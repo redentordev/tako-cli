@@ -1,0 +1,41 @@
+project:
+  name: tako-secrets-test
+  version: 1.0.0
+
+servers:
+  test:
+    host: ${SERVER_IP}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers: [test]
+    services:
+      api:
+        build: .
+        port: 3000
+        replicas: 1
+        restart: unless-stopped
+        env:
+          NODE_ENV: production
+          PORT: 3000
+          DEBUG: "false"
+        secrets:
+          - DATABASE_URL
+          - JWT_SECRET
+          - API_KEY
+          - STRIPE_KEY:STRIPE_SECRET_KEY
+        proxy:
+          domains:
+            - secrets-test.${SERVER_IP}.sslip.io
+          email: admin@example.com
+          tls:
+            provider: letsencrypt
+            staging: true
+        healthCheck:
+          path: /health
+          interval: 30s
+          timeout: 10s
+          retries: 3
+          startPeriod: 20s

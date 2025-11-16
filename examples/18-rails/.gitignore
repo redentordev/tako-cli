@@ -1,0 +1,27 @@
+# Dependencies
+/vendor/bundle
+
+# Database
+*.sqlite3
+*.sqlite3-*
+
+# Logs
+/log/*
+!/log/.keep
+
+# Temporary files
+/tmp/*
+!/tmp/.keep
+/tmp/pids/*
+!/tmp/pids/.keep
+
+# Storage
+/storage/*
+!/storage/.keep
+
+# Environment
+/.env
+/.env.local
+
+# Ignore master key for decrypting credentials
+/config/master.key

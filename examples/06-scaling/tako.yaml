@@ -1,0 +1,30 @@
+# Scaling Example
+# Multi-replica deployment with load balancing demonstration
+
+project:
+  name: scaling
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 3000
+        replicas: 3
+        proxy:
+          domains:
+            - scaling.${SERVER_HOST}.sslip.io
+          email: admin@example.com
+        loadBalancer:
+          strategy: round_robin
+        env:
+          NODE_ENV: production

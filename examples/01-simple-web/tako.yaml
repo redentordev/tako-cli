@@ -1,0 +1,33 @@
+# Simple Web Application Example
+# This is the most basic Tako configuration - perfect for getting started!
+#
+# What this does:
+# ✓ Builds your app from a Dockerfile (or auto-detects with Nixpacks)
+# ✓ Deploys to a single server
+# ✓ Sets up automatic HTTPS with Let's Encrypt
+# ✓ Makes your app available at: https://simple-web.<YOUR-IP>.sslip.io
+
+project:
+  name: simple-web
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}        # From .env file
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .                # Build from current directory
+        port: 3000              # Your app's port
+        proxy:
+          domains:
+            - simple-web.${SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        env:
+          NODE_ENV: production

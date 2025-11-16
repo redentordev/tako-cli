@@ -1,0 +1,39 @@
+# Web + Database Example
+# Web application with PostgreSQL database
+
+project:
+  name: web-db
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domains:
+            - web-db.${SERVER_HOST}.sslip.io
+          email: admin@example.com
+        env:
+          NODE_ENV: production
+          DATABASE_URL: postgresql://postgres:dbpassword123@postgres:5432/visitor_db
+
+      postgres:
+        image: postgres:15
+        persistent: true
+        port: 5432
+        volumes:
+          - /var/lib/postgresql/data
+        env:
+          POSTGRES_DB: visitor_db
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: dbpassword123

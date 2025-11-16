@@ -1,0 +1,13 @@
+{
+  "name": "monorepo-web",
+  "version": "1.0.0",
+  "description": "Web service in monorepo",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.0"
+  }
+}

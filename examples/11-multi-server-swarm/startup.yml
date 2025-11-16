@@ -1,0 +1,171 @@
+project:
+  name: multi-server-demo
+  version: 1.0.0
+  description: Multi-server deployment with Docker Swarm
+
+# Server inventory - define all servers that can be used
+servers:
+  server1:
+    host: ${SERVER1_HOST}
+    port: 22
+    user: root
+    ssh_key: ~/.ssh/id_rsa
+
+  server2:
+    host: ${SERVER2_HOST}
+    port: 22
+    user: root
+    ssh_key: ~/.ssh/id_rsa
+
+  server3:
+    host: ${SERVER3_HOST}
+    port: 22
+    user: root
+    ssh_key: ~/.ssh/id_rsa
+
+# Environment definitions
+environments:
+  # Single server development (no Swarm)
+  dev:
+    servers:
+      - server1
+    services:
+      web:
+        build: .
+        port: 3000
+        env:
+          NODE_ENV: development
+          API_URL: http://localhost:3001
+
+      api:
+        build: ./api
+        port: 3001
+        env:
+          NODE_ENV: development
+          DATABASE_URL: ${DATABASE_URL}
+
+  # Multi-server staging with Swarm
+  staging:
+    servers:
+      - server1  # Swarm manager
+      - server2  # Swarm worker
+    services:
+      # Web frontend - spread across both servers
+      web:
+        build: .
+        port: 3000
+        replicas: 2
+        placement:
+          strategy: spread  # Distribute across all nodes
+        env:
+          NODE_ENV: staging
+          API_URL: http://api:3001
+        proxy:
+          domains:
+            - staging.example.com
+          https: true
+
+      # API backend - pinned to specific servers
+      api:
+        build: ./api
+        port: 3001
+        replicas: 2
+        placement:
+          strategy: pinned
+          servers:
+            - server1
+            - server2
+        env:
+          NODE_ENV: staging
+          DATABASE_URL: ${DATABASE_URL}
+
+      # Redis cache - let Swarm decide
+      cache:
+        image: redis:alpine
+        replicas: 1
+        placement:
+          strategy: any  # Can run on any node
+        volumes:
+          - /data/redis:/data
+
+  # Multi-server production with 3 nodes
+  production:
+    servers:
+      - server1  # Swarm manager + workload
+      - server2  # Worker
+      - server3  # Worker
+    services:
+      # Web frontend - high availability
+      web:
+        build: .
+        port: 3000
+        replicas: 3
+        placement:
+          strategy: spread
+          constraints:
+            - node.role==worker  # Only on workers
+        env:
+          NODE_ENV: production
+          API_URL: http://api:3001
+        proxy:
+          domains:
+            - app.example.com
+            - www.example.com
+          https: true
+        health_check:
+          path: /health
+          interval: 30s
+          timeout: 10s
+          retries: 3
+
+      # API backend - multiple replicas
+      api:
+        build: ./api
+        port: 3001
+        replicas: 3
+        placement:
+          strategy: spread
+        env:
+          NODE_ENV: production
+          DATABASE_URL: ${DATABASE_URL}
+          REDIS_URL: redis://cache:6379
+        health_check:
+          path: /api/health
+          interval: 30s
+          timeout: 10s
+          retries: 3
+
+      # Redis - pinned to manager for persistence
+      cache:
+        image: redis:alpine
+        replicas: 1
+        placement:
+          strategy: pinned
+          servers:
+            - server1
+        volumes:
+          - /data/redis:/data
+        restart: always
+
+      # Background worker - flexible placement
+      worker:
+        build: ./worker
+        replicas: 2
+        placement:
+          strategy: any
+        env:
+          NODE_ENV: production
+          REDIS_URL: redis://cache:6379
+          DATABASE_URL: ${DATABASE_URL}
+        restart: always
+
+# Deployment hooks
+hooks:
+  pre_deploy:
+    - command: npm test
+      description: Run test suite
+
+  post_deploy:
+    - command: npm run db:migrate
+      description: Run database migrations
+      run_on: server1  # Only on one server

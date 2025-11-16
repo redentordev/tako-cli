@@ -1,0 +1,57 @@
+project:
+  name: nextjs-todos
+  version: 1.0.0
+
+# Parallel deployment configuration (optional - parallel is the default)
+# This section shows how to customize parallel deployment settings
+# If you don't include this, Tako will use these defaults automatically
+deployment:
+  strategy: parallel  # Default: parallel (can also be "sequential")
+  parallel:
+    maxConcurrentBuilds: 4   # Default: 4 - Max concurrent builds
+    maxConcurrentDeploys: 4  # Default: 4 - Max concurrent deploys
+  cache:
+    enabled: true  # Default: true - Enable build caching
+    type: local    # Default: local - Cache type
+
+servers:
+  prod:
+    host: ${SERVER_IP}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers: [prod]
+    services:
+      app:
+        build: .
+        port: 3000
+        replicas: 1
+        restart: unless-stopped
+        volumes:
+          - todos_data:/app/data
+        env:
+          NODE_ENV: production
+          DATABASE_PATH: /app/data/todos.db
+        secrets:
+          - DATABASE_URL
+          - JWT_SECRET
+          - API_KEY
+          - STRIPE_KEY:STRIPE_SECRET_KEY  # Alias: container sees STRIPE_KEY, reads from STRIPE_SECRET_KEY
+        proxy:
+          domains:
+            - nextjs-todos.${SERVER_IP}.sslip.io  # Auto-resolves to your server IP
+          email: admin@example.com      # Change this to your email
+          tls:
+            provider: letsencrypt
+            staging: false
+        healthCheck:
+          path: /api/todos
+          interval: 30s
+          timeout: 10s
+          retries: 3
+          startPeriod: 40s
+        deploy:
+          strategy: rolling
+          maxUnavailable: 1

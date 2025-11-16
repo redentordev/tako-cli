@@ -1,0 +1,36 @@
+# Swarm Mode Test Example
+# Multi-server deployment with Docker Swarm
+
+project:
+  name: swarm-test
+  version: 1.0.0
+
+servers:
+  server1:
+    host: ${SERVER1_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+  server2:
+    host: ${SERVER2_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - server1
+      - server2
+    services:
+      web:
+        build: .
+        port: 3001
+        replicas: 3
+        proxy:
+          domains:
+            - swarm-test.${SERVER1_HOST}.sslip.io
+          email: tako@redentor.dev
+        loadBalancer:
+          strategy: round_robin
+        env:
+          NODE_ENV: production
+          PORT: 3001

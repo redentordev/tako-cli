@@ -1,0 +1,36 @@
+project:
+  name: frontend
+  version: 1.0.0
+
+servers:
+  production:
+    host: ${SERVER_HOST}
+    user: ${SERVER_USER}
+    sshKey: ${SSH_KEY}
+
+environments:
+  production:
+    servers:
+      - production
+    services:
+      web:
+        build: .
+        port: 3000
+        restart: unless-stopped
+        imports:
+          - backend-api.api  # Import API from backend-api project
+        env:
+          NODE_ENV: production
+          # DNS resolution automatically works for imported services
+          # Use the global export alias: {project}_{environment}_{service}
+          API_URL: http://backend-api_production_api:4000
+        healthCheck:
+          path: /health
+          interval: 10s
+          timeout: 5s
+          retries: 3
+        # Uncomment to expose publicly via Traefik
+        proxy:
+          domains:
+            - frontend.${SERVER_HOST}.sslip.io
+          email: admin@example.com

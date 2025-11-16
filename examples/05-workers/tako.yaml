@@ -1,0 +1,35 @@
+# Workers Example
+# Background job processing with Redis queue
+
+project:
+  name: workers
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      # Background worker - no port, no proxy
+      worker:
+        build: .
+        command: node worker.js
+        replicas: 3
+        env:
+          NODE_ENV: production
+          REDIS_URL: redis://redis:6379
+          WORKER_ID: ${HOSTNAME}
+
+      # Redis queue
+      redis:
+        image: redis:7-alpine
+        persistent: true
+        port: 6379
+        volumes:
+          - /data

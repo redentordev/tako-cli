@@ -1,0 +1,44 @@
+# Umami Analytics Example
+# Simple, fast, privacy-focused alternative to Google Analytics
+
+project:
+  name: umami
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      # PostgreSQL database for Umami
+      postgres:
+        image: postgres:15-alpine
+        port: 5432
+        persistent: true
+        volumes:
+          - postgres_data:/var/lib/postgresql/data
+        env:
+          POSTGRES_USER: umami
+          POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+          POSTGRES_DB: umami
+
+      # Umami Analytics
+      umami:
+        image: ghcr.io/umami-software/umami:postgresql-latest
+        port: 3000
+        persistent: true
+        proxy:
+          domains:
+            - umami.${SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        env:
+          DATABASE_URL: postgresql://umami:${POSTGRES_PASSWORD}@postgres:5432/umami
+          DATABASE_TYPE: postgresql
+          APP_SECRET: ${APP_SECRET}
+          HOSTNAME: "0.0.0.0"

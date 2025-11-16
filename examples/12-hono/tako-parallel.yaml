@@ -1,0 +1,43 @@
+# Hono Example - WITH PARALLEL DEPLOYMENT
+# Ultra-fast web framework for the Edge
+
+project:
+  name: hono-app
+  version: 1.0.0
+
+# Enable parallel deployment
+deployment:
+  strategy: parallel
+  parallel:
+    maxConcurrentBuilds: 4
+    maxConcurrentDeploys: 4
+  cache:
+    enabled: true
+    type: local
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domains:
+            - hono.${SERVER_HOST}.sslip.io
+          email: admin@example.com
+        env:
+          NODE_ENV: production
+          PORT: "3000"
+        healthCheck:
+          path: /api/status
+          interval: 30s
+          timeout: 10s
+          retries: 3

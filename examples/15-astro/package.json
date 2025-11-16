@@ -1,0 +1,16 @@
+{
+  "name": "astro-example",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro check && astro build",
+    "preview": "astro preview",
+    "start": "node ./dist/server/entry.mjs"
+  },
+  "dependencies": {
+    "@astrojs/check": "^0.5.0",
+    "@astrojs/node": "^8.0.0",
+    "astro": "^4.5.0"
+  }
+}

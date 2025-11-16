@@ -1,0 +1,53 @@
+# Ghost CMS Example
+# Professional publishing platform with built-in SEO and newsletter tools
+
+project:
+  name: ghost
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      # MySQL database for Ghost
+      mysql:
+        image: mysql:8.0
+        port: 3306
+        persistent: true
+        volumes:
+          - mysql_data:/var/lib/mysql
+        env:
+          MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+          MYSQL_DATABASE: ghost
+          MYSQL_USER: ghost
+          MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+
+      # Ghost CMS
+      ghost:
+        image: ghost:5-alpine
+        port: 2368
+        persistent: true
+        dependsOn:
+          - mysql
+        proxy:
+          domains:
+            - ghost.${SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        env:
+          # Database
+          database__client: mysql
+          database__connection__host: mysql
+          database__connection__user: ghost
+          database__connection__password: ${MYSQL_PASSWORD}
+          database__connection__database: ghost
+          # URL
+          url: https://ghost.${SERVER_HOST}.sslip.io
+          # Node
+          NODE_ENV: production

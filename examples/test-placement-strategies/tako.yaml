@@ -1,0 +1,48 @@
+project: placement-test
+environment: production
+
+services:
+  # Example 1: Default placement (runs anywhere)
+  - name: web-default
+    image: nginx:alpine
+    replicas: 2
+    domains:
+      - default.placement-test.tako.dev
+
+  # Example 2: Spread strategy (distribute across nodes)
+  - name: web-spread
+    image: nginx:alpine
+    replicas: 3
+    domains:
+      - spread.placement-test.tako.dev
+    placement:
+      strategy: spread
+
+  # Example 3: Global strategy (one per node) - NEW!
+  - name: monitoring-agent
+    image: nginx:alpine  # Using nginx as example, normally would be monitoring agent
+    domains:
+      - monitor.placement-test.tako.dev
+    placement:
+      strategy: global
+    # Note: No replicas specified for global mode
+
+  # Example 4: Worker nodes only (using constraints)
+  - name: worker-only
+    image: nginx:alpine
+    replicas: 2
+    domains:
+      - worker.placement-test.tako.dev
+    placement:
+      constraints:
+        - node.role==worker
+
+  # Example 5: Manager nodes only
+  - name: manager-only
+    image: nginx:alpine
+    replicas: 1
+    domains:
+      - manager.placement-test.tako.dev
+    placement:
+      constraints:
+        - node.role==manager

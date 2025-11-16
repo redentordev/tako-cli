@@ -1,0 +1,62 @@
+# Plausible Analytics Example
+# Deploy Plausible Analytics using official Docker image
+# Self-hosted, privacy-friendly alternative to Google Analytics
+
+project:
+  name: plausible
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      # PostgreSQL database for Plausible
+      postgres:
+        image: postgres:14-alpine
+        port: 5432
+        persistent: true
+        volumes:
+          - postgres_data:/var/lib/postgresql/data
+        env:
+          POSTGRES_USER: plausible
+          POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+          POSTGRES_DB: plausible_db
+
+      # ClickHouse for analytics data
+      clickhouse:
+        image: clickhouse/clickhouse-server:23.3.7.5-alpine
+        port: 8123
+        persistent: true
+        volumes:
+          - clickhouse_data:/var/lib/clickhouse
+          - clickhouse_logs:/var/log/clickhouse-server
+        env:
+          CLICKHOUSE_DB: plausible_events_db
+          CLICKHOUSE_USER: plausible
+          CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+
+      # Plausible Analytics application
+      plausible:
+        image: plausible/analytics:v2.0
+        port: 8000
+        persistent: true
+        replicas: 1
+        proxy:
+          domains:
+            - plausible.${SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        env:
+          BASE_URL: https://plausible.${SERVER_HOST}.sslip.io
+          SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+          DATABASE_URL: postgres://plausible:${POSTGRES_PASSWORD}@postgres:5432/plausible_db
+          CLICKHOUSE_DATABASE_URL: http://plausible:${CLICKHOUSE_PASSWORD}@clickhouse:8123/plausible_events_db
+          DISABLE_REGISTRATION: invite_only
+          MAILER_EMAIL: ${MAILER_EMAIL}
+        command: sh -c "sleep 15 && /entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh run"

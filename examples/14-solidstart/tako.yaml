@@ -1,0 +1,28 @@
+# SolidStart Example
+# Meta-framework for building Solid apps with SSR
+
+project:
+  name: solidstart-app
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domains:
+            - solidstart.${SERVER_HOST}.sslip.io
+          email: admin@example.com
+        env:
+          NODE_ENV: production
+          PORT: "3000"

@@ -1,0 +1,32 @@
+project:
+  name: backend-api
+  version: 1.0.0
+
+servers:
+  production:
+    host: ${SERVER_HOST}
+    user: ${SERVER_USER}
+    sshKey: ${SSH_KEY}
+
+environments:
+  production:
+    servers:
+      - production
+    services:
+      api:
+        build: .
+        port: 4000
+        replicas: 2
+        export: true  # Available to other projects
+        restart: unless-stopped
+        proxy:
+          domains:
+            - backend-api.${SERVER_HOST}.sslip.io
+          email: admin@example.com
+        env:
+          NODE_ENV: production
+        healthCheck:
+          path: /health
+          interval: 10s
+          timeout: 5s
+          retries: 3

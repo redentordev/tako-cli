@@ -1,0 +1,12 @@
+{
+  "name": "simple-web-example",
+  "version": "1.0.0",
+  "description": "Simple web server example for Tako CLI",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}

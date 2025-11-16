@@ -1,0 +1,29 @@
+# SvelteKit Example
+# Full-stack web framework built on Svelte
+
+project:
+  name: sveltekit-app
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domains:
+            - sveltekit.${SERVER_HOST}.sslip.io
+          email: admin@example.com
+        env:
+          NODE_ENV: production
+          PORT: "3000"
+          ORIGIN: https://sveltekit.${SERVER_HOST}.sslip.io

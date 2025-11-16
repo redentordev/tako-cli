@@ -1,0 +1,110 @@
+project:
+  name: test-parallel
+  version: 1.0.0
+
+# Enable parallel deployment
+deployment:
+  strategy: parallel
+  parallel:
+    maxConcurrentBuilds: 4
+    maxConcurrentDeploys: 4
+    strategy: dependency-aware
+  cache:
+    enabled: true
+    type: local
+    retention: 7d
+
+servers:
+  production:
+    host: ${SERVER_HOST}
+    user: root
+    port: 22
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - production
+    services:
+      # Database service (no dependencies)
+      postgres:
+        image: postgres:15-alpine
+        port: 5432
+        restart: unless-stopped
+        persistent: true
+        env:
+          POSTGRES_DB: myapp
+          POSTGRES_USER: myapp
+          POSTGRES_PASSWORD: changeme
+        volumes:
+          - postgres_data:/var/lib/postgresql/data
+        healthCheck:
+          path: /
+          interval: 10s
+          timeout: 5s
+          retries: 5
+
+      # Redis service (no dependencies)
+      redis:
+        image: redis:7-alpine
+        port: 6379
+        restart: unless-stopped
+        persistent: true
+        volumes:
+          - redis_data:/data
+        command: redis-server --appendonly yes
+
+      # API service (depends on postgres and redis)
+      api:
+        build: ./api
+        port: 3000
+        restart: unless-stopped
+        dependsOn:
+          - postgres
+          - redis
+        env:
+          DATABASE_URL: postgresql://myapp:changeme@postgres:5432/myapp
+          REDIS_URL: redis://redis:6379
+          NODE_ENV: production
+        healthCheck:
+          path: /health
+          interval: 10s
+          timeout: 5s
+          retries: 3
+        proxy:
+          domains:
+            - api.example.com
+          email: admin@example.com
+
+      # Web service (depends on api)
+      web:
+        build: ./web
+        port: 3001
+        restart: unless-stopped
+        dependsOn:
+          - api
+        env:
+          API_URL: http://api:3000
+          NODE_ENV: production
+        healthCheck:
+          path: /
+          interval: 10s
+          timeout: 5s
+          retries: 3
+        proxy:
+          domains:
+            - example.com
+            - www.example.com
+          email: admin@example.com
+
+      # Worker service (depends on postgres and redis)
+      worker:
+        build: ./worker
+        restart: unless-stopped
+        dependsOn:
+          - postgres
+          - redis
+        env:
+          DATABASE_URL: postgresql://myapp:changeme@postgres:5432/myapp
+          REDIS_URL: redis://redis:6379
+          NODE_ENV: production

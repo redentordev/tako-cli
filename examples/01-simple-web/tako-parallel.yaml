@@ -1,0 +1,37 @@
+# Simple Web Example - WITH PARALLEL DEPLOYMENT
+# Basic Node.js web server with public domain
+
+project:
+  name: simple-web
+  version: 1.0.0
+
+# Enable parallel deployment (even for single service, tests the config)
+deployment:
+  strategy: parallel
+  parallel:
+    maxConcurrentBuilds: 4
+    maxConcurrentDeploys: 4
+  cache:
+    enabled: true
+    type: local
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domains:
+            - simple-web.${SERVER_HOST}.sslip.io
+          email: admin@example.com
+        env:
+          NODE_ENV: production

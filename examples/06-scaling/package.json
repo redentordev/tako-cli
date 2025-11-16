@@ -1,0 +1,12 @@
+{
+  "name": "scaling-example",
+  "version": "1.0.0",
+  "description": "Load balancing and scaling demonstration",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}

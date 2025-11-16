@@ -1,0 +1,7 @@
+node_modules/
+.env
+.tako/secrets*
+.tako/state.json
+.tako/deployments/
+.tako/logs/
+npm-debug.log

@@ -1,0 +1,17 @@
+[Unit]
+Description=Tako CLI Monitoring Agent
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/tako-monitor.sh
+Restart=always
+RestartSec=10
+Environment="MONITOR_INTERVAL=60"
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tako-monitor
+
+[Install]
+WantedBy=multi-user.target

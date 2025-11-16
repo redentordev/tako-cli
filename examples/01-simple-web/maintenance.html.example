@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maintenance - Simple Web</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            text-align: center;
+            padding: 50px;
+            background: #f5f5f5;
+            color: #333;
+        }
+        h1 { margin-bottom: 10px; color: #667eea; }
+        .emoji { font-size: 64px; margin-bottom: 20px; }
+        p { font-size: 18px; line-height: 1.6; }
+        .eta { color: #666; font-size: 14px; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div class="emoji">🐙</div>
+    <h1>We're Updating Our Service</h1>
+    <p>Our team is currently deploying new features.</p>
+    <p>This should only take a few minutes.</p>
+    <div class="eta">Expected completion: 5 minutes</div>
+</body>
+</html>

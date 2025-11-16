@@ -1,0 +1,43 @@
+# Laravel Example
+# The PHP Framework for Web Artisans
+
+project:
+  name: laravel-app
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 8000
+        proxy:
+          domains:
+            - laravel.${SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        env:
+          APP_NAME: Laravel
+          APP_ENV: production
+          APP_DEBUG: "false"
+          APP_KEY: ${APP_KEY}
+          APP_URL: https://laravel.${SERVER_HOST}.sslip.io
+          LOG_CHANNEL: stack
+          LOG_LEVEL: info
+          DB_CONNECTION: sqlite
+          DB_DATABASE: /var/www/html/storage/database/database.sqlite
+        volumes:
+          - laravel-logs:/var/www/html/storage/logs
+        hooks:
+          postStart:
+            - "exec: touch /var/www/html/storage/database/database.sqlite"
+            - "exec: chmod 666 /var/www/html/storage/database/database.sqlite"
+            - "exec: php artisan migrate --force"
+            - "exec: php artisan config:cache"

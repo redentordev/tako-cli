@@ -1,0 +1,28 @@
+# PHP Example
+# Classic server-side scripting language
+
+project:
+  name: php-app
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 80
+        proxy:
+          domains:
+            - php.${SERVER_HOST}.sslip.io
+          email: admin@example.com
+        env:
+          PHP_MEMORY_LIMIT: 128M
+          PHP_MAX_EXECUTION_TIME: "30"

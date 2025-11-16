@@ -1,0 +1,13 @@
+{
+  "name": "workers-example",
+  "version": "1.0.0",
+  "description": "Background worker processing with Redis",
+  "main": "worker.js",
+  "scripts": {
+    "start": "node worker.js",
+    "seed": "node seed-jobs.js"
+  },
+  "dependencies": {
+    "redis": "^4.6.0"
+  }
+}

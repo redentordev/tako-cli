@@ -1,0 +1,78 @@
+# Full-Stack Example
+# Complete application: Web (public) + API (internal) + PostgreSQL + Redis
+#
+# Deployment Order:
+# Tako CLI automatically detects service dependencies from environment variables:
+# - `api` depends on `postgres` and `redis` (inferred from DATABASE_URL and REDIS_URL)
+# - `web` depends on `api` (inferred from API_URL)
+#
+# You can also explicitly define dependencies using `dependsOn`:
+# services:
+#   web:
+#     dependsOn: [api]
+#   api:
+#     dependsOn: [postgres, redis]
+
+project:
+  name: fullstack
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      # Public-facing web application
+      web:
+        build: ./web
+        port: 3000
+        proxy:
+          domains:
+            - fullstack.${SERVER_HOST}.sslip.io
+          email: admin@example.com
+        env:
+          NODE_ENV: production
+          API_URL: http://api:4000
+        # Optional: Explicitly define dependencies (auto-detected from API_URL if not specified)
+        # dependsOn:
+        #   - api
+
+      # Internal API service
+      api:
+        build: ./api
+        port: 4000
+        replicas: 2
+        env:
+          NODE_ENV: production
+          DATABASE_URL: postgresql://postgres:secret123@postgres:5432/appdb
+          REDIS_URL: redis://redis:6379
+        # Optional: Explicitly define dependencies (auto-detected from env vars if not specified)
+        # dependsOn:
+        #   - postgres
+        #   - redis
+
+      # PostgreSQL database
+      postgres:
+        image: postgres:15
+        persistent: true
+        port: 5432
+        volumes:
+          - /var/lib/postgresql/data
+        env:
+          POSTGRES_DB: appdb
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: secret123
+
+      # Redis cache
+      redis:
+        image: redis:7-alpine
+        persistent: true
+        port: 6379
+        volumes:
+          - /data

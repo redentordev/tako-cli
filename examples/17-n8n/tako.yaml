@@ -1,0 +1,34 @@
+# n8n Workflow Automation Example
+# Deploy n8n using official Docker image from Docker Hub
+
+project:
+  name: n8n
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      n8n:
+        image: docker.n8n.io/n8nio/n8n:latest
+        port: 5678
+        persistent: true
+        volumes:
+          - n8n_data:/home/node/.n8n
+        proxy:
+          domains:
+            - n8n.${SERVER_HOST}.sslip.io
+          email: admin@example.com
+        env:
+          N8N_HOST: n8n.${SERVER_HOST}.sslip.io
+          N8N_PORT: "5678"
+          N8N_PROTOCOL: https
+          WEBHOOK_URL: https://n8n.${SERVER_HOST}.sslip.io/
+          GENERIC_TIMEZONE: UTC

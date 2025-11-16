@@ -1,0 +1,186 @@
+name: Release
+
+# This workflow creates a release when a tag is pushed
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Get version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Build binaries
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          LDFLAGS="-X github.com/redentordev/tako-cli/cmd.Version=$VERSION -X github.com/redentordev/tako-cli/cmd.BuildTime=$BUILD_TIME"
+          
+          mkdir -p dist
+          
+          echo "🔨 Building Tako CLI $VERSION..."
+          
+          # Linux AMD64
+          echo "  → Linux AMD64"
+          GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/tako-linux-amd64 .
+          
+          # Linux ARM64
+          echo "  → Linux ARM64"
+          GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/tako-linux-arm64 .
+          
+          # macOS AMD64
+          echo "  → macOS AMD64"
+          GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/tako-darwin-amd64 .
+          
+          # macOS ARM64 (Apple Silicon)
+          echo "  → macOS ARM64"
+          GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o dist/tako-darwin-arm64 .
+          
+          # Windows AMD64
+          echo "  → Windows AMD64"
+          GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/tako-windows-amd64.exe .
+          
+          echo "✅ All builds complete!"
+          ls -lh dist/
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum tako-* > checksums.txt
+          cat checksums.txt
+
+      - name: Get commit messages since last tag
+        id: changelog
+        run: |
+          LATEST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$LATEST_TAG" ]; then
+            # No previous tag, get all commits
+            COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            # Get commits since last tag
+            COMMITS=$(git log ${LATEST_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+          
+          # Save to file for multiline output
+          echo "$COMMITS" > commits.txt
+          echo "Changelog generated"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: 🐙 Tako CLI ${{ steps.version.outputs.VERSION }}
+          body: |
+            # 🐙 Tako CLI ${{ steps.version.outputs.VERSION }}
+            
+            Deploy to any VPS with zero config & zero downtime!
+            
+            ## 📦 Installation
+            
+            ### Linux (AMD64)
+            ```bash
+            curl -L https://github.com/redentordev/tako-cli/releases/download/${{ steps.version.outputs.VERSION }}/tako-linux-amd64 -o /usr/local/bin/tako
+            chmod +x /usr/local/bin/tako
+            tako --version
+            ```
+            
+            ### Linux (ARM64)
+            ```bash
+            curl -L https://github.com/redentordev/tako-cli/releases/download/${{ steps.version.outputs.VERSION }}/tako-linux-arm64 -o /usr/local/bin/tako
+            chmod +x /usr/local/bin/tako
+            tako --version
+            ```
+            
+            ### macOS (Intel)
+            ```bash
+            curl -L https://github.com/redentordev/tako-cli/releases/download/${{ steps.version.outputs.VERSION }}/tako-darwin-amd64 -o /usr/local/bin/tako
+            chmod +x /usr/local/bin/tako
+            tako --version
+            ```
+            
+            ### macOS (Apple Silicon)
+            ```bash
+            curl -L https://github.com/redentordev/tako-cli/releases/download/${{ steps.version.outputs.VERSION }}/tako-darwin-arm64 -o /usr/local/bin/tako
+            chmod +x /usr/local/bin/tako
+            tako --version
+            ```
+            
+            ### Windows (PowerShell)
+            ```powershell
+            Invoke-WebRequest -Uri "https://github.com/redentordev/tako-cli/releases/download/${{ steps.version.outputs.VERSION }}/tako-windows-amd64.exe" -OutFile "tako.exe"
+            # Add to your PATH
+            ```
+            
+            ## 🚀 Quick Start
+            
+            ```bash
+            # Initialize a new project
+            tako init my-app
+            
+            # Setup your server
+            tako setup -e production
+            
+            # Deploy!
+            tako deploy -e production
+            ```
+            
+            ## 📝 What's Changed
+            
+            $(cat commits.txt || echo "Initial release")
+            
+            ## 🔒 Verify Download
+            
+            Download `checksums.txt` and verify:
+            ```bash
+            sha256sum -c checksums.txt
+            ```
+            
+            ---
+            
+            **Built by [@redentor_dev](https://twitter.com/redentor_dev)**
+          draft: false
+          prerelease: false
+          files: |
+            dist/tako-linux-amd64
+            dist/tako-linux-arm64
+            dist/tako-darwin-amd64
+            dist/tako-darwin-arm64
+            dist/tako-windows-amd64.exe
+            dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Summary
+        run: |
+          echo "🎉 Release ${{ steps.version.outputs.VERSION }} created successfully!"
+          echo ""
+          echo "📦 Binaries uploaded:"
+          echo "  ✅ tako-linux-amd64"
+          echo "  ✅ tako-linux-arm64"
+          echo "  ✅ tako-darwin-amd64"
+          echo "  ✅ tako-darwin-arm64"
+          echo "  ✅ tako-windows-amd64.exe"
+          echo "  ✅ checksums.txt"
+          echo ""
+          echo "🔗 Release URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.VERSION }}"

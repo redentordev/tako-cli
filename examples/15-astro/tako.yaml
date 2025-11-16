@@ -1,0 +1,29 @@
+# Astro Example
+# Web framework for content-driven websites
+
+project:
+  name: astro-app
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domains:
+            - astro.${SERVER_HOST}.sslip.io
+          email: admin@example.com
+        env:
+          NODE_ENV: production
+          HOST: "0.0.0.0"
+          PORT: "3000"

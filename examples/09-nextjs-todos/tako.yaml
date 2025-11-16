@@ -1,0 +1,45 @@
+project:
+  name: nextjs-todos
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_IP}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers: [prod]
+    services:
+      app:
+        build: .
+        port: 3000
+        replicas: 1
+        restart: unless-stopped
+        volumes:
+          - todos_data:/app/data
+        env:
+          NODE_ENV: production
+          DATABASE_PATH: /app/data/todos.db
+        secrets:
+          - DATABASE_URL
+          - JWT_SECRET
+          - API_KEY
+          - STRIPE_KEY:STRIPE_SECRET_KEY  # Alias: container sees STRIPE_KEY, reads from STRIPE_SECRET_KEY
+        proxy:
+          domains:
+            - nextjs-todos.${SERVER_IP}.sslip.io  # Auto-resolves to your server IP
+          email: admin@example.com      # Change this to your email
+          tls:
+            provider: letsencrypt
+            staging: false
+        healthCheck:
+          path: /api/todos
+          interval: 30s
+          timeout: 10s
+          retries: 3
+          startPeriod: 40s
+        deploy:
+          strategy: rolling
+          maxUnavailable: 1
