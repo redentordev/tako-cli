@@ -37,16 +37,41 @@ Tako CLI brings PaaS-like simplicity with full infrastructure control - deploy t
 
 ### Installation
 
-**One-line install (Linux & macOS):**
+#### Recommended: Automated Install (Linux & macOS)
+
+The install script automatically configures your PATH and verifies checksums:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/redentordev/tako-cli/master/install.sh | bash
 ```
 
-<details>
-<summary>Alternative installation methods</summary>
+**Features:**
+- ✅ Automatic platform detection (Linux/macOS, AMD64/ARM64)
+- ✅ SHA256 checksum verification for security
+- ✅ Automatic PATH configuration for bash/zsh/fish
+- ✅ Smart install directory selection (sudo-free when possible)
+- ✅ Works immediately after installation
 
-#### Manual Download
+<details>
+<summary>📦 Homebrew (macOS & Linux)</summary>
+
+Coming soon! Homebrew tap is being prepared.
+
+```bash
+# This will be available soon
+brew tap redentordev/tako
+brew install tako
+```
+
+Benefits:
+- Automatic updates with `brew upgrade`
+- Managed dependencies
+- Trusted by developers worldwide
+
+</details>
+
+<details>
+<summary>🔧 Manual Installation</summary>
 
 **Linux (AMD64):**
 ```bash
@@ -78,7 +103,10 @@ Invoke-WebRequest -Uri "https://github.com/redentordev/tako-cli/releases/latest/
 # Add to your PATH
 ```
 
-#### Build from Source
+</details>
+
+<details>
+<summary>🛠️ Build from Source</summary>
 
 Requires Go 1.21+
 
@@ -86,9 +114,59 @@ Requires Go 1.21+
 git clone https://github.com/redentordev/tako-cli.git
 cd tako-cli
 make build
+
+# Or install directly
+make install
 ```
 
 </details>
+
+#### Verify Installation
+
+```bash
+tako --version
+```
+
+#### Shell Completion (Optional)
+
+Enable tab completion for faster workflows:
+
+```bash
+# Bash
+sudo cp completions/tako.bash /etc/bash_completion.d/tako
+
+# Zsh
+mkdir -p ~/.zsh/completion
+cp completions/tako.zsh ~/.zsh/completion/_tako
+
+# Fish
+mkdir -p ~/.config/fish/completions
+cp completions/tako.fish ~/.config/fish/completions/
+```
+
+See [completions/README.md](./completions/README.md) for detailed instructions.
+
+#### Upgrading
+
+```bash
+# Check for updates
+tako upgrade --check
+
+# Upgrade to latest version
+tako upgrade
+```
+
+#### Uninstalling
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/redentordev/tako-cli/master/uninstall.sh | bash
+```
+
+Or manually:
+```bash
+sudo rm /usr/local/bin/tako
+# Remove any PATH entries from ~/.bashrc, ~/.zshrc, etc.
+```
 
 ### Deploy Your First App (5 minutes)
 

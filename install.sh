@@ -14,34 +14,46 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Default values
-INSTALL_DIR="${TAKO_INSTALL_DIR:-/usr/local/bin}"
 REPO="redentordev/tako-cli"
 VERSION="${TAKO_VERSION:-latest}"
+VERIFY_CHECKSUM="${TAKO_VERIFY_CHECKSUM:-true}"
 
-# Print with color
+# Determine best install directory
+if [ -n "$TAKO_INSTALL_DIR" ]; then
+    INSTALL_DIR="$TAKO_INSTALL_DIR"
+elif [ -w "/usr/local/bin" ]; then
+    INSTALL_DIR="/usr/local/bin"
+elif [ -w "$HOME/.local/bin" ]; then
+    INSTALL_DIR="$HOME/.local/bin"
+else
+    INSTALL_DIR="$HOME/.local/bin"
+    mkdir -p "$INSTALL_DIR"
+fi
+
+# Print with color (output to stderr to avoid interfering with function returns)
 print_info() {
-    echo -e "${CYAN}ℹ${NC} $1"
+    echo -e "${CYAN}ℹ${NC} $1" >&2
 }
 
 print_success() {
-    echo -e "${GREEN}✓${NC} $1"
+    echo -e "${GREEN}✓${NC} $1" >&2
 }
 
 print_error() {
-    echo -e "${RED}✗${NC} $1"
+    echo -e "${RED}✗${NC} $1" >&2
 }
 
 print_warning() {
-    echo -e "${YELLOW}⚠${NC} $1"
+    echo -e "${YELLOW}⚠${NC} $1" >&2
 }
 
 print_header() {
-    echo -e "${PURPLE}"
-    echo "  ╔═══════════════════════════════════════╗"
-    echo "  ║     🐙 Tako CLI Installer             ║"
-    echo "  ║  Deploy to any VPS with zero config  ║"
-    echo "  ╚═══════════════════════════════════════╝"
-    echo -e "${NC}"
+    echo -e "${PURPLE}" >&2
+    echo "  ╔═══════════════════════════════════════╗" >&2
+    echo "  ║     🐙 Tako CLI Installer             ║" >&2
+    echo "  ║  Deploy to any VPS with zero config  ║" >&2
+    echo "  ╚═══════════════════════════════════════╝" >&2
+    echo -e "${NC}" >&2
 }
 
 # Detect OS and architecture
@@ -111,9 +123,9 @@ download_binary() {
     local binary_name="tako-${platform}"
     local download_url="https://github.com/${REPO}/releases/download/${VERSION}/${binary_name}"
     local tmp_file="/tmp/tako-${platform}-$$"
-    
+
     print_info "Downloading Tako CLI ${VERSION} for ${platform}..."
-    
+
     if command -v curl &> /dev/null; then
         if ! curl -fsSL "$download_url" -o "$tmp_file"; then
             print_error "Failed to download binary from $download_url"
@@ -125,8 +137,84 @@ download_binary() {
             exit 1
         fi
     fi
-    
+
     echo "$tmp_file"
+}
+
+# Download and verify checksum
+download_checksums() {
+    local checksums_url="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
+    local tmp_checksums="/tmp/tako-checksums-$$"
+
+    if command -v curl &> /dev/null; then
+        if ! curl -fsSL "$checksums_url" -o "$tmp_checksums" 2>/dev/null; then
+            return 1
+        fi
+    elif command -v wget &> /dev/null; then
+        if ! wget -q "$checksums_url" -O "$tmp_checksums" 2>/dev/null; then
+            return 1
+        fi
+    fi
+
+    echo "$tmp_checksums"
+}
+
+# Verify binary checksum
+verify_checksum() {
+    local binary_file=$1
+    local platform=$2
+    local binary_name="tako-${platform}"
+
+    if [ "$VERIFY_CHECKSUM" != "true" ]; then
+        return 0
+    fi
+
+    print_info "Verifying checksum..."
+
+    local checksums_file
+    checksums_file=$(download_checksums)
+
+    if [ -z "$checksums_file" ] || [ ! -f "$checksums_file" ]; then
+        print_warning "Checksum file not found, skipping verification"
+        return 0
+    fi
+
+    # Check if sha256sum or shasum is available
+    local sha_cmd
+    if command -v sha256sum &> /dev/null; then
+        sha_cmd="sha256sum"
+    elif command -v shasum &> /dev/null; then
+        sha_cmd="shasum -a 256"
+    else
+        print_warning "Neither sha256sum nor shasum found, skipping checksum verification"
+        rm -f "$checksums_file"
+        return 0
+    fi
+
+    # Calculate checksum of downloaded binary
+    local calculated_checksum
+    calculated_checksum=$($sha_cmd "$binary_file" | awk '{print $1}')
+
+    # Get expected checksum from checksums file
+    local expected_checksum
+    expected_checksum=$(grep "$binary_name" "$checksums_file" | awk '{print $1}')
+
+    rm -f "$checksums_file"
+
+    if [ -z "$expected_checksum" ]; then
+        print_warning "Checksum not found in checksums file, skipping verification"
+        return 0
+    fi
+
+    if [ "$calculated_checksum" != "$expected_checksum" ]; then
+        print_error "Checksum verification failed!"
+        print_error "Expected: $expected_checksum"
+        print_error "Got:      $calculated_checksum"
+        return 1
+    fi
+
+    print_success "Checksum verified"
+    return 0
 }
 
 # Install binary
@@ -158,44 +246,132 @@ install_binary() {
     print_success "Tako CLI installed to ${target_file}"
 }
 
+# Detect user's shell
+detect_shell() {
+    if [ -n "$BASH_VERSION" ]; then
+        echo "bash"
+    elif [ -n "$ZSH_VERSION" ]; then
+        echo "zsh"
+    elif [ -n "$FISH_VERSION" ]; then
+        echo "fish"
+    else
+        # Fallback to $SHELL environment variable
+        basename "$SHELL"
+    fi
+}
+
+# Get shell config file
+get_shell_config() {
+    local shell_name=$1
+    case "$shell_name" in
+        bash)
+            if [ -f "$HOME/.bashrc" ]; then
+                echo "$HOME/.bashrc"
+            elif [ -f "$HOME/.bash_profile" ]; then
+                echo "$HOME/.bash_profile"
+            else
+                echo "$HOME/.profile"
+            fi
+            ;;
+        zsh)
+            echo "$HOME/.zshrc"
+            ;;
+        fish)
+            echo "$HOME/.config/fish/config.fish"
+            ;;
+        *)
+            echo "$HOME/.profile"
+            ;;
+    esac
+}
+
+# Configure PATH automatically
+configure_path() {
+    local dir=$1
+
+    # Check if directory is already in PATH
+    if echo "$PATH" | grep -q "$dir"; then
+        return 0
+    fi
+
+    local shell_name
+    shell_name=$(detect_shell)
+
+    local config_file
+    config_file=$(get_shell_config "$shell_name")
+
+    # Check if PATH export already exists in config file
+    if [ -f "$config_file" ] && grep -q "export PATH.*${dir}" "$config_file" 2>/dev/null; then
+        return 0
+    fi
+
+    print_info "Adding ${dir} to PATH in ${config_file}..."
+
+    # Create config file if it doesn't exist
+    if [ ! -f "$config_file" ]; then
+        mkdir -p "$(dirname "$config_file")"
+        touch "$config_file"
+    fi
+
+    # Add PATH export to config file
+    if [ "$shell_name" = "fish" ]; then
+        echo "" >> "$config_file"
+        echo "# Added by Tako CLI installer" >> "$config_file"
+        echo "set -gx PATH $dir \$PATH" >> "$config_file"
+    else
+        echo "" >> "$config_file"
+        echo "# Added by Tako CLI installer" >> "$config_file"
+        echo "export PATH=\"${dir}:\$PATH\"" >> "$config_file"
+    fi
+
+    print_success "PATH configured in ${config_file}"
+    print_warning "Please restart your shell or run: source ${config_file}"
+}
+
 # Verify installation
 verify_installation() {
     if ! command -v tako &> /dev/null; then
         print_warning "Tako CLI installed but not found in PATH"
-        print_info "Add ${INSTALL_DIR} to your PATH or run: export PATH=\"${INSTALL_DIR}:\$PATH\""
+
+        # Try to configure PATH automatically if not in standard location
+        if [ "$INSTALL_DIR" != "/usr/local/bin" ] && [ "$INSTALL_DIR" != "/usr/bin" ]; then
+            configure_path "$INSTALL_DIR"
+        else
+            print_info "Add ${INSTALL_DIR} to your PATH or run: export PATH=\"${INSTALL_DIR}:\$PATH\""
+        fi
         return
     fi
-    
+
     local installed_version
     installed_version=$(tako --version 2>&1 | head -n1 || echo "unknown")
-    
+
     print_success "Installation verified!"
     print_info "Version: ${installed_version}"
 }
 
 # Show next steps
 show_next_steps() {
-    echo ""
-    echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║  🎉 Tako CLI installed successfully!                      ║${NC}"
-    echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
+    echo "" >&2
+    echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}" >&2
+    echo -e "${GREEN}║  🎉 Tako CLI installed successfully!                      ║${NC}" >&2
+    echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}" >&2
+    echo "" >&2
     print_info "Get started:"
-    echo ""
-    echo "  1. Initialize a new project:"
-    echo -e "     ${CYAN}tako init my-app${NC}"
-    echo ""
-    echo "  2. Configure your server in tako.yaml"
-    echo ""
-    echo "  3. Setup your server:"
-    echo -e "     ${CYAN}tako setup -e production${NC}"
-    echo ""
-    echo "  4. Deploy your application:"
-    echo -e "     ${CYAN}tako deploy -e production${NC}"
-    echo ""
+    echo "" >&2
+    echo "  1. Initialize a new project:" >&2
+    echo -e "     ${CYAN}tako init my-app${NC}" >&2
+    echo "" >&2
+    echo "  2. Configure your server in tako.yaml" >&2
+    echo "" >&2
+    echo "  3. Setup your server:" >&2
+    echo -e "     ${CYAN}tako setup -e production${NC}" >&2
+    echo "" >&2
+    echo "  4. Deploy your application:" >&2
+    echo -e "     ${CYAN}tako deploy -e production${NC}" >&2
+    echo "" >&2
     print_info "Documentation: https://github.com/${REPO}"
     print_info "Built by @redentor_dev"
-    echo ""
+    echo "" >&2
 }
 
 # Cleanup on error
@@ -225,7 +401,13 @@ main() {
     
     # Download binary
     tmp_file=$(download_binary "$platform")
-    
+
+    # Verify checksum
+    if ! verify_checksum "$tmp_file" "$platform"; then
+        print_error "Installation aborted due to checksum verification failure"
+        exit 1
+    fi
+
     # Install binary
     install_binary "$tmp_file"
     
