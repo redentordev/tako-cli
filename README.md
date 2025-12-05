@@ -8,11 +8,18 @@
 
 Tako CLI is a powerful deployment automation tool that brings Platform-as-a-Service (PaaS) simplicity to your own infrastructure. Deploy Docker containers to your VPS servers with automatic HTTPS, health checks, zero-downtime deployments, and complete control over your infrastructure.
 
-[![Version](https://img.shields.io/badge/version-0.0.1-blue)](https://github.com/redentordev/tako-cli/releases)
+[![Version](https://img.shields.io/badge/version-0.0.2-blue)](https://github.com/redentordev/tako-cli/releases)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
+[![Status](https://img.shields.io/badge/status-experimental-orange)](https://github.com/redentordev/tako-cli)
 
-> **Note:** This is a personal pet project built by [Redentor Valerio](https://github.com/redentordev) ([@redentor_dev](https://twitter.com/redentor_dev)) for my own use. Feel free to use it, but I provide no liability or guarantees. See [License](#license) for details.
+> **⚠️ Experimental Project**
+>
+> This is a personal pet project built by [Redentor Valerio](https://github.com/redentordev) ([@redentor_dev](https://twitter.com/redentor_dev)) for learning and experimentation. While functional, it is **not recommended for production use**.
+>
+> **For production deployments, check out [Uncloud](https://github.com/psviderski/uncloud)** - a more mature and actively maintained solution for deploying applications to your own servers.
+>
+> Feel free to explore Tako CLI, learn from it, or contribute - but use at your own risk. No liability or guarantees provided. See [License](#license) for details.
 
 ---
 
