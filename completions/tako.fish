@@ -27,6 +27,7 @@ complete -c tako -f -n '__fish_use_subcommand' -a 'setup' -d 'Provision server'
 complete -c tako -f -n '__fish_use_subcommand' -a 'start' -d 'Start stopped services'
 complete -c tako -f -n '__fish_use_subcommand' -a 'stats' -d 'Show real-time container stats'
 complete -c tako -f -n '__fish_use_subcommand' -a 'stop' -d 'Stop running services'
+complete -c tako -f -n '__fish_use_subcommand' -a 'storage' -d 'Manage shared storage (NFS)'
 complete -c tako -f -n '__fish_use_subcommand' -a 'upgrade' -d 'Upgrade Tako CLI'
 complete -c tako -f -n '__fish_use_subcommand' -a 'version' -d 'Show version'
 
@@ -87,6 +88,10 @@ complete -c tako -n '__fish_seen_subcommand_from secrets' -f -a 'set' -d 'Set a 
 complete -c tako -n '__fish_seen_subcommand_from secrets' -f -a 'list' -d 'List secrets'
 complete -c tako -n '__fish_seen_subcommand_from secrets' -f -a 'delete' -d 'Delete secret'
 complete -c tako -n '__fish_seen_subcommand_from secrets' -f -a 'validate' -d 'Validate secrets'
+
+# Storage subcommands
+complete -c tako -n '__fish_seen_subcommand_from storage' -f -a 'status' -d 'Show NFS storage status'
+complete -c tako -n '__fish_seen_subcommand_from storage' -f -a 'remount' -d 'Remount NFS exports'
 
 # Exec command flags
 complete -c tako -n '__fish_seen_subcommand_from exec' -s e -l env -d 'Target environment' -r

@@ -1,5 +1,6 @@
 # Binaries
 bin/
+tako
 *.exe
 *.dll
 *.so
@@ -45,3 +46,6 @@ test-app/deploy-manual.sh
 *.log
 .env
 nul
+
+# Security reports
+security-report-*.html

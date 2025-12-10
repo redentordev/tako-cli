@@ -44,6 +44,7 @@ _tako() {
                 'start:Start stopped services'
                 'stats:Show container resource usage'
                 'stop:Stop running services'
+                'storage:Manage shared storage (NFS)'
                 'upgrade:Upgrade Tako CLI to the latest version'
             )
             _describe -t commands 'tako commands' commands
@@ -209,6 +210,14 @@ _tako() {
                         'validate:Validate all required secrets are set'
                     )
                     _describe -t commands 'secrets commands' secret_commands
+                    ;;
+                storage)
+                    local -a storage_commands
+                    storage_commands=(
+                        'status:Show NFS storage status across all servers'
+                        'remount:Remount NFS exports on all clients'
+                    )
+                    _describe -t commands 'storage commands' storage_commands
                     ;;
             esac
             ;;

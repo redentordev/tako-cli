@@ -281,6 +281,7 @@ _tako_root_command()
     commands+=("start")
     commands+=("stats")
     commands+=("stop")
+    commands+=("storage")
     commands+=("upgrade")
 
     flags=()

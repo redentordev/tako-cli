@@ -37,6 +37,11 @@ func (v *ConfigValidator) ValidateConfig(cfg *config.Config) error {
 	// Validate environments
 	v.validateEnvironments(cfg.Environments, cfg.Servers)
 
+	// Validate storage (NFS) if configured
+	if cfg.Storage != nil {
+		v.validateStorage(cfg.Storage, cfg.Servers)
+	}
+
 	// Return first error if any
 	if len(v.errors) > 0 {
 		return fmt.Errorf("configuration validation failed:\n  - %s", strings.Join(v.errors, "\n  - "))
@@ -231,4 +236,113 @@ func isValidDomain(domain string) bool {
 func isValidEmail(email string) bool {
 	match, _ := regexp.MatchString(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`, email)
 	return match
+}
+
+// validateStorage validates storage (NFS) configuration
+func (v *ConfigValidator) validateStorage(storage *config.StorageConfig, servers map[string]config.ServerConfig) {
+	if storage.NFS == nil || !storage.NFS.Enabled {
+		return
+	}
+
+	nfs := storage.NFS
+
+	// Validate NFS server reference
+	if nfs.Server != "" && nfs.Server != "auto" {
+		if _, exists := servers[nfs.Server]; !exists {
+			v.errors = append(v.errors, fmt.Sprintf("storage.nfs.server '%s' not found in servers configuration", nfs.Server))
+		}
+	}
+
+	// Validate exports
+	if len(nfs.Exports) == 0 {
+		v.errors = append(v.errors, "storage.nfs.exports is required when NFS is enabled")
+		return
+	}
+
+	exportNames := make(map[string]bool)
+	exportPaths := make(map[string]bool)
+
+	for i, export := range nfs.Exports {
+		prefix := fmt.Sprintf("storage.nfs.exports[%d]", i)
+
+		// Validate export name
+		if export.Name == "" {
+			v.errors = append(v.errors, fmt.Sprintf("%s: name is required", prefix))
+		} else if !isValidName(export.Name) {
+			v.errors = append(v.errors, fmt.Sprintf("%s: invalid name '%s' (use alphanumeric, hyphens, underscores)", prefix, export.Name))
+		} else if exportNames[export.Name] {
+			v.errors = append(v.errors, fmt.Sprintf("%s: duplicate export name '%s'", prefix, export.Name))
+		}
+		exportNames[export.Name] = true
+
+		// Validate export path
+		if export.Path == "" {
+			v.errors = append(v.errors, fmt.Sprintf("%s: path is required", prefix))
+		} else {
+			if err := validateNFSExportPath(export.Path); err != nil {
+				v.errors = append(v.errors, fmt.Sprintf("%s: %v", prefix, err))
+			} else if exportPaths[export.Path] {
+				v.errors = append(v.errors, fmt.Sprintf("%s: duplicate export path '%s'", prefix, export.Path))
+			}
+			exportPaths[export.Path] = true
+		}
+	}
+
+	// Add warning for single-server with NFS
+	if len(servers) == 1 && nfs.Enabled {
+		v.warnings = append(v.warnings, "NFS is enabled but only one server is configured; NFS will be skipped and local volumes will be used instead")
+	}
+}
+
+// validateNFSExportPath validates NFS export path for security
+func validateNFSExportPath(path string) error {
+	// Must be absolute path
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("path must be absolute: %s", path)
+	}
+
+	// Cannot be root
+	if path == "/" {
+		return fmt.Errorf("path cannot be root directory")
+	}
+
+	// Blocked system directories
+	blockedPaths := []string{
+		"/etc", "/root", "/home", "/var", "/usr", "/bin", "/sbin",
+		"/lib", "/lib64", "/boot", "/proc", "/sys", "/dev", "/run", "/tmp",
+	}
+
+	cleanPath := strings.TrimSuffix(path, "/")
+	for _, blocked := range blockedPaths {
+		if cleanPath == blocked {
+			return fmt.Errorf("path '%s' is a system directory and cannot be used", path)
+		}
+		// Allow specific safe prefixes under blocked directories
+		if strings.HasPrefix(cleanPath, blocked+"/") {
+			allowedPrefixes := []string{"/srv/", "/data/", "/mnt/", "/opt/", "/nfs/"}
+			allowed := false
+			for _, prefix := range allowedPrefixes {
+				if strings.HasPrefix(cleanPath, prefix) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("path '%s' is under system directory '%s'", path, blocked)
+			}
+		}
+	}
+
+	// Path cannot contain traversal
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("path cannot contain '..'")
+	}
+
+	// Path should be at least 2 levels deep
+	parts := strings.Split(strings.Trim(cleanPath, "/"), "/")
+	if len(parts) < 2 {
+		return fmt.Errorf("path must be at least 2 levels deep (e.g., /srv/nfs)")
+	}
+
+	return nil
 }

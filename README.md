@@ -287,6 +287,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Cross-Project Networking** - Services communicate across projects
 - **Service Discovery** - Built-in DNS and load balancing
 - **Server Provisioning** - One-command setup with security hardening
+- **NFS Shared Storage** - Shared volumes across multiple servers with automatic setup
 
 ### Developer Experience
 
@@ -352,6 +353,13 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako secrets list` | List all secrets (redacted) |
 | `tako secrets delete <KEY>` | Delete a secret |
 | `tako secrets validate` | Validate all required secrets are set |
+
+### Shared Storage
+
+| Command | Description |
+|---------|-------------|
+| `tako storage status` | Show NFS storage status across all servers |
+| `tako storage remount` | Remount NFS exports on all clients |
 
 ### Development & Utilities
 
@@ -453,6 +461,75 @@ services:
     volumes:
       - redis_data:/data
 ```
+
+### NFS Shared Storage
+
+Share volumes across multiple servers using NFS. Tako automatically sets up the NFS server and clients during `tako setup`.
+
+```yaml
+# Configure NFS shared storage
+storage:
+  nfs:
+    enabled: true
+    server: auto  # Use manager node, or specify server name
+    exports:
+      - name: shared_repo
+        path: /srv/nfs/repo
+      - name: uploads
+        path: /srv/nfs/uploads
+
+servers:
+  server1:
+    host: ${SERVER1_HOST}
+    role: manager    # NFS server will run here
+  server2:
+    host: ${SERVER2_HOST}
+  server3:
+    host: ${SERVER3_HOST}
+
+environments:
+  production:
+    servers: [server1, server2, server3]
+    services:
+      session-manager:
+        build: ./session-manager
+        volumes:
+          - nfs:shared_repo:/app/repo:ro    # Read-only NFS mount
+          - sessions:/app/sessions          # Local volume for work
+        
+      content-server:
+        build: ./content-server
+        port: 3000
+        replicas: 3
+        volumes:
+          - nfs:shared_repo:/app/repo:ro    # Same NFS mount, read-only
+        placement:
+          strategy: spread
+```
+
+**NFS Volume Format:**
+```
+nfs:<export_name>:<container_path>[:ro|:rw]
+```
+
+- `export_name` - Name of the export defined in storage.nfs.exports
+- `container_path` - Mount path inside the container
+- `:ro` - Read-only mount (default, recommended)
+- `:rw` - Read-write mount
+
+**Commands:**
+```bash
+# Check NFS storage status
+tako storage status
+
+# Remount NFS if mounts become stale
+tako storage remount
+```
+
+**Notes:**
+- NFS is best for read-heavy workloads
+- For write-heavy operations (like git), use local volumes and sync/merge back
+- All servers must be in the same datacenter for acceptable performance
 
 ### Secrets Management
 

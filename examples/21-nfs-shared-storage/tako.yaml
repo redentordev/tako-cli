@@ -1,0 +1,106 @@
+# NFS Shared Storage Example
+# 
+# This example demonstrates how to use NFS shared storage to share
+# volumes across multiple servers. Use case: a session manager that
+# creates git worktrees and a content server that reads from them.
+#
+# Architecture:
+#   Server 1 (Manager + NFS Server)
+#     └── NFS exports: /srv/nfs/repo
+#   Server 2 (Worker)
+#     └── NFS mount: /mnt/tako-nfs/{project}_{env}_shared_repo
+#   Server 3 (Worker)
+#     └── NFS mount: /mnt/tako-nfs/{project}_{env}_shared_repo
+#
+# Services:
+#   - session-manager: Clones from NFS, works locally, merges back
+#   - content-server: Reads from NFS, serves to users (scalable)
+
+project:
+  name: nfs-demo
+  version: 1.0.0
+
+# NFS Shared Storage Configuration
+storage:
+  nfs:
+    enabled: true
+    server: auto  # Use manager node as NFS server
+    exports:
+      - name: shared_repo
+        path: /srv/nfs/repo
+        # Options are optional - defaults are:
+        # rw, sync, no_subtree_check, no_root_squash, crossmnt
+        options:
+          - rw
+          - sync
+          - no_subtree_check
+          - no_root_squash
+
+# Multi-server configuration
+servers:
+  server1:
+    host: ${SERVER1_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+    role: manager  # NFS server will run here
+  server2:
+    host: ${SERVER2_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+  server3:
+    host: ${SERVER3_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers: [server1, server2, server3]
+    services:
+      # Session Manager Service
+      # - Clones from NFS shared repo (read-only for safety)
+      # - Works on local session volumes (fast)
+      # - Merges back to shared repo via API/direct push
+      session-manager:
+        build: ./session-manager
+        port: 4000
+        replicas: 1  # Usually just one session manager
+        volumes:
+          # NFS mount (read-only) - clone source repo from here
+          - nfs:shared_repo:/app/shared-repo:ro
+          # Local volume for active sessions (fast local disk)
+          - sessions:/app/sessions
+        env:
+          SHARED_REPO_PATH: /app/shared-repo
+          SESSIONS_DIR: /app/sessions
+          NODE_ENV: production
+        placement:
+          strategy: pinned
+          servers: [server1]  # Pin to manager for direct NFS access
+        proxy:
+          domain: sessions.${DOMAIN}
+          email: ${LETSENCRYPT_EMAIL}
+
+      # Content Server
+      # - Reads from NFS shared repo
+      # - Serves content to users
+      # - Can scale across all servers
+      content-server:
+        build: ./content-server
+        port: 3000
+        replicas: 3  # Scale across servers
+        volumes:
+          # NFS mount (read-only)
+          - nfs:shared_repo:/app/repo:ro
+        env:
+          REPO_PATH: /app/repo
+          NODE_ENV: production
+        healthCheck:
+          path: /health
+          interval: 30s
+          timeout: 5s
+          retries: 3
+        placement:
+          strategy: spread  # Distribute across all servers
+        proxy:
+          domain: ${DOMAIN}
+          email: ${LETSENCRYPT_EMAIL}

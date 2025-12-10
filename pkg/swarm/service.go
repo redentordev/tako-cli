@@ -245,6 +245,58 @@ func (m *Manager) createService(
 
 	// Add volumes (with project and environment scoping)
 	for _, volume := range service.Volumes {
+		// Check if this is an NFS volume (nfs:export_name:/container/path format)
+		if config.IsNFSVolume(volume) {
+			exportName, containerPath, readOnly, err := config.ParseNFSVolumeSpec(volume)
+			if err != nil {
+				return fmt.Errorf("invalid NFS volume spec for service %s: %w", serviceName, err)
+			}
+
+			// Determine mount source based on deployment mode
+			// Multi-server: Use NFS mount point
+			// Single-server: Fall back to direct path from NFS export config
+			var mountSource string
+			isMultiServer := m.config.IsMultiServer()
+
+			if isMultiServer {
+				// Multi-server: Use NFS mount point
+				mountSource = fmt.Sprintf("/mnt/tako-nfs/%s_%s_%s", m.config.Project.Name, m.environment, exportName)
+			} else {
+				// Single-server: Use direct path from NFS export config (no NFS overhead)
+				// Look up the export path from config
+				export, err := m.config.GetNFSExport(exportName)
+				if err != nil {
+					return fmt.Errorf("NFS export '%s' not found in config for service %s: %w", exportName, serviceName, err)
+				}
+				mountSource = export.Path
+
+				// Ensure directory exists on single server
+				if m.verbose {
+					fmt.Printf("  Single-server mode: using direct path %s instead of NFS\n", mountSource)
+				}
+			}
+
+			// Use bind mount from source to container
+			mountOpts := fmt.Sprintf("type=bind,source=%s,target=%s", mountSource, containerPath)
+			if readOnly {
+				mountOpts += ",readonly"
+			}
+			cmd += fmt.Sprintf(" --mount %s", mountOpts)
+
+			if m.verbose {
+				accessMode := "rw"
+				if readOnly {
+					accessMode = "ro"
+				}
+				if isMultiServer {
+					fmt.Printf("  NFS volume: %s -> %s (%s)\n", exportName, containerPath, accessMode)
+				} else {
+					fmt.Printf("  Local volume (NFS fallback): %s -> %s (%s)\n", mountSource, containerPath, accessMode)
+				}
+			}
+			continue
+		}
+
 		source, target := m.parseVolumeSpec(volume)
 		if target == "" {
 			// If only one path specified, it's the target (container path)
