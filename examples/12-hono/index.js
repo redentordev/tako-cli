@@ -3,6 +3,17 @@ import { serve } from '@hono/node-server'
 
 const app = new Hono()
 
+// Security headers middleware
+app.use('*', async (c, next) => {
+  await next()
+  c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  c.header('X-Content-Type-Options', 'nosniff')
+  c.header('X-Frame-Options', 'DENY')
+  c.header('X-XSS-Protection', '1; mode=block')
+  c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
+  c.header('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
+})
+
 // Middleware for logging
 app.use('*', async (c, next) => {
   console.log(`${c.req.method} ${c.req.url}`)

@@ -457,7 +457,12 @@ func (m *Manager) updateService(
 			// Remove surrounding quotes if present
 			label = strings.Trim(label, "'\"")
 			if label != "" {
-				cmd += fmt.Sprintf(" --label-add %s", label)
+				// Quote labels containing special characters like parentheses
+				if strings.ContainsAny(label, "()\"' ") {
+					cmd += fmt.Sprintf(" --label-add '%s'", label)
+				} else {
+					cmd += fmt.Sprintf(" --label-add %s", label)
+				}
 			}
 		}
 
