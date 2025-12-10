@@ -109,9 +109,19 @@ func runPS(cmd *cobra.Command, args []string) error {
 			fmt.Printf("\n=== Server: %s (%s) ===\n", serverName, serverCfg.Host)
 		}
 
-		// Connect to server
-		client, err := ssh.NewClient(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey)
+		// Connect to server (supports both key and password auth)
+		client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
+			Host:     serverCfg.Host,
+			Port:     serverCfg.Port,
+			User:     serverCfg.User,
+			SSHKey:   serverCfg.SSHKey,
+			Password: serverCfg.Password,
+		})
 		if err != nil {
+			fmt.Printf("❌ Failed to connect to %s: %v\n", serverName, err)
+			continue
+		}
+		if err := client.Connect(); err != nil {
 			fmt.Printf("❌ Failed to connect to %s: %v\n", serverName, err)
 			continue
 		}

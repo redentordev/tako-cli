@@ -87,9 +87,18 @@ func runAccess(cmd *cobra.Command, args []string) error {
 		fmt.Printf("→ Fetching access logs from %s (service: %s)\n", serverName, accessService)
 	}
 
-	// Connect to server
-	client, err := ssh.NewClient(serverConfig.Host, serverConfig.Port, serverConfig.User, serverConfig.SSHKey)
+	// Connect to server (supports both key and password auth)
+	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
+		Host:     serverConfig.Host,
+		Port:     serverConfig.Port,
+		User:     serverConfig.User,
+		SSHKey:   serverConfig.SSHKey,
+		Password: serverConfig.Password,
+	})
 	if err != nil {
+		return fmt.Errorf("failed to connect to server: %w", err)
+	}
+	if err := client.Connect(); err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
 	defer client.Close()

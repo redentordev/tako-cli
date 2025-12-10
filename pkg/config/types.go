@@ -45,12 +45,13 @@ type CacheConfig struct {
 
 // ServerConfig defines server connection details
 type ServerConfig struct {
-	Host   string            `yaml:"host"`
-	User   string            `yaml:"user"`
-	Port   int               `yaml:"port,omitempty"`
-	SSHKey string            `yaml:"sshKey,omitempty"`
-	Role   string            `yaml:"role,omitempty"`   // "manager" or "worker" (auto-detect if not specified)
-	Labels map[string]string `yaml:"labels,omitempty"` // Custom labels for server selection
+	Host     string            `yaml:"host"`
+	User     string            `yaml:"user"`
+	Port     int               `yaml:"port,omitempty"`
+	SSHKey   string            `yaml:"sshKey,omitempty"`   // Path to SSH private key (mutually exclusive with password)
+	Password string            `yaml:"password,omitempty"` // SSH password (mutually exclusive with sshKey, use env var for security)
+	Role     string            `yaml:"role,omitempty"`     // "manager" or "worker" (auto-detect if not specified)
+	Labels   map[string]string `yaml:"labels,omitempty"`   // Custom labels for server selection
 }
 
 // ServiceConfig defines service deployment settings

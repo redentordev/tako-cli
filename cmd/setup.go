@@ -60,8 +60,8 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	for name, server := range servers {
 		fmt.Printf("\n=== Provisioning server: %s (%s) ===\n\n", name, server.Host)
 
-		// Get or create SSH client
-		client, err := sshPool.GetOrCreate(server.Host, server.Port, server.User, server.SSHKey)
+		// Get or create SSH client (supports both key and password auth)
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err != nil {
 			return fmt.Errorf("failed to connect to server %s: %w", name, err)
 		}

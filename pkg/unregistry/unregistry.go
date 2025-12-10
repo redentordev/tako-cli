@@ -350,7 +350,7 @@ func (m *Manager) EnsureImageOnAllNodes(managerClient *ssh.Client, imageName str
 		}
 
 		server := m.config.Servers[serverName]
-		client, err := m.sshPool.GetOrCreate(server.Host, server.Port, server.User, server.SSHKey)
+		client, err := m.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err != nil {
 			return false, fmt.Errorf("failed to connect to %s: %w", serverName, err)
 		}

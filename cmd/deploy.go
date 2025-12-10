@@ -176,7 +176,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get or create SSH client for first server
-	firstClient, err := sshPool.GetOrCreate(firstServer.Host, firstServer.Port, firstServer.User, firstServer.SSHKey)
+	firstClient, err := sshPool.GetOrCreateWithAuth(firstServer.Host, firstServer.Port, firstServer.User, firstServer.SSHKey, firstServer.Password)
 	if err != nil {
 		return fmt.Errorf("failed to connect to server %s: %w", firstServerName, err)
 	}
@@ -407,7 +407,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n→ Running automatic cleanup...\n")
 	}
 	for serverName, server := range servers {
-		client, err := sshPool.GetOrCreate(server.Host, server.Port, server.User, server.SSHKey)
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err == nil {
 			cleaner := cleanup.NewCleaner(client, cfg.Project.Name, verbose)
 			// Keep 3 latest images, clean stopped containers and dangling images

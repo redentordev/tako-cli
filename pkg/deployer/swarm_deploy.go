@@ -47,8 +47,8 @@ func (d *Deployer) SetupSwarmCluster() error {
 		}
 	}
 
-	// Get or create SSH client for manager
-	managerClient, err := d.sshPool.GetOrCreate(managerServer.Host, managerServer.Port, managerServer.User, managerServer.SSHKey)
+	// Get or create SSH client for manager (supports both key and password auth)
+	managerClient, err := d.sshPool.GetOrCreateWithAuth(managerServer.Host, managerServer.Port, managerServer.User, managerServer.SSHKey, managerServer.Password)
 	if err != nil {
 		return fmt.Errorf("failed to connect to manager: %w", err)
 	}
@@ -94,7 +94,7 @@ func (d *Deployer) SetupSwarmCluster() error {
 			fmt.Printf("  Joining %s (%s)...\n", serverName, server.Host)
 		}
 
-		workerClient, err := d.sshPool.GetOrCreate(server.Host, server.Port, server.User, server.SSHKey)
+		workerClient, err := d.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err != nil {
 			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 		}
@@ -232,7 +232,7 @@ func (d *Deployer) DeployServiceSwarm(serviceName string, service *config.Servic
 	}
 
 	managerServer := d.config.Servers[managerName]
-	managerClient, err := d.sshPool.GetOrCreate(managerServer.Host, managerServer.Port, managerServer.User, managerServer.SSHKey)
+	managerClient, err := d.sshPool.GetOrCreateWithAuth(managerServer.Host, managerServer.Port, managerServer.User, managerServer.SSHKey, managerServer.Password)
 	if err != nil {
 		return fmt.Errorf("failed to connect to manager: %w", err)
 	}

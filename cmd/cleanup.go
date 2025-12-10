@@ -91,9 +91,20 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	for serverName, serverCfg := range serversToClean {
 		fmt.Printf("=== Cleaning server: %s (%s) ===\n", serverName, serverCfg.Host)
 
-		// Connect to server
-		client, err := ssh.NewClient(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey)
+		// Connect to server (supports both key and password auth)
+		client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
+			Host:     serverCfg.Host,
+			Port:     serverCfg.Port,
+			User:     serverCfg.User,
+			SSHKey:   serverCfg.SSHKey,
+			Password: serverCfg.Password,
+		})
 		if err != nil {
+			fmt.Printf("❌ Failed to connect to %s: %v\n\n", serverName, err)
+			totalErrors++
+			continue
+		}
+		if err := client.Connect(); err != nil {
 			fmt.Printf("❌ Failed to connect to %s: %v\n\n", serverName, err)
 			totalErrors++
 			continue

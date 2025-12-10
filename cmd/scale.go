@@ -116,9 +116,18 @@ func runScale(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("=== Scaling via Swarm manager: %s (%s) ===\n", managerName, managerCfg.Host)
 
-	// Connect to manager
-	client, err := ssh.NewClient(managerCfg.Host, managerCfg.Port, managerCfg.User, managerCfg.SSHKey)
+	// Connect to manager (supports both key and password auth)
+	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
+		Host:     managerCfg.Host,
+		Port:     managerCfg.Port,
+		User:     managerCfg.User,
+		SSHKey:   managerCfg.SSHKey,
+		Password: managerCfg.Password,
+	})
 	if err != nil {
+		return fmt.Errorf("failed to connect to manager %s: %w", managerName, err)
+	}
+	if err := client.Connect(); err != nil {
 		return fmt.Errorf("failed to connect to manager %s: %w", managerName, err)
 	}
 	defer client.Close()

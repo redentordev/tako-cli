@@ -78,8 +78,8 @@ func runDowngrade(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Environment: %s\n", envName)
 	fmt.Printf("Server: %s (%s)\n\n", serverName, serverConfig.Host)
 
-	// Connect to server
-	client, err := sshPool.GetOrCreate(serverConfig.Host, serverConfig.Port, serverConfig.User, serverConfig.SSHKey)
+	// Connect to server (supports both key and password auth)
+	client, err := sshPool.GetOrCreateWithAuth(serverConfig.Host, serverConfig.Port, serverConfig.User, serverConfig.SSHKey, serverConfig.Password)
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}

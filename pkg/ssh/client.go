@@ -35,7 +35,7 @@ func NewPool() *Pool {
 	}
 }
 
-// NewClient creates a new SSH client
+// NewClient creates a new SSH client with key-based authentication
 func NewClient(host string, port int, user string, keyPath string) (*Client, error) {
 	// Read the private key
 	key, err := os.ReadFile(keyPath)
@@ -66,6 +66,99 @@ func NewClient(host string, port int, user string, keyPath string) (*Client, err
 		host:   host,
 		port:   port,
 	}, nil
+}
+
+// NewClientWithPassword creates a new SSH client with password-based authentication
+func NewClientWithPassword(host string, port int, user string, password string) (*Client, error) {
+	// Create SSH client config with password authentication
+	config := &ssh.ClientConfig{
+		User: user,
+		Auth: []ssh.AuthMethod{
+			ssh.Password(password),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Implement proper host key verification
+		Timeout:         60 * time.Second,            // Increased to 60s for very slow/busy servers
+		// Client version to avoid version negotiation issues
+		ClientVersion: "SSH-2.0-Tako-CLI",
+	}
+
+	return &Client{
+		config: config,
+		host:   host,
+		port:   port,
+	}, nil
+}
+
+// NewClientWithAuth creates a new SSH client with either key or password authentication
+// If both keyPath and password are provided, key-based auth is preferred
+func NewClientWithAuth(host string, port int, user string, keyPath string, password string) (*Client, error) {
+	var authMethods []ssh.AuthMethod
+
+	// Try key-based authentication first if keyPath is provided
+	if keyPath != "" {
+		key, err := os.ReadFile(keyPath)
+		if err == nil {
+			signer, err := ssh.ParsePrivateKey(key)
+			if err == nil {
+				authMethods = append(authMethods, ssh.PublicKeys(signer))
+			}
+		}
+	}
+
+	// Add password authentication as fallback or primary if no key
+	if password != "" {
+		authMethods = append(authMethods, ssh.Password(password))
+	}
+
+	// Ensure we have at least one auth method
+	if len(authMethods) == 0 {
+		return nil, fmt.Errorf("no valid authentication method provided (need either SSH key or password)")
+	}
+
+	// Create SSH client config
+	config := &ssh.ClientConfig{
+		User:            user,
+		Auth:            authMethods,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Implement proper host key verification
+		Timeout:         60 * time.Second,            // Increased to 60s for very slow/busy servers
+		ClientVersion:   "SSH-2.0-Tako-CLI",
+	}
+
+	return &Client{
+		config: config,
+		host:   host,
+		port:   port,
+	}, nil
+}
+
+// ServerConfig represents SSH connection parameters
+// This mirrors config.ServerConfig to avoid circular imports
+type ServerConfig struct {
+	Host     string
+	Port     int
+	User     string
+	SSHKey   string
+	Password string
+}
+
+// NewClientFromConfig creates a new SSH client from server configuration
+// Automatically chooses between key-based and password-based authentication
+func NewClientFromConfig(cfg ServerConfig) (*Client, error) {
+	if cfg.Port == 0 {
+		cfg.Port = 22
+	}
+
+	// Use appropriate auth method based on config
+	if cfg.Password != "" && cfg.SSHKey == "" {
+		return NewClientWithPassword(cfg.Host, cfg.Port, cfg.User, cfg.Password)
+	}
+
+	if cfg.SSHKey != "" || cfg.Password != "" {
+		return NewClientWithAuth(cfg.Host, cfg.Port, cfg.User, cfg.SSHKey, cfg.Password)
+	}
+
+	// Fallback to key-based (default key path should be set by validator)
+	return NewClient(cfg.Host, cfg.Port, cfg.User, cfg.SSHKey)
 }
 
 // Connect establishes the SSH connection with retry logic and optimized TCP settings
@@ -286,6 +379,12 @@ func (c *Client) getConnection() (*ssh.Client, error) {
 // GetOrCreate gets an existing client from the pool or creates a new one
 // Uses proper locking to avoid race conditions with double-checked locking
 func (p *Pool) GetOrCreate(host string, port int, user string, keyPath string) (*Client, error) {
+	return p.GetOrCreateWithAuth(host, port, user, keyPath, "")
+}
+
+// GetOrCreateWithAuth gets an existing client from the pool or creates a new one
+// Supports both key-based and password-based authentication
+func (p *Pool) GetOrCreateWithAuth(host string, port int, user string, keyPath string, password string) (*Client, error) {
 	key := fmt.Sprintf("%s@%s:%d", user, host, port)
 
 	// First, try with read lock
@@ -306,8 +405,18 @@ func (p *Pool) GetOrCreate(host string, port int, user string, keyPath string) (
 		return client, nil
 	}
 
-	// Create new client
-	client, err := NewClient(host, port, user, keyPath)
+	// Create new client with appropriate authentication
+	var err error
+	if password != "" && keyPath == "" {
+		// Password-only authentication
+		client, err = NewClientWithPassword(host, port, user, password)
+	} else if keyPath != "" || password != "" {
+		// Key with optional password fallback
+		client, err = NewClientWithAuth(host, port, user, keyPath, password)
+	} else {
+		return nil, fmt.Errorf("no authentication method provided")
+	}
+
 	if err != nil {
 		return nil, err
 	}

@@ -87,8 +87,14 @@ func runLive(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Create SSH client
-	client, err := ssh.NewClient(server.Host, server.Port, server.User, server.SSHKey)
+	// Create SSH client (supports both key and password auth)
+	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
+		Host:     server.Host,
+		Port:     server.Port,
+		User:     server.User,
+		SSHKey:   server.SSHKey,
+		Password: server.Password,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create SSH client: %w", err)
 	}

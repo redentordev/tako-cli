@@ -118,9 +118,19 @@ func runExec(cmd *cobra.Command, args []string) error {
 			fmt.Printf("\n=== Server: %s (%s) ===\n", serverName, serverCfg.Host)
 		}
 
-		// Connect to server
-		client, err := ssh.NewClient(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey)
+		// Connect to server (supports both key and password auth)
+		client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
+			Host:     serverCfg.Host,
+			Port:     serverCfg.Port,
+			User:     serverCfg.User,
+			SSHKey:   serverCfg.SSHKey,
+			Password: serverCfg.Password,
+		})
 		if err != nil {
+			fmt.Printf("❌ Failed to connect to %s: %v\n", serverName, err)
+			continue
+		}
+		if err := client.Connect(); err != nil {
 			fmt.Printf("❌ Failed to connect to %s: %v\n", serverName, err)
 			continue
 		}
@@ -185,9 +195,18 @@ func runExecInContainer(cfg *config.Config, envName, command string) error {
 		}
 	}
 
-	// Connect to server
-	client, err := ssh.NewClient(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey)
+	// Connect to server (supports both key and password auth)
+	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
+		Host:     serverCfg.Host,
+		Port:     serverCfg.Port,
+		User:     serverCfg.User,
+		SSHKey:   serverCfg.SSHKey,
+		Password: serverCfg.Password,
+	})
 	if err != nil {
+		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
+	}
+	if err := client.Connect(); err != nil {
 		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 	}
 	defer client.Close()

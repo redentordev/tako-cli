@@ -130,8 +130,8 @@ func showMetricsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, co
 	for _, serverName := range servers {
 		server := cfg.Servers[serverName]
 
-		// Get or create SSH client
-		client, err := sshPool.GetOrCreate(server.Host, server.Port, server.User, server.SSHKey)
+		// Get or create SSH client (supports both key and password auth)
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err != nil {
 			fmt.Printf("❌ %s (%s): Failed to connect - %v\n\n", serverName, server.Host, err)
 			continue
@@ -185,7 +185,7 @@ func showLiveMetrics(cfg *config.Config, servers []string, sshPool *ssh.Pool) er
 		for _, serverName := range servers {
 			server := cfg.Servers[serverName]
 
-			client, err := sshPool.GetOrCreate(server.Host, server.Port, server.User, server.SSHKey)
+			client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 			if err != nil {
 				fmt.Printf("❌ %s: Connection failed\n\n", serverName)
 				continue

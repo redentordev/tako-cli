@@ -117,6 +117,21 @@ func validateServer(name string, server *ServerConfig) error {
 		server.Port = 22 // Default SSH port
 	}
 
+	// Validate authentication method: must have either sshKey or password
+	hasPassword := server.Password != ""
+	hasSSHKey := server.SSHKey != ""
+
+	if hasPassword && hasSSHKey {
+		// Both specified - this is allowed, key takes precedence
+		// Just warn in verbose mode (handled elsewhere)
+	}
+
+	if hasPassword {
+		// Password authentication - no need to check SSH key
+		return nil
+	}
+
+	// SSH key authentication (default)
 	if server.SSHKey == "" {
 		// Default to standard SSH key location
 		homeDir, _ := os.UserHomeDir()
@@ -131,7 +146,7 @@ func validateServer(name string, server *ServerConfig) error {
 
 	// Check if SSH key exists
 	if _, err := os.Stat(server.SSHKey); os.IsNotExist(err) {
-		return fmt.Errorf("server %s: SSH key not found: %s", name, server.SSHKey)
+		return fmt.Errorf("server %s: SSH key not found: %s (you can also use 'password' for password authentication)", name, server.SSHKey)
 	}
 
 	return nil

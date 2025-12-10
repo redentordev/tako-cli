@@ -182,7 +182,7 @@ func (m *Monitor) checkPublicService(serviceName string, service *config.Service
 func (m *Monitor) checkInternalService(serviceName string, service *config.ServiceConfig) error {
 	// Connect to servers and check containers
 	for serverName, serverCfg := range m.config.Servers {
-		client, err := m.sshPool.GetOrCreate(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey)
+		client, err := m.sshPool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
 		if err != nil {
 			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 		}

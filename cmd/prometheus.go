@@ -48,8 +48,8 @@ func runPrometheus(cmd *cobra.Command, args []string) error {
 	for _, serverName := range servers {
 		server := cfg.Servers[serverName]
 
-		// Get or create SSH client
-		client, err := sshPool.GetOrCreate(server.Host, server.Port, server.User, server.SSHKey)
+		// Get or create SSH client (supports both key and password auth)
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err != nil {
 			continue // Skip unavailable servers
 		}
