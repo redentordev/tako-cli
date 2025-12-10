@@ -10,10 +10,18 @@ import (
 
 // Config represents the main configuration structure
 type Config struct {
-	Project      ProjectConfig                `yaml:"project"`
-	Deployment   *DeploymentConfig            `yaml:"deployment,omitempty"`
-	Servers      map[string]ServerConfig      `yaml:"servers"`
-	Environments map[string]EnvironmentConfig `yaml:"environments"`
+	Project       ProjectConfig                `yaml:"project"`
+	Deployment    *DeploymentConfig            `yaml:"deployment,omitempty"`
+	Notifications *NotificationsConfig         `yaml:"notifications,omitempty"`
+	Servers       map[string]ServerConfig      `yaml:"servers"`
+	Environments  map[string]EnvironmentConfig `yaml:"environments"`
+}
+
+// NotificationsConfig defines notification settings
+type NotificationsConfig struct {
+	Slack   string `yaml:"slack,omitempty"`   // Slack webhook URL
+	Discord string `yaml:"discord,omitempty"` // Discord webhook URL
+	Webhook string `yaml:"webhook,omitempty"` // Generic webhook URL
 }
 
 // ProjectConfig defines project metadata
