@@ -315,8 +315,10 @@ func (n *NFSProvisioner) configureExport(client *ssh.Client, export *config.NFSE
 		return nil, fmt.Errorf("failed to set ownership: %w", err)
 	}
 
-	// Set directory permissions (rwxrwxr-x - group writable, not world writable)
-	chmodCmd := fmt.Sprintf("sudo chmod -R 775 %s", export.Path)
+	// Set directory permissions (rwxrwxrwx - world writable for NFS)
+	// This is standard for NFS exports where multiple containers with different UIDs need write access
+	// Security is enforced at the NFS export level (IP restrictions) and service config (read-only mounts)
+	chmodCmd := fmt.Sprintf("sudo chmod -R 777 %s", export.Path)
 	if _, err := client.Execute(chmodCmd); err != nil {
 		return nil, fmt.Errorf("failed to set permissions: %w", err)
 	}
@@ -358,13 +360,13 @@ func (n *NFSProvisioner) configureExport(client *ssh.Client, export *config.NFSE
 
 // buildExportOptions builds NFS export options string
 func (n *NFSProvisioner) buildExportOptions(userOptions []string) string {
-	// Default options for Tako NFS - balanced security and functionality
+	// Default options for Tako NFS - optimized for container workloads
 	defaultOptions := []string{
 		"rw",               // Read-write access
 		"sync",             // Synchronous writes for data integrity
 		"no_subtree_check", // Improves reliability
 		"no_root_squash",   // Allow root access (needed for containers)
-		"secure",           // Require requests from ports < 1024 (more secure)
+		"insecure",         // Allow connections from any port (needed for some container networking)
 	}
 
 	// If user provided options, use those instead

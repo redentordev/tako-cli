@@ -379,6 +379,36 @@ func (p *Provisioner) SetupDeployUser(username string) error {
 	// Ensure user is in docker group
 	p.client.Execute(fmt.Sprintf("sudo usermod -aG docker %s", username))
 
+	// Configure passwordless sudo for the deploy user
+	// This is required for Tako to run commands like NFS setup, firewall config, etc.
+	if username != "root" {
+		if p.verbose {
+			fmt.Printf("  Configuring passwordless sudo for %s...\n", username)
+		}
+
+		// Create sudoers file for the user with proper permissions
+		sudoersContent := fmt.Sprintf("%s ALL=(ALL) NOPASSWD: ALL", username)
+		sudoersFile := fmt.Sprintf("/etc/sudoers.d/tako-%s", username)
+
+		// Write sudoers file with correct permissions (must be 0440)
+		sudoersCmd := fmt.Sprintf("echo '%s' | sudo tee %s > /dev/null && sudo chmod 0440 %s", sudoersContent, sudoersFile, sudoersFile)
+		if _, err := p.client.Execute(sudoersCmd); err != nil {
+			if p.verbose {
+				fmt.Printf("  Warning: Failed to configure passwordless sudo: %v\n", err)
+			}
+		}
+
+		// Validate the sudoers file
+		validateCmd := fmt.Sprintf("sudo visudo -cf %s", sudoersFile)
+		if _, err := p.client.Execute(validateCmd); err != nil {
+			// If validation fails, remove the invalid file
+			p.client.Execute(fmt.Sprintf("sudo rm -f %s", sudoersFile))
+			if p.verbose {
+				fmt.Printf("  Warning: Sudoers validation failed, removed invalid file\n")
+			}
+		}
+	}
+
 	return nil
 }
 
