@@ -144,3 +144,81 @@ func (t *TraefikLabelBuilder) Service(serviceName string) *TraefikLabelBuilder {
 	t.Add(key, serviceName)
 	return t
 }
+
+// Middlewares adds middleware(s) to the router
+func (t *TraefikLabelBuilder) Middlewares(middlewares ...string) *TraefikLabelBuilder {
+	key := fmt.Sprintf("traefik.http.routers.%s.middlewares", t.routerName)
+	t.Add(key, strings.Join(middlewares, ","))
+	return t
+}
+
+// RedirectRegexMiddleware creates a redirect regex middleware
+// This is used to redirect one domain to another (e.g., www -> non-www)
+func (t *TraefikLabelBuilder) RedirectRegexMiddleware(middlewareName, fromDomain, toDomain string, permanent bool) *TraefikLabelBuilder {
+	// Escape dots in domain for regex
+	escapedFromDomain := strings.ReplaceAll(fromDomain, ".", "\\.")
+
+	// Regex to match the source domain and capture the path
+	regex := fmt.Sprintf("^https?://%s/(.*)", escapedFromDomain)
+	replacement := fmt.Sprintf("https://%s/${1}", toDomain)
+
+	t.Add(fmt.Sprintf("traefik.http.middlewares.%s.redirectregex.regex", middlewareName), regex)
+	t.Add(fmt.Sprintf("traefik.http.middlewares.%s.redirectregex.replacement", middlewareName), replacement)
+	t.Add(fmt.Sprintf("traefik.http.middlewares.%s.redirectregex.permanent", middlewareName), fmt.Sprintf("%t", permanent))
+
+	return t
+}
+
+// RedirectDomainBuilder helps build redirect configurations for domain redirects
+type RedirectDomainBuilder struct {
+	containerName string
+	primaryDomain string
+	labels        []string
+}
+
+// NewRedirectDomainBuilder creates a new redirect domain builder
+func NewRedirectDomainBuilder(containerName, primaryDomain string) *RedirectDomainBuilder {
+	return &RedirectDomainBuilder{
+		containerName: containerName,
+		primaryDomain: primaryDomain,
+		labels:        make([]string, 0),
+	}
+}
+
+// AddRedirectDomain adds a domain that should redirect to the primary domain
+func (r *RedirectDomainBuilder) AddRedirectDomain(redirectDomain string, index int, certResolver string) *RedirectDomainBuilder {
+	routerName := fmt.Sprintf("%s-redirect-%d", r.containerName, index)
+	middlewareName := fmt.Sprintf("%s-redirect-%d", r.containerName, index)
+
+	builder := NewTraefikLabelBuilder(routerName, r.containerName)
+
+	// Router for the redirect domain
+	builder.HostRule(redirectDomain)
+	builder.Entrypoints("web", "websecure")
+
+	// TLS for the redirect domain (it needs its own certificate)
+	if certResolver != "" {
+		builder.TLS(certResolver)
+	}
+
+	// Create redirect middleware
+	builder.RedirectRegexMiddleware(middlewareName, redirectDomain, r.primaryDomain, true)
+
+	// Apply the middleware to the router
+	builder.Middlewares(middlewareName)
+
+	// Add all labels
+	r.labels = append(r.labels, builder.BuildSlice()...)
+
+	return r
+}
+
+// Build returns all redirect labels as a space-separated string
+func (r *RedirectDomainBuilder) Build() string {
+	return strings.Join(r.labels, " ")
+}
+
+// BuildSlice returns all redirect labels as a slice
+func (r *RedirectDomainBuilder) BuildSlice() []string {
+	return r.labels
+}

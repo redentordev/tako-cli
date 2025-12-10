@@ -14,6 +14,10 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Project.Name == "" {
 		return fmt.Errorf("project name is required")
 	}
+	// Validate project name format (alphanumeric + hyphen, must start with letter)
+	if !isValidProjectName(cfg.Project.Name) {
+		return fmt.Errorf("project name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, and hyphens, and be 1-63 characters long", cfg.Project.Name)
+	}
 	if cfg.Project.Version == "" {
 		return fmt.Errorf("project version is required")
 	}
@@ -134,6 +138,11 @@ func validateServer(name string, server *ServerConfig) error {
 }
 
 func validateService(name string, service *ServiceConfig, cfg *Config) error {
+	// Validate service name format
+	if !isValidServiceName(name) {
+		return fmt.Errorf("service name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, hyphens, and underscores, and be 1-63 characters long", name)
+	}
+
 	// Must have either Build or Image, but not both
 	if service.Build == "" && service.Image == "" {
 		return fmt.Errorf("service %s: either 'build' or 'image' is required", name)
@@ -347,16 +356,49 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 }
 
 func validateProxy(serviceName string, proxy *ProxyConfig) error {
-	if len(proxy.Domains) == 0 {
-		return fmt.Errorf("service %s: proxy configured but no domains specified", serviceName)
+	// Check that at least one domain is configured (either Domain or Domains)
+	if proxy.Domain == "" && len(proxy.Domains) == 0 {
+		return fmt.Errorf("service %s: proxy configured but no domain specified (use 'domain' or 'domains')", serviceName)
 	}
 
-	// Trim spaces from domains and validate
+	// Validate and trim primary domain
+	if proxy.Domain != "" {
+		trimmed := strings.TrimSpace(proxy.Domain)
+		proxy.Domain = trimmed
+		if !isValidDomain(trimmed) {
+			return fmt.Errorf("service %s: invalid primary domain: %s", serviceName, trimmed)
+		}
+	}
+
+	// Validate and trim domains in Domains array
 	for i, domain := range proxy.Domains {
 		trimmed := strings.TrimSpace(domain)
-		proxy.Domains[i] = trimmed // Update with trimmed version
+		proxy.Domains[i] = trimmed
 		if !isValidDomain(trimmed) {
 			return fmt.Errorf("service %s: invalid domain: %s", serviceName, trimmed)
+		}
+	}
+
+	// Validate redirect domains
+	primaryDomain := proxy.GetPrimaryDomain()
+	for i, redirectDomain := range proxy.RedirectFrom {
+		trimmed := strings.TrimSpace(redirectDomain)
+		proxy.RedirectFrom[i] = trimmed
+
+		if !isValidDomain(trimmed) {
+			return fmt.Errorf("service %s: invalid redirect domain: %s", serviceName, trimmed)
+		}
+
+		// Ensure redirect domain is not the same as primary domain
+		if strings.EqualFold(trimmed, primaryDomain) {
+			return fmt.Errorf("service %s: redirect domain '%s' cannot be the same as primary domain", serviceName, trimmed)
+		}
+
+		// Ensure redirect domain is not duplicated in Domains array
+		for _, d := range proxy.GetAllDomains() {
+			if strings.EqualFold(trimmed, d) {
+				return fmt.Errorf("service %s: redirect domain '%s' is already in the domains list - remove it from domains or redirectFrom", serviceName, trimmed)
+			}
 		}
 	}
 
@@ -419,6 +461,56 @@ func isValidDomain(domain string) bool {
 	return isValidHostname(domain)
 }
 
+// isValidProjectName validates that a project name is safe for use in Docker, file paths, and shell commands
+// Must start with lowercase letter, contain only lowercase letters, numbers, and hyphens
+// Length must be 1-63 characters (Docker/DNS label limit)
+func isValidProjectName(name string) bool {
+	if len(name) == 0 || len(name) > 63 {
+		return false
+	}
+
+	// Must start with a lowercase letter
+	if name[0] < 'a' || name[0] > 'z' {
+		return false
+	}
+
+	// Must end with alphanumeric (not hyphen)
+	lastChar := name[len(name)-1]
+	if !((lastChar >= 'a' && lastChar <= 'z') || (lastChar >= '0' && lastChar <= '9')) {
+		return false
+	}
+
+	// All characters must be lowercase letter, digit, or hyphen
+	for _, ch := range name {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-') {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isValidServiceName validates that a service name is safe
+func isValidServiceName(name string) bool {
+	if len(name) == 0 || len(name) > 63 {
+		return false
+	}
+
+	// Must start with lowercase letter
+	if name[0] < 'a' || name[0] > 'z' {
+		return false
+	}
+
+	// All characters must be lowercase letter, digit, hyphen, or underscore
+	for _, ch := range name {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_') {
+			return false
+		}
+	}
+
+	return true
+}
+
 // validateDomainUniqueness checks for duplicate domains across all services in an environment
 func validateDomainUniqueness(envName string, env *EnvironmentConfig) error {
 	domainToService := make(map[string]string)
@@ -428,8 +520,9 @@ func validateDomainUniqueness(envName string, env *EnvironmentConfig) error {
 			continue
 		}
 
-		for _, domain := range service.Proxy.Domains {
-			// Normalize domain for comparison (lowercase)
+		// Check primary domains and additional domains
+		allDomains := service.Proxy.GetAllDomains()
+		for _, domain := range allDomains {
 			normalizedDomain := strings.ToLower(domain)
 
 			if existingService, exists := domainToService[normalizedDomain]; exists {
@@ -442,6 +535,22 @@ func validateDomainUniqueness(envName string, env *EnvironmentConfig) error {
 			}
 
 			domainToService[normalizedDomain] = serviceName
+		}
+
+		// Check redirect domains
+		for _, redirectDomain := range service.Proxy.GetRedirectDomains() {
+			normalizedDomain := strings.ToLower(redirectDomain)
+
+			if existingService, exists := domainToService[normalizedDomain]; exists {
+				return fmt.Errorf(
+					"environment %s: domain conflict - redirect domain '%s' (service '%s') conflicts with domain in service '%s'\n"+
+						"  Each domain can only be assigned to one service.\n"+
+						"  Suggestion: Remove the duplicate domain from one of the services.",
+					envName, redirectDomain, serviceName, existingService,
+				)
+			}
+
+			domainToService[normalizedDomain] = serviceName + " (redirect)"
 		}
 	}
 

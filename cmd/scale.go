@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/swarm"
 	"github.com/spf13/cobra"
 )
 
@@ -104,53 +104,56 @@ func runScale(cmd *cobra.Command, args []string) error {
 
 	totalErrors := 0
 
-	// Scale on each server
-	for serverName, serverCfg := range serversToScale {
-		fmt.Printf("=== Scaling on server: %s (%s) ===\n", serverName, serverCfg.Host)
+	// For Swarm, we only need to connect to the manager node (first server)
+	// Swarm handles distribution across all nodes
+	var managerName string
+	var managerCfg config.ServerConfig
+	for name, server := range serversToScale {
+		managerName = name
+		managerCfg = server
+		break
+	}
 
-		// Connect to server
-		client, err := ssh.NewClient(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey)
+	fmt.Printf("=== Scaling via Swarm manager: %s (%s) ===\n", managerName, managerCfg.Host)
+
+	// Connect to manager
+	client, err := ssh.NewClient(managerCfg.Host, managerCfg.Port, managerCfg.User, managerCfg.SSHKey)
+	if err != nil {
+		return fmt.Errorf("failed to connect to manager %s: %w", managerName, err)
+	}
+	defer client.Close()
+
+	// Create swarm manager
+	swarmMgr := swarm.NewManager(verbose)
+
+	// Scale each service
+	for serviceName, desiredReplicas := range scaleTargets {
+		// Build full service name: {project}_{env}_{service}
+		fullServiceName := fmt.Sprintf("%s_%s_%s", cfg.Project.Name, envName, serviceName)
+
+		fmt.Printf("\n→ Scaling %s: ", serviceName)
+
+		// Get current replica count from Swarm
+		currentReplicas, err := getSwarmReplicaCount(client, fullServiceName)
 		if err != nil {
-			fmt.Printf("❌ Failed to connect to %s: %v\n\n", serverName, err)
+			fmt.Printf("❌ Failed to get current replicas: %v\n", err)
 			totalErrors++
 			continue
 		}
 
-		// Create deployer
-		deploy := deployer.NewDeployer(client, cfg, envName, verbose)
+		fmt.Printf("%d → %d replicas\n", currentReplicas, desiredReplicas)
 
-		// Scale each service
-		for serviceName, desiredReplicas := range scaleTargets {
-			service := services[serviceName]
-
-			fmt.Printf("\n→ Scaling %s: ", serviceName)
-
-			// Get current replica count
-			currentReplicas, err := getCurrentReplicaCount(client, cfg.Project.Name, serviceName, envName)
-			if err != nil {
-				fmt.Printf("❌ Failed to get current replicas: %v\n", err)
-				totalErrors++
-				continue
-			}
-
-			fmt.Printf("%d → %d replicas\n", currentReplicas, desiredReplicas)
-
-			// Update service config with new replica count
-			service.Replicas = desiredReplicas
-
-			// Deploy with skip-build flag (just scale, don't rebuild)
-			if err := deploy.DeployService(serviceName, &service, true); err != nil {
-				fmt.Printf("❌ Failed to scale %s: %v\n", serviceName, err)
-				totalErrors++
-				continue
-			}
-
-			fmt.Printf("✓ Service %s scaled successfully\n", serviceName)
+		// Scale the Swarm service directly
+		if err := swarmMgr.ScaleService(client, fullServiceName, desiredReplicas); err != nil {
+			fmt.Printf("❌ Failed to scale %s: %v\n", serviceName, err)
+			totalErrors++
+			continue
 		}
 
-		fmt.Printf("\n✓ Server %s scaling completed\n\n", serverName)
-		client.Close()
+		fmt.Printf("✓ Service %s scaled successfully\n", serviceName)
 	}
+
+	fmt.Println()
 
 	// Summary
 	if totalErrors > 0 {
@@ -162,16 +165,22 @@ func runScale(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// getCurrentReplicaCount returns the current number of replicas for a service
-func getCurrentReplicaCount(client *ssh.Client, projectName, serviceName string, envName string) (int, error) {
-	// Count containers matching pattern: {project}_{environment}_{service}_{number}
-	cmd := fmt.Sprintf("docker ps -a --filter 'name=%s_%s_%s_' --format '{{.Names}}' | wc -l", projectName, envName, serviceName)
+// getSwarmReplicaCount returns the current number of replicas for a Swarm service
+func getSwarmReplicaCount(client *ssh.Client, fullServiceName string) (int, error) {
+	// Query Swarm service for replica count
+	// Format: "3/3" (running/desired) - we want the desired count
+	cmd := fmt.Sprintf("docker service inspect %s --format '{{.Spec.Mode.Replicated.Replicas}}' 2>/dev/null || echo 0", fullServiceName)
 	output, err := client.Execute(cmd)
 	if err != nil {
 		return 0, err
 	}
 
-	count, err := strconv.Atoi(strings.TrimSpace(output))
+	output = strings.TrimSpace(output)
+	if output == "" || output == "<no value>" {
+		return 0, nil // Service doesn't exist or is in global mode
+	}
+
+	count, err := strconv.Atoi(output)
 	if err != nil {
 		return 0, err
 	}

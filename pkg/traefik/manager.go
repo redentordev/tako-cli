@@ -144,7 +144,8 @@ accessLog:
 	// Backend services still use ingress mode for load balancing across swarm nodes
 	// Don't specify a specific network for swarm provider - let Traefik discover services on all networks it's connected to
 	// CRITICAL: --restart-condition any ensures Traefik auto-recovers after server reboot
-	createCmd := fmt.Sprintf("docker service create --detach --name traefik --network %s --constraint node.role==manager --restart-condition any --publish published=80,target=80,mode=host --publish published=443,target=443,mode=host --publish published=8080,target=8080,mode=host --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock,readonly --mount type=bind,source=/etc/traefik/acme,target=/acme --mount type=bind,source=/var/log/traefik,target=/var/log/traefik --replicas 1 traefik:v3.6.1 --api.dashboard=true --api.insecure=true --providers.docker=true --providers.docker.exposedByDefault=false --providers.docker.endpoint=unix:///var/run/docker.sock --providers.docker.watch=true --providers.swarm=true --providers.swarm.exposedByDefault=false --providers.swarm.endpoint=unix:///var/run/docker.sock --providers.swarm.watch=true --entryPoints.web.address=:80 --entryPoints.web.forwardedHeaders.insecure=true --entryPoints.websecure.address=:443 --entryPoints.websecure.forwardedHeaders.insecure=true --certificatesResolvers.letsencrypt.acme.email=tako@redentor.dev --certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json --certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web --log.level=INFO --accessLog.filePath=/var/log/traefik/access.log --accessLog.format=json 2>&1", networkName)
+	// NOTE: Dashboard/API is disabled for security - no port 8080 exposure
+	createCmd := fmt.Sprintf("docker service create --detach --name traefik --network %s --constraint node.role==manager --restart-condition any --publish published=80,target=80,mode=host --publish published=443,target=443,mode=host --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock,readonly --mount type=bind,source=/etc/traefik/acme,target=/acme --mount type=bind,source=/var/log/traefik,target=/var/log/traefik --replicas 1 traefik:v3.6.1 --api.dashboard=false --providers.docker=true --providers.docker.exposedByDefault=false --providers.docker.endpoint=unix:///var/run/docker.sock --providers.docker.watch=true --providers.swarm=true --providers.swarm.exposedByDefault=false --providers.swarm.endpoint=unix:///var/run/docker.sock --providers.swarm.watch=true --entryPoints.web.address=:80 --entryPoints.web.forwardedHeaders.insecure=true --entryPoints.websecure.address=:443 --entryPoints.websecure.forwardedHeaders.insecure=true --certificatesResolvers.letsencrypt.acme.email=tako@redentor.dev --certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json --certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web --log.level=INFO --accessLog.filePath=/var/log/traefik/access.log --accessLog.format=json 2>&1", networkName)
 
 	if _, err := m.client.Execute(createCmd); err != nil {
 		return fmt.Errorf("failed to create traefik service: %w", err)
@@ -177,7 +178,6 @@ accessLog:
 
 	if m.verbose {
 		fmt.Println("  ✓ Traefik proxy service created")
-		fmt.Println("  Dashboard available at: http://<server-ip>:8080")
 	}
 
 	return nil
@@ -191,8 +191,12 @@ func (m *Manager) GetServiceLabels(serviceName string, service *config.ServiceCo
 	// Enable Traefik for this service
 	labels = append(labels, "--label \"traefik.enable=true\"")
 
+	// Get all domains using the new helper
+	allDomains := service.Proxy.GetAllDomains()
+	primaryDomain := service.Proxy.GetPrimaryDomain()
+
 	// Configure routers and services for each domain
-	for i, domain := range service.Proxy.Domains {
+	for i, domain := range allDomains {
 		// Use fullServiceName to ensure router names are unique across projects
 		routerName := fmt.Sprintf("%s-%d", fullServiceName, i)
 
@@ -220,6 +224,45 @@ func (m *Manager) GetServiceLabels(serviceName string, service *config.ServiceCo
 			// Create redirect middleware (only once per service)
 			labels = append(labels, "--label \"traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https\"")
 			labels = append(labels, "--label \"traefik.http.middlewares.redirect-to-https.redirectscheme.permanent=true\"")
+		}
+	}
+
+	// Add redirect domain labels if configured (e.g., www -> non-www)
+	if service.Proxy.HasRedirects() && primaryDomain != "" {
+		for i, redirectDomain := range service.Proxy.GetRedirectDomains() {
+			redirectRouterName := fmt.Sprintf("%s-redirect-%d", fullServiceName, i)
+			middlewareName := fmt.Sprintf("%s-redirect-%d", fullServiceName, i)
+
+			// Escape dots in domain for regex
+			escapedRedirectDomain := strings.ReplaceAll(redirectDomain, ".", "\\.")
+
+			// Router for the redirect domain (HTTPS)
+			labels = append(labels, fmt.Sprintf("--label 'traefik.http.routers.%s.rule=Host(\"%s\")'", redirectRouterName, redirectDomain))
+			labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.entrypoints=websecure\"", redirectRouterName))
+
+			// TLS for redirect domain
+			if service.Proxy.Email != "" {
+				labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.tls=true\"", redirectRouterName))
+				labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.tls.certresolver=letsencrypt\"", redirectRouterName))
+			}
+
+			// Redirect middleware
+			labels = append(labels, fmt.Sprintf("--label \"traefik.http.middlewares.%s.redirectregex.regex=^https?://%s/(.*)\"", middlewareName, escapedRedirectDomain))
+			labels = append(labels, fmt.Sprintf("--label \"traefik.http.middlewares.%s.redirectregex.replacement=https://%s/${1}\"", middlewareName, primaryDomain))
+			labels = append(labels, fmt.Sprintf("--label \"traefik.http.middlewares.%s.redirectregex.permanent=true\"", middlewareName))
+
+			// Apply middleware to router
+			labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.middlewares=%s\"", redirectRouterName, middlewareName))
+
+			// HTTP router for redirect domain (also needs redirect)
+			httpRedirectRouterName := fmt.Sprintf("%s-redirect-%d-http", fullServiceName, i)
+			labels = append(labels, fmt.Sprintf("--label 'traefik.http.routers.%s.rule=Host(\"%s\")'", httpRedirectRouterName, redirectDomain))
+			labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.entrypoints=web\"", httpRedirectRouterName))
+			labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.middlewares=%s\"", httpRedirectRouterName, middlewareName))
+		}
+
+		if m.verbose {
+			fmt.Printf("    Configured %d redirect domain(s) -> %s\n", len(service.Proxy.GetRedirectDomains()), primaryDomain)
 		}
 	}
 
@@ -401,249 +444,5 @@ func (m *Manager) RemoveServiceLabels(fullServiceName string) error {
 	return nil
 }
 
-// EnsureTraefikContainer ensures Traefik is running as a Docker container (single-server mode)
-func (m *Manager) EnsureTraefikContainer(networkName, email string) error {
-	// First, check if Traefik service exists (from Swarm mode) and remove it
-	checkServiceCmd := "docker service ls --filter name=traefik --format '{{.Name}}' 2>/dev/null || true"
-	serviceOutput, _ := m.client.Execute(checkServiceCmd)
-	if strings.TrimSpace(serviceOutput) == "traefik" {
-		if m.verbose {
-			fmt.Println("  Removing old Traefik service (from Swarm mode)...")
-		}
-		m.client.Execute("docker service rm traefik 2>/dev/null || true")
-		// Wait for service tasks to be removed
-		time.Sleep(5 * time.Second)
-	}
-
-	// Remove any leftover Swarm task containers (these hold ports)
-	// Only remove containers that match Swarm naming pattern (traefik.X.Y), not the main traefik container
-	if m.verbose {
-		fmt.Println("  Cleaning up any leftover Traefik task containers...")
-	}
-	// Remove Swarm task containers (which have dots in the name like "traefik.1.abcd")
-	// but NOT the main traefik container
-	m.client.Execute("docker ps -aq --filter name=traefik. | while read id; do docker rm -f $id 2>/dev/null || true; done")
-	time.Sleep(1 * time.Second)
-
-	// Check if traefik container already exists
-	checkCmd := "docker ps -a --filter name=^traefik$ --format '{{.Names}}'"
-	output, _ := m.client.Execute(checkCmd)
-
-	if strings.TrimSpace(output) == "traefik" {
-		// Check if it's running
-		statusCmd := "docker ps --filter name=^traefik$ --format '{{.Names}}'"
-		running, _ := m.client.Execute(statusCmd)
-
-		if strings.TrimSpace(running) == "traefik" {
-			if m.verbose {
-				fmt.Println("  Traefik proxy container already running")
-			}
-			// Ensure Traefik is connected to the project network
-			if err := m.ensureTraefikNetworkConnection(networkName); err != nil {
-				if m.verbose {
-					fmt.Printf("  Warning: Failed to connect Traefik to network %s: %v\n", networkName, err)
-				}
-			}
-			return nil
-		}
-
-		// Container exists but not running - remove and recreate
-		if m.verbose {
-			fmt.Println("  Removing stopped Traefik container...")
-		}
-		m.client.Execute("docker rm traefik 2>/dev/null || true")
-	}
-
-	if m.verbose {
-		fmt.Println("  Creating Traefik proxy container...")
-	}
-
-	// Create directories for Traefik
-	dirs := []string{
-		"/etc/traefik",
-		"/etc/traefik/acme",
-		"/var/log/traefik",
-	}
-
-	for _, dir := range dirs {
-		cmd := fmt.Sprintf("sudo mkdir -p %s && sudo chmod 755 %s", dir, dir)
-		if _, err := m.client.Execute(cmd); err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", dir, err)
-		}
-	}
-
-	// Create acme.json with proper permissions
-	m.client.Execute("sudo touch /etc/traefik/acme/acme.json && sudo chmod 600 /etc/traefik/acme/acme.json")
-
-	// Use provided email or default
-	if email == "" {
-		email = "tako@redentor.dev"
-	}
-
-	// Deploy Traefik as a Docker container
-	// NOTE: We start with one network but Traefik will be connected to additional
-	// project networks as they are deployed (see ensureTraefikNetworkConnection)
-	createCmd := fmt.Sprintf(`docker run -d \
-		--name traefik \
-		--restart=unless-stopped \
-		--network %s \
-		-p 80:80 -p 443:443 -p 8080:8080 \
-		-v /var/run/docker.sock:/var/run/docker.sock:ro \
-		-v /etc/traefik/acme:/acme \
-		-v /var/log/traefik:/var/log/traefik \
-		--label "tako.managed=true" \
-		--label "tako.role=proxy" \
-		traefik:v3.6.1 \
-		--api.dashboard=true \
-		--api.insecure=true \
-		--providers.docker=true \
-		--providers.docker.exposedByDefault=false \
-		--entryPoints.web.address=:80 \
-		--entryPoints.web.http.redirections.entryPoint.to=websecure \
-		--entryPoints.web.http.redirections.entryPoint.scheme=https \
-		--entryPoints.web.http.redirections.entryPoint.permanent=true \
-		--entryPoints.websecure.address=:443 \
-		--certificatesResolvers.letsencrypt.acme.email=%s \
-		--certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json \
-		--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web \
-		--log.level=INFO \
-		--accessLog.filePath=/var/log/traefik/access.log \
-		--accessLog.format=json 2>&1`, networkName, email)
-
-	if m.verbose {
-		fmt.Printf("  Creating Traefik with command: %s\n", createCmd)
-	}
-
-	output, err := m.client.Execute(createCmd)
-	if err != nil {
-		return fmt.Errorf("failed to create traefik container: %w, output: %s", err, output)
-	}
-
-	// Wait for container to be ready
-	time.Sleep(3 * time.Second)
-
-	if m.verbose {
-		fmt.Println("  ✓ Traefik proxy container created")
-		fmt.Println("  Dashboard available at: http://<server-ip>:8080")
-	}
-
-	return nil
-}
-
-// GetContainerLabels returns Traefik labels for container creation (single-server mode)
-// Returns a space-separated string of --label flags to be used with docker run
-func (m *Manager) GetContainerLabels(containerName string, service *config.ServiceConfig) string {
-	// Use the new TraefikLabelBuilder for cleaner, type-safe label generation
-	builder := utils.NewDockerLabelBuilder()
-	builder.Add("traefik.enable", "true")
-
-	// Configure routers for each domain
-	for i, domain := range service.Proxy.Domains {
-		if domain == "" {
-			continue
-		}
-
-		routerName := fmt.Sprintf("%s-%d", containerName, i)
-
-		// Build labels for this domain using TraefikLabelBuilder
-		traefikBuilder := utils.NewTraefikLabelBuilder(routerName, containerName)
-		traefikBuilder.
-			HostRule(domain).
-			Entrypoints("web", "websecure")
-
-		// Add TLS if email is configured
-		if service.Proxy.Email != "" {
-			traefikBuilder.TLS("letsencrypt")
-		}
-
-		// Add all Traefik labels to main builder
-		for _, label := range traefikBuilder.BuildSlice() {
-			builder.AddRaw(label)
-		}
-	}
-
-	// Service configuration - port and health check
-	builder.Add(fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", containerName), fmt.Sprintf("%d", service.Port))
-
-	if service.HealthCheck.Path != "" {
-		builder.Add(fmt.Sprintf("traefik.http.services.%s.loadbalancer.healthcheck.path", containerName), service.HealthCheck.Path)
-		builder.Add(fmt.Sprintf("traefik.http.services.%s.loadbalancer.healthcheck.interval", containerName), "10s")
-	}
-
-	return builder.Build()
-}
-
-// GetTraefikDashboardURL returns the Traefik dashboard URL
-func (m *Manager) GetTraefikDashboardURL(host string) string {
-	return fmt.Sprintf("http://%s:8080/dashboard/", host)
-}
-
-// ensureTraefikNetworkConnection ensures Traefik container is connected to a network
-// This prevents network isolation issues when multiple projects are deployed
-func (m *Manager) ensureTraefikNetworkConnection(networkName string) error {
-	// Check if Traefik is already connected to this network
-	checkCmd := fmt.Sprintf("docker inspect traefik --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}'")
-	networks, err := m.client.Execute(checkCmd)
-	if err != nil {
-		return fmt.Errorf("failed to inspect Traefik networks: %w", err)
-	}
-
-	// Check if already connected
-	if strings.Contains(networks, networkName) {
-		if m.verbose {
-			fmt.Printf("  Traefik already connected to network %s\n", networkName)
-		}
-		return nil
-	}
-
-	// Connect Traefik to the network
-	if m.verbose {
-		fmt.Printf("  Connecting Traefik to network %s...\n", networkName)
-	}
-
-	// First check if network exists
-	checkNetCmd := fmt.Sprintf("docker network inspect %s >/dev/null 2>&1 && echo 'exists' || echo 'missing'", networkName)
-	netCheck, _ := m.client.Execute(checkNetCmd)
-	if strings.TrimSpace(netCheck) != "exists" {
-		if m.verbose {
-			fmt.Printf("  Network %s does not exist yet, skipping connection\n", networkName)
-		}
-		return nil
-	}
-
-	connectCmd := fmt.Sprintf("docker network connect %s traefik 2>&1", networkName)
-	output, err := m.client.Execute(connectCmd)
-	if err != nil {
-		// Ignore "already connected" errors
-		if strings.Contains(output, "already exists") || strings.Contains(output, "already attached") {
-			if m.verbose {
-				fmt.Printf("  Traefik already attached to network %s\n", networkName)
-			}
-			return nil
-		}
-		return fmt.Errorf("failed to connect Traefik to network %s: %w, output: %s", networkName, err, output)
-	}
-
-	fmt.Printf("  ✓ Traefik connected to network %s\n", networkName)
-	return nil
-}
-
-// DisconnectFromNetwork disconnects Traefik from a network (for cleanup)
-func (m *Manager) DisconnectFromNetwork(networkName string) error {
-	// Check if Traefik exists
-	checkCmd := "docker ps --filter name=^traefik$ --format '{{.Names}}'"
-	output, _ := m.client.Execute(checkCmd)
-	if strings.TrimSpace(output) != "traefik" {
-		return nil // Traefik not running, nothing to disconnect
-	}
-
-	// Disconnect from network
-	disconnectCmd := fmt.Sprintf("docker network disconnect %s traefik 2>/dev/null || true", networkName)
-	m.client.Execute(disconnectCmd)
-
-	if m.verbose {
-		fmt.Printf("  Disconnected Traefik from network %s\n", networkName)
-	}
-
-	return nil
-}
+// NOTE: Container-mode Traefik functions (EnsureTraefikContainer, GetContainerLabels, etc.)
+// have been removed as Tako now always uses Swarm mode with EnsureTraefikService.

@@ -141,17 +141,12 @@ func (c *Client) Execute(cmd string) (string, error) {
 
 // ExecuteWithContext runs a command with context support for cancellation
 func (c *Client) ExecuteWithContext(ctx context.Context, cmd string) (string, error) {
-	c.mu.Lock()
-	if c.conn == nil {
-		c.mu.Unlock()
-		if err := c.Connect(); err != nil {
-			return "", err
-		}
-		c.mu.Lock()
+	conn, err := c.getConnection()
+	if err != nil {
+		return "", err
 	}
-	c.mu.Unlock()
 
-	session, err := c.conn.NewSession()
+	session, err := conn.NewSession()
 	if err != nil {
 		return "", fmt.Errorf("failed to create session: %w", err)
 	}
@@ -185,17 +180,12 @@ func (c *Client) ExecuteWithContext(ctx context.Context, cmd string) (string, er
 
 // ExecuteStream runs a command and streams output in real-time
 func (c *Client) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
-	c.mu.Lock()
-	if c.conn == nil {
-		c.mu.Unlock()
-		if err := c.Connect(); err != nil {
-			return err
-		}
-		c.mu.Lock()
+	conn, err := c.getConnection()
+	if err != nil {
+		return err
 	}
-	c.mu.Unlock()
 
-	session, err := c.conn.NewSession()
+	session, err := conn.NewSession()
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
@@ -228,17 +218,12 @@ func (s *StreamingSession) Close() error {
 
 // StartStream creates a new streaming session for long-running commands
 func (c *Client) StartStream(cmd string) (*StreamingSession, error) {
-	c.mu.Lock()
-	if c.conn == nil {
-		c.mu.Unlock()
-		if err := c.Connect(); err != nil {
-			return nil, err
-		}
-		c.mu.Lock()
+	conn, err := c.getConnection()
+	if err != nil {
+		return nil, err
 	}
-	c.mu.Unlock()
 
-	session, err := c.conn.NewSession()
+	session, err := conn.NewSession()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
@@ -274,15 +259,50 @@ func (c *Client) IsConnected() bool {
 	return c.conn != nil
 }
 
+// getConnection returns the current connection, establishing it if needed
+// This method properly handles the connection state to avoid TOCTOU race conditions
+func (c *Client) getConnection() (*ssh.Client, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		// Release lock during connection to avoid blocking other operations
+		c.mu.Unlock()
+		if err := c.Connect(); err != nil {
+			c.mu.Lock() // Re-acquire before returning
+			return nil, err
+		}
+		c.mu.Lock() // Re-acquire after connection
+	}
+
+	// Double-check connection is still valid
+	if c.conn == nil {
+		return nil, fmt.Errorf("connection failed: connection is nil after connect")
+	}
+
+	return c.conn, nil
+}
+
 // GetOrCreate gets an existing client from the pool or creates a new one
+// Uses proper locking to avoid race conditions with double-checked locking
 func (p *Pool) GetOrCreate(host string, port int, user string, keyPath string) (*Client, error) {
 	key := fmt.Sprintf("%s@%s:%d", user, host, port)
 
+	// First, try with read lock
 	p.mu.RLock()
 	client, exists := p.clients[key]
 	p.mu.RUnlock()
 
 	if exists {
+		return client, nil
+	}
+
+	// Acquire write lock for creation
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Double-check: another goroutine might have created it while we waited for the lock
+	if client, exists = p.clients[key]; exists {
 		return client, nil
 	}
 
@@ -292,15 +312,13 @@ func (p *Pool) GetOrCreate(host string, port int, user string, keyPath string) (
 		return nil, err
 	}
 
-	// Connect the client
+	// Connect the client (while holding the lock to prevent duplicate connections)
 	if err := client.Connect(); err != nil {
 		return nil, err
 	}
 
 	// Add to pool
-	p.mu.Lock()
 	p.clients[key] = client
-	p.mu.Unlock()
 
 	return client, nil
 }
@@ -370,15 +388,10 @@ func (c *Client) UploadReader(reader io.Reader, remotePath string, mode os.FileM
 
 // CopyFileWithMode uploads a file to the remote server with specific permissions
 func (c *Client) CopyFileWithMode(localPath, remotePath string, mode os.FileMode) error {
-	c.mu.Lock()
-	if c.conn == nil {
-		c.mu.Unlock()
-		if err := c.Connect(); err != nil {
-			return err
-		}
-		c.mu.Lock()
+	conn, err := c.getConnection()
+	if err != nil {
+		return err
 	}
-	c.mu.Unlock()
 
 	// Read file content
 	content, err := os.ReadFile(localPath)
@@ -390,7 +403,7 @@ func (c *Client) CopyFileWithMode(localPath, remotePath string, mode os.FileMode
 	// Use base64 encoding to safely transfer binary data
 	cmd := fmt.Sprintf("base64 -d > %s && chmod %o %s", remotePath, mode, remotePath)
 
-	session, err := c.conn.NewSession()
+	session, err := conn.NewSession()
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}

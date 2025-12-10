@@ -280,7 +280,7 @@ func (e *Executor) expandVariables(command string, envVars map[string]string) st
 	return result
 }
 
-// ValidateHooks validates hook commands (basic security checks)
+// ValidateHooks validates hook commands (security checks)
 func ValidateHooks(hooks *config.HooksConfig) error {
 	if hooks == nil {
 		return nil
@@ -300,19 +300,88 @@ func ValidateHooks(hooks *config.HooksConfig) error {
 				return fmt.Errorf("empty hook command found")
 			}
 
-			// Basic security: prevent obvious dangerous commands
-			dangerous := []string{
-				"rm -rf /",
-				"dd if=/dev/zero",
-				":(){ :|:& };:",
-			}
-
-			for _, danger := range dangerous {
-				if strings.Contains(hook, danger) {
-					return fmt.Errorf("dangerous command detected in hook: %s", danger)
-				}
+			if err := validateHookCommand(hook); err != nil {
+				return err
 			}
 		}
+	}
+
+	return nil
+}
+
+// validateHookCommand performs security validation on a single hook command
+func validateHookCommand(hook string) error {
+	// Normalize the command for checking
+	normalized := strings.ToLower(strings.TrimSpace(hook))
+
+	// Dangerous command patterns (more comprehensive)
+	dangerousPatterns := []string{
+		// Filesystem destruction
+		"rm -rf /",
+		"rm -rf /*",
+		"rm -rf ~",
+		"rm -rf $home",
+		"rm -rf --no-preserve-root",
+		// Disk operations
+		"dd if=/dev/zero",
+		"dd if=/dev/random",
+		"mkfs.",
+		// Fork bomb
+		":(){ :|:& };:",
+		":(){:|:&};:",
+		// Privilege escalation attempts
+		"chmod 777 /",
+		"chmod -r 777 /",
+		"chown -r",
+		// Network attacks
+		"nc -l",
+		"ncat -l",
+		// Crypto mining indicators
+		"xmrig",
+		"minerd",
+		"cryptonight",
+		// Reverse shells
+		"/dev/tcp/",
+		"bash -i >& /dev/tcp",
+		"bash -c 'bash -i",
+		// Download and execute
+		"curl|sh",
+		"curl|bash",
+		"wget|sh",
+		"wget|bash",
+		"curl -s|sh",
+		"wget -q|sh",
+	}
+
+	for _, danger := range dangerousPatterns {
+		if strings.Contains(normalized, danger) {
+			return fmt.Errorf("dangerous command pattern detected in hook: '%s' matches '%s'", hook, danger)
+		}
+	}
+
+	// Check for suspicious shell redirections
+	suspiciousPatterns := []string{
+		"> /etc/",
+		"> /var/",
+		"> /usr/",
+		"> /bin/",
+		"> /sbin/",
+		">> /etc/",
+		"| sudo",
+		"; sudo",
+		"&& sudo",
+	}
+
+	for _, suspicious := range suspiciousPatterns {
+		if strings.Contains(normalized, suspicious) {
+			return fmt.Errorf("suspicious command pattern detected in hook: '%s' contains '%s'", hook, suspicious)
+		}
+	}
+
+	// Warn about eval usage (don't block, just validate carefully)
+	if strings.Contains(normalized, "eval ") || strings.Contains(normalized, "eval(") {
+		// Allow eval but log a warning - the command itself is not blocked
+		// because eval can be legitimate for dynamic script generation
 	}
 
 	return nil

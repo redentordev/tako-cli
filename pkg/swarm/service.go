@@ -506,13 +506,6 @@ func (m *Manager) parseVolumeSpec(volume string) (source, target string) {
 	return parts[0], parts[1]
 }
 
-// transformVolume transforms volume spec with project and environment scoping
-func (m *Manager) transformVolume(volume string) string {
-	// For now, return as-is
-	// TODO: Implement proper volume transformation for Swarm
-	return volume
-}
-
 // GetServiceStatus retrieves the status of a service
 func (m *Manager) GetServiceStatus(client *ssh.Client, fullServiceName string) (string, error) {
 	cmd := fmt.Sprintf("docker service ps %s --format '{{.CurrentState}}'", fullServiceName)

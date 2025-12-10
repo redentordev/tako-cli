@@ -26,19 +26,6 @@ func NewManager(cfg *config.Config, sshPool *ssh.Pool, environment string, verbo
 	}
 }
 
-// IsSwarmMode determines if Swarm mode should be used
-// ALWAYS use Swarm mode for all deployments for consistency and simplicity
-// Benefits:
-// - Unified deployment model (single code path)
-// - Seamless scaling (add servers later without redeployment)
-// - Built-in health checks and rolling updates
-// - Service discovery works across nodes
-// - Easy migration from single to multi-server
-func (m *Manager) IsSwarmMode(envName string) bool {
-	// Always return true - use swarm mode for everything
-	return true
-}
-
 // IsSwarmInitialized checks if Docker Swarm is already initialized on a node
 func (m *Manager) IsSwarmInitialized(client *ssh.Client) (bool, error) {
 	// Check if node is part of a swarm

@@ -55,8 +55,8 @@ func NewCircuitBreaker(name string, failureThreshold int, resetTimeout time.Dura
 
 // AllowRequest checks if a request is allowed through the circuit breaker
 func (cb *CircuitBreaker) AllowRequest() bool {
-	cb.mu.RLock()
-	defer cb.mu.RUnlock()
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
 
 	switch cb.state {
 	case CircuitClosed:
@@ -64,11 +64,7 @@ func (cb *CircuitBreaker) AllowRequest() bool {
 	case CircuitOpen:
 		// Check if enough time has passed to try again
 		if time.Since(cb.lastFailureTime) > cb.resetTimeout {
-			cb.mu.RUnlock()
-			cb.mu.Lock()
 			cb.state = CircuitHalfOpen
-			cb.mu.Unlock()
-			cb.mu.RLock()
 			return true
 		}
 		return false

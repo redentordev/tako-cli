@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
@@ -256,384 +255,152 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  ✓ Network configuration verified\n")
 	}
 
-	// Check if using Swarm mode
-	useSwarmMode := deploy.IsSwarmMode()
+	// Always use Swarm mode for consistent deployment model
+	// Benefits: unified code path, seamless scaling, built-in rolling updates
+	if len(servers) == 1 {
+		fmt.Printf("\n🐝 Using Docker Swarm mode (single-server)\n\n")
+	} else {
+		fmt.Printf("\n🐝 Using Docker Swarm mode (multi-server cluster)\n\n")
+	}
 
-	if useSwarmMode {
-		// Swarm mode: Deploy services once to the cluster
-		if len(servers) == 1 {
-			fmt.Printf("\n🐝 Using Docker Swarm mode (single-server)\n\n")
-		} else {
-			fmt.Printf("\n🐝 Using Docker Swarm mode (multi-server cluster)\n\n")
+	// Log deployment start
+	if localStateMgr != nil {
+		localStateMgr.LogDeployment(fmt.Sprintf("Starting Swarm deployment to %s", envName))
+		localStateMgr.LogDeployment(fmt.Sprintf("Git commit: %s", commitInfo.ShortHash))
+	}
+
+	// Deploy to manager node only
+	stateManager := remotestate.NewStateManager(firstClient, cfg.Project.Name, firstServer.Host)
+	if err := stateManager.Initialize(); err != nil {
+		if verbose {
+			fmt.Printf("Warning: failed to initialize state directory: %v\n", err)
 		}
+	}
 
-		// Initialize local state manager
-		localStateMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
-		if err != nil && verbose {
-			fmt.Printf("Warning: failed to initialize local state: %v\n", err)
-		} else if localStateMgr != nil {
-			// Log deployment start
-			localStateMgr.LogDeployment(fmt.Sprintf("Starting Swarm deployment to %s", envName))
-			localStateMgr.LogDeployment(fmt.Sprintf("Git commit: %s", commitInfo.ShortHash))
-		}
+	startTime := time.Now()
+	deployment := &remotestate.DeploymentState{
+		Timestamp:      startTime,
+		ProjectName:    cfg.Project.Name,
+		Version:        cfg.Project.Version,
+		Status:         remotestate.StatusInProgress,
+		Services:       make(map[string]remotestate.ServiceState),
+		User:           remotestate.GetCurrentUser(),
+		Host:           firstServer.Host,
+		GitCommit:      commitInfo.Hash,
+		GitCommitShort: commitInfo.ShortHash,
+		GitBranch:      commitInfo.Branch,
+		GitCommitMsg:   commitInfo.Message,
+		GitAuthor:      commitInfo.Author,
+	}
 
-		// Deploy to manager node only
-		stateManager := remotestate.NewStateManager(firstClient, cfg.Project.Name, firstServer.Host)
-		if err := stateManager.Initialize(); err != nil {
-			if verbose {
-				fmt.Printf("Warning: failed to initialize state directory: %v\n", err)
-			}
-		}
+	deploymentFailed := false
 
-		startTime := time.Now()
-		deployment := &remotestate.DeploymentState{
-			Timestamp:      startTime,
-			ProjectName:    cfg.Project.Name,
-			Version:        cfg.Project.Version,
-			Status:         remotestate.StatusInProgress,
-			Services:       make(map[string]remotestate.ServiceState),
-			User:           remotestate.GetCurrentUser(),
-			Host:           firstServer.Host,
-			GitCommit:      commitInfo.Hash,
-			GitCommitShort: commitInfo.ShortHash,
-			GitBranch:      commitInfo.Branch,
-			GitCommitMsg:   commitInfo.Message,
-			GitAuthor:      commitInfo.Author,
-		}
+	// Resolve service deployment order based on dependencies
+	resolver := dependency.NewResolver(services, verbose)
 
-		deploymentFailed := false
+	// Optionally infer dependencies from environment variables
+	inferredDeps := resolver.InferDependencies()
+	resolver.MergeDependencies(inferredDeps)
 
-		// Resolve service deployment order based on dependencies
-		resolver := dependency.NewResolver(services, verbose)
+	// Get deployment order
+	deploymentOrder, err := resolver.ResolveOrder()
+	if err != nil {
+		return fmt.Errorf("failed to resolve service dependencies: %w", err)
+	}
 
-		// Optionally infer dependencies from environment variables
-		inferredDeps := resolver.InferDependencies()
-		resolver.MergeDependencies(inferredDeps)
+	// Deploy each service to Swarm in dependency order
+	for _, serviceName := range deploymentOrder {
+		service := services[serviceName]
+		fmt.Printf("→ Deploying service: %s\n", serviceName)
 
-		// Get deployment order
-		deploymentOrder, err := resolver.ResolveOrder()
-		if err != nil {
-			return fmt.Errorf("failed to resolve service dependencies: %w", err)
-		}
+		// Get full image name
+		fullImageName := cfg.GetFullImageName(serviceName, envName)
 
-		// Deploy each service to Swarm in dependency order
-		for _, serviceName := range deploymentOrder {
-			service := services[serviceName]
-			fmt.Printf("→ Deploying service: %s\n", serviceName)
-
-			// Get full image name
-			fullImageName := cfg.GetFullImageName(serviceName, envName)
-
-			// Build image if needed (but don't deploy with docker run)
-			if !skipBuild && service.Build != "" {
-				// Build the image on manager node
-				builtImageName, err := deploy.BuildImage(serviceName, &service)
-				if err != nil {
-					fmt.Printf("  ✗ Build failed: %v\n", err)
-					deploymentFailed = true
-					deployment.Status = remotestate.StatusFailed
-					deployment.Error = err.Error()
-					break
-				}
-				// Use the built image name
-				fullImageName = builtImageName
-			} else if service.Image != "" {
-				// Use pre-built image
-				fullImageName = service.Image
-			}
-
-			// Always deploy to Swarm using docker service create
-			if err := deploy.DeployServiceSwarm(serviceName, &service, fullImageName); err != nil {
-				fmt.Printf("  ✗ Swarm deployment failed: %v\n", err)
+		// Build image if needed (but don't deploy with docker run)
+		if !skipBuild && service.Build != "" {
+			// Build the image on manager node
+			builtImageName, err := deploy.BuildImage(serviceName, &service)
+			if err != nil {
+				fmt.Printf("  ✗ Build failed: %v\n", err)
 				deploymentFailed = true
 				deployment.Status = remotestate.StatusFailed
 				deployment.Error = err.Error()
 				break
 			}
-
-			fmt.Printf("  ✓ Service %s deployed to swarm\n", serviceName)
-
-			// Save service state
-			deployment.Services[serviceName] = remotestate.ServiceState{
-				Name:     serviceName,
-				Image:    fullImageName,
-				Port:     service.Port,
-				Replicas: service.Replicas,
-				Env:      service.Env,
-			}
+			// Use the built image name
+			fullImageName = builtImageName
+		} else if service.Image != "" {
+			// Use pre-built image
+			fullImageName = service.Image
 		}
 
-		if !deploymentFailed {
-			deployment.Status = remotestate.StatusSuccess
-			deployment.Duration = time.Since(startTime)
-			if err := stateManager.SaveDeployment(deployment); err != nil && verbose {
-				fmt.Printf("Warning: failed to save remote deployment state: %v\n", err)
-			}
-
-			// Save local deployment state
-			if localStateMgr != nil {
-				localDeployment := &localstate.DeploymentState{
-					DeploymentID:    fmt.Sprintf("deploy-%s", time.Now().Format("20060102-150405")),
-					Timestamp:       startTime,
-					Environment:     envName,
-					Mode:            "swarm",
-					Status:          "success",
-					DurationSeconds: int(time.Since(startTime).Seconds()),
-					GitCommit:       commitInfo.Hash,
-					TriggeredBy:     remotestate.GetCurrentUser(),
-					Notes:           fmt.Sprintf("Deployed %d services to swarm", len(services)),
-				}
-				if err := localStateMgr.SaveDeployment(localDeployment); err != nil && verbose {
-					fmt.Printf("Warning: failed to save local deployment state: %v\n", err)
-				}
-			}
-
-			// Register project in registry
-			networkMgr := network.NewManager(firstClient, cfg.Project.Name, envName, verbose)
-			reg := registry.NewRegistry(firstClient, verbose)
-			projectInfo := registry.ProjectInfo{
-				Name:        cfg.Project.Name,
-				Environment: envName,
-				Network:     networkMgr.GetNetworkName(),
-				Services:    deploymentOrder,
-				Domains:     extractDomains(services),
-				DeployedAt:  time.Now(),
-			}
-			if err := reg.RegisterProject(projectInfo); err != nil && verbose {
-				fmt.Printf("Warning: failed to register project: %v\n", err)
-			}
+		// Always deploy to Swarm using docker service create
+		if err := deploy.DeployServiceSwarm(serviceName, &service, fullImageName); err != nil {
+			fmt.Printf("  ✗ Swarm deployment failed: %v\n", err)
+			deploymentFailed = true
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
+			break
 		}
 
-		if deploymentFailed {
-			return fmt.Errorf("swarm deployment failed")
-		}
+		fmt.Printf("  ✓ Service %s deployed to swarm\n", serviceName)
 
-		fmt.Printf("\n✓ Swarm deployment completed!\n")
-
-	} else {
-		// Single server mode: Deploy to each server individually
-		for serverName, server := range servers {
-			fmt.Printf("\n=== Deploying to server: %s (%s) ===\n\n", serverName, server.Host)
-
-			// Get or create SSH client
-			client, err := sshPool.GetOrCreate(server.Host, server.Port, server.User, server.SSHKey)
-			if err != nil {
-				return fmt.Errorf("failed to connect to server %s: %w", serverName, err)
-			}
-
-			// Initialize local state manager (once per environment)
-			localStateMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
-			if err != nil && verbose {
-				fmt.Printf("Warning: failed to initialize local state: %v\n", err)
-			}
-
-			// Create remote state manager
-			stateManager := remotestate.NewStateManager(client, cfg.Project.Name, server.Host)
-
-			// Initialize state directory on server
-			if err := stateManager.Initialize(); err != nil {
-				if verbose {
-					fmt.Printf("Warning: failed to initialize state directory: %v\n", err)
-				}
-			}
-
-			// Create deployment state
-			startTime := time.Now()
-			deployment := &remotestate.DeploymentState{
-				Timestamp:      startTime,
-				ProjectName:    cfg.Project.Name,
-				Version:        cfg.Project.Version,
-				Status:         remotestate.StatusInProgress,
-				Services:       make(map[string]remotestate.ServiceState),
-				User:           remotestate.GetCurrentUser(),
-				Host:           server.Host,
-				GitCommit:      commitInfo.Hash,
-				GitCommitShort: commitInfo.ShortHash,
-				GitBranch:      commitInfo.Branch,
-				GitCommitMsg:   commitInfo.Message,
-				GitAuthor:      commitInfo.Author,
-			}
-
-			// Track deployment success
-			deploymentFailed := false
-
-			// Resolve service deployment order based on dependencies
-			resolver := dependency.NewResolver(services, verbose)
-
-			// Optionally infer dependencies from environment variables
-			inferredDeps := resolver.InferDependencies()
-			resolver.MergeDependencies(inferredDeps)
-
-			// Check if parallel deployment is enabled
-			if cfg.IsParallelDeployment() {
-				// Use parallel orchestrator
-				if verbose {
-					fmt.Printf("Using parallel deployment strategy\n\n")
-				}
-
-				orchestrator := deployer.NewDeploymentOrchestrator(deploy, deployer.OrchestratorConfig{
-					MaxConcurrentBuilds:  cfg.GetMaxConcurrentBuilds(),
-					MaxConcurrentDeploys: cfg.GetMaxConcurrentDeploys(),
-					EnableCache:          cfg.IsCacheEnabled(),
-					BuildTimeout:         10 * time.Minute,
-					DeployTimeout:        5 * time.Minute,
-				})
-
-				// Deploy using orchestrator
-				ctx := context.Background()
-				if err := orchestrator.Deploy(ctx, services, skipBuild); err != nil {
-					fmt.Printf("  ✗ Parallel deployment failed: %v\n", err)
-					deploymentFailed = true
-					deployment.Status = remotestate.StatusFailed
-					deployment.Error = err.Error()
-					deployment.Duration = time.Since(startTime)
-					if saveErr := stateManager.SaveDeployment(deployment); saveErr != nil && verbose {
-						fmt.Printf("Warning: failed to save deployment state: %v\n", saveErr)
-					}
-					return fmt.Errorf("parallel deployment failed: %w", err)
-				}
-
-				// Get metrics from orchestrator
-				metrics := orchestrator.GetMetrics()
-
-				// Update deployment record
-				deployment.Status = remotestate.StatusSuccess
-				deployment.Duration = metrics.TotalDuration
-
-				// Save deployment state (services already deployed by orchestrator)
-				if err := stateManager.SaveDeployment(deployment); err != nil && verbose {
-					fmt.Printf("Warning: failed to save deployment state: %v\n", err)
-				}
-
-			} else {
-				// Use sequential deployment (original logic)
-				if verbose {
-					fmt.Printf("Using sequential deployment strategy\n\n")
-				}
-
-				// Get deployment order
-				deploymentOrder, err := resolver.ResolveOrder()
-				if err != nil {
-					return fmt.Errorf("failed to resolve service dependencies: %w", err)
-				}
-
-				// Deploy each service in dependency order
-				for _, serviceName := range deploymentOrder {
-					service := services[serviceName]
-					fmt.Printf("→ Deploying service: %s\n", serviceName)
-
-					if err := deploy.DeployService(serviceName, &service, skipBuild); err != nil {
-						fmt.Printf("  ✗ Deployment failed: %v\n", err)
-						deploymentFailed = true
-
-						// Save failed state
-						deployment.Status = remotestate.StatusFailed
-						deployment.Error = err.Error()
-						deployment.Duration = time.Since(startTime)
-						if saveErr := stateManager.SaveDeployment(deployment); saveErr != nil && verbose {
-							fmt.Printf("Warning: failed to save deployment state: %v\n", saveErr)
-						}
-
-						fmt.Printf("\n→ Rolling back...\n")
-						if rbErr := deploy.Rollback(serviceName); rbErr != nil {
-							return fmt.Errorf("deployment failed and rollback failed: %w", rbErr)
-						}
-						fmt.Printf("  ✓ Rolled back successfully\n")
-						return fmt.Errorf("deployment failed: %w", err)
-					}
-
-					// Get container info for state using correct naming pattern
-					// Pattern: {project}_{env}_{service}_{replica}
-					containerName := fmt.Sprintf("%s_%s_%s_1", cfg.Project.Name, envName, serviceName)
-
-					// Get actual image name from running container (format: name:tag)
-					imageName, _ := client.Execute(fmt.Sprintf("docker inspect -f '{{index .Config.Image}}' %s 2>/dev/null", containerName))
-					// Get image ID (SHA)
-					imageID, _ := client.Execute(fmt.Sprintf("docker inspect -f '{{.Image}}' %s 2>/dev/null", containerName))
-					// Get container ID
-					containerID, _ := client.Execute(fmt.Sprintf("docker ps -q -f name=^%s$ 2>/dev/null", containerName))
-
-					// Save service state
-					deployment.Services[serviceName] = remotestate.ServiceState{
-						Name:        serviceName,
-						Image:       strings.TrimSpace(imageName),
-						ImageID:     strings.TrimSpace(imageID),
-						ContainerID: strings.TrimSpace(containerID),
-						Port:        service.Port,
-						Replicas:    1,
-						Env:         service.Env,
-						HealthCheck: remotestate.HealthCheckState{
-							Enabled:   service.HealthCheck.Path != "",
-							Path:      service.HealthCheck.Path,
-							Healthy:   true,
-							LastCheck: time.Now(),
-						},
-					}
-
-					fmt.Printf("  ✓ Service %s deployed successfully\n", serviceName)
-				}
-			} // End sequential deployment else block
-
-			// Mark deployment as successful
-			if !deploymentFailed {
-				deployment.Status = remotestate.StatusSuccess
-				deployment.Duration = time.Since(startTime)
-
-				// Save successful deployment state
-				if err := stateManager.SaveDeployment(deployment); err != nil {
-					if verbose {
-						fmt.Printf("Warning: failed to save remote deployment state: %v\n", err)
-					}
-				} else if verbose {
-					fmt.Printf("✓ Deployment state saved (ID: %s)\n", deployment.ID)
-				}
-
-				// Save local deployment state
-				if localStateMgr != nil {
-					localDeployment := &localstate.DeploymentState{
-						DeploymentID:    fmt.Sprintf("deploy-%s", time.Now().Format("20060102-150405")),
-						Timestamp:       startTime,
-						Environment:     envName,
-						Mode:            "single",
-						Status:          "success",
-						DurationSeconds: int(time.Since(startTime).Seconds()),
-						GitCommit:       commitInfo.Hash,
-						TriggeredBy:     remotestate.GetCurrentUser(),
-						Notes:           fmt.Sprintf("Deployed %d services to %s", len(services), serverName),
-					}
-					if err := localStateMgr.SaveDeployment(localDeployment); err != nil && verbose {
-						fmt.Printf("Warning: failed to save local deployment state: %v\n", err)
-					}
-				}
-
-				// Cleanup old deployments
-				if err := stateManager.CleanupOldDeployments(); err != nil && verbose {
-					fmt.Printf("Warning: failed to cleanup old deployments: %v\n", err)
-				}
-
-				// Register project in registry
-				networkMgr := network.NewManager(client, cfg.Project.Name, envName, verbose)
-				reg := registry.NewRegistry(client, verbose)
-				serviceNames := make([]string, 0, len(services))
-				for name := range services {
-					serviceNames = append(serviceNames, name)
-				}
-				projectInfo := registry.ProjectInfo{
-					Name:        cfg.Project.Name,
-					Environment: envName,
-					Network:     networkMgr.GetNetworkName(),
-					Services:    serviceNames,
-					Domains:     extractDomains(services),
-					DeployedAt:  time.Now(),
-				}
-				if err := reg.RegisterProject(projectInfo); err != nil && verbose {
-					fmt.Printf("Warning: failed to register project: %v\n", err)
-				}
-			}
-
-			fmt.Printf("\n✓ Server %s deployment completed!\n", serverName)
+		// Save service state
+		deployment.Services[serviceName] = remotestate.ServiceState{
+			Name:     serviceName,
+			Image:    fullImageName,
+			Port:     service.Port,
+			Replicas: service.Replicas,
+			Env:      service.Env,
 		}
 	}
+
+	if !deploymentFailed {
+		deployment.Status = remotestate.StatusSuccess
+		deployment.Duration = time.Since(startTime)
+		if err := stateManager.SaveDeployment(deployment); err != nil && verbose {
+			fmt.Printf("Warning: failed to save remote deployment state: %v\n", err)
+		}
+
+		// Save local deployment state
+		if localStateMgr != nil {
+			localDeployment := &localstate.DeploymentState{
+				DeploymentID:    fmt.Sprintf("deploy-%s", time.Now().Format("20060102-150405")),
+				Timestamp:       startTime,
+				Environment:     envName,
+				Mode:            "swarm",
+				Status:          "success",
+				DurationSeconds: int(time.Since(startTime).Seconds()),
+				GitCommit:       commitInfo.Hash,
+				TriggeredBy:     remotestate.GetCurrentUser(),
+				Notes:           fmt.Sprintf("Deployed %d services to swarm", len(services)),
+			}
+			if err := localStateMgr.SaveDeployment(localDeployment); err != nil && verbose {
+				fmt.Printf("Warning: failed to save local deployment state: %v\n", err)
+			}
+		}
+
+		// Register project in registry
+		networkMgr := network.NewManager(firstClient, cfg.Project.Name, envName, verbose)
+		reg := registry.NewRegistry(firstClient, verbose)
+		projectInfo := registry.ProjectInfo{
+			Name:        cfg.Project.Name,
+			Environment: envName,
+			Network:     networkMgr.GetNetworkName(),
+			Services:    deploymentOrder,
+			Domains:     extractDomains(services),
+			DeployedAt:  time.Now(),
+		}
+		if err := reg.RegisterProject(projectInfo); err != nil && verbose {
+			fmt.Printf("Warning: failed to register project: %v\n", err)
+		}
+	}
+
+	if deploymentFailed {
+		return fmt.Errorf("swarm deployment failed")
+	}
+
+	fmt.Printf("\n✓ Swarm deployment completed!\n")
 
 	// Automatic cleanup after successful deployment (per-service hooks now handled by deployer)
 	if verbose {

@@ -264,66 +264,142 @@ func volumesEqual(a, b []string) bool {
 
 // FormatPlan returns a human-readable formatted plan
 func (p *ReconciliationPlan) FormatPlan() string {
+	return p.FormatPlanVerbose(false)
+}
+
+// FormatPlanVerbose returns a detailed formatted plan with optional unchanged services
+func (p *ReconciliationPlan) FormatPlanVerbose(showUnchanged bool) string {
 	var sb strings.Builder
 
-	sb.WriteString("═══════════════════════════════════════════\n")
-	sb.WriteString(fmt.Sprintf("  DEPLOYMENT PLAN: %s (%s)\n", p.ProjectName, p.Environment))
-	sb.WriteString("═══════════════════════════════════════════\n\n")
+	sb.WriteString("┌─────────────────────────────────────────────────────────────┐\n")
+	sb.WriteString(fmt.Sprintf("│  Deployment Plan: %s (%s)\n", p.ProjectName, p.Environment))
+	sb.WriteString("└─────────────────────────────────────────────────────────────┘\n\n")
 
 	if p.Summary.Total == 0 || (p.Summary.Total == p.Summary.NoOps) {
-		sb.WriteString("✓ No changes needed - all services up-to-date\n\n")
-		sb.WriteString("═══════════════════════════════════════════\n")
+		sb.WriteString("  ✓ All services are up-to-date. No changes needed.\n\n")
 		return sb.String()
 	}
 
-	sb.WriteString(fmt.Sprintf("Summary: %d change(s)\n", p.Summary.Total-p.Summary.NoOps))
-	if p.Summary.Adds > 0 {
-		sb.WriteString(fmt.Sprintf("  + %d service(s) to add\n", p.Summary.Adds))
-	}
-	if p.Summary.Updates > 0 {
-		sb.WriteString(fmt.Sprintf("  ↻ %d service(s) to update\n", p.Summary.Updates))
-	}
-	if p.Summary.Removes > 0 {
-		sb.WriteString(fmt.Sprintf("  - %d service(s) to remove\n", p.Summary.Removes))
-	}
-	if p.Summary.NoOps > 0 {
-		sb.WriteString(fmt.Sprintf("  ✓ %d service(s) unchanged\n", p.Summary.NoOps))
-	}
-	sb.WriteString("\n")
+	// Summary table
+	changeCount := p.Summary.Total - p.Summary.NoOps
+	sb.WriteString(fmt.Sprintf("  %d change(s) to apply:\n\n", changeCount))
 
-	// Details
+	// Table header
+	sb.WriteString("  ┌────────────────┬────────────┬─────────────────────────────────────┐\n")
+	sb.WriteString("  │ Service        │ Action     │ Details                             │\n")
+	sb.WriteString("  ├────────────────┼────────────┼─────────────────────────────────────┤\n")
+
+	// Table rows
 	for _, change := range p.Changes {
+		if change.Type == ChangeNone && !showUnchanged {
+			continue
+		}
+
+		serviceName := truncateString(change.ServiceName, 14)
+		action := ""
+		details := ""
+
 		switch change.Type {
 		case ChangeAdd:
-			sb.WriteString(fmt.Sprintf("+ ADD: %s\n", change.ServiceName))
-			for _, reason := range change.Reasons {
-				sb.WriteString(fmt.Sprintf("    → %s\n", reason))
+			action = "+ CREATE"
+			if change.NewConfig != nil {
+				if change.NewConfig.Image != "" {
+					details = fmt.Sprintf("image: %s", truncateString(change.NewConfig.Image, 30))
+				} else if change.NewConfig.Build != "" {
+					details = fmt.Sprintf("build: %s", truncateString(change.NewConfig.Build, 30))
+				}
+			}
+		case ChangeUpdate:
+			action = "~ UPDATE"
+			if len(change.Reasons) > 0 {
+				details = truncateString(change.Reasons[0], 35)
+			}
+		case ChangeRemove:
+			action = "- REMOVE"
+			details = "Will stop and remove"
+		case ChangeNone:
+			action = "  (ok)"
+			details = "No changes"
+		}
+
+		sb.WriteString(fmt.Sprintf("  │ %-14s │ %-10s │ %-35s │\n", serviceName, action, details))
+	}
+
+	sb.WriteString("  └────────────────┴────────────┴─────────────────────────────────────┘\n\n")
+
+	// Detailed changes
+	hasDetails := false
+	for _, change := range p.Changes {
+		if change.Type == ChangeNone {
+			continue
+		}
+		if !hasDetails {
+			sb.WriteString("  Details:\n\n")
+			hasDetails = true
+		}
+
+		switch change.Type {
+		case ChangeAdd:
+			sb.WriteString(fmt.Sprintf("  + %s (CREATE)\n", change.ServiceName))
+			if change.NewConfig != nil {
+				if change.NewConfig.Image != "" {
+					sb.WriteString(fmt.Sprintf("      Image: %s\n", change.NewConfig.Image))
+				} else if change.NewConfig.Build != "" {
+					sb.WriteString(fmt.Sprintf("      Build: %s\n", change.NewConfig.Build))
+				}
+				if change.NewConfig.Port > 0 {
+					sb.WriteString(fmt.Sprintf("      Port: %d\n", change.NewConfig.Port))
+				}
+				replicas := change.NewConfig.Replicas
+				if replicas == 0 {
+					replicas = 1
+				}
+				sb.WriteString(fmt.Sprintf("      Replicas: %d\n", replicas))
+				if change.NewConfig.Proxy != nil {
+					domains := change.NewConfig.Proxy.GetAllDomains()
+					if len(domains) > 0 {
+						sb.WriteString(fmt.Sprintf("      Domains: %s\n", strings.Join(domains, ", ")))
+					}
+				}
 			}
 			sb.WriteString("\n")
 
 		case ChangeUpdate:
-			sb.WriteString(fmt.Sprintf("↻ UPDATE: %s\n", change.ServiceName))
+			sb.WriteString(fmt.Sprintf("  ~ %s (UPDATE)\n", change.ServiceName))
 			for _, reason := range change.Reasons {
-				sb.WriteString(fmt.Sprintf("    → %s\n", reason))
+				sb.WriteString(fmt.Sprintf("      - %s\n", reason))
 			}
 			sb.WriteString("\n")
 
 		case ChangeRemove:
-			sb.WriteString(fmt.Sprintf("- REMOVE: %s\n", change.ServiceName))
-			for _, reason := range change.Reasons {
-				sb.WriteString(fmt.Sprintf("    → %s\n", reason))
+			sb.WriteString(fmt.Sprintf("  - %s (REMOVE)\n", change.ServiceName))
+			sb.WriteString("      Service will be stopped and containers removed\n")
+			if change.OldConfig != nil && change.OldConfig.Persistent {
+				sb.WriteString("      WARNING: Service was marked as persistent!\n")
 			}
 			sb.WriteString("\n")
-
-		case ChangeNone:
-			// Skip no-ops in detailed view unless verbose
-			// sb.WriteString(fmt.Sprintf("✓ UNCHANGED: %s\n", change.ServiceName))
 		}
 	}
 
-	sb.WriteString("═══════════════════════════════════════════\n")
+	// Warning for destructive changes
+	if p.HasDestructiveChanges() {
+		sb.WriteString("  ⚠ WARNING: This plan includes service removals.\n")
+		sb.WriteString("    Removed services will be stopped and their containers deleted.\n")
+		sb.WriteString("    Volumes marked for removal will be permanently deleted.\n\n")
+	}
 
 	return sb.String()
+}
+
+// truncateString truncates a string to maxLen and adds "..." if needed
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // HasDestructiveChanges returns true if plan includes removals

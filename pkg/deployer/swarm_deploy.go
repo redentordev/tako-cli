@@ -11,6 +11,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/swarm"
 	"github.com/redentordev/tako-cli/pkg/traefik"
+	"github.com/redentordev/tako-cli/pkg/unregistry"
 )
 
 // SetupSwarmCluster initializes the Docker Swarm cluster
@@ -68,17 +69,21 @@ func (d *Deployer) SetupSwarmCluster() error {
 		time.Sleep(2 * time.Second)
 	}
 
-	// Get join token for workers
-	workerToken, err := d.swarmManager.GetJoinToken(managerClient, "worker")
-	if err != nil {
-		return fmt.Errorf("failed to get worker join token: %w", err)
+	// Only get worker token and process workers if we have multiple servers
+	var workerToken string
+	if len(servers) > 1 {
+		var err error
+		workerToken, err = d.swarmManager.GetJoinToken(managerClient, "worker")
+		if err != nil {
+			return fmt.Errorf("failed to get worker join token: %w", err)
+		}
+
+		if d.verbose {
+			fmt.Printf("\n→ Joining worker nodes to cluster...\n")
+		}
 	}
 
-	// Join worker nodes
-	if d.verbose && len(servers) > 1 {
-		fmt.Printf("\n→ Joining worker nodes to cluster...\n")
-	}
-
+	// Join worker nodes (only for multi-server deployments)
 	for _, serverName := range servers {
 		if serverName == managerName {
 			continue // Skip manager
@@ -101,7 +106,6 @@ func (d *Deployer) SetupSwarmCluster() error {
 				fmt.Printf("  Docker not found on %s, provisioning server...\n", serverName)
 			}
 
-			// Import provisioner and setup the server
 			if err := d.provisionServer(workerClient, serverName); err != nil {
 				return fmt.Errorf("failed to provision %s: %w", serverName, err)
 			}
@@ -126,7 +130,6 @@ func (d *Deployer) SetupSwarmCluster() error {
 		}
 
 		// Verify we can get node ID - if not, the node might be in a broken state
-		// Try to get node ID, and if it fails, force leave and rejoin
 		nodeID, err := d.swarmManager.GetNodeID(workerClient)
 		if err != nil {
 			if d.verbose {
@@ -134,22 +137,18 @@ func (d *Deployer) SetupSwarmCluster() error {
 				fmt.Printf("  Forcing node to leave swarm and rejoin...\n")
 			}
 
-			// Force leave the swarm
 			if leaveErr := d.swarmManager.LeaveSwarm(workerClient, true); leaveErr != nil {
 				if d.verbose {
 					fmt.Printf("  Warning: Failed to leave swarm: %v\n", leaveErr)
 				}
 			}
 
-			// Wait a moment for the leave to complete
 			time.Sleep(2 * time.Second)
 
-			// Now join the correct swarm
 			if joinErr := d.swarmManager.JoinSwarm(workerClient, managerServer.Host, workerToken); joinErr != nil {
 				return fmt.Errorf("failed to rejoin %s to swarm after leave: %w", serverName, joinErr)
 			}
 
-			// Try to get node ID again
 			nodeID, err = d.swarmManager.GetNodeID(workerClient)
 			if err != nil {
 				return fmt.Errorf("failed to get node ID for %s even after rejoin: %w", serverName, err)
@@ -182,21 +181,14 @@ func (d *Deployer) SetupSwarmCluster() error {
 		return fmt.Errorf("failed to set manager labels: %w", err)
 	}
 
-	// Setup registry only for multi-server deployments
-	// Single-server doesn't need registry as images are local
-	var registry *swarm.RegistryConfig
+	// For multi-server deployments, we'll distribute images using docker save/load over SSH
+	// This happens during service deployment (see DeployServiceSwarm)
 	if len(servers) > 1 {
-		registry, err = d.swarmManager.EnsureRegistry(managerClient)
-		if err != nil {
-			return fmt.Errorf("failed to setup registry: %w", err)
-		}
-
-		// Configure workers to use registry
-		if err := d.swarmManager.ConfigureWorkersForRegistry(registry); err != nil {
-			return fmt.Errorf("failed to configure workers for registry: %w", err)
+		if d.verbose {
+			fmt.Printf("\n→ Multi-server deployment: images will be distributed via SSH\n")
 		}
 	} else if d.verbose {
-		fmt.Printf("\n→ Skipping registry setup (single-server deployment)\n")
+		fmt.Printf("\n→ Single-server deployment (no image distribution needed)\n")
 	}
 
 	// Save swarm state
@@ -208,11 +200,7 @@ func (d *Deployer) SetupSwarmCluster() error {
 		LastUpdated: time.Now().Format(time.RFC3339),
 	}
 
-	// Add registry info only if it exists
-	if registry != nil {
-		swarmState.RegistryHost = registry.Host
-		swarmState.RegistryPort = registry.Port
-	}
+	// Note: We no longer use a registry - unregistry handles image distribution directly
 
 	if err := d.swarmManager.SaveSwarmState(swarmState); err != nil {
 		if d.verbose {
@@ -249,34 +237,27 @@ func (d *Deployer) DeployServiceSwarm(serviceName string, service *config.Servic
 		return fmt.Errorf("failed to connect to manager: %w", err)
 	}
 
-	// Load swarm state to get registry info
-	swarmState, err := d.swarmManager.LoadSwarmState()
+	// Get all servers to check if multi-server deployment
+	servers, err := d.config.GetEnvironmentServers(d.environment)
 	if err != nil {
-		return fmt.Errorf("failed to load swarm state: %w", err)
+		return fmt.Errorf("failed to get environment servers: %w", err)
 	}
 
-	// Push image to registry if we have a registry
-	var imageRef string
-	if swarmState.RegistryHost != "" {
-		registry := &swarm.RegistryConfig{
-			Host:     swarmState.RegistryHost,
-			Port:     swarmState.RegistryPort,
-			Insecure: true,
-		}
-
+	// For multi-server deployments, distribute the image to worker nodes
+	// using docker save/load streamed over SSH
+	if len(servers) > 1 {
 		if d.verbose {
-			fmt.Printf("  Pushing image to swarm registry...\n")
+			fmt.Printf("  Distributing image to worker nodes...\n")
 		}
 
-		remoteImage, err := d.swarmManager.PushImageToRegistry(managerClient, fullImageName, registry)
-		if err != nil {
-			return fmt.Errorf("failed to push image to registry: %w", err)
+		unreg := unregistry.NewManager(d.config, d.sshPool, d.environment, d.verbose)
+		if err := unreg.DistributeImage(managerClient, fullImageName); err != nil {
+			return fmt.Errorf("failed to distribute image to workers: %w", err)
 		}
-		imageRef = remoteImage
-	} else {
-		// No registry, use local image name
-		imageRef = fullImageName
 	}
+
+	// Use the local image name (image is now available on all nodes)
+	imageRef := fullImageName
 
 	// Ensure overlay network exists
 	networkName := fmt.Sprintf("tako_%s_%s", d.config.Project.Name, d.environment)
@@ -284,11 +265,10 @@ func (d *Deployer) DeployServiceSwarm(serviceName string, service *config.Servic
 		return fmt.Errorf("failed to ensure overlay network: %w", err)
 	}
 
-	// For single-server deployments without a registry, add placement constraint
-	// to ensure service runs on the server where the image was built
-	if swarmState.RegistryHost == "" {
-		// No registry means single-server deployment
-		// Add placement constraint to run on the manager node where image is available
+	// For single-server deployments, add placement constraint
+	// to ensure service runs on the manager node where the image was built
+	// For multi-server deployments, image is distributed to all nodes via unregistry
+	if len(servers) == 1 {
 		if service.Placement == nil {
 			service.Placement = &config.PlacementConfig{}
 		}
@@ -338,25 +318,9 @@ func (d *Deployer) DeployServiceSwarm(serviceName string, service *config.Servic
 	if service.IsPublic() && d.verbose {
 		fmt.Printf("  ✓ Traefik reverse proxy configured\n")
 
-		// Show Traefik dashboard URL
-		managerName, _ := d.config.GetManagerServer(d.environment)
-		if managerName != "" {
-			managerHost := d.config.Servers[managerName].Host
-			traefikManager := traefik.NewManager(managerClient, d.config.Project.Name, d.environment, d.verbose)
-			dashboardURL := traefikManager.GetTraefikDashboardURL(managerHost)
-			fmt.Printf("  Traefik Dashboard: %s\n", dashboardURL)
-		}
 	}
 
 	return nil
-}
-
-// IsSwarmMode returns true if this environment should use Swarm
-func (d *Deployer) IsSwarmMode() bool {
-	if d.swarmManager == nil {
-		return false
-	}
-	return d.swarmManager.IsSwarmMode(d.environment)
 }
 
 // Note: Legacy proxy functions have been replaced with Traefik

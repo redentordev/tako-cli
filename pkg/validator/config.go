@@ -135,19 +135,7 @@ func (v *ConfigValidator) validateService(envName, serviceName string, service c
 
 	// Validate proxy configuration
 	if service.Proxy != nil {
-		if len(service.Proxy.Domains) == 0 {
-			v.errors = append(v.errors, fmt.Sprintf("%s: proxy.domains is required when proxy is configured", prefix))
-		}
-
-		for _, domain := range service.Proxy.Domains {
-			if !isValidDomain(domain) {
-				v.errors = append(v.errors, fmt.Sprintf("%s: invalid domain '%s'", prefix, domain))
-			}
-		}
-
-		if service.Proxy.Email != "" && !isValidEmail(service.Proxy.Email) {
-			v.errors = append(v.errors, fmt.Sprintf("%s: invalid proxy.email '%s'", prefix, service.Proxy.Email))
-		}
+		v.validateProxyConfig(prefix, service.Proxy)
 	}
 
 	// Validate health check
@@ -160,6 +148,54 @@ func (v *ConfigValidator) validateService(envName, serviceName string, service c
 	// Validate replicas
 	if service.Replicas < 0 {
 		v.errors = append(v.errors, fmt.Sprintf("%s: replicas cannot be negative", prefix))
+	}
+}
+
+// validateProxyConfig validates proxy configuration including domain redirects
+func (v *ConfigValidator) validateProxyConfig(prefix string, proxy *config.ProxyConfig) {
+	// Check that at least one domain is configured
+	primaryDomain := proxy.GetPrimaryDomain()
+	if primaryDomain == "" && len(proxy.Domains) == 0 {
+		v.errors = append(v.errors, fmt.Sprintf("%s: proxy.domain or proxy.domains is required when proxy is configured", prefix))
+	}
+
+	// Validate primary domain
+	if proxy.Domain != "" && !isValidDomain(proxy.Domain) {
+		v.errors = append(v.errors, fmt.Sprintf("%s: invalid proxy.domain '%s'", prefix, proxy.Domain))
+	}
+
+	// Validate legacy domains array
+	for _, domain := range proxy.Domains {
+		if !isValidDomain(domain) {
+			v.errors = append(v.errors, fmt.Sprintf("%s: invalid domain '%s' in proxy.domains", prefix, domain))
+		}
+	}
+
+	// Validate redirect domains
+	for _, redirectDomain := range proxy.RedirectFrom {
+		if !isValidDomain(redirectDomain) {
+			v.errors = append(v.errors, fmt.Sprintf("%s: invalid redirect domain '%s' in proxy.redirectFrom", prefix, redirectDomain))
+		}
+	}
+
+	// Check for redirect domains without primary domain
+	if len(proxy.RedirectFrom) > 0 && primaryDomain == "" {
+		v.errors = append(v.errors, fmt.Sprintf("%s: proxy.redirectFrom requires proxy.domain or proxy.domains to be set", prefix))
+	}
+
+	// Check for duplicate domains between primary/domains and redirectFrom
+	allServingDomains := proxy.GetAllDomains()
+	for _, redirectDomain := range proxy.RedirectFrom {
+		for _, servingDomain := range allServingDomains {
+			if redirectDomain == servingDomain {
+				v.errors = append(v.errors, fmt.Sprintf("%s: domain '%s' cannot be both a serving domain and a redirect domain", prefix, redirectDomain))
+			}
+		}
+	}
+
+	// Validate email
+	if proxy.Email != "" && !isValidEmail(proxy.Email) {
+		v.errors = append(v.errors, fmt.Sprintf("%s: invalid proxy.email '%s'", prefix, proxy.Email))
 	}
 }
 
