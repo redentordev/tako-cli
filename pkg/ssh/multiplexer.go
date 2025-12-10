@@ -95,7 +95,11 @@ func (m *Multiplexer) establish(host string, port int, user string, sshKey strin
 	key := fmt.Sprintf("%s@%s:%d", user, host, port)
 	controlPath := m.buildControlPath(host, port, user)
 
+	// Get Tako's known_hosts file path for host key verification
+	takoKnownHosts, _ := GetKnownHostsPath()
+
 	// Build SSH command with multiplexing options
+	// Use proper host key verification based on current mode
 	args := []string{
 		"-fNM", // Background master mode
 		"-o", "ControlMaster=auto",
@@ -103,10 +107,25 @@ func (m *Multiplexer) establish(host string, port int, user string, sshKey strin
 		"-o", fmt.Sprintf("ControlPersist=%d", int(m.config.ControlPersist.Seconds())),
 		"-o", "ServerAliveInterval=60",
 		"-o", "ServerAliveCountMax=3",
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "LogLevel=ERROR",
 		"-p", fmt.Sprintf("%d", port),
+	}
+
+	// Configure host key verification based on global mode
+	switch GetGlobalHostKeyMode() {
+	case HostKeyModeInsecure:
+		args = append(args, "-o", "StrictHostKeyChecking=no")
+		args = append(args, "-o", "UserKnownHostsFile=/dev/null")
+	case HostKeyModeStrict:
+		args = append(args, "-o", "StrictHostKeyChecking=yes")
+		if takoKnownHosts != "" {
+			args = append(args, "-o", fmt.Sprintf("UserKnownHostsFile=%s", takoKnownHosts))
+		}
+	default: // TOFU or Ask
+		args = append(args, "-o", "StrictHostKeyChecking=accept-new")
+		if takoKnownHosts != "" {
+			args = append(args, "-o", fmt.Sprintf("UserKnownHostsFile=%s", takoKnownHosts))
+		}
 	}
 
 	if sshKey != "" {

@@ -56,6 +56,18 @@ func isOpenSSHFormat(data []byte) bool {
 	return len(data) > 36 && string(data[:36]) == "-----BEGIN OPENSSH PRIVATE KEY-----"
 }
 
+// getHostKeyCallback returns the appropriate host key callback based on global settings
+func getHostKeyCallback() (ssh.HostKeyCallback, error) {
+	verifier, err := GetDefaultVerifier()
+	if err != nil {
+		// If we can't create a verifier, fall back to insecure mode with warning
+		fmt.Fprintf(os.Stderr, "Warning: Could not initialize host key verification: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: Proceeding without host key verification (insecure)\n")
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
+	return verifier.GetCallback(), nil
+}
+
 // getSSHAgentAuth returns an ssh.AuthMethod using the SSH agent if available
 func getSSHAgentAuth() ssh.AuthMethod {
 	socket := os.Getenv("SSH_AUTH_SOCK")
@@ -117,12 +129,18 @@ func NewClient(host string, port int, user string, keyPath string) (*Client, err
 		}
 	}
 
+	// Get host key callback from verifier
+	hostKeyCallback, err := getHostKeyCallback()
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup host key verification: %w", err)
+	}
+
 	// Create SSH client config with optimized settings
 	config := &ssh.ClientConfig{
 		User:            user,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Implement proper host key verification
-		Timeout:         60 * time.Second,            // Increased to 60s for very slow/busy servers
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         60 * time.Second, // Increased to 60s for very slow/busy servers
 		// Client version to avoid version negotiation issues
 		ClientVersion: "SSH-2.0-Tako-CLI",
 	}
@@ -136,14 +154,20 @@ func NewClient(host string, port int, user string, keyPath string) (*Client, err
 
 // NewClientWithPassword creates a new SSH client with password-based authentication
 func NewClientWithPassword(host string, port int, user string, password string) (*Client, error) {
+	// Get host key callback from verifier
+	hostKeyCallback, err := getHostKeyCallback()
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup host key verification: %w", err)
+	}
+
 	// Create SSH client config with password authentication
 	config := &ssh.ClientConfig{
 		User: user,
 		Auth: []ssh.AuthMethod{
 			ssh.Password(password),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Implement proper host key verification
-		Timeout:         60 * time.Second,            // Increased to 60s for very slow/busy servers
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         60 * time.Second, // Increased to 60s for very slow/busy servers
 		// Client version to avoid version negotiation issues
 		ClientVersion: "SSH-2.0-Tako-CLI",
 	}
@@ -194,12 +218,18 @@ func NewClientWithAuth(host string, port int, user string, keyPath string, passw
 		return nil, fmt.Errorf("no valid authentication method provided (need either SSH key or password)")
 	}
 
+	// Get host key callback from verifier
+	hostKeyCallback, err := getHostKeyCallback()
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup host key verification: %w", err)
+	}
+
 	// Create SSH client config
 	config := &ssh.ClientConfig{
 		User:            user,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Implement proper host key verification
-		Timeout:         60 * time.Second,            // Increased to 60s for very slow/busy servers
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         60 * time.Second, // Increased to 60s for very slow/busy servers
 		ClientVersion:   "SSH-2.0-Tako-CLI",
 	}
 

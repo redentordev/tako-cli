@@ -7,15 +7,17 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/updater"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 var (
-	cfgFile string
-	verbose bool
-	envFlag string
+	cfgFile        string
+	verbose        bool
+	envFlag        string
+	hostKeyModeFlag string
 	// Version, GitCommit, and BuildTime are set via ldflags during build
 	Version   = "dev"
 	GitCommit = "unknown"
@@ -126,10 +128,12 @@ Built:   %s
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./tako.yaml)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 	rootCmd.PersistentFlags().StringVarP(&envFlag, "env", "e", "", "environment to deploy (default: production or only environment)")
+	rootCmd.PersistentFlags().StringVar(&hostKeyModeFlag, "host-key-mode", "", "SSH host key verification mode: tofu, strict, ask, insecure (default: tofu)")
 
 	// Bind flags to viper
 	viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
 	viper.BindPFlag("env", rootCmd.PersistentFlags().Lookup("env"))
+	viper.BindPFlag("host_key_mode", rootCmd.PersistentFlags().Lookup("host-key-mode"))
 }
 
 // findEnvFile searches for .env file in current directory and parent directories
@@ -166,6 +170,9 @@ func initConfig() {
 		_ = godotenv.Load(envFile)
 	}
 
+	// Configure SSH host key verification mode
+	initHostKeyMode()
+
 	if cfgFile != "" {
 		// Use config file from the flag
 		viper.SetConfigFile(cfgFile)
@@ -200,4 +207,23 @@ func getEnvironmentName(cfg interface{}) string {
 	}
 
 	return "production"
+}
+
+// initHostKeyMode configures SSH host key verification based on flag/env
+func initHostKeyMode() {
+	// Priority: flag > environment variable > default (tofu)
+	mode := hostKeyModeFlag
+	if mode == "" {
+		mode = os.Getenv("TAKO_HOST_KEY_MODE")
+	}
+
+	if mode != "" {
+		parsedMode := ssh.ParseHostKeyMode(mode)
+		ssh.SetGlobalHostKeyMode(parsedMode)
+
+		// Warn if using insecure mode
+		if parsedMode == ssh.HostKeyModeInsecure {
+			fmt.Fprintln(os.Stderr, "Warning: SSH host key verification is disabled. This is insecure!")
+		}
+	}
 }
