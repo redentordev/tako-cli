@@ -124,8 +124,18 @@ environments:
         
         # Traefik reverse proxy (for public web services)
         proxy:
-          domains:
-            - %s.${SERVER_HOST}.sslip.io  # Your domain(s) - sslip.io provides automatic DNS
+          # Primary domain where traffic is served
+          domain: %s.${SERVER_HOST}.sslip.io  # sslip.io provides automatic DNS
+          # Or use multiple domains:
+          # domains:
+          #   - app.example.com
+          #   - api.example.com
+          
+          # Domain redirects (301 redirect to primary domain with path preservation)
+          # redirectFrom:
+          #   - www.example.com      # www -> non-www
+          #   - old.example.com      # old domain -> new domain
+          
           email: ${LETSENCRYPT_EMAIL}     # Email for Let's Encrypt SSL certificates
           # port: 3000      # Optional: specify if different from service port
         
@@ -258,15 +268,28 @@ environments:
 #           # strategy: any     # No placement preference
 
 # ============================================================================
+# NOTIFICATIONS (Optional - deployment notifications)
+# ============================================================================
+# notifications:
+#   slack:
+#     webhook: ${SLACK_WEBHOOK_URL}
+#   discord:
+#     webhook: ${DISCORD_WEBHOOK_URL}
+#   webhook:
+#     url: https://your-webhook-endpoint.com/deploy
+
+# ============================================================================
 # REFERENCE: Common Service Patterns
 # ============================================================================
 
-# Next.js App:
+# Next.js App with www redirect:
 # web:
 #   build: .
 #   port: 3000
 #   proxy:
-#     domains: [app.example.com]
+#     domain: app.example.com
+#     redirectFrom:
+#       - www.app.example.com
 #     email: admin@example.com
 #   env:
 #     NODE_ENV: production
@@ -386,6 +409,26 @@ LETSENCRYPT_EMAIL=admin@example.com
 # 3. Use 'tako secrets' for sensitive data (passwords, API keys)
 # 4. Keep this .env.example file updated as a template for your team
 # 5. Validate variables are set before deploying: tako secrets validate
+
+# ============================================================================
+# USEFUL COMMANDS
+# ============================================================================
+# tako setup          - Provision server (Docker, Traefik, security)
+# tako deploy         - Deploy your application
+# tako deploy -y      - Deploy without confirmation prompts
+# tako ps             - List running services
+# tako logs --service web  - View service logs
+# tako access         - View HTTP access logs (like Vercel)
+# tako scale web=3    - Scale service to 3 replicas
+# tako stop --service web  - Stop a service (scale to 0)
+# tako start --service web - Start a stopped service
+# tako rollback       - Rollback to previous deployment
+# tako backup --volume data - Backup a Docker volume
+# tako backup --list  - List available backups
+# tako drift          - Detect configuration drift
+# tako history        - View deployment history
+# tako destroy        - Remove all services (keeps infrastructure)
+# tako --version      - Show CLI version and build info
 `
 
 	if err := os.WriteFile(".env.example", []byte(envExample), 0644); err != nil {
@@ -420,6 +463,13 @@ node_modules/
 	fmt.Printf("  2. Copy .env.example to .env and fill in your secrets\n")
 	fmt.Printf("  3. Run 'tako setup' to provision your server\n")
 	fmt.Printf("  4. Run 'tako deploy' to deploy your application\n")
+	fmt.Printf("\nUseful commands:\n")
+	fmt.Printf("  tako ps              - List running services\n")
+	fmt.Printf("  tako logs --service  - View service logs\n")
+	fmt.Printf("  tako access          - View HTTP access logs\n")
+	fmt.Printf("  tako scale web=3     - Scale to 3 replicas\n")
+	fmt.Printf("  tako rollback        - Rollback deployment\n")
+	fmt.Printf("  tako --help          - Show all commands\n")
 
 	return nil
 }

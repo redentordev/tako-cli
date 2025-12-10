@@ -132,6 +132,10 @@ make install
 
 ```bash
 tako --version
+# Output:
+# Tako CLI v0.1.0
+# Commit:  abc1234
+# Built:   2025-01-01T12:00:00Z
 ```
 
 #### Shell Completion (Optional)
@@ -266,11 +270,14 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Parallel Deployment** - Deploy multiple services concurrently (default behavior)
 - **Instant Rollback** - Revert to any previous deployment with one command
 - **Git-Based Versioning** - Every deployment tied to a Git commit
-- **State Management** - Full deployment history tracked on server
+- **State Management** - Full deployment history tracked on server with CLI version tracking
 - **Automatic HTTPS** - Traefik provisions SSL certificates via Let's Encrypt
+- **Domain Redirects** - Automatic www → non-www (or vice versa) with path preservation
 - **Health Checks** - Ensure containers are healthy before switching traffic
 - **Secrets Management** - Secure handling of environment secrets with automatic redaction
 - **Lifecycle Hooks** - Automate tasks at build, deploy, and start phases (migrations, cache warming, etc.)
+- **Volume Backup/Restore** - Backup and restore Docker volumes with `tako backup`
+- **Drift Detection** - Detect configuration drift with `tako drift`
 
 ### Infrastructure & Scaling
 
@@ -320,10 +327,21 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 | Command | Description |
 |---------|-------------|
-| `tako start` | Start stopped services |
-| `tako stop` | Stop running services |
+| `tako start` | Start stopped services (scales to configured replicas) |
+| `tako stop` | Stop running services (scales to 0) |
 | `tako scale` | Scale service replicas |
-| `tako exec` | Execute commands on remote server(s) |
+| `tako exec` | Execute commands on remote server(s) or inside containers |
+
+### Backup & Recovery
+
+| Command | Description |
+|---------|-------------|
+| `tako backup --volume <name>` | Backup a Docker volume |
+| `tako backup --list` | List available backups |
+| `tako backup --restore <id>` | Restore a volume from backup |
+| `tako backup --cleanup <days>` | Delete backups older than N days |
+| `tako drift` | Detect configuration drift between config and running services |
+| `tako drift --watch` | Continuously monitor for drift |
 
 ### Secrets Management
 
@@ -534,6 +552,31 @@ postBuild:
 ```
 
 See the [Plausible example](./examples/18-plausible) for a real-world use case.
+
+### Domain Redirects (www → non-www)
+
+Automatically redirect traffic from one domain to another (e.g., www to non-www) with proper SSL and path preservation:
+
+```yaml
+services:
+  web:
+    build: .
+    port: 3000
+    proxy:
+      # Primary domain where traffic is served
+      domain: example.com
+      # These domains will 301 redirect to the primary domain
+      redirectFrom:
+        - www.example.com
+        - old.example.com
+      email: admin@example.com
+```
+
+**Features:**
+- Automatic SSL certificates for all domains (primary + redirect domains)
+- 301 permanent redirects for SEO
+- Path preservation (`www.example.com/api/users` → `example.com/api/users`)
+- Works with both HTTP and HTTPS traffic
 
 ### Parallel Deployment (Default)
 
