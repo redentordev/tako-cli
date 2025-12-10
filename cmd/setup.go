@@ -128,7 +128,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		newVersion := &setup.ServerVersion{
 			Version:        setup.CurrentVersion,
 			InstalledAt:    time.Now(),
-			TakoCLIVersion: "0.3.0", // TODO: Get from build
+			TakoCLIVersion: Version,
 			Components:     make(map[string]string),
 			Features:       []string{"docker", "traefik-proxy", "firewall", "monitoring"},
 		}

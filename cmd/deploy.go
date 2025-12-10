@@ -539,19 +539,20 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}{}
 
 	for serviceName, service := range services {
-		if service.Proxy != nil && len(service.Proxy.Domains) > 0 {
+		if service.Proxy != nil && service.Proxy.GetPrimaryDomain() != "" {
+			allDomains := service.Proxy.GetAllDomains()
 			if !hasPublicServices {
 				fmt.Printf("Your application is available at:\n")
 				hasPublicServices = true
 			}
 			fmt.Printf("\n%s:\n", serviceName)
-			for _, domain := range service.Proxy.Domains {
+			for _, domain := range allDomains {
 				fmt.Printf("  https://%s\n", domain)
 			}
 			servicesWithProxy = append(servicesWithProxy, struct {
 				name    string
 				domains []string
-			}{serviceName, service.Proxy.Domains})
+			}{serviceName, allDomains})
 		}
 	}
 

@@ -147,46 +147,69 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n🗑️  Destroying %d server(s)...\n\n", len(serversToDestroy))
 
-	// Destroy each server
-	totalErrors := 0
-	for serverName, serverCfg := range serversToDestroy {
-		fmt.Printf("=== Destroying server: %s (%s) ===\n", serverName, serverCfg.Host)
+	// For multi-server purge, we need to handle workers before manager
+	// Otherwise swarm leave on manager will leave workers in broken state
+	var managerServer string
+	var workerServers []string
 
-		// Connect to server (supports both key and password auth)
-		client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-			Host:     serverCfg.Host,
-			Port:     serverCfg.Port,
-			User:     serverCfg.User,
-			SSHKey:   serverCfg.SSHKey,
-			Password: serverCfg.Password,
-		})
-		if err != nil {
-			fmt.Printf("❌ Failed to connect to %s: %v\n\n", serverName, err)
-			totalErrors++
-			continue
-		}
-		if err := client.Connect(); err != nil {
-			fmt.Printf("❌ Failed to connect to %s: %v\n\n", serverName, err)
-			totalErrors++
-			continue
-		}
-
-		// Decommission application
-		if err := decommissionApp(client, cfg.Project.Name, verbose); err != nil {
-			fmt.Printf("⚠️  Errors during decommission: %v\n", err)
-			totalErrors++
-		}
-
-		// Purge infrastructure if requested
-		if destroyPurgeAll {
-			if err := purgeInfrastructure(client, cfg.Project.Name, verbose); err != nil {
-				fmt.Printf("⚠️  Errors during purge: %v\n", err)
-				totalErrors++
+	if destroyPurgeAll && len(serversToDestroy) > 1 {
+		// Identify manager and workers
+		for serverName, serverCfg := range serversToDestroy {
+			if serverCfg.Role == "manager" {
+				managerServer = serverName
+			} else {
+				workerServers = append(workerServers, serverName)
 			}
 		}
+		// If no explicit manager, first server is typically manager
+		if managerServer == "" {
+			for serverName := range serversToDestroy {
+				managerServer = serverName
+				break
+			}
+		}
+	}
 
-		fmt.Printf("✓ Server %s destroyed\n\n", serverName)
-		client.Close()
+	// Destroy each server (workers first if purging multi-server)
+	totalErrors := 0
+	
+	// Process workers first if purging
+	if destroyPurgeAll && len(workerServers) > 0 {
+		for _, serverName := range workerServers {
+			serverCfg := serversToDestroy[serverName]
+			fmt.Printf("=== Destroying worker: %s (%s) ===\n", serverName, serverCfg.Host)
+			if err := destroySingleServer(serverName, serverCfg, cfg.Project.Name, verbose, destroyPurgeAll); err != nil {
+				fmt.Printf("⚠️  Errors destroying %s: %v\n", serverName, err)
+				totalErrors++
+			} else {
+				fmt.Printf("✓ Worker %s destroyed\n\n", serverName)
+			}
+		}
+	}
+
+	// Now process remaining servers (or all if not multi-server purge)
+	for serverName, serverCfg := range serversToDestroy {
+		// Skip workers we already processed
+		if destroyPurgeAll && len(workerServers) > 0 {
+			isWorker := false
+			for _, w := range workerServers {
+				if w == serverName {
+					isWorker = true
+					break
+				}
+			}
+			if isWorker {
+				continue
+			}
+		}
+		
+		fmt.Printf("=== Destroying server: %s (%s) ===\n", serverName, serverCfg.Host)
+		if err := destroySingleServer(serverName, serverCfg, cfg.Project.Name, verbose, destroyPurgeAll); err != nil {
+			fmt.Printf("⚠️  Errors destroying %s: %v\n", serverName, err)
+			totalErrors++
+		} else {
+			fmt.Printf("✓ Server %s destroyed\n\n", serverName)
+		}
 	}
 
 	// Summary
@@ -200,6 +223,39 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 			fmt.Println("\n💡 Infrastructure removed. Run 'tako setup' before next deployment.")
 		} else {
 			fmt.Println("\n💡 Infrastructure preserved. You can redeploy without running 'tako setup'.")
+		}
+	}
+
+	return nil
+}
+
+// destroySingleServer handles destruction of a single server
+func destroySingleServer(serverName string, serverCfg config.ServerConfig, projectName string, verbose bool, purgeAll bool) error {
+	// Connect to server (supports both key and password auth)
+	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
+		Host:     serverCfg.Host,
+		Port:     serverCfg.Port,
+		User:     serverCfg.User,
+		SSHKey:   serverCfg.SSHKey,
+		Password: serverCfg.Password,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to connect: %w", err)
+	}
+	if err := client.Connect(); err != nil {
+		return fmt.Errorf("failed to connect: %w", err)
+	}
+	defer client.Close()
+
+	// Decommission application
+	if err := decommissionApp(client, projectName, verbose); err != nil {
+		return fmt.Errorf("decommission failed: %w", err)
+	}
+
+	// Purge infrastructure if requested
+	if purgeAll {
+		if err := purgeInfrastructure(client, projectName, verbose); err != nil {
+			return fmt.Errorf("purge failed: %w", err)
 		}
 	}
 
@@ -224,12 +280,16 @@ func decommissionApp(client *ssh.Client, projectName string, verbose bool) error
 		}
 	}
 
-	// Remove overlay networks for this project
+	// Remove overlay networks for this project (matches tako_projectname and tako_projectname_env patterns)
 	if verbose {
 		fmt.Println("  → Removing overlay networks...")
 	}
+	// Remove networks matching the project name pattern
 	removeNetworkCmd := fmt.Sprintf("docker network ls --filter 'name=tako_%s' --format '{{.Name}}' | xargs -r docker network rm 2>/dev/null || true", projectName)
 	client.Execute(removeNetworkCmd)
+	// Also try removing with underscore pattern (tako_projectname_production)
+	removeNetworkCmd2 := fmt.Sprintf("docker network ls --format '{{.Name}}' | grep -E '^tako_%s_' | xargs -r docker network rm 2>/dev/null || true", projectName)
+	client.Execute(removeNetworkCmd2)
 
 	if verbose {
 		fmt.Println("  → Stopping application containers...")
@@ -281,7 +341,8 @@ func purgeInfrastructure(client *ssh.Client, projectName string, verbose bool) e
 		fmt.Println("  → Removing Traefik configuration...")
 	}
 
-	// Stop and remove Traefik
+	// Stop and remove Traefik (both Swarm service and standalone container)
+	client.Execute("docker service rm traefik 2>/dev/null || true")
 	client.Execute("docker stop traefik 2>/dev/null || true")
 	client.Execute("docker rm traefik 2>/dev/null || true")
 
@@ -297,11 +358,25 @@ func purgeInfrastructure(client *ssh.Client, projectName string, verbose bool) e
 	client.Execute(fmt.Sprintf("sudo rm -rf /var/log/traefik/%s-*.log*", projectName))
 
 	if verbose {
+		fmt.Println("  → Leaving Docker Swarm...")
+	}
+
+	// Leave Docker Swarm (this also removes all Swarm-related configs)
+	client.Execute("docker swarm leave --force 2>/dev/null || true")
+
+	if verbose {
 		fmt.Println("  → Pruning Docker system...")
 	}
 
 	// Prune Docker system
 	client.Execute("docker system prune -af --volumes")
+
+	// Clean up Tako state directories
+	if verbose {
+		fmt.Println("  → Removing Tako state files...")
+	}
+	client.Execute("sudo rm -rf /var/lib/tako 2>/dev/null || true")
+	client.Execute("sudo rm -rf /etc/tako 2>/dev/null || true")
 
 	if verbose {
 		fmt.Println("  ✓ Infrastructure purged")

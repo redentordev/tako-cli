@@ -366,7 +366,7 @@ func (d *Deployer) provisionServer(client *ssh.Client, serverName string) error 
 	newVersion := &setup.ServerVersion{
 		Version:        setup.CurrentVersion,
 		InstalledAt:    time.Now(),
-		TakoCLIVersion: "0.3.0",
+		TakoCLIVersion: setup.CurrentVersion, // Use setup version as CLI version proxy
 		Components:     make(map[string]string),
 		Features:       []string{"docker", "traefik-proxy", "firewall", "monitoring"},
 	}
