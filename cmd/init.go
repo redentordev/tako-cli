@@ -270,13 +270,11 @@ environments:
 # ============================================================================
 # NOTIFICATIONS (Optional - deployment notifications)
 # ============================================================================
+# Get notified on Slack, Discord, or custom webhook when deployments start/finish
 # notifications:
-#   slack:
-#     webhook: ${SLACK_WEBHOOK_URL}
-#   discord:
-#     webhook: ${DISCORD_WEBHOOK_URL}
-#   webhook:
-#     url: https://your-webhook-endpoint.com/deploy
+#   slack: ${SLACK_WEBHOOK_URL}       # Slack incoming webhook URL
+#   discord: ${DISCORD_WEBHOOK_URL}   # Discord webhook URL  
+#   webhook: https://your-endpoint.com/deploy  # Generic webhook (receives JSON)
 
 # ============================================================================
 # REFERENCE: Common Service Patterns

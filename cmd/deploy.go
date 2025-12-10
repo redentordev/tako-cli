@@ -14,6 +14,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/git"
 	"github.com/redentordev/tako-cli/pkg/health"
 	"github.com/redentordev/tako-cli/pkg/network"
+	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/registry"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -322,7 +323,36 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		CLICommit:      GitCommit,
 	}
 
+	// Setup notifications if configured
+	var notifier *notification.Notifier
+	if cfg.Notifications != nil && (cfg.Notifications.Slack != "" || cfg.Notifications.Discord != "" || cfg.Notifications.Webhook != "") {
+		notifier = notification.NewNotifier(notification.NotifierConfig{
+			SlackWebhook:   cfg.Notifications.Slack,
+			DiscordWebhook: cfg.Notifications.Discord,
+			Webhook:        cfg.Notifications.Webhook,
+		}, verbose)
+
+		// Send deployment started notification
+		if err := notifier.Notify(notification.Event{
+			Type:        notification.EventDeployStarted,
+			Project:     cfg.Project.Name,
+			Environment: envName,
+			Message:     fmt.Sprintf("Starting deployment of `%s` v%s to `%s`\nCommit: `%s` - %s", cfg.Project.Name, cfg.Project.Version, envName, commitInfo.ShortHash, commitInfo.Message),
+			Details: map[string]string{
+				"version":   cfg.Project.Version,
+				"commit":    commitInfo.ShortHash,
+				"branch":    commitInfo.Branch,
+				"author":    commitInfo.Author,
+				"user":      remotestate.GetCurrentUser(),
+				"services":  fmt.Sprintf("%d", len(services)),
+			},
+		}); err != nil && verbose {
+			fmt.Printf("  Warning: failed to send start notification: %v\n", err)
+		}
+	}
+
 	deploymentFailed := false
+	var deploymentError error
 
 	// Resolve service deployment order based on dependencies
 	resolver := dependency.NewResolver(services, verbose)
@@ -352,6 +382,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				fmt.Printf("  ✗ Build failed: %v\n", err)
 				deploymentFailed = true
+				deploymentError = fmt.Errorf("build failed for %s: %w", serviceName, err)
 				deployment.Status = remotestate.StatusFailed
 				deployment.Error = err.Error()
 				break
@@ -367,6 +398,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		if err := deploy.DeployServiceSwarm(serviceName, &service, fullImageName); err != nil {
 			fmt.Printf("  ✗ Swarm deployment failed: %v\n", err)
 			deploymentFailed = true
+			deploymentError = fmt.Errorf("swarm deployment failed for %s: %w", serviceName, err)
 			deployment.Status = remotestate.StatusFailed
 			deployment.Error = err.Error()
 			break
@@ -425,7 +457,26 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Calculate deployment duration
+	deploymentDuration := time.Since(startTime)
+
 	if deploymentFailed {
+		// Send failure notification
+		if notifier != nil {
+			notifier.Notify(notification.Event{
+				Type:        notification.EventDeployFailed,
+				Project:     cfg.Project.Name,
+				Environment: envName,
+				Message:     fmt.Sprintf("Deployment of `%s` to `%s` failed after %s", cfg.Project.Name, envName, deploymentDuration.Round(time.Second)),
+				Error:       deploymentError.Error(),
+				Duration:    deploymentDuration,
+				Details: map[string]string{
+					"version": cfg.Project.Version,
+					"commit":  commitInfo.ShortHash,
+					"user":    remotestate.GetCurrentUser(),
+				},
+			})
+		}
 		return fmt.Errorf("swarm deployment failed")
 	}
 
@@ -450,6 +501,35 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n✓ Deployment completed successfully!\n\n")
+
+	// Send success notification
+	if notifier != nil {
+		// Collect deployed service URLs
+		var urls []string
+		for _, svc := range services {
+			if svc.Proxy != nil {
+				for _, domain := range svc.Proxy.GetAllDomains() {
+					urls = append(urls, fmt.Sprintf("https://%s", domain))
+				}
+			}
+		}
+
+		notifier.Notify(notification.Event{
+			Type:        notification.EventDeploySucceeded,
+			Project:     cfg.Project.Name,
+			Environment: envName,
+			Message:     fmt.Sprintf("Successfully deployed `%s` v%s to `%s` in %s", cfg.Project.Name, cfg.Project.Version, envName, deploymentDuration.Round(time.Second)),
+			Duration:    deploymentDuration,
+			Details: map[string]string{
+				"version":  cfg.Project.Version,
+				"commit":   commitInfo.ShortHash,
+				"branch":   commitInfo.Branch,
+				"user":     remotestate.GetCurrentUser(),
+				"services": fmt.Sprintf("%d", len(services)),
+				"urls":     fmt.Sprintf("%v", urls),
+			},
+		})
+	}
 
 	// Show service URLs (iterate through services with proxy configured)
 	hasPublicServices := false
