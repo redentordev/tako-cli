@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/redentordev/tako-cli/pkg/crypto"
 )
 
 // SwarmState holds the state of the Docker Swarm
@@ -25,20 +27,24 @@ func (m *Manager) GetSwarmStateFile() string {
 	return filepath.Join(".tako", fmt.Sprintf("swarm_%s_%s.json", m.config.Project.Name, m.environment))
 }
 
-// LoadSwarmState loads the swarm state from disk
+// LoadSwarmState loads and decrypts the swarm state from disk
 func (m *Manager) LoadSwarmState() (*SwarmState, error) {
 	stateFile := m.GetSwarmStateFile()
 
 	// Check if file exists
 	if _, err := os.Stat(stateFile); os.IsNotExist(err) {
-		// Return empty state if file doesn't exist
 		return &SwarmState{
 			Nodes: make(map[string]string),
 		}, nil
 	}
 
-	// Read file
-	data, err := os.ReadFile(stateFile)
+	// Load encryption key and decrypt
+	encryptor, err := crypto.NewEncryptorFromKeyFile(crypto.GetProjectKeyPath("."))
+	if err != nil {
+		return nil, fmt.Errorf("failed to load encryption key: %w", err)
+	}
+
+	data, err := encryptor.ReadEncryptedFile(stateFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read swarm state: %w", err)
 	}
@@ -56,7 +62,8 @@ func (m *Manager) LoadSwarmState() (*SwarmState, error) {
 	return &state, nil
 }
 
-// SaveSwarmState saves the swarm state to disk
+// SaveSwarmState saves the swarm state to disk with encryption
+// Swarm tokens are sensitive and should always be encrypted
 func (m *Manager) SaveSwarmState(state *SwarmState) error {
 	stateFile := m.GetSwarmStateFile()
 
@@ -72,13 +79,24 @@ func (m *Manager) SaveSwarmState(state *SwarmState) error {
 		return fmt.Errorf("failed to marshal swarm state: %w", err)
 	}
 
-	// Write file
-	if err := os.WriteFile(stateFile, data, 0600); err != nil {
+	// Encrypt the state data (contains sensitive swarm tokens)
+	encryptor, err := crypto.NewEncryptorFromKeyFile(crypto.GetProjectKeyPath("."))
+	if err != nil {
+		return fmt.Errorf("failed to initialize encryption: %w", err)
+	}
+
+	encryptedData, err := encryptor.Encrypt(data)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt swarm state: %w", err)
+	}
+
+	// Write encrypted file
+	if err := os.WriteFile(stateFile, encryptedData, 0600); err != nil {
 		return fmt.Errorf("failed to write swarm state: %w", err)
 	}
 
 	if m.verbose {
-		fmt.Printf("  ✓ Swarm state saved to %s\n", stateFile)
+		fmt.Printf("  ✓ Swarm state saved (encrypted) to %s\n", stateFile)
 	}
 
 	return nil

@@ -1,7 +1,6 @@
 package secrets
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/crypto"
 )
 
 type Manager struct {
@@ -91,15 +91,26 @@ func (m *Manager) loadSecrets() error {
 	return nil
 }
 
-// loadFile loads secrets from a specific file
+// loadFile loads and decrypts secrets from a specific file
 func (m *Manager) loadFile(path string) error {
 	// Check if file exists
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil // Not an error if file doesn't exist
 	}
 
-	// Parse the file
-	envVars, err := godotenv.Read(path)
+	// Load encryption key and decrypt file
+	encryptor, err := crypto.NewEncryptorFromKeyFile(crypto.GetProjectKeyPath("."))
+	if err != nil {
+		return fmt.Errorf("failed to load encryption key: %w", err)
+	}
+
+	data, err := encryptor.ReadEncryptedFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to read secrets file: %w", err)
+	}
+
+	// Parse the decrypted env file content
+	envVars, err := godotenv.Unmarshal(string(data))
 	if err != nil {
 		return fmt.Errorf("failed to parse %s: %w", path, err)
 	}
@@ -220,19 +231,12 @@ func (m *Manager) Set(key, value string, environment string) error {
 	return m.loadSecrets()
 }
 
-// writeSecrets writes secrets to a file
+// writeSecrets encrypts and writes secrets to a file
 func (m *Manager) writeSecrets(path string, secrets map[string]string) error {
-	// Create or truncate file with secure permissions
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	// Write header
-	writer := bufio.NewWriter(file)
-	fmt.Fprintf(writer, "# Tako secrets file - DO NOT COMMIT\n")
-	fmt.Fprintf(writer, "# Generated/Updated: %s\n\n", time.Now().Format(time.RFC3339))
+	// Build content in memory
+	var buf strings.Builder
+	buf.WriteString("# Tako secrets file - ENCRYPTED\n")
+	buf.WriteString(fmt.Sprintf("# Generated/Updated: %s\n\n", time.Now().Format(time.RFC3339)))
 
 	// Write secrets (sorted for consistency)
 	keys := make([]string, 0, len(secrets))
@@ -249,10 +253,16 @@ func (m *Manager) writeSecrets(path string, secrets map[string]string) error {
 			value = fmt.Sprintf("\"%s\"", strings.ReplaceAll(value, "\"", "\\\""))
 		}
 
-		fmt.Fprintf(writer, "%s=%s\n", key, value)
+		buf.WriteString(fmt.Sprintf("%s=%s\n", key, value))
 	}
 
-	return writer.Flush()
+	// Load encryption key and encrypt
+	encryptor, err := crypto.NewEncryptorFromKeyFile(crypto.GetProjectKeyPath("."))
+	if err != nil {
+		return fmt.Errorf("failed to load encryption key: %w", err)
+	}
+
+	return encryptor.WriteEncryptedFile(path, []byte(buf.String()), 0600)
 }
 
 // List returns all secret keys (values are not returned for security)

@@ -1,12 +1,20 @@
 package hooks
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+)
+
+// Default timeouts for different hook types
+const (
+	DefaultBuildHookTimeout  = 10 * time.Minute // Build hooks can take longer
+	DefaultDeployHookTimeout = 5 * time.Minute  // Deploy hooks should be faster
+	DefaultExecHookTimeout   = 2 * time.Minute  // In-container exec should be quick
 )
 
 // Executor handles lifecycle hook execution
@@ -40,7 +48,7 @@ func (e *Executor) ExecutePreBuild(hooks []string, buildContext string) error {
 	}
 
 	for i, hook := range hooks {
-		if err := e.executeHook(hook, buildContext, fmt.Sprintf("pre-build[%d]", i)); err != nil {
+		if err := e.executeHookWithTimeout(hook, buildContext, fmt.Sprintf("pre-build[%d]", i), DefaultBuildHookTimeout); err != nil {
 			return fmt.Errorf("pre-build hook failed: %w", err)
 		}
 	}
@@ -62,7 +70,7 @@ func (e *Executor) ExecutePostBuild(hooks []string, imageName string) error {
 		// Replace {{IMAGE}} placeholder with actual image name
 		expandedHook := strings.ReplaceAll(hook, "{{IMAGE}}", imageName)
 
-		if err := e.executeHook(expandedHook, "", fmt.Sprintf("post-build[%d]", i)); err != nil {
+		if err := e.executeHookWithTimeout(expandedHook, "", fmt.Sprintf("post-build[%d]", i), DefaultBuildHookTimeout); err != nil {
 			return fmt.Errorf("post-build hook failed: %w", err)
 		}
 	}
@@ -147,10 +155,15 @@ func (e *Executor) ExecutePostStart(hooks []string, fullServiceName string, envV
 	return nil
 }
 
-// executeHook executes a single hook command on the server
+// executeHook executes a single hook command on the server with timeout
 func (e *Executor) executeHook(command, workDir, hookName string) error {
+	return e.executeHookWithTimeout(command, workDir, hookName, DefaultDeployHookTimeout)
+}
+
+// executeHookWithTimeout executes a hook command with a specific timeout
+func (e *Executor) executeHookWithTimeout(command, workDir, hookName string, timeout time.Duration) error {
 	if e.verbose {
-		fmt.Printf("    [%s] %s\n", hookName, command)
+		fmt.Printf("    [%s] %s (timeout: %s)\n", hookName, command, timeout)
 	}
 
 	// Build the command with working directory if specified
@@ -159,10 +172,18 @@ func (e *Executor) executeHook(command, workDir, hookName string) error {
 		fullCmd = fmt.Sprintf("cd %s && %s", workDir, command)
 	}
 
-	// Execute the command
-	output, err := e.client.Execute(fullCmd)
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// Execute the command with timeout
+	output, err := e.client.ExecuteWithContext(ctx, fullCmd)
 
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			fmt.Printf("    ✗ Hook timed out after %s: %s\n", timeout, hookName)
+			return fmt.Errorf("hook timed out after %s", timeout)
+		}
 		fmt.Printf("    ✗ Hook failed: %s\n", hookName)
 		if output != "" {
 			fmt.Printf("    Output:\n")
@@ -191,10 +212,10 @@ func (e *Executor) executeHook(command, workDir, hookName string) error {
 	return nil
 }
 
-// executeInContainer executes a command inside a running container
+// executeInContainer executes a command inside a running container with timeout
 func (e *Executor) executeInContainer(serviceName, command, hookName string) error {
 	if e.verbose {
-		fmt.Printf("    [%s] exec in container: %s\n", hookName, command)
+		fmt.Printf("    [%s] exec in container: %s (timeout: %s)\n", hookName, command, DefaultExecHookTimeout)
 	}
 
 	// Get a container ID for this service
@@ -209,11 +230,22 @@ func (e *Executor) executeInContainer(serviceName, command, hookName string) err
 		return fmt.Errorf("no running container found for service %s", serviceName)
 	}
 
-	// Execute command in container
-	execCmd := fmt.Sprintf("docker exec %s sh -c '%s'", containerID, command)
-	output, err := e.client.Execute(execCmd)
+	// Escape single quotes in command to prevent injection
+	safeCommand := strings.ReplaceAll(command, "'", "'\"'\"'")
+
+	// Execute command in container with timeout
+	execCmd := fmt.Sprintf("docker exec %s sh -c '%s'", containerID, safeCommand)
+
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultExecHookTimeout)
+	defer cancel()
+
+	output, err := e.client.ExecuteWithContext(ctx, execCmd)
 
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			fmt.Printf("    ✗ Hook timed out after %s: %s\n", DefaultExecHookTimeout, hookName)
+			return fmt.Errorf("hook timed out after %s", DefaultExecHookTimeout)
+		}
 		fmt.Printf("    ✗ Hook failed: %s\n", hookName)
 		if output != "" {
 			fmt.Printf("    Output:\n")

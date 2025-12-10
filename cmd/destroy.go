@@ -8,6 +8,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/state"
 	"github.com/spf13/cobra"
 )
 
@@ -67,6 +68,14 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+
+	// Acquire state lock to prevent concurrent operations
+	stateLock := state.NewStateLock(".tako")
+	lockInfo, err := stateLock.Acquire("destroy")
+	if err != nil {
+		return fmt.Errorf("cannot destroy: %w", err)
+	}
+	defer stateLock.Release(lockInfo)
 
 	// Determine which servers to destroy
 	serversToDestroy := make(map[string]config.ServerConfig)

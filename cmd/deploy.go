@@ -62,6 +62,18 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
+	// Acquire state lock to prevent concurrent deployments
+	stateLock := localstate.NewStateLock(".tako")
+	lockInfo, err := stateLock.Acquire("deploy")
+	if err != nil {
+		return fmt.Errorf("cannot deploy: %w", err)
+	}
+	defer stateLock.Release(lockInfo)
+
+	if verbose {
+		fmt.Printf("→ Acquired deployment lock (ID: %s)\n", lockInfo.ID)
+	}
+
 	// Initialize Git client
 	gitClient := git.NewClient(".")
 

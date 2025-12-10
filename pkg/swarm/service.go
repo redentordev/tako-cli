@@ -233,7 +233,10 @@ func (m *Manager) createService(
 			// Both source and target specified
 			// Check if source is an absolute path (bind mount) or volume name (named volume)
 			if strings.HasPrefix(source, "/") || strings.HasPrefix(source, "\\") || (len(source) > 1 && source[1] == ':') {
-				// Absolute path = bind mount
+				// Absolute path = bind mount - validate for security
+				if err := validateBindMountPath(source); err != nil {
+					return fmt.Errorf("invalid bind mount for service %s: %w", serviceName, err)
+				}
 				cmd += fmt.Sprintf(" --mount type=bind,source=%s,target=%s", source, target)
 			} else {
 				// Relative name = named volume (add project/environment prefix)
@@ -548,6 +551,54 @@ func (m *Manager) ScaleService(client *ssh.Client, fullServiceName string, repli
 
 	if m.verbose {
 		fmt.Printf("  ✓ Service scaled successfully\n")
+	}
+
+	return nil
+}
+
+// validateBindMountPath checks if a bind mount path is safe to use
+// Blocks access to sensitive system directories
+func validateBindMountPath(path string) error {
+	// Normalize path
+	cleanPath := strings.TrimSuffix(path, "/")
+
+	// Blocked paths - these should never be bind mounted
+	blockedPaths := []string{
+		"/",
+		"/etc",
+		"/etc/passwd",
+		"/etc/shadow",
+		"/etc/sudoers",
+		"/etc/ssh",
+		"/root",
+		"/root/.ssh",
+		"/var/run/docker.sock",
+		"/proc",
+		"/sys",
+		"/dev",
+		"/boot",
+		"/lib",
+		"/lib64",
+		"/usr/bin",
+		"/usr/sbin",
+		"/bin",
+		"/sbin",
+	}
+
+	// Check exact matches and prefixes
+	for _, blocked := range blockedPaths {
+		if cleanPath == blocked {
+			return fmt.Errorf("bind mounting '%s' is not allowed (security risk)", path)
+		}
+		// Also block subdirectories of sensitive paths
+		if blocked != "/" && strings.HasPrefix(cleanPath, blocked+"/") {
+			return fmt.Errorf("bind mounting paths under '%s' is not allowed (security risk)", blocked)
+		}
+	}
+
+	// Block paths that could escape containment
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("path traversal (..) not allowed in bind mounts")
 	}
 
 	return nil

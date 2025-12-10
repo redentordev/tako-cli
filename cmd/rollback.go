@@ -3,10 +3,11 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/redentordev/tako-cli/internal/state"
+	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/spf13/cobra"
 )
 
@@ -48,6 +49,14 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+
+	// Acquire state lock to prevent concurrent operations
+	stateLock := localstate.NewStateLock(".tako")
+	lockInfo, err := stateLock.Acquire("rollback")
+	if err != nil {
+		return fmt.Errorf("cannot rollback: %w", err)
+	}
+	defer stateLock.Release(lockInfo)
 
 	// Get environment and services
 	envName := getEnvironmentName(cfg)
@@ -120,10 +129,10 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create state manager
-	stateManager := state.NewStateManager(client, cfg.Project.Name, server.Host)
+	stateManager := remotestate.NewStateManager(client, cfg.Project.Name, server.Host)
 
 	// Determine which deployment to rollback to
-	var targetDeployment *state.DeploymentState
+	var targetDeployment *remotestate.DeploymentState
 
 	if len(args) > 0 {
 		// Rollback to specific deployment ID
@@ -167,7 +176,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	}
 
 	// Mark this deployment as rolled back in history
-	targetDeployment.Status = state.StatusRolledBack
+	targetDeployment.Status = remotestate.StatusRolledBack
 	if err := stateManager.SaveDeployment(targetDeployment); err != nil {
 		if verbose {
 			fmt.Printf("Warning: failed to update deployment status: %v\n", err)
