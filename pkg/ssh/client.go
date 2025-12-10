@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 // Client wraps an SSH connection with additional functionality
@@ -20,6 +21,55 @@ type Client struct {
 	port   int
 	conn   *ssh.Client
 	mu     sync.Mutex
+}
+
+// parsePrivateKey parses an SSH private key, handling various formats
+// Supports: RSA, Ed25519, ECDSA, DSA keys in PEM or OpenSSH format
+// AWS .pem files are standard PEM format and work automatically
+func parsePrivateKey(key []byte) (ssh.Signer, error) {
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		// Check if this is a passphrase-protected key
+		if err.Error() == "ssh: this private key is passphrase protected" {
+			return nil, fmt.Errorf("SSH key is passphrase-protected. Tako does not support passphrase-protected keys.\n" +
+				"Options:\n" +
+				"  1. Use ssh-agent: ssh-add ~/.ssh/your_key (then Tako will use agent forwarding)\n" +
+				"  2. Create an unencrypted copy: ssh-keygen -p -f ~/.ssh/your_key -m PEM -N ''\n" +
+				"  3. Use password authentication instead: password: ${SSH_PASSWORD}")
+		}
+		// Check for common format issues
+		if !isPEMFormat(key) && !isOpenSSHFormat(key) {
+			return nil, fmt.Errorf("failed to parse SSH key: unrecognized key format. Expected PEM or OpenSSH format")
+		}
+		return nil, fmt.Errorf("failed to parse SSH key: %w", err)
+	}
+	return signer, nil
+}
+
+// isPEMFormat checks if the key data looks like PEM format
+func isPEMFormat(data []byte) bool {
+	return len(data) > 11 && string(data[:11]) == "-----BEGIN "
+}
+
+// isOpenSSHFormat checks if the key data looks like OpenSSH format
+func isOpenSSHFormat(data []byte) bool {
+	return len(data) > 36 && string(data[:36]) == "-----BEGIN OPENSSH PRIVATE KEY-----"
+}
+
+// getSSHAgentAuth returns an ssh.AuthMethod using the SSH agent if available
+func getSSHAgentAuth() ssh.AuthMethod {
+	socket := os.Getenv("SSH_AUTH_SOCK")
+	if socket == "" {
+		return nil
+	}
+
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		return nil
+	}
+
+	agentClient := agent.NewClient(conn)
+	return ssh.PublicKeysCallback(agentClient.Signers)
 }
 
 // Pool manages a pool of SSH connections
@@ -36,25 +86,41 @@ func NewPool() *Pool {
 }
 
 // NewClient creates a new SSH client with key-based authentication
+// Also tries ssh-agent for passphrase-protected keys
 func NewClient(host string, port int, user string, keyPath string) (*Client, error) {
-	// Read the private key
+	var authMethods []ssh.AuthMethod
+
+	// Try to read and parse the key file
 	key, err := os.ReadFile(keyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read SSH key: %w", err)
 	}
 
 	// Parse the private key
-	signer, err := ssh.ParsePrivateKey(key)
+	signer, err := parsePrivateKey(key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse SSH key: %w", err)
+		// If key parsing failed (e.g., passphrase protected), try ssh-agent
+		if agentAuth := getSSHAgentAuth(); agentAuth != nil {
+			authMethods = append(authMethods, agentAuth)
+		} else {
+			// No agent available, return the original error
+			return nil, err
+		}
+	} else {
+		authMethods = append(authMethods, ssh.PublicKeys(signer))
+	}
+
+	// Also add ssh-agent as fallback if available
+	if len(authMethods) == 1 {
+		if agentAuth := getSSHAgentAuth(); agentAuth != nil {
+			authMethods = append(authMethods, agentAuth)
+		}
 	}
 
 	// Create SSH client config with optimized settings
 	config := &ssh.ClientConfig{
-		User: user,
-		Auth: []ssh.AuthMethod{
-			ssh.PublicKeys(signer),
-		},
+		User:            user,
+		Auth:            authMethods,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Implement proper host key verification
 		Timeout:         60 * time.Second,            // Increased to 60s for very slow/busy servers
 		// Client version to avoid version negotiation issues
@@ -91,6 +157,7 @@ func NewClientWithPassword(host string, port int, user string, password string) 
 
 // NewClientWithAuth creates a new SSH client with either key or password authentication
 // If both keyPath and password are provided, key-based auth is preferred
+// Also tries ssh-agent as fallback for passphrase-protected keys
 func NewClientWithAuth(host string, port int, user string, keyPath string, password string) (*Client, error) {
 	var authMethods []ssh.AuthMethod
 
@@ -98,10 +165,22 @@ func NewClientWithAuth(host string, port int, user string, keyPath string, passw
 	if keyPath != "" {
 		key, err := os.ReadFile(keyPath)
 		if err == nil {
-			signer, err := ssh.ParsePrivateKey(key)
+			signer, err := parsePrivateKey(key)
 			if err == nil {
 				authMethods = append(authMethods, ssh.PublicKeys(signer))
+			} else {
+				// Key parsing failed, try ssh-agent
+				if agentAuth := getSSHAgentAuth(); agentAuth != nil {
+					authMethods = append(authMethods, agentAuth)
+				}
 			}
+		}
+	}
+
+	// Try ssh-agent if no key methods yet
+	if len(authMethods) == 0 {
+		if agentAuth := getSSHAgentAuth(); agentAuth != nil {
+			authMethods = append(authMethods, agentAuth)
 		}
 	}
 
