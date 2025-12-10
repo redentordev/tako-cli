@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/swarm"
 	"github.com/spf13/cobra"
@@ -137,6 +138,16 @@ func runScale(cmd *cobra.Command, args []string) error {
 	defer sshPool.CloseAll()
 	swarmMgr := swarm.NewManager(cfg, sshPool, envName, verbose)
 
+	// Setup notifications if configured
+	var notifier *notification.Notifier
+	if cfg.Notifications != nil && (cfg.Notifications.Slack != "" || cfg.Notifications.Discord != "" || cfg.Notifications.Webhook != "") {
+		notifier = notification.NewNotifier(notification.NotifierConfig{
+			SlackWebhook:   cfg.Notifications.Slack,
+			DiscordWebhook: cfg.Notifications.Discord,
+			Webhook:        cfg.Notifications.Webhook,
+		}, verbose)
+	}
+
 	// Scale each service
 	for serviceName, desiredReplicas := range scaleTargets {
 		// Build full service name: {project}_{env}_{service}
@@ -162,6 +173,11 @@ func runScale(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Printf("✓ Service %s scaled successfully\n", serviceName)
+
+		// Send scale notification
+		if notifier != nil && currentReplicas != desiredReplicas {
+			notifier.Notify(notification.ScaleEvent(cfg.Project.Name, envName, serviceName, currentReplicas, desiredReplicas))
+		}
 	}
 
 	fmt.Println()

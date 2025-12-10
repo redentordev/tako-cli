@@ -20,9 +20,27 @@ const (
 	EventRollbackDone    EventType = "rollback_done"
 	EventServiceDown     EventType = "service_down"
 	EventServiceUp       EventType = "service_up"
+	EventServiceRestarted EventType = "service_restarted"
 	EventDriftDetected   EventType = "drift_detected"
 	EventBackupCompleted EventType = "backup_completed"
 	EventBackupFailed    EventType = "backup_failed"
+	// Resource alerts
+	EventHighCPU         EventType = "high_cpu"
+	EventHighMemory      EventType = "high_memory"
+	EventHighDisk        EventType = "high_disk"
+	EventResourceNormal  EventType = "resource_normal"
+	// Health alerts
+	EventHealthCheckFailed  EventType = "health_check_failed"
+	EventHealthCheckRecovered EventType = "health_check_recovered"
+	EventContainerOOM       EventType = "container_oom"
+	EventContainerCrashLoop EventType = "container_crash_loop"
+	// SSL alerts
+	EventSSLExpiringSoon  EventType = "ssl_expiring_soon"
+	EventSSLExpired       EventType = "ssl_expired"
+	EventSSLRenewed       EventType = "ssl_renewed"
+	// Scaling events
+	EventScaleUp          EventType = "scale_up"
+	EventScaleDown        EventType = "scale_down"
 )
 
 // Event represents a notification event
@@ -257,13 +275,16 @@ func (n *Notifier) postJSON(url string, payload interface{}) error {
 // getEventColor returns a hex color for the event type (Slack)
 func (n *Notifier) getEventColor(eventType EventType) string {
 	switch eventType {
-	case EventDeploySucceeded, EventServiceUp, EventBackupCompleted, EventRollbackDone:
+	case EventDeploySucceeded, EventServiceUp, EventBackupCompleted, EventRollbackDone,
+		EventHealthCheckRecovered, EventResourceNormal, EventSSLRenewed:
 		return "#36a64f" // Green
-	case EventDeployFailed, EventServiceDown, EventBackupFailed:
+	case EventDeployFailed, EventServiceDown, EventBackupFailed,
+		EventContainerOOM, EventContainerCrashLoop, EventSSLExpired:
 		return "#dc3545" // Red
-	case EventDeployStarted, EventRollbackStarted:
+	case EventDeployStarted, EventRollbackStarted, EventScaleUp, EventScaleDown, EventServiceRestarted:
 		return "#007bff" // Blue
-	case EventDriftDetected:
+	case EventDriftDetected, EventHighCPU, EventHighMemory, EventHighDisk,
+		EventHealthCheckFailed, EventSSLExpiringSoon:
 		return "#ffc107" // Yellow/Warning
 	default:
 		return "#6c757d" // Gray
@@ -273,13 +294,16 @@ func (n *Notifier) getEventColor(eventType EventType) string {
 // getEventColorInt returns an integer color for Discord
 func (n *Notifier) getEventColorInt(eventType EventType) int {
 	switch eventType {
-	case EventDeploySucceeded, EventServiceUp, EventBackupCompleted, EventRollbackDone:
+	case EventDeploySucceeded, EventServiceUp, EventBackupCompleted, EventRollbackDone,
+		EventHealthCheckRecovered, EventResourceNormal, EventSSLRenewed:
 		return 0x36a64f // Green
-	case EventDeployFailed, EventServiceDown, EventBackupFailed:
+	case EventDeployFailed, EventServiceDown, EventBackupFailed,
+		EventContainerOOM, EventContainerCrashLoop, EventSSLExpired:
 		return 0xdc3545 // Red
-	case EventDeployStarted, EventRollbackStarted:
+	case EventDeployStarted, EventRollbackStarted, EventScaleUp, EventScaleDown, EventServiceRestarted:
 		return 0x007bff // Blue
-	case EventDriftDetected:
+	case EventDriftDetected, EventHighCPU, EventHighMemory, EventHighDisk,
+		EventHealthCheckFailed, EventSSLExpiringSoon:
 		return 0xffc107 // Yellow
 	default:
 		return 0x6c757d // Gray
@@ -303,12 +327,40 @@ func (n *Notifier) getEventEmoji(eventType EventType) string {
 		return "🔴"
 	case EventServiceUp:
 		return "🟢"
+	case EventServiceRestarted:
+		return "🔄"
 	case EventDriftDetected:
 		return "⚠️"
 	case EventBackupCompleted:
 		return "💾"
 	case EventBackupFailed:
 		return "⚠️"
+	case EventHighCPU:
+		return "🔥"
+	case EventHighMemory:
+		return "💾"
+	case EventHighDisk:
+		return "💿"
+	case EventResourceNormal:
+		return "✅"
+	case EventHealthCheckFailed:
+		return "💔"
+	case EventHealthCheckRecovered:
+		return "💚"
+	case EventContainerOOM:
+		return "💥"
+	case EventContainerCrashLoop:
+		return "🔁"
+	case EventSSLExpiringSoon:
+		return "🔐"
+	case EventSSLExpired:
+		return "🔓"
+	case EventSSLRenewed:
+		return "🔒"
+	case EventScaleUp:
+		return "📈"
+	case EventScaleDown:
+		return "📉"
 	default:
 		return "📢"
 	}
@@ -331,12 +383,40 @@ func (n *Notifier) getEventTitle(eventType EventType) string {
 		return "Service Down"
 	case EventServiceUp:
 		return "Service Recovered"
+	case EventServiceRestarted:
+		return "Service Restarted"
 	case EventDriftDetected:
 		return "Configuration Drift Detected"
 	case EventBackupCompleted:
 		return "Backup Completed"
 	case EventBackupFailed:
 		return "Backup Failed"
+	case EventHighCPU:
+		return "High CPU Usage Alert"
+	case EventHighMemory:
+		return "High Memory Usage Alert"
+	case EventHighDisk:
+		return "High Disk Usage Alert"
+	case EventResourceNormal:
+		return "Resource Usage Normal"
+	case EventHealthCheckFailed:
+		return "Health Check Failed"
+	case EventHealthCheckRecovered:
+		return "Health Check Recovered"
+	case EventContainerOOM:
+		return "Container Out of Memory"
+	case EventContainerCrashLoop:
+		return "Container Crash Loop Detected"
+	case EventSSLExpiringSoon:
+		return "SSL Certificate Expiring Soon"
+	case EventSSLExpired:
+		return "SSL Certificate Expired"
+	case EventSSLRenewed:
+		return "SSL Certificate Renewed"
+	case EventScaleUp:
+		return "Service Scaled Up"
+	case EventScaleDown:
+		return "Service Scaled Down"
 	default:
 		return "Tako Notification"
 	}
@@ -390,6 +470,196 @@ func DriftDetectedEvent(project, env, service, description string) Event {
 		Environment: env,
 		Service:     service,
 		Message:     description,
+		Timestamp:   time.Now(),
+	}
+}
+
+// HighCPUEvent creates a high CPU usage alert event
+func HighCPUEvent(project, env, service string, cpuPercent float64, threshold float64) Event {
+	return Event{
+		Type:        EventHighCPU,
+		Project:     project,
+		Environment: env,
+		Service:     service,
+		Message:     fmt.Sprintf("CPU usage at %.1f%% (threshold: %.1f%%)", cpuPercent, threshold),
+		Details: map[string]string{
+			"cpu_percent": fmt.Sprintf("%.1f", cpuPercent),
+			"threshold":   fmt.Sprintf("%.1f", threshold),
+		},
+		Timestamp: time.Now(),
+	}
+}
+
+// HighMemoryEvent creates a high memory usage alert event
+func HighMemoryEvent(project, env, service string, memPercent float64, threshold float64, usedMB, totalMB int64) Event {
+	return Event{
+		Type:        EventHighMemory,
+		Project:     project,
+		Environment: env,
+		Service:     service,
+		Message:     fmt.Sprintf("Memory usage at %.1f%% (%dMB / %dMB, threshold: %.1f%%)", memPercent, usedMB, totalMB, threshold),
+		Details: map[string]string{
+			"mem_percent": fmt.Sprintf("%.1f", memPercent),
+			"used_mb":     fmt.Sprintf("%d", usedMB),
+			"total_mb":    fmt.Sprintf("%d", totalMB),
+			"threshold":   fmt.Sprintf("%.1f", threshold),
+		},
+		Timestamp: time.Now(),
+	}
+}
+
+// HighDiskEvent creates a high disk usage alert event
+func HighDiskEvent(project, env string, diskPercent float64, threshold float64, usedGB, totalGB int64) Event {
+	return Event{
+		Type:        EventHighDisk,
+		Project:     project,
+		Environment: env,
+		Message:     fmt.Sprintf("Disk usage at %.1f%% (%dGB / %dGB, threshold: %.1f%%)", diskPercent, usedGB, totalGB, threshold),
+		Details: map[string]string{
+			"disk_percent": fmt.Sprintf("%.1f", diskPercent),
+			"used_gb":      fmt.Sprintf("%d", usedGB),
+			"total_gb":     fmt.Sprintf("%d", totalGB),
+			"threshold":    fmt.Sprintf("%.1f", threshold),
+		},
+		Timestamp: time.Now(),
+	}
+}
+
+// HealthCheckFailedEvent creates a health check failure event
+func HealthCheckFailedEvent(project, env, service string, endpoint string, statusCode int, err error) Event {
+	errMsg := ""
+	if err != nil {
+		errMsg = err.Error()
+	} else if statusCode > 0 {
+		errMsg = fmt.Sprintf("HTTP %d", statusCode)
+	}
+	return Event{
+		Type:        EventHealthCheckFailed,
+		Project:     project,
+		Environment: env,
+		Service:     service,
+		Message:     fmt.Sprintf("Health check failed for `%s`: %s", endpoint, errMsg),
+		Error:       errMsg,
+		Details: map[string]string{
+			"endpoint":    endpoint,
+			"status_code": fmt.Sprintf("%d", statusCode),
+		},
+		Timestamp: time.Now(),
+	}
+}
+
+// HealthCheckRecoveredEvent creates a health check recovery event
+func HealthCheckRecoveredEvent(project, env, service string, endpoint string, downtime time.Duration) Event {
+	return Event{
+		Type:        EventHealthCheckRecovered,
+		Project:     project,
+		Environment: env,
+		Service:     service,
+		Message:     fmt.Sprintf("Health check recovered for `%s` after %s", endpoint, downtime.Round(time.Second)),
+		Duration:    downtime,
+		Details: map[string]string{
+			"endpoint": endpoint,
+			"downtime": downtime.Round(time.Second).String(),
+		},
+		Timestamp: time.Now(),
+	}
+}
+
+// ContainerOOMEvent creates an out of memory event
+func ContainerOOMEvent(project, env, service string, containerID string) Event {
+	return Event{
+		Type:        EventContainerOOM,
+		Project:     project,
+		Environment: env,
+		Service:     service,
+		Message:     fmt.Sprintf("Container `%s` was killed due to out of memory (OOM)", service),
+		Error:       "Container killed by OOM killer",
+		Details: map[string]string{
+			"container_id": containerID,
+		},
+		Timestamp: time.Now(),
+	}
+}
+
+// ContainerCrashLoopEvent creates a crash loop event
+func ContainerCrashLoopEvent(project, env, service string, restartCount int, lastError string) Event {
+	return Event{
+		Type:        EventContainerCrashLoop,
+		Project:     project,
+		Environment: env,
+		Service:     service,
+		Message:     fmt.Sprintf("Container `%s` is in crash loop (%d restarts)", service, restartCount),
+		Error:       lastError,
+		Details: map[string]string{
+			"restart_count": fmt.Sprintf("%d", restartCount),
+			"last_error":    lastError,
+		},
+		Timestamp: time.Now(),
+	}
+}
+
+// SSLExpiringSoonEvent creates an SSL expiring soon event
+func SSLExpiringSoonEvent(project, env string, domain string, expiresAt time.Time, daysUntilExpiry int) Event {
+	return Event{
+		Type:        EventSSLExpiringSoon,
+		Project:     project,
+		Environment: env,
+		Message:     fmt.Sprintf("SSL certificate for `%s` expires in %d days (%s)", domain, daysUntilExpiry, expiresAt.Format("2006-01-02")),
+		Details: map[string]string{
+			"domain":      domain,
+			"expires_at":  expiresAt.Format(time.RFC3339),
+			"days_left":   fmt.Sprintf("%d", daysUntilExpiry),
+		},
+		Timestamp: time.Now(),
+	}
+}
+
+// ScaleEvent creates a scale up/down event
+func ScaleEvent(project, env, service string, fromReplicas, toReplicas int) Event {
+	eventType := EventScaleUp
+	if toReplicas < fromReplicas {
+		eventType = EventScaleDown
+	}
+	return Event{
+		Type:        eventType,
+		Project:     project,
+		Environment: env,
+		Service:     service,
+		Message:     fmt.Sprintf("Service `%s` scaled from %d to %d replicas", service, fromReplicas, toReplicas),
+		Details: map[string]string{
+			"from_replicas": fmt.Sprintf("%d", fromReplicas),
+			"to_replicas":   fmt.Sprintf("%d", toReplicas),
+		},
+		Timestamp: time.Now(),
+	}
+}
+
+// ServiceDownEvent creates a service down event
+func ServiceDownEvent(project, env, service string, err error) Event {
+	return Event{
+		Type:        EventServiceDown,
+		Project:     project,
+		Environment: env,
+		Service:     service,
+		Message:     fmt.Sprintf("Service `%s` is down", service),
+		Error:       err.Error(),
+		Timestamp:   time.Now(),
+	}
+}
+
+// ServiceUpEvent creates a service up/recovered event
+func ServiceUpEvent(project, env, service string, downtime time.Duration) Event {
+	msg := fmt.Sprintf("Service `%s` is back online", service)
+	if downtime > 0 {
+		msg = fmt.Sprintf("Service `%s` recovered after %s downtime", service, downtime.Round(time.Second))
+	}
+	return Event{
+		Type:        EventServiceUp,
+		Project:     project,
+		Environment: env,
+		Service:     service,
+		Message:     msg,
+		Duration:    downtime,
 		Timestamp:   time.Now(),
 	}
 }

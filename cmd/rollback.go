@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"fmt"
+	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
+	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/spf13/cobra"
@@ -166,14 +168,53 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  User:      %s\n", targetDeployment.User)
 	fmt.Printf("\n")
 
+	// Setup notifications if configured
+	var notifier *notification.Notifier
+	if cfg.Notifications != nil && (cfg.Notifications.Slack != "" || cfg.Notifications.Discord != "" || cfg.Notifications.Webhook != "") {
+		notifier = notification.NewNotifier(notification.NotifierConfig{
+			SlackWebhook:   cfg.Notifications.Slack,
+			DiscordWebhook: cfg.Notifications.Discord,
+			Webhook:        cfg.Notifications.Webhook,
+		}, verbose)
+
+		// Send rollback started notification
+		notifier.Notify(notification.Event{
+			Type:        notification.EventRollbackStarted,
+			Project:     cfg.Project.Name,
+			Environment: envName,
+			Service:     rollbackService,
+			Message:     fmt.Sprintf("Rolling back `%s` to deployment `%s` (version %s)", rollbackService, targetDeployment.ID, targetDeployment.Version),
+			Details: map[string]string{
+				"deployment_id": targetDeployment.ID,
+				"version":       targetDeployment.Version,
+				"user":          remotestate.GetCurrentUser(),
+			},
+		})
+	}
+
+	startTime := time.Now()
+
 	// Create deployer
 	deploy := deployer.NewDeployer(client, cfg, envName, verbose)
 
 	// Perform rollback using state
 	serviceState := targetDeployment.Services[rollbackService]
 	if err := deploy.RollbackToState(rollbackService, &serviceState); err != nil {
+		// Send failure notification
+		if notifier != nil {
+			notifier.Notify(notification.Event{
+				Type:        notification.EventDeployFailed,
+				Project:     cfg.Project.Name,
+				Environment: envName,
+				Service:     rollbackService,
+				Message:     fmt.Sprintf("Rollback of `%s` failed", rollbackService),
+				Error:       err.Error(),
+			})
+		}
 		return fmt.Errorf("rollback failed: %w", err)
 	}
+
+	rollbackDuration := time.Since(startTime)
 
 	// Mark this deployment as rolled back in history
 	targetDeployment.Status = remotestate.StatusRolledBack
@@ -181,6 +222,22 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		if verbose {
 			fmt.Printf("Warning: failed to update deployment status: %v\n", err)
 		}
+	}
+
+	// Send success notification
+	if notifier != nil {
+		notifier.Notify(notification.Event{
+			Type:        notification.EventRollbackDone,
+			Project:     cfg.Project.Name,
+			Environment: envName,
+			Service:     rollbackService,
+			Message:     fmt.Sprintf("Successfully rolled back `%s` to version %s in %s", rollbackService, targetDeployment.Version, rollbackDuration.Round(time.Second)),
+			Duration:    rollbackDuration,
+			Details: map[string]string{
+				"deployment_id": targetDeployment.ID,
+				"version":       targetDeployment.Version,
+			},
+		})
 	}
 
 	fmt.Printf("\n✓ Successfully rolled back to deployment %s!\n", targetDeployment.ID)
