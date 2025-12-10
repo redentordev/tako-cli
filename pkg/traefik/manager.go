@@ -7,7 +7,6 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
-	"github.com/redentordev/tako-cli/pkg/utils"
 )
 
 // Manager handles Traefik proxy configuration for Swarm deployments

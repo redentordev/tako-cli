@@ -28,7 +28,7 @@ You can view details and rollback to any previous deployment.`,
 
 func init() {
 	rootCmd.AddCommand(historyCmd)
-	historyCmd.Flags().StringVarP(&historyServer, "server", "s", "production", "Server to view history from")
+	historyCmd.Flags().StringVarP(&historyServer, "server", "s", "", "Server to view history from (default: first server)")
 	historyCmd.Flags().IntVarP(&historyLimit, "limit", "n", 10, "Number of deployments to show")
 	historyCmd.Flags().StringVar(&historyStatus, "status", "", "Filter by status (success, failed, rolled_back)")
 }
@@ -40,7 +40,14 @@ func runHistory(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Get server config
+	// Get server config - default to first server if not specified
+	if historyServer == "" {
+		for name := range cfg.Servers {
+			historyServer = name
+			break
+		}
+	}
+
 	server, exists := cfg.Servers[historyServer]
 	if !exists {
 		return fmt.Errorf("server %s not found in configuration", historyServer)

@@ -132,8 +132,10 @@ func runScale(cmd *cobra.Command, args []string) error {
 	}
 	defer client.Close()
 
-	// Create swarm manager
-	swarmMgr := swarm.NewManager(verbose)
+	// Create SSH pool and swarm manager
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+	swarmMgr := swarm.NewManager(cfg, sshPool, envName, verbose)
 
 	// Scale each service
 	for serviceName, desiredReplicas := range scaleTargets {

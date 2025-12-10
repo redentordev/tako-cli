@@ -553,8 +553,4 @@ func (d *Deployer) VerifyNetworkSetup() error {
 	return nil
 }
 
-// VerifyDatabaseConnectivity verifies that a service can reach its database
-func (d *Deployer) VerifyDatabaseConnectivity(serviceName string, service *config.ServiceConfig) error {
-	containerName := fmt.Sprintf("%s_%s_%s_1", d.config.Project.Name, d.environment, serviceName)
-	return d.getHealthChecker().VerifyDatabaseConnectivity(containerName, service)
-}
+

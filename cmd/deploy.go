@@ -26,6 +26,8 @@ var (
 	deployService string
 	skipBuild     bool
 	skipHooks     bool
+	deployYes     bool
+	commitMessage string
 )
 
 var deployCmd = &cobra.Command{
@@ -53,6 +55,8 @@ func init() {
 	deployCmd.Flags().StringVar(&deployService, "service", "", "Deploy specific service")
 	deployCmd.Flags().BoolVar(&skipBuild, "skip-build", false, "Skip building Docker image")
 	deployCmd.Flags().BoolVar(&skipHooks, "skip-hooks", false, "Skip pre/post deploy hooks")
+	deployCmd.Flags().BoolVarP(&deployYes, "yes", "y", false, "Skip confirmation prompts (non-interactive mode)")
+	deployCmd.Flags().StringVarP(&commitMessage, "message", "m", "", "Commit message for uncommitted changes")
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
@@ -97,10 +101,21 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			fmt.Printf("\n⚠️  Uncommitted changes detected:\n%s\n", status)
 		}
 
-		// Prompt for commit message
-		commitMsg, err := git.PromptCommitMessage()
-		if err != nil {
-			return fmt.Errorf("deployment cancelled: %w", err)
+		// Get commit message - from flag, prompt, or auto-generate
+		var commitMsg string
+		if commitMessage != "" {
+			// Use provided commit message
+			commitMsg = commitMessage
+		} else if deployYes || isNonInteractive() {
+			// Auto-generate commit message in non-interactive mode
+			commitMsg = fmt.Sprintf("Deploy: %s", time.Now().Format("2006-01-02 15:04:05"))
+			fmt.Printf("\n→ Auto-committing changes with message: %q\n", commitMsg)
+		} else {
+			// Prompt for commit message
+			commitMsg, err = git.PromptCommitMessage()
+			if err != nil {
+				return fmt.Errorf("deployment cancelled: %w", err)
+			}
 		}
 
 		fmt.Printf("\n→ Creating commit...\n")
@@ -240,7 +255,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Print(plan.FormatPlan())
 
 	// Ask for confirmation if there are destructive changes
-	if plan.NeedsConfirmation() && !isNonInteractive() {
+	if plan.NeedsConfirmation() && !deployYes && !isNonInteractive() {
 		fmt.Printf("\nProceed with deployment? (y/N): ")
 		var response string
 		fmt.Scanln(&response)
