@@ -246,8 +246,9 @@ func (m *Manager) GetServiceLabels(serviceName string, service *config.ServiceCo
 			}
 
 			// Redirect middleware
+			// Note: Use single quotes to prevent shell expansion of $1
 			labels = append(labels, fmt.Sprintf("--label \"traefik.http.middlewares.%s.redirectregex.regex=^https?://%s/(.*)\"", middlewareName, escapedRedirectDomain))
-			labels = append(labels, fmt.Sprintf("--label \"traefik.http.middlewares.%s.redirectregex.replacement=https://%s/${1}\"", middlewareName, primaryDomain))
+			labels = append(labels, fmt.Sprintf(`--label 'traefik.http.middlewares.%s.redirectregex.replacement=https://%s/$1'`, middlewareName, primaryDomain))
 			labels = append(labels, fmt.Sprintf("--label \"traefik.http.middlewares.%s.redirectregex.permanent=true\"", middlewareName))
 
 			// Apply middleware to router

@@ -123,6 +123,29 @@ func (m *Manager) serviceExists(client *ssh.Client, serviceName string) (bool, e
 	return strings.TrimSpace(output) == serviceName, nil
 }
 
+// getServiceLabels retrieves current labels from a running service
+func (m *Manager) getServiceLabels(client *ssh.Client, fullServiceName string) (map[string]string, error) {
+	// Get labels from service spec using docker inspect
+	cmd := fmt.Sprintf("docker service inspect %s --format '{{json .Spec.Labels}}'", fullServiceName)
+	output, err := client.Execute(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect service labels: %w", err)
+	}
+
+	output = strings.TrimSpace(output)
+	if output == "" || output == "null" || output == "{}" {
+		return make(map[string]string), nil
+	}
+
+	// Parse JSON object of labels
+	var labels map[string]string
+	if err := json.Unmarshal([]byte(output), &labels); err != nil {
+		return nil, fmt.Errorf("failed to parse labels: %w", err)
+	}
+
+	return labels, nil
+}
+
 // createService creates a new Docker service
 func (m *Manager) createService(
 	client *ssh.Client,
@@ -405,6 +428,42 @@ func (m *Manager) updateService(
 			return fmt.Errorf("failed to build placement constraints: %w", err)
 		}
 		cmd += placementArgs
+	}
+
+	// Update Traefik labels if provided
+	// First get current labels to remove them, then add new ones
+	if len(traefikLabels) > 0 {
+		// Get current traefik labels
+		currentLabels, err := m.getServiceLabels(client, fullServiceName)
+		if err != nil {
+			if m.verbose {
+				fmt.Printf("  Warning: failed to get current labels: %v\n", err)
+			}
+		} else {
+			// Remove existing traefik labels
+			for key := range currentLabels {
+				if strings.HasPrefix(key, "traefik.") {
+					cmd += fmt.Sprintf(" --label-rm %s", key)
+				}
+			}
+		}
+
+		// Add new traefik labels
+		for _, label := range traefikLabels {
+			// Convert --label "key=value" to --label-add "key=value"
+			// Handle both --label and 'label formats
+			label = strings.TrimPrefix(label, "--label ")
+			label = strings.TrimPrefix(label, "--label ")
+			// Remove surrounding quotes if present
+			label = strings.Trim(label, "'\"")
+			if label != "" {
+				cmd += fmt.Sprintf(" --label-add %s", label)
+			}
+		}
+
+		if m.verbose {
+			fmt.Printf("  Updating %d Traefik labels\n", len(traefikLabels))
+		}
 	}
 
 	// Add service name at the end

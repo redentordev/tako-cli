@@ -9,14 +9,16 @@ ifeq ($(OS),Windows_NT)
     SHELL := powershell.exe
     .SHELLFLAGS := -NoProfile -Command
     VERSION=$(shell $$ErrorActionPreference='SilentlyContinue'; $$v = git describe --tags --always --dirty; if ($$v) { $$v } else { "dev" })
+    GIT_COMMIT=$(shell git rev-parse --short HEAD 2>$$null || echo "unknown")
     BUILD_TIME=$(shell [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))
 else
     # Unix-specific commands
     VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+    GIT_COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     BUILD_TIME=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 endif
 
-LDFLAGS=-ldflags "-X github.com/redentordev/tako-cli/cmd.Version=$(VERSION) -X github.com/redentordev/tako-cli/cmd.BuildTime=$(BUILD_TIME)"
+LDFLAGS=-ldflags "-X github.com/redentordev/tako-cli/cmd.Version=$(VERSION) -X github.com/redentordev/tako-cli/cmd.GitCommit=$(GIT_COMMIT) -X github.com/redentordev/tako-cli/cmd.BuildTime=$(BUILD_TIME)"
 
 # Build directories
 BUILD_DIR=dist

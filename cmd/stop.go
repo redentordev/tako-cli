@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -24,6 +25,8 @@ This is useful for:
   - Reducing resource usage when service is not needed
   - Testing failover scenarios
 
+In Swarm mode, this scales the service to 0 replicas.
+
 Examples:
   tako stop --service web --server prod
   tako stop --service api --server staging`,
@@ -32,9 +35,8 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(stopCmd)
-	stopCmd.Flags().StringVarP(&stopServer, "server", "s", "", "Server to stop service on (required)")
+	stopCmd.Flags().StringVarP(&stopServer, "server", "s", "", "Server to stop service on (default: first server)")
 	stopCmd.Flags().StringVar(&stopService, "service", "", "Service to stop (required)")
-	stopCmd.MarkFlagRequired("server")
 	stopCmd.MarkFlagRequired("service")
 }
 
@@ -57,7 +59,14 @@ func runStop(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("service %s not found in environment %s", stopService, envName)
 	}
 
-	// Get server config
+	// Get server config - default to first server if not specified
+	if stopServer == "" {
+		for name := range cfg.Servers {
+			stopServer = name
+			break
+		}
+	}
+
 	server, exists := cfg.Servers[stopServer]
 	if !exists {
 		return fmt.Errorf("server %s not found in configuration", stopServer)
@@ -82,39 +91,40 @@ func runStop(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("🛑 Stopping service %s on %s...\n\n", stopService, stopServer)
 
-	// Stop all containers for this service
-	pattern := fmt.Sprintf("%s_%s_%s_", cfg.Project.Name, envName, stopService)
+	// Swarm service name
+	swarmServiceName := fmt.Sprintf("%s_%s_%s", cfg.Project.Name, envName, stopService)
 
-	// List containers that will be stopped
-	listCmd := fmt.Sprintf("docker ps --filter 'name=%s' --format '{{.Names}}'", pattern)
-	output, err := client.Execute(listCmd)
-	if err != nil {
-		return fmt.Errorf("failed to list containers: %w", err)
+	// Check if service exists
+	checkCmd := fmt.Sprintf("docker service inspect %s --format '{{.Spec.Mode.Replicated.Replicas}}' 2>/dev/null", swarmServiceName)
+	output, err := client.Execute(checkCmd)
+	if err != nil || strings.TrimSpace(output) == "" {
+		return fmt.Errorf("service %s not found in swarm", stopService)
 	}
 
-	if output == "" || len(output) == 0 {
-		fmt.Printf("No running containers found for service %s\n", stopService)
+	currentReplicas := strings.TrimSpace(output)
+	if currentReplicas == "0" {
+		fmt.Printf("Service %s is already stopped (0 replicas)\n", stopService)
 		return nil
 	}
 
 	if verbose {
-		fmt.Printf("Containers to stop:\n%s\n", output)
+		fmt.Printf("Current replicas: %s\n", currentReplicas)
 	}
 
-	// Stop containers
-	stopCmdStr := fmt.Sprintf("docker ps --filter 'name=%s' --format '{{.Names}}' | xargs -r docker stop", pattern)
+	// Scale service to 0 replicas (stop without removing)
+	scaleCmd := fmt.Sprintf("docker service scale %s=0", swarmServiceName)
 	if verbose {
-		fmt.Printf("Executing: %s\n", stopCmdStr)
+		fmt.Printf("Executing: %s\n", scaleCmd)
 	}
 
-	_, err = client.Execute(stopCmdStr)
+	_, err = client.Execute(scaleCmd)
 	if err != nil {
-		return fmt.Errorf("failed to stop containers: %w", err)
+		return fmt.Errorf("failed to stop service: %w", err)
 	}
 
-	fmt.Printf("✓ Service %s stopped successfully\n", stopService)
-	fmt.Printf("\nContainers are stopped but not removed.\n")
-	fmt.Printf("To start the service again: tako start --service %s --server %s\n", stopService, stopServer)
+	fmt.Printf("✓ Service %s stopped successfully (scaled to 0 replicas)\n", stopService)
+	fmt.Printf("\nThe service is paused but not removed.\n")
+	fmt.Printf("To start the service again: tako start --service %s\n", stopService)
 
 	return nil
 }

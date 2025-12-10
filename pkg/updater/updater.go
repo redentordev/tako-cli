@@ -61,13 +61,55 @@ func IsUpdateAvailable(currentVersion string) (bool, string, error) {
 	current := strings.TrimPrefix(currentVersion, "v")
 	latest := strings.TrimPrefix(latestVersion, "v")
 
-	// Simple string comparison (works for semantic versioning)
 	// For dev builds, always suggest update
-	if current == "dev" || current == "unknown" {
+	if current == "dev" || current == "unknown" || current == "" {
 		return true, latestVersion, nil
 	}
 
-	return latest > current, latestVersion, nil
+	// Use semantic version comparison
+	return compareVersions(latest, current) > 0, latestVersion, nil
+}
+
+// compareVersions compares two semantic versions
+// Returns: 1 if v1 > v2, -1 if v1 < v2, 0 if equal
+func compareVersions(v1, v2 string) int {
+	// Remove 'v' prefix if present
+	v1 = strings.TrimPrefix(v1, "v")
+	v2 = strings.TrimPrefix(v2, "v")
+
+	// Split into parts (major.minor.patch)
+	parts1 := strings.Split(v1, ".")
+	parts2 := strings.Split(v2, ".")
+
+	// Compare each part
+	maxLen := len(parts1)
+	if len(parts2) > maxLen {
+		maxLen = len(parts2)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var n1, n2 int
+
+		if i < len(parts1) {
+			// Handle versions like "1.0.0-beta" by taking only the numeric part
+			numPart := strings.Split(parts1[i], "-")[0]
+			fmt.Sscanf(numPart, "%d", &n1)
+		}
+
+		if i < len(parts2) {
+			numPart := strings.Split(parts2[i], "-")[0]
+			fmt.Sscanf(numPart, "%d", &n2)
+		}
+
+		if n1 > n2 {
+			return 1
+		}
+		if n1 < n2 {
+			return -1
+		}
+	}
+
+	return 0
 }
 
 // GetBinaryName returns the binary name for the current platform

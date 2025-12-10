@@ -16,8 +16,9 @@ var (
 	cfgFile string
 	verbose bool
 	envFlag string
-	// Version and BuildTime are set via ldflags during build
+	// Version, GitCommit, and BuildTime are set via ldflags during build
 	Version   = "dev"
+	GitCommit = "unknown"
 	BuildTime = "unknown"
 )
 
@@ -31,6 +32,18 @@ zero-downtime deployments, and complete control over your infrastructure.
 
 It uses SSH for remote server management without requiring any agents on the servers.`,
 	Version: Version,
+}
+
+// GetVersionInfo returns formatted version information
+func GetVersionInfo() string {
+	info := fmt.Sprintf("Tako CLI %s", Version)
+	if GitCommit != "unknown" && GitCommit != "" {
+		info += fmt.Sprintf(" (commit: %s)", GitCommit)
+	}
+	if BuildTime != "unknown" && BuildTime != "" {
+		info += fmt.Sprintf("\nBuilt: %s", BuildTime)
+	}
+	return info
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
@@ -102,6 +115,12 @@ func shouldCheckForUpdate() bool {
 
 func init() {
 	cobra.OnInitialize(initConfig)
+
+	// Set custom version template
+	rootCmd.SetVersionTemplate(fmt.Sprintf(`Tako CLI {{.Version}}
+Commit:  %s
+Built:   %s
+`, GitCommit, BuildTime))
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./tako.yaml)")

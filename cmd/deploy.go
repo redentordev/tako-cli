@@ -318,6 +318,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		GitBranch:      commitInfo.Branch,
 		GitCommitMsg:   commitInfo.Message,
 		GitAuthor:      commitInfo.Author,
+		CLIVersion:     Version,
+		CLICommit:      GitCommit,
 	}
 
 	deploymentFailed := false

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -18,20 +19,21 @@ var startCmd = &cobra.Command{
 	Short: "Start a stopped service",
 	Long: `Start a previously stopped service on the server.
 
-This command starts containers that were stopped with 'tako stop'.
-It does not deploy new code - use 'tako deploy' for that.
+This command restarts a service that was stopped with 'tako stop'.
+It restores the service to its configured replica count.
+
+In Swarm mode, this scales the service back to its configured replicas.
 
 Examples:
-  tako start --service web --server prod
-  tako start --service api --server staging`,
+  tako start --service web
+  tako start --service api --server prod`,
 	RunE: runStart,
 }
 
 func init() {
 	rootCmd.AddCommand(startCmd)
-	startCmd.Flags().StringVarP(&startServer, "server", "s", "", "Server to start service on (required)")
+	startCmd.Flags().StringVarP(&startServer, "server", "s", "", "Server to start service on (default: first server)")
 	startCmd.Flags().StringVar(&startService, "service", "", "Service to start (required)")
-	startCmd.MarkFlagRequired("server")
 	startCmd.MarkFlagRequired("service")
 }
 
@@ -49,12 +51,26 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get services: %w", err)
 	}
 
-	// Check service exists
-	if _, exists := services[startService]; !exists {
+	// Check service exists and get config
+	svcConfig, exists := services[startService]
+	if !exists {
 		return fmt.Errorf("service %s not found in environment %s", startService, envName)
 	}
 
-	// Get server config
+	// Get target replicas from config (default to 1)
+	targetReplicas := svcConfig.Replicas
+	if targetReplicas == 0 {
+		targetReplicas = 1
+	}
+
+	// Get server config - default to first server if not specified
+	if startServer == "" {
+		for name := range cfg.Servers {
+			startServer = name
+			break
+		}
+	}
+
 	server, exists := cfg.Servers[startServer]
 	if !exists {
 		return fmt.Errorf("server %s not found in configuration", startServer)
@@ -79,38 +95,38 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("▶️  Starting service %s on %s...\n\n", startService, startServer)
 
-	// Start all containers for this service
-	pattern := fmt.Sprintf("%s_%s_%s_", cfg.Project.Name, envName, startService)
+	// Swarm service name
+	swarmServiceName := fmt.Sprintf("%s_%s_%s", cfg.Project.Name, envName, startService)
 
-	// List stopped containers
-	listCmd := fmt.Sprintf("docker ps -a --filter 'name=%s' --filter 'status=exited' --format '{{.Names}}'", pattern)
-	output, err := client.Execute(listCmd)
-	if err != nil {
-		return fmt.Errorf("failed to list containers: %w", err)
+	// Check if service exists and get current replicas
+	checkCmd := fmt.Sprintf("docker service inspect %s --format '{{.Spec.Mode.Replicated.Replicas}}' 2>/dev/null", swarmServiceName)
+	output, err := client.Execute(checkCmd)
+	if err != nil || strings.TrimSpace(output) == "" {
+		return fmt.Errorf("service %s not found in swarm. Deploy it first with 'tako deploy'", startService)
 	}
 
-	if output == "" || len(output) == 0 {
-		fmt.Printf("No stopped containers found for service %s\n", startService)
-		fmt.Printf("Hint: Check if containers are already running with 'tako ps'\n")
+	currentReplicas := strings.TrimSpace(output)
+	if currentReplicas != "0" {
+		fmt.Printf("Service %s is already running (%s replicas)\n", startService, currentReplicas)
 		return nil
 	}
 
 	if verbose {
-		fmt.Printf("Containers to start:\n%s\n", output)
+		fmt.Printf("Scaling from 0 to %d replicas\n", targetReplicas)
 	}
 
-	// Start containers
-	startCmdStr := fmt.Sprintf("docker ps -a --filter 'name=%s' --filter 'status=exited' --format '{{.Names}}' | xargs -r docker start", pattern)
+	// Scale service back to configured replicas
+	scaleCmd := fmt.Sprintf("docker service scale %s=%d", swarmServiceName, targetReplicas)
 	if verbose {
-		fmt.Printf("Executing: %s\n", startCmdStr)
+		fmt.Printf("Executing: %s\n", scaleCmd)
 	}
 
-	_, err = client.Execute(startCmdStr)
+	_, err = client.Execute(scaleCmd)
 	if err != nil {
-		return fmt.Errorf("failed to start containers: %w", err)
+		return fmt.Errorf("failed to start service: %w", err)
 	}
 
-	fmt.Printf("✓ Service %s started successfully\n", startService)
+	fmt.Printf("✓ Service %s started successfully (%d replicas)\n", startService, targetReplicas)
 	fmt.Printf("\nCheck status with: tako ps\n")
 
 	return nil

@@ -208,12 +208,35 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 
 // decommissionApp stops and removes the deployed application
 func decommissionApp(client *ssh.Client, projectName string, verbose bool) error {
+	// First, remove Swarm services (always use Swarm mode)
+	if verbose {
+		fmt.Println("  → Removing Swarm services...")
+	}
+
+	// List and remove all services for this project
+	listServicesCmd := fmt.Sprintf("docker service ls --filter 'name=%s' --format '{{.Name}}'", projectName)
+	output, _ := client.Execute(listServicesCmd)
+	if strings.TrimSpace(output) != "" {
+		removeServicesCmd := fmt.Sprintf("docker service ls --filter 'name=%s' --format '{{.Name}}' | xargs -r docker service rm", projectName)
+		client.Execute(removeServicesCmd)
+		if verbose {
+			fmt.Println("  ✓ Swarm services removed")
+		}
+	}
+
+	// Remove overlay networks for this project
+	if verbose {
+		fmt.Println("  → Removing overlay networks...")
+	}
+	removeNetworkCmd := fmt.Sprintf("docker network ls --filter 'name=tako_%s' --format '{{.Name}}' | xargs -r docker network rm 2>/dev/null || true", projectName)
+	client.Execute(removeNetworkCmd)
+
 	if verbose {
 		fmt.Println("  → Stopping application containers...")
 	}
 
-	// Stop all containers for this project
-	stopCmd := fmt.Sprintf("docker ps -q --filter 'name=%s' | xargs -r docker stop", projectName)
+	// Stop all containers for this project (cleanup any orphaned containers)
+	stopCmd := fmt.Sprintf("docker ps -q --filter 'name=%s' | xargs -r docker stop 2>/dev/null || true", projectName)
 	client.Execute(stopCmd)
 
 	if verbose {
@@ -221,15 +244,15 @@ func decommissionApp(client *ssh.Client, projectName string, verbose bool) error
 	}
 
 	// Remove all containers for this project
-	removeCmd := fmt.Sprintf("docker ps -aq --filter 'name=%s' | xargs -r docker rm -f", projectName)
+	removeCmd := fmt.Sprintf("docker ps -aq --filter 'name=%s' | xargs -r docker rm -f 2>/dev/null || true", projectName)
 	client.Execute(removeCmd)
 
 	if verbose {
 		fmt.Println("  → Removing application images...")
 	}
 
-	// Remove all images for this project
-	imagesCmd := fmt.Sprintf("docker images -q %s | xargs -r docker rmi -f", projectName)
+	// Remove all images for this project (match project name prefix)
+	imagesCmd := fmt.Sprintf("docker images --format '{{.Repository}}:{{.Tag}}' | grep '^%s' | xargs -r docker rmi -f 2>/dev/null || true", projectName)
 	client.Execute(imagesCmd)
 
 	if verbose {
@@ -241,6 +264,9 @@ func decommissionApp(client *ssh.Client, projectName string, verbose bool) error
 
 	// Remove deployment state
 	client.Execute(fmt.Sprintf("sudo rm -rf /var/lib/%s", projectName))
+
+	// Remove Tako state directory
+	client.Execute(fmt.Sprintf("sudo rm -rf /var/lib/tako/%s 2>/dev/null || true", projectName))
 
 	if verbose {
 		fmt.Println("  ✓ Application decommissioned")

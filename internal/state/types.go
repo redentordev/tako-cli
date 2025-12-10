@@ -23,6 +23,9 @@ type DeploymentState struct {
 	GitBranch      string `json:"gitBranch,omitempty"`      // Branch name
 	GitCommitMsg   string `json:"gitCommitMsg,omitempty"`   // Commit message
 	GitAuthor      string `json:"gitAuthor,omitempty"`      // Commit author
+	// CLI information
+	CLIVersion string `json:"cliVersion,omitempty"` // Tako CLI version used for deployment
+	CLICommit  string `json:"cliCommit,omitempty"`  // Tako CLI git commit hash
 }
 
 // ServiceState represents a deployed service's state
