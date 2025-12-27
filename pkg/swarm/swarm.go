@@ -2,11 +2,16 @@ package swarm
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 )
+
+// validLabelPattern matches safe Docker label keys and values
+// Only allows alphanumeric, dots, hyphens, and underscores
+var validLabelPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 // Manager handles Docker Swarm operations
 type Manager struct {
@@ -136,6 +141,14 @@ func (m *Manager) SetNodeLabels(managerClient *ssh.Client, nodeID string, labels
 	}
 
 	for key, value := range labels {
+		// Validate label key and value to prevent command injection
+		if !validLabelPattern.MatchString(key) {
+			return fmt.Errorf("invalid label key '%s': must contain only alphanumeric, dots, hyphens, and underscores", key)
+		}
+		if !validLabelPattern.MatchString(value) {
+			return fmt.Errorf("invalid label value '%s' for key '%s': must contain only alphanumeric, dots, hyphens, and underscores", value, key)
+		}
+
 		cmd := fmt.Sprintf("docker node update --label-add %s=%s %s", key, value, nodeID)
 		if _, err := managerClient.Execute(cmd); err != nil {
 			return fmt.Errorf("failed to set label %s=%s: %w", key, value, err)
@@ -212,7 +225,12 @@ func (m *Manager) EnsureSwarmNetwork(managerClient *ssh.Client, networkName stri
 		fmt.Printf("  Ensuring overlay network: %s\n", networkName)
 	}
 
-	// Check if network exists
+	// Validate network name to prevent injection
+	if !validLabelPattern.MatchString(networkName) {
+		return fmt.Errorf("invalid network name '%s': must contain only alphanumeric, dots, hyphens, and underscores", networkName)
+	}
+
+	// Check if network exists (network name is validated above)
 	checkCmd := fmt.Sprintf("docker network ls --filter name=^%s$ --format '{{.Name}}'", networkName)
 	output, err := managerClient.Execute(checkCmd)
 	if err != nil {

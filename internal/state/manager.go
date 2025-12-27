@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -67,8 +68,10 @@ func (s *StateManager) SaveDeployment(deployment *DeploymentState) error {
 	statePath := s.getStatePath()
 	tmpFile := fmt.Sprintf("/tmp/tako-deploy-%s.json", deployment.ID)
 
-	// Write to temp file first
-	writeCmd := fmt.Sprintf("cat > %s <<'EOF'\n%s\nEOF", tmpFile, string(data))
+	// Write to temp file using base64 encoding to avoid heredoc/shell escaping issues
+	// This prevents injection if JSON data contains shell metacharacters or 'EOF'
+	encoded := base64.StdEncoding.EncodeToString(data)
+	writeCmd := fmt.Sprintf("echo '%s' | base64 -d > %s", encoded, tmpFile)
 	if _, err := s.client.Execute(writeCmd); err != nil {
 		return fmt.Errorf("failed to write deployment state: %w", err)
 	}
@@ -263,7 +266,9 @@ func (s *StateManager) updateHistory(deployment *DeploymentState) error {
 	// Use unique temp file to avoid collisions from concurrent operations
 	tmpFile := fmt.Sprintf("/tmp/tako-history-%d-%d.json", time.Now().UnixNano(), os.Getpid())
 
-	writeCmd := fmt.Sprintf("cat > %s <<'EOF'\n%s\nEOF", tmpFile, string(data))
+	// Use base64 encoding to avoid heredoc/shell escaping issues
+	encoded := base64.StdEncoding.EncodeToString(data)
+	writeCmd := fmt.Sprintf("echo '%s' | base64 -d > %s", encoded, tmpFile)
 	if _, err := s.client.Execute(writeCmd); err != nil {
 		return err
 	}
