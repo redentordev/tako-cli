@@ -185,6 +185,12 @@ accessLog:
 // GetServiceLabels returns Traefik labels for service creation
 // This avoids service updates which can cause brief Traefik config reload disruptions
 func (m *Manager) GetServiceLabels(serviceName string, service *config.ServiceConfig, fullServiceName string) []string {
+	return m.GetServiceLabelsWithResolver(serviceName, service, fullServiceName, nil)
+}
+
+// GetServiceLabelsWithResolver returns Traefik labels with custom cert resolver selection
+// wildcardDomains is a set of base domains that should use the dns resolver
+func (m *Manager) GetServiceLabelsWithResolver(serviceName string, service *config.ServiceConfig, fullServiceName string, wildcardDomains map[string]bool) []string {
 	var labels []string
 
 	// Enable Traefik for this service
@@ -204,19 +210,59 @@ func (m *Manager) GetServiceLabels(serviceName string, service *config.ServiceCo
 			continue
 		}
 
+		// Check if this is a wildcard domain
+		isWildcard := strings.HasPrefix(domain, "*.")
+
+		// Determine which cert resolver to use
+		certResolver := "letsencrypt" // Default: HTTP-01
+		if isWildcard {
+			certResolver = "letsencrypt-dns" // Use DNS-01 for wildcards
+		} else if wildcardDomains != nil {
+			// Check if this domain's base domain has a wildcard configured
+			baseDomain := extractBaseDomainFromFQDN(domain)
+			if wildcardDomains[baseDomain] {
+				// This domain is covered by a wildcard cert, use DNS resolver
+				certResolver = "letsencrypt-dns"
+			}
+		}
+
+		// For wildcard domains, use HostRegexp instead of Host
+		var ruleLabel string
+		if isWildcard {
+			// Traefik v3 syntax for wildcard
+			baseDomain := strings.TrimPrefix(domain, "*.")
+			escapedDomain := strings.ReplaceAll(baseDomain, ".", "\\.")
+			ruleLabel = fmt.Sprintf("--label 'traefik.http.routers.%s.rule=HostRegexp(`^.+\\.%s$`)'", routerName, escapedDomain)
+		} else {
+			ruleLabel = fmt.Sprintf("--label 'traefik.http.routers.%s.rule=Host(\"%s\")'", routerName, domain)
+		}
+
 		// HTTPS router with TLS
-		labels = append(labels, fmt.Sprintf("--label 'traefik.http.routers.%s.rule=Host(\"%s\")'", routerName, domain))
+		labels = append(labels, ruleLabel)
 		labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.entrypoints=websecure\"", routerName))
 		labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.service=%s@swarm\"", routerName, fullServiceName))
 
 		// TLS configuration
 		if service.Proxy.Email != "" {
 			labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.tls=true\"", routerName))
-			labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.tls.certresolver=letsencrypt\"", routerName))
+			labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.tls.certresolver=%s\"", routerName, certResolver))
+
+			// For wildcard certs, we need to specify the domains explicitly
+			if isWildcard {
+				baseDomain := strings.TrimPrefix(domain, "*.")
+				labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.tls.domains[0].main=%s\"", routerName, baseDomain))
+				labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.tls.domains[0].sans=%s\"", routerName, domain))
+			}
 
 			// HTTP to HTTPS redirect
 			httpRouterName := fmt.Sprintf("%s-http", routerName)
-			labels = append(labels, fmt.Sprintf("--label 'traefik.http.routers.%s.rule=Host(\"%s\")'", httpRouterName, domain))
+			if isWildcard {
+				baseDomain := strings.TrimPrefix(domain, "*.")
+				escapedDomain := strings.ReplaceAll(baseDomain, ".", "\\.")
+				labels = append(labels, fmt.Sprintf("--label 'traefik.http.routers.%s.rule=HostRegexp(`^.+\\.%s$`)'", httpRouterName, escapedDomain))
+			} else {
+				labels = append(labels, fmt.Sprintf("--label 'traefik.http.routers.%s.rule=Host(\"%s\")'", httpRouterName, domain))
+			}
 			labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.entrypoints=web\"", httpRouterName))
 			labels = append(labels, fmt.Sprintf("--label \"traefik.http.routers.%s.middlewares=redirect-to-https@swarm\"", httpRouterName))
 
@@ -438,6 +484,109 @@ func (m *Manager) RemoveServiceLabels(fullServiceName string) error {
 		if len(removeLabels) > 0 {
 			removeCmd := fmt.Sprintf("docker service update %s %s", strings.Join(removeLabels, " "), fullServiceName)
 			m.client.Execute(removeCmd)
+		}
+	}
+
+	return nil
+}
+
+// extractBaseDomainFromFQDN extracts the base domain from a full domain
+// e.g., "app.example.com" -> "example.com"
+func extractBaseDomainFromFQDN(domain string) string {
+	parts := strings.Split(domain, ".")
+	if len(parts) <= 2 {
+		return domain
+	}
+	return strings.Join(parts[len(parts)-2:], ".")
+}
+
+// ConfigureDNS01Resolver adds DNS-01 resolver configuration to Traefik
+func (m *Manager) ConfigureDNS01Resolver(acmeDNSEndpoint string) error {
+	if m.verbose {
+		fmt.Println("  Configuring Traefik for DNS-01 challenge...")
+	}
+
+	// Update Traefik service to add DNS-01 resolver
+	// This adds the acme-dns provider configuration
+	cmd := fmt.Sprintf(`docker service update --detach \
+		--env-add ACME_DNS_API_BASE=%s \
+		--env-add ACME_DNS_STORAGE_PATH=/acme/acme-dns-credentials.json \
+		traefik 2>&1`, acmeDNSEndpoint)
+
+	if _, err := m.client.Execute(cmd); err != nil {
+		return fmt.Errorf("failed to update Traefik with DNS-01 config: %w", err)
+	}
+
+	if m.verbose {
+		fmt.Println("  ✓ Traefik configured for DNS-01 challenge")
+	}
+
+	return nil
+}
+
+// EnsureTraefikServiceWithDNS01 ensures Traefik is running with DNS-01 support
+func (m *Manager) EnsureTraefikServiceWithDNS01(networkName string, acmeDNSEndpoint string) error {
+	// First ensure basic Traefik service
+	if err := m.EnsureTraefikService(networkName); err != nil {
+		return err
+	}
+
+	// Then add DNS-01 resolver if acme-dns is configured
+	if acmeDNSEndpoint != "" {
+		if m.verbose {
+			fmt.Println("  Adding DNS-01 certificate resolver...")
+		}
+
+		// Create acme-dns.json file with correct permissions
+		m.client.Execute("sudo touch /etc/traefik/acme/acme-dns.json && sudo chmod 600 /etc/traefik/acme/acme-dns.json")
+
+		// Write a dynamic configuration file for the DNS-01 resolver
+		// Traefik can load additional configuration from files
+		dnsResolverConfig := fmt.Sprintf(`# DNS-01 resolver for wildcard certificates
+# This file is auto-generated by Tako
+http:
+  # Empty - this file only configures certificate resolvers
+
+# Note: DNS-01 resolver must be configured via CLI args when the service is created
+# The acme-dns endpoint is: %s
+`, acmeDNSEndpoint)
+
+		writeCmd := fmt.Sprintf("echo '%s' | sudo tee /etc/traefik/dns-resolver.yml > /dev/null",
+			strings.ReplaceAll(dnsResolverConfig, "'", "'\\''"))
+		m.client.Execute(writeCmd)
+
+		// Update Traefik service with DNS-01 resolver
+		// We need to recreate the service with the new args since docker service update
+		// cannot modify command args
+		if m.verbose {
+			fmt.Println("  Updating Traefik service with DNS-01 resolver...")
+		}
+
+		// Check if DNS-01 resolver already configured by looking for the env var
+		checkCmd := "docker service inspect traefik --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{.}} {{end}}' 2>/dev/null | grep -q ACME_DNS_API_BASE && echo 'configured'"
+		output, _ := m.client.Execute(checkCmd)
+		if strings.TrimSpace(output) == "configured" {
+			if m.verbose {
+				fmt.Println("  DNS-01 resolver already configured")
+			}
+			return nil
+		}
+
+		// Add environment variables for acme-dns
+		updateCmd := fmt.Sprintf(`docker service update --detach \
+			--env-add ACME_DNS_API_BASE=%s \
+			--env-add ACME_DNS_STORAGE_PATH=/data/tako/acme-dns/credentials.json \
+			traefik 2>&1`, acmeDNSEndpoint)
+
+		if _, err := m.client.Execute(updateCmd); err != nil {
+			if m.verbose {
+				fmt.Printf("  Warning: failed to add DNS-01 env vars: %v\n", err)
+			}
+		}
+
+		if m.verbose {
+			fmt.Println("  ✓ DNS-01 resolver environment configured")
+			fmt.Println("  Note: For wildcard certs, Traefik needs to be recreated with DNS-01 args")
 		}
 	}
 

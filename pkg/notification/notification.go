@@ -38,6 +38,9 @@ const (
 	EventSSLExpiringSoon  EventType = "ssl_expiring_soon"
 	EventSSLExpired       EventType = "ssl_expired"
 	EventSSLRenewed       EventType = "ssl_renewed"
+	EventSSLPending       EventType = "ssl_pending"
+	EventSSLIssued        EventType = "ssl_issued"
+	EventSSLFailed        EventType = "ssl_failed"
 	// Scaling events
 	EventScaleUp          EventType = "scale_up"
 	EventScaleDown        EventType = "scale_down"
@@ -276,12 +279,12 @@ func (n *Notifier) postJSON(url string, payload interface{}) error {
 func (n *Notifier) getEventColor(eventType EventType) string {
 	switch eventType {
 	case EventDeploySucceeded, EventServiceUp, EventBackupCompleted, EventRollbackDone,
-		EventHealthCheckRecovered, EventResourceNormal, EventSSLRenewed:
+		EventHealthCheckRecovered, EventResourceNormal, EventSSLRenewed, EventSSLIssued:
 		return "#36a64f" // Green
 	case EventDeployFailed, EventServiceDown, EventBackupFailed,
-		EventContainerOOM, EventContainerCrashLoop, EventSSLExpired:
+		EventContainerOOM, EventContainerCrashLoop, EventSSLExpired, EventSSLFailed:
 		return "#dc3545" // Red
-	case EventDeployStarted, EventRollbackStarted, EventScaleUp, EventScaleDown, EventServiceRestarted:
+	case EventDeployStarted, EventRollbackStarted, EventScaleUp, EventScaleDown, EventServiceRestarted, EventSSLPending:
 		return "#007bff" // Blue
 	case EventDriftDetected, EventHighCPU, EventHighMemory, EventHighDisk,
 		EventHealthCheckFailed, EventSSLExpiringSoon:
@@ -295,12 +298,12 @@ func (n *Notifier) getEventColor(eventType EventType) string {
 func (n *Notifier) getEventColorInt(eventType EventType) int {
 	switch eventType {
 	case EventDeploySucceeded, EventServiceUp, EventBackupCompleted, EventRollbackDone,
-		EventHealthCheckRecovered, EventResourceNormal, EventSSLRenewed:
+		EventHealthCheckRecovered, EventResourceNormal, EventSSLRenewed, EventSSLIssued:
 		return 0x36a64f // Green
 	case EventDeployFailed, EventServiceDown, EventBackupFailed,
-		EventContainerOOM, EventContainerCrashLoop, EventSSLExpired:
+		EventContainerOOM, EventContainerCrashLoop, EventSSLExpired, EventSSLFailed:
 		return 0xdc3545 // Red
-	case EventDeployStarted, EventRollbackStarted, EventScaleUp, EventScaleDown, EventServiceRestarted:
+	case EventDeployStarted, EventRollbackStarted, EventScaleUp, EventScaleDown, EventServiceRestarted, EventSSLPending:
 		return 0x007bff // Blue
 	case EventDriftDetected, EventHighCPU, EventHighMemory, EventHighDisk,
 		EventHealthCheckFailed, EventSSLExpiringSoon:
@@ -357,6 +360,12 @@ func (n *Notifier) getEventEmoji(eventType EventType) string {
 		return "🔓"
 	case EventSSLRenewed:
 		return "🔒"
+	case EventSSLPending:
+		return "⏳"
+	case EventSSLIssued:
+		return "🔒"
+	case EventSSLFailed:
+		return "❌"
 	case EventScaleUp:
 		return "📈"
 	case EventScaleDown:
@@ -413,6 +422,12 @@ func (n *Notifier) getEventTitle(eventType EventType) string {
 		return "SSL Certificate Expired"
 	case EventSSLRenewed:
 		return "SSL Certificate Renewed"
+	case EventSSLPending:
+		return "SSL Certificate Pending"
+	case EventSSLIssued:
+		return "SSL Certificate Issued"
+	case EventSSLFailed:
+		return "SSL Certificate Failed"
 	case EventScaleUp:
 		return "Service Scaled Up"
 	case EventScaleDown:
@@ -661,5 +676,51 @@ func ServiceUpEvent(project, env, service string, downtime time.Duration) Event 
 		Message:     msg,
 		Duration:    downtime,
 		Timestamp:   time.Now(),
+	}
+}
+
+// SSLPendingEvent creates an SSL certificate pending event
+func SSLPendingEvent(project, env string, domain string, cnameTarget string) Event {
+	return Event{
+		Type:        EventSSLPending,
+		Project:     project,
+		Environment: env,
+		Message:     fmt.Sprintf("Wildcard SSL certificate pending for `%s`\nConfigure DNS: `_acme-challenge.%s` CNAME `%s`", domain, domain, cnameTarget),
+		Details: map[string]string{
+			"domain":       domain,
+			"cname_target": cnameTarget,
+		},
+		Timestamp: time.Now(),
+	}
+}
+
+// SSLIssuedEvent creates an SSL certificate issued event
+func SSLIssuedEvent(project, env string, domain string, waitTime time.Duration) Event {
+	return Event{
+		Type:        EventSSLIssued,
+		Project:     project,
+		Environment: env,
+		Message:     fmt.Sprintf("Wildcard SSL certificate issued for `*.%s`", domain),
+		Duration:    waitTime,
+		Details: map[string]string{
+			"domain":    domain,
+			"wait_time": waitTime.Round(time.Second).String(),
+		},
+		Timestamp: time.Now(),
+	}
+}
+
+// SSLFailedEvent creates an SSL certificate failed event
+func SSLFailedEvent(project, env string, domain string, err error) Event {
+	return Event{
+		Type:        EventSSLFailed,
+		Project:     project,
+		Environment: env,
+		Message:     fmt.Sprintf("Failed to issue SSL certificate for `%s`", domain),
+		Error:       err.Error(),
+		Details: map[string]string{
+			"domain": domain,
+		},
+		Timestamp: time.Now(),
 	}
 }

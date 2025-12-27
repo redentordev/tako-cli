@@ -46,6 +46,13 @@ func ValidateConfig(cfg *Config) error {
 		cfg.Environments[envName] = env
 	}
 
+	// Validate top-level volumes section
+	if len(cfg.Volumes) > 0 {
+		if err := validateVolumes(cfg.Volumes); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -367,6 +374,13 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 		}
 	}
 
+	// Validate init commands
+	if len(service.Init) > 0 {
+		if err := validateInitCommands(name, service.Init); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -566,6 +580,124 @@ func validateDomainUniqueness(envName string, env *EnvironmentConfig) error {
 			}
 
 			domainToService[normalizedDomain] = serviceName + " (redirect)"
+		}
+	}
+
+	return nil
+}
+
+// validateVolumes validates the top-level volumes section
+func validateVolumes(volumes map[string]VolumeConfig) error {
+	for name, vol := range volumes {
+		// Validate volume name format
+		if !isValidVolumeName(name) {
+			return fmt.Errorf("volume '%s': invalid name - must contain only lowercase letters, numbers, hyphens, and underscores", name)
+		}
+
+		// External volumes should not have driver or driver_opts
+		if vol.External {
+			if vol.Driver != "" {
+				return fmt.Errorf("volume '%s': external volumes cannot specify a driver", name)
+			}
+			if len(vol.DriverOpts) > 0 {
+				return fmt.Errorf("volume '%s': external volumes cannot specify driver_opts", name)
+			}
+		}
+
+		// Validate driver if specified
+		if vol.Driver != "" {
+			validDrivers := map[string]bool{
+				"local":  true,
+				"nfs":    true,
+				"tmpfs":  true,
+				"cifs":   true,
+				"btrfs":  true,
+				"zfs":    true,
+				"convoy": true,
+				"rexray": true,
+			}
+			if !validDrivers[vol.Driver] {
+				// Allow custom drivers, just warn
+				fmt.Printf("Warning: volume '%s' uses non-standard driver '%s'\n", name, vol.Driver)
+			}
+		}
+
+		// If custom name is specified, validate it
+		if vol.Name != "" && !isValidDockerVolumeName(vol.Name) {
+			return fmt.Errorf("volume '%s': custom name '%s' is invalid - must be a valid Docker volume name", name, vol.Name)
+		}
+	}
+
+	return nil
+}
+
+// isValidVolumeName validates a volume key name (used in config)
+func isValidVolumeName(name string) bool {
+	if len(name) == 0 || len(name) > 63 {
+		return false
+	}
+
+	// Must start with lowercase letter
+	if name[0] < 'a' || name[0] > 'z' {
+		return false
+	}
+
+	// All characters must be lowercase letter, digit, hyphen, or underscore
+	for _, ch := range name {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_') {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isValidDockerVolumeName validates a Docker volume name
+func isValidDockerVolumeName(name string) bool {
+	if len(name) == 0 || len(name) > 255 {
+		return false
+	}
+
+	// Docker volume names are fairly permissive but cannot contain slashes
+	// or start/end with dots
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return false
+	}
+	if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
+		return false
+	}
+
+	return true
+}
+
+// validateInitCommands validates init commands for a service
+func validateInitCommands(serviceName string, initCommands []string) error {
+	if len(initCommands) == 0 {
+		return nil
+	}
+
+	for i, cmd := range initCommands {
+		if strings.TrimSpace(cmd) == "" {
+			return fmt.Errorf("service %s: init command at index %d is empty", serviceName, i)
+		}
+
+		// Warn about potentially dangerous commands
+		dangerousPatterns := []string{
+			"rm -rf /",
+			"mkfs",
+			"dd if=",
+			"> /dev/",
+			"shutdown",
+			"reboot",
+			"init 0",
+			"init 6",
+		}
+		lowerCmd := strings.ToLower(cmd)
+		for _, pattern := range dangerousPatterns {
+			if strings.Contains(lowerCmd, pattern) {
+				fmt.Printf("Warning: service %s: init command contains potentially dangerous pattern '%s': %s\n",
+					serviceName, pattern, cmd)
+			}
 		}
 	}
 

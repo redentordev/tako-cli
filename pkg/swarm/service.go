@@ -482,6 +482,44 @@ func (m *Manager) updateService(
 		cmd += placementArgs
 	}
 
+	// Update volume mounts
+	// Get current mounts from the service
+	currentMounts, err := m.getServiceMounts(client, fullServiceName)
+	if err != nil {
+		if m.verbose {
+			fmt.Printf("  Warning: failed to get current mounts: %v\n", err)
+		}
+		currentMounts = make(map[string]VolumeMount)
+	}
+
+	// Build desired mounts from config
+	desiredMounts, err := m.buildDesiredMounts(serviceName, service)
+	if err != nil {
+		return fmt.Errorf("failed to build desired mounts: %w", err)
+	}
+
+	// Compute mount changes
+	mountAdds, mountRemoves := m.computeMountChanges(currentMounts, desiredMounts)
+
+	// Ensure any new volumes exist before mounting
+	if err := m.EnsureVolumesExist(client, serviceName, service); err != nil {
+		return fmt.Errorf("failed to ensure volumes exist: %w", err)
+	}
+
+	// Apply mount removals
+	for _, target := range mountRemoves {
+		cmd += fmt.Sprintf(" --mount-rm %s", target)
+	}
+
+	// Apply mount additions
+	for _, mountSpec := range mountAdds {
+		cmd += fmt.Sprintf(" --mount-add %s", mountSpec)
+	}
+
+	if m.verbose && (len(mountAdds) > 0 || len(mountRemoves) > 0) {
+		fmt.Printf("  Updating volumes: +%d -%d\n", len(mountAdds), len(mountRemoves))
+	}
+
 	// Update Traefik labels if provided
 	// First get current labels to remove them, then add new ones
 	if len(traefikLabels) > 0 {

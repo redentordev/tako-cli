@@ -7,6 +7,7 @@ import (
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
+	"github.com/redentordev/tako-cli/pkg/acmedns"
 	"github.com/redentordev/tako-cli/pkg/cleanup"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/dependency"
@@ -18,6 +19,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/registry"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/ssl"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/spf13/cobra"
 )
@@ -255,8 +257,63 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Print(plan.FormatPlan())
 
-	// Ask for confirmation if there are destructive changes
-	if plan.NeedsConfirmation() && !deployYes && !isNonInteractive() {
+	// Detect drift (manual changes) in running services
+	var driftWarnings []string
+	for serviceName, actual := range actualState {
+		if svc, exists := services[serviceName]; exists {
+			fullServiceName := fmt.Sprintf("%s_%s_%s", cfg.Project.Name, envName, serviceName)
+			details, err := reconcile.GatherActualServiceDetails(firstClient, fullServiceName)
+			if err == nil {
+				drifts := reconcile.DetectDrift(details, &svc)
+				for _, drift := range drifts {
+					if drift.IsManual {
+						var msg string
+						switch drift.Field {
+						case "env":
+							if drift.DesiredValue == "" {
+								msg = fmt.Sprintf("  %s: env %s (manually added, will be removed)", serviceName, drift.Key)
+							} else {
+								msg = fmt.Sprintf("  %s: env %s (manually changed, will be overwritten)", serviceName, drift.Key)
+							}
+						case "volume":
+							msg = fmt.Sprintf("  %s: volume %s (manually added, will be removed)", serviceName, drift.Key)
+						case "label":
+							msg = fmt.Sprintf("  %s: label %s (manually added, will be removed)", serviceName, drift.Key)
+						case "replicas":
+							msg = fmt.Sprintf("  %s: replicas %s → %s (manually changed, will be overwritten)", serviceName, drift.ActualValue, drift.DesiredValue)
+						}
+						if msg != "" {
+							driftWarnings = append(driftWarnings, msg)
+						}
+					}
+				}
+			}
+			_ = actual // Silence unused warning
+		}
+	}
+
+	// Show drift warnings
+	if len(driftWarnings) > 0 {
+		fmt.Println("\n⚠ Manual changes detected - will be overwritten:")
+		for _, warning := range driftWarnings {
+			fmt.Println(warning)
+		}
+		fmt.Println()
+
+		// In non-interactive mode, just warn and proceed
+		if !deployYes && !isNonInteractive() {
+			fmt.Printf("Proceed with deployment? (y/N): ")
+			var response string
+			fmt.Scanln(&response)
+			if response != "y" && response != "Y" && response != "yes" {
+				fmt.Println("Deployment cancelled")
+				return nil
+			}
+		} else {
+			fmt.Println("(Non-interactive mode: proceeding with deployment)")
+		}
+	} else if plan.NeedsConfirmation() && !deployYes && !isNonInteractive() {
+		// Ask for confirmation if there are destructive changes
 		fmt.Printf("\nProceed with deployment? (y/N): ")
 		var response string
 		fmt.Scanln(&response)
@@ -281,6 +338,66 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	} else if verbose {
 		fmt.Printf("  ✓ Network configuration verified\n")
+	}
+
+	// === WILDCARD SSL DETECTION ===
+	// Check for wildcard domains and setup acme-dns if needed
+	sslReqs := ssl.DetectRequirements(services)
+	if ssl.HasWildcards(sslReqs) {
+		wildcardDomains := ssl.GroupWildcards(sslReqs)
+		fmt.Printf("\n🔐 Wildcard SSL certificates detected:\n")
+		for _, domain := range wildcardDomains {
+			fmt.Printf("   *.%s\n", domain)
+		}
+
+		// Setup acme-dns for DNS-01 challenge
+		acmeMgr := acmedns.NewManager(firstClient, firstServer.Host, verbose)
+		if err := acmeMgr.Setup(); err != nil {
+			fmt.Printf("\n⚠ Warning: Failed to setup acme-dns: %v\n", err)
+			fmt.Printf("  Wildcard SSL certificates may not be issued automatically.\n")
+			fmt.Printf("  You may need to configure DNS-01 challenge manually.\n\n")
+		} else {
+			// Register each wildcard domain
+			var registrations []*acmedns.Registration
+			for _, baseDomain := range wildcardDomains {
+				reg, err := acmeMgr.Register(baseDomain)
+				if err != nil {
+					fmt.Printf("  ⚠ Failed to register %s: %v\n", baseDomain, err)
+					continue
+				}
+				registrations = append(registrations, reg)
+			}
+
+			// Show CNAME instructions if we have new registrations
+			if len(registrations) > 0 {
+				fmt.Print(acmeMgr.GetCNAMEInstructions(registrations))
+				fmt.Printf("\n⚠ IMPORTANT: Add the CNAME records above to your DNS provider.\n")
+				fmt.Printf("  Wildcard certificates will be issued automatically once DNS propagates.\n")
+				fmt.Printf("  You can check status with: tako ssl status\n\n")
+
+				// Check if DNS is already configured (for returning users)
+				dnsChecker := ssl.NewDNSChecker()
+				allConfigured := true
+				for _, reg := range registrations {
+					verified, _ := dnsChecker.CheckCNAME(reg.Domain, reg.CNAMETarget)
+					if verified {
+						fmt.Printf("  ✓ DNS already configured for *.%s\n", reg.Domain)
+					} else {
+						allConfigured = false
+					}
+				}
+
+				if !allConfigured && !deployYes && !isNonInteractive() {
+					fmt.Printf("\nDNS records not yet configured. Continue deployment anyway? (y/N): ")
+					var response string
+					fmt.Scanln(&response)
+					if response != "y" && response != "Y" && response != "yes" {
+						fmt.Println("Deployment paused. Add DNS records and run deploy again.")
+						return nil
+					}
+				}
+			}
+		}
 	}
 
 	// Always use Swarm mode for consistent deployment model

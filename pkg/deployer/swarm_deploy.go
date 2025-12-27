@@ -303,6 +303,28 @@ func (d *Deployer) DeployServiceSwarm(serviceName string, service *config.Servic
 		}
 	}
 
+	// Create defined volumes before deployment
+	if err := d.swarmManager.CreateDefinedVolumes(managerClient); err != nil {
+		if d.verbose {
+			fmt.Printf("  Warning: failed to create defined volumes: %v\n", err)
+		}
+	}
+
+	// Ensure volumes for this service exist
+	if err := d.swarmManager.EnsureVolumesExist(managerClient, serviceName, service); err != nil {
+		return fmt.Errorf("failed to ensure volumes exist: %w", err)
+	}
+
+	// Run init commands if configured (before service starts)
+	if len(service.Init) > 0 {
+		if d.verbose {
+			fmt.Printf("  Running init commands...\n")
+		}
+		if err := d.swarmManager.RunInitCommands(managerClient, serviceName, service, imageRef); err != nil {
+			return fmt.Errorf("init commands failed: %w", err)
+		}
+	}
+
 	// Deploy service with Traefik labels included from the start
 	if err := d.swarmManager.DeployService(managerClient, serviceName, service, imageRef, networkName, traefikLabels); err != nil {
 		return fmt.Errorf("failed to deploy service to swarm: %w", err)
