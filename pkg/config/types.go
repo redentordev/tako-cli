@@ -14,8 +14,18 @@ type Config struct {
 	Deployment    *DeploymentConfig            `yaml:"deployment,omitempty"`
 	Notifications *NotificationsConfig         `yaml:"notifications,omitempty"`
 	Storage       *StorageConfig               `yaml:"storage,omitempty"`
+	Volumes       map[string]VolumeConfig      `yaml:"volumes,omitempty"` // Top-level volume definitions
 	Servers       map[string]ServerConfig      `yaml:"servers"`
 	Environments  map[string]EnvironmentConfig `yaml:"environments"`
+}
+
+// VolumeConfig defines a named volume configuration (Docker Compose style)
+type VolumeConfig struct {
+	Driver     string            `yaml:"driver,omitempty"`      // Volume driver (default: "local")
+	DriverOpts map[string]string `yaml:"driver_opts,omitempty"` // Driver-specific options
+	Labels     map[string]string `yaml:"labels,omitempty"`      // Volume labels
+	External   bool              `yaml:"external,omitempty"`    // If true, volume must already exist
+	Name       string            `yaml:"name,omitempty"`        // Override the auto-generated name (opt-out of prefix)
 }
 
 // StorageConfig defines shared storage configuration
@@ -137,6 +147,9 @@ type ServiceConfig struct {
 
 	// Service dependencies (controls deployment order)
 	DependsOn []string `yaml:"dependsOn,omitempty"` // List of service names this service depends on
+
+	// Init commands (run before service starts, useful for permissions)
+	Init []string `yaml:"init,omitempty"` // Commands to run before service starts (e.g., chown, chmod)
 }
 
 // SecretConfig defines a Docker secret
@@ -707,4 +720,62 @@ func ParseNFSVolumeSpec(volumeSpec string) (exportName string, containerPath str
 	}
 
 	return exportName, containerPath, readOnly, nil
+}
+
+// GetVolume returns a volume configuration by name
+func (c *Config) GetVolume(name string) (*VolumeConfig, bool) {
+	if c.Volumes == nil {
+		return nil, false
+	}
+	vol, exists := c.Volumes[name]
+	if !exists {
+		return nil, false
+	}
+	return &vol, true
+}
+
+// GetVolumeName returns the actual Docker volume name for a defined volume
+// If the volume has a custom name, use it; otherwise, apply project/env prefix
+func (c *Config) GetVolumeName(volumeKey, envName string) string {
+	if c.Volumes == nil {
+		// No top-level volumes, use default naming
+		return fmt.Sprintf("%s_%s_%s", c.Project.Name, envName, volumeKey)
+	}
+
+	vol, exists := c.Volumes[volumeKey]
+	if !exists {
+		// Volume not defined at top level, use default naming
+		return fmt.Sprintf("%s_%s_%s", c.Project.Name, envName, volumeKey)
+	}
+
+	// If external or has custom name, use the specified name
+	if vol.External || vol.Name != "" {
+		if vol.Name != "" {
+			return vol.Name
+		}
+		return volumeKey // External volumes use their key as-is
+	}
+
+	// Apply project/env prefix
+	return fmt.Sprintf("%s_%s_%s", c.Project.Name, envName, volumeKey)
+}
+
+// IsVolumeExternal checks if a volume is marked as external
+func (c *Config) IsVolumeExternal(name string) bool {
+	if c.Volumes == nil {
+		return false
+	}
+	vol, exists := c.Volumes[name]
+	if !exists {
+		return false
+	}
+	return vol.External
+}
+
+// GetAllDefinedVolumes returns all top-level volume definitions
+func (c *Config) GetAllDefinedVolumes() map[string]VolumeConfig {
+	if c.Volumes == nil {
+		return make(map[string]VolumeConfig)
+	}
+	return c.Volumes
 }

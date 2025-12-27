@@ -251,3 +251,180 @@ func GetServiceInspectData(client *ssh.Client, serviceName string, isSwarm bool)
 
 	return data[0], nil
 }
+
+// ActualServiceDetails contains detailed actual state of a service
+type ActualServiceDetails struct {
+	Name     string
+	Image    string
+	Replicas int
+	Env      map[string]string
+	Volumes  []string // Mount targets
+	Labels   map[string]string
+}
+
+// GatherActualServiceDetails retrieves full details for a service
+func GatherActualServiceDetails(client *ssh.Client, fullServiceName string) (*ActualServiceDetails, error) {
+	details := &ActualServiceDetails{
+		Name:    fullServiceName,
+		Env:     make(map[string]string),
+		Volumes: []string{},
+		Labels:  make(map[string]string),
+	}
+
+	// Get service inspect data
+	cmd := fmt.Sprintf("docker service inspect %s --format '{{json .}}'", fullServiceName)
+	output, err := client.Execute(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect service: %w", err)
+	}
+
+	var serviceData struct {
+		Spec struct {
+			Mode struct {
+				Replicated struct {
+					Replicas int `json:"Replicas"`
+				} `json:"Replicated"`
+			} `json:"Mode"`
+			TaskTemplate struct {
+				ContainerSpec struct {
+					Image  string   `json:"Image"`
+					Env    []string `json:"Env"`
+					Mounts []struct {
+						Type   string `json:"Type"`
+						Source string `json:"Source"`
+						Target string `json:"Target"`
+					} `json:"Mounts"`
+				} `json:"ContainerSpec"`
+			} `json:"TaskTemplate"`
+			Labels map[string]string `json:"Labels"`
+		} `json:"Spec"`
+	}
+
+	if err := json.Unmarshal([]byte(output), &serviceData); err != nil {
+		return nil, fmt.Errorf("failed to parse service data: %w", err)
+	}
+
+	details.Image = serviceData.Spec.TaskTemplate.ContainerSpec.Image
+	details.Replicas = serviceData.Spec.Mode.Replicated.Replicas
+	details.Labels = serviceData.Spec.Labels
+
+	// Parse environment variables
+	for _, envVar := range serviceData.Spec.TaskTemplate.ContainerSpec.Env {
+		parts := strings.SplitN(envVar, "=", 2)
+		if len(parts) == 2 {
+			details.Env[parts[0]] = parts[1]
+		}
+	}
+
+	// Extract mount targets
+	for _, mount := range serviceData.Spec.TaskTemplate.ContainerSpec.Mounts {
+		details.Volumes = append(details.Volumes, mount.Target)
+	}
+
+	return details, nil
+}
+
+// DriftChange represents a detected drift in a service
+type DriftChange struct {
+	Field        string // "env", "volume", "label", "replicas", "image"
+	Key          string // Environment variable name, volume path, label key, etc.
+	ActualValue  string
+	DesiredValue string
+	IsManual     bool // True if this appears to be a manual change
+}
+
+// DetectDrift compares actual state with desired state and returns drift changes
+func DetectDrift(actual *ActualServiceDetails, desired *config.ServiceConfig) []DriftChange {
+	var drifts []DriftChange
+
+	// Compare environment variables
+	// Check for env vars in actual that aren't in desired (manual additions)
+	for key, actualValue := range actual.Env {
+		desiredValue, exists := desired.Env[key]
+		if !exists {
+			drifts = append(drifts, DriftChange{
+				Field:        "env",
+				Key:          key,
+				ActualValue:  actualValue,
+				DesiredValue: "",
+				IsManual:     true,
+			})
+		} else if actualValue != desiredValue {
+			drifts = append(drifts, DriftChange{
+				Field:        "env",
+				Key:          key,
+				ActualValue:  actualValue,
+				DesiredValue: desiredValue,
+				IsManual:     true,
+			})
+		}
+	}
+
+	// Check for env vars in desired that aren't in actual (missing)
+	for key, desiredValue := range desired.Env {
+		if _, exists := actual.Env[key]; !exists {
+			drifts = append(drifts, DriftChange{
+				Field:        "env",
+				Key:          key,
+				ActualValue:  "",
+				DesiredValue: desiredValue,
+				IsManual:     false,
+			})
+		}
+	}
+
+	// Compare replicas
+	desiredReplicas := desired.Replicas
+	if desiredReplicas <= 0 {
+		desiredReplicas = 1
+	}
+	if actual.Replicas != desiredReplicas {
+		drifts = append(drifts, DriftChange{
+			Field:        "replicas",
+			Key:          "",
+			ActualValue:  fmt.Sprintf("%d", actual.Replicas),
+			DesiredValue: fmt.Sprintf("%d", desiredReplicas),
+			IsManual:     true,
+		})
+	}
+
+	// Compare volumes - check for manually added volumes
+	desiredVolumesSet := make(map[string]bool)
+	for _, vol := range desired.Volumes {
+		parts := strings.Split(vol, ":")
+		if len(parts) >= 2 {
+			desiredVolumesSet[parts[1]] = true // Target path
+		} else if len(parts) == 1 {
+			desiredVolumesSet[parts[0]] = true
+		}
+	}
+
+	for _, actualTarget := range actual.Volumes {
+		if !desiredVolumesSet[actualTarget] {
+			drifts = append(drifts, DriftChange{
+				Field:        "volume",
+				Key:          actualTarget,
+				ActualValue:  actualTarget,
+				DesiredValue: "",
+				IsManual:     true,
+			})
+		}
+	}
+
+	// Compare labels (only non-traefik, non-tako labels)
+	for key, actualValue := range actual.Labels {
+		if strings.HasPrefix(key, "traefik.") || strings.HasPrefix(key, "tako.") {
+			continue // Skip managed labels
+		}
+		// This is a manually added label
+		drifts = append(drifts, DriftChange{
+			Field:        "label",
+			Key:          key,
+			ActualValue:  actualValue,
+			DesiredValue: "",
+			IsManual:     true,
+		})
+	}
+
+	return drifts
+}
