@@ -14,7 +14,9 @@ type Manager struct {
 	basePath string
 	project  string
 	env      string
-	mu       sync.Mutex // Protect concurrent access
+	mu       sync.Mutex  // Protect concurrent access within process
+	lock     *StateLock  // Cross-process file-based locking
+	lockInfo *LockInfo   // Current lock if held
 }
 
 // GlobalState represents the overall project state
@@ -188,7 +190,49 @@ func NewManager(projectPath, projectName, environment string) (*Manager, error) 
 		basePath: basePath,
 		project:  projectName,
 		env:      environment,
+		lock:     NewStateLock(basePath),
 	}, nil
+}
+
+// AcquireLock acquires a cross-process lock for the given operation
+// Returns an error if another process holds the lock
+func (m *Manager) AcquireLock(operation string) error {
+	lockInfo, err := m.lock.Acquire(operation)
+	if err != nil {
+		return err
+	}
+	m.lockInfo = lockInfo
+	return nil
+}
+
+// AcquireLockWithWait acquires a cross-process lock, waiting if necessary
+func (m *Manager) AcquireLockWithWait(operation string) error {
+	lockInfo, err := m.lock.AcquireWithWait(operation)
+	if err != nil {
+		return err
+	}
+	m.lockInfo = lockInfo
+	return nil
+}
+
+// ReleaseLock releases the cross-process lock
+func (m *Manager) ReleaseLock() error {
+	if m.lockInfo == nil {
+		return nil
+	}
+	err := m.lock.Release(m.lockInfo)
+	m.lockInfo = nil
+	return err
+}
+
+// IsLocked returns true if the state is locked by another process
+func (m *Manager) IsLocked() bool {
+	return m.lock.IsLocked()
+}
+
+// GetLockHolder returns information about who holds the lock
+func (m *Manager) GetLockHolder() (*LockInfo, error) {
+	return m.lock.GetLockInfo()
 }
 
 // SaveDeployment saves deployment state
@@ -217,8 +261,69 @@ func (m *Manager) SaveDeployment(deployment *DeploymentState) error {
 		}
 	}
 
+	// Prune old history files to prevent unbounded growth
+	m.pruneHistory()
+
 	// Update global state
 	return m.updateGlobalState(deployment)
+}
+
+// MaxLocalHistoryEntries is the maximum number of deployment history files to keep
+const MaxLocalHistoryEntries = 50
+
+// pruneHistory removes old history files keeping only the most recent entries
+func (m *Manager) pruneHistory() {
+	historyDir := filepath.Join(m.basePath, "deployments", m.env, "history")
+
+	entries, err := os.ReadDir(historyDir)
+	if err != nil {
+		return // Silently ignore errors during cleanup
+	}
+
+	// Filter to only .json files
+	var jsonFiles []os.DirEntry
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
+			jsonFiles = append(jsonFiles, e)
+		}
+	}
+
+	// If under limit, nothing to do
+	if len(jsonFiles) <= MaxLocalHistoryEntries {
+		return
+	}
+
+	// Sort by name (which is timestamp-based, so oldest first)
+	// Files are named like "2006-01-02T15-04-05Z.json"
+	// Sorting alphabetically gives chronological order
+	type fileWithInfo struct {
+		entry   os.DirEntry
+		modTime time.Time
+	}
+	var files []fileWithInfo
+	for _, e := range jsonFiles {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileWithInfo{entry: e, modTime: info.ModTime()})
+	}
+
+	// Sort by modification time (oldest first)
+	for i := 0; i < len(files)-1; i++ {
+		for j := i + 1; j < len(files); j++ {
+			if files[i].modTime.After(files[j].modTime) {
+				files[i], files[j] = files[j], files[i]
+			}
+		}
+	}
+
+	// Remove oldest files until we're at the limit
+	toRemove := len(files) - MaxLocalHistoryEntries
+	for i := 0; i < toRemove; i++ {
+		path := filepath.Join(historyDir, files[i].entry.Name())
+		os.Remove(path) // Ignore errors during cleanup
+	}
 }
 
 // GetCurrentDeployment returns the current deployment state
@@ -454,7 +559,8 @@ func (m *Manager) updateGlobalState(deployment *DeploymentState) error {
 
 func (m *Manager) saveJSON(path string, data interface{}) error {
 	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
@@ -463,7 +569,21 @@ func (m *Manager) saveJSON(path string, data interface{}) error {
 		return err
 	}
 
-	return os.WriteFile(path, bytes, 0644)
+	// Use atomic write: write to temp file, then rename
+	// This prevents corruption if the process crashes mid-write
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, bytes, 0644); err != nil {
+		return err
+	}
+
+	// Rename is atomic on POSIX systems
+	if err := os.Rename(tmpPath, path); err != nil {
+		// Clean up temp file on failure
+		os.Remove(tmpPath)
+		return err
+	}
+
+	return nil
 }
 
 func (m *Manager) loadJSON(path string, target interface{}) error {
