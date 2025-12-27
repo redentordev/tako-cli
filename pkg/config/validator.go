@@ -134,6 +134,13 @@ func validateServer(name string, server *ServerConfig) error {
 	}
 
 	if hasPassword {
+		// Security check: warn if password appears to be hardcoded (not an env var)
+		if !strings.HasPrefix(server.Password, "${") && !strings.HasPrefix(server.Password, "$") {
+			fmt.Printf("⚠ Security Warning: server %s has a hardcoded password.\n", name)
+			fmt.Printf("  Consider using an environment variable instead:\n")
+			fmt.Printf("    password: ${SSH_PASSWORD}\n")
+			fmt.Printf("  Then set: export SSH_PASSWORD='your-password'\n\n")
+		}
 		// Password authentication - no need to check SSH key
 		return nil
 	}
@@ -487,6 +494,28 @@ func isValidDomain(domain string) bool {
 	if strings.HasPrefix(domain, "*.") {
 		domain = domain[2:]
 	}
+
+	// Check for dangerous characters that could cause issues in Traefik/shell
+	// These characters could be used for injection attacks or cause routing issues
+	dangerousChars := []string{
+		"`", "$", "!", ";", "&", "|", ">", "<", "(", ")", "{", "}", "[", "]",
+		"'", "\"", "\\", "\n", "\r", "\t", " ",
+	}
+	for _, ch := range dangerousChars {
+		if strings.Contains(domain, ch) {
+			return false
+		}
+	}
+
+	// Check for Traefik-specific regex metacharacters that could affect routing
+	// These are valid in hostnames but could cause issues if passed to HostRegexp
+	regexChars := []string{"^", "+", "?", "*", "="}
+	for _, ch := range regexChars {
+		if strings.Contains(domain, ch) {
+			return false
+		}
+	}
+
 	return isValidHostname(domain)
 }
 

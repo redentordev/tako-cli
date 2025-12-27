@@ -221,7 +221,9 @@ func (s *StateManager) getStatePath() string {
 }
 
 func (s *StateManager) generateDeploymentID() string {
-	return fmt.Sprintf("%d", time.Now().Unix())
+	// Use nanosecond precision + process ID to avoid collisions
+	// Format: timestamp_nanoseconds_pid for uniqueness
+	return fmt.Sprintf("%d_%d", time.Now().UnixNano(), os.Getpid())
 }
 
 func (s *StateManager) updateHistory(deployment *DeploymentState) error {
@@ -258,16 +260,22 @@ func (s *StateManager) updateHistory(deployment *DeploymentState) error {
 	}
 
 	historyPath := fmt.Sprintf("%s/history.json", s.getStatePath())
-	tmpFile := "/tmp/tako-history.json"
+	// Use unique temp file to avoid collisions from concurrent operations
+	tmpFile := fmt.Sprintf("/tmp/tako-history-%d-%d.json", time.Now().UnixNano(), os.Getpid())
 
 	writeCmd := fmt.Sprintf("cat > %s <<'EOF'\n%s\nEOF", tmpFile, string(data))
 	if _, err := s.client.Execute(writeCmd); err != nil {
 		return err
 	}
 
+	// Atomic move to final location
 	mvCmd := fmt.Sprintf("sudo mv %s %s", tmpFile, historyPath)
-	_, err = s.client.Execute(mvCmd)
-	return err
+	if _, err = s.client.Execute(mvCmd); err != nil {
+		// Clean up temp file on failure
+		s.client.Execute(fmt.Sprintf("rm -f %s", tmpFile))
+		return err
+	}
+	return nil
 }
 
 func (s *StateManager) loadHistory() (*DeploymentHistory, error) {
