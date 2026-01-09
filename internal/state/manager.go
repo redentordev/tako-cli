@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/resilience"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 )
 
@@ -47,7 +49,7 @@ func (s *StateManager) Initialize() error {
 	return nil
 }
 
-// SaveDeployment saves a deployment state to the server
+// SaveDeployment saves a deployment state to the server with retry logic
 func (s *StateManager) SaveDeployment(deployment *DeploymentState) error {
 	// Ensure deployment has an ID
 	if deployment.ID == "" {
@@ -64,6 +66,18 @@ func (s *StateManager) SaveDeployment(deployment *DeploymentState) error {
 		return fmt.Errorf("failed to serialize deployment state: %w", err)
 	}
 
+	// Wrap SSH operations with retry for transient failures
+	ctx := context.Background()
+	return resilience.RetryWithBackoff(ctx, func() error {
+		return s.saveDeploymentOnce(deployment, data)
+	},
+		resilience.WithMaxElapsed(30*time.Second),
+		resilience.WithMaxRetries(3),
+	)
+}
+
+// saveDeploymentOnce performs the actual save operation (called by retry wrapper)
+func (s *StateManager) saveDeploymentOnce(deployment *DeploymentState, data []byte) error {
 	// Write to server
 	statePath := s.getStatePath()
 	tmpFile := fmt.Sprintf("/tmp/tako-deploy-%s.json", deployment.ID)

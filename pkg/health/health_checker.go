@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"golang.org/x/sync/errgroup"
 )
 
 // ServiceHealth represents the health status of a deployed service
@@ -43,6 +45,7 @@ func NewHealthChecker(client *ssh.Client) *HealthChecker {
 }
 
 // CheckService performs a comprehensive health check on a service
+// Checks are run in parallel for improved performance
 func (h *HealthChecker) CheckService(ctx context.Context, serviceName, domain string) (*ServiceHealth, error) {
 	health := &ServiceHealth{
 		ServiceName: serviceName,
@@ -51,37 +54,70 @@ func (h *HealthChecker) CheckService(ctx context.Context, serviceName, domain st
 		Errors:      []string{},
 	}
 
-	// Check container status
-	health.ContainerRunning = h.checkContainerRunning(serviceName)
-	if !health.ContainerRunning {
-		health.Errors = append(health.Errors, "Container not running")
-	}
+	var mu sync.Mutex
 
-	// Check Traefik configuration
-	health.TraefikConfigured = h.checkTraefikConfig(serviceName)
-	if !health.TraefikConfigured {
-		health.Errors = append(health.Errors, "Traefik not configured properly")
-	}
+	// Run checks in parallel using errgroup
+	g, ctx := errgroup.WithContext(ctx)
 
-	// Check HTTP accessibility
-	health.HTTPAccessible = h.checkHTTPAccess(domain)
-	if !health.HTTPAccessible {
-		health.Errors = append(health.Errors, "HTTP not accessible")
-	}
-
-	// Check HTTPS and SSL
-	if sslInfo := h.checkSSL(domain); sslInfo != nil {
-		health.HTTPSAccessible = true
-		health.SSLValid = sslInfo.Valid
-		health.SSLIssuer = sslInfo.Issuer
-		health.SSLExpiry = sslInfo.Expiry
-
-		if !sslInfo.Valid {
-			health.Errors = append(health.Errors, fmt.Sprintf("SSL invalid: %s", sslInfo.Error))
+	// Container check (requires SSH)
+	g.Go(func() error {
+		running := h.checkContainerRunning(serviceName)
+		mu.Lock()
+		health.ContainerRunning = running
+		if !running {
+			health.Errors = append(health.Errors, "Container not running")
 		}
-	} else {
-		health.HTTPSAccessible = false
-		health.Errors = append(health.Errors, "HTTPS not accessible")
+		mu.Unlock()
+		return nil
+	})
+
+	// Traefik check (requires SSH)
+	g.Go(func() error {
+		configured := h.checkTraefikConfig(serviceName)
+		mu.Lock()
+		health.TraefikConfigured = configured
+		if !configured {
+			health.Errors = append(health.Errors, "Traefik not configured properly")
+		}
+		mu.Unlock()
+		return nil
+	})
+
+	// HTTP check (network, can run in parallel)
+	g.Go(func() error {
+		accessible := h.checkHTTPAccess(domain)
+		mu.Lock()
+		health.HTTPAccessible = accessible
+		if !accessible {
+			health.Errors = append(health.Errors, "HTTP not accessible")
+		}
+		mu.Unlock()
+		return nil
+	})
+
+	// HTTPS/SSL check (network, can run in parallel)
+	g.Go(func() error {
+		info := h.checkSSL(domain)
+		mu.Lock()
+		if info != nil {
+			health.HTTPSAccessible = true
+			health.SSLValid = info.Valid
+			health.SSLIssuer = info.Issuer
+			health.SSLExpiry = info.Expiry
+			if !info.Valid {
+				health.Errors = append(health.Errors, fmt.Sprintf("SSL invalid: %s", info.Error))
+			}
+		} else {
+			health.HTTPSAccessible = false
+			health.Errors = append(health.Errors, "HTTPS not accessible")
+		}
+		mu.Unlock()
+		return nil
+	})
+
+	// Wait for all checks to complete
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	return health, nil

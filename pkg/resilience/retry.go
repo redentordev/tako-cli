@@ -2,10 +2,14 @@ package resilience
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
+	"net"
 	"time"
+
+	"github.com/cenkalti/backoff/v4"
 )
 
 // RetryConfig holds configuration for retry behavior
@@ -121,4 +125,171 @@ func (r *RetryableOperation) Execute(ctx context.Context) error {
 	}
 
 	return fmt.Errorf("%s failed after %d attempts: %w", r.Name, r.Config.MaxAttempts, lastErr)
+}
+
+// =============================================================================
+// Advanced Retry with cenkalti/backoff
+// =============================================================================
+
+// BackoffRetryOption configures backoff retry behavior
+type BackoffRetryOption func(*backoffConfig)
+
+type backoffConfig struct {
+	maxElapsed   time.Duration
+	maxRetries   uint64
+	initialDelay time.Duration
+	maxDelay     time.Duration
+	multiplier   float64
+	onRetry      func(err error, duration time.Duration)
+	classifier   func(error) bool // returns true if error is retryable
+}
+
+// WithMaxElapsed sets the maximum total time for retries
+func WithMaxElapsed(d time.Duration) BackoffRetryOption {
+	return func(c *backoffConfig) {
+		c.maxElapsed = d
+	}
+}
+
+// WithMaxRetries sets the maximum number of retry attempts
+func WithMaxRetries(n uint64) BackoffRetryOption {
+	return func(c *backoffConfig) {
+		c.maxRetries = n
+	}
+}
+
+// WithInitialDelay sets the initial delay between retries
+func WithInitialDelay(d time.Duration) BackoffRetryOption {
+	return func(c *backoffConfig) {
+		c.initialDelay = d
+	}
+}
+
+// WithMaxDelay sets the maximum delay between retries
+func WithMaxDelay(d time.Duration) BackoffRetryOption {
+	return func(c *backoffConfig) {
+		c.maxDelay = d
+	}
+}
+
+// WithMultiplier sets the backoff multiplier
+func WithMultiplier(m float64) BackoffRetryOption {
+	return func(c *backoffConfig) {
+		c.multiplier = m
+	}
+}
+
+// WithOnRetry sets a callback for each retry attempt
+func WithOnRetry(fn func(err error, duration time.Duration)) BackoffRetryOption {
+	return func(c *backoffConfig) {
+		c.onRetry = fn
+	}
+}
+
+// WithRetryClassifier sets a function to determine if an error is retryable
+func WithRetryClassifier(fn func(error) bool) BackoffRetryOption {
+	return func(c *backoffConfig) {
+		c.classifier = fn
+	}
+}
+
+// RetryWithBackoff provides advanced retry with exponential backoff using cenkalti/backoff.
+// This is more robust than the basic Retry function and supports:
+// - Maximum elapsed time limit
+// - Maximum retry count
+// - Customizable backoff parameters
+// - Retry classification (determine if error is retryable)
+// - Context cancellation
+func RetryWithBackoff(ctx context.Context, operation func() error, opts ...BackoffRetryOption) error {
+	// Default configuration
+	cfg := &backoffConfig{
+		maxElapsed:   2 * time.Minute,
+		maxRetries:   0, // unlimited by default
+		initialDelay: time.Second,
+		maxDelay:     30 * time.Second,
+		multiplier:   2.0,
+		classifier:   DefaultRetryClassifier,
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// Create exponential backoff
+	b := backoff.NewExponentialBackOff()
+	b.InitialInterval = cfg.initialDelay
+	b.MaxInterval = cfg.maxDelay
+	b.MaxElapsedTime = cfg.maxElapsed
+	b.Multiplier = cfg.multiplier
+	b.RandomizationFactor = 0.1 // 10% jitter
+
+	// Wrap with max retries if specified
+	var bo backoff.BackOff = b
+	if cfg.maxRetries > 0 {
+		bo = backoff.WithMaxRetries(b, cfg.maxRetries)
+	}
+
+	// Wrap with context
+	bo = backoff.WithContext(bo, ctx)
+
+	// Create operation wrapper for classification
+	wrappedOp := func() error {
+		err := operation()
+		if err == nil {
+			return nil
+		}
+
+		// Check if error is retryable
+		if cfg.classifier != nil && !cfg.classifier(err) {
+			// Permanent error - don't retry
+			return backoff.Permanent(err)
+		}
+
+		return err
+	}
+
+	// Execute with optional notification
+	if cfg.onRetry != nil {
+		return backoff.RetryNotify(wrappedOp, bo, cfg.onRetry)
+	}
+
+	return backoff.Retry(wrappedOp, bo)
+}
+
+// DefaultRetryClassifier determines if an error is retryable.
+// Network errors and timeouts are retryable; auth and validation errors are not.
+func DefaultRetryClassifier(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Network errors are retryable
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout() || netErr.Temporary()
+	}
+
+	// Connection refused, reset, etc. are retryable
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+
+	// Context cancelled/deadline exceeded are NOT retryable
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	// Default: retry unknown errors
+	return true
+}
+
+// IsRetryable checks if an error should be retried
+func IsRetryable(err error) bool {
+	return DefaultRetryClassifier(err)
+}
+
+// PermanentError wraps an error to indicate it should not be retried
+func PermanentError(err error) error {
+	return backoff.Permanent(err)
 }

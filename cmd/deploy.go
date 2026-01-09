@@ -220,6 +220,15 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to setup swarm cluster: %w", err)
 	}
 
+	// === AUTO-SYNC STATE ===
+	// If local .tako directory doesn't exist but remote state does,
+	// automatically sync from remote to help users who cloned the project
+	if err := SyncStateOnDeploy(cfg, firstClient, envName); err != nil {
+		if verbose {
+			fmt.Printf("Warning: auto-sync failed: %v\n", err)
+		}
+	}
+
 	// === STATE RECONCILIATION ===
 	// Compare desired state (config) with actual state (running services)
 	// This ensures we properly handle service removals and updates

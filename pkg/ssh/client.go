@@ -16,11 +16,12 @@ import (
 
 // Client wraps an SSH connection with additional functionality
 type Client struct {
-	config *ssh.ClientConfig
-	host   string
-	port   int
-	conn   *ssh.Client
-	mu     sync.Mutex
+	config    *ssh.ClientConfig
+	host      string
+	port      int
+	conn      *ssh.Client
+	agentConn net.Conn // Track SSH agent connection for cleanup
+	mu        sync.Mutex
 }
 
 // parsePrivateKey parses an SSH private key, handling various formats
@@ -68,8 +69,15 @@ func getHostKeyCallback() (ssh.HostKeyCallback, error) {
 	return verifier.GetCallback(), nil
 }
 
+// agentAuthResult holds both the auth method and connection for proper cleanup
+type agentAuthResult struct {
+	authMethod ssh.AuthMethod
+	conn       net.Conn
+}
+
 // getSSHAgentAuth returns an ssh.AuthMethod using the SSH agent if available
-func getSSHAgentAuth() ssh.AuthMethod {
+// Also returns the connection so it can be properly closed later
+func getSSHAgentAuth() *agentAuthResult {
 	socket := os.Getenv("SSH_AUTH_SOCK")
 	if socket == "" {
 		return nil
@@ -81,7 +89,10 @@ func getSSHAgentAuth() ssh.AuthMethod {
 	}
 
 	agentClient := agent.NewClient(conn)
-	return ssh.PublicKeysCallback(agentClient.Signers)
+	return &agentAuthResult{
+		authMethod: ssh.PublicKeysCallback(agentClient.Signers),
+		conn:       conn,
+	}
 }
 
 // Pool manages a pool of SSH connections
@@ -101,6 +112,7 @@ func NewPool() *Pool {
 // Also tries ssh-agent for passphrase-protected keys
 func NewClient(host string, port int, user string, keyPath string) (*Client, error) {
 	var authMethods []ssh.AuthMethod
+	var agentConn net.Conn // Track agent connection for cleanup
 
 	// Try to read and parse the key file
 	key, err := os.ReadFile(keyPath)
@@ -113,7 +125,8 @@ func NewClient(host string, port int, user string, keyPath string) (*Client, err
 	if err != nil {
 		// If key parsing failed (e.g., passphrase protected), try ssh-agent
 		if agentAuth := getSSHAgentAuth(); agentAuth != nil {
-			authMethods = append(authMethods, agentAuth)
+			authMethods = append(authMethods, agentAuth.authMethod)
+			agentConn = agentAuth.conn
 		} else {
 			// No agent available, return the original error
 			return nil, err
@@ -122,16 +135,21 @@ func NewClient(host string, port int, user string, keyPath string) (*Client, err
 		authMethods = append(authMethods, ssh.PublicKeys(signer))
 	}
 
-	// Also add ssh-agent as fallback if available
-	if len(authMethods) == 1 {
+	// Also add ssh-agent as fallback if available (only if we don't already have an agent connection)
+	if len(authMethods) == 1 && agentConn == nil {
 		if agentAuth := getSSHAgentAuth(); agentAuth != nil {
-			authMethods = append(authMethods, agentAuth)
+			authMethods = append(authMethods, agentAuth.authMethod)
+			agentConn = agentAuth.conn
 		}
 	}
 
 	// Get host key callback from verifier
 	hostKeyCallback, err := getHostKeyCallback()
 	if err != nil {
+		// Clean up agent connection on error
+		if agentConn != nil {
+			agentConn.Close()
+		}
 		return nil, fmt.Errorf("failed to setup host key verification: %w", err)
 	}
 
@@ -146,9 +164,10 @@ func NewClient(host string, port int, user string, keyPath string) (*Client, err
 	}
 
 	return &Client{
-		config: config,
-		host:   host,
-		port:   port,
+		config:    config,
+		host:      host,
+		port:      port,
+		agentConn: agentConn,
 	}, nil
 }
 
@@ -184,6 +203,7 @@ func NewClientWithPassword(host string, port int, user string, password string) 
 // Also tries ssh-agent as fallback for passphrase-protected keys
 func NewClientWithAuth(host string, port int, user string, keyPath string, password string) (*Client, error) {
 	var authMethods []ssh.AuthMethod
+	var agentConn net.Conn // Track agent connection for cleanup
 
 	// Try key-based authentication first if keyPath is provided
 	if keyPath != "" {
@@ -195,16 +215,18 @@ func NewClientWithAuth(host string, port int, user string, keyPath string, passw
 			} else {
 				// Key parsing failed, try ssh-agent
 				if agentAuth := getSSHAgentAuth(); agentAuth != nil {
-					authMethods = append(authMethods, agentAuth)
+					authMethods = append(authMethods, agentAuth.authMethod)
+					agentConn = agentAuth.conn
 				}
 			}
 		}
 	}
 
 	// Try ssh-agent if no key methods yet
-	if len(authMethods) == 0 {
+	if len(authMethods) == 0 && agentConn == nil {
 		if agentAuth := getSSHAgentAuth(); agentAuth != nil {
-			authMethods = append(authMethods, agentAuth)
+			authMethods = append(authMethods, agentAuth.authMethod)
+			agentConn = agentAuth.conn
 		}
 	}
 
@@ -215,12 +237,20 @@ func NewClientWithAuth(host string, port int, user string, keyPath string, passw
 
 	// Ensure we have at least one auth method
 	if len(authMethods) == 0 {
+		// Clean up agent connection on error
+		if agentConn != nil {
+			agentConn.Close()
+		}
 		return nil, fmt.Errorf("no valid authentication method provided (need either SSH key or password)")
 	}
 
 	// Get host key callback from verifier
 	hostKeyCallback, err := getHostKeyCallback()
 	if err != nil {
+		// Clean up agent connection on error
+		if agentConn != nil {
+			agentConn.Close()
+		}
 		return nil, fmt.Errorf("failed to setup host key verification: %w", err)
 	}
 
@@ -234,9 +264,10 @@ func NewClientWithAuth(host string, port int, user string, keyPath string, passw
 	}
 
 	return &Client{
-		config: config,
-		host:   host,
-		port:   port,
+		config:    config,
+		host:      host,
+		port:      port,
+		agentConn: agentConn,
 	}, nil
 }
 
@@ -323,17 +354,40 @@ func (c *Client) Connect() error {
 	return fmt.Errorf("failed to connect after %d attempts: %w", maxRetries, lastErr)
 }
 
-// Close closes the SSH connection
+// Close closes the SSH connection and any associated resources
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	var lastErr error
+
+	// Close SSH connection
 	if c.conn != nil {
-		err := c.conn.Close()
+		if err := c.conn.Close(); err != nil {
+			lastErr = err
+		}
 		c.conn = nil
-		return err
 	}
-	return nil
+
+	// Close SSH agent connection to prevent file descriptor leak
+	if c.agentConn != nil {
+		if err := c.agentConn.Close(); err != nil && lastErr == nil {
+			lastErr = err
+		}
+		c.agentConn = nil
+	}
+
+	return lastErr
+}
+
+// Host returns the host address of the SSH connection
+func (c *Client) Host() string {
+	return c.host
+}
+
+// Port returns the port of the SSH connection
+func (c *Client) Port() int {
+	return c.port
 }
 
 // Execute runs a command on the remote server
@@ -461,6 +515,22 @@ func (c *Client) IsConnected() bool {
 	return c.conn != nil
 }
 
+// IsHealthy checks if the connection is still alive by sending a keepalive request
+// This helps detect stale connections that appear connected but are actually dead
+func (c *Client) IsHealthy() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return false
+	}
+
+	// Send a keepalive request to verify the connection is still alive
+	// This is more reliable than just checking if conn != nil
+	_, _, err := c.conn.SendRequest("keepalive@openssh.com", true, nil)
+	return err == nil
+}
+
 // getConnection returns the current connection, establishing it if needed
 // This method properly handles the connection state to avoid TOCTOU race conditions
 func (c *Client) getConnection() (*ssh.Client, error) {
@@ -493,6 +563,7 @@ func (p *Pool) GetOrCreate(host string, port int, user string, keyPath string) (
 
 // GetOrCreateWithAuth gets an existing client from the pool or creates a new one
 // Supports both key-based and password-based authentication
+// Automatically removes and replaces unhealthy connections
 func (p *Pool) GetOrCreateWithAuth(host string, port int, user string, keyPath string, password string) (*Client, error) {
 	key := fmt.Sprintf("%s@%s:%d", user, host, port)
 
@@ -502,7 +573,19 @@ func (p *Pool) GetOrCreateWithAuth(host string, port int, user string, keyPath s
 	p.mu.RUnlock()
 
 	if exists {
-		return client, nil
+		// Verify connection is still healthy before returning
+		if client.IsHealthy() {
+			return client, nil
+		}
+		// Connection is stale, need to remove and recreate
+		p.mu.Lock()
+		// Double-check it's still the same client (another goroutine may have replaced it)
+		if currentClient, stillExists := p.clients[key]; stillExists && currentClient == client {
+			client.Close() // Clean up stale connection
+			delete(p.clients, key)
+		}
+		p.mu.Unlock()
+		// Fall through to create new connection
 	}
 
 	// Acquire write lock for creation
@@ -511,7 +594,13 @@ func (p *Pool) GetOrCreateWithAuth(host string, port int, user string, keyPath s
 
 	// Double-check: another goroutine might have created it while we waited for the lock
 	if client, exists = p.clients[key]; exists {
-		return client, nil
+		// Verify health again under write lock
+		if client.IsHealthy() {
+			return client, nil
+		}
+		// Still stale, clean up
+		client.Close()
+		delete(p.clients, key)
 	}
 
 	// Create new client with appropriate authentication
@@ -532,6 +621,8 @@ func (p *Pool) GetOrCreateWithAuth(host string, port int, user string, keyPath s
 
 	// Connect the client (while holding the lock to prevent duplicate connections)
 	if err := client.Connect(); err != nil {
+		// Clean up on connection failure
+		client.Close()
 		return nil, err
 	}
 

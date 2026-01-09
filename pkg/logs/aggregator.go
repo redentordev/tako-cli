@@ -14,6 +14,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"golang.org/x/sync/errgroup"
 )
 
 // LogLevel represents log severity
@@ -85,7 +86,6 @@ func NewLogAggregator(cfg *config.Config, sshPool *ssh.Pool, environment string,
 func (a *LogAggregator) Query(ctx context.Context, query LogQuery) ([]AggregatedLog, error) {
 	var allLogs []AggregatedLog
 	var mu sync.Mutex
-	var wg sync.WaitGroup
 
 	servers, err := a.config.GetEnvironmentServers(a.environment)
 	if err != nil {
@@ -106,20 +106,23 @@ func (a *LogAggregator) Query(ctx context.Context, query LogQuery) ([]Aggregated
 		servers = filtered
 	}
 
+	// Use errgroup for structured concurrency with limited parallelism
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(5) // Limit concurrent SSH connections
+
 	// Query each server in parallel
 	for _, serverName := range servers {
 		serverCfg := a.config.Servers[serverName]
-		wg.Add(1)
+		name := serverName // Capture for goroutine
+		cfg := serverCfg
 
-		go func(name string, cfg config.ServerConfig) {
-			defer wg.Done()
-
+		g.Go(func() error {
 			client, err := a.sshPool.GetOrCreateWithAuth(cfg.Host, cfg.Port, cfg.User, cfg.SSHKey, cfg.Password)
 			if err != nil {
 				if a.verbose {
 					fmt.Printf("  ⚠ Failed to connect to %s: %v\n", name, err)
 				}
-				return
+				return nil // Don't fail the whole query for one server
 			}
 
 			logs, err := a.queryServer(ctx, client, name, query)
@@ -127,16 +130,20 @@ func (a *LogAggregator) Query(ctx context.Context, query LogQuery) ([]Aggregated
 				if a.verbose {
 					fmt.Printf("  ⚠ Failed to query %s: %v\n", name, err)
 				}
-				return
+				return nil // Don't fail the whole query for one server
 			}
 
 			mu.Lock()
 			allLogs = append(allLogs, logs...)
 			mu.Unlock()
-		}(serverName, serverCfg)
+			return nil
+		})
 	}
 
-	wg.Wait()
+	// Wait for all queries to complete
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
 
 	// Sort by timestamp (newest first)
 	sortLogsByTime(allLogs)
@@ -288,7 +295,7 @@ func (a *LogAggregator) parseLine(line, serviceName, serverName string) *Aggrega
 // Stream starts streaming logs to a channel
 func (a *LogAggregator) Stream(ctx context.Context, query LogQuery) (<-chan AggregatedLog, error) {
 	ch := make(chan AggregatedLog, 100)
-	
+
 	// Register subscriber
 	id := fmt.Sprintf("%d", time.Now().UnixNano())
 	a.mu.Lock()
@@ -308,18 +315,22 @@ func (a *LogAggregator) Stream(ctx context.Context, query LogQuery) (<-chan Aggr
 			return
 		}
 
-		var wg sync.WaitGroup
+		// Use errgroup for structured concurrency
+		g, streamCtx := errgroup.WithContext(ctx)
+		g.SetLimit(10) // Allow more concurrent streams
+
 		for _, serverName := range servers {
 			serverCfg := a.config.Servers[serverName]
-			wg.Add(1)
+			name := serverName // Capture for goroutine
+			cfg := serverCfg
 
-			go func(name string, cfg config.ServerConfig) {
-				defer wg.Done()
-				a.streamFromServer(ctx, name, cfg, query, ch)
-			}(serverName, serverCfg)
+			g.Go(func() error {
+				a.streamFromServer(streamCtx, name, cfg, query, ch)
+				return nil
+			})
 		}
 
-		wg.Wait()
+		g.Wait()
 	}()
 
 	return ch, nil

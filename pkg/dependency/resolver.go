@@ -2,6 +2,7 @@ package dependency
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -58,6 +59,10 @@ func (r *Resolver) ResolveOrder() ([]string, error) {
 		}
 	}
 
+	// Sort queue for deterministic ordering
+	// Map iteration order is random, but we want consistent deployment order
+	sort.Strings(queue)
+
 	// Process queue
 	for len(queue) > 0 {
 		// Get next service
@@ -65,12 +70,19 @@ func (r *Resolver) ResolveOrder() ([]string, error) {
 		queue = queue[1:]
 		result = append(result, current)
 
-		// Process dependents
+		// Process dependents - collect newly ready services
+		var newlyReady []string
 		for _, dependent := range graph[current] {
 			inDegree[dependent]--
 			if inDegree[dependent] == 0 {
-				queue = append(queue, dependent)
+				newlyReady = append(newlyReady, dependent)
 			}
+		}
+
+		// Sort and append newly ready services for deterministic order
+		if len(newlyReady) > 0 {
+			sort.Strings(newlyReady)
+			queue = append(queue, newlyReady...)
 		}
 	}
 
