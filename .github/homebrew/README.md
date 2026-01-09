@@ -31,10 +31,10 @@ After each release, update the `sha256` values in the formula:
 
 ```bash
 # Download binaries
-curl -LO https://github.com/redentordev/tako-cli/releases/download/v0.2.0/tako-darwin-arm64
-curl -LO https://github.com/redentordev/tako-cli/releases/download/v0.2.0/tako-darwin-amd64
-curl -LO https://github.com/redentordev/tako-cli/releases/download/v0.2.0/tako-linux-arm64
-curl -LO https://github.com/redentordev/tako-cli/releases/download/v0.2.0/tako-linux-amd64
+curl -LO https://github.com/redentordev/tako-cli/releases/download/v0.2.1/tako-darwin-arm64
+curl -LO https://github.com/redentordev/tako-cli/releases/download/v0.2.1/tako-darwin-amd64
+curl -LO https://github.com/redentordev/tako-cli/releases/download/v0.2.1/tako-linux-arm64
+curl -LO https://github.com/redentordev/tako-cli/releases/download/v0.2.1/tako-linux-amd64
 
 # Calculate checksums
 shasum -a 256 tako-darwin-arm64
