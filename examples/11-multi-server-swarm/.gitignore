@@ -1,0 +1,9 @@
+# Tako state and secrets
+.tako/
+.env
+
+# Keep example files
+!.env.example
+
+# Node
+node_modules/

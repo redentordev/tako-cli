@@ -37,8 +37,8 @@ func init() {
 }
 
 func runSetup(cmd *cobra.Command, args []string) error {
-	// Load configuration
-	cfg, err := config.LoadConfig(cfgFile)
+	// Load configuration with infrastructure state integration
+	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}

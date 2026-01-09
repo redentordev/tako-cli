@@ -4,28 +4,57 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/redentordev/tako-cli/pkg/infra"
 	"github.com/redentordev/tako-cli/pkg/syscheck"
 	"github.com/spf13/cobra"
+)
+
+var (
+	withInfra    bool
+	showPricing  bool
 )
 
 var initCmd = &cobra.Command{
 	Use:   "init [project-name]",
 	Short: "Initialize a new Tako CLI project",
 	Long: `Initialize a new Tako CLI project by creating a tako.yaml file
-with example configuration. This is the first step in setting up deployments.`,
+with example configuration. This is the first step in setting up deployments.
+
+Use --infra flag to launch an interactive wizard that helps you:
+  - Select a cloud provider (DigitalOcean, Hetzner, AWS, Linode)
+  - Choose server sizes and regions
+  - Configure networking (VPC, firewall)
+  - See estimated monthly costs
+
+Use --pricing to see a pricing comparison across all providers.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runInit,
 }
 
 func init() {
 	rootCmd.AddCommand(initCmd)
+	initCmd.Flags().BoolVar(&withInfra, "infra", false, "Use interactive wizard to configure cloud infrastructure")
+	initCmd.Flags().BoolVar(&showPricing, "pricing", false, "Show pricing comparison across providers")
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
+	// Show pricing comparison if requested
+	if showPricing {
+		infra.ShowPricingComparison()
+		infra.ShowStoragePricing()
+		return nil
+	}
+
 	projectName := "my-app"
 	if len(args) > 0 {
 		projectName = args[0]
+	}
+
+	// Run infrastructure wizard if requested
+	if withInfra {
+		return runInfraWizard(projectName)
 	}
 
 	// Check system requirements
@@ -470,4 +499,169 @@ node_modules/
 	fmt.Printf("  tako --help          - Show all commands\n")
 
 	return nil
+}
+
+// runInfraWizard runs the interactive infrastructure configuration wizard
+func runInfraWizard(projectName string) error {
+	// Check if config file already exists
+	configPath := "tako.yaml"
+	if _, err := os.Stat(configPath); err == nil {
+		return fmt.Errorf("tako.yaml already exists. Remove it first or use a different directory")
+	}
+
+	// Run the wizard
+	wizard := infra.NewWizard()
+	result, err := wizard.Run()
+	if err != nil {
+		return fmt.Errorf("wizard failed: %w", err)
+	}
+
+	// Show summary
+	fmt.Println("\n📋 Configuration Summary")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Printf("Provider: %s\n", result.Config.Provider)
+	fmt.Printf("Region: %s\n", result.Config.Region)
+	fmt.Printf("Estimated monthly cost: %s\n", infra.FormatPricing(result.EstimatedCost))
+	fmt.Println()
+
+	// Generate full config
+	configContent := generateFullConfig(projectName, result.YAMLContent)
+
+	// Write config file
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		return fmt.Errorf("failed to create config file: %w", err)
+	}
+
+	// Create .env.example with provider-specific content
+	envExample := generateInfraEnvExample(result.Config.Provider, result.ProviderEnvVar)
+	if err := os.WriteFile(".env.example", []byte(envExample), 0644); err != nil {
+		fmt.Printf("Warning: Failed to create .env.example: %v\n", err)
+	}
+
+	// Create .gitignore
+	createGitignore()
+
+	absPath, _ := filepath.Abs(configPath)
+	fmt.Printf("✓ Created tako.yaml at %s\n", absPath)
+	fmt.Printf("✓ Created .env.example\n")
+
+	fmt.Printf("\n🚀 Next steps:\n")
+	fmt.Printf("  1. Set %s environment variable\n", result.ProviderEnvVar)
+	fmt.Printf("  2. Run 'tako provision' to create cloud servers\n")
+	fmt.Printf("  3. Run 'tako setup' to configure Docker and Traefik\n")
+	fmt.Printf("  4. Run 'tako deploy' to deploy your application\n")
+	fmt.Println()
+	fmt.Printf("💡 Or run 'tako deploy --full' for the complete lifecycle\n")
+
+	return nil
+}
+
+// generateFullConfig creates the complete tako.yaml with infrastructure section
+func generateFullConfig(projectName, infraYAML string) string {
+	var sb strings.Builder
+
+	sb.WriteString("# 🐙 Tako CLI Configuration\n")
+	sb.WriteString("# Generated with: tako init --infra\n")
+	sb.WriteString("# Learn more: https://github.com/redentordev/tako-cli\n")
+	sb.WriteString("\n")
+
+	// Project section
+	sb.WriteString("project:\n")
+	sb.WriteString(fmt.Sprintf("  name: %s\n", projectName))
+	sb.WriteString("  version: 1.0.0\n")
+	sb.WriteString("\n")
+
+	// Infrastructure section (from wizard)
+	sb.WriteString(infraYAML)
+	sb.WriteString("\n")
+
+	// Servers section (auto-populated after provisioning)
+	sb.WriteString("# servers: (auto-populated after 'tako provision')\n")
+	sb.WriteString("#   manager:\n")
+	sb.WriteString("#     host: <provisioned-ip>\n")
+	sb.WriteString("#     user: root\n")
+	sb.WriteString("#     sshKey: ~/.ssh/id_ed25519\n")
+	sb.WriteString("#     role: manager\n")
+	sb.WriteString("\n")
+
+	// Environments section
+	sb.WriteString("environments:\n")
+	sb.WriteString("  production:\n")
+	sb.WriteString("    servers:\n")
+	sb.WriteString("      - manager\n")
+	sb.WriteString("    services:\n")
+	sb.WriteString("      web:\n")
+	sb.WriteString("        build: .\n")
+	sb.WriteString("        port: 3000\n")
+	sb.WriteString("        proxy:\n")
+	sb.WriteString(fmt.Sprintf("          domain: %s.example.com\n", projectName))
+	sb.WriteString("          email: ${LETSENCRYPT_EMAIL}\n")
+	sb.WriteString("        env:\n")
+	sb.WriteString("          NODE_ENV: production\n")
+
+	return sb.String()
+}
+
+// generateInfraEnvExample creates .env.example with provider-specific variables
+func generateInfraEnvExample(provider, envVar string) string {
+	var sb strings.Builder
+
+	sb.WriteString("# 🐙 Tako CLI Environment Variables\n")
+	sb.WriteString("# Copy this file to .env and fill in your actual values\n")
+	sb.WriteString("\n")
+
+	sb.WriteString("# ============================================================================\n")
+	sb.WriteString("# CLOUD PROVIDER CREDENTIALS (Required for infrastructure provisioning)\n")
+	sb.WriteString("# ============================================================================\n")
+
+	switch provider {
+	case "digitalocean":
+		sb.WriteString("# Get your token at: https://cloud.digitalocean.com/account/api/tokens\n")
+		sb.WriteString("DIGITALOCEAN_TOKEN=your-api-token-here\n")
+	case "hetzner":
+		sb.WriteString("# Get your token at: https://console.hetzner.cloud/projects/*/security/tokens\n")
+		sb.WriteString("HCLOUD_TOKEN=your-api-token-here\n")
+	case "aws":
+		sb.WriteString("# Get your keys at: https://console.aws.amazon.com/iam/home#/security_credentials\n")
+		sb.WriteString("AWS_ACCESS_KEY_ID=your-access-key-id\n")
+		sb.WriteString("AWS_SECRET_ACCESS_KEY=your-secret-access-key\n")
+	case "linode":
+		sb.WriteString("# Get your token at: https://cloud.linode.com/profile/tokens\n")
+		sb.WriteString("LINODE_TOKEN=your-api-token-here\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString("# ============================================================================\n")
+	sb.WriteString("# SSL CERTIFICATE (Required for HTTPS)\n")
+	sb.WriteString("# ============================================================================\n")
+	sb.WriteString("LETSENCRYPT_EMAIL=admin@example.com\n")
+	sb.WriteString("\n")
+
+	sb.WriteString("# ============================================================================\n")
+	sb.WriteString("# APPLICATION SECRETS (Optional)\n")
+	sb.WriteString("# ============================================================================\n")
+	sb.WriteString("# DATABASE_URL=postgresql://user:password@postgres:5432/myapp\n")
+	sb.WriteString("# JWT_SECRET=your-jwt-secret-here\n")
+	sb.WriteString("# API_KEY=your-api-key-here\n")
+
+	return sb.String()
+}
+
+// createGitignore creates a .gitignore file if it doesn't exist
+func createGitignore() {
+	gitignorePath := ".gitignore"
+	gitignoreContent := `.env
+.env.local
+.tako/
+*.log
+dist/
+build/
+node_modules/
+`
+
+	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
+		if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
+			fmt.Printf("Warning: Failed to create .gitignore: %v\n", err)
+		}
+	}
 }

@@ -238,10 +238,17 @@ func (m *Manager) createService(
 		}()
 	}
 
-	// Don't publish ports for services - Traefik handles all external access via domain routing
-	// This prevents port conflicts between projects and improves security
-	// Services are only accessible through their configured domains via Traefik
-	// Internal services can still communicate via Docker networks
+	// Publish ports directly when:
+	// 1. No Traefik/domains configured (traefikLabels is empty)
+	// 2. Service has a port specified
+	// When domains are configured, Traefik handles routing and we don't publish ports directly
+	if len(traefikLabels) == 0 && service.Port > 0 {
+		// Publish port directly for external access
+		cmd += fmt.Sprintf(" --publish published=%d,target=%d,mode=ingress", service.Port, service.Port)
+		if m.verbose {
+			fmt.Printf("  Publishing port %d (no domain configured)\n", service.Port)
+		}
+	}
 
 	// Add volumes (with project and environment scoping)
 	for _, volume := range service.Volumes {
@@ -558,6 +565,21 @@ func (m *Manager) updateService(
 
 		if m.verbose {
 			fmt.Printf("  Updating %d Traefik labels\n", len(traefikLabels))
+		}
+	}
+
+	// Publish ports directly when no Traefik/domains configured
+	// For updates, we use --publish-add to ensure port is published
+	if len(traefikLabels) == 0 && service.Port > 0 {
+		// Check if port is already published
+		portCheck := fmt.Sprintf("docker service inspect %s --format '{{range .Endpoint.Ports}}{{.PublishedPort}}{{end}}'", fullServiceName)
+		currentPorts, _ := client.Execute(portCheck)
+		if strings.TrimSpace(currentPorts) == "" {
+			// No ports published, add it
+			cmd += fmt.Sprintf(" --publish-add published=%d,target=%d,mode=ingress", service.Port, service.Port)
+			if m.verbose {
+				fmt.Printf("  Publishing port %d (no domain configured)\n", service.Port)
+			}
 		}
 	}
 

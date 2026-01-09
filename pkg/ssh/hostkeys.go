@@ -340,3 +340,60 @@ func GetKnownHostsPath() (string, error) {
 	}
 	return filepath.Join(homeDir, ".tako", "known_hosts"), nil
 }
+
+// RemoveHostKey removes a host key from Tako's known_hosts file
+// This should be called when destroying infrastructure to allow clean reconnection
+func RemoveHostKey(host string) error {
+	knownHostsPath, err := GetKnownHostsPath()
+	if err != nil {
+		return err
+	}
+
+	// Read existing file
+	data, err := os.ReadFile(knownHostsPath)
+	if os.IsNotExist(err) {
+		return nil // Nothing to remove
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read known_hosts: %w", err)
+	}
+
+	// Filter out lines matching the host
+	lines := strings.Split(string(data), "\n")
+	var newLines []string
+	removed := false
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			newLines = append(newLines, line)
+			continue
+		}
+
+		// Check if this line is for the host we want to remove
+		// Format: host algo key [comment]
+		// Also handle hashed hosts: |1|base64|base64
+		parts := strings.Fields(line)
+		if len(parts) >= 3 {
+			hostPart := parts[0]
+			// Check if host matches directly or is in a comma-separated list
+			if hostPart == host || strings.HasPrefix(hostPart, host+",") || strings.Contains(hostPart, ","+host) {
+				removed = true
+				continue // Skip this line (remove it)
+			}
+		}
+		newLines = append(newLines, line)
+	}
+
+	if !removed {
+		return nil // Host was not in file
+	}
+
+	// Write back
+	content := strings.Join(newLines, "\n")
+	if err := os.WriteFile(knownHostsPath, []byte(content), 0600); err != nil {
+		return fmt.Errorf("failed to write known_hosts: %w", err)
+	}
+
+	return nil
+}

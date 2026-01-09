@@ -63,7 +63,7 @@ func runExec(cmd *cobra.Command, args []string) error {
 	command := args[0]
 
 	// Load configuration
-	cfg, err := config.LoadConfig(cfgFile)
+	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}

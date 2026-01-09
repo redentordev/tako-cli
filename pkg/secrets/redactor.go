@@ -50,6 +50,8 @@ func compilePatterns() []*regexp.Regexp {
 		// Cloud provider patterns
 		`AKIA[0-9A-Z]{16}`,       // AWS Access Key
 		`AIza[0-9A-Za-z\-_]{35}`, // Google API Key
+		`dop_v1_[a-f0-9]{64}`,    // DigitalOcean personal access token (new format)
+		`[a-f0-9]{64}`,           // Hetzner/Linode tokens (64 char hex)
 
 		// JWT tokens
 		`eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`,

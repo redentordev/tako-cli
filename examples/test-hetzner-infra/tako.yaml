@@ -1,0 +1,22 @@
+project:
+  name: hetzner-test
+  version: 1.0.0
+
+infrastructure:
+  provider: hetzner
+  region: fsn1
+  credentials:
+    token: ${HCLOUD_TOKEN}
+
+  servers:
+    web:
+      size: cax11
+      role: manager
+
+environments:
+  production:
+    servers: [web]
+    services:
+      nginx:
+        image: nginx:alpine
+        port: 80

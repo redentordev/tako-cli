@@ -8,7 +8,7 @@
 
 Tako CLI is a powerful deployment automation tool that brings Platform-as-a-Service (PaaS) simplicity to your own infrastructure. Deploy Docker containers to your VPS servers with automatic HTTPS, health checks, zero-downtime deployments, and complete control over your infrastructure.
 
-[![Version](https://img.shields.io/badge/version-0.0.2-blue)](https://github.com/redentordev/tako-cli/releases)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue)](https://github.com/redentordev/tako-cli/releases)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Status](https://img.shields.io/badge/status-experimental-orange)](https://github.com/redentordev/tako-cli)
@@ -133,7 +133,7 @@ make install
 ```bash
 tako --version
 # Output:
-# Tako CLI v0.1.0
+# Tako CLI v0.2.0
 # Commit:  abc1234
 # Built:   2025-01-01T12:00:00Z
 ```
@@ -281,6 +281,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 ### Infrastructure & Scaling
 
+- **Cloud Infrastructure Provisioning** - Provision servers on DigitalOcean, Hetzner, Linode, or AWS with one command
 - **Multi-Server Support** - Deploy to multiple servers simultaneously
 - **Docker Swarm Integration** - Automatic orchestration for 2+ servers
 - **Placement Strategies** - Control service placement (spread, pinned, any)
@@ -302,6 +303,18 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 ---
 
 ## Core Commands
+
+### Infrastructure Provisioning
+
+| Command | Description |
+|---------|-------------|
+| `tako provision` | Provision cloud infrastructure (servers, VPC, firewall) |
+| `tako provision --preview` | Preview infrastructure changes |
+| `tako infra outputs` | Show provisioned server IPs and details |
+| `tako infra validate` | Validate infrastructure configuration |
+| `tako infra destroy` | Destroy cloud infrastructure |
+
+See [docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md) for provider setup and credentials.
 
 ### Deployment & Management
 
@@ -397,6 +410,39 @@ services:
         - app.example.com
       email: admin@example.com
 ```
+
+### Infrastructure Provisioning (Cloud Servers)
+
+Provision servers automatically on DigitalOcean, Hetzner, Linode, or AWS:
+
+```yaml
+infrastructure:
+  provider: hetzner           # or: digitalocean, linode, aws
+  region: fsn1
+  credentials:
+    token: ${HCLOUD_TOKEN}    # Set via environment variable
+  servers:
+    web:
+      size: cax11             # ARM-based, cost-effective
+      role: manager
+
+environments:
+  production:
+    servers: [web]            # Auto-populated from infrastructure
+    services:
+      app:
+        build: .
+        port: 3000
+```
+
+Then run:
+```bash
+tako provision   # Create cloud server
+tako setup       # Install Docker, Traefik
+tako deploy      # Deploy your app
+```
+
+See [docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md) for all providers and options.
 
 ### Full-Stack Application
 

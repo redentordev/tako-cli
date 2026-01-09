@@ -1,0 +1,311 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/redentordev/tako-cli/schema/tako.schema.json",
+  "title": "Tako CLI Configuration",
+  "description": "Configuration schema for tako.yaml",
+  "type": "object",
+  "required": ["project", "environments"],
+  "properties": {
+    "project": {
+      "type": "object",
+      "description": "Project metadata",
+      "required": ["name", "version"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Project name (lowercase, alphanumeric, hyphens)",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "version": {
+          "type": "string",
+          "description": "Project version (semver recommended)"
+        }
+      }
+    },
+    "infrastructure": {
+      "type": "object",
+      "description": "Cloud infrastructure provisioning via Pulumi",
+      "required": ["provider", "region", "servers"],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Cloud provider",
+          "enum": ["digitalocean", "hetzner", "aws", "linode"]
+        },
+        "region": {
+          "type": "string",
+          "description": "Region (use friendly names like 'nyc', 'frankfurt', or provider-specific)",
+          "examples": ["nyc", "nyc1", "frankfurt", "fsn1", "us-east-1"]
+        },
+        "credentials": {
+          "type": "object",
+          "description": "Provider credentials (uses env vars by default)",
+          "properties": {
+            "token": {
+              "type": "string",
+              "description": "API token (DO/Hetzner/Linode) - defaults to DIGITALOCEAN_TOKEN, HCLOUD_TOKEN, or LINODE_TOKEN"
+            },
+            "accessKey": {
+              "type": "string",
+              "description": "AWS access key - defaults to AWS_ACCESS_KEY_ID"
+            },
+            "secretKey": {
+              "type": "string",
+              "description": "AWS secret key - defaults to AWS_SECRET_ACCESS_KEY"
+            }
+          }
+        },
+        "ssh_key": {
+          "type": "string",
+          "description": "Local SSH key path for connecting to provisioned servers",
+          "default": "~/.ssh/id_ed25519"
+        },
+        "ssh_user": {
+          "type": "string",
+          "description": "SSH user for provisioned servers",
+          "default": "root"
+        },
+        "defaults": {
+          "type": "object",
+          "description": "Default values applied to all servers",
+          "properties": {
+            "size": {
+              "type": "string",
+              "description": "Default server size",
+              "enum": ["small", "medium", "large", "xlarge"],
+              "default": "medium"
+            },
+            "image": {
+              "type": "string",
+              "description": "Default OS image (auto-detected if empty)"
+            },
+            "ssh_keys": {
+              "type": "array",
+              "description": "Default SSH key fingerprints for cloud provider",
+              "items": { "type": "string" }
+            },
+            "tags": {
+              "type": "array",
+              "description": "Default tags for all servers",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "servers": {
+          "type": "object",
+          "description": "Server definitions",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": "string",
+                "description": "Override provider for multi-cloud setups",
+                "enum": ["digitalocean", "hetzner", "aws", "linode"]
+              },
+              "region": {
+                "type": "string",
+                "description": "Override region (required if provider is overridden)"
+              },
+              "size": {
+                "type": "string",
+                "description": "Server size: small (1 vCPU), medium (2 vCPU), large (4 vCPU), xlarge (8 vCPU)",
+                "enum": ["small", "medium", "large", "xlarge"]
+              },
+              "image": {
+                "type": "string",
+                "description": "OS image (defaults to Ubuntu 22.04)"
+              },
+              "role": {
+                "type": "string",
+                "description": "Server role in Swarm cluster",
+                "enum": ["manager", "worker"],
+                "default": "worker"
+              },
+              "count": {
+                "type": "integer",
+                "description": "Number of servers to create",
+                "minimum": 1,
+                "default": 1
+              },
+              "ssh_keys": {
+                "type": "array",
+                "description": "SSH key fingerprints (uses defaults if empty)",
+                "items": { "type": "string" }
+              },
+              "tags": {
+                "type": "array",
+                "description": "Server tags",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        },
+        "networking": {
+          "type": "object",
+          "description": "Network configuration",
+          "properties": {
+            "vpc": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean", "default": false },
+                "name": { "type": "string" },
+                "ip_range": { "type": "string", "default": "10.0.0.0/16" }
+              }
+            },
+            "firewall": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean", "default": false },
+                "name": { "type": "string" },
+                "rules": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["protocol"],
+                    "properties": {
+                      "protocol": { "type": "string", "enum": ["tcp", "udp", "icmp"] },
+                      "ports": { "type": "array", "items": { "type": "integer" } },
+                      "sources": { "type": "array", "items": { "type": "string" } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "storage": {
+          "type": "object",
+          "description": "Object storage configuration (S3-compatible buckets)",
+          "properties": {
+            "buckets": {
+              "type": "object",
+              "description": "Named bucket definitions",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "region": { "type": "string", "description": "Override region (defaults to infra region)" },
+                  "acl": {
+                    "type": "string",
+                    "description": "Access control",
+                    "enum": ["private", "public-read"],
+                    "default": "private"
+                  },
+                  "cors": { "type": "boolean", "description": "Enable CORS for web access", "default": false }
+                }
+              }
+            }
+          }
+        },
+        "cdn": {
+          "type": "object",
+          "description": "CDN configuration",
+          "properties": {
+            "enabled": { "type": "boolean", "default": false },
+            "origins": {
+              "type": "object",
+              "description": "Named CDN origins",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "bucket": { "type": "string", "description": "Reference to storage bucket" },
+                  "domain": { "type": "string", "description": "Custom origin domain" },
+                  "ttl": { "type": "integer", "description": "Cache TTL in seconds", "default": 86400 }
+                }
+              }
+            }
+          }
+        },
+        "state": {
+          "type": "object",
+          "description": "State backend configuration for multi-machine deployments",
+          "properties": {
+            "backend": {
+              "type": "string",
+              "description": "State storage backend",
+              "enum": ["local", "s3", "manager"],
+              "default": "local"
+            },
+            "bucket": {
+              "type": "string",
+              "description": "S3 bucket name for remote state (required for s3 backend)"
+            },
+            "region": {
+              "type": "string",
+              "description": "S3 region (defaults to infrastructure region)"
+            },
+            "endpoint": {
+              "type": "string",
+              "description": "Custom S3 endpoint (auto-detected for DO Spaces, Linode Object Storage)"
+            },
+            "encrypt": {
+              "type": "boolean",
+              "description": "Enable state encryption at rest",
+              "default": true
+            },
+            "accessKey": {
+              "type": "string",
+              "description": "S3 access key (defaults to provider credentials)"
+            },
+            "secretKey": {
+              "type": "string",
+              "description": "S3 secret key (defaults to provider credentials)"
+            }
+          }
+        }
+      }
+    },
+    "servers": {
+      "type": "object",
+      "description": "Server connection details (auto-generated when using infrastructure)",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["host", "user"],
+        "properties": {
+          "host": { "type": "string", "description": "Server IP or hostname" },
+          "user": { "type": "string", "description": "SSH user" },
+          "port": { "type": "integer", "description": "SSH port", "default": 22 },
+          "sshKey": { "type": "string", "description": "Path to SSH private key" },
+          "password": { "type": "string", "description": "SSH password (use env var)" },
+          "role": { "type": "string", "enum": ["manager", "worker"] },
+          "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+        }
+      }
+    },
+    "environments": {
+      "type": "object",
+      "description": "Deployment environments",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "servers": {
+            "type": "array",
+            "description": "Server names for this environment",
+            "items": { "type": "string" }
+          },
+          "services": {
+            "type": "object",
+            "description": "Services to deploy",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "build": { "type": "string", "description": "Build context path" },
+                "image": { "type": "string", "description": "Docker image" },
+                "port": { "type": "integer", "description": "Container port" },
+                "replicas": { "type": "integer", "default": 1 },
+                "env": { "type": "object", "additionalProperties": { "type": "string" } },
+                "volumes": { "type": "array", "items": { "type": "string" } },
+                "proxy": {
+                  "type": "object",
+                  "properties": {
+                    "domain": { "type": "string" },
+                    "email": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

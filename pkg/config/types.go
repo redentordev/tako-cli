@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -10,13 +12,121 @@ import (
 
 // Config represents the main configuration structure
 type Config struct {
-	Project       ProjectConfig                `yaml:"project"`
-	Deployment    *DeploymentConfig            `yaml:"deployment,omitempty"`
-	Notifications *NotificationsConfig         `yaml:"notifications,omitempty"`
-	Storage       *StorageConfig               `yaml:"storage,omitempty"`
-	Volumes       map[string]VolumeConfig      `yaml:"volumes,omitempty"` // Top-level volume definitions
-	Servers       map[string]ServerConfig      `yaml:"servers"`
-	Environments  map[string]EnvironmentConfig `yaml:"environments"`
+	Project        ProjectConfig                `yaml:"project"`
+	Infrastructure *InfrastructureConfig        `yaml:"infrastructure,omitempty"` // Cloud infrastructure provisioning
+	Deployment     *DeploymentConfig            `yaml:"deployment,omitempty"`
+	Notifications  *NotificationsConfig         `yaml:"notifications,omitempty"`
+	Storage        *StorageConfig               `yaml:"storage,omitempty"`
+	Volumes        map[string]VolumeConfig      `yaml:"volumes,omitempty"` // Top-level volume definitions
+	Servers        map[string]ServerConfig      `yaml:"servers"`
+	Environments   map[string]EnvironmentConfig `yaml:"environments"`
+}
+
+// InfrastructureConfig defines cloud infrastructure provisioning settings
+type InfrastructureConfig struct {
+	Provider    string                        `yaml:"provider"`              // digitalocean, hetzner, aws, linode
+	Region      string                        `yaml:"region"`                // Provider-specific region (or friendly name like "nyc", "frankfurt")
+	Credentials InfraCredentialsConfig        `yaml:"credentials,omitempty"` // Provider credentials (can use env vars)
+	SSHKey      string                        `yaml:"ssh_key,omitempty"`     // Local SSH key path for connecting to provisioned servers
+	SSHUser     string                        `yaml:"ssh_user,omitempty"`    // SSH user (default: root)
+	Defaults    *InfraDefaultsConfig          `yaml:"defaults,omitempty"`    // Default values for servers
+	Servers     map[string]InfraServerSpec    `yaml:"servers"`               // Server definitions
+	Networking  *InfraNetworkingConfig        `yaml:"networking,omitempty"`
+	Storage     *InfraStorageConfig           `yaml:"storage,omitempty"`     // Object storage (S3-compatible)
+	CDN         *InfraCDNConfig               `yaml:"cdn,omitempty"`         // CDN configuration
+	State       *InfraStateConfig             `yaml:"state,omitempty"`       // State backend configuration (for multi-machine sync)
+}
+
+// InfraStateConfig defines where Pulumi state is stored
+type InfraStateConfig struct {
+	Backend   string `yaml:"backend,omitempty"`   // "local" (default), "s3", or "manager"
+	Bucket    string `yaml:"bucket,omitempty"`    // S3 bucket name for s3 backend
+	Region    string `yaml:"region,omitempty"`    // S3 region (defaults to infra region)
+	Endpoint  string `yaml:"endpoint,omitempty"`  // Custom S3 endpoint (for DO Spaces, Linode Object Storage)
+	Encrypt   bool   `yaml:"encrypt,omitempty"`   // Enable state encryption (default: true for remote backends)
+	AccessKey string `yaml:"accessKey,omitempty"` // S3 access key (defaults to provider credentials)
+	SecretKey string `yaml:"secretKey,omitempty"` // S3 secret key (defaults to provider credentials)
+}
+
+// InfraCredentialsConfig holds provider authentication
+type InfraCredentialsConfig struct {
+	Token     string `yaml:"token,omitempty"`     // API token (DO, Hetzner, Linode) - defaults to env var
+	AccessKey string `yaml:"accessKey,omitempty"` // AWS access key
+	SecretKey string `yaml:"secretKey,omitempty"` // AWS secret key
+	ProjectID string `yaml:"projectId,omitempty"` // Project/Account ID if needed
+}
+
+// InfraDefaultsConfig provides default values for server specs
+type InfraDefaultsConfig struct {
+	Size    string   `yaml:"size,omitempty"`     // Default size: small, medium, large, xlarge
+	Image   string   `yaml:"image,omitempty"`    // Default OS image (auto-detected if empty)
+	SSHKeys []string `yaml:"ssh_keys,omitempty"` // Default SSH key fingerprints for cloud provider
+	Tags    []string `yaml:"tags,omitempty"`     // Default tags applied to all servers
+}
+
+// InfraServerSpec defines a server to be provisioned
+type InfraServerSpec struct {
+	Provider string   `yaml:"provider,omitempty"` // Override provider (for multi-cloud setups)
+	Region   string   `yaml:"region,omitempty"`   // Override region (for multi-region/multi-cloud)
+	Size     string   `yaml:"size,omitempty"`     // Size: small, medium, large, xlarge (or provider-specific)
+	Image    string   `yaml:"image,omitempty"`    // OS image (uses default if empty)
+	Role     string   `yaml:"role,omitempty"`     // "manager" or "worker" (default: worker)
+	Count    int      `yaml:"count,omitempty"`    // Number of servers (default: 1)
+	SSHKeys  []string `yaml:"ssh_keys,omitempty"` // SSH key fingerprints (uses defaults if empty)
+	Tags     []string `yaml:"tags,omitempty"`     // Server tags/labels
+	UserData string   `yaml:"userData,omitempty"` // Cloud-init script
+}
+
+// InfraNetworkingConfig defines network resources
+type InfraNetworkingConfig struct {
+	VPC      *InfraVPCConfig      `yaml:"vpc,omitempty"`
+	Firewall *InfraFirewallConfig `yaml:"firewall,omitempty"`
+}
+
+// InfraVPCConfig defines VPC/private network settings
+type InfraVPCConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Name    string `yaml:"name,omitempty"`     // VPC name (auto-generated if empty)
+	IPRange string `yaml:"ip_range,omitempty"` // CIDR (e.g., 10.0.0.0/16)
+}
+
+// InfraFirewallConfig defines firewall rules
+type InfraFirewallConfig struct {
+	Enabled bool                `yaml:"enabled"`
+	Name    string              `yaml:"name,omitempty"` // Firewall name (auto-generated if empty)
+	Rules   []InfraFirewallRule `yaml:"rules,omitempty"`
+}
+
+// InfraFirewallRule defines a single firewall rule
+type InfraFirewallRule struct {
+	Protocol string   `yaml:"protocol"`          // tcp, udp, icmp
+	Ports    []int    `yaml:"ports,omitempty"`   // Port numbers (empty = all)
+	Sources  []string `yaml:"sources,omitempty"` // CIDR addresses (e.g., 0.0.0.0/0)
+}
+
+// InfraStorageConfig defines object storage (S3-compatible buckets)
+type InfraStorageConfig struct {
+	Buckets map[string]InfraBucketSpec `yaml:"buckets,omitempty"` // Named bucket definitions
+}
+
+// InfraBucketSpec defines a storage bucket
+type InfraBucketSpec struct {
+	Region string `yaml:"region,omitempty"` // Override region (defaults to infra region)
+	ACL    string `yaml:"acl,omitempty"`    // Access: private, public-read (default: private)
+	CORS   bool   `yaml:"cors,omitempty"`   // Enable CORS for web access
+}
+
+// InfraCDNConfig defines CDN configuration
+type InfraCDNConfig struct {
+	Enabled bool                      `yaml:"enabled"`
+	Origins map[string]InfraCDNOrigin `yaml:"origins,omitempty"` // Named CDN origins
+}
+
+// InfraCDNOrigin defines a CDN origin (bucket or custom)
+type InfraCDNOrigin struct {
+	Bucket string `yaml:"bucket,omitempty"` // Reference to storage bucket
+	Domain string `yaml:"domain,omitempty"` // Custom origin domain
+	TTL    int    `yaml:"ttl,omitempty"`    // Cache TTL in seconds (default: 86400)
 }
 
 // VolumeConfig defines a named volume configuration (Docker Compose style)
@@ -581,6 +691,24 @@ func LoadConfig(configPath string) (*Config, error) {
 	return &config, nil
 }
 
+// SaveConfig writes the configuration to a YAML file
+func SaveConfig(configPath string, cfg *Config) error {
+	if configPath == "" {
+		configPath = "tako.yaml"
+	}
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
+}
+
 // GetDeploymentStrategy returns the deployment strategy (parallel or sequential)
 func (c *Config) GetDeploymentStrategy() string {
 	if c.Deployment != nil && c.Deployment.Strategy != "" {
@@ -778,4 +906,131 @@ func (c *Config) GetAllDefinedVolumes() map[string]VolumeConfig {
 		return make(map[string]VolumeConfig)
 	}
 	return c.Volumes
+}
+
+// PopulateServersFromInfrastructure populates the Servers map from infrastructure outputs
+// This bridges the gap between infrastructure provisioning and server configuration
+// It reads the infrastructure state from .tako/infra/state.json and creates ServerConfig entries
+func (c *Config) PopulateServersFromInfrastructure(takoDir string) error {
+	if c.Infrastructure == nil {
+		return nil // No infrastructure defined, nothing to do
+	}
+
+	// Load infrastructure state
+	statePath := filepath.Join(takoDir, "infra", "state.json")
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No state file yet, infrastructure not provisioned
+		}
+		return fmt.Errorf("failed to read infrastructure state: %w", err)
+	}
+
+	var infraState struct {
+		Servers map[string]struct {
+			PublicIP  string `json:"public_ip"`
+			PrivateIP string `json:"private_ip"`
+			Role      string `json:"role"`
+			Status    string `json:"status"`
+		} `json:"servers"`
+	}
+
+	if err := json.Unmarshal(data, &infraState); err != nil {
+		return fmt.Errorf("failed to parse infrastructure state: %w", err)
+	}
+
+	if len(infraState.Servers) == 0 {
+		return nil // No servers provisioned yet
+	}
+
+	// Initialize Servers map if nil
+	if c.Servers == nil {
+		c.Servers = make(map[string]ServerConfig)
+	}
+
+	// Get SSH configuration from infrastructure
+	sshUser := c.Infrastructure.SSHUser
+	if sshUser == "" {
+		sshUser = "root" // Default SSH user
+	}
+
+	sshKey := c.Infrastructure.SSHKey
+	homeDir, _ := os.UserHomeDir()
+
+	// Expand ~ in SSH key path
+	if strings.HasPrefix(sshKey, "~/") {
+		sshKey = filepath.Join(homeDir, sshKey[2:])
+	}
+
+	// Check for auto-generated SSH key first
+	if sshKey == "" {
+		sshKeysStatePath := filepath.Join(takoDir, "infra", "ssh_keys.json")
+		if sshKeysData, err := os.ReadFile(sshKeysStatePath); err == nil {
+			var sshKeyState struct {
+				KeyPair struct {
+					PrivateKeyPath string `json:"private_key_path"`
+				} `json:"key_pair"`
+			}
+			if json.Unmarshal(sshKeysData, &sshKeyState) == nil && sshKeyState.KeyPair.PrivateKeyPath != "" {
+				// Verify the key file exists
+				if _, err := os.Stat(sshKeyState.KeyPair.PrivateKeyPath); err == nil {
+					sshKey = sshKeyState.KeyPair.PrivateKeyPath
+				}
+			}
+		}
+	}
+
+	if sshKey == "" {
+		// Try common defaults
+		for _, keyPath := range []string{
+			filepath.Join(homeDir, ".ssh", "id_ed25519"),
+			filepath.Join(homeDir, ".ssh", "id_rsa"),
+		} {
+			if _, err := os.Stat(keyPath); err == nil {
+				sshKey = keyPath
+				break
+			}
+		}
+	}
+
+	// Populate servers from infrastructure state
+	for name, server := range infraState.Servers {
+		// Skip if server already defined manually (manual takes precedence)
+		if _, exists := c.Servers[name]; exists {
+			continue
+		}
+
+		// Skip if server has no IP (not fully provisioned)
+		if server.PublicIP == "" {
+			continue
+		}
+
+		// Create ServerConfig from infrastructure output
+		c.Servers[name] = ServerConfig{
+			Host:   server.PublicIP,
+			User:   sshUser,
+			SSHKey: sshKey,
+			Role:   server.Role,
+			Port:   22,
+		}
+	}
+
+	return nil
+}
+
+// LoadConfigWithInfra loads config and populates servers from infrastructure state
+// This is the recommended way to load config when infrastructure is involved
+func LoadConfigWithInfra(configPath string, takoDir string) (*Config, error) {
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Populate servers from infrastructure state if available
+	if err := cfg.PopulateServersFromInfrastructure(takoDir); err != nil {
+		// Log warning but don't fail - infrastructure might not be provisioned yet
+		fmt.Fprintf(os.Stderr, "Warning: could not load infrastructure state: %v\n", err)
+	}
+
+	return cfg, nil
 }
