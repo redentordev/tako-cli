@@ -166,6 +166,11 @@ func runInfraPreview(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no infrastructure section defined in tako.yaml")
 	}
 
+	// Ensure Pulumi is installed
+	if err := infra.EnsurePulumi(verbose); err != nil {
+		return fmt.Errorf("failed to ensure Pulumi is installed: %w", err)
+	}
+
 	takoDir := filepath.Join(".", ".tako")
 	orchestrator, err := infra.NewOrchestrator(cfg, takoDir, getEnvironmentName(cfg), verbose)
 	if err != nil {
@@ -196,6 +201,11 @@ func runInfraUp(cmd *cobra.Command, args []string) error {
 
 	if cfg.Infrastructure == nil {
 		return fmt.Errorf("no infrastructure section defined in tako.yaml")
+	}
+
+	// Ensure Pulumi is installed
+	if err := infra.EnsurePulumi(verbose); err != nil {
+		return fmt.Errorf("failed to ensure Pulumi is installed: %w", err)
 	}
 
 	takoDir := filepath.Join(".", ".tako")
@@ -245,6 +255,11 @@ func runInfraDestroy(cmd *cobra.Command, args []string) error {
 
 	if cfg.Infrastructure == nil {
 		return fmt.Errorf("no infrastructure section defined in tako.yaml")
+	}
+
+	// Ensure Pulumi is installed
+	if err := infra.EnsurePulumi(verbose); err != nil {
+		return fmt.Errorf("failed to ensure Pulumi is installed: %w", err)
 	}
 
 	takoDir := filepath.Join(".", ".tako")

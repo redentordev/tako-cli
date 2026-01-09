@@ -67,6 +67,11 @@ infrastructure:
 		return nil
 	}
 
+	// Ensure Pulumi is installed
+	if err := infra.EnsurePulumi(verbose); err != nil {
+		return fmt.Errorf("failed to ensure Pulumi is installed: %w", err)
+	}
+
 	// Get tako directory
 	takoDir := filepath.Join(".", ".tako")
 
