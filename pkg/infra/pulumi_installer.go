@@ -16,7 +16,7 @@ import (
 
 const (
 	// PulumiVersion is the version of Pulumi to install
-	PulumiVersion = "3.142.0"
+	PulumiVersion = "3.215.0"
 
 	// PulumiBaseURL is the base URL for Pulumi releases
 	PulumiBaseURL = "https://get.pulumi.com/releases/sdk"
