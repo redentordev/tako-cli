@@ -75,12 +75,14 @@ func installPulumi(verbose bool) error {
 	arch := runtime.GOARCH
 
 	// Map Go arch names to Pulumi arch names
-	pulumiArch := arch
+	var pulumiArch string
 	switch arch {
 	case "amd64":
 		pulumiArch = "x64"
 	case "arm64":
 		pulumiArch = "arm64"
+	default:
+		return fmt.Errorf("unsupported architecture: %s (only amd64 and arm64 are supported)", arch)
 	}
 
 	// Build download URL
@@ -95,10 +97,13 @@ func installPulumi(verbose bool) error {
 		downloadURL = fmt.Sprintf("%s/pulumi-v%s-linux-%s.tar.gz", PulumiBaseURL, PulumiVersion, pulumiArch)
 		archiveType = "tar.gz"
 	case "windows":
+		if arch == "arm64" {
+			return fmt.Errorf("Pulumi does not provide Windows arm64 builds. Please use Windows x64 or install Pulumi manually")
+		}
 		downloadURL = fmt.Sprintf("%s/pulumi-v%s-windows-%s.zip", PulumiBaseURL, PulumiVersion, pulumiArch)
 		archiveType = "zip"
 	default:
-		return fmt.Errorf("unsupported platform: %s", platform)
+		return fmt.Errorf("unsupported platform: %s (supported: darwin, linux, windows)", platform)
 	}
 
 	if verbose {
