@@ -163,7 +163,7 @@ func runInfraPreview(cmd *cobra.Command, args []string) error {
 	}
 
 	if cfg.Infrastructure == nil {
-		return fmt.Errorf("no infrastructure section defined in tako.yaml")
+		return fmt.Errorf("no infrastructure section defined in config file")
 	}
 
 	// Ensure Pulumi is installed
@@ -200,7 +200,7 @@ func runInfraUp(cmd *cobra.Command, args []string) error {
 	}
 
 	if cfg.Infrastructure == nil {
-		return fmt.Errorf("no infrastructure section defined in tako.yaml")
+		return fmt.Errorf("no infrastructure section defined in config file")
 	}
 
 	// Ensure Pulumi is installed
@@ -254,7 +254,7 @@ func runInfraDestroy(cmd *cobra.Command, args []string) error {
 	}
 
 	if cfg.Infrastructure == nil {
-		return fmt.Errorf("no infrastructure section defined in tako.yaml")
+		return fmt.Errorf("no infrastructure section defined in config file")
 	}
 
 	// Ensure Pulumi is installed
@@ -311,7 +311,7 @@ func runInfraOutputs(cmd *cobra.Command, args []string) error {
 	}
 
 	if cfg.Infrastructure == nil {
-		return fmt.Errorf("no infrastructure section defined in tako.yaml")
+		return fmt.Errorf("no infrastructure section defined in config file")
 	}
 
 	takoDir := filepath.Join(".", ".tako")
@@ -346,7 +346,7 @@ func runInfraStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	if cfg.Infrastructure == nil {
-		fmt.Println("No infrastructure section defined in tako.yaml")
+		fmt.Println("No infrastructure section defined in config file")
 		return nil
 	}
 
@@ -398,7 +398,7 @@ func runInfraValidate(cmd *cobra.Command, args []string) error {
 	}
 
 	if cfg.Infrastructure == nil {
-		fmt.Println("No infrastructure section defined in tako.yaml")
+		fmt.Println("No infrastructure section defined in config file")
 		return nil
 	}
 
@@ -466,7 +466,7 @@ func runInfraSwitch(cmd *cobra.Command, args []string) error {
 	}
 
 	if cfg.Infrastructure == nil {
-		return fmt.Errorf("no infrastructure section defined in tako.yaml")
+		return fmt.Errorf("no infrastructure section defined in config file")
 	}
 
 	if cfg.Infrastructure.Provider == toProvider {
@@ -595,7 +595,7 @@ func runInfraState(cmd *cobra.Command, args []string) error {
 	}
 
 	if cfg.Infrastructure == nil {
-		fmt.Println("No infrastructure section defined in tako.yaml")
+		fmt.Println("No infrastructure section defined in config file")
 		fmt.Println("\nState backend: Local (default)")
 		return nil
 	}

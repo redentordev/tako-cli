@@ -536,7 +536,7 @@ func runInfraWizard(projectName string) error {
 	createGitignore()
 
 	absPath, _ := filepath.Abs(configPath)
-	fmt.Printf("✓ Created tako.yaml at %s\n", absPath)
+	fmt.Printf("✓ Created %s at %s\n", filepath.Base(configPath), absPath)
 	fmt.Printf("✓ Created .env.example\n")
 
 	fmt.Printf("\n🚀 Next steps:\n")

@@ -18,9 +18,9 @@ var (
 
 var provisionCmd = &cobra.Command{
 	Use:   "provision",
-	Short: "Provision cloud infrastructure defined in tako.yaml",
+	Short: "Provision cloud infrastructure defined in config",
 	Long: `Provision creates cloud servers and networking as defined in the
-infrastructure section of tako.yaml.
+infrastructure section of your Tako config file (tako.yaml or tako.json).
 
 This command uses Pulumi to manage infrastructure lifecycle with state
 stored locally in .tako/pulumi/
@@ -50,7 +50,7 @@ func runProvision(cmd *cobra.Command, args []string) error {
 
 	// Check if infrastructure is defined
 	if cfg.Infrastructure == nil {
-		fmt.Println("No infrastructure section found in tako.yaml")
+		fmt.Println("No infrastructure section found in config file")
 		fmt.Println("\nTo use infrastructure provisioning, add an infrastructure section:")
 		fmt.Print(`
 infrastructure:

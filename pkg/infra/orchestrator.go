@@ -24,7 +24,7 @@ type Orchestrator struct {
 // NewOrchestrator creates a new infrastructure orchestrator
 func NewOrchestrator(cfg *config.Config, takoDir string, environment string, verbose bool) (*Orchestrator, error) {
 	if cfg.Infrastructure == nil {
-		return nil, fmt.Errorf("no infrastructure section defined in tako.yaml")
+		return nil, fmt.Errorf("no infrastructure section defined in config file")
 	}
 
 	// Get the provider
