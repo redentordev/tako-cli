@@ -2,10 +2,14 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/redentordev/tako-cli/schema/tako.schema.json",
   "title": "Tako CLI Configuration",
-  "description": "Configuration schema for tako.yaml",
+  "description": "Configuration schema for Tako CLI (tako.yaml or tako.json)",
   "type": "object",
-  "required": ["project", "environments"],
+  "required": ["project", "servers", "environments"],
   "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for IDE support"
+    },
     "project": {
       "type": "object",
       "description": "Project metadata",
@@ -271,6 +275,56 @@
         }
       }
     },
+    "deployment": {
+      "type": "object",
+      "description": "Deployment optimization settings",
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["parallel", "sequential"],
+          "description": "Deployment strategy"
+        },
+        "parallel": {
+          "type": "object",
+          "properties": {
+            "maxConcurrentBuilds": { "type": "integer", "default": 4 },
+            "maxConcurrentDeploys": { "type": "integer", "default": 4 },
+            "strategy": { "type": "string", "enum": ["dependency-aware", "resource-aware", "round-robin"] }
+          }
+        },
+        "cache": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "type": { "type": "string", "enum": ["local", "registry"] },
+            "retention": { "type": "string", "description": "Cache retention period (e.g., 7d)" }
+          }
+        }
+      }
+    },
+    "notifications": {
+      "type": "object",
+      "description": "Deployment notification settings",
+      "properties": {
+        "slack": { "type": "string", "description": "Slack webhook URL" },
+        "discord": { "type": "string", "description": "Discord webhook URL" },
+        "webhook": { "type": "string", "description": "Generic webhook URL" }
+      }
+    },
+    "volumes": {
+      "type": "object",
+      "description": "Named volume definitions",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "driver": { "type": "string", "default": "local" },
+          "driver_opts": { "type": "object", "additionalProperties": { "type": "string" } },
+          "labels": { "type": "object", "additionalProperties": { "type": "string" } },
+          "external": { "type": "boolean" },
+          "name": { "type": "string" }
+        }
+      }
+    },
     "environments": {
       "type": "object",
       "description": "Deployment environments",
@@ -291,16 +345,84 @@
                 "build": { "type": "string", "description": "Build context path" },
                 "image": { "type": "string", "description": "Docker image" },
                 "port": { "type": "integer", "description": "Container port" },
-                "replicas": { "type": "integer", "default": 1 },
-                "env": { "type": "object", "additionalProperties": { "type": "string" } },
-                "volumes": { "type": "array", "items": { "type": "string" } },
+                "command": { "type": "string", "description": "Override container command" },
+                "replicas": { "type": "integer", "default": 1, "description": "Number of replicas" },
+                "restart": {
+                  "type": "string",
+                  "enum": ["no", "on-failure", "always", "unless-stopped"],
+                  "description": "Restart policy"
+                },
+                "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Environment variables" },
+                "envFile": { "type": "string", "description": "Path to .env file" },
+                "secrets": { "type": "array", "items": { "type": "string" }, "description": "Secret names from .tako/secrets" },
+                "volumes": { "type": "array", "items": { "type": "string" }, "description": "Volume mounts" },
+                "persistent": { "type": "boolean", "description": "Mark as persistent (databases, caches)" },
+                "dependsOn": { "type": "array", "items": { "type": "string" }, "description": "Service dependencies" },
                 "proxy": {
                   "type": "object",
+                  "description": "Traefik reverse proxy settings",
                   "properties": {
-                    "domain": { "type": "string" },
-                    "email": { "type": "string" }
+                    "domain": { "type": "string", "description": "Primary domain" },
+                    "domains": { "type": "array", "items": { "type": "string" }, "description": "Additional domains" },
+                    "redirectFrom": { "type": "array", "items": { "type": "string" }, "description": "Domains to redirect from" },
+                    "email": { "type": "string", "description": "Let's Encrypt email" },
+                    "tls": {
+                      "type": "object",
+                      "properties": {
+                        "provider": { "type": "string", "enum": ["letsencrypt", "zerossl"] },
+                        "staging": { "type": "boolean" }
+                      }
+                    }
                   }
-                }
+                },
+                "healthCheck": {
+                  "type": "object",
+                  "description": "Health check configuration",
+                  "properties": {
+                    "path": { "type": "string" },
+                    "interval": { "type": "string" },
+                    "timeout": { "type": "string" },
+                    "retries": { "type": "integer" },
+                    "startPeriod": { "type": "string" }
+                  }
+                },
+                "hooks": {
+                  "type": "object",
+                  "description": "Lifecycle hooks",
+                  "properties": {
+                    "preBuild": { "type": "array", "items": { "type": "string" } },
+                    "postBuild": { "type": "array", "items": { "type": "string" } },
+                    "preDeploy": { "type": "array", "items": { "type": "string" } },
+                    "postDeploy": { "type": "array", "items": { "type": "string" } },
+                    "postStart": { "type": "array", "items": { "type": "string" } }
+                  }
+                },
+                "deploy": {
+                  "type": "object",
+                  "description": "Deployment strategy",
+                  "properties": {
+                    "strategy": { "type": "string", "enum": ["blue-green", "rolling"] },
+                    "maxUnavailable": { "type": "integer" }
+                  }
+                },
+                "placement": {
+                  "type": "object",
+                  "description": "Placement configuration",
+                  "properties": {
+                    "strategy": { "type": "string", "enum": ["spread", "pinned", "any"] },
+                    "servers": { "type": "array", "items": { "type": "string" } },
+                    "constraints": { "type": "array", "items": { "type": "string" } }
+                  }
+                },
+                "loadBalancer": {
+                  "type": "object",
+                  "description": "Load balancer settings",
+                  "properties": {
+                    "strategy": { "type": "string", "enum": ["round_robin", "least_conn", "ip_hash", "random"] }
+                  }
+                },
+                "export": { "type": "boolean", "description": "Export service to other projects" },
+                "imports": { "type": "array", "items": { "type": "string" }, "description": "Import services from other projects" }
               }
             }
           }
