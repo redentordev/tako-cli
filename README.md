@@ -8,7 +8,7 @@
 
 Tako CLI is a powerful deployment automation tool that brings Platform-as-a-Service (PaaS) simplicity to your own infrastructure. Deploy Docker containers to your VPS servers with automatic HTTPS, health checks, zero-downtime deployments, and complete control over your infrastructure.
 
-[![Version](https://img.shields.io/badge/version-0.2.1-blue)](https://github.com/redentordev/tako-cli/releases)
+[![Version](https://img.shields.io/badge/version-0.2.2-blue)](https://github.com/redentordev/tako-cli/releases)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Status](https://img.shields.io/badge/status-experimental-orange)](https://github.com/redentordev/tako-cli)
@@ -133,7 +133,7 @@ make install
 ```bash
 tako --version
 # Output:
-# Tako CLI v0.2.1
+# Tako CLI v0.2.2
 # Commit:  abc1234
 # Built:   2025-01-01T12:00:00Z
 ```
