@@ -14,13 +14,16 @@ import (
 var (
 	withInfra    bool
 	showPricing  bool
+	useJSON      bool
 )
 
 var initCmd = &cobra.Command{
 	Use:   "init [project-name]",
 	Short: "Initialize a new Tako CLI project",
-	Long: `Initialize a new Tako CLI project by creating a tako.yaml file
+	Long: `Initialize a new Tako CLI project by creating a tako.yaml (or tako.json) file
 with example configuration. This is the first step in setting up deployments.
+
+Use --json to generate tako.json instead of tako.yaml.
 
 Use --infra flag to launch an interactive wizard that helps you:
   - Select a cloud provider (DigitalOcean, Hetzner, AWS, Linode)
@@ -37,6 +40,7 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	initCmd.Flags().BoolVar(&withInfra, "infra", false, "Use interactive wizard to configure cloud infrastructure")
 	initCmd.Flags().BoolVar(&showPricing, "pricing", false, "Show pricing comparison across providers")
+	initCmd.Flags().BoolVar(&useJSON, "json", false, "Generate tako.json instead of tako.yaml")
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -101,14 +105,131 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Check if config file already exists
+	// Determine config file path based on format
 	configPath := "tako.yaml"
-	if _, err := os.Stat(configPath); err == nil {
-		return fmt.Errorf("tako.yaml already exists. Remove it first or use a different directory")
+	if useJSON {
+		configPath = "tako.json"
 	}
 
-	// Create comprehensive example config with all options
-	configContent := fmt.Sprintf(`# 🐙 Tako CLI Configuration
+	// Check if config file already exists (check both formats)
+	if _, err := os.Stat("tako.yaml"); err == nil {
+		return fmt.Errorf("tako.yaml already exists. Remove it first or use a different directory")
+	}
+	if _, err := os.Stat("tako.json"); err == nil {
+		return fmt.Errorf("tako.json already exists. Remove it first or use a different directory")
+	}
+
+	// Generate config content based on format
+	var configContent string
+	if useJSON {
+		configContent = generateJSONConfig(projectName)
+	} else {
+		configContent = generateYAMLConfig(projectName)
+	}
+
+	// Write the config file
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	fmt.Printf("\n✓ Created %s\n", configPath)
+
+	// Create .env.example
+	envExampleContent := fmt.Sprintf(`# 🐙 Tako CLI Environment Variables
+# Copy this file to .env and fill in the values
+# Run: cp .env.example .env
+
+# Server Configuration
+SERVER_HOST=your.server.ip
+
+# Let's Encrypt Email (required for HTTPS)
+LETSENCRYPT_EMAIL=you@example.com
+
+# Database (if using PostgreSQL)
+# POSTGRES_PASSWORD=your-secure-password
+# DATABASE_URL=postgresql://user:password@postgres:5432/%s
+`, projectName)
+
+	if err := os.WriteFile(".env.example", []byte(envExampleContent), 0644); err != nil {
+		return fmt.Errorf("failed to write .env.example: %w", err)
+	}
+	fmt.Println("✓ Created .env.example")
+
+	// Create .gitignore if it doesn't exist
+	gitignorePath := ".gitignore"
+	gitignoreContent := `# Tako CLI
+.tako/
+.env
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+`
+	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
+		if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
+			return fmt.Errorf("failed to write .gitignore: %w", err)
+		}
+		fmt.Println("✓ Created .gitignore")
+	}
+
+	fmt.Println("\n🐙 Tako project initialized!")
+	fmt.Println("\nNext steps:")
+	fmt.Println("  1. Copy .env.example to .env and fill in your values")
+	fmt.Printf("  2. Edit %s to configure your services\n", configPath)
+	fmt.Println("  3. Run 'tako deploy production' to deploy")
+
+	return nil
+}
+
+// generateJSONConfig creates a JSON configuration with schema reference
+func generateJSONConfig(projectName string) string {
+	return fmt.Sprintf(`{
+  "$schema": "https://raw.githubusercontent.com/redentordev/tako-cli/master/schema/tako.schema.json",
+  "project": {
+    "name": "%s",
+    "version": "1.0.0"
+  },
+  "servers": {
+    "production": {
+      "host": "${SERVER_HOST}",
+      "user": "root",
+      "port": 22,
+      "sshKey": "~/.ssh/id_ed25519"
+    }
+  },
+  "environments": {
+    "production": {
+      "servers": ["production"],
+      "services": {
+        "web": {
+          "build": ".",
+          "port": 3000,
+          "proxy": {
+            "domain": "%s.${SERVER_HOST}.sslip.io",
+            "email": "${LETSENCRYPT_EMAIL}"
+          },
+          "env": {
+            "NODE_ENV": "production"
+          }
+        }
+      }
+    }
+  }
+}
+`, projectName, projectName)
+}
+
+// generateYAMLConfig creates a YAML configuration (moved from inline)
+func generateYAMLConfig(projectName string) string {
+	return fmt.Sprintf(`# 🐙 Tako CLI Configuration
 # Complete reference with all available options
 # Uncomment and customize options as needed
 # Learn more: https://github.com/redentordev/tako-cli
@@ -358,155 +479,22 @@ environments:
 #   env:
 #     POSTGRES_PASSWORD: ${DB_PASSWORD}
 `, projectName, projectName)
-
-	// Write config file
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
-		return fmt.Errorf("failed to create config file: %w", err)
-	}
-
-	// Create .env.example file
-	envExample := `# 🐙 Tako CLI Environment Variables
-# Copy this file to .env and fill in your actual values
-# IMPORTANT: Never commit .env to version control!
-
-# ============================================================================
-# SERVER CONFIGURATION (Required)
-# ============================================================================
-# Your VPS server IP address or hostname
-SERVER_HOST=203.0.113.10
-
-# For multi-server deployments, add additional server hosts:
-# SERVER1_HOST=203.0.113.11
-# SERVER2_HOST=203.0.113.12
-
-# ============================================================================
-# SSL CERTIFICATE (Required for HTTPS)
-# ============================================================================
-# Email address for Let's Encrypt SSL certificate notifications
-LETSENCRYPT_EMAIL=admin@example.com
-
-# ============================================================================
-# SECRETS (Optional - recommended to use 'tako secrets' command instead)
-# ============================================================================
-# For better security, use: tako secrets init && tako secrets set KEY=value
-# These are shown here for reference only
-
-# Database connection strings
-# DATABASE_URL=postgresql://user:password@postgres:5432/myapp
-# POSTGRES_PASSWORD=your-secure-password-here
-# REDIS_URL=redis://redis:6379
-
-# Application secrets
-# JWT_SECRET=your-jwt-secret-here
-# API_KEY=your-api-key-here
-# STRIPE_SECRET_KEY=sk_live_...
-
-# ============================================================================
-# DOCKER REGISTRY (Optional - for private registries)
-# ============================================================================
-# Required only if using private Docker registries (GitHub, GitLab, Docker Hub, etc.)
-# REGISTRY_USER=your-username
-# REGISTRY_TOKEN=your-personal-access-token
-
-# ============================================================================
-# APPLICATION ENVIRONMENT VARIABLES
-# ============================================================================
-# Add your application-specific environment variables here
-# NODE_ENV=production
-# PORT=3000
-# LOG_LEVEL=info
-
-# Email/SMTP configuration
-# SMTP_HOST=smtp.example.com
-# SMTP_PORT=587
-# SMTP_USER=notifications@example.com
-# SMTP_PASSWORD=your-smtp-password
-
-# External API keys
-# OPENAI_API_KEY=sk-...
-# STRIPE_PUBLISHABLE_KEY=pk_live_...
-# AWS_ACCESS_KEY_ID=AKIA...
-# AWS_SECRET_ACCESS_KEY=...
-
-# ============================================================================
-# TIPS
-# ============================================================================
-# 1. Use meaningful variable names
-# 2. Document each variable with a comment
-# 3. Use 'tako secrets' for sensitive data (passwords, API keys)
-# 4. Keep this .env.example file updated as a template for your team
-# 5. Validate variables are set before deploying: tako secrets validate
-
-# ============================================================================
-# USEFUL COMMANDS
-# ============================================================================
-# tako setup          - Provision server (Docker, Traefik, security)
-# tako deploy         - Deploy your application
-# tako deploy -y      - Deploy without confirmation prompts
-# tako ps             - List running services
-# tako logs --service web  - View service logs
-# tako access         - View HTTP access logs (like Vercel)
-# tako scale web=3    - Scale service to 3 replicas
-# tako stop --service web  - Stop a service (scale to 0)
-# tako start --service web - Start a stopped service
-# tako rollback       - Rollback to previous deployment
-# tako backup --volume data - Backup a Docker volume
-# tako backup --list  - List available backups
-# tako drift          - Detect configuration drift
-# tako history        - View deployment history
-# tako destroy        - Remove all services (keeps infrastructure)
-# tako --version      - Show CLI version and build info
-`
-
-	if err := os.WriteFile(".env.example", []byte(envExample), 0644); err != nil {
-		fmt.Printf("Warning: Failed to create .env.example: %v\n", err)
-	}
-
-	// Create .gitignore if it doesn't exist
-	gitignorePath := ".gitignore"
-	gitignoreContent := `.env
-.env.local
-*.log
-dist/
-build/
-node_modules/
-`
-
-	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
-		if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
-			fmt.Printf("Warning: Failed to create .gitignore: %v\n", err)
-		}
-	}
-
-	absPath, _ := filepath.Abs(configPath)
-
-	fmt.Printf("✓ Created tako.yaml at %s\n", absPath)
-	fmt.Printf("✓ Created .env.example\n")
-	if _, err := os.Stat(gitignorePath); err == nil {
-		fmt.Printf("✓ Created .gitignore\n")
-	}
-	fmt.Printf("\nNext steps:\n")
-	fmt.Printf("  1. Edit tako.yaml with your server details\n")
-	fmt.Printf("  2. Copy .env.example to .env and fill in your secrets\n")
-	fmt.Printf("  3. Run 'tako setup' to provision your server\n")
-	fmt.Printf("  4. Run 'tako deploy' to deploy your application\n")
-	fmt.Printf("\nUseful commands:\n")
-	fmt.Printf("  tako ps              - List running services\n")
-	fmt.Printf("  tako logs --service  - View service logs\n")
-	fmt.Printf("  tako access          - View HTTP access logs\n")
-	fmt.Printf("  tako scale web=3     - Scale to 3 replicas\n")
-	fmt.Printf("  tako rollback        - Rollback deployment\n")
-	fmt.Printf("  tako --help          - Show all commands\n")
-
-	return nil
 }
 
 // runInfraWizard runs the interactive infrastructure configuration wizard
 func runInfraWizard(projectName string) error {
-	// Check if config file already exists
+	// Determine config file path based on format
 	configPath := "tako.yaml"
-	if _, err := os.Stat(configPath); err == nil {
+	if useJSON {
+		configPath = "tako.json"
+	}
+
+	// Check if config file already exists (check both formats)
+	if _, err := os.Stat("tako.yaml"); err == nil {
 		return fmt.Errorf("tako.yaml already exists. Remove it first or use a different directory")
+	}
+	if _, err := os.Stat("tako.json"); err == nil {
+		return fmt.Errorf("tako.json already exists. Remove it first or use a different directory")
 	}
 
 	// Run the wizard
@@ -524,8 +512,14 @@ func runInfraWizard(projectName string) error {
 	fmt.Printf("Estimated monthly cost: %s\n", infra.FormatPricing(result.EstimatedCost))
 	fmt.Println()
 
-	// Generate full config
-	configContent := generateFullConfig(projectName, result.YAMLContent)
+	// Generate full config based on format
+	var configContent string
+	if useJSON {
+		// For JSON, we'd need to convert the infra YAML to JSON
+		// For now, show a message that infra wizard only supports YAML
+		return fmt.Errorf("--json flag is not yet supported with --infra wizard. Use 'tako init --json' without --infra")
+	}
+	configContent = generateFullConfig(projectName, result.YAMLContent)
 
 	// Write config file
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
