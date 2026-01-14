@@ -281,14 +281,10 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 ### Infrastructure & Scaling
 
-- **Cloud Infrastructure Provisioning** - Provision servers on DigitalOcean, Hetzner, Linode, or AWS with one command
-- **Multi-Server Support** - Deploy to multiple servers simultaneously
-- **Docker Swarm Integration** - Automatic orchestration for 2+ servers
-- **Placement Strategies** - Control service placement (spread, pinned, any)
-- **Cross-Project Networking** - Services communicate across projects
-- **Service Discovery** - Built-in DNS and load balancing
-- **Server Provisioning** - One-command setup with security hardening
-- **NFS Shared Storage** - Shared volumes across multiple servers with automatic setup
+- **Cloud Provisioning** - Create servers on DigitalOcean, Hetzner, Linode, or AWS
+- **Multi-Server** - Deploy across multiple servers with Docker Swarm
+- **Placement Strategies** - Control where services run (spread, pinned)
+- **NFS Storage** - Shared volumes across servers
 
 ### Developer Experience
 
@@ -304,17 +300,15 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 ## Core Commands
 
-### Infrastructure Provisioning
+### Infrastructure
 
 | Command | Description |
 |---------|-------------|
-| `tako provision` | Provision cloud infrastructure (servers, VPC, firewall) |
-| `tako provision --preview` | Preview infrastructure changes |
-| `tako infra outputs` | Show provisioned server IPs and details |
-| `tako infra validate` | Validate infrastructure configuration |
-| `tako infra destroy` | Destroy cloud infrastructure |
+| `tako provision` | Create cloud servers |
+| `tako infra outputs` | Show server IPs |
+| `tako infra destroy` | Tear down servers |
 
-See [docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md) for provider setup and credentials.
+See [docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md) for provider setup.
 
 ### Deployment & Management
 
@@ -411,38 +405,27 @@ services:
       email: admin@example.com
 ```
 
-### Infrastructure Provisioning (Cloud Servers)
+### Infrastructure Provisioning
 
-Provision servers automatically on DigitalOcean, Hetzner, Linode, or AWS:
+Provision cloud servers on DigitalOcean, Hetzner, Linode, or AWS:
 
 ```yaml
 infrastructure:
-  provider: hetzner           # or: digitalocean, linode, aws
+  provider: hetzner
   region: fsn1
   credentials:
-    token: ${HCLOUD_TOKEN}    # Set via environment variable
+    token: ${HCLOUD_TOKEN}
   servers:
     web:
-      size: cax11             # ARM-based, cost-effective
+      size: cax11
       role: manager
-
-environments:
-  production:
-    servers: [web]            # Auto-populated from infrastructure
-    services:
-      app:
-        build: .
-        port: 3000
 ```
 
-Then run:
 ```bash
-tako provision   # Create cloud server
-tako setup       # Install Docker, Traefik
-tako deploy      # Deploy your app
+tako provision && tako setup && tako deploy
 ```
 
-See [docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md) for all providers and options.
+See [docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md) for provider setup.
 
 ### Full-Stack Application
 
