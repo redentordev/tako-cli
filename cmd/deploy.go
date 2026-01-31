@@ -520,7 +520,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			fullImageName = service.Image
 		}
 
-		// Always deploy to Swarm using docker service create
+		// Deploy to Swarm and wait for health (health verification is built into DeployServiceSwarm)
 		if err := deploy.DeployServiceSwarm(serviceName, &service, fullImageName); err != nil {
 			fmt.Printf("  ✗ Swarm deployment failed: %v\n", err)
 			deploymentFailed = true

@@ -354,6 +354,9 @@ func (m *Manager) createService(
 	}
 	cmd += fmt.Sprintf(" --restart-condition %s", restartCondition)
 
+	// Add Docker health check if configured
+	cmd += m.buildHealthCheckFlags(service)
+
 	// Add update config for rolling updates
 	cmd += " --update-parallelism 1 --update-delay 10s --update-failure-action rollback"
 
@@ -414,6 +417,9 @@ func (m *Manager) updateService(
 
 	// Update image
 	cmd += fmt.Sprintf(" --image %s", imageRef)
+
+	// Update Docker health check if configured
+	cmd += m.buildHealthCheckFlags(service)
 
 	// Update replicas (skip for global mode services)
 	// Global mode services cannot have replicas changed
@@ -730,6 +736,50 @@ func (m *Manager) ScaleService(client *ssh.Client, fullServiceName string, repli
 	}
 
 	return nil
+}
+
+// buildHealthCheckFlags builds Docker health check flags for service create/update commands.
+// Returns an empty string if no health check is configured.
+func (m *Manager) buildHealthCheckFlags(service *config.ServiceConfig) string {
+	if service.HealthCheck.Path == "" || service.Port <= 0 {
+		return ""
+	}
+
+	var flags string
+
+	healthCmd := fmt.Sprintf("curl -sf http://localhost:%d%s || exit 1", service.Port, service.HealthCheck.Path)
+	flags += fmt.Sprintf(" --health-cmd '%s'", healthCmd)
+
+	interval := service.HealthCheck.Interval
+	if interval == "" {
+		interval = "10s"
+	}
+	flags += fmt.Sprintf(" --health-interval %s", interval)
+
+	timeout := service.HealthCheck.Timeout
+	if timeout == "" {
+		timeout = "5s"
+	}
+	flags += fmt.Sprintf(" --health-timeout %s", timeout)
+
+	retries := service.HealthCheck.Retries
+	if retries <= 0 {
+		retries = 3
+	}
+	flags += fmt.Sprintf(" --health-retries %d", retries)
+
+	startPeriod := service.HealthCheck.StartPeriod
+	if startPeriod == "" {
+		startPeriod = "0s"
+	}
+	flags += fmt.Sprintf(" --health-start-period %s", startPeriod)
+
+	if m.verbose {
+		fmt.Printf("  Health check: GET http://localhost:%d%s (interval=%s, timeout=%s, retries=%d)\n",
+			service.Port, service.HealthCheck.Path, interval, timeout, retries)
+	}
+
+	return flags
 }
 
 // validateBindMountPath checks if a bind mount path is safe to use

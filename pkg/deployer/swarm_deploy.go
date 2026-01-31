@@ -330,16 +330,149 @@ func (d *Deployer) DeployServiceSwarm(serviceName string, service *config.Servic
 		return fmt.Errorf("failed to deploy service to swarm: %w", err)
 	}
 
-	// Wait for service to start
-	if d.verbose {
-		fmt.Printf("  Waiting for service to start...\n")
-		time.Sleep(5 * time.Second)
-	}
-
 	// Show Traefik dashboard URL if configured
 	if service.IsPublic() && d.verbose {
 		fmt.Printf("  ✓ Traefik reverse proxy configured\n")
+	}
 
+	// Wait for service to be healthy (uses existing managerClient, no re-resolution needed)
+	if err := d.waitForServiceHealthy(managerClient, serviceName, service); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// waitForServiceHealthy waits for a Swarm service's tasks to be running and healthy.
+// If the service has a health check configured, it waits for Docker's health status.
+// Otherwise, it just waits for the Swarm task to reach Running state.
+func (d *Deployer) waitForServiceHealthy(managerClient *ssh.Client, serviceName string, service *config.ServiceConfig) error {
+	fullServiceName := fmt.Sprintf("%s_%s_%s", d.config.Project.Name, d.environment, serviceName)
+
+	// Step 1: Wait for Swarm tasks to reach Running state (timeout: 60s)
+	taskTimeout := 60 * time.Second
+	pollInterval := 2 * time.Second
+	deadline := time.Now().Add(taskTimeout)
+
+	fmt.Printf("  Verifying service health...\n")
+	if d.verbose {
+		fmt.Printf("  Waiting for service tasks to start...\n")
+	}
+
+	for time.Now().Before(deadline) {
+		cmd := fmt.Sprintf("docker service ps %s --filter desired-state=running --format '{{.CurrentState}}' 2>/dev/null", fullServiceName)
+		output, err := managerClient.Execute(cmd)
+		if err != nil {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		output = strings.TrimSpace(output)
+		if output != "" && strings.Contains(strings.ToLower(output), "running") {
+			if d.verbose {
+				fmt.Printf("  ✓ Service tasks are running\n")
+			}
+			break
+		}
+
+		// Check for failure
+		if strings.Contains(strings.ToLower(output), "failed") || strings.Contains(strings.ToLower(output), "rejected") {
+			// Get task error details
+			errCmd := fmt.Sprintf("docker service ps %s --filter desired-state=running --format '{{.Error}}' 2>/dev/null | head -1", fullServiceName)
+			errOutput, _ := managerClient.Execute(errCmd)
+			return fmt.Errorf("service task failed: %s", strings.TrimSpace(errOutput))
+		}
+
+		if time.Now().Add(pollInterval).After(deadline) {
+			return fmt.Errorf("timeout waiting for service tasks to start (state: %s)", output)
+		}
+
+		time.Sleep(pollInterval)
+	}
+
+	// Step 2: If health check is configured, wait for healthy status
+	if service.HealthCheck.Path != "" && service.Port > 0 {
+		// Respect startPeriod before checking health
+		if service.HealthCheck.StartPeriod != "" {
+			startPeriod, err := time.ParseDuration(service.HealthCheck.StartPeriod)
+			if err == nil && startPeriod > 0 {
+				if d.verbose {
+					fmt.Printf("  Waiting for health check start period (%s)...\n", service.HealthCheck.StartPeriod)
+				}
+				time.Sleep(startPeriod)
+			}
+		}
+
+		retries := service.HealthCheck.Retries
+		if retries <= 0 {
+			retries = 3
+		}
+
+		interval := 10 * time.Second
+		if service.HealthCheck.Interval != "" {
+			if parsed, err := time.ParseDuration(service.HealthCheck.Interval); err == nil {
+				interval = parsed
+			}
+		}
+
+		// Total health check timeout: retries * interval * 2 (generous buffer)
+		healthTimeout := time.Duration(retries) * interval * 2
+		if healthTimeout < 30*time.Second {
+			healthTimeout = 30 * time.Second
+		}
+		healthDeadline := time.Now().Add(healthTimeout)
+
+		if d.verbose {
+			fmt.Printf("  Waiting for health check to pass (path: %s, timeout: %s)...\n",
+				service.HealthCheck.Path, healthTimeout.Round(time.Second))
+		}
+
+		for time.Now().Before(healthDeadline) {
+			// Single SSH call: resolve task → container → health status in one round-trip
+			cmd := fmt.Sprintf(
+				`TASK_ID=$(docker service ps %s --filter desired-state=running --format '{{.ID}}' 2>/dev/null | head -1) && `+
+					`[ -n "$TASK_ID" ] && `+
+					`CID=$(docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' "$TASK_ID" 2>/dev/null) && `+
+					`[ -n "$CID" ] && `+
+					`docker inspect --format '{{.State.Health.Status}}' "$CID" 2>/dev/null || echo "starting"`,
+				fullServiceName,
+			)
+			healthStatus, err := managerClient.Execute(cmd)
+			if err != nil {
+				time.Sleep(interval)
+				continue
+			}
+
+			healthStatus = strings.TrimSpace(healthStatus)
+
+			if healthStatus == "healthy" {
+				if d.verbose {
+					fmt.Printf("  ✓ Health check passed\n")
+				}
+				return nil
+			}
+
+			if healthStatus == "unhealthy" {
+				// Get last health check log for debugging (separate call, only on failure)
+				logCmd := fmt.Sprintf(
+					`TASK_ID=$(docker service ps %s --filter desired-state=running --format '{{.ID}}' 2>/dev/null | head -1) && `+
+						`CID=$(docker inspect --format '{{.Status.ContainerStatus.ContainerID}}' "$TASK_ID" 2>/dev/null) && `+
+						`docker inspect --format '{{range .State.Health.Log}}{{.Output}}{{end}}' "$CID" 2>/dev/null | tail -5`,
+					fullServiceName,
+				)
+				logOutput, _ := managerClient.Execute(logCmd)
+				return fmt.Errorf("health check failed (status: unhealthy)\n  Health check output: %s", strings.TrimSpace(logOutput))
+			}
+
+			// Still starting, continue polling
+			if d.verbose {
+				fmt.Printf("  Health status: %s (waiting...)\n", healthStatus)
+			}
+
+			time.Sleep(interval)
+		}
+
+		return fmt.Errorf("health check timeout after %s", healthTimeout.Round(time.Second))
 	}
 
 	return nil
