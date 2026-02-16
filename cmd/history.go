@@ -84,6 +84,18 @@ func runHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	deployments, err := stateManager.ListDeployments(opts)
+	if (err != nil || len(deployments) == 0) && cfg.IsMultiServer() {
+		// Try recovering from worker nodes
+		replicaPool := ssh.NewPool()
+		defer replicaPool.CloseAll()
+		envName := getEnvironmentName(cfg)
+		replicator := state.NewStateReplicator(replicaPool, cfg, envName, cfg.Project.Name, verbose)
+		if history, source, _ := replicator.RecoverStateFromWorkers(); history != nil && len(history.Deployments) > 0 {
+			fmt.Printf("(State recovered from worker: %s)\n\n", source)
+			deployments = history.Deployments
+			err = nil
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("failed to load deployment history: %w", err)
 	}

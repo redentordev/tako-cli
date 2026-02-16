@@ -133,6 +133,36 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 	}
 
 	if strings.TrimSpace(output) == "missing" {
+		// Try recovering from worker nodes if multi-server
+		if cfg.IsMultiServer() {
+			replicaPool := ssh.NewPool()
+			defer replicaPool.CloseAll()
+			envName := getEnvironmentName(cfg)
+			replicator := remotestate.NewStateReplicator(replicaPool, cfg, envName, cfg.Project.Name, verbose)
+			if history, source, _ := replicator.RecoverStateFromWorkers(); history != nil && len(history.Deployments) > 0 {
+				fmt.Printf("State recovered from worker: %s\n", source)
+
+				// Restore to manager
+				managerMgr := remotestate.NewStateManager(client, cfg.Project.Name, client.Host())
+				managerMgr.Initialize()
+				for _, dep := range history.Deployments {
+					managerMgr.SaveDeployment(dep)
+				}
+
+				// Now sync to local
+				localMgr, lErr := localstate.NewManager(".", cfg.Project.Name, envName)
+				if lErr == nil {
+					for _, dep := range history.Deployments {
+						localDep := convertRemoteToLocal(dep, envName)
+						localMgr.SaveDeployment(localDep)
+					}
+				}
+
+				fmt.Printf("Recovered and synced %d deployment(s)\n", len(history.Deployments))
+				return nil
+			}
+		}
+
 		fmt.Println("\nNo remote state found.")
 		fmt.Println("This project has not been deployed yet, or state was cleaned up.")
 		fmt.Println("\nRun 'tako deploy' to create initial deployment.")
@@ -415,6 +445,39 @@ func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) e
 	}
 
 	if strings.TrimSpace(output) == "missing" {
+		// Try recovering from worker nodes if multi-server
+		if cfg.IsMultiServer() {
+			replicaPool := ssh.NewPool()
+			defer replicaPool.CloseAll()
+			replicator := remotestate.NewStateReplicator(replicaPool, cfg, envName, cfg.Project.Name, verbose)
+			if history, source, _ := replicator.RecoverStateFromWorkers(); history != nil && len(history.Deployments) > 0 {
+				if verbose {
+					fmt.Printf("Recovering state from worker: %s\n", source)
+				}
+
+				// Restore to manager
+				managerMgr := remotestate.NewStateManager(client, cfg.Project.Name, client.Host())
+				managerMgr.Initialize()
+				for _, dep := range history.Deployments {
+					managerMgr.SaveDeployment(dep)
+				}
+
+				// Sync to local
+				localMgr, lErr := localstate.NewManager(".", cfg.Project.Name, envName)
+				if lErr == nil {
+					for _, dep := range history.Deployments {
+						localDep := convertRemoteToLocal(dep, envName)
+						localMgr.SaveDeployment(localDep)
+					}
+				}
+
+				if verbose {
+					fmt.Printf("Recovered %d deployment(s) from worker %s\n", len(history.Deployments), source)
+				}
+				return nil
+			}
+		}
+
 		return nil // No remote state, nothing to sync
 	}
 

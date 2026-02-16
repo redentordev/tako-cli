@@ -549,6 +549,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Warning: failed to save remote deployment state: %v\n", err)
 		}
 
+		// Replicate state to worker nodes (async, fire-and-forget)
+		if len(servers) > 1 {
+			replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
+			history, _ := stateManager.LoadHistory()
+			replicator.ReplicateDeployment(deployment, history)
+		}
+
 		// Save local deployment state
 		if localStateMgr != nil {
 			localDeployment := &localstate.DeploymentState{

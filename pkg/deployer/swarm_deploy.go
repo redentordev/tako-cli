@@ -2,9 +2,11 @@ package deployer
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/setup"
@@ -205,6 +207,15 @@ func (d *Deployer) SetupSwarmCluster() error {
 	if err := d.swarmManager.SaveSwarmState(swarmState); err != nil {
 		if d.verbose {
 			fmt.Printf("Warning: failed to save swarm state: %v\n", err)
+		}
+	}
+
+	// Replicate encrypted swarm tokens to worker nodes (async, fire-and-forget)
+	if len(servers) > 1 {
+		stateFile := d.swarmManager.GetSwarmStateFile()
+		if encData, err := os.ReadFile(stateFile); err == nil {
+			replicator := remotestate.NewStateReplicator(d.sshPool, d.config, d.environment, d.config.Project.Name, d.verbose)
+			replicator.ReplicateSwarmTokens(encData)
 		}
 	}
 

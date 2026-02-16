@@ -297,6 +297,11 @@ func (s *StateManager) updateHistory(deployment *DeploymentState) error {
 	return nil
 }
 
+// LoadHistory returns the deployment history from the remote server.
+func (s *StateManager) LoadHistory() (*DeploymentHistory, error) {
+	return s.loadHistory()
+}
+
 func (s *StateManager) loadHistory() (*DeploymentHistory, error) {
 	historyPath := fmt.Sprintf("%s/history.json", s.getStatePath())
 	readCmd := fmt.Sprintf("sudo cat %s 2>/dev/null", historyPath)

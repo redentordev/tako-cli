@@ -224,6 +224,15 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Replicate updated state to worker nodes (async, fire-and-forget)
+	if cfg.IsMultiServer() {
+		replicaPool := ssh.NewPool()
+		defer replicaPool.CloseAll()
+		replicator := remotestate.NewStateReplicator(replicaPool, cfg, envName, cfg.Project.Name, verbose)
+		history, _ := stateManager.LoadHistory()
+		replicator.ReplicateDeployment(targetDeployment, history)
+	}
+
 	// Send success notification
 	if notifier != nil {
 		notifier.Notify(notification.Event{
