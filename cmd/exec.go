@@ -137,20 +137,26 @@ func runExec(cmd *cobra.Command, args []string) error {
 		defer client.Close()
 
 		// Execute command
-		output, err := client.Execute(command)
-		if err != nil {
-			fmt.Printf("❌ Command failed on %s: %v\n", serverName, err)
-			if output != "" {
-				fmt.Printf("Output:\n%s\n", output)
+		if execInteractive {
+			if err := client.ExecuteInteractive(command); err != nil {
+				fmt.Printf("❌ Command failed on %s: %v\n", serverName, err)
 			}
-			continue
-		}
-
-		// Display output
-		if strings.TrimSpace(output) != "" {
-			fmt.Println(output)
 		} else {
-			fmt.Println("(no output)")
+			output, err := client.Execute(command)
+			if err != nil {
+				fmt.Printf("❌ Command failed on %s: %v\n", serverName, err)
+				if output != "" {
+					fmt.Printf("Output:\n%s\n", output)
+				}
+				continue
+			}
+
+			// Display output
+			if strings.TrimSpace(output) != "" {
+				fmt.Println(output)
+			} else {
+				fmt.Println("(no output)")
+			}
 		}
 	}
 
@@ -262,6 +268,10 @@ func runExecInContainer(cfg *config.Config, envName, command string) error {
 	}
 
 	// Execute command
+	if execInteractive {
+		return client.ExecuteInteractive(dockerCmd)
+	}
+
 	output, err := client.Execute(dockerCmd)
 	if err != nil {
 		return fmt.Errorf("failed to execute command: %w", err)

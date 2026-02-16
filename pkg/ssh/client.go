@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/term"
 )
 
 // Client wraps an SSH connection with additional functionality
@@ -454,6 +455,63 @@ func (c *Client) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
 	}
 
 	return nil
+}
+
+// ExecuteInteractive runs a command interactively with a remote PTY.
+// It puts the local terminal in raw mode and forwards stdin/stdout/stderr
+// bidirectionally, supporting full interactive sessions (shells, editors, etc.).
+func (c *Client) ExecuteInteractive(cmd string) error {
+	conn, err := c.getConnection()
+	if err != nil {
+		return err
+	}
+
+	session, err := conn.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
+
+	// Get local terminal size
+	fd := int(os.Stdin.Fd())
+	w, h, err := term.GetSize(fd)
+	if err != nil {
+		// Fallback to reasonable defaults if not a terminal
+		w, h = 80, 24
+	}
+
+	// Request remote PTY
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}
+	if err := session.RequestPty("xterm-256color", h, w, modes); err != nil {
+		return fmt.Errorf("failed to request PTY: %w", err)
+	}
+
+	// Put local terminal in raw mode
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return fmt.Errorf("failed to set raw terminal: %w", err)
+	}
+	defer term.Restore(fd, oldState)
+
+	// Wire up stdin/stdout/stderr
+	session.Stdin = os.Stdin
+	session.Stdout = os.Stdout
+	session.Stderr = os.Stderr
+
+	// Listen for terminal resize signals (Unix only, no-op on other platforms)
+	stopResize := watchTerminalResize(fd, session)
+	defer stopResize()
+
+	// Start and wait for the command
+	if err := session.Start(cmd); err != nil {
+		return fmt.Errorf("failed to start command: %w", err)
+	}
+
+	return session.Wait()
 }
 
 // StreamingSession represents a streaming SSH session
