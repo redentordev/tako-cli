@@ -49,12 +49,13 @@ func (sw *streamWriter) Write(p []byte) (n int, err error) {
 
 // Deployer handles deployment operations
 type Deployer struct {
-	client       *ssh.Client
-	config       *config.Config
-	environment  string
-	verbose      bool
-	sshPool      *ssh.Pool
-	swarmManager *swarm.Manager
+	client           *ssh.Client
+	config           *config.Config
+	environment      string
+	verbose          bool
+	sshPool          *ssh.Pool
+	swarmManager     *swarm.Manager
+	distributedImages map[string]bool
 }
 
 // NewDeployer creates a new deployer
@@ -71,12 +72,13 @@ func NewDeployer(client *ssh.Client, cfg *config.Config, environment string, ver
 func NewDeployerWithPool(client *ssh.Client, cfg *config.Config, environment string, sshPool *ssh.Pool, verbose bool) *Deployer {
 	swarmMgr := swarm.NewManager(cfg, sshPool, environment, verbose)
 	return &Deployer{
-		client:       client,
-		config:       cfg,
-		environment:  environment,
-		verbose:      verbose,
-		sshPool:      sshPool,
-		swarmManager: swarmMgr,
+		client:            client,
+		config:            cfg,
+		environment:       environment,
+		verbose:           verbose,
+		sshPool:           sshPool,
+		swarmManager:      swarmMgr,
+		distributedImages: make(map[string]bool),
 	}
 }
 

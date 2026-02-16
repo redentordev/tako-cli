@@ -61,10 +61,9 @@ func isOpenSSHFormat(data []byte) bool {
 func getHostKeyCallback() (ssh.HostKeyCallback, error) {
 	verifier, err := GetDefaultVerifier()
 	if err != nil {
-		// If we can't create a verifier, fall back to insecure mode with warning
-		fmt.Fprintf(os.Stderr, "Warning: Could not initialize host key verification: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Warning: Proceeding without host key verification (insecure)\n")
-		return ssh.InsecureIgnoreHostKey(), nil
+		return nil, fmt.Errorf("host key verification failed: %w\n\n"+
+			"SSH connections require host key verification for security.\n"+
+			"To bypass (NOT recommended), set TAKO_HOST_KEY_MODE=insecure", err)
 	}
 	return verifier.GetCallback(), nil
 }

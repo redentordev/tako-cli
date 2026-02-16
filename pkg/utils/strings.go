@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -70,4 +71,22 @@ func NetworkName(project, environment string) string {
 // ImageTag generates a standardized image tag
 func ImageTag(project, service, version, environment string) string {
 	return fmt.Sprintf("%s/%s:%s-%s", project, service, version, environment)
+}
+
+// ShellQuote wraps a string in single quotes with proper escaping for safe
+// use in shell commands. Single quotes within the string are handled by ending
+// the quoted section, adding an escaped single quote, and resuming quoting.
+func ShellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+// validUnixUsername matches POSIX username format:
+// starts with letter or underscore, followed by letters, digits, underscores, or hyphens
+var validUnixUsername = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$`)
+
+// IsValidUnixUsername validates that a string is a safe POSIX username.
+// Rules: starts with letter or underscore, contains only letters, digits,
+// underscores, and hyphens, max 32 characters.
+func IsValidUnixUsername(name string) bool {
+	return validUnixUsername.MatchString(name)
 }

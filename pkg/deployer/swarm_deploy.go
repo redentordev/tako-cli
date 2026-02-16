@@ -244,15 +244,27 @@ func (d *Deployer) DeployServiceSwarm(serviceName string, service *config.Servic
 	}
 
 	// For multi-server deployments, distribute the image to worker nodes
-	// using docker save/load streamed over SSH
+	// using docker save/load streamed over SSH (parallel for speed)
 	if len(servers) > 1 {
-		if d.verbose {
-			fmt.Printf("  Distributing image to worker nodes...\n")
-		}
+		// Skip if this image was already distributed in this deployment run
+		if d.distributedImages != nil && d.distributedImages[fullImageName] {
+			if d.verbose {
+				fmt.Printf("  Image already distributed in this run, skipping...\n")
+			}
+		} else {
+			if d.verbose {
+				fmt.Printf("  Distributing image to worker nodes...\n")
+			}
 
-		unreg := unregistry.NewManager(d.config, d.sshPool, d.environment, d.verbose)
-		if err := unreg.DistributeImage(managerClient, fullImageName); err != nil {
-			return fmt.Errorf("failed to distribute image to workers: %w", err)
+			unreg := unregistry.NewManager(d.config, d.sshPool, d.environment, d.verbose)
+			if err := unreg.DistributeImageParallel(managerClient, fullImageName); err != nil {
+				return fmt.Errorf("failed to distribute image to workers: %w", err)
+			}
+
+			// Mark image as distributed
+			if d.distributedImages != nil {
+				d.distributedImages[fullImageName] = true
+			}
 		}
 	}
 

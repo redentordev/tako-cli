@@ -456,6 +456,18 @@ func (m *Manager) UpdateServiceLabels(serviceName string, service *config.Servic
 
 // updateTraefikEmail updates the email in Traefik config for Let's Encrypt
 func (m *Manager) updateTraefikEmail(email string) {
+	// Validate email to prevent shell injection via sed command
+	// Only allow characters safe for shell interpolation in a sed pattern
+	for _, ch := range email {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+			ch == '@' || ch == '.' || ch == '-' || ch == '_' || ch == '+') {
+			if m.verbose {
+				fmt.Printf("  Warning: email %q contains invalid characters, skipping Traefik email update\n", email)
+			}
+			return
+		}
+	}
+
 	// Update the email in the Traefik configuration
 	updateCmd := fmt.Sprintf(
 		"sudo sed -i 's/email: tako@redentor.dev/email: %s/' /etc/traefik/traefik.yml",

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/utils"
 )
 
 // Provisioner handles server provisioning
@@ -349,6 +350,11 @@ bantime = 3600
 
 // SetupDeployUser ensures deploy user exists and has proper permissions
 func (p *Provisioner) SetupDeployUser(username string) error {
+	// Defense-in-depth: validate username before using in shell commands
+	if !utils.IsValidUnixUsername(username) {
+		return fmt.Errorf("invalid username %q: must be a valid POSIX username", username)
+	}
+
 	// Check if user exists
 	output, err := p.client.Execute(fmt.Sprintf("id -u %s", username))
 	if err != nil || output == "" {

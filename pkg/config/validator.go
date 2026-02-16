@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/redentordev/tako-cli/pkg/utils"
 )
 
 // ValidateConfig validates the configuration
@@ -117,6 +119,11 @@ func validateServer(name string, server *ServerConfig) error {
 
 	if server.User == "" {
 		return fmt.Errorf("server %s: user is required", name)
+	}
+
+	// Validate username format to prevent command injection
+	if !utils.IsValidUnixUsername(server.User) {
+		return fmt.Errorf("server %s: invalid username '%s' (must be a valid POSIX username: letters, digits, underscore, hyphen; starts with letter or underscore; max 32 chars)", name, server.User)
 	}
 
 	// Set defaults
