@@ -1,14 +1,18 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/infra"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
@@ -70,6 +74,11 @@ infrastructure:
 	// Ensure Pulumi is installed
 	if err := infra.EnsurePulumi(verbose); err != nil {
 		return fmt.Errorf("failed to ensure Pulumi is installed: %w", err)
+	}
+
+	// Ensure a state backend is configured (prompt if interactive)
+	if err := ensureStateBackend(cfg); err != nil {
+		return fmt.Errorf("failed to configure state backend: %w", err)
 	}
 
 	// Get tako directory
@@ -173,6 +182,10 @@ infrastructure:
 	}
 
 	fmt.Printf("\nProvisioning completed in %s\n", result.Duration.Round(time.Millisecond))
+
+	// Warn about SSH key backup if a new key was generated
+	printSSHKeyBackupWarning(orchestrator)
+
 	fmt.Println("\nNext steps:")
 	fmt.Println("  1. Run 'tako setup' to install Docker and configure servers")
 	fmt.Println("  2. Run 'tako deploy' to deploy your application")
@@ -208,6 +221,119 @@ func GetInfrastructureOutputs(cfg *config.Config) (map[string]interface{}, error
 	stateMgr := infra.NewStateManager(takoDir, cfg.Project.Name, envFlag)
 
 	return stateMgr.LoadOutputs()
+}
+
+// ensureStateBackend prompts the user to select a state backend if none is configured
+func ensureStateBackend(cfg *config.Config) error {
+	if cfg.Infrastructure == nil {
+		return nil
+	}
+
+	// If backend is already configured, skip
+	if cfg.Infrastructure.State != nil && cfg.Infrastructure.State.Backend != "" {
+		return nil
+	}
+
+	// If non-interactive, warn and use local
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Println("Warning: No state backend configured. Using local state (not portable).")
+		fmt.Println("Configure in tako.yaml: infrastructure.state.backend")
+		return nil
+	}
+
+	fmt.Println("\n=== State Backend ===")
+	fmt.Println("Where should infrastructure state be stored?")
+	fmt.Println()
+	fmt.Println("  1. Manager server (recommended) — synced via SSH, portable")
+	fmt.Println("  2. S3-compatible storage — needs bucket config")
+	fmt.Println("  3. Local only (not recommended) — not portable across machines")
+	fmt.Print("\nSelect [1-3] (default: 1): ")
+
+	reader := bufio.NewReader(os.Stdin)
+	input, _ := reader.ReadString('\n')
+	choice := trimInput(input)
+	if choice == "" {
+		choice = "1"
+	}
+
+	switch choice {
+	case "1":
+		cfg.Infrastructure.State = &config.InfraStateConfig{
+			Backend: "manager",
+			Encrypt: true,
+		}
+		fmt.Println("State backend: manager (synced via SSH)")
+
+	case "2":
+		cfg.Infrastructure.State = &config.InfraStateConfig{
+			Backend: "s3",
+			Encrypt: true,
+		}
+
+		// Prompt for bucket name
+		suggested := fmt.Sprintf("tako-state-%s", cfg.Project.Name)
+		fmt.Printf("S3 bucket name [%s]: ", suggested)
+		bucketInput, _ := reader.ReadString('\n')
+		bucket := trimInput(bucketInput)
+		if bucket == "" {
+			bucket = suggested
+		}
+		cfg.Infrastructure.State.Bucket = bucket
+
+		// Prompt for region
+		fmt.Printf("S3 region [%s]: ", cfg.Infrastructure.Region)
+		regionInput, _ := reader.ReadString('\n')
+		region := trimInput(regionInput)
+		if region == "" {
+			region = cfg.Infrastructure.Region
+		}
+		cfg.Infrastructure.State.Region = region
+
+		fmt.Printf("State backend: s3 (bucket: %s, region: %s)\n", bucket, region)
+
+	case "3":
+		cfg.Infrastructure.State = &config.InfraStateConfig{
+			Backend: "local",
+		}
+		fmt.Println("State backend: local")
+		fmt.Println("Warning: Local state cannot be shared across machines.")
+
+	default:
+		// Default to manager
+		cfg.Infrastructure.State = &config.InfraStateConfig{
+			Backend: "manager",
+			Encrypt: true,
+		}
+		fmt.Println("State backend: manager (synced via SSH)")
+	}
+
+	// Save the updated config
+	if err := config.SaveConfig(cfgFile, cfg); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	return nil
+}
+
+func trimInput(s string) string {
+	s = strings.TrimSpace(s)
+	return s
+}
+
+// printSSHKeyBackupWarning prints a prominent warning when a new SSH key was generated
+func printSSHKeyBackupWarning(orch *infra.Orchestrator) {
+	keyPair := orch.GetSSHKeyPair()
+	if keyPair == nil || !keyPair.NewlyGenerated {
+		return
+	}
+
+	fmt.Println()
+	fmt.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+	fmt.Println("  IMPORTANT: Back up your SSH private key!")
+	fmt.Printf("  Path: %s\n", keyPair.PrivateKeyPath)
+	fmt.Printf("  Copy: cp %s ~/.ssh/%s\n", keyPair.PrivateKeyPath, filepath.Base(keyPair.PrivateKeyPath))
+	fmt.Println("  Without this key, you cannot access your servers.")
+	fmt.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 }
 
 // ResolveInfrastructureVariable resolves ${infrastructure.name.ip} variables

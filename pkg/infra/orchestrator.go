@@ -38,7 +38,7 @@ func NewOrchestrator(cfg *config.Config, takoDir string, environment string, ver
 		return nil, fmt.Errorf("invalid infrastructure config: %w", err)
 	}
 
-	stateManager := NewStateManager(takoDir, cfg.Project.Name, environment)
+	stateManager := NewStateManagerWithConfig(takoDir, cfg.Project.Name, environment, cfg.Infrastructure)
 	sshKeyManager := NewSSHKeyManager(takoDir)
 
 	return &Orchestrator{
@@ -335,6 +335,11 @@ func (o *Orchestrator) GetInfraState() (*InfraState, error) {
 // IsProvisioned checks if infrastructure has been provisioned
 func (o *Orchestrator) IsProvisioned() bool {
 	return o.stateManager.IsProvisioned()
+}
+
+// GetSSHKeyPair returns the current SSH key pair, loading state if needed
+func (o *Orchestrator) GetSSHKeyPair() *SSHKeyPair {
+	return o.sshKeyManager.GetKeyPair()
 }
 
 // parseOutputsToState converts Pulumi outputs to InfraState

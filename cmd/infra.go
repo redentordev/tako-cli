@@ -243,6 +243,9 @@ func runInfraUp(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s: %s (%s)\n", name, server.PublicIP, server.Role)
 	}
 
+	// Warn about SSH key backup if a new key was generated
+	printSSHKeyBackupWarning(orchestrator)
+
 	fmt.Printf("\nCompleted in %s\n", result.Duration.Round(time.Millisecond))
 	return nil
 }

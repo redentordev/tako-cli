@@ -4,13 +4,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/crypto"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
+	"github.com/redentordev/tako-cli/pkg/swarm"
 	"github.com/spf13/cobra"
 )
 
@@ -120,9 +123,21 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 	// Create SSH client
 	client, err := ssh.NewClientWithAuth(firstServer.Host, firstServer.Port, firstServer.User, firstServer.SSHKey, firstServer.Password)
 	if err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
+		return fmt.Errorf("failed to connect to server: %w\n\nTroubleshooting:\n  - Check SSH key exists: ls -la %s\n  - Test manually: ssh -i %s %s@%s -p %d\n  - Verify server is reachable: ping %s",
+			err, firstServer.SSHKey, firstServer.SSHKey, firstServer.User, firstServer.Host, firstServer.Port, firstServer.Host)
 	}
 	defer client.Close()
+
+	// Verify SSH connectivity
+	verifyOutput, verifyErr := client.Execute("echo 'tako-ok'")
+	if verifyErr != nil || strings.TrimSpace(verifyOutput) != "tako-ok" {
+		return fmt.Errorf("SSH connection established but command execution failed: %v\n\nTroubleshooting:\n  - Check SSH key: %s\n  - Test manually: ssh %s@%s -p %d echo ok",
+			verifyErr, firstServer.SSHKey, firstServer.User, firstServer.Host, firstServer.Port)
+	}
+
+	if verbose {
+		fmt.Println("SSH connectivity verified")
+	}
 
 	// Check if remote state exists
 	remotePath := fmt.Sprintf("%s/%s", remotestate.StateDir, cfg.Project.Name)
@@ -163,7 +178,12 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		fmt.Println("\nNo remote state found.")
+		// No remote state and worker recovery failed — try reconciling from running services
+		fmt.Println("No remote state found, attempting recovery from running services...")
+		if err := reconcileAndSave(client, cfg, envName); err == nil {
+			return nil
+		}
+		fmt.Println("\nNo remote state or running services found.")
 		fmt.Println("This project has not been deployed yet, or state was cleaned up.")
 		fmt.Println("\nRun 'tako deploy' to create initial deployment.")
 		return nil
@@ -191,8 +211,8 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(remoteDeployments) == 0 {
-		fmt.Println("\nNo deployments found in remote state.")
-		return nil
+		fmt.Println("No deployments found in remote state, attempting recovery from running services...")
+		return reconcileAndSave(client, cfg, envName)
 	}
 
 	fmt.Printf("Found %d deployment(s) in remote state\n\n", len(remoteDeployments))
@@ -214,6 +234,9 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
+
+	// Attempt to recover swarm tokens
+	recoverSwarmTokens(client, cfg, envName)
 
 	// Show latest deployment info
 	latest := remoteDeployments[0]
@@ -577,6 +600,115 @@ func ReconcileStateFromRunning(client *ssh.Client, projectName, envName string) 
 	}
 
 	return deployment, nil
+}
+
+// recoverSwarmTokens attempts to recover Docker Swarm tokens from the server
+// and saves them as an encrypted swarm state file
+func recoverSwarmTokens(client *ssh.Client, cfg *config.Config, envName string) {
+	// Check if this node is a swarm manager
+	output, err := client.Execute("docker info --format '{{.Swarm.ControlAvailable}}'")
+	if err != nil || strings.TrimSpace(output) != "true" {
+		if verbose {
+			fmt.Println("Server is not a swarm manager, skipping swarm token recovery")
+		}
+		return
+	}
+
+	fmt.Println("Recovering swarm tokens...")
+
+	// Get worker join token
+	workerToken, err := client.Execute("docker swarm join-token worker -q")
+	if err != nil {
+		if verbose {
+			fmt.Printf("Warning: failed to get worker token: %v\n", err)
+		}
+		return
+	}
+
+	// Get manager join token
+	managerToken, err := client.Execute("docker swarm join-token manager -q")
+	if err != nil {
+		if verbose {
+			fmt.Printf("Warning: failed to get manager token: %v\n", err)
+		}
+		return
+	}
+
+	// Build swarm state
+	state := &swarm.SwarmState{
+		Initialized:  true,
+		ManagerHost:  client.Host(),
+		WorkerToken:  strings.TrimSpace(workerToken),
+		ManagerToken: strings.TrimSpace(managerToken),
+		Nodes:        make(map[string]string),
+		LastUpdated:  time.Now().Format(time.RFC3339),
+	}
+
+	// Write encrypted swarm state file
+	stateFile := filepath.Join(".tako", fmt.Sprintf("swarm_%s_%s.json", cfg.Project.Name, envName))
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
+		if verbose {
+			fmt.Printf("Warning: failed to create state directory: %v\n", err)
+		}
+		return
+	}
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		if verbose {
+			fmt.Printf("Warning: failed to marshal swarm state: %v\n", err)
+		}
+		return
+	}
+
+	encryptor, err := crypto.NewEncryptorFromKeyFile(crypto.GetProjectKeyPath("."))
+	if err != nil {
+		if verbose {
+			fmt.Printf("Warning: failed to initialize encryption: %v\n", err)
+		}
+		return
+	}
+
+	encrypted, err := encryptor.Encrypt(data)
+	if err != nil {
+		if verbose {
+			fmt.Printf("Warning: failed to encrypt swarm state: %v\n", err)
+		}
+		return
+	}
+
+	if err := os.WriteFile(stateFile, encrypted, 0600); err != nil {
+		if verbose {
+			fmt.Printf("Warning: failed to write swarm state: %v\n", err)
+		}
+		return
+	}
+
+	fmt.Println("Swarm tokens recovered and saved")
+}
+
+// reconcileAndSave uses ReconcileStateFromRunning to rebuild state from running services
+func reconcileAndSave(client *ssh.Client, cfg *config.Config, envName string) error {
+	deployment, err := ReconcileStateFromRunning(client, cfg.Project.Name, envName)
+	if err != nil {
+		return err
+	}
+
+	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+	if err != nil {
+		return fmt.Errorf("failed to initialize local state: %w", err)
+	}
+
+	if err := localMgr.SaveDeployment(deployment); err != nil {
+		return fmt.Errorf("failed to save recovered state: %w", err)
+	}
+
+	fmt.Printf("Recovered state from %d running service(s)\n", len(deployment.Services))
+
+	// Also recover swarm tokens while we're at it
+	recoverSwarmTokens(client, cfg, envName)
+
+	return nil
 }
 
 // ExportState exports current state to a JSON file

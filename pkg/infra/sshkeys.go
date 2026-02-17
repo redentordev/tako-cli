@@ -18,6 +18,7 @@ type SSHKeyPair struct {
 	PublicKeyPath  string `json:"public_key_path"`
 	PublicKey      string `json:"public_key"` // The actual public key content
 	Fingerprint    string `json:"fingerprint"`
+	NewlyGenerated bool   `json:"-"` // true when key was just generated (not persisted)
 }
 
 // SSHKeyState stores the generated key and uploaded key IDs per provider
@@ -108,7 +109,8 @@ func (m *SSHKeyManager) EnsureKeyPair(projectName string) (*SSHKeyPair, error) {
 	// Check if key already exists and is valid
 	if m.state.KeyPair.PrivateKeyPath != "" {
 		if _, err := os.Stat(m.state.KeyPair.PrivateKeyPath); err == nil {
-			// Key exists
+			// Key exists — not newly generated
+			m.state.KeyPair.NewlyGenerated = false
 			return &m.state.KeyPair, nil
 		}
 	}
@@ -119,6 +121,7 @@ func (m *SSHKeyManager) EnsureKeyPair(projectName string) (*SSHKeyPair, error) {
 		return nil, err
 	}
 
+	keyPair.NewlyGenerated = true
 	m.state.KeyPair = *keyPair
 	if err := m.SaveState(); err != nil {
 		return nil, err
