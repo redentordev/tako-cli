@@ -49,6 +49,7 @@ Displays:
   - Whether local .tako directory exists
   - Last local deployment information
   - Last remote deployment information
+  - Whether a remote operation lease is currently held
   - Whether sync is needed`,
 	RunE: runStateStatus,
 }
@@ -92,27 +93,9 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Determine which server to connect to
-	servers := cfg.Servers
-	if stateServer != "" {
-		server, exists := cfg.Servers[stateServer]
-		if !exists {
-			return fmt.Errorf("server %s not found in configuration", stateServer)
-		}
-		servers = map[string]config.ServerConfig{stateServer: server}
-	}
-
-	// Get first server
-	var firstServerName string
-	var firstServer config.ServerConfig
-	for name, srv := range servers {
-		firstServerName = name
-		firstServer = srv
-		break
-	}
-
-	if firstServerName == "" {
-		return fmt.Errorf("no servers configured")
+	firstServerName, firstServer, err := resolveStateServer(cfg, envName, stateServer)
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("Connecting to %s (%s)...\n", firstServerName, firstServer.Host)
@@ -296,27 +279,9 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	// Check remote state
 	fmt.Println("=== Remote State ===")
 
-	// Determine which server to connect to
-	servers := cfg.Servers
-	if stateServer != "" {
-		server, exists := cfg.Servers[stateServer]
-		if !exists {
-			return fmt.Errorf("server %s not found in configuration", stateServer)
-		}
-		servers = map[string]config.ServerConfig{stateServer: server}
-	}
-
-	// Get first server
-	var firstServerName string
-	var firstServer config.ServerConfig
-	for name, srv := range servers {
-		firstServerName = name
-		firstServer = srv
-		break
-	}
-
-	if firstServerName == "" {
-		fmt.Println("No servers configured")
+	firstServerName, firstServer, err := resolveStateServer(cfg, envName, stateServer)
+	if err != nil {
+		fmt.Printf("Status: %v\n", err)
 		return nil
 	}
 
@@ -329,6 +294,8 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	defer client.Close()
+
+	remoteMgr := remotestate.NewStateManager(client, cfg.Project.Name, firstServer.Host)
 
 	// Check if remote state exists
 	remotePath := fmt.Sprintf("%s/%s", remotestate.StateDir, cfg.Project.Name)
@@ -346,7 +313,6 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Directory: %s (exists)\n", remotePath)
 
 		// Get remote deployment info
-		remoteMgr := remotestate.NewStateManager(client, cfg.Project.Name, firstServer.Host)
 		remoteDeployments, err := remoteMgr.ListDeployments(&remotestate.HistoryOptions{
 			Limit:         1,
 			IncludeFailed: true,
@@ -367,6 +333,18 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	lease, err := remoteMgr.ReadLease()
+	if err != nil {
+		fmt.Printf("Lease: Error reading lease - %v\n", err)
+	} else if lease == nil {
+		fmt.Println("Lease: free")
+	} else {
+		fmt.Printf("Lease: held by %s\n", lease.Who)
+		fmt.Printf("  Operation: %s\n", lease.Operation)
+		fmt.Printf("  Created:   %s (%s ago)\n", lease.CreatedAt.Format(time.RFC3339), formatStateDuration(time.Since(lease.CreatedAt)))
+		fmt.Printf("  Expires:   %s (in %s)\n", lease.ExpiresAt.Format(time.RFC3339), time.Until(lease.ExpiresAt).Round(time.Second))
+	}
+
 	fmt.Println()
 
 	// Sync recommendation
@@ -380,6 +358,37 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func resolveStateServer(cfg *config.Config, envName string, requestedServer string) (string, config.ServerConfig, error) {
+	envServers, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return "", config.ServerConfig{}, fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	if len(envServers) == 0 {
+		return "", config.ServerConfig{}, fmt.Errorf("no servers configured for environment %s", envName)
+	}
+
+	if requestedServer == "" {
+		serverName := envServers[0]
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return "", config.ServerConfig{}, fmt.Errorf("server %s not found in configuration", serverName)
+		}
+		return serverName, server, nil
+	}
+
+	server, ok := cfg.Servers[requestedServer]
+	if !ok {
+		return "", config.ServerConfig{}, fmt.Errorf("server %s not found in configuration", requestedServer)
+	}
+	for _, serverName := range envServers {
+		if serverName == requestedServer {
+			return requestedServer, server, nil
+		}
+	}
+
+	return "", config.ServerConfig{}, fmt.Errorf("server %s is not part of environment %s", requestedServer, envName)
 }
 
 // convertRemoteToLocal converts a remote DeploymentState to local format

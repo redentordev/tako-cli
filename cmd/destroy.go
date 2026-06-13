@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -78,8 +79,18 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 	defer stateLock.Release(lockInfo)
 
-	// Determine which servers to destroy
+	envName := getEnvironmentName(cfg)
+	envServerNames, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	if len(envServerNames) == 0 {
+		return fmt.Errorf("no servers configured for environment %s", envName)
+	}
+
+	// Determine which environment nodes to destroy.
 	serversToDestroy := make(map[string]config.ServerConfig)
+	targetServerNames := append([]string(nil), envServerNames...)
 
 	if destroyServer != "" {
 		// Destroy specific server
@@ -87,10 +98,27 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		if !ok {
 			return fmt.Errorf("server '%s' not found in config", destroyServer)
 		}
+		found := false
+		for _, serverName := range envServerNames {
+			if serverName == destroyServer {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("server %s is not part of environment %s", destroyServer, envName)
+		}
 		serversToDestroy[destroyServer] = server
+		targetServerNames = []string{destroyServer}
 	} else {
-		// Destroy all servers
-		serversToDestroy = cfg.Servers
+		// Destroy all nodes in the active environment.
+		for _, serverName := range envServerNames {
+			server, ok := cfg.Servers[serverName]
+			if !ok {
+				return fmt.Errorf("server %s not found in config", serverName)
+			}
+			serversToDestroy[serverName] = server
+		}
 	}
 
 	// Show warning and get confirmation
@@ -146,11 +174,43 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	leaseServerName := targetServerNames[0]
+	leaseServer := serversToDestroy[leaseServerName]
+	leaseClient, err := ssh.NewClientFromConfig(ssh.ServerConfig{
+		Host:     leaseServer.Host,
+		Port:     leaseServer.Port,
+		User:     leaseServer.User,
+		SSHKey:   leaseServer.SSHKey,
+		Password: leaseServer.Password,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create lease client for %s: %w", leaseServerName, err)
+	}
+	if err := leaseClient.Connect(); err != nil {
+		return fmt.Errorf("failed to connect to lease node %s: %w", leaseServerName, err)
+	}
+	defer leaseClient.Close()
+
+	stateManager := remotestate.NewStateManager(leaseClient, cfg.Project.Name, leaseServer.Host)
+	lease, err := stateManager.AcquireLease("destroy", envName, remotestate.DefaultLeaseTTL)
+	if err != nil {
+		return fmt.Errorf("cannot acquire remote destroy lease: %w", err)
+	}
+	defer func() {
+		if err := stateManager.ReleaseLease(lease); err != nil && verbose {
+			fmt.Printf("Warning: failed to release remote destroy lease: %v\n", err)
+		}
+	}()
+	if verbose {
+		fmt.Printf("→ Acquired remote destroy lease on %s (ID: %s)\n", leaseServerName, lease.ID)
+	}
+
 	fmt.Printf("\n🗑️  Destroying %d server(s)...\n\n", len(serversToDestroy))
 
 	totalErrors := 0
 
-	for serverName, serverCfg := range serversToDestroy {
+	for _, serverName := range targetServerNames {
+		serverCfg := serversToDestroy[serverName]
 		fmt.Printf("=== Destroying server: %s (%s) ===\n", serverName, serverCfg.Host)
 		if err := destroySingleServer(serverName, serverCfg, cfg.Project.Name, verbose, destroyPurgeAll); err != nil {
 			fmt.Printf("⚠️  Errors destroying %s: %v\n", serverName, err)
@@ -161,18 +221,18 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 
 	// Cleanup NFS if configured and purging (only for multi-server)
-	if destroyPurgeAll && cfg.IsNFSEnabled() && len(cfg.Servers) > 1 {
+	if destroyPurgeAll && cfg.IsNFSEnabled() && len(serversToDestroy) > 1 {
 		fmt.Printf("\n=== Cleaning up NFS shared storage ===\n\n")
-		if err := cleanupNFS(cfg, envFlag); err != nil {
+		if err := cleanupNFS(cfg, envName); err != nil {
 			fmt.Printf("⚠️  NFS cleanup failed: %v\n", err)
 			totalErrors++
 		}
-	} else if destroyPurgeAll && cfg.IsNFSEnabled() && len(cfg.Servers) == 1 {
+	} else if destroyPurgeAll && cfg.IsNFSEnabled() && len(serversToDestroy) == 1 {
 		// Single server - just cleanup any local directories that might have been created
 		fmt.Printf("\n=== Cleaning up local storage (single-server mode) ===\n\n")
 		nfsConfig := cfg.GetNFSConfig()
 		if nfsConfig != nil {
-			for serverName, serverCfg := range cfg.Servers {
+			for serverName, serverCfg := range serversToDestroy {
 				client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
 					Host:     serverCfg.Host,
 					Port:     serverCfg.Port,
@@ -226,6 +286,10 @@ func cleanupNFS(cfg *config.Config, envName string) error {
 	if envName == "" {
 		envName = cfg.GetDefaultEnvironment()
 	}
+	envServers, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
 
 	// Create NFS provisioner
 	nfsProvisioner := provisioner.NewNFSProvisioner(cfg.Project.Name, envName, verbose)
@@ -247,7 +311,11 @@ func cleanupNFS(cfg *config.Config, envName string) error {
 	}
 
 	// Cleanup NFS clients first (unmount before removing server exports)
-	for serverName, serverConfig := range cfg.Servers {
+	for _, serverName := range envServers {
+		serverConfig, ok := cfg.Servers[serverName]
+		if !ok {
+			return fmt.Errorf("server %s not found in config", serverName)
+		}
 		fmt.Printf("→ Cleaning up NFS on %s...\n", serverName)
 
 		client, err := ssh.NewClientFromConfig(ssh.ServerConfig{

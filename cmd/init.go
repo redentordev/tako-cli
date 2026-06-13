@@ -157,7 +157,7 @@ Thumbs.db
 	fmt.Println("\nNext steps:")
 	fmt.Println("  1. Copy .env.example to .env and fill in your values")
 	fmt.Printf("  2. Edit %s to configure your services\n", configPath)
-	fmt.Println("  3. Run 'tako deploy production' to deploy")
+	fmt.Println("  3. Run 'tako deploy -e production' to deploy")
 
 	return nil
 }

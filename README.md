@@ -273,14 +273,15 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 ### Deployment & Operations
 
-- **Zero-Downtime Deployments** - Blue-green strategy with automatic health checks
+- **Reconciled Deployments** - Recreate containers to match the desired takod state with health checks
 - **Parallel Deployment** - Deploy multiple services concurrently (default behavior)
 - **Instant Rollback** - Revert to any previous deployment with one command
 - **Git-Based Versioning** - Every deployment tied to a Git commit
-- **State Management** - Full deployment history tracked on server with CLI version tracking
+- **State Management** - Deployment history tracked on the server with local sync for new machines
+- **Remote Lease** - CI, laptops, deploy, rollback, and destroy share a remote operation lock
 - **Automatic HTTPS** - tako-proxy provisions SSL certificates via Let's Encrypt
 - **Domain Redirects** - Automatic www → non-www (or vice versa) with path preservation
-- **Health Checks** - Ensure containers are healthy before switching traffic
+- **Health Checks** - Ensure containers are healthy after reconciliation
 - **Secrets Management** - Secure handling of environment secrets with automatic redaction
 - **Lifecycle Hooks** - Automate tasks at build, deploy, and start phases (migrations, cache warming, etc.)
 - **Volume Backup/Restore** - Backup and restore Docker volumes with `tako backup`
@@ -369,6 +370,8 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 | Command | Description |
 |---------|-------------|
+| `tako state pull` | Sync remote deployment state into local `.tako/` |
+| `tako state status` | Compare local/remote state and show the remote lease |
 | `tako upgrade` | Upgrade Tako CLI to the latest version |
 | `tako dev` | Run production environment locally |
 | `tako live` | Live development mode with hot reload |
