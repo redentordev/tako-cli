@@ -346,25 +346,11 @@ func (n *NFSProvisioner) configureExport(client *ssh.Client, export *config.NFSE
 		return nil, err
 	}
 
-	// Create export directory with secure permissions
-	createDirCmd := fmt.Sprintf("sudo mkdir -p %s", shellArg(export.Path))
-	if _, err := client.Execute(createDirCmd); err != nil {
-		return nil, fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	// Set ownership - use nobody:nogroup for NFS (standard for anonymous access)
-	// This allows containers with different UIDs to access the files
-	chownCmd := fmt.Sprintf("sudo chown -R nobody:nogroup %s", shellArg(export.Path))
-	if _, err := client.Execute(chownCmd); err != nil {
-		return nil, fmt.Errorf("failed to set ownership: %w", err)
-	}
-
-	// Set directory permissions (rwxrwxrwx - world writable for NFS)
-	// This is standard for NFS exports where multiple containers with different UIDs need write access
-	// Security is enforced at the NFS export level (IP restrictions) and service config (read-only mounts)
-	chmodCmd := fmt.Sprintf("sudo chmod -R 777 %s", shellArg(export.Path))
-	if _, err := client.Execute(chmodCmd); err != nil {
-		return nil, fmt.Errorf("failed to set permissions: %w", err)
+	// Prepare the export root without recursively mutating an existing tree.
+	// Default export options squash clients to this anonymous account.
+	prepareDirCmd := nfsExportDirectoryCommand(export.Path)
+	if _, err := client.Execute(prepareDirCmd); err != nil {
+		return nil, fmt.Errorf("failed to prepare export directory: %w", err)
 	}
 
 	// Build export options
@@ -409,7 +395,9 @@ func (n *NFSProvisioner) buildExportOptions(userOptions []string) string {
 		"rw",               // Read-write access
 		"sync",             // Synchronous writes for data integrity
 		"no_subtree_check", // Improves reliability
-		"no_root_squash",   // Allow root access (needed for containers)
+		"all_squash",       // Map all client users to the anonymous account
+		"anonuid=65534",    // nobody on common Linux distributions
+		"anongid=65534",    // nogroup/nobody on common Linux distributions
 		"insecure",         // Allow connections from any port (needed for some container networking)
 	}
 
@@ -800,6 +788,13 @@ func (n *NFSProvisioner) RemoveDockerVolume(client *ssh.Client, volumeName strin
 
 func shellArg(value string) string {
 	return utils.ShellQuote(value)
+}
+
+func nfsExportDirectoryCommand(exportPath string) string {
+	return fmt.Sprintf(
+		"nfs_group=$(getent group nogroup >/dev/null 2>&1 && printf nogroup || printf nobody); sudo install -d -m 2770 -o nobody -g \"$nfs_group\" %s",
+		shellArg(exportPath),
+	)
 }
 
 func exportExistsCommand(exportPath string) string {

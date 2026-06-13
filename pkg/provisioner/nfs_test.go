@@ -55,8 +55,28 @@ func TestValidateNFSExportOptionsAllowsKnownOptions(t *testing.T) {
 	}
 }
 
+func TestNFSDefaultExportOptionsSquashClients(t *testing.T) {
+	provisioner := NewNFSProvisioner("demo", "production", false)
+	options := provisioner.buildExportOptions(nil)
+
+	for _, expected := range []string{"all_squash", "anonuid=65534", "anongid=65534"} {
+		if !strings.Contains(options, expected) {
+			t.Fatalf("default export options missing %q: %s", expected, options)
+		}
+	}
+	if strings.Contains(options, "no_root_squash") {
+		t.Fatalf("default export options should not grant remote root semantics: %s", options)
+	}
+}
+
 func TestNFSCommandBuildersQuoteConfiguredValues(t *testing.T) {
 	exportPath := "/srv/nfs/app;touch"
+	if got := nfsExportDirectoryCommand(exportPath); !strings.Contains(got, "install -d -m 2770") ||
+		!strings.Contains(got, "'/srv/nfs/app;touch'") ||
+		strings.Contains(got, "chmod -R 777") ||
+		strings.Contains(got, "chown -R") {
+		t.Fatalf("export directory command should be quoted and non-recursive: %s", got)
+	}
 	if got := exportExistsCommand(exportPath); !strings.Contains(got, "p='/srv/nfs/app;touch'") {
 		t.Fatalf("export exists command did not quote export path: %s", got)
 	}
@@ -80,5 +100,23 @@ func TestNFSCommandBuildersQuoteConfiguredValues(t *testing.T) {
 	line := "10.0.0.1:/srv/nfs/app /mnt/tako-nfs/app nfs4 hard 0 0"
 	if got := appendRootOwnedLineCommand("/etc/fstab", line); !strings.Contains(got, "'10.0.0.1:/srv/nfs/app /mnt/tako-nfs/app nfs4 hard 0 0'") {
 		t.Fatalf("append line command did not quote line: %s", got)
+	}
+}
+
+func TestRunRootScriptUsesRootOwnedTempFile(t *testing.T) {
+	cmd := runRootScript("echo ready\n")
+	for _, expected := range []string{
+		"sudo sh -c",
+		"mktemp /tmp/tako-root-script.",
+		"base64 -d > \"$tmp\"",
+		"chmod 700 \"$tmp\"",
+		"<<'TAKO_ROOT_SCRIPT'",
+	} {
+		if !strings.Contains(cmd, expected) {
+			t.Fatalf("root script command missing %q: %s", expected, cmd)
+		}
+	}
+	if strings.Contains(cmd, "| sudo sh") || strings.Contains(cmd, "echo '") {
+		t.Fatalf("root script command should not pipe decoded script into sudo sh: %s", cmd)
 	}
 }

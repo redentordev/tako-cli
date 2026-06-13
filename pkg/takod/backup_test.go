@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -158,6 +159,36 @@ func TestValidateBackupRequestRejectsUnsafeValues(t *testing.T) {
 	invalid.BackupID = "../20240101-120000"
 	if err := validateBackupRequest(invalid, true, true); err == nil {
 		t.Fatal("expected unsafe backup ID to be rejected")
+	}
+}
+
+func TestRestoreVolumeScriptScopesDestructiveCleanup(t *testing.T) {
+	script := restoreVolumeScript("db_20240101-120000.tar.gz")
+	for _, expected := range []string{
+		"[ ! -d /target ] || [ -L /target ]",
+		"[ ! -f /backup/'db_20240101-120000.tar.gz' ]",
+		"find /target -mindepth 1 -maxdepth 1 -exec rm -rf -- {} \\;",
+		"tar -xzf /backup/'db_20240101-120000.tar.gz' -C /target",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("restore script missing %q:\n%s", expected, script)
+		}
+	}
+	for _, unsafe := range []string{
+		"rm -rf /target/*",
+		"/target/..?*",
+		"/target/.[!.]*",
+	} {
+		if strings.Contains(script, unsafe) {
+			t.Fatalf("restore script should not use brittle glob %q:\n%s", unsafe, script)
+		}
+	}
+}
+
+func TestRestoreVolumeScriptQuotesBackupFile(t *testing.T) {
+	script := restoreVolumeScript("db_'quoted'_20240101-120000.tar.gz")
+	if !strings.Contains(script, "'db_'\"'\"'quoted'\"'\"'_20240101-120000.tar.gz'") {
+		t.Fatalf("restore script did not shell-quote backup file:\n%s", script)
 	}
 }
 

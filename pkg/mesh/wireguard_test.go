@@ -84,6 +84,24 @@ func TestRenderConfigTemplateRejectsUnsafeInterface(t *testing.T) {
 	}
 }
 
+func TestRunRootScriptUsesRootOwnedTempFile(t *testing.T) {
+	cmd := runRootScript("echo ready\n")
+	for _, expected := range []string{
+		"sudo sh -c",
+		"mktemp /tmp/tako-root-script.",
+		"base64 -d > \"$tmp\"",
+		"chmod 700 \"$tmp\"",
+		"<<'TAKO_ROOT_SCRIPT'",
+	} {
+		if !strings.Contains(cmd, expected) {
+			t.Fatalf("root script command missing %q: %s", expected, cmd)
+		}
+	}
+	if strings.Contains(cmd, "| sudo sh") || strings.Contains(cmd, "echo '") {
+		t.Fatalf("root script command should not pipe decoded script into sudo sh: %s", cmd)
+	}
+}
+
 func TestApplyLocalWithRunnerWritesConfigWithoutSudo(t *testing.T) {
 	runner := &fakeWireGuardRunner{
 		files: map[string][]byte{
