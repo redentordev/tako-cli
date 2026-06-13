@@ -11,7 +11,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 )
 
-func TestStorageTargetServersIncludesEnvironmentAndExternalNFSServer(t *testing.T) {
+func TestStorageTargetServersUsesEnvironmentNodes(t *testing.T) {
 	cfg := &config.Config{
 		Servers: map[string]config.ServerConfig{
 			"node-a":  {Host: "10.0.0.1"},
@@ -23,12 +23,29 @@ func TestStorageTargetServersIncludesEnvironmentAndExternalNFSServer(t *testing.
 		},
 	}
 
-	targets, err := storageTargetServers(cfg, "production", "storage")
+	targets, err := storageTargetServers(cfg, "production", "node-a")
 	if err != nil {
 		t.Fatalf("storageTargetServers returned error: %v", err)
 	}
-	if !slices.Equal(targets, []string{"node-a", "node-b", "storage"}) {
+	if !slices.Equal(targets, []string{"node-a", "node-b"}) {
 		t.Fatalf("targets = %#v", targets)
+	}
+}
+
+func TestStorageTargetServersRejectsNFSServerOutsideEnvironment(t *testing.T) {
+	cfg := &config.Config{
+		Servers: map[string]config.ServerConfig{
+			"node-a":  {Host: "10.0.0.1"},
+			"node-b":  {Host: "10.0.0.2"},
+			"storage": {Host: "10.0.0.9"},
+		},
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {Servers: []string{"node-a", "node-b"}},
+		},
+	}
+
+	if _, err := storageTargetServers(cfg, "production", "storage"); err == nil {
+		t.Fatal("storageTargetServers should reject an NFS server outside the environment")
 	}
 }
 

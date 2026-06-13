@@ -526,7 +526,7 @@ Share volumes across multiple servers using NFS. Tako automatically sets up the 
 storage:
   nfs:
     enabled: true
-    server: auto  # Use the deterministic environment default, or specify a node
+    server: auto  # Use the deterministic environment default, or specify an environment node
     exports:
       - name: shared_repo
         path: /srv/nfs/repo

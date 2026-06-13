@@ -730,7 +730,19 @@ func (c *Config) GetNFSServerName(envName string) (string, error) {
 		return "", fmt.Errorf("NFS server '%s' not found in servers configuration", nfsConfig.Server)
 	}
 
-	return nfsConfig.Server, nil
+	envServers, err := c.GetEnvironmentServers(envName)
+	if err != nil {
+		return "", err
+	}
+	for _, serverName := range envServers {
+		if serverName == nfsConfig.Server {
+			return nfsConfig.Server, nil
+		}
+	}
+	if envName == "" {
+		envName = c.GetDefaultEnvironment()
+	}
+	return "", fmt.Errorf("NFS server '%s' is not part of environment '%s'", nfsConfig.Server, envName)
 }
 
 // GetNFSExport returns a specific NFS export by name
