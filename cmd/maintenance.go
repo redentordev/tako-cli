@@ -18,6 +18,8 @@ var (
 	maintenanceService string
 )
 
+const maintenanceImage = "nginx:1.27-alpine"
+
 var maintenanceCmd = &cobra.Command{
 	Use:   "maintenance",
 	Short: "Enable maintenance mode for a service",
@@ -509,11 +511,12 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 
 	// Create docker run command
 	dockerCmd := fmt.Sprintf(
-		"docker run -d --name %s --network %s -v %s:/usr/share/nginx/html:ro %s nginx:alpine",
+		"docker run -d --name %s --network %s -v %s:/usr/share/nginx/html:ro %s %s",
 		containerName,
 		networkName,
 		maintenanceDir,
 		strings.Join(proxyLabels, " "),
+		maintenanceImage,
 	)
 
 	// Remove existing maintenance container if any

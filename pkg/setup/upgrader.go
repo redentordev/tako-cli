@@ -351,7 +351,7 @@ docker run -d \
     -v /proc:/host/proc:ro \
     -v /sys:/host/sys:ro \
     -v /:/rootfs:ro \
-    prom/node-exporter:latest \
+    prom/node-exporter:v1.8.2 \
     --path.procfs=/host/proc \
     --path.sysfs=/host/sys \
     --collector.filesystem.mount-points-exclude="^/(sys|proc|dev|host|etc)($$|/)"
