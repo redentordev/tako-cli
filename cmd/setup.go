@@ -123,7 +123,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		}
 
 		if err := setup.WriteVersionFile(client, newVersion); err != nil {
-			fmt.Printf("  ⚠ Warning: Failed to write version file: %v\n", err)
+			return setupVersionWriteError(name, err)
 		}
 
 		fmt.Printf("\n✓ Server %s set up successfully!\n", name)
@@ -150,6 +150,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nNext step: Run 'tako deploy' to deploy your application\n")
 
 	return nil
+}
+
+func setupVersionWriteError(serverName string, err error) error {
+	return fmt.Errorf("server %s setup completed but failed to write setup version metadata: %w", serverName, err)
 }
 
 func setupTargetServers(cfg *config.Config, envName string, requestedServer string) ([]string, map[string]config.ServerConfig, error) {
