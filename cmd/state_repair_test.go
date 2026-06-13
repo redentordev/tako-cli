@@ -148,6 +148,30 @@ func TestWriteStateRepairDocumentsFailsWhenAllHistoryWritesFail(t *testing.T) {
 	}
 }
 
+func TestWriteStateRepairDocumentsFailsWhenAnyReachableHistoryWriteFails(t *testing.T) {
+	nodes := []stateRepairNode{
+		{name: "node-a", manager: &blockingHistoryRepairManager{}},
+		{name: "node-b", manager: &blockingHistoryRepairManager{failSave: true}},
+	}
+
+	historyWritten, _, _, _, err := writeStateRepairDocuments(
+		nodes,
+		stateHistoryCandidate{history: testRepairHistory()},
+		true,
+		stateDesiredCandidate{},
+		false,
+		stateActualCandidate{},
+		false,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "state repair incomplete") {
+		t.Fatalf("expected incomplete repair failure, got historyWritten=%d err=%v", historyWritten, err)
+	}
+	if historyWritten != 1 {
+		t.Fatalf("historyWritten = %d, want 1", historyWritten)
+	}
+}
+
 func waitForStateRepairLeaseStarts(t *testing.T, started <-chan string, count int) {
 	t.Helper()
 	seen := map[string]bool{}
