@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,5 +61,17 @@ func TestLatestSuccessfulDeploymentFromHistoryRequiresSuccess(t *testing.T) {
 
 	if _, err := latestSuccessfulDeploymentFromHistory(history); err == nil {
 		t.Fatal("latestSuccessfulDeploymentFromHistory should reject history without successful deployments")
+	}
+}
+
+func TestRollbackRemoteHistoryErrorFailsSuccessfulRuntimeMutation(t *testing.T) {
+	err := rollbackRemoteHistoryError(errors.New("disk full"))
+	if err == nil {
+		t.Fatal("rollbackRemoteHistoryError returned nil")
+	}
+	for _, want := range []string{"rollback succeeded", "failed to update remote deployment history", "disk full"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
 	}
 }
