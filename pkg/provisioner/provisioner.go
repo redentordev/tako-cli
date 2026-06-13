@@ -11,6 +11,7 @@ import (
 )
 
 const takodAccessGroup = "tako"
+const takodActualRefreshInterval = "30s"
 
 // Provisioner handles server provisioning
 type Provisioner struct {
@@ -218,7 +219,7 @@ install -m 0755 "$tmp" /usr/local/bin/tako
 	return nil
 }
 
-func (p *Provisioner) InstallTakodService(socket string, dataDir string) error {
+func (p *Provisioner) InstallTakodService(socket string, dataDir string, nodeName string) error {
 	binaryPath, _ := p.client.Execute("command -v tako 2>/dev/null || test -x /usr/local/bin/tako && echo /usr/local/bin/tako || true")
 	binaryPath = strings.TrimSpace(binaryPath)
 	if binaryPath == "" {
@@ -237,11 +238,14 @@ func (p *Provisioner) InstallTakodService(socket string, dataDir string) error {
 	if dataDir, err = systemdPathArg(dataDir, "/var/lib/tako"); err != nil {
 		return fmt.Errorf("invalid takod data directory: %w", err)
 	}
+	if nodeName, err = systemdIdentifierArg(nodeName); err != nil {
+		return fmt.Errorf("invalid takod node name: %w", err)
+	}
 	if err := p.ensureTakodAccessGroup(); err != nil {
 		return err
 	}
 
-	unit := buildTakodSystemdUnit(binaryPath, socket, dataDir)
+	unit := buildTakodSystemdUnit(binaryPath, socket, dataDir, nodeName, takodActualRefreshInterval)
 
 	uploadServiceCmd := fmt.Sprintf("sudo tee /etc/systemd/system/takod.service > /dev/null << 'EOFSERVICE'\n%s\nEOFSERVICE", unit)
 	if _, err := p.client.Execute(uploadServiceCmd); err != nil {
@@ -261,7 +265,7 @@ func (p *Provisioner) InstallTakodService(socket string, dataDir string) error {
 	return nil
 }
 
-func buildTakodSystemdUnit(binaryPath string, socket string, dataDir string) string {
+func buildTakodSystemdUnit(binaryPath string, socket string, dataDir string, nodeName string, actualRefreshInterval string) string {
 	return fmt.Sprintf(`[Unit]
 Description=Tako node agent
 After=network-online.target docker.service
@@ -275,13 +279,13 @@ Group=%s
 RuntimeDirectory=tako
 RuntimeDirectoryMode=0770
 UMask=0007
-ExecStart=%s takod run --socket %s --data-dir %s
+ExecStart=%s takod run --socket %s --data-dir %s --node %s --actual-refresh-interval %s
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, takodAccessGroup, binaryPath, socket, dataDir)
+`, takodAccessGroup, binaryPath, socket, dataDir, nodeName, actualRefreshInterval)
 }
 
 func (p *Provisioner) ensureTakodAccessGroup() error {
@@ -351,6 +355,22 @@ func systemdPathArg(value string, fallback string) (string, error) {
 	}
 	if strings.ContainsAny(value, " \t\r\n") {
 		return "", fmt.Errorf("path must not contain whitespace")
+	}
+	return value, nil
+}
+
+func systemdIdentifierArg(value string) (string, error) {
+	if value == "" {
+		return "", fmt.Errorf("identifier is required")
+	}
+	if len(value) > 63 {
+		return "", fmt.Errorf("identifier is too long")
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return "", fmt.Errorf("identifier contains unsupported characters")
 	}
 	return value, nil
 }

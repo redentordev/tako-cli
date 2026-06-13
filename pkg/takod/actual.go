@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+var actualDockerCommandContext = exec.CommandContext
+
 type ActualStateResponse struct {
 	Project     string                    `json:"project"`
 	Environment string                    `json:"environment"`
@@ -28,7 +30,7 @@ func GatherActualState(ctx context.Context, project string, environment string) 
 		return nil, fmt.Errorf("environment is required")
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", "ps", "--format", "{{.Names}}|{{.Image}}|{{.ID}}")
+	cmd := actualDockerCommandContext(ctx, "docker", "ps", "--format", "{{.Names}}|{{.Image}}|{{.ID}}")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %w", err)

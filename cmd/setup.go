@@ -78,7 +78,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 				fmt.Printf("→ Server is at v%s, reapplying current setup v%s...\n", serverVersion.Version, setup.CurrentVersion)
 			} else if serverVersion.Version == setup.CurrentVersion {
 				fmt.Printf("→ Server is already at the latest version (v%s), refreshing takod runtime\n", serverVersion.Version)
-				if err := ensureTakodRuntimeForSetup(prov, cfg); err != nil {
+				if err := ensureTakodRuntimeForSetup(prov, cfg, name); err != nil {
 					return fmt.Errorf("failed to refresh takod runtime on server %s: %w", name, err)
 				}
 				continue
@@ -101,7 +101,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			{"Verifying auto-recovery", prov.VerifyAutoRecovery},
 			{"Setting up deploy user", func() error { return prov.SetupDeployUser(server.User) }},
 			{"Installing monitoring agent", prov.InstallMonitoringAgent},
-			{"Installing takod runtime", func() error { return ensureTakodRuntimeForSetup(prov, cfg) }},
+			{"Installing takod runtime", func() error { return ensureTakodRuntimeForSetup(prov, cfg, name) }},
 		}
 
 		for _, step := range steps {
@@ -153,11 +153,17 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func ensureTakodRuntimeForSetup(prov *provisioner.Provisioner, cfg *config.Config) error {
+func ensureTakodRuntimeForSetup(prov *provisioner.Provisioner, cfg *config.Config, nodeName string) error {
 	if err := prov.InstallTakodBinary(Version); err != nil {
 		return err
 	}
-	return prov.InstallTakodService(cfg.Runtime.Agent.Socket, cfg.Runtime.Agent.DataDir)
+	socket := ""
+	dataDir := ""
+	if cfg.Runtime != nil && cfg.Runtime.Agent != nil {
+		socket = cfg.Runtime.Agent.Socket
+		dataDir = cfg.Runtime.Agent.DataDir
+	}
+	return prov.InstallTakodService(socket, dataDir, nodeName)
 }
 
 // setupNFS configures NFS server and clients based on configuration
