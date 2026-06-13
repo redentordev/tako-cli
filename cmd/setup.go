@@ -116,6 +116,9 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			{"Verifying auto-recovery", prov.VerifyAutoRecovery},
 			{"Setting up deploy user", func() error { return prov.SetupDeployUser(server.User) }},
 			{"Installing monitoring agent", prov.InstallMonitoringAgent},
+			{"Installing takod service", func() error {
+				return prov.InstallTakodService(cfg.Runtime.Agent.Socket, cfg.Runtime.Agent.DataDir)
+			}},
 		}
 
 		for _, step := range steps {

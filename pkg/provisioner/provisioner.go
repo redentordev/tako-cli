@@ -137,6 +137,76 @@ func (p *Provisioner) InstallWireGuard() error {
 	return mesh.EnsureWireGuardTools(p.client, p.verbose)
 }
 
+func (p *Provisioner) InstallTakodService(socket string, dataDir string) error {
+	binaryPath, _ := p.client.Execute("command -v tako 2>/dev/null || test -x /usr/local/bin/tako && echo /usr/local/bin/tako || true")
+	binaryPath = strings.TrimSpace(binaryPath)
+	if binaryPath == "" {
+		if p.verbose {
+			fmt.Printf("  Skipping takod service: no server-side tako binary found\n")
+		}
+		return nil
+	}
+	var err error
+	if binaryPath, err = systemdPathArg(binaryPath, ""); err != nil {
+		return fmt.Errorf("invalid server-side tako binary path: %w", err)
+	}
+	if socket, err = systemdPathArg(socket, "/run/tako/takod.sock"); err != nil {
+		return fmt.Errorf("invalid takod socket path: %w", err)
+	}
+	if dataDir, err = systemdPathArg(dataDir, "/var/lib/tako"); err != nil {
+		return fmt.Errorf("invalid takod data directory: %w", err)
+	}
+
+	unit := fmt.Sprintf(`[Unit]
+Description=Tako node agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=%s takod run --socket %s --data-dir %s
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`, binaryPath, socket, dataDir)
+
+	uploadServiceCmd := fmt.Sprintf("sudo tee /etc/systemd/system/takod.service > /dev/null << 'EOFSERVICE'\n%s\nEOFSERVICE", unit)
+	if _, err := p.client.Execute(uploadServiceCmd); err != nil {
+		return fmt.Errorf("failed to write takod service: %w", err)
+	}
+
+	commands := []string{
+		"sudo systemctl daemon-reload",
+		"sudo systemctl enable takod",
+		"sudo systemctl restart takod",
+	}
+	for _, cmd := range commands {
+		if _, err := p.client.Execute(cmd); err != nil {
+			return fmt.Errorf("failed to run %s: %w", cmd, err)
+		}
+	}
+	return nil
+}
+
+func systemdPathArg(value string, fallback string) (string, error) {
+	if value == "" {
+		value = fallback
+	}
+	if value == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if !strings.HasPrefix(value, "/") {
+		return "", fmt.Errorf("path must be absolute")
+	}
+	if strings.ContainsAny(value, " \t\r\n") {
+		return "", fmt.Errorf("path must not contain whitespace")
+	}
+	return value, nil
+}
+
 // Note: tako-proxy is handled per-deployment by the deployer.
 // No system-wide reverse proxy installation is needed during server setup
 
