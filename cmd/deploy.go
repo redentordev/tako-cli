@@ -579,6 +579,16 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if !deploymentFailed {
+		if err := deploy.ReconcileTakodProxy(services); err != nil {
+			fmt.Printf("  ✗ proxy reconciliation failed: %v\n", err)
+			deploymentFailed = true
+			deploymentError = fmt.Errorf("proxy reconciliation failed: %w", err)
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
+		}
+	}
+
+	if !deploymentFailed {
 		deployment.Status = remotestate.StatusSuccess
 		deployment.Duration = time.Since(startTime)
 		if err := stateManager.SaveDeployment(deployment); err != nil && verbose {

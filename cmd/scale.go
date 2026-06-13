@@ -174,6 +174,10 @@ func runScale(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("scaling completed with %d error(s)", totalErrors)
 	}
 
+	if err := deploy.ReconcileTakodProxy(desiredServices); err != nil {
+		return fmt.Errorf("scale succeeded but failed to reconcile proxy: %w", err)
+	}
+
 	postScaleActualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, nil)
 	if err != nil {
 		return fmt.Errorf("scale succeeded but failed to gather post-scale actual state: %w", err)
