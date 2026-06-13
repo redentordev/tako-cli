@@ -1,0 +1,124 @@
+package deployer
+
+import (
+	"fmt"
+	"slices"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/redentordev/tako-cli/pkg/config"
+)
+
+func TestEnsureTakodMeshKeysWithRunsConcurrently(t *testing.T) {
+	serverNames := []string{"node-a", "node-b", "node-c"}
+	deploy := &Deployer{config: testTakodDeployConfig(serverNames)}
+	started := make(chan string, len(serverNames))
+	release := make(chan struct{})
+
+	keysDone := make(chan map[string]string, 1)
+	errDone := make(chan error, 1)
+	go func() {
+		keys, err := deploy.ensureTakodMeshKeysWith(serverNames, func(serverName string) (string, error) {
+			started <- serverName
+			<-release
+			return " key-" + serverName + "\n", nil
+		})
+		keysDone <- keys
+		errDone <- err
+	}()
+
+	waitForTakodDeployStarts(t, started, len(serverNames))
+	close(release)
+
+	if err := <-errDone; err != nil {
+		t.Fatalf("ensureTakodMeshKeysWith returned error: %v", err)
+	}
+	keys := <-keysDone
+	for _, serverName := range serverNames {
+		if got, want := keys[serverName], "key-"+serverName; got != want {
+			t.Fatalf("key for %s = %q, want %q", serverName, got, want)
+		}
+	}
+}
+
+func TestPrepareTakodNodesWithRunsConcurrentlyAndPreservesIndices(t *testing.T) {
+	serverNames := []string{"node-a", "node-b", "node-c"}
+	deploy := &Deployer{config: testTakodDeployConfig(serverNames)}
+	started := make(chan string, len(serverNames))
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var calls []string
+
+	errDone := make(chan error, 1)
+	go func() {
+		errDone <- deploy.prepareTakodNodesWith(serverNames, func(index int, serverName string, server config.ServerConfig) error {
+			started <- serverName
+			<-release
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, fmt.Sprintf("%d:%s:%s", index, serverName, server.Host))
+			return nil
+		})
+	}()
+
+	waitForTakodDeployStarts(t, started, len(serverNames))
+	close(release)
+
+	if err := <-errDone; err != nil {
+		t.Fatalf("prepareTakodNodesWith returned error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	slices.Sort(calls)
+	want := []string{
+		"0:node-a:node-a.example.test",
+		"1:node-b:node-b.example.test",
+		"2:node-c:node-c.example.test",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("prepare calls = %#v, want %#v", calls, want)
+	}
+}
+
+func waitForTakodDeployStarts(t *testing.T, started <-chan string, count int) {
+	t.Helper()
+	seen := map[string]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(seen) < count {
+		select {
+		case name := <-started:
+			seen[name] = true
+		case <-deadline:
+			t.Fatalf("timed out waiting for takod setup fanout; saw %v", seen)
+		}
+	}
+}
+
+func testTakodDeployConfig(serverNames []string) *config.Config {
+	servers := make(map[string]config.ServerConfig, len(serverNames))
+	for _, serverName := range serverNames {
+		servers[serverName] = config.ServerConfig{
+			Host: serverName + ".example.test",
+			User: "root",
+		}
+	}
+	return &config.Config{
+		Project: config.ProjectConfig{Name: "demo", Version: "1.0.0"},
+		Mesh: &config.MeshConfig{
+			Enabled:      true,
+			NetworkCIDR:  "10.210.0.0/16",
+			Interface:    "tako",
+			ListenPort:   51820,
+			SubnetBits:   24,
+			NATTraversal: true,
+		},
+		Servers: servers,
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Servers: serverNames,
+			},
+		},
+	}
+}
