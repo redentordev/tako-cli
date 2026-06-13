@@ -289,14 +289,6 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		}
 	}
 
-	if len(service.Init) > 0 {
-		for _, initCmd := range service.Init {
-			if output, err := client.Execute(initCmd); err != nil {
-				return fmt.Errorf("init command failed: %w, output: %s", err, output)
-			}
-		}
-	}
-
 	envFileContent, err := d.buildTakodEnvFileContent(service)
 	if err != nil {
 		return err
@@ -320,6 +312,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Mounts:         mounts,
 		Health:         d.buildTakodHealthSpec(service),
 		Command:        service.Command,
+		Init:           service.Init,
 	}
 	for _, slot := range slots {
 		containerName := d.takodContainerName(serviceName, slot)
