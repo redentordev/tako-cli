@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/utils"
 )
@@ -130,6 +131,10 @@ func (p *Provisioner) InstallDocker() error {
 	}
 
 	return nil
+}
+
+func (p *Provisioner) InstallWireGuard() error {
+	return mesh.EnsureWireGuardTools(p.client, p.verbose)
 }
 
 // Note: tako-proxy is handled per-deployment by the deployer.

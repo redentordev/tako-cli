@@ -7,11 +7,13 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/hooks"
+	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/network"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -42,13 +44,17 @@ type takodMeshState struct {
 	ListenPort   int    `json:"listenPort"`
 	SubnetBits   int    `json:"subnetBits"`
 	NATTraversal bool   `json:"natTraversal"`
+	PublicKey    string `json:"publicKey,omitempty"`
+	Endpoint     string `json:"endpoint,omitempty"`
 }
 
 type takodMeshPeer struct {
-	Name    string            `json:"name"`
-	Host    string            `json:"host"`
-	Address string            `json:"address"`
-	Labels  map[string]string `json:"labels,omitempty"`
+	Name      string            `json:"name"`
+	Host      string            `json:"host"`
+	Address   string            `json:"address"`
+	PublicKey string            `json:"publicKey,omitempty"`
+	Endpoint  string            `json:"endpoint,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 type takodMeshDesiredState struct {
@@ -79,7 +85,12 @@ func (d *Deployer) SetupTakodRuntime() error {
 		fmt.Printf("\n-> Preparing takod mesh runtime...\n")
 	}
 
-	peers, err := d.buildTakodMeshPeers(servers)
+	nodePublicKeys, err := d.ensureTakodMeshKeys(servers)
+	if err != nil {
+		return err
+	}
+
+	peers, err := d.buildTakodMeshPeers(servers, nodePublicKeys)
 	if err != nil {
 		return err
 	}
@@ -99,7 +110,7 @@ func (d *Deployer) SetupTakodRuntime() error {
 			fmt.Printf("  -> %s (%s)\n", serverName, server.Host)
 		}
 
-		if err := d.prepareTakodNode(client, serverName, server, i, peers); err != nil {
+		if err := d.prepareTakodNode(client, serverName, server, i, peers, nodePublicKeys[serverName]); err != nil {
 			return fmt.Errorf("failed to prepare takod node %s: %w", serverName, err)
 		}
 	}
@@ -197,7 +208,7 @@ func (d *Deployer) DeployServiceTakod(serviceName string, service *config.Servic
 	return nil
 }
 
-func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, server config.ServerConfig, index int, peers []takodMeshPeer) error {
+func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, server config.ServerConfig, index int, peers []takodMeshPeer, publicKey string) error {
 	if output, err := client.Execute("docker version --format '{{.Server.Version}}' 2>/dev/null"); err != nil || strings.TrimSpace(output) == "" {
 		return fmt.Errorf("docker engine is not available")
 	}
@@ -225,6 +236,7 @@ func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, serve
 	if err != nil {
 		return err
 	}
+	endpoint := net.JoinHostPort(server.Host, strconv.Itoa(d.config.Mesh.ListenPort))
 
 	nodeState := takodNodeState{
 		Runtime:     config.RuntimeModeTakod,
@@ -240,6 +252,8 @@ func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, serve
 			ListenPort:   d.config.Mesh.ListenPort,
 			SubnetBits:   d.config.Mesh.SubnetBits,
 			NATTraversal: d.config.Mesh.NATTraversal,
+			PublicKey:    publicKey,
+			Endpoint:     endpoint,
 		},
 		Labels:    server.Labels,
 		UpdatedAt: time.Now().UTC(),
@@ -260,6 +274,17 @@ func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, serve
 	}
 	if err := uploadJSON(client, dataDir+"/mesh/peers.json", meshState, 0600); err != nil {
 		return fmt.Errorf("failed to write mesh peer state: %w", err)
+	}
+
+	meshNode := mesh.Node{
+		Name:      serverName,
+		Host:      server.Host,
+		Address:   meshAddress,
+		PublicKey: publicKey,
+		Labels:    server.Labels,
+	}
+	if err := mesh.NewManager(client, d.wireGuardConfig(), d.verbose).Apply(meshNode, takodPeersToWireGuardNodes(peers)); err != nil {
+		return fmt.Errorf("failed to reconcile WireGuard mesh: %w", err)
 	}
 
 	return nil
@@ -656,7 +681,23 @@ func (d *Deployer) validateTakodTargets(targets []string, environmentServers []s
 	return nil
 }
 
-func (d *Deployer) buildTakodMeshPeers(servers []string) ([]takodMeshPeer, error) {
+func (d *Deployer) ensureTakodMeshKeys(servers []string) (map[string]string, error) {
+	publicKeys := make(map[string]string, len(servers))
+	for _, serverName := range servers {
+		client, err := d.getEnvironmentClient(serverName)
+		if err != nil {
+			return nil, err
+		}
+		publicKey, err := mesh.EnsureNodeKeys(client, d.verbose)
+		if err != nil {
+			return nil, fmt.Errorf("failed to ensure WireGuard key on %s: %w", serverName, err)
+		}
+		publicKeys[serverName] = publicKey
+	}
+	return publicKeys, nil
+}
+
+func (d *Deployer) buildTakodMeshPeers(servers []string, publicKeys map[string]string) ([]takodMeshPeer, error) {
 	peers := make([]takodMeshPeer, 0, len(servers))
 	for i, serverName := range servers {
 		server := d.config.Servers[serverName]
@@ -664,14 +705,43 @@ func (d *Deployer) buildTakodMeshPeers(servers []string) ([]takodMeshPeer, error
 		if err != nil {
 			return nil, err
 		}
+		publicKey := publicKeys[serverName]
+		if publicKey == "" {
+			return nil, fmt.Errorf("missing WireGuard public key for %s", serverName)
+		}
 		peers = append(peers, takodMeshPeer{
-			Name:    serverName,
-			Host:    server.Host,
-			Address: address,
-			Labels:  server.Labels,
+			Name:      serverName,
+			Host:      server.Host,
+			Address:   address,
+			PublicKey: publicKey,
+			Endpoint:  net.JoinHostPort(server.Host, strconv.Itoa(d.config.Mesh.ListenPort)),
+			Labels:    server.Labels,
 		})
 	}
 	return peers, nil
+}
+
+func (d *Deployer) wireGuardConfig() mesh.WireGuardConfig {
+	return mesh.WireGuardConfig{
+		Enabled:      d.config.IsMeshEnabled(),
+		Interface:    d.config.Mesh.Interface,
+		ListenPort:   d.config.Mesh.ListenPort,
+		NATTraversal: d.config.Mesh.NATTraversal,
+	}
+}
+
+func takodPeersToWireGuardNodes(peers []takodMeshPeer) []mesh.Node {
+	nodes := make([]mesh.Node, 0, len(peers))
+	for _, peer := range peers {
+		nodes = append(nodes, mesh.Node{
+			Name:      peer.Name,
+			Host:      peer.Host,
+			Address:   peer.Address,
+			PublicKey: peer.PublicKey,
+			Labels:    peer.Labels,
+		})
+	}
+	return nodes
 }
 
 func (d *Deployer) meshAddress(index int) (string, error) {
