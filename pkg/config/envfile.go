@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/redentordev/tako-cli/pkg/envexpand"
 )
 
 // LoadEnvFile reads a .env file and returns a map of environment variables
@@ -50,7 +52,7 @@ func LoadEnvFile(path string) (map[string]string, error) {
 
 		// Expand explicit ${VAR} references only. Bare dollar values are common
 		// in secrets such as bcrypt hashes and must be preserved.
-		expanded, missing := expandEnvPlaceholders(value)
+		expanded, missing := envexpand.BracedFromOS(value)
 		if len(missing) > 0 {
 			return nil, fmt.Errorf("missing environment variable(s) on line %d in %s: %s", lineNum, path, strings.Join(missing, ", "))
 		}

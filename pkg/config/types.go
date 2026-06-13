@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/redentordev/tako-cli/pkg/envexpand"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"gopkg.in/yaml.v3"
 )
@@ -562,7 +563,7 @@ func expandEnvWithTrim(s string, ignoreYAMLComments bool) (string, error) {
 			content, comment = splitYAMLComment(line)
 		}
 
-		expanded, lineMissing := expandEnvPlaceholders(content)
+		expanded, lineMissing := envexpand.BracedFromOS(content)
 		for _, key := range lineMissing {
 			if !seenMissing[key] {
 				seenMissing[key] = true
@@ -601,36 +602,6 @@ func splitYAMLComment(line string) (string, string) {
 		}
 	}
 	return line, ""
-}
-
-func expandEnvPlaceholders(s string) (string, []string) {
-	var result strings.Builder
-	missing := make([]string, 0)
-
-	for i := 0; i < len(s); {
-		if s[i] != '$' || i+1 >= len(s) || s[i+1] != '{' {
-			result.WriteByte(s[i])
-			i++
-			continue
-		}
-
-		end := strings.IndexByte(s[i+2:], '}')
-		if end < 0 {
-			result.WriteByte(s[i])
-			i++
-			continue
-		}
-
-		key := s[i+2 : i+2+end]
-		if value, ok := os.LookupEnv(key); ok {
-			result.WriteString(strings.TrimSpace(value))
-		} else {
-			missing = append(missing, key)
-		}
-		i += end + 3
-	}
-
-	return result.String(), missing
 }
 
 // LoadConfig loads the configuration from a YAML or JSON file

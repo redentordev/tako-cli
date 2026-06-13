@@ -13,6 +13,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/crypto"
+	"github.com/redentordev/tako-cli/pkg/envexpand"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 )
 
@@ -364,7 +365,7 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 	// ${VAR} expansion. Bare dollar values are preserved for secrets such as
 	// bcrypt hashes.
 	for key, value := range service.Env {
-		expandedValue, missing := expandServiceEnvValue(value, func(varName string) (string, bool) {
+		expandedValue, missing := envexpand.Braced(value, func(varName string) (string, bool) {
 			// First check project .env
 			if val, ok := projectEnv[varName]; ok {
 				return strings.TrimSpace(val), true
@@ -415,39 +416,6 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 	}
 
 	return envFile, nil
-}
-
-func expandServiceEnvValue(value string, lookup func(string) (string, bool)) (string, []string) {
-	var result strings.Builder
-	missing := make([]string, 0)
-	seenMissing := map[string]bool{}
-
-	for i := 0; i < len(value); {
-		if value[i] != '$' || i+1 >= len(value) || value[i+1] != '{' {
-			result.WriteByte(value[i])
-			i++
-			continue
-		}
-
-		end := strings.IndexByte(value[i+2:], '}')
-		if end < 0 {
-			result.WriteByte(value[i])
-			i++
-			continue
-		}
-
-		key := value[i+2 : i+2+end]
-		if resolved, ok := lookup(key); ok {
-			result.WriteString(resolved)
-		} else if !seenMissing[key] {
-			seenMissing[key] = true
-			missing = append(missing, key)
-		}
-		i += end + 3
-	}
-
-	sort.Strings(missing)
-	return result.String(), missing
 }
 
 // ValidateRequired checks if all required secrets are present
