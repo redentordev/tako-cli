@@ -2,11 +2,15 @@ package takod
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -39,6 +43,26 @@ type AcmeDNSCredentialsRequest struct {
 
 type AcmeDNSCredentialsResponse struct {
 	Content string `json:"content"`
+}
+
+type AcmeDNSRegisterRequest struct {
+	Domain   string `json:"domain"`
+	ServerIP string `json:"serverIP"`
+}
+
+type AcmeDNSRegistration struct {
+	Domain      string    `json:"domain"`
+	Subdomain   string    `json:"subdomain"`
+	Username    string    `json:"username"`
+	Password    string    `json:"password"`
+	FullDomain  string    `json:"fulldomain"`
+	CNAMETarget string    `json:"cname_target"`
+	ServerIP    string    `json:"server_ip"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type AcmeDNSRegisterResponse struct {
+	Registration AcmeDNSRegistration `json:"registration"`
 }
 
 func ReconcileAcmeDNS(ctx context.Context, req ReconcileAcmeDNSRequest) (*ReconcileAcmeDNSResponse, error) {
@@ -99,6 +123,60 @@ func RemoveAcmeDNS(ctx context.Context) (*ReconcileAcmeDNSResponse, error) {
 	return &ReconcileAcmeDNSResponse{Container: acmeDNSContainerName, Image: defaultAcmeDNSImage}, nil
 }
 
+func RegisterAcmeDNS(ctx context.Context, req AcmeDNSRegisterRequest) (*AcmeDNSRegisterResponse, error) {
+	req.Domain = strings.TrimSpace(req.Domain)
+	if req.Domain == "" || !isSafeAcmeDNSHostname(req.Domain) {
+		return nil, fmt.Errorf("domain must be a valid hostname")
+	}
+	req.ServerIP = strings.TrimSpace(req.ServerIP)
+	if req.ServerIP == "" || (net.ParseIP(req.ServerIP) == nil && !isSafeAcmeDNSHostname(req.ServerIP)) {
+		return nil, fmt.Errorf("serverIP must be a valid IP address or hostname")
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1:8053/register", nil)
+	if err != nil {
+		return nil, err
+	}
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register with acme-dns: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read acme-dns response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("acme-dns register returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var apiResponse struct {
+		Subdomain  string `json:"subdomain"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		FullDomain string `json:"fulldomain"`
+	}
+	if err := json.Unmarshal(body, &apiResponse); err != nil {
+		return nil, fmt.Errorf("failed to parse acme-dns response: %w", err)
+	}
+	registration := AcmeDNSRegistration{
+		Domain:      req.Domain,
+		Subdomain:   apiResponse.Subdomain,
+		Username:    apiResponse.Username,
+		Password:    apiResponse.Password,
+		FullDomain:  apiResponse.FullDomain,
+		CNAMETarget: apiResponse.FullDomain,
+		ServerIP:    req.ServerIP,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := saveAcmeDNSRegistration(registration); err != nil {
+		return nil, err
+	}
+	return &AcmeDNSRegisterResponse{Registration: registration}, nil
+}
+
 func ReadAcmeDNSCredentials() (*AcmeDNSCredentialsResponse, error) {
 	path := filepath.Join(acmeDNSDataDir, acmeDNSCredentialsFile)
 	data, err := os.ReadFile(path)
@@ -120,6 +198,32 @@ func WriteAcmeDNSCredentials(req AcmeDNSCredentialsRequest) (*AcmeDNSCredentials
 		return nil, fmt.Errorf("failed to write acme-dns credentials: %w", err)
 	}
 	return &AcmeDNSCredentialsResponse{Content: req.Content}, nil
+}
+
+func saveAcmeDNSRegistration(registration AcmeDNSRegistration) error {
+	creds := struct {
+		Registrations map[string]AcmeDNSRegistration `json:"registrations"`
+	}{
+		Registrations: map[string]AcmeDNSRegistration{},
+	}
+	current, err := ReadAcmeDNSCredentials()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(current.Content) != "" {
+		_ = json.Unmarshal([]byte(current.Content), &creds)
+	}
+	if creds.Registrations == nil {
+		creds.Registrations = map[string]AcmeDNSRegistration{}
+	}
+	creds.Registrations[registration.Domain] = registration
+
+	data, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = WriteAcmeDNSCredentials(AcmeDNSCredentialsRequest{Content: string(data)})
+	return err
 }
 
 func ensureAcmeDNSDirectories() error {

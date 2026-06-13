@@ -77,6 +77,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/proxy", s.handleProxy)
 	mux.HandleFunc("/v1/cleanup", s.handleCleanup)
 	mux.HandleFunc("/v1/acme-dns", s.handleAcmeDNS)
+	mux.HandleFunc("/v1/acme-dns/register", s.handleAcmeDNSRegister)
 	mux.HandleFunc("/v1/acme-dns/credentials", s.handleAcmeDNSCredentials)
 	mux.HandleFunc("/v1/state", s.handleState)
 	mux.HandleFunc("/v1/lease", s.handleLease)
@@ -302,6 +303,28 @@ func (s *Server) handleAcmeDNS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleAcmeDNSRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	var request AcmeDNSRegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	response, err := RegisterAcmeDNS(r.Context(), request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")

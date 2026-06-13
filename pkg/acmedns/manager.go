@@ -63,20 +63,6 @@ func (m *Manager) Setup() error {
 	return nil
 }
 
-// CheckPort53 verifies port 53 is accessible from the internet
-func (m *Manager) CheckPort53() error {
-	// Check if port 53 is listening locally
-	cmd := "ss -uln | grep ':53 ' || netstat -uln | grep ':53 ' 2>/dev/null"
-	output, err := m.client.Execute(cmd)
-	if err != nil || strings.TrimSpace(output) == "" {
-		return fmt.Errorf("port 53 is not listening")
-	}
-
-	// We can't easily verify external access from inside the server
-	// The actual verification will happen when Let's Encrypt tries to query
-	return nil
-}
-
 // Register creates a new acme-dns registration for a domain
 func (m *Manager) Register(baseDomain string) (*Registration, error) {
 	// Check if already registered
@@ -92,40 +78,27 @@ func (m *Manager) Register(baseDomain string) (*Registration, error) {
 		fmt.Printf("  Registering %s with acme-dns...\n", baseDomain)
 	}
 
-	// Call acme-dns register endpoint
-	cmd := "curl -s -X POST http://localhost:8053/register"
-	output, err := m.client.Execute(cmd)
+	output, err := takodclient.RequestJSON(m.client, m.socket, "POST", "/v1/acme-dns/register", takod.AcmeDNSRegisterRequest{
+		Domain:   baseDomain,
+		ServerIP: m.serverIP,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to register with acme-dns: %w", err)
+		return nil, fmt.Errorf("failed to register with acme-dns through takod: %w", err)
 	}
-
-	// Parse response
-	var response struct {
-		Subdomain  string `json:"subdomain"`
-		Username   string `json:"username"`
-		Password   string `json:"password"`
-		FullDomain string `json:"fulldomain"`
-	}
-
+	var response takod.AcmeDNSRegisterResponse
 	if err := json.Unmarshal([]byte(output), &response); err != nil {
-		return nil, fmt.Errorf("failed to parse acme-dns response: %w, output: %s", err, output)
+		return nil, fmt.Errorf("failed to parse acme-dns registration response: %w", err)
 	}
 
-	// Build registration
 	reg := &Registration{
 		Domain:      baseDomain,
-		Subdomain:   response.Subdomain,
-		Username:    response.Username,
-		Password:    response.Password,
-		FullDomain:  response.FullDomain,
-		CNAMETarget: response.FullDomain,
-		ServerIP:    m.serverIP,
-		CreatedAt:   time.Now(),
-	}
-
-	// Save registration
-	if err := m.saveRegistration(reg); err != nil {
-		return nil, fmt.Errorf("failed to save registration: %w", err)
+		Subdomain:   response.Registration.Subdomain,
+		Username:    response.Registration.Username,
+		Password:    response.Registration.Password,
+		FullDomain:  response.Registration.FullDomain,
+		CNAMETarget: response.Registration.CNAMETarget,
+		ServerIP:    response.Registration.ServerIP,
+		CreatedAt:   response.Registration.CreatedAt,
 	}
 
 	return reg, nil
@@ -149,40 +122,6 @@ func (m *Manager) loadRegistration(baseDomain string) (*Registration, error) {
 	}
 
 	return reg, nil
-}
-
-// saveRegistration saves a registration to the credentials file
-func (m *Manager) saveRegistration(reg *Registration) error {
-	// Load existing credentials
-	var creds Credentials
-	output, _ := m.readCredentials()
-	if output != "" {
-		// Try to parse existing credentials, but don't fail if the file is corrupted
-		// We'll just start fresh with an empty credentials object
-		if err := json.Unmarshal([]byte(output), &creds); err != nil {
-			if m.verbose {
-				fmt.Printf("  Warning: existing credentials file is corrupted, starting fresh: %v\n", err)
-			}
-			creds = Credentials{}
-		}
-	}
-
-	if creds.Registrations == nil {
-		creds.Registrations = make(map[string]*Registration)
-	}
-	creds.Registrations[reg.Domain] = reg
-
-	// Save credentials
-	data, err := json.MarshalIndent(creds, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal credentials: %w", err)
-	}
-
-	if err := m.writeCredentials(string(data)); err != nil {
-		return fmt.Errorf("failed to save credentials: %w", err)
-	}
-
-	return nil
 }
 
 // GetCNAMEInstructions returns formatted CNAME setup instructions
@@ -250,14 +189,4 @@ func (m *Manager) readCredentials() (string, error) {
 		return "", fmt.Errorf("failed to parse acme-dns credentials response: %w", err)
 	}
 	return response.Content, nil
-}
-
-func (m *Manager) writeCredentials(content string) error {
-	_, err := takodclient.RequestJSON(m.client, m.socket, "PUT", "/v1/acme-dns/credentials", takod.AcmeDNSCredentialsRequest{
-		Content: content,
-	})
-	if err != nil {
-		return err
-	}
-	return nil
 }
