@@ -13,6 +13,8 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 // DriftType represents the type of drift detected
@@ -307,55 +309,45 @@ type ActualService struct {
 
 // getActualServices gets the actual running takod containers grouped by service.
 func (d *Detector) getActualServices() (map[string]ActualService, error) {
-	cmd := fmt.Sprintf(
-		"docker ps --filter label=tako.project=%s --filter label=tako.environment=%s --format '{{.Names}}|{{.Image}}'",
-		d.config.Project.Name,
-		d.environment,
+	output, err := takodclient.RequestJSON(
+		d.client,
+		d.takodSocket(),
+		"GET",
+		takodclient.ActualStateEndpoint(d.config.Project.Name, d.environment),
+		nil,
 	)
-	output, err := d.client.Execute(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list containers: %w", err)
+		return nil, fmt.Errorf("failed to read actual state through takod: %w", err)
 	}
 
-	services := make(map[string]ActualService)
+	var response takod.ActualStateResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return nil, fmt.Errorf("failed to parse takod actual state: %w", err)
+	}
+
+	services := make(map[string]ActualService, len(response.Services))
 	prefix := d.config.Project.Name + "_" + d.environment + "_"
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for serviceName, service := range response.Services {
+		if service == nil {
 			continue
 		}
-
-		parts := strings.Split(line, "|")
-		if len(parts) < 3 {
-			continue
-		}
-
-		containerName := parts[0]
-		image := parts[1]
-
-		if !strings.HasPrefix(containerName, prefix) {
-			continue
-		}
-
-		remainder := strings.TrimPrefix(containerName, prefix)
-		nameParts := strings.Split(remainder, "_")
-		if len(nameParts) < 2 {
-			continue
-		}
-		serviceName := strings.Join(nameParts[:len(nameParts)-1], "_")
 		fullName := prefix + serviceName
-
-		actual := services[fullName]
-		if actual.Name == "" {
-			actual.Name = fullName
-			actual.Image = image
+		services[fullName] = ActualService{
+			Name:     fullName,
+			Image:    service.Image,
+			Replicas: service.Replicas,
+			Running:  service.Replicas,
 		}
-		actual.Replicas++
-		actual.Running++
-		services[fullName] = actual
 	}
 
 	return services, nil
+}
+
+func (d *Detector) takodSocket() string {
+	if d.config.Runtime != nil && d.config.Runtime.Agent != nil && d.config.Runtime.Agent.Socket != "" {
+		return d.config.Runtime.Agent.Socket
+	}
+	return takodclient.DefaultSocket
 }
 
 // getReplicaSeverity determines severity based on replica count

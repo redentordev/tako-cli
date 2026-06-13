@@ -382,16 +382,13 @@ type takodRemoteStatus struct {
 }
 
 func printTakodAgentStatus(client *ssh.Client, cfg *config.Config) {
-	socket := "/run/tako/takod.sock"
-	if cfg.Runtime != nil && cfg.Runtime.Agent != nil && cfg.Runtime.Agent.Socket != "" {
-		socket = cfg.Runtime.Agent.Socket
-	}
-
-	cmd := fmt.Sprintf(
-		"if test -S %[1]s && command -v curl >/dev/null 2>&1; then curl --silent --show-error --unix-socket %[1]s http://takod/v1/status; fi",
-		cmdShellQuote(socket),
+	output, err := takodclient.RequestJSON(
+		client,
+		takodSocketFromConfig(cfg),
+		"GET",
+		"/v1/status",
+		nil,
 	)
-	output, err := client.Execute(cmd)
 	if err != nil || strings.TrimSpace(output) == "" {
 		fmt.Println("Agent: not running")
 		return
@@ -621,13 +618,6 @@ func min(a, b int) int {
 	return b
 }
 
-func cmdShellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
 // SyncStateOnDeploy attempts to sync state when local state is missing
 // This is called automatically during deploy when .tako doesn't exist
 func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) error {
@@ -724,24 +714,16 @@ func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) e
 
 // ReconcileStateFromRunning reconstructs state from running takod containers.
 // This is useful when local state is lost but containers are still running.
-func ReconcileStateFromRunning(client *ssh.Client, projectName, envName string) (*localstate.DeploymentState, error) {
-	prefix := fmt.Sprintf("%s_%s_", projectName, envName)
-	listCmd := fmt.Sprintf(
-		"docker ps --filter label=tako.project=%s --filter label=tako.environment=%s --format '{{.Names}}\\t{{.Image}}'",
-		projectName,
-		envName,
-	)
-
-	output, err := client.Execute(listCmd)
+func ReconcileStateFromRunning(client *ssh.Client, cfg *config.Config, envName string) (*localstate.DeploymentState, error) {
+	actual, err := actualStateViaTakod(client, cfg, envName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list containers: %w", err)
+		return nil, fmt.Errorf("failed to read actual state from takod: %w", err)
 	}
 
-	if strings.TrimSpace(output) == "" {
-		return nil, fmt.Errorf("no running containers found for %s", projectName)
+	if len(actual.Services) == 0 {
+		return nil, fmt.Errorf("no running containers found for %s", cfg.Project.Name)
 	}
 
-	// Parse services
 	deployment := &localstate.DeploymentState{
 		DeploymentID:    fmt.Sprintf("recovered-%d", time.Now().Unix()),
 		Timestamp:       time.Now(),
@@ -753,40 +735,19 @@ func ReconcileStateFromRunning(client *ssh.Client, projectName, envName string) 
 		Notes:           "State recovered from running takod containers",
 	}
 
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	for _, line := range lines {
-		parts := strings.Split(line, "\t")
-		if len(parts) < 2 {
+	for serviceName, service := range actual.Services {
+		if service == nil {
 			continue
 		}
-
-		containerName := parts[0]
-		image := parts[1]
-
-		remainder := strings.TrimPrefix(containerName, prefix)
-		if remainder == containerName {
-			continue // Didn't match prefix
-		}
-
-		nameParts := strings.Split(remainder, "_")
-		if len(nameParts) < 2 {
-			continue
-		}
-		serviceName := strings.Join(nameParts[:len(nameParts)-1], "_")
-
-		if existing, ok := deployment.Services[serviceName]; ok {
-			existing.Replicas++
-		} else {
-			deployment.Services[serviceName] = &localstate.ServiceDeploy{
-				Image:    image,
-				Replicas: 1,
-				Health:   "unknown",
-			}
+		deployment.Services[serviceName] = &localstate.ServiceDeploy{
+			Image:    service.Image,
+			Replicas: service.Replicas,
+			Health:   "unknown",
 		}
 	}
 
 	if len(deployment.Services) == 0 {
-		return nil, fmt.Errorf("no containers found matching prefix %s", prefix)
+		return nil, fmt.Errorf("no services found in takod actual state for %s", cfg.Project.Name)
 	}
 
 	return deployment, nil
@@ -794,7 +755,7 @@ func ReconcileStateFromRunning(client *ssh.Client, projectName, envName string) 
 
 // reconcileAndSave uses ReconcileStateFromRunning to rebuild state from running services
 func reconcileAndSave(client *ssh.Client, cfg *config.Config, envName string) error {
-	deployment, err := ReconcileStateFromRunning(client, cfg.Project.Name, envName)
+	deployment, err := ReconcileStateFromRunning(client, cfg, envName)
 	if err != nil {
 		return err
 	}

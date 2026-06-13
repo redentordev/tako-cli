@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -374,30 +375,34 @@ func checkRunningServices(record func(checkResult), cfg *config.Config, envName 
 		}
 	}
 
-	output, err := client.Execute(fmt.Sprintf(
-		"docker ps --filter label=tako.project=%s --filter label=tako.environment=%s --format '{{.Names}}\\t{{.Status}}' 2>/dev/null",
-		cfg.Project.Name,
-		envName,
-	))
-	if err == nil && strings.TrimSpace(output) != "" {
-		lines := strings.Split(strings.TrimSpace(output), "\n")
-		record(checkResult{"PASS", fmt.Sprintf("takod containers on %s: %d container(s)", clientName, len(lines)), ""})
-		for _, line := range lines {
-			parts := strings.SplitN(line, "\t", 2)
-			if len(parts) == 2 {
-				record(checkResult{"PASS", fmt.Sprintf("  %s: %s", parts[0], parts[1]), ""})
-			}
+	actual, err := actualStateViaTakod(client, cfg, envName)
+	if err != nil {
+		record(checkResult{"WARN", fmt.Sprintf("Cannot read takod actual state on %s: %v", clientName, err), "Run 'tako setup' to install/start takod"})
+		return
+	}
+
+	if len(actual.Services) == 0 {
+		record(checkResult{"WARN", fmt.Sprintf("No running services found on %s", clientName), "Run 'tako deploy' to start services"})
+		return
+	}
+
+	totalReplicas := 0
+	for _, service := range actual.Services {
+		if service != nil {
+			totalReplicas += service.Replicas
 		}
-		return
 	}
-
-	// Fallback: check docker ps
-	output, err = client.Execute("docker ps --format '{{.Names}}\\t{{.Status}}' 2>/dev/null")
-	if err == nil && strings.TrimSpace(output) != "" {
-		lines := strings.Split(strings.TrimSpace(output), "\n")
-		record(checkResult{"PASS", fmt.Sprintf("Docker containers on %s: %d running", clientName, len(lines)), ""})
-		return
+	record(checkResult{"PASS", fmt.Sprintf("takod services on %s: %d service(s), %d replica(s)", clientName, len(actual.Services), totalReplicas), ""})
+	names := make([]string, 0, len(actual.Services))
+	for name := range actual.Services {
+		names = append(names, name)
 	}
-
-	record(checkResult{"WARN", fmt.Sprintf("No running services found on %s", clientName), "Run 'tako deploy' to start services"})
+	sort.Strings(names)
+	for _, name := range names {
+		service := actual.Services[name]
+		if service == nil {
+			continue
+		}
+		record(checkResult{"PASS", fmt.Sprintf("  %s: %d replica(s)", name, service.Replicas), ""})
+	}
 }
