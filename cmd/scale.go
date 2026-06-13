@@ -44,6 +44,10 @@ func init() {
 }
 
 func runScale(cmd *cobra.Command, args []string) error {
+	return runScaleWithServer(cmd, args, scaleServer)
+}
+
+func runScaleWithServer(cmd *cobra.Command, args []string, serverOverride string) error {
 	scaleTargets := make(map[string]int)
 	for _, arg := range args {
 		parts := strings.Split(arg, "=")
@@ -82,7 +86,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	serverNames, err := scaleTargetServers(cfg, envName)
+	serverNames, err := scaleTargetServers(cfg, envName, serverOverride)
 	if err != nil {
 		return err
 	}
@@ -138,10 +142,10 @@ func runScale(cmd *cobra.Command, args []string) error {
 
 		service := services[serviceName]
 		service.Replicas = desiredReplicas
-		if scaleServer != "" {
+		if serverOverride != "" {
 			service.Placement = &config.PlacementConfig{
 				Strategy: "pinned",
-				Servers:  []string{scaleServer},
+				Servers:  []string{serverOverride},
 			}
 		}
 
@@ -207,28 +211,28 @@ func scaleEventDetails(targets map[string]int) map[string]string {
 	return details
 }
 
-func scaleTargetServers(cfg *config.Config, envName string) ([]string, error) {
+func scaleTargetServers(cfg *config.Config, envName string, serverOverride string) ([]string, error) {
 	environmentServers, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get environment servers: %w", err)
 	}
 
-	if scaleServer == "" {
+	if serverOverride == "" {
 		serverNames := append([]string(nil), environmentServers...)
 		sort.Strings(serverNames)
 		return serverNames, nil
 	}
 
-	if _, ok := cfg.Servers[scaleServer]; !ok {
-		return nil, fmt.Errorf("server '%s' not found in config", scaleServer)
+	if _, ok := cfg.Servers[serverOverride]; !ok {
+		return nil, fmt.Errorf("server '%s' not found in config", serverOverride)
 	}
 	for _, serverName := range environmentServers {
-		if serverName == scaleServer {
-			return []string{scaleServer}, nil
+		if serverName == serverOverride {
+			return []string{serverOverride}, nil
 		}
 	}
 
-	return nil, fmt.Errorf("server '%s' is not part of environment %s", scaleServer, envName)
+	return nil, fmt.Errorf("server '%s' is not part of environment %s", serverOverride, envName)
 }
 
 func scaleNotifier(cfg *config.Config) *notification.Notifier {

@@ -30,11 +30,5 @@ func init() {
 }
 
 func runStop(cmd *cobra.Command, args []string) error {
-	previousScaleServer := scaleServer
-	scaleServer = stopServer
-	defer func() {
-		scaleServer = previousScaleServer
-	}()
-
-	return runScale(cmd, []string{fmt.Sprintf("%s=0", stopService)})
+	return runScaleWithServer(cmd, []string{fmt.Sprintf("%s=0", stopService)}, stopServer)
 }

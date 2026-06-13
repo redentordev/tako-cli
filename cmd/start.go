@@ -53,11 +53,5 @@ func runStart(cmd *cobra.Command, args []string) error {
 		replicas = 1
 	}
 
-	previousScaleServer := scaleServer
-	scaleServer = startServer
-	defer func() {
-		scaleServer = previousScaleServer
-	}()
-
-	return runScale(cmd, []string{fmt.Sprintf("%s=%d", startService, replicas)})
+	return runScaleWithServer(cmd, []string{fmt.Sprintf("%s=%d", startService, replicas)}, startServer)
 }
