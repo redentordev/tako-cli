@@ -48,8 +48,13 @@ func LoadEnvFile(path string) (map[string]string, error) {
 		// Remove quotes if present
 		value = unquoteValue(value)
 
-		// Expand environment variables in the value
-		value = os.ExpandEnv(value)
+		// Expand explicit ${VAR} references only. Bare dollar values are common
+		// in secrets such as bcrypt hashes and must be preserved.
+		expanded, missing := expandEnvPlaceholders(value)
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("missing environment variable(s) on line %d in %s: %s", lineNum, path, strings.Join(missing, ", "))
+		}
+		value = expanded
 
 		envVars[key] = value
 	}
