@@ -79,6 +79,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/acme-dns", s.handleAcmeDNS)
 	mux.HandleFunc("/v1/acme-dns/credentials", s.handleAcmeDNSCredentials)
 	mux.HandleFunc("/v1/state", s.handleState)
+	mux.HandleFunc("/v1/lease", s.handleLease)
 	mux.HandleFunc("/v1/env-bundle", s.handleEnvBundle)
 	mux.HandleFunc("/v1/backups", s.handleBackups)
 	mux.HandleFunc("/v1/backups/restore", s.handleBackupRestore)
@@ -349,6 +350,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			Project:     r.URL.Query().Get("project"),
 			Environment: r.URL.Query().Get("environment"),
 			Document:    r.URL.Query().Get("document"),
+			RevisionID:  r.URL.Query().Get("revisionId"),
 		})
 	case http.MethodPut:
 		defer r.Body.Close()
@@ -366,6 +368,49 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response, err = AppendStateEvent(r.Context(), s.dataDir, request)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleLease(w http.ResponseWriter, r *http.Request) {
+	var (
+		response *LeaseResponse
+		err      error
+	)
+
+	switch r.Method {
+	case http.MethodGet:
+		response, err = ReadLease(r.Context(), s.dataDir, LeaseRequest{
+			Project:     r.URL.Query().Get("project"),
+			Environment: r.URL.Query().Get("environment"),
+		})
+	case http.MethodPost:
+		defer r.Body.Close()
+		var request LeaseRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		response, err = AcquireLease(r.Context(), s.dataDir, request)
+	case http.MethodDelete:
+		defer r.Body.Close()
+		var request LeaseRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		response, err = ReleaseLease(r.Context(), s.dataDir, request)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

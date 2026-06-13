@@ -231,10 +231,9 @@ CI runner
   acquire remote lease + reconcile selected nodes
 ```
 
-Deploy, rollback, and destroy acquire a remote lease under
-`/var/lib/tako-cli/<project>/lease`. CI and local machines compete for the same
-lease, so concurrent operations fail fast instead of racing. The local `.tako`
-lock remains as a same-machine guard.
+Deploy, rollback, scale, and destroy acquire a remote lease through `takod`.
+CI and local machines compete for the same lease, so concurrent operations fail
+fast instead of racing. The local `.tako` lock remains as a same-machine guard.
 
 ## Implementation Order
 

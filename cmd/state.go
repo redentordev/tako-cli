@@ -41,7 +41,7 @@ This is useful when:
 
 The command will:
   1. Connect to the remote server
-  2. Read deployment history from /var/lib/tako-cli/<project>
+  2. Read deployment history from takod state
   3. Sync state to local .tako directory`,
 	RunE: runStatePull,
 }
@@ -125,15 +125,10 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 		fmt.Println("SSH connectivity verified")
 	}
 
-	// Check if remote state exists
-	remotePath := fmt.Sprintf("%s/%s", remotestate.StateDir, cfg.Project.Name)
-	checkCmd := fmt.Sprintf("test -d %s && echo 'exists' || echo 'missing'", remotePath)
-	output, err := client.Execute(checkCmd)
-	if err != nil {
-		return fmt.Errorf("failed to check remote state: %w", err)
-	}
+	remoteMgr := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, firstServer.Host, takodSocketFromConfig(cfg))
+	history, historyErr := remoteMgr.LoadHistory()
 
-	if strings.TrimSpace(output) == "missing" {
+	if historyErr != nil || history == nil || len(history.Deployments) == 0 {
 		// Try recovering from mesh peers if multi-server
 		if cfg.IsMultiServer() {
 			replicaPool := ssh.NewPool()
@@ -144,11 +139,8 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 				fmt.Printf("State recovered from node: %s\n", source)
 
 				// Restore to primary node
-				primaryMgr := remotestate.NewStateManager(client, cfg.Project.Name, client.Host())
-				primaryMgr.Initialize()
-				for _, dep := range history.Deployments {
-					primaryMgr.SaveDeployment(dep)
-				}
+				primaryMgr := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, client.Host(), takodSocketFromConfig(cfg))
+				_ = primaryMgr.SaveHistory(history)
 
 				// Now sync to local
 				localMgr, lErr := localstate.NewManager(".", cfg.Project.Name, envName)
@@ -175,16 +167,13 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("Found remote state at %s\n", remotePath)
+	fmt.Printf("Found takod deployment history on %s\n", firstServerName)
 
 	// Initialize local state manager
 	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
 	if err != nil {
 		return fmt.Errorf("failed to initialize local state: %w", err)
 	}
-
-	// Create remote state manager
-	remoteMgr := remotestate.NewStateManager(client, cfg.Project.Name, firstServer.Host)
 
 	// Get remote history
 	fmt.Println("Fetching remote deployment history...")
@@ -301,41 +290,23 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	}
 	defer client.Close()
 
-	remoteMgr := remotestate.NewStateManager(client, cfg.Project.Name, firstServer.Host)
+	remoteMgr := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, firstServer.Host, takodSocketFromConfig(cfg))
 
-	// Check if remote state exists
-	remotePath := fmt.Sprintf("%s/%s", remotestate.StateDir, cfg.Project.Name)
-	checkCmd := fmt.Sprintf("test -d %s && echo 'exists' || echo 'missing'", remotePath)
-	output, err := client.Execute(checkCmd)
-	if err != nil {
-		fmt.Printf("Status: Error checking - %v\n", err)
-		return nil
-	}
-
-	if strings.TrimSpace(output) == "missing" {
-		fmt.Printf("Directory: %s (missing)\n", remotePath)
+	remoteDeployments, err := remoteMgr.ListDeployments(&remotestate.HistoryOptions{
+		Limit:         1,
+		IncludeFailed: true,
+	})
+	if err != nil || len(remoteDeployments) == 0 {
 		fmt.Println("Status: No remote state (project not deployed yet)")
 	} else {
-		fmt.Printf("Directory: %s (exists)\n", remotePath)
-
-		// Get remote deployment info
-		remoteDeployments, err := remoteMgr.ListDeployments(&remotestate.HistoryOptions{
-			Limit:         1,
-			IncludeFailed: true,
-		})
-		if err != nil {
-			fmt.Printf("Status: Error reading - %v\n", err)
-		} else if len(remoteDeployments) == 0 {
-			fmt.Println("Status: No deployments recorded")
-		} else {
-			latest := remoteDeployments[0]
-			fmt.Printf("Last deployment:\n")
-			fmt.Printf("  ID:      %s\n", remotestate.FormatDeploymentID(latest.ID))
-			fmt.Printf("  Time:    %s (%s ago)\n", latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(latest.Timestamp)))
-			fmt.Printf("  Status:  %s\n", latest.Status)
-			if latest.GitCommitShort != "" {
-				fmt.Printf("  Commit:  %s\n", latest.GitCommitShort)
-			}
+		fmt.Println("Remote state: takod history found")
+		latest := remoteDeployments[0]
+		fmt.Printf("Last deployment:\n")
+		fmt.Printf("  ID:      %s\n", remotestate.FormatDeploymentID(latest.ID))
+		fmt.Printf("  Time:    %s (%s ago)\n", latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(latest.Timestamp)))
+		fmt.Printf("  Status:  %s\n", latest.Status)
+		if latest.GitCommitShort != "" {
+			fmt.Printf("  Commit:  %s\n", latest.GitCommitShort)
 		}
 	}
 
@@ -632,15 +603,13 @@ func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) e
 		fmt.Println("Local state missing, checking remote...")
 	}
 
-	// Check if remote state exists
-	remotePath := fmt.Sprintf("%s/%s", remotestate.StateDir, cfg.Project.Name)
-	checkCmd := fmt.Sprintf("test -d %s && echo 'exists' || echo 'missing'", remotePath)
-	output, err := client.Execute(checkCmd)
-	if err != nil {
-		return nil // Ignore error, continue without sync
-	}
+	remoteMgr := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, client.Host(), takodSocketFromConfig(cfg))
+	remoteDeployments, historyErr := remoteMgr.ListDeployments(&remotestate.HistoryOptions{
+		Limit:         5,
+		IncludeFailed: false,
+	})
 
-	if strings.TrimSpace(output) == "missing" {
+	if historyErr != nil || len(remoteDeployments) == 0 {
 		// Try recovering from mesh peers if multi-server
 		if cfg.IsMultiServer() {
 			replicaPool := ssh.NewPool()
@@ -652,11 +621,8 @@ func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) e
 				}
 
 				// Restore to primary node
-				primaryMgr := remotestate.NewStateManager(client, cfg.Project.Name, client.Host())
-				primaryMgr.Initialize()
-				for _, dep := range history.Deployments {
-					primaryMgr.SaveDeployment(dep)
-				}
+				primaryMgr := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, client.Host(), takodSocketFromConfig(cfg))
+				_ = primaryMgr.SaveHistory(history)
 
 				// Sync to local
 				localMgr, lErr := localstate.NewManager(".", cfg.Project.Name, envName)
@@ -684,18 +650,6 @@ func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) e
 	// Initialize local state manager
 	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
 	if err != nil {
-		return nil // Ignore error, continue without sync
-	}
-
-	// Create remote state manager
-	remoteMgr := remotestate.NewStateManager(client, cfg.Project.Name, client.Host())
-
-	// Get latest deployment
-	remoteDeployments, err := remoteMgr.ListDeployments(&remotestate.HistoryOptions{
-		Limit:         5,
-		IncludeFailed: false,
-	})
-	if err != nil || len(remoteDeployments) == 0 {
 		return nil // Ignore error, continue without sync
 	}
 

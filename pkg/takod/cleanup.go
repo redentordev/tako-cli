@@ -16,7 +16,6 @@ type CleanupRequest struct {
 	RemoveImages           bool     `json:"removeImages,omitempty"`
 	RemoveNetworks         bool     `json:"removeNetworks,omitempty"`
 	RemoveDeployFiles      bool     `json:"removeDeployFiles,omitempty"`
-	RemoveState            bool     `json:"removeState,omitempty"`
 	RemoveTakodState       bool     `json:"removeTakodState,omitempty"`
 	ProxyFiles             []string `json:"proxyFiles,omitempty"`
 	RemoveProxyContainer   bool     `json:"removeProxyContainer,omitempty"`
@@ -139,9 +138,6 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 	}
 	if req.RemoveDeployFiles {
 		removeFixedPath(filepath.Join("/opt", req.Project), "deployment files", warn)
-	}
-	if req.RemoveState {
-		removeFixedPath(filepath.Join("/var/lib/tako-cli", req.Project), "deployment state", warn)
 	}
 	if req.RemoveTakodState {
 		cleanupTakodState(req.Project, req.Environment, warn)

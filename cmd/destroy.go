@@ -192,7 +192,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 	defer leaseClient.Close()
 
-	stateManager := remotestate.NewStateManager(leaseClient, cfg.Project.Name, leaseServer.Host)
+	stateManager := remotestate.NewStateManagerWithSocket(leaseClient, cfg.Project.Name, envName, leaseServer.Host, takodSocketFromConfig(cfg))
 	lease, err := stateManager.AcquireLease("destroy", envName, remotestate.DefaultLeaseTTL)
 	if err != nil {
 		return fmt.Errorf("cannot acquire remote destroy lease: %w", err)
@@ -407,7 +407,6 @@ func decommissionApp(client *ssh.Client, cfg *config.Config, envName string, ver
 		RemoveImages:      true,
 		RemoveNetworks:    true,
 		RemoveDeployFiles: true,
-		RemoveState:       true,
 		RemoveTakodState:  true,
 		ProxyFiles:        cleanupProxyFiles(cfg.Project.Name, envName, services),
 	})

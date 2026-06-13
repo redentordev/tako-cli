@@ -6,10 +6,11 @@ import (
 	"os"
 	"strings"
 
-	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -178,11 +179,18 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Check if env.enc exists on server
-		remotePath := fmt.Sprintf("%s/%s/env.enc", remotestate.StateDir, cfg.Project.Name)
-		checkCmd := fmt.Sprintf("test -f %s && echo 'exists' || echo 'missing'", remotePath)
-		output, err := pullClient.Execute(checkCmd)
-		if err == nil && strings.TrimSpace(output) == "exists" {
+		output, err := takodclient.RequestJSON(
+			pullClient,
+			takodSocketFromConfig(cfg),
+			"GET",
+			takodclient.EnvBundleEndpoint(cfg.Project.Name, envName),
+			nil,
+		)
+		var response takod.EnvBundleResponse
+		if err == nil {
+			err = decodeTakodJSON(output, &response)
+		}
+		if err == nil && response.Found {
 			pass("Encrypted environment bundle found on server")
 			if isInteractive {
 				fmt.Print("  Pull and decrypt environment files? [Y/n] ")

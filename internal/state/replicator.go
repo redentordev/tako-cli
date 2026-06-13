@@ -2,16 +2,15 @@ package state
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 // StateReplicator replicates deployment state across the takod mesh as read-only
@@ -22,47 +21,31 @@ type StateReplicator struct {
 	config      *config.Config
 	environment string
 	projectName string
+	socket      string
 	verbose     bool
 }
 
 // NewStateReplicator creates a new state replicator.
 func NewStateReplicator(pool *ssh.Pool, cfg *config.Config, environment, projectName string, verbose bool) *StateReplicator {
+	socket := takodclient.DefaultSocket
+	if cfg.Runtime != nil && cfg.Runtime.Agent != nil && cfg.Runtime.Agent.Socket != "" {
+		socket = cfg.Runtime.Agent.Socket
+	}
 	return &StateReplicator{
 		sshPool:     pool,
 		config:      cfg,
 		environment: environment,
 		projectName: projectName,
+		socket:      socket,
 		verbose:     verbose,
 	}
 }
 
-// ReplicateDeployment replicates a deployment and its history to mesh peers. It
-// returns immediately; the actual replication runs in a background goroutine
-// with a 30-second hard timeout. Errors are logged as warnings.
+// ReplicateDeployment replicates a deployment and its history to mesh peers.
 func (r *StateReplicator) ReplicateDeployment(deployment *DeploymentState, history *DeploymentHistory) {
 	peers := r.getReplicaServers()
 	if len(peers) == 0 {
 		return
-	}
-
-	// Serialize once
-	depData, err := json.MarshalIndent(deployment, "", "  ")
-	if err != nil {
-		if r.verbose {
-			fmt.Fprintf(os.Stderr, "Warning: failed to serialize deployment for replication: %v\n", err)
-		}
-		return
-	}
-
-	var histData []byte
-	if history != nil {
-		histData, err = json.MarshalIndent(history, "", "  ")
-		if err != nil {
-			if r.verbose {
-				fmt.Fprintf(os.Stderr, "Warning: failed to serialize history for replication: %v\n", err)
-			}
-			return
-		}
 	}
 
 	go func() {
@@ -74,7 +57,7 @@ func (r *StateReplicator) ReplicateDeployment(deployment *DeploymentState, histo
 			wg.Add(1)
 			go func(serverName string, server config.ServerConfig) {
 				defer wg.Done()
-				r.replicateToNode(ctx, serverName, server, deployment.ID, depData, histData)
+				r.replicateToNode(ctx, serverName, server, deployment, history)
 			}(name, srv)
 		}
 
@@ -94,8 +77,13 @@ func (r *StateReplicator) ReplicateDeployment(deployment *DeploymentState, histo
 	}()
 }
 
-// replicateToNode writes deployment JSON and history.json to a single peer.
-func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string, server config.ServerConfig, deployID string, depData, histData []byte) {
+func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string, server config.ServerConfig, deployment *DeploymentState, history *DeploymentHistory) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
 	client, err := r.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 	if err != nil {
 		if r.verbose {
@@ -104,28 +92,30 @@ func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string
 		return
 	}
 
-	statePath := fmt.Sprintf("%s/%s", StateDir, r.projectName)
-
-	// mkdir + write deployment + write history in one SSH call when possible
-	mkdirCmd := fmt.Sprintf("sudo mkdir -p %s && sudo chmod -R 755 %s", statePath, StateDir)
-	if _, err := client.ExecuteWithContext(ctx, mkdirCmd); err != nil {
+	deploymentCopy, err := cloneDeploymentState(deployment)
+	if err != nil {
 		if r.verbose {
-			fmt.Fprintf(os.Stderr, "Warning: replication to %s failed (mkdir): %v\n", serverName, err)
+			fmt.Fprintf(os.Stderr, "Warning: replication to %s failed (clone deployment): %v\n", serverName, err)
+		}
+		return
+	}
+	historyCopy, err := cloneDeploymentHistory(history)
+	if err != nil {
+		if r.verbose {
+			fmt.Fprintf(os.Stderr, "Warning: replication to %s failed (clone history): %v\n", serverName, err)
 		}
 		return
 	}
 
-	// Write deployment JSON via base64 + atomic move
-	if err := r.writeFileViaSSH(ctx, client, statePath, deployID+".json", depData); err != nil {
+	manager := NewStateManagerWithSocket(client, r.projectName, r.environment, server.Host, r.socket)
+	if err := manager.SaveDeployment(deploymentCopy); err != nil {
 		if r.verbose {
 			fmt.Fprintf(os.Stderr, "Warning: replication to %s failed (deployment): %v\n", serverName, err)
 		}
 		return
 	}
-
-	// Write history.json
-	if histData != nil {
-		if err := r.writeFileViaSSH(ctx, client, statePath, "history.json", histData); err != nil {
+	if historyCopy != nil {
+		if err := manager.SaveHistory(historyCopy); err != nil {
 			if r.verbose {
 				fmt.Fprintf(os.Stderr, "Warning: replication to %s failed (history): %v\n", serverName, err)
 			}
@@ -138,23 +128,7 @@ func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string
 	}
 }
 
-// writeFileViaSSH writes data to a remote file using base64 encoding and atomic move.
-func (r *StateReplicator) writeFileViaSSH(ctx context.Context, client *ssh.Client, dir, filename string, data []byte) error {
-	tmpFile := fmt.Sprintf("/tmp/tako-replica-%d-%d.json", time.Now().UnixNano(), os.Getpid())
-	encoded := base64.StdEncoding.EncodeToString(data)
-	cmd := fmt.Sprintf("echo '%s' | base64 -d > %s && sudo mv %s %s/%s", encoded, tmpFile, tmpFile, dir, filename)
-	_, err := client.ExecuteWithContext(ctx, cmd)
-	if err != nil {
-		// Clean up temp file on failure
-		client.ExecuteWithContext(ctx, fmt.Sprintf("rm -f %s", tmpFile))
-	}
-	return err
-}
-
-// RecoverStateFromPeers attempts to recover deployment history from mesh
-// peers. It reads history.json from all peers in parallel and returns the
-// one with the most recent LastUpdated timestamp.
-// Returns (nil, "", nil) if no peer has state.
+// RecoverStateFromPeers attempts to recover deployment history from mesh peers.
 func (r *StateReplicator) RecoverStateFromPeers() (*DeploymentHistory, string, error) {
 	peers := r.getReplicaServers()
 	if len(peers) == 0 {
@@ -177,24 +151,23 @@ func (r *StateReplicator) RecoverStateFromPeers() (*DeploymentHistory, string, e
 		go func(serverName string, server config.ServerConfig) {
 			defer wg.Done()
 
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			client, err := r.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 			if err != nil {
 				return
 			}
-
-			historyPath := fmt.Sprintf("%s/%s/history.json", StateDir, r.projectName)
-			cmd := fmt.Sprintf("sudo cat %s 2>/dev/null", historyPath)
-			output, err := client.ExecuteWithContext(ctx, cmd)
-			if err != nil || strings.TrimSpace(output) == "" {
+			manager := NewStateManagerWithSocket(client, r.projectName, r.environment, server.Host, r.socket)
+			history, err := manager.LoadHistory()
+			if err != nil || history == nil {
 				return
 			}
 
-			var history DeploymentHistory
-			if err := json.Unmarshal([]byte(output), &history); err != nil {
-				return
-			}
-
-			results <- result{history: &history, source: serverName}
+			results <- result{history: history, source: serverName}
 		}(name, srv)
 	}
 
@@ -216,8 +189,36 @@ func (r *StateReplicator) RecoverStateFromPeers() (*DeploymentHistory, string, e
 	return best, bestSource, nil
 }
 
-// getReplicaServers returns all environment nodes except the primary node.
-// Returns nil if there are 0 or 1 servers (single-server deployment).
+func cloneDeploymentState(deployment *DeploymentState) (*DeploymentState, error) {
+	if deployment == nil {
+		return nil, fmt.Errorf("deployment is nil")
+	}
+	data, err := json.Marshal(deployment)
+	if err != nil {
+		return nil, err
+	}
+	var out DeploymentState
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func cloneDeploymentHistory(history *DeploymentHistory) (*DeploymentHistory, error) {
+	if history == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(history)
+	if err != nil {
+		return nil, err
+	}
+	var out DeploymentHistory
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (r *StateReplicator) getReplicaServers() map[string]config.ServerConfig {
 	servers, err := r.config.GetEnvironmentServers(r.environment)
 	if err != nil || len(servers) <= 1 {
@@ -238,10 +239,8 @@ func (r *StateReplicator) getReplicaServers() map[string]config.ServerConfig {
 			replicas[name] = srv
 		}
 	}
-
 	if len(replicas) == 0 {
 		return nil
 	}
-
 	return replicas
 }
