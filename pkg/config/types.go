@@ -547,13 +547,74 @@ func (c *Config) GetFullImageName(serviceName string, envName string) string {
 	)
 }
 
-// expandEnvWithTrim expands environment variables and trims their values
-// This handles Windows CMD quirk where "set VAR=value " includes trailing space
-func expandEnvWithTrim(s string) string {
-	return os.Expand(s, func(key string) string {
-		value := os.Getenv(key)
-		return strings.TrimSpace(value)
-	})
+// expandEnvWithTrim expands ${VAR} placeholders and trims their values.
+// It intentionally does not expand bare $VAR so keys like $schema remain intact.
+// For YAML, comment text is ignored so commented examples do not require env vars.
+func expandEnvWithTrim(s string, ignoreYAMLComments bool) (string, error) {
+	var result strings.Builder
+	missing := make([]string, 0)
+	seenMissing := map[string]bool{}
+
+	for _, line := range strings.SplitAfter(s, "\n") {
+		content := line
+		comment := ""
+		if ignoreYAMLComments {
+			content, comment = splitYAMLComment(line)
+		}
+
+		expanded, lineMissing := expandEnvPlaceholders(content)
+		for _, key := range lineMissing {
+			if !seenMissing[key] {
+				seenMissing[key] = true
+				missing = append(missing, key)
+			}
+		}
+		result.WriteString(expanded)
+		result.WriteString(comment)
+	}
+
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return "", fmt.Errorf("missing environment variable(s): %s", strings.Join(missing, ", "))
+	}
+	return result.String(), nil
+}
+
+func splitYAMLComment(line string) (string, string) {
+	if idx := strings.IndexByte(line, '#'); idx >= 0 {
+		return line[:idx], line[idx:]
+	}
+	return line, ""
+}
+
+func expandEnvPlaceholders(s string) (string, []string) {
+	var result strings.Builder
+	missing := make([]string, 0)
+
+	for i := 0; i < len(s); {
+		if s[i] != '$' || i+1 >= len(s) || s[i+1] != '{' {
+			result.WriteByte(s[i])
+			i++
+			continue
+		}
+
+		end := strings.IndexByte(s[i+2:], '}')
+		if end < 0 {
+			result.WriteByte(s[i])
+			i++
+			continue
+		}
+
+		key := s[i+2 : i+2+end]
+		if value, ok := os.LookupEnv(key); ok {
+			result.WriteString(strings.TrimSpace(value))
+		} else {
+			missing = append(missing, key)
+		}
+		i += end + 3
+	}
+
+	return result.String(), missing
 }
 
 // LoadConfig loads the configuration from a YAML or JSON file
@@ -605,7 +666,10 @@ func LoadConfig(configPath string) (*Config, error) {
 
 	// Expand environment variables in the content with trimming
 	// This handles cases where environment variables have trailing spaces
-	expandedData := expandEnvWithTrim(string(data))
+	expandedData, err := expandEnvWithTrim(string(data), !isJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to expand config environment variables: %w", err)
+	}
 
 	// Parse config into Config struct
 	var config Config

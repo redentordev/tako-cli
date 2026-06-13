@@ -160,6 +160,9 @@ func configLoadFix(err error) string {
 	if strings.Contains(msg, "failed to parse YAML") || strings.Contains(msg, "failed to parse JSON") {
 		return "Fix syntax errors in config file"
 	}
+	if strings.Contains(msg, "missing environment variable") {
+		return "Set the missing variable in .env or your shell"
+	}
 	if strings.Contains(msg, "host is required") {
 		return "Set SERVER_HOST in .env or replace ${SERVER_HOST} in config"
 	}

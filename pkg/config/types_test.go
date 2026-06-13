@@ -207,6 +207,60 @@ func TestEnvironmentUsesNFSVolumesReturnsFalseWithoutNFS(t *testing.T) {
 	}
 }
 
+func TestExpandEnvWithTrimExpandsBracedVariables(t *testing.T) {
+	t.Setenv("SERVER_HOST", "  203.0.113.10  ")
+
+	expanded, err := expandEnvWithTrim("host: ${SERVER_HOST}\n", true)
+	if err != nil {
+		t.Fatalf("expandEnvWithTrim returned error: %v", err)
+	}
+	if expanded != "host: 203.0.113.10\n" {
+		t.Fatalf("expanded = %q", expanded)
+	}
+}
+
+func TestExpandEnvWithTrimPreservesSchemaKey(t *testing.T) {
+	expanded, err := expandEnvWithTrim("$schema: https://example.test/schema.json\n", true)
+	if err != nil {
+		t.Fatalf("expandEnvWithTrim returned error: %v", err)
+	}
+	if expanded != "$schema: https://example.test/schema.json\n" {
+		t.Fatalf("expanded = %q", expanded)
+	}
+}
+
+func TestExpandEnvWithTrimIgnoresYAMLCommentPlaceholders(t *testing.T) {
+	expanded, err := expandEnvWithTrim("# host: ${SERVER_HOST}\nhost: example.com # ${COMMENT_ONLY}\n", true)
+	if err != nil {
+		t.Fatalf("expandEnvWithTrim returned error: %v", err)
+	}
+	if expanded != "# host: ${SERVER_HOST}\nhost: example.com # ${COMMENT_ONLY}\n" {
+		t.Fatalf("expanded = %q", expanded)
+	}
+}
+
+func TestExpandEnvWithTrimReportsMissingVariables(t *testing.T) {
+	_, err := expandEnvWithTrim("host: ${SERVER_HOST}\nemail: ${LETSENCRYPT_EMAIL}\n", true)
+	if err == nil {
+		t.Fatal("expandEnvWithTrim should report missing variables")
+	}
+	for _, want := range []string{"SERVER_HOST", "LETSENCRYPT_EMAIL"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want missing variable %s", err, want)
+		}
+	}
+}
+
+func TestExpandEnvWithTrimChecksJSONCommentsAsContent(t *testing.T) {
+	_, err := expandEnvWithTrim(`{"note":"# ${SERVER_HOST}"}`, false)
+	if err == nil {
+		t.Fatal("expandEnvWithTrim should treat JSON strings as content")
+	}
+	if !strings.Contains(err.Error(), "SERVER_HOST") {
+		t.Fatalf("error = %q, want SERVER_HOST", err)
+	}
+}
+
 func nfsServerNameTestConfig(server string) *Config {
 	return &Config{
 		Storage: &StorageConfig{

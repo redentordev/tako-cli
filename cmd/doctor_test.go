@@ -61,6 +61,11 @@ func TestConfigLoadFixDistinguishesParseAndValidationErrors(t *testing.T) {
 			want: "SERVER_HOST",
 		},
 		{
+			name: "missing env",
+			err:  errString("failed to expand config environment variables: missing environment variable(s): SERVER_HOST"),
+			want: "missing variable",
+		},
+		{
 			name: "ssh key",
 			err:  errString("invalid config: server production: SSH key not found"),
 			want: "sshKey",
