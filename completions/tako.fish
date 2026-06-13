@@ -24,6 +24,7 @@ complete -c tako -f -n '__fish_use_subcommand' -a 'scale' -d 'Scale service repl
 complete -c tako -f -n '__fish_use_subcommand' -a 'secrets' -d 'Manage secrets'
 complete -c tako -f -n '__fish_use_subcommand' -a 'setup' -d 'Provision server'
 complete -c tako -f -n '__fish_use_subcommand' -a 'start' -d 'Start stopped services'
+complete -c tako -f -n '__fish_use_subcommand' -a 'state' -d 'Manage deployment state synchronization'
 complete -c tako -f -n '__fish_use_subcommand' -a 'stats' -d 'Show real-time container stats'
 complete -c tako -f -n '__fish_use_subcommand' -a 'stop' -d 'Stop running services'
 complete -c tako -f -n '__fish_use_subcommand' -a 'storage' -d 'Manage shared storage (NFS)'
@@ -91,6 +92,13 @@ complete -c tako -n '__fish_seen_subcommand_from secrets' -f -a 'validate' -d 'V
 # Storage subcommands
 complete -c tako -n '__fish_seen_subcommand_from storage' -f -a 'status' -d 'Show NFS storage status'
 complete -c tako -n '__fish_seen_subcommand_from storage' -f -a 'remount' -d 'Remount NFS exports'
+
+# State subcommands
+complete -c tako -n '__fish_seen_subcommand_from state' -f -a 'pull' -d 'Pull remote state'
+complete -c tako -n '__fish_seen_subcommand_from state' -f -a 'repair' -d 'Repair mesh state'
+complete -c tako -n '__fish_seen_subcommand_from state' -f -a 'status' -d 'Show state status'
+complete -c tako -n '__fish_seen_subcommand_from state' -s e -l env -d 'Target environment' -r
+complete -c tako -n '__fish_seen_subcommand_from pull repair status' -s s -l server -d 'Target state server' -r
 
 # Exec command flags
 complete -c tako -n '__fish_seen_subcommand_from exec' -s e -l env -d 'Target environment' -r

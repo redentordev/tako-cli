@@ -7,6 +7,7 @@ import (
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
+	"github.com/redentordev/tako-cli/pkg/config"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 )
 
@@ -81,6 +82,86 @@ func TestLocalDeploymentStateExistsIgnoresSecretsOnlyTakoDirectory(t *testing.T)
 	}
 }
 
+func TestBestDeploymentHistoryPrefersFreshestLastUpdated(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	older := remoteHistory(base, remoteDeployment("old", base, "demo:v1"))
+	newer := remoteHistory(base.Add(time.Hour), remoteDeployment("new", base.Add(time.Minute), "demo:v2"))
+
+	best, ok := bestDeploymentHistory([]stateHistoryCandidate{
+		{source: "node-a", history: older},
+		{source: "node-b", history: newer},
+	})
+	if !ok {
+		t.Fatal("bestDeploymentHistory returned no candidate")
+	}
+	if best.source != "node-b" {
+		t.Fatalf("best source = %q, want node-b", best.source)
+	}
+}
+
+func TestBestDeploymentHistoryFallsBackToDeploymentTimestamp(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	older := remoteHistory(time.Time{}, remoteDeployment("old", base, "demo:v1"))
+	newer := remoteHistory(time.Time{}, remoteDeployment("new", base.Add(time.Hour), "demo:v2"))
+
+	best, ok := bestDeploymentHistory([]stateHistoryCandidate{
+		{source: "node-a", history: older},
+		{source: "node-b", history: newer},
+	})
+	if !ok {
+		t.Fatal("bestDeploymentHistory returned no candidate")
+	}
+	if best.source != "node-b" {
+		t.Fatalf("best source = %q, want node-b", best.source)
+	}
+}
+
+func TestBestDeploymentHistoryIgnoresEmptyCandidates(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+
+	best, ok := bestDeploymentHistory([]stateHistoryCandidate{
+		{source: "empty", history: remoteHistory(base)},
+		{source: "nil", history: nil},
+		{source: "good", history: remoteHistory(base, remoteDeployment("new", base, "demo:v1"))},
+	})
+	if !ok {
+		t.Fatal("bestDeploymentHistory returned no candidate")
+	}
+	if best.source != "good" {
+		t.Fatalf("best source = %q, want good", best.source)
+	}
+}
+
+func TestOrderedStateServerNamesPrefersRequestedServer(t *testing.T) {
+	cfg := &config.Config{
+		Servers: map[string]config.ServerConfig{
+			"node-a": {Host: "10.0.0.1"},
+			"node-b": {Host: "10.0.0.2"},
+			"node-c": {Host: "10.0.0.3"},
+		},
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Servers: []string{"node-a", "node-b", "node-c"},
+			},
+		},
+	}
+
+	got, err := orderedStateServerNames(cfg, "production", "node-b")
+	if err != nil {
+		t.Fatalf("orderedStateServerNames returned error: %v", err)
+	}
+
+	want := []string{"node-b", "node-a", "node-c"}
+	if len(got) != len(want) {
+		t.Fatalf("ordered servers = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ordered servers = %v, want %v", got, want)
+		}
+	}
+}
+
 func remoteDeployment(id string, timestamp time.Time, image string) *remotestate.DeploymentState {
 	return &remotestate.DeploymentState{
 		ID:          id,
@@ -101,5 +182,15 @@ func remoteDeployment(id string, timestamp time.Time, image string) *remotestate
 			},
 		},
 		User: "tester",
+	}
+}
+
+func remoteHistory(lastUpdated time.Time, deployments ...*remotestate.DeploymentState) *remotestate.DeploymentHistory {
+	return &remotestate.DeploymentHistory{
+		ProjectName: "demo",
+		Environment: "production",
+		Server:      "node-a",
+		Deployments: deployments,
+		LastUpdated: lastUpdated,
 	}
 }
