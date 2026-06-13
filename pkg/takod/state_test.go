@@ -62,6 +62,52 @@ func TestReadStateDocumentReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestWriteAndReadNodeActualStateDocument(t *testing.T) {
+	dataDir := t.TempDir()
+	request := StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentActualNode,
+		Node:        "node-a",
+		Content:     "{\"node\":\"node-a\"}\n",
+	}
+
+	if _, err := WriteStateDocument(context.Background(), dataDir, request); err != nil {
+		t.Fatalf("WriteStateDocument returned error: %v", err)
+	}
+
+	read, err := ReadStateDocument(context.Background(), dataDir, StateDocumentRequest{
+		Project:     request.Project,
+		Environment: request.Environment,
+		Document:    request.Document,
+		Node:        request.Node,
+	})
+	if err != nil {
+		t.Fatalf("ReadStateDocument returned error: %v", err)
+	}
+	if !read.Found || read.Content != request.Content {
+		t.Fatalf("unexpected node actual response: %#v", read)
+	}
+
+	expectedPath := filepath.Join(dataDir, "actual", request.Project, request.Environment, "nodes", request.Node+".json")
+	if read.Path != expectedPath {
+		t.Fatalf("node actual path = %q, want %q", read.Path, expectedPath)
+	}
+}
+
+func TestNodeActualStateDocumentRequiresSafeNode(t *testing.T) {
+	_, err := WriteStateDocument(context.Background(), t.TempDir(), StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentActualNode,
+		Node:        "../node",
+		Content:     "{}",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid node") {
+		t.Fatalf("expected invalid node error, got %v", err)
+	}
+}
+
 func TestWriteAndReadHistoryStateDocument(t *testing.T) {
 	dataDir := t.TempDir()
 	request := StateDocumentRequest{

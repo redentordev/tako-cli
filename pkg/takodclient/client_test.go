@@ -18,6 +18,14 @@ func TestStateEndpointEscapesQueryValues(t *testing.T) {
 	}
 }
 
+func TestStateNodeEndpointEscapesQueryValues(t *testing.T) {
+	got := StateNodeEndpoint("demo app", "prod/us", "actual-node", "node/a")
+	want := "/v1/state?document=actual-node&environment=prod%2Fus&node=node%2Fa&project=demo+app"
+	if got != want {
+		t.Fatalf("StateNodeEndpoint() = %q, want %q", got, want)
+	}
+}
+
 func TestActualStateEndpointEscapesQueryValues(t *testing.T) {
 	got := ActualStateEndpoint("demo app", "prod/us")
 	want := "/v1/actual?environment=prod%2Fus&project=demo+app"

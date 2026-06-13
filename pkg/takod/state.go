@@ -11,6 +11,7 @@ import (
 const (
 	stateDocumentDesired    = "desired"
 	stateDocumentActual     = "actual"
+	stateDocumentActualNode = "actual-node"
 	stateDocumentEvent      = "event"
 	stateDocumentHistory    = "history"
 	stateDocumentDeployment = "deployment"
@@ -20,6 +21,7 @@ type StateDocumentRequest struct {
 	Project     string `json:"project"`
 	Environment string `json:"environment"`
 	Document    string `json:"document"`
+	Node        string `json:"node,omitempty"`
 	RevisionID  string `json:"revisionId,omitempty"`
 	Content     string `json:"content,omitempty"`
 }
@@ -121,9 +123,12 @@ func validateStateDocumentRequest(req StateDocumentRequest, requireContent bool)
 		return fmt.Errorf("invalid environment name")
 	}
 	switch req.Document {
-	case stateDocumentDesired, stateDocumentActual, stateDocumentEvent, stateDocumentHistory, stateDocumentDeployment:
+	case stateDocumentDesired, stateDocumentActual, stateDocumentActualNode, stateDocumentEvent, stateDocumentHistory, stateDocumentDeployment:
 	default:
 		return fmt.Errorf("invalid state document")
+	}
+	if req.Document == stateDocumentActualNode && !isSafeRuntimeName(req.Node) {
+		return fmt.Errorf("invalid node name")
 	}
 	if req.Document == stateDocumentDeployment && req.RevisionID == "" {
 		return fmt.Errorf("deployment ID is required")
@@ -149,6 +154,8 @@ func stateDocumentPath(dataDir string, req StateDocumentRequest, archive bool) (
 		return filepath.Join(dataDir, "desired", req.Project, req.Environment, "revision.json"), nil
 	case stateDocumentActual:
 		return filepath.Join(dataDir, "actual", req.Project, req.Environment, "containers.json"), nil
+	case stateDocumentActualNode:
+		return filepath.Join(dataDir, "actual", req.Project, req.Environment, "nodes", req.Node+".json"), nil
 	case stateDocumentEvent:
 		return filepath.Join(dataDir, "events", req.Project, req.Environment+".jsonl"), nil
 	case stateDocumentHistory:

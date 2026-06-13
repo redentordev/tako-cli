@@ -373,6 +373,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			Project:     r.URL.Query().Get("project"),
 			Environment: r.URL.Query().Get("environment"),
 			Document:    r.URL.Query().Get("document"),
+			Node:        r.URL.Query().Get("node"),
 			RevisionID:  r.URL.Query().Get("revisionId"),
 		})
 	case http.MethodPut:

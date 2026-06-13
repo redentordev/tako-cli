@@ -19,6 +19,7 @@ func persistTakodRuntimeState(
 	services map[string]config.ServiceConfig,
 	imageRefs map[string]string,
 	actualState map[string]*reconcile.ActualService,
+	nodeActualState map[string]map[string]*reconcile.ActualService,
 	gitInfo takodstate.GitInfo,
 	eventType string,
 	message string,
@@ -28,14 +29,26 @@ func persistTakodRuntimeState(
 	if err != nil {
 		return fmt.Errorf("failed to build desired revision: %w", err)
 	}
-	actual := takodstate.BuildActualSnapshot(cfg.Project.Name, envName, serverNames, actualState)
+	actual := takodstate.BuildActualSnapshotWithNodes(cfg.Project.Name, envName, serverNames, actualState, nodeActualState)
+	nodeActual := buildNodeActualSnapshots(cfg.Project.Name, envName, nodeActualState)
 	if details == nil {
 		details = make(map[string]string)
 	}
 	details["revisionId"] = desired.RevisionID
 
 	event := takodstate.NewEvent(cfg.Project.Name, envName, eventType, desired.RevisionID, message, details)
-	return takodstate.PersistToServers(sshPool, cfg, envName, serverNames, desired, actual, event, verbose)
+	return takodstate.PersistToServers(sshPool, cfg, envName, serverNames, desired, actual, nodeActual, event, verbose)
+}
+
+func buildNodeActualSnapshots(project string, environment string, nodeActualState map[string]map[string]*reconcile.ActualService) map[string]*takodstate.ActualSnapshot {
+	if len(nodeActualState) == 0 {
+		return nil
+	}
+	snapshots := make(map[string]*takodstate.ActualSnapshot, len(nodeActualState))
+	for node, actual := range nodeActualState {
+		snapshots[node] = takodstate.BuildNodeActualSnapshot(project, environment, node, actual)
+	}
+	return snapshots
 }
 
 func defaultImageRefs(cfg *config.Config, envName string, services map[string]config.ServiceConfig) map[string]string {

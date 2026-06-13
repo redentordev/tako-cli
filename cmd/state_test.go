@@ -197,6 +197,49 @@ func TestBestActualSnapshotAllowsEmptyServiceSnapshot(t *testing.T) {
 	}
 }
 
+func TestBestNodeActualSnapshotsPrefersFreshestPerNode(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+
+	best := bestNodeActualSnapshots([]stateNodeActualCandidate{
+		{source: "node-a", node: "node-a", actual: nodeActualSnapshot("node-a", base, "web")},
+		{source: "node-b", node: "node-a", actual: nodeActualSnapshot("node-a", base.Add(time.Hour), "web", "worker")},
+		{source: "node-b", node: "node-b", actual: nodeActualSnapshot("node-b", base.Add(30*time.Minute), "web")},
+	})
+
+	if len(best) != 2 {
+		t.Fatalf("best node snapshots = %d, want 2", len(best))
+	}
+	if best["node-a"].source != "node-b" {
+		t.Fatalf("node-a source = %q, want node-b", best["node-a"].source)
+	}
+	if best["node-b"].source != "node-b" {
+		t.Fatalf("node-b source = %q, want node-b", best["node-b"].source)
+	}
+}
+
+func TestAggregateActualSnapshotFromNodeSnapshots(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	best := map[string]stateNodeActualCandidate{
+		"node-a": {source: "node-a", node: "node-a", actual: nodeActualSnapshot("node-a", base, "web")},
+		"node-b": {source: "node-b", node: "node-b", actual: nodeActualSnapshot("node-b", base.Add(time.Hour), "web", "worker")},
+	}
+
+	aggregate := aggregateActualSnapshotFromNodeSnapshots("demo", "production", best)
+
+	if aggregate.CapturedAt != base.Add(time.Hour) {
+		t.Fatalf("aggregate freshness = %s, want newest node time", aggregate.CapturedAt)
+	}
+	if got := aggregate.Services["web"].Replicas; got != 2 {
+		t.Fatalf("web replicas = %d, want 2", got)
+	}
+	if got := len(aggregate.Nodes); got != 2 {
+		t.Fatalf("embedded node snapshots = %d, want 2", got)
+	}
+	if aggregate.TargetNodes[0] != "node-a" || aggregate.TargetNodes[1] != "node-b" {
+		t.Fatalf("target nodes not sorted: %#v", aggregate.TargetNodes)
+	}
+}
+
 func TestOrderedStateServerNamesPrefersRequestedServer(t *testing.T) {
 	cfg := &config.Config{
 		Servers: map[string]config.ServerConfig{
@@ -294,5 +337,11 @@ func actualSnapshot(capturedAt time.Time, services ...string) *takodstate.Actual
 			Replicas: 1,
 		}
 	}
+	return snapshot
+}
+
+func nodeActualSnapshot(node string, capturedAt time.Time, services ...string) *takodstate.ActualSnapshot {
+	snapshot := actualSnapshot(capturedAt, services...)
+	snapshot.Node = node
 	return snapshot
 }

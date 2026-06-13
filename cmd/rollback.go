@@ -246,10 +246,11 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("rollback succeeded but failed to reconcile proxy: %w", err)
 	}
 
-	postRollbackActualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, envServers, nil)
+	postRollbackNodeActualState, err := reconcile.GatherActualStateByServer(sshPool, cfg, envName, envServers)
 	if err != nil {
 		return fmt.Errorf("rollback succeeded but failed to gather post-rollback actual state: %w", err)
 	}
+	postRollbackActualState := reconcile.AggregateActualStateByServer(postRollbackNodeActualState)
 	if err := persistTakodRuntimeState(
 		sshPool,
 		cfg,
@@ -259,6 +260,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		desiredServices,
 		imageRefs,
 		postRollbackActualState,
+		postRollbackNodeActualState,
 		takodstate.GitInfo{
 			Commit:      targetDeployment.GitCommit,
 			CommitShort: targetDeployment.GitCommitShort,

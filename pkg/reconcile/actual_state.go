@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -21,8 +22,20 @@ func GatherActualStateFromServers(
 	serverNames []string,
 	_ *localstate.Manager,
 ) (map[string]*ActualService, error) {
-	actualServices := make(map[string]*ActualService)
+	actualByServer, err := GatherActualStateByServer(sshPool, cfg, environment, serverNames)
+	if err != nil {
+		return nil, err
+	}
+	return AggregateActualStateByServer(actualByServer), nil
+}
 
+func GatherActualStateByServer(
+	sshPool *ssh.Pool,
+	cfg *config.Config,
+	environment string,
+	serverNames []string,
+) (map[string]map[string]*ActualService, error) {
+	actualByServer := make(map[string]map[string]*ActualService, len(serverNames))
 	for _, serverName := range serverNames {
 		server, ok := cfg.Servers[serverName]
 		if !ok {
@@ -39,17 +52,45 @@ func GatherActualStateFromServers(
 			return nil, fmt.Errorf("failed to gather actual state from %s through takod: %w", serverName, err)
 		}
 
+		actualByServer[serverName] = nodeState
+	}
+	return actualByServer, nil
+}
+
+func AggregateActualStateByServer(actualByServer map[string]map[string]*ActualService) map[string]*ActualService {
+	actualServices := make(map[string]*ActualService)
+	serverNames := make([]string, 0, len(actualByServer))
+	for serverName := range actualByServer {
+		serverNames = append(serverNames, serverName)
+	}
+	sort.Strings(serverNames)
+	for _, serverName := range serverNames {
+		nodeState := actualByServer[serverName]
 		for serviceName, serviceState := range nodeState {
+			if serviceState == nil {
+				continue
+			}
 			if existing, ok := actualServices[serviceName]; ok {
 				existing.Replicas += serviceState.Replicas
 				existing.Containers = append(existing.Containers, serviceState.Containers...)
+				if existing.Image == "" {
+					existing.Image = serviceState.Image
+				}
 				continue
 			}
-			actualServices[serviceName] = serviceState
+			actualServices[serviceName] = cloneActualService(serviceState)
 		}
 	}
+	return actualServices
+}
 
-	return actualServices, nil
+func cloneActualService(service *ActualService) *ActualService {
+	if service == nil {
+		return nil
+	}
+	clone := *service
+	clone.Containers = append([]string(nil), service.Containers...)
+	return &clone
 }
 
 func gatherActualStateFromTakod(client *ssh.Client, cfg *config.Config, environment string) (map[string]*ActualService, error) {
