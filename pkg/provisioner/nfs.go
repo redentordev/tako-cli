@@ -202,7 +202,7 @@ func (n *NFSProvisioner) SetupNFSServer(client *ssh.Client, nfsConfig *config.NF
 	return serverInfo, nil
 }
 
-// SetupNFSClient sets up NFS client and mounts on a worker node
+// SetupNFSClient sets up NFS client mounts on a node.
 func (n *NFSProvisioner) SetupNFSClient(client *ssh.Client, nfsServerHost string, exports []NFSExportInfo) error {
 	if n.verbose {
 		fmt.Printf("→ Setting up NFS client...\n")

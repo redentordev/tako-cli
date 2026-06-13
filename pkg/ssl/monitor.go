@@ -26,11 +26,11 @@ type PendingState struct {
 
 // Monitor handles background SSL certificate monitoring
 type Monitor struct {
-	client       *ssh.Client
-	projectName  string
-	environment  string
-	notifier     *notification.Notifier
-	verbose      bool
+	client      *ssh.Client
+	projectName string
+	environment string
+	notifier    *notification.Notifier
+	verbose     bool
 }
 
 // NewMonitor creates a new SSL monitor
@@ -132,7 +132,7 @@ func (m *Monitor) CheckPending() (issued []string, stillPending []string, errors
 		}
 
 		if verified {
-			// DNS is ready, certificate will be issued by Traefik automatically
+			// DNS is ready, certificate will be issued by the proxy automatically.
 			if m.verbose {
 				fmt.Printf("  ✓ DNS verified for %s\n", pending.Domain)
 			}

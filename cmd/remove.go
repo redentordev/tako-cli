@@ -25,7 +25,7 @@ This command:
   - Stops and removes all service containers
   - Removes Docker images for this project
   - Removes proxy configurations
-  - Preserves server setup (Docker, Traefik remain installed)
+  - Preserves server setup (Docker and tako-proxy remain installed)
   - Does NOT decommission the server
 
 The server can be reused for new deployments after removal.
@@ -90,7 +90,7 @@ func runRemove(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("This will NOT:\n")
 	fmt.Printf("   • Decommission the server\n")
-	fmt.Printf("   • Remove Docker or Traefik\n")
+	fmt.Printf("   • Remove Docker or tako-proxy\n")
 	fmt.Printf("   • Remove persistent volume data\n\n")
 
 	// Confirmation unless --force
@@ -132,11 +132,10 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Warning: Error removing images: %v\n", err)
 	}
 
-	// Remove proxy configurations (Traefik will automatically update when containers are removed)
+	// Remove proxy configurations.
 	fmt.Printf("→ Removing proxy configurations...\n")
-	// Traefik uses Docker labels for configuration, so removing containers automatically removes proxy config
 	if verbose {
-		fmt.Printf("  Traefik will automatically detect removed containers\n")
+		fmt.Printf("  tako-proxy will automatically detect removed containers\n")
 	}
 
 	// Remove deployment state

@@ -15,17 +15,17 @@ import (
 
 // ServiceHealth represents the health status of a deployed service
 type ServiceHealth struct {
-	ServiceName       string
-	Domain            string
-	HTTPAccessible    bool
-	HTTPSAccessible   bool
-	SSLValid          bool
-	SSLIssuer         string
-	SSLExpiry         time.Time
-	ContainerRunning  bool
-	TraefikConfigured bool
-	LastChecked       time.Time
-	Errors            []string
+	ServiceName      string
+	Domain           string
+	HTTPAccessible   bool
+	HTTPSAccessible  bool
+	SSLValid         bool
+	SSLIssuer        string
+	SSLExpiry        time.Time
+	ContainerRunning bool
+	ProxyConfigured  bool
+	LastChecked      time.Time
+	Errors           []string
 }
 
 // HealthChecker performs periodic health checks on deployed services
@@ -71,13 +71,13 @@ func (h *HealthChecker) CheckService(ctx context.Context, serviceName, domain st
 		return nil
 	})
 
-	// Traefik check (requires SSH)
+	// Proxy check (requires SSH)
 	g.Go(func() error {
-		configured := h.checkTraefikConfig(serviceName)
+		configured := h.checkProxyConfig(serviceName)
 		mu.Lock()
-		health.TraefikConfigured = configured
+		health.ProxyConfigured = configured
 		if !configured {
-			health.Errors = append(health.Errors, "Traefik not configured properly")
+			health.Errors = append(health.Errors, "Proxy not configured properly")
 		}
 		mu.Unlock()
 		return nil
@@ -153,9 +153,9 @@ func (h *HealthChecker) MonitorSSLProvisioning(ctx context.Context, serviceName,
 				return nil
 			}
 
-			// Check Traefik logs for errors
+			// Check proxy logs for errors.
 			if attempt%3 == 0 {
-				errors := h.getTraefikSSLErrors(domain)
+				errors := h.getProxySSLErrors(domain)
 				if len(errors) > 0 {
 					fmt.Printf("⚠️  Issues detected\n")
 					for _, err := range errors {
@@ -175,16 +175,16 @@ func (h *HealthChecker) MonitorSSLProvisioning(ctx context.Context, serviceName,
 
 // checkContainerRunning checks if the container is running
 func (h *HealthChecker) checkContainerRunning(serviceName string) bool {
-	cmd := fmt.Sprintf("docker service ps %s --filter 'desired-state=running' --format '{{.CurrentState}}' | grep -i running", serviceName)
+	cmd := fmt.Sprintf("docker ps --filter label=tako.service=%s --format '{{.Names}}'", serviceName)
 	output, err := h.client.Execute(cmd)
-	return err == nil && strings.Contains(output, "Running")
+	return err == nil && strings.TrimSpace(output) != ""
 }
 
-// checkTraefikConfig checks if Traefik has the service configured
-func (h *HealthChecker) checkTraefikConfig(serviceName string) bool {
-	cmd := fmt.Sprintf("docker service inspect %s --format '{{index .Spec.Labels \"traefik.enable\"}}' 2>/dev/null", serviceName)
+// checkProxyConfig checks if the service has proxy labels.
+func (h *HealthChecker) checkProxyConfig(serviceName string) bool {
+	cmd := fmt.Sprintf("docker ps --filter label=tako.service=%s --filter label=traefik.enable=true --format '{{.Names}}'", serviceName)
 	output, err := h.client.Execute(cmd)
-	return err == nil && strings.TrimSpace(output) == "true"
+	return err == nil && strings.TrimSpace(output) != ""
 }
 
 // checkHTTPAccess checks if the service is accessible via HTTP
@@ -250,9 +250,9 @@ func (h *HealthChecker) checkSSL(domain string) *SSLInfo {
 	return nil
 }
 
-// getTraefikSSLErrors retrieves SSL-related errors from Traefik logs
-func (h *HealthChecker) getTraefikSSLErrors(domain string) []string {
-	cmd := fmt.Sprintf("docker service logs traefik --tail 50 2>&1 | grep -i 'error.*%s\\|acme.*%s' | tail -5", domain, domain)
+// getProxySSLErrors retrieves SSL-related errors from proxy logs.
+func (h *HealthChecker) getProxySSLErrors(domain string) []string {
+	cmd := fmt.Sprintf("docker logs --tail 50 tako-proxy 2>&1 | grep -i 'error.*%s\\|acme.*%s' | tail -5", domain, domain)
 	output, err := h.client.Execute(cmd)
 	if err != nil || output == "" {
 		return nil
@@ -322,11 +322,11 @@ func (h *ServiceHealth) PrintReport() {
 		fmt.Printf("   ✗ Container: Not running\n")
 	}
 
-	// Traefik status
-	if h.TraefikConfigured {
-		fmt.Printf("   ✓ Traefik: Configured\n")
+	// Proxy status
+	if h.ProxyConfigured {
+		fmt.Printf("   ✓ Proxy: Configured\n")
 	} else {
-		fmt.Printf("   ✗ Traefik: Not configured\n")
+		fmt.Printf("   ✗ Proxy: Not configured\n")
 	}
 
 	// HTTP status

@@ -102,7 +102,7 @@ test_ports() {
                     3306) log_fail "MySQL port 3306 is exposed!" ;;
                     5432) log_fail "PostgreSQL port 5432 is exposed!" ;;
                     6379) log_fail "Redis port 6379 is exposed!" ;;
-                    8080) log_warn "Port 8080 is open (Traefik dashboard?)" ;;
+                    8080) log_warn "Port 8080 is open (proxy dashboard?)" ;;
                     27017) log_fail "MongoDB port 27017 is exposed!" ;;
                     *) log_info "Port $port is open" ;;
                 esac
@@ -462,12 +462,12 @@ test_docker() {
         fi
     done
     
-    # Traefik dashboard
-    log_info "Testing Traefik dashboard exposure..."
+    # Proxy dashboard
+    log_info "Testing proxy dashboard exposure..."
     for path in ":8080" ":8080/dashboard/" ":8080/api"; do
         local code=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 3 "http://$TARGET$path" 2>/dev/null)
         if [ "$code" = "200" ]; then
-            log_warn "Traefik dashboard may be exposed at $path"
+            log_warn "Proxy dashboard may be exposed at $path"
         fi
     done
     

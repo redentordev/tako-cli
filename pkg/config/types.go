@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -14,12 +15,62 @@ import (
 type Config struct {
 	Schema        string                       `yaml:"$schema,omitempty" json:"$schema,omitempty"` // JSON Schema reference
 	Project       ProjectConfig                `yaml:"project" json:"project"`
+	Runtime       *RuntimeConfig               `yaml:"runtime,omitempty" json:"runtime,omitempty"`
+	Mesh          *MeshConfig                  `yaml:"mesh,omitempty" json:"mesh,omitempty"`
+	State         *StateConfig                 `yaml:"state,omitempty" json:"state,omitempty"`
 	Deployment    *DeploymentConfig            `yaml:"deployment,omitempty" json:"deployment,omitempty"`
 	Notifications *NotificationsConfig         `yaml:"notifications,omitempty" json:"notifications,omitempty"`
 	Storage       *StorageConfig               `yaml:"storage,omitempty" json:"storage,omitempty"`
 	Volumes       map[string]VolumeConfig      `yaml:"volumes,omitempty" json:"volumes,omitempty"` // Top-level volume definitions
 	Servers       map[string]ServerConfig      `yaml:"servers" json:"servers"`
 	Environments  map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
+}
+
+const (
+	RuntimeModeTakod = "takod"
+
+	RuntimeProxyTako = "tako-proxy"
+
+	StateBackendReplicated = "replicated"
+
+	StateDeployConsistencyLease = "lease"
+
+	StateUnreachableBlock = "block"
+)
+
+// RuntimeConfig selects the orchestration runtime. Tako has one public runtime:
+// takod. Single-node deployments are just one-node meshes.
+type RuntimeConfig struct {
+	Mode  string       `yaml:"mode,omitempty" json:"mode,omitempty"` // takod
+	Proxy string       `yaml:"proxy,omitempty" json:"proxy,omitempty"`
+	Agent *AgentConfig `yaml:"agent,omitempty" json:"agent,omitempty"`
+}
+
+// AgentConfig describes the takod node-local reconciler.
+type AgentConfig struct {
+	Enabled bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Socket  string `yaml:"socket,omitempty" json:"socket,omitempty"`
+	DataDir string `yaml:"dataDir,omitempty" json:"dataDir,omitempty"`
+}
+
+// MeshConfig describes the private node mesh. A single node still uses the same
+// model, with no remote peers.
+type MeshConfig struct {
+	Enabled      bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	NetworkCIDR  string `yaml:"networkCIDR,omitempty" json:"networkCIDR,omitempty"`
+	Interface    string `yaml:"interface,omitempty" json:"interface,omitempty"`
+	ListenPort   int    `yaml:"listenPort,omitempty" json:"listenPort,omitempty"`
+	SubnetBits   int    `yaml:"subnetBits,omitempty" json:"subnetBits,omitempty"`
+	NATTraversal bool   `yaml:"natTraversal,omitempty" json:"natTraversal,omitempty"`
+}
+
+// StateConfig controls how Tako treats local cache, remote runtime truth, and
+// deployment consistency.
+type StateConfig struct {
+	Backend            string `yaml:"backend,omitempty" json:"backend,omitempty"`                       // replicated
+	DeployConsistency  string `yaml:"deployConsistency,omitempty" json:"deployConsistency,omitempty"`   // lease
+	OnUnreachableNode  string `yaml:"onUnreachableNode,omitempty" json:"onUnreachableNode,omitempty"`   // block
+	RemoteCacheEnabled bool   `yaml:"remoteCacheEnabled,omitempty" json:"remoteCacheEnabled,omitempty"` // replicate deployment history to nodes
 }
 
 // VolumeConfig defines a named volume configuration (Docker Compose style)
@@ -39,7 +90,7 @@ type StorageConfig struct {
 // NFSConfig defines NFS shared storage settings
 type NFSConfig struct {
 	Enabled bool              `yaml:"enabled" json:"enabled"`
-	Server  string            `yaml:"server,omitempty" json:"server,omitempty"` // "auto" = use manager node, or specify server name
+	Server  string            `yaml:"server,omitempty" json:"server,omitempty"` // "auto" = use the first environment node, or specify server name
 	Exports []NFSExportConfig `yaml:"exports,omitempty" json:"exports,omitempty"`
 }
 
@@ -92,7 +143,6 @@ type ServerConfig struct {
 	Port     int               `yaml:"port,omitempty" json:"port,omitempty"`
 	SSHKey   string            `yaml:"sshKey,omitempty" json:"sshKey,omitempty"`     // Path to SSH private key (mutually exclusive with password)
 	Password string            `yaml:"password,omitempty" json:"password,omitempty"` // SSH password (mutually exclusive with sshKey, use env var for security)
-	Role     string            `yaml:"role,omitempty" json:"role,omitempty"`         // "manager" or "worker" (auto-detect if not specified)
 	Labels   map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`     // Custom labels for server selection
 }
 
@@ -110,12 +160,9 @@ type ServiceConfig struct {
 	Env      map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	EnvFile  string            `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Path to .env file (e.g., .env.production)
 
-	// Secrets: Can be either string array (new Tako secrets) or SecretConfig array (Docker Swarm secrets)
-	// String format: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"]
-	// SecretConfig format: [{name: "db_pass", source: "env:DB_PASSWORD"}]
-	Secrets       []string       `yaml:"secrets,omitempty" json:"secrets,omitempty"`             // Tako secrets from .tako/secrets files
-	DockerSecrets []SecretConfig `yaml:"dockerSecrets,omitempty" json:"dockerSecrets,omitempty"` // Docker Swarm secrets (for backward compatibility)
-	Volumes       []string       `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	// Secrets: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"].
+	Secrets []string `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
+	Volumes []string `yaml:"volumes,omitempty" json:"volumes,omitempty"`
 
 	// Service type flags
 	Persistent bool `yaml:"persistent,omitempty" json:"persistent,omitempty"` // Don't remove on redeploy (databases, caches)
@@ -145,7 +192,7 @@ type ServiceConfig struct {
 	Export  bool     `yaml:"export,omitempty" json:"export,omitempty"`   // Export this service to other projects
 	Imports []string `yaml:"imports,omitempty" json:"imports,omitempty"` // Import services from other projects (format: "project.service")
 
-	// Placement configuration (for Swarm multi-server deployments)
+	// Placement configuration for takod scheduling.
 	Placement *PlacementConfig `yaml:"placement,omitempty" json:"placement,omitempty"` // Where to run service replicas
 
 	// Service dependencies (controls deployment order)
@@ -153,13 +200,6 @@ type ServiceConfig struct {
 
 	// Init commands (run before service starts, useful for permissions)
 	Init []string `yaml:"init,omitempty" json:"init,omitempty"` // Commands to run before service starts (e.g., chown, chmod)
-}
-
-// SecretConfig defines a Docker secret
-type SecretConfig struct {
-	Name   string `yaml:"name" json:"name"`                         // Secret name (e.g., "db_password")
-	Source string `yaml:"source,omitempty" json:"source,omitempty"` // Source: "env:VAR" or "file:path" (default: env:NAME)
-	Target string `yaml:"target,omitempty" json:"target,omitempty"` // Target path in container (default: /run/secrets/{name})
 }
 
 // HealthCheckConfig defines health check settings
@@ -173,7 +213,7 @@ type HealthCheckConfig struct {
 
 // DeployConfig defines deployment strategy
 type DeployConfig struct {
-	Strategy       string `yaml:"strategy" json:"strategy"` // blue-green or rolling
+	Strategy       string `yaml:"strategy" json:"strategy"` // recreate
 	MaxUnavailable int    `yaml:"maxUnavailable,omitempty" json:"maxUnavailable,omitempty"`
 }
 
@@ -190,7 +230,7 @@ type LoadBalancerHealthCheck struct {
 	Interval string `yaml:"interval" json:"interval"`
 }
 
-// ProxyConfig defines per-service Traefik reverse proxy settings
+// ProxyConfig defines per-service public proxy settings.
 type ProxyConfig struct {
 	// Domain is the primary domain where traffic is served (recommended)
 	// Use this with RedirectFrom for cleaner configuration
@@ -278,8 +318,8 @@ type BackupConfig struct {
 type HooksConfig struct {
 	PreBuild   []string `yaml:"preBuild,omitempty" json:"preBuild,omitempty"`     // Before building Docker image
 	PostBuild  []string `yaml:"postBuild,omitempty" json:"postBuild,omitempty"`   // After building Docker image
-	PreDeploy  []string `yaml:"preDeploy,omitempty" json:"preDeploy,omitempty"`   // Before deploying service to swarm
-	PostDeploy []string `yaml:"postDeploy,omitempty" json:"postDeploy,omitempty"` // After deploying service to swarm
+	PreDeploy  []string `yaml:"preDeploy,omitempty" json:"preDeploy,omitempty"`   // Before deploying service
+	PostDeploy []string `yaml:"postDeploy,omitempty" json:"postDeploy,omitempty"` // After deploying service
 	PostStart  []string `yaml:"postStart,omitempty" json:"postStart,omitempty"`   // After service is running (can use docker exec)
 }
 
@@ -295,7 +335,7 @@ type MonitoringConfig struct {
 type EnvironmentConfig struct {
 	Servers        []string                 `yaml:"servers" json:"servers"`                                   // List of server names to use
 	ServerSelector *ServerSelector          `yaml:"serverSelector,omitempty" json:"serverSelector,omitempty"` // Label-based server selection
-	Labels         map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`                 // Environment labels for Docker nodes
+	Labels         map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`                 // Environment labels for nodes
 	Services       map[string]ServiceConfig `yaml:"services" json:"services"`                                 // Services to deploy in this environment
 }
 
@@ -309,8 +349,8 @@ type ServerSelector struct {
 type PlacementConfig struct {
 	Strategy    string   `yaml:"strategy,omitempty" json:"strategy,omitempty"`       // "spread", "pinned", "any"
 	Servers     []string `yaml:"servers,omitempty" json:"servers,omitempty"`         // Pin to specific servers (for "pinned" strategy)
-	Constraints []string `yaml:"constraints,omitempty" json:"constraints,omitempty"` // Docker Swarm constraints (e.g., "node.labels.type==high-memory")
-	Preferences []string `yaml:"preferences,omitempty" json:"preferences,omitempty"` // Docker Swarm placement preferences (e.g., "spread=node.labels.region")
+	Constraints []string `yaml:"constraints,omitempty" json:"constraints,omitempty"` // Node label constraints (e.g., "node.labels.type==high-memory")
+	Preferences []string `yaml:"preferences,omitempty" json:"preferences,omitempty"` // Placement preferences (e.g., "spread=node.labels.region")
 }
 
 // GetServiceType returns the auto-detected service type
@@ -424,6 +464,7 @@ func (c *Config) GetEnvironmentServers(envName string) ([]string, error) {
 			for name := range c.Servers {
 				servers = append(servers, name)
 			}
+			sort.Strings(servers)
 			return servers, nil
 		}
 
@@ -437,6 +478,7 @@ func (c *Config) GetEnvironmentServers(envName string) ([]string, error) {
 		if len(matchedServers) == 0 {
 			return nil, fmt.Errorf("no servers match the selector labels for environment '%s'", envName)
 		}
+		sort.Strings(matchedServers)
 		return matchedServers, nil
 	}
 
@@ -453,28 +495,18 @@ func matchesLabels(serverLabels, selectorLabels map[string]string) bool {
 	return true
 }
 
-// GetManagerServer returns the manager server for a given environment
-func (c *Config) GetManagerServer(envName string) (string, error) {
+// GetPrimaryServer returns the first configured node for an environment.
+func (c *Config) GetPrimaryServer(envName string) (string, error) {
 	servers, err := c.GetEnvironmentServers(envName)
 	if err != nil {
 		return "", err
 	}
 
-	// Look for explicitly marked manager
-	for _, serverName := range servers {
-		if server, exists := c.Servers[serverName]; exists {
-			if server.Role == "manager" {
-				return serverName, nil
-			}
-		}
-	}
-
-	// If no explicit manager, use first server in list
 	if len(servers) > 0 {
 		return servers[0], nil
 	}
 
-	return "", fmt.Errorf("no manager server found for environment '%s'", envName)
+	return "", fmt.Errorf("no primary server found for environment '%s'", envName)
 }
 
 // IsMultiServer returns true if more than one server is configured
@@ -482,12 +514,62 @@ func (c *Config) IsMultiServer() bool {
 	return len(c.Servers) > 1
 }
 
+// GetRuntimeMode returns the configured orchestration runtime.
+func (c *Config) GetRuntimeMode() string {
+	if c.Runtime == nil || c.Runtime.Mode == "" {
+		return RuntimeModeTakod
+	}
+	return c.Runtime.Mode
+}
+
+// GetRuntimeProxy returns the internal ingress proxy implementation.
+func (c *Config) GetRuntimeProxy() string {
+	if c.Runtime == nil || c.Runtime.Proxy == "" {
+		return RuntimeProxyTako
+	}
+	return c.Runtime.Proxy
+}
+
+// IsTakodRuntime returns true when the current runtime is the takod mesh runtime.
+func (c *Config) IsTakodRuntime() bool {
+	return c.GetRuntimeMode() == RuntimeModeTakod
+}
+
+// IsMeshEnabled returns true when the private node mesh is enabled.
+func (c *Config) IsMeshEnabled() bool {
+	return c.Mesh == nil || c.Mesh.Enabled
+}
+
+// GetStateBackend returns the configured state backend.
+func (c *Config) GetStateBackend() string {
+	if c.State == nil || c.State.Backend == "" {
+		return StateBackendReplicated
+	}
+	return c.State.Backend
+}
+
+// GetDeployConsistency returns the deployment consistency policy.
+func (c *Config) GetDeployConsistency() string {
+	if c.State == nil || c.State.DeployConsistency == "" {
+		return StateDeployConsistencyLease
+	}
+	return c.State.DeployConsistency
+}
+
+// GetOnUnreachableNode returns the policy used when a node cannot be reached.
+func (c *Config) GetOnUnreachableNode() string {
+	if c.State == nil || c.State.OnUnreachableNode == "" {
+		return StateUnreachableBlock
+	}
+	return c.State.OnUnreachableNode
+}
+
 // GetRegistryURL returns the auto-configured local registry URL
 // Returns empty string for single-server deployments (no registry needed)
 func (c *Config) GetRegistryURL() string {
 	// TODO: Phase 2 - implement registry for multi-server deployments
 	// For now, return empty string for all deployments
-	// In Phase 2, detect multi-server and return registry URL on manager node
+	// In a future registry-backed mode, detect multi-server and return a mesh-local registry URL.
 	return ""
 }
 
@@ -683,7 +765,7 @@ func (c *Config) GetNFSConfig() *NFSConfig {
 }
 
 // GetNFSServerName returns the NFS server name
-// If "auto" or empty, returns the manager server name for the given environment
+// If "auto" or empty, returns the primary server name for the given environment.
 func (c *Config) GetNFSServerName(envName string) (string, error) {
 	if !c.IsNFSEnabled() {
 		return "", fmt.Errorf("NFS is not enabled")
@@ -691,8 +773,8 @@ func (c *Config) GetNFSServerName(envName string) (string, error) {
 
 	nfsConfig := c.GetNFSConfig()
 	if nfsConfig.Server == "" || nfsConfig.Server == "auto" {
-		// Use manager node
-		return c.GetManagerServer(envName)
+		// Use the primary environment node.
+		return c.GetPrimaryServer(envName)
 	}
 
 	// Verify the specified server exists

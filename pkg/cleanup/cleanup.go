@@ -181,8 +181,7 @@ func (c *Cleaner) RotateLogs() error {
 		fmt.Printf("  Checking log files...\n")
 	}
 
-	// Check log directory size (Traefik logs)
-	output, err := c.client.Execute("du -sh /var/log/traefik/ 2>/dev/null || echo '0'")
+	output, err := c.client.Execute("du -sh /var/log/tako/proxy/ 2>/dev/null || echo '0'")
 	if err == nil && c.verbose {
 		fmt.Printf("  Log directory size: %s\n", strings.TrimSpace(output))
 	}
@@ -292,12 +291,12 @@ func (c *Cleaner) SecureLogPermissions() error {
 	}
 
 	commands := []string{
-		// Ensure directory is owned by root (Traefik runs in container)
-		"sudo chown -R root:root /var/log/traefik",
+		// Ensure directory is owned by root (proxy runs in container)
+		"sudo chown -R root:root /var/log/tako/proxy",
 		// Directory: readable/writable by root only
-		"sudo chmod 750 /var/log/traefik",
+		"sudo chmod 750 /var/log/tako/proxy",
 		// Log files: readable/writable by root only
-		"sudo find /var/log/traefik -type f -exec chmod 640 {} \\;",
+		"sudo find /var/log/tako/proxy -type f -exec chmod 640 {} \\;",
 	}
 
 	for _, cmd := range commands {

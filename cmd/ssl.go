@@ -37,15 +37,15 @@ func runSSLStatus(cmd *cobra.Command, args []string) error {
 
 	envName := getEnvironmentName(cfg)
 
-	// Get manager server
-	managerServerName, err := cfg.GetManagerServer(envName)
+	// Get primary node
+	primaryServerName, err := cfg.GetPrimaryServer(envName)
 	if err != nil {
-		return fmt.Errorf("failed to get manager server: %w", err)
+		return fmt.Errorf("failed to get primary node: %w", err)
 	}
 
-	server, exists := cfg.Servers[managerServerName]
+	server, exists := cfg.Servers[primaryServerName]
 	if !exists {
-		return fmt.Errorf("server '%s' not found in configuration", managerServerName)
+		return fmt.Errorf("server '%s' not found in configuration", primaryServerName)
 	}
 
 	// Connect to server

@@ -18,13 +18,12 @@ _tako() {
     case $state in
         cmds)
             commands=(
-                'access:Stream access logs from Traefik (HTTP requests)'
+                'access:Stream proxy access logs'
                 'backup:Backup and restore Docker volumes'
                 'cleanup:Clean up old Docker resources'
                 'deploy:Deploy application to environment'
                 'destroy:Remove all services from server'
                 'dev:Run production environment locally'
-                'downgrade:Downgrade from Docker Swarm to single-server mode'
                 'drift:Detect configuration drift between config and running services'
                 'exec:Execute commands on remote server(s) or in containers'
                 'history:View deployment history'
@@ -40,7 +39,7 @@ _tako() {
                 'rollback:Rollback to previous/specific deployment'
                 'scale:Scale service replicas'
                 'secrets:Manage secrets for your project'
-                'setup:Provision server (Docker, Traefik, security)'
+                'setup:Provision server (Docker, proxy, security)'
                 'start:Start stopped services'
                 'stats:Show container resource usage'
                 'stop:Stop running services'

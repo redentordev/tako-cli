@@ -4,7 +4,7 @@ Comprehensive examples demonstrating all features of the Tako CLI. Each example 
 
 ## Overview
 
-We have **25 ready-to-deploy examples** covering various use cases:
+We have ready-to-deploy examples covering common use cases:
 
 ### Web Frameworks & Applications
 | Example | Description | Features |
@@ -29,7 +29,6 @@ We have **25 ready-to-deploy examples** covering various use cases:
 | [06-scaling](./06-scaling/) | Load balancing | Multiple replicas, round-robin, scaling |
 | [07-backend-api](./07-backend-api/) | RESTful API | Export services for other projects |
 | [08-frontend-consumer](./08-frontend-consumer/) | Frontend consumer | Import and use services from other projects |
-| [11-multi-server-swarm](./11-multi-server-swarm/) | Multi-server | Docker Swarm orchestration |
 
 ### Third-Party Applications
 | Example | Description | Features |
@@ -43,9 +42,8 @@ We have **25 ready-to-deploy examples** covering various use cases:
 | Example | Description | Features |
 |---------|-------------|----------|
 | [test-parallel](./test-parallel/) | Parallel deployment | Test concurrent service deployment |
-| [test-placement-strategies](./test-placement-strategies/) | Placement strategies | Swarm node placement testing |
+| [test-placement-strategies](./test-placement-strategies/) | Placement strategies | takod node placement testing |
 | [test-secrets](./test-secrets/) | Secrets management | Secure environment variables |
-| [test-swarm](./test-swarm/) | Docker Swarm | Multi-node swarm testing |
 
 ## Quick Start
 

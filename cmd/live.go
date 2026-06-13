@@ -21,7 +21,7 @@ var liveCmd = &cobra.Command{
 This command removes the maintenance page container and restores
 traffic to the main service.
 
-If --server is not specified, defaults to the first server or manager node in Swarm mode.
+If --server is not specified, defaults to the primary environment node.
 
 Examples:
   tako live --service web              # Disable maintenance on default server
@@ -31,7 +31,7 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(liveCmd)
-	liveCmd.Flags().StringVarP(&liveServer, "server", "s", "", "Server to disable maintenance on (default: first/manager server)")
+	liveCmd.Flags().StringVarP(&liveServer, "server", "s", "", "Node to disable maintenance on (default: primary node)")
 	liveCmd.Flags().StringVar(&liveService, "service", "", "Service to restore (required)")
 	liveCmd.MarkFlagRequired("service")
 }
@@ -59,31 +59,15 @@ func runLive(cmd *cobra.Command, args []string) error {
 		}
 		serverName = liveServer
 	} else {
-		// Default to first server or manager
-		envServers, err := cfg.GetEnvironmentServers(envName)
+		primaryName, err := cfg.GetPrimaryServer(envName)
 		if err != nil {
-			return fmt.Errorf("failed to get environment servers: %w", err)
+			return fmt.Errorf("failed to get primary node: %w", err)
 		}
-
-		if len(envServers) == 0 {
-			return fmt.Errorf("no servers configured for environment %s", envName)
-		}
-
-		// If multi-server (Swarm), use manager; otherwise use first server
-		if len(envServers) > 1 {
-			managerName, err := cfg.GetManagerServer(envName)
-			if err != nil {
-				return fmt.Errorf("failed to get manager server: %w", err)
-			}
-			serverName = managerName
-			server = cfg.Servers[managerName]
-		} else {
-			serverName = envServers[0]
-			server = cfg.Servers[serverName]
-		}
+		serverName = primaryName
+		server = cfg.Servers[primaryName]
 
 		if verbose {
-			fmt.Printf("Using server: %s (%s)\n", serverName, server.Host)
+			fmt.Printf("Using node: %s (%s)\n", serverName, server.Host)
 		}
 	}
 
@@ -127,7 +111,7 @@ func runLive(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("✓ Maintenance mode disabled for %s\n", liveService)
 	fmt.Printf("\nService is now accepting normal traffic.\n")
-	fmt.Printf("Traefik has automatically updated routing.\n")
+	fmt.Printf("tako-proxy has automatically updated routing.\n")
 
 	return nil
 }

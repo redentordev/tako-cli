@@ -17,7 +17,7 @@ This example demonstrates horizontal scaling with multiple replicas and automati
                     User Requests
                          ↓
                     ┌─────────┐
-                    │ Traefik │ (Load Balancer)
+                    │tako-proxy│ (Load Balancer)
                     └────┬────┘
                          │ round_robin
          ┌───────────────┼───────────────┐

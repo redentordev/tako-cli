@@ -337,8 +337,8 @@ get_disk_io() {
 **Solution:** Added quotes around values in agent JSON output
 
 ### 3. Container Naming
-**Issue:** Container names in Swarm mode include replica hash  
-**Solution:** Filter uses grep pattern matching for project_env_service prefix
+**Issue:** Container names include replica slots
+**Solution:** Filter uses grep pattern matching for the project_env_service prefix
 
 ---
 

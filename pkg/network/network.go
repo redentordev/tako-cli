@@ -239,7 +239,7 @@ func (m *Manager) GetContainerNetworks(containerName string) ([]string, error) {
 	return networks, nil
 }
 
-// EnsureContainerConnectedToAllNetworks ensures a container (like Traefik) is connected to all project networks
+// EnsureContainerConnectedToAllNetworks ensures a container is connected to all project networks.
 func (m *Manager) EnsureContainerConnectedToAllNetworks(containerName string) error {
 	// Get all Tako project networks
 	projectNetworks, err := m.GetAllProjectNetworks()

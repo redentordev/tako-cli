@@ -40,14 +40,14 @@ for i in 1 2 3; do
     fi
 done
 
-# Check if Traefik load balancer is configured (should be for multi-replica with proxy)
-TRAEFIK_RUNNING=$(ssh -i "$VPS_SSH_KEY" ${VPS_USER:-root}@$VPS_HOST "docker ps --filter name=traefik --format '{{.Names}}' | wc -l")
+# Check if tako-proxy is configured (should be for multi-replica with proxy)
+PROXY_RUNNING=$(ssh -i "$VPS_SSH_KEY" ${VPS_USER:-root}@$VPS_HOST "docker ps --filter name=tako-proxy --format '{{.Names}}' | wc -l")
 
-if [ "$TRAEFIK_RUNNING" -gt "0" ]; then
-    echo "✓ Traefik load balancer is running"
-    echo "✓ Traefik automatically load balances all replicas via Docker labels"
+if [ "$PROXY_RUNNING" -gt "0" ]; then
+    echo "✓ tako-proxy load balancer is running"
+    echo "✓ tako-proxy automatically load balances all replicas via Docker labels"
 else
-    echo "Warning: Traefik load balancer not found"
+    echo "Warning: tako-proxy load balancer not found"
 fi
 
 # Test that all replicas are reachable via internal network

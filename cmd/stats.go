@@ -146,7 +146,6 @@ func buildDockerStatsCommand(cfg *config.Config, envName string) string {
 	// If not showing all containers, filter by project
 	if !statsAll {
 		projectName := cfg.Project.Name
-		// In swarm mode, containers are named: {project}_{env}_{service}.{replica}.{hash}
 		cmd = fmt.Sprintf("docker ps --format '{{.Names}}' | grep '^%s_%s_' | xargs -r docker stats --no-stream --format '{{json .}}'", projectName, envName)
 	}
 

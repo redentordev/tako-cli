@@ -29,7 +29,7 @@ environments:
           interval: 10s
           timeout: 5s
           retries: 3
-        # Uncomment to expose publicly via Traefik
+        # Uncomment to expose publicly through tako-proxy
         proxy:
           domains:
             - frontend.${SERVER_HOST}.sslip.io

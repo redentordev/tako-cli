@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// AccessLog represents a JSON access log entry (Traefik format)
+// AccessLog represents a JSON proxy access log entry.
 type AccessLog struct {
 	// Old format (for backward compatibility)
 	Level   string  `json:"level"`
@@ -32,7 +32,7 @@ type AccessLog struct {
 		Server      []string `json:"Server"`
 	} `json:"resp_headers"`
 
-	// New Traefik format (Swarm mode)
+	// Current proxy JSON format.
 	ClientAddr            string `json:"ClientAddr"`
 	ClientHost            string `json:"ClientHost"`
 	DownstreamStatus      int    `json:"DownstreamStatus"`
@@ -89,10 +89,10 @@ func (f *Formatter) FormatLine(line string) (string, error) {
 
 	// Apply service filter if set
 	if f.serviceFilter != "" {
-		// Extract service name from ServiceName field (format: project_env_service@swarm)
+		// Extract service name from ServiceName field (format: project_env_service@provider)
 		serviceName := log.ServiceName
 		if serviceName != "" {
-			// Parse format: project_env_service@swarm -> service
+			// Parse format: project_env_service@provider -> service
 			parts := strings.Split(serviceName, "_")
 			if len(parts) >= 3 {
 				actualService := strings.Split(parts[2], "@")[0]
@@ -103,9 +103,9 @@ func (f *Formatter) FormatLine(line string) (string, error) {
 		}
 	}
 
-	// Check if it's new Traefik format (has RequestMethod field)
+	// Check if it is the current proxy format.
 	if log.RequestMethod != "" {
-		// New Traefik Swarm format
+		// Current proxy JSON format.
 		if log.Time != "" {
 			t, err := time.Parse(time.RFC3339, log.Time)
 			if err == nil {

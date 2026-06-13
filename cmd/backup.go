@@ -61,21 +61,21 @@ func runBackup(cmd *cobra.Command, args []string) error {
 
 	envName := getEnvironmentName(cfg)
 
-	// Get manager server
-	managerName, err := cfg.GetManagerServer(envName)
+	// Get primary node
+	primaryName, err := cfg.GetPrimaryServer(envName)
 	if err != nil {
-		return fmt.Errorf("failed to get manager server: %w", err)
+		return fmt.Errorf("failed to get primary node: %w", err)
 	}
 
-	managerCfg := cfg.Servers[managerName]
+	primaryCfg := cfg.Servers[primaryName]
 
 	// Connect to server
 	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     managerCfg.Host,
-		Port:     managerCfg.Port,
-		User:     managerCfg.User,
-		SSHKey:   managerCfg.SSHKey,
-		Password: managerCfg.Password,
+		Host:     primaryCfg.Host,
+		Port:     primaryCfg.Port,
+		User:     primaryCfg.User,
+		SSHKey:   primaryCfg.SSHKey,
+		Password: primaryCfg.Password,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create SSH client: %w", err)

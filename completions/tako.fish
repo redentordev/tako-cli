@@ -1,13 +1,12 @@
 # fish completion for tako
 
 # Main commands
-complete -c tako -f -n '__fish_use_subcommand' -a 'access' -d 'Stream access logs from Traefik'
+complete -c tako -f -n '__fish_use_subcommand' -a 'access' -d 'Stream proxy access logs'
 complete -c tako -f -n '__fish_use_subcommand' -a 'backup' -d 'Backup and restore Docker volumes'
 complete -c tako -f -n '__fish_use_subcommand' -a 'cleanup' -d 'Clean up old Docker resources'
 complete -c tako -f -n '__fish_use_subcommand' -a 'deploy' -d 'Deploy application to environment'
 complete -c tako -f -n '__fish_use_subcommand' -a 'destroy' -d 'Remove all services from server'
 complete -c tako -f -n '__fish_use_subcommand' -a 'dev' -d 'Run production environment locally'
-complete -c tako -f -n '__fish_use_subcommand' -a 'downgrade' -d 'Downgrade from Docker Swarm'
 complete -c tako -f -n '__fish_use_subcommand' -a 'drift' -d 'Detect configuration drift'
 complete -c tako -f -n '__fish_use_subcommand' -a 'exec' -d 'Execute commands on remote server(s)'
 complete -c tako -f -n '__fish_use_subcommand' -a 'history' -d 'View deployment history'

@@ -23,11 +23,11 @@ var maintenanceCmd = &cobra.Command{
 	Short: "Enable maintenance mode for a service",
 	Long: `Enable maintenance mode for a public-facing service.
 
-This command deploys a maintenance page container with Traefik routing
+This command deploys a maintenance page container with proxy routing
 that takes priority over the main service. The main service continues
 running in the background.
 
-If --server is not specified, defaults to the first server or manager node in Swarm mode.
+If --server is not specified, defaults to the primary environment node.
 
 Custom Maintenance Page:
   Create a 'maintenance.html' file in your project directory to use a custom page.
@@ -47,7 +47,7 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(maintenanceCmd)
-	maintenanceCmd.Flags().StringVarP(&maintenanceServer, "server", "s", "", "Server to enable maintenance on (default: first/manager server)")
+	maintenanceCmd.Flags().StringVarP(&maintenanceServer, "server", "s", "", "Node to enable maintenance on (default: primary node)")
 	maintenanceCmd.Flags().StringVar(&maintenanceService, "service", "", "Service to put in maintenance mode (required)")
 	maintenanceCmd.MarkFlagRequired("service")
 }
@@ -90,31 +90,15 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 		}
 		serverName = maintenanceServer
 	} else {
-		// Default to first server or manager
-		envServers, err := cfg.GetEnvironmentServers(envName)
+		primaryName, err := cfg.GetPrimaryServer(envName)
 		if err != nil {
-			return fmt.Errorf("failed to get environment servers: %w", err)
+			return fmt.Errorf("failed to get primary node: %w", err)
 		}
-
-		if len(envServers) == 0 {
-			return fmt.Errorf("no servers configured for environment %s", envName)
-		}
-
-		// If multi-server (Swarm), use manager; otherwise use first server
-		if len(envServers) > 1 {
-			managerName, err := cfg.GetManagerServer(envName)
-			if err != nil {
-				return fmt.Errorf("failed to get manager server: %w", err)
-			}
-			serverName = managerName
-			server = cfg.Servers[managerName]
-		} else {
-			serverName = envServers[0]
-			server = cfg.Servers[serverName]
-		}
+		serverName = primaryName
+		server = cfg.Servers[primaryName]
 
 		if verbose {
-			fmt.Printf("Using server: %s (%s)\n", serverName, server.Host)
+			fmt.Printf("Using node: %s (%s)\n", serverName, server.Host)
 		}
 	}
 
@@ -493,36 +477,35 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to decode maintenance page: %w", err)
 	}
 
-	// Deploy maintenance container with Traefik labels
+	// Deploy maintenance container with proxy labels.
 	// Use priority 100 to ensure it takes precedence over normal service (priority 10)
 	fmt.Printf("→ Deploying maintenance container...\n")
 
 	containerName := fmt.Sprintf("%s_%s_maintenance", cfg.Project.Name, maintenanceService)
 	networkName := fmt.Sprintf("tako_%s_%s", cfg.Project.Name, envName)
 
-	// Build Traefik labels for all domains using the label builder
+	// Build proxy labels for all domains using the label builder.
 	labelBuilder := utils.NewDockerLabelBuilder()
 
 	for _, domain := range service.Proxy.Domains {
 		domainSafe := strings.ReplaceAll(domain, ".", "-")
 		routerName := fmt.Sprintf("%s-maintenance", domainSafe)
 
-		// Use TraefikLabelBuilder for proper escaping
-		traefikBuilder := utils.NewTraefikLabelBuilder(routerName, containerName)
-		traefikBuilder.
+		proxyBuilder := utils.NewProxyLabelBuilder(routerName, containerName)
+		proxyBuilder.
 			Enable().
 			HostRule(domain).
 			Priority(100). // Higher priority than normal routes
 			Entrypoints("web", "websecure").
 			TLS("letsencrypt")
 
-		// Add all Traefik labels
-		for _, label := range traefikBuilder.BuildSlice() {
+		// Add all proxy labels.
+		for _, label := range proxyBuilder.BuildSlice() {
 			labelBuilder.AddRaw(label)
 		}
 	}
 
-	traefikLabels := labelBuilder.BuildSlice()
+	proxyLabels := labelBuilder.BuildSlice()
 
 	// Create docker run command
 	dockerCmd := fmt.Sprintf(
@@ -530,7 +513,7 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 		containerName,
 		networkName,
 		maintenanceDir,
-		strings.Join(traefikLabels, " "),
+		strings.Join(proxyLabels, " "),
 	)
 
 	// Remove existing maintenance container if any

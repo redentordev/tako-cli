@@ -169,7 +169,29 @@ func generateJSONConfig(projectName string) string {
   "project": {
     "name": "%s",
     "version": "1.0.0"
-  },
+	  },
+	  "runtime": {
+	    "mode": "takod",
+	    "agent": {
+	      "enabled": true,
+	      "socket": "/run/tako/takod.sock",
+	      "dataDir": "/var/lib/tako"
+	    }
+	  },
+	  "state": {
+	    "backend": "replicated",
+	    "deployConsistency": "lease",
+	    "onUnreachableNode": "block",
+	    "remoteCacheEnabled": true
+	  },
+	  "mesh": {
+	    "enabled": true,
+	    "networkCIDR": "10.210.0.0/16",
+	    "interface": "tako",
+	    "listenPort": 51820,
+	    "subnetBits": 24,
+	    "natTraversal": true
+	  },
   "servers": {
     "production": {
       "host": "${SERVER_HOST}",
@@ -215,6 +237,30 @@ project:
   version: 1.0.0
 
 # ============================================================================
+# RUNTIME MODEL
+# ============================================================================
+	runtime:
+	  mode: takod
+	  agent:
+	    enabled: true
+	    socket: /run/tako/takod.sock
+	    dataDir: /var/lib/tako
+
+	state:
+	  backend: replicated        # Remote takod state is the source of truth.
+	  deployConsistency: lease   # Current deploy consistency policy.
+	  onUnreachableNode: block   # Block deploys when a selected node is unreachable.
+	  remoteCacheEnabled: true
+
+	mesh:
+	  enabled: true              # Single-node deployments are one-node meshes.
+	  networkCIDR: 10.210.0.0/16
+	  interface: tako
+	  listenPort: 51820
+	  subnetBits: 24
+	  natTraversal: true
+
+# ============================================================================
 # SERVER DEFINITIONS (Required)
 # ============================================================================
 servers:
@@ -223,9 +269,8 @@ servers:
     user: root                 # SSH user (root recommended for setup)
     port: 22                   # SSH port (default: 22)
     sshKey: ~/.ssh/id_ed25519  # Path to your SSH private key
-    # roles:                   # Optional: server roles for multi-server deployments
-    #   - web
-    #   - worker
+    # labels:                  # Optional: labels for placement/server selection
+    #   zone: primary
 
 # ============================================================================
 # ENVIRONMENTS (Required)
@@ -245,7 +290,7 @@ environments:
         # replicas: 1     # Number of container replicas (default: 1)
         # restart: unless-stopped  # Restart policy: no, on-failure, always, unless-stopped
         
-        # Traefik reverse proxy (for public web services)
+        # Public proxy routing
         proxy:
           # Primary domain where traffic is served
           domain: %s.${SERVER_HOST}.sslip.io  # sslip.io provides automatic DNS
@@ -363,9 +408,9 @@ environments:
 #   password: ${REGISTRY_TOKEN}
 
 # ============================================================================
-# MULTI-SERVER SWARM CONFIGURATION (Optional - for 2+ servers)
-# ============================================================================
-# For deployments with multiple servers, Tako automatically uses Docker Swarm
+	# MULTI-SERVER MESH CONFIGURATION (Optional - for 2+ servers)
+	# ============================================================================
+	# Additional servers join the same takod mesh model.
 # 
 # servers:
 #   server1:

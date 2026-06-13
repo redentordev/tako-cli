@@ -30,22 +30,22 @@ const (
 
 // DriftReport represents a drift detection report
 type DriftReport struct {
-	Service     string            `json:"service"`
-	Type        DriftType         `json:"type"`
-	Expected    string            `json:"expected"`
-	Actual      string            `json:"actual"`
-	Details     map[string]string `json:"details,omitempty"`
-	DetectedAt  time.Time         `json:"detected_at"`
-	Severity    string            `json:"severity"` // low, medium, high, critical
+	Service    string            `json:"service"`
+	Type       DriftType         `json:"type"`
+	Expected   string            `json:"expected"`
+	Actual     string            `json:"actual"`
+	Details    map[string]string `json:"details,omitempty"`
+	DetectedAt time.Time         `json:"detected_at"`
+	Severity   string            `json:"severity"` // low, medium, high, critical
 }
 
 // DriftState represents the current drift state
 type DriftState struct {
-	Project      string        `json:"project"`
-	Environment  string        `json:"environment"`
-	LastCheck    time.Time     `json:"last_check"`
-	Drifts       []DriftReport `json:"drifts"`
-	ServicesOK   []string      `json:"services_ok"`
+	Project       string        `json:"project"`
+	Environment   string        `json:"environment"`
+	LastCheck     time.Time     `json:"last_check"`
+	Drifts        []DriftReport `json:"drifts"`
+	ServicesOK    []string      `json:"services_ok"`
 	CheckDuration time.Duration `json:"check_duration"`
 }
 
@@ -56,12 +56,12 @@ type Detector struct {
 	environment string
 	notifier    *notification.Notifier
 	verbose     bool
-	
+
 	// State
-	mu          sync.RWMutex
-	lastState   *DriftState
-	stopCh      chan struct{}
-	running     bool
+	mu        sync.RWMutex
+	lastState *DriftState
+	stopCh    chan struct{}
+	running   bool
 }
 
 // NewDetector creates a new drift detector
@@ -79,7 +79,7 @@ func NewDetector(client *ssh.Client, cfg *config.Config, environment string, not
 // CheckOnce performs a single drift detection check
 func (d *Detector) CheckOnce() (*DriftState, error) {
 	start := time.Now()
-	
+
 	env, err := d.config.GetEnvironment(d.environment)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get environment: %w", err)
@@ -102,7 +102,7 @@ func (d *Detector) CheckOnce() (*DriftState, error) {
 	// Check each configured service
 	for serviceName, serviceCfg := range env.Services {
 		fullServiceName := fmt.Sprintf("%s_%s_%s", d.config.Project.Name, d.environment, serviceName)
-		
+
 		actual, exists := actualServices[fullServiceName]
 		if !exists {
 			// Service doesn't exist at all
@@ -122,7 +122,7 @@ func (d *Detector) CheckOnce() (*DriftState, error) {
 		if expectedReplicas == 0 {
 			expectedReplicas = 1
 		}
-		
+
 		if actual.Replicas < expectedReplicas {
 			state.Drifts = append(state.Drifts, DriftReport{
 				Service:    serviceName,
@@ -160,11 +160,11 @@ func (d *Detector) CheckOnce() (*DriftState, error) {
 		if !strings.HasPrefix(fullName, d.config.Project.Name+"_"+d.environment+"_") {
 			continue
 		}
-		
+
 		// Extract service name
 		prefix := d.config.Project.Name + "_" + d.environment + "_"
 		serviceName := strings.TrimPrefix(fullName, prefix)
-		
+
 		if _, exists := env.Services[serviceName]; !exists {
 			state.Drifts = append(state.Drifts, DriftReport{
 				Service:    serviceName,
@@ -178,7 +178,7 @@ func (d *Detector) CheckOnce() (*DriftState, error) {
 	}
 
 	state.CheckDuration = time.Since(start)
-	
+
 	// Store state
 	d.mu.Lock()
 	d.lastState = state
@@ -246,7 +246,7 @@ func (d *Detector) Start(ctx context.Context, interval time.Duration) error {
 				}
 				continue
 			}
-			
+
 			if d.verbose && len(state.Drifts) > 0 {
 				fmt.Printf("  ⚠ Detected %d drifts\n", len(state.Drifts))
 				for _, drift := range state.Drifts {
@@ -261,7 +261,7 @@ func (d *Detector) Start(ctx context.Context, interval time.Duration) error {
 func (d *Detector) Stop() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	
+
 	if d.running {
 		close(d.stopCh)
 	}
@@ -305,16 +305,20 @@ type ActualService struct {
 	Running  int
 }
 
-// getActualServices gets the actual running services from Docker Swarm
+// getActualServices gets the actual running takod containers grouped by service.
 func (d *Detector) getActualServices() (map[string]ActualService, error) {
-	// Get service list with details
-	cmd := "docker service ls --format '{{.Name}}|{{.Image}}|{{.Replicas}}'"
+	cmd := fmt.Sprintf(
+		"docker ps --filter label=tako.project=%s --filter label=tako.environment=%s --format '{{.Names}}|{{.Image}}'",
+		d.config.Project.Name,
+		d.environment,
+	)
 	output, err := d.client.Execute(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list services: %w", err)
+		return nil, fmt.Errorf("failed to list containers: %w", err)
 	}
 
 	services := make(map[string]ActualService)
+	prefix := d.config.Project.Name + "_" + d.environment + "_"
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -326,20 +330,29 @@ func (d *Detector) getActualServices() (map[string]ActualService, error) {
 			continue
 		}
 
-		name := parts[0]
+		containerName := parts[0]
 		image := parts[1]
-		replicaStr := parts[2]
 
-		// Parse replicas (format: "2/3" or "3/3")
-		var running, desired int
-		fmt.Sscanf(replicaStr, "%d/%d", &running, &desired)
-
-		services[name] = ActualService{
-			Name:     name,
-			Image:    image,
-			Replicas: desired,
-			Running:  running,
+		if !strings.HasPrefix(containerName, prefix) {
+			continue
 		}
+
+		remainder := strings.TrimPrefix(containerName, prefix)
+		nameParts := strings.Split(remainder, "_")
+		if len(nameParts) < 2 {
+			continue
+		}
+		serviceName := strings.Join(nameParts[:len(nameParts)-1], "_")
+		fullName := prefix + serviceName
+
+		actual := services[fullName]
+		if actual.Name == "" {
+			actual.Name = fullName
+			actual.Image = image
+		}
+		actual.Replicas++
+		actual.Running++
+		services[fullName] = actual
 	}
 
 	return services, nil
@@ -350,13 +363,13 @@ func (d *Detector) getReplicaSeverity(actual, expected int) string {
 	if actual == 0 {
 		return "critical"
 	}
-	
+
 	ratio := float64(actual) / float64(expected)
 	if ratio < 0.5 {
 		return "high"
 	} else if ratio < 1.0 {
 		return "medium"
 	}
-	
+
 	return "low"
 }

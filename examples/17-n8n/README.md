@@ -202,10 +202,10 @@ Verify domain resolves to your server:
 nslookup n8n.<your-ip>.sslip.io
 ```
 
-Check Traefik logs:
+Check proxy logs:
 ```bash
 ssh root@your-server-ip
-docker service logs traefik
+docker logs tako-proxy
 ```
 
 ### Data not persisting

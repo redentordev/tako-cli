@@ -14,9 +14,9 @@ type Manager struct {
 	basePath string
 	project  string
 	env      string
-	mu       sync.Mutex  // Protect concurrent access within process
-	lock     *StateLock  // Cross-process file-based locking
-	lockInfo *LockInfo   // Current lock if held
+	mu       sync.Mutex // Protect concurrent access within process
+	lock     *StateLock // Cross-process file-based locking
+	lockInfo *LockInfo  // Current lock if held
 }
 
 // GlobalState represents the overall project state
@@ -27,7 +27,7 @@ type GlobalState struct {
 		CreatedAt    time.Time `json:"created_at"`
 		LastDeployed time.Time `json:"last_deployed"`
 	} `json:"project"`
-	Mode         string                       `json:"mode"` // "swarm" or "single"
+	Mode         string                       `json:"mode"` // runtime mode, e.g. "takod"
 	Environments map[string]*EnvironmentState `json:"environments"`
 	Metadata     struct {
 		TakoVersion string `json:"tako_version"`
@@ -174,8 +174,8 @@ func NewManager(projectPath, projectName, environment string) (*Manager, error) 
 		"logs/deployments",
 		"logs/builds",
 		"logs/errors",
-		"swarm",
-		"config/traefik",
+		"takod",
+		"config/proxy",
 		"config/networks",
 	}
 

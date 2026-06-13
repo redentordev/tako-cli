@@ -36,19 +36,19 @@ var (
 var deployCmd = &cobra.Command{
 	Use:   "deploy",
 	Short: "Deploy your application to configured servers",
-	Long: `Deploy your application using a zero-downtime blue-green deployment strategy.
+	Long: `Deploy your application by reconciling desired services on the takod mesh.
 
 The deployment process:
   1. Run pre-deploy hooks (tests, builds)
   2. Build Docker image
   3. Push image to registry
-  4. Deploy new version alongside current version (blue-green)
+  4. Prepare selected takod nodes
   5. Run health checks
-  6. Switch traffic to new version
-  7. Remove old version
-  8. Run post-deploy hooks (migrations, etc.)
+  6. Recreate service containers to match desired state
+  7. Replicate deployment state
+  8. Run post-deploy hooks
 
-If any step fails, the deployment is automatically rolled back.`,
+If a step fails, deployment stops and records the failed state for inspection or rollback.`,
 	RunE: runDeploy,
 }
 
@@ -62,11 +62,30 @@ func init() {
 	deployCmd.Flags().StringVarP(&commitMessage, "message", "m", "", "Commit message for uncommitted changes")
 }
 
+func ensureDeployRuntimeSupported(cfg *config.Config) error {
+	if !cfg.IsTakodRuntime() {
+		return fmt.Errorf("runtime.mode=%s is not supported; Tako now uses runtime.mode=takod", cfg.GetRuntimeMode())
+	}
+	if !cfg.IsMeshEnabled() {
+		return fmt.Errorf("mesh.enabled=false is not supported; single-node deploys use a one-node mesh")
+	}
+	if cfg.GetStateBackend() != config.StateBackendReplicated {
+		return fmt.Errorf("state.backend=%s is not supported; takod deployments use replicated state", cfg.GetStateBackend())
+	}
+	if cfg.GetDeployConsistency() != config.StateDeployConsistencyLease {
+		return fmt.Errorf("state.deployConsistency=%s is not implemented yet; current deploys support lease", cfg.GetDeployConsistency())
+	}
+	return nil
+}
+
 func runDeploy(cmd *cobra.Command, args []string) error {
 	// Load deployment configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if err := ensureDeployRuntimeSupported(cfg); err != nil {
+		return err
 	}
 
 	// Acquire state lock to prevent concurrent deployments
@@ -166,14 +185,37 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
-	// Determine which servers to deploy to
-	servers := cfg.Servers
+	// Determine which environment nodes to deploy to.
+	envServerNames, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	servers := make(map[string]config.ServerConfig, len(envServerNames))
+	serverNames := append([]string(nil), envServerNames...)
+	for _, serverName := range serverNames {
+		server, exists := cfg.Servers[serverName]
+		if !exists {
+			return fmt.Errorf("server %s not found in configuration", serverName)
+		}
+		servers[serverName] = server
+	}
 	if deployServer != "" {
 		server, exists := cfg.Servers[deployServer]
 		if !exists {
 			return fmt.Errorf("server %s not found in configuration", deployServer)
 		}
+		found := false
+		for _, serverName := range envServerNames {
+			if serverName == deployServer {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("server %s is not part of environment %s", deployServer, envName)
+		}
 		servers = map[string]config.ServerConfig{deployServer: server}
+		serverNames = []string{deployServer}
 	}
 
 	// Determine which services to deploy
@@ -189,21 +231,21 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n=== Starting deployment ===\n\n")
 	fmt.Printf("Project: %s v%s\n", cfg.Project.Name, cfg.Project.Version)
 	fmt.Printf("Environment: %s\n", envName)
+	fmt.Printf("Runtime: %s\n", cfg.GetRuntimeMode())
+	fmt.Printf("State: %s (consistency: %s)\n", cfg.GetStateBackend(), cfg.GetDeployConsistency())
+	if cfg.IsMeshEnabled() {
+		fmt.Printf("Mesh: enabled (%s via %s)\n", cfg.Mesh.NetworkCIDR, cfg.Mesh.Interface)
+	} else {
+		fmt.Printf("Mesh: disabled\n")
+	}
 	fmt.Printf("Servers: %d\n", len(servers))
 	fmt.Printf("Services: %d\n\n", len(services))
 
-	// Get first server for initial operations
-	firstServerName := ""
-	var firstServer config.ServerConfig
-	for name, srv := range servers {
-		firstServerName = name
-		firstServer = srv
-		break
-	}
-
-	if firstServerName == "" {
+	if len(serverNames) == 0 {
 		return fmt.Errorf("no servers configured")
 	}
+	firstServerName := serverNames[0]
+	firstServer := servers[firstServerName]
 
 	// Get or create SSH client for first server
 	firstClient, err := sshPool.GetOrCreateWithAuth(firstServer.Host, firstServer.Port, firstServer.User, firstServer.SSHKey, firstServer.Password)
@@ -211,13 +253,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to connect to server %s: %w", firstServerName, err)
 	}
 
-	// Create deployer with pool for Swarm support
+	// Create deployer with pool for takod support
 	deploy := deployer.NewDeployerWithPool(firstClient, cfg, envName, sshPool, verbose)
+	if err := deploy.SetTargetServers(serverNames); err != nil {
+		return err
+	}
 
-	// Always setup Swarm cluster (works for single or multi-server)
-	// This provides consistent deployment model and easy scaling
-	if err := deploy.SetupSwarmCluster(); err != nil {
-		return fmt.Errorf("failed to setup swarm cluster: %w", err)
+	if err := deploy.SetupTakodRuntime(); err != nil {
+		return fmt.Errorf("failed to setup takod runtime: %w", err)
 	}
 
 	// === AUTO-SYNC STATE ===
@@ -246,8 +289,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		localStateMgr = nil // Continue without state management
 	}
 
-	// Gather actual state from running services
-	actualState, err := reconcile.GatherActualState(firstClient, cfg.Project.Name, envName, localStateMgr)
+	// Gather actual state from running containers across the selected mesh nodes.
+	actualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, localStateMgr)
 	if err != nil {
 		if verbose {
 			fmt.Printf("Warning: failed to gather actual state: %v\n", err)
@@ -337,18 +380,6 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Pre-deployment network verification
-	if verbose {
-		fmt.Printf("\n→ Verifying network configuration...\n")
-	}
-	if err := deploy.VerifyNetworkSetup(); err != nil {
-		if verbose {
-			fmt.Printf("  Warning: Network verification failed: %v\n", err)
-		}
-	} else if verbose {
-		fmt.Printf("  ✓ Network configuration verified\n")
-	}
-
 	// === WILDCARD SSL DETECTION ===
 	// Check for wildcard domains and setup acme-dns if needed
 	sslReqs := ssl.DetectRequirements(services)
@@ -409,21 +440,20 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Always use Swarm mode for consistent deployment model
-	// Benefits: unified code path, seamless scaling, built-in rolling updates
 	if len(servers) == 1 {
-		fmt.Printf("\n🐝 Using Docker Swarm mode (single-server)\n\n")
+		fmt.Printf("\n🐙 Using takod mesh runtime (one node)\n\n")
 	} else {
-		fmt.Printf("\n🐝 Using Docker Swarm mode (multi-server cluster)\n\n")
+		fmt.Printf("\n🐙 Using takod mesh runtime (%d nodes)\n\n", len(servers))
 	}
 
 	// Log deployment start
 	if localStateMgr != nil {
-		localStateMgr.LogDeployment(fmt.Sprintf("Starting Swarm deployment to %s", envName))
+		localStateMgr.LogDeployment(fmt.Sprintf("Starting takod deployment to %s", envName))
 		localStateMgr.LogDeployment(fmt.Sprintf("Git commit: %s", commitInfo.ShortHash))
 	}
 
-	// Deploy to manager node only
+	// Persist deployment state through the first reachable node. takod replication
+	// makes this recoverable from any healthy node as the runtime matures.
 	stateManager := remotestate.NewStateManager(firstClient, cfg.Project.Name, firstServer.Host)
 	if err := stateManager.Initialize(); err != nil {
 		if verbose {
@@ -493,7 +523,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to resolve service dependencies: %w", err)
 	}
 
-	// Deploy each service to Swarm in dependency order
+	// Deploy each service through takod placement in dependency order
 	for _, serviceName := range deploymentOrder {
 		service := services[serviceName]
 		fmt.Printf("→ Deploying service: %s\n", serviceName)
@@ -503,7 +533,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 		// Build image if needed (but don't deploy with docker run)
 		if !skipBuild && service.Build != "" {
-			// Build the image on manager node
+			// Build the image on the first connected node
 			builtImageName, err := deploy.BuildImage(serviceName, &service)
 			if err != nil {
 				fmt.Printf("  ✗ Build failed: %v\n", err)
@@ -520,17 +550,16 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			fullImageName = service.Image
 		}
 
-		// Deploy to Swarm and wait for health (health verification is built into DeployServiceSwarm)
-		if err := deploy.DeployServiceSwarm(serviceName, &service, fullImageName); err != nil {
-			fmt.Printf("  ✗ Swarm deployment failed: %v\n", err)
+		if err := deploy.DeployServiceTakod(serviceName, &service, fullImageName); err != nil {
+			fmt.Printf("  ✗ takod deployment failed: %v\n", err)
 			deploymentFailed = true
-			deploymentError = fmt.Errorf("swarm deployment failed for %s: %w", serviceName, err)
+			deploymentError = fmt.Errorf("takod deployment failed for %s: %w", serviceName, err)
 			deployment.Status = remotestate.StatusFailed
 			deployment.Error = err.Error()
 			break
 		}
 
-		fmt.Printf("  ✓ Service %s deployed to swarm\n", serviceName)
+		fmt.Printf("  ✓ Service %s reconciled by takod\n", serviceName)
 
 		// Save service state
 		deployment.Services[serviceName] = remotestate.ServiceState{
@@ -549,7 +578,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Warning: failed to save remote deployment state: %v\n", err)
 		}
 
-		// Replicate state to worker nodes (async, fire-and-forget)
+		// Replicate state to the rest of the mesh (async, fire-and-forget).
 		if len(servers) > 1 {
 			replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
 			history, _ := stateManager.LoadHistory()
@@ -562,12 +591,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				DeploymentID:    fmt.Sprintf("deploy-%s", time.Now().Format("20060102-150405")),
 				Timestamp:       startTime,
 				Environment:     envName,
-				Mode:            "swarm",
+				Mode:            cfg.GetRuntimeMode(),
 				Status:          "success",
 				DurationSeconds: int(time.Since(startTime).Seconds()),
 				GitCommit:       commitInfo.Hash,
 				TriggeredBy:     remotestate.GetCurrentUser(),
-				Notes:           fmt.Sprintf("Deployed %d services to swarm", len(services)),
+				Notes:           fmt.Sprintf("Deployed %d services to %s runtime", len(services), cfg.GetRuntimeMode()),
 			}
 			if err := localStateMgr.SaveDeployment(localDeployment); err != nil && verbose {
 				fmt.Printf("Warning: failed to save local deployment state: %v\n", err)
@@ -610,10 +639,10 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				},
 			})
 		}
-		return fmt.Errorf("swarm deployment failed")
+		return fmt.Errorf("takod deployment failed")
 	}
 
-	fmt.Printf("\n✓ Swarm deployment completed!\n")
+	fmt.Printf("\n✓ takod deployment completed!\n")
 
 	// Automatic cleanup after successful deployment (per-service hooks now handled by deployer)
 	if verbose {
@@ -702,7 +731,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 					if verbose {
 						fmt.Printf("\n⚠️  SSL certificate not yet available for %s\n", domain)
 						fmt.Printf("   This is normal for first deployment. Certificate will be provisioned automatically.\n")
-						fmt.Printf("   You can check status at: http://%s:8080/dashboard/\n", firstServer.Host)
+						fmt.Printf("   You can check status with: tako ssl status\n")
 					}
 				}
 				cancel()

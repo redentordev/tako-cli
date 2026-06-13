@@ -13,37 +13,37 @@ import (
 type EventType string
 
 const (
-	EventDeployStarted   EventType = "deploy_started"
-	EventDeploySucceeded EventType = "deploy_succeeded"
-	EventDeployFailed    EventType = "deploy_failed"
-	EventRollbackStarted EventType = "rollback_started"
-	EventRollbackDone    EventType = "rollback_done"
-	EventServiceDown     EventType = "service_down"
-	EventServiceUp       EventType = "service_up"
+	EventDeployStarted    EventType = "deploy_started"
+	EventDeploySucceeded  EventType = "deploy_succeeded"
+	EventDeployFailed     EventType = "deploy_failed"
+	EventRollbackStarted  EventType = "rollback_started"
+	EventRollbackDone     EventType = "rollback_done"
+	EventServiceDown      EventType = "service_down"
+	EventServiceUp        EventType = "service_up"
 	EventServiceRestarted EventType = "service_restarted"
-	EventDriftDetected   EventType = "drift_detected"
-	EventBackupCompleted EventType = "backup_completed"
-	EventBackupFailed    EventType = "backup_failed"
+	EventDriftDetected    EventType = "drift_detected"
+	EventBackupCompleted  EventType = "backup_completed"
+	EventBackupFailed     EventType = "backup_failed"
 	// Resource alerts
-	EventHighCPU         EventType = "high_cpu"
-	EventHighMemory      EventType = "high_memory"
-	EventHighDisk        EventType = "high_disk"
-	EventResourceNormal  EventType = "resource_normal"
+	EventHighCPU        EventType = "high_cpu"
+	EventHighMemory     EventType = "high_memory"
+	EventHighDisk       EventType = "high_disk"
+	EventResourceNormal EventType = "resource_normal"
 	// Health alerts
-	EventHealthCheckFailed  EventType = "health_check_failed"
+	EventHealthCheckFailed    EventType = "health_check_failed"
 	EventHealthCheckRecovered EventType = "health_check_recovered"
-	EventContainerOOM       EventType = "container_oom"
-	EventContainerCrashLoop EventType = "container_crash_loop"
+	EventContainerOOM         EventType = "container_oom"
+	EventContainerCrashLoop   EventType = "container_crash_loop"
 	// SSL alerts
-	EventSSLExpiringSoon  EventType = "ssl_expiring_soon"
-	EventSSLExpired       EventType = "ssl_expired"
-	EventSSLRenewed       EventType = "ssl_renewed"
-	EventSSLPending       EventType = "ssl_pending"
-	EventSSLIssued        EventType = "ssl_issued"
-	EventSSLFailed        EventType = "ssl_failed"
+	EventSSLExpiringSoon EventType = "ssl_expiring_soon"
+	EventSSLExpired      EventType = "ssl_expired"
+	EventSSLRenewed      EventType = "ssl_renewed"
+	EventSSLPending      EventType = "ssl_pending"
+	EventSSLIssued       EventType = "ssl_issued"
+	EventSSLFailed       EventType = "ssl_failed"
 	// Scaling events
-	EventScaleUp          EventType = "scale_up"
-	EventScaleDown        EventType = "scale_down"
+	EventScaleUp   EventType = "scale_up"
+	EventScaleDown EventType = "scale_down"
 )
 
 // Event represents a notification event
@@ -621,9 +621,9 @@ func SSLExpiringSoonEvent(project, env string, domain string, expiresAt time.Tim
 		Environment: env,
 		Message:     fmt.Sprintf("SSL certificate for `%s` expires in %d days (%s)", domain, daysUntilExpiry, expiresAt.Format("2006-01-02")),
 		Details: map[string]string{
-			"domain":      domain,
-			"expires_at":  expiresAt.Format(time.RFC3339),
-			"days_left":   fmt.Sprintf("%d", daysUntilExpiry),
+			"domain":     domain,
+			"expires_at": expiresAt.Format(time.RFC3339),
+			"days_left":  fmt.Sprintf("%d", daysUntilExpiry),
 		},
 		Timestamp: time.Now(),
 	}

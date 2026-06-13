@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
@@ -38,7 +37,7 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(consoleCmd)
-	consoleCmd.Flags().StringVarP(&consoleServer, "server", "s", "", "Target server (default: manager/first)")
+	consoleCmd.Flags().StringVarP(&consoleServer, "server", "s", "", "Target server (default: primary/first)")
 	consoleCmd.Flags().StringVar(&consoleShell, "shell", "/bin/sh", "Shell to open inside the container")
 }
 
@@ -131,7 +130,7 @@ func serviceNames(services map[string]config.ServiceConfig) []string {
 	return names
 }
 
-// resolveServer picks the target server from the flag or defaults to manager/first.
+// resolveServer picks the target server from the flag or defaults to primary/first.
 func resolveServer(cfg *config.Config, envName, serverFlag string) (string, config.ServerConfig, error) {
 	if serverFlag != "" {
 		sc, ok := cfg.Servers[serverFlag]
@@ -151,11 +150,11 @@ func resolveServer(cfg *config.Config, envName, serverFlag string) (string, conf
 	}
 
 	if len(envServers) > 1 {
-		managerName, err := cfg.GetManagerServer(envName)
+		primaryName, err := cfg.GetPrimaryServer(envName)
 		if err != nil {
-			return "", config.ServerConfig{}, fmt.Errorf("failed to get manager server: %w", err)
+			return "", config.ServerConfig{}, fmt.Errorf("failed to get primary node: %w", err)
 		}
-		return managerName, cfg.Servers[managerName], nil
+		return primaryName, cfg.Servers[primaryName], nil
 	}
 
 	name := envServers[0]
@@ -164,23 +163,19 @@ func resolveServer(cfg *config.Config, envName, serverFlag string) (string, conf
 
 // findContainerName resolves the running container name for a service.
 func findContainerName(client *ssh.Client, cfg *config.Config, envName, serviceName string) (string, error) {
-	// Check if we're in Swarm mode
-	swarmStateFile := fmt.Sprintf(".tako/swarm_%s_%s.json", cfg.Project.Name, envName)
-	if _, err := os.Stat(swarmStateFile); err == nil {
-		// Swarm mode: query docker for the actual container
-		filter := fmt.Sprintf("%s_%s_%s", cfg.Project.Name, envName, serviceName)
-		findCmd := fmt.Sprintf("docker ps --filter name=%s --format '{{.Names}}' | head -1", filter)
-		output, err := client.Execute(findCmd)
-		if err != nil {
-			return "", fmt.Errorf("failed to find container for service %s: %w", serviceName, err)
-		}
-		name := strings.TrimSpace(output)
-		if name == "" {
-			return "", fmt.Errorf("no running container found for service %s", serviceName)
-		}
+	findCmd := fmt.Sprintf(
+		"docker ps --filter label=tako.project=%s --filter label=tako.environment=%s --filter label=tako.service=%s --format '{{.Names}}' | head -1",
+		cfg.Project.Name,
+		envName,
+		serviceName,
+	)
+	output, err := client.Execute(findCmd)
+	if err != nil {
+		return "", fmt.Errorf("failed to find container for service %s: %w", serviceName, err)
+	}
+	if name := strings.TrimSpace(output); name != "" {
 		return name, nil
 	}
 
-	// Single-server mode: use standard naming
 	return fmt.Sprintf("%s_%s_%s_1", cfg.Project.Name, envName, serviceName), nil
 }

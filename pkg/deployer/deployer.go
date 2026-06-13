@@ -14,10 +14,8 @@ import (
 	"github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/hooks"
-	"github.com/redentordev/tako-cli/pkg/network"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/ssh"
-	"github.com/redentordev/tako-cli/pkg/swarm"
 )
 
 // streamWriter wraps an io.Writer with a prefix for each line
@@ -49,13 +47,13 @@ func (sw *streamWriter) Write(p []byte) (n int, err error) {
 
 // Deployer handles deployment operations
 type Deployer struct {
-	client           *ssh.Client
-	config           *config.Config
-	environment      string
-	verbose          bool
-	sshPool          *ssh.Pool
-	swarmManager     *swarm.Manager
+	client            *ssh.Client
+	config            *config.Config
+	environment       string
+	verbose           bool
+	sshPool           *ssh.Pool
 	distributedImages map[string]bool
+	targetServers     []string
 }
 
 // NewDeployer creates a new deployer
@@ -70,18 +68,57 @@ func NewDeployer(client *ssh.Client, cfg *config.Config, environment string, ver
 
 // NewDeployerWithPool creates a deployer with SSH pool for multi-server support
 func NewDeployerWithPool(client *ssh.Client, cfg *config.Config, environment string, sshPool *ssh.Pool, verbose bool) *Deployer {
-	swarmMgr := swarm.NewManager(cfg, sshPool, environment, verbose)
 	return &Deployer{
 		client:            client,
 		config:            cfg,
 		environment:       environment,
 		verbose:           verbose,
 		sshPool:           sshPool,
-		swarmManager:      swarmMgr,
 		distributedImages: make(map[string]bool),
 	}
 }
 
+// SetTargetServers restricts takod reconciliation to a validated subset of the
+// environment nodes. Passing an empty slice restores the full environment.
+func (d *Deployer) SetTargetServers(serverNames []string) error {
+	if len(serverNames) == 0 {
+		d.targetServers = nil
+		return nil
+	}
+
+	environmentServers, err := d.config.GetEnvironmentServers(d.environment)
+	if err != nil {
+		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
+
+	allowed := make(map[string]bool, len(environmentServers))
+	for _, serverName := range environmentServers {
+		allowed[serverName] = true
+	}
+
+	targets := make([]string, 0, len(serverNames))
+	seen := make(map[string]bool, len(serverNames))
+	for _, serverName := range serverNames {
+		if seen[serverName] {
+			continue
+		}
+		if !allowed[serverName] {
+			return fmt.Errorf("target server %s is not part of environment %s", serverName, d.environment)
+		}
+		if _, ok := d.config.Servers[serverName]; !ok {
+			return fmt.Errorf("target server %s is not defined in servers", serverName)
+		}
+		targets = append(targets, serverName)
+		seen[serverName] = true
+	}
+
+	if len(targets) == 0 {
+		return fmt.Errorf("no target servers selected")
+	}
+
+	d.targetServers = targets
+	return nil
+}
 
 // createCrossPlatformZip creates a zip archive with Unix-style forward slashes
 // This ensures compatibility when deploying from Windows/Mac/Linux to Linux servers
@@ -171,107 +208,38 @@ func createCrossPlatformZip(sourceDir, zipPath string, excludeDirs []string) err
 	})
 }
 
-
-// RollbackToState rolls back a Swarm service to a specific deployment state
+// RollbackToState converges a service back to a saved takod deployment state.
 func (d *Deployer) RollbackToState(serviceName string, serviceState *state.ServiceState) error {
+	if d.sshPool == nil {
+		return fmt.Errorf("ssh pool not initialized")
+	}
+	if strings.TrimSpace(serviceState.Image) == "" {
+		return fmt.Errorf("deployment state for %s does not include an image", serviceName)
+	}
+
 	if d.verbose {
 		fmt.Printf("  Rolling back service %s to image %s...\n", serviceName, serviceState.Image)
 	}
 
-	// Check if the target image exists
-	checkImageCmd := fmt.Sprintf("docker images -q %s 2>/dev/null", serviceState.ImageID)
-	imageExists, _ := d.client.Execute(checkImageCmd)
-
-	if strings.TrimSpace(imageExists) == "" {
-		checkImageByNameCmd := fmt.Sprintf("docker images -q %s 2>/dev/null", serviceState.Image)
-		imageExists, _ = d.client.Execute(checkImageByNameCmd)
-
-		if strings.TrimSpace(imageExists) == "" {
-			return fmt.Errorf("image %s (ID: %s) not found on server - cannot rollback",
-				serviceState.Image, serviceState.ImageID)
-		}
-	}
-
-	if d.verbose {
-		fmt.Printf("  Found target image: %s\n", serviceState.Image)
-	}
-
-	fullServiceName := fmt.Sprintf("%s_%s_%s", d.config.Project.Name, d.environment, serviceName)
-
-	// Check if Swarm service exists
-	checkServiceCmd := fmt.Sprintf("docker service ls --filter name=%s --format '{{.Name}}'", fullServiceName)
-	existingService, _ := d.client.Execute(checkServiceCmd)
-
-	if strings.TrimSpace(existingService) != fullServiceName {
-		return fmt.Errorf("swarm service %s not found - cannot rollback", fullServiceName)
-	}
-
-	replicas := serviceState.Replicas
-	if replicas <= 0 {
-		replicas = 1
-	}
-
-	if d.verbose {
-		fmt.Printf("  Updating Swarm service to previous image...\n")
-	}
-
-	// Build environment variable arguments
-	getEnvCmd := fmt.Sprintf("docker service inspect %s --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{.}} {{end}}'", fullServiceName)
-	currentEnvOutput, _ := d.client.Execute(getEnvCmd)
-
-	envArgs := ""
-	for _, envVar := range strings.Fields(currentEnvOutput) {
-		if idx := strings.Index(envVar, "="); idx > 0 {
-			key := envVar[:idx]
-			envArgs += fmt.Sprintf(" --env-rm %s", key)
-		}
-	}
-
-	for key, value := range serviceState.Env {
-		escapedValue := strings.ReplaceAll(value, "'", "'\"'\"'")
-		envArgs += fmt.Sprintf(" --env-add %s='%s'", key, escapedValue)
-	}
-
-	updateCmd := fmt.Sprintf("docker service update --detach --force --image %s --replicas %d%s %s 2>&1",
-		serviceState.Image,
-		replicas,
-		envArgs,
-		fullServiceName,
-	)
-
-	if d.verbose {
-		fmt.Printf("  Command: %s\n", updateCmd)
-	}
-
-	output, err := d.client.Execute(updateCmd)
+	service, err := d.config.GetService(d.environment, serviceName)
 	if err != nil {
-		return fmt.Errorf("failed to update swarm service: %w\nOutput: %s", err, output)
+		return fmt.Errorf("failed to load service config for rollback: %w", err)
 	}
 
-	if d.verbose {
-		fmt.Printf("  ✓ Swarm service updated, rolling update in progress...\n")
+	rollbackService := *service
+	rollbackService.Image = serviceState.Image
+	rollbackService.Replicas = serviceState.Replicas
+	if serviceState.Port > 0 {
+		rollbackService.Port = serviceState.Port
+	}
+	if serviceState.Env != nil {
+		rollbackService.Env = serviceState.Env
 	}
 
-	time.Sleep(5 * time.Second)
-
-	verifyCmd := fmt.Sprintf("docker service ps %s --filter 'desired-state=running' --format '{{.CurrentState}}' | head -1", fullServiceName)
-	status, _ := d.client.Execute(verifyCmd)
-
-	if strings.Contains(strings.ToLower(status), "running") {
-		if d.verbose {
-			fmt.Printf("  ✓ Service rollback completed successfully\n")
-		}
-	} else {
-		if d.verbose {
-			fmt.Printf("  Warning: Service status: %s (rollback may still be in progress)\n", strings.TrimSpace(status))
-		}
-	}
-
-	return nil
+	return d.DeployServiceTakod(serviceName, &rollbackService, serviceState.Image)
 }
 
 // BuildImage builds a Docker image for a service without deploying it
-// This is used for Swarm mode where we need to build first, then deploy with docker service create
 func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig) (string, error) {
 	deployDir := fmt.Sprintf("/opt/%s", d.config.Project.Name)
 
@@ -532,27 +500,3 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 
 	return fullImageName, nil
 }
-
-// VerifyNetworkSetup verifies that Traefik is connected to all project networks
-func (d *Deployer) VerifyNetworkSetup() error {
-	// Check if Traefik container is running
-	checkCmd := "docker ps --filter name=^traefik$ --format '{{.Names}}'"
-	output, _ := d.client.Execute(checkCmd)
-
-	if strings.TrimSpace(output) != "traefik" {
-		// Traefik not running yet - will be created during deployment
-		return nil
-	}
-
-	// Get network manager
-	networkMgr := network.NewManager(d.client, d.config.Project.Name, d.environment, d.verbose)
-
-	// Ensure Traefik is connected to all project networks
-	if err := networkMgr.EnsureContainerConnectedToAllNetworks("traefik"); err != nil {
-		return fmt.Errorf("failed to verify Traefik network connections: %w", err)
-	}
-
-	return nil
-}
-
-

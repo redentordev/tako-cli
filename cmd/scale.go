@@ -2,13 +2,15 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/notification"
+	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
-	"github.com/redentordev/tako-cli/pkg/swarm"
 	"github.com/spf13/cobra"
 )
 
@@ -18,37 +20,29 @@ var (
 
 var scaleCmd = &cobra.Command{
 	Use:   "scale SERVICE=REPLICAS [SERVICE=REPLICAS...]",
-	Short: "Scale services to specified number of replicas",
+	Short: "Scale takod services to specified replicas",
 	Long: `Scale one or more services to a specified number of replicas.
 
-This command updates the number of running replicas for a service
-without rebuilding the image. It's perfect for horizontal scaling.
+This command reconciles running takod containers without rebuilding images.
 
 Examples:
-  tako scale web=5              # Scale web service to 5 replicas
-  tako scale api=3 web=2        # Scale multiple services
-  tako scale worker=10          # Scale background workers
-  tako scale web=0              # Scale down to 0 (pause service)
+  tako scale web=5
+  tako scale api=3 web=2
+  tako scale worker=10
+  tako scale web=0
 
-The command will:
-  - Deploy new replicas if scaling up
-  - Remove excess replicas if scaling down
-  - Update load balancer configuration
-  - Maintain zero-downtime during scaling
-
-Note: This scales the running containers without rebuilding.
-      To deploy new code, use 'tako deploy' instead.`,
+Note: this changes runtime state immediately. Update replicas in tako.yaml if
+you want the next full deploy to preserve the same count.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runScale,
 }
 
 func init() {
 	rootCmd.AddCommand(scaleCmd)
-	scaleCmd.Flags().StringVarP(&scaleServer, "server", "s", "", "Scale on specific server (default: all servers)")
+	scaleCmd.Flags().StringVarP(&scaleServer, "server", "s", "", "Scale on specific server")
 }
 
 func runScale(cmd *cobra.Command, args []string) error {
-	// Parse scale targets (format: service=replicas)
 	scaleTargets := make(map[string]int)
 	for _, arg := range args {
 		parts := strings.Split(arg, "=")
@@ -59,9 +53,8 @@ func runScale(cmd *cobra.Command, args []string) error {
 		service := strings.TrimSpace(parts[0])
 		replicas, err := strconv.Atoi(strings.TrimSpace(parts[1]))
 		if err != nil {
-			return fmt.Errorf("invalid replica count for %s: %v", service, err)
+			return fmt.Errorf("invalid replica count for %s: %w", service, err)
 		}
-
 		if replicas < 0 {
 			return fmt.Errorf("replica count cannot be negative for %s", service)
 		}
@@ -69,148 +62,136 @@ func runScale(cmd *cobra.Command, args []string) error {
 		scaleTargets[service] = replicas
 	}
 
-	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if !cfg.IsTakodRuntime() {
+		return fmt.Errorf("runtime.mode=%s is not supported; Tako now uses runtime.mode=takod", cfg.GetRuntimeMode())
+	}
 
-	// Get environment and services
 	envName := getEnvironmentName(cfg)
 	services, err := cfg.GetServices(envName)
 	if err != nil {
 		return fmt.Errorf("failed to get services: %w", err)
 	}
-
-	// Validate all services exist in environment
-	for service := range scaleTargets {
-		if _, exists := services[service]; !exists {
-			return fmt.Errorf("service '%s' not found in environment %s", service, envName)
+	for serviceName := range scaleTargets {
+		if _, exists := services[serviceName]; !exists {
+			return fmt.Errorf("service '%s' not found in environment %s", serviceName, envName)
 		}
 	}
 
-	// Determine which servers to scale on
-	serversToScale := make(map[string]config.ServerConfig)
-	if scaleServer != "" {
-		server, ok := cfg.Servers[scaleServer]
-		if !ok {
-			return fmt.Errorf("server '%s' not found in config", scaleServer)
-		}
-		serversToScale[scaleServer] = server
-	} else {
-		serversToScale = cfg.Servers
-	}
-
-	fmt.Printf("⚖️  Scaling %d service(s) on %d server(s)...\n\n", len(scaleTargets), len(serversToScale))
-
-	totalErrors := 0
-
-	// For Swarm, we only need to connect to the manager node (first server)
-	// Swarm handles distribution across all nodes
-	var managerName string
-	var managerCfg config.ServerConfig
-	for name, server := range serversToScale {
-		managerName = name
-		managerCfg = server
-		break
-	}
-
-	fmt.Printf("=== Scaling via Swarm manager: %s (%s) ===\n", managerName, managerCfg.Host)
-
-	// Connect to manager (supports both key and password auth)
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     managerCfg.Host,
-		Port:     managerCfg.Port,
-		User:     managerCfg.User,
-		SSHKey:   managerCfg.SSHKey,
-		Password: managerCfg.Password,
-	})
+	serverNames, err := scaleTargetServers(cfg, envName)
 	if err != nil {
-		return fmt.Errorf("failed to connect to manager %s: %w", managerName, err)
+		return err
 	}
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to manager %s: %w", managerName, err)
+	if len(serverNames) == 0 {
+		return fmt.Errorf("no servers configured for environment %s", envName)
 	}
-	defer client.Close()
 
-	// Create SSH pool and swarm manager
+	fmt.Printf("Scaling %d service(s) on %d takod node(s)...\n\n", len(scaleTargets), len(serverNames))
+
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
-	swarmMgr := swarm.NewManager(cfg, sshPool, envName, verbose)
 
-	// Setup notifications if configured
-	var notifier *notification.Notifier
-	if cfg.Notifications != nil && (cfg.Notifications.Slack != "" || cfg.Notifications.Discord != "" || cfg.Notifications.Webhook != "") {
-		notifier = notification.NewNotifier(notification.NotifierConfig{
-			SlackWebhook:   cfg.Notifications.Slack,
-			DiscordWebhook: cfg.Notifications.Discord,
-			Webhook:        cfg.Notifications.Webhook,
-		}, verbose)
+	firstServerName := serverNames[0]
+	firstServer := cfg.Servers[firstServerName]
+	firstClient, err := sshPool.GetOrCreateWithAuth(firstServer.Host, firstServer.Port, firstServer.User, firstServer.SSHKey, firstServer.Password)
+	if err != nil {
+		return fmt.Errorf("failed to connect to node %s: %w", firstServerName, err)
 	}
 
-	// Scale each service
+	deploy := deployer.NewDeployerWithPool(firstClient, cfg, envName, sshPool, verbose)
+	if err := deploy.SetTargetServers(serverNames); err != nil {
+		return err
+	}
+	if err := deploy.SetupTakodRuntime(); err != nil {
+		return fmt.Errorf("failed to setup takod runtime: %w", err)
+	}
+
+	actualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, nil)
+	if err != nil {
+		return fmt.Errorf("failed to gather current replica state: %w", err)
+	}
+
+	notifier := scaleNotifier(cfg)
+	totalErrors := 0
 	for serviceName, desiredReplicas := range scaleTargets {
-		// Build full service name: {project}_{env}_{service}
-		fullServiceName := fmt.Sprintf("%s_%s_%s", cfg.Project.Name, envName, serviceName)
+		currentReplicas := 0
+		if actual, ok := actualState[serviceName]; ok {
+			currentReplicas = actual.Replicas
+		}
 
-		fmt.Printf("\n→ Scaling %s: ", serviceName)
+		fmt.Printf("-> Scaling %s: %d -> %d replicas\n", serviceName, currentReplicas, desiredReplicas)
 
-		// Get current replica count from Swarm
-		currentReplicas, err := getSwarmReplicaCount(client, fullServiceName)
-		if err != nil {
-			fmt.Printf("❌ Failed to get current replicas: %v\n", err)
+		service := services[serviceName]
+		service.Replicas = desiredReplicas
+		if scaleServer != "" {
+			service.Placement = &config.PlacementConfig{
+				Strategy: "pinned",
+				Servers:  []string{scaleServer},
+			}
+		}
+
+		imageRef := service.Image
+		if imageRef == "" {
+			imageRef = cfg.GetFullImageName(serviceName, envName)
+		}
+
+		if err := deploy.DeployServiceTakod(serviceName, &service, imageRef); err != nil {
+			fmt.Printf("  Failed: %v\n", err)
 			totalErrors++
 			continue
 		}
 
-		fmt.Printf("%d → %d replicas\n", currentReplicas, desiredReplicas)
-
-		// Scale the Swarm service directly
-		if err := swarmMgr.ScaleService(client, fullServiceName, desiredReplicas); err != nil {
-			fmt.Printf("❌ Failed to scale %s: %v\n", serviceName, err)
-			totalErrors++
-			continue
-		}
-
-		fmt.Printf("✓ Service %s scaled successfully\n", serviceName)
-
-		// Send scale notification
+		fmt.Printf("  ✓ Service %s scaled\n", serviceName)
 		if notifier != nil && currentReplicas != desiredReplicas {
 			notifier.Notify(notification.ScaleEvent(cfg.Project.Name, envName, serviceName, currentReplicas, desiredReplicas))
 		}
 	}
 
-	fmt.Println()
-
-	// Summary
 	if totalErrors > 0 {
-		fmt.Printf("⚠️  Scaling completed with %d errors\n", totalErrors)
-		return nil
+		return fmt.Errorf("scaling completed with %d error(s)", totalErrors)
 	}
 
-	fmt.Println("✨ All services scaled successfully!")
+	fmt.Println("\nAll services scaled successfully.")
 	return nil
 }
 
-// getSwarmReplicaCount returns the current number of replicas for a Swarm service
-func getSwarmReplicaCount(client *ssh.Client, fullServiceName string) (int, error) {
-	// Query Swarm service for replica count
-	// Format: "3/3" (running/desired) - we want the desired count
-	cmd := fmt.Sprintf("docker service inspect %s --format '{{.Spec.Mode.Replicated.Replicas}}' 2>/dev/null || echo 0", fullServiceName)
-	output, err := client.Execute(cmd)
+func scaleTargetServers(cfg *config.Config, envName string) ([]string, error) {
+	environmentServers, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
-		return 0, err
+		return nil, fmt.Errorf("failed to get environment servers: %w", err)
 	}
 
-	output = strings.TrimSpace(output)
-	if output == "" || output == "<no value>" {
-		return 0, nil // Service doesn't exist or is in global mode
+	if scaleServer == "" {
+		serverNames := append([]string(nil), environmentServers...)
+		sort.Strings(serverNames)
+		return serverNames, nil
 	}
 
-	count, err := strconv.Atoi(output)
-	if err != nil {
-		return 0, err
+	if _, ok := cfg.Servers[scaleServer]; !ok {
+		return nil, fmt.Errorf("server '%s' not found in config", scaleServer)
+	}
+	for _, serverName := range environmentServers {
+		if serverName == scaleServer {
+			return []string{scaleServer}, nil
+		}
 	}
 
-	return count, nil
+	return nil, fmt.Errorf("server '%s' is not part of environment %s", scaleServer, envName)
+}
+
+func scaleNotifier(cfg *config.Config) *notification.Notifier {
+	if cfg.Notifications == nil {
+		return nil
+	}
+	if cfg.Notifications.Slack == "" && cfg.Notifications.Discord == "" && cfg.Notifications.Webhook == "" {
+		return nil
+	}
+	return notification.NewNotifier(notification.NotifierConfig{
+		SlackWebhook:   cfg.Notifications.Slack,
+		DiscordWebhook: cfg.Notifications.Discord,
+		Webhook:        cfg.Notifications.Webhook,
+	}, verbose)
 }

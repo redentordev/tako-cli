@@ -30,12 +30,12 @@ This command has two modes:
    - Stops and removes application containers
    - Removes application Docker images
    - Removes deployment files
-   - Keeps Traefik, logs, and server setup
+   - Keeps tako-proxy, logs, and server setup
    - Safe for production - can redeploy later
 
 2. PURGE MODE (--purge-all):
    - Everything from decommission mode, PLUS:
-   - Removes Traefik reverse proxy configuration
+   - Removes shared tako-proxy runtime files
    - Removes access logs
    - Removes all Docker resources
    - Complete cleanup - requires server re-setup
@@ -110,12 +110,12 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	fmt.Println("   ✓ Remove deployment files and directories")
 
 	if destroyPurgeAll {
-		fmt.Println("   ✓ Remove Traefik reverse proxy configuration")
+		fmt.Println("   ✓ Remove shared tako-proxy runtime files")
 		fmt.Println("   ✓ Remove access logs")
 		fmt.Println("   ✓ Prune all unused Docker resources")
 		fmt.Println("\n⚠️  You'll need to run 'tako setup' again to redeploy!")
 	} else {
-		fmt.Println("\nPreserving server setup (Traefik, logs, Docker daemon)")
+		fmt.Println("\nPreserving server setup (tako-proxy, logs, Docker daemon)")
 		fmt.Println("You can redeploy without running 'tako setup' again")
 	}
 
@@ -148,62 +148,9 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n🗑️  Destroying %d server(s)...\n\n", len(serversToDestroy))
 
-	// For multi-server purge, we need to handle workers before manager
-	// Otherwise swarm leave on manager will leave workers in broken state
-	var managerServer string
-	var workerServers []string
-
-	if destroyPurgeAll && len(serversToDestroy) > 1 {
-		// Identify manager and workers
-		for serverName, serverCfg := range serversToDestroy {
-			if serverCfg.Role == "manager" {
-				managerServer = serverName
-			} else {
-				workerServers = append(workerServers, serverName)
-			}
-		}
-		// If no explicit manager, first server is typically manager
-		if managerServer == "" {
-			for serverName := range serversToDestroy {
-				managerServer = serverName
-				break
-			}
-		}
-	}
-
-	// Destroy each server (workers first if purging multi-server)
 	totalErrors := 0
 
-	// Process workers first if purging
-	if destroyPurgeAll && len(workerServers) > 0 {
-		for _, serverName := range workerServers {
-			serverCfg := serversToDestroy[serverName]
-			fmt.Printf("=== Destroying worker: %s (%s) ===\n", serverName, serverCfg.Host)
-			if err := destroySingleServer(serverName, serverCfg, cfg.Project.Name, verbose, destroyPurgeAll); err != nil {
-				fmt.Printf("⚠️  Errors destroying %s: %v\n", serverName, err)
-				totalErrors++
-			} else {
-				fmt.Printf("✓ Worker %s destroyed\n\n", serverName)
-			}
-		}
-	}
-
-	// Now process remaining servers (or all if not multi-server purge)
 	for serverName, serverCfg := range serversToDestroy {
-		// Skip workers we already processed
-		if destroyPurgeAll && len(workerServers) > 0 {
-			isWorker := false
-			for _, w := range workerServers {
-				if w == serverName {
-					isWorker = true
-					break
-				}
-			}
-			if isWorker {
-				continue
-			}
-		}
-
 		fmt.Printf("=== Destroying server: %s (%s) ===\n", serverName, serverCfg.Host)
 		if err := destroySingleServer(serverName, serverCfg, cfg.Project.Name, verbose, destroyPurgeAll); err != nil {
 			fmt.Printf("⚠️  Errors destroying %s: %v\n", serverName, err)
@@ -377,48 +324,19 @@ func destroySingleServer(serverName string, serverCfg config.ServerConfig, proje
 
 // decommissionApp stops and removes the deployed application
 func decommissionApp(client *ssh.Client, projectName string, verbose bool) error {
-	// First, remove Swarm services (always use Swarm mode)
 	if verbose {
-		fmt.Println("  → Removing Swarm services...")
+		fmt.Println("  → Removing takod containers...")
 	}
 
-	// List and remove all services for this project
-	listServicesCmd := fmt.Sprintf("docker service ls --filter 'name=%s' --format '{{.Name}}'", projectName)
-	output, _ := client.Execute(listServicesCmd)
-	if strings.TrimSpace(output) != "" {
-		removeServicesCmd := fmt.Sprintf("docker service ls --filter 'name=%s' --format '{{.Name}}' | xargs -r docker service rm", projectName)
-		client.Execute(removeServicesCmd)
-		if verbose {
-			fmt.Println("  ✓ Swarm services removed")
-		}
+	removeContainersCmd := fmt.Sprintf("docker ps -aq --filter label=tako.project=%s | xargs -r docker rm -f 2>/dev/null || true", projectName)
+	client.Execute(removeContainersCmd)
+
+	if verbose {
+		fmt.Println("  → Removing project networks...")
 	}
 
-	// Remove overlay networks for this project (matches tako_projectname and tako_projectname_env patterns)
-	if verbose {
-		fmt.Println("  → Removing overlay networks...")
-	}
-	// Remove networks matching the project name pattern
-	removeNetworkCmd := fmt.Sprintf("docker network ls --filter 'name=tako_%s' --format '{{.Name}}' | xargs -r docker network rm 2>/dev/null || true", projectName)
+	removeNetworkCmd := fmt.Sprintf("docker network ls --format '{{.Name}}' | grep -E '^tako_%s(_|$)' | xargs -r docker network rm 2>/dev/null || true", projectName)
 	client.Execute(removeNetworkCmd)
-	// Also try removing with underscore pattern (tako_projectname_production)
-	removeNetworkCmd2 := fmt.Sprintf("docker network ls --format '{{.Name}}' | grep -E '^tako_%s_' | xargs -r docker network rm 2>/dev/null || true", projectName)
-	client.Execute(removeNetworkCmd2)
-
-	if verbose {
-		fmt.Println("  → Stopping application containers...")
-	}
-
-	// Stop all containers for this project (cleanup any orphaned containers)
-	stopCmd := fmt.Sprintf("docker ps -q --filter 'name=%s' | xargs -r docker stop 2>/dev/null || true", projectName)
-	client.Execute(stopCmd)
-
-	if verbose {
-		fmt.Println("  → Removing application containers...")
-	}
-
-	// Remove all containers for this project
-	removeCmd := fmt.Sprintf("docker ps -aq --filter 'name=%s' | xargs -r docker rm -f 2>/dev/null || true", projectName)
-	client.Execute(removeCmd)
 
 	if verbose {
 		fmt.Println("  → Removing application images...")
@@ -435,11 +353,8 @@ func decommissionApp(client *ssh.Client, projectName string, verbose bool) error
 	// Remove deployment directory
 	client.Execute(fmt.Sprintf("sudo rm -rf /opt/%s", projectName))
 
-	// Remove deployment state
-	client.Execute(fmt.Sprintf("sudo rm -rf /var/lib/%s", projectName))
-
-	// Remove Tako state directory
-	client.Execute(fmt.Sprintf("sudo rm -rf /var/lib/tako/%s 2>/dev/null || true", projectName))
+	client.Execute(fmt.Sprintf("sudo rm -rf /var/lib/tako-cli/%s", projectName))
+	client.Execute(fmt.Sprintf("sudo rm -rf /var/lib/tako/desired/%s* /var/lib/tako/actual/%s* /var/lib/tako/events/%s* 2>/dev/null || true", projectName, projectName, projectName))
 
 	if verbose {
 		fmt.Println("  ✓ Application decommissioned")
@@ -451,31 +366,16 @@ func decommissionApp(client *ssh.Client, projectName string, verbose bool) error
 // purgeServerSetup removes shared server-side components installed by Tako.
 func purgeServerSetup(client *ssh.Client, projectName string, verbose bool) error {
 	if verbose {
-		fmt.Println("  → Removing Traefik configuration...")
+		fmt.Println("  → Removing tako-proxy...")
 	}
 
-	// Stop and remove Traefik (both Swarm service and standalone container)
-	client.Execute("docker service rm traefik 2>/dev/null || true")
-	client.Execute("docker stop traefik 2>/dev/null || true")
-	client.Execute("docker rm traefik 2>/dev/null || true")
-
-	// Remove Traefik configuration (backup first)
-	client.Execute("sudo cp -r /etc/traefik /etc/traefik.bak 2>/dev/null || true")
-	client.Execute("sudo rm -rf /etc/traefik")
+	client.Execute("docker rm -f tako-proxy 2>/dev/null || true")
 
 	if verbose {
 		fmt.Println("  → Removing access logs...")
 	}
 
-	// Remove logs
-	client.Execute(fmt.Sprintf("sudo rm -rf /var/log/traefik/%s-*.log*", projectName))
-
-	if verbose {
-		fmt.Println("  → Leaving Docker Swarm...")
-	}
-
-	// Leave Docker Swarm (this also removes all Swarm-related configs)
-	client.Execute("docker swarm leave --force 2>/dev/null || true")
+	client.Execute(fmt.Sprintf("sudo rm -rf /var/log/tako/proxy/%s-*.log* 2>/dev/null || true", projectName))
 
 	if verbose {
 		fmt.Println("  → Pruning Docker system...")

@@ -24,6 +24,10 @@ func ValidateConfig(cfg *Config) error {
 		return fmt.Errorf("project version is required")
 	}
 
+	if err := validateRuntimeConfig(cfg); err != nil {
+		return err
+	}
+
 	// Validate servers
 	if len(cfg.Servers) == 0 {
 		return fmt.Errorf("at least one server must be configured")
@@ -53,6 +57,104 @@ func ValidateConfig(cfg *Config) error {
 		if err := validateVolumes(cfg.Volumes); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+func validateRuntimeConfig(cfg *Config) error {
+	if cfg.Runtime == nil {
+		cfg.Runtime = &RuntimeConfig{}
+	}
+	if cfg.Runtime.Mode == "" {
+		cfg.Runtime.Mode = RuntimeModeTakod
+	}
+	if cfg.Runtime.Proxy == "" {
+		cfg.Runtime.Proxy = RuntimeProxyTako
+	}
+
+	validRuntimeModes := map[string]bool{
+		RuntimeModeTakod: true,
+	}
+	if !validRuntimeModes[cfg.Runtime.Mode] {
+		return fmt.Errorf("runtime.mode must be takod")
+	}
+
+	validRuntimeProxies := map[string]bool{
+		RuntimeProxyTako: true,
+	}
+	if !validRuntimeProxies[cfg.Runtime.Proxy] {
+		return fmt.Errorf("runtime.proxy must be %s", RuntimeProxyTako)
+	}
+
+	if cfg.Runtime.Agent == nil {
+		cfg.Runtime.Agent = &AgentConfig{}
+	}
+	cfg.Runtime.Agent.Enabled = true
+	if cfg.Runtime.Agent.Socket == "" {
+		cfg.Runtime.Agent.Socket = "/run/tako/takod.sock"
+	}
+	if cfg.Runtime.Agent.DataDir == "" {
+		cfg.Runtime.Agent.DataDir = "/var/lib/tako"
+	}
+
+	if cfg.Mesh == nil {
+		cfg.Mesh = &MeshConfig{}
+	}
+	cfg.Mesh.Enabled = true
+	if cfg.Mesh.NetworkCIDR == "" {
+		cfg.Mesh.NetworkCIDR = "10.210.0.0/16"
+	}
+	if _, _, err := net.ParseCIDR(cfg.Mesh.NetworkCIDR); err != nil {
+		return fmt.Errorf("mesh.networkCIDR is invalid: %w", err)
+	}
+	if cfg.Mesh.Interface == "" {
+		cfg.Mesh.Interface = "tako"
+	}
+	if !isValidRuntimeName(cfg.Mesh.Interface) {
+		return fmt.Errorf("mesh.interface '%s' is invalid: must contain only letters, numbers, hyphens, and underscores", cfg.Mesh.Interface)
+	}
+	if cfg.Mesh.ListenPort == 0 {
+		cfg.Mesh.ListenPort = 51820
+	}
+	if cfg.Mesh.ListenPort < 1 || cfg.Mesh.ListenPort > 65535 {
+		return fmt.Errorf("mesh.listenPort must be between 1 and 65535")
+	}
+	if cfg.Mesh.SubnetBits == 0 {
+		cfg.Mesh.SubnetBits = 24
+	}
+	if cfg.Mesh.SubnetBits < 8 || cfg.Mesh.SubnetBits > 30 {
+		return fmt.Errorf("mesh.subnetBits must be between 8 and 30")
+	}
+	cfg.Mesh.NATTraversal = true
+
+	if cfg.State == nil {
+		cfg.State = &StateConfig{}
+	}
+	if cfg.State.Backend == "" {
+		cfg.State.Backend = StateBackendReplicated
+	}
+	if cfg.State.DeployConsistency == "" {
+		cfg.State.DeployConsistency = StateDeployConsistencyLease
+	}
+	if cfg.State.OnUnreachableNode == "" {
+		cfg.State.OnUnreachableNode = StateUnreachableBlock
+	}
+	cfg.State.RemoteCacheEnabled = true
+
+	validStateBackends := map[string]bool{
+		StateBackendReplicated: true,
+	}
+	if !validStateBackends[cfg.State.Backend] {
+		return fmt.Errorf("state.backend must be replicated")
+	}
+
+	if cfg.State.DeployConsistency != StateDeployConsistencyLease {
+		return fmt.Errorf("state.deployConsistency must be lease")
+	}
+
+	if cfg.State.OnUnreachableNode != StateUnreachableBlock {
+		return fmt.Errorf("state.onUnreachableNode must be block")
 	}
 
 	return nil
@@ -296,10 +398,10 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 
 	// Validate deployment strategy
 	if service.Deploy.Strategy == "" {
-		service.Deploy.Strategy = "blue-green" // Default
+		service.Deploy.Strategy = "recreate"
 	}
-	if service.Deploy.Strategy != "blue-green" && service.Deploy.Strategy != "rolling" {
-		return fmt.Errorf("service %s: invalid deployment strategy: %s", name, service.Deploy.Strategy)
+	if service.Deploy.Strategy != "recreate" {
+		return fmt.Errorf("service %s: invalid deployment strategy %q; takod currently supports recreate", name, service.Deploy.Strategy)
 	}
 
 	// Validate hooks if configured
@@ -502,7 +604,7 @@ func isValidDomain(domain string) bool {
 		domain = domain[2:]
 	}
 
-	// Check for dangerous characters that could cause issues in Traefik/shell
+	// Check for dangerous characters that could cause issues in proxy routing or shell commands.
 	// These characters could be used for injection attacks or cause routing issues
 	dangerousChars := []string{
 		"`", "$", "!", ";", "&", "|", ">", "<", "(", ")", "{", "}", "[", "]",
@@ -514,8 +616,8 @@ func isValidDomain(domain string) bool {
 		}
 	}
 
-	// Check for Traefik-specific regex metacharacters that could affect routing
-	// These are valid in hostnames but could cause issues if passed to HostRegexp
+	// Check for regex metacharacters that could affect routing.
+	// These are valid in hostnames but could cause issues if passed to HostRegexp.
 	regexChars := []string{"^", "+", "?", "*", "="}
 	for _, ch := range regexChars {
 		if strings.Contains(domain, ch) {
@@ -573,6 +675,22 @@ func isValidServiceName(name string) bool {
 		}
 	}
 
+	return true
+}
+
+func isValidRuntimeName(name string) bool {
+	if len(name) == 0 || len(name) > 32 {
+		return false
+	}
+	for _, ch := range name {
+		if !((ch >= 'a' && ch <= 'z') ||
+			(ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') ||
+			ch == '-' ||
+			ch == '_') {
+			return false
+		}
+	}
 	return true
 }
 

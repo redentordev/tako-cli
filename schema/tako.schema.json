@@ -4,7 +4,11 @@
   "title": "Tako CLI Configuration",
   "description": "Configuration schema for Tako CLI (tako.yaml or tako.json)",
   "type": "object",
-  "required": ["project", "servers", "environments"],
+  "required": [
+    "project",
+    "servers",
+    "environments"
+  ],
   "properties": {
     "$schema": {
       "type": "string",
@@ -13,7 +17,10 @@
     "project": {
       "type": "object",
       "description": "Project metadata",
-      "required": ["name", "version"],
+      "required": [
+        "name",
+        "version"
+      ],
       "properties": {
         "name": {
           "type": "string",
@@ -26,20 +33,140 @@
         }
       }
     },
+    "runtime": {
+      "type": "object",
+      "description": "takod mesh runtime settings. One node and many nodes use the same runtime model.",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "takod"
+          ],
+          "default": "takod",
+          "description": "Runtime engine"
+        },
+        "agent": {
+          "type": "object",
+          "description": "takod node-local reconciler settings",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "socket": {
+              "type": "string",
+              "default": "/run/tako/takod.sock"
+            },
+            "dataDir": {
+              "type": "string",
+              "default": "/var/lib/tako"
+            }
+          }
+        }
+      }
+    },
+    "mesh": {
+      "type": "object",
+      "description": "Private WireGuard-style node mesh settings",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "networkCIDR": {
+          "type": "string",
+          "default": "10.210.0.0/16"
+        },
+        "interface": {
+          "type": "string",
+          "default": "tako"
+        },
+        "listenPort": {
+          "type": "integer",
+          "default": 51820,
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "subnetBits": {
+          "type": "integer",
+          "default": 24,
+          "minimum": 8,
+          "maximum": 30
+        },
+        "natTraversal": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "description": "Deployment state and reconciliation policy",
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": [
+            "replicated"
+          ],
+          "default": "replicated"
+        },
+        "deployConsistency": {
+          "type": "string",
+          "enum": [
+            "lease"
+          ],
+          "default": "lease"
+        },
+        "onUnreachableNode": {
+          "type": "string",
+          "enum": [
+            "block"
+          ],
+          "default": "block"
+        },
+        "remoteCacheEnabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
     "servers": {
       "type": "object",
       "description": "Explicit SSH server connection details",
       "additionalProperties": {
         "type": "object",
-        "required": ["host", "user"],
+        "required": [
+          "host",
+          "user"
+        ],
         "properties": {
-          "host": { "type": "string", "description": "Server IP or hostname" },
-          "user": { "type": "string", "description": "SSH user" },
-          "port": { "type": "integer", "description": "SSH port", "default": 22 },
-          "sshKey": { "type": "string", "description": "Path to SSH private key" },
-          "password": { "type": "string", "description": "SSH password (use env var)" },
-          "role": { "type": "string", "enum": ["manager", "worker"] },
-          "labels": { "type": "object", "additionalProperties": { "type": "string" } }
+          "host": {
+            "type": "string",
+            "description": "Server IP or hostname"
+          },
+          "user": {
+            "type": "string",
+            "description": "SSH user"
+          },
+          "port": {
+            "type": "integer",
+            "description": "SSH port",
+            "default": 22
+          },
+          "sshKey": {
+            "type": "string",
+            "description": "Path to SSH private key"
+          },
+          "password": {
+            "type": "string",
+            "description": "SSH password (use env var)"
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -49,23 +176,51 @@
       "properties": {
         "strategy": {
           "type": "string",
-          "enum": ["parallel", "sequential"],
+          "enum": [
+            "parallel",
+            "sequential"
+          ],
           "description": "Deployment strategy"
         },
         "parallel": {
           "type": "object",
           "properties": {
-            "maxConcurrentBuilds": { "type": "integer", "default": 4 },
-            "maxConcurrentDeploys": { "type": "integer", "default": 4 },
-            "strategy": { "type": "string", "enum": ["dependency-aware", "resource-aware", "round-robin"] }
+            "maxConcurrentBuilds": {
+              "type": "integer",
+              "default": 4
+            },
+            "maxConcurrentDeploys": {
+              "type": "integer",
+              "default": 4
+            },
+            "strategy": {
+              "type": "string",
+              "enum": [
+                "dependency-aware",
+                "resource-aware",
+                "round-robin"
+              ]
+            }
           }
         },
         "cache": {
           "type": "object",
           "properties": {
-            "enabled": { "type": "boolean", "default": true },
-            "type": { "type": "string", "enum": ["local", "registry"] },
-            "retention": { "type": "string", "description": "Cache retention period (e.g., 7d)" }
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "local",
+                "registry"
+              ]
+            },
+            "retention": {
+              "type": "string",
+              "description": "Cache retention period (e.g., 7d)"
+            }
           }
         }
       }
@@ -74,9 +229,18 @@
       "type": "object",
       "description": "Deployment notification settings",
       "properties": {
-        "slack": { "type": "string", "description": "Slack webhook URL" },
-        "discord": { "type": "string", "description": "Discord webhook URL" },
-        "webhook": { "type": "string", "description": "Generic webhook URL" }
+        "slack": {
+          "type": "string",
+          "description": "Slack webhook URL"
+        },
+        "discord": {
+          "type": "string",
+          "description": "Discord webhook URL"
+        },
+        "webhook": {
+          "type": "string",
+          "description": "Generic webhook URL"
+        }
       }
     },
     "volumes": {
@@ -85,11 +249,28 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
-          "driver": { "type": "string", "default": "local" },
-          "driver_opts": { "type": "object", "additionalProperties": { "type": "string" } },
-          "labels": { "type": "object", "additionalProperties": { "type": "string" } },
-          "external": { "type": "boolean" },
-          "name": { "type": "string" }
+          "driver": {
+            "type": "string",
+            "default": "local"
+          },
+          "driver_opts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "external": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
         }
       }
     },
@@ -102,7 +283,9 @@
           "servers": {
             "type": "array",
             "description": "Server names for this environment",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           },
           "services": {
             "type": "object",
@@ -110,35 +293,112 @@
             "additionalProperties": {
               "type": "object",
               "properties": {
-                "build": { "type": "string", "description": "Build context path" },
-                "image": { "type": "string", "description": "Docker image" },
-                "port": { "type": "integer", "description": "Container port" },
-                "command": { "type": "string", "description": "Override container command" },
-                "replicas": { "type": "integer", "default": 1, "description": "Number of replicas" },
+                "build": {
+                  "type": "string",
+                  "description": "Build context path"
+                },
+                "image": {
+                  "type": "string",
+                  "description": "Docker image"
+                },
+                "port": {
+                  "type": "integer",
+                  "description": "Container port"
+                },
+                "command": {
+                  "type": "string",
+                  "description": "Override container command"
+                },
+                "replicas": {
+                  "type": "integer",
+                  "default": 1,
+                  "description": "Number of replicas"
+                },
                 "restart": {
                   "type": "string",
-                  "enum": ["no", "on-failure", "always", "unless-stopped"],
+                  "enum": [
+                    "no",
+                    "on-failure",
+                    "always",
+                    "unless-stopped"
+                  ],
                   "description": "Restart policy"
                 },
-                "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Environment variables" },
-                "envFile": { "type": "string", "description": "Path to .env file" },
-                "secrets": { "type": "array", "items": { "type": "string" }, "description": "Secret names from .tako/secrets" },
-                "volumes": { "type": "array", "items": { "type": "string" }, "description": "Volume mounts" },
-                "persistent": { "type": "boolean", "description": "Mark as persistent (databases, caches)" },
-                "dependsOn": { "type": "array", "items": { "type": "string" }, "description": "Service dependencies" },
+                "env": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Environment variables"
+                },
+                "envFile": {
+                  "type": "string",
+                  "description": "Path to .env file"
+                },
+                "secrets": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Secret names from .tako/secrets"
+                },
+                "volumes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Volume mounts"
+                },
+                "persistent": {
+                  "type": "boolean",
+                  "description": "Mark as persistent (databases, caches)"
+                },
+                "dependsOn": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Service dependencies"
+                },
                 "proxy": {
                   "type": "object",
-                  "description": "Traefik reverse proxy settings",
+                  "description": "Public proxy settings",
                   "properties": {
-                    "domain": { "type": "string", "description": "Primary domain" },
-                    "domains": { "type": "array", "items": { "type": "string" }, "description": "Additional domains" },
-                    "redirectFrom": { "type": "array", "items": { "type": "string" }, "description": "Domains to redirect from" },
-                    "email": { "type": "string", "description": "Let's Encrypt email" },
+                    "domain": {
+                      "type": "string",
+                      "description": "Primary domain"
+                    },
+                    "domains": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Additional domains"
+                    },
+                    "redirectFrom": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Domains to redirect from"
+                    },
+                    "email": {
+                      "type": "string",
+                      "description": "Let's Encrypt email"
+                    },
                     "tls": {
                       "type": "object",
                       "properties": {
-                        "provider": { "type": "string", "enum": ["letsencrypt", "zerossl"] },
-                        "staging": { "type": "boolean" }
+                        "provider": {
+                          "type": "string",
+                          "enum": [
+                            "letsencrypt",
+                            "zerossl"
+                          ]
+                        },
+                        "staging": {
+                          "type": "boolean"
+                        }
                       }
                     }
                   }
@@ -147,50 +407,127 @@
                   "type": "object",
                   "description": "Health check configuration",
                   "properties": {
-                    "path": { "type": "string" },
-                    "interval": { "type": "string" },
-                    "timeout": { "type": "string" },
-                    "retries": { "type": "integer" },
-                    "startPeriod": { "type": "string" }
+                    "path": {
+                      "type": "string"
+                    },
+                    "interval": {
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "type": "string"
+                    },
+                    "retries": {
+                      "type": "integer"
+                    },
+                    "startPeriod": {
+                      "type": "string"
+                    }
                   }
                 },
                 "hooks": {
                   "type": "object",
                   "description": "Lifecycle hooks",
                   "properties": {
-                    "preBuild": { "type": "array", "items": { "type": "string" } },
-                    "postBuild": { "type": "array", "items": { "type": "string" } },
-                    "preDeploy": { "type": "array", "items": { "type": "string" } },
-                    "postDeploy": { "type": "array", "items": { "type": "string" } },
-                    "postStart": { "type": "array", "items": { "type": "string" } }
+                    "preBuild": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "postBuild": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "preDeploy": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "postDeploy": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "postStart": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
                   }
                 },
                 "deploy": {
                   "type": "object",
-                  "description": "Deployment strategy",
+                  "description": "Deployment strategy for takod reconciliation",
                   "properties": {
-                    "strategy": { "type": "string", "enum": ["blue-green", "rolling"] },
-                    "maxUnavailable": { "type": "integer" }
+                    "strategy": {
+                      "type": "string",
+                      "enum": [
+                        "recreate"
+                      ]
+                    },
+                    "maxUnavailable": {
+                      "type": "integer"
+                    }
                   }
                 },
                 "placement": {
                   "type": "object",
                   "description": "Placement configuration",
                   "properties": {
-                    "strategy": { "type": "string", "enum": ["spread", "pinned", "any"] },
-                    "servers": { "type": "array", "items": { "type": "string" } },
-                    "constraints": { "type": "array", "items": { "type": "string" } }
+                    "strategy": {
+                      "type": "string",
+                      "enum": [
+                        "spread",
+                        "pinned",
+                        "any",
+                        "global"
+                      ]
+                    },
+                    "servers": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "constraints": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
                   }
                 },
                 "loadBalancer": {
                   "type": "object",
                   "description": "Load balancer settings",
                   "properties": {
-                    "strategy": { "type": "string", "enum": ["round_robin", "least_conn", "ip_hash", "random"] }
+                    "strategy": {
+                      "type": "string",
+                      "enum": [
+                        "round_robin",
+                        "least_conn",
+                        "ip_hash",
+                        "random"
+                      ]
+                    }
                   }
                 },
-                "export": { "type": "boolean", "description": "Export service to other projects" },
-                "imports": { "type": "array", "items": { "type": "string" }, "description": "Import services from other projects" }
+                "export": {
+                  "type": "boolean",
+                  "description": "Export service to other projects"
+                },
+                "imports": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Import services from other projects"
+                }
               }
             }
           }

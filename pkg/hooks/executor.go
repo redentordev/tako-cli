@@ -116,8 +116,8 @@ func (e *Executor) ExecutePostDeploy(hooks []string, envVars map[string]string) 
 	return nil
 }
 
-// ExecutePostStart runs post-start hooks (after service is running)
-func (e *Executor) ExecutePostStart(hooks []string, fullServiceName string, envVars map[string]string) error {
+// ExecutePostStart runs post-start hooks after the target container is running.
+func (e *Executor) ExecutePostStart(hooks []string, containerName string, envVars map[string]string) error {
 	if len(hooks) == 0 {
 		return nil
 	}
@@ -125,8 +125,8 @@ func (e *Executor) ExecutePostStart(hooks []string, fullServiceName string, envV
 	fmt.Printf("  → Waiting for service to be ready...\n")
 
 	// Wait for service to be running
-	if err := e.waitForServiceRunning(fullServiceName); err != nil {
-		return fmt.Errorf("service did not start: %w", err)
+	if err := e.waitForContainerRunning(containerName); err != nil {
+		return fmt.Errorf("container did not start: %w", err)
 	}
 
 	fmt.Printf("  → Running post-start hooks...\n")
@@ -134,15 +134,15 @@ func (e *Executor) ExecutePostStart(hooks []string, fullServiceName string, envV
 	for i, hook := range hooks {
 		expandedHook := e.expandVariables(hook, envVars)
 
-		// Replace {{SERVICE}} with actual service name
-		expandedHook = strings.ReplaceAll(expandedHook, "{{SERVICE}}", fullServiceName)
+		// Replace {{SERVICE}} with actual container name.
+		expandedHook = strings.ReplaceAll(expandedHook, "{{SERVICE}}", containerName)
 
 		// If hook starts with "exec:", run it inside the container
 		if strings.HasPrefix(expandedHook, "exec:") {
 			command := strings.TrimPrefix(expandedHook, "exec:")
 			command = strings.TrimSpace(command)
 
-			if err := e.executeInContainer(fullServiceName, command, fmt.Sprintf("post-start[%d]", i)); err != nil {
+			if err := e.executeInContainer(containerName, command, fmt.Sprintf("post-start[%d]", i)); err != nil {
 				return fmt.Errorf("post-start hook failed: %w", err)
 			}
 		} else {
@@ -274,25 +274,22 @@ func (e *Executor) executeInContainer(serviceName, command, hookName string) err
 	return nil
 }
 
-// waitForServiceRunning waits for a service to be in running state
-func (e *Executor) waitForServiceRunning(serviceName string) error {
+// waitForContainerRunning waits for a container to be in running state.
+func (e *Executor) waitForContainerRunning(containerName string) error {
 	maxAttempts := 30 // 30 seconds
 
 	for i := 0; i < maxAttempts; i++ {
-		checkCmd := fmt.Sprintf("docker service ps %s --filter 'desired-state=running' --format '{{.CurrentState}}' | head -1", serviceName)
+		checkCmd := fmt.Sprintf("docker inspect -f '{{.State.Running}}' %s 2>/dev/null", containerName)
 		output, err := e.client.Execute(checkCmd)
 
-		if err == nil {
-			state := strings.TrimSpace(output)
-			if strings.HasPrefix(state, "Running") {
-				return nil
-			}
+		if err == nil && strings.TrimSpace(output) == "true" {
+			return nil
 		}
 
 		time.Sleep(1 * time.Second)
 	}
 
-	return fmt.Errorf("service did not start after %d seconds", maxAttempts)
+	return fmt.Errorf("container did not start after %d seconds", maxAttempts)
 }
 
 // expandVariables expands {{VAR}} placeholders with env vars

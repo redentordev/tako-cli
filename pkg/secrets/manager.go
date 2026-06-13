@@ -405,20 +405,6 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 		envFile.Set(containerVar, value)
 	}
 
-	// Also handle DockerSecrets (for backward compatibility with Docker Swarm)
-	for _, dockerSecret := range service.DockerSecrets {
-		// For DockerSecrets, we'll read them similar to before
-		// This maintains backward compatibility
-		if m.IsSensitive(dockerSecret.Name) {
-			value, err := m.Get(dockerSecret.Name)
-			if err != nil {
-				// Try to get from environment or file as before
-				continue
-			}
-			envFile.Set(dockerSecret.Name, value)
-		}
-	}
-
 	// Validate the env file
 	if err := envFile.Validate(); err != nil {
 		return nil, fmt.Errorf("env file validation failed: %w", err)
