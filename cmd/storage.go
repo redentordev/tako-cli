@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
@@ -82,6 +84,10 @@ storage:
 	}
 
 	nfsServerConfig := cfg.Servers[nfsServerName]
+	targetServers, err := storageTargetServers(cfg, envName, nfsServerName)
+	if err != nil {
+		return err
+	}
 
 	fmt.Println("NFS Storage Status")
 	fmt.Println(strings.Repeat("─", 50))
@@ -136,40 +142,32 @@ storage:
 		}
 	}
 
-	// Check client status on all servers
+	// Check client status on selected environment nodes.
 	fmt.Println("\nClient Status:")
-	for serverName, serverConfig := range cfg.Servers {
-		client, err := sshPool.GetOrCreateWithAuth(
-			serverConfig.Host,
-			serverConfig.Port,
-			serverConfig.User,
-			serverConfig.SSHKey,
-			serverConfig.Password,
-		)
+	for _, result := range collectStorageStatusNodes(cfg.Servers, targetServers, nfsServerName, func(_ string, server config.ServerConfig, isServer bool) (*provisioner.NFSStatus, error) {
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err != nil {
-			fmt.Printf("  %s: ✗ Connection failed\n", serverName)
+			return nil, fmt.Errorf("connection failed: %w", err)
+		}
+		return nfsProvisioner.GetNFSStatus(client, isServer)
+	}) {
+		if result.err != nil {
+			fmt.Printf("  %s: ✗ %v\n", result.serverName, result.err)
 			continue
 		}
-
-		status, err := nfsProvisioner.GetNFSStatus(client, false)
-		if err != nil {
-			fmt.Printf("  %s: ✗ Status check failed\n", serverName)
-			continue
-		}
-
-		if serverName == nfsServerName {
+		if result.serverName == nfsServerName {
 			// For server, show as "local"
-			if len(status.Mounts) > 0 {
-				fmt.Printf("  %s: ✓ local (NFS server)\n", serverName)
+			if len(result.status.Mounts) > 0 {
+				fmt.Printf("  %s: ✓ local (NFS server)\n", result.serverName)
 			} else {
-				fmt.Printf("  %s: ○ local, no mounts (NFS server)\n", serverName)
+				fmt.Printf("  %s: ○ local, no mounts (NFS server)\n", result.serverName)
 			}
 		} else {
 			// For clients, show mount status
-			if len(status.Mounts) > 0 {
-				fmt.Printf("  %s: ✓ mounted (%d exports)\n", serverName, len(status.Mounts))
+			if len(result.status.Mounts) > 0 {
+				fmt.Printf("  %s: ✓ mounted (%d exports)\n", result.serverName, len(result.status.Mounts))
 			} else {
-				fmt.Printf("  %s: ○ not mounted\n", serverName)
+				fmt.Printf("  %s: ○ not mounted\n", result.serverName)
 			}
 		}
 	}
@@ -204,6 +202,10 @@ func runStorageRemount(cmd *cobra.Command, args []string) error {
 	}
 
 	nfsServerConfig := cfg.Servers[nfsServerName]
+	targetServers, err := storageTargetServers(cfg, envName, nfsServerName)
+	if err != nil {
+		return err
+	}
 
 	fmt.Printf("Remounting NFS exports...\n\n")
 
@@ -224,37 +226,22 @@ func runStorageRemount(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	// Remount on all servers
-	errors := 0
-	for serverName, serverConfig := range cfg.Servers {
-		fmt.Printf("→ Remounting on %s...\n", serverName)
-
-		client, err := sshPool.GetOrCreateWithAuth(
-			serverConfig.Host,
-			serverConfig.Port,
-			serverConfig.User,
-			serverConfig.SSHKey,
-			serverConfig.Password,
-		)
+	results := collectStorageRemountNodes(cfg.Servers, targetServers, nfsServerName, nfsServerConfig.Host, func(_ string, server config.ServerConfig, nfsHost string) error {
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err != nil {
-			fmt.Printf("  ✗ Connection failed: %v\n", err)
+			return fmt.Errorf("connection failed: %w", err)
+		}
+		return nfsProvisioner.SetupNFSClient(client, nfsHost, exports)
+	})
+
+	errors := 0
+	for _, result := range results {
+		fmt.Printf("→ Remounting on %s...\n", result.serverName)
+		if result.err != nil {
+			fmt.Printf("  ✗ Remount failed: %v\n", result.err)
 			errors++
 			continue
 		}
-
-		// Determine NFS server host for this client
-		nfsHost := nfsServerConfig.Host
-		if serverName == nfsServerName {
-			nfsHost = "localhost"
-		}
-
-		// Remount using SetupNFSClient (handles unmount + mount)
-		if err := nfsProvisioner.SetupNFSClient(client, nfsHost, exports); err != nil {
-			fmt.Printf("  ✗ Remount failed: %v\n", err)
-			errors++
-			continue
-		}
-
 		fmt.Printf("  ✓ Remounted successfully\n")
 	}
 
@@ -265,4 +252,96 @@ func runStorageRemount(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("✓ All NFS exports remounted successfully")
 	return nil
+}
+
+type storageStatusReadFunc func(serverName string, server config.ServerConfig, isServer bool) (*provisioner.NFSStatus, error)
+
+type storageStatusResult struct {
+	index      int
+	serverName string
+	status     *provisioner.NFSStatus
+	err        error
+}
+
+func collectStorageStatusNodes(servers map[string]config.ServerConfig, serverNames []string, nfsServerName string, read storageStatusReadFunc) []storageStatusResult {
+	resultCh := make(chan storageStatusResult, len(serverNames))
+	var wg sync.WaitGroup
+	for index, serverName := range serverNames {
+		server, ok := servers[serverName]
+		if !ok {
+			resultCh <- storageStatusResult{index: index, serverName: serverName, err: fmt.Errorf("server not found in configuration")}
+			continue
+		}
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			status, err := read(serverName, server, serverName == nfsServerName)
+			resultCh <- storageStatusResult{index: index, serverName: serverName, status: status, err: err}
+		}(index, serverName, server)
+	}
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]storageStatusResult, len(serverNames))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+	return results
+}
+
+type storageRemountFunc func(serverName string, server config.ServerConfig, nfsHost string) error
+
+type storageRemountResult struct {
+	index      int
+	serverName string
+	err        error
+}
+
+func collectStorageRemountNodes(servers map[string]config.ServerConfig, serverNames []string, nfsServerName string, nfsServerHost string, remount storageRemountFunc) []storageRemountResult {
+	resultCh := make(chan storageRemountResult, len(serverNames))
+	var wg sync.WaitGroup
+	for index, serverName := range serverNames {
+		server, ok := servers[serverName]
+		if !ok {
+			resultCh <- storageRemountResult{index: index, serverName: serverName, err: fmt.Errorf("server not found in configuration")}
+			continue
+		}
+		nfsHost := nfsServerHost
+		if serverName == nfsServerName {
+			nfsHost = "localhost"
+		}
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig, nfsHost string) {
+			defer wg.Done()
+			resultCh <- storageRemountResult{index: index, serverName: serverName, err: remount(serverName, server, nfsHost)}
+		}(index, serverName, server, nfsHost)
+	}
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]storageRemountResult, len(serverNames))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+	return results
+}
+
+func storageTargetServers(cfg *config.Config, envName string, nfsServerName string) ([]string, error) {
+	envServers, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	seen := make(map[string]bool, len(envServers)+1)
+	targets := make([]string, 0, len(envServers)+1)
+	for _, serverName := range envServers {
+		if !seen[serverName] {
+			targets = append(targets, serverName)
+			seen[serverName] = true
+		}
+	}
+	if nfsServerName != "" && !seen[nfsServerName] {
+		targets = append(targets, nfsServerName)
+	}
+	sort.Strings(targets)
+	return targets, nil
 }
