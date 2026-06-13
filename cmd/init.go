@@ -242,26 +242,26 @@ project:
 # ============================================================================
 # RUNTIME MODEL
 # ============================================================================
-	runtime:
-	  mode: takod
-	  agent:
-	    enabled: true
-	    socket: /run/tako/takod.sock
-	    dataDir: /var/lib/tako
+runtime:
+  mode: takod
+  agent:
+    enabled: true
+    socket: /run/tako/takod.sock
+    dataDir: /var/lib/tako
 
-	state:
-	  backend: replicated        # Remote takod state is the source of truth.
-	  deployConsistency: lease   # Current deploy consistency policy.
-	  onUnreachableNode: block   # Block deploys when a selected node is unreachable.
-	  remoteCacheEnabled: true
+state:
+  backend: replicated        # Remote takod state is the source of truth.
+  deployConsistency: lease   # Current deploy consistency policy.
+  onUnreachableNode: block   # Block deploys when a selected node is unreachable.
+  remoteCacheEnabled: true
 
-	mesh:
-	  enabled: true              # Single-node deployments are one-node meshes.
-	  networkCIDR: 10.210.0.0/16
-	  interface: tako
-	  listenPort: 51820
-	  subnetBits: 24
-	  natTraversal: true
+mesh:
+  enabled: true              # Single-node deployments are one-node meshes.
+  networkCIDR: 10.210.0.0/16
+  interface: tako
+  listenPort: 51820
+  subnetBits: 24
+  natTraversal: true
 
 # ============================================================================
 # SERVER DEFINITIONS (Required)

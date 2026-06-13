@@ -1,10 +1,14 @@
 package syscheck
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 // Requirement represents a system requirement
@@ -301,10 +305,17 @@ func (s *SystemChecker) installNixpacksLinux() error {
 
 // PromptNixpacksInstall asks the user if they want to install Nixpacks
 func (s *SystemChecker) PromptNixpacksInstall() bool {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return false
+	}
+
 	fmt.Print("\nWould you like to install Nixpacks now? (Y/n): ")
 
-	var response string
-	fmt.Scanln(&response)
+	response, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return false
+	}
+	response = strings.TrimSpace(response)
 
 	// Default to yes if empty or starts with Y/y
 	if response == "" || strings.ToLower(response)[0] == 'y' {
