@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -156,13 +157,6 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("🔧 Enabling maintenance mode for %s on %s...\n\n", maintenanceService, serverName)
-
-	// Create maintenance directory
-	maintenanceDir := fmt.Sprintf("/opt/%s/maintenance", cfg.Project.Name)
-	createDirCmd := fmt.Sprintf("sudo mkdir -p %s", maintenanceDir)
-	if _, err := client.Execute(createDirCmd); err != nil {
-		return fmt.Errorf("failed to create maintenance directory: %w", err)
-	}
 
 	// Check if user has a custom maintenance.html in the project directory
 	customMaintenancePath := "maintenance.html"
@@ -494,24 +488,9 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Write maintenance page to server
+	// Prepare maintenance page content for the container.
 	fmt.Printf("→ Creating maintenance page...\n")
-
-	// Use base64 encoding to safely transfer HTML with special characters
 	encodedHTML := base64.StdEncoding.EncodeToString([]byte(maintenanceHTML))
-
-	// Write base64 to temp file first, then decode (handles large files)
-	tmpFile := fmt.Sprintf("/tmp/tako_maintenance_%d.b64", time.Now().Unix())
-	writeTempCmd := fmt.Sprintf("cat > %s <<'B64EOF'\n%s\nB64EOF", tmpFile, encodedHTML)
-	if _, err := client.Execute(writeTempCmd); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
-	}
-
-	// Decode and move to final location
-	decodeCmd := fmt.Sprintf("base64 -d < %s > %s/index.html && rm %s", tmpFile, maintenanceDir, tmpFile)
-	if _, err := client.Execute(decodeCmd); err != nil {
-		return fmt.Errorf("failed to decode maintenance page: %w", err)
-	}
 
 	// Deploy maintenance container and file-provider proxy config.
 	// Use priority 100 to ensure it takes precedence over normal service (priority 10)
@@ -519,37 +498,33 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 
 	containerName := fmt.Sprintf("%s_%s_maintenance", cfg.Project.Name, maintenanceService)
 	networkName := fmt.Sprintf("tako_%s_%s", cfg.Project.Name, envName)
+	socket := takodSocketFromConfig(cfg)
 
 	dynamicConfig, err := renderMaintenanceProxyConfig(cfg.Project.Name, envName, maintenanceService, service.Proxy, containerName)
 	if err != nil {
 		return err
 	}
-	if err := writeMaintenanceProxyConfig(client, cfg.Project.Name, envName, maintenanceService, dynamicConfig); err != nil {
+	if err := writeMaintenanceProxyConfig(client, socket, cfg.Project.Name, envName, maintenanceService, dynamicConfig); err != nil {
 		return fmt.Errorf("failed to write maintenance proxy config: %w", err)
 	}
 
-	// Create docker run command
-	dockerCmd := fmt.Sprintf(
-		"docker run -d --name %s --network %s -v %s:/usr/share/nginx/html:ro %s",
-		maintenanceShellQuote(containerName),
-		maintenanceShellQuote(networkName),
-		maintenanceShellQuote(maintenanceDir),
-		maintenanceImage,
-	)
-
-	// Remove existing maintenance container if any
-	client.Execute(fmt.Sprintf("docker rm -f %s 2>/dev/null", containerName))
-
-	// Start maintenance container
-	output, err := client.Execute(dockerCmd)
-	if err != nil {
-		return fmt.Errorf("failed to start maintenance container: %w, output: %s", err, output)
+	command := fmt.Sprintf("printf %%s %s | base64 -d > /usr/share/nginx/html/index.html && nginx -g 'daemon off;'", encodedHTML)
+	request := takod.ReconcileServiceRequest{
+		Project:      cfg.Project.Name,
+		Environment:  envName,
+		Service:      maintenanceTakodServiceName(maintenanceService),
+		Image:        maintenanceImage,
+		PullImage:    true,
+		Restart:      "unless-stopped",
+		Network:      networkName,
+		NetworkAlias: containerName,
+		Command:      command,
+		Containers: []takod.ContainerSpec{
+			{Name: containerName},
+		},
 	}
-
-	// Verify container is running
-	checkCmd := fmt.Sprintf("docker ps --filter name=%s --format '{{.Status}}'", containerName)
-	if output, err := client.Execute(checkCmd); err != nil || output == "" {
-		return fmt.Errorf("maintenance container failed to start")
+	if _, err := takodclient.RequestJSON(client, socket, "POST", "/v1/reconcile-service", request); err != nil {
+		return fmt.Errorf("failed to reconcile maintenance container: %w", err)
 	}
 
 	fmt.Printf("✓ Maintenance mode enabled for %s\n", maintenanceService)
@@ -616,38 +591,23 @@ func hostRuleForDomains(domains []string) string {
 	return strings.Join(parts, " || ")
 }
 
-func writeMaintenanceProxyConfig(client *ssh.Client, project string, environment string, serviceName string, data []byte) error {
-	path := maintenanceProxyConfigPath(project, environment, serviceName)
-	tmpPath := fmt.Sprintf("/tmp/%s", maintenanceProxyConfigFileName(project, environment, serviceName))
-	if err := client.UploadReader(strings.NewReader(string(data)), tmpPath, 0644); err != nil {
-		return err
-	}
-	cmd := fmt.Sprintf(
-		"sudo mkdir -p /etc/tako/proxy/dynamic && sudo mv %s %s && sudo chmod 644 %s",
-		maintenanceShellQuote(tmpPath),
-		maintenanceShellQuote(path),
-		maintenanceShellQuote(path),
-	)
-	_, err := client.Execute(cmd)
+func writeMaintenanceProxyConfig(client *ssh.Client, socket string, project string, environment string, serviceName string, data []byte) error {
+	_, err := takodclient.RequestJSON(client, socket, "PUT", "/v1/proxy-file", takod.ProxyFileRequest{
+		Name:    maintenanceProxyConfigFileName(project, environment, serviceName),
+		Content: string(data),
+	})
 	return err
-}
-
-func maintenanceProxyConfigPath(project string, environment string, serviceName string) string {
-	return "/etc/tako/proxy/dynamic/" + maintenanceProxyConfigFileName(project, environment, serviceName)
 }
 
 func maintenanceProxyConfigFileName(project string, environment string, serviceName string) string {
 	return sanitizeMaintenanceName(project+"-"+environment+"-"+serviceName+"-maintenance") + ".yml"
 }
 
+func maintenanceTakodServiceName(serviceName string) string {
+	return serviceName + "-maintenance"
+}
+
 func sanitizeMaintenanceName(value string) string {
 	replacer := strings.NewReplacer("_", "-", ".", "-", "/", "-", " ", "-")
 	return replacer.Replace(strings.ToLower(value))
-}
-
-func maintenanceShellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }

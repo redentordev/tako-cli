@@ -87,13 +87,14 @@ systemd service. Development builds reuse an existing server binary when one is
 already installed, which keeps local iteration from depending on a published
 release.
 
-`takod` currently exposes health, status, actual container discovery, and
-service container reconcile from node-local state. Actual container discovery
-prefers this socket and falls back to direct SSH Docker inspection when the
-agent is absent. Service deploy and scale now ask the local agent to remove,
-pull, run, and verify containers through a typed socket request. Remaining
-mutating workflows such as rollback, destroy, backup, and cleanup still need to
-move behind socket APIs.
+`takod` currently exposes health, status, actual container discovery, service
+container reconcile, proxy file updates, and proxy container reconcile from
+node-local state. Actual container discovery prefers this socket and falls back
+to direct SSH Docker inspection when the agent is absent. Service deploy, scale,
+maintenance/live, and proxy routing now ask the local agent to remove, pull,
+run, verify containers, and publish proxy config through typed socket requests.
+Remaining mutating workflows such as rollback, destroy, backup, cleanup, and
+acme-dns still need to move behind socket APIs.
 
 Local `.tako` files are cache and UX acceleration. The durable truth lives in
 Git plus the last accepted desired revision and event log replicated by takod.

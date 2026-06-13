@@ -23,7 +23,8 @@ var takodCmd = &cobra.Command{
 	Long: `Run the node-local takod agent.
 
 The agent listens on a Unix socket and exposes node-local runtime status for
-CLI status, actual-state discovery, and service container reconcile operations.`,
+CLI status, actual-state discovery, service container reconcile, and proxy
+runtime operations.`,
 }
 
 var takodRunCmd = &cobra.Command{
