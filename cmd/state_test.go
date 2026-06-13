@@ -9,6 +9,7 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
 func TestSyncRemoteDeploymentsToLocalKeepsNewestAsCurrent(t *testing.T) {
@@ -132,6 +133,81 @@ func TestBestDeploymentHistoryIgnoresEmptyCandidates(t *testing.T) {
 	}
 }
 
+func TestBestDesiredRevisionPrefersNewestCreatedAt(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	older := desiredRevision("rev-old", base)
+	newer := desiredRevision("rev-new", base.Add(time.Hour))
+
+	best, ok := bestDesiredRevision([]stateDesiredCandidate{
+		{source: "node-a", desired: older},
+		{source: "node-b", desired: newer},
+	})
+	if !ok {
+		t.Fatal("bestDesiredRevision returned no candidate")
+	}
+	if best.source != "node-b" {
+		t.Fatalf("best source = %q, want node-b", best.source)
+	}
+}
+
+func TestBestDesiredRevisionIgnoresIncompleteCandidates(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+
+	best, ok := bestDesiredRevision([]stateDesiredCandidate{
+		{source: "missing-id", desired: desiredRevision("", base.Add(time.Hour))},
+		{source: "missing-time", desired: desiredRevision("rev-missing-time", time.Time{})},
+		{source: "good", desired: desiredRevision("rev-good", base)},
+	})
+	if !ok {
+		t.Fatal("bestDesiredRevision returned no candidate")
+	}
+	if best.source != "good" {
+		t.Fatalf("best source = %q, want good", best.source)
+	}
+}
+
+func TestBestActualSnapshotPrefersNewestCapturedAt(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	older := actualSnapshot(base, "web")
+	newer := actualSnapshot(base.Add(time.Hour), "web", "worker")
+
+	best, ok := bestActualSnapshot([]stateActualCandidate{
+		{source: "node-a", actual: older},
+		{source: "node-b", actual: newer},
+	})
+	if !ok {
+		t.Fatal("bestActualSnapshot returned no candidate")
+	}
+	if best.source != "node-b" {
+		t.Fatalf("best source = %q, want node-b", best.source)
+	}
+}
+
+func TestBestActualSnapshotAllowsEmptyServiceSnapshot(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+
+	best, ok := bestActualSnapshot([]stateActualCandidate{
+		{source: "empty", actual: actualSnapshot(base)},
+	})
+	if !ok {
+		t.Fatal("bestActualSnapshot returned no candidate")
+	}
+	if best.source != "empty" {
+		t.Fatalf("best source = %q, want empty", best.source)
+	}
+}
+
+func TestStateRepairLeaseSourceFallsBackToRuntimeState(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	desired := stateDesiredCandidate{source: "node-b", desired: desiredRevision("rev-new", base)}
+	actual := stateActualCandidate{source: "node-c", actual: actualSnapshot(base, "web")}
+
+	source := stateRepairLeaseSource(false, stateHistoryCandidate{}, true, desired, true, actual)
+	if source != "node-b" {
+		t.Fatalf("lease source = %q, want node-b", source)
+	}
+}
+
 func TestOrderedStateServerNamesPrefersRequestedServer(t *testing.T) {
 	cfg := &config.Config{
 		Servers: map[string]config.ServerConfig{
@@ -193,4 +269,41 @@ func remoteHistory(lastUpdated time.Time, deployments ...*remotestate.Deployment
 		Deployments: deployments,
 		LastUpdated: lastUpdated,
 	}
+}
+
+func desiredRevision(id string, createdAt time.Time) *takodstate.DesiredRevision {
+	return &takodstate.DesiredRevision{
+		SchemaVersion: takodstate.SchemaVersion,
+		RevisionID:    id,
+		Project:       "demo",
+		Environment:   "production",
+		Source:        "test",
+		Services: map[string]takodstate.DesiredService{
+			"web": {
+				Name:     "web",
+				Type:     "public",
+				Image:    "demo:web",
+				Replicas: 1,
+			},
+		},
+		CreatedAt: createdAt,
+	}
+}
+
+func actualSnapshot(capturedAt time.Time, services ...string) *takodstate.ActualSnapshot {
+	snapshot := &takodstate.ActualSnapshot{
+		SchemaVersion: takodstate.SchemaVersion,
+		Project:       "demo",
+		Environment:   "production",
+		Services:      map[string]takodstate.ActualService{},
+		CapturedAt:    capturedAt,
+	}
+	for _, service := range services {
+		snapshot.Services[service] = takodstate.ActualService{
+			Name:     service,
+			Image:    "demo:" + service,
+			Replicas: 1,
+		}
+	}
+	return snapshot
 }

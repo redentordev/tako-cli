@@ -214,8 +214,9 @@ By default, state commands read from the active environment's primary node. Use
 `--server <name>` to read from another environment node when recovering from a
 machine change or a primary-node outage. When nodes disagree or the primary
 state copy was lost, run `tako state repair -e production`; it reads all
-reachable environment nodes, writes the freshest deployment history back to the
-reachable mesh, and refreshes local `.tako` state.
+reachable environment nodes, writes the freshest deployment history, desired
+revision, and actual snapshot back to the reachable mesh, and refreshes local
+`.tako` state when deployment history is available.
 
 ## CI/CD
 
@@ -248,7 +249,7 @@ Done:
 4. Desired revisions, actual snapshots, and events persist on nodes.
 5. WireGuard peer material and node configs reconcile through takod.
 6. Per-node proxies render mesh upstreams from desired and actual state.
-7. State repair can rebuild deployment history across reachable mesh nodes.
+7. State repair can rebuild deployment history and runtime state across reachable mesh nodes.
 
 Next:
 1. Evaluate background peer anti-entropy after the explicit repair workflow is proven.
