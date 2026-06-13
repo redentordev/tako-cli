@@ -60,6 +60,44 @@ func TestDesiredReplicasForSelection(t *testing.T) {
 	}
 }
 
+func TestPSTargetServersUsesEnvironmentNodesByDefault(t *testing.T) {
+	cfg := resolverConfig()
+	psServer = ""
+	t.Cleanup(func() { psServer = "" })
+
+	servers, err := psTargetServers(cfg, "production")
+	if err != nil {
+		t.Fatalf("psTargetServers returned error: %v", err)
+	}
+	if !slices.Equal(servers, []string{"node-a", "node-b"}) {
+		t.Fatalf("servers = %#v, want production nodes", servers)
+	}
+}
+
+func TestPSTargetServersHonorsServerOverride(t *testing.T) {
+	cfg := resolverConfig()
+	psServer = "node-b"
+	t.Cleanup(func() { psServer = "" })
+
+	servers, err := psTargetServers(cfg, "production")
+	if err != nil {
+		t.Fatalf("psTargetServers returned error: %v", err)
+	}
+	if !slices.Equal(servers, []string{"node-b"}) {
+		t.Fatalf("servers = %#v, want node-b", servers)
+	}
+}
+
+func TestPSTargetServersRejectsServerOutsideEnvironment(t *testing.T) {
+	cfg := resolverConfig()
+	psServer = "node-c"
+	t.Cleanup(func() { psServer = "" })
+
+	if _, err := psTargetServers(cfg, "production"); err == nil {
+		t.Fatal("psTargetServers should reject a server outside the environment")
+	}
+}
+
 func TestGatherPSActualStateWithRunsConcurrentlyAndMergesInServerOrder(t *testing.T) {
 	serverNames := []string{"node-a", "node-b", "node-c"}
 	servers := testPSActualStateServers(serverNames)

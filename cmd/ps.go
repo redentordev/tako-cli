@@ -72,7 +72,7 @@ func runPS(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get environment servers: %w", err)
 	}
-	serverNames, err := psTargetServers(cfg, envName, envServers)
+	serverNames, err := psTargetServers(cfg, envName)
 	if err != nil {
 		return err
 	}
@@ -100,22 +100,8 @@ func runPS(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func psTargetServers(cfg *config.Config, envName string, envServers []string) ([]string, error) {
-	if len(envServers) == 0 {
-		return nil, fmt.Errorf("no servers configured for environment %s", envName)
-	}
-	if psServer == "" {
-		return append([]string(nil), envServers...), nil
-	}
-	if _, ok := cfg.Servers[psServer]; !ok {
-		return nil, fmt.Errorf("server '%s' not found in config", psServer)
-	}
-	for _, serverName := range envServers {
-		if serverName == psServer {
-			return []string{psServer}, nil
-		}
-	}
-	return nil, fmt.Errorf("server '%s' is not part of environment %s", psServer, envName)
+func psTargetServers(cfg *config.Config, envName string) ([]string, error) {
+	return statePullServerNames(cfg, envName, psServer)
 }
 
 func gatherPSActualState(cfg *config.Config, envName string, serverNames []string) (map[string]*takod.ActualService, error) {

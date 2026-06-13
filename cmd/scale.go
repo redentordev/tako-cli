@@ -215,27 +215,12 @@ func scaleEventDetails(targets map[string]int) map[string]string {
 }
 
 func scaleTargetServers(cfg *config.Config, envName string, serverOverride string) ([]string, error) {
-	environmentServers, err := cfg.GetEnvironmentServers(envName)
+	serverNames, err := statePullServerNames(cfg, envName, serverOverride)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get environment servers: %w", err)
+		return nil, err
 	}
-
-	if serverOverride == "" {
-		serverNames := append([]string(nil), environmentServers...)
-		sort.Strings(serverNames)
-		return serverNames, nil
-	}
-
-	if _, ok := cfg.Servers[serverOverride]; !ok {
-		return nil, fmt.Errorf("server '%s' not found in config", serverOverride)
-	}
-	for _, serverName := range environmentServers {
-		if serverName == serverOverride {
-			return []string{serverOverride}, nil
-		}
-	}
-
-	return nil, fmt.Errorf("server '%s' is not part of environment %s", serverOverride, envName)
+	sort.Strings(serverNames)
+	return serverNames, nil
 }
 
 func scaleNotifier(cfg *config.Config) *notification.Notifier {
