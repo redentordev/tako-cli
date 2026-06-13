@@ -182,7 +182,8 @@ replication and storage behavior.
 ```
 
 Every ingress node runs a local proxy. It routes to local healthy containers
-first and can fall back to remote healthy containers over the mesh.
+and remote healthy containers through deterministic mesh-only upstream ports.
+One-node deployments use the same proxy path with only local upstreams.
 
 ## Switching Computers
 
@@ -226,6 +227,6 @@ lock remains as a same-machine guard.
 2. Add CI-friendly remote deploy leases and state pull/status workflows.
 3. Persist desired revisions and events on every node.
 4. Reconcile WireGuard peer material and node configs.
-5. Move ingress to per-node proxies with mesh upstream fallback.
+5. Render per-node proxies with mesh upstream load balancing.
 6. Promote reconcile/state operations to the takod socket.
 ```

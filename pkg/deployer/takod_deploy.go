@@ -320,9 +320,6 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		if service.Port <= 0 {
 			return fmt.Errorf("service %s has proxy config but no port", serviceName)
 		}
-		if err := d.ensureTakodProxy(client, networkName, proxyEmail(service)); err != nil {
-			return err
-		}
 	}
 
 	if len(service.Init) > 0 {
@@ -344,7 +341,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 	healthChecker := NewHealthChecker(client, d.verbose)
 	for _, slot := range slots {
 		containerName := d.takodContainerName(serviceName, slot)
-		runCmd, err := d.buildTakodRunCommand(containerName, serviceName, service, imageRef, networkName, envFilePath, len(slots))
+		runCmd, err := d.buildTakodRunCommand(serverName, containerName, serviceName, service, imageRef, networkName, envFilePath, slot, len(slots))
 		if err != nil {
 			return err
 		}
@@ -373,7 +370,7 @@ func (d *Deployer) removeTakodServiceContainers(client *ssh.Client, serviceName 
 	return nil
 }
 
-func (d *Deployer) buildTakodRunCommand(containerName string, serviceName string, service *config.ServiceConfig, imageRef string, networkName string, envFilePath string, nodeSlotCount int) (string, error) {
+func (d *Deployer) buildTakodRunCommand(serverName string, containerName string, serviceName string, service *config.ServiceConfig, imageRef string, networkName string, envFilePath string, slot int, nodeSlotCount int) (string, error) {
 	restart := service.Restart
 	if restart == "" {
 		restart = "unless-stopped"
@@ -402,7 +399,15 @@ func (d *Deployer) buildTakodRunCommand(containerName string, serviceName string
 	args = append(args, volumeArgs...)
 
 	if service.IsPublic() {
-		args = append(args, d.buildTakodProxyLabels(serviceName, service, networkName)...)
+		meshHostIP, err := d.meshHostIPForServer(serverName)
+		if err != nil {
+			return "", err
+		}
+		meshPort, err := d.meshUpstreamPort(serviceName, slot)
+		if err != nil {
+			return "", err
+		}
+		args = append(args, "--publish "+shellQuote(fmt.Sprintf("%s:%d:%d", meshHostIP, meshPort, service.Port)))
 	} else if service.Port > 0 {
 		if nodeSlotCount > 1 {
 			return "", fmt.Errorf("service %s publishes port %d without proxy but has multiple replicas on the same node", serviceName, service.Port)
@@ -418,40 +423,6 @@ func (d *Deployer) buildTakodRunCommand(containerName string, serviceName string
 	args = append(args, "2>&1")
 
 	return strings.Join(args, " "), nil
-}
-
-func (d *Deployer) buildTakodProxyLabels(serviceName string, service *config.ServiceConfig, networkName string) []string {
-	routerName := sanitizeRouterName(d.config.Project.Name + "-" + d.environment + "-" + serviceName)
-	domains := service.Proxy.GetAllDomains()
-	var hostRules []string
-	for _, domain := range domains {
-		hostRules = append(hostRules, "Host(`"+domain+"`)")
-	}
-	rule := strings.Join(hostRules, " || ")
-	if rule == "" {
-		rule = "Host(`" + service.Proxy.GetPrimaryDomain() + "`)"
-	}
-
-	labels := []string{
-		"traefik.enable=true",
-		"traefik.docker.network=" + networkName,
-		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port=%d", routerName, service.Port),
-		fmt.Sprintf("traefik.http.routers.%s.rule=%s", routerName, rule),
-		fmt.Sprintf("traefik.http.routers.%s.entrypoints=websecure", routerName),
-		fmt.Sprintf("traefik.http.routers.%s.tls=true", routerName),
-		fmt.Sprintf("traefik.http.routers.%s.tls.certresolver=letsencrypt", routerName),
-		fmt.Sprintf("traefik.http.routers.%s.service=%s", routerName, routerName),
-		fmt.Sprintf("traefik.http.routers.%s-http.rule=%s", routerName, rule),
-		fmt.Sprintf("traefik.http.routers.%s-http.entrypoints=web", routerName),
-		fmt.Sprintf("traefik.http.routers.%s-http.middlewares=%s-redirect", routerName, routerName),
-		fmt.Sprintf("traefik.http.middlewares.%s-redirect.redirectscheme.scheme=https", routerName),
-	}
-
-	args := make([]string, 0, len(labels))
-	for _, label := range labels {
-		args = append(args, "--label "+shellQuote(label))
-	}
-	return args
 }
 
 func (d *Deployer) buildTakodHealthFlags(service *config.ServiceConfig) []string {
@@ -535,15 +506,18 @@ func (d *Deployer) ensureTakodProxy(client *ssh.Client, networkName string, emai
 		email = "tako@redentor.dev"
 	}
 
-	setupCmd := "mkdir -p /etc/tako/proxy/acme /var/log/tako/proxy && touch /etc/tako/proxy/acme/acme.json && chmod 600 /etc/tako/proxy/acme/acme.json"
+	setupCmd := "mkdir -p /etc/tako/proxy/acme /etc/tako/proxy/dynamic /var/log/tako/proxy && touch /etc/tako/proxy/acme/acme.json && chmod 600 /etc/tako/proxy/acme/acme.json"
 	if _, err := client.Execute(setupCmd); err != nil {
 		return fmt.Errorf("failed to prepare proxy directories: %w", err)
 	}
 
 	running, _ := client.Execute("docker ps --filter name=^tako-proxy$ --format '{{.Names}}'")
 	if strings.TrimSpace(running) == "tako-proxy" {
-		_, _ = client.Execute("docker network connect " + shellQuote(networkName) + " tako-proxy 2>/dev/null || true")
-		return nil
+		args, _ := client.Execute("docker inspect tako-proxy --format '{{json .Args}}' 2>/dev/null")
+		if strings.Contains(args, "--providers.file.directory=/etc/traefik/dynamic") {
+			_, _ = client.Execute("docker network connect " + shellQuote(networkName) + " tako-proxy 2>/dev/null || true")
+			return nil
+		}
 	}
 
 	_, _ = client.Execute("docker rm -f tako-proxy 2>/dev/null || true")
@@ -556,12 +530,15 @@ func (d *Deployer) ensureTakodProxy(client *ssh.Client, networkName string, emai
 		"--publish 443:443",
 		"--volume /var/run/docker.sock:/var/run/docker.sock:ro",
 		"--volume /etc/tako/proxy/acme:/acme",
+		"--volume /etc/tako/proxy/dynamic:/etc/traefik/dynamic:ro",
 		"--volume /var/log/tako/proxy:/var/log/traefik",
 		"traefik:v3.6.1",
 		"--api.dashboard=false",
 		"--providers.docker=true",
 		"--providers.docker.exposedByDefault=false",
 		"--providers.docker.watch=true",
+		"--providers.file.directory=/etc/traefik/dynamic",
+		"--providers.file.watch=true",
 		"--entryPoints.web.address=:80",
 		"--entryPoints.web.forwardedHeaders.insecure=true",
 		"--entryPoints.websecure.address=:443",
@@ -846,16 +823,6 @@ func parseVolumeSpec(volume string) (source, target string) {
 		return parts[0], ""
 	}
 	return parts[0], parts[1]
-}
-
-func proxyEmail(service *config.ServiceConfig) string {
-	if service.Proxy == nil {
-		return ""
-	}
-	if service.Proxy.Email != "" {
-		return service.Proxy.Email
-	}
-	return ""
 }
 
 func sanitizeRouterName(value string) string {

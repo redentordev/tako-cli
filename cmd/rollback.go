@@ -245,6 +245,10 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	imageRefs := defaultImageRefs(cfg, envName, desiredServices)
 	imageRefs[rollbackService] = serviceState.Image
 
+	if err := deploy.ReconcileTakodProxy(desiredServices); err != nil {
+		return fmt.Errorf("rollback succeeded but failed to reconcile proxy: %w", err)
+	}
+
 	postRollbackActualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, envServers, nil)
 	if err != nil {
 		return fmt.Errorf("rollback succeeded but failed to gather post-rollback actual state: %w", err)
