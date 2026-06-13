@@ -25,7 +25,7 @@ This command:
   - Stops and removes all service containers
   - Removes Docker images for this project
   - Removes proxy configurations
-  - Preserves server infrastructure (Docker, Traefik remain installed)
+  - Preserves server setup (Docker, Traefik remain installed)
   - Does NOT decommission the server
 
 The server can be reused for new deployments after removal.

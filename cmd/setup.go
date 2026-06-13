@@ -17,8 +17,8 @@ var (
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
-	Short: "Provision server with Docker, Traefik, and security hardening",
-	Long: `Setup provisions your VPS server with all necessary components:
+	Short: "Set up server with Docker, Traefik, and security hardening",
+	Long: `Setup configures your VPS server with all necessary components:
   - Docker and Docker Compose
   - Traefik reverse proxy for automatic SSL and load balancing
   - UFW firewall configuration
@@ -33,12 +33,12 @@ This only needs to be run once per server.`,
 
 func init() {
 	rootCmd.AddCommand(setupCmd)
-	setupCmd.Flags().StringVarP(&setupServer, "server", "s", "", "Server to provision (default: all servers)")
+	setupCmd.Flags().StringVarP(&setupServer, "server", "s", "", "Server to set up (default: all servers)")
 }
 
 func runSetup(cmd *cobra.Command, args []string) error {
-	// Load configuration with infrastructure state integration
-	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
+	// Load deployment configuration
+	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -47,7 +47,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
-	// Determine which servers to provision
+	// Determine which servers to set up
 	servers := cfg.Servers
 	if setupServer != "" {
 		server, exists := cfg.Servers[setupServer]
@@ -57,9 +57,9 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		servers = map[string]config.ServerConfig{setupServer: server}
 	}
 
-	// Provision each server
+	// Set up each server
 	for name, server := range servers {
-		fmt.Printf("\n=== Provisioning server: %s (%s) ===\n\n", name, server.Host)
+		fmt.Printf("\n=== Setting up server: %s (%s) ===\n\n", name, server.Host)
 
 		// Get or create SSH client (supports both key and password auth)
 		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
@@ -138,7 +138,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  ⚠ Warning: Failed to write version file: %v\n", err)
 		}
 
-		fmt.Printf("\n✓ Server %s provisioned successfully!\n", name)
+		fmt.Printf("\n✓ Server %s set up successfully!\n", name)
 	}
 
 	// Setup NFS if configured and appropriate
@@ -160,7 +160,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("\nAll servers provisioned successfully!\n")
+	fmt.Printf("\nAll servers set up successfully!\n")
 	fmt.Printf("\nNext step: Run 'tako deploy' to deploy your application\n")
 
 	return nil

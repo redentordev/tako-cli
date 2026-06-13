@@ -24,9 +24,9 @@ func ValidateConfig(cfg *Config) error {
 		return fmt.Errorf("project version is required")
 	}
 
-	// Validate servers (required unless infrastructure is defined)
-	if len(cfg.Servers) == 0 && cfg.Infrastructure == nil {
-		return fmt.Errorf("at least one server must be configured (or define infrastructure section for provisioning)")
+	// Validate servers
+	if len(cfg.Servers) == 0 {
+		return fmt.Errorf("at least one server must be configured")
 	}
 	for name, server := range cfg.Servers {
 		if err := validateServer(name, &server); err != nil {
@@ -59,13 +59,13 @@ func ValidateConfig(cfg *Config) error {
 }
 
 func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) error {
-	// Validate servers or server selector (not required if infrastructure is defined)
-	if len(env.Servers) == 0 && env.ServerSelector == nil && cfg.Infrastructure == nil {
+	// Validate servers or server selector
+	if len(env.Servers) == 0 && env.ServerSelector == nil {
 		return fmt.Errorf("environment %s: must specify either 'servers' or 'serverSelector'", envName)
 	}
 
-	// Validate server names exist in config (skip if infrastructure is defined - servers come from infra)
-	if len(env.Servers) > 0 && cfg.Infrastructure == nil {
+	// Validate server names exist in config
+	if len(env.Servers) > 0 {
 		for _, serverName := range env.Servers {
 			if _, exists := cfg.Servers[serverName]; !exists {
 				return fmt.Errorf("environment %s: server '%s' not found in servers section", envName, serverName)

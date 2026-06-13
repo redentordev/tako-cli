@@ -21,7 +21,7 @@ var (
 
 var destroyCmd = &cobra.Command{
 	Use:   "destroy",
-	Short: "Remove deployed application and optionally cleanup infrastructure",
+	Short: "Remove deployed application and optionally clean up server setup",
 	Long: `Destroy the deployed application and cleanup resources.
 
 This command has two modes:
@@ -30,7 +30,7 @@ This command has two modes:
    - Stops and removes application containers
    - Removes application Docker images
    - Removes deployment files
-   - Keeps Traefik, logs, and server infrastructure
+   - Keeps Traefik, logs, and server setup
    - Safe for production - can redeploy later
 
 2. PURGE MODE (--purge-all):
@@ -46,7 +46,7 @@ Safety Features:
    - Use --force to skip confirmation prompts
 
 Examples:
-   tako destroy                    # Decommission app, keep infrastructure
+   tako destroy                    # Decommission app, keep server setup
    tako destroy --purge-all        # Remove everything (requires confirmation)
    tako destroy --server staging   # Destroy specific server only
    tako destroy --force            # Skip confirmation prompts
@@ -59,7 +59,7 @@ Examples:
 func init() {
 	rootCmd.AddCommand(destroyCmd)
 	destroyCmd.Flags().StringVarP(&destroyServer, "server", "s", "", "Specific server to destroy")
-	destroyCmd.Flags().BoolVar(&destroyPurgeAll, "purge-all", false, "Remove everything including infrastructure (DANGEROUS)")
+	destroyCmd.Flags().BoolVar(&destroyPurgeAll, "purge-all", false, "Remove everything including server setup (DANGEROUS)")
 	destroyCmd.Flags().BoolVar(&destroyForce, "force", false, "Skip confirmation prompts")
 }
 
@@ -115,7 +115,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		fmt.Println("   ✓ Prune all unused Docker resources")
 		fmt.Println("\n⚠️  You'll need to run 'tako setup' again to redeploy!")
 	} else {
-		fmt.Println("\nPreserving infrastructure (Traefik, logs, Docker daemon)")
+		fmt.Println("\nPreserving server setup (Traefik, logs, Docker daemon)")
 		fmt.Println("You can redeploy without running 'tako setup' again")
 	}
 
@@ -173,7 +173,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 
 	// Destroy each server (workers first if purging multi-server)
 	totalErrors := 0
-	
+
 	// Process workers first if purging
 	if destroyPurgeAll && len(workerServers) > 0 {
 		for _, serverName := range workerServers {
@@ -203,7 +203,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 				continue
 			}
 		}
-		
+
 		fmt.Printf("=== Destroying server: %s (%s) ===\n", serverName, serverCfg.Host)
 		if err := destroySingleServer(serverName, serverCfg, cfg.Project.Name, verbose, destroyPurgeAll); err != nil {
 			fmt.Printf("⚠️  Errors destroying %s: %v\n", serverName, err)
@@ -259,9 +259,9 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		fmt.Println("✨ All servers destroyed successfully!")
 
 		if destroyPurgeAll {
-			fmt.Println("\n💡 Infrastructure removed. Run 'tako setup' before next deployment.")
+			fmt.Println("\n💡 Server setup removed. Run 'tako setup' before next deployment.")
 		} else {
-			fmt.Println("\n💡 Infrastructure preserved. You can redeploy without running 'tako setup'.")
+			fmt.Println("\n💡 Server setup preserved. You can redeploy without running 'tako setup'.")
 		}
 	}
 
@@ -365,9 +365,9 @@ func destroySingleServer(serverName string, serverCfg config.ServerConfig, proje
 		return fmt.Errorf("decommission failed: %w", err)
 	}
 
-	// Purge infrastructure if requested
+	// Purge server setup if requested
 	if purgeAll {
-		if err := purgeInfrastructure(client, projectName, verbose); err != nil {
+		if err := purgeServerSetup(client, projectName, verbose); err != nil {
 			return fmt.Errorf("purge failed: %w", err)
 		}
 	}
@@ -448,8 +448,8 @@ func decommissionApp(client *ssh.Client, projectName string, verbose bool) error
 	return nil
 }
 
-// purgeInfrastructure removes all infrastructure (DANGEROUS)
-func purgeInfrastructure(client *ssh.Client, projectName string, verbose bool) error {
+// purgeServerSetup removes shared server-side components installed by Tako.
+func purgeServerSetup(client *ssh.Client, projectName string, verbose bool) error {
 	if verbose {
 		fmt.Println("  → Removing Traefik configuration...")
 	}
@@ -492,7 +492,7 @@ func purgeInfrastructure(client *ssh.Client, projectName string, verbose bool) e
 	client.Execute("sudo rm -rf /etc/tako 2>/dev/null || true")
 
 	if verbose {
-		fmt.Println("  ✓ Infrastructure purged")
+		fmt.Println("  ✓ Server setup purged")
 	}
 
 	return nil

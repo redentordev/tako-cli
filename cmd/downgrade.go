@@ -27,7 +27,7 @@ Your data and volumes will be preserved.
 
 Use this when:
   - Reducing from multiple servers to a single server
-  - Simplifying infrastructure
+  - Simplifying server operations
   - Cost optimization
 
 After downgrade, redeploy your services with 'tako deploy'`,

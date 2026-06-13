@@ -30,7 +30,7 @@ This command helps maintain your servers by:
   - Securing log file permissions
 
 Regular cleanup prevents disk space exhaustion and keeps your
-deployment infrastructure lean and efficient.
+deployment servers lean and efficient.
 
 Security:
   - Uses --secure flag to restrict log file permissions

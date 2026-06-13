@@ -63,7 +63,7 @@ func init() {
 }
 
 func runEnvPush(cmd *cobra.Command, args []string) error {
-	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
+	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -178,7 +178,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 }
 
 func runEnvPull(cmd *cobra.Command, args []string) error {
-	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
+	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
