@@ -1375,6 +1375,9 @@ func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCand
 	if len(nodeActual) > 0 && nodeActualWritten == 0 {
 		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired node actual runtime state to any reachable node")
 	}
+	if len(warnings) > 0 {
+		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("state repair incomplete: %s", strings.Join(warnings, "; "))
+	}
 	return historyWritten, desiredWritten, actualWritten, nodeActualWritten, nil
 }
 
