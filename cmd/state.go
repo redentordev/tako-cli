@@ -1023,7 +1023,7 @@ type stateRepairNode struct {
 	name    string
 	client  *ssh.Client
 	manager stateRepairStateManager
-	runtime *takodstate.Manager
+	runtime stateRepairRuntimeManager
 }
 
 type stateRepairLease struct {
@@ -1037,6 +1037,12 @@ type stateRepairStateManager interface {
 	SaveHistory(*remotestate.DeploymentHistory) error
 	AcquireLease(operation string, environment string, ttl time.Duration) (*remotestate.LeaseInfo, error)
 	ReleaseLease(*remotestate.LeaseInfo) error
+}
+
+type stateRepairRuntimeManager interface {
+	WriteDesired(*takodstate.DesiredRevision) error
+	WriteActual(*takodstate.ActualSnapshot) error
+	WriteNodeActual(string, *takodstate.ActualSnapshot) error
 }
 
 type stateRepairInventory struct {
@@ -1317,54 +1323,40 @@ func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCand
 	actualWritten := 0
 	nodeActualWritten := 0
 
+	resultCh := make(chan stateRepairWriteResult, len(nodes))
+	var wg sync.WaitGroup
 	for _, node := range nodes {
-		if hasHistory {
-			historyCopy, err := cloneRemoteDeploymentHistory(history.history)
-			if err != nil {
-				return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to prepare history for repair: %w", err)
-			}
-			if err := node.manager.SaveHistory(historyCopy); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to repair deployment history on %s: %v\n", node.name, err)
-			} else {
-				historyWritten++
-			}
-		}
+		wg.Add(1)
+		go func(node stateRepairNode) {
+			defer wg.Done()
+			resultCh <- writeStateRepairDocumentsToNode(node, history, hasHistory, desired, hasDesired, actual, hasActual, nodeActual)
+		}(node)
+	}
 
-		if hasDesired {
-			desiredCopy, err := cloneDesiredRevision(desired.desired)
-			if err != nil {
-				return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to prepare desired runtime state for repair: %w", err)
-			}
-			if err := node.runtime.WriteDesired(desiredCopy); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to repair desired runtime state on %s: %v\n", node.name, err)
-			} else {
-				desiredWritten++
-			}
-		}
+	wg.Wait()
+	close(resultCh)
 
-		if hasActual {
-			actualCopy, err := cloneActualSnapshot(actual.actual)
-			if err != nil {
-				return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to prepare actual runtime state for repair: %w", err)
-			}
-			if err := node.runtime.WriteActual(actualCopy); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to repair actual runtime state on %s: %v\n", node.name, err)
-			} else {
-				actualWritten++
-			}
+	var warnings []string
+	var fatalErrors []string
+	for result := range resultCh {
+		historyWritten += result.counts.history
+		desiredWritten += result.counts.desired
+		actualWritten += result.counts.actual
+		nodeActualWritten += result.counts.nodeActual
+		warnings = append(warnings, result.warnings...)
+		if result.err != nil {
+			fatalErrors = append(fatalErrors, fmt.Sprintf("%s: %v", result.nodeName, result.err))
 		}
+	}
 
-		for nodeName, candidate := range nodeActual {
-			actualCopy, err := cloneActualSnapshot(candidate.actual)
-			if err != nil {
-				return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to prepare node actual runtime state for repair: %w", err)
-			}
-			if err := node.runtime.WriteNodeActual(nodeName, actualCopy); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to repair node actual runtime state for %s on %s: %v\n", nodeName, node.name, err)
-			} else {
-				nodeActualWritten++
-			}
-		}
+	sort.Strings(warnings)
+	for _, warning := range warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+	}
+
+	if len(fatalErrors) > 0 {
+		sort.Strings(fatalErrors)
+		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to prepare state repair documents: %s", strings.Join(fatalErrors, "; "))
 	}
 
 	if hasHistory && historyWritten == 0 {
@@ -1380,6 +1372,80 @@ func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCand
 		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired node actual runtime state to any reachable node")
 	}
 	return historyWritten, desiredWritten, actualWritten, nodeActualWritten, nil
+}
+
+type stateRepairWriteCounts struct {
+	history    int
+	desired    int
+	actual     int
+	nodeActual int
+}
+
+type stateRepairWriteResult struct {
+	nodeName string
+	counts   stateRepairWriteCounts
+	warnings []string
+	err      error
+}
+
+func writeStateRepairDocumentsToNode(node stateRepairNode, history stateHistoryCandidate, hasHistory bool, desired stateDesiredCandidate, hasDesired bool, actual stateActualCandidate, hasActual bool, nodeActual map[string]stateNodeActualCandidate) stateRepairWriteResult {
+	result := stateRepairWriteResult{nodeName: node.name}
+
+	if hasHistory {
+		historyCopy, err := cloneRemoteDeploymentHistory(history.history)
+		if err != nil {
+			result.err = fmt.Errorf("failed to prepare history for repair: %w", err)
+			return result
+		}
+		if err := node.manager.SaveHistory(historyCopy); err != nil {
+			result.warnings = append(result.warnings, fmt.Sprintf("failed to repair deployment history on %s: %v", node.name, err))
+		} else {
+			result.counts.history++
+		}
+	}
+
+	if hasDesired {
+		desiredCopy, err := cloneDesiredRevision(desired.desired)
+		if err != nil {
+			result.err = fmt.Errorf("failed to prepare desired runtime state for repair: %w", err)
+			return result
+		}
+		if err := node.runtime.WriteDesired(desiredCopy); err != nil {
+			result.warnings = append(result.warnings, fmt.Sprintf("failed to repair desired runtime state on %s: %v", node.name, err))
+		} else {
+			result.counts.desired++
+		}
+	}
+
+	if hasActual {
+		actualCopy, err := cloneActualSnapshot(actual.actual)
+		if err != nil {
+			result.err = fmt.Errorf("failed to prepare actual runtime state for repair: %w", err)
+			return result
+		}
+		if err := node.runtime.WriteActual(actualCopy); err != nil {
+			result.warnings = append(result.warnings, fmt.Sprintf("failed to repair actual runtime state on %s: %v", node.name, err))
+		} else {
+			result.counts.actual++
+		}
+	}
+
+	nodeNames := sortedStateNodeActualNames(nodeActual)
+	for _, nodeName := range nodeNames {
+		candidate := nodeActual[nodeName]
+		actualCopy, err := cloneActualSnapshot(candidate.actual)
+		if err != nil {
+			result.err = fmt.Errorf("failed to prepare node actual runtime state for repair: %w", err)
+			return result
+		}
+		if err := node.runtime.WriteNodeActual(nodeName, actualCopy); err != nil {
+			result.warnings = append(result.warnings, fmt.Sprintf("failed to repair node actual runtime state for %s on %s: %v", nodeName, node.name, err))
+		} else {
+			result.counts.nodeActual++
+		}
+	}
+
+	return result
 }
 
 func printStateRepairWriteSummary(nodeCount int, hasHistory bool, historyWritten int, hasDesired bool, desiredWritten int, hasActual bool, actualWritten int, hasNodeActual bool, nodeActualWritten int) {
