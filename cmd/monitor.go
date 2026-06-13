@@ -79,6 +79,9 @@ func runMonitor(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if !cfg.IsTakodRuntime() {
+		return fmt.Errorf("runtime.mode=%s is not supported; Tako now uses runtime.mode=takod", cfg.GetRuntimeMode())
+	}
 
 	// Get environment and services
 	envName := getEnvironmentName(cfg)
@@ -96,9 +99,8 @@ func runMonitor(cmd *cobra.Command, args []string) error {
 
 	// Verify at least one service has monitoring enabled
 	hasMonitoring := false
-	for _, service := range services {
-		// Skip if filtering and not the selected service
-		if monitorService != "" && service.Monitoring == nil {
+	for serviceName, service := range services {
+		if monitorService != "" && serviceName != monitorService {
 			continue
 		}
 		if service.Monitoring != nil && service.Monitoring.Enabled {
@@ -117,6 +119,9 @@ func runMonitor(cmd *cobra.Command, args []string) error {
 
 	// Create monitor
 	monitor := monitoring.NewMonitor(cfg, sshPool, verbose)
+	if monitorService != "" {
+		monitor.SetServiceFilter(monitorService)
+	}
 
 	// Run monitoring
 	if monitorOnce {
