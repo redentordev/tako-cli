@@ -75,6 +75,8 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/proxy-file", s.handleProxyFile)
 	mux.HandleFunc("/v1/proxy", s.handleProxy)
 	mux.HandleFunc("/v1/cleanup", s.handleCleanup)
+	mux.HandleFunc("/v1/acme-dns", s.handleAcmeDNS)
+	mux.HandleFunc("/v1/acme-dns/credentials", s.handleAcmeDNSCredentials)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -250,6 +252,67 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleAcmeDNS(w http.ResponseWriter, r *http.Request) {
+	var (
+		response *ReconcileAcmeDNSResponse
+		err      error
+	)
+	switch r.Method {
+	case http.MethodPost:
+		defer r.Body.Close()
+		var request ReconcileAcmeDNSRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		response, err = ReconcileAcmeDNS(r.Context(), request)
+	case http.MethodDelete:
+		response, err = RemoveAcmeDNS(r.Context())
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleAcmeDNSCredentials(w http.ResponseWriter, r *http.Request) {
+	var (
+		response *AcmeDNSCredentialsResponse
+		err      error
+	)
+	switch r.Method {
+	case http.MethodGet:
+		response, err = ReadAcmeDNSCredentials()
+	case http.MethodPut:
+		defer r.Body.Close()
+		var request AcmeDNSCredentialsRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		response, err = WriteAcmeDNSCredentials(request)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")

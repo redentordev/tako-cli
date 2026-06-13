@@ -405,7 +405,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 
 		// Setup acme-dns for DNS-01 challenge
-		acmeMgr := acmedns.NewManager(firstClient, firstServer.Host, verbose)
+		acmeMgr := acmedns.NewManager(firstClient, firstServer.Host, takodSocketFromConfig(cfg), verbose)
 		if err := acmeMgr.Setup(); err != nil {
 			fmt.Printf("\n⚠ Warning: Failed to setup acme-dns: %v\n", err)
 			fmt.Printf("  Wildcard SSL certificates may not be issued automatically.\n")

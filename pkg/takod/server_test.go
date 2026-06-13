@@ -190,3 +190,51 @@ func TestHandleCleanupRejectsInvalidJSON(t *testing.T) {
 		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
 }
+
+func TestHandleAcmeDNSRequiresPost(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/acme-dns", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleAcmeDNS(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleAcmeDNSRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/acme-dns", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleAcmeDNS(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleAcmeDNSCredentialsRequiresSupportedMethod(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/acme-dns/credentials", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleAcmeDNSCredentials(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleAcmeDNSCredentialsRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPut, "/v1/acme-dns/credentials", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleAcmeDNSCredentials(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
