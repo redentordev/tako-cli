@@ -210,10 +210,6 @@ func (d *Deployer) DeployServiceTakod(serviceName string, service *config.Servic
 }
 
 func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, server config.ServerConfig, index int, peers []takodMeshPeer, publicKey string) error {
-	if output, err := client.Execute("docker version --format '{{.Server.Version}}' 2>/dev/null"); err != nil || strings.TrimSpace(output) == "" {
-		return fmt.Errorf("docker engine is not available")
-	}
-
 	meshAddress, err := d.meshAddress(index)
 	if err != nil {
 		return err

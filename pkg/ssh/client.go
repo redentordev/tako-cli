@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -454,6 +455,64 @@ func (c *Client) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
 	}
 
 	return nil
+}
+
+// ExecuteWithInput runs a command on the remote server, streams input to stdin,
+// and returns combined stdout/stderr output.
+func (c *Client) ExecuteWithInput(ctx context.Context, cmd string, input io.Reader) (string, error) {
+	conn, err := c.getConnection()
+	if err != nil {
+		return "", err
+	}
+
+	session, err := conn.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to create stdin pipe: %w", err)
+	}
+	var output bytes.Buffer
+	session.Stdout = &output
+	session.Stderr = &output
+
+	if err := session.Start(cmd); err != nil {
+		stdin.Close()
+		return "", fmt.Errorf("failed to start command: %w", err)
+	}
+
+	copyErrCh := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(stdin, input)
+		closeErr := stdin.Close()
+		if copyErr != nil {
+			copyErrCh <- copyErr
+			return
+		}
+		copyErrCh <- closeErr
+	}()
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- session.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		_ = session.Signal(ssh.SIGTERM)
+		return output.String(), ctx.Err()
+	case err := <-waitCh:
+		if copyErr := <-copyErrCh; copyErr != nil && err == nil {
+			return output.String(), fmt.Errorf("failed to stream command input: %w", copyErr)
+		}
+		if err != nil {
+			return output.String(), fmt.Errorf("command failed: %w", err)
+		}
+		return output.String(), nil
+	}
 }
 
 // ExecuteInteractive runs a command interactively with a remote PTY.

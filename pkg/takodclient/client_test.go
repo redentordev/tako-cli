@@ -33,3 +33,11 @@ func TestBackupsEndpointEscapesQueryValues(t *testing.T) {
 		t.Fatalf("BackupsEndpoint() = %q, want %q", got, want)
 	}
 }
+
+func TestImageBuildEndpointEscapesImage(t *testing.T) {
+	got := ImageBuildEndpoint("demo/web:abc123")
+	want := "/v1/images/build?image=demo%2Fweb%3Aabc123"
+	if got != want {
+		t.Fatalf("ImageBuildEndpoint() = %q, want %q", got, want)
+	}
+}

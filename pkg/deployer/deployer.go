@@ -1,12 +1,13 @@
 package deployer
 
 import (
-	"archive/zip"
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,6 +17,8 @@ import (
 	"github.com/redentordev/tako-cli/pkg/hooks"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 // streamWriter wraps an io.Writer with a prefix for each line
@@ -120,23 +123,22 @@ func (d *Deployer) SetTargetServers(serverNames []string) error {
 	return nil
 }
 
-// createCrossPlatformZip creates a zip archive with Unix-style forward slashes
-// This ensures compatibility when deploying from Windows/Mac/Linux to Linux servers
-// Respects .dockerignore and .gitignore files, and excludes sensitive files
-func createCrossPlatformZip(sourceDir, zipPath string, excludeDirs []string) error {
-	zipFile, err := os.Create(zipPath)
+// createCrossPlatformTarGz creates a Docker build context archive with
+// Unix-style paths on every client platform.
+func createCrossPlatformTarGz(sourceDir, archivePath string) error {
+	archiveFile, err := os.Create(archivePath)
 	if err != nil {
-		return fmt.Errorf("failed to create zip file: %w", err)
+		return fmt.Errorf("failed to create build context archive: %w", err)
 	}
-	defer zipFile.Close()
+	defer archiveFile.Close()
 
-	zipWriter := zip.NewWriter(zipFile)
-	defer zipWriter.Close()
+	gzipWriter := gzip.NewWriter(archiveFile)
+	defer gzipWriter.Close()
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
 
-	// Create ignore parser
 	ignoreParser := NewIgnoreParser()
 
-	// Load .dockerignore (takes priority over .gitignore)
 	dockerignorePath := filepath.Join(sourceDir, ".dockerignore")
 	dockerignoreExists := false
 	if _, err := os.Stat(dockerignorePath); err == nil {
@@ -144,66 +146,57 @@ func createCrossPlatformZip(sourceDir, zipPath string, excludeDirs []string) err
 		ignoreParser.LoadIgnoreFile(dockerignorePath)
 	}
 
-	// Only load .gitignore if .dockerignore doesn't exist
 	if !dockerignoreExists {
 		gitignorePath := filepath.Join(sourceDir, ".gitignore")
 		ignoreParser.LoadIgnoreFile(gitignorePath)
 	}
-
-	// Add default exclusions (sensitive files)
 	ignoreParser.AddDefaultExclusions()
 
-	// Walk the source directory
 	return filepath.Walk(sourceDir, func(filePath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Get relative path from source directory
 		relPath, err := filepath.Rel(sourceDir, filePath)
 		if err != nil {
 			return err
 		}
-
-		// Skip the source directory itself
 		if relPath == "." {
 			return nil
 		}
 
-		// Check if path should be ignored
 		if ignoreParser.ShouldIgnore(relPath) {
-			// File should be ignored - skip it
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 
-		// Convert Windows backslashes to forward slashes for cross-platform compatibility
-		// This is critical for deploying from Windows to Linux
-		zipPath := strings.ReplaceAll(relPath, string(filepath.Separator), "/")
-
-		if info.IsDir() {
-			// Add trailing slash for directories
-			zipPath += "/"
-			_, err := zipWriter.Create(zipPath)
-			return err
-		}
-
-		// Create zip entry with forward slashes
-		writer, err := zipWriter.Create(zipPath)
+		header, err := tar.FileInfoHeader(info, "")
 		if err != nil {
 			return err
 		}
+		header.Name = strings.ReplaceAll(relPath, string(filepath.Separator), "/")
 
-		// Copy file contents
+		if info.IsDir() {
+			header.Name += "/"
+			header.Mode = 0755
+			return tarWriter.WriteHeader(header)
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+
+		header.Mode = int64(info.Mode().Perm())
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
 		file, err := os.Open(filePath)
 		if err != nil {
 			return err
 		}
 		defer file.Close()
-
-		_, err = io.Copy(writer, file)
+		_, err = io.Copy(tarWriter, file)
 		return err
 	})
 }
@@ -294,18 +287,6 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 				fmt.Printf("  Detected framework: %s\n", framework)
 			}
 
-			// Build locally with Nixpacks
-			if err := detector.BuildWithNixpacks(fullImageName); err != nil {
-				return "", fmt.Errorf("failed to build with Nixpacks: %w", err)
-			}
-
-			// Save image as tar
-			if d.verbose {
-				fmt.Printf("  Exporting image...\n")
-			}
-
-			// We'll need to transfer the image to the server
-			// For now, we'll build on server with generated Dockerfile
 			if err := detector.GenerateDockerfile(); err != nil {
 				return "", fmt.Errorf("failed to generate Dockerfile: %w", err)
 			}
@@ -313,142 +294,41 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 			hasDockerfile = true
 		}
 
-		// Build on remote server
 		if d.verbose {
-			fmt.Printf("  Preparing deployment directory...\n")
-		}
-
-		// Create deployment directory on server
-		if _, err := d.client.Execute(fmt.Sprintf("mkdir -p %s", deployDir)); err != nil {
-			return "", fmt.Errorf("failed to create deployment directory: %w", err)
-		}
-
-		// Copy Dockerfile and context to server
-		if d.verbose {
-			fmt.Printf("  Copying application files...\n")
+			fmt.Printf("  Streaming build context to takod...\n")
 			fmt.Printf("  Context path: %s\n", contextPath)
 		}
 
-		// Use tar/zip for reliable directory copying
-		// Create archive locally
-		archivePath := filepath.Join(os.TempDir(), fmt.Sprintf("deploy_%s_%d", serviceName, time.Now().Unix()))
-
-		// Get absolute context path
 		absContextPath, err := filepath.Abs(contextPath)
 		if err != nil {
 			return "", fmt.Errorf("failed to get absolute path: %w", err)
 		}
 
-		var remoteTarPath string
+		archivePath := filepath.Join(os.TempDir(), fmt.Sprintf("tako-build-%s-%d.tar.gz", serviceName, time.Now().UnixNano()))
+		if err := createCrossPlatformTarGz(absContextPath, archivePath); err != nil {
+			return "", fmt.Errorf("failed to create build context archive: %w", err)
+		}
+		defer os.Remove(archivePath)
 
-		// Use cross-platform zip for Windows, native tar for Unix/Linux/Mac
-		if strings.Contains(strings.ToLower(os.Getenv("OS")), "windows") || filepath.VolumeName(absContextPath) != "" {
-			// Windows: Use our cross-platform Go zip implementation
-			zipPath := archivePath + ".zip"
-			if d.verbose {
-				fmt.Printf("  Creating zip archive (cross-platform): %s\n", zipPath)
-			}
+		archive, err := os.Open(archivePath)
+		if err != nil {
+			return "", fmt.Errorf("failed to open build context archive: %w", err)
+		}
+		defer archive.Close()
 
-			// Create zip with forward slashes for Linux compatibility
-			// Note: excludeDirs parameter is no longer used, ignore parser handles all exclusions
-			if err := createCrossPlatformZip(absContextPath, zipPath, nil); err != nil {
-				return "", fmt.Errorf("failed to create zip archive: %w", err)
-			}
-
-			defer os.Remove(zipPath)
-
-			// Copy zip to server
-			remoteTarPath = fmt.Sprintf("%s/deploy.zip", deployDir)
-			if err := d.client.CopyFile(zipPath, remoteTarPath); err != nil {
-				return "", fmt.Errorf("failed to copy zip archive: %w", err)
-			}
-
-			// Ensure unzip is installed
-			if _, err := d.client.Execute("which unzip || (apt-get update && apt-get install -y unzip)"); err != nil {
-				// Try to install unzip if not present
-				d.client.Execute("apt-get update && apt-get install -y unzip")
-			}
-
-			// Extract on server using unzip
-			extractCmd := fmt.Sprintf("cd %s && unzip -o deploy.zip && rm deploy.zip", deployDir)
-			if _, err := d.client.Execute(extractCmd); err != nil {
-				return "", fmt.Errorf("failed to extract files on server: %w", err)
-			}
-		} else {
-			// Unix/Linux/Mac: Use native tar
-			tarPath := archivePath + ".tar.gz"
-			if d.verbose {
-				fmt.Printf("  Creating tar archive: %s\n", tarPath)
-			}
-
-			// Build exclude list from .dockerignore or .gitignore
-			ignoreParser := NewIgnoreParser()
-			dockerignorePath := filepath.Join(absContextPath, ".dockerignore")
-			gitignorePath := filepath.Join(absContextPath, ".gitignore")
-			dockerignoreExists := false
-			if _, err := os.Stat(dockerignorePath); err == nil {
-				dockerignoreExists = true
-				ignoreParser.LoadIgnoreFile(dockerignorePath)
-			}
-			if !dockerignoreExists {
-				ignoreParser.LoadIgnoreFile(gitignorePath)
-			}
-			ignoreParser.AddDefaultExclusions()
-
-			// Build tar exclude arguments
-			excludeArgs := []string{}
-			for _, pattern := range ignoreParser.GetExcludedPatterns() {
-				excludeArgs = append(excludeArgs, "--exclude="+pattern)
-			}
-
-			// Build tar command with excludes
-			tarArgs := []string{"-czf", tarPath}
-			tarArgs = append(tarArgs, excludeArgs...)
-			tarArgs = append(tarArgs, "-C", absContextPath, ".")
-
-			cmd := exec.Command("tar", tarArgs...)
-			if output, err := cmd.CombinedOutput(); err != nil {
-				return "", fmt.Errorf("failed to create tar archive: %w\nOutput: %s", err, output)
-			}
-
-			defer os.Remove(tarPath)
-
-			// Copy tar to server
-			remoteTarPath = fmt.Sprintf("%s/deploy.tar.gz", deployDir)
-			if err := d.client.CopyFile(tarPath, remoteTarPath); err != nil {
-				return "", fmt.Errorf("failed to copy tar archive: %w", err)
-			}
-
-			// Extract on server
-			extractCmd := fmt.Sprintf("cd %s && tar -xzf deploy.tar.gz && rm deploy.tar.gz", deployDir)
-			if _, err := d.client.Execute(extractCmd); err != nil {
-				return "", fmt.Errorf("failed to extract files on server: %w", err)
+		output, err := takodclient.StreamRequest(d.client, d.takodSocket(), "POST", takodclient.ImageBuildEndpoint(fullImageName), archive)
+		var response takod.ImageBuildResponse
+		if err == nil {
+			if decodeErr := json.Unmarshal([]byte(output), &response); decodeErr != nil {
+				err = fmt.Errorf("failed to parse takod build response: %w", decodeErr)
 			}
 		}
-
-		// Verify files were copied
-		if d.verbose {
-			listCmd := fmt.Sprintf("ls -la %s", deployDir)
-			fileList, _ := d.client.Execute(listCmd)
-			fmt.Printf("  Files in deployment directory:\n")
-			for _, line := range strings.Split(fileList, "\n") {
-				if line != "" {
-					fmt.Printf("    %s\n", line)
-				}
-			}
+		buildOutput := response.Output
+		if buildOutput == "" {
+			buildOutput = output
 		}
-
-		// Build Docker image on server
-		if d.verbose {
-			fmt.Printf("  Building Docker image on server...\n")
-		}
-
-		buildCmd := fmt.Sprintf("cd %s && docker build -t %s . 2>&1 | tee build.log", deployDir, fullImageName)
-		output, err := d.client.Execute(buildCmd)
-
-		// Show build output in verbose mode or when there's an error
 		if d.verbose || err != nil {
-			lines := strings.Split(output, "\n")
+			lines := strings.Split(buildOutput, "\n")
 			start := len(lines) - 30
 			if start < 0 {
 				start = 0
@@ -462,19 +342,7 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 		}
 
 		if err != nil {
-			return "", fmt.Errorf("failed to build Docker image: %w", err)
-		}
-
-		// Verify image was built
-		checkImageCmd := fmt.Sprintf("docker image ls --format '{{.Repository}}:{{.Tag}}' | grep '%s' || echo 'NOT_FOUND'", fullImageName)
-		imgCheck, _ := d.client.Execute(checkImageCmd)
-
-		if d.verbose {
-			fmt.Printf("  Image verification: %s\n", strings.TrimSpace(imgCheck))
-		}
-
-		if strings.Contains(imgCheck, "NOT_FOUND") {
-			return "", fmt.Errorf("docker build completed but image '%s' was not created - check build output above", fullImageName)
+			return "", fmt.Errorf("failed to build Docker image through takod: %w", err)
 		}
 
 		if d.verbose {

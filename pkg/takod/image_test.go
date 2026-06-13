@@ -1,6 +1,9 @@
 package takod
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestValidateImageName(t *testing.T) {
 	if err := validateImageName("demo/web:abc123"); err != nil {
@@ -18,5 +21,22 @@ func TestSanitizeImageArchiveName(t *testing.T) {
 	want := "registry.example.com-demo-web-abc123"
 	if got != want {
 		t.Fatalf("sanitizeImageArchiveName() = %q, want %q", got, want)
+	}
+}
+
+func TestSafeArchiveTargetRejectsEscapes(t *testing.T) {
+	root := t.TempDir()
+	valid, err := safeArchiveTarget(root, "app/Dockerfile")
+	if err != nil {
+		t.Fatalf("expected valid archive path: %v", err)
+	}
+	if filepath.Dir(valid) != filepath.Join(root, "app") {
+		t.Fatalf("unexpected valid target: %s", valid)
+	}
+
+	for _, name := range []string{"../Dockerfile", "/etc/passwd", "app/../../secret"} {
+		if _, err := safeArchiveTarget(root, name); err == nil {
+			t.Fatalf("expected archive path %q to be rejected", name)
+		}
 	}
 }
