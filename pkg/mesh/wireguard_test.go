@@ -156,6 +156,15 @@ func TestApplyLocalWithRunnerWritesConfigWithoutSudo(t *testing.T) {
 			t.Fatalf("local takod mesh command should not require sudo: %s", command)
 		}
 	}
+	applyCommand := findCommandWithPrefix(runner.commands, "systemctl enable wg-quick@")
+	if applyCommand == "" {
+		t.Fatalf("expected wg-quick apply command, got %v", runner.commands)
+	}
+	for _, expected := range []string{"wg-quick@'tako'", "wg show 'tako'", "dev 'tako'", "wg-quick up 'tako'"} {
+		if !strings.Contains(applyCommand, expected) {
+			t.Fatalf("apply command missing %q: %s", expected, applyCommand)
+		}
+	}
 }
 
 type fakeWireGuardRunner struct {
@@ -175,13 +184,13 @@ func (f *fakeWireGuardRunner) Run(ctx context.Context, command string) (string, 
 		return "self-public\n", nil
 	case strings.HasPrefix(command, "systemctl enable wg-quick@"):
 		return "", nil
-	case command == "wg show tako >/dev/null 2>&1":
+	case command == "wg show 'tako' >/dev/null 2>&1":
 		return "", nil
-	case command == "wg show tako public-key":
+	case command == "wg show 'tako' public-key":
 		return "self-public\n", nil
-	case command == "wg show tako listen-port":
+	case command == "wg show 'tako' listen-port":
 		return "51820\n", nil
-	case command == "wg show tako peers | wc -l":
+	case command == "wg show 'tako' peers | wc -l":
 		return "1\n", nil
 	default:
 		return "", nil
@@ -205,4 +214,13 @@ func (f *fakeWireGuardRunner) WriteFile(path string, data []byte, mode os.FileMo
 func (f *fakeWireGuardRunner) MkdirAll(path string, mode os.FileMode) error {
 	f.dirs = append(f.dirs, path)
 	return nil
+}
+
+func findCommandWithPrefix(commands []string, prefix string) string {
+	for _, command := range commands {
+		if strings.HasPrefix(command, prefix) {
+			return command
+		}
+	}
+	return ""
 }

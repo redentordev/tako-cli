@@ -279,15 +279,18 @@ func applyLocalWithRunner(ctx context.Context, runner wireGuardRunner, node Node
 		return nil, fmt.Errorf("failed to update WireGuard firewall rule: %w", err)
 	}
 
+	quotedIface := shellQuote(iface)
+	syncCmd := shellQuote(fmt.Sprintf("wg syncconf %s <(wg-quick strip %s)", iface, iface))
 	applyCmd := fmt.Sprintf(
 		"systemctl enable wg-quick@%[1]s >/dev/null 2>&1 || true; "+
 			"if wg show %[1]s >/dev/null 2>&1; then "+
 			"ip address replace %[2]s dev %[1]s; "+
-			"bash -lc 'wg syncconf %[1]s <(wg-quick strip %[1]s)'; "+
+			"bash -lc %[3]s; "+
 			"else wg-quick up %[1]s; fi; "+
 			"wg show %[1]s >/dev/null",
-		iface,
+		quotedIface,
 		shellQuote(node.Address),
+		syncCmd,
 	)
 	if _, err := runner.Run(ctx, applyCmd); err != nil {
 		return nil, fmt.Errorf("failed to apply WireGuard interface %s: %w", config.Interface, err)
@@ -302,19 +305,20 @@ func readStatusWithRunner(ctx context.Context, runner wireGuardRunner, interface
 		return nil, err
 	}
 
-	if _, err := runner.Run(ctx, fmt.Sprintf("wg show %s >/dev/null 2>&1", iface)); err != nil {
+	quotedIface := shellQuote(iface)
+	if _, err := runner.Run(ctx, fmt.Sprintf("wg show %s >/dev/null 2>&1", quotedIface)); err != nil {
 		return &Status{Interface: iface, Up: false}, nil
 	}
 
-	publicKey, err := runner.Run(ctx, fmt.Sprintf("wg show %s public-key", iface))
+	publicKey, err := runner.Run(ctx, fmt.Sprintf("wg show %s public-key", quotedIface))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read WireGuard public key: %w", err)
 	}
-	listenPort, err := runner.Run(ctx, fmt.Sprintf("wg show %s listen-port", iface))
+	listenPort, err := runner.Run(ctx, fmt.Sprintf("wg show %s listen-port", quotedIface))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read WireGuard listen port: %w", err)
 	}
-	peerCountOutput, err := runner.Run(ctx, fmt.Sprintf("wg show %s peers | wc -l", iface))
+	peerCountOutput, err := runner.Run(ctx, fmt.Sprintf("wg show %s peers | wc -l", quotedIface))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read WireGuard peers: %w", err)
 	}
