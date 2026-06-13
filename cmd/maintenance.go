@@ -64,7 +64,8 @@ This command deploys a maintenance page container with proxy routing
 that takes priority over the main service. The main service continues
 running in the background.
 
-If --server is not specified, defaults to the primary environment node.
+If --server is not specified, maintenance mode is enabled on every
+environment node.
 
 Custom Maintenance Page:
   Create a 'maintenance.html' file in your project directory to use a custom page.
@@ -73,8 +74,8 @@ Custom Maintenance Page:
 To restore normal operation, use 'tako live'.
 
 Examples:
-  tako maintenance --service web              # Enable on default server
-  tako maintenance --service web --server prod # Enable on specific server
+  tako maintenance --service web               # Enable on all environment nodes
+  tako maintenance --service web --server prod  # Enable on one specific node
 
   # With custom page
   echo '<h1>Custom Maintenance</h1>' > maintenance.html
@@ -84,7 +85,7 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(maintenanceCmd)
-	maintenanceCmd.Flags().StringVarP(&maintenanceServer, "server", "s", "", "Node to enable maintenance on (default: primary node)")
+	maintenanceCmd.Flags().StringVarP(&maintenanceServer, "server", "s", "", "Node to enable maintenance on instead of all environment nodes")
 	maintenanceCmd.Flags().StringVar(&maintenanceService, "service", "", "Service to put in maintenance mode (required)")
 	maintenanceCmd.MarkFlagRequired("service")
 }
@@ -114,49 +115,12 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("service %s is not public-facing (no proxy configuration)", maintenanceService)
 	}
 
-	// Determine which server to use
-	var serverName string
-	var server config.ServerConfig
-
-	if maintenanceServer != "" {
-		// Use specified server
-		var exists bool
-		server, exists = cfg.Servers[maintenanceServer]
-		if !exists {
-			return fmt.Errorf("server %s not found in configuration", maintenanceServer)
-		}
-		serverName = maintenanceServer
-	} else {
-		primaryName, err := cfg.GetPrimaryServer(envName)
-		if err != nil {
-			return fmt.Errorf("failed to get primary node: %w", err)
-		}
-		serverName = primaryName
-		server = cfg.Servers[primaryName]
-
-		if verbose {
-			fmt.Printf("Using node: %s (%s)\n", serverName, server.Host)
-		}
-	}
-
-	// Create SSH client (supports both key and password auth)
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     server.Host,
-		Port:     server.Port,
-		User:     server.User,
-		SSHKey:   server.SSHKey,
-		Password: server.Password,
-	})
+	targetServers, err := statePullServerNames(cfg, envName, maintenanceServer)
 	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
-	}
-	defer client.Close()
-
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
+		return err
 	}
 
-	fmt.Printf("🔧 Enabling maintenance mode for %s on %s...\n\n", maintenanceService, serverName)
+	fmt.Printf("Enabling maintenance mode for %s on %d node(s)...\n\n", maintenanceService, len(targetServers))
 
 	// Check if user has a custom maintenance.html in the project directory
 	customMaintenancePath := "maintenance.html"
@@ -504,10 +468,6 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := writeMaintenanceProxyConfig(client, socket, cfg.Project.Name, envName, maintenanceService, dynamicConfig); err != nil {
-		return fmt.Errorf("failed to write maintenance proxy config: %w", err)
-	}
-
 	command := fmt.Sprintf("printf %%s %s | base64 -d > /usr/share/nginx/html/index.html && nginx -g 'daemon off;'", encodedHTML)
 	request := takod.ReconcileServiceRequest{
 		Project:      cfg.Project.Name,
@@ -523,8 +483,20 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 			{Name: containerName},
 		},
 	}
-	if _, err := takodclient.RequestJSON(client, socket, "POST", "/v1/reconcile-service", request); err != nil {
-		return fmt.Errorf("failed to reconcile maintenance container: %w", err)
+
+	var nodeErrors []string
+	for _, serverName := range targetServers {
+		server := cfg.Servers[serverName]
+		fmt.Printf("→ Enabling on %s (%s)...\n", serverName, server.Host)
+		if err := enableMaintenanceOnNode(cfg, server, socket, envName, maintenanceService, dynamicConfig, request); err != nil {
+			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", serverName, err))
+			fmt.Printf("  failed: %v\n", err)
+			continue
+		}
+		fmt.Printf("  enabled\n")
+	}
+	if len(nodeErrors) > 0 {
+		return fmt.Errorf("maintenance mode failed on %d/%d node(s): %s", len(nodeErrors), len(targetServers), strings.Join(nodeErrors, "; "))
 	}
 
 	fmt.Printf("✓ Maintenance mode enabled for %s\n", maintenanceService)
@@ -532,6 +504,31 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Service containers are still running in the background.\n")
 	fmt.Printf("\nTo restore normal operation: tako live --service %s\n", maintenanceService)
 
+	return nil
+}
+
+func enableMaintenanceOnNode(cfg *config.Config, server config.ServerConfig, socket string, envName string, serviceName string, dynamicConfig []byte, request takod.ReconcileServiceRequest) error {
+	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
+		Host:     server.Host,
+		Port:     server.Port,
+		User:     server.User,
+		SSHKey:   server.SSHKey,
+		Password: server.Password,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create SSH client: %w", err)
+	}
+	defer client.Close()
+
+	if err := client.Connect(); err != nil {
+		return fmt.Errorf("failed to connect to server: %w", err)
+	}
+	if err := writeMaintenanceProxyConfig(client, socket, cfg.Project.Name, envName, serviceName, dynamicConfig); err != nil {
+		return fmt.Errorf("failed to write maintenance proxy config: %w", err)
+	}
+	if _, err := takodclient.RequestJSON(client, socket, "POST", "/v1/reconcile-service", request); err != nil {
+		return fmt.Errorf("failed to reconcile maintenance container: %w", err)
+	}
 	return nil
 }
 
