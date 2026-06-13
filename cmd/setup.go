@@ -70,6 +70,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		}
 
 		prov := provisioner.NewProvisioner(client, verbose)
+		meshListenPort := setupMeshListenPort(cfg)
 
 		// Check if server is already set up and needs upgrade
 		serverVersion, err := setup.DetectServerVersion(client)
@@ -77,7 +78,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			if serverVersion.IsUpgradeAvailable() {
 				fmt.Printf("→ Server is at v%s, reapplying current setup v%s...\n", serverVersion.Version, setup.CurrentVersion)
 			} else if serverVersion.Version == setup.CurrentVersion {
-				fmt.Printf("→ Server is already at the latest version (v%s), refreshing takod runtime\n", serverVersion.Version)
+				fmt.Printf("→ Server is already at the latest version (v%s), refreshing firewall and takod runtime\n", serverVersion.Version)
+				if err := prov.ConfigureFirewall(meshListenPort); err != nil {
+					return fmt.Errorf("failed to refresh firewall on server %s: %w", name, err)
+				}
 				if err := ensureTakodRuntimeForSetup(prov, cfg, name); err != nil {
 					return fmt.Errorf("failed to refresh takod runtime on server %s: %w", name, err)
 				}
@@ -96,7 +100,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			{"Updating system packages", prov.UpdateSystem},
 			{"Installing Docker", prov.InstallDocker},
 			{"Installing WireGuard", prov.InstallWireGuard},
-			{"Configuring firewall (UFW)", prov.ConfigureFirewall},
+			{"Configuring firewall (UFW)", func() error { return prov.ConfigureFirewall(meshListenPort) }},
 			{"Hardening security", prov.HardenSecurity},
 			{"Verifying auto-recovery", prov.VerifyAutoRecovery},
 			{"Setting up deploy user", func() error { return prov.SetupDeployUser(server.User) }},
@@ -151,6 +155,13 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nNext step: Run 'tako deploy' to deploy your application\n")
 
 	return nil
+}
+
+func setupMeshListenPort(cfg *config.Config) int {
+	if cfg.Mesh != nil && cfg.Mesh.ListenPort > 0 {
+		return cfg.Mesh.ListenPort
+	}
+	return 51820
 }
 
 func ensureTakodRuntimeForSetup(prov *provisioner.Provisioner, cfg *config.Config, nodeName string) error {
