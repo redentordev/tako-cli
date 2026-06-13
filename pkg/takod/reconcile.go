@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -13,20 +14,21 @@ import (
 var dockerCommandContext = exec.CommandContext
 
 type ReconcileServiceRequest struct {
-	Project      string            `json:"project"`
-	Environment  string            `json:"environment"`
-	Service      string            `json:"service"`
-	Image        string            `json:"image"`
-	PullImage    bool              `json:"pullImage,omitempty"`
-	Restart      string            `json:"restart,omitempty"`
-	Network      string            `json:"network"`
-	NetworkAlias string            `json:"networkAlias,omitempty"`
-	EnvFile      string            `json:"envFile,omitempty"`
-	Labels       map[string]string `json:"labels,omitempty"`
-	Mounts       []string          `json:"mounts,omitempty"`
-	Containers   []ContainerSpec   `json:"containers"`
-	Health       *HealthSpec       `json:"health,omitempty"`
-	Command      string            `json:"command,omitempty"`
+	Project        string            `json:"project"`
+	Environment    string            `json:"environment"`
+	Service        string            `json:"service"`
+	Image          string            `json:"image"`
+	PullImage      bool              `json:"pullImage,omitempty"`
+	Restart        string            `json:"restart,omitempty"`
+	Network        string            `json:"network"`
+	NetworkAlias   string            `json:"networkAlias,omitempty"`
+	EnvFile        string            `json:"envFile,omitempty"`
+	EnvFileContent string            `json:"envFileContent,omitempty"`
+	Labels         map[string]string `json:"labels,omitempty"`
+	Mounts         []string          `json:"mounts,omitempty"`
+	Containers     []ContainerSpec   `json:"containers"`
+	Health         *HealthSpec       `json:"health,omitempty"`
+	Command        string            `json:"command,omitempty"`
 }
 
 type ContainerSpec struct {
@@ -74,6 +76,13 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	if err := ensureDockerNetwork(ctx, req.Network); err != nil {
 		return nil, err
 	}
+	cleanupEnvFile, err := prepareServiceEnvFile(&req)
+	if err != nil {
+		return nil, err
+	}
+	if cleanupEnvFile != nil {
+		defer cleanupEnvFile()
+	}
 	if req.PullImage {
 		if _, err := runDocker(ctx, "pull", req.Image); err != nil {
 			return nil, fmt.Errorf("failed to pull image %s: %w", req.Image, err)
@@ -114,12 +123,72 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	if req.EnvFile != "" && !strings.HasPrefix(req.EnvFile, "/") {
 		return fmt.Errorf("envFile must be an absolute path")
 	}
+	if req.EnvFile != "" && req.EnvFileContent != "" {
+		return fmt.Errorf("envFile and envFileContent cannot both be set")
+	}
+	if len(req.EnvFileContent) > 1<<20 {
+		return fmt.Errorf("envFileContent exceeds 1 MiB")
+	}
 	for _, container := range req.Containers {
 		if strings.TrimSpace(container.Name) == "" {
 			return fmt.Errorf("container name is required")
 		}
 	}
 	return nil
+}
+
+func prepareServiceEnvFile(req *ReconcileServiceRequest) (func(), error) {
+	if req.EnvFileContent == "" {
+		return nil, nil
+	}
+	file, err := os.CreateTemp("", envFilePattern(req.Project, req.Environment, req.Service))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create env file: %w", err)
+	}
+	cleanup := func() {
+		_ = os.Remove(file.Name())
+	}
+	if err := os.Chmod(file.Name(), 0600); err != nil {
+		file.Close()
+		cleanup()
+		return nil, fmt.Errorf("failed to secure env file: %w", err)
+	}
+	if _, err := file.WriteString(req.EnvFileContent); err != nil {
+		file.Close()
+		cleanup()
+		return nil, fmt.Errorf("failed to write env file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("failed to close env file: %w", err)
+	}
+	req.EnvFile = file.Name()
+	req.EnvFileContent = ""
+	return cleanup, nil
+}
+
+func envFilePattern(parts ...string) string {
+	safe := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.Trim(sanitizeFilePatternPart(part), "-")
+		if value == "" {
+			value = "value"
+		}
+		safe = append(safe, value)
+	}
+	return "tako-" + strings.Join(safe, "-") + "-*.env"
+}
+
+func sanitizeFilePatternPart(value string) string {
+	var out strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			out.WriteRune(r)
+		} else {
+			out.WriteRune('-')
+		}
+	}
+	return out.String()
 }
 
 func ensureDockerNetwork(ctx context.Context, network string) error {

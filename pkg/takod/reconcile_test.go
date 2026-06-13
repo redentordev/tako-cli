@@ -1,6 +1,8 @@
 package takod
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -30,6 +32,19 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	invalid.Containers = []ContainerSpec{{}}
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected empty container name to be rejected")
+	}
+
+	invalid = valid
+	invalid.EnvFile = "/tmp/demo.env"
+	invalid.EnvFileContent = "TOKEN=value\n"
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected envFile and envFileContent together to be rejected")
+	}
+
+	invalid = valid
+	invalid.EnvFileContent = string(make([]byte, (1<<20)+1))
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected oversized envFileContent to be rejected")
 	}
 }
 
@@ -86,5 +101,41 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected docker args:\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestPrepareServiceEnvFileWritesAndCleansUpTempFile(t *testing.T) {
+	req := ReconcileServiceRequest{
+		Project:        "demo",
+		Environment:    "production",
+		Service:        "web",
+		EnvFileContent: "TOKEN=value\n",
+	}
+
+	cleanup, err := prepareServiceEnvFile(&req)
+	if err != nil {
+		t.Fatalf("prepareServiceEnvFile returned error: %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("expected cleanup function")
+	}
+	if req.EnvFileContent != "" {
+		t.Fatal("expected env file content to be cleared after writing")
+	}
+	if req.EnvFile == "" || !filepath.IsAbs(req.EnvFile) {
+		t.Fatalf("expected absolute env file path, got %q", req.EnvFile)
+	}
+
+	data, err := os.ReadFile(req.EnvFile)
+	if err != nil {
+		t.Fatalf("failed to read temp env file: %v", err)
+	}
+	if string(data) != "TOKEN=value\n" {
+		t.Fatalf("temp env file content = %q", string(data))
+	}
+
+	cleanup()
+	if _, err := os.Stat(req.EnvFile); !os.IsNotExist(err) {
+		t.Fatalf("expected cleanup to remove temp env file, stat err=%v", err)
 	}
 }
