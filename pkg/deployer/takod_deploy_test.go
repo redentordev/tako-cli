@@ -3,6 +3,7 @@ package deployer
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -79,6 +80,40 @@ func TestPrepareTakodNodesWithRunsConcurrentlyAndPreservesIndices(t *testing.T) 
 	}
 	if !slices.Equal(calls, want) {
 		t.Fatalf("prepare calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestRunTakodNodeActionsRunsConcurrently(t *testing.T) {
+	serverNames := []string{"node-a", "node-b", "node-c"}
+	started := make(chan string, len(serverNames))
+	release := make(chan struct{})
+
+	errDone := make(chan error, 1)
+	go func() {
+		errDone <- runTakodNodeActions(serverNames, func(serverName string) error {
+			started <- serverName
+			<-release
+			return nil
+		})
+	}()
+
+	waitForTakodDeployStarts(t, started, len(serverNames))
+	close(release)
+
+	if err := <-errDone; err != nil {
+		t.Fatalf("runTakodNodeActions returned error: %v", err)
+	}
+}
+
+func TestRunTakodNodeActionsAggregatesSortedErrors(t *testing.T) {
+	err := runTakodNodeActions([]string{"node-b", "node-a"}, func(serverName string) error {
+		return fmt.Errorf("failed")
+	})
+	if err == nil {
+		t.Fatal("expected aggregated error")
+	}
+	if got, want := err.Error(), "node-a: failed; node-b: failed"; !strings.Contains(got, want) {
+		t.Fatalf("error = %q, want to contain %q", got, want)
 	}
 }
 

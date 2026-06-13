@@ -83,7 +83,7 @@ func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig)
 		return err
 	}
 
-	for _, serverName := range targetServers {
+	return runTakodNodeActions(targetServers, func(serverName string) error {
 		client, err := d.getEnvironmentClient(serverName)
 		if err != nil {
 			return err
@@ -91,20 +91,19 @@ func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig)
 
 		if !hasPublicServices {
 			if err := d.removeTakodProxyConfig(client); err != nil {
-				return fmt.Errorf("%s: failed to remove proxy config: %w", serverName, err)
+				return fmt.Errorf("failed to remove proxy config: %w", err)
 			}
-			continue
+			return nil
 		}
 
 		if err := d.writeTakodProxyConfig(client, dynamicConfig); err != nil {
-			return fmt.Errorf("%s: failed to write proxy config: %w", serverName, err)
+			return fmt.Errorf("failed to write proxy config: %w", err)
 		}
 		if err := d.ensureTakodProxy(client, takodNetworkName(d.config.Project.Name, d.environment), firstProxyEmail(services)); err != nil {
-			return fmt.Errorf("%s: failed to reconcile proxy: %w", serverName, err)
+			return fmt.Errorf("failed to reconcile proxy: %w", err)
 		}
-	}
-
-	return nil
+		return nil
+	})
 }
 
 func (d *Deployer) renderTakodProxyDynamicConfig(services map[string]config.ServiceConfig) ([]byte, bool, error) {
