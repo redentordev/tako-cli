@@ -8,7 +8,7 @@
 
 ## Project Overview
 
-Tako CLI is a deployment automation tool that brings PaaS-like simplicity to your own servers. It deploys Docker containers to VPS servers with automatic HTTPS, health checks, and zero-downtime deployments.
+Tako CLI is a deployment automation tool that brings PaaS-like simplicity to your own servers. It deploys Docker containers to VPS servers with automatic HTTPS, health checks, and replicated deployment state.
 
 ## Key Directories
 

@@ -17,9 +17,9 @@ type DNSChecker struct {
 func NewDNSChecker() *DNSChecker {
 	return &DNSChecker{
 		resolvers: []string{
-			"1.1.1.1:53",  // Cloudflare
-			"8.8.8.8:53",  // Google
-			"9.9.9.9:53",  // Quad9
+			"1.1.1.1:53", // Cloudflare
+			"8.8.8.8:53", // Google
+			"9.9.9.9:53", // Quad9
 		},
 	}
 }
@@ -129,9 +129,9 @@ func CheckPort53Accessible(serverIP string) error {
 
 // DNSPropagationResult represents the result of a DNS propagation check
 type DNSPropagationResult struct {
-	Domain     string
-	Verified   bool
-	Attempts   int
-	Duration   time.Duration
-	Error      error
+	Domain   string
+	Verified bool
+	Attempts int
+	Duration time.Duration
+	Error    error
 }

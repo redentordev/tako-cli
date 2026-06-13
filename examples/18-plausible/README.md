@@ -345,7 +345,7 @@ env:
 
 ## Scaling Considerations
 
-- **Plausible**: Can run multiple replicas behind Traefik
+- **Plausible**: Can run multiple replicas behind tako-proxy
 - **PostgreSQL**: Single instance (use managed PostgreSQL for HA)
 - **ClickHouse**: Single instance (use ClickHouse cluster for HA)
 
@@ -370,16 +370,15 @@ tako logs plausible
 
 Verify databases are running:
 ```bash
-ssh root@your-server-ip
-docker service ls
+tako ps
 ```
 
 ### Can't access Plausible
 
-Check Traefik configuration:
+Check proxy logs:
 ```bash
 ssh root@your-server-ip
-docker service logs traefik
+docker logs tako-proxy
 ```
 
 ## Security

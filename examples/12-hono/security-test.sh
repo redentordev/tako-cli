@@ -699,8 +699,8 @@ test_docker_exposure() {
     done
     log_pass "Docker API is not publicly exposed"
     
-    # Test Traefik dashboard exposure
-    log_info "Testing for Traefik dashboard exposure..."
+    # Test proxy dashboard exposure
+    log_info "Testing for proxy dashboard exposure..."
     
     local traefik_paths=(
         "/dashboard/"
@@ -720,7 +720,7 @@ test_docker_exposure() {
         
         local response=$(curl -s -o /dev/null -w "%{http_code}" -k --max-time 5 "$test_url" 2>/dev/null)
         if [ "$response" = "200" ]; then
-            log_warn "Traefik dashboard may be accessible: $path"
+            log_warn "Proxy dashboard may be accessible: $path"
         fi
     done
 }

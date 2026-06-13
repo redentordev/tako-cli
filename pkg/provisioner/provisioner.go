@@ -126,13 +126,13 @@ func (p *Provisioner) InstallDocker() error {
 	}
 
 	if _, err := p.client.Execute("sudo systemctl is-active docker"); err != nil {
-		return fmt.Errorf("docker service is not running: %w", err)
+		return fmt.Errorf("docker daemon is not running: %w", err)
 	}
 
 	return nil
 }
 
-// Note: Traefik installation is handled per-deployment by the deployer
+// Note: tako-proxy is handled per-deployment by the deployer.
 // No system-wide reverse proxy installation is needed during server setup
 
 // ConfigureFirewall configures UFW firewall
@@ -189,15 +189,11 @@ func (p *Provisioner) ConfigureFirewall() error {
 		// SSH with rate limiting (max 10 connections per 30 seconds per IP)
 		"sudo ufw limit 22/tcp comment 'SSH with rate limiting' || true",
 
-		// HTTP/HTTPS (no rate limiting needed, Traefik handles this)
+		// HTTP/HTTPS.
 		"sudo ufw allow 80/tcp comment 'HTTP' || true",
 		"sudo ufw allow 443/tcp comment 'HTTPS' || true",
 
-		// Docker Swarm ports (only needed for multi-server)
-		"sudo ufw allow 2377/tcp comment 'Docker Swarm management' || true",
-		"sudo ufw allow 7946/tcp comment 'Docker Swarm communication' || true",
-		"sudo ufw allow 7946/udp comment 'Docker Swarm communication' || true",
-		"sudo ufw allow 4789/udp comment 'Docker overlay network' || true",
+		"sudo ufw allow 51820/udp comment 'Tako mesh' || true",
 	}
 
 	for _, cmd := range allowCommands {

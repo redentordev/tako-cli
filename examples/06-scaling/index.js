@@ -140,7 +140,7 @@ app.get('/', (req, res) => {
           <div class="architecture">
             User Request<br>
             &nbsp;&nbsp;↓<br>
-            <strong>Traefik Load Balancer</strong><br>
+            <strong>tako-proxy Load Balancer</strong><br>
             &nbsp;&nbsp;↓&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(round_robin)<br>
             ├─→ <strong>Instance 1</strong> (port 3000)<br>
             ├─→ <strong>Instance 2</strong> (port 3000)<br>
@@ -150,7 +150,7 @@ app.get('/', (req, res) => {
           <p><strong>How it works:</strong></p>
           <ul>
             <li>3 identical instances of the application</li>
-            <li>Traefik distributes requests using round-robin</li>
+            <li>tako-proxy distributes requests using round-robin</li>
             <li>Each refresh may hit a different instance</li>
             <li>Watch the hostname change as you refresh</li>
             <li>All instances are identical and stateless</li>

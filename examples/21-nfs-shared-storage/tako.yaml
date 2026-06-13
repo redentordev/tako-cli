@@ -5,11 +5,11 @@
 # creates git worktrees and a content server that reads from them.
 #
 # Architecture:
-#   Server 1 (Manager + NFS Server)
+#   Server 1 (primary node + NFS server)
 #     └── NFS exports: /srv/nfs/repo
-#   Server 2 (Worker)
+#   Server 2
 #     └── NFS mount: /mnt/tako-nfs/{project}_{env}_shared_repo
-#   Server 3 (Worker)
+#   Server 3
 #     └── NFS mount: /mnt/tako-nfs/{project}_{env}_shared_repo
 #
 # Services:
@@ -24,7 +24,7 @@ project:
 storage:
   nfs:
     enabled: true
-    server: auto  # Use manager node as NFS server
+    server: auto  # Use the first environment node as the NFS server
     exports:
       - name: shared_repo
         path: /srv/nfs/repo
@@ -42,7 +42,6 @@ servers:
     host: ${SERVER1_HOST}
     user: root
     sshKey: ~/.ssh/id_ed25519
-    role: manager  # NFS server will run here
   server2:
     host: ${SERVER2_HOST}
     user: root

@@ -4,16 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/crypto"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
-	"github.com/redentordev/tako-cli/pkg/swarm"
 	"github.com/spf13/cobra"
 )
 
@@ -148,20 +145,20 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 	}
 
 	if strings.TrimSpace(output) == "missing" {
-		// Try recovering from worker nodes if multi-server
+		// Try recovering from mesh peers if multi-server
 		if cfg.IsMultiServer() {
 			replicaPool := ssh.NewPool()
 			defer replicaPool.CloseAll()
 			envName := getEnvironmentName(cfg)
 			replicator := remotestate.NewStateReplicator(replicaPool, cfg, envName, cfg.Project.Name, verbose)
-			if history, source, _ := replicator.RecoverStateFromWorkers(); history != nil && len(history.Deployments) > 0 {
-				fmt.Printf("State recovered from worker: %s\n", source)
+			if history, source, _ := replicator.RecoverStateFromPeers(); history != nil && len(history.Deployments) > 0 {
+				fmt.Printf("State recovered from node: %s\n", source)
 
-				// Restore to manager
-				managerMgr := remotestate.NewStateManager(client, cfg.Project.Name, client.Host())
-				managerMgr.Initialize()
+				// Restore to primary node
+				primaryMgr := remotestate.NewStateManager(client, cfg.Project.Name, client.Host())
+				primaryMgr.Initialize()
 				for _, dep := range history.Deployments {
-					managerMgr.SaveDeployment(dep)
+					primaryMgr.SaveDeployment(dep)
 				}
 
 				// Now sync to local
@@ -178,7 +175,7 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// No remote state and worker recovery failed — try reconciling from running services
+		// No remote state and peer recovery failed; try reconciling from running services.
 		fmt.Println("No remote state found, attempting recovery from running services...")
 		if err := reconcileAndSave(client, cfg, envName); err == nil {
 			return nil
@@ -234,9 +231,6 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
-
-	// Attempt to recover swarm tokens
-	recoverSwarmTokens(client, cfg, envName)
 
 	// Show latest deployment info
 	latest := remoteDeployments[0]
@@ -394,7 +388,7 @@ func convertRemoteToLocal(remote *remotestate.DeploymentState, env string) *loca
 		DeploymentID:    remote.ID,
 		Timestamp:       remote.Timestamp,
 		Environment:     env,
-		Mode:            "swarm",
+		Mode:            config.RuntimeModeTakod,
 		Status:          string(remote.Status),
 		DurationSeconds: int(remote.Duration.Seconds()),
 		GitCommit:       remote.GitCommit,
@@ -468,21 +462,21 @@ func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) e
 	}
 
 	if strings.TrimSpace(output) == "missing" {
-		// Try recovering from worker nodes if multi-server
+		// Try recovering from mesh peers if multi-server
 		if cfg.IsMultiServer() {
 			replicaPool := ssh.NewPool()
 			defer replicaPool.CloseAll()
 			replicator := remotestate.NewStateReplicator(replicaPool, cfg, envName, cfg.Project.Name, verbose)
-			if history, source, _ := replicator.RecoverStateFromWorkers(); history != nil && len(history.Deployments) > 0 {
+			if history, source, _ := replicator.RecoverStateFromPeers(); history != nil && len(history.Deployments) > 0 {
 				if verbose {
-					fmt.Printf("Recovering state from worker: %s\n", source)
+					fmt.Printf("Recovering state from node: %s\n", source)
 				}
 
-				// Restore to manager
-				managerMgr := remotestate.NewStateManager(client, cfg.Project.Name, client.Host())
-				managerMgr.Initialize()
+				// Restore to primary node
+				primaryMgr := remotestate.NewStateManager(client, cfg.Project.Name, client.Host())
+				primaryMgr.Initialize()
 				for _, dep := range history.Deployments {
-					managerMgr.SaveDeployment(dep)
+					primaryMgr.SaveDeployment(dep)
 				}
 
 				// Sync to local
@@ -495,7 +489,7 @@ func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) e
 				}
 
 				if verbose {
-					fmt.Printf("Recovered %d deployment(s) from worker %s\n", len(history.Deployments), source)
+					fmt.Printf("Recovered %d deployment(s) from node %s\n", len(history.Deployments), source)
 				}
 				return nil
 			}
@@ -539,20 +533,23 @@ func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) e
 	return nil
 }
 
-// ReconcileStateFromRunning reconstructs state from running Docker services
-// This is useful when state is completely lost but services are still running
+// ReconcileStateFromRunning reconstructs state from running takod containers.
+// This is useful when local state is lost but containers are still running.
 func ReconcileStateFromRunning(client *ssh.Client, projectName, envName string) (*localstate.DeploymentState, error) {
-	// List running services for this project
 	prefix := fmt.Sprintf("%s_%s_", projectName, envName)
-	listCmd := fmt.Sprintf("docker service ls --filter 'name=%s' --format '{{.Name}}\\t{{.Image}}\\t{{.Replicas}}'", prefix)
+	listCmd := fmt.Sprintf(
+		"docker ps --filter label=tako.project=%s --filter label=tako.environment=%s --format '{{.Names}}\\t{{.Image}}'",
+		projectName,
+		envName,
+	)
 
 	output, err := client.Execute(listCmd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list services: %w", err)
+		return nil, fmt.Errorf("failed to list containers: %w", err)
 	}
 
 	if strings.TrimSpace(output) == "" {
-		return nil, fmt.Errorf("no running services found for %s", projectName)
+		return nil, fmt.Errorf("no running containers found for %s", projectName)
 	}
 
 	// Parse services
@@ -560,131 +557,50 @@ func ReconcileStateFromRunning(client *ssh.Client, projectName, envName string) 
 		DeploymentID:    fmt.Sprintf("recovered-%d", time.Now().Unix()),
 		Timestamp:       time.Now(),
 		Environment:     envName,
-		Mode:            "swarm",
+		Mode:            config.RuntimeModeTakod,
 		Status:          "recovered",
 		DurationSeconds: 0,
 		Services:        make(map[string]*localstate.ServiceDeploy),
-		Notes:           "State recovered from running services",
+		Notes:           "State recovered from running takod containers",
 	}
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	for _, line := range lines {
 		parts := strings.Split(line, "\t")
-		if len(parts) < 3 {
+		if len(parts) < 2 {
 			continue
 		}
 
-		fullName := parts[0]
+		containerName := parts[0]
 		image := parts[1]
-		replicas := parts[2]
 
-		// Extract service name from full name (project_env_service)
-		serviceName := strings.TrimPrefix(fullName, prefix)
-		if serviceName == fullName {
+		remainder := strings.TrimPrefix(containerName, prefix)
+		if remainder == containerName {
 			continue // Didn't match prefix
 		}
 
-		// Parse replicas (format: "1/1")
-		var replicaCount int
-		fmt.Sscanf(replicas, "%d/", &replicaCount)
+		nameParts := strings.Split(remainder, "_")
+		if len(nameParts) < 2 {
+			continue
+		}
+		serviceName := strings.Join(nameParts[:len(nameParts)-1], "_")
 
-		deployment.Services[serviceName] = &localstate.ServiceDeploy{
-			Image:    image,
-			Replicas: replicaCount,
-			Health:   "unknown",
+		if existing, ok := deployment.Services[serviceName]; ok {
+			existing.Replicas++
+		} else {
+			deployment.Services[serviceName] = &localstate.ServiceDeploy{
+				Image:    image,
+				Replicas: 1,
+				Health:   "unknown",
+			}
 		}
 	}
 
 	if len(deployment.Services) == 0 {
-		return nil, fmt.Errorf("no services found matching prefix %s", prefix)
+		return nil, fmt.Errorf("no containers found matching prefix %s", prefix)
 	}
 
 	return deployment, nil
-}
-
-// recoverSwarmTokens attempts to recover Docker Swarm tokens from the server
-// and saves them as an encrypted swarm state file
-func recoverSwarmTokens(client *ssh.Client, cfg *config.Config, envName string) {
-	// Check if this node is a swarm manager
-	output, err := client.Execute("docker info --format '{{.Swarm.ControlAvailable}}'")
-	if err != nil || strings.TrimSpace(output) != "true" {
-		if verbose {
-			fmt.Println("Server is not a swarm manager, skipping swarm token recovery")
-		}
-		return
-	}
-
-	fmt.Println("Recovering swarm tokens...")
-
-	// Get worker join token
-	workerToken, err := client.Execute("docker swarm join-token worker -q")
-	if err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to get worker token: %v\n", err)
-		}
-		return
-	}
-
-	// Get manager join token
-	managerToken, err := client.Execute("docker swarm join-token manager -q")
-	if err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to get manager token: %v\n", err)
-		}
-		return
-	}
-
-	// Build swarm state
-	state := &swarm.SwarmState{
-		Initialized:  true,
-		ManagerHost:  client.Host(),
-		WorkerToken:  strings.TrimSpace(workerToken),
-		ManagerToken: strings.TrimSpace(managerToken),
-		Nodes:        make(map[string]string),
-		LastUpdated:  time.Now().Format(time.RFC3339),
-	}
-
-	// Write encrypted swarm state file
-	stateFile := filepath.Join(".tako", fmt.Sprintf("swarm_%s_%s.json", cfg.Project.Name, envName))
-	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to create state directory: %v\n", err)
-		}
-		return
-	}
-
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to marshal swarm state: %v\n", err)
-		}
-		return
-	}
-
-	encryptor, err := crypto.NewEncryptorFromKeyFile(crypto.GetProjectKeyPath("."))
-	if err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to initialize encryption: %v\n", err)
-		}
-		return
-	}
-
-	encrypted, err := encryptor.Encrypt(data)
-	if err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to encrypt swarm state: %v\n", err)
-		}
-		return
-	}
-
-	if err := os.WriteFile(stateFile, encrypted, 0600); err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to write swarm state: %v\n", err)
-		}
-		return
-	}
-
-	fmt.Println("Swarm tokens recovered and saved")
 }
 
 // reconcileAndSave uses ReconcileStateFromRunning to rebuild state from running services
@@ -704,9 +620,6 @@ func reconcileAndSave(client *ssh.Client, cfg *config.Config, envName string) er
 	}
 
 	fmt.Printf("Recovered state from %d running service(s)\n", len(deployment.Services))
-
-	// Also recover swarm tokens while we're at it
-	recoverSwarmTokens(client, cfg, envName)
 
 	return nil
 }

@@ -26,7 +26,7 @@ var rollbackCmd = &cobra.Command{
 If no deployment-id is provided, rolls back to the most recent successful deployment.
 Specify a deployment-id to rollback to a specific deployment.
 
-If --server is not specified, defaults to the first server or manager node in Swarm mode.
+If --server is not specified, state is read from the first environment node.
 
 Use 'tako history' to view available deployments.
 
@@ -40,7 +40,7 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(rollbackCmd)
-	rollbackCmd.Flags().StringVarP(&rollbackServer, "server", "s", "", "Server to rollback (default: first/manager server)")
+	rollbackCmd.Flags().StringVarP(&rollbackServer, "server", "s", "", "Node to read replicated deployment state from")
 	rollbackCmd.Flags().StringVar(&rollbackService, "service", "", "Service to rollback (required)")
 	rollbackCmd.MarkFlagRequired("service")
 }
@@ -50,6 +50,9 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if !cfg.IsTakodRuntime() {
+		return fmt.Errorf("runtime.mode=%s is not supported; Tako now uses runtime.mode=takod", cfg.GetRuntimeMode())
 	}
 
 	// Acquire state lock to prevent concurrent operations
@@ -72,62 +75,50 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("service %s not found in environment %s", rollbackService, envName)
 	}
 
-	// Determine which server to use
+	envServers, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	if len(envServers) == 0 {
+		return fmt.Errorf("no servers configured for environment %s", envName)
+	}
+
+	// Determine which node to read state from.
 	var serverName string
 	var server config.ServerConfig
 
 	if rollbackServer != "" {
-		// Use specified server
 		var exists bool
 		server, exists = cfg.Servers[rollbackServer]
 		if !exists {
 			return fmt.Errorf("server %s not found in configuration", rollbackServer)
 		}
+		found := false
+		for _, envServer := range envServers {
+			if envServer == rollbackServer {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("server %s is not part of environment %s", rollbackServer, envName)
+		}
 		serverName = rollbackServer
 	} else {
-		// Default to first server or manager
-		envServers, err := cfg.GetEnvironmentServers(envName)
-		if err != nil {
-			return fmt.Errorf("failed to get environment servers: %w", err)
-		}
-
-		if len(envServers) == 0 {
-			return fmt.Errorf("no servers configured for environment %s", envName)
-		}
-
-		// If multi-server (Swarm), use manager; otherwise use first server
-		if len(envServers) > 1 {
-			managerName, err := cfg.GetManagerServer(envName)
-			if err != nil {
-				return fmt.Errorf("failed to get manager server: %w", err)
-			}
-			serverName = managerName
-			server = cfg.Servers[managerName]
-		} else {
-			serverName = envServers[0]
-			server = cfg.Servers[serverName]
-		}
+		serverName = envServers[0]
+		server = cfg.Servers[serverName]
 
 		if verbose {
-			fmt.Printf("Using server: %s (%s)\n", serverName, server.Host)
+			fmt.Printf("Reading state from node: %s (%s)\n", serverName, server.Host)
 		}
 	}
 
-	// Create SSH client (supports both key and password auth)
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     server.Host,
-		Port:     server.Port,
-		User:     server.User,
-		SSHKey:   server.SSHKey,
-		Password: server.Password,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
-	}
-	defer client.Close()
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
 
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
+	client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	if err != nil {
+		return fmt.Errorf("failed to connect to node %s: %w", serverName, err)
 	}
 
 	// Create state manager
@@ -194,8 +185,10 @@ func runRollback(cmd *cobra.Command, args []string) error {
 
 	startTime := time.Now()
 
-	// Create deployer
-	deploy := deployer.NewDeployer(client, cfg, envName, verbose)
+	deploy := deployer.NewDeployerWithPool(client, cfg, envName, sshPool, verbose)
+	if err := deploy.SetupTakodRuntime(); err != nil {
+		return fmt.Errorf("failed to setup takod runtime: %w", err)
+	}
 
 	// Perform rollback using state
 	serviceState := targetDeployment.Services[rollbackService]
@@ -224,11 +217,9 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Replicate updated state to worker nodes (async, fire-and-forget)
+	// Replicate updated state to mesh nodes (async, fire-and-forget)
 	if cfg.IsMultiServer() {
-		replicaPool := ssh.NewPool()
-		defer replicaPool.CloseAll()
-		replicator := remotestate.NewStateReplicator(replicaPool, cfg, envName, cfg.Project.Name, verbose)
+		replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
 		history, _ := stateManager.LoadHistory()
 		replicator.ReplicateDeployment(targetDeployment, history)
 	}

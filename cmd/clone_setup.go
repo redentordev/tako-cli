@@ -163,11 +163,11 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 	printStep(4, "Environment Pull")
 
 	if len(connectedClients) > 0 {
-		// Pick a connected client (prefer manager)
+		// Pick a connected client (prefer primary)
 		var pullClient *ssh.Client
-		managerName, err := cfg.GetManagerServer(envName)
+		primaryName, err := cfg.GetPrimaryServer(envName)
 		if err == nil {
-			if c, ok := connectedClients[managerName]; ok {
+			if c, ok := connectedClients[primaryName]; ok {
 				pullClient = c
 			}
 		}
@@ -319,11 +319,11 @@ func createEnvFromExample(reader *bufio.Reader, interactive bool) error {
 	return os.WriteFile(".env", []byte(strings.Join(outputLines, "\n")), 0600)
 }
 
-// getFirstClient returns a connected client, preferring the manager
+// getFirstClient returns a connected client, preferring the primary
 func getFirstClient(clients map[string]*ssh.Client, cfg *config.Config, envName string) *ssh.Client {
-	managerName, err := cfg.GetManagerServer(envName)
+	primaryName, err := cfg.GetPrimaryServer(envName)
 	if err == nil {
-		if c, ok := clients[managerName]; ok {
+		if c, ok := clients[primaryName]; ok {
 			return c
 		}
 	}

@@ -23,13 +23,14 @@ Tako CLI needs to gracefully handle server setup updates as new features are add
   "last_upgrade": "2024-02-10T14:20:00Z",
   "components": {
     "docker": "24.0.7",
-    "traefik": "2.10",
+    "tako-proxy": "3.0",
     "nginx": "1.24",
     "fail2ban": "1.0.2"
   },
   "features": [
-    "docker-swarm",
-    "traefik-proxy",
+    "takod",
+    "tako-proxy",
+    "wireguard-mesh",
     "ssl-auto-renew",
     "log-rotation",
     "metrics-collection"
@@ -43,7 +44,7 @@ Tako CLI needs to gracefully handle server setup updates as new features are add
 ### v1.0.0 (Initial Release)
 **Features:**
 - Basic Docker installation
-- Traefik reverse proxy
+- tako-proxy
 - Nginx for static files
 - Basic firewall rules
 
@@ -73,23 +74,23 @@ Tako CLI needs to gracefully handle server setup updates as new features are add
 1. Install node exporter
 2. Configure metrics collection
 3. Set up health endpoints
-4. Restart Traefik with new config
+4. Restart tako-proxy with new config
 
-### v2.0.0 (Swarm Improvements)
+### v2.0.0 (takod Mesh)
 **Added:**
-- Swarm overlay network optimization
-- Service mesh features
+- takod reconciliation
+- WireGuard mesh features
 - Auto-scaling hooks
 - Enhanced security policies
 
 **Breaking Changes:**
 - New network topology (requires service restart)
-- Updated Traefik labels
+- Updated proxy labels
 
 **Upgrade Steps:**
 1. Backup current configs
-2. Create new overlay networks
-3. Update Traefik config
+2. Prepare takod node networks
+3. Update proxy config
 4. Migrate services gradually
 5. Remove old networks
 
@@ -237,8 +238,6 @@ func createBackup(client *ssh.Client) string {
     // Backup critical files
     filesToBackup := []string{
         "/etc/tako/version.json",
-        "/etc/traefik/traefik.yml",
-        "/etc/traefik/dynamic.yml",
         "/etc/nginx/nginx.conf",
         // ... more
     }
@@ -266,7 +265,7 @@ tako setup version
 # Server: production-1
 # Version: v1.2.0 (latest)
 # Installed: 2024-01-15 10:30:00
-# Features: docker-swarm, traefik-proxy, ssl-auto-renew, log-rotation, metrics-collection
+# Features: takod, tako-proxy, wireguard-mesh, ssl-auto-renew, log-rotation, metrics-collection
 ```
 
 ### Upgrade Server
@@ -445,4 +444,4 @@ tako setup upgrade production-1 --to=1.2.0 --skip-backup  # backup already teste
 6. **Scheduled Upgrades** - Cron-based automatic upgrades
 7. **Compliance Reports** - Track which servers are up-to-date
 
-This system ensures Tako CLI can evolve gracefully while maintaining backward compatibility and zero-downtime upgrades! 🚀
+This system ensures Tako CLI can evolve deliberately while keeping server setup reproducible across takod nodes.

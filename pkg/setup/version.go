@@ -61,8 +61,8 @@ func detectLegacySetup(client *ssh.Client) (*ServerVersion, error) {
 		Version:  "1.0.0",
 		Features: features,
 		Components: map[string]string{
-			"docker":  detectDockerVersion(client),
-			"traefik": detectTraefikVersion(client),
+			"docker":     detectDockerVersion(client),
+			"tako-proxy": detectTakoProxyVersion(client),
 		},
 	}, nil
 }
@@ -71,16 +71,9 @@ func detectLegacySetup(client *ssh.Client) (*ServerVersion, error) {
 func detectLegacyFeatures(client *ssh.Client) []string {
 	features := []string{}
 
-	// Check Docker Swarm
-	output, _ := client.Execute("docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null")
-	if strings.TrimSpace(output) == "active" {
-		features = append(features, "docker-swarm")
-	}
-
-	// Check Traefik
-	_, err := client.Execute("docker ps --filter name=traefik --format '{{.Names}}' | grep traefik")
+	_, err := client.Execute("docker ps --filter name=tako-proxy --format '{{.Names}}' | grep tako-proxy")
 	if err == nil {
-		features = append(features, "traefik-proxy")
+		features = append(features, "tako-proxy")
 	}
 
 	// Check Nginx
@@ -107,9 +100,9 @@ func detectDockerVersion(client *ssh.Client) string {
 	return strings.TrimSpace(output)
 }
 
-// detectTraefikVersion gets the installed Traefik version
-func detectTraefikVersion(client *ssh.Client) string {
-	output, err := client.Execute("docker exec traefik traefik version 2>/dev/null | grep 'Version:' | awk '{print $2}'")
+// detectTakoProxyVersion gets the installed tako-proxy version.
+func detectTakoProxyVersion(client *ssh.Client) string {
+	output, err := client.Execute("docker exec tako-proxy traefik version 2>/dev/null | grep 'Version:' | awk '{print $2}'")
 	if err != nil {
 		return "unknown"
 	}

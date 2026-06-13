@@ -231,7 +231,7 @@ ghost:
 
 However, you'll need:
 1. Shared storage for `ghost_content` (e.g., NFS)
-2. Load balancing (handled by Traefik automatically)
+2. Load balancing (handled by tako-proxy automatically)
 
 For most use cases, a single instance is sufficient.
 
@@ -259,8 +259,7 @@ tako logs mysql
 
 Verify MySQL is running:
 ```bash
-ssh root@your-server-ip
-docker service ls
+tako ps
 ```
 
 ### Admin panel not accessible

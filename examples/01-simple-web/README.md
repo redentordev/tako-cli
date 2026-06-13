@@ -34,7 +34,7 @@ LETSENCRYPT_EMAIL=you@example.com  # Your email for SSL certificates
 ### 3. Deploy!
 
 ```bash
-# First time: provision the server with Docker, Traefik, etc.
+# First time: provision the server with Docker, proxy, etc.
 tako setup
 
 # Deploy your app
@@ -90,7 +90,7 @@ Tako automatically:
 
 1. **Builds** your Docker image on the server
 2. **Deploys** the container with zero downtime
-3. **Configures** Traefik reverse proxy
+3. **Configures** tako-proxy
 4. **Obtains** SSL certificate from Let's Encrypt
 5. **Routes** traffic to your app
 
@@ -225,7 +225,7 @@ tako ps
 
 - Make sure your domain's DNS is pointing to your server IP
 - Wait 1-2 minutes for Let's Encrypt to issue certificate
-- Check Traefik logs: `ssh root@server "docker logs traefik"`
+- Check proxy logs: `ssh root@server "docker logs tako-proxy"`
 
 ## Next Steps
 
@@ -252,7 +252,7 @@ This example uses the absolute minimum configuration:
 
 From here, you can scale to:
 - Multiple services (web, API, workers)
-- Multiple servers (Swarm orchestration)
+- Multiple servers (takod mesh)
 - Multiple environments (staging, production)
 - Advanced features (secrets, hooks, health checks)
 

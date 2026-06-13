@@ -67,30 +67,30 @@ func (b *DockerLabelBuilder) Count() int {
 	return len(b.labels)
 }
 
-// TraefikLabelBuilder specifically for Traefik labels
-type TraefikLabelBuilder struct {
+// ProxyLabelBuilder builds labels for the current tako-proxy engine.
+type ProxyLabelBuilder struct {
 	*DockerLabelBuilder
 	routerName  string
 	serviceName string
 }
 
-// NewTraefikLabelBuilder creates a builder for Traefik labels
-func NewTraefikLabelBuilder(routerName, serviceName string) *TraefikLabelBuilder {
-	return &TraefikLabelBuilder{
+// NewProxyLabelBuilder creates a builder for public proxy labels.
+func NewProxyLabelBuilder(routerName, serviceName string) *ProxyLabelBuilder {
+	return &ProxyLabelBuilder{
 		DockerLabelBuilder: NewDockerLabelBuilder(),
 		routerName:         routerName,
 		serviceName:        serviceName,
 	}
 }
 
-// Enable enables Traefik for this container
-func (t *TraefikLabelBuilder) Enable() *TraefikLabelBuilder {
+// Enable exposes this container through the proxy.
+func (t *ProxyLabelBuilder) Enable() *ProxyLabelBuilder {
 	t.Add("traefik.enable", "true")
 	return t
 }
 
 // HostRule adds a Host() rule for the router
-func (t *TraefikLabelBuilder) HostRule(domain string) *TraefikLabelBuilder {
+func (t *ProxyLabelBuilder) HostRule(domain string) *ProxyLabelBuilder {
 	rule := fmt.Sprintf("Host(\"%s\")", domain)
 	key := fmt.Sprintf("traefik.http.routers.%s.rule", t.routerName)
 	t.AddWithQuotes(key, rule, "single")
@@ -98,14 +98,14 @@ func (t *TraefikLabelBuilder) HostRule(domain string) *TraefikLabelBuilder {
 }
 
 // Entrypoints sets the entrypoints for the router
-func (t *TraefikLabelBuilder) Entrypoints(entrypoints ...string) *TraefikLabelBuilder {
+func (t *ProxyLabelBuilder) Entrypoints(entrypoints ...string) *ProxyLabelBuilder {
 	key := fmt.Sprintf("traefik.http.routers.%s.entrypoints", t.routerName)
 	t.Add(key, strings.Join(entrypoints, ","))
 	return t
 }
 
 // TLS enables TLS for the router
-func (t *TraefikLabelBuilder) TLS(certResolver string) *TraefikLabelBuilder {
+func (t *ProxyLabelBuilder) TLS(certResolver string) *ProxyLabelBuilder {
 	t.Add(fmt.Sprintf("traefik.http.routers.%s.tls", t.routerName), "true")
 	if certResolver != "" {
 		t.Add(fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", t.routerName), certResolver)
@@ -114,14 +114,14 @@ func (t *TraefikLabelBuilder) TLS(certResolver string) *TraefikLabelBuilder {
 }
 
 // Port sets the service port
-func (t *TraefikLabelBuilder) Port(port int) *TraefikLabelBuilder {
+func (t *ProxyLabelBuilder) Port(port int) *ProxyLabelBuilder {
 	key := fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", t.serviceName)
 	t.Add(key, fmt.Sprintf("%d", port))
 	return t
 }
 
 // HealthCheck adds health check configuration
-func (t *TraefikLabelBuilder) HealthCheck(path string, interval string) *TraefikLabelBuilder {
+func (t *ProxyLabelBuilder) HealthCheck(path string, interval string) *ProxyLabelBuilder {
 	if path != "" {
 		t.Add(fmt.Sprintf("traefik.http.services.%s.loadbalancer.healthcheck.path", t.serviceName), path)
 	}
@@ -132,21 +132,21 @@ func (t *TraefikLabelBuilder) HealthCheck(path string, interval string) *Traefik
 }
 
 // Priority sets the router priority
-func (t *TraefikLabelBuilder) Priority(priority int) *TraefikLabelBuilder {
+func (t *ProxyLabelBuilder) Priority(priority int) *ProxyLabelBuilder {
 	key := fmt.Sprintf("traefik.http.routers.%s.priority", t.routerName)
 	t.Add(key, fmt.Sprintf("%d", priority))
 	return t
 }
 
 // Service links the router to a specific service
-func (t *TraefikLabelBuilder) Service(serviceName string) *TraefikLabelBuilder {
+func (t *ProxyLabelBuilder) Service(serviceName string) *ProxyLabelBuilder {
 	key := fmt.Sprintf("traefik.http.routers.%s.service", t.routerName)
 	t.Add(key, serviceName)
 	return t
 }
 
 // Middlewares adds middleware(s) to the router
-func (t *TraefikLabelBuilder) Middlewares(middlewares ...string) *TraefikLabelBuilder {
+func (t *ProxyLabelBuilder) Middlewares(middlewares ...string) *ProxyLabelBuilder {
 	key := fmt.Sprintf("traefik.http.routers.%s.middlewares", t.routerName)
 	t.Add(key, strings.Join(middlewares, ","))
 	return t
@@ -154,7 +154,7 @@ func (t *TraefikLabelBuilder) Middlewares(middlewares ...string) *TraefikLabelBu
 
 // RedirectRegexMiddleware creates a redirect regex middleware
 // This is used to redirect one domain to another (e.g., www -> non-www)
-func (t *TraefikLabelBuilder) RedirectRegexMiddleware(middlewareName, fromDomain, toDomain string, permanent bool) *TraefikLabelBuilder {
+func (t *ProxyLabelBuilder) RedirectRegexMiddleware(middlewareName, fromDomain, toDomain string, permanent bool) *ProxyLabelBuilder {
 	// Escape dots in domain for regex
 	escapedFromDomain := strings.ReplaceAll(fromDomain, ".", "\\.")
 
@@ -190,7 +190,7 @@ func (r *RedirectDomainBuilder) AddRedirectDomain(redirectDomain string, index i
 	routerName := fmt.Sprintf("%s-redirect-%d", r.containerName, index)
 	middlewareName := fmt.Sprintf("%s-redirect-%d", r.containerName, index)
 
-	builder := NewTraefikLabelBuilder(routerName, r.containerName)
+	builder := NewProxyLabelBuilder(routerName, r.containerName)
 
 	// Router for the redirect domain
 	builder.HostRule(redirectDomain)

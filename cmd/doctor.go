@@ -355,16 +355,14 @@ func checkRunningServices(record func(checkResult), cfg *config.Config, envName 
 		return
 	}
 
-	// Use first available client (preferably manager)
 	var client *ssh.Client
 	var clientName string
 
-	// Try to find manager
-	managerName, err := cfg.GetManagerServer(envName)
+	primaryName, err := cfg.GetPrimaryServer(envName)
 	if err == nil {
-		if c, ok := clients[managerName]; ok {
+		if c, ok := clients[primaryName]; ok {
 			client = c
-			clientName = managerName
+			clientName = primaryName
 		}
 	}
 	// Fallback to any connected client
@@ -376,15 +374,18 @@ func checkRunningServices(record func(checkResult), cfg *config.Config, envName 
 		}
 	}
 
-	// Check for Docker Swarm services
-	output, err := client.Execute("docker service ls --format '{{.Name}}\\t{{.Replicas}}' 2>/dev/null")
+	output, err := client.Execute(fmt.Sprintf(
+		"docker ps --filter label=tako.project=%s --filter label=tako.environment=%s --format '{{.Names}}\\t{{.Status}}' 2>/dev/null",
+		cfg.Project.Name,
+		envName,
+	))
 	if err == nil && strings.TrimSpace(output) != "" {
 		lines := strings.Split(strings.TrimSpace(output), "\n")
-		record(checkResult{"PASS", fmt.Sprintf("Docker Swarm services on %s: %d service(s)", clientName, len(lines)), ""})
+		record(checkResult{"PASS", fmt.Sprintf("takod containers on %s: %d container(s)", clientName, len(lines)), ""})
 		for _, line := range lines {
 			parts := strings.SplitN(line, "\t", 2)
 			if len(parts) == 2 {
-				record(checkResult{"PASS", fmt.Sprintf("  %s: %s replicas", parts[0], parts[1]), ""})
+				record(checkResult{"PASS", fmt.Sprintf("  %s: %s", parts[0], parts[1]), ""})
 			}
 		}
 		return

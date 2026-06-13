@@ -1,12 +1,12 @@
 # 🐙 Tako CLI
 
-**タコ - Deploy your applications to any VPS with zero configuration and zero downtime.**
+**タコ - Deploy your applications to any VPS with a small takod mesh.**
 
 ## What is Tako?
 
 **Tako** (タコ) is Japanese for "octopus" - pronounced "tah-koh". Just like an octopus has 8 arms to manage multiple tasks simultaneously, Tako CLI manages your deployments across multiple servers with precision and control.
 
-Tako CLI is a powerful deployment automation tool that brings Platform-as-a-Service (PaaS) simplicity to your own servers. Deploy Docker containers to your VPS servers with automatic HTTPS, health checks, zero-downtime deployments, and full server control.
+Tako CLI is a powerful deployment automation tool that brings Platform-as-a-Service (PaaS) simplicity to your own servers. Deploy Docker containers to your VPS servers with automatic HTTPS, health checks, replicated deployment state, and full server control.
 
 [![Version](https://img.shields.io/badge/version-0.2.2-blue)](https://github.com/redentordev/tako-cli/releases)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](https://golang.org/)
@@ -31,12 +31,19 @@ Tako CLI brings PaaS-like simplicity with full server control - deploy to your o
 
 - Deploy in minutes, not hours or days
 - Use your own servers (DigitalOcean, Hetzner, AWS EC2, any VPS)
-- Zero-downtime deployments with automatic rollback
-- Automatic HTTPS certificates (Let's Encrypt + Traefik)
+- Health-checked deployments with recorded rollback state
+- Automatic HTTPS certificates through tako-proxy
 - Git-based deployments with full version history
 - No monthly PaaS fees - pay only for your server
-- Multi-server orchestration with Docker Swarm
+- Meshed takod orchestration with the same model from one server to many
 - Cross-project service networking
+
+### Orchestration Direction
+
+Tako is a small takod-based orchestrator: one config, one CLI, and the same
+workflow from one server to many. See
+[docs/ORCHESTRATION-MODEL.md](./docs/ORCHESTRATION-MODEL.md) for the high-level
+runtime, state, mesh, and migration plan.
 
 ---
 
@@ -250,7 +257,7 @@ The template includes commented examples for:
 tako setup -e production
 ```
 
-This installs Docker, Traefik, configures firewall, and hardens security.
+This installs Docker, configures the proxy, configures firewall, and hardens security.
 
 5. **Deploy your application:**
 
@@ -271,7 +278,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Instant Rollback** - Revert to any previous deployment with one command
 - **Git-Based Versioning** - Every deployment tied to a Git commit
 - **State Management** - Full deployment history tracked on server with CLI version tracking
-- **Automatic HTTPS** - Traefik provisions SSL certificates via Let's Encrypt
+- **Automatic HTTPS** - tako-proxy provisions SSL certificates via Let's Encrypt
 - **Domain Redirects** - Automatic www → non-www (or vice versa) with path preservation
 - **Health Checks** - Ensure containers are healthy before switching traffic
 - **Secrets Management** - Secure handling of environment secrets with automatic redaction
@@ -281,8 +288,8 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 ### Servers & Scaling
 
-- **Multi-Server** - Deploy across multiple servers with Docker Swarm
-- **Server Setup** - Configure existing VPS hosts with Docker, Traefik, firewall rules, and monitoring
+- **Multi-Server** - Deploy across multiple servers with takod mesh placement
+- **Server Setup** - Configure existing VPS hosts with Docker, local proxy, firewall rules, and monitoring
 - **Placement Strategies** - Control where services run (spread, pinned)
 - **NFS Storage** - Shared volumes across servers
 
@@ -305,7 +312,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | Command | Description |
 |---------|-------------|
 | `tako init` | Initialize new project with template config |
-| `tako setup` | Set up existing server (Docker, Traefik, security hardening) |
+| `tako setup` | Set up existing server (Docker, proxy, security hardening) |
 | `tako deploy` | Deploy application to environment |
 | `tako rollback [id]` | Rollback to previous/specific deployment |
 | `tako destroy` | Remove all services from server |
@@ -316,7 +323,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 |---------|-------------|
 | `tako ps` | List running services and their status |
 | `tako logs` | Stream container logs |
-| `tako access` | Stream access logs from Traefik (HTTP requests) |
+| `tako access` | Stream proxy access logs |
 | `tako metrics` | View system metrics from servers |
 | `tako monitor` | Continuously monitor deployed services |
 | `tako history` | View deployment history |
@@ -366,7 +373,6 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako dev` | Run production environment locally |
 | `tako live` | Live development mode with hot reload |
 | `tako cleanup` | Clean up old Docker resources |
-| `tako downgrade` | Downgrade from Docker Swarm to single-server mode |
 
 ### Common Flags
 
@@ -425,16 +431,30 @@ tako setup && tako deploy
 
 ```yaml
 servers:
-  manager:
-    host: ${MANAGER_HOST}
+  node1:
+    host: ${NODE1_HOST}
     user: root
     sshKey: ~/.ssh/id_ed25519
-    role: manager
-  worker:
-    host: ${WORKER_HOST}
+  node2:
+    host: ${NODE2_HOST}
     user: root
     sshKey: ~/.ssh/id_ed25519
-    role: worker
+
+environments:
+  production:
+    servers:
+      - node1
+      - node2
+    services:
+      web:
+        build: .
+        replicas: 3
+        port: 3000
+        placement:
+          strategy: spread
+        proxy:
+          domain: app.example.com
+          email: admin@example.com
 ```
 
 ### Full-Stack Application
@@ -463,7 +483,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
 ```
 
-### Multi-Server with Docker Swarm
+### Multi-Server with takod Mesh
 
 ```yaml
 servers:
@@ -510,7 +530,7 @@ Share volumes across multiple servers using NFS. Tako automatically sets up the 
 storage:
   nfs:
     enabled: true
-    server: auto  # Use manager node, or specify server name
+    server: auto  # Use the first environment node, or specify server name
     exports:
       - name: shared_repo
         path: /srv/nfs/repo
@@ -520,7 +540,6 @@ storage:
 servers:
   server1:
     host: ${SERVER1_HOST}
-    role: manager    # NFS server will run here
   server2:
     host: ${SERVER2_HOST}
   server3:
@@ -736,25 +755,28 @@ deployment:
 ┌─────────────────┐
 │   VPS Server    │
 ├─────────────────┤
-│ Traefik (HTTPS) │
+│ takod           │
+│ Local Proxy     │
 │ Docker Engine   │
 │ Your Containers │
-│ State Storage   │
+│ State Cache     │
 └─────────────────┘
 ```
 
-### Multi-Server Swarm Mode
+### Multi-Server Mesh Mode
 
 ```
-    Tako CLI
-        │
-   ┌────┴────┬────────┐
-   │         │        │
-Manager    Worker1  Worker2
-   │         │        │
-Registry  Services Services
-Traefik   Replicas Replicas
-   └─── Overlay Network ───┘
+            Tako CLI
+                |
+          connect to any
+                |
+      +---------+---------+
+      |         |         |
+   takod A   takod B   takod C
+      |         |         |
+   Docker    Docker    Docker
+   Proxy     Proxy     Proxy
+      +---- private mesh ----+
 ```
 
 ---
@@ -782,7 +804,6 @@ Check out the [examples/](./examples) directory for ready-to-deploy projects:
 - **06-scaling** - Multi-replica deployment
 - **07-backend-api** - RESTful API service
 - **08-frontend-consumer** - Frontend consuming external API
-- **11-multi-server-swarm** - Multi-server orchestration
 
 ### Third-Party Applications
 - **17-n8n** - n8n (workflow automation)
@@ -792,9 +813,8 @@ Check out the [examples/](./examples) directory for ready-to-deploy projects:
 
 ### Testing & Advanced
 - **test-parallel** - Parallel deployment testing
-- **test-placement-strategies** - Swarm placement strategies
+- **test-placement-strategies** - Placement strategy testing
 - **test-secrets** - Secrets management
-- **test-swarm** - Docker Swarm testing
 
 Each example includes complete documentation and is ready to deploy.
 
@@ -837,14 +857,12 @@ tako-cli/
 │   ├── deploy.go         # Deployment logic
 │   ├── setup.go          # Server setup
 │   ├── rollback.go       # Rollback functionality
-│   ├── access.go         # Traefik access logs
+│   ├── access.go         # Proxy access logs
 │   ├── monitor.go        # Service monitoring
 │   └── ...               # Other commands
 ├── pkg/                  # Reusable packages
 │   ├── config/           # Configuration management
 │   ├── deployer/         # Core deployment engine
-│   ├── swarm/            # Docker Swarm orchestration
-│   ├── traefik/          # Traefik reverse proxy
 │   ├── git/              # Git operations
 │   ├── ssh/              # SSH client with pooling
 │   ├── provisioner/      # Server setup
@@ -881,7 +899,7 @@ Tako CLI is inspired by the excellent work of:
 
 - [Kamal](https://kamal-deploy.org/) by DHH and 37signals
 - [Dokku](https://dokku.com/) by Jeff Lindsay
-- [Docker Swarm](https://docs.docker.com/engine/swarm/) by Docker Inc.
+- [Uncloud](https://github.com/psviderski/uncloud) by Pavel Sviderski
 - The simplicity of Heroku's developer experience
 
 ---

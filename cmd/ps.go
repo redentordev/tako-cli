@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -15,14 +14,6 @@ var (
 	psServer string
 	psAll    bool
 )
-
-type ContainerInfo struct {
-	Name       string
-	Status     string
-	Uptime     string
-	Port       string
-	ReplicaNum int
-}
 
 type ServiceInfo struct {
 	Name     string
@@ -151,18 +142,6 @@ func runPS(cmd *cobra.Command, args []string) error {
 func getServiceInfo(client *ssh.Client, cfg *config.Config, envName string, filterService string, services map[string]config.ServiceConfig) ([]ServiceInfo, error) {
 	serviceInfos := []ServiceInfo{}
 
-	// Check if we're in swarm mode
-	isSwarm, err := isSwarmMode(client)
-	if err != nil {
-		return nil, fmt.Errorf("failed to check swarm mode: %w", err)
-	}
-
-	if isSwarm {
-		// Use swarm mode service listing
-		return getSwarmServiceInfo(client, cfg, envName, filterService, services)
-	}
-
-	// Iterate through configured services (standalone mode)
 	for serviceName, serviceConfig := range services {
 		// Skip if filtering and doesn't match
 		if filterService != "" && serviceName != filterService {
@@ -286,97 +265,6 @@ func getServiceInfo(client *ssh.Client, cfg *config.Config, envName string, filt
 	return serviceInfos, nil
 }
 
-// isSwarmMode checks if Docker is running in swarm mode
-func isSwarmMode(client *ssh.Client) (bool, error) {
-	output, err := client.Execute("docker info --format '{{.Swarm.LocalNodeState}}'")
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(output) == "active", nil
-}
-
-// getSwarmServiceInfo retrieves service information from Docker Swarm
-func getSwarmServiceInfo(client *ssh.Client, cfg *config.Config, envName string, filterService string, services map[string]config.ServiceConfig) ([]ServiceInfo, error) {
-	serviceInfos := []ServiceInfo{}
-
-	// Iterate through configured services
-	for serviceName, serviceConfig := range services {
-		// Skip if filtering and doesn't match
-		if filterService != "" && serviceName != filterService {
-			continue
-		}
-
-		fullServiceName := fmt.Sprintf("%s_%s_%s", cfg.Project.Name, envName, serviceName)
-
-		info := ServiceInfo{
-			Name:     serviceName,
-			Desired:  0,
-			Running:  0,
-			Internal: serviceConfig.IsInternal() || serviceConfig.IsWorker(),
-		}
-
-		// Get service replica info from docker service ls
-		cmd := fmt.Sprintf("docker service ls --filter 'name=%s' --format '{{.Replicas}}'", fullServiceName)
-		output, err := client.Execute(cmd)
-		if err != nil {
-			// Service might not exist, continue with zeros
-			info.Status = "stopped"
-			info.Desired = serviceConfig.Replicas
-			if info.Desired == 0 {
-				info.Desired = 1
-			}
-			info.Ports = getPortDisplay(serviceConfig, info.Internal, 0)
-			serviceInfos = append(serviceInfos, info)
-			continue
-		}
-
-		replicaStr := strings.TrimSpace(output)
-		if replicaStr == "" {
-			// Service doesn't exist
-			info.Status = "stopped"
-			info.Desired = serviceConfig.Replicas
-			if info.Desired == 0 {
-				info.Desired = 1
-			}
-			info.Ports = getPortDisplay(serviceConfig, info.Internal, 0)
-			serviceInfos = append(serviceInfos, info)
-			continue
-		}
-
-		// Parse replicas (format: "2/3" means 2 running out of 3 desired)
-		parts := strings.Split(replicaStr, "/")
-		if len(parts) == 2 {
-			fmt.Sscanf(parts[0], "%d", &info.Running)
-			fmt.Sscanf(parts[1], "%d", &info.Desired)
-		}
-
-		info.Replicas = info.Running
-
-		// Determine status
-		if info.Running == 0 {
-			info.Status = "stopped"
-		} else if info.Running < info.Desired {
-			info.Status = "degraded"
-		} else if info.Running == info.Desired {
-			info.Status = "running"
-		} else {
-			info.Status = "scaling"
-		}
-
-		// Set ports display
-		info.Ports = getPortDisplay(serviceConfig, info.Internal, info.Running)
-
-		serviceInfos = append(serviceInfos, info)
-	}
-
-	// Sort by service name
-	sort.Slice(serviceInfos, func(i, j int) bool {
-		return serviceInfos[i].Name < serviceInfos[j].Name
-	})
-
-	return serviceInfos, nil
-}
-
 // getPortDisplay returns the appropriate port display string
 func getPortDisplay(serviceConfig config.ServiceConfig, isInternal bool, runningCount int) string {
 	if isInternal {
@@ -444,30 +332,4 @@ func formatPorts(ports string) string {
 	}
 
 	return ports
-}
-
-// parseUptime converts Docker uptime string to human-readable format
-func parseUptime(uptime string) string {
-	// Docker format: "Up 2 hours" or "Up About a minute"
-	if strings.HasPrefix(uptime, "Up") {
-		return strings.TrimPrefix(uptime, "Up ")
-	}
-	if strings.HasPrefix(uptime, "Exited") {
-		return "stopped"
-	}
-	return uptime
-}
-
-// formatDuration formats a time.Duration into human-readable string
-func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	}
-	if d < 24*time.Hour {
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	}
-	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }

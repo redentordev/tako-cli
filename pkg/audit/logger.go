@@ -20,7 +20,7 @@ const (
 	ActivityDeploymentFailed    ActivityType = "deployment.failed"
 	ActivityResourceDeleted     ActivityType = "resource.deleted"
 	ActivityCommandExecuted     ActivityType = "command.executed"
-	ActivitySwarmInitialized    ActivityType = "swarm.initialized"
+	ActivityTakodMeshPrepared   ActivityType = "takod.mesh.prepared"
 	ActivityNodeJoined          ActivityType = "node.joined"
 )
 

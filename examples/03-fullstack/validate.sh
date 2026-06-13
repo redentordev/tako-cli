@@ -63,11 +63,11 @@ else
     echo "Warning: Could not verify API to Redis connectivity"
 fi
 
-# Check if Traefik reverse proxy is configured (if web has proxy)
-TRAEFIK_RUNNING=$(ssh -i "$VPS_SSH_KEY" ${VPS_USER:-root}@$VPS_HOST "docker ps --filter name=traefik --format '{{.Names}}' | wc -l")
+# Check if tako-proxy is configured (if web has proxy)
+PROXY_RUNNING=$(ssh -i "$VPS_SSH_KEY" ${VPS_USER:-root}@$VPS_HOST "docker ps --filter name=tako-proxy --format '{{.Names}}' | wc -l")
 
-if [ "$TRAEFIK_RUNNING" -gt "0" ]; then
-    echo "✓ Traefik reverse proxy is running"
+if [ "$PROXY_RUNNING" -gt "0" ]; then
+    echo "✓ tako-proxy is running"
 fi
 
 echo "✓ All validations passed for 03-fullstack"

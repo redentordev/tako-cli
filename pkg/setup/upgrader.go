@@ -158,8 +158,6 @@ func (u *Upgrader) createBackup() (string, error) {
 	// Files to backup
 	filesToBackup := []string{
 		"/etc/tako/version.json",
-		"/etc/traefik/traefik.yml",
-		"/etc/traefik/dynamic.yml",
 		"/etc/nginx/nginx.conf",
 		"/etc/logrotate.d/docker",
 	}
@@ -199,16 +197,9 @@ func (u *Upgrader) log(format string, args ...interface{}) {
 func detectCurrentFeatures(client *ssh.Client) []string {
 	features := []string{}
 
-	// Check Docker Swarm
-	output, _ := client.Execute("docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null")
-	if output == "active\n" {
-		features = append(features, "docker-swarm")
-	}
-
-	// Check Traefik
-	_, err := client.Execute("docker ps --filter name=traefik --format '{{.Names}}' | grep traefik")
+	_, err := client.Execute("docker ps --filter name=tako-proxy --format '{{.Names}}' | grep tako-proxy")
 	if err == nil {
-		features = append(features, "traefik-proxy")
+		features = append(features, "tako-proxy")
 	}
 
 	// Check if log rotation is installed

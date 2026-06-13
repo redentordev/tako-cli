@@ -22,8 +22,8 @@ var (
 
 var accessCmd = &cobra.Command{
 	Use:   "access [service]",
-	Short: "Stream access logs from Traefik reverse proxy",
-	Long: `Stream and format access logs from the Traefik reverse proxy.
+	Short: "Stream proxy access logs",
+	Long: `Stream and format access logs from tako-proxy.
 
 This command shows HTTP request logs including:
   - Timestamp
@@ -103,9 +103,8 @@ func runAccess(cmd *cobra.Command, args []string) error {
 	}
 	defer client.Close()
 
-	// Determine log file path (Traefik access logs)
-	// In Swarm mode, all services log to a single access.log file
-	logPath := "/var/log/traefik/access.log"
+	// Determine log file path. Public services share one proxy access log.
+	logPath := "/var/log/tako/proxy/access.log"
 
 	// Build tail command
 	tailCmd := fmt.Sprintf("sudo tail -n %d", accessTail)

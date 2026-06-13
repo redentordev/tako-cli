@@ -53,5 +53,5 @@ environments:
           retries: 3
           startPeriod: 40s
         deploy:
-          strategy: rolling
+          strategy: recreate
           maxUnavailable: 1

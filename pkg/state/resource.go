@@ -42,7 +42,7 @@ type Resource struct {
 	URN      string       `json:"urn"`
 	Type     ResourceType `json:"type"`
 	Name     string       `json:"name"`
-	Provider string       `json:"provider"` // docker, swarm, traefik
+	Provider string       `json:"provider"` // docker, takod, tako-proxy
 
 	// State
 	Status    ResourceStatus `json:"status"`
@@ -192,7 +192,7 @@ func (m *ResourceManager) Register(resourceType ResourceType, name string, input
 		URN:          urn,
 		Type:         resourceType,
 		Name:         name,
-		Provider:     "swarm",
+		Provider:     "takod",
 		Status:       StatusPending,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),

@@ -161,7 +161,7 @@ The dependency resolver detects these patterns in environment variables:
      2. API service (waits for databases)
      3. Web service (waits for API)
    - Build web and api images
-   - Configure Traefik proxy
+   - Configure tako-proxy
    - Set up internal networking
    - Verify health checks
 

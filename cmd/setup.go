@@ -17,10 +17,10 @@ var (
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
-	Short: "Set up server with Docker, Traefik, and security hardening",
+	Short: "Set up server with Docker, proxy, and security hardening",
 	Long: `Setup configures your VPS server with all necessary components:
   - Docker and Docker Compose
-  - Traefik reverse proxy for automatic SSL and load balancing
+  - tako-proxy for automatic SSL and load balancing
   - UFW firewall configuration
   - Security hardening (disable root login, fail2ban)
   - Deploy user creation and SSH key setup
@@ -131,7 +131,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			InstalledAt:    time.Now(),
 			TakoCLIVersion: Version,
 			Components:     make(map[string]string),
-			Features:       []string{"docker", "traefik-proxy", "firewall", "monitoring"},
+			Features:       []string{"docker", "tako-proxy", "firewall", "monitoring"},
 		}
 
 		if err := setup.WriteVersionFile(client, newVersion); err != nil {

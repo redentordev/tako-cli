@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -34,7 +33,7 @@ This command is useful for:
 Examples:
   # Server commands
   tako exec "docker ps"                           # Run on default/all servers
-  tako exec --server server1 "docker service ls"  # Run on specific server
+  tako exec --server server1 "docker ps"          # Run on specific server
   tako exec "df -h"                               # Check disk usage
   
   # Container commands
@@ -53,7 +52,7 @@ Examples:
 func init() {
 	rootCmd.AddCommand(execCmd)
 	execCmd.Flags().StringVarP(&execServer, "server", "s", "", "Execute on specific server")
-	execCmd.Flags().BoolVarP(&execAll, "all", "a", false, "Execute on all servers (default: manager only for swarm)")
+	execCmd.Flags().BoolVarP(&execAll, "all", "a", false, "Execute on all servers")
 	execCmd.Flags().StringVar(&execService, "service", "", "Execute command inside service container")
 	execCmd.Flags().StringVar(&execContainer, "container", "", "Execute command inside specific container")
 	execCmd.Flags().BoolVarP(&execInteractive, "interactive", "i", false, "Interactive mode (allocate TTY)")
@@ -90,21 +89,12 @@ func runExec(cmd *cobra.Command, args []string) error {
 		// Execute on all servers
 		serversToExec = cfg.Servers
 	} else {
-		// Execute on manager server (for Swarm) or first server
 		envServers, err := cfg.GetEnvironmentServers(envName)
 		if err != nil {
 			return fmt.Errorf("failed to get environment servers: %w", err)
 		}
 
-		if len(envServers) > 1 {
-			// Multi-server (Swarm): use manager
-			managerName, err := cfg.GetManagerServer(envName)
-			if err != nil {
-				return fmt.Errorf("failed to get manager server: %w", err)
-			}
-			serversToExec[managerName] = cfg.Servers[managerName]
-		} else if len(envServers) == 1 {
-			// Single server: use that server
+		if len(envServers) >= 1 {
 			serverName := envServers[0]
 			serversToExec[serverName] = cfg.Servers[serverName]
 		} else {
@@ -165,7 +155,7 @@ func runExec(cmd *cobra.Command, args []string) error {
 
 // runExecInContainer executes a command inside a container
 func runExecInContainer(cfg *config.Config, envName, command string) error {
-	// Determine which server to use (default to manager/first server)
+	// Determine which server to use.
 	var serverName string
 	var serverCfg config.ServerConfig
 
@@ -178,7 +168,6 @@ func runExecInContainer(cfg *config.Config, envName, command string) error {
 		}
 		serverName = execServer
 	} else {
-		// Use manager or first server
 		envServers, err := cfg.GetEnvironmentServers(envName)
 		if err != nil {
 			return fmt.Errorf("failed to get environment servers: %w", err)
@@ -188,17 +177,8 @@ func runExecInContainer(cfg *config.Config, envName, command string) error {
 			return fmt.Errorf("no servers configured for environment %s", envName)
 		}
 
-		if len(envServers) > 1 {
-			managerName, err := cfg.GetManagerServer(envName)
-			if err != nil {
-				return fmt.Errorf("failed to get manager server: %w", err)
-			}
-			serverName = managerName
-			serverCfg = cfg.Servers[managerName]
-		} else {
-			serverName = envServers[0]
-			serverCfg = cfg.Servers[serverName]
-		}
+		serverName = envServers[0]
+		serverCfg = cfg.Servers[serverName]
 	}
 
 	// Connect to server (supports both key and password auth)
@@ -223,33 +203,7 @@ func runExecInContainer(cfg *config.Config, envName, command string) error {
 		// Use specific container name
 		containerName = execContainer
 	} else if execService != "" {
-		// Find container for service
-		// Check if we're in Swarm mode
-		swarmStateFile := fmt.Sprintf(".tako/swarm_%s_%s.json", cfg.Project.Name, envName)
-		useSwarmMode := false
-		if _, err := os.Stat(swarmStateFile); err == nil {
-			useSwarmMode = true
-		}
-
-		if useSwarmMode {
-			// In Swarm mode, find the actual container name for the service
-			serviceName := fmt.Sprintf("%s_%s_%s", cfg.Project.Name, envName, execService)
-
-			// Get container ID for the service
-			findCmd := fmt.Sprintf("docker ps --filter name=%s --format '{{.Names}}' | head -1", serviceName)
-			output, err := client.Execute(findCmd)
-			if err != nil {
-				return fmt.Errorf("failed to find container for service %s: %w", execService, err)
-			}
-
-			containerName = strings.TrimSpace(output)
-			if containerName == "" {
-				return fmt.Errorf("no running container found for service %s", execService)
-			}
-		} else {
-			// Single-server mode: use standard naming
-			containerName = fmt.Sprintf("%s_%s_%s_1", cfg.Project.Name, envName, execService)
-		}
+		containerName = fmt.Sprintf("%s_%s_%s_1", cfg.Project.Name, envName, execService)
 	}
 
 	if verbose {

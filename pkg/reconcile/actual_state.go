@@ -19,110 +19,43 @@ func GatherActualState(
 	stateMgr *localstate.Manager,
 ) (map[string]*ActualService, error) {
 
-	// Check if using Swarm mode
-	swarmCheck, _ := client.Execute("docker info --format '{{.Swarm.LocalNodeState}}'")
-	isSwarm := strings.TrimSpace(swarmCheck) == "active"
-
-	if isSwarm {
-		// Gather from Swarm services
-		return gatherSwarmState(client, projectName, environment, stateMgr)
-	} else {
-		// Gather from standalone containers
-		return gatherContainerState(client, projectName, environment, stateMgr)
-	}
+	return gatherContainerState(client, projectName, environment, stateMgr)
 }
 
-// gatherSwarmState collects state from Docker Swarm services
-func gatherSwarmState(
-	client *ssh.Client,
-	projectName string,
+// GatherActualStateFromServers collects takod container state from every
+// selected node and aggregates replicas by service.
+func GatherActualStateFromServers(
+	sshPool *ssh.Pool,
+	cfg *config.Config,
 	environment string,
+	serverNames []string,
 	stateMgr *localstate.Manager,
 ) (map[string]*ActualService, error) {
-
 	actualServices := make(map[string]*ActualService)
 
-	// List all swarm services for this project
-	// Service naming: {project}_{env}_{service}
-	prefix := fmt.Sprintf("%s_%s_", projectName, environment)
-
-	output, err := client.Execute("docker service ls --format '{{.Name}}|{{.Replicas}}|{{.Image}}'")
-	if err != nil {
-		// If error is just "no services", return empty map (not an error)
-		if strings.Contains(err.Error(), "No such") || strings.Contains(output, "Nothing found") {
-			return actualServices, nil
-		}
-		return nil, fmt.Errorf("failed to list swarm services: %w", err)
-	}
-
-	// Handle empty output (no services running)
-	output = strings.TrimSpace(output)
-	if output == "" {
-		return actualServices, nil
-	}
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+	for _, serverName := range serverNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return nil, fmt.Errorf("server %s not found", serverName)
 		}
 
-		parts := strings.Split(line, "|")
-		if len(parts) < 3 {
-			continue
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to %s: %w", serverName, err)
 		}
 
-		fullServiceName := parts[0]
-		replicasStr := parts[1]
-		image := parts[2]
-
-		// Only process services from our project/environment
-		if !strings.HasPrefix(fullServiceName, prefix) {
-			continue
+		nodeState, err := GatherActualState(client, cfg.Project.Name, environment, stateMgr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to gather actual state from %s: %w", serverName, err)
 		}
 
-		// Extract service name (remove prefix)
-		serviceName := strings.TrimPrefix(fullServiceName, prefix)
-
-		// Parse replicas (format: "2/2" or "1/3")
-		var running, desired int
-		fmt.Sscanf(replicasStr, "%d/%d", &running, &desired)
-
-		// Get last deployed config from state (for better change detection)
-		var configSnapshot *config.ServiceConfig
-		if stateMgr != nil {
-			deployment, err := stateMgr.GetCurrentDeployment()
-			if err == nil && deployment != nil && deployment.Services != nil {
-				if svcDeploy, exists := deployment.Services[serviceName]; exists && svcDeploy != nil {
-					// Reconstruct config from deployment state
-					configSnapshot = &config.ServiceConfig{
-						Image:    svcDeploy.Image,
-						Replicas: svcDeploy.Replicas,
-						Port:     0, // Will be populated if available
-					}
-					if len(svcDeploy.Ports) > 0 {
-						configSnapshot.Port = svcDeploy.Ports[0]
-					}
-					// Note: Env vars and other fields may not be stored in state
-				}
+		for serviceName, serviceState := range nodeState {
+			if existing, ok := actualServices[serviceName]; ok {
+				existing.Replicas += serviceState.Replicas
+				existing.Containers = append(existing.Containers, serviceState.Containers...)
+				continue
 			}
-		}
-
-		// If no snapshot from state, create basic one from runtime info
-		if configSnapshot == nil {
-			configSnapshot = &config.ServiceConfig{
-				Image:    image,
-				Replicas: desired,
-			}
-		}
-
-		actualServices[serviceName] = &ActualService{
-			Name:           serviceName,
-			Image:          image,
-			Replicas:       desired,
-			Containers:     []string{}, // TODO: Get container IDs
-			ConfigSnapshot: configSnapshot,
+			actualServices[serviceName] = serviceState
 		}
 	}
 
@@ -226,32 +159,6 @@ func gatherContainerState(
 	return actualServices, nil
 }
 
-// GetServiceInspectData retrieves detailed service information
-func GetServiceInspectData(client *ssh.Client, serviceName string, isSwarm bool) (map[string]interface{}, error) {
-	var cmd string
-	if isSwarm {
-		cmd = fmt.Sprintf("docker service inspect %s", serviceName)
-	} else {
-		cmd = fmt.Sprintf("docker inspect %s", serviceName)
-	}
-
-	output, err := client.Execute(cmd)
-	if err != nil {
-		return nil, err
-	}
-
-	var data []map[string]interface{}
-	if err := json.Unmarshal([]byte(output), &data); err != nil {
-		return nil, err
-	}
-
-	if len(data) == 0 {
-		return nil, fmt.Errorf("no data returned")
-	}
-
-	return data[0], nil
-}
-
 // ActualServiceDetails contains detailed actual state of a service
 type ActualServiceDetails struct {
 	Name     string
@@ -271,45 +178,44 @@ func GatherActualServiceDetails(client *ssh.Client, fullServiceName string) (*Ac
 		Labels:  make(map[string]string),
 	}
 
-	// Get service inspect data
-	cmd := fmt.Sprintf("docker service inspect %s --format '{{json .}}'", fullServiceName)
-	output, err := client.Execute(cmd)
+	containerCmd := fmt.Sprintf("docker ps --filter 'name=%s_' --format '{{.Names}}'", fullServiceName)
+	containersOutput, err := client.Execute(containerCmd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to inspect service: %w", err)
+		return nil, fmt.Errorf("failed to list service containers: %w", err)
 	}
+	containers := strings.Fields(strings.TrimSpace(containersOutput))
+	if len(containers) == 0 {
+		return nil, fmt.Errorf("no running containers found for %s", fullServiceName)
+	}
+	details.Replicas = len(containers)
 
 	var serviceData struct {
-		Spec struct {
-			Mode struct {
-				Replicated struct {
-					Replicas int `json:"Replicas"`
-				} `json:"Replicated"`
-			} `json:"Mode"`
-			TaskTemplate struct {
-				ContainerSpec struct {
-					Image  string   `json:"Image"`
-					Env    []string `json:"Env"`
-					Mounts []struct {
-						Type   string `json:"Type"`
-						Source string `json:"Source"`
-						Target string `json:"Target"`
-					} `json:"Mounts"`
-				} `json:"ContainerSpec"`
-			} `json:"TaskTemplate"`
+		Config struct {
+			Image  string            `json:"Image"`
+			Env    []string          `json:"Env"`
 			Labels map[string]string `json:"Labels"`
-		} `json:"Spec"`
+		} `json:"Config"`
+		Mounts []struct {
+			Type   string `json:"Type"`
+			Source string `json:"Source"`
+			Target string `json:"Destination"`
+		} `json:"Mounts"`
+	}
+
+	output, err := client.Execute(fmt.Sprintf("docker inspect %s --format '{{json .}}'", containers[0]))
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect container: %w", err)
 	}
 
 	if err := json.Unmarshal([]byte(output), &serviceData); err != nil {
-		return nil, fmt.Errorf("failed to parse service data: %w", err)
+		return nil, fmt.Errorf("failed to parse container data: %w", err)
 	}
 
-	details.Image = serviceData.Spec.TaskTemplate.ContainerSpec.Image
-	details.Replicas = serviceData.Spec.Mode.Replicated.Replicas
-	details.Labels = serviceData.Spec.Labels
+	details.Image = serviceData.Config.Image
+	details.Labels = serviceData.Config.Labels
 
 	// Parse environment variables
-	for _, envVar := range serviceData.Spec.TaskTemplate.ContainerSpec.Env {
+	for _, envVar := range serviceData.Config.Env {
 		parts := strings.SplitN(envVar, "=", 2)
 		if len(parts) == 2 {
 			details.Env[parts[0]] = parts[1]
@@ -317,7 +223,7 @@ func GatherActualServiceDetails(client *ssh.Client, fullServiceName string) (*Ac
 	}
 
 	// Extract mount targets
-	for _, mount := range serviceData.Spec.TaskTemplate.ContainerSpec.Mounts {
+	for _, mount := range serviceData.Mounts {
 		details.Volumes = append(details.Volumes, mount.Target)
 	}
 
