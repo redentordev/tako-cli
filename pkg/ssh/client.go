@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -310,7 +311,7 @@ func (c *Client) Connect() error {
 		return nil // Already connected
 	}
 
-	addr := fmt.Sprintf("%s:%d", c.host, c.port)
+	addr := net.JoinHostPort(c.host, strconv.Itoa(c.port))
 
 	// Retry connection with exponential backoff
 	maxRetries := 3

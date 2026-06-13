@@ -514,6 +514,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	deploymentFailed := false
 	var deploymentError error
+	imageRefs := defaultImageRefs(cfg, envName, services)
 
 	// Resolve service deployment order based on dependencies
 	resolver := dependency.NewResolver(services, verbose)
@@ -554,6 +555,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			// Use pre-built image
 			fullImageName = service.Image
 		}
+		imageRefs[serviceName] = fullImageName
 
 		if err := deploy.DeployServiceTakod(serviceName, &service, fullImageName); err != nil {
 			fmt.Printf("  ✗ takod deployment failed: %v\n", err)
@@ -572,7 +574,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			Image:    fullImageName,
 			Port:     service.Port,
 			Replicas: service.Replicas,
-			Env:      service.Env,
+			Env:      redactedEnvKeys(service.Env),
 		}
 	}
 
@@ -581,6 +583,30 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		deployment.Duration = time.Since(startTime)
 		if err := stateManager.SaveDeployment(deployment); err != nil && verbose {
 			fmt.Printf("Warning: failed to save remote deployment state: %v\n", err)
+		}
+
+		postDeployActualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, localStateMgr)
+		if err != nil {
+			return fmt.Errorf("deployment succeeded but failed to gather post-deploy actual state: %w", err)
+		}
+		if err := persistTakodRuntimeState(
+			sshPool,
+			cfg,
+			envName,
+			serverNames,
+			"deploy",
+			services,
+			imageRefs,
+			postDeployActualState,
+			gitInfoFromCommit(commitInfo),
+			"deploy.succeeded",
+			fmt.Sprintf("deployed %d service(s)", len(services)),
+			map[string]string{
+				"commit":   commitInfo.ShortHash,
+				"services": fmt.Sprintf("%d", len(services)),
+			},
+		); err != nil {
+			return fmt.Errorf("deployment succeeded but failed to persist takod state: %w", err)
 		}
 
 		// Replicate state to the rest of the mesh (async, fire-and-forget).

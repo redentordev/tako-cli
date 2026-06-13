@@ -6,11 +6,13 @@ import (
 	"strconv"
 	"strings"
 
+	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 	"github.com/spf13/cobra"
 )
 
@@ -101,6 +103,20 @@ func runScale(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to connect to node %s: %w", firstServerName, err)
 	}
 
+	stateManager := remotestate.NewStateManager(firstClient, cfg.Project.Name, firstServer.Host)
+	lease, err := stateManager.AcquireLease("scale", envName, remotestate.DefaultLeaseTTL)
+	if err != nil {
+		return fmt.Errorf("cannot acquire remote scale lease: %w", err)
+	}
+	defer func() {
+		if err := stateManager.ReleaseLease(lease); err != nil && verbose {
+			fmt.Printf("Warning: failed to release remote scale lease: %v\n", err)
+		}
+	}()
+	if verbose {
+		fmt.Printf("→ Acquired remote scale lease on %s (ID: %s)\n", firstServerName, lease.ID)
+	}
+
 	deploy := deployer.NewDeployerWithPool(firstClient, cfg, envName, sshPool, verbose)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return err
@@ -115,6 +131,8 @@ func runScale(cmd *cobra.Command, args []string) error {
 	}
 
 	notifier := scaleNotifier(cfg)
+	desiredServices := cloneServiceMap(services)
+	imageRefs := defaultImageRefs(cfg, envName, desiredServices)
 	totalErrors := 0
 	for serviceName, desiredReplicas := range scaleTargets {
 		currentReplicas := 0
@@ -143,6 +161,8 @@ func runScale(cmd *cobra.Command, args []string) error {
 			totalErrors++
 			continue
 		}
+		desiredServices[serviceName] = service
+		imageRefs[serviceName] = imageRef
 
 		fmt.Printf("  ✓ Service %s scaled\n", serviceName)
 		if notifier != nil && currentReplicas != desiredReplicas {
@@ -154,8 +174,37 @@ func runScale(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("scaling completed with %d error(s)", totalErrors)
 	}
 
+	postScaleActualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, nil)
+	if err != nil {
+		return fmt.Errorf("scale succeeded but failed to gather post-scale actual state: %w", err)
+	}
+	if err := persistTakodRuntimeState(
+		sshPool,
+		cfg,
+		envName,
+		serverNames,
+		"scale",
+		desiredServices,
+		imageRefs,
+		postScaleActualState,
+		takodstate.GitInfo{},
+		"scale.succeeded",
+		fmt.Sprintf("scaled %d service(s)", len(scaleTargets)),
+		scaleEventDetails(scaleTargets),
+	); err != nil {
+		return fmt.Errorf("scale succeeded but failed to persist takod state: %w", err)
+	}
+
 	fmt.Println("\nAll services scaled successfully.")
 	return nil
+}
+
+func scaleEventDetails(targets map[string]int) map[string]string {
+	details := make(map[string]string, len(targets))
+	for serviceName, replicas := range targets {
+		details[serviceName] = fmt.Sprintf("%d", replicas)
+	}
+	return details
 }
 
 func scaleTargetServers(cfg *config.Config, envName string) ([]string, error) {

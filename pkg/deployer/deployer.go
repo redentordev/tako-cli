@@ -232,9 +232,6 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 	if serviceState.Port > 0 {
 		rollbackService.Port = serviceState.Port
 	}
-	if serviceState.Env != nil {
-		rollbackService.Env = serviceState.Env
-	}
 
 	return d.DeployServiceTakod(serviceName, &rollbackService, serviceState.Image)
 }

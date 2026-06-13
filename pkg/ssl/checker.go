@@ -113,7 +113,7 @@ func (c *DNSChecker) WaitForDNSPropagation(ctx context.Context, domain, expected
 func CheckPort53Accessible(serverIP string) error {
 	// Try TCP connection to port 53
 	// TCP is more reliable for connectivity testing since it's connection-oriented
-	conn, err := net.DialTimeout("tcp", serverIP+":53", 5*time.Second)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(serverIP, "53"), 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("port 53 (TCP) is not accessible: %w", err)
 	}
