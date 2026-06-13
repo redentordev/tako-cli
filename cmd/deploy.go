@@ -691,9 +691,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	// Monitor SSL certificate provisioning if there are public services
-	if hasPublicServices && firstClient != nil {
+	if hasPublicServices {
 		fmt.Printf("\n")
-		healthChecker := health.NewHealthChecker(firstClient)
+		healthChecker := health.NewHealthChecker()
 
 		for _, svc := range servicesWithProxy {
 			for _, domain := range svc.domains {
