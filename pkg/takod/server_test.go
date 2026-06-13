@@ -568,3 +568,39 @@ func TestHandleMeshStatusRequiresInterface(t *testing.T) {
 		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
 }
+
+func TestHandleImageExistsRequiresGet(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/exists?image=demo/web:abc", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleImageExists(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleImageExportRequiresImage(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/images/export", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleImageExport(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleImageImportRequiresPost(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/images/import?image=demo/web:abc", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleImageImport(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
