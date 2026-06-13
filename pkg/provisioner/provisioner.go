@@ -10,6 +10,8 @@ import (
 	"github.com/redentordev/tako-cli/pkg/utils"
 )
 
+const takodAccessGroup = "tako"
+
 // Provisioner handles server provisioning
 type Provisioner struct {
 	client  *ssh.Client
@@ -235,6 +237,9 @@ func (p *Provisioner) InstallTakodService(socket string, dataDir string) error {
 	if dataDir, err = systemdPathArg(dataDir, "/var/lib/tako"); err != nil {
 		return fmt.Errorf("invalid takod data directory: %w", err)
 	}
+	if err := p.ensureTakodAccessGroup(); err != nil {
+		return err
+	}
 
 	unit := buildTakodSystemdUnit(binaryPath, socket, dataDir)
 
@@ -266,7 +271,7 @@ Requires=docker.service
 [Service]
 Type=simple
 User=root
-Group=docker
+Group=%s
 RuntimeDirectory=tako
 RuntimeDirectoryMode=0770
 UMask=0007
@@ -276,7 +281,26 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, binaryPath, socket, dataDir)
+`, takodAccessGroup, binaryPath, socket, dataDir)
+}
+
+func (p *Provisioner) ensureTakodAccessGroup() error {
+	script := fmt.Sprintf(`set -eu
+if ! getent group %[1]s >/dev/null 2>&1; then
+  if command -v groupadd >/dev/null 2>&1; then
+    groupadd --system %[1]s 2>/dev/null || groupadd -r %[1]s 2>/dev/null || groupadd %[1]s
+  elif command -v addgroup >/dev/null 2>&1; then
+    addgroup -S %[1]s 2>/dev/null || addgroup --system %[1]s 2>/dev/null || addgroup %[1]s
+  else
+    echo "groupadd or addgroup is required to create the takod access group" >&2
+    exit 1
+  fi
+fi
+`, takodAccessGroup)
+	if _, err := p.client.Execute(runRootScript(script)); err != nil {
+		return fmt.Errorf("failed to ensure takod access group: %w", err)
+	}
+	return nil
 }
 
 func (p *Provisioner) detectLinuxArch() (string, error) {
@@ -561,6 +585,9 @@ func (p *Provisioner) SetupDeployUser(username string) error {
 	if !utils.IsValidUnixUsername(username) {
 		return fmt.Errorf("invalid username %q: must be a valid POSIX username", username)
 	}
+	if err := p.ensureTakodAccessGroup(); err != nil {
+		return err
+	}
 
 	// Check if user exists
 	output, err := p.client.Execute(fmt.Sprintf("id -u %s", username))
@@ -568,8 +595,6 @@ func (p *Provisioner) SetupDeployUser(username string) error {
 		// User doesn't exist, create it
 		commands := []string{
 			fmt.Sprintf("sudo useradd -m -s /bin/bash %s", username),
-			fmt.Sprintf("sudo usermod -aG docker %s", username),
-			fmt.Sprintf("sudo usermod -aG sudo %s", username),
 		}
 
 		for _, cmd := range commands {
@@ -589,37 +614,12 @@ func (p *Provisioner) SetupDeployUser(username string) error {
 		}
 	}
 
-	// Ensure user is in docker group
-	p.client.Execute(fmt.Sprintf("sudo usermod -aG docker %s", username))
-
-	// Configure passwordless sudo for the deploy user
-	// This is required for Tako to run commands like NFS setup, firewall config, etc.
+	// Runtime access is mediated by takod's Unix socket, not broad sudo or Docker group membership.
 	if username != "root" {
-		if p.verbose {
-			fmt.Printf("  Configuring passwordless sudo for %s...\n", username)
+		if _, err := p.client.Execute(fmt.Sprintf("sudo usermod -aG %s %s", takodAccessGroup, username)); err != nil {
+			return fmt.Errorf("failed to grant takod socket access to %s: %w", username, err)
 		}
-
-		// Create sudoers file for the user with proper permissions
-		sudoersContent := fmt.Sprintf("%s ALL=(ALL) NOPASSWD: ALL", username)
-		sudoersFile := fmt.Sprintf("/etc/sudoers.d/tako-%s", username)
-
-		// Write sudoers file with correct permissions (must be 0440)
-		sudoersCmd := fmt.Sprintf("echo '%s' | sudo tee %s > /dev/null && sudo chmod 0440 %s", sudoersContent, sudoersFile, sudoersFile)
-		if _, err := p.client.Execute(sudoersCmd); err != nil {
-			if p.verbose {
-				fmt.Printf("  Warning: Failed to configure passwordless sudo: %v\n", err)
-			}
-		}
-
-		// Validate the sudoers file
-		validateCmd := fmt.Sprintf("sudo visudo -cf %s", sudoersFile)
-		if _, err := p.client.Execute(validateCmd); err != nil {
-			// If validation fails, remove the invalid file
-			p.client.Execute(fmt.Sprintf("sudo rm -f %s", sudoersFile))
-			if p.verbose {
-				fmt.Printf("  Warning: Sudoers validation failed, removed invalid file\n")
-			}
-		}
+		_, _ = p.client.Execute(fmt.Sprintf("sudo rm -f /etc/sudoers.d/tako-%s", username))
 	}
 
 	return nil
