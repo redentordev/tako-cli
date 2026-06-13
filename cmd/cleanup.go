@@ -3,9 +3,9 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/redentordev/tako-cli/pkg/cleanup"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
 
@@ -110,18 +110,17 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Create cleaner
-		cleaner := cleanup.NewCleaner(client, cfg.Project.Name, verbose)
-
-		// Secure log permissions if requested
-		if cleanupSecure {
-			if err := cleaner.SecureLogPermissions(); err != nil {
-				fmt.Printf("⚠️  Warning: Failed to secure log permissions: %v\n", err)
-			}
-		}
-
-		// Perform cleanup
-		result, err := cleaner.FullCleanup(keepImages)
+		response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
+			Project:                cfg.Project.Name,
+			KeepImages:             keepImages,
+			CleanOldImages:         true,
+			CleanStoppedContainers: true,
+			CleanDanglingImages:    true,
+			CleanBuildCache:        true,
+			CleanUnusedVolumes:     true,
+			SecureLogPermissions:   cleanupSecure,
+			PruneDocker:            cleanupFull,
+		})
 		if err != nil {
 			fmt.Printf("❌ Cleanup failed: %v\n\n", err)
 			totalErrors++
@@ -129,9 +128,20 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Check for errors in result
-		if len(result.Errors) > 0 {
-			totalErrors += len(result.Errors)
+		if len(response.Warnings) > 0 {
+			totalErrors += len(response.Warnings)
+			printCleanupWarnings(response)
+		}
+		if verbose {
+			if response.InitialDiskUsage != "" {
+				fmt.Printf("  Disk before: %s\n", response.InitialDiskUsage)
+			}
+			if response.FinalDiskUsage != "" {
+				fmt.Printf("  Disk after:  %s\n", response.FinalDiskUsage)
+			}
+			if response.ImagesRemoved > 0 || response.ContainersRemoved > 0 {
+				fmt.Printf("  Removed %d image(s), %d stopped container(s)\n", response.ImagesRemoved, response.ContainersRemoved)
+			}
 		}
 
 		fmt.Printf("✓ Server %s cleaned successfully\n\n", serverName)

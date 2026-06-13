@@ -8,7 +8,6 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/acmedns"
-	"github.com/redentordev/tako-cli/pkg/cleanup"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/dependency"
 	"github.com/redentordev/tako-cli/pkg/deployer"
@@ -21,6 +20,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/ssl"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
 
@@ -693,12 +693,19 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	for serverName, server := range servers {
 		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err == nil {
-			cleaner := cleanup.NewCleaner(client, cfg.Project.Name, verbose)
-			// Keep 3 latest images, clean stopped containers and dangling images
-			cleaner.CleanOldImages(3)
-			cleaner.CleanStoppedContainers()
-			cleaner.CleanDanglingImages()
-			if verbose {
+			response, cleanupErr := cleanupViaTakod(client, cfg, takod.CleanupRequest{
+				Project:                cfg.Project.Name,
+				KeepImages:             3,
+				CleanOldImages:         true,
+				CleanStoppedContainers: true,
+				CleanDanglingImages:    true,
+			})
+			if cleanupErr != nil && verbose {
+				fmt.Printf("  Warning: failed to clean %s: %v\n", serverName, cleanupErr)
+				continue
+			}
+			if cleanupErr == nil && verbose {
+				printCleanupWarnings(response)
 				fmt.Printf("  ✓ Cleaned up %s\n", serverName)
 			}
 		}
