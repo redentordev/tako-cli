@@ -20,6 +20,8 @@ import (
 
 var envForce bool
 
+const envPassphraseVar = "TAKO_ENV_PASSPHRASE"
+
 var envCmd = &cobra.Command{
 	Use:   "env",
 	Short: "Manage environment credentials on remote servers",
@@ -31,7 +33,9 @@ encrypted with a passphrase using Argon2id + AES-256-GCM before upload.
 Examples:
   tako env push              # Encrypt and upload .env + secrets
   tako env pull              # Download and decrypt to local
-  tako env pull --force      # Overwrite existing local files`,
+  tako env pull --force      # Overwrite existing local files
+
+For CI, set TAKO_ENV_PASSPHRASE to avoid interactive prompts.`,
 }
 
 var envPushCmd = &cobra.Command{
@@ -232,6 +236,10 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 
 	// Write files
 	for path, encodedContent := range bundle {
+		if !isAllowedEnvBundlePath(path) {
+			fmt.Printf("Warning: skipping unsupported bundle path: %s\n", path)
+			continue
+		}
 		content, err := base64.StdEncoding.DecodeString(encodedContent)
 		if err != nil {
 			fmt.Printf("Warning: failed to decode %s: %v\n", path, err)
@@ -260,6 +268,13 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 
 // promptPassphrase reads a passphrase from the terminal without echo
 func promptPassphrase(prompt string) (string, error) {
+	if passphrase, ok, err := passphraseFromEnv(); ok || err != nil {
+		return passphrase, err
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return "", fmt.Errorf("passphrase prompt requires a terminal; set %s for non-interactive use", envPassphraseVar)
+	}
+
 	fmt.Print(prompt)
 	passBytes, err := term.ReadPassword(int(syscall.Stdin))
 	fmt.Println() // newline after hidden input
@@ -268,8 +283,8 @@ func promptPassphrase(prompt string) (string, error) {
 	}
 
 	passphrase := string(passBytes)
-	if len(passphrase) < 8 {
-		return "", fmt.Errorf("passphrase must be at least 8 characters")
+	if err := validateEnvPassphrase(passphrase); err != nil {
+		return "", err
 	}
 
 	return passphrase, nil
@@ -277,6 +292,10 @@ func promptPassphrase(prompt string) (string, error) {
 
 // promptPassphraseConfirm prompts for a passphrase with confirmation
 func promptPassphraseConfirm() (string, error) {
+	if passphrase, ok, err := passphraseFromEnv(); ok || err != nil {
+		return passphrase, err
+	}
+
 	passphrase, err := promptPassphrase("Enter passphrase for encryption: ")
 	if err != nil {
 		return "", err
@@ -292,4 +311,36 @@ func promptPassphraseConfirm() (string, error) {
 	}
 
 	return passphrase, nil
+}
+
+func passphraseFromEnv() (string, bool, error) {
+	passphrase := os.Getenv(envPassphraseVar)
+	if passphrase == "" {
+		return "", false, nil
+	}
+	if err := validateEnvPassphrase(passphrase); err != nil {
+		return "", true, fmt.Errorf("%s: %w", envPassphraseVar, err)
+	}
+	return passphrase, true, nil
+}
+
+func validateEnvPassphrase(passphrase string) error {
+	if len(passphrase) < 8 {
+		return fmt.Errorf("passphrase must be at least 8 characters")
+	}
+	return nil
+}
+
+func isAllowedEnvBundlePath(path string) bool {
+	if path == "" || filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return false
+	}
+	if path == ".env" {
+		return true
+	}
+	if filepath.Dir(path) != ".tako" {
+		return false
+	}
+	name := filepath.Base(path)
+	return name == "secrets" || strings.HasPrefix(name, "secrets.")
 }

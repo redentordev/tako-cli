@@ -7,13 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
 var (
 	dockerCommandContext = exec.CommandContext
-	shellCommandContext  = exec.CommandContext
 )
 
 type ReconcileServiceRequest struct {
@@ -32,7 +32,6 @@ type ReconcileServiceRequest struct {
 	Containers     []ContainerSpec   `json:"containers"`
 	Health         *HealthSpec       `json:"health,omitempty"`
 	Command        string            `json:"command,omitempty"`
-	Init           []string          `json:"init,omitempty"`
 }
 
 type ContainerSpec struct {
@@ -67,9 +66,6 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		req.NetworkAlias = req.Service
 	}
 
-	if err := runInitCommands(ctx, req.Init); err != nil {
-		return nil, err
-	}
 	if err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service); err != nil {
 		return nil, err
 	}
@@ -127,6 +123,27 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 			return fmt.Errorf("%s is required", label)
 		}
 	}
+	if !isSafeProjectName(req.Project) {
+		return fmt.Errorf("invalid project name")
+	}
+	if !isSafeRuntimeName(req.Environment) {
+		return fmt.Errorf("invalid environment name")
+	}
+	if !isSafeServiceName(req.Service) {
+		return fmt.Errorf("invalid service name")
+	}
+	if err := validateImageName(req.Image); err != nil {
+		return err
+	}
+	if !isSafeRuntimeName(req.Network) {
+		return fmt.Errorf("invalid network name")
+	}
+	if req.NetworkAlias != "" && !isSafeRuntimeName(req.NetworkAlias) {
+		return fmt.Errorf("invalid network alias")
+	}
+	if !isSafeRestartPolicy(req.Restart) {
+		return fmt.Errorf("invalid restart policy")
+	}
 	if req.EnvFile != "" && !strings.HasPrefix(req.EnvFile, "/") {
 		return fmt.Errorf("envFile must be an absolute path")
 	}
@@ -137,26 +154,73 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 		return fmt.Errorf("envFileContent exceeds 1 MiB")
 	}
 	for _, container := range req.Containers {
-		if strings.TrimSpace(container.Name) == "" {
-			return fmt.Errorf("container name is required")
+		if !isSafeContainerName(container.Name) {
+			return fmt.Errorf("invalid container name")
+		}
+		for _, publish := range container.Publishes {
+			if hasControlChars(publish) {
+				return fmt.Errorf("invalid publish value")
+			}
 		}
 	}
-	for _, command := range req.Init {
-		if strings.TrimSpace(command) == "" {
-			return fmt.Errorf("init command cannot be empty")
+	for _, mount := range req.Mounts {
+		if strings.TrimSpace(mount) == "" || hasControlChars(mount) {
+			return fmt.Errorf("invalid mount value")
 		}
+	}
+	if req.Command != "" && strings.ContainsRune(req.Command, '\x00') {
+		return fmt.Errorf("command contains unsupported characters")
 	}
 	return nil
 }
 
-func runInitCommands(ctx context.Context, commands []string) error {
-	for _, command := range commands {
-		output, err := runShell(ctx, command)
-		if err != nil {
-			return fmt.Errorf("init command failed: %w, output: %s", err, output)
-		}
+func isSafeServiceName(name string) bool {
+	if len(name) == 0 || len(name) > 63 || name[0] < 'a' || name[0] > 'z' {
+		return false
 	}
-	return nil
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isSafeContainerName(name string) bool {
+	if len(name) == 0 || len(name) > 128 {
+		return false
+	}
+	first := name[0]
+	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || (first >= '0' && first <= '9')) {
+		return false
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isSafeRestartPolicy(value string) bool {
+	if value == "" {
+		return true
+	}
+	switch value {
+	case "no", "always", "unless-stopped", "on-failure":
+		return true
+	}
+	if !strings.HasPrefix(value, "on-failure:") {
+		return false
+	}
+	retries, err := strconv.Atoi(strings.TrimPrefix(value, "on-failure:"))
+	return err == nil && retries >= 0 && retries <= 100
+}
+
+func hasControlChars(value string) bool {
+	return strings.ContainsAny(value, "\x00\r\n")
 }
 
 func prepareServiceEnvFile(req *ReconcileServiceRequest) (func(), error) {
@@ -354,15 +418,6 @@ func waitForContainerHealthy(ctx context.Context, containerName string, health *
 
 func runDocker(ctx context.Context, args ...string) (string, error) {
 	cmd := dockerCommandContext(ctx, "docker", args...)
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	err := cmd.Run()
-	return output.String(), err
-}
-
-func runShell(ctx context.Context, command string) (string, error) {
-	cmd := shellCommandContext(ctx, "sh", "-c", command)
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output

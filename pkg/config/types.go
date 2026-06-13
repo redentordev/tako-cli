@@ -194,9 +194,6 @@ type ServiceConfig struct {
 
 	// Service dependencies (controls deployment order)
 	DependsOn []string `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"` // List of service names this service depends on
-
-	// Init commands (run before service starts, useful for permissions)
-	Init []string `yaml:"init,omitempty" json:"init,omitempty"` // Commands to run before service starts (e.g., chown, chmod)
 }
 
 // HealthCheckConfig defines health check settings

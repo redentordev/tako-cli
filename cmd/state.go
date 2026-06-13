@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -42,7 +43,7 @@ This is useful when:
 The command will:
   1. Connect to the remote server
   2. Read deployment history from takod state
-  3. Sync state to local .tako directory`,
+  3. Refresh local deployment records in .tako without touching local secrets`,
 	RunE: runStatePull,
 }
 
@@ -60,17 +61,13 @@ Displays:
 	RunE: runStateStatus,
 }
 
-var (
-	stateForce  bool
-	stateServer string
-)
+var stateServer string
 
 func init() {
 	rootCmd.AddCommand(stateCmd)
 	stateCmd.AddCommand(statePullCmd)
 	stateCmd.AddCommand(stateStatusCmd)
 
-	statePullCmd.Flags().BoolVarP(&stateForce, "force", "f", false, "Overwrite local state even if it exists")
 	statePullCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Pull state from specific server")
 
 	stateStatusCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Check status for specific server")
@@ -84,20 +81,6 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 	}
 
 	envName := getEnvironmentName(cfg)
-
-	// Check if local state exists
-	localPath := ".tako"
-	localExists := false
-	if _, err := os.Stat(localPath); err == nil {
-		localExists = true
-	}
-
-	if localExists && !stateForce {
-		fmt.Println("Local state already exists in .tako/")
-		fmt.Println("Use --force to overwrite local state")
-		fmt.Println("\nRun 'tako state status' to compare local and remote state")
-		return nil
-	}
 
 	firstServerName, firstServer, err := resolveStateServer(cfg, envName, stateServer)
 	if err != nil {
@@ -145,9 +128,8 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 				// Now sync to local
 				localMgr, lErr := localstate.NewManager(".", cfg.Project.Name, envName)
 				if lErr == nil {
-					for _, dep := range history.Deployments {
-						localDep := convertRemoteToLocal(dep, envName)
-						localMgr.SaveDeployment(localDep)
+					if _, syncErr := syncRemoteDeploymentsToLocal(localMgr, history.Deployments, envName); syncErr != nil {
+						return fmt.Errorf("failed to sync recovered state locally: %w", syncErr)
 					}
 				}
 
@@ -192,20 +174,9 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Found %d deployment(s) in remote state\n\n", len(remoteDeployments))
 
-	// Sync each deployment to local state
-	synced := 0
-	for _, remoteDep := range remoteDeployments {
-		// Convert remote deployment to local format
-		localDep := convertRemoteToLocal(remoteDep, envName)
-
-		// Save to local state
-		if err := localMgr.SaveDeployment(localDep); err != nil {
-			if verbose {
-				fmt.Printf("Warning: failed to save deployment %s: %v\n", remoteDep.ID, err)
-			}
-			continue
-		}
-		synced++
+	synced, err := syncRemoteDeploymentsToLocal(localMgr, remoteDeployments, envName)
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
@@ -336,7 +307,7 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("Run 'tako state pull' to sync from remote server.")
 	} else {
 		fmt.Println("Local state exists.")
-		fmt.Println("Run 'tako state pull --force' to overwrite with remote state.")
+		fmt.Println("Run 'tako state pull' to refresh local deployment records from remote state.")
 	}
 
 	return nil
@@ -568,6 +539,38 @@ func boolToHealth(healthy bool) string {
 	return "unknown"
 }
 
+func syncRemoteDeploymentsToLocal(localMgr *localstate.Manager, remoteDeployments []*remotestate.DeploymentState, envName string) (int, error) {
+	ordered := append([]*remotestate.DeploymentState(nil), remoteDeployments...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i] == nil {
+			return false
+		}
+		if ordered[j] == nil {
+			return true
+		}
+		return ordered[i].Timestamp.Before(ordered[j].Timestamp)
+	})
+
+	synced := 0
+	for _, remoteDep := range ordered {
+		if remoteDep == nil {
+			continue
+		}
+		localDep := convertRemoteToLocal(remoteDep, envName)
+		if err := localMgr.SaveDeployment(localDep); err != nil {
+			return synced, fmt.Errorf("failed to save deployment %s: %w", remoteDep.ID, err)
+		}
+		synced++
+	}
+	return synced, nil
+}
+
+func localDeploymentStateExists(envName string) bool {
+	currentPath := filepath.Join(".tako", "deployments", envName, "current.json")
+	info, err := os.Stat(currentPath)
+	return err == nil && !info.IsDir()
+}
+
 func formatStateDuration(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", int(d.Seconds()))
@@ -589,14 +592,11 @@ func min(a, b int) int {
 	return b
 }
 
-// SyncStateOnDeploy attempts to sync state when local state is missing
-// This is called automatically during deploy when .tako doesn't exist
+// SyncStateOnDeploy attempts to sync state when local deployment state is missing.
+// This is called automatically during deploy when the local cache has no current deployment.
 func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) error {
-	localPath := ".tako"
-
-	// Check if local state already exists
-	if _, err := os.Stat(localPath); err == nil {
-		return nil // Local state exists, no sync needed
+	if localDeploymentStateExists(envName) {
+		return nil // Local deployment cache exists, no sync needed
 	}
 
 	if verbose {
@@ -627,9 +627,8 @@ func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) e
 				// Sync to local
 				localMgr, lErr := localstate.NewManager(".", cfg.Project.Name, envName)
 				if lErr == nil {
-					for _, dep := range history.Deployments {
-						localDep := convertRemoteToLocal(dep, envName)
-						localMgr.SaveDeployment(localDep)
+					if _, syncErr := syncRemoteDeploymentsToLocal(localMgr, history.Deployments, envName); syncErr != nil && verbose {
+						fmt.Printf("Warning: failed to sync recovered state locally: %v\n", syncErr)
 					}
 				}
 
@@ -654,9 +653,8 @@ func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) e
 	}
 
 	// Sync recent deployments
-	for _, remoteDep := range remoteDeployments {
-		localDep := convertRemoteToLocal(remoteDep, envName)
-		localMgr.SaveDeployment(localDep)
+	if _, err := syncRemoteDeploymentsToLocal(localMgr, remoteDeployments, envName); err != nil && verbose {
+		fmt.Printf("Warning: failed to sync remote state locally: %v\n", err)
 	}
 
 	if verbose {
