@@ -9,10 +9,11 @@ import (
 	"strings"
 	"syscall"
 
-	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/crypto"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -39,8 +40,8 @@ var envPushCmd = &cobra.Command{
 	Long: `Encrypt .env and .tako/secrets* files with a passphrase and upload
 the encrypted bundle to the remote server.
 
-The encrypted bundle is stored at /var/lib/tako-cli/<project>/env.enc
-on the server, protected by your passphrase.`,
+The encrypted bundle is stored in takod state on the selected node,
+protected by your passphrase.`,
 	RunE: runEnvPush,
 }
 
@@ -127,51 +128,21 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	}
 	defer client.Close()
 
-	// Upload via base64 encoding over SSH (same pattern as internal/state/manager.go)
-	remotePath := fmt.Sprintf("%s/%s/env.enc", remotestate.StateDir, cfg.Project.Name)
-	encoded := base64.StdEncoding.EncodeToString(encrypted)
-
-	// Ensure remote directory exists
-	mkdirCmd := fmt.Sprintf("sudo mkdir -p %s/%s", remotestate.StateDir, cfg.Project.Name)
-	if _, err := client.Execute(mkdirCmd); err != nil {
-		return fmt.Errorf("failed to create remote directory: %w", err)
+	request := takod.EnvBundleRequest{
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Content:     base64.StdEncoding.EncodeToString(encrypted),
+	}
+	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "PUT", "/v1/env-bundle", request)
+	if err != nil {
+		return fmt.Errorf("failed to upload environment bundle through takod: %w", err)
+	}
+	var response takod.EnvBundleResponse
+	if err := decodeTakodJSON(output, &response); err != nil {
+		return err
 	}
 
-	// Write in chunks if needed (shell has argument limits)
-	tmpFile := remotePath + ".tmp"
-	// Clear tmp file first
-	if _, err := client.Execute(fmt.Sprintf("sudo rm -f %s", tmpFile)); err != nil {
-		return fmt.Errorf("failed to prepare upload: %w", err)
-	}
-
-	// Upload in 64KB chunks
-	chunkSize := 65536
-	for i := 0; i < len(encoded); i += chunkSize {
-		end := i + chunkSize
-		if end > len(encoded) {
-			end = len(encoded)
-		}
-		chunk := encoded[i:end]
-
-		var writeCmd string
-		if i == 0 {
-			writeCmd = fmt.Sprintf("echo -n '%s' | sudo tee %s > /dev/null", chunk, tmpFile)
-		} else {
-			writeCmd = fmt.Sprintf("echo -n '%s' | sudo tee -a %s > /dev/null", chunk, tmpFile)
-		}
-		if _, err := client.Execute(writeCmd); err != nil {
-			return fmt.Errorf("failed to upload chunk: %w", err)
-		}
-	}
-
-	// Decode base64 on server and move atomically
-	decodeCmd := fmt.Sprintf("sudo bash -c 'base64 -d %s > %s.dec && mv %s.dec %s && rm -f %s && chmod 600 %s'",
-		tmpFile, tmpFile, tmpFile, remotePath, tmpFile, remotePath)
-	if _, err := client.Execute(decodeCmd); err != nil {
-		return fmt.Errorf("failed to finalize upload: %w", err)
-	}
-
-	fmt.Printf("Environment files pushed to %s on %s\n", remotePath, serverName)
+	fmt.Printf("Environment files pushed to takod state on %s\n", serverName)
 	fmt.Println("\nTo restore on another machine:")
 	fmt.Println("  tako env pull")
 	return nil
@@ -197,28 +168,28 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 	}
 	defer client.Close()
 
-	// Check if remote env bundle exists
-	remotePath := fmt.Sprintf("%s/%s/env.enc", remotestate.StateDir, cfg.Project.Name)
-	checkCmd := fmt.Sprintf("test -f %s && echo 'exists' || echo 'missing'", remotePath)
-	output, err := client.Execute(checkCmd)
+	output, err := takodclient.RequestJSON(
+		client,
+		takodSocketFromConfig(cfg),
+		"GET",
+		takodclient.EnvBundleEndpoint(cfg.Project.Name, envName),
+		nil,
+	)
 	if err != nil {
-		return fmt.Errorf("failed to check remote env: %w", err)
+		return fmt.Errorf("failed to download environment bundle through takod: %w", err)
 	}
 
-	if strings.TrimSpace(output) == "missing" {
+	var response takod.EnvBundleResponse
+	if err := decodeTakodJSON(output, &response); err != nil {
+		return err
+	}
+	if !response.Found {
 		fmt.Println("No environment bundle found on server.")
 		fmt.Println("Run 'tako env push' to upload environment files first.")
 		return nil
 	}
 
-	// Download encrypted bundle via base64
-	downloadCmd := fmt.Sprintf("sudo base64 %s", remotePath)
-	encoded, err := client.Execute(downloadCmd)
-	if err != nil {
-		return fmt.Errorf("failed to download env bundle: %w", err)
-	}
-
-	encrypted, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+	encrypted, err := base64.StdEncoding.DecodeString(strings.TrimSpace(response.Content))
 	if err != nil {
 		return fmt.Errorf("failed to decode downloaded bundle: %w", err)
 	}
