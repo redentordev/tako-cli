@@ -151,6 +151,10 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 }
 
 func collectStatePullHistories(cfg *config.Config, envName string, requestedServer string) ([]stateHistoryCandidate, error) {
+	return collectStateDeploymentHistories(cfg, envName, requestedServer, false)
+}
+
+func collectStateDeploymentHistories(cfg *config.Config, envName string, requestedServer string, quiet bool) ([]stateHistoryCandidate, error) {
 	serverNames, err := statePullServerNames(cfg, envName, requestedServer)
 	if err != nil {
 		return nil, err
@@ -159,10 +163,14 @@ func collectStatePullHistories(cfg *config.Config, envName string, requestedServ
 	histories := make([]stateHistoryCandidate, 0, len(serverNames))
 	for _, serverName := range serverNames {
 		server := cfg.Servers[serverName]
-		fmt.Printf("Checking %s (%s)...\n", serverName, server.Host)
+		if !quiet {
+			fmt.Printf("Checking %s (%s)...\n", serverName, server.Host)
+		}
 		client, err := connectAndVerifyStateServer(serverName, server)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: cannot read state from %s: %v\n", serverName, err)
+			if !quiet || verbose {
+				fmt.Fprintf(os.Stderr, "Warning: cannot read state from %s: %v\n", serverName, err)
+			}
 			continue
 		}
 
@@ -179,10 +187,12 @@ func collectStatePullHistories(cfg *config.Config, envName string, requestedServ
 			source:  serverName,
 			history: history,
 		})
-		fmt.Printf("  history: %d deployment(s), freshness %s\n",
-			deploymentHistoryCount(history),
-			deploymentHistoryFreshness(history).Format(time.RFC3339),
-		)
+		if !quiet {
+			fmt.Printf("  history: %d deployment(s), freshness %s\n",
+				deploymentHistoryCount(history),
+				deploymentHistoryFreshness(history).Format(time.RFC3339),
+			)
+		}
 	}
 	return histories, nil
 }
@@ -1670,6 +1680,19 @@ func syncRemoteDeploymentsToLocal(localMgr *localstate.Manager, remoteDeployment
 	return synced, nil
 }
 
+func syncBestDeploymentHistoryToLocal(cfg *config.Config, envName string, histories []stateHistoryCandidate) (string, int, bool, error) {
+	best, ok := bestDeploymentHistory(histories)
+	if !ok {
+		return "", 0, false, nil
+	}
+	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+	if err != nil {
+		return best.source, 0, true, err
+	}
+	synced, err := syncRemoteDeploymentsToLocal(localMgr, best.history.Deployments, envName)
+	return best.source, synced, true, err
+}
+
 func localDeploymentStateExists(envName string) bool {
 	currentPath := filepath.Join(".tako", "deployments", envName, "current.json")
 	info, err := os.Stat(currentPath)
@@ -1699,7 +1722,7 @@ func min(a, b int) int {
 
 // SyncStateOnDeploy attempts to sync state when local deployment state is missing.
 // This is called automatically during deploy when the local cache has no current deployment.
-func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) error {
+func SyncStateOnDeploy(cfg *config.Config, envName string) error {
 	if localDeploymentStateExists(envName) {
 		return nil // Local deployment cache exists, no sync needed
 	}
@@ -1708,62 +1731,38 @@ func SyncStateOnDeploy(cfg *config.Config, client *ssh.Client, envName string) e
 		fmt.Println("Local state missing, checking remote...")
 	}
 
-	remoteMgr := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, client.Host(), takodSocketFromConfig(cfg))
-	remoteDeployments, historyErr := remoteMgr.ListDeployments(&remotestate.HistoryOptions{
-		Limit:         5,
-		IncludeFailed: false,
-	})
-
-	if historyErr != nil || len(remoteDeployments) == 0 {
-		// Try recovering from mesh peers if multi-server
-		if cfg.IsMultiServer() {
-			replicaPool := ssh.NewPool()
-			defer replicaPool.CloseAll()
-			replicator := remotestate.NewStateReplicator(replicaPool, cfg, envName, cfg.Project.Name, verbose)
-			if history, source, _ := replicator.RecoverStateFromPeers(); history != nil && len(history.Deployments) > 0 {
-				if verbose {
-					fmt.Printf("Recovering state from node: %s\n", source)
-				}
-
-				// Restore to primary node
-				primaryMgr := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, client.Host(), takodSocketFromConfig(cfg))
-				_ = primaryMgr.SaveHistory(history)
-
-				// Sync to local
-				localMgr, lErr := localstate.NewManager(".", cfg.Project.Name, envName)
-				if lErr == nil {
-					if _, syncErr := syncRemoteDeploymentsToLocal(localMgr, history.Deployments, envName); syncErr != nil && verbose {
-						fmt.Printf("Warning: failed to sync recovered state locally: %v\n", syncErr)
-					}
-				}
-
-				if verbose {
-					fmt.Printf("Recovered %d deployment(s) from node %s\n", len(history.Deployments), source)
-				}
-				return nil
-			}
-		}
-
-		return nil // No remote state, nothing to sync
-	}
-
-	if verbose {
-		fmt.Println("Found remote state, syncing to local...")
-	}
-
-	// Initialize local state manager
-	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+	histories, err := collectStateDeploymentHistories(cfg, envName, "", true)
 	if err != nil {
-		return nil // Ignore error, continue without sync
+		return nil // Ignore auto-sync discovery errors and continue deployment.
 	}
 
-	// Sync recent deployments
-	if _, err := syncRemoteDeploymentsToLocal(localMgr, remoteDeployments, envName); err != nil && verbose {
-		fmt.Printf("Warning: failed to sync remote state locally: %v\n", err)
+	source, synced, ok, err := syncBestDeploymentHistoryToLocal(cfg, envName, histories)
+	if err != nil {
+		if verbose {
+			fmt.Printf("Warning: failed to sync remote state locally: %v\n", err)
+		}
+		return nil
+	}
+	if !ok {
+		if verbose {
+			fmt.Println("No remote deployment history found during auto-sync")
+		}
+		recoveryServerName, client, err := connectFirstReachableStateServer(cfg, envName, "")
+		if err != nil {
+			return nil
+		}
+		defer client.Close()
+		if verbose {
+			fmt.Printf("Attempting local state recovery from running containers on %s...\n", recoveryServerName)
+		}
+		if err := reconcileAndSave(client, cfg, envName); err != nil && verbose {
+			fmt.Printf("Warning: failed to recover local state from running containers: %v\n", err)
+		}
+		return nil
 	}
 
 	if verbose {
-		fmt.Printf("Synced %d deployment(s) from remote\n", len(remoteDeployments))
+		fmt.Printf("Synced %d deployment(s) from %s\n", synced, source)
 	}
 
 	return nil

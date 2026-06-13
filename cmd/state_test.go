@@ -49,6 +49,47 @@ func TestSyncRemoteDeploymentsToLocalKeepsNewestAsCurrent(t *testing.T) {
 	}
 }
 
+func TestSyncBestDeploymentHistoryToLocalUsesFreshestHistory(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+	}
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	older := remoteHistory(base, remoteDeployment("old", base, "demo:v1"))
+	newer := remoteHistory(base.Add(time.Hour), remoteDeployment("new", base.Add(time.Hour), "demo:v2"))
+
+	source, synced, ok, err := syncBestDeploymentHistoryToLocal(cfg, "production", []stateHistoryCandidate{
+		{source: "node-a", history: older},
+		{source: "node-b", history: newer},
+	})
+	if err != nil {
+		t.Fatalf("syncBestDeploymentHistoryToLocal returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("syncBestDeploymentHistoryToLocal returned no candidate")
+	}
+	if source != "node-b" {
+		t.Fatalf("source = %q, want node-b", source)
+	}
+	if synced != 1 {
+		t.Fatalf("synced = %d, want 1", synced)
+	}
+
+	localMgr, err := localstate.NewManager(".", "demo", "production")
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	current, err := localMgr.GetCurrentDeployment()
+	if err != nil {
+		t.Fatalf("GetCurrentDeployment returned error: %v", err)
+	}
+	if current == nil || current.DeploymentID != "new" {
+		t.Fatalf("current deployment = %#v, want new", current)
+	}
+}
+
 func TestLocalDeploymentStateExistsIgnoresSecretsOnlyTakoDirectory(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)

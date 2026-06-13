@@ -269,7 +269,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// === AUTO-SYNC STATE ===
 	// If local .tako directory doesn't exist but remote state does,
 	// automatically sync from remote to help users who cloned the project
-	if err := SyncStateOnDeploy(cfg, firstClient, envName); err != nil {
+	if err := SyncStateOnDeploy(cfg, envName); err != nil {
 		if verbose {
 			fmt.Printf("Warning: auto-sync failed: %v\n", err)
 		}

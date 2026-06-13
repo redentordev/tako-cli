@@ -9,7 +9,6 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
-	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
@@ -218,15 +217,10 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 		histories, err := collectStatePullHistories(cfg, envName, "")
 		if err != nil {
 			warn(fmt.Sprintf("State sync failed: %v", err))
-		} else if best, ok := bestDeploymentHistory(histories); ok {
-			localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
-			if err != nil {
-				warn(fmt.Sprintf("State sync failed: %v", err))
-			} else if synced, err := syncRemoteDeploymentsToLocal(localMgr, best.history.Deployments, envName); err != nil {
-				warn(fmt.Sprintf("State sync failed: %v", err))
-			} else {
-				pass(fmt.Sprintf("State synced from %s (%d deployment(s))", best.source, synced))
-			}
+		} else if source, synced, ok, err := syncBestDeploymentHistoryToLocal(cfg, envName, histories); err != nil {
+			warn(fmt.Sprintf("State sync failed: %v", err))
+		} else if ok {
+			pass(fmt.Sprintf("State synced from %s (%d deployment(s))", source, synced))
 		} else if localDeploymentStateExists(envName) {
 			pass("State synced from remote server")
 		} else {
