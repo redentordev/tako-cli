@@ -62,7 +62,7 @@ func testProxyDeployer() *Deployer {
 	cfg := &config.Config{
 		Project: config.ProjectConfig{Name: "demo", Version: "1.0.0"},
 		Mesh: &config.MeshConfig{
-			Enabled:      true,
+			Enabled:      testBoolPointer(true),
 			NetworkCIDR:  "10.210.0.0/16",
 			Interface:    "tako",
 			ListenPort:   51820,

@@ -109,7 +109,12 @@ func validateRuntimeConfig(cfg *Config) error {
 	if cfg.Runtime.Agent == nil {
 		cfg.Runtime.Agent = &AgentConfig{}
 	}
-	cfg.Runtime.Agent.Enabled = true
+	if cfg.Runtime.Agent.Enabled != nil && !*cfg.Runtime.Agent.Enabled {
+		return fmt.Errorf("runtime.agent.enabled=false is not supported; takod agent is required")
+	}
+	if cfg.Runtime.Agent.Enabled == nil {
+		cfg.Runtime.Agent.Enabled = boolPointer(true)
+	}
 	if cfg.Runtime.Agent.Socket == "" {
 		cfg.Runtime.Agent.Socket = "/run/tako/takod.sock"
 	}
@@ -120,7 +125,12 @@ func validateRuntimeConfig(cfg *Config) error {
 	if cfg.Mesh == nil {
 		cfg.Mesh = &MeshConfig{}
 	}
-	cfg.Mesh.Enabled = true
+	if cfg.Mesh.Enabled != nil && !*cfg.Mesh.Enabled {
+		return fmt.Errorf("mesh.enabled=false is not supported; single-node deploys use a one-node mesh")
+	}
+	if cfg.Mesh.Enabled == nil {
+		cfg.Mesh.Enabled = boolPointer(true)
+	}
 	if cfg.Mesh.NetworkCIDR == "" {
 		cfg.Mesh.NetworkCIDR = "10.210.0.0/16"
 	}
@@ -596,6 +606,10 @@ func isValidHostname(hostname string) bool {
 		}
 	}
 	return true
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func isValidLabel(label string) bool {
