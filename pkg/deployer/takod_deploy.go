@@ -2,11 +2,9 @@ package deployer
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -215,25 +213,6 @@ func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, serve
 		return fmt.Errorf("docker engine is not available")
 	}
 
-	dataDir := d.takodDataDir()
-	dirs := []string{
-		dataDir,
-		dataDir + "/desired",
-		dataDir + "/actual",
-		dataDir + "/events",
-		dataDir + "/mesh",
-		"/etc/tako",
-		"/run/tako",
-	}
-
-	var mkdirParts []string
-	for _, dir := range dirs {
-		mkdirParts = append(mkdirParts, shellQuote(dir))
-	}
-	if _, err := client.Execute("mkdir -p " + strings.Join(mkdirParts, " ")); err != nil {
-		return fmt.Errorf("failed to create takod directories: %w", err)
-	}
-
 	meshAddress, err := d.meshAddress(index)
 	if err != nil {
 		return err
@@ -261,10 +240,6 @@ func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, serve
 		UpdatedAt: time.Now().UTC(),
 	}
 
-	if err := uploadJSON(client, dataDir+"/node.json", nodeState, 0600); err != nil {
-		return fmt.Errorf("failed to write node state: %w", err)
-	}
-
 	meshState := takodMeshDesiredState{
 		Project:     d.config.Project.Name,
 		Environment: d.environment,
@@ -274,8 +249,11 @@ func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, serve
 		Peers:       peers,
 		UpdatedAt:   time.Now().UTC(),
 	}
-	if err := uploadJSON(client, dataDir+"/mesh/peers.json", meshState, 0600); err != nil {
-		return fmt.Errorf("failed to write mesh peer state: %w", err)
+	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/metadata", takod.MetadataRequest{
+		Node:  nodeState,
+		Peers: meshState,
+	}); err != nil {
+		return fmt.Errorf("failed to write takod metadata: %w", err)
 	}
 
 	meshNode := mesh.Node{
@@ -702,15 +680,6 @@ func uniqueAssignmentServers(assignments []takodAssignment) []string {
 	return servers
 }
 
-func uploadJSON(client *ssh.Client, remotePath string, value any, mode os.FileMode) error {
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return client.UploadReader(strings.NewReader(string(data)), remotePath, mode)
-}
-
 func (d *Deployer) reconcileServiceViaTakod(client *ssh.Client, request takod.ReconcileServiceRequest) error {
 	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/reconcile-service", request); err != nil {
 		return fmt.Errorf("takod service reconciliation failed: %w", err)
@@ -757,11 +726,4 @@ func sanitizeVolumeName(value string) string {
 		return "data"
 	}
 	return value
-}
-
-func shellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }

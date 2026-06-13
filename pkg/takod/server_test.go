@@ -420,3 +420,46 @@ func TestHandleBackupCleanupRejectsInvalidJSON(t *testing.T) {
 		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
 }
+
+func TestHandleMetadataRequiresPut(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/metadata", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleMetadata(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleMetadataRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPut, "/v1/metadata", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleMetadata(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleMetadataWritesDocuments(t *testing.T) {
+	dataDir := t.TempDir()
+	server := NewServer("/tmp/takod-test.sock", dataDir, "test")
+	req := httptest.NewRequest(http.MethodPut, "/v1/metadata", bytes.NewBufferString(`{"node":{"node":"node-a"},"peers":{"peers":[]}}`))
+	recorder := httptest.NewRecorder()
+
+	server.handleMetadata(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "node.json")); err != nil {
+		t.Fatalf("expected node metadata to be written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "mesh", "peers.json")); err != nil {
+		t.Fatalf("expected peer metadata to be written: %v", err)
+	}
+}
