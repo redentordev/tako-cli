@@ -445,8 +445,8 @@ func matchesLabels(serverLabels, selectorLabels map[string]string) bool {
 	return true
 }
 
-// GetPrimaryServer returns the first configured node for an environment.
-func (c *Config) GetPrimaryServer(envName string) (string, error) {
+// GetDefaultServer returns the first configured node for an environment.
+func (c *Config) GetDefaultServer(envName string) (string, error) {
 	servers, err := c.GetEnvironmentServers(envName)
 	if err != nil {
 		return "", err
@@ -456,7 +456,7 @@ func (c *Config) GetPrimaryServer(envName string) (string, error) {
 		return servers[0], nil
 	}
 
-	return "", fmt.Errorf("no primary server found for environment '%s'", envName)
+	return "", fmt.Errorf("no servers found for environment '%s'", envName)
 }
 
 // IsMultiServer returns true if more than one server is configured
@@ -713,8 +713,8 @@ func (c *Config) GetNFSConfig() *NFSConfig {
 	return nil
 }
 
-// GetNFSServerName returns the NFS server name
-// If "auto" or empty, returns the primary server name for the given environment.
+// GetNFSServerName returns the NFS server name.
+// If "auto" or empty, returns the default environment node.
 func (c *Config) GetNFSServerName(envName string) (string, error) {
 	if !c.IsNFSEnabled() {
 		return "", fmt.Errorf("NFS is not enabled")
@@ -722,8 +722,7 @@ func (c *Config) GetNFSServerName(envName string) (string, error) {
 
 	nfsConfig := c.GetNFSConfig()
 	if nfsConfig.Server == "" || nfsConfig.Server == "auto" {
-		// Use the primary environment node.
-		return c.GetPrimaryServer(envName)
+		return c.GetDefaultServer(envName)
 	}
 
 	// Verify the specified server exists

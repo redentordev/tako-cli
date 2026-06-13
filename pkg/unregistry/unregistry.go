@@ -39,21 +39,13 @@ func (m *Manager) DistributeImageParallel(sourceClient *ssh.Client, imageName st
 		fmt.Printf("   Image: %s\n", imageName)
 	}
 
-	servers, err := m.config.GetEnvironmentServers(m.environment)
-	if err != nil {
-		return fmt.Errorf("failed to get environment servers: %w", err)
+	sourceHost := ""
+	if sourceClient != nil {
+		sourceHost = sourceClient.Host()
 	}
-
-	primaryName, err := m.config.GetPrimaryServer(m.environment)
+	peers, err := unregistryPeerServers(m.config, m.environment, sourceHost)
 	if err != nil {
-		return fmt.Errorf("failed to get primary node: %w", err)
-	}
-
-	var peers []string
-	for _, serverName := range servers {
-		if serverName != primaryName {
-			peers = append(peers, serverName)
-		}
+		return err
 	}
 	if len(peers) == 0 {
 		if m.verbose {
@@ -100,6 +92,23 @@ func (m *Manager) DistributeImageParallel(sourceClient *ssh.Client, imageName st
 		fmt.Printf("   Image distributed successfully to all nodes\n")
 	}
 	return nil
+}
+
+func unregistryPeerServers(cfg *config.Config, environment string, sourceHost string) ([]string, error) {
+	servers, err := cfg.GetEnvironmentServers(environment)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get environment servers: %w", err)
+	}
+
+	peers := make([]string, 0, len(servers))
+	for _, serverName := range servers {
+		server := cfg.Servers[serverName]
+		if sourceHost != "" && server.Host == sourceHost {
+			continue
+		}
+		peers = append(peers, serverName)
+	}
+	return peers, nil
 }
 
 func (m *Manager) streamImageViaTakod(sourceClient *ssh.Client, peerServer config.ServerConfig, imageName string) error {
