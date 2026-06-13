@@ -224,35 +224,52 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Write files
-	restored := 0
+	restored, err := restoreEnvBundleFiles(allowedBundle, allowedPaths)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("\nRestored %d file(s) from %s\n", restored, source)
+	return nil
+}
+
+func restoreEnvBundleFiles(allowedBundle map[string]string, allowedPaths []string) (int, error) {
+	decoded := make(map[string][]byte, len(allowedPaths))
+	var decodeErrors []string
 	for _, path := range allowedPaths {
-		encodedContent := allowedBundle[path]
-		content, err := base64.StdEncoding.DecodeString(encodedContent)
+		content, err := base64.StdEncoding.DecodeString(allowedBundle[path])
 		if err != nil {
-			fmt.Printf("Warning: failed to decode %s: %v\n", path, err)
+			decodeErrors = append(decodeErrors, fmt.Sprintf("%s: %v", path, err))
 			continue
 		}
+		decoded[path] = content
+	}
+	if len(decodeErrors) > 0 {
+		return 0, fmt.Errorf("failed to decode environment bundle file(s): %s", strings.Join(decodeErrors, "; "))
+	}
 
-		// Ensure directory exists
+	restored := 0
+	var writeErrors []string
+	for _, path := range allowedPaths {
 		if dir := filepath.Dir(path); dir != "." {
 			if err := os.MkdirAll(dir, 0755); err != nil {
-				fmt.Printf("Warning: failed to create directory for %s: %v\n", path, err)
+				writeErrors = append(writeErrors, fmt.Sprintf("%s: create directory: %v", path, err))
 				continue
 			}
 		}
 
-		if err := fileutil.WriteFileAtomic(path, content, 0600); err != nil {
-			fmt.Printf("Warning: failed to write %s: %v\n", path, err)
+		if err := fileutil.WriteFileAtomic(path, decoded[path], 0600); err != nil {
+			writeErrors = append(writeErrors, fmt.Sprintf("%s: write: %v", path, err))
 			continue
 		}
 
 		fmt.Printf("Restored: %s\n", path)
 		restored++
 	}
-
-	fmt.Printf("\nRestored %d file(s) from %s\n", restored, source)
-	return nil
+	if len(writeErrors) > 0 {
+		return restored, fmt.Errorf("failed to restore environment bundle file(s): %s", strings.Join(writeErrors, "; "))
+	}
+	return restored, nil
 }
 
 func supportedEnvBundleFiles(bundle map[string]string) (map[string]string, []string, []string) {
