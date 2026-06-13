@@ -145,17 +145,56 @@ func (d *Deployer) DeployServiceTakod(serviceName string, service *config.Servic
 	if err != nil {
 		return fmt.Errorf("failed to get takod target servers: %w", err)
 	}
-	for _, serverName := range targetServers {
+	if err := runTakodNodeActions(targetServers, func(serverName string) error {
 		slots := grouped[serverName]
 		client, err := d.getEnvironmentClient(serverName)
 		if err != nil {
 			return err
 		}
 		if err := d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, slots); err != nil {
-			return fmt.Errorf("%s: %w", serverName, err)
+			return err
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
+	return nil
+}
+
+type takodNodeActionResult struct {
+	serverName string
+	err        error
+}
+
+func runTakodNodeActions(targetServers []string, action func(serverName string) error) error {
+	resultCh := make(chan takodNodeActionResult, len(targetServers))
+	var wg sync.WaitGroup
+
+	for _, serverName := range targetServers {
+		wg.Add(1)
+		go func(serverName string) {
+			defer wg.Done()
+			resultCh <- takodNodeActionResult{
+				serverName: serverName,
+				err:        action(serverName),
+			}
+		}(serverName)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	var errors []string
+	for result := range resultCh {
+		if result.err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+		}
+	}
+	if len(errors) > 0 {
+		sort.Strings(errors)
+		return fmt.Errorf("%s", strings.Join(errors, "; "))
+	}
 	return nil
 }
 
