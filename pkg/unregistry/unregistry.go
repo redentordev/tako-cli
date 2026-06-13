@@ -146,11 +146,6 @@ func (m *Manager) DistributeImage(sourceClient *ssh.Client, imageName string) er
 // This avoids creating temporary files and is more efficient for large images
 func (m *Manager) transferImageStream(sourceClient *ssh.Client, peerServer config.ServerConfig, imageName string) error {
 	// Build SSH options for the connection from source node to peer.
-	sshKeyArg := ""
-	if peerServer.SSHKey != "" {
-		sshKeyArg = fmt.Sprintf("-i %s", peerServer.SSHKey)
-	}
-
 	port := peerServer.Port
 	if port == 0 {
 		port = 22
@@ -158,12 +153,11 @@ func (m *Manager) transferImageStream(sourceClient *ssh.Client, peerServer confi
 
 	// Stream docker save through SSH to docker load on the peer.
 	streamCmd := fmt.Sprintf(
-		"docker save %s | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s -p %d %s@%s docker load",
-		imageName,
-		sshKeyArg,
+		"mkdir -p ~/.tako && docker save %s | %s -p %d %s docker load",
+		shellQuote(imageName),
+		remoteSSHCommand(peerServer),
 		port,
-		peerServer.User,
-		peerServer.Host,
+		shellQuote(peerServer.User+"@"+peerServer.Host),
 	)
 
 	if m.verbose {
@@ -279,12 +273,6 @@ func (m *Manager) DistributeImageParallel(sourceClient *ssh.Client, imageName st
 
 // transferImageFromFile transfers an image from a tar file on the source node to a peer.
 func (m *Manager) transferImageFromFile(sourceClient *ssh.Client, peerServer config.ServerConfig, tarPath, imageName string) error {
-	// Build SSH options
-	sshKeyArg := ""
-	if peerServer.SSHKey != "" {
-		sshKeyArg = fmt.Sprintf("-i %s", peerServer.SSHKey)
-	}
-
 	port := peerServer.Port
 	if port == 0 {
 		port = 22
@@ -292,12 +280,11 @@ func (m *Manager) transferImageFromFile(sourceClient *ssh.Client, peerServer con
 
 	// Stream the saved tar file to docker load on the peer.
 	streamCmd := fmt.Sprintf(
-		"cat %s | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null %s -p %d %s@%s docker load",
-		tarPath,
-		sshKeyArg,
+		"mkdir -p ~/.tako && cat %s | %s -p %d %s docker load",
+		shellQuote(tarPath),
+		remoteSSHCommand(peerServer),
 		port,
-		peerServer.User,
-		peerServer.Host,
+		shellQuote(peerServer.User+"@"+peerServer.Host),
 	)
 
 	output, err := sourceClient.Execute(streamCmd)
@@ -306,6 +293,25 @@ func (m *Manager) transferImageFromFile(sourceClient *ssh.Client, peerServer con
 	}
 
 	return nil
+}
+
+func remoteSSHCommand(peerServer config.ServerConfig) string {
+	parts := []string{
+		"ssh",
+		"-o StrictHostKeyChecking=accept-new",
+		"-o UserKnownHostsFile=~/.tako/known_hosts",
+	}
+	if peerServer.SSHKey != "" {
+		parts = append(parts, "-i "+shellQuote(peerServer.SSHKey))
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // CheckImageExists checks if an image exists on a node
