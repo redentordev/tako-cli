@@ -377,7 +377,14 @@ func systemdIdentifierArg(value string) (string, error) {
 
 func runRootScript(script string) string {
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
-	return fmt.Sprintf("echo '%s' | base64 -d | sudo sh", encoded)
+	return fmt.Sprintf(`sudo sh -c 'set -eu
+tmp=$(mktemp /tmp/tako-root-script.XXXXXX)
+trap '\''rm -f "$tmp"'\'' EXIT
+base64 -d > "$tmp"
+chmod 700 "$tmp"
+sh "$tmp"' <<'TAKO_ROOT_SCRIPT'
+%s
+TAKO_ROOT_SCRIPT`, encoded)
 }
 
 func shellQuote(value string) string {

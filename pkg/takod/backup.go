@@ -106,14 +106,13 @@ func RestoreVolumeBackup(ctx context.Context, req BackupRequest) error {
 		}
 	}
 
-	command := "rm -rf /target/* /target/..?* /target/.[!.]* 2>/dev/null; tar -xzf /backup/" + backupFile + " -C /target"
 	if _, err := runDocker(
 		ctx,
 		"run", "--rm",
 		"-v", fullVolumeName+":/target",
 		"-v", backupPath+":/backup:ro",
 		backupImage,
-		"sh", "-c", command,
+		"sh", "-c", restoreVolumeScript(backupFile),
 	); err != nil {
 		return fmt.Errorf("failed to restore backup: %w", err)
 	}
@@ -247,6 +246,29 @@ func fullBackupVolumeName(req BackupRequest) string {
 
 func backupFileName(volume string, backupID string) string {
 	return volume + "_" + backupID + ".tar.gz"
+}
+
+func restoreVolumeScript(backupFile string) string {
+	quotedBackup := shellQuote(backupFile)
+	return fmt.Sprintf(`set -eu
+if [ ! -d /target ] || [ -L /target ]; then
+  echo "invalid restore target" >&2
+  exit 1
+fi
+if [ ! -f /backup/%s ]; then
+  echo "backup file not found" >&2
+  exit 1
+fi
+find /target -mindepth 1 -maxdepth 1 -exec rm -rf -- {} \;
+tar -xzf /backup/%s -C /target
+`, quotedBackup, quotedBackup)
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func backupInfoFromPath(root string, path string) (BackupInfo, error) {
