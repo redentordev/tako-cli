@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -160,6 +162,78 @@ func TestDownloadEnvBundleFromMeshErrorsWhenAllNodesFail(t *testing.T) {
 
 	if _, _, err := downloadEnvBundleFromMesh(cfg, "production"); err == nil {
 		t.Fatal("downloadEnvBundleFromMesh should fail when all nodes fail")
+	}
+}
+
+func TestUploadEnvBundleToMeshRunsConcurrently(t *testing.T) {
+	cfg := envBundleMeshTestConfig()
+	serverNames := []string{"node-a", "node-b", "node-c"}
+	started := make(chan string, len(serverNames))
+	release := make(chan struct{})
+
+	original := uploadEnvBundleToServerFunc
+	uploadEnvBundleToServerFunc = func(_ *config.Config, serverName string, _ config.ServerConfig, _ takod.EnvBundleRequest) error {
+		started <- serverName
+		<-release
+		return nil
+	}
+	t.Cleanup(func() {
+		uploadEnvBundleToServerFunc = original
+	})
+
+	type result struct {
+		uploaded int
+		errors   []string
+	}
+	done := make(chan result, 1)
+	go func() {
+		uploaded, errors := uploadEnvBundleToMesh(cfg, serverNames, takod.EnvBundleRequest{})
+		done <- result{uploaded: uploaded, errors: errors}
+	}()
+
+	waitForEnvUploadStarts(t, started, len(serverNames))
+	close(release)
+
+	got := <-done
+	if got.uploaded != len(serverNames) || len(got.errors) != 0 {
+		t.Fatalf("upload result = %#v, want all nodes uploaded", got)
+	}
+}
+
+func TestUploadEnvBundleToMeshReportsErrorsInServerOrder(t *testing.T) {
+	cfg := envBundleMeshTestConfig()
+	serverNames := []string{"node-a", "node-b", "node-c"}
+	original := uploadEnvBundleToServerFunc
+	uploadEnvBundleToServerFunc = func(_ *config.Config, serverName string, _ config.ServerConfig, _ takod.EnvBundleRequest) error {
+		if serverName == "node-b" {
+			return fmt.Errorf("down")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		uploadEnvBundleToServerFunc = original
+	})
+
+	uploaded, errors := uploadEnvBundleToMesh(cfg, serverNames, takod.EnvBundleRequest{})
+	if uploaded != 2 {
+		t.Fatalf("uploaded = %d, want 2", uploaded)
+	}
+	if !slices.Equal(errors, []string{"node-b: down"}) {
+		t.Fatalf("errors = %#v, want node-b error", errors)
+	}
+}
+
+func waitForEnvUploadStarts(t *testing.T, started <-chan string, count int) {
+	t.Helper()
+	seen := map[string]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(seen) < count {
+		select {
+		case name := <-started:
+			seen[name] = true
+		case <-deadline:
+			t.Fatalf("timed out waiting for env upload fanout; saw %v", seen)
+		}
 	}
 }
 

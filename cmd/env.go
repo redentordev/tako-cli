@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -24,6 +25,7 @@ var envForce bool
 const envPassphraseVar = "TAKO_ENV_PASSPHRASE"
 
 var downloadEnvBundleFromServerFunc = downloadEnvBundleFromServer
+var uploadEnvBundleToServerFunc = uploadEnvBundleToServer
 
 var envCmd = &cobra.Command{
 	Use:   "env",
@@ -134,16 +136,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		Content:     base64.StdEncoding.EncodeToString(encrypted),
 	}
 
-	uploaded := 0
-	var nodeErrors []string
-	for _, serverName := range serverNames {
-		serverCfg := cfg.Servers[serverName]
-		if err := uploadEnvBundleToServer(cfg, serverName, serverCfg, request); err != nil {
-			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", serverName, err))
-			continue
-		}
-		uploaded++
-	}
+	uploaded, nodeErrors := uploadEnvBundleToMesh(cfg, serverNames, request)
 	if uploaded == 0 {
 		return fmt.Errorf("failed to upload environment bundle to any node: %s", strings.Join(nodeErrors, "; "))
 	}
@@ -291,6 +284,58 @@ func uploadEnvBundleToServer(cfg *config.Config, serverName string, serverCfg co
 		return fmt.Errorf("takod did not confirm environment bundle write")
 	}
 	return nil
+}
+
+type envBundleUploadResult struct {
+	index      int
+	serverName string
+	err        error
+}
+
+func uploadEnvBundleToMesh(cfg *config.Config, serverNames []string, request takod.EnvBundleRequest) (int, []string) {
+	resultCh := make(chan envBundleUploadResult, len(serverNames))
+	var wg sync.WaitGroup
+
+	for index, serverName := range serverNames {
+		serverCfg, ok := cfg.Servers[serverName]
+		if !ok {
+			resultCh <- envBundleUploadResult{
+				index:      index,
+				serverName: serverName,
+				err:        fmt.Errorf("server not found in configuration"),
+			}
+			continue
+		}
+
+		wg.Add(1)
+		go func(index int, serverName string, serverCfg config.ServerConfig) {
+			defer wg.Done()
+			resultCh <- envBundleUploadResult{
+				index:      index,
+				serverName: serverName,
+				err:        uploadEnvBundleToServerFunc(cfg, serverName, serverCfg, request),
+			}
+		}(index, serverName, serverCfg)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]envBundleUploadResult, len(serverNames))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+
+	uploaded := 0
+	var nodeErrors []string
+	for _, result := range results {
+		if result.err != nil {
+			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+			continue
+		}
+		uploaded++
+	}
+	return uploaded, nodeErrors
 }
 
 func downloadEnvBundleFromMesh(cfg *config.Config, envName string) (*takod.EnvBundleResponse, string, error) {
