@@ -354,6 +354,27 @@ func TestLatestDeploymentByTimestamp(t *testing.T) {
 	}
 }
 
+func TestListDeploymentsFromHistoryFiltersSortsAndLimits(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	oldSuccess := remoteDeployment("old-success", base, "demo:v1")
+	newSuccess := remoteDeployment("new-success", base.Add(2*time.Hour), "demo:v3")
+	failed := remoteDeployment("failed", base.Add(time.Hour), "demo:v2")
+	failed.Status = remotestate.StatusFailed
+
+	got := listDeploymentsFromHistory(remoteHistory(base, oldSuccess, failed, newSuccess), &remotestate.HistoryOptions{
+		Limit:         1,
+		Status:        remotestate.StatusSuccess,
+		IncludeFailed: true,
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("deployments = %d, want 1", len(got))
+	}
+	if got[0].ID != "new-success" {
+		t.Fatalf("deployment = %q, want newest successful deployment", got[0].ID)
+	}
+}
+
 func TestStateStatusCandidatesIncludesEmbeddedAndNodeActual(t *testing.T) {
 	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	aggregate := actualSnapshot(base.Add(time.Hour), "web")

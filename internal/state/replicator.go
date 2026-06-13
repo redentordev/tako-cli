@@ -13,9 +13,9 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
-// StateReplicator replicates deployment state across the takod mesh as read-only
-// backups. Replication is fire-and-forget: failures are logged as warnings and
-// never block or fail a deployment.
+// StateReplicator replicates deployment history across the takod mesh as
+// read-only backups. Replication is fire-and-forget: failures are logged as
+// warnings and never block or fail a deployment.
 type StateReplicator struct {
 	sshPool     *ssh.Pool
 	config      *config.Config
@@ -41,7 +41,9 @@ func NewStateReplicator(pool *ssh.Pool, cfg *config.Config, environment, project
 	}
 }
 
-// ReplicateDeployment replicates a deployment and its history to mesh peers.
+// ReplicateDeployment replicates a deployment and its history to environment
+// mesh nodes. Writes are idempotent, so including the node that initially saved
+// the deployment is acceptable.
 func (r *StateReplicator) ReplicateDeployment(deployment *DeploymentState, history *DeploymentHistory) {
 	peers := r.getReplicaServers()
 	if len(peers) == 0 {
@@ -128,67 +130,6 @@ func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string
 	}
 }
 
-// RecoverStateFromPeers attempts to recover deployment history from mesh peers.
-func (r *StateReplicator) RecoverStateFromPeers() (*DeploymentHistory, string, error) {
-	peers := r.getReplicaServers()
-	if len(peers) == 0 {
-		return nil, "", nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	type result struct {
-		history *DeploymentHistory
-		source  string
-	}
-
-	results := make(chan result, len(peers))
-	var wg sync.WaitGroup
-
-	for name, srv := range peers {
-		wg.Add(1)
-		go func(serverName string, server config.ServerConfig) {
-			defer wg.Done()
-
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			client, err := r.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
-			if err != nil {
-				return
-			}
-			manager := NewStateManagerWithSocket(client, r.projectName, r.environment, server.Host, r.socket)
-			history, err := manager.LoadHistory()
-			if err != nil || history == nil {
-				return
-			}
-
-			results <- result{history: history, source: serverName}
-		}(name, srv)
-	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	var best *DeploymentHistory
-	var bestSource string
-
-	for res := range results {
-		if best == nil || res.history.LastUpdated.After(best.LastUpdated) {
-			best = res.history
-			bestSource = res.source
-		}
-	}
-
-	return best, bestSource, nil
-}
-
 func cloneDeploymentState(deployment *DeploymentState) (*DeploymentState, error) {
 	if deployment == nil {
 		return nil, fmt.Errorf("deployment is nil")
@@ -225,16 +166,8 @@ func (r *StateReplicator) getReplicaServers() map[string]config.ServerConfig {
 		return nil
 	}
 
-	primaryName, err := r.config.GetPrimaryServer(r.environment)
-	if err != nil {
-		return nil
-	}
-
 	replicas := make(map[string]config.ServerConfig)
 	for _, name := range servers {
-		if name == primaryName {
-			continue
-		}
 		if srv, exists := r.config.Servers[name]; exists {
 			replicas[name] = srv
 		}
