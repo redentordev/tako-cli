@@ -771,3 +771,45 @@ func TestHandleMetricsReturnsNodeMetrics(t *testing.T) {
 		t.Fatalf("unexpected metrics response: %#v", metrics)
 	}
 }
+
+func TestHandleAccessLogsRequiresGet(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/access-logs", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleAccessLogs(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleAccessLogsRejectsInvalidTail(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/access-logs?tail=bad", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleAccessLogs(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleAccessLogsStreamsTail(t *testing.T) {
+	restore := useTempAccessLog(t, "one\ntwo\nthree\n")
+	defer restore()
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/access-logs?tail=2", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleAccessLogs(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Body.String() != "two\nthree\n" {
+		t.Fatalf("unexpected access log response: %q", recorder.Body.String())
+	}
+}

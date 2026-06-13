@@ -73,3 +73,11 @@ func TestMetricsEndpointWithCollect(t *testing.T) {
 		t.Fatalf("MetricsEndpoint() = %q, want %q", got, want)
 	}
 }
+
+func TestAccessLogsEndpointWithFollow(t *testing.T) {
+	got := AccessLogsEndpoint(75, true)
+	want := "/v1/access-logs?follow=true&tail=75"
+	if got != want {
+		t.Fatalf("AccessLogsEndpoint() = %q, want %q", got, want)
+	}
+}

@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/accesslog"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 )
 
@@ -54,31 +54,32 @@ func init() {
 }
 
 func runAccess(cmd *cobra.Command, args []string) error {
-	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if !cfg.IsTakodRuntime() {
+		return fmt.Errorf("runtime.mode=%s is not supported; Tako now uses runtime.mode=takod", cfg.GetRuntimeMode())
+	}
+	if accessTail < 0 {
+		return fmt.Errorf("tail cannot be negative")
+	}
 
-	// Get environment and services
 	envName := getEnvironmentName(cfg)
 	services, err := cfg.GetServices(envName)
 	if err != nil {
 		return fmt.Errorf("failed to get services: %w", err)
 	}
 
-	// Determine service name (for filtering)
 	accessService = ""
 	if len(args) > 0 {
 		accessService = args[0]
-		// Validate service exists
 		if _, exists := services[accessService]; !exists {
 			return fmt.Errorf("service '%s' not found in config", accessService)
 		}
 	}
 
-	// Get server configuration
-	serverConfig, serverName, err := getServerConfig(cfg, accessServer)
+	serverName, serverConfig, err := resolveServer(cfg, envName, accessServer)
 	if err != nil {
 		return err
 	}
@@ -103,20 +104,7 @@ func runAccess(cmd *cobra.Command, args []string) error {
 	}
 	defer client.Close()
 
-	// Determine log file path. Public services share one proxy access log.
-	logPath := "/var/log/tako/proxy/access.log"
-
-	// Build tail command
-	tailCmd := fmt.Sprintf("sudo tail -n %d", accessTail)
-	if accessFollow {
-		tailCmd += " -f"
-	}
-	tailCmd += fmt.Sprintf(" %s 2>/dev/null || echo 'Log file not found. Deploy your application first.'", logPath)
-
-	// Create formatter
 	formatter := accesslog.NewFormatter(verbose)
-
-	// Set service filter if specified
 	if accessService != "" {
 		formatter.SetServiceFilter(accessService)
 		if verbose {
@@ -129,90 +117,39 @@ func runAccess(cmd *cobra.Command, args []string) error {
 	fmt.Println(formatter.FormatHeader())
 	fmt.Println()
 
-	// Stream logs
-	if accessFollow {
-		// Use streaming for follow mode
-		reader, writer := io.Pipe()
-
-		// Start SSH stream in goroutine
-		go func() {
-			defer writer.Close()
-			if err := client.ExecuteStream(tailCmd, writer, os.Stderr); err != nil {
-				fmt.Fprintf(os.Stderr, "Error streaming logs: %v\n", err)
-			}
-		}()
-
-		// Read and format lines
-		scanner := bufio.NewScanner(reader)
-		for scanner.Scan() {
-			line := scanner.Text()
-			formatted, err := formatter.FormatLine(line)
-			if err != nil {
-				if verbose {
-					fmt.Fprintf(os.Stderr, "Warning: Failed to format line: %v\n", err)
-				}
-				continue
-			}
-			if formatted != "" {
-				fmt.Println(formatted)
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
-			return fmt.Errorf("error reading logs: %w", err)
-		}
-	} else {
-		// Execute once and format
-		output, err := client.Execute(tailCmd)
+	reader, writer := io.Pipe()
+	errCh := make(chan error, 1)
+	go func() {
+		endpoint := takodclient.AccessLogsEndpoint(accessTail, accessFollow)
+		err := takodclient.StreamOutput(client, takodSocketFromConfig(cfg), endpoint, writer, os.Stderr)
 		if err != nil {
-			return fmt.Errorf("failed to fetch logs: %w", err)
+			_ = writer.CloseWithError(err)
+		} else {
+			_ = writer.Close()
 		}
+		errCh <- err
+	}()
 
-		// Split output into lines and format each
-		for _, line := range splitLines(output) {
-			formatted, err := formatter.FormatLine(line)
-			if err != nil {
-				if verbose {
-					fmt.Fprintf(os.Stderr, "Warning: Failed to format line: %v\n", err)
-				}
-				continue
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		line := scanner.Text()
+		formatted, err := formatter.FormatLine(line)
+		if err != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Warning: Failed to format line: %v\n", err)
 			}
-			if formatted != "" {
-				fmt.Println(formatted)
-			}
+			continue
+		}
+		if formatted != "" {
+			fmt.Println(formatted)
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("error reading access logs: %w", err)
+	}
+	if err := <-errCh; err != nil {
+		return fmt.Errorf("failed to stream access logs: %w", err)
+	}
 	return nil
-}
-
-// splitLines splits output into lines
-func splitLines(output string) []string {
-	return strings.Split(strings.TrimSpace(output), "\n")
-}
-
-// getServerConfig returns the server configuration to use
-func getServerConfig(cfg *config.Config, serverName string) (*config.ServerConfig, string, error) {
-	if serverName != "" {
-		// Use specified server
-		server, ok := cfg.Servers[serverName]
-		if !ok {
-			return nil, "", fmt.Errorf("server '%s' not found in config", serverName)
-		}
-		return &server, serverName, nil
-	}
-
-	// Find first production server (or any server)
-	for name, server := range cfg.Servers {
-		if name == "production" || len(cfg.Servers) == 1 {
-			return &server, name, nil
-		}
-	}
-
-	// Just use first server
-	for name, server := range cfg.Servers {
-		return &server, name, nil
-	}
-
-	return nil, "", fmt.Errorf("no servers configured")
 }
