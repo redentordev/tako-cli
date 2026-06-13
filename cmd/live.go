@@ -46,6 +46,9 @@ func runLive(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
+	}
 
 	// Get environment
 	envName := getEnvironmentName(cfg)

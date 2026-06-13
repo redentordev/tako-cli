@@ -24,6 +24,22 @@ func resolveServer(cfg *config.Config, envName, serverFlag string) (string, conf
 	return serverName, server, nil
 }
 
+func resolveEnvironmentServerSet(cfg *config.Config, envName, serverFlag string) (map[string]config.ServerConfig, error) {
+	serverNames, err := statePullServerNames(cfg, envName, serverFlag)
+	if err != nil {
+		return nil, err
+	}
+	servers := make(map[string]config.ServerConfig, len(serverNames))
+	for _, serverName := range serverNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return nil, fmt.Errorf("server %s not found in config", serverName)
+		}
+		servers[serverName] = server
+	}
+	return servers, nil
+}
+
 type serverConnectFunc func(serverName string, server config.ServerConfig) (*ssh.Client, error)
 
 func connectResolvedServer(cfg *config.Config, envName, serverFlag string) (string, config.ServerConfig, *ssh.Client, error) {

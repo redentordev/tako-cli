@@ -54,8 +54,8 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-	if !cfg.IsTakodRuntime() {
-		return fmt.Errorf("runtime.mode=%s is not supported; Tako now uses runtime.mode=takod", cfg.GetRuntimeMode())
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
 	}
 
 	// Acquire state lock to prevent concurrent operations

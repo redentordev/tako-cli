@@ -18,6 +18,13 @@ func takodSocketFromConfig(cfg *config.Config) string {
 	return takodclient.DefaultSocket
 }
 
+func requireTakodRuntime(cfg *config.Config) error {
+	if !cfg.IsTakodRuntime() {
+		return fmt.Errorf("runtime.mode=%s is not supported; Tako now uses runtime.mode=takod", cfg.GetRuntimeMode())
+	}
+	return nil
+}
+
 func cleanupViaTakod(client *ssh.Client, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
 	var response takod.CleanupResponse
 	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "POST", "/v1/cleanup", request)

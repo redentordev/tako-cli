@@ -62,20 +62,15 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
+	}
 
 	// Determine which servers to clean
-	serversToClean := make(map[string]config.ServerConfig)
-
-	if cleanupServer != "" {
-		// Clean specific server
-		server, ok := cfg.Servers[cleanupServer]
-		if !ok {
-			return fmt.Errorf("server '%s' not found in config", cleanupServer)
-		}
-		serversToClean[cleanupServer] = server
-	} else {
-		// Clean all servers
-		serversToClean = cfg.Servers
+	envName := getEnvironmentName(cfg)
+	serversToClean, err := resolveEnvironmentServerSet(cfg, envName, cleanupServer)
+	if err != nil {
+		return err
 	}
 
 	// If full cleanup, keep fewer images

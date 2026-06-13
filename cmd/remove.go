@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
@@ -51,6 +50,9 @@ func runRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
+	}
 
 	// Get environment
 	envName := getEnvironmentName(cfg)
@@ -59,31 +61,14 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get services for environment %s: %w", envName, err)
 	}
 
-	// Get server config
-	server, exists := cfg.Servers[removeServer]
-	if !exists {
-		return fmt.Errorf("server %s not found in configuration", removeServer)
-	}
-
-	// Create SSH client (supports both key and password auth)
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     server.Host,
-		Port:     server.Port,
-		User:     server.User,
-		SSHKey:   server.SSHKey,
-		Password: server.Password,
-	})
+	serverName, server, client, err := connectResolvedServer(cfg, envName, removeServer)
 	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
+		return err
 	}
 	defer client.Close()
 
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
-	}
-
 	fmt.Printf("\n⚠️  WARNING: You are about to REMOVE all services from:\n\n")
-	fmt.Printf("   Server:      %s (%s)\n", removeServer, server.Host)
+	fmt.Printf("   Server:      %s (%s)\n", serverName, server.Host)
 	fmt.Printf("   Project:     %s\n", cfg.Project.Name)
 	fmt.Printf("   Environment: %s\n\n", envName)
 
@@ -134,7 +119,7 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		printCleanupWarnings(response)
 	}
 
-	fmt.Printf("\n✓ All services removed from %s\n", removeServer)
+	fmt.Printf("\n✓ All services removed from %s\n", serverName)
 	fmt.Printf("\nThe server is still provisioned and ready for new deployments.\n")
 	fmt.Printf("To deploy again: tako deploy\n")
 
