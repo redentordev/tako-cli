@@ -239,6 +239,18 @@ func TestExpandEnvWithTrimIgnoresYAMLCommentPlaceholders(t *testing.T) {
 	}
 }
 
+func TestExpandEnvWithTrimExpandsQuotedYAMLHashContent(t *testing.T) {
+	t.Setenv("FRAGMENT", "section")
+
+	expanded, err := expandEnvWithTrim("url: \"https://example.com/#${FRAGMENT}\" # ${COMMENT_ONLY}\n", true)
+	if err != nil {
+		t.Fatalf("expandEnvWithTrim returned error: %v", err)
+	}
+	if expanded != "url: \"https://example.com/#section\" # ${COMMENT_ONLY}\n" {
+		t.Fatalf("expanded = %q", expanded)
+	}
+}
+
 func TestExpandEnvWithTrimReportsMissingVariables(t *testing.T) {
 	_, err := expandEnvWithTrim("host: ${SERVER_HOST}\nemail: ${LETSENCRYPT_EMAIL}\n", true)
 	if err == nil {
