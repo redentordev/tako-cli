@@ -218,6 +218,12 @@ func collectStateDeploymentHistories(cfg *config.Config, envName string, request
 			fmt.Printf("Checking %s (%s)...\n", result.serverName, result.host)
 		}
 		if result.err != nil {
+			if errors.Is(result.err, remotestate.ErrNotFound) {
+				if verbose {
+					fmt.Printf("No deployment history found on %s\n", result.serverName)
+				}
+				continue
+			}
 			if !quiet || verbose {
 				fmt.Fprintf(os.Stderr, "Warning: cannot read state from %s: %v\n", result.serverName, result.err)
 			}
@@ -751,8 +757,10 @@ func printStateStatusMesh(status *mesh.Status, err error, cfg *config.Config) {
 
 func printStateStatusHistory(history *remotestate.DeploymentHistory, err error) {
 	if !historyHasDeployments(history) {
-		if err != nil {
+		if errors.Is(err, remotestate.ErrNotFound) {
 			fmt.Println("History: not recorded")
+		} else if err != nil {
+			fmt.Printf("History: unavailable - %v\n", err)
 		} else {
 			fmt.Println("History: empty")
 		}
@@ -1123,9 +1131,13 @@ func collectStateRepairNodes(cfg *config.Config, envName string, preferredServer
 		})
 
 		history, err := manager.LoadHistory()
-		if err != nil || !historyHasDeployments(history) {
+		if errors.Is(err, remotestate.ErrNotFound) || !historyHasDeployments(history) {
 			if verbose {
 				fmt.Printf("No deployment history found on %s\n", serverName)
+			}
+		} else if err != nil {
+			if verbose {
+				fmt.Printf("Unable to read deployment history on %s: %v\n", serverName, err)
 			}
 		} else {
 			repair.histories = append(repair.histories, stateHistoryCandidate{

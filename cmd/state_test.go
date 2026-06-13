@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -413,6 +416,22 @@ func TestStateStatusCandidatesIncludesEmbeddedAndNodeActual(t *testing.T) {
 	}
 }
 
+func TestPrintStateStatusHistoryDistinguishesMissingFromUnreadable(t *testing.T) {
+	missing := captureStdout(t, func() {
+		printStateStatusHistory(nil, remotestate.ErrNotFound)
+	})
+	if !strings.Contains(missing, "History: not recorded") {
+		t.Fatalf("missing history output = %q", missing)
+	}
+
+	unreadable := captureStdout(t, func() {
+		printStateStatusHistory(nil, errors.New("bad json"))
+	})
+	if !strings.Contains(unreadable, "History: unavailable - bad json") {
+		t.Fatalf("unreadable history output = %q", unreadable)
+	}
+}
+
 func TestBestStateStatusActualBuildsAggregateFromNodeSnapshots(t *testing.T) {
 	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 
@@ -562,4 +581,32 @@ func nodeActualSnapshot(node string, capturedAt time.Time, services ...string) *
 	snapshot := actualSnapshot(capturedAt, services...)
 	snapshot.Node = node
 	return snapshot
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	original := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stdout pipe: %v", err)
+	}
+	os.Stdout = writer
+	defer func() {
+		os.Stdout = original
+	}()
+
+	fn()
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("failed to close stdout pipe: %v", err)
+	}
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("failed to read stdout pipe: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("failed to close stdout reader: %v", err)
+	}
+	return string(output)
 }
