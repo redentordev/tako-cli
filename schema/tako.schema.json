@@ -368,13 +368,6 @@
                       "type": "string",
                       "description": "Primary domain"
                     },
-                    "domains": {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      },
-                      "description": "Additional domains"
-                    },
                     "redirectFrom": {
                       "type": "array",
                       "items": {

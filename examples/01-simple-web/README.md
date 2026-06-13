@@ -77,8 +77,7 @@ environments:
         build: .          # Build from Dockerfile in current directory
         port: 3000        # Port your app runs on inside container
         proxy:            # Makes your app publicly accessible
-          domains:
-            - simple-web.${SERVER_HOST}.sslip.io
+          domain: simple-web.${SERVER_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}
         env:
           NODE_ENV: production
@@ -89,7 +88,7 @@ environments:
 Tako automatically:
 
 1. **Builds** your Docker image on the server
-2. **Deploys** the container with zero downtime
+2. **Reconciles** the container on the target node
 3. **Configures** tako-proxy
 4. **Obtains** SSL certificate from Let's Encrypt
 5. **Routes** traffic to your app
@@ -143,8 +142,7 @@ Instead of `sslip.io`, use your own domain:
 2. Update `tako.yaml`:
    ```yaml
    proxy:
-     domains:
-       - app.example.com
+     domain: app.example.com
      email: you@example.com
    ```
 
@@ -172,7 +170,7 @@ services:
     build: .
     port: 3000
     proxy:
-      domains: [app.example.com]
+      domain: app.example.com
     env:
       DATABASE_URL: postgresql://postgres:5432/myapp
 

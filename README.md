@@ -236,8 +236,7 @@ environments:
         build: .                                      # Build from current directory
         port: 3000                                    # Container port
         proxy:
-          domains:
-            - my-app.${SERVER_HOST}.sslip.io         # Auto-DNS with sslip.io
+          domain: my-app.${SERVER_HOST}.sslip.io         # Auto-DNS with sslip.io
           email: ${LETSENCRYPT_EMAIL}
         env:
           NODE_ENV: production
@@ -257,7 +256,9 @@ The template includes commented examples for:
 tako setup -e production
 ```
 
-This installs Docker, configures the proxy, configures firewall, and hardens security.
+This installs Docker, WireGuard, the node-local `takod` runtime, firewall rules,
+monitoring, and security hardening. On released CLI builds, setup also refreshes
+the server-side `/usr/local/bin/tako` binary used by `takod`.
 
 5. **Deploy your application:**
 
@@ -313,7 +314,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | Command | Description |
 |---------|-------------|
 | `tako init` | Initialize new project with template config |
-| `tako setup` | Set up existing server (Docker, proxy, security hardening) |
+| `tako setup` | Set up or refresh an existing server with Docker, WireGuard, takod, firewall, and security hardening |
 | `tako deploy` | Deploy application to environment |
 | `tako rollback [id]` | Rollback to previous/specific deployment |
 | `tako destroy` | Remove all services from server |
@@ -399,8 +400,7 @@ services:
     env:
       NODE_ENV: production
     proxy:
-      domains:
-        - app.example.com
+      domain: app.example.com
       email: admin@example.com
 ```
 
@@ -468,8 +468,7 @@ services:
     build: ./frontend
     port: 3000
     proxy:
-      domains:
-        - app.example.com
+      domain: app.example.com
 
   api:
     build: ./backend

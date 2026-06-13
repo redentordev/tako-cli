@@ -232,8 +232,7 @@ type LoadBalancerHealthCheck struct {
 
 // ProxyConfig defines per-service public proxy settings.
 type ProxyConfig struct {
-	// Domain is the primary domain where traffic is served (recommended)
-	// Use this with RedirectFrom for cleaner configuration
+	// Domain is where traffic is served.
 	Domain string `yaml:"domain,omitempty" json:"domain,omitempty"`
 
 	// RedirectFrom specifies domains that should redirect to the primary Domain
@@ -241,55 +240,21 @@ type ProxyConfig struct {
 	// Example: ["www.example.com", "old.example.com"] -> redirects to "example.com"
 	RedirectFrom []string `yaml:"redirectFrom,omitempty" json:"redirectFrom,omitempty"`
 
-	// Domains is the legacy field for backward compatibility
-	// If Domain is not set, the first domain in Domains is treated as primary
-	// Deprecated: Use Domain + RedirectFrom instead for clearer configuration
-	Domains []string `yaml:"domains,omitempty" json:"domains,omitempty"`
-
 	Email string    `yaml:"email,omitempty" json:"email,omitempty"` // Email for Let's Encrypt
 	TLS   TLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
 }
 
 // GetPrimaryDomain returns the primary domain for this service
 func (p *ProxyConfig) GetPrimaryDomain() string {
-	if p.Domain != "" {
-		return p.Domain
-	}
-	if len(p.Domains) > 0 {
-		return p.Domains[0]
-	}
-	return ""
+	return p.Domain
 }
 
-// GetAllDomains returns all domains (primary + additional domains from Domains array)
-// excluding redirect domains
+// GetAllDomains returns all serving domains, excluding redirect domains.
 func (p *ProxyConfig) GetAllDomains() []string {
-	domains := []string{}
-
-	if p.Domain != "" {
-		domains = append(domains, p.Domain)
+	if p.Domain == "" {
+		return nil
 	}
-
-	// Add domains from legacy Domains array (but skip the first if Domain is set)
-	for i, d := range p.Domains {
-		if p.Domain != "" || i > 0 {
-			// Avoid duplicates
-			isDuplicate := false
-			for _, existing := range domains {
-				if existing == d {
-					isDuplicate = true
-					break
-				}
-			}
-			if !isDuplicate {
-				domains = append(domains, d)
-			}
-		} else if i == 0 && p.Domain == "" {
-			domains = append(domains, d)
-		}
-	}
-
-	return domains
+	return []string{p.Domain}
 }
 
 // GetRedirectDomains returns all domains that should redirect to the primary domain

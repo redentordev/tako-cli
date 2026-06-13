@@ -73,8 +73,7 @@ example-name/
 3. **Update domain in tako.yaml:**
    ```yaml
    proxy:
-     domains:
-       - your-domain.com
+     domain: your-domain.com
    ```
 
 4. **Deploy:**
@@ -207,8 +206,7 @@ services:
     build: .
     port: 3000
     proxy:
-      domains:
-        - example.com
+      domain: example.com
       email: admin@example.com
 ```
 

@@ -40,8 +40,7 @@ environments:
           - API_KEY
           - STRIPE_KEY:STRIPE_SECRET_KEY  # Alias: container sees STRIPE_KEY, reads from STRIPE_SECRET_KEY
         proxy:
-          domains:
-            - nextjs-todos.${SERVER_IP}.sslip.io  # Auto-resolves to your server IP
+          domain: nextjs-todos.${SERVER_IP}.sslip.io  # Auto-resolves to your server IP
           email: admin@example.com      # Change this to your email
           tls:
             provider: letsencrypt

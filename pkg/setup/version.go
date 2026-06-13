@@ -3,7 +3,6 @@ package setup
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -25,16 +24,12 @@ type ServerVersion struct {
 // VersionFile is the location of the version manifest on servers
 const VersionFile = "/etc/tako/version.json"
 
-// LegacySetupMarker is the old setup completion marker
-const LegacySetupMarker = "/etc/tako/setup.complete"
-
 // DetectServerVersion detects the setup version installed on a server
 func DetectServerVersion(client *ssh.Client) (*ServerVersion, error) {
 	// Try to read version file
 	output, err := client.Execute(fmt.Sprintf("cat %s 2>/dev/null", VersionFile))
-	if err != nil || strings.TrimSpace(output) == "" {
-		// No version file - check for legacy setup
-		return detectLegacySetup(client)
+	if err != nil || output == "" {
+		return nil, ErrNotSetup
 	}
 
 	var version ServerVersion
@@ -43,70 +38,6 @@ func DetectServerVersion(client *ssh.Client) (*ServerVersion, error) {
 	}
 
 	return &version, nil
-}
-
-// detectLegacySetup detects if server has old setup without version file
-func detectLegacySetup(client *ssh.Client) (*ServerVersion, error) {
-	// Check for legacy setup marker
-	_, err := client.Execute(fmt.Sprintf("test -f %s", LegacySetupMarker))
-	if err != nil {
-		// No setup at all
-		return nil, ErrNotSetup
-	}
-
-	// Legacy setup detected - version 1.0.0
-	features := detectLegacyFeatures(client)
-
-	return &ServerVersion{
-		Version:  "1.0.0",
-		Features: features,
-		Components: map[string]string{
-			"docker":     detectDockerVersion(client),
-			"tako-proxy": detectTakoProxyVersion(client),
-		},
-	}, nil
-}
-
-// detectLegacyFeatures detects what features are installed
-func detectLegacyFeatures(client *ssh.Client) []string {
-	features := []string{}
-
-	_, err := client.Execute("docker ps --filter name=tako-proxy --format '{{.Names}}' | grep tako-proxy")
-	if err == nil {
-		features = append(features, "tako-proxy")
-	}
-
-	// Check Nginx
-	_, err = client.Execute("which nginx")
-	if err == nil {
-		features = append(features, "nginx")
-	}
-
-	// Check fail2ban
-	_, err = client.Execute("which fail2ban-client")
-	if err == nil {
-		features = append(features, "fail2ban")
-	}
-
-	return features
-}
-
-// detectDockerVersion gets the installed Docker version
-func detectDockerVersion(client *ssh.Client) string {
-	output, err := client.Execute("docker --version | awk '{print $3}' | tr -d ','")
-	if err != nil {
-		return "unknown"
-	}
-	return strings.TrimSpace(output)
-}
-
-// detectTakoProxyVersion gets the installed tako-proxy version.
-func detectTakoProxyVersion(client *ssh.Client) string {
-	output, err := client.Execute("docker exec tako-proxy traefik version 2>/dev/null | grep 'Version:' | awk '{print $2}'")
-	if err != nil {
-		return "unknown"
-	}
-	return strings.TrimSpace(output)
 }
 
 // IsUpgradeAvailable checks if an upgrade is available

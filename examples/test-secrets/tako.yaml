@@ -27,8 +27,7 @@ environments:
           - API_KEY
           - STRIPE_KEY:STRIPE_SECRET_KEY
         proxy:
-          domains:
-            - secrets-test.${SERVER_IP}.sslip.io
+          domain: secrets-test.${SERVER_IP}.sslip.io
           email: admin@example.com
           tls:
             provider: letsencrypt

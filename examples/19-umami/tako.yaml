@@ -34,8 +34,7 @@ environments:
         port: 3000
         persistent: true
         proxy:
-          domains:
-            - umami.${SERVER_HOST}.sslip.io
+          domain: umami.${SERVER_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}
         env:
           DATABASE_URL: postgresql://umami:${POSTGRES_PASSWORD}@postgres:5432/umami

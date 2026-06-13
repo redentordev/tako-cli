@@ -65,8 +65,7 @@ The SQLite database will be created in `./data/todos.db`.
 2. The domain is automatically configured using sslip.io:
    ```yaml
    proxy:
-     domains:
-       - nextjs-todos.${SERVER_IP}.sslip.io  # Auto-resolves to your server
+     domain: nextjs-todos.${SERVER_IP}.sslip.io  # Auto-resolves to your server
    ```
 
    This provides automatic DNS without needing to configure actual DNS records.
@@ -114,7 +113,7 @@ Key settings in `tako.yaml`:
 - **Replicas**: 1 (can be increased for load balancing)
 - **Restart Policy**: `unless-stopped`
 - **Health Check**: Monitors `/api/todos` endpoint
-- **Deployment Strategy**: Rolling updates with zero downtime
+- **Deployment Strategy**: Reconciled container updates
 - **TLS**: Automatic HTTPS with Let's Encrypt
 
 ## Tech Stack

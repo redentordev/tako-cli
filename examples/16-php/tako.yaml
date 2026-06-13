@@ -20,8 +20,7 @@ environments:
         build: .
         port: 80
         proxy:
-          domains:
-            - php.${SERVER_HOST}.sslip.io
+          domain: php.${SERVER_HOST}.sslip.io
           email: admin@example.com
         env:
           PHP_MEMORY_LIMIT: 128M

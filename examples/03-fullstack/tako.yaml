@@ -33,8 +33,7 @@ environments:
         build: ./web
         port: 3000
         proxy:
-          domains:
-            - fullstack.${SERVER_HOST}.sslip.io
+          domain: fullstack.${SERVER_HOST}.sslip.io
           email: admin@example.com
         env:
           NODE_ENV: production

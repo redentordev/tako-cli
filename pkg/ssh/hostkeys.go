@@ -24,7 +24,7 @@ const (
 	HostKeyModeStrict
 	// HostKeyModeAsk prompts user for unknown hosts (interactive only)
 	HostKeyModeAsk
-	// HostKeyModeInsecure disables verification (not recommended, legacy behavior)
+	// HostKeyModeInsecure disables verification by explicit opt-out.
 	HostKeyModeInsecure
 )
 

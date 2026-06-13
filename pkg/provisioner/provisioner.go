@@ -1,6 +1,7 @@
 package provisioner
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -137,6 +138,53 @@ func (p *Provisioner) InstallWireGuard() error {
 	return mesh.EnsureWireGuardTools(p.client, p.verbose)
 }
 
+func (p *Provisioner) InstallTakodBinary(version string) error {
+	version, err := releaseVersionArg(version)
+	if err != nil {
+		existing, _ := p.client.Execute("command -v tako 2>/dev/null || true")
+		if strings.TrimSpace(existing) != "" {
+			if p.verbose {
+				fmt.Printf("  Using existing server-side tako binary: %s\n", strings.TrimSpace(existing))
+			}
+			return nil
+		}
+		if p.verbose {
+			fmt.Printf("  Skipping takod binary install: %v\n", err)
+		}
+		return nil
+	}
+
+	arch, err := p.detectLinuxArch()
+	if err != nil {
+		return err
+	}
+
+	binaryName := fmt.Sprintf("tako-linux-%s", arch)
+	downloadURL := fmt.Sprintf("https://github.com/redentordev/tako-cli/releases/download/%s/%s", version, binaryName)
+	script := fmt.Sprintf(`set -eu
+tmp="$(mktemp)"
+cleanup() { rm -f "$tmp"; }
+trap cleanup EXIT
+if command -v curl >/dev/null 2>&1; then
+  curl -fL --retry 3 --connect-timeout 15 -o "$tmp" %s
+elif command -v wget >/dev/null 2>&1; then
+  wget -O "$tmp" %s
+else
+  echo "curl or wget is required to install takod binary" >&2
+  exit 1
+fi
+install -m 0755 "$tmp" /usr/local/bin/tako
+/usr/local/bin/tako --version >/dev/null
+`,
+		shellQuote(downloadURL),
+		shellQuote(downloadURL),
+	)
+	if _, err := p.client.Execute(runRootScript(script)); err != nil {
+		return fmt.Errorf("failed to install takod binary from release %s: %w", version, err)
+	}
+	return nil
+}
+
 func (p *Provisioner) InstallTakodService(socket string, dataDir string) error {
 	binaryPath, _ := p.client.Execute("command -v tako 2>/dev/null || test -x /usr/local/bin/tako && echo /usr/local/bin/tako || true")
 	binaryPath = strings.TrimSpace(binaryPath)
@@ -191,6 +239,42 @@ WantedBy=multi-user.target
 	return nil
 }
 
+func (p *Provisioner) detectLinuxArch() (string, error) {
+	output, err := p.client.Execute("uname -m")
+	if err != nil {
+		return "", fmt.Errorf("failed to detect server architecture: %w", err)
+	}
+	return normalizeLinuxArch(strings.TrimSpace(output))
+}
+
+func normalizeLinuxArch(machine string) (string, error) {
+	switch strings.ToLower(machine) {
+	case "x86_64", "amd64":
+		return "amd64", nil
+	case "aarch64", "arm64":
+		return "arm64", nil
+	default:
+		return "", fmt.Errorf("unsupported Linux architecture %q", machine)
+	}
+}
+
+func releaseVersionArg(version string) (string, error) {
+	trimmed := strings.TrimSpace(version)
+	if trimmed != version {
+		return "", fmt.Errorf("release version must not contain leading or trailing whitespace")
+	}
+	if version == "" || version == "dev" || version == "unknown" {
+		return "", fmt.Errorf("release version is not available for this build")
+	}
+	for _, r := range version {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return "", fmt.Errorf("release version contains unsupported characters")
+	}
+	return version, nil
+}
+
 func systemdPathArg(value string, fallback string) (string, error) {
 	if value == "" {
 		value = fallback
@@ -205,6 +289,18 @@ func systemdPathArg(value string, fallback string) (string, error) {
 		return "", fmt.Errorf("path must not contain whitespace")
 	}
 	return value, nil
+}
+
+func runRootScript(script string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(script))
+	return fmt.Sprintf("echo '%s' | base64 -d | sudo sh", encoded)
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // Note: tako-proxy is handled per-deployment by the deployer.

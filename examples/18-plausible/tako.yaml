@@ -49,8 +49,7 @@ environments:
         persistent: true
         replicas: 1
         proxy:
-          domains:
-            - plausible.${SERVER_HOST}.sslip.io
+          domain: plausible.${SERVER_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}
         env:
           BASE_URL: https://plausible.${SERVER_HOST}.sslip.io

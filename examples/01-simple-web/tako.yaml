@@ -26,8 +26,7 @@ environments:
         build: .                # Build from current directory
         port: 3000              # Your app's port
         proxy:
-          domains:
-            - simple-web.${SERVER_HOST}.sslip.io
+          domain: simple-web.${SERVER_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}
         env:
           NODE_ENV: production

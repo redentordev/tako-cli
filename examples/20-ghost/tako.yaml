@@ -37,8 +37,7 @@ environments:
         dependsOn:
           - mysql
         proxy:
-          domains:
-            - ghost.${SERVER_HOST}.sslip.io
+          domain: ghost.${SERVER_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}
         env:
           # Database

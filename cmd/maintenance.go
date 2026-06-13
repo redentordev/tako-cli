@@ -487,7 +487,7 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	// Build proxy labels for all domains using the label builder.
 	labelBuilder := utils.NewDockerLabelBuilder()
 
-	for _, domain := range service.Proxy.Domains {
+	for _, domain := range service.Proxy.GetAllDomains() {
 		domainSafe := strings.ReplaceAll(domain, ".", "-")
 		routerName := fmt.Sprintf("%s-maintenance", domainSafe)
 

@@ -115,8 +115,7 @@ To use a custom domain instead of sslip.io:
 2. Update `tako.yaml`:
 ```yaml
 proxy:
-  domains:
-    - n8n.yourdomain.com
+  domain: n8n.yourdomain.com
   email: admin@yourdomain.com
 env:
   N8N_HOST: n8n.yourdomain.com
