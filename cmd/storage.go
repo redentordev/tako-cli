@@ -62,7 +62,7 @@ func runStorageStatus(cmd *cobra.Command, args []string) error {
 storage:
   nfs:
     enabled: true
-    server: auto  # or specify a server name
+    server: auto  # or specify an environment node
     exports:
       - name: shared_data
         path: /srv/nfs/data`)
@@ -340,7 +340,7 @@ func storageTargetServers(cfg *config.Config, envName string, nfsServerName stri
 		}
 	}
 	if nfsServerName != "" && !seen[nfsServerName] {
-		targets = append(targets, nfsServerName)
+		return nil, fmt.Errorf("NFS server %s is not part of environment %s", nfsServerName, envName)
 	}
 	sort.Strings(targets)
 	return targets, nil
