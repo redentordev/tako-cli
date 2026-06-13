@@ -364,7 +364,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				fmt.Print(acmeMgr.GetCNAMEInstructions(registrations))
 				fmt.Printf("\n⚠ IMPORTANT: Add the CNAME records above to your DNS provider.\n")
 				fmt.Printf("  Wildcard certificates will be issued automatically once DNS propagates.\n")
-				fmt.Printf("  You can check status with: tako ssl status\n\n")
+				fmt.Printf("  Re-run tako deploy after DNS propagation to reconcile the deployment.\n\n")
 
 				// Check if DNS is already configured (for returning users)
 				dnsChecker := ssl.NewDNSChecker()
@@ -703,7 +703,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 					if verbose {
 						fmt.Printf("\n⚠️  SSL certificate not yet available for %s\n", domain)
 						fmt.Printf("   This is normal for first deployment. Certificate will be provisioned automatically.\n")
-						fmt.Printf("   You can check status with: tako ssl status\n")
+						fmt.Printf("   Re-run tako deploy after DNS propagation to reconcile the service.\n")
 					}
 				}
 				cancel()
