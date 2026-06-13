@@ -260,11 +260,16 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("rollback succeeded but failed to persist takod state: %w", err)
 	}
 
-	// Replicate updated state to mesh nodes (async, fire-and-forget)
+	// Replicate updated state to mesh nodes.
 	if cfg.IsMultiServer() {
 		replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
-		history, _ := stateManager.LoadHistory()
-		replicator.ReplicateDeployment(targetDeployment, history)
+		history, err := stateManager.LoadHistory()
+		if err != nil {
+			return fmt.Errorf("rollback succeeded but failed to load remote deployment history for replication: %w", err)
+		}
+		if err := replicator.ReplicateDeployment(targetDeployment, history); err != nil {
+			return fmt.Errorf("rollback succeeded but failed to replicate remote deployment history: %w", err)
+		}
 	}
 
 	// Send success notification
