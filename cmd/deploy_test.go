@@ -97,3 +97,15 @@ func TestDeployActualStateErrorRefusesUnknownRunningServices(t *testing.T) {
 		}
 	}
 }
+
+func TestDeployRemoteHistoryErrorFailsSuccessfulRuntimeMutation(t *testing.T) {
+	err := deployRemoteHistoryError(errors.New("disk full"))
+	if err == nil {
+		t.Fatal("deployRemoteHistoryError returned nil")
+	}
+	for _, want := range []string{"deployment succeeded", "failed to save remote deployment history", "disk full"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}

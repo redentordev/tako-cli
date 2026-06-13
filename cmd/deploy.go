@@ -528,8 +528,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if !deploymentFailed {
 		deployment.Status = remotestate.StatusSuccess
 		deployment.Duration = time.Since(startTime)
-		if err := stateManager.SaveDeployment(deployment); err != nil && verbose {
-			fmt.Printf("Warning: failed to save remote deployment state: %v\n", err)
+		if err := stateManager.SaveDeployment(deployment); err != nil {
+			return deployRemoteHistoryError(err)
 		}
 
 		finalNodeActualState, err := reconcile.GatherActualStateByServer(sshPool, cfg, envName, serverNames)
@@ -766,4 +766,8 @@ func isAffirmative(response string) bool {
 
 func deployActualStateError(err error) error {
 	return fmt.Errorf("failed to gather actual state from takod; refusing to plan against unknown running services: %w", err)
+}
+
+func deployRemoteHistoryError(err error) error {
+	return fmt.Errorf("deployment succeeded but failed to save remote deployment history: %w", err)
 }
