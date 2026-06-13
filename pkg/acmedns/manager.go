@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 const (
@@ -24,50 +26,31 @@ const (
 type Manager struct {
 	client   *ssh.Client
 	serverIP string
+	socket   string
 	verbose  bool
 }
 
 // NewManager creates a new acme-dns manager
-func NewManager(client *ssh.Client, serverIP string, verbose bool) *Manager {
+func NewManager(client *ssh.Client, serverIP string, socket string, verbose bool) *Manager {
 	return &Manager{
 		client:   client,
 		serverIP: serverIP,
+		socket:   socket,
 		verbose:  verbose,
 	}
 }
 
 // Setup ensures acme-dns container is running
 func (m *Manager) Setup() error {
-	// Check if container already exists and is running
-	running, err := m.isContainerRunning()
-	if err != nil {
-		return fmt.Errorf("failed to check container status: %w", err)
-	}
-
-	if running {
-		if m.verbose {
-			fmt.Println("  acme-dns container already running")
-		}
-		return nil
-	}
-
 	if m.verbose {
 		fmt.Println("  Setting up acme-dns for wildcard SSL certificates...")
 	}
 
-	// Create directories
-	if err := m.createDirectories(); err != nil {
-		return err
-	}
-
-	// Create configuration
-	if err := m.createConfig(); err != nil {
-		return err
-	}
-
-	// Deploy container
-	if err := m.deployContainer(); err != nil {
-		return err
+	if _, err := takodclient.RequestJSON(m.client, m.socket, "POST", "/v1/acme-dns", takod.ReconcileAcmeDNSRequest{
+		ServerIP: m.serverIP,
+		Image:    Image,
+	}); err != nil {
+		return fmt.Errorf("failed to reconcile acme-dns through takod: %w", err)
 	}
 
 	// Wait for container to be ready
@@ -75,100 +58,6 @@ func (m *Manager) Setup() error {
 
 	if m.verbose {
 		fmt.Println("  ✓ acme-dns container deployed")
-	}
-
-	return nil
-}
-
-// isContainerRunning checks if the acme-dns container is running
-func (m *Manager) isContainerRunning() (bool, error) {
-	cmd := fmt.Sprintf("docker ps --filter name=%s --format '{{.Names}}'", ContainerName)
-	output, err := m.client.Execute(cmd)
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(output) == ContainerName, nil
-}
-
-// createDirectories creates necessary directories for acme-dns
-func (m *Manager) createDirectories() error {
-	dirs := []string{DataDir, ConfigDir, DataDir + "/data"}
-	for _, dir := range dirs {
-		cmd := fmt.Sprintf("sudo mkdir -p %s && sudo chmod 755 %s", dir, dir)
-		if _, err := m.client.Execute(cmd); err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", dir, err)
-		}
-	}
-	return nil
-}
-
-// createConfig creates the acme-dns configuration file
-func (m *Manager) createConfig() error {
-	// acme-dns config in TOML format
-	config := fmt.Sprintf(`[general]
-listen = "0.0.0.0:53"
-protocol = "both"
-domain = "acme.tako"
-nsname = "acme.tako"
-nsadmin = "admin.tako"
-records = [
-    "acme.tako. A %s",
-    "acme.tako. NS acme.tako."
-]
-debug = false
-
-[database]
-engine = "sqlite3"
-connection = "/var/lib/acme-dns/acme-dns.db"
-
-[api]
-ip = "0.0.0.0"
-port = "80"
-tls = "none"
-corsorigins = ["*"]
-use_header = false
-
-[logconfig]
-loglevel = "info"
-logtype = "stdout"
-logformat = "text"
-`, m.serverIP)
-
-	// Write config file
-	cmd := fmt.Sprintf("echo '%s' | sudo tee %s/config.cfg > /dev/null",
-		strings.ReplaceAll(config, "'", "'\\''"),
-		ConfigDir)
-
-	if _, err := m.client.Execute(cmd); err != nil {
-		return fmt.Errorf("failed to write acme-dns config: %w", err)
-	}
-
-	return nil
-}
-
-// deployContainer deploys the acme-dns Docker container
-func (m *Manager) deployContainer() error {
-	// Remove existing container if any
-	m.client.Execute(fmt.Sprintf("docker rm -f %s 2>/dev/null", ContainerName))
-
-	// Deploy new container
-	cmd := fmt.Sprintf(`docker run -d \
-		--name %s \
-		--restart unless-stopped \
-		-p 53:53/udp \
-		-p 53:53/tcp \
-		-p 8053:80 \
-		-v %s/config:/etc/acme-dns:ro \
-		-v %s/data:/var/lib/acme-dns \
-		%s`,
-		ContainerName,
-		DataDir,
-		DataDir,
-		Image)
-
-	output, err := m.client.Execute(cmd)
-	if err != nil {
-		return fmt.Errorf("failed to deploy acme-dns container: %w, output: %s", err, output)
 	}
 
 	return nil
@@ -244,9 +133,7 @@ func (m *Manager) Register(baseDomain string) (*Registration, error) {
 
 // loadRegistration loads an existing registration for a domain
 func (m *Manager) loadRegistration(baseDomain string) (*Registration, error) {
-	credPath := DataDir + "/credentials.json"
-	cmd := fmt.Sprintf("cat %s 2>/dev/null", credPath)
-	output, err := m.client.Execute(cmd)
+	output, err := m.readCredentials()
 	if err != nil {
 		return nil, err
 	}
@@ -266,12 +153,9 @@ func (m *Manager) loadRegistration(baseDomain string) (*Registration, error) {
 
 // saveRegistration saves a registration to the credentials file
 func (m *Manager) saveRegistration(reg *Registration) error {
-	credPath := DataDir + "/credentials.json"
-
 	// Load existing credentials
 	var creds Credentials
-	cmd := fmt.Sprintf("cat %s 2>/dev/null", credPath)
-	output, _ := m.client.Execute(cmd)
+	output, _ := m.readCredentials()
 	if output != "" {
 		// Try to parse existing credentials, but don't fail if the file is corrupted
 		// We'll just start fresh with an empty credentials object
@@ -294,11 +178,7 @@ func (m *Manager) saveRegistration(reg *Registration) error {
 		return fmt.Errorf("failed to marshal credentials: %w", err)
 	}
 
-	cmd = fmt.Sprintf("echo '%s' | sudo tee %s > /dev/null",
-		strings.ReplaceAll(string(data), "'", "'\\''"),
-		credPath)
-
-	if _, err := m.client.Execute(cmd); err != nil {
+	if err := m.writeCredentials(string(data)); err != nil {
 		return fmt.Errorf("failed to save credentials: %w", err)
 	}
 
@@ -330,9 +210,7 @@ func (m *Manager) GetCNAMEInstructions(registrations []*Registration) string {
 
 // LoadAllRegistrations loads all saved registrations
 func (m *Manager) LoadAllRegistrations() (map[string]*Registration, error) {
-	credPath := DataDir + "/credentials.json"
-	cmd := fmt.Sprintf("cat %s 2>/dev/null", credPath)
-	output, err := m.client.Execute(cmd)
+	output, err := m.readCredentials()
 	if err != nil || strings.TrimSpace(output) == "" {
 		return make(map[string]*Registration), nil
 	}
@@ -351,24 +229,35 @@ func (m *Manager) LoadAllRegistrations() (map[string]*Registration, error) {
 
 // Stop stops the acme-dns container
 func (m *Manager) Stop() error {
-	cmd := fmt.Sprintf("docker stop %s 2>/dev/null", ContainerName)
-	if _, err := m.client.Execute(cmd); err != nil {
-		// Ignore "no such container" errors, but return other errors
-		if !strings.Contains(err.Error(), "No such container") {
-			return fmt.Errorf("failed to stop acme-dns container: %w", err)
-		}
-	}
-	return nil
+	return m.Remove()
 }
 
 // Remove removes the acme-dns container
 func (m *Manager) Remove() error {
-	cmd := fmt.Sprintf("docker rm -f %s 2>/dev/null", ContainerName)
-	if _, err := m.client.Execute(cmd); err != nil {
-		// Ignore "no such container" errors, but return other errors
-		if !strings.Contains(err.Error(), "No such container") {
-			return fmt.Errorf("failed to remove acme-dns container: %w", err)
-		}
+	if _, err := takodclient.RequestJSON(m.client, m.socket, "DELETE", "/v1/acme-dns", nil); err != nil {
+		return fmt.Errorf("failed to remove acme-dns through takod: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) readCredentials() (string, error) {
+	output, err := takodclient.RequestJSON(m.client, m.socket, "GET", "/v1/acme-dns/credentials", nil)
+	if err != nil {
+		return "", err
+	}
+	var response takod.AcmeDNSCredentialsResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return "", fmt.Errorf("failed to parse acme-dns credentials response: %w", err)
+	}
+	return response.Content, nil
+}
+
+func (m *Manager) writeCredentials(content string) error {
+	_, err := takodclient.RequestJSON(m.client, m.socket, "PUT", "/v1/acme-dns/credentials", takod.AcmeDNSCredentialsRequest{
+		Content: content,
+	})
+	if err != nil {
+		return err
 	}
 	return nil
 }

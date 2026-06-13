@@ -91,11 +91,11 @@ release.
 container reconcile, proxy file updates, proxy container reconcile, and project
 cleanup from node-local state. Actual container discovery prefers this socket
 and falls back to direct SSH Docker inspection when the agent is absent. Service
-deploy, scale, maintenance/live, remove, destroy, and proxy routing now ask the
-local agent to remove, pull, run, verify containers, publish proxy config, and
-clean project resources through typed socket requests. Remaining mutating
-workflows such as acme-dns setup, backup, cleanup, and old setup-upgrader paths
-still need to move behind socket APIs.
+deploy, scale, maintenance/live, remove, destroy, acme-dns setup, and proxy
+routing now ask the local agent to remove, pull, run, verify containers,
+publish proxy config, persist acme-dns credentials, and clean project resources
+through typed socket requests. Remaining mutating workflows such as backup,
+cleanup, and old setup-upgrader paths still need to move behind socket APIs.
 
 Local `.tako` files are cache and UX acceleration. The durable truth lives in
 Git plus the last accepted desired revision and event log replicated by takod.
