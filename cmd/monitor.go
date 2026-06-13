@@ -43,7 +43,7 @@ Services must have monitoring enabled in tako.yaml:
     web:
       port: 3000
       proxy:
-        domains: [example.com]
+        domain: example.com
       healthCheck:
         path: /health
       monitoring:

@@ -23,8 +23,7 @@ environments:
         volumes:
           - n8n_data:/home/node/.n8n
         proxy:
-          domains:
-            - n8n.${SERVER_HOST}.sslip.io
+          domain: n8n.${SERVER_HOST}.sslip.io
           email: admin@example.com
         env:
           N8N_HOST: n8n.${SERVER_HOST}.sslip.io

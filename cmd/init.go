@@ -294,10 +294,6 @@ environments:
         proxy:
           # Primary domain where traffic is served
           domain: %s.${SERVER_HOST}.sslip.io  # sslip.io provides automatic DNS
-          # Or use multiple domains:
-          # domains:
-          #   - app.example.com
-          #   - api.example.com
           
           # Domain redirects (301 redirect to primary domain with path preservation)
           # redirectFrom:
@@ -484,7 +480,7 @@ environments:
 #   build: ./frontend
 #   port: 3000
 #   proxy:
-#     domains: [app.example.com]
+#     domain: app.example.com
 # api:
 #   build: ./backend
 #   port: 4000

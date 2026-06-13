@@ -20,8 +20,7 @@ environments:
         build: .
         port: 3000
         proxy:
-          domains:
-            - hono.${SERVER_HOST}.sslip.io
+          domain: hono.${SERVER_HOST}.sslip.io
           email: admin@example.com
         env:
           NODE_ENV: production

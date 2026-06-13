@@ -793,8 +793,8 @@ func isNonInteractive() bool {
 func extractDomains(services map[string]config.ServiceConfig) []string {
 	domains := []string{}
 	for _, service := range services {
-		if service.Proxy != nil && len(service.Proxy.Domains) > 0 {
-			domains = append(domains, service.Proxy.Domains...)
+		if service.Proxy != nil {
+			domains = append(domains, service.Proxy.GetAllDomains()...)
 		}
 	}
 	return domains

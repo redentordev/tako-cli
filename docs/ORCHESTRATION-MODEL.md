@@ -80,10 +80,16 @@ stable node key under `/etc/tako/wireguard`, writes `/etc/wireguard/tako.conf`,
 and brings up `wg-quick@tako`. One-node deployments still get the same
 interface, just without peer blocks.
 
-The node-local `takod` process listens on `/run/tako/takod.sock` when a server
-has a compatible `tako` binary installed. It currently exposes health and status
-from node-local state. Actual container discovery prefers this socket and falls
-back to direct SSH Docker inspection when the agent is absent. Mutating reconcile
+The node-local `takod` process listens on `/run/tako/takod.sock`. On released
+CLI builds, `tako setup` downloads the matching Linux release binary for the
+server architecture, installs it at `/usr/local/bin/tako`, and restarts the
+systemd service. Development builds reuse an existing server binary when one is
+already installed, which keeps local iteration from depending on a published
+release.
+
+`takod` currently exposes health, status, and actual container discovery from
+node-local state. Actual container discovery prefers this socket and falls back
+to direct SSH Docker inspection when the agent is absent. Mutating reconcile
 operations still use SSH until they are moved behind the socket API.
 
 Local `.tako` files are cache and UX acceleration. The durable truth lives in

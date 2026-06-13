@@ -9,30 +9,6 @@ import (
 
 // AccessLog represents a JSON proxy access log entry.
 type AccessLog struct {
-	// Old format (for backward compatibility)
-	Level   string  `json:"level"`
-	Ts      float64 `json:"ts"`
-	Logger  string  `json:"logger"`
-	Msg     string  `json:"msg"`
-	Request struct {
-		RemoteIP   string              `json:"remote_ip"`
-		RemotePort string              `json:"remote_port"`
-		Proto      string              `json:"proto"`
-		Method     string              `json:"method"`
-		Host       string              `json:"host"`
-		URI        string              `json:"uri"`
-		Headers    map[string][]string `json:"headers"`
-	} `json:"request"`
-	UserID      string  `json:"user_id"`
-	Duration    float64 `json:"duration"`
-	Size        int     `json:"size"`
-	Status      int     `json:"status"`
-	RespHeaders struct {
-		ContentType []string `json:"Content-Type"`
-		Server      []string `json:"Server"`
-	} `json:"resp_headers"`
-
-	// Current proxy JSON format.
 	ClientAddr            string `json:"ClientAddr"`
 	ClientHost            string `json:"ClientHost"`
 	DownstreamStatus      int    `json:"DownstreamStatus"`
@@ -78,14 +54,7 @@ func (f *Formatter) FormatLine(line string) (string, error) {
 		return line, nil
 	}
 
-	// Detect which format we have and extract common fields
 	var timestamp string
-	var status int
-	var method string
-	var remoteIP string
-	var duration float64
-	var size int
-	var uri string
 
 	// Apply service filter if set
 	if f.serviceFilter != "" {
@@ -103,36 +72,24 @@ func (f *Formatter) FormatLine(line string) (string, error) {
 		}
 	}
 
-	// Check if it is the current proxy format.
-	if log.RequestMethod != "" {
-		// Current proxy JSON format.
-		if log.Time != "" {
-			t, err := time.Parse(time.RFC3339, log.Time)
-			if err == nil {
-				timestamp = t.Format("15:04:05")
-			} else {
-				timestamp = log.Time[:8] // fallback
-			}
-		}
-		status = log.DownstreamStatus
-		method = log.RequestMethod
-		remoteIP = log.ClientHost
-		duration = float64(log.OriginDuration) / 1000000000.0 // nanoseconds to seconds
-		size = int(log.DownstreamContentSize)
-		uri = log.RequestPath
-	} else if log.Request.Method != "" {
-		// Old format
-		timestamp = time.Unix(int64(log.Ts), 0).Format("15:04:05")
-		status = log.Status
-		method = log.Request.Method
-		remoteIP = log.Request.RemoteIP
-		duration = log.Duration
-		size = log.Size
-		uri = log.Request.URI
-	} else {
+	if log.RequestMethod == "" {
 		// Skip non-request logs
 		return "", nil
 	}
+	if log.Time != "" {
+		t, err := time.Parse(time.RFC3339, log.Time)
+		if err == nil {
+			timestamp = t.Format("15:04:05")
+		} else if len(log.Time) >= 8 {
+			timestamp = log.Time[:8]
+		}
+	}
+	status := log.DownstreamStatus
+	method := log.RequestMethod
+	remoteIP := log.ClientHost
+	duration := float64(log.OriginDuration) / 1000000000.0 // nanoseconds to seconds
+	size := int(log.DownstreamContentSize)
+	uri := log.RequestPath
 
 	// Format status with color
 	statusColor := getStatusColor(status)
@@ -179,16 +136,6 @@ func (f *Formatter) FormatLine(line string) (string, error) {
 		// Add request host
 		if log.RequestHost != "" {
 			output += fmt.Sprintf("\n  %sHost:%s %s", colorGray, colorReset, log.RequestHost)
-		}
-
-		// Add user agent for old format
-		if userAgent, ok := log.Request.Headers["User-Agent"]; ok && len(userAgent) > 0 {
-			output += fmt.Sprintf("\n  %sUA:%s %s", colorGray, colorReset, userAgent[0])
-		}
-
-		// Add referer for old format
-		if referer, ok := log.Request.Headers["Referer"]; ok && len(referer) > 0 && referer[0] != "" {
-			output += fmt.Sprintf("\n  %sReferer:%s %s", colorGray, colorReset, referer[0])
 		}
 	}
 

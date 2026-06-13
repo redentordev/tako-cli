@@ -296,8 +296,7 @@ To use a custom domain:
 2. Update `tako.yaml`:
 ```yaml
 proxy:
-  domains:
-    - analytics.yourdomain.com
+  domain: analytics.yourdomain.com
 env:
   BASE_URL: https://analytics.yourdomain.com
 ```

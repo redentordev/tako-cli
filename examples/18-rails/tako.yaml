@@ -20,8 +20,7 @@ environments:
         build: .
         port: 3000
         proxy:
-          domains:
-            - ruby.${SERVER_HOST}.sslip.io
+          domain: ruby.${SERVER_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}
         env:
           RACK_ENV: production

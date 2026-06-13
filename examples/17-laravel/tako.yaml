@@ -20,8 +20,7 @@ environments:
         build: .
         port: 8000
         proxy:
-          domains:
-            - laravel.${SERVER_HOST}.sslip.io
+          domain: laravel.${SERVER_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}
         env:
           APP_NAME: Laravel

@@ -148,11 +148,11 @@ func (m *Monitor) checkService(serviceName string, service *config.ServiceConfig
 
 // checkPublicService checks a public service via HTTP
 func (m *Monitor) checkPublicService(serviceName string, service *config.ServiceConfig) error {
-	if service.Proxy == nil || len(service.Proxy.Domains) == 0 {
-		return fmt.Errorf("service has no domains configured")
+	if service.Proxy == nil || service.Proxy.GetPrimaryDomain() == "" {
+		return fmt.Errorf("service has no domain configured")
 	}
 
-	domain := service.Proxy.Domains[0]
+	domain := service.Proxy.GetPrimaryDomain()
 	path := service.HealthCheck.Path
 	if path == "" {
 		path = "/"

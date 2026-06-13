@@ -20,8 +20,7 @@ environments:
         export: true  # Available to other projects
         restart: unless-stopped
         proxy:
-          domains:
-            - backend-api.${SERVER_HOST}.sslip.io
+          domain: backend-api.${SERVER_HOST}.sslip.io
           email: admin@example.com
         env:
           NODE_ENV: production

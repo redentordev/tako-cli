@@ -67,6 +67,8 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to connect to server %s: %w", name, err)
 		}
 
+		prov := provisioner.NewProvisioner(client, verbose)
+
 		// Check if server is already set up and needs upgrade
 		serverVersion, err := setup.DetectServerVersion(client)
 		if err == nil && serverVersion != nil {
@@ -88,19 +90,23 @@ func runSetup(cmd *cobra.Command, args []string) error {
 					return fmt.Errorf("upgrade failed: %w", err)
 				}
 
+				if err := ensureTakodRuntimeForSetup(prov, cfg); err != nil {
+					return fmt.Errorf("failed to refresh takod runtime on server %s: %w", name, err)
+				}
+
 				fmt.Printf("  ✓ Server upgraded to v%s\n", setup.CurrentVersion)
 				continue // Skip fresh setup
 			} else {
-				fmt.Printf("→ Server is already at the latest version (v%s), skipping setup\n", serverVersion.Version)
+				fmt.Printf("→ Server is already at the latest version (v%s), refreshing takod runtime\n", serverVersion.Version)
+				if err := ensureTakodRuntimeForSetup(prov, cfg); err != nil {
+					return fmt.Errorf("failed to refresh takod runtime on server %s: %w", name, err)
+				}
 				continue
 			}
 		}
 
 		// Server not set up - run full provisioning
 		fmt.Printf("→ Setting up server from scratch...\n")
-
-		// Create provisioner
-		prov := provisioner.NewProvisioner(client, verbose)
 
 		// Run provisioning steps
 		steps := []struct {
@@ -116,9 +122,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			{"Verifying auto-recovery", prov.VerifyAutoRecovery},
 			{"Setting up deploy user", func() error { return prov.SetupDeployUser(server.User) }},
 			{"Installing monitoring agent", prov.InstallMonitoringAgent},
-			{"Installing takod service", func() error {
-				return prov.InstallTakodService(cfg.Runtime.Agent.Socket, cfg.Runtime.Agent.DataDir)
-			}},
+			{"Installing takod runtime", func() error { return ensureTakodRuntimeForSetup(prov, cfg) }},
 		}
 
 		for _, step := range steps {
@@ -168,6 +172,13 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nNext step: Run 'tako deploy' to deploy your application\n")
 
 	return nil
+}
+
+func ensureTakodRuntimeForSetup(prov *provisioner.Provisioner, cfg *config.Config) error {
+	if err := prov.InstallTakodBinary(Version); err != nil {
+		return err
+	}
+	return prov.InstallTakodService(cfg.Runtime.Agent.Socket, cfg.Runtime.Agent.DataDir)
 }
 
 // setupNFS configures NFS server and clients based on configuration

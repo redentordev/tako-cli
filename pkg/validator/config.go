@@ -160,20 +160,13 @@ func (v *ConfigValidator) validateService(envName, serviceName string, service c
 func (v *ConfigValidator) validateProxyConfig(prefix string, proxy *config.ProxyConfig) {
 	// Check that at least one domain is configured
 	primaryDomain := proxy.GetPrimaryDomain()
-	if primaryDomain == "" && len(proxy.Domains) == 0 {
-		v.errors = append(v.errors, fmt.Sprintf("%s: proxy.domain or proxy.domains is required when proxy is configured", prefix))
+	if primaryDomain == "" {
+		v.errors = append(v.errors, fmt.Sprintf("%s: proxy.domain is required when proxy is configured", prefix))
 	}
 
 	// Validate primary domain
 	if proxy.Domain != "" && !isValidDomain(proxy.Domain) {
 		v.errors = append(v.errors, fmt.Sprintf("%s: invalid proxy.domain '%s'", prefix, proxy.Domain))
-	}
-
-	// Validate legacy domains array
-	for _, domain := range proxy.Domains {
-		if !isValidDomain(domain) {
-			v.errors = append(v.errors, fmt.Sprintf("%s: invalid domain '%s' in proxy.domains", prefix, domain))
-		}
 	}
 
 	// Validate redirect domains
@@ -185,10 +178,10 @@ func (v *ConfigValidator) validateProxyConfig(prefix string, proxy *config.Proxy
 
 	// Check for redirect domains without primary domain
 	if len(proxy.RedirectFrom) > 0 && primaryDomain == "" {
-		v.errors = append(v.errors, fmt.Sprintf("%s: proxy.redirectFrom requires proxy.domain or proxy.domains to be set", prefix))
+		v.errors = append(v.errors, fmt.Sprintf("%s: proxy.redirectFrom requires proxy.domain to be set", prefix))
 	}
 
-	// Check for duplicate domains between primary/domains and redirectFrom
+	// Check for duplicate domains between primary domain and redirectFrom
 	allServingDomains := proxy.GetAllDomains()
 	for _, redirectDomain := range proxy.RedirectFrom {
 		for _, servingDomain := range allServingDomains {

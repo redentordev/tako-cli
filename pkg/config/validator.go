@@ -501,27 +501,14 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 }
 
 func validateProxy(serviceName string, proxy *ProxyConfig) error {
-	// Check that at least one domain is configured (either Domain or Domains)
-	if proxy.Domain == "" && len(proxy.Domains) == 0 {
-		return fmt.Errorf("service %s: proxy configured but no domain specified (use 'domain' or 'domains')", serviceName)
+	if proxy.Domain == "" {
+		return fmt.Errorf("service %s: proxy configured but no domain specified (use 'domain')", serviceName)
 	}
 
-	// Validate and trim primary domain
-	if proxy.Domain != "" {
-		trimmed := strings.TrimSpace(proxy.Domain)
-		proxy.Domain = trimmed
-		if !isValidDomain(trimmed) {
-			return fmt.Errorf("service %s: invalid primary domain: %s", serviceName, trimmed)
-		}
-	}
-
-	// Validate and trim domains in Domains array
-	for i, domain := range proxy.Domains {
-		trimmed := strings.TrimSpace(domain)
-		proxy.Domains[i] = trimmed
-		if !isValidDomain(trimmed) {
-			return fmt.Errorf("service %s: invalid domain: %s", serviceName, trimmed)
-		}
+	trimmed := strings.TrimSpace(proxy.Domain)
+	proxy.Domain = trimmed
+	if !isValidDomain(trimmed) {
+		return fmt.Errorf("service %s: invalid primary domain: %s", serviceName, trimmed)
 	}
 
 	// Validate redirect domains
@@ -539,10 +526,10 @@ func validateProxy(serviceName string, proxy *ProxyConfig) error {
 			return fmt.Errorf("service %s: redirect domain '%s' cannot be the same as primary domain", serviceName, trimmed)
 		}
 
-		// Ensure redirect domain is not duplicated in Domains array
+		// Ensure redirect domain is not duplicated in serving domains
 		for _, d := range proxy.GetAllDomains() {
 			if strings.EqualFold(trimmed, d) {
-				return fmt.Errorf("service %s: redirect domain '%s' is already in the domains list - remove it from domains or redirectFrom", serviceName, trimmed)
+				return fmt.Errorf("service %s: redirect domain '%s' is already the serving domain", serviceName, trimmed)
 			}
 		}
 	}

@@ -75,9 +75,8 @@ func (d *Deployer) ResolvePortConflict(portInfo *PortInfo, serviceName string, a
 
 	// Check if it's our own service's container
 	expectedContainerName := fmt.Sprintf("%s_%s", d.config.Project.Name, serviceName)
-	legacyContainerName := d.config.Project.Name
 
-	if portInfo.IsDocker && (portInfo.ProcessName == expectedContainerName || portInfo.ProcessName == legacyContainerName) {
+	if portInfo.IsDocker && portInfo.ProcessName == expectedContainerName {
 		if d.verbose {
 			fmt.Printf("  This is our own container - will be replaced during deployment\n")
 		}

@@ -52,7 +52,7 @@ Internet
 services:
   web:
     proxy:
-      domains: [fullstack.example.com]  # Public
+      domain: fullstack.example.com  # Public
     env:
       API_URL: http://api:4000          # Internal communication
 

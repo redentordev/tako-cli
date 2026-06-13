@@ -245,7 +245,7 @@ services:
     build: ./dashboard
     port: 3000
     proxy:
-      domains: [workers.example.com]
+      domain: workers.example.com
     env:
       REDIS_URL: redis://redis:6379
 ```

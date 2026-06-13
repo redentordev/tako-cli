@@ -230,27 +230,16 @@ func envMapsEqual(a, b map[string]string) bool {
 }
 
 func domainsEqual(a, b *config.ProxyConfig) bool {
-	// Both nil
 	if a == nil && b == nil {
 		return true
 	}
-	// One nil, one not
 	if (a == nil) != (b == nil) {
 		return false
 	}
-	// Compare domains
-	if len(a.Domains) != len(b.Domains) {
-		return false
-	}
-	for i := range a.Domains {
-		if a.Domains[i] != b.Domains[i] {
-			return false
-		}
-	}
-	return true
+	return a.Domain == b.Domain && stringSlicesEqual(a.RedirectFrom, b.RedirectFrom)
 }
 
-func volumesEqual(a, b []string) bool {
+func stringSlicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -260,6 +249,10 @@ func volumesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func volumesEqual(a, b []string) bool {
+	return stringSlicesEqual(a, b)
 }
 
 // FormatPlan returns a human-readable formatted plan

@@ -72,8 +72,7 @@ environments:
           timeout: 5s
           retries: 3
         proxy:
-          domains:
-            - api.example.com
+          domain: api.example.com
           email: admin@example.com
 
       # Web service (depends on api)
@@ -92,8 +91,8 @@ environments:
           timeout: 5s
           retries: 3
         proxy:
-          domains:
-            - example.com
+          domain: example.com
+          redirectFrom:
             - www.example.com
           email: admin@example.com
 

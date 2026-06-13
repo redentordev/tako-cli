@@ -31,6 +31,5 @@ environments:
           retries: 3
         # Uncomment to expose publicly through tako-proxy
         proxy:
-          domains:
-            - frontend.${SERVER_HOST}.sslip.io
+          domain: frontend.${SERVER_HOST}.sslip.io
           email: admin@example.com

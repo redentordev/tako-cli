@@ -146,8 +146,7 @@ To use a custom domain:
 2. Update `tako.yaml`:
 ```yaml
 proxy:
-  domains:
-    - blog.yourdomain.com
+  domain: blog.yourdomain.com
 env:
   url: https://blog.yourdomain.com
 ```
