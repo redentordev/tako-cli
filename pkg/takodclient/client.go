@@ -90,6 +90,28 @@ func StreamRequest(client *ssh.Client, socket string, method string, endpoint st
 	return output, nil
 }
 
+func StreamOutput(client *ssh.Client, socket string, endpoint string, stdout io.Writer, stderr io.Writer) error {
+	if socket == "" {
+		socket = DefaultSocket
+	}
+	if !strings.HasPrefix(endpoint, "/") {
+		return fmt.Errorf("takod endpoint must start with /")
+	}
+
+	args := []string{
+		"if test -S " + shellQuote(socket) + " && command -v curl >/dev/null 2>&1; then",
+		"curl --fail --silent --show-error --no-buffer",
+		"--unix-socket " + shellQuote(socket),
+		shellQuote("http://takod" + endpoint),
+		"; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi",
+	}
+	curlCmd := strings.Join(args, " ")
+	if err := client.ExecuteStream(curlCmd, stdout, stderr); err != nil {
+		return fmt.Errorf("takod stream request %s failed: %w", endpoint, err)
+	}
+	return nil
+}
+
 func ProxyFileEndpoint(name string) string {
 	return "/v1/proxy-file?name=" + url.QueryEscape(name)
 }
@@ -133,6 +155,18 @@ func ImageBuildEndpoint(image string) string {
 	query := url.Values{}
 	query.Set("image", image)
 	return "/v1/images/build?" + query.Encode()
+}
+
+func LogsEndpoint(project string, environment string, service string, tail int, follow bool) string {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	query.Set("service", service)
+	query.Set("tail", fmt.Sprintf("%d", tail))
+	if follow {
+		query.Set("follow", "true")
+	}
+	return "/v1/logs?" + query.Encode()
 }
 
 func shellQuote(value string) string {

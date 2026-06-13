@@ -49,3 +49,11 @@ func TestImageBuildEndpointEscapesImage(t *testing.T) {
 		t.Fatalf("ImageBuildEndpoint() = %q, want %q", got, want)
 	}
 }
+
+func TestLogsEndpointEscapesQueryValues(t *testing.T) {
+	got := LogsEndpoint("demo app", "prod/us", "web api", 250, true)
+	want := "/v1/logs?environment=prod%2Fus&follow=true&project=demo+app&service=web+api&tail=250"
+	if got != want {
+		t.Fatalf("LogsEndpoint() = %q, want %q", got, want)
+	}
+}

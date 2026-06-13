@@ -628,3 +628,47 @@ func TestHandleImageBuildRequiresImage(t *testing.T) {
 		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
 }
+
+func TestHandleLogsRequiresGet(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleLogs(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleLogsRejectsInvalidTail(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs?project=demo&environment=production&service=web&tail=bad", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleLogs(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleLogsStreamsServiceLogs(t *testing.T) {
+	logPath := t.TempDir() + "/commands.log"
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1\n")
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs?project=demo&environment=production&service=web&tail=10", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleLogs(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Body.String() != "logs\n" {
+		t.Fatalf("unexpected log body: %q", recorder.Body.String())
+	}
+}

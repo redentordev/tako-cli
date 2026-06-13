@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -90,6 +91,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/images/export", s.handleImageExport)
 	mux.HandleFunc("/v1/images/import", s.handleImageImport)
 	mux.HandleFunc("/v1/images/build", s.handleImageBuild)
+	mux.HandleFunc("/v1/logs", s.handleLogs)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -668,6 +670,44 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 	_ = encoder.Encode(response)
 }
 
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	tail := 100
+	if rawTail := r.URL.Query().Get("tail"); rawTail != "" {
+		parsed, err := strconv.Atoi(rawTail)
+		if err != nil {
+			http.Error(w, "tail must be an integer", http.StatusBadRequest)
+			return
+		}
+		tail = parsed
+	}
+	follow := false
+	if rawFollow := r.URL.Query().Get("follow"); rawFollow != "" {
+		parsed, err := strconv.ParseBool(rawFollow)
+		if err != nil {
+			http.Error(w, "follow must be a boolean", http.StatusBadRequest)
+			return
+		}
+		follow = parsed
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if err := StreamServiceLogs(r.Context(), LogsRequest{
+		Project:     r.URL.Query().Get("project"),
+		Environment: r.URL.Query().Get("environment"),
+		Service:     r.URL.Query().Get("service"),
+		Tail:        tail,
+		Follow:      follow,
+	}, &flushResponseWriter{writer: w}); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+}
+
 func (s *Server) Status() Status {
 	hostname, _ := os.Hostname()
 	status := Status{
@@ -709,4 +749,16 @@ func removeStaleSocket(path string) error {
 		return fmt.Errorf("%s exists and is not a socket", path)
 	}
 	return os.Remove(path)
+}
+
+type flushResponseWriter struct {
+	writer http.ResponseWriter
+}
+
+func (w *flushResponseWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if flusher, ok := w.writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return n, err
 }

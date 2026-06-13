@@ -258,6 +258,9 @@ func TestTakodCommandHelper(t *testing.T) {
 	}
 	switch commandArgs[0] {
 	case "ps":
+		if output := os.Getenv("TAKO_FAKE_PS_OUTPUT"); output != "" {
+			_, _ = os.Stdout.WriteString(output)
+		}
 		os.Exit(0)
 	case "network":
 		_, _ = os.Stdout.WriteString("network-ok\n")
