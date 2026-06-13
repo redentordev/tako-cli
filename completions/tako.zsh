@@ -1,244 +1,212 @@
 #compdef tako
+compdef _tako tako
 
-# zsh completion for tako
-# Install: cp tako.zsh ~/.zsh/completion/_tako && autoload -Uz compinit && compinit
+# zsh completion for tako                                 -*- shell-script -*-
 
-_tako() {
-    local -a commands
-
-    _arguments -C \
-        '(-h --help)'{-h,--help}'[Show help information]' \
-        '(--version)--version[Show version information]' \
-        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-        '(--config)--config[Use custom config file]:file:_files' \
-        '1: :->cmds' \
-        '*:: :->args'
-
-    case $state in
-        cmds)
-            commands=(
-                'access:Stream proxy access logs'
-                'backup:Backup and restore Docker volumes'
-                'cleanup:Clean up old Docker resources'
-                'deploy:Deploy application to environment'
-                'destroy:Remove all services from server'
-                'dev:Run production environment locally'
-                'drift:Detect configuration drift between config and running services'
-                'exec:Execute commands on remote server(s) or in containers'
-                'history:View deployment history'
-                'init:Initialize new project with template config'
-                'live:Live development mode with hot reload'
-                'logs:Stream container logs'
-                'maintenance:Enable/disable maintenance mode'
-                'metrics:View system metrics from servers'
-                'monitor:Continuously monitor deployed services'
-                'prometheus:Start Prometheus metrics endpoint'
-                'ps:List running services and their status'
-                'remove:Remove a specific service'
-                'rollback:Rollback to previous/specific deployment'
-                'scale:Scale service replicas'
-                'secrets:Manage secrets for your project'
-                'setup:Provision server (Docker, proxy, security)'
-                'start:Start stopped services'
-                'state:Manage deployment state synchronization'
-                'stats:Show container resource usage'
-                'stop:Stop running services'
-                'storage:Manage shared storage (NFS)'
-                'upgrade:Upgrade Tako CLI to the latest version'
-            )
-            _describe -t commands 'tako commands' commands
-            ;;
-        args)
-            case $words[1] in
-                deploy)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--service)--service[Deploy specific service only]:service:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '(-y --yes)'{-y,--yes}'[Skip confirmation prompts]' \
-                        '(-m --message)'{-m,--message}'[Commit message for uncommitted changes]:message:' \
-                        '(--skip-build)--skip-build[Skip building Docker image]' \
-                        '(--skip-hooks)--skip-hooks[Skip pre/post deploy hooks]'
-                    ;;
-                setup|destroy)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '(-f --force)'{-f,--force}'[Force operation without confirmation]'
-                    ;;
-                logs)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--service)--service[Target specific service]:service:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '(-f --follow)'{-f,--follow}'[Follow log output]' \
-                        '(-n --tail)'{-n,--tail}'[Number of lines to show]:lines:' \
-                        '(--since)--since[Show logs since timestamp]:timestamp:'
-                    ;;
-                access)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '(-f --follow)'{-f,--follow}'[Follow log output]' \
-                        '(-n --tail)'{-n,--tail}'[Number of lines to show]:lines:' \
-                        '(--filter)--filter[Filter by path or status]:filter:'
-                    ;;
-                ps|stats)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]'
-                    ;;
-                start|stop)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--service)--service[Target specific service]:service:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]'
-                    ;;
-                rollback)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--service)--service[Target specific service]:service:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '1:deployment ID:'
-                    ;;
-                history)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '(-n --limit)'{-n,--limit}'[Number of deployments to show]:limit:' \
-                        '(--status)--status[Filter by status (success, failed, rolled_back)]:status:(success failed rolled_back)'
-                    ;;
-                metrics)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '(--once)--once[Run once and exit]' \
-                        '(-i --interval)'{-i,--interval}'[Refresh interval]:interval:'
-                    ;;
-                monitor)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--service)--service[Monitor specific service]:service:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '(--once)--once[Run single check and exit]'
-                    ;;
-                scale)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '*:SERVICE=REPLICAS:'
-                    ;;
-                backup)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '(--volume)--volume[Volume to backup]:volume:' \
-                        '(--list)--list[List available backups]' \
-                        '(--restore)--restore[Restore from backup ID]:backup_id:' \
-                        '(--cleanup)--cleanup[Delete backups older than N days]:days:'
-                    ;;
-                drift)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '(-w --watch)'{-w,--watch}'[Continuously monitor for drift]' \
-                        '(--webhook)--webhook[Webhook URL for notifications]:url:'
-                    ;;
-                init)
-                    _arguments \
-                        '1:project name:'
-                    ;;
-                upgrade)
-                    _arguments \
-                        '(-c --check)'{-c,--check}'[Only check for updates, do not install]' \
-                        '(-f --force)'{-f,--force}'[Force upgrade even if on latest]'
-                    ;;
-                exec)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--service)--service[Execute in specific service container]:service:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '*:command:'
-                    ;;
-                cleanup)
-                    _arguments \
-                        '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                        '(-s --server)'{-s,--server}'[Target specific server]:server:' \
-                        '(--config)--config[Use custom config file]:file:_files' \
-                        '(-v --verbose)'{-v,--verbose}'[Show detailed output]' \
-                        '(--all)--all[Clean all resources]' \
-                        '(--images)--images[Clean old images]' \
-                        '(--containers)--containers[Clean stopped containers]' \
-                        '(--volumes)--volumes[Clean unused volumes]'
-                    ;;
-                secrets)
-                    local -a secret_commands
-                    secret_commands=(
-                        'init:Initialize secrets storage for project'
-                        'set:Set a secret value (KEY=value)'
-                        'list:List all secrets (redacted)'
-                        'delete:Delete a secret'
-                        'validate:Validate all required secrets are set'
-                    )
-                    _describe -t commands 'secrets commands' secret_commands
-                    ;;
-                storage)
-                    local -a storage_commands
-                    storage_commands=(
-                        'status:Show NFS storage status across all servers'
-                        'remount:Remount NFS exports on all clients'
-                    )
-                    _describe -t commands 'storage commands' storage_commands
-                    ;;
-                state)
-                    local -a state_commands
-                    state_commands=(
-                        'pull:Pull remote state to local .tako directory'
-                        'repair:Repair deployment state across reachable mesh nodes'
-                        'status:Show state synchronization status'
-                    )
-                    if [[ $CURRENT -gt 2 && "$words[2]" == "repair" ]]; then
-                        _arguments \
-                            '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
-                            '(-s --server)'{-s,--server}'[Prefer this server when acquiring the repair lease]:server:' \
-                            '(--config)--config[Use custom config file]:file:_files' \
-                            '(-v --verbose)'{-v,--verbose}'[Show detailed output]'
-                    else
-                        _describe -t commands 'state commands' state_commands
-                    fi
-                    ;;
-            esac
-            ;;
-    esac
+__tako_debug()
+{
+    local file="$BASH_COMP_DEBUG_FILE"
+    if [[ -n ${file} ]]; then
+        echo "$*" >> "${file}"
+    fi
 }
 
-_tako "$@"
+_tako()
+{
+    local shellCompDirectiveError=1
+    local shellCompDirectiveNoSpace=2
+    local shellCompDirectiveNoFileComp=4
+    local shellCompDirectiveFilterFileExt=8
+    local shellCompDirectiveFilterDirs=16
+    local shellCompDirectiveKeepOrder=32
+
+    local lastParam lastChar flagPrefix requestComp out directive comp lastComp noSpace keepOrder
+    local -a completions
+
+    __tako_debug "\n========= starting completion logic =========="
+    __tako_debug "CURRENT: ${CURRENT}, words[*]: ${words[*]}"
+
+    # The user could have moved the cursor backwards on the command-line.
+    # We need to trigger completion from the $CURRENT location, so we need
+    # to truncate the command-line ($words) up to the $CURRENT location.
+    # (We cannot use $CURSOR as its value does not work when a command is an alias.)
+    words=("${=words[1,CURRENT]}")
+    __tako_debug "Truncated words[*]: ${words[*]},"
+
+    lastParam=${words[-1]}
+    lastChar=${lastParam[-1]}
+    __tako_debug "lastParam: ${lastParam}, lastChar: ${lastChar}"
+
+    # For zsh, when completing a flag with an = (e.g., tako -n=<TAB>)
+    # completions must be prefixed with the flag
+    setopt local_options BASH_REMATCH
+    if [[ "${lastParam}" =~ '-.*=' ]]; then
+        # We are dealing with a flag with an =
+        flagPrefix="-P ${BASH_REMATCH}"
+    fi
+
+    # Prepare the command to obtain completions
+    requestComp="${words[1]} __complete ${words[2,-1]}"
+    if [ "${lastChar}" = "" ]; then
+        # If the last parameter is complete (there is a space following it)
+        # We add an extra empty parameter so we can indicate this to the go completion code.
+        __tako_debug "Adding extra empty parameter"
+        requestComp="${requestComp} \"\""
+    fi
+
+    __tako_debug "About to call: eval ${requestComp}"
+
+    # Use eval to handle any environment variables and such
+    out=$(eval ${requestComp} 2>/dev/null)
+    __tako_debug "completion output: ${out}"
+
+    # Extract the directive integer following a : from the last line
+    local lastLine
+    while IFS='\n' read -r line; do
+        lastLine=${line}
+    done < <(printf "%s\n" "${out[@]}")
+    __tako_debug "last line: ${lastLine}"
+
+    if [ "${lastLine[1]}" = : ]; then
+        directive=${lastLine[2,-1]}
+        # Remove the directive including the : and the newline
+        local suffix
+        (( suffix=${#lastLine}+2))
+        out=${out[1,-$suffix]}
+    else
+        # There is no directive specified.  Leave $out as is.
+        __tako_debug "No directive found.  Setting do default"
+        directive=0
+    fi
+
+    __tako_debug "directive: ${directive}"
+    __tako_debug "completions: ${out}"
+    __tako_debug "flagPrefix: ${flagPrefix}"
+
+    if [ $((directive & shellCompDirectiveError)) -ne 0 ]; then
+        __tako_debug "Completion received error. Ignoring completions."
+        return
+    fi
+
+    local activeHelpMarker="_activeHelp_ "
+    local endIndex=${#activeHelpMarker}
+    local startIndex=$((${#activeHelpMarker}+1))
+    local hasActiveHelp=0
+    while IFS='\n' read -r comp; do
+        # Check if this is an activeHelp statement (i.e., prefixed with $activeHelpMarker)
+        if [ "${comp[1,$endIndex]}" = "$activeHelpMarker" ];then
+            __tako_debug "ActiveHelp found: $comp"
+            comp="${comp[$startIndex,-1]}"
+            if [ -n "$comp" ]; then
+                compadd -x "${comp}"
+                __tako_debug "ActiveHelp will need delimiter"
+                hasActiveHelp=1
+            fi
+
+            continue
+        fi
+
+        if [ -n "$comp" ]; then
+            # If requested, completions are returned with a description.
+            # The description is preceded by a TAB character.
+            # For zsh's _describe, we need to use a : instead of a TAB.
+            # We first need to escape any : as part of the completion itself.
+            comp=${comp//:/\\:}
+
+            local tab="$(printf '\t')"
+            comp=${comp//$tab/:}
+
+            __tako_debug "Adding completion: ${comp}"
+            completions+=${comp}
+            lastComp=$comp
+        fi
+    done < <(printf "%s\n" "${out[@]}")
+
+    # Add a delimiter after the activeHelp statements, but only if:
+    # - there are completions following the activeHelp statements, or
+    # - file completion will be performed (so there will be choices after the activeHelp)
+    if [ $hasActiveHelp -eq 1 ]; then
+        if [ ${#completions} -ne 0 ] || [ $((directive & shellCompDirectiveNoFileComp)) -eq 0 ]; then
+            __tako_debug "Adding activeHelp delimiter"
+            compadd -x "--"
+            hasActiveHelp=0
+        fi
+    fi
+
+    if [ $((directive & shellCompDirectiveNoSpace)) -ne 0 ]; then
+        __tako_debug "Activating nospace."
+        noSpace="-S ''"
+    fi
+
+    if [ $((directive & shellCompDirectiveKeepOrder)) -ne 0 ]; then
+        __tako_debug "Activating keep order."
+        keepOrder="-V"
+    fi
+
+    if [ $((directive & shellCompDirectiveFilterFileExt)) -ne 0 ]; then
+        # File extension filtering
+        local filteringCmd
+        filteringCmd='_files'
+        for filter in ${completions[@]}; do
+            if [ ${filter[1]} != '*' ]; then
+                # zsh requires a glob pattern to do file filtering
+                filter="\*.$filter"
+            fi
+            filteringCmd+=" -g $filter"
+        done
+        filteringCmd+=" ${flagPrefix}"
+
+        __tako_debug "File filtering command: $filteringCmd"
+        _arguments '*:filename:'"$filteringCmd"
+    elif [ $((directive & shellCompDirectiveFilterDirs)) -ne 0 ]; then
+        # File completion for directories only
+        local subdir
+        subdir="${completions[1]}"
+        if [ -n "$subdir" ]; then
+            __tako_debug "Listing directories in $subdir"
+            pushd "${subdir}" >/dev/null 2>&1
+        else
+            __tako_debug "Listing directories in ."
+        fi
+
+        local result
+        _arguments '*:dirname:_files -/'" ${flagPrefix}"
+        result=$?
+        if [ -n "$subdir" ]; then
+            popd >/dev/null 2>&1
+        fi
+        return $result
+    else
+        __tako_debug "Calling _describe"
+        if eval _describe $keepOrder "completions" completions $flagPrefix $noSpace; then
+            __tako_debug "_describe found some completions"
+
+            # Return the success of having called _describe
+            return 0
+        else
+            __tako_debug "_describe did not find completions."
+            __tako_debug "Checking if we should do file completion."
+            if [ $((directive & shellCompDirectiveNoFileComp)) -ne 0 ]; then
+                __tako_debug "deactivating file completion"
+
+                # We must return an error code here to let zsh know that there were no
+                # completions found by _describe; this is what will trigger other
+                # matching algorithms to attempt to find completions.
+                # For example zsh can match letters in the middle of words.
+                return 1
+            else
+                # Perform file completion
+                __tako_debug "Activating file completion"
+
+                # We must return the result of this command, so it must be the
+                # last command, or else we must store its result to return it.
+                _arguments '*:filename:_files'" ${flagPrefix}"
+            fi
+        fi
+    fi
+}
+
+# don't run the completion function when being source-ed or eval-ed
+if [ "$funcstack[1]" = "_tako" ]; then
+    _tako
+fi
