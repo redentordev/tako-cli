@@ -239,36 +239,91 @@ func PersistToServers(pool *ssh.Pool, cfg *config.Config, environment string, se
 		return fmt.Errorf("ssh pool not initialized")
 	}
 
-	for _, serverName := range serverNames {
+	targets := make([]statePersistTarget, len(serverNames))
+	for index, serverName := range serverNames {
 		server, ok := cfg.Servers[serverName]
 		if !ok {
 			return fmt.Errorf("server %s not found", serverName)
 		}
-		client, err := pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
-		if err != nil {
-			return fmt.Errorf("failed to connect to %s for takod state persistence: %w", serverName, err)
+		targets[index] = statePersistTarget{
+			index:      index,
+			serverName: serverName,
+			server:     server,
 		}
-		manager := NewManager(client, cfg, environment)
-		if err := manager.WriteDesired(desired); err != nil {
-			return fmt.Errorf("%s: failed to write desired state: %w", serverName, err)
-		}
-		if err := manager.WriteActual(actual); err != nil {
-			return fmt.Errorf("%s: failed to write actual state: %w", serverName, err)
-		}
-		for nodeName, snapshot := range nodeActual {
-			if err := manager.WriteNodeActual(nodeName, snapshot); err != nil {
-				return fmt.Errorf("%s: failed to write actual state for node %s: %w", serverName, nodeName, err)
+	}
+
+	results := make([]statePersistResult, len(targets))
+	resultCh := make(chan statePersistResult, len(targets))
+	for _, target := range targets {
+		go func(target statePersistTarget) {
+			resultCh <- statePersistResult{
+				index:      target.index,
+				serverName: target.serverName,
+				err:        persistToServer(pool, cfg, environment, target.serverName, target.server, desired, actual, nodeActual, event),
 			}
-		}
-		if err := manager.AppendEvent(event); err != nil {
-			return fmt.Errorf("%s: failed to append event: %w", serverName, err)
-		}
-		if verbose {
-			fmt.Printf("  ✓ takod state persisted on %s\n", serverName)
+		}(target)
+	}
+
+	for range targets {
+		result := <-resultCh
+		results[result.index] = result
+	}
+
+	if err := statePersistError(results); err != nil {
+		return err
+	}
+	if verbose {
+		for _, result := range results {
+			fmt.Printf("  ✓ takod state persisted on %s\n", result.serverName)
 		}
 	}
 
 	return nil
+}
+
+type statePersistTarget struct {
+	index      int
+	serverName string
+	server     config.ServerConfig
+}
+
+type statePersistResult struct {
+	index      int
+	serverName string
+	err        error
+}
+
+func persistToServer(pool *ssh.Pool, cfg *config.Config, environment string, serverName string, server config.ServerConfig, desired *DesiredRevision, actual *ActualSnapshot, nodeActual map[string]*ActualSnapshot, event Event) error {
+	client, err := pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	if err != nil {
+		return fmt.Errorf("failed to connect to %s for takod state persistence: %w", serverName, err)
+	}
+	manager := NewManager(client, cfg, environment)
+	if err := manager.WriteDesired(desired); err != nil {
+		return fmt.Errorf("%s: failed to write desired state: %w", serverName, err)
+	}
+	if err := manager.WriteActual(actual); err != nil {
+		return fmt.Errorf("%s: failed to write actual state: %w", serverName, err)
+	}
+	for nodeName, snapshot := range nodeActual {
+		if err := manager.WriteNodeActual(nodeName, snapshot); err != nil {
+			return fmt.Errorf("%s: failed to write actual state for node %s: %w", serverName, nodeName, err)
+		}
+	}
+	if err := manager.AppendEvent(event); err != nil {
+		return fmt.Errorf("%s: failed to append event: %w", serverName, err)
+	}
+	return nil
+}
+
+func statePersistError(results []statePersistResult) error {
+	var errs []error
+	for _, result := range results {
+		if result.err != nil {
+			errs = append(errs, result.err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (m *Manager) WriteDesired(revision *DesiredRevision) error {

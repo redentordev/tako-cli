@@ -2,6 +2,7 @@ package takodstate
 
 import (
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -153,5 +154,26 @@ func TestBuildNodeActualSnapshotRecordsNode(t *testing.T) {
 	}
 	if !slices.Equal(snapshot.Services["web"].Containers, []string{"c1", "c2"}) {
 		t.Fatalf("containers were not sorted: %#v", snapshot.Services["web"].Containers)
+	}
+}
+
+func TestStatePersistErrorJoinsNodeErrors(t *testing.T) {
+	nodeAErr := errors.New("node-a failed")
+	nodeBErr := errors.New("node-b failed")
+
+	err := statePersistError([]statePersistResult{
+		{serverName: "node-a", err: nodeAErr},
+		{serverName: "node-b"},
+		{serverName: "node-c", err: nodeBErr},
+	})
+
+	if !errors.Is(err, nodeAErr) || !errors.Is(err, nodeBErr) {
+		t.Fatalf("joined error did not preserve node errors: %v", err)
+	}
+}
+
+func TestStatePersistErrorAllowsSuccessfulResults(t *testing.T) {
+	if err := statePersistError([]statePersistResult{{serverName: "node-a"}}); err != nil {
+		t.Fatalf("expected successful results to return nil, got %v", err)
 	}
 }
