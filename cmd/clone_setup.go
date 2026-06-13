@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -295,7 +296,7 @@ func createEnvFromExample(reader *bufio.Reader, interactive bool) error {
 	}
 
 	if !interactive {
-		return os.WriteFile(".env", exampleData, 0600)
+		return fileutil.WriteFileAtomic(".env", exampleData, 0600)
 	}
 
 	// Parse .env.example and prompt for values
@@ -331,5 +332,5 @@ func createEnvFromExample(reader *bufio.Reader, interactive bool) error {
 		outputLines = append(outputLines, fmt.Sprintf("%s=%s", key, val))
 	}
 
-	return os.WriteFile(".env", []byte(strings.Join(outputLines, "\n")), 0600)
+	return fileutil.WriteFileAtomic(".env", []byte(strings.Join(outputLines, "\n")), 0600)
 }

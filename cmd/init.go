@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/syscheck"
 	"github.com/spf13/cobra"
 )
@@ -103,7 +104,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Write the config file
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+	if err := fileutil.WriteFileAtomic(configPath, []byte(configContent), 0644); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
@@ -125,7 +126,7 @@ LETSENCRYPT_EMAIL=you@example.com
 # DATABASE_URL=postgresql://user:password@postgres:5432/%s
 `, projectName)
 
-	if err := os.WriteFile(".env.example", []byte(envExampleContent), 0644); err != nil {
+	if err := fileutil.WriteFileAtomic(".env.example", []byte(envExampleContent), 0644); err != nil {
 		return fmt.Errorf("failed to write .env.example: %w", err)
 	}
 	fmt.Println("✓ Created .env.example")
@@ -149,7 +150,7 @@ LETSENCRYPT_EMAIL=you@example.com
 Thumbs.db
 `
 	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
-		if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
+		if err := fileutil.WriteFileAtomic(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
 			return fmt.Errorf("failed to write .gitignore: %w", err)
 		}
 		fmt.Println("✓ Created .gitignore")

@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 )
 
 // CopyFile copies a file from local to remote server
@@ -141,7 +143,7 @@ func (c *Client) CopyFromRemote(remotePath, localPath string) error {
 	}
 
 	// Write to local file
-	if err := os.WriteFile(localPath, []byte(output), 0644); err != nil {
+	if err := fileutil.WriteFileAtomic(localPath, []byte(output), 0644); err != nil {
 		return fmt.Errorf("failed to write local file: %w", err)
 	}
 

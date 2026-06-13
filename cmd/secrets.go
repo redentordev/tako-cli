@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/spf13/cobra"
 )
@@ -29,7 +30,7 @@ var secretsInitCmd = &cobra.Command{
 		// Create .gitignore
 		gitignore := `.tako/secrets*
 `
-		if err := os.WriteFile(".tako/.gitignore", []byte(gitignore), 0644); err != nil {
+		if err := fileutil.WriteFileAtomic(".tako/.gitignore", []byte(gitignore), 0644); err != nil {
 			return fmt.Errorf("failed to create .gitignore: %w", err)
 		}
 
@@ -39,7 +40,7 @@ var secretsInitCmd = &cobra.Command{
 			path := fmt.Sprintf(".tako/%s", file)
 			if _, err := os.Stat(path); os.IsNotExist(err) {
 				content := fmt.Sprintf("# Tako secrets file: %s\n# Add your secrets here in KEY=value format\n", file)
-				if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				if err := fileutil.WriteFileAtomic(path, []byte(content), 0600); err != nil {
 					return fmt.Errorf("failed to create %s: %w", file, err)
 				}
 			}

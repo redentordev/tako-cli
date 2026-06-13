@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 )
 
 // ResourceType represents the type of a tracked resource
@@ -153,7 +155,7 @@ func (m *ResourceManager) Save() error {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	if err := os.WriteFile(m.stateFilePath(), data, 0600); err != nil {
+	if err := fileutil.WriteFileAtomic(m.stateFilePath(), data, 0600); err != nil {
 		return fmt.Errorf("failed to write state: %w", err)
 	}
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/crypto"
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -241,7 +242,7 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		if err := os.WriteFile(path, content, 0600); err != nil {
+		if err := fileutil.WriteFileAtomic(path, content, 0600); err != nil {
 			fmt.Printf("Warning: failed to write %s: %v\n", path, err)
 			continue
 		}

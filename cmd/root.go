@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/updater"
 	"github.com/spf13/cobra"
@@ -103,13 +104,13 @@ func shouldCheckForUpdate() bool {
 	info, err := os.Stat(lastCheckFile)
 	if err != nil {
 		// File doesn't exist, create it
-		os.WriteFile(lastCheckFile, []byte("checked"), 0644)
+		_ = fileutil.WriteFileAtomic(lastCheckFile, []byte("checked"), 0644)
 		return true
 	}
 
 	// Check if 24 hours have passed
 	if time.Since(info.ModTime()) > 24*time.Hour {
-		os.WriteFile(lastCheckFile, []byte("checked"), 0644)
+		_ = fileutil.WriteFileAtomic(lastCheckFile, []byte("checked"), 0644)
 		return true
 	}
 

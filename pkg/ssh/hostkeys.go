@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -393,7 +394,7 @@ func RemoveHostKey(host string) error {
 
 	// Write back
 	content := strings.Join(newLines, "\n")
-	if err := os.WriteFile(knownHostsPath, []byte(content), 0600); err != nil {
+	if err := fileutil.WriteFileAtomic(knownHostsPath, []byte(content), 0600); err != nil {
 		return fmt.Errorf("failed to write known_hosts: %w", err)
 	}
 

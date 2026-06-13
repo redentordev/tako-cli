@@ -14,6 +14,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
@@ -2055,7 +2056,7 @@ func ExportState(outputPath string) error {
 	if outputPath == "-" {
 		fmt.Println(string(data))
 	} else {
-		if err := os.WriteFile(outputPath, data, 0644); err != nil {
+		if err := fileutil.WriteFileAtomic(outputPath, data, 0644); err != nil {
 			return fmt.Errorf("failed to write file: %w", err)
 		}
 		fmt.Printf("State exported to %s\n", outputPath)
