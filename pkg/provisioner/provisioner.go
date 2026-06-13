@@ -623,11 +623,11 @@ func (p *Provisioner) SetupDeployUser(username string) error {
 	}
 
 	// Check if user exists
-	output, err := p.client.Execute(fmt.Sprintf("id -u %s", username))
+	output, err := p.client.Execute(buildUserIDCommand(username))
 	if err != nil || output == "" {
 		// User doesn't exist, create it
 		commands := []string{
-			fmt.Sprintf("sudo useradd -m -s /bin/bash %s", username),
+			buildUserCreateCommand(username),
 		}
 
 		for _, cmd := range commands {
@@ -649,13 +649,29 @@ func (p *Provisioner) SetupDeployUser(username string) error {
 
 	// Runtime access is mediated by takod's Unix socket, not broad sudo or Docker group membership.
 	if username != "root" {
-		if _, err := p.client.Execute(fmt.Sprintf("sudo usermod -aG %s %s", takodAccessGroup, username)); err != nil {
+		if _, err := p.client.Execute(buildTakodAccessCommand(username)); err != nil {
 			return fmt.Errorf("failed to grant takod socket access to %s: %w", username, err)
 		}
-		_, _ = p.client.Execute(fmt.Sprintf("sudo rm -f /etc/sudoers.d/tako-%s", username))
+		_, _ = p.client.Execute(buildLegacySudoersRemoveCommand(username))
 	}
 
 	return nil
+}
+
+func buildUserIDCommand(username string) string {
+	return fmt.Sprintf("id -u %s", shellQuote(username))
+}
+
+func buildUserCreateCommand(username string) string {
+	return fmt.Sprintf("sudo useradd -m -s /bin/bash %s", shellQuote(username))
+}
+
+func buildTakodAccessCommand(username string) string {
+	return fmt.Sprintf("sudo usermod -aG %s %s", shellQuote(takodAccessGroup), shellQuote(username))
+}
+
+func buildLegacySudoersRemoveCommand(username string) string {
+	return fmt.Sprintf("sudo rm -f -- %s", shellQuote("/etc/sudoers.d/tako-"+username))
 }
 
 // VerifyAutoRecovery verifies that critical services are enabled for auto-recovery

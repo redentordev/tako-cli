@@ -97,6 +97,29 @@ func TestTakodSystemdUnitGrantsTakoGroupSocketAccess(t *testing.T) {
 	}
 }
 
+func TestDeployUserCommandsQuoteArguments(t *testing.T) {
+	username := "deploy-user"
+	tests := map[string]string{
+		"id":      buildUserIDCommand(username),
+		"create":  buildUserCreateCommand(username),
+		"access":  buildTakodAccessCommand(username),
+		"cleanup": buildLegacySudoersRemoveCommand(username),
+	}
+
+	want := map[string]string{
+		"id":      "id -u 'deploy-user'",
+		"create":  "sudo useradd -m -s /bin/bash 'deploy-user'",
+		"access":  "sudo usermod -aG 'tako' 'deploy-user'",
+		"cleanup": "sudo rm -f -- '/etc/sudoers.d/tako-deploy-user'",
+	}
+
+	for name, got := range tests {
+		if got != want[name] {
+			t.Fatalf("%s command = %q, want %q", name, got, want[name])
+		}
+	}
+}
+
 func TestBootstrapScriptsAvoidDownloadedShellInstallers(t *testing.T) {
 	for name, script := range map[string]string{
 		"base packages": basePackageInstallScript(),
