@@ -166,3 +166,27 @@ func TestHandleProxyRejectsInvalidJSON(t *testing.T) {
 		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
 }
+
+func TestHandleCleanupRequiresPost(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/cleanup", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleCleanup(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleCleanupRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/cleanup", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleCleanup(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
