@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -121,9 +122,7 @@ func gatherPSActualState(cfg *config.Config, envName string, serverNames []strin
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
-	merged := make(map[string]*takod.ActualService)
-	for _, serverName := range serverNames {
-		server := cfg.Servers[serverName]
+	return gatherPSActualStateWith(cfg.Servers, serverNames, func(serverName string, server config.ServerConfig) (map[string]*takod.ActualService, error) {
 		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to node %s: %w", serverName, err)
@@ -133,8 +132,68 @@ func gatherPSActualState(cfg *config.Config, envName string, serverNames []strin
 		if err != nil {
 			return nil, fmt.Errorf("failed to query takod on node %s: %w", serverName, err)
 		}
+		return response.Services, nil
+	})
+}
 
-		for serviceName, service := range response.Services {
+type psActualStateReadFunc func(serverName string, server config.ServerConfig) (map[string]*takod.ActualService, error)
+
+type psActualStateReadResult struct {
+	index      int
+	serverName string
+	services   map[string]*takod.ActualService
+	err        error
+}
+
+func gatherPSActualStateWith(servers map[string]config.ServerConfig, serverNames []string, read psActualStateReadFunc) (map[string]*takod.ActualService, error) {
+	resultCh := make(chan psActualStateReadResult, len(serverNames))
+	var wg sync.WaitGroup
+
+	for index, serverName := range serverNames {
+		server, ok := servers[serverName]
+		if !ok {
+			return nil, fmt.Errorf("server %s not found in configuration", serverName)
+		}
+
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			services, err := read(serverName, server)
+			resultCh <- psActualStateReadResult{
+				index:      index,
+				serverName: serverName,
+				services:   services,
+				err:        err,
+			}
+		}(index, serverName, server)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]psActualStateReadResult, len(serverNames))
+	var nodeErrors []string
+	for result := range resultCh {
+		if result.err != nil {
+			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+			continue
+		}
+		results[result.index] = result
+	}
+	if len(nodeErrors) > 0 {
+		sort.Strings(nodeErrors)
+		return nil, fmt.Errorf("failed to gather ps actual state: %s", strings.Join(nodeErrors, "; "))
+	}
+
+	merged := make(map[string]*takod.ActualService)
+	for _, result := range results {
+		serviceNames := make([]string, 0, len(result.services))
+		for serviceName := range result.services {
+			serviceNames = append(serviceNames, serviceName)
+		}
+		sort.Strings(serviceNames)
+		for _, serviceName := range serviceNames {
+			service := result.services[serviceName]
 			if service == nil {
 				continue
 			}
