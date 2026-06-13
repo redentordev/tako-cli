@@ -68,7 +68,7 @@ func (d *Detector) HasDockerfile() bool {
 func (d *Detector) GenerateDockerfile() error {
 	// Check if nixpacks is installed
 	if !d.isNixpacksInstalled() {
-		return fmt.Errorf("nixpacks is not installed. Install it with: curl -sSL https://nixpacks.com/install.sh | bash")
+		return fmt.Errorf("nixpacks is not installed. Install it from https://nixpacks.com/docs/install")
 	}
 
 	framework, err := d.DetectFramework()
@@ -99,7 +99,7 @@ func (d *Detector) GenerateDockerfile() error {
 func (d *Detector) BuildWithNixpacks(imageName string) error {
 	// Check if nixpacks is installed
 	if !d.isNixpacksInstalled() {
-		return fmt.Errorf("nixpacks is not installed. Install it with: curl -sSL https://nixpacks.com/install.sh | bash")
+		return fmt.Errorf("nixpacks is not installed. Install it from https://nixpacks.com/docs/install")
 	}
 
 	framework, err := d.DetectFramework()

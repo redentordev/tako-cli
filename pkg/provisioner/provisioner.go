@@ -26,19 +26,16 @@ func NewProvisioner(client *ssh.Client, verbose bool) *Provisioner {
 
 // CheckRequirements checks if the server meets basic requirements
 func (p *Provisioner) CheckRequirements() error {
-	// Check if it's an Ubuntu/Debian system
-	output, err := p.client.Execute("cat /etc/os-release")
+	osInfo, err := DetectOS(p.client)
 	if err != nil {
 		return fmt.Errorf("failed to check OS: %w", err)
 	}
-
-	if !strings.Contains(strings.ToLower(output), "ubuntu") &&
-		!strings.Contains(strings.ToLower(output), "debian") {
-		return fmt.Errorf("unsupported OS (only Ubuntu/Debian are supported)")
+	if !osInfo.IsSupported() {
+		return fmt.Errorf("unsupported OS: %s", osInfo.String())
 	}
 
 	if p.verbose {
-		fmt.Printf("  OS: %s\n", strings.Split(output, "\n")[0])
+		fmt.Printf("  OS: %s\n", osInfo.String())
 	}
 
 	return nil
@@ -46,21 +43,12 @@ func (p *Provisioner) CheckRequirements() error {
 
 // UpdateSystem updates system packages
 func (p *Provisioner) UpdateSystem() error {
-	commands := []string{
-		"sudo apt-get update",
-		"sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y",
-		"sudo apt-get install -y curl wget git build-essential",
+	if p.verbose {
+		fmt.Printf("  Updating system packages with detected package manager...\n")
 	}
-
-	for _, cmd := range commands {
-		if p.verbose {
-			fmt.Printf("  Running: %s\n", cmd)
-		}
-		if _, err := p.client.Execute(cmd); err != nil {
-			return fmt.Errorf("command failed '%s': %w", cmd, err)
-		}
+	if _, err := p.client.Execute(runRootScript(basePackageInstallScript())); err != nil {
+		return fmt.Errorf("failed to update system packages: %w", err)
 	}
-
 	return nil
 }
 
@@ -86,22 +74,14 @@ func (p *Provisioner) InstallDocker() error {
 		return nil
 	}
 
-	// Install Docker using official script
-	commands := []string{
-		"curl -fsSL https://get.docker.com -o get-docker.sh",
-		"sudo sh get-docker.sh",
-		"sudo usermod -aG docker $USER",
-		"rm get-docker.sh",
+	if p.verbose {
+		fmt.Printf("  Installing Docker from OS packages...\n")
+	}
+	if _, err := p.client.Execute(runRootScript(dockerInstallScript())); err != nil {
+		return fmt.Errorf("failed to install Docker packages: %w", err)
 	}
 
-	for _, cmd := range commands {
-		if p.verbose {
-			fmt.Printf("  Running: %s\n", cmd)
-		}
-		if _, err := p.client.Execute(cmd); err != nil {
-			return fmt.Errorf("command failed '%s': %w", cmd, err)
-		}
-	}
+	_, _ = p.client.Execute("sudo usermod -aG docker $(id -un) 2>/dev/null || true")
 
 	// Enable Docker to start on boot
 	if p.verbose {
@@ -132,6 +112,57 @@ func (p *Provisioner) InstallDocker() error {
 	}
 
 	return nil
+}
+
+func basePackageInstallScript() string {
+	return `set -eu
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget git build-essential ca-certificates
+elif command -v dnf >/dev/null 2>&1; then
+  dnf upgrade -y
+  dnf install -y curl wget git gcc gcc-c++ make ca-certificates
+elif command -v yum >/dev/null 2>&1; then
+  yum update -y
+  yum install -y curl wget git gcc gcc-c++ make ca-certificates
+elif command -v zypper >/dev/null 2>&1; then
+  zypper --non-interactive refresh
+  zypper --non-interactive update -y
+  zypper --non-interactive install -y curl wget git gcc gcc-c++ make ca-certificates
+elif command -v apk >/dev/null 2>&1; then
+  apk update
+  apk upgrade
+  apk add --no-cache curl wget git build-base ca-certificates
+else
+  echo "no supported package manager found" >&2
+  exit 1
+fi
+`
+}
+
+func dockerInstallScript() string {
+	return `set -eu
+if command -v docker >/dev/null 2>&1; then
+  exit 0
+fi
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io containerd
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y moby-engine containerd || dnf install -y docker containerd
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y docker containerd || yum install -y moby-engine containerd
+elif command -v zypper >/dev/null 2>&1; then
+  zypper --non-interactive install -y docker containerd
+elif command -v apk >/dev/null 2>&1; then
+  apk add --no-cache docker docker-cli containerd
+else
+  echo "no supported package manager found for Docker installation" >&2
+  exit 1
+fi
+command -v docker >/dev/null 2>&1
+`
 }
 
 func (p *Provisioner) InstallWireGuard() error {

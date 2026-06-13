@@ -1,6 +1,9 @@
 package provisioner
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSystemdPathArg(t *testing.T) {
 	path, err := systemdPathArg("", "/run/tako/takod.sock")
@@ -55,6 +58,19 @@ func TestReleaseVersionArg(t *testing.T) {
 	for _, input := range []string{"", "dev", "unknown", "v1.2.3;rm -rf /", "v1.2.3/foo", "v1.2.3\n"} {
 		if _, err := releaseVersionArg(input); err == nil {
 			t.Fatalf("expected %q to be rejected", input)
+		}
+	}
+}
+
+func TestBootstrapScriptsAvoidDownloadedShellInstallers(t *testing.T) {
+	for name, script := range map[string]string{
+		"base packages": basePackageInstallScript(),
+		"docker":        dockerInstallScript(),
+	} {
+		for _, disallowed := range []string{"get.docker.com", "curl |", "curl -sSL", "wget |"} {
+			if strings.Contains(script, disallowed) {
+				t.Fatalf("%s script contains disallowed installer pattern %q:\n%s", name, disallowed, script)
+			}
 		}
 	}
 }

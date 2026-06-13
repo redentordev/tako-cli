@@ -73,7 +73,7 @@ func (s *SystemChecker) CheckAll() *CheckResult {
 			Command:     "nixpacks",
 			Args:        []string{"--version"},
 			Required:    false,
-			InstallHint: "Install Nixpacks: curl -sSL https://nixpacks.com/install.sh | bash (Optional - for auto-building without Dockerfile)",
+			InstallHint: "Install Nixpacks: https://nixpacks.com/docs/install (optional - for auto-building without Dockerfile)",
 		},
 	}
 
@@ -246,6 +246,22 @@ func (s *SystemChecker) InstallNixpacks() error {
 	}
 }
 
+// CanInstallNixpacks returns true when Tako can install Nixpacks through a local package manager.
+func (s *SystemChecker) CanInstallNixpacks() bool {
+	switch runtime.GOOS {
+	case "windows":
+		return commandExists("scoop")
+	case "darwin":
+		return commandExists("brew")
+	default:
+		return false
+	}
+}
+
+func commandExists(name string) bool {
+	return exec.Command(name, "--version").Run() == nil
+}
+
 // installNixpacksWindows installs Nixpacks on Windows
 func (s *SystemChecker) installNixpacksWindows() error {
 	// Check if Scoop is installed
@@ -291,31 +307,12 @@ func (s *SystemChecker) installNixpacksMacOS() error {
 		return nil
 	}
 
-	// Fallback to curl install script
-	return s.installNixpacksCurl()
+	return fmt.Errorf("homebrew is required for automatic Nixpacks installation on macOS; install manually from https://nixpacks.com/docs/install")
 }
 
 // installNixpacksLinux installs Nixpacks on Linux
 func (s *SystemChecker) installNixpacksLinux() error {
-	return s.installNixpacksCurl()
-}
-
-// installNixpacksCurl installs Nixpacks using the curl install script
-func (s *SystemChecker) installNixpacksCurl() error {
-	fmt.Println("  Downloading and running install script...")
-
-	// Download and execute the install script
-	cmd := exec.Command("sh", "-c", "curl -sSL https://nixpacks.com/install.sh | bash")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to install nixpacks: %w", err)
-	}
-
-	fmt.Println("  ✓ Nixpacks installed successfully")
-	fmt.Println("\n  Note: You may need to restart your terminal for Nixpacks to be available in PATH")
-	return nil
+	return fmt.Errorf("automatic Nixpacks installation is not available on Linux; install manually from https://nixpacks.com/docs/install")
 }
 
 // PromptNixpacksInstall asks the user if they want to install Nixpacks
