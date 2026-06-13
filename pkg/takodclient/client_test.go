@@ -57,3 +57,11 @@ func TestLogsEndpointEscapesQueryValues(t *testing.T) {
 		t.Fatalf("LogsEndpoint() = %q, want %q", got, want)
 	}
 }
+
+func TestStatsEndpointEscapesQueryValues(t *testing.T) {
+	got := StatsEndpoint("demo app", "prod/us", "web api", true)
+	want := "/v1/stats?all=true&environment=prod%2Fus&project=demo+app&service=web+api"
+	if got != want {
+		t.Fatalf("StatsEndpoint() = %q, want %q", got, want)
+	}
+}

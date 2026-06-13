@@ -7,6 +7,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
 
@@ -71,11 +72,9 @@ func runPrometheus(cmd *cobra.Command, args []string) error {
 		// Export system metrics
 		exportSystemMetrics(serverName, server.Host, &metrics)
 
-		// Fetch container stats
-		statsCmd := fmt.Sprintf("docker ps --format '{{.Names}}' | grep '^%s_%s_' | xargs -r docker stats --no-stream --format '{{json .}}'", cfg.Project.Name, envName)
-		statsOutput, err := client.Execute(statsCmd)
-		if err == nil && strings.TrimSpace(statsOutput) != "" {
-			exportContainerMetrics(serverName, server.Host, statsOutput)
+		statsResponse, err := readStatsViaTakodWithOptions(client, cfg, envName, "", false)
+		if err == nil && len(statsResponse.Stats) > 0 {
+			exportContainerMetrics(serverName, server.Host, statsResponse.Stats)
 		}
 	}
 
@@ -185,25 +184,14 @@ func exportSystemMetrics(serverName, serverHost string, metrics *MetricsData) {
 	fmt.Println()
 }
 
-func exportContainerMetrics(serverName, serverHost, statsOutput string) {
-	lines := strings.Split(strings.TrimSpace(statsOutput), "\n")
-
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-
-		var rawStat map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &rawStat); err != nil {
-			continue
-		}
-
-		containerName := getString(rawStat, "Name")
-		cpuPercent := strings.TrimSuffix(getString(rawStat, "CPUPerc"), "%")
-		memPercent := strings.TrimSuffix(getString(rawStat, "MemPerc"), "%")
+func exportContainerMetrics(serverName, serverHost string, stats []takod.ContainerStat) {
+	for _, stat := range stats {
+		containerName := stat.Name
+		cpuPercent := strings.TrimSuffix(stat.CPUPercent, "%")
+		memPercent := strings.TrimSuffix(stat.MemPercent, "%")
 
 		// Parse memory usage (format: "100MiB / 2GiB")
-		memUsage := getString(rawStat, "MemUsage")
+		memUsage := stat.MemUsage
 		memParts := strings.Split(memUsage, " / ")
 		var memUsedBytes, memTotalBytes int64
 		if len(memParts) == 2 {

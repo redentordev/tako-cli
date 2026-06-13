@@ -672,3 +672,52 @@ func TestHandleLogsStreamsServiceLogs(t *testing.T) {
 		t.Fatalf("unexpected log body: %q", recorder.Body.String())
 	}
 }
+
+func TestHandleStatsRequiresGet(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/stats", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleStats(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleStatsRejectsInvalidAll(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/stats?all=maybe", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleStats(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleStatsReturnsContainerStats(t *testing.T) {
+	logPath := t.TempDir() + "/commands.log"
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1\n")
+	t.Setenv("TAKO_FAKE_STATS_OUTPUT", `{"Name":"demo_production_web_1","CPUPerc":"1.23%"}`+"\n")
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/stats?project=demo&environment=production&service=web", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleStats(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response StatsResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode stats response: %v", err)
+	}
+	if len(response.Stats) != 1 || response.Stats[0].CPUPercent != "1.23%" {
+		t.Fatalf("unexpected stats response: %#v", response)
+	}
+}
