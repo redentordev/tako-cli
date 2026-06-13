@@ -251,17 +251,26 @@ func backupFileName(volume string, backupID string) string {
 func restoreVolumeScript(backupFile string) string {
 	quotedBackup := shellQuote(backupFile)
 	return fmt.Sprintf(`set -eu
+backupPath=/backup/%s
 if [ ! -d /target ] || [ -L /target ]; then
   echo "invalid restore target" >&2
   exit 1
 fi
-if [ ! -f /backup/%s ]; then
+if [ ! -f "$backupPath" ]; then
   echo "backup file not found" >&2
   exit 1
 fi
+tar -tzf "$backupPath" | awk '
+BEGIN { bad = 0 }
+/^\/|(^|\/)\.\.(\/|$)/ {
+  print "unsafe backup entry: " $0 > "/dev/stderr"
+  bad = 1
+}
+END { exit bad }
+'
 find /target -mindepth 1 -maxdepth 1 -exec rm -rf -- {} \;
-tar -xzf /backup/%s -C /target
-`, quotedBackup, quotedBackup)
+tar -xzf "$backupPath" -C /target
+`, quotedBackup)
 }
 
 func shellQuote(value string) string {
