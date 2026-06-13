@@ -368,7 +368,9 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako live` | Disable maintenance mode and restore service traffic |
 | `tako cleanup` | Clean up old node runtime resources |
 
-CI/CD runners use the same takod path as a laptop. See [CI/CD Deployments](./docs/CI-CD.md).
+CI/CD runners use the same takod path as a laptop. See
+[CI/CD Deployments](./docs/CI-CD.md) and the
+[meshed takod E2E checklist](./docs/MESH-E2E-CHECKLIST.md).
 
 ### Common Flags
 
