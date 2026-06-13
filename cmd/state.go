@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
@@ -160,37 +161,75 @@ func collectStateDeploymentHistories(cfg *config.Config, envName string, request
 		return nil, err
 	}
 
-	histories := make([]stateHistoryCandidate, 0, len(serverNames))
-	for _, serverName := range serverNames {
-		server := cfg.Servers[serverName]
-		if !quiet {
-			fmt.Printf("Checking %s (%s)...\n", serverName, server.Host)
+	type historyReadResult struct {
+		index      int
+		serverName string
+		host       string
+		history    *remotestate.DeploymentHistory
+		err        error
+	}
+
+	results := make([]historyReadResult, len(serverNames))
+	resultCh := make(chan historyReadResult, len(serverNames))
+	var wg sync.WaitGroup
+	for index, serverName := range serverNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return nil, fmt.Errorf("server %s not found in configuration", serverName)
 		}
-		client, err := connectAndVerifyStateServer(serverName, server)
-		if err != nil {
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			result := historyReadResult{
+				index:      index,
+				serverName: serverName,
+				host:       server.Host,
+			}
+			client, err := connectAndVerifyStateServer(serverName, server)
+			if err != nil {
+				result.err = err
+				resultCh <- result
+				return
+			}
+			defer client.Close()
+
+			manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
+			result.history, result.err = manager.LoadHistory()
+			resultCh <- result
+		}(index, serverName, server)
+	}
+	wg.Wait()
+	close(resultCh)
+	for result := range resultCh {
+		results[result.index] = result
+	}
+
+	histories := make([]stateHistoryCandidate, 0, len(serverNames))
+	for _, result := range results {
+		if !quiet {
+			fmt.Printf("Checking %s (%s)...\n", result.serverName, result.host)
+		}
+		if result.err != nil {
 			if !quiet || verbose {
-				fmt.Fprintf(os.Stderr, "Warning: cannot read state from %s: %v\n", serverName, err)
+				fmt.Fprintf(os.Stderr, "Warning: cannot read state from %s: %v\n", result.serverName, result.err)
 			}
 			continue
 		}
 
-		manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
-		history, err := manager.LoadHistory()
-		_ = client.Close()
-		if err != nil || !historyHasDeployments(history) {
+		if !historyHasDeployments(result.history) {
 			if verbose {
-				fmt.Printf("No deployment history found on %s\n", serverName)
+				fmt.Printf("No deployment history found on %s\n", result.serverName)
 			}
 			continue
 		}
 		histories = append(histories, stateHistoryCandidate{
-			source:  serverName,
-			history: history,
+			source:  result.serverName,
+			history: result.history,
 		})
 		if !quiet {
 			fmt.Printf("  history: %d deployment(s), freshness %s\n",
-				deploymentHistoryCount(history),
-				deploymentHistoryFreshness(history).Format(time.RFC3339),
+				deploymentHistoryCount(result.history),
+				deploymentHistoryFreshness(result.history).Format(time.RFC3339),
 			)
 		}
 	}
@@ -526,51 +565,73 @@ func collectStateStatusNodes(cfg *config.Config, envName string, requestedServer
 		return nil, err
 	}
 
-	nodes := make([]stateStatusNode, 0, len(serverNames))
-	for _, serverName := range serverNames {
+	nodes := make([]stateStatusNode, len(serverNames))
+	resultCh := make(chan struct {
+		index int
+		node  stateStatusNode
+	}, len(serverNames))
+	var wg sync.WaitGroup
+	for index, serverName := range serverNames {
 		server, ok := cfg.Servers[serverName]
 		if !ok {
 			return nil, fmt.Errorf("server %s not found in configuration", serverName)
 		}
-		node := stateStatusNode{
-			name: serverName,
-			host: server.Host,
-		}
-
-		client, err := connectAndVerifyStateServer(serverName, server)
-		if err != nil {
-			node.connectErr = err
-			nodes = append(nodes, node)
-			continue
-		}
-
-		manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
-		node.history, node.historyErr = manager.LoadHistory()
-
-		runtime := takodstate.NewManager(client, cfg, envName)
-		node.desired, node.desiredErr = runtime.ReadDesired()
-		node.actual, node.actualErr = runtime.ReadActual()
-		for _, actualNodeName := range envServerNames {
-			nodeActual, err := runtime.ReadNodeActual(actualNodeName)
-			if err == nil && nodeActualSnapshotRepairable(nodeActual, actualNodeName) {
-				node.nodeActual = append(node.nodeActual, stateNodeActualCandidate{
-					source: serverName,
-					node:   actualNodeName,
-					actual: nodeActual,
-				})
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			resultCh <- struct {
+				index int
+				node  stateStatusNode
+			}{
+				index: index,
+				node:  collectStateStatusNode(cfg, envName, serverName, server, envServerNames),
 			}
-		}
-
-		node.agent, node.agentErr = readTakodAgentStatus(client, cfg)
-		if cfg.Mesh != nil {
-			node.mesh, node.meshErr = readMeshRuntimeStatus(client, cfg)
-		}
-		node.lease, node.leaseErr = manager.ReadLease()
-
-		_ = client.Close()
-		nodes = append(nodes, node)
+		}(index, serverName, server)
+	}
+	wg.Wait()
+	close(resultCh)
+	for result := range resultCh {
+		nodes[result.index] = result.node
 	}
 	return nodes, nil
+}
+
+func collectStateStatusNode(cfg *config.Config, envName string, serverName string, server config.ServerConfig, envServerNames []string) stateStatusNode {
+	node := stateStatusNode{
+		name: serverName,
+		host: server.Host,
+	}
+
+	client, err := connectAndVerifyStateServer(serverName, server)
+	if err != nil {
+		node.connectErr = err
+		return node
+	}
+	defer client.Close()
+
+	manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
+	node.history, node.historyErr = manager.LoadHistory()
+
+	runtime := takodstate.NewManager(client, cfg, envName)
+	node.desired, node.desiredErr = runtime.ReadDesired()
+	node.actual, node.actualErr = runtime.ReadActual()
+	for _, actualNodeName := range envServerNames {
+		nodeActual, err := runtime.ReadNodeActual(actualNodeName)
+		if err == nil && nodeActualSnapshotRepairable(nodeActual, actualNodeName) {
+			node.nodeActual = append(node.nodeActual, stateNodeActualCandidate{
+				source: serverName,
+				node:   actualNodeName,
+				actual: nodeActual,
+			})
+		}
+	}
+
+	node.agent, node.agentErr = readTakodAgentStatus(client, cfg)
+	if cfg.Mesh != nil {
+		node.mesh, node.meshErr = readMeshRuntimeStatus(client, cfg)
+	}
+	node.lease, node.leaseErr = manager.ReadLease()
+	return node
 }
 
 func stateStatusCandidates(nodes []stateStatusNode) ([]stateHistoryCandidate, []stateDesiredCandidate, []stateActualCandidate, []stateNodeActualCandidate) {
