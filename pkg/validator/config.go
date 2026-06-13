@@ -279,6 +279,10 @@ func (v *ConfigValidator) validateStorage(storage *config.StorageConfig, servers
 			}
 			exportPaths[export.Path] = true
 		}
+
+		if err := validateNFSExportOptions(export.Options); err != nil {
+			v.errors = append(v.errors, fmt.Sprintf("%s: %v", prefix, err))
+		}
 	}
 
 	// Add warning for single-server with NFS
@@ -331,11 +335,50 @@ func validateNFSExportPath(path string) error {
 		return fmt.Errorf("path cannot contain '..'")
 	}
 
+	if !isSafeNFSPath(path) {
+		return fmt.Errorf("path contains unsupported characters")
+	}
+
 	// Path should be at least 2 levels deep
 	parts := strings.Split(strings.Trim(cleanPath, "/"), "/")
 	if len(parts) < 2 {
 		return fmt.Errorf("path must be at least 2 levels deep (e.g., /srv/nfs)")
 	}
 
+	return nil
+}
+
+func isSafeNFSPath(path string) bool {
+	for _, r := range path {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		switch r {
+		case '/', '.', '_', '-':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validateNFSExportOptions(options []string) error {
+	for _, option := range options {
+		if option == "" {
+			return fmt.Errorf("NFS export option cannot be empty")
+		}
+		for _, r := range option {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+				continue
+			}
+			switch r {
+			case '_', '-', '=', ':', '.', '/':
+				continue
+			default:
+				return fmt.Errorf("NFS export option contains unsupported characters: %s", option)
+			}
+		}
+	}
 	return nil
 }
