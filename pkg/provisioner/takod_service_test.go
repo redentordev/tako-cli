@@ -62,11 +62,11 @@ func TestReleaseVersionArg(t *testing.T) {
 	}
 }
 
-func TestTakodSystemdUnitGrantsDockerGroupSocketAccess(t *testing.T) {
+func TestTakodSystemdUnitGrantsTakoGroupSocketAccess(t *testing.T) {
 	unit := buildTakodSystemdUnit("/usr/local/bin/tako", "/run/tako/takod.sock", "/var/lib/tako")
 	for _, required := range []string{
 		"User=root",
-		"Group=docker",
+		"Group=tako",
 		"RuntimeDirectory=tako",
 		"RuntimeDirectoryMode=0770",
 		"UMask=0007",
