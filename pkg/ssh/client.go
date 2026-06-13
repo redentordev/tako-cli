@@ -63,9 +63,7 @@ func isOpenSSHFormat(data []byte) bool {
 func getHostKeyCallback() (ssh.HostKeyCallback, error) {
 	verifier, err := GetDefaultVerifier()
 	if err != nil {
-		return nil, fmt.Errorf("host key verification failed: %w\n\n"+
-			"SSH connections require host key verification for security.\n"+
-			"To bypass (NOT recommended), set TAKO_HOST_KEY_MODE=insecure", err)
+		return nil, fmt.Errorf("host key verification failed: %w", err)
 	}
 	return verifier.GetCallback(), nil
 }
