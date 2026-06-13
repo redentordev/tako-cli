@@ -32,6 +32,33 @@ func TestResolveServerRequiresRequestedServerInEnvironment(t *testing.T) {
 	}
 }
 
+func TestResolveEnvironmentServerSetUsesOnlyEnvironmentNodesByDefault(t *testing.T) {
+	cfg := resolverConfig()
+
+	servers, err := resolveEnvironmentServerSet(cfg, "production", "")
+	if err != nil {
+		t.Fatalf("resolveEnvironmentServerSet returned error: %v", err)
+	}
+
+	if _, ok := servers["node-a"]; !ok {
+		t.Fatal("node-a should be included")
+	}
+	if _, ok := servers["node-b"]; !ok {
+		t.Fatal("node-b should be included")
+	}
+	if _, ok := servers["node-c"]; ok {
+		t.Fatal("node-c should not be included because it is outside production")
+	}
+}
+
+func TestResolveEnvironmentServerSetRequiresRequestedServerInEnvironment(t *testing.T) {
+	cfg := resolverConfig()
+
+	if _, err := resolveEnvironmentServerSet(cfg, "production", "node-c"); err == nil {
+		t.Fatal("resolveEnvironmentServerSet should reject a server outside the environment")
+	}
+}
+
 func TestConnectResolvedServerUsesFirstReachableNodeByDefault(t *testing.T) {
 	cfg := resolverConfig()
 	var attempts []string

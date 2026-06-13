@@ -55,8 +55,8 @@ func init() {
 }
 
 func ensureDeployRuntimeSupported(cfg *config.Config) error {
-	if !cfg.IsTakodRuntime() {
-		return fmt.Errorf("runtime.mode=%s is not supported; Tako now uses runtime.mode=takod", cfg.GetRuntimeMode())
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
 	}
 	if !cfg.IsMeshEnabled() {
 		return fmt.Errorf("mesh.enabled=false is not supported; single-node deploys use a one-node mesh")

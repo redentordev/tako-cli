@@ -77,6 +77,9 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
+	}
 
 	envName := getEnvironmentName(cfg)
 
@@ -154,6 +157,9 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
 	}
 
 	envName := getEnvironmentName(cfg)
