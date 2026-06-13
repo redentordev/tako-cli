@@ -1,6 +1,7 @@
 package takod
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -88,6 +89,30 @@ func TestHandleActualRequiresProjectAndEnvironment(t *testing.T) {
 	recorder := httptest.NewRecorder()
 
 	server.handleActual(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleReconcileServiceRequiresPost(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/reconcile-service", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleReconcileService(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleReconcileServiceRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/reconcile-service", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleReconcileService(recorder, req)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)

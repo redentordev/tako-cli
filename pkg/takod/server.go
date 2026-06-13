@@ -71,6 +71,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/actual", s.handleActual)
+	mux.HandleFunc("/v1/reconcile-service", s.handleReconcileService)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -143,6 +144,31 @@ func (s *Server) handleActual(w http.ResponseWriter, r *http.Request) {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(actual)
+}
+
+func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request ReconcileServiceRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	response, err := ReconcileService(r.Context(), request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
 }
 
 func (s *Server) Status() Status {

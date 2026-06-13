@@ -17,6 +17,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/network"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/unregistry"
 )
 
@@ -296,25 +297,8 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		fmt.Printf("  -> %s slots %v\n", serverName, slots)
 	}
 
-	if err := d.removeTakodServiceContainers(client, serviceName); err != nil {
-		return err
-	}
-
-	if len(slots) == 0 {
-		return nil
-	}
-
 	networkMgr := network.NewManager(client, d.config.Project.Name, d.environment, d.verbose)
-	if err := networkMgr.EnsureNetwork(); err != nil {
-		return fmt.Errorf("failed to ensure project network: %w", err)
-	}
 	networkName := networkMgr.GetNetworkName()
-
-	if service.Image != "" {
-		if output, err := client.Execute("docker pull " + shellQuote(imageRef) + " 2>&1"); err != nil {
-			return fmt.Errorf("failed to pull image %s: %w, output: %s", imageRef, err, output)
-		}
-	}
 
 	if service.IsPublic() {
 		if service.Port <= 0 {
@@ -338,94 +322,51 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		defer cleanupEnv()
 	}
 
-	healthChecker := NewHealthChecker(client, d.verbose)
+	mounts, err := d.buildTakodMountSpecs(serviceName, service)
+	if err != nil {
+		return err
+	}
+
+	request := takod.ReconcileServiceRequest{
+		Project:      d.config.Project.Name,
+		Environment:  d.environment,
+		Service:      serviceName,
+		Image:        imageRef,
+		PullImage:    service.Image != "",
+		Restart:      service.Restart,
+		Network:      networkName,
+		NetworkAlias: serviceName,
+		EnvFile:      envFilePath,
+		Mounts:       mounts,
+		Health:       d.buildTakodHealthSpec(service),
+		Command:      service.Command,
+	}
 	for _, slot := range slots {
 		containerName := d.takodContainerName(serviceName, slot)
-		runCmd, err := d.buildTakodRunCommand(serverName, containerName, serviceName, service, imageRef, networkName, envFilePath, slot, len(slots))
-		if err != nil {
-			return err
+		container := takod.ContainerSpec{Name: containerName}
+		if service.IsPublic() {
+			meshHostIP, err := d.meshHostIPForServer(serverName)
+			if err != nil {
+				return err
+			}
+			meshPort, err := d.meshUpstreamPort(serviceName, slot)
+			if err != nil {
+				return err
+			}
+			container.Publishes = append(container.Publishes, fmt.Sprintf("%s:%d:%d", meshHostIP, meshPort, service.Port))
+		} else if service.Port > 0 {
+			if len(slots) > 1 {
+				return fmt.Errorf("service %s publishes port %d without proxy but has multiple replicas on the same node", serviceName, service.Port)
+			}
+			container.Publishes = append(container.Publishes, fmt.Sprintf("%d:%d", service.Port, service.Port))
 		}
-		output, err := client.Execute(runCmd)
-		if err != nil {
-			return fmt.Errorf("failed to start container %s: %w, output: %s", containerName, err, output)
-		}
-		if err := healthChecker.WaitForHealthy(containerName, service.HealthCheck.Retries); err != nil {
-			return fmt.Errorf("container %s failed health verification: %w", containerName, err)
-		}
+		request.Containers = append(request.Containers, container)
 	}
 
-	return nil
+	return d.reconcileServiceViaTakod(client, request)
 }
 
-func (d *Deployer) removeTakodServiceContainers(client *ssh.Client, serviceName string) error {
-	removeCmd := fmt.Sprintf(
-		"docker ps -aq --filter label=tako.project=%s --filter label=tako.environment=%s --filter label=tako.service=%s | xargs -r docker rm -f",
-		shellQuote(d.config.Project.Name),
-		shellQuote(d.environment),
-		shellQuote(serviceName),
-	)
-	if _, err := client.Execute(removeCmd); err != nil {
-		return fmt.Errorf("failed to remove old containers: %w", err)
-	}
-	return nil
-}
-
-func (d *Deployer) buildTakodRunCommand(serverName string, containerName string, serviceName string, service *config.ServiceConfig, imageRef string, networkName string, envFilePath string, slot int, nodeSlotCount int) (string, error) {
-	restart := service.Restart
-	if restart == "" {
-		restart = "unless-stopped"
-	}
-
-	args := []string{
-		"docker run -d",
-		"--name " + shellQuote(containerName),
-		"--restart " + shellQuote(restart),
-		"--network " + shellQuote(networkName),
-		"--network-alias " + shellQuote(serviceName),
-		"--label " + shellQuote("tako.project="+d.config.Project.Name),
-		"--label " + shellQuote("tako.environment="+d.environment),
-		"--label " + shellQuote("tako.service="+serviceName),
-		"--label " + shellQuote("tako.runtime="+config.RuntimeModeTakod),
-	}
-
-	if envFilePath != "" {
-		args = append(args, "--env-file "+shellQuote(envFilePath))
-	}
-
-	volumeArgs, err := d.buildTakodVolumeArgs(serviceName, service)
-	if err != nil {
-		return "", err
-	}
-	args = append(args, volumeArgs...)
-
-	if service.IsPublic() {
-		meshHostIP, err := d.meshHostIPForServer(serverName)
-		if err != nil {
-			return "", err
-		}
-		meshPort, err := d.meshUpstreamPort(serviceName, slot)
-		if err != nil {
-			return "", err
-		}
-		args = append(args, "--publish "+shellQuote(fmt.Sprintf("%s:%d:%d", meshHostIP, meshPort, service.Port)))
-	} else if service.Port > 0 {
-		if nodeSlotCount > 1 {
-			return "", fmt.Errorf("service %s publishes port %d without proxy but has multiple replicas on the same node", serviceName, service.Port)
-		}
-		args = append(args, fmt.Sprintf("--publish %d:%d", service.Port, service.Port))
-	}
-
-	args = append(args, d.buildTakodHealthFlags(service)...)
-	args = append(args, shellQuote(imageRef))
-	if service.Command != "" {
-		args = append(args, service.Command)
-	}
-	args = append(args, "2>&1")
-
-	return strings.Join(args, " "), nil
-}
-
-func (d *Deployer) buildTakodHealthFlags(service *config.ServiceConfig) []string {
+func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.HealthSpec {
 	if service.HealthCheck.Path == "" || service.Port <= 0 {
 		return nil
 	}
@@ -446,19 +387,24 @@ func (d *Deployer) buildTakodHealthFlags(service *config.ServiceConfig) []string
 	if startPeriod == "" {
 		startPeriod = "10s"
 	}
+	waitAttempts := service.HealthCheck.Retries
+	if waitAttempts <= 0 {
+		waitAttempts = 30
+	}
 
 	healthCmd := fmt.Sprintf("curl -sf http://localhost:%d%s || exit 1", service.Port, service.HealthCheck.Path)
-	return []string{
-		"--health-cmd " + shellQuote(healthCmd),
-		"--health-interval " + shellQuote(interval),
-		"--health-timeout " + shellQuote(timeout),
-		fmt.Sprintf("--health-retries %d", retries),
-		"--health-start-period " + shellQuote(startPeriod),
+	return &takod.HealthSpec{
+		Command:      healthCmd,
+		Interval:     interval,
+		Timeout:      timeout,
+		Retries:      retries,
+		StartPeriod:  startPeriod,
+		WaitAttempts: waitAttempts,
 	}
 }
 
-func (d *Deployer) buildTakodVolumeArgs(serviceName string, service *config.ServiceConfig) ([]string, error) {
-	var args []string
+func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.ServiceConfig) ([]string, error) {
+	var mounts []string
 	for _, volume := range service.Volumes {
 		if config.IsNFSVolume(volume) {
 			exportName, containerPath, readOnly, err := config.ParseNFSVolumeSpec(volume)
@@ -479,7 +425,7 @@ func (d *Deployer) buildTakodVolumeArgs(serviceName string, service *config.Serv
 			if readOnly {
 				mountOpts += ",readonly"
 			}
-			args = append(args, "--mount "+shellQuote(mountOpts))
+			mounts = append(mounts, mountOpts)
 			continue
 		}
 
@@ -487,18 +433,18 @@ func (d *Deployer) buildTakodVolumeArgs(serviceName string, service *config.Serv
 		if target == "" {
 			target = source
 			source = fmt.Sprintf("%s_%s_%s", d.config.Project.Name, d.environment, sanitizeVolumeName(target))
-			args = append(args, "--mount "+shellQuote(fmt.Sprintf("type=volume,source=%s,target=%s", source, target)))
+			mounts = append(mounts, fmt.Sprintf("type=volume,source=%s,target=%s", source, target))
 			continue
 		}
 
 		if strings.HasPrefix(source, "/") {
-			args = append(args, "--mount "+shellQuote(fmt.Sprintf("type=bind,source=%s,target=%s", source, target)))
+			mounts = append(mounts, fmt.Sprintf("type=bind,source=%s,target=%s", source, target))
 		} else {
 			namedVolume := fmt.Sprintf("%s_%s_%s", d.config.Project.Name, d.environment, source)
-			args = append(args, "--mount "+shellQuote(fmt.Sprintf("type=volume,source=%s,target=%s", namedVolume, target)))
+			mounts = append(mounts, fmt.Sprintf("type=volume,source=%s,target=%s", namedVolume, target))
 		}
 	}
-	return args, nil
+	return mounts, nil
 }
 
 func (d *Deployer) ensureTakodProxy(client *ssh.Client, networkName string, email string) error {
@@ -809,6 +755,38 @@ func uploadJSON(client *ssh.Client, remotePath string, value any, mode os.FileMo
 	}
 	data = append(data, '\n')
 	return client.UploadReader(strings.NewReader(string(data)), remotePath, mode)
+}
+
+func (d *Deployer) reconcileServiceViaTakod(client *ssh.Client, request takod.ReconcileServiceRequest) error {
+	tmpPath := fmt.Sprintf(
+		"/tmp/tako-reconcile-%s-%d.json",
+		sanitizeRouterName(request.Service),
+		time.Now().UnixNano(),
+	)
+	if err := uploadJSON(client, tmpPath, request, 0600); err != nil {
+		return fmt.Errorf("failed to upload takod reconcile request: %w", err)
+	}
+
+	socket := d.takodSocket()
+	curlCmd := fmt.Sprintf(
+		"status=0; if test -S %[1]s && command -v curl >/dev/null 2>&1; then "+
+			"curl --fail --silent --show-error --unix-socket %[1]s -X POST -H 'Content-Type: application/json' --data-binary @%[2]s http://takod/v1/reconcile-service || status=$?; "+
+			"else echo 'takod socket or curl is unavailable' >&2; status=42; fi; rm -f %[2]s; exit $status",
+		shellQuote(socket),
+		shellQuote(tmpPath),
+	)
+	output, err := client.Execute(curlCmd)
+	if err != nil {
+		return fmt.Errorf("takod service reconciliation failed: %w, output: %s", err, output)
+	}
+	return nil
+}
+
+func (d *Deployer) takodSocket() string {
+	if d.config.Runtime != nil && d.config.Runtime.Agent != nil && d.config.Runtime.Agent.Socket != "" {
+		return d.config.Runtime.Agent.Socket
+	}
+	return "/run/tako/takod.sock"
 }
 
 func parseVolumeSpec(volume string) (source, target string) {
