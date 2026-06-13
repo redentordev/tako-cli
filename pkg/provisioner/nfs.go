@@ -8,6 +8,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/utils"
 )
 
 // NFSProvisioner handles NFS server and client provisioning
@@ -120,13 +121,53 @@ func ValidateNFSExportPath(path string) error {
 		return fmt.Errorf("NFS export path cannot contain '..': %s", path)
 	}
 
+	if !isSafeNFSPath(path) {
+		return fmt.Errorf("NFS export path contains unsupported characters: %s", path)
+	}
+
 	return nil
+}
+
+func isSafeNFSPath(path string) bool {
+	for _, r := range path {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		switch r {
+		case '/', '.', '_', '-':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateIPAddress checks if a string is a valid IP address
 func ValidateIPAddress(ip string) error {
 	if net.ParseIP(ip) == nil {
 		return fmt.Errorf("invalid IP address: %s", ip)
+	}
+	return nil
+}
+
+// ValidateNFSExportOptions checks user-supplied /etc/exports options.
+func ValidateNFSExportOptions(options []string) error {
+	for _, option := range options {
+		if option == "" {
+			return fmt.Errorf("NFS export option cannot be empty")
+		}
+		for _, r := range option {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+				continue
+			}
+			switch r {
+			case '_', '-', '=', ':', '.', '/':
+				continue
+			default:
+				return fmt.Errorf("NFS export option contains unsupported characters: %s", option)
+			}
+		}
 	}
 	return nil
 }
@@ -301,16 +342,19 @@ func (n *NFSProvisioner) configureExport(client *ssh.Client, export *config.NFSE
 	if err := ValidateNFSExportPath(export.Path); err != nil {
 		return nil, err
 	}
+	if err := ValidateNFSExportOptions(export.Options); err != nil {
+		return nil, err
+	}
 
 	// Create export directory with secure permissions
-	createDirCmd := fmt.Sprintf("sudo mkdir -p %s", export.Path)
+	createDirCmd := fmt.Sprintf("sudo mkdir -p %s", shellArg(export.Path))
 	if _, err := client.Execute(createDirCmd); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
 	// Set ownership - use nobody:nogroup for NFS (standard for anonymous access)
 	// This allows containers with different UIDs to access the files
-	chownCmd := fmt.Sprintf("sudo chown -R nobody:nogroup %s", export.Path)
+	chownCmd := fmt.Sprintf("sudo chown -R nobody:nogroup %s", shellArg(export.Path))
 	if _, err := client.Execute(chownCmd); err != nil {
 		return nil, fmt.Errorf("failed to set ownership: %w", err)
 	}
@@ -318,7 +362,7 @@ func (n *NFSProvisioner) configureExport(client *ssh.Client, export *config.NFSE
 	// Set directory permissions (rwxrwxrwx - world writable for NFS)
 	// This is standard for NFS exports where multiple containers with different UIDs need write access
 	// Security is enforced at the NFS export level (IP restrictions) and service config (read-only mounts)
-	chmodCmd := fmt.Sprintf("sudo chmod -R 777 %s", export.Path)
+	chmodCmd := fmt.Sprintf("sudo chmod -R 777 %s", shellArg(export.Path))
 	if _, err := client.Execute(chmodCmd); err != nil {
 		return nil, fmt.Errorf("failed to set permissions: %w", err)
 	}
@@ -333,17 +377,17 @@ func (n *NFSProvisioner) configureExport(client *ssh.Client, export *config.NFSE
 	exportLine := fmt.Sprintf("%s %s", export.Path, allowedHosts)
 
 	// Remove existing export for this path (if any) and add new one
-	checkCmd := fmt.Sprintf("grep -q '^%s ' /etc/exports 2>/dev/null && echo 'exists' || echo 'new'", export.Path)
+	checkCmd := exportExistsCommand(export.Path)
 	output, _ := client.Execute(checkCmd)
 
 	if strings.TrimSpace(output) == "exists" {
 		// Remove existing line
-		removeCmd := fmt.Sprintf("sudo sed -i '\\|^%s |d' /etc/exports", export.Path)
+		removeCmd := removeExportsLineCommand(export.Path)
 		client.Execute(removeCmd)
 	}
 
 	// Add new export line
-	addCmd := fmt.Sprintf("echo '%s' | sudo tee -a /etc/exports > /dev/null", exportLine)
+	addCmd := appendRootOwnedLineCommand("/etc/exports", exportLine)
 	if _, err := client.Execute(addCmd); err != nil {
 		return nil, fmt.Errorf("failed to add export: %w", err)
 	}
@@ -466,13 +510,13 @@ func (n *NFSProvisioner) mountNFSExport(client *ssh.Client, nfsServerHost string
 	}
 
 	// Create mount point directory with restrictive permissions
-	createDirCmd := fmt.Sprintf("sudo mkdir -p %s && sudo chmod 755 %s", export.MountPoint, export.MountPoint)
+	createDirCmd := fmt.Sprintf("sudo mkdir -p %s && sudo chmod 755 %s", shellArg(export.MountPoint), shellArg(export.MountPoint))
 	if _, err := client.Execute(createDirCmd); err != nil {
 		return fmt.Errorf("failed to create mount point: %w", err)
 	}
 
 	// Check if already mounted
-	checkMountCmd := fmt.Sprintf("mountpoint -q %s && echo 'mounted' || echo 'not_mounted'", export.MountPoint)
+	checkMountCmd := fmt.Sprintf("mountpoint -q %s && echo 'mounted' || echo 'not_mounted'", shellArg(export.MountPoint))
 	output, _ := client.Execute(checkMountCmd)
 
 	if strings.TrimSpace(output) == "mounted" {
@@ -480,13 +524,14 @@ func (n *NFSProvisioner) mountNFSExport(client *ssh.Client, nfsServerHost string
 			fmt.Printf("  Already mounted, verifying...\n")
 		}
 		// Verify it's the correct mount
-		verifyCmd := fmt.Sprintf("mount | grep '%s' | grep '%s' && echo 'correct' || echo 'wrong'", export.MountPoint, nfsServerHost)
+		expectedSource := fmt.Sprintf("%s:%s", nfsServerHost, export.Path)
+		verifyCmd := fmt.Sprintf("findmnt -rn --target %s --output SOURCE | grep -F -- %s >/dev/null && echo 'correct' || echo 'wrong'", shellArg(export.MountPoint), shellArg(expectedSource))
 		verifyOutput, _ := client.Execute(verifyCmd)
 		if strings.Contains(verifyOutput, "correct") {
 			return nil
 		}
 		// Wrong mount, unmount first
-		client.Execute(fmt.Sprintf("sudo umount -f %s 2>/dev/null || true", export.MountPoint))
+		client.Execute(fmt.Sprintf("sudo umount -f %s 2>/dev/null || true", shellArg(export.MountPoint)))
 	}
 
 	// NFS mount options for performance, reliability, and security
@@ -497,28 +542,28 @@ func (n *NFSProvisioner) mountNFSExport(client *ssh.Client, nfsServerHost string
 		nfsServerHost, export.Path, export.MountPoint, mountOptions)
 
 	// Remove old fstab entry for this mount point (if any)
-	removeFstabCmd := fmt.Sprintf("sudo sed -i '\\|%s|d' /etc/fstab", export.MountPoint)
+	removeFstabCmd := removeFstabEntryCommand(export.MountPoint)
 	client.Execute(removeFstabCmd)
 
 	// Add new fstab entry
-	addFstabCmd := fmt.Sprintf("echo '%s' | sudo tee -a /etc/fstab > /dev/null", fstabEntry)
+	addFstabCmd := appendRootOwnedLineCommand("/etc/fstab", fstabEntry)
 	if _, err := client.Execute(addFstabCmd); err != nil {
 		return fmt.Errorf("failed to add fstab entry: %w", err)
 	}
 
 	// Mount the filesystem
-	mountCmd := fmt.Sprintf("sudo mount %s", export.MountPoint)
+	mountCmd := fmt.Sprintf("sudo mount %s", shellArg(export.MountPoint))
 	if _, err := client.Execute(mountCmd); err != nil {
 		// Try mounting with explicit options if fstab mount fails
 		explicitMountCmd := fmt.Sprintf("sudo mount -t nfs4 -o %s %s:%s %s",
-			mountOptions, nfsServerHost, export.Path, export.MountPoint)
+			shellArg(mountOptions), shellArg(nfsServerHost), shellArg(export.Path), shellArg(export.MountPoint))
 		if _, err := client.Execute(explicitMountCmd); err != nil {
 			return fmt.Errorf("failed to mount NFS: %w", err)
 		}
 	}
 
 	// Verify mount
-	verifyCmd := fmt.Sprintf("mountpoint -q %s && echo 'success' || echo 'failed'", export.MountPoint)
+	verifyCmd := fmt.Sprintf("mountpoint -q %s && echo 'success' || echo 'failed'", shellArg(export.MountPoint))
 	verifyOutput, _ := client.Execute(verifyCmd)
 
 	if strings.TrimSpace(verifyOutput) != "success" {
@@ -545,7 +590,7 @@ func (n *NFSProvisioner) CleanupNFSServer(client *ssh.Client, exports []NFSExpor
 
 	// Remove exports from /etc/exports
 	for _, export := range exports {
-		removeCmd := fmt.Sprintf("sudo sed -i '\\|^%s |d' /etc/exports", export.Path)
+		removeCmd := removeExportsLineCommand(export.Path)
 		client.Execute(removeCmd)
 
 		if n.verbose {
@@ -578,15 +623,15 @@ func (n *NFSProvisioner) CleanupNFSClient(client *ssh.Client, exports []NFSExpor
 
 	for _, export := range exports {
 		// Force unmount the filesystem (lazy unmount if busy)
-		unmountCmd := fmt.Sprintf("sudo umount -l %s 2>/dev/null || sudo umount -f %s 2>/dev/null || true", export.MountPoint, export.MountPoint)
+		unmountCmd := fmt.Sprintf("sudo umount -l %s 2>/dev/null || sudo umount -f %s 2>/dev/null || true", shellArg(export.MountPoint), shellArg(export.MountPoint))
 		client.Execute(unmountCmd)
 
 		// Remove from /etc/fstab
-		removeFstabCmd := fmt.Sprintf("sudo sed -i '\\|%s|d' /etc/fstab", export.MountPoint)
+		removeFstabCmd := removeFstabEntryCommand(export.MountPoint)
 		client.Execute(removeFstabCmd)
 
 		// Remove mount point directory
-		removeDirCmd := fmt.Sprintf("sudo rmdir %s 2>/dev/null || true", export.MountPoint)
+		removeDirCmd := fmt.Sprintf("sudo rmdir %s 2>/dev/null || true", shellArg(export.MountPoint))
 		client.Execute(removeDirCmd)
 
 		if n.verbose {
@@ -596,7 +641,7 @@ func (n *NFSProvisioner) CleanupNFSClient(client *ssh.Client, exports []NFSExpor
 
 	// Clean up parent directories if empty
 	parentDir := fmt.Sprintf("/mnt/tako-nfs/%s_%s", n.projectName, n.environment)
-	client.Execute(fmt.Sprintf("sudo rmdir %s 2>/dev/null || true", parentDir))
+	client.Execute(fmt.Sprintf("sudo rmdir %s 2>/dev/null || true", shellArg(parentDir)))
 	client.Execute("sudo rmdir /mnt/tako-nfs 2>/dev/null || true")
 
 	if n.verbose {
@@ -614,14 +659,14 @@ func (n *NFSProvisioner) RemountNFS(client *ssh.Client, exports []NFSExportInfo)
 
 	for _, export := range exports {
 		// Lazy unmount first (doesn't fail if busy)
-		unmountCmd := fmt.Sprintf("sudo umount -l %s 2>/dev/null || true", export.MountPoint)
+		unmountCmd := fmt.Sprintf("sudo umount -l %s 2>/dev/null || true", shellArg(export.MountPoint))
 		client.Execute(unmountCmd)
 
 		// Wait a moment
 		client.Execute("sleep 1")
 
 		// Remount
-		mountCmd := fmt.Sprintf("sudo mount %s", export.MountPoint)
+		mountCmd := fmt.Sprintf("sudo mount %s", shellArg(export.MountPoint))
 		if _, err := client.Execute(mountCmd); err != nil {
 			return fmt.Errorf("failed to remount %s: %w", export.MountPoint, err)
 		}
@@ -722,7 +767,7 @@ func (n *NFSProvisioner) CreateDockerVolume(client *ssh.Client, exportName strin
 	mountPoint := n.getMountPoint(exportName)
 
 	// Verify mount point exists and is mounted
-	checkCmd := fmt.Sprintf("mountpoint -q %s && echo 'ok' || echo 'not_mounted'", mountPoint)
+	checkCmd := fmt.Sprintf("mountpoint -q %s && echo 'ok' || echo 'not_mounted'", shellArg(mountPoint))
 	output, _ := client.Execute(checkCmd)
 	if strings.TrimSpace(output) != "ok" {
 		return fmt.Errorf("NFS mount point %s is not mounted", mountPoint)
@@ -733,7 +778,7 @@ func (n *NFSProvisioner) CreateDockerVolume(client *ssh.Client, exportName strin
 		--opt type=none \
 		--opt device=%s \
 		--opt o=bind \
-		%s`, mountPoint, volumeName)
+		%s`, shellArg(mountPoint), shellArg(volumeName))
 
 	if n.verbose {
 		fmt.Printf("  Creating Docker volume: %s -> %s\n", volumeName, mountPoint)
@@ -748,7 +793,36 @@ func (n *NFSProvisioner) CreateDockerVolume(client *ssh.Client, exportName strin
 
 // RemoveDockerVolume removes a Docker volume
 func (n *NFSProvisioner) RemoveDockerVolume(client *ssh.Client, volumeName string) error {
-	cmd := fmt.Sprintf("docker volume rm %s 2>/dev/null || true", volumeName)
+	cmd := fmt.Sprintf("docker volume rm %s 2>/dev/null || true", shellArg(volumeName))
 	client.Execute(cmd)
 	return nil
+}
+
+func shellArg(value string) string {
+	return utils.ShellQuote(value)
+}
+
+func exportExistsCommand(exportPath string) string {
+	return fmt.Sprintf("sudo awk -v p=%s '$1 == p {found=1} END {print found ? \"exists\" : \"new\"}' /etc/exports", shellArg(exportPath))
+}
+
+func removeExportsLineCommand(exportPath string) string {
+	return filterRootOwnedFileCommand("/etc/exports", exportPath, "$1 != p {print}")
+}
+
+func removeFstabEntryCommand(mountPoint string) string {
+	return filterRootOwnedFileCommand("/etc/fstab", mountPoint, "$2 != p {print}")
+}
+
+func appendRootOwnedLineCommand(path string, line string) string {
+	return fmt.Sprintf("printf '%%s\\n' %s | sudo tee -a %s > /dev/null", shellArg(line), shellArg(path))
+}
+
+func filterRootOwnedFileCommand(path string, matchValue string, awkProgram string) string {
+	return fmt.Sprintf("tmp=$(mktemp) && sudo awk -v p=%s %s %s > \"$tmp\" && sudo install -m 0644 -o root -g root \"$tmp\" %s; status=$?; [ -z \"${tmp:-}\" ] || rm -f \"$tmp\"; exit $status",
+		shellArg(matchValue),
+		shellArg(awkProgram),
+		shellArg(path),
+		shellArg(path),
+	)
 }
