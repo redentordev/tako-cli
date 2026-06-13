@@ -100,118 +100,162 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 
 	envName := getEnvironmentName(cfg)
 
-	firstServerName, firstServer, err := resolveStateServer(cfg, envName, stateServer)
+	histories, err := collectStatePullHistories(cfg, envName, stateServer)
 	if err != nil {
 		return err
 	}
+	bestHistory, hasHistory := bestDeploymentHistory(histories)
+	if hasHistory {
+		fmt.Printf("Selected deployment history from %s\n", bestHistory.source)
 
-	fmt.Printf("Connecting to %s (%s)...\n", firstServerName, firstServer.Host)
+		localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+		if err != nil {
+			return fmt.Errorf("failed to initialize local state: %w", err)
+		}
+		synced, err := syncRemoteDeploymentsToLocal(localMgr, bestHistory.history.Deployments, envName)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
 
-	// Create SSH client
-	client, err := ssh.NewClientWithAuth(firstServer.Host, firstServer.Port, firstServer.User, firstServer.SSHKey, firstServer.Password)
-	if err != nil {
-		return fmt.Errorf("failed to connect to server: %w\n\nTroubleshooting:\n  - Check SSH key exists: ls -la %s\n  - Test manually: ssh -i %s %s@%s -p %d\n  - Verify server is reachable: ping %s",
-			err, firstServer.SSHKey, firstServer.SSHKey, firstServer.User, firstServer.Host, firstServer.Port, firstServer.Host)
-	}
-	defer client.Close()
-
-	// Verify SSH connectivity
-	verifyOutput, verifyErr := client.Execute("echo 'tako-ok'")
-	if verifyErr != nil || strings.TrimSpace(verifyOutput) != "tako-ok" {
-		return fmt.Errorf("SSH connection established but command execution failed: %v\n\nTroubleshooting:\n  - Check SSH key: %s\n  - Test manually: ssh %s@%s -p %d echo ok",
-			verifyErr, firstServer.SSHKey, firstServer.User, firstServer.Host, firstServer.Port)
-	}
-
-	if verbose {
-		fmt.Println("SSH connectivity verified")
-	}
-
-	remoteMgr := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, firstServer.Host, takodSocketFromConfig(cfg))
-	history, historyErr := remoteMgr.LoadHistory()
-
-	if historyErr != nil || history == nil || len(history.Deployments) == 0 {
-		// Try recovering from mesh peers if multi-server
-		if cfg.IsMultiServer() {
-			replicaPool := ssh.NewPool()
-			defer replicaPool.CloseAll()
-			envName := getEnvironmentName(cfg)
-			replicator := remotestate.NewStateReplicator(replicaPool, cfg, envName, cfg.Project.Name, verbose)
-			if history, source, _ := replicator.RecoverStateFromPeers(); history != nil && len(history.Deployments) > 0 {
-				fmt.Printf("State recovered from node: %s\n", source)
-
-				// Restore to primary node
-				primaryMgr := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, client.Host(), takodSocketFromConfig(cfg))
-				_ = primaryMgr.SaveHistory(history)
-
-				// Now sync to local
-				localMgr, lErr := localstate.NewManager(".", cfg.Project.Name, envName)
-				if lErr == nil {
-					if _, syncErr := syncRemoteDeploymentsToLocal(localMgr, history.Deployments, envName); syncErr != nil {
-						return fmt.Errorf("failed to sync recovered state locally: %w", syncErr)
-					}
-				}
-
-				fmt.Printf("Recovered and synced %d deployment(s)\n", len(history.Deployments))
-				return nil
+		latest := latestDeploymentByTimestamp(bestHistory.history.Deployments)
+		if latest != nil {
+			fmt.Printf("\nLatest deployment:\n")
+			fmt.Printf("  ID:      %s\n", remotestate.FormatDeploymentID(latest.ID))
+			fmt.Printf("  Status:  %s\n", latest.Status)
+			fmt.Printf("  Time:    %s (%s ago)\n", latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(latest.Timestamp)))
+			fmt.Printf("  User:    %s\n", latest.User)
+			if latest.GitCommitShort != "" {
+				fmt.Printf("  Commit:  %s\n", latest.GitCommitShort)
 			}
 		}
-
-		// No remote state and peer recovery failed; try reconciling from running services.
-		fmt.Println("No remote state found, attempting recovery from running services...")
-		if err := reconcileAndSave(client, cfg, envName); err == nil {
-			return nil
-		}
-		fmt.Println("\nNo remote state or running services found.")
-		fmt.Println("This project has not been deployed yet, or state was cleaned up.")
-		fmt.Println("\nRun 'tako deploy' to create initial deployment.")
+		fmt.Println("\nLocal state is now synchronized with remote.")
 		return nil
 	}
 
-	fmt.Printf("Found takod deployment history on %s\n", firstServerName)
-
-	// Initialize local state manager
-	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
-	if err != nil {
-		return fmt.Errorf("failed to initialize local state: %w", err)
-	}
-
-	// Get remote history
-	fmt.Println("Fetching remote deployment history...")
-	remoteDeployments, err := remoteMgr.ListDeployments(&remotestate.HistoryOptions{
-		Limit:         20,
-		IncludeFailed: true,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to fetch remote history: %w", err)
-	}
-
-	if len(remoteDeployments) == 0 {
-		fmt.Println("No deployments found in remote state, attempting recovery from running services...")
-		return reconcileAndSave(client, cfg, envName)
-	}
-
-	fmt.Printf("Found %d deployment(s) in remote state\n\n", len(remoteDeployments))
-
-	synced, err := syncRemoteDeploymentsToLocal(localMgr, remoteDeployments, envName)
+	fmt.Println("No remote deployment history found, attempting recovery from running services...")
+	recoveryServerName, client, err := connectFirstReachableStateServer(cfg, envName, stateServer)
 	if err != nil {
 		return err
 	}
+	defer client.Close()
+	fmt.Printf("Recovering from running containers on %s...\n", recoveryServerName)
+	if err := reconcileAndSave(client, cfg, envName); err == nil {
+		return nil
+	}
+	fmt.Println("\nNo remote state or running services found.")
+	fmt.Println("This project has not been deployed yet, or state was cleaned up.")
+	fmt.Println("\nRun 'tako deploy' to create initial deployment.")
+	return nil
+}
 
-	fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
-
-	// Show latest deployment info
-	latest := remoteDeployments[0]
-	fmt.Printf("\nLatest deployment:\n")
-	fmt.Printf("  ID:      %s\n", remotestate.FormatDeploymentID(latest.ID))
-	fmt.Printf("  Status:  %s\n", latest.Status)
-	fmt.Printf("  Time:    %s (%s ago)\n", latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(latest.Timestamp)))
-	fmt.Printf("  User:    %s\n", latest.User)
-	if latest.GitCommitShort != "" {
-		fmt.Printf("  Commit:  %s\n", latest.GitCommitShort)
+func collectStatePullHistories(cfg *config.Config, envName string, requestedServer string) ([]stateHistoryCandidate, error) {
+	serverNames, err := statePullServerNames(cfg, envName, requestedServer)
+	if err != nil {
+		return nil, err
 	}
 
-	fmt.Println("\nLocal state is now synchronized with remote.")
-	return nil
+	histories := make([]stateHistoryCandidate, 0, len(serverNames))
+	for _, serverName := range serverNames {
+		server := cfg.Servers[serverName]
+		fmt.Printf("Checking %s (%s)...\n", serverName, server.Host)
+		client, err := connectAndVerifyStateServer(serverName, server)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cannot read state from %s: %v\n", serverName, err)
+			continue
+		}
+
+		manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
+		history, err := manager.LoadHistory()
+		_ = client.Close()
+		if err != nil || !historyHasDeployments(history) {
+			if verbose {
+				fmt.Printf("No deployment history found on %s\n", serverName)
+			}
+			continue
+		}
+		histories = append(histories, stateHistoryCandidate{
+			source:  serverName,
+			history: history,
+		})
+		fmt.Printf("  history: %d deployment(s), freshness %s\n",
+			deploymentHistoryCount(history),
+			deploymentHistoryFreshness(history).Format(time.RFC3339),
+		)
+	}
+	return histories, nil
+}
+
+func connectAndVerifyStateServer(serverName string, server config.ServerConfig) (*ssh.Client, error) {
+	client, err := ssh.NewClientWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to %s: %w", serverName, err)
+	}
+	verifyOutput, verifyErr := client.Execute("echo 'tako-ok'")
+	if verifyErr != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("SSH command verification failed: %v", verifyErr)
+	}
+	if strings.TrimSpace(verifyOutput) != "tako-ok" {
+		_ = client.Close()
+		return nil, fmt.Errorf("SSH command verification returned %q", strings.TrimSpace(verifyOutput))
+	}
+	return client, nil
+}
+
+func connectFirstReachableStateServer(cfg *config.Config, envName string, requestedServer string) (string, *ssh.Client, error) {
+	serverNames, err := statePullServerNames(cfg, envName, requestedServer)
+	if err != nil {
+		return "", nil, err
+	}
+	var lastErr error
+	for _, serverName := range serverNames {
+		server := cfg.Servers[serverName]
+		client, err := connectAndVerifyStateServer(serverName, server)
+		if err == nil {
+			return serverName, client, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return "", nil, fmt.Errorf("no reachable state server: %w", lastErr)
+	}
+	return "", nil, fmt.Errorf("no reachable state server")
+}
+
+func statePullServerNames(cfg *config.Config, envName string, requestedServer string) ([]string, error) {
+	envServers, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	if len(envServers) == 0 {
+		return nil, fmt.Errorf("no servers configured for environment %s", envName)
+	}
+	if requestedServer == "" {
+		return envServers, nil
+	}
+	if _, ok := cfg.Servers[requestedServer]; !ok {
+		return nil, fmt.Errorf("server %s not found in configuration", requestedServer)
+	}
+	for _, serverName := range envServers {
+		if serverName == requestedServer {
+			return []string{requestedServer}, nil
+		}
+	}
+	return nil, fmt.Errorf("server %s is not part of environment %s", requestedServer, envName)
+}
+
+func latestDeploymentByTimestamp(deployments []*remotestate.DeploymentState) *remotestate.DeploymentState {
+	var latest *remotestate.DeploymentState
+	for _, deployment := range deployments {
+		if deployment == nil {
+			continue
+		}
+		if latest == nil || deployment.Timestamp.After(latest.Timestamp) {
+			latest = deployment
+		}
+	}
+	return latest
 }
 
 func runStateStatus(cmd *cobra.Command, args []string) error {
