@@ -11,6 +11,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/drift"
 	"github.com/redentordev/tako-cli/pkg/notification"
+	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/spf13/cobra"
 )
@@ -59,29 +60,12 @@ func runDrift(cmd *cobra.Command, args []string) error {
 
 	envName := getEnvironmentName(cfg)
 
-	// Get primary node
-	primaryName, err := cfg.GetPrimaryServer(envName)
+	serverNames, err := statePullServerNames(cfg, envName, "")
 	if err != nil {
-		return fmt.Errorf("failed to get primary node: %w", err)
+		return err
 	}
-
-	primaryCfg := cfg.Servers[primaryName]
-
-	// Connect to server
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     primaryCfg.Host,
-		Port:     primaryCfg.Port,
-		User:     primaryCfg.User,
-		SSHKey:   primaryCfg.SSHKey,
-		Password: primaryCfg.Password,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
-	}
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-	defer client.Close()
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
 
 	// Setup notifier if webhook provided
 	var notifier *notification.Notifier
@@ -91,13 +75,37 @@ func runDrift(cmd *cobra.Command, args []string) error {
 		}, verbose)
 	}
 
-	detector := drift.NewDetector(client, cfg, envName, notifier, verbose)
+	detector := drift.NewDetectorWithActualProvider(cfg, envName, notifier, verbose, func() (map[string]drift.ActualService, error) {
+		actual, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, nil)
+		if err != nil {
+			return nil, err
+		}
+		return driftServicesFromReconcile(cfg.Project.Name, envName, actual), nil
+	})
 
 	if driftWatch {
 		return watchDrift(detector, driftInterval)
 	}
 
 	return checkDriftOnce(detector)
+}
+
+func driftServicesFromReconcile(project string, environment string, actual map[string]*reconcile.ActualService) map[string]drift.ActualService {
+	services := make(map[string]drift.ActualService, len(actual))
+	prefix := project + "_" + environment + "_"
+	for serviceName, service := range actual {
+		if service == nil {
+			continue
+		}
+		fullName := prefix + serviceName
+		services[fullName] = drift.ActualService{
+			Name:     fullName,
+			Image:    service.Image,
+			Replicas: service.Replicas,
+			Running:  service.Replicas,
+		}
+	}
+	return services
 }
 
 func checkDriftOnce(detector *drift.Detector) error {

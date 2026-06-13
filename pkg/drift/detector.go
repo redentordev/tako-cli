@@ -51,13 +51,16 @@ type DriftState struct {
 	CheckDuration time.Duration `json:"check_duration"`
 }
 
+type ActualServiceProvider func() (map[string]ActualService, error)
+
 // Detector performs continuous drift detection
 type Detector struct {
-	client      *ssh.Client
-	config      *config.Config
-	environment string
-	notifier    *notification.Notifier
-	verbose     bool
+	client         *ssh.Client
+	config         *config.Config
+	environment    string
+	notifier       *notification.Notifier
+	verbose        bool
+	actualProvider ActualServiceProvider
 
 	// State
 	mu        sync.RWMutex
@@ -76,6 +79,12 @@ func NewDetector(client *ssh.Client, cfg *config.Config, environment string, not
 		verbose:     verbose,
 		stopCh:      make(chan struct{}),
 	}
+}
+
+func NewDetectorWithActualProvider(cfg *config.Config, environment string, notifier *notification.Notifier, verbose bool, provider ActualServiceProvider) *Detector {
+	detector := NewDetector(nil, cfg, environment, notifier, verbose)
+	detector.actualProvider = provider
+	return detector
 }
 
 // CheckOnce performs a single drift detection check
@@ -309,6 +318,12 @@ type ActualService struct {
 
 // getActualServices gets the actual running takod containers grouped by service.
 func (d *Detector) getActualServices() (map[string]ActualService, error) {
+	if d.actualProvider != nil {
+		return d.actualProvider()
+	}
+	if d.client == nil {
+		return nil, fmt.Errorf("no actual service provider or takod client configured")
+	}
 	output, err := takodclient.RequestJSON(
 		d.client,
 		d.takodSocket(),
