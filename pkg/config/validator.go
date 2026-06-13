@@ -404,15 +404,6 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 		return fmt.Errorf("service %s: invalid deployment strategy %q; takod currently supports recreate", name, service.Deploy.Strategy)
 	}
 
-	// Validate hooks if configured
-	if service.Hooks != nil {
-		totalHooks := len(service.Hooks.PreBuild) + len(service.Hooks.PostBuild) +
-			len(service.Hooks.PreDeploy) + len(service.Hooks.PostDeploy) + len(service.Hooks.PostStart)
-		if totalHooks == 0 {
-			return fmt.Errorf("service %s: hooks configured but no commands specified", name)
-		}
-	}
-
 	// Validate backup if configured
 	if service.Backup != nil {
 		if service.Backup.Schedule == "" {

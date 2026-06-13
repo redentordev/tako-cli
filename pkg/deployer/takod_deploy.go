@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/hooks"
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -156,27 +155,6 @@ func (d *Deployer) DeployServiceTakod(serviceName string, service *config.Servic
 		}
 	}
 
-	if service.Hooks != nil {
-		if err := hooks.ValidateHooks(service.Hooks); err != nil {
-			return fmt.Errorf("hook validation failed: %w", err)
-		}
-	}
-
-	var hookExecutor *hooks.Executor
-	if len(assignments) > 0 {
-		firstTarget := assignments[0].ServerName
-		firstClient, err := d.getEnvironmentClient(firstTarget)
-		if err != nil {
-			return err
-		}
-		hookExecutor = hooks.NewExecutor(firstClient, d.config.Project.Name, d.environment, serviceName, d.verbose)
-		if service.Hooks != nil && len(service.Hooks.PreDeploy) > 0 {
-			if err := hookExecutor.ExecutePreDeploy(service.Hooks.PreDeploy, service.Env); err != nil {
-				return fmt.Errorf("pre-deploy hooks failed: %w", err)
-			}
-		}
-	}
-
 	grouped := groupTakodAssignments(assignments)
 	targetServers, err := d.getTakodTargetServers()
 	if err != nil {
@@ -190,19 +168,6 @@ func (d *Deployer) DeployServiceTakod(serviceName string, service *config.Servic
 		}
 		if err := d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, slots); err != nil {
 			return fmt.Errorf("%s: %w", serverName, err)
-		}
-	}
-
-	if hookExecutor != nil && service.Hooks != nil && len(service.Hooks.PostDeploy) > 0 {
-		if err := hookExecutor.ExecutePostDeploy(service.Hooks.PostDeploy, service.Env); err != nil {
-			return fmt.Errorf("post-deploy hooks failed: %w", err)
-		}
-	}
-
-	if hookExecutor != nil && service.Hooks != nil && len(service.Hooks.PostStart) > 0 {
-		containerName := d.takodContainerName(serviceName, assignments[0].Slot)
-		if err := hookExecutor.ExecutePostStart(service.Hooks.PostStart, containerName, service.Env); err != nil {
-			return fmt.Errorf("post-start hooks failed: %w", err)
 		}
 	}
 

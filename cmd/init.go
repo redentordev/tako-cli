@@ -328,16 +328,6 @@ environments:
         #   timeout: 5s
         #   retries: 3
         
-        # Lifecycle hooks
-        # hooks:
-        #   preBuild:
-        #     - "npm run generate-types"
-        #   postBuild:
-        #     - "docker scan {{IMAGE}}"
-        #   preDeploy:
-        #     - "echo 'Starting deployment...'"
-        #   postDeploy:
-        #     - "curl https://api.slack.com/webhook..."
         #   postStart:
         #     - "exec: npm run migrate"   # Run inside container
         #     - "exec: npm run seed"
@@ -463,19 +453,10 @@ environments:
 # api:
 #   build: .
 #   port: 8000
-#   hooks:
-#     postStart:
-#       - "exec: php artisan migrate --force"
-#       - "exec: php artisan cache:clear"
-
 # Python/Django:
 # api:
 #   build: .
 #   port: 8000
-#   hooks:
-#     postStart:
-#       - "exec: python manage.py migrate"
-#       - "exec: python manage.py collectstatic --noinput"
 
 # Full-stack with database:
 # web:
