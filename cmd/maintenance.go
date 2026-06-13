@@ -9,8 +9,8 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
-	"github.com/redentordev/tako-cli/pkg/utils"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -19,6 +19,40 @@ var (
 )
 
 const maintenanceImage = "nginx:1.27-alpine"
+
+type maintenanceProxyConfig struct {
+	HTTP maintenanceHTTPConfig `yaml:"http"`
+}
+
+type maintenanceHTTPConfig struct {
+	Routers  map[string]maintenanceRouter         `yaml:"routers"`
+	Services map[string]maintenanceTraefikService `yaml:"services"`
+}
+
+type maintenanceRouter struct {
+	Rule        string          `yaml:"rule"`
+	EntryPoints []string        `yaml:"entryPoints"`
+	Service     string          `yaml:"service"`
+	Priority    int             `yaml:"priority"`
+	TLS         *maintenanceTLS `yaml:"tls,omitempty"`
+}
+
+type maintenanceTLS struct {
+	CertResolver string `yaml:"certResolver"`
+}
+
+type maintenanceTraefikService struct {
+	LoadBalancer maintenanceLoadBalancer `yaml:"loadBalancer"`
+}
+
+type maintenanceLoadBalancer struct {
+	Servers        []maintenanceServerURL `yaml:"servers"`
+	PassHostHeader bool                   `yaml:"passHostHeader"`
+}
+
+type maintenanceServerURL struct {
+	URL string `yaml:"url"`
+}
 
 var maintenanceCmd = &cobra.Command{
 	Use:   "maintenance",
@@ -479,43 +513,27 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to decode maintenance page: %w", err)
 	}
 
-	// Deploy maintenance container with proxy labels.
+	// Deploy maintenance container and file-provider proxy config.
 	// Use priority 100 to ensure it takes precedence over normal service (priority 10)
 	fmt.Printf("→ Deploying maintenance container...\n")
 
 	containerName := fmt.Sprintf("%s_%s_maintenance", cfg.Project.Name, maintenanceService)
 	networkName := fmt.Sprintf("tako_%s_%s", cfg.Project.Name, envName)
 
-	// Build proxy labels for all domains using the label builder.
-	labelBuilder := utils.NewDockerLabelBuilder()
-
-	for _, domain := range service.Proxy.GetAllDomains() {
-		domainSafe := strings.ReplaceAll(domain, ".", "-")
-		routerName := fmt.Sprintf("%s-maintenance", domainSafe)
-
-		proxyBuilder := utils.NewProxyLabelBuilder(routerName, containerName)
-		proxyBuilder.
-			Enable().
-			HostRule(domain).
-			Priority(100). // Higher priority than normal routes
-			Entrypoints("web", "websecure").
-			TLS("letsencrypt")
-
-		// Add all proxy labels.
-		for _, label := range proxyBuilder.BuildSlice() {
-			labelBuilder.AddRaw(label)
-		}
+	dynamicConfig, err := renderMaintenanceProxyConfig(cfg.Project.Name, envName, maintenanceService, service.Proxy, containerName)
+	if err != nil {
+		return err
 	}
-
-	proxyLabels := labelBuilder.BuildSlice()
+	if err := writeMaintenanceProxyConfig(client, cfg.Project.Name, envName, maintenanceService, dynamicConfig); err != nil {
+		return fmt.Errorf("failed to write maintenance proxy config: %w", err)
+	}
 
 	// Create docker run command
 	dockerCmd := fmt.Sprintf(
-		"docker run -d --name %s --network %s -v %s:/usr/share/nginx/html:ro %s %s",
-		containerName,
-		networkName,
-		maintenanceDir,
-		strings.Join(proxyLabels, " "),
+		"docker run -d --name %s --network %s -v %s:/usr/share/nginx/html:ro %s",
+		maintenanceShellQuote(containerName),
+		maintenanceShellQuote(networkName),
+		maintenanceShellQuote(maintenanceDir),
 		maintenanceImage,
 	)
 
@@ -540,4 +558,96 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nTo restore normal operation: tako live --service %s\n", maintenanceService)
 
 	return nil
+}
+
+func renderMaintenanceProxyConfig(project string, environment string, serviceName string, proxy *config.ProxyConfig, containerName string) ([]byte, error) {
+	domains := maintenanceDomains(proxy)
+	if len(domains) == 0 {
+		return nil, fmt.Errorf("maintenance proxy requires at least one domain")
+	}
+
+	routerBase := sanitizeMaintenanceName(project + "-" + environment + "-" + serviceName + "-maintenance")
+	serviceID := routerBase + "-svc"
+	cfg := maintenanceProxyConfig{
+		HTTP: maintenanceHTTPConfig{
+			Routers:  make(map[string]maintenanceRouter),
+			Services: make(map[string]maintenanceTraefikService),
+		},
+	}
+
+	rule := hostRuleForDomains(domains)
+	cfg.HTTP.Routers[routerBase+"-https"] = maintenanceRouter{
+		Rule:        rule,
+		EntryPoints: []string{"websecure"},
+		Service:     serviceID,
+		Priority:    100,
+		TLS:         &maintenanceTLS{CertResolver: "letsencrypt"},
+	}
+	cfg.HTTP.Routers[routerBase+"-http"] = maintenanceRouter{
+		Rule:        rule,
+		EntryPoints: []string{"web"},
+		Service:     serviceID,
+		Priority:    100,
+	}
+	cfg.HTTP.Services[serviceID] = maintenanceTraefikService{
+		LoadBalancer: maintenanceLoadBalancer{
+			Servers:        []maintenanceServerURL{{URL: "http://" + containerName + ":80"}},
+			PassHostHeader: true,
+		},
+	}
+
+	return yaml.Marshal(cfg)
+}
+
+func maintenanceDomains(proxy *config.ProxyConfig) []string {
+	if proxy == nil {
+		return nil
+	}
+	domains := append([]string(nil), proxy.GetAllDomains()...)
+	domains = append(domains, proxy.GetRedirectDomains()...)
+	return domains
+}
+
+func hostRuleForDomains(domains []string) string {
+	parts := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		parts = append(parts, "Host(`"+strings.ReplaceAll(domain, "`", "")+"`)")
+	}
+	return strings.Join(parts, " || ")
+}
+
+func writeMaintenanceProxyConfig(client *ssh.Client, project string, environment string, serviceName string, data []byte) error {
+	path := maintenanceProxyConfigPath(project, environment, serviceName)
+	tmpPath := fmt.Sprintf("/tmp/%s", maintenanceProxyConfigFileName(project, environment, serviceName))
+	if err := client.UploadReader(strings.NewReader(string(data)), tmpPath, 0644); err != nil {
+		return err
+	}
+	cmd := fmt.Sprintf(
+		"sudo mkdir -p /etc/tako/proxy/dynamic && sudo mv %s %s && sudo chmod 644 %s",
+		maintenanceShellQuote(tmpPath),
+		maintenanceShellQuote(path),
+		maintenanceShellQuote(path),
+	)
+	_, err := client.Execute(cmd)
+	return err
+}
+
+func maintenanceProxyConfigPath(project string, environment string, serviceName string) string {
+	return "/etc/tako/proxy/dynamic/" + maintenanceProxyConfigFileName(project, environment, serviceName)
+}
+
+func maintenanceProxyConfigFileName(project string, environment string, serviceName string) string {
+	return sanitizeMaintenanceName(project+"-"+environment+"-"+serviceName+"-maintenance") + ".yml"
+}
+
+func sanitizeMaintenanceName(value string) string {
+	replacer := strings.NewReplacer("_", "-", ".", "-", "/", "-", " ", "-")
+	return replacer.Replace(strings.ToLower(value))
+}
+
+func maintenanceShellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
