@@ -180,7 +180,7 @@ func checkSSHKeys(record func(checkResult), cfg *config.Config, envName string) 
 		}
 
 		if server.Password != "" && server.SSHKey == "" {
-			record(checkResult{"PASS", fmt.Sprintf("%s: Using password auth", serverName), ""})
+			record(checkResult{"WARN", fmt.Sprintf("%s: Password auth configured", serverName), "Prefer sshKey; Tako setup hardening disables password SSH on managed hosts"})
 			continue
 		}
 
