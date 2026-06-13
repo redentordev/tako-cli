@@ -8,7 +8,6 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/accesslog"
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 )
@@ -50,7 +49,7 @@ func init() {
 	rootCmd.AddCommand(accessCmd)
 	accessCmd.Flags().BoolVarP(&accessFollow, "follow", "f", false, "Follow log output")
 	accessCmd.Flags().IntVarP(&accessTail, "tail", "n", 50, "Number of lines to show from the end")
-	accessCmd.Flags().StringVarP(&accessServer, "server", "s", "", "Server to fetch logs from (defaults to first production server)")
+	accessCmd.Flags().StringVarP(&accessServer, "server", "s", "", "Node to fetch logs from (defaults to first reachable environment node)")
 }
 
 func runAccess(cmd *cobra.Command, args []string) error {
@@ -79,30 +78,15 @@ func runAccess(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	serverName, serverConfig, err := resolveServer(cfg, envName, accessServer)
+	serverName, _, client, err := connectResolvedServer(cfg, envName, accessServer)
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 
 	if verbose {
 		fmt.Printf("→ Fetching access logs from %s (service: %s)\n", serverName, accessService)
 	}
-
-	// Connect to server (supports both key and password auth)
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     serverConfig.Host,
-		Port:     serverConfig.Port,
-		User:     serverConfig.User,
-		SSHKey:   serverConfig.SSHKey,
-		Password: serverConfig.Password,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
-	}
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
-	}
-	defer client.Close()
 
 	formatter := accesslog.NewFormatter(verbose)
 	if accessService != "" {

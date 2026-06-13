@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 )
@@ -22,7 +21,7 @@ var logsCmd = &cobra.Command{
 	Short: "View logs from deployed services",
 	Long: `View logs from deployed services on remote servers.
 
-If --server is not specified, defaults to the first environment server.
+If --server is not specified, uses the first reachable environment node.
 
 Examples:
   tako logs --service web              # View logs from default server
@@ -62,32 +61,13 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("service %s not found in environment %s", logsService, envName)
 	}
 
-	envServers, err := cfg.GetEnvironmentServers(envName)
-	if err != nil {
-		return fmt.Errorf("failed to get environment servers: %w", err)
-	}
-	serverName, server, err := selectLogsServer(cfg, envName, envServers)
+	serverName, server, client, err := connectResolvedServer(cfg, envName, logsServer)
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 	if verbose {
 		fmt.Printf("Using node: %s (%s)\n", serverName, server.Host)
-	}
-
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     server.Host,
-		Port:     server.Port,
-		User:     server.User,
-		SSHKey:   server.SSHKey,
-		Password: server.Password,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
-	}
-	defer client.Close()
-
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
 	}
 
 	fmt.Printf("Streaming logs from %s on %s (takod)...\n\n", logsService, serverName)
@@ -98,23 +78,4 @@ func runLogs(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-}
-
-func selectLogsServer(cfg *config.Config, envName string, envServers []string) (string, config.ServerConfig, error) {
-	if len(envServers) == 0 {
-		return "", config.ServerConfig{}, fmt.Errorf("no servers configured for environment %s", envName)
-	}
-	if logsServer == "" {
-		serverName := envServers[0]
-		return serverName, cfg.Servers[serverName], nil
-	}
-	if _, ok := cfg.Servers[logsServer]; !ok {
-		return "", config.ServerConfig{}, fmt.Errorf("server %s not found in configuration", logsServer)
-	}
-	for _, serverName := range envServers {
-		if serverName == logsServer {
-			return logsServer, cfg.Servers[logsServer], nil
-		}
-	}
-	return "", config.ServerConfig{}, fmt.Errorf("server %s is not part of environment %s", logsServer, envName)
 }

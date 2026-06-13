@@ -68,24 +68,9 @@ func runBackup(cmd *cobra.Command, args []string) error {
 
 	envName := getEnvironmentName(cfg)
 
-	serverName, serverCfg, err := resolveServer(cfg, envName, backupServer)
+	serverName, serverCfg, client, err := connectResolvedServer(cfg, envName, backupServer)
 	if err != nil {
 		return err
-	}
-
-	// Connect to server
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     serverCfg.Host,
-		Port:     serverCfg.Port,
-		User:     serverCfg.User,
-		SSHKey:   serverCfg.SSHKey,
-		Password: serverCfg.Password,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
-	}
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 	}
 	defer client.Close()
 
