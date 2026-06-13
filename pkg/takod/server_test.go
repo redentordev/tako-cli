@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/mesh"
 )
 
 func TestServerStatusOverUnixSocket(t *testing.T) {
@@ -461,5 +463,108 @@ func TestHandleMetadataWritesDocuments(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "mesh", "peers.json")); err != nil {
 		t.Fatalf("expected peer metadata to be written: %v", err)
+	}
+}
+
+func TestHandleMeshKeyRequiresPost(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/mesh/key", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleMeshKey(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleMeshKeyReturnsPublicKey(t *testing.T) {
+	old := ensureMeshNodeKey
+	ensureMeshNodeKey = func(ctx context.Context, verbose bool) (string, error) {
+		return "node-public-key", nil
+	}
+	t.Cleanup(func() { ensureMeshNodeKey = old })
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/mesh/key", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleMeshKey(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response MeshKeyResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if response.PublicKey != "node-public-key" {
+		t.Fatalf("unexpected public key response: %#v", response)
+	}
+}
+
+func TestHandleMeshApplyRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/mesh/apply", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleMeshApply(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleMeshApplyReconcilesMesh(t *testing.T) {
+	old := applyMeshConfig
+	applyMeshConfig = func(ctx context.Context, node mesh.Node, peers []mesh.Node, config mesh.WireGuardConfig, verbose bool) (*mesh.Status, error) {
+		if node.Name != "node-a" {
+			t.Fatalf("unexpected node: %#v", node)
+		}
+		if len(peers) != 1 || peers[0].Name != "node-b" {
+			t.Fatalf("unexpected peers: %#v", peers)
+		}
+		if config.Interface != "tako" || config.ListenPort != 51820 {
+			t.Fatalf("unexpected config: %#v", config)
+		}
+		return &mesh.Status{Interface: "tako", Up: true, PublicKey: "node-public-key", ListenPort: "51820", Peers: 1}, nil
+	}
+	t.Cleanup(func() { applyMeshConfig = old })
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	body, err := json.Marshal(MeshApplyRequest{
+		Config: mesh.WireGuardConfig{Enabled: true, Interface: "tako", ListenPort: 51820, NATTraversal: true},
+		Node:   mesh.Node{Name: "node-a", Host: "203.0.113.10", Address: "10.210.0.1/24"},
+		Peers:  []mesh.Node{{Name: "node-b", Host: "203.0.113.11", Address: "10.210.0.2/24", PublicKey: "peer-key"}},
+	})
+	if err != nil {
+		t.Fatalf("failed to encode request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/mesh/apply", bytes.NewReader(body))
+	recorder := httptest.NewRecorder()
+
+	server.handleMeshApply(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response MeshApplyResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !response.Applied || response.Status == nil || response.Status.PublicKey != "node-public-key" {
+		t.Fatalf("unexpected mesh apply response: %#v", response)
+	}
+}
+
+func TestHandleMeshStatusRequiresInterface(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/mesh/status", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleMeshStatus(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
 }

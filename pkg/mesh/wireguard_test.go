@@ -1,6 +1,9 @@
 package mesh
 
 import (
+	"context"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -79,4 +82,109 @@ func TestRenderConfigTemplateRejectsUnsafeInterface(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unsafe interface name to be rejected")
 	}
+}
+
+func TestApplyLocalWithRunnerWritesConfigWithoutSudo(t *testing.T) {
+	runner := &fakeWireGuardRunner{
+		files: map[string][]byte{
+			privateKeyPath: []byte("self-private\n"),
+		},
+		writes: make(map[string][]byte),
+		modes:  make(map[string]os.FileMode),
+	}
+
+	status, err := applyLocalWithRunner(context.Background(), runner, Node{
+		Name:    "node-a",
+		Host:    "203.0.113.10",
+		Address: "10.210.0.1/24",
+	}, []Node{
+		{Name: "node-b", Host: "203.0.113.11", Address: "10.210.0.2/24", PublicKey: "peer-b-key"},
+	}, WireGuardConfig{
+		Enabled:      true,
+		Interface:    "tako",
+		ListenPort:   51820,
+		NATTraversal: true,
+	}, false)
+	if err != nil {
+		t.Fatalf("applyLocalWithRunner returned error: %v", err)
+	}
+	if status == nil || !status.Up || status.PublicKey != "self-public" || status.Peers != 1 {
+		t.Fatalf("unexpected status: %#v", status)
+	}
+
+	configPath := wireGuardConfigPath("tako")
+	written := string(runner.writes[configPath])
+	if written == "" {
+		t.Fatalf("expected WireGuard config to be written to %s", configPath)
+	}
+	for _, expected := range []string{
+		"PrivateKey = self-private",
+		"# node-b",
+		"PublicKey = peer-b-key",
+		"AllowedIPs = 10.210.0.2/32",
+	} {
+		if !strings.Contains(written, expected) {
+			t.Fatalf("written config missing %q: %s", expected, written)
+		}
+	}
+	if strings.Contains(written, privateKeyPlaceholder) {
+		t.Fatalf("private key placeholder was not replaced: %s", written)
+	}
+	if runner.modes[configPath] != 0600 {
+		t.Fatalf("expected config mode 0600, got %v", runner.modes[configPath])
+	}
+	for _, command := range runner.commands {
+		if strings.Contains(command, "sudo ") {
+			t.Fatalf("local takod mesh command should not require sudo: %s", command)
+		}
+	}
+}
+
+type fakeWireGuardRunner struct {
+	commands []string
+	files    map[string][]byte
+	writes   map[string][]byte
+	modes    map[string]os.FileMode
+	dirs     []string
+}
+
+func (f *fakeWireGuardRunner) Run(ctx context.Context, command string) (string, error) {
+	f.commands = append(f.commands, command)
+	switch {
+	case command == "command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1":
+		return "", nil
+	case strings.Contains(command, "wg pubkey <"):
+		return "self-public\n", nil
+	case strings.HasPrefix(command, "systemctl enable wg-quick@"):
+		return "", nil
+	case command == "wg show tako >/dev/null 2>&1":
+		return "", nil
+	case command == "wg show tako public-key":
+		return "self-public\n", nil
+	case command == "wg show tako listen-port":
+		return "51820\n", nil
+	case command == "wg show tako peers | wc -l":
+		return "1\n", nil
+	default:
+		return "", nil
+	}
+}
+
+func (f *fakeWireGuardRunner) ReadFile(path string) ([]byte, error) {
+	data, ok := f.files[path]
+	if !ok {
+		return nil, fmt.Errorf("missing file %s", path)
+	}
+	return data, nil
+}
+
+func (f *fakeWireGuardRunner) WriteFile(path string, data []byte, mode os.FileMode) error {
+	f.writes[path] = append([]byte(nil), data...)
+	f.modes[path] = mode
+	return nil
+}
+
+func (f *fakeWireGuardRunner) MkdirAll(path string, mode os.FileMode) error {
+	f.dirs = append(f.dirs, path)
+	return nil
 }

@@ -1,9 +1,12 @@
 package mesh
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,36 +22,26 @@ const (
 )
 
 type WireGuardConfig struct {
-	Enabled      bool
-	Interface    string
-	ListenPort   int
-	NATTraversal bool
+	Enabled      bool   `json:"enabled"`
+	Interface    string `json:"interface"`
+	ListenPort   int    `json:"listenPort"`
+	NATTraversal bool   `json:"natTraversal"`
 }
 
 type Node struct {
-	Name      string
-	Host      string
-	Address   string
-	PublicKey string
-	Labels    map[string]string
-}
-
-type Manager struct {
-	client  *ssh.Client
-	config  WireGuardConfig
-	verbose bool
+	Name      string            `json:"name"`
+	Host      string            `json:"host"`
+	Address   string            `json:"address"`
+	PublicKey string            `json:"publicKey,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 type Status struct {
-	Interface  string
-	Up         bool
-	PublicKey  string
-	ListenPort string
-	Peers      int
-}
-
-func NewManager(client *ssh.Client, config WireGuardConfig, verbose bool) *Manager {
-	return &Manager{client: client, config: config, verbose: verbose}
+	Interface  string `json:"interface"`
+	Up         bool   `json:"up"`
+	PublicKey  string `json:"publicKey,omitempty"`
+	ListenPort string `json:"listenPort,omitempty"`
+	Peers      int    `json:"peers"`
 }
 
 func EnsureWireGuardTools(client *ssh.Client, verbose bool) error {
@@ -60,7 +53,18 @@ func EnsureWireGuardTools(client *ssh.Client, verbose bool) error {
 		fmt.Println("  Installing WireGuard tools...")
 	}
 
-	script := `set -eu
+	if _, err := client.Execute(runRootScript(wireGuardInstallScript())); err != nil {
+		return fmt.Errorf("failed to install WireGuard tools: %w", err)
+	}
+	return nil
+}
+
+func EnsureWireGuardToolsLocal(ctx context.Context, verbose bool) error {
+	return ensureWireGuardToolsWithRunner(ctx, localWireGuardRunner{}, verbose)
+}
+
+func wireGuardInstallScript() string {
+	return `set -eu
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update
   DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard wireguard-tools iproute2
@@ -79,18 +83,14 @@ fi
 command -v wg >/dev/null 2>&1
 command -v wg-quick >/dev/null 2>&1
 `
-	if _, err := client.Execute(runRootScript(script)); err != nil {
-		return fmt.Errorf("failed to install WireGuard tools: %w", err)
-	}
-	return nil
 }
 
-func EnsureNodeKeys(client *ssh.Client, verbose bool) (string, error) {
-	if err := EnsureWireGuardTools(client, verbose); err != nil {
-		return "", err
-	}
+func EnsureNodeKeysLocal(ctx context.Context, verbose bool) (string, error) {
+	return ensureNodeKeysWithRunner(ctx, localWireGuardRunner{}, verbose)
+}
 
-	script := fmt.Sprintf(`set -eu
+func wireGuardKeyScript() string {
+	return fmt.Sprintf(`set -eu
 install -d -m 700 %s
 if [ ! -s %s ]; then
   umask 077
@@ -110,79 +110,10 @@ cat %s
 		shellQuote(publicKeyPath),
 		shellQuote(publicKeyPath),
 	)
-	output, err := client.Execute(runRootScript(script))
-	if err != nil {
-		return "", fmt.Errorf("failed to ensure WireGuard node key: %w", err)
-	}
-	publicKey := strings.TrimSpace(output)
-	if publicKey == "" {
-		return "", fmt.Errorf("WireGuard public key is empty")
-	}
-	return publicKey, nil
 }
 
-func (m *Manager) Apply(node Node, peers []Node) error {
-	if !m.config.Enabled {
-		return nil
-	}
-	iface, err := validateInterfaceName(m.config.Interface)
-	if err != nil {
-		return err
-	}
-	if err := EnsureWireGuardTools(m.client, m.verbose); err != nil {
-		return err
-	}
-	if _, err := EnsureNodeKeys(m.client, m.verbose); err != nil {
-		return err
-	}
-
-	template, err := RenderConfigTemplate(node, peers, m.config)
-	if err != nil {
-		return err
-	}
-	tmpPath := fmt.Sprintf("/tmp/tako-wireguard-%s.conf", iface)
-	confPath := wireGuardConfigPath(iface)
-	if err := m.client.UploadReader(strings.NewReader(template), tmpPath, 0600); err != nil {
-		return fmt.Errorf("failed to upload WireGuard config template: %w", err)
-	}
-
-	script := fmt.Sprintf(`set -eu
-install -d -m 700 %s
-private_key=$(cat %s)
-sed "s#__TAKO_PRIVATE_KEY__#$private_key#g" %s > %s
-chmod 600 %s
-rm -f %s
-`,
-		shellQuote("/etc/wireguard"),
-		shellQuote(privateKeyPath),
-		shellQuote(tmpPath),
-		shellQuote(confPath),
-		shellQuote(confPath),
-		shellQuote(tmpPath),
-	)
-	if _, err := m.client.Execute(runRootScript(script)); err != nil {
-		return fmt.Errorf("failed to install WireGuard config: %w", err)
-	}
-
-	if _, err := m.client.Execute(fmt.Sprintf("command -v ufw >/dev/null 2>&1 && sudo ufw allow %d/udp comment 'Tako mesh' >/dev/null 2>&1 || true", m.config.ListenPort)); err != nil {
-		return fmt.Errorf("failed to update WireGuard firewall rule: %w", err)
-	}
-
-	applyCmd := fmt.Sprintf(
-		"sudo systemctl enable wg-quick@%[1]s >/dev/null 2>&1 || true; "+
-			"if sudo wg show %[1]s >/dev/null 2>&1; then "+
-			"sudo ip address replace %[2]s dev %[1]s; "+
-			"sudo bash -lc 'wg syncconf %[1]s <(wg-quick strip %[1]s)'; "+
-			"else sudo wg-quick up %[1]s; fi; "+
-			"sudo wg show %[1]s >/dev/null",
-		iface,
-		shellQuote(node.Address),
-	)
-	if _, err := m.client.Execute(applyCmd); err != nil {
-		return fmt.Errorf("failed to apply WireGuard interface %s: %w", m.config.Interface, err)
-	}
-
-	return nil
+func ApplyLocal(ctx context.Context, node Node, peers []Node, config WireGuardConfig, verbose bool) (*Status, error) {
+	return applyLocalWithRunner(ctx, localWireGuardRunner{}, node, peers, config, verbose)
 }
 
 func RenderConfigTemplate(node Node, peers []Node, config WireGuardConfig) (string, error) {
@@ -242,25 +173,147 @@ func RenderConfigTemplate(node Node, peers []Node, config WireGuardConfig) (stri
 	return b.String(), nil
 }
 
-func ReadStatus(client *ssh.Client, interfaceName string) (*Status, error) {
+func ReadStatusLocal(ctx context.Context, interfaceName string) (*Status, error) {
+	return readStatusWithRunner(ctx, localWireGuardRunner{}, interfaceName)
+}
+
+type wireGuardRunner interface {
+	Run(ctx context.Context, command string) (string, error)
+	ReadFile(path string) ([]byte, error)
+	WriteFile(path string, data []byte, mode os.FileMode) error
+	MkdirAll(path string, mode os.FileMode) error
+}
+
+type localWireGuardRunner struct{}
+
+func (localWireGuardRunner) Run(ctx context.Context, command string) (string, error) {
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(output), fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return string(output), nil
+}
+
+func (localWireGuardRunner) ReadFile(path string) ([]byte, error) {
+	return os.ReadFile(path)
+}
+
+func (localWireGuardRunner) WriteFile(path string, data []byte, mode os.FileMode) error {
+	return os.WriteFile(path, data, mode)
+}
+
+func (localWireGuardRunner) MkdirAll(path string, mode os.FileMode) error {
+	return os.MkdirAll(path, mode)
+}
+
+func ensureWireGuardToolsWithRunner(ctx context.Context, runner wireGuardRunner, verbose bool) error {
+	if _, err := runner.Run(ctx, "command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1"); err == nil {
+		return nil
+	}
+
+	if verbose {
+		fmt.Println("  Installing WireGuard tools...")
+	}
+	if _, err := runner.Run(ctx, wireGuardInstallScript()); err != nil {
+		return fmt.Errorf("failed to install WireGuard tools: %w", err)
+	}
+	return nil
+}
+
+func ensureNodeKeysWithRunner(ctx context.Context, runner wireGuardRunner, verbose bool) (string, error) {
+	if err := ensureWireGuardToolsWithRunner(ctx, runner, verbose); err != nil {
+		return "", err
+	}
+	output, err := runner.Run(ctx, wireGuardKeyScript())
+	if err != nil {
+		return "", fmt.Errorf("failed to ensure WireGuard node key: %w", err)
+	}
+	publicKey := strings.TrimSpace(output)
+	if publicKey == "" {
+		return "", fmt.Errorf("WireGuard public key is empty")
+	}
+	return publicKey, nil
+}
+
+func applyLocalWithRunner(ctx context.Context, runner wireGuardRunner, node Node, peers []Node, config WireGuardConfig, verbose bool) (*Status, error) {
+	if !config.Enabled {
+		return &Status{Interface: config.Interface, Up: false}, nil
+	}
+	iface, err := validateInterfaceName(config.Interface)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureWireGuardToolsWithRunner(ctx, runner, verbose); err != nil {
+		return nil, err
+	}
+	if _, err := ensureNodeKeysWithRunner(ctx, runner, verbose); err != nil {
+		return nil, err
+	}
+
+	template, err := RenderConfigTemplate(node, peers, config)
+	if err != nil {
+		return nil, err
+	}
+	privateKey, err := runner.ReadFile(privateKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read WireGuard private key: %w", err)
+	}
+	privateKeyValue := strings.TrimSpace(string(privateKey))
+	if privateKeyValue == "" {
+		return nil, fmt.Errorf("WireGuard private key is empty")
+	}
+	configContent := strings.ReplaceAll(template, privateKeyPlaceholder, privateKeyValue)
+
+	confPath := wireGuardConfigPath(iface)
+	if err := runner.MkdirAll("/etc/wireguard", 0700); err != nil {
+		return nil, fmt.Errorf("failed to create WireGuard config directory: %w", err)
+	}
+	if err := runner.WriteFile(confPath, []byte(configContent), 0600); err != nil {
+		return nil, fmt.Errorf("failed to write WireGuard config: %w", err)
+	}
+
+	firewallCmd := fmt.Sprintf("command -v ufw >/dev/null 2>&1 && ufw allow %d/udp comment 'Tako mesh' >/dev/null 2>&1 || true", config.ListenPort)
+	if _, err := runner.Run(ctx, firewallCmd); err != nil {
+		return nil, fmt.Errorf("failed to update WireGuard firewall rule: %w", err)
+	}
+
+	applyCmd := fmt.Sprintf(
+		"systemctl enable wg-quick@%[1]s >/dev/null 2>&1 || true; "+
+			"if wg show %[1]s >/dev/null 2>&1; then "+
+			"ip address replace %[2]s dev %[1]s; "+
+			"bash -lc 'wg syncconf %[1]s <(wg-quick strip %[1]s)'; "+
+			"else wg-quick up %[1]s; fi; "+
+			"wg show %[1]s >/dev/null",
+		iface,
+		shellQuote(node.Address),
+	)
+	if _, err := runner.Run(ctx, applyCmd); err != nil {
+		return nil, fmt.Errorf("failed to apply WireGuard interface %s: %w", config.Interface, err)
+	}
+
+	return readStatusWithRunner(ctx, runner, iface)
+}
+
+func readStatusWithRunner(ctx context.Context, runner wireGuardRunner, interfaceName string) (*Status, error) {
 	iface, err := validateInterfaceName(interfaceName)
 	if err != nil {
 		return nil, err
 	}
 
-	if _, err := client.Execute(fmt.Sprintf("sudo wg show %s >/dev/null 2>&1", iface)); err != nil {
+	if _, err := runner.Run(ctx, fmt.Sprintf("wg show %s >/dev/null 2>&1", iface)); err != nil {
 		return &Status{Interface: iface, Up: false}, nil
 	}
 
-	publicKey, err := client.Execute(fmt.Sprintf("sudo wg show %s public-key", iface))
+	publicKey, err := runner.Run(ctx, fmt.Sprintf("wg show %s public-key", iface))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read WireGuard public key: %w", err)
 	}
-	listenPort, err := client.Execute(fmt.Sprintf("sudo wg show %s listen-port", iface))
+	listenPort, err := runner.Run(ctx, fmt.Sprintf("wg show %s listen-port", iface))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read WireGuard listen port: %w", err)
 	}
-	peerCountOutput, err := client.Execute(fmt.Sprintf("sudo wg show %s peers | wc -l", iface))
+	peerCountOutput, err := runner.Run(ctx, fmt.Sprintf("wg show %s peers | wc -l", iface))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read WireGuard peers: %w", err)
 	}

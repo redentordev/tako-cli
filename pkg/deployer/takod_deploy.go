@@ -2,6 +2,7 @@ package deployer
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -263,7 +264,11 @@ func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, serve
 		PublicKey: publicKey,
 		Labels:    server.Labels,
 	}
-	if err := mesh.NewManager(client, d.wireGuardConfig(), d.verbose).Apply(meshNode, takodPeersToWireGuardNodes(peers)); err != nil {
+	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/mesh/apply", takod.MeshApplyRequest{
+		Config: d.wireGuardConfig(),
+		Node:   meshNode,
+		Peers:  takodPeersToWireGuardNodes(peers),
+	}); err != nil {
 		return fmt.Errorf("failed to reconcile WireGuard mesh: %w", err)
 	}
 
@@ -537,9 +542,17 @@ func (d *Deployer) ensureTakodMeshKeys(servers []string) (map[string]string, err
 		if err != nil {
 			return nil, err
 		}
-		publicKey, err := mesh.EnsureNodeKeys(client, d.verbose)
+		output, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/mesh/key", nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to ensure WireGuard key on %s: %w", serverName, err)
+		}
+		var response takod.MeshKeyResponse
+		if err := json.Unmarshal([]byte(output), &response); err != nil {
+			return nil, fmt.Errorf("failed to parse WireGuard key response from %s: %w", serverName, err)
+		}
+		publicKey := strings.TrimSpace(response.PublicKey)
+		if publicKey == "" {
+			return nil, fmt.Errorf("WireGuard public key from %s is empty", serverName)
 		}
 		publicKeys[serverName] = publicKey
 	}

@@ -83,6 +83,9 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/backups/restore", s.handleBackupRestore)
 	mux.HandleFunc("/v1/backups/cleanup", s.handleBackupCleanup)
 	mux.HandleFunc("/v1/metadata", s.handleMetadata)
+	mux.HandleFunc("/v1/mesh/key", s.handleMeshKey)
+	mux.HandleFunc("/v1/mesh/apply", s.handleMeshApply)
+	mux.HandleFunc("/v1/mesh/status", s.handleMeshStatus)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -510,6 +513,71 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	response, err := WriteMetadata(r.Context(), s.dataDir, request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleMeshKey(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	response, err := EnsureMeshKey(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request MeshApplyRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	response, err := ReconcileMesh(r.Context(), request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleMeshStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	interfaceName := r.URL.Query().Get("interface")
+	if interfaceName == "" {
+		http.Error(w, "interface is required", http.StatusBadRequest)
+		return
+	}
+	response, err := ReadMeshStatus(r.Context(), interfaceName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 
