@@ -1,8 +1,13 @@
 package reconcile
 
 import (
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/redentordev/tako-cli/pkg/config"
 )
 
 func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
@@ -48,4 +53,75 @@ func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
 	if nodeAWeb.Containers[0] != "a1" {
 		t.Fatalf("aggregate aliased node state: %#v", nodeAWeb.Containers)
 	}
+}
+
+func TestGatherActualStateByServerWithRunsConcurrently(t *testing.T) {
+	serverNames := []string{"node-a", "node-b", "node-c"}
+	servers := testActualStateServers(serverNames)
+	started := make(chan string, len(serverNames))
+	release := make(chan struct{})
+
+	actualDone := make(chan map[string]map[string]*ActualService, 1)
+	errDone := make(chan error, 1)
+	go func() {
+		actual, err := gatherActualStateByServerWith(servers, serverNames, func(serverName string, _ config.ServerConfig) (map[string]*ActualService, error) {
+			started <- serverName
+			<-release
+			return map[string]*ActualService{
+				"web": {Name: "web", Replicas: 1, Containers: []string{serverName + "-web"}},
+			}, nil
+		})
+		actualDone <- actual
+		errDone <- err
+	}()
+
+	waitForActualStateStarts(t, started, len(serverNames))
+	close(release)
+
+	if err := <-errDone; err != nil {
+		t.Fatalf("gatherActualStateByServerWith returned error: %v", err)
+	}
+	actual := <-actualDone
+	for _, serverName := range serverNames {
+		if got := actual[serverName]["web"].Containers[0]; got != serverName+"-web" {
+			t.Fatalf("actual state for %s = %q", serverName, got)
+		}
+	}
+}
+
+func TestGatherActualStateByServerWithAggregatesSortedErrors(t *testing.T) {
+	serverNames := []string{"node-b", "node-a"}
+	servers := testActualStateServers(serverNames)
+
+	_, err := gatherActualStateByServerWith(servers, serverNames, func(serverName string, _ config.ServerConfig) (map[string]*ActualService, error) {
+		return nil, fmt.Errorf("unavailable")
+	})
+	if err == nil {
+		t.Fatal("expected aggregate gather error")
+	}
+	if got, want := err.Error(), "node-a: unavailable; node-b: unavailable"; !strings.Contains(got, want) {
+		t.Fatalf("error = %q, want to contain %q", got, want)
+	}
+}
+
+func waitForActualStateStarts(t *testing.T, started <-chan string, count int) {
+	t.Helper()
+	seen := map[string]bool{}
+	deadline := time.After(2 * time.Second)
+	for len(seen) < count {
+		select {
+		case name := <-started:
+			seen[name] = true
+		case <-deadline:
+			t.Fatalf("timed out waiting for actual state fanout; saw %v", seen)
+		}
+	}
+}
+
+func testActualStateServers(names []string) map[string]config.ServerConfig {
+	servers := make(map[string]config.ServerConfig, len(names))
+	for _, name := range names {
+		servers[name] = config.ServerConfig{Host: name, User: "root"}
+	}
+	return servers
 }
