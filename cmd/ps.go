@@ -7,17 +7,14 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
 
-var (
-	psServer string
-	psAll    bool
-)
+var psServer string
 
 type ServiceInfo struct {
 	Name     string
-	Replicas int
 	Desired  int
 	Running  int
 	Status   string
@@ -28,26 +25,23 @@ type ServiceInfo struct {
 var psCmd = &cobra.Command{
 	Use:   "ps [SERVICE]",
 	Short: "List running services and their replicas",
-	Long: `Show the status of deployed services and their replicas.
+	Long: `Show deployed service status from the takod mesh.
 
 This command displays:
-  - Number of running vs desired replicas
-  - Container status (running, stopped, unhealthy)
-  - Port mappings
-  - Uptime information
-  - Internal/external service designation
+  - Running vs desired replica count
+  - Service status
+  - Configured port or internal service designation
 
 Examples:
-  tako ps                    # Show all services
-  tako ps web                # Show specific service details
-  tako ps --server prod      # Show services on specific server
-  tako ps --all             # Include stopped containers
+  tako ps                    # Show all services in the environment
+  tako ps web                # Show a specific service
+  tako ps --server prod      # Show the selected node only
 
 Output columns:
   SERVICE   - Service name
-  REPLICAS  - Running/Desired replica count
+  REPLICAS  - Running/desired replica count
   STATUS    - Overall service status
-  PORTS     - Port mappings or "internal"
+  PORTS     - Configured port or "internal"
   `,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runPS,
@@ -55,38 +49,34 @@ Output columns:
 
 func init() {
 	rootCmd.AddCommand(psCmd)
-	psCmd.Flags().StringVarP(&psServer, "server", "s", "", "Show services on specific server")
-	psCmd.Flags().BoolVarP(&psAll, "all", "a", false, "Show all containers including stopped")
+	psCmd.Flags().StringVarP(&psServer, "server", "s", "", "Show services on a specific node")
 }
 
 func runPS(cmd *cobra.Command, args []string) error {
-	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if !cfg.IsTakodRuntime() {
+		return fmt.Errorf("runtime.mode=%s is not supported; Tako now uses runtime.mode=takod", cfg.GetRuntimeMode())
+	}
 
-	// Get environment and services
 	envName := getEnvironmentName(cfg)
 	services, err := cfg.GetServices(envName)
 	if err != nil {
 		return fmt.Errorf("failed to get services: %w", err)
 	}
 
-	// Determine which servers to query
-	serversToQuery := make(map[string]config.ServerConfig)
-	if psServer != "" {
-		server, ok := cfg.Servers[psServer]
-		if !ok {
-			return fmt.Errorf("server '%s' not found in config", psServer)
-		}
-		serversToQuery[psServer] = server
-	} else {
-		serversToQuery = cfg.Servers
+	envServers, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	serverNames, err := psTargetServers(cfg, envName, envServers)
+	if err != nil {
+		return err
 	}
 
-	// Filter by specific service if provided
-	var filterService string
+	filterService := ""
 	if len(args) > 0 {
 		filterService = args[0]
 		if _, exists := services[filterService]; !exists {
@@ -94,190 +84,181 @@ func runPS(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Query each server
-	for serverName, serverCfg := range serversToQuery {
-		if len(serversToQuery) > 1 {
-			fmt.Printf("\n=== Server: %s (%s) ===\n", serverName, serverCfg.Host)
-		}
-
-		// Connect to server (supports both key and password auth)
-		client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-			Host:     serverCfg.Host,
-			Port:     serverCfg.Port,
-			User:     serverCfg.User,
-			SSHKey:   serverCfg.SSHKey,
-			Password: serverCfg.Password,
-		})
-		if err != nil {
-			fmt.Printf("❌ Failed to connect to %s: %v\n", serverName, err)
-			continue
-		}
-		if err := client.Connect(); err != nil {
-			fmt.Printf("❌ Failed to connect to %s: %v\n", serverName, err)
-			continue
-		}
-
-		// Get service information
-		serviceInfos, err := getServiceInfo(client, cfg, envName, filterService, services)
-		if err != nil {
-			fmt.Printf("❌ Failed to get service info: %v\n", err)
-			client.Close()
-			continue
-		}
-
-		// Display results
-		if len(serviceInfos) == 0 {
-			fmt.Println("\nNo services running")
-		} else {
-			displayServices(serviceInfos, filterService != "")
-		}
-
-		client.Close()
+	actualServices, err := gatherPSActualState(cfg, envName, serverNames)
+	if err != nil {
+		return err
 	}
 
+	serviceInfos := buildPSServiceInfo(services, actualServices, envServers, serverNames, filterService)
+	if len(serviceInfos) == 0 {
+		fmt.Println("\nNo services configured")
+		return nil
+	}
+
+	displayServices(serviceInfos)
 	return nil
 }
 
-// getServiceInfo retrieves information about running services
-func getServiceInfo(client *ssh.Client, cfg *config.Config, envName string, filterService string, services map[string]config.ServiceConfig) ([]ServiceInfo, error) {
-	serviceInfos := []ServiceInfo{}
+func psTargetServers(cfg *config.Config, envName string, envServers []string) ([]string, error) {
+	if len(envServers) == 0 {
+		return nil, fmt.Errorf("no servers configured for environment %s", envName)
+	}
+	if psServer == "" {
+		return append([]string(nil), envServers...), nil
+	}
+	if _, ok := cfg.Servers[psServer]; !ok {
+		return nil, fmt.Errorf("server '%s' not found in config", psServer)
+	}
+	for _, serverName := range envServers {
+		if serverName == psServer {
+			return []string{psServer}, nil
+		}
+	}
+	return nil, fmt.Errorf("server '%s' is not part of environment %s", psServer, envName)
+}
 
+func gatherPSActualState(cfg *config.Config, envName string, serverNames []string) (map[string]*takod.ActualService, error) {
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+
+	merged := make(map[string]*takod.ActualService)
+	for _, serverName := range serverNames {
+		server := cfg.Servers[serverName]
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to node %s: %w", serverName, err)
+		}
+
+		response, err := actualStateViaTakod(client, cfg, envName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query takod on node %s: %w", serverName, err)
+		}
+
+		for serviceName, service := range response.Services {
+			if service == nil {
+				continue
+			}
+			if existing, ok := merged[serviceName]; ok {
+				existing.Replicas += service.Replicas
+				existing.Containers = append(existing.Containers, service.Containers...)
+				if existing.Image == "" {
+					existing.Image = service.Image
+				}
+				continue
+			}
+			merged[serviceName] = &takod.ActualService{
+				Name:       service.Name,
+				Image:      service.Image,
+				Replicas:   service.Replicas,
+				Containers: append([]string(nil), service.Containers...),
+			}
+		}
+	}
+	return merged, nil
+}
+
+func buildPSServiceInfo(
+	services map[string]config.ServiceConfig,
+	actualServices map[string]*takod.ActualService,
+	envServers []string,
+	selectedServers []string,
+	filterService string,
+) []ServiceInfo {
+	serviceInfos := make([]ServiceInfo, 0, len(services))
 	for serviceName, serviceConfig := range services {
-		// Skip if filtering and doesn't match
 		if filterService != "" && serviceName != filterService {
 			continue
 		}
 
+		running := 0
+		if actual, ok := actualServices[serviceName]; ok && actual != nil {
+			running = actual.Replicas
+		}
+
+		desired := desiredReplicasForSelection(serviceConfig, envServers, selectedServers)
 		info := ServiceInfo{
 			Name:     serviceName,
-			Desired:  0, // Will be set based on actual running containers
+			Desired:  desired,
+			Running:  running,
 			Internal: serviceConfig.IsInternal() || serviceConfig.IsWorker(),
 		}
-
-		// Get running containers for this service
-		filter := "running"
-		if psAll {
-			filter = ""
-		}
-
-		var cmd string
-		if filter != "" {
-			cmd = fmt.Sprintf(
-				"docker ps --filter 'name=%s_%s_%s_' --filter 'status=%s' --format '{{.Names}}|{{.Status}}|{{.Ports}}'",
-				cfg.Project.Name,
-				envName,
-				serviceName,
-				filter,
-			)
-		} else {
-			cmd = fmt.Sprintf(
-				"docker ps -a --filter 'name=%s_%s_%s_' --format '{{.Names}}|{{.Status}}|{{.Ports}}'",
-				cfg.Project.Name,
-				envName,
-				serviceName,
-			)
-		}
-
-		output, err := client.Execute(cmd)
-		if err != nil {
-			return nil, err
-		}
-
-		// Parse container information
-		lines := strings.Split(strings.TrimSpace(output), "\n")
-		runningCount := 0
-
-		for _, line := range lines {
-			if line == "" {
-				continue
-			}
-
-			parts := strings.Split(line, "|")
-			if len(parts) >= 2 {
-				status := parts[1]
-				if strings.HasPrefix(status, "Up") {
-					runningCount++
-				}
-
-				// Extract port info from first container
-				if info.Ports == "" && len(parts) >= 3 {
-					ports := parts[2]
-					if ports != "" {
-						info.Ports = formatPorts(ports)
-					}
-				}
-			}
-		}
-
-		info.Running = runningCount
-		info.Replicas = runningCount
-
-		// Set desired based on config, but if we have more running than config, use running count
-		configReplicas := serviceConfig.Replicas
-		if configReplicas == 0 {
-			configReplicas = 1 // Default to 1 if not specified
-		}
-
-		// Desired count should be the max of config and running
-		// This handles manual scaling where running > config
-		if runningCount > configReplicas {
-			info.Desired = runningCount
-		} else {
-			info.Desired = configReplicas
-		}
-
-		// Determine status
-		if runningCount == 0 {
-			info.Status = "stopped"
-		} else if runningCount < info.Desired {
-			info.Status = "degraded"
-		} else if runningCount == info.Desired {
-			info.Status = "running"
-		} else {
-			info.Status = "scaling"
-		}
-
-		// Set ports display
-		if info.Ports == "" {
-			if info.Internal {
-				info.Ports = "internal"
-			} else if serviceConfig.Port > 0 {
-				if info.Running > 1 {
-					info.Ports = fmt.Sprintf("%d-%d", serviceConfig.Port, serviceConfig.Port+info.Running-1)
-				} else if info.Running == 1 {
-					info.Ports = fmt.Sprintf("%d", serviceConfig.Port)
-				} else {
-					info.Ports = "-"
-				}
-			} else {
-				info.Ports = "-"
-			}
-		}
-
+		info.Status = serviceStatus(running, desired)
+		info.Ports = servicePorts(serviceConfig, info.Internal, running)
 		serviceInfos = append(serviceInfos, info)
 	}
 
-	// Sort by service name
 	sort.Slice(serviceInfos, func(i, j int) bool {
 		return serviceInfos[i].Name < serviceInfos[j].Name
 	})
-
-	return serviceInfos, nil
+	return serviceInfos
 }
 
-// getPortDisplay returns the appropriate port display string
-func getPortDisplay(serviceConfig config.ServiceConfig, isInternal bool, runningCount int) string {
-	if isInternal {
+func desiredReplicasForSelection(service config.ServiceConfig, envServers []string, selectedServers []string) int {
+	targets := append([]string(nil), envServers...)
+	replicas := service.Replicas
+	if replicas <= 0 {
+		replicas = 1
+	}
+
+	if service.Placement != nil {
+		switch service.Placement.Strategy {
+		case "global":
+			replicas = len(targets)
+		case "pinned":
+			if len(service.Placement.Servers) > 0 {
+				targets = append([]string(nil), service.Placement.Servers...)
+			}
+		}
+	}
+
+	if len(targets) == 0 || replicas <= 0 {
+		return 0
+	}
+
+	selected := make(map[string]bool, len(selectedServers))
+	for _, serverName := range selectedServers {
+		selected[serverName] = true
+	}
+
+	count := 0
+	for slot := 1; slot <= replicas; slot++ {
+		serverName := targets[(slot-1)%len(targets)]
+		if selected[serverName] {
+			count++
+		}
+	}
+	return count
+}
+
+func serviceStatus(running int, desired int) string {
+	switch {
+	case running == 0:
+		return "stopped"
+	case desired == 0:
+		return "running"
+	case running < desired:
+		return "degraded"
+	case running == desired:
+		return "running"
+	default:
+		return "scaling"
+	}
+}
+
+func servicePorts(service config.ServiceConfig, internal bool, running int) string {
+	if internal {
 		return "internal"
 	}
-	if serviceConfig.Port > 0 {
-		return fmt.Sprintf("%d/tcp", serviceConfig.Port)
+	if service.Port <= 0 || running == 0 {
+		return "-"
 	}
-	return "-"
+	if running > 1 {
+		return fmt.Sprintf("%d-%d", service.Port, service.Port+running-1)
+	}
+	return fmt.Sprintf("%d", service.Port)
 }
 
-// displayServices prints service information in a formatted table
-func displayServices(services []ServiceInfo, detailed bool) {
+func displayServices(services []ServiceInfo) {
 	fmt.Println()
 	fmt.Printf("%-15s %-12s %-10s %-15s\n", "SERVICE", "REPLICAS", "STATUS", "PORTS")
 	fmt.Println(strings.Repeat("─", 60))
@@ -288,7 +269,6 @@ func displayServices(services []ServiceInfo, detailed bool) {
 			replicaStr = fmt.Sprintf("%d", svc.Running)
 		}
 
-		// Status with color indicator
 		statusStr := svc.Status
 		switch svc.Status {
 		case "running":
@@ -310,26 +290,4 @@ func displayServices(services []ServiceInfo, detailed bool) {
 	}
 
 	fmt.Println()
-}
-
-// formatPorts formats Docker port mappings for display
-func formatPorts(ports string) string {
-	if ports == "" {
-		return "-"
-	}
-
-	// Extract just the host port
-	// Example: "0.0.0.0:3000->3000/tcp" -> "3000"
-	parts := strings.Split(ports, "->")
-	if len(parts) > 0 {
-		hostPart := parts[0]
-		if strings.Contains(hostPart, ":") {
-			portParts := strings.Split(hostPart, ":")
-			if len(portParts) > 1 {
-				return portParts[len(portParts)-1]
-			}
-		}
-	}
-
-	return ports
 }

@@ -18,6 +18,14 @@ func TestStateEndpointEscapesQueryValues(t *testing.T) {
 	}
 }
 
+func TestActualStateEndpointEscapesQueryValues(t *testing.T) {
+	got := ActualStateEndpoint("demo app", "prod/us")
+	want := "/v1/actual?environment=prod%2Fus&project=demo+app"
+	if got != want {
+		t.Fatalf("ActualStateEndpoint() = %q, want %q", got, want)
+	}
+}
+
 func TestEnvBundleEndpointEscapesQueryValues(t *testing.T) {
 	got := EnvBundleEndpoint("demo app", "prod/us")
 	want := "/v1/env-bundle?environment=prod%2Fus&project=demo+app"

@@ -30,6 +30,24 @@ func cleanupViaTakod(client *ssh.Client, cfg *config.Config, request takod.Clean
 	return &response, nil
 }
 
+func actualStateViaTakod(client *ssh.Client, cfg *config.Config, environment string) (*takod.ActualStateResponse, error) {
+	var response takod.ActualStateResponse
+	output, err := takodclient.RequestJSON(
+		client,
+		takodSocketFromConfig(cfg),
+		"GET",
+		takodclient.ActualStateEndpoint(cfg.Project.Name, environment),
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := decodeTakodJSON(output, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
 func decodeTakodJSON(output string, value any) error {
 	if err := json.Unmarshal([]byte(output), value); err != nil {
 		return fmt.Errorf("failed to parse takod response: %w", err)
