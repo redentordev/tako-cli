@@ -213,7 +213,7 @@ ghost:
 ```
 
 However, you'll need:
-1. Shared storage for `ghost_content` (e.g., NFS)
+1. External shared storage or application-level replication for `ghost_content`
 2. Load balancing (handled by tako-proxy automatically)
 
 For most use cases, a single instance is sufficient.

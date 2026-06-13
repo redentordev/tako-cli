@@ -182,7 +182,7 @@ spread:
 ```
 
 Stateful services default to pinned unless the config explicitly defines
-replication and storage behavior.
+replication, placement, and external persistence behavior.
 
 ## Mesh + Ingress
 

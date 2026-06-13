@@ -67,16 +67,11 @@ func ValidateConfig(cfg *Config) error {
 }
 
 func validateStorageConfig(cfg *Config) error {
-	if !cfg.IsNFSEnabled() {
+	if cfg.Storage == nil || cfg.Storage.NFS == nil {
 		return nil
 	}
-	for envName, env := range cfg.Environments {
-		if !EnvironmentUsesNFSVolumes(env) {
-			continue
-		}
-		if _, err := cfg.GetNFSServerName(envName); err != nil {
-			return fmt.Errorf("storage.nfs for environment %s: %w", envName, err)
-		}
+	if cfg.Storage.NFS.Enabled || len(cfg.Storage.NFS.Exports) > 0 || cfg.Storage.NFS.Server != "" {
+		return fmt.Errorf("storage.nfs is no longer supported; use node-local volumes or an external storage service")
 	}
 	return nil
 }
@@ -547,18 +542,8 @@ func normalizeHTTPPath(path string) (string, error) {
 
 func validateServiceVolumes(name string, service *ServiceConfig, cfg *Config) error {
 	for _, volume := range service.Volumes {
-		if !IsNFSVolume(volume) {
-			continue
-		}
-		exportName, _, _, err := ParseNFSVolumeSpec(volume)
-		if err != nil {
-			return fmt.Errorf("service %s: invalid NFS volume %q: %w", name, volume, err)
-		}
-		if !cfg.IsNFSEnabled() {
-			return fmt.Errorf("service %s: NFS volume %q requires storage.nfs.enabled", name, volume)
-		}
-		if _, err := cfg.GetNFSExport(exportName); err != nil {
-			return fmt.Errorf("service %s: NFS volume %q references missing export: %w", name, volume, err)
+		if IsNFSVolume(volume) {
+			return fmt.Errorf("service %s: NFS volume %q is no longer supported; use node-local volumes or an external storage service", name, volume)
 		}
 	}
 	return nil
@@ -817,7 +802,6 @@ func validateVolumes(volumes map[string]VolumeConfig) error {
 		if vol.Driver != "" {
 			validDrivers := map[string]bool{
 				"local":  true,
-				"nfs":    true,
 				"tmpfs":  true,
 				"cifs":   true,
 				"btrfs":  true,

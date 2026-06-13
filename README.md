@@ -284,7 +284,6 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Multi-Server** - Deploy across multiple servers with takod mesh placement
 - **Server Setup** - Configure existing VPS hosts with Docker, local proxy, firewall rules, and monitoring
 - **Placement Strategies** - Control where services run (spread, pinned)
-- **NFS Storage** - Shared volumes across servers
 
 ### Developer Experience
 
@@ -349,13 +348,6 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako secrets list` | List all secrets (redacted) |
 | `tako secrets delete <KEY>` | Delete a secret |
 | `tako secrets validate` | Validate all required secrets are set |
-
-### Shared Storage
-
-| Command | Description |
-|---------|-------------|
-| `tako storage status` | Show NFS storage status across all servers |
-| `tako storage remount` | Remount NFS exports on all clients |
 
 ### Development & Utilities
 
@@ -517,73 +509,17 @@ services:
       - redis_data:/data
 ```
 
-### NFS Shared Storage
+### Storage Model
 
-Share volumes across multiple servers using NFS. Tako automatically sets up the NFS server and clients during `tako setup`.
+Tako treats Docker volumes as node-local by default. This keeps a one-node setup
+and a multi-node mesh on the same operational path: each service can keep
+persistent data on the node where it runs, and stateful services should use
+`pinned` placement unless they are designed for multi-writer operation.
 
-```yaml
-# Configure NFS shared storage
-storage:
-  nfs:
-    enabled: true
-    server: auto  # Use the deterministic environment default, or specify an environment node
-    exports:
-      - name: shared_repo
-        path: /srv/nfs/repo
-      - name: uploads
-        path: /srv/nfs/uploads
-
-servers:
-  server1:
-    host: ${SERVER1_HOST}
-  server2:
-    host: ${SERVER2_HOST}
-  server3:
-    host: ${SERVER3_HOST}
-
-environments:
-  production:
-    servers: [server1, server2, server3]
-    services:
-      session-manager:
-        build: ./session-manager
-        volumes:
-          - nfs:shared_repo:/app/repo:ro    # Read-only NFS mount
-          - sessions:/app/sessions          # Local volume for work
-        
-      content-server:
-        build: ./content-server
-        port: 3000
-        replicas: 3
-        volumes:
-          - nfs:shared_repo:/app/repo:ro    # Same NFS mount, read-only
-        placement:
-          strategy: spread
-```
-
-**NFS Volume Format:**
-```
-nfs:<export_name>:<container_path>[:ro|:rw]
-```
-
-- `export_name` - Name of the export defined in storage.nfs.exports
-- `container_path` - Mount path inside the container
-- `:ro` - Read-only mount (default, recommended)
-- `:rw` - Read-write mount
-
-**Commands:**
-```bash
-# Check NFS storage status
-tako storage status
-
-# Remount NFS if mounts become stale
-tako storage remount
-```
-
-**Notes:**
-- NFS is best for read-heavy workloads
-- For write-heavy operations (like git), use local volumes and sync/merge back
-- All servers must be in the same datacenter for acceptable performance
+For data that must be shared across nodes, use an external storage service or an
+application-level replication system such as a managed database, object storage,
+or purpose-built clustered datastore. Tako does not provision shared filesystem
+storage.
 
 ### Secrets Management
 
