@@ -88,13 +88,14 @@ already installed, which keeps local iteration from depending on a published
 release.
 
 `takod` currently exposes health, status, actual container discovery, service
-container reconcile, proxy file updates, and proxy container reconcile from
-node-local state. Actual container discovery prefers this socket and falls back
-to direct SSH Docker inspection when the agent is absent. Service deploy, scale,
-maintenance/live, and proxy routing now ask the local agent to remove, pull,
-run, verify containers, and publish proxy config through typed socket requests.
-Remaining mutating workflows such as rollback, destroy, backup, cleanup, and
-acme-dns still need to move behind socket APIs.
+container reconcile, proxy file updates, proxy container reconcile, and project
+cleanup from node-local state. Actual container discovery prefers this socket
+and falls back to direct SSH Docker inspection when the agent is absent. Service
+deploy, scale, maintenance/live, remove, destroy, and proxy routing now ask the
+local agent to remove, pull, run, verify containers, publish proxy config, and
+clean project resources through typed socket requests. Remaining mutating
+workflows such as acme-dns setup, backup, cleanup, and old setup-upgrader paths
+still need to move behind socket APIs.
 
 Local `.tako` files are cache and UX acceleration. The durable truth lives in
 Git plus the last accepted desired revision and event log replicated by takod.

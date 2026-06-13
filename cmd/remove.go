@@ -8,6 +8,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
 
@@ -53,6 +54,10 @@ func runRemove(cmd *cobra.Command, args []string) error {
 
 	// Get environment
 	envName := getEnvironmentName(cfg)
+	services, err := cfg.GetServices(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get services for environment %s: %w", envName, err)
+	}
 
 	// Get server config
 	server, exists := cfg.Servers[removeServer]
@@ -111,52 +116,24 @@ func runRemove(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n🗑️  Removing all services for %s...\n\n", cfg.Project.Name)
 
-	// Stop and remove all containers
-	fmt.Printf("→ Stopping containers...\n")
-	stopPattern := fmt.Sprintf("%s_%s_", cfg.Project.Name, envName)
-	stopCmd := fmt.Sprintf("docker ps -a --filter 'name=%s' --format '{{.Names}}' | xargs -r docker stop", stopPattern)
-	if _, err := client.Execute(stopCmd); err != nil && verbose {
-		fmt.Printf("  Warning: Error stopping containers: %v\n", err)
+	fmt.Printf("→ Reconciling cleanup through takod...\n")
+	response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
+		Project:           cfg.Project.Name,
+		Environment:       envName,
+		RemoveContainers:  true,
+		RemoveImages:      true,
+		RemoveNetworks:    true,
+		RemoveDeployFiles: true,
+		RemoveState:       true,
+		RemoveTakodState:  true,
+		ProxyFiles:        cleanupProxyFiles(cfg.Project.Name, envName, services),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to cleanup through takod: %w", err)
 	}
-
-	fmt.Printf("→ Removing containers...\n")
-	removeContainersCmd := fmt.Sprintf("docker ps -a --filter 'name=%s' --format '{{.Names}}' | xargs -r docker rm -f", stopPattern)
-	if _, err := client.Execute(removeContainersCmd); err != nil && verbose {
-		fmt.Printf("  Warning: Error removing containers: %v\n", err)
-	}
-
-	// Remove Docker images
-	fmt.Printf("→ Removing Docker images...\n")
-	removeImagesCmd := fmt.Sprintf("docker images '%s/*' --format '{{.Repository}}:{{.Tag}}' | xargs -r docker rmi -f", cfg.Project.Name)
-	if _, err := client.Execute(removeImagesCmd); err != nil && verbose {
-		fmt.Printf("  Warning: Error removing images: %v\n", err)
-	}
-
-	// Remove proxy configurations.
-	fmt.Printf("→ Removing proxy configurations...\n")
 	if verbose {
-		fmt.Printf("  tako-proxy will automatically detect removed containers\n")
+		printCleanupWarnings(response)
 	}
-
-	// Remove deployment state
-	fmt.Printf("→ Removing deployment state...\n")
-	removeStateCmd := fmt.Sprintf("sudo rm -rf /var/lib/tako-cli/%s", cfg.Project.Name)
-	if _, err := client.Execute(removeStateCmd); err != nil && verbose {
-		fmt.Printf("  Warning: Error removing state: %v\n", err)
-	}
-
-	// Remove deployment files
-	fmt.Printf("→ Removing deployment files...\n")
-	removeDeployCmd := fmt.Sprintf("sudo rm -rf /opt/%s", cfg.Project.Name)
-	if _, err := client.Execute(removeDeployCmd); err != nil && verbose {
-		fmt.Printf("  Warning: Error removing deployment files: %v\n", err)
-	}
-
-	// Remove network
-	fmt.Printf("→ Removing Docker network...\n")
-	networkName := fmt.Sprintf("tako_%s_%s", cfg.Project.Name, envName)
-	removeNetworkCmd := fmt.Sprintf("docker network rm %s 2>/dev/null || true", networkName)
-	client.Execute(removeNetworkCmd)
 
 	fmt.Printf("\n✓ All services removed from %s\n", removeServer)
 	fmt.Printf("\nThe server is still provisioned and ready for new deployments.\n")

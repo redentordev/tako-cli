@@ -11,6 +11,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/state"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
 
@@ -212,7 +213,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	for _, serverName := range targetServerNames {
 		serverCfg := serversToDestroy[serverName]
 		fmt.Printf("=== Destroying server: %s (%s) ===\n", serverName, serverCfg.Host)
-		if err := destroySingleServer(serverName, serverCfg, cfg.Project.Name, verbose, destroyPurgeAll); err != nil {
+		if err := destroySingleServer(serverName, serverCfg, cfg, envName, verbose, destroyPurgeAll); err != nil {
 			fmt.Printf("⚠️  Errors destroying %s: %v\n", serverName, err)
 			totalErrors++
 		} else {
@@ -357,8 +358,8 @@ func cleanupNFS(cfg *config.Config, envName string) error {
 	return nil
 }
 
-// destroySingleServer handles destruction of a single server
-func destroySingleServer(serverName string, serverCfg config.ServerConfig, projectName string, verbose bool, purgeAll bool) error {
+// destroySingleServer handles destruction of a single server.
+func destroySingleServer(serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool) error {
 	// Connect to server (supports both key and password auth)
 	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
 		Host:     serverCfg.Host,
@@ -376,13 +377,13 @@ func destroySingleServer(serverName string, serverCfg config.ServerConfig, proje
 	defer client.Close()
 
 	// Decommission application
-	if err := decommissionApp(client, projectName, verbose); err != nil {
+	if err := decommissionApp(client, cfg, envName, verbose); err != nil {
 		return fmt.Errorf("decommission failed: %w", err)
 	}
 
 	// Purge server setup if requested
 	if purgeAll {
-		if err := purgeServerSetup(client, projectName, verbose); err != nil {
+		if err := purgeServerSetup(client, cfg, verbose); err != nil {
 			return fmt.Errorf("purge failed: %w", err)
 		}
 	}
@@ -391,38 +392,31 @@ func destroySingleServer(serverName string, serverCfg config.ServerConfig, proje
 }
 
 // decommissionApp stops and removes the deployed application
-func decommissionApp(client *ssh.Client, projectName string, verbose bool) error {
+func decommissionApp(client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
 	if verbose {
 		fmt.Println("  → Removing takod containers...")
 	}
-
-	removeContainersCmd := fmt.Sprintf("docker ps -aq --filter label=tako.project=%s | xargs -r docker rm -f 2>/dev/null || true", projectName)
-	client.Execute(removeContainersCmd)
-
-	if verbose {
-		fmt.Println("  → Removing project networks...")
+	services, err := cfg.GetServices(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get services for environment %s: %w", envName, err)
 	}
-
-	removeNetworkCmd := fmt.Sprintf("docker network ls --format '{{.Name}}' | grep -E '^tako_%s(_|$)' | xargs -r docker network rm 2>/dev/null || true", projectName)
-	client.Execute(removeNetworkCmd)
-
-	if verbose {
-		fmt.Println("  → Removing application images...")
+	response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
+		Project:           cfg.Project.Name,
+		Environment:       envName,
+		RemoveContainers:  true,
+		RemoveImages:      true,
+		RemoveNetworks:    true,
+		RemoveDeployFiles: true,
+		RemoveState:       true,
+		RemoveTakodState:  true,
+		ProxyFiles:        cleanupProxyFiles(cfg.Project.Name, envName, services),
+	})
+	if err != nil {
+		return err
 	}
-
-	// Remove all images for this project (match project name prefix)
-	imagesCmd := fmt.Sprintf("docker images --format '{{.Repository}}:{{.Tag}}' | grep '^%s' | xargs -r docker rmi -f 2>/dev/null || true", projectName)
-	client.Execute(imagesCmd)
-
 	if verbose {
-		fmt.Println("  → Removing deployment files...")
+		printCleanupWarnings(response)
 	}
-
-	// Remove deployment directory
-	client.Execute(fmt.Sprintf("sudo rm -rf /opt/%s", projectName))
-
-	client.Execute(fmt.Sprintf("sudo rm -rf /var/lib/tako-cli/%s", projectName))
-	client.Execute(fmt.Sprintf("sudo rm -rf /var/lib/tako/desired/%s* /var/lib/tako/actual/%s* /var/lib/tako/events/%s* 2>/dev/null || true", projectName, projectName, projectName))
 
 	if verbose {
 		fmt.Println("  ✓ Application decommissioned")
@@ -432,32 +426,22 @@ func decommissionApp(client *ssh.Client, projectName string, verbose bool) error
 }
 
 // purgeServerSetup removes shared server-side components installed by Tako.
-func purgeServerSetup(client *ssh.Client, projectName string, verbose bool) error {
+func purgeServerSetup(client *ssh.Client, cfg *config.Config, verbose bool) error {
 	if verbose {
 		fmt.Println("  → Removing tako-proxy...")
 	}
-
-	client.Execute("docker rm -f tako-proxy 2>/dev/null || true")
-
-	if verbose {
-		fmt.Println("  → Removing access logs...")
+	response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
+		Project:              cfg.Project.Name,
+		RemoveProxyContainer: true,
+		RemoveProxyRuntime:   true,
+		PruneDocker:          true,
+	})
+	if err != nil {
+		return err
 	}
-
-	client.Execute(fmt.Sprintf("sudo rm -rf /var/log/tako/proxy/%s-*.log* 2>/dev/null || true", projectName))
-
 	if verbose {
-		fmt.Println("  → Pruning Docker system...")
+		printCleanupWarnings(response)
 	}
-
-	// Prune Docker system
-	client.Execute("docker system prune -af --volumes")
-
-	// Clean up Tako state directories
-	if verbose {
-		fmt.Println("  → Removing Tako state files...")
-	}
-	client.Execute("sudo rm -rf /var/lib/tako 2>/dev/null || true")
-	client.Execute("sudo rm -rf /etc/tako 2>/dev/null || true")
 
 	if verbose {
 		fmt.Println("  ✓ Server setup purged")
