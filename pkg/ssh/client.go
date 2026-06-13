@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -823,9 +824,7 @@ func (c *Client) CopyFileWithMode(localPath, remotePath string, mode os.FileMode
 		return fmt.Errorf("failed to read local file: %w", err)
 	}
 
-	// Create command to write file and set permissions
-	// Use base64 encoding to safely transfer binary data
-	cmd := fmt.Sprintf("base64 -d > %s && chmod %o %s", remotePath, mode, remotePath)
+	cmd := buildRemoteUploadCommand(remotePath, mode)
 
 	session, err := conn.NewSession()
 	if err != nil {
@@ -859,4 +858,16 @@ func (c *Client) CopyFileWithMode(localPath, remotePath string, mode os.FileMode
 	}
 
 	return nil
+}
+
+func buildRemoteUploadCommand(remotePath string, mode os.FileMode) string {
+	quotedPath := shellQuote(remotePath)
+	return fmt.Sprintf("base64 -d > %s && chmod %o %s", quotedPath, mode, quotedPath)
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
