@@ -79,6 +79,19 @@ func EnvBundleEndpoint(project string, environment string) string {
 	return "/v1/env-bundle?" + query.Encode()
 }
 
+func BackupsEndpoint(project string, environment string, volume string, backupID string) string {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	if volume != "" {
+		query.Set("volume", volume)
+	}
+	if backupID != "" {
+		query.Set("backupId", backupID)
+	}
+	return "/v1/backups?" + query.Encode()
+}
+
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"

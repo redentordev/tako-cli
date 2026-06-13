@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
-	"github.com/redentordev/tako-cli/pkg/backup"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 )
 
@@ -85,61 +87,73 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	}
 	defer client.Close()
 
-	mgr := backup.NewManager(client, cfg.Project.Name, envName, verbose)
-
 	// Handle different operations
 	switch {
 	case backupList:
-		return listBackups(mgr, backupVolume)
+		return listBackups(client, cfg, envName, backupVolume)
 
 	case backupRestore != "":
 		if backupVolume == "" {
 			return fmt.Errorf("--volume is required for restore")
 		}
-		return restoreBackup(mgr, backupVolume, backupRestore)
+		return restoreBackup(client, cfg, envName, backupVolume, backupRestore)
 
 	case backupDelete != "":
 		if backupVolume == "" {
 			return fmt.Errorf("--volume is required for delete")
 		}
-		return deleteBackup(mgr, backupVolume, backupDelete)
+		return deleteBackup(client, cfg, envName, backupVolume, backupDelete)
 
 	case backupCleanup > 0:
-		return cleanupBackups(mgr, backupCleanup)
+		return cleanupBackups(client, cfg, envName, backupCleanup)
 
 	case backupAll:
-		return backupAllVolumes(mgr, cfg)
+		return backupAllVolumes(client, cfg, envName)
 
 	case backupVolume != "":
-		return createBackup(mgr, backupVolume)
+		return createBackup(client, cfg, envName, backupVolume)
 
 	default:
 		return fmt.Errorf("specify --volume, --all, --list, --restore, --delete, or --cleanup")
 	}
 }
 
-func listBackups(mgr *backup.Manager, volumeName string) error {
+func listBackups(client *ssh.Client, cfg *config.Config, envName string, volumeName string) error {
 	fmt.Printf("=== Volume Backups ===\n\n")
 
-	backups, err := mgr.ListBackups(volumeName)
+	var response takod.BackupListResponse
+	err := takodBackupRequestJSON(
+		client,
+		cfg,
+		"GET",
+		takodclient.BackupsEndpoint(cfg.Project.Name, envName, volumeName, ""),
+		nil,
+		&response,
+	)
 	if err != nil {
 		return err
 	}
 
-	if len(backups) == 0 {
+	if len(response.Backups) == 0 {
 		fmt.Println("No backups found")
 		return nil
 	}
 
 	// Group by volume
-	byVolume := make(map[string][]backup.BackupInfo)
-	for _, b := range backups {
+	byVolume := make(map[string][]takod.BackupInfo)
+	for _, b := range response.Backups {
 		byVolume[b.Volume] = append(byVolume[b.Volume], b)
 	}
 
-	for vol, vBackups := range byVolume {
+	volumes := make([]string, 0, len(byVolume))
+	for vol := range byVolume {
+		volumes = append(volumes, vol)
+	}
+	sort.Strings(volumes)
+
+	for _, vol := range volumes {
 		fmt.Printf("Volume: %s\n", vol)
-		for _, b := range vBackups {
+		for _, b := range byVolume[vol] {
 			sizeStr := formatSize(b.Size)
 			fmt.Printf("  - %s  %s  %s\n", b.ID, b.CreatedAt.Format("2006-01-02 15:04"), sizeStr)
 		}
@@ -149,10 +163,18 @@ func listBackups(mgr *backup.Manager, volumeName string) error {
 	return nil
 }
 
-func createBackup(mgr *backup.Manager, volumeName string) error {
+func createBackup(client *ssh.Client, cfg *config.Config, envName string, volumeName string) error {
 	fmt.Printf("=== Backing up volume: %s ===\n\n", volumeName)
 
-	info, err := mgr.BackupVolume(volumeName)
+	var info takod.BackupInfo
+	err := takodBackupRequestJSON(
+		client,
+		cfg,
+		"POST",
+		"/v1/backups",
+		backupRequest(cfg, envName, volumeName, "", 0),
+		&info,
+	)
 	if err != nil {
 		return fmt.Errorf("backup failed: %w", err)
 	}
@@ -165,11 +187,20 @@ func createBackup(mgr *backup.Manager, volumeName string) error {
 	return nil
 }
 
-func restoreBackup(mgr *backup.Manager, volumeName, backupID string) error {
+func restoreBackup(client *ssh.Client, cfg *config.Config, envName string, volumeName string, backupID string) error {
 	fmt.Printf("=== Restoring volume: %s from backup %s ===\n\n", volumeName, backupID)
 	fmt.Printf("⚠️  WARNING: This will overwrite all data in the volume!\n\n")
 
-	if err := mgr.RestoreVolume(volumeName, backupID); err != nil {
+	var response map[string]bool
+	err := takodBackupRequestJSON(
+		client,
+		cfg,
+		"POST",
+		"/v1/backups/restore",
+		backupRequest(cfg, envName, volumeName, backupID, 0),
+		&response,
+	)
+	if err != nil {
 		return fmt.Errorf("restore failed: %w", err)
 	}
 
@@ -177,10 +208,19 @@ func restoreBackup(mgr *backup.Manager, volumeName, backupID string) error {
 	return nil
 }
 
-func deleteBackup(mgr *backup.Manager, volumeName, backupID string) error {
+func deleteBackup(client *ssh.Client, cfg *config.Config, envName string, volumeName string, backupID string) error {
 	fmt.Printf("=== Deleting backup: %s_%s ===\n\n", volumeName, backupID)
 
-	if err := mgr.DeleteBackup(volumeName, backupID); err != nil {
+	var response map[string]bool
+	err := takodBackupRequestJSON(
+		client,
+		cfg,
+		"DELETE",
+		takodclient.BackupsEndpoint(cfg.Project.Name, envName, volumeName, backupID),
+		nil,
+		&response,
+	)
+	if err != nil {
 		return fmt.Errorf("delete failed: %w", err)
 	}
 
@@ -188,24 +228,51 @@ func deleteBackup(mgr *backup.Manager, volumeName, backupID string) error {
 	return nil
 }
 
-func cleanupBackups(mgr *backup.Manager, days int) error {
+func cleanupBackups(client *ssh.Client, cfg *config.Config, envName string, days int) error {
 	fmt.Printf("=== Cleaning up backups older than %d days ===\n\n", days)
 
-	count, err := mgr.CleanupOldBackups(days)
+	var response takod.BackupCleanupResponse
+	err := takodBackupRequestJSON(
+		client,
+		cfg,
+		"POST",
+		"/v1/backups/cleanup",
+		backupRequest(cfg, envName, "", "", days),
+		&response,
+	)
 	if err != nil {
 		return fmt.Errorf("cleanup failed: %w", err)
 	}
 
-	fmt.Printf("✓ Cleaned up %d old backups\n", count)
+	fmt.Printf("✓ Cleaned up %d old backups\n", response.Deleted)
 	return nil
 }
 
-func backupAllVolumes(mgr *backup.Manager, cfg *config.Config) error {
+func backupAllVolumes(client *ssh.Client, cfg *config.Config, envName string) error {
 	fmt.Printf("=== Backing up all volumes ===\n\n")
 
-	backups, err := mgr.BackupAllVolumes(cfg)
+	volumes, err := backupVolumesFromConfig(cfg, envName)
 	if err != nil {
 		return fmt.Errorf("backup failed: %w", err)
+	}
+
+	var backups []takod.BackupInfo
+	for _, volume := range volumes {
+		var info takod.BackupInfo
+		err := takodBackupRequestJSON(
+			client,
+			cfg,
+			"POST",
+			"/v1/backups",
+			backupRequest(cfg, envName, volume.name, "", 0),
+			&info,
+		)
+		if err != nil {
+			fmt.Printf("  ⚠ Failed to backup %s: %v\n", volume.name, err)
+			continue
+		}
+		info.Service = volume.service
+		backups = append(backups, info)
 	}
 
 	fmt.Printf("\n✓ Backed up %d volumes\n", len(backups))
@@ -214,6 +281,62 @@ func backupAllVolumes(mgr *backup.Manager, cfg *config.Config) error {
 	}
 
 	return nil
+}
+
+type backupVolumeSpec struct {
+	name    string
+	service string
+}
+
+func backupVolumesFromConfig(cfg *config.Config, envName string) ([]backupVolumeSpec, error) {
+	services, err := cfg.GetServices(envName)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]backupVolumeSpec)
+	for serviceName, service := range services {
+		for _, volume := range service.Volumes {
+			source, _, _ := strings.Cut(volume, ":")
+			source = strings.TrimSpace(source)
+			if source == "" || strings.HasPrefix(source, "/") {
+				continue
+			}
+			if _, ok := seen[source]; !ok {
+				seen[source] = backupVolumeSpec{name: source, service: serviceName}
+			}
+		}
+	}
+
+	volumes := make([]backupVolumeSpec, 0, len(seen))
+	for _, volume := range seen {
+		volumes = append(volumes, volume)
+	}
+	sort.Slice(volumes, func(i, j int) bool {
+		return volumes[i].name < volumes[j].name
+	})
+	return volumes, nil
+}
+
+func backupRequest(cfg *config.Config, envName string, volumeName string, backupID string, retentionDays int) takod.BackupRequest {
+	return takod.BackupRequest{
+		Project:       cfg.Project.Name,
+		Environment:   envName,
+		Volume:        volumeName,
+		BackupID:      backupID,
+		RetentionDays: retentionDays,
+	}
+}
+
+func takodBackupRequestJSON(client *ssh.Client, cfg *config.Config, method string, endpoint string, request any, response any) error {
+	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), method, endpoint, request)
+	if err != nil {
+		return err
+	}
+	if response == nil {
+		return nil
+	}
+	return decodeTakodJSON(output, response)
 }
 
 func formatSize(bytes int64) string {
@@ -227,9 +350,4 @@ func formatSize(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
-}
-
-// Helper to check if a string contains substring (case insensitive)
-func containsIgnoreCase(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }

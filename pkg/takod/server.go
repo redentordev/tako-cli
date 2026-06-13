@@ -79,6 +79,9 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/acme-dns/credentials", s.handleAcmeDNSCredentials)
 	mux.HandleFunc("/v1/state", s.handleState)
 	mux.HandleFunc("/v1/env-bundle", s.handleEnvBundle)
+	mux.HandleFunc("/v1/backups", s.handleBackups)
+	mux.HandleFunc("/v1/backups/restore", s.handleBackupRestore)
+	mux.HandleFunc("/v1/backups/cleanup", s.handleBackupCleanup)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -389,6 +392,97 @@ func (s *Server) handleEnvBundle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
+	var (
+		response any
+		err      error
+	)
+
+	switch r.Method {
+	case http.MethodGet:
+		response, err = ListVolumeBackups(r.Context(), BackupRequest{
+			Project:     r.URL.Query().Get("project"),
+			Environment: r.URL.Query().Get("environment"),
+			Volume:      r.URL.Query().Get("volume"),
+		})
+	case http.MethodPost:
+		defer r.Body.Close()
+		var request BackupRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		response, err = CreateVolumeBackup(r.Context(), request)
+	case http.MethodDelete:
+		err = DeleteVolumeBackup(r.Context(), BackupRequest{
+			Project:     r.URL.Query().Get("project"),
+			Environment: r.URL.Query().Get("environment"),
+			Volume:      r.URL.Query().Get("volume"),
+			BackupID:    r.URL.Query().Get("backupId"),
+		})
+		response = map[string]bool{"deleted": err == nil}
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request BackupRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := RestoreVolumeBackup(r.Context(), request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(map[string]bool{"restored": true})
+}
+
+func (s *Server) handleBackupCleanup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request BackupRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	response, err := CleanupOldBackups(r.Context(), request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
