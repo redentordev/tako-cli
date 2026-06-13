@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -484,17 +485,10 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 		},
 	}
 
-	var nodeErrors []string
-	for _, serverName := range targetServers {
-		server := cfg.Servers[serverName]
-		fmt.Printf("→ Enabling on %s (%s)...\n", serverName, server.Host)
-		if err := enableMaintenanceOnNode(cfg, server, socket, envName, maintenanceService, dynamicConfig, request); err != nil {
-			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", serverName, err))
-			fmt.Printf("  failed: %v\n", err)
-			continue
-		}
-		fmt.Printf("  enabled\n")
-	}
+	results := runMaintenanceNodeActions(cfg.Servers, targetServers, func(_ string, server config.ServerConfig) error {
+		return enableMaintenanceOnNode(cfg, server, socket, envName, maintenanceService, dynamicConfig, request)
+	})
+	nodeErrors := printMaintenanceNodeResults("Enabling", "enabled", results)
 	if len(nodeErrors) > 0 {
 		return fmt.Errorf("maintenance mode failed on %d/%d node(s): %s", len(nodeErrors), len(targetServers), strings.Join(nodeErrors, "; "))
 	}
@@ -505,6 +499,66 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nTo restore normal operation: tako live --service %s\n", maintenanceService)
 
 	return nil
+}
+
+type maintenanceNodeAction func(serverName string, server config.ServerConfig) error
+
+type maintenanceNodeResult struct {
+	index      int
+	serverName string
+	host       string
+	err        error
+}
+
+func runMaintenanceNodeActions(servers map[string]config.ServerConfig, targetServers []string, action maintenanceNodeAction) []maintenanceNodeResult {
+	resultCh := make(chan maintenanceNodeResult, len(targetServers))
+	var wg sync.WaitGroup
+
+	for index, serverName := range targetServers {
+		server, ok := servers[serverName]
+		if !ok {
+			resultCh <- maintenanceNodeResult{
+				index:      index,
+				serverName: serverName,
+				err:        fmt.Errorf("server not found in configuration"),
+			}
+			continue
+		}
+
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			resultCh <- maintenanceNodeResult{
+				index:      index,
+				serverName: serverName,
+				host:       server.Host,
+				err:        action(serverName, server),
+			}
+		}(index, serverName, server)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]maintenanceNodeResult, len(targetServers))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+	return results
+}
+
+func printMaintenanceNodeResults(actionLabel string, successLabel string, results []maintenanceNodeResult) []string {
+	var nodeErrors []string
+	for _, result := range results {
+		fmt.Printf("→ %s on %s (%s)...\n", actionLabel, result.serverName, result.host)
+		if result.err != nil {
+			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+			fmt.Printf("  failed: %v\n", result.err)
+			continue
+		}
+		fmt.Printf("  %s\n", successLabel)
+	}
+	return nodeErrors
 }
 
 func enableMaintenanceOnNode(cfg *config.Config, server config.ServerConfig, socket string, envName string, serviceName string, dynamicConfig []byte, request takod.ReconcileServiceRequest) error {
