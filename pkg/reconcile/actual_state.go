@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -35,13 +36,7 @@ func GatherActualStateByServer(
 	environment string,
 	serverNames []string,
 ) (map[string]map[string]*ActualService, error) {
-	actualByServer := make(map[string]map[string]*ActualService, len(serverNames))
-	for _, serverName := range serverNames {
-		server, ok := cfg.Servers[serverName]
-		if !ok {
-			return nil, fmt.Errorf("server %s not found", serverName)
-		}
-
+	return gatherActualStateByServerWith(cfg.Servers, serverNames, func(serverName string, server config.ServerConfig) (map[string]*ActualService, error) {
 		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to %s: %w", serverName, err)
@@ -51,8 +46,56 @@ func GatherActualStateByServer(
 		if err != nil {
 			return nil, fmt.Errorf("failed to gather actual state from %s through takod: %w", serverName, err)
 		}
+		return nodeState, nil
+	})
+}
 
-		actualByServer[serverName] = nodeState
+type actualStateGatherFunc func(serverName string, server config.ServerConfig) (map[string]*ActualService, error)
+
+type actualStateGatherResult struct {
+	serverName string
+	actual     map[string]*ActualService
+	err        error
+}
+
+func gatherActualStateByServerWith(servers map[string]config.ServerConfig, serverNames []string, gather actualStateGatherFunc) (map[string]map[string]*ActualService, error) {
+	actualByServer := make(map[string]map[string]*ActualService, len(serverNames))
+	resultCh := make(chan actualStateGatherResult, len(serverNames))
+	var wg sync.WaitGroup
+
+	for _, serverName := range serverNames {
+		server, ok := servers[serverName]
+		if !ok {
+			return nil, fmt.Errorf("server %s not found", serverName)
+		}
+
+		wg.Add(1)
+		go func(serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			actual, err := gather(serverName, server)
+			resultCh <- actualStateGatherResult{
+				serverName: serverName,
+				actual:     actual,
+				err:        err,
+			}
+		}(serverName, server)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	var errors []string
+	for result := range resultCh {
+		if result.err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+			continue
+		}
+		actualByServer[result.serverName] = result.actual
+	}
+
+	if len(errors) > 0 {
+		sort.Strings(errors)
+		return nil, fmt.Errorf("failed to gather actual state: %s", strings.Join(errors, "; "))
 	}
 	return actualByServer, nil
 }
