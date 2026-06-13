@@ -363,6 +363,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 |---------|-------------|
 | `tako state pull` | Sync remote deployment state into local `.tako/` |
 | `tako state status` | Compare local/remote state and show the remote lease |
+| `tako state repair` | Repair deployment history across reachable mesh nodes |
 | `tako upgrade` | Upgrade Tako CLI to the latest version |
 | `tako live` | Disable maintenance mode and restore service traffic |
 | `tako cleanup` | Clean up old node runtime resources |

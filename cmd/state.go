@@ -61,16 +61,33 @@ Displays:
 	RunE: runStateStatus,
 }
 
+var stateRepairCmd = &cobra.Command{
+	Use:   "repair",
+	Short: "Repair deployment state across reachable mesh nodes",
+	Long: `Repair deployment history across reachable nodes in the active environment.
+
+The command reads deployment history from every reachable environment node,
+chooses the freshest copy, writes it back to all reachable nodes under the
+remote operation lease, and refreshes local .tako deployment state.
+
+Use this when nodes disagree, a primary node was replaced, or a new laptop needs
+the best available state before deploying.`,
+	RunE: runStateRepair,
+}
+
 var stateServer string
 
 func init() {
 	rootCmd.AddCommand(stateCmd)
 	stateCmd.AddCommand(statePullCmd)
 	stateCmd.AddCommand(stateStatusCmd)
+	stateCmd.AddCommand(stateRepairCmd)
 
 	statePullCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Pull state from specific server")
 
 	stateStatusCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Check status for specific server")
+
+	stateRepairCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Prefer this server when acquiring the repair lease")
 }
 
 func runStatePull(cmd *cobra.Command, args []string) error {
@@ -313,6 +330,81 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runStateRepair(cmd *cobra.Command, args []string) error {
+	cfg, err := config.LoadConfig(cfgFile)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	envName := getEnvironmentName(cfg)
+	fmt.Printf("Project: %s\n", cfg.Project.Name)
+	fmt.Printf("Environment: %s\n\n", envName)
+
+	nodes, candidates, err := collectStateRepairNodes(cfg, envName, stateServer)
+	if err != nil {
+		return err
+	}
+	defer closeStateRepairNodes(nodes)
+
+	if len(nodes) == 0 {
+		return fmt.Errorf("no reachable environment nodes found")
+	}
+
+	best, ok := bestDeploymentHistory(candidates)
+	if !ok {
+		return fmt.Errorf("no deployment history found on reachable nodes")
+	}
+
+	fmt.Printf("Repair source: %s (%d deployment(s), freshness %s)\n",
+		best.source,
+		deploymentHistoryCount(best.history),
+		deploymentHistoryFreshness(best.history).Format(time.RFC3339),
+	)
+
+	leaseNode := stateRepairLeaseNode(nodes, best.source)
+	lease, err := leaseNode.manager.AcquireLease("state-repair", envName, remotestate.DefaultLeaseTTL)
+	if err != nil {
+		return fmt.Errorf("failed to acquire repair lease on %s: %w", leaseNode.name, err)
+	}
+	defer func() {
+		if err := leaseNode.manager.ReleaseLease(lease); err != nil && verbose {
+			fmt.Fprintf(os.Stderr, "Warning: failed to release repair lease on %s: %v\n", leaseNode.name, err)
+		}
+	}()
+
+	written := 0
+	for _, node := range nodes {
+		historyCopy, err := cloneRemoteDeploymentHistory(best.history)
+		if err != nil {
+			return fmt.Errorf("failed to prepare history for repair: %w", err)
+		}
+		if err := node.manager.SaveHistory(historyCopy); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to repair %s: %v\n", node.name, err)
+			continue
+		}
+		written++
+		if verbose {
+			fmt.Printf("Repaired state on %s\n", node.name)
+		}
+	}
+	if written == 0 {
+		return fmt.Errorf("failed to write repaired history to any reachable node")
+	}
+
+	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+	if err != nil {
+		return fmt.Errorf("remote state repaired on %d node(s), but local state initialization failed: %w", written, err)
+	}
+	synced, err := syncRemoteDeploymentsToLocal(localMgr, best.history.Deployments, envName)
+	if err != nil {
+		return fmt.Errorf("remote state repaired on %d node(s), but local state sync failed: %w", written, err)
+	}
+
+	fmt.Printf("Repaired %d/%d reachable node(s)\n", written, len(nodes))
+	fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
+	return nil
+}
+
 type takodRemoteStatus struct {
 	Runtime   string    `json:"runtime"`
 	Version   string    `json:"version"`
@@ -501,6 +593,185 @@ func resolveStateServer(cfg *config.Config, envName string, requestedServer stri
 	}
 
 	return "", config.ServerConfig{}, fmt.Errorf("server %s is not part of environment %s", requestedServer, envName)
+}
+
+type stateRepairNode struct {
+	name    string
+	client  *ssh.Client
+	manager *remotestate.StateManager
+}
+
+type stateHistoryCandidate struct {
+	source  string
+	history *remotestate.DeploymentHistory
+}
+
+func collectStateRepairNodes(cfg *config.Config, envName string, preferredServer string) ([]stateRepairNode, []stateHistoryCandidate, error) {
+	serverNames, err := orderedStateServerNames(cfg, envName, preferredServer)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	nodes := make([]stateRepairNode, 0, len(serverNames))
+	candidates := make([]stateHistoryCandidate, 0, len(serverNames))
+
+	for _, serverName := range serverNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			closeStateRepairNodes(nodes)
+			return nil, nil, fmt.Errorf("server %s not found in configuration", serverName)
+		}
+
+		fmt.Printf("Checking %s (%s)...\n", serverName, server.Host)
+		client, err := ssh.NewClientWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: cannot connect to %s: %v\n", serverName, err)
+			continue
+		}
+
+		manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
+		nodes = append(nodes, stateRepairNode{
+			name:    serverName,
+			client:  client,
+			manager: manager,
+		})
+
+		history, err := manager.LoadHistory()
+		if err != nil || !historyHasDeployments(history) {
+			if verbose {
+				fmt.Printf("No deployment history found on %s\n", serverName)
+			}
+			continue
+		}
+		candidates = append(candidates, stateHistoryCandidate{
+			source:  serverName,
+			history: history,
+		})
+		fmt.Printf("  found %d deployment(s), freshness %s\n",
+			deploymentHistoryCount(history),
+			deploymentHistoryFreshness(history).Format(time.RFC3339),
+		)
+	}
+
+	return nodes, candidates, nil
+}
+
+func stateRepairLeaseNode(nodes []stateRepairNode, source string) stateRepairNode {
+	for _, node := range nodes {
+		if node.name == source {
+			return node
+		}
+	}
+	return nodes[0]
+}
+
+func closeStateRepairNodes(nodes []stateRepairNode) {
+	for _, node := range nodes {
+		if node.client != nil {
+			_ = node.client.Close()
+		}
+	}
+}
+
+func orderedStateServerNames(cfg *config.Config, envName string, preferredServer string) ([]string, error) {
+	serverNames, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	if len(serverNames) == 0 {
+		return nil, fmt.Errorf("no servers configured for environment %s", envName)
+	}
+	if preferredServer == "" {
+		return serverNames, nil
+	}
+
+	ordered := make([]string, 0, len(serverNames))
+	found := false
+	for _, serverName := range serverNames {
+		if serverName == preferredServer {
+			found = true
+			ordered = append(ordered, serverName)
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("server %s is not part of environment %s", preferredServer, envName)
+	}
+	for _, serverName := range serverNames {
+		if serverName != preferredServer {
+			ordered = append(ordered, serverName)
+		}
+	}
+	return ordered, nil
+}
+
+func bestDeploymentHistory(candidates []stateHistoryCandidate) (stateHistoryCandidate, bool) {
+	var best stateHistoryCandidate
+	ok := false
+	for _, candidate := range candidates {
+		if !historyHasDeployments(candidate.history) {
+			continue
+		}
+		if !ok || deploymentHistoryBetter(candidate.history, best.history) {
+			best = candidate
+			ok = true
+		}
+	}
+	return best, ok
+}
+
+func deploymentHistoryBetter(candidate *remotestate.DeploymentHistory, current *remotestate.DeploymentHistory) bool {
+	candidateFreshness := deploymentHistoryFreshness(candidate)
+	currentFreshness := deploymentHistoryFreshness(current)
+	if !candidateFreshness.Equal(currentFreshness) {
+		return candidateFreshness.After(currentFreshness)
+	}
+	return deploymentHistoryCount(candidate) > deploymentHistoryCount(current)
+}
+
+func historyHasDeployments(history *remotestate.DeploymentHistory) bool {
+	return deploymentHistoryCount(history) > 0
+}
+
+func deploymentHistoryCount(history *remotestate.DeploymentHistory) int {
+	if history == nil {
+		return 0
+	}
+	count := 0
+	for _, deployment := range history.Deployments {
+		if deployment != nil {
+			count++
+		}
+	}
+	return count
+}
+
+func deploymentHistoryFreshness(history *remotestate.DeploymentHistory) time.Time {
+	if history == nil {
+		return time.Time{}
+	}
+	freshness := history.LastUpdated
+	for _, deployment := range history.Deployments {
+		if deployment != nil && deployment.Timestamp.After(freshness) {
+			freshness = deployment.Timestamp
+		}
+	}
+	return freshness
+}
+
+func cloneRemoteDeploymentHistory(history *remotestate.DeploymentHistory) (*remotestate.DeploymentHistory, error) {
+	if history == nil {
+		return nil, fmt.Errorf("history is nil")
+	}
+	data, err := json.Marshal(history)
+	if err != nil {
+		return nil, err
+	}
+	var out remotestate.DeploymentHistory
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // convertRemoteToLocal converts a remote DeploymentState to local format

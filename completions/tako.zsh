@@ -41,6 +41,7 @@ _tako() {
                 'secrets:Manage secrets for your project'
                 'setup:Provision server (Docker, proxy, security)'
                 'start:Start stopped services'
+                'state:Manage deployment state synchronization'
                 'stats:Show container resource usage'
                 'stop:Stop running services'
                 'storage:Manage shared storage (NFS)'
@@ -217,6 +218,23 @@ _tako() {
                         'remount:Remount NFS exports on all clients'
                     )
                     _describe -t commands 'storage commands' storage_commands
+                    ;;
+                state)
+                    local -a state_commands
+                    state_commands=(
+                        'pull:Pull remote state to local .tako directory'
+                        'repair:Repair deployment state across reachable mesh nodes'
+                        'status:Show state synchronization status'
+                    )
+                    if [[ $CURRENT -gt 2 && "$words[2]" == "repair" ]]; then
+                        _arguments \
+                            '(-e --env)'{-e,--env}'[Target specific environment]:environment:' \
+                            '(-s --server)'{-s,--server}'[Prefer this server when acquiring the repair lease]:server:' \
+                            '(--config)--config[Use custom config file]:file:_files' \
+                            '(-v --verbose)'{-v,--verbose}'[Show detailed output]'
+                    else
+                        _describe -t commands 'state commands' state_commands
+                    fi
                     ;;
             esac
             ;;

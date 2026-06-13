@@ -11,6 +11,11 @@ Tako uses the same deployment path from laptops and CI runners:
 The remote lease in takod prevents a CI job and a laptop from reconciling the
 same environment at the same time.
 
+`tako state repair` is the recovery path for stale or divergent node state. It
+is not required on every CI deploy; run it before deploy when a primary node was
+replaced, a runner is bootstrapping after state loss, or `tako state status`
+shows that the selected node is missing deployment history that another node has.
+
 ## Required Secrets
 
 Store these in your CI provider:
