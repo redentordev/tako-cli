@@ -148,6 +148,113 @@ func TestRestoreEnvBundleFilesRejectsInvalidBase64WithoutPartialWrites(t *testin
 	}
 }
 
+func TestRestoreEnvBundleFilesRollsBackOnWriteFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if err := os.WriteFile(".env", []byte("TOKEN=old\n"), 0644); err != nil {
+		t.Fatalf("failed to seed .env: %v", err)
+	}
+
+	original := writeEnvBundleFileAtomic
+	writeEnvBundleFileAtomic = func(path string, data []byte, perm os.FileMode) error {
+		if path == ".tako/secrets.production" {
+			return fmt.Errorf("disk full")
+		}
+		return original(path, data, perm)
+	}
+	t.Cleanup(func() {
+		writeEnvBundleFileAtomic = original
+	})
+
+	restored, err := restoreEnvBundleFiles(map[string]string{
+		".env":                     base64.StdEncoding.EncodeToString([]byte("TOKEN=new\n")),
+		".tako/secrets.production": base64.StdEncoding.EncodeToString([]byte("API_KEY=value\n")),
+	}, []string{".env", ".tako/secrets.production"})
+	if err == nil {
+		t.Fatal("restoreEnvBundleFiles should fail when a write fails")
+	}
+	if restored != 0 {
+		t.Fatalf("restored = %d, want 0 after rollback", restored)
+	}
+
+	envData, err := os.ReadFile(".env")
+	if err != nil {
+		t.Fatalf("failed to read rolled back .env: %v", err)
+	}
+	if string(envData) != "TOKEN=old\n" {
+		t.Fatalf(".env = %q, want original content", envData)
+	}
+	if info, err := os.Stat(".env"); err != nil {
+		t.Fatalf("failed to stat rolled back .env: %v", err)
+	} else if info.Mode().Perm() != 0644 {
+		t.Fatalf(".env mode = %04o, want original 0644", info.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(".tako", "secrets.production")); !os.IsNotExist(err) {
+		t.Fatalf("secrets file should not remain after rollback, stat err=%v", err)
+	}
+}
+
+func TestRestoreEnvBundleFilesRejectsSymlinkTarget(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if err := os.WriteFile("outside.env", []byte("outside\n"), 0600); err != nil {
+		t.Fatalf("failed to seed outside file: %v", err)
+	}
+	if err := os.Symlink("outside.env", ".env"); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	restored, err := restoreEnvBundleFiles(map[string]string{
+		".env": base64.StdEncoding.EncodeToString([]byte("TOKEN=secret\n")),
+	}, []string{".env"})
+	if err == nil {
+		t.Fatal("restoreEnvBundleFiles should reject symlink targets")
+	}
+	if restored != 0 {
+		t.Fatalf("restored = %d, want 0", restored)
+	}
+
+	outside, err := os.ReadFile("outside.env")
+	if err != nil {
+		t.Fatalf("failed to read outside file: %v", err)
+	}
+	if string(outside) != "outside\n" {
+		t.Fatalf("outside file = %q, want unchanged", outside)
+	}
+	if info, err := os.Lstat(".env"); err != nil {
+		t.Fatalf("failed to lstat .env: %v", err)
+	} else if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal(".env symlink should remain unchanged")
+	}
+}
+
+func TestRestoreEnvBundleFilesRejectsSymlinkDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if err := os.Mkdir("outside", 0700); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	if err := os.Symlink("outside", ".tako"); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	restored, err := restoreEnvBundleFiles(map[string]string{
+		".tako/secrets.production": base64.StdEncoding.EncodeToString([]byte("API_KEY=value\n")),
+	}, []string{".tako/secrets.production"})
+	if err == nil {
+		t.Fatal("restoreEnvBundleFiles should reject symlink directories")
+	}
+	if restored != 0 {
+		t.Fatalf("restored = %d, want 0", restored)
+	}
+	if _, err := os.Stat(filepath.Join("outside", "secrets.production")); !os.IsNotExist(err) {
+		t.Fatalf("outside secrets file should not be written, stat err=%v", err)
+	}
+}
+
 func TestRestoreDownloadedEnvBundleDecryptsAndWritesFiles(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
