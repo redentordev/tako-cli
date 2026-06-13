@@ -7,29 +7,17 @@ import (
 )
 
 func resolveServer(cfg *config.Config, envName, serverFlag string) (string, config.ServerConfig, error) {
-	if serverFlag != "" {
-		server, ok := cfg.Servers[serverFlag]
-		if !ok {
-			return "", config.ServerConfig{}, fmt.Errorf("server '%s' not found in config", serverFlag)
-		}
-		return serverFlag, server, nil
-	}
-
-	envServers, err := cfg.GetEnvironmentServers(envName)
+	serverNames, err := statePullServerNames(cfg, envName, serverFlag)
 	if err != nil {
-		return "", config.ServerConfig{}, fmt.Errorf("failed to get environment servers: %w", err)
+		return "", config.ServerConfig{}, err
 	}
-	if len(envServers) == 0 {
+	if len(serverNames) == 0 {
 		return "", config.ServerConfig{}, fmt.Errorf("no servers configured for environment %s", envName)
 	}
-	if len(envServers) > 1 {
-		primaryName, err := cfg.GetPrimaryServer(envName)
-		if err != nil {
-			return "", config.ServerConfig{}, fmt.Errorf("failed to get primary node: %w", err)
-		}
-		return primaryName, cfg.Servers[primaryName], nil
+	serverName := serverNames[0]
+	server, ok := cfg.Servers[serverName]
+	if !ok {
+		return "", config.ServerConfig{}, fmt.Errorf("server %s not found in configuration", serverName)
 	}
-
-	name := envServers[0]
-	return name, cfg.Servers[name], nil
+	return serverName, server, nil
 }

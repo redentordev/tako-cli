@@ -356,53 +356,51 @@ func checkRunningServices(record func(checkResult), cfg *config.Config, envName 
 		return
 	}
 
-	var client *ssh.Client
-	var clientName string
-
-	primaryName, err := cfg.GetPrimaryServer(envName)
-	if err == nil {
-		if c, ok := clients[primaryName]; ok {
-			client = c
-			clientName = primaryName
-		}
+	clientNames := make([]string, 0, len(clients))
+	for name := range clients {
+		clientNames = append(clientNames, name)
 	}
-	// Fallback to any connected client
-	if client == nil {
-		for name, c := range clients {
-			client = c
-			clientName = name
-			break
-		}
-	}
+	sort.Strings(clientNames)
 
-	actual, err := actualStateViaTakod(client, cfg, envName)
-	if err != nil {
-		record(checkResult{"WARN", fmt.Sprintf("Cannot read takod actual state on %s: %v", clientName, err), "Run 'tako setup' to install/start takod"})
-		return
-	}
-
-	if len(actual.Services) == 0 {
-		record(checkResult{"WARN", fmt.Sprintf("No running services found on %s", clientName), "Run 'tako deploy' to start services"})
-		return
-	}
-
+	totalNodes := 0
+	totalServices := 0
 	totalReplicas := 0
-	for _, service := range actual.Services {
-		if service != nil {
-			totalReplicas += service.Replicas
-		}
-	}
-	record(checkResult{"PASS", fmt.Sprintf("takod services on %s: %d service(s), %d replica(s)", clientName, len(actual.Services), totalReplicas), ""})
-	names := make([]string, 0, len(actual.Services))
-	for name := range actual.Services {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		service := actual.Services[name]
-		if service == nil {
+	for _, clientName := range clientNames {
+		client := clients[clientName]
+		actual, err := actualStateViaTakod(client, cfg, envName)
+		if err != nil {
+			record(checkResult{"WARN", fmt.Sprintf("Cannot read takod actual state on %s: %v", clientName, err), "Run 'tako setup' to install/start takod"})
 			continue
 		}
-		record(checkResult{"PASS", fmt.Sprintf("  %s: %d replica(s)", name, service.Replicas), ""})
+		if len(actual.Services) == 0 {
+			record(checkResult{"WARN", fmt.Sprintf("No running services found on %s", clientName), "Run 'tako deploy' to start services"})
+			continue
+		}
+
+		totalNodes++
+		totalServices += len(actual.Services)
+		nodeReplicas := 0
+		for _, service := range actual.Services {
+			if service != nil {
+				nodeReplicas += service.Replicas
+			}
+		}
+		totalReplicas += nodeReplicas
+		record(checkResult{"PASS", fmt.Sprintf("takod services on %s: %d service(s), %d replica(s)", clientName, len(actual.Services), nodeReplicas), ""})
+		names := make([]string, 0, len(actual.Services))
+		for name := range actual.Services {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			service := actual.Services[name]
+			if service == nil {
+				continue
+			}
+			record(checkResult{"PASS", fmt.Sprintf("  %s: %d replica(s)", name, service.Replicas), ""})
+		}
+	}
+	if totalNodes > 1 {
+		record(checkResult{"PASS", fmt.Sprintf("takod mesh services: %d node(s), %d node-local service(s), %d replica(s)", totalNodes, totalServices, totalReplicas), ""})
 	}
 }

@@ -216,14 +216,14 @@ tako state status -e production
 tako deploy -e production
 ```
 
-By default, state commands read from the active environment's primary node. Use
-`--server <name>` to read from another environment node when recovering from a
-machine change or a primary-node outage. When nodes disagree or the primary
-state copy was lost, run `tako state repair -e production`; it reads all
-reachable environment nodes, writes the freshest deployment history, desired
-revision, aggregate actual snapshot, and node-local actual snapshots back to the
-reachable mesh, and refreshes local `.tako` state when deployment history is
-available.
+By default, state commands read all configured environment nodes and select the
+freshest deployment history, desired revision, aggregate actual snapshot, and
+node-local actual snapshots they can reach. Use `--server <name>` only for
+focused one-node debugging. When nodes disagree or a state copy was lost, run
+`tako state repair -e production`; it writes the freshest deployment history,
+desired revision, aggregate actual snapshot, and node-local actual snapshots
+back to the reachable mesh, and refreshes local `.tako` state when deployment
+history is available.
 
 ## CI/CD
 
