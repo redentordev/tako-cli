@@ -2,11 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -19,7 +19,7 @@ var (
 var historyCmd = &cobra.Command{
 	Use:   "history",
 	Short: "View deployment history",
-	Long: `View deployment history stored on the server.
+	Long: `View deployment history stored in the takod mesh.
 
 This shows all past deployments with their status, timestamp, and services.
 You can view details and rollback to any previous deployment.`,
@@ -28,7 +28,7 @@ You can view details and rollback to any previous deployment.`,
 
 func init() {
 	rootCmd.AddCommand(historyCmd)
-	historyCmd.Flags().StringVarP(&historyServer, "server", "s", "", "Server to view history from (default: first server)")
+	historyCmd.Flags().StringVarP(&historyServer, "server", "s", "", "Server to view history from instead of the full mesh")
 	historyCmd.Flags().IntVarP(&historyLimit, "limit", "n", 10, "Number of deployments to show")
 	historyCmd.Flags().StringVar(&historyStatus, "status", "", "Filter by status (success, failed, rolled_back)")
 }
@@ -41,64 +41,24 @@ func runHistory(cmd *cobra.Command, args []string) error {
 	}
 	envName := getEnvironmentName(cfg)
 
-	// Get server config - default to first server if not specified
-	if historyServer == "" {
-		for name := range cfg.Servers {
-			historyServer = name
-			break
-		}
-	}
-
-	server, exists := cfg.Servers[historyServer]
-	if !exists {
-		return fmt.Errorf("server %s not found in configuration", historyServer)
-	}
-
-	// Create SSH client (supports both key and password auth)
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     server.Host,
-		Port:     server.Port,
-		User:     server.User,
-		SSHKey:   server.SSHKey,
-		Password: server.Password,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
-	}
-	defer client.Close()
-
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
-	}
-
-	// Create state manager
-	stateManager := state.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
-
-	// List deployments
 	opts := &state.HistoryOptions{
 		Limit:         historyLimit,
 		IncludeFailed: true,
 	}
-
 	if historyStatus != "" {
 		opts.Status = state.DeploymentStatus(historyStatus)
 	}
 
-	deployments, err := stateManager.ListDeployments(opts)
-	if (err != nil || len(deployments) == 0) && cfg.IsMultiServer() {
-		// Try recovering from mesh peers
-		replicaPool := ssh.NewPool()
-		defer replicaPool.CloseAll()
-		replicator := state.NewStateReplicator(replicaPool, cfg, envName, cfg.Project.Name, verbose)
-		if history, source, _ := replicator.RecoverStateFromPeers(); history != nil && len(history.Deployments) > 0 {
-			fmt.Printf("(State recovered from node: %s)\n\n", source)
-			deployments = history.Deployments
-			err = nil
-		}
-	}
+	histories, err := collectStateDeploymentHistories(cfg, envName, historyServer, false)
 	if err != nil {
 		return fmt.Errorf("failed to load deployment history: %w", err)
 	}
+	best, ok := bestDeploymentHistory(histories)
+	if !ok {
+		fmt.Println("No deployments found")
+		return nil
+	}
+	deployments := listDeploymentsFromHistory(best.history, opts)
 
 	if len(deployments) == 0 {
 		fmt.Println("No deployments found")
@@ -106,7 +66,7 @@ func runHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	// Display deployments
-	fmt.Printf("\n📋 Deployment History for %s on %s\n\n", cfg.Project.Name, historyServer)
+	fmt.Printf("\nDeployment History for %s from %s\n\n", cfg.Project.Name, best.source)
 	fmt.Println(strings.Repeat("─", 120))
 	fmt.Printf("%-12s %-10s %-20s %-10s %-10s %-15s %-40s\n", "ID", "COMMIT", "TIMESTAMP", "VERSION", "STATUS", "DURATION", "MESSAGE")
 	fmt.Println(strings.Repeat("─", 120))
@@ -158,6 +118,45 @@ func runHistory(cmd *cobra.Command, args []string) error {
 	fmt.Printf("To view detailed logs: tako logs show <deployment-id> (coming soon)\n\n")
 
 	return nil
+}
+
+func listDeploymentsFromHistory(history *state.DeploymentHistory, opts *state.HistoryOptions) []*state.DeploymentState {
+	if history == nil {
+		return nil
+	}
+	if opts == nil {
+		opts = &state.HistoryOptions{Limit: 10, IncludeFailed: true}
+	}
+
+	var result []*state.DeploymentState
+	for _, dep := range history.Deployments {
+		if dep == nil {
+			continue
+		}
+		if opts.Status != "" && dep.Status != opts.Status {
+			continue
+		}
+		if opts.Service != "" {
+			if _, exists := dep.Services[opts.Service]; !exists {
+				continue
+			}
+		}
+		if !opts.Since.IsZero() && dep.Timestamp.Before(opts.Since) {
+			continue
+		}
+		if !opts.IncludeFailed && dep.Status == state.StatusFailed {
+			continue
+		}
+		result = append(result, dep)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Timestamp.After(result[j].Timestamp)
+	})
+	if opts.Limit > 0 && len(result) > opts.Limit {
+		result = result[:opts.Limit]
+	}
+	return result
 }
 
 func formatStatus(status state.DeploymentStatus) string {
