@@ -315,62 +315,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Print(plan.FormatPlan())
 
-	// Detect drift (manual changes) in running services
-	var driftWarnings []string
-	for serviceName, actual := range actualState {
-		if svc, exists := services[serviceName]; exists {
-			fullServiceName := fmt.Sprintf("%s_%s_%s", cfg.Project.Name, envName, serviceName)
-			details, err := reconcile.GatherActualServiceDetails(firstClient, fullServiceName)
-			if err == nil {
-				drifts := reconcile.DetectDrift(details, &svc)
-				for _, drift := range drifts {
-					if drift.IsManual {
-						var msg string
-						switch drift.Field {
-						case "env":
-							if drift.DesiredValue == "" {
-								msg = fmt.Sprintf("  %s: env %s (manually added, will be removed)", serviceName, drift.Key)
-							} else {
-								msg = fmt.Sprintf("  %s: env %s (manually changed, will be overwritten)", serviceName, drift.Key)
-							}
-						case "volume":
-							msg = fmt.Sprintf("  %s: volume %s (manually added, will be removed)", serviceName, drift.Key)
-						case "label":
-							msg = fmt.Sprintf("  %s: label %s (manually added, will be removed)", serviceName, drift.Key)
-						case "replicas":
-							msg = fmt.Sprintf("  %s: replicas %s → %s (manually changed, will be overwritten)", serviceName, drift.ActualValue, drift.DesiredValue)
-						}
-						if msg != "" {
-							driftWarnings = append(driftWarnings, msg)
-						}
-					}
-				}
-			}
-			_ = actual // Silence unused warning
-		}
-	}
-
-	// Show drift warnings
-	if len(driftWarnings) > 0 {
-		fmt.Println("\n⚠ Manual changes detected - will be overwritten:")
-		for _, warning := range driftWarnings {
-			fmt.Println(warning)
-		}
-		fmt.Println()
-
-		// In non-interactive mode, just warn and proceed
-		if !deployYes && !isNonInteractive() {
-			fmt.Printf("Proceed with deployment? (y/N): ")
-			var response string
-			fmt.Scanln(&response)
-			if response != "y" && response != "Y" && response != "yes" {
-				fmt.Println("Deployment cancelled")
-				return nil
-			}
-		} else {
-			fmt.Println("(Non-interactive mode: proceeding with deployment)")
-		}
-	} else if plan.NeedsConfirmation() && !deployYes && !isNonInteractive() {
+	if plan.NeedsConfirmation() && !deployYes && !isNonInteractive() {
 		// Ask for confirmation if there are destructive changes
 		fmt.Printf("\nProceed with deployment? (y/N): ")
 		var response string
