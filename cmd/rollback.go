@@ -210,9 +210,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	// Mark this deployment as rolled back in history
 	targetDeployment.Status = remotestate.StatusRolledBack
 	if err := stateManager.SaveDeployment(targetDeployment); err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to update deployment status: %v\n", err)
-		}
+		return rollbackRemoteHistoryError(err)
 	}
 
 	desiredServices := cloneServiceMap(services)
@@ -315,6 +313,10 @@ func deploymentFromHistory(history *remotestate.DeploymentHistory, deploymentID 
 		}
 	}
 	return nil, fmt.Errorf("deployment %s not found", deploymentID)
+}
+
+func rollbackRemoteHistoryError(err error) error {
+	return fmt.Errorf("rollback succeeded but failed to update remote deployment history: %w", err)
 }
 
 func latestSuccessfulDeploymentFromHistory(history *remotestate.DeploymentHistory) (*remotestate.DeploymentState, error) {
