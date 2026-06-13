@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"sort"
@@ -315,12 +316,9 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		}
 	}
 
-	envFilePath, cleanupEnv, err := d.uploadTakodEnvFile(client, serviceName, service)
+	envFileContent, err := d.buildTakodEnvFileContent(service)
 	if err != nil {
 		return err
-	}
-	if cleanupEnv != nil {
-		defer cleanupEnv()
 	}
 
 	mounts, err := d.buildTakodMountSpecs(serviceName, service)
@@ -329,18 +327,18 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 	}
 
 	request := takod.ReconcileServiceRequest{
-		Project:      d.config.Project.Name,
-		Environment:  d.environment,
-		Service:      serviceName,
-		Image:        imageRef,
-		PullImage:    service.Image != "",
-		Restart:      service.Restart,
-		Network:      networkName,
-		NetworkAlias: serviceName,
-		EnvFile:      envFilePath,
-		Mounts:       mounts,
-		Health:       d.buildTakodHealthSpec(service),
-		Command:      service.Command,
+		Project:        d.config.Project.Name,
+		Environment:    d.environment,
+		Service:        serviceName,
+		Image:          imageRef,
+		PullImage:      service.Image != "",
+		Restart:        service.Restart,
+		Network:        networkName,
+		NetworkAlias:   serviceName,
+		EnvFileContent: envFileContent,
+		Mounts:         mounts,
+		Health:         d.buildTakodHealthSpec(service),
+		Command:        service.Command,
 	}
 	for _, slot := range slots {
 		containerName := d.takodContainerName(serviceName, slot)
@@ -462,36 +460,31 @@ func (d *Deployer) ensureTakodProxy(client *ssh.Client, networkName string, emai
 	return nil
 }
 
-func (d *Deployer) uploadTakodEnvFile(client *ssh.Client, serviceName string, service *config.ServiceConfig) (string, func(), error) {
+func (d *Deployer) buildTakodEnvFileContent(service *config.ServiceConfig) (string, error) {
 	hasEnvVars := len(service.Env) > 0 || len(service.Secrets) > 0 || service.EnvFile != ""
 	if !hasEnvVars {
-		return "", nil, nil
+		return "", nil
 	}
 
 	secretsMgr, err := secrets.NewManager(d.environment)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to create secrets manager: %w", err)
+		return "", fmt.Errorf("failed to create secrets manager: %w", err)
 	}
 	envFile, err := secretsMgr.CreateEnvFile(service)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to create env file: %w", err)
+		return "", fmt.Errorf("failed to create env file: %w", err)
 	}
 
-	envFilePath := envFile.GetPath(d.config.Project.Name, serviceName)
-	if err := client.UploadReader(envFile.ToReader(), envFilePath, 0600); err != nil {
-		return "", nil, fmt.Errorf("failed to upload env file: %w", err)
+	data, err := io.ReadAll(envFile.ToReader())
+	if err != nil {
+		return "", fmt.Errorf("failed to read env file: %w", err)
 	}
 
 	if d.verbose {
 		fmt.Printf("  ✓ Env file created with %d variables\n", envFile.Count())
 	}
 
-	cleanup := func() {
-		if _, err := client.Execute("rm -f " + shellQuote(envFilePath)); err != nil && d.verbose {
-			fmt.Printf("  Warning: failed to cleanup env file: %v\n", err)
-		}
-	}
-	return envFilePath, cleanup, nil
+	return string(data), nil
 }
 
 func (d *Deployer) planTakodAssignments(service *config.ServiceConfig) ([]takodAssignment, error) {
