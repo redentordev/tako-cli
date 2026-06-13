@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -656,7 +657,7 @@ func SaveConfig(configPath string, cfg *Config) error {
 		}
 	}
 
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := fileutil.WriteFileAtomic(configPath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 

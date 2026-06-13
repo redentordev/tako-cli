@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 )
 
 // Manager handles local state persistence in .tako directory
@@ -160,7 +162,7 @@ func NewManager(projectPath, projectName, environment string) (*Manager, error) 
 *
 !.gitignore
 `
-		if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
+		if err := fileutil.WriteFileAtomic(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
 			return nil, fmt.Errorf("failed to create .gitignore: %w", err)
 		}
 	}
@@ -570,21 +572,7 @@ func (m *Manager) saveJSON(path string, data interface{}) error {
 		return err
 	}
 
-	// Use atomic write: write to temp file, then rename
-	// This prevents corruption if the process crashes mid-write
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, bytes, 0644); err != nil {
-		return err
-	}
-
-	// Rename is atomic on POSIX systems
-	if err := os.Rename(tmpPath, path); err != nil {
-		// Clean up temp file on failure
-		os.Remove(tmpPath)
-		return err
-	}
-
-	return nil
+	return fileutil.WriteFileAtomic(path, bytes, 0644)
 }
 
 func (m *Manager) loadJSON(path string, target interface{}) error {

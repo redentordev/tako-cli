@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 )
 
@@ -200,7 +201,7 @@ func (localWireGuardRunner) ReadFile(path string) ([]byte, error) {
 }
 
 func (localWireGuardRunner) WriteFile(path string, data []byte, mode os.FileMode) error {
-	return os.WriteFile(path, data, mode)
+	return fileutil.WriteFileAtomic(path, data, mode)
 }
 
 func (localWireGuardRunner) MkdirAll(path string, mode os.FileMode) error {

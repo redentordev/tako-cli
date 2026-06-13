@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -305,7 +306,7 @@ func (d *Detector) SaveState(path string) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return fileutil.WriteFileAtomic(path, data, 0644)
 }
 
 // ActualService represents a running service

@@ -13,6 +13,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/crypto"
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 )
 
 type Manager struct {
@@ -48,7 +49,7 @@ secrets*
 state/
 audit.log
 `
-		if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
+		if err := fileutil.WriteFileAtomic(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
 			return nil, fmt.Errorf("failed to create .gitignore: %w", err)
 		}
 	}

@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 )
 
 const (
@@ -225,13 +227,13 @@ func ShouldCheckForUpdate() bool {
 	info, err := os.Stat(lastCheckFile)
 	if err != nil {
 		// File doesn't exist, create it and return true
-		os.WriteFile(lastCheckFile, []byte(time.Now().Format(time.RFC3339)), 0644)
+		_ = fileutil.WriteFileAtomic(lastCheckFile, []byte(time.Now().Format(time.RFC3339)), 0644)
 		return true
 	}
 
 	// Check if 24 hours have passed
 	if time.Since(info.ModTime()) > checkInterval {
-		os.WriteFile(lastCheckFile, []byte(time.Now().Format(time.RFC3339)), 0644)
+		_ = fileutil.WriteFileAtomic(lastCheckFile, []byte(time.Now().Format(time.RFC3339)), 0644)
 		return true
 	}
 
