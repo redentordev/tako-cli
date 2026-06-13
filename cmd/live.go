@@ -105,13 +105,17 @@ func runLive(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to remove maintenance container: %w", err)
 	}
 
+	// Remove file-provider override from tako-proxy.
+	proxyConfigPath := maintenanceProxyConfigPath(cfg.Project.Name, envName, liveService)
+	client.Execute(fmt.Sprintf("sudo rm -f %s", maintenanceShellQuote(proxyConfigPath)))
+
 	// Remove maintenance directory
 	maintenanceDir := fmt.Sprintf("/opt/%s/maintenance", cfg.Project.Name)
-	client.Execute(fmt.Sprintf("sudo rm -rf %s", maintenanceDir))
+	client.Execute(fmt.Sprintf("sudo rm -rf %s", maintenanceShellQuote(maintenanceDir)))
 
 	fmt.Printf("✓ Maintenance mode disabled for %s\n", liveService)
 	fmt.Printf("\nService is now accepting normal traffic.\n")
-	fmt.Printf("tako-proxy has automatically updated routing.\n")
+	fmt.Printf("tako-proxy has removed the maintenance routing override.\n")
 
 	return nil
 }
