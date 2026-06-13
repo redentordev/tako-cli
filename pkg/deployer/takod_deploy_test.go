@@ -117,6 +117,32 @@ func TestRunTakodNodeActionsAggregatesSortedErrors(t *testing.T) {
 	}
 }
 
+func TestBuildTakodHealthCommandQuotesURL(t *testing.T) {
+	got := buildTakodHealthCommand(8080, "/health; touch /tmp/pwned")
+	want := "curl -sf -- 'http://127.0.0.1:8080/health; touch /tmp/pwned' || exit 1"
+	if got != want {
+		t.Fatalf("health command = %q, want %q", got, want)
+	}
+}
+
+func TestBuildTakodHealthSpecUsesQuotedCommand(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
+		Port: 8080,
+		HealthCheck: config.HealthCheckConfig{
+			Path: "/ready?token=a'b",
+		},
+	})
+	if spec == nil {
+		t.Fatal("buildTakodHealthSpec returned nil")
+	}
+
+	want := "curl -sf -- 'http://127.0.0.1:8080/ready?token=a'\"'\"'b' || exit 1"
+	if spec.Command != want {
+		t.Fatalf("health command = %q, want %q", spec.Command, want)
+	}
+}
+
 func waitForTakodDeployStarts(t *testing.T, started <-chan string, count int) {
 	t.Helper()
 	seen := map[string]bool{}
