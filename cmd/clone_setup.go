@@ -205,8 +205,14 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 				fmt.Print("  Pull and decrypt environment files? [Y/n] ")
 				input, _ := reader.ReadString('\n')
 				if answer := strings.TrimSpace(input); answer == "" || strings.ToLower(answer) == "y" {
-					fmt.Println("  Run: tako env pull")
-					fmt.Println("  (Requires the passphrase used during 'tako env push')")
+					restored, skipped, err := restoreDownloadedEnvBundle(&response, false)
+					if err != nil {
+						warn(fmt.Sprintf("Environment pull failed: %v", err))
+					} else if skipped {
+						warn("Environment files already exist; run 'tako env pull --force' to overwrite")
+					} else {
+						pass(fmt.Sprintf("Restored %d environment file(s) from %s", restored, bundleSource))
+					}
 				}
 			}
 		} else {
