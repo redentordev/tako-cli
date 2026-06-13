@@ -26,7 +26,6 @@ var (
 	deployServer  string
 	deployService string
 	skipBuild     bool
-	skipHooks     bool
 	deployYes     bool
 	commitMessage string
 )
@@ -37,14 +36,10 @@ var deployCmd = &cobra.Command{
 	Long: `Deploy your application by reconciling desired services on the takod mesh.
 
 The deployment process:
-  1. Run pre-deploy hooks (tests, builds)
-  2. Build Docker image
-  3. Push image to registry
-  4. Prepare selected takod nodes
-  5. Run health checks
-  6. Recreate service containers to match desired state
-  7. Replicate deployment state
-  8. Run post-deploy hooks
+  1. Build Docker image through takod
+  2. Prepare selected takod nodes
+  3. Recreate service containers to match desired state
+  4. Replicate deployment state
 
 If a step fails, deployment stops and records the failed state for inspection or rollback.`,
 	RunE: runDeploy,
@@ -55,7 +50,6 @@ func init() {
 	deployCmd.Flags().StringVarP(&deployServer, "server", "s", "", "Deploy to specific server")
 	deployCmd.Flags().StringVar(&deployService, "service", "", "Deploy specific service")
 	deployCmd.Flags().BoolVar(&skipBuild, "skip-build", false, "Skip building Docker image")
-	deployCmd.Flags().BoolVar(&skipHooks, "skip-hooks", false, "Skip pre/post deploy hooks")
 	deployCmd.Flags().BoolVarP(&deployYes, "yes", "y", false, "Skip confirmation prompts (non-interactive mode)")
 	deployCmd.Flags().StringVarP(&commitMessage, "message", "m", "", "Commit message for uncommitted changes")
 }
@@ -670,7 +664,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n✓ takod deployment completed!\n")
 
-	// Automatic cleanup after successful deployment (per-service hooks now handled by deployer)
+	// Automatic cleanup after successful deployment.
 	if verbose {
 		fmt.Printf("\n→ Running automatic cleanup...\n")
 	}

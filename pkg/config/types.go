@@ -179,9 +179,6 @@ type ServiceConfig struct {
 	// Deployment strategy
 	Deploy DeployConfig `yaml:"deploy,omitempty" json:"deploy,omitempty"`
 
-	// Per-service hooks
-	Hooks *HooksConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
-
 	// Per-service backup
 	Backup *BackupConfig `yaml:"backup,omitempty" json:"backup,omitempty"`
 
@@ -277,15 +274,6 @@ type TLSConfig struct {
 type BackupConfig struct {
 	Schedule string `yaml:"schedule" json:"schedule"` // cron format (e.g., "0 2 * * *")
 	Retain   int    `yaml:"retain" json:"retain"`     // days to retain backups
-}
-
-// HooksConfig defines per-service pre/post deployment hooks
-type HooksConfig struct {
-	PreBuild   []string `yaml:"preBuild,omitempty" json:"preBuild,omitempty"`     // Before building Docker image
-	PostBuild  []string `yaml:"postBuild,omitempty" json:"postBuild,omitempty"`   // After building Docker image
-	PreDeploy  []string `yaml:"preDeploy,omitempty" json:"preDeploy,omitempty"`   // Before deploying service
-	PostDeploy []string `yaml:"postDeploy,omitempty" json:"postDeploy,omitempty"` // After deploying service
-	PostStart  []string `yaml:"postStart,omitempty" json:"postStart,omitempty"`   // After service is running (can use docker exec)
 }
 
 // MonitoringConfig defines per-service monitoring settings

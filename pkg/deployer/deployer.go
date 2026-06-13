@@ -14,7 +14,6 @@ import (
 
 	"github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/hooks"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -231,20 +230,8 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 
 // BuildImage builds a Docker image for a service without deploying it
 func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig) (string, error) {
-	deployDir := fmt.Sprintf("/opt/%s", d.config.Project.Name)
-
 	// Get full image name from config with environment
 	fullImageName := d.config.GetFullImageName(serviceName, d.environment)
-
-	// Create hook executor
-	hookExecutor := hooks.NewExecutor(d.client, d.config.Project.Name, d.environment, serviceName, d.verbose)
-
-	// Execute pre-build hooks
-	if service.Hooks != nil && len(service.Hooks.PreBuild) > 0 {
-		if err := hookExecutor.ExecutePreBuild(service.Hooks.PreBuild, deployDir); err != nil {
-			return "", fmt.Errorf("pre-build hooks failed: %w", err)
-		}
-	}
 
 	if service.Build != "" {
 		// Use service.Build as the build context path
@@ -349,12 +336,6 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 			fmt.Printf("  ✓ Image built and verified: %s\n", fullImageName)
 		}
 
-		// Execute post-build hooks
-		if service.Hooks != nil && len(service.Hooks.PostBuild) > 0 {
-			if err := hookExecutor.ExecutePostBuild(service.Hooks.PostBuild, fullImageName); err != nil {
-				return "", fmt.Errorf("post-build hooks failed: %w", err)
-			}
-		}
 	} else if service.Image != "" {
 		// Service uses pre-built image (e.g., postgres, redis)
 		if d.verbose {

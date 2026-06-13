@@ -417,42 +417,6 @@
                     }
                   }
                 },
-                "hooks": {
-                  "type": "object",
-                  "description": "Lifecycle hooks",
-                  "properties": {
-                    "preBuild": {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    },
-                    "postBuild": {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    },
-                    "preDeploy": {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    },
-                    "postDeploy": {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    },
-                    "postStart": {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    }
-                  }
-                },
                 "deploy": {
                   "type": "object",
                   "description": "Deployment strategy for takod reconciliation",

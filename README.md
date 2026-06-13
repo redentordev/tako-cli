@@ -237,7 +237,7 @@ environments:
 The template includes commented examples for:
 - Database services (PostgreSQL, Redis)
 - Background workers
-- Health checks and lifecycle hooks
+- Health checks
 - Secrets management
 - Multi-server deployments
 - And more!
@@ -276,7 +276,6 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Domain Redirects** - Automatic www → non-www (or vice versa) with path preservation
 - **Health Checks** - Ensure containers are healthy after reconciliation
 - **Secrets Management** - Secure handling of environment secrets with automatic redaction
-- **Lifecycle Hooks** - Automate tasks at build, deploy, and start phases (migrations, cache warming, etc.)
 - **Volume Backup/Restore** - Backup and restore Docker volumes with `tako backup`
 - **Drift Detection** - Detect configuration drift with `tako drift`
 
@@ -613,74 +612,6 @@ tako secrets list --env production
 # Deploy with secrets
 tako deploy --env production
 ```
-
-### Lifecycle Hooks
-
-Automate tasks at different deployment phases - perfect for migrations, cache warming, or notifications:
-
-```yaml
-services:
-  api:
-    build: .
-    port: 3000
-    hooks:
-      preBuild:
-        - "npm run generate-types"      # Run before building
-      postBuild:
-        - "docker scan {{IMAGE}}"        # Security scan after build
-      preDeploy:
-        - "curl https://api.slack.com/..." # Notify team
-      postDeploy:
-        - "echo 'Deployed successfully!'"
-      postStart:
-        - "exec: npm run migrate"        # Run migrations inside container
-        - "exec: npm run seed"           # Seed database
-```
-
-**Hook Types:**
-
-1. **Shell Commands** - Run on the server
-   ```yaml
-   - "echo 'Starting deployment'"
-   - "curl -X POST https://webhook.com/notify"
-   ```
-
-2. **Container Commands** - Run inside the container (use `exec:` prefix)
-   ```yaml
-   - "exec: npm run migrate"
-   - "exec: php artisan cache:clear"
-   - "exec: python manage.py migrate"
-   ```
-
-**Available Lifecycle Phases:**
-
-- `preBuild` - Before building Docker image
-- `postBuild` - After building Docker image (use `{{IMAGE}}` placeholder)
-- `preDeploy` - Before deploying service
-- `postDeploy` - After deploying service
-- `postStart` - After service is running (best for migrations)
-
-**Common Use Cases:**
-
-```yaml
-# Database migrations
-postStart:
-  - "exec: npm run migrate"
-
-# Cache warming
-postStart:
-  - "exec: php artisan cache:warm"
-
-# Deployment notifications
-postDeploy:
-  - "curl -X POST https://hooks.slack.com/... -d 'Deployed!'"
-
-# Security scanning
-postBuild:
-  - "docker scan {{IMAGE}}"
-```
-
-See the [Plausible example](./examples/18-plausible) for a real-world use case.
 
 ### Domain Redirects (www → non-www)
 
