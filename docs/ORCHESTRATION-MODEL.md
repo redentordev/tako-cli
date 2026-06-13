@@ -28,7 +28,7 @@ Git repo
      v
 +-----------------------------+
 | tako CLI                    |
-| plan deploy logs exec state |
+| deploy logs state scale     |
 +--------------+--------------+
                |
                v

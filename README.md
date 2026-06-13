@@ -328,7 +328,6 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako start` | Start stopped services (scales to configured replicas) |
 | `tako stop` | Stop running services (scales to 0) |
 | `tako scale` | Scale service replicas |
-| `tako exec` | Execute commands on remote server(s) or inside containers |
 
 ### Backup & Recovery
 
