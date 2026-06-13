@@ -249,7 +249,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	firstServerName := serverNames[0]
 	firstServer := servers[firstServerName]
 
-	// Get or create SSH client for first server
+	// Use one target node as the build/source node; runtime state is still
+	// persisted and reconciled across all selected nodes.
 	firstClient, err := sshPool.GetOrCreateWithAuth(firstServer.Host, firstServer.Port, firstServer.User, firstServer.SSHKey, firstServer.Password)
 	if err != nil {
 		return fmt.Errorf("failed to connect to server %s: %w", firstServerName, err)

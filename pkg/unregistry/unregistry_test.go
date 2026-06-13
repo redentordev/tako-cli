@@ -71,3 +71,33 @@ func TestBuildTakodImageStreamCommandUsesTakodEndpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestUnregistryPeerServersExcludeSourceHost(t *testing.T) {
+	cfg := &config.Config{
+		Servers: map[string]config.ServerConfig{
+			"node-a": {Host: "10.0.0.1"},
+			"node-b": {Host: "10.0.0.2"},
+			"node-c": {Host: "10.0.0.3"},
+		},
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Servers: []string{"node-a", "node-b", "node-c"},
+			},
+		},
+	}
+
+	peers, err := unregistryPeerServers(cfg, "production", "10.0.0.2")
+	if err != nil {
+		t.Fatalf("unregistryPeerServers returned error: %v", err)
+	}
+
+	want := []string{"node-a", "node-c"}
+	if len(peers) != len(want) {
+		t.Fatalf("peers = %v, want %v", peers, want)
+	}
+	for i := range want {
+		if peers[i] != want[i] {
+			t.Fatalf("peers = %v, want %v", peers, want)
+		}
+	}
+}

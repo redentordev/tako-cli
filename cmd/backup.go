@@ -19,6 +19,7 @@ var (
 	backupRestore string
 	backupDelete  string
 	backupCleanup int
+	backupServer  string
 )
 
 var backupCmd = &cobra.Command{
@@ -29,6 +30,9 @@ var backupCmd = &cobra.Command{
 Examples:
   # Backup a specific volume
   tako backup --volume data
+
+  # Backup a specific node's volume
+  tako backup --server node-a --volume data
 
   # Backup all volumes
   tako backup --all
@@ -53,6 +57,7 @@ func init() {
 	backupCmd.Flags().StringVar(&backupRestore, "restore", "", "Backup ID to restore from")
 	backupCmd.Flags().StringVar(&backupDelete, "delete", "", "Backup ID to delete")
 	backupCmd.Flags().IntVar(&backupCleanup, "cleanup", 0, "Delete backups older than N days")
+	backupCmd.Flags().StringVarP(&backupServer, "server", "s", "", "Node to run the backup operation on")
 }
 
 func runBackup(cmd *cobra.Command, args []string) error {
@@ -63,29 +68,30 @@ func runBackup(cmd *cobra.Command, args []string) error {
 
 	envName := getEnvironmentName(cfg)
 
-	// Get primary node
-	primaryName, err := cfg.GetPrimaryServer(envName)
+	serverName, serverCfg, err := resolveServer(cfg, envName, backupServer)
 	if err != nil {
-		return fmt.Errorf("failed to get primary node: %w", err)
+		return err
 	}
-
-	primaryCfg := cfg.Servers[primaryName]
 
 	// Connect to server
 	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     primaryCfg.Host,
-		Port:     primaryCfg.Port,
-		User:     primaryCfg.User,
-		SSHKey:   primaryCfg.SSHKey,
-		Password: primaryCfg.Password,
+		Host:     serverCfg.Host,
+		Port:     serverCfg.Port,
+		User:     serverCfg.User,
+		SSHKey:   serverCfg.SSHKey,
+		Password: serverCfg.Password,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create SSH client: %w", err)
 	}
 	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
+		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 	}
 	defer client.Close()
+
+	if verbose {
+		fmt.Printf("Using node: %s (%s)\n", serverName, serverCfg.Host)
+	}
 
 	// Handle different operations
 	switch {

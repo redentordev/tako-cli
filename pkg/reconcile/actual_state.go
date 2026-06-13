@@ -14,7 +14,7 @@ import (
 )
 
 // GatherActualStateFromServers collects takod container state from every
-// selected node and aggregates replicas by service.
+// requested node and aggregates replicas by service.
 func GatherActualStateFromServers(
 	sshPool *ssh.Pool,
 	cfg *config.Config,
