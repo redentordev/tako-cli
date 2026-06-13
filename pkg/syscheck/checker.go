@@ -55,13 +55,6 @@ func (s *SystemChecker) CheckAll() *CheckResult {
 			InstallHint: "Install Docker: https://docs.docker.com/get-docker/",
 		},
 		{
-			Name:        "Docker Compose",
-			Command:     "docker",
-			Args:        []string{"compose", "version"},
-			Required:    true,
-			InstallHint: "Docker Compose is included with Docker Desktop",
-		},
-		{
 			Name:        "SSH",
 			Command:     s.getSSHCommand(),
 			Args:        []string{"-V"},
@@ -104,15 +97,6 @@ func (s *SystemChecker) checkRequirement(req Requirement) (bool, string) {
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
-		// Special case for docker compose - try docker-compose as fallback
-		if req.Name == "Docker Compose" {
-			cmd2 := exec.Command("docker-compose", "--version")
-			output2, err2 := cmd2.CombinedOutput()
-			if err2 == nil {
-				version := s.extractVersion(string(output2))
-				return true, version
-			}
-		}
 		return false, ""
 	}
 

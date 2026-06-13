@@ -29,7 +29,7 @@ Visit http://localhost:4321
 tako deploy
 
 # View logs
-tako logs
+tako logs --service web
 
 # Check status
 tako ps

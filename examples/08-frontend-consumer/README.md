@@ -59,17 +59,15 @@ Watch for the import connection message:
 Once deployed, test cross-project communication:
 
 ```bash
-# SSH into server
-ssh root@your-server
-
 # Test frontend health
-docker exec frontend_web_1 wget -qO- http://localhost:3000/health
+curl -fsS https://frontend.yourdomain.com/health
 
 # Test cross-project API call (frontend -> backend)
-docker exec frontend_web_1 wget -qO- http://localhost:3000/users
+curl -fsS https://frontend.yourdomain.com/users
 
-# Verify DNS resolution works
-docker exec frontend_web_1 wget -qO- http://backend-api_api:4000/api/users
+# Check runtime state and logs
+tako ps web
+tako logs --service web --tail 50
 ```
 
 ## Network Topology

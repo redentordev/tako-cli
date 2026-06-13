@@ -100,7 +100,7 @@ Tako automatically:
 tako ps
 
 # View logs
-tako logs
+tako logs --service web
 
 # View HTTP access logs
 tako access
@@ -213,7 +213,7 @@ ls -la ~/.ssh/id_ed25519
 
 ```bash
 # Check logs
-tako logs --verbose
+tako logs --service web --tail 100
 
 # Verify server status
 tako ps
@@ -223,7 +223,7 @@ tako ps
 
 - Make sure your domain's DNS is pointing to your server IP
 - Wait 1-2 minutes for Let's Encrypt to issue certificate
-- Check proxy logs: `ssh root@server "docker logs tako-proxy"`
+- Check access logs with `tako access`
 
 ## Next Steps
 

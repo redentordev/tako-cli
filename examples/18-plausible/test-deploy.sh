@@ -42,7 +42,7 @@ echo "✅ Deployment complete!"
 echo ""
 echo "📋 Next steps:"
 echo "  1. Check status: ../../tako ps --env production"
-echo "  2. View logs: ../../tako logs plausible --env production"
+echo "  2. View logs: ../../tako logs --service plausible --env production"
 echo "  3. Wait 2-3 minutes for databases to initialize"
 echo ""
 SERVER_IP=$(grep SERVER_HOST .env | cut -d= -f2)

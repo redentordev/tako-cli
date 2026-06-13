@@ -91,7 +91,7 @@ See [n8n environment variables documentation](https://docs.n8n.io/hosting/config
 
 ```bash
 # View logs
-tako logs n8n
+tako logs --service n8n
 
 # Stop service
 tako stop
@@ -127,20 +127,14 @@ env:
 To backup your n8n data:
 
 ```bash
-# SSH into server
-ssh root@your-server-ip
-
-# Backup the volume
-docker run --rm -v n8n_production_n8n_data:/data -v $(pwd):/backup \
-  alpine tar czf /backup/n8n-backup-$(date +%Y%m%d).tar.gz -C /data .
+tako backup --volume n8n_data
+tako backup --list
 ```
 
 ## Restore
 
 ```bash
-# Restore from backup
-docker run --rm -v n8n_production_n8n_data:/data -v $(pwd):/backup \
-  alpine tar xzf /backup/n8n-backup-20251114.tar.gz -C /data
+tako backup --volume n8n_data --restore <backup-id>
 ```
 
 ## Key Features of This Example
@@ -191,7 +185,7 @@ tako ps
 
 View logs:
 ```bash
-tako logs n8n
+tako logs --service n8n
 ```
 
 ### SSL certificate issues
@@ -203,16 +197,14 @@ nslookup n8n.<your-ip>.sslip.io
 
 Check proxy logs:
 ```bash
-ssh root@your-server-ip
-docker logs tako-proxy
+tako access --tail 100
 ```
 
 ### Data not persisting
 
-Verify volume exists:
+Verify the configured volume is included in backups:
 ```bash
-ssh root@your-server-ip
-docker volume ls | grep n8n
+tako backup --volume n8n_data --list
 ```
 
 ## Production Recommendations

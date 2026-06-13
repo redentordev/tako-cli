@@ -74,23 +74,12 @@ CREATE TABLE visitors (
 
 ## Testing Locally
 
+Run a local PostgreSQL instance with your preferred local tooling, then start
+the app directly:
+
 ```bash
-# Start PostgreSQL with Docker
-docker run -d \
-  --name postgres \
-  -e POSTGRES_DB=visitor_db \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=dbpassword123 \
-  -p 5432:5432 \
-  postgres:15
-
-# Install dependencies
 npm install
-
-# Set database URL
 export DATABASE_URL=postgresql://postgres:dbpassword123@localhost:5432/visitor_db
-
-# Run the server
 npm start
 
 # Visit http://localhost:3000

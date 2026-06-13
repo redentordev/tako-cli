@@ -1,55 +1,36 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Validation script for 04-monorepo example
+cd "$(dirname "$0")"
 
-echo "Validating 04-monorepo deployment..."
+echo "Validating 04-monorepo deployment through Tako..."
 
-# Check if all containers are running
-echo "Checking if all containers are running..."
-WEB_COUNT=$(ssh -i "$VPS_SSH_KEY" ${VPS_USER:-root}@$VPS_HOST "docker ps --filter name=monorepo_web --format '{{.Names}}' | wc -l")
-API_COUNT=$(ssh -i "$VPS_SSH_KEY" ${VPS_USER:-root}@$VPS_HOST "docker ps --filter name=monorepo_api --format '{{.Names}}' | wc -l")
+command -v tako >/dev/null 2>&1 || {
+  echo "Error: tako CLI is not installed or not in PATH"
+  exit 1
+}
 
-if [ "$WEB_COUNT" -eq "0" ]; then
-    echo "Error: Web container is not running"
+ps_output="$(tako ps)"
+printf '%s\n' "$ps_output"
+
+check_service() {
+  local service="$1"
+  if ! grep -E "^${service}[[:space:]]+1/1[[:space:]].*running" <<<"$ps_output" >/dev/null; then
+    echo "Error: ${service} service is not running at 1/1 replicas"
     exit 1
+  fi
+}
+
+check_service web
+check_service api
+
+echo "Checking recent web and api logs through takod..."
+tako logs --service web --tail 20 >/dev/null
+tako logs --service api --tail 20 >/dev/null
+
+if [ -n "${TAKO_VALIDATE_URL:-}" ]; then
+  echo "Checking public endpoint: $TAKO_VALIDATE_URL"
+  curl -fsS "$TAKO_VALIDATE_URL" >/dev/null
 fi
 
-if [ "$API_COUNT" -eq "0" ]; then
-    echo "Error: API container is not running"
-    exit 1
-fi
-
-echo "✓ Both containers are running (web: 1, api: 1)"
-
-# Check web container logs
-echo "Checking web container logs..."
-WEB_LOGS=$(ssh -i "$VPS_SSH_KEY" ${VPS_USER:-root}@$VPS_HOST "docker logs monorepo_web_1 2>&1 | tail -10")
-
-if [[ "$WEB_LOGS" =~ "Server running" ]] || [[ "$WEB_LOGS" =~ "listening" ]] || [[ "$WEB_LOGS" =~ "started" ]]; then
-    echo "✓ Web container started successfully"
-else
-    echo "Warning: Could not verify web startup from logs"
-fi
-
-# Check API container logs
-echo "Checking API container logs..."
-API_LOGS=$(ssh -i "$VPS_SSH_KEY" ${VPS_USER:-root}@$VPS_HOST "docker logs monorepo_api_1 2>&1 | tail -10")
-
-if [[ "$API_LOGS" =~ "API server running" ]] || [[ "$API_LOGS" =~ "listening" ]] || [[ "$API_LOGS" =~ "started" ]]; then
-    echo "✓ API container started successfully"
-else
-    echo "Warning: Could not verify API startup from logs"
-fi
-
-# Test web can reach API via Docker DNS
-echo "Testing web to API connectivity..."
-WEB_API=$(ssh -i "$VPS_SSH_KEY" ${VPS_USER:-root}@$VPS_HOST "docker exec monorepo_web_1 ping -c 1 api 2>&1" || echo "failed")
-
-if [[ "$WEB_API" =~ "1 packets transmitted, 1 received" ]] || [[ "$WEB_API" =~ "0% packet loss" ]]; then
-    echo "✓ Web can reach API via Docker DNS"
-else
-    echo "Warning: Could not verify web to API connectivity"
-fi
-
-echo "✓ All validations passed for 04-monorepo"
-exit 0
+echo "All validations passed for 04-monorepo"

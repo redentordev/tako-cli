@@ -13,7 +13,7 @@ This example demonstrates deploying **Plausible Analytics** using its official D
 **Common Issues:**
 - **Can't access URL?** → Check [Troubleshooting](#troubleshooting) section below
 - **502/503 errors?** → Databases may not be ready yet (wait 1-2 minutes)
-- **Migration errors?** → Check logs: `tako logs plausible`
+- **Migration errors?** → Check logs: `tako logs --service plausible`
 
 ## What This Demonstrates
 
@@ -22,7 +22,7 @@ This example demonstrates deploying **Plausible Analytics** using its official D
 - ✅ Service dependencies with `depends_on`
 - ✅ Multiple persistent volumes
 - ✅ Environment-based configuration
-- ✅ **Lifecycle hooks** for automated database migrations
+- ✅ Service command runs database setup and migrations before the app starts
 - ✅ Production-ready analytics platform
 
 ## About Plausible
@@ -110,14 +110,14 @@ tako deploy --env production
 tako ps --env production
 
 # 8. View logs (wait for migrations to complete)
-tako logs plausible --env production
+tako logs --service plausible --env production
 ```
 
 The deployment will:
 1. Build and start PostgreSQL database
 2. Build and start ClickHouse database  
 3. Build and start Plausible application
-4. **Run database migrations automatically** (via post-start hook)
+4. **Run database migrations automatically** in the Plausible service command
 5. Configure HTTPS with Let's Encrypt (1-2 minutes for certificate)
 
 ### First Deployment Timeline
@@ -126,71 +126,26 @@ The deployment will:
 0:00 - PostgreSQL starts
 0:10 - ClickHouse starts
 0:20 - Plausible starts
-0:30 - Migrations run (via postStart hook)
+0:30 - Migrations run in the Plausible startup command
 0:45 - SSL certificate issued
 1:00 - ✓ Plausible is ready!
 ```
 
 **Expected:** Wait 1-2 minutes after deployment before accessing the URL.
 
-## Lifecycle Hooks
+## Database Migrations
 
-This example demonstrates Tako's **lifecycle hooks** feature. Plausible requires database migrations to run after deployment. Tako automates this with the `postStart` hook:
+Plausible requires database setup and migrations before it can serve traffic.
+This example runs them in the service command:
 
 ```yaml
-plausible:
-  hooks:
-    postStart:
-      # Runs database migrations inside the container after it starts
-      - "exec: /entrypoint.sh db migrate"
+command: sh -c "sleep 15 && /entrypoint.sh db createdb && /entrypoint.sh db migrate && /entrypoint.sh run"
 ```
 
-### How Hooks Work
+Watch startup progress with:
 
-Tako supports five lifecycle hooks:
-
-1. **preBuild** - Runs before building Docker image
-2. **postBuild** - Runs after building Docker image
-3. **preDeploy** - Runs before deploying service
-4. **postDeploy** - Runs after deploying service
-5. **postStart** - Runs after service is running
-
-### Hook Types
-
-- **Shell commands** - Run on the server: `"echo 'Deploying...!'"`
-- **Container commands** - Run inside the container: `"exec: /entrypoint.sh db migrate"`
-
-### Example Use Cases
-
-**Database Migrations:**
-```yaml
-hooks:
-  postStart:
-    - "exec: npm run migrate"
-    - "exec: npm run seed"
-```
-
-**Cache Warming:**
-```yaml
-hooks:
-  postStart:
-    - "exec: php artisan cache:warm"
-```
-
-**Build-time Tasks:**
-```yaml
-hooks:
-  preBuild:
-    - "npm run generate-types"
-  postBuild:
-    - "docker scan {{IMAGE}}"
-```
-
-**Deployment Notifications:**
-```yaml
-hooks:
-  postDeploy:
-    - "curl -X POST https://hooks.slack.com/... -d 'Deployed!'"
+```bash
+tako logs --service plausible --tail 100
 ```
 
 ## Access Plausible
@@ -261,12 +216,12 @@ See [Plausible self-hosting docs](https://plausible.io/docs/self-hosting-configu
 
 ```bash
 # View logs for all services
-tako logs
+tako logs --service plausible
 
 # View logs for specific service
-tako logs plausible
-tako logs postgres
-tako logs clickhouse
+tako logs --service plausible
+tako logs --service postgres
+tako logs --service clickhouse
 
 # Stop all services
 tako stop
@@ -303,29 +258,19 @@ env:
 
 ## Backup
 
-### Database Backup
+### Data Backup
 
 ```bash
-# SSH into server
-ssh root@your-server-ip
-
-# Backup PostgreSQL
-docker exec -t plausible_production_postgres_0 pg_dump -U plausible plausible_db > plausible-$(date +%Y%m%d).sql
-
-# Backup ClickHouse
-docker run --rm -v plausible_production_clickhouse_data:/data -v $(pwd):/backup \
-  alpine tar czf /backup/clickhouse-backup-$(date +%Y%m%d).tar.gz -C /data .
+tako backup --volume postgres_data
+tako backup --volume clickhouse_data
+tako backup --list
 ```
 
 ## Restore
 
 ```bash
-# Restore PostgreSQL
-cat plausible-20251114.sql | docker exec -i plausible_production_postgres_0 psql -U plausible -d plausible_db
-
-# Restore ClickHouse
-docker run --rm -v plausible_production_clickhouse_data:/data -v $(pwd):/backup \
-  alpine tar xzf /backup/clickhouse-backup-20251114.tar.gz -C /data
+tako backup --volume postgres_data --restore <backup-id>
+tako backup --volume clickhouse_data --restore <backup-id>
 ```
 
 ## Email Configuration (Optional)
@@ -360,9 +305,9 @@ plausible:
 
 Check logs:
 ```bash
-tako logs postgres
-tako logs clickhouse
-tako logs plausible
+tako logs --service postgres
+tako logs --service clickhouse
+tako logs --service plausible
 ```
 
 ### Database connection errors
@@ -376,8 +321,7 @@ tako ps
 
 Check proxy logs:
 ```bash
-ssh root@your-server-ip
-docker logs tako-proxy
+tako access --tail 100
 ```
 
 ## Security

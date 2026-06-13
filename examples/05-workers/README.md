@@ -88,30 +88,9 @@ The system supports three job types:
 
 ## Adding Jobs
 
-**Method 1: Using seed script**
-```bash
-# Copy seed script to server
-scp seed-jobs.js root@your-server:/tmp/
+In production, enqueue jobs from an app service or API that is connected to the
+same internal Redis service:
 
-# Run on server
-ssh root@your-server
-docker run --rm --network tako-workers \
-  -v /tmp/seed-jobs.js:/app/seed-jobs.js \
-  -e REDIS_URL=redis://redis:6379 \
-  node:18-alpine \
-  sh -c "cd /app && npm install redis && node seed-jobs.js"
-```
-
-**Method 2: Using Redis CLI**
-```bash
-# Connect to Redis
-docker exec -it workers-redis redis-cli
-
-# Add a job
-LPUSH jobs '{"id":1,"type":"email","data":{"recipient":"test@example.com"},"createdAt":"2024-01-01T12:00:00.000Z"}'
-```
-
-**Method 3: From your app**
 ```javascript
 const redis = require('redis');
 const client = redis.createClient({ url: 'redis://redis:6379' });
@@ -126,40 +105,23 @@ await client.lPush('jobs', JSON.stringify({
 
 ## Monitoring Workers
 
-**View logs:**
+**View logs through takod:**
 ```bash
-# All workers
-docker logs workers-worker-1
-docker logs workers-worker-2
-docker logs workers-worker-3
-
-# Follow logs
-docker logs -f workers-worker-1
+tako logs --service worker --tail 100
+tako logs --service worker --follow
 ```
 
-**Check stats:**
+**Check service and resource state:**
 ```bash
-docker exec workers-redis redis-cli HGETALL worker:stats
-# Shows jobs processed by each worker
-```
-
-**Check queue:**
-```bash
-docker exec workers-redis redis-cli LLEN jobs
-# Number of pending jobs
-
-docker exec workers-redis redis-cli LLEN completed
-# Number of completed jobs
+tako ps
+tako stats --service worker
 ```
 
 ## Testing Locally
 
-**Terminal 1 - Redis:**
-```bash
-docker run -d --name redis -p 6379:6379 redis:7-alpine
-```
+Use a local Redis instance, then start one or more workers:
 
-**Terminal 2, 3, 4 - Workers:**
+**Worker terminals:**
 ```bash
 npm install
 export REDIS_URL=redis://localhost:6379

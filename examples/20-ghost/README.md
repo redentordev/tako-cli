@@ -125,8 +125,8 @@ See [Ghost configuration docs](https://ghost.org/docs/config/) for all options.
 
 ```bash
 # View logs
-tako logs ghost
-tako logs mysql
+tako logs --service ghost
+tako logs --service mysql
 
 # Stop services
 tako stop
@@ -181,13 +181,7 @@ See [Ghost email docs](https://ghost.org/docs/config/#mail) for more options.
 
 ### Installing Themes
 
-1. SSH into server
-2. Upload theme to Ghost content volume:
-   ```bash
-   ssh root@your-server-ip
-   docker cp mytheme.zip ghost_production_ghost_0:/var/lib/ghost/content/themes/
-   ```
-3. Extract and activate in Ghost admin panel
+Upload and activate themes from the Ghost admin panel.
 
 ### Official Themes
 
@@ -197,26 +191,16 @@ See [Ghost email docs](https://ghost.org/docs/config/#mail) for more options.
 ## Backup
 
 ```bash
-# SSH into server
-ssh root@your-server-ip
-
-# Backup MySQL database
-docker exec -t ghost_production_mysql_0 mysqldump -u ghost -p ghost > ghost-db-$(date +%Y%m%d).sql
-
-# Backup Ghost content (images, themes)
-docker run --rm -v ghost_production_ghost_content:/data -v $(pwd):/backup \
-  alpine tar czf /backup/ghost-content-$(date +%Y%m%d).tar.gz -C /data .
+tako backup --volume mysql_data
+tako backup --volume ghost_content
+tako backup --list
 ```
 
 ## Restore
 
 ```bash
-# Restore MySQL database
-cat ghost-db-20251114.sql | docker exec -i ghost_production_mysql_0 mysql -u ghost -p ghost
-
-# Restore Ghost content
-docker run --rm -v ghost_production_ghost_content:/data -v $(pwd):/backup \
-  alpine tar xzf /backup/ghost-content-20251114.tar.gz -C /data
+tako backup --volume mysql_data --restore <backup-id>
+tako backup --volume ghost_content --restore <backup-id>
 ```
 
 ## Scaling
@@ -253,7 +237,7 @@ tako stop && tako start
 
 Check MySQL logs:
 ```bash
-tako logs mysql
+tako logs --service mysql
 ```
 
 Verify MySQL is running:
@@ -265,7 +249,7 @@ tako ps
 
 1. Ensure Ghost is running: `tako ps`
 2. Try accessing: `https://your-domain/ghost`
-3. Check Ghost logs: `tako logs ghost`
+3. Check Ghost logs: `tako logs --service ghost`
 
 ## Resource Usage
 

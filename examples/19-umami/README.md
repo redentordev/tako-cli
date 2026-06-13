@@ -134,8 +134,8 @@ Get your `website-id` from Umami dashboard after adding your site.
 
 ```bash
 # View logs
-tako logs umami
-tako logs postgres
+tako logs --service umami
+tako logs --service postgres
 
 # Stop services
 tako stop
@@ -161,18 +161,14 @@ proxy:
 ## Backup
 
 ```bash
-# SSH into server
-ssh root@your-server-ip
-
-# Backup PostgreSQL database
-docker exec -t umami_production_postgres_0 pg_dump -U umami umami > umami-backup-$(date +%Y%m%d).sql
+tako backup --volume postgres_data
+tako backup --list
 ```
 
 ## Restore
 
 ```bash
-# Restore PostgreSQL database
-cat umami-backup-20251114.sql | docker exec -i umami_production_postgres_0 psql -U umami -d umami
+tako backup --volume postgres_data --restore <backup-id>
 ```
 
 ## Scaling
@@ -192,12 +188,12 @@ PostgreSQL remains single instance.
 
 Check Umami logs:
 ```bash
-tako logs umami
+tako logs --service umami
 ```
 
 Verify database connection:
 ```bash
-tako logs postgres
+tako logs --service postgres
 ```
 
 ### Analytics not tracking

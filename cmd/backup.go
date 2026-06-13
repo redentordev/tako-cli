@@ -23,8 +23,8 @@ var (
 
 var backupCmd = &cobra.Command{
 	Use:   "backup",
-	Short: "Backup and restore Docker volumes",
-	Long: `Backup and restore Docker volumes for your services.
+	Short: "Backup and restore service volumes",
+	Long: `Backup and restore service volumes.
 
 Examples:
   # Backup a specific volume

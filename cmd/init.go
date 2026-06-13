@@ -42,7 +42,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// Check if Docker daemon is running
 	if dockerRunning, msg := checker.CheckDocker(); !dockerRunning {
 		fmt.Printf("\n⚠️  Warning: %s\n", msg)
-		fmt.Println("Docker is required for local development and building images.")
+		fmt.Println("Docker is required when Tako needs to build images locally.")
 	}
 
 	// Warn if required dependencies are missing

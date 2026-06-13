@@ -22,7 +22,7 @@ const (
 	Image = "joohoi/acme-dns:v1.0"
 )
 
-// Manager handles acme-dns container lifecycle and registrations
+// Manager handles acme-dns runtime reconciliation and registrations.
 type Manager struct {
 	client   *ssh.Client
 	serverIP string

@@ -9,7 +9,7 @@ A full-stack todo application built with Next.js 15, TypeScript, Tailwind CSS, a
 - Tailwind CSS for styling
 - SQLite database with better-sqlite3
 - RESTful API routes
-- Persistent storage with Docker volumes
+- Persistent storage with service volumes
 - Production-ready Dockerfile
 
 ## Project Structure
@@ -80,7 +80,7 @@ The application will be:
 - Built as a Docker image
 - Deployed to your configured server
 - Accessible via `https://nextjs-todos.YOUR.IP.sslip.io` with automatic HTTPS
-- Data persisted in a Docker volume
+- Data persisted in a service volume
 
 **Multiple Apps**: Deploy multiple apps using different subdomains:
 - `nextjs-todos.YOUR.IP.sslip.io` → Todo app
@@ -91,7 +91,7 @@ All apps route through Caddy on ports 80/443, no port numbers needed!
 
 ## Database Persistence
 
-The todo data is stored in SQLite and persisted using Docker volumes:
+The todo data is stored in SQLite and persisted using a Tako-managed service volume:
 - Volume name: `todos_data`
 - Mount path: `/app/data`
 - Database file: `/app/data/todos.db`

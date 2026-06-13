@@ -108,7 +108,7 @@ Should parse and display database connection info without exposing credentials.
 ### ❌ What Should NOT Happen
 
 1. **Secrets exposed in deployment logs**
-2. **Secrets visible in `docker inspect`** (well, they are in env, but not in command)
+2. **Secrets exposed in command arguments or deployment output**
 3. **Secrets committed to git** (`.tako/secrets*` should be gitignored)
 4. **Temp env files left on server**
 
@@ -164,7 +164,7 @@ tako deploy --env production --verbose
 
 ### API returns "NOT_SET"?
 - Verify secrets were uploaded to the server
-- Check container logs: `docker logs tako-secrets-test_production_api_1`
+- Check service logs: `tako logs --service api --tail 50`
 - Ensure the env file was created and loaded
 
 ## Security Notes

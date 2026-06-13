@@ -48,12 +48,13 @@ Then deploy a consumer project (see example 08-frontend-consumer).
 Once deployed, test the API:
 
 ```bash
-# SSH into server
-ssh root@your-server
-
 # Test health check
-docker exec backend-api_api_1 wget -qO- http://localhost:4000/health
+curl -fsS https://api.yourdomain.com/health
 
 # Test users endpoint
-docker exec backend-api_api_1 wget -qO- http://localhost:4000/api/users
+curl -fsS https://api.yourdomain.com/api/users
+
+# Check runtime state and logs
+tako ps api
+tako logs --service api --tail 50
 ```

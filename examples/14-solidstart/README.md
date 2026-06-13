@@ -30,7 +30,7 @@ Visit http://localhost:3000
 tako deploy
 
 # View logs
-tako logs
+tako logs --service web
 
 # Check status
 tako ps
