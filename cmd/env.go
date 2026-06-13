@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -21,6 +22,8 @@ import (
 var envForce bool
 
 const envPassphraseVar = "TAKO_ENV_PASSPHRASE"
+
+var downloadEnvBundleFromServerFunc = downloadEnvBundleFromServer
 
 var envCmd = &cobra.Command{
 	Use:   "env",
@@ -195,10 +198,18 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to parse bundle: %w", err)
 	}
 
+	allowedBundle, allowedPaths, skippedPaths := supportedEnvBundleFiles(bundle)
+	for _, path := range skippedPaths {
+		fmt.Printf("Warning: skipping unsupported bundle path: %s\n", path)
+	}
+	if len(allowedPaths) == 0 {
+		return fmt.Errorf("environment bundle did not contain any supported files")
+	}
+
 	// Check for existing files
 	if !envForce {
 		var existing []string
-		for path := range bundle {
+		for _, path := range allowedPaths {
 			if _, err := os.Stat(path); err == nil {
 				existing = append(existing, path)
 			}
@@ -214,11 +225,9 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 	}
 
 	// Write files
-	for path, encodedContent := range bundle {
-		if !isAllowedEnvBundlePath(path) {
-			fmt.Printf("Warning: skipping unsupported bundle path: %s\n", path)
-			continue
-		}
+	restored := 0
+	for _, path := range allowedPaths {
+		encodedContent := allowedBundle[path]
 		content, err := base64.StdEncoding.DecodeString(encodedContent)
 		if err != nil {
 			fmt.Printf("Warning: failed to decode %s: %v\n", path, err)
@@ -239,10 +248,28 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Printf("Restored: %s\n", path)
+		restored++
 	}
 
-	fmt.Printf("\nRestored %d file(s) from %s\n", len(bundle), source)
+	fmt.Printf("\nRestored %d file(s) from %s\n", restored, source)
 	return nil
+}
+
+func supportedEnvBundleFiles(bundle map[string]string) (map[string]string, []string, []string) {
+	allowed := make(map[string]string, len(bundle))
+	allowedPaths := make([]string, 0, len(bundle))
+	skippedPaths := make([]string, 0)
+	for path, encodedContent := range bundle {
+		if !isAllowedEnvBundlePath(path) {
+			skippedPaths = append(skippedPaths, path)
+			continue
+		}
+		allowed[path] = encodedContent
+		allowedPaths = append(allowedPaths, path)
+	}
+	sort.Strings(allowedPaths)
+	sort.Strings(skippedPaths)
+	return allowed, allowedPaths, skippedPaths
 }
 
 func uploadEnvBundleToServer(cfg *config.Config, serverName string, serverCfg config.ServerConfig, request takod.EnvBundleRequest) error {
@@ -275,7 +302,7 @@ func downloadEnvBundleFromMesh(cfg *config.Config, envName string) (*takod.EnvBu
 	var nodeErrors []string
 	for _, serverName := range serverNames {
 		serverCfg := cfg.Servers[serverName]
-		response, err := downloadEnvBundleFromServer(cfg, envName, serverName, serverCfg)
+		response, err := downloadEnvBundleFromServerFunc(cfg, envName, serverName, serverCfg)
 		if err != nil {
 			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", serverName, err))
 			continue

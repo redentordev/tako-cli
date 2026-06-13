@@ -1,6 +1,12 @@
 package cmd
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+
+	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/takod"
+)
 
 func TestPassphraseFromEnv(t *testing.T) {
 	t.Setenv(envPassphraseVar, "correct horse battery staple")
@@ -46,5 +52,129 @@ func TestIsAllowedEnvBundlePath(t *testing.T) {
 				t.Fatalf("isAllowedEnvBundlePath(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSupportedEnvBundleFilesFiltersAndSortsPaths(t *testing.T) {
+	allowed, paths, skipped := supportedEnvBundleFiles(map[string]string{
+		".tako/secrets.production": "prod",
+		"../.env":                  "escape",
+		".env":                     "env",
+		".tako/known_hosts":        "known-hosts",
+	})
+
+	wantPaths := []string{".env", ".tako/secrets.production"}
+	if len(paths) != len(wantPaths) {
+		t.Fatalf("paths = %v, want %v", paths, wantPaths)
+	}
+	for i := range wantPaths {
+		if paths[i] != wantPaths[i] {
+			t.Fatalf("paths = %v, want %v", paths, wantPaths)
+		}
+	}
+	if allowed[".env"] != "env" || allowed[".tako/secrets.production"] != "prod" {
+		t.Fatalf("allowed bundle = %#v, want allowed files only", allowed)
+	}
+	wantSkipped := []string{"../.env", ".tako/known_hosts"}
+	if len(skipped) != len(wantSkipped) {
+		t.Fatalf("skipped = %v, want %v", skipped, wantSkipped)
+	}
+	for i := range wantSkipped {
+		if skipped[i] != wantSkipped[i] {
+			t.Fatalf("skipped = %v, want %v", skipped, wantSkipped)
+		}
+	}
+}
+
+func TestDownloadEnvBundleFromMeshUsesFirstFoundBundle(t *testing.T) {
+	cfg := envBundleMeshTestConfig()
+	calls := []string{}
+	original := downloadEnvBundleFromServerFunc
+	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+		calls = append(calls, serverName)
+		switch serverName {
+		case "node-a":
+			return nil, fmt.Errorf("unreachable")
+		case "node-b":
+			return &takod.EnvBundleResponse{Found: false}, nil
+		default:
+			return &takod.EnvBundleResponse{Found: true, Content: "bundle"}, nil
+		}
+	}
+	t.Cleanup(func() {
+		downloadEnvBundleFromServerFunc = original
+	})
+
+	response, source, err := downloadEnvBundleFromMesh(cfg, "production")
+	if err != nil {
+		t.Fatalf("downloadEnvBundleFromMesh returned error: %v", err)
+	}
+	if response == nil || !response.Found || response.Content != "bundle" {
+		t.Fatalf("response = %#v, want found bundle", response)
+	}
+	if source != "node-c" {
+		t.Fatalf("source = %q, want node-c", source)
+	}
+	wantCalls := []string{"node-a", "node-b", "node-c"}
+	if len(calls) != len(wantCalls) {
+		t.Fatalf("calls = %v, want %v", calls, wantCalls)
+	}
+	for i := range wantCalls {
+		if calls[i] != wantCalls[i] {
+			t.Fatalf("calls = %v, want %v", calls, wantCalls)
+		}
+	}
+}
+
+func TestDownloadEnvBundleFromMeshReturnsNotFoundWhenReachableNodesAreEmpty(t *testing.T) {
+	cfg := envBundleMeshTestConfig()
+	original := downloadEnvBundleFromServerFunc
+	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, _ string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+		return &takod.EnvBundleResponse{Found: false}, nil
+	}
+	t.Cleanup(func() {
+		downloadEnvBundleFromServerFunc = original
+	})
+
+	response, source, err := downloadEnvBundleFromMesh(cfg, "production")
+	if err != nil {
+		t.Fatalf("downloadEnvBundleFromMesh returned error: %v", err)
+	}
+	if response == nil || response.Found {
+		t.Fatalf("response = %#v, want not found", response)
+	}
+	if source != "" {
+		t.Fatalf("source = %q, want empty source", source)
+	}
+}
+
+func TestDownloadEnvBundleFromMeshErrorsWhenAllNodesFail(t *testing.T) {
+	cfg := envBundleMeshTestConfig()
+	original := downloadEnvBundleFromServerFunc
+	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+		return nil, fmt.Errorf("%s down", serverName)
+	}
+	t.Cleanup(func() {
+		downloadEnvBundleFromServerFunc = original
+	})
+
+	if _, _, err := downloadEnvBundleFromMesh(cfg, "production"); err == nil {
+		t.Fatal("downloadEnvBundleFromMesh should fail when all nodes fail")
+	}
+}
+
+func envBundleMeshTestConfig() *config.Config {
+	return &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+		Servers: map[string]config.ServerConfig{
+			"node-a": {Host: "10.0.0.1"},
+			"node-b": {Host: "10.0.0.2"},
+			"node-c": {Host: "10.0.0.3"},
+		},
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Servers: []string{"node-a", "node-b", "node-c"},
+			},
+		},
 	}
 }
