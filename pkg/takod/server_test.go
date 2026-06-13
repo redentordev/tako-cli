@@ -290,3 +290,55 @@ func TestHandleStateWritesAndReadsDocument(t *testing.T) {
 		t.Fatalf("unexpected state response: %#v", response)
 	}
 }
+
+func TestHandleEnvBundleRequiresSupportedMethod(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/env-bundle", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleEnvBundle(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleEnvBundleRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPut, "/v1/env-bundle", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleEnvBundle(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleEnvBundleWritesAndReads(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	writeBody := `{"project":"demo","environment":"production","content":"ZW5jcnlwdGVk"}`
+	writeReq := httptest.NewRequest(http.MethodPut, "/v1/env-bundle", bytes.NewBufferString(writeBody))
+	writeRecorder := httptest.NewRecorder()
+
+	server.handleEnvBundle(writeRecorder, writeReq)
+
+	if writeRecorder.Code != http.StatusOK {
+		t.Fatalf("expected write 200, got %d: %s", writeRecorder.Code, writeRecorder.Body.String())
+	}
+
+	readReq := httptest.NewRequest(http.MethodGet, "/v1/env-bundle?project=demo&environment=production", nil)
+	readRecorder := httptest.NewRecorder()
+	server.handleEnvBundle(readRecorder, readReq)
+
+	if readRecorder.Code != http.StatusOK {
+		t.Fatalf("expected read 200, got %d: %s", readRecorder.Code, readRecorder.Body.String())
+	}
+	var response EnvBundleResponse
+	if err := json.NewDecoder(readRecorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !response.Found || response.Content != "ZW5jcnlwdGVk" {
+		t.Fatalf("unexpected env bundle response: %#v", response)
+	}
+}

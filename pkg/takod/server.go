@@ -78,6 +78,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/acme-dns", s.handleAcmeDNS)
 	mux.HandleFunc("/v1/acme-dns/credentials", s.handleAcmeDNSCredentials)
 	mux.HandleFunc("/v1/state", s.handleState)
+	mux.HandleFunc("/v1/env-bundle", s.handleEnvBundle)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -349,6 +350,41 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response, err = AppendStateEvent(r.Context(), s.dataDir, request)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleEnvBundle(w http.ResponseWriter, r *http.Request) {
+	var (
+		response *EnvBundleResponse
+		err      error
+	)
+
+	switch r.Method {
+	case http.MethodGet:
+		response, err = ReadEnvBundle(r.Context(), s.dataDir, EnvBundleRequest{
+			Project:     r.URL.Query().Get("project"),
+			Environment: r.URL.Query().Get("environment"),
+		})
+	case http.MethodPut:
+		defer r.Body.Close()
+		var request EnvBundleRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		response, err = WriteEnvBundle(r.Context(), s.dataDir, request)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
