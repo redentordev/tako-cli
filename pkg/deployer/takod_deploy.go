@@ -18,6 +18,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/redentordev/tako-cli/pkg/unregistry"
 )
 
@@ -451,50 +452,12 @@ func (d *Deployer) ensureTakodProxy(client *ssh.Client, networkName string, emai
 	if email == "" {
 		email = "tako@redentor.dev"
 	}
-
-	setupCmd := "mkdir -p /etc/tako/proxy/acme /etc/tako/proxy/dynamic /var/log/tako/proxy && touch /etc/tako/proxy/acme/acme.json && chmod 600 /etc/tako/proxy/acme/acme.json"
-	if _, err := client.Execute(setupCmd); err != nil {
-		return fmt.Errorf("failed to prepare proxy directories: %w", err)
-	}
-
-	running, _ := client.Execute("docker ps --filter name=^tako-proxy$ --format '{{.Names}}'")
-	if strings.TrimSpace(running) == "tako-proxy" {
-		args, _ := client.Execute("docker inspect tako-proxy --format '{{json .Args}}' 2>/dev/null")
-		if strings.Contains(args, "--providers.file.directory=/etc/traefik/dynamic") {
-			_, _ = client.Execute("docker network connect " + shellQuote(networkName) + " tako-proxy 2>/dev/null || true")
-			return nil
-		}
-	}
-
-	_, _ = client.Execute("docker rm -f tako-proxy 2>/dev/null || true")
-	cmd := strings.Join([]string{
-		"docker run -d",
-		"--name tako-proxy",
-		"--restart unless-stopped",
-		"--network " + shellQuote(networkName),
-		"--publish 80:80",
-		"--publish 443:443",
-		"--volume /etc/tako/proxy/acme:/acme",
-		"--volume /etc/tako/proxy/dynamic:/etc/traefik/dynamic:ro",
-		"--volume /var/log/tako/proxy:/var/log/traefik",
-		"traefik:v3.6.1",
-		"--api.dashboard=false",
-		"--providers.file.directory=/etc/traefik/dynamic",
-		"--providers.file.watch=true",
-		"--entryPoints.web.address=:80",
-		"--entryPoints.websecure.address=:443",
-		"--certificatesResolvers.letsencrypt.acme.email=" + shellQuote(email),
-		"--certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json",
-		"--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web",
-		"--log.level=INFO",
-		"--accessLog.filePath=/var/log/traefik/access.log",
-		"--accessLog.format=json",
-		"2>&1",
-	}, " ")
-
-	output, err := client.Execute(cmd)
+	_, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/proxy", takod.ReconcileProxyRequest{
+		Network: networkName,
+		Email:   email,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to start takod proxy: %w, output: %s", err, output)
+		return fmt.Errorf("failed to reconcile takod proxy: %w", err)
 	}
 	return nil
 }
@@ -758,26 +721,8 @@ func uploadJSON(client *ssh.Client, remotePath string, value any, mode os.FileMo
 }
 
 func (d *Deployer) reconcileServiceViaTakod(client *ssh.Client, request takod.ReconcileServiceRequest) error {
-	tmpPath := fmt.Sprintf(
-		"/tmp/tako-reconcile-%s-%d.json",
-		sanitizeRouterName(request.Service),
-		time.Now().UnixNano(),
-	)
-	if err := uploadJSON(client, tmpPath, request, 0600); err != nil {
-		return fmt.Errorf("failed to upload takod reconcile request: %w", err)
-	}
-
-	socket := d.takodSocket()
-	curlCmd := fmt.Sprintf(
-		"status=0; if test -S %[1]s && command -v curl >/dev/null 2>&1; then "+
-			"curl --fail --silent --show-error --unix-socket %[1]s -X POST -H 'Content-Type: application/json' --data-binary @%[2]s http://takod/v1/reconcile-service || status=$?; "+
-			"else echo 'takod socket or curl is unavailable' >&2; status=42; fi; rm -f %[2]s; exit $status",
-		shellQuote(socket),
-		shellQuote(tmpPath),
-	)
-	output, err := client.Execute(curlCmd)
-	if err != nil {
-		return fmt.Errorf("takod service reconciliation failed: %w, output: %s", err, output)
+	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/reconcile-service", request); err != nil {
+		return fmt.Errorf("takod service reconciliation failed: %w", err)
 	}
 	return nil
 }

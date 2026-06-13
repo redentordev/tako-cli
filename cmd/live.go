@@ -5,6 +5,8 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 )
 
@@ -90,28 +92,25 @@ func runLive(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("🔄 Disabling maintenance mode for %s on %s...\n\n", liveService, serverName)
 
-	// Check if maintenance container exists
-	containerName := fmt.Sprintf("%s_%s_maintenance", cfg.Project.Name, liveService)
-	checkCmd := fmt.Sprintf("docker ps -a --filter name=%s --format '{{.Names}}'", containerName)
-	output, err := client.Execute(checkCmd)
-	if err != nil || output == "" {
-		return fmt.Errorf("maintenance container not found - service may not be in maintenance mode")
-	}
-
 	// Stop and remove maintenance container
 	fmt.Printf("→ Removing maintenance container...\n")
-	removeCmd := fmt.Sprintf("docker stop %s && docker rm %s", containerName, containerName)
-	if _, err := client.Execute(removeCmd); err != nil {
+	socket := takodSocketFromConfig(cfg)
+	networkName := fmt.Sprintf("tako_%s_%s", cfg.Project.Name, envName)
+	request := takod.ReconcileServiceRequest{
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Service:     maintenanceTakodServiceName(liveService),
+		Image:       maintenanceImage,
+		Network:     networkName,
+	}
+	if _, err := takodclient.RequestJSON(client, socket, "POST", "/v1/reconcile-service", request); err != nil {
 		return fmt.Errorf("failed to remove maintenance container: %w", err)
 	}
 
 	// Remove file-provider override from tako-proxy.
-	proxyConfigPath := maintenanceProxyConfigPath(cfg.Project.Name, envName, liveService)
-	client.Execute(fmt.Sprintf("sudo rm -f %s", maintenanceShellQuote(proxyConfigPath)))
-
-	// Remove maintenance directory
-	maintenanceDir := fmt.Sprintf("/opt/%s/maintenance", cfg.Project.Name)
-	client.Execute(fmt.Sprintf("sudo rm -rf %s", maintenanceShellQuote(maintenanceDir)))
+	if _, err := takodclient.RequestJSON(client, socket, "DELETE", takodclient.ProxyFileEndpoint(maintenanceProxyConfigFileName(cfg.Project.Name, envName, liveService)), nil); err != nil {
+		return fmt.Errorf("failed to remove maintenance proxy config: %w", err)
+	}
 
 	fmt.Printf("✓ Maintenance mode disabled for %s\n", liveService)
 	fmt.Printf("\nService is now accepting normal traffic.\n")

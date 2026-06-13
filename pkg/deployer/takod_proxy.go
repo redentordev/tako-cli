@@ -10,6 +10,8 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/network"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"gopkg.in/yaml.v3"
 )
 
@@ -204,32 +206,20 @@ func (d *Deployer) renderTakodProxyDynamicConfig(services map[string]config.Serv
 }
 
 func (d *Deployer) writeTakodProxyConfig(client *ssh.Client, data []byte) error {
-	path := d.takodProxyConfigPath()
-	tmpPath := "/tmp/" + d.takodProxyConfigFileName()
-	if err := client.UploadReader(strings.NewReader(string(data)), tmpPath, 0644); err != nil {
-		return err
-	}
-	cmd := fmt.Sprintf(
-		"mkdir -p /etc/tako/proxy/dynamic && mv %s %s && chmod 644 %s",
-		shellQuote(tmpPath),
-		shellQuote(path),
-		shellQuote(path),
-	)
-	_, err := client.Execute(cmd)
+	_, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/proxy-file", takod.ProxyFileRequest{
+		Name:    d.takodProxyConfigFileName(),
+		Content: string(data),
+	})
 	return err
 }
 
 func (d *Deployer) removeTakodProxyConfig(client *ssh.Client) error {
-	_, err := client.Execute("rm -f " + shellQuote(d.takodProxyConfigPath()))
+	_, err := takodclient.RequestJSON(client, d.takodSocket(), "DELETE", takodclient.ProxyFileEndpoint(d.takodProxyConfigFileName()), nil)
 	return err
 }
 
 func (d *Deployer) takodProxyConfigFileName() string {
 	return sanitizeRouterName(d.config.Project.Name+"-"+d.environment) + ".yml"
-}
-
-func (d *Deployer) takodProxyConfigPath() string {
-	return "/etc/tako/proxy/dynamic/" + d.takodProxyConfigFileName()
 }
 
 func (d *Deployer) meshUpstreamURL(serverName string, serviceName string, slot int) (string, error) {
