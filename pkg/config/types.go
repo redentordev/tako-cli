@@ -581,8 +581,24 @@ func expandEnvWithTrim(s string, ignoreYAMLComments bool) (string, error) {
 }
 
 func splitYAMLComment(line string) (string, string) {
-	if idx := strings.IndexByte(line, '#'); idx >= 0 {
-		return line[:idx], line[idx:]
+	inSingle := false
+	inDouble := false
+
+	for idx := 0; idx < len(line); idx++ {
+		switch line[idx] {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle && (idx == 0 || line[idx-1] != '\\') {
+				inDouble = !inDouble
+			}
+		case '#':
+			if !inSingle && !inDouble {
+				return line[:idx], line[idx:]
+			}
+		}
 	}
 	return line, ""
 }
