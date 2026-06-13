@@ -13,10 +13,8 @@ import (
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/git"
 	"github.com/redentordev/tako-cli/pkg/health"
-	"github.com/redentordev/tako-cli/pkg/network"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
-	"github.com/redentordev/tako-cli/pkg/registry"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/ssl"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
@@ -645,20 +643,6 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Register project in registry
-		networkMgr := network.NewManager(firstClient, cfg.Project.Name, envName, verbose)
-		reg := registry.NewRegistry(firstClient, verbose)
-		projectInfo := registry.ProjectInfo{
-			Name:        cfg.Project.Name,
-			Environment: envName,
-			Network:     networkMgr.GetNetworkName(),
-			Services:    deploymentOrder,
-			Domains:     extractDomains(services),
-			DeployedAt:  time.Now(),
-		}
-		if err := reg.RegisterProject(projectInfo); err != nil && verbose {
-			fmt.Printf("Warning: failed to register project: %v\n", err)
-		}
 	}
 
 	// Calculate deployment duration
@@ -795,15 +779,4 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 // isNonInteractive checks if running in non-interactive mode
 func isNonInteractive() bool {
 	return os.Getenv("TAKO_NONINTERACTIVE") == "1" || os.Getenv("CI") == "true"
-}
-
-// extractDomains extracts all domains from service configurations
-func extractDomains(services map[string]config.ServiceConfig) []string {
-	domains := []string{}
-	for _, service := range services {
-		if service.Proxy != nil {
-			domains = append(domains, service.Proxy.GetAllDomains()...)
-		}
-	}
-	return domains
 }
