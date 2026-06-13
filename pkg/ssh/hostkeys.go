@@ -65,28 +65,34 @@ type HostKeyVerifier struct {
 var defaultVerifier *HostKeyVerifier
 var defaultVerifierOnce sync.Once
 var globalHostKeyMode = HostKeyModeTOFU
+var globalHostKeyModeMu sync.RWMutex
 
 // SetGlobalHostKeyMode sets the global host key verification mode
 func SetGlobalHostKeyMode(mode HostKeyMode) {
+	globalHostKeyModeMu.Lock()
+	defer globalHostKeyModeMu.Unlock()
 	globalHostKeyMode = mode
 }
 
 // GetGlobalHostKeyMode returns the current global host key verification mode
 func GetGlobalHostKeyMode() HostKeyMode {
+	globalHostKeyModeMu.RLock()
+	defer globalHostKeyModeMu.RUnlock()
 	return globalHostKeyMode
 }
 
 // GetDefaultVerifier returns the default host key verifier
 func GetDefaultVerifier() (*HostKeyVerifier, error) {
 	var initErr error
+	mode := GetGlobalHostKeyMode()
 	defaultVerifierOnce.Do(func() {
-		defaultVerifier, initErr = NewHostKeyVerifier(globalHostKeyMode)
+		defaultVerifier, initErr = NewHostKeyVerifier(mode)
 	})
 	if initErr != nil {
 		return nil, initErr
 	}
 	// Update mode in case it changed
-	defaultVerifier.SetMode(globalHostKeyMode)
+	defaultVerifier.SetMode(mode)
 	return defaultVerifier, nil
 }
 
@@ -112,11 +118,15 @@ func NewHostKeyVerifier(mode HostKeyMode) (*HostKeyVerifier, error) {
 
 // SetMode sets the verification mode
 func (v *HostKeyVerifier) SetMode(mode HostKeyMode) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.mode = mode
 }
 
 // SetPromptFunc sets the function to prompt user for unknown hosts
 func (v *HostKeyVerifier) SetPromptFunc(fn func(host, fingerprint, keyType string) (bool, error)) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.promptFn = fn
 }
 
