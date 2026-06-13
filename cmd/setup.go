@@ -131,24 +131,17 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	// Setup NFS if configured and appropriate
 	if cfg.IsNFSEnabled() {
-		if setupServer != "" {
-			fmt.Printf("\n=== NFS Shared Storage ===\n")
-			fmt.Printf("→ Skipping NFS setup: --server targets one node. Run 'tako setup -e %s' without --server to configure shared NFS.\n", envName)
+		shouldSetupNFS, reason, showSingleServerTip := setupNFSDecision(cfg, envName, setupServer, len(targetServerNames))
+		if shouldSetupNFS {
+			fmt.Printf("\n=== Setting up NFS shared storage ===\n\n")
+			if err := setupNFS(cfg, sshPool, envName, targetServerNames); err != nil {
+				return fmt.Errorf("failed to setup NFS: %w", err)
+			}
 		} else {
-			serverCount := len(targetServerNames)
-			shouldSetup, reason := provisioner.ShouldSetupNFS(cfg, serverCount)
-
-			if shouldSetup {
-				fmt.Printf("\n=== Setting up NFS shared storage ===\n\n")
-				if err := setupNFS(cfg, sshPool, envName, targetServerNames); err != nil {
-					return fmt.Errorf("failed to setup NFS: %w", err)
-				}
-			} else {
-				fmt.Printf("\n=== NFS Shared Storage ===\n")
-				fmt.Printf("→ Skipping NFS setup: %s\n", reason)
-				if serverCount == 1 {
-					fmt.Printf("  Tip: NFS volumes (nfs:name:/path) will use local bind mounts on single-server deployments.\n")
-				}
+			fmt.Printf("\n=== NFS Shared Storage ===\n")
+			fmt.Printf("→ Skipping NFS setup: %s\n", reason)
+			if showSingleServerTip {
+				fmt.Printf("  Tip: NFS volumes (nfs:name:/path) will use local bind mounts on single-server deployments.\n")
 			}
 		}
 	}
@@ -173,6 +166,20 @@ func setupTargetServers(cfg *config.Config, envName string, requestedServer stri
 		servers[serverName] = server
 	}
 	return serverNames, servers, nil
+}
+
+func setupNFSDecision(cfg *config.Config, envName string, requestedServer string, serverCount int) (bool, string, bool) {
+	if !cfg.IsNFSEnabled() {
+		return false, "NFS is not enabled in configuration", false
+	}
+	if !cfg.EnvironmentUsesNFSVolumes(envName) {
+		return false, fmt.Sprintf("environment %s has no NFS volumes.", envName), false
+	}
+	if requestedServer != "" {
+		return false, fmt.Sprintf("--server targets one node. Run 'tako setup -e %s' without --server to configure shared NFS.", envName), false
+	}
+	shouldSetup, reason := provisioner.ShouldSetupNFS(cfg, serverCount)
+	return shouldSetup, reason, serverCount == 1
 }
 
 func setupMeshListenPort(cfg *config.Config) int {

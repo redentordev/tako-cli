@@ -70,9 +70,12 @@ func validateStorageConfig(cfg *Config) error {
 	if !cfg.IsNFSEnabled() {
 		return nil
 	}
-	for envName := range cfg.Environments {
+	for envName, env := range cfg.Environments {
+		if !EnvironmentUsesNFSVolumes(env) {
+			continue
+		}
 		if _, err := cfg.GetNFSServerName(envName); err != nil {
-			return fmt.Errorf("storage.nfs: %w", err)
+			return fmt.Errorf("storage.nfs for environment %s: %w", envName, err)
 		}
 	}
 	return nil
@@ -354,6 +357,10 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 		}
 	}
 
+	if err := validateServiceVolumes(name, service, cfg); err != nil {
+		return err
+	}
+
 	// Set default replicas
 	if service.Replicas == 0 {
 		service.Replicas = 1
@@ -497,6 +504,25 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 		}
 	}
 
+	return nil
+}
+
+func validateServiceVolumes(name string, service *ServiceConfig, cfg *Config) error {
+	for _, volume := range service.Volumes {
+		if !IsNFSVolume(volume) {
+			continue
+		}
+		exportName, _, _, err := ParseNFSVolumeSpec(volume)
+		if err != nil {
+			return fmt.Errorf("service %s: invalid NFS volume %q: %w", name, volume, err)
+		}
+		if !cfg.IsNFSEnabled() {
+			return fmt.Errorf("service %s: NFS volume %q requires storage.nfs.enabled", name, volume)
+		}
+		if _, err := cfg.GetNFSExport(exportName); err != nil {
+			return fmt.Errorf("service %s: NFS volume %q references missing export: %w", name, volume, err)
+		}
+	}
 	return nil
 }
 
