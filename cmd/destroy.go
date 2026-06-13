@@ -29,8 +29,8 @@ var destroyCmd = &cobra.Command{
 This command has two modes:
 
 1. DECOMMISSION MODE (default):
-   - Stops and removes application containers
-   - Removes application Docker images
+   - Stops and removes application service replicas
+   - Removes application service images
    - Removes deployment files
    - Keeps tako-proxy, logs, and server setup
    - Safe for production - can redeploy later
@@ -39,7 +39,7 @@ This command has two modes:
    - Everything from decommission mode, PLUS:
    - Removes shared tako-proxy runtime files
    - Removes access logs
-   - Removes all Docker resources
+   - Prunes unused node runtime resources
    - Complete cleanup - requires server re-setup
 
 Safety Features:
@@ -134,17 +134,17 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n%s MODE will:\n", mode)
-	fmt.Println("   ✓ Stop and remove all application containers")
-	fmt.Println("   ✓ Remove application Docker images")
+	fmt.Println("   ✓ Stop and remove all application service replicas")
+	fmt.Println("   ✓ Remove application service images")
 	fmt.Println("   ✓ Remove deployment files and directories")
 
 	if destroyPurgeAll {
 		fmt.Println("   ✓ Remove shared tako-proxy runtime files")
 		fmt.Println("   ✓ Remove access logs")
-		fmt.Println("   ✓ Prune all unused Docker resources")
+		fmt.Println("   ✓ Prune unused node runtime resources")
 		fmt.Println("\n⚠️  You'll need to run 'tako setup' again to redeploy!")
 	} else {
-		fmt.Println("\nPreserving server setup (tako-proxy, logs, Docker daemon)")
+		fmt.Println("\nPreserving server setup (takod, tako-proxy, logs)")
 		fmt.Println("You can redeploy without running 'tako setup' again")
 	}
 
@@ -394,7 +394,7 @@ func destroySingleServer(serverName string, serverCfg config.ServerConfig, cfg *
 // decommissionApp stops and removes the deployed application
 func decommissionApp(client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
 	if verbose {
-		fmt.Println("  → Removing takod containers...")
+		fmt.Println("  → Removing takod-managed services...")
 	}
 	services, err := cfg.GetServices(envName)
 	if err != nil {

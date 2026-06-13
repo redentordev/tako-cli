@@ -73,7 +73,7 @@ type StateConfig struct {
 	RemoteCacheEnabled bool   `yaml:"remoteCacheEnabled,omitempty" json:"remoteCacheEnabled,omitempty"` // replicate deployment history to nodes
 }
 
-// VolumeConfig defines a named volume configuration (Docker Compose style)
+// VolumeConfig defines a named service volume configuration.
 type VolumeConfig struct {
 	Driver     string            `yaml:"driver,omitempty" json:"driver,omitempty"`           // Volume driver (default: "local")
 	DriverOpts map[string]string `yaml:"driver_opts,omitempty" json:"driver_opts,omitempty"` // Driver-specific options

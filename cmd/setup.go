@@ -17,9 +17,11 @@ var (
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
-	Short: "Set up server with Docker, proxy, and security hardening",
+	Short: "Set up server with takod, proxy, and security hardening",
 	Long: `Setup configures your VPS server with all necessary components:
-  - Docker and Docker Compose
+  - Container runtime prerequisites
+  - WireGuard mesh networking
+  - takod node-local runtime
   - tako-proxy for automatic SSL and load balancing
   - UFW firewall configuration
   - Security hardening (disable root login, fail2ban)

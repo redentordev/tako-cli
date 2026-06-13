@@ -36,7 +36,7 @@ var deployCmd = &cobra.Command{
 	Long: `Deploy your application by reconciling desired services on the takod mesh.
 
 The deployment process:
-  1. Build Docker image through takod
+  1. Build or select the service image
   2. Prepare selected takod nodes
   3. Recreate service containers to match desired state
   4. Replicate deployment state
@@ -49,7 +49,7 @@ func init() {
 	rootCmd.AddCommand(deployCmd)
 	deployCmd.Flags().StringVarP(&deployServer, "server", "s", "", "Deploy to specific server")
 	deployCmd.Flags().StringVar(&deployService, "service", "", "Deploy specific service")
-	deployCmd.Flags().BoolVar(&skipBuild, "skip-build", false, "Skip building Docker image")
+	deployCmd.Flags().BoolVar(&skipBuild, "skip-build", false, "Skip building the service image")
 	deployCmd.Flags().BoolVarP(&deployYes, "yes", "y", false, "Skip confirmation prompts (non-interactive mode)")
 	deployCmd.Flags().StringVarP(&commitMessage, "message", "m", "", "Commit message for uncommitted changes")
 }
@@ -474,7 +474,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		// Get full image name
 		fullImageName := cfg.GetFullImageName(serviceName, envName)
 
-		// Build image if needed (but don't deploy with docker run)
+		// Build the image if needed; runtime reconciliation still goes through takod.
 		if !skipBuild && service.Build != "" {
 			// Build the image on the first connected node
 			builtImageName, err := deploy.BuildImage(serviceName, &service)
