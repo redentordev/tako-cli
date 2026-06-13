@@ -210,21 +210,21 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 	// Step 5: State pull
 	printStep(5, "Deployment State")
 
-	if _, err := os.Stat(".tako"); err == nil {
-		pass(".tako directory exists")
+	if localDeploymentStateExists(envName) {
+		pass("Local deployment state exists")
 	} else if len(connectedClients) > 0 {
-		warn(".tako directory missing, attempting state pull...")
+		warn("Local deployment state missing, attempting state pull...")
 		if err := SyncStateOnDeploy(cfg, getFirstClient(connectedClients, cfg, envName), envName); err != nil {
 			warn(fmt.Sprintf("State sync failed: %v", err))
 		} else {
-			if _, err := os.Stat(".tako"); err == nil {
+			if localDeploymentStateExists(envName) {
 				pass("State synced from remote server")
 			} else {
 				warn("No remote state available (deploy first)")
 			}
 		}
 	} else {
-		warn(".tako directory missing and no server connections available")
+		warn("Local deployment state missing and no server connections available")
 		fmt.Println("  Fix: tako state pull")
 	}
 

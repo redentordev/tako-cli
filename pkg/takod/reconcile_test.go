@@ -51,9 +51,45 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 
 	invalid = valid
-	invalid.Init = []string{" "}
+	invalid.Project = "../demo"
 	if err := validateReconcileServiceRequest(invalid); err == nil {
-		t.Fatalf("expected empty init command to be rejected")
+		t.Fatalf("expected unsafe project name to be rejected")
+	}
+
+	invalid = valid
+	invalid.Service = "Web"
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe service name to be rejected")
+	}
+
+	invalid = valid
+	invalid.Image = "demo\nweb"
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe image name to be rejected")
+	}
+
+	invalid = valid
+	invalid.Restart = "always;reboot"
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe restart policy to be rejected")
+	}
+
+	invalid = valid
+	invalid.Containers = []ContainerSpec{{Name: "bad/name"}}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe container name to be rejected")
+	}
+
+	invalid = valid
+	invalid.Containers = []ContainerSpec{{Name: "demo_production_web_1", Publishes: []string{"80:80\n--privileged"}}}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe publish value to be rejected")
+	}
+
+	invalid = valid
+	invalid.Mounts = []string{"type=bind,source=/data,target=/data\n--privileged"}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe mount value to be rejected")
 	}
 }
 
@@ -149,27 +185,7 @@ func TestPrepareServiceEnvFileWritesAndCleansUpTempFile(t *testing.T) {
 	}
 }
 
-func TestRunInitCommandsStopsOnFailure(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "commands.log")
-	restore := useFakeCommands(t, logPath)
-	defer restore()
-	t.Setenv("TAKO_FAKE_FAIL_SHELL", "fail now")
-
-	err := runInitCommands(context.Background(), []string{"fail now", "should not run"})
-	if err == nil {
-		t.Fatal("expected init failure")
-	}
-	if !strings.Contains(err.Error(), "init command failed") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	entries := readCommandLog(t, logPath)
-	if len(entries) != 1 || !strings.Contains(entries[0], "fail now") {
-		t.Fatalf("expected only the failing init command to run, got %#v", entries)
-	}
-}
-
-func TestReconcileServiceRunsInitBeforeDockerMutation(t *testing.T) {
+func TestReconcileServiceRunsDockerMutation(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "commands.log")
 	restore := useFakeCommands(t, logPath)
 	defer restore()
@@ -180,7 +196,6 @@ func TestReconcileServiceRunsInitBeforeDockerMutation(t *testing.T) {
 		Service:     "web",
 		Image:       "registry.example.com/demo/web:abc",
 		Network:     "tako_demo_production",
-		Init:        []string{"echo preparing"},
 		Containers:  []ContainerSpec{{Name: "demo_production_web_1"}},
 	})
 	if err != nil {
@@ -188,28 +203,22 @@ func TestReconcileServiceRunsInitBeforeDockerMutation(t *testing.T) {
 	}
 
 	entries := readCommandLog(t, logPath)
-	if len(entries) < 2 {
-		t.Fatalf("expected shell and docker commands, got %#v", entries)
+	if len(entries) == 0 {
+		t.Fatalf("expected docker commands, got %#v", entries)
 	}
-	if !strings.HasPrefix(entries[0], "sh -c echo preparing") {
-		t.Fatalf("expected init command first, got %#v", entries)
-	}
-	if !strings.HasPrefix(entries[1], "docker ps ") {
-		t.Fatalf("expected first Docker mutation after init to list old containers, got %#v", entries)
+	if !strings.HasPrefix(entries[0], "docker ps ") {
+		t.Fatalf("expected first Docker mutation to list old containers, got %#v", entries)
 	}
 }
 
 func useFakeCommands(t *testing.T, logPath string) func() {
 	t.Helper()
 	oldDocker := dockerCommandContext
-	oldShell := shellCommandContext
 	dockerCommandContext = fakeCommandContext
-	shellCommandContext = fakeCommandContext
 	t.Setenv("GO_WANT_TAKOD_COMMAND_HELPER", "1")
 	t.Setenv("TAKO_COMMAND_LOG", logPath)
 	return func() {
 		dockerCommandContext = oldDocker
-		shellCommandContext = oldShell
 	}
 }
 

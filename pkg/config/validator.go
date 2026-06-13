@@ -481,13 +481,6 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 		}
 	}
 
-	// Validate init commands
-	if len(service.Init) > 0 {
-		if err := validateInitCommands(name, service.Init); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
@@ -800,38 +793,4 @@ func isValidDockerVolumeName(name string) bool {
 	}
 
 	return true
-}
-
-// validateInitCommands validates init commands for a service
-func validateInitCommands(serviceName string, initCommands []string) error {
-	if len(initCommands) == 0 {
-		return nil
-	}
-
-	for i, cmd := range initCommands {
-		if strings.TrimSpace(cmd) == "" {
-			return fmt.Errorf("service %s: init command at index %d is empty", serviceName, i)
-		}
-
-		// Warn about potentially dangerous commands
-		dangerousPatterns := []string{
-			"rm -rf /",
-			"mkfs",
-			"dd if=",
-			"> /dev/",
-			"shutdown",
-			"reboot",
-			"init 0",
-			"init 6",
-		}
-		lowerCmd := strings.ToLower(cmd)
-		for _, pattern := range dangerousPatterns {
-			if strings.Contains(lowerCmd, pattern) {
-				fmt.Printf("Warning: service %s: init command contains potentially dangerous pattern '%s': %s\n",
-					serviceName, pattern, cmd)
-			}
-		}
-	}
-
-	return nil
 }

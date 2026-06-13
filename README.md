@@ -364,8 +364,10 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako state pull` | Sync remote deployment state into local `.tako/` |
 | `tako state status` | Compare local/remote state and show the remote lease |
 | `tako upgrade` | Upgrade Tako CLI to the latest version |
-| `tako live` | Live development mode with hot reload |
-| `tako cleanup` | Clean up old Docker resources |
+| `tako live` | Disable maintenance mode and restore service traffic |
+| `tako cleanup` | Clean up old node runtime resources |
+
+CI/CD runners use the same takod path as a laptop. See [CI/CD Deployments](./docs/CI-CD.md).
 
 ### Common Flags
 
@@ -680,7 +682,7 @@ deployment:
 ├─────────────────┤
 │ takod           │
 │ Local Proxy     │
-│ Docker Engine   │
+│ Container Runtime │
 │ Your Containers │
 │ State Cache     │
 └─────────────────┘
@@ -697,7 +699,7 @@ deployment:
       |         |         |
    takod A   takod B   takod C
       |         |         |
-   Docker    Docker    Docker
+   Runtime   Runtime   Runtime
    Proxy     Proxy     Proxy
       +---- private mesh ----+
 ```
@@ -749,7 +751,7 @@ Each example includes complete documentation and is ready to deploy.
 
 - Go 1.21 or higher
 - Git
-- Docker (for local testing)
+- Container runtime such as Docker (for local builds and tests)
 - Make (optional)
 
 ### Building from Source

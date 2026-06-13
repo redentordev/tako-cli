@@ -273,7 +273,6 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Mounts:         mounts,
 		Health:         d.buildTakodHealthSpec(service),
 		Command:        service.Command,
-		Init:           service.Init,
 	}
 	for _, slot := range slots {
 		containerName := d.takodContainerName(serviceName, slot)

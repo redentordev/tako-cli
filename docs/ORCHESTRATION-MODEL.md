@@ -235,13 +235,18 @@ Deploy, rollback, scale, and destroy acquire a remote lease through `takod`.
 CI and local machines compete for the same lease, so concurrent operations fail
 fast instead of racing. The local `.tako` lock remains as a same-machine guard.
 
-## Implementation Order
+## Implementation Status
 
 ```text
-1. Keep the CLI surface takod-only.
-2. Add CI-friendly remote deploy leases and state pull/status workflows.
-3. Persist desired revisions and events on every node.
-4. Reconcile WireGuard peer material and node configs.
-5. Render per-node proxies with mesh upstream load balancing.
-6. Continue promoting mutating operations to the takod socket.
+Done:
+1. CLI runtime operations go through takod.
+2. Deploy, rollback, scale, and destroy share remote leases.
+3. State pull/status and env push/pull support clone and CI workflows.
+4. Desired revisions, actual snapshots, and events persist on nodes.
+5. WireGuard peer material and node configs reconcile through takod.
+6. Per-node proxies render mesh upstreams from desired and actual state.
+
+Next:
+1. Add continuous peer anti-entropy loops for state repair.
+2. Expand e2e validation across one-node and multi-node meshes.
 ```
