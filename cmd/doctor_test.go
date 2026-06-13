@@ -44,6 +44,38 @@ func TestCheckSSHKeysWarnsOnPasswordOnlyAuth(t *testing.T) {
 	}
 }
 
+func TestConfigLoadFixDistinguishesParseAndValidationErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "yaml parse",
+			err:  errString("failed to parse YAML config: yaml: line 1"),
+			want: "Fix syntax errors",
+		},
+		{
+			name: "missing host",
+			err:  errString("invalid config: server production: host is required"),
+			want: "SERVER_HOST",
+		},
+		{
+			name: "ssh key",
+			err:  errString("invalid config: server production: SSH key not found"),
+			want: "sshKey",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := configLoadFix(tt.err); !strings.Contains(got, tt.want) {
+				t.Fatalf("configLoadFix() = %q, want containing %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCollectServerConnectivityRunsConcurrentlyAndKeepsOrder(t *testing.T) {
 	serverNames := []string{"node-a", "node-b", "node-c"}
 	servers := testDoctorServers(serverNames)
@@ -81,6 +113,12 @@ func TestCollectServerConnectivityRunsConcurrentlyAndKeepsOrder(t *testing.T) {
 			t.Fatalf("result %d message = %q", i, results[i].result.message)
 		}
 	}
+}
+
+type errString string
+
+func (e errString) Error() string {
+	return string(e)
 }
 
 func TestCollectServerConnectivityReportsMissingServerInOrder(t *testing.T) {
