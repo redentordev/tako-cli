@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/secrets"
@@ -307,13 +308,7 @@ func checkServerConnectivity(record func(checkResult), cfg *config.Config, envNa
 		return clients
 	}
 
-	for _, serverName := range servers {
-		server, ok := cfg.Servers[serverName]
-		if !ok {
-			record(checkResult{"FAIL", fmt.Sprintf("%s: Not found in config", serverName), ""})
-			continue
-		}
-
+	for _, result := range collectServerConnectivity(cfg.Servers, servers, func(serverName string, server config.ServerConfig) doctorConnectivityResult {
 		client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
 			Host:     server.Host,
 			Port:     server.Port,
@@ -322,32 +317,95 @@ func checkServerConnectivity(record func(checkResult), cfg *config.Config, envNa
 			Password: server.Password,
 		})
 		if err != nil {
-			record(checkResult{"FAIL", fmt.Sprintf("%s (%s): %v", serverName, server.Host, err), "Check SSH key and server config"})
-			continue
+			return doctorConnectivityResult{
+				serverName: serverName,
+				result:     checkResult{"FAIL", fmt.Sprintf("%s (%s): %v", serverName, server.Host, err), "Check SSH key and server config"},
+			}
 		}
 
 		if err := client.Connect(); err != nil {
-			record(checkResult{"FAIL", fmt.Sprintf("%s (%s): Connection failed — %v", serverName, server.Host, err), "Check server is running and SSH access is configured"})
-			continue
+			return doctorConnectivityResult{
+				serverName: serverName,
+				result:     checkResult{"FAIL", fmt.Sprintf("%s (%s): Connection failed — %v", serverName, server.Host, err), "Check server is running and SSH access is configured"},
+			}
 		}
 
 		// Verify connectivity with a simple command
 		output, err := client.Execute("echo 'tako-ok'")
 		if err != nil {
-			record(checkResult{"FAIL", fmt.Sprintf("%s (%s): Connected but command failed — %v", serverName, server.Host, err), ""})
 			client.Close()
-			continue
+			return doctorConnectivityResult{
+				serverName: serverName,
+				result:     checkResult{"FAIL", fmt.Sprintf("%s (%s): Connected but command failed — %v", serverName, server.Host, err), ""},
+			}
 		}
 
 		if strings.TrimSpace(output) != "tako-ok" {
-			record(checkResult{"WARN", fmt.Sprintf("%s (%s): Connected but unexpected output", serverName, server.Host), ""})
-		} else {
-			record(checkResult{"PASS", fmt.Sprintf("%s (%s): Connected", serverName, server.Host), ""})
+			return doctorConnectivityResult{
+				serverName: serverName,
+				client:     client,
+				result:     checkResult{"WARN", fmt.Sprintf("%s (%s): Connected but unexpected output", serverName, server.Host), ""},
+			}
 		}
-		clients[serverName] = client
+		return doctorConnectivityResult{
+			serverName: serverName,
+			client:     client,
+			result:     checkResult{"PASS", fmt.Sprintf("%s (%s): Connected", serverName, server.Host), ""},
+		}
+	}) {
+		record(result.result)
+		if result.client != nil {
+			clients[result.serverName] = result.client
+		}
 	}
 
 	return clients
+}
+
+type doctorConnectivityFunc func(serverName string, server config.ServerConfig) doctorConnectivityResult
+
+type doctorConnectivityResult struct {
+	index      int
+	serverName string
+	client     *ssh.Client
+	result     checkResult
+}
+
+func collectServerConnectivity(servers map[string]config.ServerConfig, serverNames []string, connect doctorConnectivityFunc) []doctorConnectivityResult {
+	resultCh := make(chan doctorConnectivityResult, len(serverNames))
+	var wg sync.WaitGroup
+
+	for index, serverName := range serverNames {
+		server, ok := servers[serverName]
+		if !ok {
+			resultCh <- doctorConnectivityResult{
+				index:      index,
+				serverName: serverName,
+				result:     checkResult{"FAIL", fmt.Sprintf("%s: Not found in config", serverName), ""},
+			}
+			continue
+		}
+
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			result := connect(serverName, server)
+			result.index = index
+			if result.serverName == "" {
+				result.serverName = serverName
+			}
+			resultCh <- result
+		}(index, serverName, server)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]doctorConnectivityResult, len(serverNames))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+	return results
 }
 
 func checkRunningServices(record func(checkResult), cfg *config.Config, envName string, clients map[string]*ssh.Client) {
