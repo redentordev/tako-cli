@@ -75,6 +75,79 @@ func TestAcquireStateRepairLeasesWithReleasesOnFailure(t *testing.T) {
 	}
 }
 
+func TestWriteStateRepairDocumentsWritesHistoryConcurrently(t *testing.T) {
+	nodes := []stateRepairNode{
+		{name: "node-a"},
+		{name: "node-b"},
+		{name: "node-c"},
+	}
+	started := make(chan string, len(nodes))
+	release := make(chan struct{})
+	for i := range nodes {
+		nodes[i].manager = &blockingHistoryRepairManager{
+			nodeName: nodes[i].name,
+			started:  started,
+			release:  release,
+		}
+	}
+
+	done := make(chan struct {
+		history int
+		err     error
+	}, 1)
+	go func() {
+		historyWritten, _, _, _, err := writeStateRepairDocuments(
+			nodes,
+			stateHistoryCandidate{history: testRepairHistory()},
+			true,
+			stateDesiredCandidate{},
+			false,
+			stateActualCandidate{},
+			false,
+			nil,
+		)
+		done <- struct {
+			history int
+			err     error
+		}{history: historyWritten, err: err}
+	}()
+
+	waitForStateRepairLeaseStarts(t, started, len(nodes))
+	close(release)
+
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("writeStateRepairDocuments returned error: %v", result.err)
+	}
+	if result.history != len(nodes) {
+		t.Fatalf("historyWritten = %d, want %d", result.history, len(nodes))
+	}
+}
+
+func TestWriteStateRepairDocumentsFailsWhenAllHistoryWritesFail(t *testing.T) {
+	nodes := []stateRepairNode{
+		{name: "node-a", manager: &blockingHistoryRepairManager{failSave: true}},
+		{name: "node-b", manager: &blockingHistoryRepairManager{failSave: true}},
+	}
+
+	historyWritten, _, _, _, err := writeStateRepairDocuments(
+		nodes,
+		stateHistoryCandidate{history: testRepairHistory()},
+		true,
+		stateDesiredCandidate{},
+		false,
+		stateActualCandidate{},
+		false,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "failed to write repaired deployment history") {
+		t.Fatalf("expected all-history-write failure, got historyWritten=%d err=%v", historyWritten, err)
+	}
+	if historyWritten != 0 {
+		t.Fatalf("historyWritten = %d, want 0", historyWritten)
+	}
+}
+
 func waitForStateRepairLeaseStarts(t *testing.T, started <-chan string, count int) {
 	t.Helper()
 	seen := map[string]bool{}
@@ -117,4 +190,47 @@ func (m *recordingStateRepairManager) Released() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.released...)
+}
+
+type blockingHistoryRepairManager struct {
+	nodeName string
+	started  chan<- string
+	release  <-chan struct{}
+	failSave bool
+}
+
+func (m *blockingHistoryRepairManager) LoadHistory() (*remotestate.DeploymentHistory, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (m *blockingHistoryRepairManager) SaveHistory(*remotestate.DeploymentHistory) error {
+	if m.started != nil {
+		m.started <- m.nodeName
+	}
+	if m.release != nil {
+		<-m.release
+	}
+	if m.failSave {
+		return fmt.Errorf("save failed")
+	}
+	return nil
+}
+
+func (m *blockingHistoryRepairManager) AcquireLease(string, string, time.Duration) (*remotestate.LeaseInfo, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (m *blockingHistoryRepairManager) ReleaseLease(*remotestate.LeaseInfo) error {
+	return nil
+}
+
+func testRepairHistory() *remotestate.DeploymentHistory {
+	return &remotestate.DeploymentHistory{
+		ProjectName: "demo",
+		Environment: "production",
+		Deployments: []*remotestate.DeploymentState{
+			{ID: "deploy-1", Timestamp: time.Now().UTC(), Status: remotestate.StatusSuccess},
+		},
+		LastUpdated: time.Now().UTC(),
+	}
 }
