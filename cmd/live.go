@@ -67,17 +67,10 @@ func runLive(cmd *cobra.Command, args []string) error {
 		Network:     networkName,
 	}
 
-	var nodeErrors []string
-	for _, serverName := range targetServers {
-		server := cfg.Servers[serverName]
-		fmt.Printf("→ Disabling on %s (%s)...\n", serverName, server.Host)
-		if err := disableMaintenanceOnNode(cfg, server, socket, envName, liveService, request); err != nil {
-			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", serverName, err))
-			fmt.Printf("  failed: %v\n", err)
-			continue
-		}
-		fmt.Printf("  disabled\n")
-	}
+	results := runMaintenanceNodeActions(cfg.Servers, targetServers, func(_ string, server config.ServerConfig) error {
+		return disableMaintenanceOnNode(cfg, server, socket, envName, liveService, request)
+	})
+	nodeErrors := printMaintenanceNodeResults("Disabling", "disabled", results)
 	if len(nodeErrors) > 0 {
 		return fmt.Errorf("maintenance disable failed on %d/%d node(s): %s", len(nodeErrors), len(targetServers), strings.Join(nodeErrors, "; "))
 	}
