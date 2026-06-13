@@ -72,41 +72,18 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		// Check if server is already set up and needs upgrade
 		serverVersion, err := setup.DetectServerVersion(client)
 		if err == nil && serverVersion != nil {
-			// Server already set up
 			if serverVersion.IsUpgradeAvailable() {
-				fmt.Printf("→ Server is at v%s, upgrading to v%s...\n", serverVersion.Version, setup.CurrentVersion)
-
-				// Create upgrader with console logger
-				upgrader := setup.NewUpgrader(client, &consoleLogger{}, Version)
-
-				// Plan upgrade
-				path, err := setup.PlanUpgrade(serverVersion.Version, setup.CurrentVersion)
-				if err != nil {
-					return fmt.Errorf("failed to plan upgrade: %w", err)
-				}
-
-				// Execute upgrade
-				if err := upgrader.Execute(path); err != nil {
-					return fmt.Errorf("upgrade failed: %w", err)
-				}
-
-				if err := ensureTakodRuntimeForSetup(prov, cfg); err != nil {
-					return fmt.Errorf("failed to refresh takod runtime on server %s: %w", name, err)
-				}
-
-				fmt.Printf("  ✓ Server upgraded to v%s\n", setup.CurrentVersion)
-				continue // Skip fresh setup
-			} else {
+				fmt.Printf("→ Server is at v%s, reapplying current setup v%s...\n", serverVersion.Version, setup.CurrentVersion)
+			} else if serverVersion.Version == setup.CurrentVersion {
 				fmt.Printf("→ Server is already at the latest version (v%s), refreshing takod runtime\n", serverVersion.Version)
 				if err := ensureTakodRuntimeForSetup(prov, cfg); err != nil {
 					return fmt.Errorf("failed to refresh takod runtime on server %s: %w", name, err)
 				}
 				continue
 			}
+		} else {
+			fmt.Printf("→ Setting up server from scratch...\n")
 		}
-
-		// Server not set up - run full provisioning
-		fmt.Printf("→ Setting up server from scratch...\n")
 
 		// Run provisioning steps
 		steps := []struct {
