@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 	"github.com/spf13/cobra"
 )
 
@@ -333,6 +336,9 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	fmt.Println()
+	printTakodRuntimeStatus(takodstate.NewManager(client, cfg, envName))
+
 	lease, err := remoteMgr.ReadLease()
 	if err != nil {
 		fmt.Printf("Lease: Error reading lease - %v\n", err)
@@ -358,6 +364,96 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func printTakodRuntimeStatus(manager *takodstate.Manager) {
+	fmt.Println("=== Takod Runtime State ===")
+
+	desired, desiredErr := manager.ReadDesired()
+	actual, actualErr := manager.ReadActual()
+	if errors.Is(desiredErr, takodstate.ErrNotFound) && errors.Is(actualErr, takodstate.ErrNotFound) {
+		fmt.Println("Status: No desired or actual runtime state recorded")
+		return
+	}
+
+	if desiredErr != nil && !errors.Is(desiredErr, takodstate.ErrNotFound) {
+		fmt.Printf("Desired: Error reading - %v\n", desiredErr)
+	} else if desired != nil {
+		fmt.Println("Desired revision:")
+		fmt.Printf("  ID:      %s\n", desired.RevisionID)
+		fmt.Printf("  Source:  %s\n", desired.Source)
+		fmt.Printf("  Time:    %s (%s ago)\n", desired.CreatedAt.Format(time.RFC3339), formatStateDuration(time.Since(desired.CreatedAt)))
+		if desired.Git.CommitShort != "" {
+			fmt.Printf("  Commit:  %s\n", desired.Git.CommitShort)
+		}
+		if len(desired.TargetNodes) > 0 {
+			fmt.Printf("  Nodes:   %s\n", strings.Join(desired.TargetNodes, ", "))
+		}
+		printDesiredRuntimeServices(desired.Services)
+	} else {
+		fmt.Println("Desired: Not recorded")
+	}
+
+	if actualErr != nil && !errors.Is(actualErr, takodstate.ErrNotFound) {
+		fmt.Printf("Actual: Error reading - %v\n", actualErr)
+	} else if actual != nil {
+		fmt.Println("Actual snapshot:")
+		fmt.Printf("  Time:    %s (%s ago)\n", actual.CapturedAt.Format(time.RFC3339), formatStateDuration(time.Since(actual.CapturedAt)))
+		if len(actual.TargetNodes) > 0 {
+			fmt.Printf("  Nodes:   %s\n", strings.Join(actual.TargetNodes, ", "))
+		}
+		printActualRuntimeServices(actual.Services)
+	} else {
+		fmt.Println("Actual: Not recorded")
+	}
+}
+
+func printDesiredRuntimeServices(services map[string]takodstate.DesiredService) {
+	if len(services) == 0 {
+		fmt.Println("  Services: none")
+		return
+	}
+
+	names := sortedServiceNames(services)
+	fmt.Printf("  Services: %d\n", len(names))
+	for _, name := range names {
+		service := services[name]
+		image := service.Image
+		if image == "" {
+			image = service.Build
+		}
+		if image == "" {
+			image = "<none>"
+		}
+		fmt.Printf("    - %s: %d replica(s), %s\n", name, service.Replicas, image)
+	}
+}
+
+func printActualRuntimeServices(services map[string]takodstate.ActualService) {
+	if len(services) == 0 {
+		fmt.Println("  Services: none")
+		return
+	}
+
+	names := sortedServiceNames(services)
+	fmt.Printf("  Services: %d\n", len(names))
+	for _, name := range names {
+		service := services[name]
+		image := service.Image
+		if image == "" {
+			image = "<unknown>"
+		}
+		fmt.Printf("    - %s: %d replica(s), %s\n", name, service.Replicas, image)
+	}
+}
+
+func sortedServiceNames[T any](services map[string]T) []string {
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func resolveStateServer(cfg *config.Config, envName string, requestedServer string) (string, config.ServerConfig, error) {

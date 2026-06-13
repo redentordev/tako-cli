@@ -8,8 +8,10 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/notification"
+	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 	"github.com/spf13/cobra"
 )
 
@@ -198,6 +200,9 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	startTime := time.Now()
 
 	deploy := deployer.NewDeployerWithPool(client, cfg, envName, sshPool, verbose)
+	if err := deploy.SetTargetServers(envServers); err != nil {
+		return err
+	}
 	if err := deploy.SetupTakodRuntime(); err != nil {
 		return fmt.Errorf("failed to setup takod runtime: %w", err)
 	}
@@ -227,6 +232,47 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		if verbose {
 			fmt.Printf("Warning: failed to update deployment status: %v\n", err)
 		}
+	}
+
+	desiredServices := cloneServiceMap(services)
+	rollbackConfig := desiredServices[rollbackService]
+	rollbackConfig.Image = serviceState.Image
+	rollbackConfig.Replicas = serviceState.Replicas
+	if serviceState.Port > 0 {
+		rollbackConfig.Port = serviceState.Port
+	}
+	desiredServices[rollbackService] = rollbackConfig
+	imageRefs := defaultImageRefs(cfg, envName, desiredServices)
+	imageRefs[rollbackService] = serviceState.Image
+
+	postRollbackActualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, envServers, nil)
+	if err != nil {
+		return fmt.Errorf("rollback succeeded but failed to gather post-rollback actual state: %w", err)
+	}
+	if err := persistTakodRuntimeState(
+		sshPool,
+		cfg,
+		envName,
+		envServers,
+		"rollback",
+		desiredServices,
+		imageRefs,
+		postRollbackActualState,
+		takodstate.GitInfo{
+			Commit:      targetDeployment.GitCommit,
+			CommitShort: targetDeployment.GitCommitShort,
+			Branch:      targetDeployment.GitBranch,
+			Message:     targetDeployment.GitCommitMsg,
+			Author:      targetDeployment.GitAuthor,
+		},
+		"rollback.succeeded",
+		fmt.Sprintf("rolled back %s to deployment %s", rollbackService, targetDeployment.ID),
+		map[string]string{
+			"service":      rollbackService,
+			"deploymentId": targetDeployment.ID,
+		},
+	); err != nil {
+		return fmt.Errorf("rollback succeeded but failed to persist takod state: %w", err)
 	}
 
 	// Replicate updated state to mesh nodes (async, fire-and-forget)
