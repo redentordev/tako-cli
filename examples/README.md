@@ -321,15 +321,12 @@ npm start
 # Visit http://localhost:3000
 ```
 
-For services requiring databases:
-```bash
-# PostgreSQL
-docker run -d -p 5432:5432 \
-  -e POSTGRES_PASSWORD=password \
-  postgres:15
+For services requiring databases, use your normal local Postgres/Redis setup
+while developing. After deployment, validate runtime state through Tako:
 
-# Redis
-docker run -d -p 6379:6379 redis:7-alpine
+```bash
+tako ps
+tako logs --service web --tail 50
 ```
 
 ## Environment Variables
@@ -387,15 +384,11 @@ services:
     replicas: 5  # Scale to 5 instances
 ```
 
-### Add Hooks
+### Run Startup Tasks
 ```yaml
 services:
   web:
-    hooks:
-      preDeploy:
-        - npm run migrate
-      postDeploy:
-        - npm run seed
+    command: sh -c "npm run migrate && npm start"
 ```
 
 ## Troubleshooting
@@ -403,24 +396,24 @@ services:
 ### Service Not Starting
 ```bash
 # Check logs
-docker logs project-service-1
+tako logs --service web
 
-# Check if container exists
-docker ps -a | grep project
+# Check takod runtime state
+tako ps
 
-# Check if port is available
-netstat -tulpn | grep :3000
+# Check node and project health
+tako doctor
 ```
 
 ### Domain Not Resolving
 1. Verify DNS points to your server IP
 2. Wait for DNS propagation (up to 48 hours)
-3. Check Caddy logs: `docker logs caddy`
+3. Check access logs with `tako access`
 
 ### Database Connection Failed
-1. Check service is running: `docker ps | grep postgres`
+1. Check service is running: `tako ps`
 2. Verify connection string in env vars
-3. Check if database is initialized: `docker logs project-postgres`
+3. Check recent service logs: `tako logs --service postgres`
 
 ### Can't Access Internal Service
 - Internal services are not exposed to internet (by design)

@@ -21,7 +21,6 @@ tako ps
 ## Verify
 
 ```bash
-docker ps --filter label=tako.project=placement-test
 tako ps --server node1
 tako ps --server node2
 ```

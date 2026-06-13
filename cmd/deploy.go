@@ -532,9 +532,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Warning: failed to save remote deployment state: %v\n", err)
 		}
 
-		postDeployActualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, localStateMgr)
+		finalActualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, localStateMgr)
 		if err != nil {
-			return fmt.Errorf("deployment succeeded but failed to gather post-deploy actual state: %w", err)
+			return fmt.Errorf("deployment succeeded but failed to gather final actual state: %w", err)
 		}
 		if err := persistTakodRuntimeState(
 			sshPool,
@@ -544,7 +544,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			"deploy",
 			services,
 			imageRefs,
-			postDeployActualState,
+			finalActualState,
 			gitInfoFromCommit(commitInfo),
 			"deploy.succeeded",
 			fmt.Sprintf("deployed %d service(s)", len(services)),

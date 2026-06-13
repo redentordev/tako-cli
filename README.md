@@ -276,7 +276,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Domain Redirects** - Automatic www → non-www (or vice versa) with path preservation
 - **Health Checks** - Ensure containers are healthy after reconciliation
 - **Secrets Management** - Secure handling of environment secrets with automatic redaction
-- **Volume Backup/Restore** - Backup and restore Docker volumes with `tako backup`
+- **Volume Backup/Restore** - Backup and restore service volumes with `tako backup`
 - **Drift Detection** - Detect configuration drift with `tako drift`
 
 ### Servers & Scaling
@@ -290,7 +290,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 - **Simple YAML Configuration** - Intuitive and readable
 - **Environment Variables** - Full support with .env files
-- **Local Development Mode** - Run production environment locally with `tako dev`
+- **Local Development Workflow** - Pull remote state, use `.env` files, and deploy through the same takod path
 - **Auto-Update** - Built-in upgrade mechanism with `tako upgrade`
 - **Verbose Logging** - Detailed output for debugging
 - **Cross-Platform** - Single binary for Windows, macOS, Linux
@@ -333,7 +333,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 | Command | Description |
 |---------|-------------|
-| `tako backup --volume <name>` | Backup a Docker volume |
+| `tako backup --volume <name>` | Backup a service volume |
 | `tako backup --list` | List available backups |
 | `tako backup --restore <id>` | Restore a volume from backup |
 | `tako backup --cleanup <days>` | Delete backups older than N days |
@@ -364,7 +364,6 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako state pull` | Sync remote deployment state into local `.tako/` |
 | `tako state status` | Compare local/remote state and show the remote lease |
 | `tako upgrade` | Upgrade Tako CLI to the latest version |
-| `tako dev` | Run production environment locally |
 | `tako live` | Live development mode with hot reload |
 | `tako cleanup` | Clean up old Docker resources |
 

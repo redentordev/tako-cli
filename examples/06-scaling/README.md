@@ -235,24 +235,22 @@ The load balancer uses these to:
 
 **List all instances:**
 ```bash
-docker ps | grep scaling-web
+tako ps web
 ```
 
 **View logs from all instances:**
 ```bash
-docker logs scaling-web-1
-docker logs scaling-web-2
-docker logs scaling-web-3
+tako logs --service web --tail 100
 ```
 
 **Follow logs in real-time:**
 ```bash
-docker logs -f scaling-web-1
+tako logs --service web --follow
 ```
 
 **Check resource usage:**
 ```bash
-docker stats scaling-web-1 scaling-web-2 scaling-web-3
+tako stats --service web
 ```
 
 ## When to Scale

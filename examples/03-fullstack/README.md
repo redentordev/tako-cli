@@ -167,21 +167,9 @@ The dependency resolver detects these patterns in environment variables:
 
 ## Testing Locally
 
-**Terminal 1 - PostgreSQL:**
-```bash
-docker run -d --name postgres \
-  -e POSTGRES_DB=appdb \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=secret123 \
-  -p 5432:5432 postgres:15
-```
+Use local PostgreSQL and Redis instances, then start the app services:
 
-**Terminal 2 - Redis:**
-```bash
-docker run -d --name redis -p 6379:6379 redis:7-alpine
-```
-
-**Terminal 3 - API:**
+**Terminal 1 - API:**
 ```bash
 cd api
 npm install
