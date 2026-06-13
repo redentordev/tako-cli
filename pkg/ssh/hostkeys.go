@@ -13,6 +13,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+	"golang.org/x/term"
 )
 
 // HostKeyMode controls host key verification behavior
@@ -114,6 +115,7 @@ func NewHostKeyVerifier(mode HostKeyMode) (*HostKeyVerifier, error) {
 		mode:            mode,
 		systemHostsPath: filepath.Join(homeDir, ".ssh", "known_hosts"),
 		takoHostsPath:   filepath.Join(takoDir, "known_hosts"),
+		promptFn:        InteractivePrompt,
 	}, nil
 }
 
@@ -199,12 +201,7 @@ func (v *HostKeyVerifier) verify(hostname string, remote net.Addr, key ssh.Publi
 
 	case HostKeyModeAsk:
 		if v.promptFn == nil {
-			// No prompt function - fall back to TOFU behavior
-			fmt.Fprintf(os.Stderr, "Warning: No interactive prompt available, using TOFU for %s\n", host)
-			if err := v.addHostKey(host, port, key); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: Could not save host key: %v\n", err)
-			}
-			return nil
+			return fmt.Errorf("host key mode ask requires an interactive prompt; use tofu to trust on first use or strict with preinstalled known_hosts")
 		}
 
 		accepted, err := v.promptFn(host, fingerprint, key.Type())
@@ -312,26 +309,31 @@ func extractHostPort(hostname string, remote net.Addr) (string, int) {
 // InteractivePrompt prompts the user to accept an unknown host key
 // Use this with SetPromptFunc for interactive CLI sessions
 func InteractivePrompt(host, fingerprint, keyType string) (bool, error) {
-	fmt.Printf(`The authenticity of host '%s' can't be established.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return false, fmt.Errorf("host key prompt requires a terminal; use tofu to trust on first use or strict with preinstalled known_hosts")
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf(`The authenticity of host '%s' can't be established.
 %s key fingerprint is %s.
 Are you sure you want to continue connecting (yes/no)? `, host, keyType, fingerprint)
 
-	reader := bufio.NewReader(os.Stdin)
-	response, err := reader.ReadString('\n')
-	if err != nil {
-		return false, err
-	}
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			return false, err
+		}
 
-	response = strings.TrimSpace(strings.ToLower(response))
+		response = strings.TrimSpace(strings.ToLower(response))
 
-	switch response {
-	case "yes", "y":
-		return true, nil
-	case "no", "n":
-		return false, nil
-	default:
-		fmt.Println("Please type 'yes' or 'no'.")
-		return InteractivePrompt(host, fingerprint, keyType)
+		switch response {
+		case "yes", "y":
+			return true, nil
+		case "no", "n":
+			return false, nil
+		default:
+			fmt.Println("Please type 'yes' or 'no'.")
+		}
 	}
 }
 
