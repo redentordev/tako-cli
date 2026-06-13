@@ -62,6 +62,23 @@ func TestReleaseVersionArg(t *testing.T) {
 	}
 }
 
+func TestTakodSystemdUnitGrantsDockerGroupSocketAccess(t *testing.T) {
+	unit := buildTakodSystemdUnit("/usr/local/bin/tako", "/run/tako/takod.sock", "/var/lib/tako")
+	for _, required := range []string{
+		"User=root",
+		"Group=docker",
+		"RuntimeDirectory=tako",
+		"RuntimeDirectoryMode=0770",
+		"UMask=0007",
+		"Requires=docker.service",
+		"ExecStart=/usr/local/bin/tako takod run --socket /run/tako/takod.sock --data-dir /var/lib/tako",
+	} {
+		if !strings.Contains(unit, required) {
+			t.Fatalf("systemd unit is missing %q:\n%s", required, unit)
+		}
+	}
+}
+
 func TestBootstrapScriptsAvoidDownloadedShellInstallers(t *testing.T) {
 	for name, script := range map[string]string{
 		"base packages": basePackageInstallScript(),

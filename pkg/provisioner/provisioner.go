@@ -236,21 +236,7 @@ func (p *Provisioner) InstallTakodService(socket string, dataDir string) error {
 		return fmt.Errorf("invalid takod data directory: %w", err)
 	}
 
-	unit := fmt.Sprintf(`[Unit]
-Description=Tako node agent
-After=network-online.target docker.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=%s takod run --socket %s --data-dir %s
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-`, binaryPath, socket, dataDir)
+	unit := buildTakodSystemdUnit(binaryPath, socket, dataDir)
 
 	uploadServiceCmd := fmt.Sprintf("sudo tee /etc/systemd/system/takod.service > /dev/null << 'EOFSERVICE'\n%s\nEOFSERVICE", unit)
 	if _, err := p.client.Execute(uploadServiceCmd); err != nil {
@@ -268,6 +254,29 @@ WantedBy=multi-user.target
 		}
 	}
 	return nil
+}
+
+func buildTakodSystemdUnit(binaryPath string, socket string, dataDir string) string {
+	return fmt.Sprintf(`[Unit]
+Description=Tako node agent
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=docker
+RuntimeDirectory=tako
+RuntimeDirectoryMode=0770
+UMask=0007
+ExecStart=%s takod run --socket %s --data-dir %s
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`, binaryPath, socket, dataDir)
 }
 
 func (p *Provisioner) detectLinuxArch() (string, error) {
