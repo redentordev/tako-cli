@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -16,6 +17,8 @@ import (
 )
 
 const MaxHistoryEntries = 50
+
+var ErrNotFound = errors.New("takod deployment history not found")
 
 // StateManager manages deployment history through the node-local takod state API.
 type StateManager struct {
@@ -191,14 +194,16 @@ func (s *StateManager) generateDeploymentID() string {
 }
 
 func (s *StateManager) updateHistory(deployment *DeploymentState) error {
-	history, _ := s.loadHistory()
-	if history == nil {
+	history, err := s.loadHistory()
+	if errors.Is(err, ErrNotFound) {
 		history = &DeploymentHistory{
 			ProjectName: s.projectName,
 			Environment: s.environment,
 			Server:      s.server,
 			Deployments: []*DeploymentState{},
 		}
+	} else if err != nil {
+		return fmt.Errorf("failed to load existing deployment history before update: %w", err)
 	}
 
 	found := false
@@ -234,7 +239,7 @@ func (s *StateManager) LoadHistory() (*DeploymentHistory, error) {
 func (s *StateManager) loadHistory() (*DeploymentHistory, error) {
 	var history DeploymentHistory
 	if err := s.readDocument("history", "", &history); err != nil {
-		return nil, fmt.Errorf("no history found")
+		return nil, err
 	}
 	return &history, nil
 }
@@ -285,12 +290,19 @@ func (s *StateManager) readRawDocument(document string, revisionID string) (stri
 	if err != nil {
 		return "", err
 	}
+	return decodeStateDocumentContent(output, document)
+}
+
+func decodeStateDocumentContent(output string, document string) (string, error) {
 	var response takod.StateDocumentResponse
 	if err := json.Unmarshal([]byte(output), &response); err != nil {
 		return "", fmt.Errorf("failed to parse takod state response: %w", err)
 	}
 	if !response.Found {
-		return "", fmt.Errorf("not found")
+		return "", ErrNotFound
+	}
+	if response.Content == "" {
+		return "", fmt.Errorf("empty takod state document %s", document)
 	}
 	return response.Content, nil
 }
