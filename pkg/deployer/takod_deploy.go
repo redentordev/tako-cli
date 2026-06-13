@@ -126,12 +126,12 @@ func (d *Deployer) DeployServiceTakod(serviceName string, service *config.Servic
 				fmt.Printf("  Image already distributed in this run, skipping...\n")
 			}
 		} else {
-			managerClient, err := d.getFirstEnvironmentClient()
+			sourceClient, err := d.getSourceEnvironmentClient()
 			if err != nil {
 				return err
 			}
 			unreg := unregistry.NewManager(d.config, d.sshPool, d.environment, d.verbose)
-			if err := unreg.DistributeImageParallel(managerClient, imageRef); err != nil {
+			if err := unreg.DistributeImageParallel(sourceClient, imageRef); err != nil {
 				return fmt.Errorf("failed to distribute image across takod nodes: %w", err)
 			}
 			if d.distributedImages != nil {
@@ -710,7 +710,7 @@ func (d *Deployer) meshAddress(index int) (string, error) {
 	return fmt.Sprintf("%s/%d", nodeIP.String(), d.config.Mesh.SubnetBits), nil
 }
 
-func (d *Deployer) getFirstEnvironmentClient() (*ssh.Client, error) {
+func (d *Deployer) getSourceEnvironmentClient() (*ssh.Client, error) {
 	servers, err := d.getTakodTargetServers()
 	if err != nil {
 		return nil, err

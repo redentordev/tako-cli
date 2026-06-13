@@ -246,19 +246,19 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Printf("→ Acquired remote deploy leases: %s\n", leaseSet.Summary())
 	}
 
-	firstServerName := serverNames[0]
-	firstServer := servers[firstServerName]
+	sourceServerName := serverNames[0]
+	sourceServer := servers[sourceServerName]
 
-	// Use one target node as the build/source node; runtime state is still
-	// persisted and reconciled across all selected nodes.
-	firstClient, err := sshPool.GetOrCreateWithAuth(firstServer.Host, firstServer.Port, firstServer.User, firstServer.SSHKey, firstServer.Password)
+	// Use one reachable target as the build/source node; runtime state is still
+	// persisted and reconciled across the selected mesh.
+	sourceClient, err := sshPool.GetOrCreateWithAuth(sourceServer.Host, sourceServer.Port, sourceServer.User, sourceServer.SSHKey, sourceServer.Password)
 	if err != nil {
-		return fmt.Errorf("failed to connect to server %s: %w", firstServerName, err)
+		return fmt.Errorf("failed to connect to server %s: %w", sourceServerName, err)
 	}
-	stateManager := remotestate.NewStateManagerWithSocket(firstClient, cfg.Project.Name, envName, firstServer.Host, takodSocketFromConfig(cfg))
+	stateManager := remotestate.NewStateManagerWithSocket(sourceClient, cfg.Project.Name, envName, sourceServer.Host, takodSocketFromConfig(cfg))
 
 	// Create deployer with pool for takod support
-	deploy := deployer.NewDeployerWithPool(firstClient, cfg, envName, sshPool, verbose)
+	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, verbose)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return err
 	}
@@ -340,7 +340,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 
 		// Setup acme-dns for DNS-01 challenge
-		acmeMgr := acmedns.NewManager(firstClient, firstServer.Host, takodSocketFromConfig(cfg), verbose)
+		acmeMgr := acmedns.NewManager(sourceClient, sourceServer.Host, takodSocketFromConfig(cfg), verbose)
 		if err := acmeMgr.Setup(); err != nil {
 			fmt.Printf("\n⚠ Warning: Failed to setup acme-dns: %v\n", err)
 			fmt.Printf("  Wildcard SSL certificates may not be issued automatically.\n")
@@ -409,7 +409,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		Status:         remotestate.StatusInProgress,
 		Services:       make(map[string]remotestate.ServiceState),
 		User:           remotestate.GetCurrentUser(),
-		Host:           firstServer.Host,
+		Host:           sourceServer.Host,
 		GitCommit:      commitInfo.Hash,
 		GitCommitShort: commitInfo.ShortHash,
 		GitBranch:      commitInfo.Branch,
