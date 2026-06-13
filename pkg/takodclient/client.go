@@ -102,6 +102,13 @@ func StateEndpoint(project string, environment string, document string) string {
 	return "/v1/state?" + query.Encode()
 }
 
+func ActualStateEndpoint(project string, environment string) string {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	return "/v1/actual?" + query.Encode()
+}
+
 func EnvBundleEndpoint(project string, environment string) string {
 	query := url.Values{}
 	query.Set("project", project)
