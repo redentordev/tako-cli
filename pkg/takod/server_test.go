@@ -604,3 +604,27 @@ func TestHandleImageImportRequiresPost(t *testing.T) {
 		t.Fatalf("expected 405, got %d", recorder.Code)
 	}
 }
+
+func TestHandleImageBuildRequiresPost(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/images/build?image=demo/web:abc", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleImageBuild(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleImageBuildRequiresImage(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/build", bytes.NewBufferString(""))
+	recorder := httptest.NewRecorder()
+
+	server.handleImageBuild(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}

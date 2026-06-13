@@ -89,6 +89,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/images/exists", s.handleImageExists)
 	mux.HandleFunc("/v1/images/export", s.handleImageExport)
 	mux.HandleFunc("/v1/images/import", s.handleImageImport)
+	mux.HandleFunc("/v1/images/build", s.handleImageBuild)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -632,6 +633,30 @@ func (s *Server) handleImageImport(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	response, err := ImportImage(r.Context(), r.URL.Query().Get("image"), r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	image := r.URL.Query().Get("image")
+	if err := validateImageName(image); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	response, err := BuildImage(r.Context(), image, r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

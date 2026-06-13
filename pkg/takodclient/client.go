@@ -1,8 +1,10 @@
 package takodclient
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"time"
@@ -60,6 +62,34 @@ func RequestJSON(client *ssh.Client, socket string, method string, endpoint stri
 	return output, nil
 }
 
+func StreamRequest(client *ssh.Client, socket string, method string, endpoint string, reader io.Reader) (string, error) {
+	if socket == "" {
+		socket = DefaultSocket
+	}
+	if !strings.HasPrefix(endpoint, "/") {
+		return "", fmt.Errorf("takod endpoint must start with /")
+	}
+	if method == "" {
+		method = "POST"
+	}
+
+	args := []string{
+		"if test -S " + shellQuote(socket) + " && command -v curl >/dev/null 2>&1; then",
+		"curl --fail --silent --show-error",
+		"--unix-socket " + shellQuote(socket),
+		"-X " + shellQuote(method),
+		"--data-binary @-",
+		shellQuote("http://takod" + endpoint),
+		"; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi",
+	}
+	curlCmd := strings.Join(args, " ")
+	output, err := client.ExecuteWithInput(context.Background(), curlCmd, reader)
+	if err != nil {
+		return output, fmt.Errorf("takod stream request %s %s failed: %w, output: %s", method, endpoint, err, output)
+	}
+	return output, nil
+}
+
 func ProxyFileEndpoint(name string) string {
 	return "/v1/proxy-file?name=" + url.QueryEscape(name)
 }
@@ -90,6 +120,12 @@ func BackupsEndpoint(project string, environment string, volume string, backupID
 		query.Set("backupId", backupID)
 	}
 	return "/v1/backups?" + query.Encode()
+}
+
+func ImageBuildEndpoint(image string) string {
+	query := url.Values{}
+	query.Set("image", image)
+	return "/v1/images/build?" + query.Encode()
 }
 
 func shellQuote(value string) string {
