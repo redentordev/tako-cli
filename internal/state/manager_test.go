@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecodeStateDocumentContentReturnsNotFoundSentinel(t *testing.T) {
@@ -40,5 +41,22 @@ func TestDecodeStateDocumentContentReturnsContent(t *testing.T) {
 	}
 	if content != "{\"deployments\":[]}\n" {
 		t.Fatalf("content = %q", content)
+	}
+}
+
+func TestPruneAndSortDeploymentsDropsNilSortsAndLimits(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	got := pruneAndSortDeployments([]*DeploymentState{
+		{ID: "old", Timestamp: base},
+		nil,
+		{ID: "new", Timestamp: base.Add(time.Hour)},
+		{ID: "middle", Timestamp: base.Add(time.Minute)},
+	}, 2)
+
+	if len(got) != 2 {
+		t.Fatalf("deployments = %d, want 2", len(got))
+	}
+	if got[0].ID != "new" || got[1].ID != "middle" {
+		t.Fatalf("deployments order = [%s %s], want [new middle]", got[0].ID, got[1].ID)
 	}
 }

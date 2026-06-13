@@ -18,7 +18,7 @@ import (
 
 const MaxHistoryEntries = 50
 
-var ErrNotFound = errors.New("takod deployment history not found")
+var ErrNotFound = errors.New("takod state document not found")
 
 // StateManager manages deployment history through the node-local takod state API.
 type StateManager struct {
@@ -83,14 +83,18 @@ func (s *StateManager) GetDeployment(deploymentID string) (*DeploymentState, err
 	var deployment DeploymentState
 	if err := s.readDocument("deployment", deploymentID, &deployment); err == nil {
 		return &deployment, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, fmt.Errorf("failed to read deployment %s: %w", deploymentID, err)
 	}
 
 	history, err := s.loadHistory()
-	if err != nil {
+	if errors.Is(err, ErrNotFound) {
 		return nil, fmt.Errorf("deployment %s not found", deploymentID)
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to load deployment history for %s: %w", deploymentID, err)
 	}
 	for _, dep := range history.Deployments {
-		if dep.ID == deploymentID {
+		if dep != nil && dep.ID == deploymentID {
 			return dep, nil
 		}
 	}
@@ -110,6 +114,9 @@ func (s *StateManager) ListDeployments(opts *HistoryOptions) ([]*DeploymentState
 
 	var result []*DeploymentState
 	for _, dep := range history.Deployments {
+		if dep == nil {
+			continue
+		}
 		if opts.Status != "" && dep.Status != opts.Status {
 			continue
 		}
@@ -165,7 +172,7 @@ func (s *StateManager) GetPreviousDeployment(currentID string) (*DeploymentState
 		return nil, err
 	}
 	for i, dep := range deployments {
-		if dep.ID == currentID && i+1 < len(deployments) {
+		if dep != nil && dep.ID == currentID && i+1 < len(deployments) {
 			return deployments[i+1], nil
 		}
 	}
@@ -178,13 +185,11 @@ func (s *StateManager) CleanupOldDeployments() error {
 	if err != nil {
 		return err
 	}
-	if len(history.Deployments) <= MaxHistoryEntries {
+	pruned := pruneAndSortDeployments(history.Deployments, MaxHistoryEntries)
+	if len(history.Deployments) <= MaxHistoryEntries && len(pruned) == len(history.Deployments) {
 		return nil
 	}
-	sort.Slice(history.Deployments, func(i, j int) bool {
-		return history.Deployments[i].Timestamp.After(history.Deployments[j].Timestamp)
-	})
-	history.Deployments = history.Deployments[:MaxHistoryEntries]
+	history.Deployments = pruned
 	history.LastUpdated = time.Now().UTC()
 	return s.SaveHistory(history)
 }
@@ -208,7 +213,7 @@ func (s *StateManager) updateHistory(deployment *DeploymentState) error {
 
 	found := false
 	for i, existing := range history.Deployments {
-		if existing.ID == deployment.ID {
+		if existing != nil && existing.ID == deployment.ID {
 			history.Deployments[i] = deployment
 			found = true
 			break
@@ -218,17 +223,28 @@ func (s *StateManager) updateHistory(deployment *DeploymentState) error {
 		history.Deployments = append(history.Deployments, deployment)
 	}
 
-	sort.Slice(history.Deployments, func(i, j int) bool {
-		return history.Deployments[i].Timestamp.After(history.Deployments[j].Timestamp)
-	})
-	if len(history.Deployments) > MaxHistoryEntries {
-		history.Deployments = history.Deployments[:MaxHistoryEntries]
-	}
+	history.Deployments = pruneAndSortDeployments(history.Deployments, MaxHistoryEntries)
 	history.ProjectName = s.projectName
 	history.Environment = s.environment
 	history.Server = s.server
 	history.LastUpdated = time.Now().UTC()
 	return s.SaveHistory(history)
+}
+
+func pruneAndSortDeployments(deployments []*DeploymentState, limit int) []*DeploymentState {
+	pruned := make([]*DeploymentState, 0, len(deployments))
+	for _, deployment := range deployments {
+		if deployment != nil {
+			pruned = append(pruned, deployment)
+		}
+	}
+	sort.Slice(pruned, func(i, j int) bool {
+		return pruned[i].Timestamp.After(pruned[j].Timestamp)
+	})
+	if limit > 0 && len(pruned) > limit {
+		return pruned[:limit]
+	}
+	return pruned
 }
 
 // LoadHistory returns the deployment history from takod state.
