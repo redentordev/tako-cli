@@ -20,6 +20,7 @@ const (
 	acmeDNSDefaultDomain    = "acme.tako"
 	acmeDNSDefaultNSAdmin   = "admin.tako"
 	acmeDNSDefaultAPIListen = "0.0.0.0"
+	acmeDNSHostAPIBinding   = "127.0.0.1:8053:80"
 )
 
 var (
@@ -76,7 +77,8 @@ func ReconcileAcmeDNS(ctx context.Context, req ReconcileAcmeDNSRequest) (*Reconc
 	if err := ensureAcmeDNSDirectories(); err != nil {
 		return nil, err
 	}
-	if err := writeAcmeDNSConfig(req.ServerIP); err != nil {
+	configChanged, err := writeAcmeDNSConfig(req.ServerIP)
+	if err != nil {
 		return nil, err
 	}
 
@@ -85,10 +87,14 @@ func ReconcileAcmeDNS(ctx context.Context, req ReconcileAcmeDNSRequest) (*Reconc
 		return nil, fmt.Errorf("failed to check acme-dns container status: %w", err)
 	}
 	if strings.TrimSpace(running) == acmeDNSContainerName {
-		return &ReconcileAcmeDNSResponse{Container: acmeDNSContainerName, Image: req.Image}, nil
+		if !configChanged && acmeDNSContainerHasLoopbackAPI(ctx) {
+			return &ReconcileAcmeDNSResponse{Container: acmeDNSContainerName, Image: req.Image}, nil
+		}
+		if _, err := runDocker(ctx, "rm", "-f", acmeDNSContainerName); err != nil {
+			return nil, fmt.Errorf("failed to replace acme-dns container: %w", err)
+		}
 	}
 
-	_, _ = runDocker(ctx, "rm", "-f", acmeDNSContainerName)
 	if output, err := runDocker(ctx, buildAcmeDNSContainerArgs(req.Image)...); err != nil {
 		return nil, fmt.Errorf("failed to start acme-dns: %w, output: %s", err, output)
 	}
@@ -235,7 +241,7 @@ func ensureAcmeDNSDirectories() error {
 	return nil
 }
 
-func writeAcmeDNSConfig(serverIP string) error {
+func writeAcmeDNSConfig(serverIP string) (bool, error) {
 	config := fmt.Sprintf(`[general]
 listen = "0.0.0.0:53"
 protocol = "both"
@@ -274,10 +280,13 @@ logformat = "text"
 		acmeDNSDefaultAPIListen,
 	)
 	path := filepath.Join(acmeDNSConfigDir, "config.cfg")
-	if err := os.WriteFile(path, []byte(config), 0644); err != nil {
-		return fmt.Errorf("failed to write acme-dns config: %w", err)
+	if current, err := os.ReadFile(path); err == nil && string(current) == config {
+		return false, nil
 	}
-	return nil
+	if err := os.WriteFile(path, []byte(config), 0644); err != nil {
+		return false, fmt.Errorf("failed to write acme-dns config: %w", err)
+	}
+	return true, nil
 }
 
 func buildAcmeDNSContainerArgs(image string) []string {
@@ -287,11 +296,37 @@ func buildAcmeDNSContainerArgs(image string) []string {
 		"--restart", "unless-stopped",
 		"--publish", "53:53/udp",
 		"--publish", "53:53/tcp",
-		"--publish", "8053:80",
+		"--publish", acmeDNSHostAPIBinding,
 		"--volume", filepath.Join(acmeDNSDataDir, "config") + ":/etc/acme-dns:ro",
 		"--volume", filepath.Join(acmeDNSDataDir, "data") + ":/var/lib/acme-dns",
 		"--label", "tako.runtime=takod",
 		"--label", "tako.component=acme-dns",
 		image,
 	}
+}
+
+type acmeDNSDockerPortBinding struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
+}
+
+func acmeDNSContainerHasLoopbackAPI(ctx context.Context) bool {
+	output, err := runDocker(ctx, "inspect", acmeDNSContainerName, "--format", "{{json .HostConfig.PortBindings}}")
+	if err != nil {
+		return false
+	}
+	return acmeDNSPortBindingsHaveLoopbackAPI(output)
+}
+
+func acmeDNSPortBindingsHaveLoopbackAPI(output string) bool {
+	var bindings map[string][]acmeDNSDockerPortBinding
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &bindings); err != nil {
+		return false
+	}
+	for _, binding := range bindings["80/tcp"] {
+		if binding.HostPort == "8053" && binding.HostIP == "127.0.0.1" {
+			return true
+		}
+	}
+	return false
 }
