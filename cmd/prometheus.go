@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -30,6 +31,9 @@ func runPrometheus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if !cfg.IsTakodRuntime() {
+		return fmt.Errorf("runtime.mode=%s is not supported; Tako now uses runtime.mode=takod", cfg.GetRuntimeMode())
+	}
 
 	// Determine environment
 	envName := getEnvironmentName(cfg)
@@ -44,31 +48,88 @@ func runPrometheus(cmd *cobra.Command, args []string) error {
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
-	// Collect and export metrics
-	for _, serverName := range servers {
-		server := cfg.Servers[serverName]
-
-		// Get or create SSH client (supports both key and password auth)
-		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
-		if err != nil {
-			continue // Skip unavailable servers
-		}
-
-		metrics, err := readMetricsViaTakod(client, cfg, true)
-		if err != nil {
+	for _, result := range collectPrometheusNodes(cfg, envName, servers, sshPool) {
+		if result.err != nil || result.metrics == nil {
 			continue
 		}
-
-		// Export system metrics
-		exportSystemMetrics(serverName, server.Host, metrics)
-
-		statsResponse, err := readStatsViaTakodWithOptions(client, cfg, envName, "", false)
-		if err == nil && len(statsResponse.Stats) > 0 {
-			exportContainerMetrics(serverName, server.Host, statsResponse.Stats)
+		exportSystemMetrics(result.serverName, result.host, result.metrics)
+		if len(result.stats) > 0 {
+			exportContainerMetrics(result.serverName, result.host, result.stats)
 		}
 	}
 
 	return nil
+}
+
+type prometheusNodeResult struct {
+	index      int
+	serverName string
+	host       string
+	metrics    *MetricsData
+	stats      []takod.ContainerStat
+	err        error
+}
+
+type prometheusReadFunc func(serverName string, server config.ServerConfig) (*MetricsData, []takod.ContainerStat, error)
+
+func collectPrometheusNodes(cfg *config.Config, envName string, serverNames []string, sshPool *ssh.Pool) []prometheusNodeResult {
+	return collectPrometheusNodesWith(cfg.Servers, serverNames, func(serverName string, server config.ServerConfig) (*MetricsData, []takod.ContainerStat, error) {
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		metrics, err := readMetricsViaTakod(client, cfg, true)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		statsResponse, err := readStatsViaTakodWithOptions(client, cfg, envName, "", false)
+		if err != nil {
+			return metrics, nil, nil
+		}
+		return metrics, statsResponse.Stats, nil
+	})
+}
+
+func collectPrometheusNodesWith(configuredServers map[string]config.ServerConfig, serverNames []string, read prometheusReadFunc) []prometheusNodeResult {
+	resultCh := make(chan prometheusNodeResult, len(serverNames))
+	var wg sync.WaitGroup
+
+	for index, serverName := range serverNames {
+		server, ok := configuredServers[serverName]
+		if !ok {
+			resultCh <- prometheusNodeResult{
+				index:      index,
+				serverName: serverName,
+				err:        fmt.Errorf("server not found in configuration"),
+			}
+			continue
+		}
+
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			metrics, stats, err := read(serverName, server)
+			resultCh <- prometheusNodeResult{
+				index:      index,
+				serverName: serverName,
+				host:       server.Host,
+				metrics:    metrics,
+				stats:      stats,
+				err:        err,
+			}
+		}(index, serverName, server)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]prometheusNodeResult, len(serverNames))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+	return results
 }
 
 func exportSystemMetrics(serverName, serverHost string, metrics *MetricsData) {
