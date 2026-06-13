@@ -32,6 +32,14 @@ func TestResolveServerRequiresRequestedServerInEnvironment(t *testing.T) {
 	}
 }
 
+func TestServerConfigByNameReportsMissingServer(t *testing.T) {
+	cfg := resolverConfig()
+
+	if _, err := serverConfigByName(cfg, "missing"); err == nil {
+		t.Fatal("serverConfigByName should reject missing server")
+	}
+}
+
 func TestResolveEnvironmentServerSetUsesOnlyEnvironmentNodesByDefault(t *testing.T) {
 	cfg := resolverConfig()
 

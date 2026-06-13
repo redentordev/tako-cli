@@ -102,7 +102,10 @@ func unregistryPeerServers(cfg *config.Config, environment string, sourceHost st
 
 	peers := make([]string, 0, len(servers))
 	for _, serverName := range servers {
-		server := cfg.Servers[serverName]
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return nil, fmt.Errorf("server %s not found in configuration", serverName)
+		}
 		if sourceHost != "" && server.Host == sourceHost {
 			continue
 		}

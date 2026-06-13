@@ -109,7 +109,10 @@ func runScaleWithServer(cmd *cobra.Command, args []string, serverOverride string
 	}
 
 	sourceServerName := serverNames[0]
-	sourceServer := cfg.Servers[sourceServerName]
+	sourceServer, err := serverConfigByName(cfg, sourceServerName)
+	if err != nil {
+		return err
+	}
 	sourceClient, err := sshPool.GetOrCreateWithAuth(sourceServer.Host, sourceServer.Port, sourceServer.User, sourceServer.SSHKey, sourceServer.Password)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node %s: %w", sourceServerName, err)
