@@ -63,4 +63,16 @@ jobs:
           cache: true
 
       - name: Race test critical packages
-        run: go test -race ./cmd ./pkg/deployer ./pkg/ssh ./pkg/takodclient ./pkg/takod ./pkg/takodstate
+        run: >
+          go test -race
+          ./cmd
+          ./internal/state
+          ./pkg/mesh
+          ./pkg/provisioner
+          ./pkg/secrets
+          ./pkg/deployer
+          ./pkg/ssh
+          ./pkg/takodclient
+          ./pkg/takod
+          ./pkg/takodstate
+          ./pkg/config
