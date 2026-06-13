@@ -11,7 +11,10 @@ import (
 	"time"
 )
 
-var dockerCommandContext = exec.CommandContext
+var (
+	dockerCommandContext = exec.CommandContext
+	shellCommandContext  = exec.CommandContext
+)
 
 type ReconcileServiceRequest struct {
 	Project        string            `json:"project"`
@@ -29,6 +32,7 @@ type ReconcileServiceRequest struct {
 	Containers     []ContainerSpec   `json:"containers"`
 	Health         *HealthSpec       `json:"health,omitempty"`
 	Command        string            `json:"command,omitempty"`
+	Init           []string          `json:"init,omitempty"`
 }
 
 type ContainerSpec struct {
@@ -63,6 +67,9 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		req.NetworkAlias = req.Service
 	}
 
+	if err := runInitCommands(ctx, req.Init); err != nil {
+		return nil, err
+	}
 	if err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service); err != nil {
 		return nil, err
 	}
@@ -132,6 +139,21 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	for _, container := range req.Containers {
 		if strings.TrimSpace(container.Name) == "" {
 			return fmt.Errorf("container name is required")
+		}
+	}
+	for _, command := range req.Init {
+		if strings.TrimSpace(command) == "" {
+			return fmt.Errorf("init command cannot be empty")
+		}
+	}
+	return nil
+}
+
+func runInitCommands(ctx context.Context, commands []string) error {
+	for _, command := range commands {
+		output, err := runShell(ctx, command)
+		if err != nil {
+			return fmt.Errorf("init command failed: %w, output: %s", err, output)
 		}
 	}
 	return nil
@@ -332,6 +354,15 @@ func waitForContainerHealthy(ctx context.Context, containerName string, health *
 
 func runDocker(ctx context.Context, args ...string) (string, error) {
 	cmd := dockerCommandContext(ctx, "docker", args...)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	err := cmd.Run()
+	return output.String(), err
+}
+
+func runShell(ctx context.Context, command string) (string, error) {
+	cmd := shellCommandContext(ctx, "sh", "-c", command)
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
