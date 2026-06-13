@@ -100,7 +100,7 @@ func TestGatherPSActualStateWithRunsConcurrentlyAndMergesInServerOrder(t *testin
 		t.Fatalf("web replicas = %d, want 3", web.Replicas)
 	}
 	if web.Image != "image-node-a" {
-		t.Fatalf("web image = %q, want first server image", web.Image)
+		t.Fatalf("web image = %q, want selected source image", web.Image)
 	}
 	wantContainers := []string{"node-a-web", "node-b-web", "node-c-web"}
 	if !slices.Equal(web.Containers, wantContainers) {

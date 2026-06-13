@@ -90,7 +90,7 @@ type StorageConfig struct {
 // NFSConfig defines NFS shared storage settings
 type NFSConfig struct {
 	Enabled bool              `yaml:"enabled" json:"enabled"`
-	Server  string            `yaml:"server,omitempty" json:"server,omitempty"` // "auto" = use the first environment node, or specify server name
+	Server  string            `yaml:"server,omitempty" json:"server,omitempty"` // "auto" = use the deterministic environment default, or specify a node
 	Exports []NFSExportConfig `yaml:"exports,omitempty" json:"exports,omitempty"`
 }
 
@@ -445,7 +445,7 @@ func matchesLabels(serverLabels, selectorLabels map[string]string) bool {
 	return true
 }
 
-// GetDefaultServer returns the first configured node for an environment.
+// GetDefaultServer returns the deterministic default node for an environment.
 func (c *Config) GetDefaultServer(envName string) (string, error) {
 	servers, err := c.GetEnvironmentServers(envName)
 	if err != nil {
