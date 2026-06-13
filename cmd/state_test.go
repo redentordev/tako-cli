@@ -313,6 +313,66 @@ func TestLatestDeploymentByTimestamp(t *testing.T) {
 	}
 }
 
+func TestStateStatusCandidatesIncludesEmbeddedAndNodeActual(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	aggregate := actualSnapshot(base.Add(time.Hour), "web")
+	aggregate.Nodes = map[string]takodstate.ActualNodeSnapshot{
+		"node-a": {
+			Node:       "node-a",
+			Services:   actualSnapshot(base, "web").Services,
+			CapturedAt: base,
+		},
+	}
+
+	histories, desired, actual, nodeActual := stateStatusCandidates([]stateStatusNode{
+		{
+			name:    "node-a",
+			history: remoteHistory(base, remoteDeployment("new", base, "demo:v1")),
+			desired: desiredRevision("rev-a", base),
+			actual:  aggregate,
+			nodeActual: []stateNodeActualCandidate{
+				{source: "node-b", node: "node-b", actual: nodeActualSnapshot("node-b", base.Add(2*time.Hour), "worker")},
+			},
+		},
+		{name: "node-c"},
+	})
+
+	if len(histories) != 1 || histories[0].source != "node-a" {
+		t.Fatalf("histories = %#v, want one node-a candidate", histories)
+	}
+	if len(desired) != 1 || desired[0].source != "node-a" {
+		t.Fatalf("desired = %#v, want one node-a candidate", desired)
+	}
+	if len(actual) != 1 || actual[0].source != "node-a" {
+		t.Fatalf("actual = %#v, want one node-a candidate", actual)
+	}
+	if len(nodeActual) != 2 {
+		t.Fatalf("node actual candidates = %d, want embedded plus standalone", len(nodeActual))
+	}
+}
+
+func TestBestStateStatusActualBuildsAggregateFromNodeSnapshots(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+
+	best, ok, nodes := bestStateStatusActual("demo", "production", nil, []stateNodeActualCandidate{
+		{source: "node-a", node: "node-a", actual: nodeActualSnapshot("node-a", base, "web")},
+		{source: "node-b", node: "node-b", actual: nodeActualSnapshot("node-b", base.Add(time.Hour), "worker")},
+	})
+
+	if !ok {
+		t.Fatal("bestStateStatusActual returned no aggregate")
+	}
+	if best.source != "node actual snapshots" {
+		t.Fatalf("best source = %q, want node actual snapshots", best.source)
+	}
+	if len(nodes) != 2 || len(best.actual.Nodes) != 2 {
+		t.Fatalf("node snapshots = %d embedded = %d, want 2", len(nodes), len(best.actual.Nodes))
+	}
+	if got := best.actual.CapturedAt; !got.Equal(base.Add(time.Hour)) {
+		t.Fatalf("aggregate capturedAt = %s, want newest node time", got)
+	}
+}
+
 func stateServerNamesConfig() *config.Config {
 	return &config.Config{
 		Servers: map[string]config.ServerConfig{
