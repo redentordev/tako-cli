@@ -721,3 +721,53 @@ func TestHandleStatsReturnsContainerStats(t *testing.T) {
 		t.Fatalf("unexpected stats response: %#v", response)
 	}
 }
+
+func TestHandleMetricsRequiresGet(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/metrics", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleMetrics(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleMetricsRejectsInvalidCollect(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/metrics?collect=maybe", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleMetrics(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleMetricsReturnsNodeMetrics(t *testing.T) {
+	restore := useTempMetricsFile(t, `{"cpu_percent":"12.5","uptime_seconds":123}`+"\n")
+	defer restore()
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/metrics", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleMetrics(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response MetricsResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode metrics response: %v", err)
+	}
+	var metrics map[string]any
+	if err := json.Unmarshal(response.Metrics, &metrics); err != nil {
+		t.Fatalf("failed to decode nested metrics: %v", err)
+	}
+	if metrics["cpu_percent"] != "12.5" {
+		t.Fatalf("unexpected metrics response: %#v", metrics)
+	}
+}

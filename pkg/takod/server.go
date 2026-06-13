@@ -93,6 +93,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/images/build", s.handleImageBuild)
 	mux.HandleFunc("/v1/logs", s.handleLogs)
 	mux.HandleFunc("/v1/stats", s.handleStats)
+	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -733,6 +734,34 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	collect := false
+	if rawCollect := r.URL.Query().Get("collect"); rawCollect != "" {
+		parsed, err := strconv.ParseBool(rawCollect)
+		if err != nil {
+			http.Error(w, "collect must be a boolean", http.StatusBadRequest)
+			return
+		}
+		collect = parsed
+	}
+
+	response, err := ReadNodeMetrics(r.Context(), collect)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 

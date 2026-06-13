@@ -65,3 +65,11 @@ func TestStatsEndpointEscapesQueryValues(t *testing.T) {
 		t.Fatalf("StatsEndpoint() = %q, want %q", got, want)
 	}
 }
+
+func TestMetricsEndpointWithCollect(t *testing.T) {
+	got := MetricsEndpoint(true)
+	want := "/v1/metrics?collect=true"
+	if got != want {
+		t.Fatalf("MetricsEndpoint() = %q, want %q", got, want)
+	}
+}
