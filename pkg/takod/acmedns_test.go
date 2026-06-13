@@ -15,7 +15,7 @@ func TestBuildAcmeDNSContainerArgs(t *testing.T) {
 		"--restart", "unless-stopped",
 		"--publish", "53:53/udp",
 		"--publish", "53:53/tcp",
-		"--publish", "8053:80",
+		"--publish", "127.0.0.1:8053:80",
 		"--volume", "/data/tako/acme-dns/config:/etc/acme-dns:ro",
 		"--volume", "/data/tako/acme-dns/data:/var/lib/acme-dns",
 		"--label", "tako.runtime=takod",
@@ -24,6 +24,23 @@ func TestBuildAcmeDNSContainerArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected acme-dns args:\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestAcmeDNSPortBindingsRequireLoopbackAPI(t *testing.T) {
+	loopback := `{"80/tcp":[{"HostIp":"127.0.0.1","HostPort":"8053"}]}`
+	if !acmeDNSPortBindingsHaveLoopbackAPI(loopback) {
+		t.Fatal("expected loopback API binding to be accepted")
+	}
+
+	public := `{"80/tcp":[{"HostIp":"0.0.0.0","HostPort":"8053"}]}`
+	if acmeDNSPortBindingsHaveLoopbackAPI(public) {
+		t.Fatal("expected public API binding to be rejected")
+	}
+
+	emptyHost := `{"80/tcp":[{"HostIp":"","HostPort":"8053"}]}`
+	if acmeDNSPortBindingsHaveLoopbackAPI(emptyHost) {
+		t.Fatal("expected wildcard Docker API binding to be rejected")
 	}
 }
 
