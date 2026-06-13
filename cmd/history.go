@@ -39,6 +39,7 @@ func runHistory(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	envName := getEnvironmentName(cfg)
 
 	// Get server config - default to first server if not specified
 	if historyServer == "" {
@@ -71,7 +72,7 @@ func runHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create state manager
-	stateManager := state.NewStateManager(client, cfg.Project.Name, server.Host)
+	stateManager := state.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
 
 	// List deployments
 	opts := &state.HistoryOptions{
@@ -88,7 +89,6 @@ func runHistory(cmd *cobra.Command, args []string) error {
 		// Try recovering from mesh peers
 		replicaPool := ssh.NewPool()
 		defer replicaPool.CloseAll()
-		envName := getEnvironmentName(cfg)
 		replicator := state.NewStateReplicator(replicaPool, cfg, envName, cfg.Project.Name, verbose)
 		if history, source, _ := replicator.RecoverStateFromPeers(); history != nil && len(history.Deployments) > 0 {
 			fmt.Printf("(State recovered from node: %s)\n\n", source)

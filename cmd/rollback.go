@@ -124,7 +124,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create state manager
-	stateManager := remotestate.NewStateManager(client, cfg.Project.Name, server.Host)
+	stateManager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
 	lease, err := stateManager.AcquireLease("rollback", envName, remotestate.DefaultLeaseTTL)
 	if err != nil {
 		return fmt.Errorf("cannot acquire remote rollback lease: %w", err)

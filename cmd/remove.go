@@ -124,7 +124,6 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		RemoveImages:      true,
 		RemoveNetworks:    true,
 		RemoveDeployFiles: true,
-		RemoveState:       true,
 		RemoveTakodState:  true,
 		ProxyFiles:        cleanupProxyFiles(cfg.Project.Name, envName, services),
 	})

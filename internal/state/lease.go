@@ -1,21 +1,18 @@
 package state
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
-const (
-	DefaultLeaseTTL = 30 * time.Minute
-)
+const DefaultLeaseTTL = 30 * time.Minute
 
-// LeaseInfo describes a remote takod deployment lease. The lease is backed by
-// an atomic directory create on the state node, so separate laptops and CI jobs
-// contend for the same lock.
+// LeaseInfo describes a remote takod deployment lease.
 type LeaseInfo struct {
 	ID          string    `json:"id"`
 	ProjectName string    `json:"projectName"`
@@ -29,95 +26,67 @@ type LeaseInfo struct {
 
 // AcquireLease acquires the remote deployment lease for this project.
 func (s *StateManager) AcquireLease(operation, environment string, ttl time.Duration) (*LeaseInfo, error) {
+	if environment == "" {
+		environment = s.environment
+	}
 	if ttl <= 0 {
 		ttl = DefaultLeaseTTL
 	}
-	if err := s.Initialize(); err != nil {
-		return nil, err
-	}
 
-	lease := &LeaseInfo{
-		ID:          fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
-		ProjectName: s.projectName,
+	request := takod.LeaseRequest{
+		Project:     s.projectName,
 		Environment: environment,
+		ID:          fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
 		Operation:   operation,
 		Who:         currentPrincipal(),
 		PID:         os.Getpid(),
-		CreatedAt:   time.Now().UTC(),
-		ExpiresAt:   time.Now().UTC().Add(ttl),
+		TTLSeconds:  int64(ttl.Seconds()),
+	}
+	output, err := takodclient.RequestJSON(s.client, s.socket, "POST", "/v1/lease", request)
+	if err != nil {
+		return nil, err
 	}
 
-	for attempt := 0; attempt < 2; attempt++ {
-		acquired, err := s.tryCreateLeaseDir()
-		if err != nil {
-			return nil, err
+	response, err := decodeLeaseResponse(output)
+	if err != nil {
+		return nil, err
+	}
+	if !response.Acquired {
+		if response.Lease == nil {
+			return nil, fmt.Errorf("remote state is locked but lease metadata is missing")
 		}
-		if acquired {
-			if err := s.writeLeaseInfo(lease); err != nil {
-				_ = s.ReleaseLease(lease)
-				return nil, err
-			}
-			return lease, nil
-		}
-
-		existing, err := s.readLeaseWithGrace()
-		if err != nil {
-			return nil, fmt.Errorf("remote lease is held but metadata could not be read: %w", err)
-		}
-		if existing == nil {
-			return nil, fmt.Errorf("remote lease is held but metadata is missing; remove %s manually if it is stale", s.leasePath())
-		}
-		if time.Now().UTC().After(existing.ExpiresAt) {
-			if err := s.forceRemoveLease(); err != nil {
-				return nil, fmt.Errorf("failed to remove expired remote lease: %w", err)
-			}
-			continue
-		}
-
 		return nil, fmt.Errorf("remote state is locked by %s (operation: %s, expires in %s)",
-			existing.Who,
-			existing.Operation,
-			time.Until(existing.ExpiresAt).Round(time.Second),
+			response.Lease.Who,
+			response.Lease.Operation,
+			time.Until(response.Lease.ExpiresAt).Round(time.Second),
 		)
 	}
-
-	return nil, fmt.Errorf("failed to acquire remote lease after removing expired lease")
-}
-
-func (s *StateManager) readLeaseWithGrace() (*LeaseInfo, error) {
-	var lastErr error
-	for i := 0; i < 5; i++ {
-		lease, err := s.ReadLease()
-		if err != nil {
-			lastErr = err
-		} else if lease != nil {
-			return lease, nil
-		}
-		time.Sleep(200 * time.Millisecond)
+	if response.Lease == nil {
+		return nil, fmt.Errorf("remote lease was acquired but metadata is missing")
 	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, nil
+	return leaseFromTakod(response.Lease), nil
 }
 
 // ReadLease returns the currently held remote lease, or nil if none exists.
 func (s *StateManager) ReadLease() (*LeaseInfo, error) {
-	cmd := fmt.Sprintf("sudo cat %s 2>/dev/null || true", shellQuote(s.leaseInfoPath()))
-	output, err := s.client.Execute(cmd)
+	output, err := takodclient.RequestJSON(
+		s.client,
+		s.socket,
+		"GET",
+		takodclient.LeaseEndpoint(s.projectName, s.environment),
+		nil,
+	)
 	if err != nil {
 		return nil, err
 	}
-	output = strings.TrimSpace(output)
-	if output == "" {
-		return nil, nil
-	}
-
-	var lease LeaseInfo
-	if err := json.Unmarshal([]byte(output), &lease); err != nil {
+	response, err := decodeLeaseResponse(output)
+	if err != nil {
 		return nil, err
 	}
-	return &lease, nil
+	if !response.Found || response.Lease == nil {
+		return nil, nil
+	}
+	return leaseFromTakod(response.Lease), nil
 }
 
 // ReleaseLease releases the remote lease if it is still owned by this process.
@@ -125,71 +94,37 @@ func (s *StateManager) ReleaseLease(lease *LeaseInfo) error {
 	if lease == nil {
 		return nil
 	}
-
-	current, err := s.ReadLease()
-	if err != nil {
-		return err
+	request := takod.LeaseRequest{
+		Project:     s.projectName,
+		Environment: lease.Environment,
+		ID:          lease.ID,
 	}
-	if current == nil {
+	_, err := takodclient.RequestJSON(s.client, s.socket, "DELETE", "/v1/lease", request)
+	return err
+}
+
+func decodeLeaseResponse(output string) (*takod.LeaseResponse, error) {
+	var response takod.LeaseResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return nil, fmt.Errorf("failed to parse takod lease response: %w", err)
+	}
+	return &response, nil
+}
+
+func leaseFromTakod(lease *takod.LeaseInfo) *LeaseInfo {
+	if lease == nil {
 		return nil
 	}
-	if current.ID != lease.ID {
-		return fmt.Errorf("cannot release remote lease: held by %s (operation: %s)", current.Who, current.Operation)
+	return &LeaseInfo{
+		ID:          lease.ID,
+		ProjectName: lease.ProjectName,
+		Environment: lease.Environment,
+		Operation:   lease.Operation,
+		Who:         lease.Who,
+		PID:         lease.PID,
+		CreatedAt:   lease.CreatedAt,
+		ExpiresAt:   lease.ExpiresAt,
 	}
-
-	cmd := fmt.Sprintf("sudo rm -rf %s", shellQuote(s.leasePath()))
-	_, err = s.client.Execute(cmd)
-	return err
-}
-
-func (s *StateManager) tryCreateLeaseDir() (bool, error) {
-	cmd := fmt.Sprintf(
-		"sudo mkdir -p %s && if sudo mkdir %s 2>/dev/null; then echo acquired; else echo held; fi",
-		shellQuote(s.getStatePath()),
-		shellQuote(s.leasePath()),
-	)
-	output, err := s.client.Execute(cmd)
-	if err != nil {
-		return false, fmt.Errorf("failed to create remote lease: %w", err)
-	}
-	return strings.Contains(output, "acquired"), nil
-}
-
-func (s *StateManager) writeLeaseInfo(lease *LeaseInfo) error {
-	data, err := json.MarshalIndent(lease, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-
-	tmpFile := fmt.Sprintf("/tmp/tako-lease-%s.json", lease.ID)
-	encoded := base64.StdEncoding.EncodeToString(data)
-	cmd := fmt.Sprintf("echo '%s' | base64 -d > %s && sudo mv %s %s && sudo chmod 644 %s",
-		encoded,
-		shellQuote(tmpFile),
-		shellQuote(tmpFile),
-		shellQuote(s.leaseInfoPath()),
-		shellQuote(s.leaseInfoPath()),
-	)
-	if _, err := s.client.Execute(cmd); err != nil {
-		_, _ = s.client.Execute("rm -f " + shellQuote(tmpFile))
-		return fmt.Errorf("failed to write remote lease metadata: %w", err)
-	}
-	return nil
-}
-
-func (s *StateManager) forceRemoveLease() error {
-	cmd := fmt.Sprintf("sudo rm -rf %s", shellQuote(s.leasePath()))
-	_, err := s.client.Execute(cmd)
-	return err
-}
-
-func (s *StateManager) leasePath() string {
-	return fmt.Sprintf("%s/lease", s.getStatePath())
-}
-
-func (s *StateManager) leaseInfoPath() string {
-	return fmt.Sprintf("%s/info.json", s.leasePath())
 }
 
 func currentPrincipal() string {
@@ -199,11 +134,4 @@ func currentPrincipal() string {
 		return who
 	}
 	return fmt.Sprintf("%s@%s", who, hostname)
-}
-
-func shellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }

@@ -62,6 +62,38 @@ func TestReadStateDocumentReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestWriteAndReadHistoryStateDocument(t *testing.T) {
+	dataDir := t.TempDir()
+	request := StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentHistory,
+		Content:     "{\"deployments\":[]}\n",
+	}
+	if _, err := WriteStateDocument(context.Background(), dataDir, request); err != nil {
+		t.Fatalf("WriteStateDocument returned error: %v", err)
+	}
+	read, err := ReadStateDocument(context.Background(), dataDir, request)
+	if err != nil {
+		t.Fatalf("ReadStateDocument returned error: %v", err)
+	}
+	if !read.Found || read.Content != request.Content {
+		t.Fatalf("unexpected history response: %#v", read)
+	}
+}
+
+func TestDeploymentStateDocumentRequiresRevisionID(t *testing.T) {
+	_, err := WriteStateDocument(context.Background(), t.TempDir(), StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentDeployment,
+		Content:     "{}",
+	})
+	if err == nil || !strings.Contains(err.Error(), "deployment ID") {
+		t.Fatalf("expected deployment ID error, got %v", err)
+	}
+}
+
 func TestAppendStateEventNormalizesNewline(t *testing.T) {
 	dataDir := t.TempDir()
 	request := StateDocumentRequest{

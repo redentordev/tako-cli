@@ -6,9 +6,10 @@ import (
 
 // DeploymentState represents a single deployment's state
 type DeploymentState struct {
-	ID          string                  `json:"id"`              // Unique deployment ID (timestamp-based)
-	Timestamp   time.Time               `json:"timestamp"`       // When deployment occurred
-	ProjectName string                  `json:"projectName"`     // Project name
+	ID          string                  `json:"id"`          // Unique deployment ID (timestamp-based)
+	Timestamp   time.Time               `json:"timestamp"`   // When deployment occurred
+	ProjectName string                  `json:"projectName"` // Project name
+	Environment string                  `json:"environment,omitempty"`
 	Version     string                  `json:"version"`         // Project version
 	Status      DeploymentStatus        `json:"status"`          // success, failed, rolled_back
 	Services    map[string]ServiceState `json:"services"`        // Deployed services
@@ -61,6 +62,7 @@ const (
 // DeploymentHistory contains all deployments for a project
 type DeploymentHistory struct {
 	ProjectName string             `json:"projectName"`
+	Environment string             `json:"environment,omitempty"`
 	Server      string             `json:"server"`
 	Deployments []*DeploymentState `json:"deployments"`
 	LastUpdated time.Time          `json:"lastUpdated"`

@@ -124,6 +124,24 @@ func StateEndpoint(project string, environment string, document string) string {
 	return "/v1/state?" + query.Encode()
 }
 
+func StateRevisionEndpoint(project string, environment string, document string, revisionID string) string {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	query.Set("document", document)
+	if revisionID != "" {
+		query.Set("revisionId", revisionID)
+	}
+	return "/v1/state?" + query.Encode()
+}
+
+func LeaseEndpoint(project string, environment string) string {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	return "/v1/lease?" + query.Encode()
+}
+
 func ActualStateEndpoint(project string, environment string) string {
 	query := url.Values{}
 	query.Set("project", project)

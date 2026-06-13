@@ -103,7 +103,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to connect to node %s: %w", firstServerName, err)
 	}
 
-	stateManager := remotestate.NewStateManager(firstClient, cfg.Project.Name, firstServer.Host)
+	stateManager := remotestate.NewStateManagerWithSocket(firstClient, cfg.Project.Name, envName, firstServer.Host, takodSocketFromConfig(cfg))
 	lease, err := stateManager.AcquireLease("scale", envName, remotestate.DefaultLeaseTTL)
 	if err != nil {
 		return fmt.Errorf("cannot acquire remote scale lease: %w", err)
