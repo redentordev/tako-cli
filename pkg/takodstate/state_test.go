@@ -79,7 +79,7 @@ func TestBuildDesiredRevisionNormalizesNegativeReplicaCount(t *testing.T) {
 	}
 	services := map[string]config.ServiceConfig{
 		"worker": {
-			Image:    "busybox:latest",
+			Image:    "busybox:1.36.1",
 			Replicas: -2,
 		},
 	}

@@ -17,7 +17,7 @@ const (
 	// ContainerName is the name of the acme-dns container
 	ContainerName = "tako-acme-dns"
 	// Image is the acme-dns Docker image
-	Image = "joohoi/acme-dns:latest"
+	Image = "joohoi/acme-dns:v1.0"
 )
 
 // Manager handles acme-dns container lifecycle and registrations

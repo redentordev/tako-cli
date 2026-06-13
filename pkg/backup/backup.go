@@ -16,6 +16,8 @@ const (
 
 	// DefaultRetention is the default number of days to keep backups
 	DefaultRetention = 7
+
+	backupHelperImage = "alpine:3.20"
 )
 
 // Manager handles volume backup and restore operations
@@ -79,9 +81,9 @@ func (m *Manager) BackupVolume(volumeName string) (*BackupInfo, error) {
 	backupCmd := fmt.Sprintf(`docker run --rm \
 		-v %s:/source:ro \
 		-v %s:/backup \
-		alpine:latest \
+		%s \
 		tar -czf /backup/%s -C /source .`,
-		fullVolumeName, backupPath, backupFile)
+		fullVolumeName, backupPath, backupHelperImage, backupFile)
 
 	if m.verbose {
 		fmt.Printf("  → Creating compressed backup...\n")
@@ -141,9 +143,9 @@ func (m *Manager) RestoreVolume(volumeName, backupID string) error {
 	restoreCmd := fmt.Sprintf(`docker run --rm \
 		-v %s:/target \
 		-v %s:/backup:ro \
-		alpine:latest \
+		%s \
 		sh -c "rm -rf /target/* /target/..?* /target/.[!.]* 2>/dev/null; tar -xzf /backup/%s -C /target"`,
-		fullVolumeName, backupPath, backupFile)
+		fullVolumeName, backupPath, backupHelperImage, backupFile)
 
 	if m.verbose {
 		fmt.Printf("  → Extracting backup...\n")

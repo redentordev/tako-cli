@@ -9,6 +9,8 @@ import (
 	"github.com/redentordev/tako-cli/pkg/ssh"
 )
 
+const registryMarkerImage = "busybox:1.36.1"
+
 // ProjectInfo holds metadata about a deployed project
 type ProjectInfo struct {
 	Name        string    `json:"name"`
@@ -58,15 +60,15 @@ func (r *Registry) RegisterProject(info ProjectInfo) error {
 		return fmt.Errorf("failed to serialize project info: %w", err)
 	}
 
-	// Create marker container with project metadata as labels
-	// Using busybox:latest as it's small and universally available
+	// Create marker container with project metadata as labels.
 	createCmd := fmt.Sprintf(
-		`docker create --name %s --label "tako.registry=true" --label "tako.project=%s" --label "tako.environment=%s" --label "tako.network=%s" --label "tako.info=%s" busybox:latest true`,
+		`docker create --name %s --label "tako.registry=true" --label "tako.project=%s" --label "tako.environment=%s" --label "tako.network=%s" --label "tako.info=%s" %s true`,
 		markerName,
 		info.Name,
 		info.Environment,
 		info.Network,
 		strings.ReplaceAll(string(infoJSON), `"`, `\"`),
+		registryMarkerImage,
 	)
 
 	if _, err := r.client.Execute(createCmd); err != nil {
