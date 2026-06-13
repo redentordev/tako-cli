@@ -118,6 +118,15 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, envServers, "rollback")
+	if err != nil {
+		return err
+	}
+	defer leaseSet.Release(verbose)
+	if verbose {
+		fmt.Printf("→ Acquired remote rollback leases: %s\n", leaseSet.Summary())
+	}
+
 	client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node %s: %w", serverName, err)
@@ -125,18 +134,6 @@ func runRollback(cmd *cobra.Command, args []string) error {
 
 	// Create state manager
 	stateManager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
-	lease, err := stateManager.AcquireLease("rollback", envName, remotestate.DefaultLeaseTTL)
-	if err != nil {
-		return fmt.Errorf("cannot acquire remote rollback lease: %w", err)
-	}
-	defer func() {
-		if err := stateManager.ReleaseLease(lease); err != nil && verbose {
-			fmt.Printf("Warning: failed to release remote rollback lease: %v\n", err)
-		}
-	}()
-	if verbose {
-		fmt.Printf("→ Acquired remote rollback lease on %s (ID: %s)\n", serverName, lease.ID)
-	}
 
 	// Determine which deployment to rollback to
 	var targetDeployment *remotestate.DeploymentState

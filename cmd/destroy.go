@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -175,35 +174,15 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	leaseServerName := targetServerNames[0]
-	leaseServer := serversToDestroy[leaseServerName]
-	leaseClient, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     leaseServer.Host,
-		Port:     leaseServer.Port,
-		User:     leaseServer.User,
-		SSHKey:   leaseServer.SSHKey,
-		Password: leaseServer.Password,
-	})
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServerNames, "destroy")
 	if err != nil {
-		return fmt.Errorf("failed to create lease client for %s: %w", leaseServerName, err)
+		return err
 	}
-	if err := leaseClient.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to lease node %s: %w", leaseServerName, err)
-	}
-	defer leaseClient.Close()
-
-	stateManager := remotestate.NewStateManagerWithSocket(leaseClient, cfg.Project.Name, envName, leaseServer.Host, takodSocketFromConfig(cfg))
-	lease, err := stateManager.AcquireLease("destroy", envName, remotestate.DefaultLeaseTTL)
-	if err != nil {
-		return fmt.Errorf("cannot acquire remote destroy lease: %w", err)
-	}
-	defer func() {
-		if err := stateManager.ReleaseLease(lease); err != nil && verbose {
-			fmt.Printf("Warning: failed to release remote destroy lease: %v\n", err)
-		}
-	}()
+	defer leaseSet.Release(verbose)
 	if verbose {
-		fmt.Printf("→ Acquired remote destroy lease on %s (ID: %s)\n", leaseServerName, lease.ID)
+		fmt.Printf("→ Acquired remote destroy leases: %s\n", leaseSet.Summary())
 	}
 
 	fmt.Printf("\n🗑️  Destroying %d server(s)...\n\n", len(serversToDestroy))

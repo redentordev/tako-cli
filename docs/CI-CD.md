@@ -8,8 +8,8 @@ Tako uses the same deployment path from laptops and CI runners:
 4. Pull remote deployment state into the local `.tako/` cache.
 5. Run `tako deploy --yes`.
 
-The remote lease in takod prevents a CI job and a laptop from reconciling the
-same environment at the same time.
+Remote leases in takod prevent a CI job and a laptop from reconciling the same
+target nodes at the same time.
 
 `tako state repair` is the recovery path for stale or divergent node state. It
 is not required on every CI deploy; run it before deploy when a primary node was
