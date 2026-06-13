@@ -77,7 +77,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 				fmt.Printf("→ Server is at v%s, upgrading to v%s...\n", serverVersion.Version, setup.CurrentVersion)
 
 				// Create upgrader with console logger
-				upgrader := setup.NewUpgrader(client, &consoleLogger{})
+				upgrader := setup.NewUpgrader(client, &consoleLogger{}, Version)
 
 				// Plan upgrade
 				path, err := setup.PlanUpgrade(serverVersion.Version, setup.CurrentVersion)

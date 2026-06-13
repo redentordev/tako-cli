@@ -4,7 +4,9 @@ package telemetry
 
 import (
 	"context"
+	"crypto/tls"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
+	"google.golang.org/grpc/credentials"
 )
 
 var (
@@ -37,6 +40,8 @@ type Config struct {
 	Environment string
 	// OTLPEndpoint is the OTLP collector endpoint (e.g., localhost:4317)
 	OTLPEndpoint string
+	// OTLPInsecure disables TLS for local or explicitly trusted collectors.
+	OTLPInsecure bool
 	// Debug enables stdout trace exporter for debugging
 	Debug bool
 }
@@ -48,6 +53,7 @@ func DefaultConfig() Config {
 		ServiceVersion: getEnvOrDefault("TAKO_VERSION", "dev"),
 		Environment:    getEnvOrDefault("TAKO_ENVIRONMENT", "development"),
 		OTLPEndpoint:   os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		OTLPInsecure:   strings.EqualFold(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE"), "true"),
 		Debug:          os.Getenv("TAKO_TRACE_DEBUG") == "1",
 	}
 }
@@ -105,10 +111,16 @@ func initTracer(cfg Config) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		client := otlptracegrpc.NewClient(
+		options := []otlptracegrpc.Option{
 			otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint),
-			otlptracegrpc.WithInsecure(), // TODO: Add TLS config option
-		)
+		}
+		if cfg.OTLPInsecure {
+			options = append(options, otlptracegrpc.WithInsecure())
+		} else {
+			options = append(options, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(&tls.Config{})))
+		}
+
+		client := otlptracegrpc.NewClient(options...)
 
 		exporter, err = otlptrace.New(ctx, client)
 		if err != nil {
