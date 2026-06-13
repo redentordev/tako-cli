@@ -74,6 +74,14 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 	t.Fatalf("takod status was not reachable: %v", lastErr)
 }
 
+func TestNewTakodHTTPServerSetsHeaderTimeout(t *testing.T) {
+	server := newTakodHTTPServer(http.NewServeMux())
+
+	if server.ReadHeaderTimeout != takodReadHeaderTimeout {
+		t.Fatalf("ReadHeaderTimeout = %s, want %s", server.ReadHeaderTimeout, takodReadHeaderTimeout)
+	}
+}
+
 func TestRemoveStaleSocketRejectsNonSocket(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "takod.sock")
 	if err := os.WriteFile(path, []byte("not a socket"), 0600); err != nil {

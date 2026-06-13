@@ -25,6 +25,8 @@ type Server struct {
 	mu                    sync.Mutex
 }
 
+const takodReadHeaderTimeout = 5 * time.Second
+
 type Status struct {
 	Runtime   string         `json:"runtime"`
 	Version   string         `json:"version"`
@@ -111,7 +113,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/access-logs", s.handleAccessLogs)
 
-	httpServer := &http.Server{Handler: mux}
+	httpServer := newTakodHTTPServer(mux)
 	s.mu.Lock()
 	s.server = httpServer
 	s.mu.Unlock()
@@ -139,6 +141,13 @@ func (s *Server) Run(ctx context.Context) error {
 	case err := <-errCh:
 		_ = os.Remove(s.socket)
 		return err
+	}
+}
+
+func newTakodHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: takodReadHeaderTimeout,
 	}
 }
 
