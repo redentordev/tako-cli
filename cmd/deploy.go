@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ import (
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
@@ -314,12 +316,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Print(plan.FormatPlan())
 
-	if plan.NeedsConfirmation() && !deployYes && !isNonInteractive() {
+	if plan.NeedsConfirmation() && !deployYes {
 		// Ask for confirmation if there are destructive changes
-		fmt.Printf("\nProceed with deployment? (y/N): ")
-		var response string
-		fmt.Scanln(&response)
-		if response != "y" && response != "Y" && response != "yes" {
+		confirmed, err := confirmDeployAction("\nProceed with deployment? (y/N): ", "deployment plan includes destructive changes")
+		if err != nil {
+			return err
+		}
+		if !confirmed {
 			fmt.Println("Deployment cancelled")
 			return nil
 		}
@@ -377,11 +380,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 					}
 				}
 
-				if !allConfigured && !deployYes && !isNonInteractive() {
-					fmt.Printf("\nDNS records not yet configured. Continue deployment anyway? (y/N): ")
-					var response string
-					fmt.Scanln(&response)
-					if response != "y" && response != "Y" && response != "yes" {
+				if !allConfigured && !deployYes {
+					confirmed, err := confirmDeployAction("\nDNS records not yet configured. Continue deployment anyway? (y/N): ", "wildcard DNS records are not configured")
+					if err != nil {
+						return err
+					}
+					if !confirmed {
 						fmt.Println("Deployment paused. Add DNS records and run deploy again.")
 						return nil
 					}
@@ -724,6 +728,39 @@ func isNonInteractive() bool {
 func truthyEnv(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
 	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func confirmDeployAction(prompt string, reason string) (bool, error) {
+	if err := requireDeployPromptAllowed(reason); err != nil {
+		return false, err
+	}
+
+	fmt.Print(prompt)
+	response, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return false, fmt.Errorf("failed to read confirmation: %w", err)
+	}
+
+	return isAffirmative(response), nil
+}
+
+func requireDeployPromptAllowed(reason string) error {
+	if isNonInteractive() {
+		return fmt.Errorf("%s; rerun with --yes to approve in non-interactive mode", reason)
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return fmt.Errorf("%s; confirmation requires a terminal or --yes", reason)
+	}
+	return nil
+}
+
+func isAffirmative(response string) bool {
+	switch strings.ToLower(strings.TrimSpace(response)) {
+	case "y", "yes":
 		return true
 	default:
 		return false

@@ -1,6 +1,9 @@
 package cmd
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIsNonInteractiveAcceptsTruthyEnvValues(t *testing.T) {
 	tests := []struct {
@@ -33,5 +36,51 @@ func TestIsNonInteractiveRejectsFalseyEnvValues(t *testing.T) {
 
 	if isNonInteractive() {
 		t.Fatal("isNonInteractive() should reject falsey values")
+	}
+}
+
+func TestRequireDeployPromptAllowedRejectsNonInteractiveWithoutYes(t *testing.T) {
+	t.Setenv("TAKO_NONINTERACTIVE", "true")
+	t.Setenv("CI", "")
+
+	err := requireDeployPromptAllowed("deployment plan includes destructive changes")
+	if err == nil {
+		t.Fatal("requireDeployPromptAllowed() error = nil, want non-interactive approval error")
+	}
+	if !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("error = %q, want --yes guidance", err)
+	}
+}
+
+func TestRequireDeployPromptAllowedRejectsNonTerminalWithoutYes(t *testing.T) {
+	t.Setenv("TAKO_NONINTERACTIVE", "")
+	t.Setenv("CI", "")
+
+	err := requireDeployPromptAllowed("deployment plan includes destructive changes")
+	if err == nil {
+		t.Fatal("requireDeployPromptAllowed() error = nil, want terminal requirement error")
+	}
+	if !strings.Contains(err.Error(), "terminal or --yes") {
+		t.Fatalf("error = %q, want terminal/--yes guidance", err)
+	}
+}
+
+func TestIsAffirmative(t *testing.T) {
+	tests := []struct {
+		response string
+		want     bool
+	}{
+		{response: "y", want: true},
+		{response: "Y\n", want: true},
+		{response: "yes", want: true},
+		{response: "YES\n", want: true},
+		{response: "", want: false},
+		{response: "no", want: false},
+	}
+
+	for _, tt := range tests {
+		if got := isAffirmative(tt.response); got != tt.want {
+			t.Fatalf("isAffirmative(%q) = %v, want %v", tt.response, got, tt.want)
+		}
 	}
 }
