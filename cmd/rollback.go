@@ -28,7 +28,8 @@ var rollbackCmd = &cobra.Command{
 If no deployment-id is provided, rolls back to the most recent successful deployment.
 Specify a deployment-id to rollback to a specific deployment.
 
-If --server is not specified, state is read from the first environment node.
+If --server is not specified, rollback reads the freshest reachable deployment
+history from the mesh.
 
 Use 'tako history' to view available deployments.
 
@@ -85,36 +86,6 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no servers configured for environment %s", envName)
 	}
 
-	// Determine which node to read state from.
-	var serverName string
-	var server config.ServerConfig
-
-	if rollbackServer != "" {
-		var exists bool
-		server, exists = cfg.Servers[rollbackServer]
-		if !exists {
-			return fmt.Errorf("server %s not found in configuration", rollbackServer)
-		}
-		found := false
-		for _, envServer := range envServers {
-			if envServer == rollbackServer {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("server %s is not part of environment %s", rollbackServer, envName)
-		}
-		serverName = rollbackServer
-	} else {
-		serverName = envServers[0]
-		server = cfg.Servers[serverName]
-
-		if verbose {
-			fmt.Printf("Reading state from node: %s (%s)\n", serverName, server.Host)
-		}
-	}
-
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
@@ -125,6 +96,16 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	defer leaseSet.Release(verbose)
 	if verbose {
 		fmt.Printf("→ Acquired remote rollback leases: %s\n", leaseSet.Summary())
+	}
+
+	historySource, err := selectRollbackHistorySource(cfg, envName, rollbackServer)
+	if err != nil {
+		return err
+	}
+	serverName := historySource.source
+	server := cfg.Servers[serverName]
+	if verbose {
+		fmt.Printf("Reading rollback state from node: %s (%s)\n", serverName, server.Host)
 	}
 
 	client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
@@ -143,7 +124,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		deploymentID := args[0]
 		fmt.Printf("\n=== Rolling back to deployment: %s ===\n\n", deploymentID)
 
-		targetDeployment, err = stateManager.GetDeployment(deploymentID)
+		targetDeployment, err = deploymentFromHistory(historySource.history, deploymentID)
 		if err != nil {
 			return fmt.Errorf("failed to find deployment %s: %w", deploymentID, err)
 		}
@@ -151,7 +132,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		// Rollback to most recent successful deployment
 		fmt.Printf("\n=== Rolling back to previous successful deployment ===\n\n")
 
-		targetDeployment, err = stateManager.GetLatestSuccessful()
+		targetDeployment, err = latestSuccessfulDeploymentFromHistory(historySource.history)
 		if err != nil {
 			return fmt.Errorf("failed to find previous deployment: %w", err)
 		}
@@ -304,4 +285,43 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n✓ Successfully rolled back to deployment %s!\n", targetDeployment.ID)
 
 	return nil
+}
+
+func selectRollbackHistorySource(cfg *config.Config, envName string, requestedServer string) (stateHistoryCandidate, error) {
+	histories, err := collectStateDeploymentHistories(cfg, envName, requestedServer, !verbose)
+	if err != nil {
+		return stateHistoryCandidate{}, fmt.Errorf("failed to load rollback history: %w", err)
+	}
+	best, ok := bestDeploymentHistory(histories)
+	if !ok {
+		if requestedServer != "" {
+			return stateHistoryCandidate{}, fmt.Errorf("no deployment history found on node %s", requestedServer)
+		}
+		return stateHistoryCandidate{}, fmt.Errorf("no deployment history found on reachable mesh nodes")
+	}
+	return best, nil
+}
+
+func deploymentFromHistory(history *remotestate.DeploymentHistory, deploymentID string) (*remotestate.DeploymentState, error) {
+	if history == nil {
+		return nil, fmt.Errorf("deployment %s not found", deploymentID)
+	}
+	for _, deployment := range history.Deployments {
+		if deployment != nil && deployment.ID == deploymentID {
+			return deployment, nil
+		}
+	}
+	return nil, fmt.Errorf("deployment %s not found", deploymentID)
+}
+
+func latestSuccessfulDeploymentFromHistory(history *remotestate.DeploymentHistory) (*remotestate.DeploymentState, error) {
+	deployments := listDeploymentsFromHistory(history, &remotestate.HistoryOptions{
+		Status:        remotestate.StatusSuccess,
+		Limit:         1,
+		IncludeFailed: false,
+	})
+	if len(deployments) == 0 {
+		return nil, fmt.Errorf("no successful deployments found")
+	}
+	return deployments[0], nil
 }
