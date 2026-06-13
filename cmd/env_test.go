@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"encoding/base64"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +89,60 @@ func TestSupportedEnvBundleFilesFiltersAndSortsPaths(t *testing.T) {
 		if skipped[i] != wantSkipped[i] {
 			t.Fatalf("skipped = %v, want %v", skipped, wantSkipped)
 		}
+	}
+}
+
+func TestRestoreEnvBundleFilesWritesAllowedFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	restored, err := restoreEnvBundleFiles(map[string]string{
+		".env":                     base64.StdEncoding.EncodeToString([]byte("TOKEN=secret\n")),
+		".tako/secrets.production": base64.StdEncoding.EncodeToString([]byte("API_KEY=value\n")),
+	}, []string{".env", ".tako/secrets.production"})
+	if err != nil {
+		t.Fatalf("restoreEnvBundleFiles returned error: %v", err)
+	}
+	if restored != 2 {
+		t.Fatalf("restored = %d, want 2", restored)
+	}
+
+	envData, err := os.ReadFile(".env")
+	if err != nil {
+		t.Fatalf("failed to read restored .env: %v", err)
+	}
+	if string(envData) != "TOKEN=secret\n" {
+		t.Fatalf(".env = %q", envData)
+	}
+
+	info, err := os.Stat(filepath.Join(".tako", "secrets.production"))
+	if err != nil {
+		t.Fatalf("failed to stat restored secrets file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("restored file mode = %04o, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestRestoreEnvBundleFilesRejectsInvalidBase64WithoutPartialWrites(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	restored, err := restoreEnvBundleFiles(map[string]string{
+		".env":                     base64.StdEncoding.EncodeToString([]byte("TOKEN=secret\n")),
+		".tako/secrets.production": "not-base64!",
+	}, []string{".env", ".tako/secrets.production"})
+	if err == nil {
+		t.Fatal("restoreEnvBundleFiles should reject invalid base64")
+	}
+	if restored != 0 {
+		t.Fatalf("restored = %d, want 0", restored)
+	}
+	if !strings.Contains(err.Error(), "failed to decode") {
+		t.Fatalf("error = %q, want decode context", err)
+	}
+	if _, statErr := os.Stat(".env"); !os.IsNotExist(statErr) {
+		t.Fatalf(".env should not be written on decode failure, statErr=%v", statErr)
 	}
 }
 
