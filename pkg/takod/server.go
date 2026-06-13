@@ -86,6 +86,9 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/mesh/key", s.handleMeshKey)
 	mux.HandleFunc("/v1/mesh/apply", s.handleMeshApply)
 	mux.HandleFunc("/v1/mesh/status", s.handleMeshStatus)
+	mux.HandleFunc("/v1/images/exists", s.handleImageExists)
+	mux.HandleFunc("/v1/images/export", s.handleImageExport)
+	mux.HandleFunc("/v1/images/import", s.handleImageImport)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -576,6 +579,59 @@ func (s *Server) handleMeshStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := ReadMeshStatus(r.Context(), interfaceName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleImageExists(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	response, err := ImageExists(r.Context(), r.URL.Query().Get("image"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleImageExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	image := r.URL.Query().Get("image")
+	if err := validateImageName(image); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeImageTarHeaders(w, image)
+	if err := ExportImage(r.Context(), image, w); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+}
+
+func (s *Server) handleImageImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	response, err := ImportImage(r.Context(), r.URL.Query().Get("image"), r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
