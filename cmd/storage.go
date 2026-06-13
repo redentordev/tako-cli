@@ -83,7 +83,10 @@ storage:
 		return fmt.Errorf("failed to determine NFS server: %w", err)
 	}
 
-	nfsServerConfig := cfg.Servers[nfsServerName]
+	nfsServerConfig, err := serverConfigByName(cfg, nfsServerName)
+	if err != nil {
+		return err
+	}
 	targetServers, err := storageTargetServers(cfg, envName, nfsServerName)
 	if err != nil {
 		return err
@@ -201,7 +204,10 @@ func runStorageRemount(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to determine NFS server: %w", err)
 	}
 
-	nfsServerConfig := cfg.Servers[nfsServerName]
+	nfsServerConfig, err := serverConfigByName(cfg, nfsServerName)
+	if err != nil {
+		return err
+	}
 	targetServers, err := storageTargetServers(cfg, envName, nfsServerName)
 	if err != nil {
 		return err

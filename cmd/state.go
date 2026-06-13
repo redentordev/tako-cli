@@ -260,7 +260,10 @@ func connectFirstReachableStateServer(cfg *config.Config, envName string, reques
 	}
 	var lastErr error
 	for _, serverName := range serverNames {
-		server := cfg.Servers[serverName]
+		server, err := serverConfigByName(cfg, serverName)
+		if err != nil {
+			return "", nil, err
+		}
 		client, err := connectAndVerifyStateServer(serverName, server)
 		if err == nil {
 			return serverName, client, nil

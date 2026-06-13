@@ -352,7 +352,10 @@ func downloadEnvBundleFromMesh(cfg *config.Config, envName string) (*takod.EnvBu
 
 	var nodeErrors []string
 	for _, serverName := range serverNames {
-		serverCfg := cfg.Servers[serverName]
+		serverCfg, err := serverConfigByName(cfg, serverName)
+		if err != nil {
+			return nil, "", err
+		}
 		response, err := downloadEnvBundleFromServerFunc(cfg, envName, serverName, serverCfg)
 		if err != nil {
 			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", serverName, err))

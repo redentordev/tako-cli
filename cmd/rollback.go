@@ -103,7 +103,10 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	serverName := historySource.source
-	server := cfg.Servers[serverName]
+	server, err := serverConfigByName(cfg, serverName)
+	if err != nil {
+		return err
+	}
 	if verbose {
 		fmt.Printf("Reading rollback state from node: %s (%s)\n", serverName, server.Host)
 	}

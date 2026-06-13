@@ -101,3 +101,20 @@ func TestUnregistryPeerServersExcludeSourceHost(t *testing.T) {
 		}
 	}
 }
+
+func TestUnregistryPeerServersReportsMissingEnvironmentServer(t *testing.T) {
+	cfg := &config.Config{
+		Servers: map[string]config.ServerConfig{
+			"node-a": {Host: "10.0.0.1"},
+		},
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Servers: []string{"node-a", "missing"},
+			},
+		},
+	}
+
+	if _, err := unregistryPeerServers(cfg, "production", ""); err == nil {
+		t.Fatal("unregistryPeerServers should reject a missing environment server")
+	}
+}

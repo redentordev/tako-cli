@@ -177,7 +177,10 @@ func showLiveStats(cfg *config.Config, servers []string, sshPool *ssh.Pool, envN
 		fmt.Printf("=== Live Container Stats - %s ===\n\n", time.Now().Format("2006-01-02 15:04:05"))
 
 		for _, serverName := range servers {
-			server := cfg.Servers[serverName]
+			server, err := serverConfigByName(cfg, serverName)
+			if err != nil {
+				return err
+			}
 
 			client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 			if err != nil {
