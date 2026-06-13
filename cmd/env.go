@@ -175,27 +175,40 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	restored, skipped, err := restoreDownloadedEnvBundle(response, envForce)
+	if err != nil {
+		return err
+	}
+	if skipped {
+		return nil
+	}
+
+	fmt.Printf("\nRestored %d file(s) from %s\n", restored, source)
+	return nil
+}
+
+func restoreDownloadedEnvBundle(response *takod.EnvBundleResponse, force bool) (int, bool, error) {
 	encrypted, err := base64.StdEncoding.DecodeString(strings.TrimSpace(response.Content))
 	if err != nil {
-		return fmt.Errorf("failed to decode downloaded bundle: %w", err)
+		return 0, false, fmt.Errorf("failed to decode downloaded bundle: %w", err)
 	}
 
 	// Prompt for passphrase
 	passphrase, err := promptPassphrase("Enter passphrase: ")
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 
 	// Decrypt
 	bundleJSON, err := crypto.DecryptWithPassphrase(encrypted, passphrase)
 	if err != nil {
-		return fmt.Errorf("failed to decrypt bundle: %w", err)
+		return 0, false, fmt.Errorf("failed to decrypt bundle: %w", err)
 	}
 
 	// Parse bundle
 	var bundle map[string]string
 	if err := json.Unmarshal(bundleJSON, &bundle); err != nil {
-		return fmt.Errorf("failed to parse bundle: %w", err)
+		return 0, false, fmt.Errorf("failed to parse bundle: %w", err)
 	}
 
 	allowedBundle, allowedPaths, skippedPaths := supportedEnvBundleFiles(bundle)
@@ -203,11 +216,11 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Warning: skipping unsupported bundle path: %s\n", path)
 	}
 	if len(allowedPaths) == 0 {
-		return fmt.Errorf("environment bundle did not contain any supported files")
+		return 0, false, fmt.Errorf("environment bundle did not contain any supported files")
 	}
 
 	// Check for existing files
-	if !envForce {
+	if !force {
 		var existing []string
 		for _, path := range allowedPaths {
 			if _, err := os.Stat(path); err == nil {
@@ -220,17 +233,15 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  - %s\n", path)
 			}
 			fmt.Println("\nUse --force to overwrite existing files.")
-			return nil
+			return 0, true, nil
 		}
 	}
 
 	restored, err := restoreEnvBundleFiles(allowedBundle, allowedPaths)
 	if err != nil {
-		return err
+		return restored, false, err
 	}
-
-	fmt.Printf("\nRestored %d file(s) from %s\n", restored, source)
-	return nil
+	return restored, false, nil
 }
 
 func restoreEnvBundleFiles(allowedBundle map[string]string, allowedPaths []string) (int, error) {

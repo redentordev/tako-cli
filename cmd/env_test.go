@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/crypto"
 	"github.com/redentordev/tako-cli/pkg/takod"
 )
 
@@ -143,6 +145,46 @@ func TestRestoreEnvBundleFilesRejectsInvalidBase64WithoutPartialWrites(t *testin
 	}
 	if _, statErr := os.Stat(".env"); !os.IsNotExist(statErr) {
 		t.Fatalf(".env should not be written on decode failure, statErr=%v", statErr)
+	}
+}
+
+func TestRestoreDownloadedEnvBundleDecryptsAndWritesFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	passphrase := "correct horse battery staple"
+	t.Setenv(envPassphraseVar, passphrase)
+
+	bundleJSON, err := json.Marshal(map[string]string{
+		".env": base64.StdEncoding.EncodeToString([]byte("TOKEN=secret\n")),
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal bundle: %v", err)
+	}
+	encrypted, err := crypto.EncryptWithPassphrase(bundleJSON, passphrase)
+	if err != nil {
+		t.Fatalf("EncryptWithPassphrase returned error: %v", err)
+	}
+
+	restored, skipped, err := restoreDownloadedEnvBundle(&takod.EnvBundleResponse{
+		Found:   true,
+		Content: base64.StdEncoding.EncodeToString(encrypted),
+	}, false)
+	if err != nil {
+		t.Fatalf("restoreDownloadedEnvBundle returned error: %v", err)
+	}
+	if skipped {
+		t.Fatal("restoreDownloadedEnvBundle skipped unexpectedly")
+	}
+	if restored != 1 {
+		t.Fatalf("restored = %d, want 1", restored)
+	}
+
+	envData, err := os.ReadFile(".env")
+	if err != nil {
+		t.Fatalf("failed to read restored .env: %v", err)
+	}
+	if string(envData) != "TOKEN=secret\n" {
+		t.Fatalf(".env = %q", envData)
 	}
 }
 
