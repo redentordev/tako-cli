@@ -49,18 +49,15 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
-	// Determine which servers to set up
-	servers := cfg.Servers
-	if setupServer != "" {
-		server, exists := cfg.Servers[setupServer]
-		if !exists {
-			return fmt.Errorf("server %s not found in configuration", setupServer)
-		}
-		servers = map[string]config.ServerConfig{setupServer: server}
+	envName := getEnvironmentName(cfg)
+	targetServerNames, servers, err := setupTargetServers(cfg, envName, setupServer)
+	if err != nil {
+		return err
 	}
 
 	// Set up each server
-	for name, server := range servers {
+	for _, name := range targetServerNames {
+		server := servers[name]
 		fmt.Printf("\n=== Setting up server: %s (%s) ===\n\n", name, server.Host)
 
 		// Get or create SSH client (supports both key and password auth)
@@ -134,19 +131,24 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	// Setup NFS if configured and appropriate
 	if cfg.IsNFSEnabled() {
-		serverCount := len(cfg.Servers)
-		shouldSetup, reason := provisioner.ShouldSetupNFS(cfg, serverCount)
-
-		if shouldSetup {
-			fmt.Printf("\n=== Setting up NFS shared storage ===\n\n")
-			if err := setupNFS(cfg, sshPool, envFlag); err != nil {
-				return fmt.Errorf("failed to setup NFS: %w", err)
-			}
-		} else {
+		if setupServer != "" {
 			fmt.Printf("\n=== NFS Shared Storage ===\n")
-			fmt.Printf("→ Skipping NFS setup: %s\n", reason)
-			if serverCount == 1 {
-				fmt.Printf("  Tip: NFS volumes (nfs:name:/path) will use local bind mounts on single-server deployments.\n")
+			fmt.Printf("→ Skipping NFS setup: --server targets one node. Run 'tako setup -e %s' without --server to configure shared NFS.\n", envName)
+		} else {
+			serverCount := len(targetServerNames)
+			shouldSetup, reason := provisioner.ShouldSetupNFS(cfg, serverCount)
+
+			if shouldSetup {
+				fmt.Printf("\n=== Setting up NFS shared storage ===\n\n")
+				if err := setupNFS(cfg, sshPool, envName, targetServerNames); err != nil {
+					return fmt.Errorf("failed to setup NFS: %w", err)
+				}
+			} else {
+				fmt.Printf("\n=== NFS Shared Storage ===\n")
+				fmt.Printf("→ Skipping NFS setup: %s\n", reason)
+				if serverCount == 1 {
+					fmt.Printf("  Tip: NFS volumes (nfs:name:/path) will use local bind mounts on single-server deployments.\n")
+				}
 			}
 		}
 	}
@@ -155,6 +157,22 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nNext step: Run 'tako deploy' to deploy your application\n")
 
 	return nil
+}
+
+func setupTargetServers(cfg *config.Config, envName string, requestedServer string) ([]string, map[string]config.ServerConfig, error) {
+	serverNames, err := statePullServerNames(cfg, envName, requestedServer)
+	if err != nil {
+		return nil, nil, err
+	}
+	servers := make(map[string]config.ServerConfig, len(serverNames))
+	for _, serverName := range serverNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return nil, nil, fmt.Errorf("server %s not found in config", serverName)
+		}
+		servers[serverName] = server
+	}
+	return serverNames, servers, nil
 }
 
 func setupMeshListenPort(cfg *config.Config) int {
@@ -178,7 +196,7 @@ func ensureTakodRuntimeForSetup(prov *provisioner.Provisioner, cfg *config.Confi
 }
 
 // setupNFS configures NFS server and clients based on configuration
-func setupNFS(cfg *config.Config, sshPool *ssh.Pool, envName string) error {
+func setupNFS(cfg *config.Config, sshPool *ssh.Pool, envName string, serverNames []string) error {
 	nfsConfig := cfg.GetNFSConfig()
 	if nfsConfig == nil || !nfsConfig.Enabled {
 		return nil
@@ -210,8 +228,12 @@ func setupNFS(cfg *config.Config, sshPool *ssh.Pool, envName string) error {
 	fmt.Printf("→ NFS server will be: %s (%s)\n", nfsServerName, nfsServerConfig.Host)
 
 	// Get all server IPs for firewall configuration
-	serverIPs := make([]string, 0, len(cfg.Servers))
-	for _, server := range cfg.Servers {
+	serverIPs := make([]string, 0, len(serverNames))
+	for _, serverName := range serverNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return fmt.Errorf("server %s not found in config", serverName)
+		}
 		// Validate IP addresses
 		if err := provisioner.ValidateIPAddress(server.Host); err != nil {
 			return fmt.Errorf("invalid server IP for firewall rules: %w", err)
@@ -254,9 +276,13 @@ func setupNFS(cfg *config.Config, sshPool *ssh.Pool, envName string) error {
 
 	// Setup NFS clients on all other servers
 	clientErrors := 0
-	for serverName, serverConfig := range cfg.Servers {
+	for _, serverName := range serverNames {
 		if serverName == nfsServerName {
 			continue // Skip the NFS server itself
+		}
+		serverConfig, ok := cfg.Servers[serverName]
+		if !ok {
+			return fmt.Errorf("server %s not found in config", serverName)
 		}
 
 		fmt.Printf("→ Setting up NFS client on %s...\n", serverName)
