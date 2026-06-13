@@ -197,17 +197,6 @@ func TestBestActualSnapshotAllowsEmptyServiceSnapshot(t *testing.T) {
 	}
 }
 
-func TestStateRepairLeaseSourceFallsBackToRuntimeState(t *testing.T) {
-	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
-	desired := stateDesiredCandidate{source: "node-b", desired: desiredRevision("rev-new", base)}
-	actual := stateActualCandidate{source: "node-c", actual: actualSnapshot(base, "web")}
-
-	source := stateRepairLeaseSource(false, stateHistoryCandidate{}, true, desired, true, actual)
-	if source != "node-b" {
-		t.Fatalf("lease source = %q, want node-b", source)
-	}
-}
-
 func TestOrderedStateServerNamesPrefersRequestedServer(t *testing.T) {
 	cfg := &config.Config{
 		Servers: map[string]config.ServerConfig{

@@ -229,14 +229,15 @@ CI runner
   tako deploy --yes
        |
        v
-  connect to the environment state node
+  connect to every target environment node
        |
        v
-  acquire remote lease + reconcile selected nodes
+  acquire remote leases + reconcile selected nodes
 ```
 
-Deploy, rollback, scale, and destroy acquire a remote lease through `takod`.
-CI and local machines compete for the same lease, so concurrent operations fail
+Deploy, rollback, scale, destroy, and state repair acquire remote leases through
+`takod` on the target nodes before mutating runtime or state. CI and local
+machines compete for the same per-node leases, so concurrent operations fail
 fast instead of racing. The local `.tako` lock remains as a same-machine guard.
 
 ## Implementation Status
@@ -250,6 +251,7 @@ Done:
 5. WireGuard peer material and node configs reconcile through takod.
 6. Per-node proxies render mesh upstreams from desired and actual state.
 7. State repair can rebuild deployment history and runtime state across reachable mesh nodes.
+8. Mutating operations acquire leases across their target nodes.
 
 Next:
 1. Evaluate background peer anti-entropy after the explicit repair workflow is proven.

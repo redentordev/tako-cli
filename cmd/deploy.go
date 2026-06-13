@@ -236,6 +236,16 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if len(serverNames) == 0 {
 		return fmt.Errorf("no servers configured")
 	}
+
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, serverNames, "deploy")
+	if err != nil {
+		return err
+	}
+	defer leaseSet.Release(verbose)
+	if verbose {
+		fmt.Printf("→ Acquired remote deploy leases: %s\n", leaseSet.Summary())
+	}
+
 	firstServerName := serverNames[0]
 	firstServer := servers[firstServerName]
 
@@ -244,20 +254,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to server %s: %w", firstServerName, err)
 	}
-
 	stateManager := remotestate.NewStateManagerWithSocket(firstClient, cfg.Project.Name, envName, firstServer.Host, takodSocketFromConfig(cfg))
-	lease, err := stateManager.AcquireLease("deploy", envName, remotestate.DefaultLeaseTTL)
-	if err != nil {
-		return fmt.Errorf("cannot acquire remote deploy lease: %w", err)
-	}
-	defer func() {
-		if err := stateManager.ReleaseLease(lease); err != nil && verbose {
-			fmt.Printf("Warning: failed to release remote deploy lease: %v\n", err)
-		}
-	}()
-	if verbose {
-		fmt.Printf("→ Acquired remote deploy lease on %s (ID: %s)\n", firstServerName, lease.ID)
-	}
 
 	// Create deployer with pool for takod support
 	deploy := deployer.NewDeployerWithPool(firstClient, cfg, envName, sshPool, verbose)

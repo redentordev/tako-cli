@@ -360,16 +360,14 @@ func runStateRepair(cmd *cobra.Command, args []string) error {
 
 	printStateRepairSource(hasHistory, bestHistory, hasDesired, bestDesired, hasActual, bestActual)
 
-	leaseNode := stateRepairLeaseNode(repair.nodes, stateRepairLeaseSource(hasHistory, bestHistory, hasDesired, bestDesired, hasActual, bestActual))
-	lease, err := leaseNode.manager.AcquireLease("state-repair", envName, remotestate.DefaultLeaseTTL)
+	repairLeases, err := acquireStateRepairLeases(repair.nodes, envName)
 	if err != nil {
-		return fmt.Errorf("failed to acquire repair lease on %s: %w", leaseNode.name, err)
+		return err
 	}
-	defer func() {
-		if err := leaseNode.manager.ReleaseLease(lease); err != nil && verbose {
-			fmt.Fprintf(os.Stderr, "Warning: failed to release repair lease on %s: %v\n", leaseNode.name, err)
-		}
-	}()
+	defer releaseStateRepairLeases(repairLeases, verbose)
+	if verbose {
+		fmt.Printf("Acquired state repair leases: %s\n", stateRepairLeaseSummary(repairLeases))
+	}
 
 	historyWritten, desiredWritten, actualWritten, err := writeStateRepairDocuments(repair.nodes, bestHistory, hasHistory, bestDesired, hasDesired, bestActual, hasActual)
 	if err != nil {
@@ -589,6 +587,12 @@ type stateRepairNode struct {
 	runtime *takodstate.Manager
 }
 
+type stateRepairLease struct {
+	serverName string
+	manager    *remotestate.StateManager
+	lease      *remotestate.LeaseInfo
+}
+
 type stateRepairInventory struct {
 	nodes     []stateRepairNode
 	histories []stateHistoryCandidate
@@ -695,15 +699,6 @@ func collectStateRepairNodes(cfg *config.Config, envName string, preferredServer
 	return repair, nil
 }
 
-func stateRepairLeaseNode(nodes []stateRepairNode, source string) stateRepairNode {
-	for _, node := range nodes {
-		if node.name == source {
-			return node
-		}
-	}
-	return nodes[0]
-}
-
 func closeStateRepairNodes(nodes []stateRepairNode) {
 	for _, node := range nodes {
 		if node.client != nil {
@@ -712,17 +707,38 @@ func closeStateRepairNodes(nodes []stateRepairNode) {
 	}
 }
 
-func stateRepairLeaseSource(hasHistory bool, history stateHistoryCandidate, hasDesired bool, desired stateDesiredCandidate, hasActual bool, actual stateActualCandidate) string {
-	if hasHistory {
-		return history.source
+func acquireStateRepairLeases(nodes []stateRepairNode, envName string) ([]stateRepairLease, error) {
+	leases := make([]stateRepairLease, 0, len(nodes))
+	for _, node := range nodes {
+		lease, err := node.manager.AcquireLease("state-repair", envName, remotestate.DefaultLeaseTTL)
+		if err != nil {
+			releaseStateRepairLeases(leases, false)
+			return nil, fmt.Errorf("failed to acquire repair lease on %s: %w", node.name, err)
+		}
+		leases = append(leases, stateRepairLease{
+			serverName: node.name,
+			manager:    node.manager,
+			lease:      lease,
+		})
 	}
-	if hasDesired {
-		return desired.source
+	return leases, nil
+}
+
+func releaseStateRepairLeases(leases []stateRepairLease, verbose bool) {
+	for i := len(leases) - 1; i >= 0; i-- {
+		lease := leases[i]
+		if err := lease.manager.ReleaseLease(lease.lease); err != nil && verbose {
+			fmt.Fprintf(os.Stderr, "Warning: failed to release repair lease on %s: %v\n", lease.serverName, err)
+		}
 	}
-	if hasActual {
-		return actual.source
+}
+
+func stateRepairLeaseSummary(leases []stateRepairLease) string {
+	parts := make([]string, 0, len(leases))
+	for _, lease := range leases {
+		parts = append(parts, fmt.Sprintf("%s:%s", lease.serverName, lease.lease.ID))
 	}
-	return ""
+	return strings.Join(parts, ", ")
 }
 
 func printStateRepairSource(hasHistory bool, history stateHistoryCandidate, hasDesired bool, desired stateDesiredCandidate, hasActual bool, actual stateActualCandidate) {

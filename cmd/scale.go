@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/notification"
@@ -96,25 +95,20 @@ func runScale(cmd *cobra.Command, args []string) error {
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, serverNames, "scale")
+	if err != nil {
+		return err
+	}
+	defer leaseSet.Release(verbose)
+	if verbose {
+		fmt.Printf("→ Acquired remote scale leases: %s\n", leaseSet.Summary())
+	}
+
 	firstServerName := serverNames[0]
 	firstServer := cfg.Servers[firstServerName]
 	firstClient, err := sshPool.GetOrCreateWithAuth(firstServer.Host, firstServer.Port, firstServer.User, firstServer.SSHKey, firstServer.Password)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node %s: %w", firstServerName, err)
-	}
-
-	stateManager := remotestate.NewStateManagerWithSocket(firstClient, cfg.Project.Name, envName, firstServer.Host, takodSocketFromConfig(cfg))
-	lease, err := stateManager.AcquireLease("scale", envName, remotestate.DefaultLeaseTTL)
-	if err != nil {
-		return fmt.Errorf("cannot acquire remote scale lease: %w", err)
-	}
-	defer func() {
-		if err := stateManager.ReleaseLease(lease); err != nil && verbose {
-			fmt.Printf("Warning: failed to release remote scale lease: %v\n", err)
-		}
-	}()
-	if verbose {
-		fmt.Printf("→ Acquired remote scale lease on %s (ID: %s)\n", firstServerName, lease.ID)
 	}
 
 	deploy := deployer.NewDeployerWithPool(firstClient, cfg, envName, sshPool, verbose)
