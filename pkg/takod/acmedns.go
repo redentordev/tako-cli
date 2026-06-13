@@ -200,7 +200,7 @@ func WriteAcmeDNSCredentials(req AcmeDNSCredentialsRequest) (*AcmeDNSCredentials
 		return nil, fmt.Errorf("failed to create acme-dns data directory: %w", err)
 	}
 	path := filepath.Join(acmeDNSDataDir, acmeDNSCredentialsFile)
-	if err := os.WriteFile(path, []byte(req.Content), 0600); err != nil {
+	if err := writeFileAtomic(path, []byte(req.Content), 0600); err != nil {
 		return nil, fmt.Errorf("failed to write acme-dns credentials: %w", err)
 	}
 	return &AcmeDNSCredentialsResponse{Content: req.Content}, nil
@@ -283,7 +283,7 @@ logformat = "text"
 	if current, err := os.ReadFile(path); err == nil && string(current) == config {
 		return false, nil
 	}
-	if err := os.WriteFile(path, []byte(config), 0644); err != nil {
+	if err := writeFileAtomic(path, []byte(config), 0644); err != nil {
 		return false, fmt.Errorf("failed to write acme-dns config: %w", err)
 	}
 	return true, nil

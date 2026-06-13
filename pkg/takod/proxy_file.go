@@ -31,33 +31,9 @@ func WriteProxyFile(ctx context.Context, req ProxyFileRequest) (*ProxyFileRespon
 		return nil, fmt.Errorf("failed to create proxy dynamic directory: %w", err)
 	}
 	path := filepath.Join(proxyDynamicDir, name)
-	tmp, err := os.CreateTemp(proxyDynamicDir, "."+name+".*.tmp")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create proxy config temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err := tmp.WriteString(req.Content); err != nil {
-		_ = tmp.Close()
-		return nil, fmt.Errorf("failed to write proxy config temp file: %w", err)
-	}
-	if err := tmp.Chmod(0644); err != nil {
-		_ = tmp.Close()
-		return nil, fmt.Errorf("failed to chmod proxy config temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close proxy config temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := writeFileAtomic(path, []byte(req.Content), 0644); err != nil {
 		return nil, fmt.Errorf("failed to publish proxy config file: %w", err)
 	}
-	cleanup = false
 	return &ProxyFileResponse{Path: path}, nil
 }
 

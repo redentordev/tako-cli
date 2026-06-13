@@ -70,7 +70,7 @@ func WriteStateDocument(ctx context.Context, dataDir string, req StateDocumentRe
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create state directory: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(req.Content), 0600); err != nil {
+	if err := writeFileAtomic(path, []byte(req.Content), 0600); err != nil {
 		return nil, fmt.Errorf("failed to write state document: %w", err)
 	}
 	if req.Document == stateDocumentDesired && req.RevisionID != "" {
@@ -81,7 +81,7 @@ func WriteStateDocument(ctx context.Context, dataDir string, req StateDocumentRe
 		if err := os.MkdirAll(filepath.Dir(archivePath), 0755); err != nil {
 			return nil, fmt.Errorf("failed to create revision archive directory: %w", err)
 		}
-		if err := os.WriteFile(archivePath, []byte(req.Content), 0600); err != nil {
+		if err := writeFileAtomic(archivePath, []byte(req.Content), 0600); err != nil {
 			return nil, fmt.Errorf("failed to write desired revision archive: %w", err)
 		}
 	}
