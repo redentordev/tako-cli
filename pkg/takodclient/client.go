@@ -169,6 +169,23 @@ func LogsEndpoint(project string, environment string, service string, tail int, 
 	return "/v1/logs?" + query.Encode()
 }
 
+func StatsEndpoint(project string, environment string, service string, all bool) string {
+	query := url.Values{}
+	if project != "" {
+		query.Set("project", project)
+	}
+	if environment != "" {
+		query.Set("environment", environment)
+	}
+	if service != "" {
+		query.Set("service", service)
+	}
+	if all {
+		query.Set("all", "true")
+	}
+	return "/v1/stats?" + query.Encode()
+}
+
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"

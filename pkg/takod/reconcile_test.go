@@ -280,6 +280,11 @@ func TestTakodCommandHelper(t *testing.T) {
 	case "logs":
 		_, _ = os.Stdout.WriteString("logs\n")
 		os.Exit(0)
+	case "stats":
+		if output := os.Getenv("TAKO_FAKE_STATS_OUTPUT"); output != "" {
+			_, _ = os.Stdout.WriteString(output)
+		}
+		os.Exit(0)
 	default:
 		os.Exit(0)
 	}

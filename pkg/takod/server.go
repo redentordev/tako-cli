@@ -92,6 +92,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/images/import", s.handleImageImport)
 	mux.HandleFunc("/v1/images/build", s.handleImageBuild)
 	mux.HandleFunc("/v1/logs", s.handleLogs)
+	mux.HandleFunc("/v1/stats", s.handleStats)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -706,6 +707,39 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	all := false
+	if rawAll := r.URL.Query().Get("all"); rawAll != "" {
+		parsed, err := strconv.ParseBool(rawAll)
+		if err != nil {
+			http.Error(w, "all must be a boolean", http.StatusBadRequest)
+			return
+		}
+		all = parsed
+	}
+
+	response, err := ReadContainerStats(r.Context(), StatsRequest{
+		Project:     r.URL.Query().Get("project"),
+		Environment: r.URL.Query().Get("environment"),
+		Service:     r.URL.Query().Get("service"),
+		All:         all,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
 }
 
 func (s *Server) Status() Status {

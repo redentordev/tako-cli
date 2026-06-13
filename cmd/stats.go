@@ -1,14 +1,14 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 )
 
@@ -17,17 +17,6 @@ var (
 	statsService string
 	statsAll     bool
 )
-
-// ContainerStats represents resource usage for a single container
-type ContainerStats struct {
-	Name       string
-	CPUPercent string
-	MemUsage   string
-	MemPercent string
-	NetIO      string
-	BlockIO    string
-	PIDs       string
-}
 
 var statsCmd = &cobra.Command{
 	Use:   "stats",
@@ -47,22 +36,30 @@ func init() {
 }
 
 func runStats(cmd *cobra.Command, args []string) error {
-	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if !cfg.IsTakodRuntime() {
+		return fmt.Errorf("runtime.mode=%s is not supported; Tako now uses runtime.mode=takod", cfg.GetRuntimeMode())
+	}
 
-	// Determine environment
 	envName := getEnvironmentName(cfg)
+	if statsService != "" {
+		services, err := cfg.GetServices(envName)
+		if err != nil {
+			return fmt.Errorf("failed to get services: %w", err)
+		}
+		if _, ok := services[statsService]; !ok {
+			return fmt.Errorf("service %s not found in environment %s", statsService, envName)
+		}
+	}
 
-	// Get servers for environment
 	servers, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
 		return fmt.Errorf("failed to get servers: %w", err)
 	}
 
-	// Create SSH pool
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
@@ -87,18 +84,13 @@ func showStatsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, envN
 			continue
 		}
 
-		// Build docker stats command
-		statsCmd := buildDockerStatsCommand(cfg, envName)
-
-		// Execute docker stats
-		output, err := client.Execute(statsCmd)
+		response, err := readStatsViaTakod(client, cfg, envName)
 		if err != nil {
 			fmt.Printf("❌ %s (%s): Failed to get stats - %v\n\n", serverName, server.Host, err)
 			continue
 		}
 
-		// Parse and display stats
-		displayContainerStats(serverName, server.Host, output)
+		displayContainerStats(serverName, server.Host, response.Stats)
 	}
 
 	return nil
@@ -125,79 +117,47 @@ func showLiveStats(cfg *config.Config, servers []string, sshPool *ssh.Pool, envN
 				continue
 			}
 
-			statsCmd := buildDockerStatsCommand(cfg, envName)
-			output, err := client.Execute(statsCmd)
+			response, err := readStatsViaTakod(client, cfg, envName)
 			if err != nil {
 				fmt.Printf("❌ %s: Stats unavailable\n\n", serverName)
 				continue
 			}
 
-			displayContainerStats(serverName, server.Host, output)
+			displayContainerStats(serverName, server.Host, response.Stats)
 		}
 
 		<-ticker.C
 	}
 }
 
-func buildDockerStatsCommand(cfg *config.Config, envName string) string {
-	// Use docker stats with JSON format and no-stream (single snapshot)
-	cmd := "docker stats --no-stream --format '{{json .}}'"
-
-	// If not showing all containers, filter by project
-	if !statsAll {
-		projectName := cfg.Project.Name
-		cmd = fmt.Sprintf("docker ps --format '{{.Names}}' | grep '^%s_%s_' | xargs -r docker stats --no-stream --format '{{json .}}'", projectName, envName)
-	}
-
-	// Filter by specific service if requested
-	if statsService != "" {
-		projectName := cfg.Project.Name
-		cmd = fmt.Sprintf("docker ps --format '{{.Names}}' | grep '^%s_%s_%s\\.' | xargs -r docker stats --no-stream --format '{{json .}}'", projectName, envName, statsService)
-	}
-
-	return cmd
+func readStatsViaTakod(client *ssh.Client, cfg *config.Config, envName string) (*takod.StatsResponse, error) {
+	return readStatsViaTakodWithOptions(client, cfg, envName, statsService, statsAll)
 }
 
-func displayContainerStats(serverName, serverHost, output string) {
-	if strings.TrimSpace(output) == "" {
+func readStatsViaTakodWithOptions(client *ssh.Client, cfg *config.Config, envName string, service string, all bool) (*takod.StatsResponse, error) {
+	endpoint := takodclient.StatsEndpoint(cfg.Project.Name, envName, service, all)
+	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	var response takod.StatsResponse
+	if err := decodeTakodJSON(output, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func displayContainerStats(serverName, serverHost string, stats []takod.ContainerStat) {
+	if len(stats) == 0 {
 		fmt.Printf("📊 %s (%s)\n", serverName, serverHost)
 		fmt.Printf("No containers found\n\n")
 		return
 	}
 
-	// Parse JSON output (one JSON object per line)
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	var stats []ContainerStats
-
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-
-		var rawStat map[string]interface{}
-		if err := json.Unmarshal([]byte(line), &rawStat); err != nil {
-			continue
-		}
-
-		stat := ContainerStats{
-			Name:       getString(rawStat, "Name"),
-			CPUPercent: getString(rawStat, "CPUPerc"),
-			MemUsage:   getString(rawStat, "MemUsage"),
-			MemPercent: getString(rawStat, "MemPerc"),
-			NetIO:      getString(rawStat, "NetIO"),
-			BlockIO:    getString(rawStat, "BlockIO"),
-			PIDs:       getString(rawStat, "PIDs"),
-		}
-
-		stats = append(stats, stat)
-	}
-
-	// Sort by name
 	sort.Slice(stats, func(i, j int) bool {
 		return stats[i].Name < stats[j].Name
 	})
 
-	// Display
 	fmt.Printf("📊 %s (%s)\n", serverName, serverHost)
 	fmt.Printf("─────────────────────────────────────────────────────────────────────────────────────\n")
 	fmt.Printf("%-40s %10s %20s %10s %20s %15s\n", "CONTAINER", "CPU %", "MEMORY", "MEM %", "NET I/O", "BLOCK I/O")
@@ -221,13 +181,4 @@ func displayContainerStats(serverName, serverHost, output string) {
 	}
 
 	fmt.Printf("\n")
-}
-
-func getString(m map[string]interface{}, key string) string {
-	if val, ok := m[key]; ok {
-		if str, ok := val.(string); ok {
-			return str
-		}
-	}
-	return ""
 }
