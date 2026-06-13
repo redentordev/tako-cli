@@ -10,7 +10,8 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
-	"github.com/redentordev/tako-cli/pkg/verification"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 // Monitor handles continuous service monitoring
@@ -20,6 +21,7 @@ type Monitor struct {
 	verbose  bool
 	envName  string
 	services map[string]config.ServiceConfig
+	filter   string
 }
 
 // WebhookPayload represents the structure sent to webhook endpoints
@@ -31,6 +33,10 @@ type WebhookPayload struct {
 	Server    string                 `json:"server"`
 	Details   map[string]interface{} `json:"details"`
 	Severity  string                 `json:"severity"`
+}
+
+func (m *Monitor) SetServiceFilter(serviceName string) {
+	m.filter = serviceName
 }
 
 // NewMonitor creates a new service monitor
@@ -59,6 +65,9 @@ func (m *Monitor) Start(envName string) error {
 	// Show monitoring configuration
 	monitoredCount := 0
 	for serviceName, service := range services {
+		if m.filter != "" && serviceName != m.filter {
+			continue
+		}
 		if service.Monitoring != nil && service.Monitoring.Enabled {
 			monitoredCount++
 			fmt.Printf("  ✓ Monitoring %s (%s check every %s)\n",
@@ -115,6 +124,9 @@ func (m *Monitor) checkAllServices() {
 	now := time.Now()
 
 	for serviceName, service := range m.services {
+		if m.filter != "" && serviceName != m.filter {
+			continue
+		}
 		// Skip if monitoring not enabled
 		if service.Monitoring == nil || !service.Monitoring.Enabled {
 			continue
@@ -180,36 +192,64 @@ func (m *Monitor) checkPublicService(serviceName string, service *config.Service
 
 // checkInternalService checks internal service by verifying containers
 func (m *Monitor) checkInternalService(serviceName string, service *config.ServiceConfig) error {
-	// Connect to servers and check containers
-	for serverName, serverCfg := range m.config.Servers {
+	expected := expectedReplicas(service, m.config, m.envName)
+	actual := 0
+
+	serverNames, err := m.config.GetEnvironmentServers(m.envName)
+	if err != nil {
+		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
+
+	for _, serverName := range serverNames {
+		serverCfg := m.config.Servers[serverName]
 		client, err := m.sshPool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
 		if err != nil {
 			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 		}
 
-		// Check each replica
-		failures := 0
-		for replica := 1; replica <= service.Replicas; replica++ {
-			containerName := fmt.Sprintf("%s_%s_%d", m.config.Project.Name, serviceName, replica)
-
-			// Create verifier
-			verifier := verification.NewVerifier(client, false)
-
-			// Check container health
-			if err := verifier.CheckContainerHealth(containerName, service); err != nil {
-				failures++
-				if m.verbose {
-					fmt.Printf("    Replica %d/%d failed: %v\n", replica, service.Replicas, err)
-				}
-			}
+		output, err := takodclient.RequestJSON(
+			client,
+			m.takodSocket(),
+			"GET",
+			takodclient.ActualStateEndpoint(m.config.Project.Name, m.envName),
+			nil,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to read takod actual state from %s: %w", serverName, err)
 		}
-
-		if failures > 0 {
-			return fmt.Errorf("%d/%d replicas unhealthy", failures, service.Replicas)
+		var response takod.ActualStateResponse
+		if err := json.Unmarshal([]byte(output), &response); err != nil {
+			return fmt.Errorf("failed to parse takod actual state from %s: %w", serverName, err)
+		}
+		if state := response.Services[serviceName]; state != nil {
+			actual += state.Replicas
 		}
 	}
 
+	if actual < expected {
+		return fmt.Errorf("%d/%d replicas running", actual, expected)
+	}
 	return nil
+}
+
+func expectedReplicas(service *config.ServiceConfig, cfg *config.Config, envName string) int {
+	replicas := service.Replicas
+	if replicas <= 0 {
+		replicas = 1
+	}
+	if service.Placement != nil && service.Placement.Strategy == "global" {
+		if servers, err := cfg.GetEnvironmentServers(envName); err == nil && len(servers) > 0 {
+			return len(servers)
+		}
+	}
+	return replicas
+}
+
+func (m *Monitor) takodSocket() string {
+	if m.config.Runtime != nil && m.config.Runtime.Agent != nil && m.config.Runtime.Agent.Socket != "" {
+		return m.config.Runtime.Agent.Socket
+	}
+	return takodclient.DefaultSocket
 }
 
 // sendWebhook sends a webhook notification
