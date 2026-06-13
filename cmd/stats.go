@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -74,26 +76,92 @@ func showStatsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, envN
 	fmt.Printf("\n=== Container Statistics ===\n")
 	fmt.Printf("Timestamp: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
 
-	for _, serverName := range servers {
-		server := cfg.Servers[serverName]
-
-		// Get or create SSH client (supports both key and password auth)
-		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
-		if err != nil {
-			fmt.Printf("❌ %s (%s): Failed to connect - %v\n\n", serverName, server.Host, err)
+	for _, result := range collectStatsOnce(cfg, servers, sshPool, envName) {
+		if result.connectErr != nil {
+			fmt.Printf("❌ %s (%s): Failed to connect - %v\n\n", result.serverName, result.host, result.connectErr)
 			continue
 		}
-
-		response, err := readStatsViaTakod(client, cfg, envName)
-		if err != nil {
-			fmt.Printf("❌ %s (%s): Failed to get stats - %v\n\n", serverName, server.Host, err)
+		if result.statsErr != nil {
+			fmt.Printf("❌ %s (%s): Failed to get stats - %v\n\n", result.serverName, result.host, result.statsErr)
 			continue
 		}
-
-		displayContainerStats(serverName, server.Host, response.Stats)
+		displayContainerStats(result.serverName, result.host, result.stats)
 	}
 
 	return nil
+}
+
+type statsNodeResult struct {
+	index      int
+	serverName string
+	host       string
+	stats      []takod.ContainerStat
+	connectErr error
+	statsErr   error
+}
+
+type statsReadFunc func(serverName string, server config.ServerConfig) (*takod.StatsResponse, error)
+
+func collectStatsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, envName string) []statsNodeResult {
+	return collectStatsOnceWith(cfg.Servers, servers, func(serverName string, server config.ServerConfig) (*takod.StatsResponse, error) {
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err != nil {
+			return nil, fmt.Errorf("connect: %w", err)
+		}
+		response, err := readStatsViaTakod(client, cfg, envName)
+		if err != nil {
+			return nil, fmt.Errorf("stats: %w", err)
+		}
+		return response, nil
+	})
+}
+
+func collectStatsOnceWith(configuredServers map[string]config.ServerConfig, serverNames []string, read statsReadFunc) []statsNodeResult {
+	resultCh := make(chan statsNodeResult, len(serverNames))
+	var wg sync.WaitGroup
+
+	for index, serverName := range serverNames {
+		server, ok := configuredServers[serverName]
+		if !ok {
+			resultCh <- statsNodeResult{
+				index:      index,
+				serverName: serverName,
+				connectErr: fmt.Errorf("server not found in configuration"),
+			}
+			continue
+		}
+
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			response, err := read(serverName, server)
+			result := statsNodeResult{
+				index:      index,
+				serverName: serverName,
+				host:       server.Host,
+			}
+			if response != nil {
+				result.stats = response.Stats
+			}
+			if err != nil {
+				if strings.HasPrefix(err.Error(), "connect: ") {
+					result.connectErr = fmt.Errorf("%s", strings.TrimPrefix(err.Error(), "connect: "))
+				} else {
+					result.statsErr = err
+				}
+			}
+			resultCh <- result
+		}(index, serverName, server)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]statsNodeResult, len(serverNames))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+	return results
 }
 
 func showLiveStats(cfg *config.Config, servers []string, sshPool *ssh.Pool, envName string) error {
