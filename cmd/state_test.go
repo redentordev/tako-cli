@@ -270,6 +270,64 @@ func TestOrderedStateServerNamesPrefersRequestedServer(t *testing.T) {
 	}
 }
 
+func TestStatePullServerNamesReadsAllByDefault(t *testing.T) {
+	cfg := stateServerNamesConfig()
+
+	got, err := statePullServerNames(cfg, "production", "")
+	if err != nil {
+		t.Fatalf("statePullServerNames returned error: %v", err)
+	}
+	want := []string{"node-a", "node-b", "node-c"}
+	if len(got) != len(want) {
+		t.Fatalf("state pull servers = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("state pull servers = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestStatePullServerNamesUsesOnlyRequestedServer(t *testing.T) {
+	cfg := stateServerNamesConfig()
+
+	got, err := statePullServerNames(cfg, "production", "node-b")
+	if err != nil {
+		t.Fatalf("statePullServerNames returned error: %v", err)
+	}
+	if len(got) != 1 || got[0] != "node-b" {
+		t.Fatalf("state pull servers = %v, want [node-b]", got)
+	}
+}
+
+func TestLatestDeploymentByTimestamp(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	latest := latestDeploymentByTimestamp([]*remotestate.DeploymentState{
+		remoteDeployment("old", base, "demo:v1"),
+		nil,
+		remoteDeployment("new", base.Add(time.Hour), "demo:v2"),
+	})
+
+	if latest == nil || latest.ID != "new" {
+		t.Fatalf("latest deployment = %#v, want new", latest)
+	}
+}
+
+func stateServerNamesConfig() *config.Config {
+	return &config.Config{
+		Servers: map[string]config.ServerConfig{
+			"node-a": {Host: "10.0.0.1"},
+			"node-b": {Host: "10.0.0.2"},
+			"node-c": {Host: "10.0.0.3"},
+		},
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Servers: []string{"node-a", "node-b", "node-c"},
+			},
+		},
+	}
+}
+
 func remoteDeployment(id string, timestamp time.Time, image string) *remotestate.DeploymentState {
 	return &remotestate.DeploymentState{
 		ID:          id,
