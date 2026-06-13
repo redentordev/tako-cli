@@ -9,6 +9,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
@@ -214,14 +215,22 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 		pass("Local deployment state exists")
 	} else if len(connectedClients) > 0 {
 		warn("Local deployment state missing, attempting state pull...")
-		if err := SyncStateOnDeploy(cfg, getFirstClient(connectedClients, cfg, envName), envName); err != nil {
+		histories, err := collectStatePullHistories(cfg, envName, "")
+		if err != nil {
 			warn(fmt.Sprintf("State sync failed: %v", err))
-		} else {
-			if localDeploymentStateExists(envName) {
-				pass("State synced from remote server")
+		} else if best, ok := bestDeploymentHistory(histories); ok {
+			localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+			if err != nil {
+				warn(fmt.Sprintf("State sync failed: %v", err))
+			} else if synced, err := syncRemoteDeploymentsToLocal(localMgr, best.history.Deployments, envName); err != nil {
+				warn(fmt.Sprintf("State sync failed: %v", err))
 			} else {
-				warn("No remote state available (deploy first)")
+				pass(fmt.Sprintf("State synced from %s (%d deployment(s))", best.source, synced))
 			}
+		} else if localDeploymentStateExists(envName) {
+			pass("State synced from remote server")
+		} else {
+			warn("No remote state available (deploy first)")
 		}
 	} else {
 		warn("Local deployment state missing and no server connections available")
@@ -325,18 +334,4 @@ func createEnvFromExample(reader *bufio.Reader, interactive bool) error {
 	}
 
 	return os.WriteFile(".env", []byte(strings.Join(outputLines, "\n")), 0600)
-}
-
-// getFirstClient returns a connected client, preferring the primary
-func getFirstClient(clients map[string]*ssh.Client, cfg *config.Config, envName string) *ssh.Client {
-	primaryName, err := cfg.GetPrimaryServer(envName)
-	if err == nil {
-		if c, ok := clients[primaryName]; ok {
-			return c
-		}
-	}
-	for _, c := range clients {
-		return c
-	}
-	return nil
 }
