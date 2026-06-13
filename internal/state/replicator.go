@@ -3,8 +3,9 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -13,9 +14,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
-// StateReplicator replicates deployment history across the takod mesh as
-// read-only backups. Replication is fire-and-forget: failures are logged as
-// warnings and never block or fail a deployment.
+// StateReplicator replicates deployment history across the takod mesh.
 type StateReplicator struct {
 	sshPool     *ssh.Pool
 	config      *config.Config
@@ -23,6 +22,8 @@ type StateReplicator struct {
 	projectName string
 	socket      string
 	verbose     bool
+
+	replicateNode func(context.Context, string, config.ServerConfig, *DeploymentState, *DeploymentHistory) error
 }
 
 // NewStateReplicator creates a new state replicator.
@@ -41,93 +42,103 @@ func NewStateReplicator(pool *ssh.Pool, cfg *config.Config, environment, project
 	}
 }
 
-// ReplicateDeployment replicates a deployment and its history to environment
-// mesh nodes. Writes are idempotent, so including the node that initially saved
-// the deployment is acceptable.
-func (r *StateReplicator) ReplicateDeployment(deployment *DeploymentState, history *DeploymentHistory) {
+// ReplicateDeployment replicates a deployment and its history to every
+// environment mesh node. Writes are idempotent, so including the node that
+// initially saved the deployment is acceptable.
+func (r *StateReplicator) ReplicateDeployment(deployment *DeploymentState, history *DeploymentHistory) error {
 	peers := r.getReplicaServers()
 	if len(peers) == 0 {
-		return
+		return nil
 	}
 
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-		var wg sync.WaitGroup
-		for name, srv := range peers {
-			wg.Add(1)
-			go func(serverName string, server config.ServerConfig) {
-				defer wg.Done()
-				r.replicateToNode(ctx, serverName, server, deployment, history)
-			}(name, srv)
-		}
+	replicateNode := r.replicateToNode
+	if r.replicateNode != nil {
+		replicateNode = r.replicateNode
+	}
 
-		done := make(chan struct{})
-		go func() {
-			wg.Wait()
-			close(done)
-		}()
+	names := make([]string, 0, len(peers))
+	for name := range peers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 
-		select {
-		case <-done:
-		case <-ctx.Done():
-			if r.verbose {
-				fmt.Fprintf(os.Stderr, "Warning: state replication timed out after 30s\n")
+	errs := make(chan error, len(names))
+	var wg sync.WaitGroup
+	for _, name := range names {
+		server := peers[name]
+		wg.Add(1)
+		go func(serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			if err := replicateNode(ctx, serverName, server, deployment, history); err != nil {
+				errs <- fmt.Errorf("%s: %w", serverName, err)
 			}
-		}
+		}(name, server)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
 	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return fmt.Errorf("state replication timed out after 30s: %w", ctx.Err())
+	}
+
+	close(errs)
+	var joined []error
+	for err := range errs {
+		joined = append(joined, err)
+	}
+	if len(joined) > 0 {
+		return fmt.Errorf("state replication failed: %w", errors.Join(joined...))
+	}
+	return nil
 }
 
-func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string, server config.ServerConfig, deployment *DeploymentState, history *DeploymentHistory) {
+func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string, server config.ServerConfig, deployment *DeploymentState, history *DeploymentHistory) error {
 	select {
 	case <-ctx.Done():
-		return
+		return ctx.Err()
 	default:
+	}
+	if r.sshPool == nil {
+		return fmt.Errorf("ssh pool is nil")
 	}
 
 	client, err := r.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 	if err != nil {
-		if r.verbose {
-			fmt.Fprintf(os.Stderr, "Warning: replication to %s failed (connect): %v\n", serverName, err)
-		}
-		return
+		return fmt.Errorf("connect: %w", err)
 	}
 
 	deploymentCopy, err := cloneDeploymentState(deployment)
 	if err != nil {
-		if r.verbose {
-			fmt.Fprintf(os.Stderr, "Warning: replication to %s failed (clone deployment): %v\n", serverName, err)
-		}
-		return
+		return fmt.Errorf("clone deployment: %w", err)
 	}
 	historyCopy, err := cloneDeploymentHistory(history)
 	if err != nil {
-		if r.verbose {
-			fmt.Fprintf(os.Stderr, "Warning: replication to %s failed (clone history): %v\n", serverName, err)
-		}
-		return
+		return fmt.Errorf("clone history: %w", err)
 	}
 
 	manager := NewStateManagerWithSocket(client, r.projectName, r.environment, server.Host, r.socket)
 	if err := manager.SaveDeployment(deploymentCopy); err != nil {
-		if r.verbose {
-			fmt.Fprintf(os.Stderr, "Warning: replication to %s failed (deployment): %v\n", serverName, err)
-		}
-		return
+		return fmt.Errorf("deployment: %w", err)
 	}
 	if historyCopy != nil {
 		if err := manager.SaveHistory(historyCopy); err != nil {
-			if r.verbose {
-				fmt.Fprintf(os.Stderr, "Warning: replication to %s failed (history): %v\n", serverName, err)
-			}
-			return
+			return fmt.Errorf("history: %w", err)
 		}
 	}
 
 	if r.verbose {
-		fmt.Fprintf(os.Stderr, "  ✓ State replicated to node %s\n", serverName)
+		fmt.Printf("  ✓ State replicated to node %s\n", serverName)
 	}
+	return nil
 }
 
 func cloneDeploymentState(deployment *DeploymentState) (*DeploymentState, error) {

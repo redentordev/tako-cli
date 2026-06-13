@@ -558,11 +558,16 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("deployment succeeded but failed to persist takod state: %w", err)
 		}
 
-		// Replicate state to the rest of the mesh (async, fire-and-forget).
+		// Replicate state to the rest of the mesh.
 		if len(servers) > 1 {
 			replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
-			history, _ := stateManager.LoadHistory()
-			replicator.ReplicateDeployment(deployment, history)
+			history, err := stateManager.LoadHistory()
+			if err != nil {
+				return fmt.Errorf("deployment succeeded but failed to load remote deployment history for replication: %w", err)
+			}
+			if err := replicator.ReplicateDeployment(deployment, history); err != nil {
+				return fmt.Errorf("deployment succeeded but failed to replicate remote deployment history: %w", err)
+			}
 		}
 
 		// Save local deployment state
