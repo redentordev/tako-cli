@@ -27,7 +27,6 @@ var setupCmd = &cobra.Command{
   - Security hardening (disable root login, fail2ban)
   - Deploy user creation and SSH key setup
   - Monitoring agent for system metrics
-  - NFS shared storage (if configured)
 
 This only needs to be run once per server.`,
 	RunE: runSetup,
@@ -129,23 +128,6 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n✓ Server %s set up successfully!\n", name)
 	}
 
-	// Setup NFS if configured and appropriate
-	if cfg.IsNFSEnabled() {
-		shouldSetupNFS, reason, showSingleServerTip := setupNFSDecision(cfg, envName, setupServer, len(targetServerNames))
-		if shouldSetupNFS {
-			fmt.Printf("\n=== Setting up NFS shared storage ===\n\n")
-			if err := setupNFS(cfg, sshPool, envName, targetServerNames); err != nil {
-				return fmt.Errorf("failed to setup NFS: %w", err)
-			}
-		} else {
-			fmt.Printf("\n=== NFS Shared Storage ===\n")
-			fmt.Printf("→ Skipping NFS setup: %s\n", reason)
-			if showSingleServerTip {
-				fmt.Printf("  Tip: NFS volumes (nfs:name:/path) will use local bind mounts on single-server deployments.\n")
-			}
-		}
-	}
-
 	fmt.Printf("\nAll servers set up successfully!\n")
 	fmt.Printf("\nNext step: Run 'tako deploy' to deploy your application\n")
 
@@ -172,20 +154,6 @@ func setupTargetServers(cfg *config.Config, envName string, requestedServer stri
 	return serverNames, servers, nil
 }
 
-func setupNFSDecision(cfg *config.Config, envName string, requestedServer string, serverCount int) (bool, string, bool) {
-	if !cfg.IsNFSEnabled() {
-		return false, "NFS is not enabled in configuration", false
-	}
-	if !cfg.EnvironmentUsesNFSVolumes(envName) {
-		return false, fmt.Sprintf("environment %s has no NFS volumes.", envName), false
-	}
-	if requestedServer != "" {
-		return false, fmt.Sprintf("--server targets one node. Run 'tako setup -e %s' without --server to configure shared NFS.", envName), false
-	}
-	shouldSetup, reason := provisioner.ShouldSetupNFS(cfg, serverCount)
-	return shouldSetup, reason, serverCount == 1
-}
-
 func setupMeshListenPort(cfg *config.Config) int {
 	if cfg.Mesh != nil && cfg.Mesh.ListenPort > 0 {
 		return cfg.Mesh.ListenPort
@@ -204,144 +172,6 @@ func ensureTakodRuntimeForSetup(prov *provisioner.Provisioner, cfg *config.Confi
 		dataDir = cfg.Runtime.Agent.DataDir
 	}
 	return prov.InstallTakodService(socket, dataDir, nodeName)
-}
-
-// setupNFS configures NFS server and clients based on configuration
-func setupNFS(cfg *config.Config, sshPool *ssh.Pool, envName string, serverNames []string) error {
-	nfsConfig := cfg.GetNFSConfig()
-	if nfsConfig == nil || !nfsConfig.Enabled {
-		return nil
-	}
-
-	// Use default environment if not specified
-	if envName == "" {
-		envName = cfg.GetDefaultEnvironment()
-	}
-
-	// Validate export paths before proceeding
-	for _, export := range nfsConfig.Exports {
-		if err := provisioner.ValidateNFSExportPath(export.Path); err != nil {
-			return fmt.Errorf("invalid NFS export '%s': %w", export.Name, err)
-		}
-	}
-
-	// Get NFS server name
-	nfsServerName, err := cfg.GetNFSServerName(envName)
-	if err != nil {
-		return fmt.Errorf("failed to determine NFS server: %w", err)
-	}
-
-	nfsServerConfig, exists := cfg.Servers[nfsServerName]
-	if !exists {
-		return fmt.Errorf("NFS server '%s' not found in servers configuration", nfsServerName)
-	}
-
-	fmt.Printf("→ NFS server will be: %s (%s)\n", nfsServerName, nfsServerConfig.Host)
-
-	// Get all server IPs for firewall configuration
-	serverIPs := make([]string, 0, len(serverNames))
-	for _, serverName := range serverNames {
-		server, ok := cfg.Servers[serverName]
-		if !ok {
-			return fmt.Errorf("server %s not found in config", serverName)
-		}
-		// Validate IP addresses
-		if err := provisioner.ValidateIPAddress(server.Host); err != nil {
-			return fmt.Errorf("invalid server IP for firewall rules: %w", err)
-		}
-		serverIPs = append(serverIPs, server.Host)
-	}
-
-	// Create NFS provisioner
-	nfsProvisioner := provisioner.NewNFSProvisioner(cfg.Project.Name, envName, verbose)
-
-	// Connect to NFS server and set it up
-	nfsClient, err := sshPool.GetOrCreateWithAuth(
-		nfsServerConfig.Host,
-		nfsServerConfig.Port,
-		nfsServerConfig.User,
-		nfsServerConfig.SSHKey,
-		nfsServerConfig.Password,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to connect to NFS server %s: %w", nfsServerName, err)
-	}
-
-	// Check for existing NFS setup and handle migration if needed
-	existingStatus, _ := nfsProvisioner.DetectExistingNFS(nfsClient)
-	if existingStatus != nil && existingStatus.ServiceActive {
-		if verbose {
-			fmt.Printf("  Detected existing NFS server, updating configuration...\n")
-		}
-	}
-
-	fmt.Printf("→ Setting up NFS server on %s...\n", nfsServerName)
-	serverInfo, err := nfsProvisioner.SetupNFSServer(nfsClient, nfsConfig, serverIPs)
-	if err != nil {
-		return fmt.Errorf("failed to setup NFS server: %w", err)
-	}
-	serverInfo.ServerName = nfsServerName
-	serverInfo.Host = nfsServerConfig.Host
-
-	fmt.Printf("  ✓ NFS server configured with %d exports\n", len(serverInfo.Exports))
-
-	// Setup NFS clients on all other servers
-	clientErrors := 0
-	for _, serverName := range serverNames {
-		if serverName == nfsServerName {
-			continue // Skip the NFS server itself
-		}
-		serverConfig, ok := cfg.Servers[serverName]
-		if !ok {
-			return fmt.Errorf("server %s not found in config", serverName)
-		}
-
-		fmt.Printf("→ Setting up NFS client on %s...\n", serverName)
-
-		client, err := sshPool.GetOrCreateWithAuth(
-			serverConfig.Host,
-			serverConfig.Port,
-			serverConfig.User,
-			serverConfig.SSHKey,
-			serverConfig.Password,
-		)
-		if err != nil {
-			fmt.Printf("  ⚠ Warning: failed to connect to server %s: %v\n", serverName, err)
-			clientErrors++
-			continue
-		}
-
-		if err := nfsProvisioner.SetupNFSClient(client, nfsServerConfig.Host, serverInfo.Exports); err != nil {
-			fmt.Printf("  ⚠ Warning: failed to setup NFS client on %s: %v\n", serverName, err)
-			clientErrors++
-			continue
-		}
-
-		fmt.Printf("  ✓ NFS client configured on %s\n", serverName)
-	}
-
-	// Also setup local mount on the NFS server itself (for local access)
-	fmt.Printf("→ Setting up local NFS access on %s...\n", nfsServerName)
-	if err := nfsProvisioner.SetupNFSClient(nfsClient, "localhost", serverInfo.Exports); err != nil {
-		// Non-fatal: local mount may fail but remote access still works
-		fmt.Printf("  ⚠ Warning: local NFS mount on server failed: %v\n", err)
-	} else {
-		fmt.Printf("  ✓ Local NFS access configured\n")
-	}
-
-	fmt.Printf("\n✓ NFS shared storage setup completed!\n")
-	fmt.Printf("  Server: %s (%s)\n", nfsServerName, nfsServerConfig.Host)
-	fmt.Printf("  Exports:\n")
-	for _, export := range serverInfo.Exports {
-		fmt.Printf("    - %s: %s\n", export.Name, export.Path)
-		fmt.Printf("      Mount point: %s\n", export.MountPoint)
-	}
-
-	if clientErrors > 0 {
-		fmt.Printf("\n⚠ Warning: %d client(s) failed to setup. Run 'tako storage remount' to retry.\n", clientErrors)
-	}
-
-	return nil
 }
 
 // consoleLogger implements the setup.Logger interface for console output

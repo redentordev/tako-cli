@@ -84,24 +84,25 @@ type VolumeConfig struct {
 	Name       string            `yaml:"name,omitempty" json:"name,omitempty"`               // Override the auto-generated name (opt-out of prefix)
 }
 
-// StorageConfig defines shared storage configuration
+// StorageConfig keeps legacy storage keys so removed options fail validation
+// instead of being silently ignored.
 type StorageConfig struct {
 	NFS *NFSConfig `yaml:"nfs,omitempty" json:"nfs,omitempty"`
 }
 
-// NFSConfig defines NFS shared storage settings
+// NFSConfig is retained only to reject removed storage.nfs configuration.
 type NFSConfig struct {
 	Enabled bool              `yaml:"enabled" json:"enabled"`
-	Server  string            `yaml:"server,omitempty" json:"server,omitempty"` // "auto" = use the deterministic environment default, or specify a node
+	Server  string            `yaml:"server,omitempty" json:"server,omitempty"`
 	Exports []NFSExportConfig `yaml:"exports,omitempty" json:"exports,omitempty"`
 }
 
-// NFSExportConfig defines an NFS export/share
+// NFSExportConfig is retained only to reject removed storage.nfs exports.
 type NFSExportConfig struct {
-	Name    string   `yaml:"name" json:"name"`                           // Name of the export (used in volume references)
-	Path    string   `yaml:"path" json:"path"`                           // Path on the NFS server
-	Size    string   `yaml:"size,omitempty" json:"size,omitempty"`       // Optional: expected size for provisioning hints
-	Options []string `yaml:"options,omitempty" json:"options,omitempty"` // NFS export options (e.g., rw, sync, no_subtree_check)
+	Name    string   `yaml:"name" json:"name"`
+	Path    string   `yaml:"path" json:"path"`
+	Size    string   `yaml:"size,omitempty" json:"size,omitempty"`
+	Options []string `yaml:"options,omitempty" json:"options,omitempty"`
 }
 
 // NotificationsConfig defines notification settings
@@ -752,145 +753,9 @@ func (c *Config) IsCacheEnabled() bool {
 	return true // Default to enabled
 }
 
-// IsNFSEnabled returns true if NFS storage is enabled
-func (c *Config) IsNFSEnabled() bool {
-	return c.Storage != nil && c.Storage.NFS != nil && c.Storage.NFS.Enabled
-}
-
-// EnvironmentUsesNFSVolumes returns true when any service in an environment
-// declares an nfs:<export>:<path> volume.
-func (c *Config) EnvironmentUsesNFSVolumes(envName string) bool {
-	if envName == "" {
-		envName = c.GetDefaultEnvironment()
-	}
-	env, exists := c.Environments[envName]
-	if !exists {
-		return false
-	}
-	return EnvironmentUsesNFSVolumes(env)
-}
-
-// EnvironmentUsesNFSVolumes returns true when any service declares an
-// nfs:<export>:<path> volume.
-func EnvironmentUsesNFSVolumes(env EnvironmentConfig) bool {
-	for _, service := range env.Services {
-		for _, volume := range service.Volumes {
-			if IsNFSVolume(volume) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// GetNFSConfig returns the NFS configuration, or nil if not enabled
-func (c *Config) GetNFSConfig() *NFSConfig {
-	if c.Storage != nil && c.Storage.NFS != nil {
-		return c.Storage.NFS
-	}
-	return nil
-}
-
-// GetNFSServerName returns the NFS server name.
-// If "auto" or empty, returns the default environment node.
-func (c *Config) GetNFSServerName(envName string) (string, error) {
-	if !c.IsNFSEnabled() {
-		return "", fmt.Errorf("NFS is not enabled")
-	}
-
-	nfsConfig := c.GetNFSConfig()
-	if nfsConfig.Server == "" || nfsConfig.Server == "auto" {
-		return c.GetDefaultServer(envName)
-	}
-
-	// Verify the specified server exists
-	if _, exists := c.Servers[nfsConfig.Server]; !exists {
-		return "", fmt.Errorf("NFS server '%s' not found in servers configuration", nfsConfig.Server)
-	}
-
-	envServers, err := c.GetEnvironmentServers(envName)
-	if err != nil {
-		return "", err
-	}
-	for _, serverName := range envServers {
-		if serverName == nfsConfig.Server {
-			return nfsConfig.Server, nil
-		}
-	}
-	if envName == "" {
-		envName = c.GetDefaultEnvironment()
-	}
-	return "", fmt.Errorf("NFS server '%s' is not part of environment '%s'", nfsConfig.Server, envName)
-}
-
-// GetNFSExport returns a specific NFS export by name
-func (c *Config) GetNFSExport(name string) (*NFSExportConfig, error) {
-	if !c.IsNFSEnabled() {
-		return nil, fmt.Errorf("NFS is not enabled")
-	}
-
-	for _, export := range c.GetNFSConfig().Exports {
-		if export.Name == name {
-			return &export, nil
-		}
-	}
-
-	return nil, fmt.Errorf("NFS export '%s' not found", name)
-}
-
-// GetNFSExports returns all NFS exports
-func (c *Config) GetNFSExports() []NFSExportConfig {
-	if !c.IsNFSEnabled() {
-		return nil
-	}
-	return c.GetNFSConfig().Exports
-}
-
-// IsNFSVolume checks if a volume spec refers to an NFS volume (nfs:name:/path format)
+// IsNFSVolume checks if a volume spec uses the removed nfs: prefix.
 func IsNFSVolume(volumeSpec string) bool {
 	return strings.HasPrefix(volumeSpec, "nfs:")
-}
-
-// ParseNFSVolumeSpec parses an NFS volume specification
-// Format: nfs:export_name:/container/path[:ro]
-// Returns: exportName, containerPath, readOnly, error
-func ParseNFSVolumeSpec(volumeSpec string) (exportName string, containerPath string, readOnly bool, err error) {
-	if !IsNFSVolume(volumeSpec) {
-		return "", "", false, fmt.Errorf("not an NFS volume spec: %s", volumeSpec)
-	}
-
-	// Remove the "nfs:" prefix
-	spec := strings.TrimPrefix(volumeSpec, "nfs:")
-
-	// Check for :ro suffix
-	if strings.HasSuffix(spec, ":ro") {
-		readOnly = true
-		spec = strings.TrimSuffix(spec, ":ro")
-	} else if strings.HasSuffix(spec, ":rw") {
-		readOnly = false
-		spec = strings.TrimSuffix(spec, ":rw")
-	} else {
-		// Default to read-only for safety
-		readOnly = true
-	}
-
-	// Split into export name and container path
-	parts := strings.SplitN(spec, ":", 2)
-	if len(parts) != 2 {
-		return "", "", false, fmt.Errorf("invalid NFS volume spec: %s (expected format: nfs:export_name:/container/path[:ro|:rw])", volumeSpec)
-	}
-
-	exportName = parts[0]
-	containerPath = parts[1]
-
-	if exportName == "" {
-		return "", "", false, fmt.Errorf("NFS export name cannot be empty")
-	}
-	if containerPath == "" || !strings.HasPrefix(containerPath, "/") {
-		return "", "", false, fmt.Errorf("NFS container path must be an absolute path")
-	}
-
-	return exportName, containerPath, readOnly, nil
 }
 
 // GetVolume returns a volume configuration by name

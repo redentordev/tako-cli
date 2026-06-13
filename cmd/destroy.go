@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -203,44 +202,6 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Cleanup NFS if configured and purging (only for multi-server)
-	if destroyPurgeAll && cfg.IsNFSEnabled() && len(serversToDestroy) > 1 {
-		fmt.Printf("\n=== Cleaning up NFS shared storage ===\n\n")
-		if err := cleanupNFS(cfg, envName); err != nil {
-			fmt.Printf("⚠️  NFS cleanup failed: %v\n", err)
-			totalErrors++
-		}
-	} else if destroyPurgeAll && cfg.IsNFSEnabled() && len(serversToDestroy) == 1 {
-		// Single server - just cleanup any local directories that might have been created
-		fmt.Printf("\n=== Cleaning up local storage (single-server mode) ===\n\n")
-		nfsConfig := cfg.GetNFSConfig()
-		if nfsConfig != nil {
-			for serverName, serverCfg := range serversToDestroy {
-				client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-					Host:     serverCfg.Host,
-					Port:     serverCfg.Port,
-					User:     serverCfg.User,
-					SSHKey:   serverCfg.SSHKey,
-					Password: serverCfg.Password,
-				})
-				if err != nil {
-					continue
-				}
-				if err := client.Connect(); err != nil {
-					continue
-				}
-				defer client.Close()
-
-				// Note: We don't delete the data directories, just inform the user
-				fmt.Printf("→ Storage directories on %s preserved:\n", serverName)
-				for _, export := range nfsConfig.Exports {
-					fmt.Printf("    - %s\n", export.Path)
-				}
-				fmt.Printf("  Remove manually if no longer needed.\n")
-			}
-		}
-	}
-
 	// Summary
 	if totalErrors > 0 {
 		fmt.Printf("⚠️  Destroy completed with %d errors\n", totalErrors)
@@ -254,88 +215,6 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 			fmt.Println("\n💡 Server setup preserved. You can redeploy without running 'tako setup'.")
 		}
 	}
-
-	return nil
-}
-
-// cleanupNFS removes NFS configuration from all servers
-func cleanupNFS(cfg *config.Config, envName string) error {
-	nfsConfig := cfg.GetNFSConfig()
-	if nfsConfig == nil || !nfsConfig.Enabled {
-		return nil
-	}
-
-	// Use default environment if not specified
-	if envName == "" {
-		envName = cfg.GetDefaultEnvironment()
-	}
-	envServers, err := cfg.GetEnvironmentServers(envName)
-	if err != nil {
-		return fmt.Errorf("failed to get environment servers: %w", err)
-	}
-
-	// Create NFS provisioner
-	nfsProvisioner := provisioner.NewNFSProvisioner(cfg.Project.Name, envName, verbose)
-
-	// Build export info for cleanup
-	exports := make([]provisioner.NFSExportInfo, 0, len(nfsConfig.Exports))
-	for _, export := range nfsConfig.Exports {
-		exports = append(exports, provisioner.NFSExportInfo{
-			Name:       export.Name,
-			Path:       export.Path,
-			MountPoint: nfsProvisioner.GetNFSMountPoint(export.Name),
-		})
-	}
-
-	// Get NFS server name
-	nfsServerName, err := cfg.GetNFSServerName(envName)
-	if err != nil {
-		return fmt.Errorf("failed to determine NFS server: %w", err)
-	}
-
-	// Cleanup NFS clients first (unmount before removing server exports)
-	for _, serverName := range envServers {
-		serverConfig, ok := cfg.Servers[serverName]
-		if !ok {
-			return fmt.Errorf("server %s not found in config", serverName)
-		}
-		fmt.Printf("→ Cleaning up NFS on %s...\n", serverName)
-
-		client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-			Host:     serverConfig.Host,
-			Port:     serverConfig.Port,
-			User:     serverConfig.User,
-			SSHKey:   serverConfig.SSHKey,
-			Password: serverConfig.Password,
-		})
-		if err != nil {
-			fmt.Printf("  ⚠ Warning: failed to connect to %s: %v\n", serverName, err)
-			continue
-		}
-		if err := client.Connect(); err != nil {
-			fmt.Printf("  ⚠ Warning: failed to connect to %s: %v\n", serverName, err)
-			continue
-		}
-		defer client.Close()
-
-		// Cleanup as client (unmount)
-		if err := nfsProvisioner.CleanupNFSClient(client, exports); err != nil {
-			fmt.Printf("  ⚠ Warning: failed to cleanup NFS client on %s: %v\n", serverName, err)
-		}
-
-		// If this is the NFS server, also cleanup server config
-		if serverName == nfsServerName {
-			if err := nfsProvisioner.CleanupNFSServer(client, exports); err != nil {
-				fmt.Printf("  ⚠ Warning: failed to cleanup NFS server on %s: %v\n", serverName, err)
-			}
-		}
-
-		fmt.Printf("  ✓ NFS cleanup completed on %s\n", serverName)
-	}
-
-	fmt.Printf("\n✓ NFS shared storage cleanup completed\n")
-	fmt.Printf("  Note: Export directories on the NFS server were preserved.\n")
-	fmt.Printf("  Remove manually if needed: %s\n", nfsConfig.Exports[0].Path)
 
 	return nil
 }

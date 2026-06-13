@@ -430,26 +430,7 @@ func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.Serv
 	var mounts []string
 	for _, volume := range service.Volumes {
 		if config.IsNFSVolume(volume) {
-			exportName, containerPath, readOnly, err := config.ParseNFSVolumeSpec(volume)
-			if err != nil {
-				return nil, fmt.Errorf("invalid NFS volume spec for service %s: %w", serviceName, err)
-			}
-
-			mountSource := fmt.Sprintf("/mnt/tako-nfs/%s_%s_%s", d.config.Project.Name, d.environment, exportName)
-			if !d.config.IsMultiServer() {
-				export, err := d.config.GetNFSExport(exportName)
-				if err != nil {
-					return nil, fmt.Errorf("NFS export '%s' not found in config for service %s: %w", exportName, serviceName, err)
-				}
-				mountSource = export.Path
-			}
-
-			mountOpts := fmt.Sprintf("type=bind,source=%s,target=%s", mountSource, containerPath)
-			if readOnly {
-				mountOpts += ",readonly"
-			}
-			mounts = append(mounts, mountOpts)
-			continue
+			return nil, fmt.Errorf("service %s: NFS volumes are no longer supported; use node-local volumes or an external storage service", serviceName)
 		}
 
 		source, target := parseVolumeSpec(volume)
