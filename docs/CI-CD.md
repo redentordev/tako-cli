@@ -17,10 +17,10 @@ but it does not depend on the runner's old `.tako/` directory to know what is
 currently running.
 
 `tako state repair` is the recovery path for stale or divergent node state. It
-is not required on every CI deploy; run it before deploy when a primary node was
+is not required on every CI deploy; run it before deploy when a node was
 replaced, a runner is bootstrapping after state loss, or `tako state status`
-shows that the selected node is missing deployment history, desired runtime
-state, or actual runtime state that another node has.
+shows that reachable nodes disagree on deployment history, desired runtime
+state, or actual runtime state.
 
 ## Required Secrets
 

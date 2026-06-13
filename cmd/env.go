@@ -24,8 +24,8 @@ const envPassphraseVar = "TAKO_ENV_PASSPHRASE"
 
 var envCmd = &cobra.Command{
 	Use:   "env",
-	Short: "Manage environment credentials on remote servers",
-	Long: `Push and pull encrypted environment files (.env, secrets) to/from remote servers.
+	Short: "Manage environment credentials in the takod mesh",
+	Long: `Push and pull encrypted environment files (.env, secrets) to/from the takod mesh.
 
 This allows you to securely transfer credentials between machines. Files are
 encrypted with a passphrase using Argon2id + AES-256-GCM before upload.
@@ -40,19 +40,19 @@ For CI, set TAKO_ENV_PASSPHRASE to avoid interactive prompts.`,
 
 var envPushCmd = &cobra.Command{
 	Use:   "push",
-	Short: "Encrypt and upload environment files to server",
+	Short: "Encrypt and upload environment files to the takod mesh",
 	Long: `Encrypt .env and .tako/secrets* files with a passphrase and upload
-the encrypted bundle to the remote server.
+the encrypted bundle to reachable environment nodes.
 
-The encrypted bundle is stored in takod state on the selected node,
+The encrypted bundle is stored in takod state on each reachable node,
 protected by your passphrase.`,
 	RunE: runEnvPush,
 }
 
 var envPullCmd = &cobra.Command{
 	Use:   "pull",
-	Short: "Download and decrypt environment files from server",
-	Long: `Download the encrypted environment bundle from the remote server,
+	Short: "Download and decrypt environment files from the takod mesh",
+	Long: `Download the encrypted environment bundle from reachable environment nodes,
 decrypt it with your passphrase, and restore the files locally.
 
 By default, refuses to overwrite existing files. Use --force to override.`,
@@ -120,33 +120,35 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\nEncrypted %d file(s), uploading...\n", len(bundle))
 
-	// Connect to server
-	serverName, serverCfg, err := resolveServer(cfg, envName, "")
+	serverNames, err := statePullServerNames(cfg, envName, "")
 	if err != nil {
 		return err
 	}
-
-	client, err := ssh.NewClientWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
-	if err != nil {
-		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
-	}
-	defer client.Close()
 
 	request := takod.EnvBundleRequest{
 		Project:     cfg.Project.Name,
 		Environment: envName,
 		Content:     base64.StdEncoding.EncodeToString(encrypted),
 	}
-	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "PUT", "/v1/env-bundle", request)
-	if err != nil {
-		return fmt.Errorf("failed to upload environment bundle through takod: %w", err)
+
+	uploaded := 0
+	var nodeErrors []string
+	for _, serverName := range serverNames {
+		serverCfg := cfg.Servers[serverName]
+		if err := uploadEnvBundleToServer(cfg, serverName, serverCfg, request); err != nil {
+			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", serverName, err))
+			continue
+		}
+		uploaded++
 	}
-	var response takod.EnvBundleResponse
-	if err := decodeTakodJSON(output, &response); err != nil {
-		return err
+	if uploaded == 0 {
+		return fmt.Errorf("failed to upload environment bundle to any node: %s", strings.Join(nodeErrors, "; "))
+	}
+	if len(nodeErrors) > 0 {
+		return fmt.Errorf("environment bundle uploaded to %d/%d node(s), failed on %s", uploaded, len(serverNames), strings.Join(nodeErrors, "; "))
 	}
 
-	fmt.Printf("Environment files pushed to takod state on %s\n", serverName)
+	fmt.Printf("Environment files pushed to takod state on %d node(s)\n", uploaded)
 	fmt.Println("\nTo restore on another machine:")
 	fmt.Println("  tako env pull")
 	return nil
@@ -160,35 +162,12 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 
 	envName := getEnvironmentName(cfg)
 
-	// Connect to server
-	serverName, serverCfg, err := resolveServer(cfg, envName, "")
+	response, source, err := downloadEnvBundleFromMesh(cfg, envName)
 	if err != nil {
 		return err
 	}
-
-	client, err := ssh.NewClientWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
-	if err != nil {
-		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
-	}
-	defer client.Close()
-
-	output, err := takodclient.RequestJSON(
-		client,
-		takodSocketFromConfig(cfg),
-		"GET",
-		takodclient.EnvBundleEndpoint(cfg.Project.Name, envName),
-		nil,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to download environment bundle through takod: %w", err)
-	}
-
-	var response takod.EnvBundleResponse
-	if err := decodeTakodJSON(output, &response); err != nil {
-		return err
-	}
-	if !response.Found {
-		fmt.Println("No environment bundle found on server.")
+	if response == nil || !response.Found {
+		fmt.Println("No environment bundle found on reachable nodes.")
 		fmt.Println("Run 'tako env push' to upload environment files first.")
 		return nil
 	}
@@ -262,8 +241,78 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Restored: %s\n", path)
 	}
 
-	fmt.Printf("\nRestored %d file(s) from server\n", len(bundle))
+	fmt.Printf("\nRestored %d file(s) from %s\n", len(bundle), source)
 	return nil
+}
+
+func uploadEnvBundleToServer(cfg *config.Config, serverName string, serverCfg config.ServerConfig, request takod.EnvBundleRequest) error {
+	client, err := ssh.NewClientWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
+	if err != nil {
+		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
+	}
+	defer client.Close()
+
+	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "PUT", "/v1/env-bundle", request)
+	if err != nil {
+		return fmt.Errorf("failed to upload environment bundle through takod: %w", err)
+	}
+	var response takod.EnvBundleResponse
+	if err := decodeTakodJSON(output, &response); err != nil {
+		return err
+	}
+	if !response.Found {
+		return fmt.Errorf("takod did not confirm environment bundle write")
+	}
+	return nil
+}
+
+func downloadEnvBundleFromMesh(cfg *config.Config, envName string) (*takod.EnvBundleResponse, string, error) {
+	serverNames, err := statePullServerNames(cfg, envName, "")
+	if err != nil {
+		return nil, "", err
+	}
+
+	var nodeErrors []string
+	for _, serverName := range serverNames {
+		serverCfg := cfg.Servers[serverName]
+		response, err := downloadEnvBundleFromServer(cfg, envName, serverName, serverCfg)
+		if err != nil {
+			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", serverName, err))
+			continue
+		}
+		if response != nil && response.Found {
+			return response, serverName, nil
+		}
+	}
+	if len(nodeErrors) == len(serverNames) {
+		return nil, "", fmt.Errorf("failed to read environment bundle from any node: %s", strings.Join(nodeErrors, "; "))
+	}
+	return &takod.EnvBundleResponse{Found: false}, "", nil
+}
+
+func downloadEnvBundleFromServer(cfg *config.Config, envName string, serverName string, serverCfg config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	client, err := ssh.NewClientWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to %s: %w", serverName, err)
+	}
+	defer client.Close()
+
+	output, err := takodclient.RequestJSON(
+		client,
+		takodSocketFromConfig(cfg),
+		"GET",
+		takodclient.EnvBundleEndpoint(cfg.Project.Name, envName),
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download environment bundle through takod: %w", err)
+	}
+
+	var response takod.EnvBundleResponse
+	if err := decodeTakodJSON(output, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
 }
 
 // promptPassphrase reads a passphrase from the terminal without echo

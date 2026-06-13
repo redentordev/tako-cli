@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -164,34 +165,37 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 	printStep(4, "Environment Pull")
 
 	if len(connectedClients) > 0 {
-		// Pick a connected client (prefer primary)
-		var pullClient *ssh.Client
-		primaryName, err := cfg.GetPrimaryServer(envName)
-		if err == nil {
-			if c, ok := connectedClients[primaryName]; ok {
-				pullClient = c
-			}
+		connectedNames := make([]string, 0, len(connectedClients))
+		for name := range connectedClients {
+			connectedNames = append(connectedNames, name)
 		}
-		if pullClient == nil {
-			for _, c := range connectedClients {
-				pullClient = c
+		sort.Strings(connectedNames)
+		var response takod.EnvBundleResponse
+		var bundleSource string
+		for _, name := range connectedNames {
+			output, err := takodclient.RequestJSON(
+				connectedClients[name],
+				takodSocketFromConfig(cfg),
+				"GET",
+				takodclient.EnvBundleEndpoint(cfg.Project.Name, envName),
+				nil,
+			)
+			if err != nil {
+				continue
+			}
+			var candidate takod.EnvBundleResponse
+			if err := decodeTakodJSON(output, &candidate); err != nil {
+				continue
+			}
+			if candidate.Found {
+				response = candidate
+				bundleSource = name
 				break
 			}
 		}
 
-		output, err := takodclient.RequestJSON(
-			pullClient,
-			takodSocketFromConfig(cfg),
-			"GET",
-			takodclient.EnvBundleEndpoint(cfg.Project.Name, envName),
-			nil,
-		)
-		var response takod.EnvBundleResponse
-		if err == nil {
-			err = decodeTakodJSON(output, &response)
-		}
-		if err == nil && response.Found {
-			pass("Encrypted environment bundle found on server")
+		if response.Found {
+			pass(fmt.Sprintf("Encrypted environment bundle found on %s", bundleSource))
 			if isInteractive {
 				fmt.Print("  Pull and decrypt environment files? [Y/n] ")
 				input, _ := reader.ReadString('\n')
@@ -201,7 +205,7 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 				}
 			}
 		} else {
-			warn("No encrypted environment bundle on server (run 'tako env push' to create one)")
+			warn("No encrypted environment bundle on reachable servers (run 'tako env push' to create one)")
 		}
 	} else {
 		warn("No connected servers — cannot check for environment bundle")
@@ -222,7 +226,7 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 		} else if ok {
 			pass(fmt.Sprintf("State synced from %s (%d deployment(s))", source, synced))
 		} else if localDeploymentStateExists(envName) {
-			pass("State synced from remote server")
+			pass("State synced from remote mesh")
 		} else {
 			warn("No remote state available (deploy first)")
 		}

@@ -41,7 +41,7 @@ This is useful when:
   - Recovering local state after accidental deletion
 
 The command will:
-  1. Connect to the remote server
+  1. Connect to reachable environment nodes
   2. Read deployment history from takod state
   3. Refresh local deployment records in .tako without touching local secrets`,
 	RunE: runStatePull,
@@ -72,7 +72,7 @@ from every reachable environment node. It chooses the freshest copies, writes
 them back to all reachable nodes under the remote operation lease, and refreshes
 local .tako deployment state when deployment history is available.
 
-Use this when nodes disagree, a primary node was replaced, or a new laptop needs
+Use this when nodes disagree, a node was replaced, or a new laptop needs
 the best available state before deploying.`,
 	RunE: runStateRepair,
 }
