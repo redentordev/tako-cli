@@ -338,6 +338,7 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println()
+	printTakodAgentStatus(client, cfg)
 	printTakodRuntimeStatus(takodstate.NewManager(client, cfg, envName))
 	printMeshRuntimeStatus(client, cfg)
 
@@ -366,6 +367,42 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+type takodRemoteStatus struct {
+	Runtime   string    `json:"runtime"`
+	Version   string    `json:"version"`
+	Hostname  string    `json:"hostname"`
+	Socket    string    `json:"socket"`
+	DataDir   string    `json:"dataDir"`
+	StartedAt time.Time `json:"startedAt"`
+	Now       time.Time `json:"now"`
+}
+
+func printTakodAgentStatus(client *ssh.Client, cfg *config.Config) {
+	socket := "/run/tako/takod.sock"
+	if cfg.Runtime != nil && cfg.Runtime.Agent != nil && cfg.Runtime.Agent.Socket != "" {
+		socket = cfg.Runtime.Agent.Socket
+	}
+
+	cmd := fmt.Sprintf(
+		"if test -S %[1]s && command -v curl >/dev/null 2>&1; then curl --silent --show-error --unix-socket %[1]s http://takod/v1/status; fi",
+		cmdShellQuote(socket),
+	)
+	output, err := client.Execute(cmd)
+	if err != nil || strings.TrimSpace(output) == "" {
+		fmt.Println("Agent: not running")
+		return
+	}
+
+	var status takodRemoteStatus
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		fmt.Printf("Agent: running but returned unreadable status - %v\n", err)
+		return
+	}
+
+	fmt.Printf("Agent: %s %s on %s\n", status.Runtime, status.Version, status.Hostname)
+	fmt.Printf("  Started: %s (%s ago)\n", status.StartedAt.Format(time.RFC3339), formatStateDuration(status.Now.Sub(status.StartedAt)))
 }
 
 func printMeshRuntimeStatus(client *ssh.Client, cfg *config.Config) {
@@ -569,6 +606,13 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func cmdShellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // SyncStateOnDeploy attempts to sync state when local state is missing

@@ -80,6 +80,11 @@ stable node key under `/etc/tako/wireguard`, writes `/etc/wireguard/tako.conf`,
 and brings up `wg-quick@tako`. One-node deployments still get the same
 interface, just without peer blocks.
 
+The node-local `takod` process listens on `/run/tako/takod.sock` when a server
+has a compatible `tako` binary installed. It currently exposes health and status
+from node-local state; reconcile operations still use SSH until they are moved
+behind the socket API.
+
 Local `.tako` files are cache and UX acceleration. The durable truth lives in
 Git plus the last accepted desired revision and event log replicated by takod.
 
@@ -228,5 +233,5 @@ lock remains as a same-machine guard.
 3. Persist desired revisions and events on every node.
 4. Reconcile WireGuard peer material and node configs.
 5. Render per-node proxies with mesh upstream load balancing.
-6. Promote reconcile/state operations to the takod socket.
+6. Promote reconcile operations to the takod socket.
 ```

@@ -32,7 +32,8 @@ var rootCmd = &cobra.Command{
 Deploy Docker containers to your VPS servers with automatic HTTPS, health checks,
 replicated state, and full server control.
 
-It uses SSH for remote server management without requiring any agents on the servers.`,
+It uses SSH for bootstrap and a small node-local takod agent for runtime status
+and future reconcile operations.`,
 	Version: Version,
 }
 
