@@ -412,9 +412,21 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 	if service.LoadBalancer.HealthCheck.Enabled && service.LoadBalancer.HealthCheck.Interval == "" {
 		service.LoadBalancer.HealthCheck.Interval = "10s"
 	}
+	if service.LoadBalancer.HealthCheck.Enabled {
+		path, err := normalizeHTTPPath(service.LoadBalancer.HealthCheck.Path)
+		if err != nil {
+			return fmt.Errorf("service %s: invalid load balancer health check path: %w", name, err)
+		}
+		service.LoadBalancer.HealthCheck.Path = path
+	}
 
 	// Validate health check if configured
 	if service.HealthCheck.Path != "" {
+		path, err := normalizeHTTPPath(service.HealthCheck.Path)
+		if err != nil {
+			return fmt.Errorf("service %s: invalid health check path: %w", name, err)
+		}
+		service.HealthCheck.Path = path
 		if service.Port == 0 {
 			return fmt.Errorf("service %s: port is required when health check is configured", name)
 		}
@@ -515,6 +527,22 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 	}
 
 	return nil
+}
+
+func normalizeHTTPPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("must start with /")
+	}
+	for _, r := range path {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("must not contain control characters")
+		}
+	}
+	return path, nil
 }
 
 func validateServiceVolumes(name string, service *ServiceConfig, cfg *Config) error {

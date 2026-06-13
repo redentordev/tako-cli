@@ -19,6 +19,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/redentordev/tako-cli/pkg/unregistry"
+	"github.com/redentordev/tako-cli/pkg/utils"
 )
 
 type takodAssignment struct {
@@ -410,15 +411,19 @@ func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.He
 		waitAttempts = 30
 	}
 
-	healthCmd := fmt.Sprintf("curl -sf http://localhost:%d%s || exit 1", service.Port, service.HealthCheck.Path)
 	return &takod.HealthSpec{
-		Command:      healthCmd,
+		Command:      buildTakodHealthCommand(service.Port, service.HealthCheck.Path),
 		Interval:     interval,
 		Timeout:      timeout,
 		Retries:      retries,
 		StartPeriod:  startPeriod,
 		WaitAttempts: waitAttempts,
 	}
+}
+
+func buildTakodHealthCommand(port int, path string) string {
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
+	return fmt.Sprintf("curl -sf -- %s || exit 1", utils.ShellQuote(url))
 }
 
 func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.ServiceConfig) ([]string, error) {

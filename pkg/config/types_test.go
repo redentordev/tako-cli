@@ -177,6 +177,60 @@ func TestValidateConfigDefaultsRequiredRuntimeBooleans(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRejectsHealthCheckPathWithoutSlash(t *testing.T) {
+	cfg := validNFSValidationConfig("node-b")
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Port = 8080
+	web.HealthCheck.Path = "health"
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject health check paths without a leading slash")
+	}
+	if !strings.Contains(err.Error(), "must start with /") {
+		t.Fatalf("error = %q, want leading slash guidance", err)
+	}
+}
+
+func TestValidateConfigRejectsHealthCheckPathWithControlCharacter(t *testing.T) {
+	cfg := validNFSValidationConfig("node-b")
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Port = 8080
+	web.HealthCheck.Path = "/health\nx"
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject health check paths with control characters")
+	}
+	if !strings.Contains(err.Error(), "control characters") {
+		t.Fatalf("error = %q, want control character guidance", err)
+	}
+}
+
+func TestValidateConfigRejectsLoadBalancerHealthCheckPathWithoutSlash(t *testing.T) {
+	cfg := validNFSValidationConfig("node-b")
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.LoadBalancer.HealthCheck.Enabled = true
+	web.LoadBalancer.HealthCheck.Path = "health"
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject load balancer health check paths without a leading slash")
+	}
+	if !strings.Contains(err.Error(), "load balancer health check path") {
+		t.Fatalf("error = %q, want load balancer health check path context", err)
+	}
+}
+
 func TestEnvironmentUsesNFSVolumes(t *testing.T) {
 	env := EnvironmentConfig{
 		Services: map[string]ServiceConfig{
