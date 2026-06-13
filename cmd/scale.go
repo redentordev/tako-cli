@@ -104,14 +104,14 @@ func runScale(cmd *cobra.Command, args []string) error {
 		fmt.Printf("→ Acquired remote scale leases: %s\n", leaseSet.Summary())
 	}
 
-	firstServerName := serverNames[0]
-	firstServer := cfg.Servers[firstServerName]
-	firstClient, err := sshPool.GetOrCreateWithAuth(firstServer.Host, firstServer.Port, firstServer.User, firstServer.SSHKey, firstServer.Password)
+	sourceServerName := serverNames[0]
+	sourceServer := cfg.Servers[sourceServerName]
+	sourceClient, err := sshPool.GetOrCreateWithAuth(sourceServer.Host, sourceServer.Port, sourceServer.User, sourceServer.SSHKey, sourceServer.Password)
 	if err != nil {
-		return fmt.Errorf("failed to connect to node %s: %w", firstServerName, err)
+		return fmt.Errorf("failed to connect to node %s: %w", sourceServerName, err)
 	}
 
-	deploy := deployer.NewDeployerWithPool(firstClient, cfg, envName, sshPool, verbose)
+	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, verbose)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return err
 	}
