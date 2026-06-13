@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 )
@@ -37,10 +38,14 @@ func (c *Client) CopyFile(localPath, remotePath string) error {
 	// Create remote directory if needed
 	remoteDir := filepath.Dir(remotePath)
 	if remoteDir != "." && remoteDir != "/" {
-		mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteDir)
-		if _, err := c.Execute(mkdirCmd); err != nil {
+		if _, err := c.Execute(buildRemoteMkdirCommand(remoteDir)); err != nil {
 			return fmt.Errorf("failed to create remote directory: %w", err)
 		}
+	}
+
+	header, err := buildSCPHeader(filepath.Base(remotePath), fileInfo.Mode().Perm(), fileInfo.Size())
+	if err != nil {
+		return err
 	}
 
 	// Create SCP session
@@ -61,18 +66,17 @@ func (c *Client) CopyFile(localPath, remotePath string) error {
 		defer stdin.Close()
 
 		// Send file header
-		fmt.Fprintf(stdin, "C0%o %d %s\n", fileInfo.Mode().Perm(), fileInfo.Size(), filepath.Base(remotePath))
+		_, _ = io.WriteString(stdin, header)
 
 		// Send file content
-		io.Copy(stdin, localFile)
+		_, _ = io.Copy(stdin, localFile)
 
 		// Send null byte to indicate end
-		fmt.Fprint(stdin, "\x00")
+		_, _ = io.WriteString(stdin, "\x00")
 	}()
 
 	// Run SCP command
-	cmd := fmt.Sprintf("scp -t %s", remotePath)
-	if err := session.Run(cmd); err != nil {
+	if err := session.Run(buildRemoteSCPReceiveCommand(remotePath)); err != nil {
 		return fmt.Errorf("failed to copy file: %w", err)
 	}
 
@@ -82,8 +86,7 @@ func (c *Client) CopyFile(localPath, remotePath string) error {
 // CopyDirectory copies a directory from local to remote server
 func (c *Client) CopyDirectory(localPath, remotePath string) error {
 	// Create remote directory
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", remotePath)
-	if _, err := c.Execute(mkdirCmd); err != nil {
+	if _, err := c.Execute(buildRemoteMkdirCommand(remotePath)); err != nil {
 		return fmt.Errorf("failed to create remote directory: %w", err)
 	}
 
@@ -104,8 +107,7 @@ func (c *Client) CopyDirectory(localPath, remotePath string) error {
 
 		// Handle directories and files
 		if info.IsDir() {
-			mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteFile)
-			if _, err := c.Execute(mkdirCmd); err != nil {
+			if _, err := c.Execute(buildRemoteMkdirCommand(remoteFile)); err != nil {
 				return fmt.Errorf("failed to create directory %s: %w", remoteFile, err)
 			}
 		} else {
@@ -137,7 +139,7 @@ func (c *Client) CopyFromRemote(remotePath, localPath string) error {
 	}
 
 	// Get file content via cat
-	output, err := c.Execute(fmt.Sprintf("cat %s", remotePath))
+	output, err := c.Execute(buildRemoteReadCommand(remotePath))
 	if err != nil {
 		return fmt.Errorf("failed to read remote file: %w", err)
 	}
@@ -148,4 +150,26 @@ func (c *Client) CopyFromRemote(remotePath, localPath string) error {
 	}
 
 	return nil
+}
+
+func buildRemoteMkdirCommand(remotePath string) string {
+	return fmt.Sprintf("mkdir -p -- %s", shellQuote(remotePath))
+}
+
+func buildRemoteSCPReceiveCommand(remotePath string) string {
+	return fmt.Sprintf("scp -t -- %s", shellQuote(remotePath))
+}
+
+func buildRemoteReadCommand(remotePath string) string {
+	return fmt.Sprintf("cat -- %s", shellQuote(remotePath))
+}
+
+func buildSCPHeader(name string, mode os.FileMode, size int64) (string, error) {
+	if name == "" || name == "." || name == "/" {
+		return "", fmt.Errorf("invalid remote file name %q", name)
+	}
+	if strings.ContainsAny(name, "\r\n") {
+		return "", fmt.Errorf("remote file name contains a newline")
+	}
+	return fmt.Sprintf("C0%o %d %s\n", mode.Perm(), size, name), nil
 }
