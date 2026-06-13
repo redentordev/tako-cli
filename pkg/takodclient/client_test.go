@@ -9,3 +9,11 @@ func TestProxyFileEndpointEscapesName(t *testing.T) {
 		t.Fatalf("ProxyFileEndpoint() = %q, want %q", got, want)
 	}
 }
+
+func TestStateEndpointEscapesQueryValues(t *testing.T) {
+	got := StateEndpoint("demo app", "prod/us", "desired")
+	want := "/v1/state?document=desired&environment=prod%2Fus&project=demo+app"
+	if got != want {
+		t.Fatalf("StateEndpoint() = %q, want %q", got, want)
+	}
+}

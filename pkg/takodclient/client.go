@@ -64,6 +64,14 @@ func ProxyFileEndpoint(name string) string {
 	return "/v1/proxy-file?name=" + url.QueryEscape(name)
 }
 
+func StateEndpoint(project string, environment string, document string) string {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	query.Set("document", document)
+	return "/v1/state?" + query.Encode()
+}
+
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"

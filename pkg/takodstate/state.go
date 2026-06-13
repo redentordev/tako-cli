@@ -2,24 +2,26 @@ package takodstate
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 const (
-	DefaultDataDir = "/var/lib/tako"
-	SchemaVersion  = 1
+	SchemaVersion = 1
+
+	stateDocumentDesired = "desired"
+	stateDocumentActual  = "actual"
+	stateDocumentEvent   = "event"
 )
 
 var ErrNotFound = errors.New("takod state not found")
@@ -95,19 +97,19 @@ type Event struct {
 
 type Manager struct {
 	client      *ssh.Client
-	dataDir     string
+	socket      string
 	project     string
 	environment string
 }
 
 func NewManager(client *ssh.Client, cfg *config.Config, environment string) *Manager {
-	dataDir := DefaultDataDir
-	if cfg.Runtime != nil && cfg.Runtime.Agent != nil && cfg.Runtime.Agent.DataDir != "" {
-		dataDir = cfg.Runtime.Agent.DataDir
+	socket := takodclient.DefaultSocket
+	if cfg.Runtime != nil && cfg.Runtime.Agent != nil && cfg.Runtime.Agent.Socket != "" {
+		socket = cfg.Runtime.Agent.Socket
 	}
 	return &Manager{
 		client:      client,
-		dataDir:     dataDir,
+		socket:      socket,
 		project:     cfg.Project.Name,
 		environment: environment,
 	}
@@ -214,54 +216,31 @@ func PersistToServers(pool *ssh.Pool, cfg *config.Config, environment string, se
 	return nil
 }
 
-func (m *Manager) Ensure() error {
-	dirs := []string{
-		m.desiredDir(),
-		m.desiredDir() + "/revisions",
-		m.actualDir(),
-		m.eventsDir(),
-	}
-	quoted := make([]string, 0, len(dirs))
-	for _, dir := range dirs {
-		quoted = append(quoted, shellQuote(dir))
-	}
-	if _, err := m.client.Execute("mkdir -p " + strings.Join(quoted, " ")); err != nil {
-		return err
-	}
-	return nil
-}
-
 func (m *Manager) WriteDesired(revision *DesiredRevision) error {
 	if revision == nil {
 		return fmt.Errorf("desired revision is nil")
 	}
-	if err := m.Ensure(); err != nil {
+	content, err := marshalStateDocument(revision)
+	if err != nil {
 		return err
 	}
-	if err := uploadJSON(m.client, m.desiredRevisionPath(), revision, 0600); err != nil {
-		return err
-	}
-	if revision.RevisionID != "" {
-		if err := uploadJSON(m.client, m.desiredRevisionArchivePath(revision.RevisionID), revision, 0600); err != nil {
-			return err
-		}
-	}
-	return nil
+	return m.writeDocument(stateDocumentDesired, revision.RevisionID, content)
 }
 
 func (m *Manager) WriteActual(snapshot *ActualSnapshot) error {
 	if snapshot == nil {
 		return fmt.Errorf("actual snapshot is nil")
 	}
-	if err := m.Ensure(); err != nil {
+	content, err := marshalStateDocument(snapshot)
+	if err != nil {
 		return err
 	}
-	return uploadJSON(m.client, m.actualSnapshotPath(), snapshot, 0600)
+	return m.writeDocument(stateDocumentActual, "", content)
 }
 
 func (m *Manager) ReadDesired() (*DesiredRevision, error) {
 	var revision DesiredRevision
-	if err := m.readJSON(m.desiredRevisionPath(), &revision); err != nil {
+	if err := m.readDocument(stateDocumentDesired, &revision); err != nil {
 		return nil, err
 	}
 	return &revision, nil
@@ -269,16 +248,13 @@ func (m *Manager) ReadDesired() (*DesiredRevision, error) {
 
 func (m *Manager) ReadActual() (*ActualSnapshot, error) {
 	var snapshot ActualSnapshot
-	if err := m.readJSON(m.actualSnapshotPath(), &snapshot); err != nil {
+	if err := m.readDocument(stateDocumentActual, &snapshot); err != nil {
 		return nil, err
 	}
 	return &snapshot, nil
 }
 
 func (m *Manager) AppendEvent(event Event) error {
-	if err := m.Ensure(); err != nil {
-		return err
-	}
 	if event.Time.IsZero() {
 		event.Time = time.Now().UTC()
 	}
@@ -289,29 +265,56 @@ func (m *Manager) AppendEvent(event Event) error {
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
-	encoded := base64.StdEncoding.EncodeToString(data)
-	cmd := fmt.Sprintf("echo '%s' | base64 -d >> %s", encoded, shellQuote(m.eventsPath()))
-	_, err = m.client.Execute(cmd)
+	request := m.documentRequest(stateDocumentEvent, "", string(data))
+	_, err = takodclient.RequestJSON(m.client, m.socket, "POST", "/v1/state", request)
 	return err
 }
 
-func (m *Manager) readJSON(remotePath string, value any) error {
-	cmd := fmt.Sprintf("if test -f %s; then cat %s; else printf '__TAKO_STATE_NOT_FOUND__'; fi", shellQuote(remotePath), shellQuote(remotePath))
-	output, err := m.client.Execute(cmd)
+func (m *Manager) writeDocument(document string, revisionID string, content string) error {
+	request := m.documentRequest(document, revisionID, content)
+	_, err := takodclient.RequestJSON(m.client, m.socket, "PUT", "/v1/state", request)
+	return err
+}
+
+func (m *Manager) readDocument(document string, value any) error {
+	output, err := takodclient.RequestJSON(m.client, m.socket, "GET", takodclient.StateEndpoint(m.project, m.environment, document), nil)
 	if err != nil {
-		return fmt.Errorf("failed to read %s: %w", remotePath, err)
+		return err
 	}
-	if strings.TrimSpace(output) == "__TAKO_STATE_NOT_FOUND__" {
+
+	var response takod.StateDocumentResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return fmt.Errorf("failed to parse takod state response: %w", err)
+	}
+	if !response.Found {
 		return ErrNotFound
 	}
-	if strings.TrimSpace(output) == "" {
-		return fmt.Errorf("empty state file %s", remotePath)
+	if response.Content == "" {
+		return fmt.Errorf("empty takod state document %s/%s/%s", m.project, m.environment, document)
 	}
-	if err := json.Unmarshal([]byte(output), value); err != nil {
-		return fmt.Errorf("failed to parse %s: %w", remotePath, err)
+	if err := json.Unmarshal([]byte(response.Content), value); err != nil {
+		return fmt.Errorf("failed to parse takod state document %s/%s/%s: %w", m.project, m.environment, document, err)
 	}
 	return nil
+}
+
+func (m *Manager) documentRequest(document string, revisionID string, content string) takod.StateDocumentRequest {
+	return takod.StateDocumentRequest{
+		Project:     m.project,
+		Environment: m.environment,
+		Document:    document,
+		RevisionID:  revisionID,
+		Content:     content,
+	}
+}
+
+func marshalStateDocument(value any) (string, error) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	data = append(data, '\n')
+	return string(data), nil
 }
 
 func sanitizeDesiredService(serviceName string, service config.ServiceConfig, imageRef string) DesiredService {
@@ -355,43 +358,6 @@ func revisionID(revision *DesiredRevision) string {
 	return fmt.Sprintf("%s-%s", revision.CreatedAt.Format("20060102T150405Z"), hex.EncodeToString(sum[:])[:12])
 }
 
-func (m *Manager) desiredDir() string {
-	return fmt.Sprintf("%s/desired/%s/%s", m.dataDir, m.project, m.environment)
-}
-
-func (m *Manager) actualDir() string {
-	return fmt.Sprintf("%s/actual/%s/%s", m.dataDir, m.project, m.environment)
-}
-
-func (m *Manager) eventsDir() string {
-	return fmt.Sprintf("%s/events/%s", m.dataDir, m.project)
-}
-
-func (m *Manager) desiredRevisionPath() string {
-	return fmt.Sprintf("%s/revision.json", m.desiredDir())
-}
-
-func (m *Manager) desiredRevisionArchivePath(revisionID string) string {
-	return fmt.Sprintf("%s/revisions/%s.json", m.desiredDir(), revisionID)
-}
-
-func (m *Manager) actualSnapshotPath() string {
-	return fmt.Sprintf("%s/containers.json", m.actualDir())
-}
-
-func (m *Manager) eventsPath() string {
-	return fmt.Sprintf("%s/%s.jsonl", m.eventsDir(), m.environment)
-}
-
-func uploadJSON(client *ssh.Client, remotePath string, value any, mode os.FileMode) error {
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return client.UploadReader(strings.NewReader(string(data)), remotePath, mode)
-}
-
 func sortedKeys(values map[string]string) []string {
 	if len(values) == 0 {
 		return nil
@@ -411,11 +377,4 @@ func sortedCopy(values []string) []string {
 	out := append([]string(nil), values...)
 	sort.Strings(out)
 	return out
-}
-
-func shellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
