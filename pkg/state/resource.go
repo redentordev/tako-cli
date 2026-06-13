@@ -15,63 +15,63 @@ import (
 type ResourceType string
 
 const (
-	ResourceService    ResourceType = "service"
-	ResourceNetwork    ResourceType = "network"
-	ResourceVolume     ResourceType = "volume"
-	ResourceSecret     ResourceType = "secret"
-	ResourceConfig     ResourceType = "config"
-	ResourceImage      ResourceType = "image"
+	ResourceService ResourceType = "service"
+	ResourceNetwork ResourceType = "network"
+	ResourceVolume  ResourceType = "volume"
+	ResourceSecret  ResourceType = "secret"
+	ResourceConfig  ResourceType = "config"
+	ResourceImage   ResourceType = "image"
 )
 
 // ResourceStatus represents the current status of a resource
 type ResourceStatus string
 
 const (
-	StatusPending   ResourceStatus = "pending"
-	StatusCreating  ResourceStatus = "creating"
-	StatusCreated   ResourceStatus = "created"
-	StatusUpdating  ResourceStatus = "updating"
-	StatusDeleting  ResourceStatus = "deleting"
-	StatusDeleted   ResourceStatus = "deleted"
-	StatusFailed    ResourceStatus = "failed"
+	StatusPending  ResourceStatus = "pending"
+	StatusCreating ResourceStatus = "creating"
+	StatusCreated  ResourceStatus = "created"
+	StatusUpdating ResourceStatus = "updating"
+	StatusDeleting ResourceStatus = "deleting"
+	StatusDeleted  ResourceStatus = "deleted"
+	StatusFailed   ResourceStatus = "failed"
 )
 
-// Resource represents a tracked infrastructure resource (Pulumi-style)
+// Resource represents a tracked deployment resource.
 type Resource struct {
 	// URN is a unique identifier: urn:tako:{project}:{env}:{type}:{name}
-	URN         string                 `json:"urn"`
-	Type        ResourceType           `json:"type"`
-	Name        string                 `json:"name"`
-	Provider    string                 `json:"provider"` // docker, swarm, traefik
-	
+	URN      string       `json:"urn"`
+	Type     ResourceType `json:"type"`
+	Name     string       `json:"name"`
+	Provider string       `json:"provider"` // docker, swarm, traefik
+
 	// State
-	Status      ResourceStatus         `json:"status"`
-	CreatedAt   time.Time              `json:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at"`
-	
+	Status    ResourceStatus `json:"status"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+
 	// Inputs are the user-provided configuration
-	Inputs      map[string]interface{} `json:"inputs"`
-	
+	Inputs map[string]interface{} `json:"inputs"`
+
 	// Outputs are provider-generated values
-	Outputs     map[string]interface{} `json:"outputs"`
-	
+	Outputs map[string]interface{} `json:"outputs"`
+
 	// Dependencies are URNs of resources this depends on
-	Dependencies []string              `json:"dependencies,omitempty"`
-	
+	Dependencies []string `json:"dependencies,omitempty"`
+
 	// Parent is the URN of the parent resource (for hierarchical resources)
-	Parent      string                 `json:"parent,omitempty"`
-	
+	Parent string `json:"parent,omitempty"`
+
 	// Checksum of inputs for change detection
-	InputsHash  string                 `json:"inputs_hash"`
+	InputsHash string `json:"inputs_hash"`
 }
 
 // ResourceGraph represents the complete state of all resources
 type ResourceGraph struct {
-	Version     int                    `json:"version"`
-	Project     string                 `json:"project"`
-	Environment string                 `json:"environment"`
-	Resources   map[string]*Resource   `json:"resources"` // URN -> Resource
-	Metadata    GraphMetadata          `json:"metadata"`
+	Version     int                  `json:"version"`
+	Project     string               `json:"project"`
+	Environment string               `json:"environment"`
+	Resources   map[string]*Resource `json:"resources"` // URN -> Resource
+	Metadata    GraphMetadata        `json:"metadata"`
 }
 
 // GraphMetadata contains metadata about the resource graph
@@ -107,7 +107,7 @@ func (m *ResourceManager) stateFilePath() string {
 // Load loads the resource graph from disk
 func (m *ResourceManager) Load() error {
 	path := m.stateFilePath()
-	
+
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		// Initialize empty graph
@@ -194,8 +194,8 @@ func (m *ResourceManager) Register(resourceType ResourceType, name string, input
 		Name:         name,
 		Provider:     "swarm",
 		Status:       StatusPending,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 		Inputs:       inputs,
 		Outputs:      make(map[string]interface{}),
 		Dependencies: dependencies,

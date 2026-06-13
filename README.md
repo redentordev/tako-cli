@@ -6,7 +6,7 @@
 
 **Tako** (タコ) is Japanese for "octopus" - pronounced "tah-koh". Just like an octopus has 8 arms to manage multiple tasks simultaneously, Tako CLI manages your deployments across multiple servers with precision and control.
 
-Tako CLI is a powerful deployment automation tool that brings Platform-as-a-Service (PaaS) simplicity to your own infrastructure. Deploy Docker containers to your VPS servers with automatic HTTPS, health checks, zero-downtime deployments, and complete control over your infrastructure.
+Tako CLI is a powerful deployment automation tool that brings Platform-as-a-Service (PaaS) simplicity to your own servers. Deploy Docker containers to your VPS servers with automatic HTTPS, health checks, zero-downtime deployments, and full server control.
 
 [![Version](https://img.shields.io/badge/version-0.2.2-blue)](https://github.com/redentordev/tako-cli/releases)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](https://golang.org/)
@@ -25,7 +25,7 @@ Tako CLI is a powerful deployment automation tool that brings Platform-as-a-Serv
 
 ## Why Tako CLI?
 
-Tako CLI brings PaaS-like simplicity with full infrastructure control - deploy to your own servers without vendor lock-in or monthly fees.
+Tako CLI brings PaaS-like simplicity with full server control - deploy to your own servers without vendor lock-in or monthly fees.
 
 ### Key Benefits
 
@@ -279,10 +279,10 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Volume Backup/Restore** - Backup and restore Docker volumes with `tako backup`
 - **Drift Detection** - Detect configuration drift with `tako drift`
 
-### Infrastructure & Scaling
+### Servers & Scaling
 
-- **Cloud Provisioning** - Create servers on DigitalOcean, Hetzner, Linode, or AWS
 - **Multi-Server** - Deploy across multiple servers with Docker Swarm
+- **Server Setup** - Configure existing VPS hosts with Docker, Traefik, firewall rules, and monitoring
 - **Placement Strategies** - Control where services run (spread, pinned)
 - **NFS Storage** - Shared volumes across servers
 
@@ -300,22 +300,12 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 ## Core Commands
 
-### Infrastructure
-
-| Command | Description |
-|---------|-------------|
-| `tako provision` | Create cloud servers |
-| `tako infra outputs` | Show server IPs |
-| `tako infra destroy` | Tear down servers |
-
-See [docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md) for provider setup.
-
 ### Deployment & Management
 
 | Command | Description |
 |---------|-------------|
 | `tako init` | Initialize new project with template config |
-| `tako setup` | Provision server (Docker, Traefik, security hardening) |
+| `tako setup` | Set up existing server (Docker, Traefik, security hardening) |
 | `tako deploy` | Deploy application to environment |
 | `tako rollback [id]` | Rollback to previous/specific deployment |
 | `tako destroy` | Remove all services from server |
@@ -405,27 +395,47 @@ services:
       email: admin@example.com
 ```
 
-### Infrastructure Provisioning
-
-Provision cloud servers on DigitalOcean, Hetzner, Linode, or AWS:
+### Existing VPS Deployment
 
 ```yaml
-infrastructure:
-  provider: hetzner
-  region: fsn1
-  credentials:
-    token: ${HCLOUD_TOKEN}
-  servers:
-    web:
-      size: cax11
-      role: manager
+servers:
+  production:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - production
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: app.example.com
+          email: admin@example.com
 ```
 
 ```bash
-tako provision && tako setup && tako deploy
+tako setup && tako deploy
 ```
 
-See [docs/INFRASTRUCTURE.md](./docs/INFRASTRUCTURE.md) for provider setup.
+### Multi-Server Deployment
+
+```yaml
+servers:
+  manager:
+    host: ${MANAGER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+    role: manager
+  worker:
+    host: ${WORKER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+    role: worker
+```
 
 ### Full-Stack Application
 
@@ -825,7 +835,7 @@ make build-all
 tako-cli/
 ├── cmd/                  # CLI commands (23 commands)
 │   ├── deploy.go         # Deployment logic
-│   ├── setup.go          # Server provisioning
+│   ├── setup.go          # Server setup
 │   ├── rollback.go       # Rollback functionality
 │   ├── access.go         # Traefik access logs
 │   ├── monitor.go        # Service monitoring

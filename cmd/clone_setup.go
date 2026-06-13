@@ -64,15 +64,11 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 	// Step 1: Check config
 	printStep(1, "Configuration")
 
-	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
+	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		// Try without infra
-		cfg, err = config.LoadConfig(cfgFile)
-		if err != nil {
-			fail(fmt.Sprintf("Cannot load config: %v", err))
-			fmt.Println("\n  Make sure you're in the project root with a valid tako.yaml or tako.json.")
-			return nil
-		}
+		fail(fmt.Sprintf("Cannot load config: %v", err))
+		fmt.Println("\n  Make sure you're in the project root with a valid tako.yaml or tako.json.")
+		return nil
 	}
 	pass(fmt.Sprintf("Config loaded: %s (project: %s)", cfgFile, cfg.Project.Name))
 

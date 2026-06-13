@@ -58,11 +58,11 @@ func (m HostKeyMode) String() string {
 
 // HostKeyVerifier provides host key verification with TOFU support
 type HostKeyVerifier struct {
-	mode           HostKeyMode
-	systemHostsPath string  // ~/.ssh/known_hosts
-	takoHostsPath   string  // ~/.tako/known_hosts
-	promptFn       func(host, fingerprint, keyType string) (bool, error)
-	mu             sync.Mutex
+	mode            HostKeyMode
+	systemHostsPath string // ~/.ssh/known_hosts
+	takoHostsPath   string // ~/.tako/known_hosts
+	promptFn        func(host, fingerprint, keyType string) (bool, error)
+	mu              sync.Mutex
 }
 
 // Global verifier instance with default settings
@@ -108,7 +108,7 @@ func NewHostKeyVerifier(mode HostKeyMode) (*HostKeyVerifier, error) {
 	}
 
 	return &HostKeyVerifier{
-		mode:           mode,
+		mode:            mode,
 		systemHostsPath: filepath.Join(homeDir, ".ssh", "known_hosts"),
 		takoHostsPath:   filepath.Join(takoDir, "known_hosts"),
 	}, nil
@@ -342,7 +342,7 @@ func GetKnownHostsPath() (string, error) {
 }
 
 // RemoveHostKey removes a host key from Tako's known_hosts file
-// This should be called when destroying infrastructure to allow clean reconnection
+// This should be called when recreating a server to allow clean reconnection.
 func RemoveHostKey(host string) error {
 	knownHostsPath, err := GetKnownHostsPath()
 	if err != nil {

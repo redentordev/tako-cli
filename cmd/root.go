@@ -14,9 +14,9 @@ import (
 )
 
 var (
-	cfgFile        string
-	verbose        bool
-	envFlag        string
+	cfgFile         string
+	verbose         bool
+	envFlag         string
 	hostKeyModeFlag string
 	// Version, GitCommit, and BuildTime are set via ldflags during build
 	Version   = "dev"
@@ -28,9 +28,9 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "tako",
 	Short: "Deploy applications to any VPS with zero configuration and zero downtime",
-	Long: `Tako CLI brings Platform-as-a-Service (PaaS) simplicity to your own infrastructure.
+	Long: `Tako CLI brings Platform-as-a-Service (PaaS) simplicity to your own servers.
 Deploy Docker containers to your VPS servers with automatic HTTPS, health checks,
-zero-downtime deployments, and complete control over your infrastructure.
+zero-downtime deployments, and full server control.
 
 It uses SSH for remote server management without requiring any agents on the servers.`,
 	Version: Version,

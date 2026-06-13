@@ -63,8 +63,8 @@ func init() {
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
-	// Load configuration with infrastructure state integration
-	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
+	// Load deployment configuration
+	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -465,12 +465,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			Environment: envName,
 			Message:     fmt.Sprintf("Starting deployment of `%s` v%s to `%s`\nCommit: `%s` - %s", cfg.Project.Name, cfg.Project.Version, envName, commitInfo.ShortHash, commitInfo.Message),
 			Details: map[string]string{
-				"version":   cfg.Project.Version,
-				"commit":    commitInfo.ShortHash,
-				"branch":    commitInfo.Branch,
-				"author":    commitInfo.Author,
-				"user":      remotestate.GetCurrentUser(),
-				"services":  fmt.Sprintf("%d", len(services)),
+				"version":  cfg.Project.Version,
+				"commit":   commitInfo.ShortHash,
+				"branch":   commitInfo.Branch,
+				"author":   commitInfo.Author,
+				"user":     remotestate.GetCurrentUser(),
+				"services": fmt.Sprintf("%d", len(services)),
 			},
 		}); err != nil && verbose {
 			fmt.Printf("  Warning: failed to send start notification: %v\n", err)

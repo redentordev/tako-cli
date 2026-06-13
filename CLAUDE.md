@@ -8,14 +8,13 @@
 
 ## Project Overview
 
-Tako CLI is a deployment automation tool that brings PaaS-like simplicity to your own infrastructure. It deploys Docker containers to VPS servers with automatic HTTPS, health checks, and zero-downtime deployments.
+Tako CLI is a deployment automation tool that brings PaaS-like simplicity to your own servers. It deploys Docker containers to VPS servers with automatic HTTPS, health checks, and zero-downtime deployments.
 
 ## Key Directories
 
 - `cmd/` - CLI commands
 - `pkg/` - Core packages
-- `pkg/infra/` - Infrastructure provisioning (Pulumi-based)
-- `pkg/infra/providers/` - Cloud providers (DigitalOcean, Hetzner, AWS, Linode)
+- `pkg/provisioner/` - Existing server setup over SSH
 - `examples/` - Example projects
 - `docs/` - Documentation
 
@@ -33,11 +32,6 @@ go build ./...   # Build all packages
 go test ./...    # Run tests
 ```
 
-## Infrastructure Providers
+## Deployment Scope
 
-| Provider | Token Env Var |
-|----------|---------------|
-| DigitalOcean | `DIGITALOCEAN_TOKEN` |
-| Hetzner | `HCLOUD_TOKEN` |
-| Linode | `LINODE_TOKEN` |
-| AWS | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` |
+Tako deploys to existing VPS hosts declared in `servers`. It does not create cloud provider infrastructure.

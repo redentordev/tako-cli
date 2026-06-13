@@ -140,7 +140,7 @@ func checkConfig(record func(checkResult)) (*config.Config, error) {
 	record(checkResult{"PASS", fmt.Sprintf("Config file: Found %s", configName), ""})
 
 	// Try loading config
-	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
+	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		record(checkResult{"FAIL", fmt.Sprintf("Config parse: %v", err), "Fix syntax errors in config file"})
 		return nil, err
