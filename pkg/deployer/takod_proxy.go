@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/network"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -97,14 +96,10 @@ func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig)
 			continue
 		}
 
-		networkMgr := network.NewManager(client, d.config.Project.Name, d.environment, d.verbose)
-		if err := networkMgr.EnsureNetwork(); err != nil {
-			return fmt.Errorf("%s: failed to ensure proxy network: %w", serverName, err)
-		}
 		if err := d.writeTakodProxyConfig(client, dynamicConfig); err != nil {
 			return fmt.Errorf("%s: failed to write proxy config: %w", serverName, err)
 		}
-		if err := d.ensureTakodProxy(client, networkMgr.GetNetworkName(), firstProxyEmail(services)); err != nil {
+		if err := d.ensureTakodProxy(client, takodNetworkName(d.config.Project.Name, d.environment), firstProxyEmail(services)); err != nil {
 			return fmt.Errorf("%s: failed to reconcile proxy: %w", serverName, err)
 		}
 	}

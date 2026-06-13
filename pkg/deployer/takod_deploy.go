@@ -15,7 +15,6 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/hooks"
 	"github.com/redentordev/tako-cli/pkg/mesh"
-	"github.com/redentordev/tako-cli/pkg/network"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -299,8 +298,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		fmt.Printf("  -> %s slots %v\n", serverName, slots)
 	}
 
-	networkMgr := network.NewManager(client, d.config.Project.Name, d.environment, d.verbose)
-	networkName := networkMgr.GetNetworkName()
+	networkName := takodNetworkName(d.config.Project.Name, d.environment)
 
 	if service.IsPublic() {
 		if service.Port <= 0 {
@@ -725,6 +723,10 @@ func (d *Deployer) takodSocket() string {
 		return d.config.Runtime.Agent.Socket
 	}
 	return "/run/tako/takod.sock"
+}
+
+func takodNetworkName(project string, environment string) string {
+	return fmt.Sprintf("tako_%s_%s", project, environment)
 }
 
 func parseVolumeSpec(volume string) (source, target string) {
