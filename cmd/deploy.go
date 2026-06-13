@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
@@ -717,5 +718,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 // isNonInteractive checks if running in non-interactive mode
 func isNonInteractive() bool {
-	return os.Getenv("TAKO_NONINTERACTIVE") == "1" || os.Getenv("CI") == "true"
+	return truthyEnv("TAKO_NONINTERACTIVE") || truthyEnv("CI")
+}
+
+func truthyEnv(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
