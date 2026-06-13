@@ -328,10 +328,6 @@ environments:
         #   timeout: 5s
         #   retries: 3
         
-        #   postStart:
-        #     - "exec: npm run migrate"   # Run inside container
-        #     - "exec: npm run seed"
-        
         # Cross-project service imports
         # imports:
         #   - other-project.postgres  # Import postgres from other-project
