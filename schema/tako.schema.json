@@ -51,7 +51,9 @@
           "properties": {
             "enabled": {
               "type": "boolean",
-              "default": true
+              "const": true,
+              "default": true,
+              "description": "Must be true; takod agent is required"
             },
             "socket": {
               "type": "string",
@@ -71,7 +73,9 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": true
+          "const": true,
+          "default": true,
+          "description": "Must be true; single-node deploys use a one-node mesh"
         },
         "networkCIDR": {
           "type": "string",

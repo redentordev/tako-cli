@@ -131,6 +131,52 @@ func TestValidateConfigRejectsNFSVolumeMissingExport(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRejectsDisabledRuntimeAgent(t *testing.T) {
+	cfg := validNFSValidationConfig("node-b")
+	disabled := false
+	cfg.Runtime = &RuntimeConfig{
+		Agent: &AgentConfig{Enabled: &disabled},
+	}
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject disabled runtime agent")
+	}
+	if !strings.Contains(err.Error(), "runtime.agent.enabled=false") {
+		t.Fatalf("error = %q, want runtime agent error", err)
+	}
+}
+
+func TestValidateConfigRejectsDisabledMesh(t *testing.T) {
+	cfg := validNFSValidationConfig("node-b")
+	disabled := false
+	cfg.Mesh = &MeshConfig{Enabled: &disabled}
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject disabled mesh")
+	}
+	if !strings.Contains(err.Error(), "mesh.enabled=false") {
+		t.Fatalf("error = %q, want mesh enabled error", err)
+	}
+}
+
+func TestValidateConfigDefaultsRequiredRuntimeBooleans(t *testing.T) {
+	cfg := validNFSValidationConfig("node-b")
+	cfg.Runtime = &RuntimeConfig{Agent: &AgentConfig{}}
+	cfg.Mesh = &MeshConfig{ListenPort: 42420}
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+	if cfg.Runtime.Agent.Enabled == nil || !*cfg.Runtime.Agent.Enabled {
+		t.Fatal("runtime agent should default to enabled")
+	}
+	if cfg.Mesh.Enabled == nil || !*cfg.Mesh.Enabled {
+		t.Fatal("mesh should default to enabled")
+	}
+}
+
 func TestEnvironmentUsesNFSVolumes(t *testing.T) {
 	env := EnvironmentConfig{
 		Services: map[string]ServiceConfig{

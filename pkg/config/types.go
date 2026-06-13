@@ -49,7 +49,7 @@ type RuntimeConfig struct {
 
 // AgentConfig describes the takod node-local reconciler.
 type AgentConfig struct {
-	Enabled bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	Socket  string `yaml:"socket,omitempty" json:"socket,omitempty"`
 	DataDir string `yaml:"dataDir,omitempty" json:"dataDir,omitempty"`
 }
@@ -57,7 +57,7 @@ type AgentConfig struct {
 // MeshConfig describes the private node mesh. A single node still uses the same
 // model, with no remote peers.
 type MeshConfig struct {
-	Enabled      bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Enabled      *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	NetworkCIDR  string `yaml:"networkCIDR,omitempty" json:"networkCIDR,omitempty"`
 	Interface    string `yaml:"interface,omitempty" json:"interface,omitempty"`
 	ListenPort   int    `yaml:"listenPort,omitempty" json:"listenPort,omitempty"`
@@ -488,7 +488,7 @@ func (c *Config) IsTakodRuntime() bool {
 
 // IsMeshEnabled returns true when the private node mesh is enabled.
 func (c *Config) IsMeshEnabled() bool {
-	return c.Mesh == nil || c.Mesh.Enabled
+	return c.Mesh == nil || c.Mesh.Enabled == nil || *c.Mesh.Enabled
 }
 
 // GetStateBackend returns the configured state backend.

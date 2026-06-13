@@ -142,7 +142,7 @@ func testTakodDeployConfig(serverNames []string) *config.Config {
 	return &config.Config{
 		Project: config.ProjectConfig{Name: "demo", Version: "1.0.0"},
 		Mesh: &config.MeshConfig{
-			Enabled:      true,
+			Enabled:      testBoolPointer(true),
 			NetworkCIDR:  "10.210.0.0/16",
 			Interface:    "tako",
 			ListenPort:   51820,
@@ -156,4 +156,8 @@ func testTakodDeployConfig(serverNames []string) *config.Config {
 			},
 		},
 	}
+}
+
+func testBoolPointer(value bool) *bool {
+	return &value
 }
