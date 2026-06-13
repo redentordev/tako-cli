@@ -184,14 +184,14 @@ first and can fall back to remote healthy containers over the mesh.
 
 ```bash
 git clone <repo>
-tako connect production root@one-node
 tako state pull -e production
-tako plan -e production
-tako deploy production
+tako state status -e production
+tako deploy -e production
 ```
 
-Any healthy node should be enough to recover the latest accepted desired
-revision, deployment history, and event log.
+By default, state commands read from the active environment's primary node. Use
+`--server <name>` to read from another environment node when recovering from a
+machine change or a primary-node outage.
 
 ## CI/CD
 
@@ -200,26 +200,28 @@ CI uses the same path as a laptop:
 ```text
 CI runner
   checkout
-  tako plan --json
+  tako state status
   tako deploy --yes
        |
        v
-  connect to any reachable takod node
+  connect to the environment state node
        |
        v
-  lease + reconcile across the mesh
+  acquire remote lease + reconcile selected nodes
 ```
 
-The deploy lock must be remote, not local. CI and local machines compete for the
-same takod lease, so concurrent deployments converge instead of racing.
+Deploy, rollback, and destroy acquire a remote lease under
+`/var/lib/tako-cli/<project>/lease`. CI and local machines compete for the same
+lease, so concurrent operations fail fast instead of racing. The local `.tako`
+lock remains as a same-machine guard.
 
 ## Implementation Order
 
 ```text
 1. Keep the CLI surface takod-only.
-2. Persist desired revisions and events on every node.
-3. Add WireGuard peer material and mesh routes.
-4. Move ingress to per-node proxies with mesh upstream fallback.
-5. Promote reconcile/state operations to the takod socket.
-6. Add CI-friendly deploy leases and state pull/push workflows.
+2. Add CI-friendly remote deploy leases and state pull/status workflows.
+3. Persist desired revisions and events on every node.
+4. Add WireGuard peer material and mesh routes.
+5. Move ingress to per-node proxies with mesh upstream fallback.
+6. Promote reconcile/state operations to the takod socket.
 ```

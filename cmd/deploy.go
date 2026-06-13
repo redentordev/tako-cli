@@ -253,6 +253,20 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to connect to server %s: %w", firstServerName, err)
 	}
 
+	stateManager := remotestate.NewStateManager(firstClient, cfg.Project.Name, firstServer.Host)
+	lease, err := stateManager.AcquireLease("deploy", envName, remotestate.DefaultLeaseTTL)
+	if err != nil {
+		return fmt.Errorf("cannot acquire remote deploy lease: %w", err)
+	}
+	defer func() {
+		if err := stateManager.ReleaseLease(lease); err != nil && verbose {
+			fmt.Printf("Warning: failed to release remote deploy lease: %v\n", err)
+		}
+	}()
+	if verbose {
+		fmt.Printf("→ Acquired remote deploy lease on %s (ID: %s)\n", firstServerName, lease.ID)
+	}
+
 	// Create deployer with pool for takod support
 	deploy := deployer.NewDeployerWithPool(firstClient, cfg, envName, sshPool, verbose)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
@@ -450,15 +464,6 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if localStateMgr != nil {
 		localStateMgr.LogDeployment(fmt.Sprintf("Starting takod deployment to %s", envName))
 		localStateMgr.LogDeployment(fmt.Sprintf("Git commit: %s", commitInfo.ShortHash))
-	}
-
-	// Persist deployment state through the first reachable node. takod replication
-	// makes this recoverable from any healthy node as the runtime matures.
-	stateManager := remotestate.NewStateManager(firstClient, cfg.Project.Name, firstServer.Host)
-	if err := stateManager.Initialize(); err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to initialize state directory: %v\n", err)
-		}
 	}
 
 	startTime := time.Now()
