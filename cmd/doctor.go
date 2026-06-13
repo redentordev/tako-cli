@@ -144,12 +144,29 @@ func checkConfig(record func(checkResult)) (*config.Config, error) {
 	// Try loading config
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		record(checkResult{"FAIL", fmt.Sprintf("Config parse: %v", err), "Fix syntax errors in config file"})
+		record(checkResult{"FAIL", fmt.Sprintf("Config parse: %v", err), configLoadFix(err)})
 		return nil, err
 	}
 
 	record(checkResult{"PASS", fmt.Sprintf("Config parse: Valid (project: %s)", cfg.Project.Name), ""})
 	return cfg, nil
+}
+
+func configLoadFix(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "failed to parse YAML") || strings.Contains(msg, "failed to parse JSON") {
+		return "Fix syntax errors in config file"
+	}
+	if strings.Contains(msg, "host is required") {
+		return "Set SERVER_HOST in .env or replace ${SERVER_HOST} in config"
+	}
+	if strings.Contains(msg, "SSH key not found") {
+		return "Check sshKey path, create the key, or configure password via an environment variable"
+	}
+	return "Fix config values or missing environment variables"
 }
 
 func checkEnvFile(record func(checkResult)) {
