@@ -165,10 +165,13 @@ func TestValidateBackupRequestRejectsUnsafeValues(t *testing.T) {
 func TestRestoreVolumeScriptScopesDestructiveCleanup(t *testing.T) {
 	script := restoreVolumeScript("db_20240101-120000.tar.gz")
 	for _, expected := range []string{
+		"backupPath=/backup/'db_20240101-120000.tar.gz'",
 		"[ ! -d /target ] || [ -L /target ]",
-		"[ ! -f /backup/'db_20240101-120000.tar.gz' ]",
+		"[ ! -f \"$backupPath\" ]",
+		"tar -tzf \"$backupPath\" | awk",
+		"/^\\/|(^|\\/)\\.\\.(\\/|$)/",
 		"find /target -mindepth 1 -maxdepth 1 -exec rm -rf -- {} \\;",
-		"tar -xzf /backup/'db_20240101-120000.tar.gz' -C /target",
+		"tar -xzf \"$backupPath\" -C /target",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("restore script missing %q:\n%s", expected, script)
