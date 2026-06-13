@@ -5,9 +5,15 @@ import (
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 )
 
 func TestRemoteSSHCommandUsesTOFUKnownHosts(t *testing.T) {
+	ssh.SetGlobalHostKeyMode(ssh.HostKeyModeTOFU)
+	t.Cleanup(func() {
+		ssh.SetGlobalHostKeyMode(ssh.HostKeyModeTOFU)
+	})
+
 	cmd := remoteSSHCommand(config.ServerConfig{SSHKey: "/home/deploy/.ssh/id_ed25519"})
 
 	for _, expected := range []string{
@@ -21,6 +27,21 @@ func TestRemoteSSHCommandUsesTOFUKnownHosts(t *testing.T) {
 	}
 	if strings.Contains(cmd, "StrictHostKeyChecking=no") || strings.Contains(cmd, "UserKnownHostsFile=/dev/null") {
 		t.Fatalf("ssh command disables host key checking: %s", cmd)
+	}
+}
+
+func TestRemoteSSHCommandHonorsStrictHostKeyMode(t *testing.T) {
+	ssh.SetGlobalHostKeyMode(ssh.HostKeyModeStrict)
+	t.Cleanup(func() {
+		ssh.SetGlobalHostKeyMode(ssh.HostKeyModeTOFU)
+	})
+
+	cmd := remoteSSHCommand(config.ServerConfig{SSHKey: "/home/deploy/.ssh/id_ed25519"})
+	if !strings.Contains(cmd, "StrictHostKeyChecking=yes") {
+		t.Fatalf("strict host key mode was not applied: %s", cmd)
+	}
+	if strings.Contains(cmd, "StrictHostKeyChecking=accept-new") {
+		t.Fatalf("strict host key mode should not accept new host keys: %s", cmd)
 	}
 }
 

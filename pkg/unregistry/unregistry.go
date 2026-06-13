@@ -156,9 +156,14 @@ func takodCurlCommand(socket string, method string, endpoint string, bodyArg str
 }
 
 func remoteSSHCommand(peerServer config.ServerConfig) string {
+	strictHostKeyChecking := "accept-new"
+	if ssh.GetGlobalHostKeyMode() == ssh.HostKeyModeStrict {
+		strictHostKeyChecking = "yes"
+	}
+
 	parts := []string{
 		"ssh",
-		"-o StrictHostKeyChecking=accept-new",
+		"-o StrictHostKeyChecking=" + strictHostKeyChecking,
 		"-o UserKnownHostsFile=~/.tako/known_hosts",
 	}
 	if peerServer.SSHKey != "" {
