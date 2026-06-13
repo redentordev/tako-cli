@@ -64,7 +64,7 @@ func WriteEnvBundle(ctx context.Context, dataDir string, req EnvBundleRequest) (
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return nil, fmt.Errorf("failed to create environment bundle directory: %w", err)
 	}
-	if err := os.WriteFile(path, content, 0600); err != nil {
+	if err := writeFileAtomic(path, content, 0600); err != nil {
 		return nil, fmt.Errorf("failed to write environment bundle: %w", err)
 	}
 	return &EnvBundleResponse{Found: true, Content: req.Content, Path: path}, nil

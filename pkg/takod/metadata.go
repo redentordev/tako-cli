@@ -59,7 +59,7 @@ func writeMetadataDocument(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0600)
+	return writeFileAtomic(path, data, 0600)
 }
 
 func metadataDocumentLooksObject(data []byte) bool {
