@@ -1,6 +1,33 @@
 package takodclient
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestBuildRequestCommandWithBodyStreamsStdin(t *testing.T) {
+	got := buildRequestCommand("/run/tako/takod.sock", "POST", "/v1/state?document=desired", true)
+
+	if !strings.Contains(got, "--data-binary @-") {
+		t.Fatalf("request body should stream from stdin: %s", got)
+	}
+	for _, disallowed := range []string{"/tmp/tako-takod", "rm -f"} {
+		if strings.Contains(got, disallowed) {
+			t.Fatalf("request command should not stage remote temp files (%s): %s", disallowed, got)
+		}
+	}
+}
+
+func TestBuildRequestCommandWithoutBodyOmitsStdinBody(t *testing.T) {
+	got := buildRequestCommand("/run/tako/takod.sock", "GET", "/v1/health", false)
+
+	if strings.Contains(got, "--data-binary") {
+		t.Fatalf("GET request should not include a request body: %s", got)
+	}
+	if !strings.Contains(got, "curl --fail --silent --show-error --unix-socket '/run/tako/takod.sock' -X 'GET' 'http://takod/v1/health'") {
+		t.Fatalf("unexpected request command: %s", got)
+	}
+}
 
 func TestProxyFileEndpointEscapesName(t *testing.T) {
 	got := ProxyFileEndpoint("demo production.yml")
