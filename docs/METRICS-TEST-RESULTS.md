@@ -317,7 +317,7 @@ get_disk_io() {
 - CPU: < 0.1% (negligible)
 - Memory: ~5-10 MB
 - Collection interval: 60 seconds (configurable)
-- Storage: /var/lib/tako/metrics/current.json (~500 bytes)
+- Storage: node-local metrics snapshot exposed through takod `/v1/metrics`
 
 **Command Execution Times:**
 - `tako metrics --once`: ~1-2 seconds

@@ -1,6 +1,8 @@
 # Resource Monitoring Guide
 
-Tako CLI provides comprehensive resource monitoring capabilities for both system-level and container-level metrics.
+Tako CLI provides resource monitoring for both system-level and container-level
+metrics. The CLI reads these values through the node-local `takod` socket; Docker
+and metrics-file access stay inside the node agent.
 
 ## Commands Overview
 
@@ -50,7 +52,7 @@ Updated: 2024-01-15T10:30:45Z
 
 ### 2. `tako stats` - Container Statistics
 
-View per-container resource usage using Docker stats.
+View per-container resource usage collected by `takod` from local containers.
 
 **Basic Usage:**
 ```bash
@@ -147,10 +149,11 @@ tako_container_cpu_usage_percent{server="prod",host="95.216.194.236",container="
 
 ### Setup Prometheus Scraping
 
-1. **Create a cron job or systemd timer** to periodically export metrics:
+1. **Create a cron job or systemd timer** on a machine that can reach the Tako
+   environment:
 
 ```bash
-# Export metrics every minute and save to file
+# Export metrics every minute and save to a textfile collector directory
 */1 * * * * /usr/local/bin/tako prometheus > /var/lib/tako/metrics/prometheus.txt
 ```
 
@@ -167,7 +170,8 @@ scrape_configs:
         - '/var/lib/tako/metrics/prometheus.txt'
 ```
 
-3. **Or expose via HTTP endpoint** (requires additional setup):
+3. **Or expose via a small internal HTTP endpoint** if your monitoring stack
+   needs pull-based scraping:
 
 ```bash
 # Simple HTTP server to serve metrics
@@ -181,7 +185,9 @@ done
 
 ## Monitoring Agent
 
-The monitoring agent runs on each server and collects metrics every 60 seconds.
+The monitoring agent runs on each server and collects host metrics every 60
+seconds. `takod` exposes those metrics through `/v1/metrics`, and exposes
+container stats through `/v1/stats`.
 
 ### Agent Installation
 
@@ -283,16 +289,16 @@ fi
 
 ## Comparison with Other Tools
 
-| Feature | tako metrics | tako stats | docker stats | prometheus |
-|---------|-------------|-----------|--------------|------------|
-| System CPU/RAM/Disk | ✅ | ❌ | ❌ | ✅ |
-| Network I/O | ✅ | ❌ | ✅ | ✅ |
-| Disk I/O | ✅ | ✅ | ✅ | ✅ |
-| Container metrics | ❌ | ✅ | ✅ | ✅ |
-| Historical data | ❌ | ❌ | ❌ | ✅ |
-| Live updates | ✅ | ✅ | ✅ | ✅ |
-| Prometheus format | ❌ | ❌ | ❌ | ✅ |
-| Multi-server | ✅ | ✅ | ❌ | ✅ |
+| Feature | tako metrics | tako stats | tako prometheus |
+|---------|-------------|-----------|-----------------|
+| System CPU/RAM/Disk | ✅ | ❌ | ✅ |
+| Network I/O | ✅ | ❌ | ✅ |
+| Disk I/O | ✅ | ✅ | ✅ |
+| Container metrics | ❌ | ✅ | ✅ |
+| Historical data | ❌ | ❌ | Depends on scraper |
+| Live updates | ✅ | ✅ | ❌ |
+| Prometheus format | ❌ | ❌ | ✅ |
+| Multi-server | ✅ | ✅ | ✅ |
 
 ---
 
@@ -312,24 +318,24 @@ The monitoring agent has minimal performance impact:
 ### Metrics not available
 
 ```bash
-# Check if agent is running
-sudo systemctl status tako-monitor
+# Reinstall or refresh takod and the monitoring agent
+tako setup
 
-# Check metrics file
-cat /var/lib/tako/metrics/current.json
+# Check node runtime health
+tako doctor
 
-# Manually collect metrics
-/usr/local/bin/tako-monitor.sh once
+# Read metrics through takod
+tako metrics --once --verbose
 ```
 
 ### Container stats empty
 
 ```bash
-# Verify containers are running
-docker ps
-
-# Check if project name matches
+# Verify project containers through takod
 tako ps
+
+# Check all containers visible to the node agent
+tako stats --all
 ```
 
 ### Prometheus format issues
