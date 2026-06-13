@@ -342,3 +342,81 @@ func TestHandleEnvBundleWritesAndReads(t *testing.T) {
 		t.Fatalf("unexpected env bundle response: %#v", response)
 	}
 }
+
+func TestHandleBackupsRequiresSupportedMethod(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPut, "/v1/backups", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleBackups(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleBackupsRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/backups", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleBackups(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleBackupsListsBackups(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	request := BackupRequest{Project: "demo", Environment: "production"}
+	dir := backupDirectory(request)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatalf("failed to create backup dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data_20240101-120000.tar.gz"), []byte("backup"), 0600); err != nil {
+		t.Fatalf("failed to write backup fixture: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/backups?project=demo&environment=production", nil)
+	recorder := httptest.NewRecorder()
+	server.handleBackups(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response BackupListResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(response.Backups) != 1 || response.Backups[0].Volume != "data" {
+		t.Fatalf("unexpected backups response: %#v", response)
+	}
+}
+
+func TestHandleBackupRestoreRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/backups/restore", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleBackupRestore(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleBackupCleanupRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/backups/cleanup", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleBackupCleanup(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}

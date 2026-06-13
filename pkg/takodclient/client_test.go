@@ -25,3 +25,11 @@ func TestEnvBundleEndpointEscapesQueryValues(t *testing.T) {
 		t.Fatalf("EnvBundleEndpoint() = %q, want %q", got, want)
 	}
 }
+
+func TestBackupsEndpointEscapesQueryValues(t *testing.T) {
+	got := BackupsEndpoint("demo app", "prod/us", "db data", "20260613-120000")
+	want := "/v1/backups?backupId=20260613-120000&environment=prod%2Fus&project=demo+app&volume=db+data"
+	if got != want {
+		t.Fatalf("BackupsEndpoint() = %q, want %q", got, want)
+	}
+}
