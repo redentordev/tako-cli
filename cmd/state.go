@@ -1022,14 +1022,21 @@ func sortedServiceNames[T any](services map[string]T) []string {
 type stateRepairNode struct {
 	name    string
 	client  *ssh.Client
-	manager *remotestate.StateManager
+	manager stateRepairStateManager
 	runtime *takodstate.Manager
 }
 
 type stateRepairLease struct {
 	serverName string
-	manager    *remotestate.StateManager
+	manager    stateRepairStateManager
 	lease      *remotestate.LeaseInfo
+}
+
+type stateRepairStateManager interface {
+	LoadHistory() (*remotestate.DeploymentHistory, error)
+	SaveHistory(*remotestate.DeploymentHistory) error
+	AcquireLease(operation string, environment string, ttl time.Duration) (*remotestate.LeaseInfo, error)
+	ReleaseLease(*remotestate.LeaseInfo) error
 }
 
 type stateRepairInventory struct {
@@ -1180,18 +1187,69 @@ func closeStateRepairNodes(nodes []stateRepairNode) {
 }
 
 func acquireStateRepairLeases(nodes []stateRepairNode, envName string) ([]stateRepairLease, error) {
-	leases := make([]stateRepairLease, 0, len(nodes))
-	for _, node := range nodes {
+	return acquireStateRepairLeasesWith(nodes, func(node stateRepairNode) (stateRepairLease, error) {
 		lease, err := node.manager.AcquireLease("state-repair", envName, remotestate.DefaultLeaseTTL)
 		if err != nil {
-			releaseStateRepairLeases(leases, false)
-			return nil, fmt.Errorf("failed to acquire repair lease on %s: %w", node.name, err)
+			return stateRepairLease{}, fmt.Errorf("failed to acquire repair lease on %s: %w", node.name, err)
 		}
-		leases = append(leases, stateRepairLease{
+		return stateRepairLease{
 			serverName: node.name,
 			manager:    node.manager,
 			lease:      lease,
-		})
+		}, nil
+	})
+}
+
+type stateRepairLeaseAcquireFunc func(stateRepairNode) (stateRepairLease, error)
+
+type stateRepairLeaseResult struct {
+	index int
+	lease stateRepairLease
+	err   error
+}
+
+func acquireStateRepairLeasesWith(nodes []stateRepairNode, acquire stateRepairLeaseAcquireFunc) ([]stateRepairLease, error) {
+	resultCh := make(chan stateRepairLeaseResult, len(nodes))
+	var wg sync.WaitGroup
+
+	for index, node := range nodes {
+		wg.Add(1)
+		go func(index int, node stateRepairNode) {
+			defer wg.Done()
+			lease, err := acquire(node)
+			resultCh <- stateRepairLeaseResult{
+				index: index,
+				lease: lease,
+				err:   err,
+			}
+		}(index, node)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	ordered := make([]stateRepairLease, len(nodes))
+	var errors []string
+	for result := range resultCh {
+		if result.err != nil {
+			errors = append(errors, result.err.Error())
+			continue
+		}
+		ordered[result.index] = result.lease
+	}
+
+	leases := make([]stateRepairLease, 0, len(nodes))
+	for _, lease := range ordered {
+		if lease.lease == nil {
+			continue
+		}
+		leases = append(leases, lease)
+	}
+
+	if len(errors) > 0 {
+		releaseStateRepairLeases(leases, false)
+		sort.Strings(errors)
+		return nil, fmt.Errorf("failed to acquire repair leases: %s", strings.Join(errors, "; "))
 	}
 	return leases, nil
 }
@@ -1199,6 +1257,9 @@ func acquireStateRepairLeases(nodes []stateRepairNode, envName string) ([]stateR
 func releaseStateRepairLeases(leases []stateRepairLease, verbose bool) {
 	for i := len(leases) - 1; i >= 0; i-- {
 		lease := leases[i]
+		if lease.manager == nil || lease.lease == nil {
+			continue
+		}
 		if err := lease.manager.ReleaseLease(lease.lease); err != nil && verbose {
 			fmt.Fprintf(os.Stderr, "Warning: failed to release repair lease on %s: %v\n", lease.serverName, err)
 		}
