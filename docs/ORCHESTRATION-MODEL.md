@@ -96,6 +96,11 @@ read metrics, and clean project resources through typed socket requests. The
 CLI may still use SSH as a transport to reach the Unix socket, but runtime Docker
 inspection and mutation belong to `takod`.
 
+Installed `takod` services also refresh node-local actual container state in the
+background. The loop is lease-aware: if a deploy, rollback, scale, destroy, or
+state repair operation holds the environment lease, the background refresh skips
+that project/environment until the lease is clear.
+
 Local `.tako` files are cache and UX acceleration. The durable truth lives in
 Git plus the last accepted desired revision and event log replicated by takod.
 
@@ -150,6 +155,7 @@ Each node stores enough state to stand alone:
     <project>/<env>/revision.json
   actual/
     <project>/<env>/containers.json
+    <project>/<env>/nodes/<node>.json
   events/
     <project>/<env>.jsonl
   mesh/
@@ -215,8 +221,9 @@ By default, state commands read from the active environment's primary node. Use
 machine change or a primary-node outage. When nodes disagree or the primary
 state copy was lost, run `tako state repair -e production`; it reads all
 reachable environment nodes, writes the freshest deployment history, desired
-revision, and actual snapshot back to the reachable mesh, and refreshes local
-`.tako` state when deployment history is available.
+revision, aggregate actual snapshot, and node-local actual snapshots back to the
+reachable mesh, and refreshes local `.tako` state when deployment history is
+available.
 
 ## CI/CD
 

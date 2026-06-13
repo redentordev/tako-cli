@@ -39,7 +39,8 @@ current provisioning path from scratch.
 6. Apply host hardening and auto-recovery checks.
 7. Ensure the deploy user and monitoring agent.
 8. Install or reuse the server-side tako binary.
-9. Install and restart the takod systemd service.
+9. Install and restart the takod systemd service with the configured node name
+   and node-local actual-state refresh interval.
 10. Write /etc/tako/version.json.
 ```
 
@@ -54,7 +55,8 @@ releases.
 If a server has an older setup manifest, Tako executes the configured setup
 upgrade path and then refreshes the takod runtime. If the manifest is already at
 the current setup version, setup still refreshes the takod binary and systemd
-service so runtime changes are applied without needing a manifest bump.
+service so runtime changes, including takod flags and background refresh
+behavior, are applied without needing a manifest bump.
 
 ## Version Ownership
 

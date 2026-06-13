@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -13,8 +14,10 @@ import (
 )
 
 var (
-	takodSocket  string
-	takodDataDir string
+	takodSocket                string
+	takodDataDir               string
+	takodNode                  string
+	takodActualRefreshInterval time.Duration
 )
 
 var takodCmd = &cobra.Command{
@@ -39,6 +42,8 @@ func init() {
 
 	takodRunCmd.Flags().StringVar(&takodSocket, "socket", "", "Unix socket path")
 	takodRunCmd.Flags().StringVar(&takodDataDir, "data-dir", "", "takod data directory")
+	takodRunCmd.Flags().StringVar(&takodNode, "node", "", "Configured Tako node name")
+	takodRunCmd.Flags().DurationVar(&takodActualRefreshInterval, "actual-refresh-interval", 0, "Refresh node-local actual state at this interval (0 disables)")
 }
 
 func runTakod(cmd *cobra.Command, args []string) error {
@@ -69,7 +74,10 @@ func runTakod(cmd *cobra.Command, args []string) error {
 	if verbose {
 		fmt.Printf("takod listening on %s with data dir %s\n", socket, dataDir)
 	}
-	err := takod.NewServer(socket, dataDir, Version).Run(ctx)
+	err := takod.NewServerWithOptions(socket, dataDir, Version, takod.ServerOptions{
+		NodeName:              takodNode,
+		ActualRefreshInterval: takodActualRefreshInterval,
+	}).Run(ctx)
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}

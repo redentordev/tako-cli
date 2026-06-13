@@ -21,6 +21,24 @@ func TestSystemdPathArg(t *testing.T) {
 	}
 }
 
+func TestSystemdIdentifierArg(t *testing.T) {
+	for _, value := range []string{"node-a", "node_a", "Node1"} {
+		got, err := systemdIdentifierArg(value)
+		if err != nil {
+			t.Fatalf("systemdIdentifierArg(%q) returned error: %v", value, err)
+		}
+		if got != value {
+			t.Fatalf("systemdIdentifierArg(%q) = %q, want %q", value, got, value)
+		}
+	}
+
+	for _, value := range []string{"", "../node", "bad node", "bad\nnode", "bad/node"} {
+		if _, err := systemdIdentifierArg(value); err == nil {
+			t.Fatalf("expected %q to be rejected", value)
+		}
+	}
+}
+
 func TestNormalizeLinuxArch(t *testing.T) {
 	tests := map[string]string{
 		"x86_64":  "amd64",
@@ -63,7 +81,7 @@ func TestReleaseVersionArg(t *testing.T) {
 }
 
 func TestTakodSystemdUnitGrantsTakoGroupSocketAccess(t *testing.T) {
-	unit := buildTakodSystemdUnit("/usr/local/bin/tako", "/run/tako/takod.sock", "/var/lib/tako")
+	unit := buildTakodSystemdUnit("/usr/local/bin/tako", "/run/tako/takod.sock", "/var/lib/tako", "node-a", "30s")
 	for _, required := range []string{
 		"User=root",
 		"Group=tako",
@@ -71,7 +89,7 @@ func TestTakodSystemdUnitGrantsTakoGroupSocketAccess(t *testing.T) {
 		"RuntimeDirectoryMode=0770",
 		"UMask=0007",
 		"Requires=docker.service",
-		"ExecStart=/usr/local/bin/tako takod run --socket /run/tako/takod.sock --data-dir /var/lib/tako",
+		"ExecStart=/usr/local/bin/tako takod run --socket /run/tako/takod.sock --data-dir /var/lib/tako --node node-a --actual-refresh-interval 30s",
 	} {
 		if !strings.Contains(unit, required) {
 			t.Fatalf("systemd unit is missing %q:\n%s", required, unit)

@@ -15,12 +15,14 @@ import (
 )
 
 type Server struct {
-	socket    string
-	dataDir   string
-	version   string
-	startedAt time.Time
-	server    *http.Server
-	mu        sync.Mutex
+	socket                string
+	dataDir               string
+	version               string
+	nodeName              string
+	actualRefreshInterval time.Duration
+	startedAt             time.Time
+	server                *http.Server
+	mu                    sync.Mutex
 }
 
 type Status struct {
@@ -36,11 +38,22 @@ type Status struct {
 }
 
 func NewServer(socket string, dataDir string, version string) *Server {
+	return NewServerWithOptions(socket, dataDir, version, ServerOptions{})
+}
+
+type ServerOptions struct {
+	NodeName              string
+	ActualRefreshInterval time.Duration
+}
+
+func NewServerWithOptions(socket string, dataDir string, version string, opts ServerOptions) *Server {
 	return &Server{
-		socket:    socket,
-		dataDir:   dataDir,
-		version:   version,
-		startedAt: time.Now().UTC(),
+		socket:                socket,
+		dataDir:               dataDir,
+		version:               version,
+		nodeName:              opts.NodeName,
+		actualRefreshInterval: opts.ActualRefreshInterval,
+		startedAt:             time.Now().UTC(),
 	}
 }
 
@@ -103,6 +116,10 @@ func (s *Server) Run(ctx context.Context) error {
 	s.server = httpServer
 	s.mu.Unlock()
 
+	if s.actualRefreshInterval > 0 {
+		go s.runActualRefreshLoop(ctx)
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -122,6 +139,31 @@ func (s *Server) Run(ctx context.Context) error {
 	case err := <-errCh:
 		_ = os.Remove(s.socket)
 		return err
+	}
+}
+
+func (s *Server) runActualRefreshLoop(ctx context.Context) {
+	if s.nodeName == "" {
+		fmt.Fprintln(os.Stderr, "takod actual refresh disabled: node name is required")
+		return
+	}
+
+	refresh := func() {
+		if _, err := RefreshActualStateDocuments(ctx, s.dataDir, s.nodeName); err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(os.Stderr, "takod actual refresh failed: %v\n", err)
+		}
+	}
+
+	refresh()
+	ticker := time.NewTicker(s.actualRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refresh()
+		}
 	}
 }
 
