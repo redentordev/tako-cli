@@ -94,6 +94,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/logs", s.handleLogs)
 	mux.HandleFunc("/v1/stats", s.handleStats)
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
+	mux.HandleFunc("/v1/access-logs", s.handleAccessLogs)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -769,6 +770,38 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleAccessLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	tail := 50
+	if rawTail := r.URL.Query().Get("tail"); rawTail != "" {
+		parsed, err := strconv.Atoi(rawTail)
+		if err != nil {
+			http.Error(w, "tail must be an integer", http.StatusBadRequest)
+			return
+		}
+		tail = parsed
+	}
+	follow := false
+	if rawFollow := r.URL.Query().Get("follow"); rawFollow != "" {
+		parsed, err := strconv.ParseBool(rawFollow)
+		if err != nil {
+			http.Error(w, "follow must be a boolean", http.StatusBadRequest)
+			return
+		}
+		follow = parsed
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if err := StreamProxyAccessLogs(r.Context(), tail, follow, &flushResponseWriter{writer: w}); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 }
 
 func (s *Server) Status() Status {

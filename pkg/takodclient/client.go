@@ -195,6 +195,15 @@ func MetricsEndpoint(collect bool) string {
 	return "/v1/metrics?" + query.Encode()
 }
 
+func AccessLogsEndpoint(tail int, follow bool) string {
+	query := url.Values{}
+	query.Set("tail", fmt.Sprintf("%d", tail))
+	if follow {
+		query.Set("follow", "true")
+	}
+	return "/v1/access-logs?" + query.Encode()
+}
+
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"
