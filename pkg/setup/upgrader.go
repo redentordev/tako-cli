@@ -9,8 +9,9 @@ import (
 
 // Upgrader handles server setup upgrades
 type Upgrader struct {
-	client *ssh.Client
-	logger Logger
+	client     *ssh.Client
+	logger     Logger
+	cliVersion string
 }
 
 // Logger interface for upgrade logging
@@ -19,10 +20,14 @@ type Logger interface {
 }
 
 // NewUpgrader creates a new upgrader instance
-func NewUpgrader(client *ssh.Client, logger Logger) *Upgrader {
+func NewUpgrader(client *ssh.Client, logger Logger, cliVersion string) *Upgrader {
+	if cliVersion == "" {
+		cliVersion = "unknown"
+	}
 	return &Upgrader{
-		client: client,
-		logger: logger,
+		client:     client,
+		logger:     logger,
+		cliVersion: cliVersion,
 	}
 }
 
@@ -126,7 +131,7 @@ func (u *Upgrader) Execute(path *UpgradePath) error {
 	newVersion := &ServerVersion{
 		Version:        path.To,
 		LastUpgrade:    time.Now(),
-		TakoCLIVersion: "0.3.0", // TODO: Get from build
+		TakoCLIVersion: u.cliVersion,
 		Components:     make(map[string]string),
 		Features:       detectCurrentFeatures(u.client),
 	}

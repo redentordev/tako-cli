@@ -49,6 +49,7 @@ type DeploymentState struct {
 	Timestamp       time.Time                 `json:"timestamp"`
 	Environment     string                    `json:"environment"`
 	Mode            string                    `json:"mode"`
+	Servers         []string                  `json:"servers,omitempty"`
 	Status          string                    `json:"status"` // success, failed, partial
 	DurationSeconds int                       `json:"duration_seconds"`
 	Services        map[string]*ServiceDeploy `json:"services"`
@@ -549,7 +550,7 @@ func (m *Manager) updateGlobalState(deployment *DeploymentState) error {
 
 	global.Environments[m.env] = &EnvironmentState{
 		Active:         true,
-		Servers:        []string{}, // TODO: Extract from deployment
+		Servers:        append([]string(nil), deployment.Servers...),
 		LastDeployment: deployment.Timestamp,
 		DeploymentID:   deployment.DeploymentID,
 	}

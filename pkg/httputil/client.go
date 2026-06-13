@@ -3,7 +3,6 @@
 package httputil
 
 import (
-	"crypto/tls"
 	"net/http"
 	"sync"
 	"time"
@@ -12,28 +11,15 @@ import (
 var (
 	defaultClient     *http.Client
 	defaultClientOnce sync.Once
-
-	// insecureClient skips TLS verification (use with caution)
-	insecureClient     *http.Client
-	insecureClientOnce sync.Once
 )
 
 // DefaultClient returns a shared HTTP client with optimized connection pooling.
 // The client is safe for concurrent use and reuses connections efficiently.
 func DefaultClient() *http.Client {
 	defaultClientOnce.Do(func() {
-		defaultClient = newOptimizedClient(30*time.Second, false)
+		defaultClient = newOptimizedClient(30 * time.Second)
 	})
 	return defaultClient
-}
-
-// InsecureClient returns a shared HTTP client that skips TLS verification.
-// Use only when connecting to servers with self-signed certificates.
-func InsecureClient() *http.Client {
-	insecureClientOnce.Do(func() {
-		insecureClient = newOptimizedClient(30*time.Second, true)
-	})
-	return insecureClient
 }
 
 // NewClientWithTimeout creates a new HTTP client with the specified timeout.
@@ -45,17 +31,8 @@ func NewClientWithTimeout(timeout time.Duration) *http.Client {
 	}
 }
 
-// NewInsecureClientWithTimeout creates a new HTTP client that skips TLS verification.
-// Use only when connecting to servers with self-signed certificates.
-func NewInsecureClientWithTimeout(timeout time.Duration) *http.Client {
-	return &http.Client{
-		Timeout:   timeout,
-		Transport: InsecureClient().Transport,
-	}
-}
-
 // newOptimizedClient creates an HTTP client with optimized transport settings.
-func newOptimizedClient(timeout time.Duration, insecure bool) *http.Client {
+func newOptimizedClient(timeout time.Duration) *http.Client {
 	// Clone the default transport to get sensible defaults
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 
@@ -71,12 +48,6 @@ func newOptimizedClient(timeout time.Duration, insecure bool) *http.Client {
 	// Set reasonable timeouts
 	transport.ResponseHeaderTimeout = 30 * time.Second
 	transport.ExpectContinueTimeout = 1 * time.Second
-
-	if insecure {
-		transport.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: true,
-		}
-	}
 
 	return &http.Client{
 		Timeout:   timeout,

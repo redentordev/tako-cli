@@ -532,9 +532,8 @@ func (c *Config) GetOnUnreachableNode() string {
 // GetRegistryURL returns the auto-configured local registry URL
 // Returns empty string for single-server deployments (no registry needed)
 func (c *Config) GetRegistryURL() string {
-	// TODO: Phase 2 - implement registry for multi-server deployments
-	// For now, return empty string for all deployments
-	// In a future registry-backed mode, detect multi-server and return a mesh-local registry URL.
+	// Takod deployments use direct peer transfer for built images unless a service
+	// explicitly references an external image.
 	return ""
 }
 

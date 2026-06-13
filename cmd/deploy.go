@@ -633,6 +633,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				Timestamp:       startTime,
 				Environment:     envName,
 				Mode:            cfg.GetRuntimeMode(),
+				Servers:         append([]string(nil), serverNames...),
 				Status:          "success",
 				DurationSeconds: int(time.Since(startTime).Seconds()),
 				GitCommit:       commitInfo.Hash,
