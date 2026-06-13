@@ -24,21 +24,19 @@ const (
 	HostKeyModeStrict
 	// HostKeyModeAsk prompts user for unknown hosts (interactive only)
 	HostKeyModeAsk
-	// HostKeyModeInsecure disables verification by explicit opt-out.
-	HostKeyModeInsecure
 )
 
 // ParseHostKeyMode parses a string into HostKeyMode
-func ParseHostKeyMode(s string) HostKeyMode {
+func ParseHostKeyMode(s string) (HostKeyMode, error) {
 	switch strings.ToLower(s) {
+	case "", "tofu":
+		return HostKeyModeTOFU, nil
 	case "strict":
-		return HostKeyModeStrict
+		return HostKeyModeStrict, nil
 	case "ask":
-		return HostKeyModeAsk
-	case "insecure", "none", "off":
-		return HostKeyModeInsecure
+		return HostKeyModeAsk, nil
 	default:
-		return HostKeyModeTOFU
+		return HostKeyModeTOFU, fmt.Errorf("unsupported host key mode %q (use tofu, strict, or ask)", s)
 	}
 }
 
@@ -49,8 +47,6 @@ func (m HostKeyMode) String() string {
 		return "strict"
 	case HostKeyModeAsk:
 		return "ask"
-	case HostKeyModeInsecure:
-		return "insecure"
 	default:
 		return "tofu"
 	}
@@ -126,10 +122,6 @@ func (v *HostKeyVerifier) SetPromptFunc(fn func(host, fingerprint, keyType strin
 
 // GetCallback returns an ssh.HostKeyCallback for use with ssh.ClientConfig
 func (v *HostKeyVerifier) GetCallback() ssh.HostKeyCallback {
-	if v.mode == HostKeyModeInsecure {
-		return ssh.InsecureIgnoreHostKey()
-	}
-
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		return v.verify(hostname, remote, key)
 	}

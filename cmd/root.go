@@ -129,7 +129,7 @@ Built:   %s
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./tako.yaml or ./tako.json)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 	rootCmd.PersistentFlags().StringVarP(&envFlag, "env", "e", "", "environment to deploy (default: production or only environment)")
-	rootCmd.PersistentFlags().StringVar(&hostKeyModeFlag, "host-key-mode", "", "SSH host key verification mode: tofu, strict, ask, insecure (default: tofu)")
+	rootCmd.PersistentFlags().StringVar(&hostKeyModeFlag, "host-key-mode", "", "SSH host key verification mode: tofu, strict, ask (default: tofu)")
 
 	// Bind flags to viper
 	viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
@@ -219,12 +219,11 @@ func initHostKeyMode() {
 	}
 
 	if mode != "" {
-		parsedMode := ssh.ParseHostKeyMode(mode)
-		ssh.SetGlobalHostKeyMode(parsedMode)
-
-		// Warn if using insecure mode
-		if parsedMode == ssh.HostKeyModeInsecure {
-			fmt.Fprintln(os.Stderr, "Warning: SSH host key verification is disabled. This is insecure!")
+		parsedMode, err := ssh.ParseHostKeyMode(mode)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid SSH host key mode: %v\n", err)
+			os.Exit(1)
 		}
+		ssh.SetGlobalHostKeyMode(parsedMode)
 	}
 }

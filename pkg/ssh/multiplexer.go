@@ -113,9 +113,6 @@ func (m *Multiplexer) establish(host string, port int, user string, sshKey strin
 
 	// Configure host key verification based on global mode
 	switch GetGlobalHostKeyMode() {
-	case HostKeyModeInsecure:
-		args = append(args, "-o", "StrictHostKeyChecking=no")
-		args = append(args, "-o", "UserKnownHostsFile=/dev/null")
 	case HostKeyModeStrict:
 		args = append(args, "-o", "StrictHostKeyChecking=yes")
 		if takoKnownHosts != "" {
