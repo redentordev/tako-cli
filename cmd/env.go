@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,7 @@ const envPassphraseVar = "TAKO_ENV_PASSPHRASE"
 
 var downloadEnvBundleFromServerFunc = downloadEnvBundleFromServer
 var uploadEnvBundleToServerFunc = uploadEnvBundleToServer
+var writeEnvBundleFileAtomic = fileutil.WriteFileAtomic
 
 var envCmd = &cobra.Command{
 	Use:   "env",
@@ -259,28 +261,183 @@ func restoreEnvBundleFiles(allowedBundle map[string]string, allowedPaths []strin
 		return 0, fmt.Errorf("failed to decode environment bundle file(s): %s", strings.Join(decodeErrors, "; "))
 	}
 
-	restored := 0
-	var writeErrors []string
+	backups, createdDirs, err := prepareEnvRestoreTransaction(allowedPaths)
+	if err != nil {
+		return 0, err
+	}
 	for _, path := range allowedPaths {
-		if dir := filepath.Dir(path); dir != "." {
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				writeErrors = append(writeErrors, fmt.Sprintf("%s: create directory: %v", path, err))
-				continue
+		if err := writeEnvBundleFileAtomic(path, decoded[path], 0600); err != nil {
+			message := fmt.Sprintf("%s: write: %v", path, err)
+			if rollbackErr := rollbackEnvRestore(backups, createdDirs); rollbackErr != nil {
+				return 0, fmt.Errorf("failed to restore environment bundle file(s): %s; rollback failed: %w", message, rollbackErr)
 			}
+			return 0, fmt.Errorf("failed to restore environment bundle file(s): %s", message)
+		}
+	}
+
+	for _, path := range allowedPaths {
+		fmt.Printf("Restored: %s\n", path)
+	}
+	return len(allowedPaths), nil
+}
+
+type envRestoreBackup struct {
+	path    string
+	exists  bool
+	content []byte
+	mode    os.FileMode
+}
+
+func prepareEnvRestoreTransaction(paths []string) (map[string]envRestoreBackup, []string, error) {
+	createdDirs := make([]string, 0)
+	for _, path := range paths {
+		if !isAllowedEnvBundlePath(path) {
+			return nil, nil, fmt.Errorf("%s: unsupported environment bundle path", path)
 		}
 
-		if err := fileutil.WriteFileAtomic(path, decoded[path], 0600); err != nil {
-			writeErrors = append(writeErrors, fmt.Sprintf("%s: write: %v", path, err))
+		dir := filepath.Dir(path)
+		if dir == "." {
 			continue
 		}
 
-		fmt.Printf("Restored: %s\n", path)
-		restored++
+		dirExisted := true
+		if _, err := os.Lstat(dir); os.IsNotExist(err) {
+			dirExisted = false
+		} else if err != nil {
+			return nil, nil, fmt.Errorf("%s: inspect directory: %w", path, err)
+		}
+
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return nil, nil, fmt.Errorf("%s: create directory: %w", path, err)
+		}
+		if !dirExisted {
+			createdDirs = append(createdDirs, dir)
+		}
+		if err := validateEnvRestoreDirectory(dir); err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", path, err)
+		}
 	}
-	if len(writeErrors) > 0 {
-		return restored, fmt.Errorf("failed to restore environment bundle file(s): %s", strings.Join(writeErrors, "; "))
+
+	backups := make(map[string]envRestoreBackup, len(paths))
+	for _, path := range paths {
+		if err := validateEnvRestoreTarget(path); err != nil {
+			return nil, nil, err
+		}
+
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			backups[path] = envRestoreBackup{path: path}
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: inspect file: %w", path, err)
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: backup existing file: %w", path, err)
+		}
+		backups[path] = envRestoreBackup{
+			path:    path,
+			exists:  true,
+			content: data,
+			mode:    info.Mode().Perm(),
+		}
 	}
-	return restored, nil
+
+	return backups, createdDirs, nil
+}
+
+func validateEnvRestoreTarget(path string) error {
+	dir := filepath.Dir(path)
+	if dir != "." {
+		if err := validateEnvRestoreDirectory(dir); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+	}
+
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%s: inspect file: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s: refusing to overwrite symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s: refusing to overwrite non-regular file", path)
+	}
+	return nil
+}
+
+func validateEnvRestoreDirectory(dir string) error {
+	clean := filepath.Clean(dir)
+	if clean == "." {
+		return nil
+	}
+
+	current := ""
+	for _, part := range strings.Split(clean, string(os.PathSeparator)) {
+		if part == "" {
+			continue
+		}
+		if current == "" {
+			current = part
+		} else {
+			current = filepath.Join(current, part)
+		}
+
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect directory %s: %w", current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to restore through symlink directory %s", current)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("restore parent %s is not a directory", current)
+		}
+	}
+	return nil
+}
+
+func rollbackEnvRestore(backups map[string]envRestoreBackup, createdDirs []string) error {
+	paths := make([]string, 0, len(backups))
+	for path := range backups {
+		paths = append(paths, path)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(paths)))
+
+	var rollbackErrors []string
+	for _, path := range paths {
+		backup := backups[path]
+		if backup.exists {
+			if err := writeEnvBundleFileAtomic(backup.path, backup.content, backup.mode); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Sprintf("%s: restore backup: %v", backup.path, err))
+			}
+			continue
+		}
+
+		if err := os.Remove(backup.path); err != nil && !os.IsNotExist(err) {
+			rollbackErrors = append(rollbackErrors, fmt.Sprintf("%s: remove restored file: %v", backup.path, err))
+		}
+	}
+
+	for i := len(createdDirs) - 1; i >= 0; i-- {
+		if err := os.Remove(createdDirs[i]); err != nil && !os.IsNotExist(err) {
+			rollbackErrors = append(rollbackErrors, fmt.Sprintf("%s: remove created directory: %v", createdDirs[i], err))
+		}
+	}
+
+	if len(rollbackErrors) > 0 {
+		return errors.New(strings.Join(rollbackErrors, "; "))
+	}
+	return nil
 }
 
 func supportedEnvBundleFiles(bundle map[string]string) (map[string]string, []string, []string) {
