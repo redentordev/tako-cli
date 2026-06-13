@@ -52,6 +52,10 @@ func ValidateConfig(cfg *Config) error {
 		cfg.Environments[envName] = env
 	}
 
+	if err := validateStorageConfig(cfg); err != nil {
+		return err
+	}
+
 	// Validate top-level volumes section
 	if len(cfg.Volumes) > 0 {
 		if err := validateVolumes(cfg.Volumes); err != nil {
@@ -59,6 +63,18 @@ func ValidateConfig(cfg *Config) error {
 		}
 	}
 
+	return nil
+}
+
+func validateStorageConfig(cfg *Config) error {
+	if !cfg.IsNFSEnabled() {
+		return nil
+	}
+	for envName := range cfg.Environments {
+		if _, err := cfg.GetNFSServerName(envName); err != nil {
+			return fmt.Errorf("storage.nfs: %w", err)
+		}
+	}
 	return nil
 }
 
