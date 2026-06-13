@@ -435,6 +435,44 @@ func TestBestStateStatusActualBuildsAggregateFromNodeSnapshots(t *testing.T) {
 	}
 }
 
+func TestReconcileStateFromActualSnapshotBuildsRecoveredDeployment(t *testing.T) {
+	snapshot := actualSnapshot(time.Now().UTC(), "web", "worker")
+	snapshot.Services["web"] = takodstate.ActualService{
+		Name:     "web",
+		Image:    "demo:web",
+		Replicas: 2,
+	}
+
+	deployment, err := ReconcileStateFromActualSnapshot(&config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+	}, "production", snapshot, "recovered from mesh")
+	if err != nil {
+		t.Fatalf("ReconcileStateFromActualSnapshot returned error: %v", err)
+	}
+
+	if deployment.Environment != "production" || deployment.Mode != config.RuntimeModeTakod || deployment.Status != "recovered" {
+		t.Fatalf("unexpected recovered deployment metadata: %#v", deployment)
+	}
+	if deployment.Notes != "recovered from mesh" {
+		t.Fatalf("notes = %q, want recovered from mesh", deployment.Notes)
+	}
+	if got := deployment.Services["web"].Replicas; got != 2 {
+		t.Fatalf("web replicas = %d, want 2", got)
+	}
+	if got := deployment.Services["worker"].Image; got != "demo:worker" {
+		t.Fatalf("worker image = %q, want demo:worker", got)
+	}
+}
+
+func TestReconcileStateFromActualSnapshotRejectsEmptySnapshot(t *testing.T) {
+	_, err := ReconcileStateFromActualSnapshot(&config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+	}, "production", actualSnapshot(time.Now().UTC()), "empty")
+	if err == nil {
+		t.Fatal("ReconcileStateFromActualSnapshot should reject snapshots without services")
+	}
+}
+
 func stateServerNamesConfig() *config.Config {
 	return &config.Config{
 		Servers: map[string]config.ServerConfig{

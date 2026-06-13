@@ -136,7 +136,14 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Println("No remote deployment history found, attempting recovery from running services...")
+	fmt.Println("No remote deployment history found, attempting recovery from mesh runtime state...")
+	if err := recoverAndSaveStateFromMeshActual(cfg, envName, stateServer); err == nil {
+		return nil
+	} else if verbose {
+		fmt.Printf("Warning: mesh runtime state recovery failed: %v\n", err)
+	}
+
+	fmt.Println("No mesh runtime state found, attempting recovery from running services...")
 	recoveryServerName, client, err := connectFirstReachableStateServer(cfg, envName, stateServer)
 	if err != nil {
 		return err
@@ -1963,18 +1970,31 @@ func SyncStateOnDeploy(cfg *config.Config, envName string) error {
 	return nil
 }
 
-// ReconcileStateFromRunning reconstructs state from running takod containers.
-// This is useful when local state is lost but containers are still running.
-func ReconcileStateFromRunning(client *ssh.Client, cfg *config.Config, envName string) (*localstate.DeploymentState, error) {
-	actual, err := actualStateViaTakod(client, cfg, envName)
+func recoverAndSaveStateFromMeshActual(cfg *config.Config, envName string, requestedServer string) error {
+	nodes, err := collectStateStatusNodes(cfg, envName, requestedServer)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read actual state from takod: %w", err)
+		return err
+	}
+	_, _, actualCandidates, nodeActualCandidates := stateStatusCandidates(nodes)
+	bestActual, hasActual, _ := bestStateStatusActual(cfg.Project.Name, envName, actualCandidates, nodeActualCandidates)
+	if !hasActual {
+		return fmt.Errorf("no mesh actual state found")
 	}
 
-	if len(actual.Services) == 0 {
-		return nil, fmt.Errorf("no running containers found for %s", cfg.Project.Name)
+	deployment, err := ReconcileStateFromActualSnapshot(cfg, envName, bestActual.actual, "State recovered from replicated takod actual state")
+	if err != nil {
+		return err
 	}
+	return saveRecoveredDeployment(cfg, envName, deployment)
+}
 
+// ReconcileStateFromActualSnapshot reconstructs local state from a replicated
+// takod actual snapshot. This is useful on a fresh machine when deployment
+// history was lost but mesh runtime snapshots are still available.
+func ReconcileStateFromActualSnapshot(cfg *config.Config, envName string, actual *takodstate.ActualSnapshot, notes string) (*localstate.DeploymentState, error) {
+	if actual == nil || len(actual.Services) == 0 {
+		return nil, fmt.Errorf("no actual services found for %s", cfg.Project.Name)
+	}
 	deployment := &localstate.DeploymentState{
 		DeploymentID:    fmt.Sprintf("recovered-%d", time.Now().Unix()),
 		Timestamp:       time.Now(),
@@ -1983,13 +2003,10 @@ func ReconcileStateFromRunning(client *ssh.Client, cfg *config.Config, envName s
 		Status:          "recovered",
 		DurationSeconds: 0,
 		Services:        make(map[string]*localstate.ServiceDeploy),
-		Notes:           "State recovered from running takod containers",
+		Notes:           notes,
 	}
 
 	for serviceName, service := range actual.Services {
-		if service == nil {
-			continue
-		}
 		deployment.Services[serviceName] = &localstate.ServiceDeploy{
 			Image:    service.Image,
 			Replicas: service.Replicas,
@@ -2004,13 +2021,49 @@ func ReconcileStateFromRunning(client *ssh.Client, cfg *config.Config, envName s
 	return deployment, nil
 }
 
+// ReconcileStateFromRunning reconstructs state from running takod containers.
+// This is useful when local state is lost but containers are still running.
+func ReconcileStateFromRunning(client *ssh.Client, cfg *config.Config, envName string) (*localstate.DeploymentState, error) {
+	actual, err := actualStateViaTakod(client, cfg, envName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read actual state from takod: %w", err)
+	}
+
+	if len(actual.Services) == 0 {
+		return nil, fmt.Errorf("no running containers found for %s", cfg.Project.Name)
+	}
+
+	snapshot := &takodstate.ActualSnapshot{
+		SchemaVersion: takodstate.SchemaVersion,
+		Project:       cfg.Project.Name,
+		Environment:   envName,
+		Services:      make(map[string]takodstate.ActualService, len(actual.Services)),
+		CapturedAt:    time.Now().UTC(),
+	}
+	for serviceName, service := range actual.Services {
+		if service == nil {
+			continue
+		}
+		snapshot.Services[serviceName] = takodstate.ActualService{
+			Name:       service.Name,
+			Image:      service.Image,
+			Replicas:   service.Replicas,
+			Containers: append([]string(nil), service.Containers...),
+		}
+	}
+	return ReconcileStateFromActualSnapshot(cfg, envName, snapshot, "State recovered from running takod containers")
+}
+
 // reconcileAndSave uses ReconcileStateFromRunning to rebuild state from running services
 func reconcileAndSave(client *ssh.Client, cfg *config.Config, envName string) error {
 	deployment, err := ReconcileStateFromRunning(client, cfg, envName)
 	if err != nil {
 		return err
 	}
+	return saveRecoveredDeployment(cfg, envName, deployment)
+}
 
+func saveRecoveredDeployment(cfg *config.Config, envName string, deployment *localstate.DeploymentState) error {
 	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
 	if err != nil {
 		return fmt.Errorf("failed to initialize local state: %w", err)
