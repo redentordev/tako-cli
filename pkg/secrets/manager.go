@@ -360,21 +360,24 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 		}
 	}
 
-	// First, add clear (non-secret) environment variables with expansion
+	// First, add clear (non-secret) environment variables with explicit
+	// ${VAR} expansion. Bare dollar values are preserved for secrets such as
+	// bcrypt hashes.
 	for key, value := range service.Env {
-		// Expand ${VAR} and $VAR syntax
-		expandedValue := os.Expand(value, func(varName string) string {
+		expandedValue, missing := expandServiceEnvValue(value, func(varName string) (string, bool) {
 			// First check project .env
 			if val, ok := projectEnv[varName]; ok {
-				return strings.TrimSpace(val)
+				return strings.TrimSpace(val), true
 			}
 			// Then check loaded secrets
 			if val, ok := m.secrets[varName]; ok {
-				return val
+				return val, true
 			}
-			// Return empty string if not found (don't leave ${VAR} in output)
-			return ""
+			return "", false
 		})
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("service env %s references missing variable(s): %s", key, strings.Join(missing, ", "))
+		}
 
 		// Trim any trailing whitespace from the expanded value
 		expandedValue = strings.TrimSpace(expandedValue)
@@ -412,6 +415,39 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 	}
 
 	return envFile, nil
+}
+
+func expandServiceEnvValue(value string, lookup func(string) (string, bool)) (string, []string) {
+	var result strings.Builder
+	missing := make([]string, 0)
+	seenMissing := map[string]bool{}
+
+	for i := 0; i < len(value); {
+		if value[i] != '$' || i+1 >= len(value) || value[i+1] != '{' {
+			result.WriteByte(value[i])
+			i++
+			continue
+		}
+
+		end := strings.IndexByte(value[i+2:], '}')
+		if end < 0 {
+			result.WriteByte(value[i])
+			i++
+			continue
+		}
+
+		key := value[i+2 : i+2+end]
+		if resolved, ok := lookup(key); ok {
+			result.WriteString(resolved)
+		} else if !seenMissing[key] {
+			seenMissing[key] = true
+			missing = append(missing, key)
+		}
+		i += end + 3
+	}
+
+	sort.Strings(missing)
+	return result.String(), missing
 }
 
 // ValidateRequired checks if all required secrets are present
