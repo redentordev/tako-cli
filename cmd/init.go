@@ -65,7 +65,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 		fmt.Println("\n💡 Nixpacks is optional but recommended for best experience.")
 		fmt.Println("It allows you to deploy without writing a Dockerfile - just push your code!")
 
-		if checker.PromptNixpacksInstall() {
+		if !checker.CanInstallNixpacks() {
+			fmt.Println("Install it manually later: https://nixpacks.com/docs/install")
+		} else if checker.PromptNixpacksInstall() {
 			if err := checker.InstallNixpacks(); err != nil {
 				fmt.Printf("\n⚠️  Failed to install Nixpacks: %v\n", err)
 				fmt.Println("You can install it manually later: https://nixpacks.com/docs/install")

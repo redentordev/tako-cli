@@ -51,20 +51,17 @@ runtime, state, mesh, and migration plan.
 
 ### Installation
 
-#### Recommended: Automated Install (Linux & macOS)
+#### Recommended: Direct Binary Install
 
-The install script automatically configures your PATH and verifies checksums:
+Download the release binary for your platform and install it onto your PATH:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/redentordev/tako-cli/master/install.sh | bash
+curl -fL https://github.com/redentordev/tako-cli/releases/latest/download/tako-linux-amd64 -o /tmp/tako
+sudo install -m 0755 /tmp/tako /usr/local/bin/tako
+rm /tmp/tako
 ```
 
-**Features:**
-- ✅ Automatic platform detection (Linux/macOS, AMD64/ARM64)
-- ✅ SHA256 checksum verification for security
-- ✅ Automatic PATH configuration for bash/zsh/fish
-- ✅ Smart install directory selection (sudo-free when possible)
-- ✅ Works immediately after installation
+Use the manual section below for Linux ARM64, macOS, and Windows binaries.
 
 <details>
 <summary>📦 Homebrew (macOS & Linux)</summary>
@@ -177,12 +174,7 @@ tako upgrade
 #### Uninstalling
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/redentordev/tako-cli/master/uninstall.sh | bash
-```
-
-Or manually:
-```bash
-sudo rm /usr/local/bin/tako
+sudo rm -f /usr/local/bin/tako
 # Remove any PATH entries from ~/.bashrc, ~/.zshrc, etc.
 ```
 
