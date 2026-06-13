@@ -137,6 +137,10 @@ func (m *Manager) loadFile(path string) error {
 
 // executeCommand executes a command for substitution (with safety checks)
 func (m *Manager) executeCommand(command string) (string, error) {
+	if os.Getenv("TAKO_ALLOW_SECRET_COMMANDS") != "1" {
+		return "", fmt.Errorf("command substitution is disabled; set TAKO_ALLOW_SECRET_COMMANDS=1 to enable it")
+	}
+
 	// Security: Only allow specific safe commands
 	allowedCommands := []string{
 		"tako",

@@ -66,6 +66,32 @@ func TestCreateEnvFileReportsMissingBracedEnv(t *testing.T) {
 	}
 }
 
+func TestExecuteCommandRequiresExplicitOptIn(t *testing.T) {
+	t.Setenv("TAKO_ALLOW_SECRET_COMMANDS", "")
+	mgr := &Manager{}
+
+	_, err := mgr.executeCommand("tako version")
+	if err == nil {
+		t.Fatal("executeCommand should reject command substitution by default")
+	}
+	if !strings.Contains(err.Error(), "TAKO_ALLOW_SECRET_COMMANDS=1") {
+		t.Fatalf("error = %q, want opt-in hint", err)
+	}
+}
+
+func TestExecuteCommandKeepsAllowlistWhenOptedIn(t *testing.T) {
+	t.Setenv("TAKO_ALLOW_SECRET_COMMANDS", "1")
+	mgr := &Manager{}
+
+	_, err := mgr.executeCommand("sh -c echo unsafe")
+	if err == nil {
+		t.Fatal("executeCommand should reject commands outside the allowlist")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("error = %q, want allowlist error", err)
+	}
+}
+
 func withTempWorkingDir(t *testing.T) {
 	t.Helper()
 	oldDir, err := os.Getwd()
