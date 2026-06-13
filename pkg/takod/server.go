@@ -70,6 +70,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/v1/status", s.handleStatus)
+	mux.HandleFunc("/v1/actual", s.handleActual)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -118,6 +119,30 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(status)
+}
+
+func (s *Server) handleActual(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	project := r.URL.Query().Get("project")
+	environment := r.URL.Query().Get("environment")
+	if project == "" || environment == "" {
+		http.Error(w, "project and environment are required", http.StatusBadRequest)
+		return
+	}
+	actual, err := GatherActualState(r.Context(), project, environment)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(actual)
 }
 
 func (s *Server) Status() Status {

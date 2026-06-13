@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -78,5 +79,17 @@ func TestRemoveStaleSocketRejectsNonSocket(t *testing.T) {
 
 	if err := removeStaleSocket(path); err == nil {
 		t.Fatal("expected non-socket path to be rejected")
+	}
+}
+
+func TestHandleActualRequiresProjectAndEnvironment(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/actual", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleActual(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
 }
