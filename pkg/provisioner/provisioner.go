@@ -397,8 +397,12 @@ func shellQuote(value string) string {
 // Note: tako-proxy is handled per-deployment by the deployer.
 // No system-wide reverse proxy installation is needed during server setup
 
-// ConfigureFirewall configures UFW firewall
-func (p *Provisioner) ConfigureFirewall() error {
+// ConfigureFirewall configures UFW firewall.
+func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
+	if meshListenPort < 1 || meshListenPort > 65535 {
+		return fmt.Errorf("mesh listen port must be between 1 and 65535")
+	}
+
 	// Check if UFW is already active
 	output, _ := p.client.Execute("sudo ufw status | grep -i 'Status: active'")
 	isActive := strings.TrimSpace(output) != ""
@@ -447,18 +451,7 @@ func (p *Provisioner) ConfigureFirewall() error {
 	}
 
 	// Allow essential services with rate limiting for SSH (use || true to ignore "Skipping adding existing rule" errors)
-	allowCommands := []string{
-		// SSH with rate limiting (max 10 connections per 30 seconds per IP)
-		"sudo ufw limit 22/tcp comment 'SSH with rate limiting' || true",
-
-		// HTTP/HTTPS.
-		"sudo ufw allow 80/tcp comment 'HTTP' || true",
-		"sudo ufw allow 443/tcp comment 'HTTPS' || true",
-
-		"sudo ufw allow 51820/udp comment 'Tako mesh' || true",
-	}
-
-	for _, cmd := range allowCommands {
+	for _, cmd := range firewallAllowCommands(meshListenPort) {
 		if p.verbose {
 			fmt.Printf("  Running: %s\n", cmd)
 		}
@@ -481,6 +474,19 @@ func (p *Provisioner) ConfigureFirewall() error {
 	}
 
 	return nil
+}
+
+func firewallAllowCommands(meshListenPort int) []string {
+	return []string{
+		// SSH with rate limiting (max 10 connections per 30 seconds per IP).
+		"sudo ufw limit 22/tcp comment 'SSH with rate limiting' || true",
+
+		// HTTP/HTTPS.
+		"sudo ufw allow 80/tcp comment 'HTTP' || true",
+		"sudo ufw allow 443/tcp comment 'HTTPS' || true",
+
+		fmt.Sprintf("sudo ufw allow %d/udp comment 'Tako mesh' || true", meshListenPort),
+	}
 }
 
 // HardenSecurity applies comprehensive security hardening
