@@ -110,6 +110,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			{"Checking system requirements", prov.CheckRequirements},
 			{"Updating system packages", prov.UpdateSystem},
 			{"Installing Docker", prov.InstallDocker},
+			{"Installing WireGuard", prov.InstallWireGuard},
 			{"Configuring firewall (UFW)", prov.ConfigureFirewall},
 			{"Hardening security", prov.HardenSecurity},
 			{"Verifying auto-recovery", prov.VerifyAutoRecovery},
@@ -131,7 +132,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			InstalledAt:    time.Now(),
 			TakoCLIVersion: Version,
 			Components:     make(map[string]string),
-			Features:       []string{"docker", "tako-proxy", "firewall", "monitoring"},
+			Features:       []string{"docker", "wireguard-mesh", "tako-proxy", "firewall", "monitoring"},
 		}
 
 		if err := setup.WriteVersionFile(client, newVersion); err != nil {

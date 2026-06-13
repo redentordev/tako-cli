@@ -75,6 +75,11 @@ mesh:
   natTraversal: true
 ```
 
+During runtime preparation, Tako installs WireGuard tools when missing, creates a
+stable node key under `/etc/tako/wireguard`, writes `/etc/wireguard/tako.conf`,
+and brings up `wg-quick@tako`. One-node deployments still get the same
+interface, just without peer blocks.
+
 Local `.tako` files are cache and UX acceleration. The durable truth lives in
 Git plus the last accepted desired revision and event log replicated by takod.
 
@@ -133,7 +138,6 @@ Each node stores enough state to stand alone:
     <project>/<env>.jsonl
   mesh/
     peers.json
-    routes.json
 ```
 
 If a node loses contact with the CLI or peers, it keeps serving its last accepted
@@ -221,7 +225,7 @@ lock remains as a same-machine guard.
 1. Keep the CLI surface takod-only.
 2. Add CI-friendly remote deploy leases and state pull/status workflows.
 3. Persist desired revisions and events on every node.
-4. Add WireGuard peer material and mesh routes.
+4. Reconcile WireGuard peer material and node configs.
 5. Move ingress to per-node proxies with mesh upstream fallback.
 6. Promote reconcile/state operations to the takod socket.
 ```

@@ -11,6 +11,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
@@ -338,6 +339,7 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Println()
 	printTakodRuntimeStatus(takodstate.NewManager(client, cfg, envName))
+	printMeshRuntimeStatus(client, cfg)
 
 	lease, err := remoteMgr.ReadLease()
 	if err != nil {
@@ -364,6 +366,31 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func printMeshRuntimeStatus(client *ssh.Client, cfg *config.Config) {
+	if cfg.Mesh == nil {
+		return
+	}
+
+	status, err := mesh.ReadStatus(client, cfg.Mesh.Interface)
+	if err != nil {
+		fmt.Printf("Mesh: Error reading WireGuard status - %v\n", err)
+		return
+	}
+	if !status.Up {
+		fmt.Printf("Mesh: %s is down\n", status.Interface)
+		return
+	}
+
+	publicKey := status.PublicKey
+	if len(publicKey) > 16 {
+		publicKey = publicKey[:16] + "..."
+	}
+	fmt.Printf("Mesh: %s is up, listen port %s, peers %d\n", status.Interface, status.ListenPort, status.Peers)
+	if publicKey != "" {
+		fmt.Printf("  Public key: %s\n", publicKey)
+	}
 }
 
 func printTakodRuntimeStatus(manager *takodstate.Manager) {
