@@ -1,8 +1,11 @@
 package setup
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -27,7 +30,7 @@ const VersionFile = "/etc/tako/version.json"
 // DetectServerVersion detects the setup version installed on a server
 func DetectServerVersion(client *ssh.Client) (*ServerVersion, error) {
 	// Try to read version file
-	output, err := client.Execute(fmt.Sprintf("cat %s 2>/dev/null", VersionFile))
+	output, err := client.Execute(fmt.Sprintf("cat -- %s 2>/dev/null", shellQuote(VersionFile)))
 	if err != nil || output == "" {
 		return nil, ErrNotSetup
 	}
@@ -110,18 +113,29 @@ func WriteVersionFile(client *ssh.Client, version *ServerVersion) error {
 		return fmt.Errorf("failed to marshal version: %w", err)
 	}
 
-	// Create directory if it doesn't exist
-	if _, err := client.Execute("mkdir -p /etc/tako"); err != nil {
-		return fmt.Errorf("failed to create tako directory: %w", err)
-	}
-
-	// Write version file
-	cmd := fmt.Sprintf("cat > %s << 'EOF'\n%s\nEOF", VersionFile, string(data))
-	if _, err := client.Execute(cmd); err != nil {
+	if _, err := client.Execute(buildWriteVersionFileCommand(data)); err != nil {
 		return fmt.Errorf("failed to write version file: %w", err)
 	}
 
 	return nil
+}
+
+func buildWriteVersionFileCommand(data []byte) string {
+	encoded := base64.StdEncoding.EncodeToString(data)
+	dir := filepath.Dir(VersionFile)
+	return fmt.Sprintf(
+		"tmp=$(mktemp) && trap 'rm -f \"$tmp\"' EXIT && printf %%s %s | base64 -d > \"$tmp\" && sudo install -d -m 0755 %s && sudo install -m 0644 \"$tmp\" %s",
+		shellQuote(encoded),
+		shellQuote(dir),
+		shellQuote(VersionFile),
+	)
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 // ErrNotSetup indicates server is not set up
