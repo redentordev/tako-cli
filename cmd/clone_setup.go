@@ -41,6 +41,10 @@ func init() {
 	rootCmd.AddCommand(cloneSetupCmd)
 }
 
+var cloneSetupCollectStatePullHistories = collectStatePullHistories
+var cloneSetupSyncBestDeploymentHistoryToLocal = syncBestDeploymentHistoryToLocal
+var cloneSetupRecoverStateFromMeshActual = recoverAndSaveStateFromMeshActual
+
 func runCloneSetup(cmd *cobra.Command, args []string) error {
 	reader := bufio.NewReader(os.Stdin)
 	passed, warned, failed := 0, 0, 0
@@ -219,17 +223,11 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 		pass("Local deployment state exists")
 	} else if len(connectedClients) > 0 {
 		warn("Local deployment state missing, attempting state pull...")
-		histories, err := collectStatePullHistories(cfg, envName, "")
+		message, err := cloneSetupSyncMissingState(cfg, envName)
 		if err != nil {
-			warn(fmt.Sprintf("State sync failed: %v", err))
-		} else if source, synced, ok, err := syncBestDeploymentHistoryToLocal(cfg, envName, histories); err != nil {
-			warn(fmt.Sprintf("State sync failed: %v", err))
-		} else if ok {
-			pass(fmt.Sprintf("State synced from %s (%d deployment(s))", source, synced))
-		} else if localDeploymentStateExists(envName) {
-			pass("State synced from remote mesh")
+			warn(err.Error())
 		} else {
-			warn("No remote state available (deploy first)")
+			pass(message)
 		}
 	} else {
 		warn("Local deployment state missing and no server connections available")
@@ -286,6 +284,27 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func cloneSetupSyncMissingState(cfg *config.Config, envName string) (string, error) {
+	histories, err := cloneSetupCollectStatePullHistories(cfg, envName, "")
+	if err != nil {
+		return "", fmt.Errorf("State sync failed: %w", err)
+	}
+	source, synced, ok, err := cloneSetupSyncBestDeploymentHistoryToLocal(cfg, envName, histories)
+	if err != nil {
+		return "", fmt.Errorf("State sync failed: %w", err)
+	}
+	if ok {
+		return fmt.Sprintf("State synced from %s (%d deployment(s))", source, synced), nil
+	}
+	if localDeploymentStateExists(envName) {
+		return "State synced from remote mesh", nil
+	}
+	if err := cloneSetupRecoverStateFromMeshActual(cfg, envName, ""); err != nil {
+		return "", fmt.Errorf("No remote state available (deploy first): %w", err)
+	}
+	return "State recovered from remote mesh runtime", nil
 }
 
 // createEnvFromExample creates .env from .env.example, optionally prompting for values
