@@ -238,3 +238,55 @@ func TestHandleAcmeDNSCredentialsRejectsInvalidJSON(t *testing.T) {
 		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
 }
+
+func TestHandleStateRequiresSupportedMethod(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodDelete, "/v1/state", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleState(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleStateRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPut, "/v1/state", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleState(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleStateWritesAndReadsDocument(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	writeBody := `{"project":"demo","environment":"production","document":"desired","revisionId":"rev_1","content":"{\"ok\":true}\n"}`
+	writeReq := httptest.NewRequest(http.MethodPut, "/v1/state", bytes.NewBufferString(writeBody))
+	writeRecorder := httptest.NewRecorder()
+
+	server.handleState(writeRecorder, writeReq)
+
+	if writeRecorder.Code != http.StatusOK {
+		t.Fatalf("expected write 200, got %d: %s", writeRecorder.Code, writeRecorder.Body.String())
+	}
+
+	readReq := httptest.NewRequest(http.MethodGet, "/v1/state?project=demo&environment=production&document=desired", nil)
+	readRecorder := httptest.NewRecorder()
+	server.handleState(readRecorder, readReq)
+
+	if readRecorder.Code != http.StatusOK {
+		t.Fatalf("expected read 200, got %d: %s", readRecorder.Code, readRecorder.Body.String())
+	}
+	var response StateDocumentResponse
+	if err := json.NewDecoder(readRecorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !response.Found || response.Content != "{\"ok\":true}\n" {
+		t.Fatalf("unexpected state response: %#v", response)
+	}
+}
