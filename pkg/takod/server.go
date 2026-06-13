@@ -82,6 +82,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/backups", s.handleBackups)
 	mux.HandleFunc("/v1/backups/restore", s.handleBackupRestore)
 	mux.HandleFunc("/v1/backups/cleanup", s.handleBackupCleanup)
+	mux.HandleFunc("/v1/metadata", s.handleMetadata)
 
 	httpServer := &http.Server{Handler: mux}
 	s.mu.Lock()
@@ -483,6 +484,30 @@ func (s *Server) handleBackupCleanup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := CleanupOldBackups(r.Context(), request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request MetadataRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	response, err := WriteMetadata(r.Context(), s.dataDir, request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
