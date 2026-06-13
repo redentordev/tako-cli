@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
 	"github.com/spf13/cobra"
 )
@@ -410,9 +412,20 @@ func printMeshRuntimeStatus(client *ssh.Client, cfg *config.Config) {
 		return
 	}
 
-	status, err := mesh.ReadStatus(client, cfg.Mesh.Interface)
+	output, err := takodclient.RequestJSON(
+		client,
+		takodSocketFromConfig(cfg),
+		"GET",
+		"/v1/mesh/status?interface="+url.QueryEscape(cfg.Mesh.Interface),
+		nil,
+	)
 	if err != nil {
 		fmt.Printf("Mesh: Error reading WireGuard status - %v\n", err)
+		return
+	}
+	var status mesh.Status
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		fmt.Printf("Mesh: Error parsing WireGuard status - %v\n", err)
 		return
 	}
 	if !status.Up {
