@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGetNFSServerNameUsesEnvironmentDefault(t *testing.T) {
 	cfg := nfsServerNameTestConfig("auto")
@@ -36,17 +39,125 @@ func TestGetNFSServerNameRejectsServerOutsideEnvironment(t *testing.T) {
 
 func TestValidateConfigRejectsNFSServerOutsideEnvironment(t *testing.T) {
 	cfg := validNFSValidationConfig("storage")
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Image:   "nginx:alpine",
+		Volumes: []string{"nfs:shared_data:/data:rw"},
+	}
+	cfg.Environments["production"] = production
 
 	if err := ValidateConfig(cfg); err == nil {
 		t.Fatal("ValidateConfig should reject an NFS server outside the environment")
 	}
 }
 
-func TestValidateConfigAcceptsEnvironmentNFSServer(t *testing.T) {
-	cfg := validNFSValidationConfig("node-b")
+func TestValidateConfigAllowsNFSServerOutsideEnvironmentWithoutNFSVolumes(t *testing.T) {
+	cfg := validNFSValidationConfig("storage")
 
 	if err := ValidateConfig(cfg); err != nil {
 		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+}
+
+func TestValidateConfigAllowsNFSServerOutsideUnusedEnvironment(t *testing.T) {
+	cfg := validNFSValidationConfig("node-b")
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Image:   "nginx:alpine",
+		Volumes: []string{"nfs:shared_data:/data:rw"},
+	}
+	cfg.Environments["production"] = production
+	cfg.Environments["staging"] = EnvironmentConfig{
+		Servers: []string{"storage"},
+		Services: map[string]ServiceConfig{
+			"web": {Image: "nginx:alpine"},
+		},
+	}
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+}
+
+func TestValidateConfigAcceptsEnvironmentNFSServer(t *testing.T) {
+	cfg := validNFSValidationConfig("node-b")
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Image:   "nginx:alpine",
+		Volumes: []string{"nfs:shared_data:/data:rw"},
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+}
+
+func TestValidateConfigRejectsNFSVolumeWithoutNFSConfig(t *testing.T) {
+	cfg := validNFSValidationConfig("node-b")
+	cfg.Storage = nil
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Image:   "nginx:alpine",
+		Volumes: []string{"nfs:shared_data:/data:rw"},
+	}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject NFS volumes when NFS is disabled")
+	}
+	if !strings.Contains(err.Error(), "requires storage.nfs.enabled") {
+		t.Fatalf("error = %q, want storage.nfs.enabled error", err)
+	}
+}
+
+func TestValidateConfigRejectsNFSVolumeMissingExport(t *testing.T) {
+	cfg := validNFSValidationConfig("node-b")
+	cfg.Storage.NFS.Exports = nil
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Image:   "nginx:alpine",
+		Volumes: []string{"nfs:missing:/data:rw"},
+	}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject NFS volumes that reference missing exports")
+	}
+	if !strings.Contains(err.Error(), "references missing export") {
+		t.Fatalf("error = %q, want missing export error", err)
+	}
+}
+
+func TestEnvironmentUsesNFSVolumes(t *testing.T) {
+	env := EnvironmentConfig{
+		Services: map[string]ServiceConfig{
+			"web": {
+				Image:   "nginx:alpine",
+				Volumes: []string{"data:/data", "nfs:shared_data:/shared:ro"},
+			},
+		},
+	}
+
+	if !EnvironmentUsesNFSVolumes(env) {
+		t.Fatal("EnvironmentUsesNFSVolumes should detect nfs volume specs")
+	}
+}
+
+func TestEnvironmentUsesNFSVolumesReturnsFalseWithoutNFS(t *testing.T) {
+	env := EnvironmentConfig{
+		Services: map[string]ServiceConfig{
+			"web": {
+				Image:   "nginx:alpine",
+				Volumes: []string{"data:/data"},
+			},
+		},
+	}
+
+	if EnvironmentUsesNFSVolumes(env) {
+		t.Fatal("EnvironmentUsesNFSVolumes should ignore non-NFS volumes")
 	}
 }
 
@@ -56,6 +167,9 @@ func nfsServerNameTestConfig(server string) *Config {
 			NFS: &NFSConfig{
 				Enabled: true,
 				Server:  server,
+				Exports: []NFSExportConfig{
+					{Name: "shared_data", Path: "/srv/tako/shared"},
+				},
 			},
 		},
 		Servers: map[string]ServerConfig{

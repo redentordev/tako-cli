@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -39,5 +40,86 @@ func TestSetupMeshListenPort(t *testing.T) {
 	cfg := &config.Config{Mesh: &config.MeshConfig{ListenPort: 42420}}
 	if got := setupMeshListenPort(cfg); got != 42420 {
 		t.Fatalf("configured mesh listen port = %d, want 42420", got)
+	}
+}
+
+func TestSetupNFSDecisionSkipsEnvironmentWithoutNFSVolumes(t *testing.T) {
+	cfg := setupNFSDecisionConfig([]string{"data:/data"})
+
+	shouldSetup, reason, showTip := setupNFSDecision(cfg, "production", "", 2)
+
+	if shouldSetup {
+		t.Fatal("setupNFSDecision should skip environments without NFS volumes")
+	}
+	if !strings.Contains(reason, "has no NFS volumes") {
+		t.Fatalf("reason = %q, want no NFS volumes reason", reason)
+	}
+	if showTip {
+		t.Fatal("single-server tip should not be shown for no-NFS-volume skip")
+	}
+}
+
+func TestSetupNFSDecisionSetsUpMultiNodeEnvironmentWithNFSVolumes(t *testing.T) {
+	cfg := setupNFSDecisionConfig([]string{"nfs:shared_data:/data:rw"})
+
+	shouldSetup, reason, showTip := setupNFSDecision(cfg, "production", "", 2)
+
+	if !shouldSetup {
+		t.Fatalf("setupNFSDecision should set up NFS, reason = %q", reason)
+	}
+	if showTip {
+		t.Fatal("single-server tip should not be shown for multi-node NFS setup")
+	}
+}
+
+func TestSetupNFSDecisionSkipsSingleNodeEnvironmentWithNFSVolumes(t *testing.T) {
+	cfg := setupNFSDecisionConfig([]string{"nfs:shared_data:/data:rw"})
+
+	shouldSetup, reason, showTip := setupNFSDecision(cfg, "production", "", 1)
+
+	if shouldSetup {
+		t.Fatal("setupNFSDecision should skip single-node NFS setup")
+	}
+	if !strings.Contains(reason, "2+ servers") {
+		t.Fatalf("reason = %q, want single-node reason", reason)
+	}
+	if !showTip {
+		t.Fatal("single-server tip should be shown for single-node NFS volumes")
+	}
+}
+
+func TestSetupNFSDecisionSkipsRequestedSingleServer(t *testing.T) {
+	cfg := setupNFSDecisionConfig([]string{"nfs:shared_data:/data:rw"})
+
+	shouldSetup, reason, showTip := setupNFSDecision(cfg, "production", "node-a", 1)
+
+	if shouldSetup {
+		t.Fatal("setupNFSDecision should skip NFS setup when --server is used")
+	}
+	if !strings.Contains(reason, "--server targets one node") {
+		t.Fatalf("reason = %q, want requested-server reason", reason)
+	}
+	if showTip {
+		t.Fatal("single-server tip should not be shown for requested-server skip")
+	}
+}
+
+func setupNFSDecisionConfig(volumes []string) *config.Config {
+	return &config.Config{
+		Storage: &config.StorageConfig{
+			NFS: &config.NFSConfig{Enabled: true, Server: "auto"},
+		},
+		Servers: map[string]config.ServerConfig{
+			"node-a": {Host: "10.0.0.1"},
+			"node-b": {Host: "10.0.0.2"},
+		},
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Servers: []string{"node-a", "node-b"},
+				Services: map[string]config.ServiceConfig{
+					"web": {Image: "nginx:alpine", Volumes: volumes},
+				},
+			},
+		},
 	}
 }

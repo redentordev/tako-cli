@@ -705,6 +705,32 @@ func (c *Config) IsNFSEnabled() bool {
 	return c.Storage != nil && c.Storage.NFS != nil && c.Storage.NFS.Enabled
 }
 
+// EnvironmentUsesNFSVolumes returns true when any service in an environment
+// declares an nfs:<export>:<path> volume.
+func (c *Config) EnvironmentUsesNFSVolumes(envName string) bool {
+	if envName == "" {
+		envName = c.GetDefaultEnvironment()
+	}
+	env, exists := c.Environments[envName]
+	if !exists {
+		return false
+	}
+	return EnvironmentUsesNFSVolumes(env)
+}
+
+// EnvironmentUsesNFSVolumes returns true when any service declares an
+// nfs:<export>:<path> volume.
+func EnvironmentUsesNFSVolumes(env EnvironmentConfig) bool {
+	for _, service := range env.Services {
+		for _, volume := range service.Volumes {
+			if IsNFSVolume(volume) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // GetNFSConfig returns the NFS configuration, or nil if not enabled
 func (c *Config) GetNFSConfig() *NFSConfig {
 	if c.Storage != nil && c.Storage.NFS != nil {
