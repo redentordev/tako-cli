@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/reconcile"
 )
 
 func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
@@ -91,5 +92,66 @@ func TestBuildDesiredRevisionNormalizesNegativeReplicaCount(t *testing.T) {
 
 	if got := revision.Services["worker"].Replicas; got != 1 {
 		t.Fatalf("expected negative replicas to normalize to 1, got %d", got)
+	}
+}
+
+func TestBuildActualSnapshotWithNodesEmbedsNodeSnapshots(t *testing.T) {
+	nodeActual := map[string]map[string]*reconcile.ActualService{
+		"node-b": {
+			"web": {
+				Name:       "web",
+				Image:      "demo/web:1",
+				Replicas:   1,
+				Containers: []string{"b2", "b1"},
+			},
+		},
+		"node-a": {
+			"web": {
+				Name:       "web",
+				Image:      "demo/web:1",
+				Replicas:   1,
+				Containers: []string{"a1"},
+			},
+			"worker": {
+				Name:       "worker",
+				Image:      "demo/worker:1",
+				Replicas:   1,
+				Containers: []string{"w1"},
+			},
+		},
+	}
+	aggregate := reconcile.AggregateActualStateByServer(nodeActual)
+
+	snapshot := BuildActualSnapshotWithNodes("demo", "production", []string{"node-b", "node-a"}, aggregate, nodeActual)
+
+	if !slices.Equal(snapshot.TargetNodes, []string{"node-a", "node-b"}) {
+		t.Fatalf("target nodes were not sorted: %#v", snapshot.TargetNodes)
+	}
+	if got := snapshot.Services["web"].Replicas; got != 2 {
+		t.Fatalf("aggregate web replicas = %d, want 2", got)
+	}
+	if !slices.Equal(snapshot.Nodes["node-b"].Services["web"].Containers, []string{"b1", "b2"}) {
+		t.Fatalf("node containers were not sorted: %#v", snapshot.Nodes["node-b"].Services["web"].Containers)
+	}
+	if snapshot.Nodes["node-a"].CapturedAt.IsZero() || snapshot.Nodes["node-b"].CapturedAt.IsZero() {
+		t.Fatalf("expected embedded node snapshots to have capture times: %#v", snapshot.Nodes)
+	}
+}
+
+func TestBuildNodeActualSnapshotRecordsNode(t *testing.T) {
+	snapshot := BuildNodeActualSnapshot("demo", "production", "node-a", map[string]*reconcile.ActualService{
+		"web": {
+			Name:       "web",
+			Image:      "demo/web:1",
+			Replicas:   1,
+			Containers: []string{"c2", "c1"},
+		},
+	})
+
+	if snapshot.Node != "node-a" {
+		t.Fatalf("node = %q, want node-a", snapshot.Node)
+	}
+	if !slices.Equal(snapshot.Services["web"].Containers, []string{"c1", "c2"}) {
+		t.Fatalf("containers were not sorted: %#v", snapshot.Services["web"].Containers)
 	}
 }

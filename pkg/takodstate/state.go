@@ -19,9 +19,10 @@ import (
 const (
 	SchemaVersion = 1
 
-	stateDocumentDesired = "desired"
-	stateDocumentActual  = "actual"
-	stateDocumentEvent   = "event"
+	stateDocumentDesired    = "desired"
+	stateDocumentActual     = "actual"
+	stateDocumentNodeActual = "actual-node"
+	stateDocumentEvent      = "event"
 )
 
 var ErrNotFound = errors.New("takod state not found")
@@ -68,12 +69,20 @@ type DesiredService struct {
 }
 
 type ActualSnapshot struct {
-	SchemaVersion int                      `json:"schemaVersion"`
-	Project       string                   `json:"project"`
-	Environment   string                   `json:"environment"`
-	TargetNodes   []string                 `json:"targetNodes"`
-	Services      map[string]ActualService `json:"services"`
-	CapturedAt    time.Time                `json:"capturedAt"`
+	SchemaVersion int                           `json:"schemaVersion"`
+	Project       string                        `json:"project"`
+	Environment   string                        `json:"environment"`
+	Node          string                        `json:"node,omitempty"`
+	TargetNodes   []string                      `json:"targetNodes,omitempty"`
+	Services      map[string]ActualService      `json:"services"`
+	Nodes         map[string]ActualNodeSnapshot `json:"nodes,omitempty"`
+	CapturedAt    time.Time                     `json:"capturedAt"`
+}
+
+type ActualNodeSnapshot struct {
+	Node       string                   `json:"node"`
+	Services   map[string]ActualService `json:"services"`
+	CapturedAt time.Time                `json:"capturedAt"`
 }
 
 type ActualService struct {
@@ -146,11 +155,49 @@ func BuildDesiredRevision(cfg *config.Config, environment string, source string,
 }
 
 func BuildActualSnapshot(project string, environment string, targetNodes []string, actual map[string]*reconcile.ActualService) *ActualSnapshot {
+	return BuildActualSnapshotWithNodes(project, environment, targetNodes, actual, nil)
+}
+
+func BuildActualSnapshotWithNodes(project string, environment string, targetNodes []string, actual map[string]*reconcile.ActualService, nodeActual map[string]map[string]*reconcile.ActualService) *ActualSnapshot {
+	now := time.Now().UTC()
 	snapshot := &ActualSnapshot{
 		SchemaVersion: SchemaVersion,
 		Project:       project,
 		Environment:   environment,
 		TargetNodes:   sortedCopy(targetNodes),
+		Services:      make(map[string]ActualService, len(actual)),
+		CapturedAt:    now,
+	}
+
+	for serviceName, service := range actual {
+		if service == nil {
+			continue
+		}
+		snapshot.Services[serviceName] = actualServiceFromReconcile(service)
+	}
+
+	if len(nodeActual) > 0 {
+		snapshot.Nodes = make(map[string]ActualNodeSnapshot, len(nodeActual))
+		for node, services := range nodeActual {
+			nodeSnapshot := BuildNodeActualSnapshot(project, environment, node, services)
+			nodeSnapshot.CapturedAt = now
+			snapshot.Nodes[node] = ActualNodeSnapshot{
+				Node:       node,
+				Services:   nodeSnapshot.Services,
+				CapturedAt: nodeSnapshot.CapturedAt,
+			}
+		}
+	}
+
+	return snapshot
+}
+
+func BuildNodeActualSnapshot(project string, environment string, node string, actual map[string]*reconcile.ActualService) *ActualSnapshot {
+	snapshot := &ActualSnapshot{
+		SchemaVersion: SchemaVersion,
+		Project:       project,
+		Environment:   environment,
+		Node:          node,
 		Services:      make(map[string]ActualService, len(actual)),
 		CapturedAt:    time.Now().UTC(),
 	}
@@ -159,16 +206,19 @@ func BuildActualSnapshot(project string, environment string, targetNodes []strin
 		if service == nil {
 			continue
 		}
-		containers := sortedCopy(service.Containers)
-		snapshot.Services[serviceName] = ActualService{
-			Name:       service.Name,
-			Image:      service.Image,
-			Replicas:   service.Replicas,
-			Containers: containers,
-		}
+		snapshot.Services[serviceName] = actualServiceFromReconcile(service)
 	}
-
 	return snapshot
+}
+
+func actualServiceFromReconcile(service *reconcile.ActualService) ActualService {
+	containers := sortedCopy(service.Containers)
+	return ActualService{
+		Name:       service.Name,
+		Image:      service.Image,
+		Replicas:   service.Replicas,
+		Containers: containers,
+	}
 }
 
 func NewEvent(project string, environment string, eventType string, revisionID string, message string, details map[string]string) Event {
@@ -184,7 +234,7 @@ func NewEvent(project string, environment string, eventType string, revisionID s
 	}
 }
 
-func PersistToServers(pool *ssh.Pool, cfg *config.Config, environment string, serverNames []string, desired *DesiredRevision, actual *ActualSnapshot, event Event, verbose bool) error {
+func PersistToServers(pool *ssh.Pool, cfg *config.Config, environment string, serverNames []string, desired *DesiredRevision, actual *ActualSnapshot, nodeActual map[string]*ActualSnapshot, event Event, verbose bool) error {
 	if pool == nil {
 		return fmt.Errorf("ssh pool not initialized")
 	}
@@ -204,6 +254,11 @@ func PersistToServers(pool *ssh.Pool, cfg *config.Config, environment string, se
 		}
 		if err := manager.WriteActual(actual); err != nil {
 			return fmt.Errorf("%s: failed to write actual state: %w", serverName, err)
+		}
+		for nodeName, snapshot := range nodeActual {
+			if err := manager.WriteNodeActual(nodeName, snapshot); err != nil {
+				return fmt.Errorf("%s: failed to write actual state for node %s: %w", serverName, nodeName, err)
+			}
 		}
 		if err := manager.AppendEvent(event); err != nil {
 			return fmt.Errorf("%s: failed to append event: %w", serverName, err)
@@ -238,6 +293,23 @@ func (m *Manager) WriteActual(snapshot *ActualSnapshot) error {
 	return m.writeDocument(stateDocumentActual, "", content)
 }
 
+func (m *Manager) WriteNodeActual(node string, snapshot *ActualSnapshot) error {
+	if node == "" {
+		return fmt.Errorf("node name is required")
+	}
+	if snapshot == nil {
+		return fmt.Errorf("node actual snapshot is nil")
+	}
+	if snapshot.Node == "" {
+		snapshot.Node = node
+	}
+	content, err := marshalStateDocument(snapshot)
+	if err != nil {
+		return err
+	}
+	return m.writeNodeDocument(stateDocumentNodeActual, node, content)
+}
+
 func (m *Manager) ReadDesired() (*DesiredRevision, error) {
 	var revision DesiredRevision
 	if err := m.readDocument(stateDocumentDesired, &revision); err != nil {
@@ -249,6 +321,17 @@ func (m *Manager) ReadDesired() (*DesiredRevision, error) {
 func (m *Manager) ReadActual() (*ActualSnapshot, error) {
 	var snapshot ActualSnapshot
 	if err := m.readDocument(stateDocumentActual, &snapshot); err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
+func (m *Manager) ReadNodeActual(node string) (*ActualSnapshot, error) {
+	if node == "" {
+		return nil, fmt.Errorf("node name is required")
+	}
+	var snapshot ActualSnapshot
+	if err := m.readNodeDocument(stateDocumentNodeActual, node, &snapshot); err != nil {
 		return nil, err
 	}
 	return &snapshot, nil
@@ -276,12 +359,30 @@ func (m *Manager) writeDocument(document string, revisionID string, content stri
 	return err
 }
 
+func (m *Manager) writeNodeDocument(document string, node string, content string) error {
+	request := m.documentRequest(document, "", content)
+	request.Node = node
+	_, err := takodclient.RequestJSON(m.client, m.socket, "PUT", "/v1/state", request)
+	return err
+}
+
 func (m *Manager) readDocument(document string, value any) error {
 	output, err := takodclient.RequestJSON(m.client, m.socket, "GET", takodclient.StateEndpoint(m.project, m.environment, document), nil)
 	if err != nil {
 		return err
 	}
+	return decodeStateDocumentResponse(output, m.project, m.environment, document, value)
+}
 
+func (m *Manager) readNodeDocument(document string, node string, value any) error {
+	output, err := takodclient.RequestJSON(m.client, m.socket, "GET", takodclient.StateNodeEndpoint(m.project, m.environment, document, node), nil)
+	if err != nil {
+		return err
+	}
+	return decodeStateDocumentResponse(output, m.project, m.environment, document, value)
+}
+
+func decodeStateDocumentResponse(output string, project string, environment string, document string, value any) error {
 	var response takod.StateDocumentResponse
 	if err := json.Unmarshal([]byte(output), &response); err != nil {
 		return fmt.Errorf("failed to parse takod state response: %w", err)
@@ -290,10 +391,10 @@ func (m *Manager) readDocument(document string, value any) error {
 		return ErrNotFound
 	}
 	if response.Content == "" {
-		return fmt.Errorf("empty takod state document %s/%s/%s", m.project, m.environment, document)
+		return fmt.Errorf("empty takod state document %s/%s/%s", project, environment, document)
 	}
 	if err := json.Unmarshal([]byte(response.Content), value); err != nil {
-		return fmt.Errorf("failed to parse takod state document %s/%s/%s: %w", m.project, m.environment, document, err)
+		return fmt.Errorf("failed to parse takod state document %s/%s/%s: %w", project, environment, document, err)
 	}
 	return nil
 }

@@ -354,11 +354,22 @@ func runStateRepair(cmd *cobra.Command, args []string) error {
 	bestHistory, hasHistory := bestDeploymentHistory(repair.histories)
 	bestDesired, hasDesired := bestDesiredRevision(repair.desired)
 	bestActual, hasActual := bestActualSnapshot(repair.actual)
-	if !hasHistory && !hasDesired && !hasActual {
+	bestNodeActual := bestNodeActualSnapshots(repair.nodeActual)
+	hasNodeActual := len(bestNodeActual) > 0
+	if hasActual && hasNodeActual {
+		bestActual.actual = actualSnapshotWithNodeSnapshots(bestActual.actual, bestNodeActual)
+	} else if !hasActual && hasNodeActual {
+		bestActual = stateActualCandidate{
+			source: "node actual snapshots",
+			actual: aggregateActualSnapshotFromNodeSnapshots(cfg.Project.Name, envName, bestNodeActual),
+		}
+		hasActual = actualSnapshotRepairable(bestActual.actual)
+	}
+	if !hasHistory && !hasDesired && !hasActual && !hasNodeActual {
 		return fmt.Errorf("no deployment history or runtime state found on reachable nodes")
 	}
 
-	printStateRepairSource(hasHistory, bestHistory, hasDesired, bestDesired, hasActual, bestActual)
+	printStateRepairSource(hasHistory, bestHistory, hasDesired, bestDesired, hasActual, bestActual, bestNodeActual)
 
 	repairLeases, err := acquireStateRepairLeases(repair.nodes, envName)
 	if err != nil {
@@ -369,7 +380,7 @@ func runStateRepair(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Acquired state repair leases: %s\n", stateRepairLeaseSummary(repairLeases))
 	}
 
-	historyWritten, desiredWritten, actualWritten, err := writeStateRepairDocuments(repair.nodes, bestHistory, hasHistory, bestDesired, hasDesired, bestActual, hasActual)
+	historyWritten, desiredWritten, actualWritten, nodeActualWritten, err := writeStateRepairDocuments(repair.nodes, bestHistory, hasHistory, bestDesired, hasDesired, bestActual, hasActual, bestNodeActual)
 	if err != nil {
 		return err
 	}
@@ -386,7 +397,7 @@ func runStateRepair(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
 	}
 
-	printStateRepairWriteSummary(len(repair.nodes), hasHistory, historyWritten, hasDesired, desiredWritten, hasActual, actualWritten)
+	printStateRepairWriteSummary(len(repair.nodes), hasHistory, historyWritten, hasDesired, desiredWritten, hasActual, actualWritten, hasNodeActual, nodeActualWritten)
 	return nil
 }
 
@@ -496,6 +507,7 @@ func printTakodRuntimeStatus(manager *takodstate.Manager) {
 			fmt.Printf("  Nodes:   %s\n", strings.Join(actual.TargetNodes, ", "))
 		}
 		printActualRuntimeServices(actual.Services)
+		printActualNodeRuntimeServices(actual.Nodes)
 	} else {
 		fmt.Println("Actual: Not recorded")
 	}
@@ -537,6 +549,28 @@ func printActualRuntimeServices(services map[string]takodstate.ActualService) {
 			image = "<unknown>"
 		}
 		fmt.Printf("    - %s: %d replica(s), %s\n", name, service.Replicas, image)
+	}
+}
+
+func printActualNodeRuntimeServices(nodes map[string]takodstate.ActualNodeSnapshot) {
+	if len(nodes) == 0 {
+		return
+	}
+
+	nodeNames := make([]string, 0, len(nodes))
+	for node := range nodes {
+		nodeNames = append(nodeNames, node)
+	}
+	sort.Strings(nodeNames)
+
+	fmt.Printf("  Node snapshots: %d\n", len(nodeNames))
+	for _, nodeName := range nodeNames {
+		snapshot := nodes[nodeName]
+		fmt.Printf("    - %s: %d service(s), freshness %s\n",
+			nodeName,
+			len(snapshot.Services),
+			snapshot.CapturedAt.Format(time.RFC3339),
+		)
 	}
 }
 
@@ -594,10 +628,11 @@ type stateRepairLease struct {
 }
 
 type stateRepairInventory struct {
-	nodes     []stateRepairNode
-	histories []stateHistoryCandidate
-	desired   []stateDesiredCandidate
-	actual    []stateActualCandidate
+	nodes      []stateRepairNode
+	histories  []stateHistoryCandidate
+	desired    []stateDesiredCandidate
+	actual     []stateActualCandidate
+	nodeActual []stateNodeActualCandidate
 }
 
 type stateHistoryCandidate struct {
@@ -615,6 +650,12 @@ type stateActualCandidate struct {
 	actual *takodstate.ActualSnapshot
 }
 
+type stateNodeActualCandidate struct {
+	source string
+	node   string
+	actual *takodstate.ActualSnapshot
+}
+
 func collectStateRepairNodes(cfg *config.Config, envName string, preferredServer string) (*stateRepairInventory, error) {
 	serverNames, err := orderedStateServerNames(cfg, envName, preferredServer)
 	if err != nil {
@@ -622,10 +663,11 @@ func collectStateRepairNodes(cfg *config.Config, envName string, preferredServer
 	}
 
 	repair := &stateRepairInventory{
-		nodes:     make([]stateRepairNode, 0, len(serverNames)),
-		histories: make([]stateHistoryCandidate, 0, len(serverNames)),
-		desired:   make([]stateDesiredCandidate, 0, len(serverNames)),
-		actual:    make([]stateActualCandidate, 0, len(serverNames)),
+		nodes:      make([]stateRepairNode, 0, len(serverNames)),
+		histories:  make([]stateHistoryCandidate, 0, len(serverNames)),
+		desired:    make([]stateDesiredCandidate, 0, len(serverNames)),
+		actual:     make([]stateActualCandidate, 0, len(serverNames)),
+		nodeActual: make([]stateNodeActualCandidate, 0, len(serverNames)),
 	}
 
 	for _, serverName := range serverNames {
@@ -691,8 +733,33 @@ func collectStateRepairNodes(cfg *config.Config, envName string, preferredServer
 				actualSnapshotServiceCount(actual),
 				actualSnapshotFreshness(actual).Format(time.RFC3339),
 			)
+			for nodeName, nodeSnapshot := range actual.Nodes {
+				repair.nodeActual = append(repair.nodeActual, stateNodeActualCandidate{
+					source: serverName + " aggregate",
+					node:   nodeName,
+					actual: actualSnapshotFromEmbeddedNode(actual.Project, actual.Environment, nodeSnapshot),
+				})
+			}
 		} else if verbose && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
 			fmt.Printf("Unable to read actual runtime state on %s: %v\n", serverName, err)
+		}
+
+		nodeActualCount := 0
+		for _, nodeName := range serverNames {
+			nodeActual, err := runtime.ReadNodeActual(nodeName)
+			if err == nil && nodeActualSnapshotRepairable(nodeActual, nodeName) {
+				repair.nodeActual = append(repair.nodeActual, stateNodeActualCandidate{
+					source: serverName,
+					node:   nodeName,
+					actual: nodeActual,
+				})
+				nodeActualCount++
+			} else if verbose && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+				fmt.Printf("Unable to read node actual runtime state for %s on %s: %v\n", nodeName, serverName, err)
+			}
+		}
+		if nodeActualCount > 0 {
+			fmt.Printf("  node actual: %d snapshot(s)\n", nodeActualCount)
 		}
 	}
 
@@ -741,7 +808,7 @@ func stateRepairLeaseSummary(leases []stateRepairLease) string {
 	return strings.Join(parts, ", ")
 }
 
-func printStateRepairSource(hasHistory bool, history stateHistoryCandidate, hasDesired bool, desired stateDesiredCandidate, hasActual bool, actual stateActualCandidate) {
+func printStateRepairSource(hasHistory bool, history stateHistoryCandidate, hasDesired bool, desired stateDesiredCandidate, hasActual bool, actual stateActualCandidate, nodeActual map[string]stateNodeActualCandidate) {
 	if hasHistory {
 		fmt.Printf("Deployment history source: %s (%d deployment(s), freshness %s)\n",
 			history.source,
@@ -763,18 +830,32 @@ func printStateRepairSource(hasHistory bool, history stateHistoryCandidate, hasD
 			actualSnapshotFreshness(actual.actual).Format(time.RFC3339),
 		)
 	}
+	if len(nodeActual) > 0 {
+		nodes := sortedStateNodeActualNames(nodeActual)
+		fmt.Printf("Node actual sources: %d node(s)\n", len(nodes))
+		for _, nodeName := range nodes {
+			candidate := nodeActual[nodeName]
+			fmt.Printf("  %s: %s (%d service(s), freshness %s)\n",
+				nodeName,
+				candidate.source,
+				actualSnapshotServiceCount(candidate.actual),
+				actualSnapshotFreshness(candidate.actual).Format(time.RFC3339),
+			)
+		}
+	}
 }
 
-func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCandidate, hasHistory bool, desired stateDesiredCandidate, hasDesired bool, actual stateActualCandidate, hasActual bool) (int, int, int, error) {
+func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCandidate, hasHistory bool, desired stateDesiredCandidate, hasDesired bool, actual stateActualCandidate, hasActual bool, nodeActual map[string]stateNodeActualCandidate) (int, int, int, int, error) {
 	historyWritten := 0
 	desiredWritten := 0
 	actualWritten := 0
+	nodeActualWritten := 0
 
 	for _, node := range nodes {
 		if hasHistory {
 			historyCopy, err := cloneRemoteDeploymentHistory(history.history)
 			if err != nil {
-				return historyWritten, desiredWritten, actualWritten, fmt.Errorf("failed to prepare history for repair: %w", err)
+				return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to prepare history for repair: %w", err)
 			}
 			if err := node.manager.SaveHistory(historyCopy); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to repair deployment history on %s: %v\n", node.name, err)
@@ -786,7 +867,7 @@ func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCand
 		if hasDesired {
 			desiredCopy, err := cloneDesiredRevision(desired.desired)
 			if err != nil {
-				return historyWritten, desiredWritten, actualWritten, fmt.Errorf("failed to prepare desired runtime state for repair: %w", err)
+				return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to prepare desired runtime state for repair: %w", err)
 			}
 			if err := node.runtime.WriteDesired(desiredCopy); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to repair desired runtime state on %s: %v\n", node.name, err)
@@ -798,7 +879,7 @@ func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCand
 		if hasActual {
 			actualCopy, err := cloneActualSnapshot(actual.actual)
 			if err != nil {
-				return historyWritten, desiredWritten, actualWritten, fmt.Errorf("failed to prepare actual runtime state for repair: %w", err)
+				return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to prepare actual runtime state for repair: %w", err)
 			}
 			if err := node.runtime.WriteActual(actualCopy); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to repair actual runtime state on %s: %v\n", node.name, err)
@@ -806,21 +887,36 @@ func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCand
 				actualWritten++
 			}
 		}
+
+		for nodeName, candidate := range nodeActual {
+			actualCopy, err := cloneActualSnapshot(candidate.actual)
+			if err != nil {
+				return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to prepare node actual runtime state for repair: %w", err)
+			}
+			if err := node.runtime.WriteNodeActual(nodeName, actualCopy); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to repair node actual runtime state for %s on %s: %v\n", nodeName, node.name, err)
+			} else {
+				nodeActualWritten++
+			}
+		}
 	}
 
 	if hasHistory && historyWritten == 0 {
-		return historyWritten, desiredWritten, actualWritten, fmt.Errorf("failed to write repaired deployment history to any reachable node")
+		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired deployment history to any reachable node")
 	}
 	if hasDesired && desiredWritten == 0 {
-		return historyWritten, desiredWritten, actualWritten, fmt.Errorf("failed to write repaired desired runtime state to any reachable node")
+		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired desired runtime state to any reachable node")
 	}
 	if hasActual && actualWritten == 0 {
-		return historyWritten, desiredWritten, actualWritten, fmt.Errorf("failed to write repaired actual runtime state to any reachable node")
+		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired actual runtime state to any reachable node")
 	}
-	return historyWritten, desiredWritten, actualWritten, nil
+	if len(nodeActual) > 0 && nodeActualWritten == 0 {
+		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired node actual runtime state to any reachable node")
+	}
+	return historyWritten, desiredWritten, actualWritten, nodeActualWritten, nil
 }
 
-func printStateRepairWriteSummary(nodeCount int, hasHistory bool, historyWritten int, hasDesired bool, desiredWritten int, hasActual bool, actualWritten int) {
+func printStateRepairWriteSummary(nodeCount int, hasHistory bool, historyWritten int, hasDesired bool, desiredWritten int, hasActual bool, actualWritten int, hasNodeActual bool, nodeActualWritten int) {
 	if hasHistory {
 		fmt.Printf("Repaired deployment history on %d/%d reachable node(s)\n", historyWritten, nodeCount)
 	}
@@ -829,6 +925,9 @@ func printStateRepairWriteSummary(nodeCount int, hasHistory bool, historyWritten
 	}
 	if hasActual {
 		fmt.Printf("Repaired actual runtime state on %d/%d reachable node(s)\n", actualWritten, nodeCount)
+	}
+	if hasNodeActual {
+		fmt.Printf("Repaired node actual runtime state with %d document write(s)\n", nodeActualWritten)
 	}
 }
 
@@ -909,6 +1008,131 @@ func bestActualSnapshot(candidates []stateActualCandidate) (stateActualCandidate
 	return best, ok
 }
 
+func bestNodeActualSnapshots(candidates []stateNodeActualCandidate) map[string]stateNodeActualCandidate {
+	best := make(map[string]stateNodeActualCandidate)
+	for _, candidate := range candidates {
+		if !nodeActualSnapshotRepairable(candidate.actual, candidate.node) {
+			continue
+		}
+		current, ok := best[candidate.node]
+		if !ok || actualSnapshotBetter(candidate.actual, current.actual) {
+			best[candidate.node] = candidate
+		}
+	}
+	return best
+}
+
+func actualSnapshotWithNodeSnapshots(snapshot *takodstate.ActualSnapshot, nodeActual map[string]stateNodeActualCandidate) *takodstate.ActualSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	copy, err := cloneActualSnapshot(snapshot)
+	if err != nil {
+		return snapshot
+	}
+	copy.Nodes = actualNodeSnapshotMap(nodeActual)
+	if len(copy.TargetNodes) == 0 {
+		copy.TargetNodes = sortedStateNodeActualNames(nodeActual)
+	}
+	return copy
+}
+
+func aggregateActualSnapshotFromNodeSnapshots(project string, environment string, nodeActual map[string]stateNodeActualCandidate) *takodstate.ActualSnapshot {
+	nodes := sortedStateNodeActualNames(nodeActual)
+	snapshot := &takodstate.ActualSnapshot{
+		SchemaVersion: takodstate.SchemaVersion,
+		Project:       project,
+		Environment:   environment,
+		TargetNodes:   nodes,
+		Services:      make(map[string]takodstate.ActualService),
+		Nodes:         actualNodeSnapshotMap(nodeActual),
+	}
+
+	var newest time.Time
+	for _, nodeName := range nodes {
+		candidate := nodeActual[nodeName]
+		if candidate.actual == nil {
+			continue
+		}
+		if candidate.actual.CapturedAt.After(newest) {
+			newest = candidate.actual.CapturedAt
+		}
+		for serviceName, service := range candidate.actual.Services {
+			if existing, ok := snapshot.Services[serviceName]; ok {
+				existing.Replicas += service.Replicas
+				existing.Containers = append(existing.Containers, service.Containers...)
+				if existing.Image == "" {
+					existing.Image = service.Image
+				}
+				snapshot.Services[serviceName] = existing
+				continue
+			}
+			snapshot.Services[serviceName] = takodstate.ActualService{
+				Name:       service.Name,
+				Image:      service.Image,
+				Replicas:   service.Replicas,
+				Containers: append([]string(nil), service.Containers...),
+			}
+		}
+	}
+	if newest.IsZero() {
+		newest = time.Now().UTC()
+	}
+	snapshot.CapturedAt = newest
+	return snapshot
+}
+
+func actualNodeSnapshotMap(nodeActual map[string]stateNodeActualCandidate) map[string]takodstate.ActualNodeSnapshot {
+	if len(nodeActual) == 0 {
+		return nil
+	}
+	out := make(map[string]takodstate.ActualNodeSnapshot, len(nodeActual))
+	for _, nodeName := range sortedStateNodeActualNames(nodeActual) {
+		candidate := nodeActual[nodeName]
+		if candidate.actual == nil {
+			continue
+		}
+		out[nodeName] = takodstate.ActualNodeSnapshot{
+			Node:       nodeName,
+			Services:   cloneActualServices(candidate.actual.Services),
+			CapturedAt: candidate.actual.CapturedAt,
+		}
+	}
+	return out
+}
+
+func actualSnapshotFromEmbeddedNode(project string, environment string, snapshot takodstate.ActualNodeSnapshot) *takodstate.ActualSnapshot {
+	return &takodstate.ActualSnapshot{
+		SchemaVersion: takodstate.SchemaVersion,
+		Project:       project,
+		Environment:   environment,
+		Node:          snapshot.Node,
+		Services:      cloneActualServices(snapshot.Services),
+		CapturedAt:    snapshot.CapturedAt,
+	}
+}
+
+func cloneActualServices(services map[string]takodstate.ActualService) map[string]takodstate.ActualService {
+	if len(services) == 0 {
+		return nil
+	}
+	out := make(map[string]takodstate.ActualService, len(services))
+	for name, service := range services {
+		service.Containers = append([]string(nil), service.Containers...)
+		out[name] = service
+	}
+	return out
+}
+
+func sortedStateNodeActualNames(nodeActual map[string]stateNodeActualCandidate) []string {
+	nodes := make([]string, 0, len(nodeActual))
+	for node := range nodeActual {
+		nodes = append(nodes, node)
+	}
+	sort.Strings(nodes)
+	return nodes
+}
+
 func deploymentHistoryBetter(candidate *remotestate.DeploymentHistory, current *remotestate.DeploymentHistory) bool {
 	candidateFreshness := deploymentHistoryFreshness(candidate)
 	currentFreshness := deploymentHistoryFreshness(current)
@@ -949,6 +1173,13 @@ func desiredRevisionRepairable(revision *takodstate.DesiredRevision) bool {
 
 func actualSnapshotRepairable(snapshot *takodstate.ActualSnapshot) bool {
 	return snapshot != nil && !snapshot.CapturedAt.IsZero()
+}
+
+func nodeActualSnapshotRepairable(snapshot *takodstate.ActualSnapshot, node string) bool {
+	if !actualSnapshotRepairable(snapshot) {
+		return false
+	}
+	return snapshot.Node == "" || snapshot.Node == node
 }
 
 func deploymentHistoryCount(history *remotestate.DeploymentHistory) int {

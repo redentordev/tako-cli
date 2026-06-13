@@ -172,10 +172,11 @@ func runScale(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("scale succeeded but failed to reconcile proxy: %w", err)
 	}
 
-	postScaleActualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, nil)
+	postScaleNodeActualState, err := reconcile.GatherActualStateByServer(sshPool, cfg, envName, serverNames)
 	if err != nil {
 		return fmt.Errorf("scale succeeded but failed to gather post-scale actual state: %w", err)
 	}
+	postScaleActualState := reconcile.AggregateActualStateByServer(postScaleNodeActualState)
 	if err := persistTakodRuntimeState(
 		sshPool,
 		cfg,
@@ -185,6 +186,7 @@ func runScale(cmd *cobra.Command, args []string) error {
 		desiredServices,
 		imageRefs,
 		postScaleActualState,
+		postScaleNodeActualState,
 		takodstate.GitInfo{},
 		"scale.succeeded",
 		fmt.Sprintf("scaled %d service(s)", len(scaleTargets)),
