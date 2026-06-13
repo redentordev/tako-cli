@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -95,24 +96,8 @@ func (d *Deployer) SetupTakodRuntime() error {
 		return err
 	}
 
-	for i, serverName := range servers {
-		server, ok := d.config.Servers[serverName]
-		if !ok {
-			return fmt.Errorf("server %s not found", serverName)
-		}
-
-		client, err := d.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
-		if err != nil {
-			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
-		}
-
-		if d.verbose {
-			fmt.Printf("  -> %s (%s)\n", serverName, server.Host)
-		}
-
-		if err := d.prepareTakodNode(client, serverName, server, i, peers, nodePublicKeys[serverName]); err != nil {
-			return fmt.Errorf("failed to prepare takod node %s: %w", serverName, err)
-		}
+	if err := d.prepareTakodNodes(servers, peers, nodePublicKeys); err != nil {
+		return err
 	}
 
 	if d.verbose {
@@ -233,6 +218,67 @@ func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, serve
 		return fmt.Errorf("failed to reconcile WireGuard mesh: %w", err)
 	}
 
+	return nil
+}
+
+type prepareTakodNodeFunc func(index int, serverName string, server config.ServerConfig) error
+
+type prepareTakodNodeResult struct {
+	serverName string
+	err        error
+}
+
+func (d *Deployer) prepareTakodNodes(servers []string, peers []takodMeshPeer, publicKeys map[string]string) error {
+	return d.prepareTakodNodesWith(servers, func(index int, serverName string, server config.ServerConfig) error {
+		client, err := d.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err != nil {
+			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
+		}
+
+		if d.verbose {
+			fmt.Printf("  -> %s (%s)\n", serverName, server.Host)
+		}
+
+		if err := d.prepareTakodNode(client, serverName, server, index, peers, publicKeys[serverName]); err != nil {
+			return fmt.Errorf("failed to prepare takod node %s: %w", serverName, err)
+		}
+		return nil
+	})
+}
+
+func (d *Deployer) prepareTakodNodesWith(servers []string, prepare prepareTakodNodeFunc) error {
+	resultCh := make(chan prepareTakodNodeResult, len(servers))
+	var wg sync.WaitGroup
+
+	for index, serverName := range servers {
+		server, ok := d.config.Servers[serverName]
+		if !ok {
+			return fmt.Errorf("server %s not found", serverName)
+		}
+
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			resultCh <- prepareTakodNodeResult{
+				serverName: serverName,
+				err:        prepare(index, serverName, server),
+			}
+		}(index, serverName, server)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	var errors []string
+	for result := range resultCh {
+		if result.err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+		}
+	}
+	if len(errors) > 0 {
+		sort.Strings(errors)
+		return fmt.Errorf("failed to prepare takod runtime: %s", strings.Join(errors, "; "))
+	}
 	return nil
 }
 
@@ -489,25 +535,75 @@ func (d *Deployer) validateTakodTargets(targets []string, environmentServers []s
 }
 
 func (d *Deployer) ensureTakodMeshKeys(servers []string) (map[string]string, error) {
-	publicKeys := make(map[string]string, len(servers))
-	for _, serverName := range servers {
+	return d.ensureTakodMeshKeysWith(servers, func(serverName string) (string, error) {
 		client, err := d.getEnvironmentClient(serverName)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 		output, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/mesh/key", nil)
 		if err != nil {
-			return nil, fmt.Errorf("failed to ensure WireGuard key on %s: %w", serverName, err)
+			return "", fmt.Errorf("failed to ensure WireGuard key on %s: %w", serverName, err)
 		}
 		var response takod.MeshKeyResponse
 		if err := json.Unmarshal([]byte(output), &response); err != nil {
-			return nil, fmt.Errorf("failed to parse WireGuard key response from %s: %w", serverName, err)
+			return "", fmt.Errorf("failed to parse WireGuard key response from %s: %w", serverName, err)
 		}
 		publicKey := strings.TrimSpace(response.PublicKey)
 		if publicKey == "" {
-			return nil, fmt.Errorf("WireGuard public key from %s is empty", serverName)
+			return "", fmt.Errorf("WireGuard public key from %s is empty", serverName)
 		}
-		publicKeys[serverName] = publicKey
+		return publicKey, nil
+	})
+}
+
+type ensureTakodMeshKeyFunc func(serverName string) (string, error)
+
+type ensureTakodMeshKeyResult struct {
+	serverName string
+	publicKey  string
+	err        error
+}
+
+func (d *Deployer) ensureTakodMeshKeysWith(servers []string, ensure ensureTakodMeshKeyFunc) (map[string]string, error) {
+	publicKeys := make(map[string]string, len(servers))
+	resultCh := make(chan ensureTakodMeshKeyResult, len(servers))
+	var wg sync.WaitGroup
+
+	for _, serverName := range servers {
+		if _, ok := d.config.Servers[serverName]; !ok {
+			return nil, fmt.Errorf("server %s not found", serverName)
+		}
+
+		wg.Add(1)
+		go func(serverName string) {
+			defer wg.Done()
+			publicKey, err := ensure(serverName)
+			resultCh <- ensureTakodMeshKeyResult{
+				serverName: serverName,
+				publicKey:  strings.TrimSpace(publicKey),
+				err:        err,
+			}
+		}(serverName)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	var errors []string
+	for result := range resultCh {
+		if result.err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+			continue
+		}
+		if result.publicKey == "" {
+			errors = append(errors, fmt.Sprintf("%s: WireGuard public key is empty", result.serverName))
+			continue
+		}
+		publicKeys[result.serverName] = result.publicKey
+	}
+	if len(errors) > 0 {
+		sort.Strings(errors)
+		return nil, fmt.Errorf("failed to ensure WireGuard keys: %s", strings.Join(errors, "; "))
 	}
 	return publicKeys, nil
 }
