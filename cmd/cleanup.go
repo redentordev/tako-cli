@@ -18,14 +18,14 @@ var (
 
 var cleanupCmd = &cobra.Command{
 	Use:   "cleanup",
-	Short: "Clean up server resources (Docker images, containers, logs)",
+	Short: "Clean up node runtime resources and logs",
 	Long: `Clean up server resources to reclaim disk space.
 
 This command helps maintain your servers by:
-  - Removing old Docker images (keeps latest N)
-  - Removing stopped containers
+  - Removing old service images (keeps latest N)
+  - Removing stopped service replicas
   - Cleaning dangling images
-  - Pruning Docker build cache
+  - Pruning build cache
   - Removing unused volumes
   - Securing log file permissions
 

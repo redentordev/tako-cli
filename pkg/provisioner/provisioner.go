@@ -54,7 +54,7 @@ func (p *Provisioner) UpdateSystem() error {
 	return nil
 }
 
-// InstallDocker installs Docker and Docker Compose
+// InstallDocker installs and enables the container runtime used by takod.
 func (p *Provisioner) InstallDocker() error {
 	// Check if Docker is already installed
 	if output, err := p.client.Execute("which docker"); err == nil && output != "" {

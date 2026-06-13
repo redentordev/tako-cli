@@ -20,17 +20,17 @@ var (
 var removeCmd = &cobra.Command{
 	Use:   "remove",
 	Short: "Remove all deployed services from a server",
-	Long: `Remove all deployed services and containers from a server.
+	Long: `Remove all deployed services from a server.
 
 This command:
-  - Stops and removes all service containers
-  - Removes Docker images for this project
+  - Stops and removes all service replicas
+  - Removes service images for this project
   - Removes proxy configurations
-  - Preserves server setup (Docker and tako-proxy remain installed)
+  - Preserves server setup (takod and tako-proxy remain installed)
   - Does NOT decommission the server
 
 The server can be reused for new deployments after removal.
-To fully decommission a server, use 'tako destroy --decommission'.
+To decommission an environment, use 'tako destroy'.
 
 Examples:
   tako remove --server prod
@@ -88,14 +88,14 @@ func runRemove(cmd *cobra.Command, args []string) error {
 	fmt.Printf("   Environment: %s\n\n", envName)
 
 	fmt.Printf("This will:\n")
-	fmt.Printf("   • Stop and remove all containers for this project\n")
-	fmt.Printf("   • Remove Docker images\n")
+	fmt.Printf("   • Stop and remove all service replicas for this project\n")
+	fmt.Printf("   • Remove service images\n")
 	fmt.Printf("   • Remove proxy configurations\n")
 	fmt.Printf("   • Remove deployment state\n\n")
 
 	fmt.Printf("This will NOT:\n")
 	fmt.Printf("   • Decommission the server\n")
-	fmt.Printf("   • Remove Docker or tako-proxy\n")
+	fmt.Printf("   • Remove takod or tako-proxy\n")
 	fmt.Printf("   • Remove persistent volume data\n\n")
 
 	// Confirmation unless --force
