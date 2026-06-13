@@ -172,29 +172,29 @@ func generateJSONConfig(projectName string) string {
   "project": {
     "name": "%s",
     "version": "1.0.0"
-	  },
-	  "runtime": {
-	    "mode": "takod",
-	    "agent": {
-	      "enabled": true,
-	      "socket": "/run/tako/takod.sock",
-	      "dataDir": "/var/lib/tako"
-	    }
-	  },
-	  "state": {
-	    "backend": "replicated",
-	    "deployConsistency": "lease",
-	    "onUnreachableNode": "block",
-	    "remoteCacheEnabled": true
-	  },
-	  "mesh": {
-	    "enabled": true,
-	    "networkCIDR": "10.210.0.0/16",
-	    "interface": "tako",
-	    "listenPort": 51820,
-	    "subnetBits": 24,
-	    "natTraversal": true
-	  },
+  },
+  "runtime": {
+    "mode": "takod",
+    "agent": {
+      "enabled": true,
+      "socket": "/run/tako/takod.sock",
+      "dataDir": "/var/lib/tako"
+    }
+  },
+  "state": {
+    "backend": "replicated",
+    "deployConsistency": "lease",
+    "onUnreachableNode": "block",
+    "remoteCacheEnabled": true
+  },
+  "mesh": {
+    "enabled": true,
+    "networkCIDR": "10.210.0.0/16",
+    "interface": "tako",
+    "listenPort": 51820,
+    "subnetBits": 24,
+    "natTraversal": true
+  },
   "servers": {
     "production": {
       "host": "${SERVER_HOST}",
