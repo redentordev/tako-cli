@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
+	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -85,32 +87,8 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("🧹 Cleaning up %d server(s)...\n", len(serversToClean))
 	fmt.Printf("   Keeping %d latest images per service\n\n", keepImages)
 
-	totalErrors := 0
-
-	// Clean each server
-	for serverName, serverCfg := range serversToClean {
-		fmt.Printf("=== Cleaning server: %s (%s) ===\n", serverName, serverCfg.Host)
-
-		// Connect to server (supports both key and password auth)
-		client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-			Host:     serverCfg.Host,
-			Port:     serverCfg.Port,
-			User:     serverCfg.User,
-			SSHKey:   serverCfg.SSHKey,
-			Password: serverCfg.Password,
-		})
-		if err != nil {
-			fmt.Printf("❌ Failed to connect to %s: %v\n\n", serverName, err)
-			totalErrors++
-			continue
-		}
-		if err := client.Connect(); err != nil {
-			fmt.Printf("❌ Failed to connect to %s: %v\n\n", serverName, err)
-			totalErrors++
-			continue
-		}
-
-		response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
+	results := collectCleanupNodes(serversToClean, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
+		return cleanupSingleNode(cfg, serverCfg, takod.CleanupRequest{
 			Project:                cfg.Project.Name,
 			KeepImages:             keepImages,
 			CleanOldImages:         true,
@@ -121,31 +99,34 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 			SecureLogPermissions:   cleanupSecure,
 			PruneDocker:            cleanupFull,
 		})
-		if err != nil {
-			fmt.Printf("❌ Cleanup failed: %v\n\n", err)
+	})
+
+	totalErrors := 0
+	for _, result := range results {
+		fmt.Printf("=== Cleaning server: %s (%s) ===\n", result.serverName, result.host)
+		if result.err != nil {
+			fmt.Printf("❌ Cleanup failed: %v\n\n", result.err)
 			totalErrors++
-			client.Close()
 			continue
 		}
 
-		if len(response.Warnings) > 0 {
-			totalErrors += len(response.Warnings)
-			printCleanupWarnings(response)
+		if len(result.response.Warnings) > 0 {
+			totalErrors += len(result.response.Warnings)
+			printCleanupWarnings(result.response)
 		}
 		if verbose {
-			if response.InitialDiskUsage != "" {
-				fmt.Printf("  Disk before: %s\n", response.InitialDiskUsage)
+			if result.response.InitialDiskUsage != "" {
+				fmt.Printf("  Disk before: %s\n", result.response.InitialDiskUsage)
 			}
-			if response.FinalDiskUsage != "" {
-				fmt.Printf("  Disk after:  %s\n", response.FinalDiskUsage)
+			if result.response.FinalDiskUsage != "" {
+				fmt.Printf("  Disk after:  %s\n", result.response.FinalDiskUsage)
 			}
-			if response.ImagesRemoved > 0 || response.ContainersRemoved > 0 {
-				fmt.Printf("  Removed %d image(s), %d stopped container(s)\n", response.ImagesRemoved, response.ContainersRemoved)
+			if result.response.ImagesRemoved > 0 || result.response.ContainersRemoved > 0 {
+				fmt.Printf("  Removed %d image(s), %d stopped container(s)\n", result.response.ImagesRemoved, result.response.ContainersRemoved)
 			}
 		}
 
-		fmt.Printf("✓ Server %s cleaned successfully\n\n", serverName)
-		client.Close()
+		fmt.Printf("✓ Server %s cleaned successfully\n\n", result.serverName)
 	}
 
 	// Summary
@@ -160,4 +141,72 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	fmt.Println("   Consider adding it to your deployment workflow or cron jobs")
 
 	return nil
+}
+
+type cleanupNodeAction func(serverName string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error)
+
+type cleanupNodeResult struct {
+	index      int
+	serverName string
+	host       string
+	response   *takod.CleanupResponse
+	err        error
+}
+
+func collectCleanupNodes(servers map[string]config.ServerConfig, action cleanupNodeAction) []cleanupNodeResult {
+	names := make([]string, 0, len(servers))
+	for name := range servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	resultCh := make(chan cleanupNodeResult, len(names))
+	var wg sync.WaitGroup
+	for index, serverName := range names {
+		serverCfg := servers[serverName]
+		wg.Add(1)
+		go func(index int, serverName string, serverCfg config.ServerConfig) {
+			defer wg.Done()
+			response, err := action(serverName, serverCfg)
+			resultCh <- cleanupNodeResult{
+				index:      index,
+				serverName: serverName,
+				host:       serverCfg.Host,
+				response:   response,
+				err:        err,
+			}
+		}(index, serverName, serverCfg)
+	}
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]cleanupNodeResult, len(names))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+	return results
+}
+
+func cleanupSingleNode(cfg *config.Config, serverCfg config.ServerConfig, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
+	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
+		Host:     serverCfg.Host,
+		Port:     serverCfg.Port,
+		User:     serverCfg.User,
+		SSHKey:   serverCfg.SSHKey,
+		Password: serverCfg.Password,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SSH client: %w", err)
+	}
+	defer client.Close()
+
+	if err := client.Connect(); err != nil {
+		return nil, fmt.Errorf("failed to connect: %w", err)
+	}
+
+	response, err := cleanupViaTakod(client, cfg, request)
+	if err != nil {
+		return nil, err
+	}
+	return response, nil
 }
