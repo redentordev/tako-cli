@@ -186,6 +186,15 @@ func StatsEndpoint(project string, environment string, service string, all bool)
 	return "/v1/stats?" + query.Encode()
 }
 
+func MetricsEndpoint(collect bool) string {
+	if !collect {
+		return "/v1/metrics"
+	}
+	query := url.Values{}
+	query.Set("collect", "true")
+	return "/v1/metrics?" + query.Encode()
+}
+
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"

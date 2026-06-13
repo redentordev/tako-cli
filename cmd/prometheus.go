@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -55,22 +54,13 @@ func runPrometheus(cmd *cobra.Command, args []string) error {
 			continue // Skip unavailable servers
 		}
 
-		// Collect new metrics
-		_, _ = client.Execute("/usr/local/bin/tako-monitor.sh once")
-
-		// Fetch system metrics
-		output, err := client.Execute("cat /var/lib/tako/metrics/current.json 2>/dev/null")
+		metrics, err := readMetricsViaTakod(client, cfg, true)
 		if err != nil {
 			continue
 		}
 
-		var metrics MetricsData
-		if err := json.Unmarshal([]byte(output), &metrics); err != nil {
-			continue
-		}
-
 		// Export system metrics
-		exportSystemMetrics(serverName, server.Host, &metrics)
+		exportSystemMetrics(serverName, server.Host, metrics)
 
 		statsResponse, err := readStatsViaTakodWithOptions(client, cfg, envName, "", false)
 		if err == nil && len(statsResponse.Stats) > 0 {
