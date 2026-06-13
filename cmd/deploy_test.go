@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -81,6 +82,18 @@ func TestIsAffirmative(t *testing.T) {
 	for _, tt := range tests {
 		if got := isAffirmative(tt.response); got != tt.want {
 			t.Fatalf("isAffirmative(%q) = %v, want %v", tt.response, got, tt.want)
+		}
+	}
+}
+
+func TestDeployActualStateErrorRefusesUnknownRunningServices(t *testing.T) {
+	err := deployActualStateError(errors.New("node-a: takod unavailable"))
+	if err == nil {
+		t.Fatal("deployActualStateError returned nil")
+	}
+	for _, want := range []string{"refusing to plan", "unknown running services", "takod unavailable"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
 		}
 	}
 }

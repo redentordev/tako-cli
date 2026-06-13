@@ -299,10 +299,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Gather actual state from running containers across the selected mesh nodes.
 	actualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, localStateMgr)
 	if err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to gather actual state: %v\n", err)
-		}
-		actualState = make(map[string]*reconcile.ActualService) // Continue with empty state
+		return deployActualStateError(err)
 	}
 
 	if verbose && len(actualState) > 0 {
@@ -765,4 +762,8 @@ func isAffirmative(response string) bool {
 	default:
 		return false
 	}
+}
+
+func deployActualStateError(err error) error {
+	return fmt.Errorf("failed to gather actual state from takod; refusing to plan against unknown running services: %w", err)
 }
