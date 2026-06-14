@@ -178,7 +178,7 @@ pinned:
   instances stay on named nodes
 
 spread:
-  choose nodes by labels and capacity
+  spread replicas across selected nodes, optionally filtered by node label constraints
 ```
 
 Stateful services default to pinned unless the config explicitly defines

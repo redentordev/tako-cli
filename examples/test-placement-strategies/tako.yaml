@@ -16,10 +16,14 @@ servers:
     host: ${SERVER1_HOST}
     user: root
     sshKey: ${SSH_KEY}
+    labels:
+      role: web
   node2:
     host: ${SERVER2_HOST}
     user: root
     sshKey: ${SSH_KEY}
+    labels:
+      role: web
 
 environments:
   production:
@@ -41,6 +45,8 @@ environments:
         port: 80
         placement:
           strategy: spread
+          constraints:
+            - node.labels.role==web
         proxy:
           domain: spread.${SERVER1_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}

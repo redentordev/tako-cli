@@ -537,38 +537,25 @@ func (d *Deployer) planTakodAssignments(service *config.ServiceConfig) ([]takodA
 		return nil, fmt.Errorf("environment %s has no target servers", d.environment)
 	}
 
-	targets := append([]string(nil), servers...)
 	replicas := service.Replicas
 	if replicas < 0 {
 		return nil, fmt.Errorf("replicas cannot be negative")
 	}
-	if replicas == 0 {
-		return []takodAssignment{}, nil
-	}
+	scaleToZero := replicas == 0
 	if replicas <= 0 {
 		replicas = 1
 	}
 
-	if service.Placement != nil {
-		switch service.Placement.Strategy {
-		case "global":
-			replicas = len(targets)
-		case "pinned":
-			if len(service.Placement.Servers) == 0 {
-				return nil, fmt.Errorf("pinned placement requires servers")
-			}
-			targets = append([]string(nil), service.Placement.Servers...)
-			if replicas <= 0 {
-				replicas = 1
-			}
-		case "spread", "any", "":
-		default:
-			return nil, fmt.Errorf("unknown placement strategy: %s", service.Placement.Strategy)
-		}
-	}
-
-	if err := d.validateTakodTargets(targets, servers); err != nil {
+	targets, err := config.ResolvePlacementTargets(service.Placement, d.config.Servers, servers, d.environment)
+	if err != nil {
 		return nil, err
+	}
+	if service.Placement != nil && strings.TrimSpace(service.Placement.Strategy) == "global" {
+		replicas = len(targets)
+		scaleToZero = false
+	}
+	if scaleToZero {
+		return []takodAssignment{}, nil
 	}
 
 	assignments := make([]takodAssignment, 0, replicas)
@@ -577,22 +564,6 @@ func (d *Deployer) planTakodAssignments(service *config.ServiceConfig) ([]takodA
 		assignments = append(assignments, takodAssignment{ServerName: serverName, Slot: slot})
 	}
 	return assignments, nil
-}
-
-func (d *Deployer) validateTakodTargets(targets []string, environmentServers []string) error {
-	allowed := make(map[string]bool, len(environmentServers))
-	for _, serverName := range environmentServers {
-		allowed[serverName] = true
-	}
-	for _, target := range targets {
-		if !allowed[target] {
-			return fmt.Errorf("placement target %s is outside the selected takod node set for environment %s", target, d.environment)
-		}
-		if _, ok := d.config.Servers[target]; !ok {
-			return fmt.Errorf("placement target %s is not defined in servers", target)
-		}
-	}
-	return nil
 }
 
 func (d *Deployer) ensureTakodMeshKeys(servers []string) (map[string]string, error) {
