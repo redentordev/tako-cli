@@ -172,6 +172,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Initialize Git client
+	gitClient := git.NewClient(".")
+
+	commitInfo, err := resolveDeployCommitInfo(gitClient)
+	if err != nil {
+		return err
+	}
+
 	// Acquire state lock to prevent concurrent deployments
 	stateLock := localstate.NewStateLock(".tako")
 	lockInfo, err := stateLock.Acquire("deploy")
@@ -182,14 +190,6 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	if verbose {
 		fmt.Printf("→ Acquired deployment lock (ID: %s)\n", lockInfo.ID)
-	}
-
-	// Initialize Git client
-	gitClient := git.NewClient(".")
-
-	commitInfo, err := resolveDeployCommitInfo(gitClient)
-	if err != nil {
-		return err
 	}
 
 	// Display commit info

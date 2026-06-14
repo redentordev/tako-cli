@@ -9,8 +9,12 @@ import (
 )
 
 var (
-	gitCommandContext = exec.CommandContext
-	gitCommandTimeout = 15 * time.Second
+	gitCommandContext  = exec.CommandContext
+	gitCommandTimeout  = 15 * time.Second
+	takoStatePathspecs = []string{
+		":(exclude).tako",
+		":(exclude).tako/**",
+	}
 )
 
 // Client handles Git operations
@@ -34,7 +38,7 @@ func (c *Client) IsRepository() bool {
 
 // HasUncommittedChanges checks if there are uncommitted changes
 func (c *Client) HasUncommittedChanges() (bool, error) {
-	output, err := c.gitOutput("status", "--porcelain")
+	output, err := c.gitStatusOutput("--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("failed to check git status: %w", err)
 	}
@@ -97,11 +101,17 @@ func (c *Client) GetUserEmail() (string, error) {
 
 // GetStatus returns the git status output
 func (c *Client) GetStatus() (string, error) {
-	output, err := c.gitOutput("status", "--short")
+	output, err := c.gitStatusOutput("--short")
 	if err != nil {
 		return "", fmt.Errorf("failed to get git status: %w", err)
 	}
 	return string(output), nil
+}
+
+func (c *Client) gitStatusOutput(format string) ([]byte, error) {
+	args := []string{"status", format, "--", "."}
+	args = append(args, takoStatePathspecs...)
+	return c.gitOutput(args...)
 }
 
 func (c *Client) runGit(args ...string) error {
