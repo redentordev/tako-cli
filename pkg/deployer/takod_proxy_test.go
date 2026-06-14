@@ -58,6 +58,26 @@ func TestMeshUpstreamPortRejectsSlotRangeCollision(t *testing.T) {
 	}
 }
 
+func TestProxyHostRuleNormalizesAndPreservesWildcard(t *testing.T) {
+	rule, err := proxyHostRule(&config.ProxyConfig{Domain: " *.example.com "})
+	if err != nil {
+		t.Fatalf("proxyHostRule returned error: %v", err)
+	}
+	if rule != "Host(`*.example.com`)" {
+		t.Fatalf("rule = %q, want wildcard host rule", rule)
+	}
+}
+
+func TestProxyHostRuleRejectsRuleInjection(t *testing.T) {
+	_, err := proxyHostRule(&config.ProxyConfig{Domain: "example.com`) || PathPrefix(`/"})
+	if err == nil {
+		t.Fatal("proxyHostRule should reject rule injection characters")
+	}
+	if !strings.Contains(err.Error(), "invalid domain") {
+		t.Fatalf("error = %q, want invalid domain", err)
+	}
+}
+
 func testProxyDeployer() *Deployer {
 	cfg := &config.Config{
 		Project: config.ProjectConfig{Name: "demo", Version: "1.0.0"},

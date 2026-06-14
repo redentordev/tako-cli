@@ -217,6 +217,50 @@ func TestValidateConfigRejectsLoadBalancerHealthCheckPathWithoutSlash(t *testing
 	}
 }
 
+func TestNormalizeProxyDomainTrimsAndPreservesWildcard(t *testing.T) {
+	got, err := NormalizeProxyDomain("  *.example.com  ")
+	if err != nil {
+		t.Fatalf("NormalizeProxyDomain returned error: %v", err)
+	}
+	if got != "*.example.com" {
+		t.Fatalf("domain = %q, want wildcard preserved", got)
+	}
+}
+
+func TestNormalizeProxyDomainRejectsRuleInjection(t *testing.T) {
+	_, err := NormalizeProxyDomain("example.com`) || PathPrefix(`/")
+	if err == nil {
+		t.Fatal("NormalizeProxyDomain should reject rule injection characters")
+	}
+	if !strings.Contains(err.Error(), "invalid domain") {
+		t.Fatalf("error = %q, want invalid domain", err)
+	}
+}
+
+func TestValidateConfigTrimsProxyDomains(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Image: "nginx:alpine",
+		Proxy: &ProxyConfig{
+			Domain:       " example.com ",
+			RedirectFrom: []string{" www.example.com "},
+		},
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+	got := cfg.Environments["production"].Services["web"].Proxy
+	if got.Domain != "example.com" {
+		t.Fatalf("domain = %q, want trimmed", got.Domain)
+	}
+	if got.RedirectFrom[0] != "www.example.com" {
+		t.Fatalf("redirect domain = %q, want trimmed", got.RedirectFrom[0])
+	}
+}
+
 func TestExpandEnvWithTrimExpandsBracedVariables(t *testing.T) {
 	t.Setenv("SERVER_HOST", "  203.0.113.10  ")
 

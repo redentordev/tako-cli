@@ -40,6 +40,22 @@ func TestRenderMaintenanceProxyConfigUsesFileProviderRouters(t *testing.T) {
 	}
 }
 
+func TestRenderMaintenanceProxyConfigRejectsUnsafeDomain(t *testing.T) {
+	_, err := renderMaintenanceProxyConfig(
+		"demo",
+		"production",
+		"web",
+		&config.ProxyConfig{Domain: "example.com`) || PathPrefix(`/"},
+		"demo_web_maintenance",
+	)
+	if err == nil {
+		t.Fatal("renderMaintenanceProxyConfig should reject unsafe domains")
+	}
+	if !strings.Contains(err.Error(), "invalid domain") {
+		t.Fatalf("error = %q, want invalid domain", err)
+	}
+}
+
 func TestCleanupProxyFilesIncludesRuntimeAndMaintenanceOverrides(t *testing.T) {
 	files := cleanupProxyFiles("demo-app", "production_1", map[string]config.ServiceConfig{
 		"api": {

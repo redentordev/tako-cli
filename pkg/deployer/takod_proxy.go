@@ -143,7 +143,10 @@ func (d *Deployer) renderTakodProxyDynamicConfig(services map[string]config.Serv
 		})
 
 		routerName := sanitizeRouterName(d.config.Project.Name + "-" + d.environment + "-" + serviceName)
-		rule := proxyHostRule(service.Proxy)
+		rule, err := proxyHostRule(service.Proxy)
+		if err != nil {
+			return nil, false, fmt.Errorf("service %s has invalid proxy domains: %w", serviceName, err)
+		}
 		if rule == "" {
 			return nil, false, fmt.Errorf("service %s has proxy config but no domains", serviceName)
 		}
@@ -285,9 +288,9 @@ func (d *Deployer) meshUpstreamPort(serviceName string, slot int) (int, error) {
 	return port, nil
 }
 
-func proxyHostRule(proxy *config.ProxyConfig) string {
+func proxyHostRule(proxy *config.ProxyConfig) (string, error) {
 	if proxy == nil {
-		return ""
+		return "", nil
 	}
 	domains := proxy.GetAllDomains()
 	if len(domains) == 0 {
@@ -299,9 +302,13 @@ func proxyHostRule(proxy *config.ProxyConfig) string {
 
 	var hostRules []string
 	for _, domain := range domains {
-		hostRules = append(hostRules, "Host(`"+domain+"`)")
+		normalized, err := config.NormalizeProxyDomain(domain)
+		if err != nil {
+			return "", err
+		}
+		hostRules = append(hostRules, "Host(`"+normalized+"`)")
 	}
-	return strings.Join(hostRules, " || ")
+	return strings.Join(hostRules, " || "), nil
 }
 
 func firstProxyEmail(services map[string]config.ServiceConfig) string {

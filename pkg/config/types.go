@@ -243,6 +243,19 @@ func (p *ProxyConfig) HasRedirects() bool {
 	return len(p.RedirectFrom) > 0
 }
 
+// NormalizeProxyDomain trims and validates a domain before it is used in proxy
+// routing configuration.
+func NormalizeProxyDomain(domain string) (string, error) {
+	trimmed := strings.TrimSpace(domain)
+	if trimmed == "" {
+		return "", fmt.Errorf("domain is required")
+	}
+	if !isValidDomain(trimmed) {
+		return "", fmt.Errorf("invalid domain: %s", trimmed)
+	}
+	return trimmed, nil
+}
+
 // TLSConfig defines TLS settings
 type TLSConfig struct {
 	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"` // letsencrypt, zerossl (default: letsencrypt)
