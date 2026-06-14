@@ -1,0 +1,41 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+      TAKO_NONINTERACTIVE: "1"
+      TAKO_HOST_KEY_MODE: strict
+      TAKO_ENV_PASSPHRASE: ${{ secrets.TAKO_ENV_PASSPHRASE }}
+      TAKO_SERVER_HOST: ${{ secrets.TAKO_SERVER_HOST }}
+      TAKO_SSH_KEY: ~/.ssh/tako_deploy
+      LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tako
+        run: |
+          curl -fL https://github.com/redentordev/tako-cli/releases/latest/download/tako-linux-amd64 -o /usr/local/bin/tako
+          chmod +x /usr/local/bin/tako
+
+      - name: Restore SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.TAKO_SSH_PRIVATE_KEY }}" > "$TAKO_SSH_KEY"
+          chmod 600 "$TAKO_SSH_KEY"
+
+      - name: Restore remote state
+        run: |
+          tako env pull --force
+          tako state pull
+          tako state status
+          tako state lease
+
+      - name: Deploy
+        run: tako deploy -e production --yes

@@ -1,0 +1,48 @@
+project:
+  name: pattern-stages
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ${SSH_KEY}
+
+environments:
+  preview:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: preview-stages.${SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        env:
+          APP_STAGE: preview
+          NODE_ENV: production
+        healthCheck:
+          path: /health
+          interval: 30s
+          timeout: 5s
+          retries: 3
+
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: stages.${SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        env:
+          APP_STAGE: production
+          NODE_ENV: production
+        healthCheck:
+          path: /health
+          interval: 30s
+          timeout: 5s
+          retries: 3

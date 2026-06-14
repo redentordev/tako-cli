@@ -17,19 +17,25 @@ func TestDeploymentPatternTemplatesLoadAndCoverCommonUseCases(t *testing.T) {
 	}
 	t.Setenv("SERVER_HOST", "203.0.113.10")
 	t.Setenv("SSH_KEY", sshKey)
+	t.Setenv("TAKO_SERVER_HOST", "203.0.113.10")
+	t.Setenv("TAKO_SSH_KEY", sshKey)
 	t.Setenv("LETSENCRYPT_EMAIL", "admin@example.com")
 	t.Setenv("POSTGRES_PASSWORD", "example-password")
 
 	patterns := map[string]func(t *testing.T, cfg *config.Config){
-		"00-prebuilt-image": assertPrebuiltImagePattern,
-		"01-static-site":    assertStaticSitePattern,
-		"02-node-api":       assertNodeAPIPattern,
-		"03-volume-sqlite":  assertVolumePattern,
-		"04-postgres-app":   assertPostgresAppPattern,
-		"05-workers-redis":  assertWorkersPattern,
-		"06-cron-runner":    assertCronRunnerPattern,
-		"07-python-fastapi": assertFastAPIPattern,
-		"08-go-web":         assertGoWebPattern,
+		"00-prebuilt-image":        assertPrebuiltImagePattern,
+		"01-static-site":           assertStaticSitePattern,
+		"02-node-api":              assertNodeAPIPattern,
+		"03-volume-sqlite":         assertVolumePattern,
+		"04-postgres-app":          assertPostgresAppPattern,
+		"05-workers-redis":         assertWorkersPattern,
+		"06-cron-runner":           assertCronRunnerPattern,
+		"07-python-fastapi":        assertFastAPIPattern,
+		"08-go-web":                assertGoWebPattern,
+		"09-monorepo-web-api":      assertMonorepoPattern,
+		"10-stages-shared-node":    assertStagesPattern,
+		"11-websocket-node":        assertWebSocketPattern,
+		"12-github-actions-deploy": assertGitHubActionsPattern,
 	}
 
 	matches, err := filepath.Glob(filepath.Join("deployment-patterns", "*", "tako.yaml"))
@@ -48,6 +54,7 @@ func TestDeploymentPatternTemplatesLoadAndCoverCommonUseCases(t *testing.T) {
 		}
 		t.Run(patternName, func(t *testing.T) {
 			cfg := loadPatternConfig(t, configPath)
+			assertBuildContextsExist(t, filepath.Dir(configPath), cfg)
 			check(t, cfg)
 		})
 	}
@@ -226,9 +233,91 @@ func assertGoWebPattern(t *testing.T, cfg *config.Config) {
 	}
 }
 
+func assertMonorepoPattern(t *testing.T, cfg *config.Config) {
+	services := productionServices(t, cfg)
+	web := services["web"]
+	api := services["api"]
+	assertPublicService(t, web, 3000)
+	if web.Build != "./web" || !slices.Contains(web.DependsOn, "api") || web.Env["API_URL"] != "http://api:4000" {
+		t.Fatalf("monorepo web should use its own context and depend on internal api: %#v", web)
+	}
+	if api.Build != "./api" || api.Proxy != nil || api.Port != 4000 || api.Replicas != 2 {
+		t.Fatalf("monorepo api should be internal and replicated: %#v", api)
+	}
+}
+
+func assertStagesPattern(t *testing.T, cfg *config.Config) {
+	if cfg.Project.Name != "pattern-stages" {
+		t.Fatalf("stage template project name = %q", cfg.Project.Name)
+	}
+	preview, err := cfg.GetService("preview", "web")
+	if err != nil {
+		t.Fatalf("preview web service missing: %v", err)
+	}
+	production, err := cfg.GetService("production", "web")
+	if err != nil {
+		t.Fatalf("production web service missing: %v", err)
+	}
+	if preview.Proxy == nil || production.Proxy == nil {
+		t.Fatalf("stage services should both be public: preview=%#v production=%#v", preview, production)
+	}
+	if preview.Proxy.Domain == production.Proxy.Domain {
+		t.Fatalf("stage domains must differ: %q", preview.Proxy.Domain)
+	}
+	if preview.Env["APP_STAGE"] != "preview" || production.Env["APP_STAGE"] != "production" {
+		t.Fatalf("stage env values should make runtime identity visible: preview=%#v production=%#v", preview.Env, production.Env)
+	}
+}
+
+func assertWebSocketPattern(t *testing.T, cfg *config.Config) {
+	realtime := productionServices(t, cfg)["realtime"]
+	assertPublicService(t, realtime, 3000)
+	if realtime.Replicas != 2 || realtime.LoadBalancer.Strategy != "ip_hash" {
+		t.Fatalf("websocket template should use replicated ip_hash balancing: %#v", realtime)
+	}
+}
+
+func assertGitHubActionsPattern(t *testing.T, cfg *config.Config) {
+	web := productionServices(t, cfg)["web"]
+	assertPublicService(t, web, 3000)
+	if cfg.Servers["prod"].User != "deploy" || cfg.Servers["prod"].SSHKey == "" {
+		t.Fatalf("ci template should use deploy user and CI-provided ssh key: %#v", cfg.Servers["prod"])
+	}
+	if web.Replicas != 2 || web.HealthCheck.Path != "/health" {
+		t.Fatalf("ci template should be replicated with health check: %#v", web)
+	}
+}
+
 func assertPublicService(t *testing.T, service config.ServiceConfig, port int) {
 	t.Helper()
 	if service.Port != port || service.Proxy == nil || service.Proxy.Domain == "" {
 		t.Fatalf("service should be public on port %d: %#v", port, service)
+	}
+}
+
+func assertBuildContextsExist(t *testing.T, patternDir string, cfg *config.Config) {
+	t.Helper()
+	checked := map[string]bool{}
+	for envName, env := range cfg.Environments {
+		for serviceName, service := range env.Services {
+			if service.Build == "" {
+				continue
+			}
+			buildPath := filepath.Clean(filepath.Join(patternDir, service.Build))
+			if checked[buildPath] {
+				continue
+			}
+			checked[buildPath] = true
+			info, err := os.Stat(buildPath)
+			if err != nil {
+				t.Fatalf("%s/%s build context %s is not readable: %v", envName, serviceName, buildPath, err)
+			}
+			if !info.IsDir() {
+				t.Fatalf("%s/%s build context %s is not a directory", envName, serviceName, buildPath)
+			}
+			if _, err := os.Stat(filepath.Join(buildPath, "Dockerfile")); err != nil {
+				t.Fatalf("%s/%s build context %s has no Dockerfile: %v", envName, serviceName, buildPath, err)
+			}
+		}
 	}
 }
