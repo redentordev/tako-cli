@@ -40,6 +40,17 @@ fi
 
 [ -z "$DOMAIN" ] && DOMAIN="$TARGET"
 
+SSH_KNOWN_HOSTS="${TAKO_SECURITY_TEST_KNOWN_HOSTS:-$(mktemp "${TMPDIR:-/tmp}/tako-security-known-hosts.XXXXXX")}"
+if [ -z "${TAKO_SECURITY_TEST_KNOWN_HOSTS:-}" ]; then
+    trap 'rm -f "$SSH_KNOWN_HOSTS"' EXIT
+fi
+SSH_TEST_OPTS=(
+    -o BatchMode=yes
+    -o ConnectTimeout=5
+    -o StrictHostKeyChecking=accept-new
+    -o UserKnownHostsFile="$SSH_KNOWN_HOSTS"
+)
+
 # Results
 declare -a PASSED=()
 declare -a WARNINGS=()
@@ -166,11 +177,10 @@ test_ssh() {
     
     # Test password authentication
     log_info "Testing password authentication..."
-    local auth_test=$(timeout 10 ssh -v -o BatchMode=yes -o ConnectTimeout=5 \
+    local auth_test=$(timeout 10 ssh -v "${SSH_TEST_OPTS[@]}" \
         -o PreferredAuthentications=password \
         -o PubkeyAuthentication=no \
-        -o StrictHostKeyChecking=no \
-        test@$TARGET 2>&1 || true)
+        "test@$TARGET" 2>&1 || true)
     
     if echo "$auth_test" | grep -qi "password"; then
         if echo "$auth_test" | grep -qi "permission denied"; then
@@ -186,8 +196,7 @@ test_ssh() {
     log_info "Testing for weak ciphers..."
     local weak_ciphers="3des-cbc aes128-cbc aes192-cbc aes256-cbc"
     for cipher in $weak_ciphers; do
-        if timeout 5 ssh -o Ciphers=$cipher -o BatchMode=yes -o ConnectTimeout=3 \
-            -o StrictHostKeyChecking=no test@$TARGET 2>&1 | grep -qi "no matching cipher"; then
+        if timeout 5 ssh "${SSH_TEST_OPTS[@]}" -o ConnectTimeout=3 -o Ciphers="$cipher" "test@$TARGET" 2>&1 | grep -qi "no matching cipher"; then
             log_pass "Weak cipher $cipher is disabled"
         else
             log_warn "Weak cipher $cipher may be enabled"
@@ -197,8 +206,7 @@ test_ssh() {
     # Test weak key exchange
     log_info "Testing for weak key exchange algorithms..."
     local weak_kex="diffie-hellman-group1-sha1"
-    if timeout 5 ssh -o KexAlgorithms=$weak_kex -o BatchMode=yes -o ConnectTimeout=3 \
-        -o StrictHostKeyChecking=no test@$TARGET 2>&1 | grep -qi "no matching"; then
+    if timeout 5 ssh "${SSH_TEST_OPTS[@]}" -o ConnectTimeout=3 -o KexAlgorithms="$weak_kex" "test@$TARGET" 2>&1 | grep -qi "no matching"; then
         log_pass "Weak KEX diffie-hellman-group1-sha1 is disabled"
     else
         log_warn "Weak KEX may be enabled"
