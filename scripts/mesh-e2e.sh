@@ -40,7 +40,13 @@ KEEP_WORKDIR="${TAKO_E2E_KEEP_WORKDIR:-0}"
 OFFLINE_SERVER="${TAKO_E2E_OFFLINE_SERVER:-}"
 OFFLINE_HOST="${TAKO_E2E_OFFLINE_HOST:-}"
 OFFLINE_USER="${TAKO_E2E_OFFLINE_USER:-}"
-OFFLINE_PORT="${TAKO_E2E_OFFLINE_PORT:-22}"
+if [[ -n "${TAKO_E2E_OFFLINE_PORT:-}" ]]; then
+  OFFLINE_PORT="$TAKO_E2E_OFFLINE_PORT"
+  OFFLINE_PORT_SET=1
+else
+  OFFLINE_PORT=22
+  OFFLINE_PORT_SET=0
+fi
 OFFLINE_SSH_KEY="${TAKO_E2E_OFFLINE_SSH_KEY:-}"
 OFFLINE_SSH_OPTS="${TAKO_E2E_OFFLINE_SSH_OPTS:-}"
 OFFLINE_STOP_CMD="${TAKO_E2E_OFFLINE_STOP_CMD:-sudo systemctl stop takod}"
@@ -66,10 +72,10 @@ Options:
   --yes               Allow mutating phases.
   --keep-workdir      Keep temporary fresh-clone workdirs.
   --offline-server    Node name to stop for the offline/rejoin phase.
-  --offline-host      SSH host for the offline node.
-  --offline-user      SSH user for the offline node.
-  --offline-port      SSH port for the offline node. Defaults to 22.
-  --offline-ssh-key   SSH key for the offline node.
+  --offline-host      Override SSH host for the offline node.
+  --offline-user      Override SSH user for the offline node.
+  --offline-port      Override SSH port for the offline node.
+  --offline-ssh-key   Override SSH key for the offline node.
   --help, -h          Show this help.
 
 Phases:
@@ -170,6 +176,7 @@ while [[ $# -gt 0 ]]; do
     --offline-port)
       [[ $# -ge 2 ]] || die "--offline-port requires a value"
       OFFLINE_PORT="$2"
+      OFFLINE_PORT_SET=1
       shift 2
       ;;
     --offline-ssh-key)
@@ -348,6 +355,8 @@ restore_offline_node() {
 }
 
 require_offline_node_control() {
+  infer_offline_node_control
+
   require_tool ssh
   [[ -n "$OFFLINE_SERVER" ]] ||
     die "phase 'offline' requires --offline-server or TAKO_E2E_OFFLINE_SERVER"
@@ -355,6 +364,39 @@ require_offline_node_control() {
     die "phase 'offline' requires --offline-host or TAKO_E2E_OFFLINE_HOST"
   [[ -n "$OFFLINE_USER" ]] ||
     die "phase 'offline' requires --offline-user or TAKO_E2E_OFFLINE_USER"
+}
+
+infer_offline_node_control() {
+  if [[ -z "$OFFLINE_SERVER" ]]; then
+    return
+  fi
+  if [[ -n "$OFFLINE_HOST" && -n "$OFFLINE_USER" && "$OFFLINE_PORT_SET" == "1" && -n "$OFFLINE_SSH_KEY" ]]; then
+    return
+  fi
+
+  local resolved resolved_host resolved_user resolved_port resolved_key
+  if ! resolved="$(
+    cd "$APP_DIR"
+    TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 "$TAKO_BIN" --env "$ENVIRONMENT" internal e2e-server-ssh --server "$OFFLINE_SERVER"
+  )"; then
+    if [[ -n "${TAKO_E2E_DEBUG:-}" ]]; then
+      echo "warning: could not infer offline node SSH settings from tako config" >&2
+    fi
+    return
+  fi
+
+  {
+    IFS= read -r resolved_host || true
+    IFS= read -r resolved_user || true
+    IFS= read -r resolved_port || true
+    IFS= read -r resolved_key || true
+  } <<<"$resolved"
+
+  [[ -z "$OFFLINE_HOST" && -n "$resolved_host" ]] && OFFLINE_HOST="$resolved_host"
+  [[ -z "$OFFLINE_USER" && -n "$resolved_user" ]] && OFFLINE_USER="$resolved_user"
+  [[ "$OFFLINE_PORT_SET" == "0" && -n "$resolved_port" ]] && OFFLINE_PORT="$resolved_port"
+  [[ -z "$OFFLINE_SSH_KEY" && -n "$resolved_key" ]] && OFFLINE_SSH_KEY="$resolved_key"
+  return 0
 }
 
 wait_for_offline_status() {
