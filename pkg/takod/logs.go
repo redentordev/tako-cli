@@ -75,6 +75,15 @@ func validateLogsRequest(req LogsRequest) error {
 			return fmt.Errorf("%s is required", label)
 		}
 	}
+	if !isSafeProjectName(req.Project) {
+		return fmt.Errorf("invalid project name")
+	}
+	if !isSafeRuntimeName(req.Environment) {
+		return fmt.Errorf("invalid environment name")
+	}
+	if !isSafeServiceName(req.Service) {
+		return fmt.Errorf("invalid service name")
+	}
 	if req.Tail < 0 {
 		return fmt.Errorf("tail cannot be negative")
 	}

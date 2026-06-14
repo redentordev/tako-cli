@@ -69,6 +69,15 @@ func validateStatsRequest(req StatsRequest) error {
 			return fmt.Errorf("%s is required", label)
 		}
 	}
+	if !isSafeProjectName(req.Project) {
+		return fmt.Errorf("invalid project name")
+	}
+	if !isSafeRuntimeName(req.Environment) {
+		return fmt.Errorf("invalid environment name")
+	}
+	if req.Service != "" && !isSafeServiceName(req.Service) {
+		return fmt.Errorf("invalid service name")
+	}
 	return nil
 }
 

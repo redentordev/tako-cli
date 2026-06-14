@@ -54,3 +54,37 @@ func TestStreamServiceLogsRejectsInvalidTail(t *testing.T) {
 		t.Fatalf("expected invalid tail error, got %v", err)
 	}
 }
+
+func TestStreamServiceLogsRejectsInvalidIdentifiers(t *testing.T) {
+	tests := []struct {
+		name string
+		req  LogsRequest
+		want string
+	}{
+		{
+			name: "project",
+			req:  LogsRequest{Project: "../demo", Environment: "production", Service: "web"},
+			want: "invalid project name",
+		},
+		{
+			name: "environment",
+			req:  LogsRequest{Project: "demo", Environment: "prod\nbad", Service: "web"},
+			want: "invalid environment name",
+		},
+		{
+			name: "service",
+			req:  LogsRequest{Project: "demo", Environment: "production", Service: "Web"},
+			want: "invalid service name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+			err := StreamServiceLogs(context.Background(), tt.req, &output)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+		})
+	}
+}
