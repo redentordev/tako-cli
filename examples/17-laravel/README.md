@@ -92,7 +92,7 @@ services:
   db:
     image: mysql:8.0
     env:
-      MYSQL_ROOT_PASSWORD: secret
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: laravel
     volumes:
       - db-data:/var/lib/mysql

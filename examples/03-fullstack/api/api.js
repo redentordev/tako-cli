@@ -7,6 +7,17 @@ const PORT = process.env.PORT || 4000;
 
 app.use(express.json());
 
+function redactConnectionString(value) {
+  if (!value) return 'not configured';
+  try {
+    const url = new URL(value);
+    if (url.password) url.password = 'REDACTED';
+    return url.toString();
+  } catch {
+    return 'configured';
+  }
+}
+
 // PostgreSQL connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -111,6 +122,6 @@ app.get('/health', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`API server running on port ${PORT}`);
-  console.log(`Database: ${process.env.DATABASE_URL}`);
+  console.log(`Database: ${redactConnectionString(process.env.DATABASE_URL)}`);
   console.log(`Redis: ${process.env.REDIS_URL}`);
 });

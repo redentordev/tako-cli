@@ -237,7 +237,7 @@ func TestBuildTakodContainerSpecDoesNotPublishPublicOneNodeService(t *testing.T)
 	container, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
 		Port:  80,
 		Proxy: &config.ProxyConfig{Domain: "example.com"},
-	}, 1, 1, false, 0)
+	}, 1, false, 0)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestBuildTakodContainerSpecPublishesPublicMultiNodeServiceOnMeshIP(t *testi
 	container, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
 		Port:  80,
 		Proxy: &config.ProxyConfig{Domain: "example.com"},
-	}, 1, 1, true, 24321)
+	}, 1, true, 24321)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
@@ -272,22 +272,14 @@ func TestBuildTakodContainerSpecPublishesPublicMultiNodeServiceOnMeshIP(t *testi
 	}
 }
 
-func TestBuildTakodContainerSpecPublishesInternalDirectPort(t *testing.T) {
+func TestBuildTakodContainerSpecDoesNotPublishInternalServicePort(t *testing.T) {
 	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
-	container, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, 1, false, 0)
+	container, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, false, 0)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
-	if !slices.Equal(container.Publishes, []string{"9100:9100"}) {
-		t.Fatalf("internal direct publish = %#v, want 9100:9100", container.Publishes)
-	}
-}
-
-func TestBuildTakodContainerSpecRejectsReplicatedInternalDirectPort(t *testing.T) {
-	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
-	_, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, 2, false, 0)
-	if err == nil {
-		t.Fatal("expected replicated direct host port to be rejected")
+	if len(container.Publishes) != 0 {
+		t.Fatalf("internal service should not publish host ports: %#v", container.Publishes)
 	}
 }
 

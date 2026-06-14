@@ -459,7 +459,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 				return err
 			}
 		}
-		container, err := d.buildTakodContainerSpec(serverName, serviceName, service, slot, len(slots), publishMeshUpstreams, meshPort)
+		container, err := d.buildTakodContainerSpec(serverName, serviceName, service, slot, publishMeshUpstreams, meshPort)
 		if err != nil {
 			return err
 		}
@@ -469,7 +469,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 	return d.reconcileServiceViaTakod(client, request)
 }
 
-func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string, service *config.ServiceConfig, slot int, slotCount int, publishMeshUpstreams bool, meshPort int) (takod.ContainerSpec, error) {
+func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string, service *config.ServiceConfig, slot int, publishMeshUpstreams bool, meshPort int) (takod.ContainerSpec, error) {
 	container := takod.ContainerSpec{Name: d.takodContainerName(serviceName, slot)}
 	if service.IsPublic() && publishMeshUpstreams {
 		meshHostIP, err := d.meshHostIPForServer(serverName)
@@ -480,11 +480,6 @@ func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string
 			return container, fmt.Errorf("service %s slot %d requires an allocated mesh upstream port", serviceName, slot)
 		}
 		container.Publishes = append(container.Publishes, fmt.Sprintf("%s:%d:%d", meshHostIP, meshPort, service.Port))
-	} else if !service.IsPublic() && service.Port > 0 {
-		if slotCount > 1 {
-			return container, fmt.Errorf("service %s publishes port %d without proxy but has multiple replicas on the same node", serviceName, service.Port)
-		}
-		container.Publishes = append(container.Publishes, fmt.Sprintf("%d:%d", service.Port, service.Port))
 	}
 	return container, nil
 }

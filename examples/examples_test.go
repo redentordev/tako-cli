@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -49,6 +50,48 @@ func TestDeploymentPatternTemplatesLoadAndCoverCommonUseCases(t *testing.T) {
 			cfg := loadPatternConfig(t, configPath)
 			check(t, cfg)
 		})
+	}
+}
+
+func TestExamplesDoNotUseKnownDemoDatabasePasswords(t *testing.T) {
+	forbidden := []string{
+		"dbpassword123",
+		"postgres:secret123",
+		"POSTGRES_PASSWORD: secret123",
+		"MYSQL_ROOT_PASSWORD: secret\n",
+		"console.log(`Database: ${process.env.DATABASE_URL}`)",
+	}
+
+	err := filepath.WalkDir(".", func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case "node_modules", ".git":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		switch filepath.Ext(path) {
+		case ".js", ".md", ".yaml", ".yml":
+		default:
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		content := string(data)
+		for _, pattern := range forbidden {
+			if strings.Contains(content, pattern) {
+				t.Fatalf("%s contains unsafe copyable demo credential %q", path, strings.TrimSpace(pattern))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to scan examples: %v", err)
 	}
 }
 
