@@ -128,6 +128,84 @@ func TestLocalDeploymentStateExistsIgnoresSecretsOnlyTakoDirectory(t *testing.T)
 	}
 }
 
+func TestSyncStateOnDeployRecoversFromMeshActualBeforeRunningFallback(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	originalCollect := syncStateCollectDeploymentHistories
+	originalRecoverMesh := syncStateRecoverFromMeshActual
+	originalRecoverRunning := syncStateRecoverFromRunningMesh
+	t.Cleanup(func() {
+		syncStateCollectDeploymentHistories = originalCollect
+		syncStateRecoverFromMeshActual = originalRecoverMesh
+		syncStateRecoverFromRunningMesh = originalRecoverRunning
+	})
+
+	syncStateCollectDeploymentHistories = func(_ *config.Config, envName string, requestedServer string, quiet bool) ([]stateHistoryCandidate, error) {
+		if envName != "production" || requestedServer != "" || !quiet {
+			t.Fatalf("unexpected history collection args env=%q requested=%q quiet=%v", envName, requestedServer, quiet)
+		}
+		return nil, nil
+	}
+	meshRecovered := false
+	syncStateRecoverFromMeshActual = func(_ *config.Config, envName string, requestedServer string) error {
+		if envName != "production" || requestedServer != "" {
+			t.Fatalf("unexpected mesh recovery args env=%q requested=%q", envName, requestedServer)
+		}
+		meshRecovered = true
+		return nil
+	}
+	syncStateRecoverFromRunningMesh = func(*config.Config, string, string) error {
+		t.Fatal("running mesh fallback should not run after mesh actual recovery succeeds")
+		return nil
+	}
+
+	err := SyncStateOnDeploy(&config.Config{Project: config.ProjectConfig{Name: "demo"}}, "production")
+	if err != nil {
+		t.Fatalf("SyncStateOnDeploy returned error: %v", err)
+	}
+	if !meshRecovered {
+		t.Fatal("mesh actual recovery was not attempted")
+	}
+}
+
+func TestSyncStateOnDeployFallsBackToRunningMeshWhenMeshActualMissing(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	originalCollect := syncStateCollectDeploymentHistories
+	originalRecoverMesh := syncStateRecoverFromMeshActual
+	originalRecoverRunning := syncStateRecoverFromRunningMesh
+	t.Cleanup(func() {
+		syncStateCollectDeploymentHistories = originalCollect
+		syncStateRecoverFromMeshActual = originalRecoverMesh
+		syncStateRecoverFromRunningMesh = originalRecoverRunning
+	})
+
+	syncStateCollectDeploymentHistories = func(*config.Config, string, string, bool) ([]stateHistoryCandidate, error) {
+		return nil, nil
+	}
+	syncStateRecoverFromMeshActual = func(*config.Config, string, string) error {
+		return errors.New("no mesh actual state")
+	}
+	runningRecovered := false
+	syncStateRecoverFromRunningMesh = func(_ *config.Config, envName string, requestedServer string) error {
+		if envName != "production" || requestedServer != "" {
+			t.Fatalf("unexpected running recovery args env=%q requested=%q", envName, requestedServer)
+		}
+		runningRecovered = true
+		return nil
+	}
+
+	err := SyncStateOnDeploy(&config.Config{Project: config.ProjectConfig{Name: "demo"}}, "production")
+	if err != nil {
+		t.Fatalf("SyncStateOnDeploy returned error: %v", err)
+	}
+	if !runningRecovered {
+		t.Fatal("running mesh fallback was not attempted")
+	}
+}
+
 func TestRunStateStatusReturnsConfigurationErrors(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)

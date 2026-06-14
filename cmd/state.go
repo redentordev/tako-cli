@@ -82,6 +82,12 @@ the best available state before deploying.`,
 
 var stateServer string
 
+var (
+	syncStateCollectDeploymentHistories = collectStateDeploymentHistories
+	syncStateRecoverFromMeshActual      = recoverAndSaveStateFromMeshActual
+	syncStateRecoverFromRunningMesh     = recoverAndSaveStateFromRunningMesh
+)
+
 func init() {
 	rootCmd.AddCommand(stateCmd)
 	stateCmd.AddCommand(statePullCmd)
@@ -1944,7 +1950,7 @@ func SyncStateOnDeploy(cfg *config.Config, envName string) error {
 		fmt.Println("Local state missing, checking remote...")
 	}
 
-	histories, err := collectStateDeploymentHistories(cfg, envName, "", true)
+	histories, err := syncStateCollectDeploymentHistories(cfg, envName, "", true)
 	if err != nil {
 		return nil // Ignore auto-sync discovery errors and continue deployment.
 	}
@@ -1960,7 +1966,15 @@ func SyncStateOnDeploy(cfg *config.Config, envName string) error {
 		if verbose {
 			fmt.Println("No remote deployment history found during auto-sync")
 		}
-		if err := recoverAndSaveStateFromRunningMesh(cfg, envName, ""); err != nil && verbose {
+		if err := syncStateRecoverFromMeshActual(cfg, envName, ""); err == nil {
+			if verbose {
+				fmt.Println("Recovered local state from replicated takod runtime state")
+			}
+			return nil
+		} else if verbose {
+			fmt.Printf("Warning: failed to recover local state from replicated takod runtime state: %v\n", err)
+		}
+		if err := syncStateRecoverFromRunningMesh(cfg, envName, ""); err != nil && verbose {
 			fmt.Printf("Warning: failed to recover local state from running mesh containers: %v\n", err)
 		}
 		return nil
