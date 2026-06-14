@@ -815,6 +815,22 @@ func TestHandleMetricsReturnsNodeMetrics(t *testing.T) {
 	}
 }
 
+func TestHandleImageImportRejectsOversizedContentLength(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/import?image=demo:latest", strings.NewReader(""))
+	req.ContentLength = defaultImageImportMaxBytes + 1
+	recorder := httptest.NewRecorder()
+
+	server.handleImageImport(recorder, req)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "image import exceeds maximum size") {
+		t.Fatalf("response = %q, want size limit context", recorder.Body.String())
+	}
+}
+
 func TestHandleAccessLogsRequiresGet(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
 	req := httptest.NewRequest(http.MethodPost, "/v1/access-logs", nil)

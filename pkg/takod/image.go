@@ -32,6 +32,7 @@ const (
 	defaultBuildContextMaxBytes     int64 = 2 << 30
 	defaultBuildContextMaxFileBytes int64 = 1 << 30
 	defaultBuildContextMaxEntries         = 200000
+	defaultImageImportMaxBytes      int64 = 8 << 30
 )
 
 type buildContextLimits struct {
@@ -66,6 +67,7 @@ func ImportImage(ctx context.Context, image string, r io.Reader) (*ImageImportRe
 	if err := validateImageName(image); err != nil {
 		return nil, err
 	}
+	r = newMaxBytesReader(r, defaultImageImportMaxBytes, "image import")
 	cmd := dockerCommandContext(ctx, "docker", "load")
 	cmd.Stdin = r
 	var output bytes.Buffer
@@ -78,6 +80,45 @@ func ImportImage(ctx context.Context, image string, r io.Reader) (*ImageImportRe
 		return nil, fmt.Errorf("imported image %s is not inspectable: %w", image, err)
 	}
 	return &ImageImportResponse{Image: image, Output: strings.TrimSpace(output.String())}, nil
+}
+
+type maxBytesReader struct {
+	reader      io.Reader
+	remaining   int64
+	maxBytes    int64
+	description string
+}
+
+func newMaxBytesReader(reader io.Reader, maxBytes int64, description string) io.Reader {
+	if maxBytes <= 0 {
+		return reader
+	}
+	return &maxBytesReader{
+		reader:      reader,
+		remaining:   maxBytes,
+		maxBytes:    maxBytes,
+		description: description,
+	}
+}
+
+func (r *maxBytesReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		var one [1]byte
+		n, err := r.reader.Read(one[:])
+		if n > 0 {
+			return 0, fmt.Errorf("%s exceeds maximum size %d bytes", r.description, r.maxBytes)
+		}
+		if err == nil {
+			return 0, fmt.Errorf("%s reader made no progress after maximum size %d bytes", r.description, r.maxBytes)
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= int64(n)
+	return n, err
 }
 
 func BuildImage(ctx context.Context, image string, r io.Reader) (*ImageBuildResponse, error) {
