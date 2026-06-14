@@ -271,7 +271,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Instant Rollback** - Revert to any previous deployment with one command
 - **Git-Based Versioning** - Every deployment tied to a Git commit
 - **State Management** - Deployment history tracked on the server with local sync for new machines
-- **Remote Lease** - CI, laptops, deploy, rollback, and destroy share a remote operation lock
+- **Remote Lease** - CI, laptops, and mutating operations share remote operation locks
 - **Automatic HTTPS** - tako-proxy provisions SSL certificates via Let's Encrypt
 - **Domain Redirects** - Automatic www → non-www (or vice versa) with path preservation
 - **Health Checks** - Ensure containers are healthy after reconciliation
