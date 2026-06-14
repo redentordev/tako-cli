@@ -40,7 +40,7 @@ func LoadEnvFile(path string) (map[string]string, error) {
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
 			// Skip invalid lines with a warning (don't fail)
-			fmt.Printf("Warning: Invalid line %d in %s: %s\n", lineNum, path, line)
+			fmt.Fprintf(os.Stderr, "Warning: Invalid line %d in %s: %s\n", lineNum, path, line)
 			continue
 		}
 
