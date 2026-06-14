@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/crypto"
@@ -141,7 +140,6 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		Project:     cfg.Project.Name,
 		Environment: envName,
 		Content:     base64.StdEncoding.EncodeToString(encrypted),
-		UpdatedAt:   time.Now().UTC(),
 	}
 
 	uploaded, nodeErrors := uploadEnvBundleToMesh(cfg, serverNames, request)
