@@ -63,3 +63,36 @@ func TestReadContainerStatsAllDoesNotRequireProject(t *testing.T) {
 		t.Fatalf("unexpected commands: %#v", entries)
 	}
 }
+
+func TestReadContainerStatsRejectsInvalidIdentifiers(t *testing.T) {
+	tests := []struct {
+		name string
+		req  StatsRequest
+		want string
+	}{
+		{
+			name: "project",
+			req:  StatsRequest{Project: "../demo", Environment: "production", Service: "web"},
+			want: "invalid project name",
+		},
+		{
+			name: "environment",
+			req:  StatsRequest{Project: "demo", Environment: "prod\nbad", Service: "web"},
+			want: "invalid environment name",
+		},
+		{
+			name: "service",
+			req:  StatsRequest{Project: "demo", Environment: "production", Service: "Web"},
+			want: "invalid service name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ReadContainerStats(context.Background(), tt.req)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+		})
+	}
+}
