@@ -13,36 +13,33 @@ import (
 )
 
 var (
-	removeServer string
-	removeForce  bool
+	removeForce bool
 )
 
 var removeCmd = &cobra.Command{
 	Use:   "remove",
-	Short: "Remove all deployed services from a server",
-	Long: `Remove all deployed services from a server.
+	Short: "Remove deployed services from the environment mesh",
+	Long: `Remove deployed services from every node in the active environment.
 
 This command:
   - Stops and removes all service replicas
   - Removes service images for this project
   - Removes proxy configurations
   - Preserves server setup (takod and tako-proxy remain installed)
-  - Does NOT decommission the server
+  - Does NOT decommission the servers
 
-The server can be reused for new deployments after removal.
+The environment can be reused for new deployments after removal.
 To decommission an environment, use 'tako destroy'.
 
 Examples:
-  tako remove --server prod
-  tako remove --server staging --force`,
+  tako remove
+  tako remove --force`,
 	RunE: runRemove,
 }
 
 func init() {
 	rootCmd.AddCommand(removeCmd)
-	removeCmd.Flags().StringVarP(&removeServer, "server", "s", "", "Server to remove services from (required)")
 	removeCmd.Flags().BoolVarP(&removeForce, "force", "f", false, "Skip confirmation prompt")
-	removeCmd.MarkFlagRequired("server")
 }
 
 func runRemove(cmd *cobra.Command, args []string) error {
@@ -61,17 +58,31 @@ func runRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get services for environment %s: %w", envName, err)
 	}
-
-	serverName, server, client, err := connectResolvedServer(cfg, envName, removeServer)
+	serverNames, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get environment servers: %w", err)
 	}
-	defer client.Close()
+	if len(serverNames) == 0 {
+		return fmt.Errorf("no servers configured for environment %s", envName)
+	}
+	servers := make(map[string]config.ServerConfig, len(serverNames))
+	for _, serverName := range serverNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return fmt.Errorf("server %s not found in configuration", serverName)
+		}
+		servers[serverName] = server
+	}
 
 	fmt.Printf("\n⚠️  WARNING: You are about to REMOVE all services from:\n\n")
-	fmt.Printf("   Server:      %s (%s)\n", serverName, server.Host)
 	fmt.Printf("   Project:     %s\n", cfg.Project.Name)
-	fmt.Printf("   Environment: %s\n\n", envName)
+	fmt.Printf("   Environment: %s\n", envName)
+	fmt.Printf("   Servers:     %d\n\n", len(serverNames))
+	for _, serverName := range serverNames {
+		server := servers[serverName]
+		fmt.Printf("   • %s (%s)\n", serverName, server.Host)
+	}
+	fmt.Println()
 
 	fmt.Printf("This will:\n")
 	fmt.Printf("   • Stop and remove all service replicas for this project\n")
@@ -104,17 +115,46 @@ func runRemove(cmd *cobra.Command, args []string) error {
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
-	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, []string{serverName}, "remove")
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, serverNames, "remove")
 	if err != nil {
 		return err
 	}
 	defer leaseSet.Release(verbose)
 	if verbose {
-		fmt.Printf("→ Acquired remote remove lease: %s\n", leaseSet.Summary())
+		fmt.Printf("→ Acquired remote remove leases: %s\n", leaseSet.Summary())
 	}
 
-	fmt.Printf("→ Reconciling cleanup through takod...\n")
-	response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
+	fmt.Printf("→ Reconciling cleanup through takod on %d node(s)...\n", len(serverNames))
+	request := removeCleanupRequest(cfg, envName, services)
+	results := collectCleanupNodes(servers, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
+		return cleanupSingleNode(cfg, serverCfg, request)
+	})
+
+	var errors []string
+	for _, result := range results {
+		if result.err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+			fmt.Printf("  ✗ %s failed: %v\n", result.serverName, result.err)
+			continue
+		}
+		if verbose {
+			printCleanupWarnings(result.response)
+		}
+		fmt.Printf("  ✓ %s removed\n", result.serverName)
+	}
+	if len(errors) > 0 {
+		return fmt.Errorf("remove incomplete: %s", strings.Join(errors, "; "))
+	}
+
+	fmt.Printf("\n✓ All services removed from environment %s\n", envName)
+	fmt.Printf("\nThe servers are still provisioned and ready for new deployments.\n")
+	fmt.Printf("To deploy again: tako deploy\n")
+
+	return nil
+}
+
+func removeCleanupRequest(cfg *config.Config, envName string, services map[string]config.ServiceConfig) takod.CleanupRequest {
+	return takod.CleanupRequest{
 		Project:           cfg.Project.Name,
 		Environment:       envName,
 		RemoveContainers:  true,
@@ -123,17 +163,5 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		RemoveDeployFiles: true,
 		RemoveTakodState:  true,
 		ProxyFiles:        cleanupProxyFiles(cfg.Project.Name, envName, services),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to cleanup through takod: %w", err)
 	}
-	if verbose {
-		printCleanupWarnings(response)
-	}
-
-	fmt.Printf("\n✓ All services removed from %s\n", serverName)
-	fmt.Printf("\nThe server is still provisioned and ready for new deployments.\n")
-	fmt.Printf("To deploy again: tako deploy\n")
-
-	return nil
 }
