@@ -283,7 +283,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 - **Multi-Server** - Deploy across multiple servers with takod mesh placement
 - **Server Setup** - Configure existing VPS hosts with Docker, local proxy, firewall rules, and monitoring
-- **Placement Strategies** - Control where services run (spread, pinned)
+- **Placement Strategies** - Control where services run (spread, pinned, global, label constraints)
 
 ### Developer Experience
 
@@ -442,6 +442,8 @@ environments:
         port: 3000
         placement:
           strategy: spread
+          constraints:
+            - node.labels.role==web
         proxy:
           domain: app.example.com
           email: admin@example.com
@@ -490,7 +492,9 @@ environments:
         port: 3000
         replicas: 4
         placement:
-          strategy: spread  # Distribute across all servers
+          strategy: spread  # Distribute across matching servers
+          constraints:
+            - node.labels.role==web
 ```
 
 ### Background Workers

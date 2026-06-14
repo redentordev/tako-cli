@@ -90,7 +90,10 @@ func runPS(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	serviceInfos := buildPSServiceInfo(services, actualServices, envServers, serverNames, filterService)
+	serviceInfos, err := buildPSServiceInfo(cfg.Servers, services, actualServices, envServers, serverNames, filterService)
+	if err != nil {
+		return err
+	}
 	if len(serviceInfos) == 0 {
 		fmt.Println("\nNo services configured")
 		return nil
@@ -203,12 +206,13 @@ func gatherPSActualStateWith(servers map[string]config.ServerConfig, serverNames
 }
 
 func buildPSServiceInfo(
+	servers map[string]config.ServerConfig,
 	services map[string]config.ServiceConfig,
 	actualServices map[string]*takod.ActualService,
 	envServers []string,
 	selectedServers []string,
 	filterService string,
-) []ServiceInfo {
+) ([]ServiceInfo, error) {
 	serviceInfos := make([]ServiceInfo, 0, len(services))
 	for serviceName, serviceConfig := range services {
 		if filterService != "" && serviceName != filterService {
@@ -220,7 +224,10 @@ func buildPSServiceInfo(
 			running = actual.Replicas
 		}
 
-		desired := desiredReplicasForSelection(serviceConfig, envServers, selectedServers)
+		desired, err := desiredReplicasForSelection(servers, serviceConfig, envServers, selectedServers)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve desired placement for %s: %w", serviceName, err)
+		}
 		info := ServiceInfo{
 			Name:     serviceName,
 			Desired:  desired,
@@ -235,29 +242,25 @@ func buildPSServiceInfo(
 	sort.Slice(serviceInfos, func(i, j int) bool {
 		return serviceInfos[i].Name < serviceInfos[j].Name
 	})
-	return serviceInfos
+	return serviceInfos, nil
 }
 
-func desiredReplicasForSelection(service config.ServiceConfig, envServers []string, selectedServers []string) int {
-	targets := append([]string(nil), envServers...)
+func desiredReplicasForSelection(servers map[string]config.ServerConfig, service config.ServiceConfig, envServers []string, selectedServers []string) (int, error) {
 	replicas := service.Replicas
 	if replicas <= 0 {
 		replicas = 1
 	}
 
-	if service.Placement != nil {
-		switch service.Placement.Strategy {
-		case "global":
-			replicas = len(targets)
-		case "pinned":
-			if len(service.Placement.Servers) > 0 {
-				targets = append([]string(nil), service.Placement.Servers...)
-			}
-		}
+	targets, err := config.ResolvePlacementTargets(service.Placement, servers, envServers, "selected environment")
+	if err != nil {
+		return 0, err
+	}
+	if service.Placement != nil && strings.TrimSpace(service.Placement.Strategy) == "global" {
+		replicas = len(targets)
 	}
 
 	if len(targets) == 0 || replicas <= 0 {
-		return 0
+		return 0, nil
 	}
 
 	selected := make(map[string]bool, len(selectedServers))
@@ -272,7 +275,7 @@ func desiredReplicasForSelection(service config.ServiceConfig, envServers []stri
 			count++
 		}
 	}
-	return count
+	return count, nil
 }
 
 func serviceStatus(running int, desired int) string {

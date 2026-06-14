@@ -371,6 +371,9 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 	if service.Replicas < 0 {
 		return fmt.Errorf("service %s: replicas cannot be negative", name)
 	}
+	if err := ValidatePlacementConfig(service.Placement); err != nil {
+		return fmt.Errorf("service %s: %w", name, err)
+	}
 
 	// Validate proxy if configured (per-service)
 	if service.Proxy != nil {

@@ -144,6 +144,55 @@ func TestBuildTakodHealthSpecUsesQuotedCommand(t *testing.T) {
 	}
 }
 
+func TestPlanTakodAssignmentsHonorsPlacementConstraints(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a", "node-b", "node-c"})
+	cfg.Servers["node-a"] = config.ServerConfig{Host: "node-a.example.test", User: "root", Labels: map[string]string{"role": "web"}}
+	cfg.Servers["node-b"] = config.ServerConfig{Host: "node-b.example.test", User: "root", Labels: map[string]string{"role": "worker"}}
+	cfg.Servers["node-c"] = config.ServerConfig{Host: "node-c.example.test", User: "root", Labels: map[string]string{"role": "web"}}
+	deploy := &Deployer{config: cfg, environment: "production"}
+
+	assignments, err := deploy.planTakodAssignments(&config.ServiceConfig{
+		Replicas: 3,
+		Placement: &config.PlacementConfig{
+			Strategy:    "spread",
+			Constraints: []string{"node.labels.role==web"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("planTakodAssignments returned error: %v", err)
+	}
+
+	got := make([]string, 0, len(assignments))
+	for _, assignment := range assignments {
+		got = append(got, assignment.ServerName)
+	}
+	want := []string{"node-a", "node-c", "node-a"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("assignment servers = %#v, want %#v", got, want)
+	}
+}
+
+func TestPlanTakodAssignmentsGlobalUsesConstrainedTargets(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a", "node-b", "node-c"})
+	cfg.Servers["node-a"] = config.ServerConfig{Host: "node-a.example.test", User: "root", Labels: map[string]string{"role": "web"}}
+	cfg.Servers["node-b"] = config.ServerConfig{Host: "node-b.example.test", User: "root", Labels: map[string]string{"role": "worker"}}
+	cfg.Servers["node-c"] = config.ServerConfig{Host: "node-c.example.test", User: "root", Labels: map[string]string{"role": "web"}}
+	deploy := &Deployer{config: cfg, environment: "production"}
+
+	assignments, err := deploy.planTakodAssignments(&config.ServiceConfig{
+		Placement: &config.PlacementConfig{
+			Strategy:    "global",
+			Constraints: []string{"node.labels.role==web"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("planTakodAssignments returned error: %v", err)
+	}
+	if len(assignments) != 2 {
+		t.Fatalf("assignments = %#v, want two constrained global assignments", assignments)
+	}
+}
+
 func TestServiceRuntimeLabelsIncludeSafeConfigHash(t *testing.T) {
 	service := config.ServiceConfig{
 		Image: "nginx:1.27",

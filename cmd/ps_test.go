@@ -52,11 +52,37 @@ func TestDesiredReplicasForSelection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := desiredReplicasForSelection(tt.service, envServers, tt.selected)
+			servers := testPSActualStateServers(envServers)
+			got, err := desiredReplicasForSelection(servers, tt.service, envServers, tt.selected)
+			if err != nil {
+				t.Fatalf("desiredReplicasForSelection returned error: %v", err)
+			}
 			if got != tt.wantCount {
 				t.Fatalf("desiredReplicasForSelection() = %d, want %d", got, tt.wantCount)
 			}
 		})
+	}
+}
+
+func TestDesiredReplicasForSelectionHonorsPlacementConstraints(t *testing.T) {
+	envServers := []string{"node-a", "node-b", "node-c"}
+	servers := testPSActualStateServers(envServers)
+	servers["node-a"] = config.ServerConfig{Host: "node-a", Labels: map[string]string{"role": "web"}}
+	servers["node-b"] = config.ServerConfig{Host: "node-b", Labels: map[string]string{"role": "worker"}}
+	servers["node-c"] = config.ServerConfig{Host: "node-c", Labels: map[string]string{"role": "web"}}
+
+	got, err := desiredReplicasForSelection(servers, config.ServiceConfig{
+		Replicas: 4,
+		Placement: &config.PlacementConfig{
+			Strategy:    "spread",
+			Constraints: []string{"node.labels.role==web"},
+		},
+	}, envServers, []string{"node-a"})
+	if err != nil {
+		t.Fatalf("desiredReplicasForSelection returned error: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("desiredReplicasForSelection() = %d, want 2", got)
 	}
 }
 
