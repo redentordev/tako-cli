@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestRemoveCommandDoesNotExposeServerFlag(t *testing.T) {
@@ -36,8 +37,13 @@ func TestRemoveCleanupRequestTargetsEnvironmentState(t *testing.T) {
 	if !request.RemoveContainers || !request.RemoveImages || !request.RemoveNetworks || !request.RemoveDeployFiles || !request.RemoveTakodState {
 		t.Fatalf("request did not enable full project cleanup: %#v", request)
 	}
-	if !slices.Contains(request.ProxyFiles, "demo-production.yml") {
-		t.Fatalf("proxy files = %#v, want demo-production.yml", request.ProxyFiles)
+	for _, want := range []string{
+		runtimeid.ProxyConfigFileName("demo", "production"),
+		runtimeid.MaintenanceProxyConfigFileName("demo", "production", "web"),
+	} {
+		if !slices.Contains(request.ProxyFiles, want) {
+			t.Fatalf("proxy files = %#v, want %s", request.ProxyFiles, want)
+		}
 	}
 	if !slices.Equal(request.ImageRepositories, []string{"demo/web"}) {
 		t.Fatalf("image repositories = %#v, want only Tako-owned web repository", request.ImageRepositories)

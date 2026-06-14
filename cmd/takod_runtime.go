@@ -81,11 +81,9 @@ func cleanupProxyFiles(project string, environment string, services map[string]c
 		}
 	}
 	add(runtimeProxyConfigFileName(project, environment))
-	add(runtimeid.LegacyProxyConfigFileName(project, environment))
 	for serviceName, service := range services {
 		if service.IsPublic() {
 			add(maintenanceProxyConfigFileName(project, environment, serviceName))
-			add(runtimeid.LegacyMaintenanceProxyConfigFileName(project, environment, serviceName))
 		}
 	}
 	files := make([]string, 0, len(seen))

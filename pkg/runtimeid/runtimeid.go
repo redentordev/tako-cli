@@ -3,7 +3,6 @@ package runtimeid
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -119,28 +118,4 @@ func shortHash(parts ...string) string {
 		_, _ = hash.Write([]byte(part))
 	}
 	return hex.EncodeToString(hash.Sum(nil))[:10]
-}
-
-func LegacyProxyConfigFileName(project string, environment string) string {
-	return legacyFileName(project + "-" + environment)
-}
-
-func LegacyMaintenanceProxyConfigFileName(project string, environment string, service string) string {
-	return legacyFileName(fmt.Sprintf("%s-%s-%s-maintenance", project, environment, service))
-}
-
-func legacyFileName(value string) string {
-	var out strings.Builder
-	for _, r := range value {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
-			out.WriteRune(r)
-		} else {
-			out.WriteRune('-')
-		}
-	}
-	name := strings.Trim(out.String(), "-")
-	if name == "" {
-		name = "tako"
-	}
-	return name + ".yml"
 }
