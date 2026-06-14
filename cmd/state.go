@@ -83,9 +83,9 @@ the best available state before deploying.`,
 var stateServer string
 
 var (
-	syncStateCollectDeploymentHistories = collectStateDeploymentHistories
-	syncStateRecoverFromMeshActual      = recoverAndSaveStateFromMeshActual
-	syncStateRecoverFromRunningMesh     = recoverAndSaveStateFromRunningMesh
+	syncStateCollectDeploymentHistories = collectStateDeploymentHistoriesWithPool
+	syncStateRecoverFromMeshActual      = recoverAndSaveStateFromMeshActualWithPool
+	syncStateRecoverFromRunningMesh     = recoverAndSaveStateFromRunningMeshWithPool
 )
 
 func init() {
@@ -167,6 +167,10 @@ func collectStatePullHistories(cfg *config.Config, envName string, requestedServ
 }
 
 func collectStateDeploymentHistories(cfg *config.Config, envName string, requestedServer string, quiet bool) ([]stateHistoryCandidate, error) {
+	return collectStateDeploymentHistoriesWithPool(nil, cfg, envName, requestedServer, quiet)
+}
+
+func collectStateDeploymentHistoriesWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string, quiet bool) ([]stateHistoryCandidate, error) {
 	serverNames, err := statePullServerNames(cfg, envName, requestedServer)
 	if err != nil {
 		return nil, err
@@ -188,13 +192,13 @@ func collectStateDeploymentHistories(cfg *config.Config, envName string, request
 				serverName: serverName,
 				host:       server.Host,
 			}
-			client, err := connectAndVerifyStateServer(serverName, server)
+			client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
 			if err != nil {
 				result.err = err
 				resultCh <- result
 				return
 			}
-			defer client.Close()
+			defer cleanup()
 
 			manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
 			result.readAttempted = true
@@ -280,20 +284,35 @@ func stateHistoryCandidatesFromResults(results []stateHistoryReadResult, quiet b
 }
 
 func connectAndVerifyStateServer(serverName string, server config.ServerConfig) (*ssh.Client, error) {
-	client, err := ssh.NewClientWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	client, _, err := connectAndVerifyStateServerWithPool(nil, serverName, server)
+	return client, err
+}
+
+func connectAndVerifyStateServerWithPool(pool *ssh.Pool, serverName string, server config.ServerConfig) (*ssh.Client, func(), error) {
+	var client *ssh.Client
+	var err error
+	cleanup := func() {}
+	if pool != nil {
+		client, err = pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	} else {
+		client, err = ssh.NewClientWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err == nil {
+			cleanup = func() { _ = client.Close() }
+		}
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to %s: %w", serverName, err)
+		return nil, cleanup, fmt.Errorf("failed to connect to %s: %w", serverName, err)
 	}
 	verifyOutput, verifyErr := client.Execute("echo 'tako-ok'")
 	if verifyErr != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("SSH command verification failed: %v", verifyErr)
+		cleanup()
+		return nil, func() {}, fmt.Errorf("SSH command verification failed: %v", verifyErr)
 	}
 	if strings.TrimSpace(verifyOutput) != "tako-ok" {
-		_ = client.Close()
-		return nil, fmt.Errorf("SSH command verification returned %q", strings.TrimSpace(verifyOutput))
+		cleanup()
+		return nil, func() {}, fmt.Errorf("SSH command verification returned %q", strings.TrimSpace(verifyOutput))
 	}
-	return client, nil
+	return client, cleanup, nil
 }
 
 func statePullServerNames(cfg *config.Config, envName string, requestedServer string) ([]string, error) {
@@ -578,6 +597,10 @@ type stateStatusNode struct {
 }
 
 func collectStateStatusNodes(cfg *config.Config, envName string, requestedServer string) ([]stateStatusNode, error) {
+	return collectStateStatusNodesWithPool(nil, cfg, envName, requestedServer)
+}
+
+func collectStateStatusNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) ([]stateStatusNode, error) {
 	serverNames, err := statePullServerNames(cfg, envName, requestedServer)
 	if err != nil {
 		return nil, err
@@ -606,7 +629,7 @@ func collectStateStatusNodes(cfg *config.Config, envName string, requestedServer
 				node  stateStatusNode
 			}{
 				index: index,
-				node:  collectStateStatusNode(cfg, envName, serverName, server, envServerNames),
+				node:  collectStateStatusNode(pool, cfg, envName, serverName, server, envServerNames),
 			}
 		}(index, serverName, server)
 	}
@@ -618,18 +641,18 @@ func collectStateStatusNodes(cfg *config.Config, envName string, requestedServer
 	return nodes, nil
 }
 
-func collectStateStatusNode(cfg *config.Config, envName string, serverName string, server config.ServerConfig, envServerNames []string) stateStatusNode {
+func collectStateStatusNode(pool *ssh.Pool, cfg *config.Config, envName string, serverName string, server config.ServerConfig, envServerNames []string) stateStatusNode {
 	node := stateStatusNode{
 		name: serverName,
 		host: server.Host,
 	}
 
-	client, err := connectAndVerifyStateServer(serverName, server)
+	client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
 	if err != nil {
 		node.connectErr = err
 		return node
 	}
-	defer client.Close()
+	defer cleanup()
 
 	manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
 	node.history, node.historyErr = manager.LoadHistory()
@@ -1942,6 +1965,10 @@ func min(a, b int) int {
 // SyncStateOnDeploy attempts to sync state when local deployment state is missing.
 // This is called automatically during deploy when the local cache has no current deployment.
 func SyncStateOnDeploy(cfg *config.Config, envName string) error {
+	return SyncStateOnDeployWithPool(nil, cfg, envName)
+}
+
+func SyncStateOnDeployWithPool(pool *ssh.Pool, cfg *config.Config, envName string) error {
 	if localDeploymentStateExists(envName) {
 		return nil // Local deployment cache exists, no sync needed
 	}
@@ -1950,7 +1977,7 @@ func SyncStateOnDeploy(cfg *config.Config, envName string) error {
 		fmt.Println("Local state missing, checking remote...")
 	}
 
-	histories, err := syncStateCollectDeploymentHistories(cfg, envName, "", true)
+	histories, err := syncStateCollectDeploymentHistories(pool, cfg, envName, "", true)
 	if err != nil {
 		return nil // Ignore auto-sync discovery errors and continue deployment.
 	}
@@ -1966,7 +1993,7 @@ func SyncStateOnDeploy(cfg *config.Config, envName string) error {
 		if verbose {
 			fmt.Println("No remote deployment history found during auto-sync")
 		}
-		if err := syncStateRecoverFromMeshActual(cfg, envName, ""); err == nil {
+		if err := syncStateRecoverFromMeshActual(pool, cfg, envName, ""); err == nil {
 			if verbose {
 				fmt.Println("Recovered local state from replicated takod runtime state")
 			}
@@ -1974,7 +2001,7 @@ func SyncStateOnDeploy(cfg *config.Config, envName string) error {
 		} else if verbose {
 			fmt.Printf("Warning: failed to recover local state from replicated takod runtime state: %v\n", err)
 		}
-		if err := syncStateRecoverFromRunningMesh(cfg, envName, ""); err != nil && verbose {
+		if err := syncStateRecoverFromRunningMesh(pool, cfg, envName, ""); err != nil && verbose {
 			fmt.Printf("Warning: failed to recover local state from running mesh containers: %v\n", err)
 		}
 		return nil
@@ -1988,7 +2015,11 @@ func SyncStateOnDeploy(cfg *config.Config, envName string) error {
 }
 
 func recoverAndSaveStateFromMeshActual(cfg *config.Config, envName string, requestedServer string) error {
-	nodes, err := collectStateStatusNodes(cfg, envName, requestedServer)
+	return recoverAndSaveStateFromMeshActualWithPool(nil, cfg, envName, requestedServer)
+}
+
+func recoverAndSaveStateFromMeshActualWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) error {
+	nodes, err := collectStateStatusNodesWithPool(pool, cfg, envName, requestedServer)
 	if err != nil {
 		return err
 	}
@@ -2014,7 +2045,11 @@ type runningActualNodeResult struct {
 }
 
 func recoverAndSaveStateFromRunningMesh(cfg *config.Config, envName string, requestedServer string) error {
-	candidates, err := collectRunningActualNodeSnapshots(cfg, envName, requestedServer)
+	return recoverAndSaveStateFromRunningMeshWithPool(nil, cfg, envName, requestedServer)
+}
+
+func recoverAndSaveStateFromRunningMeshWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) error {
+	candidates, err := collectRunningActualNodeSnapshotsWithPool(pool, cfg, envName, requestedServer)
 	if err != nil {
 		return err
 	}
@@ -2031,6 +2066,10 @@ func recoverAndSaveStateFromRunningMesh(cfg *config.Config, envName string, requ
 }
 
 func collectRunningActualNodeSnapshots(cfg *config.Config, envName string, requestedServer string) ([]stateNodeActualCandidate, error) {
+	return collectRunningActualNodeSnapshotsWithPool(nil, cfg, envName, requestedServer)
+}
+
+func collectRunningActualNodeSnapshotsWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) ([]stateNodeActualCandidate, error) {
 	serverNames, err := statePullServerNames(cfg, envName, requestedServer)
 	if err != nil {
 		return nil, err
@@ -2053,13 +2092,13 @@ func collectRunningActualNodeSnapshots(cfg *config.Config, envName string, reque
 				host:       server.Host,
 			}
 
-			client, err := connectAndVerifyStateServer(serverName, server)
+			client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
 			if err != nil {
 				result.err = err
 				resultCh <- result
 				return
 			}
-			defer client.Close()
+			defer cleanup()
 
 			actual, err := actualStateViaTakod(client, cfg, envName)
 			if err != nil {

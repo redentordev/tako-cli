@@ -11,6 +11,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
@@ -141,21 +142,21 @@ func TestSyncStateOnDeployRecoversFromMeshActualBeforeRunningFallback(t *testing
 		syncStateRecoverFromRunningMesh = originalRecoverRunning
 	})
 
-	syncStateCollectDeploymentHistories = func(_ *config.Config, envName string, requestedServer string, quiet bool) ([]stateHistoryCandidate, error) {
+	syncStateCollectDeploymentHistories = func(_ *ssh.Pool, _ *config.Config, envName string, requestedServer string, quiet bool) ([]stateHistoryCandidate, error) {
 		if envName != "production" || requestedServer != "" || !quiet {
 			t.Fatalf("unexpected history collection args env=%q requested=%q quiet=%v", envName, requestedServer, quiet)
 		}
 		return nil, nil
 	}
 	meshRecovered := false
-	syncStateRecoverFromMeshActual = func(_ *config.Config, envName string, requestedServer string) error {
+	syncStateRecoverFromMeshActual = func(_ *ssh.Pool, _ *config.Config, envName string, requestedServer string) error {
 		if envName != "production" || requestedServer != "" {
 			t.Fatalf("unexpected mesh recovery args env=%q requested=%q", envName, requestedServer)
 		}
 		meshRecovered = true
 		return nil
 	}
-	syncStateRecoverFromRunningMesh = func(*config.Config, string, string) error {
+	syncStateRecoverFromRunningMesh = func(*ssh.Pool, *config.Config, string, string) error {
 		t.Fatal("running mesh fallback should not run after mesh actual recovery succeeds")
 		return nil
 	}
@@ -182,14 +183,14 @@ func TestSyncStateOnDeployFallsBackToRunningMeshWhenMeshActualMissing(t *testing
 		syncStateRecoverFromRunningMesh = originalRecoverRunning
 	})
 
-	syncStateCollectDeploymentHistories = func(*config.Config, string, string, bool) ([]stateHistoryCandidate, error) {
+	syncStateCollectDeploymentHistories = func(*ssh.Pool, *config.Config, string, string, bool) ([]stateHistoryCandidate, error) {
 		return nil, nil
 	}
-	syncStateRecoverFromMeshActual = func(*config.Config, string, string) error {
+	syncStateRecoverFromMeshActual = func(*ssh.Pool, *config.Config, string, string) error {
 		return errors.New("no mesh actual state")
 	}
 	runningRecovered := false
-	syncStateRecoverFromRunningMesh = func(_ *config.Config, envName string, requestedServer string) error {
+	syncStateRecoverFromRunningMesh = func(_ *ssh.Pool, _ *config.Config, envName string, requestedServer string) error {
 		if envName != "production" || requestedServer != "" {
 			t.Fatalf("unexpected running recovery args env=%q requested=%q", envName, requestedServer)
 		}
