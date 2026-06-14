@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -64,4 +65,82 @@ func TestSetupVersionWriteErrorFailsSuccessfulProvisioning(t *testing.T) {
 			t.Fatalf("error = %q, want %q", err, want)
 		}
 	}
+}
+
+func TestRefreshCurrentSetupRegrantsDeployUserAccessBeforeTakodRestart(t *testing.T) {
+	oldTakodBinary := setupTakodBinary
+	setupTakodBinary = ""
+	t.Cleanup(func() {
+		setupTakodBinary = oldTakodBinary
+	})
+
+	cfg := &config.Config{
+		Runtime: &config.RuntimeConfig{
+			Agent: &config.AgentConfig{
+				Socket:  "/run/custom/takod.sock",
+				DataDir: "/var/lib/custom-tako",
+			},
+		},
+	}
+	prov := &recordingSetupRefresher{}
+
+	if err := refreshCurrentSetup(prov, cfg, "node-a", "deploy", 42420); err != nil {
+		t.Fatalf("refreshCurrentSetup returned error: %v", err)
+	}
+
+	want := []string{
+		"firewall:42420",
+		"deploy-user:deploy",
+		"install-release:" + Version,
+		"service:/run/custom/takod.sock:/var/lib/custom-tako:node-a",
+	}
+	if !slices.Equal(prov.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", prov.calls, want)
+	}
+}
+
+func TestRefreshCurrentSetupWrapsDeployUserAccessError(t *testing.T) {
+	prov := &recordingSetupRefresher{deployUserErr: errors.New("usermod failed")}
+
+	err := refreshCurrentSetup(prov, &config.Config{}, "node-a", "deploy", 51820)
+	if err == nil {
+		t.Fatal("refreshCurrentSetup returned nil error")
+	}
+	if !strings.Contains(err.Error(), "refresh deploy user access") || !strings.Contains(err.Error(), "usermod failed") {
+		t.Fatalf("error = %q, want deploy access context", err)
+	}
+}
+
+type recordingSetupRefresher struct {
+	calls         []string
+	firewallErr   error
+	deployUserErr error
+	releaseErr    error
+	fileErr       error
+	serviceErr    error
+}
+
+func (r *recordingSetupRefresher) ConfigureFirewall(meshListenPort int) error {
+	r.calls = append(r.calls, fmt.Sprintf("firewall:%d", meshListenPort))
+	return r.firewallErr
+}
+
+func (r *recordingSetupRefresher) SetupDeployUser(username string) error {
+	r.calls = append(r.calls, "deploy-user:"+username)
+	return r.deployUserErr
+}
+
+func (r *recordingSetupRefresher) InstallTakodBinary(version string) error {
+	r.calls = append(r.calls, "install-release:"+version)
+	return r.releaseErr
+}
+
+func (r *recordingSetupRefresher) InstallTakodBinaryFromFile(path string) error {
+	r.calls = append(r.calls, "install-file:"+path)
+	return r.fileErr
+}
+
+func (r *recordingSetupRefresher) InstallTakodService(socket string, dataDir string, nodeName string) error {
+	r.calls = append(r.calls, "service:"+socket+":"+dataDir+":"+nodeName)
+	return r.serviceErr
 }

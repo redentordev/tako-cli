@@ -8,7 +8,7 @@ as a Tako setup manifest.
 
 ```json
 {
-  "version": "1.2.0",
+  "version": "1.2.1",
   "installed_at": "2026-06-13T00:00:00Z",
   "last_upgrade": "2026-06-13T00:00:00Z",
   "components": {

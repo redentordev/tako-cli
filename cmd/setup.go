@@ -76,12 +76,9 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			if serverVersion.IsUpgradeAvailable() {
 				fmt.Printf("→ Server is at v%s, reapplying current setup v%s...\n", serverVersion.Version, setup.CurrentVersion)
 			} else if serverVersion.Version == setup.CurrentVersion {
-				fmt.Printf("→ Server is already at the latest version (v%s), refreshing firewall and takod runtime\n", serverVersion.Version)
-				if err := prov.ConfigureFirewall(meshListenPort); err != nil {
-					return fmt.Errorf("failed to refresh firewall on server %s: %w", name, err)
-				}
-				if err := ensureTakodRuntimeForSetup(prov, cfg, name); err != nil {
-					return fmt.Errorf("failed to refresh takod runtime on server %s: %w", name, err)
+				fmt.Printf("→ Server is already at the latest version (v%s), refreshing firewall, deploy access, and takod runtime\n", serverVersion.Version)
+				if err := refreshCurrentSetup(prov, cfg, name, server.User, meshListenPort); err != nil {
+					return fmt.Errorf("failed to refresh current setup on server %s: %w", name, err)
 				}
 				continue
 			}
@@ -163,7 +160,32 @@ func setupMeshListenPort(cfg *config.Config) int {
 	return 51820
 }
 
-func ensureTakodRuntimeForSetup(prov *provisioner.Provisioner, cfg *config.Config, nodeName string) error {
+type setupRuntimeInstaller interface {
+	InstallTakodBinaryFromFile(string) error
+	InstallTakodBinary(string) error
+	InstallTakodService(socket string, dataDir string, nodeName string) error
+}
+
+type currentSetupRefresher interface {
+	setupRuntimeInstaller
+	ConfigureFirewall(meshListenPort int) error
+	SetupDeployUser(username string) error
+}
+
+func refreshCurrentSetup(prov currentSetupRefresher, cfg *config.Config, nodeName string, username string, meshListenPort int) error {
+	if err := prov.ConfigureFirewall(meshListenPort); err != nil {
+		return fmt.Errorf("refresh firewall: %w", err)
+	}
+	if err := prov.SetupDeployUser(username); err != nil {
+		return fmt.Errorf("refresh deploy user access: %w", err)
+	}
+	if err := ensureTakodRuntimeForSetup(prov, cfg, nodeName); err != nil {
+		return fmt.Errorf("refresh takod runtime: %w", err)
+	}
+	return nil
+}
+
+func ensureTakodRuntimeForSetup(prov setupRuntimeInstaller, cfg *config.Config, nodeName string) error {
 	if setupTakodBinary != "" {
 		if err := prov.InstallTakodBinaryFromFile(setupTakodBinary); err != nil {
 			return err
