@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestListVolumeBackupsParsesAndSortsFiles(t *testing.T) {
@@ -159,6 +160,22 @@ func TestValidateBackupRequestRejectsUnsafeValues(t *testing.T) {
 	invalid.BackupID = "../20240101-120000"
 	if err := validateBackupRequest(invalid, true, true); err == nil {
 		t.Fatal("expected unsafe backup ID to be rejected")
+	}
+}
+
+func TestBackupIDForRequestUsesProvidedID(t *testing.T) {
+	request := BackupRequest{BackupID: "20240101-120000"}
+	got := backupIDForRequest(request, time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC))
+	if got != request.BackupID {
+		t.Fatalf("backup ID = %q, want %q", got, request.BackupID)
+	}
+}
+
+func TestBackupIDForRequestFallsBackToNow(t *testing.T) {
+	now := time.Date(2026, 6, 13, 12, 34, 56, 0, time.FixedZone("test", -7*60*60))
+	got := backupIDForRequest(BackupRequest{}, now)
+	if got != "20260613-193456" {
+		t.Fatalf("backup ID = %q, want UTC timestamp", got)
 	}
 }
 

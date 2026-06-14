@@ -332,10 +332,10 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 | Command | Description |
 |---------|-------------|
-| `tako backup --volume <name>` | Backup a service volume |
-| `tako backup --list` | List available backups |
-| `tako backup --restore <id>` | Restore a volume from backup |
-| `tako backup --cleanup <days>` | Delete backups older than N days |
+| `tako backup --volume <name>` | Backup a service volume across environment nodes |
+| `tako backup --list` | List available backups across environment nodes |
+| `tako backup --server <node> --volume <name> --restore <id>` | Restore a node-local volume from backup |
+| `tako backup --cleanup <days>` | Delete backups older than N days across environment nodes |
 | `tako drift` | Detect configuration drift between config and running services |
 | `tako drift --watch` | Continuously monitor for drift |
 
