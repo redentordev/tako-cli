@@ -538,33 +538,70 @@ type envBundleDownloadCandidate struct {
 	index    int
 }
 
+type envBundleDownloadResult struct {
+	index      int
+	serverName string
+	response   *takod.EnvBundleResponse
+	err        error
+}
+
 func downloadEnvBundleFromMesh(cfg *config.Config, envName string) (*takod.EnvBundleResponse, string, error) {
 	serverNames, err := statePullServerNames(cfg, envName, "")
 	if err != nil {
 		return nil, "", err
 	}
 
-	var nodeErrors []string
-	candidates := make([]envBundleDownloadCandidate, 0, len(serverNames))
+	resultCh := make(chan envBundleDownloadResult, len(serverNames))
+	var wg sync.WaitGroup
+
 	for index, serverName := range serverNames {
 		serverCfg, err := serverConfigByName(cfg, serverName)
 		if err != nil {
-			return nil, "", err
-		}
-		response, err := downloadEnvBundleFromServerFunc(cfg, envName, serverName, serverCfg)
-		if err != nil {
-			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", serverName, err))
+			resultCh <- envBundleDownloadResult{
+				index:      index,
+				serverName: serverName,
+				err:        err,
+			}
 			continue
 		}
-		if response != nil && response.Found {
-			if response.UpdatedAt.IsZero() {
-				nodeErrors = append(nodeErrors, fmt.Sprintf("%s: environment bundle missing updatedAt metadata", serverName))
+
+		wg.Add(1)
+		go func(index int, serverName string, serverCfg config.ServerConfig) {
+			defer wg.Done()
+			response, err := downloadEnvBundleFromServerFunc(cfg, envName, serverName, serverCfg)
+			resultCh <- envBundleDownloadResult{
+				index:      index,
+				serverName: serverName,
+				response:   response,
+				err:        err,
+			}
+		}(index, serverName, serverCfg)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]envBundleDownloadResult, len(serverNames))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+
+	var nodeErrors []string
+	candidates := make([]envBundleDownloadCandidate, 0, len(serverNames))
+	for _, result := range results {
+		if result.err != nil {
+			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+			continue
+		}
+		if result.response != nil && result.response.Found {
+			if result.response.UpdatedAt.IsZero() {
+				nodeErrors = append(nodeErrors, fmt.Sprintf("%s: environment bundle missing updatedAt metadata", result.serverName))
 				continue
 			}
 			candidates = append(candidates, envBundleDownloadCandidate{
-				response: response,
-				source:   serverName,
-				index:    index,
+				response: result.response,
+				source:   result.serverName,
+				index:    result.index,
 			})
 		}
 	}

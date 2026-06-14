@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -299,9 +300,12 @@ func TestDownloadEnvBundleFromMeshUsesFirstFoundBundle(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
 	updatedAt := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	calls := []string{}
+	var callsMu sync.Mutex
 	original := downloadEnvBundleFromServerFunc
 	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+		callsMu.Lock()
 		calls = append(calls, serverName)
+		callsMu.Unlock()
 		switch serverName {
 		case "node-a":
 			return nil, fmt.Errorf("unreachable")
@@ -326,12 +330,16 @@ func TestDownloadEnvBundleFromMeshUsesFirstFoundBundle(t *testing.T) {
 		t.Fatalf("source = %q, want node-c", source)
 	}
 	wantCalls := []string{"node-a", "node-b", "node-c"}
-	if len(calls) != len(wantCalls) {
-		t.Fatalf("calls = %v, want %v", calls, wantCalls)
+	callsMu.Lock()
+	gotCalls := slices.Clone(calls)
+	callsMu.Unlock()
+	slices.Sort(gotCalls)
+	if len(gotCalls) != len(wantCalls) {
+		t.Fatalf("calls = %v, want %v", gotCalls, wantCalls)
 	}
 	for i := range wantCalls {
-		if calls[i] != wantCalls[i] {
-			t.Fatalf("calls = %v, want %v", calls, wantCalls)
+		if gotCalls[i] != wantCalls[i] {
+			t.Fatalf("calls = %v, want %v", gotCalls, wantCalls)
 		}
 	}
 }
@@ -437,6 +445,52 @@ func TestDownloadEnvBundleFromMeshErrorsWhenAllNodesFail(t *testing.T) {
 	}
 }
 
+func TestDownloadEnvBundleFromMeshRunsConcurrently(t *testing.T) {
+	cfg := envBundleMeshTestConfig()
+	serverNames := []string{"node-a", "node-b", "node-c"}
+	updatedAt := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	started := make(chan string, len(serverNames))
+	release := make(chan struct{})
+
+	original := downloadEnvBundleFromServerFunc
+	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+		started <- serverName
+		<-release
+		if serverName == "node-b" {
+			return &takod.EnvBundleResponse{Found: true, Content: "bundle", UpdatedAt: updatedAt}, nil
+		}
+		return &takod.EnvBundleResponse{Found: false}, nil
+	}
+	t.Cleanup(func() {
+		downloadEnvBundleFromServerFunc = original
+	})
+
+	type result struct {
+		response *takod.EnvBundleResponse
+		source   string
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		response, source, err := downloadEnvBundleFromMesh(cfg, "production")
+		done <- result{response: response, source: source, err: err}
+	}()
+
+	waitForEnvMeshStarts(t, started, len(serverNames))
+	close(release)
+
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("downloadEnvBundleFromMesh returned error: %v", got.err)
+	}
+	if got.source != "node-b" {
+		t.Fatalf("source = %q, want node-b", got.source)
+	}
+	if got.response == nil || !got.response.Found || got.response.Content != "bundle" {
+		t.Fatalf("response = %#v, want node-b bundle", got.response)
+	}
+}
+
 func TestUploadEnvBundleToMeshRunsConcurrently(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
 	serverNames := []string{"node-a", "node-b", "node-c"}
@@ -463,7 +517,7 @@ func TestUploadEnvBundleToMeshRunsConcurrently(t *testing.T) {
 		done <- result{uploaded: uploaded, errors: errors}
 	}()
 
-	waitForEnvUploadStarts(t, started, len(serverNames))
+	waitForEnvMeshStarts(t, started, len(serverNames))
 	close(release)
 
 	got := <-done
@@ -495,7 +549,7 @@ func TestUploadEnvBundleToMeshReportsErrorsInServerOrder(t *testing.T) {
 	}
 }
 
-func waitForEnvUploadStarts(t *testing.T, started <-chan string, count int) {
+func waitForEnvMeshStarts(t *testing.T, started <-chan string, count int) {
 	t.Helper()
 	seen := map[string]bool{}
 	deadline := time.After(2 * time.Second)
@@ -504,7 +558,7 @@ func waitForEnvUploadStarts(t *testing.T, started <-chan string, count int) {
 		case name := <-started:
 			seen[name] = true
 		case <-deadline:
-			t.Fatalf("timed out waiting for env upload fanout; saw %v", seen)
+			t.Fatalf("timed out waiting for env mesh fanout; saw %v", seen)
 		}
 	}
 }
