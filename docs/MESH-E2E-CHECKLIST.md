@@ -143,6 +143,7 @@ cd <repo>
 tako env pull -e production --force
 tako state pull -e production
 tako state status -e production
+tako state lease -e production
 tako deploy -e production --yes
 ```
 
@@ -204,6 +205,7 @@ CI should run the same steps as a fresh laptop:
 tako env pull -e production --force
 tako state pull -e production
 tako state status -e production
+tako state lease -e production
 tako deploy -e production --yes
 ```
 

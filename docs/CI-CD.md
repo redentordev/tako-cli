@@ -96,6 +96,7 @@ jobs:
           tako env pull --force
           tako state pull
           tako state status
+          tako state lease
 
       - name: Deploy
         run: tako deploy --yes
