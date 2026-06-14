@@ -14,7 +14,6 @@ import (
 )
 
 var (
-	destroyServer   string
 	destroyPurgeAll bool
 	destroyForce    bool
 )
@@ -48,7 +47,6 @@ Safety Features:
 Examples:
    tako destroy                    # Decommission app, keep server setup
    tako destroy --purge-all        # Remove everything (requires confirmation)
-   tako destroy --server staging   # Destroy specific server only
    tako destroy --force            # Skip confirmation prompts
 
 ⚠️  WARNING: PURGE MODE (--purge-all) removes everything!
@@ -58,7 +56,6 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(destroyCmd)
-	destroyCmd.Flags().StringVarP(&destroyServer, "server", "s", "", "Specific server to destroy")
 	destroyCmd.Flags().BoolVar(&destroyPurgeAll, "purge-all", false, "Remove everything including server setup (DANGEROUS)")
 	destroyCmd.Flags().BoolVar(&destroyForce, "force", false, "Skip confirmation prompts")
 }
@@ -82,45 +79,9 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	defer stateLock.Release(lockInfo)
 
 	envName := getEnvironmentName(cfg)
-	envServerNames, err := cfg.GetEnvironmentServers(envName)
+	serversToDestroy, targetServerNames, err := destroyEnvironmentTargets(cfg, envName)
 	if err != nil {
-		return fmt.Errorf("failed to get environment servers: %w", err)
-	}
-	if len(envServerNames) == 0 {
-		return fmt.Errorf("no servers configured for environment %s", envName)
-	}
-
-	// Determine which environment nodes to destroy.
-	serversToDestroy := make(map[string]config.ServerConfig)
-	targetServerNames := append([]string(nil), envServerNames...)
-
-	if destroyServer != "" {
-		// Destroy specific server
-		server, ok := cfg.Servers[destroyServer]
-		if !ok {
-			return fmt.Errorf("server '%s' not found in config", destroyServer)
-		}
-		found := false
-		for _, serverName := range envServerNames {
-			if serverName == destroyServer {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("server %s is not part of environment %s", destroyServer, envName)
-		}
-		serversToDestroy[destroyServer] = server
-		targetServerNames = []string{destroyServer}
-	} else {
-		// Destroy all nodes in the active environment.
-		for _, serverName := range envServerNames {
-			server, ok := cfg.Servers[serverName]
-			if !ok {
-				return fmt.Errorf("server %s not found in config", serverName)
-			}
-			serversToDestroy[serverName] = server
-		}
+		return err
 	}
 
 	// Show warning and get confirmation
@@ -130,7 +91,8 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("⚠️  WARNING: You are about to %s the following servers:\n\n", mode)
-	for serverName, server := range serversToDestroy {
+	for _, serverName := range targetServerNames {
+		server := serversToDestroy[serverName]
 		fmt.Printf("   • %s (%s)\n", serverName, server.Host)
 	}
 
@@ -206,6 +168,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	if totalErrors > 0 {
 		fmt.Printf("⚠️  Destroy completed with %d errors\n", totalErrors)
 		fmt.Println("   Run with -v (verbose) flag for more details")
+		return fmt.Errorf("destroy incomplete: %d server(s) failed", totalErrors)
 	} else {
 		fmt.Println("✨ All servers destroyed successfully!")
 
@@ -217,6 +180,26 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func destroyEnvironmentTargets(cfg *config.Config, envName string) (map[string]config.ServerConfig, []string, error) {
+	envServerNames, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	if len(envServerNames) == 0 {
+		return nil, nil, fmt.Errorf("no servers configured for environment %s", envName)
+	}
+
+	servers := make(map[string]config.ServerConfig, len(envServerNames))
+	for _, serverName := range envServerNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return nil, nil, fmt.Errorf("server %s not found in config", serverName)
+		}
+		servers[serverName] = server
+	}
+	return servers, append([]string(nil), envServerNames...), nil
 }
 
 // destroySingleServer handles destruction of a single server.
