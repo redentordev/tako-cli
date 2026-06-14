@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,67 @@ func TestGitOutputTimesOut(t *testing.T) {
 	}
 }
 
+func TestStatusIgnoresTakoLocalState(t *testing.T) {
+	dir := initRealGitRepo(t)
+	takoHistoryDir := filepath.Join(dir, ".tako", "deployments", "dev", "history")
+	if err := os.MkdirAll(takoHistoryDir, 0755); err != nil {
+		t.Fatalf("create tako state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(takoHistoryDir, "deploy.json"), []byte("{}\n"), 0644); err != nil {
+		t.Fatalf("write tako state: %v", err)
+	}
+
+	client := NewClient(dir)
+	dirty, err := client.HasUncommittedChanges()
+	if err != nil {
+		t.Fatalf("HasUncommittedChanges returned error: %v", err)
+	}
+	if dirty {
+		t.Fatal("HasUncommittedChanges returned true for generated .tako state")
+	}
+
+	status, err := client.GetStatus()
+	if err != nil {
+		t.Fatalf("GetStatus returned error: %v", err)
+	}
+	if strings.Contains(status, ".tako") {
+		t.Fatalf("GetStatus included generated .tako state: %q", status)
+	}
+}
+
+func TestStatusReportsSourceChangesWhenTakoLocalStateExists(t *testing.T) {
+	dir := initRealGitRepo(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".tako"), 0755); err != nil {
+		t.Fatalf("create tako state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".tako", ".lock"), []byte("{}\n"), 0600); err != nil {
+		t.Fatalf("write tako lock: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.txt"), []byte("changed\n"), 0644); err != nil {
+		t.Fatalf("modify source file: %v", err)
+	}
+
+	client := NewClient(dir)
+	dirty, err := client.HasUncommittedChanges()
+	if err != nil {
+		t.Fatalf("HasUncommittedChanges returned error: %v", err)
+	}
+	if !dirty {
+		t.Fatal("HasUncommittedChanges returned false for modified source")
+	}
+
+	status, err := client.GetStatus()
+	if err != nil {
+		t.Fatalf("GetStatus returned error: %v", err)
+	}
+	if !strings.Contains(status, "app.txt") {
+		t.Fatalf("GetStatus = %q, want source file change", status)
+	}
+	if strings.Contains(status, ".tako") {
+		t.Fatalf("GetStatus included generated .tako state: %q", status)
+	}
+}
+
 func useFakeGitCommand(t *testing.T) func() {
 	t.Helper()
 	oldCommand := gitCommandContext
@@ -71,4 +133,29 @@ func TestGitCommandHelper(t *testing.T) {
 		_, _ = os.Stdout.WriteString(output)
 	}
 	os.Exit(0)
+}
+
+func initRealGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	runRealGit(t, dir, "init", "-q")
+	runRealGit(t, dir, "config", "user.email", "test@example.com")
+	runRealGit(t, dir, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(dir, "app.txt"), []byte("initial\n"), 0644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+	runRealGit(t, dir, "add", "app.txt")
+	runRealGit(t, dir, "commit", "-q", "-m", "initial")
+	return dir
+}
+
+func runRealGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, string(output))
+	}
+	return string(output)
 }
