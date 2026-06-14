@@ -282,6 +282,42 @@ func TestMergeRuntimeImageRefsPreservesNonDeployedActualImages(t *testing.T) {
 	}
 }
 
+func TestApplyDeployRemovalsCallsRemoveChangesOnly(t *testing.T) {
+	remover := &fakeDeployServiceRemover{}
+	plan := &reconcile.ReconciliationPlan{
+		Changes: []reconcile.ServiceChange{
+			{Type: reconcile.ChangeNone, ServiceName: "web"},
+			{Type: reconcile.ChangeRemove, ServiceName: "old-api"},
+			{Type: reconcile.ChangeUpdate, ServiceName: "worker"},
+			{Type: reconcile.ChangeRemove, ServiceName: "old-worker"},
+		},
+	}
+
+	if err := applyDeployRemovals(remover, plan); err != nil {
+		t.Fatalf("applyDeployRemovals returned error: %v", err)
+	}
+	if got := strings.Join(remover.removed, ","); got != "old-api,old-worker" {
+		t.Fatalf("removed services = %q, want old-api,old-worker", got)
+	}
+}
+
+func TestApplyDeployRemovalsReturnsServiceContext(t *testing.T) {
+	remover := &fakeDeployServiceRemover{err: errors.New("node failed")}
+	plan := &reconcile.ReconciliationPlan{
+		Changes: []reconcile.ServiceChange{
+			{Type: reconcile.ChangeRemove, ServiceName: "old-api"},
+		},
+	}
+
+	err := applyDeployRemovals(remover, plan)
+	if err == nil {
+		t.Fatal("applyDeployRemovals returned nil, want error")
+	}
+	if !strings.Contains(err.Error(), "old-api") || !strings.Contains(err.Error(), "node failed") {
+		t.Fatalf("error = %q, want service and cause", err)
+	}
+}
+
 type fakeDeployGitReader struct {
 	repository bool
 	dirty      bool
@@ -331,5 +367,18 @@ func (f *fakeLocalDeploymentSaver) SaveDeployment(deployment *localstate.Deploym
 		return f.err
 	}
 	f.saved = deployment
+	return nil
+}
+
+type fakeDeployServiceRemover struct {
+	removed []string
+	err     error
+}
+
+func (f *fakeDeployServiceRemover) RemoveServiceTakod(serviceName string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.removed = append(f.removed, serviceName)
 	return nil
 }

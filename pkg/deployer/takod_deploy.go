@@ -163,6 +163,32 @@ func (d *Deployer) DeployServiceTakod(serviceName string, service *config.Servic
 	return nil
 }
 
+func (d *Deployer) RemoveServiceTakod(serviceName string) error {
+	if d.sshPool == nil {
+		return fmt.Errorf("ssh pool not initialized")
+	}
+
+	targetServers, err := d.getTakodTargetServers()
+	if err != nil {
+		return fmt.Errorf("failed to get takod target servers: %w", err)
+	}
+	if len(targetServers) == 0 {
+		return fmt.Errorf("environment %s has no target servers", d.environment)
+	}
+
+	return runTakodNodeActions(targetServers, func(serverName string) error {
+		client, err := d.getEnvironmentClient(serverName)
+		if err != nil {
+			return err
+		}
+		return d.removeServiceViaTakod(client, takod.RemoveServiceRequest{
+			Project:     d.config.Project.Name,
+			Environment: d.environment,
+			Service:     serviceName,
+		})
+	})
+}
+
 type takodNodeActionResult struct {
 	serverName string
 	err        error
@@ -770,6 +796,13 @@ func uniqueAssignmentServers(assignments []takodAssignment) []string {
 func (d *Deployer) reconcileServiceViaTakod(client *ssh.Client, request takod.ReconcileServiceRequest) error {
 	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/reconcile-service", request); err != nil {
 		return fmt.Errorf("takod service reconciliation failed: %w", err)
+	}
+	return nil
+}
+
+func (d *Deployer) removeServiceViaTakod(client *ssh.Client, request takod.RemoveServiceRequest) error {
+	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/remove-service", request); err != nil {
+		return fmt.Errorf("takod service removal failed: %w", err)
 	}
 	return nil
 }
