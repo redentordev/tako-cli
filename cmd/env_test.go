@@ -12,8 +12,10 @@ import (
 	"testing"
 	"time"
 
+	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/crypto"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 )
 
@@ -293,6 +295,124 @@ func TestRestoreDownloadedEnvBundleDecryptsAndWritesFiles(t *testing.T) {
 	}
 	if string(envData) != "TOKEN=secret\n" {
 		t.Fatalf(".env = %q", envData)
+	}
+}
+
+func TestRunEnvPushAcquiresAndReleasesRemoteLeases(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	configPath := filepath.Join(tempDir, "tako.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+    password: ${TEST_SSH_PASSWORD}
+  node-b:
+    host: 10.0.0.2
+    user: deploy
+    password: ${TEST_SSH_PASSWORD}
+environments:
+  production:
+    servers: [node-a, node-b]
+    services:
+      web:
+        image: nginx:alpine
+`), 0600); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+	if err := os.WriteFile(".env", []byte("TOKEN=secret\n"), 0600); err != nil {
+		t.Fatalf("failed to write .env: %v", err)
+	}
+	t.Setenv("TEST_SSH_PASSWORD", "secret")
+	t.Setenv(envPassphraseVar, "correct horse battery staple")
+
+	oldCfgFile := cfgFile
+	oldEnvFlag := envFlag
+	oldVerbose := verbose
+	cfgFile = configPath
+	envFlag = "production"
+	verbose = false
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+		envFlag = oldEnvFlag
+		verbose = oldVerbose
+	})
+
+	manager := &recordingLeaseManager{}
+	var leasedOperation string
+	var leasedEnvironment string
+	var leasedServers []string
+	leaseAcquired := false
+	originalAcquire := acquireRemoteOperationLeasesFunc
+	acquireRemoteOperationLeasesFunc = func(pool *ssh.Pool, _ *config.Config, envName string, serverNames []string, operation string) (*remoteOperationLeaseSet, error) {
+		if pool == nil {
+			return nil, fmt.Errorf("missing ssh pool")
+		}
+		leasedOperation = operation
+		leasedEnvironment = envName
+		leasedServers = append([]string(nil), serverNames...)
+		leaseAcquired = true
+		return &remoteOperationLeaseSet{
+			operation: operation,
+			leases: []remoteOperationLease{
+				{serverName: "node-a", manager: manager, lease: &remotestate.LeaseInfo{ID: "lease-node-a", Environment: envName}},
+				{serverName: "node-b", manager: manager, lease: &remotestate.LeaseInfo{ID: "lease-node-b", Environment: envName}},
+			},
+		}, nil
+	}
+	t.Cleanup(func() {
+		acquireRemoteOperationLeasesFunc = originalAcquire
+	})
+
+	originalUpload := uploadEnvBundleToServerFunc
+	var uploaded []string
+	var uploadedMu sync.Mutex
+	uploadEnvBundleToServerFunc = func(_ *config.Config, serverName string, _ config.ServerConfig, request takod.EnvBundleRequest) error {
+		if !leaseAcquired {
+			return fmt.Errorf("upload started before lease acquisition")
+		}
+		if request.Project != "demo" || request.Environment != "production" || strings.TrimSpace(request.Content) == "" {
+			return fmt.Errorf("unexpected request: %#v", request)
+		}
+		uploadedMu.Lock()
+		uploaded = append(uploaded, serverName)
+		uploadedMu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() {
+		uploadEnvBundleToServerFunc = originalUpload
+	})
+
+	if err := runEnvPush(nil, nil); err != nil {
+		t.Fatalf("runEnvPush returned error: %v", err)
+	}
+
+	if leasedOperation != "env-push" {
+		t.Fatalf("lease operation = %q, want env-push", leasedOperation)
+	}
+	if leasedEnvironment != "production" {
+		t.Fatalf("lease environment = %q, want production", leasedEnvironment)
+	}
+	if !slices.Equal(leasedServers, []string{"node-a", "node-b"}) {
+		t.Fatalf("leased servers = %#v, want node-a,node-b", leasedServers)
+	}
+
+	uploadedMu.Lock()
+	slices.Sort(uploaded)
+	gotUploaded := append([]string(nil), uploaded...)
+	uploadedMu.Unlock()
+	if !slices.Equal(gotUploaded, []string{"node-a", "node-b"}) {
+		t.Fatalf("uploaded servers = %#v, want node-a,node-b", gotUploaded)
+	}
+
+	released := manager.Released()
+	if got, want := strings.Join(released, ","), "lease-node-b,lease-node-a"; got != want {
+		t.Fatalf("released leases = %q, want %q", got, want)
 	}
 }
 
