@@ -1,6 +1,10 @@
 package takod
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
 
 func TestParseActualState(t *testing.T) {
 	output := `
@@ -38,5 +42,26 @@ demo_production_web_2|registry.example.com/demo/web:abc|container-b|hash-b
 	actual := ParseActualState("demo", "production", output)
 	if got := actual.Services["web"].ConfigHash; got != "" {
 		t.Fatalf("mixed config hash = %q, want empty", got)
+	}
+}
+
+func TestGatherActualStateRejectsInvalidIdentifiers(t *testing.T) {
+	tests := []struct {
+		name        string
+		project     string
+		environment string
+		want        string
+	}{
+		{name: "project", project: "../demo", environment: "production", want: "invalid project name"},
+		{name: "environment", project: "demo", environment: "prod\nbad", want: "invalid environment name"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := GatherActualState(context.Background(), tt.project, tt.environment)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q error, got %v", tt.want, err)
+			}
+		})
 	}
 }

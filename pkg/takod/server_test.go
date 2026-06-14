@@ -106,6 +106,42 @@ func TestHandleActualRequiresProjectAndEnvironment(t *testing.T) {
 	}
 }
 
+func TestHandleActualRejectsInvalidIdentifiers(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "project",
+			url:  "/v1/actual?project=../demo&environment=production",
+			want: "invalid project name",
+		},
+		{
+			name: "environment",
+			url:  "/v1/actual?project=demo&environment=prod%0Abad",
+			want: "invalid environment name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+			req := httptest.NewRequest(http.MethodGet, tt.url, nil)
+			recorder := httptest.NewRecorder()
+
+			server.handleActual(recorder, req)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", recorder.Code)
+			}
+			if !strings.Contains(recorder.Body.String(), tt.want) {
+				t.Fatalf("unexpected response: %q", recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandleReconcileServiceRequiresPost(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
 	req := httptest.NewRequest(http.MethodGet, "/v1/reconcile-service", nil)
