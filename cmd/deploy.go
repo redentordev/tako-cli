@@ -343,7 +343,10 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if plan.IsEmpty() && !hasBuildServices(services) {
-		fmt.Println("\n✓ All services are up-to-date. Nothing to deploy.")
+		if err := deploy.ReconcileTakodProxy(services); err != nil {
+			return fmt.Errorf("failed to reconcile proxy routes: %w", err)
+		}
+		fmt.Println("\n✓ All services are up-to-date. Proxy routes reconciled.")
 		return nil
 	}
 	if plan.IsEmpty() {
