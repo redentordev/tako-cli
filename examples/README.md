@@ -6,6 +6,11 @@ Comprehensive examples demonstrating all features of the Tako CLI. Each example 
 
 We have ready-to-deploy examples covering common use cases:
 
+### Deployment Pattern Templates
+| Example | Description | Features |
+|---------|-------------|----------|
+| [deployment-patterns](./deployment-patterns/) | Copyable production shapes | Prebuilt images, static sites, dynamic APIs, volumes, databases, workers, cron-style runners, Python, Go |
+
 ### Web Frameworks & Applications
 | Example | Description | Features |
 |---------|-------------|----------|
@@ -78,7 +83,7 @@ example-name/
 
 4. **Deploy:**
    ```bash
-   start deploy prod
+   tako deploy -e production
    ```
 
 ## Example Progression

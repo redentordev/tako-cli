@@ -45,10 +45,12 @@ current provisioning path from scratch.
 ```
 
 Released CLI builds download the matching Linux release asset for the server
-architecture and install it as `/usr/local/bin/tako`. Development builds reuse
-an existing server-side binary when present and otherwise skip the systemd
-service install; this keeps local development independent from published
-releases.
+architecture and install it as `/usr/local/bin/tako`. The takod runtime is also
+refreshed during deploy, scale, and rollback when the node agent is missing or
+running a different CLI version. Development builds reuse an existing
+server-side binary when present; for local integration testing, set
+`TAKO_TAKOD_BINARY` to a Linux tako binary to upload that binary before the
+systemd service is restarted.
 
 ## Upgrade Behavior
 

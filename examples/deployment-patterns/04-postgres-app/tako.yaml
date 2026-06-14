@@ -1,0 +1,47 @@
+project:
+  name: pattern-postgres
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ${SSH_KEY}
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: ./app
+        port: 3000
+        dependsOn:
+          - postgres
+        proxy:
+          domain: postgres-app.${SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        env:
+          DATABASE_URL: postgresql://app:${POSTGRES_PASSWORD}@postgres:5432/app
+        healthCheck:
+          path: /health
+          interval: 30s
+          timeout: 5s
+          retries: 5
+
+      postgres:
+        image: postgres:16-alpine
+        persistent: true
+        volumes:
+          - postgres_data:/var/lib/postgresql/data
+        backup:
+          schedule: "0 2 * * *"
+          retain: 14
+        env:
+          POSTGRES_DB: app
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+        placement:
+          strategy: pinned
+          servers:
+            - prod

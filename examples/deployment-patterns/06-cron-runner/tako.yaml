@@ -1,0 +1,24 @@
+project:
+  name: pattern-cron
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ${SSH_KEY}
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      jobs:
+        image: alpine:3.20
+        command: sh -c "while true; do { date -u; echo running scheduled task; } | tee -a /var/log/tako-cron/run.log; sleep 3600; done"
+        restart: unless-stopped
+        volumes:
+          - cron_logs:/var/log/tako-cron
+        env:
+          TZ: UTC
+          JOB_NAME: hourly-maintenance
