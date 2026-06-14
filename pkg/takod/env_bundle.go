@@ -45,24 +45,12 @@ func ReadEnvBundle(ctx context.Context, dataDir string, req EnvBundleRequest) (*
 	if err != nil {
 		return nil, fmt.Errorf("failed to read environment bundle: %w", err)
 	}
-	if response, ok, err := decodeEnvBundleEnvelope(data); ok || err != nil {
-		if err != nil {
-			return nil, err
-		}
-		response.Path = path
-		return response, nil
-	}
-
-	info, err := os.Stat(path)
+	response, err := decodeEnvBundleEnvelope(data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to stat environment bundle: %w", err)
+		return nil, err
 	}
-	return &EnvBundleResponse{
-		Found:     true,
-		Content:   base64.StdEncoding.EncodeToString(data),
-		Path:      path,
-		UpdatedAt: info.ModTime().UTC(),
-	}, nil
+	response.Path = path
+	return response, nil
 }
 
 func WriteEnvBundle(ctx context.Context, dataDir string, req EnvBundleRequest) (*EnvBundleResponse, error) {
@@ -108,29 +96,29 @@ type envBundleEnvelope struct {
 	Content   string    `json:"content"`
 }
 
-func decodeEnvBundleEnvelope(data []byte) (*EnvBundleResponse, bool, error) {
+func decodeEnvBundleEnvelope(data []byte) (*EnvBundleResponse, error) {
 	var envelope envBundleEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
-		return nil, false, nil
-	}
-	if envelope.Version == 0 && strings.TrimSpace(envelope.Content) == "" {
-		return nil, false, nil
+		return nil, fmt.Errorf("failed to decode environment bundle envelope: %w", err)
 	}
 	if envelope.Version != envBundleEnvelopeVersion {
-		return nil, true, fmt.Errorf("unsupported environment bundle envelope version %d", envelope.Version)
+		return nil, fmt.Errorf("unsupported environment bundle envelope version %d", envelope.Version)
 	}
 	if envelope.UpdatedAt.IsZero() {
-		return nil, true, fmt.Errorf("environment bundle envelope missing updatedAt")
+		return nil, fmt.Errorf("environment bundle envelope missing updatedAt")
+	}
+	if strings.TrimSpace(envelope.Content) == "" {
+		return nil, fmt.Errorf("environment bundle envelope missing content")
 	}
 	content, err := base64.StdEncoding.DecodeString(strings.TrimSpace(envelope.Content))
 	if err != nil {
-		return nil, true, fmt.Errorf("invalid environment bundle envelope content: %w", err)
+		return nil, fmt.Errorf("invalid environment bundle envelope content: %w", err)
 	}
 	return &EnvBundleResponse{
 		Found:     true,
 		Content:   base64.StdEncoding.EncodeToString(content),
 		UpdatedAt: envelope.UpdatedAt.UTC(),
-	}, true, nil
+	}, nil
 }
 
 func validateEnvBundleRequest(req EnvBundleRequest, requireContent bool) error {

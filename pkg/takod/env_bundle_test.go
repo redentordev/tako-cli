@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -68,28 +69,25 @@ func TestWriteAndReadEnvBundle(t *testing.T) {
 	}
 }
 
-func TestReadEnvBundleSupportsLegacyRawContent(t *testing.T) {
+func TestReadEnvBundleRejectsRawContent(t *testing.T) {
 	dataDir := t.TempDir()
 	path := filepath.Join(dataDir, "env", "demo", "production.enc")
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
-		t.Fatalf("failed to create legacy bundle directory: %v", err)
+		t.Fatalf("failed to create bundle directory: %v", err)
 	}
-	if err := os.WriteFile(path, []byte("legacy encrypted bytes"), 0600); err != nil {
-		t.Fatalf("failed to write legacy bundle: %v", err)
+	if err := os.WriteFile(path, []byte("raw encrypted bytes"), 0600); err != nil {
+		t.Fatalf("failed to write raw bundle: %v", err)
 	}
 
-	read, err := ReadEnvBundle(context.Background(), dataDir, EnvBundleRequest{
+	_, err := ReadEnvBundle(context.Background(), dataDir, EnvBundleRequest{
 		Project:     "demo",
 		Environment: "production",
 	})
-	if err != nil {
-		t.Fatalf("ReadEnvBundle returned error: %v", err)
+	if err == nil {
+		t.Fatal("expected raw bundle content to be rejected")
 	}
-	if !read.Found || read.Content != base64.StdEncoding.EncodeToString([]byte("legacy encrypted bytes")) {
-		t.Fatalf("unexpected legacy env bundle response: %#v", read)
-	}
-	if read.UpdatedAt.IsZero() {
-		t.Fatal("expected legacy read response to use file modtime as UpdatedAt")
+	if !strings.Contains(err.Error(), "failed to decode environment bundle envelope") {
+		t.Fatalf("error = %q, want envelope decode context", err)
 	}
 }
 
