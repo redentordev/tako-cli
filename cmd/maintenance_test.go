@@ -85,6 +85,22 @@ func TestCleanupProxyFilesIncludesRuntimeAndMaintenanceOverrides(t *testing.T) {
 	}
 }
 
+func TestMaintenanceRuntimeNamesUseSharedRuntimeIDHelpers(t *testing.T) {
+	project := "demo-app"
+	environment := "prod_api"
+	service := "web"
+
+	if got, want := maintenanceNetworkName(project, environment), runtimeid.NetworkName(project, environment); got != want {
+		t.Fatalf("maintenance network = %q, want %q", got, want)
+	}
+	if got, want := maintenanceContainerName(project, environment, service), runtimeid.ContainerName(project, environment, maintenanceTakodServiceName(service), 1); got != want {
+		t.Fatalf("maintenance container = %q, want %q", got, want)
+	}
+	if strings.Contains(maintenanceContainerName(project, environment, service), project+"_"+service+"_maintenance") {
+		t.Fatalf("maintenance container name should not use raw project/service formatting")
+	}
+}
+
 func TestCleanupImageRepositoriesIncludesOnlyTakoOwnedImages(t *testing.T) {
 	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo", Version: "v1"}}
 	repositories := cleanupImageRepositories(cfg, "production", map[string]config.ServiceConfig{

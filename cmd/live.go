@@ -68,7 +68,7 @@ func runLive(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Disabling maintenance mode for %s on %d node(s)...\n\n", liveService, len(targetServers))
 
 	socket := takodSocketFromConfig(cfg)
-	networkName := fmt.Sprintf("tako_%s_%s", cfg.Project.Name, envName)
+	networkName := maintenanceNetworkName(cfg.Project.Name, envName)
 	request := takod.ReconcileServiceRequest{
 		Project:     cfg.Project.Name,
 		Environment: envName,

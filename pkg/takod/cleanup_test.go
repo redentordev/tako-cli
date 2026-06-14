@@ -203,6 +203,40 @@ func TestScopedProjectPruneDoesNotRunGlobalDockerSystemPrune(t *testing.T) {
 	}
 }
 
+func TestCleanupNetworksDisconnectsSharedProxyBeforeRemovingStageNetwork(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	target := runtimeid.NetworkName("demo", "production")
+	otherStage := runtimeid.NetworkName("demo", "preview")
+	otherProject := runtimeid.NetworkName("other", "production")
+	t.Setenv("TAKO_FAKE_NETWORK_LS_OUTPUT", strings.Join([]string{target, otherStage, otherProject}, "\n")+"\n")
+
+	removed, err := cleanupNetworks(context.Background(), "demo", "production")
+	if err != nil {
+		t.Fatalf("cleanupNetworks returned error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	entries := readCommandLog(t, logPath)
+	wantDisconnect := "docker network disconnect -f " + target + " tako-proxy"
+	wantRemove := "docker network rm " + target
+	if !slices.Contains(entries, wantDisconnect) {
+		t.Fatalf("docker log missing proxy disconnect %q in %#v", wantDisconnect, entries)
+	}
+	if !slices.Contains(entries, wantRemove) {
+		t.Fatalf("docker log missing network remove %q in %#v", wantRemove, entries)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry, otherStage) || strings.Contains(entry, otherProject) {
+			t.Fatalf("cleanup touched unrelated network via %q; all entries %#v", entry, entries)
+		}
+	}
+}
+
 func TestSecureProxyLogPermissionsSetsModes(t *testing.T) {
 	root := t.TempDir()
 	subdir := filepath.Join(root, "archive")

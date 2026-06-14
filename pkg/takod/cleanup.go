@@ -243,23 +243,28 @@ func cleanupNetworks(ctx context.Context, project string, environment string) (i
 			continue
 		}
 		if environment != "" {
-			if name == runtimeid.NetworkName(project, environment) || name == fmt.Sprintf("tako_%s_%s", project, environment) {
+			if name == runtimeid.NetworkName(project, environment) {
 				names = append(names, name)
 			}
 			continue
 		}
-		if strings.HasPrefix(name, runtimeid.NetworkProjectPrefix(project)) || strings.HasPrefix(name, "tako_"+project+"_") {
+		if strings.HasPrefix(name, runtimeid.NetworkProjectPrefix(project)) {
 			names = append(names, name)
 		}
 	}
 	removed := 0
 	for _, name := range names {
+		disconnectProxyFromNetwork(ctx, name)
 		if _, err := runDocker(ctx, "network", "rm", name); err != nil {
 			return removed, fmt.Errorf("failed to remove docker network %s: %w", name, err)
 		}
 		removed++
 	}
 	return removed, nil
+}
+
+func disconnectProxyFromNetwork(ctx context.Context, network string) {
+	_, _ = runDocker(ctx, "network", "disconnect", "-f", network, "tako-proxy")
 }
 
 func cleanupImages(ctx context.Context, project string, imageRepositories []string) (int, error) {
