@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -90,6 +91,41 @@ func cleanupProxyFiles(project string, environment string, services map[string]c
 	}
 	sort.Strings(files)
 	return files
+}
+
+func cleanupImageRepositories(cfg *config.Config, environment string, services map[string]config.ServiceConfig) []string {
+	seen := make(map[string]bool)
+	for serviceName, service := range services {
+		if service.Build == "" && service.Image != "" {
+			continue
+		}
+		repository := imageRepositoryFromRef(cfg.GetFullImageName(serviceName, environment))
+		if repository != "" {
+			seen[repository] = true
+		}
+	}
+	repositories := make([]string, 0, len(seen))
+	for repository := range seen {
+		repositories = append(repositories, repository)
+	}
+	sort.Strings(repositories)
+	return repositories
+}
+
+func imageRepositoryFromRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if digest := strings.Index(ref, "@"); digest >= 0 {
+		ref = ref[:digest]
+	}
+	lastSlash := strings.LastIndex(ref, "/")
+	lastColon := strings.LastIndex(ref, ":")
+	if lastColon > lastSlash {
+		ref = ref[:lastColon]
+	}
+	return ref
 }
 
 func runtimeProxyConfigFileName(project string, environment string) string {

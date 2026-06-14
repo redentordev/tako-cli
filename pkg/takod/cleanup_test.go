@@ -44,7 +44,7 @@ func TestImageRepositoryMatchesProject(t *testing.T) {
 		"registry.example.com/demo/web",
 		"localhost:5000/demo/web",
 	} {
-		if !imageRepositoryMatchesProject(repo, "demo") {
+		if !imageRepositoryMatchesProject(repo, "demo", nil) {
 			t.Fatalf("expected repository %q to match project", repo)
 		}
 	}
@@ -54,9 +54,42 @@ func TestImageRepositoryMatchesProject(t *testing.T) {
 		"company/demo-web",
 		"registry.example.com/notdemo/web",
 	} {
-		if imageRepositoryMatchesProject(repo, "demo") {
+		if imageRepositoryMatchesProject(repo, "demo", nil) {
 			t.Fatalf("expected repository %q not to match project", repo)
 		}
+	}
+}
+
+func TestImageRepositoryMatchesExactAllowlist(t *testing.T) {
+	allowed := []string{"registry.example.com/demo/web", "registry.example.com/demo/api"}
+	if !imageRepositoryMatchesProject("registry.example.com/demo/web", "demo", allowed) {
+		t.Fatal("expected exact allowlisted repository to match")
+	}
+	for _, repo := range []string{
+		"demo/web",
+		"registry.example.com/demo/unrelated",
+		"registry.example.com/demo/web-extra",
+	} {
+		if imageRepositoryMatchesProject(repo, "demo", allowed) {
+			t.Fatalf("expected repository %q not to match exact allowlist", repo)
+		}
+	}
+}
+
+func TestValidateCleanupRequestRejectsUnsafeImageRepository(t *testing.T) {
+	if err := validateCleanupRequest(CleanupRequest{
+		Project:           "demo",
+		ImageRepositories: []string{"localhost:5000/demo/web"},
+	}); err != nil {
+		t.Fatalf("expected registry repository with port to be accepted: %v", err)
+	}
+
+	err := validateCleanupRequest(CleanupRequest{
+		Project:           "demo",
+		ImageRepositories: []string{"demo/web:latest"},
+	})
+	if err == nil {
+		t.Fatal("expected tagged image repository to be rejected")
 	}
 }
 

@@ -73,6 +73,11 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	targetServerNames := sortedCleanupServerNames(serversToClean)
+	services, err := cfg.GetServices(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get services for environment %s: %w", envName, err)
+	}
+	imageRepositories := cleanupImageRepositories(cfg, envName, services)
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServerNames, "cleanup")
@@ -96,6 +101,8 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	results := collectCleanupNodes(serversToClean, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
 		return cleanupSingleNode(cfg, serverCfg, takod.CleanupRequest{
 			Project:                cfg.Project.Name,
+			Environment:            envName,
+			ImageRepositories:      imageRepositories,
 			KeepImages:             keepImages,
 			CleanOldImages:         true,
 			CleanStoppedContainers: true,

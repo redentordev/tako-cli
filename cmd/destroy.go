@@ -253,6 +253,7 @@ func decommissionApp(client *ssh.Client, cfg *config.Config, envName string, ver
 		RemoveDeployFiles: true,
 		RemoveTakodState:  true,
 		ProxyFiles:        cleanupProxyFiles(cfg.Project.Name, envName, services),
+		ImageRepositories: cleanupImageRepositories(cfg, envName, services),
 	})
 	if err != nil {
 		return err

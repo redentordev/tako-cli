@@ -21,6 +21,9 @@ func TestRemoveCleanupRequestTargetsEnvironmentState(t *testing.T) {
 		"web": {
 			Proxy: &config.ProxyConfig{Domain: "example.com"},
 		},
+		"db": {
+			Image: "postgres:16",
+		},
 	}
 
 	request := removeCleanupRequest(cfg, "production", services)
@@ -35,5 +38,8 @@ func TestRemoveCleanupRequestTargetsEnvironmentState(t *testing.T) {
 	}
 	if !slices.Contains(request.ProxyFiles, "demo-production.yml") {
 		t.Fatalf("proxy files = %#v, want demo-production.yml", request.ProxyFiles)
+	}
+	if !slices.Equal(request.ImageRepositories, []string{"demo/web"}) {
+		t.Fatalf("image repositories = %#v, want only Tako-owned web repository", request.ImageRepositories)
 	}
 }
