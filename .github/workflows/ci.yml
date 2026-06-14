@@ -40,6 +40,9 @@ jobs:
       - name: Check generated diff
         run: git diff --check
 
+      - name: Check shell script syntax
+        run: find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+
       - name: Test
         run: go test ./...
 
