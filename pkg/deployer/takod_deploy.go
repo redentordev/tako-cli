@@ -421,6 +421,10 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 			return fmt.Errorf("service %s has proxy config but no port", serviceName)
 		}
 	}
+	publishMeshUpstreams, err := d.shouldPublishMeshUpstreams()
+	if err != nil {
+		return err
+	}
 
 	envFileContent, err := d.buildTakodEnvFileContent(service)
 	if err != nil {
@@ -448,28 +452,43 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Labels:         serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
 	}
 	for _, slot := range slots {
-		containerName := d.takodContainerName(serviceName, slot)
-		container := takod.ContainerSpec{Name: containerName}
-		if service.IsPublic() {
-			meshHostIP, err := d.meshHostIPForServer(serverName)
-			if err != nil {
-				return err
-			}
-			meshPort, err := d.meshUpstreamPort(serviceName, slot)
-			if err != nil {
-				return err
-			}
-			container.Publishes = append(container.Publishes, fmt.Sprintf("%s:%d:%d", meshHostIP, meshPort, service.Port))
-		} else if service.Port > 0 {
-			if len(slots) > 1 {
-				return fmt.Errorf("service %s publishes port %d without proxy but has multiple replicas on the same node", serviceName, service.Port)
-			}
-			container.Publishes = append(container.Publishes, fmt.Sprintf("%d:%d", service.Port, service.Port))
+		container, err := d.buildTakodContainerSpec(serverName, serviceName, service, slot, len(slots), publishMeshUpstreams)
+		if err != nil {
+			return err
 		}
 		request.Containers = append(request.Containers, container)
 	}
 
 	return d.reconcileServiceViaTakod(client, request)
+}
+
+func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string, service *config.ServiceConfig, slot int, slotCount int, publishMeshUpstreams bool) (takod.ContainerSpec, error) {
+	container := takod.ContainerSpec{Name: d.takodContainerName(serviceName, slot)}
+	if service.IsPublic() && publishMeshUpstreams {
+		meshHostIP, err := d.meshHostIPForServer(serverName)
+		if err != nil {
+			return container, err
+		}
+		meshPort, err := d.meshUpstreamPort(serviceName, slot)
+		if err != nil {
+			return container, err
+		}
+		container.Publishes = append(container.Publishes, fmt.Sprintf("%s:%d:%d", meshHostIP, meshPort, service.Port))
+	} else if !service.IsPublic() && service.Port > 0 {
+		if slotCount > 1 {
+			return container, fmt.Errorf("service %s publishes port %d without proxy but has multiple replicas on the same node", serviceName, service.Port)
+		}
+		container.Publishes = append(container.Publishes, fmt.Sprintf("%d:%d", service.Port, service.Port))
+	}
+	return container, nil
+}
+
+func (d *Deployer) shouldPublishMeshUpstreams() (bool, error) {
+	servers, err := d.config.GetEnvironmentServers(d.environment)
+	if err != nil {
+		return false, err
+	}
+	return len(servers) > 1, nil
 }
 
 func serviceRuntimeLabels(project string, environment string, serviceName string, service config.ServiceConfig) map[string]string {
