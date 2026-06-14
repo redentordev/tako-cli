@@ -63,7 +63,7 @@ func WriteStateDocument(ctx context.Context, dataDir string, req StateDocumentRe
 	if req.Document == stateDocumentEvent {
 		return nil, fmt.Errorf("state events are append-only")
 	}
-	if err := validateStateDocumentContent(req.Document, req.Content); err != nil {
+	if err := validateStateDocumentContent(req); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -99,7 +99,7 @@ func AppendStateEvent(ctx context.Context, dataDir string, req StateDocumentRequ
 	if err := validateStateDocumentRequest(req, true); err != nil {
 		return nil, err
 	}
-	if err := validateStateDocumentContent(req.Document, req.Content); err != nil {
+	if err := validateStateDocumentContent(req); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -151,23 +151,86 @@ func validateStateDocumentRequest(req StateDocumentRequest, requireContent bool)
 	return nil
 }
 
-func validateStateDocumentContent(document string, content string) error {
-	decoder := json.NewDecoder(strings.NewReader(content))
+func validateStateDocumentContent(req StateDocumentRequest) error {
+	decoder := json.NewDecoder(strings.NewReader(req.Content))
 	var raw json.RawMessage
 	if err := decoder.Decode(&raw); err != nil {
-		return fmt.Errorf("invalid %s state document JSON: %w", document, err)
+		return fmt.Errorf("invalid %s state document JSON: %w", req.Document, err)
 	}
 
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		if err == nil {
-			return fmt.Errorf("%s state document must contain a single JSON value", document)
+			return fmt.Errorf("%s state document must contain a single JSON value", req.Document)
 		}
-		return fmt.Errorf("invalid %s state document JSON: %w", document, err)
+		return fmt.Errorf("invalid %s state document JSON: %w", req.Document, err)
 	}
 
 	if trimmed := bytes.TrimSpace(raw); len(trimmed) == 0 || trimmed[0] != '{' {
-		return fmt.Errorf("%s state document must be a JSON object", document)
+		return fmt.Errorf("%s state document must be a JSON object", req.Document)
+	}
+	if err := validateStateDocumentIdentity(req, raw); err != nil {
+		return err
+	}
+	return nil
+}
+
+type stateDocumentIdentity struct {
+	Project     string `json:"project"`
+	ProjectName string `json:"projectName"`
+	Environment string `json:"environment"`
+	Node        string `json:"node"`
+	RevisionID  string `json:"revisionId"`
+	ID          string `json:"id"`
+}
+
+func validateStateDocumentIdentity(req StateDocumentRequest, raw json.RawMessage) error {
+	var identity stateDocumentIdentity
+	if err := json.Unmarshal(raw, &identity); err != nil {
+		return fmt.Errorf("invalid %s state document identity: %w", req.Document, err)
+	}
+
+	switch req.Document {
+	case stateDocumentDesired:
+		return validateProjectEnvRevisionIdentity(req, identity.Project, identity.Environment, identity.RevisionID, "revisionId")
+	case stateDocumentActual:
+		return validateProjectEnvIdentity(req, identity.Project, identity.Environment)
+	case stateDocumentActualNode:
+		if err := validateProjectEnvIdentity(req, identity.Project, identity.Environment); err != nil {
+			return err
+		}
+		if identity.Node != req.Node {
+			return fmt.Errorf("state document node mismatch: content has %q, request has %q", identity.Node, req.Node)
+		}
+	case stateDocumentHistory:
+		return validateProjectEnvIdentity(req, identity.ProjectName, identity.Environment)
+	case stateDocumentDeployment:
+		return validateProjectEnvRevisionIdentity(req, identity.ProjectName, identity.Environment, identity.ID, "id")
+	case stateDocumentEvent:
+		return validateProjectEnvIdentity(req, identity.Project, identity.Environment)
+	}
+	return nil
+}
+
+func validateProjectEnvIdentity(req StateDocumentRequest, project string, environment string) error {
+	if project != req.Project {
+		return fmt.Errorf("state document project mismatch: content has %q, request has %q", project, req.Project)
+	}
+	if environment != req.Environment {
+		return fmt.Errorf("state document environment mismatch: content has %q, request has %q", environment, req.Environment)
+	}
+	return nil
+}
+
+func validateProjectEnvRevisionIdentity(req StateDocumentRequest, project string, environment string, revisionID string, field string) error {
+	if err := validateProjectEnvIdentity(req, project, environment); err != nil {
+		return err
+	}
+	if revisionID == "" {
+		return fmt.Errorf("state document %s is required", field)
+	}
+	if req.RevisionID != "" && revisionID != req.RevisionID {
+		return fmt.Errorf("state document %s mismatch: content has %q, request has %q", field, revisionID, req.RevisionID)
 	}
 	return nil
 }
