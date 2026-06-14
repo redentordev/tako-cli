@@ -368,7 +368,6 @@ CI/CD runners use the same takod path as a laptop. See
 
 - `-v, --verbose` - Show detailed output
 - `-e, --env <name>` - Target specific environment
-- `-s, --server <name>` - Target specific server
 - `--service <name>` - Target specific service
 - `--config <path>` - Use custom config file
 

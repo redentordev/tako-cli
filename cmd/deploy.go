@@ -26,7 +26,6 @@ import (
 )
 
 var (
-	deployServer  string
 	deployService string
 	skipBuild     bool
 	deployYes     bool
@@ -39,7 +38,7 @@ var deployCmd = &cobra.Command{
 
 The deployment process:
   1. Build or select the service image
-  2. Prepare selected takod nodes
+  2. Prepare environment takod nodes
   3. Recreate service containers to match desired state
   4. Replicate deployment state
 
@@ -49,7 +48,6 @@ If a step fails, deployment stops and records the failed state for inspection or
 
 func init() {
 	rootCmd.AddCommand(deployCmd)
-	deployCmd.Flags().StringVarP(&deployServer, "server", "s", "", "Deploy to specific server")
 	deployCmd.Flags().StringVar(&deployService, "service", "", "Deploy specific service")
 	deployCmd.Flags().BoolVar(&skipBuild, "skip-build", false, "Skip building the service image")
 	deployCmd.Flags().BoolVarP(&deployYes, "yes", "y", false, "Skip confirmation prompts (non-interactive mode)")
@@ -225,24 +223,6 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("server %s not found in configuration", serverName)
 		}
 		servers[serverName] = server
-	}
-	if deployServer != "" {
-		server, exists := cfg.Servers[deployServer]
-		if !exists {
-			return fmt.Errorf("server %s not found in configuration", deployServer)
-		}
-		found := false
-		for _, serverName := range envServerNames {
-			if serverName == deployServer {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("server %s is not part of environment %s", deployServer, envName)
-		}
-		servers = map[string]config.ServerConfig{deployServer: server}
-		serverNames = []string{deployServer}
 	}
 
 	// Determine which services to deploy
@@ -564,7 +544,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	if !deploymentFailed {
 		proxyServices := services
-		if deployService != "" && deployServer == "" {
+		if deployService != "" {
 			proxyServices = cloneServiceMap(allServices)
 		}
 		if err := deploy.ReconcileTakodProxy(proxyServices); err != nil {
@@ -590,7 +570,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		finalActualState := reconcile.AggregateActualStateByServer(finalNodeActualState)
 		runtimeServices := services
 		runtimeImageRefs := imageRefs
-		if deployService != "" && deployServer == "" {
+		if deployService != "" {
 			runtimeServices = cloneServiceMap(allServices)
 			runtimeImageRefs = mergeRuntimeImageRefs(cfg, envName, runtimeServices, imageRefs, finalActualState)
 		}
