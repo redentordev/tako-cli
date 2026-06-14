@@ -212,6 +212,85 @@ func TestBuildTakodHealthSpecUsesQuotedCommand(t *testing.T) {
 	}
 }
 
+func TestShouldPublishMeshUpstreamsOnlyForMultiNodeEnvironments(t *testing.T) {
+	oneNode := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
+	got, err := oneNode.shouldPublishMeshUpstreams()
+	if err != nil {
+		t.Fatalf("one-node shouldPublishMeshUpstreams returned error: %v", err)
+	}
+	if got {
+		t.Fatal("one-node environments should not publish mesh upstream host ports")
+	}
+
+	twoNodes := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production"}
+	got, err = twoNodes.shouldPublishMeshUpstreams()
+	if err != nil {
+		t.Fatalf("two-node shouldPublishMeshUpstreams returned error: %v", err)
+	}
+	if !got {
+		t.Fatal("multi-node environments should publish mesh upstream host ports")
+	}
+}
+
+func TestBuildTakodContainerSpecDoesNotPublishPublicOneNodeService(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
+	container, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
+		Port:  80,
+		Proxy: &config.ProxyConfig{Domain: "example.com"},
+	}, 1, 1, false)
+	if err != nil {
+		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
+	}
+	if len(container.Publishes) != 0 {
+		t.Fatalf("public one-node service should not publish direct host ports: %#v", container.Publishes)
+	}
+}
+
+func TestBuildTakodContainerSpecPublishesPublicMultiNodeServiceOnMeshIP(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production"}
+	env := deploy.config.Environments["production"]
+	env.Services = map[string]config.ServiceConfig{
+		"web": {
+			Port:  80,
+			Proxy: &config.ProxyConfig{Domain: "example.com"},
+		},
+	}
+	deploy.config.Environments["production"] = env
+
+	container, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
+		Port:  80,
+		Proxy: &config.ProxyConfig{Domain: "example.com"},
+	}, 1, 1, true)
+	if err != nil {
+		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
+	}
+	if len(container.Publishes) != 1 {
+		t.Fatalf("public multi-node service should publish one mesh port: %#v", container.Publishes)
+	}
+	if !strings.HasPrefix(container.Publishes[0], "10.210.0.1:") || !strings.HasSuffix(container.Publishes[0], ":80") {
+		t.Fatalf("public multi-node publish should bind the mesh IP and container port: %#v", container.Publishes)
+	}
+}
+
+func TestBuildTakodContainerSpecPublishesInternalDirectPort(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
+	container, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, 1, false)
+	if err != nil {
+		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
+	}
+	if !slices.Equal(container.Publishes, []string{"9100:9100"}) {
+		t.Fatalf("internal direct publish = %#v, want 9100:9100", container.Publishes)
+	}
+}
+
+func TestBuildTakodContainerSpecRejectsReplicatedInternalDirectPort(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
+	_, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, 2, false)
+	if err == nil {
+		t.Fatal("expected replicated direct host port to be rejected")
+	}
+}
+
 func TestPlanTakodAssignmentsHonorsPlacementConstraints(t *testing.T) {
 	cfg := testTakodDeployConfig([]string{"node-a", "node-b", "node-c"})
 	cfg.Servers["node-a"] = config.ServerConfig{Host: "node-a.example.test", User: "root", Labels: map[string]string{"role": "web"}}

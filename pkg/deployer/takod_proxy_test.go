@@ -1,6 +1,7 @@
 package deployer
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -21,12 +22,16 @@ func TestRenderTakodProxyDynamicConfigUsesLocalAndMeshUpstreams(t *testing.T) {
 	}
 
 	configText := string(data)
+	remotePort, err := deploy.meshUpstreamPort("web", 2)
+	if err != nil {
+		t.Fatalf("meshUpstreamPort returned error: %v", err)
+	}
 	for _, expected := range []string{
 		"rule: Host(`example.com`)",
 		"entryPoints:",
 		"certResolver: letsencrypt",
 		"url: http://" + runtimeid.ContainerName("demo", "production", "web", 1) + ":3000",
-		"url: http://10.210.0.2:21002",
+		fmt.Sprintf("url: http://10.210.0.2:%d", remotePort),
 		"path: /health",
 		"interval: 15s",
 	} {
@@ -49,8 +54,12 @@ func TestRenderTakodProxyDynamicConfigUsesLocalUpstreamForCurrentNode(t *testing
 	}
 
 	configText := string(data)
+	remotePort, err := deploy.meshUpstreamPort("web", 1)
+	if err != nil {
+		t.Fatalf("meshUpstreamPort returned error: %v", err)
+	}
 	for _, expected := range []string{
-		"url: http://10.210.0.1:21001",
+		fmt.Sprintf("url: http://10.210.0.1:%d", remotePort),
 		"url: http://" + runtimeid.ContainerName("demo", "production", "web", 2) + ":3000",
 	} {
 		if !strings.Contains(configText, expected) {
@@ -135,8 +144,40 @@ func TestRenderTakodProxyDynamicConfigUsesServiceHealthCheckFallback(t *testing.
 
 func TestMeshUpstreamPortRejectsSlotRangeCollision(t *testing.T) {
 	deploy := testProxyDeployer()
-	if _, err := deploy.meshUpstreamPort("web", meshUpstreamPortStep); err == nil {
+	if _, err := deploy.meshUpstreamPort("web", meshUpstreamPortSlotLimit+1); err == nil {
 		t.Fatal("expected slot at per-service range boundary to be rejected")
+	}
+}
+
+func TestMeshUpstreamPortIsScopedByProjectEnvironmentAndService(t *testing.T) {
+	deploy := testProxyDeployer()
+	basePort, err := deploy.meshUpstreamPort("web", 1)
+	if err != nil {
+		t.Fatalf("meshUpstreamPort returned error: %v", err)
+	}
+
+	otherProject := testProxyDeployer()
+	otherProject.config.Project.Name = "other"
+	otherProjectPort, err := otherProject.meshUpstreamPort("web", 1)
+	if err != nil {
+		t.Fatalf("other project meshUpstreamPort returned error: %v", err)
+	}
+
+	otherEnvironment := testProxyDeployer()
+	otherEnvironment.environment = "staging"
+	otherEnvironment.config.Environments["staging"] = otherEnvironment.config.Environments["production"]
+	otherEnvironmentPort, err := otherEnvironment.meshUpstreamPort("web", 1)
+	if err != nil {
+		t.Fatalf("other environment meshUpstreamPort returned error: %v", err)
+	}
+
+	apiPort, err := deploy.meshUpstreamPort("api", 1)
+	if err != nil {
+		t.Fatalf("api meshUpstreamPort returned error: %v", err)
+	}
+
+	if basePort == otherProjectPort || basePort == otherEnvironmentPort || basePort == apiPort {
+		t.Fatalf("mesh upstream ports should differ by app/stage/service: base=%d otherProject=%d otherEnv=%d api=%d", basePort, otherProjectPort, otherEnvironmentPort, apiPort)
 	}
 }
 

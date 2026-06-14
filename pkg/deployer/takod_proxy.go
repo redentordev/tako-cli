@@ -2,6 +2,7 @@ package deployer
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net"
 	"sort"
 	"strconv"
@@ -16,9 +17,9 @@ import (
 )
 
 const (
-	meshUpstreamPortBase = 20000
-	meshUpstreamPortStep = 1000
-	meshUpstreamPortMax  = 65000
+	meshUpstreamPortBase      = 20000
+	meshUpstreamPortMax       = 65000
+	meshUpstreamPortSlotLimit = 64
 )
 
 type traefikDynamicConfig struct {
@@ -318,9 +319,29 @@ func (d *Deployer) meshUpstreamPort(serviceName string, slot int) (int, error) {
 	if slot <= 0 {
 		return 0, fmt.Errorf("invalid takod slot %d for %s", slot, serviceName)
 	}
-	if slot >= meshUpstreamPortStep {
-		return 0, fmt.Errorf("service %s slot %d exceeds per-service mesh upstream limit %d", serviceName, slot, meshUpstreamPortStep-1)
+	if slot > meshUpstreamPortSlotLimit {
+		return 0, fmt.Errorf("service %s slot %d exceeds per-service mesh upstream limit %d", serviceName, slot, meshUpstreamPortSlotLimit)
 	}
+	if d.config == nil || d.config.Project.Name == "" || d.environment == "" {
+		return 0, fmt.Errorf("project and environment are required for mesh upstream port allocation")
+	}
+	blockCount := (meshUpstreamPortMax - meshUpstreamPortBase + 1) / meshUpstreamPortSlotLimit
+	if blockCount <= 0 {
+		return 0, fmt.Errorf("invalid mesh upstream port range")
+	}
+	block, err := d.meshUpstreamPortBlock(serviceName, blockCount)
+	if err != nil {
+		return 0, err
+	}
+
+	port := meshUpstreamPortBase + block*meshUpstreamPortSlotLimit + (slot - 1)
+	if port > meshUpstreamPortMax {
+		return 0, fmt.Errorf("mesh upstream port %d for %s slot %d exceeds maximum %d", port, serviceName, slot, meshUpstreamPortMax)
+	}
+	return port, nil
+}
+
+func (d *Deployer) meshUpstreamPortBlock(serviceName string, blockCount int) (int, error) {
 	services, err := d.config.GetServices(d.environment)
 	if err != nil {
 		return 0, err
@@ -331,22 +352,33 @@ func (d *Deployer) meshUpstreamPort(serviceName string, slot int) (int, error) {
 	}
 	sort.Strings(serviceNames)
 
-	serviceIndex := -1
-	for i, name := range serviceNames {
-		if name == serviceName {
-			serviceIndex = i
+	allocated := make(map[int]string, len(serviceNames))
+	for _, name := range serviceNames {
+		block := preferredMeshUpstreamPortBlock(d.config.Project.Name, d.environment, name, blockCount)
+		for attempts := 0; attempts < blockCount; attempts++ {
+			candidate := (block + attempts) % blockCount
+			if _, exists := allocated[candidate]; exists {
+				continue
+			}
+			allocated[candidate] = name
+			if name == serviceName {
+				return candidate, nil
+			}
 			break
 		}
 	}
-	if serviceIndex < 0 {
-		return 0, fmt.Errorf("service %s not found", serviceName)
-	}
+	return 0, fmt.Errorf("service %s not found or no mesh upstream port blocks are available", serviceName)
+}
 
-	port := meshUpstreamPortBase + serviceIndex*meshUpstreamPortStep + slot
-	if port > meshUpstreamPortMax {
-		return 0, fmt.Errorf("mesh upstream port %d for %s slot %d exceeds maximum %d", port, serviceName, slot, meshUpstreamPortMax)
+func preferredMeshUpstreamPortBlock(project string, environment string, serviceName string, blockCount int) int {
+	hash := fnv.New32a()
+	for index, part := range []string{project, environment, serviceName} {
+		if index > 0 {
+			_, _ = hash.Write([]byte{0})
+		}
+		_, _ = hash.Write([]byte(part))
 	}
-	return port, nil
+	return int(hash.Sum32() % uint32(blockCount))
 }
 
 func proxyHostRule(proxy *config.ProxyConfig) (string, error) {
