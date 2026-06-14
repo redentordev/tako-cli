@@ -272,6 +272,10 @@ func applyLocalWithRunner(ctx context.Context, runner wireGuardRunner, node Node
 	if err != nil {
 		return nil, err
 	}
+	nodeAddress, err := wireGuardInterfaceAddress(node.Address)
+	if err != nil {
+		return nil, fmt.Errorf("node mesh address is invalid: %w", err)
+	}
 	privateKey, err := runner.ReadFile(privateKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read WireGuard private key: %w", err)
@@ -305,7 +309,7 @@ func applyLocalWithRunner(ctx context.Context, runner wireGuardRunner, node Node
 			"else wg-quick up %[1]s; fi; "+
 			"wg show %[1]s >/dev/null",
 		quotedIface,
-		shellQuote(node.Address),
+		shellQuote(nodeAddress),
 		syncCmd,
 	)
 	if _, err := runner.Run(ctx, applyCmd); err != nil {
