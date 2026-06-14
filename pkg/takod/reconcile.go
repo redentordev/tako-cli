@@ -1,7 +1,6 @@
 package takod
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -418,9 +417,9 @@ func waitForContainerHealthy(ctx context.Context, containerName string, health *
 
 func runDocker(ctx context.Context, args ...string) (string, error) {
 	cmd := dockerCommandContext(ctx, "docker", args...)
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
+	cmd.Stdout = output
+	cmd.Stderr = output
 	err := cmd.Run()
 	return output.String(), err
 }
