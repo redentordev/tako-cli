@@ -781,7 +781,6 @@ func (p *Provisioner) SetupDeployUser(username string) error {
 		if _, err := p.client.Execute(buildTakodAccessCommand(username)); err != nil {
 			return fmt.Errorf("failed to grant takod socket access to %s: %w", username, err)
 		}
-		_, _ = p.client.Execute(buildLegacySudoersRemoveCommand(username))
 	}
 
 	return nil
@@ -797,10 +796,6 @@ func buildUserCreateCommand(username string) string {
 
 func buildTakodAccessCommand(username string) string {
 	return fmt.Sprintf("sudo usermod -aG %s %s", shellQuote(takodAccessGroup), shellQuote(username))
-}
-
-func buildLegacySudoersRemoveCommand(username string) string {
-	return fmt.Sprintf("sudo rm -f -- %s", shellQuote("/etc/sudoers.d/tako-"+username))
 }
 
 // VerifyAutoRecovery verifies that critical services are enabled for auto-recovery
