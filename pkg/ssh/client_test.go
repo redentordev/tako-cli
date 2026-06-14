@@ -3,9 +3,11 @@ package ssh
 import (
 	"context"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -91,5 +93,39 @@ func TestLockedBufferAllowsConcurrentWrites(t *testing.T) {
 
 	if got := buffer.String(); len(got) != 50 || strings.Count(got, "x") != 50 {
 		t.Fatalf("buffer = %q, want 50 x bytes", got)
+	}
+}
+
+func TestConnectBackoffCapsDelay(t *testing.T) {
+	tests := map[int]time.Duration{
+		0: time.Second,
+		1: time.Second,
+		2: 2 * time.Second,
+		4: 8 * time.Second,
+		5: connectBackoffMax,
+		8: connectBackoffMax,
+	}
+
+	for attempt, want := range tests {
+		if got := connectBackoff(attempt); got != want {
+			t.Fatalf("connectBackoff(%d) = %s, want %s", attempt, got, want)
+		}
+	}
+}
+
+func TestIsTransientDialErrorClassifiesRateLimitFailures(t *testing.T) {
+	refused := &net.OpError{
+		Op:  "dial",
+		Net: "tcp",
+		Err: &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED},
+	}
+	if !isTransientDialError(refused) {
+		t.Fatal("connection refused should be treated as transient")
+	}
+	if !isTransientDialError(os.ErrDeadlineExceeded) {
+		t.Fatal("deadline exceeded should be treated as transient")
+	}
+	if isTransientDialError(os.ErrNotExist) {
+		t.Fatal("unrelated local errors should not be treated as transient")
 	}
 }
