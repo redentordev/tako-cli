@@ -169,16 +169,8 @@ func collectStateDeploymentHistories(cfg *config.Config, envName string, request
 		return nil, err
 	}
 
-	type historyReadResult struct {
-		index      int
-		serverName string
-		host       string
-		history    *remotestate.DeploymentHistory
-		err        error
-	}
-
-	results := make([]historyReadResult, len(serverNames))
-	resultCh := make(chan historyReadResult, len(serverNames))
+	results := make([]stateHistoryReadResult, len(serverNames))
+	resultCh := make(chan stateHistoryReadResult, len(serverNames))
 	var wg sync.WaitGroup
 	for index, serverName := range serverNames {
 		server, ok := cfg.Servers[serverName]
@@ -188,7 +180,7 @@ func collectStateDeploymentHistories(cfg *config.Config, envName string, request
 		wg.Add(1)
 		go func(index int, serverName string, server config.ServerConfig) {
 			defer wg.Done()
-			result := historyReadResult{
+			result := stateHistoryReadResult{
 				index:      index,
 				serverName: serverName,
 				host:       server.Host,
@@ -202,6 +194,7 @@ func collectStateDeploymentHistories(cfg *config.Config, envName string, request
 			defer client.Close()
 
 			manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
+			result.readAttempted = true
 			result.history, result.err = manager.LoadHistory()
 			resultCh <- result
 		}(index, serverName, server)
@@ -212,7 +205,21 @@ func collectStateDeploymentHistories(cfg *config.Config, envName string, request
 		results[result.index] = result
 	}
 
-	histories := make([]stateHistoryCandidate, 0, len(serverNames))
+	return stateHistoryCandidatesFromResults(results, quiet)
+}
+
+type stateHistoryReadResult struct {
+	index         int
+	serverName    string
+	host          string
+	history       *remotestate.DeploymentHistory
+	readAttempted bool
+	err           error
+}
+
+func stateHistoryCandidatesFromResults(results []stateHistoryReadResult, quiet bool) ([]stateHistoryCandidate, error) {
+	histories := make([]stateHistoryCandidate, 0, len(results))
+	readErrors := make([]string, 0)
 	for _, result := range results {
 		if !quiet {
 			fmt.Printf("Checking %s (%s)...\n", result.serverName, result.host)
@@ -223,6 +230,9 @@ func collectStateDeploymentHistories(cfg *config.Config, envName string, request
 					fmt.Printf("No deployment history found on %s\n", result.serverName)
 				}
 				continue
+			}
+			if result.readAttempted {
+				readErrors = append(readErrors, fmt.Sprintf("%s: %v", result.serverName, result.err))
 			}
 			if !quiet || verbose {
 				fmt.Fprintf(os.Stderr, "Warning: cannot read state from %s: %v\n", result.serverName, result.err)
@@ -246,6 +256,10 @@ func collectStateDeploymentHistories(cfg *config.Config, envName string, request
 				deploymentHistoryFreshness(result.history).Format(time.RFC3339),
 			)
 		}
+	}
+	if len(histories) == 0 && len(readErrors) > 0 {
+		sort.Strings(readErrors)
+		return nil, fmt.Errorf("failed to read deployment history from reachable node(s): %s", strings.Join(readErrors, "; "))
 	}
 	return histories, nil
 }
