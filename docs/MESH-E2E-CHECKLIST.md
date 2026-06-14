@@ -29,8 +29,8 @@ State repair         Divergent reachable nodes can be repaired from freshest sta
 
 The manual flows below are captured in `scripts/mesh-e2e.sh`. The script builds
 the current CLI by default, runs commands from a real app repository, writes
-logs under `.tako/e2e/`, and uses temporary fresh clones for new-computer and CI
-checks.
+logs outside the app worktree unless `TAKO_E2E_LOG_DIR` is set, and uses
+temporary fresh clones for new-computer and CI checks.
 
 Safe preflight:
 
@@ -59,6 +59,8 @@ make mesh-e2e APP_DIR=/path/to/app ENV=production PHASES=standard ARGS=--yes
 ```
 
 Mutating phases refuse to run unless `--yes` or `TAKO_E2E_CONFIRM=run` is set.
+Deploy and env phases also fail early unless `.tako/` and `.env` are ignored
+and the app worktree is clean, matching `tako deploy`'s clean-check behavior.
 The env phase backs up the local `.env`, verifies that `env pull --force`
 restores the same content, and restores the original file if the check fails.
 

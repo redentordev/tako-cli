@@ -14,6 +14,7 @@
 #   TAKO_E2E_PHASES           Comma-separated phases. Defaults to preflight.
 #   TAKO_E2E_TAKO_BIN         Existing tako binary. Defaults to a local build.
 #   TAKO_E2E_CONFIRM=run      Required for setup/deploy/repair/env phases.
+#   TAKO_E2E_LOG_DIR          Directory for logs. Defaults outside app worktree.
 #   TAKO_E2E_KEEP_WORKDIR=1   Keep temporary fresh-clone workdirs.
 
 set -Eeuo pipefail
@@ -134,7 +135,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 APP_DIR="$(cd -- "$APP_DIR" && pwd)"
-LOG_DIR="${TAKO_E2E_LOG_DIR:-$APP_DIR/.tako/e2e/$(date -u +%Y%m%dT%H%M%SZ)}"
+APP_SLUG="$(basename -- "$APP_DIR" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-//; s/-$//')"
+[[ -n "$APP_SLUG" ]] || APP_SLUG="app"
+LOG_DIR="${TAKO_E2E_LOG_DIR:-${TMPDIR:-/tmp}/tako-e2e-logs/$APP_SLUG/$(date -u +%Y%m%dT%H%M%SZ)}"
 
 require_tool() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required"
@@ -145,6 +148,38 @@ require_app_repo() {
     die "$APP_DIR does not contain tako.yaml, tako.yml, or tako.json"
   (cd "$APP_DIR" && git rev-parse --is-inside-work-tree >/dev/null 2>&1) ||
     die "$APP_DIR must be a git worktree for fresh-clone and deploy checks"
+}
+
+require_deploy_ignore_rules() {
+  local dir="$1"
+  local missing=()
+
+  for path in ".tako" ".env"; do
+    if ! (cd "$dir" && git check-ignore -q "$path"); then
+      missing+=("$path")
+    fi
+  done
+
+  if ((${#missing[@]} > 0)); then
+    die "$dir must ignore ${missing[*]} before E2E deploy/env phases; add .tako/ and .env to .gitignore"
+  fi
+}
+
+require_clean_worktree() {
+  local dir="$1"
+  local status
+
+  status="$(cd "$dir" && git status --porcelain)"
+  if [[ -n "$status" ]]; then
+    printf '%s\n' "$status" >&2
+    die "$dir has uncommitted changes; commit, stash, or discard them before E2E deploy phases"
+  fi
+}
+
+require_deploy_ready_worktree() {
+  local dir="$1"
+  require_deploy_ignore_rules "$dir"
+  require_clean_worktree "$dir"
 }
 
 build_or_select_tako() {
@@ -233,6 +268,7 @@ require_passphrase() {
 fresh_clone() {
   local label="$1"
   local temp_parent
+  require_deploy_ready_worktree "$APP_DIR"
   temp_parent="$(mktemp -d "${TMPDIR:-/tmp}/tako-e2e-${label}.XXXXXX")"
   TEMP_DIRS+=("$temp_parent")
 
@@ -251,6 +287,7 @@ phase_preflight() {
 
 phase_one_node() {
   require_confirm "one-node"
+  require_deploy_ready_worktree "$APP_DIR"
   run_tako "setup" setup
   run_tako "deploy" deploy --yes
   run_tako "state status after deploy" state status
@@ -261,6 +298,7 @@ phase_one_node() {
 
 phase_two_node() {
   require_confirm "two-node"
+  require_deploy_ready_worktree "$APP_DIR"
   run_tako "two-node setup" setup
   run_tako "two-node repair" state repair
   run_tako "two-node status before deploy" state status
@@ -271,6 +309,7 @@ phase_two_node() {
 phase_env() {
   require_confirm "env"
   require_passphrase "env"
+  require_deploy_ignore_rules "$APP_DIR"
   run_tako "env push" env push
 
   local backup=""
@@ -306,6 +345,7 @@ phase_new_computer() {
   local clone_dir
   fresh_clone "new-computer"
   clone_dir="$FRESH_CLONE_DIR"
+  require_deploy_ready_worktree "$clone_dir"
   run_tako_in "$clone_dir" "new-computer env pull" env pull --force
   run_tako_in "$clone_dir" "new-computer state pull" state pull
   run_tako_in "$clone_dir" "new-computer state status" state status
@@ -318,6 +358,7 @@ phase_ci() {
   local clone_dir
   fresh_clone "ci"
   clone_dir="$FRESH_CLONE_DIR"
+  require_deploy_ready_worktree "$clone_dir"
   run_cmd "ci env and state deploy" bash -c '
     cd "$1"
     shift
@@ -337,6 +378,7 @@ phase_repair() {
 
 phase_offline() {
   require_confirm "offline"
+  require_deploy_ready_worktree "$APP_DIR"
   note "offline phase expects one node to already be unreachable"
   run_tako "offline state status" state status
   run_tako "offline drift" drift
