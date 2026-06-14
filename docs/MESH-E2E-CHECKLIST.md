@@ -54,9 +54,6 @@ scripts/mesh-e2e.sh \
   --env production \
   --phases full \
   --offline-server node-b \
-  --offline-host 203.0.113.20 \
-  --offline-user deploy \
-  --offline-ssh-key ~/.ssh/tako_deploy \
   --yes
 ```
 
@@ -78,7 +75,9 @@ unavailable, restarts `takod`, runs repair, and deploys again. If the phase
 fails after stopping the agent, the harness tries to restart it from the exit
 trap. Override `TAKO_E2E_OFFLINE_STOP_CMD`,
 `TAKO_E2E_OFFLINE_START_CMD`, or `TAKO_E2E_OFFLINE_STATUS_CMD` if your service
-manager is not systemd.
+manager is not systemd. The harness infers offline-node host, user, port, and
+SSH key from `tako.yaml`; use `--offline-host`, `--offline-user`,
+`--offline-port`, or `--offline-ssh-key` only when you need to override config.
 
 ## One-Node Flow
 
@@ -165,9 +164,6 @@ scripts/mesh-e2e.sh \
   --env production \
   --phases offline \
   --offline-server node-b \
-  --offline-host 203.0.113.20 \
-  --offline-user deploy \
-  --offline-ssh-key ~/.ssh/tako_deploy \
   --yes
 ```
 
