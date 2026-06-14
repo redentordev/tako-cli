@@ -213,6 +213,9 @@ Expected result:
 - `TAKO_HOST_KEY_MODE=strict` works after known hosts are installed.
 - Remote leases reject overlapping deploy, rollback, scale, maintenance, live,
   remove, cleanup, destroy, and repair operations.
+- `tako state lease` shows held lease IDs, and
+  `tako state lease release --id <id> --force` releases only the exact stale ID
+  when a runner or laptop is interrupted.
 
 ## Completion Bar
 

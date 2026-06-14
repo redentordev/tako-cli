@@ -11,6 +11,16 @@ Tako uses the same deployment path from laptops and CI runners:
 Remote leases in takod prevent a CI job and a laptop from reconciling the same
 target nodes at the same time.
 
+If a runner is cancelled while holding a lease, inspect it with
+`tako state lease`. Release only the exact stale ID shown by the mesh:
+
+```bash
+tako state lease release --id <lease-id> --force
+```
+
+The release command matches the current remote ID before deleting anything, so
+it will not clear a newer lease that replaced the stale one.
+
 `tako deploy` reads Git metadata for deployment history and rollback context,
 but it does not create commits. CI should deploy a clean checkout; if generated
 files or dependency installers modify the worktree before deploy, commit or

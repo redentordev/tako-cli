@@ -80,7 +80,28 @@ the best available state before deploying.`,
 	RunE: runStateRepair,
 }
 
+var stateLeaseCmd = &cobra.Command{
+	Use:   "lease",
+	Short: "Show remote operation leases",
+	Long: `Show remote operation leases held on reachable takod nodes.
+
+Use this when a mutating command reports that the environment is locked.`,
+	RunE: runStateLease,
+}
+
+var stateLeaseReleaseCmd = &cobra.Command{
+	Use:   "release",
+	Short: "Release a remote operation lease by exact ID",
+	Long: `Release a remote operation lease by exact ID.
+
+This command only releases leases whose current remote ID matches --id. It
+refuses to release a non-expired lease unless --force is set.`,
+	RunE: runStateLeaseRelease,
+}
+
 var stateServer string
+var stateLeaseID string
+var stateLeaseForce bool
 
 var (
 	syncStateCollectDeploymentHistories = collectStateDeploymentHistoriesWithPool
@@ -93,12 +114,19 @@ func init() {
 	stateCmd.AddCommand(statePullCmd)
 	stateCmd.AddCommand(stateStatusCmd)
 	stateCmd.AddCommand(stateRepairCmd)
+	stateCmd.AddCommand(stateLeaseCmd)
+	stateLeaseCmd.AddCommand(stateLeaseReleaseCmd)
 
 	statePullCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Pull state from a specific server instead of the full mesh")
 
 	stateStatusCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Check status for a specific server instead of the full mesh")
 
 	stateRepairCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Prefer this server when acquiring the repair lease")
+
+	stateLeaseCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Show a specific server lease instead of the full mesh")
+	stateLeaseReleaseCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Release a lease on a specific server instead of the full mesh")
+	stateLeaseReleaseCmd.Flags().StringVar(&stateLeaseID, "id", "", "Exact remote lease ID to release")
+	stateLeaseReleaseCmd.Flags().BoolVar(&stateLeaseForce, "force", false, "Release a matching non-expired lease")
 }
 
 func runStatePull(cmd *cobra.Command, args []string) error {
@@ -434,6 +462,160 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+type stateLeaseNode struct {
+	name    string
+	host    string
+	manager remoteLeaseManager
+	lease   *remotestate.LeaseInfo
+	err     error
+}
+
+func runStateLease(cmd *cobra.Command, args []string) error {
+	cfg, err := config.LoadConfig(cfgFile)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	envName := getEnvironmentName(cfg)
+	pool := ssh.NewPool()
+	defer pool.CloseAll()
+
+	nodes, err := collectStateLeaseNodes(pool, cfg, envName, stateServer)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Project: %s\n", cfg.Project.Name)
+	fmt.Printf("Environment: %s\n\n", envName)
+	printStateLeaseNodes(nodes)
+	return nil
+}
+
+func runStateLeaseRelease(cmd *cobra.Command, args []string) error {
+	cfg, err := config.LoadConfig(cfgFile)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	envName := getEnvironmentName(cfg)
+	pool := ssh.NewPool()
+	defer pool.CloseAll()
+
+	nodes, err := collectStateLeaseNodes(pool, cfg, envName, stateServer)
+	if err != nil {
+		return err
+	}
+	released, err := releaseStateLeaseByID(nodes, stateLeaseID, stateLeaseForce, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Released lease %s on %d node(s): %s\n", strings.TrimSpace(stateLeaseID), len(released), strings.Join(released, ", "))
+	return nil
+}
+
+func collectStateLeaseNodes(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) ([]stateLeaseNode, error) {
+	serverNames, err := statePullServerNames(cfg, envName, requestedServer)
+	if err != nil {
+		return nil, err
+	}
+	nodes := make([]stateLeaseNode, len(serverNames))
+	resultCh := make(chan struct {
+		index int
+		node  stateLeaseNode
+	}, len(serverNames))
+	var wg sync.WaitGroup
+	for index, serverName := range serverNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return nil, fmt.Errorf("server %s not found in configuration", serverName)
+		}
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			node := stateLeaseNode{name: serverName, host: server.Host}
+			client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
+			if err != nil {
+				node.err = err
+				resultCh <- struct {
+					index int
+					node  stateLeaseNode
+				}{index: index, node: node}
+				return
+			}
+			defer cleanup()
+
+			manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
+			node.manager = manager
+			node.lease, node.err = manager.ReadLease()
+			resultCh <- struct {
+				index int
+				node  stateLeaseNode
+			}{index: index, node: node}
+		}(index, serverName, server)
+	}
+	wg.Wait()
+	close(resultCh)
+	for result := range resultCh {
+		nodes[result.index] = result.node
+	}
+	return nodes, nil
+}
+
+func printStateLeaseNodes(nodes []stateLeaseNode) {
+	for _, node := range nodes {
+		fmt.Printf("Node: %s (%s)\n", node.name, node.host)
+		printStateStatusLease(node.lease, node.err)
+		fmt.Println()
+	}
+}
+
+func releaseStateLeaseByID(nodes []stateLeaseNode, leaseID string, force bool, now time.Time) ([]string, error) {
+	leaseID = strings.TrimSpace(leaseID)
+	if leaseID == "" {
+		return nil, fmt.Errorf("--id is required")
+	}
+
+	var released []string
+	var releaseErrors []string
+	var nodeErrors []string
+	found := false
+	for _, node := range nodes {
+		if node.err != nil {
+			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", node.name, node.err))
+			continue
+		}
+		if node.lease == nil || node.lease.ID != leaseID {
+			continue
+		}
+		found = true
+		if node.manager == nil {
+			releaseErrors = append(releaseErrors, fmt.Sprintf("%s: lease manager unavailable", node.name))
+			continue
+		}
+		if !force && now.Before(node.lease.ExpiresAt) {
+			releaseErrors = append(releaseErrors, fmt.Sprintf("%s: lease has not expired yet; use --force to release it", node.name))
+			continue
+		}
+		if err := node.manager.ReleaseLease(node.lease); err != nil {
+			releaseErrors = append(releaseErrors, fmt.Sprintf("%s: %v", node.name, err))
+			continue
+		}
+		released = append(released, node.name)
+	}
+	if len(releaseErrors) > 0 {
+		sort.Strings(releaseErrors)
+		return released, fmt.Errorf("failed to release lease %s: %s", leaseID, strings.Join(releaseErrors, "; "))
+	}
+	if !found {
+		if len(nodeErrors) > 0 {
+			sort.Strings(nodeErrors)
+			return nil, fmt.Errorf("lease %s not found on reachable nodes; unreachable nodes: %s", leaseID, strings.Join(nodeErrors, "; "))
+		}
+		return nil, fmt.Errorf("lease %s not found on reachable nodes", leaseID)
+	}
+	if len(released) == 0 {
+		return nil, fmt.Errorf("lease %s was found but not released", leaseID)
+	}
+	return released, nil
 }
 
 func runStateRepair(cmd *cobra.Command, args []string) error {
@@ -853,6 +1035,7 @@ func printStateStatusLease(lease *remotestate.LeaseInfo, err error) {
 		return
 	}
 	fmt.Printf("Lease: held by %s\n", lease.Who)
+	fmt.Printf("  ID:        %s\n", lease.ID)
 	fmt.Printf("  Operation: %s\n", lease.Operation)
 	fmt.Printf("  Created:   %s (%s ago)\n", lease.CreatedAt.Format(time.RFC3339), formatStateDuration(time.Since(lease.CreatedAt)))
 	fmt.Printf("  Expires:   %s (in %s)\n", lease.ExpiresAt.Format(time.RFC3339), time.Until(lease.ExpiresAt).Round(time.Second))

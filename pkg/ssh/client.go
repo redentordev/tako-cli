@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -19,6 +21,12 @@ import (
 )
 
 const DefaultCommandTimeout = 30 * time.Minute
+
+const (
+	connectMaxTCPAttempts       = 8
+	connectMaxHandshakeAttempts = 3
+	connectBackoffMax           = 10 * time.Second
+)
 
 // Client wraps an SSH connection with additional functionality
 type Client struct {
@@ -315,11 +323,10 @@ func (c *Client) Connect() error {
 
 	addr := net.JoinHostPort(c.host, strconv.Itoa(c.port))
 
-	// Retry connection with exponential backoff
-	maxRetries := 3
 	var lastErr error
+	handshakeAttempts := 0
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	for attempt := 1; attempt <= connectMaxTCPAttempts; attempt++ {
 		// Create TCP connection with custom dialer for better timeout control
 		dialer := &net.Dialer{
 			Timeout:   60 * time.Second, // Increased to 60s
@@ -330,11 +337,11 @@ func (c *Client) Connect() error {
 		tcpConn, err := dialer.Dial("tcp", addr)
 		if err != nil {
 			lastErr = fmt.Errorf("TCP dial failed: %w", err)
-			if attempt < maxRetries {
-				backoff := time.Duration(1<<uint(attempt-1)) * time.Second
-				time.Sleep(backoff)
+			if attempt < connectMaxTCPAttempts && isTransientDialError(err) {
+				time.Sleep(connectBackoff(attempt))
+				continue
 			}
-			continue
+			return fmt.Errorf("failed to connect after %d attempt(s): %w", attempt, lastErr)
 		}
 
 		// Now establish SSH connection over TCP
@@ -342,11 +349,12 @@ func (c *Client) Connect() error {
 		if err != nil {
 			tcpConn.Close()
 			lastErr = fmt.Errorf("SSH handshake failed: %w", err)
-			if attempt < maxRetries {
-				backoff := time.Duration(1<<uint(attempt-1)) * time.Second
-				time.Sleep(backoff)
+			handshakeAttempts++
+			if handshakeAttempts < connectMaxHandshakeAttempts {
+				time.Sleep(connectBackoff(handshakeAttempts))
+				continue
 			}
-			continue
+			return fmt.Errorf("failed to establish SSH after %d handshake attempt(s): %w", handshakeAttempts, lastErr)
 		}
 
 		// Create SSH client
@@ -354,7 +362,45 @@ func (c *Client) Connect() error {
 		return nil
 	}
 
-	return fmt.Errorf("failed to connect after %d attempts: %w", maxRetries, lastErr)
+	return fmt.Errorf("failed to connect after %d attempt(s): %w", connectMaxTCPAttempts, lastErr)
+}
+
+func connectBackoff(attempt int) time.Duration {
+	if attempt <= 0 {
+		return time.Second
+	}
+	backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+	if backoff > connectBackoffMax {
+		return connectBackoffMax
+	}
+	return backoff
+}
+
+func isTransientDialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ETIMEDOUT) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection refused",
+		"connection reset",
+		"i/o timeout",
+		"operation timed out",
+		"no route to host",
+		"network is unreachable",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // Close closes the SSH connection and any associated resources
@@ -767,48 +813,50 @@ func (p *Pool) GetOrCreateWithAuth(host string, port int, user string, keyPath s
 		// Fall through to create new connection
 	}
 
-	// Acquire write lock for creation
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Double-check: another goroutine might have created it while we waited for the lock
 	if client, exists = p.clients[key]; exists {
-		// Verify health again under write lock
 		if client.IsHealthy() {
+			p.mu.Unlock()
 			return client, nil
 		}
-		// Still stale, clean up
 		client.Close()
 		delete(p.clients, key)
 	}
+	p.mu.Unlock()
 
-	// Create new client with appropriate authentication
-	var err error
-	if password != "" && keyPath == "" {
-		// Password-only authentication
-		client, err = NewClientWithPassword(host, port, user, password)
-	} else if keyPath != "" || password != "" {
-		// Key with optional password fallback
-		client, err = NewClientWithAuth(host, port, user, keyPath, password)
-	} else {
-		return nil, fmt.Errorf("no authentication method provided")
-	}
-
+	client, err := newPooledClient(host, port, user, keyPath, password)
 	if err != nil {
 		return nil, err
 	}
 
-	// Connect the client (while holding the lock to prevent duplicate connections)
 	if err := client.Connect(); err != nil {
-		// Clean up on connection failure
 		client.Close()
 		return nil, err
 	}
 
-	// Add to pool
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if existing, exists := p.clients[key]; exists {
+		if existing.IsHealthy() {
+			client.Close()
+			return existing, nil
+		}
+		existing.Close()
+		delete(p.clients, key)
+	}
 	p.clients[key] = client
 
 	return client, nil
+}
+
+func newPooledClient(host string, port int, user string, keyPath string, password string) (*Client, error) {
+	if password != "" && keyPath == "" {
+		return NewClientWithPassword(host, port, user, password)
+	}
+	if keyPath != "" || password != "" {
+		return NewClientWithAuth(host, port, user, keyPath, password)
+	}
+	return nil, fmt.Errorf("no authentication method provided")
 }
 
 // Get retrieves a client from the pool
