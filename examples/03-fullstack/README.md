@@ -151,7 +151,7 @@ The dependency resolver detects these patterns in environment variables:
 
 3. Deploy all services:
    ```bash
-   tako deploy --server prod
+   tako deploy
    ```
 
 4. The CLI will:
