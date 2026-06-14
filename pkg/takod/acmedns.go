@@ -67,12 +67,9 @@ type AcmeDNSRegisterResponse struct {
 }
 
 func ReconcileAcmeDNS(ctx context.Context, req ReconcileAcmeDNSRequest) (*ReconcileAcmeDNSResponse, error) {
-	req.ServerIP = strings.TrimSpace(req.ServerIP)
-	if req.ServerIP == "" || (net.ParseIP(req.ServerIP) == nil && !isSafeAcmeDNSHostname(req.ServerIP)) {
-		return nil, fmt.Errorf("serverIP must be a valid IP address or hostname")
-	}
-	if req.Image == "" {
-		req.Image = defaultAcmeDNSImage
+	normalizeReconcileAcmeDNSRequest(&req)
+	if err := validateReconcileAcmeDNSRequest(req); err != nil {
+		return nil, err
 	}
 	if err := ensureAcmeDNSDirectories(); err != nil {
 		return nil, err
@@ -101,6 +98,23 @@ func ReconcileAcmeDNS(ctx context.Context, req ReconcileAcmeDNSRequest) (*Reconc
 	return &ReconcileAcmeDNSResponse{Container: acmeDNSContainerName, Image: req.Image}, nil
 }
 
+func normalizeReconcileAcmeDNSRequest(req *ReconcileAcmeDNSRequest) {
+	req.ServerIP = strings.TrimSpace(req.ServerIP)
+	if req.Image == "" {
+		req.Image = defaultAcmeDNSImage
+	}
+}
+
+func validateReconcileAcmeDNSRequest(req ReconcileAcmeDNSRequest) error {
+	if !isSafeAcmeDNSServerAddress(req.ServerIP) {
+		return fmt.Errorf("serverIP must be a valid IP address or hostname")
+	}
+	if err := validateImageName(req.Image); err != nil {
+		return err
+	}
+	return nil
+}
+
 func isSafeAcmeDNSHostname(hostname string) bool {
 	if len(hostname) > 253 {
 		return false
@@ -122,6 +136,11 @@ func isSafeAcmeDNSHostname(hostname string) bool {
 	return true
 }
 
+func isSafeAcmeDNSServerAddress(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && (net.ParseIP(value) != nil || isSafeAcmeDNSHostname(value))
+}
+
 func RemoveAcmeDNS(ctx context.Context) (*ReconcileAcmeDNSResponse, error) {
 	if _, err := runDocker(ctx, "rm", "-f", acmeDNSContainerName); err != nil {
 		return nil, fmt.Errorf("failed to remove acme-dns: %w", err)
@@ -130,13 +149,9 @@ func RemoveAcmeDNS(ctx context.Context) (*ReconcileAcmeDNSResponse, error) {
 }
 
 func RegisterAcmeDNS(ctx context.Context, req AcmeDNSRegisterRequest) (*AcmeDNSRegisterResponse, error) {
-	req.Domain = strings.TrimSpace(req.Domain)
-	if req.Domain == "" || !isSafeAcmeDNSHostname(req.Domain) {
-		return nil, fmt.Errorf("domain must be a valid hostname")
-	}
-	req.ServerIP = strings.TrimSpace(req.ServerIP)
-	if req.ServerIP == "" || (net.ParseIP(req.ServerIP) == nil && !isSafeAcmeDNSHostname(req.ServerIP)) {
-		return nil, fmt.Errorf("serverIP must be a valid IP address or hostname")
+	normalizeAcmeDNSRegisterRequest(&req)
+	if err := validateAcmeDNSRegisterRequest(req); err != nil {
+		return nil, err
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1:8053/register", nil)
@@ -181,6 +196,21 @@ func RegisterAcmeDNS(ctx context.Context, req AcmeDNSRegisterRequest) (*AcmeDNSR
 		return nil, err
 	}
 	return &AcmeDNSRegisterResponse{Registration: registration}, nil
+}
+
+func normalizeAcmeDNSRegisterRequest(req *AcmeDNSRegisterRequest) {
+	req.Domain = strings.TrimSpace(req.Domain)
+	req.ServerIP = strings.TrimSpace(req.ServerIP)
+}
+
+func validateAcmeDNSRegisterRequest(req AcmeDNSRegisterRequest) error {
+	if req.Domain == "" || !isSafeAcmeDNSHostname(req.Domain) {
+		return fmt.Errorf("domain must be a valid hostname")
+	}
+	if !isSafeAcmeDNSServerAddress(req.ServerIP) {
+		return fmt.Errorf("serverIP must be a valid IP address or hostname")
+	}
+	return nil
 }
 
 func ReadAcmeDNSCredentials() (*AcmeDNSCredentialsResponse, error) {
