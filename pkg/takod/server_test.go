@@ -166,6 +166,27 @@ func TestHandleReconcileServiceRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHandleReconcileServiceRejectsInvalidRequest(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/reconcile-service", bytes.NewBufferString(`{
+		"project":"demo",
+		"environment":"production",
+		"service":"web",
+		"image":"--help",
+		"network":"tako_demo_production"
+	}`))
+	recorder := httptest.NewRecorder()
+
+	server.handleReconcileService(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "image must not start") {
+		t.Fatalf("unexpected response: %q", recorder.Body.String())
+	}
+}
+
 func TestHandleRemoveServiceRequiresPost(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
 	req := httptest.NewRequest(http.MethodGet, "/v1/remove-service", nil)
@@ -187,6 +208,21 @@ func TestHandleRemoveServiceRejectsInvalidJSON(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleRemoveServiceRejectsInvalidRequest(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/remove-service", bytes.NewBufferString(`{"project":"../demo","environment":"production","service":"web"}`))
+	recorder := httptest.NewRecorder()
+
+	server.handleRemoveService(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "invalid project name") {
+		t.Fatalf("unexpected response: %q", recorder.Body.String())
 	}
 }
 
