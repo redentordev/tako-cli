@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -29,6 +30,62 @@ func TestCreateCrossPlatformTarGzRespectsIgnoreFiles(t *testing.T) {
 	}
 	if names["secret.txt"] {
 		t.Fatalf("archive included ignored file; names=%#v", names)
+	}
+}
+
+func TestCreateCrossPlatformTarGzWithLimitsRejectsLargeFile(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "Dockerfile"), strings.Repeat("A", 6))
+
+	archivePath := filepath.Join(t.TempDir(), "context.tar.gz")
+	err := createCrossPlatformTarGzWithLimits(root, archivePath, buildContextArchiveLimits{
+		MaxBytes:     100,
+		MaxFileBytes: 5,
+		MaxEntries:   10,
+	})
+	if err == nil {
+		t.Fatal("expected oversized file to be rejected")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Fatalf("error = %q, want max file size context", err)
+	}
+}
+
+func TestCreateCrossPlatformTarGzWithLimitsRejectsTotalSize(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "a.txt"), strings.Repeat("A", 4))
+	mustWriteFile(t, filepath.Join(root, "b.txt"), strings.Repeat("B", 4))
+
+	archivePath := filepath.Join(t.TempDir(), "context.tar.gz")
+	err := createCrossPlatformTarGzWithLimits(root, archivePath, buildContextArchiveLimits{
+		MaxBytes:     7,
+		MaxFileBytes: 10,
+		MaxEntries:   10,
+	})
+	if err == nil {
+		t.Fatal("expected oversized build context to be rejected")
+	}
+	if !strings.Contains(err.Error(), "maximum total size") {
+		t.Fatalf("error = %q, want total size context", err)
+	}
+}
+
+func TestCreateCrossPlatformTarGzWithLimitsRejectsEntryCount(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "a.txt"), "A")
+	mustWriteFile(t, filepath.Join(root, "b.txt"), "B")
+
+	archivePath := filepath.Join(t.TempDir(), "context.tar.gz")
+	err := createCrossPlatformTarGzWithLimits(root, archivePath, buildContextArchiveLimits{
+		MaxBytes:     100,
+		MaxFileBytes: 10,
+		MaxEntries:   1,
+	})
+	if err == nil {
+		t.Fatal("expected too many entries to be rejected")
+	}
+	if !strings.Contains(err.Error(), "maximum entry count") {
+		t.Fatalf("error = %q, want entry count context", err)
 	}
 }
 

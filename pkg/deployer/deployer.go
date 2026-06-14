@@ -58,6 +58,18 @@ type Deployer struct {
 	targetServers     []string
 }
 
+const (
+	defaultBuildContextArchiveMaxBytes     int64 = 2 << 30
+	defaultBuildContextArchiveMaxFileBytes int64 = 1 << 30
+	defaultBuildContextArchiveMaxEntries         = 200000
+)
+
+type buildContextArchiveLimits struct {
+	MaxBytes     int64
+	MaxFileBytes int64
+	MaxEntries   int
+}
+
 // NewDeployer creates a new deployer
 func NewDeployer(client *ssh.Client, cfg *config.Config, environment string, verbose bool) *Deployer {
 	return &Deployer{
@@ -125,6 +137,14 @@ func (d *Deployer) SetTargetServers(serverNames []string) error {
 // createCrossPlatformTarGz creates a Docker build context archive with
 // Unix-style paths on every client platform.
 func createCrossPlatformTarGz(sourceDir, archivePath string) error {
+	return createCrossPlatformTarGzWithLimits(sourceDir, archivePath, buildContextArchiveLimits{
+		MaxBytes:     defaultBuildContextArchiveMaxBytes,
+		MaxFileBytes: defaultBuildContextArchiveMaxFileBytes,
+		MaxEntries:   defaultBuildContextArchiveMaxEntries,
+	})
+}
+
+func createCrossPlatformTarGzWithLimits(sourceDir, archivePath string, limits buildContextArchiveLimits) error {
 	archiveFile, err := os.Create(archivePath)
 	if err != nil {
 		return fmt.Errorf("failed to create build context archive: %w", err)
@@ -151,6 +171,8 @@ func createCrossPlatformTarGz(sourceDir, archivePath string) error {
 	}
 	ignoreParser.AddDefaultExclusions()
 
+	var totalBytes int64
+	entries := 0
 	return filepath.Walk(sourceDir, func(filePath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -170,6 +192,10 @@ func createCrossPlatformTarGz(sourceDir, archivePath string) error {
 			}
 			return nil
 		}
+		entries++
+		if limits.MaxEntries > 0 && entries > limits.MaxEntries {
+			return fmt.Errorf("build context exceeds maximum entry count %d", limits.MaxEntries)
+		}
 
 		header, err := tar.FileInfoHeader(info, "")
 		if err != nil {
@@ -185,6 +211,13 @@ func createCrossPlatformTarGz(sourceDir, archivePath string) error {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
+		if limits.MaxFileBytes > 0 && info.Size() > limits.MaxFileBytes {
+			return fmt.Errorf("build context file %s exceeds maximum size %d bytes", relPath, limits.MaxFileBytes)
+		}
+		if limits.MaxBytes > 0 && totalBytes+info.Size() > limits.MaxBytes {
+			return fmt.Errorf("build context exceeds maximum total size %d bytes", limits.MaxBytes)
+		}
+		totalBytes += info.Size()
 
 		header.Mode = int64(info.Mode().Perm())
 		if err := tarWriter.WriteHeader(header); err != nil {
