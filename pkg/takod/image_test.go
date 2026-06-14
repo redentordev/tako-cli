@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,6 +26,30 @@ func TestSanitizeImageArchiveName(t *testing.T) {
 	want := "registry.example.com-demo-web-abc123"
 	if got != want {
 		t.Fatalf("sanitizeImageArchiveName() = %q, want %q", got, want)
+	}
+}
+
+func TestMaxBytesReaderAllowsExactLimit(t *testing.T) {
+	reader := newMaxBytesReader(strings.NewReader("12345"), 5, "test stream")
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll returned error: %v", err)
+	}
+	if string(data) != "12345" {
+		t.Fatalf("data = %q, want exact payload", data)
+	}
+}
+
+func TestMaxBytesReaderRejectsOverflow(t *testing.T) {
+	reader := newMaxBytesReader(strings.NewReader("123456"), 5, "test stream")
+
+	_, err := io.ReadAll(reader)
+	if err == nil {
+		t.Fatal("expected overflow to be rejected")
+	}
+	if !strings.Contains(err.Error(), "test stream exceeds maximum size 5 bytes") {
+		t.Fatalf("error = %q, want size limit context", err)
 	}
 }
 

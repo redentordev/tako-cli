@@ -776,9 +776,18 @@ func (s *Server) handleImageImport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	image := r.URL.Query().Get("image")
+	if err := validateImageName(image); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if r.ContentLength > defaultImageImportMaxBytes {
+		http.Error(w, fmt.Sprintf("image import exceeds maximum size %d bytes", defaultImageImportMaxBytes), http.StatusRequestEntityTooLarge)
+		return
+	}
 	defer r.Body.Close()
 
-	response, err := ImportImage(r.Context(), r.URL.Query().Get("image"), r.Body)
+	response, err := ImportImage(r.Context(), image, http.MaxBytesReader(w, r.Body, defaultImageImportMaxBytes))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
