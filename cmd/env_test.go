@@ -372,7 +372,10 @@ environments:
 	originalUpload := uploadEnvBundleToServerFunc
 	var uploaded []string
 	var uploadedMu sync.Mutex
-	uploadEnvBundleToServerFunc = func(_ *config.Config, serverName string, _ config.ServerConfig, request takod.EnvBundleRequest) error {
+	uploadEnvBundleToServerFunc = func(pool *ssh.Pool, _ *config.Config, serverName string, _ config.ServerConfig, request takod.EnvBundleRequest) error {
+		if pool == nil {
+			return fmt.Errorf("missing ssh pool")
+		}
 		if !leaseAcquired {
 			return fmt.Errorf("upload started before lease acquisition")
 		}
@@ -422,7 +425,7 @@ func TestDownloadEnvBundleFromMeshUsesFirstFoundBundle(t *testing.T) {
 	calls := []string{}
 	var callsMu sync.Mutex
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		callsMu.Lock()
 		calls = append(calls, serverName)
 		callsMu.Unlock()
@@ -439,7 +442,7 @@ func TestDownloadEnvBundleFromMeshUsesFirstFoundBundle(t *testing.T) {
 		downloadEnvBundleFromServerFunc = original
 	})
 
-	response, source, err := downloadEnvBundleFromMesh(cfg, "production")
+	response, source, err := downloadEnvBundleFromMesh(nil, cfg, "production")
 	if err != nil {
 		t.Fatalf("downloadEnvBundleFromMesh returned error: %v", err)
 	}
@@ -470,7 +473,7 @@ func TestDownloadEnvBundleFromMeshUsesNewestBundle(t *testing.T) {
 	newer := older.Add(time.Hour)
 
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		switch serverName {
 		case "node-a":
 			return &takod.EnvBundleResponse{Found: false}, nil
@@ -484,7 +487,7 @@ func TestDownloadEnvBundleFromMeshUsesNewestBundle(t *testing.T) {
 		downloadEnvBundleFromServerFunc = original
 	})
 
-	response, source, err := downloadEnvBundleFromMesh(cfg, "production")
+	response, source, err := downloadEnvBundleFromMesh(nil, cfg, "production")
 	if err != nil {
 		t.Fatalf("downloadEnvBundleFromMesh returned error: %v", err)
 	}
@@ -512,14 +515,14 @@ func TestSelectFreshestEnvBundleCandidateFallsBackToServerOrderForEqualTimestamp
 func TestDownloadEnvBundleFromMeshRejectsMissingUpdatedAtMetadata(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, _ string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, _ string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		return &takod.EnvBundleResponse{Found: true, Content: "bundle"}, nil
 	}
 	t.Cleanup(func() {
 		downloadEnvBundleFromServerFunc = original
 	})
 
-	_, _, err := downloadEnvBundleFromMesh(cfg, "production")
+	_, _, err := downloadEnvBundleFromMesh(nil, cfg, "production")
 	if err == nil {
 		t.Fatal("downloadEnvBundleFromMesh should reject bundles without metadata")
 	}
@@ -531,14 +534,14 @@ func TestDownloadEnvBundleFromMeshRejectsMissingUpdatedAtMetadata(t *testing.T) 
 func TestDownloadEnvBundleFromMeshReturnsNotFoundWhenReachableNodesAreEmpty(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, _ string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, _ string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		return &takod.EnvBundleResponse{Found: false}, nil
 	}
 	t.Cleanup(func() {
 		downloadEnvBundleFromServerFunc = original
 	})
 
-	response, source, err := downloadEnvBundleFromMesh(cfg, "production")
+	response, source, err := downloadEnvBundleFromMesh(nil, cfg, "production")
 	if err != nil {
 		t.Fatalf("downloadEnvBundleFromMesh returned error: %v", err)
 	}
@@ -553,14 +556,14 @@ func TestDownloadEnvBundleFromMeshReturnsNotFoundWhenReachableNodesAreEmpty(t *t
 func TestDownloadEnvBundleFromMeshErrorsWhenAllNodesFail(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		return nil, fmt.Errorf("%s down", serverName)
 	}
 	t.Cleanup(func() {
 		downloadEnvBundleFromServerFunc = original
 	})
 
-	if _, _, err := downloadEnvBundleFromMesh(cfg, "production"); err == nil {
+	if _, _, err := downloadEnvBundleFromMesh(nil, cfg, "production"); err == nil {
 		t.Fatal("downloadEnvBundleFromMesh should fail when all nodes fail")
 	}
 }
@@ -573,7 +576,7 @@ func TestDownloadEnvBundleFromMeshRunsConcurrently(t *testing.T) {
 	release := make(chan struct{})
 
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		started <- serverName
 		<-release
 		if serverName == "node-b" {
@@ -592,7 +595,7 @@ func TestDownloadEnvBundleFromMeshRunsConcurrently(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		response, source, err := downloadEnvBundleFromMesh(cfg, "production")
+		response, source, err := downloadEnvBundleFromMesh(nil, cfg, "production")
 		done <- result{response: response, source: source, err: err}
 	}()
 
@@ -618,7 +621,7 @@ func TestUploadEnvBundleToMeshRunsConcurrently(t *testing.T) {
 	release := make(chan struct{})
 
 	original := uploadEnvBundleToServerFunc
-	uploadEnvBundleToServerFunc = func(_ *config.Config, serverName string, _ config.ServerConfig, _ takod.EnvBundleRequest) error {
+	uploadEnvBundleToServerFunc = func(_ *ssh.Pool, _ *config.Config, serverName string, _ config.ServerConfig, _ takod.EnvBundleRequest) error {
 		started <- serverName
 		<-release
 		return nil
@@ -633,7 +636,7 @@ func TestUploadEnvBundleToMeshRunsConcurrently(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		uploaded, errors := uploadEnvBundleToMesh(cfg, serverNames, takod.EnvBundleRequest{})
+		uploaded, errors := uploadEnvBundleToMesh(nil, cfg, serverNames, takod.EnvBundleRequest{})
 		done <- result{uploaded: uploaded, errors: errors}
 	}()
 
@@ -650,7 +653,7 @@ func TestUploadEnvBundleToMeshReportsErrorsInServerOrder(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
 	serverNames := []string{"node-a", "node-b", "node-c"}
 	original := uploadEnvBundleToServerFunc
-	uploadEnvBundleToServerFunc = func(_ *config.Config, serverName string, _ config.ServerConfig, _ takod.EnvBundleRequest) error {
+	uploadEnvBundleToServerFunc = func(_ *ssh.Pool, _ *config.Config, serverName string, _ config.ServerConfig, _ takod.EnvBundleRequest) error {
 		if serverName == "node-b" {
 			return fmt.Errorf("down")
 		}
@@ -660,7 +663,7 @@ func TestUploadEnvBundleToMeshReportsErrorsInServerOrder(t *testing.T) {
 		uploadEnvBundleToServerFunc = original
 	})
 
-	uploaded, errors := uploadEnvBundleToMesh(cfg, serverNames, takod.EnvBundleRequest{})
+	uploaded, errors := uploadEnvBundleToMesh(nil, cfg, serverNames, takod.EnvBundleRequest{})
 	if uploaded != 2 {
 		t.Fatalf("uploaded = %d, want 2", uploaded)
 	}

@@ -152,7 +152,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		Content:     base64.StdEncoding.EncodeToString(encrypted),
 	}
 
-	uploaded, nodeErrors := uploadEnvBundleToMesh(cfg, serverNames, request)
+	uploaded, nodeErrors := uploadEnvBundleToMesh(sshPool, cfg, serverNames, request)
 	if uploaded == 0 {
 		return fmt.Errorf("failed to upload environment bundle to any node: %s", strings.Join(nodeErrors, "; "))
 	}
@@ -177,7 +177,10 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 
 	envName := getEnvironmentName(cfg)
 
-	response, source, err := downloadEnvBundleFromMesh(cfg, envName)
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+
+	response, source, err := downloadEnvBundleFromMesh(sshPool, cfg, envName)
 	if err != nil {
 		return err
 	}
@@ -467,12 +470,14 @@ func supportedEnvBundleFiles(bundle map[string]string) (map[string]string, []str
 	return allowed, allowedPaths, skippedPaths
 }
 
-func uploadEnvBundleToServer(cfg *config.Config, serverName string, serverCfg config.ServerConfig, request takod.EnvBundleRequest) error {
-	client, err := ssh.NewClientWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
+func uploadEnvBundleToServer(pool *ssh.Pool, cfg *config.Config, serverName string, serverCfg config.ServerConfig, request takod.EnvBundleRequest) error {
+	if pool == nil {
+		return fmt.Errorf("ssh pool is not initialized")
+	}
+	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
 	if err != nil {
 		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 	}
-	defer client.Close()
 
 	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "PUT", "/v1/env-bundle", request)
 	if err != nil {
@@ -494,7 +499,7 @@ type envBundleUploadResult struct {
 	err        error
 }
 
-func uploadEnvBundleToMesh(cfg *config.Config, serverNames []string, request takod.EnvBundleRequest) (int, []string) {
+func uploadEnvBundleToMesh(pool *ssh.Pool, cfg *config.Config, serverNames []string, request takod.EnvBundleRequest) (int, []string) {
 	resultCh := make(chan envBundleUploadResult, len(serverNames))
 	var wg sync.WaitGroup
 
@@ -515,7 +520,7 @@ func uploadEnvBundleToMesh(cfg *config.Config, serverNames []string, request tak
 			resultCh <- envBundleUploadResult{
 				index:      index,
 				serverName: serverName,
-				err:        uploadEnvBundleToServerFunc(cfg, serverName, serverCfg, request),
+				err:        uploadEnvBundleToServerFunc(pool, cfg, serverName, serverCfg, request),
 			}
 		}(index, serverName, serverCfg)
 	}
@@ -553,7 +558,7 @@ type envBundleDownloadResult struct {
 	err        error
 }
 
-func downloadEnvBundleFromMesh(cfg *config.Config, envName string) (*takod.EnvBundleResponse, string, error) {
+func downloadEnvBundleFromMesh(pool *ssh.Pool, cfg *config.Config, envName string) (*takod.EnvBundleResponse, string, error) {
 	serverNames, err := statePullServerNames(cfg, envName, "")
 	if err != nil {
 		return nil, "", err
@@ -576,7 +581,7 @@ func downloadEnvBundleFromMesh(cfg *config.Config, envName string) (*takod.EnvBu
 		wg.Add(1)
 		go func(index int, serverName string, serverCfg config.ServerConfig) {
 			defer wg.Done()
-			response, err := downloadEnvBundleFromServerFunc(cfg, envName, serverName, serverCfg)
+			response, err := downloadEnvBundleFromServerFunc(pool, cfg, envName, serverName, serverCfg)
 			resultCh <- envBundleDownloadResult{
 				index:      index,
 				serverName: serverName,
@@ -644,12 +649,14 @@ func selectFreshestEnvBundleCandidate(candidates []envBundleDownloadCandidate) e
 	return candidates[0]
 }
 
-func downloadEnvBundleFromServer(cfg *config.Config, envName string, serverName string, serverCfg config.ServerConfig) (*takod.EnvBundleResponse, error) {
-	client, err := ssh.NewClientWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
+func downloadEnvBundleFromServer(pool *ssh.Pool, cfg *config.Config, envName string, serverName string, serverCfg config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("ssh pool is not initialized")
+	}
+	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to %s: %w", serverName, err)
 	}
-	defer client.Close()
 
 	output, err := takodclient.RequestJSON(
 		client,
