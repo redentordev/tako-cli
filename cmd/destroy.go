@@ -156,7 +156,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	for _, serverName := range targetServerNames {
 		serverCfg := serversToDestroy[serverName]
 		fmt.Printf("=== Destroying server: %s (%s) ===\n", serverName, serverCfg.Host)
-		if err := destroySingleServer(serverName, serverCfg, cfg, envName, verbose, destroyPurgeAll); err != nil {
+		if err := destroySingleServer(sshPool, serverName, serverCfg, cfg, envName, verbose, destroyPurgeAll); err != nil {
 			fmt.Printf("⚠️  Errors destroying %s: %v\n", serverName, err)
 			totalErrors++
 		} else {
@@ -203,31 +203,27 @@ func destroyEnvironmentTargets(cfg *config.Config, envName string) (map[string]c
 }
 
 // destroySingleServer handles destruction of a single server.
-func destroySingleServer(serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool) error {
-	// Connect to server (supports both key and password auth)
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     serverCfg.Host,
-		Port:     serverCfg.Port,
-		User:     serverCfg.User,
-		SSHKey:   serverCfg.SSHKey,
-		Password: serverCfg.Password,
-	})
+func destroySingleServer(pool sshClientProvider, serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool) error {
+	return destroySingleServerWithHooks(pool, serverName, serverCfg, cfg, envName, verbose, purgeAll, decommissionApp, purgeServerSetup)
+}
+
+func destroySingleServerWithHooks(pool sshClientProvider, serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool, decommission func(*ssh.Client, *config.Config, string, bool) error, purge func(*ssh.Client, *config.Config, bool) error) error {
+	if pool == nil {
+		return fmt.Errorf("ssh pool is not initialized")
+	}
+	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
 	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
+		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 	}
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-	defer client.Close()
 
 	// Decommission application
-	if err := decommissionApp(client, cfg, envName, verbose); err != nil {
+	if err := decommission(client, cfg, envName, verbose); err != nil {
 		return fmt.Errorf("decommission failed: %w", err)
 	}
 
 	// Purge server setup if requested
 	if purgeAll {
-		if err := purgeServerSetup(client, cfg, verbose); err != nil {
+		if err := purge(client, cfg, verbose); err != nil {
 			return fmt.Errorf("purge failed: %w", err)
 		}
 	}

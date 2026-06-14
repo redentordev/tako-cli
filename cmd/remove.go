@@ -127,7 +127,7 @@ func runRemove(cmd *cobra.Command, args []string) error {
 	fmt.Printf("→ Reconciling cleanup through takod on %d node(s)...\n", len(serverNames))
 	request := removeCleanupRequest(cfg, envName, services)
 	results := collectCleanupNodes(servers, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
-		return cleanupSingleNode(cfg, serverCfg, request)
+		return cleanupSingleNode(cfg, sshPool, serverCfg, request)
 	})
 
 	var errors []string

@@ -99,7 +99,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("   Keeping %d latest images per service\n\n", keepImages)
 
 	results := collectCleanupNodes(serversToClean, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
-		return cleanupSingleNode(cfg, serverCfg, takod.CleanupRequest{
+		return cleanupSingleNode(cfg, sshPool, serverCfg, takod.CleanupRequest{
 			Project:                cfg.Project.Name,
 			Environment:            envName,
 			ImageRepositories:      imageRepositories,
@@ -158,6 +158,10 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 
 type cleanupNodeAction func(serverName string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error)
 
+type sshClientProvider interface {
+	GetOrCreateWithAuth(host string, port int, user string, keyPath string, password string) (*ssh.Client, error)
+}
+
 type cleanupNodeResult struct {
 	index      int
 	serverName string
@@ -205,24 +209,20 @@ func sortedCleanupServerNames(servers map[string]config.ServerConfig) []string {
 	return names
 }
 
-func cleanupSingleNode(cfg *config.Config, serverCfg config.ServerConfig, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     serverCfg.Host,
-		Port:     serverCfg.Port,
-		User:     serverCfg.User,
-		SSHKey:   serverCfg.SSHKey,
-		Password: serverCfg.Password,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create SSH client: %w", err)
-	}
-	defer client.Close()
+func cleanupSingleNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
+	return cleanupSingleNodeWithExecutor(cfg, pool, serverCfg, request, cleanupViaTakod)
+}
 
-	if err := client.Connect(); err != nil {
+func cleanupSingleNodeWithExecutor(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, request takod.CleanupRequest, execute func(*ssh.Client, *config.Config, takod.CleanupRequest) (*takod.CleanupResponse, error)) (*takod.CleanupResponse, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("ssh pool is not initialized")
+	}
+	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
+	if err != nil {
 		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
 
-	response, err := cleanupViaTakod(client, cfg, request)
+	response, err := execute(client, cfg, request)
 	if err != nil {
 		return nil, err
 	}
