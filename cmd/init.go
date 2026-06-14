@@ -157,12 +157,23 @@ Thumbs.db
 	}
 
 	fmt.Println("\n🐙 Tako project initialized!")
-	fmt.Println("\nNext steps:")
-	fmt.Println("  1. Copy .env.example to .env and fill in your values")
-	fmt.Printf("  2. Edit %s to configure your services\n", configPath)
-	fmt.Println("  3. Run 'tako deploy -e production' to deploy")
+	for _, line := range initNextSteps(configPath) {
+		fmt.Println(line)
+	}
 
 	return nil
+}
+
+func initNextSteps(configPath string) []string {
+	return []string{
+		"",
+		"Next steps:",
+		"  1. Copy .env.example to .env and fill in your values",
+		fmt.Sprintf("  2. Edit %s to configure your services", configPath),
+		"  3. Commit your app and config changes",
+		"  4. Run 'tako setup -e production' once per server",
+		"  5. Run 'tako deploy -e production' to deploy",
+	}
 }
 
 // generateJSONConfig creates a JSON configuration with schema reference

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -46,5 +47,19 @@ func TestGenerateJSONConfigParsesRuntimeBlocks(t *testing.T) {
 	}
 	if cfg.Mesh == nil {
 		t.Fatal("generated JSON should include mesh config")
+	}
+}
+
+func TestInitNextStepsIncludeGitSetupAndDeployFlow(t *testing.T) {
+	steps := initNextSteps("tako.yaml")
+
+	for _, want := range []string{
+		"  3. Commit your app and config changes",
+		"  4. Run 'tako setup -e production' once per server",
+		"  5. Run 'tako deploy -e production' to deploy",
+	} {
+		if !slices.Contains(steps, want) {
+			t.Fatalf("init next steps missing %q: %#v", want, steps)
+		}
 	}
 }
