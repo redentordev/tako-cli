@@ -113,9 +113,7 @@ func (d *Detector) CheckOnce() (*DriftState, error) {
 
 	// Check each configured service
 	for serviceName, serviceCfg := range env.Services {
-		fullServiceName := fmt.Sprintf("%s_%s_%s", d.config.Project.Name, d.environment, serviceName)
-
-		actual, exists := actualServices[fullServiceName]
+		actual, exists := actualServices[serviceName]
 		if !exists {
 			// Service doesn't exist at all
 			state.Drifts = append(state.Drifts, DriftReport{
@@ -168,15 +166,7 @@ func (d *Detector) CheckOnce() (*DriftState, error) {
 	}
 
 	// Check for unexpected services
-	for fullName := range actualServices {
-		if !strings.HasPrefix(fullName, d.config.Project.Name+"_"+d.environment+"_") {
-			continue
-		}
-
-		// Extract service name
-		prefix := d.config.Project.Name + "_" + d.environment + "_"
-		serviceName := strings.TrimPrefix(fullName, prefix)
-
+	for serviceName := range actualServices {
 		if _, exists := env.Services[serviceName]; !exists {
 			state.Drifts = append(state.Drifts, DriftReport{
 				Service:    serviceName,
@@ -342,14 +332,12 @@ func (d *Detector) getActualServices() (map[string]ActualService, error) {
 	}
 
 	services := make(map[string]ActualService, len(response.Services))
-	prefix := d.config.Project.Name + "_" + d.environment + "_"
 	for serviceName, service := range response.Services {
 		if service == nil {
 			continue
 		}
-		fullName := prefix + serviceName
-		services[fullName] = ActualService{
-			Name:     fullName,
+		services[serviceName] = ActualService{
+			Name:     serviceName,
 			Image:    service.Image,
 			Replicas: service.Replicas,
 			Running:  service.Replicas,

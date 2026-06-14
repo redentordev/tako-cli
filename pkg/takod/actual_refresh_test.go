@@ -25,7 +25,7 @@ func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
 	restore := useFakeActualDocker(t)
 	defer restore()
 	runtimeID := runtimeid.ServiceIdentity("demo", "production", "web")
-	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1|demo/web:1|container-a|hash-web|"+runtimeID+"\n")
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1|demo/web:1|container-a|hash-web|"+runtimeID+"|demo|production|web\n")
 
 	refreshed, err := RefreshActualStateDocuments(context.Background(), dataDir, "node-a")
 	if err != nil {
@@ -98,7 +98,7 @@ func TestRefreshActualStateDocumentsSkipsHeldLease(t *testing.T) {
 
 	restore := useFakeActualDocker(t)
 	defer restore()
-	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1|demo/web:1|container-a\n")
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1|demo/web:1|container-a|||demo|production|web\n")
 
 	refreshed, err := RefreshActualStateDocuments(context.Background(), dataDir, "node-a")
 	if err != nil {

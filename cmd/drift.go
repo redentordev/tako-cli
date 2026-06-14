@@ -80,7 +80,7 @@ func runDrift(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return nil, err
 		}
-		return driftServicesFromReconcile(cfg.Project.Name, envName, actual), nil
+		return driftServicesFromReconcile(actual), nil
 	})
 
 	if driftWatch {
@@ -90,16 +90,14 @@ func runDrift(cmd *cobra.Command, args []string) error {
 	return checkDriftOnce(detector)
 }
 
-func driftServicesFromReconcile(project string, environment string, actual map[string]*reconcile.ActualService) map[string]drift.ActualService {
+func driftServicesFromReconcile(actual map[string]*reconcile.ActualService) map[string]drift.ActualService {
 	services := make(map[string]drift.ActualService, len(actual))
-	prefix := project + "_" + environment + "_"
 	for serviceName, service := range actual {
 		if service == nil {
 			continue
 		}
-		fullName := prefix + serviceName
-		services[fullName] = drift.ActualService{
-			Name:     fullName,
+		services[serviceName] = drift.ActualService{
+			Name:     serviceName,
 			Image:    service.Image,
 			Replicas: service.Replicas,
 			Running:  service.Replicas,

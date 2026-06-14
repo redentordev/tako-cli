@@ -22,8 +22,8 @@ func TestDetectorUsesActualServiceProvider(t *testing.T) {
 	}
 	detector := NewDetectorWithActualProvider(cfg, "production", nil, false, func() (map[string]ActualService, error) {
 		return map[string]ActualService{
-			"demo_production_web": {
-				Name:     "demo_production_web",
+			"web": {
+				Name:     "web",
 				Image:    "demo:web",
 				Replicas: 2,
 				Running:  2,
