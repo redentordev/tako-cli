@@ -16,7 +16,6 @@ import (
 )
 
 var (
-	maintenanceServer  string
 	maintenanceService string
 )
 
@@ -65,9 +64,6 @@ This command deploys a maintenance page container with proxy routing
 that takes priority over the main service. The main service continues
 running in the background.
 
-If --server is not specified, maintenance mode is enabled on every
-environment node.
-
 Custom Maintenance Page:
   Create a 'maintenance.html' file in your project directory to use a custom page.
   If not provided, a simple default page will be used.
@@ -76,7 +72,6 @@ To restore normal operation, use 'tako live'.
 
 Examples:
   tako maintenance --service web               # Enable on all environment nodes
-  tako maintenance --service web --server prod  # Enable on one specific node
 
   # With custom page
   echo '<h1>Custom Maintenance</h1>' > maintenance.html
@@ -86,7 +81,6 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(maintenanceCmd)
-	maintenanceCmd.Flags().StringVarP(&maintenanceServer, "server", "s", "", "Node to enable maintenance on instead of all environment nodes")
 	maintenanceCmd.Flags().StringVar(&maintenanceService, "service", "", "Service to put in maintenance mode (required)")
 	maintenanceCmd.MarkFlagRequired("service")
 }
@@ -119,9 +113,12 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("service %s is not public-facing (no proxy configuration)", maintenanceService)
 	}
 
-	targetServers, err := statePullServerNames(cfg, envName, maintenanceServer)
+	targetServers, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
 		return err
+	}
+	if len(targetServers) == 0 {
+		return fmt.Errorf("no servers configured for environment %s", envName)
 	}
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()

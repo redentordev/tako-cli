@@ -12,7 +12,6 @@ import (
 )
 
 var (
-	liveServer  string
 	liveService string
 )
 
@@ -24,18 +23,13 @@ var liveCmd = &cobra.Command{
 This command removes the maintenance page container and restores
 traffic to the main service.
 
-If --server is not specified, maintenance mode is disabled on every
-environment node.
-
 Examples:
-  tako live --service web               # Disable maintenance on all environment nodes
-  tako live --service web --server prod  # Disable on one specific node`,
+  tako live --service web`,
 	RunE: runLive,
 }
 
 func init() {
 	rootCmd.AddCommand(liveCmd)
-	liveCmd.Flags().StringVarP(&liveServer, "server", "s", "", "Node to disable maintenance on instead of all environment nodes")
 	liveCmd.Flags().StringVar(&liveService, "service", "", "Service to restore (required)")
 	liveCmd.MarkFlagRequired("service")
 }
@@ -53,9 +47,12 @@ func runLive(cmd *cobra.Command, args []string) error {
 	// Get environment
 	envName := getEnvironmentName(cfg)
 
-	targetServers, err := statePullServerNames(cfg, envName, liveServer)
+	targetServers, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
 		return err
+	}
+	if len(targetServers) == 0 {
+		return fmt.Errorf("no servers configured for environment %s", envName)
 	}
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
