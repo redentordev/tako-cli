@@ -28,6 +28,17 @@ minimal so the deployment shape is easy to see and adapt.
 3. Replace the project name, domain, and service settings.
 4. Run `tako setup -e production`, then `tako deploy -e production --yes`.
 
+## Validate The Catalog
+
+Run the local validation command after changing these templates:
+
+```sh
+make examples
+```
+
+This loads every `tako.yaml`, checks build contexts, verifies the CI/CD example,
+and runs the deployment pattern assertions without contacting a real server.
+
 Stateful templates use node-local volumes. Pin stateful services when moving
 to multiple nodes unless the service itself is built for replication.
 

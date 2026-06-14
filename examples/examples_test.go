@@ -60,6 +60,58 @@ func TestDeploymentPatternTemplatesLoadAndCoverCommonUseCases(t *testing.T) {
 	}
 }
 
+func TestDeploymentPatternDocsAndValidatorCoverCatalog(t *testing.T) {
+	patterns := []string{
+		"00-prebuilt-image",
+		"01-static-site",
+		"02-node-api",
+		"03-volume-sqlite",
+		"04-postgres-app",
+		"05-workers-redis",
+		"06-cron-runner",
+		"07-python-fastapi",
+		"08-go-web",
+		"09-monorepo-web-api",
+		"10-stages-shared-node",
+		"11-websocket-node",
+		"12-github-actions-deploy",
+	}
+
+	readme := readExampleFile(t, filepath.Join("deployment-patterns", "README.md"))
+	validateScript := readExampleFile(t, filepath.Join("deployment-patterns", "validate.sh"))
+	envExample := readExampleFile(t, filepath.Join("deployment-patterns", ".env.example"))
+
+	for _, pattern := range patterns {
+		if !strings.Contains(readme, "`"+pattern+"`") {
+			t.Fatalf("deployment pattern README missing %s", pattern)
+		}
+	}
+
+	for _, expected := range []string{
+		"SERVER_HOST",
+		"TAKO_SERVER_HOST",
+		"SSH_KEY",
+		"TAKO_SSH_KEY",
+		"LETSENCRYPT_EMAIL",
+		"POSTGRES_PASSWORD",
+	} {
+		if !strings.Contains(envExample, expected) {
+			t.Fatalf("deployment pattern .env.example missing %s", expected)
+		}
+	}
+
+	for _, expected := range []string{
+		"*/tako.yaml",
+		"go build -o \"$TMP_DIR/test-config\" \"$ROOT/cmd/test-config\"",
+		"\"$TMP_DIR/test-config\" tako.yaml",
+		"go test ./examples",
+	} {
+		if !strings.Contains(validateScript, expected) {
+			t.Fatalf("deployment pattern validator missing %q", expected)
+		}
+	}
+}
+
 func TestExamplesDoNotUseKnownDemoDatabasePasswords(t *testing.T) {
 	forbidden := []string{
 		"dbpassword123",
@@ -100,6 +152,15 @@ func TestExamplesDoNotUseKnownDemoDatabasePasswords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to scan examples: %v", err)
 	}
+}
+
+func readExampleFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", path, err)
+	}
+	return string(data)
 }
 
 func TestGitHubActionsDeploymentPatternIncludesStateWorkflow(t *testing.T) {
