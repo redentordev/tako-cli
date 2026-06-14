@@ -119,6 +119,11 @@ func AggregateActualStateByServer(actualByServer map[string]map[string]*ActualSe
 				if existing.Image == "" {
 					existing.Image = serviceState.Image
 				}
+				if existing.ConfigHash == "" {
+					existing.ConfigHash = serviceState.ConfigHash
+				} else if serviceState.ConfigHash != "" && existing.ConfigHash != serviceState.ConfigHash {
+					existing.ConfigHash = ""
+				}
 				continue
 			}
 			actualServices[serviceName] = cloneActualService(serviceState)
@@ -172,6 +177,7 @@ func gatherActualStateFromTakod(client *ssh.Client, cfg *config.Config, environm
 			Image:      service.Image,
 			Replicas:   service.Replicas,
 			Containers: append([]string(nil), service.Containers...),
+			ConfigHash: service.ConfigHash,
 			ConfigSnapshot: &config.ServiceConfig{
 				Image: service.Image,
 			},

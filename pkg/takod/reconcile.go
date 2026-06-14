@@ -200,6 +200,11 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 			return fmt.Errorf("invalid mount value")
 		}
 	}
+	for key, value := range req.Labels {
+		if strings.TrimSpace(key) == "" || hasControlChars(key) || hasControlChars(value) {
+			return fmt.Errorf("invalid label")
+		}
+	}
 	if req.Command != "" && strings.ContainsRune(req.Command, '\x00') {
 		return fmt.Errorf("command contains unsupported characters")
 	}

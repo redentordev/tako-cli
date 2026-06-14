@@ -21,7 +21,7 @@ func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
 
 	restore := useFakeActualDocker(t)
 	defer restore()
-	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1|demo/web:1|container-a\n")
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1|demo/web:1|container-a|hash-web\n")
 
 	refreshed, err := RefreshActualStateDocuments(context.Background(), dataDir, "node-a")
 	if err != nil {
@@ -43,6 +43,9 @@ func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
 	if got := nodeSnapshot.Services["web"].Replicas; got != 1 {
 		t.Fatalf("node web replicas = %d, want 1", got)
 	}
+	if got := nodeSnapshot.Services["web"].ConfigHash; got != "hash-web" {
+		t.Fatalf("node web config hash = %q, want hash-web", got)
+	}
 
 	aggregate := readActualSnapshotFixture(t, dataDir, StateDocumentRequest{
 		Project:     "demo",
@@ -51,6 +54,9 @@ func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
 	})
 	if got := aggregate.Services["web"].Replicas; got != 1 {
 		t.Fatalf("aggregate web replicas = %d, want 1", got)
+	}
+	if got := aggregate.Services["web"].ConfigHash; got != "hash-web" {
+		t.Fatalf("aggregate web config hash = %q, want hash-web", got)
 	}
 	if _, ok := aggregate.Nodes["node-a"]; !ok {
 		t.Fatalf("aggregate missing node-a snapshot: %#v", aggregate.Nodes)

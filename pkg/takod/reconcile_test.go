@@ -91,6 +91,12 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe mount value to be rejected")
 	}
+
+	invalid = valid
+	invalid.Labels = map[string]string{"tako.configHash": "abc\n--privileged"}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe label value to be rejected")
+	}
 }
 
 func TestValidateRemoveServiceRequest(t *testing.T) {

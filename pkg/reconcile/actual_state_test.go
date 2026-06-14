@@ -16,6 +16,7 @@ func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
 		Image:      "demo/web:1",
 		Replicas:   1,
 		Containers: []string{"a1"},
+		ConfigHash: "hash-web",
 	}
 	actualByServer := map[string]map[string]*ActualService{
 		"node-a": {
@@ -27,6 +28,7 @@ func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
 				Image:      "demo/web:1",
 				Replicas:   2,
 				Containers: []string{"b1", "b2"},
+				ConfigHash: "hash-web",
 			},
 			"worker": {
 				Name:       "worker",
@@ -48,10 +50,29 @@ func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
 	if got := aggregate["worker"].Replicas; got != 1 {
 		t.Fatalf("worker replicas = %d, want 1", got)
 	}
+	if got := aggregate["web"].ConfigHash; got != "hash-web" {
+		t.Fatalf("web config hash = %q, want hash-web", got)
+	}
 
 	aggregate["web"].Containers[0] = "mutated"
 	if nodeAWeb.Containers[0] != "a1" {
 		t.Fatalf("aggregate aliased node state: %#v", nodeAWeb.Containers)
+	}
+}
+
+func TestAggregateActualStateByServerClearsMixedConfigHashes(t *testing.T) {
+	actualByServer := map[string]map[string]*ActualService{
+		"node-a": {
+			"web": {Name: "web", Image: "demo/web:1", Replicas: 1, ConfigHash: "hash-a"},
+		},
+		"node-b": {
+			"web": {Name: "web", Image: "demo/web:1", Replicas: 1, ConfigHash: "hash-b"},
+		},
+	}
+
+	aggregate := AggregateActualStateByServer(actualByServer)
+	if got := aggregate["web"].ConfigHash; got != "" {
+		t.Fatalf("mixed config hash = %q, want empty", got)
 	}
 }
 

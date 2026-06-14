@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/reconcile"
 )
 
 func TestEnsureTakodMeshKeysWithRunsConcurrently(t *testing.T) {
@@ -140,6 +141,33 @@ func TestBuildTakodHealthSpecUsesQuotedCommand(t *testing.T) {
 	want := "curl -sf -- 'http://127.0.0.1:8080/ready?token=a'\"'\"'b' || exit 1"
 	if spec.Command != want {
 		t.Fatalf("health command = %q, want %q", spec.Command, want)
+	}
+}
+
+func TestServiceRuntimeLabelsIncludeSafeConfigHash(t *testing.T) {
+	service := config.ServiceConfig{
+		Image: "nginx:1.27",
+		Port:  8080,
+		Proxy: &config.ProxyConfig{Domain: "example.com"},
+	}
+	wantHash, ok := reconcile.SafeServiceConfigHash(service)
+	if !ok {
+		t.Fatal("expected safe service hash")
+	}
+
+	labels := serviceRuntimeLabels(service)
+	if labels[reconcile.ConfigHashLabel] != wantHash {
+		t.Fatalf("config hash label = %q, want %q", labels[reconcile.ConfigHashLabel], wantHash)
+	}
+}
+
+func TestServiceRuntimeLabelsSkipEnvMaterial(t *testing.T) {
+	labels := serviceRuntimeLabels(config.ServiceConfig{
+		Image: "nginx:1.27",
+		Env:   map[string]string{"TOKEN": "secret"},
+	})
+	if labels != nil {
+		t.Fatalf("labels = %#v, want nil", labels)
 	}
 }
 
