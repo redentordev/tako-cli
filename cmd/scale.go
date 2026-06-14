@@ -5,12 +5,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
 	"github.com/spf13/cobra"
 )
@@ -125,6 +128,7 @@ func runScaleWithServer(cmd *cobra.Command, args []string, serverOverride string
 	if err := deploy.SetupTakodRuntime(); err != nil {
 		return fmt.Errorf("failed to setup takod runtime: %w", err)
 	}
+	startTime := time.Now()
 
 	actualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, nil)
 	if err != nil {
@@ -202,6 +206,12 @@ func runScaleWithServer(cmd *cobra.Command, args []string, serverOverride string
 		return fmt.Errorf("scale succeeded but failed to persist takod state: %w", err)
 	}
 
+	scaleDuration := time.Since(startTime)
+	scaleDeployment := buildScaleDeploymentState(cfg, envName, sourceServer.Host, startTime, scaleDuration, scaleTargets, desiredServices, imageRefs)
+	if err := recordScaleDeploymentState(sshPool, sourceClient, cfg, envName, serverNames, scaleDeployment); err != nil {
+		return fmt.Errorf("scale succeeded but failed to record deployment history: %w", err)
+	}
+
 	fmt.Println("\nAll services scaled successfully.")
 	return nil
 }
@@ -212,6 +222,110 @@ func scaleEventDetails(targets map[string]int) map[string]string {
 		details[serviceName] = fmt.Sprintf("%d", replicas)
 	}
 	return details
+}
+
+func buildScaleDeploymentState(
+	cfg *config.Config,
+	envName string,
+	host string,
+	startTime time.Time,
+	duration time.Duration,
+	scaleTargets map[string]int,
+	services map[string]config.ServiceConfig,
+	imageRefs map[string]string,
+) *remotestate.DeploymentState {
+	serviceStates := make(map[string]remotestate.ServiceState, len(scaleTargets))
+	for _, serviceName := range sortedScaleTargetNames(scaleTargets) {
+		service := services[serviceName]
+		serviceStates[serviceName] = remotestate.ServiceState{
+			Name:     serviceName,
+			Image:    imageRefs[serviceName],
+			Port:     service.Port,
+			Replicas: service.Replicas,
+			Env:      redactedEnvKeys(service.Env),
+		}
+	}
+
+	return &remotestate.DeploymentState{
+		Timestamp:   startTime,
+		ProjectName: cfg.Project.Name,
+		Environment: envName,
+		Version:     cfg.Project.Version,
+		Status:      remotestate.StatusSuccess,
+		Services:    serviceStates,
+		User:        remotestate.GetCurrentUser(),
+		Host:        host,
+		Duration:    duration,
+		Message:     fmt.Sprintf("scaled %s", scaleTargetSummary(scaleTargets)),
+		CLIVersion:  Version,
+		CLICommit:   GitCommit,
+	}
+}
+
+func recordScaleDeploymentState(
+	sshPool *ssh.Pool,
+	sourceClient *ssh.Client,
+	cfg *config.Config,
+	envName string,
+	serverNames []string,
+	deployment *remotestate.DeploymentState,
+) error {
+	stateManager := remotestate.NewStateManagerWithSocket(sourceClient, cfg.Project.Name, envName, deployment.Host, takodSocketFromConfig(cfg))
+	if err := stateManager.SaveDeployment(deployment); err != nil {
+		return fmt.Errorf("failed to save remote scale history: %w", err)
+	}
+
+	if len(serverNames) > 1 {
+		replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
+		history, err := stateManager.LoadHistory()
+		if err != nil {
+			return fmt.Errorf("failed to load scale history for replication: %w", err)
+		}
+		if err := replicator.ReplicateDeployment(deployment, history); err != nil {
+			return fmt.Errorf("failed to replicate scale history: %w", err)
+		}
+	}
+
+	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+	if err != nil {
+		if verbose {
+			fmt.Printf("Warning: failed to initialize local state for scale: %v\n", err)
+		}
+		return nil
+	}
+	localDeployment := &localstate.DeploymentState{
+		DeploymentID:    fmt.Sprintf("scale-%s", deployment.Timestamp.Format("20060102-150405")),
+		Timestamp:       deployment.Timestamp,
+		Environment:     envName,
+		Mode:            cfg.GetRuntimeMode(),
+		Servers:         append([]string(nil), serverNames...),
+		Status:          "success",
+		DurationSeconds: int(deployment.Duration.Seconds()),
+		TriggeredBy:     remotestate.GetCurrentUser(),
+		Notes:           deployment.Message,
+	}
+	if err := localMgr.SaveDeployment(localDeployment); err != nil && verbose {
+		fmt.Printf("Warning: failed to save local scale state: %v\n", err)
+	}
+	return nil
+}
+
+func scaleTargetSummary(targets map[string]int) string {
+	names := sortedScaleTargetNames(targets)
+	parts := make([]string, 0, len(names))
+	for _, serviceName := range names {
+		parts = append(parts, fmt.Sprintf("%s=%d", serviceName, targets[serviceName]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func sortedScaleTargetNames(targets map[string]int) []string {
+	names := make([]string, 0, len(targets))
+	for serviceName := range targets {
+		names = append(names, serviceName)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func scaleTargetServers(cfg *config.Config, envName string, serverOverride string) ([]string, error) {
