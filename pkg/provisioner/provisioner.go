@@ -194,29 +194,72 @@ func (p *Provisioner) InstallTakodBinary(version string) error {
 	}
 
 	binaryName := fmt.Sprintf("tako-linux-%s", arch)
-	downloadURL := fmt.Sprintf("https://github.com/redentordev/tako-cli/releases/download/%s/%s", version, binaryName)
-	script := fmt.Sprintf(`set -eu
-tmp="$(mktemp)"
-cleanup() { rm -f "$tmp"; }
-trap cleanup EXIT
-if command -v curl >/dev/null 2>&1; then
-  curl -fL --retry 3 --connect-timeout 15 -o "$tmp" %s
-elif command -v wget >/dev/null 2>&1; then
-  wget -O "$tmp" %s
-else
-  echo "curl or wget is required to install takod binary" >&2
-  exit 1
-fi
-install -m 0755 "$tmp" /usr/local/bin/tako
-/usr/local/bin/tako --version >/dev/null
-`,
-		shellQuote(downloadURL),
-		shellQuote(downloadURL),
-	)
+	script := takodBinaryInstallScript(version, binaryName)
 	if _, err := p.client.Execute(runRootScript(script)); err != nil {
 		return fmt.Errorf("failed to install takod binary from release %s: %w", version, err)
 	}
 	return nil
+}
+
+func takodBinaryInstallScript(version string, binaryName string) string {
+	downloadURL := fmt.Sprintf("https://github.com/redentordev/tako-cli/releases/download/%s/%s", version, binaryName)
+	checksumsURL := fmt.Sprintf("https://github.com/redentordev/tako-cli/releases/download/%s/checksums.txt", version)
+	return fmt.Sprintf(`set -eu
+tmp="$(mktemp)"
+checksums="$(mktemp)"
+cleanup() { rm -f "$tmp" "$checksums"; }
+trap cleanup EXIT
+
+fetch() {
+  url="$1"
+  dest="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 --connect-timeout 15 -o "$dest" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --tries=3 --timeout=15 -O "$dest" "$url"
+  else
+    echo "curl or wget is required to install takod binary" >&2
+    exit 1
+  fi
+}
+
+calc_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+    return 0
+  fi
+  echo "sha256sum or shasum is required to verify takod binary" >&2
+  return 1
+}
+
+fetch %s "$tmp"
+fetch %s "$checksums"
+
+expected="$(awk -v name=%s '$2 == name { print $1; found = 1; exit } END { if (!found) exit 1 }' "$checksums")" || {
+  echo "checksum for %s not found in checksums.txt" >&2
+  exit 1
+}
+calculated="$(calc_sha256 "$tmp")"
+if [ "$calculated" != "$expected" ]; then
+  echo "checksum mismatch for %s" >&2
+  echo "expected: $expected" >&2
+  echo "got:      $calculated" >&2
+  exit 1
+fi
+
+install -m 0755 "$tmp" /usr/local/bin/tako
+/usr/local/bin/tako --version >/dev/null
+`,
+		shellQuote(downloadURL),
+		shellQuote(checksumsURL),
+		shellQuote(binaryName),
+		binaryName,
+		binaryName,
+	)
 }
 
 func (p *Provisioner) InstallTakodService(socket string, dataDir string, nodeName string) error {

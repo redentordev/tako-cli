@@ -132,3 +132,46 @@ func TestBootstrapScriptsAvoidDownloadedShellInstallers(t *testing.T) {
 		}
 	}
 }
+
+func TestTakodBinaryInstallScriptVerifiesReleaseChecksum(t *testing.T) {
+	script := takodBinaryInstallScript("v1.2.3", "tako-linux-amd64")
+
+	for _, required := range []string{
+		"https://github.com/redentordev/tako-cli/releases/download/v1.2.3/tako-linux-amd64",
+		"https://github.com/redentordev/tako-cli/releases/download/v1.2.3/checksums.txt",
+		"calc_sha256()",
+		"sha256sum \"$1\"",
+		"shasum -a 256 \"$1\"",
+		"awk -v name='tako-linux-amd64'",
+		"checksum mismatch for tako-linux-amd64",
+		"install -m 0755 \"$tmp\" /usr/local/bin/tako",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("install script is missing %q:\n%s", required, script)
+		}
+	}
+}
+
+func TestTakodBinaryInstallScriptFailsClosedOnChecksumProblems(t *testing.T) {
+	script := takodBinaryInstallScript("v1.2.3", "tako-linux-amd64")
+
+	for _, required := range []string{
+		"sha256sum or shasum is required to verify takod binary",
+		"checksum for tako-linux-amd64 not found in checksums.txt",
+		"exit 1",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("install script is missing fail-closed behavior %q:\n%s", required, script)
+		}
+	}
+
+	for _, disallowed := range []string{
+		"skipping checksum",
+		"skip checksum",
+		"checksum not found in checksums file, skipping",
+	} {
+		if strings.Contains(script, disallowed) {
+			t.Fatalf("install script contains disallowed best-effort verification text %q:\n%s", disallowed, script)
+		}
+	}
+}
