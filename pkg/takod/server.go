@@ -112,6 +112,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/remove-service", s.handleRemoveService)
 	mux.HandleFunc("/v1/proxy-file", s.handleProxyFile)
 	mux.HandleFunc("/v1/proxy", s.handleProxy)
+	mux.HandleFunc("/v1/ports/allocate", s.handlePortAllocate)
 	mux.HandleFunc("/v1/cleanup", s.handleCleanup)
 	mux.HandleFunc("/v1/acme-dns", s.handleAcmeDNS)
 	mux.HandleFunc("/v1/acme-dns/register", s.handleAcmeDNSRegister)
@@ -303,6 +304,34 @@ func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	if err := ReleaseServicePortAllocations(r.Context(), s.dataDir, request.Project, request.Environment, request.Service); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handlePortAllocate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request PortAllocationRequest
+	if err := decodeJSONRequest(w, r, &request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	response, err := AllocatePort(r.Context(), s.dataDir, request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
@@ -389,6 +418,11 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if request.RemoveContainers || request.RemoveTakodState || request.RemoveProxyRuntime {
+		if err := ReleaseProjectPortAllocations(r.Context(), s.dataDir, request.Project, request.Environment); err != nil {
+			response.Warnings = append(response.Warnings, fmt.Sprintf("failed to release port allocations: %v", err))
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
