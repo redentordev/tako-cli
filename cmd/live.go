@@ -57,6 +57,16 @@ func runLive(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServers, "live")
+	if err != nil {
+		return err
+	}
+	defer leaseSet.Release(verbose)
+	if verbose {
+		fmt.Printf("→ Acquired remote live leases: %s\n", leaseSet.Summary())
+	}
 
 	fmt.Printf("Disabling maintenance mode for %s on %d node(s)...\n\n", liveService, len(targetServers))
 

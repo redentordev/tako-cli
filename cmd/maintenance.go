@@ -123,6 +123,16 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServers, "maintenance")
+	if err != nil {
+		return err
+	}
+	defer leaseSet.Release(verbose)
+	if verbose {
+		fmt.Printf("→ Acquired remote maintenance leases: %s\n", leaseSet.Summary())
+	}
 
 	fmt.Printf("Enabling maintenance mode for %s on %d node(s)...\n\n", maintenanceService, len(targetServers))
 
