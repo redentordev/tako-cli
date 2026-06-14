@@ -3,7 +3,6 @@ package reconcile
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -12,6 +11,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 // GatherActualStateFromServers collects takod container state from every
@@ -148,17 +148,11 @@ func gatherActualStateFromTakod(client *ssh.Client, cfg *config.Config, environm
 		socket = cfg.Runtime.Agent.Socket
 	}
 
-	requestURL := fmt.Sprintf(
-		"http://takod/v1/actual?project=%s&environment=%s",
-		queryEscape(cfg.Project.Name),
-		queryEscape(environment),
-	)
-	cmd := fmt.Sprintf(
-		"if test -S %[1]s && command -v curl >/dev/null 2>&1; then curl --fail --silent --show-error --unix-socket %[1]s %[2]s; else exit 42; fi",
-		shellQuote(socket),
-		shellQuote(requestURL),
-	)
-	output, err := client.Execute(cmd)
+	return gatherActualStateFromTakodWith(client, socket, cfg.Project.Name, environment)
+}
+
+func gatherActualStateFromTakodWith(client takodclient.RequestExecutor, socket string, project string, environment string) (map[string]*ActualService, error) {
+	output, err := takodclient.RequestJSON(client, socket, "GET", takodclient.ActualStateEndpoint(project, environment), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -193,15 +187,4 @@ func mergeRuntimeID(existing string, incoming string) string {
 		return existing
 	}
 	return ""
-}
-
-func queryEscape(value string) string {
-	return url.QueryEscape(value)
-}
-
-func shellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }

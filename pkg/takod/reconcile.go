@@ -121,10 +121,16 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	started := make([]string, 0, len(req.Containers))
 	for _, container := range req.Containers {
 		if err := runServiceContainer(ctx, req, container); err != nil {
+			if cleanupErr := cleanupStartedContainers(started); cleanupErr != nil {
+				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
+			}
 			return nil, err
 		}
 		started = append(started, container.Name)
 		if err := waitForContainerHealthy(ctx, container.Name, req.Health); err != nil {
+			if cleanupErr := cleanupStartedContainers(started); cleanupErr != nil {
+				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
+			}
 			return nil, err
 		}
 	}
@@ -492,6 +498,19 @@ func runServiceContainer(ctx context.Context, req ReconcileServiceRequest, conta
 	args := buildServiceContainerArgs(req, container)
 	if output, err := runDocker(ctx, args...); err != nil {
 		return fmt.Errorf("failed to start container %s: %w, output: %s", container.Name, err, output)
+	}
+	return nil
+}
+
+func cleanupStartedContainers(containerNames []string) error {
+	if len(containerNames) == 0 {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	args := append([]string{"rm", "-f"}, containerNames...)
+	if _, err := runDocker(cleanupCtx, args...); err != nil {
+		return fmt.Errorf("failed to remove started containers: %w", err)
 	}
 	return nil
 }
