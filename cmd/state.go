@@ -18,6 +18,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
 	"github.com/spf13/cobra"
@@ -143,15 +144,11 @@ func runStatePull(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Warning: mesh runtime state recovery failed: %v\n", err)
 	}
 
-	fmt.Println("No mesh runtime state found, attempting recovery from running services...")
-	recoveryServerName, client, err := connectFirstReachableStateServer(cfg, envName, stateServer)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-	fmt.Printf("Recovering from running containers on %s...\n", recoveryServerName)
-	if err := reconcileAndSave(client, cfg, envName); err == nil {
+	fmt.Println("No mesh runtime state found, attempting recovery from running services across reachable nodes...")
+	if err := recoverAndSaveStateFromRunningMesh(cfg, envName, stateServer); err == nil {
 		return nil
+	} else if verbose {
+		fmt.Printf("Warning: running service recovery failed: %v\n", err)
 	}
 	fmt.Println("\nNo remote state or running services found.")
 	fmt.Println("This project has not been deployed yet, or state was cleaned up.")
@@ -279,29 +276,6 @@ func connectAndVerifyStateServer(serverName string, server config.ServerConfig) 
 		return nil, fmt.Errorf("SSH command verification returned %q", strings.TrimSpace(verifyOutput))
 	}
 	return client, nil
-}
-
-func connectFirstReachableStateServer(cfg *config.Config, envName string, requestedServer string) (string, *ssh.Client, error) {
-	serverNames, err := statePullServerNames(cfg, envName, requestedServer)
-	if err != nil {
-		return "", nil, err
-	}
-	var lastErr error
-	for _, serverName := range serverNames {
-		server, err := serverConfigByName(cfg, serverName)
-		if err != nil {
-			return "", nil, err
-		}
-		client, err := connectAndVerifyStateServer(serverName, server)
-		if err == nil {
-			return serverName, client, nil
-		}
-		lastErr = err
-	}
-	if lastErr != nil {
-		return "", nil, fmt.Errorf("no reachable state server: %w", lastErr)
-	}
-	return "", nil, fmt.Errorf("no reachable state server")
 }
 
 func statePullServerNames(cfg *config.Config, envName string, requestedServer string) ([]string, error) {
@@ -1974,16 +1948,8 @@ func SyncStateOnDeploy(cfg *config.Config, envName string) error {
 		if verbose {
 			fmt.Println("No remote deployment history found during auto-sync")
 		}
-		recoveryServerName, client, err := connectFirstReachableStateServer(cfg, envName, "")
-		if err != nil {
-			return nil
-		}
-		defer client.Close()
-		if verbose {
-			fmt.Printf("Attempting local state recovery from running containers on %s...\n", recoveryServerName)
-		}
-		if err := reconcileAndSave(client, cfg, envName); err != nil && verbose {
-			fmt.Printf("Warning: failed to recover local state from running containers: %v\n", err)
+		if err := recoverAndSaveStateFromRunningMesh(cfg, envName, ""); err != nil && verbose {
+			fmt.Printf("Warning: failed to recover local state from running mesh containers: %v\n", err)
 		}
 		return nil
 	}
@@ -2011,6 +1977,155 @@ func recoverAndSaveStateFromMeshActual(cfg *config.Config, envName string, reque
 		return err
 	}
 	return saveRecoveredDeployment(cfg, envName, deployment)
+}
+
+type runningActualNodeResult struct {
+	index      int
+	serverName string
+	host       string
+	candidate  stateNodeActualCandidate
+	err        error
+}
+
+func recoverAndSaveStateFromRunningMesh(cfg *config.Config, envName string, requestedServer string) error {
+	candidates, err := collectRunningActualNodeSnapshots(cfg, envName, requestedServer)
+	if err != nil {
+		return err
+	}
+	bestNodeActual := bestNodeActualSnapshots(candidates)
+	if len(bestNodeActual) == 0 {
+		return fmt.Errorf("no running takod containers found on reachable mesh nodes")
+	}
+	aggregate := aggregateActualSnapshotFromNodeSnapshots(cfg.Project.Name, envName, bestNodeActual)
+	deployment, err := ReconcileStateFromActualSnapshot(cfg, envName, aggregate, "State recovered from running takod containers across the mesh")
+	if err != nil {
+		return err
+	}
+	return saveRecoveredDeployment(cfg, envName, deployment)
+}
+
+func collectRunningActualNodeSnapshots(cfg *config.Config, envName string, requestedServer string) ([]stateNodeActualCandidate, error) {
+	serverNames, err := statePullServerNames(cfg, envName, requestedServer)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]runningActualNodeResult, len(serverNames))
+	resultCh := make(chan runningActualNodeResult, len(serverNames))
+	var wg sync.WaitGroup
+	for index, serverName := range serverNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return nil, fmt.Errorf("server %s not found in configuration", serverName)
+		}
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			result := runningActualNodeResult{
+				index:      index,
+				serverName: serverName,
+				host:       server.Host,
+			}
+
+			client, err := connectAndVerifyStateServer(serverName, server)
+			if err != nil {
+				result.err = err
+				resultCh <- result
+				return
+			}
+			defer client.Close()
+
+			actual, err := actualStateViaTakod(client, cfg, envName)
+			if err != nil {
+				result.err = err
+				resultCh <- result
+				return
+			}
+
+			snapshot := actualSnapshotFromTakodActual(cfg.Project.Name, envName, serverName, actual, time.Now().UTC())
+			if len(snapshot.Services) > 0 {
+				result.candidate = stateNodeActualCandidate{
+					source: serverName,
+					node:   serverName,
+					actual: snapshot,
+				}
+			}
+			resultCh <- result
+		}(index, serverName, server)
+	}
+	wg.Wait()
+	close(resultCh)
+	for result := range resultCh {
+		results[result.index] = result
+	}
+
+	readErrors := make([]string, 0)
+	candidates := make([]stateNodeActualCandidate, 0, len(results))
+	for _, result := range results {
+		if result.err != nil {
+			readErrors = append(readErrors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+			if verbose {
+				fmt.Fprintf(os.Stderr, "Warning: cannot read running state from %s: %v\n", result.serverName, result.err)
+			}
+			continue
+		}
+		if result.candidate.actual != nil {
+			candidates = append(candidates, result.candidate)
+			if verbose {
+				fmt.Printf("Running state: %s (%s) has %d service(s)\n", result.serverName, result.host, len(result.candidate.actual.Services))
+			}
+		} else if verbose {
+			fmt.Printf("Running state: %s (%s) has no services\n", result.serverName, result.host)
+		}
+	}
+	if len(candidates) == 0 && len(readErrors) > 0 {
+		sort.Strings(readErrors)
+		return nil, fmt.Errorf("failed to read running state from reachable node(s): %s", strings.Join(readErrors, "; "))
+	}
+	return candidates, nil
+}
+
+func actualSnapshotFromTakodActual(project string, environment string, node string, actual *takod.ActualStateResponse, capturedAt time.Time) *takodstate.ActualSnapshot {
+	snapshot := &takodstate.ActualSnapshot{
+		SchemaVersion: takodstate.SchemaVersion,
+		Project:       project,
+		Environment:   environment,
+		Node:          node,
+		Services:      make(map[string]takodstate.ActualService),
+		CapturedAt:    capturedAt,
+	}
+	if actual == nil {
+		return snapshot
+	}
+
+	for serviceName, service := range actual.Services {
+		if service == nil {
+			continue
+		}
+		name := service.Name
+		if name == "" {
+			name = serviceName
+		}
+		if name == "" {
+			continue
+		}
+		key := serviceName
+		if key == "" {
+			key = name
+		}
+		replicas := service.Replicas
+		if replicas == 0 && len(service.Containers) > 0 {
+			replicas = len(service.Containers)
+		}
+		snapshot.Services[key] = takodstate.ActualService{
+			Name:       name,
+			Image:      service.Image,
+			Replicas:   replicas,
+			Containers: append([]string(nil), service.Containers...),
+			ConfigHash: service.ConfigHash,
+		}
+	}
+	return snapshot
 }
 
 // ReconcileStateFromActualSnapshot reconstructs local state from a replicated
@@ -2044,48 +2159,6 @@ func ReconcileStateFromActualSnapshot(cfg *config.Config, envName string, actual
 	}
 
 	return deployment, nil
-}
-
-// ReconcileStateFromRunning reconstructs state from running takod containers.
-// This is useful when local state is lost but containers are still running.
-func ReconcileStateFromRunning(client *ssh.Client, cfg *config.Config, envName string) (*localstate.DeploymentState, error) {
-	actual, err := actualStateViaTakod(client, cfg, envName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read actual state from takod: %w", err)
-	}
-
-	if len(actual.Services) == 0 {
-		return nil, fmt.Errorf("no running containers found for %s", cfg.Project.Name)
-	}
-
-	snapshot := &takodstate.ActualSnapshot{
-		SchemaVersion: takodstate.SchemaVersion,
-		Project:       cfg.Project.Name,
-		Environment:   envName,
-		Services:      make(map[string]takodstate.ActualService, len(actual.Services)),
-		CapturedAt:    time.Now().UTC(),
-	}
-	for serviceName, service := range actual.Services {
-		if service == nil {
-			continue
-		}
-		snapshot.Services[serviceName] = takodstate.ActualService{
-			Name:       service.Name,
-			Image:      service.Image,
-			Replicas:   service.Replicas,
-			Containers: append([]string(nil), service.Containers...),
-		}
-	}
-	return ReconcileStateFromActualSnapshot(cfg, envName, snapshot, "State recovered from running takod containers")
-}
-
-// reconcileAndSave uses ReconcileStateFromRunning to rebuild state from running services
-func reconcileAndSave(client *ssh.Client, cfg *config.Config, envName string) error {
-	deployment, err := ReconcileStateFromRunning(client, cfg, envName)
-	if err != nil {
-		return err
-	}
-	return saveRecoveredDeployment(cfg, envName, deployment)
 }
 
 func saveRecoveredDeployment(cfg *config.Config, envName string, deployment *localstate.DeploymentState) error {

@@ -12,6 +12,7 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
@@ -384,6 +385,80 @@ func TestAggregateActualSnapshotFromNodeSnapshots(t *testing.T) {
 	}
 	if aggregate.TargetNodes[0] != "node-a" || aggregate.TargetNodes[1] != "node-b" {
 		t.Fatalf("target nodes not sorted: %#v", aggregate.TargetNodes)
+	}
+}
+
+func TestActualSnapshotFromTakodActualRecordsNodeServices(t *testing.T) {
+	capturedAt := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	actual := &takod.ActualStateResponse{
+		Services: map[string]*takod.ActualService{
+			"web": {
+				Name:       "web",
+				Image:      "demo:web",
+				Replicas:   2,
+				Containers: []string{"web-1", "web-2"},
+				ConfigHash: "abc123",
+			},
+			"worker": {
+				Image:      "demo:worker",
+				Containers: []string{"worker-1"},
+			},
+			"nil-service": nil,
+		},
+	}
+
+	snapshot := actualSnapshotFromTakodActual("demo", "production", "node-a", actual, capturedAt)
+
+	if snapshot.Node != "node-a" || !snapshot.CapturedAt.Equal(capturedAt) {
+		t.Fatalf("unexpected snapshot metadata: %#v", snapshot)
+	}
+	if got := snapshot.Services["web"].Replicas; got != 2 {
+		t.Fatalf("web replicas = %d, want 2", got)
+	}
+	if got := snapshot.Services["web"].ConfigHash; got != "abc123" {
+		t.Fatalf("web config hash = %q, want abc123", got)
+	}
+	if got := snapshot.Services["worker"].Replicas; got != 1 {
+		t.Fatalf("worker replicas = %d, want container count fallback", got)
+	}
+	if _, ok := snapshot.Services["nil-service"]; ok {
+		t.Fatal("nil service should be skipped")
+	}
+}
+
+func TestRunningActualSnapshotsAggregateAcrossNodes(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	nodeA := actualSnapshotFromTakodActual("demo", "production", "node-a", &takod.ActualStateResponse{
+		Services: map[string]*takod.ActualService{
+			"web": {Name: "web", Image: "demo:web-a", Replicas: 2, Containers: []string{"a1", "a2"}},
+		},
+	}, base)
+	nodeB := actualSnapshotFromTakodActual("demo", "production", "node-b", &takod.ActualStateResponse{
+		Services: map[string]*takod.ActualService{
+			"web":    {Name: "web", Image: "demo:web-b", Replicas: 1, Containers: []string{"b1"}},
+			"worker": {Name: "worker", Image: "demo:worker", Replicas: 1, Containers: []string{"w1"}},
+		},
+	}, base.Add(time.Hour))
+
+	aggregate := aggregateActualSnapshotFromNodeSnapshots("demo", "production", map[string]stateNodeActualCandidate{
+		"node-a": {source: "node-a", node: "node-a", actual: nodeA},
+		"node-b": {source: "node-b", node: "node-b", actual: nodeB},
+	})
+
+	if got := aggregate.Services["web"].Replicas; got != 3 {
+		t.Fatalf("web replicas = %d, want 3", got)
+	}
+	if got := len(aggregate.Services["web"].Containers); got != 3 {
+		t.Fatalf("web containers = %d, want 3", got)
+	}
+	if got := aggregate.Services["worker"].Replicas; got != 1 {
+		t.Fatalf("worker replicas = %d, want 1", got)
+	}
+	if got := len(aggregate.Nodes); got != 2 {
+		t.Fatalf("embedded node snapshots = %d, want 2", got)
+	}
+	if !aggregate.CapturedAt.Equal(base.Add(time.Hour)) {
+		t.Fatalf("aggregate capturedAt = %s, want newest node time", aggregate.CapturedAt)
 	}
 }
 
