@@ -76,7 +76,7 @@ tako env pull -e production --force
 Expected result:
 
 - `env push` writes the encrypted bundle to every reachable environment node.
-- `env pull` can restore from any node that has the bundle.
+- `env pull` restores the newest bundle from reachable nodes.
 - Unsupported bundle paths are skipped instead of written outside the project.
 
 ## New-Computer Flow
@@ -94,7 +94,8 @@ tako deploy -e production --yes
 
 Expected result:
 
-- Local `.tako/` state is rebuilt from the freshest reachable mesh state.
+- Environment files and local `.tako/` state are rebuilt from the freshest
+  reachable mesh state.
 - Deploy does not depend on deployment history from the previous laptop.
 - Remote leases prevent concurrent laptop and CI mutations.
 

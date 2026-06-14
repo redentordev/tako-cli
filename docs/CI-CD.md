@@ -4,7 +4,7 @@ Tako uses the same deployment path from laptops and CI runners:
 
 1. Checkout the app repository.
 2. Restore SSH credentials.
-3. Pull encrypted environment files from takod.
+3. Pull the newest reachable encrypted environment bundle from takod.
 4. Pull remote deployment state into the local `.tako/` cache.
 5. Run `tako deploy --yes`.
 
@@ -15,6 +15,9 @@ Each installed takod refreshes its own actual container snapshot in the
 background. CI still runs `tako state pull` for deployment history and local UX,
 but it does not depend on the runner's old `.tako/` directory to know what is
 currently running.
+
+`tako env pull` selects the newest bundle from reachable mesh nodes, so a fresh
+runner is not tied to whichever node answers first.
 
 `tako state repair` is the recovery path for stale or divergent node state. It
 is not required on every CI deploy; run it before deploy when a node was
