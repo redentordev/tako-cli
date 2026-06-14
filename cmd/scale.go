@@ -132,7 +132,7 @@ func runScaleTargets(cmd *cobra.Command, args []string) error {
 
 	notifier := scaleNotifier(cfg)
 	desiredServices := cloneServiceMap(services)
-	imageRefs := defaultImageRefs(cfg, envName, desiredServices)
+	scaledImageRefs := make(map[string]string, len(scaleTargets))
 	totalErrors := 0
 	for serviceName, desiredReplicas := range scaleTargets {
 		currentReplicas := 0
@@ -156,7 +156,7 @@ func runScaleTargets(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		desiredServices[serviceName] = service
-		imageRefs[serviceName] = imageRef
+		scaledImageRefs[serviceName] = imageRef
 
 		fmt.Printf("  ✓ Service %s scaled\n", serviceName)
 		if notifier != nil && currentReplicas != desiredReplicas {
@@ -177,6 +177,7 @@ func runScaleTargets(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("scale succeeded but failed to gather post-scale actual state: %w", err)
 	}
 	postScaleActualState := reconcile.AggregateActualStateByServer(postScaleNodeActualState)
+	runtimeImageRefs := mergeRuntimeImageRefs(cfg, envName, desiredServices, scaledImageRefs, postScaleActualState)
 	if err := persistTakodRuntimeState(
 		sshPool,
 		cfg,
@@ -184,7 +185,7 @@ func runScaleTargets(cmd *cobra.Command, args []string) error {
 		serverNames,
 		"scale",
 		desiredServices,
-		imageRefs,
+		runtimeImageRefs,
 		postScaleActualState,
 		postScaleNodeActualState,
 		takodstate.GitInfo{},
@@ -196,7 +197,7 @@ func runScaleTargets(cmd *cobra.Command, args []string) error {
 	}
 
 	scaleDuration := time.Since(startTime)
-	scaleDeployment := buildScaleDeploymentState(cfg, envName, sourceServer.Host, startTime, scaleDuration, scaleTargets, desiredServices, imageRefs)
+	scaleDeployment := buildScaleDeploymentState(cfg, envName, sourceServer.Host, startTime, scaleDuration, scaleTargets, desiredServices, scaledImageRefs)
 	if err := recordScaleDeploymentState(sshPool, sourceClient, cfg, envName, serverNames, scaleDeployment); err != nil {
 		return fmt.Errorf("scale succeeded but failed to record deployment history: %w", err)
 	}
