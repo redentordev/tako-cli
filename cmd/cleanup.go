@@ -72,6 +72,17 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	targetServerNames := sortedCleanupServerNames(serversToClean)
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServerNames, "cleanup")
+	if err != nil {
+		return err
+	}
+	defer leaseSet.Release(verbose)
+	if verbose {
+		fmt.Printf("→ Acquired remote cleanup leases: %s\n", leaseSet.Summary())
+	}
 
 	// If full cleanup, keep fewer images
 	keepImages := cleanupKeep
@@ -149,11 +160,7 @@ type cleanupNodeResult struct {
 }
 
 func collectCleanupNodes(servers map[string]config.ServerConfig, action cleanupNodeAction) []cleanupNodeResult {
-	names := make([]string, 0, len(servers))
-	for name := range servers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := sortedCleanupServerNames(servers)
 
 	resultCh := make(chan cleanupNodeResult, len(names))
 	var wg sync.WaitGroup
@@ -180,6 +187,15 @@ func collectCleanupNodes(servers map[string]config.ServerConfig, action cleanupN
 		results[result.index] = result
 	}
 	return results
+}
+
+func sortedCleanupServerNames(servers map[string]config.ServerConfig) []string {
+	names := make([]string, 0, len(servers))
+	for name := range servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func cleanupSingleNode(cfg *config.Config, serverCfg config.ServerConfig, request takod.CleanupRequest) (*takod.CleanupResponse, error) {

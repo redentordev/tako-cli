@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
@@ -100,6 +101,17 @@ func runRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\n🗑️  Removing all services for %s...\n\n", cfg.Project.Name)
+
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, []string{serverName}, "remove")
+	if err != nil {
+		return err
+	}
+	defer leaseSet.Release(verbose)
+	if verbose {
+		fmt.Printf("→ Acquired remote remove lease: %s\n", leaseSet.Summary())
+	}
 
 	fmt.Printf("→ Reconciling cleanup through takod...\n")
 	response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
