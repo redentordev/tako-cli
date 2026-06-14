@@ -92,6 +92,16 @@ func TestInstallTakodBinaryFromFileRejectsNonRegularPath(t *testing.T) {
 	}
 }
 
+func TestTakodBinaryPathCommandDoesNotEchoFallbackAfterCommandVSuccess(t *testing.T) {
+	command := takodBinaryPathCommand()
+	if !strings.Contains(command, "{ test -x /usr/local/bin/tako && echo /usr/local/bin/tako; }") {
+		t.Fatalf("binary path command should group fallback branch:\n%s", command)
+	}
+	if strings.Contains(command, "command -v tako 2>/dev/null || test -x /usr/local/bin/tako && echo") {
+		t.Fatalf("binary path command has ambiguous shell precedence:\n%s", command)
+	}
+}
+
 func TestTakodSystemdUnitGrantsTakoGroupSocketAccess(t *testing.T) {
 	unit := buildTakodSystemdUnit("/usr/local/bin/tako", "/run/tako/takod.sock", "/var/lib/tako", "node-a", "30s")
 	for _, required := range []string{
