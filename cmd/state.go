@@ -395,8 +395,7 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 
 	remoteNodes, err := collectStateStatusNodes(cfg, envName, stateServer)
 	if err != nil {
-		fmt.Printf("Status: %v\n", err)
-		return nil
+		return err
 	}
 	printStateStatusNodes(remoteNodes, cfg)
 

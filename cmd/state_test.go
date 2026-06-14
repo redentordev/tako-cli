@@ -127,6 +127,51 @@ func TestLocalDeploymentStateExistsIgnoresSecretsOnlyTakoDirectory(t *testing.T)
 	}
 }
 
+func TestRunStateStatusReturnsConfigurationErrors(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	configPath := filepath.Join(tempDir, "tako.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+    password: test-password
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+`), 0600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	oldCfgFile := cfgFile
+	oldStateServer := stateServer
+	oldEnvFlag := envFlag
+	cfgFile = configPath
+	stateServer = "node-b"
+	envFlag = "production"
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+		stateServer = oldStateServer
+		envFlag = oldEnvFlag
+	})
+
+	err := runStateStatus(nil, nil)
+	if err == nil {
+		t.Fatal("runStateStatus should return configuration errors")
+	}
+	if !strings.Contains(err.Error(), "server node-b not found") {
+		t.Fatalf("error = %q, want server config context", err)
+	}
+}
+
 func TestBestDeploymentHistoryPrefersFreshestLastUpdated(t *testing.T) {
 	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	older := remoteHistory(base, remoteDeployment("old", base, "demo:v1"))
