@@ -80,6 +80,18 @@ func TestReleaseVersionArg(t *testing.T) {
 	}
 }
 
+func TestInstallTakodBinaryFromFileRejectsNonRegularPath(t *testing.T) {
+	provisioner := NewProvisioner(nil, false)
+
+	err := provisioner.InstallTakodBinaryFromFile(t.TempDir())
+	if err == nil {
+		t.Fatal("InstallTakodBinaryFromFile should reject directories")
+	}
+	if !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("error = %q, want regular file context", err)
+	}
+}
+
 func TestTakodSystemdUnitGrantsTakoGroupSocketAccess(t *testing.T) {
 	unit := buildTakodSystemdUnit("/usr/local/bin/tako", "/run/tako/takod.sock", "/var/lib/tako", "node-a", "30s")
 	for _, required := range []string{
@@ -130,6 +142,51 @@ func TestBootstrapScriptsAvoidDownloadedShellInstallers(t *testing.T) {
 				t.Fatalf("%s script contains disallowed installer pattern %q:\n%s", name, disallowed, script)
 			}
 		}
+	}
+}
+
+func TestSecurityHardeningScriptsAreNonInteractive(t *testing.T) {
+	install := securityPackagesInstallScript()
+	if !strings.Contains(install, "DEBIAN_FRONTEND=noninteractive") {
+		t.Fatalf("security package install script should force noninteractive apt:\n%s", install)
+	}
+	if strings.Contains(install, "dpkg-reconfigure") {
+		t.Fatalf("security package install script must not run interactive dpkg-reconfigure:\n%s", install)
+	}
+
+	unattended := unattendedUpgradesConfigScript()
+	for _, required := range []string{
+		"/etc/apt/apt.conf.d/20auto-upgrades",
+		`APT::Periodic::Update-Package-Lists "1";`,
+		`APT::Periodic::Unattended-Upgrade "1";`,
+	} {
+		if !strings.Contains(unattended, required) {
+			t.Fatalf("unattended upgrades script is missing %q:\n%s", required, unattended)
+		}
+	}
+	if strings.Contains(unattended, "dpkg-reconfigure") {
+		t.Fatalf("unattended upgrades script must not run interactive dpkg-reconfigure:\n%s", unattended)
+	}
+}
+
+func TestFail2BanJailConfigIgnoresActiveSSHClientIP(t *testing.T) {
+	config := fail2banSSHDJailConfig("203.0.113.42")
+	for _, required := range []string{
+		"[sshd]",
+		"maxretry = 5",
+		"bantime = 3600",
+		"ignoreip = 127.0.0.1/8 ::1 203.0.113.42",
+	} {
+		if !strings.Contains(config, required) {
+			t.Fatalf("fail2ban config is missing %q:\n%s", required, config)
+		}
+	}
+}
+
+func TestFail2BanJailConfigRejectsInvalidIgnoreIP(t *testing.T) {
+	config := fail2banSSHDJailConfig("203.0.113.42; bad")
+	if strings.Contains(config, "ignoreip") || strings.Contains(config, "bad") {
+		t.Fatalf("fail2ban config should not include unsafe client IP:\n%s", config)
 	}
 }
 

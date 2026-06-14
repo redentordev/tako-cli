@@ -12,7 +12,8 @@ import (
 )
 
 var (
-	setupServer string
+	setupServer      string
+	setupTakodBinary string
 )
 
 var setupCmd = &cobra.Command{
@@ -35,6 +36,7 @@ This only needs to be run once per server.`,
 func init() {
 	rootCmd.AddCommand(setupCmd)
 	setupCmd.Flags().StringVarP(&setupServer, "server", "s", "", "Server to set up (default: all servers)")
+	setupCmd.Flags().StringVar(&setupTakodBinary, "takod-binary", "", "Path to a Linux tako binary to install as takod during setup (for development/testing)")
 }
 
 func runSetup(cmd *cobra.Command, args []string) error {
@@ -162,8 +164,14 @@ func setupMeshListenPort(cfg *config.Config) int {
 }
 
 func ensureTakodRuntimeForSetup(prov *provisioner.Provisioner, cfg *config.Config, nodeName string) error {
-	if err := prov.InstallTakodBinary(Version); err != nil {
-		return err
+	if setupTakodBinary != "" {
+		if err := prov.InstallTakodBinaryFromFile(setupTakodBinary); err != nil {
+			return err
+		}
+	} else {
+		if err := prov.InstallTakodBinary(Version); err != nil {
+			return err
+		}
 	}
 	socket := ""
 	dataDir := ""

@@ -1,9 +1,13 @@
 package provisioner
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
+	"net"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -12,6 +16,7 @@ import (
 
 const takodAccessGroup = "tako"
 const takodActualRefreshInterval = "30s"
+const securityCommandTimeout = 10 * time.Minute
 
 // Provisioner handles server provisioning
 type Provisioner struct {
@@ -182,10 +187,7 @@ func (p *Provisioner) InstallTakodBinary(version string) error {
 			}
 			return nil
 		}
-		if p.verbose {
-			fmt.Printf("  Skipping takod binary install: %v\n", err)
-		}
-		return nil
+		return fmt.Errorf("cannot install takod binary from release: %w; pass --takod-binary with a Linux tako binary for development setup", err)
 	}
 
 	arch, err := p.detectLinuxArch()
@@ -197,6 +199,36 @@ func (p *Provisioner) InstallTakodBinary(version string) error {
 	script := takodBinaryInstallScript(version, binaryName)
 	if _, err := p.client.Execute(runRootScript(script)); err != nil {
 		return fmt.Errorf("failed to install takod binary from release %s: %w", version, err)
+	}
+	return nil
+}
+
+func (p *Provisioner) InstallTakodBinaryFromFile(localPath string) error {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to inspect local takod binary: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("local takod binary path is not a regular file: %s", localPath)
+	}
+	file, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open local takod binary: %w", err)
+	}
+	defer file.Close()
+
+	remoteTemp := fmt.Sprintf("/tmp/tako-upload-%d", time.Now().UnixNano())
+	if p.verbose {
+		fmt.Printf("  Uploading local takod binary: %s\n", localPath)
+	}
+	if err := p.client.UploadReader(file, remoteTemp, 0755); err != nil {
+		return fmt.Errorf("failed to upload local takod binary: %w", err)
+	}
+
+	installCmd := fmt.Sprintf("sudo install -m 0755 %s /usr/local/bin/tako && rm -f -- %s && /usr/local/bin/tako --version >/dev/null", shellQuote(remoteTemp), shellQuote(remoteTemp))
+	if _, err := p.client.Execute(installCmd); err != nil {
+		_, _ = p.client.Execute("rm -f -- " + shellQuote(remoteTemp))
+		return fmt.Errorf("failed to install uploaded takod binary: %w", err)
 	}
 	return nil
 }
@@ -266,10 +298,7 @@ func (p *Provisioner) InstallTakodService(socket string, dataDir string, nodeNam
 	binaryPath, _ := p.client.Execute("command -v tako 2>/dev/null || test -x /usr/local/bin/tako && echo /usr/local/bin/tako || true")
 	binaryPath = strings.TrimSpace(binaryPath)
 	if binaryPath == "" {
-		if p.verbose {
-			fmt.Printf("  Skipping takod service: no server-side tako binary found\n")
-		}
-		return nil
+		return fmt.Errorf("no server-side tako binary found; run setup with a release build or pass --takod-binary")
 	}
 	var err error
 	if binaryPath, err = systemdPathArg(binaryPath, ""); err != nil {
@@ -538,30 +567,15 @@ func (p *Provisioner) HardenSecurity() error {
 		fmt.Printf("  Installing and configuring security tools...\n")
 	}
 
-	// Install security packages
-	installCommands := []string{
-		"sudo apt-get install -y fail2ban",
-		"sudo apt-get install -y unattended-upgrades",
-		"sudo apt-get install -y ufw",
+	if p.verbose {
+		fmt.Printf("  Installing security packages...\n")
 	}
-
-	for _, cmd := range installCommands {
-		if p.verbose {
-			fmt.Printf("  Running: %s\n", cmd)
-		}
-		p.client.Execute(cmd)
+	if _, err := p.executeSecurityCommand(runRootScript(securityPackagesInstallScript())); err != nil {
+		return fmt.Errorf("failed to install security packages: %w", err)
 	}
 
 	// Configure fail2ban with custom jail for SSH
-	fail2banConfig := `[sshd]
-enabled = true
-port = ssh
-filter = sshd
-logpath = /var/log/auth.log
-maxretry = 5
-findtime = 600
-bantime = 3600
-`
+	fail2banConfig := fail2banSSHDJailConfig(p.detectSSHClientIP())
 
 	if p.verbose {
 		fmt.Printf("  Configuring fail2ban jail for SSH...\n")
@@ -569,11 +583,17 @@ bantime = 3600
 
 	// Write fail2ban jail config
 	fail2banCmd := fmt.Sprintf("sudo tee /etc/fail2ban/jail.d/sshd.local > /dev/null << 'EOF'\n%s\nEOF", fail2banConfig)
-	p.client.Execute(fail2banCmd)
+	if _, err := p.executeSecurityCommand(fail2banCmd); err != nil {
+		return fmt.Errorf("failed to configure fail2ban SSH jail: %w", err)
+	}
 
 	// Enable and start fail2ban
-	p.client.Execute("sudo systemctl enable fail2ban")
-	p.client.Execute("sudo systemctl restart fail2ban")
+	if _, err := p.executeSecurityCommand("sudo systemctl enable fail2ban"); err != nil {
+		return fmt.Errorf("failed to enable fail2ban: %w", err)
+	}
+	if _, err := p.executeSecurityCommand("sudo systemctl restart fail2ban"); err != nil {
+		return fmt.Errorf("failed to restart fail2ban: %w", err)
+	}
 
 	// Configure SSH hardening
 	if p.verbose {
@@ -618,7 +638,9 @@ bantime = 3600
 	if p.verbose {
 		fmt.Printf("  Enabling automatic security updates...\n")
 	}
-	p.client.Execute("sudo dpkg-reconfigure -plow unattended-upgrades")
+	if _, err := p.executeSecurityCommand(runRootScript(unattendedUpgradesConfigScript())); err != nil {
+		return fmt.Errorf("failed to configure unattended upgrades: %w", err)
+	}
 
 	// Enable and restart SSH service
 	if p.verbose {
@@ -653,6 +675,66 @@ bantime = 3600
 	}
 
 	return nil
+}
+
+func (p *Provisioner) executeSecurityCommand(command string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), securityCommandTimeout)
+	defer cancel()
+	return p.client.ExecuteWithContext(ctx, command)
+}
+
+func securityPackagesInstallScript() string {
+	return `set -eu
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y fail2ban unattended-upgrades ufw
+elif command -v apk >/dev/null 2>&1; then
+  apk add --no-cache fail2ban
+else
+  echo "security package bootstrap is only implemented for apt and apk hosts" >&2
+  exit 1
+fi
+`
+}
+
+func unattendedUpgradesConfigScript() string {
+	return `set -eu
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+fi
+`
+}
+
+func fail2banSSHDJailConfig(clientIP string) string {
+	var b strings.Builder
+	b.WriteString(`[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 5
+findtime = 600
+bantime = 3600
+`)
+	if parsed := net.ParseIP(strings.TrimSpace(clientIP)); parsed != nil {
+		b.WriteString("ignoreip = 127.0.0.1/8 ::1 ")
+		b.WriteString(parsed.String())
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func (p *Provisioner) detectSSHClientIP() string {
+	output, err := p.client.Execute("printf '%s' \"$SSH_CONNECTION\" | awk '{print $1}'")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(output)
 }
 
 // SetupDeployUser ensures deploy user exists and has proper permissions

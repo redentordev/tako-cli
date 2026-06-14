@@ -44,6 +44,16 @@ func TestSetupMeshListenPort(t *testing.T) {
 	}
 }
 
+func TestSetupRegistersTakodBinaryFlag(t *testing.T) {
+	flag := setupCmd.Flags().Lookup("takod-binary")
+	if flag == nil {
+		t.Fatal("setup command should expose --takod-binary")
+	}
+	if !strings.Contains(flag.Usage, "development/testing") {
+		t.Fatalf("takod-binary flag usage = %q, want development/testing context", flag.Usage)
+	}
+}
+
 func TestSetupVersionWriteErrorFailsSuccessfulProvisioning(t *testing.T) {
 	err := setupVersionWriteError("node-a", errors.New("permission denied"))
 	if err == nil {
