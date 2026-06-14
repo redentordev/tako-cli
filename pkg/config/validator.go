@@ -33,6 +33,9 @@ func ValidateConfig(cfg *Config) error {
 		return fmt.Errorf("at least one server must be configured")
 	}
 	for name, server := range cfg.Servers {
+		if !isValidRuntimeIdentifier(name) {
+			return fmt.Errorf("server name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, hyphens, and underscores, and be 1-63 characters long", name)
+		}
 		if err := validateServer(name, &server); err != nil {
 			return err
 		}
@@ -45,6 +48,9 @@ func ValidateConfig(cfg *Config) error {
 		return fmt.Errorf("at least one environment must be configured")
 	}
 	for envName, env := range cfg.Environments {
+		if !isValidRuntimeIdentifier(envName) {
+			return fmt.Errorf("environment name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, hyphens, and underscores, and be 1-63 characters long", envName)
+		}
 		if err := validateEnvironment(envName, &env, cfg); err != nil {
 			return err
 		}
@@ -287,7 +293,7 @@ func validateServer(name string, server *ServerConfig) error {
 
 func validateService(name string, service *ServiceConfig, cfg *Config) error {
 	// Validate service name format
-	if !isValidServiceName(name) {
+	if !isValidRuntimeIdentifier(name) {
 		return fmt.Errorf("service name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, hyphens, and underscores, and be 1-63 characters long", name)
 	}
 
@@ -683,8 +689,9 @@ func isValidProjectName(name string) bool {
 	return true
 }
 
-// isValidServiceName validates that a service name is safe
-func isValidServiceName(name string) bool {
+// isValidRuntimeIdentifier validates names used in runtime paths, Docker labels,
+// volume names, and generated config fragments.
+func isValidRuntimeIdentifier(name string) bool {
 	if len(name) == 0 || len(name) > 63 {
 		return false
 	}

@@ -116,6 +116,37 @@ func TestValidateConfigRejectsDisabledMesh(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRejectsUnsafeServerName(t *testing.T) {
+	cfg := validValidationConfig()
+	cfg.Servers["node-a\nbad"] = cfg.Servers["node-a"]
+	delete(cfg.Servers, "node-a")
+	production := cfg.Environments["production"]
+	production.Servers = []string{"node-a\nbad", "node-b"}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject unsafe server names")
+	}
+	if !strings.Contains(err.Error(), "server name") {
+		t.Fatalf("error = %q, want server name error", err)
+	}
+}
+
+func TestValidateConfigRejectsUnsafeEnvironmentName(t *testing.T) {
+	cfg := validValidationConfig()
+	cfg.Environments["prod/../../bad"] = cfg.Environments["production"]
+	delete(cfg.Environments, "production")
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject unsafe environment names")
+	}
+	if !strings.Contains(err.Error(), "environment name") {
+		t.Fatalf("error = %q, want environment name error", err)
+	}
+}
+
 func TestValidateConfigDefaultsRequiredRuntimeBooleans(t *testing.T) {
 	cfg := validValidationConfig()
 	cfg.Runtime = &RuntimeConfig{Agent: &AgentConfig{}}
