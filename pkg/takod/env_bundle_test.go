@@ -14,13 +14,12 @@ import (
 func TestWriteAndReadEnvBundle(t *testing.T) {
 	dataDir := t.TempDir()
 	content := base64.StdEncoding.EncodeToString([]byte("encrypted bytes"))
-	updatedAt := time.Date(2026, 6, 13, 12, 30, 0, 0, time.UTC)
 	request := EnvBundleRequest{
 		Project:     "demo",
 		Environment: "production",
 		Content:     content,
-		UpdatedAt:   updatedAt,
 	}
+	before := time.Now().UTC()
 
 	write, err := WriteEnvBundle(context.Background(), dataDir, request)
 	if err != nil {
@@ -32,8 +31,9 @@ func TestWriteAndReadEnvBundle(t *testing.T) {
 	if write.UpdatedAt.IsZero() {
 		t.Fatal("expected write response to include UpdatedAt")
 	}
-	if !write.UpdatedAt.Equal(updatedAt) {
-		t.Fatalf("write UpdatedAt = %s, want %s", write.UpdatedAt, updatedAt)
+	after := time.Now().UTC()
+	if write.UpdatedAt.Before(before) || write.UpdatedAt.After(after) {
+		t.Fatalf("write UpdatedAt = %s, want server write time between %s and %s", write.UpdatedAt, before, after)
 	}
 
 	stored, err := os.ReadFile(filepath.Join(dataDir, "env", request.Project, request.Environment+".enc"))
@@ -66,6 +66,29 @@ func TestWriteAndReadEnvBundle(t *testing.T) {
 	}
 	if read.UpdatedAt.IsZero() {
 		t.Fatal("expected read response to include UpdatedAt")
+	}
+}
+
+func TestWriteEnvBundleIgnoresClientUpdatedAt(t *testing.T) {
+	dataDir := t.TempDir()
+	future := time.Now().UTC().Add(365 * 24 * time.Hour)
+	before := time.Now().UTC()
+
+	write, err := WriteEnvBundle(context.Background(), dataDir, EnvBundleRequest{
+		Project:     "demo",
+		Environment: "production",
+		Content:     base64.StdEncoding.EncodeToString([]byte("encrypted bytes")),
+		UpdatedAt:   future,
+	})
+	if err != nil {
+		t.Fatalf("WriteEnvBundle returned error: %v", err)
+	}
+	after := time.Now().UTC()
+	if write.UpdatedAt.Before(before) || write.UpdatedAt.After(after) {
+		t.Fatalf("write UpdatedAt = %s, want server write time between %s and %s", write.UpdatedAt, before, after)
+	}
+	if write.UpdatedAt.Equal(future) {
+		t.Fatalf("write UpdatedAt trusted client-provided future timestamp %s", future)
 	}
 }
 

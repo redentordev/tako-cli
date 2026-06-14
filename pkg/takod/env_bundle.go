@@ -64,10 +64,7 @@ func WriteEnvBundle(ctx context.Context, dataDir string, req EnvBundleRequest) (
 	if err != nil {
 		return nil, fmt.Errorf("invalid environment bundle content: %w", err)
 	}
-	updatedAt := req.UpdatedAt.UTC()
-	if updatedAt.IsZero() {
-		updatedAt = time.Now().UTC()
-	}
+	updatedAt := time.Now().UTC()
 	encodedContent := base64.StdEncoding.EncodeToString(content)
 	envelope, err := json.MarshalIndent(envBundleEnvelope{
 		Version:   envBundleEnvelopeVersion,
