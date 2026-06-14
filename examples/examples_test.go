@@ -102,6 +102,27 @@ func TestExamplesDoNotUseKnownDemoDatabasePasswords(t *testing.T) {
 	}
 }
 
+func TestGitHubActionsDeploymentPatternIncludesStateWorkflow(t *testing.T) {
+	workflowPath := filepath.Join("deployment-patterns", "12-github-actions-deploy", ".github", "workflows", "deploy.yml")
+	data, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("failed to read GitHub Actions workflow: %v", err)
+	}
+	content := string(data)
+	for _, expected := range []string{
+		"TAKO_NONINTERACTIVE: \"1\"",
+		"TAKO_HOST_KEY_MODE: strict",
+		"tako env pull --force",
+		"tako state pull",
+		"tako state lease",
+		"tako deploy -e production --yes",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("GitHub Actions deployment template missing %q", expected)
+		}
+	}
+}
+
 func loadPatternConfig(t *testing.T, configPath string) *config.Config {
 	t.Helper()
 	absPath, err := filepath.Abs(configPath)
