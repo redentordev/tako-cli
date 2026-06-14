@@ -77,7 +77,7 @@ func TestDestroySingleServerUsesProvidedPool(t *testing.T) {
 			}
 			return nil
 		},
-		func(client *ssh.Client, cfg *config.Config, verbose bool) error {
+		func(client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
 			steps = append(steps, "purge")
 			return nil
 		},
@@ -106,7 +106,10 @@ func TestDestroySingleServerPurgesAfterDecommissionWhenRequested(t *testing.T) {
 			steps = append(steps, "decommission")
 			return nil
 		},
-		func(client *ssh.Client, cfg *config.Config, verbose bool) error {
+		func(client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
+			if envName != "production" {
+				t.Fatalf("purge env=%q, want production", envName)
+			}
 			steps = append(steps, "purge")
 			return nil
 		},
@@ -127,7 +130,7 @@ func TestDestroySingleServerDoesNotPurgeAfterDecommissionFailure(t *testing.T) {
 		func(client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
 			return errors.New("cleanup failed")
 		},
-		func(client *ssh.Client, cfg *config.Config, verbose bool) error {
+		func(client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
 			purged = true
 			return nil
 		},

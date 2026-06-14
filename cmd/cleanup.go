@@ -28,7 +28,7 @@ This command helps maintain your servers by:
   - Removing stopped service replicas
   - Cleaning dangling images
   - Pruning build cache
-  - Removing unused volumes
+  - Removing unused Tako project volumes
   - Securing log file permissions
 
 Regular cleanup prevents disk space exhaustion and keeps your
@@ -110,7 +110,6 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 			CleanBuildCache:        true,
 			CleanUnusedVolumes:     true,
 			SecureLogPermissions:   cleanupSecure,
-			PruneDocker:            cleanupFull,
 		})
 	})
 

@@ -5,7 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestValidateCleanupRequest(t *testing.T) {
@@ -121,6 +124,82 @@ func TestUniqueFields(t *testing.T) {
 	want := []string{"a", "b", "c"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("uniqueFields() = %#v, want %#v", got, want)
+	}
+}
+
+func TestCleanupUnusedProjectVolumesScopesToProjectEnvironment(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	target := runtimeid.VolumeName("demo", "production", "data")
+	otherStage := runtimeid.VolumeName("demo", "preview", "data")
+	otherProject := runtimeid.VolumeName("other", "production", "data")
+	t.Setenv("TAKO_FAKE_VOLUME_LS_OUTPUT", strings.Join([]string{target, otherStage, otherProject}, "\n")+"\n")
+
+	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production")
+	if err != nil {
+		t.Fatalf("cleanupUnusedProjectVolumes returned error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	entries := readCommandLog(t, logPath)
+	want := "docker volume rm " + target
+	if !slices.Contains(entries, want) {
+		t.Fatalf("docker log missing %q in %#v", want, entries)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry, "volume rm "+otherStage) || strings.Contains(entry, "volume rm "+otherProject) {
+			t.Fatalf("cleanup removed unrelated volume via %q; all entries %#v", entry, entries)
+		}
+	}
+}
+
+func TestCleanupUnusedProjectVolumesSkipsInUseVolumes(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	target := runtimeid.VolumeName("demo", "production", "data")
+	t.Setenv("TAKO_FAKE_VOLUME_LS_OUTPUT", target+"\n")
+	t.Setenv("TAKO_FAKE_FAIL_VOLUME_RM", target)
+
+	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production")
+	if err != nil {
+		t.Fatalf("cleanupUnusedProjectVolumes should skip in-use volumes, got error: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed = %d, want 0", removed)
+	}
+}
+
+func TestScopedProjectPruneDoesNotRunGlobalDockerSystemPrune(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	response, err := CleanupProject(context.Background(), CleanupRequest{
+		Project:     "demo",
+		Environment: "production",
+		PruneDocker: true,
+	})
+	if err != nil {
+		t.Fatalf("CleanupProject returned error: %v", err)
+	}
+	if len(response.Warnings) > 0 {
+		t.Fatalf("CleanupProject warnings = %#v", response.Warnings)
+	}
+
+	entries := readCommandLog(t, logPath)
+	for _, entry := range entries {
+		if strings.Contains(entry, "docker system prune") || strings.Contains(entry, "docker volume prune") {
+			t.Fatalf("scoped prune should not run global prune command %q; all entries %#v", entry, entries)
+		}
+		if strings.Contains(entry, "docker images --format") {
+			t.Fatalf("environment-scoped prune should not remove project images across stages via %q; all entries %#v", entry, entries)
+		}
 	}
 }
 

@@ -465,9 +465,8 @@ func backupVolumesFromConfig(cfg *config.Config, envName string) ([]backupVolume
 	seen := make(map[string]backupVolumeSpec)
 	for serviceName, service := range services {
 		for _, volume := range service.Volumes {
-			source, _, _ := strings.Cut(volume, ":")
-			source = strings.TrimSpace(source)
-			if source == "" || strings.HasPrefix(source, "/") {
+			source, ok := backupVolumeNameFromSpec(volume)
+			if !ok {
 				continue
 			}
 			if _, ok := seen[source]; !ok {
@@ -484,6 +483,22 @@ func backupVolumesFromConfig(cfg *config.Config, envName string) ([]backupVolume
 		return volumes[i].name < volumes[j].name
 	})
 	return volumes, nil
+}
+
+func backupVolumeNameFromSpec(volume string) (string, bool) {
+	source, target, hasTarget := strings.Cut(volume, ":")
+	source = strings.TrimSpace(source)
+	target = strings.TrimSpace(target)
+	if source == "" {
+		return "", false
+	}
+	if !hasTarget {
+		return source, true
+	}
+	if target == "" || strings.HasPrefix(source, "/") || config.IsNFSVolume(volume) {
+		return "", false
+	}
+	return source, true
 }
 
 func backupRequest(cfg *config.Config, envName string, volumeName string, backupID string, retentionDays int) takod.BackupRequest {

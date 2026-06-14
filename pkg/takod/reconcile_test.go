@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -201,6 +202,52 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 	}
 }
 
+func TestNamedVolumeSourcesFromMountsReturnsUniqueSortedVolumes(t *testing.T) {
+	got := namedVolumeSourcesFromMounts([]string{
+		"type=volume,source=tako_demo_production_cache,target=/cache",
+		"type=bind,source=/srv/data,target=/data",
+		"type=volume,src=tako_demo_production_uploads,target=/uploads",
+		"type=volume,source=tako_demo_production_cache,target=/cache2",
+	})
+	want := []string{"tako_demo_production_cache", "tako_demo_production_uploads"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("volume sources = %#v, want %#v", got, want)
+	}
+}
+
+func TestReconcileServiceCreatesNamedVolumesWithRuntimeLabels(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	_, err := ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		Image:       "registry.example.com/demo/web:abc",
+		Network:     "tako_demo_production",
+		Mounts: []string{
+			"type=volume,source=tako_demo_production_data,target=/data",
+			"type=bind,source=/srv/demo,target=/srv/demo",
+		},
+		Containers: []ContainerSpec{{Name: "demo_production_web_1"}},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileService returned error: %v", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	want := "docker volume create --label tako.project=demo --label tako.environment=production --label tako.runtime=takod --label tako.service=web tako_demo_production_data"
+	if !slices.Contains(entries, want) {
+		t.Fatalf("docker log missing labeled volume create %q in %#v", want, entries)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry, "volume create") && strings.Contains(entry, "/srv/demo") {
+			t.Fatalf("bind mount should not create Docker volume: %#v", entries)
+		}
+	}
+}
+
 func TestPrepareServiceEnvFileWritesAndCleansUpTempFile(t *testing.T) {
 	req := ReconcileServiceRequest{
 		Project:        "demo",
@@ -364,6 +411,20 @@ func TestTakodCommandHelper(t *testing.T) {
 		os.Exit(0)
 	case "network":
 		_, _ = os.Stdout.WriteString("network-ok\n")
+		os.Exit(0)
+	case "volume":
+		if len(commandArgs) > 1 && commandArgs[1] == "ls" {
+			if output := os.Getenv("TAKO_FAKE_VOLUME_LS_OUTPUT"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+			}
+		}
+		if len(commandArgs) > 1 && commandArgs[1] == "rm" {
+			failVolume := os.Getenv("TAKO_FAKE_FAIL_VOLUME_RM")
+			if failVolume != "" && strings.Contains(strings.Join(commandArgs, " "), failVolume) {
+				_, _ = os.Stderr.WriteString("volume is in use")
+				os.Exit(1)
+			}
+		}
 		os.Exit(0)
 	case "pull":
 		_, _ = os.Stdout.WriteString("pulled\n")

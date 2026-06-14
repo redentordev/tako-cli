@@ -11,6 +11,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/envexpand"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"gopkg.in/yaml.v3"
 )
 
@@ -775,13 +776,13 @@ func (c *Config) GetVolume(name string) (*VolumeConfig, bool) {
 func (c *Config) GetVolumeName(volumeKey, envName string) string {
 	if c.Volumes == nil {
 		// No top-level volumes, use default naming
-		return fmt.Sprintf("%s_%s_%s", c.Project.Name, envName, volumeKey)
+		return runtimeid.VolumeName(c.Project.Name, envName, volumeKey)
 	}
 
 	vol, exists := c.Volumes[volumeKey]
 	if !exists {
 		// Volume not defined at top level, use default naming
-		return fmt.Sprintf("%s_%s_%s", c.Project.Name, envName, volumeKey)
+		return runtimeid.VolumeName(c.Project.Name, envName, volumeKey)
 	}
 
 	// If external or has custom name, use the specified name
@@ -793,7 +794,7 @@ func (c *Config) GetVolumeName(volumeKey, envName string) string {
 	}
 
 	// Apply project/env prefix
-	return fmt.Sprintf("%s_%s_%s", c.Project.Name, envName, volumeKey)
+	return runtimeid.VolumeName(c.Project.Name, envName, volumeKey)
 }
 
 // IsVolumeExternal checks if a volume is marked as external

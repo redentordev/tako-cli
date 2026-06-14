@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestListVolumeBackupsParsesAndSortsFiles(t *testing.T) {
@@ -176,6 +178,15 @@ func TestBackupIDForRequestFallsBackToNow(t *testing.T) {
 	got := backupIDForRequest(BackupRequest{}, now)
 	if got != "20260613-193456" {
 		t.Fatalf("backup ID = %q, want UTC timestamp", got)
+	}
+}
+
+func TestFullBackupVolumeNameUsesRuntimeVolumeIdentity(t *testing.T) {
+	request := BackupRequest{Project: "demo", Environment: "production", Volume: "db_data"}
+	got := fullBackupVolumeName(request)
+	want := runtimeid.VolumeName("demo", "production", "db_data")
+	if got != want {
+		t.Fatalf("full backup volume name = %q, want %q", got, want)
 	}
 }
 

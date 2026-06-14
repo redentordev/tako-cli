@@ -114,7 +114,7 @@ tako stop
 # Start the service
 tako start
 
-# Remove everything
+# Remove the deployed app
 tako destroy
 ```
 

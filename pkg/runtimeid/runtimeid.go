@@ -37,6 +37,14 @@ func VolumeName(project string, environment string, volume string) string {
 	return compactName("_", dockerNameMax, []string{"tako", project, environment, volume}, shortHash(project, environment, volume))
 }
 
+func VolumeProjectPrefix(project string) string {
+	return strings.Join([]string{"tako", sanitizePart(project, "_")}, "_") + "_"
+}
+
+func VolumeEnvironmentPrefix(project string, environment string) string {
+	return strings.Join([]string{"tako", sanitizePart(project, "_"), sanitizePart(environment, "_")}, "_") + "_"
+}
+
 func ProxyConfigFileName(project string, environment string) string {
 	return compactName("-", proxyConfigNameMax-len(".yml"), []string{"tako", project, environment}, shortHash(project, environment)) + ".yml"
 }

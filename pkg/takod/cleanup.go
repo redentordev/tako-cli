@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -20,8 +21,6 @@ type CleanupRequest struct {
 	RemoveDeployFiles      bool     `json:"removeDeployFiles,omitempty"`
 	RemoveTakodState       bool     `json:"removeTakodState,omitempty"`
 	ProxyFiles             []string `json:"proxyFiles,omitempty"`
-	RemoveProxyContainer   bool     `json:"removeProxyContainer,omitempty"`
-	RemoveProxyRuntime     bool     `json:"removeProxyRuntime,omitempty"`
 	PruneDocker            bool     `json:"pruneDocker,omitempty"`
 	ImageRepositories      []string `json:"imageRepositories,omitempty"`
 	KeepImages             int      `json:"keepImages,omitempty"`
@@ -40,7 +39,6 @@ type CleanupResponse struct {
 	ImagesRemoved         int      `json:"imagesRemoved,omitempty"`
 	NetworksRemoved       int      `json:"networksRemoved,omitempty"`
 	ProxyFilesRemoved     int      `json:"proxyFilesRemoved,omitempty"`
-	ProxyContainerRemoved bool     `json:"proxyContainerRemoved,omitempty"`
 	BuildCacheCleaned     bool     `json:"buildCacheCleaned,omitempty"`
 	UnusedVolumesCleaned  bool     `json:"unusedVolumesCleaned,omitempty"`
 	LogPermissionsSecured bool     `json:"logPermissionsSecured,omitempty"`
@@ -75,13 +73,6 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 			warn("%v", err)
 		}
 		response.ContainersRemoved = count
-	}
-	if req.RemoveProxyContainer {
-		if _, err := runDocker(ctx, "rm", "-f", "tako-proxy"); err != nil {
-			warn("failed to remove tako-proxy: %v", err)
-		} else {
-			response.ProxyContainerRemoved = true
-		}
 	}
 	if req.RemoveNetworks {
 		count, err := cleanupNetworks(ctx, req.Project, req.Environment)
@@ -126,8 +117,8 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 		}
 	}
 	if req.CleanUnusedVolumes {
-		if _, err := runDocker(ctx, "volume", "prune", "-f"); err != nil {
-			warn("failed to clean unused Docker volumes: %v", err)
+		if _, err := cleanupUnusedProjectVolumes(ctx, req.Project, req.Environment); err != nil {
+			warn("failed to clean unused project volumes: %v", err)
 		} else {
 			response.UnusedVolumesCleaned = true
 		}
@@ -153,14 +144,7 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 		}
 	}
 	if req.PruneDocker {
-		if _, err := runDocker(ctx, "system", "prune", "-af", "--volumes"); err != nil {
-			warn("failed to prune docker system: %v", err)
-		}
-	}
-	if req.RemoveProxyRuntime {
-		removeFixedPath("/var/log/tako/proxy", "proxy logs", warn)
-		removeFixedPath("/etc/tako", "tako config", warn)
-		removeFixedPath("/var/lib/tako", "takod state", warn)
+		runScopedProjectPrune(ctx, req.Project, req.Environment, warn, response)
 	}
 	if req.includesMaintenanceCleanup() {
 		response.FinalDiskUsage = diskUsage(ctx)
@@ -355,6 +339,79 @@ func cleanupDanglingImages(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("failed to remove dangling docker images: %w", err)
 	}
 	return len(ids), nil
+}
+
+func cleanupUnusedProjectVolumes(ctx context.Context, project string, environment string) (int, error) {
+	output, err := runDocker(ctx, "volume", "ls", "--format", "{{.Name}}")
+	if err != nil {
+		return 0, fmt.Errorf("failed to list docker volumes: %w", err)
+	}
+	var names []string
+	for _, line := range strings.Split(output, "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" || !volumeNameMatchesProjectEnvironment(name, project, environment) {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	removed := 0
+	for _, name := range names {
+		output, err := runDocker(ctx, "volume", "rm", name)
+		if err != nil {
+			if dockerVolumeInUse(output) {
+				continue
+			}
+			return removed, fmt.Errorf("failed to remove docker volume %s: %w", name, err)
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+func volumeNameMatchesProjectEnvironment(name string, project string, environment string) bool {
+	if environment != "" {
+		return strings.HasPrefix(name, runtimeid.VolumeEnvironmentPrefix(project, environment))
+	}
+	return strings.HasPrefix(name, runtimeid.VolumeProjectPrefix(project))
+}
+
+func dockerVolumeInUse(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "volume is in use") ||
+		strings.Contains(lower, "volume is still in use") ||
+		strings.Contains(lower, "is in use")
+}
+
+func runScopedProjectPrune(ctx context.Context, project string, environment string, warn func(string, ...any), response *CleanupResponse) {
+	if count, err := cleanupStoppedContainers(ctx, project, environment); err != nil {
+		warn("failed to remove stopped project containers during scoped prune: %v", err)
+	} else {
+		response.ContainersRemoved += count
+	}
+	if environment == "" {
+		if count, err := cleanupOldProjectImages(ctx, project, 0, nil); err != nil {
+			warn("failed to remove project images during scoped prune: %v", err)
+		} else {
+			response.ImagesRemoved += count
+		}
+	}
+	if count, err := cleanupDanglingImages(ctx); err != nil {
+		warn("failed to remove dangling images during scoped prune: %v", err)
+	} else {
+		response.ImagesRemoved += count
+	}
+	if _, err := runDocker(ctx, "builder", "prune", "-f"); err != nil {
+		warn("failed to clean Docker build cache during scoped prune: %v", err)
+	} else {
+		response.BuildCacheCleaned = true
+	}
+	if _, err := cleanupUnusedProjectVolumes(ctx, project, environment); err != nil {
+		warn("failed to remove unused project volumes during scoped prune: %v", err)
+	} else {
+		response.UnusedVolumesCleaned = true
+	}
 }
 
 func imageRepositoryMatchesProject(repository string, project string, allowedRepositories []string) bool {

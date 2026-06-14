@@ -60,3 +60,15 @@ func TestNetworkProjectPrefixMatchesSanitizedProjectName(t *testing.T) {
 		t.Fatalf("network name %q should start with project prefix %q", name, prefix)
 	}
 }
+
+func TestVolumePrefixesMatchSanitizedRuntimeNames(t *testing.T) {
+	name := VolumeName("demo-app", "production_1", "cache")
+	projectPrefix := VolumeProjectPrefix("demo-app")
+	environmentPrefix := VolumeEnvironmentPrefix("demo-app", "production_1")
+	if !strings.HasPrefix(name, projectPrefix) {
+		t.Fatalf("volume name %q should start with project prefix %q", name, projectPrefix)
+	}
+	if !strings.HasPrefix(name, environmentPrefix) {
+		t.Fatalf("volume name %q should start with environment prefix %q", name, environmentPrefix)
+	}
+}

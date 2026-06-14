@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -85,6 +86,61 @@ func TestNewBackupIDFormat(t *testing.T) {
 	id := newBackupID()
 	if _, err := time.Parse("20060102-150405", id); err != nil {
 		t.Fatalf("backup ID %q is not parseable: %v", id, err)
+	}
+}
+
+func TestBackupVolumeNameFromSpecDistinguishesNamedVolumesFromBinds(t *testing.T) {
+	tests := []struct {
+		name   string
+		spec   string
+		want   string
+		wantOK bool
+	}{
+		{name: "shorthand target becomes named volume", spec: "/data", want: "/data", wantOK: true},
+		{name: "named source with target", spec: "cache:/cache", want: "cache", wantOK: true},
+		{name: "host bind is skipped", spec: "/srv/uploads:/uploads", wantOK: false},
+		{name: "empty target is skipped", spec: "cache:", wantOK: false},
+		{name: "nfs volume is skipped", spec: "nfs:/exports/data", wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := backupVolumeNameFromSpec(tt.spec)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("backupVolumeNameFromSpec(%q) = %q, %v; want %q, %v", tt.spec, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestBackupVolumesFromConfigIncludesTakoVolumeShorthand(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Services: map[string]config.ServiceConfig{
+					"web": {
+						Volumes: []string{"/data", "cache:/cache", "/srv/uploads:/uploads"},
+					},
+					"worker": {
+						Volumes: []string{"queue:/queue"},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := backupVolumesFromConfig(cfg, "production")
+	if err != nil {
+		t.Fatalf("backupVolumesFromConfig returned error: %v", err)
+	}
+	want := []backupVolumeSpec{
+		{name: "/data", service: "web"},
+		{name: "cache", service: "web"},
+		{name: "queue", service: "worker"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("backup volumes = %#v, want %#v", got, want)
 	}
 }
 
