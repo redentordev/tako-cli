@@ -182,11 +182,8 @@ func (d *Deployer) renderTakodProxyDynamicConfig(services map[string]config.Serv
 			Servers:        upstreams,
 			PassHostHeader: true,
 		}
-		if service.LoadBalancer.HealthCheck.Enabled {
-			lb.HealthCheck = &traefikHealthCheck{
-				Path:     service.LoadBalancer.HealthCheck.Path,
-				Interval: service.LoadBalancer.HealthCheck.Interval,
-			}
+		if healthCheck := proxyHealthCheckForService(service); healthCheck != nil {
+			lb.HealthCheck = healthCheck
 		}
 		httpConfig.Services[routerName] = traefikService{LoadBalancer: lb}
 	}
@@ -200,6 +197,26 @@ func (d *Deployer) renderTakodProxyDynamicConfig(services map[string]config.Serv
 		return nil, false, fmt.Errorf("failed to render proxy dynamic config: %w", err)
 	}
 	return data, true, nil
+}
+
+func proxyHealthCheckForService(service config.ServiceConfig) *traefikHealthCheck {
+	if service.LoadBalancer.HealthCheck.Enabled {
+		return &traefikHealthCheck{
+			Path:     service.LoadBalancer.HealthCheck.Path,
+			Interval: service.LoadBalancer.HealthCheck.Interval,
+		}
+	}
+	if service.HealthCheck.Path == "" {
+		return nil
+	}
+	interval := service.HealthCheck.Interval
+	if interval == "" {
+		interval = "10s"
+	}
+	return &traefikHealthCheck{
+		Path:     service.HealthCheck.Path,
+		Interval: interval,
+	}
 }
 
 func (d *Deployer) writeTakodProxyConfig(client *ssh.Client, data []byte) error {
