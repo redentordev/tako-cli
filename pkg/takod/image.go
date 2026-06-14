@@ -126,6 +126,7 @@ func BuildImage(ctx context.Context, image string, r io.Reader) (*ImageBuildResp
 	if err := validateImageName(image); err != nil {
 		return nil, err
 	}
+	r = newMaxBytesReader(r, defaultBuildContextMaxBytes, "build context upload")
 	buildDir, err := os.MkdirTemp("", "tako-build-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create build directory: %w", err)
