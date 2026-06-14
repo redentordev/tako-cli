@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -24,6 +25,63 @@ func TestBuildAcmeDNSContainerArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected acme-dns args:\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestValidateReconcileAcmeDNSRequestAllowsDefaults(t *testing.T) {
+	req := ReconcileAcmeDNSRequest{ServerIP: " 203.0.113.10 "}
+
+	normalizeReconcileAcmeDNSRequest(&req)
+	if err := validateReconcileAcmeDNSRequest(req); err != nil {
+		t.Fatalf("expected defaulted acme-dns request to validate: %v", err)
+	}
+	if req.ServerIP != "203.0.113.10" {
+		t.Fatalf("serverIP = %q, want trimmed IP", req.ServerIP)
+	}
+	if req.Image != defaultAcmeDNSImage {
+		t.Fatalf("image = %q, want %q", req.Image, defaultAcmeDNSImage)
+	}
+}
+
+func TestValidateReconcileAcmeDNSRequestRejectsUnsafeImage(t *testing.T) {
+	req := ReconcileAcmeDNSRequest{ServerIP: "203.0.113.10", Image: "--help"}
+
+	err := validateReconcileAcmeDNSRequest(req)
+	if err == nil {
+		t.Fatal("expected unsafe image to be rejected")
+	}
+	if !strings.Contains(err.Error(), "image must not start") {
+		t.Fatalf("error = %q, want image validation error", err)
+	}
+}
+
+func TestValidateAcmeDNSRegisterRequestRejectsUnsafeValues(t *testing.T) {
+	tests := []struct {
+		name string
+		req  AcmeDNSRegisterRequest
+		want string
+	}{
+		{
+			name: "domain",
+			req:  AcmeDNSRegisterRequest{Domain: "bad;host", ServerIP: "203.0.113.10"},
+			want: "domain must be a valid hostname",
+		},
+		{
+			name: "server",
+			req:  AcmeDNSRegisterRequest{Domain: "example.com", ServerIP: "bad_host"},
+			want: "serverIP must be a valid IP address or hostname",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAcmeDNSRegisterRequest(tt.req)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want %q", err.Error(), tt.want)
+			}
+		})
 	}
 }
 

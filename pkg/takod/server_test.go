@@ -301,6 +301,36 @@ func TestHandleAcmeDNSRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHandleAcmeDNSRejectsInvalidRequest(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/acme-dns", bytes.NewBufferString(`{"serverIP":"203.0.113.10","image":"--help"}`))
+	recorder := httptest.NewRecorder()
+
+	server.handleAcmeDNS(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "image must not start") {
+		t.Fatalf("unexpected response: %q", recorder.Body.String())
+	}
+}
+
+func TestHandleAcmeDNSRegisterRejectsInvalidRequest(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/acme-dns/register", bytes.NewBufferString(`{"domain":"bad;host","serverIP":"203.0.113.10"}`))
+	recorder := httptest.NewRecorder()
+
+	server.handleAcmeDNSRegister(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "domain must be a valid hostname") {
+		t.Fatalf("unexpected response: %q", recorder.Body.String())
+	}
+}
+
 func TestHandleAcmeDNSCredentialsRequiresSupportedMethod(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
 	req := httptest.NewRequest(http.MethodPost, "/v1/acme-dns/credentials", nil)

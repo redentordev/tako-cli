@@ -402,6 +402,11 @@ func (s *Server) handleAcmeDNS(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		normalizeReconcileAcmeDNSRequest(&request)
+		if err := validateReconcileAcmeDNSRequest(request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		response, err = ReconcileAcmeDNS(r.Context(), request)
 	case http.MethodDelete:
 		response, err = RemoveAcmeDNS(r.Context())
@@ -429,6 +434,11 @@ func (s *Server) handleAcmeDNSRegister(w http.ResponseWriter, r *http.Request) {
 	var request AcmeDNSRegisterRequest
 	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	normalizeAcmeDNSRegisterRequest(&request)
+	if err := validateAcmeDNSRegisterRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	response, err := RegisterAcmeDNS(r.Context(), request)
