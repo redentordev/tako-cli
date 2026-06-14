@@ -169,7 +169,7 @@ func TestApplyLocalWithRunnerWritesConfigWithoutSudo(t *testing.T) {
 	status, err := applyLocalWithRunner(context.Background(), runner, Node{
 		Name:    "node-a",
 		Host:    "203.0.113.10",
-		Address: "10.210.0.1/24",
+		Address: " 10.210.0.1/24 ",
 	}, []Node{
 		{Name: "node-b", Host: "203.0.113.11", Address: "10.210.0.2/24", PublicKey: "peer-b-key"},
 	}, WireGuardConfig{
@@ -215,7 +215,7 @@ func TestApplyLocalWithRunnerWritesConfigWithoutSudo(t *testing.T) {
 	if applyCommand == "" {
 		t.Fatalf("expected wg-quick apply command, got %v", runner.commands)
 	}
-	for _, expected := range []string{"wg-quick@'tako'", "wg show 'tako'", "dev 'tako'", "wg-quick up 'tako'"} {
+	for _, expected := range []string{"wg-quick@'tako'", "wg show 'tako'", "ip address replace '10.210.0.1/24'", "dev 'tako'", "wg-quick up 'tako'"} {
 		if !strings.Contains(applyCommand, expected) {
 			t.Fatalf("apply command missing %q: %s", expected, applyCommand)
 		}
