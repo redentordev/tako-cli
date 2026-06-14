@@ -68,7 +68,7 @@ Once installed, you can use tab completion with Tako CLI:
 ```bash
 # Complete commands
 tako <TAB>
-# Shows: access, cleanup, deploy, destroy, dev, ...
+# Shows: deploy, destroy, doctor, drift, env, ...
 
 # Complete flags
 tako deploy --<TAB>

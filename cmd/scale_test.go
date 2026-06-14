@@ -25,12 +25,6 @@ func TestScaleCommandsDoNotExposeServerFlag(t *testing.T) {
 	if flag := scaleCmd.Flags().Lookup("server"); flag != nil {
 		t.Fatal("scale command should not expose a server flag")
 	}
-	if flag := startCmd.Flags().Lookup("server"); flag != nil {
-		t.Fatal("start command should not expose a server flag")
-	}
-	if flag := stopCmd.Flags().Lookup("server"); flag != nil {
-		t.Fatal("stop command should not expose a server flag")
-	}
 }
 
 func TestScaleTargetSummaryIsDeterministic(t *testing.T) {

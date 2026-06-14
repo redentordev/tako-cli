@@ -102,17 +102,14 @@ tako ps
 # View logs
 tako logs --service web
 
-# View HTTP access logs
-tako access
-
 # Rollback to previous version
 tako rollback
 
-# Stop the service
-tako stop
+# Stop the service replicas
+tako scale web=0
 
-# Start the service
-tako start
+# Start two service replicas
+tako scale web=2
 
 # Remove the deployed app
 tako destroy
@@ -223,7 +220,7 @@ tako ps
 
 - Make sure your domain's DNS is pointing to your server IP
 - Wait 1-2 minutes for Let's Encrypt to issue certificate
-- Check access logs with `tako access`
+- Check service logs with `tako logs --service web`
 
 ## Next Steps
 

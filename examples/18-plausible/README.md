@@ -224,10 +224,10 @@ tako logs --service postgres
 tako logs --service clickhouse
 
 # Stop all services
-tako stop
+tako scale plausible=0 postgres=0 clickhouse=0
 
 # Start all services
-tako start
+tako scale plausible=1 postgres=1 clickhouse=1
 
 # Remove deployment
 tako remove
@@ -256,22 +256,10 @@ env:
   BASE_URL: https://analytics.yourdomain.com
 ```
 
-## Backup
+## Data
 
-### Data Backup
-
-```bash
-tako backup --volume postgres_data
-tako backup --volume clickhouse_data
-tako backup --list
-```
-
-## Restore
-
-```bash
-tako backup --volume postgres_data --restore <backup-id>
-tako backup --volume clickhouse_data --restore <backup-id>
-```
+PostgreSQL and ClickHouse data are stored in configured service volumes. Use
+database-native backup/export workflows for durable off-node backups.
 
 ## Email Configuration (Optional)
 
@@ -319,9 +307,9 @@ tako ps
 
 ### Can't access Plausible
 
-Check proxy logs:
+Check service logs:
 ```bash
-tako access --tail 100
+tako logs --service plausible --tail 100
 ```
 
 ## Security

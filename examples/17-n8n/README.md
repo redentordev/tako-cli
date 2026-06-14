@@ -93,11 +93,11 @@ See [n8n environment variables documentation](https://docs.n8n.io/hosting/config
 # View logs
 tako logs --service n8n
 
-# Stop service
-tako stop
+# Stop service replicas
+tako scale n8n=0
 
-# Start service
-tako start
+# Start service replicas
+tako scale n8n=1
 
 # Remove deployment
 tako remove
@@ -122,20 +122,10 @@ env:
   WEBHOOK_URL: https://n8n.yourdomain.com/
 ```
 
-## Backup
+## Data
 
-To backup your n8n data:
-
-```bash
-tako backup --volume n8n_data
-tako backup --list
-```
-
-## Restore
-
-```bash
-tako backup --volume n8n_data --restore <backup-id>
-```
+n8n data is stored in the configured `n8n_data` volume. Use n8n's export tools
+or a database-specific backup workflow for durable off-node backups.
 
 ## Key Features of This Example
 
@@ -195,17 +185,14 @@ Verify domain resolves to your server:
 nslookup n8n.<your-ip>.sslip.io
 ```
 
-Check proxy logs:
+Check service logs:
 ```bash
-tako access --tail 100
+tako logs --service n8n --tail 100
 ```
 
 ### Data not persisting
 
-Verify the configured volume is included in backups:
-```bash
-tako backup --volume n8n_data --list
-```
+Verify the `n8n_data` volume is configured in `tako.yaml`.
 
 ## Production Recommendations
 

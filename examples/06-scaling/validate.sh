@@ -20,7 +20,7 @@ fi
 
 echo "Checking recent web logs and stats through takod..."
 tako logs --service web --tail 50 >/dev/null
-tako stats --service web >/dev/null
+tako metrics --server prod >/dev/null
 
 if [ -n "${TAKO_VALIDATE_URL:-}" ]; then
   echo "Checking public endpoint: $TAKO_VALIDATE_URL"

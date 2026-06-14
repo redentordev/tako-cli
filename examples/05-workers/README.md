@@ -114,7 +114,7 @@ tako logs --service worker --follow
 **Check service and resource state:**
 ```bash
 tako ps
-tako stats --service worker
+tako metrics --server prod
 ```
 
 ## Testing Locally

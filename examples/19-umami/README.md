@@ -138,10 +138,10 @@ tako logs --service umami
 tako logs --service postgres
 
 # Stop services
-tako stop
+tako scale umami=0 postgres=0
 
 # Start services
-tako start
+tako scale umami=1 postgres=1
 
 # Remove deployment
 tako remove
@@ -158,18 +158,10 @@ proxy:
   domain: analytics.yourdomain.com
 ```
 
-## Backup
+## Data
 
-```bash
-tako backup --volume postgres_data
-tako backup --list
-```
-
-## Restore
-
-```bash
-tako backup --volume postgres_data --restore <backup-id>
-```
+PostgreSQL data is stored in the configured `postgres_data` volume. Use
+database-native backup/export workflows for durable off-node backups.
 
 ## Scaling
 

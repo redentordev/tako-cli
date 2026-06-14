@@ -295,7 +295,7 @@ run_tako_in() {
   run_cmd "$label" bash -c '
     cd "$1"
     shift
-    TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 "$@"
+    TAKO_NONINTERACTIVE=1 "$@"
   ' _ "$dir" "$TAKO_BIN" --env "$ENVIRONMENT" "$@"
 }
 
@@ -311,7 +311,7 @@ run_tako_status() {
   run_cmd_status "$label" bash -c '
     cd "$1"
     shift
-    TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 "$@"
+    TAKO_NONINTERACTIVE=1 "$@"
   ' _ "$APP_DIR" "$TAKO_BIN" --env "$ENVIRONMENT" "$@"
 }
 
@@ -379,7 +379,7 @@ infer_offline_node_control() {
   local resolved resolved_host resolved_user resolved_port resolved_key
   if ! resolved="$(
     cd "$APP_DIR"
-    TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 "$TAKO_BIN" --env "$ENVIRONMENT" internal e2e-server-ssh --server "$OFFLINE_SERVER"
+    TAKO_NONINTERACTIVE=1 "$TAKO_BIN" --env "$ENVIRONMENT" internal e2e-server-ssh --server "$OFFLINE_SERVER"
   )"; then
     if [[ -n "${TAKO_E2E_DEBUG:-}" ]]; then
       echo "warning: could not infer offline node SSH settings from tako config" >&2
@@ -520,11 +520,11 @@ phase_ci() {
     cd "$1"
     ci_host_key_mode="$2"
     shift 2
-    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" env pull --force
-    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state pull
-    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state status
-    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state lease
-    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" deploy --yes
+    CI=true TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" env pull --force
+    CI=true TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state pull
+    CI=true TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state status
+    CI=true TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state lease
+    CI=true TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" deploy --yes
   ' _ "$clone_dir" "$CI_HOST_KEY_MODE" "$TAKO_BIN"
 }
 

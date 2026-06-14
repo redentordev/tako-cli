@@ -155,16 +155,6 @@ cp completions/tako.fish ~/.config/fish/completions/
 
 See [completions/README.md](./completions/README.md) for detailed instructions.
 
-#### Upgrading
-
-```bash
-# Check for updates
-tako upgrade --check
-
-# Upgrade to latest version
-tako upgrade
-```
-
 #### Uninstalling
 
 ```bash
@@ -278,7 +268,6 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Domain Redirects** - Automatic www → non-www (or vice versa) with path preservation
 - **Health Checks** - Ensure containers are healthy after reconciliation
 - **Secrets Management** - Secure handling of environment secrets with automatic redaction
-- **Volume Backup/Restore** - Backup and restore service volumes with `tako backup`
 - **Drift Detection** - Detect configuration drift with `tako drift`
 
 ### Servers & Scaling
@@ -292,7 +281,6 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Simple YAML Configuration** - Intuitive and readable
 - **Environment Variables** - Full support with .env files
 - **Local Development Workflow** - Pull remote state, use `.env` files, and deploy through the same takod path
-- **Auto-Update** - Built-in upgrade mechanism with `tako upgrade`
 - **Verbose Logging** - Detailed output for debugging
 - **Cross-Platform** - Single binary for Windows, macOS, Linux
 - **No Dependencies** - Just the binary and SSH access
@@ -317,27 +305,19 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 |---------|-------------|
 | `tako ps` | List running services and their status |
 | `tako logs` | Stream container logs |
-| `tako access` | Stream proxy access logs |
 | `tako metrics` | View system metrics from servers |
-| `tako monitor` | Continuously monitor deployed services |
 | `tako history` | View deployment history |
 
 ### Service Control
 
 | Command | Description |
 |---------|-------------|
-| `tako start` | Start stopped services (scales to configured replicas) |
-| `tako stop` | Stop running services (scales to 0) |
 | `tako scale` | Scale service replicas |
 
 ### Backup & Recovery
 
 | Command | Description |
 |---------|-------------|
-| `tako backup --volume <name>` | Backup a service volume across environment nodes |
-| `tako backup --list` | List available backups across environment nodes |
-| `tako backup --server <node> --volume <name> --restore <id>` | Restore a node-local volume from backup |
-| `tako backup --cleanup <days>` | Delete backups older than N days across environment nodes |
 | `tako drift` | Detect configuration drift between config and running services |
 | `tako drift --watch` | Continuously monitor for drift |
 
@@ -360,9 +340,6 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako state repair` | Repair deployment and runtime state across reachable mesh nodes |
 | `tako state lease` | Show remote operation leases across reachable nodes |
 | `tako state lease release --id <id> --force` | Release an exact stale remote lease |
-| `tako upgrade` | Upgrade Tako CLI to the latest version |
-| `tako live` | Disable maintenance mode and restore service traffic |
-| `tako cleanup` | Clean up old node runtime resources |
 
 CI/CD runners use the same takod path as a laptop. See
 [CI/CD Deployments](./docs/CI-CD.md) and the
@@ -731,12 +708,10 @@ make build-all
 
 ```
 tako-cli/
-├── cmd/                  # CLI commands (23 commands)
+├── cmd/                  # CLI commands
 │   ├── deploy.go         # Deployment logic
 │   ├── setup.go          # Server setup
 │   ├── rollback.go       # Rollback functionality
-│   ├── access.go         # Proxy access logs
-│   ├── monitor.go        # Service monitoring
 │   └── ...               # Other commands
 ├── pkg/                  # Reusable packages
 │   ├── config/           # Configuration management
@@ -744,8 +719,6 @@ tako-cli/
 │   ├── git/              # Git operations
 │   ├── ssh/              # SSH client with pooling
 │   ├── provisioner/      # Server setup
-│   ├── monitoring/       # Service health monitoring
-│   ├── accesslog/        # Access log formatting
 │   └── ...               # Other packages
 ├── internal/             # Internal packages
 │   └── state/            # Deployment state management

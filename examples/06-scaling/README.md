@@ -248,9 +248,9 @@ tako logs --service web --tail 100
 tako logs --service web --follow
 ```
 
-**Check resource usage:**
+**Check node resource usage:**
 ```bash
-tako stats --service web
+tako metrics --server prod
 ```
 
 ## When to Scale

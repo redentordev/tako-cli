@@ -4,12 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/joho/godotenv"
-	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/ssh"
-	"github.com/redentordev/tako-cli/pkg/updater"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -51,69 +48,10 @@ func GetVersionInfo() string {
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute() {
-	// Check for updates on startup (once per day, non-blocking)
-	checkForUpdatesOnStartup()
-
 	err := rootCmd.Execute()
 	if err != nil {
 		os.Exit(1)
 	}
-}
-
-// checkForUpdatesOnStartup checks for updates in the background
-func checkForUpdatesOnStartup() {
-	// Skip update check if user disabled it
-	if os.Getenv("TAKO_SKIP_UPDATE_CHECK") == "1" {
-		return
-	}
-
-	// Only check once per day
-	shouldCheck := shouldCheckForUpdate()
-	if !shouldCheck {
-		return
-	}
-
-	// Run check in background to not slow down command execution
-	go func() {
-		defer func() {
-			// Recover from any panics in update check
-			if r := recover(); r != nil {
-				// Silently ignore errors in background update check
-			}
-		}()
-
-		checkForUpdate()
-	}()
-}
-
-// checkForUpdate checks if an update is available
-func checkForUpdate() {
-	updater.CheckForUpdate(Version, true) // silent mode
-}
-
-// shouldCheckForUpdate checks if it's time to check for updates
-func shouldCheckForUpdate() bool {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-
-	lastCheckFile := filepath.Join(homeDir, ".tako_last_update_check")
-
-	info, err := os.Stat(lastCheckFile)
-	if err != nil {
-		// File doesn't exist, create it
-		_ = fileutil.WriteFileAtomic(lastCheckFile, []byte("checked"), 0644)
-		return true
-	}
-
-	// Check if 24 hours have passed
-	if time.Since(info.ModTime()) > 24*time.Hour {
-		_ = fileutil.WriteFileAtomic(lastCheckFile, []byte("checked"), 0644)
-		return true
-	}
-
-	return false
 }
 
 func init() {

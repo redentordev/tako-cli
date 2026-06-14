@@ -126,7 +126,7 @@ func ComputePlan(
 					Reasons: []string{
 						"Service removed from config but marked as PERSISTENT",
 						"Keeping service running (databases, stateful services)",
-						"To remove, use: tako stop " + serviceName,
+						"To stop replicas, use: tako scale " + serviceName + "=0",
 					},
 				}
 				plan.Changes = append(plan.Changes, change)

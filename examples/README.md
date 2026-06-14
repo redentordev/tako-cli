@@ -412,7 +412,7 @@ tako doctor
 ### Domain Not Resolving
 1. Verify DNS points to your server IP
 2. Wait for DNS propagation (up to 48 hours)
-3. Check access logs with `tako access`
+3. Check service logs with `tako logs --service web`
 
 ### Database Connection Failed
 1. Check service is running: `tako ps`

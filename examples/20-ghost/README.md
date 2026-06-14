@@ -129,10 +129,10 @@ tako logs --service ghost
 tako logs --service mysql
 
 # Stop services
-tako stop
+tako scale ghost=0 mysql=0
 
 # Start services
-tako start
+tako scale ghost=1 mysql=1
 
 # Remove deployment
 tako remove
@@ -188,20 +188,10 @@ Upload and activate themes from the Ghost admin panel.
 - Download from https://ghost.org/themes/
 - Upload via Ghost admin panel: Settings → Design → Change theme
 
-## Backup
+## Data
 
-```bash
-tako backup --volume mysql_data
-tako backup --volume ghost_content
-tako backup --list
-```
-
-## Restore
-
-```bash
-tako backup --volume mysql_data --restore <backup-id>
-tako backup --volume ghost_content --restore <backup-id>
-```
+MySQL data and Ghost content are stored in configured service volumes. Use
+Ghost export and database-native backup workflows for durable off-node backups.
 
 ## Scaling
 
@@ -230,7 +220,7 @@ env:
 
 Restart Ghost after changing:
 ```bash
-tako stop && tako start
+tako scale ghost=0 && tako scale ghost=1
 ```
 
 ### Database connection errors
