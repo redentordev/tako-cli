@@ -35,7 +35,7 @@ environments:
         env:
           POSTGRES_DB: myapp
           POSTGRES_USER: myapp
-          POSTGRES_PASSWORD: changeme
+          POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
         volumes:
           - postgres_data:/var/lib/postgresql/data
         healthCheck:
@@ -63,7 +63,7 @@ environments:
           - postgres
           - redis
         env:
-          DATABASE_URL: postgresql://myapp:changeme@postgres:5432/myapp
+          DATABASE_URL: postgresql://myapp:${POSTGRES_PASSWORD}@postgres:5432/myapp
           REDIS_URL: redis://redis:6379
           NODE_ENV: production
         healthCheck:
@@ -104,6 +104,6 @@ environments:
           - postgres
           - redis
         env:
-          DATABASE_URL: postgresql://myapp:changeme@postgres:5432/myapp
+          DATABASE_URL: postgresql://myapp:${POSTGRES_PASSWORD}@postgres:5432/myapp
           REDIS_URL: redis://redis:6379
           NODE_ENV: production
