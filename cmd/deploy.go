@@ -105,6 +105,65 @@ func resolveDeployCommitInfo(gitClient deployGitReader) (*git.CommitInfo, error)
 	return commitInfo, nil
 }
 
+type remoteDeploymentSaver interface {
+	SaveDeployment(*remotestate.DeploymentState) error
+}
+
+type localDeploymentSaver interface {
+	SaveDeployment(*localstate.DeploymentState) error
+}
+
+func recordFailedDeploymentState(
+	remoteSaver remoteDeploymentSaver,
+	localSaver localDeploymentSaver,
+	deployment *remotestate.DeploymentState,
+	cfg *config.Config,
+	envName string,
+	serverNames []string,
+	commitInfo *git.CommitInfo,
+	startTime time.Time,
+	deploymentErr error,
+) error {
+	if deployment == nil {
+		return fmt.Errorf("deployment state is nil")
+	}
+	deployment.Status = remotestate.StatusFailed
+	deployment.Duration = time.Since(startTime)
+	if deploymentErr != nil {
+		deployment.Error = deploymentErr.Error()
+	} else if deployment.Error == "" {
+		deployment.Error = "deployment failed"
+	}
+
+	if remoteSaver == nil {
+		return fmt.Errorf("remote deployment recorder is nil")
+	}
+	if err := remoteSaver.SaveDeployment(deployment); err != nil {
+		return fmt.Errorf("failed to save failed remote deployment state: %w", err)
+	}
+
+	if localSaver != nil {
+		localDeployment := &localstate.DeploymentState{
+			DeploymentID:    fmt.Sprintf("deploy-%s", startTime.Format("20060102-150405")),
+			Timestamp:       startTime,
+			Environment:     envName,
+			Mode:            cfg.GetRuntimeMode(),
+			Servers:         append([]string(nil), serverNames...),
+			Status:          "failed",
+			DurationSeconds: int(time.Since(startTime).Seconds()),
+			TriggeredBy:     remotestate.GetCurrentUser(),
+			Notes:           deployment.Error,
+		}
+		if commitInfo != nil {
+			localDeployment.GitCommit = commitInfo.Hash
+		}
+		if err := localSaver.SaveDeployment(localDeployment); err != nil {
+			return fmt.Errorf("failed to save failed local deployment state: %w", err)
+		}
+	}
+	return nil
+}
+
 func runDeploy(cmd *cobra.Command, args []string) error {
 	// Load deployment configuration
 	cfg, err := config.LoadConfig(cfgFile)
@@ -568,6 +627,20 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	deploymentDuration := time.Since(startTime)
 
 	if deploymentFailed {
+		recordErr := recordFailedDeploymentState(stateManager, localStateMgr, deployment, cfg, envName, serverNames, commitInfo, startTime, deploymentError)
+		if recordErr == nil && len(servers) > 1 {
+			replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
+			history, err := stateManager.LoadHistory()
+			if err != nil {
+				recordErr = fmt.Errorf("failed to load failed deployment history for replication: %w", err)
+			} else if err := replicator.ReplicateDeployment(deployment, history); err != nil {
+				recordErr = fmt.Errorf("failed to replicate failed deployment history: %w", err)
+			}
+		}
+		if recordErr != nil && verbose {
+			fmt.Printf("Warning: failed to record failed deployment state: %v\n", recordErr)
+		}
+
 		// Send failure notification
 		if notifier != nil {
 			notifier.Notify(notification.Event{
@@ -583,6 +656,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 					"user":    remotestate.GetCurrentUser(),
 				},
 			})
+		}
+		if recordErr != nil {
+			return fmt.Errorf("takod deployment failed; additionally failed to record failed deployment state: %w", recordErr)
 		}
 		return fmt.Errorf("takod deployment failed")
 	}
