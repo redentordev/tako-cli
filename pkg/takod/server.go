@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -25,7 +26,27 @@ type Server struct {
 	mu                    sync.Mutex
 }
 
-const takodReadHeaderTimeout = 5 * time.Second
+const (
+	takodReadHeaderTimeout = 5 * time.Second
+	takodMaxJSONBodyBytes  = 16 << 20
+)
+
+func decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, takodMaxJSONBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("request body must contain a single JSON value")
+		}
+		return err
+	}
+	return nil
+}
 
 type Status struct {
 	Runtime   string         `json:"runtime"`
@@ -230,7 +251,7 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 	defer r.Body.Close()
 
 	var request ReconcileServiceRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -257,7 +278,7 @@ func (s *Server) handleProxyFile(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		defer r.Body.Close()
 		var request ProxyFileRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -287,7 +308,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request ReconcileProxyRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -312,7 +333,7 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request CleanupRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -338,7 +359,7 @@ func (s *Server) handleAcmeDNS(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		defer r.Body.Close()
 		var request ReconcileAcmeDNSRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -367,7 +388,7 @@ func (s *Server) handleAcmeDNSRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var request AcmeDNSRegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -393,7 +414,7 @@ func (s *Server) handleAcmeDNSCredentials(w http.ResponseWriter, r *http.Request
 	case http.MethodPut:
 		defer r.Body.Close()
 		var request AcmeDNSCredentialsRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -430,7 +451,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		defer r.Body.Close()
 		var request StateDocumentRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -438,7 +459,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		defer r.Body.Close()
 		var request StateDocumentRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -473,7 +494,7 @@ func (s *Server) handleLease(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		defer r.Body.Close()
 		var request LeaseRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -481,7 +502,7 @@ func (s *Server) handleLease(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		defer r.Body.Close()
 		var request LeaseRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -516,7 +537,7 @@ func (s *Server) handleEnvBundle(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		defer r.Body.Close()
 		var request EnvBundleRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -552,7 +573,7 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		defer r.Body.Close()
 		var request BackupRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -588,7 +609,7 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request BackupRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -611,7 +632,7 @@ func (s *Server) handleBackupCleanup(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request BackupRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -635,7 +656,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request MetadataRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -677,7 +698,7 @@ func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request MeshApplyRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
