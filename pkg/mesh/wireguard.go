@@ -418,6 +418,10 @@ func validateInterfaceName(value string) (string, error) {
 	return escaped, nil
 }
 
+func ValidateInterfaceName(value string) (string, error) {
+	return validateInterfaceName(value)
+}
+
 func runRootScript(script string) string {
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
 	return fmt.Sprintf(`sudo sh -c 'set -eu
