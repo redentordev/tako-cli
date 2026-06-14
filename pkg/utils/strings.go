@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 // SanitizeName sanitizes a string for use in Docker/network names
@@ -57,15 +59,12 @@ func Quote(s string) string {
 
 // ContainerName generates a standardized container name
 func ContainerName(project, environment, service string, replica int) string {
-	if replica > 0 {
-		return fmt.Sprintf("%s_%s_%s_%d", project, environment, service, replica)
-	}
-	return fmt.Sprintf("%s_%s_%s", project, environment, service)
+	return runtimeid.ContainerName(project, environment, service, replica)
 }
 
 // NetworkName generates a standardized network name
 func NetworkName(project, environment string) string {
-	return fmt.Sprintf("tako_%s_%s", project, environment)
+	return runtimeid.NetworkName(project, environment)
 }
 
 // ImageTag generates a standardized image tag

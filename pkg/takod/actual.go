@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 var actualDockerCommandContext = exec.CommandContext
@@ -21,6 +23,7 @@ type ActualService struct {
 	Replicas   int      `json:"replicas"`
 	Containers []string `json:"containers,omitempty"`
 	ConfigHash string   `json:"configHash,omitempty"`
+	RuntimeID  string   `json:"runtimeId,omitempty"`
 }
 
 func GatherActualState(ctx context.Context, project string, environment string) (*ActualStateResponse, error) {
@@ -37,7 +40,11 @@ func GatherActualState(ctx context.Context, project string, environment string) 
 		return nil, fmt.Errorf("invalid environment name")
 	}
 
-	cmd := actualDockerCommandContext(ctx, "docker", "ps", "--format", `{{.Names}}|{{.Image}}|{{.ID}}|{{.Label "tako.configHash"}}`)
+	format := fmt.Sprintf(
+		`{{.Names}}|{{.Image}}|{{.ID}}|{{.Label "tako.configHash"}}|{{.Label %q}}|{{.Label "tako.project"}}|{{.Label "tako.environment"}}|{{.Label "tako.service"}}`,
+		runtimeid.ServiceIdentityLabel,
+	)
+	cmd := actualDockerCommandContext(ctx, "docker", "ps", "--format", format)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %w", err)
@@ -72,16 +79,31 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 		if len(parts) >= 4 {
 			configHash = strings.TrimSpace(parts[3])
 		}
-		if !strings.HasPrefix(containerName, prefix) {
-			continue
+		runtimeID := ""
+		if len(parts) >= 5 {
+			runtimeID = strings.TrimSpace(parts[4])
 		}
+		serviceName := ""
+		if len(parts) >= 8 &&
+			strings.TrimSpace(parts[5]) == project &&
+			strings.TrimSpace(parts[6]) == environment {
+			serviceName = strings.TrimSpace(parts[7])
+		}
+		if serviceName == "" {
+			if !strings.HasPrefix(containerName, prefix) {
+				continue
+			}
 
-		remainder := strings.TrimPrefix(containerName, prefix)
-		nameParts := strings.Split(remainder, "_")
-		if len(nameParts) < 2 {
+			remainder := strings.TrimPrefix(containerName, prefix)
+			nameParts := strings.Split(remainder, "_")
+			if len(nameParts) < 2 {
+				continue
+			}
+			serviceName = strings.Join(nameParts[:len(nameParts)-1], "_")
+		}
+		if serviceName == "" || !isSafeServiceName(serviceName) {
 			continue
 		}
-		serviceName := strings.Join(nameParts[:len(nameParts)-1], "_")
 
 		if existing, ok := response.Services[serviceName]; ok {
 			existing.Containers = append(existing.Containers, containerID)
@@ -91,6 +113,7 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 			} else if configHash != "" && existing.ConfigHash != configHash {
 				existing.ConfigHash = ""
 			}
+			existing.RuntimeID = mergeRuntimeID(existing.RuntimeID, runtimeID)
 			continue
 		}
 
@@ -100,8 +123,16 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 			Replicas:   1,
 			Containers: []string{containerID},
 			ConfigHash: configHash,
+			RuntimeID:  runtimeID,
 		}
 	}
 
 	return response
+}
+
+func mergeRuntimeID(existing string, incoming string) string {
+	if existing == incoming {
+		return existing
+	}
+	return ""
 }

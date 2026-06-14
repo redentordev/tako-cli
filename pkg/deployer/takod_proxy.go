@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -98,6 +99,9 @@ func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig)
 		if err := d.writeTakodProxyConfig(client, dynamicConfig); err != nil {
 			return fmt.Errorf("failed to write proxy config: %w", err)
 		}
+		if err := d.removeLegacyTakodProxyConfig(client); err != nil {
+			return fmt.Errorf("failed to remove legacy proxy config: %w", err)
+		}
 		if err := d.ensureTakodProxy(client, takodNetworkName(d.config.Project.Name, d.environment), firstProxyEmail(services)); err != nil {
 			return fmt.Errorf("failed to reconcile proxy: %w", err)
 		}
@@ -145,7 +149,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 			return assignments[i].ServerName < assignments[j].ServerName
 		})
 
-		routerName := sanitizeRouterName(d.config.Project.Name + "-" + d.environment + "-" + serviceName)
+		routerName := runtimeid.RouterName(d.config.Project.Name, d.environment, serviceName)
 		rule, err := proxyHostRule(service.Proxy)
 		if err != nil {
 			return nil, false, fmt.Errorf("service %s has invalid proxy domains: %w", serviceName, err)
@@ -242,12 +246,38 @@ func (d *Deployer) writeTakodProxyConfig(client *ssh.Client, data []byte) error 
 }
 
 func (d *Deployer) removeTakodProxyConfig(client *ssh.Client) error {
-	_, err := takodclient.RequestJSON(client, d.takodSocket(), "DELETE", takodclient.ProxyFileEndpoint(d.takodProxyConfigFileName()), nil)
-	return err
+	for _, name := range d.takodProxyConfigFileNames() {
+		if _, err := takodclient.RequestJSON(client, d.takodSocket(), "DELETE", takodclient.ProxyFileEndpoint(name), nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *Deployer) takodProxyConfigFileName() string {
-	return sanitizeRouterName(d.config.Project.Name+"-"+d.environment) + ".yml"
+	return runtimeid.ProxyConfigFileName(d.config.Project.Name, d.environment)
+}
+
+func (d *Deployer) takodProxyConfigFileNames() []string {
+	current := d.takodProxyConfigFileName()
+	legacy := runtimeid.LegacyProxyConfigFileName(d.config.Project.Name, d.environment)
+	if legacy == current {
+		return []string{current}
+	}
+	return []string{current, legacy}
+}
+
+func (d *Deployer) removeLegacyTakodProxyConfig(client *ssh.Client) error {
+	current := d.takodProxyConfigFileName()
+	for _, name := range d.takodProxyConfigFileNames() {
+		if name == current {
+			continue
+		}
+		if _, err := takodclient.RequestJSON(client, d.takodSocket(), "DELETE", takodclient.ProxyFileEndpoint(name), nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *Deployer) meshUpstreamURL(serverName string, serviceName string, slot int) (string, error) {

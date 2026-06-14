@@ -14,6 +14,7 @@
 #   TAKO_E2E_PHASES           Comma-separated phases. Defaults to preflight.
 #   TAKO_E2E_TAKO_BIN         Existing tako binary. Defaults to a local build.
 #   TAKO_E2E_CONFIRM=run      Required for setup/deploy/repair/env phases.
+#   TAKO_E2E_CI_HOST_KEY_MODE Host key mode for the ci phase. Defaults to TAKO_HOST_KEY_MODE or tofu.
 #   TAKO_E2E_LOG_DIR          Directory for logs. Defaults outside app worktree.
 #   TAKO_E2E_KEEP_WORKDIR=1   Keep temporary fresh-clone workdirs.
 #   TAKO_E2E_OFFLINE_SERVER   Node name to stop for the offline/rejoin phase.
@@ -36,6 +37,7 @@ ENVIRONMENT="${TAKO_E2E_ENVIRONMENT:-${TAKO_E2E_ENV:-production}}"
 PHASES="${TAKO_E2E_PHASES:-preflight}"
 TAKO_BIN="${TAKO_E2E_TAKO_BIN:-}"
 CONFIRM="${TAKO_E2E_CONFIRM:-}"
+CI_HOST_KEY_MODE="${TAKO_E2E_CI_HOST_KEY_MODE:-${TAKO_HOST_KEY_MODE:-tofu}}"
 KEEP_WORKDIR="${TAKO_E2E_KEEP_WORKDIR:-0}"
 OFFLINE_SERVER="${TAKO_E2E_OFFLINE_SERVER:-}"
 OFFLINE_HOST="${TAKO_E2E_OFFLINE_HOST:-}"
@@ -516,13 +518,14 @@ phase_ci() {
   require_deploy_ready_worktree "$clone_dir"
   run_cmd "ci env and state deploy" bash -c '
     cd "$1"
-    shift
-    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="${TAKO_HOST_KEY_MODE:-strict}" "$@" --env "$TAKO_E2E_ENVIRONMENT" env pull --force
-    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="${TAKO_HOST_KEY_MODE:-strict}" "$@" --env "$TAKO_E2E_ENVIRONMENT" state pull
-    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="${TAKO_HOST_KEY_MODE:-strict}" "$@" --env "$TAKO_E2E_ENVIRONMENT" state status
-    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="${TAKO_HOST_KEY_MODE:-strict}" "$@" --env "$TAKO_E2E_ENVIRONMENT" state lease
-    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="${TAKO_HOST_KEY_MODE:-strict}" "$@" --env "$TAKO_E2E_ENVIRONMENT" deploy --yes
-  ' _ "$clone_dir" "$TAKO_BIN"
+    ci_host_key_mode="$2"
+    shift 2
+    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" env pull --force
+    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state pull
+    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state status
+    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state lease
+    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" deploy --yes
+  ' _ "$clone_dir" "$CI_HOST_KEY_MODE" "$TAKO_BIN"
 }
 
 phase_repair() {

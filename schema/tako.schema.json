@@ -24,7 +24,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Project name (lowercase, alphanumeric, hyphens)",
+          "description": "App namespace. Keep this stable and unique per product on shared nodes.",
           "pattern": "^[a-z][a-z0-9-]{0,62}$"
         },
         "version": {

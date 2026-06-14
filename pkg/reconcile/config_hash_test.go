@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestSafeServiceConfigHashStableAcrossOrderOnlyFields(t *testing.T) {
@@ -59,11 +60,12 @@ func TestDetectChangesUsesMatchingSafeConfigHash(t *testing.T) {
 		t.Fatal("expected safe service hash")
 	}
 
-	reasons := detectChanges(service, &ActualService{
+	reasons := detectChanges("demo", "production", "web", service, &ActualService{
 		Name:       "web",
 		Image:      "nginx:1.27",
 		Replicas:   1,
 		ConfigHash: hash,
+		RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "web"),
 		ConfigSnapshot: &config.ServiceConfig{
 			Image: "nginx:1.27",
 		},
@@ -83,7 +85,32 @@ func TestDetectChangesDoesNotLetHashHideReplicaDrift(t *testing.T) {
 		t.Fatal("expected safe service hash")
 	}
 
-	reasons := detectChanges(service, &ActualService{
+	reasons := detectChanges("demo", "production", "web", service, &ActualService{
+		Name:       "web",
+		Image:      "nginx:1.27",
+		Replicas:   1,
+		ConfigHash: hash,
+		RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "web"),
+		ConfigSnapshot: &config.ServiceConfig{
+			Image: "nginx:1.27",
+		},
+	})
+	if len(reasons) == 0 {
+		t.Fatal("detectChanges() should report replica drift")
+	}
+}
+
+func TestDetectChangesDoesNotLetHashHideRuntimeIdentityDrift(t *testing.T) {
+	service := config.ServiceConfig{
+		Image: "nginx:1.27",
+		Port:  8080,
+	}
+	hash, ok := SafeServiceConfigHash(service)
+	if !ok {
+		t.Fatal("expected safe service hash")
+	}
+
+	reasons := detectChanges("demo", "production", "web", service, &ActualService{
 		Name:       "web",
 		Image:      "nginx:1.27",
 		Replicas:   1,
@@ -93,6 +120,9 @@ func TestDetectChangesDoesNotLetHashHideReplicaDrift(t *testing.T) {
 		},
 	})
 	if len(reasons) == 0 {
-		t.Fatal("detectChanges() should report replica drift")
+		t.Fatal("detectChanges() should report runtime identity drift")
+	}
+	if reasons[0] != "Runtime identity changed" {
+		t.Fatalf("first reason = %q, want runtime identity drift", reasons[0])
 	}
 }

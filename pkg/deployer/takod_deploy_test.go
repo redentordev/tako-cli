@@ -10,6 +10,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestEnsureTakodMeshKeysWithRunsConcurrently(t *testing.T) {
@@ -204,19 +205,69 @@ func TestServiceRuntimeLabelsIncludeSafeConfigHash(t *testing.T) {
 		t.Fatal("expected safe service hash")
 	}
 
-	labels := serviceRuntimeLabels(service)
+	labels := serviceRuntimeLabels("demo", "production", "web", service)
 	if labels[reconcile.ConfigHashLabel] != wantHash {
 		t.Fatalf("config hash label = %q, want %q", labels[reconcile.ConfigHashLabel], wantHash)
 	}
+	if labels[runtimeid.ServiceIdentityLabel] != runtimeid.ServiceIdentity("demo", "production", "web") {
+		t.Fatalf("runtime identity label = %q, want runtime identity", labels[runtimeid.ServiceIdentityLabel])
+	}
 }
 
-func TestServiceRuntimeLabelsSkipEnvMaterial(t *testing.T) {
-	labels := serviceRuntimeLabels(config.ServiceConfig{
+func TestServiceRuntimeLabelsKeepRuntimeIdentityForEnvMaterial(t *testing.T) {
+	labels := serviceRuntimeLabels("demo", "production", "web", config.ServiceConfig{
 		Image: "nginx:1.27",
 		Env:   map[string]string{"TOKEN": "secret"},
 	})
-	if labels != nil {
-		t.Fatalf("labels = %#v, want nil", labels)
+	if _, ok := labels[reconcile.ConfigHashLabel]; ok {
+		t.Fatalf("config hash label should be omitted for env material: %#v", labels)
+	}
+	if labels[runtimeid.ServiceIdentityLabel] != runtimeid.ServiceIdentity("demo", "production", "web") {
+		t.Fatalf("runtime identity label = %q, want runtime identity", labels[runtimeid.ServiceIdentityLabel])
+	}
+}
+
+func TestTakodRuntimeNamesUseCollisionResistantAppStageIdentity(t *testing.T) {
+	left := &Deployer{
+		config:      &config.Config{Project: config.ProjectConfig{Name: "demo"}},
+		environment: "prod_api",
+	}
+	right := &Deployer{
+		config:      &config.Config{Project: config.ProjectConfig{Name: "demo"}},
+		environment: "prod",
+	}
+
+	leftContainer := left.takodContainerName("web", 1)
+	rightContainer := right.takodContainerName("api_web", 1)
+	if leftContainer == rightContainer {
+		t.Fatalf("container names collided: %q", leftContainer)
+	}
+	if leftContainer != runtimeid.ContainerName("demo", "prod_api", "web", 1) {
+		t.Fatalf("left container = %q, want runtimeid container", leftContainer)
+	}
+	if takodNetworkName("demo", "prod_api") != runtimeid.NetworkName("demo", "prod_api") {
+		t.Fatal("takod network should use runtimeid network name")
+	}
+}
+
+func TestBuildTakodMountSpecsNamespacesNamedVolumes(t *testing.T) {
+	deploy := &Deployer{
+		config:      &config.Config{Project: config.ProjectConfig{Name: "demo"}},
+		environment: "production",
+	}
+
+	mounts, err := deploy.buildTakodMountSpecs("web", &config.ServiceConfig{
+		Volumes: []string{"/data", "cache:/cache"},
+	})
+	if err != nil {
+		t.Fatalf("buildTakodMountSpecs returned error: %v", err)
+	}
+	want := []string{
+		"type=volume,source=" + runtimeid.VolumeName("demo", "production", "/data") + ",target=/data",
+		"type=volume,source=" + runtimeid.VolumeName("demo", "production", "cache") + ",target=/cache",
+	}
+	if !slices.Equal(mounts, want) {
+		t.Fatalf("mounts = %#v, want %#v", mounts, want)
 	}
 }
 

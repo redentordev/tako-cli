@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestParseActualState(t *testing.T) {
@@ -42,6 +44,38 @@ demo_production_web_2|registry.example.com/demo/web:abc|container-b|hash-b
 	actual := ParseActualState("demo", "production", output)
 	if got := actual.Services["web"].ConfigHash; got != "" {
 		t.Fatalf("mixed config hash = %q, want empty", got)
+	}
+}
+
+func TestParseActualStateUsesRuntimeLabelsForHashedContainers(t *testing.T) {
+	identity := runtimeid.ServiceIdentity("demo-app", "production", "web")
+	output := strings.Join([]string{
+		runtimeid.ContainerName("demo-app", "production", "web", 1) + "|demo/web:1|container-a|hash-web|" + identity + "|demo-app|production|web",
+		runtimeid.ContainerName("other", "production", "web", 1) + "|other/web:1|container-b|hash-other|" + runtimeid.ServiceIdentity("other", "production", "web") + "|other|production|web",
+	}, "\n")
+
+	actual := ParseActualState("demo-app", "production", output)
+	if len(actual.Services) != 1 {
+		t.Fatalf("expected one service, got %#v", actual.Services)
+	}
+	if got := actual.Services["web"].RuntimeID; got != identity {
+		t.Fatalf("runtime id = %q, want %q", got, identity)
+	}
+	if got := actual.Services["web"].ConfigHash; got != "hash-web" {
+		t.Fatalf("config hash = %q, want hash-web", got)
+	}
+}
+
+func TestParseActualStateClearsMixedRuntimeID(t *testing.T) {
+	identity := runtimeid.ServiceIdentity("demo", "production", "web")
+	output := `
+demo_production_web_1|demo/web:1|container-a|hash-web|` + identity + `
+demo_production_web_2|demo/web:1|container-b|hash-web|
+`
+
+	actual := ParseActualState("demo", "production", output)
+	if got := actual.Services["web"].RuntimeID; got != "" {
+		t.Fatalf("mixed runtime id = %q, want empty", got)
 	}
 }
 

@@ -117,6 +117,7 @@ func runScaleTargets(cmd *cobra.Command, args []string) error {
 	}
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, verbose)
+	deploy.SetCLIVersion(Version)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return err
 	}

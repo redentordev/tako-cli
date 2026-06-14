@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestRenderMaintenanceProxyConfigUsesFileProviderRouters(t *testing.T) {
@@ -68,10 +69,14 @@ func TestCleanupProxyFilesIncludesRuntimeAndMaintenanceOverrides(t *testing.T) {
 	})
 
 	want := []string{
-		"demo-app-production-1-api-maintenance.yml",
-		"demo-app-production-1-web-maintenance.yml",
-		"demo-app-production-1.yml",
+		runtimeid.LegacyMaintenanceProxyConfigFileName("demo-app", "production_1", "api"),
+		runtimeid.LegacyMaintenanceProxyConfigFileName("demo-app", "production_1", "web"),
+		runtimeid.LegacyProxyConfigFileName("demo-app", "production_1"),
+		runtimeid.MaintenanceProxyConfigFileName("demo-app", "production_1", "api"),
+		runtimeid.MaintenanceProxyConfigFileName("demo-app", "production_1", "web"),
+		runtimeid.ProxyConfigFileName("demo-app", "production_1"),
 	}
+	slices.Sort(want)
 	if len(files) != len(want) {
 		t.Fatalf("cleanupProxyFiles returned %d files, want %d: %#v", len(files), len(want), files)
 	}

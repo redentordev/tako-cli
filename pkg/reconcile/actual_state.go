@@ -124,6 +124,7 @@ func AggregateActualStateByServer(actualByServer map[string]map[string]*ActualSe
 				} else if serviceState.ConfigHash != "" && existing.ConfigHash != serviceState.ConfigHash {
 					existing.ConfigHash = ""
 				}
+				existing.RuntimeID = mergeRuntimeID(existing.RuntimeID, serviceState.RuntimeID)
 				continue
 			}
 			actualServices[serviceName] = cloneActualService(serviceState)
@@ -178,12 +179,20 @@ func gatherActualStateFromTakod(client *ssh.Client, cfg *config.Config, environm
 			Replicas:   service.Replicas,
 			Containers: append([]string(nil), service.Containers...),
 			ConfigHash: service.ConfigHash,
+			RuntimeID:  service.RuntimeID,
 			ConfigSnapshot: &config.ServiceConfig{
 				Image: service.Image,
 			},
 		}
 	}
 	return actualServices, nil
+}
+
+func mergeRuntimeID(existing string, incoming string) string {
+	if existing == incoming {
+		return existing
+	}
+	return ""
 }
 
 func queryEscape(value string) string {

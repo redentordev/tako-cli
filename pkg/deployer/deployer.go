@@ -56,6 +56,7 @@ type Deployer struct {
 	sshPool           *ssh.Pool
 	distributedImages map[string]bool
 	targetServers     []string
+	cliVersion        string
 }
 
 const (
@@ -90,6 +91,10 @@ func NewDeployerWithPool(client *ssh.Client, cfg *config.Config, environment str
 		sshPool:           sshPool,
 		distributedImages: make(map[string]bool),
 	}
+}
+
+func (d *Deployer) SetCLIVersion(version string) {
+	d.cliVersion = strings.TrimSpace(version)
 }
 
 // SetTargetServers restricts takod reconciliation to a validated subset of the

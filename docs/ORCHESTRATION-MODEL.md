@@ -50,6 +50,25 @@ Git repo
 One node is a mesh with one member. Adding a second node should not change the
 shape of config or day-to-day commands.
 
+## App And Stage Identity
+
+Tako treats `project.name` as the app name and the selected environment as the
+stage. That pair is the isolation boundary for deployment history, desired
+state, actual snapshots, leases, env bundles, Docker labels, proxy files,
+networks, containers, and generated volume names.
+
+Multiple unrelated projects can share the same server when they use distinct
+app/stage pairs. The node-local proxy is intentionally shared because only one
+process can own ports 80 and 443, but each app/stage writes its own dynamic
+proxy file and service routes. Runtime Docker artifacts include a deterministic
+short identity hash so similar names such as `prod_api/web` and
+`prod/api_web` cannot collapse into the same container, network, proxy, or
+volume name.
+
+The operational rule is the same as SST's app/stage model: keep app names
+stable and unique per product, and use environments as stages such as
+`production`, `staging`, or `preview`.
+
 ## Config Contract
 
 ```yaml
