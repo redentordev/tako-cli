@@ -472,8 +472,8 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	// Use priority 100 to ensure it takes precedence over normal service (priority 10)
 	fmt.Printf("→ Deploying maintenance container...\n")
 
-	containerName := fmt.Sprintf("%s_%s_maintenance", cfg.Project.Name, maintenanceService)
-	networkName := fmt.Sprintf("tako_%s_%s", cfg.Project.Name, envName)
+	containerName := maintenanceContainerName(cfg.Project.Name, envName, maintenanceService)
+	networkName := maintenanceNetworkName(cfg.Project.Name, envName)
 	socket := takodSocketFromConfig(cfg)
 
 	dynamicConfig, err := renderMaintenanceProxyConfig(cfg.Project.Name, envName, maintenanceService, service.Proxy, containerName)
@@ -671,6 +671,14 @@ func writeMaintenanceProxyConfig(client *ssh.Client, socket string, project stri
 
 func maintenanceProxyConfigFileName(project string, environment string, serviceName string) string {
 	return runtimeid.MaintenanceProxyConfigFileName(project, environment, serviceName)
+}
+
+func maintenanceContainerName(project string, environment string, serviceName string) string {
+	return runtimeid.ContainerName(project, environment, maintenanceTakodServiceName(serviceName), 1)
+}
+
+func maintenanceNetworkName(project string, environment string) string {
+	return runtimeid.NetworkName(project, environment)
 }
 
 func maintenanceTakodServiceName(serviceName string) string {

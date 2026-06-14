@@ -410,6 +410,12 @@ func TestTakodCommandHelper(t *testing.T) {
 		}
 		os.Exit(0)
 	case "network":
+		if len(commandArgs) > 1 && commandArgs[1] == "ls" {
+			if output := os.Getenv("TAKO_FAKE_NETWORK_LS_OUTPUT"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+			}
+			os.Exit(0)
+		}
 		_, _ = os.Stdout.WriteString("network-ok\n")
 		os.Exit(0)
 	case "volume":
