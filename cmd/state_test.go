@@ -240,11 +240,33 @@ func TestStateHistoryCandidatesFailClosedOnUnreadableHistory(t *testing.T) {
 	}
 }
 
-func TestStateHistoryCandidatesAllowsRecoveryAfterConnectionErrorsOnly(t *testing.T) {
-	histories, err := stateHistoryCandidatesFromResults([]stateHistoryReadResult{
+func TestStateHistoryCandidatesFailWhenNoNodeReachable(t *testing.T) {
+	_, err := stateHistoryCandidatesFromResults([]stateHistoryReadResult{
 		{
 			serverName: "node-a",
 			host:       "10.0.0.1",
+			err:        errors.New("unreachable"),
+		},
+	}, true)
+	if err == nil {
+		t.Fatal("stateHistoryCandidatesFromResults should fail when no node is reachable")
+	}
+	if !strings.Contains(err.Error(), "failed to reach environment node") {
+		t.Fatalf("error = %q, want reachability context", err)
+	}
+}
+
+func TestStateHistoryCandidatesAllowsRecoveryWhenReachableNodeHasNoHistory(t *testing.T) {
+	histories, err := stateHistoryCandidatesFromResults([]stateHistoryReadResult{
+		{
+			serverName:    "node-a",
+			host:          "10.0.0.1",
+			readAttempted: true,
+			err:           remotestate.ErrNotFound,
+		},
+		{
+			serverName: "node-b",
+			host:       "10.0.0.2",
 			err:        errors.New("unreachable"),
 		},
 	}, true)
