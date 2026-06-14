@@ -147,7 +147,7 @@ func streamLogsFromNode(
 	prefix bool,
 	output io.Writer,
 ) error {
-	client, err := connectLogNode(server)
+	client, err := connectTakodStreamNode(server)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node %s: %w", serverName, err)
 	}
@@ -189,7 +189,7 @@ func streamLogsFromNode(
 	return nil
 }
 
-func connectLogNode(server config.ServerConfig) (*ssh.Client, error) {
+func connectTakodStreamNode(server config.ServerConfig) (*ssh.Client, error) {
 	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
 		Host:     server.Host,
 		Port:     server.Port,
