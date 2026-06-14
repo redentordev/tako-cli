@@ -7,7 +7,6 @@ import (
 )
 
 var (
-	stopServer  string
 	stopService string
 )
 
@@ -18,17 +17,16 @@ var stopCmd = &cobra.Command{
 
 Examples:
   tako stop --service web
-  tako stop --service api --server prod`,
+  tako stop --service api`,
 	RunE: runStop,
 }
 
 func init() {
 	rootCmd.AddCommand(stopCmd)
-	stopCmd.Flags().StringVarP(&stopServer, "server", "s", "", "Server to target")
 	stopCmd.Flags().StringVar(&stopService, "service", "", "Service to stop (required)")
 	stopCmd.MarkFlagRequired("service")
 }
 
 func runStop(cmd *cobra.Command, args []string) error {
-	return runScaleWithServer(cmd, []string{fmt.Sprintf("%s=0", stopService)}, stopServer)
+	return runScaleTargets(cmd, []string{fmt.Sprintf("%s=0", stopService)})
 }

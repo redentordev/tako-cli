@@ -18,10 +18,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var (
-	scaleServer string
-)
-
 var scaleCmd = &cobra.Command{
 	Use:   "scale SERVICE=REPLICAS [SERVICE=REPLICAS...]",
 	Short: "Scale takod services to specified replicas",
@@ -43,14 +39,13 @@ you want the next full deploy to preserve the same count.`,
 
 func init() {
 	rootCmd.AddCommand(scaleCmd)
-	scaleCmd.Flags().StringVarP(&scaleServer, "server", "s", "", "Scale on specific server")
 }
 
 func runScale(cmd *cobra.Command, args []string) error {
-	return runScaleWithServer(cmd, args, scaleServer)
+	return runScaleTargets(cmd, args)
 }
 
-func runScaleWithServer(cmd *cobra.Command, args []string, serverOverride string) error {
+func runScaleTargets(cmd *cobra.Command, args []string) error {
 	scaleTargets := make(map[string]int)
 	for _, arg := range args {
 		parts := strings.Split(arg, "=")
@@ -89,7 +84,7 @@ func runScaleWithServer(cmd *cobra.Command, args []string, serverOverride string
 		}
 	}
 
-	serverNames, err := scaleTargetServers(cfg, envName, serverOverride)
+	serverNames, err := scaleTargetServers(cfg, envName)
 	if err != nil {
 		return err
 	}
@@ -149,12 +144,6 @@ func runScaleWithServer(cmd *cobra.Command, args []string, serverOverride string
 
 		service := services[serviceName]
 		service.Replicas = desiredReplicas
-		if serverOverride != "" {
-			service.Placement = &config.PlacementConfig{
-				Strategy: "pinned",
-				Servers:  []string{serverOverride},
-			}
-		}
 
 		imageRef := service.Image
 		if imageRef == "" {
@@ -328,8 +317,8 @@ func sortedScaleTargetNames(targets map[string]int) []string {
 	return names
 }
 
-func scaleTargetServers(cfg *config.Config, envName string, serverOverride string) ([]string, error) {
-	serverNames, err := statePullServerNames(cfg, envName, serverOverride)
+func scaleTargetServers(cfg *config.Config, envName string) ([]string, error) {
+	serverNames, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
 		return nil, err
 	}
