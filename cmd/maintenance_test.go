@@ -82,6 +82,36 @@ func TestCleanupProxyFilesIncludesRuntimeAndMaintenanceOverrides(t *testing.T) {
 	}
 }
 
+func TestCleanupImageRepositoriesIncludesOnlyTakoOwnedImages(t *testing.T) {
+	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo", Version: "v1"}}
+	repositories := cleanupImageRepositories(cfg, "production", map[string]config.ServiceConfig{
+		"api":    {Build: "./api"},
+		"db":     {Image: "postgres:16"},
+		"worker": {},
+	})
+
+	want := []string{"demo/api", "demo/worker"}
+	if !slices.Equal(repositories, want) {
+		t.Fatalf("repositories = %#v, want %#v", repositories, want)
+	}
+}
+
+func TestImageRepositoryFromRefStripsTagsAndDigests(t *testing.T) {
+	tests := map[string]string{
+		"demo/web:v1":                                 "demo/web",
+		"localhost:5000/demo/web:v1":                  "localhost:5000/demo/web",
+		"registry.example.com/demo/web@sha256:abcdef": "registry.example.com/demo/web",
+		"registry.example.com:5000/demo/web:v1-env":   "registry.example.com:5000/demo/web",
+		"registry.example.com:5000/demo/web":          "registry.example.com:5000/demo/web",
+		"  registry.example.com/demo/web:latest  ":    "registry.example.com/demo/web",
+	}
+	for ref, want := range tests {
+		if got := imageRepositoryFromRef(ref); got != want {
+			t.Fatalf("imageRepositoryFromRef(%q) = %q, want %q", ref, got, want)
+		}
+	}
+}
+
 func TestRunMaintenanceNodeActionsRunsConcurrentlyAndKeepsOrder(t *testing.T) {
 	serverNames := []string{"node-a", "node-b", "node-c"}
 	servers := testMaintenanceServers(serverNames)

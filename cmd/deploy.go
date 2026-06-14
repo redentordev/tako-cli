@@ -678,11 +678,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if verbose {
 		fmt.Printf("\n→ Running automatic cleanup...\n")
 	}
+	imageRepositories := cleanupImageRepositories(cfg, envName, services)
 	for serverName, server := range servers {
 		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err == nil {
 			response, cleanupErr := cleanupViaTakod(client, cfg, takod.CleanupRequest{
 				Project:                cfg.Project.Name,
+				Environment:            envName,
+				ImageRepositories:      imageRepositories,
 				KeepImages:             3,
 				CleanOldImages:         true,
 				CleanStoppedContainers: true,

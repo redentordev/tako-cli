@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 type CleanupRequest struct {
@@ -20,6 +21,7 @@ type CleanupRequest struct {
 	RemoveProxyContainer   bool     `json:"removeProxyContainer,omitempty"`
 	RemoveProxyRuntime     bool     `json:"removeProxyRuntime,omitempty"`
 	PruneDocker            bool     `json:"pruneDocker,omitempty"`
+	ImageRepositories      []string `json:"imageRepositories,omitempty"`
 	KeepImages             int      `json:"keepImages,omitempty"`
 	CleanOldImages         bool     `json:"cleanOldImages,omitempty"`
 	CleanStoppedContainers bool     `json:"cleanStoppedContainers,omitempty"`
@@ -87,14 +89,14 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 		response.NetworksRemoved = count
 	}
 	if req.RemoveImages {
-		count, err := cleanupImages(ctx, req.Project)
+		count, err := cleanupImages(ctx, req.Project, req.ImageRepositories)
 		if err != nil {
 			warn("%v", err)
 		}
 		response.ImagesRemoved = count
 	}
 	if req.CleanOldImages {
-		count, err := cleanupOldProjectImages(ctx, req.Project, req.KeepImages)
+		count, err := cleanupOldProjectImages(ctx, req.Project, req.KeepImages, req.ImageRepositories)
 		if err != nil {
 			warn("%v", err)
 		}
@@ -176,6 +178,11 @@ func validateCleanupRequest(req CleanupRequest) error {
 	for _, name := range req.ProxyFiles {
 		if _, err := validateProxyFileName(name); err != nil {
 			return fmt.Errorf("invalid proxy file %q: %w", name, err)
+		}
+	}
+	for _, repository := range req.ImageRepositories {
+		if !isSafeImageRepository(repository) {
+			return fmt.Errorf("invalid image repository %q", repository)
 		}
 	}
 	return nil
@@ -269,7 +276,7 @@ func cleanupNetworks(ctx context.Context, project string, environment string) (i
 	return removed, nil
 }
 
-func cleanupImages(ctx context.Context, project string) (int, error) {
+func cleanupImages(ctx context.Context, project string, imageRepositories []string) (int, error) {
 	output, err := runDocker(ctx, "images", "--format", "{{.Repository}}\t{{.Tag}}")
 	if err != nil {
 		return 0, fmt.Errorf("failed to list docker images: %w", err)
@@ -285,7 +292,7 @@ func cleanupImages(ctx context.Context, project string) (int, error) {
 			continue
 		}
 		repo, tag := fields[0], fields[1]
-		if repo == "<none>" || tag == "<none>" || !imageRepositoryMatchesProject(repo, project) {
+		if repo == "<none>" || tag == "<none>" || !imageRepositoryMatchesProject(repo, project, imageRepositories) {
 			continue
 		}
 		refs = append(refs, repo+":"+tag)
@@ -300,7 +307,7 @@ func cleanupImages(ctx context.Context, project string) (int, error) {
 	return len(refs), nil
 }
 
-func cleanupOldProjectImages(ctx context.Context, project string, keepLatest int) (int, error) {
+func cleanupOldProjectImages(ctx context.Context, project string, keepLatest int, imageRepositories []string) (int, error) {
 	output, err := runDocker(ctx, "images", "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}")
 	if err != nil {
 		return 0, fmt.Errorf("failed to list docker images: %w", err)
@@ -314,7 +321,7 @@ func cleanupOldProjectImages(ctx context.Context, project string, keepLatest int
 			continue
 		}
 		id, repo, tag := fields[0], fields[1], fields[2]
-		if id == "" || repo == "<none>" || tag == "<none>" || !imageRepositoryMatchesProject(repo, project) || seen[id] {
+		if id == "" || repo == "<none>" || tag == "<none>" || !imageRepositoryMatchesProject(repo, project, imageRepositories) || seen[id] {
 			continue
 		}
 		seen[id] = true
@@ -348,7 +355,15 @@ func cleanupDanglingImages(ctx context.Context) (int, error) {
 	return len(ids), nil
 }
 
-func imageRepositoryMatchesProject(repository string, project string) bool {
+func imageRepositoryMatchesProject(repository string, project string, allowedRepositories []string) bool {
+	if len(allowedRepositories) > 0 {
+		for _, allowed := range allowedRepositories {
+			if repository == allowed {
+				return true
+			}
+		}
+		return false
+	}
 	if repository == project || strings.HasPrefix(repository, project+"/") {
 		return true
 	}
@@ -358,6 +373,40 @@ func imageRepositoryMatchesProject(repository string, project string) bool {
 		}
 	}
 	return false
+}
+
+func isSafeImageRepository(repository string) bool {
+	if strings.TrimSpace(repository) == "" || len(repository) > maxImageRefLength {
+		return false
+	}
+	if strings.HasPrefix(repository, "-") || strings.Contains(repository, "@") {
+		return false
+	}
+	if imageRepositoryFromRef(repository) != repository {
+		return false
+	}
+	for _, r := range repository {
+		if r < 0x20 || r == 0x7f || unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func imageRepositoryFromRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if digest := strings.Index(ref, "@"); digest >= 0 {
+		ref = ref[:digest]
+	}
+	lastSlash := strings.LastIndex(ref, "/")
+	lastColon := strings.LastIndex(ref, ":")
+	if lastColon > lastSlash {
+		ref = ref[:lastColon]
+	}
+	return ref
 }
 
 func uniqueFields(output string) []string {
