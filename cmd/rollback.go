@@ -16,7 +16,6 @@ import (
 )
 
 var (
-	rollbackServer  string
 	rollbackService string
 )
 
@@ -28,14 +27,12 @@ var rollbackCmd = &cobra.Command{
 If no deployment-id is provided, rolls back to the most recent successful deployment.
 Specify a deployment-id to rollback to a specific deployment.
 
-If --server is not specified, rollback reads the freshest reachable deployment
-history from the mesh.
+Rollback reads the freshest reachable deployment history from the mesh.
 
 Use 'tako history' to view available deployments.
 
 Examples:
   tako rollback --service web                 # Rollback to previous deployment
-  tako rollback --service web --server prod   # Rollback on specific server
   tako rollback --service web deploy-123      # Rollback to specific deployment`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runRollback,
@@ -43,7 +40,6 @@ Examples:
 
 func init() {
 	rootCmd.AddCommand(rollbackCmd)
-	rollbackCmd.Flags().StringVarP(&rollbackServer, "server", "s", "", "Node to read replicated deployment state from")
 	rollbackCmd.Flags().StringVar(&rollbackService, "service", "", "Service to rollback (required)")
 	rollbackCmd.MarkFlagRequired("service")
 }
@@ -98,7 +94,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		fmt.Printf("→ Acquired remote rollback leases: %s\n", leaseSet.Summary())
 	}
 
-	historySource, err := selectRollbackHistorySource(cfg, envName, rollbackServer)
+	historySource, err := selectRollbackHistorySource(cfg, envName, "")
 	if err != nil {
 		return err
 	}
@@ -204,8 +200,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		rollbackConfig.Port = serviceState.Port
 	}
 	desiredServices[rollbackService] = rollbackConfig
-	imageRefs := defaultImageRefs(cfg, envName, desiredServices)
-	imageRefs[rollbackService] = serviceState.Image
+	rollbackImageRefs := map[string]string{rollbackService: serviceState.Image}
 
 	if err := deploy.ReconcileTakodProxy(desiredServices); err != nil {
 		return fmt.Errorf("rollback succeeded but failed to reconcile proxy: %w", err)
@@ -216,6 +211,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("rollback succeeded but failed to gather post-rollback actual state: %w", err)
 	}
 	postRollbackActualState := reconcile.AggregateActualStateByServer(postRollbackNodeActualState)
+	runtimeImageRefs := mergeRuntimeImageRefs(cfg, envName, desiredServices, rollbackImageRefs, postRollbackActualState)
 	if err := persistTakodRuntimeState(
 		sshPool,
 		cfg,
@@ -223,7 +219,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		envServers,
 		"rollback",
 		desiredServices,
-		imageRefs,
+		runtimeImageRefs,
 		postRollbackActualState,
 		postRollbackNodeActualState,
 		takodstate.GitInfo{

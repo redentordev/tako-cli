@@ -112,6 +112,12 @@ func TestRollbackRemoteHistoryErrorFailsSuccessfulRuntimeMutation(t *testing.T) 
 	}
 }
 
+func TestRollbackCommandDoesNotExposeServerFlag(t *testing.T) {
+	if flag := rollbackCmd.Flags().Lookup("server"); flag != nil {
+		t.Fatal("rollback command should not expose a server flag")
+	}
+}
+
 func TestBuildRollbackDeploymentDoesNotMutateTarget(t *testing.T) {
 	start := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	target := rollbackHistoryDeployment("target", remotestate.StatusSuccess, start.Add(-time.Hour), "web")
