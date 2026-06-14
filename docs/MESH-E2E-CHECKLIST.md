@@ -211,8 +211,8 @@ Expected result:
 
 - The runner has no dependency on a persisted `.tako/` workspace.
 - `TAKO_HOST_KEY_MODE=strict` works after known hosts are installed.
-- Remote leases reject overlapping deploy, rollback, scale, destroy, and repair
-  operations.
+- Remote leases reject overlapping deploy, rollback, scale, maintenance, live,
+  remove, cleanup, destroy, and repair operations.
 
 ## Completion Bar
 

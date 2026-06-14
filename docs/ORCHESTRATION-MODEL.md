@@ -97,9 +97,9 @@ CLI may still use SSH as a transport to reach the Unix socket, but runtime Docke
 inspection and mutation belong to `takod`.
 
 Installed `takod` services also refresh node-local actual container state in the
-background. The loop is lease-aware: if a deploy, rollback, scale, destroy, or
-state repair operation holds the environment lease, the background refresh skips
-that project/environment until the lease is clear.
+background. The loop is lease-aware: if a mutating operation holds the
+environment lease, the background refresh skips that project/environment until
+the lease is clear.
 
 Local `.tako` files are cache and UX acceleration. The durable truth lives in
 Git plus the last accepted desired revision and event log replicated by takod.
@@ -242,17 +242,18 @@ CI runner
   acquire remote leases + reconcile selected nodes
 ```
 
-Deploy, rollback, scale, destroy, and state repair acquire remote leases through
-`takod` on the target nodes before mutating runtime or state. CI and local
-machines compete for the same per-node leases, so concurrent operations fail
-fast instead of racing. The local `.tako` lock remains as a same-machine guard.
+Deploy, rollback, scale, maintenance, live, remove, cleanup, destroy, and state
+repair acquire remote leases through `takod` on the target nodes before
+mutating runtime or state. CI and local machines compete for the same per-node
+leases, so concurrent operations fail fast instead of racing. The local `.tako`
+lock remains as a same-machine guard.
 
 ## Implementation Status
 
 ```text
 Done:
 1. CLI runtime operations go through takod.
-2. Deploy, rollback, scale, and destroy share remote leases.
+2. Mutating runtime and state operations share remote leases.
 3. State pull/status and env push/pull support clone and CI workflows.
 4. Desired revisions, actual snapshots, and events persist on nodes.
 5. WireGuard peer material and node configs reconcile through takod.
