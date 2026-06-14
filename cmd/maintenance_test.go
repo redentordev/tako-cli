@@ -125,6 +125,15 @@ func TestRunMaintenanceNodeActionsRecordsErrors(t *testing.T) {
 	}
 }
 
+func TestMaintenanceCommandsDoNotExposeServerFlag(t *testing.T) {
+	if flag := maintenanceCmd.Flags().Lookup("server"); flag != nil {
+		t.Fatal("maintenance command should not expose a server flag")
+	}
+	if flag := liveCmd.Flags().Lookup("server"); flag != nil {
+		t.Fatal("live command should not expose a server flag")
+	}
+}
+
 func waitForMaintenanceStarts(t *testing.T, started <-chan string, count int) {
 	t.Helper()
 	seen := map[string]bool{}
