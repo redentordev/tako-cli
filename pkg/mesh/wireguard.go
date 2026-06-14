@@ -121,6 +121,10 @@ func RenderConfigTemplate(node Node, peers []Node, config WireGuardConfig) (stri
 	if node.Address == "" {
 		return "", fmt.Errorf("node mesh address is required")
 	}
+	nodeAddress, err := wireGuardInterfaceAddress(node.Address)
+	if err != nil {
+		return "", fmt.Errorf("node mesh address is invalid: %w", err)
+	}
 	if _, err := validateInterfaceName(config.Interface); err != nil {
 		return "", err
 	}
@@ -131,7 +135,7 @@ func RenderConfigTemplate(node Node, peers []Node, config WireGuardConfig) (stri
 	var b strings.Builder
 	b.WriteString("[Interface]\n")
 	b.WriteString("Address = ")
-	b.WriteString(node.Address)
+	b.WriteString(nodeAddress)
 	b.WriteString("\n")
 	b.WriteString("ListenPort = ")
 	b.WriteString(strconv.Itoa(config.ListenPort))
@@ -143,7 +147,15 @@ func RenderConfigTemplate(node Node, peers []Node, config WireGuardConfig) (stri
 
 	filtered := peerNodes(node.Name, peers)
 	for _, peer := range filtered {
-		if peer.PublicKey == "" {
+		peerName, err := wireGuardConfigValue("mesh peer name", peer.Name)
+		if err != nil {
+			return "", fmt.Errorf("mesh peer has invalid name: %w", err)
+		}
+		publicKey, err := wireGuardConfigValue("mesh peer public key", peer.PublicKey)
+		if err != nil {
+			return "", fmt.Errorf("mesh peer %s has invalid public key: %w", peer.Name, err)
+		}
+		if publicKey == "" {
 			return "", fmt.Errorf("mesh peer %s has no public key", peer.Name)
 		}
 		allowedIP, err := wireGuardAllowedIP(peer.Address)
@@ -153,14 +165,18 @@ func RenderConfigTemplate(node Node, peers []Node, config WireGuardConfig) (stri
 
 		b.WriteString("\n[Peer]\n")
 		b.WriteString("# ")
-		b.WriteString(peer.Name)
+		b.WriteString(peerName)
 		b.WriteString("\n")
 		b.WriteString("PublicKey = ")
-		b.WriteString(peer.PublicKey)
+		b.WriteString(publicKey)
 		b.WriteString("\n")
 		if peer.Host != "" {
+			host, err := wireGuardConfigValue("mesh peer host", peer.Host)
+			if err != nil {
+				return "", fmt.Errorf("mesh peer %s has invalid host: %w", peer.Name, err)
+			}
 			b.WriteString("Endpoint = ")
-			b.WriteString(net.JoinHostPort(peer.Host, strconv.Itoa(config.ListenPort)))
+			b.WriteString(net.JoinHostPort(host, strconv.Itoa(config.ListenPort)))
 			b.WriteString("\n")
 		}
 		b.WriteString("AllowedIPs = ")
@@ -348,6 +364,10 @@ func peerNodes(currentNode string, peers []Node) []Node {
 }
 
 func wireGuardAllowedIP(address string) (string, error) {
+	address, err := wireGuardConfigValue("mesh peer address", address)
+	if err != nil {
+		return "", err
+	}
 	ip, _, err := net.ParseCIDR(address)
 	if err != nil {
 		parsed := net.ParseIP(address)
@@ -360,6 +380,27 @@ func wireGuardAllowedIP(address string) (string, error) {
 		return ip.String() + "/32", nil
 	}
 	return ip.String() + "/128", nil
+}
+
+func wireGuardInterfaceAddress(address string) (string, error) {
+	address, err := wireGuardConfigValue("node mesh address", address)
+	if err != nil {
+		return "", err
+	}
+	if _, _, err := net.ParseCIDR(address); err != nil {
+		return "", err
+	}
+	return address, nil
+}
+
+func wireGuardConfigValue(name string, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("%s must not contain control characters", name)
+		}
+	}
+	return value, nil
 }
 
 func wireGuardConfigPath(interfaceName string) string {
