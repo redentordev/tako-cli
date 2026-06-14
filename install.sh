@@ -172,11 +172,13 @@ verify_checksum() {
     print_info "Verifying checksum..."
 
     local checksums_file
-    checksums_file=$(download_checksums)
-
+    if ! checksums_file=$(download_checksums); then
+        print_error "Failed to download checksums.txt"
+        return 1
+    fi
     if [ -z "$checksums_file" ] || [ ! -f "$checksums_file" ]; then
-        print_warning "Checksum file not found, skipping verification"
-        return 0
+        print_error "Checksum file not found"
+        return 1
     fi
 
     # Check if sha256sum or shasum is available
@@ -186,9 +188,9 @@ verify_checksum() {
     elif command -v shasum &> /dev/null; then
         sha_cmd="shasum -a 256"
     else
-        print_warning "Neither sha256sum nor shasum found, skipping checksum verification"
+        print_error "Neither sha256sum nor shasum found; cannot verify download"
         rm -f "$checksums_file"
-        return 0
+        return 1
     fi
 
     # Calculate checksum of downloaded binary
@@ -197,13 +199,18 @@ verify_checksum() {
 
     # Get expected checksum from checksums file
     local expected_checksum
-    expected_checksum=$(grep "$binary_name" "$checksums_file" | awk '{print $1}')
+    expected_checksum=$(awk -v name="$binary_name" '$2 == name || $2 == "*" name { print $1; found = 1; exit } END { if (!found) exit 1 }' "$checksums_file" || true)
 
     rm -f "$checksums_file"
 
     if [ -z "$expected_checksum" ]; then
-        print_warning "Checksum not found in checksums file, skipping verification"
-        return 0
+        print_error "Checksum for ${binary_name} not found in checksums.txt"
+        return 1
+    fi
+
+    if ! echo "$expected_checksum" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+        print_error "Checksum for ${binary_name} is not a valid SHA-256 digest"
+        return 1
     fi
 
     if [ "$calculated_checksum" != "$expected_checksum" ]; then
