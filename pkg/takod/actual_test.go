@@ -10,10 +10,10 @@ import (
 
 func TestParseActualState(t *testing.T) {
 	output := `
-demo_production_web_1|registry.example.com/demo/web:abc|container-a
-demo_production_web_2|registry.example.com/demo/web:abc|container-b
-demo_production_api_v2_3|registry.example.com/demo/api:def|container-c|hash-api
-other_production_web_1|ignored|container-d
+demo_production_web_1|registry.example.com/demo/web:abc|container-a|||demo|production|web
+demo_production_web_2|registry.example.com/demo/web:abc|container-b|||demo|production|web
+demo_production_api_v2_3|registry.example.com/demo/api:def|container-c|hash-api||demo|production|api_v2
+other_production_web_1|ignored|container-d|||other|production|web
 malformed
 `
 
@@ -37,8 +37,8 @@ malformed
 
 func TestParseActualStateClearsMixedConfigHash(t *testing.T) {
 	output := `
-demo_production_web_1|registry.example.com/demo/web:abc|container-a|hash-a
-demo_production_web_2|registry.example.com/demo/web:abc|container-b|hash-b
+demo_production_web_1|registry.example.com/demo/web:abc|container-a|hash-a||demo|production|web
+demo_production_web_2|registry.example.com/demo/web:abc|container-b|hash-b||demo|production|web
 `
 
 	actual := ParseActualState("demo", "production", output)
@@ -69,13 +69,24 @@ func TestParseActualStateUsesRuntimeLabelsForHashedContainers(t *testing.T) {
 func TestParseActualStateClearsMixedRuntimeID(t *testing.T) {
 	identity := runtimeid.ServiceIdentity("demo", "production", "web")
 	output := `
-demo_production_web_1|demo/web:1|container-a|hash-web|` + identity + `
-demo_production_web_2|demo/web:1|container-b|hash-web|
+demo_production_web_1|demo/web:1|container-a|hash-web|` + identity + `|demo|production|web
+demo_production_web_2|demo/web:1|container-b|hash-web||demo|production|web
 `
 
 	actual := ParseActualState("demo", "production", output)
 	if got := actual.Services["web"].RuntimeID; got != "" {
 		t.Fatalf("mixed runtime id = %q, want empty", got)
+	}
+}
+
+func TestParseActualStateIgnoresUnlabeledContainers(t *testing.T) {
+	output := `
+demo_production_web_1|registry.example.com/demo/web:abc|container-a
+`
+
+	actual := ParseActualState("demo", "production", output)
+	if len(actual.Services) != 0 {
+		t.Fatalf("expected unlabeled containers to be ignored, got %#v", actual.Services)
 	}
 }
 

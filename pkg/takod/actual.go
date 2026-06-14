@@ -60,7 +60,6 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 		Services:    make(map[string]*ActualService),
 	}
 
-	prefix := fmt.Sprintf("%s_%s_", project, environment)
 	for _, line := range strings.Split(strings.TrimSpace(dockerPSOutput), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -72,7 +71,6 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 			continue
 		}
 
-		containerName := parts[0]
 		image := parts[1]
 		containerID := parts[2]
 		configHash := ""
@@ -90,16 +88,7 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 			serviceName = strings.TrimSpace(parts[7])
 		}
 		if serviceName == "" {
-			if !strings.HasPrefix(containerName, prefix) {
-				continue
-			}
-
-			remainder := strings.TrimPrefix(containerName, prefix)
-			nameParts := strings.Split(remainder, "_")
-			if len(nameParts) < 2 {
-				continue
-			}
-			serviceName = strings.Join(nameParts[:len(nameParts)-1], "_")
+			continue
 		}
 		if serviceName == "" || !isSafeServiceName(serviceName) {
 			continue
