@@ -342,9 +342,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if plan.IsEmpty() {
+	if plan.IsEmpty() && !hasBuildServices(services) {
 		fmt.Println("\n✓ All services are up-to-date. Nothing to deploy.")
 		return nil
+	}
+	if plan.IsEmpty() {
+		fmt.Println("\n-> No config drift detected; build services will still be reconciled for the current commit.")
 	}
 
 	// === WILDCARD SSL DETECTION ===
@@ -867,4 +870,13 @@ func filterActualStateForServices(actualState map[string]*reconcile.ActualServic
 		}
 	}
 	return filtered
+}
+
+func hasBuildServices(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.Build != "" {
+			return true
+		}
+	}
+	return false
 }
