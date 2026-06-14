@@ -232,6 +232,14 @@ func (s *Server) handleActual(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project and environment are required", http.StatusBadRequest)
 		return
 	}
+	if !isSafeProjectName(project) {
+		http.Error(w, "invalid project name", http.StatusBadRequest)
+		return
+	}
+	if !isSafeRuntimeName(environment) {
+		http.Error(w, "invalid environment name", http.StatusBadRequest)
+		return
+	}
 	actual, err := GatherActualState(r.Context(), project, environment)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)

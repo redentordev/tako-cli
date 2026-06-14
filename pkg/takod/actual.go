@@ -30,6 +30,12 @@ func GatherActualState(ctx context.Context, project string, environment string) 
 	if environment == "" {
 		return nil, fmt.Errorf("environment is required")
 	}
+	if !isSafeProjectName(project) {
+		return nil, fmt.Errorf("invalid project name")
+	}
+	if !isSafeRuntimeName(environment) {
+		return nil, fmt.Errorf("invalid environment name")
+	}
 
 	cmd := actualDockerCommandContext(ctx, "docker", "ps", "--format", `{{.Names}}|{{.Image}}|{{.ID}}|{{.Label "tako.configHash"}}`)
 	output, err := cmd.Output()
