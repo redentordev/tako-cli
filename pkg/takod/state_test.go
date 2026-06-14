@@ -128,6 +128,42 @@ func TestWriteAndReadHistoryStateDocument(t *testing.T) {
 	}
 }
 
+func TestWriteStateDocumentRejectsMalformedContent(t *testing.T) {
+	_, err := WriteStateDocument(context.Background(), t.TempDir(), StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentDesired,
+		Content:     "{",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid desired state document JSON") {
+		t.Fatalf("expected malformed JSON error, got %v", err)
+	}
+}
+
+func TestWriteStateDocumentRejectsMultipleJSONValues(t *testing.T) {
+	_, err := WriteStateDocument(context.Background(), t.TempDir(), StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentDesired,
+		Content:     `{"ok":true} {"extra":true}`,
+	})
+	if err == nil || !strings.Contains(err.Error(), "single JSON value") {
+		t.Fatalf("expected single JSON value error, got %v", err)
+	}
+}
+
+func TestWriteStateDocumentRejectsNonObjectContent(t *testing.T) {
+	_, err := WriteStateDocument(context.Background(), t.TempDir(), StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentActual,
+		Content:     `[]`,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be a JSON object") {
+		t.Fatalf("expected JSON object error, got %v", err)
+	}
+}
+
 func TestDeploymentStateDocumentRequiresRevisionID(t *testing.T) {
 	_, err := WriteStateDocument(context.Background(), t.TempDir(), StateDocumentRequest{
 		Project:     "demo",
@@ -162,6 +198,17 @@ func TestAppendStateEventNormalizesNewline(t *testing.T) {
 	}
 	if got, want := string(data), "{\"type\":\"deploy\"}\n"; got != want {
 		t.Fatalf("event log = %q, want %q", got, want)
+	}
+}
+
+func TestAppendStateEventRejectsMalformedContent(t *testing.T) {
+	_, err := AppendStateEvent(context.Background(), t.TempDir(), StateDocumentRequest{
+		Project:     "demo",
+		Environment: "staging",
+		Content:     "deploy",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid event state document JSON") {
+		t.Fatalf("expected event JSON error, got %v", err)
 	}
 }
 

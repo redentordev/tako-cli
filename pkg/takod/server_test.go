@@ -443,6 +443,22 @@ func TestHandleStateWritesAndReadsDocument(t *testing.T) {
 	}
 }
 
+func TestHandleStateRejectsMalformedDocumentContent(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	writeBody := `{"project":"demo","environment":"production","document":"desired","revisionId":"rev_1","content":"not-json"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/state", bytes.NewBufferString(writeBody))
+	recorder := httptest.NewRecorder()
+
+	server.handleState(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "invalid desired state document JSON") {
+		t.Fatalf("response = %q, want document JSON error", recorder.Body.String())
+	}
+}
+
 func TestHandleEnvBundleRequiresSupportedMethod(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
 	req := httptest.NewRequest(http.MethodPost, "/v1/env-bundle", nil)
