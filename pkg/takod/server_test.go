@@ -618,6 +618,28 @@ func TestHandleMeshApplyRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHandleMeshApplyRejectsInvalidRequest(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	body, err := json.Marshal(MeshApplyRequest{
+		Config: mesh.WireGuardConfig{Enabled: true, Interface: "tako;rm", ListenPort: 51820},
+		Node:   mesh.Node{Name: "node-a", Address: "10.210.0.1/24"},
+	})
+	if err != nil {
+		t.Fatalf("failed to encode request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/mesh/apply", bytes.NewReader(body))
+	recorder := httptest.NewRecorder()
+
+	server.handleMeshApply(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "mesh interface") {
+		t.Fatalf("unexpected response: %q", recorder.Body.String())
+	}
+}
+
 func TestHandleMeshApplyReconcilesMesh(t *testing.T) {
 	old := applyMeshConfig
 	applyMeshConfig = func(ctx context.Context, node mesh.Node, peers []mesh.Node, config mesh.WireGuardConfig, verbose bool) (*mesh.Status, error) {
@@ -669,6 +691,21 @@ func TestHandleMeshStatusRequiresInterface(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleMeshStatusRejectsInvalidInterface(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/mesh/status?interface=tako%3Brm", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleMeshStatus(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "mesh interface") {
+		t.Fatalf("unexpected response: %q", recorder.Body.String())
 	}
 }
 

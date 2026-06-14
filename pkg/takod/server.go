@@ -736,6 +736,10 @@ func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := validateMeshApplyRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	response, err := ReconcileMesh(r.Context(), request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -757,6 +761,10 @@ func (s *Server) handleMeshStatus(w http.ResponseWriter, r *http.Request) {
 	interfaceName := r.URL.Query().Get("interface")
 	if interfaceName == "" {
 		http.Error(w, "interface is required", http.StatusBadRequest)
+		return
+	}
+	if err := validateMeshStatusRequest(interfaceName); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	response, err := ReadMeshStatus(r.Context(), interfaceName)

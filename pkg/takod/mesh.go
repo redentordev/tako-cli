@@ -2,6 +2,7 @@ package takod
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/redentordev/tako-cli/pkg/mesh"
 )
@@ -36,6 +37,9 @@ func EnsureMeshKey(ctx context.Context) (*MeshKeyResponse, error) {
 }
 
 func ReconcileMesh(ctx context.Context, request MeshApplyRequest) (*MeshApplyResponse, error) {
+	if err := validateMeshApplyRequest(request); err != nil {
+		return nil, err
+	}
 	status, err := applyMeshConfig(ctx, request.Node, request.Peers, request.Config, false)
 	if err != nil {
 		return nil, err
@@ -47,5 +51,28 @@ func ReconcileMesh(ctx context.Context, request MeshApplyRequest) (*MeshApplyRes
 }
 
 func ReadMeshStatus(ctx context.Context, interfaceName string) (*mesh.Status, error) {
+	if err := validateMeshStatusRequest(interfaceName); err != nil {
+		return nil, err
+	}
 	return readMeshStatus(ctx, interfaceName)
+}
+
+func validateMeshApplyRequest(request MeshApplyRequest) error {
+	if !request.Config.Enabled {
+		return fmt.Errorf("mesh.enabled=false is not supported")
+	}
+	if _, err := mesh.ValidateInterfaceName(request.Config.Interface); err != nil {
+		return err
+	}
+	if _, err := mesh.RenderConfigTemplate(request.Node, request.Peers, request.Config); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateMeshStatusRequest(interfaceName string) error {
+	if _, err := mesh.ValidateInterfaceName(interfaceName); err != nil {
+		return err
+	}
+	return nil
 }
