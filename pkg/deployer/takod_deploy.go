@@ -14,6 +14,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/mesh"
+	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -385,6 +386,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Mounts:         mounts,
 		Health:         d.buildTakodHealthSpec(service),
 		Command:        service.Command,
+		Labels:         serviceRuntimeLabels(*service),
 	}
 	for _, slot := range slots {
 		containerName := d.takodContainerName(serviceName, slot)
@@ -409,6 +411,14 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 	}
 
 	return d.reconcileServiceViaTakod(client, request)
+}
+
+func serviceRuntimeLabels(service config.ServiceConfig) map[string]string {
+	configHash, ok := reconcile.SafeServiceConfigHash(service)
+	if !ok {
+		return nil
+	}
+	return map[string]string{reconcile.ConfigHashLabel: configHash}
 }
 
 func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.HealthSpec {

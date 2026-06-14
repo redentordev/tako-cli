@@ -20,6 +20,7 @@ type ActualService struct {
 	Image      string   `json:"image,omitempty"`
 	Replicas   int      `json:"replicas"`
 	Containers []string `json:"containers,omitempty"`
+	ConfigHash string   `json:"configHash,omitempty"`
 }
 
 func GatherActualState(ctx context.Context, project string, environment string) (*ActualStateResponse, error) {
@@ -30,7 +31,7 @@ func GatherActualState(ctx context.Context, project string, environment string) 
 		return nil, fmt.Errorf("environment is required")
 	}
 
-	cmd := actualDockerCommandContext(ctx, "docker", "ps", "--format", "{{.Names}}|{{.Image}}|{{.ID}}")
+	cmd := actualDockerCommandContext(ctx, "docker", "ps", "--format", `{{.Names}}|{{.Image}}|{{.ID}}|{{.Label "tako.configHash"}}`)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %w", err)
@@ -61,6 +62,10 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 		containerName := parts[0]
 		image := parts[1]
 		containerID := parts[2]
+		configHash := ""
+		if len(parts) >= 4 {
+			configHash = strings.TrimSpace(parts[3])
+		}
 		if !strings.HasPrefix(containerName, prefix) {
 			continue
 		}
@@ -75,6 +80,11 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 		if existing, ok := response.Services[serviceName]; ok {
 			existing.Containers = append(existing.Containers, containerID)
 			existing.Replicas++
+			if existing.ConfigHash == "" {
+				existing.ConfigHash = configHash
+			} else if configHash != "" && existing.ConfigHash != configHash {
+				existing.ConfigHash = ""
+			}
 			continue
 		}
 
@@ -83,6 +93,7 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 			Image:      image,
 			Replicas:   1,
 			Containers: []string{containerID},
+			ConfigHash: configHash,
 		}
 	}
 

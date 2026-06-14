@@ -104,6 +104,7 @@ func TestBuildActualSnapshotWithNodesEmbedsNodeSnapshots(t *testing.T) {
 				Image:      "demo/web:1",
 				Replicas:   1,
 				Containers: []string{"b2", "b1"},
+				ConfigHash: "hash-web",
 			},
 		},
 		"node-a": {
@@ -112,6 +113,7 @@ func TestBuildActualSnapshotWithNodesEmbedsNodeSnapshots(t *testing.T) {
 				Image:      "demo/web:1",
 				Replicas:   1,
 				Containers: []string{"a1"},
+				ConfigHash: "hash-web",
 			},
 			"worker": {
 				Name:       "worker",
@@ -134,6 +136,9 @@ func TestBuildActualSnapshotWithNodesEmbedsNodeSnapshots(t *testing.T) {
 	if !slices.Equal(snapshot.Nodes["node-b"].Services["web"].Containers, []string{"b1", "b2"}) {
 		t.Fatalf("node containers were not sorted: %#v", snapshot.Nodes["node-b"].Services["web"].Containers)
 	}
+	if got := snapshot.Services["web"].ConfigHash; got != "hash-web" {
+		t.Fatalf("aggregate config hash = %q, want hash-web", got)
+	}
 	if snapshot.Nodes["node-a"].CapturedAt.IsZero() || snapshot.Nodes["node-b"].CapturedAt.IsZero() {
 		t.Fatalf("expected embedded node snapshots to have capture times: %#v", snapshot.Nodes)
 	}
@@ -146,6 +151,7 @@ func TestBuildNodeActualSnapshotRecordsNode(t *testing.T) {
 			Image:      "demo/web:1",
 			Replicas:   1,
 			Containers: []string{"c2", "c1"},
+			ConfigHash: "hash-web",
 		},
 	})
 
@@ -154,6 +160,9 @@ func TestBuildNodeActualSnapshotRecordsNode(t *testing.T) {
 	}
 	if !slices.Equal(snapshot.Services["web"].Containers, []string{"c1", "c2"}) {
 		t.Fatalf("containers were not sorted: %#v", snapshot.Services["web"].Containers)
+	}
+	if got := snapshot.Services["web"].ConfigHash; got != "hash-web" {
+		t.Fatalf("node config hash = %q, want hash-web", got)
 	}
 }
 

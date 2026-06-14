@@ -38,6 +38,7 @@ type persistedActualService struct {
 	Image      string   `json:"image,omitempty"`
 	Replicas   int      `json:"replicas"`
 	Containers []string `json:"containers,omitempty"`
+	ConfigHash string   `json:"configHash,omitempty"`
 }
 
 func RefreshActualStateDocuments(ctx context.Context, dataDir string, node string) (int, error) {
@@ -205,6 +206,11 @@ func recomputePersistedAggregate(snapshot *persistedActualSnapshot) {
 				if existing.Image == "" {
 					existing.Image = service.Image
 				}
+				if existing.ConfigHash == "" {
+					existing.ConfigHash = service.ConfigHash
+				} else if service.ConfigHash != "" && existing.ConfigHash != service.ConfigHash {
+					existing.ConfigHash = ""
+				}
 				snapshot.Services[serviceName] = existing
 				continue
 			}
@@ -231,6 +237,7 @@ func persistedServicesFromActual(services map[string]*ActualService) map[string]
 			Image:      service.Image,
 			Replicas:   service.Replicas,
 			Containers: containers,
+			ConfigHash: service.ConfigHash,
 		}
 	}
 	return out

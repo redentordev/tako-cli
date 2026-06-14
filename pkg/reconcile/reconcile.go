@@ -158,6 +158,7 @@ type ActualService struct {
 	Image          string
 	Replicas       int
 	Containers     []string
+	ConfigHash     string
 	ConfigSnapshot *config.ServiceConfig // Last deployed config
 }
 
@@ -185,6 +186,18 @@ func detectChanges(desired config.ServiceConfig, actual *ActualService) []string
 	}
 	if desiredReplicas != actual.Replicas {
 		reasons = append(reasons, fmt.Sprintf("Replicas changed: %d → %d", actual.Replicas, desiredReplicas))
+	}
+	if len(reasons) > 0 {
+		return reasons
+	}
+
+	if actual.ConfigHash != "" {
+		if desiredHash, ok := SafeServiceConfigHash(desired); ok {
+			if actual.ConfigHash == desiredHash {
+				return nil
+			}
+			return []string{"Service configuration changed"}
+		}
 	}
 
 	// Compare port (only if both are set)
