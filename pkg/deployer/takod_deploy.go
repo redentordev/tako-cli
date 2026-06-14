@@ -452,7 +452,14 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Labels:         serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
 	}
 	for _, slot := range slots {
-		container, err := d.buildTakodContainerSpec(serverName, serviceName, service, slot, len(slots), publishMeshUpstreams)
+		meshPort := 0
+		if service.IsPublic() && publishMeshUpstreams {
+			meshPort, err = d.allocateMeshUpstreamPort(client, serverName, serviceName, slot, service.Port)
+			if err != nil {
+				return err
+			}
+		}
+		container, err := d.buildTakodContainerSpec(serverName, serviceName, service, slot, len(slots), publishMeshUpstreams, meshPort)
 		if err != nil {
 			return err
 		}
@@ -462,16 +469,15 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 	return d.reconcileServiceViaTakod(client, request)
 }
 
-func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string, service *config.ServiceConfig, slot int, slotCount int, publishMeshUpstreams bool) (takod.ContainerSpec, error) {
+func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string, service *config.ServiceConfig, slot int, slotCount int, publishMeshUpstreams bool, meshPort int) (takod.ContainerSpec, error) {
 	container := takod.ContainerSpec{Name: d.takodContainerName(serviceName, slot)}
 	if service.IsPublic() && publishMeshUpstreams {
 		meshHostIP, err := d.meshHostIPForServer(serverName)
 		if err != nil {
 			return container, err
 		}
-		meshPort, err := d.meshUpstreamPort(serviceName, slot)
-		if err != nil {
-			return container, err
+		if meshPort <= 0 {
+			return container, fmt.Errorf("service %s slot %d requires an allocated mesh upstream port", serviceName, slot)
 		}
 		container.Publishes = append(container.Publishes, fmt.Sprintf("%s:%d:%d", meshHostIP, meshPort, service.Port))
 	} else if !service.IsPublic() && service.Port > 0 {

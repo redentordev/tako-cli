@@ -142,6 +142,41 @@ func TestHandleActualRejectsInvalidIdentifiers(t *testing.T) {
 	}
 }
 
+func TestHandlePortAllocate(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	body := bytes.NewBufferString(`{
+		"kind":"mesh-upstream",
+		"project":"demo",
+		"environment":"production",
+		"service":"web",
+		"slot":1,
+		"hostIp":"10.210.0.1",
+		"containerPort":3000,
+		"preferredPort":31001,
+		"minPort":30000,
+		"maxPort":32000
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/ports/allocate", body)
+	recorder := httptest.NewRecorder()
+
+	server.handlePortAllocate(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response PortAllocationResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if response.HostPort != 31001 || response.Key == "" {
+		t.Fatalf("unexpected allocation response: %#v", response)
+	}
+}
+
 func TestHandleReconcileServiceRequiresPost(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
 	req := httptest.NewRequest(http.MethodGet, "/v1/reconcile-service", nil)

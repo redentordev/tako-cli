@@ -225,12 +225,15 @@ replication, placement, and external persistence behavior.
 ```
 
 Every ingress node runs a local proxy. It routes to local healthy containers
-and remote healthy containers through deterministic mesh-only upstream ports.
+and remote healthy containers through node-local mesh-only upstream ports.
 One-node deployments use the same proxy path with only local upstreams and do
-not publish mesh host ports. Multi-node upstream ports are allocated from the
-project, environment, service, and replica slot so unrelated apps with common
-service names such as `web` can share the same server without taking each
-other's mesh upstream port.
+not publish mesh host ports. Multi-node upstream ports are allocated and
+recorded by the target node's `takod` agent. The CLI sends a deterministic
+app/stage/service/slot preferred port, but `takod` checks existing Docker port
+bindings and its allocation registry before accepting it, then returns the
+actual assigned port for container publish and proxy rendering. This lets
+unrelated apps with common service names such as `web` share the same server
+without taking each other's mesh upstream port.
 
 ## Switching Computers
 

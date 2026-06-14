@@ -237,7 +237,7 @@ func TestBuildTakodContainerSpecDoesNotPublishPublicOneNodeService(t *testing.T)
 	container, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
 		Port:  80,
 		Proxy: &config.ProxyConfig{Domain: "example.com"},
-	}, 1, 1, false)
+	}, 1, 1, false, 0)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestBuildTakodContainerSpecPublishesPublicMultiNodeServiceOnMeshIP(t *testi
 	container, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
 		Port:  80,
 		Proxy: &config.ProxyConfig{Domain: "example.com"},
-	}, 1, 1, true)
+	}, 1, 1, true, 24321)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestBuildTakodContainerSpecPublishesPublicMultiNodeServiceOnMeshIP(t *testi
 
 func TestBuildTakodContainerSpecPublishesInternalDirectPort(t *testing.T) {
 	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
-	container, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, 1, false)
+	container, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, 1, false, 0)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
@@ -285,9 +285,41 @@ func TestBuildTakodContainerSpecPublishesInternalDirectPort(t *testing.T) {
 
 func TestBuildTakodContainerSpecRejectsReplicatedInternalDirectPort(t *testing.T) {
 	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
-	_, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, 2, false)
+	_, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, 2, false, 0)
 	if err == nil {
 		t.Fatal("expected replicated direct host port to be rejected")
+	}
+}
+
+func TestAllocateMeshUpstreamPortUsesTakodAndCachesResult(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production"}
+	env := deploy.config.Environments["production"]
+	env.Services = map[string]config.ServiceConfig{
+		"web": {
+			Port:  80,
+			Proxy: &config.ProxyConfig{Domain: "example.com"},
+		},
+	}
+	deploy.config.Environments["production"] = env
+
+	port, err := deploy.allocateMeshUpstreamPort(fakeTakodStatusExecutor{
+		output: `{"hostPort":24567}`,
+	}, "node-a", "web", 1, 80)
+	if err != nil {
+		t.Fatalf("allocateMeshUpstreamPort returned error: %v", err)
+	}
+	if port != 24567 {
+		t.Fatalf("allocated port = %d, want 24567", port)
+	}
+
+	port, err = deploy.allocateMeshUpstreamPort(fakeTakodStatusExecutor{
+		err: fmt.Errorf("should not be called after cache fill"),
+	}, "node-a", "web", 1, 80)
+	if err != nil {
+		t.Fatalf("cached allocateMeshUpstreamPort returned error: %v", err)
+	}
+	if port != 24567 {
+		t.Fatalf("cached port = %d, want 24567", port)
 	}
 }
 

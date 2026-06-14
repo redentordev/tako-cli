@@ -1,6 +1,7 @@
 package deployer
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"net"
@@ -21,6 +22,13 @@ const (
 	meshUpstreamPortMax       = 65000
 	meshUpstreamPortSlotLimit = 64
 )
+
+type meshUpstreamPortKey struct {
+	ServerName    string
+	ServiceName   string
+	Slot          int
+	ContainerPort int
+}
 
 type traefikDynamicConfig struct {
 	HTTP traefikHTTPConfig `yaml:"http,omitempty"`
@@ -215,7 +223,7 @@ func (d *Deployer) takodProxyUpstreamURL(proxyServerName string, upstreamServerN
 		containerName := d.takodContainerName(serviceName, slot)
 		return "http://" + net.JoinHostPort(containerName, strconv.Itoa(servicePort)), nil
 	}
-	return d.meshUpstreamURL(upstreamServerName, serviceName, slot)
+	return d.meshUpstreamURL(upstreamServerName, serviceName, slot, servicePort)
 }
 
 func proxyHealthCheckForService(service config.ServiceConfig) *traefikHealthCheck {
@@ -281,16 +289,86 @@ func (d *Deployer) removeLegacyTakodProxyConfig(client *ssh.Client) error {
 	return nil
 }
 
-func (d *Deployer) meshUpstreamURL(serverName string, serviceName string, slot int) (string, error) {
+func (d *Deployer) meshUpstreamURL(serverName string, serviceName string, slot int, servicePort int) (string, error) {
 	hostIP, err := d.meshHostIPForServer(serverName)
 	if err != nil {
 		return "", err
 	}
-	port, err := d.meshUpstreamPort(serviceName, slot)
+	port, err := d.meshUpstreamPortForServer(serverName, serviceName, slot, servicePort)
 	if err != nil {
 		return "", err
 	}
 	return "http://" + net.JoinHostPort(hostIP, strconv.Itoa(port)), nil
+}
+
+func (d *Deployer) meshUpstreamPortForServer(serverName string, serviceName string, slot int, containerPort int) (int, error) {
+	if d.meshPortAllocator != nil {
+		return d.meshPortAllocator(serverName, serviceName, slot, containerPort)
+	}
+	client, err := d.getEnvironmentClient(serverName)
+	if err != nil {
+		return 0, err
+	}
+	return d.allocateMeshUpstreamPort(client, serverName, serviceName, slot, containerPort)
+}
+
+func (d *Deployer) allocateMeshUpstreamPort(client takodclient.RequestExecutor, serverName string, serviceName string, slot int, containerPort int) (int, error) {
+	key := meshUpstreamPortKey{ServerName: serverName, ServiceName: serviceName, Slot: slot, ContainerPort: containerPort}
+	if port, ok := d.cachedMeshUpstreamPort(key); ok {
+		return port, nil
+	}
+
+	hostIP, err := d.meshHostIPForServer(serverName)
+	if err != nil {
+		return 0, err
+	}
+	preferredPort, err := d.meshUpstreamPort(serviceName, slot)
+	if err != nil {
+		return 0, err
+	}
+	output, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/ports/allocate", takod.PortAllocationRequest{
+		Kind:          takod.PortAllocationKindMeshUpstream,
+		Project:       d.config.Project.Name,
+		Environment:   d.environment,
+		Service:       serviceName,
+		Slot:          slot,
+		HostIP:        hostIP,
+		ContainerPort: containerPort,
+		PreferredPort: preferredPort,
+		MinPort:       meshUpstreamPortBase,
+		MaxPort:       meshUpstreamPortMax,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to allocate mesh upstream port for %s slot %d on %s: %w", serviceName, slot, serverName, err)
+	}
+	var response takod.PortAllocationResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return 0, fmt.Errorf("failed to parse mesh upstream port allocation: %w", err)
+	}
+	if response.HostPort < meshUpstreamPortBase || response.HostPort > meshUpstreamPortMax {
+		return 0, fmt.Errorf("takod allocated invalid mesh upstream port %d for %s slot %d", response.HostPort, serviceName, slot)
+	}
+	d.storeMeshUpstreamPort(key, response.HostPort)
+	return response.HostPort, nil
+}
+
+func (d *Deployer) cachedMeshUpstreamPort(key meshUpstreamPortKey) (int, bool) {
+	d.meshPortCacheMu.Lock()
+	defer d.meshPortCacheMu.Unlock()
+	if d.meshPortCache == nil {
+		return 0, false
+	}
+	port, ok := d.meshPortCache[key]
+	return port, ok
+}
+
+func (d *Deployer) storeMeshUpstreamPort(key meshUpstreamPortKey, port int) {
+	d.meshPortCacheMu.Lock()
+	defer d.meshPortCacheMu.Unlock()
+	if d.meshPortCache == nil {
+		d.meshPortCache = make(map[meshUpstreamPortKey]int)
+	}
+	d.meshPortCache[key] = port
 }
 
 func (d *Deployer) meshHostIPForServer(serverName string) (string, error) {

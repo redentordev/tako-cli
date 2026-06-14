@@ -240,5 +240,9 @@ func testProxyDeployer() *Deployer {
 			},
 		},
 	}
-	return &Deployer{config: cfg, environment: "production"}
+	deploy := &Deployer{config: cfg, environment: "production"}
+	deploy.meshPortAllocator = func(_ string, serviceName string, slot int, _ int) (int, error) {
+		return deploy.meshUpstreamPort(serviceName, slot)
+	}
+	return deploy
 }

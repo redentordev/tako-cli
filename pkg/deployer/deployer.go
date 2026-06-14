@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/internal/state"
@@ -57,6 +58,9 @@ type Deployer struct {
 	distributedImages map[string]bool
 	targetServers     []string
 	cliVersion        string
+	meshPortCache     map[meshUpstreamPortKey]int
+	meshPortCacheMu   sync.Mutex
+	meshPortAllocator func(serverName string, serviceName string, slot int, containerPort int) (int, error)
 }
 
 const (

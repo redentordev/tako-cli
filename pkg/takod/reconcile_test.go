@@ -373,6 +373,18 @@ func TestTakodCommandHelper(t *testing.T) {
 		os.Exit(0)
 	case "inspect":
 		joined := strings.Join(commandArgs, " ")
+		if strings.Contains(joined, ".HostConfig.PortBindings") {
+			if output := os.Getenv("TAKO_FAKE_INSPECT_PORT_BINDINGS"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+			}
+			os.Exit(0)
+		}
+		if strings.Contains(joined, ".Config.Labels") {
+			if output := os.Getenv("TAKO_FAKE_INSPECT_LABELS"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+			}
+			os.Exit(0)
+		}
 		if strings.Contains(joined, ".State.Running") {
 			_, _ = os.Stdout.WriteString("true\n")
 		}
