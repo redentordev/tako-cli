@@ -297,6 +297,7 @@ func TestRestoreDownloadedEnvBundleDecryptsAndWritesFiles(t *testing.T) {
 
 func TestDownloadEnvBundleFromMeshUsesFirstFoundBundle(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
+	updatedAt := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	calls := []string{}
 	original := downloadEnvBundleFromServerFunc
 	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
@@ -307,7 +308,7 @@ func TestDownloadEnvBundleFromMeshUsesFirstFoundBundle(t *testing.T) {
 		case "node-b":
 			return &takod.EnvBundleResponse{Found: false}, nil
 		default:
-			return &takod.EnvBundleResponse{Found: true, Content: "bundle"}, nil
+			return &takod.EnvBundleResponse{Found: true, Content: "bundle", UpdatedAt: updatedAt}, nil
 		}
 	}
 	t.Cleanup(func() {
@@ -367,15 +368,35 @@ func TestDownloadEnvBundleFromMeshUsesNewestBundle(t *testing.T) {
 	}
 }
 
-func TestSelectFreshestEnvBundleCandidateFallsBackToServerOrder(t *testing.T) {
+func TestSelectFreshestEnvBundleCandidateFallsBackToServerOrderForEqualTimestamps(t *testing.T) {
+	updatedAt := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	candidates := []envBundleDownloadCandidate{
-		{response: &takod.EnvBundleResponse{Found: true, Content: "first"}, source: "node-a", index: 0},
-		{response: &takod.EnvBundleResponse{Found: true, Content: "second"}, source: "node-b", index: 1},
+		{response: &takod.EnvBundleResponse{Found: true, Content: "first", UpdatedAt: updatedAt}, source: "node-a", index: 0},
+		{response: &takod.EnvBundleResponse{Found: true, Content: "second", UpdatedAt: updatedAt}, source: "node-b", index: 1},
 	}
 
 	selected := selectFreshestEnvBundleCandidate(candidates)
 	if selected.source != "node-a" || selected.response.Content != "first" {
-		t.Fatalf("selected = %#v, want first server for legacy bundle metadata", selected)
+		t.Fatalf("selected = %#v, want first server for equal timestamp", selected)
+	}
+}
+
+func TestDownloadEnvBundleFromMeshRejectsMissingUpdatedAtMetadata(t *testing.T) {
+	cfg := envBundleMeshTestConfig()
+	original := downloadEnvBundleFromServerFunc
+	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, _ string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+		return &takod.EnvBundleResponse{Found: true, Content: "bundle"}, nil
+	}
+	t.Cleanup(func() {
+		downloadEnvBundleFromServerFunc = original
+	})
+
+	_, _, err := downloadEnvBundleFromMesh(cfg, "production")
+	if err == nil {
+		t.Fatal("downloadEnvBundleFromMesh should reject bundles without metadata")
+	}
+	if !strings.Contains(err.Error(), "missing updatedAt metadata") {
+		t.Fatalf("error = %q, want missing metadata context", err)
 	}
 }
 

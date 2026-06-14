@@ -557,6 +557,10 @@ func downloadEnvBundleFromMesh(cfg *config.Config, envName string) (*takod.EnvBu
 			continue
 		}
 		if response != nil && response.Found {
+			if response.UpdatedAt.IsZero() {
+				nodeErrors = append(nodeErrors, fmt.Sprintf("%s: environment bundle missing updatedAt metadata", serverName))
+				continue
+			}
 			candidates = append(candidates, envBundleDownloadCandidate{
 				response: response,
 				source:   serverName,

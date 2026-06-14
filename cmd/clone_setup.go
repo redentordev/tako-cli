@@ -192,6 +192,10 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 				continue
 			}
 			if candidate.Found {
+				if candidate.UpdatedAt.IsZero() {
+					warn(fmt.Sprintf("%s: environment bundle missing updatedAt metadata", name))
+					continue
+				}
 				candidates = append(candidates, envBundleDownloadCandidate{
 					response: &candidate,
 					source:   name,
