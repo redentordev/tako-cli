@@ -90,6 +90,30 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe label value to be rejected")
 	}
+
+	invalid = valid
+	invalid.Health = &HealthSpec{Command: "curl -sf /health\n--privileged"}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe health command to be rejected")
+	}
+
+	invalid = valid
+	invalid.Health = &HealthSpec{Interval: "not-a-duration"}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected invalid health interval to be rejected")
+	}
+
+	invalid = valid
+	invalid.Health = &HealthSpec{Retries: maxHealthRetries + 1}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected oversized health retries to be rejected")
+	}
+
+	invalid = valid
+	invalid.Health = &HealthSpec{WaitAttempts: maxHealthWaitAttempts + 1}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected oversized health waitAttempts to be rejected")
+	}
 }
 
 func TestValidateRemoveServiceRequest(t *testing.T) {
