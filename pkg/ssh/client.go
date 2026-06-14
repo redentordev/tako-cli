@@ -439,6 +439,18 @@ func (c *Client) Port() int {
 	return c.port
 }
 
+// Dial opens a connection from the remote SSH server to address.
+// This is used for local tooling such as port forwarding to node-local
+// container addresses that are not reachable directly from the operator's
+// machine.
+func (c *Client) Dial(network string, address string) (net.Conn, error) {
+	conn, err := c.getConnection()
+	if err != nil {
+		return nil, err
+	}
+	return conn.Dial(network, address)
+}
+
 // Execute runs a command on the remote server
 func (c *Client) Execute(cmd string) (string, error) {
 	return c.ExecuteWithContext(context.Background(), cmd)
@@ -629,6 +641,13 @@ func waitSessionWithContext(ctx context.Context, session *ssh.Session) error {
 // It puts the local terminal in raw mode and forwards stdin/stdout/stderr
 // bidirectionally, supporting full interactive sessions (shells, editors, etc.).
 func (c *Client) ExecuteInteractive(cmd string) error {
+	return c.ExecuteDuplex(cmd, os.Stdin, os.Stdout, os.Stderr, true)
+}
+
+// ExecuteDuplex runs a command with stdin/stdout/stderr connected to the
+// provided streams. When tty is true, it requests a remote PTY and mirrors the
+// local terminal mode and resize events.
+func (c *Client) ExecuteDuplex(cmd string, stdin io.Reader, stdout, stderr io.Writer, tty bool) error {
 	conn, err := c.getConnection()
 	if err != nil {
 		return err
@@ -640,46 +659,50 @@ func (c *Client) ExecuteInteractive(cmd string) error {
 	}
 	defer session.Close()
 
-	// Get local terminal size
-	fd := int(os.Stdin.Fd())
-	w, h, err := term.GetSize(fd)
-	if err != nil {
-		// Fallback to reasonable defaults if not a terminal
-		w, h = 80, 24
+	if tty {
+		fd := int(os.Stdin.Fd())
+		w, h, err := term.GetSize(fd)
+		if err != nil {
+			w, h = 80, 24
+		}
+
+		modes := ssh.TerminalModes{
+			ssh.ECHO:          1,
+			ssh.TTY_OP_ISPEED: 14400,
+			ssh.TTY_OP_OSPEED: 14400,
+		}
+		if err := session.RequestPty("xterm-256color", h, w, modes); err != nil {
+			return fmt.Errorf("failed to request PTY: %w", err)
+		}
+
+		oldState, err := term.MakeRaw(fd)
+		if err != nil {
+			return fmt.Errorf("failed to set raw terminal: %w", err)
+		}
+		defer term.Restore(fd, oldState)
+
+		stopResize := watchTerminalResize(fd, session)
+		defer stopResize()
 	}
 
-	// Request remote PTY
-	modes := ssh.TerminalModes{
-		ssh.ECHO:          1,
-		ssh.TTY_OP_ISPEED: 14400,
-		ssh.TTY_OP_OSPEED: 14400,
-	}
-	if err := session.RequestPty("xterm-256color", h, w, modes); err != nil {
-		return fmt.Errorf("failed to request PTY: %w", err)
-	}
+	session.Stdin = stdin
+	session.Stdout = stdout
+	session.Stderr = stderr
 
-	// Put local terminal in raw mode
-	oldState, err := term.MakeRaw(fd)
-	if err != nil {
-		return fmt.Errorf("failed to set raw terminal: %w", err)
-	}
-	defer term.Restore(fd, oldState)
-
-	// Wire up stdin/stdout/stderr
-	session.Stdin = os.Stdin
-	session.Stdout = os.Stdout
-	session.Stderr = os.Stderr
-
-	// Listen for terminal resize signals (Unix only, no-op on other platforms)
-	stopResize := watchTerminalResize(fd, session)
-	defer stopResize()
-
-	// Start and wait for the command
 	if err := session.Start(cmd); err != nil {
 		return fmt.Errorf("failed to start command: %w", err)
 	}
 
 	return session.Wait()
+}
+
+// ExitCode returns the remote process exit code carried by an SSH error.
+func ExitCode(err error) (int, bool) {
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitStatus(), true
+	}
+	return 0, false
 }
 
 // StreamingSession represents a streaming SSH session
@@ -693,6 +716,14 @@ type StreamingSession struct {
 func (s *StreamingSession) Close() error {
 	if s.session != nil {
 		return s.session.Close()
+	}
+	return nil
+}
+
+// Wait waits for the streaming command to finish.
+func (s *StreamingSession) Wait() error {
+	if s.session != nil {
+		return s.session.Wait()
 	}
 	return nil
 }

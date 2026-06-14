@@ -4,8 +4,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -68,6 +70,190 @@ func TestMaxBytesReaderRejectsOverflow(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "test stream exceeds maximum size 5 bytes") {
 		t.Fatalf("error = %q, want size limit context", err)
+	}
+}
+
+func TestBuildImagePassesPlatformToDocker(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	archive := testBuildContextArchive(t, map[string]string{
+		"Dockerfile": "FROM scratch\n",
+	})
+	response, err := BuildImage(context.Background(), "demo/web:abc123", "linux/amd64", bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("BuildImage returned error: %v", err)
+	}
+	if response.Image != "demo/web:abc123" {
+		t.Fatalf("image = %q, want demo/web:abc123", response.Image)
+	}
+
+	entries := readCommandLog(t, logPath)
+	want := "docker build --platform linux/amd64 -t demo/web:abc123 ."
+	if !slices.Contains(entries, want) {
+		t.Fatalf("docker log missing platform build %q in %#v", want, entries)
+	}
+}
+
+func TestBuildImagePassesDockerfileToDocker(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	archive := testBuildContextArchive(t, map[string]string{
+		"Dockerfile.renderer": "FROM scratch\n",
+	})
+	response, err := BuildImageWithOptions(context.Background(), "demo/renderer:abc123", ImageBuildOptions{
+		Dockerfile: "Dockerfile.renderer",
+	}, bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("BuildImageWithOptions returned error: %v", err)
+	}
+	if response.Image != "demo/renderer:abc123" {
+		t.Fatalf("image = %q, want demo/renderer:abc123", response.Image)
+	}
+
+	entries := readCommandLog(t, logPath)
+	want := "docker build --file Dockerfile.renderer -t demo/renderer:abc123 ."
+	if !slices.Contains(entries, want) {
+		t.Fatalf("docker log missing dockerfile build %q in %#v", want, entries)
+	}
+}
+
+func TestBuildImageRejectsUnsafeDockerfilePath(t *testing.T) {
+	archive := testBuildContextArchive(t, map[string]string{
+		"Dockerfile": "FROM scratch\n",
+	})
+	_, err := BuildImageWithOptions(context.Background(), "demo/web:abc123", ImageBuildOptions{
+		Dockerfile: "../Dockerfile",
+	}, bytes.NewReader(archive))
+	if err == nil {
+		t.Fatal("expected unsafe dockerfile path to fail")
+	}
+	if !strings.Contains(err.Error(), "relative path inside the build context") {
+		t.Fatalf("error = %q, want build context validation", err)
+	}
+}
+
+func TestBuildImageRejectsMissingDockerfilePath(t *testing.T) {
+	archive := testBuildContextArchive(t, map[string]string{
+		"Dockerfile": "FROM scratch\n",
+	})
+	_, err := BuildImageWithOptions(context.Background(), "demo/web:abc123", ImageBuildOptions{
+		Dockerfile: "Dockerfile.renderer",
+	}, bytes.NewReader(archive))
+	if err == nil {
+		t.Fatal("expected missing dockerfile to fail")
+	}
+	if !strings.Contains(err.Error(), "dockerfile does not exist in build context") {
+		t.Fatalf("error = %q, want missing dockerfile validation", err)
+	}
+}
+
+func TestBuildImageRejectsInvalidPlatform(t *testing.T) {
+	if _, err := BuildImage(context.Background(), "demo/web:abc123", "darwin/amd64", strings.NewReader("")); err == nil {
+		t.Fatal("BuildImage should reject invalid platform")
+	}
+}
+
+func TestBuildImageUsesExistingLocalCache(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	archive := testBuildContextArchive(t, map[string]string{
+		"Dockerfile": "FROM scratch\n",
+	})
+	_, err := BuildImageWithOptions(context.Background(), "demo/web:next", ImageBuildOptions{
+		CacheFrom: []string{"demo/web:previous"},
+	}, bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("BuildImageWithOptions returned error: %v", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	for _, want := range []string{
+		"docker image inspect demo/web:previous",
+		"docker build --cache-from demo/web:previous -t demo/web:next .",
+	} {
+		if !slices.Contains(entries, want) {
+			t.Fatalf("docker log missing %q in %#v", want, entries)
+		}
+	}
+}
+
+func TestBuildImageUsesBuildxRegistryCache(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	archive := testBuildContextArchive(t, map[string]string{
+		"Dockerfile": "FROM scratch\n",
+	})
+	_, err := BuildImageWithOptions(context.Background(), "registry.example.com/demo/web:next", ImageBuildOptions{
+		Platform:  "linux/amd64",
+		CacheFrom: []string{"type=registry,ref=registry.example.com/demo/web:buildcache"},
+		CacheTo:   []string{"type=registry,ref=registry.example.com/demo/web:buildcache,mode=max"},
+		Builder:   "mesh-builder",
+		UseBuildx: true,
+	}, bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("BuildImageWithOptions returned error: %v", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	for _, want := range []string{
+		"docker buildx version",
+		"docker buildx build --load --builder mesh-builder --platform linux/amd64 --cache-from type=registry,ref=registry.example.com/demo/web:buildcache --cache-to type=registry,ref=registry.example.com/demo/web:buildcache,mode=max -t registry.example.com/demo/web:next .",
+	} {
+		if !slices.Contains(entries, want) {
+			t.Fatalf("docker log missing %q in %#v", want, entries)
+		}
+	}
+}
+
+func TestBuildImageReportsMissingBuildx(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_BUILDX_UNAVAILABLE", "1")
+
+	archive := testBuildContextArchive(t, map[string]string{
+		"Dockerfile": "FROM scratch\n",
+	})
+	_, err := BuildImageWithOptions(context.Background(), "demo/web:next", ImageBuildOptions{
+		CacheTo:   []string{"type=registry,ref=registry.example.com/demo/web:buildcache,mode=max"},
+		UseBuildx: true,
+	}, bytes.NewReader(archive))
+	if err == nil {
+		t.Fatal("expected missing buildx to fail")
+	}
+	if !strings.Contains(err.Error(), "docker buildx is required") {
+		t.Fatalf("error = %q, want buildx requirement", err)
+	}
+}
+
+func TestNodeInfoNormalizesDockerPlatform(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	t.Setenv("TAKO_FAKE_INFO_OUTPUT", `{"OSType":"linux","Architecture":"x86_64","OperatingSystem":"Fake Linux","ServerVersion":"27.0.0","DockerRootDir":"/var/lib/docker"}`+"\n")
+	t.Setenv("TAKO_FAKE_BUILDX_OUTPUT", "github.com/docker/buildx v0.18.0\n")
+
+	info, err := NodeInfo(context.Background(), "node-a")
+	if err != nil {
+		t.Fatalf("NodeInfo returned error: %v", err)
+	}
+	if info.Node != "node-a" || info.Platform != "linux/amd64" {
+		t.Fatalf("unexpected node info: %#v", info)
+	}
+	if !info.BuildxAvailable || !strings.Contains(info.BuildxVersion, "buildx") {
+		t.Fatalf("expected buildx details in node info: %#v", info)
+	}
+	if info.Docker.RootDir != "/var/lib/docker" {
+		t.Fatalf("docker root dir = %q, want /var/lib/docker", info.Docker.RootDir)
 	}
 }
 

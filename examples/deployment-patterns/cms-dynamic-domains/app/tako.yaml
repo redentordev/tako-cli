@@ -1,0 +1,64 @@
+project:
+  name: pattern-cms-app
+  version: 1.0.0
+
+deployment:
+  source: git
+
+volumes:
+  mongo_data:
+    driver: local
+
+servers:
+  app:
+    host: ${APP_SERVER_HOST}
+    user: root
+    sshKey: ${APP_SSH_KEY}
+
+environments:
+  production:
+    servers:
+      - app
+    services:
+      mongo:
+        image: mongo:7
+        persistent: true
+        volumes:
+          - mongo_data:/data/db
+        placement:
+          strategy: pinned
+          servers:
+            - app
+
+      admin:
+        image: nginxdemos/hello:plain-text
+        port: 80
+        export:
+          ports:
+            web: 80
+        dependsOn:
+          - mongo
+        healthCheck:
+          path: /
+          interval: 15s
+          timeout: 5s
+          retries: 3
+
+      renderer:
+        image: nginxdemos/hello:plain-text
+        port: 80
+        export:
+          ports:
+            web: 80
+        dependsOn:
+          - admin
+        replicas: 2
+        deploy:
+          strategy: rolling
+          order: start-first
+          maxUnavailable: 0
+        healthCheck:
+          path: /
+          interval: 15s
+          timeout: 5s
+          retries: 3

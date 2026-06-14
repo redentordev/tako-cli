@@ -144,11 +144,26 @@ func TestBootstrapScriptsAvoidDownloadedShellInstallers(t *testing.T) {
 	for name, script := range map[string]string{
 		"base packages": basePackageInstallScript(),
 		"docker":        dockerInstallScript(),
+		"docker buildx": dockerBuildxInstallScript(),
 	} {
 		for _, disallowed := range []string{"get.docker.com", "curl |", "curl -sSL", "wget |"} {
 			if strings.Contains(script, disallowed) {
 				t.Fatalf("%s script contains disallowed installer pattern %q:\n%s", name, disallowed, script)
 			}
+		}
+	}
+}
+
+func TestDockerBuildxInstallScriptUsesOSPackages(t *testing.T) {
+	script := dockerBuildxInstallScript()
+	for _, required := range []string{
+		"docker buildx version",
+		"apt-get install -y docker-buildx",
+		"docker-cli-buildx",
+		"registry build cache requires manual buildx installation",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("docker buildx install script missing %q:\n%s", required, script)
 		}
 	}
 }

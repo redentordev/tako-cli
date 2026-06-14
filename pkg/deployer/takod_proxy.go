@@ -134,14 +134,12 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 
 	for _, serviceName := range serviceNames {
 		service := services[serviceName]
-		if !service.IsPublic() {
+		proxyPorts := proxyPortsForService(service)
+		if len(proxyPorts) == 0 {
 			continue
 		}
-		if service.Port <= 0 {
-			return nil, false, fmt.Errorf("service %s has proxy config but no port", serviceName)
-		}
 
-		assignments, err := d.planTakodAssignments(&service)
+		assignments, err := d.planTakodAssignments(serviceName, &service)
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to plan proxy upstreams for %s: %w", serviceName, err)
 		}
@@ -155,50 +153,52 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 			return assignments[i].ServerName < assignments[j].ServerName
 		})
 
-		routerName := runtimeid.RouterName(d.config.Project.Name, d.environment, serviceName)
-		rule, err := proxyHostRule(service.Proxy)
-		if err != nil {
-			return nil, false, fmt.Errorf("service %s has invalid proxy domains: %w", serviceName, err)
-		}
-		if rule == "" {
-			return nil, false, fmt.Errorf("service %s has proxy config but no domains", serviceName)
-		}
-
-		var upstreams []traefikServer
-		for _, assignment := range assignments {
-			url, err := d.takodProxyUpstreamURL(proxyServerName, assignment.ServerName, serviceName, assignment.Slot, service.Port)
+		for _, port := range proxyPorts {
+			routerName := proxyRouterName(d.config.Project.Name, d.environment, serviceName, port)
+			rule, err := proxyHostRule(port.Proxy)
 			if err != nil {
-				return nil, false, err
+				return nil, false, fmt.Errorf("service %s port %s has invalid proxy domains: %w", serviceName, port.Name, err)
 			}
-			upstreams = append(upstreams, traefikServer{URL: url})
-		}
+			if rule == "" {
+				return nil, false, fmt.Errorf("service %s port %s has proxy config but no domains", serviceName, port.Name)
+			}
 
-		redirectName := routerName + "-redirect"
-		httpRouterName := routerName + "-http"
-		httpConfig.Routers[routerName] = traefikRouter{
-			Rule:        rule,
-			EntryPoints: []string{"websecure"},
-			Service:     routerName,
-			TLS:         &traefikTLS{CertResolver: "letsencrypt"},
-		}
-		httpConfig.Routers[httpRouterName] = traefikRouter{
-			Rule:        rule,
-			EntryPoints: []string{"web"},
-			Service:     routerName,
-			Middlewares: []string{redirectName},
-		}
-		httpConfig.Middlewares[redirectName] = traefikMiddleware{
-			RedirectScheme: &traefikRedirectScheme{Scheme: "https"},
-		}
+			var upstreams []traefikServer
+			for _, assignment := range assignments {
+				url, err := d.takodProxyUpstreamURL(proxyServerName, assignment.ServerName, serviceName, assignment.Slot, port)
+				if err != nil {
+					return nil, false, err
+				}
+				upstreams = append(upstreams, traefikServer{URL: url})
+			}
 
-		lb := traefikLoadBalancer{
-			Servers:        upstreams,
-			PassHostHeader: true,
+			redirectName := routerName + "-redirect"
+			httpRouterName := routerName + "-http"
+			httpConfig.Routers[routerName] = traefikRouter{
+				Rule:        rule,
+				EntryPoints: []string{"websecure"},
+				Service:     routerName,
+				TLS:         &traefikTLS{CertResolver: "letsencrypt"},
+			}
+			httpConfig.Routers[httpRouterName] = traefikRouter{
+				Rule:        rule,
+				EntryPoints: []string{"web"},
+				Service:     routerName,
+				Middlewares: []string{redirectName},
+			}
+			httpConfig.Middlewares[redirectName] = traefikMiddleware{
+				RedirectScheme: &traefikRedirectScheme{Scheme: "https"},
+			}
+
+			lb := traefikLoadBalancer{
+				Servers:        upstreams,
+				PassHostHeader: true,
+			}
+			if healthCheck := proxyHealthCheckForPort(service, port); healthCheck != nil {
+				lb.HealthCheck = healthCheck
+			}
+			httpConfig.Services[routerName] = traefikService{LoadBalancer: lb}
 		}
-		if healthCheck := proxyHealthCheckForService(service); healthCheck != nil {
-			lb.HealthCheck = healthCheck
-		}
-		httpConfig.Services[routerName] = traefikService{LoadBalancer: lb}
 	}
 
 	if len(httpConfig.Routers) == 0 {
@@ -212,18 +212,18 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 	return data, true, nil
 }
 
-func (d *Deployer) takodProxyUpstreamURL(proxyServerName string, upstreamServerName string, serviceName string, slot int, servicePort int) (string, error) {
+func (d *Deployer) takodProxyUpstreamURL(proxyServerName string, upstreamServerName string, serviceName string, slot int, port config.PortConfig) (string, error) {
 	if upstreamServerName == proxyServerName {
-		if servicePort <= 0 {
-			return "", fmt.Errorf("service %s has invalid local proxy port %d", serviceName, servicePort)
+		if port.Target <= 0 {
+			return "", fmt.Errorf("service %s has invalid local proxy port %d", serviceName, port.Target)
 		}
-		containerName := d.takodContainerName(serviceName, slot)
-		return "http://" + net.JoinHostPort(containerName, strconv.Itoa(servicePort)), nil
+		alias := runtimeid.ContainerNetworkAlias(d.config.Project.Name, d.environment, serviceName, slot)
+		return port.ProxyScheme() + "://" + net.JoinHostPort(alias, strconv.Itoa(port.Target)), nil
 	}
-	return d.meshUpstreamURL(upstreamServerName, serviceName, slot, servicePort)
+	return d.meshUpstreamURL(upstreamServerName, serviceName, slot, port.Target, port.ProxyScheme())
 }
 
-func proxyHealthCheckForService(service config.ServiceConfig) *traefikHealthCheck {
+func proxyHealthCheckForPort(service config.ServiceConfig, port config.PortConfig) *traefikHealthCheck {
 	if service.LoadBalancer.HealthCheck.Enabled {
 		return &traefikHealthCheck{
 			Path:     service.LoadBalancer.HealthCheck.Path,
@@ -241,6 +241,23 @@ func proxyHealthCheckForService(service config.ServiceConfig) *traefikHealthChec
 		Path:     service.HealthCheck.Path,
 		Interval: interval,
 	}
+}
+
+func proxyPortsForService(service config.ServiceConfig) []config.PortConfig {
+	var ports []config.PortConfig
+	for _, port := range service.EffectivePorts() {
+		if port.Mode == "proxy" && port.Proxy != nil {
+			ports = append(ports, port)
+		}
+	}
+	return ports
+}
+
+func proxyRouterName(project string, environment string, serviceName string, port config.PortConfig) string {
+	if port.Name == "http" {
+		return runtimeid.RouterName(project, environment, serviceName)
+	}
+	return runtimeid.RouterName(project, environment, serviceName+"_"+port.Name)
 }
 
 func (d *Deployer) writeTakodProxyConfig(client *ssh.Client, data []byte) error {
@@ -262,7 +279,7 @@ func (d *Deployer) takodProxyConfigFileName() string {
 	return runtimeid.ProxyConfigFileName(d.config.Project.Name, d.environment)
 }
 
-func (d *Deployer) meshUpstreamURL(serverName string, serviceName string, slot int, servicePort int) (string, error) {
+func (d *Deployer) meshUpstreamURL(serverName string, serviceName string, slot int, servicePort int, scheme string) (string, error) {
 	hostIP, err := d.meshHostIPForServer(serverName)
 	if err != nil {
 		return "", err
@@ -271,7 +288,10 @@ func (d *Deployer) meshUpstreamURL(serverName string, serviceName string, slot i
 	if err != nil {
 		return "", err
 	}
-	return "http://" + net.JoinHostPort(hostIP, strconv.Itoa(port)), nil
+	if scheme == "" {
+		scheme = "http"
+	}
+	return scheme + "://" + net.JoinHostPort(hostIP, strconv.Itoa(port)), nil
 }
 
 func (d *Deployer) meshUpstreamPortForServer(serverName string, serviceName string, slot int, containerPort int) (int, error) {
@@ -295,7 +315,7 @@ func (d *Deployer) allocateMeshUpstreamPort(client takodclient.RequestExecutor, 
 	if err != nil {
 		return 0, err
 	}
-	preferredPort, err := d.meshUpstreamPort(serviceName, slot)
+	preferredPort, err := d.meshUpstreamPort(serviceName, slot, containerPort)
 	if err != nil {
 		return 0, err
 	}
@@ -366,9 +386,12 @@ func (d *Deployer) meshHostIPForServer(serverName string) (string, error) {
 	return "", fmt.Errorf("server %s is not a takod target", serverName)
 }
 
-func (d *Deployer) meshUpstreamPort(serviceName string, slot int) (int, error) {
+func (d *Deployer) meshUpstreamPort(serviceName string, slot int, containerPort int) (int, error) {
 	if slot <= 0 {
 		return 0, fmt.Errorf("invalid takod slot %d for %s", slot, serviceName)
+	}
+	if containerPort <= 0 || containerPort > 65535 {
+		return 0, fmt.Errorf("invalid container port %d for %s", containerPort, serviceName)
 	}
 	if slot > meshUpstreamPortSlotLimit {
 		return 0, fmt.Errorf("service %s slot %d exceeds per-service mesh upstream limit %d", serviceName, slot, meshUpstreamPortSlotLimit)
@@ -376,60 +399,27 @@ func (d *Deployer) meshUpstreamPort(serviceName string, slot int) (int, error) {
 	if d.config == nil || d.config.Project.Name == "" || d.environment == "" {
 		return 0, fmt.Errorf("project and environment are required for mesh upstream port allocation")
 	}
-	blockCount := (meshUpstreamPortMax - meshUpstreamPortBase + 1) / meshUpstreamPortSlotLimit
-	if blockCount <= 0 {
-		return 0, fmt.Errorf("invalid mesh upstream port range")
-	}
-	block, err := d.meshUpstreamPortBlock(serviceName, blockCount)
-	if err != nil {
-		return 0, err
-	}
-
-	port := meshUpstreamPortBase + block*meshUpstreamPortSlotLimit + (slot - 1)
-	if port > meshUpstreamPortMax {
-		return 0, fmt.Errorf("mesh upstream port %d for %s slot %d exceeds maximum %d", port, serviceName, slot, meshUpstreamPortMax)
-	}
-	return port, nil
-}
-
-func (d *Deployer) meshUpstreamPortBlock(serviceName string, blockCount int) (int, error) {
 	services, err := d.config.GetServices(d.environment)
 	if err != nil {
 		return 0, err
 	}
-	serviceNames := make([]string, 0, len(services))
-	for name := range services {
-		serviceNames = append(serviceNames, name)
+	if _, ok := services[serviceName]; !ok {
+		return 0, fmt.Errorf("service %s not found", serviceName)
 	}
-	sort.Strings(serviceNames)
-
-	allocated := make(map[int]string, len(serviceNames))
-	for _, name := range serviceNames {
-		block := preferredMeshUpstreamPortBlock(d.config.Project.Name, d.environment, name, blockCount)
-		for attempts := 0; attempts < blockCount; attempts++ {
-			candidate := (block + attempts) % blockCount
-			if _, exists := allocated[candidate]; exists {
-				continue
-			}
-			allocated[candidate] = name
-			if name == serviceName {
-				return candidate, nil
-			}
-			break
-		}
-	}
-	return 0, fmt.Errorf("service %s not found or no mesh upstream port blocks are available", serviceName)
+	portRange := meshUpstreamPortMax - meshUpstreamPortBase + 1
+	offset := preferredMeshUpstreamPortOffset(d.config.Project.Name, d.environment, serviceName, containerPort, portRange)
+	return meshUpstreamPortBase + ((offset + slot - 1) % portRange), nil
 }
 
-func preferredMeshUpstreamPortBlock(project string, environment string, serviceName string, blockCount int) int {
+func preferredMeshUpstreamPortOffset(project string, environment string, serviceName string, containerPort int, portRange int) int {
 	hash := fnv.New32a()
-	for index, part := range []string{project, environment, serviceName} {
+	for index, part := range []string{project, environment, serviceName, strconv.Itoa(containerPort)} {
 		if index > 0 {
 			_, _ = hash.Write([]byte{0})
 		}
 		_, _ = hash.Write([]byte(part))
 	}
-	return int(hash.Sum32() % uint32(blockCount))
+	return int(hash.Sum32() % uint32(portRange))
 }
 
 func proxyHostRule(proxy *config.ProxyConfig) (string, error) {
@@ -457,8 +447,10 @@ func proxyHostRule(proxy *config.ProxyConfig) (string, error) {
 
 func firstProxyEmail(services map[string]config.ServiceConfig) string {
 	for _, service := range services {
-		if service.Proxy != nil && service.Proxy.Email != "" {
-			return service.Proxy.Email
+		for _, port := range proxyPortsForService(service) {
+			if port.Proxy != nil && port.Proxy.Email != "" {
+				return port.Proxy.Email
+			}
 		}
 	}
 	return ""

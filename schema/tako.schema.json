@@ -186,6 +186,15 @@
           ],
           "description": "Deployment strategy"
         },
+        "source": {
+          "type": "string",
+          "enum": [
+            "local",
+            "git"
+          ],
+          "default": "local",
+          "description": "Build source mode: local worktree or committed git HEAD"
+        },
         "parallel": {
           "type": "object",
           "properties": {
@@ -224,6 +233,14 @@
             "retention": {
               "type": "string",
               "description": "Cache retention period (e.g., 7d)"
+            },
+            "ref": {
+              "type": "string",
+              "description": "Registry cache reference for type=registry"
+            },
+            "builder": {
+              "type": "string",
+              "description": "Optional docker buildx builder name"
             }
           }
         }
@@ -244,6 +261,27 @@
         "webhook": {
           "type": "string",
           "description": "Generic webhook URL"
+        }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "description": "Private registry credentials for prebuilt image pulls",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Registry host, e.g. ghcr.io or registry.example.com:5000"
+        },
+        "username": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string",
+          "description": "Use an environment variable placeholder, e.g. ${REGISTRY_TOKEN}"
+        },
+        "identityToken": {
+          "type": "string",
+          "description": "Registry identity token alternative to username/password"
         }
       }
     },
@@ -272,8 +310,126 @@
           "external": {
             "type": "boolean"
           },
+          "replicated": {
+            "type": "boolean",
+            "description": "True when the application or external storage layer handles safe multi-node writes"
+          },
           "name": {
             "type": "string"
+          }
+        }
+      }
+    },
+    "configs": {
+      "type": "object",
+      "description": "Project-owned config artifacts mounted read-only into services",
+      "additionalProperties": {
+        "type": "object",
+        "oneOf": [
+          {
+            "required": [
+              "source"
+            ]
+          },
+          {
+            "required": [
+              "generate"
+            ]
+          }
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "Relative local file path inside the project checkout"
+          },
+          "generate": {
+            "type": "object",
+            "description": "Generated config artifact definition",
+            "properties": {
+              "caddy": {
+                "type": "object",
+                "description": "Generate a Caddyfile from cross-project imports",
+                "required": [
+                  "email",
+                  "adminHost",
+                  "siteHost",
+                  "adminImport",
+                  "rendererImport"
+                ],
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "description": "Let's Encrypt account email"
+                  },
+                  "adminHost": {
+                    "type": "string",
+                    "description": "Static admin hostname"
+                  },
+                  "siteHost": {
+                    "type": "string",
+                    "description": "Static platform site hostname"
+                  },
+                  "adminImport": {
+                    "type": "string",
+                    "description": "Import alias for the admin upstream"
+                  },
+                  "rendererImport": {
+                    "type": "string",
+                    "description": "Import alias for the renderer upstream"
+                  },
+                  "askImport": {
+                    "type": "string",
+                    "description": "Import alias for the on-demand TLS ask endpoint; defaults to adminImport"
+                  },
+                  "askPath": {
+                    "type": "string",
+                    "description": "HTTP path for Caddy on-demand TLS ask checks"
+                  },
+                  "onDemandTLS": {
+                    "type": "boolean",
+                    "description": "Enable Caddy on-demand TLS catch-all routing"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "imports": {
+      "type": "object",
+      "description": "Cross-project service imports keyed by local alias",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "project",
+          "environment",
+          "service",
+          "port"
+        ],
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "Exporting project name"
+          },
+          "environment": {
+            "type": "string",
+            "description": "Exporting environment/stage"
+          },
+          "service": {
+            "type": "string",
+            "description": "Exporting service name"
+          },
+          "port": {
+            "type": "string",
+            "description": "Exported named port"
+          },
+          "servers": {
+            "type": "array",
+            "description": "Optional configured server names to query for the exported project",
+            "items": {
+              "type": "string"
+            }
           }
         }
       }
@@ -301,13 +457,115 @@
                   "type": "string",
                   "description": "Build context path"
                 },
+                "dockerfile": {
+                  "type": "string",
+                  "description": "Dockerfile path relative to the build context"
+                },
                 "image": {
                   "type": "string",
                   "description": "Docker image"
                 },
+                "platform": {
+                  "type": "string",
+                  "description": "Docker platform for service image builds",
+                  "enum": [
+                    "linux/amd64",
+                    "linux/arm64",
+                    "linux/arm/v6",
+                    "linux/arm/v7",
+                    "linux/386"
+                  ]
+                },
                 "port": {
                   "type": "integer",
-                  "description": "Container port"
+                  "description": "Container port shorthand for one HTTP/internal port"
+                },
+                "ports": {
+                  "type": "array",
+                  "description": "Named service ports for internal, proxy, or host binding",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "name",
+                      "target"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "target": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535
+                      },
+                      "published": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535
+                      },
+                      "protocol": {
+                        "type": "string",
+                        "enum": [
+                          "http",
+                          "https",
+                          "tcp",
+                          "udp"
+                        ]
+                      },
+                      "mode": {
+                        "type": "string",
+                        "enum": [
+                          "internal",
+                          "proxy",
+                          "host"
+                        ]
+                      },
+                      "hostIP": {
+                        "type": "string",
+                        "description": "Host bind IP or CIDR for host mode"
+                      },
+                      "internal": {
+                        "type": "boolean",
+                        "description": "Compatibility shorthand for mode: internal"
+                      },
+                      "proxy": {
+                        "type": "object",
+                        "description": "Public proxy settings for this port",
+                        "properties": {
+                          "domain": {
+                            "type": "string",
+                            "description": "Primary domain"
+                          },
+                          "redirectFrom": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "Domains to redirect from"
+                          },
+                          "email": {
+                            "type": "string",
+                            "description": "Let's Encrypt email"
+                          },
+                          "tls": {
+                            "type": "object",
+                            "properties": {
+                              "provider": {
+                                "type": "string",
+                                "enum": [
+                                  "letsencrypt",
+                                  "zerossl"
+                                ]
+                              },
+                              "staging": {
+                                "type": "boolean"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
                 },
                 "command": {
                   "type": "string",
@@ -352,6 +610,31 @@
                     "type": "string"
                   },
                   "description": "Volume mounts"
+                },
+                "configs": {
+                  "type": "array",
+                  "description": "Read-only config file mounts from top-level configs",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "source",
+                      "target"
+                    ],
+                    "properties": {
+                      "source": {
+                        "type": "string",
+                        "description": "Top-level config artifact name"
+                      },
+                      "target": {
+                        "type": "string",
+                        "description": "Absolute container file path"
+                      },
+                      "mode": {
+                        "type": "string",
+                        "description": "Read-only octal file mode, e.g. 0444"
+                      }
+                    }
+                  }
                 },
                 "persistent": {
                   "type": "boolean",
@@ -428,11 +711,22 @@
                     "strategy": {
                       "type": "string",
                       "enum": [
-                        "recreate"
+                        "recreate",
+                        "rolling"
+                      ]
+                    },
+                    "order": {
+                      "type": "string",
+                      "enum": [
+                        "start-first",
+                        "stop-first"
                       ]
                     },
                     "maxUnavailable": {
                       "type": "integer"
+                    },
+                    "monitor": {
+                      "type": "string"
                     }
                   }
                 },
@@ -479,15 +773,23 @@
                   }
                 },
                 "export": {
-                  "type": "boolean",
-                  "description": "Export service to other projects"
-                },
-                "imports": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
+                  "type": "object",
+                  "description": "Explicit service ports exported to other projects",
+                  "required": [
+                    "ports"
+                  ],
+                  "properties": {
+                    "ports": {
+                      "type": "object",
+                      "description": "Exported port aliases mapped to container target ports",
+                      "additionalProperties": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535
+                      }
+                    }
                   },
-                  "description": "Import services from other projects"
+                  "additionalProperties": false
                 }
               }
             }

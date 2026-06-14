@@ -16,6 +16,20 @@ func TestFirewallAllowCommandsUseConfiguredMeshPort(t *testing.T) {
 	}
 }
 
+func TestFirewallAllowCommandsDoNotThrottleSSH(t *testing.T) {
+	commands := strings.Join(firewallAllowCommands(42420), "\n")
+
+	if strings.Contains(commands, "ufw limit 22/tcp comment") {
+		t.Fatalf("firewall commands should not rate-limit Tako's SSH control plane:\n%s", commands)
+	}
+	if !strings.Contains(commands, "sudo ufw --force delete limit 22/tcp || true") {
+		t.Fatalf("firewall commands should remove legacy SSH limit rules:\n%s", commands)
+	}
+	if !strings.Contains(commands, "sudo ufw allow 22/tcp comment 'SSH' || true") {
+		t.Fatalf("firewall commands should allow SSH without UFW throttling:\n%s", commands)
+	}
+}
+
 func TestConfigureFirewallRejectsInvalidMeshPort(t *testing.T) {
 	provisioner := NewProvisioner(nil, false)
 

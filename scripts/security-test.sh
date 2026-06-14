@@ -9,7 +9,7 @@
 #   apt-get update && apt-get install -y nmap hydra nikto sslscan netcat-openbsd jq
 #
 # Example:
-#   ./security-test.sh 77.42.21.99 hono.77.42.21.99.sslip.io
+#   ./security-test.sh 203.0.113.10 hono.203.0.113.10.sslip.io
 #
 
 set -e
@@ -34,7 +34,7 @@ if [ -z "$TARGET" ]; then
     echo "  apt-get update && apt-get install -y nmap hydra nikto sslscan netcat-openbsd jq"
     echo ""
     echo "Example:"
-    echo "  $0 77.42.21.99 hono.77.42.21.99.sslip.io"
+    echo "  $0 203.0.113.10 hono.203.0.113.10.sslip.io"
     exit 1
 fi
 

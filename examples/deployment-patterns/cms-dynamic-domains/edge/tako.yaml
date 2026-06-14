@@ -1,0 +1,74 @@
+project:
+  name: pattern-cms-edge
+  version: 1.0.0
+
+servers:
+  edge:
+    host: ${EDGE_SERVER_HOST}
+    user: root
+    sshKey: ${EDGE_SSH_KEY}
+  app:
+    host: ${APP_SERVER_HOST}
+    user: root
+    sshKey: ${APP_SSH_KEY}
+
+imports:
+  jardin_admin:
+    project: pattern-cms-app
+    environment: production
+    service: admin
+    port: web
+    servers:
+      - app
+  jardin_renderer:
+    project: pattern-cms-app
+    environment: production
+    service: renderer
+    port: web
+    servers:
+      - app
+
+configs:
+  caddyfile:
+    generate:
+      caddy:
+        email: ${LETSENCRYPT_EMAIL}
+        adminHost: ${JARDIN_ADMIN_HOST}
+        siteHost: ${JARDIN_SITE_HOST}
+        adminImport: jardin_admin
+        rendererImport: jardin_renderer
+        askImport: jardin_admin
+        askPath: /api/platform/domains/ask
+        onDemandTLS: true
+
+volumes:
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+
+environments:
+  production:
+    servers:
+      - edge
+    services:
+      edge:
+        image: caddy:2.9-alpine
+        ports:
+          - name: http
+            target: 80
+            published: 80
+            protocol: tcp
+            mode: host
+          - name: https
+            target: 443
+            published: 443
+            protocol: tcp
+            mode: host
+        configs:
+          - source: caddyfile
+            target: /etc/caddy/Caddyfile
+            mode: "0444"
+        volumes:
+          - caddy_data:/data
+          - caddy_config:/config

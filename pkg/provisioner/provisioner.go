@@ -2,7 +2,9 @@ package provisioner
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -79,6 +81,9 @@ func (p *Provisioner) InstallDocker() error {
 			}
 			p.client.Execute("sudo systemctl start docker")
 		}
+		if err := p.EnsureDockerBuildx(); err != nil && p.verbose {
+			fmt.Printf("  Warning: failed to ensure Docker buildx: %v\n", err)
+		}
 		return nil
 	}
 
@@ -119,6 +124,23 @@ func (p *Provisioner) InstallDocker() error {
 		return fmt.Errorf("docker daemon is not running: %w", err)
 	}
 
+	if err := p.EnsureDockerBuildx(); err != nil && p.verbose {
+		fmt.Printf("  Warning: failed to ensure Docker buildx: %v\n", err)
+	}
+
+	return nil
+}
+
+func (p *Provisioner) EnsureDockerBuildx() error {
+	if output, err := p.client.Execute("docker buildx version"); err == nil && strings.TrimSpace(output) != "" {
+		return nil
+	}
+	if p.verbose {
+		fmt.Printf("  Ensuring Docker buildx plugin from OS packages...\n")
+	}
+	if _, err := p.client.Execute(runRootScript(dockerBuildxInstallScript())); err != nil {
+		return fmt.Errorf("failed to install Docker buildx package: %w", err)
+	}
 	return nil
 }
 
@@ -173,6 +195,31 @@ command -v docker >/dev/null 2>&1
 `
 }
 
+func dockerBuildxInstallScript() string {
+	return `set -eu
+if docker buildx version >/dev/null 2>&1; then
+  exit 0
+fi
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker-buildx || DEBIAN_FRONTEND=noninteractive apt-get install -y docker-buildx-plugin || true
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y docker-buildx-plugin || dnf install -y docker-buildx || true
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y docker-buildx-plugin || yum install -y docker-buildx || true
+elif command -v zypper >/dev/null 2>&1; then
+  zypper --non-interactive install -y docker-buildx || zypper --non-interactive install -y docker-buildx-plugin || true
+elif command -v apk >/dev/null 2>&1; then
+  apk add --no-cache docker-cli-buildx || apk add --no-cache docker-buildx || true
+fi
+if docker buildx version >/dev/null 2>&1; then
+  exit 0
+fi
+echo "docker buildx plugin is not available from this OS package manager; registry build cache requires manual buildx installation" >&2
+exit 0
+`
+}
+
 func (p *Provisioner) InstallWireGuard() error {
 	return mesh.EnsureWireGuardTools(p.client, p.verbose)
 }
@@ -211,6 +258,17 @@ func (p *Provisioner) InstallTakodBinaryFromFile(localPath string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("local takod binary path is not a regular file: %s", localPath)
 	}
+	localHash, err := fileSHA256(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to checksum local takod binary: %w", err)
+	}
+	if p.remoteTakodBinaryMatches(localHash) {
+		if p.verbose {
+			fmt.Printf("  Local takod binary already installed: %s\n", localPath)
+		}
+		return nil
+	}
+
 	file, err := os.Open(localPath)
 	if err != nil {
 		return fmt.Errorf("failed to open local takod binary: %w", err)
@@ -231,6 +289,26 @@ func (p *Provisioner) InstallTakodBinaryFromFile(localPath string) error {
 		return fmt.Errorf("failed to install uploaded takod binary: %w", err)
 	}
 	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (p *Provisioner) remoteTakodBinaryMatches(localHash string) bool {
+	if strings.TrimSpace(localHash) == "" {
+		return false
+	}
+	output, err := p.client.Execute("if test -x /usr/local/bin/tako && command -v sha256sum >/dev/null 2>&1; then sha256sum /usr/local/bin/tako | awk '{print $1}'; fi")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(output) == localHash
 }
 
 func takodBinaryInstallScript(version string, binaryName string) string {
@@ -554,8 +632,11 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 
 func firewallAllowCommands(meshListenPort int) []string {
 	return []string{
-		// SSH with rate limiting (max 10 connections per 30 seconds per IP).
-		"sudo ufw limit 22/tcp comment 'SSH with rate limiting' || true",
+		// Tako opens several short-lived SSH sessions for normal operator flows.
+		// Key-only SSH and fail2ban provide brute-force protection without
+		// self-throttling legitimate deploy, logs, scale, and state commands.
+		"sudo ufw --force delete limit 22/tcp || true",
+		"sudo ufw allow 22/tcp comment 'SSH' || true",
 
 		// HTTP/HTTPS.
 		"sudo ufw allow 80/tcp comment 'HTTP' || true",

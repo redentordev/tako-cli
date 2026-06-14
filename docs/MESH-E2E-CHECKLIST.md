@@ -68,6 +68,8 @@ Deploy and env phases also fail early unless `.tako/` and `.env` are ignored
 and the app worktree is clean, matching `tako deploy`'s clean-check behavior.
 The env phase backs up the local `.env`, verifies that `env pull --force`
 restores the same content, and restores the original file if the check fails.
+For stage-specific files, use `tako env push production --from-file
+.env.production`; pull restores `.env.production` with the same basename.
 The CI phase defaults to `TAKO_E2E_CI_HOST_KEY_MODE=tofu`; set it to `strict`
 when validating a runner image with preinstalled known hosts.
 
@@ -125,6 +127,7 @@ Expected result:
 
 ```bash
 tako env push -e production
+tako env push production --from-file .env.production
 rm -f .env
 tako env pull -e production --force
 ```
@@ -132,6 +135,8 @@ tako env pull -e production --force
 Expected result:
 
 - `env push` writes the encrypted bundle to every reachable environment node.
+- `--from-file` accepts `.env.<stage>` files with comments and quoted values
+  and keeps the basename on restore.
 - `env pull` restores the newest bundle from reachable nodes.
 - Unsupported bundle paths are skipped instead of written outside the project.
 
@@ -215,8 +220,8 @@ Expected result:
 
 - The runner has no dependency on a persisted `.tako/` workspace.
 - `TAKO_HOST_KEY_MODE=strict` works after known hosts are installed.
-- Remote leases reject overlapping deploy, rollback, scale, maintenance, live,
-  remove, cleanup, destroy, and repair operations.
+- Remote leases reject overlapping deploy, rollback, scale, env push, remove,
+  destroy, and repair operations.
 - `tako state lease` shows held lease IDs, and
   `tako state lease release --id <id> --force` releases only the exact stale ID
   when a runner or laptop is interrupted.

@@ -4,7 +4,7 @@ This example demonstrates a backend API service that **exports** itself for use 
 
 ## Features
 
-- **Exported Service**: API service is marked with `export: true`
+- **Exported Service**: API service explicitly exports the named `web` port
 - **Load Balanced**: 2 replicas with health checks
 - **Private Database**: PostgreSQL database NOT exported (stays private)
 - **Multi-Project**: Can be consumed by other projects via imports
@@ -14,7 +14,7 @@ This example demonstrates a backend API service that **exports** itself for use 
 ### api
 - **Port**: 4000
 - **Replicas**: 2
-- **Export**: true (available to other projects)
+- **Export**: `web:4000` (available to other projects)
 - **Endpoints**:
   - `GET /health` - Health check
   - `GET /api/users` - User list
@@ -25,12 +25,18 @@ This example demonstrates a backend API service that **exports** itself for use 
 - **Persistent**: true
 - **Export**: false (private to this project)
 
-## DNS Resolution
+## Export
 
-Other projects can access this API via:
-- `backend-api_api` - Round-robin across both replicas
-- `backend-api_api_1` - Specific replica 1
-- `backend-api_api_2` - Specific replica 2
+Other projects can declare an import for:
+
+```yaml
+imports:
+  backend_api:
+    project: backend-api
+    environment: production
+    service: api
+    port: web
+```
 
 ## Usage
 

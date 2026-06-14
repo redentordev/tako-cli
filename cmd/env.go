@@ -22,7 +22,10 @@ import (
 	"golang.org/x/term"
 )
 
-var envForce bool
+var (
+	envForce        bool
+	envPushFromFile string
+)
 
 const envPassphraseVar = "TAKO_ENV_PASSPHRASE"
 
@@ -39,31 +42,38 @@ This allows you to securely transfer credentials between machines. Files are
 encrypted with a passphrase using Argon2id + AES-256-GCM before upload.
 
 Examples:
+  tako env push production --from-file .env.production
   tako env push              # Encrypt and upload .env + secrets
-  tako env pull              # Download and decrypt to local
+  tako env pull production   # Download and decrypt to local
   tako env pull --force      # Overwrite existing local files
 
 For CI, set TAKO_ENV_PASSPHRASE to avoid interactive prompts.`,
 }
 
 var envPushCmd = &cobra.Command{
-	Use:   "push",
+	Use:   "push [environment]",
 	Short: "Encrypt and upload environment files to the takod mesh",
 	Long: `Encrypt .env and .tako/secrets* files with a passphrase and upload
 the encrypted bundle to reachable environment nodes.
 
+Use --from-file to push a stage-specific env file such as .env.production.
+Files named .env or .env.<stage> are restored with that basename on pull;
+other source filenames are restored as .env.
+
 The encrypted bundle is stored in takod state on each reachable node,
 protected by your passphrase.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runEnvPush,
 }
 
 var envPullCmd = &cobra.Command{
-	Use:   "pull",
+	Use:   "pull [environment]",
 	Short: "Download and decrypt environment files from the takod mesh",
 	Long: `Download the encrypted environment bundle from reachable environment nodes,
 decrypt it with your passphrase, and restore the files locally.
 
 By default, refuses to overwrite existing files. Use --force to override.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runEnvPull,
 }
 
@@ -72,6 +82,7 @@ func init() {
 	envCmd.AddCommand(envPushCmd)
 	envCmd.AddCommand(envPullCmd)
 
+	envPushCmd.Flags().StringVar(&envPushFromFile, "from-file", "", "Read env content from this file instead of .env")
 	envPullCmd.Flags().BoolVar(&envForce, "force", false, "Overwrite existing local files")
 }
 
@@ -84,31 +95,14 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	envName := getEnvironmentName(cfg)
-
-	// Collect files to bundle
-	bundle := make(map[string]string) // relative path -> base64 content
-
-	// Add .env if it exists
-	if data, err := os.ReadFile(".env"); err == nil {
-		bundle[".env"] = base64.StdEncoding.EncodeToString(data)
-		fmt.Println("Including: .env")
+	envName, err := envCommandEnvironment(cfg, args)
+	if err != nil {
+		return err
 	}
 
-	// Add .tako/secrets* files
-	matches, _ := filepath.Glob(".tako/secrets*")
-	for _, match := range matches {
-		data, err := os.ReadFile(match)
-		if err != nil {
-			fmt.Printf("Warning: skipping %s: %v\n", match, err)
-			continue
-		}
-		bundle[match] = base64.StdEncoding.EncodeToString(data)
-		fmt.Printf("Including: %s\n", match)
-	}
-
-	if len(bundle) == 0 {
-		return fmt.Errorf("no environment files found to push (.env, .tako/secrets*)")
+	bundle, err := collectEnvPushBundle(envPushFromFile)
+	if err != nil {
+		return err
 	}
 
 	// Prompt for passphrase
@@ -175,7 +169,10 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	envName := getEnvironmentName(cfg)
+	envName, err := envCommandEnvironment(cfg, args)
+	if err != nil {
+		return err
+	}
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
@@ -200,6 +197,93 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\nRestored %d file(s) from %s\n", restored, source)
 	return nil
+}
+
+func envCommandEnvironment(cfg *config.Config, args []string) (string, error) {
+	if len(args) > 1 {
+		return "", fmt.Errorf("expected at most one environment argument")
+	}
+	if len(args) == 0 {
+		return getEnvironmentName(cfg), nil
+	}
+	envName := strings.TrimSpace(args[0])
+	if envName == "" {
+		return "", fmt.Errorf("environment argument is required")
+	}
+	if envFlag != "" && envFlag != envName {
+		return "", fmt.Errorf("environment argument %q conflicts with --env %q", envName, envFlag)
+	}
+	if _, ok := cfg.Environments[envName]; !ok {
+		return "", fmt.Errorf("environment %s not found in config", envName)
+	}
+	return envName, nil
+}
+
+func collectEnvPushBundle(fromFile string) (map[string]string, error) {
+	bundle := make(map[string]string)
+	if strings.TrimSpace(fromFile) != "" {
+		targetPath, data, err := readEnvPushSource(fromFile)
+		if err != nil {
+			return nil, err
+		}
+		bundle[targetPath] = base64.StdEncoding.EncodeToString(data)
+		fmt.Printf("Including: %s from %s\n", targetPath, fromFile)
+	} else if data, err := os.ReadFile(".env"); err == nil {
+		bundle[".env"] = base64.StdEncoding.EncodeToString(data)
+		fmt.Println("Including: .env")
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to read .env: %w", err)
+	}
+
+	matches, _ := filepath.Glob(".tako/secrets*")
+	for _, match := range matches {
+		data, err := os.ReadFile(match)
+		if err != nil {
+			fmt.Printf("Warning: skipping %s: %v\n", match, err)
+			continue
+		}
+		bundle[match] = base64.StdEncoding.EncodeToString(data)
+		fmt.Printf("Including: %s\n", match)
+	}
+
+	if len(bundle) == 0 {
+		return nil, fmt.Errorf("no environment files found to push (.env, .tako/secrets*)")
+	}
+	return bundle, nil
+}
+
+func readEnvPushSource(source string) (string, []byte, error) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return "", nil, fmt.Errorf("--from-file is required")
+	}
+	clean := filepath.Clean(source)
+	info, err := os.Lstat(clean)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to inspect --from-file %s: %w", source, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", nil, fmt.Errorf("--from-file %s must be a regular file, not a symlink", source)
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("--from-file %s must be a regular file", source)
+	}
+	if info.Size() > 1<<20 {
+		return "", nil, fmt.Errorf("--from-file %s exceeds 1 MiB", source)
+	}
+	data, err := os.ReadFile(clean)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read --from-file %s: %w", source, err)
+	}
+	return envBundlePathForSource(clean), data, nil
+}
+
+func envBundlePathForSource(source string) string {
+	base := filepath.Base(filepath.Clean(source))
+	if base == ".env" || strings.HasPrefix(base, ".env.") {
+		return base
+	}
+	return ".env"
 }
 
 func restoreDownloadedEnvBundle(response *takod.EnvBundleResponse, force bool) (int, bool, error) {
@@ -745,7 +829,7 @@ func isAllowedEnvBundlePath(path string) bool {
 	if path == "" || filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return false
 	}
-	if path == ".env" {
+	if filepath.Dir(path) == "." && (path == ".env" || strings.HasPrefix(path, ".env.")) {
 		return true
 	}
 	if filepath.Dir(path) != ".tako" {

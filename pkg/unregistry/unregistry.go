@@ -3,7 +3,10 @@
 package unregistry
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 
@@ -115,12 +118,15 @@ func unregistryPeerServers(cfg *config.Config, environment string, sourceHost st
 }
 
 func (m *Manager) streamImageViaTakod(sourceClient *ssh.Client, peerServer config.ServerConfig, imageName string) error {
-	command := buildTakodImageStreamCommand(m.takodSocket(), peerServer, imageName)
-	output, err := sourceClient.Execute(command)
-	if err != nil {
-		return fmt.Errorf("failed to stream image through takod: %w, output: %s", err, output)
+	if m.sshPool == nil {
+		return fmt.Errorf("ssh pool is required for image distribution")
 	}
-	return nil
+
+	peerClient, err := m.sshPool.GetOrCreateWithAuth(peerServer.Host, peerServer.Port, peerServer.User, peerServer.SSHKey, peerServer.Password)
+	if err != nil {
+		return fmt.Errorf("failed to connect to peer: %w", err)
+	}
+	return streamImageViaTakodClients(sourceClient, peerClient, m.takodSocket(), imageName)
 }
 
 func (m *Manager) takodSocket() string {
@@ -130,27 +136,64 @@ func (m *Manager) takodSocket() string {
 	return takodclient.DefaultSocket
 }
 
-func buildTakodImageStreamCommand(socket string, peerServer config.ServerConfig, imageName string) string {
+func streamImageViaTakodClients(sourceClient *ssh.Client, peerClient *ssh.Client, socket string, imageName string) error {
+	if sourceClient == nil {
+		return fmt.Errorf("source client is required")
+	}
+	if peerClient == nil {
+		return fmt.Errorf("peer client is required")
+	}
+
+	exportCommand := buildTakodImageExportCommand(socket, imageName)
+	importCommand := buildTakodImageImportCommand(socket, imageName)
+	stream, err := sourceClient.StartStream(exportCommand)
+	if err != nil {
+		return fmt.Errorf("failed to start takod image export: %w", err)
+	}
+	defer stream.Close()
+
+	var exportStderr bytes.Buffer
+	stderrDone := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(&exportStderr, stream.Stderr)
+		stderrDone <- copyErr
+	}()
+
+	output, importErr := peerClient.ExecuteWithInput(context.Background(), importCommand, stream.Stdout)
+	if importErr != nil {
+		_ = stream.Close()
+	}
+
+	exportErr := stream.Wait()
+	stderrErr := <-stderrDone
+	exportStderrText := strings.TrimSpace(exportStderr.String())
+
+	if importErr != nil {
+		return fmt.Errorf("failed to import image through peer takod: %w, output: %s, export stderr: %s", importErr, strings.TrimSpace(output), exportStderrText)
+	}
+	if exportErr != nil {
+		return fmt.Errorf("failed to export image through source takod: %w, stderr: %s", exportErr, exportStderrText)
+	}
+	if stderrErr != nil {
+		return fmt.Errorf("failed to read source export stderr: %w", stderrErr)
+	}
+	return nil
+}
+
+func buildTakodImageExportCommand(socket string, imageName string) string {
 	if socket == "" {
 		socket = takodclient.DefaultSocket
 	}
 	exportURL := "http://takod/v1/images/export?image=" + url.QueryEscape(imageName)
-	importURL := "http://takod/v1/images/import?image=" + url.QueryEscape(imageName)
-	sourceCurl := takodCurlCommand(socket, "GET", exportURL, "")
-	peerCurl := takodCurlCommand(socket, "POST", importURL, "--data-binary @-")
+	return takodCurlCommand(socket, "GET", exportURL, "")
+}
 
-	port := peerServer.Port
-	if port == 0 {
-		port = 22
+func buildTakodImageImportCommand(socket string, imageName string) string {
+	if socket == "" {
+		socket = takodclient.DefaultSocket
 	}
-	return fmt.Sprintf(
-		"%s | %s -p %d %s %s",
-		sourceCurl,
-		remoteSSHCommand(peerServer),
-		port,
-		shellQuote(peerServer.User+"@"+peerServer.Host),
-		shellQuote(peerCurl),
-	)
+	importURL := "http://takod/v1/images/import?image=" + url.QueryEscape(imageName)
+	return takodCurlCommand(socket, "POST", importURL, "--http1.1 -H "+shellQuote("Transfer-Encoding: chunked")+" --upload-file -")
 }
 
 func takodCurlCommand(socket string, method string, endpoint string, bodyArg string) string {
@@ -164,23 +207,6 @@ func takodCurlCommand(socket string, method string, endpoint string, bodyArg str
 		parts = append(parts, bodyArg)
 	}
 	parts = append(parts, shellQuote(endpoint), "; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi")
-	return strings.Join(parts, " ")
-}
-
-func remoteSSHCommand(peerServer config.ServerConfig) string {
-	strictHostKeyChecking := "accept-new"
-	if ssh.GetGlobalHostKeyMode() == ssh.HostKeyModeStrict {
-		strictHostKeyChecking = "yes"
-	}
-
-	parts := []string{
-		"ssh",
-		"-o StrictHostKeyChecking=" + strictHostKeyChecking,
-		"-o UserKnownHostsFile=~/.tako/known_hosts",
-	}
-	if peerServer.SSHKey != "" {
-		parts = append(parts, "-i "+shellQuote(peerServer.SSHKey))
-	}
 	return strings.Join(parts, " ")
 }
 

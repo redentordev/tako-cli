@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,8 +24,11 @@ type Config struct {
 	Mesh          *MeshConfig                  `yaml:"mesh,omitempty" json:"mesh,omitempty"`
 	State         *StateConfig                 `yaml:"state,omitempty" json:"state,omitempty"`
 	Deployment    *DeploymentConfig            `yaml:"deployment,omitempty" json:"deployment,omitempty"`
+	Registry      *RegistryConfig              `yaml:"registry,omitempty" json:"registry,omitempty"`
 	Notifications *NotificationsConfig         `yaml:"notifications,omitempty" json:"notifications,omitempty"`
 	Volumes       map[string]VolumeConfig      `yaml:"volumes,omitempty" json:"volumes,omitempty"` // Top-level volume definitions
+	Configs       map[string]ConfigFileConfig  `yaml:"configs,omitempty" json:"configs,omitempty"` // Top-level config file artifacts
+	Imports       map[string]ImportConfig      `yaml:"imports,omitempty" json:"imports,omitempty"` // Cross-project service imports
 	Servers       map[string]ServerConfig      `yaml:"servers" json:"servers"`
 	Environments  map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
 }
@@ -33,6 +37,9 @@ const (
 	RuntimeModeTakod = "takod"
 
 	RuntimeProxyTako = "tako-proxy"
+
+	DeploymentSourceLocal = "local"
+	DeploymentSourceGit   = "git"
 
 	StateBackendReplicated = "replicated"
 
@@ -82,7 +89,40 @@ type VolumeConfig struct {
 	DriverOpts map[string]string `yaml:"driver_opts,omitempty" json:"driver_opts,omitempty"` // Driver-specific options
 	Labels     map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`           // Volume labels
 	External   bool              `yaml:"external,omitempty" json:"external,omitempty"`       // If true, volume must already exist
+	Replicated bool              `yaml:"replicated,omitempty" json:"replicated,omitempty"`   // App/external replication handles multi-node writes
 	Name       string            `yaml:"name,omitempty" json:"name,omitempty"`               // Override the auto-generated name (opt-out of prefix)
+}
+
+// ConfigFileConfig defines a project-owned file artifact that can be mounted into services.
+type ConfigFileConfig struct {
+	Source   string                 `yaml:"source,omitempty" json:"source,omitempty"`     // Local file path relative to the project checkout
+	Generate *GeneratedConfigConfig `yaml:"generate,omitempty" json:"generate,omitempty"` // Generated artifact definition
+}
+
+// GeneratedConfigConfig defines a generated config artifact.
+type GeneratedConfigConfig struct {
+	Caddy *GeneratedCaddyConfig `yaml:"caddy,omitempty" json:"caddy,omitempty"`
+}
+
+// GeneratedCaddyConfig renders a Caddyfile from cross-project imports.
+type GeneratedCaddyConfig struct {
+	Email          string `yaml:"email" json:"email"`
+	AdminHost      string `yaml:"adminHost" json:"adminHost"`
+	SiteHost       string `yaml:"siteHost" json:"siteHost"`
+	AdminImport    string `yaml:"adminImport" json:"adminImport"`
+	RendererImport string `yaml:"rendererImport" json:"rendererImport"`
+	AskImport      string `yaml:"askImport,omitempty" json:"askImport,omitempty"`
+	AskPath        string `yaml:"askPath,omitempty" json:"askPath,omitempty"`
+	OnDemandTLS    bool   `yaml:"onDemandTLS,omitempty" json:"onDemandTLS,omitempty"`
+}
+
+// ImportConfig defines a named cross-project service import.
+type ImportConfig struct {
+	Project     string   `yaml:"project" json:"project"`
+	Environment string   `yaml:"environment" json:"environment"`
+	Service     string   `yaml:"service" json:"service"`
+	Port        string   `yaml:"port" json:"port"`
+	Servers     []string `yaml:"servers,omitempty" json:"servers,omitempty"` // Optional configured server names to query for the exported project
 }
 
 // NotificationsConfig defines notification settings
@@ -101,6 +141,7 @@ type ProjectConfig struct {
 // DeploymentConfig defines deployment optimization settings
 type DeploymentConfig struct {
 	Strategy string          `yaml:"strategy,omitempty" json:"strategy,omitempty"` // "parallel" or "sequential" (default: sequential)
+	Source   string          `yaml:"source,omitempty" json:"source,omitempty"`     // "local" (default) or "git"
 	Parallel *ParallelConfig `yaml:"parallel,omitempty" json:"parallel,omitempty"`
 	Cache    *CacheConfig    `yaml:"cache,omitempty" json:"cache,omitempty"`
 }
@@ -117,6 +158,24 @@ type CacheConfig struct {
 	Enabled   bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`     // Enable build caching (default: true)
 	Type      string `yaml:"type,omitempty" json:"type,omitempty"`           // "local" (default), "registry"
 	Retention string `yaml:"retention,omitempty" json:"retention,omitempty"` // Cache retention period (e.g., "7d")
+	Ref       string `yaml:"ref,omitempty" json:"ref,omitempty"`             // Registry cache reference for type=registry
+	Builder   string `yaml:"builder,omitempty" json:"builder,omitempty"`     // Optional docker buildx builder name
+}
+
+// RegistryConfig defines credentials for pulling private images.
+type RegistryConfig struct {
+	URL           string `yaml:"url,omitempty" json:"url,omitempty"`
+	Username      string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password      string `yaml:"password,omitempty" json:"password,omitempty"`
+	IdentityToken string `yaml:"identityToken,omitempty" json:"identityToken,omitempty"`
+}
+
+// RegistryAuthConfig is the sanitized registry auth material used for a pull.
+type RegistryAuthConfig struct {
+	Server        string
+	Username      string
+	Password      string
+	IdentityToken string
 }
 
 // ServerConfig defines server connection details
@@ -132,11 +191,14 @@ type ServerConfig struct {
 // ServiceConfig defines service deployment settings
 type ServiceConfig struct {
 	// Build or Image (mutually exclusive)
-	Build string `yaml:"build,omitempty" json:"build,omitempty"` // Path to build context (auto-detects Dockerfile)
-	Image string `yaml:"image,omitempty" json:"image,omitempty"` // Pre-built image (for postgres, redis, etc)
+	Build      string `yaml:"build,omitempty" json:"build,omitempty"`           // Path to build context (auto-detects Dockerfile)
+	Dockerfile string `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"` // Dockerfile path relative to build context
+	Image      string `yaml:"image,omitempty" json:"image,omitempty"`           // Pre-built image (for postgres, redis, etc)
+	Platform   string `yaml:"platform,omitempty" json:"platform,omitempty"`     // Docker platform for service image builds, e.g. linux/amd64
 
 	// Basic settings
 	Port     int               `yaml:"port,omitempty" json:"port,omitempty"`
+	Ports    []PortConfig      `yaml:"ports,omitempty" json:"ports,omitempty"`
 	Command  string            `yaml:"command,omitempty" json:"command,omitempty"`
 	Replicas int               `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
 	Restart  string            `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
@@ -144,8 +206,9 @@ type ServiceConfig struct {
 	EnvFile  string            `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Path to .env file (e.g., .env.production)
 
 	// Secrets: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"].
-	Secrets []string `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
-	Volumes []string `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	Secrets []string                 `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
+	Volumes []string                 `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	Configs []ServiceConfigFileMount `yaml:"configs,omitempty" json:"configs,omitempty"`
 
 	// Service type flags
 	Persistent bool `yaml:"persistent,omitempty" json:"persistent,omitempty"` // Don't remove on redeploy (databases, caches)
@@ -162,6 +225,9 @@ type ServiceConfig struct {
 	// Deployment strategy
 	Deploy DeployConfig `yaml:"deploy,omitempty" json:"deploy,omitempty"`
 
+	// Deployment hooks run as short-lived containers from this service image.
+	Hooks HooksConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
+
 	// Per-service backup
 	Backup *BackupConfig `yaml:"backup,omitempty" json:"backup,omitempty"`
 
@@ -169,14 +235,26 @@ type ServiceConfig struct {
 	Monitoring *MonitoringConfig `yaml:"monitoring,omitempty" json:"monitoring,omitempty"`
 
 	// Cross-project networking
-	Export  bool     `yaml:"export,omitempty" json:"export,omitempty"`   // Export this service to other projects
-	Imports []string `yaml:"imports,omitempty" json:"imports,omitempty"` // Import services from other projects (format: "project.service")
+	Export *ServiceExportConfig `yaml:"export,omitempty" json:"export,omitempty"` // Explicit service ports exported to other projects
 
 	// Placement configuration for takod scheduling.
 	Placement *PlacementConfig `yaml:"placement,omitempty" json:"placement,omitempty"` // Where to run service replicas
 
 	// Service dependencies (controls deployment order)
 	DependsOn []string `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"` // List of service names this service depends on
+}
+
+// ServiceExportConfig defines explicitly exported named service ports.
+type ServiceExportConfig struct {
+	Ports map[string]int `yaml:"ports,omitempty" json:"ports,omitempty"`
+}
+
+// ServiceConfigFileMount maps a named project config file into a container.
+type ServiceConfigFileMount struct {
+	Source      string `yaml:"source" json:"source"`
+	Target      string `yaml:"target" json:"target"`
+	Mode        string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	ContentHash string `yaml:"-" json:"-"`
 }
 
 // HealthCheckConfig defines health check settings
@@ -188,10 +266,41 @@ type HealthCheckConfig struct {
 	StartPeriod string `yaml:"startPeriod,omitempty" json:"startPeriod,omitempty"` // Grace period before starting checks
 }
 
+// PortConfig defines a named service port. The legacy ServiceConfig.Port field
+// remains shorthand for one internal or proxied HTTP port.
+type PortConfig struct {
+	Name      string       `yaml:"name,omitempty" json:"name,omitempty"`
+	Target    int          `yaml:"target" json:"target"`
+	Published int          `yaml:"published,omitempty" json:"published,omitempty"`
+	Protocol  string       `yaml:"protocol,omitempty" json:"protocol,omitempty"` // http, https, tcp, udp
+	Mode      string       `yaml:"mode,omitempty" json:"mode,omitempty"`         // internal, proxy, host
+	HostIP    string       `yaml:"hostIP,omitempty" json:"hostIP,omitempty"`     // IP or CIDR for host mode
+	Internal  bool         `yaml:"internal,omitempty" json:"internal,omitempty"`
+	Proxy     *ProxyConfig `yaml:"proxy,omitempty" json:"proxy,omitempty"`
+}
+
 // DeployConfig defines deployment strategy
 type DeployConfig struct {
-	Strategy       string `yaml:"strategy" json:"strategy"` // recreate
+	Strategy       string `yaml:"strategy,omitempty" json:"strategy,omitempty"` // recreate, rolling
+	Order          string `yaml:"order,omitempty" json:"order,omitempty"`       // start-first, stop-first
 	MaxUnavailable int    `yaml:"maxUnavailable,omitempty" json:"maxUnavailable,omitempty"`
+	Monitor        string `yaml:"monitor,omitempty" json:"monitor,omitempty"` // e.g. 30s
+}
+
+// HooksConfig defines pre/post deploy hooks for a service.
+type HooksConfig struct {
+	PreDeploy  *HookConfig `yaml:"preDeploy,omitempty" json:"preDeploy,omitempty"`
+	PostDeploy *HookConfig `yaml:"postDeploy,omitempty" json:"postDeploy,omitempty"`
+}
+
+// HookConfig defines a short-lived container command run from the service image.
+type HookConfig struct {
+	Command    string            `yaml:"command" json:"command"`
+	Timeout    string            `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	Env        map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	Secrets    []string          `yaml:"secrets,omitempty" json:"secrets,omitempty"`
+	User       string            `yaml:"user,omitempty" json:"user,omitempty"`
+	WorkingDir string            `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
 }
 
 // LoadBalancerConfig defines load balancing settings
@@ -304,10 +413,10 @@ func (s *ServiceConfig) GetServiceType() string {
 	if s.Persistent {
 		return "persistent" // Database, cache, etc.
 	}
-	if s.Proxy != nil {
+	if s.IsPublic() {
 		return "public" // Public web service
 	}
-	if s.Port > 0 {
+	if len(s.EffectivePorts()) > 0 {
 		return "internal" // Internal API
 	}
 	return "worker" // Background worker
@@ -315,17 +424,95 @@ func (s *ServiceConfig) GetServiceType() string {
 
 // IsPublic returns true if service should be exposed publicly
 func (s *ServiceConfig) IsPublic() bool {
-	return s.Proxy != nil
+	for _, port := range s.EffectivePorts() {
+		if port.Proxy != nil && port.Mode == "proxy" {
+			return true
+		}
+	}
+	return false
 }
 
 // IsInternal returns true if service is internal-only
 func (s *ServiceConfig) IsInternal() bool {
-	return s.Port > 0 && s.Proxy == nil
+	return len(s.EffectivePorts()) > 0 && !s.IsPublic()
 }
 
 // IsWorker returns true if service is a background worker
 func (s *ServiceConfig) IsWorker() bool {
-	return s.Port == 0
+	return len(s.EffectivePorts()) == 0
+}
+
+// EffectivePorts returns the explicit ports[] model plus the legacy port/proxy
+// shorthand rendered as a single named port.
+func (s *ServiceConfig) EffectivePorts() []PortConfig {
+	if len(s.Ports) > 0 {
+		out := make([]PortConfig, len(s.Ports))
+		copy(out, s.Ports)
+		for index := range out {
+			normalizePortDefaults(&out[index])
+		}
+		return out
+	}
+	if s.Port <= 0 {
+		return nil
+	}
+	port := PortConfig{
+		Name:     "http",
+		Target:   s.Port,
+		Protocol: "http",
+		Mode:     "internal",
+		Proxy:    s.Proxy,
+	}
+	if s.Proxy != nil {
+		port.Mode = "proxy"
+	}
+	return []PortConfig{port}
+}
+
+// PrimaryTargetPort returns the target port used by service-level health checks
+// and compatibility displays.
+func (s *ServiceConfig) PrimaryTargetPort() int {
+	if s.Port > 0 {
+		return s.Port
+	}
+	for _, port := range s.EffectivePorts() {
+		if port.Target > 0 {
+			return port.Target
+		}
+	}
+	return 0
+}
+
+func normalizePortDefaults(port *PortConfig) {
+	if port.Protocol == "" {
+		if port.Proxy != nil || port.Mode == "proxy" {
+			port.Protocol = "http"
+		} else {
+			port.Protocol = "tcp"
+		}
+	}
+	if port.Mode == "" {
+		switch {
+		case port.Internal:
+			port.Mode = "internal"
+		case port.Proxy != nil:
+			port.Mode = "proxy"
+		case port.Published > 0 || port.HostIP != "":
+			port.Mode = "host"
+		default:
+			port.Mode = "internal"
+		}
+	}
+	if port.Internal {
+		port.Mode = "internal"
+	}
+}
+
+func (p PortConfig) ProxyScheme() string {
+	if p.Protocol == "https" {
+		return "https"
+	}
+	return "http"
 }
 
 // GetDefaultEnvironment returns the default environment name
@@ -516,6 +703,81 @@ func (c *Config) GetRegistryURL() string {
 	// Takod deployments use direct peer transfer for built images unless a service
 	// explicitly references an external image.
 	return ""
+}
+
+// RegistryAuthForImage returns registry credentials for an image when the
+// configured registry host matches the image reference.
+func (c *Config) RegistryAuthForImage(image string) *RegistryAuthConfig {
+	if c == nil || c.Registry == nil {
+		return nil
+	}
+	server := NormalizeRegistryServer(c.Registry.URL)
+	if server == "" || !registryServerMatchesImage(server, image) {
+		return nil
+	}
+	return &RegistryAuthConfig{
+		Server:        registryAuthServer(server),
+		Username:      c.Registry.Username,
+		Password:      c.Registry.Password,
+		IdentityToken: c.Registry.IdentityToken,
+	}
+}
+
+func NormalizeRegistryServer(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
+		return strings.ToLower(parsed.Host)
+	}
+	value = strings.TrimPrefix(value, "//")
+	if slash := strings.Index(value, "/"); slash >= 0 {
+		value = value[:slash]
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func registryServerMatchesImage(server string, image string) bool {
+	imageHost := imageRegistryHost(image)
+	if imageHost == "" {
+		return false
+	}
+	if dockerHubRegistry(server) && dockerHubRegistry(imageHost) {
+		return true
+	}
+	return strings.EqualFold(server, imageHost)
+}
+
+func imageRegistryHost(image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" || strings.HasPrefix(image, "-") {
+		return ""
+	}
+	first, _, _ := strings.Cut(image, "/")
+	if first == "" {
+		return ""
+	}
+	if first == "localhost" || strings.ContainsAny(first, ".:") {
+		return strings.ToLower(first)
+	}
+	return "docker.io"
+}
+
+func dockerHubRegistry(server string) bool {
+	switch strings.ToLower(strings.TrimSpace(server)) {
+	case "docker.io", "index.docker.io", "registry-1.docker.io":
+		return true
+	default:
+		return false
+	}
+}
+
+func registryAuthServer(server string) string {
+	if dockerHubRegistry(server) {
+		return "https://index.docker.io/v1/"
+	}
+	return server
 }
 
 // GetFullImageName returns the full image name with registry and environment tag
@@ -752,6 +1014,24 @@ func (c *Config) IsCacheEnabled() bool {
 		return c.Deployment.Cache.Enabled
 	}
 	return true // Default to enabled
+}
+
+func (c *Config) DeploymentSource() string {
+	if c.Deployment != nil && strings.TrimSpace(c.Deployment.Source) != "" {
+		return strings.TrimSpace(c.Deployment.Source)
+	}
+	return DeploymentSourceLocal
+}
+
+func (c *Config) DeploymentCache() *CacheConfig {
+	if c.Deployment != nil && c.Deployment.Cache != nil {
+		cache := *c.Deployment.Cache
+		if cache.Type == "" {
+			cache.Type = "local"
+		}
+		return &cache
+	}
+	return &CacheConfig{Enabled: true, Type: "local"}
 }
 
 // IsNFSVolume checks if a volume spec uses the removed nfs: prefix.

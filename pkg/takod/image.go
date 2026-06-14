@@ -28,6 +28,15 @@ type ImageBuildResponse struct {
 	Output string `json:"output,omitempty"`
 }
 
+type ImageBuildOptions struct {
+	Platform   string
+	Dockerfile string
+	CacheFrom  []string
+	CacheTo    []string
+	Builder    string
+	UseBuildx  bool
+}
+
 const (
 	defaultBuildContextMaxBytes     int64 = 2 << 30
 	defaultBuildContextMaxFileBytes int64 = 1 << 30
@@ -122,9 +131,31 @@ func (r *maxBytesReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func BuildImage(ctx context.Context, image string, r io.Reader) (*ImageBuildResponse, error) {
+func BuildImage(ctx context.Context, image string, platform string, r io.Reader) (*ImageBuildResponse, error) {
+	return BuildImageWithOptions(ctx, image, ImageBuildOptions{Platform: platform}, r)
+}
+
+func BuildImageWithOptions(ctx context.Context, image string, opts ImageBuildOptions, r io.Reader) (*ImageBuildResponse, error) {
 	if err := validateImageName(image); err != nil {
 		return nil, err
+	}
+	opts.Platform = strings.TrimSpace(opts.Platform)
+	opts.Dockerfile = strings.TrimSpace(opts.Dockerfile)
+	opts.Builder = strings.TrimSpace(opts.Builder)
+	if opts.Platform != "" && !isValidBuildPlatform(opts.Platform) {
+		return nil, fmt.Errorf("invalid build platform %q", opts.Platform)
+	}
+	if opts.Dockerfile != "" {
+		dockerfile, err := cleanBuildDockerfilePath(opts.Dockerfile)
+		if err != nil {
+			return nil, err
+		}
+		opts.Dockerfile = dockerfile
+	}
+	if opts.Builder != "" {
+		if err := validateBuildOptionValue("builder", opts.Builder); err != nil {
+			return nil, err
+		}
 	}
 	r = newMaxBytesReader(r, defaultBuildContextMaxBytes, "build context upload")
 	buildDir, err := os.MkdirTemp("", "tako-build-*")
@@ -136,8 +167,21 @@ func BuildImage(ctx context.Context, image string, r io.Reader) (*ImageBuildResp
 	if err := extractTarGz(r, buildDir); err != nil {
 		return nil, err
 	}
+	if opts.Dockerfile != "" {
+		if err := validateExtractedDockerfile(buildDir, opts.Dockerfile); err != nil {
+			return nil, err
+		}
+	}
 
-	cmd := dockerCommandContext(ctx, "docker", "build", "-t", image, ".")
+	useBuildx := opts.UseBuildx || opts.Builder != "" || len(opts.CacheTo) > 0
+	if useBuildx {
+		if _, err := runDocker(ctx, "buildx", "version"); err != nil {
+			return nil, fmt.Errorf("docker buildx is required for this build: %w", err)
+		}
+	}
+	args := buildDockerBuildArgs(ctx, image, opts, useBuildx)
+	args = append(args, "-t", image, ".")
+	cmd := dockerCommandContext(ctx, "docker", args...)
 	cmd.Dir = buildDir
 	output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
 	cmd.Stdout = output
@@ -149,6 +193,110 @@ func BuildImage(ctx context.Context, image string, r io.Reader) (*ImageBuildResp
 		return nil, fmt.Errorf("built image %s is not inspectable: %w", image, err)
 	}
 	return &ImageBuildResponse{Image: image, Output: strings.TrimSpace(output.String())}, nil
+}
+
+func buildDockerBuildArgs(ctx context.Context, image string, opts ImageBuildOptions, useBuildx bool) []string {
+	args := []string{"build"}
+	if useBuildx {
+		args = []string{"buildx", "build", "--load"}
+		if opts.Builder != "" {
+			args = append(args, "--builder", opts.Builder)
+		}
+	}
+	if opts.Platform != "" {
+		args = append(args, "--platform", opts.Platform)
+	}
+	if opts.Dockerfile != "" {
+		args = append(args, "--file", opts.Dockerfile)
+	}
+	for _, cacheFrom := range normalizedBuildCacheValues(opts.CacheFrom) {
+		if useBuildx {
+			args = append(args, "--cache-from", cacheFrom)
+			continue
+		}
+		if err := validateImageName(cacheFrom); err != nil {
+			continue
+		}
+		if _, err := runDocker(ctx, "image", "inspect", cacheFrom); err == nil {
+			args = append(args, "--cache-from", cacheFrom)
+		}
+	}
+	for _, cacheTo := range normalizedBuildCacheValues(opts.CacheTo) {
+		if useBuildx {
+			args = append(args, "--cache-to", cacheTo)
+		}
+	}
+	return args
+}
+
+func normalizedBuildCacheValues(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		if err := validateBuildOptionValue("cache", value); err != nil {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
+func validateBuildOptionValue(field string, value string) error {
+	if value == "" {
+		return fmt.Errorf("build %s is required", field)
+	}
+	if len(value) > 1024 {
+		return fmt.Errorf("build %s is too long", field)
+	}
+	if strings.HasPrefix(value, "-") {
+		return fmt.Errorf("build %s must not start with '-'", field)
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("build %s must not contain control characters", field)
+		}
+	}
+	return nil
+}
+
+func cleanBuildDockerfilePath(dockerfile string) (string, error) {
+	if err := validateBuildOptionValue("dockerfile", dockerfile); err != nil {
+		return "", err
+	}
+	clean := filepath.Clean(dockerfile)
+	if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("dockerfile must be a relative path inside the build context")
+	}
+	return filepath.ToSlash(clean), nil
+}
+
+func validateExtractedDockerfile(buildDir string, dockerfile string) error {
+	target, err := safeArchiveTarget(buildDir, dockerfile)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		return fmt.Errorf("dockerfile does not exist in build context: %s", dockerfile)
+	}
+	if info.IsDir() || !info.Mode().IsRegular() {
+		return fmt.Errorf("dockerfile must be a regular file in build context: %s", dockerfile)
+	}
+	return nil
+}
+
+func isValidBuildPlatform(platform string) bool {
+	switch platform {
+	case "linux/amd64", "linux/arm64", "linux/arm/v6", "linux/arm/v7", "linux/386":
+		return true
+	default:
+		return false
+	}
 }
 
 func extractTarGz(r io.Reader, destDir string) error {
@@ -221,6 +369,9 @@ func extractTarGzWithLimits(r io.Reader, destDir string, limits buildContextLimi
 			}
 			if closeErr != nil {
 				return fmt.Errorf("failed to close build context file %s: %w", header.Name, closeErr)
+			}
+			if err := os.Chmod(target, mode); err != nil {
+				return fmt.Errorf("failed to set build context file mode for %s: %w", header.Name, err)
 			}
 		default:
 			return fmt.Errorf("unsupported build context entry %s", header.Name)

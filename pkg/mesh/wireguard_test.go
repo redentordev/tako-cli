@@ -215,7 +215,7 @@ func TestApplyLocalWithRunnerWritesConfigWithoutSudo(t *testing.T) {
 	if applyCommand == "" {
 		t.Fatalf("expected wg-quick apply command, got %v", runner.commands)
 	}
-	for _, expected := range []string{"wg-quick@'tako'", "wg show 'tako'", "ip address replace '10.210.0.1/24'", "dev 'tako'", "wg-quick up 'tako'"} {
+	for _, expected := range []string{"wg-quick@'tako'", "wg show 'tako'", "ip -o -4 address show dev", "ip address del", "ip address replace", "10.210.0.1/24", "dev \"$iface\"", "wg-quick up 'tako'"} {
 		if !strings.Contains(applyCommand, expected) {
 			t.Fatalf("apply command missing %q: %s", expected, applyCommand)
 		}

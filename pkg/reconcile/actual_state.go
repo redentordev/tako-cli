@@ -125,6 +125,11 @@ func AggregateActualStateByServer(actualByServer map[string]map[string]*ActualSe
 					existing.ConfigHash = ""
 				}
 				existing.RuntimeID = mergeRuntimeID(existing.RuntimeID, serviceState.RuntimeID)
+				existing.HealthyReplicas += serviceState.HealthyReplicas
+				existing.UnhealthyReplicas += serviceState.UnhealthyReplicas
+				existing.StartingReplicas += serviceState.StartingReplicas
+				existing.NoHealthcheckReplicas += serviceState.NoHealthcheckReplicas
+				existing.UnknownHealthReplicas += serviceState.UnknownHealthReplicas
 				continue
 			}
 			actualServices[serviceName] = cloneActualService(serviceState)
@@ -168,12 +173,17 @@ func gatherActualStateFromTakodWith(client takodclient.RequestExecutor, socket s
 			continue
 		}
 		actualServices[serviceName] = &ActualService{
-			Name:       service.Name,
-			Image:      service.Image,
-			Replicas:   service.Replicas,
-			Containers: append([]string(nil), service.Containers...),
-			ConfigHash: service.ConfigHash,
-			RuntimeID:  service.RuntimeID,
+			Name:                  service.Name,
+			Image:                 service.Image,
+			Replicas:              service.Replicas,
+			Containers:            append([]string(nil), service.Containers...),
+			ConfigHash:            service.ConfigHash,
+			RuntimeID:             service.RuntimeID,
+			HealthyReplicas:       service.HealthyReplicas,
+			UnhealthyReplicas:     service.UnhealthyReplicas,
+			StartingReplicas:      service.StartingReplicas,
+			NoHealthcheckReplicas: service.NoHealthcheckReplicas,
+			UnknownHealthReplicas: service.UnknownHealthReplicas,
 			ConfigSnapshot: &config.ServiceConfig{
 				Image: service.Image,
 			},

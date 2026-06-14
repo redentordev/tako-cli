@@ -301,15 +301,23 @@ func applyLocalWithRunner(ctx context.Context, runner wireGuardRunner, node Node
 
 	quotedIface := shellQuote(iface)
 	syncCmd := shellQuote(fmt.Sprintf("wg syncconf %s <(wg-quick strip %s)", iface, iface))
+	addressSyncScript := shellQuote(fmt.Sprintf(
+		"desired=%s; iface=%s; "+
+			"ip -o -4 address show dev \"$iface\" scope global | awk '{print $4}' | "+
+			"while read -r address; do [ \"$address\" = \"$desired\" ] || ip address del \"$address\" dev \"$iface\" || true; done; "+
+			"ip address replace \"$desired\" dev \"$iface\"",
+		shellQuote(nodeAddress),
+		shellQuote(iface),
+	))
 	applyCmd := fmt.Sprintf(
 		"systemctl enable wg-quick@%[1]s >/dev/null 2>&1 || true; "+
 			"if wg show %[1]s >/dev/null 2>&1; then "+
-			"ip address replace %[2]s dev %[1]s; "+
+			"sh -c %[2]s; "+
 			"bash -lc %[3]s; "+
 			"else wg-quick up %[1]s; fi; "+
 			"wg show %[1]s >/dev/null",
 		quotedIface,
-		shellQuote(nodeAddress),
+		addressSyncScript,
 		syncCmd,
 	)
 	if _, err := runner.Run(ctx, applyCmd); err != nil {

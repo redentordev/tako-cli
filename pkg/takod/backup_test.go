@@ -163,6 +163,12 @@ func TestValidateBackupRequestRejectsUnsafeValues(t *testing.T) {
 	if err := validateBackupRequest(invalid, true, true); err == nil {
 		t.Fatal("expected unsafe backup ID to be rejected")
 	}
+
+	invalid = valid
+	invalid.VolumeName = "../docker-volume"
+	if err := validateBackupRequest(invalid, true, true); err == nil {
+		t.Fatal("expected unsafe docker volume name to be rejected")
+	}
 }
 
 func TestBackupIDForRequestUsesProvidedID(t *testing.T) {
@@ -187,6 +193,100 @@ func TestFullBackupVolumeNameUsesRuntimeVolumeIdentity(t *testing.T) {
 	want := runtimeid.VolumeName("demo", "production", "db_data")
 	if got != want {
 		t.Fatalf("full backup volume name = %q, want %q", got, want)
+	}
+}
+
+func TestFullBackupVolumeNameUsesExplicitDockerVolumeName(t *testing.T) {
+	request := BackupRequest{
+		Project:     "demo",
+		Environment: "production",
+		Volume:      "db_data",
+		VolumeName:  "shared-db-data",
+	}
+	if got := fullBackupVolumeName(request); got != "shared-db-data" {
+		t.Fatalf("full backup volume name = %q, want explicit docker volume", got)
+	}
+}
+
+func TestEnsureBackupVolumeOwnedAllowsLabelOwnedCustomName(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_VOLUME_INSPECT_LABELS", "demo\tproduction\n")
+
+	request := BackupRequest{Project: "demo", Environment: "production", Volume: "data", VolumeName: "shared-data"}
+	if err := ensureBackupVolumeOwned(context.Background(), request, request.VolumeName); err != nil {
+		t.Fatalf("ensureBackupVolumeOwned returned error: %v", err)
+	}
+}
+
+func TestEnsureBackupVolumeOwnedRejectsUnownedCustomName(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_VOLUME_INSPECT_LABELS", "other\tproduction\n")
+
+	request := BackupRequest{Project: "demo", Environment: "production", Volume: "data", VolumeName: "shared-data"}
+	if err := ensureBackupVolumeOwned(context.Background(), request, request.VolumeName); err == nil {
+		t.Fatal("expected unowned custom volume to be rejected")
+	}
+}
+
+func TestRestoreVolumeBackupCreatesMissingDefaultVolume(t *testing.T) {
+	restoreRoot := useTempBackupRoot(t)
+	defer restoreRoot()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	t.Setenv("TAKO_FAKE_FAIL_VOLUME_INSPECT", "1")
+
+	request := BackupRequest{Project: "demo", Environment: "production", Volume: "data", BackupID: "20240101-120000"}
+	dir := backupDirectory(request)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatalf("failed to create backup dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, backupFileName(request.Volume, request.BackupID)), []byte("backup"), 0600); err != nil {
+		t.Fatalf("failed to write backup fixture: %v", err)
+	}
+
+	if err := RestoreVolumeBackup(context.Background(), request); err != nil {
+		t.Fatalf("RestoreVolumeBackup returned error: %v", err)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if !strings.Contains(commands, "docker volume create") {
+		t.Fatalf("restore did not create missing default volume, commands:\n%s", commands)
+	}
+}
+
+func TestRestoreVolumeBackupRejectsMissingExplicitVolumeName(t *testing.T) {
+	restoreRoot := useTempBackupRoot(t)
+	defer restoreRoot()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	t.Setenv("TAKO_FAKE_FAIL_VOLUME_INSPECT", "shared-data")
+
+	request := BackupRequest{
+		Project:     "demo",
+		Environment: "production",
+		Volume:      "data",
+		VolumeName:  "shared-data",
+		BackupID:    "20240101-120000",
+	}
+	dir := backupDirectory(request)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatalf("failed to create backup dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, backupFileName(request.Volume, request.BackupID)), []byte("backup"), 0600); err != nil {
+		t.Fatalf("failed to write backup fixture: %v", err)
+	}
+
+	if err := RestoreVolumeBackup(context.Background(), request); err == nil {
+		t.Fatal("expected missing explicit docker volume to be rejected")
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if strings.Contains(commands, "docker volume create") {
+		t.Fatalf("restore should not create missing explicit volume, commands:\n%s", commands)
 	}
 }
 

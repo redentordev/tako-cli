@@ -9,7 +9,7 @@ We have ready-to-deploy examples covering common use cases:
 ### Deployment Pattern Templates
 | Example | Description | Features |
 |---------|-------------|----------|
-| [deployment-patterns](./deployment-patterns/) | Copyable production shapes | Prebuilt images, static sites, APIs, volumes, databases, workers, cron-style runners, monorepos, stages, WebSockets, CI/CD, Python, Go |
+| [deployment-patterns](./deployment-patterns/) | Copyable production shapes | Prebuilt images, static sites, APIs, volumes, databases, workers, cron-style runners, monorepos, stages, WebSockets, CI/CD, Python, Go, CMS dynamic domains |
 
 ### Web Frameworks & Applications
 | Example | Description | Features |
@@ -259,19 +259,19 @@ services:
   api:
     build: .
     port: 4000
-    export: true  # Make available to other projects
+    export:
+      ports:
+        web: 4000  # Make this named port available to other projects
 ```
 
 ### Cross-Project Service Import
 ```yaml
-services:
-  web:
-    build: .
-    port: 3000
-    imports:
-      - backend-api.api  # Import from another project
-    env:
-      API_URL: http://backend-api_api:4000  # DNS works!
+imports:
+  backend_api:
+    project: backend-api
+    environment: production
+    service: api
+    port: web
 ```
 
 ## Common Use Cases
@@ -346,12 +346,12 @@ servers:
 
 Set it before deploying:
 ```bash
-export SERVER_HOST=46.62.254.8
+export SERVER_HOST=203.0.113.10
 ```
 
 You can also set it in a `.env` file:
 ```bash
-SERVER_HOST=46.62.254.8
+SERVER_HOST=203.0.113.10
 ```
 
 ## Customizing Examples

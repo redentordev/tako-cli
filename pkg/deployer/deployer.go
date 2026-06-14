@@ -4,10 +4,13 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -58,15 +61,22 @@ type Deployer struct {
 	distributedImages map[string]bool
 	targetServers     []string
 	cliVersion        string
+	deployHooks       bool
+	volumePlacements  map[string][]string
+	volumeInspector   func(serverName string, volumeNames []string) (map[string]bool, error)
 	meshPortCache     map[meshUpstreamPortKey]int
 	meshPortCacheMu   sync.Mutex
 	meshPortAllocator func(serverName string, serviceName string, slot int, containerPort int) (int, error)
+	nodeInfoInspector func(serverName string) (*takod.NodeInfoResponse, error)
+	generatedConfigs  map[string][]byte
+	importResolver    func(alias string) ([]string, error)
 }
 
 const (
 	defaultBuildContextArchiveMaxBytes     int64 = 2 << 30
 	defaultBuildContextArchiveMaxFileBytes int64 = 1 << 30
 	defaultBuildContextArchiveMaxEntries         = 200000
+	buildContextGitArchiveTimeout                = 5 * time.Minute
 )
 
 type buildContextArchiveLimits struct {
@@ -78,10 +88,11 @@ type buildContextArchiveLimits struct {
 // NewDeployer creates a new deployer
 func NewDeployer(client *ssh.Client, cfg *config.Config, environment string, verbose bool) *Deployer {
 	return &Deployer{
-		client:      client,
-		config:      cfg,
-		environment: environment,
-		verbose:     verbose,
+		client:           client,
+		config:           cfg,
+		environment:      environment,
+		verbose:          verbose,
+		volumePlacements: make(map[string][]string),
 	}
 }
 
@@ -94,11 +105,16 @@ func NewDeployerWithPool(client *ssh.Client, cfg *config.Config, environment str
 		verbose:           verbose,
 		sshPool:           sshPool,
 		distributedImages: make(map[string]bool),
+		volumePlacements:  make(map[string][]string),
 	}
 }
 
 func (d *Deployer) SetCLIVersion(version string) {
 	d.cliVersion = strings.TrimSpace(version)
+}
+
+func (d *Deployer) SetDeployHooksEnabled(enabled bool) {
+	d.deployHooks = enabled
 }
 
 // SetTargetServers restricts takod reconciliation to a validated subset of the
@@ -153,7 +169,19 @@ func createCrossPlatformTarGz(sourceDir, archivePath string) error {
 	})
 }
 
+func createCrossPlatformTarGzWithForcedIncludes(sourceDir, archivePath string, forcedIncludes []string) error {
+	return createCrossPlatformTarGzWithOptions(sourceDir, archivePath, buildContextArchiveLimits{
+		MaxBytes:     defaultBuildContextArchiveMaxBytes,
+		MaxFileBytes: defaultBuildContextArchiveMaxFileBytes,
+		MaxEntries:   defaultBuildContextArchiveMaxEntries,
+	}, forcedIncludes)
+}
+
 func createCrossPlatformTarGzWithLimits(sourceDir, archivePath string, limits buildContextArchiveLimits) error {
+	return createCrossPlatformTarGzWithOptions(sourceDir, archivePath, limits, nil)
+}
+
+func createCrossPlatformTarGzWithOptions(sourceDir, archivePath string, limits buildContextArchiveLimits, forcedIncludes []string) error {
 	archiveFile, err := os.Create(archivePath)
 	if err != nil {
 		return fmt.Errorf("failed to create build context archive: %w", err)
@@ -179,6 +207,14 @@ func createCrossPlatformTarGzWithLimits(sourceDir, archivePath string, limits bu
 		ignoreParser.LoadIgnoreFile(gitignorePath)
 	}
 	ignoreParser.AddDefaultExclusions()
+	forced := map[string]bool{}
+	for _, include := range forcedIncludes {
+		include = strings.TrimSpace(include)
+		if include == "" {
+			continue
+		}
+		forced[filepath.ToSlash(filepath.Clean(include))] = true
+	}
 
 	var totalBytes int64
 	entries := 0
@@ -195,7 +231,8 @@ func createCrossPlatformTarGzWithLimits(sourceDir, archivePath string, limits bu
 			return nil
 		}
 
-		if ignoreParser.ShouldIgnore(relPath) {
+		relArchivePath := filepath.ToSlash(relPath)
+		if ignoreParser.ShouldIgnore(relPath) && !forced[relArchivePath] {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -210,7 +247,7 @@ func createCrossPlatformTarGzWithLimits(sourceDir, archivePath string, limits bu
 		if err != nil {
 			return err
 		}
-		header.Name = strings.ReplaceAll(relPath, string(filepath.Separator), "/")
+		header.Name = relArchivePath
 
 		if info.IsDir() {
 			header.Name += "/"
@@ -228,7 +265,7 @@ func createCrossPlatformTarGzWithLimits(sourceDir, archivePath string, limits bu
 		}
 		totalBytes += info.Size()
 
-		header.Mode = int64(info.Mode().Perm())
+		header.Mode = normalizedBuildContextFileMode(info.Mode())
 		if err := tarWriter.WriteHeader(header); err != nil {
 			return err
 		}
@@ -240,6 +277,249 @@ func createCrossPlatformTarGzWithLimits(sourceDir, archivePath string, limits bu
 		_, err = io.Copy(tarWriter, file)
 		return err
 	})
+}
+
+func createGitSourceTarGzWithForcedIncludes(sourceDir, archivePath string, forcedIncludes []string) error {
+	contextDir, cleanup, err := createGitSourceContext(sourceDir, buildContextArchiveLimits{
+		MaxBytes:     defaultBuildContextArchiveMaxBytes,
+		MaxFileBytes: defaultBuildContextArchiveMaxFileBytes,
+		MaxEntries:   defaultBuildContextArchiveMaxEntries,
+	})
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	return createCrossPlatformTarGzWithForcedIncludes(contextDir, archivePath, forcedIncludes)
+}
+
+func createGitSourceContext(sourceDir string, limits buildContextArchiveLimits) (string, func(), error) {
+	sourceAbs, err := filepath.Abs(sourceDir)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to resolve build context path: %w", err)
+	}
+	if realSource, err := filepath.EvalSymlinks(sourceAbs); err == nil {
+		sourceAbs = realSource
+	}
+	repoRoot, err := gitBuildOutput(sourceAbs, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to locate git repository for build context: %w", err)
+	}
+	repoRootAbs, err := filepath.Abs(strings.TrimSpace(repoRoot))
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to resolve git root: %w", err)
+	}
+	if realRoot, err := filepath.EvalSymlinks(repoRootAbs); err == nil {
+		repoRootAbs = realRoot
+	}
+	relContext, err := filepath.Rel(repoRootAbs, sourceAbs)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to resolve build context relative to git root: %w", err)
+	}
+	if relContext == ".." || strings.HasPrefix(relContext, ".."+string(filepath.Separator)) || filepath.IsAbs(relContext) {
+		return "", nil, fmt.Errorf("build context must be inside the git repository")
+	}
+	gitContext := filepath.ToSlash(filepath.Clean(relContext))
+	if gitContext == "." {
+		gitContext = ""
+	}
+
+	tempDir, err := os.MkdirTemp("", "tako-git-source-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create git build context: %w", err)
+	}
+	cleanup := func() {
+		_ = os.RemoveAll(tempDir)
+	}
+	rawArchive := filepath.Join(tempDir, "source.tar")
+	args := []string{"-C", repoRootAbs, "archive", "--format=tar", "--output", rawArchive, "HEAD"}
+	if gitContext != "" {
+		args = append(args, "--", gitContext)
+	}
+	if err := gitBuildRun(args...); err != nil {
+		cleanup()
+		if gitContext == "" {
+			return "", nil, fmt.Errorf("failed to archive committed git source: %w", err)
+		}
+		return "", nil, fmt.Errorf("failed to archive committed git source for %s: %w", gitContext, err)
+	}
+
+	contextDir := filepath.Join(tempDir, "context")
+	if err := os.MkdirAll(contextDir, 0755); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("failed to create extracted git context: %w", err)
+	}
+	if err := extractGitSourceContext(rawArchive, contextDir, gitContext, limits); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return contextDir, cleanup, nil
+}
+
+func extractGitSourceContext(archivePath, destDir, stripPrefix string, limits buildContextArchiveLimits) error {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("failed to open committed git archive: %w", err)
+	}
+	defer file.Close()
+
+	prefix := strings.Trim(strings.TrimSpace(stripPrefix), "/")
+	tarReader := tar.NewReader(file)
+	var totalBytes int64
+	entries := 0
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read committed git archive: %w", err)
+		}
+
+		relPath, err := stripGitArchivePrefix(header.Name, prefix)
+		if err != nil {
+			return err
+		}
+		if relPath == "" {
+			continue
+		}
+		entries++
+		if limits.MaxEntries > 0 && entries > limits.MaxEntries {
+			return fmt.Errorf("committed build context exceeds maximum entry count %d", limits.MaxEntries)
+		}
+
+		target, err := safeExtractTarget(destDir, relPath)
+		if err != nil {
+			return err
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return fmt.Errorf("failed to create committed build context directory: %w", err)
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if header.Size < 0 {
+				return fmt.Errorf("committed build context file %s has invalid size", relPath)
+			}
+			if limits.MaxFileBytes > 0 && header.Size > limits.MaxFileBytes {
+				return fmt.Errorf("committed build context file %s exceeds maximum size %d bytes", relPath, limits.MaxFileBytes)
+			}
+			if limits.MaxBytes > 0 && totalBytes+header.Size > limits.MaxBytes {
+				return fmt.Errorf("committed build context exceeds maximum total size %d bytes", limits.MaxBytes)
+			}
+			totalBytes += header.Size
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("failed to create committed build context parent: %w", err)
+			}
+			mode := os.FileMode(normalizedBuildContextFileMode(header.FileInfo().Mode()))
+			if mode == 0 {
+				mode = 0600
+			}
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				return fmt.Errorf("failed to write committed build context file: %w", err)
+			}
+			_, copyErr := io.CopyN(out, tarReader, header.Size)
+			closeErr := out.Close()
+			if copyErr != nil {
+				return fmt.Errorf("failed to extract committed build context file %s: %w", relPath, copyErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("failed to close committed build context file %s: %w", relPath, closeErr)
+			}
+			if err := os.Chmod(target, mode); err != nil {
+				return fmt.Errorf("failed to set committed build context file mode for %s: %w", relPath, err)
+			}
+		default:
+			// Git archives can contain symlinks. Build contexts created by Tako only
+			// preserve regular files and directories, so ignore other entry types.
+			continue
+		}
+	}
+}
+
+func normalizedBuildContextFileMode(mode os.FileMode) int64 {
+	if mode.Perm()&0111 != 0 {
+		return 0755
+	}
+	return 0644
+}
+
+func stripGitArchivePrefix(name string, prefix string) (string, error) {
+	clean := path.Clean(strings.TrimSpace(name))
+	if clean == "." {
+		return "", nil
+	}
+	if path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("committed git archive path escapes root: %s", name)
+	}
+	if prefix != "" {
+		if clean == prefix {
+			return "", nil
+		}
+		prefixWithSlash := prefix + "/"
+		if !strings.HasPrefix(clean, prefixWithSlash) {
+			return "", fmt.Errorf("committed git archive path %s is outside build context %s", clean, prefix)
+		}
+		clean = strings.TrimPrefix(clean, prefixWithSlash)
+	}
+	if clean == "." {
+		return "", nil
+	}
+	return clean, nil
+}
+
+func safeExtractTarget(destDir string, archiveName string) (string, error) {
+	clean := path.Clean(archiveName)
+	if clean == "." || path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("committed build context path escapes root: %s", archiveName)
+	}
+	target := filepath.Join(destDir, filepath.FromSlash(clean))
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve committed build context path: %w", err)
+	}
+	destAbs, err := filepath.Abs(destDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve committed build context root: %w", err)
+	}
+	if targetAbs != destAbs && !strings.HasPrefix(targetAbs, destAbs+string(filepath.Separator)) {
+		return "", fmt.Errorf("committed build context path escapes root: %s", archiveName)
+	}
+	return targetAbs, nil
+}
+
+func gitBuildOutput(workDir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), buildContextGitArchiveTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = workDir
+	output, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("git command timed out after %s: git %s", buildContextGitArchiveTimeout, strings.Join(args, " "))
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
+func gitBuildRun(args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), buildContextGitArchiveTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("git command timed out after %s: git %s", buildContextGitArchiveTimeout, strings.Join(args, " "))
+	}
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("git %s failed: %s", strings.Join(args, " "), detail)
+	}
+	return nil
 }
 
 // RollbackToState converges a service back to a saved takod deployment state.
@@ -278,24 +558,28 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 	if service.Build != "" {
 		// Use service.Build as the build context path
 		contextPath := service.Build
-
-		// Auto-detect Dockerfile in the build context
-		dockerfilePaths := []string{
-			filepath.Join(contextPath, "Dockerfile"),
-			filepath.Join(contextPath, "Dockerfile.prod"),
-			filepath.Join(contextPath, "dockerfile"),
-			filepath.Join(contextPath, ".dockerfile"),
+		sourceContextPath := contextPath
+		cleanupSourceContext := func() {}
+		if d.config.DeploymentSource() == config.DeploymentSourceGit {
+			gitContextPath, cleanup, err := createGitSourceContext(contextPath, buildContextArchiveLimits{
+				MaxBytes:     defaultBuildContextArchiveMaxBytes,
+				MaxFileBytes: defaultBuildContextArchiveMaxFileBytes,
+				MaxEntries:   defaultBuildContextArchiveMaxEntries,
+			})
+			if err != nil {
+				return "", fmt.Errorf("failed to prepare committed git build context: %w", err)
+			}
+			sourceContextPath = gitContextPath
+			cleanupSourceContext = cleanup
+			defer cleanupSourceContext()
 		}
 
-		hasDockerfile := false
-		for _, path := range dockerfilePaths {
-			if _, err := os.Stat(path); err == nil {
-				hasDockerfile = true
-				if d.verbose {
-					fmt.Printf("  Found Dockerfile: %s\n", filepath.Base(path))
-				}
-				break
-			}
+		dockerfilePath, hasDockerfile, err := resolveServiceDockerfile(sourceContextPath, service.Dockerfile)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve dockerfile: %w", err)
+		}
+		if hasDockerfile && d.verbose {
+			fmt.Printf("  Found Dockerfile: %s\n", dockerfilePath)
 		}
 
 		if !hasDockerfile {
@@ -304,7 +588,7 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 				fmt.Printf("  No Dockerfile found - using Nixpacks auto-detection...\n")
 			}
 
-			detector := nixpacks.NewDetector(contextPath, d.verbose)
+			detector := nixpacks.NewDetector(sourceContextPath, d.verbose)
 
 			// Detect framework
 			framework, err := detector.DetectFramework()
@@ -321,20 +605,23 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 			}
 
 			hasDockerfile = true
+			dockerfilePath = "Dockerfile"
 		}
 
 		if d.verbose {
 			fmt.Printf("  Streaming build context to takod...\n")
 			fmt.Printf("  Context path: %s\n", contextPath)
+			fmt.Printf("  Build source: %s\n", d.config.DeploymentSource())
+			fmt.Printf("  Dockerfile: %s\n", dockerfilePath)
 		}
 
-		absContextPath, err := filepath.Abs(contextPath)
+		absContextPath, err := filepath.Abs(sourceContextPath)
 		if err != nil {
 			return "", fmt.Errorf("failed to get absolute path: %w", err)
 		}
 
 		archivePath := filepath.Join(os.TempDir(), fmt.Sprintf("tako-build-%s-%d.tar.gz", serviceName, time.Now().UnixNano()))
-		if err := createCrossPlatformTarGz(absContextPath, archivePath); err != nil {
+		if err := createCrossPlatformTarGzWithForcedIncludes(absContextPath, archivePath, []string{dockerfilePath}); err != nil {
 			return "", fmt.Errorf("failed to create build context archive: %w", err)
 		}
 		defer os.Remove(archivePath)
@@ -345,7 +632,7 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 		}
 		defer archive.Close()
 
-		output, err := takodclient.StreamRequest(d.client, d.takodSocket(), "POST", takodclient.ImageBuildEndpoint(fullImageName), archive)
+		output, err := takodclient.StreamRequest(d.client, d.takodSocket(), "POST", d.imageBuildEndpoint(fullImageName, service, dockerfilePath), archive)
 		var response takod.ImageBuildResponse
 		if err == nil {
 			if decodeErr := json.Unmarshal([]byte(output), &response); decodeErr != nil {
@@ -387,4 +674,68 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 	}
 
 	return fullImageName, nil
+}
+
+func resolveServiceDockerfile(contextPath string, dockerfile string) (string, bool, error) {
+	if strings.TrimSpace(dockerfile) != "" {
+		clean := filepath.Clean(strings.TrimSpace(dockerfile))
+		if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return "", false, fmt.Errorf("dockerfile must be a relative path inside the build context")
+		}
+		candidate := filepath.Join(contextPath, clean)
+		info, err := os.Lstat(candidate)
+		if err != nil {
+			return "", false, fmt.Errorf("dockerfile does not exist: %s", dockerfile)
+		}
+		if info.IsDir() || !info.Mode().IsRegular() {
+			return "", false, fmt.Errorf("dockerfile must be a regular file: %s", dockerfile)
+		}
+		return filepath.ToSlash(clean), true, nil
+	}
+
+	dockerfileCandidates := []string{
+		"Dockerfile",
+		"Dockerfile.prod",
+		"dockerfile",
+		".dockerfile",
+	}
+	for _, candidate := range dockerfileCandidates {
+		path := filepath.Join(contextPath, candidate)
+		info, err := os.Lstat(path)
+		if err == nil && !info.IsDir() && info.Mode().IsRegular() {
+			return filepath.ToSlash(candidate), true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func (d *Deployer) imageBuildEndpoint(image string, service *config.ServiceConfig, dockerfilePath ...string) string {
+	dockerfile := service.Dockerfile
+	if len(dockerfilePath) > 0 && strings.TrimSpace(dockerfilePath[0]) != "" {
+		dockerfile = dockerfilePath[0]
+	}
+	opts := takodclient.ImageBuildEndpointOptions{
+		Platform:   service.Platform,
+		Dockerfile: dockerfile,
+	}
+	cache := d.config.DeploymentCache()
+	if cache != nil && cache.Enabled {
+		switch cache.Type {
+		case "registry":
+			ref := strings.TrimSpace(cache.Ref)
+			if ref != "" {
+				cacheSpec := "type=registry,ref=" + ref
+				opts.CacheFrom = append(opts.CacheFrom, cacheSpec)
+				opts.CacheTo = append(opts.CacheTo, cacheSpec+",mode=max")
+				opts.Buildx = true
+			}
+		default:
+			opts.CacheFrom = append(opts.CacheFrom, image)
+		}
+		if cache.Builder != "" {
+			opts.Builder = cache.Builder
+			opts.Buildx = true
+		}
+	}
+	return takodclient.ImageBuildEndpointWithOptions(image, opts)
 }

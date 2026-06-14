@@ -5,69 +5,39 @@ import (
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/ssh"
 )
 
-func TestRemoteSSHCommandUsesTOFUKnownHosts(t *testing.T) {
-	ssh.SetGlobalHostKeyMode(ssh.HostKeyModeTOFU)
-	t.Cleanup(func() {
-		ssh.SetGlobalHostKeyMode(ssh.HostKeyModeTOFU)
-	})
+func TestBuildTakodImageTransferCommandsUseTakodEndpoints(t *testing.T) {
+	exportCmd := buildTakodImageExportCommand("/run/tako/takod.sock", "demo/web:abc123")
+	importCmd := buildTakodImageImportCommand("/run/tako/takod.sock", "demo/web:abc123")
 
-	cmd := remoteSSHCommand(config.ServerConfig{SSHKey: "/home/deploy/.ssh/id_ed25519"})
-
-	for _, expected := range []string{
-		"StrictHostKeyChecking=accept-new",
-		"UserKnownHostsFile=~/.tako/known_hosts",
-		"-i '/home/deploy/.ssh/id_ed25519'",
-	} {
-		if !strings.Contains(cmd, expected) {
-			t.Fatalf("ssh command missing %q: %s", expected, cmd)
+	for _, cmd := range []string{exportCmd, importCmd} {
+		for _, expected := range []string{
+			"--unix-socket '/run/tako/takod.sock'",
+		} {
+			if !strings.Contains(cmd, expected) {
+				t.Fatalf("transfer command missing %q: %s", expected, cmd)
+			}
+		}
+		for _, unexpected := range []string{"ssh", "docker save", "docker load", "docker image"} {
+			if strings.Contains(cmd, unexpected) {
+				t.Fatalf("transfer command should not run %q directly: %s", unexpected, cmd)
+			}
 		}
 	}
-	if strings.Contains(cmd, "StrictHostKeyChecking=no") || strings.Contains(cmd, "UserKnownHostsFile=/dev/null") {
-		t.Fatalf("ssh command disables host key checking: %s", cmd)
-	}
-}
 
-func TestRemoteSSHCommandHonorsStrictHostKeyMode(t *testing.T) {
-	ssh.SetGlobalHostKeyMode(ssh.HostKeyModeStrict)
-	t.Cleanup(func() {
-		ssh.SetGlobalHostKeyMode(ssh.HostKeyModeTOFU)
-	})
-
-	cmd := remoteSSHCommand(config.ServerConfig{SSHKey: "/home/deploy/.ssh/id_ed25519"})
-	if !strings.Contains(cmd, "StrictHostKeyChecking=yes") {
-		t.Fatalf("strict host key mode was not applied: %s", cmd)
+	if !strings.Contains(exportCmd, "/v1/images/export?image=demo%2Fweb%3Aabc123") {
+		t.Fatalf("export command missing export endpoint: %s", exportCmd)
 	}
-	if strings.Contains(cmd, "StrictHostKeyChecking=accept-new") {
-		t.Fatalf("strict host key mode should not accept new host keys: %s", cmd)
+	if strings.Contains(exportCmd, "--data-binary @-") {
+		t.Fatalf("export command should not send stdin: %s", exportCmd)
 	}
-}
-
-func TestBuildTakodImageStreamCommandUsesTakodEndpoints(t *testing.T) {
-	cmd := buildTakodImageStreamCommand("/run/tako/takod.sock", config.ServerConfig{
-		Host:   "10.210.0.2",
-		Port:   2222,
-		User:   "deploy",
-		SSHKey: "/home/deploy/.ssh/id_ed25519",
-	}, "demo/web:abc123")
-
-	for _, expected := range []string{
-		"--unix-socket '/run/tako/takod.sock'",
-		"/v1/images/export?image=demo%2Fweb%3Aabc123",
-		"/v1/images/import?image=demo%2Fweb%3Aabc123",
-		"--data-binary @-",
-		"deploy@10.210.0.2",
-		"-p 2222",
-	} {
-		if !strings.Contains(cmd, expected) {
-			t.Fatalf("stream command missing %q: %s", expected, cmd)
-		}
+	if !strings.Contains(importCmd, "/v1/images/import?image=demo%2Fweb%3Aabc123") {
+		t.Fatalf("import command missing import endpoint: %s", importCmd)
 	}
-	for _, unexpected := range []string{"docker save", "docker load", "docker image"} {
-		if strings.Contains(cmd, unexpected) {
-			t.Fatalf("stream command should not run %q directly: %s", unexpected, cmd)
+	for _, expected := range []string{"--http1.1", "-H 'Transfer-Encoding: chunked'", "--upload-file -"} {
+		if !strings.Contains(importCmd, expected) {
+			t.Fatalf("import command should stream stdin with %q: %s", expected, importCmd)
 		}
 	}
 }

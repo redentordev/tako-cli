@@ -16,6 +16,7 @@ import (
 
 const (
 	PortAllocationKindMeshUpstream = "mesh-upstream"
+	PortAllocationKindHostBind     = "host-bind"
 	portAllocationSchemaVersion    = 1
 )
 
@@ -73,6 +74,7 @@ type dockerHostPortUse struct {
 	Project     string
 	Environment string
 	Service     string
+	Component   string
 }
 
 func AllocatePort(ctx context.Context, dataDir string, req PortAllocationRequest) (*PortAllocationResponse, error) {
@@ -95,7 +97,7 @@ func AllocatePort(ctx context.Context, dataDir string, req PortAllocationRequest
 		return nil, err
 	}
 
-	key := portAllocationKey(req.Kind, req.Project, req.Environment, req.Service, req.Slot)
+	key := portAllocationKey(req.Kind, req.Project, req.Environment, req.Service, req.Slot, req.ContainerPort)
 	usedPorts, err := usedDockerHostPorts(ctx)
 	if err != nil {
 		return nil, err
@@ -104,6 +106,10 @@ func AllocatePort(ctx context.Context, dataDir string, req PortAllocationRequest
 		if !hostPortUsedByOtherService(usedPorts[existing.HostPort], req) {
 			return portAllocationResponse(key, existing), nil
 		}
+	}
+
+	if err := rejectSharedProxyPublicHostBind(req, usedPorts); err != nil {
+		return nil, err
 	}
 
 	reserved := make(map[int]bool)
@@ -216,7 +222,7 @@ func ReleaseProjectPortAllocations(ctx context.Context, dataDir string, project 
 }
 
 func validatePortAllocationRequest(req PortAllocationRequest) error {
-	if req.Kind != PortAllocationKindMeshUpstream {
+	if req.Kind != PortAllocationKindMeshUpstream && req.Kind != PortAllocationKindHostBind {
 		return fmt.Errorf("invalid port allocation kind")
 	}
 	if !isSafeProjectName(req.Project) {
@@ -303,7 +309,36 @@ func dockerHostPortUseFromLabels(labels map[string]string) dockerHostPortUse {
 		Project:     labels["tako.project"],
 		Environment: labels["tako.environment"],
 		Service:     labels["tako.service"],
+		Component:   labels["tako.component"],
 	}
+}
+
+func rejectSharedProxyPublicHostBind(req PortAllocationRequest, usedPorts map[int][]dockerHostPortUse) error {
+	if req.Kind != PortAllocationKindHostBind {
+		return nil
+	}
+	for _, port := range candidatePorts(req.PreferredPort, req.MinPort, req.MaxPort) {
+		if !isPublicIngressPort(port) {
+			continue
+		}
+		if hostPortUsedBySharedProxy(usedPorts[port]) {
+			return fmt.Errorf("host port %d is already owned by shared tako-proxy; use a dedicated edge node with tako-proxy disabled before deploying a service that binds public %d/%d directly", port, 80, 443)
+		}
+	}
+	return nil
+}
+
+func isPublicIngressPort(port int) bool {
+	return port == 80 || port == 443
+}
+
+func hostPortUsedBySharedProxy(uses []dockerHostPortUse) bool {
+	for _, use := range uses {
+		if use.Component == "proxy" {
+			return true
+		}
+	}
+	return false
 }
 
 func hostPortUsedByOtherService(uses []dockerHostPortUse, req PortAllocationRequest) bool {
@@ -387,8 +422,8 @@ func portAllocationRegistryPath(dataDir string) string {
 	return filepath.Join(dataDir, "ports", "allocations.json")
 }
 
-func portAllocationKey(kind string, project string, environment string, service string, slot int) string {
-	return fmt.Sprintf("%s/%s/%s/%s/%d", kind, project, environment, service, slot)
+func portAllocationKey(kind string, project string, environment string, service string, slot int, containerPort int) string {
+	return fmt.Sprintf("%s/%s/%s/%s/%d/%d", kind, project, environment, service, slot, containerPort)
 }
 
 func portAllocationResponse(key string, allocation portAllocationEntry) *PortAllocationResponse {

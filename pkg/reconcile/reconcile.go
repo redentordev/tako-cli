@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -155,13 +156,18 @@ func ComputePlan(
 
 // ActualService represents a currently running service
 type ActualService struct {
-	Name           string
-	Image          string
-	Replicas       int
-	Containers     []string
-	ConfigHash     string
-	RuntimeID      string
-	ConfigSnapshot *config.ServiceConfig // Last deployed config
+	Name                  string
+	Image                 string
+	Replicas              int
+	Containers            []string
+	ConfigHash            string
+	RuntimeID             string
+	HealthyReplicas       int
+	UnhealthyReplicas     int
+	StartingReplicas      int
+	NoHealthcheckReplicas int
+	UnknownHealthReplicas int
+	ConfigSnapshot        *config.ServiceConfig // Last deployed config
 }
 
 // detectChanges compares config with actual service and returns reasons for update
@@ -209,9 +215,8 @@ func detectChanges(projectName string, environment string, serviceName string, d
 		}
 	}
 
-	// Compare port (only if both are set)
-	if desired.Port > 0 && oldConfig.Port > 0 && desired.Port != oldConfig.Port {
-		reasons = append(reasons, fmt.Sprintf("Port changed: %d → %d", oldConfig.Port, desired.Port))
+	if !portsEqual(desired, *oldConfig) {
+		reasons = append(reasons, "Port configuration changed")
 	}
 
 	// Compare environment variables
@@ -225,13 +230,17 @@ func detectChanges(projectName string, environment string, serviceName string, d
 	}
 
 	// Compare domain configuration
-	if !domainsEqual(desired.Proxy, oldConfig.Proxy) {
+	if !serviceDomainsEqual(desired, *oldConfig) {
 		reasons = append(reasons, "Domain/proxy configuration changed")
 	}
 
 	// Compare volume mounts
 	if !volumesEqual(desired.Volumes, oldConfig.Volumes) {
 		reasons = append(reasons, "Volume configuration changed")
+	}
+
+	if !configsEqual(desired.Configs, oldConfig.Configs) {
+		reasons = append(reasons, "Config file configuration changed")
 	}
 
 	return reasons
@@ -261,6 +270,58 @@ func domainsEqual(a, b *config.ProxyConfig) bool {
 	return a.Domain == b.Domain && stringSlicesEqual(a.RedirectFrom, b.RedirectFrom)
 }
 
+func portsEqual(a, b config.ServiceConfig) bool {
+	return portSlicesEqual(a.EffectivePorts(), b.EffectivePorts())
+}
+
+func portSlicesEqual(a, b []config.PortConfig) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sort.SliceStable(a, func(i, j int) bool {
+		if a[i].Name == a[j].Name {
+			return a[i].Target < a[j].Target
+		}
+		return a[i].Name < a[j].Name
+	})
+	sort.SliceStable(b, func(i, j int) bool {
+		if b[i].Name == b[j].Name {
+			return b[i].Target < b[j].Target
+		}
+		return b[i].Name < b[j].Name
+	})
+	for i := range a {
+		if a[i].Name != b[i].Name ||
+			a[i].Target != b[i].Target ||
+			a[i].Published != b[i].Published ||
+			a[i].Protocol != b[i].Protocol ||
+			a[i].Mode != b[i].Mode ||
+			a[i].HostIP != b[i].HostIP ||
+			a[i].Internal != b[i].Internal ||
+			!domainsEqual(a[i].Proxy, b[i].Proxy) {
+			return false
+		}
+	}
+	return true
+}
+
+func serviceDomainsEqual(a, b config.ServiceConfig) bool {
+	return stringSlicesEqual(serviceDomains(a), serviceDomains(b))
+}
+
+func serviceDomains(service config.ServiceConfig) []string {
+	var domains []string
+	for _, port := range service.EffectivePorts() {
+		if port.Proxy == nil {
+			continue
+		}
+		domains = append(domains, port.Proxy.GetAllDomains()...)
+		domains = append(domains, port.Proxy.GetRedirectDomains()...)
+	}
+	sort.Strings(domains)
+	return domains
+}
+
 func stringSlicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -275,6 +336,37 @@ func stringSlicesEqual(a, b []string) bool {
 
 func volumesEqual(a, b []string) bool {
 	return stringSlicesEqual(a, b)
+}
+
+func configsEqual(a, b []config.ServiceConfigFileMount) bool {
+	a = sortedConfigFilesForCompare(a)
+	b = sortedConfigFilesForCompare(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Source != b[i].Source ||
+			a[i].Target != b[i].Target ||
+			a[i].Mode != b[i].Mode ||
+			a[i].ContentHash != b[i].ContentHash {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedConfigFilesForCompare(configs []config.ServiceConfigFileMount) []config.ServiceConfigFileMount {
+	if len(configs) == 0 {
+		return nil
+	}
+	out := append([]config.ServiceConfigFileMount(nil), configs...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Source == out[j].Source {
+			return out[i].Target < out[j].Target
+		}
+		return out[i].Source < out[j].Source
+	})
+	return out
 }
 
 // FormatPlan returns a human-readable formatted plan

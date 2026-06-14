@@ -19,26 +19,37 @@ func TestDeploymentPatternTemplatesLoadAndCoverCommonUseCases(t *testing.T) {
 	t.Setenv("SSH_KEY", sshKey)
 	t.Setenv("TAKO_SERVER_HOST", "203.0.113.10")
 	t.Setenv("TAKO_SSH_KEY", sshKey)
+	t.Setenv("APP_SERVER_HOST", "203.0.113.20")
+	t.Setenv("APP_SSH_KEY", sshKey)
+	t.Setenv("EDGE_SERVER_HOST", "203.0.113.30")
+	t.Setenv("EDGE_SSH_KEY", sshKey)
 	t.Setenv("LETSENCRYPT_EMAIL", "admin@example.com")
 	t.Setenv("POSTGRES_PASSWORD", "example-password")
+	t.Setenv("JARDIN_ADMIN_HOST", "admin.example.com")
+	t.Setenv("JARDIN_SITE_HOST", "sites.example.com")
+	t.Setenv("JARDIN_ENV_FILE", ".env.example")
 
 	patterns := map[string]func(t *testing.T, cfg *config.Config){
-		"00-prebuilt-image":        assertPrebuiltImagePattern,
-		"01-static-site":           assertStaticSitePattern,
-		"02-node-api":              assertNodeAPIPattern,
-		"03-volume-sqlite":         assertVolumePattern,
-		"04-postgres-app":          assertPostgresAppPattern,
-		"05-workers-redis":         assertWorkersPattern,
-		"06-cron-runner":           assertCronRunnerPattern,
-		"07-python-fastapi":        assertFastAPIPattern,
-		"08-go-web":                assertGoWebPattern,
-		"09-monorepo-web-api":      assertMonorepoPattern,
-		"10-stages-shared-node":    assertStagesPattern,
-		"11-websocket-node":        assertWebSocketPattern,
-		"12-github-actions-deploy": assertGitHubActionsPattern,
+		"00-prebuilt-image":              assertPrebuiltImagePattern,
+		"01-static-site":                 assertStaticSitePattern,
+		"02-node-api":                    assertNodeAPIPattern,
+		"03-volume-sqlite":               assertVolumePattern,
+		"04-postgres-app":                assertPostgresAppPattern,
+		"05-workers-redis":               assertWorkersPattern,
+		"06-cron-runner":                 assertCronRunnerPattern,
+		"07-python-fastapi":              assertFastAPIPattern,
+		"08-go-web":                      assertGoWebPattern,
+		"09-monorepo-web-api":            assertMonorepoPattern,
+		"10-stages-shared-node":          assertStagesPattern,
+		"11-websocket-node":              assertWebSocketPattern,
+		"12-github-actions-deploy":       assertGitHubActionsPattern,
+		"cms-dynamic-domains/app":        assertCMSDynamicDomainsAppPattern,
+		"cms-dynamic-domains/edge":       assertCMSDynamicDomainsEdgePattern,
+		"next-admin-renderer-mongo/app":  assertNextAdminRendererMongoAppPattern,
+		"next-admin-renderer-mongo/edge": assertNextAdminRendererMongoEdgePattern,
 	}
 
-	matches, err := filepath.Glob(filepath.Join("deployment-patterns", "*", "tako.yaml"))
+	matches, err := deploymentPatternConfigPaths()
 	if err != nil {
 		t.Fatalf("failed to scan deployment pattern templates: %v", err)
 	}
@@ -47,7 +58,7 @@ func TestDeploymentPatternTemplatesLoadAndCoverCommonUseCases(t *testing.T) {
 	}
 
 	for _, configPath := range matches {
-		patternName := filepath.Base(filepath.Dir(configPath))
+		patternName := deploymentPatternID(configPath)
 		check, ok := patterns[patternName]
 		if !ok {
 			t.Fatalf("deployment pattern %s is not covered by assertions", patternName)
@@ -75,6 +86,8 @@ func TestDeploymentPatternDocsAndValidatorCoverCatalog(t *testing.T) {
 		"10-stages-shared-node",
 		"11-websocket-node",
 		"12-github-actions-deploy",
+		"cms-dynamic-domains",
+		"next-admin-renderer-mongo",
 	}
 
 	readme := readExampleFile(t, filepath.Join("deployment-patterns", "README.md"))
@@ -92,8 +105,15 @@ func TestDeploymentPatternDocsAndValidatorCoverCatalog(t *testing.T) {
 		"TAKO_SERVER_HOST",
 		"SSH_KEY",
 		"TAKO_SSH_KEY",
+		"APP_SERVER_HOST",
+		"APP_SSH_KEY",
+		"EDGE_SERVER_HOST",
+		"EDGE_SSH_KEY",
 		"LETSENCRYPT_EMAIL",
 		"POSTGRES_PASSWORD",
+		"JARDIN_ADMIN_HOST",
+		"JARDIN_SITE_HOST",
+		"JARDIN_ENV_FILE",
 	} {
 		if !strings.Contains(envExample, expected) {
 			t.Fatalf("deployment pattern .env.example missing %s", expected)
@@ -101,7 +121,7 @@ func TestDeploymentPatternDocsAndValidatorCoverCatalog(t *testing.T) {
 	}
 
 	for _, expected := range []string{
-		"*/tako.yaml",
+		"find \"$PATTERNS_DIR\"",
 		"go build -o \"$TMP_DIR/test-config\" \"$ROOT/cmd/test-config\"",
 		"\"$TMP_DIR/test-config\" tako.yaml",
 		"go test ./examples",
@@ -110,6 +130,56 @@ func TestDeploymentPatternDocsAndValidatorCoverCatalog(t *testing.T) {
 			t.Fatalf("deployment pattern validator missing %q", expected)
 		}
 	}
+}
+
+func TestNextAdminRendererMongoDocsCoverEnvAndCIFlow(t *testing.T) {
+	readme := readExampleFile(t, filepath.Join("deployment-patterns", "next-admin-renderer-mongo", "README.md"))
+	for _, expected := range []string{
+		"JARDIN_ENV_FILE=.env.production",
+		"tako env push production --from-file .env.production",
+		"tako env pull production --force",
+		"tako state pull -e production",
+		"tako deploy -e production --yes",
+		"TAKO_NONINTERACTIVE=1 tako setup -e production --dedicated-edge",
+		"TAKO_NONINTERACTIVE=1 tako deploy -e production --yes",
+		"clean checkout",
+	} {
+		if !strings.Contains(readme, expected) {
+			t.Fatalf("next-admin-renderer-mongo README missing %q", expected)
+		}
+	}
+}
+
+func deploymentPatternConfigPaths() ([]string, error) {
+	var matches []string
+	err := filepath.WalkDir("deployment-patterns", func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case "node_modules", ".git":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Name() == "tako.yaml" {
+			matches = append(matches, filepath.ToSlash(path))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(matches)
+	return matches, nil
+}
+
+func deploymentPatternID(configPath string) string {
+	path := filepath.ToSlash(configPath)
+	path = strings.TrimPrefix(path, "deployment-patterns/")
+	path = strings.TrimSuffix(path, "/tako.yaml")
+	return path
 }
 
 func TestExamplesDoNotUseKnownDemoDatabasePasswords(t *testing.T) {
@@ -294,8 +364,14 @@ func assertStaticSitePattern(t *testing.T, cfg *config.Config) {
 func assertNodeAPIPattern(t *testing.T, cfg *config.Config) {
 	api := productionServices(t, cfg)["api"]
 	assertPublicService(t, api, 3000)
+	if len(api.Ports) != 2 || api.Ports[1].Name != "metrics" || api.Ports[1].Mode != "internal" || api.Ports[1].Target != 9090 {
+		t.Fatalf("node api should expose explicit http and internal metrics ports: %#v", api.Ports)
+	}
 	if api.Replicas != 2 || api.HealthCheck.Path != "/health" {
 		t.Fatalf("node api should be replicated with health check: %#v", api)
+	}
+	if api.Deploy.Strategy != "rolling" || api.Deploy.Order != "start-first" || api.Deploy.MaxUnavailable != 0 {
+		t.Fatalf("node api should use start-first rolling deploys: %#v", api.Deploy)
 	}
 }
 
@@ -304,6 +380,9 @@ func assertVolumePattern(t *testing.T, cfg *config.Config) {
 	assertPublicService(t, web, 3000)
 	if !slices.Contains(web.Volumes, "app_data:/app/data") {
 		t.Fatalf("volume template missing app_data mount: %#v", web.Volumes)
+	}
+	if cfg.Volumes["app_data"].Driver != "local" {
+		t.Fatalf("volume template should define app_data as a local named volume: %#v", cfg.Volumes)
 	}
 	if web.Backup == nil || web.Backup.Schedule == "" || web.Backup.Retain != 14 {
 		t.Fatalf("volume template missing backup schedule: %#v", web.Backup)
@@ -420,11 +499,169 @@ func assertGitHubActionsPattern(t *testing.T, cfg *config.Config) {
 	}
 }
 
+func assertCMSDynamicDomainsAppPattern(t *testing.T, cfg *config.Config) {
+	if cfg.Project.Name != "pattern-cms-app" {
+		t.Fatalf("cms app project name = %q", cfg.Project.Name)
+	}
+	services := productionServices(t, cfg)
+	for _, serviceName := range []string{"admin", "renderer"} {
+		service := services[serviceName]
+		if service.Export == nil || service.Export.Ports["web"] != 80 {
+			t.Fatalf("%s should export web:80: %#v", serviceName, service.Export)
+		}
+		if service.Port != 80 {
+			t.Fatalf("%s should expose internal port 80: %#v", serviceName, service)
+		}
+	}
+	mongo := services["mongo"]
+	if !mongo.Persistent || !slices.Contains(mongo.Volumes, "mongo_data:/data/db") {
+		t.Fatalf("mongo should be persistent with mongo_data volume: %#v", mongo)
+	}
+}
+
+func assertCMSDynamicDomainsEdgePattern(t *testing.T, cfg *config.Config) {
+	if cfg.Project.Name != "pattern-cms-edge" {
+		t.Fatalf("cms edge project name = %q", cfg.Project.Name)
+	}
+	if cfg.Imports["jardin_admin"].Project != "pattern-cms-app" || cfg.Imports["jardin_admin"].Service != "admin" {
+		t.Fatalf("edge missing admin import: %#v", cfg.Imports["jardin_admin"])
+	}
+	if cfg.Imports["jardin_renderer"].Project != "pattern-cms-app" || cfg.Imports["jardin_renderer"].Service != "renderer" {
+		t.Fatalf("edge missing renderer import: %#v", cfg.Imports["jardin_renderer"])
+	}
+	edge := productionServices(t, cfg)["edge"]
+	if len(edge.Ports) != 2 {
+		t.Fatalf("edge should declare http and https host ports: %#v", edge.Ports)
+	}
+	wantPorts := map[string]int{"http": 80, "https": 443}
+	for _, port := range edge.Ports {
+		if port.Mode != "host" || port.Published != wantPorts[port.Name] || port.Target != wantPorts[port.Name] {
+			t.Fatalf("edge port should bind public host port directly: %#v", port)
+		}
+	}
+	if len(edge.Configs) != 1 || edge.Configs[0].Source != "caddyfile" || edge.Configs[0].Target != "/etc/caddy/Caddyfile" {
+		t.Fatalf("edge should mount managed Caddyfile: %#v", edge.Configs)
+	}
+	caddyConfig, ok := cfg.Configs["caddyfile"]
+	if !ok || caddyConfig.Generate == nil || caddyConfig.Generate.Caddy == nil {
+		t.Fatalf("edge should generate managed Caddyfile: %#v", cfg.Configs)
+	}
+	caddy := caddyConfig.Generate.Caddy
+	if caddy.AdminImport != "jardin_admin" || caddy.RendererImport != "jardin_renderer" || !caddy.OnDemandTLS {
+		t.Fatalf("edge generated Caddy config should consume imports: %#v", caddy)
+	}
+	for _, mount := range []string{"caddy_data:/data", "caddy_config:/config"} {
+		if !slices.Contains(edge.Volumes, mount) {
+			t.Fatalf("edge missing Caddy volume %s: %#v", mount, edge.Volumes)
+		}
+	}
+}
+
+func assertNextAdminRendererMongoAppPattern(t *testing.T, cfg *config.Config) {
+	if cfg.Project.Name != "pattern-next-cms-app" {
+		t.Fatalf("next cms app project name = %q", cfg.Project.Name)
+	}
+	caddyConfig, ok := cfg.Configs["colocated_caddyfile"]
+	if !ok || caddyConfig.Source != "ops/caddy/Caddyfile" {
+		t.Fatalf("next cms app should use checked-in colocated Caddyfile: %#v", cfg.Configs)
+	}
+
+	services := productionServices(t, cfg)
+	mongo := services["mongo"]
+	if !mongo.Persistent || !slices.Contains(mongo.Volumes, "mongo_data:/data/db") {
+		t.Fatalf("mongo should be persistent with mongo_data volume: %#v", mongo)
+	}
+	if mongo.Placement == nil || mongo.Placement.Strategy != "pinned" {
+		t.Fatalf("mongo should be pinned for node-local data: %#v", mongo.Placement)
+	}
+
+	admin := services["admin"]
+	if admin.Build != "." || admin.Dockerfile != "Dockerfile" || admin.Port != 3000 {
+		t.Fatalf("admin should build from root Dockerfile on port 3000: %#v", admin)
+	}
+	if admin.Export == nil || admin.Export.Ports["web"] != 3000 {
+		t.Fatalf("admin should export web:3000: %#v", admin.Export)
+	}
+	if !slices.Contains(admin.DependsOn, "mongo") || admin.Env["MONGO_URL"] == "" || admin.EnvFile != ".env.example" {
+		t.Fatalf("admin should depend on mongo and receive runtime env file: %#v", admin)
+	}
+	if admin.HealthCheck.Path != "/api/health" || admin.Deploy.Strategy != "rolling" || admin.Deploy.Order != "start-first" {
+		t.Fatalf("admin should be health-gated rolling deploy: health=%#v deploy=%#v", admin.HealthCheck, admin.Deploy)
+	}
+
+	renderer := services["renderer"]
+	if renderer.Build != "." || renderer.Dockerfile != "Dockerfile.renderer" || renderer.Replicas != 2 {
+		t.Fatalf("renderer should build from Dockerfile.renderer with replicas: %#v", renderer)
+	}
+	if renderer.Export == nil || renderer.Export.Ports["web"] != 3000 {
+		t.Fatalf("renderer should export web:3000: %#v", renderer.Export)
+	}
+	if !slices.Contains(renderer.DependsOn, "admin") || renderer.Env["ADMIN_URL"] != "http://admin:3000" || renderer.EnvFile != ".env.example" {
+		t.Fatalf("renderer should depend on admin and receive runtime env file: %#v", renderer)
+	}
+	if renderer.HealthCheck.Path != "/api/health" || renderer.Deploy.Strategy != "rolling" || renderer.Deploy.Order != "start-first" {
+		t.Fatalf("renderer should be health-gated rolling deploy: health=%#v deploy=%#v", renderer.HealthCheck, renderer.Deploy)
+	}
+
+	edge := services["edge-colocated"]
+	assertPublicService(t, edge, 80)
+	if len(edge.Configs) != 1 || edge.Configs[0].Source != "colocated_caddyfile" || edge.Configs[0].Target != "/etc/caddy/Caddyfile" {
+		t.Fatalf("colocated edge should mount checked-in Caddyfile: %#v", edge.Configs)
+	}
+	for _, mount := range []string{"caddy_colocated_data:/data", "caddy_colocated_config:/config"} {
+		if !slices.Contains(edge.Volumes, mount) {
+			t.Fatalf("colocated edge missing Caddy volume %s: %#v", mount, edge.Volumes)
+		}
+	}
+}
+
+func assertNextAdminRendererMongoEdgePattern(t *testing.T, cfg *config.Config) {
+	if cfg.Project.Name != "pattern-next-cms-edge" {
+		t.Fatalf("next cms edge project name = %q", cfg.Project.Name)
+	}
+	if cfg.Imports["jardin_admin"].Project != "pattern-next-cms-app" || cfg.Imports["jardin_admin"].Service != "admin" {
+		t.Fatalf("edge missing admin import: %#v", cfg.Imports["jardin_admin"])
+	}
+	if cfg.Imports["jardin_renderer"].Project != "pattern-next-cms-app" || cfg.Imports["jardin_renderer"].Service != "renderer" {
+		t.Fatalf("edge missing renderer import: %#v", cfg.Imports["jardin_renderer"])
+	}
+
+	edge := productionServices(t, cfg)["edge"]
+	if len(edge.Ports) != 2 {
+		t.Fatalf("dedicated edge should declare http and https host ports: %#v", edge.Ports)
+	}
+	wantPorts := map[string]int{"http": 80, "https": 443}
+	for _, port := range edge.Ports {
+		if port.Mode != "host" || port.Published != wantPorts[port.Name] || port.Target != wantPorts[port.Name] {
+			t.Fatalf("dedicated edge port should bind public host port directly: %#v", port)
+		}
+	}
+	if len(edge.Configs) != 1 || edge.Configs[0].Source != "caddyfile" || edge.Configs[0].Target != "/etc/caddy/Caddyfile" {
+		t.Fatalf("dedicated edge should mount managed generated Caddyfile: %#v", edge.Configs)
+	}
+	caddyConfig, ok := cfg.Configs["caddyfile"]
+	if !ok || caddyConfig.Generate == nil || caddyConfig.Generate.Caddy == nil {
+		t.Fatalf("dedicated edge should generate managed Caddyfile: %#v", cfg.Configs)
+	}
+	caddy := caddyConfig.Generate.Caddy
+	if caddy.AdminImport != "jardin_admin" || caddy.RendererImport != "jardin_renderer" || caddy.AskImport != "jardin_admin" || !caddy.OnDemandTLS {
+		t.Fatalf("dedicated edge generated Caddy config should consume app imports: %#v", caddy)
+	}
+	for _, mount := range []string{"caddy_data:/data", "caddy_config:/config"} {
+		if !slices.Contains(edge.Volumes, mount) {
+			t.Fatalf("dedicated edge missing Caddy volume %s: %#v", mount, edge.Volumes)
+		}
+	}
+}
+
 func assertPublicService(t *testing.T, service config.ServiceConfig, port int) {
 	t.Helper()
-	if service.Port != port || service.Proxy == nil || service.Proxy.Domain == "" {
-		t.Fatalf("service should be public on port %d: %#v", port, service)
+	for _, servicePort := range service.EffectivePorts() {
+		if servicePort.Target == port && servicePort.Mode == "proxy" && servicePort.Proxy != nil && servicePort.Proxy.Domain != "" {
+			return
+		}
 	}
+	t.Fatalf("service should be public on port %d: %#v", port, service)
 }
 
 func assertBuildContextsExist(t *testing.T, patternDir string, cfg *config.Config) {
@@ -449,6 +686,12 @@ func assertBuildContextsExist(t *testing.T, patternDir string, cfg *config.Confi
 			}
 			if _, err := os.Stat(filepath.Join(buildPath, "Dockerfile")); err != nil {
 				t.Fatalf("%s/%s build context %s has no Dockerfile: %v", envName, serviceName, buildPath, err)
+			}
+			if service.Dockerfile != "" {
+				dockerfilePath := filepath.Clean(filepath.Join(buildPath, service.Dockerfile))
+				if _, err := os.Stat(dockerfilePath); err != nil {
+					t.Fatalf("%s/%s build context %s has no service Dockerfile %s: %v", envName, serviceName, buildPath, service.Dockerfile, err)
+				}
 			}
 		}
 	}

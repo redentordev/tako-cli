@@ -287,6 +287,40 @@ servers:
     #   zone: primary
 
 # ============================================================================
+# CONFIG FILE ARTIFACTS (Optional)
+# ============================================================================
+# Use for non-secret runtime config files such as a Caddyfile. Files are
+# uploaded to takod-owned storage and mounted read-only into services.
+# configs:
+#   caddyfile:
+#     source: ./ops/caddy/Caddyfile
+#   generated-caddy:
+#     generate:
+#       caddy:
+#         email: ${LETSENCRYPT_EMAIL}
+#         adminHost: admin.example.com
+#         siteHost: sites.example.com
+#         adminImport: app_admin
+#         rendererImport: app_renderer
+#         askImport: app_admin
+#         askPath: /api/platform/domains/ask
+#         onDemandTLS: true
+
+# Cross-project imports are declared at the project level and consumed by
+# edge/proxy services or tooling.
+# imports:
+#   app_admin:
+#     project: other-project
+#     environment: production
+#     service: admin
+#     port: web
+#   app_renderer:
+#     project: other-project
+#     environment: production
+#     service: renderer
+#     port: web
+
+# ============================================================================
 # ENVIRONMENTS (Required)
 # ============================================================================
 environments:
@@ -299,6 +333,7 @@ environments:
       # ======================================================================
       web:
         build: .          # Path to build context (directory with Dockerfile)
+        # dockerfile: Dockerfile.prod  # Optional: Dockerfile path relative to build context
         # image: node:20  # Or use a pre-built image instead of build
         port: 3000        # Internal container port
         # replicas: 1     # Number of container replicas (default: 1)
@@ -332,6 +367,12 @@ environments:
         # volumes:
         #   - uploads:/app/uploads              # Named volume
         #   - /host/path:/container/path        # Bind mount
+
+        # Config files (read-only files from top-level configs)
+        # configs:
+        #   - source: caddyfile
+        #     target: /etc/caddy/Caddyfile
+        #     mode: "0444"
         
         # Health checks
         # healthCheck:
@@ -340,12 +381,10 @@ environments:
         #   timeout: 5s
         #   retries: 3
         
-        # Cross-project service imports
-        # imports:
-        #   - other-project.postgres  # Import postgres from other-project
-        
-        # Export service to other projects
-        # export: true
+        # Export service ports to other projects
+        # export:
+        #   ports:
+        #     web: 3000
 
       # ======================================================================
       # DATABASE SERVICE - PostgreSQL example
@@ -360,7 +399,9 @@ environments:
       #     POSTGRES_USER: myapp
       #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       #     POSTGRES_DB: myapp_production
-      #   # export: true  # Allow other projects to import this service
+      #   # export:
+      #   #   ports:
+      #   #     postgres: 5432  # Allow other projects to import this port
 
       # ======================================================================
       # CACHE SERVICE - Redis example
@@ -388,12 +429,15 @@ environments:
 # ============================================================================
 # deployment:
 #   strategy: parallel      # parallel or sequential
+#   source: git             # local (default) or git for committed HEAD builds
 #   parallel:
 #     maxConcurrentBuilds: 4   # Max simultaneous builds
 #     maxConcurrentDeploys: 4  # Max simultaneous deploys
 #   cache:
 #     enabled: true         # Enable Docker build cache
-#     type: local           # Cache type: local
+#     type: local           # Cache type: local or registry
+#     # ref: ghcr.io/acme/my-app/buildcache  # required when type: registry
+#     # builder: mesh-builder                # optional docker buildx builder
 
 # ============================================================================
 # DOCKER REGISTRY (Optional - for private images)

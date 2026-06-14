@@ -117,21 +117,48 @@ func TestDeployRemoteHistoryErrorFailsSuccessfulRuntimeMutation(t *testing.T) {
 	}
 }
 
-func TestResolveDeployCommitInfoRejectsDirtyWorktree(t *testing.T) {
+func TestResolveDeployCommitInfoRejectsDirtyWorktreeForGitSource(t *testing.T) {
 	reader := fakeDeployGitReader{
 		repository: true,
 		dirty:      true,
 		status:     " M main.go\n?? new.txt\n",
 	}
 
-	_, err := resolveDeployCommitInfo(reader)
+	_, err := resolveDeployCommitInfo(reader, config.DeploymentSourceGit)
 	if err == nil {
-		t.Fatal("resolveDeployCommitInfo should reject dirty worktrees")
+		t.Fatal("resolveDeployCommitInfo should reject dirty worktrees for git source")
 	}
-	for _, want := range []string{"cannot deploy with uncommitted changes", "commit, stash, or discard", "M main.go", "?? new.txt"} {
+	for _, want := range []string{"cannot deploy git source with uncommitted changes", "commit, stash, or discard", "M main.go", "?? new.txt"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want %q", err, want)
 		}
+	}
+}
+
+func TestResolveDeployCommitInfoAllowsDirtyWorktreeForLocalSource(t *testing.T) {
+	want := &git.CommitInfo{
+		Hash:      "abcdef",
+		ShortHash: "abc",
+		Branch:    "main",
+		Message:   "deploy me",
+		Author:    "redentor",
+	}
+	reader := fakeDeployGitReader{
+		repository: true,
+		dirty:      true,
+		status:     " M main.go\n",
+		commitInfo: want,
+	}
+
+	got, err := resolveDeployCommitInfo(reader, config.DeploymentSourceLocal)
+	if err != nil {
+		t.Fatalf("resolveDeployCommitInfo returned error: %v", err)
+	}
+	if got.CommitInfo != want {
+		t.Fatalf("commitInfo = %#v, want %#v", got.CommitInfo, want)
+	}
+	if !got.Dirty || !strings.Contains(got.Status, "M main.go") {
+		t.Fatalf("dirty context = %#v, want status", got)
 	}
 }
 
@@ -148,17 +175,17 @@ func TestResolveDeployCommitInfoReturnsCleanCommitInfo(t *testing.T) {
 		commitInfo: want,
 	}
 
-	got, err := resolveDeployCommitInfo(reader)
+	got, err := resolveDeployCommitInfo(reader, config.DeploymentSourceLocal)
 	if err != nil {
 		t.Fatalf("resolveDeployCommitInfo returned error: %v", err)
 	}
-	if got != want {
-		t.Fatalf("commitInfo = %#v, want %#v", got, want)
+	if got.CommitInfo != want {
+		t.Fatalf("commitInfo = %#v, want %#v", got.CommitInfo, want)
 	}
 }
 
 func TestResolveDeployCommitInfoRequiresGitRepository(t *testing.T) {
-	_, err := resolveDeployCommitInfo(fakeDeployGitReader{})
+	_, err := resolveDeployCommitInfo(fakeDeployGitReader{}, config.DeploymentSourceLocal)
 	if err == nil {
 		t.Fatal("resolveDeployCommitInfo should reject non-git repositories")
 	}

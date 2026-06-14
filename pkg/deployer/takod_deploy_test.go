@@ -2,8 +2,11 @@ package deployer
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -13,6 +16,8 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/utils"
 )
 
 func TestEnsureTakodMeshKeysWithRunsConcurrently(t *testing.T) {
@@ -121,6 +126,17 @@ func TestRunTakodNodeActionsAggregatesSortedErrors(t *testing.T) {
 	}
 }
 
+func TestRollingNodeOrderDeploysAssignedNodesBeforeCleanupNodes(t *testing.T) {
+	got := rollingNodeOrder(
+		[]string{"node-a", "node-b", "node-c"},
+		[]string{"node-c", "node-b", "node-c"},
+	)
+	want := []string{"node-c", "node-b", "node-a"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("rolling node order = %#v, want %#v", got, want)
+	}
+}
+
 func TestShouldInstallTakodRelease(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -175,9 +191,25 @@ func TestShouldInstallTakodRelease(t *testing.T) {
 
 func TestBuildTakodHealthCommandQuotesURL(t *testing.T) {
 	got := buildTakodHealthCommand(8080, "/health; touch /tmp/pwned")
-	want := "curl -sf -- 'http://127.0.0.1:8080/health; touch /tmp/pwned' || exit 1"
+	want := expectedTakodHealthCommand("http://127.0.0.1:8080/health; touch /tmp/pwned")
 	if got != want {
 		t.Fatalf("health command = %q, want %q", got, want)
+	}
+}
+
+func TestBuildTakodHealthCommandFallsBackThroughWgetAndNode(t *testing.T) {
+	got := buildTakodHealthCommand(8080, "/health")
+	for _, expected := range []string{
+		"command -v curl",
+		"curl -sf -- \"$url\"",
+		"command -v wget",
+		"wget -q -O /dev/null -- \"$url\"",
+		"command -v node",
+		"fetch(process.argv[1])",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("health command missing %q: %s", expected, got)
+		}
 	}
 }
 
@@ -206,10 +238,16 @@ func TestBuildTakodHealthSpecUsesQuotedCommand(t *testing.T) {
 		t.Fatal("buildTakodHealthSpec returned nil")
 	}
 
-	want := "curl -sf -- 'http://127.0.0.1:8080/ready?token=a'\"'\"'b' || exit 1"
+	want := expectedTakodHealthCommand("http://127.0.0.1:8080/ready?token=a'b")
 	if spec.Command != want {
 		t.Fatalf("health command = %q, want %q", spec.Command, want)
 	}
+}
+
+func expectedTakodHealthCommand(url string) string {
+	nodeProbe := `fetch(process.argv[1]).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))`
+	script := fmt.Sprintf("url=%s; if command -v curl >/dev/null 2>&1; then curl -sf -- \"$url\" >/dev/null; elif command -v wget >/dev/null 2>&1; then wget -q -O /dev/null -- \"$url\"; elif command -v node >/dev/null 2>&1; then node -e %s \"$url\"; else echo 'curl, wget, or node is required for health checks' >&2; exit 127; fi", utils.ShellQuote(url), utils.ShellQuote(nodeProbe))
+	return "sh -c " + utils.ShellQuote(script)
 }
 
 func TestBuildTakodHealthSpecWaitsLongerThanDockerRetryCount(t *testing.T) {
@@ -264,17 +302,232 @@ func TestShouldPublishMeshUpstreamsOnlyForMultiNodeEnvironments(t *testing.T) {
 	}
 }
 
+func TestTakodMeshServersIncludeImportServersBeforeEnvironmentServers(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"edge"})
+	cfg.Servers["app"] = config.ServerConfig{Host: "app.example.test", User: "root"}
+	cfg.Imports = map[string]config.ImportConfig{
+		"jardin_admin": {
+			Project:     "jardin-cms",
+			Environment: "production",
+			Service:     "admin",
+			Port:        "web",
+			Servers:     []string{"app"},
+		},
+		"jardin_renderer": {
+			Project:     "jardin-cms",
+			Environment: "production",
+			Service:     "renderer",
+			Port:        "web",
+			Servers:     []string{"app"},
+		},
+	}
+	deploy := &Deployer{config: cfg, environment: "production"}
+
+	got, err := deploy.getTakodMeshServers()
+	if err != nil {
+		t.Fatalf("getTakodMeshServers returned error: %v", err)
+	}
+	want := []string{"app", "edge"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("mesh servers = %#v, want %#v", got, want)
+	}
+	appAddress, err := deploy.meshAddress(0)
+	if err != nil {
+		t.Fatalf("meshAddress returned error: %v", err)
+	}
+	if appAddress != "10.210.0.1/24" {
+		t.Fatalf("import producer address = %q, want exported endpoint source address", appAddress)
+	}
+}
+
+func TestPlanTakodAssignmentsGlobalExpandsToAddedEnvironmentNode(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b", "node-c"}), environment: "production"}
+
+	assignments, err := deploy.planTakodAssignments("agent", &config.ServiceConfig{
+		Placement: &config.PlacementConfig{Strategy: "global"},
+	})
+	if err != nil {
+		t.Fatalf("planTakodAssignments returned error: %v", err)
+	}
+	want := []takodAssignment{
+		{ServerName: "node-a", Slot: 1},
+		{ServerName: "node-b", Slot: 2},
+		{ServerName: "node-c", Slot: 3},
+	}
+	if !slices.Equal(assignments, want) {
+		t.Fatalf("assignments = %#v, want %#v", assignments, want)
+	}
+}
+
+func TestShouldDistributeBuiltImageWhenAssignedAwayFromSource(t *testing.T) {
+	tests := []struct {
+		name        string
+		assignments []string
+		source      string
+		want        bool
+	}{
+		{
+			name:        "only source node",
+			assignments: []string{"node-a"},
+			source:      "node-a",
+			want:        false,
+		},
+		{
+			name:        "source and peer",
+			assignments: []string{"node-a", "node-b"},
+			source:      "node-a",
+			want:        true,
+		},
+		{
+			name:        "pinned to peer only",
+			assignments: []string{"node-b"},
+			source:      "node-a",
+			want:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldDistributeBuiltImage(tt.assignments, tt.source); got != tt.want {
+				t.Fatalf("shouldDistributeBuiltImage(%v, %q) = %v, want %v", tt.assignments, tt.source, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildTakodContainerSpecDoesNotPublishPublicOneNodeService(t *testing.T) {
 	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
-	container, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
+	container, err := deploy.buildTakodContainerSpec(nil, "node-a", "web", &config.ServiceConfig{
 		Port:  80,
 		Proxy: &config.ProxyConfig{Domain: "example.com"},
-	}, 1, false, 0)
+	}, 1, false)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
 	if len(container.Publishes) != 0 {
 		t.Fatalf("public one-node service should not publish direct host ports: %#v", container.Publishes)
+	}
+	wantAlias := runtimeid.ContainerNetworkAlias("demo", "production", "web", 1)
+	if !slices.Contains(container.NetworkAliases, wantAlias) {
+		t.Fatalf("container network aliases = %#v, want %q", container.NetworkAliases, wantAlias)
+	}
+	for _, alias := range container.NetworkAliases {
+		if strings.Contains(alias, "_") {
+			t.Fatalf("container network alias should be DNS-safe: %q", alias)
+		}
+	}
+}
+
+func TestServiceNetworkAliasesIncludeScopedDiscoveryNames(t *testing.T) {
+	got := serviceNetworkAliases("demo-app", "production", "api")
+	want := []string{
+		"api",
+		"api.tako.internal",
+		"api.production.demo-app.tako.internal",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("serviceNetworkAliases() = %#v, want %#v", got, want)
+	}
+}
+
+func TestTakodRegistryAuthMatchesConfiguredRegistry(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a"})
+	cfg.Registry = &config.RegistryConfig{
+		URL:      "registry.example.com",
+		Username: "deploy",
+		Password: "secret-token",
+	}
+
+	auth := takodRegistryAuth(cfg, "registry.example.com/demo/web:1")
+	if auth == nil {
+		t.Fatal("expected registry auth")
+	}
+	if auth.Server != "registry.example.com" || auth.Username != "deploy" || auth.Password != "secret-token" {
+		t.Fatalf("unexpected registry auth: %#v", auth)
+	}
+	if takodRegistryAuth(cfg, "ghcr.io/demo/web:1") != nil {
+		t.Fatal("registry auth should not match a different registry host")
+	}
+}
+
+func TestValidateServicePlatformCompatibilityRejectsMismatch(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production"}
+	deploy.nodeInfoInspector = func(serverName string) (*takod.NodeInfoResponse, error) {
+		return &takod.NodeInfoResponse{Platform: "linux/amd64"}, nil
+	}
+
+	err := deploy.ValidateServicePlatformCompatibility("web", &config.ServiceConfig{
+		Image:    "demo/web:1",
+		Platform: "linux/arm64",
+		Replicas: 2,
+	})
+	if err == nil {
+		t.Fatal("expected platform mismatch to be rejected")
+	}
+	if !strings.Contains(err.Error(), "platform linux/arm64 does not match assigned node platform") {
+		t.Fatalf("error = %q, want platform mismatch context", err)
+	}
+}
+
+func TestValidateServicePlatformCompatibilityAllowsMatchingNodes(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production"}
+	deploy.nodeInfoInspector = func(serverName string) (*takod.NodeInfoResponse, error) {
+		return &takod.NodeInfoResponse{Platform: "linux/amd64"}, nil
+	}
+
+	err := deploy.ValidateServicePlatformCompatibility("web", &config.ServiceConfig{
+		Build:    ".",
+		Platform: "linux/amd64",
+		Replicas: 2,
+	})
+	if err != nil {
+		t.Fatalf("expected matching platform to pass: %v", err)
+	}
+}
+
+func TestValidateBuildWithoutPlatformRejectsMixedAssignedPlatforms(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production"}
+	deploy.nodeInfoInspector = func(serverName string) (*takod.NodeInfoResponse, error) {
+		if serverName == "node-b" {
+			return &takod.NodeInfoResponse{Platform: "linux/arm64"}, nil
+		}
+		return &takod.NodeInfoResponse{Platform: "linux/amd64"}, nil
+	}
+
+	err := deploy.ValidateServicePlatformCompatibility("web", &config.ServiceConfig{
+		Build:    ".",
+		Replicas: 2,
+	})
+	if err == nil {
+		t.Fatal("expected mixed platform build to be rejected")
+	}
+	if !strings.Contains(err.Error(), "mixed platforms") {
+		t.Fatalf("error = %q, want mixed platform context", err)
+	}
+}
+
+func TestValidateBuildWithoutPlatformRejectsSourceMismatch(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production"}
+	deploy.nodeInfoInspector = func(serverName string) (*takod.NodeInfoResponse, error) {
+		if serverName == "node-a" {
+			return &takod.NodeInfoResponse{Platform: "linux/amd64"}, nil
+		}
+		return &takod.NodeInfoResponse{Platform: "linux/arm64"}, nil
+	}
+
+	err := deploy.ValidateServicePlatformCompatibility("web", &config.ServiceConfig{
+		Build:    ".",
+		Replicas: 1,
+		Placement: &config.PlacementConfig{
+			Strategy: "pinned",
+			Servers:  []string{"node-b"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected source mismatch to be rejected")
+	}
+	if !strings.Contains(err.Error(), "source node node-a=linux/amd64") {
+		t.Fatalf("error = %q, want source mismatch context", err)
 	}
 }
 
@@ -289,10 +542,12 @@ func TestBuildTakodContainerSpecPublishesPublicMultiNodeServiceOnMeshIP(t *testi
 	}
 	deploy.config.Environments["production"] = env
 
-	container, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
+	container, err := deploy.buildTakodContainerSpec(fakeTakodStatusExecutor{
+		output: `{"hostPort":24567}`,
+	}, "node-a", "web", &config.ServiceConfig{
 		Port:  80,
 		Proxy: &config.ProxyConfig{Domain: "example.com"},
-	}, 1, true, 24321)
+	}, 1, true)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
@@ -306,12 +561,57 @@ func TestBuildTakodContainerSpecPublishesPublicMultiNodeServiceOnMeshIP(t *testi
 
 func TestBuildTakodContainerSpecDoesNotPublishInternalServicePort(t *testing.T) {
 	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
-	container, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, false, 0)
+	container, err := deploy.buildTakodContainerSpec(nil, "node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, false)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
 	if len(container.Publishes) != 0 {
 		t.Fatalf("internal service should not publish host ports: %#v", container.Publishes)
+	}
+}
+
+func TestBuildTakodContainerSpecPublishesExportedInternalPortOnMeshIP(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
+	service := config.ServiceConfig{
+		Port: 4000,
+		Export: &config.ServiceExportConfig{
+			Ports: map[string]int{"web": 4000},
+		},
+	}
+	env := deploy.config.Environments["production"]
+	env.Services = map[string]config.ServiceConfig{"api": service}
+	deploy.config.Environments["production"] = env
+
+	container, err := deploy.buildTakodContainerSpec(fakeTakodStatusExecutor{
+		output: `{"hostPort":24567}`,
+	}, "node-a", "api", &service, 1, false)
+	if err != nil {
+		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
+	}
+	if len(container.Publishes) != 1 || container.Publishes[0] != "10.210.0.1:24567:4000" {
+		t.Fatalf("exported internal service publish = %#v, want mesh upstream", container.Publishes)
+	}
+}
+
+func TestBuildTakodContainerSpecPublishesHostPortOnResolvedCIDR(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
+	container, err := deploy.buildTakodContainerSpec(fakeTakodStatusExecutor{
+		output: `{"hostPort":15353}`,
+	}, "node-a", "dns", &config.ServiceConfig{
+		Ports: []config.PortConfig{{
+			Name:      "dns",
+			Target:    5353,
+			Published: 15353,
+			Protocol:  "udp",
+			Mode:      "host",
+			HostIP:    "10.210.0.0/16",
+		}},
+	}, 1, false)
+	if err != nil {
+		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
+	}
+	if len(container.Publishes) != 1 || container.Publishes[0] != "10.210.0.1:15353:5353/udp" {
+		t.Fatalf("host publish = %#v, want mesh CIDR UDP bind", container.Publishes)
 	}
 }
 
@@ -354,7 +654,7 @@ func TestPlanTakodAssignmentsHonorsPlacementConstraints(t *testing.T) {
 	cfg.Servers["node-c"] = config.ServerConfig{Host: "node-c.example.test", User: "root", Labels: map[string]string{"role": "web"}}
 	deploy := &Deployer{config: cfg, environment: "production"}
 
-	assignments, err := deploy.planTakodAssignments(&config.ServiceConfig{
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{
 		Replicas: 3,
 		Placement: &config.PlacementConfig{
 			Strategy:    "spread",
@@ -382,7 +682,7 @@ func TestPlanTakodAssignmentsGlobalUsesConstrainedTargets(t *testing.T) {
 	cfg.Servers["node-c"] = config.ServerConfig{Host: "node-c.example.test", User: "root", Labels: map[string]string{"role": "web"}}
 	deploy := &Deployer{config: cfg, environment: "production"}
 
-	assignments, err := deploy.planTakodAssignments(&config.ServiceConfig{
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{
 		Placement: &config.PlacementConfig{
 			Strategy:    "global",
 			Constraints: []string{"node.labels.role==web"},
@@ -454,22 +754,160 @@ func TestTakodRuntimeNamesUseCollisionResistantAppStageIdentity(t *testing.T) {
 
 func TestBuildTakodMountSpecsNamespacesNamedVolumes(t *testing.T) {
 	deploy := &Deployer{
-		config:      &config.Config{Project: config.ProjectConfig{Name: "demo"}},
+		config: &config.Config{
+			Project: config.ProjectConfig{Name: "demo"},
+			Volumes: map[string]config.VolumeConfig{
+				"cache": {Name: "shared-cache"},
+			},
+		},
 		environment: "production",
 	}
 
 	mounts, err := deploy.buildTakodMountSpecs("web", &config.ServiceConfig{
-		Volumes: []string{"/data", "cache:/cache"},
+		Volumes: []string{"/data", "cache:/cache", "cache:/cache-ro:ro", "/srv/app/config:/config:ro"},
 	})
 	if err != nil {
 		t.Fatalf("buildTakodMountSpecs returned error: %v", err)
 	}
 	want := []string{
 		"type=volume,source=" + runtimeid.VolumeName("demo", "production", "/data") + ",target=/data",
-		"type=volume,source=" + runtimeid.VolumeName("demo", "production", "cache") + ",target=/cache",
+		"type=volume,source=shared-cache,target=/cache",
+		"type=volume,source=shared-cache,target=/cache-ro,readonly",
+		"type=bind,source=/srv/app/config,target=/config,readonly",
 	}
 	if !slices.Equal(mounts, want) {
 		t.Fatalf("mounts = %#v, want %#v", mounts, want)
+	}
+}
+
+func TestBuildTakodMountSpecsRejectsRelativeBindMount(t *testing.T) {
+	deploy := &Deployer{
+		config: &config.Config{
+			Project: config.ProjectConfig{Name: "demo"},
+		},
+		environment: "production",
+	}
+
+	_, err := deploy.buildTakodMountSpecs("web", &config.ServiceConfig{
+		Volumes: []string{"./data:/data"},
+	})
+	if err == nil {
+		t.Fatal("buildTakodMountSpecs should reject relative bind mounts")
+	}
+	if !strings.Contains(err.Error(), "relative bind mount") {
+		t.Fatalf("error = %q, want relative bind mount guidance", err)
+	}
+}
+
+func TestBuildTakodConfigFilesEncodesContents(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "Caddyfile")
+	if err := os.WriteFile(configPath, []byte(":80 {\n respond \"edge\"\n}\n"), 0600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	deploy := &Deployer{
+		config: &config.Config{
+			Project: config.ProjectConfig{Name: "demo"},
+			Configs: map[string]config.ConfigFileConfig{
+				"caddyfile": {Source: configPath},
+			},
+		},
+		environment: "production",
+	}
+
+	files, err := deploy.buildTakodConfigFiles("edge", &config.ServiceConfig{
+		Configs: []config.ServiceConfigFileMount{{
+			Source: "caddyfile",
+			Target: "/etc/caddy/Caddyfile",
+			Mode:   "0444",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildTakodConfigFiles returned error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("files = %#v, want one config file", files)
+	}
+	got, err := base64.StdEncoding.DecodeString(files[0].ContentBase64)
+	if err != nil {
+		t.Fatalf("invalid content base64: %v", err)
+	}
+	if string(got) != ":80 {\n respond \"edge\"\n}\n" {
+		t.Fatalf("content = %q, want Caddyfile contents", string(got))
+	}
+	if files[0].Source != "caddyfile" || files[0].Target != "/etc/caddy/Caddyfile" || files[0].Mode != "0444" || files[0].ContentHash == "" {
+		t.Fatalf("unexpected config file request: %#v", files[0])
+	}
+}
+
+func TestHookTargetServerPrefersAssignedNode(t *testing.T) {
+	got := hookTargetServer(
+		[]takodAssignment{{ServerName: "node-b", Slot: 2}, {ServerName: "node-a", Slot: 1}},
+		[]string{"node-c"},
+	)
+	if got != "node-a" {
+		t.Fatalf("hook target = %q, want first sorted assigned node", got)
+	}
+
+	got = hookTargetServer(nil, []string{"node-c", "node-d"})
+	if got != "node-c" {
+		t.Fatalf("hook target fallback = %q, want first target node", got)
+	}
+}
+
+func TestBuildHookRequestMergesServiceAndHookRuntimeSettings(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	deploy := &Deployer{
+		config:      &config.Config{Project: config.ProjectConfig{Name: "demo"}},
+		environment: "production",
+	}
+	service := &config.ServiceConfig{
+		Image: "demo/web:1",
+		Env: map[string]string{
+			"BASE":     "service",
+			"SERVICE":  "yes",
+			"OVERRIDE": "service",
+		},
+		Volumes: []string{"data:/data"},
+	}
+	hook := &config.HookConfig{
+		Command:    "npm run migrate",
+		Timeout:    "5m",
+		User:       "1000:1000",
+		WorkingDir: "/app",
+		Env: map[string]string{
+			"HOOK":     "yes",
+			"OVERRIDE": "hook",
+		},
+	}
+
+	request, err := deploy.buildHookRequest("web", service, "demo/web:1", "preDeploy", hook)
+	if err != nil {
+		t.Fatalf("buildHookRequest returned error: %v", err)
+	}
+	if request.Hook != "preDeploy" || request.Image != "demo/web:1" || request.User != "1000:1000" || request.WorkingDir != "/app" || request.Timeout != "5m" {
+		t.Fatalf("unexpected hook request: %#v", request)
+	}
+	if !slices.Equal(request.Command, []string{"sh", "-c", "npm run migrate"}) {
+		t.Fatalf("command = %#v, want shell command", request.Command)
+	}
+	if !strings.Contains(request.EnvFileContent, "SERVICE=yes") ||
+		!strings.Contains(request.EnvFileContent, "HOOK=yes") ||
+		!strings.Contains(request.EnvFileContent, "OVERRIDE=hook") ||
+		strings.Contains(request.EnvFileContent, "OVERRIDE=service") {
+		t.Fatalf("env file content did not merge as expected: %q", request.EnvFileContent)
+	}
+	if len(request.Mounts) != 1 || !strings.Contains(request.Mounts[0], "target=/data") {
+		t.Fatalf("mounts = %#v, want service mounts", request.Mounts)
 	}
 }
 

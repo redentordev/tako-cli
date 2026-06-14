@@ -2,6 +2,8 @@ package state
 
 import (
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/config"
 )
 
 // DeploymentState represents a single deployment's state
@@ -31,14 +33,15 @@ type DeploymentState struct {
 
 // ServiceState represents a deployed service's state
 type ServiceState struct {
-	Name        string            `json:"name"`
-	Image       string            `json:"image"`       // Image name with tag
-	ImageID     string            `json:"imageId"`     // Docker image ID
-	ContainerID string            `json:"containerId"` // Running container ID
-	Port        int               `json:"port"`
-	Replicas    int               `json:"replicas"`
-	Env         map[string]string `json:"env"`
-	HealthCheck HealthCheckState  `json:"healthCheck"`
+	Name        string              `json:"name"`
+	Image       string              `json:"image"`       // Image name with tag
+	ImageID     string              `json:"imageId"`     // Docker image ID
+	ContainerID string              `json:"containerId"` // Running container ID
+	Port        int                 `json:"port"`
+	Ports       []config.PortConfig `json:"ports,omitempty"`
+	Replicas    int                 `json:"replicas"`
+	Env         map[string]string   `json:"env"`
+	HealthCheck HealthCheckState    `json:"healthCheck"`
 }
 
 // HealthCheckState represents health check status

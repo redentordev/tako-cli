@@ -50,6 +50,9 @@ func GetVersionInfo() string {
 func Execute() {
 	err := rootCmd.Execute()
 	if err != nil {
+		if code, ok := commandExitCode(err); ok {
+			os.Exit(code)
+		}
 		os.Exit(1)
 	}
 }

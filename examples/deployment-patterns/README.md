@@ -20,6 +20,8 @@ minimal so the deployment shape is easy to see and adapt.
 | `10-stages-shared-node` | Preview and production on one node | Same project, separate environments, distinct domains |
 | `11-websocket-node` | Realtime Node.js service | WebSocket endpoint, replicas, `ip_hash` balancing |
 | `12-github-actions-deploy` | CI/CD deployment | GitHub Actions, state restore, noninteractive deploy |
+| `cms-dynamic-domains` | CMS app plus dedicated Caddy edge | Cross-project exports/imports, generated Caddy config mount, direct `80/443` edge |
+| `next-admin-renderer-mongo` | Jardin-shaped CMS fixture | Two Dockerfiles, Mongo, runtime token, colocated Caddy, dedicated generated edge |
 
 ## How To Use
 
@@ -46,3 +48,10 @@ When multiple unrelated projects share one node, keep each template's
 `project.name`, environment name, proxy domain, and named volumes unique. Tako
 uses the project plus environment as the runtime boundary for containers,
 networks, proxy files, state, and cleanup.
+
+The `cms-dynamic-domains` edge project is intentionally different from normal
+public services: it binds host ports `80` and `443` directly for Caddy on a
+dedicated edge node. Do not deploy it onto a node already using shared
+`tako-proxy` for unrelated projects. Use `tako setup --dedicated-edge` on that
+node; setup refuses to stop shared `tako-proxy` while active proxy route files
+exist.

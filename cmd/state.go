@@ -1849,16 +1849,26 @@ func aggregateActualSnapshotFromNodeSnapshots(project string, environment string
 					existing.ConfigHash = ""
 				}
 				existing.RuntimeID = mergeActualRuntimeID(existing.RuntimeID, service.RuntimeID)
+				existing.HealthyReplicas += service.HealthyReplicas
+				existing.UnhealthyReplicas += service.UnhealthyReplicas
+				existing.StartingReplicas += service.StartingReplicas
+				existing.NoHealthcheckReplicas += service.NoHealthcheckReplicas
+				existing.UnknownHealthReplicas += service.UnknownHealthReplicas
 				snapshot.Services[serviceName] = existing
 				continue
 			}
 			snapshot.Services[serviceName] = takodstate.ActualService{
-				Name:       service.Name,
-				Image:      service.Image,
-				Replicas:   service.Replicas,
-				Containers: append([]string(nil), service.Containers...),
-				ConfigHash: service.ConfigHash,
-				RuntimeID:  service.RuntimeID,
+				Name:                  service.Name,
+				Image:                 service.Image,
+				Replicas:              service.Replicas,
+				Containers:            append([]string(nil), service.Containers...),
+				ConfigHash:            service.ConfigHash,
+				RuntimeID:             service.RuntimeID,
+				HealthyReplicas:       service.HealthyReplicas,
+				UnhealthyReplicas:     service.UnhealthyReplicas,
+				StartingReplicas:      service.StartingReplicas,
+				NoHealthcheckReplicas: service.NoHealthcheckReplicas,
+				UnknownHealthReplicas: service.UnknownHealthReplicas,
 			}
 		}
 	}
@@ -2082,12 +2092,28 @@ func convertRemoteToLocal(remote *remotestate.DeploymentState, env string) *loca
 			Image:    svc.Image,
 			ImageID:  svc.ImageID,
 			Replicas: svc.Replicas,
-			Ports:    []int{svc.Port},
+			Ports:    serviceStatePortInts(svc),
 			Health:   boolToHealth(svc.HealthCheck.Healthy),
 		}
 	}
 
 	return local
+}
+
+func serviceStatePortInts(service remotestate.ServiceState) []int {
+	if len(service.Ports) > 0 {
+		ports := make([]int, 0, len(service.Ports))
+		for _, port := range service.Ports {
+			if port.Target > 0 {
+				ports = append(ports, port.Target)
+			}
+		}
+		return ports
+	}
+	if service.Port > 0 {
+		return []int{service.Port}
+	}
+	return nil
 }
 
 func boolToHealth(healthy bool) string {
@@ -2391,12 +2417,17 @@ func actualSnapshotFromTakodActual(project string, environment string, node stri
 			replicas = len(service.Containers)
 		}
 		snapshot.Services[key] = takodstate.ActualService{
-			Name:       name,
-			Image:      service.Image,
-			Replicas:   replicas,
-			Containers: append([]string(nil), service.Containers...),
-			ConfigHash: service.ConfigHash,
-			RuntimeID:  service.RuntimeID,
+			Name:                  name,
+			Image:                 service.Image,
+			Replicas:              replicas,
+			Containers:            append([]string(nil), service.Containers...),
+			ConfigHash:            service.ConfigHash,
+			RuntimeID:             service.RuntimeID,
+			HealthyReplicas:       service.HealthyReplicas,
+			UnhealthyReplicas:     service.UnhealthyReplicas,
+			StartingReplicas:      service.StartingReplicas,
+			NoHealthcheckReplicas: service.NoHealthcheckReplicas,
+			UnknownHealthReplicas: service.UnknownHealthReplicas,
 		}
 	}
 	return snapshot

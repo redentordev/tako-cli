@@ -1,0 +1,114 @@
+project:
+  name: pattern-next-cms-app
+  version: 1.0.0
+
+deployment:
+  source: git
+
+configs:
+  colocated_caddyfile:
+    source: ./ops/caddy/Caddyfile
+
+volumes:
+  mongo_data:
+    driver: local
+  caddy_colocated_data:
+    driver: local
+  caddy_colocated_config:
+    driver: local
+
+servers:
+  app:
+    host: ${APP_SERVER_HOST}
+    user: root
+    sshKey: ${APP_SSH_KEY}
+
+environments:
+  production:
+    servers:
+      - app
+    services:
+      mongo:
+        image: mongo:7
+        persistent: true
+        volumes:
+          - mongo_data:/data/db
+        placement:
+          strategy: pinned
+          servers:
+            - app
+
+      admin:
+        build: .
+        dockerfile: Dockerfile
+        port: 3000
+        export:
+          ports:
+            web: 3000
+        dependsOn:
+          - mongo
+        deploy:
+          strategy: rolling
+          order: start-first
+          maxUnavailable: 0
+          monitor: 10s
+        env:
+          SERVICE_ROLE: admin
+          PORT: "3000"
+          MONGO_URL: mongodb://mongo:27017/jardin_fixture
+        envFile: ${JARDIN_ENV_FILE}
+        healthCheck:
+          path: /api/health
+          interval: 5s
+          timeout: 3s
+          retries: 10
+          startPeriod: 20s
+
+      renderer:
+        build: .
+        dockerfile: Dockerfile.renderer
+        port: 3000
+        replicas: 2
+        export:
+          ports:
+            web: 3000
+        dependsOn:
+          - admin
+        deploy:
+          strategy: rolling
+          order: start-first
+          maxUnavailable: 0
+          monitor: 10s
+        env:
+          SERVICE_ROLE: renderer
+          PORT: "3000"
+          ADMIN_URL: http://admin:3000
+        envFile: ${JARDIN_ENV_FILE}
+        healthCheck:
+          path: /api/health
+          interval: 5s
+          timeout: 3s
+          retries: 10
+          startPeriod: 10s
+
+      edge-colocated:
+        image: caddy:2.9-alpine
+        port: 80
+        proxy:
+          domain: cms-colocated.${APP_SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        configs:
+          - source: colocated_caddyfile
+            target: /etc/caddy/Caddyfile
+            mode: "0444"
+        volumes:
+          - caddy_colocated_data:/data
+          - caddy_colocated_config:/config
+        dependsOn:
+          - admin
+          - renderer
+        healthCheck:
+          path: /
+          interval: 15s
+          timeout: 5s
+          retries: 3

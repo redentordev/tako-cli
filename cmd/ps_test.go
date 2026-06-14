@@ -9,6 +9,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
 func TestDesiredReplicasForSelection(t *testing.T) {
@@ -83,6 +84,96 @@ func TestDesiredReplicasForSelectionHonorsPlacementConstraints(t *testing.T) {
 	}
 	if got != 2 {
 		t.Fatalf("desiredReplicasForSelection() = %d, want 2", got)
+	}
+}
+
+func TestBuildPSServiceInfoUsesRuntimeDesiredRevision(t *testing.T) {
+	servers := testPSActualStateServers([]string{"node-a"})
+	services := map[string]config.ServiceConfig{
+		"web": {
+			Replicas: 1,
+			Port:     3000,
+		},
+	}
+	actualServices := map[string]*takod.ActualService{
+		"web": {
+			Name:     "web",
+			Replicas: 2,
+		},
+	}
+	desired := &takodstate.DesiredRevision{
+		Project:     "demo",
+		Environment: "production",
+		TargetNodes: []string{"node-a"},
+		Services: map[string]takodstate.DesiredService{
+			"web": {
+				Name:     "web",
+				Replicas: 2,
+			},
+		},
+	}
+
+	infos, err := buildPSServiceInfo(servers, services, actualServices, desired, []string{"node-a"}, []string{"node-a"}, "")
+	if err != nil {
+		t.Fatalf("buildPSServiceInfo returned error: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("service info count = %d, want 1", len(infos))
+	}
+	if got := infos[0].Desired; got != 2 {
+		t.Fatalf("desired replicas = %d, want runtime desired count 2", got)
+	}
+	if got := infos[0].Status; got != "running" {
+		t.Fatalf("status = %q, want running", got)
+	}
+}
+
+func TestBuildPSServiceInfoReportsUnhealthyReplicas(t *testing.T) {
+	servers := testPSActualStateServers([]string{"node-a"})
+	services := map[string]config.ServiceConfig{
+		"renderer": {
+			Replicas: 2,
+			Port:     3000,
+		},
+	}
+	actualServices := map[string]*takod.ActualService{
+		"renderer": {
+			Name:              "renderer",
+			Replicas:          2,
+			HealthyReplicas:   1,
+			UnhealthyReplicas: 1,
+		},
+	}
+
+	infos, err := buildPSServiceInfo(servers, services, actualServices, nil, []string{"node-a"}, []string{"node-a"}, "")
+	if err != nil {
+		t.Fatalf("buildPSServiceInfo returned error: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("service info count = %d, want 1", len(infos))
+	}
+	if infos[0].Status != "unhealthy" {
+		t.Fatalf("status = %q, want unhealthy", infos[0].Status)
+	}
+	if infos[0].Health != "1 healthy, 1 unhealthy" {
+		t.Fatalf("health = %q, want health count breakdown", infos[0].Health)
+	}
+}
+
+func TestServicePortsFormatsExplicitPorts(t *testing.T) {
+	service := config.ServiceConfig{
+		Ports: []config.PortConfig{
+			{Name: "http", Target: 3000, Mode: "proxy", Protocol: "http", Proxy: &config.ProxyConfig{Domain: "example.com"}},
+			{Name: "metrics", Target: 9090, Mode: "internal", Protocol: "tcp"},
+			{Name: "dns", Target: 5353, Published: 15353, Mode: "host", Protocol: "udp"},
+		},
+	}
+
+	got := servicePorts(service, false, 1)
+	for _, want := range []string{"http:3000", "metrics:9090/internal", "dns:15353->5353/udp"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ports = %q, want %q", got, want)
+		}
 	}
 }
 

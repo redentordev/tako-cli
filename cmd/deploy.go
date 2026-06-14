@@ -32,8 +32,9 @@ var (
 )
 
 var deployCmd = &cobra.Command{
-	Use:   "deploy",
-	Short: "Deploy your application to configured servers",
+	Use:          "deploy",
+	Short:        "Deploy your application to configured servers",
+	SilenceUsage: true,
 	Long: `Deploy your application by reconciling desired services on the takod mesh.
 
 The deployment process:
@@ -76,31 +77,50 @@ type deployGitReader interface {
 	GetCommitInfo(string) (*git.CommitInfo, error)
 }
 
-func resolveDeployCommitInfo(gitClient deployGitReader) (*git.CommitInfo, error) {
+type deployCommitContext struct {
+	CommitInfo *git.CommitInfo
+	Source     string
+	Dirty      bool
+	Status     string
+}
+
+func resolveDeployCommitInfo(gitClient deployGitReader, source string) (*deployCommitContext, error) {
 	if !gitClient.IsRepository() {
 		return nil, fmt.Errorf("❌ This project is not a Git repository.\n\nPlease initialize Git first:\n  git init\n  git add .\n  git commit -m \"Initial commit\"\n\nGit is required for deployment tracking and rollback functionality.")
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = config.DeploymentSourceLocal
 	}
 
 	hasChanges, err := gitClient.HasUncommittedChanges()
 	if err != nil {
 		return nil, fmt.Errorf("failed to check git status: %w", err)
 	}
+	status := ""
 	if hasChanges {
-		status, err := gitClient.GetStatus()
+		status, err = gitClient.GetStatus()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get git status: %w", err)
 		}
 		if strings.TrimSpace(status) == "" {
 			status = "(dirty worktree)"
 		}
-		return nil, fmt.Errorf("cannot deploy with uncommitted changes; commit, stash, or discard changes first:\n%s", strings.TrimSpace(status))
+		if source == config.DeploymentSourceGit {
+			return nil, fmt.Errorf("cannot deploy git source with uncommitted changes; commit, stash, or discard changes first:\n%s", strings.TrimSpace(status))
+		}
 	}
 
 	commitInfo, err := gitClient.GetCommitInfo("")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commit info: %w", err)
 	}
-	return commitInfo, nil
+	return &deployCommitContext{
+		CommitInfo: commitInfo,
+		Source:     source,
+		Dirty:      hasChanges,
+		Status:     strings.TrimSpace(status),
+	}, nil
 }
 
 type remoteDeploymentSaver interface {
@@ -175,10 +195,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Initialize Git client
 	gitClient := git.NewClient(".")
 
-	commitInfo, err := resolveDeployCommitInfo(gitClient)
+	deployCommit, err := resolveDeployCommitInfo(gitClient, cfg.DeploymentSource())
 	if err != nil {
 		return err
 	}
+	commitInfo := deployCommit.CommitInfo
 
 	// Acquire state lock to prevent concurrent deployments
 	stateLock := localstate.NewStateLock(".tako")
@@ -198,6 +219,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Branch:  %s\n", commitInfo.Branch)
 	fmt.Printf("  Author:  %s\n", commitInfo.Author)
 	fmt.Printf("  Message: %s\n", commitInfo.Message)
+	if deployCommit.Source == config.DeploymentSourceGit {
+		fmt.Printf("  Source:  git HEAD\n")
+	} else {
+		fmt.Printf("  Source:  local worktree\n")
+	}
+	if deployCommit.Dirty {
+		fmt.Printf("\n⚠ Deploying local worktree with uncommitted changes. Git metadata points to HEAD, but built images include local edits:\n%s\n", deployCommit.Status)
+	}
 
 	// Get environment and services
 	envName := getEnvironmentName(cfg)
@@ -275,12 +304,24 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Create deployer with pool for takod support
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, verbose)
 	deploy.SetCLIVersion(Version)
+	deploy.SetDeployHooksEnabled(true)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return err
 	}
 
 	if err := deploy.SetupTakodRuntime(); err != nil {
 		return fmt.Errorf("failed to setup takod runtime: %w", err)
+	}
+
+	preparedServices, err := deploy.PrepareGeneratedConfigArtifacts(services)
+	if err != nil {
+		return fmt.Errorf("failed to prepare generated config artifacts: %w", err)
+	}
+	services = preparedServices
+	if deployService == "" {
+		allServices = preparedServices
+	} else if service, ok := preparedServices[deployService]; ok {
+		allServices[deployService] = service
 	}
 
 	// === AUTO-SYNC STATE ===
@@ -495,6 +536,15 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		service := services[serviceName]
 		fmt.Printf("→ Deploying service: %s\n", serviceName)
 
+		if err := deploy.ValidateServicePlatformCompatibility(serviceName, &service); err != nil {
+			fmt.Printf("  ✗ Platform check failed: %v\n", err)
+			deploymentFailed = true
+			deploymentError = fmt.Errorf("platform check failed for %s: %w", serviceName, err)
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
+			break
+		}
+
 		// Get full image name
 		fullImageName := cfg.GetFullImageName(serviceName, envName)
 
@@ -533,7 +583,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		deployment.Services[serviceName] = remotestate.ServiceState{
 			Name:     serviceName,
 			Image:    fullImageName,
-			Port:     service.Port,
+			Port:     service.PrimaryTargetPort(),
+			Ports:    service.Ports,
 			Replicas: service.Replicas,
 			Env:      redactedEnvKeys(service.Env),
 		}
@@ -713,8 +764,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		// Collect deployed service URLs
 		var urls []string
 		for _, svc := range services {
-			if svc.Proxy != nil {
-				for _, domain := range svc.Proxy.GetAllDomains() {
+			for _, port := range svc.EffectivePorts() {
+				if port.Proxy == nil {
+					continue
+				}
+				for _, domain := range port.Proxy.GetAllDomains() {
 					urls = append(urls, fmt.Sprintf("https://%s", domain))
 				}
 			}
@@ -745,20 +799,27 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}{}
 
 	for serviceName, service := range services {
-		if service.Proxy != nil && service.Proxy.GetPrimaryDomain() != "" {
-			allDomains := service.Proxy.GetAllDomains()
+		for _, port := range service.EffectivePorts() {
+			if port.Proxy == nil || port.Proxy.GetPrimaryDomain() == "" {
+				continue
+			}
+			allDomains := port.Proxy.GetAllDomains()
 			if !hasPublicServices {
 				fmt.Printf("Your application is available at:\n")
 				hasPublicServices = true
 			}
-			fmt.Printf("\n%s:\n", serviceName)
+			label := serviceName
+			if port.Name != "" && port.Name != "http" {
+				label = serviceName + "." + port.Name
+			}
+			fmt.Printf("\n%s:\n", label)
 			for _, domain := range allDomains {
 				fmt.Printf("  https://%s\n", domain)
 			}
 			servicesWithProxy = append(servicesWithProxy, struct {
 				name    string
 				domains []string
-			}{serviceName, allDomains})
+			}{label, allDomains})
 		}
 	}
 

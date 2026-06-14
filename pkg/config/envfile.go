@@ -17,6 +17,9 @@ import (
 // - Single and double quoted values
 // - Variable expansion ${VAR} syntax
 func LoadEnvFile(path string) (map[string]string, error) {
+	if err := validateEnvFilePath(path); err != nil {
+		return nil, err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open env file: %w", err)
@@ -66,6 +69,20 @@ func LoadEnvFile(path string) (map[string]string, error) {
 	}
 
 	return envVars, nil
+}
+
+func validateEnvFilePath(path string) error {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("envFile not found: %s", path)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to stat envFile %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("envFile must be a regular file: %s", path)
+	}
+	return nil
 }
 
 // unquoteValue removes surrounding quotes from a value

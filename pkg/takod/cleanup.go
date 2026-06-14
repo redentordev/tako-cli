@@ -2,11 +2,13 @@ package takod
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"unicode"
 
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
@@ -488,21 +490,34 @@ func uniqueFields(output string) []string {
 }
 
 func cleanupTakodState(project string, environment string, warn func(string, ...any)) {
+	cleanupTakodStateUnder("/var/lib/tako", project, environment, warn)
+}
+
+func cleanupTakodStateUnder(root string, project string, environment string, warn func(string, ...any)) {
 	if environment != "" {
-		for _, path := range []string{
-			filepath.Join("/var/lib/tako/desired", project, environment),
-			filepath.Join("/var/lib/tako/actual", project, environment),
-			filepath.Join("/var/lib/tako/events", project, environment+".jsonl"),
+		parents := []string{
+			filepath.Join(root, "desired", project),
+			filepath.Join(root, "actual", project),
+			filepath.Join(root, "configs", project),
+			filepath.Join(root, "events", project),
+		}
+		for i, path := range []string{
+			filepath.Join(root, "desired", project, environment),
+			filepath.Join(root, "actual", project, environment),
+			filepath.Join(root, "configs", project, environment),
+			filepath.Join(root, "events", project, environment+".jsonl"),
 		} {
 			removeFixedPath(path, "takod state", warn)
+			removeEmptyPath(parents[i], "takod state parent", warn)
 		}
 		return
 	}
 
 	for _, path := range []string{
-		filepath.Join("/var/lib/tako/desired", project),
-		filepath.Join("/var/lib/tako/actual", project),
-		filepath.Join("/var/lib/tako/events", project),
+		filepath.Join(root, "desired", project),
+		filepath.Join(root, "actual", project),
+		filepath.Join(root, "configs", project),
+		filepath.Join(root, "events", project),
 	} {
 		removeFixedPath(path, "takod state", warn)
 	}
@@ -511,6 +526,14 @@ func cleanupTakodState(project string, environment string, warn func(string, ...
 func removeFixedPath(path string, label string, warn func(string, ...any)) {
 	if err := os.RemoveAll(path); err != nil {
 		warn("failed to remove %s at %s: %v", label, path, err)
+	}
+}
+
+func removeEmptyPath(path string, label string, warn func(string, ...any)) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
+			warn("failed to remove empty %s at %s: %v", label, path, err)
+		}
 	}
 }
 

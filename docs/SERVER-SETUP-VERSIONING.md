@@ -25,6 +25,11 @@ as a Tako setup manifest.
 }
 ```
 
+Dedicated edge nodes use the same setup version but replace `tako-proxy` with
+`dedicated-edge` in the features list. That means shared `tako-proxy` was
+removed only after route-file safety checks passed, so a project-owned edge
+service can bind public `80/443`.
+
 Missing or invalid manifests are treated as not set up. Setup then runs the
 current provisioning path from scratch.
 
@@ -37,11 +42,14 @@ current provisioning path from scratch.
 4. Install WireGuard tools.
 5. Configure UFW for SSH, HTTP, HTTPS, and the mesh port.
 6. Apply host hardening and auto-recovery checks.
-7. Ensure the deploy user and monitoring agent.
-8. Install or reuse the server-side tako binary.
-9. Install and restart the takod systemd service with the configured node name
+7. Ensure Docker buildx from OS packages when available.
+8. Ensure the deploy user and monitoring agent.
+9. Install or reuse the server-side tako binary.
+10. Install and restart the takod systemd service with the configured node name
    and node-local actual-state refresh interval.
-10. Write /etc/tako/version.json.
+11. If `--dedicated-edge` is set, ask takod to disable shared `tako-proxy`;
+   this refuses while `/etc/tako/proxy/dynamic` contains route files.
+12. Write /etc/tako/version.json.
 ```
 
 Released CLI builds download the matching Linux release asset for the server
@@ -56,9 +64,9 @@ systemd service is restarted.
 
 If a server has an older setup manifest, Tako executes the configured setup
 upgrade path and then refreshes the takod runtime. If the manifest is already at
-the current setup version, setup still refreshes the takod binary and systemd
-service so runtime changes, including takod flags and background refresh
-behavior, are applied without needing a manifest bump.
+the current setup version, setup still refreshes firewall rules, Docker buildx,
+deploy-user access, the takod binary, and the systemd service so runtime changes
+are applied without needing a manifest bump.
 
 ## Version Ownership
 

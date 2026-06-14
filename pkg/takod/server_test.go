@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/mesh"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestServerStatusOverUnixSocket(t *testing.T) {
@@ -139,6 +142,53 @@ func TestHandleActualRejectsInvalidIdentifiers(t *testing.T) {
 				t.Fatalf("unexpected response: %q", recorder.Body.String())
 			}
 		})
+	}
+}
+
+func TestHandleDiscoveryReturnsHealthyEndpoints(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	networkName := runtimeid.NetworkName("demo", "production")
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "web-1\n")
+	t.Setenv("TAKO_FAKE_INSPECT_OUTPUT", `[
+  {
+    "Id": "web-1",
+    "Name": "/web-1",
+    "Config": {"Labels": {"tako.service": "web"}},
+    "State": {"Running": true, "Health": {"Status": "healthy"}},
+    "NetworkSettings": {"Networks": {"`+networkName+`": {"IPAddress": "172.20.0.20"}}}
+  }
+]`)
+
+	server := NewServerWithOptions("/tmp/takod-test.sock", t.TempDir(), "test", ServerOptions{NodeName: "node-a"})
+	req := httptest.NewRequest(http.MethodGet, "/v1/discovery?project=demo&environment=production&service=web&port=3000", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleDiscovery(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response DiscoveryResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode discovery response: %v", err)
+	}
+	if response.Node != "node-a" || len(response.Endpoints) != 1 || response.Endpoints[0].Address != "172.20.0.20:3000" {
+		t.Fatalf("unexpected discovery response: %#v", response)
+	}
+}
+
+func TestHandleDiscoveryRejectsInvalidQuery(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/discovery?project=demo&environment=production&port=bad", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleDiscovery(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
 }
 
@@ -321,6 +371,31 @@ func TestHandleProxyRejectsInvalidRequest(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "invalid network name") {
 		t.Fatalf("unexpected response: %q", recorder.Body.String())
+	}
+}
+
+func TestHandleProxyDeleteDisablesProxy(t *testing.T) {
+	withProxyDynamicDir(t)
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "tako-proxy\n")
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodDelete, "/v1/proxy", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleProxy(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response DisableProxyResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !response.Removed {
+		t.Fatalf("response = %#v, want removed", response)
 	}
 }
 
@@ -853,6 +928,102 @@ func TestHandleImageExistsRequiresGet(t *testing.T) {
 	}
 }
 
+func TestHandleImagePruneReturnsScopedResponse(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_IMAGES_OUTPUT", "imgold\tdemo/web\told\t12MB\t2 hours ago\n")
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	body := bytes.NewBufferString(`{"project":"demo","environment":"production","force":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/prune", body)
+	recorder := httptest.NewRecorder()
+
+	server.handleImagePrune(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response ImagePruneResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode image prune response: %v", err)
+	}
+	if response.Project != "demo" || response.Environment != "production" || !slices.Equal(response.Removed, []string{"demo/web:old"}) {
+		t.Fatalf("unexpected response: %#v", response)
+	}
+}
+
+func TestHandleNodeInfoReturnsPlatform(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	t.Setenv("TAKO_FAKE_INFO_OUTPUT", `{"OSType":"linux","Architecture":"aarch64","OperatingSystem":"Fake Linux","ServerVersion":"27.0.0"}`+"\n")
+
+	server := NewServerWithOptions("/tmp/takod-test.sock", t.TempDir(), "test", ServerOptions{NodeName: "node-a"})
+	req := httptest.NewRequest(http.MethodGet, "/v1/node/info", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleNodeInfo(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response NodeInfoResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode node info: %v", err)
+	}
+	if response.Node != "node-a" || response.Platform != "linux/arm64" {
+		t.Fatalf("unexpected node info response: %#v", response)
+	}
+}
+
+func TestHandleMeshRTTReturnsPingResult(t *testing.T) {
+	oldCommand := meshPingCommandContext
+	meshPingCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", `printf '%s\n' '1 packets transmitted, 1 received, 0% packet loss, time 0ms' 'rtt min/avg/max/mdev = 0.100/0.100/0.100/0.000 ms'`)
+	}
+	t.Cleanup(func() { meshPingCommandContext = oldCommand })
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/mesh/rtt?target=10.210.0.2&count=1", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleMeshRTT(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response MeshRTTResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !response.Reachable || response.AvgMS != 0.1 {
+		t.Fatalf("unexpected response: %#v", response)
+	}
+}
+
+func TestHandleNodeLogsStreamsTakodJournal(t *testing.T) {
+	oldCommand := nodeLogsCommandContext
+	nodeLogsCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "printf 'takod log\\n'")
+	}
+	t.Cleanup(func() { nodeLogsCommandContext = oldCommand })
+
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/node/logs?tail=5", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleNodeLogs(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Body.String() != "takod log\n" {
+		t.Fatalf("unexpected log body: %q", recorder.Body.String())
+	}
+}
+
 func TestHandleImageExportRequiresImage(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
 	req := httptest.NewRequest(http.MethodGet, "/v1/images/export", nil)
@@ -1087,6 +1258,39 @@ func TestHandleMetricsReturnsNodeMetrics(t *testing.T) {
 	}
 	if metrics["cpu_percent"] != "12.5" {
 		t.Fatalf("unexpected metrics response: %#v", metrics)
+	}
+}
+
+func TestHandleMetricsReturnsPrometheusFormat(t *testing.T) {
+	restore := useTempMetricsFile(t, `{"cpu_percent":"12.5","uptime_seconds":123}`+"\n")
+	defer restore()
+
+	server := NewServerWithOptions("/tmp/takod-test.sock", t.TempDir(), "test", ServerOptions{NodeName: "node-a"})
+	req := httptest.NewRequest(http.MethodGet, "/v1/metrics?format=prometheus", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleMetrics(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, "text/plain") {
+		t.Fatalf("content type = %q, want text/plain", got)
+	}
+	if !strings.Contains(recorder.Body.String(), `tako_node_cpu_percent{node="node-a"} 12.5`) {
+		t.Fatalf("unexpected prometheus body:\n%s", recorder.Body.String())
+	}
+}
+
+func TestHandleMetricsRejectsInvalidFormat(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/metrics?format=xml", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleMetrics(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
 	}
 }
 

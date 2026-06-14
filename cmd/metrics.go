@@ -18,6 +18,7 @@ var (
 	metricsLive   bool
 	metricsOnce   bool
 	metricsServer string
+	metricsProm   bool
 )
 
 // MetricsData represents the JSON structure returned by the monitoring agent
@@ -82,6 +83,7 @@ func init() {
 	rootCmd.AddCommand(metricsCmd)
 	metricsCmd.Flags().BoolVar(&metricsLive, "live", false, "Continuous live updates")
 	metricsCmd.Flags().BoolVar(&metricsOnce, "once", false, "Collect metrics once immediately")
+	metricsCmd.Flags().BoolVar(&metricsProm, "prometheus", false, "Print Prometheus exposition text")
 	metricsCmd.Flags().StringVarP(&metricsServer, "server", "s", "", "Specific server to monitor")
 }
 
@@ -121,10 +123,41 @@ func runMetrics(cmd *cobra.Command, args []string) error {
 	defer sshPool.CloseAll()
 
 	if metricsLive {
+		if metricsProm {
+			return fmt.Errorf("--prometheus cannot be combined with --live")
+		}
 		return showLiveMetrics(cfg, servers, sshPool)
+	}
+	if metricsProm {
+		return showPrometheusMetrics(cfg, envName, servers, sshPool, metricsOnce)
 	}
 
 	return showMetricsOnce(cfg, servers, sshPool, metricsOnce)
+}
+
+func showPrometheusMetrics(cfg *config.Config, envName string, servers []string, sshPool *ssh.Pool, collectNew bool) error {
+	for _, serverName := range servers {
+		server, err := serverConfigByName(cfg, serverName)
+		if err != nil {
+			return err
+		}
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err != nil {
+			return fmt.Errorf("%s: connect failed: %w", serverName, err)
+		}
+		output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "GET", takodclient.PrometheusMetricsEndpoint(cfg.Project.Name, envName, collectNew), nil)
+		if err != nil {
+			return fmt.Errorf("%s: metrics failed: %w", serverName, err)
+		}
+		if len(servers) > 1 {
+			fmt.Printf("# tako_server %s\n", serverName)
+		}
+		fmt.Print(output)
+		if !strings.HasSuffix(output, "\n") {
+			fmt.Println()
+		}
+	}
+	return nil
 }
 
 func showMetricsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, collectNew bool) error {

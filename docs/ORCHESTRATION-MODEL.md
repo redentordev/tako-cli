@@ -202,8 +202,46 @@ spread:
   spread replicas across selected nodes, optionally filtered by node label constraints
 ```
 
-Stateful services default to pinned unless the config explicitly defines
-replication, placement, and external persistence behavior.
+Named Docker volumes are node-local by default. If a volume already exists on a
+node, Tako schedules the service there unless placement explicitly says
+otherwise. Services sharing the same local volume are co-located, and
+non-global replicas that would write the same local volume from multiple nodes
+are rejected. Mark a top-level volume `external: true` or `replicated: true`
+only when an external storage layer or the application handles safe multi-node
+writes.
+
+Volume backup and restore follow the same app/stage boundary. The CLI resolves
+`SERVICE VOLUME` through the service's configured mounts, skips bind mounts, and
+sends `takod` both a safe backup key and the real Docker volume name. `takod`
+backs up or restores only generated app/stage volumes or custom named volumes
+with matching Tako ownership labels; missing custom volumes are not created
+during restore.
+
+## Deploy Strategy
+
+`recreate` remains the default. Services can opt into rolling replacement:
+
+```yaml
+deploy:
+  strategy: rolling
+  order: start-first
+  maxUnavailable: 0
+  monitor: 30s
+```
+
+For `start-first`, `takod` starts a temporary replacement container, waits for
+it to become healthy, then removes the old slot and renames the replacement into
+the stable slot name. If Docker rejects the temporary container because a host
+port is already bound, `takod` falls back to `stop-first`: it stops the old slot
+to free the port, starts and health-checks the replacement, and restarts the old
+slot if the replacement fails.
+
+When a replacement fails its health check, `takod` removes only the failed
+temporary replacement and leaves the existing slot in place. Health-check
+failures include recent container logs in the error returned to the CLI.
+`tako ps` preserves total running replica counts but also shows a health column
+and marks services with unhealthy replicas as `unhealthy`; `tako inspect` shows
+the per-container health state for slot-level debugging.
 
 ## Mesh + Ingress
 
@@ -239,6 +277,115 @@ For services without `proxy`, `port` is still the container port used by health
 checks and service-to-service networking, but it is not published on the host.
 This keeps databases, queues, and internal APIs private by default.
 
+`ports[]` is the explicit form for services that have more than one listener or
+need a host bind. Each entry has a stable name and a container `target` port.
+`mode: proxy` routes HTTP/HTTPS through Tako's shared ingress, `mode: internal`
+keeps the port private to the app/stage network, and `mode: host` publishes the
+port on the selected node after reserving it through `takod`.
+
+```yaml
+ports:
+  - name: http
+    target: 3000
+    protocol: http
+    proxy:
+      domain: app.example.com
+  - name: metrics
+    target: 9090
+    protocol: tcp
+    internal: true
+  - name: dns
+    target: 5353
+    published: 53
+    protocol: udp
+    mode: host
+    hostIP: 10.210.0.0/16
+```
+
+Host binds may use a concrete IP or a CIDR. For a CIDR, the deployer resolves
+the node's public IP first and then its mesh IP. `takod` rejects allocations that
+collide with existing Docker bindings or Tako's per-node allocation registry, so
+unrelated apps can share the same server without silently stealing ports from
+each other.
+
+## Internal Discovery
+
+Every service container receives private Docker network aliases scoped to its
+app/stage network:
+
+```text
+SERVICE
+SERVICE.tako.internal
+SERVICE.ENV.PROJECT.tako.internal
+```
+
+The short `.tako.internal` name is intentionally scoped by the Docker network,
+so unrelated projects on the same node cannot resolve or reach it. The full name
+is stable across app/stage clones and works from any service attached to that
+same app/stage network. When multiple healthy replicas are connected to the
+same node-local network, Docker DNS returns multiple A records and clients can
+round-robin across them.
+
+For operator inspection, `tako discovery [SERVICE]` asks each configured
+environment node's `takod` for its local healthy endpoints and merges the
+responses. `takod` only returns containers that are running, healthy, and
+attached to the app/stage Docker network; unreachable nodes do not contribute
+stale endpoints. Use `--port` to inspect a specific target port or
+`--round-robin` to rotate endpoint order.
+
+Global or otherwise co-located services get local-first behavior naturally
+because each node resolves the replicas attached to its own app/stage network.
+Cross-project discovery stays private by default. Services must declare
+explicit exported named ports, and consumer or edge projects declare top-level
+import aliases that point at project, environment, service, and exported port.
+`tako discovery --import ALIAS` reads the exporting project's desired state,
+validates the named export, then queries live `takod` discovery for healthy
+endpoints. Exported internal ports are published on mesh-local host ports so a
+dedicated edge node can use mesh-reachable upstreams instead of Docker bridge
+addresses. `--format upstreams` renders those rows as HTTP upstream URLs for
+edge config workflows such as Caddy environment placeholders.
+
+## Metrics
+
+`tako metrics` keeps the human-readable node view. `tako metrics --prometheus`
+prints Prometheus exposition text collected through each node's takod Unix
+socket:
+
+```bash
+tako metrics --prometheus
+tako metrics --prometheus --once
+tako metrics --prometheus --server node-a
+```
+
+The underlying endpoint is `GET /v1/metrics?format=prometheus`. It is not bound
+to a public TCP listener; the CLI reaches it over SSH and the node-local takod
+socket. Scrapes include node CPU, memory, disk, load, network, disk IO, takod
+uptime, service running/desired replica gauges for the selected project/stage,
+latest deployment status, and lease state.
+
+## Node Inspection
+
+Node-level operator commands stay on the takod socket path:
+
+```bash
+tako inspect [SERVICE]
+tako inspect [SERVICE] --server node-a
+tako node logs [NODE]
+tako node logs [NODE] --unit tako-monitor --tail 200
+tako mesh rtt
+tako mesh rtt --server node-a --count 5
+```
+
+`inspect` asks each selected node's takod for scoped container details and
+prints node, service, replica slot, container ID, state, health, image, ports,
+and mounts. It intentionally does not return container environment variables.
+
+`node logs` streams an allowlisted systemd unit from the target node. It
+defaults to `takod` and also supports `tako-monitor`; it does not accept
+arbitrary unit names. `mesh rtt` asks each selected node's takod to ping peer
+WireGuard mesh IPs and reports average RTT plus packet loss. Both commands work
+for one node or many nodes without exposing a public debug listener.
+
 ## Switching Computers
 
 ```bash
@@ -257,6 +404,117 @@ desired revision, aggregate actual snapshot, and node-local actual snapshots
 back to the reachable mesh, and refreshes local `.tako` state when deployment
 history is available.
 
+## Build Source
+
+The default build source is the local worktree:
+
+```yaml
+deployment:
+  source: local
+```
+
+This is best for fast iteration. If the worktree has uncommitted changes, deploy
+continues but prints a warning because deployment history still points at the
+current `HEAD` commit while the built image includes local edits.
+
+Use committed Git source for CI and production workflows that must match the
+repository exactly:
+
+```yaml
+deployment:
+  source: git
+```
+
+With `source: git`, Tako refuses dirty worktrees, creates build contexts from
+committed `HEAD` content, then applies the committed `.dockerignore` before
+streaming the archive to `takod`. Untracked files, ignored local artifacts,
+`node_modules`, stale `.next` output, and local `.env` files are not included
+unless they are committed and not excluded by `.dockerignore`.
+
+## Build Platform
+
+Services can set `platform` when a build must target a specific Linux
+architecture:
+
+```yaml
+services:
+  web:
+    build: .
+    platform: linux/amd64
+```
+
+The CLI forwards the platform to `takod`, and `takod` runs Docker with
+`--platform`. The field is persisted in desired state and included in safe
+config hashes, so changing it reconciles like any other build-affecting config
+change.
+
+Before building or reconciling a platform-scoped service, the CLI asks each
+assigned `takod` node for its Docker platform through `/v1/node/info`. If
+`platform` is set, every assigned node must report the same platform. If a
+`build:` service does not set `platform`, Tako verifies that the source build
+node and assigned runtime nodes report one matching platform. This avoids
+silently building one architecture and distributing it to incompatible nodes.
+Per-platform multi-arch manifest publishing is still future work.
+
+## Build Cache
+
+Build cache is configured under `deployment.cache`:
+
+```yaml
+deployment:
+  cache:
+    enabled: true
+    type: local
+```
+
+`type: local` is the default. The CLI passes the service image as
+`cacheFrom`, and `takod` only adds `docker build --cache-from` when that image
+already exists on the build node. First deploys do not fail just because there
+is no previous image; later deploys can reuse node-local layers.
+
+Registry cache uses Docker buildx:
+
+```yaml
+deployment:
+  cache:
+    enabled: true
+    type: registry
+    ref: ghcr.io/acme/my-app/buildcache
+    builder: mesh-builder
+```
+
+For `type: registry`, `takod` runs `docker buildx build --load` with
+`--cache-from type=registry,ref=...` and
+`--cache-to type=registry,ref=...,mode=max`. If buildx is missing on the build
+node, setup tries to install it from OS packages. Hosts without a buildx package
+still fail before service reconciliation with a clear buildx requirement error.
+Registry cache references are not stored in desired runtime state as secrets,
+and they should not contain credentials; use normal registry auth paths for
+private registries.
+
+## Private Registry Pulls
+
+For prebuilt private images, configure one registry credential set:
+
+```yaml
+registry:
+  url: ghcr.io
+  username: ${REGISTRY_USER}
+  password: ${REGISTRY_TOKEN}
+
+services:
+  api:
+    image: ghcr.io/acme/api:2026-06-14
+```
+
+The CLI expands environment placeholders locally and sends matching credentials
+only in the takod request body over SSH stdin. Takod writes a temporary
+`DOCKER_CONFIG`, runs `docker pull`, and removes the config immediately after
+the pull. Credentials are not written to desired state, labels, command
+arguments, or deployment history. This first pass covers prebuilt service images
+used by deploys, hooks, and `tako run --one-off`; private base images for
+`build:` services still need build-time auth support.
+
 ## CI/CD
 
 CI uses the same path as a laptop:
@@ -274,11 +532,11 @@ CI runner
   acquire remote leases + reconcile selected nodes
 ```
 
-Deploy, rollback, scale, maintenance, live, remove, cleanup, destroy, and state
-repair acquire remote leases through `takod` on the target nodes before
-mutating runtime or state. CI and local machines compete for the same per-node
-leases, so concurrent operations fail fast instead of racing. The local `.tako`
-lock remains as a same-machine guard.
+Deploy, rollback, scale, env push, remove, destroy, and state repair acquire
+remote leases through `takod` on the target nodes before mutating runtime or
+state. CI and local machines compete for the same per-node leases, so
+concurrent operations fail fast instead of racing. The local `.tako` lock
+remains as a same-machine guard.
 
 ## Implementation Status
 
@@ -292,6 +550,9 @@ Done:
 6. Per-node proxies render mesh upstreams from desired and actual state.
 7. State repair can rebuild deployment history and runtime state across reachable mesh nodes.
 8. Mutating operations acquire leases across their target nodes.
+9. `tako image prune --force` removes only app-owned images that are not used
+   by app containers on the target node; Docker still protects images used by
+   unrelated containers.
 
 Next:
 1. Evaluate background peer anti-entropy after the explicit repair workflow is proven.

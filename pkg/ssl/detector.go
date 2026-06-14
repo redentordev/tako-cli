@@ -30,32 +30,32 @@ func DetectRequirements(services map[string]config.ServiceConfig) []DomainRequir
 	var reqs []DomainRequirement
 
 	for name, svc := range services {
-		if svc.Proxy == nil {
-			continue
-		}
-
-		domains := svc.Proxy.GetAllDomains()
-		for _, domain := range domains {
-			if domain == "" {
+		for _, port := range svc.EffectivePorts() {
+			if port.Proxy == nil {
 				continue
 			}
+			for _, domain := range port.Proxy.GetAllDomains() {
+				if domain == "" {
+					continue
+				}
 
-			req := DomainRequirement{
-				Domain:      domain,
-				ServiceName: name,
+				req := DomainRequirement{
+					Domain:      domain,
+					ServiceName: name,
+				}
+
+				if IsWildcard(domain) {
+					req.IsWildcard = true
+					req.BaseDomain = strings.TrimPrefix(domain, "*.")
+					req.ChallengeType = ChallengeDNS01
+				} else {
+					req.IsWildcard = false
+					req.BaseDomain = extractBaseDomain(domain)
+					req.ChallengeType = ChallengeHTTP01
+				}
+
+				reqs = append(reqs, req)
 			}
-
-			if IsWildcard(domain) {
-				req.IsWildcard = true
-				req.BaseDomain = strings.TrimPrefix(domain, "*.")
-				req.ChallengeType = ChallengeDNS01
-			} else {
-				req.IsWildcard = false
-				req.BaseDomain = extractBaseDomain(domain)
-				req.ChallengeType = ChallengeHTTP01
-			}
-
-			reqs = append(reqs, req)
 		}
 	}
 

@@ -52,6 +52,59 @@ func TestCreateEnvFilePreservesBareDollarValues(t *testing.T) {
 	}
 }
 
+func TestCreateEnvFileMergesServiceEnvFile(t *testing.T) {
+	withTempWorkingDir(t)
+	envPath := ".env.production"
+	if err := os.WriteFile(envPath, []byte("FROM_FILE=yes\nOVERRIDE=file\nSECRET=from-file\n"), 0600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	mgr := &Manager{secrets: map[string]string{"SECRET_KEY": "from-secret"}}
+
+	envFile, err := mgr.CreateEnvFile(&config.ServiceConfig{
+		EnvFile: envPath,
+		Env: map[string]string{
+			"OVERRIDE": "explicit",
+		},
+		Secrets: []string{"SECRET:SECRET_KEY"},
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvFile returned error: %v", err)
+	}
+
+	if got, _ := envFile.Get("FROM_FILE"); got != "yes" {
+		t.Fatalf("FROM_FILE = %q", got)
+	}
+	if got, _ := envFile.Get("OVERRIDE"); got != "explicit" {
+		t.Fatalf("OVERRIDE = %q", got)
+	}
+	if got, _ := envFile.Get("SECRET"); got != "from-secret" {
+		t.Fatalf("SECRET = %q", got)
+	}
+}
+
+func TestCreateEnvFileExpandsEnvFromServiceEnvFile(t *testing.T) {
+	withTempWorkingDir(t)
+	envPath := ".env.production"
+	if err := os.WriteFile(envPath, []byte("APP_HOST=app.example.com\n"), 0600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	mgr := &Manager{secrets: map[string]string{}}
+
+	envFile, err := mgr.CreateEnvFile(&config.ServiceConfig{
+		EnvFile: envPath,
+		Env: map[string]string{
+			"APP_URL": "https://${APP_HOST}",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvFile returned error: %v", err)
+	}
+
+	if got, _ := envFile.Get("APP_URL"); got != "https://app.example.com" {
+		t.Fatalf("APP_URL = %q", got)
+	}
+}
+
 func TestCreateEnvFileReportsMissingBracedEnv(t *testing.T) {
 	withTempWorkingDir(t)
 	mgr := &Manager{secrets: map[string]string{}}

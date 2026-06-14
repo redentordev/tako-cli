@@ -119,6 +119,71 @@ func TestCleanupRequestIncludesMaintenanceCleanup(t *testing.T) {
 	}
 }
 
+func TestCleanupTakodStateRemovesEmptyProjectParents(t *testing.T) {
+	root := t.TempDir()
+	for _, path := range []string{
+		filepath.Join(root, "desired", "demo", "production", "desired.json"),
+		filepath.Join(root, "actual", "demo", "production", "actual.json"),
+		filepath.Join(root, "configs", "demo", "production", "web", "caddy", "hash", "content"),
+		filepath.Join(root, "events", "demo", "production.jsonl"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte("state"), 0600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	var warnings []string
+	cleanupTakodStateUnder(root, "demo", "production", func(format string, args ...any) {
+		warnings = append(warnings, format)
+	})
+
+	if len(warnings) > 0 {
+		t.Fatalf("cleanup warnings = %#v", warnings)
+	}
+	for _, path := range []string{
+		filepath.Join(root, "desired", "demo"),
+		filepath.Join(root, "actual", "demo"),
+		filepath.Join(root, "configs", "demo"),
+		filepath.Join(root, "events", "demo"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected %s to be removed, stat err=%v", path, err)
+		}
+	}
+}
+
+func TestCleanupTakodStateKeepsProjectParentsWithOtherStages(t *testing.T) {
+	root := t.TempDir()
+	prodPath := filepath.Join(root, "configs", "demo", "production", "web", "caddy", "hash", "content")
+	previewPath := filepath.Join(root, "configs", "demo", "preview", "web", "caddy", "hash", "content")
+	for _, path := range []string{prodPath, previewPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte("state"), 0600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	var warnings []string
+	cleanupTakodStateUnder(root, "demo", "production", func(format string, args ...any) {
+		warnings = append(warnings, format)
+	})
+
+	if len(warnings) > 0 {
+		t.Fatalf("cleanup warnings = %#v", warnings)
+	}
+	if _, err := os.Stat(filepath.Join(root, "configs", "demo", "production")); !os.IsNotExist(err) {
+		t.Fatalf("expected production configs removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(previewPath); err != nil {
+		t.Fatalf("expected preview config preserved: %v", err)
+	}
+}
+
 func TestUniqueFields(t *testing.T) {
 	got := uniqueFields("a\nb\na\tc\n")
 	want := []string{"a", "b", "c"}

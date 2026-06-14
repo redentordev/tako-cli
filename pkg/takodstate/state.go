@@ -43,29 +43,64 @@ type DesiredRevision struct {
 	Source        string                    `json:"source"`
 	TargetNodes   []string                  `json:"targetNodes"`
 	Services      map[string]DesiredService `json:"services"`
+	Imports       map[string]DesiredImport  `json:"imports,omitempty"`
+	Exports       []DesiredExportRecord     `json:"exports,omitempty"`
 	Git           GitInfo                   `json:"git,omitempty"`
 	CreatedAt     time.Time                 `json:"createdAt"`
 }
 
 type DesiredService struct {
-	Name           string                   `json:"name"`
-	Type           string                   `json:"type"`
-	Image          string                   `json:"image,omitempty"`
-	Build          string                   `json:"build,omitempty"`
-	Command        string                   `json:"command,omitempty"`
-	Port           int                      `json:"port,omitempty"`
-	Replicas       int                      `json:"replicas"`
-	Restart        string                   `json:"restart,omitempty"`
-	Persistent     bool                     `json:"persistent,omitempty"`
-	Placement      *config.PlacementConfig  `json:"placement,omitempty"`
-	Domains        []string                 `json:"domains,omitempty"`
-	Volumes        []string                 `json:"volumes,omitempty"`
-	EnvKeys        []string                 `json:"envKeys,omitempty"`
-	EnvFile        bool                     `json:"envFile,omitempty"`
-	SecretRefs     []string                 `json:"secretRefs,omitempty"`
-	DependsOn      []string                 `json:"dependsOn,omitempty"`
-	HealthCheck    config.HealthCheckConfig `json:"healthCheck,omitempty"`
-	DeployStrategy string                   `json:"deployStrategy,omitempty"`
+	Name           string                      `json:"name"`
+	Type           string                      `json:"type"`
+	Image          string                      `json:"image,omitempty"`
+	Build          string                      `json:"build,omitempty"`
+	Dockerfile     string                      `json:"dockerfile,omitempty"`
+	Platform       string                      `json:"platform,omitempty"`
+	Command        string                      `json:"command,omitempty"`
+	Port           int                         `json:"port,omitempty"`
+	Ports          []config.PortConfig         `json:"ports,omitempty"`
+	Replicas       int                         `json:"replicas"`
+	Restart        string                      `json:"restart,omitempty"`
+	Persistent     bool                        `json:"persistent,omitempty"`
+	Placement      *config.PlacementConfig     `json:"placement,omitempty"`
+	Domains        []string                    `json:"domains,omitempty"`
+	Volumes        []string                    `json:"volumes,omitempty"`
+	Configs        []DesiredConfigFileMount    `json:"configs,omitempty"`
+	EnvKeys        []string                    `json:"envKeys,omitempty"`
+	EnvFile        bool                        `json:"envFile,omitempty"`
+	SecretRefs     []string                    `json:"secretRefs,omitempty"`
+	DependsOn      []string                    `json:"dependsOn,omitempty"`
+	Export         *config.ServiceExportConfig `json:"export,omitempty"`
+	HealthCheck    config.HealthCheckConfig    `json:"healthCheck,omitempty"`
+	DeployStrategy string                      `json:"deployStrategy,omitempty"`
+	DeployOrder    string                      `json:"deployOrder,omitempty"`
+	MaxUnavailable int                         `json:"maxUnavailable,omitempty"`
+	DeployMonitor  string                      `json:"deployMonitor,omitempty"`
+	Hooks          config.HooksConfig          `json:"hooks,omitempty"`
+}
+
+type DesiredImport struct {
+	Project     string   `json:"project"`
+	Environment string   `json:"environment"`
+	Service     string   `json:"service"`
+	Port        string   `json:"port"`
+	Servers     []string `json:"servers,omitempty"`
+}
+
+type DesiredExportRecord struct {
+	Project     string `json:"project"`
+	Environment string `json:"environment"`
+	Service     string `json:"service"`
+	Port        string `json:"port"`
+	Target      int    `json:"target"`
+	Protocol    string `json:"protocol,omitempty"`
+}
+
+type DesiredConfigFileMount struct {
+	Source      string `json:"source"`
+	Target      string `json:"target"`
+	Mode        string `json:"mode,omitempty"`
+	ContentHash string `json:"contentHash,omitempty"`
 }
 
 type ActualSnapshot struct {
@@ -86,12 +121,17 @@ type ActualNodeSnapshot struct {
 }
 
 type ActualService struct {
-	Name       string   `json:"name"`
-	Image      string   `json:"image,omitempty"`
-	Replicas   int      `json:"replicas"`
-	Containers []string `json:"containers,omitempty"`
-	ConfigHash string   `json:"configHash,omitempty"`
-	RuntimeID  string   `json:"runtimeId,omitempty"`
+	Name                  string   `json:"name"`
+	Image                 string   `json:"image,omitempty"`
+	Replicas              int      `json:"replicas"`
+	Containers            []string `json:"containers,omitempty"`
+	ConfigHash            string   `json:"configHash,omitempty"`
+	RuntimeID             string   `json:"runtimeId,omitempty"`
+	HealthyReplicas       int      `json:"healthyReplicas,omitempty"`
+	UnhealthyReplicas     int      `json:"unhealthyReplicas,omitempty"`
+	StartingReplicas      int      `json:"startingReplicas,omitempty"`
+	NoHealthcheckReplicas int      `json:"noHealthcheckReplicas,omitempty"`
+	UnknownHealthReplicas int      `json:"unknownHealthReplicas,omitempty"`
 }
 
 type Event struct {
@@ -135,6 +175,7 @@ func BuildDesiredRevision(cfg *config.Config, environment string, source string,
 		Source:        source,
 		TargetNodes:   sortedCopy(targetNodes),
 		Services:      make(map[string]DesiredService, len(services)),
+		Imports:       sanitizeDesiredImports(cfg.Imports),
 		Git:           git,
 		CreatedAt:     now,
 	}
@@ -152,6 +193,7 @@ func BuildDesiredRevision(cfg *config.Config, environment string, source string,
 		revision.Services[serviceName] = sanitizeDesiredService(serviceName, service, imageRef)
 	}
 
+	revision.Exports = buildDesiredExportRecords(cfg.Project.Name, environment, services)
 	revision.RevisionID = revisionID(revision)
 	return revision, nil
 }
@@ -216,12 +258,17 @@ func BuildNodeActualSnapshot(project string, environment string, node string, ac
 func actualServiceFromReconcile(service *reconcile.ActualService) ActualService {
 	containers := sortedCopy(service.Containers)
 	return ActualService{
-		Name:       service.Name,
-		Image:      service.Image,
-		Replicas:   service.Replicas,
-		Containers: containers,
-		ConfigHash: service.ConfigHash,
-		RuntimeID:  service.RuntimeID,
+		Name:                  service.Name,
+		Image:                 service.Image,
+		Replicas:              service.Replicas,
+		Containers:            containers,
+		ConfigHash:            service.ConfigHash,
+		RuntimeID:             service.RuntimeID,
+		HealthyReplicas:       service.HealthyReplicas,
+		UnhealthyReplicas:     service.UnhealthyReplicas,
+		StartingReplicas:      service.StartingReplicas,
+		NoHealthcheckReplicas: service.NoHealthcheckReplicas,
+		UnknownHealthReplicas: service.UnknownHealthReplicas,
 	}
 }
 
@@ -483,30 +530,185 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 		replicas = 1
 	}
 
-	var domains []string
-	if service.Proxy != nil {
-		domains = sortedCopy(service.Proxy.GetAllDomains())
-	}
+	domains := serviceDomains(service)
 
 	return DesiredService{
 		Name:           serviceName,
 		Type:           service.GetServiceType(),
 		Image:          imageRef,
 		Build:          service.Build,
+		Dockerfile:     service.Dockerfile,
+		Platform:       service.Platform,
 		Command:        service.Command,
 		Port:           service.Port,
+		Ports:          sortedPortConfigs(service.Ports),
 		Replicas:       replicas,
 		Restart:        service.Restart,
 		Persistent:     service.Persistent,
 		Placement:      service.Placement,
 		Domains:        domains,
 		Volumes:        sortedCopy(service.Volumes),
+		Configs:        sanitizeDesiredConfigFiles(service.Configs),
 		EnvKeys:        sortedKeys(service.Env),
 		EnvFile:        service.EnvFile != "",
 		SecretRefs:     sortedCopy(service.Secrets),
 		DependsOn:      sortedCopy(service.DependsOn),
+		Export:         sanitizeDesiredExport(service.Export),
 		HealthCheck:    service.HealthCheck,
 		DeployStrategy: service.Deploy.Strategy,
+		DeployOrder:    service.Deploy.Order,
+		MaxUnavailable: service.Deploy.MaxUnavailable,
+		DeployMonitor:  service.Deploy.Monitor,
+		Hooks:          sanitizeDesiredHooks(service.Hooks),
+	}
+}
+
+func sanitizeDesiredImports(imports map[string]config.ImportConfig) map[string]DesiredImport {
+	if len(imports) == 0 {
+		return nil
+	}
+	out := make(map[string]DesiredImport, len(imports))
+	for alias, importConfig := range imports {
+		out[alias] = DesiredImport{
+			Project:     importConfig.Project,
+			Environment: importConfig.Environment,
+			Service:     importConfig.Service,
+			Port:        importConfig.Port,
+			Servers:     sortedCopy(importConfig.Servers),
+		}
+	}
+	return out
+}
+
+func sanitizeDesiredExport(export *config.ServiceExportConfig) *config.ServiceExportConfig {
+	if export == nil {
+		return nil
+	}
+	clone := &config.ServiceExportConfig{}
+	if len(export.Ports) > 0 {
+		clone.Ports = make(map[string]int, len(export.Ports))
+		for name, target := range export.Ports {
+			clone.Ports[name] = target
+		}
+	}
+	return clone
+}
+
+func buildDesiredExportRecords(project string, environment string, services map[string]config.ServiceConfig) []DesiredExportRecord {
+	if len(services) == 0 {
+		return nil
+	}
+	var records []DesiredExportRecord
+	serviceNames := make([]string, 0, len(services))
+	for serviceName := range services {
+		serviceNames = append(serviceNames, serviceName)
+	}
+	sort.Strings(serviceNames)
+	for _, serviceName := range serviceNames {
+		service := services[serviceName]
+		if service.Export == nil || len(service.Export.Ports) == 0 {
+			continue
+		}
+		protocolByTarget := exportProtocolsByTarget(service)
+		portNames := make([]string, 0, len(service.Export.Ports))
+		for portName := range service.Export.Ports {
+			portNames = append(portNames, portName)
+		}
+		sort.Strings(portNames)
+		for _, portName := range portNames {
+			target := service.Export.Ports[portName]
+			records = append(records, DesiredExportRecord{
+				Project:     project,
+				Environment: environment,
+				Service:     serviceName,
+				Port:        portName,
+				Target:      target,
+				Protocol:    protocolByTarget[target],
+			})
+		}
+	}
+	return records
+}
+
+func exportProtocolsByTarget(service config.ServiceConfig) map[int]string {
+	out := make(map[int]string)
+	for _, port := range service.EffectivePorts() {
+		if port.Target <= 0 {
+			continue
+		}
+		if _, exists := out[port.Target]; exists {
+			continue
+		}
+		out[port.Target] = port.Protocol
+	}
+	return out
+}
+
+func sanitizeDesiredConfigFiles(configs []config.ServiceConfigFileMount) []DesiredConfigFileMount {
+	if len(configs) == 0 {
+		return nil
+	}
+	out := make([]DesiredConfigFileMount, 0, len(configs))
+	for _, cfg := range configs {
+		out = append(out, DesiredConfigFileMount{
+			Source:      cfg.Source,
+			Target:      cfg.Target,
+			Mode:        cfg.Mode,
+			ContentHash: cfg.ContentHash,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Source == out[j].Source {
+			return out[i].Target < out[j].Target
+		}
+		return out[i].Source < out[j].Source
+	})
+	return out
+}
+
+func serviceDomains(service config.ServiceConfig) []string {
+	var domains []string
+	for _, port := range service.EffectivePorts() {
+		if port.Proxy == nil {
+			continue
+		}
+		domains = append(domains, port.Proxy.GetAllDomains()...)
+		domains = append(domains, port.Proxy.GetRedirectDomains()...)
+	}
+	return sortedCopy(domains)
+}
+
+func sortedPortConfigs(ports []config.PortConfig) []config.PortConfig {
+	if len(ports) == 0 {
+		return nil
+	}
+	service := config.ServiceConfig{Ports: ports}
+	out := service.EffectivePorts()
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].Target < out[j].Target
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func sanitizeDesiredHooks(hooks config.HooksConfig) config.HooksConfig {
+	return config.HooksConfig{
+		PreDeploy:  sanitizeDesiredHook(hooks.PreDeploy),
+		PostDeploy: sanitizeDesiredHook(hooks.PostDeploy),
+	}
+}
+
+func sanitizeDesiredHook(hook *config.HookConfig) *config.HookConfig {
+	if hook == nil {
+		return nil
+	}
+	return &config.HookConfig{
+		Command:    hook.Command,
+		Timeout:    hook.Timeout,
+		User:       hook.User,
+		WorkingDir: hook.WorkingDir,
 	}
 }
 

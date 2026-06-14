@@ -197,7 +197,11 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	rollbackConfig := desiredServices[rollbackService]
 	rollbackConfig.Image = serviceState.Image
 	rollbackConfig.Replicas = serviceState.Replicas
-	if serviceState.Port > 0 {
+	if len(serviceState.Ports) > 0 {
+		rollbackConfig.Port = 0
+		rollbackConfig.Proxy = nil
+		rollbackConfig.Ports = serviceState.Ports
+	} else if serviceState.Port > 0 {
 		rollbackConfig.Port = serviceState.Port
 	}
 	desiredServices[rollbackService] = rollbackConfig

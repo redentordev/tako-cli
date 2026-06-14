@@ -231,7 +231,8 @@ func buildScaleDeploymentState(
 		serviceStates[serviceName] = remotestate.ServiceState{
 			Name:     serviceName,
 			Image:    imageRefs[serviceName],
-			Port:     service.Port,
+			Port:     service.PrimaryTargetPort(),
+			Ports:    service.Ports,
 			Replicas: service.Replicas,
 			Env:      redactedEnvKeys(service.Env),
 		}

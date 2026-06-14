@@ -82,7 +82,7 @@ func cleanupProxyFiles(project string, environment string, services map[string]c
 	}
 	add(runtimeProxyConfigFileName(project, environment))
 	for serviceName, service := range services {
-		if service.IsPublic() {
+		if service.IsPublic() || service.Proxy != nil {
 			add(maintenanceProxyConfigFileName(project, environment, serviceName))
 		}
 	}

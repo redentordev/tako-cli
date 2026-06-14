@@ -119,7 +119,8 @@ func StreamRequest(client RequestExecutor, socket string, method string, endpoin
 
 	args := []string{
 		"if test -S " + shellQuote(socket) + " && command -v curl >/dev/null 2>&1; then",
-		"curl --fail --silent --show-error",
+		"curl --silent --show-error",
+		"--write-out '\\n__TAKO_HTTP_STATUS__:%{http_code}'",
 		"--unix-socket " + shellQuote(socket),
 		"-X " + shellQuote(method),
 		"--data-binary @-",
@@ -131,10 +132,15 @@ func StreamRequest(client RequestExecutor, socket string, method string, endpoin
 	defer cancel()
 
 	output, err := client.ExecuteWithInput(ctx, curlCmd, reader)
+	bodyOutput, status, hasStatus := splitHTTPStatus(output)
 	if err != nil {
-		return output, fmt.Errorf("takod stream request %s %s failed: %w, output: %s", method, endpoint, err, output)
+		return bodyOutput, fmt.Errorf("takod stream request %s %s failed: %w, output: %s", method, endpoint, err, bodyOutput)
 	}
-	return output, nil
+	bodyOutput = sanitizeJSONOutput(bodyOutput)
+	if hasStatus && status >= 400 {
+		return bodyOutput, fmt.Errorf("takod stream request %s %s returned HTTP %d: %s", method, endpoint, status, strings.TrimSpace(bodyOutput))
+	}
+	return bodyOutput, nil
 }
 
 func StreamOutput(client StreamExecutor, socket string, endpoint string, stdout io.Writer, stderr io.Writer) error {
@@ -205,6 +211,16 @@ func ActualStateEndpoint(project string, environment string) string {
 	return "/v1/actual?" + query.Encode()
 }
 
+func InspectEndpoint(project string, environment string, service string) string {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	if service != "" {
+		query.Set("service", service)
+	}
+	return "/v1/inspect?" + query.Encode()
+}
+
 func EnvBundleEndpoint(project string, environment string) string {
 	query := url.Values{}
 	query.Set("project", project)
@@ -225,10 +241,65 @@ func BackupsEndpoint(project string, environment string, volume string, backupID
 	return "/v1/backups?" + query.Encode()
 }
 
-func ImageBuildEndpoint(image string) string {
+type ImageBuildEndpointOptions struct {
+	Platform   string
+	Dockerfile string
+	CacheFrom  []string
+	CacheTo    []string
+	Builder    string
+	Buildx     bool
+}
+
+func ImageBuildEndpoint(image string, platform ...string) string {
+	opts := ImageBuildEndpointOptions{}
+	if len(platform) > 0 {
+		opts.Platform = platform[0]
+	}
+	return ImageBuildEndpointWithOptions(image, opts)
+}
+
+func ImageBuildEndpointWithOptions(image string, opts ImageBuildEndpointOptions) string {
 	query := url.Values{}
 	query.Set("image", image)
+	if opts.Platform != "" {
+		query.Set("platform", opts.Platform)
+	}
+	if opts.Dockerfile != "" {
+		query.Set("dockerfile", opts.Dockerfile)
+	}
+	for _, cacheFrom := range opts.CacheFrom {
+		if cacheFrom != "" {
+			query.Add("cacheFrom", cacheFrom)
+		}
+	}
+	for _, cacheTo := range opts.CacheTo {
+		if cacheTo != "" {
+			query.Add("cacheTo", cacheTo)
+		}
+	}
+	if opts.Builder != "" {
+		query.Set("builder", opts.Builder)
+	}
+	if opts.Buildx {
+		query.Set("buildx", "true")
+	}
 	return "/v1/images/build?" + query.Encode()
+}
+
+func ImagesEndpoint(project string, environment string) string {
+	query := url.Values{}
+	query.Set("project", project)
+	if environment != "" {
+		query.Set("environment", environment)
+	}
+	return "/v1/images?" + query.Encode()
+}
+
+func VolumesEndpoint(project string, environment string) string {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	return "/v1/volumes?" + query.Encode()
 }
 
 func LogsEndpoint(project string, environment string, service string, tail int, follow bool) string {
@@ -241,6 +312,22 @@ func LogsEndpoint(project string, environment string, service string, tail int, 
 		query.Set("follow", "true")
 	}
 	return "/v1/logs?" + query.Encode()
+}
+
+func NodeLogsEndpoint(unit string, tail int, follow bool) string {
+	query := url.Values{}
+	if unit != "" {
+		query.Set("unit", unit)
+	}
+	query.Set("tail", fmt.Sprintf("%d", tail))
+	if follow {
+		query.Set("follow", "true")
+	}
+	return "/v1/node/logs?" + query.Encode()
+}
+
+func NodeInfoEndpoint() string {
+	return "/v1/node/info"
 }
 
 func StatsEndpoint(project string, environment string, service string, all bool) string {
@@ -267,6 +354,66 @@ func MetricsEndpoint(collect bool) string {
 	query := url.Values{}
 	query.Set("collect", "true")
 	return "/v1/metrics?" + query.Encode()
+}
+
+func PrometheusMetricsEndpoint(project string, environment string, collect bool) string {
+	query := url.Values{}
+	query.Set("format", "prometheus")
+	if project != "" {
+		query.Set("project", project)
+	}
+	if environment != "" {
+		query.Set("environment", environment)
+	}
+	if collect {
+		query.Set("collect", "true")
+	}
+	return "/v1/metrics?" + query.Encode()
+}
+
+func ProxyTargetEndpoint(project string, environment string, service string, port int) string {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	query.Set("service", service)
+	query.Set("port", fmt.Sprintf("%d", port))
+	return "/v1/proxy-target?" + query.Encode()
+}
+
+func DiscoveryEndpoint(project string, environment string, service string, port int, roundRobin bool) string {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	if service != "" {
+		query.Set("service", service)
+	}
+	if port > 0 {
+		query.Set("port", fmt.Sprintf("%d", port))
+	}
+	if roundRobin {
+		query.Set("roundRobin", "true")
+	}
+	return "/v1/discovery?" + query.Encode()
+}
+
+func ExecTargetEndpoint(project string, environment string, service string, slot int) string {
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	query.Set("service", service)
+	if slot > 0 {
+		query.Set("slot", fmt.Sprintf("%d", slot))
+	}
+	return "/v1/exec-target?" + query.Encode()
+}
+
+func MeshRTTEndpoint(target string, count int) string {
+	query := url.Values{}
+	query.Set("target", target)
+	if count > 0 {
+		query.Set("count", fmt.Sprintf("%d", count))
+	}
+	return "/v1/mesh/rtt?" + query.Encode()
 }
 
 func AccessLogsEndpoint(tail int, follow bool) string {

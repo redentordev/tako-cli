@@ -35,6 +35,27 @@ malformed
 	}
 }
 
+func TestParseActualStateCapturesHealthCounts(t *testing.T) {
+	output := `
+demo_production_web_1|demo/web:1|container-a|||demo|production|web|Up 10 seconds (healthy)
+demo_production_web_2|demo/web:1|container-b|||demo|production|web|Up 8 seconds (unhealthy)
+demo_production_web_3|demo/web:1|container-c|||demo|production|web|Up 3 seconds (health: starting)
+demo_production_worker_1|demo/worker:1|container-d|||demo|production|worker|Up 1 minute
+`
+
+	actual := ParseActualState("demo", "production", output)
+	web := actual.Services["web"]
+	if web == nil {
+		t.Fatal("missing web service")
+	}
+	if web.HealthyReplicas != 1 || web.UnhealthyReplicas != 1 || web.StartingReplicas != 1 {
+		t.Fatalf("web health counts = healthy:%d unhealthy:%d starting:%d", web.HealthyReplicas, web.UnhealthyReplicas, web.StartingReplicas)
+	}
+	if got := actual.Services["worker"].NoHealthcheckReplicas; got != 1 {
+		t.Fatalf("worker no-healthcheck replicas = %d, want 1", got)
+	}
+}
+
 func TestParseActualStateClearsMixedConfigHash(t *testing.T) {
 	output := `
 demo_production_web_1|registry.example.com/demo/web:abc|container-a|hash-a||demo|production|web

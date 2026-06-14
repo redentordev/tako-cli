@@ -24,6 +24,7 @@ type BackupRequest struct {
 	Project       string `json:"project"`
 	Environment   string `json:"environment"`
 	Volume        string `json:"volume,omitempty"`
+	VolumeName    string `json:"volumeName,omitempty"`
 	BackupID      string `json:"backupId,omitempty"`
 	RetentionDays int    `json:"retentionDays,omitempty"`
 }
@@ -53,14 +54,17 @@ func CreateVolumeBackup(ctx context.Context, req BackupRequest) (*BackupInfo, er
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	backupPath := backupDirectory(req)
-	if err := os.MkdirAll(backupPath, 0750); err != nil {
-		return nil, fmt.Errorf("failed to create backup directory: %w", err)
-	}
-
 	fullVolumeName := fullBackupVolumeName(req)
 	if _, err := runDocker(ctx, "volume", "inspect", fullVolumeName); err != nil {
 		return nil, fmt.Errorf("volume %s does not exist", fullVolumeName)
+	}
+	if err := ensureBackupVolumeOwned(ctx, req, fullVolumeName); err != nil {
+		return nil, err
+	}
+
+	backupPath := backupDirectory(req)
+	if err := os.MkdirAll(backupPath, 0750); err != nil {
+		return nil, fmt.Errorf("failed to create backup directory: %w", err)
 	}
 
 	backupID := backupIDForRequest(req, time.Now())
@@ -103,9 +107,14 @@ func RestoreVolumeBackup(ctx context.Context, req BackupRequest) error {
 
 	fullVolumeName := fullBackupVolumeName(req)
 	if _, err := runDocker(ctx, "volume", "inspect", fullVolumeName); err != nil {
+		if !usesDefaultBackupVolumeName(req) {
+			return fmt.Errorf("volume %s does not exist or is not managed by %s/%s", fullVolumeName, req.Project, req.Environment)
+		}
 		if createErr := ensureDockerVolume(ctx, req.Project, req.Environment, "", fullVolumeName); createErr != nil {
 			return fmt.Errorf("failed to ensure volume exists: %w", createErr)
 		}
+	} else if err := ensureBackupVolumeOwned(ctx, req, fullVolumeName); err != nil {
+		return err
 	}
 
 	if _, err := runDocker(
@@ -227,6 +236,9 @@ func validateBackupRequest(req BackupRequest, requireVolume bool, requireBackupI
 			return fmt.Errorf("invalid volume name")
 		}
 	}
+	if req.VolumeName != "" && !isSafeDockerVolumeName(req.VolumeName) {
+		return fmt.Errorf("invalid docker volume name")
+	}
 	if requireBackupID || req.BackupID != "" {
 		if !isSafeBackupID(req.BackupID) {
 			return fmt.Errorf("invalid backup ID")
@@ -250,7 +262,25 @@ func backupDirectory(req BackupRequest) string {
 }
 
 func fullBackupVolumeName(req BackupRequest) string {
+	if req.VolumeName != "" {
+		return req.VolumeName
+	}
 	return runtimeid.VolumeName(req.Project, req.Environment, req.Volume)
+}
+
+func usesDefaultBackupVolumeName(req BackupRequest) bool {
+	return req.VolumeName == "" || req.VolumeName == runtimeid.VolumeName(req.Project, req.Environment, req.Volume)
+}
+
+func ensureBackupVolumeOwned(ctx context.Context, req BackupRequest, volumeName string) error {
+	owned, err := volumeBelongsToProjectEnvironment(ctx, volumeName, req.Project, req.Environment)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return fmt.Errorf("volume %s is not owned by %s/%s", volumeName, req.Project, req.Environment)
+	}
+	return nil
 }
 
 func backupFileName(volume string, backupID string) string {

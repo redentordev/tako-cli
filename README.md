@@ -210,6 +210,7 @@ environments:
     services:
       web:
         build: .                                      # Build from current directory
+        # dockerfile: Dockerfile.prod                 # Optional Dockerfile path inside build context
         port: 3000                                    # Container port
         proxy:
           domain: my-app.${SERVER_HOST}.sslip.io         # Auto-DNS with sslip.io
@@ -303,21 +304,31 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 | Command | Description |
 |---------|-------------|
-| `tako ps` | List running services and their status |
+| `tako ps` | List running services, replica counts, and health status |
+| `tako inspect [SERVICE]` | Inspect app-owned containers on takod nodes |
 | `tako logs` | Stream container logs |
 | `tako metrics` | View system metrics from servers |
 | `tako history` | View deployment history |
+| `tako image ls` | List app-owned Docker images on takod nodes |
+| `tako image prune --force` | Prune unused app-owned Docker images while keeping images used by app containers |
+| `tako volume ls` | List app-owned Docker volumes on takod nodes |
 
 ### Service Control
 
 | Command | Description |
 |---------|-------------|
 | `tako scale` | Scale service replicas |
+| `tako exec SERVICE [COMMAND...]` | Run a command inside a service replica |
+| `tako run SERVICE [COMMAND...] --one-off` | Run a one-off task with service env and mounts |
 
 ### Backup & Recovery
 
 | Command | Description |
 |---------|-------------|
+| `tako volume backup SERVICE VOLUME` | Back up a service Docker volume on nodes where it exists |
+| `tako volume backups [SERVICE] [VOLUME]` | List volume backups |
+| `tako volume restore SERVICE VOLUME BACKUP_ID --force` | Restore a service volume backup |
+| `tako volume backup delete SERVICE VOLUME BACKUP_ID --force` | Delete a stored volume backup |
 | `tako drift` | Detect configuration drift between config and running services |
 | `tako drift --watch` | Continuously monitor for drift |
 
@@ -325,6 +336,8 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 | Command | Description |
 |---------|-------------|
+| `tako env push [environment] --from-file .env.production` | Encrypt and upload an env file bundle to takod state |
+| `tako env pull [environment] --force` | Restore the newest reachable encrypted env bundle |
 | `tako secrets init` | Initialize secrets storage for project |
 | `tako secrets set <KEY>=<value>` | Set a secret value |
 | `tako secrets list` | List all secrets (redacted) |
@@ -505,6 +518,111 @@ application-level replication system such as a managed database, object storage,
 or purpose-built clustered datastore. Tako does not provision shared filesystem
 storage.
 
+Volume backups are node-local too. `tako volume backup SERVICE VOLUME` resolves
+the service volume from `tako.yaml`, then creates a backup only on nodes where
+that Docker volume exists. `tako volume restore SERVICE VOLUME BACKUP_ID
+--force` restores only on nodes that hold that backup. Custom Docker volume
+names are allowed only when the volume has Tako app/stage ownership labels.
+
+### Config Files
+
+Use managed config files for non-secret runtime config such as a Caddyfile.
+Tako uploads the local file to each target `takod`, stores it under a
+project/stage-scoped path, and mounts it read-only into the container.
+
+```yaml
+configs:
+  caddyfile:
+    source: ./ops/caddy/Caddyfile
+
+services:
+  edge:
+    image: caddy:2.9-alpine
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+        mode: "0444"
+```
+
+Config content changes are part of reconciliation. Do not put credentials in
+config files; use `env`, `envFile`, or Tako secrets for sensitive values.
+
+Config artifacts can also be generated. The first supported generator renders
+a Caddyfile from cross-project imports before the deployment plan is computed:
+
+```yaml
+imports:
+  app_admin:
+    project: app
+    environment: production
+    service: admin
+    port: web
+    servers:
+      - app-node
+  app_renderer:
+    project: app
+    environment: production
+    service: renderer
+    port: web
+    servers:
+      - app-node
+
+configs:
+  caddyfile:
+    generate:
+      caddy:
+        email: ops@example.com
+        adminHost: admin.example.com
+        siteHost: sites.example.com
+        adminImport: app_admin
+        rendererImport: app_renderer
+        askImport: app_admin
+        askPath: /api/platform/domains/ask
+        onDemandTLS: true
+```
+
+Generated config content is hashed after import resolution, so changed healthy
+upstreams trigger reconciliation for services that mount the generated file.
+
+### Cross-Project Exports
+
+Services stay private unless they explicitly export named ports. Edge or
+consumer projects declare imports at the project level:
+
+```yaml
+# app project
+services:
+  renderer:
+    image: ghcr.io/acme/renderer:latest
+    port: 3000
+    export:
+      ports:
+        web: 3000
+
+# edge project
+imports:
+  app_renderer:
+    project: app
+    environment: production
+    service: renderer
+    port: web
+    servers:
+      - app-node
+```
+
+Use `tako discovery --import app_renderer` from the edge project to resolve the
+exported target from remote desired state and show live healthy endpoints. For
+edge config workflows, `--format upstreams` prints a space-separated list of
+HTTP upstream URLs suitable for manual Caddy environment placeholders:
+
+```sh
+export APP_RENDERER_UPSTREAMS="$(tako discovery --import app_renderer --format upstreams | tr -d '\n')"
+```
+
+For dedicated Caddy edge services, prefer generated config artifacts so the
+deploy command resolves imports, renders the Caddyfile, hashes it, uploads it,
+and reconciles the edge container in one run.
+
 ### Shared Nodes
 
 Unrelated projects can deploy to the same server. Treat `project.name` as the
@@ -513,7 +631,37 @@ leases, env bundles, Docker labels, networks, containers, proxy files, and
 generated volume names. The `tako-proxy` container is shared per node for ports
 80 and 443, while each app/stage owns its own dynamic routes.
 
+Services that bind host ports directly are reserved through `takod` before
+containers are reconciled. If a service tries to bind public `80` or `443` on a
+node where shared `tako-proxy` already owns those ports, deployment fails with
+dedicated-edge guidance instead of replacing shared ingress for unrelated
+projects.
+
+For a node intentionally dedicated to a project-owned edge service, run
+`tako setup --dedicated-edge`. This disables shared `tako-proxy` only when the
+node has no active Tako proxy route files.
+
 ### Secrets Management
+
+Use env bundles when a deployment needs to move `.env` files between a laptop,
+a fresh checkout, and CI without committing them. Bundles are encrypted locally
+with `TAKO_ENV_PASSPHRASE` or an interactive passphrase, then stored in takod
+state on reachable environment nodes.
+
+```bash
+# Seed production env from an SSM/CapRover export or local stage file
+TAKO_ENV_PASSPHRASE='correct horse battery staple' \
+  tako env push production --from-file .env.production
+
+# Restore on another machine or CI runner
+TAKO_ENV_PASSPHRASE='correct horse battery staple' \
+  tako env pull production --force
+```
+
+Files named `.env` and `.env.<stage>` restore with that basename. Other
+`--from-file` source names restore as `.env`. `.tako/secrets*` files are bundled
+alongside env files; `tako secrets list` remains redacted and env bundle
+commands never print secret values.
 
 ```yaml
 services:
@@ -586,13 +734,16 @@ deployment:
     maxConcurrentDeploys: 4  # Max deploys at once
   cache:
     enabled: true     # Enable build caching
-    type: local       # Cache type
+    type: local       # local or registry
+    # ref: ghcr.io/acme/my-app/buildcache  # required for type: registry
+    # builder: mesh-builder                # optional docker buildx builder
 ```
 
 **Benefits:**
 - Faster deployments for multi-service apps
 - Dependency-aware scheduling
-- Automatic build caching
+- Local build cache reuse from existing node-local images
+- Optional registry cache through Docker buildx
 - Concurrent builds and deploys
 
 ---

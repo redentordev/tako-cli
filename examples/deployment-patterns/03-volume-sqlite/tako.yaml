@@ -2,6 +2,10 @@ project:
   name: pattern-volume
   version: 1.0.0
 
+volumes:
+  app_data:
+    driver: local
+
 servers:
   prod:
     host: ${SERVER_HOST}

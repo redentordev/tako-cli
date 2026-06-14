@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestTrackedCompletionsMatchGeneratedOutput(t *testing.T) {
@@ -52,5 +55,75 @@ func TestTrackedCompletionsMatchGeneratedOutput(t *testing.T) {
 				t.Fatalf("%s completions are stale; regenerate with `tako completion %s > completions/%s`", tt.name, tt.name, tt.file)
 			}
 		})
+	}
+}
+
+func TestDynamicCompletionsUseProjectConfig(t *testing.T) {
+	oldCfgFile := cfgFile
+	oldEnvFlag := envFlag
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+		envFlag = oldEnvFlag
+	})
+	t.Setenv("SSH_PASSWORD", "test-password")
+
+	path := filepath.Join(t.TempDir(), "tako.yaml")
+	err := os.WriteFile(path, []byte(`
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+    password: ${SSH_PASSWORD}
+  node-b:
+    host: 10.0.0.2
+    user: deploy
+    password: ${SSH_PASSWORD}
+environments:
+  production:
+    servers: [node-a, node-b]
+    services:
+      web:
+        image: nginx:alpine
+      worker:
+        image: busybox:1.36
+  staging:
+    servers: [node-b]
+    services:
+      api:
+        image: nginx:alpine
+`), 0600)
+	if err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	cfgFile = path
+	envFlag = "production"
+
+	services, directive := completeServiceArg(execCmd, nil, "w")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Fatalf("service directive = %v, want no file comp", directive)
+	}
+	if !slices.Equal(services, []string{"web", "worker"}) {
+		t.Fatalf("service completions = %#v, want web and worker", services)
+	}
+
+	scale, directive := completeScaleArg(scaleCmd, []string{"web=2"}, "w")
+	if directive != cobra.ShellCompDirectiveNoFileComp|cobra.ShellCompDirectiveNoSpace {
+		t.Fatalf("scale directive = %v, want no file comp + no space", directive)
+	}
+	if !slices.Equal(scale, []string{"worker="}) {
+		t.Fatalf("scale completions = %#v, want worker=", scale)
+	}
+
+	nodes, _ := completeServersForFlag(execCmd, nil, "node-")
+	if !slices.Equal(nodes, []string{"node-a", "node-b"}) {
+		t.Fatalf("node completions = %#v, want both nodes", nodes)
+	}
+
+	envs, _ := completeEnvironments(rootCmd, nil, "st")
+	if !slices.Equal(envs, []string{"staging"}) {
+		t.Fatalf("environment completions = %#v, want staging", envs)
 	}
 }

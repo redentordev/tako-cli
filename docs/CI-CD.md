@@ -22,14 +22,33 @@ The release command matches the current remote ID before deleting anything, so
 it will not clear a newer lease that replaced the stale one.
 
 `tako deploy` reads Git metadata for deployment history and rollback context,
-but it does not create commits. CI should deploy a clean checkout; if generated
-files or dependency installers modify the worktree before deploy, commit or
-discard those changes earlier in the pipeline.
+but it does not create commits. CI should deploy a clean checkout. For
+reproducible builds that match the repository instead of runner-local files, set:
+
+```yaml
+deployment:
+  source: git
+```
+
+With `source: git`, Tako refuses dirty worktrees, archives committed `HEAD`
+content for build services, and applies the committed `.dockerignore`. If
+generated files or dependency installers modify the worktree before deploy,
+commit or discard those changes earlier in the pipeline.
 
 Each installed takod refreshes its own actual container snapshot in the
 background. CI still runs `tako state pull` for deployment history and local UX,
 but it does not depend on the runner's old `.tako/` directory to know what is
 currently running.
+
+Seed the bundle from a laptop or controlled admin machine before relying on CI:
+
+```bash
+TAKO_ENV_PASSPHRASE=... tako env push production --from-file .env.production
+```
+
+`--from-file` accepts exported env files with comments and quoted values. Files
+named `.env` or `.env.<stage>` restore with that basename; other source names
+restore as `.env`. `.tako/secrets*` files are bundled alongside the env file.
 
 `tako env pull` selects the newest bundle from reachable mesh nodes, so a fresh
 runner is not tied to whichever node answers first.
@@ -45,7 +64,8 @@ state, or actual runtime state.
 Store these in your CI provider:
 
 - `TAKO_SSH_PRIVATE_KEY`: private key that can SSH to the configured nodes.
-- `TAKO_ENV_PASSPHRASE`: passphrase used by `tako env push`.
+- `TAKO_ENV_PASSPHRASE`: passphrase used by `tako env push` and
+  `tako env pull`.
 
 Your `tako.yaml` can reference CI-provided paths through environment expansion:
 

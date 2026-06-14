@@ -48,6 +48,7 @@ func TestIsAllowedEnvBundlePath(t *testing.T) {
 		want bool
 	}{
 		{path: ".env", want: true},
+		{path: ".env.production", want: true},
 		{path: ".tako/secrets", want: true},
 		{path: ".tako/secrets.production", want: true},
 		{path: ".tako/../.env", want: false},
@@ -66,15 +67,96 @@ func TestIsAllowedEnvBundlePath(t *testing.T) {
 	}
 }
 
+func TestEnvCommandEnvironmentUsesPositionalEnvironment(t *testing.T) {
+	cfg := envBundleMeshTestConfig()
+
+	got, err := envCommandEnvironment(cfg, []string{"production"})
+	if err != nil {
+		t.Fatalf("envCommandEnvironment returned error: %v", err)
+	}
+	if got != "production" {
+		t.Fatalf("environment = %q, want production", got)
+	}
+
+	oldEnvFlag := envFlag
+	envFlag = "staging"
+	t.Cleanup(func() {
+		envFlag = oldEnvFlag
+	})
+	if _, err := envCommandEnvironment(cfg, []string{"production"}); err == nil {
+		t.Fatal("envCommandEnvironment should reject positional/flag conflicts")
+	}
+}
+
+func TestCollectEnvPushBundleFromFileStoresStageEnvAndSecrets(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	envContent := "# comment\nTOKEN='quoted value'\nURL=\"https://example.com\"\n"
+	if err := os.WriteFile(".env.production", []byte(envContent), 0600); err != nil {
+		t.Fatalf("failed to write env file: %v", err)
+	}
+	if err := os.Mkdir(".tako", 0700); err != nil {
+		t.Fatalf("failed to create .tako: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(".tako", "secrets.production"), []byte("API_KEY=value\n"), 0600); err != nil {
+		t.Fatalf("failed to write secrets file: %v", err)
+	}
+
+	bundle, err := collectEnvPushBundle(".env.production")
+	if err != nil {
+		t.Fatalf("collectEnvPushBundle returned error: %v", err)
+	}
+	envData, err := base64.StdEncoding.DecodeString(bundle[".env.production"])
+	if err != nil {
+		t.Fatalf("failed to decode bundled env: %v", err)
+	}
+	if string(envData) != envContent {
+		t.Fatalf("env bundle content = %q, want original", string(envData))
+	}
+	secretData, err := base64.StdEncoding.DecodeString(bundle[".tako/secrets.production"])
+	if err != nil {
+		t.Fatalf("failed to decode bundled secrets: %v", err)
+	}
+	if string(secretData) != "API_KEY=value\n" {
+		t.Fatalf("secret bundle content = %q, want original", string(secretData))
+	}
+}
+
+func TestEnvBundlePathForSourceFallsBackToDotEnv(t *testing.T) {
+	if got := envBundlePathForSource("/tmp/ssm-output"); got != ".env" {
+		t.Fatalf("bundle path = %q, want .env", got)
+	}
+	if got := envBundlePathForSource("/tmp/.env.production"); got != ".env.production" {
+		t.Fatalf("bundle path = %q, want .env.production", got)
+	}
+}
+
+func TestReadEnvPushSourceRejectsSymlink(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	if err := os.WriteFile("real.env", []byte("TOKEN=value\n"), 0600); err != nil {
+		t.Fatalf("failed to write real env: %v", err)
+	}
+	if err := os.Symlink("real.env", ".env.production"); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, _, err := readEnvPushSource(".env.production"); err == nil {
+		t.Fatal("readEnvPushSource should reject symlink source")
+	}
+}
+
 func TestSupportedEnvBundleFilesFiltersAndSortsPaths(t *testing.T) {
 	allowed, paths, skipped := supportedEnvBundleFiles(map[string]string{
 		".tako/secrets.production": "prod",
+		".env.production":          "stage",
 		"../.env":                  "escape",
 		".env":                     "env",
 		".tako/known_hosts":        "known-hosts",
 	})
 
-	wantPaths := []string{".env", ".tako/secrets.production"}
+	wantPaths := []string{".env", ".env.production", ".tako/secrets.production"}
 	if len(paths) != len(wantPaths) {
 		t.Fatalf("paths = %v, want %v", paths, wantPaths)
 	}
@@ -83,7 +165,7 @@ func TestSupportedEnvBundleFilesFiltersAndSortsPaths(t *testing.T) {
 			t.Fatalf("paths = %v, want %v", paths, wantPaths)
 		}
 	}
-	if allowed[".env"] != "env" || allowed[".tako/secrets.production"] != "prod" {
+	if allowed[".env"] != "env" || allowed[".env.production"] != "stage" || allowed[".tako/secrets.production"] != "prod" {
 		t.Fatalf("allowed bundle = %#v, want allowed files only", allowed)
 	}
 	wantSkipped := []string{"../.env", ".tako/known_hosts"}
@@ -102,9 +184,9 @@ func TestRestoreEnvBundleFilesWritesAllowedFiles(t *testing.T) {
 	t.Chdir(tempDir)
 
 	restored, err := restoreEnvBundleFiles(map[string]string{
-		".env":                     base64.StdEncoding.EncodeToString([]byte("TOKEN=secret\n")),
+		".env.production":          base64.StdEncoding.EncodeToString([]byte("TOKEN=secret\n")),
 		".tako/secrets.production": base64.StdEncoding.EncodeToString([]byte("API_KEY=value\n")),
-	}, []string{".env", ".tako/secrets.production"})
+	}, []string{".env.production", ".tako/secrets.production"})
 	if err != nil {
 		t.Fatalf("restoreEnvBundleFiles returned error: %v", err)
 	}
@@ -112,12 +194,12 @@ func TestRestoreEnvBundleFilesWritesAllowedFiles(t *testing.T) {
 		t.Fatalf("restored = %d, want 2", restored)
 	}
 
-	envData, err := os.ReadFile(".env")
+	envData, err := os.ReadFile(".env.production")
 	if err != nil {
-		t.Fatalf("failed to read restored .env: %v", err)
+		t.Fatalf("failed to read restored .env.production: %v", err)
 	}
 	if string(envData) != "TOKEN=secret\n" {
-		t.Fatalf(".env = %q", envData)
+		t.Fatalf(".env.production = %q", envData)
 	}
 
 	info, err := os.Stat(filepath.Join(".tako", "secrets.production"))
@@ -334,13 +416,16 @@ environments:
 	oldCfgFile := cfgFile
 	oldEnvFlag := envFlag
 	oldVerbose := verbose
+	oldFromFile := envPushFromFile
 	cfgFile = configPath
 	envFlag = "production"
 	verbose = false
+	envPushFromFile = ""
 	t.Cleanup(func() {
 		cfgFile = oldCfgFile
 		envFlag = oldEnvFlag
 		verbose = oldVerbose
+		envPushFromFile = oldFromFile
 	})
 
 	manager := &recordingLeaseManager{}

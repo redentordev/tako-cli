@@ -3,6 +3,7 @@ package takodclient
 import (
 	"context"
 	"io"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -118,11 +119,34 @@ func TestStreamRequestUsesLongDeadline(t *testing.T) {
 	}
 }
 
+func TestStreamRequestReturnsHTTPErrorBody(t *testing.T) {
+	client := &fakeTakodExecutor{output: "docker buildx is required\n__TAKO_HTTP_STATUS__:502"}
+
+	output, err := StreamRequest(client, DefaultSocket, "POST", "/v1/images/build", strings.NewReader("archive"))
+	if err == nil {
+		t.Fatal("StreamRequest should return HTTP errors")
+	}
+	if output != "docker buildx is required" {
+		t.Fatalf("output = %q, want response body", output)
+	}
+	if !strings.Contains(err.Error(), "HTTP 502") || !strings.Contains(err.Error(), "docker buildx is required") {
+		t.Fatalf("error = %q, want HTTP status and response body", err.Error())
+	}
+}
+
 func TestProxyFileEndpointEscapesName(t *testing.T) {
 	got := ProxyFileEndpoint("demo production.yml")
 	want := "/v1/proxy-file?name=demo+production.yml"
 	if got != want {
 		t.Fatalf("ProxyFileEndpoint() = %q, want %q", got, want)
+	}
+}
+
+func TestDiscoveryEndpointEscapesQueryValues(t *testing.T) {
+	got := DiscoveryEndpoint("demo app", "prod/us", "web api", 3000, true)
+	want := "/v1/discovery?environment=prod%2Fus&port=3000&project=demo+app&roundRobin=true&service=web+api"
+	if got != want {
+		t.Fatalf("DiscoveryEndpoint() = %q, want %q", got, want)
 	}
 }
 
@@ -150,6 +174,14 @@ func TestActualStateEndpointEscapesQueryValues(t *testing.T) {
 	}
 }
 
+func TestInspectEndpointEscapesQueryValues(t *testing.T) {
+	got := InspectEndpoint("demo app", "prod/us", "web api")
+	want := "/v1/inspect?environment=prod%2Fus&project=demo+app&service=web+api"
+	if got != want {
+		t.Fatalf("InspectEndpoint() = %q, want %q", got, want)
+	}
+}
+
 func TestEnvBundleEndpointEscapesQueryValues(t *testing.T) {
 	got := EnvBundleEndpoint("demo app", "prod/us")
 	want := "/v1/env-bundle?environment=prod%2Fus&project=demo+app"
@@ -174,11 +206,77 @@ func TestImageBuildEndpointEscapesImage(t *testing.T) {
 	}
 }
 
+func TestImageBuildEndpointEscapesPlatform(t *testing.T) {
+	got := ImageBuildEndpoint("demo/web:abc123", "linux/amd64")
+	want := "/v1/images/build?image=demo%2Fweb%3Aabc123&platform=linux%2Famd64"
+	if got != want {
+		t.Fatalf("ImageBuildEndpoint() = %q, want %q", got, want)
+	}
+}
+
+func TestImageBuildEndpointWithOptions(t *testing.T) {
+	got := ImageBuildEndpointWithOptions("registry.example.com/demo/web:abc123", ImageBuildEndpointOptions{
+		Platform:   "linux/amd64",
+		Dockerfile: "Dockerfile.renderer",
+		CacheFrom:  []string{"type=registry,ref=registry.example.com/demo/web:cache"},
+		CacheTo:    []string{"type=registry,ref=registry.example.com/demo/web:cache,mode=max"},
+		Builder:    "mesh-builder",
+		Buildx:     true,
+	})
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("failed to parse endpoint: %v", err)
+	}
+	query := parsed.Query()
+	if parsed.Path != "/v1/images/build" ||
+		query.Get("image") != "registry.example.com/demo/web:abc123" ||
+		query.Get("platform") != "linux/amd64" ||
+		query.Get("dockerfile") != "Dockerfile.renderer" ||
+		query.Get("builder") != "mesh-builder" ||
+		query.Get("buildx") != "true" ||
+		query.Get("cacheFrom") != "type=registry,ref=registry.example.com/demo/web:cache" ||
+		query.Get("cacheTo") != "type=registry,ref=registry.example.com/demo/web:cache,mode=max" {
+		t.Fatalf("unexpected endpoint/query: %s", got)
+	}
+}
+
+func TestImagesEndpointEscapesQueryValues(t *testing.T) {
+	got := ImagesEndpoint("demo app", "prod/us")
+	want := "/v1/images?environment=prod%2Fus&project=demo+app"
+	if got != want {
+		t.Fatalf("ImagesEndpoint() = %q, want %q", got, want)
+	}
+}
+
+func TestVolumesEndpointEscapesQueryValues(t *testing.T) {
+	got := VolumesEndpoint("demo app", "prod/us")
+	want := "/v1/volumes?environment=prod%2Fus&project=demo+app"
+	if got != want {
+		t.Fatalf("VolumesEndpoint() = %q, want %q", got, want)
+	}
+}
+
 func TestLogsEndpointEscapesQueryValues(t *testing.T) {
 	got := LogsEndpoint("demo app", "prod/us", "web api", 250, true)
 	want := "/v1/logs?environment=prod%2Fus&follow=true&project=demo+app&service=web+api&tail=250"
 	if got != want {
 		t.Fatalf("LogsEndpoint() = %q, want %q", got, want)
+	}
+}
+
+func TestNodeLogsEndpointEscapesQueryValues(t *testing.T) {
+	got := NodeLogsEndpoint("tako-monitor", 250, true)
+	want := "/v1/node/logs?follow=true&tail=250&unit=tako-monitor"
+	if got != want {
+		t.Fatalf("NodeLogsEndpoint() = %q, want %q", got, want)
+	}
+}
+
+func TestNodeInfoEndpoint(t *testing.T) {
+	got := NodeInfoEndpoint()
+	want := "/v1/node/info"
+	if got != want {
+		t.Fatalf("NodeInfoEndpoint() = %q, want %q", got, want)
 	}
 }
 
@@ -190,11 +288,27 @@ func TestStatsEndpointEscapesQueryValues(t *testing.T) {
 	}
 }
 
+func TestMeshRTTEndpointEscapesQueryValues(t *testing.T) {
+	got := MeshRTTEndpoint("10.210.0.2", 3)
+	want := "/v1/mesh/rtt?count=3&target=10.210.0.2"
+	if got != want {
+		t.Fatalf("MeshRTTEndpoint() = %q, want %q", got, want)
+	}
+}
+
 func TestMetricsEndpointWithCollect(t *testing.T) {
 	got := MetricsEndpoint(true)
 	want := "/v1/metrics?collect=true"
 	if got != want {
 		t.Fatalf("MetricsEndpoint() = %q, want %q", got, want)
+	}
+}
+
+func TestPrometheusMetricsEndpointEscapesQueryValues(t *testing.T) {
+	got := PrometheusMetricsEndpoint("demo app", "prod/us", true)
+	want := "/v1/metrics?collect=true&environment=prod%2Fus&format=prometheus&project=demo+app"
+	if got != want {
+		t.Fatalf("PrometheusMetricsEndpoint() = %q, want %q", got, want)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -76,6 +77,56 @@ func TestAllocatePortReusesSameServiceDockerPort(t *testing.T) {
 	}
 	if allocation.HostPort != 31001 {
 		t.Fatalf("host port = %d, want same-service port 31001", allocation.HostPort)
+	}
+}
+
+func TestAllocateHostBindPortRejectsSharedProxyPublicPort(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "tako-proxy\n")
+	t.Setenv("TAKO_FAKE_INSPECT_PORT_BINDINGS", `{"80/tcp":[{"HostIp":"","HostPort":"80"}],"443/tcp":[{"HostIp":"","HostPort":"443"}]}`)
+	t.Setenv("TAKO_FAKE_INSPECT_LABELS", `{"tako.runtime":"takod","tako.component":"proxy"}`)
+
+	req := testPortAllocationRequest()
+	req.Kind = PortAllocationKindHostBind
+	req.HostIP = "0.0.0.0"
+	req.ContainerPort = 80
+	req.PreferredPort = 80
+	req.MinPort = 80
+	req.MaxPort = 80
+
+	_, err := AllocatePort(context.Background(), t.TempDir(), req)
+	if err == nil {
+		t.Fatal("expected shared proxy public host bind to be rejected")
+	}
+	if !strings.Contains(err.Error(), "tako-proxy") || !strings.Contains(err.Error(), "dedicated edge node") {
+		t.Fatalf("error = %q, want actionable shared proxy edge-node guidance", err.Error())
+	}
+}
+
+func TestAllocateHostBindPortStillRejectsOtherOccupiedPort(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "other\n")
+	t.Setenv("TAKO_FAKE_INSPECT_PORT_BINDINGS", `{"8080/tcp":[{"HostIp":"","HostPort":"8080"}]}`)
+	t.Setenv("TAKO_FAKE_INSPECT_LABELS", `{"tako.project":"other","tako.environment":"production","tako.service":"web"}`)
+
+	req := testPortAllocationRequest()
+	req.Kind = PortAllocationKindHostBind
+	req.HostIP = "0.0.0.0"
+	req.ContainerPort = 8080
+	req.PreferredPort = 8080
+	req.MinPort = 8080
+	req.MaxPort = 8080
+
+	_, err := AllocatePort(context.Background(), t.TempDir(), req)
+	if err == nil {
+		t.Fatal("expected occupied host port to be rejected")
+	}
+	if strings.Contains(err.Error(), "tako-proxy") {
+		t.Fatalf("error = %q, should not report shared proxy for unrelated container", err.Error())
 	}
 }
 

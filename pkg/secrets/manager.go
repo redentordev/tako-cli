@@ -368,6 +368,19 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 		projectEnv = envData
 	}
 
+	serviceEnv := make(map[string]string)
+	if service.EnvFile != "" {
+		var err error
+		serviceEnv, err = config.LoadEnvFile(service.EnvFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load service envFile %s: %w", service.EnvFile, err)
+		}
+		for key, value := range serviceEnv {
+			projectEnv[key] = value
+			envFile.Set(key, value)
+		}
+	}
+
 	// Also load environment variables from OS
 	for _, env := range os.Environ() {
 		parts := strings.SplitN(env, "=", 2)
