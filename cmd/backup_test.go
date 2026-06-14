@@ -88,6 +88,40 @@ func TestNewBackupIDFormat(t *testing.T) {
 	}
 }
 
+func TestConnectBackupNodeUsesProvidedPool(t *testing.T) {
+	provider := &fakeSSHClientProvider{}
+	server := config.ServerConfig{
+		Host:     "node-a.example.test",
+		Port:     2222,
+		User:     "deploy",
+		SSHKey:   "/tmp/id_ed25519",
+		Password: "fallback",
+	}
+
+	if _, err := connectBackupNode(provider, server); err != nil {
+		t.Fatalf("connectBackupNode returned error: %v", err)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("pool requests = %#v, want one", provider.requests)
+	}
+	got := provider.requests[0]
+	if got.host != server.Host || got.port != server.Port || got.user != server.User || got.sshKey != server.SSHKey || got.password != server.Password {
+		t.Fatalf("pool request = %#v, want server config", got)
+	}
+}
+
+func TestConnectBackupNodeReturnsPoolConnectionError(t *testing.T) {
+	provider := &fakeSSHClientProvider{err: fmt.Errorf("dial failed")}
+
+	_, err := connectBackupNode(provider, config.ServerConfig{Host: "node-a.example.test"})
+	if err == nil {
+		t.Fatal("connectBackupNode returned nil, want connection error")
+	}
+	if got := err.Error(); got != "dial failed" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
 func waitForBackupStarts(t *testing.T, started <-chan string, count int) {
 	t.Helper()
 	seen := map[string]bool{}

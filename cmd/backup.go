@@ -82,9 +82,11 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	if len(targetServerNames) == 0 {
 		return fmt.Errorf("no servers configured for environment %s", envName)
 	}
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
 
 	if backupList {
-		return listBackupsAcrossNodes(cfg, envName, servers, backupVolume)
+		return listBackupsAcrossNodes(cfg, sshPool, envName, servers, backupVolume)
 	}
 
 	if backupRestore != "" {
@@ -102,8 +104,6 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("specify --volume, --all, --list, --restore, --delete, or --cleanup")
 	}
 
-	sshPool := ssh.NewPool()
-	defer sshPool.CloseAll()
 	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServerNames, "backup")
 	if err != nil {
 		return err
@@ -116,19 +116,19 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	switch {
 	case backupRestore != "":
 		serverName := targetServerNames[0]
-		return restoreBackupOnNode(cfg, envName, serverName, servers[serverName], backupVolume, backupRestore)
+		return restoreBackupOnNode(cfg, sshPool, envName, serverName, servers[serverName], backupVolume, backupRestore)
 
 	case backupDelete != "":
-		return deleteBackupAcrossNodes(cfg, envName, servers, backupVolume, backupDelete)
+		return deleteBackupAcrossNodes(cfg, sshPool, envName, servers, backupVolume, backupDelete)
 
 	case backupCleanup > 0:
-		return cleanupBackupsAcrossNodes(cfg, envName, servers, backupCleanup)
+		return cleanupBackupsAcrossNodes(cfg, sshPool, envName, servers, backupCleanup)
 
 	case backupAll:
-		return backupAllVolumesAcrossNodes(cfg, envName, servers, newBackupID())
+		return backupAllVolumesAcrossNodes(cfg, sshPool, envName, servers, newBackupID())
 
 	case backupVolume != "":
-		return createBackupAcrossNodes(cfg, envName, servers, backupVolume, newBackupID())
+		return createBackupAcrossNodes(cfg, sshPool, envName, servers, backupVolume, newBackupID())
 
 	default:
 		return fmt.Errorf("specify --volume, --all, --list, --restore, --delete, or --cleanup")
@@ -145,11 +145,11 @@ func ensureSingleBackupRestoreTarget(targetServerNames []string, requestedServer
 	return nil
 }
 
-func listBackupsAcrossNodes(cfg *config.Config, envName string, servers map[string]config.ServerConfig, volumeName string) error {
+func listBackupsAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, volumeName string) error {
 	fmt.Printf("=== Volume Backups ===\n\n")
 
 	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
-		backups, err := readBackupsFromNode(cfg, serverCfg, envName, volumeName)
+		backups, err := readBackupsFromNode(cfg, pool, serverCfg, envName, volumeName)
 		return backupNodeActionResult{backups: backups}, err
 	})
 
@@ -180,12 +180,12 @@ func listBackupsAcrossNodes(cfg *config.Config, envName string, servers map[stri
 	return nil
 }
 
-func createBackupAcrossNodes(cfg *config.Config, envName string, servers map[string]config.ServerConfig, volumeName string, backupID string) error {
+func createBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, volumeName string, backupID string) error {
 	fmt.Printf("=== Backing up volume: %s ===\n", volumeName)
 	fmt.Printf("Backup ID: %s\n\n", backupID)
 
 	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
-		info, err := createBackupOnNode(cfg, serverCfg, envName, volumeName, backupID)
+		info, err := createBackupOnNode(cfg, pool, serverCfg, envName, volumeName, backupID)
 		if backupVolumeMissing(err) {
 			return backupNodeActionResult{skipped: []string{fmt.Sprintf("%s: volume not present on node", volumeName)}}, nil
 		}
@@ -219,23 +219,22 @@ func restoreBackup(client *ssh.Client, cfg *config.Config, envName string, volum
 	return nil
 }
 
-func restoreBackupOnNode(cfg *config.Config, envName string, serverName string, serverCfg config.ServerConfig, volumeName string, backupID string) error {
-	client, err := connectBackupNode(serverCfg)
+func restoreBackupOnNode(cfg *config.Config, pool sshClientProvider, envName string, serverName string, serverCfg config.ServerConfig, volumeName string, backupID string) error {
+	client, err := connectBackupNode(pool, serverCfg)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node %s: %w", serverName, err)
 	}
-	defer client.Close()
 	if verbose {
 		fmt.Printf("Using node: %s (%s)\n", serverName, serverCfg.Host)
 	}
 	return restoreBackup(client, cfg, envName, volumeName, backupID)
 }
 
-func deleteBackupAcrossNodes(cfg *config.Config, envName string, servers map[string]config.ServerConfig, volumeName string, backupID string) error {
+func deleteBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, volumeName string, backupID string) error {
 	fmt.Printf("=== Deleting backup: %s_%s ===\n\n", volumeName, backupID)
 
 	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
-		err := deleteBackupOnNode(cfg, serverCfg, envName, volumeName, backupID)
+		err := deleteBackupOnNode(cfg, pool, serverCfg, envName, volumeName, backupID)
 		if err != nil {
 			return backupNodeActionResult{}, err
 		}
@@ -245,11 +244,11 @@ func deleteBackupAcrossNodes(cfg *config.Config, envName string, servers map[str
 	return printBackupDeleteResults(results)
 }
 
-func cleanupBackupsAcrossNodes(cfg *config.Config, envName string, servers map[string]config.ServerConfig, days int) error {
+func cleanupBackupsAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, days int) error {
 	fmt.Printf("=== Cleaning up backups older than %d days ===\n\n", days)
 
 	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
-		response, err := cleanupBackupsOnNode(cfg, serverCfg, envName, days)
+		response, err := cleanupBackupsOnNode(cfg, pool, serverCfg, envName, days)
 		if err != nil {
 			return backupNodeActionResult{}, err
 		}
@@ -259,7 +258,7 @@ func cleanupBackupsAcrossNodes(cfg *config.Config, envName string, servers map[s
 	return printBackupCleanupResults(results)
 }
 
-func backupAllVolumesAcrossNodes(cfg *config.Config, envName string, servers map[string]config.ServerConfig, backupID string) error {
+func backupAllVolumesAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, backupID string) error {
 	volumes, err := backupVolumesFromConfig(cfg, envName)
 	if err != nil {
 		return fmt.Errorf("backup failed: %w", err)
@@ -275,7 +274,7 @@ func backupAllVolumesAcrossNodes(cfg *config.Config, envName string, servers map
 		var payload backupNodeActionResult
 		var failures []string
 		for _, volume := range volumes {
-			info, err := createBackupOnNode(cfg, serverCfg, envName, volume.name, backupID)
+			info, err := createBackupOnNode(cfg, pool, serverCfg, envName, volume.name, backupID)
 			if backupVolumeMissing(err) {
 				payload.skipped = append(payload.skipped, fmt.Sprintf("%s: volume not present on node", volume.name))
 				continue
@@ -497,12 +496,11 @@ func backupRequest(cfg *config.Config, envName string, volumeName string, backup
 	}
 }
 
-func readBackupsFromNode(cfg *config.Config, serverCfg config.ServerConfig, envName string, volumeName string) ([]takod.BackupInfo, error) {
-	client, err := connectBackupNode(serverCfg)
+func readBackupsFromNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, envName string, volumeName string) ([]takod.BackupInfo, error) {
+	client, err := connectBackupNode(pool, serverCfg)
 	if err != nil {
 		return nil, err
 	}
-	defer client.Close()
 
 	var response takod.BackupListResponse
 	err = takodBackupRequestJSON(
@@ -519,12 +517,11 @@ func readBackupsFromNode(cfg *config.Config, serverCfg config.ServerConfig, envN
 	return response.Backups, nil
 }
 
-func createBackupOnNode(cfg *config.Config, serverCfg config.ServerConfig, envName string, volumeName string, backupID string) (takod.BackupInfo, error) {
-	client, err := connectBackupNode(serverCfg)
+func createBackupOnNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, envName string, volumeName string, backupID string) (takod.BackupInfo, error) {
+	client, err := connectBackupNode(pool, serverCfg)
 	if err != nil {
 		return takod.BackupInfo{}, err
 	}
-	defer client.Close()
 
 	var info takod.BackupInfo
 	err = takodBackupRequestJSON(
@@ -541,12 +538,11 @@ func createBackupOnNode(cfg *config.Config, serverCfg config.ServerConfig, envNa
 	return info, nil
 }
 
-func deleteBackupOnNode(cfg *config.Config, serverCfg config.ServerConfig, envName string, volumeName string, backupID string) error {
-	client, err := connectBackupNode(serverCfg)
+func deleteBackupOnNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, envName string, volumeName string, backupID string) error {
+	client, err := connectBackupNode(pool, serverCfg)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
 
 	var response map[string]bool
 	return takodBackupRequestJSON(
@@ -559,12 +555,11 @@ func deleteBackupOnNode(cfg *config.Config, serverCfg config.ServerConfig, envNa
 	)
 }
 
-func cleanupBackupsOnNode(cfg *config.Config, serverCfg config.ServerConfig, envName string, days int) (takod.BackupCleanupResponse, error) {
-	client, err := connectBackupNode(serverCfg)
+func cleanupBackupsOnNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, envName string, days int) (takod.BackupCleanupResponse, error) {
+	client, err := connectBackupNode(pool, serverCfg)
 	if err != nil {
 		return takod.BackupCleanupResponse{}, err
 	}
-	defer client.Close()
 
 	var response takod.BackupCleanupResponse
 	err = takodBackupRequestJSON(
@@ -581,19 +576,12 @@ func cleanupBackupsOnNode(cfg *config.Config, serverCfg config.ServerConfig, env
 	return response, nil
 }
 
-func connectBackupNode(serverCfg config.ServerConfig) (*ssh.Client, error) {
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     serverCfg.Host,
-		Port:     serverCfg.Port,
-		User:     serverCfg.User,
-		SSHKey:   serverCfg.SSHKey,
-		Password: serverCfg.Password,
-	})
-	if err != nil {
-		return nil, err
+func connectBackupNode(pool sshClientProvider, serverCfg config.ServerConfig) (*ssh.Client, error) {
+	if pool == nil {
+		return nil, fmt.Errorf("ssh pool is not initialized")
 	}
-	if err := client.Connect(); err != nil {
-		_ = client.Close()
+	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
+	if err != nil {
 		return nil, err
 	}
 	return client, nil
