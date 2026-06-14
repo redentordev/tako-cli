@@ -419,7 +419,7 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if request.RemoveContainers || request.RemoveTakodState || request.RemoveProxyRuntime {
+	if request.RemoveContainers || request.RemoveTakodState {
 		if err := ReleaseProjectPortAllocations(r.Context(), s.dataDir, request.Project, request.Environment); err != nil {
 			response.Warnings = append(response.Warnings, fmt.Sprintf("failed to release port allocations: %v", err))
 		}

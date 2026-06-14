@@ -20,6 +20,7 @@ const (
 	maxHealthWaitAttempts = 600
 	maxHealthFieldBytes   = 4096
 	maxHealthDuration     = 24 * time.Hour
+	maxDockerVolumeName   = 255
 )
 
 type ReconcileServiceRequest struct {
@@ -99,6 +100,9 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		}, nil
 	}
 	if err := ensureDockerNetwork(ctx, req.Network); err != nil {
+		return nil, err
+	}
+	if err := ensureServiceVolumes(ctx, req); err != nil {
 		return nil, err
 	}
 	cleanupEnvFile, err := prepareServiceEnvFile(&req)
@@ -383,6 +387,82 @@ func ensureDockerNetwork(ctx context.Context, network string) error {
 		return fmt.Errorf("failed to ensure docker network %s: %w", network, err)
 	}
 	return nil
+}
+
+func ensureServiceVolumes(ctx context.Context, req ReconcileServiceRequest) error {
+	for _, volume := range namedVolumeSourcesFromMounts(req.Mounts) {
+		if err := ensureDockerVolume(ctx, req.Project, req.Environment, req.Service, volume); err != nil {
+			return fmt.Errorf("failed to ensure docker volume %s: %w", volume, err)
+		}
+	}
+	return nil
+}
+
+func ensureDockerVolume(ctx context.Context, project string, environment string, service string, volume string) error {
+	if !isSafeDockerVolumeName(volume) {
+		return fmt.Errorf("invalid volume name")
+	}
+	args := []string{
+		"volume", "create",
+		"--label", "tako.project=" + project,
+		"--label", "tako.environment=" + environment,
+		"--label", "tako.runtime=takod",
+	}
+	if service != "" {
+		args = append(args, "--label", "tako.service="+service)
+	}
+	args = append(args, volume)
+	_, err := runDocker(ctx, args...)
+	return err
+}
+
+func namedVolumeSourcesFromMounts(mounts []string) []string {
+	seen := make(map[string]bool)
+	var names []string
+	for _, mount := range mounts {
+		fields := parseDockerMountFields(mount)
+		if fields["type"] != "volume" {
+			continue
+		}
+		source := fields["source"]
+		if source == "" {
+			source = fields["src"]
+		}
+		if source == "" || strings.HasPrefix(source, "/") || seen[source] {
+			continue
+		}
+		seen[source] = true
+		names = append(names, source)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func parseDockerMountFields(mount string) map[string]string {
+	fields := make(map[string]string)
+	for _, part := range strings.Split(mount, ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		fields[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return fields
+}
+
+func isSafeDockerVolumeName(name string) bool {
+	if strings.TrimSpace(name) == "" || len(name) > maxDockerVolumeName {
+		return false
+	}
+	if strings.ContainsAny(name, "/\\\x00\r\n") || strings.HasPrefix(name, "-") {
+		return false
+	}
+	for _, r := range name {
+		if r <= 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func removeServiceContainers(ctx context.Context, project string, environment string, service string) (int, error) {

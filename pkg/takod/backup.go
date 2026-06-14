@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 const (
@@ -101,7 +103,7 @@ func RestoreVolumeBackup(ctx context.Context, req BackupRequest) error {
 
 	fullVolumeName := fullBackupVolumeName(req)
 	if _, err := runDocker(ctx, "volume", "inspect", fullVolumeName); err != nil {
-		if _, createErr := runDocker(ctx, "volume", "create", fullVolumeName); createErr != nil {
+		if createErr := ensureDockerVolume(ctx, req.Project, req.Environment, "", fullVolumeName); createErr != nil {
 			return fmt.Errorf("failed to ensure volume exists: %w", createErr)
 		}
 	}
@@ -248,7 +250,7 @@ func backupDirectory(req BackupRequest) string {
 }
 
 func fullBackupVolumeName(req BackupRequest) string {
-	return fmt.Sprintf("%s_%s_%s", req.Project, req.Environment, req.Volume)
+	return runtimeid.VolumeName(req.Project, req.Environment, req.Volume)
 }
 
 func backupFileName(volume string, backupID string) string {

@@ -20,7 +20,7 @@ var (
 
 var destroyCmd = &cobra.Command{
 	Use:   "destroy",
-	Short: "Remove deployed application and optionally clean up server setup",
+	Short: "Remove deployed application and optionally clean up app-owned leftovers",
 	Long: `Destroy the deployed application and cleanup resources.
 
 This command has two modes:
@@ -34,10 +34,10 @@ This command has two modes:
 
 2. PURGE MODE (--purge-all):
    - Everything from decommission mode, PLUS:
-   - Removes shared tako-proxy runtime files
-   - Removes access logs
-   - Prunes unused node runtime resources
-   - Complete cleanup - requires server re-setup
+   - Prunes unused app-owned volumes
+   - Prunes stopped app containers and old app images
+   - Keeps shared takod and tako-proxy runtime intact
+   - Safe when unrelated projects share the same node
 
 Safety Features:
    - Production servers require explicit confirmation
@@ -46,17 +46,16 @@ Safety Features:
 
 Examples:
    tako destroy                    # Decommission app, keep server setup
-   tako destroy --purge-all        # Remove everything (requires confirmation)
+   tako destroy --purge-all        # Also prune app-owned leftovers
    tako destroy --force            # Skip confirmation prompts
 
-⚠️  WARNING: PURGE MODE (--purge-all) removes everything!
-   You'll need to run 'tako setup' again to redeploy.`,
+PURGE MODE is app/stage scoped. It does not remove shared takod or tako-proxy.`,
 	RunE: runDestroy,
 }
 
 func init() {
 	rootCmd.AddCommand(destroyCmd)
-	destroyCmd.Flags().BoolVar(&destroyPurgeAll, "purge-all", false, "Remove everything including server setup (DANGEROUS)")
+	destroyCmd.Flags().BoolVar(&destroyPurgeAll, "purge-all", false, "Also prune app-owned leftovers after decommission")
 	destroyCmd.Flags().BoolVar(&destroyForce, "force", false, "Skip confirmation prompts")
 }
 
@@ -102,10 +101,9 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	fmt.Println("   ✓ Remove deployment files and directories")
 
 	if destroyPurgeAll {
-		fmt.Println("   ✓ Remove shared tako-proxy runtime files")
-		fmt.Println("   ✓ Remove access logs")
-		fmt.Println("   ✓ Prune unused node runtime resources")
-		fmt.Println("\n⚠️  You'll need to run 'tako setup' again to redeploy!")
+		fmt.Println("   ✓ Prune unused app-owned volumes")
+		fmt.Println("   ✓ Prune stopped app containers and old app images")
+		fmt.Println("\nPreserving shared server setup (takod, tako-proxy, logs)")
 	} else {
 		fmt.Println("\nPreserving server setup (takod, tako-proxy, logs)")
 		fmt.Println("You can redeploy without running 'tako setup' again")
@@ -173,7 +171,7 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		fmt.Println("✨ All servers destroyed successfully!")
 
 		if destroyPurgeAll {
-			fmt.Println("\n💡 Server setup removed. Run 'tako setup' before next deployment.")
+			fmt.Println("\n💡 App-owned leftovers pruned. Shared server setup was preserved.")
 		} else {
 			fmt.Println("\n💡 Server setup preserved. You can redeploy without running 'tako setup'.")
 		}
@@ -204,10 +202,10 @@ func destroyEnvironmentTargets(cfg *config.Config, envName string) (map[string]c
 
 // destroySingleServer handles destruction of a single server.
 func destroySingleServer(pool sshClientProvider, serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool) error {
-	return destroySingleServerWithHooks(pool, serverName, serverCfg, cfg, envName, verbose, purgeAll, decommissionApp, purgeServerSetup)
+	return destroySingleServerWithHooks(pool, serverName, serverCfg, cfg, envName, verbose, purgeAll, decommissionApp, purgeProjectRuntime)
 }
 
-func destroySingleServerWithHooks(pool sshClientProvider, serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool, decommission func(*ssh.Client, *config.Config, string, bool) error, purge func(*ssh.Client, *config.Config, bool) error) error {
+func destroySingleServerWithHooks(pool sshClientProvider, serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool, decommission func(*ssh.Client, *config.Config, string, bool) error, purge func(*ssh.Client, *config.Config, string, bool) error) error {
 	if pool == nil {
 		return fmt.Errorf("ssh pool is not initialized")
 	}
@@ -223,7 +221,7 @@ func destroySingleServerWithHooks(pool sshClientProvider, serverName string, ser
 
 	// Purge server setup if requested
 	if purgeAll {
-		if err := purge(client, cfg, verbose); err != nil {
+		if err := purge(client, cfg, envName, verbose); err != nil {
 			return fmt.Errorf("purge failed: %w", err)
 		}
 	}
@@ -265,16 +263,16 @@ func decommissionApp(client *ssh.Client, cfg *config.Config, envName string, ver
 	return nil
 }
 
-// purgeServerSetup removes shared server-side components installed by Tako.
-func purgeServerSetup(client *ssh.Client, cfg *config.Config, verbose bool) error {
+// purgeProjectRuntime removes app-owned leftovers without touching shared takod
+// or tako-proxy runtime used by other projects on the same node.
+func purgeProjectRuntime(client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
 	if verbose {
-		fmt.Println("  → Removing tako-proxy...")
+		fmt.Println("  → Pruning app-owned leftovers...")
 	}
 	response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
-		Project:              cfg.Project.Name,
-		RemoveProxyContainer: true,
-		RemoveProxyRuntime:   true,
-		PruneDocker:          true,
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		PruneDocker: true,
 	})
 	if err != nil {
 		return err
@@ -284,7 +282,7 @@ func purgeServerSetup(client *ssh.Client, cfg *config.Config, verbose bool) erro
 	}
 
 	if verbose {
-		fmt.Println("  ✓ Server setup purged")
+		fmt.Println("  ✓ App-owned leftovers pruned")
 	}
 
 	return nil
