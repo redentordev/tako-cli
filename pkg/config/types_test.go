@@ -1,28 +1,60 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestValidateConfigRejectsNFSStorageConfig(t *testing.T) {
-	cfg := validValidationConfig()
-	cfg.Storage = &StorageConfig{
-		NFS: &NFSConfig{
-			Enabled: true,
-			Server:  "auto",
-			Exports: []NFSExportConfig{
-				{Name: "shared_data", Path: "/srv/tako/shared"},
-			},
-		},
+func TestLoadConfigRejectsUnknownJSONStorageField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tako.json")
+	err := os.WriteFile(path, []byte(`{
+  "project": {"name": "demo", "version": "1.0.0"},
+  "storage": {"nfs": {"enabled": true}},
+  "servers": {"node-a": {"host": "10.0.0.1", "user": "deploy"}},
+  "environments": {
+    "production": {
+      "servers": ["node-a"],
+      "services": {"web": {"image": "nginx:alpine"}}
+    }
+  }
+}`), 0600)
+	if err != nil {
+		t.Fatalf("failed to write test config: %v", err)
 	}
 
-	err := ValidateConfig(cfg)
+	_, err = LoadConfig(path)
 	if err == nil {
-		t.Fatal("ValidateConfig should reject storage.nfs")
+		t.Fatal("LoadConfig should reject unknown storage field")
 	}
-	if !strings.Contains(err.Error(), "storage.nfs is no longer supported") {
-		t.Fatalf("error = %q, want unsupported storage.nfs error", err)
+	if !strings.Contains(err.Error(), `unknown field "storage"`) {
+		t.Fatalf("error = %q, want unknown storage field error", err)
+	}
+}
+
+func TestLoadConfigRejectsUnknownNestedJSONField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tako.json")
+	err := os.WriteFile(path, []byte(`{
+  "project": {"name": "demo", "version": "1.0.0"},
+  "servers": {"node-a": {"host": "10.0.0.1", "user": "deploy"}},
+  "environments": {
+    "production": {
+      "servers": ["node-a"],
+      "services": {"web": {"image": "nginx:alpine", "unknown": true}}
+    }
+  }
+}`), 0600)
+	if err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	_, err = LoadConfig(path)
+	if err == nil {
+		t.Fatal("LoadConfig should reject unknown nested field")
+	}
+	if !strings.Contains(err.Error(), `unknown field "unknown"`) {
+		t.Fatalf("error = %q, want unknown nested field error", err)
 	}
 }
 

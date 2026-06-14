@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,7 +23,6 @@ type Config struct {
 	State         *StateConfig                 `yaml:"state,omitempty" json:"state,omitempty"`
 	Deployment    *DeploymentConfig            `yaml:"deployment,omitempty" json:"deployment,omitempty"`
 	Notifications *NotificationsConfig         `yaml:"notifications,omitempty" json:"notifications,omitempty"`
-	Storage       *StorageConfig               `yaml:"storage,omitempty" json:"storage,omitempty"`
 	Volumes       map[string]VolumeConfig      `yaml:"volumes,omitempty" json:"volumes,omitempty"` // Top-level volume definitions
 	Servers       map[string]ServerConfig      `yaml:"servers" json:"servers"`
 	Environments  map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
@@ -82,27 +82,6 @@ type VolumeConfig struct {
 	Labels     map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`           // Volume labels
 	External   bool              `yaml:"external,omitempty" json:"external,omitempty"`       // If true, volume must already exist
 	Name       string            `yaml:"name,omitempty" json:"name,omitempty"`               // Override the auto-generated name (opt-out of prefix)
-}
-
-// StorageConfig keeps legacy storage keys so removed options fail validation
-// instead of being silently ignored.
-type StorageConfig struct {
-	NFS *NFSConfig `yaml:"nfs,omitempty" json:"nfs,omitempty"`
-}
-
-// NFSConfig is retained only to reject removed storage.nfs configuration.
-type NFSConfig struct {
-	Enabled bool              `yaml:"enabled" json:"enabled"`
-	Server  string            `yaml:"server,omitempty" json:"server,omitempty"`
-	Exports []NFSExportConfig `yaml:"exports,omitempty" json:"exports,omitempty"`
-}
-
-// NFSExportConfig is retained only to reject removed storage.nfs exports.
-type NFSExportConfig struct {
-	Name    string   `yaml:"name" json:"name"`
-	Path    string   `yaml:"path" json:"path"`
-	Size    string   `yaml:"size,omitempty" json:"size,omitempty"`
-	Options []string `yaml:"options,omitempty" json:"options,omitempty"`
 }
 
 // NotificationsConfig defines notification settings
@@ -662,8 +641,16 @@ func LoadConfig(configPath string) (*Config, error) {
 	// Parse config into Config struct
 	var config Config
 	if isJSON {
-		// Parse JSON
-		if err := json.Unmarshal([]byte(expandedData), &config); err != nil {
+		decoder := json.NewDecoder(strings.NewReader(expandedData))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&config); err != nil {
+			return nil, fmt.Errorf("failed to parse JSON config: %w", err)
+		}
+		var extra any
+		if err := decoder.Decode(&extra); err != io.EOF {
+			if err == nil {
+				return nil, fmt.Errorf("failed to parse JSON config: multiple JSON values")
+			}
 			return nil, fmt.Errorf("failed to parse JSON config: %w", err)
 		}
 	} else {

@@ -52,10 +52,6 @@ func ValidateConfig(cfg *Config) error {
 		cfg.Environments[envName] = env
 	}
 
-	if err := validateStorageConfig(cfg); err != nil {
-		return err
-	}
-
 	// Validate top-level volumes section
 	if len(cfg.Volumes) > 0 {
 		if err := validateVolumes(cfg.Volumes); err != nil {
@@ -63,16 +59,6 @@ func ValidateConfig(cfg *Config) error {
 		}
 	}
 
-	return nil
-}
-
-func validateStorageConfig(cfg *Config) error {
-	if cfg.Storage == nil || cfg.Storage.NFS == nil {
-		return nil
-	}
-	if cfg.Storage.NFS.Enabled || len(cfg.Storage.NFS.Exports) > 0 || cfg.Storage.NFS.Server != "" {
-		return fmt.Errorf("storage.nfs is no longer supported; use node-local volumes or an external storage service")
-	}
 	return nil
 }
 
