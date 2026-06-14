@@ -720,6 +720,36 @@ func TestHandleLogsRejectsInvalidTail(t *testing.T) {
 	}
 }
 
+func TestHandleLogsRejectsNegativeTail(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs?project=demo&environment=production&service=web&tail=-1", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleLogs(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "tail cannot be negative") {
+		t.Fatalf("unexpected response: %q", recorder.Body.String())
+	}
+}
+
+func TestHandleLogsRejectsInvalidIdentifier(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/logs?project=../demo&environment=production&service=web&tail=10", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleLogs(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "invalid project name") {
+		t.Fatalf("unexpected response: %q", recorder.Body.String())
+	}
+}
+
 func TestHandleLogsStreamsServiceLogs(t *testing.T) {
 	logPath := t.TempDir() + "/commands.log"
 	restore := useFakeCommands(t, logPath)
@@ -876,6 +906,36 @@ func TestHandleAccessLogsRejectsInvalidTail(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleAccessLogsRejectsNegativeTail(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/access-logs?tail=-1", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleAccessLogs(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "tail cannot be negative") {
+		t.Fatalf("unexpected response: %q", recorder.Body.String())
+	}
+}
+
+func TestHandleAccessLogsRejectsLargeTail(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/access-logs?tail=10001", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleAccessLogs(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "tail cannot exceed 10000") {
+		t.Fatalf("unexpected response: %q", recorder.Body.String())
 	}
 }
 

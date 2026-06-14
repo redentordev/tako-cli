@@ -874,14 +874,20 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		follow = parsed
 	}
 
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	if err := StreamServiceLogs(r.Context(), LogsRequest{
+	request := LogsRequest{
 		Project:     r.URL.Query().Get("project"),
 		Environment: r.URL.Query().Get("environment"),
 		Service:     r.URL.Query().Get("service"),
 		Tail:        tail,
 		Follow:      follow,
-	}, &flushResponseWriter{writer: w}); err != nil {
+	}
+	if err := validateLogsRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if err := StreamServiceLogs(r.Context(), request, &flushResponseWriter{writer: w}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -971,6 +977,10 @@ func (s *Server) handleAccessLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		follow = parsed
+	}
+	if err := validateAccessLogTail(tail); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

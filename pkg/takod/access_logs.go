@@ -15,8 +15,8 @@ var (
 )
 
 func StreamProxyAccessLogs(ctx context.Context, tail int, follow bool, writer io.Writer) error {
-	if tail < 0 {
-		return fmt.Errorf("tail cannot be negative")
+	if err := validateAccessLogTail(tail); err != nil {
+		return err
 	}
 	if tail == 0 {
 		tail = 50
@@ -36,6 +36,16 @@ func StreamProxyAccessLogs(ctx context.Context, tail int, follow bool, writer io
 	cmd.Stderr = writer
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to stream proxy access logs: %w", err)
+	}
+	return nil
+}
+
+func validateAccessLogTail(tail int) error {
+	if tail < 0 {
+		return fmt.Errorf("tail cannot be negative")
+	}
+	if tail > maxLogTail {
+		return fmt.Errorf("tail cannot exceed %d", maxLogTail)
 	}
 	return nil
 }

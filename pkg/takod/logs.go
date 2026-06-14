@@ -17,6 +17,8 @@ type LogsRequest struct {
 	Follow      bool   `json:"follow,omitempty"`
 }
 
+const maxLogTail = 10000
+
 func StreamServiceLogs(ctx context.Context, req LogsRequest, writer io.Writer) error {
 	if err := validateLogsRequest(req); err != nil {
 		return err
@@ -87,8 +89,8 @@ func validateLogsRequest(req LogsRequest) error {
 	if req.Tail < 0 {
 		return fmt.Errorf("tail cannot be negative")
 	}
-	if req.Tail > 10000 {
-		return fmt.Errorf("tail cannot exceed 10000")
+	if req.Tail > maxLogTail {
+		return fmt.Errorf("tail cannot exceed %d", maxLogTail)
 	}
 	return nil
 }
