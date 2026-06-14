@@ -238,6 +238,21 @@ func TestHandleProxyRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHandleProxyRejectsInvalidRequest(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/proxy", bytes.NewBufferString(`{"network":"tako;rm"}`))
+	recorder := httptest.NewRecorder()
+
+	server.handleProxy(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "invalid network name") {
+		t.Fatalf("unexpected response: %q", recorder.Body.String())
+	}
+}
+
 func TestHandleCleanupRequiresPost(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
 	req := httptest.NewRequest(http.MethodGet, "/v1/cleanup", nil)

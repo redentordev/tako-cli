@@ -2,6 +2,7 @@ package takod
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -38,5 +39,66 @@ func TestBuildProxyContainerArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected proxy args:\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestValidateReconcileProxyRequestAllowsDefaults(t *testing.T) {
+	req := ReconcileProxyRequest{Network: "tako_demo_production"}
+
+	normalizeReconcileProxyRequest(&req)
+	if err := validateReconcileProxyRequest(req); err != nil {
+		t.Fatalf("expected defaulted proxy request to validate: %v", err)
+	}
+	if req.Email != defaultProxyEmail {
+		t.Fatalf("email = %q, want %q", req.Email, defaultProxyEmail)
+	}
+	if req.Image != defaultProxyImage {
+		t.Fatalf("image = %q, want %q", req.Image, defaultProxyImage)
+	}
+}
+
+func TestValidateReconcileProxyRequestRejectsUnsafeValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*ReconcileProxyRequest)
+		want   string
+	}{
+		{
+			name: "network",
+			mutate: func(req *ReconcileProxyRequest) {
+				req.Network = "tako;rm"
+			},
+			want: "invalid network name",
+		},
+		{
+			name: "image",
+			mutate: func(req *ReconcileProxyRequest) {
+				req.Image = "--help"
+			},
+			want: "image must not start",
+		},
+		{
+			name: "email",
+			mutate: func(req *ReconcileProxyRequest) {
+				req.Email = "ops@example.com\nbad"
+			},
+			want: "invalid proxy email",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := ReconcileProxyRequest{Network: "tako_demo_production"}
+			normalizeReconcileProxyRequest(&req)
+			tt.mutate(&req)
+
+			err := validateReconcileProxyRequest(req)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want %q", err.Error(), tt.want)
+			}
+		})
 	}
 }

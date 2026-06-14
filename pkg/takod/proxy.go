@@ -24,14 +24,9 @@ type ReconcileProxyResponse struct {
 }
 
 func ReconcileProxy(ctx context.Context, req ReconcileProxyRequest) (*ReconcileProxyResponse, error) {
-	if strings.TrimSpace(req.Network) == "" {
-		return nil, fmt.Errorf("network is required")
-	}
-	if req.Email == "" {
-		req.Email = defaultProxyEmail
-	}
-	if req.Image == "" {
-		req.Image = defaultProxyImage
+	normalizeReconcileProxyRequest(&req)
+	if err := validateReconcileProxyRequest(req); err != nil {
+		return nil, err
 	}
 	if err := ensureDockerNetwork(ctx, req.Network); err != nil {
 		return nil, err
@@ -54,6 +49,41 @@ func ReconcileProxy(ctx context.Context, req ReconcileProxyRequest) (*ReconcileP
 		return nil, fmt.Errorf("failed to start tako-proxy: %w, output: %s", err, output)
 	}
 	return &ReconcileProxyResponse{Container: "tako-proxy", Image: req.Image}, nil
+}
+
+func normalizeReconcileProxyRequest(req *ReconcileProxyRequest) {
+	if req.Email == "" {
+		req.Email = defaultProxyEmail
+	}
+	if req.Image == "" {
+		req.Image = defaultProxyImage
+	}
+}
+
+func validateReconcileProxyRequest(req ReconcileProxyRequest) error {
+	if strings.TrimSpace(req.Network) == "" {
+		return fmt.Errorf("network is required")
+	}
+	if !isSafeRuntimeName(req.Network) {
+		return fmt.Errorf("invalid network name")
+	}
+	if err := validateImageName(req.Image); err != nil {
+		return err
+	}
+	if !isSafeProxyEmail(req.Email) {
+		return fmt.Errorf("invalid proxy email")
+	}
+	return nil
+}
+
+func isSafeProxyEmail(value string) bool {
+	if len(value) == 0 || len(value) > 254 || strings.TrimSpace(value) != value {
+		return false
+	}
+	if strings.Count(value, "@") != 1 {
+		return false
+	}
+	return !hasControlChars(value) && !strings.ContainsAny(value, " \t")
 }
 
 func ensureProxyDirectories() error {
