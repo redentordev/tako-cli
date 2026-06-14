@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,11 @@ import (
 	"github.com/redentordev/tako-cli/pkg/crypto"
 	"github.com/redentordev/tako-cli/pkg/envexpand"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
+)
+
+var (
+	secretCommandContext = exec.CommandContext
+	secretCommandTimeout = 2 * time.Minute
 )
 
 type Manager struct {
@@ -171,11 +177,16 @@ func (m *Manager) executeCommand(command string) (string, error) {
 		return "", fmt.Errorf("command '%s' not allowed in substitution (security policy)", cmdName)
 	}
 
-	// Execute the command
-	cmd := exec.Command(parts[0], parts[1:]...)
+	ctx, cancel := context.WithTimeout(context.Background(), secretCommandTimeout)
+	defer cancel()
+
+	cmd := secretCommandContext(ctx, parts[0], parts[1:]...)
 	cmd.Env = os.Environ() // Inherit environment
 
 	output, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("command timed out after %s", secretCommandTimeout)
+	}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("command failed: %s", string(exitErr.Stderr))
