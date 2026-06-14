@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-const defaultLeaseTTL = 30 * time.Minute
+const (
+	defaultLeaseTTL = 30 * time.Minute
+	maxLeaseTTL     = 24 * time.Hour
+)
 
 type LeaseInfo struct {
 	ID          string    `json:"id"`
@@ -205,6 +208,15 @@ func validateLeaseRequest(req LeaseRequest, requireAcquireFields bool) error {
 		}
 		if req.Who == "" || len(req.Who) > 256 {
 			return fmt.Errorf("invalid lease owner")
+		}
+		if hasControlChars(req.Who) {
+			return fmt.Errorf("invalid lease owner")
+		}
+		if req.PID < 0 {
+			return fmt.Errorf("invalid lease PID")
+		}
+		if req.TTLSeconds < 0 || req.TTLSeconds > int64(maxLeaseTTL/time.Second) {
+			return fmt.Errorf("invalid lease TTL")
 		}
 	}
 	return nil
