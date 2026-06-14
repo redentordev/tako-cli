@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -322,6 +323,37 @@ func TestHandleEnvBundleRejectsInvalidJSON(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleEnvBundleRejectsOversizedJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	body := `{"project":"demo","environment":"production","content":"` + strings.Repeat("A", takodMaxJSONBodyBytes) + `"}`
+	req := httptest.NewRequest(http.MethodPut, "/v1/env-bundle", bytes.NewBufferString(body))
+	recorder := httptest.NewRecorder()
+
+	server.handleEnvBundle(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "request body too large") {
+		t.Fatalf("response = %q, want body-size error", recorder.Body.String())
+	}
+}
+
+func TestHandleEnvBundleRejectsMultipleJSONValues(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPut, "/v1/env-bundle", bytes.NewBufferString(`{} {}`))
+	recorder := httptest.NewRecorder()
+
+	server.handleEnvBundle(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "single JSON value") {
+		t.Fatalf("response = %q, want single-value error", recorder.Body.String())
 	}
 }
 
