@@ -310,6 +310,33 @@ func TestReconcileServiceRunsDockerMutation(t *testing.T) {
 	}
 }
 
+func TestReconcileServiceCleansStartedContainersOnHealthFailure(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_HEALTH_STATUS", "unhealthy")
+
+	_, err := ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		Image:       "registry.example.com/demo/web:abc",
+		Network:     "tako_demo_production",
+		Containers:  []ContainerSpec{{Name: "demo_production_web_1"}},
+		Health: &HealthSpec{
+			Command: "curl -sf http://127.0.0.1:3000/health || exit 1",
+		},
+	})
+	if err == nil {
+		t.Fatal("ReconcileService should fail for unhealthy containers")
+	}
+
+	entries := readCommandLog(t, logPath)
+	if !slices.Contains(entries, "docker rm -f demo_production_web_1") {
+		t.Fatalf("docker log missing cleanup of started container in %#v", entries)
+	}
+}
+
 func TestContainerHealthWaitAttemptsDoesNotUseDockerRetryCount(t *testing.T) {
 	got := containerHealthWaitAttempts(&HealthSpec{
 		Command: "curl -sf http://127.0.0.1:3000/health || exit 1",
@@ -453,6 +480,12 @@ func TestTakodCommandHelper(t *testing.T) {
 		os.Exit(0)
 	case "inspect":
 		joined := strings.Join(commandArgs, " ")
+		if strings.Contains(joined, ".State.Health.Status") {
+			if output := os.Getenv("TAKO_FAKE_HEALTH_STATUS"); output != "" {
+				_, _ = os.Stdout.WriteString(output + "\n")
+			}
+			os.Exit(0)
+		}
 		if strings.Contains(joined, ".HostConfig.PortBindings") {
 			if output := os.Getenv("TAKO_FAKE_INSPECT_PORT_BINDINGS"); output != "" {
 				_, _ = os.Stdout.WriteString(output)

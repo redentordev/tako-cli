@@ -1,7 +1,9 @@
 package reconcile
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -152,6 +154,28 @@ func TestGatherActualStateByServerWithAggregatesSortedErrors(t *testing.T) {
 	}
 }
 
+func TestGatherActualStateFromTakodUsesSharedClientEndpoint(t *testing.T) {
+	executor := &fakeActualTakodExecutor{
+		output: `{"project":"demo app","environment":"prod/us","services":{"web":{"name":"web","image":"demo/web:1","replicas":2,"containers":["a","b"],"configHash":"hash","runtimeId":"rid"}}}` + "\n__TAKO_HTTP_STATUS__:200",
+	}
+
+	actual, err := gatherActualStateFromTakodWith(executor, "/run/custom.sock", "demo app", "prod/us")
+	if err != nil {
+		t.Fatalf("gatherActualStateFromTakodWith returned error: %v", err)
+	}
+
+	if !strings.Contains(executor.cmd, "--write-out '\\n__TAKO_HTTP_STATUS__:%{http_code}'") {
+		t.Fatalf("actual state gather should use shared takod client status handling: %s", executor.cmd)
+	}
+	if !strings.Contains(executor.cmd, "environment=prod%2Fus") || !strings.Contains(executor.cmd, "project=demo+app") {
+		t.Fatalf("actual state endpoint was not escaped correctly: %s", executor.cmd)
+	}
+	web := actual["web"]
+	if web == nil || web.Replicas != 2 || !slices.Equal(web.Containers, []string{"a", "b"}) || web.RuntimeID != "rid" {
+		t.Fatalf("web actual state = %#v", web)
+	}
+}
+
 func waitForActualStateStarts(t *testing.T, started <-chan string, count int) {
 	t.Helper()
 	seen := map[string]bool{}
@@ -164,6 +188,22 @@ func waitForActualStateStarts(t *testing.T, started <-chan string, count int) {
 			t.Fatalf("timed out waiting for actual state fanout; saw %v", seen)
 		}
 	}
+}
+
+type fakeActualTakodExecutor struct {
+	cmd    string
+	output string
+	err    error
+}
+
+func (f *fakeActualTakodExecutor) ExecuteWithContext(_ context.Context, cmd string) (string, error) {
+	f.cmd = cmd
+	return f.output, f.err
+}
+
+func (f *fakeActualTakodExecutor) ExecuteWithInput(_ context.Context, cmd string, _ io.Reader) (string, error) {
+	f.cmd = cmd
+	return f.output, f.err
 }
 
 func testActualStateServers(names []string) map[string]config.ServerConfig {
