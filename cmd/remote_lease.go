@@ -25,6 +25,8 @@ type remoteOperationLeaseSet struct {
 	leases    []remoteOperationLease
 }
 
+var acquireRemoteOperationLeasesFunc = acquireRemoteOperationLeases
+
 func acquireRemoteOperationLeases(pool *ssh.Pool, cfg *config.Config, envName string, serverNames []string, operation string) (*remoteOperationLeaseSet, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("ssh pool is not initialized")

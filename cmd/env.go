@@ -135,6 +135,16 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+	leaseSet, err := acquireRemoteOperationLeasesFunc(sshPool, cfg, envName, serverNames, "env-push")
+	if err != nil {
+		return err
+	}
+	defer leaseSet.Release(verbose)
+	if verbose {
+		fmt.Printf("→ Acquired remote env-push leases: %s\n", leaseSet.Summary())
+	}
 
 	request := takod.EnvBundleRequest{
 		Project:     cfg.Project.Name,
