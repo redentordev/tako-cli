@@ -11,10 +11,28 @@ import (
 )
 
 func TestValidateImageName(t *testing.T) {
-	if err := validateImageName("demo/web:abc123"); err != nil {
-		t.Fatalf("expected image name to be valid: %v", err)
+	for _, image := range []string{
+		"demo/web:abc123",
+		"postgres:15",
+		"ghcr.io/org/app:v1.2.3",
+		"registry.example.com:5000/demo/web@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"demo/web:v1..2",
+	} {
+		if err := validateImageName(image); err != nil {
+			t.Fatalf("expected image name %q to be valid: %v", image, err)
+		}
 	}
-	for _, image := range []string{"", "demo\nweb:abc", "demo\rweb:abc", "demo\x00web:abc"} {
+	for _, image := range []string{
+		"",
+		"--help",
+		"-demo/web:abc",
+		"demo web:abc",
+		"demo\tweb:abc",
+		"demo\nweb:abc",
+		"demo\rweb:abc",
+		"demo\x00web:abc",
+		strings.Repeat("a", maxImageRefLength+1),
+	} {
 		if err := validateImageName(image); err == nil {
 			t.Fatalf("expected image name %q to be rejected", image)
 		}

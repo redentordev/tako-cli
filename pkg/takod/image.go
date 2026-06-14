@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 type ImageExistsResponse struct {
@@ -32,6 +33,7 @@ const (
 	defaultBuildContextMaxFileBytes int64 = 1 << 30
 	defaultBuildContextMaxEntries         = 200000
 	defaultImageImportMaxBytes      int64 = 8 << 30
+	maxImageRefLength                     = 512
 )
 
 type buildContextLimits struct {
@@ -255,8 +257,16 @@ func validateImageName(image string) error {
 	if strings.TrimSpace(image) == "" {
 		return fmt.Errorf("image is required")
 	}
-	if strings.ContainsAny(image, "\x00\r\n") {
-		return fmt.Errorf("image contains unsupported characters")
+	if len(image) > maxImageRefLength {
+		return fmt.Errorf("image exceeds maximum length %d", maxImageRefLength)
+	}
+	if strings.HasPrefix(image, "-") {
+		return fmt.Errorf("image must not start with '-'")
+	}
+	for _, r := range image {
+		if unicode.IsSpace(r) || r < 0x20 || r == 0x7f {
+			return fmt.Errorf("image contains unsupported characters")
+		}
 	}
 	return nil
 }
