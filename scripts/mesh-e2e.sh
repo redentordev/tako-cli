@@ -79,9 +79,9 @@ Options:
   --help, -h          Show this help.
 
 Phases:
-  preflight       Local config and remote state visibility checks.
-  one-node        setup, deploy, state status, history, ps, drift.
-  two-node        setup, repair, status, deploy, status.
+  preflight       Local config, remote state, and remote lease visibility checks.
+  one-node        setup, deploy, state status, lease status, history, ps, drift.
+  two-node        setup, repair, status, lease status, deploy, status.
   env             env push, temporary local env removal, env pull --force.
   new-computer    fresh clone, env pull, state pull, status, deploy.
   ci              fresh clone with CI env, env pull, state pull, status, deploy.
@@ -433,6 +433,7 @@ phase_preflight() {
   run_cmd "tako version" "$TAKO_BIN" --version
   run_tako "doctor skip remote" doctor --skip-remote
   run_tako "state status" state status
+  run_tako "state lease" state lease
 }
 
 phase_one_node() {
@@ -441,6 +442,7 @@ phase_one_node() {
   run_tako "setup" setup
   run_tako "deploy" deploy --yes
   run_tako "state status after deploy" state status
+  run_tako "state lease after deploy" state lease
   run_tako "history" history
   run_tako "ps" ps
   run_tako "drift" drift
@@ -452,8 +454,10 @@ phase_two_node() {
   run_tako "two-node setup" setup
   run_tako "two-node repair" state repair
   run_tako "two-node status before deploy" state status
+  run_tako "two-node lease before deploy" state lease
   run_tako "two-node deploy" deploy --yes
   run_tako "two-node status after deploy" state status
+  run_tako "two-node lease after deploy" state lease
 }
 
 phase_env() {
@@ -499,6 +503,7 @@ phase_new_computer() {
   run_tako_in "$clone_dir" "new-computer env pull" env pull --force
   run_tako_in "$clone_dir" "new-computer state pull" state pull
   run_tako_in "$clone_dir" "new-computer state status" state status
+  run_tako_in "$clone_dir" "new-computer state lease" state lease
   run_tako_in "$clone_dir" "new-computer deploy" deploy --yes
 }
 
@@ -515,6 +520,7 @@ phase_ci() {
     CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="${TAKO_HOST_KEY_MODE:-strict}" "$@" --env "$TAKO_E2E_ENVIRONMENT" env pull --force
     CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="${TAKO_HOST_KEY_MODE:-strict}" "$@" --env "$TAKO_E2E_ENVIRONMENT" state pull
     CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="${TAKO_HOST_KEY_MODE:-strict}" "$@" --env "$TAKO_E2E_ENVIRONMENT" state status
+    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="${TAKO_HOST_KEY_MODE:-strict}" "$@" --env "$TAKO_E2E_ENVIRONMENT" state lease
     CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="${TAKO_HOST_KEY_MODE:-strict}" "$@" --env "$TAKO_E2E_ENVIRONMENT" deploy --yes
   ' _ "$clone_dir" "$TAKO_BIN"
 }
@@ -522,8 +528,10 @@ phase_ci() {
 phase_repair() {
   require_confirm "repair"
   run_tako "repair status before" state status
+  run_tako "repair lease before" state lease
   run_tako "state repair" state repair
   run_tako "repair status after" state status
+  run_tako "repair lease after" state lease
 }
 
 phase_offline() {
@@ -538,6 +546,7 @@ phase_offline() {
   wait_for_offline_status down || die "offline node $OFFLINE_SERVER did not become unavailable"
 
   run_tako "offline state status" state status
+  run_tako "offline state lease" state lease
 
   if run_tako_status "offline drift should fail closed" drift; then
     die "drift unexpectedly succeeded while $OFFLINE_SERVER was unavailable"
@@ -552,6 +561,7 @@ phase_offline() {
   restore_offline_node
   wait_for_offline_status up || die "offline node $OFFLINE_SERVER did not come back"
   run_tako "rejoined state status" state status
+  run_tako "rejoined state lease" state lease
   run_tako "rejoined state repair" state repair
   run_tako "rejoined deploy" deploy --yes
 }
