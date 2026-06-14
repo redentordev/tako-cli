@@ -15,6 +15,13 @@ var (
 	dockerCommandContext = exec.CommandContext
 )
 
+const (
+	maxHealthRetries      = 100
+	maxHealthWaitAttempts = 600
+	maxHealthFieldBytes   = 4096
+	maxHealthDuration     = 24 * time.Hour
+)
+
 type ReconcileServiceRequest struct {
 	Project        string            `json:"project"`
 	Environment    string            `json:"environment"`
@@ -204,6 +211,41 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	}
 	if req.Command != "" && strings.ContainsRune(req.Command, '\x00') {
 		return fmt.Errorf("command contains unsupported characters")
+	}
+	if err := validateHealthSpec(req.Health); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateHealthSpec(health *HealthSpec) error {
+	if health == nil {
+		return nil
+	}
+	if len(health.Command) > maxHealthFieldBytes || hasControlChars(health.Command) {
+		return fmt.Errorf("invalid health command")
+	}
+	for label, value := range map[string]string{
+		"health interval":     health.Interval,
+		"health timeout":      health.Timeout,
+		"health start period": health.StartPeriod,
+	} {
+		if value == "" {
+			continue
+		}
+		if len(value) > 64 || hasControlChars(value) {
+			return fmt.Errorf("invalid %s", label)
+		}
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration <= 0 || duration > maxHealthDuration {
+			return fmt.Errorf("invalid %s", label)
+		}
+	}
+	if health.Retries < 0 || health.Retries > maxHealthRetries {
+		return fmt.Errorf("health retries must be between 0 and %d", maxHealthRetries)
+	}
+	if health.WaitAttempts < 0 || health.WaitAttempts > maxHealthWaitAttempts {
+		return fmt.Errorf("health waitAttempts must be between 0 and %d", maxHealthWaitAttempts)
 	}
 	return nil
 }

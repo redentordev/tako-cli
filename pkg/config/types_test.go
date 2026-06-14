@@ -199,6 +199,44 @@ func TestValidateConfigRejectsHealthCheckPathWithControlCharacter(t *testing.T) 
 	}
 }
 
+func TestValidateConfigRejectsInvalidHealthCheckTiming(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Port = 8080
+	web.HealthCheck.Path = "/health"
+	web.HealthCheck.Interval = "not-a-duration"
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject invalid health check interval")
+	}
+	if !strings.Contains(err.Error(), "invalid health check interval") {
+		t.Fatalf("error = %q, want health check interval context", err)
+	}
+}
+
+func TestValidateConfigRejectsOversizedHealthCheckRetries(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Port = 8080
+	web.HealthCheck.Path = "/health"
+	web.HealthCheck.Retries = maxServiceHealthRetries + 1
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject oversized health check retries")
+	}
+	if !strings.Contains(err.Error(), "health check retries") {
+		t.Fatalf("error = %q, want health check retries context", err)
+	}
+}
+
 func TestValidateConfigRejectsLoadBalancerHealthCheckPathWithoutSlash(t *testing.T) {
 	cfg := validValidationConfig()
 	production := cfg.Environments["production"]

@@ -6,8 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/utils"
+)
+
+const (
+	maxServiceHealthRetries  = 100
+	maxServiceHealthDuration = 24 * time.Hour
 )
 
 // ValidateConfig validates the configuration
@@ -426,6 +432,9 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 		if service.HealthCheck.Retries == 0 {
 			service.HealthCheck.Retries = 3
 		}
+		if err := validateServiceHealthTiming(name, service.HealthCheck); err != nil {
+			return err
+		}
 	}
 
 	// Validate deployment strategy
@@ -530,6 +539,26 @@ func normalizeHTTPPath(path string) (string, error) {
 		}
 	}
 	return path, nil
+}
+
+func validateServiceHealthTiming(serviceName string, health HealthCheckConfig) error {
+	for label, value := range map[string]string{
+		"interval":     health.Interval,
+		"timeout":      health.Timeout,
+		"start period": health.StartPeriod,
+	} {
+		if value == "" {
+			continue
+		}
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration <= 0 || duration > maxServiceHealthDuration {
+			return fmt.Errorf("service %s: invalid health check %s", serviceName, label)
+		}
+	}
+	if health.Retries < 0 || health.Retries > maxServiceHealthRetries {
+		return fmt.Errorf("service %s: health check retries must be between 0 and %d", serviceName, maxServiceHealthRetries)
+	}
+	return nil
 }
 
 func validateServiceVolumes(name string, service *ServiceConfig, cfg *Config) error {
