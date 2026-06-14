@@ -33,6 +33,12 @@ type ReconcileServiceRequest struct {
 	Command        string            `json:"command,omitempty"`
 }
 
+type RemoveServiceRequest struct {
+	Project     string `json:"project"`
+	Environment string `json:"environment"`
+	Service     string `json:"service"`
+}
+
 type ContainerSpec struct {
 	Name      string   `json:"name"`
 	Publishes []string `json:"publishes,omitempty"`
@@ -48,10 +54,18 @@ type HealthSpec struct {
 }
 
 type ReconcileServiceResponse struct {
-	Project     string   `json:"project"`
-	Environment string   `json:"environment"`
-	Service     string   `json:"service"`
-	Containers  []string `json:"containers"`
+	Project           string   `json:"project"`
+	Environment       string   `json:"environment"`
+	Service           string   `json:"service"`
+	Containers        []string `json:"containers"`
+	RemovedContainers int      `json:"removedContainers,omitempty"`
+}
+
+type RemoveServiceResponse struct {
+	Project           string `json:"project"`
+	Environment       string `json:"environment"`
+	Service           string `json:"service"`
+	RemovedContainers int    `json:"removedContainers"`
 }
 
 func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*ReconcileServiceResponse, error) {
@@ -65,14 +79,16 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		req.NetworkAlias = req.Service
 	}
 
-	if err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service); err != nil {
+	removedContainers, err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service)
+	if err != nil {
 		return nil, err
 	}
 	if len(req.Containers) == 0 {
 		return &ReconcileServiceResponse{
-			Project:     req.Project,
-			Environment: req.Environment,
-			Service:     req.Service,
+			Project:           req.Project,
+			Environment:       req.Environment,
+			Service:           req.Service,
+			RemovedContainers: removedContainers,
 		}, nil
 	}
 	if err := ensureDockerNetwork(ctx, req.Network); err != nil {
@@ -103,10 +119,27 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	}
 
 	return &ReconcileServiceResponse{
-		Project:     req.Project,
-		Environment: req.Environment,
-		Service:     req.Service,
-		Containers:  started,
+		Project:           req.Project,
+		Environment:       req.Environment,
+		Service:           req.Service,
+		Containers:        started,
+		RemovedContainers: removedContainers,
+	}, nil
+}
+
+func RemoveService(ctx context.Context, req RemoveServiceRequest) (*RemoveServiceResponse, error) {
+	if err := validateRemoveServiceRequest(req); err != nil {
+		return nil, err
+	}
+	removedContainers, err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service)
+	if err != nil {
+		return nil, err
+	}
+	return &RemoveServiceResponse{
+		Project:           req.Project,
+		Environment:       req.Environment,
+		Service:           req.Service,
+		RemovedContainers: removedContainers,
 	}, nil
 }
 
@@ -169,6 +202,28 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	}
 	if req.Command != "" && strings.ContainsRune(req.Command, '\x00') {
 		return fmt.Errorf("command contains unsupported characters")
+	}
+	return nil
+}
+
+func validateRemoveServiceRequest(req RemoveServiceRequest) error {
+	for label, value := range map[string]string{
+		"project":     req.Project,
+		"environment": req.Environment,
+		"service":     req.Service,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s is required", label)
+		}
+	}
+	if !isSafeProjectName(req.Project) {
+		return fmt.Errorf("invalid project name")
+	}
+	if !isSafeRuntimeName(req.Environment) {
+		return fmt.Errorf("invalid environment name")
+	}
+	if !isSafeServiceName(req.Service) {
+		return fmt.Errorf("invalid service name")
 	}
 	return nil
 }
@@ -286,7 +341,7 @@ func ensureDockerNetwork(ctx context.Context, network string) error {
 	return nil
 }
 
-func removeServiceContainers(ctx context.Context, project string, environment string, service string) error {
+func removeServiceContainers(ctx context.Context, project string, environment string, service string) (int, error) {
 	output, err := runDocker(
 		ctx,
 		"ps",
@@ -296,17 +351,17 @@ func removeServiceContainers(ctx context.Context, project string, environment st
 		"--filter", "label=tako.service="+service,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to list old service containers: %w", err)
+		return 0, fmt.Errorf("failed to list old service containers: %w", err)
 	}
 	ids := strings.Fields(strings.TrimSpace(output))
 	if len(ids) == 0 {
-		return nil
+		return 0, nil
 	}
 	args := append([]string{"rm", "-f"}, ids...)
 	if _, err := runDocker(ctx, args...); err != nil {
-		return fmt.Errorf("failed to remove old service containers: %w", err)
+		return 0, fmt.Errorf("failed to remove old service containers: %w", err)
 	}
-	return nil
+	return len(ids), nil
 }
 
 func runServiceContainer(ctx context.Context, req ReconcileServiceRequest, container ContainerSpec) error {

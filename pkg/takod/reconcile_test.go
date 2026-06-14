@@ -93,6 +93,35 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 }
 
+func TestValidateRemoveServiceRequest(t *testing.T) {
+	valid := RemoveServiceRequest{
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+	}
+	if err := validateRemoveServiceRequest(valid); err != nil {
+		t.Fatalf("valid remove request returned error: %v", err)
+	}
+
+	invalid := valid
+	invalid.Project = "../demo"
+	if err := validateRemoveServiceRequest(invalid); err == nil {
+		t.Fatal("expected unsafe project name to be rejected")
+	}
+
+	invalid = valid
+	invalid.Environment = "prod\n"
+	if err := validateRemoveServiceRequest(invalid); err == nil {
+		t.Fatal("expected unsafe environment name to be rejected")
+	}
+
+	invalid = valid
+	invalid.Service = "Web"
+	if err := validateRemoveServiceRequest(invalid); err == nil {
+		t.Fatal("expected unsafe service name to be rejected")
+	}
+}
+
 func TestBuildServiceContainerArgs(t *testing.T) {
 	req := ReconcileServiceRequest{
 		Project:      "demo",
@@ -208,6 +237,45 @@ func TestReconcileServiceRunsDockerMutation(t *testing.T) {
 	}
 	if !strings.HasPrefix(entries[0], "docker ps ") {
 		t.Fatalf("expected first Docker mutation to list old containers, got %#v", entries)
+	}
+}
+
+func TestRemoveServiceRemovesMatchingContainers(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "abc123\ndef456\n")
+
+	response, err := RemoveService(context.Background(), RemoveServiceRequest{
+		Project:     "demo",
+		Environment: "production",
+		Service:     "old-api",
+	})
+	if err != nil {
+		t.Fatalf("RemoveService returned error: %v", err)
+	}
+	if response.RemovedContainers != 2 {
+		t.Fatalf("removed containers = %d, want 2", response.RemovedContainers)
+	}
+
+	entries := readCommandLog(t, logPath)
+	if len(entries) != 2 {
+		t.Fatalf("docker entries = %#v, want ps and rm", entries)
+	}
+	for _, want := range []string{
+		"docker ps -aq --filter label=tako.project=demo --filter label=tako.environment=production --filter label=tako.service=old-api",
+		"docker rm -f abc123 def456",
+	} {
+		found := false
+		for _, entry := range entries {
+			if entry == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("docker log missing %q in %#v", want, entries)
+		}
 	}
 }
 

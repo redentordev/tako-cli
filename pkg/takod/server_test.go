@@ -130,6 +130,30 @@ func TestHandleReconcileServiceRejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHandleRemoveServiceRequiresPost(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodGet, "/v1/remove-service", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleRemoveService(recorder, req)
+
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleRemoveServiceRejectsInvalidJSON(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/remove-service", bytes.NewBufferString("{"))
+	recorder := httptest.NewRecorder()
+
+	server.handleRemoveService(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
 func TestHandleProxyFileRequiresSupportedMethod(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
 	req := httptest.NewRequest(http.MethodPost, "/v1/proxy-file", nil)

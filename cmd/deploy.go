@@ -553,6 +553,16 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if !deploymentFailed {
+		if err := applyDeployRemovals(deploy, plan); err != nil {
+			fmt.Printf("  ✗ service removal failed: %v\n", err)
+			deploymentFailed = true
+			deploymentError = err
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
+		}
+	}
+
+	if !deploymentFailed {
 		proxyServices := services
 		if deployService != "" && deployServer == "" {
 			proxyServices = cloneServiceMap(allServices)
@@ -840,6 +850,30 @@ func deployActualStateError(err error) error {
 
 func deployRemoteHistoryError(err error) error {
 	return fmt.Errorf("deployment succeeded but failed to save remote deployment history: %w", err)
+}
+
+type deployServiceRemover interface {
+	RemoveServiceTakod(serviceName string) error
+}
+
+func applyDeployRemovals(remover deployServiceRemover, plan *reconcile.ReconciliationPlan) error {
+	if remover == nil {
+		return fmt.Errorf("service remover is nil")
+	}
+	if plan == nil {
+		return nil
+	}
+	for _, change := range plan.Changes {
+		if change.Type != reconcile.ChangeRemove {
+			continue
+		}
+		fmt.Printf("→ Removing service: %s\n", change.ServiceName)
+		if err := remover.RemoveServiceTakod(change.ServiceName); err != nil {
+			return fmt.Errorf("remove failed for %s: %w", change.ServiceName, err)
+		}
+		fmt.Printf("  ✓ Service %s removed\n", change.ServiceName)
+	}
+	return nil
 }
 
 func filterActualStateForServices(actualState map[string]*reconcile.ActualService, services map[string]config.ServiceConfig) map[string]*reconcile.ActualService {
