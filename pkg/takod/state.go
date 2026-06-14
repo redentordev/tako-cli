@@ -1,8 +1,11 @@
 package takod
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,6 +63,9 @@ func WriteStateDocument(ctx context.Context, dataDir string, req StateDocumentRe
 	if req.Document == stateDocumentEvent {
 		return nil, fmt.Errorf("state events are append-only")
 	}
+	if err := validateStateDocumentContent(req.Document, req.Content); err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -91,6 +97,9 @@ func WriteStateDocument(ctx context.Context, dataDir string, req StateDocumentRe
 func AppendStateEvent(ctx context.Context, dataDir string, req StateDocumentRequest) (*StateDocumentResponse, error) {
 	req.Document = stateDocumentEvent
 	if err := validateStateDocumentRequest(req, true); err != nil {
+		return nil, err
+	}
+	if err := validateStateDocumentContent(req.Document, req.Content); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -138,6 +147,27 @@ func validateStateDocumentRequest(req StateDocumentRequest, requireContent bool)
 	}
 	if requireContent && strings.TrimSpace(req.Content) == "" {
 		return fmt.Errorf("content is required")
+	}
+	return nil
+}
+
+func validateStateDocumentContent(document string, content string) error {
+	decoder := json.NewDecoder(strings.NewReader(content))
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		return fmt.Errorf("invalid %s state document JSON: %w", document, err)
+	}
+
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("%s state document must contain a single JSON value", document)
+		}
+		return fmt.Errorf("invalid %s state document JSON: %w", document, err)
+	}
+
+	if trimmed := bytes.TrimSpace(raw); len(trimmed) == 0 || trimmed[0] != '{' {
+		return fmt.Errorf("%s state document must be a JSON object", document)
 	}
 	return nil
 }
