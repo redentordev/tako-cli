@@ -9,6 +9,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 )
 
 func TestRenderMaintenanceProxyConfigUsesFileProviderRouters(t *testing.T) {
@@ -179,6 +180,55 @@ func TestMaintenanceCommandsDoNotExposeServerFlag(t *testing.T) {
 	}
 	if flag := liveCmd.Flags().Lookup("server"); flag != nil {
 		t.Fatal("live command should not expose a server flag")
+	}
+}
+
+func TestRunMaintenanceWithClientUsesProvidedPool(t *testing.T) {
+	provider := &fakeSSHClientProvider{}
+	server := config.ServerConfig{
+		Host:     "node-a.example.test",
+		Port:     2222,
+		User:     "deploy",
+		SSHKey:   "/tmp/id_ed25519",
+		Password: "fallback",
+	}
+	called := false
+
+	err := runMaintenanceWithClient(provider, server, func(client *ssh.Client) error {
+		called = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runMaintenanceWithClient returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("executor was not called")
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("pool requests = %#v, want one", provider.requests)
+	}
+	got := provider.requests[0]
+	if got.host != server.Host || got.port != server.Port || got.user != server.User || got.sshKey != server.SSHKey || got.password != server.Password {
+		t.Fatalf("pool request = %#v, want server config", got)
+	}
+}
+
+func TestRunMaintenanceWithClientReturnsPoolConnectionError(t *testing.T) {
+	provider := &fakeSSHClientProvider{err: fmt.Errorf("dial failed")}
+	called := false
+
+	err := runMaintenanceWithClient(provider, config.ServerConfig{Host: "node-a.example.test"}, func(client *ssh.Client) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("runMaintenanceWithClient returned nil, want connection error")
+	}
+	if called {
+		t.Fatal("executor should not run after pool connection error")
+	}
+	if got := err.Error(); got != "failed to connect to server: dial failed" {
+		t.Fatalf("error = %q", got)
 	}
 }
 
