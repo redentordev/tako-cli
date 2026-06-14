@@ -557,14 +557,7 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 }
 
 func waitForContainerHealthy(ctx context.Context, containerName string, health *HealthSpec) error {
-	attempts := 30
-	if health != nil {
-		if health.WaitAttempts > 0 {
-			attempts = health.WaitAttempts
-		} else if health.Retries > 0 {
-			attempts = health.Retries
-		}
-	}
+	attempts := containerHealthWaitAttempts(health)
 
 	for i := 0; i < attempts; i++ {
 		status, err := runDocker(ctx, "inspect", containerName, "--format", "{{.State.Health.Status}}")
@@ -592,6 +585,13 @@ func waitForContainerHealthy(ctx context.Context, containerName string, health *
 		}
 	}
 	return fmt.Errorf("health check timeout for %s after %d attempts", containerName, attempts)
+}
+
+func containerHealthWaitAttempts(health *HealthSpec) int {
+	if health != nil && health.WaitAttempts > 0 {
+		return health.WaitAttempts
+	}
+	return 30
 }
 
 func runDocker(ctx context.Context, args ...string) (string, error) {

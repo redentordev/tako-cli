@@ -525,10 +525,6 @@ func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.He
 	if startPeriod == "" {
 		startPeriod = "10s"
 	}
-	waitAttempts := service.HealthCheck.Retries
-	if waitAttempts <= 0 {
-		waitAttempts = 30
-	}
 
 	return &takod.HealthSpec{
 		Command:      buildTakodHealthCommand(service.Port, service.HealthCheck.Path),
@@ -536,8 +532,33 @@ func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.He
 		Timeout:      timeout,
 		Retries:      retries,
 		StartPeriod:  startPeriod,
-		WaitAttempts: waitAttempts,
+		WaitAttempts: deploymentHealthWaitAttempts(interval, startPeriod, retries),
 	}
+}
+
+func deploymentHealthWaitAttempts(interval string, startPeriod string, retries int) int {
+	if retries <= 0 {
+		retries = 3
+	}
+
+	intervalDuration, err := time.ParseDuration(interval)
+	if err != nil || intervalDuration <= 0 {
+		intervalDuration = 10 * time.Second
+	}
+	startPeriodDuration, err := time.ParseDuration(startPeriod)
+	if err != nil || startPeriodDuration < 0 {
+		startPeriodDuration = 10 * time.Second
+	}
+
+	wait := startPeriodDuration + (time.Duration(retries+1) * intervalDuration) + (5 * time.Second)
+	attempts := int(wait.Round(time.Second) / time.Second)
+	if attempts < 30 {
+		return 30
+	}
+	if attempts > 600 {
+		return 600
+	}
+	return attempts
 }
 
 func buildTakodHealthCommand(port int, path string) string {

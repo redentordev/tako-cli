@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -15,6 +16,7 @@ const DefaultSocket = "/run/tako/takod.sock"
 const (
 	JSONRequestTimeout   = 2 * time.Minute
 	StreamRequestTimeout = 30 * time.Minute
+	httpStatusMarker     = "\n__TAKO_HTTP_STATUS__:"
 )
 
 type RequestExecutor interface {
@@ -60,10 +62,15 @@ func RequestJSON(client RequestExecutor, socket string, method string, endpoint 
 	} else {
 		output, err = client.ExecuteWithContext(ctx, curlCmd)
 	}
+	bodyOutput, status, hasStatus := splitHTTPStatus(output)
 	if err != nil {
-		return output, fmt.Errorf("takod request %s %s failed: %w, output: %s", method, endpoint, err, output)
+		return bodyOutput, fmt.Errorf("takod request %s %s failed: %w, output: %s", method, endpoint, err, bodyOutput)
 	}
-	return sanitizeJSONOutput(output), nil
+	bodyOutput = sanitizeJSONOutput(bodyOutput)
+	if hasStatus && status >= 400 {
+		return bodyOutput, fmt.Errorf("takod request %s %s returned HTTP %d: %s", method, endpoint, status, strings.TrimSpace(bodyOutput))
+	}
+	return bodyOutput, nil
 }
 
 func sanitizeJSONOutput(output string) string {
@@ -72,7 +79,8 @@ func sanitizeJSONOutput(output string) string {
 
 func buildRequestCommand(socket string, method string, endpoint string, hasBody bool) string {
 	args := []string{
-		"curl --fail --silent --show-error",
+		"curl --silent --show-error",
+		"--write-out '\\n__TAKO_HTTP_STATUS__:%{http_code}'",
 		"--unix-socket " + shellQuote(socket),
 		"-X " + shellQuote(method),
 	}
@@ -83,6 +91,19 @@ func buildRequestCommand(socket string, method string, endpoint string, hasBody 
 
 	curlCmd := strings.Join(args, " ")
 	return fmt.Sprintf("if test -S %[1]s && command -v curl >/dev/null 2>&1; then %[2]s; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi", shellQuote(socket), curlCmd)
+}
+
+func splitHTTPStatus(output string) (string, int, bool) {
+	idx := strings.LastIndex(output, httpStatusMarker)
+	if idx < 0 {
+		return output, 0, false
+	}
+	statusText := strings.TrimSpace(output[idx+len(httpStatusMarker):])
+	status, err := strconv.Atoi(statusText)
+	if err != nil {
+		return output, 0, false
+	}
+	return output[:idx], status, true
 }
 
 func StreamRequest(client RequestExecutor, socket string, method string, endpoint string, reader io.Reader) (string, error) {

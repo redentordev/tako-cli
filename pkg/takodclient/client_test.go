@@ -27,7 +27,7 @@ func TestBuildRequestCommandWithoutBodyOmitsStdinBody(t *testing.T) {
 	if strings.Contains(got, "--data-binary") {
 		t.Fatalf("GET request should not include a request body: %s", got)
 	}
-	if !strings.Contains(got, "curl --fail --silent --show-error --unix-socket '/run/tako/takod.sock' -X 'GET' 'http://takod/v1/health'") {
+	if !strings.Contains(got, "curl --silent --show-error --write-out '\\n__TAKO_HTTP_STATUS__:%{http_code}' --unix-socket '/run/tako/takod.sock' -X 'GET' 'http://takod/v1/health'") {
 		t.Fatalf("unexpected request command: %s", got)
 	}
 }
@@ -72,6 +72,31 @@ func TestSanitizeJSONOutputStripsLeadingNUL(t *testing.T) {
 	got := sanitizeJSONOutput("\x00\x00{\"ok\":true}")
 	if got != "{\"ok\":true}" {
 		t.Fatalf("sanitized output = %q", got)
+	}
+}
+
+func TestRequestJSONReturnsHTTPErrorBody(t *testing.T) {
+	client := &fakeTakodExecutor{output: "container web health check failed\n__TAKO_HTTP_STATUS__:502"}
+
+	output, err := RequestJSON(client, DefaultSocket, "POST", "/v1/reconcile-service", map[string]string{"service": "web"})
+	if err == nil {
+		t.Fatal("RequestJSON should return HTTP errors")
+	}
+	if output != "container web health check failed" {
+		t.Fatalf("output = %q, want response body", output)
+	}
+	if !strings.Contains(err.Error(), "HTTP 502") || !strings.Contains(err.Error(), "container web health check failed") {
+		t.Fatalf("error = %q, want HTTP status and response body", err.Error())
+	}
+}
+
+func TestSplitHTTPStatusSeparatesTrailingCurlStatus(t *testing.T) {
+	body, status, ok := splitHTTPStatus("{\"ok\":true}\n__TAKO_HTTP_STATUS__:201")
+	if !ok {
+		t.Fatal("expected status marker to be detected")
+	}
+	if body != "{\"ok\":true}" || status != 201 {
+		t.Fatalf("body=%q status=%d, want JSON body and 201", body, status)
 	}
 }
 
@@ -187,12 +212,14 @@ type fakeTakodExecutor struct {
 	deadline     time.Time
 	startedAt    time.Time
 	body         string
+	output       string
+	err          error
 }
 
 func (f *fakeTakodExecutor) ExecuteWithContext(ctx context.Context, _ string) (string, error) {
 	f.contextCalls++
 	f.captureDeadline(ctx)
-	return "ok", nil
+	return f.response()
 }
 
 func (f *fakeTakodExecutor) ExecuteWithInput(ctx context.Context, _ string, input io.Reader) (string, error) {
@@ -203,7 +230,7 @@ func (f *fakeTakodExecutor) ExecuteWithInput(ctx context.Context, _ string, inpu
 		return "", err
 	}
 	f.body = string(data)
-	return "ok", nil
+	return f.response()
 }
 
 func (f *fakeTakodExecutor) ExecuteStream(_ string, _ io.Writer, _ io.Writer) error {
@@ -213,6 +240,13 @@ func (f *fakeTakodExecutor) ExecuteStream(_ string, _ io.Writer, _ io.Writer) er
 func (f *fakeTakodExecutor) captureDeadline(ctx context.Context) {
 	f.startedAt = time.Now()
 	f.deadline, _ = ctx.Deadline()
+}
+
+func (f *fakeTakodExecutor) response() (string, error) {
+	if f.output != "" || f.err != nil {
+		return f.output, f.err
+	}
+	return "ok", nil
 }
 
 func (f *fakeTakodExecutor) deadlineWithin(timeout time.Duration) bool {

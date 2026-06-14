@@ -310,6 +310,19 @@ func TestReconcileServiceRunsDockerMutation(t *testing.T) {
 	}
 }
 
+func TestContainerHealthWaitAttemptsDoesNotUseDockerRetryCount(t *testing.T) {
+	got := containerHealthWaitAttempts(&HealthSpec{
+		Command: "curl -sf http://127.0.0.1:3000/health || exit 1",
+		Retries: 1,
+	})
+	if got != 30 {
+		t.Fatalf("wait attempts = %d, want default 30", got)
+	}
+	if got := containerHealthWaitAttempts(&HealthSpec{Retries: 1, WaitAttempts: 45}); got != 45 {
+		t.Fatalf("explicit wait attempts = %d, want 45", got)
+	}
+}
+
 func TestRemoveServiceRemovesMatchingContainers(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "commands.log")
 	restore := useFakeCommands(t, logPath)

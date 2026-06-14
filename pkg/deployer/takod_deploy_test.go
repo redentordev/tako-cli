@@ -212,6 +212,38 @@ func TestBuildTakodHealthSpecUsesQuotedCommand(t *testing.T) {
 	}
 }
 
+func TestBuildTakodHealthSpecWaitsLongerThanDockerRetryCount(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
+		Port: 80,
+		HealthCheck: config.HealthCheckConfig{
+			Path:        "/",
+			Interval:    "30s",
+			Timeout:     "5s",
+			Retries:     3,
+			StartPeriod: "10s",
+		},
+	})
+	if spec == nil {
+		t.Fatal("buildTakodHealthSpec returned nil")
+	}
+	if spec.Retries != 3 {
+		t.Fatalf("docker health retries = %d, want 3", spec.Retries)
+	}
+	if spec.WaitAttempts != 135 {
+		t.Fatalf("deployment wait attempts = %d, want 135", spec.WaitAttempts)
+	}
+}
+
+func TestDeploymentHealthWaitAttemptsUsesFloorAndCap(t *testing.T) {
+	if got := deploymentHealthWaitAttempts("1s", "0s", 1); got != 30 {
+		t.Fatalf("short health wait attempts = %d, want floor 30", got)
+	}
+	if got := deploymentHealthWaitAttempts("10m", "10m", 100); got != 600 {
+		t.Fatalf("long health wait attempts = %d, want cap 600", got)
+	}
+}
+
 func TestShouldPublishMeshUpstreamsOnlyForMultiNodeEnvironments(t *testing.T) {
 	oneNode := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
 	got, err := oneNode.shouldPublishMeshUpstreams()
