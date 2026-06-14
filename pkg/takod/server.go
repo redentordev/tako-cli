@@ -874,9 +874,13 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if r.ContentLength > defaultBuildContextMaxBytes {
+		http.Error(w, fmt.Sprintf("build context exceeds maximum size %d bytes", defaultBuildContextMaxBytes), http.StatusRequestEntityTooLarge)
+		return
+	}
 	defer r.Body.Close()
 
-	response, err := BuildImage(r.Context(), image, r.Body)
+	response, err := BuildImage(r.Context(), image, http.MaxBytesReader(w, r.Body, defaultBuildContextMaxBytes))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

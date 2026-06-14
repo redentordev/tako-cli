@@ -866,6 +866,22 @@ func TestHandleImageBuildRequiresImage(t *testing.T) {
 	}
 }
 
+func TestHandleImageBuildRejectsOversizedContentLength(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/build?image=demo/web:abc", nil)
+	req.ContentLength = defaultBuildContextMaxBytes + 1
+	recorder := httptest.NewRecorder()
+
+	server.handleImageBuild(recorder, req)
+
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "build context exceeds maximum size") {
+		t.Fatalf("response = %q, want build context size error", recorder.Body.String())
+	}
+}
+
 func TestHandleLogsRequiresGet(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
 	req := httptest.NewRequest(http.MethodPost, "/v1/logs", nil)
