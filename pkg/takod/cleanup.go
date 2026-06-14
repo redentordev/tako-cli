@@ -1,7 +1,6 @@
 package takod
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -444,9 +443,9 @@ func dockerDiskUsage(ctx context.Context) string {
 
 func runHostCommand(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := dockerCommandContext(ctx, name, args...)
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
+	cmd.Stdout = output
+	cmd.Stderr = output
 	err := cmd.Run()
 	return output.String(), err
 }

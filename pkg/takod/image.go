@@ -2,7 +2,6 @@ package takod
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"fmt"
@@ -55,8 +54,8 @@ func ExportImage(ctx context.Context, image string, w io.Writer) error {
 	}
 	cmd := dockerCommandContext(ctx, "docker", "save", image)
 	cmd.Stdout = w
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to export image %s: %w, output: %s", image, err, stderr.String())
 	}
@@ -70,9 +69,9 @@ func ImportImage(ctx context.Context, image string, r io.Reader) (*ImageImportRe
 	r = newMaxBytesReader(r, defaultImageImportMaxBytes, "image import")
 	cmd := dockerCommandContext(ctx, "docker", "load")
 	cmd.Stdin = r
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
+	cmd.Stdout = output
+	cmd.Stderr = output
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to import image %s: %w, output: %s", image, err, output.String())
 	}
@@ -137,9 +136,9 @@ func BuildImage(ctx context.Context, image string, r io.Reader) (*ImageBuildResp
 
 	cmd := dockerCommandContext(ctx, "docker", "build", "-t", image, ".")
 	cmd.Dir = buildDir
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
+	cmd.Stdout = output
+	cmd.Stderr = output
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to build image %s: %w, output: %s", image, err, output.String())
 	}

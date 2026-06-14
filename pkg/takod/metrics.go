@@ -22,8 +22,11 @@ type MetricsResponse struct {
 func ReadNodeMetrics(ctx context.Context, collect bool) (*MetricsResponse, error) {
 	if collect {
 		cmd := monitorCommandContext(ctx, monitorCommandPath, "once")
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return nil, fmt.Errorf("failed to collect node metrics: %w, output: %s", err, string(output))
+		output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
+		cmd.Stdout = output
+		cmd.Stderr = output
+		if err := cmd.Run(); err != nil {
+			return nil, fmt.Errorf("failed to collect node metrics: %w, output: %s", err, output.String())
 		}
 	}
 
