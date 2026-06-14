@@ -7,13 +7,27 @@ import (
 	"io"
 	"net/url"
 	"strings"
-
-	"github.com/redentordev/tako-cli/pkg/ssh"
+	"time"
 )
 
 const DefaultSocket = "/run/tako/takod.sock"
 
-func RequestJSON(client *ssh.Client, socket string, method string, endpoint string, value any) (string, error) {
+const (
+	JSONRequestTimeout   = 2 * time.Minute
+	StreamRequestTimeout = 30 * time.Minute
+)
+
+type RequestExecutor interface {
+	ExecuteWithContext(ctx context.Context, cmd string) (string, error)
+	ExecuteWithInput(ctx context.Context, cmd string, input io.Reader) (string, error)
+}
+
+type StreamExecutor interface {
+	RequestExecutor
+	ExecuteStream(cmd string, stdout io.Writer, stderr io.Writer) error
+}
+
+func RequestJSON(client RequestExecutor, socket string, method string, endpoint string, value any) (string, error) {
 	if socket == "" {
 		socket = DefaultSocket
 	}
@@ -36,12 +50,15 @@ func RequestJSON(client *ssh.Client, socket string, method string, endpoint stri
 	}
 
 	curlCmd := buildRequestCommand(socket, method, endpoint, hasBody)
+	ctx, cancel := context.WithTimeout(context.Background(), JSONRequestTimeout)
+	defer cancel()
+
 	var output string
 	var err error
 	if hasBody {
-		output, err = client.ExecuteWithInput(context.Background(), curlCmd, body)
+		output, err = client.ExecuteWithInput(ctx, curlCmd, body)
 	} else {
-		output, err = client.Execute(curlCmd)
+		output, err = client.ExecuteWithContext(ctx, curlCmd)
 	}
 	if err != nil {
 		return output, fmt.Errorf("takod request %s %s failed: %w, output: %s", method, endpoint, err, output)
@@ -64,7 +81,7 @@ func buildRequestCommand(socket string, method string, endpoint string, hasBody 
 	return fmt.Sprintf("if test -S %[1]s && command -v curl >/dev/null 2>&1; then %[2]s; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi", shellQuote(socket), curlCmd)
 }
 
-func StreamRequest(client *ssh.Client, socket string, method string, endpoint string, reader io.Reader) (string, error) {
+func StreamRequest(client RequestExecutor, socket string, method string, endpoint string, reader io.Reader) (string, error) {
 	if socket == "" {
 		socket = DefaultSocket
 	}
@@ -85,14 +102,17 @@ func StreamRequest(client *ssh.Client, socket string, method string, endpoint st
 		"; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi",
 	}
 	curlCmd := strings.Join(args, " ")
-	output, err := client.ExecuteWithInput(context.Background(), curlCmd, reader)
+	ctx, cancel := context.WithTimeout(context.Background(), StreamRequestTimeout)
+	defer cancel()
+
+	output, err := client.ExecuteWithInput(ctx, curlCmd, reader)
 	if err != nil {
 		return output, fmt.Errorf("takod stream request %s %s failed: %w, output: %s", method, endpoint, err, output)
 	}
 	return output, nil
 }
 
-func StreamOutput(client *ssh.Client, socket string, endpoint string, stdout io.Writer, stderr io.Writer) error {
+func StreamOutput(client StreamExecutor, socket string, endpoint string, stdout io.Writer, stderr io.Writer) error {
 	if socket == "" {
 		socket = DefaultSocket
 	}

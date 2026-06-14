@@ -1,8 +1,11 @@
 package takodclient
 
 import (
+	"context"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildRequestCommandWithBodyStreamsStdin(t *testing.T) {
@@ -26,6 +29,60 @@ func TestBuildRequestCommandWithoutBodyOmitsStdinBody(t *testing.T) {
 	}
 	if !strings.Contains(got, "curl --fail --silent --show-error --unix-socket '/run/tako/takod.sock' -X 'GET' 'http://takod/v1/health'") {
 		t.Fatalf("unexpected request command: %s", got)
+	}
+}
+
+func TestRequestJSONUsesDeadlineForGET(t *testing.T) {
+	client := &fakeTakodExecutor{}
+
+	output, err := RequestJSON(client, DefaultSocket, "GET", "/v1/health", nil)
+	if err != nil {
+		t.Fatalf("RequestJSON returned error: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("output = %q, want ok", output)
+	}
+	if client.contextCalls != 1 {
+		t.Fatalf("ExecuteWithContext calls = %d, want 1", client.contextCalls)
+	}
+	if !client.deadlineWithin(JSONRequestTimeout) {
+		t.Fatalf("deadline = %s, want near %s", client.deadline.Sub(client.startedAt), JSONRequestTimeout)
+	}
+}
+
+func TestRequestJSONUsesDeadlineForBody(t *testing.T) {
+	client := &fakeTakodExecutor{}
+
+	_, err := RequestJSON(client, DefaultSocket, "POST", "/v1/state", map[string]string{"document": "desired"})
+	if err != nil {
+		t.Fatalf("RequestJSON returned error: %v", err)
+	}
+	if client.inputCalls != 1 {
+		t.Fatalf("ExecuteWithInput calls = %d, want 1", client.inputCalls)
+	}
+	if !client.deadlineWithin(JSONRequestTimeout) {
+		t.Fatalf("deadline = %s, want near %s", client.deadline.Sub(client.startedAt), JSONRequestTimeout)
+	}
+	if !strings.Contains(client.body, `"document": "desired"`) {
+		t.Fatalf("body = %q, want JSON content", client.body)
+	}
+}
+
+func TestStreamRequestUsesLongDeadline(t *testing.T) {
+	client := &fakeTakodExecutor{}
+
+	_, err := StreamRequest(client, DefaultSocket, "POST", "/v1/images/import", strings.NewReader("archive"))
+	if err != nil {
+		t.Fatalf("StreamRequest returned error: %v", err)
+	}
+	if client.inputCalls != 1 {
+		t.Fatalf("ExecuteWithInput calls = %d, want 1", client.inputCalls)
+	}
+	if !client.deadlineWithin(StreamRequestTimeout) {
+		t.Fatalf("deadline = %s, want near %s", client.deadline.Sub(client.startedAt), StreamRequestTimeout)
+	}
+	if client.body != "archive" {
+		t.Fatalf("body = %q, want archive", client.body)
 	}
 }
 
@@ -115,4 +172,46 @@ func TestAccessLogsEndpointWithFollow(t *testing.T) {
 	if got != want {
 		t.Fatalf("AccessLogsEndpoint() = %q, want %q", got, want)
 	}
+}
+
+type fakeTakodExecutor struct {
+	contextCalls int
+	inputCalls   int
+	deadline     time.Time
+	startedAt    time.Time
+	body         string
+}
+
+func (f *fakeTakodExecutor) ExecuteWithContext(ctx context.Context, _ string) (string, error) {
+	f.contextCalls++
+	f.captureDeadline(ctx)
+	return "ok", nil
+}
+
+func (f *fakeTakodExecutor) ExecuteWithInput(ctx context.Context, _ string, input io.Reader) (string, error) {
+	f.inputCalls++
+	f.captureDeadline(ctx)
+	data, err := io.ReadAll(input)
+	if err != nil {
+		return "", err
+	}
+	f.body = string(data)
+	return "ok", nil
+}
+
+func (f *fakeTakodExecutor) ExecuteStream(_ string, _ io.Writer, _ io.Writer) error {
+	return nil
+}
+
+func (f *fakeTakodExecutor) captureDeadline(ctx context.Context) {
+	f.startedAt = time.Now()
+	f.deadline, _ = ctx.Deadline()
+}
+
+func (f *fakeTakodExecutor) deadlineWithin(timeout time.Duration) bool {
+	if f.deadline.IsZero() {
+		return false
+	}
+	got := f.deadline.Sub(f.startedAt)
+	return got > timeout-5*time.Second && got <= timeout
 }
