@@ -28,6 +28,18 @@ type ImageBuildResponse struct {
 	Output string `json:"output,omitempty"`
 }
 
+const (
+	defaultBuildContextMaxBytes     int64 = 2 << 30
+	defaultBuildContextMaxFileBytes int64 = 1 << 30
+	defaultBuildContextMaxEntries         = 200000
+)
+
+type buildContextLimits struct {
+	MaxBytes     int64
+	MaxFileBytes int64
+	MaxEntries   int
+}
+
 func ImageExists(ctx context.Context, image string) (*ImageExistsResponse, error) {
 	if err := validateImageName(image); err != nil {
 		return nil, err
@@ -97,6 +109,14 @@ func BuildImage(ctx context.Context, image string, r io.Reader) (*ImageBuildResp
 }
 
 func extractTarGz(r io.Reader, destDir string) error {
+	return extractTarGzWithLimits(r, destDir, buildContextLimits{
+		MaxBytes:     defaultBuildContextMaxBytes,
+		MaxFileBytes: defaultBuildContextMaxFileBytes,
+		MaxEntries:   defaultBuildContextMaxEntries,
+	})
+}
+
+func extractTarGzWithLimits(r io.Reader, destDir string, limits buildContextLimits) error {
 	gzipReader, err := gzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("failed to read build context gzip stream: %w", err)
@@ -104,6 +124,8 @@ func extractTarGz(r io.Reader, destDir string) error {
 	defer gzipReader.Close()
 
 	tarReader := tar.NewReader(gzipReader)
+	var totalBytes int64
+	entries := 0
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
@@ -111,6 +133,10 @@ func extractTarGz(r io.Reader, destDir string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("failed to read build context tar stream: %w", err)
+		}
+		entries++
+		if limits.MaxEntries > 0 && entries > limits.MaxEntries {
+			return fmt.Errorf("build context exceeds maximum entry count %d", limits.MaxEntries)
 		}
 
 		target, err := safeArchiveTarget(destDir, header.Name)
@@ -123,6 +149,17 @@ func extractTarGz(r io.Reader, destDir string) error {
 				return fmt.Errorf("failed to create build context directory %s: %w", header.Name, err)
 			}
 		case tar.TypeReg, tar.TypeRegA:
+			if header.Size < 0 {
+				return fmt.Errorf("build context file %s has invalid size", header.Name)
+			}
+			if limits.MaxFileBytes > 0 && header.Size > limits.MaxFileBytes {
+				return fmt.Errorf("build context file %s exceeds maximum size %d bytes", header.Name, limits.MaxFileBytes)
+			}
+			if limits.MaxBytes > 0 && totalBytes+header.Size > limits.MaxBytes {
+				return fmt.Errorf("build context exceeds maximum total size %d bytes", limits.MaxBytes)
+			}
+			totalBytes += header.Size
+
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 				return fmt.Errorf("failed to create build context parent for %s: %w", header.Name, err)
 			}
