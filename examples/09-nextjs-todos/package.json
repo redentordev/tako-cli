@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1",
-    "next": "16.0.2",
+    "next": "16.2.9",
     "react": "19.2.0",
     "react-dom": "19.2.0"
   },
@@ -21,8 +21,11 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.0.2",
+    "eslint-config-next": "16.2.9",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "overrides": {
+    "postcss": "^8.5.10"
   }
 }

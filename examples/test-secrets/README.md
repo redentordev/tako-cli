@@ -23,7 +23,7 @@ This is a test project to verify that Tako's new secrets management system works
    tako secrets set DATABASE_URL=postgresql://... --env production
    tako secrets set JWT_SECRET=your_secret --env production
    tako secrets set API_KEY=sk_test_123 --env production
-   tako secrets set STRIPE_SECRET_KEY=sk_live_456 --env production
+   tako secrets set STRIPE_SECRET_KEY=replace-with-stripe-secret --env production
    ```
 
 3. **Set your server IP** in `.env`:

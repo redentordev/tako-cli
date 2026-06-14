@@ -1,10 +1,10 @@
 # Next.js Todo App Example
 
-A full-stack todo application built with Next.js 15, TypeScript, Tailwind CSS, and SQLite. This example demonstrates how to deploy a complete Next.js application with a database using Tako CLI.
+A full-stack todo application built with Next.js 16, TypeScript, Tailwind CSS, and SQLite. This example demonstrates how to deploy a complete Next.js application with a database using Tako CLI.
 
 ## Features
 
-- Next.js 15 with App Router
+- Next.js 16 with App Router
 - TypeScript for type safety
 - Tailwind CSS for styling
 - SQLite database with better-sqlite3
@@ -118,7 +118,7 @@ Key settings in `tako.yaml`:
 
 ## Tech Stack
 
-- **Framework**: Next.js 15.1
+- **Framework**: Next.js 16
 - **Language**: TypeScript 5
 - **Styling**: Tailwind CSS 4
 - **Database**: SQLite (better-sqlite3)

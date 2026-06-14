@@ -122,6 +122,7 @@ func TestExamplesDoNotUseKnownDemoDatabasePasswords(t *testing.T) {
 		"POSTGRES_PASSWORD=changeme",
 		":changeme@",
 		"changeme123",
+		"sk_live_",
 		"console.log(`Database: ${process.env.DATABASE_URL}`)",
 	}
 
@@ -155,6 +156,46 @@ func TestExamplesDoNotUseKnownDemoDatabasePasswords(t *testing.T) {
 			if strings.Contains(content, pattern) {
 				t.Fatalf("%s contains unsafe copyable demo credential %q", path, strings.TrimSpace(pattern))
 			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to scan examples: %v", err)
+	}
+}
+
+func TestExamplesDoNotContainGeneratedRuntimeArtifacts(t *testing.T) {
+	forbiddenNames := map[string]bool{
+		"test-prometheus.txt": true,
+	}
+	forbiddenExtensions := map[string]bool{
+		".db":      true,
+		".sqlite":  true,
+		".sqlite3": true,
+		".log":     true,
+		".out":     true,
+		".zip":     true,
+	}
+
+	err := filepath.WalkDir(".", func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == "21-nfs-shared-storage" && entry.IsDir() {
+			t.Fatalf("%s is deprecated; NFS shared storage support was removed", path)
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case "node_modules", ".git":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if forbiddenNames[entry.Name()] {
+			t.Fatalf("%s is generated runtime output and should not be committed", path)
+		}
+		if strings.HasSuffix(entry.Name(), ".tar.gz") || forbiddenExtensions[filepath.Ext(entry.Name())] {
+			t.Fatalf("%s is a generated/binary artifact and should not be committed", path)
 		}
 		return nil
 	})

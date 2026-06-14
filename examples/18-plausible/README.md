@@ -65,7 +65,7 @@ Edit `.env`:
 
 ```bash
 # Your server IP
-SERVER_HOST=95.216.194.236
+SERVER_HOST=203.0.113.10
 
 # Email for SSL certificate
 LETSENCRYPT_EMAIL=your-email@example.com
@@ -156,7 +156,7 @@ After deployment, access Plausible at:
 https://plausible.<your-server-ip>.sslip.io
 ```
 
-Example: `https://plausible.95.216.194.236.sslip.io`
+Example: `https://plausible.203.0.113.10.sslip.io`
 
 ### First-Time Setup
 

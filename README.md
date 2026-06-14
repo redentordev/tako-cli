@@ -672,7 +672,6 @@ Check out the [examples/](./examples) directory for ready-to-deploy projects:
 - **09-nextjs-todos** - Next.js with SQLite
 - **12-hono** - Hono (ultra-fast Edge framework)
 - **13-sveltekit** - SvelteKit (full-stack Svelte)
-- **14-solidstart** - SolidStart (fine-grained reactivity)
 - **15-astro** - Astro (content-driven framework)
 - **16-php** - Vanilla PHP 8.3 application
 - **17-laravel** - Laravel (PHP framework)

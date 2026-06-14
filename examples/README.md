@@ -21,7 +21,6 @@ We have ready-to-deploy examples covering common use cases:
 | [09-nextjs-todos](./09-nextjs-todos/) | Next.js + SQLite | Full-stack Next.js, TypeScript, SQLite |
 | [12-hono](./12-hono/) | Hono framework | Ultra-fast Edge framework |
 | [13-sveltekit](./13-sveltekit/) | SvelteKit | Full-stack Svelte framework |
-| [14-solidstart](./14-solidstart/) | SolidStart | Fine-grained reactivity framework |
 | [15-astro](./15-astro/) | Astro | Content-driven framework |
 | [16-php](./16-php/) | Vanilla PHP 8.3 | Pure PHP application |
 | [17-laravel](./17-laravel/) | Laravel | PHP framework |
