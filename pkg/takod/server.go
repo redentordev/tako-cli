@@ -264,6 +264,10 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := validateReconcileServiceRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	response, err := ReconcileService(r.Context(), request)
 	if err != nil {
@@ -287,6 +291,10 @@ func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
 	var request RemoveServiceRequest
 	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateRemoveServiceRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
