@@ -318,6 +318,22 @@ func TestApplyDeployRemovalsReturnsServiceContext(t *testing.T) {
 	}
 }
 
+func TestHasBuildServices(t *testing.T) {
+	if hasBuildServices(map[string]config.ServiceConfig{
+		"web": {Build: "."},
+	}) != true {
+		t.Fatal("hasBuildServices should detect build-backed services")
+	}
+	if hasBuildServices(map[string]config.ServiceConfig{
+		"db": {Image: "postgres:16"},
+	}) != false {
+		t.Fatal("hasBuildServices should ignore image-only services")
+	}
+	if hasBuildServices(nil) {
+		t.Fatal("hasBuildServices should reject empty service maps")
+	}
+}
+
 type fakeDeployGitReader struct {
 	repository bool
 	dirty      bool
