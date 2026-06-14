@@ -1,49 +1,43 @@
 # 🐙 Tako CLI
 
-**タコ - Deploy your applications to any VPS with a small takod mesh.**
+**タコ - Deploy containerized apps to your own VPS with one small takod mesh.**
 
 ## What is Tako?
 
-**Tako** (タコ) is Japanese for "octopus" - pronounced "tah-koh". Just like an octopus has 8 arms to manage multiple tasks simultaneously, Tako CLI manages your deployments across multiple servers with precision and control.
+**Tako** (タコ) is Japanese for "octopus" - pronounced "tah-koh".
 
-Tako CLI is a powerful deployment automation tool that brings Platform-as-a-Service (PaaS) simplicity to your own servers. Deploy Docker containers to your VPS servers with automatic HTTPS, health checks, replicated deployment state, and full server control.
+Tako has one job: reconcile a Git-backed app config onto one or more owned
+servers. A single server is a one-node mesh; adding more nodes keeps the same
+commands, config shape, proxy model, and state workflow.
+
+The CLI uses SSH for bootstrap and talks to a node-local `takod` agent for
+runtime work. `takod` owns Docker reconciliation, proxy config, WireGuard mesh
+state, remote leases, and replicated deployment state.
 
 [![Version](https://img.shields.io/badge/version-0.2.2-blue)](https://github.com/redentordev/tako-cli/releases)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
-[![Status](https://img.shields.io/badge/status-experimental-orange)](https://github.com/redentordev/tako-cli)
-
-> **⚠️ Experimental Project**
->
-> This is a personal pet project built by [Redentor Valerio](https://github.com/redentordev) ([@redentor_dev](https://twitter.com/redentor_dev)) for learning and experimentation. While functional, it is **not recommended for production use**.
->
-> **For production deployments, check out [Uncloud](https://github.com/psviderski/uncloud)** - a more mature and actively maintained solution for deploying applications to your own servers.
->
-> Feel free to explore Tako CLI, learn from it, or contribute - but use at your own risk. No liability or guarantees provided. See [License](#license) for details.
+[![Runtime](https://img.shields.io/badge/runtime-takod_mesh-blue)](https://github.com/redentordev/tako-cli)
 
 ---
 
 ## Why Tako CLI?
 
-Tako CLI brings PaaS-like simplicity with full server control - deploy to your own servers without vendor lock-in or monthly fees.
+Tako keeps deployment boring: one config, one CLI, one runtime path.
 
 ### Key Benefits
 
-- Deploy in minutes, not hours or days
 - Use your own servers (DigitalOcean, Hetzner, AWS EC2, any VPS)
 - Health-checked deployments with recorded rollback state
 - Automatic HTTPS certificates through tako-proxy
-- Git-based deployments with full version history
-- No monthly PaaS fees - pay only for your server
-- Meshed takod orchestration with the same model from one server to many
-- Cross-project service networking
+- Git-clean deployments with full version history
+- Meshed takod orchestration from one server to many
+- App/stage isolation so unrelated projects can share a node
+- Remote leases for laptop and CI safety
+- State pull/repair workflows for switching computers
 
-### Orchestration Direction
-
-Tako is a small takod-based orchestrator: one config, one CLI, and the same
-workflow from one server to many. See
-[docs/ORCHESTRATION-MODEL.md](./docs/ORCHESTRATION-MODEL.md) for the high-level
-runtime, state, mesh, and migration plan.
+See [docs/ORCHESTRATION-MODEL.md](./docs/ORCHESTRATION-MODEL.md) for the
+runtime, state, mesh, and CI model.
 
 ---
 
@@ -242,7 +236,14 @@ The template includes commented examples for:
 - Multi-server deployments
 - And more!
 
-4. **Setup your server (one-time):**
+4. **Commit your app and Tako config:**
+
+```bash
+git add .
+git commit -m "Initial Tako deployment config"
+```
+
+5. **Setup your server (one-time):**
 
 ```bash
 tako setup -e production
@@ -253,7 +254,7 @@ monitoring, and security hardening. Released CLI builds also refresh the
 server-side `/usr/local/bin/tako` binary used by `takod` during setup, deploy,
 scale, and rollback so the node agent keeps pace with the CLI.
 
-5. **Deploy your application:**
+6. **Deploy your application:**
 
 ```bash
 tako deploy -e production
@@ -766,10 +767,6 @@ tako-cli/
 ## License
 
 MIT License - see [LICENSE](./LICENSE) file for full text.
-
-**⚠️ Disclaimer:** This is a personal pet project. While functional, it comes with no guarantees or liability. Use at your own risk.
-
----
 
 ## Acknowledgments
 

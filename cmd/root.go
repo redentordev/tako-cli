@@ -29,12 +29,11 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "tako",
 	Short: "Deploy applications to any VPS with a small takod mesh",
-	Long: `Tako CLI brings Platform-as-a-Service (PaaS) simplicity to your own servers.
-Deploy containerized services to your VPS servers with automatic HTTPS, health checks,
-replicated state, and full server control.
+	Long: `Tako reconciles Git-backed app config onto one or more owned servers.
+One server is a one-node mesh; adding nodes keeps the same config and commands.
 
-It uses SSH for bootstrap and a small node-local takod agent for runtime status
-and runtime reconciliation.`,
+The CLI uses SSH for bootstrap and a node-local takod agent for Docker
+reconciliation, proxy config, remote leases, and replicated deployment state.`,
 	Version: Version,
 }
 
