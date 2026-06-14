@@ -68,6 +68,13 @@ func TestRequestJSONUsesDeadlineForBody(t *testing.T) {
 	}
 }
 
+func TestSanitizeJSONOutputStripsLeadingNUL(t *testing.T) {
+	got := sanitizeJSONOutput("\x00\x00{\"ok\":true}")
+	if got != "{\"ok\":true}" {
+		t.Fatalf("sanitized output = %q", got)
+	}
+}
+
 func TestStreamRequestUsesLongDeadline(t *testing.T) {
 	client := &fakeTakodExecutor{}
 

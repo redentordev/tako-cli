@@ -63,7 +63,11 @@ func RequestJSON(client RequestExecutor, socket string, method string, endpoint 
 	if err != nil {
 		return output, fmt.Errorf("takod request %s %s failed: %w, output: %s", method, endpoint, err, output)
 	}
-	return output, nil
+	return sanitizeJSONOutput(output), nil
+}
+
+func sanitizeJSONOutput(output string) string {
+	return strings.TrimLeft(output, "\x00")
 }
 
 func buildRequestCommand(socket string, method string, endpoint string, hasBody bool) string {

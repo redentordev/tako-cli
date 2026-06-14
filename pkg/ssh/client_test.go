@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -69,5 +71,25 @@ func TestNewBase64ReaderStreamsEncodedContent(t *testing.T) {
 	}
 	if string(data) != "aGVsbG8=" {
 		t.Fatalf("encoded content = %q, want aGVsbG8=", string(data))
+	}
+}
+
+func TestLockedBufferAllowsConcurrentWrites(t *testing.T) {
+	var buffer lockedBuffer
+	var wg sync.WaitGroup
+
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := buffer.Write([]byte("x")); err != nil {
+				t.Errorf("Write returned error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := buffer.String(); len(got) != 50 || strings.Count(got, "x") != 50 {
+		t.Fatalf("buffer = %q, want 50 x bytes", got)
 	}
 }
