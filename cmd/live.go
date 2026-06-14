@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -112,19 +111,9 @@ func disableMaintenanceOnNode(cfg *config.Config, server config.ServerConfig, so
 	if _, err := takodclient.RequestJSON(client, socket, "POST", "/v1/reconcile-service", request); err != nil {
 		return fmt.Errorf("failed to remove maintenance container: %w", err)
 	}
-	for _, name := range maintenanceProxyConfigFileNames(cfg.Project.Name, envName, serviceName) {
-		if _, err := takodclient.RequestJSON(client, socket, "DELETE", takodclient.ProxyFileEndpoint(name), nil); err != nil {
-			return fmt.Errorf("failed to remove maintenance proxy config: %w", err)
-		}
+	name := maintenanceProxyConfigFileName(cfg.Project.Name, envName, serviceName)
+	if _, err := takodclient.RequestJSON(client, socket, "DELETE", takodclient.ProxyFileEndpoint(name), nil); err != nil {
+		return fmt.Errorf("failed to remove maintenance proxy config: %w", err)
 	}
 	return nil
-}
-
-func maintenanceProxyConfigFileNames(project string, environment string, serviceName string) []string {
-	current := maintenanceProxyConfigFileName(project, environment, serviceName)
-	legacy := runtimeid.LegacyMaintenanceProxyConfigFileName(project, environment, serviceName)
-	if legacy == current {
-		return []string{current}
-	}
-	return []string{current, legacy}
 }

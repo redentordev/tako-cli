@@ -108,9 +108,6 @@ func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig)
 		if err := d.writeTakodProxyConfig(client, dynamicConfig); err != nil {
 			return fmt.Errorf("failed to write proxy config: %w", err)
 		}
-		if err := d.removeLegacyTakodProxyConfig(client); err != nil {
-			return fmt.Errorf("failed to remove legacy proxy config: %w", err)
-		}
 		if err := d.ensureTakodProxy(client, takodNetworkName(d.config.Project.Name, d.environment), firstProxyEmail(services)); err != nil {
 			return fmt.Errorf("failed to reconcile proxy: %w", err)
 		}
@@ -255,38 +252,14 @@ func (d *Deployer) writeTakodProxyConfig(client *ssh.Client, data []byte) error 
 }
 
 func (d *Deployer) removeTakodProxyConfig(client *ssh.Client) error {
-	for _, name := range d.takodProxyConfigFileNames() {
-		if _, err := takodclient.RequestJSON(client, d.takodSocket(), "DELETE", takodclient.ProxyFileEndpoint(name), nil); err != nil {
-			return err
-		}
+	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "DELETE", takodclient.ProxyFileEndpoint(d.takodProxyConfigFileName()), nil); err != nil {
+		return err
 	}
 	return nil
 }
 
 func (d *Deployer) takodProxyConfigFileName() string {
 	return runtimeid.ProxyConfigFileName(d.config.Project.Name, d.environment)
-}
-
-func (d *Deployer) takodProxyConfigFileNames() []string {
-	current := d.takodProxyConfigFileName()
-	legacy := runtimeid.LegacyProxyConfigFileName(d.config.Project.Name, d.environment)
-	if legacy == current {
-		return []string{current}
-	}
-	return []string{current, legacy}
-}
-
-func (d *Deployer) removeLegacyTakodProxyConfig(client *ssh.Client) error {
-	current := d.takodProxyConfigFileName()
-	for _, name := range d.takodProxyConfigFileNames() {
-		if name == current {
-			continue
-		}
-		if _, err := takodclient.RequestJSON(client, d.takodSocket(), "DELETE", takodclient.ProxyFileEndpoint(name), nil); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (d *Deployer) meshUpstreamURL(serverName string, serviceName string, slot int, servicePort int) (string, error) {

@@ -69,9 +69,6 @@ func TestCleanupProxyFilesIncludesRuntimeAndMaintenanceOverrides(t *testing.T) {
 	})
 
 	want := []string{
-		runtimeid.LegacyMaintenanceProxyConfigFileName("demo-app", "production_1", "api"),
-		runtimeid.LegacyMaintenanceProxyConfigFileName("demo-app", "production_1", "web"),
-		runtimeid.LegacyProxyConfigFileName("demo-app", "production_1"),
 		runtimeid.MaintenanceProxyConfigFileName("demo-app", "production_1", "api"),
 		runtimeid.MaintenanceProxyConfigFileName("demo-app", "production_1", "web"),
 		runtimeid.ProxyConfigFileName("demo-app", "production_1"),

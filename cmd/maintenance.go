@@ -668,13 +668,7 @@ func writeMaintenanceProxyConfig(client *ssh.Client, socket string, project stri
 	if err != nil {
 		return err
 	}
-	legacyName := runtimeid.LegacyMaintenanceProxyConfigFileName(project, environment, serviceName)
-	currentName := maintenanceProxyConfigFileName(project, environment, serviceName)
-	if legacyName == currentName {
-		return nil
-	}
-	_, err = takodclient.RequestJSON(client, socket, "DELETE", takodclient.ProxyFileEndpoint(legacyName), nil)
-	return err
+	return nil
 }
 
 func maintenanceProxyConfigFileName(project string, environment string, serviceName string) string {
