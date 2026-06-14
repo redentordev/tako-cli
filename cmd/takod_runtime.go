@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -80,9 +81,11 @@ func cleanupProxyFiles(project string, environment string, services map[string]c
 		}
 	}
 	add(runtimeProxyConfigFileName(project, environment))
+	add(runtimeid.LegacyProxyConfigFileName(project, environment))
 	for serviceName, service := range services {
 		if service.IsPublic() {
 			add(maintenanceProxyConfigFileName(project, environment, serviceName))
+			add(runtimeid.LegacyMaintenanceProxyConfigFileName(project, environment, serviceName))
 		}
 	}
 	files := make([]string, 0, len(seen))
@@ -129,17 +132,5 @@ func imageRepositoryFromRef(ref string) string {
 }
 
 func runtimeProxyConfigFileName(project string, environment string) string {
-	return sanitizeTakodFileName(project+"-"+environment) + ".yml"
-}
-
-func sanitizeTakodFileName(value string) string {
-	out := make([]rune, 0, len(value))
-	for _, r := range value {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
-			out = append(out, r)
-		} else {
-			out = append(out, '-')
-		}
-	}
-	return string(out)
+	return runtimeid.ProxyConfigFileName(project, environment)
 }

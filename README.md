@@ -526,6 +526,14 @@ application-level replication system such as a managed database, object storage,
 or purpose-built clustered datastore. Tako does not provision shared filesystem
 storage.
 
+### Shared Nodes
+
+Unrelated projects can deploy to the same server. Treat `project.name` as the
+app name and the environment as the stage; that app/stage pair scopes state,
+leases, env bundles, Docker labels, networks, containers, proxy files, and
+generated volume names. The `tako-proxy` container is shared per node for ports
+80 and 443, while each app/stage owns its own dynamic routes.
+
 ### Secrets Management
 
 ```yaml

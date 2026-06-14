@@ -1,0 +1,62 @@
+package runtimeid
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestContainerNameAvoidsAmbiguousStageServiceCollision(t *testing.T) {
+	left := ContainerName("demo", "prod_api", "web", 1)
+	right := ContainerName("demo", "prod", "api_web", 1)
+	if left == right {
+		t.Fatalf("container names collided: %q", left)
+	}
+	for _, name := range []string{left, right} {
+		if !strings.HasPrefix(name, "tako_") {
+			t.Fatalf("container name %q should be tako-prefixed", name)
+		}
+		if len(name) > dockerNameMax {
+			t.Fatalf("container name length = %d, want <= %d", len(name), dockerNameMax)
+		}
+	}
+}
+
+func TestServiceIdentityAvoidsAmbiguousStageServiceCollision(t *testing.T) {
+	left := ServiceIdentity("demo", "prod_api", "web")
+	right := ServiceIdentity("demo", "prod", "api_web")
+	if left == right {
+		t.Fatalf("service identities collided: %q", left)
+	}
+	if len(left) != 10 || len(right) != 10 {
+		t.Fatalf("service identity should use short hash values, got %q %q", left, right)
+	}
+}
+
+func TestProxyConfigFileNameIncludesAppStageIdentity(t *testing.T) {
+	left := ProxyConfigFileName("demo-api", "production")
+	right := ProxyConfigFileName("demo", "api-production")
+	if left == right {
+		t.Fatalf("proxy config names collided: %q", left)
+	}
+	if !strings.HasSuffix(left, ".yml") || !strings.HasSuffix(right, ".yml") {
+		t.Fatalf("proxy config names should end in .yml: %q %q", left, right)
+	}
+}
+
+func TestNetworkNameFitsTakodRuntimeValidationLimit(t *testing.T) {
+	name := NetworkName("very-long-project-name-with-enough-characters-to-require-truncation", "production")
+	if len(name) > dockerNetworkMax {
+		t.Fatalf("network name length = %d, want <= %d: %q", len(name), dockerNetworkMax, name)
+	}
+	if !strings.HasPrefix(name, "tako_") {
+		t.Fatalf("network name %q should be tako-prefixed", name)
+	}
+}
+
+func TestNetworkProjectPrefixMatchesSanitizedProjectName(t *testing.T) {
+	name := NetworkName("demo-app", "production")
+	prefix := NetworkProjectPrefix("demo-app")
+	if !strings.HasPrefix(name, prefix) {
+		t.Fatalf("network name %q should start with project prefix %q", name, prefix)
+	}
+}

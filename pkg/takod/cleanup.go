@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 type CleanupRequest struct {
@@ -257,12 +259,12 @@ func cleanupNetworks(ctx context.Context, project string, environment string) (i
 			continue
 		}
 		if environment != "" {
-			if name == fmt.Sprintf("tako_%s_%s", project, environment) {
+			if name == runtimeid.NetworkName(project, environment) || name == fmt.Sprintf("tako_%s_%s", project, environment) {
 				names = append(names, name)
 			}
 			continue
 		}
-		if strings.HasPrefix(name, "tako_"+project+"_") {
+		if strings.HasPrefix(name, runtimeid.NetworkProjectPrefix(project)) || strings.HasPrefix(name, "tako_"+project+"_") {
 			names = append(names, name)
 		}
 	}

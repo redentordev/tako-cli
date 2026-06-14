@@ -11,6 +11,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -204,6 +205,132 @@ func TestSyncStateOnDeployFallsBackToRunningMeshWhenMeshActualMissing(t *testing
 	}
 	if !runningRecovered {
 		t.Fatal("running mesh fallback was not attempted")
+	}
+}
+
+func TestSyncStateOnDeployRefreshesExistingLocalStateFromRemoteHistory(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	localMgr, err := localstate.NewManager(".", "demo", "production")
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	if err := localMgr.SaveDeployment(&localstate.DeploymentState{
+		DeploymentID: "old",
+		Timestamp:    base,
+		Environment:  "production",
+		Status:       "success",
+		Services: map[string]*localstate.ServiceDeploy{
+			"web": {Image: "demo:v1", Replicas: 1},
+		},
+	}); err != nil {
+		t.Fatalf("SaveDeployment returned error: %v", err)
+	}
+
+	originalCollect := syncStateCollectDeploymentHistories
+	originalRecoverMesh := syncStateRecoverFromMeshActual
+	originalRecoverRunning := syncStateRecoverFromRunningMesh
+	t.Cleanup(func() {
+		syncStateCollectDeploymentHistories = originalCollect
+		syncStateRecoverFromMeshActual = originalRecoverMesh
+		syncStateRecoverFromRunningMesh = originalRecoverRunning
+	})
+
+	syncStateCollectDeploymentHistories = func(_ *ssh.Pool, _ *config.Config, envName string, requestedServer string, quiet bool) ([]stateHistoryCandidate, error) {
+		if envName != "production" || requestedServer != "" || !quiet {
+			t.Fatalf("unexpected history collection args env=%q requested=%q quiet=%v", envName, requestedServer, quiet)
+		}
+		return []stateHistoryCandidate{
+			{
+				source:  "node-a",
+				history: remoteHistory(base.Add(time.Hour), remoteDeployment("new", base.Add(time.Hour), "demo:v2")),
+			},
+		}, nil
+	}
+	syncStateRecoverFromMeshActual = func(*ssh.Pool, *config.Config, string, string) error {
+		t.Fatal("mesh recovery should not run when remote history is available")
+		return nil
+	}
+	syncStateRecoverFromRunningMesh = func(*ssh.Pool, *config.Config, string, string) error {
+		t.Fatal("running recovery should not run when remote history is available")
+		return nil
+	}
+
+	err = SyncStateOnDeploy(&config.Config{Project: config.ProjectConfig{Name: "demo"}}, "production")
+	if err != nil {
+		t.Fatalf("SyncStateOnDeploy returned error: %v", err)
+	}
+
+	current, err := localMgr.GetCurrentDeployment()
+	if err != nil {
+		t.Fatalf("GetCurrentDeployment returned error: %v", err)
+	}
+	if current == nil || current.DeploymentID != "new" {
+		t.Fatalf("current deployment = %#v, want remote deployment new", current)
+	}
+	if got := current.Services["web"].Image; got != "demo:v2" {
+		t.Fatalf("current web image = %q, want demo:v2", got)
+	}
+}
+
+func TestSyncStateOnDeployKeepsExistingLocalStateWhenRemoteHistoryMissing(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+
+	localMgr, err := localstate.NewManager(".", "demo", "production")
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	if err := localMgr.SaveDeployment(&localstate.DeploymentState{
+		DeploymentID: "local",
+		Timestamp:    base,
+		Environment:  "production",
+		Status:       "success",
+		Services: map[string]*localstate.ServiceDeploy{
+			"web": {Image: "demo:local", Replicas: 1},
+		},
+	}); err != nil {
+		t.Fatalf("SaveDeployment returned error: %v", err)
+	}
+
+	originalCollect := syncStateCollectDeploymentHistories
+	originalRecoverMesh := syncStateRecoverFromMeshActual
+	originalRecoverRunning := syncStateRecoverFromRunningMesh
+	t.Cleanup(func() {
+		syncStateCollectDeploymentHistories = originalCollect
+		syncStateRecoverFromMeshActual = originalRecoverMesh
+		syncStateRecoverFromRunningMesh = originalRecoverRunning
+	})
+
+	syncStateCollectDeploymentHistories = func(*ssh.Pool, *config.Config, string, string, bool) ([]stateHistoryCandidate, error) {
+		return nil, nil
+	}
+	syncStateRecoverFromMeshActual = func(*ssh.Pool, *config.Config, string, string) error {
+		t.Fatal("mesh recovery should not overwrite existing local state when no remote history exists")
+		return nil
+	}
+	syncStateRecoverFromRunningMesh = func(*ssh.Pool, *config.Config, string, string) error {
+		t.Fatal("running recovery should not overwrite existing local state when no remote history exists")
+		return nil
+	}
+
+	err = SyncStateOnDeploy(&config.Config{Project: config.ProjectConfig{Name: "demo"}}, "production")
+	if err != nil {
+		t.Fatalf("SyncStateOnDeploy returned error: %v", err)
+	}
+
+	current, err := localMgr.GetCurrentDeployment()
+	if err != nil {
+		t.Fatalf("GetCurrentDeployment returned error: %v", err)
+	}
+	if current == nil || current.DeploymentID != "local" {
+		t.Fatalf("current deployment = %#v, want existing local deployment", current)
+	}
+	if got := current.Services["web"].Image; got != "demo:local" {
+		t.Fatalf("current web image = %q, want demo:local", got)
 	}
 }
 
@@ -554,6 +681,9 @@ func TestAggregateActualSnapshotFromNodeSnapshots(t *testing.T) {
 	if got := aggregate.Services["web"].Replicas; got != 2 {
 		t.Fatalf("web replicas = %d, want 2", got)
 	}
+	if got := aggregate.Services["web"].RuntimeID; got != runtimeid.ServiceIdentity("demo", "production", "web") {
+		t.Fatalf("web runtime id = %q, want expected runtime id", got)
+	}
 	if got := len(aggregate.Nodes); got != 2 {
 		t.Fatalf("embedded node snapshots = %d, want 2", got)
 	}
@@ -572,6 +702,7 @@ func TestActualSnapshotFromTakodActualRecordsNodeServices(t *testing.T) {
 				Replicas:   2,
 				Containers: []string{"web-1", "web-2"},
 				ConfigHash: "abc123",
+				RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "web"),
 			},
 			"worker": {
 				Image:      "demo:worker",
@@ -591,6 +722,9 @@ func TestActualSnapshotFromTakodActualRecordsNodeServices(t *testing.T) {
 	}
 	if got := snapshot.Services["web"].ConfigHash; got != "abc123" {
 		t.Fatalf("web config hash = %q, want abc123", got)
+	}
+	if got := snapshot.Services["web"].RuntimeID; got != runtimeid.ServiceIdentity("demo", "production", "web") {
+		t.Fatalf("web runtime id = %q, want expected runtime id", got)
 	}
 	if got := snapshot.Services["worker"].Replicas; got != 1 {
 		t.Fatalf("worker replicas = %d, want container count fallback", got)
@@ -921,9 +1055,10 @@ func actualSnapshot(capturedAt time.Time, services ...string) *takodstate.Actual
 	}
 	for _, service := range services {
 		snapshot.Services[service] = takodstate.ActualService{
-			Name:     service,
-			Image:    "demo:" + service,
-			Replicas: 1,
+			Name:      service,
+			Image:     "demo:" + service,
+			Replicas:  1,
+			RuntimeID: runtimeid.ServiceIdentity("demo", "production", service),
 		}
 	}
 	return snapshot

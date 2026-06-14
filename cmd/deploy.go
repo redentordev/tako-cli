@@ -274,6 +274,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	// Create deployer with pool for takod support
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, verbose)
+	deploy.SetCLIVersion(Version)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return err
 	}

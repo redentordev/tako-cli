@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 // ChangeType represents the type of change needed
@@ -78,7 +79,7 @@ func ComputePlan(
 		} else {
 			// Service exists -> check if UPDATE needed
 			matchedActual[serviceName] = true
-			reasons := detectChanges(desiredConfig, actual)
+			reasons := detectChanges(projectName, environment, serviceName, desiredConfig, actual)
 
 			if len(reasons) > 0 {
 				// Changes detected -> UPDATE
@@ -159,11 +160,12 @@ type ActualService struct {
 	Replicas       int
 	Containers     []string
 	ConfigHash     string
+	RuntimeID      string
 	ConfigSnapshot *config.ServiceConfig // Last deployed config
 }
 
 // detectChanges compares config with actual service and returns reasons for update
-func detectChanges(desired config.ServiceConfig, actual *ActualService) []string {
+func detectChanges(projectName string, environment string, serviceName string, desired config.ServiceConfig, actual *ActualService) []string {
 	reasons := []string{}
 
 	// Safety check
@@ -173,6 +175,13 @@ func detectChanges(desired config.ServiceConfig, actual *ActualService) []string
 	}
 
 	oldConfig := actual.ConfigSnapshot
+
+	if projectName != "" && environment != "" && serviceName != "" {
+		expectedRuntimeID := runtimeid.ServiceIdentity(projectName, environment, serviceName)
+		if actual.RuntimeID != expectedRuntimeID {
+			reasons = append(reasons, "Runtime identity changed")
+		}
+	}
 
 	// Compare image (if specified)
 	if desired.Image != "" && desired.Image != actual.Image {

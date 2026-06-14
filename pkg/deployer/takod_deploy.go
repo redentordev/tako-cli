@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/mesh"
+	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -88,6 +91,10 @@ func (d *Deployer) SetupTakodRuntime() error {
 		fmt.Printf("\n-> Preparing takod mesh runtime...\n")
 	}
 
+	if err := d.ensureTakodAgents(servers); err != nil {
+		return err
+	}
+
 	nodePublicKeys, err := d.ensureTakodMeshKeys(servers)
 	if err != nil {
 		return err
@@ -107,6 +114,58 @@ func (d *Deployer) SetupTakodRuntime() error {
 	}
 
 	return nil
+}
+
+func (d *Deployer) ensureTakodAgents(servers []string) error {
+	return runTakodNodeActions(servers, func(serverName string) error {
+		server, ok := d.config.Servers[serverName]
+		if !ok {
+			return fmt.Errorf("server %s not found", serverName)
+		}
+		client, err := d.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err != nil {
+			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
+		}
+
+		prov := provisioner.NewProvisioner(client, d.verbose)
+		if localBinary := strings.TrimSpace(os.Getenv("TAKO_TAKOD_BINARY")); localBinary != "" {
+			if err := prov.InstallTakodBinaryFromFile(localBinary); err != nil {
+				return fmt.Errorf("failed to install local takod binary on %s: %w", serverName, err)
+			}
+		} else if d.shouldInstallTakodRelease(client) {
+			if err := prov.InstallTakodBinary(d.cliVersion); err != nil {
+				return fmt.Errorf("failed to install takod binary on %s: %w", serverName, err)
+			}
+		}
+
+		socket := ""
+		dataDir := ""
+		if d.config.Runtime != nil && d.config.Runtime.Agent != nil {
+			socket = d.config.Runtime.Agent.Socket
+			dataDir = d.config.Runtime.Agent.DataDir
+		}
+		if err := prov.InstallTakodService(socket, dataDir, serverName); err != nil {
+			return fmt.Errorf("failed to install takod service on %s: %w", serverName, err)
+		}
+		return nil
+	})
+}
+
+func (d *Deployer) shouldInstallTakodRelease(client *ssh.Client) bool {
+	version := strings.TrimSpace(d.cliVersion)
+	if version == "" || version == "dev" {
+		return false
+	}
+
+	output, err := takodclient.RequestJSON(client, d.takodSocket(), "GET", "/v1/status", nil)
+	if err != nil {
+		return true
+	}
+	var status takod.Status
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		return true
+	}
+	return strings.TrimSpace(status.Version) != version
 }
 
 // DeployServiceTakod reconciles one service through standalone Docker containers
@@ -386,7 +445,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Mounts:         mounts,
 		Health:         d.buildTakodHealthSpec(service),
 		Command:        service.Command,
-		Labels:         serviceRuntimeLabels(*service),
+		Labels:         serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
 	}
 	for _, slot := range slots {
 		containerName := d.takodContainerName(serviceName, slot)
@@ -413,12 +472,16 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 	return d.reconcileServiceViaTakod(client, request)
 }
 
-func serviceRuntimeLabels(service config.ServiceConfig) map[string]string {
+func serviceRuntimeLabels(project string, environment string, serviceName string, service config.ServiceConfig) map[string]string {
+	labels := map[string]string{
+		runtimeid.ServiceIdentityLabel: runtimeid.ServiceIdentity(project, environment, serviceName),
+	}
 	configHash, ok := reconcile.SafeServiceConfigHash(service)
 	if !ok {
-		return nil
+		return labels
 	}
-	return map[string]string{reconcile.ConfigHashLabel: configHash}
+	labels[reconcile.ConfigHashLabel] = configHash
+	return labels
 }
 
 func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.HealthSpec {
@@ -472,7 +535,7 @@ func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.Serv
 		source, target := parseVolumeSpec(volume)
 		if target == "" {
 			target = source
-			source = fmt.Sprintf("%s_%s_%s", d.config.Project.Name, d.environment, sanitizeVolumeName(target))
+			source = runtimeid.VolumeName(d.config.Project.Name, d.environment, target)
 			mounts = append(mounts, fmt.Sprintf("type=volume,source=%s,target=%s", source, target))
 			continue
 		}
@@ -480,7 +543,7 @@ func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.Serv
 		if strings.HasPrefix(source, "/") {
 			mounts = append(mounts, fmt.Sprintf("type=bind,source=%s,target=%s", source, target))
 		} else {
-			namedVolume := fmt.Sprintf("%s_%s_%s", d.config.Project.Name, d.environment, source)
+			namedVolume := runtimeid.VolumeName(d.config.Project.Name, d.environment, source)
 			mounts = append(mounts, fmt.Sprintf("type=volume,source=%s,target=%s", namedVolume, target))
 		}
 	}
@@ -734,7 +797,7 @@ func (d *Deployer) getEnvironmentClient(serverName string) (*ssh.Client, error) 
 }
 
 func (d *Deployer) takodContainerName(serviceName string, slot int) string {
-	return fmt.Sprintf("%s_%s_%s_%d", d.config.Project.Name, d.environment, serviceName, slot)
+	return runtimeid.ContainerName(d.config.Project.Name, d.environment, serviceName, slot)
 }
 
 func (d *Deployer) takodDataDir() string {
@@ -796,7 +859,7 @@ func (d *Deployer) takodSocket() string {
 }
 
 func takodNetworkName(project string, environment string) string {
-	return fmt.Sprintf("tako_%s_%s", project, environment)
+	return runtimeid.NetworkName(project, environment)
 }
 
 func parseVolumeSpec(volume string) (source, target string) {
@@ -805,26 +868,4 @@ func parseVolumeSpec(volume string) (source, target string) {
 		return parts[0], ""
 	}
 	return parts[0], parts[1]
-}
-
-func sanitizeRouterName(value string) string {
-	var out strings.Builder
-	for _, r := range value {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' {
-			out.WriteRune(r)
-		} else {
-			out.WriteRune('-')
-		}
-	}
-	return strings.Trim(out.String(), "-")
-}
-
-func sanitizeVolumeName(value string) string {
-	value = strings.Trim(value, "/")
-	value = strings.ReplaceAll(value, "/", "_")
-	value = strings.ReplaceAll(value, ":", "_")
-	if value == "" {
-		return "data"
-	}
-	return value
 }

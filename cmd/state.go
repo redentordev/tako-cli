@@ -1843,6 +1843,12 @@ func aggregateActualSnapshotFromNodeSnapshots(project string, environment string
 				if existing.Image == "" {
 					existing.Image = service.Image
 				}
+				if existing.ConfigHash == "" {
+					existing.ConfigHash = service.ConfigHash
+				} else if service.ConfigHash != "" && existing.ConfigHash != service.ConfigHash {
+					existing.ConfigHash = ""
+				}
+				existing.RuntimeID = mergeActualRuntimeID(existing.RuntimeID, service.RuntimeID)
 				snapshot.Services[serviceName] = existing
 				continue
 			}
@@ -1851,6 +1857,8 @@ func aggregateActualSnapshotFromNodeSnapshots(project string, environment string
 				Image:      service.Image,
 				Replicas:   service.Replicas,
 				Containers: append([]string(nil), service.Containers...),
+				ConfigHash: service.ConfigHash,
+				RuntimeID:  service.RuntimeID,
 			}
 		}
 	}
@@ -2155,19 +2163,23 @@ func min(a, b int) int {
 	return b
 }
 
-// SyncStateOnDeploy attempts to sync state when local deployment state is missing.
-// This is called automatically during deploy when the local cache has no current deployment.
+// SyncStateOnDeploy refreshes local deployment state from the remote mesh before
+// deploy. When no remote deployment history exists, runtime recovery is used
+// only for missing local state so an existing local cache is not overwritten by
+// weaker inferred state.
 func SyncStateOnDeploy(cfg *config.Config, envName string) error {
 	return SyncStateOnDeployWithPool(nil, cfg, envName)
 }
 
 func SyncStateOnDeployWithPool(pool *ssh.Pool, cfg *config.Config, envName string) error {
-	if localDeploymentStateExists(envName) {
-		return nil // Local deployment cache exists, no sync needed
-	}
+	localExists := localDeploymentStateExists(envName)
 
 	if verbose {
-		fmt.Println("Local state missing, checking remote...")
+		if localExists {
+			fmt.Println("Refreshing local deployment state from remote mesh...")
+		} else {
+			fmt.Println("Local state missing, checking remote mesh...")
+		}
 	}
 
 	histories, err := syncStateCollectDeploymentHistories(pool, cfg, envName, "", true)
@@ -2185,6 +2197,9 @@ func SyncStateOnDeployWithPool(pool *ssh.Pool, cfg *config.Config, envName strin
 	if !ok {
 		if verbose {
 			fmt.Println("No remote deployment history found during auto-sync")
+		}
+		if localExists {
+			return nil
 		}
 		if err := syncStateRecoverFromMeshActual(pool, cfg, envName, ""); err == nil {
 			if verbose {
@@ -2381,9 +2396,17 @@ func actualSnapshotFromTakodActual(project string, environment string, node stri
 			Replicas:   replicas,
 			Containers: append([]string(nil), service.Containers...),
 			ConfigHash: service.ConfigHash,
+			RuntimeID:  service.RuntimeID,
 		}
 	}
 	return snapshot
+}
+
+func mergeActualRuntimeID(existing string, incoming string) string {
+	if existing == incoming {
+		return existing
+	}
+	return ""
 }
 
 // ReconcileStateFromActualSnapshot reconstructs local state from a replicated

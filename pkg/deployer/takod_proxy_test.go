@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestRenderTakodProxyDynamicConfigUsesLocalAndMeshUpstreams(t *testing.T) {
@@ -24,7 +25,7 @@ func TestRenderTakodProxyDynamicConfigUsesLocalAndMeshUpstreams(t *testing.T) {
 		"rule: Host(`example.com`)",
 		"entryPoints:",
 		"certResolver: letsencrypt",
-		"url: http://demo_production_web_1:3000",
+		"url: http://" + runtimeid.ContainerName("demo", "production", "web", 1) + ":3000",
 		"url: http://10.210.0.2:21002",
 		"path: /health",
 		"interval: 15s",
@@ -50,7 +51,7 @@ func TestRenderTakodProxyDynamicConfigUsesLocalUpstreamForCurrentNode(t *testing
 	configText := string(data)
 	for _, expected := range []string{
 		"url: http://10.210.0.1:21001",
-		"url: http://demo_production_web_2:3000",
+		"url: http://" + runtimeid.ContainerName("demo", "production", "web", 2) + ":3000",
 	} {
 		if !strings.Contains(configText, expected) {
 			t.Fatalf("dynamic config missing %q:\n%s", expected, configText)
@@ -81,7 +82,7 @@ func TestRenderTakodProxyDynamicConfigUsesOnlyLocalUpstreamForOneNode(t *testing
 	}
 
 	configText := string(data)
-	if !strings.Contains(configText, "url: http://demo_production_web_1:3000") {
+	if !strings.Contains(configText, "url: http://"+runtimeid.ContainerName("demo", "production", "web", 1)+":3000") {
 		t.Fatalf("dynamic config missing local upstream:\n%s", configText)
 	}
 	if strings.Contains(configText, "10.210.0.") {

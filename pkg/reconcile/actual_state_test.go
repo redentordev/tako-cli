@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
@@ -17,6 +18,7 @@ func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
 		Replicas:   1,
 		Containers: []string{"a1"},
 		ConfigHash: "hash-web",
+		RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "web"),
 	}
 	actualByServer := map[string]map[string]*ActualService{
 		"node-a": {
@@ -29,6 +31,7 @@ func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
 				Replicas:   2,
 				Containers: []string{"b1", "b2"},
 				ConfigHash: "hash-web",
+				RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "web"),
 			},
 			"worker": {
 				Name:       "worker",
@@ -53,6 +56,9 @@ func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
 	if got := aggregate["web"].ConfigHash; got != "hash-web" {
 		t.Fatalf("web config hash = %q, want hash-web", got)
 	}
+	if got := aggregate["web"].RuntimeID; got != runtimeid.ServiceIdentity("demo", "production", "web") {
+		t.Fatalf("web runtime id = %q, want expected runtime id", got)
+	}
 
 	aggregate["web"].Containers[0] = "mutated"
 	if nodeAWeb.Containers[0] != "a1" {
@@ -73,6 +79,27 @@ func TestAggregateActualStateByServerClearsMixedConfigHashes(t *testing.T) {
 	aggregate := AggregateActualStateByServer(actualByServer)
 	if got := aggregate["web"].ConfigHash; got != "" {
 		t.Fatalf("mixed config hash = %q, want empty", got)
+	}
+}
+
+func TestAggregateActualStateByServerClearsMixedRuntimeIDs(t *testing.T) {
+	actualByServer := map[string]map[string]*ActualService{
+		"node-a": {
+			"web": {
+				Name:      "web",
+				Image:     "demo/web:1",
+				Replicas:  1,
+				RuntimeID: runtimeid.ServiceIdentity("demo", "production", "web"),
+			},
+		},
+		"node-b": {
+			"web": {Name: "web", Image: "demo/web:1", Replicas: 1},
+		},
+	}
+
+	aggregate := AggregateActualStateByServer(actualByServer)
+	if got := aggregate["web"].RuntimeID; got != "" {
+		t.Fatalf("mixed runtime id = %q, want empty", got)
 	}
 }
 

@@ -116,6 +116,10 @@ TAKO_ENV_PASSPHRASE=... \
 scripts/mesh-e2e.sh --app-dir /path/to/app --env production --phases ci --yes
 ```
 
+The harness CI phase defaults to `TAKO_E2E_CI_HOST_KEY_MODE=tofu` so first-run
+automation can prove the flow. Set `TAKO_E2E_CI_HOST_KEY_MODE=strict` when you
+want the proof to match a runner with preinstalled known hosts.
+
 For the fuller laptop and CI proof, use:
 
 ```bash

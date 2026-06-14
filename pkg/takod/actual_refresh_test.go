@@ -6,6 +6,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
@@ -22,7 +24,8 @@ func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
 
 	restore := useFakeActualDocker(t)
 	defer restore()
-	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1|demo/web:1|container-a|hash-web\n")
+	runtimeID := runtimeid.ServiceIdentity("demo", "production", "web")
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1|demo/web:1|container-a|hash-web|"+runtimeID+"\n")
 
 	refreshed, err := RefreshActualStateDocuments(context.Background(), dataDir, "node-a")
 	if err != nil {
@@ -47,6 +50,9 @@ func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
 	if got := nodeSnapshot.Services["web"].ConfigHash; got != "hash-web" {
 		t.Fatalf("node web config hash = %q, want hash-web", got)
 	}
+	if got := nodeSnapshot.Services["web"].RuntimeID; got != runtimeID {
+		t.Fatalf("node web runtime id = %q, want %q", got, runtimeID)
+	}
 
 	aggregate := readActualSnapshotFixture(t, dataDir, StateDocumentRequest{
 		Project:     "demo",
@@ -58,6 +64,9 @@ func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
 	}
 	if got := aggregate.Services["web"].ConfigHash; got != "hash-web" {
 		t.Fatalf("aggregate web config hash = %q, want hash-web", got)
+	}
+	if got := aggregate.Services["web"].RuntimeID; got != runtimeID {
+		t.Fatalf("aggregate web runtime id = %q, want %q", got, runtimeID)
 	}
 	if _, ok := aggregate.Nodes["node-a"]; !ok {
 		t.Fatalf("aggregate missing node-a snapshot: %#v", aggregate.Nodes)

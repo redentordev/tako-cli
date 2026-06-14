@@ -161,6 +161,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	startTime := time.Now()
 
 	deploy := deployer.NewDeployerWithPool(client, cfg, envName, sshPool, verbose)
+	deploy.SetCLIVersion(Version)
 	if err := deploy.SetTargetServers(envServers); err != nil {
 		return err
 	}

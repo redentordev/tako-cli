@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -602,7 +603,7 @@ func renderMaintenanceProxyConfig(project string, environment string, serviceNam
 		return nil, fmt.Errorf("maintenance proxy requires at least one domain")
 	}
 
-	routerBase := sanitizeMaintenanceName(project + "-" + environment + "-" + serviceName + "-maintenance")
+	routerBase := runtimeid.RouterName(project, environment, serviceName) + "-maintenance"
 	serviceID := routerBase + "-svc"
 	cfg := maintenanceProxyConfig{
 		HTTP: maintenanceHTTPConfig{
@@ -664,18 +665,22 @@ func writeMaintenanceProxyConfig(client *ssh.Client, socket string, project stri
 		Name:    maintenanceProxyConfigFileName(project, environment, serviceName),
 		Content: string(data),
 	})
+	if err != nil {
+		return err
+	}
+	legacyName := runtimeid.LegacyMaintenanceProxyConfigFileName(project, environment, serviceName)
+	currentName := maintenanceProxyConfigFileName(project, environment, serviceName)
+	if legacyName == currentName {
+		return nil
+	}
+	_, err = takodclient.RequestJSON(client, socket, "DELETE", takodclient.ProxyFileEndpoint(legacyName), nil)
 	return err
 }
 
 func maintenanceProxyConfigFileName(project string, environment string, serviceName string) string {
-	return sanitizeMaintenanceName(project+"-"+environment+"-"+serviceName+"-maintenance") + ".yml"
+	return runtimeid.MaintenanceProxyConfigFileName(project, environment, serviceName)
 }
 
 func maintenanceTakodServiceName(serviceName string) string {
 	return serviceName + "-maintenance"
-}
-
-func sanitizeMaintenanceName(value string) string {
-	replacer := strings.NewReplacer("_", "-", ".", "-", "/", "-", " ", "-")
-	return replacer.Replace(strings.ToLower(value))
 }

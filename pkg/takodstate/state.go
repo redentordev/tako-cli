@@ -91,6 +91,7 @@ type ActualService struct {
 	Replicas   int      `json:"replicas"`
 	Containers []string `json:"containers,omitempty"`
 	ConfigHash string   `json:"configHash,omitempty"`
+	RuntimeID  string   `json:"runtimeId,omitempty"`
 }
 
 type Event struct {
@@ -220,6 +221,7 @@ func actualServiceFromReconcile(service *reconcile.ActualService) ActualService 
 		Replicas:   service.Replicas,
 		Containers: containers,
 		ConfigHash: service.ConfigHash,
+		RuntimeID:  service.RuntimeID,
 	}
 }
 

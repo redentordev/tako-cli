@@ -68,6 +68,8 @@ Deploy and env phases also fail early unless `.tako/` and `.env` are ignored
 and the app worktree is clean, matching `tako deploy`'s clean-check behavior.
 The env phase backs up the local `.env`, verifies that `env pull --force`
 restores the same content, and restores the original file if the check fails.
+The CI phase defaults to `TAKO_E2E_CI_HOST_KEY_MODE=tofu`; set it to `strict`
+when validating a runner image with preinstalled known hosts.
 
 The offline phase stops `takod` on the selected node through SSH, verifies that
 status degrades and drift/deploy fail closed while the node agent is

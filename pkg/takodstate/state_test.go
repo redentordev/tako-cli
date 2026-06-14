@@ -9,6 +9,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
@@ -105,6 +106,7 @@ func TestBuildActualSnapshotWithNodesEmbedsNodeSnapshots(t *testing.T) {
 				Replicas:   1,
 				Containers: []string{"b2", "b1"},
 				ConfigHash: "hash-web",
+				RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "web"),
 			},
 		},
 		"node-a": {
@@ -114,6 +116,7 @@ func TestBuildActualSnapshotWithNodesEmbedsNodeSnapshots(t *testing.T) {
 				Replicas:   1,
 				Containers: []string{"a1"},
 				ConfigHash: "hash-web",
+				RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "web"),
 			},
 			"worker": {
 				Name:       "worker",
@@ -139,6 +142,9 @@ func TestBuildActualSnapshotWithNodesEmbedsNodeSnapshots(t *testing.T) {
 	if got := snapshot.Services["web"].ConfigHash; got != "hash-web" {
 		t.Fatalf("aggregate config hash = %q, want hash-web", got)
 	}
+	if got := snapshot.Services["web"].RuntimeID; got != runtimeid.ServiceIdentity("demo", "production", "web") {
+		t.Fatalf("aggregate runtime id = %q, want expected runtime id", got)
+	}
 	if snapshot.Nodes["node-a"].CapturedAt.IsZero() || snapshot.Nodes["node-b"].CapturedAt.IsZero() {
 		t.Fatalf("expected embedded node snapshots to have capture times: %#v", snapshot.Nodes)
 	}
@@ -152,6 +158,7 @@ func TestBuildNodeActualSnapshotRecordsNode(t *testing.T) {
 			Replicas:   1,
 			Containers: []string{"c2", "c1"},
 			ConfigHash: "hash-web",
+			RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "web"),
 		},
 	})
 
@@ -163,6 +170,9 @@ func TestBuildNodeActualSnapshotRecordsNode(t *testing.T) {
 	}
 	if got := snapshot.Services["web"].ConfigHash; got != "hash-web" {
 		t.Fatalf("node config hash = %q, want hash-web", got)
+	}
+	if got := snapshot.Services["web"].RuntimeID; got != runtimeid.ServiceIdentity("demo", "production", "web") {
+		t.Fatalf("node runtime id = %q, want expected runtime id", got)
 	}
 }
 
