@@ -84,6 +84,61 @@ func TestRenderConfigTemplateRejectsUnsafeInterface(t *testing.T) {
 	}
 }
 
+func TestRenderConfigTemplateRejectsInvalidNodeAddress(t *testing.T) {
+	_, err := RenderConfigTemplate(Node{
+		Name:    "node-a",
+		Address: "10.210.0.1\nPostUp = rm -rf /",
+	}, nil, WireGuardConfig{
+		Enabled:    true,
+		Interface:  "tako",
+		ListenPort: 51820,
+	})
+	if err == nil || !strings.Contains(err.Error(), "node mesh address") {
+		t.Fatalf("expected invalid node address error, got %v", err)
+	}
+}
+
+func TestRenderConfigTemplateRejectsInjectedPeerFields(t *testing.T) {
+	tests := []struct {
+		name string
+		peer Node
+	}{
+		{
+			name: "peer name",
+			peer: Node{Name: "node-b\n[Peer]", Host: "203.0.113.11", Address: "10.210.0.2/24", PublicKey: "peer-b-key"},
+		},
+		{
+			name: "peer public key",
+			peer: Node{Name: "node-b", Host: "203.0.113.11", Address: "10.210.0.2/24", PublicKey: "peer-b-key\nPostUp = bad"},
+		},
+		{
+			name: "peer host",
+			peer: Node{Name: "node-b", Host: "203.0.113.11\nEndpoint = attacker:51820", Address: "10.210.0.2/24", PublicKey: "peer-b-key"},
+		},
+		{
+			name: "peer address",
+			peer: Node{Name: "node-b", Host: "203.0.113.11", Address: "10.210.0.2/24\nAllowedIPs = 0.0.0.0/0", PublicKey: "peer-b-key"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := RenderConfigTemplate(Node{
+				Name:    "node-a",
+				Host:    "203.0.113.10",
+				Address: "10.210.0.1/24",
+			}, []Node{tt.peer}, WireGuardConfig{
+				Enabled:    true,
+				Interface:  "tako",
+				ListenPort: 51820,
+			})
+			if err == nil {
+				t.Fatal("expected injected peer field to be rejected")
+			}
+		})
+	}
+}
+
 func TestRunRootScriptUsesRootOwnedTempFile(t *testing.T) {
 	cmd := runRootScript("echo ready\n")
 	for _, expected := range []string{
