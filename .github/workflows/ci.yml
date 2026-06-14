@@ -28,29 +28,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Check formatting
-        run: |
-          unformatted="$(gofmt -l $(git ls-files '*.go'))"
-          if [ -n "$unformatted" ]; then
-            echo "Go files need gofmt:"
-            echo "$unformatted"
-            exit 1
-          fi
-
-      - name: Check generated diff
-        run: git diff --check
-
-      - name: Check shell script syntax
-        run: find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
-
-      - name: Test
-        run: go test ./...
-
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
+      - name: Run quality checks
+        run: make ci-quality
 
   race:
     name: Race Tests
@@ -66,16 +45,4 @@ jobs:
           cache: true
 
       - name: Race test critical packages
-        run: >
-          go test -race
-          ./cmd
-          ./internal/state
-          ./pkg/mesh
-          ./pkg/provisioner
-          ./pkg/secrets
-          ./pkg/deployer
-          ./pkg/ssh
-          ./pkg/takodclient
-          ./pkg/takod
-          ./pkg/takodstate
-          ./pkg/config
+        run: make ci-race

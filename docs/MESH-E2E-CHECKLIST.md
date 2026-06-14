@@ -220,9 +220,5 @@ The migration is proven only when the checklist passes against real servers and
 the following local gates pass:
 
 ```bash
-go test ./...
-go test -race ./cmd ./internal/state ./pkg/mesh ./pkg/provisioner ./pkg/secrets ./pkg/deployer ./pkg/ssh ./pkg/takodclient ./pkg/takod ./pkg/takodstate ./pkg/config
-go build ./...
-go vet ./...
-git diff --check
+make ci-check
 ```
