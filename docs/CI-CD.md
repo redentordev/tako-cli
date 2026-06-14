@@ -11,6 +11,11 @@ Tako uses the same deployment path from laptops and CI runners:
 Remote leases in takod prevent a CI job and a laptop from reconciling the same
 target nodes at the same time.
 
+`tako deploy` reads Git metadata for deployment history and rollback context,
+but it does not create commits. CI should deploy a clean checkout; if generated
+files or dependency installers modify the worktree before deploy, commit or
+discard those changes earlier in the pipeline.
+
 Each installed takod refreshes its own actual container snapshot in the
 background. CI still runs `tako state pull` for deployment history and local UX,
 but it does not depend on the runner's old `.tako/` directory to know what is

@@ -30,7 +30,6 @@ var (
 	deployService string
 	skipBuild     bool
 	deployYes     bool
-	commitMessage string
 )
 
 var deployCmd = &cobra.Command{
@@ -54,7 +53,6 @@ func init() {
 	deployCmd.Flags().StringVar(&deployService, "service", "", "Deploy specific service")
 	deployCmd.Flags().BoolVar(&skipBuild, "skip-build", false, "Skip building the service image")
 	deployCmd.Flags().BoolVarP(&deployYes, "yes", "y", false, "Skip confirmation prompts (non-interactive mode)")
-	deployCmd.Flags().StringVarP(&commitMessage, "message", "m", "", "Commit message for uncommitted changes")
 }
 
 func ensureDeployRuntimeSupported(cfg *config.Config) error {
@@ -71,6 +69,40 @@ func ensureDeployRuntimeSupported(cfg *config.Config) error {
 		return fmt.Errorf("state.deployConsistency=%s is not implemented yet; current deploys support lease", cfg.GetDeployConsistency())
 	}
 	return nil
+}
+
+type deployGitReader interface {
+	IsRepository() bool
+	HasUncommittedChanges() (bool, error)
+	GetStatus() (string, error)
+	GetCommitInfo(string) (*git.CommitInfo, error)
+}
+
+func resolveDeployCommitInfo(gitClient deployGitReader) (*git.CommitInfo, error) {
+	if !gitClient.IsRepository() {
+		return nil, fmt.Errorf("❌ This project is not a Git repository.\n\nPlease initialize Git first:\n  git init\n  git add .\n  git commit -m \"Initial commit\"\n\nGit is required for deployment tracking and rollback functionality.")
+	}
+
+	hasChanges, err := gitClient.HasUncommittedChanges()
+	if err != nil {
+		return nil, fmt.Errorf("failed to check git status: %w", err)
+	}
+	if hasChanges {
+		status, err := gitClient.GetStatus()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get git status: %w", err)
+		}
+		if strings.TrimSpace(status) == "" {
+			status = "(dirty worktree)"
+		}
+		return nil, fmt.Errorf("cannot deploy with uncommitted changes; commit, stash, or discard changes first:\n%s", strings.TrimSpace(status))
+	}
+
+	commitInfo, err := gitClient.GetCommitInfo("")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit info: %w", err)
+	}
+	return commitInfo, nil
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
@@ -98,68 +130,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Initialize Git client
 	gitClient := git.NewClient(".")
 
-	// Check if project is a Git repository
-	if !gitClient.IsRepository() {
-		return fmt.Errorf("❌ This project is not a Git repository.\n\nPlease initialize Git first:\n  git init\n  git add .\n  git commit -m \"Initial commit\"\n\nGit is required for deployment tracking and rollback functionality.")
-	}
-
-	// Check for uncommitted changes
-	hasChanges, err := gitClient.HasUncommittedChanges()
+	commitInfo, err := resolveDeployCommitInfo(gitClient)
 	if err != nil {
-		return fmt.Errorf("failed to check git status: %w", err)
-	}
-
-	var commitInfo *git.CommitInfo
-
-	if hasChanges {
-		// Show uncommitted changes
-		status, err := gitClient.GetStatus()
-		if err == nil && verbose {
-			fmt.Printf("\n⚠️  Uncommitted changes detected:\n%s\n", status)
-		}
-
-		// Get commit message - from flag, prompt, or auto-generate
-		var commitMsg string
-		if commitMessage != "" {
-			// Use provided commit message
-			commitMsg = commitMessage
-		} else if deployYes || isNonInteractive() {
-			// Auto-generate commit message in non-interactive mode
-			commitMsg = fmt.Sprintf("Deploy: %s", time.Now().Format("2006-01-02 15:04:05"))
-			fmt.Printf("\n→ Auto-committing changes with message: %q\n", commitMsg)
-		} else {
-			// Prompt for commit message
-			commitMsg, err = git.PromptCommitMessage()
-			if err != nil {
-				return fmt.Errorf("deployment cancelled: %w", err)
-			}
-		}
-
-		fmt.Printf("\n→ Creating commit...\n")
-
-		// Stage all changes
-		if err := gitClient.AddAll(); err != nil {
-			return fmt.Errorf("failed to stage changes: %w", err)
-		}
-
-		// Create commit
-		if err := gitClient.Commit(commitMsg); err != nil {
-			return fmt.Errorf("failed to create commit: %w", err)
-		}
-
-		// Get commit info
-		commitInfo, err = gitClient.GetCommitInfo("")
-		if err != nil {
-			return fmt.Errorf("failed to get commit info: %w", err)
-		}
-
-		fmt.Printf("  ✓ Created commit: %s\n", commitInfo.ShortHash)
-	} else {
-		// No uncommitted changes, get current commit info
-		commitInfo, err = gitClient.GetCommitInfo("")
-		if err != nil {
-			return fmt.Errorf("failed to get commit info: %w", err)
-		}
+		return err
 	}
 
 	// Display commit info
