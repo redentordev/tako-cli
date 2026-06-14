@@ -177,6 +177,64 @@ func TestBestDeploymentHistoryIgnoresEmptyCandidates(t *testing.T) {
 	}
 }
 
+func TestStateHistoryCandidatesFailClosedOnUnreadableHistory(t *testing.T) {
+	_, err := stateHistoryCandidatesFromResults([]stateHistoryReadResult{
+		{
+			serverName:    "node-a",
+			host:          "10.0.0.1",
+			readAttempted: true,
+			err:           errors.New("bad json"),
+		},
+	}, true)
+	if err == nil {
+		t.Fatal("stateHistoryCandidatesFromResults should fail when reachable history is unreadable")
+	}
+	if !strings.Contains(err.Error(), "failed to read deployment history from reachable node") {
+		t.Fatalf("error = %q, want fail-closed history read context", err)
+	}
+}
+
+func TestStateHistoryCandidatesAllowsRecoveryAfterConnectionErrorsOnly(t *testing.T) {
+	histories, err := stateHistoryCandidatesFromResults([]stateHistoryReadResult{
+		{
+			serverName: "node-a",
+			host:       "10.0.0.1",
+			err:        errors.New("unreachable"),
+		},
+	}, true)
+	if err != nil {
+		t.Fatalf("stateHistoryCandidatesFromResults returned error: %v", err)
+	}
+	if len(histories) != 0 {
+		t.Fatalf("histories = %#v, want none", histories)
+	}
+}
+
+func TestStateHistoryCandidatesUsesValidHistoryDespiteOtherReadError(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+
+	histories, err := stateHistoryCandidatesFromResults([]stateHistoryReadResult{
+		{
+			serverName:    "node-a",
+			host:          "10.0.0.1",
+			readAttempted: true,
+			err:           errors.New("bad json"),
+		},
+		{
+			serverName:    "node-b",
+			host:          "10.0.0.2",
+			readAttempted: true,
+			history:       remoteHistory(base, remoteDeployment("deploy-1", base, "demo:v1")),
+		},
+	}, true)
+	if err != nil {
+		t.Fatalf("stateHistoryCandidatesFromResults returned error: %v", err)
+	}
+	if len(histories) != 1 || histories[0].source != "node-b" {
+		t.Fatalf("histories = %#v, want node-b valid history", histories)
+	}
+}
+
 func TestBestDesiredRevisionPrefersNewestCreatedAt(t *testing.T) {
 	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	older := desiredRevision("rev-old", base)
