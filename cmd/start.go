@@ -8,7 +8,6 @@ import (
 )
 
 var (
-	startServer  string
 	startService string
 )
 
@@ -20,13 +19,12 @@ replica count.
 
 Examples:
   tako start --service web
-  tako start --service api --server prod`,
+  tako start --service api`,
 	RunE: runStart,
 }
 
 func init() {
 	rootCmd.AddCommand(startCmd)
-	startCmd.Flags().StringVarP(&startServer, "server", "s", "", "Server to target")
 	startCmd.Flags().StringVar(&startService, "service", "", "Service to start (required)")
 	startCmd.MarkFlagRequired("service")
 }
@@ -53,5 +51,5 @@ func runStart(cmd *cobra.Command, args []string) error {
 		replicas = 1
 	}
 
-	return runScaleWithServer(cmd, []string{fmt.Sprintf("%s=%d", startService, replicas)}, startServer)
+	return runScaleTargets(cmd, []string{fmt.Sprintf("%s=%d", startService, replicas)})
 }

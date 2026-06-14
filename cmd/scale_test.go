@@ -12,7 +12,7 @@ import (
 func TestScaleTargetServersUsesSortedEnvironmentNodes(t *testing.T) {
 	cfg := scaleTargetConfig()
 
-	servers, err := scaleTargetServers(cfg, "production", "")
+	servers, err := scaleTargetServers(cfg, "production")
 	if err != nil {
 		t.Fatalf("scaleTargetServers returned error: %v", err)
 	}
@@ -21,23 +21,15 @@ func TestScaleTargetServersUsesSortedEnvironmentNodes(t *testing.T) {
 	}
 }
 
-func TestScaleTargetServersHonorsServerOverride(t *testing.T) {
-	cfg := scaleTargetConfig()
-
-	servers, err := scaleTargetServers(cfg, "production", "node-b")
-	if err != nil {
-		t.Fatalf("scaleTargetServers returned error: %v", err)
+func TestScaleCommandsDoNotExposeServerFlag(t *testing.T) {
+	if flag := scaleCmd.Flags().Lookup("server"); flag != nil {
+		t.Fatal("scale command should not expose a server flag")
 	}
-	if !slices.Equal(servers, []string{"node-b"}) {
-		t.Fatalf("servers = %#v, want node-b", servers)
+	if flag := startCmd.Flags().Lookup("server"); flag != nil {
+		t.Fatal("start command should not expose a server flag")
 	}
-}
-
-func TestScaleTargetServersRejectsOutsideEnvironmentOverride(t *testing.T) {
-	cfg := scaleTargetConfig()
-
-	if _, err := scaleTargetServers(cfg, "production", "node-c"); err == nil {
-		t.Fatal("scaleTargetServers should reject server outside environment")
+	if flag := stopCmd.Flags().Lookup("server"); flag != nil {
+		t.Fatal("stop command should not expose a server flag")
 	}
 }
 
