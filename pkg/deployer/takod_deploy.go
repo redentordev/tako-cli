@@ -151,7 +151,7 @@ func (d *Deployer) ensureTakodAgents(servers []string) error {
 	})
 }
 
-func (d *Deployer) shouldInstallTakodRelease(client *ssh.Client) bool {
+func (d *Deployer) shouldInstallTakodRelease(client takodclient.RequestExecutor) bool {
 	version := strings.TrimSpace(d.cliVersion)
 	if version == "" || version == "dev" {
 		return false

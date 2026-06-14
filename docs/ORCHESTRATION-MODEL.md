@@ -100,11 +100,13 @@ and brings up `wg-quick@tako`. One-node deployments still get the same
 interface, just without peer blocks.
 
 The node-local `takod` process listens on `/run/tako/takod.sock`. On released
-CLI builds, `tako setup` downloads the matching Linux release binary for the
-server architecture, installs it at `/usr/local/bin/tako`, and restarts the
-systemd service. Development builds reuse an existing server binary when one is
-already installed, which keeps local iteration from depending on a published
-release.
+CLI builds, `tako setup`, `tako deploy`, `tako scale`, and `tako rollback`
+download the matching Linux release binary for the server architecture when the
+node agent is missing or running a different version, install it at
+`/usr/local/bin/tako`, and restart the systemd service. Development builds reuse
+an existing server binary when one is already installed. For local agent smoke
+tests, set `TAKO_TAKOD_BINARY` to a Linux tako binary to upload that binary
+before runtime preparation.
 
 `takod` exposes health, status, actual container discovery, service container
 reconcile, proxy file updates, proxy container reconcile, logs, stats, metrics,

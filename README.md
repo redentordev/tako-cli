@@ -249,8 +249,9 @@ tako setup -e production
 ```
 
 This installs Docker, WireGuard, the node-local `takod` runtime, firewall rules,
-monitoring, and security hardening. On released CLI builds, setup also refreshes
-the server-side `/usr/local/bin/tako` binary used by `takod`.
+monitoring, and security hardening. Released CLI builds also refresh the
+server-side `/usr/local/bin/tako` binary used by `takod` during setup, deploy,
+scale, and rollback so the node agent keeps pace with the CLI.
 
 5. **Deploy your application:**
 

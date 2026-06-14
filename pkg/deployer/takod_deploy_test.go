@@ -1,7 +1,9 @@
 package deployer
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"sync"
@@ -119,12 +121,77 @@ func TestRunTakodNodeActionsAggregatesSortedErrors(t *testing.T) {
 	}
 }
 
+func TestShouldInstallTakodRelease(t *testing.T) {
+	tests := []struct {
+		name       string
+		version    string
+		statusJSON string
+		statusErr  error
+		want       bool
+	}{
+		{
+			name:       "matching release",
+			version:    "v1.2.3",
+			statusJSON: `{"version":"v1.2.3"}`,
+			want:       false,
+		},
+		{
+			name:       "different release",
+			version:    "v1.2.4",
+			statusJSON: `{"version":"v1.2.3"}`,
+			want:       true,
+		},
+		{
+			name:      "missing agent",
+			version:   "v1.2.4",
+			statusErr: fmt.Errorf("takod unavailable"),
+			want:      true,
+		},
+		{
+			name:    "dev build does not download release",
+			version: "dev",
+			want:    false,
+		},
+		{
+			name:    "empty version does not download release",
+			version: "",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deploy := &Deployer{cliVersion: tt.version, config: &config.Config{}}
+			got := deploy.shouldInstallTakodRelease(fakeTakodStatusExecutor{
+				output: tt.statusJSON,
+				err:    tt.statusErr,
+			})
+			if got != tt.want {
+				t.Fatalf("shouldInstallTakodRelease() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildTakodHealthCommandQuotesURL(t *testing.T) {
 	got := buildTakodHealthCommand(8080, "/health; touch /tmp/pwned")
 	want := "curl -sf -- 'http://127.0.0.1:8080/health; touch /tmp/pwned' || exit 1"
 	if got != want {
 		t.Fatalf("health command = %q, want %q", got, want)
 	}
+}
+
+type fakeTakodStatusExecutor struct {
+	output string
+	err    error
+}
+
+func (f fakeTakodStatusExecutor) ExecuteWithContext(ctx context.Context, cmd string) (string, error) {
+	return f.output, f.err
+}
+
+func (f fakeTakodStatusExecutor) ExecuteWithInput(ctx context.Context, cmd string, input io.Reader) (string, error) {
+	return f.output, f.err
 }
 
 func TestBuildTakodHealthSpecUsesQuotedCommand(t *testing.T) {

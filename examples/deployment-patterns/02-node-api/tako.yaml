@@ -1,0 +1,30 @@
+project:
+  name: pattern-node-api
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ${SSH_KEY}
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      api:
+        build: .
+        port: 3000
+        replicas: 2
+        proxy:
+          domain: node-api.${SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        env:
+          APP_VERSION: 1.0.0
+          PORT: "3000"
+        healthCheck:
+          path: /health
+          interval: 15s
+          timeout: 5s
+          retries: 3
