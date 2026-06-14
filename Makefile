@@ -1,4 +1,4 @@
-.PHONY: build install test clean run help dev lint fmt build-all mesh-e2e ci-quality ci-race ci-check
+.PHONY: build install test clean run help dev lint fmt build-all mesh-e2e examples ci-quality ci-race ci-check
 
 # Binary name
 BINARY_NAME=tako
@@ -100,6 +100,10 @@ mesh-e2e:
 	 TAKO_E2E_PHASES="$(or $(PHASES),preflight)" \
 	 scripts/mesh-e2e.sh $(ARGS)
 
+## examples: Validate deployment pattern examples
+examples:
+	@examples/deployment-patterns/validate.sh
+
 ## ci-quality: Run formatting, diff, shell, test, build, and vet gates
 ci-quality:
 ifeq ($(OS),Windows_NT)
@@ -116,7 +120,7 @@ else
 	@echo "Checking generated diff..."
 	@git diff --check
 	@echo "Checking shell script syntax..."
-	@find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+	@find scripts examples -name '*.sh' -print0 | xargs -0 -n1 bash -n
 	@echo "Running tests..."
 	@go test ./...
 	@echo "Building..."
