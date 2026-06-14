@@ -255,10 +255,10 @@ func validateServer(name string, server *ServerConfig) error {
 	if hasPassword {
 		// Security check: warn if password appears to be hardcoded (not an env var)
 		if !strings.HasPrefix(server.Password, "${") && !strings.HasPrefix(server.Password, "$") {
-			fmt.Printf("⚠ Security Warning: server %s has a hardcoded password.\n", name)
-			fmt.Printf("  Consider using an environment variable instead:\n")
-			fmt.Printf("    password: ${SSH_PASSWORD}\n")
-			fmt.Printf("  Then set: export SSH_PASSWORD='your-password'\n\n")
+			fmt.Fprintf(os.Stderr, "⚠ Security Warning: server %s has a hardcoded password.\n", name)
+			fmt.Fprintf(os.Stderr, "  Consider using an environment variable instead:\n")
+			fmt.Fprintf(os.Stderr, "    password: ${SSH_PASSWORD}\n")
+			fmt.Fprintf(os.Stderr, "  Then set: export SSH_PASSWORD='your-password'\n\n")
 		}
 		// Password authentication - no need to check SSH key
 		return nil
@@ -329,7 +329,7 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 			}
 		}
 		if !dockerfileFound {
-			fmt.Printf("Warning: No Dockerfile found in %s\n", buildPath)
+			fmt.Fprintf(os.Stderr, "Warning: No Dockerfile found in %s\n", buildPath)
 		}
 	}
 
@@ -797,7 +797,7 @@ func validateVolumes(volumes map[string]VolumeConfig) error {
 			}
 			if !validDrivers[vol.Driver] {
 				// Allow custom drivers, just warn
-				fmt.Printf("Warning: volume '%s' uses non-standard driver '%s'\n", name, vol.Driver)
+				fmt.Fprintf(os.Stderr, "Warning: volume '%s' uses non-standard driver '%s'\n", name, vol.Driver)
 			}
 		}
 

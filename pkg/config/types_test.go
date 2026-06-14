@@ -1,6 +1,7 @@
 package config
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,6 +252,67 @@ func TestExpandEnvWithTrimChecksJSONCommentsAsContent(t *testing.T) {
 	}
 }
 
+func TestLoadConfigWarningsUseStderr(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tako.yaml")
+	if err := os.WriteFile(path, []byte(`
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+    password: hardcoded-password
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+`), 0600); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	var loadErr error
+	stdout, stderr := captureConfigOutput(t, func() {
+		_, loadErr = LoadConfig(path)
+	})
+	if loadErr != nil {
+		t.Fatalf("LoadConfig returned error: %v", loadErr)
+	}
+	if stdout != "" {
+		t.Fatalf("LoadConfig warning wrote to stdout: %q", stdout)
+	}
+	if !strings.Contains(stderr, "hardcoded password") {
+		t.Fatalf("stderr = %q, want hardcoded password warning", stderr)
+	}
+}
+
+func TestLoadEnvFileWarningsUseStderr(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("INVALID_LINE\nGOOD=value\n"), 0600); err != nil {
+		t.Fatalf("failed to write env file: %v", err)
+	}
+
+	var env map[string]string
+	var loadErr error
+	stdout, stderr := captureConfigOutput(t, func() {
+		env, loadErr = LoadEnvFile(path)
+	})
+	if loadErr != nil {
+		t.Fatalf("LoadEnvFile returned error: %v", loadErr)
+	}
+	if stdout != "" {
+		t.Fatalf("LoadEnvFile warning wrote to stdout: %q", stdout)
+	}
+	if !strings.Contains(stderr, "Invalid line") {
+		t.Fatalf("stderr = %q, want invalid line warning", stderr)
+	}
+	if env["GOOD"] != "value" {
+		t.Fatalf("GOOD = %q, want value", env["GOOD"])
+	}
+}
+
 func validValidationConfig() *Config {
 	return &Config{
 		Project: ProjectConfig{Name: "demo", Version: "1.0.0"},
@@ -267,4 +329,52 @@ func validValidationConfig() *Config {
 			},
 		},
 	}
+}
+
+func captureConfigOutput(t *testing.T, fn func()) (string, string) {
+	t.Helper()
+
+	originalStdout := os.Stdout
+	originalStderr := os.Stderr
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stdout pipe: %v", err)
+	}
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create stderr pipe: %v", err)
+	}
+
+	os.Stdout = stdoutWriter
+	os.Stderr = stderrWriter
+	defer func() {
+		os.Stdout = originalStdout
+		os.Stderr = originalStderr
+	}()
+
+	fn()
+
+	if err := stdoutWriter.Close(); err != nil {
+		t.Fatalf("failed to close stdout writer: %v", err)
+	}
+	if err := stderrWriter.Close(); err != nil {
+		t.Fatalf("failed to close stderr writer: %v", err)
+	}
+
+	stdout, err := io.ReadAll(stdoutReader)
+	if err != nil {
+		t.Fatalf("failed to read stdout: %v", err)
+	}
+	stderr, err := io.ReadAll(stderrReader)
+	if err != nil {
+		t.Fatalf("failed to read stderr: %v", err)
+	}
+	if err := stdoutReader.Close(); err != nil {
+		t.Fatalf("failed to close stdout reader: %v", err)
+	}
+	if err := stderrReader.Close(); err != nil {
+		t.Fatalf("failed to close stderr reader: %v", err)
+	}
+
+	return string(stdout), string(stderr)
 }
