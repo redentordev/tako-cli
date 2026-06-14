@@ -628,11 +628,13 @@ func runStateRepair(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Project: %s\n", cfg.Project.Name)
 	fmt.Printf("Environment: %s\n\n", envName)
 
-	repair, err := collectStateRepairNodes(cfg, envName, stateServer)
+	pool := ssh.NewPool()
+	defer pool.CloseAll()
+
+	repair, err := collectStateRepairNodesWithPool(pool, cfg, envName, stateServer)
 	if err != nil {
 		return err
 	}
-	defer closeStateRepairNodes(repair.nodes)
 
 	if len(repair.nodes) == 0 {
 		return fmt.Errorf("no reachable environment nodes found")
@@ -1252,6 +1254,7 @@ func sortedServiceNames[T any](services map[string]T) []string {
 type stateRepairNode struct {
 	name    string
 	client  *ssh.Client
+	cleanup func()
 	manager stateRepairStateManager
 	runtime stateRepairRuntimeManager
 }
@@ -1305,6 +1308,10 @@ type stateNodeActualCandidate struct {
 }
 
 func collectStateRepairNodes(cfg *config.Config, envName string, preferredServer string) (*stateRepairInventory, error) {
+	return collectStateRepairNodesWithPool(nil, cfg, envName, preferredServer)
+}
+
+func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName string, preferredServer string) (*stateRepairInventory, error) {
 	serverNames, err := orderedStateServerNames(cfg, envName, preferredServer)
 	if err != nil {
 		return nil, err
@@ -1326,7 +1333,7 @@ func collectStateRepairNodes(cfg *config.Config, envName string, preferredServer
 		}
 
 		fmt.Printf("Checking %s (%s)...\n", serverName, server.Host)
-		client, err := ssh.NewClientWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: cannot connect to %s: %v\n", serverName, err)
 			continue
@@ -1337,6 +1344,7 @@ func collectStateRepairNodes(cfg *config.Config, envName string, preferredServer
 		repair.nodes = append(repair.nodes, stateRepairNode{
 			name:    serverName,
 			client:  client,
+			cleanup: cleanup,
 			manager: manager,
 			runtime: runtime,
 		})
@@ -1420,7 +1428,9 @@ func collectStateRepairNodes(cfg *config.Config, envName string, preferredServer
 
 func closeStateRepairNodes(nodes []stateRepairNode) {
 	for _, node := range nodes {
-		if node.client != nil {
+		if node.cleanup != nil {
+			node.cleanup()
+		} else if node.client != nil {
 			_ = node.client.Close()
 		}
 	}

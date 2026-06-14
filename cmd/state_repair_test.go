@@ -172,6 +172,28 @@ func TestWriteStateRepairDocumentsFailsWhenAnyReachableHistoryWriteFails(t *test
 	}
 }
 
+func TestCloseStateRepairNodesUsesCleanupCallback(t *testing.T) {
+	cleaned := 0
+	closeStateRepairNodes([]stateRepairNode{
+		{
+			name: "node-a",
+			cleanup: func() {
+				cleaned++
+			},
+		},
+		{
+			name: "node-b",
+			cleanup: func() {
+				cleaned++
+			},
+		},
+	})
+
+	if cleaned != 2 {
+		t.Fatalf("cleanup calls = %d, want 2", cleaned)
+	}
+}
+
 func waitForStateRepairLeaseStarts(t *testing.T, started <-chan string, count int) {
 	t.Helper()
 	seen := map[string]bool{}
