@@ -89,3 +89,20 @@ jobs:
 Use `TAKO_HOST_KEY_MODE=strict` when the runner image already has trusted host
 keys. For first-time automation, run one manual bootstrap with `tofu` or install
 known hosts before switching CI to `strict`.
+
+## Proving the Workflow
+
+Before treating CI deploys as reliable, run the same flow from a temporary fresh
+clone with the mesh E2E harness:
+
+```bash
+TAKO_ENV_PASSPHRASE=... \
+scripts/mesh-e2e.sh --app-dir /path/to/app --env production --phases ci --yes
+```
+
+For the fuller laptop and CI proof, use:
+
+```bash
+TAKO_ENV_PASSPHRASE=... \
+scripts/mesh-e2e.sh --app-dir /path/to/app --env production --phases standard --yes
+```

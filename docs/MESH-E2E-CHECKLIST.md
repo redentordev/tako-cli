@@ -25,6 +25,43 @@ State repair         Divergent reachable nodes can be repaired from freshest sta
   preinstalled.
 - `TAKO_ENV_PASSPHRASE` set when testing env bundle push/pull.
 
+## Runnable Harness
+
+The manual flows below are captured in `scripts/mesh-e2e.sh`. The script builds
+the current CLI by default, runs commands from a real app repository, writes
+logs under `.tako/e2e/`, and uses temporary fresh clones for new-computer and CI
+checks.
+
+Safe preflight:
+
+```bash
+scripts/mesh-e2e.sh --app-dir /path/to/app --env production
+```
+
+Standard mutating proof:
+
+```bash
+TAKO_ENV_PASSPHRASE=... \
+scripts/mesh-e2e.sh --app-dir /path/to/app --env production --phases standard --yes
+```
+
+Full proof including two-node repair and a manually prepared offline-node run:
+
+```bash
+TAKO_ENV_PASSPHRASE=... \
+scripts/mesh-e2e.sh --app-dir /path/to/app --env production --phases full --yes
+```
+
+You can also run the harness through Make:
+
+```bash
+make mesh-e2e APP_DIR=/path/to/app ENV=production PHASES=standard ARGS=--yes
+```
+
+Mutating phases refuse to run unless `--yes` or `TAKO_E2E_CONFIRM=run` is set.
+The env phase backs up the local `.env`, verifies that `env pull --force`
+restores the same content, and restores the original file if the check fails.
+
 ## One-Node Flow
 
 ```bash

@@ -1,4 +1,4 @@
-.PHONY: build install test clean run help dev lint fmt build-all
+.PHONY: build install test clean run help dev lint fmt build-all mesh-e2e
 
 # Binary name
 BINARY_NAME=tako
@@ -91,6 +91,13 @@ test:
 test-short:
 	@echo "Running short tests..."
 	@go test -short -v ./...
+
+## mesh-e2e: Run meshed takod E2E harness (APP_DIR=. ENV=production PHASES=preflight ARGS=...)
+mesh-e2e:
+	@TAKO_E2E_APP_DIR="$(or $(APP_DIR),$(CURDIR))" \
+	 TAKO_E2E_ENVIRONMENT="$(or $(ENV),production)" \
+	 TAKO_E2E_PHASES="$(or $(PHASES),preflight)" \
+	 scripts/mesh-e2e.sh $(ARGS)
 
 ## lint: Run linter
 lint:
