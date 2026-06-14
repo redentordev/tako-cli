@@ -61,7 +61,7 @@ func CreateVolumeBackup(ctx context.Context, req BackupRequest) (*BackupInfo, er
 		return nil, fmt.Errorf("volume %s does not exist", fullVolumeName)
 	}
 
-	backupID := time.Now().UTC().Format("20060102-150405")
+	backupID := backupIDForRequest(req, time.Now())
 	backupFile := backupFileName(req.Volume, backupID)
 	if _, err := runDocker(
 		ctx,
@@ -234,6 +234,13 @@ func validateBackupRequest(req BackupRequest, requireVolume bool, requireBackupI
 		return fmt.Errorf("retentionDays cannot be negative")
 	}
 	return nil
+}
+
+func backupIDForRequest(req BackupRequest, now time.Time) string {
+	if req.BackupID != "" {
+		return req.BackupID
+	}
+	return now.UTC().Format("20060102-150405")
 }
 
 func backupDirectory(req BackupRequest) string {
