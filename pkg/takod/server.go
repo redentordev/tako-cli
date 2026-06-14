@@ -346,6 +346,11 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	normalizeReconcileProxyRequest(&request)
+	if err := validateReconcileProxyRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	response, err := ReconcileProxy(r.Context(), request)
 	if err != nil {
