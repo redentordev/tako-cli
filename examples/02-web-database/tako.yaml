@@ -24,7 +24,7 @@ environments:
           email: admin@example.com
         env:
           NODE_ENV: production
-          DATABASE_URL: postgresql://postgres:dbpassword123@postgres:5432/visitor_db
+          DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/visitor_db
 
       postgres:
         image: postgres:15
@@ -35,4 +35,4 @@ environments:
         env:
           POSTGRES_DB: visitor_db
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: dbpassword123
+          POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}

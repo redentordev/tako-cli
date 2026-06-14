@@ -99,7 +99,7 @@ The CLI analyzes environment variables to infer dependencies:
 ```yaml
 api:
   env:
-    DATABASE_URL: postgresql://postgres:secret123@postgres:5432/appdb
+    DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/appdb
     REDIS_URL: redis://redis:6379
 # Automatically infers: api depends on [postgres, redis]
 
@@ -145,6 +145,7 @@ The dependency resolver detects these patterns in environment variables:
 1. Set server host:
    ```bash
    export SERVER_HOST=your.server.ip
+   export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
    ```
 
 2. Update domain in `tako.yaml`
@@ -173,7 +174,8 @@ Use local PostgreSQL and Redis instances, then start the app services:
 ```bash
 cd api
 npm install
-export DATABASE_URL=postgresql://postgres:secret123@localhost:5432/appdb
+export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+export DATABASE_URL="postgresql://postgres:${POSTGRES_PASSWORD}@localhost:5432/appdb"
 export REDIS_URL=redis://localhost:6379
 npm start
 ```

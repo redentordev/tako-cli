@@ -235,6 +235,10 @@ actual assigned port for container publish and proxy rendering. This lets
 unrelated apps with common service names such as `web` share the same server
 without taking each other's mesh upstream port.
 
+For services without `proxy`, `port` is still the container port used by health
+checks and service-to-service networking, but it is not published on the host.
+This keeps databases, queues, and internal APIs private by default.
+
 ## Switching Computers
 
 ```bash
