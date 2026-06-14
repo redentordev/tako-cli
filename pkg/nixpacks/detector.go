@@ -1,10 +1,20 @@
 package nixpacks
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
+)
+
+var nixpacksCommandContext = exec.CommandContext
+
+const (
+	nixpacksCheckTimeout    = 10 * time.Second
+	nixpacksGenerateTimeout = 5 * time.Minute
+	nixpacksBuildTimeout    = 30 * time.Minute
 )
 
 // Framework represents a detected framework
@@ -81,9 +91,14 @@ func (d *Detector) GenerateDockerfile() error {
 		fmt.Printf("  Generating Dockerfile with Nixpacks...\n")
 	}
 
-	// Generate Dockerfile using nixpacks
-	cmd := exec.Command("nixpacks", "generate", d.projectPath, "--out", d.projectPath)
+	ctx, cancel := context.WithTimeout(context.Background(), nixpacksGenerateTimeout)
+	defer cancel()
+
+	cmd := nixpacksCommandContext(ctx, "nixpacks", "generate", d.projectPath, "--out", d.projectPath)
 	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("nixpacks generate timed out after %s", nixpacksGenerateTimeout)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to generate Dockerfile with nixpacks: %w\nOutput: %s", err, string(output))
 	}
@@ -112,12 +127,17 @@ func (d *Detector) BuildWithNixpacks(imageName string) error {
 		fmt.Printf("  Building with Nixpacks...\n")
 	}
 
-	// Build using nixpacks
-	cmd := exec.Command("nixpacks", "build", d.projectPath, "--name", imageName)
+	ctx, cancel := context.WithTimeout(context.Background(), nixpacksBuildTimeout)
+	defer cancel()
+
+	cmd := nixpacksCommandContext(ctx, "nixpacks", "build", d.projectPath, "--name", imageName)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("nixpacks build timed out after %s", nixpacksBuildTimeout)
+		}
 		return fmt.Errorf("failed to build with nixpacks: %w", err)
 	}
 
@@ -130,7 +150,10 @@ func (d *Detector) BuildWithNixpacks(imageName string) error {
 
 // isNixpacksInstalled checks if nixpacks CLI is available
 func (d *Detector) isNixpacksInstalled() bool {
-	cmd := exec.Command("nixpacks", "--version")
+	ctx, cancel := context.WithTimeout(context.Background(), nixpacksCheckTimeout)
+	defer cancel()
+
+	cmd := nixpacksCommandContext(ctx, "nixpacks", "--version")
 	err := cmd.Run()
 	return err == nil
 }
