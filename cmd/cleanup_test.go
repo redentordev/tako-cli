@@ -1,13 +1,42 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 )
+
+type sshClientRequest struct {
+	host     string
+	port     int
+	user     string
+	sshKey   string
+	password string
+}
+
+type fakeSSHClientProvider struct {
+	requests []sshClientRequest
+	err      error
+}
+
+func (p *fakeSSHClientProvider) GetOrCreateWithAuth(host string, port int, user string, keyPath string, password string) (*ssh.Client, error) {
+	p.requests = append(p.requests, sshClientRequest{
+		host:     host,
+		port:     port,
+		user:     user,
+		sshKey:   keyPath,
+		password: password,
+	})
+	if p.err != nil {
+		return nil, p.err
+	}
+	return nil, nil
+}
 
 func TestCollectCleanupNodesRunsConcurrentlyAndKeepsSortedOrder(t *testing.T) {
 	servers := map[string]config.ServerConfig{
@@ -60,6 +89,66 @@ func TestCollectCleanupNodesRecordsErrors(t *testing.T) {
 	}
 	if results[1].serverName != "node-b" || results[1].err != nil {
 		t.Fatalf("node-b should succeed: %#v", results[1])
+	}
+}
+
+func TestCleanupSingleNodeUsesProvidedPool(t *testing.T) {
+	provider := &fakeSSHClientProvider{}
+	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo"}}
+	server := config.ServerConfig{
+		Host:     "node-a.example.test",
+		Port:     2222,
+		User:     "deploy",
+		SSHKey:   "/tmp/id_ed25519",
+		Password: "fallback",
+	}
+	request := takod.CleanupRequest{Project: "demo", Environment: "production"}
+
+	called := false
+	response, err := cleanupSingleNodeWithExecutor(cfg, provider, server, request, func(client *ssh.Client, gotCfg *config.Config, gotRequest takod.CleanupRequest) (*takod.CleanupResponse, error) {
+		called = true
+		if gotCfg != cfg {
+			t.Fatal("executor received different config pointer")
+		}
+		if gotRequest.Project != "demo" || gotRequest.Environment != "production" {
+			t.Fatalf("cleanup request = %#v", gotRequest)
+		}
+		return &takod.CleanupResponse{ImagesRemoved: 1}, nil
+	})
+	if err != nil {
+		t.Fatalf("cleanupSingleNodeWithExecutor returned error: %v", err)
+	}
+	if !called {
+		t.Fatal("executor was not called")
+	}
+	if response == nil || response.ImagesRemoved != 1 {
+		t.Fatalf("response = %#v", response)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("pool requests = %#v, want one", provider.requests)
+	}
+	got := provider.requests[0]
+	if got.host != server.Host || got.port != server.Port || got.user != server.User || got.sshKey != server.SSHKey || got.password != server.Password {
+		t.Fatalf("pool request = %#v, want server config", got)
+	}
+}
+
+func TestCleanupSingleNodeReturnsPoolConnectionError(t *testing.T) {
+	provider := &fakeSSHClientProvider{err: errors.New("dial failed")}
+	called := false
+
+	_, err := cleanupSingleNodeWithExecutor(&config.Config{}, provider, config.ServerConfig{Host: "node-a.example.test"}, takod.CleanupRequest{}, func(*ssh.Client, *config.Config, takod.CleanupRequest) (*takod.CleanupResponse, error) {
+		called = true
+		return &takod.CleanupResponse{}, nil
+	})
+	if err == nil {
+		t.Fatal("cleanupSingleNodeWithExecutor returned nil, want connection error")
+	}
+	if called {
+		t.Fatal("executor should not run after pool connection error")
+	}
+	if got := err.Error(); got != "failed to connect: dial failed" {
+		t.Fatalf("error = %q", got)
 	}
 }
 
