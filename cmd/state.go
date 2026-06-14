@@ -217,11 +217,16 @@ type stateHistoryReadResult struct {
 func stateHistoryCandidatesFromResults(results []stateHistoryReadResult, quiet bool) ([]stateHistoryCandidate, error) {
 	histories := make([]stateHistoryCandidate, 0, len(results))
 	readErrors := make([]string, 0)
+	connectionErrors := make([]string, 0)
+	reachable := 0
 	for _, result := range results {
 		if !quiet {
 			fmt.Printf("Checking %s (%s)...\n", result.serverName, result.host)
 		}
 		if result.err != nil {
+			if result.readAttempted {
+				reachable++
+			}
 			if errors.Is(result.err, remotestate.ErrNotFound) {
 				if verbose {
 					fmt.Printf("No deployment history found on %s\n", result.serverName)
@@ -230,12 +235,15 @@ func stateHistoryCandidatesFromResults(results []stateHistoryReadResult, quiet b
 			}
 			if result.readAttempted {
 				readErrors = append(readErrors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+			} else {
+				connectionErrors = append(connectionErrors, fmt.Sprintf("%s: %v", result.serverName, result.err))
 			}
 			if !quiet || verbose {
 				fmt.Fprintf(os.Stderr, "Warning: cannot read state from %s: %v\n", result.serverName, result.err)
 			}
 			continue
 		}
+		reachable++
 
 		if !historyHasDeployments(result.history) {
 			if verbose {
@@ -253,6 +261,10 @@ func stateHistoryCandidatesFromResults(results []stateHistoryReadResult, quiet b
 				deploymentHistoryFreshness(result.history).Format(time.RFC3339),
 			)
 		}
+	}
+	if len(histories) == 0 && reachable == 0 && len(connectionErrors) > 0 {
+		sort.Strings(connectionErrors)
+		return nil, fmt.Errorf("failed to reach environment node(s): %s", strings.Join(connectionErrors, "; "))
 	}
 	if len(histories) == 0 && len(readErrors) > 0 {
 		sort.Strings(readErrors)
