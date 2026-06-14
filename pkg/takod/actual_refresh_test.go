@@ -14,7 +14,8 @@ func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
 		Project:     "demo",
 		Environment: "production",
 		Document:    stateDocumentDesired,
-		Content:     "{\"revisionId\":\"rev-1\"}\n",
+		RevisionID:  "rev-1",
+		Content:     "{\"project\":\"demo\",\"environment\":\"production\",\"revisionId\":\"rev-1\"}\n",
 	}); err != nil {
 		t.Fatalf("failed to write desired fixture: %v", err)
 	}
@@ -69,7 +70,8 @@ func TestRefreshActualStateDocumentsSkipsHeldLease(t *testing.T) {
 		Project:     "demo",
 		Environment: "production",
 		Document:    stateDocumentDesired,
-		Content:     "{\"revisionId\":\"rev-1\"}\n",
+		RevisionID:  "rev-1",
+		Content:     "{\"project\":\"demo\",\"environment\":\"production\",\"revisionId\":\"rev-1\"}\n",
 	}); err != nil {
 		t.Fatalf("failed to write desired fixture: %v", err)
 	}

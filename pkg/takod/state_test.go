@@ -15,7 +15,7 @@ func TestWriteAndReadStateDocumentArchivesDesiredRevision(t *testing.T) {
 		Environment: "production",
 		Document:    stateDocumentDesired,
 		RevisionID:  "20260613T120000Z_abc123",
-		Content:     "{\"ok\":true}\n",
+		Content:     "{\"project\":\"demo-app\",\"environment\":\"production\",\"revisionId\":\"20260613T120000Z_abc123\"}\n",
 	}
 
 	response, err := WriteStateDocument(context.Background(), dataDir, request)
@@ -69,7 +69,7 @@ func TestWriteAndReadNodeActualStateDocument(t *testing.T) {
 		Environment: "production",
 		Document:    stateDocumentActualNode,
 		Node:        "node-a",
-		Content:     "{\"node\":\"node-a\"}\n",
+		Content:     "{\"project\":\"demo\",\"environment\":\"production\",\"node\":\"node-a\"}\n",
 	}
 
 	if _, err := WriteStateDocument(context.Background(), dataDir, request); err != nil {
@@ -114,7 +114,7 @@ func TestWriteAndReadHistoryStateDocument(t *testing.T) {
 		Project:     "demo",
 		Environment: "production",
 		Document:    stateDocumentHistory,
-		Content:     "{\"deployments\":[]}\n",
+		Content:     "{\"projectName\":\"demo\",\"environment\":\"production\",\"deployments\":[]}\n",
 	}
 	if _, err := WriteStateDocument(context.Background(), dataDir, request); err != nil {
 		t.Fatalf("WriteStateDocument returned error: %v", err)
@@ -164,6 +164,32 @@ func TestWriteStateDocumentRejectsNonObjectContent(t *testing.T) {
 	}
 }
 
+func TestWriteStateDocumentRejectsProjectMismatch(t *testing.T) {
+	_, err := WriteStateDocument(context.Background(), t.TempDir(), StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentDesired,
+		RevisionID:  "rev_1",
+		Content:     `{"project":"other","environment":"production","revisionId":"rev_1"}`,
+	})
+	if err == nil || !strings.Contains(err.Error(), "project mismatch") {
+		t.Fatalf("expected project mismatch error, got %v", err)
+	}
+}
+
+func TestWriteStateDocumentRejectsNodeMismatch(t *testing.T) {
+	_, err := WriteStateDocument(context.Background(), t.TempDir(), StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentActualNode,
+		Node:        "node-a",
+		Content:     `{"project":"demo","environment":"production","node":"node-b"}`,
+	})
+	if err == nil || !strings.Contains(err.Error(), "node mismatch") {
+		t.Fatalf("expected node mismatch error, got %v", err)
+	}
+}
+
 func TestDeploymentStateDocumentRequiresRevisionID(t *testing.T) {
 	_, err := WriteStateDocument(context.Background(), t.TempDir(), StateDocumentRequest{
 		Project:     "demo",
@@ -181,7 +207,7 @@ func TestAppendStateEventNormalizesNewline(t *testing.T) {
 	request := StateDocumentRequest{
 		Project:     "demo",
 		Environment: "staging",
-		Content:     "{\"type\":\"deploy\"}\n\n",
+		Content:     "{\"type\":\"deploy\",\"project\":\"demo\",\"environment\":\"staging\"}\n\n",
 	}
 
 	response, err := AppendStateEvent(context.Background(), dataDir, request)
@@ -196,7 +222,7 @@ func TestAppendStateEventNormalizesNewline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read event log: %v", err)
 	}
-	if got, want := string(data), "{\"type\":\"deploy\"}\n"; got != want {
+	if got, want := string(data), "{\"type\":\"deploy\",\"project\":\"demo\",\"environment\":\"staging\"}\n"; got != want {
 		t.Fatalf("event log = %q, want %q", got, want)
 	}
 }
@@ -218,7 +244,7 @@ func TestStateDocumentValidationRejectsUnsafeNames(t *testing.T) {
 		Environment: "production",
 		Document:    stateDocumentDesired,
 		RevisionID:  "rev_123",
-		Content:     "{}",
+		Content:     `{"project":"demo","environment":"production","revisionId":"rev_123"}`,
 	}
 
 	for name, mutate := range map[string]func(*StateDocumentRequest){
@@ -242,7 +268,7 @@ func TestWriteStateDocumentRejectsEventOverwrite(t *testing.T) {
 		Project:     "demo",
 		Environment: "production",
 		Document:    stateDocumentEvent,
-		Content:     "{}",
+		Content:     `{"project":"demo","environment":"production"}`,
 	})
 	if err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("expected append-only event error, got %v", err)

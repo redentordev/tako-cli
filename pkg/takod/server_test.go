@@ -417,7 +417,7 @@ func TestHandleStateRejectsInvalidJSON(t *testing.T) {
 
 func TestHandleStateWritesAndReadsDocument(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
-	writeBody := `{"project":"demo","environment":"production","document":"desired","revisionId":"rev_1","content":"{\"ok\":true}\n"}`
+	writeBody := `{"project":"demo","environment":"production","document":"desired","revisionId":"rev_1","content":"{\"project\":\"demo\",\"environment\":\"production\",\"revisionId\":\"rev_1\"}\n"}`
 	writeReq := httptest.NewRequest(http.MethodPut, "/v1/state", bytes.NewBufferString(writeBody))
 	writeRecorder := httptest.NewRecorder()
 
@@ -438,7 +438,7 @@ func TestHandleStateWritesAndReadsDocument(t *testing.T) {
 	if err := json.NewDecoder(readRecorder.Body).Decode(&response); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if !response.Found || response.Content != "{\"ok\":true}\n" {
+	if !response.Found || response.Content != "{\"project\":\"demo\",\"environment\":\"production\",\"revisionId\":\"rev_1\"}\n" {
 		t.Fatalf("unexpected state response: %#v", response)
 	}
 }
