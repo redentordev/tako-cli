@@ -176,11 +176,8 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	if !isSafeRestartPolicy(req.Restart) {
 		return fmt.Errorf("invalid restart policy")
 	}
-	if req.EnvFile != "" && !strings.HasPrefix(req.EnvFile, "/") {
-		return fmt.Errorf("envFile must be an absolute path")
-	}
-	if req.EnvFile != "" && req.EnvFileContent != "" {
-		return fmt.Errorf("envFile and envFileContent cannot both be set")
+	if req.EnvFile != "" {
+		return fmt.Errorf("envFile path is not accepted; use envFileContent")
 	}
 	if len(req.EnvFileContent) > 1<<20 {
 		return fmt.Errorf("envFileContent exceeds 1 MiB")

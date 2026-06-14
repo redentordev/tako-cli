@@ -26,22 +26,15 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 
 	invalid := valid
-	invalid.EnvFile = "relative.env"
+	invalid.EnvFile = "/tmp/demo.env"
 	if err := validateReconcileServiceRequest(invalid); err == nil {
-		t.Fatalf("expected relative env file to be rejected")
+		t.Fatalf("expected external env file path to be rejected")
 	}
 
 	invalid = valid
 	invalid.Containers = []ContainerSpec{{}}
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected empty container name to be rejected")
-	}
-
-	invalid = valid
-	invalid.EnvFile = "/tmp/demo.env"
-	invalid.EnvFileContent = "TOKEN=value\n"
-	if err := validateReconcileServiceRequest(invalid); err == nil {
-		t.Fatalf("expected envFile and envFileContent together to be rejected")
 	}
 
 	invalid = valid
