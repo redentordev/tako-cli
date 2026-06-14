@@ -338,8 +338,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Found %d running service(s)\n", len(actualState))
 	}
 
+	planActualState := actualState
+	if deployService != "" {
+		planActualState = filterActualStateForServices(actualState, services)
+	}
+
 	// Compute reconciliation plan
-	plan := reconcile.ComputePlan(cfg.Project.Name, envName, services, actualState)
+	plan := reconcile.ComputePlan(cfg.Project.Name, envName, services, planActualState)
 
 	// Show plan to user
 	fmt.Println()
@@ -548,7 +553,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if !deploymentFailed {
-		if err := deploy.ReconcileTakodProxy(services); err != nil {
+		proxyServices := services
+		if deployService != "" && deployServer == "" {
+			proxyServices = cloneServiceMap(allServices)
+		}
+		if err := deploy.ReconcileTakodProxy(proxyServices); err != nil {
 			fmt.Printf("  ✗ proxy reconciliation failed: %v\n", err)
 			deploymentFailed = true
 			deploymentError = fmt.Errorf("proxy reconciliation failed: %w", err)
@@ -569,22 +578,29 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("deployment succeeded but failed to gather final actual state: %w", err)
 		}
 		finalActualState := reconcile.AggregateActualStateByServer(finalNodeActualState)
+		runtimeServices := services
+		runtimeImageRefs := imageRefs
+		if deployService != "" && deployServer == "" {
+			runtimeServices = cloneServiceMap(allServices)
+			runtimeImageRefs = mergeRuntimeImageRefs(cfg, envName, runtimeServices, imageRefs, finalActualState)
+		}
 		if err := persistTakodRuntimeState(
 			sshPool,
 			cfg,
 			envName,
 			serverNames,
 			"deploy",
-			services,
-			imageRefs,
+			runtimeServices,
+			runtimeImageRefs,
 			finalActualState,
 			finalNodeActualState,
 			gitInfoFromCommit(commitInfo),
 			"deploy.succeeded",
 			fmt.Sprintf("deployed %d service(s)", len(services)),
 			map[string]string{
-				"commit":   commitInfo.ShortHash,
-				"services": fmt.Sprintf("%d", len(services)),
+				"commit":          commitInfo.ShortHash,
+				"services":        fmt.Sprintf("%d", len(services)),
+				"desiredServices": fmt.Sprintf("%d", len(runtimeServices)),
 			},
 		); err != nil {
 			return fmt.Errorf("deployment succeeded but failed to persist takod state: %w", err)
@@ -824,4 +840,17 @@ func deployActualStateError(err error) error {
 
 func deployRemoteHistoryError(err error) error {
 	return fmt.Errorf("deployment succeeded but failed to save remote deployment history: %w", err)
+}
+
+func filterActualStateForServices(actualState map[string]*reconcile.ActualService, services map[string]config.ServiceConfig) map[string]*reconcile.ActualService {
+	if len(actualState) == 0 || len(services) == 0 {
+		return map[string]*reconcile.ActualService{}
+	}
+	filtered := make(map[string]*reconcile.ActualService, len(services))
+	for serviceName := range services {
+		if actual, ok := actualState[serviceName]; ok {
+			filtered[serviceName] = actual
+		}
+	}
+	return filtered
 }

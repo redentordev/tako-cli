@@ -9,6 +9,7 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/git"
+	"github.com/redentordev/tako-cli/pkg/reconcile"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 )
 
@@ -224,6 +225,60 @@ func TestRecordFailedDeploymentStateReturnsRemoteSaveError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to save failed remote deployment state") || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("error = %q, want remote save context", err)
+	}
+}
+
+func TestFilterActualStateForServicesScopesTargetedDeployPlan(t *testing.T) {
+	webActual := &reconcile.ActualService{Name: "web", Image: "demo/web:old", Replicas: 1}
+	actualState := map[string]*reconcile.ActualService{
+		"web": webActual,
+		"api": {Name: "api", Image: "demo/api:old", Replicas: 1},
+	}
+	services := map[string]config.ServiceConfig{
+		"web": {Build: "."},
+	}
+
+	got := filterActualStateForServices(actualState, services)
+	if len(got) != 1 {
+		t.Fatalf("filtered actual services = %d, want 1", len(got))
+	}
+	if got["web"] != webActual {
+		t.Fatalf("filtered web actual = %#v, want original web actual", got["web"])
+	}
+	if _, ok := got["api"]; ok {
+		t.Fatal("filtered actual state included unselected api service")
+	}
+}
+
+func TestMergeRuntimeImageRefsPreservesNonDeployedActualImages(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo", Version: "1.2.3"},
+	}
+	services := map[string]config.ServiceConfig{
+		"web":    {Build: "."},
+		"api":    {Build: "./api"},
+		"cache":  {Image: "redis:7"},
+		"worker": {Build: "./worker"},
+	}
+	deployedImageRefs := map[string]string{
+		"web": "demo/web:built",
+	}
+	actualState := map[string]*reconcile.ActualService{
+		"api":   {Name: "api", Image: "demo/api:old", Replicas: 1},
+		"cache": {Name: "cache", Image: "redis:6", Replicas: 1},
+	}
+
+	got := mergeRuntimeImageRefs(cfg, "production", services, deployedImageRefs, actualState)
+	want := map[string]string{
+		"web":    "demo/web:built",
+		"api":    "demo/api:old",
+		"cache":  "redis:6",
+		"worker": "demo/worker:1.2.3-production",
+	}
+	for serviceName, wantImage := range want {
+		if got[serviceName] != wantImage {
+			t.Fatalf("image ref for %s = %q, want %q", serviceName, got[serviceName], wantImage)
+		}
 	}
 }
 
