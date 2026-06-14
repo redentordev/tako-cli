@@ -295,7 +295,7 @@ install -m 0755 "$tmp" /usr/local/bin/tako
 }
 
 func (p *Provisioner) InstallTakodService(socket string, dataDir string, nodeName string) error {
-	binaryPath, _ := p.client.Execute("command -v tako 2>/dev/null || test -x /usr/local/bin/tako && echo /usr/local/bin/tako || true")
+	binaryPath, _ := p.client.Execute(takodBinaryPathCommand())
 	binaryPath = strings.TrimSpace(binaryPath)
 	if binaryPath == "" {
 		return fmt.Errorf("no server-side tako binary found; run setup with a release build or pass --takod-binary")
@@ -335,6 +335,10 @@ func (p *Provisioner) InstallTakodService(socket string, dataDir string, nodeNam
 		}
 	}
 	return nil
+}
+
+func takodBinaryPathCommand() string {
+	return "command -v tako 2>/dev/null || { test -x /usr/local/bin/tako && echo /usr/local/bin/tako; } || true"
 }
 
 func buildTakodSystemdUnit(binaryPath string, socket string, dataDir string, nodeName string, actualRefreshInterval string) string {
