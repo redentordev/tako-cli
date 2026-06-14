@@ -45,11 +45,19 @@ TAKO_ENV_PASSPHRASE=... \
 scripts/mesh-e2e.sh --app-dir /path/to/app --env production --phases standard --yes
 ```
 
-Full proof including two-node repair and a manually prepared offline-node run:
+Full proof including two-node repair and an automated offline-node run:
 
 ```bash
 TAKO_ENV_PASSPHRASE=... \
-scripts/mesh-e2e.sh --app-dir /path/to/app --env production --phases full --yes
+scripts/mesh-e2e.sh \
+  --app-dir /path/to/app \
+  --env production \
+  --phases full \
+  --offline-server node-b \
+  --offline-host 203.0.113.20 \
+  --offline-user deploy \
+  --offline-ssh-key ~/.ssh/tako_deploy \
+  --yes
 ```
 
 You can also run the harness through Make:
@@ -63,6 +71,14 @@ Deploy and env phases also fail early unless `.tako/` and `.env` are ignored
 and the app worktree is clean, matching `tako deploy`'s clean-check behavior.
 The env phase backs up the local `.env`, verifies that `env pull --force`
 restores the same content, and restores the original file if the check fails.
+
+The offline phase stops `takod` on the selected node through SSH, verifies that
+status degrades and drift/deploy fail closed while the node agent is
+unavailable, restarts `takod`, runs repair, and deploys again. If the phase
+fails after stopping the agent, the harness tries to restart it from the exit
+trap. Override `TAKO_E2E_OFFLINE_STOP_CMD`,
+`TAKO_E2E_OFFLINE_START_CMD`, or `TAKO_E2E_OFFLINE_STATUS_CMD` if your service
+manager is not systemd.
 
 ## One-Node Flow
 
@@ -140,23 +156,31 @@ Expected result:
 
 ## Offline-Node Flow
 
-Temporarily stop SSH or takod on one non-critical node, then run:
+Run the harness against one non-critical node:
 
 ```bash
-tako state status -e production
-tako drift -e production
-tako deploy -e production --yes
+TAKO_ENV_PASSPHRASE=... \
+scripts/mesh-e2e.sh \
+  --app-dir /path/to/app \
+  --env production \
+  --phases offline \
+  --offline-server node-b \
+  --offline-host 203.0.113.20 \
+  --offline-user deploy \
+  --offline-ssh-key ~/.ssh/tako_deploy \
+  --yes
 ```
 
 Expected result:
 
-- `state status` clearly reports the unreachable node and still shows best
+- `state status` clearly reports the unavailable node agent and still shows best
   known state from reachable nodes.
-- `drift` reports actual state from reachable nodes.
-- Deploy behavior follows `state.onUnreachableNode`; the default robust posture
-  is to block when a target node is unreachable.
+- `drift` and `deploy` fail closed while the target node agent is unavailable.
+- Deploy behavior follows `state.onUnreachableNode`; the default posture is to
+  block when a target node is unreachable.
 - Existing containers on the unreachable node keep serving their last accepted
   revision.
+- After `takod` restarts, `state repair` and `deploy` succeed again.
 
 ## State Repair Flow
 

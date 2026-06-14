@@ -16,6 +16,15 @@
 #   TAKO_E2E_CONFIRM=run      Required for setup/deploy/repair/env phases.
 #   TAKO_E2E_LOG_DIR          Directory for logs. Defaults outside app worktree.
 #   TAKO_E2E_KEEP_WORKDIR=1   Keep temporary fresh-clone workdirs.
+#   TAKO_E2E_OFFLINE_SERVER   Node name to stop for the offline/rejoin phase.
+#   TAKO_E2E_OFFLINE_HOST     SSH host for TAKO_E2E_OFFLINE_SERVER.
+#   TAKO_E2E_OFFLINE_USER     SSH user for TAKO_E2E_OFFLINE_SERVER.
+#   TAKO_E2E_OFFLINE_PORT     SSH port for TAKO_E2E_OFFLINE_SERVER. Defaults to 22.
+#   TAKO_E2E_OFFLINE_SSH_KEY  Optional SSH key for TAKO_E2E_OFFLINE_SERVER.
+#   TAKO_E2E_OFFLINE_SSH_OPTS Optional extra ssh options for the offline node.
+#   TAKO_E2E_OFFLINE_STOP_CMD Command that makes the node agent unavailable.
+#   TAKO_E2E_OFFLINE_START_CMD Command that restores the node agent.
+#   TAKO_E2E_OFFLINE_STATUS_CMD Command that succeeds when the node agent is back.
 
 set -Eeuo pipefail
 
@@ -28,6 +37,16 @@ PHASES="${TAKO_E2E_PHASES:-preflight}"
 TAKO_BIN="${TAKO_E2E_TAKO_BIN:-}"
 CONFIRM="${TAKO_E2E_CONFIRM:-}"
 KEEP_WORKDIR="${TAKO_E2E_KEEP_WORKDIR:-0}"
+OFFLINE_SERVER="${TAKO_E2E_OFFLINE_SERVER:-}"
+OFFLINE_HOST="${TAKO_E2E_OFFLINE_HOST:-}"
+OFFLINE_USER="${TAKO_E2E_OFFLINE_USER:-}"
+OFFLINE_PORT="${TAKO_E2E_OFFLINE_PORT:-22}"
+OFFLINE_SSH_KEY="${TAKO_E2E_OFFLINE_SSH_KEY:-}"
+OFFLINE_SSH_OPTS="${TAKO_E2E_OFFLINE_SSH_OPTS:-}"
+OFFLINE_STOP_CMD="${TAKO_E2E_OFFLINE_STOP_CMD:-sudo systemctl stop takod}"
+OFFLINE_START_CMD="${TAKO_E2E_OFFLINE_START_CMD:-sudo systemctl start takod}"
+OFFLINE_STATUS_CMD="${TAKO_E2E_OFFLINE_STATUS_CMD:-sudo systemctl is-active --quiet takod}"
+OFFLINE_RESTORE_NEEDED=0
 
 LOG_DIR=""
 STEP=0
@@ -46,6 +65,11 @@ Options:
   --tako-bin PATH     Existing tako binary to test.
   --yes               Allow mutating phases.
   --keep-workdir      Keep temporary fresh-clone workdirs.
+  --offline-server    Node name to stop for the offline/rejoin phase.
+  --offline-host      SSH host for the offline node.
+  --offline-user      SSH user for the offline node.
+  --offline-port      SSH port for the offline node. Defaults to 22.
+  --offline-ssh-key   SSH key for the offline node.
   --help, -h          Show this help.
 
 Phases:
@@ -56,7 +80,7 @@ Phases:
   new-computer    fresh clone, env pull, state pull, status, deploy.
   ci              fresh clone with CI env, env pull, state pull, status, deploy.
   repair          state status, state repair, state status.
-  offline         status, drift, deploy while you have manually taken a node down.
+  offline         stop one takod, prove fail-closed behavior, restart, repair, deploy.
   standard        preflight, one-node, env, new-computer, ci.
   full            standard plus two-node, repair, offline.
 
@@ -79,6 +103,10 @@ slug() {
 }
 
 cleanup() {
+  if declare -F restore_offline_node >/dev/null; then
+    restore_offline_node
+  fi
+
   if ((${#TEMP_DIRS[@]} == 0)); then
     return
   fi
@@ -123,6 +151,31 @@ while [[ $# -gt 0 ]]; do
     --keep-workdir)
       KEEP_WORKDIR="1"
       shift
+      ;;
+    --offline-server)
+      [[ $# -ge 2 ]] || die "--offline-server requires a value"
+      OFFLINE_SERVER="$2"
+      shift 2
+      ;;
+    --offline-host)
+      [[ $# -ge 2 ]] || die "--offline-host requires a value"
+      OFFLINE_HOST="$2"
+      shift 2
+      ;;
+    --offline-user)
+      [[ $# -ge 2 ]] || die "--offline-user requires a value"
+      OFFLINE_USER="$2"
+      shift 2
+      ;;
+    --offline-port)
+      [[ $# -ge 2 ]] || die "--offline-port requires a value"
+      OFFLINE_PORT="$2"
+      shift 2
+      ;;
+    --offline-ssh-key)
+      [[ $# -ge 2 ]] || die "--offline-ssh-key requires a value"
+      OFFLINE_SSH_KEY="$2"
+      shift 2
       ;;
     --help|-h)
       usage
@@ -265,6 +318,61 @@ require_passphrase() {
     die "phase '$phase' requires TAKO_ENV_PASSPHRASE for non-interactive env bundle restore"
 }
 
+ssh_offline_node() {
+  local remote_cmd="$1"
+  local args=("-p" "$OFFLINE_PORT" "-o" "BatchMode=yes")
+
+  if [[ -n "$OFFLINE_SSH_KEY" ]]; then
+    args+=("-i" "$OFFLINE_SSH_KEY")
+  fi
+  if [[ -n "$OFFLINE_SSH_OPTS" ]]; then
+    local extra_opts=()
+    read -r -a extra_opts <<<"$OFFLINE_SSH_OPTS"
+    args+=("${extra_opts[@]}")
+  fi
+
+  ssh "${args[@]}" "$OFFLINE_USER@$OFFLINE_HOST" "$remote_cmd"
+}
+
+restore_offline_node() {
+  if [[ "$OFFLINE_RESTORE_NEEDED" != "1" ]]; then
+    return
+  fi
+
+  note "Restoring offline node agent: $OFFLINE_SERVER"
+  if ! ssh_offline_node "$OFFLINE_START_CMD" >/dev/null 2>&1; then
+    echo "warning: failed to restore offline node $OFFLINE_SERVER with: $OFFLINE_START_CMD" >&2
+    return
+  fi
+  OFFLINE_RESTORE_NEEDED=0
+}
+
+require_offline_node_control() {
+  require_tool ssh
+  [[ -n "$OFFLINE_SERVER" ]] ||
+    die "phase 'offline' requires --offline-server or TAKO_E2E_OFFLINE_SERVER"
+  [[ -n "$OFFLINE_HOST" ]] ||
+    die "phase 'offline' requires --offline-host or TAKO_E2E_OFFLINE_HOST"
+  [[ -n "$OFFLINE_USER" ]] ||
+    die "phase 'offline' requires --offline-user or TAKO_E2E_OFFLINE_USER"
+}
+
+wait_for_offline_status() {
+  local wanted="$1"
+  local attempt
+
+  for attempt in $(seq 1 30); do
+    if ssh_offline_node "$OFFLINE_STATUS_CMD" >/dev/null 2>&1; then
+      [[ "$wanted" == "up" ]] && return 0
+    else
+      [[ "$wanted" == "down" ]] && return 0
+    fi
+    sleep 2
+  done
+
+  return 1
+}
+
 fresh_clone() {
   local label="$1"
   local temp_parent
@@ -378,11 +486,32 @@ phase_repair() {
 
 phase_offline() {
   require_confirm "offline"
+  require_offline_node_control
   require_deploy_ready_worktree "$APP_DIR"
-  note "offline phase expects one node to already be unreachable"
+  run_tako "offline baseline target status" state status --server "$OFFLINE_SERVER"
+
+  note "Stopping takod on $OFFLINE_SERVER"
+  ssh_offline_node "$OFFLINE_STOP_CMD" >/dev/null
+  OFFLINE_RESTORE_NEEDED=1
+  wait_for_offline_status down || die "offline node $OFFLINE_SERVER did not become unavailable"
+
   run_tako "offline state status" state status
-  run_tako "offline drift" drift
-  run_tako "offline deploy" deploy --yes
+
+  if run_tako_status "offline drift should fail closed" drift; then
+    die "drift unexpectedly succeeded while $OFFLINE_SERVER was unavailable"
+  fi
+  note "Drift failed closed while $OFFLINE_SERVER was unavailable"
+
+  if run_tako_status "offline deploy should fail closed" deploy --yes; then
+    die "deploy unexpectedly succeeded while $OFFLINE_SERVER was unavailable"
+  fi
+  note "Deploy failed closed while $OFFLINE_SERVER was unavailable"
+
+  restore_offline_node
+  wait_for_offline_status up || die "offline node $OFFLINE_SERVER did not come back"
+  run_tako "rejoined state status" state status
+  run_tako "rejoined state repair" state repair
+  run_tako "rejoined deploy" deploy --yes
 }
 
 expand_phases() {
@@ -426,7 +555,10 @@ main() {
   note "Environment: $ENVIRONMENT"
   note "Logs: $LOG_DIR"
 
-  mapfile -t phase_list < <(expand_phases "$PHASES")
+  phase_list=()
+  while IFS= read -r phase; do
+    [[ -n "$phase" ]] && phase_list+=("$phase")
+  done < <(expand_phases "$PHASES")
   [[ ${#phase_list[@]} -gt 0 ]] || die "no phases selected"
 
   for phase in "${phase_list[@]}"; do
