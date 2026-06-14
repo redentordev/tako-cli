@@ -487,7 +487,7 @@ func (c *Client) ExecuteWithInput(ctx context.Context, cmd string, input io.Read
 	if err != nil {
 		return "", fmt.Errorf("failed to create stdin pipe: %w", err)
 	}
-	var output bytes.Buffer
+	var output lockedBuffer
 	session.Stdout = &output
 	session.Stderr = &output
 
@@ -528,6 +528,23 @@ func (c *Client) ExecuteWithInput(ctx context.Context, cmd string, input io.Read
 		}
 		return output.String(), nil
 	}
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func withDefaultCommandDeadline(ctx context.Context) (context.Context, context.CancelFunc, bool) {

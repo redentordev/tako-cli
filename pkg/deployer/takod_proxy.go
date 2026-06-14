@@ -78,17 +78,16 @@ func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig)
 		return nil
 	}
 
-	dynamicConfig, hasPublicServices, err := d.renderTakodProxyDynamicConfig(services)
-	if err != nil {
-		return err
-	}
-
 	return runTakodNodeActions(targetServers, func(serverName string) error {
 		client, err := d.getEnvironmentClient(serverName)
 		if err != nil {
 			return err
 		}
 
+		dynamicConfig, hasPublicServices, err := d.renderTakodProxyDynamicConfigForNode(services, serverName)
+		if err != nil {
+			return err
+		}
 		if !hasPublicServices {
 			if err := d.removeTakodProxyConfig(client); err != nil {
 				return fmt.Errorf("failed to remove proxy config: %w", err)
@@ -106,7 +105,11 @@ func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig)
 	})
 }
 
-func (d *Deployer) renderTakodProxyDynamicConfig(services map[string]config.ServiceConfig) ([]byte, bool, error) {
+func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]config.ServiceConfig, proxyServerName string) ([]byte, bool, error) {
+	if strings.TrimSpace(proxyServerName) == "" {
+		return nil, false, fmt.Errorf("proxy server name is required")
+	}
+
 	httpConfig := traefikHTTPConfig{
 		Routers:     make(map[string]traefikRouter),
 		Services:    make(map[string]traefikService),
@@ -153,7 +156,7 @@ func (d *Deployer) renderTakodProxyDynamicConfig(services map[string]config.Serv
 
 		var upstreams []traefikServer
 		for _, assignment := range assignments {
-			url, err := d.meshUpstreamURL(assignment.ServerName, serviceName, assignment.Slot)
+			url, err := d.takodProxyUpstreamURL(proxyServerName, assignment.ServerName, serviceName, assignment.Slot, service.Port)
 			if err != nil {
 				return nil, false, err
 			}
@@ -197,6 +200,17 @@ func (d *Deployer) renderTakodProxyDynamicConfig(services map[string]config.Serv
 		return nil, false, fmt.Errorf("failed to render proxy dynamic config: %w", err)
 	}
 	return data, true, nil
+}
+
+func (d *Deployer) takodProxyUpstreamURL(proxyServerName string, upstreamServerName string, serviceName string, slot int, servicePort int) (string, error) {
+	if upstreamServerName == proxyServerName {
+		if servicePort <= 0 {
+			return "", fmt.Errorf("service %s has invalid local proxy port %d", serviceName, servicePort)
+		}
+		containerName := d.takodContainerName(serviceName, slot)
+		return "http://" + net.JoinHostPort(containerName, strconv.Itoa(servicePort)), nil
+	}
+	return d.meshUpstreamURL(upstreamServerName, serviceName, slot)
 }
 
 func proxyHealthCheckForService(service config.ServiceConfig) *traefikHealthCheck {

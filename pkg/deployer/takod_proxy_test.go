@@ -7,13 +7,13 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 )
 
-func TestRenderTakodProxyDynamicConfigUsesMeshUpstreams(t *testing.T) {
+func TestRenderTakodProxyDynamicConfigUsesLocalAndMeshUpstreams(t *testing.T) {
 	deploy := testProxyDeployer()
 	services := deploy.config.Environments["production"].Services
 
-	data, hasPublic, err := deploy.renderTakodProxyDynamicConfig(services)
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNode(services, "node-a")
 	if err != nil {
-		t.Fatalf("renderTakodProxyDynamicConfig returned error: %v", err)
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
 	}
 	if !hasPublic {
 		t.Fatal("expected public services to be detected")
@@ -24,7 +24,7 @@ func TestRenderTakodProxyDynamicConfigUsesMeshUpstreams(t *testing.T) {
 		"rule: Host(`example.com`)",
 		"entryPoints:",
 		"certResolver: letsencrypt",
-		"url: http://10.210.0.1:21001",
+		"url: http://demo_production_web_1:3000",
 		"url: http://10.210.0.2:21002",
 		"path: /health",
 		"interval: 15s",
@@ -35,6 +35,60 @@ func TestRenderTakodProxyDynamicConfigUsesMeshUpstreams(t *testing.T) {
 	}
 }
 
+func TestRenderTakodProxyDynamicConfigUsesLocalUpstreamForCurrentNode(t *testing.T) {
+	deploy := testProxyDeployer()
+	services := deploy.config.Environments["production"].Services
+
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNode(services, "node-b")
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
+	}
+	if !hasPublic {
+		t.Fatal("expected public services to be detected")
+	}
+
+	configText := string(data)
+	for _, expected := range []string{
+		"url: http://10.210.0.1:21001",
+		"url: http://demo_production_web_2:3000",
+	} {
+		if !strings.Contains(configText, expected) {
+			t.Fatalf("dynamic config missing %q:\n%s", expected, configText)
+		}
+	}
+}
+
+func TestRenderTakodProxyDynamicConfigUsesOnlyLocalUpstreamForOneNode(t *testing.T) {
+	deploy := testProxyDeployer()
+	deploy.config.Environments["production"] = config.EnvironmentConfig{
+		Servers: []string{"node-a"},
+		Services: map[string]config.ServiceConfig{
+			"web": {
+				Port:     3000,
+				Replicas: 1,
+				Proxy:    &config.ProxyConfig{Domain: "example.com"},
+			},
+		},
+	}
+	services := deploy.config.Environments["production"].Services
+
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNode(services, "node-a")
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
+	}
+	if !hasPublic {
+		t.Fatal("expected public services to be detected")
+	}
+
+	configText := string(data)
+	if !strings.Contains(configText, "url: http://demo_production_web_1:3000") {
+		t.Fatalf("dynamic config missing local upstream:\n%s", configText)
+	}
+	if strings.Contains(configText, "10.210.0.") {
+		t.Fatalf("one-node proxy config should not route through mesh IPs:\n%s", configText)
+	}
+}
+
 func TestRenderTakodProxyDynamicConfigSkipsScaleToZero(t *testing.T) {
 	deploy := testProxyDeployer()
 	services := deploy.config.Environments["production"].Services
@@ -42,9 +96,9 @@ func TestRenderTakodProxyDynamicConfigSkipsScaleToZero(t *testing.T) {
 	web.Replicas = 0
 	services["web"] = web
 
-	data, hasPublic, err := deploy.renderTakodProxyDynamicConfig(services)
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNode(services, "node-a")
 	if err != nil {
-		t.Fatalf("renderTakodProxyDynamicConfig returned error: %v", err)
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
 	}
 	if hasPublic {
 		t.Fatalf("expected no active public routes for scale-to-zero, got:\n%s", string(data))
@@ -59,9 +113,9 @@ func TestRenderTakodProxyDynamicConfigUsesServiceHealthCheckFallback(t *testing.
 	web.HealthCheck = config.HealthCheckConfig{Path: "/ready", Interval: "20s"}
 	services["web"] = web
 
-	data, hasPublic, err := deploy.renderTakodProxyDynamicConfig(services)
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNode(services, "node-a")
 	if err != nil {
-		t.Fatalf("renderTakodProxyDynamicConfig returned error: %v", err)
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
 	}
 	if !hasPublic {
 		t.Fatal("expected public services to be detected")
