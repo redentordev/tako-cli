@@ -1,0 +1,29 @@
+project:
+  name: pattern-cicd
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${TAKO_SERVER_HOST}
+    user: deploy
+    sshKey: ${TAKO_SSH_KEY}
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        build: .
+        port: 3000
+        replicas: 2
+        proxy:
+          domain: cicd.${TAKO_SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        env:
+          NODE_ENV: production
+        healthCheck:
+          path: /health
+          interval: 30s
+          timeout: 5s
+          retries: 3

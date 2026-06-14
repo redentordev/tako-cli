@@ -750,7 +750,7 @@ tako-cli/
 │   └── ...               # Other packages
 ├── internal/             # Internal packages
 │   └── state/            # Deployment state management
-├── examples/             # Example projects (25 examples)
+├── examples/             # Example projects and deployment templates
 ├── docs/                 # Documentation
 └── Makefile              # Build automation
 ```

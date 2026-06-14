@@ -9,7 +9,7 @@ We have ready-to-deploy examples covering common use cases:
 ### Deployment Pattern Templates
 | Example | Description | Features |
 |---------|-------------|----------|
-| [deployment-patterns](./deployment-patterns/) | Copyable production shapes | Prebuilt images, static sites, dynamic APIs, volumes, databases, workers, cron-style runners, Python, Go |
+| [deployment-patterns](./deployment-patterns/) | Copyable production shapes | Prebuilt images, static sites, APIs, volumes, databases, workers, cron-style runners, monorepos, stages, WebSockets, CI/CD, Python, Go |
 
 ### Web Frameworks & Applications
 | Example | Description | Features |
@@ -458,15 +458,12 @@ Before deploying to production:
 ## Contributing
 
 Have a great example to add? We'd love to see:
-- Django/Python examples
-- Go microservices
-- Ruby on Rails apps
-- PHP/Laravel applications
 - React/Vue/Angular SPAs
 - GraphQL APIs
-- WebSocket servers
-- Cron jobs
-- CI/CD integrations
+- Django applications
+- Message queues beyond Redis
+- Object storage patterns
+- Multi-region application shapes
 
 Submit a pull request with your example!
 
