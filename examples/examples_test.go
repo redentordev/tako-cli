@@ -118,6 +118,10 @@ func TestExamplesDoNotUseKnownDemoDatabasePasswords(t *testing.T) {
 		"postgres:secret123",
 		"POSTGRES_PASSWORD: secret123",
 		"MYSQL_ROOT_PASSWORD: secret\n",
+		"POSTGRES_PASSWORD: changeme",
+		"POSTGRES_PASSWORD=changeme",
+		":changeme@",
+		"changeme123",
 		"console.log(`Database: ${process.env.DATABASE_URL}`)",
 	}
 
@@ -132,9 +136,14 @@ func TestExamplesDoNotUseKnownDemoDatabasePasswords(t *testing.T) {
 			}
 			return nil
 		}
-		switch filepath.Ext(path) {
-		case ".js", ".md", ".yaml", ".yml":
-		default:
+		shouldScan := entry.Name() == ".env.example"
+		if !shouldScan {
+			switch filepath.Ext(path) {
+			case ".js", ".md", ".yaml", ".yml":
+				shouldScan = true
+			}
+		}
+		if !shouldScan {
 			return nil
 		}
 		data, err := os.ReadFile(path)
