@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/redentordev/tako-cli/pkg/git"
 )
 
 func TestIsNonInteractiveAcceptsTruthyEnvValues(t *testing.T) {
@@ -108,4 +110,80 @@ func TestDeployRemoteHistoryErrorFailsSuccessfulRuntimeMutation(t *testing.T) {
 			t.Fatalf("error = %q, want %q", err, want)
 		}
 	}
+}
+
+func TestResolveDeployCommitInfoRejectsDirtyWorktree(t *testing.T) {
+	reader := fakeDeployGitReader{
+		repository: true,
+		dirty:      true,
+		status:     " M main.go\n?? new.txt\n",
+	}
+
+	_, err := resolveDeployCommitInfo(reader)
+	if err == nil {
+		t.Fatal("resolveDeployCommitInfo should reject dirty worktrees")
+	}
+	for _, want := range []string{"cannot deploy with uncommitted changes", "commit, stash, or discard", "M main.go", "?? new.txt"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestResolveDeployCommitInfoReturnsCleanCommitInfo(t *testing.T) {
+	want := &git.CommitInfo{
+		Hash:      "abcdef",
+		ShortHash: "abc",
+		Branch:    "main",
+		Message:   "deploy me",
+		Author:    "redentor",
+	}
+	reader := fakeDeployGitReader{
+		repository: true,
+		commitInfo: want,
+	}
+
+	got, err := resolveDeployCommitInfo(reader)
+	if err != nil {
+		t.Fatalf("resolveDeployCommitInfo returned error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("commitInfo = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveDeployCommitInfoRequiresGitRepository(t *testing.T) {
+	_, err := resolveDeployCommitInfo(fakeDeployGitReader{})
+	if err == nil {
+		t.Fatal("resolveDeployCommitInfo should reject non-git repositories")
+	}
+	if !strings.Contains(err.Error(), "not a Git repository") {
+		t.Fatalf("error = %q, want git repository guidance", err)
+	}
+}
+
+type fakeDeployGitReader struct {
+	repository bool
+	dirty      bool
+	status     string
+	commitInfo *git.CommitInfo
+}
+
+func (f fakeDeployGitReader) IsRepository() bool {
+	return f.repository
+}
+
+func (f fakeDeployGitReader) HasUncommittedChanges() (bool, error) {
+	return f.dirty, nil
+}
+
+func (f fakeDeployGitReader) GetStatus() (string, error) {
+	return f.status, nil
+}
+
+func (f fakeDeployGitReader) GetCommitInfo(_ string) (*git.CommitInfo, error) {
+	if f.commitInfo == nil {
+		return nil, errors.New("missing commit")
+	}
+	return f.commitInfo, nil
 }

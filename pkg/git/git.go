@@ -1,9 +1,7 @@
 package git
 
 import (
-	"bufio"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 )
@@ -115,45 +113,6 @@ func (c *Client) GetStatus() (string, error) {
 		return "", fmt.Errorf("failed to get git status: %w", err)
 	}
 	return string(output), nil
-}
-
-// AddAll stages all changes
-func (c *Client) AddAll() error {
-	cmd := exec.Command("git", "add", ".")
-	cmd.Dir = c.workDir
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to stage changes: %w", err)
-	}
-	return nil
-}
-
-// Commit creates a commit with the given message
-func (c *Client) Commit(message string) error {
-	cmd := exec.Command("git", "commit", "-m", message)
-	cmd.Dir = c.workDir
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create commit: %w", err)
-	}
-	return nil
-}
-
-// PromptCommitMessage prompts the user for a commit message
-func PromptCommitMessage() (string, error) {
-	fmt.Println("\nYou have uncommitted changes. Please enter a commit message:")
-	fmt.Print("> ")
-
-	reader := bufio.NewReader(os.Stdin)
-	message, err := reader.ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("failed to read input: %w", err)
-	}
-
-	message = strings.TrimSpace(message)
-	if message == "" {
-		return "", fmt.Errorf("commit message cannot be empty")
-	}
-
-	return message, nil
 }
 
 // GetCommitInfo returns formatted commit information
