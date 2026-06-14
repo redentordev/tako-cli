@@ -1,6 +1,9 @@
 package updater
 
 import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -155,18 +158,24 @@ func DownloadUpdate(version string) error {
 		return fmt.Errorf("download failed with status %d", resp.StatusCode)
 	}
 
-	// Create temporary file
 	out, err := os.Create(tmpFile)
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %w", err)
 	}
-	defer out.Close()
 
-	// Copy download to file
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
+	if _, err = io.Copy(out, resp.Body); err != nil {
+		_ = out.Close()
 		os.Remove(tmpFile)
 		return fmt.Errorf("failed to save update: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmpFile)
+		return fmt.Errorf("failed to close temporary update file: %w", err)
+	}
+
+	if err := verifyDownloadedBinary(client, version, binaryName, tmpFile); err != nil {
+		os.Remove(tmpFile)
+		return err
 	}
 
 	// Make executable
@@ -196,6 +205,87 @@ func DownloadUpdate(version string) error {
 	fmt.Printf("✓ Successfully upgraded to Tako CLI %s\n", version)
 	fmt.Println("Please restart your terminal or run 'tako --version' to verify")
 
+	return nil
+}
+
+func verifyDownloadedBinary(client *http.Client, version string, binaryName string, path string) error {
+	expected, err := downloadExpectedChecksum(client, version, binaryName)
+	if err != nil {
+		return err
+	}
+	if err := verifyFileChecksum(path, expected); err != nil {
+		return fmt.Errorf("downloaded %s failed checksum verification: %w", binaryName, err)
+	}
+	return nil
+}
+
+func downloadExpectedChecksum(client *http.Client, version string, binaryName string) (string, error) {
+	url := fmt.Sprintf(downloadURL, repoOwner, repoName, version, "checksums.txt")
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("failed to download checksums.txt: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("checksums.txt download failed with status %d", resp.StatusCode)
+	}
+
+	const maxChecksumManifestBytes = 1 << 20
+	limited := io.LimitReader(resp.Body, maxChecksumManifestBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return "", fmt.Errorf("failed to read checksums.txt: %w", err)
+	}
+	if len(data) > maxChecksumManifestBytes {
+		return "", fmt.Errorf("checksums.txt is larger than %d bytes", maxChecksumManifestBytes)
+	}
+
+	checksum, err := parseChecksumManifest(string(data), binaryName)
+	if err != nil {
+		return "", err
+	}
+	return checksum, nil
+}
+
+func parseChecksumManifest(manifest string, binaryName string) (string, error) {
+	scanner := bufio.NewScanner(strings.NewReader(manifest))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		name := strings.TrimPrefix(fields[1], "*")
+		if name != binaryName {
+			continue
+		}
+		checksum := strings.ToLower(fields[0])
+		if _, err := hex.DecodeString(checksum); err != nil || len(checksum) != sha256.Size*2 {
+			return "", fmt.Errorf("checksum for %s is not a valid SHA-256 digest", binaryName)
+		}
+		return checksum, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("failed to parse checksums.txt: %w", err)
+	}
+	return "", fmt.Errorf("checksum for %s not found in checksums.txt", binaryName)
+}
+
+func verifyFileChecksum(path string, expected string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+	actual := hex.EncodeToString(hash.Sum(nil))
+	if !strings.EqualFold(actual, expected) {
+		return fmt.Errorf("checksum mismatch: expected %s, got %s", strings.ToLower(expected), actual)
+	}
 	return nil
 }
 
