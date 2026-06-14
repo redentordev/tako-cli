@@ -120,30 +120,14 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	stateManager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
 
 	// Determine which deployment to rollback to
-	var targetDeployment *remotestate.DeploymentState
-
 	if len(args) > 0 {
-		// Rollback to specific deployment ID
-		deploymentID := args[0]
-		fmt.Printf("\n=== Rolling back to deployment: %s ===\n\n", deploymentID)
-
-		targetDeployment, err = deploymentFromHistory(historySource.history, deploymentID)
-		if err != nil {
-			return fmt.Errorf("failed to find deployment %s: %w", deploymentID, err)
-		}
+		fmt.Printf("\n=== Rolling back to deployment: %s ===\n\n", args[0])
 	} else {
-		// Rollback to most recent successful deployment
 		fmt.Printf("\n=== Rolling back to previous successful deployment ===\n\n")
-
-		targetDeployment, err = latestSuccessfulDeploymentFromHistory(historySource.history)
-		if err != nil {
-			return fmt.Errorf("failed to find previous deployment: %w", err)
-		}
 	}
-
-	// Verify target deployment has the requested service
-	if _, exists := targetDeployment.Services[rollbackService]; !exists {
-		return fmt.Errorf("service %s not found in deployment %s", rollbackService, targetDeployment.ID)
+	targetDeployment, err := selectRollbackTargetFromHistory(historySource.history, firstArg(args), rollbackService)
+	if err != nil {
+		return err
 	}
 
 	// Display deployment info
@@ -207,9 +191,8 @@ func runRollback(cmd *cobra.Command, args []string) error {
 
 	rollbackDuration := time.Since(startTime)
 
-	// Mark this deployment as rolled back in history
-	targetDeployment.Status = remotestate.StatusRolledBack
-	if err := stateManager.SaveDeployment(targetDeployment); err != nil {
+	rollbackDeployment := buildRollbackDeployment(cfg, envName, server.Host, startTime, rollbackDuration, targetDeployment, rollbackService, serviceState)
+	if err := stateManager.SaveDeployment(rollbackDeployment); err != nil {
 		return rollbackRemoteHistoryError(err)
 	}
 
@@ -267,10 +250,12 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("rollback succeeded but failed to load remote deployment history for replication: %w", err)
 		}
-		if err := replicator.ReplicateDeployment(targetDeployment, history); err != nil {
+		if err := replicator.ReplicateDeployment(rollbackDeployment, history); err != nil {
 			return fmt.Errorf("rollback succeeded but failed to replicate remote deployment history: %w", err)
 		}
 	}
+
+	saveLocalRollbackState(cfg, envName, envServers, rollbackDeployment, rollbackService, targetDeployment.ID, verbose)
 
 	// Send success notification
 	if notifier != nil {
@@ -320,18 +305,129 @@ func deploymentFromHistory(history *remotestate.DeploymentHistory, deploymentID 
 	return nil, fmt.Errorf("deployment %s not found", deploymentID)
 }
 
+func firstArg(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
+}
+
+func selectRollbackTargetFromHistory(history *remotestate.DeploymentHistory, deploymentID string, serviceName string) (*remotestate.DeploymentState, error) {
+	if deploymentID != "" {
+		deployment, err := deploymentFromHistory(history, deploymentID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find deployment %s: %w", deploymentID, err)
+		}
+		if err := validateRollbackTarget(deployment, serviceName); err != nil {
+			return nil, err
+		}
+		return deployment, nil
+	}
+	deployment, err := previousStableServiceDeploymentFromHistory(history, serviceName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find previous deployment: %w", err)
+	}
+	return deployment, nil
+}
+
+func validateRollbackTarget(deployment *remotestate.DeploymentState, serviceName string) error {
+	if deployment == nil {
+		return fmt.Errorf("deployment is nil")
+	}
+	if !isRollbackStableStatus(deployment.Status) {
+		return fmt.Errorf("deployment %s has status %s and is not a stable rollback target", deployment.ID, deployment.Status)
+	}
+	if _, exists := deployment.Services[serviceName]; !exists {
+		return fmt.Errorf("service %s not found in deployment %s", serviceName, deployment.ID)
+	}
+	return nil
+}
+
+func previousStableServiceDeploymentFromHistory(history *remotestate.DeploymentHistory, serviceName string) (*remotestate.DeploymentState, error) {
+	deployments := listDeploymentsFromHistory(history, &remotestate.HistoryOptions{
+		Limit:         0,
+		IncludeFailed: true,
+	})
+	seenCurrentServiceDeployment := false
+	for _, deployment := range deployments {
+		if deployment == nil {
+			continue
+		}
+		if _, exists := deployment.Services[serviceName]; !exists {
+			continue
+		}
+		if !seenCurrentServiceDeployment {
+			seenCurrentServiceDeployment = true
+			continue
+		}
+		if !isRollbackStableStatus(deployment.Status) {
+			continue
+		}
+		return deployment, nil
+	}
+	return nil, fmt.Errorf("no previous stable deployment found for service %s", serviceName)
+}
+
+func isRollbackStableStatus(status remotestate.DeploymentStatus) bool {
+	return status == remotestate.StatusSuccess || status == remotestate.StatusRolledBack
+}
+
 func rollbackRemoteHistoryError(err error) error {
 	return fmt.Errorf("rollback succeeded but failed to update remote deployment history: %w", err)
 }
 
-func latestSuccessfulDeploymentFromHistory(history *remotestate.DeploymentHistory) (*remotestate.DeploymentState, error) {
-	deployments := listDeploymentsFromHistory(history, &remotestate.HistoryOptions{
-		Status:        remotestate.StatusSuccess,
-		Limit:         1,
-		IncludeFailed: false,
-	})
-	if len(deployments) == 0 {
-		return nil, fmt.Errorf("no successful deployments found")
+func buildRollbackDeployment(
+	cfg *config.Config,
+	envName string,
+	host string,
+	startTime time.Time,
+	duration time.Duration,
+	targetDeployment *remotestate.DeploymentState,
+	serviceName string,
+	serviceState remotestate.ServiceState,
+) *remotestate.DeploymentState {
+	return &remotestate.DeploymentState{
+		Timestamp:      startTime,
+		ProjectName:    cfg.Project.Name,
+		Environment:    envName,
+		Version:        targetDeployment.Version,
+		Status:         remotestate.StatusRolledBack,
+		Services:       map[string]remotestate.ServiceState{serviceName: serviceState},
+		User:           remotestate.GetCurrentUser(),
+		Host:           host,
+		Duration:       duration,
+		Message:        fmt.Sprintf("rolled back %s to deployment %s", serviceName, targetDeployment.ID),
+		GitCommit:      targetDeployment.GitCommit,
+		GitCommitShort: targetDeployment.GitCommitShort,
+		GitBranch:      targetDeployment.GitBranch,
+		GitCommitMsg:   targetDeployment.GitCommitMsg,
+		GitAuthor:      targetDeployment.GitAuthor,
+		CLIVersion:     Version,
+		CLICommit:      GitCommit,
 	}
-	return deployments[0], nil
+}
+
+func saveLocalRollbackState(cfg *config.Config, envName string, serverNames []string, deployment *remotestate.DeploymentState, serviceName string, targetDeploymentID string, verbose bool) {
+	localStateMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+	if err != nil {
+		if verbose {
+			fmt.Printf("Warning: failed to initialize local state for rollback: %v\n", err)
+		}
+		return
+	}
+	localDeployment := &localstate.DeploymentState{
+		DeploymentID:    fmt.Sprintf("rollback-%s", deployment.Timestamp.Format("20060102-150405")),
+		Timestamp:       deployment.Timestamp,
+		Environment:     envName,
+		Mode:            cfg.GetRuntimeMode(),
+		Servers:         append([]string(nil), serverNames...),
+		Status:          string(remotestate.StatusRolledBack),
+		DurationSeconds: int(deployment.Duration.Seconds()),
+		GitCommit:       deployment.GitCommit,
+		TriggeredBy:     remotestate.GetCurrentUser(),
+		Notes:           fmt.Sprintf("Rolled back %s to deployment %s", serviceName, targetDeploymentID),
+	}
+	if err := localStateMgr.SaveDeployment(localDeployment); err != nil && verbose {
+		fmt.Printf("Warning: failed to save local rollback state: %v\n", err)
+	}
 }
