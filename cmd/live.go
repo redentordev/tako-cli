@@ -78,7 +78,7 @@ func runLive(cmd *cobra.Command, args []string) error {
 	}
 
 	results := runMaintenanceNodeActions(cfg.Servers, targetServers, func(_ string, server config.ServerConfig) error {
-		return disableMaintenanceOnNode(cfg, server, socket, envName, liveService, request)
+		return disableMaintenanceOnNode(cfg, sshPool, server, socket, envName, liveService, request)
 	})
 	nodeErrors := printMaintenanceNodeResults("Disabling", "disabled", results)
 	if len(nodeErrors) > 0 {
@@ -92,28 +92,15 @@ func runLive(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func disableMaintenanceOnNode(cfg *config.Config, server config.ServerConfig, socket string, envName string, serviceName string, request takod.ReconcileServiceRequest) error {
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     server.Host,
-		Port:     server.Port,
-		User:     server.User,
-		SSHKey:   server.SSHKey,
-		Password: server.Password,
+func disableMaintenanceOnNode(cfg *config.Config, pool sshClientProvider, server config.ServerConfig, socket string, envName string, serviceName string, request takod.ReconcileServiceRequest) error {
+	return runMaintenanceWithClient(pool, server, func(client *ssh.Client) error {
+		if _, err := takodclient.RequestJSON(client, socket, "POST", "/v1/reconcile-service", request); err != nil {
+			return fmt.Errorf("failed to remove maintenance container: %w", err)
+		}
+		name := maintenanceProxyConfigFileName(cfg.Project.Name, envName, serviceName)
+		if _, err := takodclient.RequestJSON(client, socket, "DELETE", takodclient.ProxyFileEndpoint(name), nil); err != nil {
+			return fmt.Errorf("failed to remove maintenance proxy config: %w", err)
+		}
+		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
-	}
-	defer client.Close()
-
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
-	}
-	if _, err := takodclient.RequestJSON(client, socket, "POST", "/v1/reconcile-service", request); err != nil {
-		return fmt.Errorf("failed to remove maintenance container: %w", err)
-	}
-	name := maintenanceProxyConfigFileName(cfg.Project.Name, envName, serviceName)
-	if _, err := takodclient.RequestJSON(client, socket, "DELETE", takodclient.ProxyFileEndpoint(name), nil); err != nil {
-		return fmt.Errorf("failed to remove maintenance proxy config: %w", err)
-	}
-	return nil
 }

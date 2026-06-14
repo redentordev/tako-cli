@@ -497,7 +497,7 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	}
 
 	results := runMaintenanceNodeActions(cfg.Servers, targetServers, func(_ string, server config.ServerConfig) error {
-		return enableMaintenanceOnNode(cfg, server, socket, envName, maintenanceService, dynamicConfig, request)
+		return enableMaintenanceOnNode(cfg, sshPool, server, socket, envName, maintenanceService, dynamicConfig, request)
 	})
 	nodeErrors := printMaintenanceNodeResults("Enabling", "enabled", results)
 	if len(nodeErrors) > 0 {
@@ -572,29 +572,27 @@ func printMaintenanceNodeResults(actionLabel string, successLabel string, result
 	return nodeErrors
 }
 
-func enableMaintenanceOnNode(cfg *config.Config, server config.ServerConfig, socket string, envName string, serviceName string, dynamicConfig []byte, request takod.ReconcileServiceRequest) error {
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     server.Host,
-		Port:     server.Port,
-		User:     server.User,
-		SSHKey:   server.SSHKey,
-		Password: server.Password,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
+func runMaintenanceWithClient(pool sshClientProvider, server config.ServerConfig, execute func(*ssh.Client) error) error {
+	if pool == nil {
+		return fmt.Errorf("ssh pool is not initialized")
 	}
-	defer client.Close()
-
-	if err := client.Connect(); err != nil {
+	client, err := pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
-	if err := writeMaintenanceProxyConfig(client, socket, cfg.Project.Name, envName, serviceName, dynamicConfig); err != nil {
-		return fmt.Errorf("failed to write maintenance proxy config: %w", err)
-	}
-	if _, err := takodclient.RequestJSON(client, socket, "POST", "/v1/reconcile-service", request); err != nil {
-		return fmt.Errorf("failed to reconcile maintenance container: %w", err)
-	}
-	return nil
+	return execute(client)
+}
+
+func enableMaintenanceOnNode(cfg *config.Config, pool sshClientProvider, server config.ServerConfig, socket string, envName string, serviceName string, dynamicConfig []byte, request takod.ReconcileServiceRequest) error {
+	return runMaintenanceWithClient(pool, server, func(client *ssh.Client) error {
+		if err := writeMaintenanceProxyConfig(client, socket, cfg.Project.Name, envName, serviceName, dynamicConfig); err != nil {
+			return fmt.Errorf("failed to write maintenance proxy config: %w", err)
+		}
+		if _, err := takodclient.RequestJSON(client, socket, "POST", "/v1/reconcile-service", request); err != nil {
+			return fmt.Errorf("failed to reconcile maintenance container: %w", err)
+		}
+		return nil
+	})
 }
 
 func renderMaintenanceProxyConfig(project string, environment string, serviceName string, proxy *config.ProxyConfig, containerName string) ([]byte, error) {
