@@ -18,6 +18,8 @@ import (
 	"golang.org/x/term"
 )
 
+const DefaultCommandTimeout = 30 * time.Minute
+
 // Client wraps an SSH connection with additional functionality
 type Client struct {
 	config    *ssh.ClientConfig
@@ -398,6 +400,9 @@ func (c *Client) Execute(cmd string) (string, error) {
 
 // ExecuteWithContext runs a command with context support for cancellation
 func (c *Client) ExecuteWithContext(ctx context.Context, cmd string) (string, error) {
+	ctx, cancel, defaultDeadline := withDefaultCommandDeadline(ctx)
+	defer cancel()
+
 	conn, err := c.getConnection()
 	if err != nil {
 		return "", err
@@ -424,7 +429,10 @@ func (c *Client) ExecuteWithContext(ctx context.Context, cmd string) (string, er
 	// Wait for completion or context cancellation
 	select {
 	case <-ctx.Done():
-		session.Signal(ssh.SIGTERM)
+		_ = session.Signal(ssh.SIGTERM)
+		if defaultDeadline && ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("remote command timed out after %s", DefaultCommandTimeout)
+		}
 		return "", ctx.Err()
 	case res := <-resultChan:
 		if res.err != nil {
@@ -461,6 +469,9 @@ func (c *Client) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
 // ExecuteWithInput runs a command on the remote server, streams input to stdin,
 // and returns combined stdout/stderr output.
 func (c *Client) ExecuteWithInput(ctx context.Context, cmd string, input io.Reader) (string, error) {
+	ctx, cancel, defaultDeadline := withDefaultCommandDeadline(ctx)
+	defer cancel()
+
 	conn, err := c.getConnection()
 	if err != nil {
 		return "", err
@@ -504,6 +515,9 @@ func (c *Client) ExecuteWithInput(ctx context.Context, cmd string, input io.Read
 	select {
 	case <-ctx.Done():
 		_ = session.Signal(ssh.SIGTERM)
+		if defaultDeadline && ctx.Err() == context.DeadlineExceeded {
+			return output.String(), fmt.Errorf("remote command timed out after %s", DefaultCommandTimeout)
+		}
 		return output.String(), ctx.Err()
 	case err := <-waitCh:
 		if copyErr := <-copyErrCh; copyErr != nil && err == nil {
@@ -513,6 +527,38 @@ func (c *Client) ExecuteWithInput(ctx context.Context, cmd string, input io.Read
 			return output.String(), fmt.Errorf("command failed: %w", err)
 		}
 		return output.String(), nil
+	}
+}
+
+func withDefaultCommandDeadline(ctx context.Context) (context.Context, context.CancelFunc, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}, false
+	}
+	defaultCtx, cancel := context.WithTimeout(ctx, DefaultCommandTimeout)
+	return defaultCtx, cancel, true
+}
+
+func waitSessionWithContext(ctx context.Context, session *ssh.Session) error {
+	ctx, cancel, defaultDeadline := withDefaultCommandDeadline(ctx)
+	defer cancel()
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- session.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		_ = session.Signal(ssh.SIGTERM)
+		if defaultDeadline && ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("remote command timed out after %s", DefaultCommandTimeout)
+		}
+		return ctx.Err()
+	case err := <-waitCh:
+		return err
 	}
 }
 
@@ -813,11 +859,6 @@ func (c *Client) UploadReader(reader io.Reader, remotePath string, mode os.FileM
 
 // CopyFileWithMode uploads a file to the remote server with specific permissions
 func (c *Client) CopyFileWithMode(localPath, remotePath string, mode os.FileMode) error {
-	conn, err := c.getConnection()
-	if err != nil {
-		return err
-	}
-
 	// Read file content
 	content, err := os.ReadFile(localPath)
 	if err != nil {
@@ -825,39 +866,27 @@ func (c *Client) CopyFileWithMode(localPath, remotePath string, mode os.FileMode
 	}
 
 	cmd := buildRemoteUploadCommand(remotePath, mode)
-
-	session, err := conn.NewSession()
-	if err != nil {
-		return fmt.Errorf("failed to create session: %w", err)
-	}
-	defer session.Close()
-
-	// Set up stdin pipe
-	stdin, err := session.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdin pipe: %w", err)
-	}
-
-	// Start command
-	if err := session.Start(cmd); err != nil {
-		return fmt.Errorf("failed to start command: %w", err)
-	}
-
-	// Write base64-encoded content
-	encoder := base64.NewEncoder(base64.StdEncoding, stdin)
-	if _, err := encoder.Write(content); err != nil {
-		stdin.Close()
-		return fmt.Errorf("failed to write content: %w", err)
-	}
-	encoder.Close()
-	stdin.Close()
-
-	// Wait for completion
-	if err := session.Wait(); err != nil {
+	encodedReader := newBase64Reader(content)
+	if _, err := c.ExecuteWithInput(context.Background(), cmd, encodedReader); err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
 
 	return nil
+}
+
+func newBase64Reader(content []byte) io.Reader {
+	reader, writer := io.Pipe()
+	go func() {
+		encoder := base64.NewEncoder(base64.StdEncoding, writer)
+		_, writeErr := encoder.Write(content)
+		closeErr := encoder.Close()
+		if writeErr != nil {
+			_ = writer.CloseWithError(writeErr)
+			return
+		}
+		_ = writer.CloseWithError(closeErr)
+	}()
+	return reader
 }
 
 func buildRemoteUploadCommand(remotePath string, mode os.FileMode) string {

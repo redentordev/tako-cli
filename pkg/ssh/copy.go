@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -61,7 +62,12 @@ func (c *Client) CopyFile(localPath, remotePath string) error {
 		return fmt.Errorf("failed to get stdin pipe: %w", err)
 	}
 
-	// Start SCP command on remote
+	command := buildRemoteSCPReceiveCommand(remotePath)
+	if err := session.Start(command); err != nil {
+		return fmt.Errorf("failed to start remote copy command: %w", err)
+	}
+
+	// Stream the SCP payload after the remote scp process is ready.
 	go func() {
 		defer stdin.Close()
 
@@ -75,8 +81,7 @@ func (c *Client) CopyFile(localPath, remotePath string) error {
 		_, _ = io.WriteString(stdin, "\x00")
 	}()
 
-	// Run SCP command
-	if err := session.Run(buildRemoteSCPReceiveCommand(remotePath)); err != nil {
+	if err := waitSessionWithContext(context.Background(), session); err != nil {
 		return fmt.Errorf("failed to copy file: %w", err)
 	}
 
