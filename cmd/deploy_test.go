@@ -4,8 +4,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	remotestate "github.com/redentordev/tako-cli/internal/state"
+	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/git"
+	localstate "github.com/redentordev/tako-cli/pkg/state"
 )
 
 func TestIsNonInteractiveAcceptsTruthyEnvValues(t *testing.T) {
@@ -162,6 +166,67 @@ func TestResolveDeployCommitInfoRequiresGitRepository(t *testing.T) {
 	}
 }
 
+func TestRecordFailedDeploymentStatePersistsRemoteAndLocalFailure(t *testing.T) {
+	start := time.Now().Add(-2 * time.Second)
+	remoteSaver := &fakeRemoteDeploymentSaver{}
+	localSaver := &fakeLocalDeploymentSaver{}
+	deployment := &remotestate.DeploymentState{
+		Timestamp: start,
+		Services:  map[string]remotestate.ServiceState{},
+	}
+	cfg := &config.Config{
+		Runtime: &config.RuntimeConfig{Mode: config.RuntimeModeTakod},
+	}
+	commit := &git.CommitInfo{Hash: "abcdef"}
+	deployErr := errors.New("web failed")
+
+	err := recordFailedDeploymentState(remoteSaver, localSaver, deployment, cfg, "production", []string{"node-a", "node-b"}, commit, start, deployErr)
+	if err != nil {
+		t.Fatalf("recordFailedDeploymentState returned error: %v", err)
+	}
+	if remoteSaver.saved == nil {
+		t.Fatal("remote deployment was not saved")
+	}
+	if remoteSaver.saved.Status != remotestate.StatusFailed {
+		t.Fatalf("remote status = %q, want failed", remoteSaver.saved.Status)
+	}
+	if remoteSaver.saved.Error != "web failed" {
+		t.Fatalf("remote error = %q, want deployment error", remoteSaver.saved.Error)
+	}
+	if remoteSaver.saved.Duration <= 0 {
+		t.Fatalf("remote duration = %s, want positive duration", remoteSaver.saved.Duration)
+	}
+	if localSaver.saved == nil {
+		t.Fatal("local deployment was not saved")
+	}
+	if localSaver.saved.Status != "failed" {
+		t.Fatalf("local status = %q, want failed", localSaver.saved.Status)
+	}
+	if localSaver.saved.GitCommit != "abcdef" {
+		t.Fatalf("local git commit = %q, want abcdef", localSaver.saved.GitCommit)
+	}
+	if got := strings.Join(localSaver.saved.Servers, ","); got != "node-a,node-b" {
+		t.Fatalf("local servers = %q, want node-a,node-b", got)
+	}
+}
+
+func TestRecordFailedDeploymentStateReturnsRemoteSaveError(t *testing.T) {
+	remoteSaver := &fakeRemoteDeploymentSaver{err: errors.New("disk full")}
+	deployment := &remotestate.DeploymentState{
+		Timestamp: time.Now(),
+		Services:  map[string]remotestate.ServiceState{},
+	}
+	cfg := &config.Config{Runtime: &config.RuntimeConfig{Mode: config.RuntimeModeTakod}}
+
+	err := recordFailedDeploymentState(remoteSaver, nil, deployment, cfg, "production", []string{"node-a"}, nil, time.Now(), errors.New("deploy failed"))
+	if err == nil {
+		t.Fatal("recordFailedDeploymentState should return remote save errors")
+	}
+	if !strings.Contains(err.Error(), "failed to save failed remote deployment state") || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("error = %q, want remote save context", err)
+	}
+}
+
 type fakeDeployGitReader struct {
 	repository bool
 	dirty      bool
@@ -186,4 +251,30 @@ func (f fakeDeployGitReader) GetCommitInfo(_ string) (*git.CommitInfo, error) {
 		return nil, errors.New("missing commit")
 	}
 	return f.commitInfo, nil
+}
+
+type fakeRemoteDeploymentSaver struct {
+	saved *remotestate.DeploymentState
+	err   error
+}
+
+func (f *fakeRemoteDeploymentSaver) SaveDeployment(deployment *remotestate.DeploymentState) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.saved = deployment
+	return nil
+}
+
+type fakeLocalDeploymentSaver struct {
+	saved *localstate.DeploymentState
+	err   error
+}
+
+func (f *fakeLocalDeploymentSaver) SaveDeployment(deployment *localstate.DeploymentState) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.saved = deployment
+	return nil
 }
