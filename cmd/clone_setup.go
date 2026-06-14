@@ -175,9 +175,8 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 			connectedNames = append(connectedNames, name)
 		}
 		sort.Strings(connectedNames)
-		var response takod.EnvBundleResponse
-		var bundleSource string
-		for _, name := range connectedNames {
+		candidates := make([]envBundleDownloadCandidate, 0, len(connectedNames))
+		for index, name := range connectedNames {
 			output, err := takodclient.RequestJSON(
 				connectedClients[name],
 				takodSocketFromConfig(cfg),
@@ -193,19 +192,24 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 				continue
 			}
 			if candidate.Found {
-				response = candidate
-				bundleSource = name
-				break
+				candidates = append(candidates, envBundleDownloadCandidate{
+					response: &candidate,
+					source:   name,
+					index:    index,
+				})
 			}
 		}
 
-		if response.Found {
+		if len(candidates) > 0 {
+			selected := selectFreshestEnvBundleCandidate(candidates)
+			response := selected.response
+			bundleSource := selected.source
 			pass(fmt.Sprintf("Encrypted environment bundle found on %s", bundleSource))
 			if isInteractive {
 				fmt.Print("  Pull and decrypt environment files? [Y/n] ")
 				input, _ := reader.ReadString('\n')
 				if answer := strings.TrimSpace(input); answer == "" || strings.ToLower(answer) == "y" {
-					restored, skipped, err := restoreDownloadedEnvBundle(&response, false)
+					restored, skipped, err := restoreDownloadedEnvBundle(response, false)
 					if err != nil {
 						warn(fmt.Sprintf("Environment pull failed: %v", err))
 					} else if skipped {

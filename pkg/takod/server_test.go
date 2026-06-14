@@ -351,6 +351,9 @@ func TestHandleEnvBundleWritesAndReads(t *testing.T) {
 	if !response.Found || response.Content != "ZW5jcnlwdGVk" {
 		t.Fatalf("unexpected env bundle response: %#v", response)
 	}
+	if response.UpdatedAt.IsZero() {
+		t.Fatal("expected env bundle response to include UpdatedAt")
+	}
 }
 
 func TestHandleBackupsRequiresSupportedMethod(t *testing.T) {

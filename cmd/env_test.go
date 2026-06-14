@@ -335,6 +335,50 @@ func TestDownloadEnvBundleFromMeshUsesFirstFoundBundle(t *testing.T) {
 	}
 }
 
+func TestDownloadEnvBundleFromMeshUsesNewestBundle(t *testing.T) {
+	cfg := envBundleMeshTestConfig()
+	older := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+
+	original := downloadEnvBundleFromServerFunc
+	downloadEnvBundleFromServerFunc = func(_ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+		switch serverName {
+		case "node-a":
+			return &takod.EnvBundleResponse{Found: false}, nil
+		case "node-b":
+			return &takod.EnvBundleResponse{Found: true, Content: "old", UpdatedAt: older}, nil
+		default:
+			return &takod.EnvBundleResponse{Found: true, Content: "new", UpdatedAt: newer}, nil
+		}
+	}
+	t.Cleanup(func() {
+		downloadEnvBundleFromServerFunc = original
+	})
+
+	response, source, err := downloadEnvBundleFromMesh(cfg, "production")
+	if err != nil {
+		t.Fatalf("downloadEnvBundleFromMesh returned error: %v", err)
+	}
+	if source != "node-c" {
+		t.Fatalf("source = %q, want node-c", source)
+	}
+	if response == nil || response.Content != "new" {
+		t.Fatalf("response = %#v, want newest bundle", response)
+	}
+}
+
+func TestSelectFreshestEnvBundleCandidateFallsBackToServerOrder(t *testing.T) {
+	candidates := []envBundleDownloadCandidate{
+		{response: &takod.EnvBundleResponse{Found: true, Content: "first"}, source: "node-a", index: 0},
+		{response: &takod.EnvBundleResponse{Found: true, Content: "second"}, source: "node-b", index: 1},
+	}
+
+	selected := selectFreshestEnvBundleCandidate(candidates)
+	if selected.source != "node-a" || selected.response.Content != "first" {
+		t.Fatalf("selected = %#v, want first server for legacy bundle metadata", selected)
+	}
+}
+
 func TestDownloadEnvBundleFromMeshReturnsNotFoundWhenReachableNodesAreEmpty(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
 	original := downloadEnvBundleFromServerFunc

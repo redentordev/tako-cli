@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/crypto"
@@ -140,6 +141,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		Project:     cfg.Project.Name,
 		Environment: envName,
 		Content:     base64.StdEncoding.EncodeToString(encrypted),
+		UpdatedAt:   time.Now().UTC(),
 	}
 
 	uploaded, nodeErrors := uploadEnvBundleToMesh(cfg, serverNames, request)
@@ -530,6 +532,12 @@ func uploadEnvBundleToMesh(cfg *config.Config, serverNames []string, request tak
 	return uploaded, nodeErrors
 }
 
+type envBundleDownloadCandidate struct {
+	response *takod.EnvBundleResponse
+	source   string
+	index    int
+}
+
 func downloadEnvBundleFromMesh(cfg *config.Config, envName string) (*takod.EnvBundleResponse, string, error) {
 	serverNames, err := statePullServerNames(cfg, envName, "")
 	if err != nil {
@@ -537,7 +545,8 @@ func downloadEnvBundleFromMesh(cfg *config.Config, envName string) (*takod.EnvBu
 	}
 
 	var nodeErrors []string
-	for _, serverName := range serverNames {
+	candidates := make([]envBundleDownloadCandidate, 0, len(serverNames))
+	for index, serverName := range serverNames {
 		serverCfg, err := serverConfigByName(cfg, serverName)
 		if err != nil {
 			return nil, "", err
@@ -548,13 +557,42 @@ func downloadEnvBundleFromMesh(cfg *config.Config, envName string) (*takod.EnvBu
 			continue
 		}
 		if response != nil && response.Found {
-			return response, serverName, nil
+			candidates = append(candidates, envBundleDownloadCandidate{
+				response: response,
+				source:   serverName,
+				index:    index,
+			})
 		}
+	}
+	if len(candidates) > 0 {
+		selected := selectFreshestEnvBundleCandidate(candidates)
+		return selected.response, selected.source, nil
 	}
 	if len(nodeErrors) == len(serverNames) {
 		return nil, "", fmt.Errorf("failed to read environment bundle from any node: %s", strings.Join(nodeErrors, "; "))
 	}
 	return &takod.EnvBundleResponse{Found: false}, "", nil
+}
+
+func selectFreshestEnvBundleCandidate(candidates []envBundleDownloadCandidate) envBundleDownloadCandidate {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := candidates[i].response.UpdatedAt
+		right := candidates[j].response.UpdatedAt
+		if left.IsZero() && right.IsZero() {
+			return candidates[i].index < candidates[j].index
+		}
+		if left.IsZero() {
+			return false
+		}
+		if right.IsZero() {
+			return true
+		}
+		if left.Equal(right) {
+			return candidates[i].index < candidates[j].index
+		}
+		return left.After(right)
+	})
+	return candidates[0]
 }
 
 func downloadEnvBundleFromServer(cfg *config.Config, envName string, serverName string, serverCfg config.ServerConfig) (*takod.EnvBundleResponse, error) {
