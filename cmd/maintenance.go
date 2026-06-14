@@ -611,7 +611,10 @@ func renderMaintenanceProxyConfig(project string, environment string, serviceNam
 		},
 	}
 
-	rule := hostRuleForDomains(domains)
+	rule, err := hostRuleForDomains(domains)
+	if err != nil {
+		return nil, err
+	}
 	cfg.HTTP.Routers[routerBase+"-https"] = maintenanceRouter{
 		Rule:        rule,
 		EntryPoints: []string{"websecure"},
@@ -644,12 +647,16 @@ func maintenanceDomains(proxy *config.ProxyConfig) []string {
 	return domains
 }
 
-func hostRuleForDomains(domains []string) string {
+func hostRuleForDomains(domains []string) (string, error) {
 	parts := make([]string, 0, len(domains))
 	for _, domain := range domains {
-		parts = append(parts, "Host(`"+strings.ReplaceAll(domain, "`", "")+"`)")
+		normalized, err := config.NormalizeProxyDomain(domain)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, "Host(`"+normalized+"`)")
 	}
-	return strings.Join(parts, " || ")
+	return strings.Join(parts, " || "), nil
 }
 
 func writeMaintenanceProxyConfig(client *ssh.Client, socket string, project string, environment string, serviceName string, data []byte) error {

@@ -546,21 +546,20 @@ func validateProxy(serviceName string, proxy *ProxyConfig) error {
 		return fmt.Errorf("service %s: proxy configured but no domain specified (use 'domain')", serviceName)
 	}
 
-	trimmed := strings.TrimSpace(proxy.Domain)
-	proxy.Domain = trimmed
-	if !isValidDomain(trimmed) {
-		return fmt.Errorf("service %s: invalid primary domain: %s", serviceName, trimmed)
+	trimmed, err := NormalizeProxyDomain(proxy.Domain)
+	if err != nil {
+		return fmt.Errorf("service %s: invalid primary domain: %s", serviceName, strings.TrimSpace(proxy.Domain))
 	}
+	proxy.Domain = trimmed
 
 	// Validate redirect domains
 	primaryDomain := proxy.GetPrimaryDomain()
 	for i, redirectDomain := range proxy.RedirectFrom {
-		trimmed := strings.TrimSpace(redirectDomain)
-		proxy.RedirectFrom[i] = trimmed
-
-		if !isValidDomain(trimmed) {
-			return fmt.Errorf("service %s: invalid redirect domain: %s", serviceName, trimmed)
+		trimmed, err := NormalizeProxyDomain(redirectDomain)
+		if err != nil {
+			return fmt.Errorf("service %s: invalid redirect domain: %s", serviceName, strings.TrimSpace(redirectDomain))
 		}
+		proxy.RedirectFrom[i] = trimmed
 
 		// Ensure redirect domain is not the same as primary domain
 		if strings.EqualFold(trimmed, primaryDomain) {
