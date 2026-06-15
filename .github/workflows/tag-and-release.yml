@@ -15,12 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -36,7 +36,8 @@ jobs:
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
           BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          LDFLAGS="-X github.com/redentordev/tako-cli/cmd.Version=$VERSION -X github.com/redentordev/tako-cli/cmd.BuildTime=$BUILD_TIME"
+          GIT_COMMIT=${GITHUB_SHA::7}
+          LDFLAGS="-X github.com/redentordev/tako-cli/cmd.Version=$VERSION -X github.com/redentordev/tako-cli/cmd.GitCommit=$GIT_COMMIT -X github.com/redentordev/tako-cli/cmd.BuildTime=$BUILD_TIME"
           
           mkdir -p dist
           
@@ -163,7 +164,7 @@ jobs:
           } | sed 's/^  //' > release-notes.md
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.VERSION }}
           name: 🐙 Tako CLI ${{ steps.version.outputs.VERSION }}
