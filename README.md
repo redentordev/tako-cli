@@ -60,18 +60,24 @@ Use the manual section below for Linux ARM64, macOS, and Windows binaries.
 <details>
 <summary>📦 Homebrew (macOS & Linux)</summary>
 
-Coming soon! Homebrew tap is being prepared.
+Install directly from the tap:
 
 ```bash
-# This will be available soon
+brew install redentordev/tako/tako
+```
+
+Or tap it first:
+
+```bash
 brew tap redentordev/tako
+brew trust redentordev/tako # if Homebrew asks you to trust the tap
 brew install tako
 ```
 
 Benefits:
 - Automatic updates with `brew upgrade`
-- Managed dependencies
-- Trusted by developers worldwide
+- Works on macOS and Linux
+- Installs the current release binary from GitHub Releases
 
 </details>
 
