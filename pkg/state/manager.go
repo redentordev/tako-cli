@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 )
 
 // Manager handles local state persistence in .tako directory
@@ -14,9 +16,9 @@ type Manager struct {
 	basePath string
 	project  string
 	env      string
-	mu       sync.Mutex  // Protect concurrent access within process
-	lock     *StateLock  // Cross-process file-based locking
-	lockInfo *LockInfo   // Current lock if held
+	mu       sync.Mutex // Protect concurrent access within process
+	lock     *StateLock // Cross-process file-based locking
+	lockInfo *LockInfo  // Current lock if held
 }
 
 // GlobalState represents the overall project state
@@ -27,7 +29,7 @@ type GlobalState struct {
 		CreatedAt    time.Time `json:"created_at"`
 		LastDeployed time.Time `json:"last_deployed"`
 	} `json:"project"`
-	Mode         string                       `json:"mode"` // "swarm" or "single"
+	Mode         string                       `json:"mode"` // runtime mode, e.g. "takod"
 	Environments map[string]*EnvironmentState `json:"environments"`
 	Metadata     struct {
 		TakoVersion string `json:"tako_version"`
@@ -49,6 +51,7 @@ type DeploymentState struct {
 	Timestamp       time.Time                 `json:"timestamp"`
 	Environment     string                    `json:"environment"`
 	Mode            string                    `json:"mode"`
+	Servers         []string                  `json:"servers,omitempty"`
 	Status          string                    `json:"status"` // success, failed, partial
 	DurationSeconds int                       `json:"duration_seconds"`
 	Services        map[string]*ServiceDeploy `json:"services"`
@@ -159,7 +162,7 @@ func NewManager(projectPath, projectName, environment string) (*Manager, error) 
 *
 !.gitignore
 `
-		if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
+		if err := fileutil.WriteFileAtomic(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
 			return nil, fmt.Errorf("failed to create .gitignore: %w", err)
 		}
 	}
@@ -174,8 +177,8 @@ func NewManager(projectPath, projectName, environment string) (*Manager, error) 
 		"logs/deployments",
 		"logs/builds",
 		"logs/errors",
-		"swarm",
-		"config/traefik",
+		"takod",
+		"config/proxy",
 		"config/networks",
 	}
 
@@ -549,7 +552,7 @@ func (m *Manager) updateGlobalState(deployment *DeploymentState) error {
 
 	global.Environments[m.env] = &EnvironmentState{
 		Active:         true,
-		Servers:        []string{}, // TODO: Extract from deployment
+		Servers:        append([]string(nil), deployment.Servers...),
 		LastDeployment: deployment.Timestamp,
 		DeploymentID:   deployment.DeploymentID,
 	}
@@ -569,21 +572,7 @@ func (m *Manager) saveJSON(path string, data interface{}) error {
 		return err
 	}
 
-	// Use atomic write: write to temp file, then rename
-	// This prevents corruption if the process crashes mid-write
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, bytes, 0644); err != nil {
-		return err
-	}
-
-	// Rename is atomic on POSIX systems
-	if err := os.Rename(tmpPath, path); err != nil {
-		// Clean up temp file on failure
-		os.Remove(tmpPath)
-		return err
-	}
-
-	return nil
+	return fileutil.WriteFileAtomic(path, bytes, 0644)
 }
 
 func (m *Manager) loadJSON(path string, target interface{}) error {

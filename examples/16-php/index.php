@@ -25,6 +25,7 @@ switch ($uri) {
 
 function renderHomePage() {
     $serverTime = date('c');
+    $replica = getReplicaInfo();
     ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -175,6 +176,18 @@ function renderHomePage() {
                 <span class="label">Server Software:</span>
                 <span class="value"><?php echo $_SERVER['SERVER_SOFTWARE'] ?? 'Unknown'; ?></span>
             </div>
+            <div class="info-item">
+                <span class="label">Replica ID:</span>
+                <span class="value"><?php echo htmlspecialchars($replica['id'], ENT_QUOTES, 'UTF-8'); ?></span>
+            </div>
+            <div class="info-item">
+                <span class="label">Container:</span>
+                <span class="value"><?php echo htmlspecialchars($replica['hostname'], ENT_QUOTES, 'UTF-8'); ?></span>
+            </div>
+            <div class="info-item">
+                <span class="label">Request ID:</span>
+                <span class="value"><?php echo htmlspecialchars($replica['request_id'], ENT_QUOTES, 'UTF-8'); ?></span>
+            </div>
         </div>
 
         <div class="features">
@@ -201,11 +214,16 @@ function renderHomePage() {
 }
 
 function renderAPIResponse() {
+    $replica = getReplicaInfo();
     header('Content-Type: application/json');
     echo json_encode([
         'message' => 'Hello from PHP!',
         'framework' => 'PHP',
         'deployed_with' => 'Tako CLI',
+        'replica_id' => $replica['id'],
+        'container_hostname' => $replica['hostname'],
+        'process_id' => $replica['process_id'],
+        'request_id' => $replica['request_id'],
         'timestamp' => date('c'),
         'php_version' => PHP_VERSION,
         'features' => [
@@ -218,15 +236,31 @@ function renderAPIResponse() {
 }
 
 function renderInfoResponse() {
+    $replica = getReplicaInfo();
     header('Content-Type: application/json');
     echo json_encode([
         'php_version' => PHP_VERSION,
         'server' => $_SERVER['SERVER_SOFTWARE'] ?? 'Unknown',
+        'replica_id' => $replica['id'],
+        'container_hostname' => $replica['hostname'],
+        'process_id' => $replica['process_id'],
+        'request_id' => $replica['request_id'],
         'extensions' => get_loaded_extensions(),
         'memory_limit' => ini_get('memory_limit'),
         'max_execution_time' => ini_get('max_execution_time'),
         'timestamp' => date('c')
     ], JSON_PRETTY_PRINT);
+}
+
+function getReplicaInfo() {
+    $hostname = gethostname() ?: ($_SERVER['HOSTNAME'] ?? 'unknown');
+
+    return [
+        'id' => substr(hash('sha256', $hostname), 0, 8),
+        'hostname' => $hostname,
+        'process_id' => getmypid(),
+        'request_id' => bin2hex(random_bytes(4)),
+    ];
 }
 
 function render404() {

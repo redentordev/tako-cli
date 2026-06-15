@@ -8,40 +8,38 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
 
 var (
-	removeServer string
-	removeForce  bool
+	removeForce bool
 )
 
 var removeCmd = &cobra.Command{
 	Use:   "remove",
-	Short: "Remove all deployed services from a server",
-	Long: `Remove all deployed services and containers from a server.
+	Short: "Remove deployed services from the environment mesh",
+	Long: `Remove deployed services from every node in the active environment.
 
 This command:
-  - Stops and removes all service containers
-  - Removes Docker images for this project
+  - Stops and removes all service replicas
+  - Removes service images for this project
   - Removes proxy configurations
-  - Preserves server infrastructure (Docker, Traefik remain installed)
-  - Does NOT decommission the server
+  - Preserves server setup (takod and tako-proxy remain installed)
+  - Does NOT decommission the servers
 
-The server can be reused for new deployments after removal.
-To fully decommission a server, use 'tako destroy --decommission'.
+The environment can be reused for new deployments after removal.
+To decommission an environment, use 'tako destroy'.
 
 Examples:
-  tako remove --server prod
-  tako remove --server staging --force`,
+  tako remove
+  tako remove --force`,
 	RunE: runRemove,
 }
 
 func init() {
 	rootCmd.AddCommand(removeCmd)
-	removeCmd.Flags().StringVarP(&removeServer, "server", "s", "", "Server to remove services from (required)")
 	removeCmd.Flags().BoolVarP(&removeForce, "force", "f", false, "Skip confirmation prompt")
-	removeCmd.MarkFlagRequired("server")
 }
 
 func runRemove(cmd *cobra.Command, args []string) error {
@@ -50,47 +48,51 @@ func runRemove(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
+	}
 
 	// Get environment
 	envName := getEnvironmentName(cfg)
-
-	// Get server config
-	server, exists := cfg.Servers[removeServer]
-	if !exists {
-		return fmt.Errorf("server %s not found in configuration", removeServer)
-	}
-
-	// Create SSH client (supports both key and password auth)
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     server.Host,
-		Port:     server.Port,
-		User:     server.User,
-		SSHKey:   server.SSHKey,
-		Password: server.Password,
-	})
+	services, err := cfg.GetServices(envName)
 	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
+		return fmt.Errorf("failed to get services for environment %s: %w", envName, err)
 	}
-	defer client.Close()
-
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
+	serverNames, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	if len(serverNames) == 0 {
+		return fmt.Errorf("no servers configured for environment %s", envName)
+	}
+	servers := make(map[string]config.ServerConfig, len(serverNames))
+	for _, serverName := range serverNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return fmt.Errorf("server %s not found in configuration", serverName)
+		}
+		servers[serverName] = server
 	}
 
 	fmt.Printf("\n⚠️  WARNING: You are about to REMOVE all services from:\n\n")
-	fmt.Printf("   Server:      %s (%s)\n", removeServer, server.Host)
 	fmt.Printf("   Project:     %s\n", cfg.Project.Name)
-	fmt.Printf("   Environment: %s\n\n", envName)
+	fmt.Printf("   Environment: %s\n", envName)
+	fmt.Printf("   Servers:     %d\n\n", len(serverNames))
+	for _, serverName := range serverNames {
+		server := servers[serverName]
+		fmt.Printf("   • %s (%s)\n", serverName, server.Host)
+	}
+	fmt.Println()
 
 	fmt.Printf("This will:\n")
-	fmt.Printf("   • Stop and remove all containers for this project\n")
-	fmt.Printf("   • Remove Docker images\n")
+	fmt.Printf("   • Stop and remove all service replicas for this project\n")
+	fmt.Printf("   • Remove service images\n")
 	fmt.Printf("   • Remove proxy configurations\n")
 	fmt.Printf("   • Remove deployment state\n\n")
 
 	fmt.Printf("This will NOT:\n")
 	fmt.Printf("   • Decommission the server\n")
-	fmt.Printf("   • Remove Docker or Traefik\n")
+	fmt.Printf("   • Remove takod or tako-proxy\n")
 	fmt.Printf("   • Remove persistent volume data\n\n")
 
 	// Confirmation unless --force
@@ -111,57 +113,56 @@ func runRemove(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\n🗑️  Removing all services for %s...\n\n", cfg.Project.Name)
 
-	// Stop and remove all containers
-	fmt.Printf("→ Stopping containers...\n")
-	stopPattern := fmt.Sprintf("%s_%s_", cfg.Project.Name, envName)
-	stopCmd := fmt.Sprintf("docker ps -a --filter 'name=%s' --format '{{.Names}}' | xargs -r docker stop", stopPattern)
-	if _, err := client.Execute(stopCmd); err != nil && verbose {
-		fmt.Printf("  Warning: Error stopping containers: %v\n", err)
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, serverNames, "remove")
+	if err != nil {
+		return err
 	}
-
-	fmt.Printf("→ Removing containers...\n")
-	removeContainersCmd := fmt.Sprintf("docker ps -a --filter 'name=%s' --format '{{.Names}}' | xargs -r docker rm -f", stopPattern)
-	if _, err := client.Execute(removeContainersCmd); err != nil && verbose {
-		fmt.Printf("  Warning: Error removing containers: %v\n", err)
-	}
-
-	// Remove Docker images
-	fmt.Printf("→ Removing Docker images...\n")
-	removeImagesCmd := fmt.Sprintf("docker images '%s/*' --format '{{.Repository}}:{{.Tag}}' | xargs -r docker rmi -f", cfg.Project.Name)
-	if _, err := client.Execute(removeImagesCmd); err != nil && verbose {
-		fmt.Printf("  Warning: Error removing images: %v\n", err)
-	}
-
-	// Remove proxy configurations (Traefik will automatically update when containers are removed)
-	fmt.Printf("→ Removing proxy configurations...\n")
-	// Traefik uses Docker labels for configuration, so removing containers automatically removes proxy config
+	defer leaseSet.Release(verbose)
 	if verbose {
-		fmt.Printf("  Traefik will automatically detect removed containers\n")
+		fmt.Printf("→ Acquired remote remove leases: %s\n", leaseSet.Summary())
 	}
 
-	// Remove deployment state
-	fmt.Printf("→ Removing deployment state...\n")
-	removeStateCmd := fmt.Sprintf("sudo rm -rf /var/lib/tako-cli/%s", cfg.Project.Name)
-	if _, err := client.Execute(removeStateCmd); err != nil && verbose {
-		fmt.Printf("  Warning: Error removing state: %v\n", err)
+	fmt.Printf("→ Reconciling cleanup through takod on %d node(s)...\n", len(serverNames))
+	request := removeCleanupRequest(cfg, envName, services)
+	results := collectCleanupNodes(servers, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
+		return cleanupSingleNode(cfg, sshPool, serverCfg, request)
+	})
+
+	var errors []string
+	for _, result := range results {
+		if result.err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+			fmt.Printf("  ✗ %s failed: %v\n", result.serverName, result.err)
+			continue
+		}
+		if verbose {
+			printCleanupWarnings(result.response)
+		}
+		fmt.Printf("  ✓ %s removed\n", result.serverName)
+	}
+	if len(errors) > 0 {
+		return fmt.Errorf("remove incomplete: %s", strings.Join(errors, "; "))
 	}
 
-	// Remove deployment files
-	fmt.Printf("→ Removing deployment files...\n")
-	removeDeployCmd := fmt.Sprintf("sudo rm -rf /opt/%s", cfg.Project.Name)
-	if _, err := client.Execute(removeDeployCmd); err != nil && verbose {
-		fmt.Printf("  Warning: Error removing deployment files: %v\n", err)
-	}
-
-	// Remove network
-	fmt.Printf("→ Removing Docker network...\n")
-	networkName := fmt.Sprintf("tako_%s_%s", cfg.Project.Name, envName)
-	removeNetworkCmd := fmt.Sprintf("docker network rm %s 2>/dev/null || true", networkName)
-	client.Execute(removeNetworkCmd)
-
-	fmt.Printf("\n✓ All services removed from %s\n", removeServer)
-	fmt.Printf("\nThe server is still provisioned and ready for new deployments.\n")
+	fmt.Printf("\n✓ All services removed from environment %s\n", envName)
+	fmt.Printf("\nThe servers are still provisioned and ready for new deployments.\n")
 	fmt.Printf("To deploy again: tako deploy\n")
 
 	return nil
+}
+
+func removeCleanupRequest(cfg *config.Config, envName string, services map[string]config.ServiceConfig) takod.CleanupRequest {
+	return takod.CleanupRequest{
+		Project:           cfg.Project.Name,
+		Environment:       envName,
+		RemoveContainers:  true,
+		RemoveImages:      true,
+		RemoveNetworks:    true,
+		RemoveDeployFiles: true,
+		RemoveTakodState:  true,
+		ProxyFiles:        cleanupProxyFiles(cfg.Project.Name, envName, services),
+		ImageRepositories: cleanupImageRepositories(cfg, envName, services),
+	}
 }

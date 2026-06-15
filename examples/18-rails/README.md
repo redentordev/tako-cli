@@ -42,4 +42,4 @@ The application is deployed as a containerized service with:
 - Zero-downtime deployments
 - HTTPS with Let's Encrypt
 
-✅ **Status: LIVE and Working** - https://ruby.95.216.194.236.sslip.io
+After deployment, the app is available at `https://ruby.<your-server-ip>.sslip.io`.

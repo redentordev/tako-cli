@@ -33,8 +33,7 @@ environments:
         build: ./web
         port: 3000
         proxy:
-          domains:
-            - fullstack.${SERVER_HOST}.sslip.io
+          domain: fullstack.${SERVER_HOST}.sslip.io
           email: admin@example.com
         env:
           NODE_ENV: production
@@ -50,7 +49,7 @@ environments:
         replicas: 2
         env:
           NODE_ENV: production
-          DATABASE_URL: postgresql://postgres:secret123@postgres:5432/appdb
+          DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/appdb
           REDIS_URL: redis://redis:6379
         # Optional: Explicitly define dependencies (auto-detected from env vars if not specified)
         # dependsOn:
@@ -67,7 +66,7 @@ environments:
         env:
           POSTGRES_DB: appdb
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: secret123
+          POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 
       # Redis cache
       redis:

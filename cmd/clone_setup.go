@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
-	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -38,6 +41,10 @@ func init() {
 	rootCmd.AddCommand(cloneSetupCmd)
 }
 
+var cloneSetupCollectStatePullHistories = collectStatePullHistories
+var cloneSetupSyncBestDeploymentHistoryToLocal = syncBestDeploymentHistoryToLocal
+var cloneSetupRecoverStateFromMeshActual = recoverAndSaveStateFromMeshActual
+
 func runCloneSetup(cmd *cobra.Command, args []string) error {
 	reader := bufio.NewReader(os.Stdin)
 	passed, warned, failed := 0, 0, 0
@@ -64,15 +71,11 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 	// Step 1: Check config
 	printStep(1, "Configuration")
 
-	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
+	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		// Try without infra
-		cfg, err = config.LoadConfig(cfgFile)
-		if err != nil {
-			fail(fmt.Sprintf("Cannot load config: %v", err))
-			fmt.Println("\n  Make sure you're in the project root with a valid tako.yaml or tako.json.")
-			return nil
-		}
+		fail(fmt.Sprintf("Cannot load config: %v", err))
+		fmt.Println("\n  Make sure you're in the project root with a valid tako.yaml or tako.json.")
+		return nil
 	}
 	pass(fmt.Sprintf("Config loaded: %s (project: %s)", cfgFile, cfg.Project.Name))
 
@@ -167,37 +170,61 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 	printStep(4, "Environment Pull")
 
 	if len(connectedClients) > 0 {
-		// Pick a connected client (prefer manager)
-		var pullClient *ssh.Client
-		managerName, err := cfg.GetManagerServer(envName)
-		if err == nil {
-			if c, ok := connectedClients[managerName]; ok {
-				pullClient = c
-			}
+		connectedNames := make([]string, 0, len(connectedClients))
+		for name := range connectedClients {
+			connectedNames = append(connectedNames, name)
 		}
-		if pullClient == nil {
-			for _, c := range connectedClients {
-				pullClient = c
-				break
+		sort.Strings(connectedNames)
+		candidates := make([]envBundleDownloadCandidate, 0, len(connectedNames))
+		for index, name := range connectedNames {
+			output, err := takodclient.RequestJSON(
+				connectedClients[name],
+				takodSocketFromConfig(cfg),
+				"GET",
+				takodclient.EnvBundleEndpoint(cfg.Project.Name, envName),
+				nil,
+			)
+			if err != nil {
+				continue
+			}
+			var candidate takod.EnvBundleResponse
+			if err := decodeTakodJSON(output, &candidate); err != nil {
+				continue
+			}
+			if candidate.Found {
+				if candidate.UpdatedAt.IsZero() {
+					warn(fmt.Sprintf("%s: environment bundle missing updatedAt metadata", name))
+					continue
+				}
+				candidates = append(candidates, envBundleDownloadCandidate{
+					response: &candidate,
+					source:   name,
+					index:    index,
+				})
 			}
 		}
 
-		// Check if env.enc exists on server
-		remotePath := fmt.Sprintf("%s/%s/env.enc", remotestate.StateDir, cfg.Project.Name)
-		checkCmd := fmt.Sprintf("test -f %s && echo 'exists' || echo 'missing'", remotePath)
-		output, err := pullClient.Execute(checkCmd)
-		if err == nil && strings.TrimSpace(output) == "exists" {
-			pass("Encrypted environment bundle found on server")
+		if len(candidates) > 0 {
+			selected := selectFreshestEnvBundleCandidate(candidates)
+			response := selected.response
+			bundleSource := selected.source
+			pass(fmt.Sprintf("Encrypted environment bundle found on %s", bundleSource))
 			if isInteractive {
 				fmt.Print("  Pull and decrypt environment files? [Y/n] ")
 				input, _ := reader.ReadString('\n')
 				if answer := strings.TrimSpace(input); answer == "" || strings.ToLower(answer) == "y" {
-					fmt.Println("  Run: tako env pull")
-					fmt.Println("  (Requires the passphrase used during 'tako env push')")
+					restored, skipped, err := restoreDownloadedEnvBundle(response, false)
+					if err != nil {
+						warn(fmt.Sprintf("Environment pull failed: %v", err))
+					} else if skipped {
+						warn("Environment files already exist; run 'tako env pull --force' to overwrite")
+					} else {
+						pass(fmt.Sprintf("Restored %d environment file(s) from %s", restored, bundleSource))
+					}
 				}
 			}
 		} else {
-			warn("No encrypted environment bundle on server (run 'tako env push' to create one)")
+			warn("No encrypted environment bundle on reachable servers (run 'tako env push' to create one)")
 		}
 	} else {
 		warn("No connected servers — cannot check for environment bundle")
@@ -206,21 +233,18 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 	// Step 5: State pull
 	printStep(5, "Deployment State")
 
-	if _, err := os.Stat(".tako"); err == nil {
-		pass(".tako directory exists")
+	if localDeploymentStateExists(envName) {
+		pass("Local deployment state exists")
 	} else if len(connectedClients) > 0 {
-		warn(".tako directory missing, attempting state pull...")
-		if err := SyncStateOnDeploy(cfg, getFirstClient(connectedClients, cfg, envName), envName); err != nil {
-			warn(fmt.Sprintf("State sync failed: %v", err))
+		warn("Local deployment state missing, attempting state pull...")
+		message, err := cloneSetupSyncMissingState(cfg, envName)
+		if err != nil {
+			warn(err.Error())
 		} else {
-			if _, err := os.Stat(".tako"); err == nil {
-				pass("State synced from remote server")
-			} else {
-				warn("No remote state available (deploy first)")
-			}
+			pass(message)
 		}
 	} else {
-		warn(".tako directory missing and no server connections available")
+		warn("Local deployment state missing and no server connections available")
 		fmt.Println("  Fix: tako state pull")
 	}
 
@@ -276,6 +300,27 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func cloneSetupSyncMissingState(cfg *config.Config, envName string) (string, error) {
+	histories, err := cloneSetupCollectStatePullHistories(cfg, envName, "")
+	if err != nil {
+		return "", fmt.Errorf("State sync failed: %w", err)
+	}
+	source, synced, ok, err := cloneSetupSyncBestDeploymentHistoryToLocal(cfg, envName, histories)
+	if err != nil {
+		return "", fmt.Errorf("State sync failed: %w", err)
+	}
+	if ok {
+		return fmt.Sprintf("State synced from %s (%d deployment(s))", source, synced), nil
+	}
+	if localDeploymentStateExists(envName) {
+		return "State synced from remote mesh", nil
+	}
+	if err := cloneSetupRecoverStateFromMeshActual(cfg, envName, ""); err != nil {
+		return "", fmt.Errorf("No remote state available (deploy first): %w", err)
+	}
+	return "State recovered from remote mesh runtime", nil
+}
+
 // createEnvFromExample creates .env from .env.example, optionally prompting for values
 func createEnvFromExample(reader *bufio.Reader, interactive bool) error {
 	exampleData, err := os.ReadFile(".env.example")
@@ -284,7 +329,7 @@ func createEnvFromExample(reader *bufio.Reader, interactive bool) error {
 	}
 
 	if !interactive {
-		return os.WriteFile(".env", exampleData, 0600)
+		return fileutil.WriteFileAtomic(".env", exampleData, 0600)
 	}
 
 	// Parse .env.example and prompt for values
@@ -320,19 +365,5 @@ func createEnvFromExample(reader *bufio.Reader, interactive bool) error {
 		outputLines = append(outputLines, fmt.Sprintf("%s=%s", key, val))
 	}
 
-	return os.WriteFile(".env", []byte(strings.Join(outputLines, "\n")), 0600)
-}
-
-// getFirstClient returns a connected client, preferring the manager
-func getFirstClient(clients map[string]*ssh.Client, cfg *config.Config, envName string) *ssh.Client {
-	managerName, err := cfg.GetManagerServer(envName)
-	if err == nil {
-		if c, ok := clients[managerName]; ok {
-			return c
-		}
-	}
-	for _, c := range clients {
-		return c
-	}
-	return nil
+	return fileutil.WriteFileAtomic(".env", []byte(strings.Join(outputLines, "\n")), 0600)
 }

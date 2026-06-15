@@ -50,7 +50,7 @@ Edit `.env`:
 
 ```bash
 # Your server IP
-SERVER_HOST=95.216.194.236
+SERVER_HOST=203.0.113.10
 
 # Email for SSL certificate
 LETSENCRYPT_EMAIL=your-email@example.com
@@ -80,7 +80,7 @@ After deployment, access Umami at:
 https://umami.<your-server-ip>.sslip.io
 ```
 
-Example: `https://umami.95.216.194.236.sslip.io`
+Example: `https://umami.203.0.113.10.sslip.io`
 
 ### Default Login
 
@@ -134,14 +134,14 @@ Get your `website-id` from Umami dashboard after adding your site.
 
 ```bash
 # View logs
-tako logs umami
-tako logs postgres
+tako logs --service umami
+tako logs --service postgres
 
 # Stop services
-tako stop
+tako scale umami=0 postgres=0
 
 # Start services
-tako start
+tako scale umami=1 postgres=1
 
 # Remove deployment
 tako remove
@@ -155,26 +155,13 @@ To use a custom domain:
 2. Update `tako.yaml`:
 ```yaml
 proxy:
-  domains:
-    - analytics.yourdomain.com
+  domain: analytics.yourdomain.com
 ```
 
-## Backup
+## Data
 
-```bash
-# SSH into server
-ssh root@your-server-ip
-
-# Backup PostgreSQL database
-docker exec -t umami_production_postgres_0 pg_dump -U umami umami > umami-backup-$(date +%Y%m%d).sql
-```
-
-## Restore
-
-```bash
-# Restore PostgreSQL database
-cat umami-backup-20251114.sql | docker exec -i umami_production_postgres_0 psql -U umami -d umami
-```
+PostgreSQL data is stored in the configured `postgres_data` volume. Use
+database-native backup/export workflows for durable off-node backups.
 
 ## Scaling
 
@@ -193,12 +180,12 @@ PostgreSQL remains single instance.
 
 Check Umami logs:
 ```bash
-tako logs umami
+tako logs --service umami
 ```
 
 Verify database connection:
 ```bash
-tako logs postgres
+tako logs --service postgres
 ```
 
 ### Analytics not tracking

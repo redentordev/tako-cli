@@ -27,14 +27,14 @@ cp .env.example .env
 
 ```bash
 # .env
-SERVER_HOST=95.216.194.236  # Replace with your actual server IP
+SERVER_HOST=203.0.113.10  # Replace with your actual server IP
 LETSENCRYPT_EMAIL=you@example.com  # Your email for SSL certificates
 ```
 
 ### 3. Deploy!
 
 ```bash
-# First time: provision the server with Docker, Traefik, etc.
+# First time: provision the server with Docker, proxy, etc.
 tako setup
 
 # Deploy your app
@@ -43,9 +43,9 @@ tako deploy
 
 That's it! Your app will be live at:
 ```
-https://simple-web.95.216.194.236.sslip.io
+https://simple-web.203.0.113.10.sslip.io
 ```
-(Replace `95.216.194.236` with your server IP)
+(Replace `203.0.113.10` with your server IP)
 
 ## What Gets Deployed
 
@@ -77,8 +77,7 @@ environments:
         build: .          # Build from Dockerfile in current directory
         port: 3000        # Port your app runs on inside container
         proxy:            # Makes your app publicly accessible
-          domains:
-            - simple-web.${SERVER_HOST}.sslip.io
+          domain: simple-web.${SERVER_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}
         env:
           NODE_ENV: production
@@ -89,8 +88,8 @@ environments:
 Tako automatically:
 
 1. **Builds** your Docker image on the server
-2. **Deploys** the container with zero downtime
-3. **Configures** Traefik reverse proxy
+2. **Reconciles** the container on the target node
+3. **Configures** tako-proxy
 4. **Obtains** SSL certificate from Let's Encrypt
 5. **Routes** traffic to your app
 
@@ -101,21 +100,18 @@ Tako automatically:
 tako ps
 
 # View logs
-tako logs
-
-# View HTTP access logs
-tako access
+tako logs --service web
 
 # Rollback to previous version
 tako rollback
 
-# Stop the service
-tako stop
+# Stop the service replicas
+tako scale web=0
 
-# Start the service
-tako start
+# Start two service replicas
+tako scale web=2
 
-# Remove everything
+# Remove the deployed app
 tako destroy
 ```
 
@@ -137,14 +133,13 @@ Instead of `sslip.io`, use your own domain:
 
 1. Point your domain's A record to your server IP:
    ```
-   app.example.com → 95.216.194.236
+   app.example.com → 203.0.113.10
    ```
 
 2. Update `tako.yaml`:
    ```yaml
    proxy:
-     domains:
-       - app.example.com
+     domain: app.example.com
      email: you@example.com
    ```
 
@@ -172,7 +167,7 @@ services:
     build: .
     port: 3000
     proxy:
-      domains: [app.example.com]
+      domain: app.example.com
     env:
       DATABASE_URL: postgresql://postgres:5432/myapp
 
@@ -215,7 +210,7 @@ ls -la ~/.ssh/id_ed25519
 
 ```bash
 # Check logs
-tako logs --verbose
+tako logs --service web --tail 100
 
 # Verify server status
 tako ps
@@ -225,7 +220,7 @@ tako ps
 
 - Make sure your domain's DNS is pointing to your server IP
 - Wait 1-2 minutes for Let's Encrypt to issue certificate
-- Check Traefik logs: `ssh root@server "docker logs traefik"`
+- Check service logs with `tako logs --service web`
 
 ## Next Steps
 
@@ -252,7 +247,7 @@ This example uses the absolute minimum configuration:
 
 From here, you can scale to:
 - Multiple services (web, API, workers)
-- Multiple servers (Swarm orchestration)
+- Multiple servers (takod mesh)
 - Multiple environments (staging, production)
 - Advanced features (secrets, hooks, health checks)
 

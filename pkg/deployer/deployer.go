@@ -1,23 +1,27 @@
 package deployer
 
 import (
-	"archive/zip"
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/hooks"
-	"github.com/redentordev/tako-cli/pkg/network"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/ssh"
-	"github.com/redentordev/tako-cli/pkg/swarm"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 // streamWriter wraps an io.Writer with a prefix for each line
@@ -49,57 +53,148 @@ func (sw *streamWriter) Write(p []byte) (n int, err error) {
 
 // Deployer handles deployment operations
 type Deployer struct {
-	client           *ssh.Client
-	config           *config.Config
-	environment      string
-	verbose          bool
-	sshPool          *ssh.Pool
-	swarmManager     *swarm.Manager
+	client            *ssh.Client
+	config            *config.Config
+	environment       string
+	verbose           bool
+	sshPool           *ssh.Pool
 	distributedImages map[string]bool
+	targetServers     []string
+	cliVersion        string
+	deployHooks       bool
+	volumePlacements  map[string][]string
+	volumeInspector   func(serverName string, volumeNames []string) (map[string]bool, error)
+	meshPortCache     map[meshUpstreamPortKey]int
+	meshPortCacheMu   sync.Mutex
+	meshPortAllocator func(serverName string, serviceName string, slot int, containerPort int) (int, error)
+	nodeInfoInspector func(serverName string) (*takod.NodeInfoResponse, error)
+	generatedConfigs  map[string][]byte
+	importResolver    func(alias string) ([]string, error)
+}
+
+const (
+	defaultBuildContextArchiveMaxBytes     int64 = 2 << 30
+	defaultBuildContextArchiveMaxFileBytes int64 = 1 << 30
+	defaultBuildContextArchiveMaxEntries         = 200000
+	buildContextGitArchiveTimeout                = 5 * time.Minute
+)
+
+type buildContextArchiveLimits struct {
+	MaxBytes     int64
+	MaxFileBytes int64
+	MaxEntries   int
 }
 
 // NewDeployer creates a new deployer
 func NewDeployer(client *ssh.Client, cfg *config.Config, environment string, verbose bool) *Deployer {
 	return &Deployer{
-		client:      client,
-		config:      cfg,
-		environment: environment,
-		verbose:     verbose,
+		client:           client,
+		config:           cfg,
+		environment:      environment,
+		verbose:          verbose,
+		volumePlacements: make(map[string][]string),
 	}
 }
 
 // NewDeployerWithPool creates a deployer with SSH pool for multi-server support
 func NewDeployerWithPool(client *ssh.Client, cfg *config.Config, environment string, sshPool *ssh.Pool, verbose bool) *Deployer {
-	swarmMgr := swarm.NewManager(cfg, sshPool, environment, verbose)
 	return &Deployer{
 		client:            client,
 		config:            cfg,
 		environment:       environment,
 		verbose:           verbose,
 		sshPool:           sshPool,
-		swarmManager:      swarmMgr,
 		distributedImages: make(map[string]bool),
+		volumePlacements:  make(map[string][]string),
 	}
 }
 
+func (d *Deployer) SetCLIVersion(version string) {
+	d.cliVersion = strings.TrimSpace(version)
+}
 
-// createCrossPlatformZip creates a zip archive with Unix-style forward slashes
-// This ensures compatibility when deploying from Windows/Mac/Linux to Linux servers
-// Respects .dockerignore and .gitignore files, and excludes sensitive files
-func createCrossPlatformZip(sourceDir, zipPath string, excludeDirs []string) error {
-	zipFile, err := os.Create(zipPath)
-	if err != nil {
-		return fmt.Errorf("failed to create zip file: %w", err)
+func (d *Deployer) SetDeployHooksEnabled(enabled bool) {
+	d.deployHooks = enabled
+}
+
+// SetTargetServers restricts takod reconciliation to a validated subset of the
+// environment nodes. Passing an empty slice restores the full environment.
+func (d *Deployer) SetTargetServers(serverNames []string) error {
+	if len(serverNames) == 0 {
+		d.targetServers = nil
+		return nil
 	}
-	defer zipFile.Close()
 
-	zipWriter := zip.NewWriter(zipFile)
-	defer zipWriter.Close()
+	environmentServers, err := d.config.GetEnvironmentServers(d.environment)
+	if err != nil {
+		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
 
-	// Create ignore parser
+	allowed := make(map[string]bool, len(environmentServers))
+	for _, serverName := range environmentServers {
+		allowed[serverName] = true
+	}
+
+	targets := make([]string, 0, len(serverNames))
+	seen := make(map[string]bool, len(serverNames))
+	for _, serverName := range serverNames {
+		if seen[serverName] {
+			continue
+		}
+		if !allowed[serverName] {
+			return fmt.Errorf("target server %s is not part of environment %s", serverName, d.environment)
+		}
+		if _, ok := d.config.Servers[serverName]; !ok {
+			return fmt.Errorf("target server %s is not defined in servers", serverName)
+		}
+		targets = append(targets, serverName)
+		seen[serverName] = true
+	}
+
+	if len(targets) == 0 {
+		return fmt.Errorf("no target servers selected")
+	}
+
+	d.targetServers = targets
+	return nil
+}
+
+// createCrossPlatformTarGz creates a Docker build context archive with
+// Unix-style paths on every client platform.
+func createCrossPlatformTarGz(sourceDir, archivePath string) error {
+	return createCrossPlatformTarGzWithLimits(sourceDir, archivePath, buildContextArchiveLimits{
+		MaxBytes:     defaultBuildContextArchiveMaxBytes,
+		MaxFileBytes: defaultBuildContextArchiveMaxFileBytes,
+		MaxEntries:   defaultBuildContextArchiveMaxEntries,
+	})
+}
+
+func createCrossPlatformTarGzWithForcedIncludes(sourceDir, archivePath string, forcedIncludes []string) error {
+	return createCrossPlatformTarGzWithOptions(sourceDir, archivePath, buildContextArchiveLimits{
+		MaxBytes:     defaultBuildContextArchiveMaxBytes,
+		MaxFileBytes: defaultBuildContextArchiveMaxFileBytes,
+		MaxEntries:   defaultBuildContextArchiveMaxEntries,
+	}, forcedIncludes)
+}
+
+func createCrossPlatformTarGzWithLimits(sourceDir, archivePath string, limits buildContextArchiveLimits) error {
+	return createCrossPlatformTarGzWithOptions(sourceDir, archivePath, limits, nil)
+}
+
+func createCrossPlatformTarGzWithOptions(sourceDir, archivePath string, limits buildContextArchiveLimits, forcedIncludes []string) error {
+	archiveFile, err := os.Create(archivePath)
+	if err != nil {
+		return fmt.Errorf("failed to create build context archive: %w", err)
+	}
+	defer archiveFile.Close()
+
+	gzipWriter := gzip.NewWriter(archiveFile)
+	defer gzipWriter.Close()
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
+
 	ignoreParser := NewIgnoreParser()
 
-	// Load .dockerignore (takes priority over .gitignore)
 	dockerignorePath := filepath.Join(sourceDir, ".dockerignore")
 	dockerignoreExists := false
 	if _, err := os.Stat(dockerignorePath); err == nil {
@@ -107,208 +202,384 @@ func createCrossPlatformZip(sourceDir, zipPath string, excludeDirs []string) err
 		ignoreParser.LoadIgnoreFile(dockerignorePath)
 	}
 
-	// Only load .gitignore if .dockerignore doesn't exist
 	if !dockerignoreExists {
 		gitignorePath := filepath.Join(sourceDir, ".gitignore")
 		ignoreParser.LoadIgnoreFile(gitignorePath)
 	}
-
-	// Add default exclusions (sensitive files)
 	ignoreParser.AddDefaultExclusions()
+	forced := map[string]bool{}
+	for _, include := range forcedIncludes {
+		include = strings.TrimSpace(include)
+		if include == "" {
+			continue
+		}
+		forced[filepath.ToSlash(filepath.Clean(include))] = true
+	}
 
-	// Walk the source directory
+	var totalBytes int64
+	entries := 0
 	return filepath.Walk(sourceDir, func(filePath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Get relative path from source directory
 		relPath, err := filepath.Rel(sourceDir, filePath)
 		if err != nil {
 			return err
 		}
-
-		// Skip the source directory itself
 		if relPath == "." {
 			return nil
 		}
 
-		// Check if path should be ignored
-		if ignoreParser.ShouldIgnore(relPath) {
-			// File should be ignored - skip it
+		relArchivePath := filepath.ToSlash(relPath)
+		if ignoreParser.ShouldIgnore(relPath) && !forced[relArchivePath] {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-
-		// Convert Windows backslashes to forward slashes for cross-platform compatibility
-		// This is critical for deploying from Windows to Linux
-		zipPath := strings.ReplaceAll(relPath, string(filepath.Separator), "/")
-
-		if info.IsDir() {
-			// Add trailing slash for directories
-			zipPath += "/"
-			_, err := zipWriter.Create(zipPath)
-			return err
+		entries++
+		if limits.MaxEntries > 0 && entries > limits.MaxEntries {
+			return fmt.Errorf("build context exceeds maximum entry count %d", limits.MaxEntries)
 		}
 
-		// Create zip entry with forward slashes
-		writer, err := zipWriter.Create(zipPath)
+		header, err := tar.FileInfoHeader(info, "")
 		if err != nil {
 			return err
 		}
+		header.Name = relArchivePath
 
-		// Copy file contents
+		if info.IsDir() {
+			header.Name += "/"
+			header.Mode = 0755
+			return tarWriter.WriteHeader(header)
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		if limits.MaxFileBytes > 0 && info.Size() > limits.MaxFileBytes {
+			return fmt.Errorf("build context file %s exceeds maximum size %d bytes", relPath, limits.MaxFileBytes)
+		}
+		if limits.MaxBytes > 0 && totalBytes+info.Size() > limits.MaxBytes {
+			return fmt.Errorf("build context exceeds maximum total size %d bytes", limits.MaxBytes)
+		}
+		totalBytes += info.Size()
+
+		header.Mode = normalizedBuildContextFileMode(info.Mode())
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
 		file, err := os.Open(filePath)
 		if err != nil {
 			return err
 		}
 		defer file.Close()
-
-		_, err = io.Copy(writer, file)
+		_, err = io.Copy(tarWriter, file)
 		return err
 	})
 }
 
+func createGitSourceTarGzWithForcedIncludes(sourceDir, archivePath string, forcedIncludes []string) error {
+	contextDir, cleanup, err := createGitSourceContext(sourceDir, buildContextArchiveLimits{
+		MaxBytes:     defaultBuildContextArchiveMaxBytes,
+		MaxFileBytes: defaultBuildContextArchiveMaxFileBytes,
+		MaxEntries:   defaultBuildContextArchiveMaxEntries,
+	})
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	return createCrossPlatformTarGzWithForcedIncludes(contextDir, archivePath, forcedIncludes)
+}
 
-// RollbackToState rolls back a Swarm service to a specific deployment state
+func createGitSourceContext(sourceDir string, limits buildContextArchiveLimits) (string, func(), error) {
+	sourceAbs, err := filepath.Abs(sourceDir)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to resolve build context path: %w", err)
+	}
+	if realSource, err := filepath.EvalSymlinks(sourceAbs); err == nil {
+		sourceAbs = realSource
+	}
+	repoRoot, err := gitBuildOutput(sourceAbs, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to locate git repository for build context: %w", err)
+	}
+	repoRootAbs, err := filepath.Abs(strings.TrimSpace(repoRoot))
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to resolve git root: %w", err)
+	}
+	if realRoot, err := filepath.EvalSymlinks(repoRootAbs); err == nil {
+		repoRootAbs = realRoot
+	}
+	relContext, err := filepath.Rel(repoRootAbs, sourceAbs)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to resolve build context relative to git root: %w", err)
+	}
+	if relContext == ".." || strings.HasPrefix(relContext, ".."+string(filepath.Separator)) || filepath.IsAbs(relContext) {
+		return "", nil, fmt.Errorf("build context must be inside the git repository")
+	}
+	gitContext := filepath.ToSlash(filepath.Clean(relContext))
+	if gitContext == "." {
+		gitContext = ""
+	}
+
+	tempDir, err := os.MkdirTemp("", "tako-git-source-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create git build context: %w", err)
+	}
+	cleanup := func() {
+		_ = os.RemoveAll(tempDir)
+	}
+	rawArchive := filepath.Join(tempDir, "source.tar")
+	args := []string{"-C", repoRootAbs, "archive", "--format=tar", "--output", rawArchive, "HEAD"}
+	if gitContext != "" {
+		args = append(args, "--", gitContext)
+	}
+	if err := gitBuildRun(args...); err != nil {
+		cleanup()
+		if gitContext == "" {
+			return "", nil, fmt.Errorf("failed to archive committed git source: %w", err)
+		}
+		return "", nil, fmt.Errorf("failed to archive committed git source for %s: %w", gitContext, err)
+	}
+
+	contextDir := filepath.Join(tempDir, "context")
+	if err := os.MkdirAll(contextDir, 0755); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("failed to create extracted git context: %w", err)
+	}
+	if err := extractGitSourceContext(rawArchive, contextDir, gitContext, limits); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return contextDir, cleanup, nil
+}
+
+func extractGitSourceContext(archivePath, destDir, stripPrefix string, limits buildContextArchiveLimits) error {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("failed to open committed git archive: %w", err)
+	}
+	defer file.Close()
+
+	prefix := strings.Trim(strings.TrimSpace(stripPrefix), "/")
+	tarReader := tar.NewReader(file)
+	var totalBytes int64
+	entries := 0
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read committed git archive: %w", err)
+		}
+
+		relPath, err := stripGitArchivePrefix(header.Name, prefix)
+		if err != nil {
+			return err
+		}
+		if relPath == "" {
+			continue
+		}
+		entries++
+		if limits.MaxEntries > 0 && entries > limits.MaxEntries {
+			return fmt.Errorf("committed build context exceeds maximum entry count %d", limits.MaxEntries)
+		}
+
+		target, err := safeExtractTarget(destDir, relPath)
+		if err != nil {
+			return err
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return fmt.Errorf("failed to create committed build context directory: %w", err)
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if header.Size < 0 {
+				return fmt.Errorf("committed build context file %s has invalid size", relPath)
+			}
+			if limits.MaxFileBytes > 0 && header.Size > limits.MaxFileBytes {
+				return fmt.Errorf("committed build context file %s exceeds maximum size %d bytes", relPath, limits.MaxFileBytes)
+			}
+			if limits.MaxBytes > 0 && totalBytes+header.Size > limits.MaxBytes {
+				return fmt.Errorf("committed build context exceeds maximum total size %d bytes", limits.MaxBytes)
+			}
+			totalBytes += header.Size
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("failed to create committed build context parent: %w", err)
+			}
+			mode := os.FileMode(normalizedBuildContextFileMode(header.FileInfo().Mode()))
+			if mode == 0 {
+				mode = 0600
+			}
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				return fmt.Errorf("failed to write committed build context file: %w", err)
+			}
+			_, copyErr := io.CopyN(out, tarReader, header.Size)
+			closeErr := out.Close()
+			if copyErr != nil {
+				return fmt.Errorf("failed to extract committed build context file %s: %w", relPath, copyErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("failed to close committed build context file %s: %w", relPath, closeErr)
+			}
+			if err := os.Chmod(target, mode); err != nil {
+				return fmt.Errorf("failed to set committed build context file mode for %s: %w", relPath, err)
+			}
+		default:
+			// Git archives can contain symlinks. Build contexts created by Tako only
+			// preserve regular files and directories, so ignore other entry types.
+			continue
+		}
+	}
+}
+
+func normalizedBuildContextFileMode(mode os.FileMode) int64 {
+	if mode.Perm()&0111 != 0 {
+		return 0755
+	}
+	return 0644
+}
+
+func stripGitArchivePrefix(name string, prefix string) (string, error) {
+	clean := path.Clean(strings.TrimSpace(name))
+	if clean == "." {
+		return "", nil
+	}
+	if path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("committed git archive path escapes root: %s", name)
+	}
+	if prefix != "" {
+		if clean == prefix {
+			return "", nil
+		}
+		prefixWithSlash := prefix + "/"
+		if !strings.HasPrefix(clean, prefixWithSlash) {
+			return "", fmt.Errorf("committed git archive path %s is outside build context %s", clean, prefix)
+		}
+		clean = strings.TrimPrefix(clean, prefixWithSlash)
+	}
+	if clean == "." {
+		return "", nil
+	}
+	return clean, nil
+}
+
+func safeExtractTarget(destDir string, archiveName string) (string, error) {
+	clean := path.Clean(archiveName)
+	if clean == "." || path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("committed build context path escapes root: %s", archiveName)
+	}
+	target := filepath.Join(destDir, filepath.FromSlash(clean))
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve committed build context path: %w", err)
+	}
+	destAbs, err := filepath.Abs(destDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve committed build context root: %w", err)
+	}
+	if targetAbs != destAbs && !strings.HasPrefix(targetAbs, destAbs+string(filepath.Separator)) {
+		return "", fmt.Errorf("committed build context path escapes root: %s", archiveName)
+	}
+	return targetAbs, nil
+}
+
+func gitBuildOutput(workDir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), buildContextGitArchiveTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = workDir
+	output, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("git command timed out after %s: git %s", buildContextGitArchiveTimeout, strings.Join(args, " "))
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
+func gitBuildRun(args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), buildContextGitArchiveTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("git command timed out after %s: git %s", buildContextGitArchiveTimeout, strings.Join(args, " "))
+	}
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("git %s failed: %s", strings.Join(args, " "), detail)
+	}
+	return nil
+}
+
+// RollbackToState converges a service back to a saved takod deployment state.
 func (d *Deployer) RollbackToState(serviceName string, serviceState *state.ServiceState) error {
+	if d.sshPool == nil {
+		return fmt.Errorf("ssh pool not initialized")
+	}
+	if strings.TrimSpace(serviceState.Image) == "" {
+		return fmt.Errorf("deployment state for %s does not include an image", serviceName)
+	}
+
 	if d.verbose {
 		fmt.Printf("  Rolling back service %s to image %s...\n", serviceName, serviceState.Image)
 	}
 
-	// Check if the target image exists
-	checkImageCmd := fmt.Sprintf("docker images -q %s 2>/dev/null", serviceState.ImageID)
-	imageExists, _ := d.client.Execute(checkImageCmd)
-
-	if strings.TrimSpace(imageExists) == "" {
-		checkImageByNameCmd := fmt.Sprintf("docker images -q %s 2>/dev/null", serviceState.Image)
-		imageExists, _ = d.client.Execute(checkImageByNameCmd)
-
-		if strings.TrimSpace(imageExists) == "" {
-			return fmt.Errorf("image %s (ID: %s) not found on server - cannot rollback",
-				serviceState.Image, serviceState.ImageID)
-		}
-	}
-
-	if d.verbose {
-		fmt.Printf("  Found target image: %s\n", serviceState.Image)
-	}
-
-	fullServiceName := fmt.Sprintf("%s_%s_%s", d.config.Project.Name, d.environment, serviceName)
-
-	// Check if Swarm service exists
-	checkServiceCmd := fmt.Sprintf("docker service ls --filter name=%s --format '{{.Name}}'", fullServiceName)
-	existingService, _ := d.client.Execute(checkServiceCmd)
-
-	if strings.TrimSpace(existingService) != fullServiceName {
-		return fmt.Errorf("swarm service %s not found - cannot rollback", fullServiceName)
-	}
-
-	replicas := serviceState.Replicas
-	if replicas <= 0 {
-		replicas = 1
-	}
-
-	if d.verbose {
-		fmt.Printf("  Updating Swarm service to previous image...\n")
-	}
-
-	// Build environment variable arguments
-	getEnvCmd := fmt.Sprintf("docker service inspect %s --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{.}} {{end}}'", fullServiceName)
-	currentEnvOutput, _ := d.client.Execute(getEnvCmd)
-
-	envArgs := ""
-	for _, envVar := range strings.Fields(currentEnvOutput) {
-		if idx := strings.Index(envVar, "="); idx > 0 {
-			key := envVar[:idx]
-			envArgs += fmt.Sprintf(" --env-rm %s", key)
-		}
-	}
-
-	for key, value := range serviceState.Env {
-		escapedValue := strings.ReplaceAll(value, "'", "'\"'\"'")
-		envArgs += fmt.Sprintf(" --env-add %s='%s'", key, escapedValue)
-	}
-
-	updateCmd := fmt.Sprintf("docker service update --detach --force --image %s --replicas %d%s %s 2>&1",
-		serviceState.Image,
-		replicas,
-		envArgs,
-		fullServiceName,
-	)
-
-	if d.verbose {
-		fmt.Printf("  Command: %s\n", updateCmd)
-	}
-
-	output, err := d.client.Execute(updateCmd)
+	service, err := d.config.GetService(d.environment, serviceName)
 	if err != nil {
-		return fmt.Errorf("failed to update swarm service: %w\nOutput: %s", err, output)
+		return fmt.Errorf("failed to load service config for rollback: %w", err)
 	}
 
-	if d.verbose {
-		fmt.Printf("  ✓ Swarm service updated, rolling update in progress...\n")
+	rollbackService := *service
+	rollbackService.Image = serviceState.Image
+	rollbackService.Replicas = serviceState.Replicas
+	if serviceState.Port > 0 {
+		rollbackService.Port = serviceState.Port
 	}
 
-	time.Sleep(5 * time.Second)
-
-	verifyCmd := fmt.Sprintf("docker service ps %s --filter 'desired-state=running' --format '{{.CurrentState}}' | head -1", fullServiceName)
-	status, _ := d.client.Execute(verifyCmd)
-
-	if strings.Contains(strings.ToLower(status), "running") {
-		if d.verbose {
-			fmt.Printf("  ✓ Service rollback completed successfully\n")
-		}
-	} else {
-		if d.verbose {
-			fmt.Printf("  Warning: Service status: %s (rollback may still be in progress)\n", strings.TrimSpace(status))
-		}
-	}
-
-	return nil
+	return d.DeployServiceTakod(serviceName, &rollbackService, serviceState.Image)
 }
 
 // BuildImage builds a Docker image for a service without deploying it
-// This is used for Swarm mode where we need to build first, then deploy with docker service create
 func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig) (string, error) {
-	deployDir := fmt.Sprintf("/opt/%s", d.config.Project.Name)
-
 	// Get full image name from config with environment
 	fullImageName := d.config.GetFullImageName(serviceName, d.environment)
-
-	// Create hook executor
-	hookExecutor := hooks.NewExecutor(d.client, d.config.Project.Name, d.environment, serviceName, d.verbose)
-
-	// Execute pre-build hooks
-	if service.Hooks != nil && len(service.Hooks.PreBuild) > 0 {
-		if err := hookExecutor.ExecutePreBuild(service.Hooks.PreBuild, deployDir); err != nil {
-			return "", fmt.Errorf("pre-build hooks failed: %w", err)
-		}
-	}
 
 	if service.Build != "" {
 		// Use service.Build as the build context path
 		contextPath := service.Build
-
-		// Auto-detect Dockerfile in the build context
-		dockerfilePaths := []string{
-			filepath.Join(contextPath, "Dockerfile"),
-			filepath.Join(contextPath, "Dockerfile.prod"),
-			filepath.Join(contextPath, "dockerfile"),
-			filepath.Join(contextPath, ".dockerfile"),
+		sourceContextPath := contextPath
+		cleanupSourceContext := func() {}
+		if d.config.DeploymentSource() == config.DeploymentSourceGit {
+			gitContextPath, cleanup, err := createGitSourceContext(contextPath, buildContextArchiveLimits{
+				MaxBytes:     defaultBuildContextArchiveMaxBytes,
+				MaxFileBytes: defaultBuildContextArchiveMaxFileBytes,
+				MaxEntries:   defaultBuildContextArchiveMaxEntries,
+			})
+			if err != nil {
+				return "", fmt.Errorf("failed to prepare committed git build context: %w", err)
+			}
+			sourceContextPath = gitContextPath
+			cleanupSourceContext = cleanup
+			defer cleanupSourceContext()
 		}
 
-		hasDockerfile := false
-		for _, path := range dockerfilePaths {
-			if _, err := os.Stat(path); err == nil {
-				hasDockerfile = true
-				if d.verbose {
-					fmt.Printf("  Found Dockerfile: %s\n", filepath.Base(path))
-				}
-				break
-			}
+		dockerfilePath, hasDockerfile, err := resolveServiceDockerfile(sourceContextPath, service.Dockerfile)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve dockerfile: %w", err)
+		}
+		if hasDockerfile && d.verbose {
+			fmt.Printf("  Found Dockerfile: %s\n", dockerfilePath)
 		}
 
 		if !hasDockerfile {
@@ -317,7 +588,7 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 				fmt.Printf("  No Dockerfile found - using Nixpacks auto-detection...\n")
 			}
 
-			detector := nixpacks.NewDetector(contextPath, d.verbose)
+			detector := nixpacks.NewDetector(sourceContextPath, d.verbose)
 
 			// Detect framework
 			framework, err := detector.DetectFramework()
@@ -329,161 +600,51 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 				fmt.Printf("  Detected framework: %s\n", framework)
 			}
 
-			// Build locally with Nixpacks
-			if err := detector.BuildWithNixpacks(fullImageName); err != nil {
-				return "", fmt.Errorf("failed to build with Nixpacks: %w", err)
-			}
-
-			// Save image as tar
-			if d.verbose {
-				fmt.Printf("  Exporting image...\n")
-			}
-
-			// We'll need to transfer the image to the server
-			// For now, we'll build on server with generated Dockerfile
 			if err := detector.GenerateDockerfile(); err != nil {
 				return "", fmt.Errorf("failed to generate Dockerfile: %w", err)
 			}
 
 			hasDockerfile = true
+			dockerfilePath = "Dockerfile"
 		}
 
-		// Build on remote server
 		if d.verbose {
-			fmt.Printf("  Preparing deployment directory...\n")
-		}
-
-		// Create deployment directory on server
-		if _, err := d.client.Execute(fmt.Sprintf("mkdir -p %s", deployDir)); err != nil {
-			return "", fmt.Errorf("failed to create deployment directory: %w", err)
-		}
-
-		// Copy Dockerfile and context to server
-		if d.verbose {
-			fmt.Printf("  Copying application files...\n")
+			fmt.Printf("  Streaming build context to takod...\n")
 			fmt.Printf("  Context path: %s\n", contextPath)
+			fmt.Printf("  Build source: %s\n", d.config.DeploymentSource())
+			fmt.Printf("  Dockerfile: %s\n", dockerfilePath)
 		}
 
-		// Use tar/zip for reliable directory copying
-		// Create archive locally
-		archivePath := filepath.Join(os.TempDir(), fmt.Sprintf("deploy_%s_%d", serviceName, time.Now().Unix()))
-
-		// Get absolute context path
-		absContextPath, err := filepath.Abs(contextPath)
+		absContextPath, err := filepath.Abs(sourceContextPath)
 		if err != nil {
 			return "", fmt.Errorf("failed to get absolute path: %w", err)
 		}
 
-		var remoteTarPath string
+		archivePath := filepath.Join(os.TempDir(), fmt.Sprintf("tako-build-%s-%d.tar.gz", serviceName, time.Now().UnixNano()))
+		if err := createCrossPlatformTarGzWithForcedIncludes(absContextPath, archivePath, []string{dockerfilePath}); err != nil {
+			return "", fmt.Errorf("failed to create build context archive: %w", err)
+		}
+		defer os.Remove(archivePath)
 
-		// Use cross-platform zip for Windows, native tar for Unix/Linux/Mac
-		if strings.Contains(strings.ToLower(os.Getenv("OS")), "windows") || filepath.VolumeName(absContextPath) != "" {
-			// Windows: Use our cross-platform Go zip implementation
-			zipPath := archivePath + ".zip"
-			if d.verbose {
-				fmt.Printf("  Creating zip archive (cross-platform): %s\n", zipPath)
-			}
+		archive, err := os.Open(archivePath)
+		if err != nil {
+			return "", fmt.Errorf("failed to open build context archive: %w", err)
+		}
+		defer archive.Close()
 
-			// Create zip with forward slashes for Linux compatibility
-			// Note: excludeDirs parameter is no longer used, ignore parser handles all exclusions
-			if err := createCrossPlatformZip(absContextPath, zipPath, nil); err != nil {
-				return "", fmt.Errorf("failed to create zip archive: %w", err)
-			}
-
-			defer os.Remove(zipPath)
-
-			// Copy zip to server
-			remoteTarPath = fmt.Sprintf("%s/deploy.zip", deployDir)
-			if err := d.client.CopyFile(zipPath, remoteTarPath); err != nil {
-				return "", fmt.Errorf("failed to copy zip archive: %w", err)
-			}
-
-			// Ensure unzip is installed
-			if _, err := d.client.Execute("which unzip || (apt-get update && apt-get install -y unzip)"); err != nil {
-				// Try to install unzip if not present
-				d.client.Execute("apt-get update && apt-get install -y unzip")
-			}
-
-			// Extract on server using unzip
-			extractCmd := fmt.Sprintf("cd %s && unzip -o deploy.zip && rm deploy.zip", deployDir)
-			if _, err := d.client.Execute(extractCmd); err != nil {
-				return "", fmt.Errorf("failed to extract files on server: %w", err)
-			}
-		} else {
-			// Unix/Linux/Mac: Use native tar
-			tarPath := archivePath + ".tar.gz"
-			if d.verbose {
-				fmt.Printf("  Creating tar archive: %s\n", tarPath)
-			}
-
-			// Build exclude list from .dockerignore or .gitignore
-			ignoreParser := NewIgnoreParser()
-			dockerignorePath := filepath.Join(absContextPath, ".dockerignore")
-			gitignorePath := filepath.Join(absContextPath, ".gitignore")
-			dockerignoreExists := false
-			if _, err := os.Stat(dockerignorePath); err == nil {
-				dockerignoreExists = true
-				ignoreParser.LoadIgnoreFile(dockerignorePath)
-			}
-			if !dockerignoreExists {
-				ignoreParser.LoadIgnoreFile(gitignorePath)
-			}
-			ignoreParser.AddDefaultExclusions()
-
-			// Build tar exclude arguments
-			excludeArgs := []string{}
-			for _, pattern := range ignoreParser.GetExcludedPatterns() {
-				excludeArgs = append(excludeArgs, "--exclude="+pattern)
-			}
-
-			// Build tar command with excludes
-			tarArgs := []string{"-czf", tarPath}
-			tarArgs = append(tarArgs, excludeArgs...)
-			tarArgs = append(tarArgs, "-C", absContextPath, ".")
-
-			cmd := exec.Command("tar", tarArgs...)
-			if output, err := cmd.CombinedOutput(); err != nil {
-				return "", fmt.Errorf("failed to create tar archive: %w\nOutput: %s", err, output)
-			}
-
-			defer os.Remove(tarPath)
-
-			// Copy tar to server
-			remoteTarPath = fmt.Sprintf("%s/deploy.tar.gz", deployDir)
-			if err := d.client.CopyFile(tarPath, remoteTarPath); err != nil {
-				return "", fmt.Errorf("failed to copy tar archive: %w", err)
-			}
-
-			// Extract on server
-			extractCmd := fmt.Sprintf("cd %s && tar -xzf deploy.tar.gz && rm deploy.tar.gz", deployDir)
-			if _, err := d.client.Execute(extractCmd); err != nil {
-				return "", fmt.Errorf("failed to extract files on server: %w", err)
+		output, err := takodclient.StreamRequest(d.client, d.takodSocket(), "POST", d.imageBuildEndpoint(fullImageName, service, dockerfilePath), archive)
+		var response takod.ImageBuildResponse
+		if err == nil {
+			if decodeErr := json.Unmarshal([]byte(output), &response); decodeErr != nil {
+				err = fmt.Errorf("failed to parse takod build response: %w", decodeErr)
 			}
 		}
-
-		// Verify files were copied
-		if d.verbose {
-			listCmd := fmt.Sprintf("ls -la %s", deployDir)
-			fileList, _ := d.client.Execute(listCmd)
-			fmt.Printf("  Files in deployment directory:\n")
-			for _, line := range strings.Split(fileList, "\n") {
-				if line != "" {
-					fmt.Printf("    %s\n", line)
-				}
-			}
+		buildOutput := response.Output
+		if buildOutput == "" {
+			buildOutput = output
 		}
-
-		// Build Docker image on server
-		if d.verbose {
-			fmt.Printf("  Building Docker image on server...\n")
-		}
-
-		buildCmd := fmt.Sprintf("cd %s && docker build -t %s . 2>&1 | tee build.log", deployDir, fullImageName)
-		output, err := d.client.Execute(buildCmd)
-
-		// Show build output in verbose mode or when there's an error
 		if d.verbose || err != nil {
-			lines := strings.Split(output, "\n")
+			lines := strings.Split(buildOutput, "\n")
 			start := len(lines) - 30
 			if start < 0 {
 				start = 0
@@ -497,31 +658,13 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 		}
 
 		if err != nil {
-			return "", fmt.Errorf("failed to build Docker image: %w", err)
-		}
-
-		// Verify image was built
-		checkImageCmd := fmt.Sprintf("docker image ls --format '{{.Repository}}:{{.Tag}}' | grep '%s' || echo 'NOT_FOUND'", fullImageName)
-		imgCheck, _ := d.client.Execute(checkImageCmd)
-
-		if d.verbose {
-			fmt.Printf("  Image verification: %s\n", strings.TrimSpace(imgCheck))
-		}
-
-		if strings.Contains(imgCheck, "NOT_FOUND") {
-			return "", fmt.Errorf("docker build completed but image '%s' was not created - check build output above", fullImageName)
+			return "", fmt.Errorf("failed to build Docker image through takod: %w", err)
 		}
 
 		if d.verbose {
 			fmt.Printf("  ✓ Image built and verified: %s\n", fullImageName)
 		}
 
-		// Execute post-build hooks
-		if service.Hooks != nil && len(service.Hooks.PostBuild) > 0 {
-			if err := hookExecutor.ExecutePostBuild(service.Hooks.PostBuild, fullImageName); err != nil {
-				return "", fmt.Errorf("post-build hooks failed: %w", err)
-			}
-		}
 	} else if service.Image != "" {
 		// Service uses pre-built image (e.g., postgres, redis)
 		if d.verbose {
@@ -533,26 +676,66 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 	return fullImageName, nil
 }
 
-// VerifyNetworkSetup verifies that Traefik is connected to all project networks
-func (d *Deployer) VerifyNetworkSetup() error {
-	// Check if Traefik container is running
-	checkCmd := "docker ps --filter name=^traefik$ --format '{{.Names}}'"
-	output, _ := d.client.Execute(checkCmd)
-
-	if strings.TrimSpace(output) != "traefik" {
-		// Traefik not running yet - will be created during deployment
-		return nil
+func resolveServiceDockerfile(contextPath string, dockerfile string) (string, bool, error) {
+	if strings.TrimSpace(dockerfile) != "" {
+		clean := filepath.Clean(strings.TrimSpace(dockerfile))
+		if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return "", false, fmt.Errorf("dockerfile must be a relative path inside the build context")
+		}
+		candidate := filepath.Join(contextPath, clean)
+		info, err := os.Lstat(candidate)
+		if err != nil {
+			return "", false, fmt.Errorf("dockerfile does not exist: %s", dockerfile)
+		}
+		if info.IsDir() || !info.Mode().IsRegular() {
+			return "", false, fmt.Errorf("dockerfile must be a regular file: %s", dockerfile)
+		}
+		return filepath.ToSlash(clean), true, nil
 	}
 
-	// Get network manager
-	networkMgr := network.NewManager(d.client, d.config.Project.Name, d.environment, d.verbose)
-
-	// Ensure Traefik is connected to all project networks
-	if err := networkMgr.EnsureContainerConnectedToAllNetworks("traefik"); err != nil {
-		return fmt.Errorf("failed to verify Traefik network connections: %w", err)
+	dockerfileCandidates := []string{
+		"Dockerfile",
+		"Dockerfile.prod",
+		"dockerfile",
+		".dockerfile",
 	}
-
-	return nil
+	for _, candidate := range dockerfileCandidates {
+		path := filepath.Join(contextPath, candidate)
+		info, err := os.Lstat(path)
+		if err == nil && !info.IsDir() && info.Mode().IsRegular() {
+			return filepath.ToSlash(candidate), true, nil
+		}
+	}
+	return "", false, nil
 }
 
-
+func (d *Deployer) imageBuildEndpoint(image string, service *config.ServiceConfig, dockerfilePath ...string) string {
+	dockerfile := service.Dockerfile
+	if len(dockerfilePath) > 0 && strings.TrimSpace(dockerfilePath[0]) != "" {
+		dockerfile = dockerfilePath[0]
+	}
+	opts := takodclient.ImageBuildEndpointOptions{
+		Platform:   service.Platform,
+		Dockerfile: dockerfile,
+	}
+	cache := d.config.DeploymentCache()
+	if cache != nil && cache.Enabled {
+		switch cache.Type {
+		case "registry":
+			ref := strings.TrimSpace(cache.Ref)
+			if ref != "" {
+				cacheSpec := "type=registry,ref=" + ref
+				opts.CacheFrom = append(opts.CacheFrom, cacheSpec)
+				opts.CacheTo = append(opts.CacheTo, cacheSpec+",mode=max")
+				opts.Buildx = true
+			}
+		default:
+			opts.CacheFrom = append(opts.CacheFrom, image)
+		}
+		if cache.Builder != "" {
+			opts.Builder = cache.Builder
+			opts.Buildx = true
+		}
+	}
+	return takodclient.ImageBuildEndpointWithOptions(image, opts)
+}

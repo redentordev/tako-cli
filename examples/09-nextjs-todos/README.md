@@ -1,15 +1,15 @@
 # Next.js Todo App Example
 
-A full-stack todo application built with Next.js 15, TypeScript, Tailwind CSS, and SQLite. This example demonstrates how to deploy a complete Next.js application with a database using Tako CLI.
+A full-stack todo application built with Next.js 16, TypeScript, Tailwind CSS, and SQLite. This example demonstrates how to deploy a complete Next.js application with a database using Tako CLI.
 
 ## Features
 
-- Next.js 15 with App Router
+- Next.js 16 with App Router
 - TypeScript for type safety
 - Tailwind CSS for styling
 - SQLite database with better-sqlite3
 - RESTful API routes
-- Persistent storage with Docker volumes
+- Persistent storage with service volumes
 - Production-ready Dockerfile
 
 ## Project Structure
@@ -65,8 +65,7 @@ The SQLite database will be created in `./data/todos.db`.
 2. The domain is automatically configured using sslip.io:
    ```yaml
    proxy:
-     domains:
-       - nextjs-todos.${SERVER_IP}.sslip.io  # Auto-resolves to your server
+     domain: nextjs-todos.${SERVER_IP}.sslip.io  # Auto-resolves to your server
    ```
 
    This provides automatic DNS without needing to configure actual DNS records.
@@ -81,7 +80,7 @@ The application will be:
 - Built as a Docker image
 - Deployed to your configured server
 - Accessible via `https://nextjs-todos.YOUR.IP.sslip.io` with automatic HTTPS
-- Data persisted in a Docker volume
+- Data persisted in a service volume
 
 **Multiple Apps**: Deploy multiple apps using different subdomains:
 - `nextjs-todos.YOUR.IP.sslip.io` → Todo app
@@ -92,7 +91,7 @@ All apps route through Caddy on ports 80/443, no port numbers needed!
 
 ## Database Persistence
 
-The todo data is stored in SQLite and persisted using Docker volumes:
+The todo data is stored in SQLite and persisted using a Tako-managed service volume:
 - Volume name: `todos_data`
 - Mount path: `/app/data`
 - Database file: `/app/data/todos.db`
@@ -114,12 +113,12 @@ Key settings in `tako.yaml`:
 - **Replicas**: 1 (can be increased for load balancing)
 - **Restart Policy**: `unless-stopped`
 - **Health Check**: Monitors `/api/todos` endpoint
-- **Deployment Strategy**: Rolling updates with zero downtime
+- **Deployment Strategy**: Reconciled container updates
 - **TLS**: Automatic HTTPS with Let's Encrypt
 
 ## Tech Stack
 
-- **Framework**: Next.js 15.1
+- **Framework**: Next.js 16
 - **Language**: TypeScript 5
 - **Styling**: Tailwind CSS 4
 - **Database**: SQLite (better-sqlite3)

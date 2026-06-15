@@ -2,141 +2,121 @@ package state
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/resilience"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
-const (
-	// StateDir is the directory on the server where state is stored
-	StateDir = "/var/lib/tako-cli"
-	// MaxHistoryEntries is the maximum number of deployments to keep
-	MaxHistoryEntries = 50
-)
+const MaxHistoryEntries = 50
 
-// StateManager manages deployment state on remote servers
+var ErrNotFound = errors.New("takod state document not found")
+
+// StateManager manages deployment history through the node-local takod state API.
 type StateManager struct {
 	client      *ssh.Client
+	socket      string
 	projectName string
+	environment string
 	server      string
 }
 
-// NewStateManager creates a new state manager
-func NewStateManager(client *ssh.Client, projectName, server string) *StateManager {
+// NewStateManager creates a state manager that uses the default takod socket.
+func NewStateManager(client *ssh.Client, projectName, environment, server string) *StateManager {
+	return NewStateManagerWithSocket(client, projectName, environment, server, takodclient.DefaultSocket)
+}
+
+// NewStateManagerWithSocket creates a state manager using a configured takod socket.
+func NewStateManagerWithSocket(client *ssh.Client, projectName, environment, server, socket string) *StateManager {
+	if socket == "" {
+		socket = takodclient.DefaultSocket
+	}
 	return &StateManager{
 		client:      client,
+		socket:      socket,
 		projectName: projectName,
+		environment: environment,
 		server:      server,
 	}
 }
 
-// Initialize ensures the state directory exists on the server
+// Initialize is retained for callers that want to eagerly validate state access.
 func (s *StateManager) Initialize() error {
-	// Create state directory and project subdirectory
-	statePath := s.getStatePath()
-	cmd := fmt.Sprintf("sudo mkdir -p %s && sudo chmod -R 755 %s", statePath, StateDir)
-	if _, err := s.client.Execute(cmd); err != nil {
-		return fmt.Errorf("failed to initialize state directory: %w", err)
-	}
 	return nil
 }
 
-// SaveDeployment saves a deployment state to the server with retry logic
+// SaveDeployment saves a deployment state with retry logic.
 func (s *StateManager) SaveDeployment(deployment *DeploymentState) error {
-	// Ensure deployment has an ID
 	if deployment.ID == "" {
 		deployment.ID = s.generateDeploymentID()
 	}
-
-	// Set metadata
 	deployment.ProjectName = s.projectName
+	deployment.Environment = s.environment
 	deployment.Host = s.server
 
-	// Serialize to JSON
-	data, err := json.MarshalIndent(deployment, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to serialize deployment state: %w", err)
-	}
-
-	// Wrap SSH operations with retry for transient failures
 	ctx := context.Background()
 	return resilience.RetryWithBackoff(ctx, func() error {
-		return s.saveDeploymentOnce(deployment, data)
+		return s.saveDeploymentOnce(deployment)
 	},
 		resilience.WithMaxElapsed(30*time.Second),
 		resilience.WithMaxRetries(3),
 	)
 }
 
-// saveDeploymentOnce performs the actual save operation (called by retry wrapper)
-func (s *StateManager) saveDeploymentOnce(deployment *DeploymentState, data []byte) error {
-	// Write to server
-	statePath := s.getStatePath()
-	tmpFile := fmt.Sprintf("/tmp/tako-deploy-%s.json", deployment.ID)
-
-	// Write to temp file using base64 encoding to avoid heredoc/shell escaping issues
-	// This prevents injection if JSON data contains shell metacharacters or 'EOF'
-	encoded := base64.StdEncoding.EncodeToString(data)
-	writeCmd := fmt.Sprintf("echo '%s' | base64 -d > %s", encoded, tmpFile)
-	if _, err := s.client.Execute(writeCmd); err != nil {
+func (s *StateManager) saveDeploymentOnce(deployment *DeploymentState) error {
+	if err := s.writeDocument("deployment", deployment.ID, deployment); err != nil {
 		return fmt.Errorf("failed to write deployment state: %w", err)
 	}
-
-	// Move to state directory
-	mvCmd := fmt.Sprintf("sudo mv %s %s/%s.json", tmpFile, statePath, deployment.ID)
-	if _, err := s.client.Execute(mvCmd); err != nil {
-		return fmt.Errorf("failed to move deployment state: %w", err)
-	}
-
-	// Update history
 	return s.updateHistory(deployment)
 }
 
-// GetDeployment retrieves a specific deployment by ID
+// GetDeployment retrieves a specific deployment by ID.
 func (s *StateManager) GetDeployment(deploymentID string) (*DeploymentState, error) {
-	statePath := s.getStatePath()
-	filePath := fmt.Sprintf("%s/%s.json", statePath, deploymentID)
-
-	// Read file from server
-	readCmd := fmt.Sprintf("sudo cat %s 2>/dev/null", filePath)
-	output, err := s.client.Execute(readCmd)
-	if err != nil || strings.TrimSpace(output) == "" {
-		return nil, fmt.Errorf("deployment %s not found", deploymentID)
-	}
-
-	// Parse JSON
 	var deployment DeploymentState
-	if err := json.Unmarshal([]byte(output), &deployment); err != nil {
-		return nil, fmt.Errorf("failed to parse deployment state: %w", err)
+	if err := s.readDocument("deployment", deploymentID, &deployment); err == nil {
+		return &deployment, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, fmt.Errorf("failed to read deployment %s: %w", deploymentID, err)
 	}
 
-	return &deployment, nil
+	history, err := s.loadHistory()
+	if errors.Is(err, ErrNotFound) {
+		return nil, fmt.Errorf("deployment %s not found", deploymentID)
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to load deployment history for %s: %w", deploymentID, err)
+	}
+	for _, dep := range history.Deployments {
+		if dep != nil && dep.ID == deploymentID {
+			return dep, nil
+		}
+	}
+	return nil, fmt.Errorf("deployment %s not found", deploymentID)
 }
 
-// ListDeployments lists all deployments with optional filtering
+// ListDeployments lists all deployments with optional filtering.
 func (s *StateManager) ListDeployments(opts *HistoryOptions) ([]*DeploymentState, error) {
 	if opts == nil {
 		opts = &HistoryOptions{Limit: 10, IncludeFailed: true}
 	}
 
-	// Read history file
 	history, err := s.loadHistory()
 	if err != nil {
 		return nil, err
 	}
 
-	// Filter and sort
 	var result []*DeploymentState
 	for _, dep := range history.Deployments {
-		// Apply filters
+		if dep == nil {
+			continue
+		}
 		if opts.Status != "" && dep.Status != opts.Status {
 			continue
 		}
@@ -151,16 +131,13 @@ func (s *StateManager) ListDeployments(opts *HistoryOptions) ([]*DeploymentState
 		if !opts.IncludeFailed && dep.Status == StatusFailed {
 			continue
 		}
-
 		result = append(result, dep)
 	}
 
-	// Sort by timestamp (newest first)
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].Timestamp.After(result[j].Timestamp)
 	})
 
-	// Apply limit
 	if opts.Limit > 0 && len(result) > opts.Limit {
 		result = result[:opts.Limit]
 	}
@@ -168,7 +145,7 @@ func (s *StateManager) ListDeployments(opts *HistoryOptions) ([]*DeploymentState
 	return result, nil
 }
 
-// GetLatestSuccessful returns the most recent successful deployment
+// GetLatestSuccessful returns the most recent successful deployment.
 func (s *StateManager) GetLatestSuccessful() (*DeploymentState, error) {
 	deployments, err := s.ListDeployments(&HistoryOptions{
 		Status:        StatusSuccess,
@@ -178,15 +155,13 @@ func (s *StateManager) GetLatestSuccessful() (*DeploymentState, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	if len(deployments) == 0 {
 		return nil, fmt.Errorf("no successful deployments found")
 	}
-
 	return deployments[0], nil
 }
 
-// GetPreviousDeployment returns the deployment before the current one
+// GetPreviousDeployment returns the deployment before the current one.
 func (s *StateManager) GetPreviousDeployment(currentID string) (*DeploymentState, error) {
 	deployments, err := s.ListDeployments(&HistoryOptions{
 		Status:        StatusSuccess,
@@ -196,130 +171,159 @@ func (s *StateManager) GetPreviousDeployment(currentID string) (*DeploymentState
 	if err != nil {
 		return nil, err
 	}
-
-	// Find current deployment and return the one before it
 	for i, dep := range deployments {
-		if dep.ID == currentID && i+1 < len(deployments) {
+		if dep != nil && dep.ID == currentID && i+1 < len(deployments) {
 			return deployments[i+1], nil
 		}
 	}
-
 	return nil, fmt.Errorf("no previous deployment found")
 }
 
-// CleanupOldDeployments removes old deployment records
+// CleanupOldDeployments prunes old entries from the history document.
 func (s *StateManager) CleanupOldDeployments() error {
-	deployments, err := s.ListDeployments(&HistoryOptions{
-		Limit:         MaxHistoryEntries * 2,
-		IncludeFailed: true,
-	})
+	history, err := s.loadHistory()
 	if err != nil {
 		return err
 	}
-
-	// Keep only MaxHistoryEntries
-	if len(deployments) > MaxHistoryEntries {
-		toDelete := deployments[MaxHistoryEntries:]
-		statePath := s.getStatePath()
-
-		for _, dep := range toDelete {
-			deleteCmd := fmt.Sprintf("sudo rm -f %s/%s.json", statePath, dep.ID)
-			s.client.Execute(deleteCmd) // Ignore errors
-		}
+	pruned := pruneAndSortDeployments(history.Deployments, MaxHistoryEntries)
+	if len(history.Deployments) <= MaxHistoryEntries && len(pruned) == len(history.Deployments) {
+		return nil
 	}
-
-	return nil
-}
-
-// Helper functions
-
-func (s *StateManager) getStatePath() string {
-	return fmt.Sprintf("%s/%s", StateDir, s.projectName)
+	history.Deployments = pruned
+	history.LastUpdated = time.Now().UTC()
+	return s.SaveHistory(history)
 }
 
 func (s *StateManager) generateDeploymentID() string {
-	// Use nanosecond precision + process ID to avoid collisions
-	// Format: timestamp_nanoseconds_pid for uniqueness
 	return fmt.Sprintf("%d_%d", time.Now().UnixNano(), os.Getpid())
 }
 
 func (s *StateManager) updateHistory(deployment *DeploymentState) error {
-	history, _ := s.loadHistory() // Ignore error, create new if needed
-
-	if history == nil {
+	history, err := s.loadHistory()
+	if errors.Is(err, ErrNotFound) {
 		history = &DeploymentHistory{
 			ProjectName: s.projectName,
+			Environment: s.environment,
 			Server:      s.server,
 			Deployments: []*DeploymentState{},
 		}
+	} else if err != nil {
+		return fmt.Errorf("failed to load existing deployment history before update: %w", err)
 	}
 
-	// Add or update deployment in history
 	found := false
-	for i, d := range history.Deployments {
-		if d.ID == deployment.ID {
+	for i, existing := range history.Deployments {
+		if existing != nil && existing.ID == deployment.ID {
 			history.Deployments[i] = deployment
 			found = true
 			break
 		}
 	}
-
 	if !found {
 		history.Deployments = append(history.Deployments, deployment)
 	}
 
-	history.LastUpdated = time.Now()
-
-	// Save history
-	data, err := json.MarshalIndent(history, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	historyPath := fmt.Sprintf("%s/history.json", s.getStatePath())
-	// Use unique temp file to avoid collisions from concurrent operations
-	tmpFile := fmt.Sprintf("/tmp/tako-history-%d-%d.json", time.Now().UnixNano(), os.Getpid())
-
-	// Use base64 encoding to avoid heredoc/shell escaping issues
-	encoded := base64.StdEncoding.EncodeToString(data)
-	writeCmd := fmt.Sprintf("echo '%s' | base64 -d > %s", encoded, tmpFile)
-	if _, err := s.client.Execute(writeCmd); err != nil {
-		return err
-	}
-
-	// Atomic move to final location
-	mvCmd := fmt.Sprintf("sudo mv %s %s", tmpFile, historyPath)
-	if _, err = s.client.Execute(mvCmd); err != nil {
-		// Clean up temp file on failure
-		s.client.Execute(fmt.Sprintf("rm -f %s", tmpFile))
-		return err
-	}
-	return nil
+	history.Deployments = pruneAndSortDeployments(history.Deployments, MaxHistoryEntries)
+	history.ProjectName = s.projectName
+	history.Environment = s.environment
+	history.Server = s.server
+	history.LastUpdated = time.Now().UTC()
+	return s.SaveHistory(history)
 }
 
-// LoadHistory returns the deployment history from the remote server.
+func pruneAndSortDeployments(deployments []*DeploymentState, limit int) []*DeploymentState {
+	pruned := make([]*DeploymentState, 0, len(deployments))
+	for _, deployment := range deployments {
+		if deployment != nil {
+			pruned = append(pruned, deployment)
+		}
+	}
+	sort.Slice(pruned, func(i, j int) bool {
+		return pruned[i].Timestamp.After(pruned[j].Timestamp)
+	})
+	if limit > 0 && len(pruned) > limit {
+		return pruned[:limit]
+	}
+	return pruned
+}
+
+// LoadHistory returns the deployment history from takod state.
 func (s *StateManager) LoadHistory() (*DeploymentHistory, error) {
 	return s.loadHistory()
 }
 
 func (s *StateManager) loadHistory() (*DeploymentHistory, error) {
-	historyPath := fmt.Sprintf("%s/history.json", s.getStatePath())
-	readCmd := fmt.Sprintf("sudo cat %s 2>/dev/null", historyPath)
-
-	output, err := s.client.Execute(readCmd)
-	if err != nil || strings.TrimSpace(output) == "" {
-		return nil, fmt.Errorf("no history found")
-	}
-
 	var history DeploymentHistory
-	if err := json.Unmarshal([]byte(output), &history); err != nil {
-		return nil, fmt.Errorf("failed to parse history: %w", err)
+	if err := s.readDocument("history", "", &history); err != nil {
+		return nil, err
 	}
-
 	return &history, nil
 }
 
-// GetCurrentUser returns the current system user for deployment tracking
+// SaveHistory writes a full deployment history document through takod.
+func (s *StateManager) SaveHistory(history *DeploymentHistory) error {
+	if history == nil {
+		return fmt.Errorf("history is nil")
+	}
+	history.ProjectName = s.projectName
+	history.Environment = s.environment
+	history.Server = s.server
+	history.LastUpdated = time.Now().UTC()
+	return s.writeDocument("history", "", history)
+}
+
+func (s *StateManager) writeDocument(document string, revisionID string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	request := takod.StateDocumentRequest{
+		Project:     s.projectName,
+		Environment: s.environment,
+		Document:    document,
+		RevisionID:  revisionID,
+		Content:     string(data),
+	}
+	_, err = takodclient.RequestJSON(s.client, s.socket, "PUT", "/v1/state", request)
+	return err
+}
+
+func (s *StateManager) readDocument(document string, revisionID string, value any) error {
+	content, err := s.readRawDocument(document, revisionID)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal([]byte(content), value); err != nil {
+		return fmt.Errorf("failed to parse %s state: %w", document, err)
+	}
+	return nil
+}
+
+func (s *StateManager) readRawDocument(document string, revisionID string) (string, error) {
+	endpoint := takodclient.StateRevisionEndpoint(s.projectName, s.environment, document, revisionID)
+	output, err := takodclient.RequestJSON(s.client, s.socket, "GET", endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	return decodeStateDocumentContent(output, document)
+}
+
+func decodeStateDocumentContent(output string, document string) (string, error) {
+	var response takod.StateDocumentResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return "", fmt.Errorf("failed to parse takod state response: %w", err)
+	}
+	if !response.Found {
+		return "", ErrNotFound
+	}
+	if response.Content == "" {
+		return "", fmt.Errorf("empty takod state document %s", document)
+	}
+	return response.Content, nil
+}
+
+// GetCurrentUser returns the current system user for deployment tracking.
 func GetCurrentUser() string {
 	if u, err := user.Current(); err == nil {
 		return u.Username
@@ -330,7 +334,7 @@ func GetCurrentUser() string {
 	return "unknown"
 }
 
-// FormatDeploymentID formats a deployment ID for display
+// FormatDeploymentID formats a deployment ID for display.
 func FormatDeploymentID(id string) string {
 	if len(id) > 10 {
 		return id[:10]
@@ -338,7 +342,7 @@ func FormatDeploymentID(id string) string {
 	return id
 }
 
-// FormatDuration formats a duration for display
+// FormatDuration formats a duration for display.
 func FormatDuration(d time.Duration) string {
 	if d < time.Second {
 		return fmt.Sprintf("%dms", d.Milliseconds())

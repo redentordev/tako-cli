@@ -1,0 +1,236 @@
+# Meshed takod E2E Checklist
+
+Use this checklist to prove the single runtime path before treating the mesh
+migration as complete. The same commands should work for one node, two nodes,
+and CI runners.
+
+## Test Matrix
+
+```text
+Case                 Goal
+-------------------  ---------------------------------------------------------
+One node             A one-node mesh can setup, deploy, reconcile, and recover.
+Two nodes            State, env bundles, desired state, and actual state agree.
+Offline node         Reachable nodes keep serving and the CLI reports the gap.
+New computer         A clean checkout can pull state/env and deploy.
+CI runner            Automation uses the same takod path and remote leases.
+State repair         Divergent reachable nodes can be repaired from freshest state.
+```
+
+## Prerequisites
+
+- A repo with `tako.yaml` and at least one proxied service.
+- SSH access to each configured server.
+- Host keys accepted locally, or `TAKO_HOST_KEY_MODE=strict` with known hosts
+  preinstalled.
+- `TAKO_ENV_PASSPHRASE` set when testing env bundle push/pull.
+
+## Runnable Harness
+
+The manual flows below are captured in `scripts/mesh-e2e.sh`. The script builds
+the current CLI by default, runs commands from a real app repository, writes
+logs outside the app worktree unless `TAKO_E2E_LOG_DIR` is set, and uses
+temporary fresh clones for new-computer and CI checks.
+
+Safe preflight:
+
+```bash
+scripts/mesh-e2e.sh --app-dir /path/to/app --env production
+```
+
+Standard mutating proof:
+
+```bash
+TAKO_ENV_PASSPHRASE=... \
+scripts/mesh-e2e.sh --app-dir /path/to/app --env production --phases standard --yes
+```
+
+Full proof including two-node repair and an automated offline-node run:
+
+```bash
+TAKO_ENV_PASSPHRASE=... \
+scripts/mesh-e2e.sh \
+  --app-dir /path/to/app \
+  --env production \
+  --phases full \
+  --offline-server node-b \
+  --yes
+```
+
+You can also run the harness through Make:
+
+```bash
+make mesh-e2e APP_DIR=/path/to/app ENV=production PHASES=standard ARGS=--yes
+```
+
+Mutating phases refuse to run unless `--yes` or `TAKO_E2E_CONFIRM=run` is set.
+Deploy and env phases also fail early unless `.tako/` and `.env` are ignored
+and the app worktree is clean, matching `tako deploy`'s clean-check behavior.
+The env phase backs up the local `.env`, verifies that `env pull --force`
+restores the same content, and restores the original file if the check fails.
+For stage-specific files, use `tako env push production --from-file
+.env.production`; pull restores `.env.production` with the same basename.
+The CI phase defaults to `TAKO_E2E_CI_HOST_KEY_MODE=tofu`; set it to `strict`
+when validating a runner image with preinstalled known hosts.
+
+The offline phase stops `takod` on the selected node through SSH, verifies that
+status degrades and drift/deploy fail closed while the node agent is
+unavailable, restarts `takod`, runs repair, and deploys again. If the phase
+fails after stopping the agent, the harness tries to restart it from the exit
+trap. Override `TAKO_E2E_OFFLINE_STOP_CMD`,
+`TAKO_E2E_OFFLINE_START_CMD`, or `TAKO_E2E_OFFLINE_STATUS_CMD` if your service
+manager is not systemd. The harness infers offline-node host, user, port, and
+SSH key from `tako.yaml`; use `--offline-host`, `--offline-user`,
+`--offline-port`, or `--offline-ssh-key` only when you need to override config.
+
+## One-Node Flow
+
+```bash
+tako setup -e production
+tako deploy -e production --yes
+tako state status -e production
+tako history -e production
+tako ps -e production
+tako drift -e production
+```
+
+Expected result:
+
+- `setup` installs/refreshes Docker, WireGuard, takod, proxy, and firewall rules.
+- `deploy` reconciles through takod, not a local Docker path.
+- `state status` shows one reachable node with deployment history, desired
+  state, aggregate actual state, node-local actual state, agent status, mesh
+  status, and no state disagreement.
+- `history`, `ps`, and `drift` match the deployed revision.
+
+## Two-Node Flow
+
+Add a second server to the same environment, then run:
+
+```bash
+tako setup -e production
+tako state repair -e production
+tako state status -e production
+tako deploy -e production --yes
+tako state status -e production
+```
+
+Expected result:
+
+- Both nodes have takod running.
+- WireGuard mesh status lists both peers.
+- Deployment history and desired state are available from both reachable nodes.
+- Actual state is reported per node and as an aggregate.
+- Proxy upstreams include healthy local and mesh-reachable service instances.
+
+## Env Bundle Flow
+
+```bash
+tako env push -e production
+tako env push production --from-file .env.production
+rm -f .env
+tako env pull -e production --force
+```
+
+Expected result:
+
+- `env push` writes the encrypted bundle to every reachable environment node.
+- `--from-file` accepts `.env.<stage>` files with comments and quoted values
+  and keeps the basename on restore.
+- `env pull` restores the newest bundle from reachable nodes.
+- Unsupported bundle paths are skipped instead of written outside the project.
+
+## New-Computer Flow
+
+From a clean checkout with no `.tako/` directory:
+
+```bash
+git clone <repo>
+cd <repo>
+tako env pull -e production --force
+tako state pull -e production
+tako state status -e production
+tako state lease -e production
+tako deploy -e production --yes
+```
+
+Expected result:
+
+- Environment files and local `.tako/` state are rebuilt from the freshest
+  reachable mesh state.
+- Deploy does not depend on deployment history from the previous laptop.
+- Remote leases prevent concurrent laptop and CI mutations.
+
+## Offline-Node Flow
+
+Run the harness against one non-critical node:
+
+```bash
+TAKO_ENV_PASSPHRASE=... \
+scripts/mesh-e2e.sh \
+  --app-dir /path/to/app \
+  --env production \
+  --phases offline \
+  --offline-server node-b \
+  --yes
+```
+
+Expected result:
+
+- `state status` clearly reports the unavailable node agent and still shows best
+  known state from reachable nodes.
+- `drift` and `deploy` fail closed while the target node agent is unavailable.
+- Deploy behavior follows `state.onUnreachableNode`; the default posture is to
+  block when a target node is unreachable.
+- Existing containers on the unreachable node keep serving their last accepted
+  revision.
+- After `takod` restarts, `state repair` and `deploy` succeed again.
+
+## State Repair Flow
+
+Run this after replacing a node, restoring from backup, or finding divergent
+mesh state:
+
+```bash
+tako state status -e production
+tako state repair -e production
+tako state status -e production
+```
+
+Expected result:
+
+- Repair selects the freshest reachable deployment history.
+- Desired state, aggregate actual state, and node-local actual snapshots are
+  written back to reachable nodes.
+- Local `.tako/` deployment history is refreshed when remote history exists.
+
+## CI Flow
+
+CI should run the same steps as a fresh laptop:
+
+```bash
+tako env pull -e production --force
+tako state pull -e production
+tako state status -e production
+tako state lease -e production
+tako deploy -e production --yes
+```
+
+Expected result:
+
+- The runner has no dependency on a persisted `.tako/` workspace.
+- `TAKO_HOST_KEY_MODE=strict` works after known hosts are installed.
+- Remote leases reject overlapping deploy, rollback, scale, env push, remove,
+  destroy, and repair operations.
+- `tako state lease` shows held lease IDs, and
+  `tako state lease release --id <id> --force` releases only the exact stale ID
+  when a runner or laptop is interrupted.
+
+## Completion Bar
+
+The migration is proven only when the checklist passes against real servers and
+the following local gates pass:
+
+```bash
+make ci-check
+```

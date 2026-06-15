@@ -68,7 +68,7 @@ Once installed, you can use tab completion with Tako CLI:
 ```bash
 # Complete commands
 tako <TAB>
-# Shows: access, cleanup, deploy, destroy, dev, ...
+# Shows: deploy, destroy, doctor, drift, env, ...
 
 # Complete flags
 tako deploy --<TAB>
@@ -143,10 +143,10 @@ The install script can automatically install completions. During installation, c
 
 To update completions when new commands are added:
 
-1. Edit the appropriate completion file(s)
-2. Add new commands and their descriptions
-3. Update flags and arguments
-4. Test the completions
+1. Run `tako completion bash > completions/tako.bash`
+2. Run `tako completion zsh > completions/tako.zsh`
+3. Run `tako completion fish > completions/tako.fish`
+4. Run `go test ./cmd` to verify tracked completions match generated output
 5. Submit a pull request
 
 For more information about shell completions:

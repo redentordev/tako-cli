@@ -1,18 +1,31 @@
 package ssh
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
+)
+
+const DefaultCommandTimeout = 30 * time.Minute
+
+const (
+	connectMaxTCPAttempts       = 8
+	connectMaxHandshakeAttempts = 3
+	connectBackoffMax           = 10 * time.Second
 )
 
 // Client wraps an SSH connection with additional functionality
@@ -62,9 +75,7 @@ func isOpenSSHFormat(data []byte) bool {
 func getHostKeyCallback() (ssh.HostKeyCallback, error) {
 	verifier, err := GetDefaultVerifier()
 	if err != nil {
-		return nil, fmt.Errorf("host key verification failed: %w\n\n"+
-			"SSH connections require host key verification for security.\n"+
-			"To bypass (NOT recommended), set TAKO_HOST_KEY_MODE=insecure", err)
+		return nil, fmt.Errorf("host key verification failed: %w", err)
 	}
 	return verifier.GetCallback(), nil
 }
@@ -310,13 +321,12 @@ func (c *Client) Connect() error {
 		return nil // Already connected
 	}
 
-	addr := fmt.Sprintf("%s:%d", c.host, c.port)
+	addr := net.JoinHostPort(c.host, strconv.Itoa(c.port))
 
-	// Retry connection with exponential backoff
-	maxRetries := 3
 	var lastErr error
+	handshakeAttempts := 0
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
+	for attempt := 1; attempt <= connectMaxTCPAttempts; attempt++ {
 		// Create TCP connection with custom dialer for better timeout control
 		dialer := &net.Dialer{
 			Timeout:   60 * time.Second, // Increased to 60s
@@ -327,11 +337,11 @@ func (c *Client) Connect() error {
 		tcpConn, err := dialer.Dial("tcp", addr)
 		if err != nil {
 			lastErr = fmt.Errorf("TCP dial failed: %w", err)
-			if attempt < maxRetries {
-				backoff := time.Duration(1<<uint(attempt-1)) * time.Second
-				time.Sleep(backoff)
+			if attempt < connectMaxTCPAttempts && isTransientDialError(err) {
+				time.Sleep(connectBackoff(attempt))
+				continue
 			}
-			continue
+			return fmt.Errorf("failed to connect after %d attempt(s): %w", attempt, lastErr)
 		}
 
 		// Now establish SSH connection over TCP
@@ -339,11 +349,12 @@ func (c *Client) Connect() error {
 		if err != nil {
 			tcpConn.Close()
 			lastErr = fmt.Errorf("SSH handshake failed: %w", err)
-			if attempt < maxRetries {
-				backoff := time.Duration(1<<uint(attempt-1)) * time.Second
-				time.Sleep(backoff)
+			handshakeAttempts++
+			if handshakeAttempts < connectMaxHandshakeAttempts {
+				time.Sleep(connectBackoff(handshakeAttempts))
+				continue
 			}
-			continue
+			return fmt.Errorf("failed to establish SSH after %d handshake attempt(s): %w", handshakeAttempts, lastErr)
 		}
 
 		// Create SSH client
@@ -351,7 +362,45 @@ func (c *Client) Connect() error {
 		return nil
 	}
 
-	return fmt.Errorf("failed to connect after %d attempts: %w", maxRetries, lastErr)
+	return fmt.Errorf("failed to connect after %d attempt(s): %w", connectMaxTCPAttempts, lastErr)
+}
+
+func connectBackoff(attempt int) time.Duration {
+	if attempt <= 0 {
+		return time.Second
+	}
+	backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+	if backoff > connectBackoffMax {
+		return connectBackoffMax
+	}
+	return backoff
+}
+
+func isTransientDialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ETIMEDOUT) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"connection refused",
+		"connection reset",
+		"i/o timeout",
+		"operation timed out",
+		"no route to host",
+		"network is unreachable",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // Close closes the SSH connection and any associated resources
@@ -390,6 +439,18 @@ func (c *Client) Port() int {
 	return c.port
 }
 
+// Dial opens a connection from the remote SSH server to address.
+// This is used for local tooling such as port forwarding to node-local
+// container addresses that are not reachable directly from the operator's
+// machine.
+func (c *Client) Dial(network string, address string) (net.Conn, error) {
+	conn, err := c.getConnection()
+	if err != nil {
+		return nil, err
+	}
+	return conn.Dial(network, address)
+}
+
 // Execute runs a command on the remote server
 func (c *Client) Execute(cmd string) (string, error) {
 	return c.ExecuteWithContext(context.Background(), cmd)
@@ -397,6 +458,9 @@ func (c *Client) Execute(cmd string) (string, error) {
 
 // ExecuteWithContext runs a command with context support for cancellation
 func (c *Client) ExecuteWithContext(ctx context.Context, cmd string) (string, error) {
+	ctx, cancel, defaultDeadline := withDefaultCommandDeadline(ctx)
+	defer cancel()
+
 	conn, err := c.getConnection()
 	if err != nil {
 		return "", err
@@ -423,7 +487,10 @@ func (c *Client) ExecuteWithContext(ctx context.Context, cmd string) (string, er
 	// Wait for completion or context cancellation
 	select {
 	case <-ctx.Done():
-		session.Signal(ssh.SIGTERM)
+		_ = session.Signal(ssh.SIGTERM)
+		if defaultDeadline && ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("remote command timed out after %s", DefaultCommandTimeout)
+		}
 		return "", ctx.Err()
 	case res := <-resultChan:
 		if res.err != nil {
@@ -457,10 +524,130 @@ func (c *Client) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
 	return nil
 }
 
+// ExecuteWithInput runs a command on the remote server, streams input to stdin,
+// and returns combined stdout/stderr output.
+func (c *Client) ExecuteWithInput(ctx context.Context, cmd string, input io.Reader) (string, error) {
+	ctx, cancel, defaultDeadline := withDefaultCommandDeadline(ctx)
+	defer cancel()
+
+	conn, err := c.getConnection()
+	if err != nil {
+		return "", err
+	}
+
+	session, err := conn.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to create stdin pipe: %w", err)
+	}
+	var output lockedBuffer
+	session.Stdout = &output
+	session.Stderr = &output
+
+	if err := session.Start(cmd); err != nil {
+		stdin.Close()
+		return "", fmt.Errorf("failed to start command: %w", err)
+	}
+
+	copyErrCh := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(stdin, input)
+		closeErr := stdin.Close()
+		if copyErr != nil {
+			copyErrCh <- copyErr
+			return
+		}
+		copyErrCh <- closeErr
+	}()
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- session.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		_ = session.Signal(ssh.SIGTERM)
+		if defaultDeadline && ctx.Err() == context.DeadlineExceeded {
+			return output.String(), fmt.Errorf("remote command timed out after %s", DefaultCommandTimeout)
+		}
+		return output.String(), ctx.Err()
+	case err := <-waitCh:
+		if copyErr := <-copyErrCh; copyErr != nil && err == nil {
+			return output.String(), fmt.Errorf("failed to stream command input: %w", copyErr)
+		}
+		if err != nil {
+			return output.String(), fmt.Errorf("command failed: %w", err)
+		}
+		return output.String(), nil
+	}
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func withDefaultCommandDeadline(ctx context.Context) (context.Context, context.CancelFunc, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}, false
+	}
+	defaultCtx, cancel := context.WithTimeout(ctx, DefaultCommandTimeout)
+	return defaultCtx, cancel, true
+}
+
+func waitSessionWithContext(ctx context.Context, session *ssh.Session) error {
+	ctx, cancel, defaultDeadline := withDefaultCommandDeadline(ctx)
+	defer cancel()
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- session.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		_ = session.Signal(ssh.SIGTERM)
+		if defaultDeadline && ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("remote command timed out after %s", DefaultCommandTimeout)
+		}
+		return ctx.Err()
+	case err := <-waitCh:
+		return err
+	}
+}
+
 // ExecuteInteractive runs a command interactively with a remote PTY.
 // It puts the local terminal in raw mode and forwards stdin/stdout/stderr
 // bidirectionally, supporting full interactive sessions (shells, editors, etc.).
 func (c *Client) ExecuteInteractive(cmd string) error {
+	return c.ExecuteDuplex(cmd, os.Stdin, os.Stdout, os.Stderr, true)
+}
+
+// ExecuteDuplex runs a command with stdin/stdout/stderr connected to the
+// provided streams. When tty is true, it requests a remote PTY and mirrors the
+// local terminal mode and resize events.
+func (c *Client) ExecuteDuplex(cmd string, stdin io.Reader, stdout, stderr io.Writer, tty bool) error {
 	conn, err := c.getConnection()
 	if err != nil {
 		return err
@@ -472,46 +659,50 @@ func (c *Client) ExecuteInteractive(cmd string) error {
 	}
 	defer session.Close()
 
-	// Get local terminal size
-	fd := int(os.Stdin.Fd())
-	w, h, err := term.GetSize(fd)
-	if err != nil {
-		// Fallback to reasonable defaults if not a terminal
-		w, h = 80, 24
+	if tty {
+		fd := int(os.Stdin.Fd())
+		w, h, err := term.GetSize(fd)
+		if err != nil {
+			w, h = 80, 24
+		}
+
+		modes := ssh.TerminalModes{
+			ssh.ECHO:          1,
+			ssh.TTY_OP_ISPEED: 14400,
+			ssh.TTY_OP_OSPEED: 14400,
+		}
+		if err := session.RequestPty("xterm-256color", h, w, modes); err != nil {
+			return fmt.Errorf("failed to request PTY: %w", err)
+		}
+
+		oldState, err := term.MakeRaw(fd)
+		if err != nil {
+			return fmt.Errorf("failed to set raw terminal: %w", err)
+		}
+		defer term.Restore(fd, oldState)
+
+		stopResize := watchTerminalResize(fd, session)
+		defer stopResize()
 	}
 
-	// Request remote PTY
-	modes := ssh.TerminalModes{
-		ssh.ECHO:          1,
-		ssh.TTY_OP_ISPEED: 14400,
-		ssh.TTY_OP_OSPEED: 14400,
-	}
-	if err := session.RequestPty("xterm-256color", h, w, modes); err != nil {
-		return fmt.Errorf("failed to request PTY: %w", err)
-	}
+	session.Stdin = stdin
+	session.Stdout = stdout
+	session.Stderr = stderr
 
-	// Put local terminal in raw mode
-	oldState, err := term.MakeRaw(fd)
-	if err != nil {
-		return fmt.Errorf("failed to set raw terminal: %w", err)
-	}
-	defer term.Restore(fd, oldState)
-
-	// Wire up stdin/stdout/stderr
-	session.Stdin = os.Stdin
-	session.Stdout = os.Stdout
-	session.Stderr = os.Stderr
-
-	// Listen for terminal resize signals (Unix only, no-op on other platforms)
-	stopResize := watchTerminalResize(fd, session)
-	defer stopResize()
-
-	// Start and wait for the command
 	if err := session.Start(cmd); err != nil {
 		return fmt.Errorf("failed to start command: %w", err)
 	}
 
 	return session.Wait()
+}
+
+// ExitCode returns the remote process exit code carried by an SSH error.
+func ExitCode(err error) (int, bool) {
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitStatus(), true
+	}
+	return 0, false
 }
 
 // StreamingSession represents a streaming SSH session
@@ -525,6 +716,14 @@ type StreamingSession struct {
 func (s *StreamingSession) Close() error {
 	if s.session != nil {
 		return s.session.Close()
+	}
+	return nil
+}
+
+// Wait waits for the streaming command to finish.
+func (s *StreamingSession) Wait() error {
+	if s.session != nil {
+		return s.session.Wait()
 	}
 	return nil
 }
@@ -645,48 +844,50 @@ func (p *Pool) GetOrCreateWithAuth(host string, port int, user string, keyPath s
 		// Fall through to create new connection
 	}
 
-	// Acquire write lock for creation
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Double-check: another goroutine might have created it while we waited for the lock
 	if client, exists = p.clients[key]; exists {
-		// Verify health again under write lock
 		if client.IsHealthy() {
+			p.mu.Unlock()
 			return client, nil
 		}
-		// Still stale, clean up
 		client.Close()
 		delete(p.clients, key)
 	}
+	p.mu.Unlock()
 
-	// Create new client with appropriate authentication
-	var err error
-	if password != "" && keyPath == "" {
-		// Password-only authentication
-		client, err = NewClientWithPassword(host, port, user, password)
-	} else if keyPath != "" || password != "" {
-		// Key with optional password fallback
-		client, err = NewClientWithAuth(host, port, user, keyPath, password)
-	} else {
-		return nil, fmt.Errorf("no authentication method provided")
-	}
-
+	client, err := newPooledClient(host, port, user, keyPath, password)
 	if err != nil {
 		return nil, err
 	}
 
-	// Connect the client (while holding the lock to prevent duplicate connections)
 	if err := client.Connect(); err != nil {
-		// Clean up on connection failure
 		client.Close()
 		return nil, err
 	}
 
-	// Add to pool
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if existing, exists := p.clients[key]; exists {
+		if existing.IsHealthy() {
+			client.Close()
+			return existing, nil
+		}
+		existing.Close()
+		delete(p.clients, key)
+	}
 	p.clients[key] = client
 
 	return client, nil
+}
+
+func newPooledClient(host string, port int, user string, keyPath string, password string) (*Client, error) {
+	if password != "" && keyPath == "" {
+		return NewClientWithPassword(host, port, user, password)
+	}
+	if keyPath != "" || password != "" {
+		return NewClientWithAuth(host, port, user, keyPath, password)
+	}
+	return nil, fmt.Errorf("no authentication method provided")
 }
 
 // Get retrieves a client from the pool
@@ -754,51 +955,44 @@ func (c *Client) UploadReader(reader io.Reader, remotePath string, mode os.FileM
 
 // CopyFileWithMode uploads a file to the remote server with specific permissions
 func (c *Client) CopyFileWithMode(localPath, remotePath string, mode os.FileMode) error {
-	conn, err := c.getConnection()
-	if err != nil {
-		return err
-	}
-
 	// Read file content
 	content, err := os.ReadFile(localPath)
 	if err != nil {
 		return fmt.Errorf("failed to read local file: %w", err)
 	}
 
-	// Create command to write file and set permissions
-	// Use base64 encoding to safely transfer binary data
-	cmd := fmt.Sprintf("base64 -d > %s && chmod %o %s", remotePath, mode, remotePath)
-
-	session, err := conn.NewSession()
-	if err != nil {
-		return fmt.Errorf("failed to create session: %w", err)
-	}
-	defer session.Close()
-
-	// Set up stdin pipe
-	stdin, err := session.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdin pipe: %w", err)
-	}
-
-	// Start command
-	if err := session.Start(cmd); err != nil {
-		return fmt.Errorf("failed to start command: %w", err)
-	}
-
-	// Write base64-encoded content
-	encoder := base64.NewEncoder(base64.StdEncoding, stdin)
-	if _, err := encoder.Write(content); err != nil {
-		stdin.Close()
-		return fmt.Errorf("failed to write content: %w", err)
-	}
-	encoder.Close()
-	stdin.Close()
-
-	// Wait for completion
-	if err := session.Wait(); err != nil {
+	cmd := buildRemoteUploadCommand(remotePath, mode)
+	encodedReader := newBase64Reader(content)
+	if _, err := c.ExecuteWithInput(context.Background(), cmd, encodedReader); err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
 
 	return nil
+}
+
+func newBase64Reader(content []byte) io.Reader {
+	reader, writer := io.Pipe()
+	go func() {
+		encoder := base64.NewEncoder(base64.StdEncoding, writer)
+		_, writeErr := encoder.Write(content)
+		closeErr := encoder.Close()
+		if writeErr != nil {
+			_ = writer.CloseWithError(writeErr)
+			return
+		}
+		_ = writer.CloseWithError(closeErr)
+	}()
+	return reader
+}
+
+func buildRemoteUploadCommand(remotePath string, mode os.FileMode) string {
+	quotedPath := shellQuote(remotePath)
+	return fmt.Sprintf("base64 -d > %s && chmod %o %s", quotedPath, mode, quotedPath)
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }

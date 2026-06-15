@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,13 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/crypto"
+	"github.com/redentordev/tako-cli/pkg/envexpand"
+	"github.com/redentordev/tako-cli/pkg/fileutil"
+)
+
+var (
+	secretCommandContext = exec.CommandContext
+	secretCommandTimeout = 2 * time.Minute
 )
 
 type Manager struct {
@@ -48,7 +56,7 @@ secrets*
 state/
 audit.log
 `
-		if err := os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
+		if err := fileutil.WriteFileAtomic(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
 			return nil, fmt.Errorf("failed to create .gitignore: %w", err)
 		}
 	}
@@ -135,6 +143,10 @@ func (m *Manager) loadFile(path string) error {
 
 // executeCommand executes a command for substitution (with safety checks)
 func (m *Manager) executeCommand(command string) (string, error) {
+	if os.Getenv("TAKO_ALLOW_SECRET_COMMANDS") != "1" {
+		return "", fmt.Errorf("command substitution is disabled; set TAKO_ALLOW_SECRET_COMMANDS=1 to enable it")
+	}
+
 	// Security: Only allow specific safe commands
 	allowedCommands := []string{
 		"tako",
@@ -165,11 +177,16 @@ func (m *Manager) executeCommand(command string) (string, error) {
 		return "", fmt.Errorf("command '%s' not allowed in substitution (security policy)", cmdName)
 	}
 
-	// Execute the command
-	cmd := exec.Command(parts[0], parts[1:]...)
+	ctx, cancel := context.WithTimeout(context.Background(), secretCommandTimeout)
+	defer cancel()
+
+	cmd := secretCommandContext(ctx, parts[0], parts[1:]...)
 	cmd.Env = os.Environ() // Inherit environment
 
 	output, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("command timed out after %s", secretCommandTimeout)
+	}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("command failed: %s", string(exitErr.Stderr))
@@ -351,6 +368,19 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 		projectEnv = envData
 	}
 
+	serviceEnv := make(map[string]string)
+	if service.EnvFile != "" {
+		var err error
+		serviceEnv, err = config.LoadEnvFile(service.EnvFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load service envFile %s: %w", service.EnvFile, err)
+		}
+		for key, value := range serviceEnv {
+			projectEnv[key] = value
+			envFile.Set(key, value)
+		}
+	}
+
 	// Also load environment variables from OS
 	for _, env := range os.Environ() {
 		parts := strings.SplitN(env, "=", 2)
@@ -359,21 +389,24 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 		}
 	}
 
-	// First, add clear (non-secret) environment variables with expansion
+	// First, add clear (non-secret) environment variables with explicit
+	// ${VAR} expansion. Bare dollar values are preserved for secrets such as
+	// bcrypt hashes.
 	for key, value := range service.Env {
-		// Expand ${VAR} and $VAR syntax
-		expandedValue := os.Expand(value, func(varName string) string {
+		expandedValue, missing := envexpand.Braced(value, func(varName string) (string, bool) {
 			// First check project .env
 			if val, ok := projectEnv[varName]; ok {
-				return strings.TrimSpace(val)
+				return strings.TrimSpace(val), true
 			}
 			// Then check loaded secrets
 			if val, ok := m.secrets[varName]; ok {
-				return val
+				return val, true
 			}
-			// Return empty string if not found (don't leave ${VAR} in output)
-			return ""
+			return "", false
 		})
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("service env %s references missing variable(s): %s", key, strings.Join(missing, ", "))
+		}
 
 		// Trim any trailing whitespace from the expanded value
 		expandedValue = strings.TrimSpace(expandedValue)
@@ -403,20 +436,6 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 		}
 
 		envFile.Set(containerVar, value)
-	}
-
-	// Also handle DockerSecrets (for backward compatibility with Docker Swarm)
-	for _, dockerSecret := range service.DockerSecrets {
-		// For DockerSecrets, we'll read them similar to before
-		// This maintains backward compatibility
-		if m.IsSensitive(dockerSecret.Name) {
-			value, err := m.Get(dockerSecret.Name)
-			if err != nil {
-				// Try to get from environment or file as before
-				continue
-			}
-			envFile.Set(dockerSecret.Name, value)
-		}
 	}
 
 	// Validate the env file

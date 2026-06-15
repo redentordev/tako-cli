@@ -3,160 +3,126 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	"github.com/redentordev/tako-cli/pkg/envexpand"
+	"github.com/redentordev/tako-cli/pkg/fileutil"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"gopkg.in/yaml.v3"
 )
 
 // Config represents the main configuration structure
 type Config struct {
-	Schema         string                       `yaml:"$schema,omitempty" json:"$schema,omitempty"` // JSON Schema reference
-	Project        ProjectConfig                `yaml:"project" json:"project"`
-	Infrastructure *InfrastructureConfig        `yaml:"infrastructure,omitempty" json:"infrastructure,omitempty"` // Cloud infrastructure provisioning
-	Deployment     *DeploymentConfig            `yaml:"deployment,omitempty" json:"deployment,omitempty"`
-	Notifications  *NotificationsConfig         `yaml:"notifications,omitempty" json:"notifications,omitempty"`
-	Storage        *StorageConfig               `yaml:"storage,omitempty" json:"storage,omitempty"`
-	Volumes        map[string]VolumeConfig      `yaml:"volumes,omitempty" json:"volumes,omitempty"` // Top-level volume definitions
-	Servers        map[string]ServerConfig      `yaml:"servers" json:"servers"`
-	Environments   map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
+	Schema        string                       `yaml:"$schema,omitempty" json:"$schema,omitempty"` // JSON Schema reference
+	Project       ProjectConfig                `yaml:"project" json:"project"`
+	Runtime       *RuntimeConfig               `yaml:"runtime,omitempty" json:"runtime,omitempty"`
+	Mesh          *MeshConfig                  `yaml:"mesh,omitempty" json:"mesh,omitempty"`
+	State         *StateConfig                 `yaml:"state,omitempty" json:"state,omitempty"`
+	Deployment    *DeploymentConfig            `yaml:"deployment,omitempty" json:"deployment,omitempty"`
+	Registry      *RegistryConfig              `yaml:"registry,omitempty" json:"registry,omitempty"`
+	Notifications *NotificationsConfig         `yaml:"notifications,omitempty" json:"notifications,omitempty"`
+	Volumes       map[string]VolumeConfig      `yaml:"volumes,omitempty" json:"volumes,omitempty"` // Top-level volume definitions
+	Configs       map[string]ConfigFileConfig  `yaml:"configs,omitempty" json:"configs,omitempty"` // Top-level config file artifacts
+	Imports       map[string]ImportConfig      `yaml:"imports,omitempty" json:"imports,omitempty"` // Cross-project service imports
+	Servers       map[string]ServerConfig      `yaml:"servers" json:"servers"`
+	Environments  map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
 }
 
-// InfrastructureConfig defines cloud infrastructure provisioning settings
-type InfrastructureConfig struct {
-	Provider    string                        `yaml:"provider" json:"provider"`                           // digitalocean, hetzner, aws, linode
-	Region      string                        `yaml:"region" json:"region"`                               // Provider-specific region (or friendly name like "nyc", "frankfurt")
-	Credentials InfraCredentialsConfig        `yaml:"credentials,omitempty" json:"credentials,omitempty"` // Provider credentials (can use env vars)
-	SSHKey      string                        `yaml:"ssh_key,omitempty" json:"ssh_key,omitempty"`         // Local SSH key path for connecting to provisioned servers
-	SSHUser     string                        `yaml:"ssh_user,omitempty" json:"ssh_user,omitempty"`       // SSH user (default: root)
-	Defaults    *InfraDefaultsConfig          `yaml:"defaults,omitempty" json:"defaults,omitempty"`       // Default values for servers
-	Servers     map[string]InfraServerSpec    `yaml:"servers" json:"servers"`                             // Server definitions
-	Networking  *InfraNetworkingConfig        `yaml:"networking,omitempty" json:"networking,omitempty"`
-	Storage     *InfraStorageConfig           `yaml:"storage,omitempty" json:"storage,omitempty"`   // Object storage (S3-compatible)
-	CDN         *InfraCDNConfig               `yaml:"cdn,omitempty" json:"cdn,omitempty"`           // CDN configuration
-	State       *InfraStateConfig             `yaml:"state,omitempty" json:"state,omitempty"`       // State backend configuration (for multi-machine sync)
+const (
+	RuntimeModeTakod = "takod"
+
+	RuntimeProxyTako = "tako-proxy"
+
+	DeploymentSourceLocal = "local"
+	DeploymentSourceGit   = "git"
+
+	StateBackendReplicated = "replicated"
+
+	StateDeployConsistencyLease = "lease"
+
+	StateUnreachableBlock = "block"
+)
+
+// RuntimeConfig selects the orchestration runtime. Tako has one public runtime:
+// takod. Single-node deployments are just one-node meshes.
+type RuntimeConfig struct {
+	Mode  string       `yaml:"mode,omitempty" json:"mode,omitempty"` // takod
+	Proxy string       `yaml:"proxy,omitempty" json:"proxy,omitempty"`
+	Agent *AgentConfig `yaml:"agent,omitempty" json:"agent,omitempty"`
 }
 
-// InfraStateConfig defines where Pulumi state is stored
-type InfraStateConfig struct {
-	Backend   string `yaml:"backend,omitempty" json:"backend,omitempty"`     // "local" (default), "s3", or "manager"
-	Bucket    string `yaml:"bucket,omitempty" json:"bucket,omitempty"`       // S3 bucket name for s3 backend
-	Region    string `yaml:"region,omitempty" json:"region,omitempty"`       // S3 region (defaults to infra region)
-	Endpoint  string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`   // Custom S3 endpoint (for DO Spaces, Linode Object Storage)
-	Encrypt   bool   `yaml:"encrypt,omitempty" json:"encrypt,omitempty"`     // Enable state encryption (default: true for remote backends)
-	AccessKey string `yaml:"accessKey,omitempty" json:"accessKey,omitempty"` // S3 access key (defaults to provider credentials)
-	SecretKey string `yaml:"secretKey,omitempty" json:"secretKey,omitempty"` // S3 secret key (defaults to provider credentials)
+// AgentConfig describes the takod node-local reconciler.
+type AgentConfig struct {
+	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Socket  string `yaml:"socket,omitempty" json:"socket,omitempty"`
+	DataDir string `yaml:"dataDir,omitempty" json:"dataDir,omitempty"`
 }
 
-// InfraCredentialsConfig holds provider authentication
-type InfraCredentialsConfig struct {
-	Token     string `yaml:"token,omitempty" json:"token,omitempty"`         // API token (DO, Hetzner, Linode) - defaults to env var
-	AccessKey string `yaml:"accessKey,omitempty" json:"accessKey,omitempty"` // AWS access key
-	SecretKey string `yaml:"secretKey,omitempty" json:"secretKey,omitempty"` // AWS secret key
-	ProjectID string `yaml:"projectId,omitempty" json:"projectId,omitempty"` // Project/Account ID if needed
+// MeshConfig describes the private node mesh. A single node still uses the same
+// model, with no remote peers.
+type MeshConfig struct {
+	Enabled      *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	NetworkCIDR  string `yaml:"networkCIDR,omitempty" json:"networkCIDR,omitempty"`
+	Interface    string `yaml:"interface,omitempty" json:"interface,omitempty"`
+	ListenPort   int    `yaml:"listenPort,omitempty" json:"listenPort,omitempty"`
+	SubnetBits   int    `yaml:"subnetBits,omitempty" json:"subnetBits,omitempty"`
+	NATTraversal bool   `yaml:"natTraversal,omitempty" json:"natTraversal,omitempty"`
 }
 
-// InfraDefaultsConfig provides default values for server specs
-type InfraDefaultsConfig struct {
-	Size    string   `yaml:"size,omitempty" json:"size,omitempty"`         // Default size: small, medium, large, xlarge
-	Image   string   `yaml:"image,omitempty" json:"image,omitempty"`       // Default OS image (auto-detected if empty)
-	SSHKeys []string `yaml:"ssh_keys,omitempty" json:"ssh_keys,omitempty"` // Default SSH key fingerprints for cloud provider
-	Tags    []string `yaml:"tags,omitempty" json:"tags,omitempty"`         // Default tags applied to all servers
+// StateConfig controls how Tako treats local cache, remote runtime truth, and
+// deployment consistency.
+type StateConfig struct {
+	Backend            string `yaml:"backend,omitempty" json:"backend,omitempty"`                       // replicated
+	DeployConsistency  string `yaml:"deployConsistency,omitempty" json:"deployConsistency,omitempty"`   // lease
+	OnUnreachableNode  string `yaml:"onUnreachableNode,omitempty" json:"onUnreachableNode,omitempty"`   // block
+	RemoteCacheEnabled bool   `yaml:"remoteCacheEnabled,omitempty" json:"remoteCacheEnabled,omitempty"` // replicate deployment history to nodes
 }
 
-// InfraServerSpec defines a server to be provisioned
-type InfraServerSpec struct {
-	Provider string   `yaml:"provider,omitempty" json:"provider,omitempty"` // Override provider (for multi-cloud setups)
-	Region   string   `yaml:"region,omitempty" json:"region,omitempty"`     // Override region (for multi-region/multi-cloud)
-	Size     string   `yaml:"size,omitempty" json:"size,omitempty"`         // Size: small, medium, large, xlarge (or provider-specific)
-	Image    string   `yaml:"image,omitempty" json:"image,omitempty"`       // OS image (uses default if empty)
-	Role     string   `yaml:"role,omitempty" json:"role,omitempty"`         // "manager" or "worker" (default: worker)
-	Count    int      `yaml:"count,omitempty" json:"count,omitempty"`       // Number of servers (default: 1)
-	SSHKeys  []string `yaml:"ssh_keys,omitempty" json:"ssh_keys,omitempty"` // SSH key fingerprints (uses defaults if empty)
-	Tags     []string `yaml:"tags,omitempty" json:"tags,omitempty"`         // Server tags/labels
-	UserData string   `yaml:"userData,omitempty" json:"userData,omitempty"` // Cloud-init script
-}
-
-// InfraNetworkingConfig defines network resources
-type InfraNetworkingConfig struct {
-	VPC      *InfraVPCConfig      `yaml:"vpc,omitempty" json:"vpc,omitempty"`
-	Firewall *InfraFirewallConfig `yaml:"firewall,omitempty" json:"firewall,omitempty"`
-}
-
-// InfraVPCConfig defines VPC/private network settings
-type InfraVPCConfig struct {
-	Enabled bool   `yaml:"enabled" json:"enabled"`
-	Name    string `yaml:"name,omitempty" json:"name,omitempty"`         // VPC name (auto-generated if empty)
-	IPRange string `yaml:"ip_range,omitempty" json:"ip_range,omitempty"` // CIDR (e.g., 10.0.0.0/16)
-}
-
-// InfraFirewallConfig defines firewall rules
-type InfraFirewallConfig struct {
-	Enabled bool                `yaml:"enabled" json:"enabled"`
-	Name    string              `yaml:"name,omitempty" json:"name,omitempty"` // Firewall name (auto-generated if empty)
-	Rules   []InfraFirewallRule `yaml:"rules,omitempty" json:"rules,omitempty"`
-}
-
-// InfraFirewallRule defines a single firewall rule
-type InfraFirewallRule struct {
-	Protocol string   `yaml:"protocol" json:"protocol"`                 // tcp, udp, icmp
-	Ports    []int    `yaml:"ports,omitempty" json:"ports,omitempty"`   // Port numbers (empty = all)
-	Sources  []string `yaml:"sources,omitempty" json:"sources,omitempty"` // CIDR addresses (e.g., 0.0.0.0/0)
-}
-
-// InfraStorageConfig defines object storage (S3-compatible buckets)
-type InfraStorageConfig struct {
-	Buckets map[string]InfraBucketSpec `yaml:"buckets,omitempty" json:"buckets,omitempty"` // Named bucket definitions
-}
-
-// InfraBucketSpec defines a storage bucket
-type InfraBucketSpec struct {
-	Region string `yaml:"region,omitempty" json:"region,omitempty"` // Override region (defaults to infra region)
-	ACL    string `yaml:"acl,omitempty" json:"acl,omitempty"`       // Access: private, public-read (default: private)
-	CORS   bool   `yaml:"cors,omitempty" json:"cors,omitempty"`     // Enable CORS for web access
-}
-
-// InfraCDNConfig defines CDN configuration
-type InfraCDNConfig struct {
-	Enabled bool                      `yaml:"enabled" json:"enabled"`
-	Origins map[string]InfraCDNOrigin `yaml:"origins,omitempty" json:"origins,omitempty"` // Named CDN origins
-}
-
-// InfraCDNOrigin defines a CDN origin (bucket or custom)
-type InfraCDNOrigin struct {
-	Bucket string `yaml:"bucket,omitempty" json:"bucket,omitempty"` // Reference to storage bucket
-	Domain string `yaml:"domain,omitempty" json:"domain,omitempty"` // Custom origin domain
-	TTL    int    `yaml:"ttl,omitempty" json:"ttl,omitempty"`       // Cache TTL in seconds (default: 86400)
-}
-
-// VolumeConfig defines a named volume configuration (Docker Compose style)
+// VolumeConfig defines a named service volume configuration.
 type VolumeConfig struct {
 	Driver     string            `yaml:"driver,omitempty" json:"driver,omitempty"`           // Volume driver (default: "local")
 	DriverOpts map[string]string `yaml:"driver_opts,omitempty" json:"driver_opts,omitempty"` // Driver-specific options
 	Labels     map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`           // Volume labels
 	External   bool              `yaml:"external,omitempty" json:"external,omitempty"`       // If true, volume must already exist
+	Replicated bool              `yaml:"replicated,omitempty" json:"replicated,omitempty"`   // App/external replication handles multi-node writes
 	Name       string            `yaml:"name,omitempty" json:"name,omitempty"`               // Override the auto-generated name (opt-out of prefix)
 }
 
-// StorageConfig defines shared storage configuration
-type StorageConfig struct {
-	NFS *NFSConfig `yaml:"nfs,omitempty" json:"nfs,omitempty"`
+// ConfigFileConfig defines a project-owned file artifact that can be mounted into services.
+type ConfigFileConfig struct {
+	Source   string                 `yaml:"source,omitempty" json:"source,omitempty"`     // Local file path relative to the project checkout
+	Generate *GeneratedConfigConfig `yaml:"generate,omitempty" json:"generate,omitempty"` // Generated artifact definition
 }
 
-// NFSConfig defines NFS shared storage settings
-type NFSConfig struct {
-	Enabled bool              `yaml:"enabled" json:"enabled"`
-	Server  string            `yaml:"server,omitempty" json:"server,omitempty"` // "auto" = use manager node, or specify server name
-	Exports []NFSExportConfig `yaml:"exports,omitempty" json:"exports,omitempty"`
+// GeneratedConfigConfig defines a generated config artifact.
+type GeneratedConfigConfig struct {
+	Caddy *GeneratedCaddyConfig `yaml:"caddy,omitempty" json:"caddy,omitempty"`
 }
 
-// NFSExportConfig defines an NFS export/share
-type NFSExportConfig struct {
-	Name    string   `yaml:"name" json:"name"`                       // Name of the export (used in volume references)
-	Path    string   `yaml:"path" json:"path"`                       // Path on the NFS server
-	Size    string   `yaml:"size,omitempty" json:"size,omitempty"`   // Optional: expected size for provisioning hints
-	Options []string `yaml:"options,omitempty" json:"options,omitempty"` // NFS export options (e.g., rw, sync, no_subtree_check)
+// GeneratedCaddyConfig renders a Caddyfile from cross-project imports.
+type GeneratedCaddyConfig struct {
+	Email          string `yaml:"email" json:"email"`
+	AdminHost      string `yaml:"adminHost" json:"adminHost"`
+	SiteHost       string `yaml:"siteHost" json:"siteHost"`
+	AdminImport    string `yaml:"adminImport" json:"adminImport"`
+	RendererImport string `yaml:"rendererImport" json:"rendererImport"`
+	AskImport      string `yaml:"askImport,omitempty" json:"askImport,omitempty"`
+	AskPath        string `yaml:"askPath,omitempty" json:"askPath,omitempty"`
+	OnDemandTLS    bool   `yaml:"onDemandTLS,omitempty" json:"onDemandTLS,omitempty"`
+}
+
+// ImportConfig defines a named cross-project service import.
+type ImportConfig struct {
+	Project     string   `yaml:"project" json:"project"`
+	Environment string   `yaml:"environment" json:"environment"`
+	Service     string   `yaml:"service" json:"service"`
+	Port        string   `yaml:"port" json:"port"`
+	Servers     []string `yaml:"servers,omitempty" json:"servers,omitempty"` // Optional configured server names to query for the exported project
 }
 
 // NotificationsConfig defines notification settings
@@ -175,6 +141,7 @@ type ProjectConfig struct {
 // DeploymentConfig defines deployment optimization settings
 type DeploymentConfig struct {
 	Strategy string          `yaml:"strategy,omitempty" json:"strategy,omitempty"` // "parallel" or "sequential" (default: sequential)
+	Source   string          `yaml:"source,omitempty" json:"source,omitempty"`     // "local" (default) or "git"
 	Parallel *ParallelConfig `yaml:"parallel,omitempty" json:"parallel,omitempty"`
 	Cache    *CacheConfig    `yaml:"cache,omitempty" json:"cache,omitempty"`
 }
@@ -183,7 +150,7 @@ type DeploymentConfig struct {
 type ParallelConfig struct {
 	MaxConcurrentBuilds  int    `yaml:"maxConcurrentBuilds,omitempty" json:"maxConcurrentBuilds,omitempty"`   // Default: 4
 	MaxConcurrentDeploys int    `yaml:"maxConcurrentDeploys,omitempty" json:"maxConcurrentDeploys,omitempty"` // Default: 4
-	Strategy             string `yaml:"strategy,omitempty" json:"strategy,omitempty"`                        // "dependency-aware" (default), "resource-aware", "round-robin"
+	Strategy             string `yaml:"strategy,omitempty" json:"strategy,omitempty"`                         // "dependency-aware" (default), "resource-aware", "round-robin"
 }
 
 // CacheConfig defines build caching settings
@@ -191,6 +158,24 @@ type CacheConfig struct {
 	Enabled   bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`     // Enable build caching (default: true)
 	Type      string `yaml:"type,omitempty" json:"type,omitempty"`           // "local" (default), "registry"
 	Retention string `yaml:"retention,omitempty" json:"retention,omitempty"` // Cache retention period (e.g., "7d")
+	Ref       string `yaml:"ref,omitempty" json:"ref,omitempty"`             // Registry cache reference for type=registry
+	Builder   string `yaml:"builder,omitempty" json:"builder,omitempty"`     // Optional docker buildx builder name
+}
+
+// RegistryConfig defines credentials for pulling private images.
+type RegistryConfig struct {
+	URL           string `yaml:"url,omitempty" json:"url,omitempty"`
+	Username      string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password      string `yaml:"password,omitempty" json:"password,omitempty"`
+	IdentityToken string `yaml:"identityToken,omitempty" json:"identityToken,omitempty"`
+}
+
+// RegistryAuthConfig is the sanitized registry auth material used for a pull.
+type RegistryAuthConfig struct {
+	Server        string
+	Username      string
+	Password      string
+	IdentityToken string
 }
 
 // ServerConfig defines server connection details
@@ -200,30 +185,30 @@ type ServerConfig struct {
 	Port     int               `yaml:"port,omitempty" json:"port,omitempty"`
 	SSHKey   string            `yaml:"sshKey,omitempty" json:"sshKey,omitempty"`     // Path to SSH private key (mutually exclusive with password)
 	Password string            `yaml:"password,omitempty" json:"password,omitempty"` // SSH password (mutually exclusive with sshKey, use env var for security)
-	Role     string            `yaml:"role,omitempty" json:"role,omitempty"`         // "manager" or "worker" (auto-detect if not specified)
 	Labels   map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`     // Custom labels for server selection
 }
 
 // ServiceConfig defines service deployment settings
 type ServiceConfig struct {
 	// Build or Image (mutually exclusive)
-	Build string `yaml:"build,omitempty" json:"build,omitempty"` // Path to build context (auto-detects Dockerfile)
-	Image string `yaml:"image,omitempty" json:"image,omitempty"` // Pre-built image (for postgres, redis, etc)
+	Build      string `yaml:"build,omitempty" json:"build,omitempty"`           // Path to build context (auto-detects Dockerfile)
+	Dockerfile string `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"` // Dockerfile path relative to build context
+	Image      string `yaml:"image,omitempty" json:"image,omitempty"`           // Pre-built image (for postgres, redis, etc)
+	Platform   string `yaml:"platform,omitempty" json:"platform,omitempty"`     // Docker platform for service image builds, e.g. linux/amd64
 
 	// Basic settings
 	Port     int               `yaml:"port,omitempty" json:"port,omitempty"`
+	Ports    []PortConfig      `yaml:"ports,omitempty" json:"ports,omitempty"`
 	Command  string            `yaml:"command,omitempty" json:"command,omitempty"`
 	Replicas int               `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
 	Restart  string            `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
 	Env      map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	EnvFile  string            `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Path to .env file (e.g., .env.production)
 
-	// Secrets: Can be either string array (new Tako secrets) or SecretConfig array (Docker Swarm secrets)
-	// String format: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"]
-	// SecretConfig format: [{name: "db_pass", source: "env:DB_PASSWORD"}]
-	Secrets       []string       `yaml:"secrets,omitempty" json:"secrets,omitempty"`             // Tako secrets from .tako/secrets files
-	DockerSecrets []SecretConfig `yaml:"dockerSecrets,omitempty" json:"dockerSecrets,omitempty"` // Docker Swarm secrets (for backward compatibility)
-	Volumes       []string       `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	// Secrets: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"].
+	Secrets []string                 `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
+	Volumes []string                 `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	Configs []ServiceConfigFileMount `yaml:"configs,omitempty" json:"configs,omitempty"`
 
 	// Service type flags
 	Persistent bool `yaml:"persistent,omitempty" json:"persistent,omitempty"` // Don't remove on redeploy (databases, caches)
@@ -240,8 +225,8 @@ type ServiceConfig struct {
 	// Deployment strategy
 	Deploy DeployConfig `yaml:"deploy,omitempty" json:"deploy,omitempty"`
 
-	// Per-service hooks
-	Hooks *HooksConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
+	// Deployment hooks run as short-lived containers from this service image.
+	Hooks HooksConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 
 	// Per-service backup
 	Backup *BackupConfig `yaml:"backup,omitempty" json:"backup,omitempty"`
@@ -250,24 +235,26 @@ type ServiceConfig struct {
 	Monitoring *MonitoringConfig `yaml:"monitoring,omitempty" json:"monitoring,omitempty"`
 
 	// Cross-project networking
-	Export  bool     `yaml:"export,omitempty" json:"export,omitempty"`   // Export this service to other projects
-	Imports []string `yaml:"imports,omitempty" json:"imports,omitempty"` // Import services from other projects (format: "project.service")
+	Export *ServiceExportConfig `yaml:"export,omitempty" json:"export,omitempty"` // Explicit service ports exported to other projects
 
-	// Placement configuration (for Swarm multi-server deployments)
+	// Placement configuration for takod scheduling.
 	Placement *PlacementConfig `yaml:"placement,omitempty" json:"placement,omitempty"` // Where to run service replicas
 
 	// Service dependencies (controls deployment order)
 	DependsOn []string `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"` // List of service names this service depends on
-
-	// Init commands (run before service starts, useful for permissions)
-	Init []string `yaml:"init,omitempty" json:"init,omitempty"` // Commands to run before service starts (e.g., chown, chmod)
 }
 
-// SecretConfig defines a Docker secret
-type SecretConfig struct {
-	Name   string `yaml:"name" json:"name"`                       // Secret name (e.g., "db_password")
-	Source string `yaml:"source,omitempty" json:"source,omitempty"` // Source: "env:VAR" or "file:path" (default: env:NAME)
-	Target string `yaml:"target,omitempty" json:"target,omitempty"` // Target path in container (default: /run/secrets/{name})
+// ServiceExportConfig defines explicitly exported named service ports.
+type ServiceExportConfig struct {
+	Ports map[string]int `yaml:"ports,omitempty" json:"ports,omitempty"`
+}
+
+// ServiceConfigFileMount maps a named project config file into a container.
+type ServiceConfigFileMount struct {
+	Source      string `yaml:"source" json:"source"`
+	Target      string `yaml:"target" json:"target"`
+	Mode        string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	ContentHash string `yaml:"-" json:"-"`
 }
 
 // HealthCheckConfig defines health check settings
@@ -279,10 +266,41 @@ type HealthCheckConfig struct {
 	StartPeriod string `yaml:"startPeriod,omitempty" json:"startPeriod,omitempty"` // Grace period before starting checks
 }
 
+// PortConfig defines a named service port. The legacy ServiceConfig.Port field
+// remains shorthand for one internal or proxied HTTP port.
+type PortConfig struct {
+	Name      string       `yaml:"name,omitempty" json:"name,omitempty"`
+	Target    int          `yaml:"target" json:"target"`
+	Published int          `yaml:"published,omitempty" json:"published,omitempty"`
+	Protocol  string       `yaml:"protocol,omitempty" json:"protocol,omitempty"` // http, https, tcp, udp
+	Mode      string       `yaml:"mode,omitempty" json:"mode,omitempty"`         // internal, proxy, host
+	HostIP    string       `yaml:"hostIP,omitempty" json:"hostIP,omitempty"`     // IP or CIDR for host mode
+	Internal  bool         `yaml:"internal,omitempty" json:"internal,omitempty"`
+	Proxy     *ProxyConfig `yaml:"proxy,omitempty" json:"proxy,omitempty"`
+}
+
 // DeployConfig defines deployment strategy
 type DeployConfig struct {
-	Strategy       string `yaml:"strategy" json:"strategy"` // blue-green or rolling
+	Strategy       string `yaml:"strategy,omitempty" json:"strategy,omitempty"` // recreate, rolling
+	Order          string `yaml:"order,omitempty" json:"order,omitempty"`       // start-first, stop-first
 	MaxUnavailable int    `yaml:"maxUnavailable,omitempty" json:"maxUnavailable,omitempty"`
+	Monitor        string `yaml:"monitor,omitempty" json:"monitor,omitempty"` // e.g. 30s
+}
+
+// HooksConfig defines pre/post deploy hooks for a service.
+type HooksConfig struct {
+	PreDeploy  *HookConfig `yaml:"preDeploy,omitempty" json:"preDeploy,omitempty"`
+	PostDeploy *HookConfig `yaml:"postDeploy,omitempty" json:"postDeploy,omitempty"`
+}
+
+// HookConfig defines a short-lived container command run from the service image.
+type HookConfig struct {
+	Command    string            `yaml:"command" json:"command"`
+	Timeout    string            `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	Env        map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	Secrets    []string          `yaml:"secrets,omitempty" json:"secrets,omitempty"`
+	User       string            `yaml:"user,omitempty" json:"user,omitempty"`
+	WorkingDir string            `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
 }
 
 // LoadBalancerConfig defines load balancing settings
@@ -298,10 +316,9 @@ type LoadBalancerHealthCheck struct {
 	Interval string `yaml:"interval" json:"interval"`
 }
 
-// ProxyConfig defines per-service Traefik reverse proxy settings
+// ProxyConfig defines per-service public proxy settings.
 type ProxyConfig struct {
-	// Domain is the primary domain where traffic is served (recommended)
-	// Use this with RedirectFrom for cleaner configuration
+	// Domain is where traffic is served.
 	Domain string `yaml:"domain,omitempty" json:"domain,omitempty"`
 
 	// RedirectFrom specifies domains that should redirect to the primary Domain
@@ -309,55 +326,21 @@ type ProxyConfig struct {
 	// Example: ["www.example.com", "old.example.com"] -> redirects to "example.com"
 	RedirectFrom []string `yaml:"redirectFrom,omitempty" json:"redirectFrom,omitempty"`
 
-	// Domains is the legacy field for backward compatibility
-	// If Domain is not set, the first domain in Domains is treated as primary
-	// Deprecated: Use Domain + RedirectFrom instead for clearer configuration
-	Domains []string `yaml:"domains,omitempty" json:"domains,omitempty"`
-
 	Email string    `yaml:"email,omitempty" json:"email,omitempty"` // Email for Let's Encrypt
 	TLS   TLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
 }
 
 // GetPrimaryDomain returns the primary domain for this service
 func (p *ProxyConfig) GetPrimaryDomain() string {
-	if p.Domain != "" {
-		return p.Domain
-	}
-	if len(p.Domains) > 0 {
-		return p.Domains[0]
-	}
-	return ""
+	return p.Domain
 }
 
-// GetAllDomains returns all domains (primary + additional domains from Domains array)
-// excluding redirect domains
+// GetAllDomains returns all serving domains, excluding redirect domains.
 func (p *ProxyConfig) GetAllDomains() []string {
-	domains := []string{}
-
-	if p.Domain != "" {
-		domains = append(domains, p.Domain)
+	if p.Domain == "" {
+		return nil
 	}
-
-	// Add domains from legacy Domains array (but skip the first if Domain is set)
-	for i, d := range p.Domains {
-		if p.Domain != "" || i > 0 {
-			// Avoid duplicates
-			isDuplicate := false
-			for _, existing := range domains {
-				if existing == d {
-					isDuplicate = true
-					break
-				}
-			}
-			if !isDuplicate {
-				domains = append(domains, d)
-			}
-		} else if i == 0 && p.Domain == "" {
-			domains = append(domains, d)
-		}
-	}
-
-	return domains
+	return []string{p.Domain}
 }
 
 // GetRedirectDomains returns all domains that should redirect to the primary domain
@@ -368,6 +351,19 @@ func (p *ProxyConfig) GetRedirectDomains() []string {
 // HasRedirects returns true if there are redirect domains configured
 func (p *ProxyConfig) HasRedirects() bool {
 	return len(p.RedirectFrom) > 0
+}
+
+// NormalizeProxyDomain trims and validates a domain before it is used in proxy
+// routing configuration.
+func NormalizeProxyDomain(domain string) (string, error) {
+	trimmed := strings.TrimSpace(domain)
+	if trimmed == "" {
+		return "", fmt.Errorf("domain is required")
+	}
+	if !isValidDomain(trimmed) {
+		return "", fmt.Errorf("invalid domain: %s", trimmed)
+	}
+	return trimmed, nil
 }
 
 // TLSConfig defines TLS settings
@@ -382,29 +378,20 @@ type BackupConfig struct {
 	Retain   int    `yaml:"retain" json:"retain"`     // days to retain backups
 }
 
-// HooksConfig defines per-service pre/post deployment hooks
-type HooksConfig struct {
-	PreBuild   []string `yaml:"preBuild,omitempty" json:"preBuild,omitempty"`     // Before building Docker image
-	PostBuild  []string `yaml:"postBuild,omitempty" json:"postBuild,omitempty"`   // After building Docker image
-	PreDeploy  []string `yaml:"preDeploy,omitempty" json:"preDeploy,omitempty"`   // Before deploying service to swarm
-	PostDeploy []string `yaml:"postDeploy,omitempty" json:"postDeploy,omitempty"` // After deploying service to swarm
-	PostStart  []string `yaml:"postStart,omitempty" json:"postStart,omitempty"`   // After service is running (can use docker exec)
-}
-
 // MonitoringConfig defines per-service monitoring settings
 type MonitoringConfig struct {
-	Enabled   bool   `yaml:"enabled" json:"enabled"`                       // Enable monitoring for this service
-	Interval  string `yaml:"interval,omitempty" json:"interval,omitempty"` // Check interval (e.g., "60s")
-	Webhook   string `yaml:"webhook,omitempty" json:"webhook,omitempty"`   // Webhook URL for alerts
+	Enabled   bool   `yaml:"enabled" json:"enabled"`                         // Enable monitoring for this service
+	Interval  string `yaml:"interval,omitempty" json:"interval,omitempty"`   // Check interval (e.g., "60s")
+	Webhook   string `yaml:"webhook,omitempty" json:"webhook,omitempty"`     // Webhook URL for alerts
 	CheckType string `yaml:"checkType,omitempty" json:"checkType,omitempty"` // "http" or "container" (default: auto-detect)
 }
 
 // EnvironmentConfig defines an environment (production, staging, etc.)
 type EnvironmentConfig struct {
-	Servers        []string                 `yaml:"servers" json:"servers"`                                 // List of server names to use
+	Servers        []string                 `yaml:"servers" json:"servers"`                                   // List of server names to use
 	ServerSelector *ServerSelector          `yaml:"serverSelector,omitempty" json:"serverSelector,omitempty"` // Label-based server selection
-	Labels         map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`               // Environment labels for Docker nodes
-	Services       map[string]ServiceConfig `yaml:"services" json:"services"`                               // Services to deploy in this environment
+	Labels         map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`                 // Environment labels for nodes
+	Services       map[string]ServiceConfig `yaml:"services" json:"services"`                                 // Services to deploy in this environment
 }
 
 // ServerSelector defines label-based server selection
@@ -417,8 +404,8 @@ type ServerSelector struct {
 type PlacementConfig struct {
 	Strategy    string   `yaml:"strategy,omitempty" json:"strategy,omitempty"`       // "spread", "pinned", "any"
 	Servers     []string `yaml:"servers,omitempty" json:"servers,omitempty"`         // Pin to specific servers (for "pinned" strategy)
-	Constraints []string `yaml:"constraints,omitempty" json:"constraints,omitempty"` // Docker Swarm constraints (e.g., "node.labels.type==high-memory")
-	Preferences []string `yaml:"preferences,omitempty" json:"preferences,omitempty"` // Docker Swarm placement preferences (e.g., "spread=node.labels.region")
+	Constraints []string `yaml:"constraints,omitempty" json:"constraints,omitempty"` // Node label constraints (e.g., "node.labels.type==high-memory")
+	Preferences []string `yaml:"preferences,omitempty" json:"preferences,omitempty"` // Placement preferences (e.g., "spread=node.labels.region")
 }
 
 // GetServiceType returns the auto-detected service type
@@ -426,10 +413,10 @@ func (s *ServiceConfig) GetServiceType() string {
 	if s.Persistent {
 		return "persistent" // Database, cache, etc.
 	}
-	if s.Proxy != nil {
+	if s.IsPublic() {
 		return "public" // Public web service
 	}
-	if s.Port > 0 {
+	if len(s.EffectivePorts()) > 0 {
 		return "internal" // Internal API
 	}
 	return "worker" // Background worker
@@ -437,17 +424,95 @@ func (s *ServiceConfig) GetServiceType() string {
 
 // IsPublic returns true if service should be exposed publicly
 func (s *ServiceConfig) IsPublic() bool {
-	return s.Proxy != nil
+	for _, port := range s.EffectivePorts() {
+		if port.Proxy != nil && port.Mode == "proxy" {
+			return true
+		}
+	}
+	return false
 }
 
 // IsInternal returns true if service is internal-only
 func (s *ServiceConfig) IsInternal() bool {
-	return s.Port > 0 && s.Proxy == nil
+	return len(s.EffectivePorts()) > 0 && !s.IsPublic()
 }
 
 // IsWorker returns true if service is a background worker
 func (s *ServiceConfig) IsWorker() bool {
-	return s.Port == 0
+	return len(s.EffectivePorts()) == 0
+}
+
+// EffectivePorts returns the explicit ports[] model plus the legacy port/proxy
+// shorthand rendered as a single named port.
+func (s *ServiceConfig) EffectivePorts() []PortConfig {
+	if len(s.Ports) > 0 {
+		out := make([]PortConfig, len(s.Ports))
+		copy(out, s.Ports)
+		for index := range out {
+			normalizePortDefaults(&out[index])
+		}
+		return out
+	}
+	if s.Port <= 0 {
+		return nil
+	}
+	port := PortConfig{
+		Name:     "http",
+		Target:   s.Port,
+		Protocol: "http",
+		Mode:     "internal",
+		Proxy:    s.Proxy,
+	}
+	if s.Proxy != nil {
+		port.Mode = "proxy"
+	}
+	return []PortConfig{port}
+}
+
+// PrimaryTargetPort returns the target port used by service-level health checks
+// and compatibility displays.
+func (s *ServiceConfig) PrimaryTargetPort() int {
+	if s.Port > 0 {
+		return s.Port
+	}
+	for _, port := range s.EffectivePorts() {
+		if port.Target > 0 {
+			return port.Target
+		}
+	}
+	return 0
+}
+
+func normalizePortDefaults(port *PortConfig) {
+	if port.Protocol == "" {
+		if port.Proxy != nil || port.Mode == "proxy" {
+			port.Protocol = "http"
+		} else {
+			port.Protocol = "tcp"
+		}
+	}
+	if port.Mode == "" {
+		switch {
+		case port.Internal:
+			port.Mode = "internal"
+		case port.Proxy != nil:
+			port.Mode = "proxy"
+		case port.Published > 0 || port.HostIP != "":
+			port.Mode = "host"
+		default:
+			port.Mode = "internal"
+		}
+	}
+	if port.Internal {
+		port.Mode = "internal"
+	}
+}
+
+func (p PortConfig) ProxyScheme() string {
+	if p.Protocol == "https" {
+		return "https"
+	}
+	return "http"
 }
 
 // GetDefaultEnvironment returns the default environment name
@@ -532,6 +597,7 @@ func (c *Config) GetEnvironmentServers(envName string) ([]string, error) {
 			for name := range c.Servers {
 				servers = append(servers, name)
 			}
+			sort.Strings(servers)
 			return servers, nil
 		}
 
@@ -545,6 +611,7 @@ func (c *Config) GetEnvironmentServers(envName string) ([]string, error) {
 		if len(matchedServers) == 0 {
 			return nil, fmt.Errorf("no servers match the selector labels for environment '%s'", envName)
 		}
+		sort.Strings(matchedServers)
 		return matchedServers, nil
 	}
 
@@ -561,28 +628,18 @@ func matchesLabels(serverLabels, selectorLabels map[string]string) bool {
 	return true
 }
 
-// GetManagerServer returns the manager server for a given environment
-func (c *Config) GetManagerServer(envName string) (string, error) {
+// GetDefaultServer returns the deterministic default node for an environment.
+func (c *Config) GetDefaultServer(envName string) (string, error) {
 	servers, err := c.GetEnvironmentServers(envName)
 	if err != nil {
 		return "", err
 	}
 
-	// Look for explicitly marked manager
-	for _, serverName := range servers {
-		if server, exists := c.Servers[serverName]; exists {
-			if server.Role == "manager" {
-				return serverName, nil
-			}
-		}
-	}
-
-	// If no explicit manager, use first server in list
 	if len(servers) > 0 {
 		return servers[0], nil
 	}
 
-	return "", fmt.Errorf("no manager server found for environment '%s'", envName)
+	return "", fmt.Errorf("no servers found for environment '%s'", envName)
 }
 
 // IsMultiServer returns true if more than one server is configured
@@ -590,13 +647,137 @@ func (c *Config) IsMultiServer() bool {
 	return len(c.Servers) > 1
 }
 
+// GetRuntimeMode returns the configured orchestration runtime.
+func (c *Config) GetRuntimeMode() string {
+	if c.Runtime == nil || c.Runtime.Mode == "" {
+		return RuntimeModeTakod
+	}
+	return c.Runtime.Mode
+}
+
+// GetRuntimeProxy returns the internal ingress proxy implementation.
+func (c *Config) GetRuntimeProxy() string {
+	if c.Runtime == nil || c.Runtime.Proxy == "" {
+		return RuntimeProxyTako
+	}
+	return c.Runtime.Proxy
+}
+
+// IsTakodRuntime returns true when the current runtime is the takod mesh runtime.
+func (c *Config) IsTakodRuntime() bool {
+	return c.GetRuntimeMode() == RuntimeModeTakod
+}
+
+// IsMeshEnabled returns true when the private node mesh is enabled.
+func (c *Config) IsMeshEnabled() bool {
+	return c.Mesh == nil || c.Mesh.Enabled == nil || *c.Mesh.Enabled
+}
+
+// GetStateBackend returns the configured state backend.
+func (c *Config) GetStateBackend() string {
+	if c.State == nil || c.State.Backend == "" {
+		return StateBackendReplicated
+	}
+	return c.State.Backend
+}
+
+// GetDeployConsistency returns the deployment consistency policy.
+func (c *Config) GetDeployConsistency() string {
+	if c.State == nil || c.State.DeployConsistency == "" {
+		return StateDeployConsistencyLease
+	}
+	return c.State.DeployConsistency
+}
+
+// GetOnUnreachableNode returns the policy used when a node cannot be reached.
+func (c *Config) GetOnUnreachableNode() string {
+	if c.State == nil || c.State.OnUnreachableNode == "" {
+		return StateUnreachableBlock
+	}
+	return c.State.OnUnreachableNode
+}
+
 // GetRegistryURL returns the auto-configured local registry URL
 // Returns empty string for single-server deployments (no registry needed)
 func (c *Config) GetRegistryURL() string {
-	// TODO: Phase 2 - implement registry for multi-server deployments
-	// For now, return empty string for all deployments
-	// In Phase 2, detect multi-server and return registry URL on manager node
+	// Takod deployments use direct peer transfer for built images unless a service
+	// explicitly references an external image.
 	return ""
+}
+
+// RegistryAuthForImage returns registry credentials for an image when the
+// configured registry host matches the image reference.
+func (c *Config) RegistryAuthForImage(image string) *RegistryAuthConfig {
+	if c == nil || c.Registry == nil {
+		return nil
+	}
+	server := NormalizeRegistryServer(c.Registry.URL)
+	if server == "" || !registryServerMatchesImage(server, image) {
+		return nil
+	}
+	return &RegistryAuthConfig{
+		Server:        registryAuthServer(server),
+		Username:      c.Registry.Username,
+		Password:      c.Registry.Password,
+		IdentityToken: c.Registry.IdentityToken,
+	}
+}
+
+func NormalizeRegistryServer(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.Host != "" {
+		return strings.ToLower(parsed.Host)
+	}
+	value = strings.TrimPrefix(value, "//")
+	if slash := strings.Index(value, "/"); slash >= 0 {
+		value = value[:slash]
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func registryServerMatchesImage(server string, image string) bool {
+	imageHost := imageRegistryHost(image)
+	if imageHost == "" {
+		return false
+	}
+	if dockerHubRegistry(server) && dockerHubRegistry(imageHost) {
+		return true
+	}
+	return strings.EqualFold(server, imageHost)
+}
+
+func imageRegistryHost(image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" || strings.HasPrefix(image, "-") {
+		return ""
+	}
+	first, _, _ := strings.Cut(image, "/")
+	if first == "" {
+		return ""
+	}
+	if first == "localhost" || strings.ContainsAny(first, ".:") {
+		return strings.ToLower(first)
+	}
+	return "docker.io"
+}
+
+func dockerHubRegistry(server string) bool {
+	switch strings.ToLower(strings.TrimSpace(server)) {
+	case "docker.io", "index.docker.io", "registry-1.docker.io":
+		return true
+	default:
+		return false
+	}
+}
+
+func registryAuthServer(server string) string {
+	if dockerHubRegistry(server) {
+		return "https://index.docker.io/v1/"
+	}
+	return server
 }
 
 // GetFullImageName returns the full image name with registry and environment tag
@@ -623,13 +804,60 @@ func (c *Config) GetFullImageName(serviceName string, envName string) string {
 	)
 }
 
-// expandEnvWithTrim expands environment variables and trims their values
-// This handles Windows CMD quirk where "set VAR=value " includes trailing space
-func expandEnvWithTrim(s string) string {
-	return os.Expand(s, func(key string) string {
-		value := os.Getenv(key)
-		return strings.TrimSpace(value)
-	})
+// expandEnvWithTrim expands ${VAR} placeholders and trims their values.
+// It intentionally does not expand bare $VAR so keys like $schema remain intact.
+// For YAML, comment text is ignored so commented examples do not require env vars.
+func expandEnvWithTrim(s string, ignoreYAMLComments bool) (string, error) {
+	var result strings.Builder
+	missing := make([]string, 0)
+	seenMissing := map[string]bool{}
+
+	for _, line := range strings.SplitAfter(s, "\n") {
+		content := line
+		comment := ""
+		if ignoreYAMLComments {
+			content, comment = splitYAMLComment(line)
+		}
+
+		expanded, lineMissing := envexpand.BracedFromOS(content)
+		for _, key := range lineMissing {
+			if !seenMissing[key] {
+				seenMissing[key] = true
+				missing = append(missing, key)
+			}
+		}
+		result.WriteString(expanded)
+		result.WriteString(comment)
+	}
+
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return "", fmt.Errorf("missing environment variable(s): %s", strings.Join(missing, ", "))
+	}
+	return result.String(), nil
+}
+
+func splitYAMLComment(line string) (string, string) {
+	inSingle := false
+	inDouble := false
+
+	for idx := 0; idx < len(line); idx++ {
+		switch line[idx] {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle && (idx == 0 || line[idx-1] != '\\') {
+				inDouble = !inDouble
+			}
+		case '#':
+			if !inSingle && !inDouble {
+				return line[:idx], line[idx:]
+			}
+		}
+	}
+	return line, ""
 }
 
 // LoadConfig loads the configuration from a YAML or JSON file
@@ -681,13 +909,24 @@ func LoadConfig(configPath string) (*Config, error) {
 
 	// Expand environment variables in the content with trimming
 	// This handles cases where environment variables have trailing spaces
-	expandedData := expandEnvWithTrim(string(data))
+	expandedData, err := expandEnvWithTrim(string(data), !isJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to expand config environment variables: %w", err)
+	}
 
 	// Parse config into Config struct
 	var config Config
 	if isJSON {
-		// Parse JSON
-		if err := json.Unmarshal([]byte(expandedData), &config); err != nil {
+		decoder := json.NewDecoder(strings.NewReader(expandedData))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&config); err != nil {
+			return nil, fmt.Errorf("failed to parse JSON config: %w", err)
+		}
+		var extra any
+		if err := decoder.Decode(&extra); err != io.EOF {
+			if err == nil {
+				return nil, fmt.Errorf("failed to parse JSON config: multiple JSON values")
+			}
 			return nil, fmt.Errorf("failed to parse JSON config: %w", err)
 		}
 	} else {
@@ -733,7 +972,7 @@ func SaveConfig(configPath string, cfg *Config) error {
 		}
 	}
 
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
+	if err := fileutil.WriteFileAtomic(configPath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
@@ -777,108 +1016,27 @@ func (c *Config) IsCacheEnabled() bool {
 	return true // Default to enabled
 }
 
-// IsNFSEnabled returns true if NFS storage is enabled
-func (c *Config) IsNFSEnabled() bool {
-	return c.Storage != nil && c.Storage.NFS != nil && c.Storage.NFS.Enabled
+func (c *Config) DeploymentSource() string {
+	if c.Deployment != nil && strings.TrimSpace(c.Deployment.Source) != "" {
+		return strings.TrimSpace(c.Deployment.Source)
+	}
+	return DeploymentSourceLocal
 }
 
-// GetNFSConfig returns the NFS configuration, or nil if not enabled
-func (c *Config) GetNFSConfig() *NFSConfig {
-	if c.Storage != nil && c.Storage.NFS != nil {
-		return c.Storage.NFS
-	}
-	return nil
-}
-
-// GetNFSServerName returns the NFS server name
-// If "auto" or empty, returns the manager server name for the given environment
-func (c *Config) GetNFSServerName(envName string) (string, error) {
-	if !c.IsNFSEnabled() {
-		return "", fmt.Errorf("NFS is not enabled")
-	}
-
-	nfsConfig := c.GetNFSConfig()
-	if nfsConfig.Server == "" || nfsConfig.Server == "auto" {
-		// Use manager node
-		return c.GetManagerServer(envName)
-	}
-
-	// Verify the specified server exists
-	if _, exists := c.Servers[nfsConfig.Server]; !exists {
-		return "", fmt.Errorf("NFS server '%s' not found in servers configuration", nfsConfig.Server)
-	}
-
-	return nfsConfig.Server, nil
-}
-
-// GetNFSExport returns a specific NFS export by name
-func (c *Config) GetNFSExport(name string) (*NFSExportConfig, error) {
-	if !c.IsNFSEnabled() {
-		return nil, fmt.Errorf("NFS is not enabled")
-	}
-
-	for _, export := range c.GetNFSConfig().Exports {
-		if export.Name == name {
-			return &export, nil
+func (c *Config) DeploymentCache() *CacheConfig {
+	if c.Deployment != nil && c.Deployment.Cache != nil {
+		cache := *c.Deployment.Cache
+		if cache.Type == "" {
+			cache.Type = "local"
 		}
+		return &cache
 	}
-
-	return nil, fmt.Errorf("NFS export '%s' not found", name)
+	return &CacheConfig{Enabled: true, Type: "local"}
 }
 
-// GetNFSExports returns all NFS exports
-func (c *Config) GetNFSExports() []NFSExportConfig {
-	if !c.IsNFSEnabled() {
-		return nil
-	}
-	return c.GetNFSConfig().Exports
-}
-
-// IsNFSVolume checks if a volume spec refers to an NFS volume (nfs:name:/path format)
+// IsNFSVolume checks if a volume spec uses the removed nfs: prefix.
 func IsNFSVolume(volumeSpec string) bool {
 	return strings.HasPrefix(volumeSpec, "nfs:")
-}
-
-// ParseNFSVolumeSpec parses an NFS volume specification
-// Format: nfs:export_name:/container/path[:ro]
-// Returns: exportName, containerPath, readOnly, error
-func ParseNFSVolumeSpec(volumeSpec string) (exportName string, containerPath string, readOnly bool, err error) {
-	if !IsNFSVolume(volumeSpec) {
-		return "", "", false, fmt.Errorf("not an NFS volume spec: %s", volumeSpec)
-	}
-
-	// Remove the "nfs:" prefix
-	spec := strings.TrimPrefix(volumeSpec, "nfs:")
-
-	// Check for :ro suffix
-	if strings.HasSuffix(spec, ":ro") {
-		readOnly = true
-		spec = strings.TrimSuffix(spec, ":ro")
-	} else if strings.HasSuffix(spec, ":rw") {
-		readOnly = false
-		spec = strings.TrimSuffix(spec, ":rw")
-	} else {
-		// Default to read-only for safety
-		readOnly = true
-	}
-
-	// Split into export name and container path
-	parts := strings.SplitN(spec, ":", 2)
-	if len(parts) != 2 {
-		return "", "", false, fmt.Errorf("invalid NFS volume spec: %s (expected format: nfs:export_name:/container/path[:ro|:rw])", volumeSpec)
-	}
-
-	exportName = parts[0]
-	containerPath = parts[1]
-
-	if exportName == "" {
-		return "", "", false, fmt.Errorf("NFS export name cannot be empty")
-	}
-	if containerPath == "" || !strings.HasPrefix(containerPath, "/") {
-		return "", "", false, fmt.Errorf("NFS container path must be an absolute path")
-	}
-
-	return exportName, containerPath, readOnly, nil
 }
 
 // GetVolume returns a volume configuration by name
@@ -898,13 +1056,13 @@ func (c *Config) GetVolume(name string) (*VolumeConfig, bool) {
 func (c *Config) GetVolumeName(volumeKey, envName string) string {
 	if c.Volumes == nil {
 		// No top-level volumes, use default naming
-		return fmt.Sprintf("%s_%s_%s", c.Project.Name, envName, volumeKey)
+		return runtimeid.VolumeName(c.Project.Name, envName, volumeKey)
 	}
 
 	vol, exists := c.Volumes[volumeKey]
 	if !exists {
 		// Volume not defined at top level, use default naming
-		return fmt.Sprintf("%s_%s_%s", c.Project.Name, envName, volumeKey)
+		return runtimeid.VolumeName(c.Project.Name, envName, volumeKey)
 	}
 
 	// If external or has custom name, use the specified name
@@ -916,7 +1074,7 @@ func (c *Config) GetVolumeName(volumeKey, envName string) string {
 	}
 
 	// Apply project/env prefix
-	return fmt.Sprintf("%s_%s_%s", c.Project.Name, envName, volumeKey)
+	return runtimeid.VolumeName(c.Project.Name, envName, volumeKey)
 }
 
 // IsVolumeExternal checks if a volume is marked as external
@@ -937,131 +1095,4 @@ func (c *Config) GetAllDefinedVolumes() map[string]VolumeConfig {
 		return make(map[string]VolumeConfig)
 	}
 	return c.Volumes
-}
-
-// PopulateServersFromInfrastructure populates the Servers map from infrastructure outputs
-// This bridges the gap between infrastructure provisioning and server configuration
-// It reads the infrastructure state from .tako/infra/state.json and creates ServerConfig entries
-func (c *Config) PopulateServersFromInfrastructure(takoDir string) error {
-	if c.Infrastructure == nil {
-		return nil // No infrastructure defined, nothing to do
-	}
-
-	// Load infrastructure state
-	statePath := filepath.Join(takoDir, "infra", "state.json")
-	data, err := os.ReadFile(statePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // No state file yet, infrastructure not provisioned
-		}
-		return fmt.Errorf("failed to read infrastructure state: %w", err)
-	}
-
-	var infraState struct {
-		Servers map[string]struct {
-			PublicIP  string `json:"public_ip"`
-			PrivateIP string `json:"private_ip"`
-			Role      string `json:"role"`
-			Status    string `json:"status"`
-		} `json:"servers"`
-	}
-
-	if err := json.Unmarshal(data, &infraState); err != nil {
-		return fmt.Errorf("failed to parse infrastructure state: %w", err)
-	}
-
-	if len(infraState.Servers) == 0 {
-		return nil // No servers provisioned yet
-	}
-
-	// Initialize Servers map if nil
-	if c.Servers == nil {
-		c.Servers = make(map[string]ServerConfig)
-	}
-
-	// Get SSH configuration from infrastructure
-	sshUser := c.Infrastructure.SSHUser
-	if sshUser == "" {
-		sshUser = "root" // Default SSH user
-	}
-
-	sshKey := c.Infrastructure.SSHKey
-	homeDir, _ := os.UserHomeDir()
-
-	// Expand ~ in SSH key path
-	if strings.HasPrefix(sshKey, "~/") {
-		sshKey = filepath.Join(homeDir, sshKey[2:])
-	}
-
-	// Check for auto-generated SSH key first
-	if sshKey == "" {
-		sshKeysStatePath := filepath.Join(takoDir, "infra", "ssh_keys.json")
-		if sshKeysData, err := os.ReadFile(sshKeysStatePath); err == nil {
-			var sshKeyState struct {
-				KeyPair struct {
-					PrivateKeyPath string `json:"private_key_path"`
-				} `json:"key_pair"`
-			}
-			if json.Unmarshal(sshKeysData, &sshKeyState) == nil && sshKeyState.KeyPair.PrivateKeyPath != "" {
-				// Verify the key file exists
-				if _, err := os.Stat(sshKeyState.KeyPair.PrivateKeyPath); err == nil {
-					sshKey = sshKeyState.KeyPair.PrivateKeyPath
-				}
-			}
-		}
-	}
-
-	if sshKey == "" {
-		// Try common defaults
-		for _, keyPath := range []string{
-			filepath.Join(homeDir, ".ssh", "id_ed25519"),
-			filepath.Join(homeDir, ".ssh", "id_rsa"),
-		} {
-			if _, err := os.Stat(keyPath); err == nil {
-				sshKey = keyPath
-				break
-			}
-		}
-	}
-
-	// Populate servers from infrastructure state
-	for name, server := range infraState.Servers {
-		// Skip if server already defined manually (manual takes precedence)
-		if _, exists := c.Servers[name]; exists {
-			continue
-		}
-
-		// Skip if server has no IP (not fully provisioned)
-		if server.PublicIP == "" {
-			continue
-		}
-
-		// Create ServerConfig from infrastructure output
-		c.Servers[name] = ServerConfig{
-			Host:   server.PublicIP,
-			User:   sshUser,
-			SSHKey: sshKey,
-			Role:   server.Role,
-			Port:   22,
-		}
-	}
-
-	return nil
-}
-
-// LoadConfigWithInfra loads config and populates servers from infrastructure state
-// This is the recommended way to load config when infrastructure is involved
-func LoadConfigWithInfra(configPath string, takoDir string) (*Config, error) {
-	cfg, err := LoadConfig(configPath)
-	if err != nil {
-		return nil, err
-	}
-
-	// Populate servers from infrastructure state if available
-	if err := cfg.PopulateServersFromInfrastructure(takoDir); err != nil {
-		// Log warning but don't fail - infrastructure might not be provisioned yet
-		fmt.Fprintf(os.Stderr, "Warning: could not load infrastructure state: %v\n", err)
-	}
-
-	return cfg, nil
 }

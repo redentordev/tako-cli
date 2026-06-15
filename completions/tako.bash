@@ -1,335 +1,420 @@
-# bash completion for tako                                -*- shell-script -*-
+# bash completion V2 for tako                                 -*- shell-script -*-
 
 __tako_debug()
 {
-    if [[ -n ${BASH_COMP_DEBUG_FILE:-} ]]; then
+    if [[ -n ${BASH_COMP_DEBUG_FILE-} ]]; then
         echo "$*" >> "${BASH_COMP_DEBUG_FILE}"
     fi
 }
 
-# Homebrew on Macs have version 1.3 of bash-completion which doesn't include
-# _init_completion. This is a very minimal version of that function.
+# Macs have bash3 for which the bash-completion package doesn't include
+# _init_completion. This is a minimal version of that function.
 __tako_init_completion()
 {
     COMPREPLY=()
     _get_comp_words_by_ref "$@" cur prev words cword
 }
 
-__tako_index_of_word()
-{
-    local w word=$1
-    shift
-    index=0
-    for w in "$@"; do
-        [[ $w = "$word" ]] && return
-        index=$((index+1))
-    done
-    index=-1
+# This function calls the tako program to obtain the completion
+# results and the directive.  It fills the 'out' and 'directive' vars.
+__tako_get_completion_results() {
+    local requestComp lastParam lastChar args
+
+    # Prepare the command to request completions for the program.
+    # Calling ${words[0]} instead of directly tako allows handling aliases
+    args=("${words[@]:1}")
+    requestComp="${words[0]} __complete ${args[*]}"
+
+    lastParam=${words[$((${#words[@]}-1))]}
+    lastChar=${lastParam:$((${#lastParam}-1)):1}
+    __tako_debug "lastParam ${lastParam}, lastChar ${lastChar}"
+
+    if [[ -z ${cur} && ${lastChar} != = ]]; then
+        # If the last parameter is complete (there is a space following it)
+        # We add an extra empty parameter so we can indicate this to the go method.
+        __tako_debug "Adding extra empty parameter"
+        requestComp="${requestComp} ''"
+    fi
+
+    # When completing a flag with an = (e.g., tako -n=<TAB>)
+    # bash focuses on the part after the =, so we need to remove
+    # the flag part from $cur
+    if [[ ${cur} == -*=* ]]; then
+        cur="${cur#*=}"
+    fi
+
+    __tako_debug "Calling ${requestComp}"
+    # Use eval to handle any environment variables and such
+    out=$(eval "${requestComp}" 2>/dev/null)
+
+    # Extract the directive integer at the very end of the output following a colon (:)
+    directive=${out##*:}
+    # Remove the directive
+    out=${out%:*}
+    if [[ ${directive} == "${out}" ]]; then
+        # There is not directive specified
+        directive=0
+    fi
+    __tako_debug "The completion directive is: ${directive}"
+    __tako_debug "The completions are: ${out}"
 }
 
-__tako_contains_word()
-{
-    local w word=$1; shift
-    for w in "$@"; do
-        [[ $w = "$word" ]] && return
-    done
-    return 1
-}
+__tako_process_completion_results() {
+    local shellCompDirectiveError=1
+    local shellCompDirectiveNoSpace=2
+    local shellCompDirectiveNoFileComp=4
+    local shellCompDirectiveFilterFileExt=8
+    local shellCompDirectiveFilterDirs=16
+    local shellCompDirectiveKeepOrder=32
 
-__tako_handle_reply()
-{
-    __tako_debug "${FUNCNAME[0]}"
-    case $cur in
-        -*)
-            if [[ $(type -t compopt) = "builtin" ]]; then
+    if (((directive & shellCompDirectiveError) != 0)); then
+        # Error code.  No completion.
+        __tako_debug "Received error from custom completion go code"
+        return
+    else
+        if (((directive & shellCompDirectiveNoSpace) != 0)); then
+            if [[ $(type -t compopt) == builtin ]]; then
+                __tako_debug "Activating no space"
                 compopt -o nospace
-            fi
-            local allflags
-            if [ ${#must_have_one_flag[@]} -ne 0 ]; then
-                allflags=("${must_have_one_flag[@]}")
             else
-                allflags=("${flags[*]} ${two_word_flags[*]}")
+                __tako_debug "No space directive not supported in this version of bash"
             fi
-            while IFS='' read -r comp; do
-                COMPREPLY+=("$comp")
-            done < <(compgen -W "${allflags[*]}" -- "$cur")
-            if [[ $(type -t compopt) = "builtin" ]]; then
-                [[ "${COMPREPLY[0]}" == *= ]] || compopt +o nospace
-            fi
-
-            # complete after --flag=abc
-            if [[ $cur == *=* ]]; then
-                if [[ $(type -t compopt) = "builtin" ]]; then
-                    compopt +o nospace
+        fi
+        if (((directive & shellCompDirectiveKeepOrder) != 0)); then
+            if [[ $(type -t compopt) == builtin ]]; then
+                # no sort isn't supported for bash less than < 4.4
+                if [[ ${BASH_VERSINFO[0]} -lt 4 || ( ${BASH_VERSINFO[0]} -eq 4 && ${BASH_VERSINFO[1]} -lt 4 ) ]]; then
+                    __tako_debug "No sort directive not supported in this version of bash"
+                else
+                    __tako_debug "Activating keep order"
+                    compopt -o nosort
                 fi
+            else
+                __tako_debug "No sort directive not supported in this version of bash"
+            fi
+        fi
+        if (((directive & shellCompDirectiveNoFileComp) != 0)); then
+            if [[ $(type -t compopt) == builtin ]]; then
+                __tako_debug "Activating no file completion"
+                compopt +o default
+            else
+                __tako_debug "No file completion directive not supported in this version of bash"
+            fi
+        fi
+    fi
 
-                local index flag
-                flag="${cur%=*}"
-                __tako_index_of_word "${flag}" "${flags_with_completion[@]}"
-                COMPREPLY=()
-                if [[ ${index} -ge 0 ]]; then
-                    PREFIX=""
-                    cur="${cur#*=}"
-                    ${flags_completion[${index}]}
-                    if [ -n "${ZSH_VERSION:-}" ]; then
-                        # zsh completion needs --flag= prefix
-                        eval "COMPREPLY=( \"\${COMPREPLY[@]/#/${flag}=}\" )"
-                    fi
+    # Separate activeHelp from normal completions
+    local completions=()
+    local activeHelp=()
+    __tako_extract_activeHelp
+
+    if (((directive & shellCompDirectiveFilterFileExt) != 0)); then
+        # File extension filtering
+        local fullFilter="" filter filteringCmd
+
+        # Do not use quotes around the $completions variable or else newline
+        # characters will be kept.
+        for filter in ${completions[*]}; do
+            fullFilter+="$filter|"
+        done
+
+        filteringCmd="_filedir $fullFilter"
+        __tako_debug "File filtering command: $filteringCmd"
+        $filteringCmd
+    elif (((directive & shellCompDirectiveFilterDirs) != 0)); then
+        # File completion for directories only
+
+        local subdir
+        subdir=${completions[0]}
+        if [[ -n $subdir ]]; then
+            __tako_debug "Listing directories in $subdir"
+            pushd "$subdir" >/dev/null 2>&1 && _filedir -d && popd >/dev/null 2>&1 || return
+        else
+            __tako_debug "Listing directories in ."
+            _filedir -d
+        fi
+    else
+        __tako_handle_completion_types
+    fi
+
+    __tako_handle_special_char "$cur" :
+    __tako_handle_special_char "$cur" =
+
+    # Print the activeHelp statements before we finish
+    __tako_handle_activeHelp
+}
+
+__tako_handle_activeHelp() {
+    # Print the activeHelp statements
+    if ((${#activeHelp[*]} != 0)); then
+        if [ -z $COMP_TYPE ]; then
+            # Bash v3 does not set the COMP_TYPE variable.
+            printf "\n";
+            printf "%s\n" "${activeHelp[@]}"
+            printf "\n"
+            __tako_reprint_commandLine
+            return
+        fi
+
+        # Only print ActiveHelp on the second TAB press
+        if [ $COMP_TYPE -eq 63 ]; then
+            printf "\n"
+            printf "%s\n" "${activeHelp[@]}"
+
+            if ((${#COMPREPLY[*]} == 0)); then
+                # When there are no completion choices from the program, file completion
+                # may kick in if the program has not disabled it; in such a case, we want
+                # to know if any files will match what the user typed, so that we know if
+                # there will be completions presented, so that we know how to handle ActiveHelp.
+                # To find out, we actually trigger the file completion ourselves;
+                # the call to _filedir will fill COMPREPLY if files match.
+                if (((directive & shellCompDirectiveNoFileComp) == 0)); then
+                    __tako_debug "Listing files"
+                    _filedir
                 fi
             fi
 
-            return 0;
-            ;;
-    esac
+            if ((${#COMPREPLY[*]} != 0)); then
+                # If there are completion choices to be shown, print a delimiter.
+                # Re-printing the command-line will automatically be done
+                # by the shell when it prints the completion choices.
+                printf -- "--"
+            else
+                # When there are no completion choices at all, we need
+                # to re-print the command-line since the shell will
+                # not be doing it itself.
+                __tako_reprint_commandLine
+            fi
+        elif [ $COMP_TYPE -eq 37 ] || [ $COMP_TYPE -eq 42 ]; then
+            # For completion type: menu-complete/menu-complete-backward and insert-completions
+            # the completions are immediately inserted into the command-line, so we first
+            # print the activeHelp message and reprint the command-line since the shell won't.
+            printf "\n"
+            printf "%s\n" "${activeHelp[@]}"
 
-    # check if we are handling a flag with special work handling
-    local index
-    __tako_index_of_word "${prev}" "${flags_with_completion[@]}"
-    if [[ ${index} -ge 0 ]]; then
-        ${flags_completion[${index}]}
-        return
+            __tako_reprint_commandLine
+        fi
     fi
+}
 
-    # we are parsing a flag and don't have a special handler, no completion
-    if [[ ${cur} != "${words[cword]}" ]]; then
-        return
+__tako_reprint_commandLine() {
+    # The prompt format is only available from bash 4.4.
+    # We test if it is available before using it.
+    if (x=${PS1@P}) 2> /dev/null; then
+        printf "%s" "${PS1@P}${COMP_LINE[@]}"
+    else
+        # Can't print the prompt.  Just print the
+        # text the user had typed, it is workable enough.
+        printf "%s" "${COMP_LINE[@]}"
     fi
+}
 
-    local completions
-    completions=("${commands[@]}")
-    if [[ ${#must_have_one_noun[@]} -ne 0 ]]; then
-        completions+=("${must_have_one_noun[@]}")
-    elif [[ -n "${has_completion_function}" ]]; then
-        # if a go completion function is provided, defer to that function
-        __tako_handle_go_custom_completion
-    fi
-    if [[ ${#must_have_one_flag[@]} -ne 0 ]]; then
-        completions+=("${must_have_one_flag[@]}")
-    fi
+# Separate activeHelp lines from real completions.
+# Fills the $activeHelp and $completions arrays.
+__tako_extract_activeHelp() {
+    local activeHelpMarker="_activeHelp_ "
+    local endIndex=${#activeHelpMarker}
+
     while IFS='' read -r comp; do
-        COMPREPLY+=("$comp")
-    done < <(compgen -W "${completions[*]}" -- "$cur")
+        [[ -z $comp ]] && continue
 
-    if [[ ${#COMPREPLY[@]} -eq 0 && ${#noun_aliases[@]} -gt 0 && ${#must_have_one_noun[@]} -ne 0 ]]; then
-        while IFS='' read -r comp; do
-            COMPREPLY+=("$comp")
-        done < <(compgen -W "${noun_aliases[*]}" -- "$cur")
-    fi
-
-    if [[ ${#COMPREPLY[@]} -eq 0 ]]; then
-        if declare -F __tako_custom_func >/dev/null; then
-            # try command name qualified custom func
-            __tako_custom_func
+        if [[ ${comp:0:endIndex} == $activeHelpMarker ]]; then
+            comp=${comp:endIndex}
+            __tako_debug "ActiveHelp found: $comp"
+            if [[ -n $comp ]]; then
+                activeHelp+=("$comp")
+            fi
         else
-            # otherwise fall back to unqualified for compatibility
-            declare -F __custom_func >/dev/null && __custom_func
+            # Not an activeHelp line but a normal completion
+            completions+=("$comp")
         fi
-    fi
-
-    # available in bash-completion >= 2, not always present on macOS
-    if declare -F __ltrim_colon_completions >/dev/null; then
-        __ltrim_colon_completions "$cur"
-    fi
+    done <<<"${out}"
 }
 
-# The arguments should be in the form "ext1|ext2|extn"
-__tako_handle_filename_extension_flag()
-{
-    local ext="$1"
-    _filedir "@(${ext})"
+__tako_handle_completion_types() {
+    __tako_debug "__tako_handle_completion_types: COMP_TYPE is $COMP_TYPE"
+
+    case $COMP_TYPE in
+    37|42)
+        # Type: menu-complete/menu-complete-backward and insert-completions
+        # If the user requested inserting one completion at a time, or all
+        # completions at once on the command-line we must remove the descriptions.
+        # https://github.com/spf13/cobra/issues/1508
+
+        # If there are no completions, we don't need to do anything
+        (( ${#completions[@]} == 0 )) && return 0
+
+        local tab=$'\t'
+
+        # Strip any description and escape the completion to handled special characters
+        IFS=$'\n' read -ra completions -d '' < <(printf "%q\n" "${completions[@]%%$tab*}")
+
+        # Only consider the completions that match
+        IFS=$'\n' read -ra COMPREPLY -d '' < <(IFS=$'\n'; compgen -W "${completions[*]}" -- "${cur}")
+
+        # compgen looses the escaping so we need to escape all completions again since they will
+        # all be inserted on the command-line.
+        IFS=$'\n' read -ra COMPREPLY -d '' < <(printf "%q\n" "${COMPREPLY[@]}")
+        ;;
+
+    *)
+        # Type: complete (normal completion)
+        __tako_handle_standard_completion_case
+        ;;
+    esac
 }
 
-__tako_handle_flag()
-{
-    __tako_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
+__tako_handle_standard_completion_case() {
+    local tab=$'\t'
 
-    # if a command required a flag, and we found it, unset must_have_one_flag()
-    local flagname=${words[c]}
-    local flagvalue=""
-    # if the word contained an =
-    if [[ ${words[c]} == *"="* ]]; then
-        flagvalue=${flagname#*=} # take in as flagvalue after the =
-        flagname=${flagname%=*} # strip everything after the =
-        flagname="${flagname}=" # but put the = back
-    fi
-    __tako_debug "${FUNCNAME[0]}: looking for ${flagname}"
-    if __tako_contains_word "${flagname}" "${must_have_one_flag[@]}"; then
-        must_have_one_flag=()
-    fi
+    # If there are no completions, we don't need to do anything
+    (( ${#completions[@]} == 0 )) && return 0
 
-    # if you set a flag which only applies to this command, don't show subcommands
-    if __tako_contains_word "${flagname}" "${local_nonpersistent_flags[@]}"; then
-      commands=()
-    fi
+    # Short circuit to optimize if we don't have descriptions
+    if [[ "${completions[*]}" != *$tab* ]]; then
+        # First, escape the completions to handle special characters
+        IFS=$'\n' read -ra completions -d '' < <(printf "%q\n" "${completions[@]}")
+        # Only consider the completions that match what the user typed
+        IFS=$'\n' read -ra COMPREPLY -d '' < <(IFS=$'\n'; compgen -W "${completions[*]}" -- "${cur}")
 
-    # keep flag value with flagname as flaghash
-    # flaghash variable is an associative array which is only supported in bash > 3.
-    if [[ -z "${BASH_VERSION:-}" || "${BASH_VERSINFO[0]:-}" -gt 3 ]]; then
-        if [ -n "${flagvalue}" ] ; then
-            flaghash[${flagname}]=${flagvalue}
-        elif [ -n "${words[ $((c+1)) ]}" ] ; then
-            flaghash[${flagname}]=${words[ $((c+1)) ]}
-        else
-            flaghash[${flagname}]=""
+        # compgen looses the escaping so, if there is only a single completion, we need to
+        # escape it again because it will be inserted on the command-line.  If there are multiple
+        # completions, we don't want to escape them because they will be printed in a list
+        # and we don't want to show escape characters in that list.
+        if (( ${#COMPREPLY[@]} == 1 )); then
+            COMPREPLY[0]=$(printf "%q" "${COMPREPLY[0]}")
         fi
+        return 0
     fi
 
-    # skip the argument to a two word flag
-    if [[ ${words[c]} != *"="* ]] && __tako_contains_word "${words[c]}" "${two_word_flags[@]}"; then
-        __tako_debug "${FUNCNAME[0]}: found a flag ${words[c]}, skip the next argument"
-        c=$((c+1))
-        # if we are looking for a flags value, don't show commands
-        if [[ $c -eq $cword ]]; then
-            commands=()
+    local longest=0
+    local compline
+    # Look for the longest completion so that we can format things nicely
+    while IFS='' read -r compline; do
+        [[ -z $compline ]] && continue
+
+        # Before checking if the completion matches what the user typed,
+        # we need to strip any description and escape the completion to handle special
+        # characters because those escape characters are part of what the user typed.
+        # Don't call "printf" in a sub-shell because it will be much slower
+        # since we are in a loop.
+        printf -v comp "%q" "${compline%%$tab*}" &>/dev/null || comp=$(printf "%q" "${compline%%$tab*}")
+
+        # Only consider the completions that match
+        [[ $comp == "$cur"* ]] || continue
+
+        # The completions matches.  Add it to the list of full completions including
+        # its description.  We don't escape the completion because it may get printed
+        # in a list if there are more than one and we don't want show escape characters
+        # in that list.
+        COMPREPLY+=("$compline")
+
+        # Strip any description before checking the length, and again, don't escape
+        # the completion because this length is only used when printing the completions
+        # in a list and we don't want show escape characters in that list.
+        comp=${compline%%$tab*}
+        if ((${#comp}>longest)); then
+            longest=${#comp}
         fi
-    fi
+    done < <(printf "%s\n" "${completions[@]}")
 
-    c=$((c+1))
-
-}
-
-__tako_handle_noun()
-{
-    __tako_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
-
-    if __tako_contains_word "${words[c]}" "${must_have_one_noun[@]}"; then
-        must_have_one_noun=()
-    elif __tako_contains_word "${words[c]}" "${noun_aliases[@]}"; then
-        must_have_one_noun=()
-    fi
-
-    nouns+=("${words[c]}")
-    c=$((c+1))
-}
-
-__tako_handle_command()
-{
-    __tako_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
-
-    local next_command
-    if [[ -n ${last_command} ]]; then
-        next_command="_${last_command}_${words[c]//:/__}"
+    # If there is a single completion left, remove the description text and escape any special characters
+    if ((${#COMPREPLY[*]} == 1)); then
+        __tako_debug "COMPREPLY[0]: ${COMPREPLY[0]}"
+        COMPREPLY[0]=$(printf "%q" "${COMPREPLY[0]%%$tab*}")
+        __tako_debug "Removed description from single completion, which is now: ${COMPREPLY[0]}"
     else
-        if [[ $c -eq 0 ]]; then
-            next_command="_tako_root_command"
-        else
-            next_command="_${words[c]//:/__}"
-        fi
+        # Format the descriptions
+        __tako_format_comp_descriptions $longest
     fi
-    c=$((c+1))
-    __tako_debug "${FUNCNAME[0]}: looking for ${next_command}"
-    declare -F "$next_command" >/dev/null && $next_command
 }
 
-__tako_handle_word()
+__tako_handle_special_char()
 {
-    if [[ $c -ge $cword ]]; then
-        __tako_handle_reply
-        return
+    local comp="$1"
+    local char=$2
+    if [[ "$comp" == *${char}* && "$COMP_WORDBREAKS" == *${char}* ]]; then
+        local word=${comp%"${comp##*${char}}"}
+        local idx=${#COMPREPLY[*]}
+        while ((--idx >= 0)); do
+            COMPREPLY[idx]=${COMPREPLY[idx]#"$word"}
+        done
     fi
-    __tako_debug "${FUNCNAME[0]}: c is $c words[c] is ${words[c]}"
-    if [[ "${words[c]}" == -* ]]; then
-        __tako_handle_flag
-    elif __tako_contains_word "${words[c]}" "${commands[@]}"; then
-        __tako_handle_command
-    elif [[ $c -eq 0 ]]; then
-        __tako_handle_command
-    elif __tako_contains_word "${words[c]}" "${command_aliases[@]}"; then
-        # aliashash variable is an associative array which is only supported in bash > 3.
-        if [[ -z "${BASH_VERSION:-}" || "${BASH_VERSINFO[0]:-}" -gt 3 ]]; then
-            words[c]=${aliashash[${words[c]}]}
-            __tako_handle_command
-        else
-            __tako_handle_noun
-        fi
-    else
-        __tako_handle_noun
-    fi
-    __tako_handle_word
 }
 
-_tako_root_command()
+__tako_format_comp_descriptions()
 {
-    last_command="tako"
+    local tab=$'\t'
+    local comp desc maxdesclength
+    local longest=$1
 
-    command_aliases=()
+    local i ci
+    for ci in ${!COMPREPLY[*]}; do
+        comp=${COMPREPLY[ci]}
+        # Properly format the description string which follows a tab character if there is one
+        if [[ "$comp" == *$tab* ]]; then
+            __tako_debug "Original comp: $comp"
+            desc=${comp#*$tab}
+            comp=${comp%%$tab*}
 
-    commands=()
-    commands+=("access")
-    commands+=("backup")
-    commands+=("cleanup")
-    commands+=("deploy")
-    commands+=("destroy")
-    commands+=("dev")
-    commands+=("downgrade")
-    commands+=("drift")
-    commands+=("exec")
-    commands+=("history")
-    commands+=("init")
-    commands+=("live")
-    commands+=("logs")
-    commands+=("maintenance")
-    commands+=("metrics")
-    commands+=("monitor")
-    commands+=("prometheus")
-    commands+=("ps")
-    commands+=("remove")
-    commands+=("rollback")
-    commands+=("scale")
-    commands+=("secrets")
-    commands+=("setup")
-    commands+=("start")
-    commands+=("stats")
-    commands+=("stop")
-    commands+=("storage")
-    commands+=("upgrade")
+            # $COLUMNS stores the current shell width.
+            # Remove an extra 4 because we add 2 spaces and 2 parentheses.
+            maxdesclength=$(( COLUMNS - longest - 4 ))
 
-    flags=()
-    two_word_flags=()
-    local_nonpersistent_flags=()
-    flags_with_completion=()
-    flags_completion=()
+            # Make sure we can fit a description of at least 8 characters
+            # if we are to align the descriptions.
+            if ((maxdesclength > 8)); then
+                # Add the proper number of spaces to align the descriptions
+                for ((i = ${#comp} ; i < longest ; i++)); do
+                    comp+=" "
+                done
+            else
+                # Don't pad the descriptions so we can fit more text after the completion
+                maxdesclength=$(( COLUMNS - ${#comp} - 4 ))
+            fi
 
-    flags+=("--help")
-    flags+=("-h")
-    local_nonpersistent_flags+=("--help")
-    flags+=("--version")
-    flags+=("-v")
-    local_nonpersistent_flags+=("--version")
-
-    must_have_one_flag=()
-    must_have_one_noun=()
-    noun_aliases=()
+            # If there is enough space for any description text,
+            # truncate the descriptions that are too long for the shell width
+            if ((maxdesclength > 0)); then
+                if ((${#desc} > maxdesclength)); then
+                    desc=${desc:0:$(( maxdesclength - 1 ))}
+                    desc+="…"
+                fi
+                comp+="  ($desc)"
+            fi
+            COMPREPLY[ci]=$comp
+            __tako_debug "Final comp: $comp"
+        fi
+    done
 }
 
 __start_tako()
 {
     local cur prev words cword split
-    declare -A flaghash 2>/dev/null || :
-    declare -A aliashash 2>/dev/null || :
+
+    COMPREPLY=()
+
+    # Call _init_completion from the bash-completion package
+    # to prepare the arguments properly
     if declare -F _init_completion >/dev/null 2>&1; then
-        _init_completion -s || return
+        _init_completion -n =: || return
     else
-        __tako_init_completion -n "=" || return
+        __tako_init_completion -n =: || return
     fi
 
-    local c=0
-    local flag_parsing_disabled=
-    local flags=()
-    local two_word_flags=()
-    local local_nonpersistent_flags=()
-    local flags_with_completion=()
-    local flags_completion=()
-    local commands=("tako")
-    local command_aliases=()
-    local must_have_one_flag=()
-    local must_have_one_noun=()
-    local has_completion_function=""
-    local last_command=""
-    local nouns=()
-    local noun_aliases=()
+    __tako_debug
+    __tako_debug "========= starting completion logic =========="
+    __tako_debug "cur is ${cur}, words[*] is ${words[*]}, #words[@] is ${#words[@]}, cword is $cword"
 
-    __tako_handle_word
+    # The user could have moved the cursor backwards on the command-line.
+    # We need to trigger completion from the $cword location, so we need
+    # to truncate the command-line ($words) up to the $cword location.
+    words=("${words[@]:0:$cword+1}")
+    __tako_debug "Truncated words[*]: ${words[*]},"
+
+    local out directive
+    __tako_get_completion_results
+    __tako_process_completion_results
 }
 
 if [[ $(type -t compopt) = "builtin" ]]; then
@@ -337,3 +422,5 @@ if [[ $(type -t compopt) = "builtin" ]]; then
 else
     complete -o default -o nospace -F __start_tako tako
 fi
+
+# ex: ts=4 sw=4 et filetype=sh

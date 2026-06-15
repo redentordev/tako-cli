@@ -1,10 +1,13 @@
 package ssh
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -38,12 +41,12 @@ type MuxConnection struct {
 
 // NewMultiplexer creates a new SSH multiplexer
 func NewMultiplexer() *Multiplexer {
-	controlDir := filepath.Join(os.TempDir(), "tako-ssh-mux")
-	os.MkdirAll(controlDir, 0700)
+	controlDir := defaultMuxControlDir()
+	_ = os.MkdirAll(controlDir, 0700)
 
 	return &Multiplexer{
 		config: MultiplexConfig{
-			ControlPath:    filepath.Join(controlDir, "mux-%h-%p-%r"),
+			ControlPath:    filepath.Join(controlDir, "mux"),
 			ControlPersist: 10 * time.Minute,
 			MaxSessions:    10,
 		},
@@ -113,9 +116,6 @@ func (m *Multiplexer) establish(host string, port int, user string, sshKey strin
 
 	// Configure host key verification based on global mode
 	switch GetGlobalHostKeyMode() {
-	case HostKeyModeInsecure:
-		args = append(args, "-o", "StrictHostKeyChecking=no")
-		args = append(args, "-o", "UserKnownHostsFile=/dev/null")
 	case HostKeyModeStrict:
 		args = append(args, "-o", "StrictHostKeyChecking=yes")
 		if takoKnownHosts != "" {
@@ -155,12 +155,20 @@ func (m *Multiplexer) establish(host string, port int, user string, sshKey strin
 
 // buildControlPath generates the control socket path
 func (m *Multiplexer) buildControlPath(host string, port int, user string) string {
-	// Create a safe filename from connection details
-	safeHost := filepath.Base(host)
+	hash := sha256.Sum256([]byte(fmt.Sprintf("%s@%s:%d", user, host, port)))
 	return filepath.Join(
 		filepath.Dir(m.config.ControlPath),
-		fmt.Sprintf("mux-%s-%d-%s", safeHost, port, user),
+		"mux-"+hex.EncodeToString(hash[:16]),
 	)
+}
+
+func defaultMuxControlDir() string {
+	if runtime.GOOS != "windows" {
+		if err := os.MkdirAll("/tmp/tako-ssh-mux", 0700); err == nil {
+			return "/tmp/tako-ssh-mux"
+		}
+	}
+	return filepath.Join(os.TempDir(), "tako-ssh-mux")
 }
 
 // IsHealthy checks if the multiplexed connection is still active

@@ -10,8 +10,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+	"golang.org/x/term"
 )
 
 // HostKeyMode controls host key verification behavior
@@ -24,21 +26,19 @@ const (
 	HostKeyModeStrict
 	// HostKeyModeAsk prompts user for unknown hosts (interactive only)
 	HostKeyModeAsk
-	// HostKeyModeInsecure disables verification (not recommended, legacy behavior)
-	HostKeyModeInsecure
 )
 
 // ParseHostKeyMode parses a string into HostKeyMode
-func ParseHostKeyMode(s string) HostKeyMode {
+func ParseHostKeyMode(s string) (HostKeyMode, error) {
 	switch strings.ToLower(s) {
+	case "", "tofu":
+		return HostKeyModeTOFU, nil
 	case "strict":
-		return HostKeyModeStrict
+		return HostKeyModeStrict, nil
 	case "ask":
-		return HostKeyModeAsk
-	case "insecure", "none", "off":
-		return HostKeyModeInsecure
+		return HostKeyModeAsk, nil
 	default:
-		return HostKeyModeTOFU
+		return HostKeyModeTOFU, fmt.Errorf("unsupported host key mode %q (use tofu, strict, or ask)", s)
 	}
 }
 
@@ -49,8 +49,6 @@ func (m HostKeyMode) String() string {
 		return "strict"
 	case HostKeyModeAsk:
 		return "ask"
-	case HostKeyModeInsecure:
-		return "insecure"
 	default:
 		return "tofu"
 	}
@@ -58,39 +56,45 @@ func (m HostKeyMode) String() string {
 
 // HostKeyVerifier provides host key verification with TOFU support
 type HostKeyVerifier struct {
-	mode           HostKeyMode
-	systemHostsPath string  // ~/.ssh/known_hosts
-	takoHostsPath   string  // ~/.tako/known_hosts
-	promptFn       func(host, fingerprint, keyType string) (bool, error)
-	mu             sync.Mutex
+	mode            HostKeyMode
+	systemHostsPath string // ~/.ssh/known_hosts
+	takoHostsPath   string // ~/.tako/known_hosts
+	promptFn        func(host, fingerprint, keyType string) (bool, error)
+	mu              sync.Mutex
 }
 
 // Global verifier instance with default settings
 var defaultVerifier *HostKeyVerifier
 var defaultVerifierOnce sync.Once
 var globalHostKeyMode = HostKeyModeTOFU
+var globalHostKeyModeMu sync.RWMutex
 
 // SetGlobalHostKeyMode sets the global host key verification mode
 func SetGlobalHostKeyMode(mode HostKeyMode) {
+	globalHostKeyModeMu.Lock()
+	defer globalHostKeyModeMu.Unlock()
 	globalHostKeyMode = mode
 }
 
 // GetGlobalHostKeyMode returns the current global host key verification mode
 func GetGlobalHostKeyMode() HostKeyMode {
+	globalHostKeyModeMu.RLock()
+	defer globalHostKeyModeMu.RUnlock()
 	return globalHostKeyMode
 }
 
 // GetDefaultVerifier returns the default host key verifier
 func GetDefaultVerifier() (*HostKeyVerifier, error) {
 	var initErr error
+	mode := GetGlobalHostKeyMode()
 	defaultVerifierOnce.Do(func() {
-		defaultVerifier, initErr = NewHostKeyVerifier(globalHostKeyMode)
+		defaultVerifier, initErr = NewHostKeyVerifier(mode)
 	})
 	if initErr != nil {
 		return nil, initErr
 	}
 	// Update mode in case it changed
-	defaultVerifier.SetMode(globalHostKeyMode)
+	defaultVerifier.SetMode(mode)
 	return defaultVerifier, nil
 }
 
@@ -108,28 +112,29 @@ func NewHostKeyVerifier(mode HostKeyMode) (*HostKeyVerifier, error) {
 	}
 
 	return &HostKeyVerifier{
-		mode:           mode,
+		mode:            mode,
 		systemHostsPath: filepath.Join(homeDir, ".ssh", "known_hosts"),
 		takoHostsPath:   filepath.Join(takoDir, "known_hosts"),
+		promptFn:        InteractivePrompt,
 	}, nil
 }
 
 // SetMode sets the verification mode
 func (v *HostKeyVerifier) SetMode(mode HostKeyMode) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.mode = mode
 }
 
 // SetPromptFunc sets the function to prompt user for unknown hosts
 func (v *HostKeyVerifier) SetPromptFunc(fn func(host, fingerprint, keyType string) (bool, error)) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	v.promptFn = fn
 }
 
 // GetCallback returns an ssh.HostKeyCallback for use with ssh.ClientConfig
 func (v *HostKeyVerifier) GetCallback() ssh.HostKeyCallback {
-	if v.mode == HostKeyModeInsecure {
-		return ssh.InsecureIgnoreHostKey()
-	}
-
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		return v.verify(hostname, remote, key)
 	}
@@ -196,12 +201,7 @@ func (v *HostKeyVerifier) verify(hostname string, remote net.Addr, key ssh.Publi
 
 	case HostKeyModeAsk:
 		if v.promptFn == nil {
-			// No prompt function - fall back to TOFU behavior
-			fmt.Fprintf(os.Stderr, "Warning: No interactive prompt available, using TOFU for %s\n", host)
-			if err := v.addHostKey(host, port, key); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: Could not save host key: %v\n", err)
-			}
-			return nil
+			return fmt.Errorf("host key mode ask requires an interactive prompt; use tofu to trust on first use or strict with preinstalled known_hosts")
 		}
 
 		accepted, err := v.promptFn(host, fingerprint, key.Type())
@@ -309,26 +309,31 @@ func extractHostPort(hostname string, remote net.Addr) (string, int) {
 // InteractivePrompt prompts the user to accept an unknown host key
 // Use this with SetPromptFunc for interactive CLI sessions
 func InteractivePrompt(host, fingerprint, keyType string) (bool, error) {
-	fmt.Printf(`The authenticity of host '%s' can't be established.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return false, fmt.Errorf("host key prompt requires a terminal; use tofu to trust on first use or strict with preinstalled known_hosts")
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf(`The authenticity of host '%s' can't be established.
 %s key fingerprint is %s.
 Are you sure you want to continue connecting (yes/no)? `, host, keyType, fingerprint)
 
-	reader := bufio.NewReader(os.Stdin)
-	response, err := reader.ReadString('\n')
-	if err != nil {
-		return false, err
-	}
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			return false, err
+		}
 
-	response = strings.TrimSpace(strings.ToLower(response))
+		response = strings.TrimSpace(strings.ToLower(response))
 
-	switch response {
-	case "yes", "y":
-		return true, nil
-	case "no", "n":
-		return false, nil
-	default:
-		fmt.Println("Please type 'yes' or 'no'.")
-		return InteractivePrompt(host, fingerprint, keyType)
+		switch response {
+		case "yes", "y":
+			return true, nil
+		case "no", "n":
+			return false, nil
+		default:
+			fmt.Println("Please type 'yes' or 'no'.")
+		}
 	}
 }
 
@@ -342,7 +347,7 @@ func GetKnownHostsPath() (string, error) {
 }
 
 // RemoveHostKey removes a host key from Tako's known_hosts file
-// This should be called when destroying infrastructure to allow clean reconnection
+// This should be called when recreating a server to allow clean reconnection.
 func RemoveHostKey(host string) error {
 	knownHostsPath, err := GetKnownHostsPath()
 	if err != nil {
@@ -391,7 +396,7 @@ func RemoveHostKey(host string) error {
 
 	// Write back
 	content := strings.Join(newLines, "\n")
-	if err := os.WriteFile(knownHostsPath, []byte(content), 0600); err != nil {
+	if err := fileutil.WriteFileAtomic(knownHostsPath, []byte(content), 0600); err != nil {
 		return fmt.Errorf("failed to write known_hosts: %w", err)
 	}
 

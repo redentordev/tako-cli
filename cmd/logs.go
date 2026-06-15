@@ -1,11 +1,17 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
+	"sort"
+	"strings"
+	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 )
 
@@ -19,20 +25,20 @@ var (
 var logsCmd = &cobra.Command{
 	Use:   "logs",
 	Short: "View logs from deployed services",
-	Long: `View logs from deployed services on remote servers.
+	Long: `View logs from deployed services across the environment mesh.
 
-If --server is not specified, defaults to the first server or manager node in Swarm mode.
+If --server is not specified, streams logs from every configured environment node.
 
 Examples:
-  tako logs --service web              # View logs from default server
-  tako logs --service web --server prod # View logs from specific server
+  tako logs --service web               # View logs from the environment mesh
+  tako logs --service web --server prod # View logs from a specific node
   tako logs --service web -f            # Follow logs in real-time`,
 	RunE: runLogs,
 }
 
 func init() {
 	rootCmd.AddCommand(logsCmd)
-	logsCmd.Flags().StringVarP(&logsServer, "server", "s", "", "Server to view logs from (default: first/manager server)")
+	logsCmd.Flags().StringVarP(&logsServer, "server", "s", "", "Node to view logs from (default: all environment nodes)")
 	logsCmd.Flags().StringVar(&logsService, "service", "", "Service to view logs from (required)")
 	logsCmd.Flags().BoolVarP(&logsFollow, "follow", "f", false, "Follow log output")
 	logsCmd.Flags().IntVarP(&logsTail, "tail", "n", 100, "Number of lines to show")
@@ -40,66 +46,150 @@ func init() {
 }
 
 func runLogs(cmd *cobra.Command, args []string) error {
-	// Load configuration
-	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
+	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
+	}
+	if logsTail < 0 {
+		return fmt.Errorf("tail cannot be negative")
+	}
 
-	// Get environment and services
 	envName := getEnvironmentName(cfg)
 	services, err := cfg.GetServices(envName)
 	if err != nil {
 		return fmt.Errorf("failed to get services: %w", err)
 	}
 
-	// Check service exists
 	if _, exists := services[logsService]; !exists {
 		return fmt.Errorf("service %s not found in environment %s", logsService, envName)
 	}
 
-	// Determine which server to use
-	var serverName string
-	var server config.ServerConfig
-
-	if logsServer != "" {
-		// Use specified server
-		var exists bool
-		server, exists = cfg.Servers[logsServer]
-		if !exists {
-			return fmt.Errorf("server %s not found in configuration", logsServer)
-		}
-		serverName = logsServer
-	} else {
-		// Default to first server or manager
-		envServers, err := cfg.GetEnvironmentServers(envName)
-		if err != nil {
-			return fmt.Errorf("failed to get environment servers: %w", err)
-		}
-
-		if len(envServers) == 0 {
-			return fmt.Errorf("no servers configured for environment %s", envName)
-		}
-
-		// If multi-server (Swarm), use manager; otherwise use first server
-		if len(envServers) > 1 {
-			managerName, err := cfg.GetManagerServer(envName)
-			if err != nil {
-				return fmt.Errorf("failed to get manager server: %w", err)
-			}
-			serverName = managerName
-			server = cfg.Servers[managerName]
-		} else {
-			serverName = envServers[0]
-			server = cfg.Servers[serverName]
-		}
-
-		if verbose {
-			fmt.Printf("Using server: %s (%s)\n", serverName, server.Host)
-		}
+	servers, err := resolveEnvironmentServerSet(cfg, envName, logsServer)
+	if err != nil {
+		return err
+	}
+	if len(servers) == 0 {
+		return fmt.Errorf("no servers configured for environment %s", envName)
 	}
 
-	// Create SSH client (supports both key and password auth)
+	fmt.Printf("Streaming logs from %s on %d takod node(s)...\n\n", logsService, len(servers))
+
+	output := &lockedLogWriter{writer: os.Stdout}
+	results := streamLogNodesWith(servers, func(serverName string, server config.ServerConfig, prefix bool) error {
+		return streamLogsFromNode(cfg, envName, serverName, server, logsService, logsTail, logsFollow, prefix, output)
+	})
+	if err := summarizeLogStreamResults(results); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type lockedLogWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+}
+
+func (w *lockedLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writer.Write(p)
+}
+
+type logNodeStreamFunc func(serverName string, server config.ServerConfig, prefix bool) error
+
+type logNodeResult struct {
+	index      int
+	serverName string
+	host       string
+	err        error
+}
+
+func streamLogNodesWith(servers map[string]config.ServerConfig, stream logNodeStreamFunc) []logNodeResult {
+	names := sortedLogServerNames(servers)
+	prefix := len(names) > 1
+	resultCh := make(chan logNodeResult, len(names))
+	var wg sync.WaitGroup
+	for index, serverName := range names {
+		server := servers[serverName]
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			resultCh <- logNodeResult{
+				index:      index,
+				serverName: serverName,
+				host:       server.Host,
+				err:        stream(serverName, server, prefix),
+			}
+		}(index, serverName, server)
+	}
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]logNodeResult, len(names))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+	return results
+}
+
+func streamLogsFromNode(
+	cfg *config.Config,
+	envName string,
+	serverName string,
+	server config.ServerConfig,
+	service string,
+	tail int,
+	follow bool,
+	prefix bool,
+	output io.Writer,
+) error {
+	client, err := connectTakodStreamNode(server)
+	if err != nil {
+		return fmt.Errorf("failed to connect to node %s: %w", serverName, err)
+	}
+	defer client.Close()
+	if verbose {
+		fmt.Printf("Using node: %s (%s)\n", serverName, server.Host)
+	}
+
+	endpoint := takodclient.LogsEndpoint(cfg.Project.Name, envName, service, tail, follow)
+	reader, writer := io.Pipe()
+	streamDone := make(chan error, 1)
+	go func() {
+		err := takodclient.StreamOutput(client, takodSocketFromConfig(cfg), endpoint, writer, writer)
+		if err != nil {
+			_ = writer.CloseWithError(err)
+		} else {
+			_ = writer.Close()
+		}
+		streamDone <- err
+	}()
+
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if prefix {
+			fmt.Fprintf(output, "[%s] %s\n", serverName, line)
+		} else {
+			fmt.Fprintln(output, line)
+		}
+	}
+	scanErr := scanner.Err()
+	streamErr := <-streamDone
+	if streamErr != nil {
+		return streamErr
+	}
+	if scanErr != nil {
+		return scanErr
+	}
+	return nil
+}
+
+func connectTakodStreamNode(server config.ServerConfig) (*ssh.Client, error) {
 	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
 		Host:     server.Host,
 		Port:     server.Port,
@@ -108,51 +198,38 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		Password: server.Password,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create SSH client: %w", err)
+		return nil, err
 	}
-	defer client.Close()
-
 	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect to server: %w", err)
+		_ = client.Close()
+		return nil, err
 	}
+	return client, nil
+}
 
-	// Check if we're in Swarm mode by checking for swarm state file
-	swarmStateFile := fmt.Sprintf(".tako/swarm_%s_%s.json", cfg.Project.Name, envName)
-	useSwarmMode := false
-	if _, err := os.Stat(swarmStateFile); err == nil {
-		useSwarmMode = true
-	}
-
-	// Build appropriate logs command based on deployment mode
-	var dockerCmd string
-	if useSwarmMode {
-		// Use docker service logs for Swarm mode
-		serviceName := fmt.Sprintf("%s_%s_%s", cfg.Project.Name, envName, logsService)
-		dockerCmd = fmt.Sprintf("docker service logs --tail %d", logsTail)
-		if logsFollow {
-			dockerCmd += " -f"
+func summarizeLogStreamResults(results []logNodeResult) error {
+	var failures []string
+	for _, result := range results {
+		if result.err == nil {
+			continue
 		}
-		dockerCmd += fmt.Sprintf(" %s", serviceName)
-	} else {
-		// Use docker logs for single-server mode
-		containerName := fmt.Sprintf("%s_%s_%s_1", cfg.Project.Name, envName, logsService)
-		dockerCmd = fmt.Sprintf("docker logs --tail %d", logsTail)
-		if logsFollow {
-			dockerCmd += " -f"
-		}
-		dockerCmd += fmt.Sprintf(" %s", containerName)
+		failures = append(failures, fmt.Sprintf("%s: %v", result.serverName, result.err))
 	}
-
-	// Execute and stream logs
-	mode := "single-server"
-	if useSwarmMode {
-		mode = "Swarm"
+	if len(failures) == 0 {
+		return nil
 	}
-	fmt.Printf("Streaming logs from %s on %s (%s mode)...\n\n", logsService, serverName, mode)
-
-	if err := client.ExecuteStream(dockerCmd, os.Stdout, os.Stderr); err != nil {
-		return fmt.Errorf("failed to stream logs: %w", err)
+	sort.Strings(failures)
+	if len(failures) == len(results) {
+		return fmt.Errorf("failed to stream logs from all target nodes: %s", strings.Join(failures, "; "))
 	}
+	return fmt.Errorf("log streaming completed with %d node error(s): %s", len(failures), strings.Join(failures, "; "))
+}
 
-	return nil
+func sortedLogServerNames(servers map[string]config.ServerConfig) []string {
+	names := make([]string, 0, len(servers))
+	for name := range servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }

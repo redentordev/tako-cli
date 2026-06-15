@@ -20,8 +20,7 @@ environments:
         build: ./web
         port: 3000
         proxy:
-          domains:
-            - monorepo.${SERVER_HOST}.sslip.io
+          domain: monorepo.${SERVER_HOST}.sslip.io
           email: admin@example.com
         env:
           NODE_ENV: production

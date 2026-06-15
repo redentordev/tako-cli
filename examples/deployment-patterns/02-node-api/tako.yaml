@@ -1,0 +1,51 @@
+project:
+  name: pattern-node-api
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ${SSH_KEY}
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      api:
+        build: .
+        ports:
+          - name: http
+            target: 3000
+            protocol: http
+            proxy:
+              domain: node-api.${SERVER_HOST}.sslip.io
+              email: ${LETSENCRYPT_EMAIL}
+          - name: metrics
+            target: 9090
+            protocol: tcp
+            internal: true
+        replicas: 2
+        deploy:
+          strategy: rolling
+          order: start-first
+          maxUnavailable: 0
+          monitor: 10s
+        env:
+          APP_VERSION: 1.0.0
+          PORT: "3000"
+        hooks:
+          preDeploy:
+            command: node -e "console.log('pre-deploy checks')"
+            timeout: 2m
+            env:
+              HOOK_MODE: preflight
+          postDeploy:
+            command: node -e "console.log('post-deploy warmup')"
+            timeout: 2m
+        healthCheck:
+          path: /health
+          interval: 15s
+          timeout: 5s
+          retries: 3

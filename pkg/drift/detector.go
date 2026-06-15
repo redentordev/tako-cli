@@ -11,8 +11,11 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 // DriftType represents the type of drift detected
@@ -30,38 +33,41 @@ const (
 
 // DriftReport represents a drift detection report
 type DriftReport struct {
-	Service     string            `json:"service"`
-	Type        DriftType         `json:"type"`
-	Expected    string            `json:"expected"`
-	Actual      string            `json:"actual"`
-	Details     map[string]string `json:"details,omitempty"`
-	DetectedAt  time.Time         `json:"detected_at"`
-	Severity    string            `json:"severity"` // low, medium, high, critical
+	Service    string            `json:"service"`
+	Type       DriftType         `json:"type"`
+	Expected   string            `json:"expected"`
+	Actual     string            `json:"actual"`
+	Details    map[string]string `json:"details,omitempty"`
+	DetectedAt time.Time         `json:"detected_at"`
+	Severity   string            `json:"severity"` // low, medium, high, critical
 }
 
 // DriftState represents the current drift state
 type DriftState struct {
-	Project      string        `json:"project"`
-	Environment  string        `json:"environment"`
-	LastCheck    time.Time     `json:"last_check"`
-	Drifts       []DriftReport `json:"drifts"`
-	ServicesOK   []string      `json:"services_ok"`
+	Project       string        `json:"project"`
+	Environment   string        `json:"environment"`
+	LastCheck     time.Time     `json:"last_check"`
+	Drifts        []DriftReport `json:"drifts"`
+	ServicesOK    []string      `json:"services_ok"`
 	CheckDuration time.Duration `json:"check_duration"`
 }
 
+type ActualServiceProvider func() (map[string]ActualService, error)
+
 // Detector performs continuous drift detection
 type Detector struct {
-	client      *ssh.Client
-	config      *config.Config
-	environment string
-	notifier    *notification.Notifier
-	verbose     bool
-	
+	client         *ssh.Client
+	config         *config.Config
+	environment    string
+	notifier       *notification.Notifier
+	verbose        bool
+	actualProvider ActualServiceProvider
+
 	// State
-	mu          sync.RWMutex
-	lastState   *DriftState
-	stopCh      chan struct{}
-	running     bool
+	mu        sync.RWMutex
+	lastState *DriftState
+	stopCh    chan struct{}
+	running   bool
 }
 
 // NewDetector creates a new drift detector
@@ -76,10 +82,16 @@ func NewDetector(client *ssh.Client, cfg *config.Config, environment string, not
 	}
 }
 
+func NewDetectorWithActualProvider(cfg *config.Config, environment string, notifier *notification.Notifier, verbose bool, provider ActualServiceProvider) *Detector {
+	detector := NewDetector(nil, cfg, environment, notifier, verbose)
+	detector.actualProvider = provider
+	return detector
+}
+
 // CheckOnce performs a single drift detection check
 func (d *Detector) CheckOnce() (*DriftState, error) {
 	start := time.Now()
-	
+
 	env, err := d.config.GetEnvironment(d.environment)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get environment: %w", err)
@@ -101,9 +113,7 @@ func (d *Detector) CheckOnce() (*DriftState, error) {
 
 	// Check each configured service
 	for serviceName, serviceCfg := range env.Services {
-		fullServiceName := fmt.Sprintf("%s_%s_%s", d.config.Project.Name, d.environment, serviceName)
-		
-		actual, exists := actualServices[fullServiceName]
+		actual, exists := actualServices[serviceName]
 		if !exists {
 			// Service doesn't exist at all
 			state.Drifts = append(state.Drifts, DriftReport{
@@ -122,7 +132,7 @@ func (d *Detector) CheckOnce() (*DriftState, error) {
 		if expectedReplicas == 0 {
 			expectedReplicas = 1
 		}
-		
+
 		if actual.Replicas < expectedReplicas {
 			state.Drifts = append(state.Drifts, DriftReport{
 				Service:    serviceName,
@@ -156,15 +166,7 @@ func (d *Detector) CheckOnce() (*DriftState, error) {
 	}
 
 	// Check for unexpected services
-	for fullName := range actualServices {
-		if !strings.HasPrefix(fullName, d.config.Project.Name+"_"+d.environment+"_") {
-			continue
-		}
-		
-		// Extract service name
-		prefix := d.config.Project.Name + "_" + d.environment + "_"
-		serviceName := strings.TrimPrefix(fullName, prefix)
-		
+	for serviceName := range actualServices {
 		if _, exists := env.Services[serviceName]; !exists {
 			state.Drifts = append(state.Drifts, DriftReport{
 				Service:    serviceName,
@@ -178,7 +180,7 @@ func (d *Detector) CheckOnce() (*DriftState, error) {
 	}
 
 	state.CheckDuration = time.Since(start)
-	
+
 	// Store state
 	d.mu.Lock()
 	d.lastState = state
@@ -246,7 +248,7 @@ func (d *Detector) Start(ctx context.Context, interval time.Duration) error {
 				}
 				continue
 			}
-			
+
 			if d.verbose && len(state.Drifts) > 0 {
 				fmt.Printf("  ⚠ Detected %d drifts\n", len(state.Drifts))
 				for _, drift := range state.Drifts {
@@ -261,7 +263,7 @@ func (d *Detector) Start(ctx context.Context, interval time.Duration) error {
 func (d *Detector) Stop() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	
+
 	if d.running {
 		close(d.stopCh)
 	}
@@ -294,7 +296,7 @@ func (d *Detector) SaveState(path string) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return fileutil.WriteFileAtomic(path, data, 0644)
 }
 
 // ActualService represents a running service
@@ -305,44 +307,51 @@ type ActualService struct {
 	Running  int
 }
 
-// getActualServices gets the actual running services from Docker Swarm
+// getActualServices gets the actual running takod containers grouped by service.
 func (d *Detector) getActualServices() (map[string]ActualService, error) {
-	// Get service list with details
-	cmd := "docker service ls --format '{{.Name}}|{{.Image}}|{{.Replicas}}'"
-	output, err := d.client.Execute(cmd)
+	if d.actualProvider != nil {
+		return d.actualProvider()
+	}
+	if d.client == nil {
+		return nil, fmt.Errorf("no actual service provider or takod client configured")
+	}
+	output, err := takodclient.RequestJSON(
+		d.client,
+		d.takodSocket(),
+		"GET",
+		takodclient.ActualStateEndpoint(d.config.Project.Name, d.environment),
+		nil,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list services: %w", err)
+		return nil, fmt.Errorf("failed to read actual state through takod: %w", err)
 	}
 
-	services := make(map[string]ActualService)
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	var response takod.ActualStateResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return nil, fmt.Errorf("failed to parse takod actual state: %w", err)
+	}
+
+	services := make(map[string]ActualService, len(response.Services))
+	for serviceName, service := range response.Services {
+		if service == nil {
 			continue
 		}
-
-		parts := strings.Split(line, "|")
-		if len(parts) < 3 {
-			continue
-		}
-
-		name := parts[0]
-		image := parts[1]
-		replicaStr := parts[2]
-
-		// Parse replicas (format: "2/3" or "3/3")
-		var running, desired int
-		fmt.Sscanf(replicaStr, "%d/%d", &running, &desired)
-
-		services[name] = ActualService{
-			Name:     name,
-			Image:    image,
-			Replicas: desired,
-			Running:  running,
+		services[serviceName] = ActualService{
+			Name:     serviceName,
+			Image:    service.Image,
+			Replicas: service.Replicas,
+			Running:  service.Replicas,
 		}
 	}
 
 	return services, nil
+}
+
+func (d *Detector) takodSocket() string {
+	if d.config.Runtime != nil && d.config.Runtime.Agent != nil && d.config.Runtime.Agent.Socket != "" {
+		return d.config.Runtime.Agent.Socket
+	}
+	return takodclient.DefaultSocket
 }
 
 // getReplicaSeverity determines severity based on replica count
@@ -350,13 +359,13 @@ func (d *Detector) getReplicaSeverity(actual, expected int) string {
 	if actual == 0 {
 		return "critical"
 	}
-	
+
 	ratio := float64(actual) / float64(expected)
 	if ratio < 0.5 {
 		return "high"
 	} else if ratio < 1.0 {
 		return "medium"
 	}
-	
+
 	return "low"
 }

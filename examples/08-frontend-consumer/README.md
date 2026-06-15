@@ -4,10 +4,9 @@ This example demonstrates a frontend service that **imports** and consumes the b
 
 ## Features
 
-- **Cross-Project Imports**: Imports `backend-api.api` service
-- **Automatic DNS Resolution**: Access backend via `backend-api_api:4000`
-- **Network Bridging**: Automatically connected to backend-api's network
-- **Service Discovery**: Round-robin load balancing across backend replicas
+- **Cross-Project Import Declaration**: Imports `backend-api` through a named `backend_api` alias
+- **Explicit API URL**: `BACKEND_API_URL` is used until generated import upstream wiring is enabled
+- **Service Discovery Input**: The import declaration gives Tako the project, stage, service, and named port to resolve
 
 ## Prerequisites
 
@@ -22,8 +21,8 @@ cd examples/07-backend-api
 
 ### web
 - **Port**: 3000
-- **Imports**: `backend-api.api`
-- **Environment**: `API_URL=http://backend-api_api:4000`
+- **Imports**: `backend_api` -> `backend-api/production/api:web`
+- **Environment**: `API_URL=${BACKEND_API_URL}`
 - **Endpoints**:
   - `GET /health` - Health check
   - `GET /users` - Fetches users from backend-api
@@ -31,10 +30,10 @@ cd examples/07-backend-api
 
 ## How It Works
 
-1. **Import Declaration**: `imports: [backend-api.api]` in tako.yaml
-2. **Network Bridging**: Container is connected to `tako_backend-api_production` network
-3. **DNS Resolution**: Docker DNS resolves service alias `api` to backend replicas within the imported network
-4. **Load Balancing**: Automatic round-robin across all api replicas
+1. **Export Declaration**: example 07 exports `api:web`.
+2. **Import Declaration**: this project declares a top-level `backend_api` import.
+3. **Endpoint Resolution**: use `tako discovery` against the backend project or a generated config artifact to get healthy private endpoints.
+4. **Application Wiring**: set `BACKEND_API_URL` to the resolved backend URL for this example.
 
 ## Usage
 
@@ -45,48 +44,37 @@ cd examples/08-frontend-consumer
 ../../bin/tako deploy -v
 ```
 
-Watch for the import connection message:
-```
-  Connecting to imported services...
-  ✓ Connected to backend-api network
-  ✓ Connected to backend-api.api (access via backend-api_production_api)
-```
-
-**Important**: Exported services are accessible via their global alias: `{project}_{environment}_{service}` (e.g., `http://backend-api_production_api:4000`).
+Set `BACKEND_API_URL` before deploy, for example `http://10.210.0.10:4000`
+after resolving the backend API endpoint.
 
 ## Testing
 
 Once deployed, test cross-project communication:
 
 ```bash
-# SSH into server
-ssh root@your-server
-
 # Test frontend health
-docker exec frontend_web_1 wget -qO- http://localhost:3000/health
+curl -fsS https://frontend.yourdomain.com/health
 
 # Test cross-project API call (frontend -> backend)
-docker exec frontend_web_1 wget -qO- http://localhost:3000/users
+curl -fsS https://frontend.yourdomain.com/users
 
-# Verify DNS resolution works
-docker exec frontend_web_1 wget -qO- http://backend-api_api:4000/api/users
+# Check runtime state and logs
+tako ps web
+tako logs --service web --tail 50
 ```
 
 ## Network Topology
 
-After deployment, the frontend container is connected to TWO networks:
+The import declaration is explicit metadata. It does not grant access to every
+service in the backend project:
 
 ```
-frontend_web_1:
-  - tako_frontend (own project network)
-  - tako_backend-api (imported network)
+frontend
+  imports backend_api -> backend-api / production / api:web
 ```
 
-This allows DNS resolution of:
-- `api` - Load balanced across all api replicas (use this in your code)
-- `api_1` - Specific replica 1
-- `api_2` - Specific replica 2
-- `database` - ❌ NOT accessible (not exported by backend-api)
+Only explicitly exported backend ports are intended to be resolvable. Private
+services such as databases remain unexported.
 
 ## Security
 

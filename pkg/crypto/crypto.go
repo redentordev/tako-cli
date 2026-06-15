@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -66,7 +67,7 @@ func NewEncryptorFromKeyFile(keyPath string) (*Encryptor, error) {
 
 		// Save key to file with secure permissions
 		encoded := base64.StdEncoding.EncodeToString(key)
-		if err := os.WriteFile(keyPath, []byte(encoded), 0600); err != nil {
+		if err := fileutil.WriteFileAtomic(keyPath, []byte(encoded), 0600); err != nil {
 			return nil, fmt.Errorf("failed to save key: %w", err)
 		}
 
@@ -237,7 +238,7 @@ func (e *Encryptor) EncryptFile(filePath string) error {
 	}
 
 	// Write encrypted data back
-	if err := os.WriteFile(filePath, encrypted, info.Mode()); err != nil {
+	if err := fileutil.WriteFileAtomic(filePath, encrypted, info.Mode()); err != nil {
 		return fmt.Errorf("failed to write encrypted file: %w", err)
 	}
 
@@ -270,7 +271,7 @@ func (e *Encryptor) DecryptFile(filePath string) error {
 	}
 
 	// Write decrypted data back
-	if err := os.WriteFile(filePath, decrypted, info.Mode()); err != nil {
+	if err := fileutil.WriteFileAtomic(filePath, decrypted, info.Mode()); err != nil {
 		return fmt.Errorf("failed to write decrypted file: %w", err)
 	}
 
@@ -299,7 +300,7 @@ func (e *Encryptor) WriteEncryptedFile(filePath string, data []byte, perm os.Fil
 		return err
 	}
 
-	return os.WriteFile(filePath, encrypted, perm)
+	return fileutil.WriteFileAtomic(filePath, encrypted, perm)
 }
 
 // IsEncrypted checks if data has the encryption header

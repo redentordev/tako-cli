@@ -3,10 +3,14 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 )
 
@@ -14,6 +18,7 @@ var (
 	metricsLive   bool
 	metricsOnce   bool
 	metricsServer string
+	metricsProm   bool
 )
 
 // MetricsData represents the JSON structure returned by the monitoring agent
@@ -78,20 +83,21 @@ func init() {
 	rootCmd.AddCommand(metricsCmd)
 	metricsCmd.Flags().BoolVar(&metricsLive, "live", false, "Continuous live updates")
 	metricsCmd.Flags().BoolVar(&metricsOnce, "once", false, "Collect metrics once immediately")
+	metricsCmd.Flags().BoolVar(&metricsProm, "prometheus", false, "Print Prometheus exposition text")
 	metricsCmd.Flags().StringVarP(&metricsServer, "server", "s", "", "Specific server to monitor")
 }
 
 func runMetrics(cmd *cobra.Command, args []string) error {
-	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
+	}
 
-	// Determine environment
 	envName := getEnvironmentName(cfg)
 
-	// Get servers for environment
 	servers, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
 		return fmt.Errorf("failed to get servers: %w", err)
@@ -117,57 +123,132 @@ func runMetrics(cmd *cobra.Command, args []string) error {
 	defer sshPool.CloseAll()
 
 	if metricsLive {
+		if metricsProm {
+			return fmt.Errorf("--prometheus cannot be combined with --live")
+		}
 		return showLiveMetrics(cfg, servers, sshPool)
+	}
+	if metricsProm {
+		return showPrometheusMetrics(cfg, envName, servers, sshPool, metricsOnce)
 	}
 
 	return showMetricsOnce(cfg, servers, sshPool, metricsOnce)
+}
+
+func showPrometheusMetrics(cfg *config.Config, envName string, servers []string, sshPool *ssh.Pool, collectNew bool) error {
+	for _, serverName := range servers {
+		server, err := serverConfigByName(cfg, serverName)
+		if err != nil {
+			return err
+		}
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err != nil {
+			return fmt.Errorf("%s: connect failed: %w", serverName, err)
+		}
+		output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "GET", takodclient.PrometheusMetricsEndpoint(cfg.Project.Name, envName, collectNew), nil)
+		if err != nil {
+			return fmt.Errorf("%s: metrics failed: %w", serverName, err)
+		}
+		if len(servers) > 1 {
+			fmt.Printf("# tako_server %s\n", serverName)
+		}
+		fmt.Print(output)
+		if !strings.HasSuffix(output, "\n") {
+			fmt.Println()
+		}
+	}
+	return nil
 }
 
 func showMetricsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, collectNew bool) error {
 	fmt.Printf("\n=== System Metrics ===\n")
 	fmt.Printf("Timestamp: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
 
-	for _, serverName := range servers {
-		server := cfg.Servers[serverName]
-
-		// Get or create SSH client (supports both key and password auth)
-		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
-		if err != nil {
-			fmt.Printf("❌ %s (%s): Failed to connect - %v\n\n", serverName, server.Host, err)
+	for _, result := range collectMetricsOnce(cfg, servers, sshPool, collectNew) {
+		if result.connectErr != nil {
+			fmt.Printf("❌ %s (%s): Failed to connect - %v\n\n", result.serverName, result.host, result.connectErr)
 			continue
 		}
-
-		// Collect new metrics if requested
-		if collectNew {
-			_, err = client.Execute("/usr/local/bin/tako-monitor.sh once")
-			if err != nil {
-				fmt.Printf("❌ %s (%s): Failed to collect metrics - %v\n\n", serverName, server.Host, err)
-				continue
-			}
-			// Wait a moment for metrics to be written
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		// Fetch metrics from server
-		output, err := client.Execute("cat /var/lib/tako/metrics/current.json 2>/dev/null")
-		if err != nil {
-			fmt.Printf("❌ %s (%s): Monitoring agent not installed or not running\n", serverName, server.Host)
-			fmt.Printf("   Run: tako setup --server %s\n\n", serverName)
+		if result.metricsErr != nil {
+			fmt.Printf("❌ %s (%s): Monitoring agent not installed or not running\n", result.serverName, result.host)
+			fmt.Printf("   Run: tako setup --server %s\n\n", result.serverName)
 			continue
 		}
-
-		// Parse JSON
-		var metrics MetricsData
-		if err := json.Unmarshal([]byte(output), &metrics); err != nil {
-			fmt.Printf("❌ %s (%s): Failed to parse metrics - %v\n\n", serverName, server.Host, err)
-			continue
-		}
-
-		// Display metrics
-		displayServerMetrics(serverName, server.Host, &metrics)
+		displayServerMetrics(result.serverName, result.host, result.metrics)
 	}
 
 	return nil
+}
+
+type metricsNodeResult struct {
+	index      int
+	serverName string
+	host       string
+	metrics    *MetricsData
+	connectErr error
+	metricsErr error
+}
+
+type metricsReadFunc func(serverName string, server config.ServerConfig) (*MetricsData, error)
+
+func collectMetricsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, collectNew bool) []metricsNodeResult {
+	return collectMetricsOnceWith(cfg.Servers, servers, func(serverName string, server config.ServerConfig) (*MetricsData, error) {
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err != nil {
+			return nil, fmt.Errorf("connect: %w", err)
+		}
+		metrics, err := readMetricsViaTakod(client, cfg, collectNew)
+		if err != nil {
+			return nil, fmt.Errorf("metrics: %w", err)
+		}
+		return metrics, nil
+	})
+}
+
+func collectMetricsOnceWith(configuredServers map[string]config.ServerConfig, serverNames []string, read metricsReadFunc) []metricsNodeResult {
+	resultCh := make(chan metricsNodeResult, len(serverNames))
+	var wg sync.WaitGroup
+
+	for index, serverName := range serverNames {
+		server, ok := configuredServers[serverName]
+		if !ok {
+			resultCh <- metricsNodeResult{
+				index:      index,
+				serverName: serverName,
+				connectErr: fmt.Errorf("server not found in configuration"),
+			}
+			continue
+		}
+
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			metrics, err := read(serverName, server)
+			result := metricsNodeResult{
+				index:      index,
+				serverName: serverName,
+				host:       server.Host,
+				metrics:    metrics,
+			}
+			if err != nil {
+				if strings.HasPrefix(err.Error(), "connect: ") {
+					result.connectErr = fmt.Errorf("%s", strings.TrimPrefix(err.Error(), "connect: "))
+				} else {
+					result.metricsErr = err
+				}
+			}
+			resultCh <- result
+		}(index, serverName, server)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]metricsNodeResult, len(serverNames))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+	return results
 }
 
 func showLiveMetrics(cfg *config.Config, servers []string, sshPool *ssh.Pool) error {
@@ -183,7 +264,10 @@ func showLiveMetrics(cfg *config.Config, servers []string, sshPool *ssh.Pool) er
 		fmt.Printf("=== Live Metrics - %s ===\n\n", time.Now().Format("2006-01-02 15:04:05"))
 
 		for _, serverName := range servers {
-			server := cfg.Servers[serverName]
+			server, err := serverConfigByName(cfg, serverName)
+			if err != nil {
+				return err
+			}
 
 			client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 			if err != nil {
@@ -191,23 +275,34 @@ func showLiveMetrics(cfg *config.Config, servers []string, sshPool *ssh.Pool) er
 				continue
 			}
 
-			output, err := client.Execute("cat /var/lib/tako/metrics/current.json 2>/dev/null")
+			metrics, err := readMetricsViaTakod(client, cfg, false)
 			if err != nil {
 				fmt.Printf("❌ %s: Monitoring not available\n\n", serverName)
 				continue
 			}
 
-			var metrics MetricsData
-			if err := json.Unmarshal([]byte(output), &metrics); err != nil {
-				fmt.Printf("❌ %s: Parse error\n\n", serverName)
-				continue
-			}
-
-			displayServerMetrics(serverName, server.Host, &metrics)
+			displayServerMetrics(serverName, server.Host, metrics)
 		}
 
 		<-ticker.C
 	}
+}
+
+func readMetricsViaTakod(client *ssh.Client, cfg *config.Config, collect bool) (*MetricsData, error) {
+	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "GET", takodclient.MetricsEndpoint(collect), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var response takod.MetricsResponse
+	if err := decodeTakodJSON(output, &response); err != nil {
+		return nil, err
+	}
+	var metrics MetricsData
+	if err := json.Unmarshal(response.Metrics, &metrics); err != nil {
+		return nil, fmt.Errorf("failed to parse metrics: %w", err)
+	}
+	return &metrics, nil
 }
 
 func displayServerMetrics(serverName, serverHost string, metrics *MetricsData) {

@@ -20,13 +20,6 @@ You can run this locally with PHP's built-in server:
 php -S localhost:8000
 ```
 
-Or use Docker:
-
-```bash
-docker build -t php-app .
-docker run -p 8000:80 php-app
-```
-
 Visit http://localhost:8000
 
 ## Deploy with Tako CLI
@@ -36,7 +29,7 @@ Visit http://localhost:8000
 tako deploy
 
 # View logs
-tako logs
+tako logs --service web
 
 # Check status
 tako ps

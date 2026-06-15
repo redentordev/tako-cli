@@ -31,7 +31,7 @@ tako init
 tako deploy
 
 # View logs
-tako logs
+tako logs --service web
 
 # Check status
 tako ps

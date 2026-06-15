@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/secrets"
@@ -140,14 +142,34 @@ func checkConfig(record func(checkResult)) (*config.Config, error) {
 	record(checkResult{"PASS", fmt.Sprintf("Config file: Found %s", configName), ""})
 
 	// Try loading config
-	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
+	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		record(checkResult{"FAIL", fmt.Sprintf("Config parse: %v", err), "Fix syntax errors in config file"})
+		record(checkResult{"FAIL", fmt.Sprintf("Config parse: %v", err), configLoadFix(err)})
 		return nil, err
 	}
 
 	record(checkResult{"PASS", fmt.Sprintf("Config parse: Valid (project: %s)", cfg.Project.Name), ""})
 	return cfg, nil
+}
+
+func configLoadFix(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "failed to parse YAML") || strings.Contains(msg, "failed to parse JSON") {
+		return "Fix syntax errors in config file"
+	}
+	if strings.Contains(msg, "missing environment variable") {
+		return "Set the missing variable in .env or your shell"
+	}
+	if strings.Contains(msg, "host is required") {
+		return "Set SERVER_HOST in .env or replace ${SERVER_HOST} in config"
+	}
+	if strings.Contains(msg, "SSH key not found") {
+		return "Check sshKey path, create the key, or configure password via an environment variable"
+	}
+	return "Fix config values or missing environment variables"
 }
 
 func checkEnvFile(record func(checkResult)) {
@@ -179,7 +201,7 @@ func checkSSHKeys(record func(checkResult), cfg *config.Config, envName string) 
 		}
 
 		if server.Password != "" && server.SSHKey == "" {
-			record(checkResult{"PASS", fmt.Sprintf("%s: Using password auth", serverName), ""})
+			record(checkResult{"WARN", fmt.Sprintf("%s: Password auth configured", serverName), "Prefer sshKey; Tako setup hardening disables password SSH on managed hosts"})
 			continue
 		}
 
@@ -306,13 +328,7 @@ func checkServerConnectivity(record func(checkResult), cfg *config.Config, envNa
 		return clients
 	}
 
-	for _, serverName := range servers {
-		server, ok := cfg.Servers[serverName]
-		if !ok {
-			record(checkResult{"FAIL", fmt.Sprintf("%s: Not found in config", serverName), ""})
-			continue
-		}
-
+	for _, result := range collectServerConnectivity(cfg.Servers, servers, func(serverName string, server config.ServerConfig) doctorConnectivityResult {
 		client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
 			Host:     server.Host,
 			Port:     server.Port,
@@ -321,32 +337,95 @@ func checkServerConnectivity(record func(checkResult), cfg *config.Config, envNa
 			Password: server.Password,
 		})
 		if err != nil {
-			record(checkResult{"FAIL", fmt.Sprintf("%s (%s): %v", serverName, server.Host, err), "Check SSH key and server config"})
-			continue
+			return doctorConnectivityResult{
+				serverName: serverName,
+				result:     checkResult{"FAIL", fmt.Sprintf("%s (%s): %v", serverName, server.Host, err), "Check SSH key and server config"},
+			}
 		}
 
 		if err := client.Connect(); err != nil {
-			record(checkResult{"FAIL", fmt.Sprintf("%s (%s): Connection failed — %v", serverName, server.Host, err), "Check server is running and SSH access is configured"})
-			continue
+			return doctorConnectivityResult{
+				serverName: serverName,
+				result:     checkResult{"FAIL", fmt.Sprintf("%s (%s): Connection failed — %v", serverName, server.Host, err), "Check server is running and SSH access is configured"},
+			}
 		}
 
 		// Verify connectivity with a simple command
 		output, err := client.Execute("echo 'tako-ok'")
 		if err != nil {
-			record(checkResult{"FAIL", fmt.Sprintf("%s (%s): Connected but command failed — %v", serverName, server.Host, err), ""})
 			client.Close()
-			continue
+			return doctorConnectivityResult{
+				serverName: serverName,
+				result:     checkResult{"FAIL", fmt.Sprintf("%s (%s): Connected but command failed — %v", serverName, server.Host, err), ""},
+			}
 		}
 
 		if strings.TrimSpace(output) != "tako-ok" {
-			record(checkResult{"WARN", fmt.Sprintf("%s (%s): Connected but unexpected output", serverName, server.Host), ""})
-		} else {
-			record(checkResult{"PASS", fmt.Sprintf("%s (%s): Connected", serverName, server.Host), ""})
+			return doctorConnectivityResult{
+				serverName: serverName,
+				client:     client,
+				result:     checkResult{"WARN", fmt.Sprintf("%s (%s): Connected but unexpected output", serverName, server.Host), ""},
+			}
 		}
-		clients[serverName] = client
+		return doctorConnectivityResult{
+			serverName: serverName,
+			client:     client,
+			result:     checkResult{"PASS", fmt.Sprintf("%s (%s): Connected", serverName, server.Host), ""},
+		}
+	}) {
+		record(result.result)
+		if result.client != nil {
+			clients[result.serverName] = result.client
+		}
 	}
 
 	return clients
+}
+
+type doctorConnectivityFunc func(serverName string, server config.ServerConfig) doctorConnectivityResult
+
+type doctorConnectivityResult struct {
+	index      int
+	serverName string
+	client     *ssh.Client
+	result     checkResult
+}
+
+func collectServerConnectivity(servers map[string]config.ServerConfig, serverNames []string, connect doctorConnectivityFunc) []doctorConnectivityResult {
+	resultCh := make(chan doctorConnectivityResult, len(serverNames))
+	var wg sync.WaitGroup
+
+	for index, serverName := range serverNames {
+		server, ok := servers[serverName]
+		if !ok {
+			resultCh <- doctorConnectivityResult{
+				index:      index,
+				serverName: serverName,
+				result:     checkResult{"FAIL", fmt.Sprintf("%s: Not found in config", serverName), ""},
+			}
+			continue
+		}
+
+		wg.Add(1)
+		go func(index int, serverName string, server config.ServerConfig) {
+			defer wg.Done()
+			result := connect(serverName, server)
+			result.index = index
+			if result.serverName == "" {
+				result.serverName = serverName
+			}
+			resultCh <- result
+		}(index, serverName, server)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	results := make([]doctorConnectivityResult, len(serverNames))
+	for result := range resultCh {
+		results[result.index] = result
+	}
+	return results
 }
 
 func checkRunningServices(record func(checkResult), cfg *config.Config, envName string, clients map[string]*ssh.Client) {
@@ -355,48 +434,51 @@ func checkRunningServices(record func(checkResult), cfg *config.Config, envName 
 		return
 	}
 
-	// Use first available client (preferably manager)
-	var client *ssh.Client
-	var clientName string
-
-	// Try to find manager
-	managerName, err := cfg.GetManagerServer(envName)
-	if err == nil {
-		if c, ok := clients[managerName]; ok {
-			client = c
-			clientName = managerName
-		}
+	clientNames := make([]string, 0, len(clients))
+	for name := range clients {
+		clientNames = append(clientNames, name)
 	}
-	// Fallback to any connected client
-	if client == nil {
-		for name, c := range clients {
-			client = c
-			clientName = name
-			break
-		}
-	}
+	sort.Strings(clientNames)
 
-	// Check for Docker Swarm services
-	output, err := client.Execute("docker service ls --format '{{.Name}}\\t{{.Replicas}}' 2>/dev/null")
-	if err == nil && strings.TrimSpace(output) != "" {
-		lines := strings.Split(strings.TrimSpace(output), "\n")
-		record(checkResult{"PASS", fmt.Sprintf("Docker Swarm services on %s: %d service(s)", clientName, len(lines)), ""})
-		for _, line := range lines {
-			parts := strings.SplitN(line, "\t", 2)
-			if len(parts) == 2 {
-				record(checkResult{"PASS", fmt.Sprintf("  %s: %s replicas", parts[0], parts[1]), ""})
+	totalNodes := 0
+	totalServices := 0
+	totalReplicas := 0
+	for _, clientName := range clientNames {
+		client := clients[clientName]
+		actual, err := actualStateViaTakod(client, cfg, envName)
+		if err != nil {
+			record(checkResult{"WARN", fmt.Sprintf("Cannot read takod actual state on %s: %v", clientName, err), "Run 'tako setup' to install/start takod"})
+			continue
+		}
+		if len(actual.Services) == 0 {
+			record(checkResult{"WARN", fmt.Sprintf("No running services found on %s", clientName), "Run 'tako deploy' to start services"})
+			continue
+		}
+
+		totalNodes++
+		totalServices += len(actual.Services)
+		nodeReplicas := 0
+		for _, service := range actual.Services {
+			if service != nil {
+				nodeReplicas += service.Replicas
 			}
 		}
-		return
+		totalReplicas += nodeReplicas
+		record(checkResult{"PASS", fmt.Sprintf("takod services on %s: %d service(s), %d replica(s)", clientName, len(actual.Services), nodeReplicas), ""})
+		names := make([]string, 0, len(actual.Services))
+		for name := range actual.Services {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			service := actual.Services[name]
+			if service == nil {
+				continue
+			}
+			record(checkResult{"PASS", fmt.Sprintf("  %s: %d replica(s)", name, service.Replicas), ""})
+		}
 	}
-
-	// Fallback: check docker ps
-	output, err = client.Execute("docker ps --format '{{.Names}}\\t{{.Status}}' 2>/dev/null")
-	if err == nil && strings.TrimSpace(output) != "" {
-		lines := strings.Split(strings.TrimSpace(output), "\n")
-		record(checkResult{"PASS", fmt.Sprintf("Docker containers on %s: %d running", clientName, len(lines)), ""})
-		return
+	if totalNodes > 1 {
+		record(checkResult{"PASS", fmt.Sprintf("takod mesh services: %d node(s), %d node-local service(s), %d replica(s)", totalNodes, totalServices, totalReplicas), ""})
 	}
-
-	record(checkResult{"WARN", fmt.Sprintf("No running services found on %s", clientName), "Run 'tako deploy' to start services"})
 }

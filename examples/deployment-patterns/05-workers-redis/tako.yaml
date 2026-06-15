@@ -1,0 +1,47 @@
+project:
+  name: pattern-workers
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ${SSH_KEY}
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      api:
+        build: ./app
+        port: 3000
+        dependsOn:
+          - redis
+        proxy:
+          domain: workers-api.${SERVER_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        env:
+          REDIS_URL: redis://redis:6379
+        healthCheck:
+          path: /health
+          interval: 30s
+          timeout: 5s
+          retries: 3
+
+      worker:
+        build: ./app
+        command: node worker.js
+        replicas: 3
+        dependsOn:
+          - redis
+        env:
+          REDIS_URL: redis://redis:6379
+          WORKER_INTERVAL_MS: "5000"
+
+      redis:
+        image: redis:7-alpine
+        persistent: true
+        volumes:
+          - redis_data:/data
+        command: redis-server --appendonly yes

@@ -34,7 +34,7 @@ services:
     build: ./web          # Build context is web/ subdirectory
     port: 3000
     proxy:
-      domains: [monorepo.example.com]
+      domain: monorepo.example.com
 
   api:
     build: ./api          # Build context is api/ subdirectory

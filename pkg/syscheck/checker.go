@@ -1,10 +1,24 @@
 package syscheck
 
 import (
+	"bufio"
+	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
+
+	"golang.org/x/term"
+)
+
+var (
+	syscheckCommandContext  = exec.CommandContext
+	requirementCheckTimeout = 10 * time.Second
+	dockerCheckTimeout      = 15 * time.Second
+	commandExistsTimeout    = 5 * time.Second
+	nixpacksInstallTimeout  = 10 * time.Minute
 )
 
 // Requirement represents a system requirement
@@ -55,13 +69,6 @@ func (s *SystemChecker) CheckAll() *CheckResult {
 			InstallHint: "Install Docker: https://docs.docker.com/get-docker/",
 		},
 		{
-			Name:        "Docker Compose",
-			Command:     "docker",
-			Args:        []string{"compose", "version"},
-			Required:    true,
-			InstallHint: "Docker Compose is included with Docker Desktop",
-		},
-		{
 			Name:        "SSH",
 			Command:     s.getSSHCommand(),
 			Args:        []string{"-V"},
@@ -73,7 +80,7 @@ func (s *SystemChecker) CheckAll() *CheckResult {
 			Command:     "nixpacks",
 			Args:        []string{"--version"},
 			Required:    false,
-			InstallHint: "Install Nixpacks: curl -sSL https://nixpacks.com/install.sh | bash (Optional - for auto-building without Dockerfile)",
+			InstallHint: "Install Nixpacks: https://nixpacks.com/docs/install (optional - for auto-building without Dockerfile)",
 		},
 	}
 
@@ -100,19 +107,8 @@ func (s *SystemChecker) CheckAll() *CheckResult {
 
 // checkRequirement checks if a requirement is installed
 func (s *SystemChecker) checkRequirement(req Requirement) (bool, string) {
-	cmd := exec.Command(req.Command, req.Args...)
-	output, err := cmd.CombinedOutput()
-
+	output, err := runSyscheckCommandOutput(requirementCheckTimeout, req.Command, req.Args...)
 	if err != nil {
-		// Special case for docker compose - try docker-compose as fallback
-		if req.Name == "Docker Compose" {
-			cmd2 := exec.Command("docker-compose", "--version")
-			output2, err2 := cmd2.CombinedOutput()
-			if err2 == nil {
-				version := s.extractVersion(string(output2))
-				return true, version
-			}
-		}
 		return false, ""
 	}
 
@@ -216,14 +212,12 @@ func (s *SystemChecker) PrintResults(result *CheckResult) {
 // CheckDocker specifically checks if Docker daemon is running
 func (s *SystemChecker) CheckDocker() (bool, string) {
 	// Try docker info first
-	cmd := exec.Command("docker", "info")
-	if err := cmd.Run(); err == nil {
+	if err := runSyscheckCommand(dockerCheckTimeout, "docker", "info"); err == nil {
 		return true, "Docker daemon is running"
 	}
 
 	// Fallback to docker ps
-	cmd = exec.Command("docker", "ps")
-	if err := cmd.Run(); err == nil {
+	if err := runSyscheckCommand(dockerCheckTimeout, "docker", "ps"); err == nil {
 		return true, "Docker daemon is running"
 	}
 
@@ -246,11 +240,26 @@ func (s *SystemChecker) InstallNixpacks() error {
 	}
 }
 
+// CanInstallNixpacks returns true when Tako can install Nixpacks through a local package manager.
+func (s *SystemChecker) CanInstallNixpacks() bool {
+	switch runtime.GOOS {
+	case "windows":
+		return commandExists("scoop")
+	case "darwin":
+		return commandExists("brew")
+	default:
+		return false
+	}
+}
+
+func commandExists(name string) bool {
+	return runSyscheckCommand(commandExistsTimeout, name, "--version") == nil
+}
+
 // installNixpacksWindows installs Nixpacks on Windows
 func (s *SystemChecker) installNixpacksWindows() error {
 	// Check if Scoop is installed
-	cmd := exec.Command("scoop", "--version")
-	if err := cmd.Run(); err != nil {
+	if err := runSyscheckCommand(commandExistsTimeout, "scoop", "--version"); err != nil {
 		fmt.Println("\n⚠️  Scoop package manager is not installed.")
 		fmt.Println("Nixpacks on Windows requires Scoop.")
 		fmt.Println("\nTo install Scoop, run this in PowerShell:")
@@ -261,11 +270,7 @@ func (s *SystemChecker) installNixpacksWindows() error {
 	}
 
 	fmt.Println("  Installing via Scoop...")
-	cmd = exec.Command("scoop", "install", "nixpacks")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-
-	if err := cmd.Run(); err != nil {
+	if err := runSyscheckCommand(nixpacksInstallTimeout, "scoop", "install", "nixpacks"); err != nil {
 		return fmt.Errorf("failed to install nixpacks via scoop: %w", err)
 	}
 
@@ -276,14 +281,9 @@ func (s *SystemChecker) installNixpacksWindows() error {
 // installNixpacksMacOS installs Nixpacks on macOS
 func (s *SystemChecker) installNixpacksMacOS() error {
 	// Try Homebrew first
-	cmd := exec.Command("brew", "--version")
-	if err := cmd.Run(); err == nil {
+	if err := runSyscheckCommand(commandExistsTimeout, "brew", "--version"); err == nil {
 		fmt.Println("  Installing via Homebrew...")
-		cmd = exec.Command("brew", "install", "nixpacks")
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-
-		if err := cmd.Run(); err != nil {
+		if err := runSyscheckCommand(nixpacksInstallTimeout, "brew", "install", "nixpacks"); err != nil {
 			return fmt.Errorf("failed to install nixpacks via brew: %w", err)
 		}
 
@@ -291,39 +291,51 @@ func (s *SystemChecker) installNixpacksMacOS() error {
 		return nil
 	}
 
-	// Fallback to curl install script
-	return s.installNixpacksCurl()
+	return fmt.Errorf("homebrew is required for automatic Nixpacks installation on macOS; install manually from https://nixpacks.com/docs/install")
 }
 
 // installNixpacksLinux installs Nixpacks on Linux
 func (s *SystemChecker) installNixpacksLinux() error {
-	return s.installNixpacksCurl()
+	return fmt.Errorf("automatic Nixpacks installation is not available on Linux; install manually from https://nixpacks.com/docs/install")
 }
 
-// installNixpacksCurl installs Nixpacks using the curl install script
-func (s *SystemChecker) installNixpacksCurl() error {
-	fmt.Println("  Downloading and running install script...")
+func runSyscheckCommand(timeout time.Duration, name string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 
-	// Download and execute the install script
-	cmd := exec.Command("sh", "-c", "curl -sSL https://nixpacks.com/install.sh | bash")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to install nixpacks: %w", err)
+	cmd := syscheckCommandContext(ctx, name, args...)
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("%s timed out after %s", name, timeout)
 	}
+	return err
+}
 
-	fmt.Println("  ✓ Nixpacks installed successfully")
-	fmt.Println("\n  Note: You may need to restart your terminal for Nixpacks to be available in PATH")
-	return nil
+func runSyscheckCommandOutput(timeout time.Duration, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := syscheckCommandContext(ctx, name, args...)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return output, fmt.Errorf("%s timed out after %s", name, timeout)
+	}
+	return output, err
 }
 
 // PromptNixpacksInstall asks the user if they want to install Nixpacks
 func (s *SystemChecker) PromptNixpacksInstall() bool {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return false
+	}
+
 	fmt.Print("\nWould you like to install Nixpacks now? (Y/n): ")
 
-	var response string
-	fmt.Scanln(&response)
+	response, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return false
+	}
+	response = strings.TrimSpace(response)
 
 	// Default to yes if empty or starts with Y/y
 	if response == "" || strings.ToLower(response)[0] == 'y' {

@@ -4,19 +4,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/redentordev/tako-cli/pkg/ssh"
-	"github.com/redentordev/tako-cli/pkg/updater"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 var (
-	cfgFile        string
-	verbose        bool
-	envFlag        string
+	cfgFile         string
+	verbose         bool
+	envFlag         string
 	hostKeyModeFlag string
 	// Version, GitCommit, and BuildTime are set via ldflags during build
 	Version   = "dev"
@@ -27,12 +25,12 @@ var (
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "tako",
-	Short: "Deploy applications to any VPS with zero configuration and zero downtime",
-	Long: `Tako CLI brings Platform-as-a-Service (PaaS) simplicity to your own infrastructure.
-Deploy Docker containers to your VPS servers with automatic HTTPS, health checks,
-zero-downtime deployments, and complete control over your infrastructure.
+	Short: "Deploy applications to any VPS with a small takod mesh",
+	Long: `Tako reconciles Git-backed app config onto one or more owned servers.
+One server is a one-node mesh; adding nodes keeps the same config and commands.
 
-It uses SSH for remote server management without requiring any agents on the servers.`,
+The CLI uses SSH for bootstrap and a node-local takod agent for Docker
+reconciliation, proxy config, remote leases, and replicated deployment state.`,
 	Version: Version,
 }
 
@@ -50,69 +48,13 @@ func GetVersionInfo() string {
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute() {
-	// Check for updates on startup (once per day, non-blocking)
-	checkForUpdatesOnStartup()
-
 	err := rootCmd.Execute()
 	if err != nil {
+		if code, ok := commandExitCode(err); ok {
+			os.Exit(code)
+		}
 		os.Exit(1)
 	}
-}
-
-// checkForUpdatesOnStartup checks for updates in the background
-func checkForUpdatesOnStartup() {
-	// Skip update check if user disabled it
-	if os.Getenv("TAKO_SKIP_UPDATE_CHECK") == "1" {
-		return
-	}
-
-	// Only check once per day
-	shouldCheck := shouldCheckForUpdate()
-	if !shouldCheck {
-		return
-	}
-
-	// Run check in background to not slow down command execution
-	go func() {
-		defer func() {
-			// Recover from any panics in update check
-			if r := recover(); r != nil {
-				// Silently ignore errors in background update check
-			}
-		}()
-
-		checkForUpdate()
-	}()
-}
-
-// checkForUpdate checks if an update is available
-func checkForUpdate() {
-	updater.CheckForUpdate(Version, true) // silent mode
-}
-
-// shouldCheckForUpdate checks if it's time to check for updates
-func shouldCheckForUpdate() bool {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-
-	lastCheckFile := filepath.Join(homeDir, ".tako_last_update_check")
-
-	info, err := os.Stat(lastCheckFile)
-	if err != nil {
-		// File doesn't exist, create it
-		os.WriteFile(lastCheckFile, []byte("checked"), 0644)
-		return true
-	}
-
-	// Check if 24 hours have passed
-	if time.Since(info.ModTime()) > 24*time.Hour {
-		os.WriteFile(lastCheckFile, []byte("checked"), 0644)
-		return true
-	}
-
-	return false
 }
 
 func init() {
@@ -128,7 +70,7 @@ Built:   %s
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./tako.yaml or ./tako.json)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 	rootCmd.PersistentFlags().StringVarP(&envFlag, "env", "e", "", "environment to deploy (default: production or only environment)")
-	rootCmd.PersistentFlags().StringVar(&hostKeyModeFlag, "host-key-mode", "", "SSH host key verification mode: tofu, strict, ask, insecure (default: tofu)")
+	rootCmd.PersistentFlags().StringVar(&hostKeyModeFlag, "host-key-mode", "", "SSH host key verification mode: tofu, strict, ask (default: tofu)")
 
 	// Bind flags to viper
 	viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
@@ -218,12 +160,11 @@ func initHostKeyMode() {
 	}
 
 	if mode != "" {
-		parsedMode := ssh.ParseHostKeyMode(mode)
-		ssh.SetGlobalHostKeyMode(parsedMode)
-
-		// Warn if using insecure mode
-		if parsedMode == ssh.HostKeyModeInsecure {
-			fmt.Fprintln(os.Stderr, "Warning: SSH host key verification is disabled. This is insecure!")
+		parsedMode, err := ssh.ParseHostKeyMode(mode)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid SSH host key mode: %v\n", err)
+			os.Exit(1)
 		}
+		ssh.SetGlobalHostKeyMode(parsedMode)
 	}
 }

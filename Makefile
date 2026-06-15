@@ -1,4 +1,4 @@
-.PHONY: build install test clean run help dev lint fmt build-all
+.PHONY: build install test clean run help dev lint fmt build-all mesh-e2e examples ci-quality ci-race ci-check
 
 # Binary name
 BINARY_NAME=tako
@@ -19,6 +19,7 @@ else
 endif
 
 LDFLAGS=-ldflags "-X github.com/redentordev/tako-cli/cmd.Version=$(VERSION) -X github.com/redentordev/tako-cli/cmd.GitCommit=$(GIT_COMMIT) -X github.com/redentordev/tako-cli/cmd.BuildTime=$(BUILD_TIME)"
+RACE_PACKAGES=./cmd ./internal/state ./pkg/mesh ./pkg/provisioner ./pkg/secrets ./pkg/deployer ./pkg/ssh ./pkg/takodclient ./pkg/takod ./pkg/takodstate ./pkg/config
 
 # Build directories
 BUILD_DIR=dist
@@ -92,6 +93,55 @@ test-short:
 	@echo "Running short tests..."
 	@go test -short -v ./...
 
+## mesh-e2e: Run meshed takod E2E harness (APP_DIR=. ENV=production PHASES=preflight ARGS=...)
+mesh-e2e:
+	@TAKO_E2E_APP_DIR="$(or $(APP_DIR),$(CURDIR))" \
+	 TAKO_E2E_ENVIRONMENT="$(or $(ENV),production)" \
+	 TAKO_E2E_PHASES="$(or $(PHASES),preflight)" \
+	 scripts/mesh-e2e.sh $(ARGS)
+
+## examples: Validate deployment pattern examples
+examples:
+	@examples/deployment-patterns/validate.sh
+
+## ci-quality: Run formatting, diff, shell, test, build, and vet gates
+ci-quality:
+ifeq ($(OS),Windows_NT)
+	@Write-Host "ci-quality is supported from a POSIX shell; run it in Git Bash, WSL, or CI."
+	@exit 1
+else
+	@echo "Checking Go formatting..."
+	@unformatted="$$(gofmt -l $$(git ls-files '*.go'))"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "Go files need gofmt:"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+	@echo "Checking generated diff..."
+	@git diff --check
+	@echo "Checking shell script syntax..."
+	@find scripts examples -name '*.sh' -print0 | xargs -0 -n1 bash -n
+	@echo "Running tests..."
+	@go test ./...
+	@echo "Building..."
+	@go build ./...
+	@echo "Running go vet..."
+	@go vet ./...
+endif
+
+## ci-race: Run CI race-test package set
+ci-race:
+ifeq ($(OS),Windows_NT)
+	@Write-Host "ci-race is supported from a POSIX shell; run it in Git Bash, WSL, or CI."
+	@exit 1
+else
+	@echo "Running race tests..."
+	@go test -race $(RACE_PACKAGES)
+endif
+
+## ci-check: Run all CI-equivalent local gates
+ci-check: ci-quality ci-race
+
 ## lint: Run linter
 lint:
 	@echo "Running linter..."
@@ -161,6 +211,6 @@ version:
 	@echo "Version: $(VERSION)"
 	@echo "Build Time: $(BUILD_TIME)"
 
-## check: Run all checks (fmt, vet, lint, test)
-check: fmt vet lint test
+## check: Run CI-equivalent local checks
+check: ci-check
 	@echo "All checks passed!"

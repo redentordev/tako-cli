@@ -23,13 +23,15 @@ This example demonstrates a web application with a PostgreSQL database, showcasi
 services:
   web:
     env:
-      DATABASE_URL: postgresql://postgres:dbpassword123@postgres:5432/visitor_db
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/visitor_db
 
   postgres:
     image: postgres:15
     persistent: true  # Data persists across redeployments
     volumes:
       - /var/lib/postgresql/data
+    env:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 ```
 
 Key points:
@@ -42,11 +44,12 @@ Key points:
 1. Update `tako.yaml` with your server and domain:
    ```bash
    export SERVER_HOST=your.server.ip
+   export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
    ```
 
 2. Deploy:
    ```bash
-   start deploy prod
+   tako deploy -e production
    ```
 
 3. The application will:
@@ -74,23 +77,13 @@ CREATE TABLE visitors (
 
 ## Testing Locally
 
+Run a local PostgreSQL instance with your preferred local tooling, then start
+the app directly:
+
 ```bash
-# Start PostgreSQL with Docker
-docker run -d \
-  --name postgres \
-  -e POSTGRES_DB=visitor_db \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_PASSWORD=dbpassword123 \
-  -p 5432:5432 \
-  postgres:15
-
-# Install dependencies
 npm install
-
-# Set database URL
-export DATABASE_URL=postgresql://postgres:dbpassword123@localhost:5432/visitor_db
-
-# Run the server
+export POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+export DATABASE_URL="postgresql://postgres:${POSTGRES_PASSWORD}@localhost:5432/visitor_db"
 npm start
 
 # Visit http://localhost:3000
@@ -102,7 +95,7 @@ The web service communicates with PostgreSQL using Docker's internal networking:
 
 ```javascript
 const pool = new Pool({
-  connectionString: 'postgresql://postgres:dbpassword123@postgres:5432/visitor_db'
+  connectionString: process.env.DATABASE_URL
 });
 ```
 

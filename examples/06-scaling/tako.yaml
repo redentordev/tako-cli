@@ -21,8 +21,7 @@ environments:
         port: 3000
         replicas: 3
         proxy:
-          domains:
-            - scaling.${SERVER_HOST}.sslip.io
+          domain: scaling.${SERVER_HOST}.sslip.io
           email: admin@example.com
         loadBalancer:
           strategy: round_robin

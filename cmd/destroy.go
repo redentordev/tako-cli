@@ -7,38 +7,37 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/state"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
 
 var (
-	destroyServer   string
 	destroyPurgeAll bool
 	destroyForce    bool
 )
 
 var destroyCmd = &cobra.Command{
 	Use:   "destroy",
-	Short: "Remove deployed application and optionally cleanup infrastructure",
+	Short: "Remove deployed application and optionally clean up app-owned leftovers",
 	Long: `Destroy the deployed application and cleanup resources.
 
 This command has two modes:
 
 1. DECOMMISSION MODE (default):
-   - Stops and removes application containers
-   - Removes application Docker images
+   - Stops and removes application service replicas
+   - Removes application service images
    - Removes deployment files
-   - Keeps Traefik, logs, and server infrastructure
+   - Keeps tako-proxy, logs, and server setup
    - Safe for production - can redeploy later
 
 2. PURGE MODE (--purge-all):
    - Everything from decommission mode, PLUS:
-   - Removes Traefik reverse proxy configuration
-   - Removes access logs
-   - Removes all Docker resources
-   - Complete cleanup - requires server re-setup
+   - Prunes unused app-owned volumes
+   - Prunes stopped app containers and old app images
+   - Keeps shared takod and tako-proxy runtime intact
+   - Safe when unrelated projects share the same node
 
 Safety Features:
    - Production servers require explicit confirmation
@@ -46,20 +45,17 @@ Safety Features:
    - Use --force to skip confirmation prompts
 
 Examples:
-   tako destroy                    # Decommission app, keep infrastructure
-   tako destroy --purge-all        # Remove everything (requires confirmation)
-   tako destroy --server staging   # Destroy specific server only
+   tako destroy                    # Decommission app, keep server setup
+   tako destroy --purge-all        # Also prune app-owned leftovers
    tako destroy --force            # Skip confirmation prompts
 
-⚠️  WARNING: PURGE MODE (--purge-all) removes everything!
-   You'll need to run 'tako setup' again to redeploy.`,
+PURGE MODE is app/stage scoped. It does not remove shared takod or tako-proxy.`,
 	RunE: runDestroy,
 }
 
 func init() {
 	rootCmd.AddCommand(destroyCmd)
-	destroyCmd.Flags().StringVarP(&destroyServer, "server", "s", "", "Specific server to destroy")
-	destroyCmd.Flags().BoolVar(&destroyPurgeAll, "purge-all", false, "Remove everything including infrastructure (DANGEROUS)")
+	destroyCmd.Flags().BoolVar(&destroyPurgeAll, "purge-all", false, "Also prune app-owned leftovers after decommission")
 	destroyCmd.Flags().BoolVar(&destroyForce, "force", false, "Skip confirmation prompts")
 }
 
@@ -68,6 +64,9 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
 	}
 
 	// Acquire state lock to prevent concurrent operations
@@ -78,19 +77,10 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 	defer stateLock.Release(lockInfo)
 
-	// Determine which servers to destroy
-	serversToDestroy := make(map[string]config.ServerConfig)
-
-	if destroyServer != "" {
-		// Destroy specific server
-		server, ok := cfg.Servers[destroyServer]
-		if !ok {
-			return fmt.Errorf("server '%s' not found in config", destroyServer)
-		}
-		serversToDestroy[destroyServer] = server
-	} else {
-		// Destroy all servers
-		serversToDestroy = cfg.Servers
+	envName := getEnvironmentName(cfg)
+	serversToDestroy, targetServerNames, err := destroyEnvironmentTargets(cfg, envName)
+	if err != nil {
+		return err
 	}
 
 	// Show warning and get confirmation
@@ -100,22 +90,22 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("⚠️  WARNING: You are about to %s the following servers:\n\n", mode)
-	for serverName, server := range serversToDestroy {
+	for _, serverName := range targetServerNames {
+		server := serversToDestroy[serverName]
 		fmt.Printf("   • %s (%s)\n", serverName, server.Host)
 	}
 
 	fmt.Printf("\n%s MODE will:\n", mode)
-	fmt.Println("   ✓ Stop and remove all application containers")
-	fmt.Println("   ✓ Remove application Docker images")
+	fmt.Println("   ✓ Stop and remove all application service replicas")
+	fmt.Println("   ✓ Remove application service images")
 	fmt.Println("   ✓ Remove deployment files and directories")
 
 	if destroyPurgeAll {
-		fmt.Println("   ✓ Remove Traefik reverse proxy configuration")
-		fmt.Println("   ✓ Remove access logs")
-		fmt.Println("   ✓ Prune all unused Docker resources")
-		fmt.Println("\n⚠️  You'll need to run 'tako setup' again to redeploy!")
+		fmt.Println("   ✓ Prune unused app-owned volumes")
+		fmt.Println("   ✓ Prune stopped app containers and old app images")
+		fmt.Println("\nPreserving shared server setup (takod, tako-proxy, logs)")
 	} else {
-		fmt.Println("\nPreserving infrastructure (Traefik, logs, Docker daemon)")
+		fmt.Println("\nPreserving server setup (takod, tako-proxy, logs)")
 		fmt.Println("You can redeploy without running 'tako setup' again")
 	}
 
@@ -146,66 +136,25 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServerNames, "destroy")
+	if err != nil {
+		return err
+	}
+	defer leaseSet.Release(verbose)
+	if verbose {
+		fmt.Printf("→ Acquired remote destroy leases: %s\n", leaseSet.Summary())
+	}
+
 	fmt.Printf("\n🗑️  Destroying %d server(s)...\n\n", len(serversToDestroy))
 
-	// For multi-server purge, we need to handle workers before manager
-	// Otherwise swarm leave on manager will leave workers in broken state
-	var managerServer string
-	var workerServers []string
-
-	if destroyPurgeAll && len(serversToDestroy) > 1 {
-		// Identify manager and workers
-		for serverName, serverCfg := range serversToDestroy {
-			if serverCfg.Role == "manager" {
-				managerServer = serverName
-			} else {
-				workerServers = append(workerServers, serverName)
-			}
-		}
-		// If no explicit manager, first server is typically manager
-		if managerServer == "" {
-			for serverName := range serversToDestroy {
-				managerServer = serverName
-				break
-			}
-		}
-	}
-
-	// Destroy each server (workers first if purging multi-server)
 	totalErrors := 0
-	
-	// Process workers first if purging
-	if destroyPurgeAll && len(workerServers) > 0 {
-		for _, serverName := range workerServers {
-			serverCfg := serversToDestroy[serverName]
-			fmt.Printf("=== Destroying worker: %s (%s) ===\n", serverName, serverCfg.Host)
-			if err := destroySingleServer(serverName, serverCfg, cfg.Project.Name, verbose, destroyPurgeAll); err != nil {
-				fmt.Printf("⚠️  Errors destroying %s: %v\n", serverName, err)
-				totalErrors++
-			} else {
-				fmt.Printf("✓ Worker %s destroyed\n\n", serverName)
-			}
-		}
-	}
 
-	// Now process remaining servers (or all if not multi-server purge)
-	for serverName, serverCfg := range serversToDestroy {
-		// Skip workers we already processed
-		if destroyPurgeAll && len(workerServers) > 0 {
-			isWorker := false
-			for _, w := range workerServers {
-				if w == serverName {
-					isWorker = true
-					break
-				}
-			}
-			if isWorker {
-				continue
-			}
-		}
-		
+	for _, serverName := range targetServerNames {
+		serverCfg := serversToDestroy[serverName]
 		fmt.Printf("=== Destroying server: %s (%s) ===\n", serverName, serverCfg.Host)
-		if err := destroySingleServer(serverName, serverCfg, cfg.Project.Name, verbose, destroyPurgeAll); err != nil {
+		if err := destroySingleServer(sshPool, serverName, serverCfg, cfg, envName, verbose, destroyPurgeAll); err != nil {
 			fmt.Printf("⚠️  Errors destroying %s: %v\n", serverName, err)
 			totalErrors++
 		} else {
@@ -213,161 +162,66 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Cleanup NFS if configured and purging (only for multi-server)
-	if destroyPurgeAll && cfg.IsNFSEnabled() && len(cfg.Servers) > 1 {
-		fmt.Printf("\n=== Cleaning up NFS shared storage ===\n\n")
-		if err := cleanupNFS(cfg, envFlag); err != nil {
-			fmt.Printf("⚠️  NFS cleanup failed: %v\n", err)
-			totalErrors++
-		}
-	} else if destroyPurgeAll && cfg.IsNFSEnabled() && len(cfg.Servers) == 1 {
-		// Single server - just cleanup any local directories that might have been created
-		fmt.Printf("\n=== Cleaning up local storage (single-server mode) ===\n\n")
-		nfsConfig := cfg.GetNFSConfig()
-		if nfsConfig != nil {
-			for serverName, serverCfg := range cfg.Servers {
-				client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-					Host:     serverCfg.Host,
-					Port:     serverCfg.Port,
-					User:     serverCfg.User,
-					SSHKey:   serverCfg.SSHKey,
-					Password: serverCfg.Password,
-				})
-				if err != nil {
-					continue
-				}
-				if err := client.Connect(); err != nil {
-					continue
-				}
-				defer client.Close()
-
-				// Note: We don't delete the data directories, just inform the user
-				fmt.Printf("→ Storage directories on %s preserved:\n", serverName)
-				for _, export := range nfsConfig.Exports {
-					fmt.Printf("    - %s\n", export.Path)
-				}
-				fmt.Printf("  Remove manually if no longer needed.\n")
-			}
-		}
-	}
-
 	// Summary
 	if totalErrors > 0 {
 		fmt.Printf("⚠️  Destroy completed with %d errors\n", totalErrors)
 		fmt.Println("   Run with -v (verbose) flag for more details")
+		return fmt.Errorf("destroy incomplete: %d server(s) failed", totalErrors)
 	} else {
 		fmt.Println("✨ All servers destroyed successfully!")
 
 		if destroyPurgeAll {
-			fmt.Println("\n💡 Infrastructure removed. Run 'tako setup' before next deployment.")
+			fmt.Println("\n💡 App-owned leftovers pruned. Shared server setup was preserved.")
 		} else {
-			fmt.Println("\n💡 Infrastructure preserved. You can redeploy without running 'tako setup'.")
+			fmt.Println("\n💡 Server setup preserved. You can redeploy without running 'tako setup'.")
 		}
 	}
 
 	return nil
 }
 
-// cleanupNFS removes NFS configuration from all servers
-func cleanupNFS(cfg *config.Config, envName string) error {
-	nfsConfig := cfg.GetNFSConfig()
-	if nfsConfig == nil || !nfsConfig.Enabled {
-		return nil
-	}
-
-	// Use default environment if not specified
-	if envName == "" {
-		envName = cfg.GetDefaultEnvironment()
-	}
-
-	// Create NFS provisioner
-	nfsProvisioner := provisioner.NewNFSProvisioner(cfg.Project.Name, envName, verbose)
-
-	// Build export info for cleanup
-	exports := make([]provisioner.NFSExportInfo, 0, len(nfsConfig.Exports))
-	for _, export := range nfsConfig.Exports {
-		exports = append(exports, provisioner.NFSExportInfo{
-			Name:       export.Name,
-			Path:       export.Path,
-			MountPoint: nfsProvisioner.GetNFSMountPoint(export.Name),
-		})
-	}
-
-	// Get NFS server name
-	nfsServerName, err := cfg.GetNFSServerName(envName)
+func destroyEnvironmentTargets(cfg *config.Config, envName string) (map[string]config.ServerConfig, []string, error) {
+	envServerNames, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
-		return fmt.Errorf("failed to determine NFS server: %w", err)
+		return nil, nil, fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	if len(envServerNames) == 0 {
+		return nil, nil, fmt.Errorf("no servers configured for environment %s", envName)
 	}
 
-	// Cleanup NFS clients first (unmount before removing server exports)
-	for serverName, serverConfig := range cfg.Servers {
-		fmt.Printf("→ Cleaning up NFS on %s...\n", serverName)
-
-		client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-			Host:     serverConfig.Host,
-			Port:     serverConfig.Port,
-			User:     serverConfig.User,
-			SSHKey:   serverConfig.SSHKey,
-			Password: serverConfig.Password,
-		})
-		if err != nil {
-			fmt.Printf("  ⚠ Warning: failed to connect to %s: %v\n", serverName, err)
-			continue
+	servers := make(map[string]config.ServerConfig, len(envServerNames))
+	for _, serverName := range envServerNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return nil, nil, fmt.Errorf("server %s not found in config", serverName)
 		}
-		if err := client.Connect(); err != nil {
-			fmt.Printf("  ⚠ Warning: failed to connect to %s: %v\n", serverName, err)
-			continue
-		}
-		defer client.Close()
-
-		// Cleanup as client (unmount)
-		if err := nfsProvisioner.CleanupNFSClient(client, exports); err != nil {
-			fmt.Printf("  ⚠ Warning: failed to cleanup NFS client on %s: %v\n", serverName, err)
-		}
-
-		// If this is the NFS server, also cleanup server config
-		if serverName == nfsServerName {
-			if err := nfsProvisioner.CleanupNFSServer(client, exports); err != nil {
-				fmt.Printf("  ⚠ Warning: failed to cleanup NFS server on %s: %v\n", serverName, err)
-			}
-		}
-
-		fmt.Printf("  ✓ NFS cleanup completed on %s\n", serverName)
+		servers[serverName] = server
 	}
-
-	fmt.Printf("\n✓ NFS shared storage cleanup completed\n")
-	fmt.Printf("  Note: Export directories on the NFS server were preserved.\n")
-	fmt.Printf("  Remove manually if needed: %s\n", nfsConfig.Exports[0].Path)
-
-	return nil
+	return servers, append([]string(nil), envServerNames...), nil
 }
 
-// destroySingleServer handles destruction of a single server
-func destroySingleServer(serverName string, serverCfg config.ServerConfig, projectName string, verbose bool, purgeAll bool) error {
-	// Connect to server (supports both key and password auth)
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     serverCfg.Host,
-		Port:     serverCfg.Port,
-		User:     serverCfg.User,
-		SSHKey:   serverCfg.SSHKey,
-		Password: serverCfg.Password,
-	})
+// destroySingleServer handles destruction of a single server.
+func destroySingleServer(pool sshClientProvider, serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool) error {
+	return destroySingleServerWithHooks(pool, serverName, serverCfg, cfg, envName, verbose, purgeAll, decommissionApp, purgeProjectRuntime)
+}
+
+func destroySingleServerWithHooks(pool sshClientProvider, serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool, decommission func(*ssh.Client, *config.Config, string, bool) error, purge func(*ssh.Client, *config.Config, string, bool) error) error {
+	if pool == nil {
+		return fmt.Errorf("ssh pool is not initialized")
+	}
+	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
 	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
+		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 	}
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-	defer client.Close()
 
 	// Decommission application
-	if err := decommissionApp(client, projectName, verbose); err != nil {
+	if err := decommission(client, cfg, envName, verbose); err != nil {
 		return fmt.Errorf("decommission failed: %w", err)
 	}
 
-	// Purge infrastructure if requested
+	// Purge server setup if requested
 	if purgeAll {
-		if err := purgeInfrastructure(client, projectName, verbose); err != nil {
+		if err := purge(client, cfg, envName, verbose); err != nil {
 			return fmt.Errorf("purge failed: %w", err)
 		}
 	}
@@ -376,70 +230,31 @@ func destroySingleServer(serverName string, serverCfg config.ServerConfig, proje
 }
 
 // decommissionApp stops and removes the deployed application
-func decommissionApp(client *ssh.Client, projectName string, verbose bool) error {
-	// First, remove Swarm services (always use Swarm mode)
+func decommissionApp(client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
 	if verbose {
-		fmt.Println("  → Removing Swarm services...")
+		fmt.Println("  → Removing takod-managed services...")
 	}
-
-	// List and remove all services for this project
-	listServicesCmd := fmt.Sprintf("docker service ls --filter 'name=%s' --format '{{.Name}}'", projectName)
-	output, _ := client.Execute(listServicesCmd)
-	if strings.TrimSpace(output) != "" {
-		removeServicesCmd := fmt.Sprintf("docker service ls --filter 'name=%s' --format '{{.Name}}' | xargs -r docker service rm", projectName)
-		client.Execute(removeServicesCmd)
-		if verbose {
-			fmt.Println("  ✓ Swarm services removed")
-		}
+	services, err := cfg.GetServices(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get services for environment %s: %w", envName, err)
 	}
-
-	// Remove overlay networks for this project (matches tako_projectname and tako_projectname_env patterns)
+	response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
+		Project:           cfg.Project.Name,
+		Environment:       envName,
+		RemoveContainers:  true,
+		RemoveImages:      true,
+		RemoveNetworks:    true,
+		RemoveDeployFiles: true,
+		RemoveTakodState:  true,
+		ProxyFiles:        cleanupProxyFiles(cfg.Project.Name, envName, services),
+		ImageRepositories: cleanupImageRepositories(cfg, envName, services),
+	})
+	if err != nil {
+		return err
+	}
 	if verbose {
-		fmt.Println("  → Removing overlay networks...")
+		printCleanupWarnings(response)
 	}
-	// Remove networks matching the project name pattern
-	removeNetworkCmd := fmt.Sprintf("docker network ls --filter 'name=tako_%s' --format '{{.Name}}' | xargs -r docker network rm 2>/dev/null || true", projectName)
-	client.Execute(removeNetworkCmd)
-	// Also try removing with underscore pattern (tako_projectname_production)
-	removeNetworkCmd2 := fmt.Sprintf("docker network ls --format '{{.Name}}' | grep -E '^tako_%s_' | xargs -r docker network rm 2>/dev/null || true", projectName)
-	client.Execute(removeNetworkCmd2)
-
-	if verbose {
-		fmt.Println("  → Stopping application containers...")
-	}
-
-	// Stop all containers for this project (cleanup any orphaned containers)
-	stopCmd := fmt.Sprintf("docker ps -q --filter 'name=%s' | xargs -r docker stop 2>/dev/null || true", projectName)
-	client.Execute(stopCmd)
-
-	if verbose {
-		fmt.Println("  → Removing application containers...")
-	}
-
-	// Remove all containers for this project
-	removeCmd := fmt.Sprintf("docker ps -aq --filter 'name=%s' | xargs -r docker rm -f 2>/dev/null || true", projectName)
-	client.Execute(removeCmd)
-
-	if verbose {
-		fmt.Println("  → Removing application images...")
-	}
-
-	// Remove all images for this project (match project name prefix)
-	imagesCmd := fmt.Sprintf("docker images --format '{{.Repository}}:{{.Tag}}' | grep '^%s' | xargs -r docker rmi -f 2>/dev/null || true", projectName)
-	client.Execute(imagesCmd)
-
-	if verbose {
-		fmt.Println("  → Removing deployment files...")
-	}
-
-	// Remove deployment directory
-	client.Execute(fmt.Sprintf("sudo rm -rf /opt/%s", projectName))
-
-	// Remove deployment state
-	client.Execute(fmt.Sprintf("sudo rm -rf /var/lib/%s", projectName))
-
-	// Remove Tako state directory
-	client.Execute(fmt.Sprintf("sudo rm -rf /var/lib/tako/%s 2>/dev/null || true", projectName))
 
 	if verbose {
 		fmt.Println("  ✓ Application decommissioned")
@@ -448,51 +263,26 @@ func decommissionApp(client *ssh.Client, projectName string, verbose bool) error
 	return nil
 }
 
-// purgeInfrastructure removes all infrastructure (DANGEROUS)
-func purgeInfrastructure(client *ssh.Client, projectName string, verbose bool) error {
+// purgeProjectRuntime removes app-owned leftovers without touching shared takod
+// or tako-proxy runtime used by other projects on the same node.
+func purgeProjectRuntime(client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
 	if verbose {
-		fmt.Println("  → Removing Traefik configuration...")
+		fmt.Println("  → Pruning app-owned leftovers...")
+	}
+	response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		PruneDocker: true,
+	})
+	if err != nil {
+		return err
+	}
+	if verbose {
+		printCleanupWarnings(response)
 	}
 
-	// Stop and remove Traefik (both Swarm service and standalone container)
-	client.Execute("docker service rm traefik 2>/dev/null || true")
-	client.Execute("docker stop traefik 2>/dev/null || true")
-	client.Execute("docker rm traefik 2>/dev/null || true")
-
-	// Remove Traefik configuration (backup first)
-	client.Execute("sudo cp -r /etc/traefik /etc/traefik.bak 2>/dev/null || true")
-	client.Execute("sudo rm -rf /etc/traefik")
-
 	if verbose {
-		fmt.Println("  → Removing access logs...")
-	}
-
-	// Remove logs
-	client.Execute(fmt.Sprintf("sudo rm -rf /var/log/traefik/%s-*.log*", projectName))
-
-	if verbose {
-		fmt.Println("  → Leaving Docker Swarm...")
-	}
-
-	// Leave Docker Swarm (this also removes all Swarm-related configs)
-	client.Execute("docker swarm leave --force 2>/dev/null || true")
-
-	if verbose {
-		fmt.Println("  → Pruning Docker system...")
-	}
-
-	// Prune Docker system
-	client.Execute("docker system prune -af --volumes")
-
-	// Clean up Tako state directories
-	if verbose {
-		fmt.Println("  → Removing Tako state files...")
-	}
-	client.Execute("sudo rm -rf /var/lib/tako 2>/dev/null || true")
-	client.Execute("sudo rm -rf /etc/tako 2>/dev/null || true")
-
-	if verbose {
-		fmt.Println("  ✓ Infrastructure purged")
+		fmt.Println("  ✓ App-owned leftovers pruned")
 	}
 
 	return nil

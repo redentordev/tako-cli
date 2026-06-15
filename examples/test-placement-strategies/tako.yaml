@@ -1,48 +1,67 @@
-project: placement-test
-environment: production
+project:
+  name: placement-test
+  version: "1.0.0"
 
-services:
-  # Example 1: Default placement (runs anywhere)
-  - name: web-default
-    image: nginx:alpine
-    replicas: 2
-    domains:
-      - default.placement-test.tako.dev
+runtime:
+  mode: takod
 
-  # Example 2: Spread strategy (distribute across nodes)
-  - name: web-spread
-    image: nginx:alpine
-    replicas: 3
-    domains:
-      - spread.placement-test.tako.dev
-    placement:
-      strategy: spread
+mesh:
+  enabled: true
 
-  # Example 3: Global strategy (one per node) - NEW!
-  - name: monitoring-agent
-    image: nginx:alpine  # Using nginx as example, normally would be monitoring agent
-    domains:
-      - monitor.placement-test.tako.dev
-    placement:
-      strategy: global
-    # Note: No replicas specified for global mode
+state:
+  backend: replicated
 
-  # Example 4: Worker nodes only (using constraints)
-  - name: worker-only
-    image: nginx:alpine
-    replicas: 2
-    domains:
-      - worker.placement-test.tako.dev
-    placement:
-      constraints:
-        - node.role==worker
+servers:
+  node1:
+    host: ${SERVER1_HOST}
+    user: root
+    sshKey: ${SSH_KEY}
+    labels:
+      role: web
+  node2:
+    host: ${SERVER2_HOST}
+    user: root
+    sshKey: ${SSH_KEY}
+    labels:
+      role: web
 
-  # Example 5: Manager nodes only
-  - name: manager-only
-    image: nginx:alpine
-    replicas: 1
-    domains:
-      - manager.placement-test.tako.dev
-    placement:
-      constraints:
-        - node.role==manager
+environments:
+  production:
+    servers:
+      - node1
+      - node2
+    services:
+      web-default:
+        image: nginx:alpine
+        replicas: 2
+        port: 80
+        proxy:
+          domain: default.${SERVER1_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+
+      web-spread:
+        image: nginx:alpine
+        replicas: 3
+        port: 80
+        placement:
+          strategy: spread
+          constraints:
+            - node.labels.role==web
+        proxy:
+          domain: spread.${SERVER1_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+
+      monitoring-agent:
+        image: nginx:alpine
+        port: 80
+        placement:
+          strategy: global
+
+      pinned-api:
+        image: nginx:alpine
+        replicas: 1
+        port: 80
+        placement:
+          strategy: pinned
+          servers:
+            - node1

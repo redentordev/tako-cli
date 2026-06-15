@@ -37,7 +37,7 @@ Edit `.env`:
 
 ```bash
 # Your server IP address
-SERVER_HOST=95.216.194.236
+SERVER_HOST=203.0.113.10
 
 # Email for SSL certificate
 LETSENCRYPT_EMAIL=your-email@example.com
@@ -61,7 +61,7 @@ After deployment, access n8n at:
 https://n8n.<your-server-ip>.sslip.io
 ```
 
-Example: `https://n8n.95.216.194.236.sslip.io`
+Example: `https://n8n.203.0.113.10.sslip.io`
 
 On first access, you'll be prompted to create an admin account.
 
@@ -91,13 +91,13 @@ See [n8n environment variables documentation](https://docs.n8n.io/hosting/config
 
 ```bash
 # View logs
-tako logs n8n
+tako logs --service n8n
 
-# Stop service
-tako stop
+# Stop service replicas
+tako scale n8n=0
 
-# Start service
-tako start
+# Start service replicas
+tako scale n8n=1
 
 # Remove deployment
 tako remove
@@ -115,34 +115,17 @@ To use a custom domain instead of sslip.io:
 2. Update `tako.yaml`:
 ```yaml
 proxy:
-  domains:
-    - n8n.yourdomain.com
+  domain: n8n.yourdomain.com
   email: admin@yourdomain.com
 env:
   N8N_HOST: n8n.yourdomain.com
   WEBHOOK_URL: https://n8n.yourdomain.com/
 ```
 
-## Backup
+## Data
 
-To backup your n8n data:
-
-```bash
-# SSH into server
-ssh root@your-server-ip
-
-# Backup the volume
-docker run --rm -v n8n_production_n8n_data:/data -v $(pwd):/backup \
-  alpine tar czf /backup/n8n-backup-$(date +%Y%m%d).tar.gz -C /data .
-```
-
-## Restore
-
-```bash
-# Restore from backup
-docker run --rm -v n8n_production_n8n_data:/data -v $(pwd):/backup \
-  alpine tar xzf /backup/n8n-backup-20251114.tar.gz -C /data
-```
+n8n data is stored in the configured `n8n_data` volume. Use n8n's export tools
+or a database-specific backup workflow for durable off-node backups.
 
 ## Key Features of This Example
 
@@ -192,7 +175,7 @@ tako ps
 
 View logs:
 ```bash
-tako logs n8n
+tako logs --service n8n
 ```
 
 ### SSL certificate issues
@@ -202,19 +185,14 @@ Verify domain resolves to your server:
 nslookup n8n.<your-ip>.sslip.io
 ```
 
-Check Traefik logs:
+Check service logs:
 ```bash
-ssh root@your-server-ip
-docker service logs traefik
+tako logs --service n8n --tail 100
 ```
 
 ### Data not persisting
 
-Verify volume exists:
-```bash
-ssh root@your-server-ip
-docker volume ls | grep n8n
-```
+Verify the `n8n_data` volume is configured in `tako.yaml`.
 
 ## Production Recommendations
 

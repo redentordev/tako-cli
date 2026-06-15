@@ -1,73 +1,205 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/acmedns"
-	"github.com/redentordev/tako-cli/pkg/cleanup"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/dependency"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/git"
 	"github.com/redentordev/tako-cli/pkg/health"
-	"github.com/redentordev/tako-cli/pkg/network"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
-	"github.com/redentordev/tako-cli/pkg/registry"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/ssl"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
-	deployServer  string
 	deployService string
 	skipBuild     bool
-	skipHooks     bool
 	deployYes     bool
-	commitMessage string
 )
 
 var deployCmd = &cobra.Command{
-	Use:   "deploy",
-	Short: "Deploy your application to configured servers",
-	Long: `Deploy your application using a zero-downtime blue-green deployment strategy.
+	Use:          "deploy",
+	Short:        "Deploy your application to configured servers",
+	SilenceUsage: true,
+	Long: `Deploy your application by reconciling desired services on the takod mesh.
 
 The deployment process:
-  1. Run pre-deploy hooks (tests, builds)
-  2. Build Docker image
-  3. Push image to registry
-  4. Deploy new version alongside current version (blue-green)
-  5. Run health checks
-  6. Switch traffic to new version
-  7. Remove old version
-  8. Run post-deploy hooks (migrations, etc.)
+  1. Build or select the service image
+  2. Prepare environment takod nodes
+  3. Recreate service containers to match desired state
+  4. Replicate deployment state
 
-If any step fails, the deployment is automatically rolled back.`,
+If a step fails, deployment stops and records the failed state for inspection or rollback.`,
 	RunE: runDeploy,
 }
 
 func init() {
 	rootCmd.AddCommand(deployCmd)
-	deployCmd.Flags().StringVarP(&deployServer, "server", "s", "", "Deploy to specific server")
 	deployCmd.Flags().StringVar(&deployService, "service", "", "Deploy specific service")
-	deployCmd.Flags().BoolVar(&skipBuild, "skip-build", false, "Skip building Docker image")
-	deployCmd.Flags().BoolVar(&skipHooks, "skip-hooks", false, "Skip pre/post deploy hooks")
+	deployCmd.Flags().BoolVar(&skipBuild, "skip-build", false, "Skip building the service image")
 	deployCmd.Flags().BoolVarP(&deployYes, "yes", "y", false, "Skip confirmation prompts (non-interactive mode)")
-	deployCmd.Flags().StringVarP(&commitMessage, "message", "m", "", "Commit message for uncommitted changes")
+}
+
+func ensureDeployRuntimeSupported(cfg *config.Config) error {
+	if err := requireTakodRuntime(cfg); err != nil {
+		return err
+	}
+	if !cfg.IsMeshEnabled() {
+		return fmt.Errorf("mesh.enabled=false is not supported; single-node deploys use a one-node mesh")
+	}
+	if cfg.GetStateBackend() != config.StateBackendReplicated {
+		return fmt.Errorf("state.backend=%s is not supported; takod deployments use replicated state", cfg.GetStateBackend())
+	}
+	if cfg.GetDeployConsistency() != config.StateDeployConsistencyLease {
+		return fmt.Errorf("state.deployConsistency=%s is not implemented yet; current deploys support lease", cfg.GetDeployConsistency())
+	}
+	return nil
+}
+
+type deployGitReader interface {
+	IsRepository() bool
+	HasUncommittedChanges() (bool, error)
+	GetStatus() (string, error)
+	GetCommitInfo(string) (*git.CommitInfo, error)
+}
+
+type deployCommitContext struct {
+	CommitInfo *git.CommitInfo
+	Source     string
+	Dirty      bool
+	Status     string
+}
+
+func resolveDeployCommitInfo(gitClient deployGitReader, source string) (*deployCommitContext, error) {
+	if !gitClient.IsRepository() {
+		return nil, fmt.Errorf("❌ This project is not a Git repository.\n\nPlease initialize Git first:\n  git init\n  git add .\n  git commit -m \"Initial commit\"\n\nGit is required for deployment tracking and rollback functionality.")
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = config.DeploymentSourceLocal
+	}
+
+	hasChanges, err := gitClient.HasUncommittedChanges()
+	if err != nil {
+		return nil, fmt.Errorf("failed to check git status: %w", err)
+	}
+	status := ""
+	if hasChanges {
+		status, err = gitClient.GetStatus()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get git status: %w", err)
+		}
+		if strings.TrimSpace(status) == "" {
+			status = "(dirty worktree)"
+		}
+		if source == config.DeploymentSourceGit {
+			return nil, fmt.Errorf("cannot deploy git source with uncommitted changes; commit, stash, or discard changes first:\n%s", strings.TrimSpace(status))
+		}
+	}
+
+	commitInfo, err := gitClient.GetCommitInfo("")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit info: %w", err)
+	}
+	return &deployCommitContext{
+		CommitInfo: commitInfo,
+		Source:     source,
+		Dirty:      hasChanges,
+		Status:     strings.TrimSpace(status),
+	}, nil
+}
+
+type remoteDeploymentSaver interface {
+	SaveDeployment(*remotestate.DeploymentState) error
+}
+
+type localDeploymentSaver interface {
+	SaveDeployment(*localstate.DeploymentState) error
+}
+
+func recordFailedDeploymentState(
+	remoteSaver remoteDeploymentSaver,
+	localSaver localDeploymentSaver,
+	deployment *remotestate.DeploymentState,
+	cfg *config.Config,
+	envName string,
+	serverNames []string,
+	commitInfo *git.CommitInfo,
+	startTime time.Time,
+	deploymentErr error,
+) error {
+	if deployment == nil {
+		return fmt.Errorf("deployment state is nil")
+	}
+	deployment.Status = remotestate.StatusFailed
+	deployment.Duration = time.Since(startTime)
+	if deploymentErr != nil {
+		deployment.Error = deploymentErr.Error()
+	} else if deployment.Error == "" {
+		deployment.Error = "deployment failed"
+	}
+
+	if remoteSaver == nil {
+		return fmt.Errorf("remote deployment recorder is nil")
+	}
+	if err := remoteSaver.SaveDeployment(deployment); err != nil {
+		return fmt.Errorf("failed to save failed remote deployment state: %w", err)
+	}
+
+	if localSaver != nil {
+		localDeployment := &localstate.DeploymentState{
+			DeploymentID:    fmt.Sprintf("deploy-%s", startTime.Format("20060102-150405")),
+			Timestamp:       startTime,
+			Environment:     envName,
+			Mode:            cfg.GetRuntimeMode(),
+			Servers:         append([]string(nil), serverNames...),
+			Status:          "failed",
+			DurationSeconds: int(time.Since(startTime).Seconds()),
+			TriggeredBy:     remotestate.GetCurrentUser(),
+			Notes:           deployment.Error,
+		}
+		if commitInfo != nil {
+			localDeployment.GitCommit = commitInfo.Hash
+		}
+		if err := localSaver.SaveDeployment(localDeployment); err != nil {
+			return fmt.Errorf("failed to save failed local deployment state: %w", err)
+		}
+	}
+	return nil
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
-	// Load configuration with infrastructure state integration
-	cfg, err := config.LoadConfigWithInfra(cfgFile, ".tako")
+	// Load deployment configuration
+	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
+	if err := ensureDeployRuntimeSupported(cfg); err != nil {
+		return err
+	}
+
+	// Initialize Git client
+	gitClient := git.NewClient(".")
+
+	deployCommit, err := resolveDeployCommitInfo(gitClient, cfg.DeploymentSource())
+	if err != nil {
+		return err
+	}
+	commitInfo := deployCommit.CommitInfo
 
 	// Acquire state lock to prevent concurrent deployments
 	stateLock := localstate.NewStateLock(".tako")
@@ -81,79 +213,20 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Printf("→ Acquired deployment lock (ID: %s)\n", lockInfo.ID)
 	}
 
-	// Initialize Git client
-	gitClient := git.NewClient(".")
-
-	// Check if project is a Git repository
-	if !gitClient.IsRepository() {
-		return fmt.Errorf("❌ This project is not a Git repository.\n\nPlease initialize Git first:\n  git init\n  git add .\n  git commit -m \"Initial commit\"\n\nGit is required for deployment tracking and rollback functionality.")
-	}
-
-	// Check for uncommitted changes
-	hasChanges, err := gitClient.HasUncommittedChanges()
-	if err != nil {
-		return fmt.Errorf("failed to check git status: %w", err)
-	}
-
-	var commitInfo *git.CommitInfo
-
-	if hasChanges {
-		// Show uncommitted changes
-		status, err := gitClient.GetStatus()
-		if err == nil && verbose {
-			fmt.Printf("\n⚠️  Uncommitted changes detected:\n%s\n", status)
-		}
-
-		// Get commit message - from flag, prompt, or auto-generate
-		var commitMsg string
-		if commitMessage != "" {
-			// Use provided commit message
-			commitMsg = commitMessage
-		} else if deployYes || isNonInteractive() {
-			// Auto-generate commit message in non-interactive mode
-			commitMsg = fmt.Sprintf("Deploy: %s", time.Now().Format("2006-01-02 15:04:05"))
-			fmt.Printf("\n→ Auto-committing changes with message: %q\n", commitMsg)
-		} else {
-			// Prompt for commit message
-			commitMsg, err = git.PromptCommitMessage()
-			if err != nil {
-				return fmt.Errorf("deployment cancelled: %w", err)
-			}
-		}
-
-		fmt.Printf("\n→ Creating commit...\n")
-
-		// Stage all changes
-		if err := gitClient.AddAll(); err != nil {
-			return fmt.Errorf("failed to stage changes: %w", err)
-		}
-
-		// Create commit
-		if err := gitClient.Commit(commitMsg); err != nil {
-			return fmt.Errorf("failed to create commit: %w", err)
-		}
-
-		// Get commit info
-		commitInfo, err = gitClient.GetCommitInfo("")
-		if err != nil {
-			return fmt.Errorf("failed to get commit info: %w", err)
-		}
-
-		fmt.Printf("  ✓ Created commit: %s\n", commitInfo.ShortHash)
-	} else {
-		// No uncommitted changes, get current commit info
-		commitInfo, err = gitClient.GetCommitInfo("")
-		if err != nil {
-			return fmt.Errorf("failed to get commit info: %w", err)
-		}
-	}
-
 	// Display commit info
 	fmt.Printf("\n📦 Deploying commit:\n")
 	fmt.Printf("  Hash:    %s\n", commitInfo.ShortHash)
 	fmt.Printf("  Branch:  %s\n", commitInfo.Branch)
 	fmt.Printf("  Author:  %s\n", commitInfo.Author)
 	fmt.Printf("  Message: %s\n", commitInfo.Message)
+	if deployCommit.Source == config.DeploymentSourceGit {
+		fmt.Printf("  Source:  git HEAD\n")
+	} else {
+		fmt.Printf("  Source:  local worktree\n")
+	}
+	if deployCommit.Dirty {
+		fmt.Printf("\n⚠ Deploying local worktree with uncommitted changes. Git metadata points to HEAD, but built images include local edits:\n%s\n", deployCommit.Status)
+	}
 
 	// Get environment and services
 	envName := getEnvironmentName(cfg)
@@ -166,14 +239,19 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
-	// Determine which servers to deploy to
-	servers := cfg.Servers
-	if deployServer != "" {
-		server, exists := cfg.Servers[deployServer]
+	// Determine which environment nodes to deploy to.
+	envServerNames, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	servers := make(map[string]config.ServerConfig, len(envServerNames))
+	serverNames := append([]string(nil), envServerNames...)
+	for _, serverName := range serverNames {
+		server, exists := cfg.Servers[serverName]
 		if !exists {
-			return fmt.Errorf("server %s not found in configuration", deployServer)
+			return fmt.Errorf("server %s not found in configuration", serverName)
 		}
-		servers = map[string]config.ServerConfig{deployServer: server}
+		servers[serverName] = server
 	}
 
 	// Determine which services to deploy
@@ -189,41 +267,67 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n=== Starting deployment ===\n\n")
 	fmt.Printf("Project: %s v%s\n", cfg.Project.Name, cfg.Project.Version)
 	fmt.Printf("Environment: %s\n", envName)
+	fmt.Printf("Runtime: %s\n", cfg.GetRuntimeMode())
+	fmt.Printf("State: %s (consistency: %s)\n", cfg.GetStateBackend(), cfg.GetDeployConsistency())
+	if cfg.IsMeshEnabled() {
+		fmt.Printf("Mesh: enabled (%s via %s)\n", cfg.Mesh.NetworkCIDR, cfg.Mesh.Interface)
+	} else {
+		fmt.Printf("Mesh: disabled\n")
+	}
 	fmt.Printf("Servers: %d\n", len(servers))
 	fmt.Printf("Services: %d\n\n", len(services))
 
-	// Get first server for initial operations
-	firstServerName := ""
-	var firstServer config.ServerConfig
-	for name, srv := range servers {
-		firstServerName = name
-		firstServer = srv
-		break
-	}
-
-	if firstServerName == "" {
+	if len(serverNames) == 0 {
 		return fmt.Errorf("no servers configured")
 	}
 
-	// Get or create SSH client for first server
-	firstClient, err := sshPool.GetOrCreateWithAuth(firstServer.Host, firstServer.Port, firstServer.User, firstServer.SSHKey, firstServer.Password)
+	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, serverNames, "deploy")
 	if err != nil {
-		return fmt.Errorf("failed to connect to server %s: %w", firstServerName, err)
+		return err
+	}
+	defer leaseSet.Release(verbose)
+	if verbose {
+		fmt.Printf("→ Acquired remote deploy leases: %s\n", leaseSet.Summary())
 	}
 
-	// Create deployer with pool for Swarm support
-	deploy := deployer.NewDeployerWithPool(firstClient, cfg, envName, sshPool, verbose)
+	sourceServerName := serverNames[0]
+	sourceServer := servers[sourceServerName]
 
-	// Always setup Swarm cluster (works for single or multi-server)
-	// This provides consistent deployment model and easy scaling
-	if err := deploy.SetupSwarmCluster(); err != nil {
-		return fmt.Errorf("failed to setup swarm cluster: %w", err)
+	// Use one reachable target as the build/source node; runtime state is still
+	// persisted and reconciled across the selected mesh.
+	sourceClient, err := sshPool.GetOrCreateWithAuth(sourceServer.Host, sourceServer.Port, sourceServer.User, sourceServer.SSHKey, sourceServer.Password)
+	if err != nil {
+		return fmt.Errorf("failed to connect to server %s: %w", sourceServerName, err)
+	}
+	stateManager := remotestate.NewStateManagerWithSocket(sourceClient, cfg.Project.Name, envName, sourceServer.Host, takodSocketFromConfig(cfg))
+
+	// Create deployer with pool for takod support
+	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, verbose)
+	deploy.SetCLIVersion(Version)
+	deploy.SetDeployHooksEnabled(true)
+	if err := deploy.SetTargetServers(serverNames); err != nil {
+		return err
+	}
+
+	if err := deploy.SetupTakodRuntime(); err != nil {
+		return fmt.Errorf("failed to setup takod runtime: %w", err)
+	}
+
+	preparedServices, err := deploy.PrepareGeneratedConfigArtifacts(services)
+	if err != nil {
+		return fmt.Errorf("failed to prepare generated config artifacts: %w", err)
+	}
+	services = preparedServices
+	if deployService == "" {
+		allServices = preparedServices
+	} else if service, ok := preparedServices[deployService]; ok {
+		allServices[deployService] = service
 	}
 
 	// === AUTO-SYNC STATE ===
 	// If local .tako directory doesn't exist but remote state does,
 	// automatically sync from remote to help users who cloned the project
-	if err := SyncStateOnDeploy(cfg, firstClient, envName); err != nil {
+	if err := SyncStateOnDeployWithPool(sshPool, cfg, envName); err != nil {
 		if verbose {
 			fmt.Printf("Warning: auto-sync failed: %v\n", err)
 		}
@@ -246,107 +350,49 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		localStateMgr = nil // Continue without state management
 	}
 
-	// Gather actual state from running services
-	actualState, err := reconcile.GatherActualState(firstClient, cfg.Project.Name, envName, localStateMgr)
+	// Gather actual state from running containers across the selected mesh nodes.
+	actualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, localStateMgr)
 	if err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to gather actual state: %v\n", err)
-		}
-		actualState = make(map[string]*reconcile.ActualService) // Continue with empty state
+		return deployActualStateError(err)
 	}
 
 	if verbose && len(actualState) > 0 {
 		fmt.Printf("  Found %d running service(s)\n", len(actualState))
 	}
 
+	planActualState := actualState
+	if deployService != "" {
+		planActualState = filterActualStateForServices(actualState, services)
+	}
+
 	// Compute reconciliation plan
-	plan := reconcile.ComputePlan(cfg.Project.Name, envName, services, actualState)
+	plan := reconcile.ComputePlan(cfg.Project.Name, envName, services, planActualState)
 
 	// Show plan to user
 	fmt.Println()
 	fmt.Print(plan.FormatPlan())
 
-	// Detect drift (manual changes) in running services
-	var driftWarnings []string
-	for serviceName, actual := range actualState {
-		if svc, exists := services[serviceName]; exists {
-			fullServiceName := fmt.Sprintf("%s_%s_%s", cfg.Project.Name, envName, serviceName)
-			details, err := reconcile.GatherActualServiceDetails(firstClient, fullServiceName)
-			if err == nil {
-				drifts := reconcile.DetectDrift(details, &svc)
-				for _, drift := range drifts {
-					if drift.IsManual {
-						var msg string
-						switch drift.Field {
-						case "env":
-							if drift.DesiredValue == "" {
-								msg = fmt.Sprintf("  %s: env %s (manually added, will be removed)", serviceName, drift.Key)
-							} else {
-								msg = fmt.Sprintf("  %s: env %s (manually changed, will be overwritten)", serviceName, drift.Key)
-							}
-						case "volume":
-							msg = fmt.Sprintf("  %s: volume %s (manually added, will be removed)", serviceName, drift.Key)
-						case "label":
-							msg = fmt.Sprintf("  %s: label %s (manually added, will be removed)", serviceName, drift.Key)
-						case "replicas":
-							msg = fmt.Sprintf("  %s: replicas %s → %s (manually changed, will be overwritten)", serviceName, drift.ActualValue, drift.DesiredValue)
-						}
-						if msg != "" {
-							driftWarnings = append(driftWarnings, msg)
-						}
-					}
-				}
-			}
-			_ = actual // Silence unused warning
-		}
-	}
-
-	// Show drift warnings
-	if len(driftWarnings) > 0 {
-		fmt.Println("\n⚠ Manual changes detected - will be overwritten:")
-		for _, warning := range driftWarnings {
-			fmt.Println(warning)
-		}
-		fmt.Println()
-
-		// In non-interactive mode, just warn and proceed
-		if !deployYes && !isNonInteractive() {
-			fmt.Printf("Proceed with deployment? (y/N): ")
-			var response string
-			fmt.Scanln(&response)
-			if response != "y" && response != "Y" && response != "yes" {
-				fmt.Println("Deployment cancelled")
-				return nil
-			}
-		} else {
-			fmt.Println("(Non-interactive mode: proceeding with deployment)")
-		}
-	} else if plan.NeedsConfirmation() && !deployYes && !isNonInteractive() {
+	if plan.NeedsConfirmation() && !deployYes {
 		// Ask for confirmation if there are destructive changes
-		fmt.Printf("\nProceed with deployment? (y/N): ")
-		var response string
-		fmt.Scanln(&response)
-		if response != "y" && response != "Y" && response != "yes" {
+		confirmed, err := confirmDeployAction("\nProceed with deployment? (y/N): ", "deployment plan includes destructive changes")
+		if err != nil {
+			return err
+		}
+		if !confirmed {
 			fmt.Println("Deployment cancelled")
 			return nil
 		}
 	}
 
-	if plan.IsEmpty() {
-		fmt.Println("\n✓ All services are up-to-date. Nothing to deploy.")
+	if plan.IsEmpty() && !hasBuildServices(services) {
+		if err := deploy.ReconcileTakodProxy(services); err != nil {
+			return fmt.Errorf("failed to reconcile proxy routes: %w", err)
+		}
+		fmt.Println("\n✓ All services are up-to-date. Proxy routes reconciled.")
 		return nil
 	}
-
-	// Pre-deployment network verification
-	if verbose {
-		fmt.Printf("\n→ Verifying network configuration...\n")
-	}
-	if err := deploy.VerifyNetworkSetup(); err != nil {
-		if verbose {
-			fmt.Printf("  Warning: Network verification failed: %v\n", err)
-		}
-	} else if verbose {
-		fmt.Printf("  ✓ Network configuration verified\n")
+	if plan.IsEmpty() {
+		fmt.Println("\n-> No config drift detected; build services will still be reconciled for the current commit.")
 	}
 
 	// === WILDCARD SSL DETECTION ===
@@ -360,7 +406,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 
 		// Setup acme-dns for DNS-01 challenge
-		acmeMgr := acmedns.NewManager(firstClient, firstServer.Host, verbose)
+		acmeMgr := acmedns.NewManager(sourceClient, sourceServer.Host, takodSocketFromConfig(cfg), verbose)
 		if err := acmeMgr.Setup(); err != nil {
 			fmt.Printf("\n⚠ Warning: Failed to setup acme-dns: %v\n", err)
 			fmt.Printf("  Wildcard SSL certificates may not be issued automatically.\n")
@@ -382,7 +428,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				fmt.Print(acmeMgr.GetCNAMEInstructions(registrations))
 				fmt.Printf("\n⚠ IMPORTANT: Add the CNAME records above to your DNS provider.\n")
 				fmt.Printf("  Wildcard certificates will be issued automatically once DNS propagates.\n")
-				fmt.Printf("  You can check status with: tako ssl status\n\n")
+				fmt.Printf("  Re-run tako deploy after DNS propagation to reconcile the deployment.\n\n")
 
 				// Check if DNS is already configured (for returning users)
 				dnsChecker := ssl.NewDNSChecker()
@@ -396,11 +442,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 					}
 				}
 
-				if !allConfigured && !deployYes && !isNonInteractive() {
-					fmt.Printf("\nDNS records not yet configured. Continue deployment anyway? (y/N): ")
-					var response string
-					fmt.Scanln(&response)
-					if response != "y" && response != "Y" && response != "yes" {
+				if !allConfigured && !deployYes {
+					confirmed, err := confirmDeployAction("\nDNS records not yet configured. Continue deployment anyway? (y/N): ", "wildcard DNS records are not configured")
+					if err != nil {
+						return err
+					}
+					if !confirmed {
 						fmt.Println("Deployment paused. Add DNS records and run deploy again.")
 						return nil
 					}
@@ -409,26 +456,16 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Always use Swarm mode for consistent deployment model
-	// Benefits: unified code path, seamless scaling, built-in rolling updates
 	if len(servers) == 1 {
-		fmt.Printf("\n🐝 Using Docker Swarm mode (single-server)\n\n")
+		fmt.Printf("\n🐙 Using takod mesh runtime (one node)\n\n")
 	} else {
-		fmt.Printf("\n🐝 Using Docker Swarm mode (multi-server cluster)\n\n")
+		fmt.Printf("\n🐙 Using takod mesh runtime (%d nodes)\n\n", len(servers))
 	}
 
 	// Log deployment start
 	if localStateMgr != nil {
-		localStateMgr.LogDeployment(fmt.Sprintf("Starting Swarm deployment to %s", envName))
+		localStateMgr.LogDeployment(fmt.Sprintf("Starting takod deployment to %s", envName))
 		localStateMgr.LogDeployment(fmt.Sprintf("Git commit: %s", commitInfo.ShortHash))
-	}
-
-	// Deploy to manager node only
-	stateManager := remotestate.NewStateManager(firstClient, cfg.Project.Name, firstServer.Host)
-	if err := stateManager.Initialize(); err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to initialize state directory: %v\n", err)
-		}
 	}
 
 	startTime := time.Now()
@@ -439,7 +476,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		Status:         remotestate.StatusInProgress,
 		Services:       make(map[string]remotestate.ServiceState),
 		User:           remotestate.GetCurrentUser(),
-		Host:           firstServer.Host,
+		Host:           sourceServer.Host,
 		GitCommit:      commitInfo.Hash,
 		GitCommitShort: commitInfo.ShortHash,
 		GitBranch:      commitInfo.Branch,
@@ -465,12 +502,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			Environment: envName,
 			Message:     fmt.Sprintf("Starting deployment of `%s` v%s to `%s`\nCommit: `%s` - %s", cfg.Project.Name, cfg.Project.Version, envName, commitInfo.ShortHash, commitInfo.Message),
 			Details: map[string]string{
-				"version":   cfg.Project.Version,
-				"commit":    commitInfo.ShortHash,
-				"branch":    commitInfo.Branch,
-				"author":    commitInfo.Author,
-				"user":      remotestate.GetCurrentUser(),
-				"services":  fmt.Sprintf("%d", len(services)),
+				"version":  cfg.Project.Version,
+				"commit":   commitInfo.ShortHash,
+				"branch":   commitInfo.Branch,
+				"author":   commitInfo.Author,
+				"user":     remotestate.GetCurrentUser(),
+				"services": fmt.Sprintf("%d", len(services)),
 			},
 		}); err != nil && verbose {
 			fmt.Printf("  Warning: failed to send start notification: %v\n", err)
@@ -479,6 +516,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	deploymentFailed := false
 	var deploymentError error
+	imageRefs := defaultImageRefs(cfg, envName, services)
 
 	// Resolve service deployment order based on dependencies
 	resolver := dependency.NewResolver(services, verbose)
@@ -493,17 +531,26 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to resolve service dependencies: %w", err)
 	}
 
-	// Deploy each service to Swarm in dependency order
+	// Deploy each service through takod placement in dependency order
 	for _, serviceName := range deploymentOrder {
 		service := services[serviceName]
 		fmt.Printf("→ Deploying service: %s\n", serviceName)
 
+		if err := deploy.ValidateServicePlatformCompatibility(serviceName, &service); err != nil {
+			fmt.Printf("  ✗ Platform check failed: %v\n", err)
+			deploymentFailed = true
+			deploymentError = fmt.Errorf("platform check failed for %s: %w", serviceName, err)
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
+			break
+		}
+
 		// Get full image name
 		fullImageName := cfg.GetFullImageName(serviceName, envName)
 
-		// Build image if needed (but don't deploy with docker run)
+		// Build the image if needed; runtime reconciliation still goes through takod.
 		if !skipBuild && service.Build != "" {
-			// Build the image on manager node
+			// Build the image on the first connected node
 			builtImageName, err := deploy.BuildImage(serviceName, &service)
 			if err != nil {
 				fmt.Printf("  ✗ Build failed: %v\n", err)
@@ -519,41 +566,104 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			// Use pre-built image
 			fullImageName = service.Image
 		}
+		imageRefs[serviceName] = fullImageName
 
-		// Deploy to Swarm and wait for health (health verification is built into DeployServiceSwarm)
-		if err := deploy.DeployServiceSwarm(serviceName, &service, fullImageName); err != nil {
-			fmt.Printf("  ✗ Swarm deployment failed: %v\n", err)
+		if err := deploy.DeployServiceTakod(serviceName, &service, fullImageName); err != nil {
+			fmt.Printf("  ✗ takod deployment failed: %v\n", err)
 			deploymentFailed = true
-			deploymentError = fmt.Errorf("swarm deployment failed for %s: %w", serviceName, err)
+			deploymentError = fmt.Errorf("takod deployment failed for %s: %w", serviceName, err)
 			deployment.Status = remotestate.StatusFailed
 			deployment.Error = err.Error()
 			break
 		}
 
-		fmt.Printf("  ✓ Service %s deployed to swarm\n", serviceName)
+		fmt.Printf("  ✓ Service %s reconciled by takod\n", serviceName)
 
 		// Save service state
 		deployment.Services[serviceName] = remotestate.ServiceState{
 			Name:     serviceName,
 			Image:    fullImageName,
-			Port:     service.Port,
+			Port:     service.PrimaryTargetPort(),
+			Ports:    service.Ports,
 			Replicas: service.Replicas,
-			Env:      service.Env,
+			Env:      redactedEnvKeys(service.Env),
+		}
+	}
+
+	if !deploymentFailed {
+		if err := applyDeployRemovals(deploy, plan); err != nil {
+			fmt.Printf("  ✗ service removal failed: %v\n", err)
+			deploymentFailed = true
+			deploymentError = err
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
+		}
+	}
+
+	if !deploymentFailed {
+		proxyServices := services
+		if deployService != "" {
+			proxyServices = cloneServiceMap(allServices)
+		}
+		if err := deploy.ReconcileTakodProxy(proxyServices); err != nil {
+			fmt.Printf("  ✗ proxy reconciliation failed: %v\n", err)
+			deploymentFailed = true
+			deploymentError = fmt.Errorf("proxy reconciliation failed: %w", err)
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
 		}
 	}
 
 	if !deploymentFailed {
 		deployment.Status = remotestate.StatusSuccess
 		deployment.Duration = time.Since(startTime)
-		if err := stateManager.SaveDeployment(deployment); err != nil && verbose {
-			fmt.Printf("Warning: failed to save remote deployment state: %v\n", err)
+		if err := stateManager.SaveDeployment(deployment); err != nil {
+			return deployRemoteHistoryError(err)
 		}
 
-		// Replicate state to worker nodes (async, fire-and-forget)
+		finalNodeActualState, err := reconcile.GatherActualStateByServer(sshPool, cfg, envName, serverNames)
+		if err != nil {
+			return fmt.Errorf("deployment succeeded but failed to gather final actual state: %w", err)
+		}
+		finalActualState := reconcile.AggregateActualStateByServer(finalNodeActualState)
+		runtimeServices := services
+		runtimeImageRefs := imageRefs
+		if deployService != "" {
+			runtimeServices = cloneServiceMap(allServices)
+			runtimeImageRefs = mergeRuntimeImageRefs(cfg, envName, runtimeServices, imageRefs, finalActualState)
+		}
+		if err := persistTakodRuntimeState(
+			sshPool,
+			cfg,
+			envName,
+			serverNames,
+			"deploy",
+			runtimeServices,
+			runtimeImageRefs,
+			finalActualState,
+			finalNodeActualState,
+			gitInfoFromCommit(commitInfo),
+			"deploy.succeeded",
+			fmt.Sprintf("deployed %d service(s)", len(services)),
+			map[string]string{
+				"commit":          commitInfo.ShortHash,
+				"services":        fmt.Sprintf("%d", len(services)),
+				"desiredServices": fmt.Sprintf("%d", len(runtimeServices)),
+			},
+		); err != nil {
+			return fmt.Errorf("deployment succeeded but failed to persist takod state: %w", err)
+		}
+
+		// Replicate state to the rest of the mesh.
 		if len(servers) > 1 {
 			replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
-			history, _ := stateManager.LoadHistory()
-			replicator.ReplicateDeployment(deployment, history)
+			history, err := stateManager.LoadHistory()
+			if err != nil {
+				return fmt.Errorf("deployment succeeded but failed to load remote deployment history for replication: %w", err)
+			}
+			if err := replicator.ReplicateDeployment(deployment, history); err != nil {
+				return fmt.Errorf("deployment succeeded but failed to replicate remote deployment history: %w", err)
+			}
 		}
 
 		// Save local deployment state
@@ -562,38 +672,39 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				DeploymentID:    fmt.Sprintf("deploy-%s", time.Now().Format("20060102-150405")),
 				Timestamp:       startTime,
 				Environment:     envName,
-				Mode:            "swarm",
+				Mode:            cfg.GetRuntimeMode(),
+				Servers:         append([]string(nil), serverNames...),
 				Status:          "success",
 				DurationSeconds: int(time.Since(startTime).Seconds()),
 				GitCommit:       commitInfo.Hash,
 				TriggeredBy:     remotestate.GetCurrentUser(),
-				Notes:           fmt.Sprintf("Deployed %d services to swarm", len(services)),
+				Notes:           fmt.Sprintf("Deployed %d services to %s runtime", len(services), cfg.GetRuntimeMode()),
 			}
 			if err := localStateMgr.SaveDeployment(localDeployment); err != nil && verbose {
 				fmt.Printf("Warning: failed to save local deployment state: %v\n", err)
 			}
 		}
 
-		// Register project in registry
-		networkMgr := network.NewManager(firstClient, cfg.Project.Name, envName, verbose)
-		reg := registry.NewRegistry(firstClient, verbose)
-		projectInfo := registry.ProjectInfo{
-			Name:        cfg.Project.Name,
-			Environment: envName,
-			Network:     networkMgr.GetNetworkName(),
-			Services:    deploymentOrder,
-			Domains:     extractDomains(services),
-			DeployedAt:  time.Now(),
-		}
-		if err := reg.RegisterProject(projectInfo); err != nil && verbose {
-			fmt.Printf("Warning: failed to register project: %v\n", err)
-		}
 	}
 
 	// Calculate deployment duration
 	deploymentDuration := time.Since(startTime)
 
 	if deploymentFailed {
+		recordErr := recordFailedDeploymentState(stateManager, localStateMgr, deployment, cfg, envName, serverNames, commitInfo, startTime, deploymentError)
+		if recordErr == nil && len(servers) > 1 {
+			replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
+			history, err := stateManager.LoadHistory()
+			if err != nil {
+				recordErr = fmt.Errorf("failed to load failed deployment history for replication: %w", err)
+			} else if err := replicator.ReplicateDeployment(deployment, history); err != nil {
+				recordErr = fmt.Errorf("failed to replicate failed deployment history: %w", err)
+			}
+		}
+		if recordErr != nil && verbose {
+			fmt.Printf("Warning: failed to record failed deployment state: %v\n", recordErr)
+		}
+
 		// Send failure notification
 		if notifier != nil {
 			notifier.Notify(notification.Event{
@@ -610,24 +721,37 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				},
 			})
 		}
-		return fmt.Errorf("swarm deployment failed")
+		if recordErr != nil {
+			return fmt.Errorf("takod deployment failed; additionally failed to record failed deployment state: %w", recordErr)
+		}
+		return fmt.Errorf("takod deployment failed")
 	}
 
-	fmt.Printf("\n✓ Swarm deployment completed!\n")
+	fmt.Printf("\n✓ takod deployment completed!\n")
 
-	// Automatic cleanup after successful deployment (per-service hooks now handled by deployer)
+	// Automatic cleanup after successful deployment.
 	if verbose {
 		fmt.Printf("\n→ Running automatic cleanup...\n")
 	}
+	imageRepositories := cleanupImageRepositories(cfg, envName, services)
 	for serverName, server := range servers {
 		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err == nil {
-			cleaner := cleanup.NewCleaner(client, cfg.Project.Name, verbose)
-			// Keep 3 latest images, clean stopped containers and dangling images
-			cleaner.CleanOldImages(3)
-			cleaner.CleanStoppedContainers()
-			cleaner.CleanDanglingImages()
-			if verbose {
+			response, cleanupErr := cleanupViaTakod(client, cfg, takod.CleanupRequest{
+				Project:                cfg.Project.Name,
+				Environment:            envName,
+				ImageRepositories:      imageRepositories,
+				KeepImages:             3,
+				CleanOldImages:         true,
+				CleanStoppedContainers: true,
+				CleanDanglingImages:    true,
+			})
+			if cleanupErr != nil && verbose {
+				fmt.Printf("  Warning: failed to clean %s: %v\n", serverName, cleanupErr)
+				continue
+			}
+			if cleanupErr == nil && verbose {
+				printCleanupWarnings(response)
 				fmt.Printf("  ✓ Cleaned up %s\n", serverName)
 			}
 		}
@@ -640,8 +764,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		// Collect deployed service URLs
 		var urls []string
 		for _, svc := range services {
-			if svc.Proxy != nil {
-				for _, domain := range svc.Proxy.GetAllDomains() {
+			for _, port := range svc.EffectivePorts() {
+				if port.Proxy == nil {
+					continue
+				}
+				for _, domain := range port.Proxy.GetAllDomains() {
 					urls = append(urls, fmt.Sprintf("https://%s", domain))
 				}
 			}
@@ -672,27 +799,34 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}{}
 
 	for serviceName, service := range services {
-		if service.Proxy != nil && service.Proxy.GetPrimaryDomain() != "" {
-			allDomains := service.Proxy.GetAllDomains()
+		for _, port := range service.EffectivePorts() {
+			if port.Proxy == nil || port.Proxy.GetPrimaryDomain() == "" {
+				continue
+			}
+			allDomains := port.Proxy.GetAllDomains()
 			if !hasPublicServices {
 				fmt.Printf("Your application is available at:\n")
 				hasPublicServices = true
 			}
-			fmt.Printf("\n%s:\n", serviceName)
+			label := serviceName
+			if port.Name != "" && port.Name != "http" {
+				label = serviceName + "." + port.Name
+			}
+			fmt.Printf("\n%s:\n", label)
 			for _, domain := range allDomains {
 				fmt.Printf("  https://%s\n", domain)
 			}
 			servicesWithProxy = append(servicesWithProxy, struct {
 				name    string
 				domains []string
-			}{serviceName, allDomains})
+			}{label, allDomains})
 		}
 	}
 
 	// Monitor SSL certificate provisioning if there are public services
-	if hasPublicServices && firstClient != nil {
+	if hasPublicServices {
 		fmt.Printf("\n")
-		healthChecker := health.NewHealthChecker(firstClient)
+		healthChecker := health.NewHealthChecker()
 
 		for _, svc := range servicesWithProxy {
 			for _, domain := range svc.domains {
@@ -702,7 +836,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 					if verbose {
 						fmt.Printf("\n⚠️  SSL certificate not yet available for %s\n", domain)
 						fmt.Printf("   This is normal for first deployment. Certificate will be provisioned automatically.\n")
-						fmt.Printf("   You can check status at: http://%s:8080/dashboard/\n", firstServer.Host)
+						fmt.Printf("   Re-run tako deploy after DNS propagation to reconcile the service.\n")
 					}
 				}
 				cancel()
@@ -716,16 +850,101 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 // isNonInteractive checks if running in non-interactive mode
 func isNonInteractive() bool {
-	return os.Getenv("TAKO_NONINTERACTIVE") == "1" || os.Getenv("CI") == "true"
+	return truthyEnv("TAKO_NONINTERACTIVE") || truthyEnv("CI")
 }
 
-// extractDomains extracts all domains from service configurations
-func extractDomains(services map[string]config.ServiceConfig) []string {
-	domains := []string{}
-	for _, service := range services {
-		if service.Proxy != nil && len(service.Proxy.Domains) > 0 {
-			domains = append(domains, service.Proxy.Domains...)
+func truthyEnv(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func confirmDeployAction(prompt string, reason string) (bool, error) {
+	if err := requireDeployPromptAllowed(reason); err != nil {
+		return false, err
+	}
+
+	fmt.Print(prompt)
+	response, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return false, fmt.Errorf("failed to read confirmation: %w", err)
+	}
+
+	return isAffirmative(response), nil
+}
+
+func requireDeployPromptAllowed(reason string) error {
+	if isNonInteractive() {
+		return fmt.Errorf("%s; rerun with --yes to approve in non-interactive mode", reason)
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return fmt.Errorf("%s; confirmation requires a terminal or --yes", reason)
+	}
+	return nil
+}
+
+func isAffirmative(response string) bool {
+	switch strings.ToLower(strings.TrimSpace(response)) {
+	case "y", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+func deployActualStateError(err error) error {
+	return fmt.Errorf("failed to gather actual state from takod; refusing to plan against unknown running services: %w", err)
+}
+
+func deployRemoteHistoryError(err error) error {
+	return fmt.Errorf("deployment succeeded but failed to save remote deployment history: %w", err)
+}
+
+type deployServiceRemover interface {
+	RemoveServiceTakod(serviceName string) error
+}
+
+func applyDeployRemovals(remover deployServiceRemover, plan *reconcile.ReconciliationPlan) error {
+	if remover == nil {
+		return fmt.Errorf("service remover is nil")
+	}
+	if plan == nil {
+		return nil
+	}
+	for _, change := range plan.Changes {
+		if change.Type != reconcile.ChangeRemove {
+			continue
+		}
+		fmt.Printf("→ Removing service: %s\n", change.ServiceName)
+		if err := remover.RemoveServiceTakod(change.ServiceName); err != nil {
+			return fmt.Errorf("remove failed for %s: %w", change.ServiceName, err)
+		}
+		fmt.Printf("  ✓ Service %s removed\n", change.ServiceName)
+	}
+	return nil
+}
+
+func filterActualStateForServices(actualState map[string]*reconcile.ActualService, services map[string]config.ServiceConfig) map[string]*reconcile.ActualService {
+	if len(actualState) == 0 || len(services) == 0 {
+		return map[string]*reconcile.ActualService{}
+	}
+	filtered := make(map[string]*reconcile.ActualService, len(services))
+	for serviceName := range services {
+		if actual, ok := actualState[serviceName]; ok {
+			filtered[serviceName] = actual
 		}
 	}
-	return domains
+	return filtered
+}
+
+func hasBuildServices(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.Build != "" {
+			return true
+		}
+	}
+	return false
 }

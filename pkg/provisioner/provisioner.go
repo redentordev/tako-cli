@@ -1,12 +1,24 @@
 package provisioner
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"net"
+	"os"
 	"strings"
+	"time"
 
+	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/utils"
 )
+
+const takodAccessGroup = "tako"
+const takodActualRefreshInterval = "30s"
+const securityCommandTimeout = 10 * time.Minute
 
 // Provisioner handles server provisioning
 type Provisioner struct {
@@ -24,19 +36,16 @@ func NewProvisioner(client *ssh.Client, verbose bool) *Provisioner {
 
 // CheckRequirements checks if the server meets basic requirements
 func (p *Provisioner) CheckRequirements() error {
-	// Check if it's an Ubuntu/Debian system
-	output, err := p.client.Execute("cat /etc/os-release")
+	osInfo, err := DetectOS(p.client)
 	if err != nil {
 		return fmt.Errorf("failed to check OS: %w", err)
 	}
-
-	if !strings.Contains(strings.ToLower(output), "ubuntu") &&
-		!strings.Contains(strings.ToLower(output), "debian") {
-		return fmt.Errorf("unsupported OS (only Ubuntu/Debian are supported)")
+	if !osInfo.IsSupported() {
+		return fmt.Errorf("unsupported OS: %s", osInfo.String())
 	}
 
 	if p.verbose {
-		fmt.Printf("  OS: %s\n", strings.Split(output, "\n")[0])
+		fmt.Printf("  OS: %s\n", osInfo.String())
 	}
 
 	return nil
@@ -44,25 +53,16 @@ func (p *Provisioner) CheckRequirements() error {
 
 // UpdateSystem updates system packages
 func (p *Provisioner) UpdateSystem() error {
-	commands := []string{
-		"sudo apt-get update",
-		"sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y",
-		"sudo apt-get install -y curl wget git build-essential",
+	if p.verbose {
+		fmt.Printf("  Updating system packages with detected package manager...\n")
 	}
-
-	for _, cmd := range commands {
-		if p.verbose {
-			fmt.Printf("  Running: %s\n", cmd)
-		}
-		if _, err := p.client.Execute(cmd); err != nil {
-			return fmt.Errorf("command failed '%s': %w", cmd, err)
-		}
+	if _, err := p.client.Execute(runRootScript(basePackageInstallScript())); err != nil {
+		return fmt.Errorf("failed to update system packages: %w", err)
 	}
-
 	return nil
 }
 
-// InstallDocker installs Docker and Docker Compose
+// InstallDocker installs and enables the container runtime used by takod.
 func (p *Provisioner) InstallDocker() error {
 	// Check if Docker is already installed
 	if output, err := p.client.Execute("which docker"); err == nil && output != "" {
@@ -81,25 +81,20 @@ func (p *Provisioner) InstallDocker() error {
 			}
 			p.client.Execute("sudo systemctl start docker")
 		}
+		if err := p.EnsureDockerBuildx(); err != nil && p.verbose {
+			fmt.Printf("  Warning: failed to ensure Docker buildx: %v\n", err)
+		}
 		return nil
 	}
 
-	// Install Docker using official script
-	commands := []string{
-		"curl -fsSL https://get.docker.com -o get-docker.sh",
-		"sudo sh get-docker.sh",
-		"sudo usermod -aG docker $USER",
-		"rm get-docker.sh",
+	if p.verbose {
+		fmt.Printf("  Installing Docker from OS packages...\n")
+	}
+	if _, err := p.client.Execute(runRootScript(dockerInstallScript())); err != nil {
+		return fmt.Errorf("failed to install Docker packages: %w", err)
 	}
 
-	for _, cmd := range commands {
-		if p.verbose {
-			fmt.Printf("  Running: %s\n", cmd)
-		}
-		if _, err := p.client.Execute(cmd); err != nil {
-			return fmt.Errorf("command failed '%s': %w", cmd, err)
-		}
-	}
+	_, _ = p.client.Execute("sudo usermod -aG docker $(id -un) 2>/dev/null || true")
 
 	// Enable Docker to start on boot
 	if p.verbose {
@@ -126,17 +121,442 @@ func (p *Provisioner) InstallDocker() error {
 	}
 
 	if _, err := p.client.Execute("sudo systemctl is-active docker"); err != nil {
-		return fmt.Errorf("docker service is not running: %w", err)
+		return fmt.Errorf("docker daemon is not running: %w", err)
+	}
+
+	if err := p.EnsureDockerBuildx(); err != nil && p.verbose {
+		fmt.Printf("  Warning: failed to ensure Docker buildx: %v\n", err)
 	}
 
 	return nil
 }
 
-// Note: Traefik installation is handled per-deployment by the deployer
+func (p *Provisioner) EnsureDockerBuildx() error {
+	if output, err := p.client.Execute("docker buildx version"); err == nil && strings.TrimSpace(output) != "" {
+		return nil
+	}
+	if p.verbose {
+		fmt.Printf("  Ensuring Docker buildx plugin from OS packages...\n")
+	}
+	if _, err := p.client.Execute(runRootScript(dockerBuildxInstallScript())); err != nil {
+		return fmt.Errorf("failed to install Docker buildx package: %w", err)
+	}
+	return nil
+}
+
+func basePackageInstallScript() string {
+	return `set -eu
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget git build-essential ca-certificates
+elif command -v dnf >/dev/null 2>&1; then
+  dnf upgrade -y
+  dnf install -y curl wget git gcc gcc-c++ make ca-certificates
+elif command -v yum >/dev/null 2>&1; then
+  yum update -y
+  yum install -y curl wget git gcc gcc-c++ make ca-certificates
+elif command -v zypper >/dev/null 2>&1; then
+  zypper --non-interactive refresh
+  zypper --non-interactive update -y
+  zypper --non-interactive install -y curl wget git gcc gcc-c++ make ca-certificates
+elif command -v apk >/dev/null 2>&1; then
+  apk update
+  apk upgrade
+  apk add --no-cache curl wget git build-base ca-certificates
+else
+  echo "no supported package manager found" >&2
+  exit 1
+fi
+`
+}
+
+func dockerInstallScript() string {
+	return `set -eu
+if command -v docker >/dev/null 2>&1; then
+  exit 0
+fi
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io containerd
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y moby-engine containerd || dnf install -y docker containerd
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y docker containerd || yum install -y moby-engine containerd
+elif command -v zypper >/dev/null 2>&1; then
+  zypper --non-interactive install -y docker containerd
+elif command -v apk >/dev/null 2>&1; then
+  apk add --no-cache docker docker-cli containerd
+else
+  echo "no supported package manager found for Docker installation" >&2
+  exit 1
+fi
+command -v docker >/dev/null 2>&1
+`
+}
+
+func dockerBuildxInstallScript() string {
+	return `set -eu
+if docker buildx version >/dev/null 2>&1; then
+  exit 0
+fi
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker-buildx || DEBIAN_FRONTEND=noninteractive apt-get install -y docker-buildx-plugin || true
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y docker-buildx-plugin || dnf install -y docker-buildx || true
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y docker-buildx-plugin || yum install -y docker-buildx || true
+elif command -v zypper >/dev/null 2>&1; then
+  zypper --non-interactive install -y docker-buildx || zypper --non-interactive install -y docker-buildx-plugin || true
+elif command -v apk >/dev/null 2>&1; then
+  apk add --no-cache docker-cli-buildx || apk add --no-cache docker-buildx || true
+fi
+if docker buildx version >/dev/null 2>&1; then
+  exit 0
+fi
+echo "docker buildx plugin is not available from this OS package manager; registry build cache requires manual buildx installation" >&2
+exit 0
+`
+}
+
+func (p *Provisioner) InstallWireGuard() error {
+	return mesh.EnsureWireGuardTools(p.client, p.verbose)
+}
+
+func (p *Provisioner) InstallTakodBinary(version string) error {
+	version, err := releaseVersionArg(version)
+	if err != nil {
+		existing, _ := p.client.Execute("command -v tako 2>/dev/null || true")
+		if strings.TrimSpace(existing) != "" {
+			if p.verbose {
+				fmt.Printf("  Using existing server-side tako binary: %s\n", strings.TrimSpace(existing))
+			}
+			return nil
+		}
+		return fmt.Errorf("cannot install takod binary from release: %w; pass --takod-binary with a Linux tako binary for development setup", err)
+	}
+
+	arch, err := p.detectLinuxArch()
+	if err != nil {
+		return err
+	}
+
+	binaryName := fmt.Sprintf("tako-linux-%s", arch)
+	script := takodBinaryInstallScript(version, binaryName)
+	if _, err := p.client.Execute(runRootScript(script)); err != nil {
+		return fmt.Errorf("failed to install takod binary from release %s: %w", version, err)
+	}
+	return nil
+}
+
+func (p *Provisioner) InstallTakodBinaryFromFile(localPath string) error {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to inspect local takod binary: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("local takod binary path is not a regular file: %s", localPath)
+	}
+	localHash, err := fileSHA256(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to checksum local takod binary: %w", err)
+	}
+	if p.remoteTakodBinaryMatches(localHash) {
+		if p.verbose {
+			fmt.Printf("  Local takod binary already installed: %s\n", localPath)
+		}
+		return nil
+	}
+
+	file, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open local takod binary: %w", err)
+	}
+	defer file.Close()
+
+	remoteTemp := fmt.Sprintf("/tmp/tako-upload-%d", time.Now().UnixNano())
+	if p.verbose {
+		fmt.Printf("  Uploading local takod binary: %s\n", localPath)
+	}
+	if err := p.client.UploadReader(file, remoteTemp, 0755); err != nil {
+		return fmt.Errorf("failed to upload local takod binary: %w", err)
+	}
+
+	installCmd := fmt.Sprintf("sudo install -m 0755 %s /usr/local/bin/tako && rm -f -- %s && /usr/local/bin/tako --version >/dev/null", shellQuote(remoteTemp), shellQuote(remoteTemp))
+	if _, err := p.client.Execute(installCmd); err != nil {
+		_, _ = p.client.Execute("rm -f -- " + shellQuote(remoteTemp))
+		return fmt.Errorf("failed to install uploaded takod binary: %w", err)
+	}
+	return nil
+}
+
+func fileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (p *Provisioner) remoteTakodBinaryMatches(localHash string) bool {
+	if strings.TrimSpace(localHash) == "" {
+		return false
+	}
+	output, err := p.client.Execute("if test -x /usr/local/bin/tako && command -v sha256sum >/dev/null 2>&1; then sha256sum /usr/local/bin/tako | awk '{print $1}'; fi")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(output) == localHash
+}
+
+func takodBinaryInstallScript(version string, binaryName string) string {
+	downloadURL := fmt.Sprintf("https://github.com/redentordev/tako-cli/releases/download/%s/%s", version, binaryName)
+	checksumsURL := fmt.Sprintf("https://github.com/redentordev/tako-cli/releases/download/%s/checksums.txt", version)
+	return fmt.Sprintf(`set -eu
+tmp="$(mktemp)"
+checksums="$(mktemp)"
+cleanup() { rm -f "$tmp" "$checksums"; }
+trap cleanup EXIT
+
+fetch() {
+  url="$1"
+  dest="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 --connect-timeout 15 -o "$dest" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --tries=3 --timeout=15 -O "$dest" "$url"
+  else
+    echo "curl or wget is required to install takod binary" >&2
+    exit 1
+  fi
+}
+
+calc_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+    return 0
+  fi
+  echo "sha256sum or shasum is required to verify takod binary" >&2
+  return 1
+}
+
+fetch %s "$tmp"
+fetch %s "$checksums"
+
+expected="$(awk -v name=%s '$2 == name { print $1; found = 1; exit } END { if (!found) exit 1 }' "$checksums")" || {
+  echo "checksum for %s not found in checksums.txt" >&2
+  exit 1
+}
+calculated="$(calc_sha256 "$tmp")"
+if [ "$calculated" != "$expected" ]; then
+  echo "checksum mismatch for %s" >&2
+  echo "expected: $expected" >&2
+  echo "got:      $calculated" >&2
+  exit 1
+fi
+
+install -m 0755 "$tmp" /usr/local/bin/tako
+/usr/local/bin/tako --version >/dev/null
+`,
+		shellQuote(downloadURL),
+		shellQuote(checksumsURL),
+		shellQuote(binaryName),
+		binaryName,
+		binaryName,
+	)
+}
+
+func (p *Provisioner) InstallTakodService(socket string, dataDir string, nodeName string) error {
+	binaryPath, _ := p.client.Execute(takodBinaryPathCommand())
+	binaryPath = strings.TrimSpace(binaryPath)
+	if binaryPath == "" {
+		return fmt.Errorf("no server-side tako binary found; run setup with a release build or pass --takod-binary")
+	}
+	var err error
+	if binaryPath, err = systemdPathArg(binaryPath, ""); err != nil {
+		return fmt.Errorf("invalid server-side tako binary path: %w", err)
+	}
+	if socket, err = systemdPathArg(socket, "/run/tako/takod.sock"); err != nil {
+		return fmt.Errorf("invalid takod socket path: %w", err)
+	}
+	if dataDir, err = systemdPathArg(dataDir, "/var/lib/tako"); err != nil {
+		return fmt.Errorf("invalid takod data directory: %w", err)
+	}
+	if nodeName, err = systemdIdentifierArg(nodeName); err != nil {
+		return fmt.Errorf("invalid takod node name: %w", err)
+	}
+	if err := p.ensureTakodAccessGroup(); err != nil {
+		return err
+	}
+
+	unit := buildTakodSystemdUnit(binaryPath, socket, dataDir, nodeName, takodActualRefreshInterval)
+
+	uploadServiceCmd := fmt.Sprintf("sudo tee /etc/systemd/system/takod.service > /dev/null << 'EOFSERVICE'\n%s\nEOFSERVICE", unit)
+	if _, err := p.client.Execute(uploadServiceCmd); err != nil {
+		return fmt.Errorf("failed to write takod service: %w", err)
+	}
+
+	commands := []string{
+		"sudo systemctl daemon-reload",
+		"sudo systemctl enable takod",
+		"sudo systemctl restart takod",
+	}
+	for _, cmd := range commands {
+		if _, err := p.client.Execute(cmd); err != nil {
+			return fmt.Errorf("failed to run %s: %w", cmd, err)
+		}
+	}
+	return nil
+}
+
+func takodBinaryPathCommand() string {
+	return "command -v tako 2>/dev/null || { test -x /usr/local/bin/tako && echo /usr/local/bin/tako; } || true"
+}
+
+func buildTakodSystemdUnit(binaryPath string, socket string, dataDir string, nodeName string, actualRefreshInterval string) string {
+	return fmt.Sprintf(`[Unit]
+Description=Tako node agent
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=%s
+RuntimeDirectory=tako
+RuntimeDirectoryMode=0770
+UMask=0007
+ExecStart=%s takod run --socket %s --data-dir %s --node %s --actual-refresh-interval %s
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`, takodAccessGroup, binaryPath, socket, dataDir, nodeName, actualRefreshInterval)
+}
+
+func (p *Provisioner) ensureTakodAccessGroup() error {
+	script := fmt.Sprintf(`set -eu
+if ! getent group %[1]s >/dev/null 2>&1; then
+  if command -v groupadd >/dev/null 2>&1; then
+    groupadd --system %[1]s 2>/dev/null || groupadd -r %[1]s 2>/dev/null || groupadd %[1]s
+  elif command -v addgroup >/dev/null 2>&1; then
+    addgroup -S %[1]s 2>/dev/null || addgroup --system %[1]s 2>/dev/null || addgroup %[1]s
+  else
+    echo "groupadd or addgroup is required to create the takod access group" >&2
+    exit 1
+  fi
+fi
+`, takodAccessGroup)
+	if _, err := p.client.Execute(runRootScript(script)); err != nil {
+		return fmt.Errorf("failed to ensure takod access group: %w", err)
+	}
+	return nil
+}
+
+func (p *Provisioner) detectLinuxArch() (string, error) {
+	output, err := p.client.Execute("uname -m")
+	if err != nil {
+		return "", fmt.Errorf("failed to detect server architecture: %w", err)
+	}
+	return normalizeLinuxArch(strings.TrimSpace(output))
+}
+
+func normalizeLinuxArch(machine string) (string, error) {
+	switch strings.ToLower(machine) {
+	case "x86_64", "amd64":
+		return "amd64", nil
+	case "aarch64", "arm64":
+		return "arm64", nil
+	default:
+		return "", fmt.Errorf("unsupported Linux architecture %q", machine)
+	}
+}
+
+func releaseVersionArg(version string) (string, error) {
+	trimmed := strings.TrimSpace(version)
+	if trimmed != version {
+		return "", fmt.Errorf("release version must not contain leading or trailing whitespace")
+	}
+	if version == "" || version == "dev" || version == "unknown" {
+		return "", fmt.Errorf("release version is not available for this build")
+	}
+	for _, r := range version {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return "", fmt.Errorf("release version contains unsupported characters")
+	}
+	return version, nil
+}
+
+func systemdPathArg(value string, fallback string) (string, error) {
+	if value == "" {
+		value = fallback
+	}
+	if value == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	if !strings.HasPrefix(value, "/") {
+		return "", fmt.Errorf("path must be absolute")
+	}
+	if strings.ContainsAny(value, " \t\r\n") {
+		return "", fmt.Errorf("path must not contain whitespace")
+	}
+	return value, nil
+}
+
+func systemdIdentifierArg(value string) (string, error) {
+	if value == "" {
+		return "", fmt.Errorf("identifier is required")
+	}
+	if len(value) > 63 {
+		return "", fmt.Errorf("identifier is too long")
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return "", fmt.Errorf("identifier contains unsupported characters")
+	}
+	return value, nil
+}
+
+func runRootScript(script string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(script))
+	return fmt.Sprintf(`sudo sh -c 'set -eu
+tmp=$(mktemp /tmp/tako-root-script.XXXXXX)
+trap '\''rm -f "$tmp"'\'' EXIT
+base64 -d > "$tmp"
+chmod 700 "$tmp"
+sh "$tmp"' <<'TAKO_ROOT_SCRIPT'
+%s
+TAKO_ROOT_SCRIPT`, encoded)
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+// Note: tako-proxy is handled per-deployment by the deployer.
 // No system-wide reverse proxy installation is needed during server setup
 
-// ConfigureFirewall configures UFW firewall
-func (p *Provisioner) ConfigureFirewall() error {
+// ConfigureFirewall configures UFW firewall.
+func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
+	if meshListenPort < 1 || meshListenPort > 65535 {
+		return fmt.Errorf("mesh listen port must be between 1 and 65535")
+	}
+
 	// Check if UFW is already active
 	output, _ := p.client.Execute("sudo ufw status | grep -i 'Status: active'")
 	isActive := strings.TrimSpace(output) != ""
@@ -185,22 +605,7 @@ func (p *Provisioner) ConfigureFirewall() error {
 	}
 
 	// Allow essential services with rate limiting for SSH (use || true to ignore "Skipping adding existing rule" errors)
-	allowCommands := []string{
-		// SSH with rate limiting (max 10 connections per 30 seconds per IP)
-		"sudo ufw limit 22/tcp comment 'SSH with rate limiting' || true",
-
-		// HTTP/HTTPS (no rate limiting needed, Traefik handles this)
-		"sudo ufw allow 80/tcp comment 'HTTP' || true",
-		"sudo ufw allow 443/tcp comment 'HTTPS' || true",
-
-		// Docker Swarm ports (only needed for multi-server)
-		"sudo ufw allow 2377/tcp comment 'Docker Swarm management' || true",
-		"sudo ufw allow 7946/tcp comment 'Docker Swarm communication' || true",
-		"sudo ufw allow 7946/udp comment 'Docker Swarm communication' || true",
-		"sudo ufw allow 4789/udp comment 'Docker overlay network' || true",
-	}
-
-	for _, cmd := range allowCommands {
+	for _, cmd := range firewallAllowCommands(meshListenPort) {
 		if p.verbose {
 			fmt.Printf("  Running: %s\n", cmd)
 		}
@@ -225,36 +630,37 @@ func (p *Provisioner) ConfigureFirewall() error {
 	return nil
 }
 
+func firewallAllowCommands(meshListenPort int) []string {
+	return []string{
+		// Tako opens several short-lived SSH sessions for normal operator flows.
+		// Key-only SSH and fail2ban provide brute-force protection without
+		// self-throttling legitimate deploy, logs, scale, and state commands.
+		"sudo ufw --force delete limit 22/tcp || true",
+		"sudo ufw allow 22/tcp comment 'SSH' || true",
+
+		// HTTP/HTTPS.
+		"sudo ufw allow 80/tcp comment 'HTTP' || true",
+		"sudo ufw allow 443/tcp comment 'HTTPS' || true",
+
+		fmt.Sprintf("sudo ufw allow %d/udp comment 'Tako mesh' || true", meshListenPort),
+	}
+}
+
 // HardenSecurity applies comprehensive security hardening
 func (p *Provisioner) HardenSecurity() error {
 	if p.verbose {
 		fmt.Printf("  Installing and configuring security tools...\n")
 	}
 
-	// Install security packages
-	installCommands := []string{
-		"sudo apt-get install -y fail2ban",
-		"sudo apt-get install -y unattended-upgrades",
-		"sudo apt-get install -y ufw",
+	if p.verbose {
+		fmt.Printf("  Installing security packages...\n")
 	}
-
-	for _, cmd := range installCommands {
-		if p.verbose {
-			fmt.Printf("  Running: %s\n", cmd)
-		}
-		p.client.Execute(cmd)
+	if _, err := p.executeSecurityCommand(runRootScript(securityPackagesInstallScript())); err != nil {
+		return fmt.Errorf("failed to install security packages: %w", err)
 	}
 
 	// Configure fail2ban with custom jail for SSH
-	fail2banConfig := `[sshd]
-enabled = true
-port = ssh
-filter = sshd
-logpath = /var/log/auth.log
-maxretry = 5
-findtime = 600
-bantime = 3600
-`
+	fail2banConfig := fail2banSSHDJailConfig(p.detectSSHClientIP())
 
 	if p.verbose {
 		fmt.Printf("  Configuring fail2ban jail for SSH...\n")
@@ -262,11 +668,17 @@ bantime = 3600
 
 	// Write fail2ban jail config
 	fail2banCmd := fmt.Sprintf("sudo tee /etc/fail2ban/jail.d/sshd.local > /dev/null << 'EOF'\n%s\nEOF", fail2banConfig)
-	p.client.Execute(fail2banCmd)
+	if _, err := p.executeSecurityCommand(fail2banCmd); err != nil {
+		return fmt.Errorf("failed to configure fail2ban SSH jail: %w", err)
+	}
 
 	// Enable and start fail2ban
-	p.client.Execute("sudo systemctl enable fail2ban")
-	p.client.Execute("sudo systemctl restart fail2ban")
+	if _, err := p.executeSecurityCommand("sudo systemctl enable fail2ban"); err != nil {
+		return fmt.Errorf("failed to enable fail2ban: %w", err)
+	}
+	if _, err := p.executeSecurityCommand("sudo systemctl restart fail2ban"); err != nil {
+		return fmt.Errorf("failed to restart fail2ban: %w", err)
+	}
 
 	// Configure SSH hardening
 	if p.verbose {
@@ -311,7 +723,9 @@ bantime = 3600
 	if p.verbose {
 		fmt.Printf("  Enabling automatic security updates...\n")
 	}
-	p.client.Execute("sudo dpkg-reconfigure -plow unattended-upgrades")
+	if _, err := p.executeSecurityCommand(runRootScript(unattendedUpgradesConfigScript())); err != nil {
+		return fmt.Errorf("failed to configure unattended upgrades: %w", err)
+	}
 
 	// Enable and restart SSH service
 	if p.verbose {
@@ -348,21 +762,82 @@ bantime = 3600
 	return nil
 }
 
+func (p *Provisioner) executeSecurityCommand(command string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), securityCommandTimeout)
+	defer cancel()
+	return p.client.ExecuteWithContext(ctx, command)
+}
+
+func securityPackagesInstallScript() string {
+	return `set -eu
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y fail2ban unattended-upgrades ufw
+elif command -v apk >/dev/null 2>&1; then
+  apk add --no-cache fail2ban
+else
+  echo "security package bootstrap is only implemented for apt and apk hosts" >&2
+  exit 1
+fi
+`
+}
+
+func unattendedUpgradesConfigScript() string {
+	return `set -eu
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+fi
+`
+}
+
+func fail2banSSHDJailConfig(clientIP string) string {
+	var b strings.Builder
+	b.WriteString(`[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 5
+findtime = 600
+bantime = 3600
+`)
+	if parsed := net.ParseIP(strings.TrimSpace(clientIP)); parsed != nil {
+		b.WriteString("ignoreip = 127.0.0.1/8 ::1 ")
+		b.WriteString(parsed.String())
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func (p *Provisioner) detectSSHClientIP() string {
+	output, err := p.client.Execute("printf '%s' \"$SSH_CONNECTION\" | awk '{print $1}'")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(output)
+}
+
 // SetupDeployUser ensures deploy user exists and has proper permissions
 func (p *Provisioner) SetupDeployUser(username string) error {
 	// Defense-in-depth: validate username before using in shell commands
 	if !utils.IsValidUnixUsername(username) {
 		return fmt.Errorf("invalid username %q: must be a valid POSIX username", username)
 	}
+	if err := p.ensureTakodAccessGroup(); err != nil {
+		return err
+	}
 
 	// Check if user exists
-	output, err := p.client.Execute(fmt.Sprintf("id -u %s", username))
+	output, err := p.client.Execute(buildUserIDCommand(username))
 	if err != nil || output == "" {
 		// User doesn't exist, create it
 		commands := []string{
-			fmt.Sprintf("sudo useradd -m -s /bin/bash %s", username),
-			fmt.Sprintf("sudo usermod -aG docker %s", username),
-			fmt.Sprintf("sudo usermod -aG sudo %s", username),
+			buildUserCreateCommand(username),
 		}
 
 		for _, cmd := range commands {
@@ -382,40 +857,26 @@ func (p *Provisioner) SetupDeployUser(username string) error {
 		}
 	}
 
-	// Ensure user is in docker group
-	p.client.Execute(fmt.Sprintf("sudo usermod -aG docker %s", username))
-
-	// Configure passwordless sudo for the deploy user
-	// This is required for Tako to run commands like NFS setup, firewall config, etc.
+	// Runtime access is mediated by takod's Unix socket, not broad sudo or Docker group membership.
 	if username != "root" {
-		if p.verbose {
-			fmt.Printf("  Configuring passwordless sudo for %s...\n", username)
-		}
-
-		// Create sudoers file for the user with proper permissions
-		sudoersContent := fmt.Sprintf("%s ALL=(ALL) NOPASSWD: ALL", username)
-		sudoersFile := fmt.Sprintf("/etc/sudoers.d/tako-%s", username)
-
-		// Write sudoers file with correct permissions (must be 0440)
-		sudoersCmd := fmt.Sprintf("echo '%s' | sudo tee %s > /dev/null && sudo chmod 0440 %s", sudoersContent, sudoersFile, sudoersFile)
-		if _, err := p.client.Execute(sudoersCmd); err != nil {
-			if p.verbose {
-				fmt.Printf("  Warning: Failed to configure passwordless sudo: %v\n", err)
-			}
-		}
-
-		// Validate the sudoers file
-		validateCmd := fmt.Sprintf("sudo visudo -cf %s", sudoersFile)
-		if _, err := p.client.Execute(validateCmd); err != nil {
-			// If validation fails, remove the invalid file
-			p.client.Execute(fmt.Sprintf("sudo rm -f %s", sudoersFile))
-			if p.verbose {
-				fmt.Printf("  Warning: Sudoers validation failed, removed invalid file\n")
-			}
+		if _, err := p.client.Execute(buildTakodAccessCommand(username)); err != nil {
+			return fmt.Errorf("failed to grant takod socket access to %s: %w", username, err)
 		}
 	}
 
 	return nil
+}
+
+func buildUserIDCommand(username string) string {
+	return fmt.Sprintf("id -u %s", shellQuote(username))
+}
+
+func buildUserCreateCommand(username string) string {
+	return fmt.Sprintf("sudo useradd -m -s /bin/bash %s", shellQuote(username))
+}
+
+func buildTakodAccessCommand(username string) string {
+	return fmt.Sprintf("sudo usermod -aG %s %s", shellQuote(takodAccessGroup), shellQuote(username))
 }
 
 // VerifyAutoRecovery verifies that critical services are enabled for auto-recovery

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/redentordev/tako-cli/pkg/envexpand"
 )
 
 // LoadEnvFile reads a .env file and returns a map of environment variables
@@ -15,6 +17,9 @@ import (
 // - Single and double quoted values
 // - Variable expansion ${VAR} syntax
 func LoadEnvFile(path string) (map[string]string, error) {
+	if err := validateEnvFilePath(path); err != nil {
+		return nil, err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open env file: %w", err)
@@ -38,7 +43,7 @@ func LoadEnvFile(path string) (map[string]string, error) {
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
 			// Skip invalid lines with a warning (don't fail)
-			fmt.Printf("Warning: Invalid line %d in %s: %s\n", lineNum, path, line)
+			fmt.Fprintf(os.Stderr, "Warning: Invalid line %d in %s: %s\n", lineNum, path, line)
 			continue
 		}
 
@@ -48,8 +53,13 @@ func LoadEnvFile(path string) (map[string]string, error) {
 		// Remove quotes if present
 		value = unquoteValue(value)
 
-		// Expand environment variables in the value
-		value = os.ExpandEnv(value)
+		// Expand explicit ${VAR} references only. Bare dollar values are common
+		// in secrets such as bcrypt hashes and must be preserved.
+		expanded, missing := envexpand.BracedFromOS(value)
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("missing environment variable(s) on line %d in %s: %s", lineNum, path, strings.Join(missing, ", "))
+		}
+		value = expanded
 
 		envVars[key] = value
 	}
@@ -59,6 +69,20 @@ func LoadEnvFile(path string) (map[string]string, error) {
 	}
 
 	return envVars, nil
+}
+
+func validateEnvFilePath(path string) error {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("envFile not found: %s", path)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to stat envFile %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("envFile must be a regular file: %s", path)
+	}
+	return nil
 }
 
 // unquoteValue removes surrounding quotes from a value

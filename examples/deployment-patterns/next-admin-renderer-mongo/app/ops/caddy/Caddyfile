@@ -1,0 +1,16 @@
+:80 {
+  encode zstd gzip
+
+  handle /admin* {
+    reverse_proxy admin:3000
+  }
+
+  handle /api/platform/domains/ask {
+    reverse_proxy admin:3000
+  }
+
+  handle {
+    reverse_proxy renderer:3000
+  }
+}
+

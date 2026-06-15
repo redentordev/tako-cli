@@ -29,7 +29,7 @@ Visit http://localhost:4321
 tako deploy
 
 # View logs
-tako logs
+tako logs --service web
 
 # Check status
 tako ps
@@ -44,9 +44,7 @@ Astro's Islands architecture allows you to use your favorite UI framework (React
 ```
 src/
 ├── pages/
-│   ├── index.astro        # Home page
-│   └── api/
-│       └── hello.ts       # API endpoint
+│   └── index.astro        # Home page
 └── components/            # Reusable components (optional)
 ```
 

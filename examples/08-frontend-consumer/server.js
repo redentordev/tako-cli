@@ -3,8 +3,8 @@ const fetch = require('node-fetch');
 const app = express();
 const port = 3000;
 
-// Get API URL from environment variable (set in tako.yaml)
-const API_URL = process.env.API_URL || 'http://backend-api_api:4000';
+// Get API URL from environment variable after resolving the imported endpoint.
+const API_URL = process.env.API_URL || 'http://localhost:4000';
 
 app.use(express.json());
 

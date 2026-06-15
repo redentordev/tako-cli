@@ -17,9 +17,9 @@ type DNSChecker struct {
 func NewDNSChecker() *DNSChecker {
 	return &DNSChecker{
 		resolvers: []string{
-			"1.1.1.1:53",  // Cloudflare
-			"8.8.8.8:53",  // Google
-			"9.9.9.9:53",  // Quad9
+			"1.1.1.1:53", // Cloudflare
+			"8.8.8.8:53", // Google
+			"9.9.9.9:53", // Quad9
 		},
 	}
 }
@@ -113,7 +113,7 @@ func (c *DNSChecker) WaitForDNSPropagation(ctx context.Context, domain, expected
 func CheckPort53Accessible(serverIP string) error {
 	// Try TCP connection to port 53
 	// TCP is more reliable for connectivity testing since it's connection-oriented
-	conn, err := net.DialTimeout("tcp", serverIP+":53", 5*time.Second)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(serverIP, "53"), 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("port 53 (TCP) is not accessible: %w", err)
 	}
@@ -129,9 +129,9 @@ func CheckPort53Accessible(serverIP string) error {
 
 // DNSPropagationResult represents the result of a DNS propagation check
 type DNSPropagationResult struct {
-	Domain     string
-	Verified   bool
-	Attempts   int
-	Duration   time.Duration
-	Error      error
+	Domain   string
+	Verified bool
+	Attempts int
+	Duration time.Duration
+	Error    error
 }

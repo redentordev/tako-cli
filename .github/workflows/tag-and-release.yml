@@ -22,7 +22,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
+          cache: true
 
       - name: Get version from tag
         id: version
@@ -79,86 +80,94 @@ jobs:
             COMMITS=$(git log --pretty=format:"- %s (%h)" --no-merges)
           else
             # Get commits since last tag
-            COMMITS=$(git log ${LATEST_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+            COMMITS=$(git log "${LATEST_TAG}..HEAD" --pretty=format:"- %s (%h)" --no-merges)
           fi
           
           # Save to file for multiline output
           echo "$COMMITS" > commits.txt
           echo "Changelog generated"
 
+      - name: Build release notes
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          {
+            cat <<EOF
+            # 🐙 Tako CLI $VERSION
+
+            Deploy to any VPS with a small takod mesh.
+
+            ## 📦 Installation
+
+            ### Linux (AMD64)
+            \`\`\`bash
+            curl -L https://github.com/redentordev/tako-cli/releases/download/$VERSION/tako-linux-amd64 -o /usr/local/bin/tako
+            chmod +x /usr/local/bin/tako
+            tako --version
+            \`\`\`
+
+            ### Linux (ARM64)
+            \`\`\`bash
+            curl -L https://github.com/redentordev/tako-cli/releases/download/$VERSION/tako-linux-arm64 -o /usr/local/bin/tako
+            chmod +x /usr/local/bin/tako
+            tako --version
+            \`\`\`
+
+            ### macOS (Intel)
+            \`\`\`bash
+            curl -L https://github.com/redentordev/tako-cli/releases/download/$VERSION/tako-darwin-amd64 -o /usr/local/bin/tako
+            chmod +x /usr/local/bin/tako
+            tako --version
+            \`\`\`
+
+            ### macOS (Apple Silicon)
+            \`\`\`bash
+            curl -L https://github.com/redentordev/tako-cli/releases/download/$VERSION/tako-darwin-arm64 -o /usr/local/bin/tako
+            chmod +x /usr/local/bin/tako
+            tako --version
+            \`\`\`
+
+            ### Windows (PowerShell)
+            \`\`\`powershell
+            Invoke-WebRequest -Uri "https://github.com/redentordev/tako-cli/releases/download/$VERSION/tako-windows-amd64.exe" -OutFile "tako.exe"
+            # Add to your PATH
+            \`\`\`
+
+            ## 🚀 Quick Start
+
+            \`\`\`bash
+            tako init my-app
+            tako setup -e production
+            tako deploy -e production
+            \`\`\`
+
+            ## 📝 What's Changed
+          EOF
+            if grep -q '[^[:space:]]' commits.txt; then
+              cat commits.txt
+            else
+              echo "Initial release"
+            fi
+            cat <<'EOF'
+
+            ## 🔒 Verify Download
+
+            Download `checksums.txt` and verify:
+            ```bash
+            sha256sum -c checksums.txt
+            ```
+
+            ---
+
+            **Built by [@redentor_dev](https://twitter.com/redentor_dev)**
+          EOF
+          } | sed 's/^  //' > release-notes.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.version.outputs.VERSION }}
           name: 🐙 Tako CLI ${{ steps.version.outputs.VERSION }}
-          body: |
-            # 🐙 Tako CLI ${{ steps.version.outputs.VERSION }}
-            
-            Deploy to any VPS with zero config & zero downtime!
-            
-            ## 📦 Installation
-            
-            ### Linux (AMD64)
-            ```bash
-            curl -L https://github.com/redentordev/tako-cli/releases/download/${{ steps.version.outputs.VERSION }}/tako-linux-amd64 -o /usr/local/bin/tako
-            chmod +x /usr/local/bin/tako
-            tako --version
-            ```
-            
-            ### Linux (ARM64)
-            ```bash
-            curl -L https://github.com/redentordev/tako-cli/releases/download/${{ steps.version.outputs.VERSION }}/tako-linux-arm64 -o /usr/local/bin/tako
-            chmod +x /usr/local/bin/tako
-            tako --version
-            ```
-            
-            ### macOS (Intel)
-            ```bash
-            curl -L https://github.com/redentordev/tako-cli/releases/download/${{ steps.version.outputs.VERSION }}/tako-darwin-amd64 -o /usr/local/bin/tako
-            chmod +x /usr/local/bin/tako
-            tako --version
-            ```
-            
-            ### macOS (Apple Silicon)
-            ```bash
-            curl -L https://github.com/redentordev/tako-cli/releases/download/${{ steps.version.outputs.VERSION }}/tako-darwin-arm64 -o /usr/local/bin/tako
-            chmod +x /usr/local/bin/tako
-            tako --version
-            ```
-            
-            ### Windows (PowerShell)
-            ```powershell
-            Invoke-WebRequest -Uri "https://github.com/redentordev/tako-cli/releases/download/${{ steps.version.outputs.VERSION }}/tako-windows-amd64.exe" -OutFile "tako.exe"
-            # Add to your PATH
-            ```
-            
-            ## 🚀 Quick Start
-            
-            ```bash
-            # Initialize a new project
-            tako init my-app
-            
-            # Setup your server
-            tako setup -e production
-            
-            # Deploy!
-            tako deploy -e production
-            ```
-            
-            ## 📝 What's Changed
-            
-            $(cat commits.txt || echo "Initial release")
-            
-            ## 🔒 Verify Download
-            
-            Download `checksums.txt` and verify:
-            ```bash
-            sha256sum -c checksums.txt
-            ```
-            
-            ---
-            
-            **Built by [@redentor_dev](https://twitter.com/redentor_dev)**
+          body_path: release-notes.md
           draft: false
           prerelease: false
           files: |

@@ -4,7 +4,12 @@ Comprehensive examples demonstrating all features of the Tako CLI. Each example 
 
 ## Overview
 
-We have **25 ready-to-deploy examples** covering various use cases:
+We have ready-to-deploy examples covering common use cases:
+
+### Deployment Pattern Templates
+| Example | Description | Features |
+|---------|-------------|----------|
+| [deployment-patterns](./deployment-patterns/) | Copyable production shapes | Prebuilt images, static sites, APIs, volumes, databases, workers, cron-style runners, monorepos, stages, WebSockets, CI/CD, Python, Go, CMS dynamic domains |
 
 ### Web Frameworks & Applications
 | Example | Description | Features |
@@ -16,7 +21,6 @@ We have **25 ready-to-deploy examples** covering various use cases:
 | [09-nextjs-todos](./09-nextjs-todos/) | Next.js + SQLite | Full-stack Next.js, TypeScript, SQLite |
 | [12-hono](./12-hono/) | Hono framework | Ultra-fast Edge framework |
 | [13-sveltekit](./13-sveltekit/) | SvelteKit | Full-stack Svelte framework |
-| [14-solidstart](./14-solidstart/) | SolidStart | Fine-grained reactivity framework |
 | [15-astro](./15-astro/) | Astro | Content-driven framework |
 | [16-php](./16-php/) | Vanilla PHP 8.3 | Pure PHP application |
 | [17-laravel](./17-laravel/) | Laravel | PHP framework |
@@ -29,7 +33,6 @@ We have **25 ready-to-deploy examples** covering various use cases:
 | [06-scaling](./06-scaling/) | Load balancing | Multiple replicas, round-robin, scaling |
 | [07-backend-api](./07-backend-api/) | RESTful API | Export services for other projects |
 | [08-frontend-consumer](./08-frontend-consumer/) | Frontend consumer | Import and use services from other projects |
-| [11-multi-server-swarm](./11-multi-server-swarm/) | Multi-server | Docker Swarm orchestration |
 
 ### Third-Party Applications
 | Example | Description | Features |
@@ -43,9 +46,8 @@ We have **25 ready-to-deploy examples** covering various use cases:
 | Example | Description | Features |
 |---------|-------------|----------|
 | [test-parallel](./test-parallel/) | Parallel deployment | Test concurrent service deployment |
-| [test-placement-strategies](./test-placement-strategies/) | Placement strategies | Swarm node placement testing |
+| [test-placement-strategies](./test-placement-strategies/) | Placement strategies | takod node placement testing |
 | [test-secrets](./test-secrets/) | Secrets management | Secure environment variables |
-| [test-swarm](./test-swarm/) | Docker Swarm | Multi-node swarm testing |
 
 ## Quick Start
 
@@ -75,13 +77,12 @@ example-name/
 3. **Update domain in tako.yaml:**
    ```yaml
    proxy:
-     domains:
-       - your-domain.com
+     domain: your-domain.com
    ```
 
 4. **Deploy:**
    ```bash
-   start deploy prod
+   tako deploy -e production
    ```
 
 ## Example Progression
@@ -209,8 +210,7 @@ services:
     build: .
     port: 3000
     proxy:
-      domains:
-        - example.com
+      domain: example.com
       email: admin@example.com
 ```
 
@@ -259,19 +259,19 @@ services:
   api:
     build: .
     port: 4000
-    export: true  # Make available to other projects
+    export:
+      ports:
+        web: 4000  # Make this named port available to other projects
 ```
 
 ### Cross-Project Service Import
 ```yaml
-services:
-  web:
-    build: .
-    port: 3000
-    imports:
-      - backend-api.api  # Import from another project
-    env:
-      API_URL: http://backend-api_api:4000  # DNS works!
+imports:
+  backend_api:
+    project: backend-api
+    environment: production
+    service: api
+    port: web
 ```
 
 ## Common Use Cases
@@ -325,15 +325,12 @@ npm start
 # Visit http://localhost:3000
 ```
 
-For services requiring databases:
-```bash
-# PostgreSQL
-docker run -d -p 5432:5432 \
-  -e POSTGRES_PASSWORD=password \
-  postgres:15
+For services requiring databases, use your normal local Postgres/Redis setup
+while developing. After deployment, validate runtime state through Tako:
 
-# Redis
-docker run -d -p 6379:6379 redis:7-alpine
+```bash
+tako ps
+tako logs --service web --tail 50
 ```
 
 ## Environment Variables
@@ -349,12 +346,12 @@ servers:
 
 Set it before deploying:
 ```bash
-export SERVER_HOST=46.62.254.8
+export SERVER_HOST=203.0.113.10
 ```
 
 You can also set it in a `.env` file:
 ```bash
-SERVER_HOST=46.62.254.8
+SERVER_HOST=203.0.113.10
 ```
 
 ## Customizing Examples
@@ -391,15 +388,11 @@ services:
     replicas: 5  # Scale to 5 instances
 ```
 
-### Add Hooks
+### Run Startup Tasks
 ```yaml
 services:
   web:
-    hooks:
-      preDeploy:
-        - npm run migrate
-      postDeploy:
-        - npm run seed
+    command: sh -c "npm run migrate && npm start"
 ```
 
 ## Troubleshooting
@@ -407,24 +400,24 @@ services:
 ### Service Not Starting
 ```bash
 # Check logs
-docker logs project-service-1
+tako logs --service web
 
-# Check if container exists
-docker ps -a | grep project
+# Check takod runtime state
+tako ps
 
-# Check if port is available
-netstat -tulpn | grep :3000
+# Check node and project health
+tako doctor
 ```
 
 ### Domain Not Resolving
 1. Verify DNS points to your server IP
 2. Wait for DNS propagation (up to 48 hours)
-3. Check Caddy logs: `docker logs caddy`
+3. Check service logs with `tako logs --service web`
 
 ### Database Connection Failed
-1. Check service is running: `docker ps | grep postgres`
+1. Check service is running: `tako ps`
 2. Verify connection string in env vars
-3. Check if database is initialized: `docker logs project-postgres`
+3. Check recent service logs: `tako logs --service postgres`
 
 ### Can't Access Internal Service
 - Internal services are not exposed to internet (by design)
@@ -464,15 +457,12 @@ Before deploying to production:
 ## Contributing
 
 Have a great example to add? We'd love to see:
-- Django/Python examples
-- Go microservices
-- Ruby on Rails apps
-- PHP/Laravel applications
 - React/Vue/Angular SPAs
 - GraphQL APIs
-- WebSocket servers
-- Cron jobs
-- CI/CD integrations
+- Django applications
+- Message queues beyond Redis
+- Object storage patterns
+- Multi-region application shapes
 
 Submit a pull request with your example!
 

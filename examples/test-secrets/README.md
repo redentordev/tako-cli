@@ -23,7 +23,7 @@ This is a test project to verify that Tako's new secrets management system works
    tako secrets set DATABASE_URL=postgresql://... --env production
    tako secrets set JWT_SECRET=your_secret --env production
    tako secrets set API_KEY=sk_test_123 --env production
-   tako secrets set STRIPE_SECRET_KEY=sk_live_456 --env production
+   tako secrets set STRIPE_SECRET_KEY=replace-with-stripe-secret --env production
    ```
 
 3. **Set your server IP** in `.env`:
@@ -108,7 +108,7 @@ Should parse and display database connection info without exposing credentials.
 ### ❌ What Should NOT Happen
 
 1. **Secrets exposed in deployment logs**
-2. **Secrets visible in `docker inspect`** (well, they are in env, but not in command)
+2. **Secrets exposed in command arguments or deployment output**
 3. **Secrets committed to git** (`.tako/secrets*` should be gitignored)
 4. **Temp env files left on server**
 
@@ -164,7 +164,7 @@ tako deploy --env production --verbose
 
 ### API returns "NOT_SET"?
 - Verify secrets were uploaded to the server
-- Check container logs: `docker logs tako-secrets-test_production_api_1`
+- Check service logs: `tako logs --service api --tail 50`
 - Ensure the env file was created and loaded
 
 ## Security Notes
