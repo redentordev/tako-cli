@@ -393,7 +393,11 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 	// ${VAR} expansion. Bare dollar values are preserved for secrets such as
 	// bcrypt hashes.
 	for key, value := range service.Env {
-		expandedValue, missing := envexpand.Braced(value, func(varName string) (string, bool) {
+		if value.Link != nil {
+			return nil, fmt.Errorf("service env %s contains an unresolved link", key)
+		}
+		rawValue := value.PlainString()
+		expandedValue, missing := envexpand.Braced(rawValue, func(varName string) (string, bool) {
 			// First check project .env
 			if val, ok := projectEnv[varName]; ok {
 				return strings.TrimSpace(val), true

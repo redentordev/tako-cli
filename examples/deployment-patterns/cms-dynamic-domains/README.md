@@ -6,10 +6,10 @@ dedicated Caddy edge node for dynamic customer domains.
 ```text
 app/
   admin, renderer, mongo
-  exports admin:web and renderer:web
+  shares admin and renderer default ports
 
 edge/
-  imports app exports
+  imports shared app endpoints for edge config
   generates Caddyfile from imports as a managed config
   binds public 80 and 443 directly
 ```
@@ -42,9 +42,9 @@ tako setup -e production --dedicated-edge
 tako deploy -e production --yes
 ```
 
-The Caddyfile is rendered from `imports`, uploaded, and mounted read-only
-through Tako `configs`; nothing is edited on the remote host and no upstream
-addresses are hard-coded in the checkout.
+The Caddyfile is rendered from explicit edge `imports`, uploaded, and mounted
+read-only through Tako `configs`; nothing is edited on the remote host and no
+upstream addresses are hard-coded in the checkout.
 
 ## Notes
 

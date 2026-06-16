@@ -447,6 +447,199 @@ func TestValidateConfigAcceptsExplicitExportsAndImports(t *testing.T) {
 	}
 }
 
+func TestValidateConfigAcceptsShareAndLocalEnvLink(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["admin"] = ServiceConfig{
+		Image: "nginx:alpine",
+		Port:  3000,
+		Share: &ServiceShareConfig{Enabled: true},
+	}
+	production.Services["renderer"] = ServiceConfig{
+		Image: "nginx:alpine",
+		Port:  3000,
+		Env: map[string]EnvValue{
+			"CMS_ADMIN_API_BASE_URL": {Link: &ServiceLinkRef{Service: "admin"}},
+		},
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+	admin := cfg.Environments["production"].Services["admin"]
+	if admin.Export == nil || admin.Export.Ports[DefaultSharedPortName] != 3000 {
+		t.Fatalf("share did not normalize to default export: %#v", admin.Export)
+	}
+}
+
+func TestLoadConfigAcceptsCleanLinkSyntax(t *testing.T) {
+	t.Setenv("SSH_PASSWORD", "test-password")
+	path := filepath.Join(t.TempDir(), "tako.yaml")
+	if err := os.WriteFile(path, []byte(`
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+    password: ${SSH_PASSWORD}
+environments:
+  production:
+    servers: [node-a]
+    services:
+      admin:
+        image: nginx:alpine
+        port: 3000
+        share: true
+      renderer:
+        image: nginx:alpine
+        port: 3000
+        env:
+          CMS_ADMIN_API_BASE_URL:
+            link: admin
+          PUBLIC_ADMIN_URL:
+            url: https://admin.example.com
+`), 0600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	renderer := cfg.Environments["production"].Services["renderer"]
+	if renderer.Env["CMS_ADMIN_API_BASE_URL"].Link == nil || renderer.Env["CMS_ADMIN_API_BASE_URL"].Link.Service != "admin" {
+		t.Fatalf("link env did not parse: %#v", renderer.Env["CMS_ADMIN_API_BASE_URL"])
+	}
+	if got := renderer.Env["PUBLIC_ADMIN_URL"].URL; got != "https://admin.example.com" {
+		t.Fatalf("url env = %q", got)
+	}
+}
+
+func TestLoadConfigRejectsUnknownCleanLinkFields(t *testing.T) {
+	tests := map[string]string{
+		"env object": `
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+environments:
+  production:
+    servers: [node-a]
+    services:
+      admin:
+        image: nginx:alpine
+        port: 3000
+      renderer:
+        image: nginx:alpine
+        env:
+          ADMIN_URL:
+            link: admin
+            extra: nope
+`,
+		"link object": `
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+        env:
+          API_URL:
+            link:
+              app: backend-api
+              stage: production
+              service: api
+              target: nope
+`,
+		"share object": `
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+environments:
+  production:
+    servers: [node-a]
+    services:
+      api:
+        image: nginx:alpine
+        port: 3000
+        share:
+          ports: []
+          expose: true
+`,
+	}
+
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "tako.yaml")
+			if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+				t.Fatalf("failed to write config: %v", err)
+			}
+			_, err := LoadConfig(path)
+			if err == nil {
+				t.Fatal("LoadConfig should reject unknown clean link/share fields")
+			}
+			if !strings.Contains(err.Error(), "unknown field") {
+				t.Fatalf("error = %q, want unknown field", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigRejectsUnknownJSONCleanLinkField(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tako.json")
+	if err := os.WriteFile(path, []byte(`{
+  "project": {"name": "demo", "version": "1.0.0"},
+  "servers": {"node-a": {"host": "10.0.0.1", "user": "deploy"}},
+  "environments": {
+    "production": {
+      "servers": ["node-a"],
+      "services": {
+        "web": {
+          "image": "nginx:alpine",
+          "env": {
+            "API_URL": {
+              "link": {
+                "app": "backend-api",
+                "stage": "production",
+                "service": "api",
+                "target": "nope"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`), 0600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("LoadConfig should reject unknown JSON link fields")
+	}
+	if !strings.Contains(err.Error(), `unknown field "target"`) {
+		t.Fatalf("error = %q, want unknown target field", err)
+	}
+}
+
 func TestValidateConfigRejectsInvalidExportsAndImports(t *testing.T) {
 	tests := map[string]func(*Config){
 		"same project import": func(cfg *Config) {

@@ -253,25 +253,24 @@ services:
       strategy: round_robin
 ```
 
-### Cross-Project Service Export
+### Cross-Project Service Link
 ```yaml
+# Producer app
 services:
   api:
     build: .
     port: 4000
-    export:
-      ports:
-        web: 4000  # Make this named port available to other projects
-```
+    share: true
 
-### Cross-Project Service Import
-```yaml
-imports:
-  backend_api:
-    project: backend-api
-    environment: production
-    service: api
-    port: web
+# Consumer app
+services:
+  web:
+    env:
+      API_URL:
+        link:
+          app: backend-api
+          stage: production
+          service: api
 ```
 
 ## Common Use Cases

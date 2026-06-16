@@ -335,15 +335,18 @@ stale endpoints. Use `--port` to inspect a specific target port or
 
 Global or otherwise co-located services get local-first behavior naturally
 because each node resolves the replicas attached to its own app/stage network.
-Cross-project discovery stays private by default. Services must declare
-explicit exported named ports, and consumer or edge projects declare top-level
-import aliases that point at project, environment, service, and exported port.
-`tako discovery --import ALIAS` reads the exporting project's desired state,
-validates the named export, then queries live `takod` discovery for healthy
-endpoints. Exported internal ports are published on mesh-local host ports so a
-dedicated edge node can use mesh-reachable upstreams instead of Docker bridge
-addresses. `--format upstreams` renders those rows as HTTP upstream URLs for
-edge config workflows such as Caddy environment placeholders.
+Cross-project discovery stays private by default. Producer services opt in with
+`share: true` for their primary port or `share: [name]` for selected named
+ports. Normal consumers set env values with `link`, and Tako resolves those into
+private URLs during deploy. Dedicated edge config workflows can still declare
+top-level import aliases that point at project, environment, service, and shared
+port, usually `default`. `tako discovery --import ALIAS` reads the exporting
+project's desired state, validates the shared port, then queries live `takod`
+discovery for healthy endpoints. Shared internal ports are published on
+mesh-local host ports so a dedicated edge node can use mesh-reachable upstreams
+instead of Docker bridge addresses. `--format upstreams` renders those rows as
+HTTP upstream URLs for edge config workflows such as Caddy environment
+placeholders.
 
 ## Metrics
 

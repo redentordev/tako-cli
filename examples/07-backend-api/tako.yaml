@@ -17,9 +17,7 @@ environments:
         build: .
         port: 4000
         replicas: 2
-        export:
-          ports:
-            web: 4000  # Available to other projects
+        share: true  # Available to other projects
         restart: unless-stopped
         proxy:
           domain: backend-api.${SERVER_HOST}.sslip.io

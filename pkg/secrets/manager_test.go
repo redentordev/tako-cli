@@ -17,9 +17,9 @@ func TestCreateEnvFileExpandsBracedEnvFromOSAndSecrets(t *testing.T) {
 	mgr := &Manager{secrets: map[string]string{"TOKEN": "secret-token"}}
 
 	envFile, err := mgr.CreateEnvFile(&config.ServiceConfig{
-		Env: map[string]string{
-			"DATABASE_URL": "postgres://${DB_HOST}:5432/app",
-			"API_TOKEN":    "${TOKEN}",
+		Env: map[string]config.EnvValue{
+			"DATABASE_URL": config.PlainEnvValue("postgres://${DB_HOST}:5432/app"),
+			"API_TOKEN":    config.PlainEnvValue("${TOKEN}"),
 		},
 	})
 	if err != nil {
@@ -39,8 +39,8 @@ func TestCreateEnvFilePreservesBareDollarValues(t *testing.T) {
 	mgr := &Manager{secrets: map[string]string{}}
 
 	envFile, err := mgr.CreateEnvFile(&config.ServiceConfig{
-		Env: map[string]string{
-			"PASSWORD_HASH": "$2a$10$abcdefghijklmnopqrstuv",
+		Env: map[string]config.EnvValue{
+			"PASSWORD_HASH": config.PlainEnvValue("$2a$10$abcdefghijklmnopqrstuv"),
 		},
 	})
 	if err != nil {
@@ -62,8 +62,8 @@ func TestCreateEnvFileMergesServiceEnvFile(t *testing.T) {
 
 	envFile, err := mgr.CreateEnvFile(&config.ServiceConfig{
 		EnvFile: envPath,
-		Env: map[string]string{
-			"OVERRIDE": "explicit",
+		Env: map[string]config.EnvValue{
+			"OVERRIDE": config.PlainEnvValue("explicit"),
 		},
 		Secrets: []string{"SECRET:SECRET_KEY"},
 	})
@@ -92,8 +92,8 @@ func TestCreateEnvFileExpandsEnvFromServiceEnvFile(t *testing.T) {
 
 	envFile, err := mgr.CreateEnvFile(&config.ServiceConfig{
 		EnvFile: envPath,
-		Env: map[string]string{
-			"APP_URL": "https://${APP_HOST}",
+		Env: map[string]config.EnvValue{
+			"APP_URL": config.PlainEnvValue("https://${APP_HOST}"),
 		},
 	})
 	if err != nil {
@@ -110,8 +110,8 @@ func TestCreateEnvFileReportsMissingBracedEnv(t *testing.T) {
 	mgr := &Manager{secrets: map[string]string{}}
 
 	_, err := mgr.CreateEnvFile(&config.ServiceConfig{
-		Env: map[string]string{
-			"DATABASE_URL": "postgres://${DB_HOST}:5432/app",
+		Env: map[string]config.EnvValue{
+			"DATABASE_URL": config.PlainEnvValue("postgres://${DB_HOST}:5432/app"),
 		},
 	})
 	if err == nil {

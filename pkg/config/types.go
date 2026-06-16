@@ -197,13 +197,13 @@ type ServiceConfig struct {
 	Platform   string `yaml:"platform,omitempty" json:"platform,omitempty"`     // Docker platform for service image builds, e.g. linux/amd64
 
 	// Basic settings
-	Port     int               `yaml:"port,omitempty" json:"port,omitempty"`
-	Ports    []PortConfig      `yaml:"ports,omitempty" json:"ports,omitempty"`
-	Command  string            `yaml:"command,omitempty" json:"command,omitempty"`
-	Replicas int               `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
-	Restart  string            `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
-	Env      map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	EnvFile  string            `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Path to .env file (e.g., .env.production)
+	Port     int                 `yaml:"port,omitempty" json:"port,omitempty"`
+	Ports    []PortConfig        `yaml:"ports,omitempty" json:"ports,omitempty"`
+	Command  string              `yaml:"command,omitempty" json:"command,omitempty"`
+	Replicas int                 `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
+	Restart  string              `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
+	Env      map[string]EnvValue `yaml:"env,omitempty" json:"env,omitempty"`
+	EnvFile  string              `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Path to .env file (e.g., .env.production)
 
 	// Secrets: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"].
 	Secrets []string                 `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
@@ -235,6 +235,7 @@ type ServiceConfig struct {
 	Monitoring *MonitoringConfig `yaml:"monitoring,omitempty" json:"monitoring,omitempty"`
 
 	// Cross-project networking
+	Share  *ServiceShareConfig  `yaml:"share,omitempty" json:"share,omitempty"`   // Clean shorthand for sharing service ports with other projects
 	Export *ServiceExportConfig `yaml:"export,omitempty" json:"export,omitempty"` // Explicit service ports exported to other projects
 
 	// Placement configuration for takod scheduling.

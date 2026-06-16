@@ -17,14 +17,14 @@ imports:
     project: pattern-next-cms-app
     environment: production
     service: admin
-    port: web
+    port: default
     servers:
       - app
   jardin_renderer:
     project: pattern-next-cms-app
     environment: production
     service: renderer
-    port: web
+    port: default
     servers:
       - app
 
@@ -72,4 +72,3 @@ environments:
         volumes:
           - caddy_data:/data
           - caddy_config:/config
-
