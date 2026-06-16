@@ -15,11 +15,13 @@ edge/
 
 Use `app/tako.yaml` when the CMS and edge Caddy can share one app/stage
 network. Use `edge/tako.yaml` when public dynamic domains need a separate edge
-node that imports `admin:web` and `renderer:web` over the mesh.
+node that imports the shared `admin` and `renderer` default ports over the mesh.
 
-The app services expose only explicit exports. Mongo stays private and uses a
-node-local volume. The runtime token is passed through environment state and is
-never printed by the fixture endpoints.
+The renderer gets `ADMIN_URL` from a local service link to `admin`, so the app
+config does not hard-code internal URLs. The app services use `share: true` for
+the dedicated edge project. Mongo stays private and uses a node-local volume.
+The runtime token is passed through environment state and is never printed by
+the fixture endpoints.
 
 The app fixture sets `deployment.source: git` to prove the committed-source
 build path for the two Dockerfiles from one repository root.
@@ -51,7 +53,7 @@ The deploy still uses committed Git source, so CI should run from a clean checko
 and should not generate or edit tracked files before `tako deploy`.
 
 For the dedicated edge project, run from `edge/` after the app project has
-exported healthy `admin:web` and `renderer:web` endpoints:
+healthy shared `admin` and `renderer` endpoints:
 
 ```sh
 TAKO_NONINTERACTIVE=1 tako setup -e production --dedicated-edge

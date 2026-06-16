@@ -349,7 +349,7 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 	}
 
 	for serviceName, service := range env.Services {
-		if err := validateService(serviceName, &service, cfg); err != nil {
+		if err := validateService(envName, serviceName, &service, env.Services, cfg); err != nil {
 			return fmt.Errorf("environment %s: %w", envName, err)
 		}
 		// Update the service in the map with defaults applied
@@ -433,7 +433,7 @@ func validateServer(name string, server *ServerConfig) error {
 	return nil
 }
 
-func validateService(name string, service *ServiceConfig, cfg *Config) error {
+func validateService(envName string, name string, service *ServiceConfig, envServices map[string]ServiceConfig, cfg *Config) error {
 	// Validate service name format
 	if !isValidRuntimeIdentifier(name) {
 		return fmt.Errorf("service name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, hyphens, and underscores, and be 1-63 characters long", name)
@@ -518,7 +518,13 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 	if err := validateServicePorts(name, service); err != nil {
 		return err
 	}
+	if err := normalizeServiceShare(name, service); err != nil {
+		return err
+	}
 	if err := validateServiceExport(name, service); err != nil {
+		return err
+	}
+	if err := validateServiceEnvLinks(envName, name, service, envServices, cfg); err != nil {
 		return err
 	}
 
@@ -837,6 +843,159 @@ func normalizeImportServers(servers []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func normalizeServiceShare(name string, service *ServiceConfig) error {
+	if service.Share == nil || !service.Share.Enabled {
+		return nil
+	}
+	ports := service.EffectivePorts()
+	if len(ports) == 0 {
+		return fmt.Errorf("service %s: share requires a service port", name)
+	}
+	if service.Export == nil {
+		service.Export = &ServiceExportConfig{}
+	}
+	if service.Export.Ports == nil {
+		service.Export.Ports = make(map[string]int)
+	}
+
+	sharePorts := service.Share.Ports
+	if len(sharePorts) == 0 {
+		if len(ports) != 1 {
+			return fmt.Errorf("service %s: share: true requires exactly one service port; use share: [port_name] for multi-port services", name)
+		}
+		return addSharedExportPort(name, service.Export.Ports, DefaultSharedPortName, ports[0].Target)
+	}
+
+	for _, portName := range sharePorts {
+		port, ok := servicePortByName(service, portName)
+		if !ok {
+			return fmt.Errorf("service %s: share port %q is not a configured service port", name, portName)
+		}
+		if err := addSharedExportPort(name, service.Export.Ports, portName, port.Target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func addSharedExportPort(serviceName string, exports map[string]int, portName string, target int) error {
+	if !isValidRuntimeIdentifier(portName) {
+		return fmt.Errorf("service %s: share port %q is invalid", serviceName, portName)
+	}
+	if target < 1 || target > 65535 {
+		return fmt.Errorf("service %s: share port %s target must be between 1 and 65535", serviceName, portName)
+	}
+	if existing, ok := exports[portName]; ok && existing != target {
+		return fmt.Errorf("service %s: share port %s conflicts with export target %d", serviceName, portName, existing)
+	}
+	exports[portName] = target
+	return nil
+}
+
+func validateServiceEnvLinks(envName string, serviceName string, service *ServiceConfig, envServices map[string]ServiceConfig, cfg *Config) error {
+	for key, value := range service.Env {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return fmt.Errorf("service %s: env key cannot be empty", serviceName)
+		}
+		if value.IsPlain() {
+			continue
+		}
+		if value.URL != "" {
+			if containsControlCharacter(value.URL) {
+				return fmt.Errorf("service %s: env %s url contains a control character", serviceName, key)
+			}
+			continue
+		}
+		if value.Link == nil {
+			return fmt.Errorf("service %s: env %s must be a string, url, or link", serviceName, key)
+		}
+		link := value.Link
+		link.App = strings.TrimSpace(link.App)
+		link.Stage = strings.TrimSpace(link.Stage)
+		link.Service = strings.TrimSpace(link.Service)
+		link.Port = strings.TrimSpace(link.Port)
+		link.Servers = normalizeImportServers(link.Servers)
+		if link.Service == "" {
+			return fmt.Errorf("service %s: env %s link.service is required", serviceName, key)
+		}
+		if !isValidRuntimeIdentifier(link.Service) {
+			return fmt.Errorf("service %s: env %s link service %q is invalid", serviceName, key, link.Service)
+		}
+		if link.Port != "" && !isValidRuntimeIdentifier(link.Port) {
+			return fmt.Errorf("service %s: env %s link port %q is invalid", serviceName, key, link.Port)
+		}
+		if link.App == "" && link.Stage == "" {
+			if link.Service == serviceName {
+				return fmt.Errorf("service %s: env %s cannot link to itself", serviceName, key)
+			}
+			target, ok := envServices[link.Service]
+			if !ok {
+				return fmt.Errorf("service %s: env %s links unknown service %q", serviceName, key, link.Service)
+			}
+			if _, err := resolveLinkedServicePort(link.Service, target, link.Port); err != nil {
+				return fmt.Errorf("service %s: env %s: %w", serviceName, key, err)
+			}
+			continue
+		}
+		if link.App == "" || link.Stage == "" {
+			return fmt.Errorf("service %s: env %s cross-project link requires app and stage", serviceName, key)
+		}
+		if !isValidProjectName(link.App) {
+			return fmt.Errorf("service %s: env %s link app %q is invalid", serviceName, key, link.App)
+		}
+		if !isValidRuntimeIdentifier(link.Stage) {
+			return fmt.Errorf("service %s: env %s link stage %q is invalid", serviceName, key, link.Stage)
+		}
+		if link.App == cfg.Project.Name && link.Stage == envName {
+			return fmt.Errorf("service %s: env %s links the current app/stage; use link: %s", serviceName, key, link.Service)
+		}
+		for _, serverName := range link.Servers {
+			if _, ok := cfg.Servers[serverName]; !ok {
+				return fmt.Errorf("service %s: env %s link server %q is not defined", serviceName, key, serverName)
+			}
+		}
+	}
+	return nil
+}
+
+func resolveLinkedServicePort(serviceName string, service ServiceConfig, requested string) (PortConfig, error) {
+	ports := service.EffectivePorts()
+	if len(ports) == 0 {
+		return PortConfig{}, fmt.Errorf("linked service %s has no service port", serviceName)
+	}
+	if requested == "" {
+		if len(ports) != 1 {
+			return PortConfig{}, fmt.Errorf("linked service %s has multiple ports; set link.port", serviceName)
+		}
+		return ports[0], nil
+	}
+	port, ok := servicePortByName(&service, requested)
+	if !ok {
+		return PortConfig{}, fmt.Errorf("linked service %s has no port %q", serviceName, requested)
+	}
+	return port, nil
+}
+
+func servicePortByName(service *ServiceConfig, name string) (PortConfig, bool) {
+	name = strings.TrimSpace(name)
+	for _, port := range service.EffectivePorts() {
+		if port.Name == name {
+			return port, true
+		}
+	}
+	return PortConfig{}, false
+}
+
+func containsControlCharacter(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func validateServiceExport(name string, service *ServiceConfig) error {

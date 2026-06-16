@@ -20,7 +20,7 @@ minimal so the deployment shape is easy to see and adapt.
 | `10-stages-shared-node` | Preview and production on one node | Same project, separate environments, distinct domains |
 | `11-websocket-node` | Realtime Node.js service | WebSocket endpoint, replicas, `ip_hash` balancing |
 | `12-github-actions-deploy` | CI/CD deployment | GitHub Actions, state restore, noninteractive deploy |
-| `cms-dynamic-domains` | CMS app plus dedicated Caddy edge | Cross-project exports/imports, generated Caddy config mount, direct `80/443` edge |
+| `cms-dynamic-domains` | CMS app plus dedicated Caddy edge | Shared app endpoints, generated Caddy config mount, direct `80/443` edge |
 | `next-admin-renderer-mongo` | Jardin-shaped CMS fixture | Two Dockerfiles, Mongo, runtime token, colocated Caddy, dedicated generated edge |
 
 ## How To Use

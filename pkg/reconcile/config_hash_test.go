@@ -32,7 +32,7 @@ func TestSafeServiceConfigHashStableAcrossOrderOnlyFields(t *testing.T) {
 
 func TestSafeServiceConfigHashRejectsEnvMaterial(t *testing.T) {
 	tests := map[string]config.ServiceConfig{
-		"env":               {Image: "nginx", Env: map[string]string{"TOKEN": "secret"}},
+		"env":               {Image: "nginx", Env: map[string]config.EnvValue{"TOKEN": config.PlainEnvValue("secret")}},
 		"envFile":           {Image: "nginx", EnvFile: ".env"},
 		"monitoringWebhook": {Image: "nginx", Monitoring: &config.MonitoringConfig{Webhook: "https://hooks.example.test/token"}},
 		"secrets":           {Image: "nginx", Secrets: []string{"TOKEN"}},

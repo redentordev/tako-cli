@@ -248,16 +248,33 @@ func detectChanges(projectName string, environment string, serviceName string, d
 
 // Helper functions for comparing configurations
 
-func envMapsEqual(a, b map[string]string) bool {
+func envMapsEqual(a, b map[string]config.EnvValue) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for k, v := range a {
-		if b[k] != v {
+		if !envValuesEqual(v, b[k]) {
 			return false
 		}
 	}
 	return true
+}
+
+func envValuesEqual(a, b config.EnvValue) bool {
+	if a.Value != b.Value || a.URL != b.URL {
+		return false
+	}
+	if (a.Link == nil) != (b.Link == nil) {
+		return false
+	}
+	if a.Link == nil {
+		return true
+	}
+	return a.Link.App == b.Link.App &&
+		a.Link.Stage == b.Link.Stage &&
+		a.Link.Service == b.Link.Service &&
+		a.Link.Port == b.Link.Port &&
+		stringSlicesEqual(a.Link.Servers, b.Link.Servers)
 }
 
 func domainsEqual(a, b *config.ProxyConfig) bool {

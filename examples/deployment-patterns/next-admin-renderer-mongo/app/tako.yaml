@@ -42,9 +42,7 @@ environments:
         build: .
         dockerfile: Dockerfile
         port: 3000
-        export:
-          ports:
-            web: 3000
+        share: true
         dependsOn:
           - mongo
         deploy:
@@ -69,9 +67,7 @@ environments:
         dockerfile: Dockerfile.renderer
         port: 3000
         replicas: 2
-        export:
-          ports:
-            web: 3000
+        share: true
         dependsOn:
           - admin
         deploy:
@@ -82,7 +78,8 @@ environments:
         env:
           SERVICE_ROLE: renderer
           PORT: "3000"
-          ADMIN_URL: http://admin:3000
+          ADMIN_URL:
+            link: admin
         envFile: ${JARDIN_ENV_FILE}
         healthCheck:
           path: /api/health

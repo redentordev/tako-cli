@@ -14,7 +14,7 @@ The CLI uses SSH for bootstrap and talks to a node-local `takod` agent for
 runtime work. `takod` owns Docker reconciliation, proxy config, WireGuard mesh
 state, remote leases, and replicated deployment state.
 
-[![Version](https://img.shields.io/badge/version-0.2.2-blue)](https://github.com/redentordev/tako-cli/releases)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue)](https://github.com/redentordev/tako-cli/releases)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Runtime](https://img.shields.io/badge/runtime-takod_mesh-blue)](https://github.com/redentordev/tako-cli)
@@ -137,7 +137,7 @@ make install
 ```bash
 tako --version
 # Output:
-# Tako CLI v0.2.2
+# Tako CLI v0.4.0
 # Commit:  abc1234
 # Built:   2025-01-01T12:00:00Z
 ```
@@ -562,14 +562,14 @@ imports:
     project: app
     environment: production
     service: admin
-    port: web
+    port: default
     servers:
       - app-node
   app_renderer:
     project: app
     environment: production
     service: renderer
-    port: web
+    port: default
     servers:
       - app-node
 
@@ -590,36 +590,62 @@ configs:
 Generated config content is hashed after import resolution, so changed healthy
 upstreams trigger reconciliation for services that mount the generated file.
 
-### Cross-Project Exports
+### Service Links Across Apps
 
-Services stay private unless they explicitly export named ports. Edge or
-consumer projects declare imports at the project level:
+Services stay private unless the producer explicitly shares them. Consumers set
+normal environment variables from service links; Tako resolves the private URL
+during deploy.
 
 ```yaml
-# app project
+# producer app
 services:
   renderer:
     image: ghcr.io/acme/renderer:latest
     port: 3000
-    export:
-      ports:
-        web: 3000
+    share: true
 
-# edge project
+# consumer app
+services:
+  web:
+    env:
+      RENDERER_URL:
+        link:
+          app: app
+          stage: production
+          service: renderer
+```
+
+Same app/stage links are shorter:
+
+```yaml
+services:
+  admin:
+    port: 3000
+
+  renderer:
+    env:
+      ADMIN_URL:
+        link: admin
+```
+
+For dedicated edge config workflows, explicit `imports` are still available.
+Use them when a generated Caddyfile needs a named upstream:
+
+```yaml
 imports:
   app_renderer:
     project: app
     environment: production
     service: renderer
-    port: web
+    port: default
     servers:
       - app-node
 ```
 
-Use `tako discovery --import app_renderer` from the edge project to resolve the
-exported target from remote desired state and show live healthy endpoints. For
-edge config workflows, `--format upstreams` prints a space-separated list of
-HTTP upstream URLs suitable for manual Caddy environment placeholders:
+Then run `tako discovery --import app_renderer` from the edge project to resolve
+a shared target from remote desired state and show live healthy endpoints.
+`--format upstreams` prints a space-separated list of HTTP upstream URLs
+suitable for manual Caddy environment placeholders:
 
 ```sh
 export APP_RENDERER_UPSTREAMS="$(tako discovery --import app_renderer --format upstreams | tr -d '\n')"

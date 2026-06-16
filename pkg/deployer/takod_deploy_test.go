@@ -719,7 +719,7 @@ func TestServiceRuntimeLabelsIncludeSafeConfigHash(t *testing.T) {
 func TestServiceRuntimeLabelsKeepRuntimeIdentityForEnvMaterial(t *testing.T) {
 	labels := serviceRuntimeLabels("demo", "production", "web", config.ServiceConfig{
 		Image: "nginx:1.27",
-		Env:   map[string]string{"TOKEN": "secret"},
+		Env:   map[string]config.EnvValue{"TOKEN": config.PlainEnvValue("secret")},
 	})
 	if _, ok := labels[reconcile.ConfigHashLabel]; ok {
 		t.Fatalf("config hash label should be omitted for env material: %#v", labels)
@@ -872,10 +872,10 @@ func TestBuildHookRequestMergesServiceAndHookRuntimeSettings(t *testing.T) {
 	}
 	service := &config.ServiceConfig{
 		Image: "demo/web:1",
-		Env: map[string]string{
-			"BASE":     "service",
-			"SERVICE":  "yes",
-			"OVERRIDE": "service",
+		Env: map[string]config.EnvValue{
+			"BASE":     config.PlainEnvValue("service"),
+			"SERVICE":  config.PlainEnvValue("yes"),
+			"OVERRIDE": config.PlainEnvValue("service"),
 		},
 		Volumes: []string{"data:/data"},
 	}

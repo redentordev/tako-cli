@@ -449,7 +449,7 @@ func assertMonorepoPattern(t *testing.T, cfg *config.Config) {
 	web := services["web"]
 	api := services["api"]
 	assertPublicService(t, web, 3000)
-	if web.Build != "./web" || !slices.Contains(web.DependsOn, "api") || web.Env["API_URL"] != "http://api:4000" {
+	if web.Build != "./web" || !slices.Contains(web.DependsOn, "api") || web.Env["API_URL"].PlainString() != "http://api:4000" {
 		t.Fatalf("monorepo web should use its own context and depend on internal api: %#v", web)
 	}
 	if api.Build != "./api" || api.Proxy != nil || api.Port != 4000 || api.Replicas != 2 {
@@ -475,7 +475,7 @@ func assertStagesPattern(t *testing.T, cfg *config.Config) {
 	if preview.Proxy.Domain == production.Proxy.Domain {
 		t.Fatalf("stage domains must differ: %q", preview.Proxy.Domain)
 	}
-	if preview.Env["APP_STAGE"] != "preview" || production.Env["APP_STAGE"] != "production" {
+	if preview.Env["APP_STAGE"].PlainString() != "preview" || production.Env["APP_STAGE"].PlainString() != "production" {
 		t.Fatalf("stage env values should make runtime identity visible: preview=%#v production=%#v", preview.Env, production.Env)
 	}
 }
@@ -506,8 +506,8 @@ func assertCMSDynamicDomainsAppPattern(t *testing.T, cfg *config.Config) {
 	services := productionServices(t, cfg)
 	for _, serviceName := range []string{"admin", "renderer"} {
 		service := services[serviceName]
-		if service.Export == nil || service.Export.Ports["web"] != 80 {
-			t.Fatalf("%s should export web:80: %#v", serviceName, service.Export)
+		if service.Share == nil || !service.Share.Enabled || service.Export == nil || service.Export.Ports[config.DefaultSharedPortName] != 80 {
+			t.Fatalf("%s should share default:80: share=%#v export=%#v", serviceName, service.Share, service.Export)
 		}
 		if service.Port != 80 {
 			t.Fatalf("%s should expose internal port 80: %#v", serviceName, service)
@@ -528,6 +528,9 @@ func assertCMSDynamicDomainsEdgePattern(t *testing.T, cfg *config.Config) {
 	}
 	if cfg.Imports["jardin_renderer"].Project != "pattern-cms-app" || cfg.Imports["jardin_renderer"].Service != "renderer" {
 		t.Fatalf("edge missing renderer import: %#v", cfg.Imports["jardin_renderer"])
+	}
+	if cfg.Imports["jardin_admin"].Port != config.DefaultSharedPortName || cfg.Imports["jardin_renderer"].Port != config.DefaultSharedPortName {
+		t.Fatalf("edge imports should consume default shared ports: %#v", cfg.Imports)
 	}
 	edge := productionServices(t, cfg)["edge"]
 	if len(edge.Ports) != 2 {
@@ -579,10 +582,10 @@ func assertNextAdminRendererMongoAppPattern(t *testing.T, cfg *config.Config) {
 	if admin.Build != "." || admin.Dockerfile != "Dockerfile" || admin.Port != 3000 {
 		t.Fatalf("admin should build from root Dockerfile on port 3000: %#v", admin)
 	}
-	if admin.Export == nil || admin.Export.Ports["web"] != 3000 {
-		t.Fatalf("admin should export web:3000: %#v", admin.Export)
+	if admin.Share == nil || !admin.Share.Enabled || admin.Export == nil || admin.Export.Ports[config.DefaultSharedPortName] != 3000 {
+		t.Fatalf("admin should share default:3000: share=%#v export=%#v", admin.Share, admin.Export)
 	}
-	if !slices.Contains(admin.DependsOn, "mongo") || admin.Env["MONGO_URL"] == "" || admin.EnvFile != ".env.example" {
+	if !slices.Contains(admin.DependsOn, "mongo") || admin.Env["MONGO_URL"].PlainString() == "" || admin.EnvFile != ".env.example" {
 		t.Fatalf("admin should depend on mongo and receive runtime env file: %#v", admin)
 	}
 	if admin.HealthCheck.Path != "/api/health" || admin.Deploy.Strategy != "rolling" || admin.Deploy.Order != "start-first" {
@@ -593,11 +596,12 @@ func assertNextAdminRendererMongoAppPattern(t *testing.T, cfg *config.Config) {
 	if renderer.Build != "." || renderer.Dockerfile != "Dockerfile.renderer" || renderer.Replicas != 2 {
 		t.Fatalf("renderer should build from Dockerfile.renderer with replicas: %#v", renderer)
 	}
-	if renderer.Export == nil || renderer.Export.Ports["web"] != 3000 {
-		t.Fatalf("renderer should export web:3000: %#v", renderer.Export)
+	if renderer.Share == nil || !renderer.Share.Enabled || renderer.Export == nil || renderer.Export.Ports[config.DefaultSharedPortName] != 3000 {
+		t.Fatalf("renderer should share default:3000: share=%#v export=%#v", renderer.Share, renderer.Export)
 	}
-	if !slices.Contains(renderer.DependsOn, "admin") || renderer.Env["ADMIN_URL"] != "http://admin:3000" || renderer.EnvFile != ".env.example" {
-		t.Fatalf("renderer should depend on admin and receive runtime env file: %#v", renderer)
+	adminURL := renderer.Env["ADMIN_URL"]
+	if !slices.Contains(renderer.DependsOn, "admin") || adminURL.Link == nil || adminURL.Link.Service != "admin" || renderer.EnvFile != ".env.example" {
+		t.Fatalf("renderer should depend on admin through a local service link and receive runtime env file: %#v", renderer)
 	}
 	if renderer.HealthCheck.Path != "/api/health" || renderer.Deploy.Strategy != "rolling" || renderer.Deploy.Order != "start-first" {
 		t.Fatalf("renderer should be health-gated rolling deploy: health=%#v deploy=%#v", renderer.HealthCheck, renderer.Deploy)
@@ -624,6 +628,9 @@ func assertNextAdminRendererMongoEdgePattern(t *testing.T, cfg *config.Config) {
 	}
 	if cfg.Imports["jardin_renderer"].Project != "pattern-next-cms-app" || cfg.Imports["jardin_renderer"].Service != "renderer" {
 		t.Fatalf("edge missing renderer import: %#v", cfg.Imports["jardin_renderer"])
+	}
+	if cfg.Imports["jardin_admin"].Port != config.DefaultSharedPortName || cfg.Imports["jardin_renderer"].Port != config.DefaultSharedPortName {
+		t.Fatalf("edge imports should consume default shared ports: %#v", cfg.Imports)
 	}
 
 	edge := productionServices(t, cfg)["edge"]

@@ -720,7 +720,7 @@ func revisionID(revision *DesiredRevision) string {
 	return fmt.Sprintf("%s-%s", revision.CreatedAt.Format("20060102T150405Z"), hex.EncodeToString(sum[:])[:12])
 }
 
-func sortedKeys(values map[string]string) []string {
+func sortedKeys(values map[string]config.EnvValue) []string {
 	if len(values) == 0 {
 		return nil
 	}

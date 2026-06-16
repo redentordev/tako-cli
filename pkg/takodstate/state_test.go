@@ -32,9 +32,9 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 			Platform:   "linux/amd64",
 			Port:       3000,
 			Replicas:   0,
-			Env: map[string]string{
-				"DATABASE_URL": "postgres://user:password@example/db",
-				"TOKEN":        "top-secret-token",
+			Env: map[string]config.EnvValue{
+				"DATABASE_URL": config.PlainEnvValue("postgres://user:password@example/db"),
+				"TOKEN":        config.PlainEnvValue("top-secret-token"),
 			},
 			EnvFile: ".env.production",
 			Secrets: []string{"TOKEN:prod/token", "DATABASE_URL"},

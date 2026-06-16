@@ -33,9 +33,7 @@ environments:
       admin:
         image: nginxdemos/hello:plain-text
         port: 80
-        export:
-          ports:
-            web: 80
+        share: true
         dependsOn:
           - mongo
         healthCheck:
@@ -47,9 +45,7 @@ environments:
       renderer:
         image: nginxdemos/hello:plain-text
         port: 80
-        export:
-          ports:
-            web: 80
+        share: true
         dependsOn:
           - admin
         replicas: 2

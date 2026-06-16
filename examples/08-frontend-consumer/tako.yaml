@@ -8,13 +8,6 @@ servers:
     user: ${SERVER_USER}
     sshKey: ${SSH_KEY}
 
-imports:
-  backend_api:
-    project: backend-api
-    environment: production
-    service: api
-    port: web
-
 environments:
   production:
     servers:
@@ -26,8 +19,11 @@ environments:
         restart: unless-stopped
         env:
           NODE_ENV: production
-          API_IMPORT: backend_api
-          API_URL: ${BACKEND_API_URL}
+          API_URL:
+            link:
+              app: backend-api
+              stage: production
+              service: api
         healthCheck:
           path: /health
           interval: 10s

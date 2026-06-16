@@ -47,7 +47,7 @@ func TestBuildScaleDeploymentStateRecordsScaledServices(t *testing.T) {
 		"web": {
 			Port:     3000,
 			Replicas: 4,
-			Env:      map[string]string{"TOKEN": "secret"},
+			Env:      map[string]config.EnvValue{"TOKEN": config.PlainEnvValue("secret")},
 		},
 	}
 

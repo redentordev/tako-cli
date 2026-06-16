@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
@@ -79,7 +80,11 @@ func runOneOffCommand(cmd *cobra.Command, args []string) error {
 	tty := commandWantsTTY(command, runTTY)
 	stdin := commandWantsStdin(command, tty, runStdin)
 
-	envFileContent, err := buildOperatorEnvFileContent(envName, &service)
+	pool := ssh.NewPool()
+	defer pool.CloseAll()
+
+	deploy := deployer.NewDeployerWithPool(nil, cfg, envName, pool, verbose)
+	envFileContent, err := deploy.BuildServiceEnvFileContent(serviceName, &service)
 	if err != nil {
 		return err
 	}
@@ -87,9 +92,6 @@ func runOneOffCommand(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-
-	pool := ssh.NewPool()
-	defer pool.CloseAll()
 
 	target, serverNames, err := selectRunTarget(pool, cfg, envName, runServer)
 	if err != nil {

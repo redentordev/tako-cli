@@ -487,7 +487,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		return err
 	}
 
-	envFileContent, err := d.buildTakodEnvFileContent(service)
+	envFileContent, err := d.buildTakodEnvFileContent(serviceName, service)
 	if err != nil {
 		return err
 	}
@@ -617,7 +617,7 @@ func (d *Deployer) buildHookRequest(serviceName string, service *config.ServiceC
 		return takod.RunHookRequest{}, fmt.Errorf("%s hook is nil", hookName)
 	}
 	hookService := serviceConfigForHook(service, hook)
-	envFileContent, err := d.buildTakodEnvFileContent(&hookService)
+	envFileContent, err := d.buildTakodEnvFileContent(serviceName, &hookService)
 	if err != nil {
 		return takod.RunHookRequest{}, err
 	}
@@ -663,16 +663,16 @@ func serviceConfigForHook(service *config.ServiceConfig, hook *config.HookConfig
 	return hookService
 }
 
-func mergeHookEnv(serviceEnv map[string]string, hookEnv map[string]string) map[string]string {
+func mergeHookEnv(serviceEnv map[string]config.EnvValue, hookEnv map[string]string) map[string]config.EnvValue {
 	if len(serviceEnv) == 0 && len(hookEnv) == 0 {
 		return nil
 	}
-	merged := make(map[string]string, len(serviceEnv)+len(hookEnv))
+	merged := make(map[string]config.EnvValue, len(serviceEnv)+len(hookEnv))
 	for key, value := range serviceEnv {
 		merged[key] = value
 	}
 	for key, value := range hookEnv {
-		merged[key] = value
+		merged[key] = config.PlainEnvValue(value)
 	}
 	return merged
 }
@@ -1004,17 +1004,29 @@ func (d *Deployer) ensureTakodProxy(client *ssh.Client, networkName string, emai
 	return nil
 }
 
-func (d *Deployer) buildTakodEnvFileContent(service *config.ServiceConfig) (string, error) {
+// BuildServiceEnvFileContent renders the runtime env file for a service after
+// resolving Tako service links. It is shared by deploy and one-off run paths.
+func (d *Deployer) BuildServiceEnvFileContent(serviceName string, service *config.ServiceConfig) (string, error) {
+	return d.buildTakodEnvFileContent(serviceName, service)
+}
+
+func (d *Deployer) buildTakodEnvFileContent(serviceName string, service *config.ServiceConfig) (string, error) {
 	hasEnvVars := len(service.Env) > 0 || len(service.Secrets) > 0 || service.EnvFile != ""
 	if !hasEnvVars {
 		return "", nil
 	}
+	resolvedEnv, err := d.resolveServiceEnv(serviceName, service)
+	if err != nil {
+		return "", err
+	}
+	envService := *service
+	envService.Env = resolvedEnv
 
 	secretsMgr, err := secrets.NewManager(d.environment)
 	if err != nil {
 		return "", fmt.Errorf("failed to create secrets manager: %w", err)
 	}
-	envFile, err := secretsMgr.CreateEnvFile(service)
+	envFile, err := secretsMgr.CreateEnvFile(&envService)
 	if err != nil {
 		return "", fmt.Errorf("failed to create env file: %w", err)
 	}

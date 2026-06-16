@@ -17,14 +17,14 @@ imports:
     project: pattern-cms-app
     environment: production
     service: admin
-    port: web
+    port: default
     servers:
       - app
   jardin_renderer:
     project: pattern-cms-app
     environment: production
     service: renderer
-    port: web
+    port: default
     servers:
       - app
 

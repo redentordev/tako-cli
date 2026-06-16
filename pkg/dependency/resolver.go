@@ -124,6 +124,14 @@ func (r *Resolver) InferDependencies() map[string][]string {
 
 		// Check environment variables for references to other services
 		for key, value := range service.Env {
+			if value.Link != nil && value.Link.App == "" && value.Link.Stage == "" && value.Link.Service != "" && value.Link.Service != name {
+				deps = append(deps, value.Link.Service)
+				continue
+			}
+			if !value.IsPlain() {
+				continue
+			}
+			valueText := value.PlainString()
 			for otherName := range r.services {
 				if otherName == name {
 					continue // Skip self
@@ -138,9 +146,9 @@ func (r *Resolver) InferDependencies() map[string][]string {
 
 				// Get the environment variable key to check if it's a host/server reference
 				upperOther := strings.ToUpper(otherName)
-				upperValue := strings.ToUpper(value)
+				upperValue := strings.ToUpper(valueText)
 				lowerOther := strings.ToLower(otherName)
-				lowerValue := strings.ToLower(value)
+				lowerValue := strings.ToLower(valueText)
 
 				// First check: does the value equal the service name exactly AND is it in a host/server variable?
 				// This handles cases like: database__connection__host: mysql

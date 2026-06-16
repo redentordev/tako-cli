@@ -306,19 +306,30 @@ servers:
 #         askPath: /api/platform/domains/ask
 #         onDemandTLS: true
 
-# Cross-project imports are declared at the project level and consumed by
-# edge/proxy services or tooling.
+# For normal app-to-app calls, share a producer service and set consumer env
+# values from a link:
+# services:
+#   api:
+#     port: 4000
+#     share: true
+#   web:
+#     env:
+#       API_URL:
+#         link: api
+#
+# Cross-project links use the same env shape with app/stage/service. Explicit
+# imports are still available for edge/proxy generated configs and tooling.
 # imports:
 #   app_admin:
 #     project: other-project
 #     environment: production
 #     service: admin
-#     port: web
+#     port: default
 #   app_renderer:
 #     project: other-project
 #     environment: production
 #     service: renderer
-#     port: web
+#     port: default
 
 # ============================================================================
 # ENVIRONMENTS (Required)
@@ -381,10 +392,8 @@ environments:
         #   timeout: 5s
         #   retries: 3
         
-        # Export service ports to other projects
-        # export:
-        #   ports:
-        #     web: 3000
+        # Share the primary service port with other projects
+        # share: true
 
       # ======================================================================
       # DATABASE SERVICE - PostgreSQL example
@@ -399,9 +408,7 @@ environments:
       #     POSTGRES_USER: myapp
       #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       #     POSTGRES_DB: myapp_production
-      #   # export:
-      #   #   ports:
-      #   #     postgres: 5432  # Allow other projects to import this port
+      #   # share: true  # Allow other projects to link to this service
 
       # ======================================================================
       # CACHE SERVICE - Redis example

@@ -127,6 +127,10 @@ func (d *Deployer) resolveImportUpstreams(alias string) ([]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("import not found in config")
 	}
+	return d.resolveImportConfigUpstreams(alias, importConfig)
+}
+
+func (d *Deployer) resolveImportConfigUpstreams(alias string, importConfig config.ImportConfig) ([]string, error) {
 	serverNames, err := serviceimport.ServerNames(d.config, d.environment, importConfig, "")
 	if err != nil {
 		return nil, err

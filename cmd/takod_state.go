@@ -91,7 +91,7 @@ func cloneServiceMap(services map[string]config.ServiceConfig) map[string]config
 	return out
 }
 
-func redactedEnvKeys(env map[string]string) map[string]string {
+func redactedEnvKeys(env map[string]config.EnvValue) map[string]string {
 	if len(env) == 0 {
 		return nil
 	}

@@ -1,20 +1,20 @@
 # Example 07: Backend API (Cross-Project Provider)
 
-This example demonstrates a backend API service that **exports** itself for use by other projects.
+This example demonstrates a backend API service that **shares** itself for use by other projects.
 
 ## Features
 
-- **Exported Service**: API service explicitly exports the named `web` port
+- **Shared Service**: API service explicitly shares its primary port
 - **Load Balanced**: 2 replicas with health checks
 - **Private Database**: PostgreSQL database NOT exported (stays private)
-- **Multi-Project**: Can be consumed by other projects via imports
+- **Multi-Project**: Can be consumed by other projects via service links
 
 ## Services
 
 ### api
 - **Port**: 4000
 - **Replicas**: 2
-- **Export**: `web:4000` (available to other projects)
+- **Share**: primary port 4000 is available to linked projects
 - **Endpoints**:
   - `GET /health` - Health check
   - `GET /api/users` - User list
@@ -25,17 +25,19 @@ This example demonstrates a backend API service that **exports** itself for use 
 - **Persistent**: true
 - **Export**: false (private to this project)
 
-## Export
+## Share
 
-Other projects can declare an import for:
+Other projects can link to this shared service:
 
 ```yaml
-imports:
-  backend_api:
-    project: backend-api
-    environment: production
-    service: api
-    port: web
+services:
+  web:
+    env:
+      API_URL:
+        link:
+          app: backend-api
+          stage: production
+          service: api
 ```
 
 ## Usage

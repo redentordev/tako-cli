@@ -589,9 +589,84 @@
                 "env": {
                   "type": "object",
                   "additionalProperties": {
-                    "type": "string"
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "description": "Structured environment value resolved by Tako",
+                        "oneOf": [
+                          {
+                            "required": [
+                              "url"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "link"
+                            ]
+                          }
+                        ],
+                        "properties": {
+                          "url": {
+                            "type": "string",
+                            "description": "Explicit URL override"
+                          },
+                          "link": {
+                            "description": "Service link. Use a service name for same app/stage, or an object for another app/stage.",
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "required": [
+                                  "service"
+                                ],
+                                "properties": {
+                                  "app": {
+                                    "type": "string",
+                                    "description": "Producing app/project name"
+                                  },
+                                  "project": {
+                                    "type": "string",
+                                    "description": "Alias for app"
+                                  },
+                                  "stage": {
+                                    "type": "string",
+                                    "description": "Producing stage/environment"
+                                  },
+                                  "environment": {
+                                    "type": "string",
+                                    "description": "Alias for stage"
+                                  },
+                                  "service": {
+                                    "type": "string",
+                                    "description": "Producing service name"
+                                  },
+                                  "port": {
+                                    "type": "string",
+                                    "description": "Named port for multi-port services"
+                                  },
+                                  "servers": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "description": "Optional configured server names to query for the producing app"
+                                  }
+                                },
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "additionalProperties": false
+                      }
+                    ]
                   },
-                  "description": "Environment variables"
+                  "description": "Environment variables. Values may be strings, explicit URLs, or service links."
                 },
                 "envFile": {
                   "type": "string",
@@ -771,6 +846,32 @@
                       ]
                     }
                   }
+                },
+                "share": {
+                  "description": "Clean shorthand for sharing service ports with other projects",
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "ports": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  ]
                 },
                 "export": {
                   "type": "object",
