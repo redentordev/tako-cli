@@ -23,7 +23,6 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/redentordev/tako-cli/pkg/unregistry"
-	"github.com/redentordev/tako-cli/pkg/utils"
 )
 
 type takodAssignment struct {
@@ -431,25 +430,26 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		return err
 	}
 
-	mounts, err := d.buildTakodMountSpecs(serviceName, service)
+	mounts, externalVolumes, err := d.buildTakodMountSpecs(serviceName, service)
 	if err != nil {
 		return err
 	}
 
 	request := takod.ReconcileServiceRequest{
-		Project:        d.config.Project.Name,
-		Environment:    d.environment,
-		Service:        serviceName,
-		Image:          imageRef,
-		PullImage:      service.Image != "",
-		Restart:        service.Restart,
-		Network:        networkName,
-		NetworkAlias:   serviceName,
-		EnvFileContent: envFileContent,
-		Mounts:         mounts,
-		Health:         d.buildTakodHealthSpec(service),
-		Command:        service.Command,
-		Labels:         serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
+		Project:         d.config.Project.Name,
+		Environment:     d.environment,
+		Service:         serviceName,
+		Image:           imageRef,
+		PullImage:       service.Image != "",
+		Restart:         service.Restart,
+		Network:         networkName,
+		NetworkAlias:    serviceName,
+		EnvFileContent:  envFileContent,
+		Mounts:          mounts,
+		Health:          d.buildTakodHealthSpec(service),
+		Command:         service.Command,
+		Labels:          serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
+		ExternalVolumes: externalVolumes,
 	}
 	for _, slot := range slots {
 		meshPort := 0
@@ -470,7 +470,10 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 }
 
 func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string, service *config.ServiceConfig, slot int, publishMeshUpstreams bool, meshPort int) (takod.ContainerSpec, error) {
-	container := takod.ContainerSpec{Name: d.takodContainerName(serviceName, slot)}
+	container := takod.ContainerSpec{
+		Name:           d.takodContainerName(serviceName, slot),
+		NetworkAliases: []string{d.takodContainerAlias(serviceName, slot)},
+	}
 	if service.IsPublic() && publishMeshUpstreams {
 		meshHostIP, err := d.meshHostIPForServer(serverName)
 		if err != nil {
@@ -505,7 +508,7 @@ func serviceRuntimeLabels(project string, environment string, serviceName string
 }
 
 func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.HealthSpec {
-	if service.HealthCheck.Path == "" || service.Port <= 0 {
+	if service.HealthCheck.Path == "" && service.HealthCheck.TCPPort <= 0 {
 		return nil
 	}
 
@@ -526,8 +529,19 @@ func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.He
 		startPeriod = "10s"
 	}
 
+	port := service.Port
+	scheme := ""
+	if service.HealthCheck.Path != "" {
+		scheme = "http"
+	}
+	if service.HealthCheck.TCPPort > 0 {
+		port = service.HealthCheck.TCPPort
+	}
+
 	return &takod.HealthSpec{
-		Command:      buildTakodHealthCommand(service.Port, service.HealthCheck.Path),
+		Path:         service.HealthCheck.Path,
+		Port:         port,
+		Scheme:       scheme,
 		Interval:     interval,
 		Timeout:      timeout,
 		Retries:      retries,
@@ -561,34 +575,40 @@ func deploymentHealthWaitAttempts(interval string, startPeriod string, retries i
 	return attempts
 }
 
-func buildTakodHealthCommand(port int, path string) string {
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
-	return fmt.Sprintf("curl -sf -- %s || exit 1", utils.ShellQuote(url))
-}
-
-func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.ServiceConfig) ([]string, error) {
+func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.ServiceConfig) ([]string, []string, error) {
 	var mounts []string
+	var externalVolumes []string
+	externalSeen := make(map[string]bool)
 	for _, volume := range service.Volumes {
 		if config.IsNFSVolume(volume) {
-			return nil, fmt.Errorf("service %s: NFS volumes are no longer supported; use node-local volumes or an external storage service", serviceName)
+			return nil, nil, fmt.Errorf("service %s: NFS volumes are no longer supported; use node-local volumes or an external storage service", serviceName)
 		}
 
 		source, target := parseVolumeSpec(volume)
 		if target == "" {
 			target = source
-			source = runtimeid.VolumeName(d.config.Project.Name, d.environment, target)
+			source = d.config.GetVolumeName(target, d.environment)
 			mounts = append(mounts, fmt.Sprintf("type=volume,source=%s,target=%s", source, target))
+			if d.config.IsVolumeExternal(target) && !externalSeen[source] {
+				externalVolumes = append(externalVolumes, source)
+				externalSeen[source] = true
+			}
 			continue
 		}
 
 		if strings.HasPrefix(source, "/") {
 			mounts = append(mounts, fmt.Sprintf("type=bind,source=%s,target=%s", source, target))
 		} else {
-			namedVolume := runtimeid.VolumeName(d.config.Project.Name, d.environment, source)
+			namedVolume := d.config.GetVolumeName(source, d.environment)
 			mounts = append(mounts, fmt.Sprintf("type=volume,source=%s,target=%s", namedVolume, target))
+			if d.config.IsVolumeExternal(source) && !externalSeen[namedVolume] {
+				externalVolumes = append(externalVolumes, namedVolume)
+				externalSeen[namedVolume] = true
+			}
 		}
 	}
-	return mounts, nil
+	sort.Strings(externalVolumes)
+	return mounts, externalVolumes, nil
 }
 
 func (d *Deployer) ensureTakodProxy(client *ssh.Client, networkName string, email string) error {
@@ -841,6 +861,10 @@ func (d *Deployer) takodContainerName(serviceName string, slot int) string {
 	return runtimeid.ContainerName(d.config.Project.Name, d.environment, serviceName, slot)
 }
 
+func (d *Deployer) takodContainerAlias(serviceName string, slot int) string {
+	return runtimeid.ContainerAlias(d.config.Project.Name, d.environment, serviceName, slot)
+}
+
 func (d *Deployer) takodDataDir() string {
 	if d.config.Runtime != nil && d.config.Runtime.Agent != nil && d.config.Runtime.Agent.DataDir != "" {
 		return d.config.Runtime.Agent.DataDir
@@ -879,10 +903,28 @@ func uniqueAssignmentServers(assignments []takodAssignment) []string {
 }
 
 func (d *Deployer) reconcileServiceViaTakod(client *ssh.Client, request takod.ReconcileServiceRequest) error {
-	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/reconcile-service", request); err != nil {
+	timeout := reconcileServiceRequestTimeout(request)
+	if _, err := takodclient.RequestJSONWithTimeout(client, d.takodSocket(), "POST", "/v1/reconcile-service", request, timeout); err != nil {
 		return fmt.Errorf("takod service reconciliation failed: %w", err)
 	}
 	return nil
+}
+
+func reconcileServiceRequestTimeout(request takod.ReconcileServiceRequest) time.Duration {
+	timeout := takodclient.JSONRequestTimeout
+	if request.Health == nil || request.Health.WaitAttempts <= 0 {
+		return timeout
+	}
+	containers := len(request.Containers)
+	if containers < 1 {
+		containers = 1
+	}
+	healthWindow := time.Duration(request.Health.WaitAttempts*containers) * time.Second
+	calculated := healthWindow + 2*time.Minute
+	if calculated < timeout {
+		return timeout
+	}
+	return calculated
 }
 
 func (d *Deployer) removeServiceViaTakod(client *ssh.Client, request takod.RemoveServiceRequest) error {

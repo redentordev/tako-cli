@@ -144,6 +144,42 @@ func TestBackupVolumesFromConfigIncludesTakoVolumeShorthand(t *testing.T) {
 	}
 }
 
+func TestBackupRequestResolvesExternalDockerVolumeName(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+		Volumes: map[string]config.VolumeConfig{
+			"n8n_data": {
+				External: true,
+				Name:     "captain--n8n-data",
+			},
+		},
+	}
+
+	got := backupRequest(cfg, "production", "n8n_data", "20260616-120000", 0)
+	if got.Volume != "n8n_data" {
+		t.Fatalf("logical backup volume = %q, want n8n_data", got.Volume)
+	}
+	if got.DockerVolume != "captain--n8n-data" {
+		t.Fatalf("docker volume = %q, want external volume name", got.DockerVolume)
+	}
+	if !got.ExternalVolume {
+		t.Fatal("backup request should mark external volume")
+	}
+}
+
+func TestBackupRequestUsesSafeArchiveNameForPathShorthand(t *testing.T) {
+	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo"}}
+
+	got := backupRequest(cfg, "production", "/data/uploads", "20260616-120000", 0)
+	if got.Volume != "data_uploads" {
+		t.Fatalf("archive volume = %q, want data_uploads", got.Volume)
+	}
+	wantDockerVolume := cfg.GetVolumeName("/data/uploads", "production")
+	if got.DockerVolume != wantDockerVolume {
+		t.Fatalf("docker volume = %q, want generated runtime volume", got.DockerVolume)
+	}
+}
+
 func TestConnectBackupNodeUsesProvidedPool(t *testing.T) {
 	provider := &fakeSSHClientProvider{}
 	server := config.ServerConfig{

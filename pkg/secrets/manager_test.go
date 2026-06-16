@@ -4,12 +4,124 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/crypto"
 )
+
+func TestNewManagerWritesGitignoreForSecretsAndProjectKey(t *testing.T) {
+	withTempWorkingDir(t)
+
+	if _, err := NewManager("production"); err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(".tako", ".gitignore"))
+	if err != nil {
+		t.Fatalf("failed to read .tako/.gitignore: %v", err)
+	}
+
+	got := string(data)
+	for _, want := range []string{"secrets*", "encryption.key", "*.key", "*.env", "state.json", "deployments/", "logs/"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf(".tako/.gitignore = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestManagerSetPreservesExistingEncryptedSecrets(t *testing.T) {
+	withTempWorkingDir(t)
+
+	mgr, err := NewManager("production")
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	if err := mgr.Set("FIRST_SECRET", "one", "production"); err != nil {
+		t.Fatalf("Set FIRST_SECRET returned error: %v", err)
+	}
+	if err := mgr.Set("SECOND_SECRET", "two", "production"); err != nil {
+		t.Fatalf("Set SECOND_SECRET returned error: %v", err)
+	}
+
+	reloaded, err := NewManager("production")
+	if err != nil {
+		t.Fatalf("reloading manager returned error: %v", err)
+	}
+	if got, err := reloaded.Get("FIRST_SECRET"); err != nil || got != "one" {
+		t.Fatalf("FIRST_SECRET = %q, %v; want one", got, err)
+	}
+	if got, err := reloaded.Get("SECOND_SECRET"); err != nil || got != "two" {
+		t.Fatalf("SECOND_SECRET = %q, %v; want two", got, err)
+	}
+
+	encrypted, err := crypto.IsFileEncrypted(filepath.Join(".tako", "secrets.production"))
+	if err != nil {
+		t.Fatalf("failed to inspect encrypted secrets file: %v", err)
+	}
+	if !encrypted {
+		t.Fatal("secrets.production should be encrypted after Set")
+	}
+}
+
+func TestManagerDeletePreservesOtherEncryptedSecrets(t *testing.T) {
+	withTempWorkingDir(t)
+
+	mgr, err := NewManager("production")
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	if err := mgr.Set("KEEP_SECRET", "keep", "production"); err != nil {
+		t.Fatalf("Set KEEP_SECRET returned error: %v", err)
+	}
+	if err := mgr.Set("DELETE_SECRET", "delete", "production"); err != nil {
+		t.Fatalf("Set DELETE_SECRET returned error: %v", err)
+	}
+	if err := mgr.Delete("DELETE_SECRET", "production"); err != nil {
+		t.Fatalf("Delete returned error: %v", err)
+	}
+
+	reloaded, err := NewManager("production")
+	if err != nil {
+		t.Fatalf("reloading manager returned error: %v", err)
+	}
+	if got, err := reloaded.Get("KEEP_SECRET"); err != nil || got != "keep" {
+		t.Fatalf("KEEP_SECRET = %q, %v; want keep", got, err)
+	}
+	if _, err := reloaded.Get("DELETE_SECRET"); err == nil {
+		t.Fatal("DELETE_SECRET should be removed")
+	}
+}
+
+func TestManagerLoadsPlaintextPlaceholderSecretsFile(t *testing.T) {
+	withTempWorkingDir(t)
+
+	if err := os.MkdirAll(".tako", 0700); err != nil {
+		t.Fatalf("failed to create .tako: %v", err)
+	}
+	placeholderPath := filepath.Join(".tako", "secrets.production")
+	if err := os.WriteFile(placeholderPath, []byte("# placeholder from secrets init\n"), 0600); err != nil {
+		t.Fatalf("failed to write placeholder: %v", err)
+	}
+
+	mgr, err := NewManager("production")
+	if err != nil {
+		t.Fatalf("NewManager should tolerate plaintext placeholders: %v", err)
+	}
+	if err := mgr.Set("PLACEHOLDER_SECRET", "value", "production"); err != nil {
+		t.Fatalf("Set returned error: %v", err)
+	}
+	encrypted, err := crypto.IsFileEncrypted(placeholderPath)
+	if err != nil {
+		t.Fatalf("failed to inspect placeholder secrets file: %v", err)
+	}
+	if !encrypted {
+		t.Fatal("placeholder secrets file should be encrypted after Set")
+	}
+}
 
 func TestCreateEnvFileExpandsBracedEnvFromOSAndSecrets(t *testing.T) {
 	withTempWorkingDir(t)
@@ -31,6 +143,55 @@ func TestCreateEnvFileExpandsBracedEnvFromOSAndSecrets(t *testing.T) {
 	}
 	if got, _ := envFile.Get("API_TOKEN"); got != "secret-token" {
 		t.Fatalf("API_TOKEN = %q", got)
+	}
+}
+
+func TestCreateEnvFileLoadsServiceEnvFileWithExplicitEnvAndSecretsTakingPriority(t *testing.T) {
+	withTempWorkingDir(t)
+	envPath := ".env.service"
+	if err := os.WriteFile(envPath, []byte("DATABASE_URL=postgres://env-file\nTOKEN=env-file-token\nFROM_FILE=file-value\n"), 0600); err != nil {
+		t.Fatalf("failed to write env file: %v", err)
+	}
+	mgr := &Manager{secrets: map[string]string{"TOKEN": "secret-token"}}
+
+	envFile, err := mgr.CreateEnvFile(&config.ServiceConfig{
+		EnvFile: envPath,
+		Env: map[string]string{
+			"DATABASE_URL": "postgres://explicit",
+			"USES_FILE":    "${FROM_FILE}",
+		},
+		Secrets: []string{"TOKEN"},
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvFile returned error: %v", err)
+	}
+
+	if got, _ := envFile.Get("FROM_FILE"); got != "file-value" {
+		t.Fatalf("FROM_FILE = %q, want file-value", got)
+	}
+	if got, _ := envFile.Get("USES_FILE"); got != "file-value" {
+		t.Fatalf("USES_FILE = %q, want file-value", got)
+	}
+	if got, _ := envFile.Get("DATABASE_URL"); got != "postgres://explicit" {
+		t.Fatalf("DATABASE_URL = %q, want explicit env override", got)
+	}
+	if got, _ := envFile.Get("TOKEN"); got != "secret-token" {
+		t.Fatalf("TOKEN = %q, want secret override", got)
+	}
+}
+
+func TestCreateEnvFileSupportsSecretAliases(t *testing.T) {
+	withTempWorkingDir(t)
+	mgr := &Manager{secrets: map[string]string{"INTERNAL_TOKEN": "secret-token"}}
+
+	envFile, err := mgr.CreateEnvFile(&config.ServiceConfig{
+		Secrets: []string{"API_TOKEN:INTERNAL_TOKEN"},
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvFile returned error: %v", err)
+	}
+	if got, _ := envFile.Get("API_TOKEN"); got != "secret-token" {
+		t.Fatalf("API_TOKEN = %q, want aliased secret value", got)
 	}
 }
 

@@ -917,6 +917,21 @@ func TestHandleImageBuildRejectsOversizedContentLength(t *testing.T) {
 	}
 }
 
+func TestHandleImageBuildRejectsUnsafeDockerfilePath(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/build?image=demo/web:abc&dockerfile=../Dockerfile", bytes.NewBufferString(""))
+	recorder := httptest.NewRecorder()
+
+	server.handleImageBuild(recorder, req)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "dockerfile path must stay inside") {
+		t.Fatalf("response = %q, want dockerfile path error", recorder.Body.String())
+	}
+}
+
 func TestHandleLogsRequiresGet(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
 	req := httptest.NewRequest(http.MethodPost, "/v1/logs", nil)

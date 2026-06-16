@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,10 +74,17 @@ type traefikHealthCheck struct {
 
 type traefikMiddleware struct {
 	RedirectScheme *traefikRedirectScheme `yaml:"redirectScheme,omitempty"`
+	RedirectRegex  *traefikRedirectRegex  `yaml:"redirectRegex,omitempty"`
 }
 
 type traefikRedirectScheme struct {
 	Scheme string `yaml:"scheme"`
+}
+
+type traefikRedirectRegex struct {
+	Regex       string `yaml:"regex"`
+	Replacement string `yaml:"replacement"`
+	Permanent   bool   `yaml:"permanent"`
 }
 
 func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig) error {
@@ -165,11 +173,16 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 		}
 
 		var upstreams []traefikServer
+		seenUpstreams := make(map[string]bool)
 		for _, assignment := range assignments {
 			url, err := d.takodProxyUpstreamURL(proxyServerName, assignment.ServerName, serviceName, assignment.Slot, service.Port)
 			if err != nil {
 				return nil, false, err
 			}
+			if seenUpstreams[url] {
+				continue
+			}
+			seenUpstreams[url] = true
 			upstreams = append(upstreams, traefikServer{URL: url})
 		}
 
@@ -189,6 +202,9 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 		}
 		httpConfig.Middlewares[redirectName] = traefikMiddleware{
 			RedirectScheme: &traefikRedirectScheme{Scheme: "https"},
+		}
+		if err := addRedirectFromRouters(&httpConfig, routerName, service.Proxy); err != nil {
+			return nil, false, fmt.Errorf("service %s has invalid redirect domains: %w", serviceName, err)
 		}
 
 		lb := traefikLoadBalancer{
@@ -217,8 +233,7 @@ func (d *Deployer) takodProxyUpstreamURL(proxyServerName string, upstreamServerN
 		if servicePort <= 0 {
 			return "", fmt.Errorf("service %s has invalid local proxy port %d", serviceName, servicePort)
 		}
-		containerName := d.takodContainerName(serviceName, slot)
-		return "http://" + net.JoinHostPort(containerName, strconv.Itoa(servicePort)), nil
+		return "http://" + net.JoinHostPort(serviceName, strconv.Itoa(servicePort)), nil
 	}
 	return d.meshUpstreamURL(upstreamServerName, serviceName, slot, servicePort)
 }
@@ -453,6 +468,58 @@ func proxyHostRule(proxy *config.ProxyConfig) (string, error) {
 		hostRules = append(hostRules, "Host(`"+normalized+"`)")
 	}
 	return strings.Join(hostRules, " || "), nil
+}
+
+func addRedirectFromRouters(httpConfig *traefikHTTPConfig, routerName string, proxy *config.ProxyConfig) error {
+	if proxy == nil || len(proxy.GetRedirectDomains()) == 0 {
+		return nil
+	}
+	primary, err := config.NormalizeProxyDomain(proxy.GetPrimaryDomain())
+	if err != nil {
+		return err
+	}
+	for _, domain := range proxy.GetRedirectDomains() {
+		normalized, err := config.NormalizeProxyDomain(domain)
+		if err != nil {
+			return err
+		}
+		redirectName := routerName + "-from-" + proxyNameHash(normalized)
+		rule := "Host(`" + normalized + "`)"
+		httpConfig.Middlewares[redirectName] = traefikMiddleware{
+			RedirectRegex: &traefikRedirectRegex{
+				Regex:       "^https?://" + redirectHostRegex(normalized) + "(/.*)?$",
+				Replacement: "https://" + primary + "${1}",
+				Permanent:   true,
+			},
+		}
+		httpConfig.Routers[redirectName+"-https"] = traefikRouter{
+			Rule:        rule,
+			EntryPoints: []string{"websecure"},
+			Service:     routerName,
+			Middlewares: []string{redirectName},
+			TLS:         &traefikTLS{CertResolver: "letsencrypt"},
+		}
+		httpConfig.Routers[redirectName+"-http"] = traefikRouter{
+			Rule:        rule,
+			EntryPoints: []string{"web"},
+			Service:     routerName,
+			Middlewares: []string{redirectName},
+		}
+	}
+	return nil
+}
+
+func redirectHostRegex(domain string) string {
+	if strings.HasPrefix(domain, "*.") {
+		return `[^/]+` + regexp.QuoteMeta(strings.TrimPrefix(domain, "*"))
+	}
+	return regexp.QuoteMeta(domain)
+}
+
+func proxyNameHash(value string) string {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(value))
+	return strconv.FormatUint(uint64(hash.Sum32()), 16)
 }
 
 func firstProxyEmail(services map[string]config.ServiceConfig) string {

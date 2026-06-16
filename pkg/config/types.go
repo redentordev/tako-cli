@@ -132,8 +132,9 @@ type ServerConfig struct {
 // ServiceConfig defines service deployment settings
 type ServiceConfig struct {
 	// Build or Image (mutually exclusive)
-	Build string `yaml:"build,omitempty" json:"build,omitempty"` // Path to build context (auto-detects Dockerfile)
-	Image string `yaml:"image,omitempty" json:"image,omitempty"` // Pre-built image (for postgres, redis, etc)
+	Build      string `yaml:"build,omitempty" json:"build,omitempty"`           // Path to build context (auto-detects Dockerfile)
+	Dockerfile string `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"` // Dockerfile path relative to build context
+	Image      string `yaml:"image,omitempty" json:"image,omitempty"`           // Pre-built image (for postgres, redis, etc)
 
 	// Basic settings
 	Port     int               `yaml:"port,omitempty" json:"port,omitempty"`
@@ -182,6 +183,7 @@ type ServiceConfig struct {
 // HealthCheckConfig defines health check settings
 type HealthCheckConfig struct {
 	Path        string `yaml:"path" json:"path"`
+	TCPPort     int    `yaml:"tcpPort,omitempty" json:"tcpPort,omitempty"`
 	Interval    string `yaml:"interval" json:"interval"`
 	Timeout     string `yaml:"timeout" json:"timeout"`
 	Retries     int    `yaml:"retries" json:"retries"`

@@ -21,6 +21,25 @@ func TestContainerNameAvoidsAmbiguousStageServiceCollision(t *testing.T) {
 	}
 }
 
+func TestContainerAliasIsDNSSafeAndCollisionResistant(t *testing.T) {
+	left := ContainerAlias("demo", "prod_api", "web", 1)
+	right := ContainerAlias("demo", "prod", "api_web", 1)
+	if left == right {
+		t.Fatalf("container aliases collided: %q", left)
+	}
+	for _, alias := range []string{left, right} {
+		if strings.Contains(alias, "_") {
+			t.Fatalf("container alias %q should not contain underscores", alias)
+		}
+		if !strings.HasPrefix(alias, "tako-") {
+			t.Fatalf("container alias %q should be tako-prefixed", alias)
+		}
+		if len(alias) > dockerNetworkMax {
+			t.Fatalf("container alias length = %d, want <= %d", len(alias), dockerNetworkMax)
+		}
+	}
+}
+
 func TestServiceIdentityAvoidsAmbiguousStageServiceCollision(t *testing.T) {
 	left := ServiceIdentity("demo", "prod_api", "web")
 	right := ServiceIdentity("demo", "prod", "api_web")

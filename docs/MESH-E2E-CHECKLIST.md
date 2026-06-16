@@ -177,6 +177,9 @@ Expected result:
 - `drift` and `deploy` fail closed while the target node agent is unavailable.
 - Deploy behavior follows `state.onUnreachableNode`; the default posture is to
   block when a target node is unreachable.
+- `TAKO_SSH_CONNECT_TIMEOUT` and `TAKO_SSH_CONNECT_ATTEMPTS` can be lowered for
+  incident checks so destroyed nodes fail quickly without changing the default
+  fail-closed deploy posture.
 - Existing containers on the unreachable node keep serving their last accepted
   revision.
 - After `takod` restarts, `state repair` and `deploy` succeed again.

@@ -163,6 +163,74 @@ func TestValidateConfigDefaultsRequiredRuntimeBooleans(t *testing.T) {
 	}
 }
 
+func TestValidateConfigAcceptsDockerfileRelativeToBuildContext(t *testing.T) {
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	root := t.TempDir()
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+	})
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("failed to switch cwd: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "packages", "web"), 0755); err != nil {
+		t.Fatalf("failed to create package dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "packages", "web", "Dockerfile"), []byte("FROM scratch\n"), 0600); err != nil {
+		t.Fatalf("failed to write Dockerfile: %v", err)
+	}
+
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Build:      ".",
+		Dockerfile: "packages/web/Dockerfile",
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+}
+
+func TestValidateConfigRejectsUnsafeDockerfilePath(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Build:      ".",
+		Dockerfile: "../Dockerfile",
+	}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject dockerfile paths outside the build context")
+	}
+	if !strings.Contains(err.Error(), "invalid dockerfile path") {
+		t.Fatalf("error = %q, want dockerfile context", err)
+	}
+}
+
+func TestValidateConfigRejectsDockerfileWithoutBuild(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Image:      "nginx:alpine",
+		Dockerfile: "Dockerfile",
+	}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject dockerfile without build")
+	}
+	if !strings.Contains(err.Error(), "dockerfile requires build") {
+		t.Fatalf("error = %q, want dockerfile requires build", err)
+	}
+}
+
 func TestValidateConfigRejectsHealthCheckPathWithoutSlash(t *testing.T) {
 	cfg := validValidationConfig()
 	production := cfg.Environments["production"]
@@ -234,6 +302,45 @@ func TestValidateConfigRejectsOversizedHealthCheckRetries(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "health check retries") {
 		t.Fatalf("error = %q, want health check retries context", err)
+	}
+}
+
+func TestValidateConfigAcceptsTCPHealthCheck(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	db := production.Services["web"]
+	db.Port = 5432
+	db.Proxy = nil
+	db.HealthCheck.TCPPort = 5432
+	production.Services["db"] = db
+	delete(production.Services, "web")
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+	got := cfg.Environments["production"].Services["db"].HealthCheck
+	if got.Interval != "10s" || got.Timeout != "5s" || got.Retries != 3 {
+		t.Fatalf("tcp health defaults = %#v", got)
+	}
+}
+
+func TestValidateConfigRejectsAmbiguousHealthCheckProtocol(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Port = 8080
+	web.HealthCheck.Path = "/health"
+	web.HealthCheck.TCPPort = 8080
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject health checks with both path and tcpPort")
+	}
+	if !strings.Contains(err.Error(), "both path and tcpPort") {
+		t.Fatalf("error = %q, want ambiguity guidance", err)
 	}
 }
 

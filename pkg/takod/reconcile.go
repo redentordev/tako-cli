@@ -3,6 +3,9 @@ package takod
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -13,6 +16,7 @@ import (
 
 var (
 	dockerCommandContext = exec.CommandContext
+	healthHTTPClient     = &http.Client{}
 )
 
 const (
@@ -24,21 +28,22 @@ const (
 )
 
 type ReconcileServiceRequest struct {
-	Project        string            `json:"project"`
-	Environment    string            `json:"environment"`
-	Service        string            `json:"service"`
-	Image          string            `json:"image"`
-	PullImage      bool              `json:"pullImage,omitempty"`
-	Restart        string            `json:"restart,omitempty"`
-	Network        string            `json:"network"`
-	NetworkAlias   string            `json:"networkAlias,omitempty"`
-	EnvFile        string            `json:"envFile,omitempty"`
-	EnvFileContent string            `json:"envFileContent,omitempty"`
-	Labels         map[string]string `json:"labels,omitempty"`
-	Mounts         []string          `json:"mounts,omitempty"`
-	Containers     []ContainerSpec   `json:"containers"`
-	Health         *HealthSpec       `json:"health,omitempty"`
-	Command        string            `json:"command,omitempty"`
+	Project         string            `json:"project"`
+	Environment     string            `json:"environment"`
+	Service         string            `json:"service"`
+	Image           string            `json:"image"`
+	PullImage       bool              `json:"pullImage,omitempty"`
+	Restart         string            `json:"restart,omitempty"`
+	Network         string            `json:"network"`
+	NetworkAlias    string            `json:"networkAlias,omitempty"`
+	EnvFile         string            `json:"envFile,omitempty"`
+	EnvFileContent  string            `json:"envFileContent,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	Mounts          []string          `json:"mounts,omitempty"`
+	ExternalVolumes []string          `json:"externalVolumes,omitempty"`
+	Containers      []ContainerSpec   `json:"containers"`
+	Health          *HealthSpec       `json:"health,omitempty"`
+	Command         string            `json:"command,omitempty"`
 }
 
 type RemoveServiceRequest struct {
@@ -48,12 +53,16 @@ type RemoveServiceRequest struct {
 }
 
 type ContainerSpec struct {
-	Name      string   `json:"name"`
-	Publishes []string `json:"publishes,omitempty"`
+	Name           string   `json:"name"`
+	NetworkAliases []string `json:"networkAliases,omitempty"`
+	Publishes      []string `json:"publishes,omitempty"`
 }
 
 type HealthSpec struct {
 	Command      string `json:"command,omitempty"`
+	Path         string `json:"path,omitempty"`
+	Port         int    `json:"port,omitempty"`
+	Scheme       string `json:"scheme,omitempty"`
 	Interval     string `json:"interval,omitempty"`
 	Timeout      string `json:"timeout,omitempty"`
 	Retries      int    `json:"retries,omitempty"`
@@ -87,11 +96,11 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		req.NetworkAlias = req.Service
 	}
 
-	removedContainers, err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service)
-	if err != nil {
-		return nil, err
-	}
 	if len(req.Containers) == 0 {
+		removedContainers, err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service)
+		if err != nil {
+			return nil, err
+		}
 		return &ReconcileServiceResponse{
 			Project:           req.Project,
 			Environment:       req.Environment,
@@ -103,6 +112,11 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		return nil, err
 	}
 	if err := ensureServiceVolumes(ctx, req); err != nil {
+		return nil, err
+	}
+
+	removedContainers, err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service)
+	if err != nil {
 		return nil, err
 	}
 	cleanupEnvFile, err := prepareServiceEnvFile(&req)
@@ -127,7 +141,7 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 			return nil, err
 		}
 		started = append(started, container.Name)
-		if err := waitForContainerHealthy(ctx, container.Name, req.Health); err != nil {
+		if err := waitForContainerHealthy(ctx, req.Network, container.Name, req.Health); err != nil {
 			if cleanupErr := cleanupStartedContainers(started); cleanupErr != nil {
 				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
 			}
@@ -203,6 +217,11 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 		if !isSafeContainerName(container.Name) {
 			return fmt.Errorf("invalid container name")
 		}
+		for _, alias := range container.NetworkAliases {
+			if !isSafeRuntimeName(alias) {
+				return fmt.Errorf("invalid container network alias")
+			}
+		}
 		for _, publish := range container.Publishes {
 			if hasControlChars(publish) {
 				return fmt.Errorf("invalid publish value")
@@ -212,6 +231,11 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	for _, mount := range req.Mounts {
 		if strings.TrimSpace(mount) == "" || hasControlChars(mount) {
 			return fmt.Errorf("invalid mount value")
+		}
+	}
+	for _, volume := range req.ExternalVolumes {
+		if !isSafeDockerVolumeName(volume) {
+			return fmt.Errorf("invalid external volume name")
 		}
 	}
 	for key, value := range req.Labels {
@@ -234,6 +258,21 @@ func validateHealthSpec(health *HealthSpec) error {
 	}
 	if len(health.Command) > maxHealthFieldBytes || hasControlChars(health.Command) {
 		return fmt.Errorf("invalid health command")
+	}
+	if len(health.Path) > maxHealthFieldBytes || hasControlChars(health.Path) {
+		return fmt.Errorf("invalid health path")
+	}
+	if health.Path != "" && !strings.HasPrefix(health.Path, "/") {
+		return fmt.Errorf("invalid health path")
+	}
+	if health.Port < 0 || health.Port > 65535 {
+		return fmt.Errorf("invalid health port")
+	}
+	if health.Path != "" && health.Port == 0 {
+		return fmt.Errorf("health port is required when health path is set")
+	}
+	if health.Scheme != "" && health.Scheme != "http" && health.Scheme != "https" {
+		return fmt.Errorf("invalid health scheme")
 	}
 	for label, value := range map[string]string{
 		"health interval":     health.Interval,
@@ -396,7 +435,17 @@ func ensureDockerNetwork(ctx context.Context, network string) error {
 }
 
 func ensureServiceVolumes(ctx context.Context, req ReconcileServiceRequest) error {
+	external := make(map[string]bool, len(req.ExternalVolumes))
+	for _, volume := range req.ExternalVolumes {
+		external[volume] = true
+	}
 	for _, volume := range namedVolumeSourcesFromMounts(req.Mounts) {
+		if external[volume] {
+			if _, err := runDocker(ctx, "volume", "inspect", volume); err != nil {
+				return fmt.Errorf("external docker volume %s does not exist", volume)
+			}
+			continue
+		}
 		if err := ensureDockerVolume(ctx, req.Project, req.Environment, req.Service, volume); err != nil {
 			return fmt.Errorf("failed to ensure docker volume %s: %w", volume, err)
 		}
@@ -523,6 +572,11 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 		"--network", req.Network,
 		"--network-alias", req.NetworkAlias,
 	}
+	for _, alias := range container.NetworkAliases {
+		if alias != "" && alias != req.NetworkAlias {
+			args = append(args, "--network-alias", alias)
+		}
+	}
 
 	labels := map[string]string{
 		"tako.project":     req.Project,
@@ -575,26 +629,46 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 	return args
 }
 
-func waitForContainerHealthy(ctx context.Context, containerName string, health *HealthSpec) error {
+func waitForContainerHealthy(ctx context.Context, networkName string, containerName string, health *HealthSpec) error {
 	attempts := containerHealthWaitAttempts(health)
+	var lastErr error
 
 	for i := 0; i < attempts; i++ {
-		status, err := runDocker(ctx, "inspect", containerName, "--format", "{{.State.Health.Status}}")
-		status = strings.TrimSpace(status)
-		if err == nil && status == "healthy" {
-			return nil
-		}
-		if err == nil && status == "unhealthy" {
-			logs, _ := runDocker(ctx, "logs", containerName, "--tail", "50")
-			return fmt.Errorf("container %s health check failed, last logs:\n%s", containerName, logs)
-		}
-
 		running, runErr := runDocker(ctx, "inspect", containerName, "--format", "{{.State.Running}}")
 		if runErr != nil {
 			return fmt.Errorf("failed to inspect container %s: %w", containerName, runErr)
 		}
-		if strings.TrimSpace(running) == "true" && (health == nil || health.Command == "") {
+		if strings.TrimSpace(running) != "true" {
+			lastErr = fmt.Errorf("container is not running")
+		} else if health == nil || (health.Command == "" && health.Path == "" && health.Port <= 0) {
 			return nil
+		} else if health.Path != "" {
+			if err := checkContainerHTTPHealth(ctx, networkName, containerName, health); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		} else if health.Port > 0 {
+			if err := checkContainerTCPHealth(ctx, networkName, containerName, health); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		} else {
+			status, err := runDocker(ctx, "inspect", containerName, "--format", "{{.State.Health.Status}}")
+			status = strings.TrimSpace(status)
+			if err == nil && status == "healthy" {
+				return nil
+			}
+			if err == nil && status == "unhealthy" {
+				logs, _ := runDocker(ctx, "logs", containerName, "--tail", "50")
+				return fmt.Errorf("container %s health check failed, last logs:\n%s", containerName, logs)
+			}
+			if err != nil {
+				lastErr = err
+			} else {
+				lastErr = fmt.Errorf("docker health status is %q", status)
+			}
 		}
 
 		select {
@@ -602,6 +676,13 @@ func waitForContainerHealthy(ctx context.Context, containerName string, health *
 			return ctx.Err()
 		case <-time.After(time.Second):
 		}
+	}
+	logs, _ := runDocker(ctx, "logs", containerName, "--tail", "50")
+	if lastErr != nil {
+		if strings.TrimSpace(logs) != "" {
+			return fmt.Errorf("health check timeout for %s after %d attempts: %v, last logs:\n%s", containerName, attempts, lastErr, logs)
+		}
+		return fmt.Errorf("health check timeout for %s after %d attempts: %v", containerName, attempts, lastErr)
 	}
 	return fmt.Errorf("health check timeout for %s after %d attempts", containerName, attempts)
 }
@@ -611,6 +692,86 @@ func containerHealthWaitAttempts(health *HealthSpec) int {
 		return health.WaitAttempts
 	}
 	return 30
+}
+
+func checkContainerHTTPHealth(ctx context.Context, networkName string, containerName string, health *HealthSpec) error {
+	ip, err := containerNetworkIP(ctx, networkName, containerName)
+	if err != nil {
+		return err
+	}
+	scheme := health.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
+	timeout := healthCheckTimeout(health)
+	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	target := fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(ip, strconv.Itoa(health.Port)), health.Path)
+	request, err := http.NewRequestWithContext(attemptCtx, http.MethodGet, target, nil)
+	if err != nil {
+		return fmt.Errorf("failed to build health request: %w", err)
+	}
+	response, err := healthHTTPClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("HTTP health request failed: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode < 200 || response.StatusCode >= 400 {
+		return fmt.Errorf("HTTP health returned status %d", response.StatusCode)
+	}
+	return nil
+}
+
+func checkContainerTCPHealth(ctx context.Context, networkName string, containerName string, health *HealthSpec) error {
+	ip, err := containerNetworkIP(ctx, networkName, containerName)
+	if err != nil {
+		return err
+	}
+	timeout := healthCheckTimeout(health)
+	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	dialer := &net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(attemptCtx, "tcp", net.JoinHostPort(ip, strconv.Itoa(health.Port)))
+	if err != nil {
+		return fmt.Errorf("TCP health check failed: %w", err)
+	}
+	_ = conn.Close()
+	return nil
+}
+
+func containerNetworkIP(ctx context.Context, networkName string, containerName string) (string, error) {
+	format := fmt.Sprintf(`{{with index .NetworkSettings.Networks %q}}{{.IPAddress}}{{end}}`, networkName)
+	output, err := runDocker(ctx, "inspect", containerName, "--format", format)
+	if err != nil {
+		return "", fmt.Errorf("failed to inspect container network IP: %w", err)
+	}
+	ip := strings.TrimSpace(output)
+	if ip == "" {
+		output, err = runDocker(ctx, "inspect", containerName, "--format", `{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}`)
+		if err != nil {
+			return "", fmt.Errorf("failed to inspect container network IP: %w", err)
+		}
+		ip = strings.TrimSpace(output)
+	}
+	if net.ParseIP(ip) == nil {
+		if ip == "" {
+			return "", fmt.Errorf("container %s has no IP address on network %s", containerName, networkName)
+		}
+		return "", fmt.Errorf("container %s has invalid IP address %q", containerName, ip)
+	}
+	return ip, nil
+}
+
+func healthCheckTimeout(health *HealthSpec) time.Duration {
+	if health != nil && health.Timeout != "" {
+		if timeout, err := time.ParseDuration(health.Timeout); err == nil && timeout > 0 {
+			return timeout
+		}
+	}
+	return 5 * time.Second
 }
 
 func runDocker(ctx context.Context, args ...string) (string, error) {

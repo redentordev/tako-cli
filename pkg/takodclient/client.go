@@ -30,6 +30,10 @@ type StreamExecutor interface {
 }
 
 func RequestJSON(client RequestExecutor, socket string, method string, endpoint string, value any) (string, error) {
+	return RequestJSONWithTimeout(client, socket, method, endpoint, value, JSONRequestTimeout)
+}
+
+func RequestJSONWithTimeout(client RequestExecutor, socket string, method string, endpoint string, value any, timeout time.Duration) (string, error) {
 	if socket == "" {
 		socket = DefaultSocket
 	}
@@ -52,7 +56,10 @@ func RequestJSON(client RequestExecutor, socket string, method string, endpoint 
 	}
 
 	curlCmd := buildRequestCommand(socket, method, endpoint, hasBody)
-	ctx, cancel := context.WithTimeout(context.Background(), JSONRequestTimeout)
+	if timeout <= 0 {
+		timeout = JSONRequestTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	var output string
@@ -225,9 +232,12 @@ func BackupsEndpoint(project string, environment string, volume string, backupID
 	return "/v1/backups?" + query.Encode()
 }
 
-func ImageBuildEndpoint(image string) string {
+func ImageBuildEndpoint(image string, dockerfile ...string) string {
 	query := url.Values{}
 	query.Set("image", image)
+	if len(dockerfile) > 0 && strings.TrimSpace(dockerfile[0]) != "" {
+		query.Set("dockerfile", dockerfile[0])
+	}
 	return "/v1/images/build?" + query.Encode()
 }
 

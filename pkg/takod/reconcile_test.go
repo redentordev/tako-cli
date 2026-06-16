@@ -2,6 +2,11 @@ package takod
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,6 +80,12 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 
 	invalid = valid
+	invalid.Containers = []ContainerSpec{{Name: "demo_production_web_1", NetworkAliases: []string{"bad/alias"}}}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe container network alias to be rejected")
+	}
+
+	invalid = valid
 	invalid.Containers = []ContainerSpec{{Name: "demo_production_web_1", Publishes: []string{"80:80\n--privileged"}}}
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe publish value to be rejected")
@@ -87,6 +98,12 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 
 	invalid = valid
+	invalid.ExternalVolumes = []string{"bad/name"}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe external volume name to be rejected")
+	}
+
+	invalid = valid
 	invalid.Labels = map[string]string{"tako.configHash": "abc\n--privileged"}
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe label value to be rejected")
@@ -96,6 +113,18 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	invalid.Health = &HealthSpec{Command: "curl -sf /health\n--privileged"}
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe health command to be rejected")
+	}
+
+	invalid = valid
+	invalid.Health = &HealthSpec{Path: "health", Port: 3000}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected health path without slash to be rejected")
+	}
+
+	invalid = valid
+	invalid.Health = &HealthSpec{Path: "/health"}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected health path without port to be rejected")
 	}
 
 	invalid = valid
@@ -162,7 +191,9 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 		Mounts:  []string{"type=volume,source=demo_data,target=/data"},
 		Command: "npm run worker",
 		Health: &HealthSpec{
-			Command:     "curl -sf http://localhost:3000/health || exit 1",
+			Path:        "/health",
+			Port:        3000,
+			Scheme:      "http",
 			Interval:    "10s",
 			Timeout:     "5s",
 			Retries:     3,
@@ -171,8 +202,9 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 	}
 
 	got := buildServiceContainerArgs(req, ContainerSpec{
-		Name:      "demo_production_web_1",
-		Publishes: []string{"10.42.0.2:31001:3000"},
+		Name:           "demo_production_web_1",
+		NetworkAliases: []string{"tako-demo-production-web-1"},
+		Publishes:      []string{"10.42.0.2:31001:3000"},
 	})
 
 	want := []string{
@@ -181,6 +213,7 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 		"--restart", "unless-stopped",
 		"--network", "tako_demo_production",
 		"--network-alias", "web",
+		"--network-alias", "tako-demo-production-web-1",
 		"--label", "tako.environment=production",
 		"--label", "tako.project=demo",
 		"--label", "tako.role=frontend",
@@ -189,11 +222,6 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 		"--env-file", "/tmp/web.env",
 		"--mount", "type=volume,source=demo_data,target=/data",
 		"--publish", "10.42.0.2:31001:3000",
-		"--health-cmd", "curl -sf http://localhost:3000/health || exit 1",
-		"--health-interval", "10s",
-		"--health-timeout", "5s",
-		"--health-retries", "3",
-		"--health-start-period", "10s",
 		"registry.example.com/demo/web:abc",
 		"sh", "-c", "npm run worker",
 	}
@@ -244,6 +272,71 @@ func TestReconcileServiceCreatesNamedVolumesWithRuntimeLabels(t *testing.T) {
 	for _, entry := range entries {
 		if strings.Contains(entry, "volume create") && strings.Contains(entry, "/srv/demo") {
 			t.Fatalf("bind mount should not create Docker volume: %#v", entries)
+		}
+	}
+}
+
+func TestReconcileServiceInspectsExternalVolumesWithoutCreatingThem(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	_, err := ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		Image:       "registry.example.com/demo/web:abc",
+		Network:     "tako_demo_production",
+		Mounts: []string{
+			"type=volume,source=captain--n8n-data,target=/home/node/.n8n",
+		},
+		ExternalVolumes: []string{"captain--n8n-data"},
+		Containers:      []ContainerSpec{{Name: "demo_production_web_1"}},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileService returned error: %v", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	if !slices.Contains(entries, "docker volume inspect captain--n8n-data") {
+		t.Fatalf("docker log missing external volume inspect in %#v", entries)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry, "volume create") && strings.Contains(entry, "captain--n8n-data") {
+			t.Fatalf("external volume should not be created: %#v", entries)
+		}
+	}
+}
+
+func TestReconcileServiceFailsMissingExternalVolumeBeforeRemovingContainers(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_MISSING_VOLUME_INSPECT", "captain--missing-data")
+
+	_, err := ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		Image:       "registry.example.com/demo/web:abc",
+		Network:     "tako_demo_production",
+		Mounts: []string{
+			"type=volume,source=captain--missing-data,target=/data",
+		},
+		ExternalVolumes: []string{"captain--missing-data"},
+		Containers:      []ContainerSpec{{Name: "demo_production_web_1"}},
+	})
+	if err == nil {
+		t.Fatal("ReconcileService should fail for missing external volume")
+	}
+	if !strings.Contains(err.Error(), "external docker volume captain--missing-data does not exist") {
+		t.Fatalf("error = %q, want missing external volume context", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry, "docker ps -aq --filter label=tako.project=demo") || strings.HasPrefix(entry, "docker rm -f") {
+			t.Fatalf("missing external volume should fail before removing old containers; log %#v", entries)
 		}
 	}
 }
@@ -305,8 +398,11 @@ func TestReconcileServiceRunsDockerMutation(t *testing.T) {
 	if len(entries) == 0 {
 		t.Fatalf("expected docker commands, got %#v", entries)
 	}
-	if !strings.HasPrefix(entries[0], "docker ps ") {
-		t.Fatalf("expected first Docker mutation to list old containers, got %#v", entries)
+	if !strings.HasPrefix(entries[0], "docker network inspect ") {
+		t.Fatalf("expected first Docker mutation to preflight network, got %#v", entries)
+	}
+	if !slices.Contains(entries, "docker ps -aq --filter label=tako.project=demo --filter label=tako.environment=production --filter label=tako.service=web") {
+		t.Fatalf("expected Docker mutation to list old containers after preflight, got %#v", entries)
 	}
 }
 
@@ -337,6 +433,113 @@ func TestReconcileServiceCleansStartedContainersOnHealthFailure(t *testing.T) {
 	}
 }
 
+func TestReconcileServiceUsesHostSideHTTPHealthWithoutDockerHealthCommand(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+	host, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("failed to split test server host: %v", err)
+	}
+
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_CONTAINER_IP", host)
+
+	_, err = ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		Image:       "registry.example.com/demo/web:abc",
+		Network:     "tako_demo_production",
+		Containers:  []ContainerSpec{{Name: "demo_production_web_1"}},
+		Health: &HealthSpec{
+			Path:         "/health",
+			Port:         mustAtoi(t, port),
+			Timeout:      "2s",
+			WaitAttempts: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileService returned error: %v", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	for _, entry := range entries {
+		if strings.Contains(entry, "--health-cmd") || strings.Contains(entry, "curl -sf") {
+			t.Fatalf("docker args should not include in-container health command: %#v", entries)
+		}
+	}
+	wantInspect := fmt.Sprintf("docker inspect demo_production_web_1 --format {{with index .NetworkSettings.Networks %q}}{{.IPAddress}}{{end}}", "tako_demo_production")
+	if !slices.Contains(entries, wantInspect) {
+		t.Fatalf("docker log missing network IP inspect %q in %#v", wantInspect, entries)
+	}
+}
+
+func TestReconcileServiceUsesHostSideTCPHealthWithoutDockerHealthCommand(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	host, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("failed to split listener address: %v", err)
+	}
+
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_CONTAINER_IP", host)
+
+	_, err = ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:     "demo",
+		Environment: "production",
+		Service:     "postgres",
+		Image:       "postgres:16-alpine",
+		Network:     "tako_demo_production",
+		Containers:  []ContainerSpec{{Name: "demo_production_postgres_1"}},
+		Health: &HealthSpec{
+			Port:         mustAtoi(t, port),
+			Timeout:      "2s",
+			WaitAttempts: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileService returned error: %v", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	for _, entry := range entries {
+		if strings.Contains(entry, "--health-cmd") || strings.Contains(entry, "curl -sf") {
+			t.Fatalf("docker args should not include in-container health command: %#v", entries)
+		}
+	}
+	wantInspect := fmt.Sprintf("docker inspect demo_production_postgres_1 --format {{with index .NetworkSettings.Networks %q}}{{.IPAddress}}{{end}}", "tako_demo_production")
+	if !slices.Contains(entries, wantInspect) {
+		t.Fatalf("docker log missing network IP inspect %q in %#v", wantInspect, entries)
+	}
+}
+
 func TestContainerHealthWaitAttemptsDoesNotUseDockerRetryCount(t *testing.T) {
 	got := containerHealthWaitAttempts(&HealthSpec{
 		Command: "curl -sf http://127.0.0.1:3000/health || exit 1",
@@ -348,6 +551,15 @@ func TestContainerHealthWaitAttemptsDoesNotUseDockerRetryCount(t *testing.T) {
 	if got := containerHealthWaitAttempts(&HealthSpec{Retries: 1, WaitAttempts: 45}); got != 45 {
 		t.Fatalf("explicit wait attempts = %d, want 45", got)
 	}
+}
+
+func mustAtoi(t *testing.T, value string) int {
+	t.Helper()
+	var out int
+	if _, err := fmt.Sscanf(value, "%d", &out); err != nil {
+		t.Fatalf("failed to parse integer %q: %v", value, err)
+	}
+	return out
 }
 
 func TestRemoveServiceRemovesMatchingContainers(t *testing.T) {
@@ -459,6 +671,14 @@ func TestTakodCommandHelper(t *testing.T) {
 		_, _ = os.Stdout.WriteString("network-ok\n")
 		os.Exit(0)
 	case "volume":
+		if len(commandArgs) > 2 && commandArgs[1] == "inspect" {
+			missing := os.Getenv("TAKO_FAKE_MISSING_VOLUME_INSPECT")
+			if missing != "" && commandArgs[2] == missing {
+				_, _ = os.Stderr.WriteString("No such volume")
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
 		if len(commandArgs) > 1 && commandArgs[1] == "ls" {
 			if output := os.Getenv("TAKO_FAKE_VOLUME_LS_OUTPUT"); output != "" {
 				_, _ = os.Stdout.WriteString(output)
@@ -482,6 +702,12 @@ func TestTakodCommandHelper(t *testing.T) {
 		joined := strings.Join(commandArgs, " ")
 		if strings.Contains(joined, ".State.Health.Status") {
 			if output := os.Getenv("TAKO_FAKE_HEALTH_STATUS"); output != "" {
+				_, _ = os.Stdout.WriteString(output + "\n")
+			}
+			os.Exit(0)
+		}
+		if strings.Contains(joined, ".NetworkSettings.Networks") {
+			if output := os.Getenv("TAKO_FAKE_CONTAINER_IP"); output != "" {
 				_, _ = os.Stdout.WriteString(output + "\n")
 			}
 			os.Exit(0)

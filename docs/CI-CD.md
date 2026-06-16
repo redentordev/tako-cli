@@ -73,6 +73,8 @@ jobs:
       CI: "true"
       TAKO_NONINTERACTIVE: "1"
       TAKO_HOST_KEY_MODE: strict
+      TAKO_SSH_CONNECT_TIMEOUT: 10s
+      TAKO_SSH_CONNECT_ATTEMPTS: "3"
       TAKO_ENV_PASSPHRASE: ${{ secrets.TAKO_ENV_PASSPHRASE }}
       TAKO_SSH_KEY: ~/.ssh/tako_deploy
       TAKO_SERVER_HOST: ${{ secrets.TAKO_SERVER_HOST }}
@@ -105,6 +107,13 @@ jobs:
 Use `TAKO_HOST_KEY_MODE=strict` when the runner image already has trusted host
 keys. For first-time automation, run one manual bootstrap with `tofu` or install
 known hosts before switching CI to `strict`.
+
+When a node is destroyed or firewalled, state and deploy commands still fail
+closed, but SSH should not hang for minutes. Use `TAKO_SSH_CONNECT_TIMEOUT` and
+`TAKO_SSH_CONNECT_ATTEMPTS` to tune incident behavior; for example,
+`TAKO_SSH_CONNECT_TIMEOUT=8s TAKO_SSH_CONNECT_ATTEMPTS=1 tako state status`
+quickly proves which configured node is unreachable before running
+`tako state repair` against the surviving mesh.
 
 ## Proving the Workflow
 

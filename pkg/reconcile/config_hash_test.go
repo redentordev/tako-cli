@@ -32,19 +32,49 @@ func TestSafeServiceConfigHashStableAcrossOrderOnlyFields(t *testing.T) {
 	}
 }
 
-func TestSafeServiceConfigHashRejectsEnvMaterial(t *testing.T) {
-	tests := map[string]config.ServiceConfig{
-		"env":               {Image: "nginx", Env: map[string]string{"TOKEN": "secret"}},
-		"envFile":           {Image: "nginx", EnvFile: ".env"},
-		"monitoringWebhook": {Image: "nginx", Monitoring: &config.MonitoringConfig{Webhook: "https://hooks.example.test/token"}},
-		"secrets":           {Image: "nginx", Secrets: []string{"TOKEN"}},
+func TestSafeServiceConfigHashRedactsEnvAndSecretValues(t *testing.T) {
+	a := config.ServiceConfig{
+		Image:      "nginx",
+		Dockerfile: "Dockerfile.web",
+		Env:        map[string]string{"TOKEN": "secret-one"},
+		EnvFile:    ".env.production",
+		Secrets:    []string{"DATABASE_URL", "API_TOKEN:API_TOKEN"},
+		Monitoring: &config.MonitoringConfig{Webhook: "https://hooks.example.test/one"},
 	}
-	for name, service := range tests {
-		t.Run(name, func(t *testing.T) {
-			if hash, ok := SafeServiceConfigHash(service); ok || hash != "" {
-				t.Fatalf("SafeServiceConfigHash() = %q, %v; want rejected", hash, ok)
-			}
-		})
+	b := a
+	b.Env = map[string]string{"TOKEN": "secret-two"}
+	b.Monitoring = &config.MonitoringConfig{Webhook: "https://hooks.example.test/two"}
+
+	hashA, ok := SafeServiceConfigHash(a)
+	if !ok {
+		t.Fatal("expected safe redacted service hash")
+	}
+	hashB, ok := SafeServiceConfigHash(b)
+	if !ok {
+		t.Fatal("expected safe redacted service hash")
+	}
+	if hashA != hashB {
+		t.Fatalf("hashes should ignore raw env/webhook values: %q != %q", hashA, hashB)
+	}
+
+	c := a
+	c.Env = map[string]string{"OTHER_TOKEN": "secret-one"}
+	hashC, ok := SafeServiceConfigHash(c)
+	if !ok {
+		t.Fatal("expected safe redacted service hash")
+	}
+	if hashA == hashC {
+		t.Fatal("hash should change when env keys change")
+	}
+
+	d := a
+	d.Secrets = []string{"DATABASE_URL"}
+	hashD, ok := SafeServiceConfigHash(d)
+	if !ok {
+		t.Fatal("expected safe redacted service hash")
+	}
+	if hashA == hashD {
+		t.Fatal("hash should change when secret refs change")
 	}
 }
 

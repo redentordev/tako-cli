@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,6 +23,18 @@ var (
 	secretCommandContext = exec.CommandContext
 	secretCommandTimeout = 2 * time.Minute
 )
+
+const GitignoreContent = `# Tako secrets - DO NOT COMMIT
+secrets*
+encryption.key
+*.key
+*.env
+state.json
+state/
+deployments/
+logs/
+audit.log
+`
 
 type Manager struct {
 	mu          sync.RWMutex
@@ -50,13 +63,7 @@ func NewManager(environment string) (*Manager, error) {
 	// Create .gitignore if it doesn't exist
 	gitignorePath := filepath.Join(m.basePath, ".gitignore")
 	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
-		gitignoreContent := `# Tako secrets - DO NOT COMMIT
-secrets*
-*.env
-state/
-audit.log
-`
-		if err := fileutil.WriteFileAtomic(gitignorePath, []byte(gitignoreContent), 0644); err != nil {
+		if err := fileutil.WriteFileAtomic(gitignorePath, []byte(GitignoreContent), 0644); err != nil {
 			return nil, fmt.Errorf("failed to create .gitignore: %w", err)
 		}
 	}
@@ -106,21 +113,9 @@ func (m *Manager) loadFile(path string) error {
 		return nil // Not an error if file doesn't exist
 	}
 
-	// Load encryption key and decrypt file
-	encryptor, err := crypto.NewEncryptorFromKeyFile(crypto.GetProjectKeyPath("."))
+	envVars, err := readSecretsFile(path)
 	if err != nil {
-		return fmt.Errorf("failed to load encryption key: %w", err)
-	}
-
-	data, err := encryptor.ReadEncryptedFile(path)
-	if err != nil {
-		return fmt.Errorf("failed to read secrets file: %w", err)
-	}
-
-	// Parse the decrypted env file content
-	envVars, err := godotenv.Unmarshal(string(data))
-	if err != nil {
-		return fmt.Errorf("failed to parse %s: %w", path, err)
+		return err
 	}
 
 	// Process each variable
@@ -216,6 +211,13 @@ func (m *Manager) Get(key string) (string, error) {
 		key, strings.Join(availableKeys, ", "))
 }
 
+func (m *Manager) Has(key string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, exists := m.secrets[key]
+	return exists
+}
+
 // Set sets a secret value
 func (m *Manager) Set(key, value string, environment string) error {
 	if environment == "" {
@@ -230,10 +232,15 @@ func (m *Manager) Set(key, value string, environment string) error {
 		path = filepath.Join(m.basePath, fmt.Sprintf("secrets.%s", environment))
 	}
 
-	// Load existing secrets from file
-	existing := make(map[string]string)
-	if fileData, err := godotenv.Read(path); err == nil {
-		existing = fileData
+	// Load existing secrets from the target file. Files may be encrypted from
+	// previous writes or plaintext placeholders from `tako secrets init`.
+	existing, err := readSecretsFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			existing = make(map[string]string)
+		} else {
+			return fmt.Errorf("failed to read existing secrets: %w", err)
+		}
 	}
 
 	// Update the value
@@ -310,10 +317,15 @@ func (m *Manager) Delete(key string, environment string) error {
 		path = filepath.Join(m.basePath, fmt.Sprintf("secrets.%s", environment))
 	}
 
-	// Load existing secrets
-	existing := make(map[string]string)
-	if fileData, err := godotenv.Read(path); err == nil {
-		existing = fileData
+	// Load existing secrets from the target file. Files may be encrypted from
+	// previous writes or plaintext placeholders from `tako secrets init`.
+	existing, err := readSecretsFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			existing = make(map[string]string)
+		} else {
+			return fmt.Errorf("failed to read existing secrets: %w", err)
+		}
 	}
 
 	// Delete the key
@@ -326,6 +338,24 @@ func (m *Manager) Delete(key string, environment string) error {
 
 	// Reload secrets
 	return m.loadSecrets()
+}
+
+func readSecretsFile(path string) (map[string]string, error) {
+	encryptor, err := crypto.NewEncryptorFromKeyFile(crypto.GetProjectKeyPath("."))
+	if err != nil {
+		return nil, fmt.Errorf("failed to load encryption key: %w", err)
+	}
+
+	data, err := encryptor.ReadEncryptedFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read secrets file: %w", err)
+	}
+
+	envVars, err := godotenv.Unmarshal(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse %s: %w", path, err)
+	}
+	return envVars, nil
 }
 
 // IsSensitive checks if a key name indicates sensitive data
@@ -362,6 +392,18 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 
 	envFile := NewEnvFile()
 
+	serviceEnv := make(map[string]string)
+	if service.EnvFile != "" {
+		loaded, err := config.LoadEnvFile(service.EnvFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load service envFile %s: %w", service.EnvFile, err)
+		}
+		serviceEnv = loaded
+		for key, value := range serviceEnv {
+			envFile.Set(key, value)
+		}
+	}
+
 	// Load .env file from current directory for variable expansion
 	projectEnv := make(map[string]string)
 	if envData, err := godotenv.Read(".env"); err == nil {
@@ -381,11 +423,14 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 	// bcrypt hashes.
 	for key, value := range service.Env {
 		expandedValue, missing := envexpand.Braced(value, func(varName string) (string, bool) {
-			// First check project .env
+			if val, ok := serviceEnv[varName]; ok {
+				return strings.TrimSpace(val), true
+			}
+			// Then check project .env and OS environment.
 			if val, ok := projectEnv[varName]; ok {
 				return strings.TrimSpace(val), true
 			}
-			// Then check loaded secrets
+			// Finally check loaded Tako secrets.
 			if val, ok := m.secrets[varName]; ok {
 				return val, true
 			}

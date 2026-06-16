@@ -1,5 +1,6 @@
 # Binaries
 bin/
+dist/
 tako
 *.exe
 *.dll
@@ -42,10 +43,15 @@ test-app/deploy-output.log
 test-app/deploy-manual.sh
 
 # Temporary files
+.tmp/
 *.tmp
 *.log
 .env
 nul
+
+# Local planning drafts
+goals/*.md
+goals/*.draft.yaml
 
 # Security reports
 security-report-*.html

@@ -78,6 +78,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get services for environment %s: %w", envName, err)
 	}
 	imageRepositories := cleanupImageRepositories(cfg, envName, services)
+	externalVolumes := externalVolumeNamesForEnvironment(cfg, envName)
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServerNames, "cleanup")
@@ -103,6 +104,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 			Project:                cfg.Project.Name,
 			Environment:            envName,
 			ImageRepositories:      imageRepositories,
+			ExternalVolumes:        externalVolumes,
 			KeepImages:             keepImages,
 			CleanOldImages:         true,
 			CleanStoppedContainers: true,

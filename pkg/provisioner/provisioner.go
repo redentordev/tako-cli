@@ -130,7 +130,7 @@ if command -v apt-get >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget git build-essential ca-certificates
 elif command -v dnf >/dev/null 2>&1; then
   dnf upgrade -y
-  dnf install -y curl wget git gcc gcc-c++ make ca-certificates
+  dnf install -y curl-minimal wget git gcc gcc-c++ make ca-certificates
 elif command -v yum >/dev/null 2>&1; then
   yum update -y
   yum install -y curl wget git gcc gcc-c++ make ca-certificates
@@ -473,10 +473,32 @@ func shellQuote(value string) string {
 // Note: tako-proxy is handled per-deployment by the deployer.
 // No system-wide reverse proxy installation is needed during server setup
 
-// ConfigureFirewall configures UFW firewall.
+// ConfigureFirewall configures UFW when available. Non-Debian cloud images
+// commonly rely on provider firewalls instead of UFW; setup should not fail on
+// those hosts merely because the ufw package is unavailable.
 func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 	if meshListenPort < 1 || meshListenPort > 65535 {
 		return fmt.Errorf("mesh listen port must be between 1 and 65535")
+	}
+
+	hasUFW := true
+	if _, err := p.client.Execute("command -v ufw"); err != nil {
+		hasUFW = false
+	}
+	if !hasUFW {
+		osInfo, err := DetectOS(p.client)
+		if err == nil && shouldSkipUFWFirewall(osInfo) {
+			if p.verbose {
+				fmt.Printf("  UFW not available on %s; relying on provider/native firewall\n", osInfo.String())
+			}
+			return nil
+		}
+		if p.verbose {
+			fmt.Printf("  Running: sudo apt-get install -y ufw\n")
+		}
+		if _, err := p.client.Execute("sudo apt-get install -y ufw"); err != nil {
+			return fmt.Errorf("failed to install ufw: %w", err)
+		}
 	}
 
 	// Check if UFW is already active
@@ -485,14 +507,6 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 
 	if isActive && p.verbose {
 		fmt.Printf("  UFW already active, updating rules...\n")
-	}
-
-	// Install UFW if not present
-	if p.verbose {
-		fmt.Printf("  Running: sudo apt-get install -y ufw\n")
-	}
-	if _, err := p.client.Execute("sudo apt-get install -y ufw"); err != nil {
-		return fmt.Errorf("failed to install ufw: %w", err)
 	}
 
 	// Disable UFW temporarily to safely update rules
@@ -552,6 +566,13 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 	return nil
 }
 
+func shouldSkipUFWFirewall(osInfo *OSInfo) bool {
+	if osInfo == nil {
+		return false
+	}
+	return osInfo.Family != OSFamilyDebian
+}
+
 func firewallAllowCommands(meshListenPort int) []string {
 	return []string{
 		// SSH with rate limiting (max 10 connections per 30 seconds per IP).
@@ -578,25 +599,29 @@ func (p *Provisioner) HardenSecurity() error {
 		return fmt.Errorf("failed to install security packages: %w", err)
 	}
 
-	// Configure fail2ban with custom jail for SSH
-	fail2banConfig := fail2banSSHDJailConfig(p.detectSSHClientIP())
+	if p.fail2banAvailable() {
+		// Configure fail2ban with custom jail for SSH
+		fail2banConfig := fail2banSSHDJailConfig(p.detectSSHClientIP())
 
-	if p.verbose {
-		fmt.Printf("  Configuring fail2ban jail for SSH...\n")
-	}
+		if p.verbose {
+			fmt.Printf("  Configuring fail2ban jail for SSH...\n")
+		}
 
-	// Write fail2ban jail config
-	fail2banCmd := fmt.Sprintf("sudo tee /etc/fail2ban/jail.d/sshd.local > /dev/null << 'EOF'\n%s\nEOF", fail2banConfig)
-	if _, err := p.executeSecurityCommand(fail2banCmd); err != nil {
-		return fmt.Errorf("failed to configure fail2ban SSH jail: %w", err)
-	}
+		// Write fail2ban jail config
+		fail2banCmd := fmt.Sprintf("sudo mkdir -p /etc/fail2ban/jail.d && sudo tee /etc/fail2ban/jail.d/sshd.local > /dev/null << 'EOF'\n%s\nEOF", fail2banConfig)
+		if _, err := p.executeSecurityCommand(fail2banCmd); err != nil {
+			return fmt.Errorf("failed to configure fail2ban SSH jail: %w", err)
+		}
 
-	// Enable and start fail2ban
-	if _, err := p.executeSecurityCommand("sudo systemctl enable fail2ban"); err != nil {
-		return fmt.Errorf("failed to enable fail2ban: %w", err)
-	}
-	if _, err := p.executeSecurityCommand("sudo systemctl restart fail2ban"); err != nil {
-		return fmt.Errorf("failed to restart fail2ban: %w", err)
+		// Enable and start fail2ban
+		if _, err := p.executeSecurityCommand("sudo systemctl enable fail2ban"); err != nil {
+			return fmt.Errorf("failed to enable fail2ban: %w", err)
+		}
+		if _, err := p.executeSecurityCommand("sudo systemctl restart fail2ban"); err != nil {
+			return fmt.Errorf("failed to restart fail2ban: %w", err)
+		}
+	} else if p.verbose {
+		fmt.Printf("  fail2ban unavailable on this host; skipping fail2ban jail\n")
 	}
 
 	// Configure SSH hardening
@@ -687,17 +712,30 @@ func (p *Provisioner) executeSecurityCommand(command string) (string, error) {
 	return p.client.ExecuteWithContext(ctx, command)
 }
 
+func (p *Provisioner) fail2banAvailable() bool {
+	if _, err := p.executeSecurityCommand("command -v fail2ban-client"); err == nil {
+		return true
+	}
+	if output, err := p.executeSecurityCommand("systemctl list-unit-files fail2ban.service --no-legend 2>/dev/null | awk '{print $1}'"); err == nil {
+		return strings.TrimSpace(output) == "fail2ban.service"
+	}
+	return false
+}
+
 func securityPackagesInstallScript() string {
 	return `set -eu
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y fail2ban unattended-upgrades ufw
+elif command -v dnf >/dev/null 2>&1; then
+  echo "security package bootstrap skipped for dnf hosts; using SSH hardening and provider/native firewall"
+elif command -v yum >/dev/null 2>&1; then
+  echo "security package bootstrap skipped for yum hosts; using SSH hardening and provider/native firewall"
 elif command -v apk >/dev/null 2>&1; then
   apk add --no-cache fail2ban
 else
-  echo "security package bootstrap is only implemented for apt and apk hosts" >&2
-  exit 1
+  echo "security package bootstrap skipped for this host; using SSH hardening only"
 fi
 `
 }
@@ -1006,8 +1044,7 @@ WantedBy=multi-user.target
 	if p.verbose {
 		fmt.Printf("  Installing bc (calculator)...\n")
 	}
-	_, err = p.client.Execute("sudo apt-get install -y bc")
-	if err != nil {
+	if err := p.installPackages("bc"); err != nil {
 		return fmt.Errorf("failed to install bc: %w", err)
 	}
 
@@ -1066,4 +1103,16 @@ WantedBy=multi-user.target
 	}
 
 	return nil
+}
+
+func (p *Provisioner) installPackages(packages ...string) error {
+	osInfo, err := DetectOS(p.client)
+	if err != nil {
+		return fmt.Errorf("failed to detect OS: %w", err)
+	}
+	manager, err := NewPackageManager(p.client, osInfo, p.verbose)
+	if err != nil {
+		return err
+	}
+	return manager.Install(packages...)
 }

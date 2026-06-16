@@ -4,8 +4,11 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"io"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -85,6 +88,74 @@ func TestSafeArchiveTargetRejectsEscapes(t *testing.T) {
 		if _, err := safeArchiveTarget(root, name); err == nil {
 			t.Fatalf("expected archive path %q to be rejected", name)
 		}
+	}
+}
+
+func TestBuildImageUsesCustomDockerfilePath(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	archive := testBuildContextArchive(t, map[string]string{
+		"packages/web/Dockerfile": "FROM scratch\n",
+		"packages/web/server.js":  "console.log('ok')\n",
+	})
+	response, err := BuildImage(context.Background(), "demo/web:abc", bytes.NewReader(archive), "packages/web/Dockerfile")
+	if err != nil {
+		t.Fatalf("BuildImage returned error: %v", err)
+	}
+	if response.Image != "demo/web:abc" {
+		t.Fatalf("image = %q, want demo/web:abc", response.Image)
+	}
+
+	entries := readCommandLog(t, logPath)
+	want := "docker build -t demo/web:abc -f packages/web/Dockerfile ."
+	if !slices.Contains(entries, want) {
+		t.Fatalf("commands = %#v, want %q", entries, want)
+	}
+}
+
+func TestBuildImageRejectsMissingCustomDockerfilePath(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	archive := testBuildContextArchive(t, map[string]string{
+		"packages/web/server.js": "console.log('ok')\n",
+	})
+	_, err := BuildImage(context.Background(), "demo/web:abc", bytes.NewReader(archive), "packages/web/Dockerfile")
+	if err == nil {
+		t.Fatal("BuildImage should reject missing custom Dockerfile")
+	}
+	if !strings.Contains(err.Error(), "dockerfile does not exist") {
+		t.Fatalf("error = %q, want missing dockerfile context", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("failed to read command log: %v", err)
+	}
+	entries := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for _, entry := range entries {
+		if strings.Contains(entry, "docker build") {
+			t.Fatalf("docker build should not run for missing dockerfile: %#v", entries)
+		}
+	}
+}
+
+func TestBuildImageRejectsUnsafeCustomDockerfilePath(t *testing.T) {
+	archive := testBuildContextArchive(t, map[string]string{
+		"Dockerfile": "FROM scratch\n",
+	})
+	_, err := BuildImage(context.Background(), "demo/web:abc", bytes.NewReader(archive), "../Dockerfile")
+	if err == nil {
+		t.Fatal("BuildImage should reject unsafe custom Dockerfile path")
+	}
+	if !strings.Contains(err.Error(), "must stay inside") {
+		t.Fatalf("error = %q, want safety context", err)
 	}
 }
 

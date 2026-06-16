@@ -26,3 +26,27 @@ func TestRequireTakodRuntimeRejectsNonTakod(t *testing.T) {
 		t.Fatalf("error = %q, want runtime mode included", err.Error())
 	}
 }
+
+func TestExternalVolumeNamesForEnvironmentReturnsConfiguredDockerNames(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+		Volumes: map[string]config.VolumeConfig{
+			"cache": {
+				Name: "custom-cache",
+			},
+			"data": {
+				External: true,
+			},
+			"n8n": {
+				External: true,
+				Name:     "captain--n8n-data",
+			},
+		},
+	}
+
+	got := externalVolumeNamesForEnvironment(cfg, "production")
+	want := []string{"captain--n8n-data", "data"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("external volumes = %#v, want %#v", got, want)
+	}
+}

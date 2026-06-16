@@ -68,6 +68,19 @@ func TestRequestJSONUsesDeadlineForBody(t *testing.T) {
 	}
 }
 
+func TestRequestJSONWithTimeoutUsesCustomDeadline(t *testing.T) {
+	client := &fakeTakodExecutor{}
+	timeout := 7 * time.Minute
+
+	_, err := RequestJSONWithTimeout(client, DefaultSocket, "POST", "/v1/reconcile-service", map[string]string{"service": "web"}, timeout)
+	if err != nil {
+		t.Fatalf("RequestJSONWithTimeout returned error: %v", err)
+	}
+	if !client.deadlineWithin(timeout) {
+		t.Fatalf("deadline = %s, want near %s", client.deadline.Sub(client.startedAt), timeout)
+	}
+}
+
 func TestSanitizeJSONOutputStripsLeadingNUL(t *testing.T) {
 	got := sanitizeJSONOutput("\x00\x00{\"ok\":true}")
 	if got != "{\"ok\":true}" {
@@ -169,6 +182,14 @@ func TestBackupsEndpointEscapesQueryValues(t *testing.T) {
 func TestImageBuildEndpointEscapesImage(t *testing.T) {
 	got := ImageBuildEndpoint("demo/web:abc123")
 	want := "/v1/images/build?image=demo%2Fweb%3Aabc123"
+	if got != want {
+		t.Fatalf("ImageBuildEndpoint() = %q, want %q", got, want)
+	}
+}
+
+func TestImageBuildEndpointEscapesDockerfile(t *testing.T) {
+	got := ImageBuildEndpoint("demo/web:abc123", "packages/web/Dockerfile")
+	want := "/v1/images/build?dockerfile=packages%2Fweb%2FDockerfile&image=demo%2Fweb%3Aabc123"
 	if got != want {
 		t.Fatalf("ImageBuildEndpoint() = %q, want %q", got, want)
 	}

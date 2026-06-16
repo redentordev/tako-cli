@@ -23,8 +23,10 @@ import (
 const DefaultCommandTimeout = 30 * time.Minute
 
 const (
-	connectMaxTCPAttempts       = 8
+	connectDefaultTCPAttempts   = 3
 	connectMaxHandshakeAttempts = 3
+	connectDefaultTimeout       = 10 * time.Second
+	connectMaxTimeout           = 5 * time.Minute
 	connectBackoffMax           = 10 * time.Second
 )
 
@@ -169,7 +171,7 @@ func NewClient(host string, port int, user string, keyPath string) (*Client, err
 		User:            user,
 		Auth:            authMethods,
 		HostKeyCallback: hostKeyCallback,
-		Timeout:         60 * time.Second, // Increased to 60s for very slow/busy servers
+		Timeout:         connectTimeout(),
 		// Client version to avoid version negotiation issues
 		ClientVersion: "SSH-2.0-Tako-CLI",
 	}
@@ -197,7 +199,7 @@ func NewClientWithPassword(host string, port int, user string, password string) 
 			ssh.Password(password),
 		},
 		HostKeyCallback: hostKeyCallback,
-		Timeout:         60 * time.Second, // Increased to 60s for very slow/busy servers
+		Timeout:         connectTimeout(),
 		// Client version to avoid version negotiation issues
 		ClientVersion: "SSH-2.0-Tako-CLI",
 	}
@@ -270,7 +272,7 @@ func NewClientWithAuth(host string, port int, user string, keyPath string, passw
 		User:            user,
 		Auth:            authMethods,
 		HostKeyCallback: hostKeyCallback,
-		Timeout:         60 * time.Second, // Increased to 60s for very slow/busy servers
+		Timeout:         connectTimeout(),
 		ClientVersion:   "SSH-2.0-Tako-CLI",
 	}
 
@@ -325,11 +327,13 @@ func (c *Client) Connect() error {
 
 	var lastErr error
 	handshakeAttempts := 0
+	tcpAttempts := connectTCPAttempts()
+	timeout := connectTimeout()
 
-	for attempt := 1; attempt <= connectMaxTCPAttempts; attempt++ {
+	for attempt := 1; attempt <= tcpAttempts; attempt++ {
 		// Create TCP connection with custom dialer for better timeout control
 		dialer := &net.Dialer{
-			Timeout:   60 * time.Second, // Increased to 60s
+			Timeout:   timeout,
 			KeepAlive: 30 * time.Second,
 		}
 
@@ -337,7 +341,7 @@ func (c *Client) Connect() error {
 		tcpConn, err := dialer.Dial("tcp", addr)
 		if err != nil {
 			lastErr = fmt.Errorf("TCP dial failed: %w", err)
-			if attempt < connectMaxTCPAttempts && isTransientDialError(err) {
+			if attempt < tcpAttempts && isTransientDialError(err) {
 				time.Sleep(connectBackoff(attempt))
 				continue
 			}
@@ -362,7 +366,44 @@ func (c *Client) Connect() error {
 		return nil
 	}
 
-	return fmt.Errorf("failed to connect after %d attempt(s): %w", connectMaxTCPAttempts, lastErr)
+	return fmt.Errorf("failed to connect after %d attempt(s): %w", tcpAttempts, lastErr)
+}
+
+func connectTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("TAKO_SSH_CONNECT_TIMEOUT"))
+	if raw == "" {
+		return connectDefaultTimeout
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		seconds, parseErr := strconv.Atoi(raw)
+		if parseErr != nil {
+			return connectDefaultTimeout
+		}
+		duration = time.Duration(seconds) * time.Second
+	}
+	if duration < time.Second {
+		return connectDefaultTimeout
+	}
+	if duration > connectMaxTimeout {
+		return connectMaxTimeout
+	}
+	return duration
+}
+
+func connectTCPAttempts() int {
+	raw := strings.TrimSpace(os.Getenv("TAKO_SSH_CONNECT_ATTEMPTS"))
+	if raw == "" {
+		return connectDefaultTCPAttempts
+	}
+	attempts, err := strconv.Atoi(raw)
+	if err != nil || attempts < 1 {
+		return connectDefaultTCPAttempts
+	}
+	if attempts > 20 {
+		return 20
+	}
+	return attempts
 }
 
 func connectBackoff(attempt int) time.Duration {

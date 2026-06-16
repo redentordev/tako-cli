@@ -248,6 +248,7 @@ func decommissionApp(client *ssh.Client, cfg *config.Config, envName string, ver
 		RemoveTakodState:  true,
 		ProxyFiles:        cleanupProxyFiles(cfg.Project.Name, envName, services),
 		ImageRepositories: cleanupImageRepositories(cfg, envName, services),
+		ExternalVolumes:   externalVolumeNamesForEnvironment(cfg, envName),
 	})
 	if err != nil {
 		return err
@@ -270,9 +271,10 @@ func purgeProjectRuntime(client *ssh.Client, cfg *config.Config, envName string,
 		fmt.Println("  → Pruning app-owned leftovers...")
 	}
 	response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
-		Project:     cfg.Project.Name,
-		Environment: envName,
-		PruneDocker: true,
+		Project:         cfg.Project.Name,
+		Environment:     envName,
+		PruneDocker:     true,
+		ExternalVolumes: externalVolumeNamesForEnvironment(cfg, envName),
 	})
 	if err != nil {
 		return err

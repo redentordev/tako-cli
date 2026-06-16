@@ -310,6 +310,14 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 	if service.Build != "" && service.Image != "" {
 		return fmt.Errorf("service %s: cannot specify both 'build' and 'image'", name)
 	}
+	if service.Dockerfile != "" {
+		if service.Build == "" {
+			return fmt.Errorf("service %s: dockerfile requires build", name)
+		}
+		if err := validateDockerfilePath(service.Dockerfile); err != nil {
+			return fmt.Errorf("service %s: invalid dockerfile path: %w", name, err)
+		}
+	}
 
 	// If Build is specified, check if path exists and detect Dockerfile
 	if service.Build != "" {
@@ -325,23 +333,30 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 			return fmt.Errorf("service %s: build path does not exist: %s", name, service.Build)
 		}
 
-		// Try to find Dockerfile in build path
-		dockerfileCandidates := []string{
-			"Dockerfile",
-			"Dockerfile.prod",
-			"dockerfile",
-			".dockerfile",
-		}
-		dockerfileFound := false
-		for _, candidate := range dockerfileCandidates {
-			dockerfilePath := filepath.Join(buildPath, candidate)
-			if _, err := os.Stat(dockerfilePath); err == nil {
-				dockerfileFound = true
-				break
+		if service.Dockerfile != "" {
+			dockerfilePath := filepath.Join(buildPath, filepath.Clean(service.Dockerfile))
+			if _, err := os.Stat(dockerfilePath); os.IsNotExist(err) {
+				return fmt.Errorf("service %s: dockerfile does not exist: %s", name, service.Dockerfile)
 			}
-		}
-		if !dockerfileFound {
-			fmt.Fprintf(os.Stderr, "Warning: No Dockerfile found in %s\n", buildPath)
+		} else {
+			// Try to find Dockerfile in build path
+			dockerfileCandidates := []string{
+				"Dockerfile",
+				"Dockerfile.prod",
+				"dockerfile",
+				".dockerfile",
+			}
+			dockerfileFound := false
+			for _, candidate := range dockerfileCandidates {
+				dockerfilePath := filepath.Join(buildPath, candidate)
+				if _, err := os.Stat(dockerfilePath); err == nil {
+					dockerfileFound = true
+					break
+				}
+			}
+			if !dockerfileFound {
+				fmt.Fprintf(os.Stderr, "Warning: No Dockerfile found in %s\n", buildPath)
+			}
 		}
 	}
 
@@ -417,7 +432,15 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 	}
 
 	// Validate health check if configured
-	if service.HealthCheck.Path != "" {
+	hasHTTPHealthCheck := service.HealthCheck.Path != ""
+	hasTCPHealthCheck := service.HealthCheck.TCPPort > 0
+	if service.HealthCheck.TCPPort < 0 || service.HealthCheck.TCPPort > 65535 {
+		return fmt.Errorf("service %s: health check tcpPort must be between 1 and 65535", name)
+	}
+	if hasHTTPHealthCheck && hasTCPHealthCheck {
+		return fmt.Errorf("service %s: health check cannot set both path and tcpPort", name)
+	}
+	if hasHTTPHealthCheck {
 		path, err := normalizeHTTPPath(service.HealthCheck.Path)
 		if err != nil {
 			return fmt.Errorf("service %s: invalid health check path: %w", name, err)
@@ -426,6 +449,8 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 		if service.Port == 0 {
 			return fmt.Errorf("service %s: port is required when health check is configured", name)
 		}
+	}
+	if hasHTTPHealthCheck || hasTCPHealthCheck {
 		if service.HealthCheck.Interval == "" {
 			service.HealthCheck.Interval = "10s"
 		}
@@ -569,6 +594,23 @@ func validateServiceVolumes(name string, service *ServiceConfig, cfg *Config) er
 		if IsNFSVolume(volume) {
 			return fmt.Errorf("service %s: NFS volume %q is no longer supported; use node-local volumes or an external storage service", name, volume)
 		}
+	}
+	return nil
+}
+
+func validateDockerfilePath(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("path is required")
+	}
+	if filepath.IsAbs(path) {
+		return fmt.Errorf("must be relative to the build context")
+	}
+	if strings.ContainsAny(path, "\x00\r\n") {
+		return fmt.Errorf("contains control characters")
+	}
+	cleaned := filepath.Clean(path)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("must stay inside the build context")
 	}
 	return nil
 }

@@ -164,5 +164,6 @@ func removeCleanupRequest(cfg *config.Config, envName string, services map[strin
 		RemoveTakodState:  true,
 		ProxyFiles:        cleanupProxyFiles(cfg.Project.Name, envName, services),
 		ImageRepositories: cleanupImageRepositories(cfg, envName, services),
+		ExternalVolumes:   externalVolumeNamesForEnvironment(cfg, envName),
 	}
 }

@@ -190,6 +190,57 @@ func TestFullBackupVolumeNameUsesRuntimeVolumeIdentity(t *testing.T) {
 	}
 }
 
+func TestFullBackupVolumeNameUsesExplicitDockerVolume(t *testing.T) {
+	request := BackupRequest{
+		Project:      "demo",
+		Environment:  "production",
+		Volume:       "n8n_data",
+		DockerVolume: "captain--n8n-data",
+	}
+	if got := fullBackupVolumeName(request); got != "captain--n8n-data" {
+		t.Fatalf("full backup volume name = %q, want explicit Docker volume", got)
+	}
+}
+
+func TestRestoreExternalVolumeDoesNotCreateMissingVolume(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	t.Setenv("TAKO_FAKE_MISSING_VOLUME_INSPECT", "captain--missing-data")
+
+	request := BackupRequest{
+		Project:        "demo",
+		Environment:    "production",
+		Volume:         "n8n_data",
+		DockerVolume:   "captain--missing-data",
+		ExternalVolume: true,
+		BackupID:       "20240101-120000",
+	}
+	dir := backupDirectory(request)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatalf("failed to create backup dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, backupFileName(request.Volume, request.BackupID)), []byte("backup"), 0600); err != nil {
+		t.Fatalf("failed to write backup fixture: %v", err)
+	}
+
+	err := RestoreVolumeBackup(context.Background(), request)
+	if err == nil {
+		t.Fatal("RestoreVolumeBackup should fail for missing external volume")
+	}
+	if !strings.Contains(err.Error(), "external volume captain--missing-data does not exist") {
+		t.Fatalf("error = %q, want missing external volume context", err)
+	}
+	entries := readCommandLog(t, logPath)
+	for _, entry := range entries {
+		if strings.Contains(entry, "volume create") {
+			t.Fatalf("restore should not create missing external volume; log %#v", entries)
+		}
+	}
+}
+
 func TestRestoreVolumeScriptScopesDestructiveCleanup(t *testing.T) {
 	script := restoreVolumeScript("db_20240101-120000.tar.gz")
 	for _, expected := range []string{

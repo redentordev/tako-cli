@@ -582,6 +582,32 @@ func TestStateHistoryCandidatesUsesValidHistoryDespiteOtherReadError(t *testing.
 	}
 }
 
+func TestStateStatusReachableCount(t *testing.T) {
+	nodes := []stateStatusNode{
+		{name: "node-a"},
+		{name: "node-b", connectErr: errors.New("timeout")},
+		{name: "node-c"},
+	}
+	if got := stateStatusReachableCount(nodes); got != 2 {
+		t.Fatalf("stateStatusReachableCount = %d, want 2", got)
+	}
+}
+
+func TestStateStatusNoReachableErrorIncludesFailClosedGuidance(t *testing.T) {
+	err := stateStatusNoReachableError("production", []stateStatusNode{
+		{name: "node-a", connectErr: errors.New("timeout")},
+		{name: "node-b", connectErr: errors.New("connection refused")},
+	})
+	if err == nil {
+		t.Fatal("stateStatusNoReachableError returned nil")
+	}
+	for _, want := range []string{"no reachable environment nodes", "deploy will fail closed", "node-a", "node-b"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestBestDesiredRevisionPrefersNewestCreatedAt(t *testing.T) {
 	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	older := desiredRevision("rev-old", base)
@@ -902,6 +928,38 @@ func TestStateStatusCandidatesIncludesEmbeddedAndNodeActual(t *testing.T) {
 	}
 }
 
+func TestStateStatusCandidatesIgnoresEmbeddedNodeActualOutsideEnvironment(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	aggregate := actualSnapshot(base.Add(time.Hour), "web")
+	aggregate.Nodes = map[string]takodstate.ActualNodeSnapshot{
+		"node-a": {
+			Node:       "node-a",
+			Services:   nodeActualSnapshot("node-a", base, "web").Services,
+			CapturedAt: base,
+		},
+		"removed-node": {
+			Node:       "removed-node",
+			Services:   nodeActualSnapshot("removed-node", base, "worker").Services,
+			CapturedAt: base,
+		},
+	}
+
+	_, _, _, nodeActual := stateStatusCandidates([]stateStatusNode{
+		{
+			name:     "node-a",
+			envNodes: []string{"node-a", "node-b"},
+			actual:   aggregate,
+		},
+	})
+
+	if len(nodeActual) != 1 {
+		t.Fatalf("node actual candidates = %d, want only configured embedded node", len(nodeActual))
+	}
+	if nodeActual[0].node != "node-a" {
+		t.Fatalf("node actual candidate = %q, want node-a", nodeActual[0].node)
+	}
+}
+
 func TestPrintStateStatusHistoryDistinguishesMissingFromUnreadable(t *testing.T) {
 	missing := captureStdout(t, func() {
 		printStateStatusHistory(nil, remotestate.ErrNotFound)
@@ -937,6 +995,35 @@ func TestBestStateStatusActualBuildsAggregateFromNodeSnapshots(t *testing.T) {
 	}
 	if got := best.actual.CapturedAt; !got.Equal(base.Add(time.Hour)) {
 		t.Fatalf("aggregate capturedAt = %s, want newest node time", got)
+	}
+}
+
+func TestBestStateStatusActualRebuildsAggregateFromNodeSnapshots(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	aggregate := actualSnapshot(base.Add(2*time.Hour), "web")
+	aggregate.Services["web"] = takodstate.ActualService{
+		Name:     "web",
+		Image:    "demo:web",
+		Replicas: 2,
+	}
+
+	best, ok, nodes := bestStateStatusActual("demo", "production", []stateActualCandidate{
+		{source: "node-a", actual: aggregate},
+	}, []stateNodeActualCandidate{
+		{source: "node-a aggregate", node: "node-a", actual: nodeActualSnapshot("node-a", base, "web")},
+	})
+
+	if !ok {
+		t.Fatal("bestStateStatusActual returned no aggregate")
+	}
+	if got := best.actual.Services["web"].Replicas; got != 1 {
+		t.Fatalf("web replicas = %d, want filtered node actual count", got)
+	}
+	if len(nodes) != 1 || len(best.actual.Nodes) != 1 {
+		t.Fatalf("node snapshots = %d embedded = %d, want 1", len(nodes), len(best.actual.Nodes))
+	}
+	if got := best.actual.TargetNodes; len(got) != 1 || got[0] != "node-a" {
+		t.Fatalf("target nodes = %#v, want node-a only", got)
 	}
 }
 

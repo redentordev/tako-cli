@@ -25,6 +25,11 @@ func ContainerName(project string, environment string, service string, slot int)
 	return compactName("_", dockerNameMax, []string{"tako", project, environment, service, slotText}, shortHash(project, environment, service, slotText))
 }
 
+func ContainerAlias(project string, environment string, service string, slot int) string {
+	slotText := strconv.Itoa(slot)
+	return compactName("-", dockerNetworkMax, []string{"tako", project, environment, service, slotText}, shortHash(project, environment, service, slotText))
+}
+
 func NetworkName(project string, environment string) string {
 	return compactName("_", dockerNetworkMax, []string{"tako", project, environment}, shortHash(project, environment))
 }

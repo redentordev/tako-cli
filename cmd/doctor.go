@@ -11,6 +11,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -103,6 +104,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Println("\n=== Running Services ===")
 		checkRunningServices(record, cfg, envName, clients)
 
+		fmt.Println("\n=== External Volumes ===")
+		checkExternalVolumes(record, cfg, envName, clients)
+
 		// Clean up clients
 		for _, c := range clients {
 			c.Close()
@@ -111,6 +115,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Println("\n=== Server Connectivity ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
 		fmt.Println("\n=== Running Services ===")
+		fmt.Println("  [SKIP] Skipped (--skip-remote)")
+		fmt.Println("\n=== External Volumes ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
 	}
 
@@ -124,17 +130,22 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 func checkConfig(record func(checkResult)) (*config.Config, error) {
 	// Check for config file existence
-	configFound := false
-	configName := ""
-	for _, name := range []string{"tako.yaml", "tako.yml", "tako.json"} {
-		if _, err := os.Stat(name); err == nil {
-			configFound = true
-			configName = name
-			break
+	configName := cfgFile
+	if configName != "" {
+		if _, err := os.Stat(configName); err != nil {
+			record(checkResult{"FAIL", fmt.Sprintf("Config file: Not found: %s", configName), "Check --config path"})
+			return nil, fmt.Errorf("no config")
+		}
+	} else {
+		for _, name := range []string{"tako.yaml", "tako.yml", "tako.json"} {
+			if _, err := os.Stat(name); err == nil {
+				configName = name
+				break
+			}
 		}
 	}
 
-	if !configFound {
+	if configName == "" {
 		record(checkResult{"FAIL", "Config file: Not found", "Create tako.yaml in project root"})
 		return nil, fmt.Errorf("no config")
 	}
@@ -480,5 +491,34 @@ func checkRunningServices(record func(checkResult), cfg *config.Config, envName 
 	}
 	if totalNodes > 1 {
 		record(checkResult{"PASS", fmt.Sprintf("takod mesh services: %d node(s), %d node-local service(s), %d replica(s)", totalNodes, totalServices, totalReplicas), ""})
+	}
+}
+
+func checkExternalVolumes(record func(checkResult), cfg *config.Config, envName string, clients map[string]*ssh.Client) {
+	volumes := externalVolumeNamesForEnvironment(cfg, envName)
+	if len(volumes) == 0 {
+		record(checkResult{"PASS", "No external volumes configured", ""})
+		return
+	}
+	if len(clients) == 0 {
+		record(checkResult{"SKIP", "No connected servers to check external volumes", ""})
+		return
+	}
+
+	clientNames := make([]string, 0, len(clients))
+	for name := range clients {
+		clientNames = append(clientNames, name)
+	}
+	sort.Strings(clientNames)
+
+	for _, clientName := range clientNames {
+		client := clients[clientName]
+		for _, volume := range volumes {
+			if _, err := client.Execute("docker volume inspect " + utils.ShellQuote(volume) + " >/dev/null"); err != nil {
+				record(checkResult{"FAIL", fmt.Sprintf("%s: external volume %s missing", clientName, volume), "Create or import the Docker volume before deploy"})
+				continue
+			}
+			record(checkResult{"PASS", fmt.Sprintf("%s: external volume %s present", clientName, volume), ""})
+		}
 	}
 }

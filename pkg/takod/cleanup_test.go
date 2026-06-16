@@ -137,7 +137,7 @@ func TestCleanupUnusedProjectVolumesScopesToProjectEnvironment(t *testing.T) {
 	otherProject := runtimeid.VolumeName("other", "production", "data")
 	t.Setenv("TAKO_FAKE_VOLUME_LS_OUTPUT", strings.Join([]string{target, otherStage, otherProject}, "\n")+"\n")
 
-	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production")
+	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production", nil)
 	if err != nil {
 		t.Fatalf("cleanupUnusedProjectVolumes returned error: %v", err)
 	}
@@ -166,12 +166,40 @@ func TestCleanupUnusedProjectVolumesSkipsInUseVolumes(t *testing.T) {
 	t.Setenv("TAKO_FAKE_VOLUME_LS_OUTPUT", target+"\n")
 	t.Setenv("TAKO_FAKE_FAIL_VOLUME_RM", target)
 
-	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production")
+	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production", nil)
 	if err != nil {
 		t.Fatalf("cleanupUnusedProjectVolumes should skip in-use volumes, got error: %v", err)
 	}
 	if removed != 0 {
 		t.Fatalf("removed = %d, want 0", removed)
+	}
+}
+
+func TestCleanupUnusedProjectVolumesSkipsProtectedExternalVolumes(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	protected := runtimeid.VolumeName("demo", "production", "imported")
+	owned := runtimeid.VolumeName("demo", "production", "cache")
+	t.Setenv("TAKO_FAKE_VOLUME_LS_OUTPUT", strings.Join([]string{protected, owned}, "\n")+"\n")
+
+	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production", []string{protected})
+	if err != nil {
+		t.Fatalf("cleanupUnusedProjectVolumes returned error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+
+	entries := readCommandLog(t, logPath)
+	if !slices.Contains(entries, "docker volume rm "+owned) {
+		t.Fatalf("docker log missing owned volume removal in %#v", entries)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry, "volume rm "+protected) {
+			t.Fatalf("cleanup removed protected external volume via %q; all entries %#v", entry, entries)
+		}
 	}
 }
 

@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
@@ -17,6 +21,20 @@ var secretsCmd = &cobra.Command{
 	Long:  `Manage secrets stored in .tako/secrets files. Secrets are stored locally and never committed to git.`,
 }
 
+var secretsProviderFlags struct {
+	profile         string
+	region          string
+	path            string
+	from            string
+	env             string
+	prefixStrip     string
+	maps            []string
+	dryRun          bool
+	write           bool
+	overwrite       bool
+	debugShowValues bool
+}
+
 var secretsInitCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize secrets management",
@@ -28,9 +46,7 @@ var secretsInitCmd = &cobra.Command{
 		}
 
 		// Create .gitignore
-		gitignore := `.tako/secrets*
-`
-		if err := fileutil.WriteFileAtomic(".tako/.gitignore", []byte(gitignore), 0644); err != nil {
+		if err := fileutil.WriteFileAtomic(".tako/.gitignore", []byte(secrets.GitignoreContent), 0644); err != nil {
 			return fmt.Errorf("failed to create .gitignore: %w", err)
 		}
 
@@ -208,11 +224,228 @@ var secretsValidateCmd = &cobra.Command{
 	},
 }
 
+var secretsFetchCmd = &cobra.Command{
+	Use:   "fetch PROVIDER [NAME...]",
+	Short: "Fetch secrets from an external provider",
+	Long: `Fetch secrets from an external provider and print only redacted values by default.
+
+Supported providers:
+  aws-ssm
+  aws-secrets-manager`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		provider := args[0]
+		names := args[1:]
+
+		values, err := secrets.FetchProviderSecrets(context.Background(), provider, names, providerOptionsFromFlags())
+		if err != nil {
+			return err
+		}
+		keys := sortedSecretMapKeys(values)
+		payload := make(map[string]string, len(keys))
+		for _, key := range keys {
+			if secretsProviderFlags.debugShowValues {
+				payload[key] = values[key]
+			} else {
+				payload[key] = "[REDACTED]"
+			}
+		}
+		out := map[string]any{
+			"provider":    provider,
+			"environment": getEnvDisplay(secretsProviderFlags.env),
+			"count":       len(keys),
+			"secrets":     payload,
+		}
+		encoded, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(encoded))
+		if !secretsProviderFlags.debugShowValues {
+			fmt.Println("Values redacted. Use --debug-show-values only when you deliberately need plaintext output.")
+		}
+		return nil
+	},
+}
+
+var secretsImportCmd = &cobra.Command{
+	Use:   "import PROVIDER [NAME...]",
+	Short: "Import provider secrets into encrypted Tako secrets",
+	Long: `Import external provider secrets into encrypted .tako/secrets files.
+
+By default this command performs a redacted dry run. Pass --write to persist
+the imported values. Existing local secrets are skipped unless --overwrite is
+provided.`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if secretsProviderFlags.write && secretsProviderFlags.dryRun {
+			return fmt.Errorf("--write and --dry-run cannot be used together")
+		}
+
+		provider := args[0]
+		names := args[1:]
+		values, err := secrets.FetchProviderSecrets(context.Background(), provider, names, providerOptionsFromFlags())
+		if err != nil {
+			return err
+		}
+
+		mappings, err := parseSecretMappings(secretsProviderFlags.maps)
+		if err != nil {
+			return err
+		}
+		planned, err := mapImportedSecrets(values, secretsProviderFlags.prefixStrip, mappings)
+		if err != nil {
+			return err
+		}
+		keys := sortedSecretMapKeys(planned)
+
+		fmt.Printf("Provider: %s\n", provider)
+		fmt.Printf("Environment: %s\n", getEnvDisplay(secretsProviderFlags.env))
+		fmt.Printf("Discovered: %d secret(s)\n", len(values))
+		fmt.Printf("Mapped: %d secret(s)\n", len(keys))
+		for _, key := range keys {
+			fmt.Printf("  %s=[REDACTED]\n", key)
+		}
+
+		if !secretsProviderFlags.write {
+			fmt.Println("\nDry run only. Re-run with --write to update encrypted Tako secrets.")
+			return nil
+		}
+
+		mgr, err := secrets.NewManager(secretsProviderFlags.env)
+		if err != nil {
+			return err
+		}
+		written := 0
+		skipped := 0
+		for _, key := range keys {
+			if mgr.Has(key) && !secretsProviderFlags.overwrite {
+				skipped++
+				fmt.Printf("  Skipped existing: %s\n", key)
+				continue
+			}
+			if err := mgr.Set(key, planned[key], secretsProviderFlags.env); err != nil {
+				return fmt.Errorf("failed to write secret %s: %w", key, err)
+			}
+			written++
+		}
+		fmt.Printf("\nImported %d secret(s)", written)
+		if skipped > 0 {
+			fmt.Printf(" (%d skipped; use --overwrite to replace)", skipped)
+		}
+		fmt.Println()
+		return nil
+	},
+}
+
 func getEnvDisplay(env string) string {
 	if env == "" {
 		return "all environments"
 	}
 	return env
+}
+
+func providerOptionsFromFlags() secrets.ProviderOptions {
+	return secrets.ProviderOptions{
+		Profile: secretsProviderFlags.profile,
+		Region:  secretsProviderFlags.region,
+		Path:    secretsProviderFlags.path,
+		From:    secretsProviderFlags.from,
+	}
+}
+
+func parseSecretMappings(values []string) (map[string]string, error) {
+	mappings := make(map[string]string, len(values))
+	for _, value := range values {
+		source, target, ok := strings.Cut(value, "=")
+		source = strings.TrimSpace(source)
+		target = strings.TrimSpace(target)
+		if !ok || source == "" || target == "" {
+			return nil, fmt.Errorf("invalid --map value %q, use SOURCE=DEST", value)
+		}
+		if !isValidImportedSecretKey(target) {
+			return nil, fmt.Errorf("invalid mapped secret key %q", target)
+		}
+		mappings[source] = target
+	}
+	return mappings, nil
+}
+
+func mapImportedSecrets(values map[string]string, prefixStrip string, mappings map[string]string) (map[string]string, error) {
+	out := make(map[string]string, len(values))
+	for source, value := range values {
+		key, ok := mappings[source]
+		if !ok {
+			key = importedSecretKey(source, prefixStrip)
+		}
+		if !isValidImportedSecretKey(key) {
+			return nil, fmt.Errorf("provider secret %q maps to invalid env key %q", source, key)
+		}
+		if _, exists := out[key]; exists {
+			return nil, fmt.Errorf("multiple provider secrets map to %s; use --map to disambiguate", key)
+		}
+		out[key] = value
+	}
+	return out, nil
+}
+
+func importedSecretKey(source string, prefixStrip string) string {
+	key := strings.TrimSpace(source)
+	if prefixStrip != "" {
+		prefix := strings.TrimSpace(prefixStrip)
+		if strings.HasPrefix(key, prefix) {
+			key = strings.TrimPrefix(key, prefix)
+		}
+		key = strings.TrimLeft(key, "/")
+	}
+	key = strings.Trim(key, "/")
+	var out strings.Builder
+	lastWasSeparator := false
+	for _, r := range key {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			out.WriteRune(unicode.ToUpper(r))
+			lastWasSeparator = false
+			continue
+		}
+		if !lastWasSeparator {
+			out.WriteRune('_')
+			lastWasSeparator = true
+		}
+	}
+	result := strings.Trim(out.String(), "_")
+	if result == "" {
+		return "SECRET"
+	}
+	if result[0] >= '0' && result[0] <= '9' {
+		result = "SECRET_" + result
+	}
+	return result
+}
+
+func isValidImportedSecretKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	first := rune(key[0])
+	if !((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z') || first == '_') {
+		return false
+	}
+	for _, r := range key {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func sortedSecretMapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func init() {
@@ -224,6 +457,8 @@ func init() {
 	secretsCmd.AddCommand(secretsListCmd)
 	secretsCmd.AddCommand(secretsDeleteCmd)
 	secretsCmd.AddCommand(secretsValidateCmd)
+	secretsCmd.AddCommand(secretsFetchCmd)
+	secretsCmd.AddCommand(secretsImportCmd)
 
 	// Add environment flag to relevant commands
 	for _, cmd := range []*cobra.Command{
@@ -234,4 +469,21 @@ func init() {
 	} {
 		cmd.Flags().StringP("env", "e", "", "Environment (e.g., production, staging)")
 	}
+
+	for _, cmd := range []*cobra.Command{
+		secretsFetchCmd,
+		secretsImportCmd,
+	} {
+		cmd.Flags().StringVar(&secretsProviderFlags.profile, "profile", "", "AWS CLI profile")
+		cmd.Flags().StringVar(&secretsProviderFlags.region, "region", "", "AWS region")
+		cmd.Flags().StringVar(&secretsProviderFlags.path, "path", "", "Provider path/prefix to import recursively")
+		cmd.Flags().StringVar(&secretsProviderFlags.from, "from", "", "Provider folder/name prefix for explicit names")
+		cmd.Flags().StringVarP(&secretsProviderFlags.env, "env", "e", "", "Environment (e.g., production, staging)")
+		cmd.Flags().StringVar(&secretsProviderFlags.prefixStrip, "prefix-strip", "", "Strip this provider prefix before deriving local secret keys")
+		cmd.Flags().StringArrayVar(&secretsProviderFlags.maps, "map", nil, "Map provider source to local secret key (SOURCE=DEST)")
+		cmd.Flags().BoolVar(&secretsProviderFlags.dryRun, "dry-run", false, "Preview provider import without writing")
+		cmd.Flags().BoolVar(&secretsProviderFlags.debugShowValues, "debug-show-values", false, "Print plaintext secret values")
+	}
+	secretsImportCmd.Flags().BoolVar(&secretsProviderFlags.write, "write", false, "Write imported secrets to encrypted .tako/secrets files")
+	secretsImportCmd.Flags().BoolVar(&secretsProviderFlags.overwrite, "overwrite", false, "Overwrite existing local secrets")
 }

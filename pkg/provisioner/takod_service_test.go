@@ -153,10 +153,29 @@ func TestBootstrapScriptsAvoidDownloadedShellInstallers(t *testing.T) {
 	}
 }
 
+func TestBasePackageInstallScriptAvoidsFullCurlOnDnf(t *testing.T) {
+	script := basePackageInstallScript()
+	if strings.Contains(script, "dnf install -y curl ") {
+		t.Fatalf("dnf bootstrap should not force full curl because Amazon Linux ships curl-minimal:\n%s", script)
+	}
+	if !strings.Contains(script, "dnf install -y curl-minimal wget git gcc gcc-c++ make ca-certificates") {
+		t.Fatalf("dnf bootstrap should keep curl command support through curl-minimal:\n%s", script)
+	}
+}
+
 func TestSecurityHardeningScriptsAreNonInteractive(t *testing.T) {
 	install := securityPackagesInstallScript()
 	if !strings.Contains(install, "DEBIAN_FRONTEND=noninteractive") {
 		t.Fatalf("security package install script should force noninteractive apt:\n%s", install)
+	}
+	for _, required := range []string{
+		"security package bootstrap skipped for dnf hosts",
+		"security package bootstrap skipped for yum hosts",
+		"using SSH hardening",
+	} {
+		if !strings.Contains(install, required) {
+			t.Fatalf("security package install script should handle non-Debian hosts with best-effort hardening; missing %q:\n%s", required, install)
+		}
 	}
 	if strings.Contains(install, "dpkg-reconfigure") {
 		t.Fatalf("security package install script must not run interactive dpkg-reconfigure:\n%s", install)

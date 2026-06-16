@@ -502,13 +502,18 @@ func backupVolumeNameFromSpec(volume string) (string, bool) {
 }
 
 func backupRequest(cfg *config.Config, envName string, volumeName string, backupID string, retentionDays int) takod.BackupRequest {
-	return takod.BackupRequest{
+	request := takod.BackupRequest{
 		Project:       cfg.Project.Name,
 		Environment:   envName,
-		Volume:        volumeName,
+		Volume:        backupArchiveVolumeName(volumeName),
 		BackupID:      backupID,
 		RetentionDays: retentionDays,
 	}
+	if volumeName != "" {
+		request.DockerVolume = cfg.GetVolumeName(volumeName, envName)
+		request.ExternalVolume = cfg.IsVolumeExternal(volumeName)
+	}
+	return request
 }
 
 func readBackupsFromNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, envName string, volumeName string) ([]takod.BackupInfo, error) {
@@ -522,7 +527,7 @@ func readBackupsFromNode(cfg *config.Config, pool sshClientProvider, serverCfg c
 		client,
 		cfg,
 		"GET",
-		takodclient.BackupsEndpoint(cfg.Project.Name, envName, volumeName, ""),
+		takodclient.BackupsEndpoint(cfg.Project.Name, envName, backupArchiveVolumeName(volumeName), ""),
 		nil,
 		&response,
 	)
@@ -564,7 +569,7 @@ func deleteBackupOnNode(cfg *config.Config, pool sshClientProvider, serverCfg co
 		client,
 		cfg,
 		"DELETE",
-		takodclient.BackupsEndpoint(cfg.Project.Name, envName, volumeName, backupID),
+		takodclient.BackupsEndpoint(cfg.Project.Name, envName, backupArchiveVolumeName(volumeName), backupID),
 		nil,
 		&response,
 	)
@@ -604,6 +609,51 @@ func connectBackupNode(pool sshClientProvider, serverCfg config.ServerConfig) (*
 
 func backupVolumeMissing(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "volume ") && strings.Contains(err.Error(), " does not exist")
+}
+
+func backupArchiveVolumeName(volumeName string) string {
+	volumeName = strings.TrimSpace(volumeName)
+	if volumeName == "" {
+		return ""
+	}
+	if isBackupArchiveVolumeName(volumeName) {
+		return volumeName
+	}
+	trimmed := strings.Trim(volumeName, "/")
+	var out strings.Builder
+	lastWasSeparator := false
+	for _, r := range trimmed {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			out.WriteRune(r)
+			lastWasSeparator = false
+			continue
+		}
+		if !lastWasSeparator {
+			out.WriteRune('_')
+			lastWasSeparator = true
+		}
+	}
+	cleaned := strings.Trim(out.String(), "_")
+	if cleaned == "" {
+		return "volume"
+	}
+	return cleaned
+}
+
+func isBackupArchiveVolumeName(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for i, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		if i > 0 && (r == '-' || r == '_' || r == '.') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func newBackupID() string {

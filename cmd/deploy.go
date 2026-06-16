@@ -29,6 +29,7 @@ var (
 	deployService string
 	skipBuild     bool
 	deployYes     bool
+	allowDirty    bool
 )
 
 var deployCmd = &cobra.Command{
@@ -51,6 +52,7 @@ func init() {
 	deployCmd.Flags().StringVar(&deployService, "service", "", "Deploy specific service")
 	deployCmd.Flags().BoolVar(&skipBuild, "skip-build", false, "Skip building the service image")
 	deployCmd.Flags().BoolVarP(&deployYes, "yes", "y", false, "Skip confirmation prompts (non-interactive mode)")
+	deployCmd.Flags().BoolVar(&allowDirty, "allow-dirty", false, "Allow deploying with uncommitted local changes")
 }
 
 func ensureDeployRuntimeSupported(cfg *config.Config) error {
@@ -76,31 +78,35 @@ type deployGitReader interface {
 	GetCommitInfo(string) (*git.CommitInfo, error)
 }
 
-func resolveDeployCommitInfo(gitClient deployGitReader) (*git.CommitInfo, error) {
+func resolveDeployCommitInfo(gitClient deployGitReader, allowDirty bool) (*git.CommitInfo, string, error) {
 	if !gitClient.IsRepository() {
-		return nil, fmt.Errorf("❌ This project is not a Git repository.\n\nPlease initialize Git first:\n  git init\n  git add .\n  git commit -m \"Initial commit\"\n\nGit is required for deployment tracking and rollback functionality.")
+		return nil, "", fmt.Errorf("❌ This project is not a Git repository.\n\nPlease initialize Git first:\n  git init\n  git add .\n  git commit -m \"Initial commit\"\n\nGit is required for deployment tracking and rollback functionality.")
 	}
 
 	hasChanges, err := gitClient.HasUncommittedChanges()
 	if err != nil {
-		return nil, fmt.Errorf("failed to check git status: %w", err)
+		return nil, "", fmt.Errorf("failed to check git status: %w", err)
 	}
+	dirtyStatus := ""
 	if hasChanges {
 		status, err := gitClient.GetStatus()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get git status: %w", err)
+			return nil, "", fmt.Errorf("failed to get git status: %w", err)
 		}
 		if strings.TrimSpace(status) == "" {
 			status = "(dirty worktree)"
 		}
-		return nil, fmt.Errorf("cannot deploy with uncommitted changes; commit, stash, or discard changes first:\n%s", strings.TrimSpace(status))
+		dirtyStatus = strings.TrimSpace(status)
+		if !allowDirty {
+			return nil, "", fmt.Errorf("cannot deploy with uncommitted changes; commit, stash, or discard changes first:\n%s", dirtyStatus)
+		}
 	}
 
 	commitInfo, err := gitClient.GetCommitInfo("")
 	if err != nil {
-		return nil, fmt.Errorf("failed to get commit info: %w", err)
+		return nil, "", fmt.Errorf("failed to get commit info: %w", err)
 	}
-	return commitInfo, nil
+	return commitInfo, dirtyStatus, nil
 }
 
 type remoteDeploymentSaver interface {
@@ -175,7 +181,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Initialize Git client
 	gitClient := git.NewClient(".")
 
-	commitInfo, err := resolveDeployCommitInfo(gitClient)
+	commitInfo, dirtyStatus, err := resolveDeployCommitInfo(gitClient, allowDirty)
 	if err != nil {
 		return err
 	}
@@ -198,6 +204,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Branch:  %s\n", commitInfo.Branch)
 	fmt.Printf("  Author:  %s\n", commitInfo.Author)
 	fmt.Printf("  Message: %s\n", commitInfo.Message)
+	if dirtyStatus != "" {
+		fmt.Printf("\n⚠ Deploying with uncommitted local changes (--allow-dirty).\n")
+		fmt.Printf("  Deployment history records HEAD only; uncommitted file contents are not recoverable from Git.\n")
+		if verbose {
+			fmt.Printf("  Dirty files:\n%s\n", dirtyStatus)
+		}
+	}
 
 	// Get environment and services
 	envName := getEnvironmentName(cfg)
@@ -353,6 +366,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if plan.IsEmpty() {
 		fmt.Println("\n-> No config drift detected; build services will still be reconciled for the current commit.")
 	}
+	servicesToDeploy := servicesToDeployForPlan(plan, services)
 
 	// === WILDCARD SSL DETECTION ===
 	// Check for wildcard domains and setup acme-dns if needed
@@ -492,7 +506,10 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	// Deploy each service through takod placement in dependency order
 	for _, serviceName := range deploymentOrder {
-		service := services[serviceName]
+		service, shouldDeploy := servicesToDeploy[serviceName]
+		if !shouldDeploy {
+			continue
+		}
 		fmt.Printf("→ Deploying service: %s\n", serviceName)
 
 		// Get full image name
@@ -683,6 +700,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n→ Running automatic cleanup...\n")
 	}
 	imageRepositories := cleanupImageRepositories(cfg, envName, services)
+	externalVolumes := externalVolumeNamesForEnvironment(cfg, envName)
 	for serverName, server := range servers {
 		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 		if err == nil {
@@ -690,6 +708,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				Project:                cfg.Project.Name,
 				Environment:            envName,
 				ImageRepositories:      imageRepositories,
+				ExternalVolumes:        externalVolumes,
 				KeepImages:             3,
 				CleanOldImages:         true,
 				CleanStoppedContainers: true,
@@ -886,4 +905,34 @@ func hasBuildServices(services map[string]config.ServiceConfig) bool {
 		}
 	}
 	return false
+}
+
+func servicesToDeployForPlan(plan *reconcile.ReconciliationPlan, services map[string]config.ServiceConfig) map[string]config.ServiceConfig {
+	if len(services) == 0 {
+		return map[string]config.ServiceConfig{}
+	}
+	if plan == nil {
+		return cloneServiceMap(services)
+	}
+
+	selected := make(map[string]config.ServiceConfig)
+	if plan.IsEmpty() {
+		for serviceName, service := range services {
+			if service.Build != "" {
+				selected[serviceName] = service
+			}
+		}
+		return selected
+	}
+
+	for _, change := range plan.Changes {
+		if change.Type != reconcile.ChangeAdd && change.Type != reconcile.ChangeUpdate {
+			continue
+		}
+		service, ok := services[change.ServiceName]
+		if ok {
+			selected[change.ServiceName] = service
+		}
+	}
+	return selected
 }

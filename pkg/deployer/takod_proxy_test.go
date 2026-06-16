@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestRenderTakodProxyDynamicConfigUsesLocalAndMeshUpstreams(t *testing.T) {
@@ -30,7 +29,7 @@ func TestRenderTakodProxyDynamicConfigUsesLocalAndMeshUpstreams(t *testing.T) {
 		"rule: Host(`example.com`)",
 		"entryPoints:",
 		"certResolver: letsencrypt",
-		"url: http://" + runtimeid.ContainerName("demo", "production", "web", 1) + ":3000",
+		"url: http://web:3000",
 		fmt.Sprintf("url: http://10.210.0.2:%d", remotePort),
 		"path: /health",
 		"interval: 15s",
@@ -60,7 +59,7 @@ func TestRenderTakodProxyDynamicConfigUsesLocalUpstreamForCurrentNode(t *testing
 	}
 	for _, expected := range []string{
 		fmt.Sprintf("url: http://10.210.0.1:%d", remotePort),
-		"url: http://" + runtimeid.ContainerName("demo", "production", "web", 2) + ":3000",
+		"url: http://web:3000",
 	} {
 		if !strings.Contains(configText, expected) {
 			t.Fatalf("dynamic config missing %q:\n%s", expected, configText)
@@ -91,7 +90,7 @@ func TestRenderTakodProxyDynamicConfigUsesOnlyLocalUpstreamForOneNode(t *testing
 	}
 
 	configText := string(data)
-	if !strings.Contains(configText, "url: http://"+runtimeid.ContainerName("demo", "production", "web", 1)+":3000") {
+	if !strings.Contains(configText, "url: http://web:3000") {
 		t.Fatalf("dynamic config missing local upstream:\n%s", configText)
 	}
 	if strings.Contains(configText, "10.210.0.") {
@@ -112,6 +111,35 @@ func TestRenderTakodProxyDynamicConfigSkipsScaleToZero(t *testing.T) {
 	}
 	if hasPublic {
 		t.Fatalf("expected no active public routes for scale-to-zero, got:\n%s", string(data))
+	}
+}
+
+func TestRenderTakodProxyDynamicConfigRendersRedirectFromRouters(t *testing.T) {
+	deploy := testProxyDeployer()
+	services := deploy.config.Environments["production"].Services
+	web := services["web"]
+	web.Proxy.RedirectFrom = []string{"www.example.com"}
+	services["web"] = web
+
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNode(services, "node-a")
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
+	}
+	if !hasPublic {
+		t.Fatal("expected public services to be detected")
+	}
+
+	configText := string(data)
+	for _, expected := range []string{
+		"rule: Host(`www.example.com`)",
+		"redirectRegex:",
+		`regex: ^https?://www\.example\.com(/.*)?$`,
+		"replacement: https://example.com${1}",
+		"permanent: true",
+	} {
+		if !strings.Contains(configText, expected) {
+			t.Fatalf("dynamic config missing %q:\n%s", expected, configText)
+		}
 	}
 }
 

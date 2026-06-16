@@ -21,6 +21,7 @@ type CleanupRequest struct {
 	RemoveDeployFiles      bool     `json:"removeDeployFiles,omitempty"`
 	RemoveTakodState       bool     `json:"removeTakodState,omitempty"`
 	ProxyFiles             []string `json:"proxyFiles,omitempty"`
+	ExternalVolumes        []string `json:"externalVolumes,omitempty"`
 	PruneDocker            bool     `json:"pruneDocker,omitempty"`
 	ImageRepositories      []string `json:"imageRepositories,omitempty"`
 	KeepImages             int      `json:"keepImages,omitempty"`
@@ -117,7 +118,7 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 		}
 	}
 	if req.CleanUnusedVolumes {
-		if _, err := cleanupUnusedProjectVolumes(ctx, req.Project, req.Environment); err != nil {
+		if _, err := cleanupUnusedProjectVolumes(ctx, req.Project, req.Environment, req.ExternalVolumes); err != nil {
 			warn("failed to clean unused project volumes: %v", err)
 		} else {
 			response.UnusedVolumesCleaned = true
@@ -144,7 +145,7 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 		}
 	}
 	if req.PruneDocker {
-		runScopedProjectPrune(ctx, req.Project, req.Environment, warn, response)
+		runScopedProjectPrune(ctx, req.Project, req.Environment, req.ExternalVolumes, warn, response)
 	}
 	if req.includesMaintenanceCleanup() {
 		response.FinalDiskUsage = diskUsage(ctx)
@@ -169,6 +170,11 @@ func validateCleanupRequest(req CleanupRequest) error {
 	for _, repository := range req.ImageRepositories {
 		if !isSafeImageRepository(repository) {
 			return fmt.Errorf("invalid image repository %q", repository)
+		}
+	}
+	for _, volume := range req.ExternalVolumes {
+		if !isSafeDockerVolumeName(volume) {
+			return fmt.Errorf("invalid external volume name")
 		}
 	}
 	return nil
@@ -346,15 +352,22 @@ func cleanupDanglingImages(ctx context.Context) (int, error) {
 	return len(ids), nil
 }
 
-func cleanupUnusedProjectVolumes(ctx context.Context, project string, environment string) (int, error) {
+func cleanupUnusedProjectVolumes(ctx context.Context, project string, environment string, protectedVolumes []string) (int, error) {
 	output, err := runDocker(ctx, "volume", "ls", "--format", "{{.Name}}")
 	if err != nil {
 		return 0, fmt.Errorf("failed to list docker volumes: %w", err)
+	}
+	protected := make(map[string]bool, len(protectedVolumes))
+	for _, volume := range protectedVolumes {
+		protected[volume] = true
 	}
 	var names []string
 	for _, line := range strings.Split(output, "\n") {
 		name := strings.TrimSpace(line)
 		if name == "" || !volumeNameMatchesProjectEnvironment(name, project, environment) {
+			continue
+		}
+		if protected[name] {
 			continue
 		}
 		names = append(names, name)
@@ -389,7 +402,7 @@ func dockerVolumeInUse(output string) bool {
 		strings.Contains(lower, "is in use")
 }
 
-func runScopedProjectPrune(ctx context.Context, project string, environment string, warn func(string, ...any), response *CleanupResponse) {
+func runScopedProjectPrune(ctx context.Context, project string, environment string, protectedVolumes []string, warn func(string, ...any), response *CleanupResponse) {
 	if count, err := cleanupStoppedContainers(ctx, project, environment); err != nil {
 		warn("failed to remove stopped project containers during scoped prune: %v", err)
 	} else {
@@ -412,7 +425,7 @@ func runScopedProjectPrune(ctx context.Context, project string, environment stri
 	} else {
 		response.BuildCacheCleaned = true
 	}
-	if _, err := cleanupUnusedProjectVolumes(ctx, project, environment); err != nil {
+	if _, err := cleanupUnusedProjectVolumes(ctx, project, environment, protectedVolumes); err != nil {
 		warn("failed to remove unused project volumes during scoped prune: %v", err)
 	} else {
 		response.UnusedVolumesCleaned = true

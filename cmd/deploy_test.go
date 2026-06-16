@@ -124,7 +124,7 @@ func TestResolveDeployCommitInfoRejectsDirtyWorktree(t *testing.T) {
 		status:     " M main.go\n?? new.txt\n",
 	}
 
-	_, err := resolveDeployCommitInfo(reader)
+	_, _, err := resolveDeployCommitInfo(reader, false)
 	if err == nil {
 		t.Fatal("resolveDeployCommitInfo should reject dirty worktrees")
 	}
@@ -148,22 +148,52 @@ func TestResolveDeployCommitInfoReturnsCleanCommitInfo(t *testing.T) {
 		commitInfo: want,
 	}
 
-	got, err := resolveDeployCommitInfo(reader)
+	got, dirtyStatus, err := resolveDeployCommitInfo(reader, false)
 	if err != nil {
 		t.Fatalf("resolveDeployCommitInfo returned error: %v", err)
 	}
 	if got != want {
 		t.Fatalf("commitInfo = %#v, want %#v", got, want)
 	}
+	if dirtyStatus != "" {
+		t.Fatalf("dirtyStatus = %q, want empty", dirtyStatus)
+	}
 }
 
 func TestResolveDeployCommitInfoRequiresGitRepository(t *testing.T) {
-	_, err := resolveDeployCommitInfo(fakeDeployGitReader{})
+	_, _, err := resolveDeployCommitInfo(fakeDeployGitReader{}, false)
 	if err == nil {
 		t.Fatal("resolveDeployCommitInfo should reject non-git repositories")
 	}
 	if !strings.Contains(err.Error(), "not a Git repository") {
 		t.Fatalf("error = %q, want git repository guidance", err)
+	}
+}
+
+func TestResolveDeployCommitInfoAllowsDirtyWorktreeWhenExplicit(t *testing.T) {
+	want := &git.CommitInfo{
+		Hash:      "abcdef",
+		ShortHash: "abc",
+		Branch:    "feature",
+		Message:   "deploy test",
+		Author:    "redentor",
+	}
+	reader := fakeDeployGitReader{
+		repository: true,
+		dirty:      true,
+		status:     " M .dockerignore\n",
+		commitInfo: want,
+	}
+
+	got, dirtyStatus, err := resolveDeployCommitInfo(reader, true)
+	if err != nil {
+		t.Fatalf("resolveDeployCommitInfo returned error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("commitInfo = %#v, want %#v", got, want)
+	}
+	if dirtyStatus != "M .dockerignore" {
+		t.Fatalf("dirtyStatus = %q, want dirty file list", dirtyStatus)
 	}
 }
 
@@ -331,6 +361,55 @@ func TestHasBuildServices(t *testing.T) {
 	}
 	if hasBuildServices(nil) {
 		t.Fatal("hasBuildServices should reject empty service maps")
+	}
+}
+
+func TestServicesToDeployForEmptyPlanIncludesOnlyBuildServices(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"web": {Build: "."},
+		"db":  {Image: "postgres:16"},
+	}
+	plan := &reconcile.ReconciliationPlan{}
+
+	got := servicesToDeployForPlan(plan, services)
+	if len(got) != 1 {
+		t.Fatalf("servicesToDeployForPlan returned %d service(s), want 1: %#v", len(got), got)
+	}
+	if _, ok := got["web"]; !ok {
+		t.Fatalf("build service missing from deploy set: %#v", got)
+	}
+	if _, ok := got["db"]; ok {
+		t.Fatalf("image-only service should not be redeployed on empty plan: %#v", got)
+	}
+}
+
+func TestServicesToDeployForPlanIncludesAddsAndUpdatesOnly(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"web":    {Build: "."},
+		"worker": {Image: "worker:1"},
+		"old":    {Image: "old:1"},
+	}
+	plan := &reconcile.ReconciliationPlan{
+		Summary: reconcile.ReconciliationSummary{Total: 4, Adds: 1, Updates: 1, Removes: 1, NoOps: 1},
+		Changes: []reconcile.ServiceChange{
+			{Type: reconcile.ChangeUpdate, ServiceName: "web"},
+			{Type: reconcile.ChangeAdd, ServiceName: "worker"},
+			{Type: reconcile.ChangeRemove, ServiceName: "old"},
+			{Type: reconcile.ChangeNone, ServiceName: "noop"},
+		},
+	}
+
+	got := servicesToDeployForPlan(plan, services)
+	if len(got) != 2 {
+		t.Fatalf("servicesToDeployForPlan returned %d service(s), want 2: %#v", len(got), got)
+	}
+	for _, want := range []string{"web", "worker"} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("%s missing from deploy set: %#v", want, got)
+		}
+	}
+	if _, ok := got["old"]; ok {
+		t.Fatalf("removed service should not be in deploy set: %#v", got)
 	}
 }
 

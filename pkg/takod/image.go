@@ -122,9 +122,18 @@ func (r *maxBytesReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func BuildImage(ctx context.Context, image string, r io.Reader) (*ImageBuildResponse, error) {
+func BuildImage(ctx context.Context, image string, r io.Reader, dockerfile ...string) (*ImageBuildResponse, error) {
 	if err := validateImageName(image); err != nil {
 		return nil, err
+	}
+	dockerfilePath := ""
+	if len(dockerfile) > 0 {
+		dockerfilePath = strings.TrimSpace(dockerfile[0])
+	}
+	if dockerfilePath != "" {
+		if err := validateDockerfilePath(dockerfilePath); err != nil {
+			return nil, err
+		}
 	}
 	r = newMaxBytesReader(r, defaultBuildContextMaxBytes, "build context upload")
 	buildDir, err := os.MkdirTemp("", "tako-build-*")
@@ -137,7 +146,18 @@ func BuildImage(ctx context.Context, image string, r io.Reader) (*ImageBuildResp
 		return nil, err
 	}
 
-	cmd := dockerCommandContext(ctx, "docker", "build", "-t", image, ".")
+	args := []string{"build", "-t", image}
+	if dockerfilePath != "" {
+		if _, err := safeArchiveTarget(buildDir, dockerfilePath); err != nil {
+			return nil, err
+		}
+		if _, err := os.Stat(filepath.Join(buildDir, filepath.Clean(dockerfilePath))); os.IsNotExist(err) {
+			return nil, fmt.Errorf("dockerfile does not exist in build context: %s", dockerfilePath)
+		}
+		args = append(args, "-f", dockerfilePath)
+	}
+	args = append(args, ".")
+	cmd := dockerCommandContext(ctx, "docker", args...)
 	cmd.Dir = buildDir
 	output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
 	cmd.Stdout = output
@@ -149,6 +169,23 @@ func BuildImage(ctx context.Context, image string, r io.Reader) (*ImageBuildResp
 		return nil, fmt.Errorf("built image %s is not inspectable: %w", image, err)
 	}
 	return &ImageBuildResponse{Image: image, Output: strings.TrimSpace(output.String())}, nil
+}
+
+func validateDockerfilePath(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("dockerfile path is required")
+	}
+	if filepath.IsAbs(path) {
+		return fmt.Errorf("dockerfile path must be relative to the build context")
+	}
+	if strings.ContainsAny(path, "\x00\r\n") {
+		return fmt.Errorf("dockerfile path contains unsupported characters")
+	}
+	cleaned := filepath.Clean(path)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("dockerfile path must stay inside the build context")
+	}
+	return nil
 }
 
 func extractTarGz(r io.Reader, destDir string) error {

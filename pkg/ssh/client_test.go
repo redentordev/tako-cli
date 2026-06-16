@@ -113,6 +113,52 @@ func TestConnectBackoffCapsDelay(t *testing.T) {
 	}
 }
 
+func TestConnectTimeoutUsesEnvironmentOverride(t *testing.T) {
+	t.Setenv("TAKO_SSH_CONNECT_TIMEOUT", "7s")
+	if got := connectTimeout(); got != 7*time.Second {
+		t.Fatalf("connectTimeout = %s, want 7s", got)
+	}
+
+	t.Setenv("TAKO_SSH_CONNECT_TIMEOUT", "8")
+	if got := connectTimeout(); got != 8*time.Second {
+		t.Fatalf("connectTimeout seconds shorthand = %s, want 8s", got)
+	}
+}
+
+func TestConnectTimeoutFallsBackAndCapsUnsafeValues(t *testing.T) {
+	t.Setenv("TAKO_SSH_CONNECT_TIMEOUT", "bad")
+	if got := connectTimeout(); got != connectDefaultTimeout {
+		t.Fatalf("invalid connectTimeout = %s, want default %s", got, connectDefaultTimeout)
+	}
+
+	t.Setenv("TAKO_SSH_CONNECT_TIMEOUT", "500ms")
+	if got := connectTimeout(); got != connectDefaultTimeout {
+		t.Fatalf("subsecond connectTimeout = %s, want default %s", got, connectDefaultTimeout)
+	}
+
+	t.Setenv("TAKO_SSH_CONNECT_TIMEOUT", "10m")
+	if got := connectTimeout(); got != connectMaxTimeout {
+		t.Fatalf("oversized connectTimeout = %s, want cap %s", got, connectMaxTimeout)
+	}
+}
+
+func TestConnectTCPAttemptsUsesEnvironmentOverride(t *testing.T) {
+	t.Setenv("TAKO_SSH_CONNECT_ATTEMPTS", "1")
+	if got := connectTCPAttempts(); got != 1 {
+		t.Fatalf("connectTCPAttempts = %d, want 1", got)
+	}
+
+	t.Setenv("TAKO_SSH_CONNECT_ATTEMPTS", "bad")
+	if got := connectTCPAttempts(); got != connectDefaultTCPAttempts {
+		t.Fatalf("invalid connectTCPAttempts = %d, want default %d", got, connectDefaultTCPAttempts)
+	}
+
+	t.Setenv("TAKO_SSH_CONNECT_ATTEMPTS", "100")
+	if got := connectTCPAttempts(); got != 20 {
+		t.Fatalf("oversized connectTCPAttempts = %d, want cap 20", got)
+	}
+}
+
 func TestIsTransientDialErrorClassifiesRateLimitFailures(t *testing.T) {
 	refused := &net.OpError{
 		Op:  "dial",

@@ -26,3 +26,17 @@ func TestConfigureFirewallRejectsInvalidMeshPort(t *testing.T) {
 		t.Fatal("expected oversized mesh port to be rejected")
 	}
 }
+
+func TestShouldSkipUFWFirewallOnlyForNonDebianHosts(t *testing.T) {
+	if shouldSkipUFWFirewall(&OSInfo{Family: OSFamilyDebian}) {
+		t.Fatal("Debian-family hosts should still use UFW")
+	}
+	for _, family := range []OSFamily{OSFamilyRHEL, OSFamilySUSE, OSFamilyAlpine} {
+		if !shouldSkipUFWFirewall(&OSInfo{Family: family}) {
+			t.Fatalf("family %s should skip UFW when UFW is absent", family)
+		}
+	}
+	if shouldSkipUFWFirewall(nil) {
+		t.Fatal("unknown OS should not skip UFW")
+	}
+}

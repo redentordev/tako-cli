@@ -113,6 +113,27 @@ func cleanupImageRepositories(cfg *config.Config, environment string, services m
 	return repositories
 }
 
+func externalVolumeNamesForEnvironment(cfg *config.Config, environment string) []string {
+	if cfg == nil || cfg.Volumes == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	names := make([]string, 0)
+	for key, volume := range cfg.Volumes {
+		if !volume.External {
+			continue
+		}
+		name := cfg.GetVolumeName(key, environment)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func imageRepositoryFromRef(ref string) string {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {

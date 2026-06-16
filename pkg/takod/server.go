@@ -912,9 +912,16 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("build context exceeds maximum size %d bytes", defaultBuildContextMaxBytes), http.StatusRequestEntityTooLarge)
 		return
 	}
+	dockerfile := r.URL.Query().Get("dockerfile")
+	if dockerfile != "" {
+		if err := validateDockerfilePath(dockerfile); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	defer r.Body.Close()
 
-	response, err := BuildImage(r.Context(), image, http.MaxBytesReader(w, r.Body, defaultBuildContextMaxBytes))
+	response, err := BuildImage(r.Context(), image, http.MaxBytesReader(w, r.Body, defaultBuildContextMaxBytes), dockerfile)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

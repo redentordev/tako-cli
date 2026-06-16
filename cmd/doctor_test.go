@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +10,54 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 )
+
+func TestCheckConfigHonorsConfigFlag(t *testing.T) {
+	tempDir := t.TempDir()
+	keyPath := filepath.Join(tempDir, "id_ed25519")
+	if err := os.WriteFile(keyPath, []byte("test-key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tempDir, "custom-tako.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 127.0.0.1
+    user: root
+    sshKey: `+keyPath+`
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+        port: 80
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldCfgFile := cfgFile
+	cfgFile = configPath
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+	})
+
+	var results []checkResult
+	cfg, err := checkConfig(func(result checkResult) {
+		results = append(results, result)
+	})
+	if err != nil {
+		t.Fatalf("checkConfig returned error: %v", err)
+	}
+	if cfg.Project.Name != "demo" {
+		t.Fatalf("project name = %q, want demo", cfg.Project.Name)
+	}
+	if len(results) < 1 || results[0].status != "PASS" || !strings.Contains(results[0].message, configPath) {
+		t.Fatalf("first result = %#v, want config flag path pass", results)
+	}
+}
 
 func TestCheckSSHKeysWarnsOnPasswordOnlyAuth(t *testing.T) {
 	cfg := &config.Config{

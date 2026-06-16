@@ -461,6 +461,10 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("Run 'tako state pull' to refresh local deployment records from remote state.")
 	}
 
+	if stateStatusReachableCount(remoteNodes) == 0 {
+		return stateStatusNoReachableError(envName, remoteNodes)
+	}
+
 	return nil
 }
 
@@ -762,6 +766,7 @@ func printMeshRuntimeStatus(client *ssh.Client, cfg *config.Config) {
 type stateStatusNode struct {
 	name       string
 	host       string
+	envNodes   []string
 	connectErr error
 
 	history    *remotestate.DeploymentHistory
@@ -827,8 +832,9 @@ func collectStateStatusNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 
 func collectStateStatusNode(pool *ssh.Pool, cfg *config.Config, envName string, serverName string, server config.ServerConfig, envServerNames []string) stateStatusNode {
 	node := stateStatusNode{
-		name: serverName,
-		host: server.Host,
+		name:     serverName,
+		host:     server.Host,
+		envNodes: append([]string(nil), envServerNames...),
 	}
 
 	client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
@@ -868,6 +874,7 @@ func stateStatusCandidates(nodes []stateStatusNode) ([]stateHistoryCandidate, []
 	desired := make([]stateDesiredCandidate, 0, len(nodes))
 	actual := make([]stateActualCandidate, 0, len(nodes))
 	nodeActual := make([]stateNodeActualCandidate, 0, len(nodes))
+	configuredNodes := stateStatusConfiguredNodeSet(nodes)
 
 	for _, node := range nodes {
 		if historyHasDeployments(node.history) {
@@ -888,6 +895,9 @@ func stateStatusCandidates(nodes []stateStatusNode) ([]stateHistoryCandidate, []
 				actual: node.actual,
 			})
 			for nodeName, embedded := range node.actual.Nodes {
+				if !stateNodeConfigured(configuredNodes, nodeName) {
+					continue
+				}
 				nodeActual = append(nodeActual, stateNodeActualCandidate{
 					source: node.name + " aggregate",
 					node:   nodeName,
@@ -898,6 +908,34 @@ func stateStatusCandidates(nodes []stateStatusNode) ([]stateHistoryCandidate, []
 		nodeActual = append(nodeActual, node.nodeActual...)
 	}
 	return histories, desired, actual, nodeActual
+}
+
+func stateStatusConfiguredNodeSet(nodes []stateStatusNode) map[string]struct{} {
+	configured := make(map[string]struct{})
+	for _, node := range nodes {
+		for _, nodeName := range node.envNodes {
+			if nodeName != "" {
+				configured[nodeName] = struct{}{}
+			}
+		}
+	}
+	if len(configured) > 0 {
+		return configured
+	}
+	for _, node := range nodes {
+		if node.name != "" {
+			configured[node.name] = struct{}{}
+		}
+	}
+	return configured
+}
+
+func stateNodeConfigured(configured map[string]struct{}, nodeName string) bool {
+	if len(configured) == 0 {
+		return true
+	}
+	_, ok := configured[nodeName]
+	return ok
 }
 
 func bestStateStatusActual(project string, envName string, actualCandidates []stateActualCandidate, nodeActualCandidates []stateNodeActualCandidate) (stateActualCandidate, bool, map[string]stateNodeActualCandidate) {
@@ -916,13 +954,7 @@ func bestStateStatusActual(project string, envName string, actualCandidates []st
 }
 
 func printStateStatusNodes(nodes []stateStatusNode, cfg *config.Config) {
-	reachable := 0
-	for _, node := range nodes {
-		if node.connectErr == nil {
-			reachable++
-		}
-	}
-	fmt.Printf("Nodes: %d configured, %d reachable\n", len(nodes), reachable)
+	fmt.Printf("Nodes: %d configured, %d reachable\n", len(nodes), stateStatusReachableCount(nodes))
 
 	for _, node := range nodes {
 		fmt.Printf("\nNode: %s (%s)\n", node.name, node.host)
@@ -939,6 +971,31 @@ func printStateStatusNodes(nodes []stateStatusNode, cfg *config.Config) {
 		printStateStatusActual(node.actual, node.actualErr, node.nodeActual)
 		printStateStatusLease(node.lease, node.leaseErr)
 	}
+}
+
+func stateStatusReachableCount(nodes []stateStatusNode) int {
+	reachable := 0
+	for _, node := range nodes {
+		if node.connectErr == nil {
+			reachable++
+		}
+	}
+	return reachable
+}
+
+func stateStatusNoReachableError(envName string, nodes []stateStatusNode) error {
+	details := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if node.connectErr != nil {
+			details = append(details, fmt.Sprintf("%s: %v", node.name, node.connectErr))
+		}
+	}
+	sort.Strings(details)
+	message := fmt.Sprintf("no reachable environment nodes for %s; deploy will fail closed until SSH/network is restored or the environment config is updated", envName)
+	if len(details) == 0 {
+		return errors.New(message)
+	}
+	return fmt.Errorf("%s: %s", message, strings.Join(details, "; "))
 }
 
 func printStateStatusAgent(status *takodRemoteStatus, err error) {
@@ -1394,6 +1451,9 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 				actualSnapshotFreshness(actual).Format(time.RFC3339),
 			)
 			for nodeName, nodeSnapshot := range actual.Nodes {
+				if !stateNodeNameInList(serverNames, nodeName) {
+					continue
+				}
 				repair.nodeActual = append(repair.nodeActual, stateNodeActualCandidate{
 					source: serverName + " aggregate",
 					node:   nodeName,
@@ -1805,15 +1865,10 @@ func actualSnapshotWithNodeSnapshots(snapshot *takodstate.ActualSnapshot, nodeAc
 	if snapshot == nil {
 		return nil
 	}
-	copy, err := cloneActualSnapshot(snapshot)
-	if err != nil {
+	if len(nodeActual) == 0 {
 		return snapshot
 	}
-	copy.Nodes = actualNodeSnapshotMap(nodeActual)
-	if len(copy.TargetNodes) == 0 {
-		copy.TargetNodes = sortedStateNodeActualNames(nodeActual)
-	}
-	return copy
+	return aggregateActualSnapshotFromNodeSnapshots(snapshot.Project, snapshot.Environment, nodeActual)
 }
 
 func aggregateActualSnapshotFromNodeSnapshots(project string, environment string, nodeActual map[string]stateNodeActualCandidate) *takodstate.ActualSnapshot {
@@ -1918,6 +1973,15 @@ func sortedStateNodeActualNames(nodeActual map[string]stateNodeActualCandidate) 
 	}
 	sort.Strings(nodes)
 	return nodes
+}
+
+func stateNodeNameInList(nodes []string, nodeName string) bool {
+	for _, node := range nodes {
+		if node == nodeName {
+			return true
+		}
+	}
+	return false
 }
 
 func deploymentHistoryBetter(candidate *remotestate.DeploymentHistory, current *remotestate.DeploymentHistory) bool {

@@ -279,48 +279,56 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 		// Use service.Build as the build context path
 		contextPath := service.Build
 
-		// Auto-detect Dockerfile in the build context
-		dockerfilePaths := []string{
-			filepath.Join(contextPath, "Dockerfile"),
-			filepath.Join(contextPath, "Dockerfile.prod"),
-			filepath.Join(contextPath, "dockerfile"),
-			filepath.Join(contextPath, ".dockerfile"),
-		}
+		if service.Dockerfile != "" {
+			dockerfilePath := filepath.Join(contextPath, filepath.Clean(service.Dockerfile))
+			if _, err := os.Stat(dockerfilePath); err != nil {
+				return "", fmt.Errorf("dockerfile does not exist in build context: %s", service.Dockerfile)
+			}
+			if d.verbose {
+				fmt.Printf("  Found Dockerfile: %s\n", service.Dockerfile)
+			}
+		} else {
+			// Auto-detect Dockerfile in the build context
+			dockerfilePaths := []string{
+				filepath.Join(contextPath, "Dockerfile"),
+				filepath.Join(contextPath, "Dockerfile.prod"),
+				filepath.Join(contextPath, "dockerfile"),
+				filepath.Join(contextPath, ".dockerfile"),
+			}
 
-		hasDockerfile := false
-		for _, path := range dockerfilePaths {
-			if _, err := os.Stat(path); err == nil {
-				hasDockerfile = true
-				if d.verbose {
-					fmt.Printf("  Found Dockerfile: %s\n", filepath.Base(path))
+			hasDockerfile := false
+			for _, path := range dockerfilePaths {
+				if _, err := os.Stat(path); err == nil {
+					hasDockerfile = true
+					if d.verbose {
+						fmt.Printf("  Found Dockerfile: %s\n", filepath.Base(path))
+					}
+					break
 				}
-				break
-			}
-		}
-
-		if !hasDockerfile {
-			// No Dockerfile - try to use Nixpacks
-			if d.verbose {
-				fmt.Printf("  No Dockerfile found - using Nixpacks auto-detection...\n")
 			}
 
-			detector := nixpacks.NewDetector(contextPath, d.verbose)
+			if !hasDockerfile {
+				// No Dockerfile - try to use Nixpacks
+				if d.verbose {
+					fmt.Printf("  No Dockerfile found - using Nixpacks auto-detection...\n")
+				}
 
-			// Detect framework
-			framework, err := detector.DetectFramework()
-			if err != nil {
-				return "", fmt.Errorf("failed to detect framework: %w\nHint: Either add a Dockerfile or ensure your project has recognizable framework files (package.json, go.mod, etc.)", err)
+				detector := nixpacks.NewDetector(contextPath, d.verbose)
+
+				// Detect framework
+				framework, err := detector.DetectFramework()
+				if err != nil {
+					return "", fmt.Errorf("failed to detect framework: %w\nHint: Either add a Dockerfile or ensure your project has recognizable framework files (package.json, go.mod, etc.)", err)
+				}
+
+				if d.verbose {
+					fmt.Printf("  Detected framework: %s\n", framework)
+				}
+
+				if err := detector.GenerateDockerfile(); err != nil {
+					return "", fmt.Errorf("failed to generate Dockerfile: %w", err)
+				}
 			}
-
-			if d.verbose {
-				fmt.Printf("  Detected framework: %s\n", framework)
-			}
-
-			if err := detector.GenerateDockerfile(); err != nil {
-				return "", fmt.Errorf("failed to generate Dockerfile: %w", err)
-			}
-
-			hasDockerfile = true
 		}
 
 		if d.verbose {
@@ -345,7 +353,7 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig)
 		}
 		defer archive.Close()
 
-		output, err := takodclient.StreamRequest(d.client, d.takodSocket(), "POST", takodclient.ImageBuildEndpoint(fullImageName), archive)
+		output, err := takodclient.StreamRequest(d.client, d.takodSocket(), "POST", takodclient.ImageBuildEndpoint(fullImageName, service.Dockerfile), archive)
 		var response takod.ImageBuildResponse
 		if err == nil {
 			if decodeErr := json.Unmarshal([]byte(output), &response); decodeErr != nil {

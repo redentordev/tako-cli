@@ -13,6 +13,8 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 func TestEnsureTakodMeshKeysWithRunsConcurrently(t *testing.T) {
@@ -173,14 +175,6 @@ func TestShouldInstallTakodRelease(t *testing.T) {
 	}
 }
 
-func TestBuildTakodHealthCommandQuotesURL(t *testing.T) {
-	got := buildTakodHealthCommand(8080, "/health; touch /tmp/pwned")
-	want := "curl -sf -- 'http://127.0.0.1:8080/health; touch /tmp/pwned' || exit 1"
-	if got != want {
-		t.Fatalf("health command = %q, want %q", got, want)
-	}
-}
-
 type fakeTakodStatusExecutor struct {
 	output string
 	err    error
@@ -194,7 +188,7 @@ func (f fakeTakodStatusExecutor) ExecuteWithInput(ctx context.Context, cmd strin
 	return f.output, f.err
 }
 
-func TestBuildTakodHealthSpecUsesQuotedCommand(t *testing.T) {
+func TestBuildTakodHealthSpecUsesHostSideHTTPPathAndPort(t *testing.T) {
 	deploy := &Deployer{}
 	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
 		Port: 8080,
@@ -206,9 +200,17 @@ func TestBuildTakodHealthSpecUsesQuotedCommand(t *testing.T) {
 		t.Fatal("buildTakodHealthSpec returned nil")
 	}
 
-	want := "curl -sf -- 'http://127.0.0.1:8080/ready?token=a'\"'\"'b' || exit 1"
-	if spec.Command != want {
-		t.Fatalf("health command = %q, want %q", spec.Command, want)
+	if spec.Command != "" {
+		t.Fatalf("health command = %q, want empty host-side health command", spec.Command)
+	}
+	if spec.Path != "/ready?token=a'b" {
+		t.Fatalf("health path = %q, want configured path", spec.Path)
+	}
+	if spec.Port != 8080 {
+		t.Fatalf("health port = %d, want 8080", spec.Port)
+	}
+	if spec.Scheme != "http" {
+		t.Fatalf("health scheme = %q, want http", spec.Scheme)
 	}
 }
 
@@ -235,12 +237,56 @@ func TestBuildTakodHealthSpecWaitsLongerThanDockerRetryCount(t *testing.T) {
 	}
 }
 
+func TestBuildTakodHealthSpecUsesTCPPort(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
+		Port: 5432,
+		HealthCheck: config.HealthCheckConfig{
+			TCPPort: 5432,
+			Timeout: "2s",
+		},
+	})
+	if spec == nil {
+		t.Fatal("buildTakodHealthSpec returned nil")
+	}
+	if spec.Path != "" {
+		t.Fatalf("health path = %q, want empty TCP health path", spec.Path)
+	}
+	if spec.Scheme != "" {
+		t.Fatalf("health scheme = %q, want empty TCP health scheme", spec.Scheme)
+	}
+	if spec.Port != 5432 {
+		t.Fatalf("health port = %d, want 5432", spec.Port)
+	}
+	if spec.Timeout != "2s" {
+		t.Fatalf("health timeout = %q, want 2s", spec.Timeout)
+	}
+}
+
 func TestDeploymentHealthWaitAttemptsUsesFloorAndCap(t *testing.T) {
 	if got := deploymentHealthWaitAttempts("1s", "0s", 1); got != 30 {
 		t.Fatalf("short health wait attempts = %d, want floor 30", got)
 	}
 	if got := deploymentHealthWaitAttempts("10m", "10m", 100); got != 600 {
 		t.Fatalf("long health wait attempts = %d, want cap 600", got)
+	}
+}
+
+func TestReconcileServiceRequestTimeoutCoversHealthWindowPerReplica(t *testing.T) {
+	got := reconcileServiceRequestTimeout(takod.ReconcileServiceRequest{
+		Containers: []takod.ContainerSpec{{Name: "web-1"}, {Name: "web-2"}},
+		Health:     &takod.HealthSpec{WaitAttempts: 350},
+	})
+	want := 820 * time.Second
+	if got != want {
+		t.Fatalf("timeout = %s, want %s", got, want)
+	}
+
+	got = reconcileServiceRequestTimeout(takod.ReconcileServiceRequest{
+		Containers: []takod.ContainerSpec{{Name: "web-1"}},
+	})
+	if got != takodclient.JSONRequestTimeout {
+		t.Fatalf("default timeout = %s, want %s", got, takodclient.JSONRequestTimeout)
 	}
 }
 
@@ -275,6 +321,9 @@ func TestBuildTakodContainerSpecDoesNotPublishPublicOneNodeService(t *testing.T)
 	}
 	if len(container.Publishes) != 0 {
 		t.Fatalf("public one-node service should not publish direct host ports: %#v", container.Publishes)
+	}
+	if len(container.NetworkAliases) != 1 || container.NetworkAliases[0] != runtimeid.ContainerAlias("demo", "production", "web", 1) {
+		t.Fatalf("network aliases = %#v, want generated DNS-safe alias", container.NetworkAliases)
 	}
 }
 
@@ -416,13 +465,19 @@ func TestServiceRuntimeLabelsIncludeSafeConfigHash(t *testing.T) {
 	}
 }
 
-func TestServiceRuntimeLabelsKeepRuntimeIdentityForEnvMaterial(t *testing.T) {
-	labels := serviceRuntimeLabels("demo", "production", "web", config.ServiceConfig{
+func TestServiceRuntimeLabelsIncludeRedactedHashForEnvMaterial(t *testing.T) {
+	service := config.ServiceConfig{
 		Image: "nginx:1.27",
 		Env:   map[string]string{"TOKEN": "secret"},
-	})
-	if _, ok := labels[reconcile.ConfigHashLabel]; ok {
-		t.Fatalf("config hash label should be omitted for env material: %#v", labels)
+	}
+	wantHash, ok := reconcile.SafeServiceConfigHash(service)
+	if !ok {
+		t.Fatal("expected redacted service hash")
+	}
+
+	labels := serviceRuntimeLabels("demo", "production", "web", service)
+	if labels[reconcile.ConfigHashLabel] != wantHash {
+		t.Fatalf("config hash label = %q, want %q", labels[reconcile.ConfigHashLabel], wantHash)
 	}
 	if labels[runtimeid.ServiceIdentityLabel] != runtimeid.ServiceIdentity("demo", "production", "web") {
 		t.Fatalf("runtime identity label = %q, want runtime identity", labels[runtimeid.ServiceIdentityLabel])
@@ -458,7 +513,7 @@ func TestBuildTakodMountSpecsNamespacesNamedVolumes(t *testing.T) {
 		environment: "production",
 	}
 
-	mounts, err := deploy.buildTakodMountSpecs("web", &config.ServiceConfig{
+	mounts, externalVolumes, err := deploy.buildTakodMountSpecs("web", &config.ServiceConfig{
 		Volumes: []string{"/data", "cache:/cache"},
 	})
 	if err != nil {
@@ -470,6 +525,45 @@ func TestBuildTakodMountSpecsNamespacesNamedVolumes(t *testing.T) {
 	}
 	if !slices.Equal(mounts, want) {
 		t.Fatalf("mounts = %#v, want %#v", mounts, want)
+	}
+	if len(externalVolumes) != 0 {
+		t.Fatalf("external volumes = %#v, want none", externalVolumes)
+	}
+}
+
+func TestBuildTakodMountSpecsHonorsExternalVolumeNames(t *testing.T) {
+	deploy := &Deployer{
+		config: &config.Config{
+			Project: config.ProjectConfig{Name: "demo"},
+			Volumes: map[string]config.VolumeConfig{
+				"n8n_data": {
+					External: true,
+					Name:     "captain--n8n-data",
+				},
+				"cache": {
+					Name: "shared-cache",
+				},
+			},
+		},
+		environment: "production",
+	}
+
+	mounts, externalVolumes, err := deploy.buildTakodMountSpecs("n8n", &config.ServiceConfig{
+		Volumes: []string{"n8n_data:/home/node/.n8n", "cache:/cache"},
+	})
+	if err != nil {
+		t.Fatalf("buildTakodMountSpecs returned error: %v", err)
+	}
+	wantMounts := []string{
+		"type=volume,source=captain--n8n-data,target=/home/node/.n8n",
+		"type=volume,source=shared-cache,target=/cache",
+	}
+	if !slices.Equal(mounts, wantMounts) {
+		t.Fatalf("mounts = %#v, want %#v", mounts, wantMounts)
+	}
+	wantExternal := []string{"captain--n8n-data"}
+	if !slices.Equal(externalVolumes, wantExternal) {
+		t.Fatalf("external volumes = %#v, want %#v", externalVolumes, wantExternal)
 	}
 }
 
