@@ -111,7 +111,9 @@ ifeq ($(OS),Windows_NT)
 	@exit 1
 else
 	@echo "Checking Go formatting..."
-	@unformatted="$$(gofmt -l $$(git ls-files '*.go'))"; \
+	@unformatted="$$(git ls-files '*.go' | while IFS= read -r file; do \
+		if [ -f "$$file" ]; then printf '%s\n' "$$file"; fi; \
+	done | xargs gofmt -l)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "Go files need gofmt:"; \
 		echo "$$unformatted"; \

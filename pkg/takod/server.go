@@ -114,9 +114,6 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/proxy", s.handleProxy)
 	mux.HandleFunc("/v1/ports/allocate", s.handlePortAllocate)
 	mux.HandleFunc("/v1/cleanup", s.handleCleanup)
-	mux.HandleFunc("/v1/acme-dns", s.handleAcmeDNS)
-	mux.HandleFunc("/v1/acme-dns/register", s.handleAcmeDNSRegister)
-	mux.HandleFunc("/v1/acme-dns/credentials", s.handleAcmeDNSCredentials)
 	mux.HandleFunc("/v1/state", s.handleState)
 	mux.HandleFunc("/v1/lease", s.handleLease)
 	mux.HandleFunc("/v1/env-bundle", s.handleEnvBundle)
@@ -425,99 +422,6 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	_ = encoder.Encode(response)
-}
-
-func (s *Server) handleAcmeDNS(w http.ResponseWriter, r *http.Request) {
-	var (
-		response *ReconcileAcmeDNSResponse
-		err      error
-	)
-	switch r.Method {
-	case http.MethodPost:
-		defer r.Body.Close()
-		var request ReconcileAcmeDNSRequest
-		if err := decodeJSONRequest(w, r, &request); err != nil {
-			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		normalizeReconcileAcmeDNSRequest(&request)
-		if err := validateReconcileAcmeDNSRequest(request); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		response, err = ReconcileAcmeDNS(r.Context(), request)
-	case http.MethodDelete:
-		response, err = RemoveAcmeDNS(r.Context())
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	_ = encoder.Encode(response)
-}
-
-func (s *Server) handleAcmeDNSRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	defer r.Body.Close()
-	var request AcmeDNSRegisterRequest
-	if err := decodeJSONRequest(w, r, &request); err != nil {
-		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	normalizeAcmeDNSRegisterRequest(&request)
-	if err := validateAcmeDNSRegisterRequest(request); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	response, err := RegisterAcmeDNS(r.Context(), request)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	_ = encoder.Encode(response)
-}
-
-func (s *Server) handleAcmeDNSCredentials(w http.ResponseWriter, r *http.Request) {
-	var (
-		response *AcmeDNSCredentialsResponse
-		err      error
-	)
-	switch r.Method {
-	case http.MethodGet:
-		response, err = ReadAcmeDNSCredentials()
-	case http.MethodPut:
-		defer r.Body.Close()
-		var request AcmeDNSCredentialsRequest
-		if err := decodeJSONRequest(w, r, &request); err != nil {
-			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		response, err = WriteAcmeDNSCredentials(request)
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")

@@ -559,6 +559,51 @@ func TestValidateConfigRejectsUnsupportedLoadBalancerStrategy(t *testing.T) {
 	}
 }
 
+func TestValidateConfigRejectsWildcardProxyDomains(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*ProxyConfig)
+		want   string
+	}{
+		{
+			name: "primary",
+			mutate: func(proxy *ProxyConfig) {
+				proxy.Domain = "*.example.com"
+			},
+			want: "wildcard proxy domain",
+		},
+		{
+			name: "redirect",
+			mutate: func(proxy *ProxyConfig) {
+				proxy.RedirectFrom = []string{"*.old.example.com"}
+			},
+			want: "wildcard redirect domain",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validValidationConfig()
+			production := cfg.Environments["production"]
+			web := production.Services["web"]
+			web.Proxy = &ProxyConfig{Domain: "example.com"}
+			tt.mutate(web.Proxy)
+			production.Services["web"] = web
+			cfg.Environments["production"] = production
+
+			err := ValidateConfig(cfg)
+			if err == nil {
+				t.Fatal("ValidateConfig should reject wildcard proxy domains")
+			}
+			for _, want := range []string{tt.want, "DNS-01 certificate handling"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %q, want %q", err, want)
+				}
+			}
+		})
+	}
+}
+
 func TestNormalizeProxyDomainTrimsAndPreservesWildcard(t *testing.T) {
 	got, err := NormalizeProxyDomain("  *.example.com  ")
 	if err != nil {

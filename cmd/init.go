@@ -313,7 +313,8 @@ environments:
         
         # Public proxy routing
         proxy:
-          # Primary domain where traffic is served
+          # Primary explicit hostname where traffic is served.
+          # Wildcard hostnames such as *.example.com are not supported yet.
           domain: %s.${SERVER_HOST}.sslip.io  # sslip.io provides automatic DNS
           
           # Domain redirects (301 redirect to primary domain with path preservation)

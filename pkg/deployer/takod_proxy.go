@@ -546,7 +546,7 @@ func proxyHostRule(proxy *config.ProxyConfig) (string, error) {
 
 	var hostRules []string
 	for _, domain := range domains {
-		normalized, err := config.NormalizeProxyDomain(domain)
+		normalized, err := normalizeExplicitProxyDomain(domain)
 		if err != nil {
 			return "", err
 		}
@@ -555,16 +555,27 @@ func proxyHostRule(proxy *config.ProxyConfig) (string, error) {
 	return strings.Join(hostRules, " || "), nil
 }
 
+func normalizeExplicitProxyDomain(domain string) (string, error) {
+	normalized, err := config.NormalizeProxyDomain(domain)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(normalized, "*.") {
+		return "", fmt.Errorf("wildcard proxy domain %q is not supported by the built-in tako-proxy yet", normalized)
+	}
+	return normalized, nil
+}
+
 func addRedirectFromRouters(httpConfig *traefikHTTPConfig, routerName string, proxy *config.ProxyConfig) error {
 	if proxy == nil || len(proxy.GetRedirectDomains()) == 0 {
 		return nil
 	}
-	primary, err := config.NormalizeProxyDomain(proxy.GetPrimaryDomain())
+	primary, err := normalizeExplicitProxyDomain(proxy.GetPrimaryDomain())
 	if err != nil {
 		return err
 	}
 	for _, domain := range proxy.GetRedirectDomains() {
-		normalized, err := config.NormalizeProxyDomain(domain)
+		normalized, err := normalizeExplicitProxyDomain(domain)
 		if err != nil {
 			return err
 		}
