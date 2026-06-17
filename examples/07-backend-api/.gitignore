@@ -1,4 +1,5 @@
 .env
+*.tar.gz
 
 # Tako state
 .tako/

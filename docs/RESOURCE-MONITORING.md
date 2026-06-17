@@ -27,7 +27,7 @@ tako metrics --server prod-1
 === System Metrics ===
 Timestamp: 2024-01-15 10:30:45
 
-📊 prod (95.216.194.236)
+📊 prod (203.0.113.10)
 ─────────────────────────────────────────────────
 CPU:    67.20% [█████████████░░░░░░░]
 Memory: 71.70% (2739 MB / 3820 MB) [██████████████░░░░░░]
@@ -74,7 +74,7 @@ tako stats --all
 === Container Statistics ===
 Timestamp: 2024-01-15 10:35:22
 
-📊 prod (95.216.194.236)
+📊 prod (203.0.113.10)
 ─────────────────────────────────────────────────────────────────────────────────────
 CONTAINER                                   CPU %        MEMORY     MEM %           NET I/O      BLOCK I/O
 ─────────────────────────────────────────────────────────────────────────────────────
@@ -105,15 +105,15 @@ tako prometheus
 ```
 # HELP tako_cpu_usage_percent CPU usage percentage
 # TYPE tako_cpu_usage_percent gauge
-tako_cpu_usage_percent{server="prod",host="95.216.194.236"} 67.20
+tako_cpu_usage_percent{server="prod",host="203.0.113.10"} 67.20
 
 # HELP tako_memory_total_bytes Total memory in bytes
 # TYPE tako_memory_total_bytes gauge
-tako_memory_total_bytes{server="prod",host="95.216.194.236"} 4006387712
+tako_memory_total_bytes{server="prod",host="203.0.113.10"} 4006387712
 
 # HELP tako_container_cpu_usage_percent Container CPU usage percentage
 # TYPE tako_container_cpu_usage_percent gauge
-tako_container_cpu_usage_percent{server="prod",host="95.216.194.236",container="nextjs-todos_prod_web.1.abc"} 2.45
+tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="nextjs-todos_prod_web.1.abc"} 2.45
 ```
 
 **Metrics Exported:**
