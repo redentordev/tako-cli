@@ -522,6 +522,11 @@ func stateSyncRecommendation(localExists bool, localCurrent *localstate.Deployme
 		lines = append(lines, "No state pull needed.")
 		return lines
 	}
+	if deploymentsEquivalentExceptID(localCurrent, remoteLatest) {
+		lines = append(lines, fmt.Sprintf("Local and remote deployment records describe the same deployment from %s, but use different ID formats.", bestHistory.source))
+		lines = append(lines, "No state pull needed.")
+		return lines
+	}
 
 	if !localCurrent.Timestamp.IsZero() && !remoteLatest.Timestamp.IsZero() {
 		if localCurrent.Timestamp.Before(remoteLatest.Timestamp) {
@@ -544,6 +549,77 @@ func stateSyncRecommendation(localExists bool, localCurrent *localstate.Deployme
 	lines = append(lines, fmt.Sprintf("Local and remote deployment timestamps match, but deployment IDs differ from %s.", bestHistory.source))
 	lines = append(lines, "Run 'tako state pull' to normalize local deployment records.")
 	return lines
+}
+
+func deploymentsEquivalentExceptID(localCurrent *localstate.DeploymentState, remoteLatest *remotestate.DeploymentState) bool {
+	if localCurrent == nil || remoteLatest == nil {
+		return false
+	}
+	if !deploymentTimestampsEquivalent(localCurrent.Timestamp, remoteLatest.Timestamp) {
+		return false
+	}
+	if !deploymentStatusesEquivalent(localCurrent.Status, remoteLatest.Status) {
+		return false
+	}
+	if !deploymentCommitsEquivalent(localCurrent.GitCommit, remoteLatest.GitCommit, remoteLatest.GitCommitShort) {
+		return false
+	}
+	return deploymentServicesEquivalent(localCurrent.Services, remoteLatest.Services)
+}
+
+func deploymentTimestampsEquivalent(localTime time.Time, remoteTime time.Time) bool {
+	if localTime.IsZero() || remoteTime.IsZero() {
+		return false
+	}
+	return localTime.UTC().Truncate(time.Second).Equal(remoteTime.UTC().Truncate(time.Second))
+}
+
+func deploymentStatusesEquivalent(localStatus string, remoteStatus remotestate.DeploymentStatus) bool {
+	return strings.EqualFold(strings.TrimSpace(localStatus), strings.TrimSpace(string(remoteStatus)))
+}
+
+func deploymentCommitsEquivalent(localCommit string, remoteCommit string, remoteShort string) bool {
+	localCommit = strings.TrimSpace(localCommit)
+	remoteCommit = strings.TrimSpace(remoteCommit)
+	remoteShort = strings.TrimSpace(remoteShort)
+	if localCommit == "" || (remoteCommit == "" && remoteShort == "") {
+		return true
+	}
+	if remoteCommit != "" && localCommit == remoteCommit {
+		return true
+	}
+	if remoteShort != "" && strings.HasPrefix(localCommit, remoteShort) {
+		return true
+	}
+	if remoteCommit != "" && strings.HasPrefix(remoteCommit, localCommit) {
+		return true
+	}
+	return false
+}
+
+func deploymentServicesEquivalent(localServices map[string]*localstate.ServiceDeploy, remoteServices map[string]remotestate.ServiceState) bool {
+	if len(localServices) == 0 || len(remoteServices) == 0 {
+		return true
+	}
+	if len(localServices) != len(remoteServices) {
+		return false
+	}
+	for name, localService := range localServices {
+		remoteService, ok := remoteServices[name]
+		if !ok {
+			return false
+		}
+		if localService == nil {
+			return false
+		}
+		if strings.TrimSpace(localService.Image) != "" && strings.TrimSpace(remoteService.Image) != "" && localService.Image != remoteService.Image {
+			return false
+		}
+		if localService.Replicas != 0 && remoteService.Replicas != 0 && localService.Replicas != remoteService.Replicas {
+			return false
+		}
+	}
+	return true
 }
 
 type stateLeaseNode struct {
