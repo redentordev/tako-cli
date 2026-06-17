@@ -292,6 +292,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 ### Servers & Scaling
 
 - **Multi-Server** - Deploy across multiple servers with takod mesh placement
+- **Build Image Streaming** - Broker locally built images between node-local takod agents without node-to-node SSH keys
 - **Server Setup** - Configure existing VPS hosts with Docker, local proxy, firewall rules, and monitoring
 - **Placement Strategies** - Control where services run (spread, pinned, global, label constraints)
 
