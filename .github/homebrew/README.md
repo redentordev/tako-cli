@@ -24,7 +24,7 @@ brew install tako
 ## Release Update Checklist
 
 1. Push a `vX.Y.Z` tag in this repository and wait for the release workflow to
-   publish all binary assets plus `checksums.txt`.
+   verify and publish all binary assets plus `checksums.txt`.
 2. Download the release checksums:
 
    ```bash
