@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 )
 
@@ -196,6 +198,57 @@ func TestCollectServerConnectivityReportsMissingServerInOrder(t *testing.T) {
 	}
 	if !strings.Contains(results[1].result.message, "Not found in config") {
 		t.Fatalf("node-b message = %q", results[1].result.message)
+	}
+}
+
+func TestCheckDockerRuntimeWithReportsRootfulPass(t *testing.T) {
+	var results []checkResult
+	checkDockerRuntimeWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, func(string) (*provisioner.DockerRuntimeInfo, error) {
+		return &provisioner.DockerRuntimeInfo{ServerVersion: "29.1.3", RootDir: "/var/lib/docker"}, nil
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "PASS" || !strings.Contains(results[0].message, "Docker rootful daemon 29.1.3") {
+		t.Fatalf("result = %#v, want rootful pass", results[0])
+	}
+}
+
+func TestCheckDockerRuntimeWithFailsRootless(t *testing.T) {
+	var results []checkResult
+	checkDockerRuntimeWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, func(string) (*provisioner.DockerRuntimeInfo, error) {
+		return &provisioner.DockerRuntimeInfo{Rootless: true}, nil
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "FAIL" || !strings.Contains(results[0].message, "Docker runtime is rootless") {
+		t.Fatalf("result = %#v, want rootless failure", results[0])
+	}
+	if !strings.Contains(results[0].fix, "rootful system Docker") {
+		t.Fatalf("fix = %q, want rootful guidance", results[0].fix)
+	}
+}
+
+func TestCheckDockerRuntimeWithFailsProbeErrors(t *testing.T) {
+	var results []checkResult
+	checkDockerRuntimeWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, func(string) (*provisioner.DockerRuntimeInfo, error) {
+		return nil, errors.New("daemon unavailable")
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "FAIL" || !strings.Contains(results[0].message, "Docker runtime unsupported") || !strings.Contains(results[0].message, "daemon unavailable") {
+		t.Fatalf("result = %#v, want probe failure", results[0])
 	}
 }
 
