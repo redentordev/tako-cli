@@ -109,6 +109,8 @@ var (
 	syncStateRecoverFromRunningMesh     = recoverAndSaveStateFromRunningMeshWithPool
 )
 
+const stateStatusRequestTimeout = 10 * time.Second
+
 func init() {
 	rootCmd.AddCommand(stateCmd)
 	stateCmd.AddCommand(statePullCmd)
@@ -844,10 +846,12 @@ func collectStateStatusNode(pool *ssh.Pool, cfg *config.Config, envName string, 
 	}
 	defer cleanup()
 
-	manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
+	manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg)).
+		WithRequestTimeout(stateStatusRequestTimeout)
 	node.history, node.historyErr = manager.LoadHistory()
 
-	runtime := takodstate.NewManager(client, cfg, envName)
+	runtime := takodstate.NewManager(client, cfg, envName).
+		WithRequestTimeout(stateStatusRequestTimeout)
 	node.desired, node.desiredErr = runtime.ReadDesired()
 	node.actual, node.actualErr = runtime.ReadActual()
 	for _, actualNodeName := range envServerNames {
@@ -1153,12 +1157,13 @@ func printBestKnownState(history stateHistoryCandidate, hasHistory bool, desired
 }
 
 func readTakodAgentStatus(client *ssh.Client, cfg *config.Config) (*takodRemoteStatus, error) {
-	output, err := takodclient.RequestJSON(
+	output, err := takodclient.RequestJSONWithTimeout(
 		client,
 		takodSocketFromConfig(cfg),
 		"GET",
 		"/v1/status",
 		nil,
+		stateStatusRequestTimeout,
 	)
 	if err != nil {
 		return nil, err
@@ -1178,12 +1183,13 @@ func readMeshRuntimeStatus(client *ssh.Client, cfg *config.Config) (*mesh.Status
 	if cfg.Mesh == nil {
 		return nil, nil
 	}
-	output, err := takodclient.RequestJSON(
+	output, err := takodclient.RequestJSONWithTimeout(
 		client,
 		takodSocketFromConfig(cfg),
 		"GET",
 		"/v1/mesh/status?interface="+url.QueryEscape(cfg.Mesh.Interface),
 		nil,
+		stateStatusRequestTimeout,
 	)
 	if err != nil {
 		return nil, err

@@ -107,10 +107,11 @@ type Event struct {
 }
 
 type Manager struct {
-	client      *ssh.Client
-	socket      string
-	project     string
-	environment string
+	client         takodclient.RequestExecutor
+	socket         string
+	project        string
+	environment    string
+	requestTimeout time.Duration
 }
 
 func NewManager(client *ssh.Client, cfg *config.Config, environment string) *Manager {
@@ -124,6 +125,14 @@ func NewManager(client *ssh.Client, cfg *config.Config, environment string) *Man
 		project:     cfg.Project.Name,
 		environment: environment,
 	}
+}
+
+// WithRequestTimeout returns a shallow copy that uses a custom takod request
+// deadline. A non-positive timeout keeps the package default.
+func (m *Manager) WithRequestTimeout(timeout time.Duration) *Manager {
+	copy := *m
+	copy.requestTimeout = timeout
+	return &copy
 }
 
 func BuildDesiredRevision(cfg *config.Config, environment string, source string, services map[string]config.ServiceConfig, imageRefs map[string]string, targetNodes []string, git GitInfo) (*DesiredRevision, error) {
@@ -429,7 +438,7 @@ func (m *Manager) DeleteNodeActual(node string) error {
 	}
 	request := m.documentRequest(stateDocumentNodeActual, "", "")
 	request.Node = node
-	_, err := takodclient.RequestJSON(m.client, m.socket, "DELETE", "/v1/state", request)
+	_, err := m.requestJSON("DELETE", "/v1/state", request)
 	return err
 }
 
@@ -472,25 +481,25 @@ func (m *Manager) AppendEvent(event Event) error {
 		return err
 	}
 	request := m.documentRequest(stateDocumentEvent, "", string(data))
-	_, err = takodclient.RequestJSON(m.client, m.socket, "POST", "/v1/state", request)
+	_, err = m.requestJSON("POST", "/v1/state", request)
 	return err
 }
 
 func (m *Manager) writeDocument(document string, revisionID string, content string) error {
 	request := m.documentRequest(document, revisionID, content)
-	_, err := takodclient.RequestJSON(m.client, m.socket, "PUT", "/v1/state", request)
+	_, err := m.requestJSON("PUT", "/v1/state", request)
 	return err
 }
 
 func (m *Manager) writeNodeDocument(document string, node string, content string) error {
 	request := m.documentRequest(document, "", content)
 	request.Node = node
-	_, err := takodclient.RequestJSON(m.client, m.socket, "PUT", "/v1/state", request)
+	_, err := m.requestJSON("PUT", "/v1/state", request)
 	return err
 }
 
 func (m *Manager) readDocument(document string, value any) error {
-	output, err := takodclient.RequestJSON(m.client, m.socket, "GET", takodclient.StateEndpoint(m.project, m.environment, document), nil)
+	output, err := m.requestJSON("GET", takodclient.StateEndpoint(m.project, m.environment, document), nil)
 	if err != nil {
 		return err
 	}
@@ -498,11 +507,18 @@ func (m *Manager) readDocument(document string, value any) error {
 }
 
 func (m *Manager) readNodeDocument(document string, node string, value any) error {
-	output, err := takodclient.RequestJSON(m.client, m.socket, "GET", takodclient.StateNodeEndpoint(m.project, m.environment, document, node), nil)
+	output, err := m.requestJSON("GET", takodclient.StateNodeEndpoint(m.project, m.environment, document, node), nil)
 	if err != nil {
 		return err
 	}
 	return decodeStateDocumentResponse(output, m.project, m.environment, document, value)
+}
+
+func (m *Manager) requestJSON(method string, endpoint string, value any) (string, error) {
+	if m.requestTimeout > 0 {
+		return takodclient.RequestJSONWithTimeout(m.client, m.socket, method, endpoint, value, m.requestTimeout)
+	}
+	return takodclient.RequestJSON(m.client, m.socket, method, endpoint, value)
 }
 
 func decodeStateDocumentResponse(output string, project string, environment string, document string, value any) error {
