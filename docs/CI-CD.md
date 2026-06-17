@@ -1,5 +1,17 @@
 # CI/CD Deployments
 
+## Tako Project CI vs App Deployment CI
+
+The CI suite for the Tako CLI repository is self-contained. Pull requests and
+pushes run Go tests, builds, vet, formatting checks, shell syntax checks, and
+race tests on GitHub-hosted runners. Those checks do not SSH to playground
+servers, do not need deployment secrets, and do not mutate any real hosts.
+
+Server-backed deployment proof is intentionally separate. Use the mesh E2E
+harness from a real app repository when you want to prove setup, deploy, remote
+state, leases, proxy protocols, or node-recovery behavior against actual
+servers. That harness is opt-in and requires the app's normal SSH/env secrets.
+
 Tako uses the same deployment path from laptops and CI runners:
 
 1. Checkout the app repository.

@@ -34,6 +34,11 @@ the current CLI by default, runs commands from a real app repository, writes
 logs outside the app worktree unless `TAKO_E2E_LOG_DIR` is set, and uses
 temporary fresh clones for new-computer and CI checks.
 
+This harness is not part of the repository's default CI suite. Normal Tako CLI
+CI is self-contained and does not contact servers. Run the harness separately
+when a change needs live proof against owned nodes, WireGuard routing, proxy
+protocols, leases, or replicated takod state.
+
 Safe preflight:
 
 ```bash
