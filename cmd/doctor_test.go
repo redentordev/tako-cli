@@ -254,6 +254,76 @@ func TestCheckDockerRuntimeWithFailsProbeErrors(t *testing.T) {
 	}
 }
 
+func TestCheckServerAgentVersionWithReportsMatchingAgent(t *testing.T) {
+	var results []checkResult
+	checkServerAgentVersionWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, "v0.4.39", func(string) (*takodRemoteStatus, error) {
+		return &takodRemoteStatus{Runtime: "takod", Version: "v0.4.39", Hostname: "host-a"}, nil
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "PASS" || !strings.Contains(results[0].message, "matches CLI v0.4.39") {
+		t.Fatalf("result = %#v, want matching-agent pass", results[0])
+	}
+}
+
+func TestCheckServerAgentVersionWithFailsStaleReleasedAgent(t *testing.T) {
+	var results []checkResult
+	checkServerAgentVersionWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, "v0.4.39", func(string) (*takodRemoteStatus, error) {
+		return &takodRemoteStatus{Runtime: "takod", Version: "v0.4.38", Hostname: "host-a"}, nil
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "FAIL" || !strings.Contains(results[0].message, "differs from CLI v0.4.39") {
+		t.Fatalf("result = %#v, want stale-agent failure", results[0])
+	}
+	if !strings.Contains(results[0].fix, "tako upgrade servers") {
+		t.Fatalf("fix = %q, want upgrade guidance", results[0].fix)
+	}
+}
+
+func TestCheckServerAgentVersionWithWarnsForDevelopmentCLI(t *testing.T) {
+	var results []checkResult
+	checkServerAgentVersionWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, "dev", func(string) (*takodRemoteStatus, error) {
+		return &takodRemoteStatus{Runtime: "takod", Version: "v0.4.39", Hostname: "host-a"}, nil
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "WARN" || !strings.Contains(results[0].message, "development CLI dev") {
+		t.Fatalf("result = %#v, want development-cli warning", results[0])
+	}
+	if !strings.Contains(results[0].fix, "--takod-binary") {
+		t.Fatalf("fix = %q, want takod-binary guidance", results[0].fix)
+	}
+}
+
+func TestCheckServerAgentVersionWithFailsProbeErrors(t *testing.T) {
+	var results []checkResult
+	checkServerAgentVersionWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, "v0.4.39", func(string) (*takodRemoteStatus, error) {
+		return nil, errors.New("status unavailable")
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "FAIL" || !strings.Contains(results[0].message, "status unavailable") {
+		t.Fatalf("result = %#v, want status failure", results[0])
+	}
+}
+
 func TestPublicServiceNamesReturnsSortedProxyServices(t *testing.T) {
 	cfg := &config.Config{
 		Environments: map[string]config.EnvironmentConfig{

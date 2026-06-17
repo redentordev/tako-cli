@@ -169,7 +169,8 @@ available to `takod`, systemd for the agent service, and enough privileges to
 configure WireGuard, firewall rules, published ports, and the shared proxy. A
 fully rootless remote server mode is not implemented yet. `tako setup` verifies
 that rootful system Docker is reachable through `sudo docker info`, and
-`tako doctor` reports the same Docker runtime mode. For environments with
+`tako doctor` reports the same Docker runtime mode and compares reachable
+server-side takod agent versions with the running CLI. For environments with
 public routes, `tako doctor` also inspects the live shared proxy container and
 verifies the required Traefik file-provider settings, TCP 80/443 publishes,
 UDP 443 publish for HTTP/3, and ACME, dynamic-config, and access-log mounts.
@@ -391,7 +392,8 @@ Done:
     runtime state.
 17. `tako discovery exports` lists exported service records from reachable
     nodes.
-18. `tako doctor` verifies rootful remote Docker and live proxy runtime shape.
+18. `tako doctor` verifies takod agent versions, rootful remote Docker, and live
+    proxy runtime shape.
 
 Next:
 1. Add distributed certificate handling for multi-edge deployments.
