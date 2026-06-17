@@ -198,7 +198,7 @@ type DeployConfig struct {
 
 // LoadBalancerConfig defines load balancing settings
 type LoadBalancerConfig struct {
-	Strategy    string                  `yaml:"strategy" json:"strategy"` // round_robin, least_conn, ip_hash, random
+	Strategy    string                  `yaml:"strategy" json:"strategy"` // round_robin, sticky
 	HealthCheck LoadBalancerHealthCheck `yaml:"healthCheck,omitempty" json:"healthCheck,omitempty"`
 }
 

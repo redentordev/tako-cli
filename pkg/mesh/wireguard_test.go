@@ -211,6 +211,19 @@ func TestApplyLocalWithRunnerWritesConfigWithoutSudo(t *testing.T) {
 			t.Fatalf("local takod mesh command should not require sudo: %s", command)
 		}
 	}
+	routedFirewallCommand := findCommandContaining(runner.commands, "ufw route allow")
+	if routedFirewallCommand == "" {
+		t.Fatalf("expected routed UFW command, got %v", runner.commands)
+	}
+	for _, expected := range []string{
+		"net.ipv4.ip_forward=1",
+		"ufw route allow in on 'tako' from '10.210.0.2/32'",
+		"ufw route allow out on 'tako' to '10.210.0.2/32'",
+	} {
+		if !strings.Contains(routedFirewallCommand, expected) {
+			t.Fatalf("routed firewall command missing %q: %s", expected, routedFirewallCommand)
+		}
+	}
 	applyCommand := findCommandWithPrefix(runner.commands, "systemctl enable wg-quick@")
 	if applyCommand == "" {
 		t.Fatalf("expected wg-quick apply command, got %v", runner.commands)
@@ -274,6 +287,15 @@ func (f *fakeWireGuardRunner) MkdirAll(path string, mode os.FileMode) error {
 func findCommandWithPrefix(commands []string, prefix string) string {
 	for _, command := range commands {
 		if strings.HasPrefix(command, prefix) {
+			return command
+		}
+	}
+	return ""
+}
+
+func findCommandContaining(commands []string, fragment string) string {
+	for _, command := range commands {
+		if strings.Contains(command, fragment) {
 			return command
 		}
 	}

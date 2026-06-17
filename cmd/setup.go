@@ -80,6 +80,9 @@ func runSetup(cmd *cobra.Command, args []string) error {
 				if err := refreshCurrentSetup(prov, cfg, name, server.User, meshListenPort); err != nil {
 					return fmt.Errorf("failed to refresh current setup on server %s: %w", name, err)
 				}
+				if err := setup.WriteVersionFile(client, setupVersionManifest(serverVersion)); err != nil {
+					return setupVersionWriteError(name, err)
+				}
 				continue
 			}
 		} else {
@@ -112,15 +115,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		}
 
 		// Write version file after successful setup
-		newVersion := &setup.ServerVersion{
-			Version:        setup.CurrentVersion,
-			InstalledAt:    time.Now(),
-			TakoCLIVersion: Version,
-			Components:     make(map[string]string),
-			Features:       []string{"docker", "wireguard-mesh", "tako-proxy", "firewall", "monitoring"},
-		}
-
-		if err := setup.WriteVersionFile(client, newVersion); err != nil {
+		if err := setup.WriteVersionFile(client, setupVersionManifest(nil)); err != nil {
 			return setupVersionWriteError(name, err)
 		}
 
@@ -135,6 +130,29 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 func setupVersionWriteError(serverName string, err error) error {
 	return fmt.Errorf("server %s setup completed but failed to write setup version metadata: %w", serverName, err)
+}
+
+func setupVersionManifest(existing *setup.ServerVersion) *setup.ServerVersion {
+	installedAt := time.Now()
+	lastUpgrade := time.Time{}
+	components := make(map[string]string)
+
+	if existing != nil {
+		installedAt = existing.InstalledAt
+		lastUpgrade = existing.LastUpgrade
+		for key, value := range existing.Components {
+			components[key] = value
+		}
+	}
+
+	return &setup.ServerVersion{
+		Version:        setup.CurrentVersion,
+		InstalledAt:    installedAt,
+		LastUpgrade:    lastUpgrade,
+		TakoCLIVersion: Version,
+		Components:     components,
+		Features:       []string{"docker", "wireguard-mesh", "tako-proxy", "firewall", "monitoring"},
+	}
 }
 
 func setupTargetServers(cfg *config.Config, envName string, requestedServer string) ([]string, map[string]config.ServerConfig, error) {
@@ -186,8 +204,12 @@ func refreshCurrentSetup(prov currentSetupRefresher, cfg *config.Config, nodeNam
 }
 
 func ensureTakodRuntimeForSetup(prov setupRuntimeInstaller, cfg *config.Config, nodeName string) error {
-	if setupTakodBinary != "" {
-		if err := prov.InstallTakodBinaryFromFile(setupTakodBinary); err != nil {
+	return ensureTakodRuntimeWithBinary(prov, cfg, nodeName, setupTakodBinary)
+}
+
+func ensureTakodRuntimeWithBinary(prov setupRuntimeInstaller, cfg *config.Config, nodeName string, takodBinary string) error {
+	if takodBinary != "" {
+		if err := prov.InstallTakodBinaryFromFile(takodBinary); err != nil {
 			return err
 		}
 	} else {

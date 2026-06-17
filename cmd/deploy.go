@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -69,6 +70,41 @@ func ensureDeployRuntimeSupported(cfg *config.Config) error {
 		return fmt.Errorf("state.deployConsistency=%s is not implemented yet; current deploys support lease", cfg.GetDeployConsistency())
 	}
 	return nil
+}
+
+func loadDeployConfig(configPath string) (*config.Config, error) {
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		return nil, formatDeployConfigError(resolveDeployConfigPath(configPath), err)
+	}
+	return cfg, nil
+}
+
+func resolveDeployConfigPath(configPath string) string {
+	if configPath != "" {
+		return configPath
+	}
+	if _, err := os.Stat("tako.yaml"); err == nil {
+		return "tako.yaml"
+	}
+	if _, err := os.Stat("tako.json"); err == nil {
+		return "tako.json"
+	}
+	return "tako.yaml"
+}
+
+func formatDeployConfigError(configPath string, err error) error {
+	message := strings.TrimSpace(err.Error())
+	switch {
+	case strings.HasPrefix(message, "failed to parse YAML config:"):
+		return fmt.Errorf("YAML syntax error in %s:\n  %s", filepath.Clean(configPath), strings.TrimSpace(strings.TrimPrefix(message, "failed to parse YAML config:")))
+	case strings.HasPrefix(message, "failed to parse JSON config:"):
+		return fmt.Errorf("JSON syntax error in %s:\n  %s", filepath.Clean(configPath), strings.TrimSpace(strings.TrimPrefix(message, "failed to parse JSON config:")))
+	case strings.HasPrefix(message, "invalid config:"):
+		return fmt.Errorf("config validation failed in %s:\n  %s", filepath.Clean(configPath), strings.TrimSpace(strings.TrimPrefix(message, "invalid config:")))
+	default:
+		return fmt.Errorf("config preflight failed in %s:\n  %s", filepath.Clean(configPath), message)
+	}
 }
 
 type deployGitReader interface {
@@ -170,9 +206,9 @@ func recordFailedDeploymentState(
 
 func runDeploy(cmd *cobra.Command, args []string) error {
 	// Load deployment configuration
-	cfg, err := config.LoadConfig(cfgFile)
+	cfg, err := loadDeployConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return err
 	}
 	if err := ensureDeployRuntimeSupported(cfg); err != nil {
 		return err

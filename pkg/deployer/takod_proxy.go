@@ -61,6 +61,17 @@ type traefikLoadBalancer struct {
 	Servers        []traefikServer     `yaml:"servers"`
 	HealthCheck    *traefikHealthCheck `yaml:"healthCheck,omitempty"`
 	PassHostHeader bool                `yaml:"passHostHeader"`
+	Sticky         *traefikSticky      `yaml:"sticky,omitempty"`
+}
+
+type traefikSticky struct {
+	Cookie *traefikStickyCookie `yaml:"cookie,omitempty"`
+}
+
+type traefikStickyCookie struct {
+	Name     string `yaml:"name,omitempty"`
+	Secure   bool   `yaml:"secure,omitempty"`
+	HTTPOnly bool   `yaml:"httpOnly,omitempty"`
 }
 
 type traefikServer struct {
@@ -211,6 +222,9 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 			Servers:        upstreams,
 			PassHostHeader: true,
 		}
+		if service.LoadBalancer.Strategy == "sticky" {
+			lb.Sticky = stickyLoadBalancerCookie(routerName)
+		}
 		if healthCheck := proxyHealthCheckForService(service); healthCheck != nil {
 			lb.HealthCheck = healthCheck
 		}
@@ -255,6 +269,16 @@ func proxyHealthCheckForService(service config.ServiceConfig) *traefikHealthChec
 	return &traefikHealthCheck{
 		Path:     service.HealthCheck.Path,
 		Interval: interval,
+	}
+}
+
+func stickyLoadBalancerCookie(routerName string) *traefikSticky {
+	return &traefikSticky{
+		Cookie: &traefikStickyCookie{
+			Name:     "tako_" + proxyNameHash(routerName),
+			Secure:   true,
+			HTTPOnly: true,
+		},
 	}
 }
 

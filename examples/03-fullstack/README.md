@@ -71,7 +71,7 @@ services:
 ## How It Works
 
 1. **User Request**: Browser → `fullstack.example.com`
-2. **Web Layer**: Caddy proxy → Web container
+2. **Web Layer**: tako-proxy → Web container
 3. **API Call**: Web → `http://api:4000` (internal network)
 4. **Load Balance**: Request distributed across 2 API replicas
 5. **Data Layer**: API → PostgreSQL (reads/writes) + Redis (cache)

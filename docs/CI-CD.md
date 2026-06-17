@@ -4,9 +4,10 @@ Tako uses the same deployment path from laptops and CI runners:
 
 1. Checkout the app repository.
 2. Restore SSH credentials.
-3. Pull the newest reachable encrypted environment bundle from takod.
-4. Pull remote deployment state into the local `.tako/` cache.
-5. Run `tako deploy --yes`.
+3. Optionally patch stale server-side takod agents with `tako upgrade servers`.
+4. Pull the newest reachable encrypted environment bundle from takod.
+5. Pull remote deployment state into the local `.tako/` cache.
+6. Run `tako deploy --yes`.
 
 Remote leases in takod prevent a CI job and a laptop from reconciling the same
 target nodes at the same time.
@@ -95,6 +96,8 @@ jobs:
 
       - name: Restore environment and state
         run: |
+          tako upgrade servers --dry-run
+          tako upgrade servers
           tako env pull --force
           tako state pull
           tako state status
@@ -114,6 +117,13 @@ closed, but SSH should not hang for minutes. Use `TAKO_SSH_CONNECT_TIMEOUT` and
 `TAKO_SSH_CONNECT_TIMEOUT=8s TAKO_SSH_CONNECT_ATTEMPTS=1 tako state status`
 quickly proves which configured node is unreachable before running
 `tako state repair` against the surviving mesh.
+
+If a CI deploy fails because the server agent is stale or missing features from
+the current CLI, run `tako upgrade servers --dry-run` to see each node's agent
+version, then `tako upgrade servers` to install the matching release binary,
+restart `takod`, refresh `/etc/tako/version.json`, and verify `/v1/status`
+before deploying again. Development CLI builds must pass `--takod-binary` with a
+Linux binary because there is no release asset for `dev`.
 
 ## Proving the Workflow
 

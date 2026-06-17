@@ -87,7 +87,7 @@ The application will be:
 - `api.YOUR.IP.sslip.io` → Backend API
 - `app.YOUR.IP.sslip.io` → Frontend app
 
-All apps route through Caddy on ports 80/443, no port numbers needed!
+All apps route through tako-proxy on ports 80/443, no port numbers needed!
 
 ## Database Persistence
 

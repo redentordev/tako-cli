@@ -18,7 +18,7 @@ environments:
         port: 3000
         replicas: 2
         loadBalancer:
-          strategy: ip_hash
+          strategy: sticky
         proxy:
           domain: websocket.${SERVER_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}

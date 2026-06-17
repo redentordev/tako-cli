@@ -170,6 +170,35 @@ func TestRenderTakodProxyDynamicConfigUsesServiceHealthCheckFallback(t *testing.
 	}
 }
 
+func TestRenderTakodProxyDynamicConfigUsesStickyStrategy(t *testing.T) {
+	deploy := testProxyDeployer()
+	services := deploy.config.Environments["production"].Services
+	web := services["web"]
+	web.LoadBalancer.Strategy = "sticky"
+	services["web"] = web
+
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNode(services, "node-a")
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
+	}
+	if !hasPublic {
+		t.Fatal("expected public services to be detected")
+	}
+
+	configText := string(data)
+	for _, expected := range []string{
+		"sticky:",
+		"cookie:",
+		"name: tako_",
+		"secure: true",
+		"httpOnly: true",
+	} {
+		if !strings.Contains(configText, expected) {
+			t.Fatalf("dynamic config missing %q:\n%s", expected, configText)
+		}
+	}
+}
+
 func TestMeshUpstreamPortRejectsSlotRangeCollision(t *testing.T) {
 	deploy := testProxyDeployer()
 	if _, err := deploy.meshUpstreamPort("web", meshUpstreamPortSlotLimit+1); err == nil {

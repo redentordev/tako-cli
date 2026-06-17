@@ -81,7 +81,7 @@ The system supports three job types:
 
 2. Deploy:
    ```bash
-   start deploy prod
+   tako deploy -e production --yes
    ```
 
 3. Workers start immediately and wait for jobs

@@ -9,7 +9,7 @@ This example demonstrates horizontal scaling with multiple replicas and automati
 - **Round-Robin Strategy**: Sequential distribution across instances
 - **Instance Identification**: Each instance shows its unique hostname
 - **High Availability**: Service continues if one instance fails
-- **Zero Downtime**: Rolling updates without interruption
+- **Reconciled Updates**: Tako recreates containers to match desired state
 
 ## How It Works
 
@@ -55,10 +55,9 @@ services:
 - Instance1 → Instance2 → Instance3 → Instance1 → ...
 - Simple and fair distribution
 
-**Other strategies** (if supported by your CLI):
-- `least_connections` - Routes to instance with fewest active connections
-- `ip_hash` - Same client IP always goes to same instance
-- `random` - Random instance selection
+**Sticky:**
+- Uses a secure HTTP-only cookie for session-affine traffic
+- Useful for WebSocket-heavy services or temporary session affinity
 
 ## How to Deploy
 
@@ -71,7 +70,7 @@ services:
 
 3. Deploy:
    ```bash
-   start deploy prod
+   tako deploy -e production --yes
    ```
 
 4. Visit your domain and keep refreshing - watch the hostname change!
@@ -127,14 +126,14 @@ services:
 
 **Deploy changes:**
 ```bash
-start deploy prod
+tako deploy -e production --yes
 ```
 
 The system will:
 - Add new instances if scaling up
 - Gracefully stop instances if scaling down
 - Update load balancer configuration
-- Zero downtime during scaling
+- Reconcile containers to the desired replica count
 
 ## Benefits of Horizontal Scaling
 
@@ -148,10 +147,10 @@ The system will:
 - Distribute CPU and memory load
 - Better response times under load
 
-**Zero Downtime Deployments:**
-- Update one instance at a time
-- Others continue serving traffic
-- Gradual rollout of changes
+**Reconciled Deployments:**
+- Tako compares desired config against running services
+- Replica count changes are applied during deploy
+- Health checks keep unhealthy instances out of proxy rotation
 
 **Cost Efficiency:**
 - Scale up during peak hours
@@ -289,14 +288,14 @@ loadBalancer:
 ```yaml
 replicas: 5
 loadBalancer:
-  strategy: least_connections
+  strategy: round_robin
 ```
 
 **3. WebSocket Server:**
 ```yaml
 replicas: 2
 loadBalancer:
-  strategy: ip_hash  # Same client → same instance
+  strategy: sticky  # Session-affine traffic
 ```
 
 ## Troubleshooting
@@ -304,14 +303,14 @@ loadBalancer:
 **Problem: Always hitting same instance**
 - Check load balancer configuration
 - Verify all instances are healthy
-- Check if strategy is `ip_hash`
+- Check if strategy is `sticky` and your client is sending the sticky cookie
 
 **Problem: Uneven load distribution**
 - Some instances may be slower
 - Check resource usage per instance
-- Consider `least_connections` strategy
+- Use `round_robin` for stateless services
 
 **Problem: Sessions not persisting**
 - Application is stateful (needs fixing)
 - Move sessions to Redis/database
-- Use sticky sessions (ip_hash) as temporary fix
+- Use `sticky` as a temporary session-affinity fix

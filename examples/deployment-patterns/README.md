@@ -18,7 +18,7 @@ minimal so the deployment shape is easy to see and adapt.
 | `08-go-web` | Go web service | Multi-stage Dockerfile, replicas, load balancing |
 | `09-monorepo-web-api` | Monorepo with public web and internal API | Separate build contexts, dependency order, internal routing |
 | `10-stages-shared-node` | Preview and production on one node | Same project, separate environments, distinct domains |
-| `11-websocket-node` | Realtime Node.js service | WebSocket endpoint, replicas, `ip_hash` balancing |
+| `11-websocket-node` | Realtime Node.js service | WebSocket endpoint, replicas, sticky balancing |
 | `12-github-actions-deploy` | CI/CD deployment | GitHub Actions, state restore, noninteractive deploy |
 
 ## How To Use

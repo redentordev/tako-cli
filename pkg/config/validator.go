@@ -403,12 +403,10 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 	}
 	validStrategies := map[string]bool{
 		"round_robin": true,
-		"least_conn":  true,
-		"ip_hash":     true,
-		"random":      true,
+		"sticky":      true,
 	}
 	if service.LoadBalancer.Strategy != "" && !validStrategies[service.LoadBalancer.Strategy] {
-		return fmt.Errorf("service %s: invalid load balancer strategy: %s", name, service.LoadBalancer.Strategy)
+		return fmt.Errorf("service %s: invalid load balancer strategy %q; supported strategies are round_robin and sticky", name, service.LoadBalancer.Strategy)
 	}
 
 	// Set load balancer health check defaults

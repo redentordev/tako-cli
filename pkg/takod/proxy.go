@@ -38,7 +38,8 @@ func ReconcileProxy(ctx context.Context, req ReconcileProxyRequest) (*ReconcileP
 	running, _ := runDocker(ctx, "ps", "--filter", "name=^tako-proxy$", "--format", "{{.Names}}")
 	if strings.TrimSpace(running) == "tako-proxy" {
 		args, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .Args}}")
-		if strings.Contains(args, "--providers.file.directory=/etc/traefik/dynamic") {
+		ports, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .NetworkSettings.Ports}}")
+		if proxyContainerIsCurrent(args, ports) {
 			_, _ = runDocker(ctx, "network", "connect", req.Network, "tako-proxy")
 			return &ReconcileProxyResponse{Container: "tako-proxy", Image: req.Image}, nil
 		}
@@ -118,6 +119,7 @@ func buildProxyContainerArgs(req ReconcileProxyRequest) []string {
 		"--network", req.Network,
 		"--publish", "80:80",
 		"--publish", "443:443",
+		"--publish", "443:443/udp",
 		"--volume", "/etc/tako/proxy/acme:/acme",
 		"--volume", "/etc/tako/proxy/dynamic:/etc/traefik/dynamic:ro",
 		"--volume", "/var/log/tako/proxy:/var/log/traefik",
@@ -129,6 +131,8 @@ func buildProxyContainerArgs(req ReconcileProxyRequest) []string {
 		"--providers.file.watch=true",
 		"--entryPoints.web.address=:80",
 		"--entryPoints.websecure.address=:443",
+		"--entryPoints.websecure.http3=true",
+		"--entryPoints.websecure.http3.advertisedPort=443",
 		"--certificatesResolvers.letsencrypt.acme.email=" + req.Email,
 		"--certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json",
 		"--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web",
@@ -136,4 +140,17 @@ func buildProxyContainerArgs(req ReconcileProxyRequest) []string {
 		"--accessLog.filePath=/var/log/traefik/access.log",
 		"--accessLog.format=json",
 	}
+}
+
+func proxyContainerIsCurrent(args string, ports string) bool {
+	requiredArgs := []string{
+		"--providers.file.directory=/etc/traefik/dynamic",
+		"--entryPoints.websecure.http3",
+	}
+	for _, required := range requiredArgs {
+		if !strings.Contains(args, required) {
+			return false
+		}
+	}
+	return strings.Contains(ports, `"443/udp"`)
 }

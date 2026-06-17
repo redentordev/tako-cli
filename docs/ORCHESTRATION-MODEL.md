@@ -9,7 +9,7 @@ There is one runtime path:
 tako CLI -> takod -> local Docker
                |
                +-> mesh
-               +-> local proxy
+               +-> local proxy (Traefik-backed tako-proxy)
                +-> replicated state
                +-> health + reconciliation
 ```
@@ -58,10 +58,11 @@ state, actual snapshots, leases, env bundles, Docker labels, proxy files,
 networks, containers, and generated volume names.
 
 Multiple unrelated projects can share the same server when they use distinct
-app/stage pairs. The node-local proxy is intentionally shared because only one
-process can own ports 80 and 443, but each app/stage writes its own dynamic
-proxy file and service routes. Runtime Docker artifacts include a deterministic
-short identity hash so similar names such as `prod_api/web` and
+app/stage pairs. The node-local Traefik-backed `tako-proxy` is intentionally
+shared because only one process can own ports 80, TCP 443, and UDP 443 for
+HTTP/3, but each app/stage writes its own dynamic proxy file and service routes.
+Runtime Docker artifacts include a deterministic short identity hash so similar
+names such as `prod_api/web` and
 `prod/api_web` cannot collapse into the same container, network, proxy, or
 volume name.
 
@@ -106,7 +107,9 @@ node agent is missing or running a different version, install it at
 `/usr/local/bin/tako`, and restart the systemd service. Development builds reuse
 an existing server binary when one is already installed. For local agent smoke
 tests, set `TAKO_TAKOD_BINARY` to a Linux tako binary to upload that binary
-before runtime preparation.
+before runtime preparation. Operators can also run `tako upgrade servers` to
+explicitly patch stale server-side agents, refresh the setup manifest, and
+verify `/v1/status` before reconciling application services.
 
 `takod` exposes health, status, actual container discovery, service container
 reconcile, proxy file updates, proxy container reconcile, logs, stats, metrics,
@@ -224,16 +227,24 @@ replication, placement, and external persistence behavior.
           web@node-c
 ```
 
-Every ingress node runs a local proxy. It routes to local healthy containers
-and remote healthy containers through node-local mesh-only upstream ports.
-One-node deployments use the same proxy path with only local upstreams and do
-not publish mesh host ports. Multi-node upstream ports are allocated and
+Every selected environment node with public routes currently runs the shared
+node-local proxy. It routes to local containers through Docker DNS and remote
+containers through node-local mesh-only upstream ports. Health is enforced by
+the generated Traefik service health checks when configured. One-node
+deployments use the same proxy path with only local upstreams and do not publish
+mesh host ports. Multi-node upstream ports are allocated and
 recorded by the target node's `takod` agent. The CLI sends a deterministic
 app/stage/service/slot preferred port, but `takod` checks existing Docker port
 bindings and its allocation registry before accepting it, then returns the
 actual assigned port for container publish and proxy rendering. This lets
 unrelated apps with common service names such as `web` share the same server
 without taking each other's mesh upstream port.
+
+The built-in load balancer strategies are intentionally narrow:
+`round_robin` uses Traefik's default load balancing, and `sticky` enables secure
+HTTP-only cookie stickiness for session-affine or WebSocket-heavy workloads.
+Other algorithms are rejected at config validation until they are implemented in
+the generated proxy config.
 
 For services without `proxy`, `port` is still the container port used by health
 checks and service-to-service networking, but it is not published on the host.
@@ -264,6 +275,8 @@ CI uses the same path as a laptop:
 ```text
 CI runner
   checkout
+  tako upgrade servers --dry-run
+  tako upgrade servers
   tako state status
   tako deploy --yes
        |
@@ -289,11 +302,15 @@ Done:
 3. State pull/status and env push/pull support clone and CI workflows.
 4. Desired revisions, actual snapshots, and events persist on nodes.
 5. WireGuard peer material and node configs reconcile through takod.
-6. Per-node proxies render mesh upstreams from desired and actual state.
+6. Per-node proxies render mesh upstreams from desired placement and Traefik health checks.
 7. State repair can rebuild deployment history and runtime state across reachable mesh nodes.
 8. Mutating operations acquire leases across their target nodes.
+9. Proxy setup supports HTTP/1.1, HTTP/2, HTTP/3, WebSocket traffic, and sticky sessions.
+10. `tako upgrade servers` explicitly patches stale server-side takod agents.
 
 Next:
-1. Evaluate background peer anti-entropy after the explicit repair workflow is proven.
-2. Expand e2e validation across one-node and multi-node meshes.
+1. Add a dedicated edge/proxy placement selector.
+2. Add shared ACME/certificate storage for multi-edge deployments.
+3. Evaluate background peer anti-entropy after the explicit repair workflow is proven.
+4. Expand e2e validation across one-node and multi-node meshes.
 ```
