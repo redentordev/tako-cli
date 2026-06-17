@@ -19,8 +19,9 @@ var (
 )
 
 var setupCmd = &cobra.Command{
-	Use:   "setup",
-	Short: "Set up server with takod, proxy, and security hardening",
+	Use:          "setup",
+	Short:        "Set up server with takod, proxy, and security hardening",
+	SilenceUsage: true,
 	Long: `Setup configures your VPS server with all necessary components:
   - Container runtime prerequisites
   - WireGuard mesh networking

@@ -57,6 +57,12 @@ func TestSetupRegistersTakodBinaryFlag(t *testing.T) {
 	}
 }
 
+func TestSetupCommandSilencesUsageOnExecutionErrors(t *testing.T) {
+	if !setupCmd.SilenceUsage {
+		t.Fatal("setup command should silence usage on execution errors")
+	}
+}
+
 func TestSetupVersionWriteErrorFailsSuccessfulProvisioning(t *testing.T) {
 	err := setupVersionWriteError("node-a", errors.New("permission denied"))
 	if err == nil {
