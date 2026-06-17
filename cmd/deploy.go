@@ -10,7 +10,6 @@ import (
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
-	"github.com/redentordev/tako-cli/pkg/acmedns"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/dependency"
 	"github.com/redentordev/tako-cli/pkg/deployer"
@@ -19,7 +18,6 @@ import (
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
-	"github.com/redentordev/tako-cli/pkg/ssl"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
@@ -404,67 +402,6 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Println("\n-> No config drift detected; build services will still be reconciled for the current commit.")
 	}
 	servicesToDeploy := servicesToDeployForPlan(plan, services)
-
-	// === WILDCARD SSL DETECTION ===
-	// Check for wildcard domains and setup acme-dns if needed
-	sslReqs := ssl.DetectRequirements(services)
-	if ssl.HasWildcards(sslReqs) {
-		wildcardDomains := ssl.GroupWildcards(sslReqs)
-		fmt.Printf("\n🔐 Wildcard SSL certificates detected:\n")
-		for _, domain := range wildcardDomains {
-			fmt.Printf("   *.%s\n", domain)
-		}
-
-		// Setup acme-dns for DNS-01 challenge
-		acmeMgr := acmedns.NewManager(sourceClient, sourceServer.Host, takodSocketFromConfig(cfg), verbose)
-		if err := acmeMgr.Setup(); err != nil {
-			fmt.Printf("\n⚠ Warning: Failed to setup acme-dns: %v\n", err)
-			fmt.Printf("  Wildcard SSL certificates may not be issued automatically.\n")
-			fmt.Printf("  You may need to configure DNS-01 challenge manually.\n\n")
-		} else {
-			// Register each wildcard domain
-			var registrations []*acmedns.Registration
-			for _, baseDomain := range wildcardDomains {
-				reg, err := acmeMgr.Register(baseDomain)
-				if err != nil {
-					fmt.Printf("  ⚠ Failed to register %s: %v\n", baseDomain, err)
-					continue
-				}
-				registrations = append(registrations, reg)
-			}
-
-			// Show CNAME instructions if we have new registrations
-			if len(registrations) > 0 {
-				fmt.Print(acmeMgr.GetCNAMEInstructions(registrations))
-				fmt.Printf("\n⚠ IMPORTANT: Add the CNAME records above to your DNS provider.\n")
-				fmt.Printf("  Wildcard certificates will be issued automatically once DNS propagates.\n")
-				fmt.Printf("  Re-run tako deploy after DNS propagation to reconcile the deployment.\n\n")
-
-				// Check if DNS is already configured (for returning users)
-				dnsChecker := ssl.NewDNSChecker()
-				allConfigured := true
-				for _, reg := range registrations {
-					verified, _ := dnsChecker.CheckCNAME(reg.Domain, reg.CNAMETarget)
-					if verified {
-						fmt.Printf("  ✓ DNS already configured for *.%s\n", reg.Domain)
-					} else {
-						allConfigured = false
-					}
-				}
-
-				if !allConfigured && !deployYes {
-					confirmed, err := confirmDeployAction("\nDNS records not yet configured. Continue deployment anyway? (y/N): ", "wildcard DNS records are not configured")
-					if err != nil {
-						return err
-					}
-					if !confirmed {
-						fmt.Println("Deployment paused. Add DNS records and run deploy again.")
-						return nil
-					}
-				}
-			}
-		}
-	}
 
 	if len(servers) == 1 {
 		fmt.Printf("\n🐙 Using takod mesh runtime (one node)\n\n")

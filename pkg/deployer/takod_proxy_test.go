@@ -324,13 +324,31 @@ func TestMeshUpstreamPortIsScopedByProjectEnvironmentAndService(t *testing.T) {
 	}
 }
 
-func TestProxyHostRuleNormalizesAndPreservesWildcard(t *testing.T) {
-	rule, err := proxyHostRule(&config.ProxyConfig{Domain: " *.example.com "})
-	if err != nil {
-		t.Fatalf("proxyHostRule returned error: %v", err)
+func TestProxyHostRuleRejectsWildcardDomain(t *testing.T) {
+	_, err := proxyHostRule(&config.ProxyConfig{Domain: " *.example.com "})
+	if err == nil {
+		t.Fatal("proxyHostRule should reject wildcard domains")
 	}
-	if rule != "Host(`*.example.com`)" {
-		t.Fatalf("rule = %q, want wildcard host rule", rule)
+	if !strings.Contains(err.Error(), "wildcard proxy domain") {
+		t.Fatalf("error = %q, want wildcard proxy domain", err)
+	}
+}
+
+func TestAddRedirectFromRoutersRejectsWildcardDomain(t *testing.T) {
+	httpConfig := &traefikHTTPConfig{
+		Routers:     map[string]traefikRouter{},
+		Services:    map[string]traefikService{},
+		Middlewares: map[string]traefikMiddleware{},
+	}
+	err := addRedirectFromRouters(httpConfig, "web", &config.ProxyConfig{
+		Domain:       "example.com",
+		RedirectFrom: []string{"*.old.example.com"},
+	})
+	if err == nil {
+		t.Fatal("addRedirectFromRouters should reject wildcard domains")
+	}
+	if !strings.Contains(err.Error(), "wildcard proxy domain") {
+		t.Fatalf("error = %q, want wildcard proxy domain", err)
 	}
 }
 

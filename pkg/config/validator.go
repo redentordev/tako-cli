@@ -719,6 +719,9 @@ func validateProxy(serviceName string, proxy *ProxyConfig) error {
 	if err != nil {
 		return fmt.Errorf("service %s: invalid primary domain: %s", serviceName, strings.TrimSpace(proxy.Domain))
 	}
+	if isWildcardProxyDomain(trimmed) {
+		return fmt.Errorf("service %s: wildcard proxy domain %q is not supported by the built-in tako-proxy yet; use explicit hostnames until DNS-01 certificate handling is implemented", serviceName, trimmed)
+	}
 	proxy.Domain = trimmed
 
 	// Validate redirect domains
@@ -727,6 +730,9 @@ func validateProxy(serviceName string, proxy *ProxyConfig) error {
 		trimmed, err := NormalizeProxyDomain(redirectDomain)
 		if err != nil {
 			return fmt.Errorf("service %s: invalid redirect domain: %s", serviceName, strings.TrimSpace(redirectDomain))
+		}
+		if isWildcardProxyDomain(trimmed) {
+			return fmt.Errorf("service %s: wildcard redirect domain %q is not supported by the built-in tako-proxy yet; use explicit hostnames until DNS-01 certificate handling is implemented", serviceName, trimmed)
 		}
 		proxy.RedirectFrom[i] = trimmed
 
@@ -763,6 +769,10 @@ func validateProxy(serviceName string, proxy *ProxyConfig) error {
 	}
 
 	return nil
+}
+
+func isWildcardProxyDomain(domain string) bool {
+	return strings.HasPrefix(strings.TrimSpace(domain), "*.")
 }
 
 func isValidHostname(hostname string) bool {

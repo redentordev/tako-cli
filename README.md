@@ -647,6 +647,9 @@ services:
 - 301 permanent redirects for SEO
 - Path preservation (`www.example.com/api/users` → `example.com/api/users`)
 - Works with both HTTP and HTTPS traffic
+- Wildcard domains such as `*.example.com` are rejected for now; the built-in
+  proxy uses HTTP-01 certificate issuance and needs DNS-01 support before
+  wildcard certificates can be automated.
 
 ### Parallel Deployment (Default)
 

@@ -132,11 +132,11 @@ verify `/v1/status` before reconciling application services.
 
 `takod` exposes health, status, actual container discovery, service container
 reconcile, proxy file updates, proxy container reconcile, logs, stats, metrics,
-access logs, volume backups, acme-dns state, mesh metadata, and project cleanup
-from node-local state. Runtime workflows ask the local agent to remove, pull,
-run, verify containers, publish proxy config, persist credentials, stream logs,
-read metrics, and clean project resources through typed socket requests. The
-CLI may still use SSH as a transport to reach the Unix socket, but runtime Docker
+access logs, volume backups, mesh metadata, and project cleanup from node-local
+state. Runtime workflows ask the local agent to remove, pull, run, verify
+containers, publish proxy config, persist credentials, stream logs, read
+metrics, and clean project resources through typed socket requests. The CLI may
+still use SSH as a transport to reach the Unix socket, but runtime Docker
 inspection and mutation belong to `takod`.
 
 Installed `takod` services also refresh node-local actual container state in the
@@ -277,9 +277,12 @@ edge nodes with pinned servers or node-label constraints while service
 containers keep their own placement. Built-in ACME TLS currently requires the
 proxy placement to resolve to one node; multi-edge certificate issuance and
 storage is blocked at config validation until distributed certificate handling
-is implemented. The proxy routes to local containers through Docker DNS and
-remote containers through node-local mesh-only upstream ports. Health is
-enforced by the generated Traefik service health checks when configured.
+is implemented. Public proxy domains must be explicit hostnames; wildcard
+hostnames such as `*.example.com` are blocked until DNS-01 certificate handling
+is implemented in the generated Traefik proxy config. The proxy routes to local
+containers through Docker DNS and remote containers through node-local mesh-only
+upstream ports. Health is enforced by the generated Traefik service health
+checks when configured.
 One-node deployments use the same proxy path with only local upstreams and do
 not publish mesh host ports. Multi-node upstream ports are allocated and
 recorded by the target node's `takod` agent. The CLI sends a
@@ -363,10 +366,13 @@ Done:
 12. Environment proxy placement can limit public ingress to dedicated edge nodes.
 13. Config validation blocks unsafe multi-edge automatic ACME TLS.
 14. Build-image distribution is brokered by the CLI between node-local takod agents.
+15. Config validation blocks wildcard public hostnames until DNS-01 certificate
+    handling is implemented.
 
 Next:
 1. Add distributed certificate handling for multi-edge deployments.
-2. Evaluate background peer anti-entropy after the explicit repair workflow is proven.
-3. Add layer-delta peer image distribution.
-4. Expand e2e validation across one-node and multi-node meshes.
+2. Add DNS-01 certificate handling for wildcard public hostnames.
+3. Evaluate background peer anti-entropy after the explicit repair workflow is proven.
+4. Add layer-delta peer image distribution.
+5. Expand e2e validation across one-node and multi-node meshes.
 ```

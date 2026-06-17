@@ -681,11 +681,15 @@ func ServiceUpEvent(project, env, service string, downtime time.Duration) Event 
 
 // SSLPendingEvent creates an SSL certificate pending event
 func SSLPendingEvent(project, env string, domain string, cnameTarget string) Event {
+	message := fmt.Sprintf("SSL certificate pending for `%s`", domain)
+	if cnameTarget != "" {
+		message = fmt.Sprintf("%s\nConfigure DNS challenge target `%s`", message, cnameTarget)
+	}
 	return Event{
 		Type:        EventSSLPending,
 		Project:     project,
 		Environment: env,
-		Message:     fmt.Sprintf("Wildcard SSL certificate pending for `%s`\nConfigure DNS: `_acme-challenge.%s` CNAME `%s`", domain, domain, cnameTarget),
+		Message:     message,
 		Details: map[string]string{
 			"domain":       domain,
 			"cname_target": cnameTarget,
@@ -700,7 +704,7 @@ func SSLIssuedEvent(project, env string, domain string, waitTime time.Duration) 
 		Type:        EventSSLIssued,
 		Project:     project,
 		Environment: env,
-		Message:     fmt.Sprintf("Wildcard SSL certificate issued for `*.%s`", domain),
+		Message:     fmt.Sprintf("SSL certificate issued for `%s`", domain),
 		Duration:    waitTime,
 		Details: map[string]string{
 			"domain":    domain,

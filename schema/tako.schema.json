@@ -406,14 +406,14 @@
                   "properties": {
                     "domain": {
                       "type": "string",
-                      "description": "Primary domain"
+                      "description": "Primary hostname. Wildcard hostnames are not supported by the built-in proxy yet."
                     },
                     "redirectFrom": {
                       "type": "array",
                       "items": {
                         "type": "string"
                       },
-                      "description": "Domains to redirect from"
+                      "description": "Hostnames to redirect from. Wildcard hostnames are not supported by the built-in proxy yet."
                     },
                     "email": {
                       "type": "string",
