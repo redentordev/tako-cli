@@ -240,12 +240,61 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		env.Services[serviceName] = service
 	}
 
+	if err := validateEnvironmentProxyACMESafety(envName, env, cfg); err != nil {
+		return err
+	}
+
 	// Check for duplicate domains across services
 	if err := validateDomainUniqueness(envName, env); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func validateEnvironmentProxyACMESafety(envName string, env *EnvironmentConfig, cfg *Config) error {
+	environmentServers, err := environmentServerTargets(envName, env, cfg)
+	if err != nil {
+		return err
+	}
+	proxyTargets, err := ResolveEnvironmentProxyTargets(env.Proxy, cfg.Servers, environmentServers, envName)
+	if err != nil {
+		return fmt.Errorf("environment %s proxy placement: %w", envName, err)
+	}
+	if len(proxyTargets) <= 1 {
+		return nil
+	}
+
+	var publicServices []string
+	for serviceName, service := range env.Services {
+		if service.Proxy == nil {
+			continue
+		}
+		if isAutomaticACMETLSProvider(service.Proxy.TLS.Provider) {
+			publicServices = append(publicServices, serviceName)
+		}
+	}
+	if len(publicServices) == 0 {
+		return nil
+	}
+	sort.Strings(publicServices)
+
+	return fmt.Errorf(
+		"environment %s: automatic ACME TLS currently supports one proxy node, but proxy placement resolves to %d nodes (%s) for public service(s): %s; set environment.proxy.placement to a single edge node until shared certificate distribution is implemented",
+		envName,
+		len(proxyTargets),
+		strings.Join(proxyTargets, ", "),
+		strings.Join(publicServices, ", "),
+	)
+}
+
+func isAutomaticACMETLSProvider(provider string) bool {
+	switch provider {
+	case "", "letsencrypt", "zerossl":
+		return true
+	default:
+		return false
+	}
 }
 
 func environmentServerTargets(envName string, env *EnvironmentConfig, cfg *Config) ([]string, error) {
