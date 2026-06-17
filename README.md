@@ -65,6 +65,18 @@ rm /tmp/tako
 
 Use the manual section below for Linux ARM64, macOS, and Windows binaries.
 
+#### Container Image
+
+Each release also publishes a multi-arch Linux image for AMD64 and ARM64:
+
+```bash
+docker run --rm ghcr.io/redentordev/tako-cli:latest --version
+```
+
+For CI jobs that run Tako from the image, mount the project checkout, SSH key,
+and Docker socket into the container so builds and remote deploys use the same
+Git-backed config as the host runner.
+
 <details>
 <summary>🔧 Manual Installation</summary>
 
@@ -103,7 +115,7 @@ Invoke-WebRequest -Uri "https://github.com/redentordev/tako-cli/releases/latest/
 <details>
 <summary>🛠️ Build from Source</summary>
 
-Requires Go 1.21+
+Requires Go 1.26.4 or newer.
 
 ```bash
 git clone https://github.com/redentordev/tako-cli.git
