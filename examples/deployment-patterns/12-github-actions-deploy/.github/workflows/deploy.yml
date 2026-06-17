@@ -11,13 +11,15 @@ jobs:
       CI: "true"
       TAKO_NONINTERACTIVE: "1"
       TAKO_HOST_KEY_MODE: strict
+      TAKO_SSH_CONNECT_TIMEOUT: 10s
+      TAKO_SSH_CONNECT_ATTEMPTS: "3"
       TAKO_ENV_PASSPHRASE: ${{ secrets.TAKO_ENV_PASSPHRASE }}
       TAKO_SERVER_HOST: ${{ secrets.TAKO_SERVER_HOST }}
       TAKO_SSH_KEY: ~/.ssh/tako_deploy
       LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Tako
         run: |
@@ -30,12 +32,15 @@ jobs:
           printf '%s\n' "${{ secrets.TAKO_SSH_PRIVATE_KEY }}" > "$TAKO_SSH_KEY"
           chmod 600 "$TAKO_SSH_KEY"
 
-      - name: Restore remote state
+      - name: Validate, upgrade, and restore state
         run: |
-          tako env pull --force
-          tako state pull
-          tako state status
-          tako state lease
+          tako validate -e production
+          tako upgrade servers -e production --dry-run
+          tako upgrade servers -e production
+          tako env pull -e production --force
+          tako state pull -e production
+          tako state status -e production
+          tako state lease -e production
 
       - name: Deploy
         run: tako deploy -e production --yes
