@@ -2,6 +2,7 @@ package takod
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -39,7 +40,9 @@ func ReconcileProxy(ctx context.Context, req ReconcileProxyRequest) (*ReconcileP
 	if strings.TrimSpace(running) == "tako-proxy" {
 		args, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .Args}}")
 		ports, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .NetworkSettings.Ports}}")
-		if proxyContainerIsCurrent(args, ports) {
+		image, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{.Config.Image}}")
+		mounts, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .Mounts}}")
+		if proxyContainerIsCurrent(req, args, ports, image, mounts) {
 			_, _ = runDocker(ctx, "network", "connect", req.Network, "tako-proxy")
 			return &ReconcileProxyResponse{Container: "tako-proxy", Image: req.Image}, nil
 		}
@@ -142,15 +145,98 @@ func buildProxyContainerArgs(req ReconcileProxyRequest) []string {
 	}
 }
 
-func proxyContainerIsCurrent(args string, ports string) bool {
+func proxyContainerIsCurrent(req ReconcileProxyRequest, argsJSON string, portsJSON string, image string, mountsJSON string) bool {
+	if strings.TrimSpace(image) != req.Image {
+		return false
+	}
+
 	requiredArgs := []string{
 		"--providers.file.directory=/etc/traefik/dynamic",
-		"--entryPoints.websecure.http3",
+		"--providers.file.watch=true",
+		"--entryPoints.web.address=:80",
+		"--entryPoints.websecure.address=:443",
+		"--entryPoints.websecure.http3=true",
+		"--entryPoints.websecure.http3.advertisedPort=443",
+		"--certificatesResolvers.letsencrypt.acme.email=" + req.Email,
+		"--certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json",
+		"--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web",
+		"--accessLog.filePath=/var/log/traefik/access.log",
+		"--accessLog.format=json",
+	}
+	args, err := parseProxyArgs(argsJSON)
+	if err != nil {
+		return false
 	}
 	for _, required := range requiredArgs {
-		if !strings.Contains(args, required) {
+		if !proxyArgExists(args, required) {
 			return false
 		}
 	}
-	return strings.Contains(ports, `"443/udp"`)
+	if !proxyPortsAreCurrent(portsJSON) {
+		return false
+	}
+	return proxyMountsAreCurrent(mountsJSON)
+}
+
+func parseProxyArgs(raw string) ([]string, error) {
+	var args []string
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return nil, err
+	}
+	return args, nil
+}
+
+func proxyArgExists(args []string, expected string) bool {
+	for _, arg := range args {
+		if arg == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func proxyPortsAreCurrent(raw string) bool {
+	var ports map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &ports); err != nil {
+		return false
+	}
+	for _, port := range []string{"80/tcp", "443/tcp", "443/udp"} {
+		if _, ok := ports[port]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func proxyMountsAreCurrent(raw string) bool {
+	var mounts []struct {
+		Source      string `json:"Source"`
+		Destination string `json:"Destination"`
+	}
+	if err := json.Unmarshal([]byte(raw), &mounts); err != nil {
+		return false
+	}
+	requiredMounts := map[string]string{
+		"/acme":                "/etc/tako/proxy/acme",
+		"/etc/traefik/dynamic": "/etc/tako/proxy/dynamic",
+		"/var/log/traefik":     "/var/log/tako/proxy",
+	}
+	for destination, source := range requiredMounts {
+		if !proxyMountExists(mounts, source, destination) {
+			return false
+		}
+	}
+	return true
+}
+
+func proxyMountExists(mounts []struct {
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+}, source string, destination string) bool {
+	for _, mount := range mounts {
+		if mount.Source == source && mount.Destination == destination {
+			return true
+		}
+	}
+	return false
 }
