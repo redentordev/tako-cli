@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestRenderTakodProxyDynamicConfigUsesLocalAndMeshUpstreams(t *testing.T) {
@@ -29,7 +30,7 @@ func TestRenderTakodProxyDynamicConfigUsesLocalAndMeshUpstreams(t *testing.T) {
 		"rule: Host(`example.com`)",
 		"entryPoints:",
 		"certResolver: letsencrypt",
-		"url: http://web:3000",
+		"url: http://" + runtimeid.ContainerAlias("demo", "production", "web", 1) + ":3000",
 		fmt.Sprintf("url: http://10.210.0.2:%d", remotePort),
 		"path: /health",
 		"interval: 15s",
@@ -59,7 +60,7 @@ func TestRenderTakodProxyDynamicConfigUsesLocalUpstreamForCurrentNode(t *testing
 	}
 	for _, expected := range []string{
 		fmt.Sprintf("url: http://10.210.0.1:%d", remotePort),
-		"url: http://web:3000",
+		"url: http://" + runtimeid.ContainerAlias("demo", "production", "web", 2) + ":3000",
 	} {
 		if !strings.Contains(configText, expected) {
 			t.Fatalf("dynamic config missing %q:\n%s", expected, configText)
@@ -90,8 +91,11 @@ func TestRenderTakodProxyDynamicConfigUsesOnlyLocalUpstreamForOneNode(t *testing
 	}
 
 	configText := string(data)
-	if !strings.Contains(configText, "url: http://web:3000") {
+	if !strings.Contains(configText, "url: http://"+runtimeid.ContainerAlias("demo", "production", "web", 1)+":3000") {
 		t.Fatalf("dynamic config missing local upstream:\n%s", configText)
+	}
+	if strings.Contains(configText, "url: http://web:3000") {
+		t.Fatalf("local proxy upstream must use project/stage-scoped container alias, not generic service DNS:\n%s", configText)
 	}
 	if strings.Contains(configText, "10.210.0.") {
 		t.Fatalf("one-node proxy config should not route through mesh IPs:\n%s", configText)

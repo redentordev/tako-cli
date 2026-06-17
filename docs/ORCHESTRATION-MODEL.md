@@ -66,6 +66,11 @@ names such as `prod_api/web` and
 `prod/api_web` cannot collapse into the same container, network, proxy, or
 volume name.
 
+Proxy routes also target deterministic project/stage-scoped container aliases,
+not generic service DNS names. This matters because the shared proxy can be
+attached to several app networks at once; `web` may exist in many projects, but
+`tako-myapp-production-web-1-...` resolves to one intended upstream.
+
 The operational rule is the same as SST's app/stage model: keep app names
 stable and unique per product, and use environments as stages such as
 `production`, `staging`, or `preview`.
