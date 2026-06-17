@@ -144,6 +144,23 @@ the lease is clear.
 Local `.tako` files are cache and UX acceleration. The durable truth lives in
 Git plus the last accepted desired revision and event log replicated by takod.
 
+## Local Docker Compatibility
+
+Local development only needs a Docker-compatible daemon when Tako has to build
+or inspect images from the machine running the CLI. Docker Desktop and Colima
+work for that path as long as the active Docker context answers `docker info`.
+Rootless Docker can also be used locally for builds when the current user can
+run normal `docker build`, `docker pull`, and `docker save` commands.
+
+Remote `takod` hosts have stricter requirements than a laptop build context.
+Setup and runtime reconciliation currently assume a Linux server with Docker
+available to `takod`, systemd for the agent service, and enough privileges to
+configure WireGuard, firewall rules, published ports, and the shared proxy. A
+fully rootless remote server mode is not implemented yet; treat rootless Docker
+on remote deployment nodes as experimental until the live mesh checklist proves
+setup, proxy ports, WireGuard routing, volumes, and service reconciliation on
+that host.
+
 ## Runtime Flow
 
 ```text

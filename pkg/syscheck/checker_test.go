@@ -62,6 +62,15 @@ func TestCommandExistsReturnsFalseOnTimeout(t *testing.T) {
 	}
 }
 
+func TestDockerDaemonUnavailableMessageMentionsDockerInfo(t *testing.T) {
+	msg := dockerDaemonUnavailableMessage()
+	for _, want := range []string{"Docker daemon is not running", "docker info"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("dockerDaemonUnavailableMessage() = %q, want containing %q", msg, want)
+		}
+	}
+}
+
 func TestPromptNixpacksInstallReturnsFalseWhenNonInteractive(t *testing.T) {
 	oldStdin := os.Stdin
 	reader, writer, err := os.Pipe()
