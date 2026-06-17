@@ -116,6 +116,60 @@ func TestRunDeployFailsInvalidYAMLBeforeGit(t *testing.T) {
 	}
 }
 
+func TestRunDeployFailsInvalidConfigBeforeGit(t *testing.T) {
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	root := t.TempDir()
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+	})
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("failed to switch cwd: %v", err)
+	}
+	t.Setenv("SSH_PASSWORD", "test-password")
+	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), []byte(`
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: example.com
+    user: deploy
+    password: ${SSH_PASSWORD}
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+        replicas: 2
+        loadBalancer:
+          strategy: ip_hash
+`), 0600); err != nil {
+		t.Fatalf("failed to write invalid config: %v", err)
+	}
+	oldCfgFile := cfgFile
+	cfgFile = ""
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+	})
+
+	err = runDeploy(deployCmd, nil)
+	if err == nil {
+		t.Fatal("runDeploy should fail on invalid config")
+	}
+	for _, want := range []string{"config validation failed in tako.yaml", "invalid load balancer strategy", "round_robin and sticky"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "Git repository") {
+		t.Fatalf("deploy should fail before git checks, got %q", err)
+	}
+}
+
 func TestFormatDeployConfigErrorReportsValidationFailures(t *testing.T) {
 	err := formatDeployConfigError("tako.yaml", errors.New(`invalid config: service web: invalid load balancer strategy "ip_hash"; supported strategies are round_robin and sticky`))
 	for _, want := range []string{"config validation failed in tako.yaml", "invalid load balancer strategy", "round_robin and sticky"} {
