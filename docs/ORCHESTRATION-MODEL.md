@@ -166,6 +166,9 @@ that rootful system Docker is reachable through `sudo docker info`, and
 public routes, `tako doctor` also inspects the live shared proxy container and
 verifies the required Traefik file-provider settings, TCP 80/443 publishes,
 UDP 443 publish for HTTP/3, and ACME, dynamic-config, and access-log mounts.
+It also reads replicated deployment/runtime state through takod and reports
+whether deployment history, desired state, aggregate actual state, node-local
+actual snapshots, and the remote operation lease are healthy.
 Rootless Docker on remote deployment nodes is blocked until the live mesh
 checklist proves setup, proxy ports, WireGuard routing, volumes, and service
 reconciliation on that host.
