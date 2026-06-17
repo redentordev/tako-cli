@@ -10,8 +10,14 @@ func TestUpgradeServersCommandRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Find(upgrade servers) returned error: %v", err)
 	}
+	if !upgradeCmd.SilenceUsage {
+		t.Fatal("upgrade command should silence usage for execution errors")
+	}
 	if cmd != upgradeServersCmd {
 		t.Fatalf("upgrade servers command was not registered")
+	}
+	if !upgradeServersCmd.SilenceUsage {
+		t.Fatal("upgrade servers command should silence usage for execution errors")
 	}
 	for _, flagName := range []string{"server", "dry-run", "takod-binary"} {
 		if flag := upgradeServersCmd.Flags().Lookup(flagName); flag == nil {

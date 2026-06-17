@@ -28,8 +28,9 @@ var (
 )
 
 var upgradeCmd = &cobra.Command{
-	Use:   "upgrade",
-	Short: "Upgrade Tako CLI to the latest version",
+	Use:          "upgrade",
+	Short:        "Upgrade Tako CLI to the latest version",
+	SilenceUsage: true,
 	Long: `Upgrade Tako CLI to the latest version from GitHub releases.
 
 This command will:
@@ -52,8 +53,9 @@ as the original installation.`,
 }
 
 var upgradeServersCmd = &cobra.Command{
-	Use:   "servers",
-	Short: "Upgrade server-side takod agents to this CLI version",
+	Use:          "servers",
+	Short:        "Upgrade server-side takod agents to this CLI version",
+	SilenceUsage: true,
 	Long: `Upgrade server-side takod agents for the selected environment.
 
 This command patches stale or missing takod agents without changing application
