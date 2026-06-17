@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -141,6 +142,9 @@ func DownloadUpdate(version string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
+	if isHomebrewManagedExecutable(execPath) {
+		return fmt.Errorf("this Tako binary is managed by Homebrew; use `brew upgrade redentordev/tako/tako` instead")
+	}
 
 	// Download to temporary file
 	tmpFile := execPath + ".new"
@@ -206,6 +210,20 @@ func DownloadUpdate(version string) error {
 	fmt.Println("Please restart your terminal or run 'tako --version' to verify")
 
 	return nil
+}
+
+func isHomebrewManagedExecutable(path string) bool {
+	paths := []string{path}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != path {
+		paths = append(paths, resolved)
+	}
+	for _, candidate := range paths {
+		normalized := filepath.ToSlash(filepath.Clean(candidate))
+		if strings.Contains(normalized, "/Cellar/tako/") && strings.HasSuffix(normalized, "/bin/tako") {
+			return true
+		}
+	}
+	return false
 }
 
 func verifyDownloadedBinary(client *http.Client, version string, binaryName string, path string) error {

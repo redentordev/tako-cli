@@ -88,3 +88,43 @@ func TestVerifyFileChecksumRejectsMismatch(t *testing.T) {
 		t.Fatalf("error = %q, want mismatch context", err)
 	}
 }
+
+func TestIsHomebrewManagedExecutableDetectsCellarBinary(t *testing.T) {
+	if !isHomebrewManagedExecutable("/opt/homebrew/Cellar/tako/0.4.18/bin/tako") {
+		t.Fatal("expected Homebrew Cellar binary to be detected")
+	}
+	if !isHomebrewManagedExecutable("/home/linuxbrew/.linuxbrew/Cellar/tako/0.4.18/bin/tako") {
+		t.Fatal("expected Linuxbrew Cellar binary to be detected")
+	}
+}
+
+func TestIsHomebrewManagedExecutableDetectsSymlinkToCellarBinary(t *testing.T) {
+	root := t.TempDir()
+	cellarBinary := filepath.Join(root, "Cellar", "tako", "0.4.18", "bin", "tako")
+	link := filepath.Join(root, "bin", "tako")
+	if err := os.MkdirAll(filepath.Dir(cellarBinary), 0755); err != nil {
+		t.Fatalf("failed to create cellar dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(link), 0755); err != nil {
+		t.Fatalf("failed to create bin dir: %v", err)
+	}
+	if err := os.WriteFile(cellarBinary, []byte("binary"), 0755); err != nil {
+		t.Fatalf("failed to write cellar binary: %v", err)
+	}
+	if err := os.Symlink(cellarBinary, link); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	if !isHomebrewManagedExecutable(link) {
+		t.Fatal("expected symlink to Homebrew Cellar binary to be detected")
+	}
+}
+
+func TestIsHomebrewManagedExecutableIgnoresDirectBinary(t *testing.T) {
+	if isHomebrewManagedExecutable("/usr/local/bin/tako") {
+		t.Fatal("direct binary path should not be treated as Homebrew-managed")
+	}
+	if isHomebrewManagedExecutable("/tmp/Cellar/not-tako/0.4.18/bin/tako") {
+		t.Fatal("non-tako Cellar path should not be treated as Homebrew-managed")
+	}
+}

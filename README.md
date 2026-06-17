@@ -148,6 +148,10 @@ See [completions/README.md](./completions/README.md) for detailed instructions.
 #### Upgrading
 
 ```bash
+# Homebrew installs
+brew upgrade redentordev/tako/tako
+
+# Direct binary installs
 # Check for updates
 tako upgrade --check
 
