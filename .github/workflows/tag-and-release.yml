@@ -36,7 +36,8 @@ jobs:
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
           BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          LDFLAGS="-X github.com/redentordev/tako-cli/cmd.Version=$VERSION -X github.com/redentordev/tako-cli/cmd.BuildTime=$BUILD_TIME"
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          LDFLAGS="-X github.com/redentordev/tako-cli/cmd.Version=$VERSION -X github.com/redentordev/tako-cli/cmd.GitCommit=$GIT_COMMIT -X github.com/redentordev/tako-cli/cmd.BuildTime=$BUILD_TIME"
           
           mkdir -p dist
           
