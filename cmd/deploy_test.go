@@ -75,6 +75,12 @@ func TestRequireDeployPromptAllowedRejectsNonTerminalWithoutYes(t *testing.T) {
 	}
 }
 
+func TestDeployCommandSilencesUsageOnRunErrors(t *testing.T) {
+	if !deployCmd.SilenceUsage {
+		t.Fatal("deploy command should silence usage on execution errors")
+	}
+}
+
 func TestRunDeployFailsInvalidYAMLBeforeGit(t *testing.T) {
 	oldDir, err := os.Getwd()
 	if err != nil {

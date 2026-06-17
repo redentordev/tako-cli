@@ -34,8 +34,9 @@ var (
 )
 
 var deployCmd = &cobra.Command{
-	Use:   "deploy",
-	Short: "Deploy your application to configured servers",
+	Use:          "deploy",
+	Short:        "Deploy your application to configured servers",
+	SilenceUsage: true,
 	Long: `Deploy your application by reconciling desired services on the takod mesh.
 
 The deployment process:
