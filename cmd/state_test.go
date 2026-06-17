@@ -16,7 +16,25 @@ import (
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
+	"github.com/spf13/cobra"
 )
+
+func TestStateCommandsSilenceUsageOnExecutionErrors(t *testing.T) {
+	commands := []*cobra.Command{
+		stateCmd,
+		statePullCmd,
+		stateStatusCmd,
+		stateRepairCmd,
+		stateLeaseCmd,
+		stateLeaseReleaseCmd,
+	}
+
+	for _, cmd := range commands {
+		if !cmd.SilenceUsage {
+			t.Fatalf("%s command should silence usage on execution errors", cmd.CommandPath())
+		}
+	}
+}
 
 func TestSyncRemoteDeploymentsToLocalKeepsNewestAsCurrent(t *testing.T) {
 	tempDir := t.TempDir()
