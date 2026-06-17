@@ -18,6 +18,9 @@
 #   TAKO_E2E_CI_HOST_KEY_MODE Host key mode for the ci phase. Defaults to TAKO_HOST_KEY_MODE or tofu.
 #   TAKO_E2E_LOG_DIR          Directory for logs. Defaults outside app worktree.
 #   TAKO_E2E_KEEP_WORKDIR=1   Keep temporary fresh-clone workdirs.
+#   TAKO_E2E_PROTOCOL_URL     Public HTTPS URL for protocol checks.
+#   TAKO_E2E_WEBSOCKET_URL    Optional public wss:// URL for WebSocket checks.
+#   TAKO_E2E_HTTP3_REQUIRED=1 Fail when curl cannot make HTTP/3 requests.
 #   TAKO_E2E_OFFLINE_SERVER   Node name to stop for the offline/rejoin phase.
 #   TAKO_E2E_OFFLINE_HOST     SSH host for TAKO_E2E_OFFLINE_SERVER.
 #   TAKO_E2E_OFFLINE_USER     SSH user for TAKO_E2E_OFFLINE_SERVER.
@@ -57,6 +60,9 @@ OFFLINE_STOP_CMD="${TAKO_E2E_OFFLINE_STOP_CMD:-sudo systemctl stop takod}"
 OFFLINE_START_CMD="${TAKO_E2E_OFFLINE_START_CMD:-sudo systemctl start takod}"
 OFFLINE_STATUS_CMD="${TAKO_E2E_OFFLINE_STATUS_CMD:-sudo systemctl is-active --quiet takod}"
 OFFLINE_RESTORE_NEEDED=0
+PROTOCOL_URL="${TAKO_E2E_PROTOCOL_URL:-${TAKO_VALIDATE_URL:-}}"
+WEBSOCKET_URL="${TAKO_E2E_WEBSOCKET_URL:-}"
+HTTP3_REQUIRED="${TAKO_E2E_HTTP3_REQUIRED:-0}"
 
 LOG_DIR=""
 STEP=0
@@ -81,6 +87,9 @@ Options:
   --offline-user      Override SSH user for the offline node.
   --offline-port      Override SSH port for the offline node.
   --offline-ssh-key   Override SSH key for the offline node.
+  --protocol-url      Public HTTPS URL for protocol checks.
+  --websocket-url     Optional public wss:// URL for WebSocket checks.
+  --http3-required    Fail if curl cannot make HTTP/3 requests.
   --help, -h          Show this help.
 
 Phases:
@@ -91,12 +100,14 @@ Phases:
   new-computer    fresh clone, validate, env pull, state pull, status, deploy.
   ci              fresh clone with CI env, validate, upgrade, state pull, deploy.
   repair          state status, state repair, state status.
+  protocols       HTTP/1.1, HTTP/2, optional HTTP/3, and optional WebSocket checks.
   offline         stop one takod, prove fail-closed behavior, restart, repair, deploy.
   standard        preflight, one-node, env, new-computer, ci.
   full            standard plus two-node, repair, offline.
 
 Mutating phases require --yes or TAKO_E2E_CONFIRM=run.
 Set TAKO_ENV_PASSPHRASE for env, new-computer, and ci phases.
+Set TAKO_E2E_PROTOCOL_URL for protocols phase.
 EOF
 }
 
@@ -194,6 +205,20 @@ while [[ $# -gt 0 ]]; do
       OFFLINE_SSH_KEY="$2"
       shift 2
       ;;
+    --protocol-url)
+      [[ $# -ge 2 ]] || die "--protocol-url requires a value"
+      PROTOCOL_URL="$2"
+      shift 2
+      ;;
+    --websocket-url)
+      [[ $# -ge 2 ]] || die "--websocket-url requires a value"
+      WEBSOCKET_URL="$2"
+      shift 2
+      ;;
+    --http3-required)
+      HTTP3_REQUIRED="1"
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -250,6 +275,26 @@ require_deploy_ready_worktree() {
   local dir="$1"
   require_deploy_ignore_rules "$dir"
   require_clean_worktree "$dir"
+}
+
+curl_supports_http3() {
+  curl --http3 --version >/dev/null 2>&1
+}
+
+require_protocol_url() {
+  require_tool curl
+  [[ -n "$PROTOCOL_URL" ]] ||
+    die "phase 'protocols' requires TAKO_E2E_PROTOCOL_URL or TAKO_VALIDATE_URL"
+  case "$PROTOCOL_URL" in
+    https://*) ;;
+    *) die "phase 'protocols' requires an https:// URL, got: $PROTOCOL_URL" ;;
+  esac
+  if [[ -n "$WEBSOCKET_URL" ]]; then
+    case "$WEBSOCKET_URL" in
+      wss://*) ;;
+      *) die "phase 'protocols' requires a wss:// WebSocket URL, got: $WEBSOCKET_URL" ;;
+    esac
+  fi
 }
 
 build_or_select_tako() {
@@ -601,6 +646,55 @@ phase_repair() {
   run_tako "repair lease after" state lease
 }
 
+phase_protocols() {
+  require_protocol_url
+
+  run_cmd "protocol HTTP/1.1" curl --http1.1 --fail --silent --show-error --location --max-time 20 --dump-header "$LOG_DIR/protocol-http1.headers" --output "$LOG_DIR/protocol-http1.body" "$PROTOCOL_URL"
+  run_cmd "protocol HTTP/2" curl --http2 --fail --silent --show-error --location --max-time 20 --dump-header "$LOG_DIR/protocol-http2.headers" --output "$LOG_DIR/protocol-http2.body" "$PROTOCOL_URL"
+
+  if grep -qi '^alt-svc:.*h3' "$LOG_DIR/protocol-http1.headers" "$LOG_DIR/protocol-http2.headers"; then
+    note "HTTP/3 Alt-Svc advertised"
+  else
+    die "protocol response did not advertise HTTP/3 Alt-Svc"
+  fi
+
+  if curl_supports_http3; then
+    run_cmd "protocol HTTP/3" curl --http3 --fail --silent --show-error --location --max-time 20 --dump-header "$LOG_DIR/protocol-http3.headers" --output "$LOG_DIR/protocol-http3.body" "$PROTOCOL_URL"
+  elif [[ "$HTTP3_REQUIRED" == "1" ]]; then
+    die "curl does not support --http3; install an HTTP/3-capable curl or unset TAKO_E2E_HTTP3_REQUIRED"
+  else
+    note "Skipping HTTP/3 wire request: curl does not support --http3"
+  fi
+
+  if [[ -n "$WEBSOCKET_URL" ]]; then
+    require_tool node
+    run_cmd "protocol WebSocket" node --input-type=module -e '
+const url = process.argv[1];
+if (typeof WebSocket === "undefined") {
+  console.error("Node WebSocket global unavailable; use Node 22+ or omit TAKO_E2E_WEBSOCKET_URL");
+  process.exit(1);
+}
+const ws = new WebSocket(url);
+const timeout = setTimeout(() => {
+  console.error("websocket timeout");
+  process.exit(1);
+}, 10000);
+ws.addEventListener("message", (event) => {
+  console.log(String(event.data));
+  clearTimeout(timeout);
+  ws.close();
+});
+ws.addEventListener("error", (event) => {
+  console.error(event.error || event.message || "websocket error");
+  clearTimeout(timeout);
+  process.exit(1);
+});
+' "$WEBSOCKET_URL"
+  else
+    note "Skipping WebSocket check: TAKO_E2E_WEBSOCKET_URL is not set"
+  fi
+}
+
 phase_offline() {
   require_confirm "offline"
   require_offline_node_control
@@ -651,7 +745,7 @@ expand_phases() {
         ;;
       "")
         ;;
-      preflight|one-node|two-node|env|new-computer|ci|repair|offline)
+      preflight|one-node|two-node|env|new-computer|ci|repair|protocols|offline)
         expanded+=("$phase")
         ;;
       *)
@@ -691,6 +785,7 @@ main() {
       new-computer) phase_new_computer ;;
       ci) phase_ci ;;
       repair) phase_repair ;;
+      protocols) phase_protocols ;;
       offline) phase_offline ;;
     esac
   done
