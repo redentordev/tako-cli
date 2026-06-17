@@ -73,7 +73,17 @@ func TestReleaseVersionArg(t *testing.T) {
 		}
 	}
 
-	for _, input := range []string{"", "dev", "unknown", "v1.2.3;rm -rf /", "v1.2.3/foo", "v1.2.3\n"} {
+	for _, input := range []string{
+		"",
+		"dev",
+		"unknown",
+		"v1.2.3;rm -rf /",
+		"v1.2.3/foo",
+		"v1.2.3\n",
+		"v1.2.3-dirty",
+		"v1.2.3-1-gabcdef0",
+		"v1.2.3-rc.1-2-gabcdef0",
+	} {
 		if _, err := releaseVersionArg(input); err == nil {
 			t.Fatalf("expected %q to be rejected", input)
 		}
