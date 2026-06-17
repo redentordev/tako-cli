@@ -208,6 +208,8 @@ From a clean checkout with no `.tako/` directory:
 ```bash
 git clone <repo>
 cd <repo>
+tako validate -e production
+tako doctor -e production --skip-remote
 tako env pull -e production --force
 tako state pull -e production
 tako state status -e production
@@ -219,6 +221,8 @@ Expected result:
 
 - Environment files and local `.tako/` state are rebuilt from the freshest
   reachable mesh state.
+- Local build contexts, Dockerfiles, or Nixpacks inputs are checked before SSH
+  and deploy work.
 - Deploy does not depend on deployment history from the previous laptop.
 - Remote leases prevent concurrent laptop and CI mutations.
 

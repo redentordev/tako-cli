@@ -12,6 +12,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -34,6 +35,7 @@ Checks performed:
   - SSH key accessibility and permissions
   - Secrets configuration
   - Local state (.tako directory)
+  - Local build inputs
   - Server connectivity (skip with --skip-remote)
   - Docker runtime and proxy runtime (skip with --skip-remote)
   - Replicated deployment/runtime state (skip with --skip-remote)
@@ -101,6 +103,10 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// === Local State ===
 	fmt.Println("\n=== Local State ===")
 	checkLocalState(record)
+
+	// === Local Build Inputs ===
+	fmt.Println("\n=== Local Build Inputs ===")
+	checkLocalBuildInputs(record, cfg, envName)
 
 	// === Server Connectivity ===
 	if !doctorSkipRemote {
@@ -188,6 +194,134 @@ func dockerRuntimeValue(value string) string {
 		return "unknown"
 	}
 	return value
+}
+
+type doctorBuildInputInfo struct {
+	BuildPath         string
+	Dockerfile        string
+	Framework         string
+	NeedsNixpacks     bool
+	NixpacksAvailable bool
+}
+
+func checkLocalBuildInputs(record func(checkResult), cfg *config.Config, envName string) {
+	checkLocalBuildInputsWith(record, cfg, envName, doctorNixpacksAvailable)
+}
+
+func checkLocalBuildInputsWith(record func(checkResult), cfg *config.Config, envName string, nixpacksAvailable func(string) bool) {
+	services, err := cfg.GetServices(envName)
+	if err != nil {
+		record(checkResult{"WARN", fmt.Sprintf("Cannot resolve services for local build input checks: %v", err), ""})
+		return
+	}
+
+	buildServiceNames := make([]string, 0)
+	for name, service := range services {
+		if strings.TrimSpace(service.Build) != "" {
+			buildServiceNames = append(buildServiceNames, name)
+		}
+	}
+	sort.Strings(buildServiceNames)
+
+	if len(buildServiceNames) == 0 {
+		record(checkResult{"PASS", "No build-backed services; local build inputs not required", ""})
+		return
+	}
+
+	record(checkResult{"PASS", "Build images stream to remote takod; local Docker daemon is not required for takod deploys", ""})
+	for _, serviceName := range buildServiceNames {
+		service := services[serviceName]
+		info, err := inspectDoctorBuildInput(serviceName, service, nixpacksAvailable)
+		if err != nil {
+			record(checkResult{"FAIL", fmt.Sprintf("%s: %v", serviceName, err), "Fix the build context, Dockerfile, or Nixpacks setup before deploy"})
+			continue
+		}
+		if info.NeedsNixpacks && !info.NixpacksAvailable {
+			record(checkResult{"FAIL", fmt.Sprintf("%s: build context %s has no Dockerfile; detected %s but Nixpacks is not installed", serviceName, doctorPathDisplay(info.BuildPath), info.Framework), "Install Nixpacks or add a Dockerfile"})
+			continue
+		}
+		if info.NeedsNixpacks {
+			record(checkResult{"PASS", fmt.Sprintf("%s: build context %s has %s framework inputs; Nixpacks available to generate Dockerfile", serviceName, doctorPathDisplay(info.BuildPath), info.Framework), ""})
+			continue
+		}
+		record(checkResult{"PASS", fmt.Sprintf("%s: build context %s uses Dockerfile %s", serviceName, doctorPathDisplay(info.BuildPath), info.Dockerfile), ""})
+	}
+}
+
+func inspectDoctorBuildInput(serviceName string, service config.ServiceConfig, nixpacksAvailable func(string) bool) (*doctorBuildInputInfo, error) {
+	buildPath := strings.TrimSpace(service.Build)
+	if buildPath == "" {
+		return nil, fmt.Errorf("service is not build-backed")
+	}
+
+	stat, err := os.Stat(buildPath)
+	if err != nil {
+		return nil, fmt.Errorf("build path does not exist: %s", service.Build)
+	}
+	if !stat.IsDir() {
+		return nil, fmt.Errorf("build path is not a directory: %s", service.Build)
+	}
+
+	if service.Dockerfile != "" {
+		dockerfile := filepath.Clean(service.Dockerfile)
+		dockerfilePath := filepath.Join(buildPath, dockerfile)
+		if stat, err := os.Stat(dockerfilePath); err != nil {
+			return nil, fmt.Errorf("dockerfile does not exist: %s", service.Dockerfile)
+		} else if stat.IsDir() {
+			return nil, fmt.Errorf("dockerfile path is a directory: %s", service.Dockerfile)
+		}
+		return &doctorBuildInputInfo{BuildPath: buildPath, Dockerfile: dockerfile}, nil
+	}
+
+	if dockerfile, ok := findDoctorDockerfile(buildPath); ok {
+		return &doctorBuildInputInfo{BuildPath: buildPath, Dockerfile: dockerfile}, nil
+	}
+
+	detector := nixpacks.NewDetector(buildPath, false)
+	framework, err := detector.DetectFramework()
+	if err != nil {
+		return nil, fmt.Errorf("build context %s has no Dockerfile and no recognizable Nixpacks framework files", service.Build)
+	}
+	return &doctorBuildInputInfo{
+		BuildPath:         buildPath,
+		Framework:         string(framework),
+		NeedsNixpacks:     true,
+		NixpacksAvailable: nixpacksAvailable(buildPath),
+	}, nil
+}
+
+func findDoctorDockerfile(buildPath string) (string, bool) {
+	for _, candidate := range []string{"Dockerfile", "Dockerfile.prod", "dockerfile", ".dockerfile"} {
+		path := filepath.Join(buildPath, candidate)
+		if stat, err := os.Stat(path); err == nil && !stat.IsDir() {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func doctorNixpacksAvailable(buildPath string) bool {
+	info, err := nixpacks.NewDetector(buildPath, false).GetFrameworkInfo()
+	if err != nil {
+		return false
+	}
+	available, _ := info["nixpacksAvailable"].(bool)
+	return available
+}
+
+func doctorPathDisplay(path string) string {
+	if path == "" {
+		return "."
+	}
+	cleaned := filepath.Clean(path)
+	if cwd, err := os.Getwd(); err == nil {
+		if absPath, absErr := filepath.Abs(cleaned); absErr == nil {
+			if rel, relErr := filepath.Rel(cwd, absPath); relErr == nil && rel != "" && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+				return filepath.Clean(rel)
+			}
+		}
+	}
+	return cleaned
 }
 
 var errDoctorProxyMissing = errors.New("tako-proxy container is not running")

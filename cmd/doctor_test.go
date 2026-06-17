@@ -532,6 +532,157 @@ func TestStateLeaseFallbackLabels(t *testing.T) {
 	}
 }
 
+func TestCheckLocalBuildInputsWithReportsNoBuildServices(t *testing.T) {
+	cfg := &config.Config{
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Services: map[string]config.ServiceConfig{
+					"web": {Image: "nginx:alpine"},
+				},
+			},
+		},
+	}
+
+	var results []checkResult
+	checkLocalBuildInputsWith(func(result checkResult) {
+		results = append(results, result)
+	}, cfg, "production", func(string) bool {
+		t.Fatal("nixpacks probe should not run for image-only services")
+		return false
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "PASS" || !strings.Contains(results[0].message, "No build-backed services") {
+		t.Fatalf("result = %#v, want no-build pass", results[0])
+	}
+}
+
+func TestCheckLocalBuildInputsWithReportsDockerfileBuild(t *testing.T) {
+	buildDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(buildDir, "Dockerfile"), []byte("FROM scratch\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Services: map[string]config.ServiceConfig{
+					"web": {Build: buildDir},
+				},
+			},
+		},
+	}
+
+	var results []checkResult
+	checkLocalBuildInputsWith(func(result checkResult) {
+		results = append(results, result)
+	}, cfg, "production", func(string) bool {
+		t.Fatal("nixpacks probe should not run when a Dockerfile exists")
+		return false
+	})
+
+	if len(results) != 2 {
+		t.Fatalf("results = %#v, want remote-build note and service pass", results)
+	}
+	if results[0].status != "PASS" || !strings.Contains(results[0].message, "local Docker daemon is not required") {
+		t.Fatalf("note result = %#v, want remote-build note", results[0])
+	}
+	if results[1].status != "PASS" || !strings.Contains(results[1].message, "uses Dockerfile Dockerfile") {
+		t.Fatalf("service result = %#v, want Dockerfile pass", results[1])
+	}
+}
+
+func TestCheckLocalBuildInputsWithFailsWhenNixpacksMissing(t *testing.T) {
+	buildDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(buildDir, "package.json"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Services: map[string]config.ServiceConfig{
+					"web": {Build: buildDir},
+				},
+			},
+		},
+	}
+
+	var results []checkResult
+	checkLocalBuildInputsWith(func(result checkResult) {
+		results = append(results, result)
+	}, cfg, "production", func(string) bool {
+		return false
+	})
+
+	if len(results) != 2 {
+		t.Fatalf("results = %#v, want remote-build note and service failure", results)
+	}
+	if results[1].status != "FAIL" || !strings.Contains(results[1].message, "Nixpacks is not installed") {
+		t.Fatalf("service result = %#v, want missing-Nixpacks failure", results[1])
+	}
+	if !strings.Contains(results[1].fix, "Install Nixpacks") {
+		t.Fatalf("fix = %q, want Nixpacks guidance", results[1].fix)
+	}
+}
+
+func TestCheckLocalBuildInputsWithReportsNixpacksReady(t *testing.T) {
+	buildDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(buildDir, "go.mod"), []byte("module example.test/app\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Services: map[string]config.ServiceConfig{
+					"api": {Build: buildDir},
+				},
+			},
+		},
+	}
+
+	var results []checkResult
+	checkLocalBuildInputsWith(func(result checkResult) {
+		results = append(results, result)
+	}, cfg, "production", func(string) bool {
+		return true
+	})
+
+	if len(results) != 2 {
+		t.Fatalf("results = %#v, want remote-build note and service pass", results)
+	}
+	if results[1].status != "PASS" || !strings.Contains(results[1].message, "go framework inputs") || !strings.Contains(results[1].message, "Nixpacks available") {
+		t.Fatalf("service result = %#v, want Nixpacks-ready pass", results[1])
+	}
+}
+
+func TestCheckLocalBuildInputsWithFailsUnknownFramework(t *testing.T) {
+	buildDir := t.TempDir()
+	cfg := &config.Config{
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Services: map[string]config.ServiceConfig{
+					"web": {Build: buildDir},
+				},
+			},
+		},
+	}
+
+	var results []checkResult
+	checkLocalBuildInputsWith(func(result checkResult) {
+		results = append(results, result)
+	}, cfg, "production", func(string) bool {
+		return true
+	})
+
+	if len(results) != 2 {
+		t.Fatalf("results = %#v, want remote-build note and service failure", results)
+	}
+	if results[1].status != "FAIL" || !strings.Contains(results[1].message, "no Dockerfile and no recognizable Nixpacks framework files") {
+		t.Fatalf("service result = %#v, want unknown-framework failure", results[1])
+	}
+}
+
 type fakeDoctorExecutor struct {
 	command string
 	output  string
