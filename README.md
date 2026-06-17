@@ -10,14 +10,9 @@ Tako has one job: reconcile a Git-backed app config onto one or more owned
 servers. A single server is a one-node mesh; adding more nodes keeps the same
 commands, config shape, proxy model, and state workflow.
 
-The CLI uses SSH for bootstrap and talks to a node-local `takod` agent for
-runtime work. `takod` owns Docker reconciliation, proxy config, WireGuard mesh
-state, remote leases, and replicated deployment state.
-
-[![Version](https://img.shields.io/github/v/release/redentordev/tako-cli?label=version)](https://github.com/redentordev/tako-cli/releases)
-[![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](https://golang.org/)
-[![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
-[![Runtime](https://img.shields.io/badge/runtime-takod_mesh-blue)](https://github.com/redentordev/tako-cli)
+The CLI uses SSH for bootstrap and talks to a node-local `takod` agent.
+`takod` owns the runtime reconciliation loop: Docker service state, proxy
+routes, WireGuard mesh state, remote leases, and replicated deployment state.
 
 ---
 
