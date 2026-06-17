@@ -17,6 +17,7 @@ CI runner            Automation uses the same takod path and remote leases.
 State repair         Divergent reachable nodes can be repaired from freshest state.
 Agent upgrade        Stale takod agents can be patched and verified explicitly.
 Proxy protocols      HTTP/1.1, HTTP/2, HTTP/3, WebSocket, and sticky routes work.
+Invalid config       Invalid YAML fails at deploy preflight before remote work.
 ```
 
 ## Prerequisites
@@ -56,7 +57,7 @@ scripts/mesh-e2e.sh \
   --websocket-url wss://app.example.com/socket
 ```
 
-Standard mutating proof:
+Standard mutating proof, including an invalid-config preflight check:
 
 ```bash
 TAKO_ENV_PASSPHRASE=... \
@@ -88,6 +89,11 @@ The env phase backs up the local `.env`, verifies that `env pull --force`
 restores the same content, and restores the original file if the check fails.
 The CI phase defaults to `TAKO_E2E_CI_HOST_KEY_MODE=tofu`; set it to `strict`
 when validating a runner image with preinstalled known hosts.
+
+The invalid-config phase creates a temporary app directory with malformed
+`tako.yaml`, runs `tako deploy --yes`, and verifies the command exits with a
+config preflight error before deployment startup, locks, leases, SSH pools, or
+runtime reconciliation can begin.
 
 Mutating phases run `tako upgrade servers` so the proof covers stale-agent
 patching before deploy. If the harness is testing a local source-tree build
