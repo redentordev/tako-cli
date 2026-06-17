@@ -10,10 +10,12 @@ import (
 	"strings"
 	"sync"
 
+	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 	"github.com/redentordev/tako-cli/pkg/utils"
 	"github.com/spf13/cobra"
 )
@@ -34,6 +36,7 @@ Checks performed:
   - Local state (.tako directory)
   - Server connectivity (skip with --skip-remote)
   - Docker runtime and proxy runtime (skip with --skip-remote)
+  - Replicated deployment/runtime state (skip with --skip-remote)
   - Running services (skip with --skip-remote)
 
 Examples:
@@ -114,6 +117,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Println("\n=== Running Services ===")
 		checkRunningServices(record, cfg, envName, clients)
 
+		fmt.Println("\n=== Replicated State ===")
+		checkReplicatedState(record, cfg, envName, clients)
+
 		fmt.Println("\n=== External Volumes ===")
 		checkExternalVolumes(record, cfg, envName, clients)
 
@@ -129,6 +135,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Println("\n=== Proxy Runtime ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
 		fmt.Println("\n=== Running Services ===")
+		fmt.Println("  [SKIP] Skipped (--skip-remote)")
+		fmt.Println("\n=== Replicated State ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
 		fmt.Println("\n=== External Volumes ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
@@ -375,6 +383,157 @@ func doctorProxyMountExists(mounts []doctorProxyMount, source string, destinatio
 		}
 	}
 	return false
+}
+
+type doctorReplicatedStateInfo struct {
+	HasHistory          bool
+	HistoryDeployments  int
+	HasDesired          bool
+	DesiredServices     int
+	HasActual           bool
+	ActualServices      int
+	NodeActualSnapshots int
+	Lease               *remotestate.LeaseInfo
+}
+
+func checkReplicatedState(record func(checkResult), cfg *config.Config, envName string, clients map[string]*ssh.Client) {
+	if len(clients) == 0 {
+		record(checkResult{"SKIP", "No connected servers to check replicated state", ""})
+		return
+	}
+
+	envServerNames, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		record(checkResult{"WARN", fmt.Sprintf("Cannot resolve environment servers for replicated state: %v", err), ""})
+		return
+	}
+
+	clientNames := make([]string, 0, len(clients))
+	for name := range clients {
+		clientNames = append(clientNames, name)
+	}
+	sort.Strings(clientNames)
+
+	checkReplicatedStateWith(record, clientNames, func(clientName string) (*doctorReplicatedStateInfo, error) {
+		return detectDoctorReplicatedState(clients[clientName], cfg, envName, envServerNames)
+	})
+}
+
+func checkReplicatedStateWith(record func(checkResult), clientNames []string, probe func(string) (*doctorReplicatedStateInfo, error)) {
+	for _, clientName := range clientNames {
+		info, err := probe(clientName)
+		if err != nil {
+			record(checkResult{"FAIL", fmt.Sprintf("%s: Cannot read replicated state: %v", clientName, err), "Run 'tako setup', then 'tako state repair' if the node should keep participating"})
+			continue
+		}
+		if info == nil {
+			record(checkResult{"FAIL", fmt.Sprintf("%s: Cannot read replicated state: empty result", clientName), "Run 'tako setup', then 'tako state repair' if the node should keep participating"})
+			continue
+		}
+		if !info.HasHistory && !info.HasDesired && !info.HasActual {
+			record(checkResult{"WARN", fmt.Sprintf("%s: No replicated deployment or runtime state recorded", clientName), "Run 'tako deploy' for first deploy or 'tako state repair' to restore from another node"})
+			continue
+		}
+
+		missing := doctorReplicatedStateMissing(info)
+		if len(missing) > 0 {
+			record(checkResult{"WARN", fmt.Sprintf("%s: Replicated state incomplete (missing %s)", clientName, strings.Join(missing, ", ")), "Run 'tako state repair' before the next deploy"})
+		} else {
+			record(checkResult{"PASS", fmt.Sprintf("%s: Replicated state present (history %d deployment(s), desired %d service(s), actual %d service(s), node actual %d snapshot(s))", clientName, info.HistoryDeployments, info.DesiredServices, info.ActualServices, info.NodeActualSnapshots), ""})
+		}
+
+		if info.Lease == nil {
+			record(checkResult{"PASS", fmt.Sprintf("%s: Remote operation lease free", clientName), ""})
+		} else {
+			record(checkResult{"WARN", fmt.Sprintf("%s: Remote operation lease held by %s (%s)", clientName, stateLeaseWho(info.Lease), stateLeaseOperation(info.Lease)), "Inspect with 'tako state lease' and release only the exact stale ID if needed"})
+		}
+	}
+}
+
+func doctorReplicatedStateMissing(info *doctorReplicatedStateInfo) []string {
+	if info == nil {
+		return []string{"state"}
+	}
+	var missing []string
+	if !info.HasHistory {
+		missing = append(missing, "deployment history")
+	}
+	if !info.HasDesired {
+		missing = append(missing, "desired runtime")
+	}
+	if !info.HasActual {
+		missing = append(missing, "actual runtime")
+	}
+	if info.NodeActualSnapshots == 0 {
+		missing = append(missing, "node actual snapshots")
+	}
+	return missing
+}
+
+func detectDoctorReplicatedState(client *ssh.Client, cfg *config.Config, envName string, envServerNames []string) (*doctorReplicatedStateInfo, error) {
+	info := &doctorReplicatedStateInfo{}
+
+	manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, "", takodSocketFromConfig(cfg)).
+		WithRequestTimeout(stateStatusRequestTimeout)
+	history, err := manager.LoadHistory()
+	if err != nil && !errors.Is(err, remotestate.ErrNotFound) {
+		return nil, fmt.Errorf("deployment history: %w", err)
+	}
+	if historyHasDeployments(history) {
+		info.HasHistory = true
+		info.HistoryDeployments = deploymentHistoryCount(history)
+	}
+
+	runtime := takodstate.NewManager(client, cfg, envName).
+		WithRequestTimeout(stateStatusRequestTimeout)
+	desired, err := runtime.ReadDesired()
+	if err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+		return nil, fmt.Errorf("desired runtime: %w", err)
+	}
+	if desiredRevisionRepairable(desired) {
+		info.HasDesired = true
+		info.DesiredServices = len(desired.Services)
+	}
+
+	actual, err := runtime.ReadActual()
+	if err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+		return nil, fmt.Errorf("actual runtime: %w", err)
+	}
+	if actualSnapshotRepairable(actual) {
+		info.HasActual = true
+		info.ActualServices = actualSnapshotServiceCount(actual)
+	}
+
+	for _, nodeName := range envServerNames {
+		nodeActual, err := runtime.ReadNodeActual(nodeName)
+		if err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+			return nil, fmt.Errorf("node actual runtime for %s: %w", nodeName, err)
+		}
+		if nodeActualSnapshotRepairable(nodeActual, nodeName) {
+			info.NodeActualSnapshots++
+		}
+	}
+
+	lease, err := manager.ReadLease()
+	if err != nil {
+		return nil, fmt.Errorf("remote lease: %w", err)
+	}
+	info.Lease = lease
+	return info, nil
+}
+
+func stateLeaseWho(lease *remotestate.LeaseInfo) string {
+	if lease == nil || strings.TrimSpace(lease.Who) == "" {
+		return "unknown"
+	}
+	return strings.TrimSpace(lease.Who)
+}
+
+func stateLeaseOperation(lease *remotestate.LeaseInfo) string {
+	if lease == nil || strings.TrimSpace(lease.Operation) == "" {
+		return "unknown operation"
+	}
+	return strings.TrimSpace(lease.Operation)
 }
 
 func checkConfig(record func(checkResult)) (*config.Config, error) {

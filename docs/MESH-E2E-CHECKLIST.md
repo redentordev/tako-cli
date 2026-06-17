@@ -116,9 +116,10 @@ Expected result:
   `/v1/status` reports the CLI version.
 - `deploy` reconciles services and the shared `tako-proxy` through takod, not a
   local Docker path.
-- `doctor` reports rootful remote Docker and `Proxy Runtime` readiness for
-  public services, including TCP 80/443, UDP 443, and Traefik file-provider
-  settings.
+- `doctor` reports rootful remote Docker, `Proxy Runtime` readiness for public
+  services, and `Replicated State` health, including deployment history,
+  desired runtime, aggregate actual state, node-local actual snapshots, and a
+  free remote operation lease.
 - `state status` shows one reachable node with deployment history, desired
   state, aggregate actual state, node-local actual state, agent status, mesh
   status, and no state disagreement.

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -405,6 +406,129 @@ func TestDetectDoctorProxyRuntimeMapsMissingContainer(t *testing.T) {
 	_, err := detectDoctorProxyRuntime(executor)
 	if !errors.Is(err, errDoctorProxyMissing) {
 		t.Fatalf("error = %v, want errDoctorProxyMissing", err)
+	}
+}
+
+func TestCheckReplicatedStateWithReportsCompleteState(t *testing.T) {
+	var results []checkResult
+	checkReplicatedStateWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, func(string) (*doctorReplicatedStateInfo, error) {
+		return &doctorReplicatedStateInfo{
+			HasHistory:          true,
+			HistoryDeployments:  3,
+			HasDesired:          true,
+			DesiredServices:     2,
+			HasActual:           true,
+			ActualServices:      2,
+			NodeActualSnapshots: 1,
+		}, nil
+	})
+
+	if len(results) != 2 {
+		t.Fatalf("results = %#v, want state pass and lease pass", results)
+	}
+	if results[0].status != "PASS" || !strings.Contains(results[0].message, "history 3 deployment(s)") {
+		t.Fatalf("state result = %#v, want replicated state pass", results[0])
+	}
+	if results[1].status != "PASS" || !strings.Contains(results[1].message, "lease free") {
+		t.Fatalf("lease result = %#v, want lease free pass", results[1])
+	}
+}
+
+func TestCheckReplicatedStateWithWarnsWhenNoStateRecorded(t *testing.T) {
+	var results []checkResult
+	checkReplicatedStateWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, func(string) (*doctorReplicatedStateInfo, error) {
+		return &doctorReplicatedStateInfo{}, nil
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "WARN" || !strings.Contains(results[0].message, "No replicated deployment or runtime state") {
+		t.Fatalf("result = %#v, want no-state warning", results[0])
+	}
+	if !strings.Contains(results[0].fix, "tako deploy") || !strings.Contains(results[0].fix, "tako state repair") {
+		t.Fatalf("fix = %q, want deploy/repair guidance", results[0].fix)
+	}
+}
+
+func TestCheckReplicatedStateWithWarnsWhenStateIncomplete(t *testing.T) {
+	var results []checkResult
+	checkReplicatedStateWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, func(string) (*doctorReplicatedStateInfo, error) {
+		return &doctorReplicatedStateInfo{
+			HasHistory:         true,
+			HistoryDeployments: 1,
+			HasDesired:         true,
+			DesiredServices:    1,
+		}, nil
+	})
+
+	if len(results) != 2 {
+		t.Fatalf("results = %#v, want state warning and lease pass", results)
+	}
+	if results[0].status != "WARN" || !strings.Contains(results[0].message, "actual runtime") || !strings.Contains(results[0].message, "node actual snapshots") {
+		t.Fatalf("state result = %#v, want incomplete-state warning", results[0])
+	}
+	if !strings.Contains(results[0].fix, "tako state repair") {
+		t.Fatalf("fix = %q, want state repair guidance", results[0].fix)
+	}
+}
+
+func TestCheckReplicatedStateWithWarnsOnHeldLease(t *testing.T) {
+	var results []checkResult
+	checkReplicatedStateWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, func(string) (*doctorReplicatedStateInfo, error) {
+		return &doctorReplicatedStateInfo{
+			HasHistory:          true,
+			HistoryDeployments:  1,
+			HasDesired:          true,
+			DesiredServices:     1,
+			HasActual:           true,
+			ActualServices:      1,
+			NodeActualSnapshots: 1,
+			Lease:               &remotestate.LeaseInfo{Who: "ci", Operation: "deploy"},
+		}, nil
+	})
+
+	if len(results) != 2 {
+		t.Fatalf("results = %#v, want state pass and lease warning", results)
+	}
+	if results[1].status != "WARN" || !strings.Contains(results[1].message, "held by ci (deploy)") {
+		t.Fatalf("lease result = %#v, want held-lease warning", results[1])
+	}
+	if !strings.Contains(results[1].fix, "tako state lease") {
+		t.Fatalf("fix = %q, want lease inspection guidance", results[1].fix)
+	}
+}
+
+func TestCheckReplicatedStateWithFailsProbeErrors(t *testing.T) {
+	var results []checkResult
+	checkReplicatedStateWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, func(string) (*doctorReplicatedStateInfo, error) {
+		return nil, errors.New("state endpoint unavailable")
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "FAIL" || !strings.Contains(results[0].message, "state endpoint unavailable") {
+		t.Fatalf("result = %#v, want replicated-state failure", results[0])
+	}
+}
+
+func TestStateLeaseFallbackLabels(t *testing.T) {
+	if got := stateLeaseWho(nil); got != "unknown" {
+		t.Fatalf("stateLeaseWho(nil) = %q", got)
+	}
+	if got := stateLeaseOperation(&remotestate.LeaseInfo{}); got != "unknown operation" {
+		t.Fatalf("stateLeaseOperation(empty) = %q", got)
 	}
 }
 

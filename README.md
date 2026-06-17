@@ -330,7 +330,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako ps` | List running services and their status |
 | `tako logs` | Stream container logs |
 | `tako access` | Stream proxy access logs |
-| `tako doctor` | Diagnose config, SSH, Docker runtime, proxy runtime, services, and volumes |
+| `tako doctor` | Diagnose config, SSH, Docker runtime, proxy runtime, replicated state, services, and volumes |
 | `tako metrics` | View system metrics from servers |
 | `tako monitor` | Continuously monitor deployed services |
 | `tako history` | View deployment history |

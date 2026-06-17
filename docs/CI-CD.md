@@ -54,6 +54,11 @@ replaced, a runner is bootstrapping after state loss, or `tako state status`
 shows that reachable nodes disagree on deployment history, desired runtime
 state, or actual runtime state.
 
+`tako doctor` is the quick diagnostic when a runner can reach the nodes but the
+state picture is unclear. Its `Replicated State` section reports deployment
+history, desired runtime, aggregate actual runtime, node-local actual snapshots,
+and the current remote operation lease from each reachable takod node.
+
 ## Required Secrets
 
 Store these in your CI provider:
