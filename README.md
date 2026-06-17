@@ -283,7 +283,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **State Management** - Deployment history tracked on the server with local sync for new machines
 - **Remote Lease** - CI, laptops, and mutating operations share remote operation locks
 - **Automatic HTTPS** - tako-proxy provisions SSL certificates via Let's Encrypt
-- **Modern HTTP Proxying** - HTTP/1.1, HTTP/2, HTTP/3, and WebSocket traffic route through the Traefik-backed tako-proxy
+- **Modern HTTP Proxying** - HTTP/1.1, HTTP/2, HTTP/3, and WebSocket traffic route through the Traefik-backed tako-proxy; `tako doctor` verifies the live proxy container shape
 - **Agent Upgrades** - Patch stale server-side takod agents with `tako upgrade servers`
 - **Domain Redirects** - Automatic www → non-www (or vice versa) with path preservation
 - **Health Checks** - Ensure containers are healthy after reconciliation
@@ -330,6 +330,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako ps` | List running services and their status |
 | `tako logs` | Stream container logs |
 | `tako access` | Stream proxy access logs |
+| `tako doctor` | Diagnose config, SSH, Docker runtime, proxy runtime, services, and volumes |
 | `tako metrics` | View system metrics from servers |
 | `tako monitor` | Continuously monitor deployed services |
 | `tako history` | View deployment history |
@@ -553,8 +554,11 @@ node for HTTP on port 80, HTTPS on TCP 443, and HTTP/3 on UDP 443, while each
 app/stage owns its own dynamic routes. Proxy upstreams target deterministic
 project/stage-scoped container aliases instead of generic service names like
 `web`, so unrelated projects can safely use the same service names on the same
-node. By default every selected environment node with public routes reconciles
-the shared proxy for that app/stage. Built-in ACME TLS currently requires the
+node. `tako doctor` inspects proxy nodes and verifies that the live shared proxy
+has the required Traefik file-provider settings, TCP 80/443 publishes, UDP 443
+publish for HTTP/3, and persistent ACME, dynamic-config, and access-log mounts.
+By default every selected environment node with public routes reconciles the
+shared proxy for that app/stage. Built-in ACME TLS currently requires the
 proxy placement to resolve to one node, because distributed certificate
 issuance/storage is not implemented yet. To keep public ingress on a dedicated
 edge node, set `environment.proxy.placement` with a pinned server or node-label

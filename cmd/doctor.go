@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,6 +33,7 @@ Checks performed:
   - Secrets configuration
   - Local state (.tako directory)
   - Server connectivity (skip with --skip-remote)
+  - Docker runtime and proxy runtime (skip with --skip-remote)
   - Running services (skip with --skip-remote)
 
 Examples:
@@ -104,6 +107,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Println("\n=== Docker Runtime ===")
 		checkDockerRuntime(record, clients)
 
+		fmt.Println("\n=== Proxy Runtime ===")
+		checkProxyRuntime(record, cfg, envName, clients)
+
 		// === Running Services ===
 		fmt.Println("\n=== Running Services ===")
 		checkRunningServices(record, cfg, envName, clients)
@@ -119,6 +125,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Println("\n=== Server Connectivity ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
 		fmt.Println("\n=== Docker Runtime ===")
+		fmt.Println("  [SKIP] Skipped (--skip-remote)")
+		fmt.Println("\n=== Proxy Runtime ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
 		fmt.Println("\n=== Running Services ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
@@ -172,6 +180,201 @@ func dockerRuntimeValue(value string) string {
 		return "unknown"
 	}
 	return value
+}
+
+var errDoctorProxyMissing = errors.New("tako-proxy container is not running")
+
+type doctorCommandExecutor interface {
+	Execute(command string) (string, error)
+}
+
+type doctorProxyRuntimeInfo struct {
+	Image   string
+	Running bool
+	Args    []string
+	Ports   map[string]json.RawMessage
+	Mounts  []doctorProxyMount
+}
+
+type doctorProxyMount struct {
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+}
+
+func checkProxyRuntime(record func(checkResult), cfg *config.Config, envName string, clients map[string]*ssh.Client) {
+	publicServices, err := publicServiceNames(cfg, envName)
+	if err != nil {
+		record(checkResult{"WARN", fmt.Sprintf("Cannot resolve public services: %v", err), ""})
+		return
+	}
+	if len(publicServices) == 0 {
+		record(checkResult{"PASS", "No public proxy routes configured", ""})
+		return
+	}
+
+	proxyServers, err := cfg.GetEnvironmentProxyServers(envName)
+	if err != nil {
+		record(checkResult{"WARN", fmt.Sprintf("Cannot resolve proxy servers: %v", err), ""})
+		return
+	}
+	sort.Strings(proxyServers)
+
+	for _, serverName := range proxyServers {
+		client, ok := clients[serverName]
+		if !ok {
+			record(checkResult{"SKIP", fmt.Sprintf("%s: Proxy target not connected", serverName), ""})
+			continue
+		}
+		checkProxyRuntimeWith(record, serverName, publicServices, func() (*doctorProxyRuntimeInfo, error) {
+			return detectDoctorProxyRuntime(client)
+		})
+	}
+}
+
+func publicServiceNames(cfg *config.Config, envName string) ([]string, error) {
+	services, err := cfg.GetServices(envName)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0)
+	for name, service := range services {
+		if service.IsPublic() {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+func checkProxyRuntimeWith(record func(checkResult), serverName string, publicServices []string, probe func() (*doctorProxyRuntimeInfo, error)) {
+	info, err := probe()
+	if errors.Is(err, errDoctorProxyMissing) {
+		record(checkResult{"WARN", fmt.Sprintf("%s: tako-proxy is not running for public service(s): %s", serverName, strings.Join(publicServices, ", ")), "Run 'tako deploy' to reconcile proxy routes"})
+		return
+	}
+	if err != nil {
+		record(checkResult{"FAIL", fmt.Sprintf("%s: Cannot inspect tako-proxy: %v", serverName, err), "Run 'tako deploy' or check Docker on the proxy node"})
+		return
+	}
+	if info == nil {
+		record(checkResult{"FAIL", fmt.Sprintf("%s: Cannot inspect tako-proxy: empty result", serverName), "Run 'tako deploy' or check Docker on the proxy node"})
+		return
+	}
+	if !info.Running {
+		record(checkResult{"FAIL", fmt.Sprintf("%s: tako-proxy container exists but is not running", serverName), "Run 'tako deploy' to recreate the shared proxy"})
+		return
+	}
+
+	missing := doctorProxyRuntimeMissing(info)
+	if len(missing) > 0 {
+		record(checkResult{"FAIL", fmt.Sprintf("%s: tako-proxy is stale or incomplete (missing %s)", serverName, strings.Join(missing, ", ")), "Run 'tako deploy' to recreate the shared proxy"})
+		return
+	}
+
+	record(checkResult{"PASS", fmt.Sprintf("%s: tako-proxy ready for HTTP/1.1, HTTP/2, HTTP/3 UDP 443, and WebSocket upgrades", serverName), ""})
+}
+
+func detectDoctorProxyRuntime(client doctorCommandExecutor) (*doctorProxyRuntimeInfo, error) {
+	const command = "sudo docker inspect tako-proxy --format '{{json .State.Running}}{{\"\\n\"}}{{json .Args}}{{\"\\n\"}}{{json .NetworkSettings.Ports}}{{\"\\n\"}}{{json .Mounts}}{{\"\\n\"}}{{.Config.Image}}'"
+	output, err := client.Execute(command)
+	if err != nil {
+		combined := strings.ToLower(output + " " + err.Error())
+		if strings.Contains(combined, "no such object") {
+			return nil, errDoctorProxyMissing
+		}
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(output))
+	}
+	return parseDoctorProxyRuntime(output)
+}
+
+func parseDoctorProxyRuntime(output string) (*doctorProxyRuntimeInfo, error) {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 5 {
+		return nil, fmt.Errorf("unexpected docker inspect output")
+	}
+
+	var info doctorProxyRuntimeInfo
+	if err := json.Unmarshal([]byte(lines[0]), &info.Running); err != nil {
+		return nil, fmt.Errorf("invalid proxy running state: %w", err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &info.Args); err != nil {
+		return nil, fmt.Errorf("invalid proxy args: %w", err)
+	}
+	if err := json.Unmarshal([]byte(lines[2]), &info.Ports); err != nil {
+		return nil, fmt.Errorf("invalid proxy ports: %w", err)
+	}
+	if err := json.Unmarshal([]byte(lines[3]), &info.Mounts); err != nil {
+		return nil, fmt.Errorf("invalid proxy mounts: %w", err)
+	}
+	info.Image = strings.TrimSpace(strings.Join(lines[4:], "\n"))
+	return &info, nil
+}
+
+func doctorProxyRuntimeMissing(info *doctorProxyRuntimeInfo) []string {
+	if info == nil {
+		return []string{"inspect data"}
+	}
+	var missing []string
+	for _, arg := range []string{
+		"--providers.file.directory=/etc/traefik/dynamic",
+		"--providers.file.watch=true",
+		"--entryPoints.web.address=:80",
+		"--entryPoints.websecure.address=:443",
+		"--entryPoints.websecure.http3=true",
+		"--entryPoints.websecure.http3.advertisedPort=443",
+		"--certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json",
+		"--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web",
+	} {
+		if !doctorProxyArgExists(info.Args, arg) {
+			missing = append(missing, arg)
+		}
+	}
+	if !doctorProxyArgHasPrefix(info.Args, "--certificatesResolvers.letsencrypt.acme.email=") {
+		missing = append(missing, "letsencrypt ACME email")
+	}
+	for _, port := range []string{"80/tcp", "443/tcp", "443/udp"} {
+		if _, ok := info.Ports[port]; !ok {
+			missing = append(missing, port+" publish")
+		}
+	}
+	requiredMounts := map[string]string{
+		"/acme":                "/etc/tako/proxy/acme",
+		"/etc/traefik/dynamic": "/etc/tako/proxy/dynamic",
+		"/var/log/traefik":     "/var/log/tako/proxy",
+	}
+	for destination, source := range requiredMounts {
+		if !doctorProxyMountExists(info.Mounts, source, destination) {
+			missing = append(missing, destination+" mount")
+		}
+	}
+	return missing
+}
+
+func doctorProxyArgExists(args []string, expected string) bool {
+	for _, arg := range args {
+		if arg == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func doctorProxyArgHasPrefix(args []string, prefix string) bool {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func doctorProxyMountExists(mounts []doctorProxyMount, source string, destination string) bool {
+	for _, mount := range mounts {
+		if mount.Source == source && mount.Destination == destination {
+			return true
+		}
+	}
+	return false
 }
 
 func checkConfig(record func(checkResult)) (*config.Config, error) {
