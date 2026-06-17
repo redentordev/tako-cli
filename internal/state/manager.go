@@ -22,11 +22,12 @@ var ErrNotFound = errors.New("takod state document not found")
 
 // StateManager manages deployment history through the node-local takod state API.
 type StateManager struct {
-	client      *ssh.Client
-	socket      string
-	projectName string
-	environment string
-	server      string
+	client         takodclient.RequestExecutor
+	socket         string
+	projectName    string
+	environment    string
+	server         string
+	requestTimeout time.Duration
 }
 
 // NewStateManager creates a state manager that uses the default takod socket.
@@ -46,6 +47,14 @@ func NewStateManagerWithSocket(client *ssh.Client, projectName, environment, ser
 		environment: environment,
 		server:      server,
 	}
+}
+
+// WithRequestTimeout returns a shallow copy that uses a custom takod request
+// deadline. A non-positive timeout keeps the package default.
+func (s *StateManager) WithRequestTimeout(timeout time.Duration) *StateManager {
+	copy := *s
+	copy.requestTimeout = timeout
+	return &copy
 }
 
 // Initialize is retained for callers that want to eagerly validate state access.
@@ -285,7 +294,7 @@ func (s *StateManager) writeDocument(document string, revisionID string, value a
 		RevisionID:  revisionID,
 		Content:     string(data),
 	}
-	_, err = takodclient.RequestJSON(s.client, s.socket, "PUT", "/v1/state", request)
+	_, err = s.requestJSON("PUT", "/v1/state", request)
 	return err
 }
 
@@ -302,11 +311,18 @@ func (s *StateManager) readDocument(document string, revisionID string, value an
 
 func (s *StateManager) readRawDocument(document string, revisionID string) (string, error) {
 	endpoint := takodclient.StateRevisionEndpoint(s.projectName, s.environment, document, revisionID)
-	output, err := takodclient.RequestJSON(s.client, s.socket, "GET", endpoint, nil)
+	output, err := s.requestJSON("GET", endpoint, nil)
 	if err != nil {
 		return "", err
 	}
 	return decodeStateDocumentContent(output, document)
+}
+
+func (s *StateManager) requestJSON(method string, endpoint string, value any) (string, error) {
+	if s.requestTimeout > 0 {
+		return takodclient.RequestJSONWithTimeout(s.client, s.socket, method, endpoint, value, s.requestTimeout)
+	}
+	return takodclient.RequestJSON(s.client, s.socket, method, endpoint, value)
 }
 
 func decodeStateDocumentContent(output string, document string) (string, error) {

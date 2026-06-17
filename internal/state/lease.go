@@ -42,7 +42,7 @@ func (s *StateManager) AcquireLease(operation, environment string, ttl time.Dura
 		PID:         os.Getpid(),
 		TTLSeconds:  int64(ttl.Seconds()),
 	}
-	output, err := takodclient.RequestJSON(s.client, s.socket, "POST", "/v1/lease", request)
+	output, err := s.requestJSON("POST", "/v1/lease", request)
 	if err != nil {
 		return nil, err
 	}
@@ -69,13 +69,7 @@ func (s *StateManager) AcquireLease(operation, environment string, ttl time.Dura
 
 // ReadLease returns the currently held remote lease, or nil if none exists.
 func (s *StateManager) ReadLease() (*LeaseInfo, error) {
-	output, err := takodclient.RequestJSON(
-		s.client,
-		s.socket,
-		"GET",
-		takodclient.LeaseEndpoint(s.projectName, s.environment),
-		nil,
-	)
+	output, err := s.requestJSON("GET", takodclient.LeaseEndpoint(s.projectName, s.environment), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +93,7 @@ func (s *StateManager) ReleaseLease(lease *LeaseInfo) error {
 		Environment: lease.Environment,
 		ID:          lease.ID,
 	}
-	_, err := takodclient.RequestJSON(s.client, s.socket, "DELETE", "/v1/lease", request)
+	_, err := s.requestJSON("DELETE", "/v1/lease", request)
 	return err
 }
 

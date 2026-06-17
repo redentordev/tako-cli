@@ -1,11 +1,14 @@
 package takodstate
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
@@ -176,6 +179,26 @@ func TestBuildNodeActualSnapshotRecordsNode(t *testing.T) {
 	}
 }
 
+func TestManagerWithRequestTimeoutUsesCustomDeadline(t *testing.T) {
+	client := &fakeManagerExecutor{
+		output: `{"found":true,"content":"{\"schemaVersion\":1,\"revisionId\":\"rev-1\",\"project\":\"demo\",\"environment\":\"production\",\"services\":{},\"createdAt\":\"2026-06-17T12:00:00Z\"}\n"}`,
+	}
+	timeout := 7 * time.Second
+	manager := (&Manager{
+		client:      client,
+		socket:      "/run/tako/takod.sock",
+		project:     "demo",
+		environment: "production",
+	}).WithRequestTimeout(timeout)
+
+	if _, err := manager.ReadDesired(); err != nil {
+		t.Fatalf("ReadDesired returned error: %v", err)
+	}
+	if !client.deadlineWithin(timeout) {
+		t.Fatalf("deadline = %s, want near %s", client.deadline.Sub(client.startedAt), timeout)
+	}
+}
+
 func TestStatePersistErrorJoinsNodeErrors(t *testing.T) {
 	nodeAErr := errors.New("node-a failed")
 	nodeBErr := errors.New("node-b failed")
@@ -189,6 +212,36 @@ func TestStatePersistErrorJoinsNodeErrors(t *testing.T) {
 	if !errors.Is(err, nodeAErr) || !errors.Is(err, nodeBErr) {
 		t.Fatalf("joined error did not preserve node errors: %v", err)
 	}
+}
+
+type fakeManagerExecutor struct {
+	output    string
+	startedAt time.Time
+	deadline  time.Time
+}
+
+func (f *fakeManagerExecutor) ExecuteWithContext(ctx context.Context, cmd string) (string, error) {
+	f.startedAt = time.Now()
+	if deadline, ok := ctx.Deadline(); ok {
+		f.deadline = deadline
+	}
+	return f.output, nil
+}
+
+func (f *fakeManagerExecutor) ExecuteWithInput(ctx context.Context, cmd string, input io.Reader) (string, error) {
+	f.startedAt = time.Now()
+	if deadline, ok := ctx.Deadline(); ok {
+		f.deadline = deadline
+	}
+	return f.output, nil
+}
+
+func (f *fakeManagerExecutor) deadlineWithin(want time.Duration) bool {
+	if f.deadline.IsZero() || f.startedAt.IsZero() {
+		return false
+	}
+	got := f.deadline.Sub(f.startedAt)
+	return got > want-time.Second && got < want+time.Second
 }
 
 func TestStatePersistErrorAllowsSuccessfulResults(t *testing.T) {
