@@ -4,10 +4,11 @@ Tako uses the same deployment path from laptops and CI runners:
 
 1. Checkout the app repository.
 2. Restore SSH credentials.
-3. Optionally patch stale server-side takod agents with `tako upgrade servers`.
-4. Pull the newest reachable encrypted environment bundle from takod.
-5. Pull remote deployment state into the local `.tako/` cache.
-6. Run `tako deploy --yes`.
+3. Validate `tako.yaml` with `tako validate`.
+4. Optionally patch stale server-side takod agents with `tako upgrade servers`.
+5. Pull the newest reachable encrypted environment bundle from takod.
+6. Pull remote deployment state into the local `.tako/` cache.
+7. Run `tako deploy --yes`.
 
 Remote leases in takod prevent a CI job and a laptop from reconciling the same
 target nodes at the same time.
@@ -96,6 +97,7 @@ jobs:
 
       - name: Restore environment and state
         run: |
+          tako validate -e production
           tako upgrade servers --dry-run
           tako upgrade servers
           tako env pull --force

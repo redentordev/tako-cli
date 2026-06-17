@@ -22,7 +22,7 @@ export LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL:-ops@example.com}"
 export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-example-postgres-password}"
 
 echo "Validating deployment pattern templates..."
-go build -o "$TMP_DIR/test-config" "$ROOT/cmd/test-config"
+go build -o "$TMP_DIR/tako" "$ROOT"
 
 for config_path in "$PATTERNS_DIR"/*/tako.yaml; do
   pattern_dir="$(dirname "$config_path")"
@@ -30,7 +30,7 @@ for config_path in "$PATTERNS_DIR"/*/tako.yaml; do
   echo "  - $pattern_name"
   (
     cd "$pattern_dir"
-    "$TMP_DIR/test-config" tako.yaml >/dev/null
+    TAKO_SKIP_UPDATE_CHECK=1 "$TMP_DIR/tako" --config tako.yaml --env production validate --quiet
   )
 done
 

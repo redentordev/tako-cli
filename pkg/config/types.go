@@ -678,12 +678,52 @@ func LoadConfig(configPath string) (*Config, error) {
 		}
 	}
 
+	normalizeConfigRelativePaths(&config, configDir)
+
 	// Validate config
 	if err := ValidateConfig(&config); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
 	return &config, nil
+}
+
+func normalizeConfigRelativePaths(cfg *Config, configDir string) {
+	if cfg == nil || configDir == "" || configDir == "." {
+		return
+	}
+	absConfigDir, err := filepath.Abs(configDir)
+	if err != nil {
+		return
+	}
+	cwd, err := os.Getwd()
+	if err == nil {
+		absCWD, err := filepath.Abs(cwd)
+		if err == nil && absConfigDir == absCWD {
+			return
+		}
+	}
+
+	for name, server := range cfg.Servers {
+		server.SSHKey = resolveConfigRelativePath(absConfigDir, server.SSHKey)
+		cfg.Servers[name] = server
+	}
+	for envName, env := range cfg.Environments {
+		for serviceName, service := range env.Services {
+			service.Build = resolveConfigRelativePath(absConfigDir, service.Build)
+			service.EnvFile = resolveConfigRelativePath(absConfigDir, service.EnvFile)
+			env.Services[serviceName] = service
+		}
+		cfg.Environments[envName] = env
+	}
+}
+
+func resolveConfigRelativePath(baseDir string, path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" || filepath.IsAbs(trimmed) || strings.HasPrefix(trimmed, "~") {
+		return path
+	}
+	return filepath.Join(baseDir, trimmed)
 }
 
 // SaveConfig writes the configuration to a YAML or JSON file based on extension

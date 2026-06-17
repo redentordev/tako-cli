@@ -298,6 +298,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | Command | Description |
 |---------|-------------|
 | `tako init` | Initialize new project with template config |
+| `tako validate` | Validate config locally before Git, SSH, build, or deploy work |
 | `tako setup` | Set up or refresh an existing server with Docker, WireGuard, takod, firewall, and security hardening |
 | `tako deploy` | Deploy application to environment |
 | `tako rollback [id]` | Rollback to previous/specific deployment |

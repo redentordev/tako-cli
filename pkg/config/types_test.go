@@ -59,6 +59,77 @@ func TestLoadConfigRejectsUnknownNestedJSONField(t *testing.T) {
 	}
 }
 
+func TestLoadConfigResolvesRelativePathsFromConfigDirectory(t *testing.T) {
+	root := t.TempDir()
+	appDir := filepath.Join(root, "app")
+	deployDir := filepath.Join(root, "deploy")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		t.Fatalf("failed to create app dir: %v", err)
+	}
+	if err := os.MkdirAll(deployDir, 0755); err != nil {
+		t.Fatalf("failed to create deploy dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "Dockerfile"), []byte("FROM scratch\n"), 0600); err != nil {
+		t.Fatalf("failed to write Dockerfile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(deployDir, "service.env"), []byte("PORT=3000\n"), 0600); err != nil {
+		t.Fatalf("failed to write env file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(deployDir, "id_ed25519"), []byte("test-key"), 0600); err != nil {
+		t.Fatalf("failed to write ssh key: %v", err)
+	}
+	path := filepath.Join(deployDir, "tako.yaml")
+	if err := os.WriteFile(path, []byte(`
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 203.0.113.10
+    user: deploy
+    sshKey: id_ed25519
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        build: ../app
+        envFile: service.env
+`), 0600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	otherDir := filepath.Join(root, "other")
+	if err := os.MkdirAll(otherDir, 0755); err != nil {
+		t.Fatalf("failed to create other dir: %v", err)
+	}
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("failed to switch cwd: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+	})
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	web := cfg.Environments["production"].Services["web"]
+	if got, want := filepath.Clean(web.Build), appDir; got != want {
+		t.Fatalf("build path = %q, want %q", got, want)
+	}
+	if got, want := filepath.Clean(web.EnvFile), filepath.Join(deployDir, "service.env"); got != want {
+		t.Fatalf("envFile = %q, want %q", got, want)
+	}
+	if got, want := filepath.Clean(cfg.Servers["node-a"].SSHKey), filepath.Join(deployDir, "id_ed25519"); got != want {
+		t.Fatalf("sshKey = %q, want %q", got, want)
+	}
+}
+
 func TestValidateConfigRejectsNFSVolumeSpecs(t *testing.T) {
 	cfg := validValidationConfig()
 	production := cfg.Environments["production"]

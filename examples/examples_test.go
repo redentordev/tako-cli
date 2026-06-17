@@ -102,8 +102,8 @@ func TestDeploymentPatternDocsAndValidatorCoverCatalog(t *testing.T) {
 
 	for _, expected := range []string{
 		"*/tako.yaml",
-		"go build -o \"$TMP_DIR/test-config\" \"$ROOT/cmd/test-config\"",
-		"\"$TMP_DIR/test-config\" tako.yaml",
+		"go build -o \"$TMP_DIR/tako\" \"$ROOT\"",
+		"\"$TMP_DIR/tako\" --config tako.yaml --env production validate --quiet",
 		"go test ./examples",
 	} {
 		if !strings.Contains(validateScript, expected) {
@@ -182,8 +182,10 @@ func TestGitHubActionsDeploymentPatternIncludesStateWorkflow(t *testing.T) {
 	for _, expected := range []string{
 		"TAKO_NONINTERACTIVE: \"1\"",
 		"TAKO_HOST_KEY_MODE: strict",
-		"tako env pull --force",
-		"tako state pull",
+		"tako validate -e production",
+		"tako upgrade servers -e production --dry-run",
+		"tako env pull -e production --force",
+		"tako state pull -e production",
 		"tako state lease",
 		"tako deploy -e production --yes",
 	} {
