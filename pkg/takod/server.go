@@ -555,6 +555,14 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response, err = AppendStateEvent(r.Context(), s.dataDir, request)
+	case http.MethodDelete:
+		defer r.Body.Close()
+		var request StateDocumentRequest
+		if err := decodeJSONRequest(w, r, &request); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		response, err = DeleteStateDocument(r.Context(), s.dataDir, request)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

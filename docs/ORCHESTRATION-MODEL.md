@@ -271,7 +271,9 @@ focused one-node debugging. When nodes disagree or a state copy was lost, run
 `tako state repair -e production`; it writes the freshest deployment history,
 desired revision, aggregate actual snapshot, and node-local actual snapshots
 back to the reachable mesh, and refreshes local `.tako` state when deployment
-history is available.
+history is available. When a node has been removed from the environment, deploy
+and state repair prune stale per-node actual snapshots for that node after the
+fresh target-node state is written.
 
 ## CI/CD
 

@@ -1330,9 +1330,11 @@ type stateRepairStateManager interface {
 }
 
 type stateRepairRuntimeManager interface {
+	ReadActual() (*takodstate.ActualSnapshot, error)
 	WriteDesired(*takodstate.DesiredRevision) error
 	WriteActual(*takodstate.ActualSnapshot) error
 	WriteNodeActual(string, *takodstate.ActualSnapshot) error
+	DeleteNodeActual(string) error
 }
 
 type stateRepairInventory struct {
@@ -1697,6 +1699,14 @@ type stateRepairWriteResult struct {
 
 func writeStateRepairDocumentsToNode(node stateRepairNode, history stateHistoryCandidate, hasHistory bool, desired stateDesiredCandidate, hasDesired bool, actual stateActualCandidate, hasActual bool, nodeActual map[string]stateNodeActualCandidate) stateRepairWriteResult {
 	result := stateRepairWriteResult{nodeName: node.name}
+	var previousActual *takodstate.ActualSnapshot
+	if hasActual || len(nodeActual) > 0 {
+		var err error
+		previousActual, err = node.runtime.ReadActual()
+		if err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+			result.warnings = append(result.warnings, fmt.Sprintf("failed to read previous actual runtime state on %s before pruning stale node state: %v", node.name, err))
+		}
+	}
 
 	if hasHistory {
 		historyCopy, err := cloneRemoteDeploymentHistory(history.history)
@@ -1749,6 +1759,12 @@ func writeStateRepairDocumentsToNode(node stateRepairNode, history stateHistoryC
 			result.warnings = append(result.warnings, fmt.Sprintf("failed to repair node actual runtime state for %s on %s: %v", nodeName, node.name, err))
 		} else {
 			result.counts.nodeActual++
+		}
+	}
+
+	for _, staleNode := range takodstate.StaleNodeActualNames(previousActual, actual.actual, stateRepairNodeActualSnapshots(nodeActual)) {
+		if err := node.runtime.DeleteNodeActual(staleNode); err != nil {
+			result.warnings = append(result.warnings, fmt.Sprintf("failed to delete stale node actual runtime state for %s on %s: %v", staleNode, node.name, err))
 		}
 	}
 
@@ -1973,6 +1989,19 @@ func sortedStateNodeActualNames(nodeActual map[string]stateNodeActualCandidate) 
 	}
 	sort.Strings(nodes)
 	return nodes
+}
+
+func stateRepairNodeActualSnapshots(nodeActual map[string]stateNodeActualCandidate) map[string]*takodstate.ActualSnapshot {
+	if len(nodeActual) == 0 {
+		return nil
+	}
+	out := make(map[string]*takodstate.ActualSnapshot, len(nodeActual))
+	for nodeName, candidate := range nodeActual {
+		if candidate.actual != nil {
+			out[nodeName] = candidate.actual
+		}
+	}
+	return out
 }
 
 func stateNodeNameInList(nodes []string, nodeName string) bool {
