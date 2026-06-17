@@ -13,6 +13,7 @@
 #   TAKO_E2E_ENVIRONMENT      Environment name. Defaults to production.
 #   TAKO_E2E_PHASES           Comma-separated phases. Defaults to preflight.
 #   TAKO_E2E_TAKO_BIN         Existing tako binary. Defaults to a local build.
+#   TAKO_E2E_TAKOD_BINARY     Linux tako binary to upload for local/non-release agent upgrades.
 #   TAKO_E2E_CONFIRM=run      Required for setup/deploy/repair/env phases.
 #   TAKO_E2E_CI_HOST_KEY_MODE Host key mode for the ci phase. Defaults to TAKO_HOST_KEY_MODE or tofu.
 #   TAKO_E2E_LOG_DIR          Directory for logs. Defaults outside app worktree.
@@ -36,6 +37,7 @@ APP_DIR="${TAKO_E2E_APP_DIR:-$PWD}"
 ENVIRONMENT="${TAKO_E2E_ENVIRONMENT:-${TAKO_E2E_ENV:-production}}"
 PHASES="${TAKO_E2E_PHASES:-preflight}"
 TAKO_BIN="${TAKO_E2E_TAKO_BIN:-}"
+TAKOD_BINARY="${TAKO_E2E_TAKOD_BINARY:-${TAKO_TAKOD_BINARY:-}}"
 CONFIRM="${TAKO_E2E_CONFIRM:-}"
 CI_HOST_KEY_MODE="${TAKO_E2E_CI_HOST_KEY_MODE:-${TAKO_HOST_KEY_MODE:-tofu}}"
 KEEP_WORKDIR="${TAKO_E2E_KEEP_WORKDIR:-0}"
@@ -71,6 +73,7 @@ Options:
   --env NAME, -e NAME Environment to test. Defaults to production.
   --phases LIST       Comma-separated phases to run.
   --tako-bin PATH     Existing tako binary to test.
+  --takod-binary PATH Linux tako binary for local/non-release server upgrades.
   --yes               Allow mutating phases.
   --keep-workdir      Keep temporary fresh-clone workdirs.
   --offline-server    Node name to stop for the offline/rejoin phase.
@@ -81,12 +84,12 @@ Options:
   --help, -h          Show this help.
 
 Phases:
-  preflight       Local config, remote state, and remote lease visibility checks.
-  one-node        setup, deploy, state status, lease status, history, ps, drift.
+  preflight       validate, doctor, state, lease, and upgrade dry-run checks.
+  one-node        setup, upgrade servers, deploy, status, lease, history, ps, drift.
   two-node        setup, repair, status, lease status, deploy, status.
   env             env push, temporary local env removal, env pull --force.
-  new-computer    fresh clone, env pull, state pull, status, deploy.
-  ci              fresh clone with CI env, env pull, state pull, status, deploy.
+  new-computer    fresh clone, validate, env pull, state pull, status, deploy.
+  ci              fresh clone with CI env, validate, upgrade, state pull, deploy.
   repair          state status, state repair, state status.
   offline         stop one takod, prove fail-closed behavior, restart, repair, deploy.
   standard        preflight, one-node, env, new-computer, ci.
@@ -150,6 +153,11 @@ while [[ $# -gt 0 ]]; do
     --tako-bin)
       [[ $# -ge 2 ]] || die "--tako-bin requires a value"
       TAKO_BIN="$2"
+      shift 2
+      ;;
+    --takod-binary)
+      [[ $# -ge 2 ]] || die "--takod-binary requires a value"
+      TAKOD_BINARY="$2"
       shift 2
       ;;
     --yes)
@@ -257,6 +265,14 @@ build_or_select_tako() {
   (cd "$REPO_DIR" && go build -o "$TAKO_BIN" .)
 }
 
+normalize_takod_binary() {
+  if [[ -z "$TAKOD_BINARY" ]]; then
+    return
+  fi
+  [[ -f "$TAKOD_BINARY" ]] || die "takod binary is not a file: $TAKOD_BINARY"
+  TAKOD_BINARY="$(cd -- "$(dirname -- "$TAKOD_BINARY")" && pwd)/$(basename -- "$TAKOD_BINARY")"
+}
+
 LAST_LOG_FILE=""
 
 run_cmd_status() {
@@ -294,9 +310,13 @@ run_tako_in() {
   shift 2
   run_cmd "$label" bash -c '
     cd "$1"
-    shift
+    takod_binary="$2"
+    shift 2
+    if [[ -n "$takod_binary" ]]; then
+      export TAKO_TAKOD_BINARY="$takod_binary"
+    fi
     TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 "$@"
-  ' _ "$dir" "$TAKO_BIN" --env "$ENVIRONMENT" "$@"
+  ' _ "$dir" "$TAKOD_BINARY" "$TAKO_BIN" --env "$ENVIRONMENT" "$@"
 }
 
 run_tako() {
@@ -310,9 +330,39 @@ run_tako_status() {
   shift
   run_cmd_status "$label" bash -c '
     cd "$1"
-    shift
+    takod_binary="$2"
+    shift 2
+    if [[ -n "$takod_binary" ]]; then
+      export TAKO_TAKOD_BINARY="$takod_binary"
+    fi
     TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 "$@"
-  ' _ "$APP_DIR" "$TAKO_BIN" --env "$ENVIRONMENT" "$@"
+  ' _ "$APP_DIR" "$TAKOD_BINARY" "$TAKO_BIN" --env "$ENVIRONMENT" "$@"
+}
+
+run_upgrade_servers_apply_in() {
+  local dir="$1"
+  local label="$2"
+  local args=(upgrade servers)
+  if [[ -n "$TAKOD_BINARY" ]]; then
+    args+=(--takod-binary "$TAKOD_BINARY")
+  fi
+  run_tako_in "$dir" "$label" "${args[@]}"
+}
+
+run_upgrade_servers_apply() {
+  local label="$1"
+  run_upgrade_servers_apply_in "$APP_DIR" "$label"
+}
+
+run_upgrade_servers_dry_run_in() {
+  local dir="$1"
+  local label="$2"
+  run_tako_in "$dir" "$label" upgrade servers --dry-run
+}
+
+run_upgrade_servers_dry_run() {
+  local label="$1"
+  run_upgrade_servers_dry_run_in "$APP_DIR" "$label"
 }
 
 require_confirm() {
@@ -433,15 +483,19 @@ fresh_clone() {
 
 phase_preflight() {
   run_cmd "tako version" "$TAKO_BIN" --version
+  run_tako "validate config" validate
   run_tako "doctor skip remote" doctor --skip-remote
   run_tako "state status" state status
   run_tako "state lease" state lease
+  run_upgrade_servers_dry_run "upgrade servers dry-run"
 }
 
 phase_one_node() {
   require_confirm "one-node"
   require_deploy_ready_worktree "$APP_DIR"
   run_tako "setup" setup
+  run_upgrade_servers_dry_run "upgrade servers dry-run"
+  run_upgrade_servers_apply "upgrade servers"
   run_tako "deploy" deploy --yes
   run_tako "state status after deploy" state status
   run_tako "state lease after deploy" state lease
@@ -502,6 +556,7 @@ phase_new_computer() {
   fresh_clone "new-computer"
   clone_dir="$FRESH_CLONE_DIR"
   require_deploy_ready_worktree "$clone_dir"
+  run_tako_in "$clone_dir" "new-computer validate config" validate
   run_tako_in "$clone_dir" "new-computer env pull" env pull --force
   run_tako_in "$clone_dir" "new-computer state pull" state pull
   run_tako_in "$clone_dir" "new-computer state status" state status
@@ -519,13 +574,22 @@ phase_ci() {
   run_cmd "ci env and state deploy" bash -c '
     cd "$1"
     ci_host_key_mode="$2"
-    shift 2
+    takod_binary="$3"
+    shift 3
+    upgrade_args=()
+    if [[ -n "$takod_binary" ]]; then
+      export TAKO_TAKOD_BINARY="$takod_binary"
+      upgrade_args+=(--takod-binary "$takod_binary")
+    fi
+    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" validate
+    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" upgrade servers --dry-run
+    CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" upgrade servers "${upgrade_args[@]}"
     CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" env pull --force
     CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state pull
     CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state status
     CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" state lease
     CI=true TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 TAKO_HOST_KEY_MODE="$ci_host_key_mode" "$@" --env "$TAKO_E2E_ENVIRONMENT" deploy --yes
-  ' _ "$clone_dir" "$CI_HOST_KEY_MODE" "$TAKO_BIN"
+  ' _ "$clone_dir" "$CI_HOST_KEY_MODE" "$TAKOD_BINARY" "$TAKO_BIN"
 }
 
 phase_repair() {
@@ -602,6 +666,7 @@ main() {
   require_tool git
   require_tool bash
   require_app_repo
+  normalize_takod_binary
   build_or_select_tako
 
   export TAKO_E2E_ENVIRONMENT="$ENVIRONMENT"

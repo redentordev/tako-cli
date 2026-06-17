@@ -73,6 +73,12 @@ restores the same content, and restores the original file if the check fails.
 The CI phase defaults to `TAKO_E2E_CI_HOST_KEY_MODE=tofu`; set it to `strict`
 when validating a runner image with preinstalled known hosts.
 
+Mutating phases run `tako upgrade servers` so the proof covers stale-agent
+patching before deploy. If the harness is testing a local source-tree build
+instead of an already released binary, pass a Linux server binary with
+`--takod-binary` or `TAKO_E2E_TAKOD_BINARY`; otherwise there is no release asset
+for the server to download.
+
 The offline phase stops `takod` on the selected node through SSH, verifies that
 status degrades and drift/deploy fail closed while the node agent is
 unavailable, restarts `takod`, runs repair, and deploys again. If the phase

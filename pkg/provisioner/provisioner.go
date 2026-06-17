@@ -410,6 +410,9 @@ func releaseVersionArg(version string) (string, error) {
 	if version == "" || version == "dev" || version == "unknown" {
 		return "", fmt.Errorf("release version is not available for this build")
 	}
+	if isGitDescribeSnapshot(version) {
+		return "", fmt.Errorf("release version %q is a non-release build; pass --takod-binary with a Linux tako binary", version)
+	}
 	for _, r := range version {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
 			continue
@@ -417,6 +420,46 @@ func releaseVersionArg(version string) (string, error) {
 		return "", fmt.Errorf("release version contains unsupported characters")
 	}
 	return version, nil
+}
+
+func isGitDescribeSnapshot(version string) bool {
+	if strings.Contains(version, "-dirty") {
+		return true
+	}
+	parts := strings.Split(version, "-")
+	if len(parts) < 3 {
+		return false
+	}
+	for i := 1; i < len(parts)-1; i++ {
+		if !allASCIIBytes(parts[i], isASCIIDigit) {
+			continue
+		}
+		next := parts[i+1]
+		if len(next) > 1 && next[0] == 'g' && allASCIIBytes(next[1:], isASCIIHex) {
+			return true
+		}
+	}
+	return false
+}
+
+func allASCIIBytes(value string, valid func(byte) bool) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if !valid(value[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIDigit(b byte) bool {
+	return b >= '0' && b <= '9'
+}
+
+func isASCIIHex(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
 }
 
 func systemdPathArg(value string, fallback string) (string, error) {
