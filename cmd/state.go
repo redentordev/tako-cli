@@ -460,7 +460,7 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 
 	// Sync recommendation
 	fmt.Println("=== Sync Status ===")
-	for _, line := range stateSyncRecommendation(localExists, localCurrent, bestHistory, hasRemoteHistory) {
+	for _, line := range stateSyncRecommendation(localExists, localCurrent, bestHistory, hasRemoteHistory, stateStatusUnreachableCount(remoteNodes)) {
 		fmt.Println(line)
 	}
 
@@ -471,7 +471,7 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func stateSyncRecommendation(localExists bool, localCurrent *localstate.DeploymentState, bestHistory stateHistoryCandidate, hasRemoteHistory bool) []string {
+func stateSyncRecommendation(localExists bool, localCurrent *localstate.DeploymentState, bestHistory stateHistoryCandidate, hasRemoteHistory bool, unreachableCount int) []string {
 	lines := make([]string, 0, 4)
 	if !localExists {
 		lines = append(lines, "Local state is missing.")
@@ -498,12 +498,22 @@ func stateSyncRecommendation(localExists bool, localCurrent *localstate.Deployme
 
 	if !hasRemoteHistory {
 		lines = append(lines, "No remote deployment history was found on reachable nodes; local deployment records are the best known copy.")
+		if unreachableCount > 0 {
+			lines = append(lines, "Some checked nodes are unreachable; restore reachability or remove destroyed nodes from config before pulling state.")
+		} else {
+			lines = append(lines, "Run 'tako deploy --yes' to reconcile the reachable mesh and publish fresh deployment state.")
+		}
 		return lines
 	}
 
 	remoteLatest := latestDeploymentByTimestamp(bestHistory.history.Deployments)
 	if remoteLatest == nil {
 		lines = append(lines, "No remote deployment history was found on reachable nodes; local deployment records are the best known copy.")
+		if unreachableCount > 0 {
+			lines = append(lines, "Some checked nodes are unreachable; restore reachability or remove destroyed nodes from config before pulling state.")
+		} else {
+			lines = append(lines, "Run 'tako deploy --yes' to reconcile the reachable mesh and publish fresh deployment state.")
+		}
 		return lines
 	}
 
@@ -521,7 +531,12 @@ func stateSyncRecommendation(localExists bool, localCurrent *localstate.Deployme
 		}
 		if localCurrent.Timestamp.After(remoteLatest.Timestamp) {
 			lines = append(lines, fmt.Sprintf("Local deployment records are newer than the freshest reachable remote history from %s.", bestHistory.source))
-			lines = append(lines, "Check mesh reachability before pulling state.")
+			if unreachableCount > 0 {
+				lines = append(lines, "Some checked nodes are unreachable; restore reachability or remove destroyed nodes from config before pulling state.")
+			} else {
+				lines = append(lines, "All checked nodes are reachable, so remote deployment history appears stale.")
+				lines = append(lines, "Run 'tako deploy --yes' to reconcile the mesh and publish fresh state; avoid 'tako state pull' unless you intend to replace local records.")
+			}
 			return lines
 		}
 	}
@@ -1046,6 +1061,10 @@ func stateStatusReachableCount(nodes []stateStatusNode) int {
 		}
 	}
 	return reachable
+}
+
+func stateStatusUnreachableCount(nodes []stateStatusNode) int {
+	return len(nodes) - stateStatusReachableCount(nodes)
 }
 
 func stateStatusNoReachableError(envName string, nodes []stateStatusNode) error {
