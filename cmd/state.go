@@ -396,6 +396,7 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	fmt.Println("=== Local State ===")
 	localPath := ".tako"
 	localExists := false
+	var localCurrent *localstate.DeploymentState
 
 	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
 		localExists = true
@@ -410,6 +411,7 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 			if err != nil || currentDep == nil {
 				fmt.Println("Status: No deployments recorded locally")
 			} else {
+				localCurrent = currentDep
 				fmt.Printf("Last deployment:\n")
 				fmt.Printf("  ID:      %s\n", currentDep.DeploymentID)
 				fmt.Printf("  Time:    %s (%s ago)\n", currentDep.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(currentDep.Timestamp)))
@@ -452,15 +454,8 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 
 	// Sync recommendation
 	fmt.Println("=== Sync Status ===")
-	if !localExists {
-		fmt.Println("Local state is missing.")
-		if hasRemoteHistory {
-			fmt.Printf("Remote deployment history is available from %s.\n", bestHistory.source)
-		}
-		fmt.Println("Run 'tako state pull' to sync from the freshest reachable node.")
-	} else {
-		fmt.Println("Local state exists.")
-		fmt.Println("Run 'tako state pull' to refresh local deployment records from remote state.")
+	for _, line := range stateSyncRecommendation(localExists, localCurrent, bestHistory, hasRemoteHistory) {
+		fmt.Println(line)
 	}
 
 	if stateStatusReachableCount(remoteNodes) == 0 {
@@ -468,6 +463,66 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func stateSyncRecommendation(localExists bool, localCurrent *localstate.DeploymentState, bestHistory stateHistoryCandidate, hasRemoteHistory bool) []string {
+	lines := make([]string, 0, 4)
+	if !localExists {
+		lines = append(lines, "Local state is missing.")
+		if hasRemoteHistory {
+			lines = append(lines, fmt.Sprintf("Remote deployment history is available from %s.", bestHistory.source))
+			lines = append(lines, "Run 'tako state pull' to sync from the freshest reachable node.")
+			return lines
+		}
+		lines = append(lines, "No remote deployment history was found on reachable nodes.")
+		return lines
+	}
+
+	lines = append(lines, "Local state exists.")
+	if localCurrent == nil {
+		lines = append(lines, "No current local deployment is recorded.")
+		if hasRemoteHistory {
+			lines = append(lines, fmt.Sprintf("Remote deployment history is available from %s.", bestHistory.source))
+			lines = append(lines, "Run 'tako state pull' to sync from the freshest reachable node.")
+		} else {
+			lines = append(lines, "No remote deployment history was found on reachable nodes.")
+		}
+		return lines
+	}
+
+	if !hasRemoteHistory {
+		lines = append(lines, "No remote deployment history was found on reachable nodes; local deployment records are the best known copy.")
+		return lines
+	}
+
+	remoteLatest := latestDeploymentByTimestamp(bestHistory.history.Deployments)
+	if remoteLatest == nil {
+		lines = append(lines, "No remote deployment history was found on reachable nodes; local deployment records are the best known copy.")
+		return lines
+	}
+
+	if localCurrent.DeploymentID == remoteLatest.ID {
+		lines = append(lines, fmt.Sprintf("Local deployment records match the freshest reachable remote deployment from %s.", bestHistory.source))
+		lines = append(lines, "No state pull needed.")
+		return lines
+	}
+
+	if !localCurrent.Timestamp.IsZero() && !remoteLatest.Timestamp.IsZero() {
+		if localCurrent.Timestamp.Before(remoteLatest.Timestamp) {
+			lines = append(lines, fmt.Sprintf("Remote deployment history from %s is newer than local state.", bestHistory.source))
+			lines = append(lines, "Run 'tako state pull' to refresh local deployment records.")
+			return lines
+		}
+		if localCurrent.Timestamp.After(remoteLatest.Timestamp) {
+			lines = append(lines, fmt.Sprintf("Local deployment records are newer than the freshest reachable remote history from %s.", bestHistory.source))
+			lines = append(lines, "Check mesh reachability before pulling state.")
+			return lines
+		}
+	}
+
+	lines = append(lines, fmt.Sprintf("Local and remote deployment timestamps match, but deployment IDs differ from %s.", bestHistory.source))
+	lines = append(lines, "Run 'tako state pull' to normalize local deployment records.")
+	return lines
 }
 
 type stateLeaseNode struct {
