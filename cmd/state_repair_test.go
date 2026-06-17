@@ -76,6 +76,24 @@ func TestAcquireStateRepairLeasesWithReleasesOnFailure(t *testing.T) {
 	}
 }
 
+func TestAcquireStateForgetNodeLeasesUsesForgetOperation(t *testing.T) {
+	manager := &operationRecordingLeaseManager{}
+	nodes := []stateRepairNode{
+		{name: "node-a", manager: manager},
+	}
+
+	leases, err := acquireStateForgetNodeLeases(nodes, "production")
+	if err != nil {
+		t.Fatalf("acquireStateForgetNodeLeases returned error: %v", err)
+	}
+	if len(leases) != 1 {
+		t.Fatalf("leases = %d, want 1", len(leases))
+	}
+	if got := strings.Join(manager.operations, ","); got != "state-forget-node" {
+		t.Fatalf("operations = %q, want state-forget-node", got)
+	}
+}
+
 func TestWriteStateRepairDocumentsWritesHistoryConcurrently(t *testing.T) {
 	nodes := []stateRepairNode{
 		{name: "node-a"},
@@ -285,6 +303,27 @@ func (m *recordingStateRepairManager) Released() []string {
 	return append([]string(nil), m.released...)
 }
 
+type operationRecordingLeaseManager struct {
+	operations []string
+}
+
+func (m *operationRecordingLeaseManager) LoadHistory() (*remotestate.DeploymentHistory, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (m *operationRecordingLeaseManager) SaveHistory(*remotestate.DeploymentHistory) error {
+	return fmt.Errorf("not implemented")
+}
+
+func (m *operationRecordingLeaseManager) AcquireLease(operation string, environment string, ttl time.Duration) (*remotestate.LeaseInfo, error) {
+	m.operations = append(m.operations, operation)
+	return &remotestate.LeaseInfo{ID: operation + "-lease"}, nil
+}
+
+func (m *operationRecordingLeaseManager) ReleaseLease(*remotestate.LeaseInfo) error {
+	return nil
+}
+
 type blockingHistoryRepairManager struct {
 	nodeName string
 	started  chan<- string
@@ -319,7 +358,10 @@ func (m *blockingHistoryRepairManager) ReleaseLease(*remotestate.LeaseInfo) erro
 
 type recordingStateRepairRuntime struct {
 	previousActual *takodstate.ActualSnapshot
+	nodeActual     map[string]*takodstate.ActualSnapshot
+	writtenActual  *takodstate.ActualSnapshot
 	deleted        []string
+	events         []takodstate.Event
 }
 
 func (m *recordingStateRepairRuntime) ReadActual() (*takodstate.ActualSnapshot, error) {
@@ -329,11 +371,23 @@ func (m *recordingStateRepairRuntime) ReadActual() (*takodstate.ActualSnapshot, 
 	return m.previousActual, nil
 }
 
+func (m *recordingStateRepairRuntime) ReadNodeActual(node string) (*takodstate.ActualSnapshot, error) {
+	if m.nodeActual == nil {
+		return nil, takodstate.ErrNotFound
+	}
+	actual, ok := m.nodeActual[node]
+	if !ok {
+		return nil, takodstate.ErrNotFound
+	}
+	return actual, nil
+}
+
 func (m *recordingStateRepairRuntime) WriteDesired(*takodstate.DesiredRevision) error {
 	return nil
 }
 
-func (m *recordingStateRepairRuntime) WriteActual(*takodstate.ActualSnapshot) error {
+func (m *recordingStateRepairRuntime) WriteActual(actual *takodstate.ActualSnapshot) error {
+	m.writtenActual = actual
 	return nil
 }
 
@@ -343,6 +397,11 @@ func (m *recordingStateRepairRuntime) WriteNodeActual(string, *takodstate.Actual
 
 func (m *recordingStateRepairRuntime) DeleteNodeActual(node string) error {
 	m.deleted = append(m.deleted, node)
+	return nil
+}
+
+func (m *recordingStateRepairRuntime) AppendEvent(event takodstate.Event) error {
+	m.events = append(m.events, event)
 	return nil
 }
 

@@ -25,6 +25,7 @@ func TestStateCommandsSilenceUsageOnExecutionErrors(t *testing.T) {
 		statePullCmd,
 		stateStatusCmd,
 		stateRepairCmd,
+		stateForgetNodeCmd,
 		stateLeaseCmd,
 		stateLeaseReleaseCmd,
 	}
@@ -33,6 +34,102 @@ func TestStateCommandsSilenceUsageOnExecutionErrors(t *testing.T) {
 		if !cmd.SilenceUsage {
 			t.Fatalf("%s command should silence usage on execution errors", cmd.CommandPath())
 		}
+	}
+}
+
+func TestValidateStateForgetNodeNameRejectsUnsafeValues(t *testing.T) {
+	for _, nodeName := range []string{"", "../node", "node/b", "node b", "..", "node..b"} {
+		t.Run(nodeName, func(t *testing.T) {
+			if err := validateStateForgetNodeName(nodeName); err == nil {
+				t.Fatalf("validateStateForgetNodeName(%q) should reject unsafe value", nodeName)
+			}
+		})
+	}
+	if err := validateStateForgetNodeName("node-a_1.prod"); err != nil {
+		t.Fatalf("validateStateForgetNodeName rejected safe name: %v", err)
+	}
+}
+
+func TestActualSnapshotWithoutNodePrunesTargetAndEmbeddedNode(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	snapshot := actualSnapshot(base, "web")
+	snapshot.TargetNodes = []string{"node-a", "node-b", "node-c"}
+	snapshot.Nodes = map[string]takodstate.ActualNodeSnapshot{
+		"node-a": {
+			Node:       "node-a",
+			Services:   nodeActualSnapshot("node-a", base, "web").Services,
+			CapturedAt: base,
+		},
+		"node-b": {
+			Node:       "node-b",
+			Services:   nodeActualSnapshot("node-b", base, "worker").Services,
+			CapturedAt: base,
+		},
+	}
+
+	pruned, changed := actualSnapshotWithoutNode(snapshot, "node-b")
+	if !changed {
+		t.Fatal("actualSnapshotWithoutNode should report a change")
+	}
+	if got := strings.Join(pruned.TargetNodes, ","); got != "node-a,node-c" {
+		t.Fatalf("target nodes = %q, want node-a,node-c", got)
+	}
+	if _, ok := pruned.Nodes["node-b"]; ok {
+		t.Fatalf("embedded node-b should be removed: %#v", pruned.Nodes)
+	}
+	if _, ok := snapshot.Nodes["node-b"]; !ok {
+		t.Fatal("original snapshot should not be mutated")
+	}
+	if !pruned.CapturedAt.After(base) {
+		t.Fatalf("pruned capturedAt = %s, want refreshed timestamp after %s", pruned.CapturedAt, base)
+	}
+}
+
+func TestForgetNodeOnRepairNodePrunesAggregateAndDeletesStandaloneSnapshot(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	actual := actualSnapshot(base, "web")
+	actual.TargetNodes = []string{"node-a", "node-b"}
+	actual.Nodes = map[string]takodstate.ActualNodeSnapshot{
+		"node-a": {
+			Node:       "node-a",
+			Services:   nodeActualSnapshot("node-a", base, "web").Services,
+			CapturedAt: base,
+		},
+		"node-b": {
+			Node:       "node-b",
+			Services:   nodeActualSnapshot("node-b", base, "worker").Services,
+			CapturedAt: base,
+		},
+	}
+	runtime := &recordingStateRepairRuntime{
+		previousActual: actual,
+		nodeActual: map[string]*takodstate.ActualSnapshot{
+			"node-b": nodeActualSnapshot("node-b", base, "worker"),
+		},
+	}
+
+	result := forgetNodeOnRepairNode(stateRepairNode{name: "node-a", runtime: runtime}, "demo", "production", "node-b")
+
+	if result.err != nil {
+		t.Fatalf("forgetNodeOnRepairNode returned error: %v", result.err)
+	}
+	if !result.nodeActualExisted {
+		t.Fatal("expected node actual snapshot to be detected")
+	}
+	if !result.aggregatePruned {
+		t.Fatal("expected aggregate actual state to be pruned")
+	}
+	if got := strings.Join(runtime.deleted, ","); got != "node-b" {
+		t.Fatalf("deleted node actual = %q, want node-b", got)
+	}
+	if runtime.writtenActual == nil {
+		t.Fatal("expected pruned aggregate actual state to be written")
+	}
+	if _, ok := runtime.writtenActual.Nodes["node-b"]; ok {
+		t.Fatalf("written aggregate still contains node-b: %#v", runtime.writtenActual.Nodes)
+	}
+	if len(runtime.events) != 1 || runtime.events[0].Type != "state_node_forgotten" {
+		t.Fatalf("events = %#v, want state_node_forgotten event", runtime.events)
 	}
 }
 
