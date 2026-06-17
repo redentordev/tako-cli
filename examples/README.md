@@ -347,12 +347,12 @@ servers:
 
 Set it before deploying:
 ```bash
-export SERVER_HOST=46.62.254.8
+export SERVER_HOST=203.0.113.10
 ```
 
 You can also set it in a `.env` file:
 ```bash
-SERVER_HOST=46.62.254.8
+SERVER_HOST=203.0.113.10
 ```
 
 ## Customizing Examples

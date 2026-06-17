@@ -14,7 +14,7 @@ All enhanced monitoring features have been tested and verified across multiple e
 
 ## Test Environment
 
-**Server:** prod (95.216.194.236)  
+**Server:** prod (203.0.113.10)
 **Examples Tested:**
 1. `09-nextjs-todos` - Single container
 2. `20-ghost` - Multi-container (Ghost + MySQL)
@@ -29,7 +29,7 @@ All enhanced monitoring features have been tested and verified across multiple e
 === System Metrics ===
 Timestamp: 2025-11-16 02:22:17
 
-📊 prod (95.216.194.236)
+📊 prod (203.0.113.10)
 ─────────────────────────────────────────────────
 CPU:    61.03% [████████████░░░░░░░░]
 Memory: 73.89% (2822 MB / 3820 MB) [██████████████░░░░░░]
@@ -78,7 +78,7 @@ Updated: 2025-11-15T18:22:21Z
 === Container Statistics ===
 Timestamp: 2025-11-16 02:22:26
 
-📊 prod (95.216.194.236)
+📊 prod (203.0.113.10)
 ─────────────────────────────────────────────────────────────────────────────────────
 CONTAINER                                     CPU %               MEMORY      MEM %              NET I/O       BLOCK I/O
 ─────────────────────────────────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ nextjs-todos_production_app.1.aby9d...        0.00%   38.42MiB / 3.73GiB      1.
 === Container Statistics ===
 Timestamp: 2025-11-16 02:22:51
 
-📊 prod (95.216.194.236)
+📊 prod (203.0.113.10)
 ─────────────────────────────────────────────────────────────────────────────────────
 CONTAINER                                     CPU %               MEMORY      MEM %              NET I/O       BLOCK I/O
 ─────────────────────────────────────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ ghost_production_mysql.1.wpev7mwpi4...        1.02%   389.6MiB / 3.73GiB     10.
 === Container Statistics ===
 Timestamp: 2025-11-16 02:23:01
 
-📊 prod (95.216.194.236)
+📊 prod (203.0.113.10)
 ─────────────────────────────────────────────────────────────────────────────────────
 CONTAINER                                     CPU %               MEMORY      MEM %              NET I/O       BLOCK I/O
 ─────────────────────────────────────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ ghost_production_ghost.1.w96cza09ow...        0.02%   104.3MiB / 3.73GiB      2.
 === Container Statistics ===
 Timestamp: 2025-11-16 02:23:20
 
-📊 prod (95.216.194.236)
+📊 prod (203.0.113.10)
 ─────────────────────────────────────────────────────────────────────────────────────
 CONTAINER                                     CPU %               MEMORY      MEM %              NET I/O       BLOCK I/O
 ─────────────────────────────────────────────────────────────────────────────────────
@@ -169,7 +169,7 @@ fullstack_production_web.1.lahcygcr...        0.00%    19.8MiB / 3.73GiB      0.
 === Container Statistics ===
 Timestamp: 2025-11-16 02:23:31
 
-📊 prod (95.216.194.236)
+📊 prod (203.0.113.10)
 ─────────────────────────────────────────────────────────────────────────────────────
 CONTAINER                                     CPU %               MEMORY      MEM %              NET I/O       BLOCK I/O
 ─────────────────────────────────────────────────────────────────────────────────────
@@ -191,31 +191,31 @@ fullstack_production_api.2.saca39pp...        0.00%   23.94MiB / 3.73GiB      0.
 ```
 # HELP tako_cpu_usage_percent CPU usage percentage
 # TYPE tako_cpu_usage_percent gauge
-tako_cpu_usage_percent{server="prod",host="95.216.194.236"} 68.04
+tako_cpu_usage_percent{server="prod",host="203.0.113.10"} 68.04
 
 # HELP tako_memory_total_bytes Total memory in bytes
 # TYPE tako_memory_total_bytes gauge
-tako_memory_total_bytes{server="prod",host="95.216.194.236"} 4005560320
+tako_memory_total_bytes{server="prod",host="203.0.113.10"} 4005560320
 
 # HELP tako_memory_used_bytes Used memory in bytes
 # TYPE tako_memory_used_bytes gauge
-tako_memory_used_bytes{server="prod",host="95.216.194.236"} 2861563904
+tako_memory_used_bytes{server="prod",host="203.0.113.10"} 2861563904
 
 # HELP tako_network_receive_bytes Network bytes received
 # TYPE tako_network_receive_bytes counter
-tako_network_receive_bytes{server="prod",host="95.216.194.236"} 51784
+tako_network_receive_bytes{server="prod",host="203.0.113.10"} 51784
 
 # HELP tako_network_transmit_bytes Network bytes transmitted
 # TYPE tako_network_transmit_bytes counter
-tako_network_transmit_bytes{server="prod",host="95.216.194.236"} 54782
+tako_network_transmit_bytes{server="prod",host="203.0.113.10"} 54782
 
 # HELP tako_disk_read_bytes Disk bytes read
 # TYPE tako_disk_read_bytes counter
-tako_disk_read_bytes{server="prod",host="95.216.194.236"} 5693440
+tako_disk_read_bytes{server="prod",host="203.0.113.10"} 5693440
 
 # HELP tako_disk_write_bytes Disk bytes written
 # TYPE tako_disk_write_bytes counter
-tako_disk_write_bytes{server="prod",host="95.216.194.236"} 49008640
+tako_disk_write_bytes{server="prod",host="203.0.113.10"} 49008640
 ```
 
 **✅ Verified System Metrics Exported:**
@@ -235,19 +235,19 @@ tako_disk_write_bytes{server="prod",host="95.216.194.236"} 49008640
 ```
 # HELP tako_container_cpu_usage_percent Container CPU usage percentage
 # TYPE tako_container_cpu_usage_percent gauge
-tako_container_cpu_usage_percent{server="prod",host="95.216.194.236",container="nextjs-todos_production_app.1.aby9dpj5tcr8h23dhup46xrn9"} 0.00
+tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="nextjs-todos_production_app.1.aby9dpj5tcr8h23dhup46xrn9"} 0.00
 
 # HELP tako_container_memory_used_bytes Container memory usage in bytes
 # TYPE tako_container_memory_used_bytes gauge
-tako_container_memory_used_bytes{server="prod",host="95.216.194.236",container="nextjs-todos_production_app.1.aby9dpj5tcr8h23dhup46xrn9"} 40527462
+tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="nextjs-todos_production_app.1.aby9dpj5tcr8h23dhup46xrn9"} 40527462
 
 # HELP tako_container_memory_limit_bytes Container memory limit in bytes
 # TYPE tako_container_memory_limit_bytes gauge
-tako_container_memory_limit_bytes{server="prod",host="95.216.194.236",container="nextjs-todos_production_app.1.aby9dpj5tcr8h23dhup46xrn9"} 4005057003
+tako_container_memory_limit_bytes{server="prod",host="203.0.113.10",container="nextjs-todos_production_app.1.aby9dpj5tcr8h23dhup46xrn9"} 4005057003
 
 # HELP tako_container_memory_usage_percent Container memory usage percentage
 # TYPE tako_container_memory_usage_percent gauge
-tako_container_memory_usage_percent{server="prod",host="95.216.194.236",container="nextjs-todos_production_app.1.aby9dpj5tcr8h23dhup46xrn9"} 1.01
+tako_container_memory_usage_percent{server="prod",host="203.0.113.10",container="nextjs-todos_production_app.1.aby9dpj5tcr8h23dhup46xrn9"} 1.01
 ```
 
 **✅ Verified Container Metrics Exported:**
@@ -268,18 +268,18 @@ tako_container_memory_usage_percent{server="prod",host="95.216.194.236",containe
 **Sample Container Metrics:**
 ```
 # postgres container
-tako_container_cpu_usage_percent{server="prod",host="95.216.194.236",container="fullstack_production_postgres.1.ljmlwn48ubxpmb1lttltc59d7"} 0.00
-tako_container_memory_used_bytes{server="prod",host="95.216.194.236",container="fullstack_production_postgres.1.ljmlwn48ubxpmb1lttltc59d7"} 20468203
+tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_postgres.1.ljmlwn48ubxpmb1lttltc59d7"} 0.00
+tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="fullstack_production_postgres.1.ljmlwn48ubxpmb1lttltc59d7"} 20468203
 
 # redis container
-tako_container_cpu_usage_percent{server="prod",host="95.216.194.236",container="fullstack_production_redis.1.8n67aw7evq22q3j16civ6yqhx"} 0.84
-tako_container_memory_used_bytes{server="prod",host="95.216.194.236",container="fullstack_production_redis.1.8n67aw7evq22q3j16civ6yqhx"} 3403677
+tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_redis.1.8n67aw7evq22q3j16civ6yqhx"} 0.84
+tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="fullstack_production_redis.1.8n67aw7evq22q3j16civ6yqhx"} 3403677
 
 # api replica 1
-tako_container_memory_used_bytes{server="prod",host="95.216.194.236",container="fullstack_production_api.1.vxg0gd93vlkycfzb6twfgh7q6"} 25260195
+tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="fullstack_production_api.1.vxg0gd93vlkycfzb6twfgh7q6"} 25260195
 
 # api replica 2
-tako_container_memory_used_bytes{server="prod",host="95.216.194.236",container="fullstack_production_api.2.saca39ppgx2x8pjxd8yy0mlvy"} 25102909
+tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="fullstack_production_api.2.saca39ppgx2x8pjxd8yy0mlvy"} 25102909
 ```
 
 **✅ Verified:**

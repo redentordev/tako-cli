@@ -38,7 +38,7 @@ Edit `.env`:
 
 ```bash
 # Your server IP
-SERVER_HOST=95.216.194.236
+SERVER_HOST=203.0.113.10
 
 # Email for SSL certificate
 LETSENCRYPT_EMAIL=your-email@example.com
@@ -72,7 +72,7 @@ After deployment, access Ghost at:
 https://ghost.<your-server-ip>.sslip.io
 ```
 
-Example: `https://ghost.95.216.194.236.sslip.io`
+Example: `https://ghost.203.0.113.10.sslip.io`
 
 ### First-Time Setup
 

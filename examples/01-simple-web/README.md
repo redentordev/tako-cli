@@ -27,7 +27,7 @@ cp .env.example .env
 
 ```bash
 # .env
-SERVER_HOST=95.216.194.236  # Replace with your actual server IP
+SERVER_HOST=203.0.113.10  # Replace with your actual server IP
 LETSENCRYPT_EMAIL=you@example.com  # Your email for SSL certificates
 ```
 
@@ -43,9 +43,9 @@ tako deploy
 
 That's it! Your app will be live at:
 ```
-https://simple-web.95.216.194.236.sslip.io
+https://simple-web.203.0.113.10.sslip.io
 ```
-(Replace `95.216.194.236` with your server IP)
+(Replace `203.0.113.10` with your server IP)
 
 ## What Gets Deployed
 
@@ -136,7 +136,7 @@ Instead of `sslip.io`, use your own domain:
 
 1. Point your domain's A record to your server IP:
    ```
-   app.example.com → 95.216.194.236
+   app.example.com → 203.0.113.10
    ```
 
 2. Update `tako.yaml`:
