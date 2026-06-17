@@ -2,6 +2,7 @@ package takod
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -762,6 +763,18 @@ func TestTakodCommandHelper(t *testing.T) {
 			if missing != "" && commandArgs[2] == missing {
 				_, _ = os.Stderr.WriteString("No such network")
 				os.Exit(1)
+			}
+			if byNameRaw := os.Getenv("TAKO_FAKE_NETWORK_INSPECT_LABELS_BY_NAME"); byNameRaw != "" {
+				byName := make(map[string]string)
+				if err := json.Unmarshal([]byte(byNameRaw), &byName); err != nil {
+					os.Exit(2)
+				}
+				_, _ = os.Stdout.WriteString(byName[commandArgs[2]])
+				os.Exit(0)
+			}
+			if output := os.Getenv("TAKO_FAKE_NETWORK_INSPECT_LABELS"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+				os.Exit(0)
 			}
 		}
 		if len(commandArgs) > 1 && commandArgs[1] == "ls" {

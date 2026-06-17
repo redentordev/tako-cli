@@ -77,8 +77,9 @@ as `backend-api-production-api`; consumers declare `imports: [backend-api.api]`
 and are attached only to that exported service network. This keeps non-exported
 services in the provider project network private. Export networks are labeled
 with `tako.discovery=export`, app, environment, service, and alias metadata so
-future discovery tooling can inspect Docker state without guessing from network
-names.
+operators can run `tako discovery exports` without guessing from network names.
+This is an inspection path, not mesh DNS/SRV; consumers still opt in with
+explicit `imports: [project.service]`.
 
 The operational rule is the same as SST's app/stage model: keep app names
 stable and unique per product, and use environments as stages such as
@@ -373,6 +374,8 @@ Done:
     handling is implemented.
 16. `tako state forget-node` explicitly prunes retired nodes from replicated
     runtime state.
+17. `tako discovery exports` lists exported service records from reachable
+    nodes.
 
 Next:
 1. Add distributed certificate handling for multi-edge deployments.
