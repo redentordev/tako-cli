@@ -452,6 +452,117 @@ environments:
 	}
 }
 
+func TestStateSyncRecommendationReportsSyncedState(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	lines := stateSyncRecommendation(
+		true,
+		&localstate.DeploymentState{
+			DeploymentID: "deploy-new",
+			Timestamp:    base,
+		},
+		stateHistoryCandidate{
+			source:  "node-a",
+			history: remoteHistory(base, remoteDeployment("deploy-new", base, "demo:v1")),
+		},
+		true,
+	)
+
+	output := strings.Join(lines, "\n")
+	if !strings.Contains(output, "No state pull needed.") {
+		t.Fatalf("recommendation = %q, want no-pull guidance", output)
+	}
+	if strings.Contains(output, "Run 'tako state pull'") {
+		t.Fatalf("recommendation = %q, should not suggest pull when local matches remote", output)
+	}
+}
+
+func TestStateSyncRecommendationReportsStaleLocalState(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	lines := stateSyncRecommendation(
+		true,
+		&localstate.DeploymentState{
+			DeploymentID: "deploy-old",
+			Timestamp:    base,
+		},
+		stateHistoryCandidate{
+			source:  "node-b",
+			history: remoteHistory(base.Add(time.Hour), remoteDeployment("deploy-new", base.Add(time.Hour), "demo:v2")),
+		},
+		true,
+	)
+
+	output := strings.Join(lines, "\n")
+	for _, want := range []string{"Remote deployment history from node-b is newer", "Run 'tako state pull'"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("recommendation = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestStateSyncRecommendationReportsLocalStateNewerThanRemote(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	lines := stateSyncRecommendation(
+		true,
+		&localstate.DeploymentState{
+			DeploymentID: "deploy-local",
+			Timestamp:    base.Add(time.Hour),
+		},
+		stateHistoryCandidate{
+			source:  "node-a",
+			history: remoteHistory(base, remoteDeployment("deploy-remote", base, "demo:v1")),
+		},
+		true,
+	)
+
+	output := strings.Join(lines, "\n")
+	for _, want := range []string{"Local deployment records are newer", "Check mesh reachability before pulling state."} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("recommendation = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestStateSyncRecommendationHandlesMissingLocalState(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	lines := stateSyncRecommendation(
+		false,
+		nil,
+		stateHistoryCandidate{
+			source:  "node-a",
+			history: remoteHistory(base, remoteDeployment("deploy-new", base, "demo:v1")),
+		},
+		true,
+	)
+
+	output := strings.Join(lines, "\n")
+	for _, want := range []string{"Local state is missing.", "Remote deployment history is available from node-a.", "Run 'tako state pull'"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("recommendation = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestStateSyncRecommendationHandlesExistingLocalStateWithoutRemoteHistory(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	lines := stateSyncRecommendation(
+		true,
+		&localstate.DeploymentState{
+			DeploymentID: "deploy-local",
+			Timestamp:    base,
+		},
+		stateHistoryCandidate{},
+		false,
+	)
+
+	output := strings.Join(lines, "\n")
+	if !strings.Contains(output, "local deployment records are the best known copy") {
+		t.Fatalf("recommendation = %q, want best-known local guidance", output)
+	}
+	if strings.Contains(output, "Run 'tako state pull'") {
+		t.Fatalf("recommendation = %q, should not suggest pull without remote history", output)
+	}
+}
+
 func TestBestDeploymentHistoryPrefersFreshestLastUpdated(t *testing.T) {
 	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	older := remoteHistory(base, remoteDeployment("old", base, "demo:v1"))
