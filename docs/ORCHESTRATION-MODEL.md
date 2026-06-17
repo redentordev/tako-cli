@@ -106,6 +106,11 @@ mesh:
   natTraversal: true
 ```
 
+`remoteCacheEnabled` must remain `true` in the current model. Local `.tako`
+files are a cache; deployment history and runtime revisions have to be
+replicated to `takod` so another laptop or CI runner can reconcile from the same
+state.
+
 During runtime preparation, Tako installs WireGuard tools when missing, creates a
 stable node key under `/etc/tako/wireguard`, writes `/etc/wireguard/tako.conf`,
 and brings up `wg-quick@tako`. One-node deployments still get the same

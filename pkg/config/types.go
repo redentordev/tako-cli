@@ -73,7 +73,7 @@ type StateConfig struct {
 	Backend            string `yaml:"backend,omitempty" json:"backend,omitempty"`                       // replicated
 	DeployConsistency  string `yaml:"deployConsistency,omitempty" json:"deployConsistency,omitempty"`   // lease
 	OnUnreachableNode  string `yaml:"onUnreachableNode,omitempty" json:"onUnreachableNode,omitempty"`   // block
-	RemoteCacheEnabled bool   `yaml:"remoteCacheEnabled,omitempty" json:"remoteCacheEnabled,omitempty"` // replicate deployment history to nodes
+	RemoteCacheEnabled *bool  `yaml:"remoteCacheEnabled,omitempty" json:"remoteCacheEnabled,omitempty"` // must be true
 }
 
 // VolumeConfig defines a named service volume configuration.
@@ -510,6 +510,14 @@ func (c *Config) GetOnUnreachableNode() string {
 		return StateUnreachableBlock
 	}
 	return c.State.OnUnreachableNode
+}
+
+// IsRemoteCacheEnabled returns whether deployment history is replicated to takod.
+func (c *Config) IsRemoteCacheEnabled() bool {
+	if c.State == nil || c.State.RemoteCacheEnabled == nil {
+		return true
+	}
+	return *c.State.RemoteCacheEnabled
 }
 
 // GetRegistryURL returns the auto-configured local registry URL
