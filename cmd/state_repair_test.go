@@ -8,6 +8,7 @@ import (
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
 func TestAcquireStateRepairLeasesWithRunsConcurrently(t *testing.T) {
@@ -172,6 +173,52 @@ func TestWriteStateRepairDocumentsFailsWhenAnyReachableHistoryWriteFails(t *test
 	}
 }
 
+func TestWriteStateRepairDocumentsDeletesStaleNodeActual(t *testing.T) {
+	runtime := &recordingStateRepairRuntime{
+		previousActual: &takodstate.ActualSnapshot{
+			Project:     "demo",
+			Environment: "production",
+			TargetNodes: []string{"node-a", "node-b"},
+			Nodes: map[string]takodstate.ActualNodeSnapshot{
+				"node-b": {Node: "node-b"},
+			},
+			CapturedAt: time.Now().UTC().Add(-time.Hour),
+		},
+	}
+	nodes := []stateRepairNode{
+		{name: "node-a", runtime: runtime},
+	}
+	currentActual := &takodstate.ActualSnapshot{
+		Project:     "demo",
+		Environment: "production",
+		TargetNodes: []string{"node-a"},
+		Services:    map[string]takodstate.ActualService{},
+		CapturedAt:  time.Now().UTC(),
+	}
+
+	_, _, actualWritten, nodeActualWritten, err := writeStateRepairDocuments(
+		nodes,
+		stateHistoryCandidate{},
+		false,
+		stateDesiredCandidate{},
+		false,
+		stateActualCandidate{actual: currentActual},
+		true,
+		map[string]stateNodeActualCandidate{
+			"node-a": {node: "node-a", actual: nodeActualSnapshot("node-a", time.Now().UTC(), "web")},
+		},
+	)
+	if err != nil {
+		t.Fatalf("writeStateRepairDocuments returned error: %v", err)
+	}
+	if actualWritten != 1 || nodeActualWritten != 1 {
+		t.Fatalf("actualWritten=%d nodeActualWritten=%d, want 1/1", actualWritten, nodeActualWritten)
+	}
+	if got, want := strings.Join(runtime.deleted, ","), "node-b"; got != want {
+		t.Fatalf("deleted stale node actual = %q, want %q", got, want)
+	}
+}
+
 func TestCloseStateRepairNodesUsesCleanupCallback(t *testing.T) {
 	cleaned := 0
 	closeStateRepairNodes([]stateRepairNode{
@@ -267,6 +314,35 @@ func (m *blockingHistoryRepairManager) AcquireLease(string, string, time.Duratio
 }
 
 func (m *blockingHistoryRepairManager) ReleaseLease(*remotestate.LeaseInfo) error {
+	return nil
+}
+
+type recordingStateRepairRuntime struct {
+	previousActual *takodstate.ActualSnapshot
+	deleted        []string
+}
+
+func (m *recordingStateRepairRuntime) ReadActual() (*takodstate.ActualSnapshot, error) {
+	if m.previousActual == nil {
+		return nil, takodstate.ErrNotFound
+	}
+	return m.previousActual, nil
+}
+
+func (m *recordingStateRepairRuntime) WriteDesired(*takodstate.DesiredRevision) error {
+	return nil
+}
+
+func (m *recordingStateRepairRuntime) WriteActual(*takodstate.ActualSnapshot) error {
+	return nil
+}
+
+func (m *recordingStateRepairRuntime) WriteNodeActual(string, *takodstate.ActualSnapshot) error {
+	return nil
+}
+
+func (m *recordingStateRepairRuntime) DeleteNodeActual(node string) error {
+	m.deleted = append(m.deleted, node)
 	return nil
 }
 

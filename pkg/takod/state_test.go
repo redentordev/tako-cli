@@ -95,6 +95,71 @@ func TestWriteAndReadNodeActualStateDocument(t *testing.T) {
 	}
 }
 
+func TestDeleteNodeActualStateDocument(t *testing.T) {
+	dataDir := t.TempDir()
+	request := StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentActualNode,
+		Node:        "node-a",
+		Content:     "{\"project\":\"demo\",\"environment\":\"production\",\"node\":\"node-a\"}\n",
+	}
+
+	if _, err := WriteStateDocument(context.Background(), dataDir, request); err != nil {
+		t.Fatalf("WriteStateDocument returned error: %v", err)
+	}
+
+	deleted, err := DeleteStateDocument(context.Background(), dataDir, StateDocumentRequest{
+		Project:     request.Project,
+		Environment: request.Environment,
+		Document:    request.Document,
+		Node:        request.Node,
+	})
+	if err != nil {
+		t.Fatalf("DeleteStateDocument returned error: %v", err)
+	}
+	if !deleted.Found {
+		t.Fatalf("expected delete response to report deleted document: %#v", deleted)
+	}
+
+	read, err := ReadStateDocument(context.Background(), dataDir, StateDocumentRequest{
+		Project:     request.Project,
+		Environment: request.Environment,
+		Document:    request.Document,
+		Node:        request.Node,
+	})
+	if err != nil {
+		t.Fatalf("ReadStateDocument returned error: %v", err)
+	}
+	if read.Found {
+		t.Fatalf("expected node actual document to be deleted: %#v", read)
+	}
+
+	deletedAgain, err := DeleteStateDocument(context.Background(), dataDir, StateDocumentRequest{
+		Project:     request.Project,
+		Environment: request.Environment,
+		Document:    request.Document,
+		Node:        request.Node,
+	})
+	if err != nil {
+		t.Fatalf("second DeleteStateDocument returned error: %v", err)
+	}
+	if deletedAgain.Found {
+		t.Fatalf("expected second delete to report missing document: %#v", deletedAgain)
+	}
+}
+
+func TestDeleteStateDocumentRejectsNonNodeActualDocument(t *testing.T) {
+	_, err := DeleteStateDocument(context.Background(), t.TempDir(), StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentActual,
+	})
+	if err == nil || !strings.Contains(err.Error(), "only actual-node") {
+		t.Fatalf("expected non-node delete rejection, got %v", err)
+	}
+}
+
 func TestNodeActualStateDocumentRequiresSafeNode(t *testing.T) {
 	_, err := WriteStateDocument(context.Background(), t.TempDir(), StateDocumentRequest{
 		Project:     "demo",

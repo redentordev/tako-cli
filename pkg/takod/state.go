@@ -94,6 +94,28 @@ func WriteStateDocument(ctx context.Context, dataDir string, req StateDocumentRe
 	return &StateDocumentResponse{Found: true, Content: req.Content, Path: path}, nil
 }
 
+func DeleteStateDocument(ctx context.Context, dataDir string, req StateDocumentRequest) (*StateDocumentResponse, error) {
+	if err := validateStateDocumentRequest(req, false); err != nil {
+		return nil, err
+	}
+	if req.Document != stateDocumentActualNode {
+		return nil, fmt.Errorf("only actual-node state documents can be deleted")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	path, err := stateDocumentPath(dataDir, req, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Remove(path); os.IsNotExist(err) {
+		return &StateDocumentResponse{Found: false, Path: path}, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to delete state document: %w", err)
+	}
+	return &StateDocumentResponse{Found: true, Path: path}, nil
+}
+
 func AppendStateEvent(ctx context.Context, dataDir string, req StateDocumentRequest) (*StateDocumentResponse, error) {
 	req.Document = stateDocumentEvent
 	if err := validateStateDocumentRequest(req, true); err != nil {

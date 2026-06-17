@@ -428,13 +428,46 @@ func TestHandleAcmeDNSCredentialsRejectsInvalidJSON(t *testing.T) {
 
 func TestHandleStateRequiresSupportedMethod(t *testing.T) {
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
-	req := httptest.NewRequest(http.MethodDelete, "/v1/state", nil)
+	req := httptest.NewRequest(http.MethodPatch, "/v1/state", nil)
 	recorder := httptest.NewRecorder()
 
 	server.handleState(recorder, req)
 
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", recorder.Code)
+	}
+}
+
+func TestHandleStateDeletesNodeActualDocument(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	writeBody := `{"project":"demo","environment":"production","document":"actual-node","node":"node-a","content":"{\"project\":\"demo\",\"environment\":\"production\",\"node\":\"node-a\"}\n"}`
+	writeReq := httptest.NewRequest(http.MethodPut, "/v1/state", bytes.NewBufferString(writeBody))
+	writeRecorder := httptest.NewRecorder()
+	server.handleState(writeRecorder, writeReq)
+	if writeRecorder.Code != http.StatusOK {
+		t.Fatalf("expected write 200, got %d: %s", writeRecorder.Code, writeRecorder.Body.String())
+	}
+
+	deleteBody := `{"project":"demo","environment":"production","document":"actual-node","node":"node-a"}`
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/state", bytes.NewBufferString(deleteBody))
+	deleteRecorder := httptest.NewRecorder()
+	server.handleState(deleteRecorder, deleteReq)
+	if deleteRecorder.Code != http.StatusOK {
+		t.Fatalf("expected delete 200, got %d: %s", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+
+	readReq := httptest.NewRequest(http.MethodGet, "/v1/state?project=demo&environment=production&document=actual-node&node=node-a", nil)
+	readRecorder := httptest.NewRecorder()
+	server.handleState(readRecorder, readReq)
+	if readRecorder.Code != http.StatusOK {
+		t.Fatalf("expected read 200, got %d: %s", readRecorder.Code, readRecorder.Body.String())
+	}
+	var response StateDocumentResponse
+	if err := json.NewDecoder(readRecorder.Body).Decode(&response); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if response.Found {
+		t.Fatalf("expected deleted node actual document to be missing: %#v", response)
 	}
 }
 

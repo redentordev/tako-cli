@@ -196,3 +196,35 @@ func TestStatePersistErrorAllowsSuccessfulResults(t *testing.T) {
 		t.Fatalf("expected successful results to return nil, got %v", err)
 	}
 }
+
+func TestStaleNodeActualNamesUsesPreviousAndCurrentNodeSets(t *testing.T) {
+	previous := &ActualSnapshot{
+		TargetNodes: []string{"node-c", "node-a", "node-b", "node-e"},
+		Nodes: map[string]ActualNodeSnapshot{
+			"node-d": {Node: "node-d"},
+			"node-a": {Node: "node-a"},
+		},
+	}
+	current := &ActualSnapshot{
+		TargetNodes: []string{"node-a"},
+		Nodes: map[string]ActualNodeSnapshot{
+			"node-e": {Node: "node-e"},
+		},
+	}
+	currentNodeActual := map[string]*ActualSnapshot{
+		"node-f": {Node: "node-f"},
+	}
+
+	stale := StaleNodeActualNames(previous, current, currentNodeActual)
+	if !slices.Equal(stale, []string{"node-b", "node-c", "node-d", "node-e"}) {
+		t.Fatalf("stale nodes = %#v, want node-b/node-c/node-d/node-e", stale)
+	}
+}
+
+func TestStaleNodeActualNamesDoesNotDeleteWithoutActiveNodeSet(t *testing.T) {
+	previous := &ActualSnapshot{TargetNodes: []string{"node-a"}}
+
+	if stale := StaleNodeActualNames(previous, nil, nil); len(stale) != 0 {
+		t.Fatalf("stale nodes = %#v, want none when current node set is unknown", stale)
+	}
+}

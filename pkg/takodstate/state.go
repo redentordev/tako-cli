@@ -303,6 +303,10 @@ func persistToServer(pool *ssh.Pool, cfg *config.Config, environment string, ser
 		return fmt.Errorf("failed to connect to %s for takod state persistence: %w", serverName, err)
 	}
 	manager := NewManager(client, cfg, environment)
+	previousActual, err := manager.ReadActual()
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("%s: failed to read previous actual state before pruning stale node state: %w", serverName, err)
+	}
 	if err := manager.WriteDesired(desired); err != nil {
 		return fmt.Errorf("%s: failed to write desired state: %w", serverName, err)
 	}
@@ -312,6 +316,11 @@ func persistToServer(pool *ssh.Pool, cfg *config.Config, environment string, ser
 	for nodeName, snapshot := range nodeActual {
 		if err := manager.WriteNodeActual(nodeName, snapshot); err != nil {
 			return fmt.Errorf("%s: failed to write actual state for node %s: %w", serverName, nodeName, err)
+		}
+	}
+	for _, staleNode := range StaleNodeActualNames(previousActual, actual, nodeActual) {
+		if err := manager.DeleteNodeActual(staleNode); err != nil {
+			return fmt.Errorf("%s: failed to delete stale actual state for node %s: %w", serverName, staleNode, err)
 		}
 	}
 	if err := manager.AppendEvent(event); err != nil {
@@ -328,6 +337,51 @@ func statePersistError(results []statePersistResult) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// StaleNodeActualNames returns previous node snapshots that are no longer active.
+func StaleNodeActualNames(previous *ActualSnapshot, current *ActualSnapshot, currentNodeActual map[string]*ActualSnapshot) []string {
+	if previous == nil {
+		return nil
+	}
+
+	active := make(map[string]struct{})
+	if current != nil {
+		for _, nodeName := range current.TargetNodes {
+			if nodeName != "" {
+				active[nodeName] = struct{}{}
+			}
+		}
+	}
+	for nodeName := range currentNodeActual {
+		if nodeName != "" {
+			active[nodeName] = struct{}{}
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+
+	previousNodes := make(map[string]struct{})
+	for _, nodeName := range previous.TargetNodes {
+		if nodeName != "" {
+			previousNodes[nodeName] = struct{}{}
+		}
+	}
+	for nodeName := range previous.Nodes {
+		if nodeName != "" {
+			previousNodes[nodeName] = struct{}{}
+		}
+	}
+
+	stale := make([]string, 0)
+	for nodeName := range previousNodes {
+		if _, ok := active[nodeName]; !ok {
+			stale = append(stale, nodeName)
+		}
+	}
+	sort.Strings(stale)
+	return stale
 }
 
 func (m *Manager) WriteDesired(revision *DesiredRevision) error {
@@ -367,6 +421,16 @@ func (m *Manager) WriteNodeActual(node string, snapshot *ActualSnapshot) error {
 		return err
 	}
 	return m.writeNodeDocument(stateDocumentNodeActual, node, content)
+}
+
+func (m *Manager) DeleteNodeActual(node string) error {
+	if node == "" {
+		return fmt.Errorf("node name is required")
+	}
+	request := m.documentRequest(stateDocumentNodeActual, "", "")
+	request.Node = node
+	_, err := takodclient.RequestJSON(m.client, m.socket, "DELETE", "/v1/state", request)
+	return err
 }
 
 func (m *Manager) ReadDesired() (*DesiredRevision, error) {
