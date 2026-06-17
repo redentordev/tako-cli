@@ -162,7 +162,9 @@ func validateRuntimeConfig(cfg *Config) error {
 	if cfg.State.OnUnreachableNode == "" {
 		cfg.State.OnUnreachableNode = StateUnreachableBlock
 	}
-	cfg.State.RemoteCacheEnabled = true
+	if cfg.State.RemoteCacheEnabled == nil {
+		cfg.State.RemoteCacheEnabled = boolPointer(true)
+	}
 
 	validStateBackends := map[string]bool{
 		StateBackendReplicated: true,
@@ -177,6 +179,10 @@ func validateRuntimeConfig(cfg *Config) error {
 
 	if cfg.State.OnUnreachableNode != StateUnreachableBlock {
 		return fmt.Errorf("state.onUnreachableNode must be block")
+	}
+
+	if !*cfg.State.RemoteCacheEnabled {
+		return fmt.Errorf("state.remoteCacheEnabled must be true")
 	}
 
 	return nil

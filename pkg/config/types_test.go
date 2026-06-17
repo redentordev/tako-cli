@@ -222,6 +222,7 @@ func TestValidateConfigDefaultsRequiredRuntimeBooleans(t *testing.T) {
 	cfg := validValidationConfig()
 	cfg.Runtime = &RuntimeConfig{Agent: &AgentConfig{}}
 	cfg.Mesh = &MeshConfig{ListenPort: 42420}
+	cfg.State = &StateConfig{}
 
 	if err := ValidateConfig(cfg); err != nil {
 		t.Fatalf("ValidateConfig returned error: %v", err)
@@ -231,6 +232,26 @@ func TestValidateConfigDefaultsRequiredRuntimeBooleans(t *testing.T) {
 	}
 	if cfg.Mesh.Enabled == nil || !*cfg.Mesh.Enabled {
 		t.Fatal("mesh should default to enabled")
+	}
+	if cfg.State.RemoteCacheEnabled == nil || !*cfg.State.RemoteCacheEnabled {
+		t.Fatal("remote cache should default to enabled")
+	}
+	if !cfg.IsRemoteCacheEnabled() {
+		t.Fatal("IsRemoteCacheEnabled should use the enabled default")
+	}
+}
+
+func TestValidateConfigRejectsDisabledRemoteCache(t *testing.T) {
+	cfg := validValidationConfig()
+	disabled := false
+	cfg.State = &StateConfig{RemoteCacheEnabled: &disabled}
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject disabled remote cache")
+	}
+	if !strings.Contains(err.Error(), "state.remoteCacheEnabled must be true") {
+		t.Fatalf("error = %q, want remote cache error", err)
 	}
 }
 
