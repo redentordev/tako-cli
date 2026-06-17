@@ -231,6 +231,9 @@ Expected result:
   fail-closed deploy posture.
 - Existing containers on the unreachable node keep serving their last accepted
   revision.
+- After a destroyed node is removed from the active environment config,
+  `tako state forget-node <node> --yes` prunes its replicated node snapshot from
+  reachable nodes before the next deploy.
 - After `takod` restarts, `state repair` and `deploy` succeed again.
 
 ## State Repair Flow

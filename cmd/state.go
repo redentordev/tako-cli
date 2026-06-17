@@ -84,6 +84,23 @@ the best available state before deploying.`,
 	RunE: runStateRepair,
 }
 
+var stateForgetNodeCmd = &cobra.Command{
+	Use:          "forget-node <node>",
+	Short:        "Remove a retired node from replicated runtime state",
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true,
+	Long: `Remove a retired or destroyed node from replicated runtime state.
+
+This command does not edit tako.yaml and does not touch application containers.
+It deletes the node-local actual snapshot for the named node and rewrites the
+aggregate actual snapshot without that node on every reachable environment node.
+
+Use this after removing a destroyed node from the active environment config, or
+pass --force when you intentionally need to forget a node that is still listed
+in the environment.`,
+	RunE: runStateForgetNode,
+}
+
 var stateLeaseCmd = &cobra.Command{
 	Use:          "lease",
 	Short:        "Show remote operation leases",
@@ -108,6 +125,8 @@ refuses to release a non-expired lease unless --force is set.`,
 var stateServer string
 var stateLeaseID string
 var stateLeaseForce bool
+var stateForgetNodeYes bool
+var stateForgetNodeForce bool
 
 var (
 	syncStateCollectDeploymentHistories = collectStateDeploymentHistoriesWithPool
@@ -122,6 +141,7 @@ func init() {
 	stateCmd.AddCommand(statePullCmd)
 	stateCmd.AddCommand(stateStatusCmd)
 	stateCmd.AddCommand(stateRepairCmd)
+	stateCmd.AddCommand(stateForgetNodeCmd)
 	stateCmd.AddCommand(stateLeaseCmd)
 	stateLeaseCmd.AddCommand(stateLeaseReleaseCmd)
 
@@ -130,6 +150,9 @@ func init() {
 	stateStatusCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Check status for a specific server instead of the full mesh")
 
 	stateRepairCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Prefer this server when acquiring the repair lease")
+	stateForgetNodeCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Write to a specific reachable server instead of the full mesh")
+	stateForgetNodeCmd.Flags().BoolVarP(&stateForgetNodeYes, "yes", "y", false, "Skip confirmation prompt")
+	stateForgetNodeCmd.Flags().BoolVar(&stateForgetNodeForce, "force", false, "Allow forgetting a node that is still listed in the active environment")
 
 	stateLeaseCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Show a specific server lease instead of the full mesh")
 	stateLeaseReleaseCmd.Flags().StringVarP(&stateServer, "server", "s", "", "Release a lease on a specific server instead of the full mesh")
@@ -848,6 +871,273 @@ func runStateRepair(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runStateForgetNode(cmd *cobra.Command, args []string) error {
+	nodeName := strings.TrimSpace(args[0])
+	if err := validateStateForgetNodeName(nodeName); err != nil {
+		return err
+	}
+
+	cfg, err := config.LoadConfig(cfgFile)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	envName := getEnvironmentName(cfg)
+	envServers, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	if stateNodeNameInList(envServers, nodeName) && !stateForgetNodeForce {
+		return fmt.Errorf("node %s is still listed in environment %s; remove it from tako.yaml first or rerun with --force", nodeName, envName)
+	}
+
+	if !stateForgetNodeYes {
+		confirmed, err := confirmDeployAction(
+			fmt.Sprintf("Forget node %q from replicated runtime state for %s? (y/N): ", nodeName, envName),
+			fmt.Sprintf("forget-node mutates replicated runtime state for node %q", nodeName),
+		)
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Println("State cleanup cancelled.")
+			return nil
+		}
+	}
+
+	fmt.Printf("Project: %s\n", cfg.Project.Name)
+	fmt.Printf("Environment: %s\n", envName)
+	fmt.Printf("Retired node: %s\n\n", nodeName)
+
+	pool := ssh.NewPool()
+	defer pool.CloseAll()
+
+	repair, err := collectStateRepairNodesWithPool(pool, cfg, envName, stateServer)
+	if err != nil {
+		return err
+	}
+	if len(repair.nodes) == 0 {
+		return fmt.Errorf("no reachable environment nodes found")
+	}
+
+	repairLeases, err := acquireStateForgetNodeLeases(repair.nodes, envName)
+	if err != nil {
+		return err
+	}
+	defer releaseStateRepairLeases(repairLeases, verbose)
+	if verbose {
+		fmt.Printf("Acquired state cleanup leases: %s\n", stateRepairLeaseSummary(repairLeases))
+	}
+
+	results, err := forgetNodeFromRepairNodes(repair.nodes, cfg.Project.Name, envName, nodeName)
+	if err != nil {
+		return err
+	}
+	printStateForgetNodeSummary(nodeName, results)
+	return nil
+}
+
+func forgetNodeFromRepairNodes(nodes []stateRepairNode, project string, envName string, nodeName string) ([]stateForgetNodeResult, error) {
+	results := make([]stateForgetNodeResult, len(nodes))
+	resultCh := make(chan stateForgetNodeIndexedResult, len(nodes))
+	for index, node := range nodes {
+		go func(index int, node stateRepairNode) {
+			result := forgetNodeOnRepairNode(node, project, envName, nodeName)
+			result.nodeName = node.name
+			resultCh <- stateForgetNodeIndexedResult{index: index, result: result}
+		}(index, node)
+	}
+
+	var fatalErrors []string
+	for range nodes {
+		indexed := <-resultCh
+		result := indexed.result
+		results[indexed.index] = result
+		if result.err != nil {
+			fatalErrors = append(fatalErrors, fmt.Sprintf("%s: %v", result.nodeName, result.err))
+		}
+	}
+	if len(fatalErrors) > 0 {
+		sort.Strings(fatalErrors)
+		return results, fmt.Errorf("failed to forget node %s: %s", nodeName, strings.Join(fatalErrors, "; "))
+	}
+	return results, nil
+}
+
+func forgetNodeOnRepairNode(node stateRepairNode, project string, envName string, nodeName string) stateForgetNodeResult {
+	result := stateForgetNodeResult{nodeName: node.name}
+	if node.runtime == nil {
+		result.err = fmt.Errorf("runtime state manager unavailable")
+		return result
+	}
+
+	if _, err := node.runtime.ReadNodeActual(nodeName); err == nil {
+		result.nodeActualExisted = true
+	} else if err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+		result.warnings = append(result.warnings, fmt.Sprintf("could not check existing node actual snapshot: %v", err))
+	}
+
+	actual, err := node.runtime.ReadActual()
+	if err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+		result.err = fmt.Errorf("failed to read aggregate actual state: %w", err)
+		return result
+	}
+	if err == nil {
+		pruned, changed := actualSnapshotWithoutNode(actual, nodeName)
+		if changed {
+			if err := node.runtime.WriteActual(pruned); err != nil {
+				result.err = fmt.Errorf("failed to write pruned aggregate actual state: %w", err)
+				return result
+			}
+			result.aggregatePruned = true
+		}
+	}
+
+	if err := node.runtime.DeleteNodeActual(nodeName); err != nil {
+		result.err = fmt.Errorf("failed to delete node actual snapshot: %w", err)
+		return result
+	}
+
+	event := takodstate.NewEvent(project, envName, "state_node_forgotten", "", fmt.Sprintf("Forgot node %s from replicated runtime state", nodeName), map[string]string{
+		"node": nodeName,
+	})
+	if err := node.runtime.AppendEvent(event); err != nil {
+		result.warnings = append(result.warnings, fmt.Sprintf("failed to append state cleanup event: %v", err))
+	}
+
+	return result
+}
+
+func actualSnapshotWithoutNode(snapshot *takodstate.ActualSnapshot, nodeName string) (*takodstate.ActualSnapshot, bool) {
+	if snapshot == nil {
+		return nil, false
+	}
+
+	targetNodes, targetChanged := removeStateNodeName(snapshot.TargetNodes, nodeName)
+	nodes, nodeChanged := removeActualEmbeddedNode(snapshot.Nodes, nodeName)
+	if !targetChanged && !nodeChanged {
+		return snapshot, false
+	}
+
+	pruned := *snapshot
+	pruned.TargetNodes = targetNodes
+	pruned.Nodes = nodes
+	pruned.Services = copyActualServices(snapshot.Services)
+	pruned.CapturedAt = time.Now().UTC()
+	return &pruned, true
+}
+
+func removeStateNodeName(nodes []string, nodeName string) ([]string, bool) {
+	if len(nodes) == 0 {
+		return nil, false
+	}
+	out := make([]string, 0, len(nodes))
+	changed := false
+	for _, node := range nodes {
+		if node == nodeName {
+			changed = true
+			continue
+		}
+		out = append(out, node)
+	}
+	if !changed {
+		return append([]string(nil), nodes...), false
+	}
+	return out, true
+}
+
+func removeActualEmbeddedNode(nodes map[string]takodstate.ActualNodeSnapshot, nodeName string) (map[string]takodstate.ActualNodeSnapshot, bool) {
+	if len(nodes) == 0 {
+		return nil, false
+	}
+	if _, ok := nodes[nodeName]; !ok {
+		return copyActualNodeSnapshots(nodes), false
+	}
+	out := make(map[string]takodstate.ActualNodeSnapshot, len(nodes)-1)
+	for node, snapshot := range nodes {
+		if node == nodeName {
+			continue
+		}
+		copied := snapshot
+		copied.Services = copyActualServices(snapshot.Services)
+		out[node] = copied
+	}
+	if len(out) == 0 {
+		return nil, true
+	}
+	return out, true
+}
+
+func copyActualServices(services map[string]takodstate.ActualService) map[string]takodstate.ActualService {
+	if services == nil {
+		return nil
+	}
+	out := make(map[string]takodstate.ActualService, len(services))
+	for serviceName, service := range services {
+		service.Containers = append([]string(nil), service.Containers...)
+		out[serviceName] = service
+	}
+	return out
+}
+
+func copyActualNodeSnapshots(nodes map[string]takodstate.ActualNodeSnapshot) map[string]takodstate.ActualNodeSnapshot {
+	if nodes == nil {
+		return nil
+	}
+	out := make(map[string]takodstate.ActualNodeSnapshot, len(nodes))
+	for nodeName, snapshot := range nodes {
+		copied := snapshot
+		copied.Services = copyActualServices(snapshot.Services)
+		out[nodeName] = copied
+	}
+	return out
+}
+
+func validateStateForgetNodeName(nodeName string) error {
+	if nodeName == "" {
+		return fmt.Errorf("node name is required")
+	}
+	for _, ch := range nodeName {
+		if (ch >= 'a' && ch <= 'z') ||
+			(ch >= 'A' && ch <= 'Z') ||
+			(ch >= '0' && ch <= '9') ||
+			ch == '-' ||
+			ch == '_' ||
+			ch == '.' {
+			continue
+		}
+		return fmt.Errorf("node name %q contains unsupported characters", nodeName)
+	}
+	if nodeName == "." || nodeName == ".." || strings.Contains(nodeName, "..") {
+		return fmt.Errorf("node name %q is not allowed", nodeName)
+	}
+	return nil
+}
+
+func printStateForgetNodeSummary(nodeName string, results []stateForgetNodeResult) {
+	pruned := 0
+	existed := 0
+	for _, result := range results {
+		if result.aggregatePruned {
+			pruned++
+		}
+		if result.nodeActualExisted {
+			existed++
+		}
+	}
+	fmt.Printf("\nForgot node %s from replicated state on %d reachable node(s).\n", nodeName, len(results))
+	fmt.Printf("Standalone node snapshot existed on %d node(s).\n", existed)
+	fmt.Printf("Aggregate actual state pruned on %d node(s).\n", pruned)
+	for _, result := range results {
+		for _, warning := range result.warnings {
+			fmt.Fprintf(os.Stderr, "Warning: %s: %s\n", result.nodeName, warning)
+		}
+	}
+	fmt.Println("\nNext:")
+	fmt.Println("  tako state status")
+	fmt.Println("  tako deploy --yes")
+}
+
 type takodRemoteStatus struct {
 	Runtime   string    `json:"runtime"`
 	Version   string    `json:"version"`
@@ -1493,10 +1783,12 @@ type stateRepairStateManager interface {
 
 type stateRepairRuntimeManager interface {
 	ReadActual() (*takodstate.ActualSnapshot, error)
+	ReadNodeActual(string) (*takodstate.ActualSnapshot, error)
 	WriteDesired(*takodstate.DesiredRevision) error
 	WriteActual(*takodstate.ActualSnapshot) error
 	WriteNodeActual(string, *takodstate.ActualSnapshot) error
 	DeleteNodeActual(string) error
+	AppendEvent(takodstate.Event) error
 }
 
 type stateRepairInventory struct {
@@ -1526,6 +1818,19 @@ type stateNodeActualCandidate struct {
 	source string
 	node   string
 	actual *takodstate.ActualSnapshot
+}
+
+type stateForgetNodeResult struct {
+	nodeName          string
+	nodeActualExisted bool
+	aggregatePruned   bool
+	warnings          []string
+	err               error
+}
+
+type stateForgetNodeIndexedResult struct {
+	index  int
+	result stateForgetNodeResult
 }
 
 func collectStateRepairNodes(cfg *config.Config, envName string, preferredServer string) (*stateRepairInventory, error) {
@@ -1661,10 +1966,18 @@ func closeStateRepairNodes(nodes []stateRepairNode) {
 }
 
 func acquireStateRepairLeases(nodes []stateRepairNode, envName string) ([]stateRepairLease, error) {
+	return acquireStateOperationLeases(nodes, envName, "state-repair")
+}
+
+func acquireStateForgetNodeLeases(nodes []stateRepairNode, envName string) ([]stateRepairLease, error) {
+	return acquireStateOperationLeases(nodes, envName, "state-forget-node")
+}
+
+func acquireStateOperationLeases(nodes []stateRepairNode, envName string, operation string) ([]stateRepairLease, error) {
 	return acquireStateRepairLeasesWith(nodes, func(node stateRepairNode) (stateRepairLease, error) {
-		lease, err := node.manager.AcquireLease("state-repair", envName, remotestate.DefaultLeaseTTL)
+		lease, err := node.manager.AcquireLease(operation, envName, remotestate.DefaultLeaseTTL)
 		if err != nil {
-			return stateRepairLease{}, fmt.Errorf("failed to acquire repair lease on %s: %w", node.name, err)
+			return stateRepairLease{}, fmt.Errorf("failed to acquire %s lease on %s: %w", operation, node.name, err)
 		}
 		return stateRepairLease{
 			serverName: node.name,

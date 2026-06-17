@@ -368,6 +368,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako state pull` | Sync remote deployment state into local `.tako/` |
 | `tako state status` | Compare local/remote state and show the remote lease |
 | `tako state repair` | Repair deployment and runtime state across reachable mesh nodes |
+| `tako state forget-node <node> --yes` | Prune a retired node from replicated runtime state |
 | `tako state lease` | Show remote operation leases across reachable nodes |
 | `tako state lease release --id <id> --force` | Release an exact stale remote lease |
 | `tako upgrade` | Upgrade Tako CLI to the latest version |

@@ -137,9 +137,10 @@ closed, but SSH should not hang for minutes. Use `TAKO_SSH_CONNECT_TIMEOUT` and
 `TAKO_SSH_CONNECT_TIMEOUT=8s TAKO_SSH_CONNECT_ATTEMPTS=1 tako state status`
 quickly proves which configured node is unreachable before running
 `tako state repair` against the surviving mesh. After the destroyed node is
-removed from `tako.yaml`, the next deploy or state repair rewrites the current
-target-node runtime state and prunes stale per-node actual snapshots for the
-removed node.
+removed from `tako.yaml`, run `tako state forget-node <node> --yes` to prune
+its replicated actual snapshot from reachable nodes before the next deploy. The
+next deploy or state repair also rewrites the current target-node runtime state
+and prunes stale per-node actual snapshots for removed nodes.
 
 If a CI deploy fails because the server agent is stale or missing features from
 the current CLI, run `tako upgrade servers --dry-run` to see each node's agent

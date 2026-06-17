@@ -321,7 +321,10 @@ desired revision, aggregate actual snapshot, and node-local actual snapshots
 back to the reachable mesh, and refreshes local `.tako` state when deployment
 history is available. When a node has been removed from the environment, deploy
 and state repair prune stale per-node actual snapshots for that node after the
-fresh target-node state is written.
+fresh target-node state is written. Operators can also run
+`tako state forget-node <node> --yes` after removing a destroyed node from
+`tako.yaml` to explicitly delete its standalone node snapshot and prune it from
+aggregate actual state on reachable nodes before the next deploy.
 
 ## CI/CD
 
@@ -368,6 +371,8 @@ Done:
 14. Build-image distribution is brokered by the CLI between node-local takod agents.
 15. Config validation blocks wildcard public hostnames until DNS-01 certificate
     handling is implemented.
+16. `tako state forget-node` explicitly prunes retired nodes from replicated
+    runtime state.
 
 Next:
 1. Add distributed certificate handling for multi-edge deployments.
