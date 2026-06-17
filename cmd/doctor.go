@@ -37,6 +37,7 @@ Checks performed:
   - Local state (.tako directory)
   - Local build inputs
   - Server connectivity (skip with --skip-remote)
+  - Server agent version (skip with --skip-remote)
   - Docker runtime and proxy runtime (skip with --skip-remote)
   - Replicated deployment/runtime state (skip with --skip-remote)
   - Running services (skip with --skip-remote)
@@ -113,6 +114,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Println("\n=== Server Connectivity ===")
 		clients := checkServerConnectivity(record, cfg, envName)
 
+		fmt.Println("\n=== Server Agent Version ===")
+		checkServerAgentVersion(record, cfg, clients)
+
 		fmt.Println("\n=== Docker Runtime ===")
 		checkDockerRuntime(record, clients)
 
@@ -135,6 +139,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		fmt.Println("\n=== Server Connectivity ===")
+		fmt.Println("  [SKIP] Skipped (--skip-remote)")
+		fmt.Println("\n=== Server Agent Version ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
 		fmt.Println("\n=== Docker Runtime ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
@@ -194,6 +200,67 @@ func dockerRuntimeValue(value string) string {
 		return "unknown"
 	}
 	return value
+}
+
+func checkServerAgentVersion(record func(checkResult), cfg *config.Config, clients map[string]*ssh.Client) {
+	if len(clients) == 0 {
+		record(checkResult{"SKIP", "No connected servers to check takod agent version", ""})
+		return
+	}
+
+	clientNames := make([]string, 0, len(clients))
+	for name := range clients {
+		clientNames = append(clientNames, name)
+	}
+	sort.Strings(clientNames)
+
+	checkServerAgentVersionWith(record, clientNames, Version, func(clientName string) (*takodRemoteStatus, error) {
+		return readTakodAgentStatus(clients[clientName], cfg)
+	})
+}
+
+func checkServerAgentVersionWith(record func(checkResult), clientNames []string, targetVersion string, probe func(string) (*takodRemoteStatus, error)) {
+	targetVersion = strings.TrimSpace(targetVersion)
+	if targetVersion == "" {
+		targetVersion = "unknown"
+	}
+
+	for _, clientName := range clientNames {
+		status, err := probe(clientName)
+		if err != nil {
+			record(checkResult{"FAIL", fmt.Sprintf("%s: Cannot read takod agent version: %v", clientName, err), "Run 'tako setup' or 'tako upgrade servers' before deploy"})
+			continue
+		}
+		if status == nil {
+			record(checkResult{"FAIL", fmt.Sprintf("%s: Cannot read takod agent version: empty status", clientName), "Run 'tako setup' or 'tako upgrade servers' before deploy"})
+			continue
+		}
+
+		currentVersion := strings.TrimSpace(status.Version)
+		if currentVersion == "" {
+			currentVersion = "unknown"
+		}
+		runtime := strings.TrimSpace(status.Runtime)
+		if runtime == "" {
+			runtime = "takod"
+		}
+		hostname := strings.TrimSpace(status.Hostname)
+		if hostname == "" {
+			hostname = clientName
+		}
+
+		if currentVersion == targetVersion {
+			record(checkResult{"PASS", fmt.Sprintf("%s: %s %s matches CLI %s on %s", clientName, runtime, currentVersion, targetVersion, hostname), ""})
+			continue
+		}
+
+		if cliVersionRequiresTakodBinary(targetVersion) {
+			record(checkResult{"WARN", fmt.Sprintf("%s: %s %s differs from development CLI %s on %s", clientName, runtime, currentVersion, targetVersion, hostname), "Run 'tako upgrade servers --takod-binary <linux-tako-binary>' before testing this CLI against servers"})
+			continue
+		}
+
+		record(checkResult{"FAIL", fmt.Sprintf("%s: %s %s differs from CLI %s on %s", clientName, runtime, currentVersion, targetVersion, hostname), "Run 'tako upgrade servers --dry-run', then 'tako upgrade servers'"})
+	}
 }
 
 type doctorBuildInputInfo struct {

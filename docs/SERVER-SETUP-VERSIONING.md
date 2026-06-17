@@ -76,8 +76,9 @@ the current setup version, setup still refreshes the takod binary and systemd
 service so runtime changes, including takod flags and background refresh
 behavior, are applied without needing a manifest bump.
 
-Use `tako upgrade servers` when you only need to patch stale server-side takod
-agents without rerunning the full setup path:
+Use `tako doctor` to surface stale or unavailable server-side takod agents in
+the normal health report. Use `tako upgrade servers` when you only need to patch
+those agents without rerunning the full setup path:
 
 ```bash
 tako upgrade servers --dry-run

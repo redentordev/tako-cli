@@ -57,9 +57,10 @@ shows that reachable nodes disagree on deployment history, desired runtime
 state, or actual runtime state.
 
 `tako doctor` is the quick diagnostic when a runner can reach the nodes but the
-state picture is unclear. Its `Replicated State` section reports deployment
-history, desired runtime, aggregate actual runtime, node-local actual snapshots,
-and the current remote operation lease from each reachable takod node.
+state picture is unclear. Its server-agent check reports stale or mismatched
+takod versions, and its `Replicated State` section reports deployment history,
+desired runtime, aggregate actual runtime, node-local actual snapshots, and the
+current remote operation lease from each reachable takod node.
 
 ## Required Secrets
 
@@ -152,12 +153,13 @@ its replicated actual snapshot from reachable nodes before the next deploy. The
 next deploy or state repair also rewrites the current target-node runtime state
 and prunes stale per-node actual snapshots for removed nodes.
 
-If a CI deploy fails because the server agent is stale or missing features from
-the current CLI, run `tako upgrade servers --dry-run` to see each node's agent
-version, then `tako upgrade servers` to install the matching release binary,
-restart `takod`, refresh `/etc/tako/version.json`, and verify `/v1/status`
-before deploying again. Development CLI builds must pass `--takod-binary` with a
-Linux binary because there is no release asset for `dev`.
+If `tako doctor` or a CI deploy reports that the server agent is stale or
+missing features from the current CLI, run `tako upgrade servers --dry-run` to
+see each node's agent version, then `tako upgrade servers` to install the
+matching release binary, restart `takod`, refresh `/etc/tako/version.json`, and
+verify `/v1/status` before deploying again. Development CLI builds must pass
+`--takod-binary` with a Linux binary because there is no release asset for
+`dev`.
 
 ## Proving the Workflow
 
