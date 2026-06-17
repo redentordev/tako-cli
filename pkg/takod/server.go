@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -132,6 +133,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/stats", s.handleStats)
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/access-logs", s.handleAccessLogs)
+	mux.HandleFunc("/v1/discovery/exports", s.handleDiscoveryExports)
 
 	httpServer := newTakodHTTPServer(mux)
 	s.mu.Lock()
@@ -984,6 +986,30 @@ func (s *Server) handleAccessLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+}
+
+func (s *Server) handleDiscoveryExports(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	environment := strings.TrimSpace(r.URL.Query().Get("environment"))
+	if environment != "" && !isSafeRuntimeName(environment) {
+		http.Error(w, "invalid environment name", http.StatusBadRequest)
+		return
+	}
+
+	response, err := ListExportDiscovery(r.Context(), environment)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
 }
 
 func (s *Server) Status() Status {

@@ -371,6 +371,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako state forget-node <node> --yes` | Prune a retired node from replicated runtime state |
 | `tako state lease` | Show remote operation leases across reachable nodes |
 | `tako state lease release --id <id> --force` | Release an exact stale remote lease |
+| `tako discovery exports` | List exported service discovery records on reachable nodes |
 | `tako upgrade` | Upgrade Tako CLI to the latest version |
 | `tako upgrade servers` | Upgrade and verify server-side takod agents to this CLI version |
 | `tako live` | Disable maintenance mode and restore service traffic |
@@ -591,7 +592,9 @@ does not expose that project's private services. Consumers declare
 `imports: [other-app.api]` and call the service through the readable DNS alias
 `other-app-production-api` in the same environment. Export networks carry
 `tako.discovery=export` labels with app, environment, service, and alias
-metadata for future service-discovery tooling.
+metadata. Use `tako discovery exports` to inspect those records on reachable
+nodes, or `tako discovery exports --all-environments --server <node>` when
+auditing a shared host.
 
 ### Secrets Management
 

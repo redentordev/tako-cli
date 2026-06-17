@@ -288,6 +288,15 @@ func AccessLogsEndpoint(tail int, follow bool) string {
 	return "/v1/access-logs?" + query.Encode()
 }
 
+func DiscoveryExportsEndpoint(environment string) string {
+	if strings.TrimSpace(environment) == "" {
+		return "/v1/discovery/exports"
+	}
+	query := url.Values{}
+	query.Set("environment", environment)
+	return "/v1/discovery/exports?" + query.Encode()
+}
+
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"
