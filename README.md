@@ -14,7 +14,7 @@ The CLI uses SSH for bootstrap and talks to a node-local `takod` agent for
 runtime work. `takod` owns Docker reconciliation, proxy config, WireGuard mesh
 state, remote leases, and replicated deployment state.
 
-[![Version](https://img.shields.io/badge/version-0.2.2-blue)](https://github.com/redentordev/tako-cli/releases)
+[![Version](https://img.shields.io/github/v/release/redentordev/tako-cli?label=version)](https://github.com/redentordev/tako-cli/releases)
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 [![Runtime](https://img.shields.io/badge/runtime-takod_mesh-blue)](https://github.com/redentordev/tako-cli)
@@ -45,7 +45,20 @@ runtime, state, mesh, and CI model.
 
 ### Installation
 
-#### Recommended: Direct Binary Install
+#### Recommended: Homebrew (macOS & Linux)
+
+```bash
+brew install redentordev/tako/tako
+```
+
+Or tap first:
+
+```bash
+brew tap redentordev/tako
+brew install tako
+```
+
+#### Direct Binary Install
 
 Download the release binary for your platform and install it onto your PATH:
 
@@ -56,24 +69,6 @@ rm /tmp/tako
 ```
 
 Use the manual section below for Linux ARM64, macOS, and Windows binaries.
-
-<details>
-<summary>📦 Homebrew (macOS & Linux)</summary>
-
-Coming soon! Homebrew tap is being prepared.
-
-```bash
-# This will be available soon
-brew tap redentordev/tako
-brew install tako
-```
-
-Benefits:
-- Automatic updates with `brew upgrade`
-- Managed dependencies
-- Trusted by developers worldwide
-
-</details>
 
 <details>
 <summary>🔧 Manual Installation</summary>
@@ -131,7 +126,7 @@ make install
 ```bash
 tako --version
 # Output:
-# Tako CLI v0.2.2
+# Tako CLI vX.Y.Z
 # Commit:  abc1234
 # Built:   2025-01-01T12:00:00Z
 ```
