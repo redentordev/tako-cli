@@ -237,16 +237,17 @@ func TestCleanupNetworksDisconnectsSharedProxyBeforeRemovingStageNetwork(t *test
 	defer restore()
 
 	target := runtimeid.NetworkName("demo", "production")
+	exportNetwork := runtimeid.ExportNetworkName("demo", "production", "api")
 	otherStage := runtimeid.NetworkName("demo", "preview")
 	otherProject := runtimeid.NetworkName("other", "production")
-	t.Setenv("TAKO_FAKE_NETWORK_LS_OUTPUT", strings.Join([]string{target, otherStage, otherProject}, "\n")+"\n")
+	t.Setenv("TAKO_FAKE_NETWORK_LS_OUTPUT", strings.Join([]string{target, exportNetwork, otherStage, otherProject}, "\n")+"\n")
 
 	removed, err := cleanupNetworks(context.Background(), "demo", "production")
 	if err != nil {
 		t.Fatalf("cleanupNetworks returned error: %v", err)
 	}
-	if removed != 1 {
-		t.Fatalf("removed = %d, want 1", removed)
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
 	}
 
 	entries := readCommandLog(t, logPath)
@@ -257,6 +258,10 @@ func TestCleanupNetworksDisconnectsSharedProxyBeforeRemovingStageNetwork(t *test
 	}
 	if !slices.Contains(entries, wantRemove) {
 		t.Fatalf("docker log missing network remove %q in %#v", wantRemove, entries)
+	}
+	wantExportRemove := "docker network rm " + exportNetwork
+	if !slices.Contains(entries, wantExportRemove) {
+		t.Fatalf("docker log missing export network remove %q in %#v", wantExportRemove, entries)
 	}
 	for _, entry := range entries {
 		if strings.Contains(entry, otherStage) || strings.Contains(entry, otherProject) {

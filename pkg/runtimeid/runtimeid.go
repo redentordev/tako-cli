@@ -46,6 +46,10 @@ func NetworkProjectPrefix(project string) string {
 	return strings.Join([]string{"tako", sanitizePart(project, "_")}, "_") + "_"
 }
 
+func NetworkEnvironmentPrefix(project string, environment string) string {
+	return strings.Join([]string{"tako", sanitizePart(project, "_"), sanitizePart(environment, "_")}, "_") + "_"
+}
+
 func VolumeName(project string, environment string, volume string) string {
 	return compactName("_", dockerNameMax, []string{"tako", project, environment, volume}, shortHash(project, environment, volume))
 }
