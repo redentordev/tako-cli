@@ -20,6 +20,7 @@ const (
 	privateKeyPath        = KeyDir + "/privatekey"
 	publicKeyPath         = KeyDir + "/publickey"
 	privateKeyPlaceholder = "__TAKO_PRIVATE_KEY__"
+	meshSysctlPath        = "/etc/sysctl.d/99-tako-mesh.conf"
 )
 
 type WireGuardConfig struct {
@@ -336,8 +337,10 @@ func wireGuardRoutedFirewallCommand(interfaceName string, currentNode string, pe
 
 	quotedIface := shellQuote(interfaceName)
 	commands := []string{
-		"command -v ufw >/dev/null 2>&1 || exit 0",
 		"sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true",
+		fmt.Sprintf("mkdir -p %s >/dev/null 2>&1 || true", shellQuote("/etc/sysctl.d")),
+		fmt.Sprintf("printf '%%s\\n' 'net.ipv4.ip_forward=1' > %s 2>/dev/null || true", shellQuote(meshSysctlPath)),
+		"command -v ufw >/dev/null 2>&1 || exit 0",
 	}
 	for _, peer := range filtered {
 		allowedIP, err := wireGuardAllowedIP(peer.Address)
