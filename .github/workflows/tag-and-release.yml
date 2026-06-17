@@ -72,6 +72,36 @@ jobs:
           sha256sum tako-* > checksums.txt
           cat checksums.txt
 
+      - name: Verify release assets
+        run: |
+          set -euo pipefail
+
+          VERSION=${{ steps.version.outputs.VERSION }}
+          GIT_COMMIT=$(git rev-parse --short HEAD)
+          expected_assets=(
+            tako-linux-amd64
+            tako-linux-arm64
+            tako-darwin-amd64
+            tako-darwin-arm64
+            tako-windows-amd64.exe
+          )
+
+          cd dist
+          for asset in "${expected_assets[@]}"; do
+            test -s "$asset"
+          done
+
+          printf '%s\n' "${expected_assets[@]}" | sort > expected-assets.txt
+          awk '{print $2}' checksums.txt | sort > checksum-assets.txt
+          diff -u expected-assets.txt checksum-assets.txt
+          sha256sum -c checksums.txt
+
+          chmod +x tako-linux-amd64
+          version_output=$(./tako-linux-amd64 --version)
+          echo "$version_output"
+          grep -F "Tako CLI $VERSION" <<<"$version_output"
+          grep -F "Commit:  $GIT_COMMIT" <<<"$version_output"
+
       - name: Get commit messages since last tag
         id: changelog
         run: |
