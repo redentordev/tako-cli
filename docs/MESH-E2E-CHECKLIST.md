@@ -45,6 +45,17 @@ Safe preflight:
 scripts/mesh-e2e.sh --app-dir /path/to/app --env production
 ```
 
+Public protocol proof against a deployed service:
+
+```bash
+scripts/mesh-e2e.sh \
+  --app-dir /path/to/app \
+  --env production \
+  --phases protocols \
+  --protocol-url https://app.example.com/health \
+  --websocket-url wss://app.example.com/socket
+```
+
 Standard mutating proof:
 
 ```bash
@@ -164,19 +175,32 @@ even when the local test client cannot negotiate HTTP/3.
 Run this against a public proxied service:
 
 ```bash
-curl --http1.1 -I https://<domain>
-curl --http2 -I https://<domain>
-curl -I https://<domain>
+scripts/mesh-e2e.sh \
+  --app-dir /path/to/app \
+  --env production \
+  --phases protocols \
+  --protocol-url https://<domain>/health
 ```
 
-If your client supports HTTP/3, also verify:
+The phase writes response headers and bodies to the harness log directory. It
+always verifies HTTP/1.1, HTTP/2, and HTTP/3 `Alt-Svc` advertisement. If the
+local `curl` supports `--http3`, it also makes an HTTP/3 request. Set
+`TAKO_E2E_HTTP3_REQUIRED=1` or pass `--http3-required` when a test runner must
+fail instead of skipping an HTTP/3 wire request.
+
+For WebSocket services, include the WebSocket URL:
 
 ```bash
-curl --http3 -I https://<domain>
+scripts/mesh-e2e.sh \
+  --app-dir /path/to/app \
+  --env production \
+  --phases protocols \
+  --protocol-url https://<domain>/health \
+  --websocket-url wss://<domain>/socket
 ```
 
-For WebSocket services, open the WebSocket endpoint through the public domain
-and refresh several times when using `loadBalancer.strategy: sticky`.
+For sticky replica behavior, inspect the saved protocol response bodies or run
+several requests with and without the sticky cookie.
 
 Expected result:
 
