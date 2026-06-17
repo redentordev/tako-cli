@@ -79,7 +79,7 @@ func (p *Provisioner) InstallDocker() error {
 			}
 			p.client.Execute("sudo systemctl start docker")
 		}
-		return nil
+		return p.VerifySupportedDockerRuntime()
 	}
 
 	if p.verbose {
@@ -119,7 +119,7 @@ func (p *Provisioner) InstallDocker() error {
 		return fmt.Errorf("docker daemon is not running: %w", err)
 	}
 
-	return nil
+	return p.VerifySupportedDockerRuntime()
 }
 
 func basePackageInstallScript() string {

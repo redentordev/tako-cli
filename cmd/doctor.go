@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/utils"
@@ -100,6 +101,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Println("\n=== Server Connectivity ===")
 		clients := checkServerConnectivity(record, cfg, envName)
 
+		fmt.Println("\n=== Docker Runtime ===")
+		checkDockerRuntime(record, clients)
+
 		// === Running Services ===
 		fmt.Println("\n=== Running Services ===")
 		checkRunningServices(record, cfg, envName, clients)
@@ -114,6 +118,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Println("\n=== Server Connectivity ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
+		fmt.Println("\n=== Docker Runtime ===")
+		fmt.Println("  [SKIP] Skipped (--skip-remote)")
 		fmt.Println("\n=== Running Services ===")
 		fmt.Println("  [SKIP] Skipped (--skip-remote)")
 		fmt.Println("\n=== External Volumes ===")
@@ -126,6 +132,46 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("doctor found %d issue(s)", failed)
 	}
 	return nil
+}
+
+func checkDockerRuntime(record func(checkResult), clients map[string]*ssh.Client) {
+	if len(clients) == 0 {
+		record(checkResult{"SKIP", "No connected servers to check Docker runtime", ""})
+		return
+	}
+
+	clientNames := make([]string, 0, len(clients))
+	for name := range clients {
+		clientNames = append(clientNames, name)
+	}
+	sort.Strings(clientNames)
+
+	checkDockerRuntimeWith(record, clientNames, func(clientName string) (*provisioner.DockerRuntimeInfo, error) {
+		return provisioner.DetectDockerRuntime(clients[clientName])
+	})
+}
+
+func checkDockerRuntimeWith(record func(checkResult), clientNames []string, probe func(string) (*provisioner.DockerRuntimeInfo, error)) {
+	for _, clientName := range clientNames {
+		info, err := probe(clientName)
+		if err != nil {
+			record(checkResult{"FAIL", fmt.Sprintf("%s: Docker runtime unsupported - %v", clientName, err), "Install/start rootful system Docker, then rerun 'tako setup'"})
+			continue
+		}
+		if info.Rootless {
+			record(checkResult{"FAIL", fmt.Sprintf("%s: Docker runtime is rootless", clientName), "Use rootful system Docker for remote takod nodes"})
+			continue
+		}
+		record(checkResult{"PASS", fmt.Sprintf("%s: Docker rootful daemon %s (root dir: %s)", clientName, dockerRuntimeValue(info.ServerVersion), dockerRuntimeValue(info.RootDir)), ""})
+	}
+}
+
+func dockerRuntimeValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func checkConfig(record func(checkResult)) (*config.Config, error) {

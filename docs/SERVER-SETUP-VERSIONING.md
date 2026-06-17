@@ -34,16 +34,24 @@ current provisioning path from scratch.
 1. Check Ubuntu/Debian requirements.
 2. Install or refresh system packages.
 3. Install and enable Docker.
-4. Install WireGuard tools.
-5. Configure UFW for SSH, HTTP, HTTPS, HTTP/3 UDP 443, the mesh listen port,
+4. Verify that rootful system Docker is reachable through `sudo docker info`.
+5. Install WireGuard tools.
+6. Configure UFW for SSH, HTTP, HTTPS, HTTP/3 UDP 443, the mesh listen port,
    routed peer mesh traffic, and persistent IPv4 forwarding for mesh routing.
-6. Apply host hardening and auto-recovery checks.
-7. Ensure the deploy user and monitoring agent.
-8. Install or reuse the server-side tako binary.
-9. Install and restart the takod systemd service with the configured node name
+7. Apply host hardening and auto-recovery checks.
+8. Ensure the deploy user and monitoring agent.
+9. Install or reuse the server-side tako binary.
+10. Install and restart the takod systemd service with the configured node name
    and node-local actual-state refresh interval.
-10. Write /etc/tako/version.json.
+11. Write /etc/tako/version.json.
 ```
+
+Remote deployment nodes currently require rootful system Docker because `takod`
+reconciles systemd, WireGuard, firewall rules, published ports, volumes, and the
+shared proxy. Rootless Docker can still be used for local build contexts when
+the active local Docker context supports normal `docker build`, `docker pull`,
+and `docker save`, but rootless remote server mode is blocked until it has a
+dedicated live proof.
 
 Released CLI builds download the matching Linux release asset for the server
 architecture and install it as `/usr/local/bin/tako`. The takod runtime is also
