@@ -296,7 +296,7 @@
           },
           "proxy": {
             "type": "object",
-            "description": "Environment-level public proxy settings",
+            "description": "Environment-level public proxy settings. Built-in ACME TLS requires placement to resolve to one proxy node until distributed certificate handling is implemented.",
             "properties": {
               "placement": {
                 "type": "object",

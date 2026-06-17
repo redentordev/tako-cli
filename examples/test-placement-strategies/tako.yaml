@@ -30,6 +30,11 @@ environments:
     servers:
       - node1
       - node2
+    proxy:
+      placement:
+        strategy: pinned
+        servers:
+          - node1
     services:
       web-default:
         image: nginx:alpine

@@ -501,6 +501,44 @@ func TestValidateConfigRejectsEnvironmentProxyPlacementOutsideEnvironment(t *tes
 	}
 }
 
+func TestValidateConfigRejectsAutomaticACMEOnMultipleProxyNodes(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Proxy = &ProxyConfig{Domain: "example.com"}
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject automatic ACME on multiple proxy nodes")
+	}
+	for _, want := range []string{"automatic ACME TLS", "one proxy node", "node-a, node-b", "environment.proxy.placement"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestValidateConfigAllowsAutomaticACMEWithSingleProxyPlacement(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Proxy = &ProxyConfig{Domain: "example.com"}
+	production.Services["web"] = web
+	production.Proxy = &EnvironmentProxyConfig{
+		Placement: &PlacementConfig{
+			Strategy: "pinned",
+			Servers:  []string{"node-a"},
+		},
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+}
+
 func TestValidateConfigRejectsUnsupportedLoadBalancerStrategy(t *testing.T) {
 	cfg := validValidationConfig()
 	production := cfg.Environments["production"]
@@ -544,6 +582,12 @@ func TestNormalizeProxyDomainRejectsRuleInjection(t *testing.T) {
 func TestValidateConfigTrimsProxyDomains(t *testing.T) {
 	cfg := validValidationConfig()
 	production := cfg.Environments["production"]
+	production.Proxy = &EnvironmentProxyConfig{
+		Placement: &PlacementConfig{
+			Strategy: "pinned",
+			Servers:  []string{"node-a"},
+		},
+	}
 	production.Services["web"] = ServiceConfig{
 		Image: "nginx:alpine",
 		Proxy: &ProxyConfig{

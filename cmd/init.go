@@ -293,7 +293,9 @@ environments:
   production:
     servers:
       - production
-    # Optional: keep public ingress on dedicated edge nodes in multi-node setups.
+    # Optional: keep public ingress on one edge node in multi-node setups.
+    # Built-in ACME TLS requires a single proxy node until distributed
+    # certificate handling is implemented.
     # proxy:
     #   placement:
     #     constraints:
@@ -426,6 +428,11 @@ environments:
 # environments:
 #   production:
 #     servers: [server1, server2]
+#     # Required for public services with built-in ACME TLS on multi-node setups.
+#     proxy:
+#       placement:
+#         strategy: pinned
+#         servers: [server1]
 #     services:
 #       web:
 #         build: .

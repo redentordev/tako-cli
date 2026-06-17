@@ -549,9 +549,11 @@ app/stage owns its own dynamic routes. Proxy upstreams target deterministic
 project/stage-scoped container aliases instead of generic service names like
 `web`, so unrelated projects can safely use the same service names on the same
 node. By default every selected environment node with public routes reconciles
-the shared proxy for that app/stage. To keep public ingress on dedicated edge
-nodes, set `environment.proxy.placement` with pinned servers or node-label
-constraints:
+the shared proxy for that app/stage. Built-in ACME TLS currently requires the
+proxy placement to resolve to one node, because distributed certificate
+issuance/storage is not implemented yet. To keep public ingress on a dedicated
+edge node, set `environment.proxy.placement` with a pinned server or node-label
+constraint:
 
 ```yaml
 servers:
