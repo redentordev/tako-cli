@@ -495,6 +495,75 @@ func TestStateSyncRecommendationReportsSyncedState(t *testing.T) {
 	}
 }
 
+func TestStateSyncRecommendationTreatsEquivalentDeploymentWithDifferentIDAsSynced(t *testing.T) {
+	base := time.Date(2026, 6, 17, 19, 31, 29, 0, time.UTC)
+	remote := remoteDeployment("1781724699", base, "demo:v1")
+	remote.GitCommitShort = "c08d8fc"
+
+	lines := stateSyncRecommendation(
+		true,
+		&localstate.DeploymentState{
+			DeploymentID: "deploy-20260617-123144",
+			Timestamp:    base,
+			Status:       "success",
+			GitCommit:    "c08d8fc1234567890",
+			Services: map[string]*localstate.ServiceDeploy{
+				"web": {
+					Image:    "demo:v1",
+					Replicas: 1,
+				},
+			},
+		},
+		stateHistoryCandidate{
+			source:  "node-a",
+			history: remoteHistory(base, remote),
+		},
+		true,
+		0,
+	)
+
+	output := strings.Join(lines, "\n")
+	if !strings.Contains(output, "different ID formats") {
+		t.Fatalf("recommendation = %q, want ID-format explanation", output)
+	}
+	if !strings.Contains(output, "No state pull needed.") {
+		t.Fatalf("recommendation = %q, want no-pull guidance", output)
+	}
+	if strings.Contains(output, "Run 'tako state pull'") {
+		t.Fatalf("recommendation = %q, should not suggest pull for equivalent deployment", output)
+	}
+}
+
+func TestStateSyncRecommendationTreatsMatchingCommitWithMissingServicesAsSynced(t *testing.T) {
+	base := time.Date(2026, 6, 17, 19, 31, 29, 0, time.UTC)
+	remote := remoteDeployment("1781724699", base, "demo:v1")
+	remote.GitCommit = "c08d8fcda4353183b3ecf7f23a5b0d6f0f8ee302"
+
+	lines := stateSyncRecommendation(
+		true,
+		&localstate.DeploymentState{
+			DeploymentID: "deploy-20260617-123144",
+			Timestamp:    base.Add(341 * time.Millisecond),
+			Status:       "success",
+			GitCommit:    "c08d8fcda4353183b3ecf7f23a5b0d6f0f8ee302",
+		},
+		stateHistoryCandidate{
+			source:  "node-a",
+			history: remoteHistory(base, remote),
+		},
+		true,
+		0,
+	)
+
+	output := strings.Join(lines, "\n")
+	if !strings.Contains(output, "No state pull needed.") {
+		t.Fatalf("recommendation = %q, want no-pull guidance", output)
+	}
+	if strings.Contains(output, "Run 'tako state pull'") {
+		t.Fatalf("recommendation = %q, should not suggest pull for matching commit with missing service details", output)
+	}
+}
+
 func TestStateSyncRecommendationReportsStaleLocalState(t *testing.T) {
 	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	lines := stateSyncRecommendation(
