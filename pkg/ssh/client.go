@@ -730,6 +730,19 @@ type StreamingSession struct {
 	Stderr  io.Reader
 }
 
+// Wait waits for the streaming command to finish.
+func (s *StreamingSession) Wait() error {
+	return s.WaitContext(context.Background())
+}
+
+// WaitContext waits for the streaming command to finish or for ctx to expire.
+func (s *StreamingSession) WaitContext(ctx context.Context) error {
+	if s.session == nil {
+		return nil
+	}
+	return waitSessionWithContext(ctx, s.session)
+}
+
 // Close closes the streaming session
 func (s *StreamingSession) Close() error {
 	if s.session != nil {

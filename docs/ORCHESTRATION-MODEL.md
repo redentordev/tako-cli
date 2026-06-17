@@ -164,6 +164,14 @@ on remote deployment nodes as experimental until the live mesh checklist proves
 setup, proxy ports, WireGuard routing, volumes, and service reconciliation on
 that host.
 
+For build-based services in a multi-node environment, Tako builds the image on
+the selected source node through that node's `takod` socket, then brokers a
+stream from the source node's `takod` image export endpoint into each peer
+node's `takod` image import endpoint over the CLI's existing SSH sessions. Peer
+nodes do not need the operator's private key on disk, and runtime Docker
+save/load still runs only inside node-local agents. This is full-image transfer;
+layer-delta peer distribution is still future work.
+
 ## Runtime Flow
 
 ```text
@@ -354,9 +362,11 @@ Done:
 11. Tag releases publish verified multi-arch Linux CLI images to GHCR.
 12. Environment proxy placement can limit public ingress to dedicated edge nodes.
 13. Config validation blocks unsafe multi-edge automatic ACME TLS.
+14. Build-image distribution is brokered by the CLI between node-local takod agents.
 
 Next:
 1. Add distributed certificate handling for multi-edge deployments.
 2. Evaluate background peer anti-entropy after the explicit repair workflow is proven.
-3. Expand e2e validation across one-node and multi-node meshes.
+3. Add layer-delta peer image distribution.
+4. Expand e2e validation across one-node and multi-node meshes.
 ```
