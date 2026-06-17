@@ -478,14 +478,14 @@
                 },
                 "export": {
                   "type": "boolean",
-                  "description": "Export service to other projects"
+                  "description": "Attach this service to a service-scoped export network for other projects"
                 },
                 "imports": {
                   "type": "array",
                   "items": {
                     "type": "string"
                   },
-                  "description": "Import services from other projects"
+                  "description": "Import services from other projects as project.service in the same environment"
                 }
               }
             }

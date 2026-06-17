@@ -170,8 +170,8 @@ type ServiceConfig struct {
 	Monitoring *MonitoringConfig `yaml:"monitoring,omitempty" json:"monitoring,omitempty"`
 
 	// Cross-project networking
-	Export  bool     `yaml:"export,omitempty" json:"export,omitempty"`   // Export this service to other projects
-	Imports []string `yaml:"imports,omitempty" json:"imports,omitempty"` // Import services from other projects (format: "project.service")
+	Export  bool     `yaml:"export,omitempty" json:"export,omitempty"`   // Attach this service to a service-scoped export network
+	Imports []string `yaml:"imports,omitempty" json:"imports,omitempty"` // Import same-environment services from other projects (format: "project.service")
 
 	// Placement configuration for takod scheduling.
 	Placement *PlacementConfig `yaml:"placement,omitempty" json:"placement,omitempty"` // Where to run service replicas

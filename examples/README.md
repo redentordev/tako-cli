@@ -181,7 +181,7 @@ Learn to create reusable backend services.
 
 Import services:
 - Consume services from other projects
-- Automatic network bridging
+- Service-scoped export network attachment
 - DNS-based service discovery
 - Seamless cross-project communication
 
@@ -272,7 +272,7 @@ services:
     imports:
       - backend-api.api  # Import from another project
     env:
-      API_URL: http://backend-api_api:4000  # DNS works!
+      API_URL: http://backend-api-production-api:4000  # {project}-{environment}-{service}
 ```
 
 ## Common Use Cases

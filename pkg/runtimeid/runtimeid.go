@@ -30,6 +30,14 @@ func ContainerAlias(project string, environment string, service string, slot int
 	return compactName("-", dockerNetworkMax, []string{"tako", project, environment, service, slotText}, shortHash(project, environment, service, slotText))
 }
 
+func ExportNetworkName(project string, environment string, service string) string {
+	return compactName("_", dockerNetworkMax, []string{"tako", project, environment, service, "export"}, shortHash(project, environment, service, "export"))
+}
+
+func ExportAlias(project string, environment string, service string) string {
+	return readableName("-", dockerNetworkMax, []string{project, environment, service}, shortHash(project, environment, service, "export-alias"))
+}
+
 func NetworkName(project string, environment string) string {
 	return compactName("_", dockerNetworkMax, []string{"tako", project, environment}, shortHash(project, environment))
 }
@@ -98,6 +106,44 @@ func compactName(separator string, maxLen int, parts []string, suffix string) st
 		prefix = prefix[:prefixBudget]
 	}
 	prefix = strings.Trim(prefix, separator)
+	if prefix == "" {
+		return suffix
+	}
+	return prefix + requiredSuffix
+}
+
+func readableName(separator string, maxLen int, parts []string, suffix string) string {
+	sanitized := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = sanitizePart(part, separator)
+		if part != "" {
+			sanitized = append(sanitized, part)
+		}
+	}
+	name := strings.Join(sanitized, separator)
+	name = strings.Trim(name, separator)
+	if name == "" {
+		name = sanitizePart(suffix, separator)
+	}
+	if name == "" {
+		name = "id"
+	}
+	if len(name) <= maxLen {
+		return name
+	}
+	suffix = sanitizePart(suffix, separator)
+	if suffix == "" {
+		suffix = shortHash(strings.Join(parts, "\x00"))
+	}
+	requiredSuffix := separator + suffix
+	prefixBudget := maxLen - len(requiredSuffix)
+	if prefixBudget <= 0 {
+		if len(suffix) <= maxLen {
+			return suffix
+		}
+		return suffix[:maxLen]
+	}
+	prefix := strings.Trim(name[:prefixBudget], separator)
 	if prefix == "" {
 		return suffix
 	}

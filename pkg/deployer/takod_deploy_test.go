@@ -327,6 +327,32 @@ func TestBuildTakodContainerSpecDoesNotPublishPublicOneNodeService(t *testing.T)
 	}
 }
 
+func TestBuildTakodNetworkAttachmentsUsesServiceScopedExportNetworks(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
+	deploy.config.Project.Name = "frontend"
+
+	got := deploy.buildTakodNetworkAttachments("web", &config.ServiceConfig{
+		Export:  true,
+		Imports: []string{"backend-api.api", "metrics.collector"},
+	})
+
+	if len(got) != 3 {
+		t.Fatalf("network attachments = %#v, want export plus two imports", got)
+	}
+	if got[0].Network != runtimeid.ExportNetworkName("frontend", "production", "web") || !got[0].Create {
+		t.Fatalf("export attachment = %#v, want created frontend web export network", got[0])
+	}
+	if len(got[0].Aliases) != 1 || got[0].Aliases[0] != runtimeid.ExportAlias("frontend", "production", "web") {
+		t.Fatalf("export aliases = %#v, want readable export alias", got[0].Aliases)
+	}
+	if got[1].Network != runtimeid.ExportNetworkName("backend-api", "production", "api") || got[1].Create {
+		t.Fatalf("first import attachment = %#v, want backend api import network", got[1])
+	}
+	if got[2].Network != runtimeid.ExportNetworkName("metrics", "production", "collector") || got[2].Create {
+		t.Fatalf("second import attachment = %#v, want metrics collector import network", got[2])
+	}
+}
+
 func TestBuildTakodContainerSpecPublishesPublicMultiNodeServiceOnMeshIP(t *testing.T) {
 	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production"}
 	env := deploy.config.Environments["production"]

@@ -342,7 +342,7 @@ environments:
         
         # Cross-project service imports
         # imports:
-        #   - other-project.postgres  # Import postgres from other-project
+        #   - other-project.postgres  # Provides other-project-production-postgres DNS
         
         # Export service to other projects
         # export: true

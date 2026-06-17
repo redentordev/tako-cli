@@ -71,6 +71,12 @@ not generic service DNS names. This matters because the shared proxy can be
 attached to several app networks at once; `web` may exist in many projects, but
 `tako-myapp-production-web-1-...` resolves to one intended upstream.
 
+Cross-project imports use a separate service-scoped export network. A service
+with `export: true` is attached to an export network with a readable alias such
+as `backend-api-production-api`; consumers declare `imports: [backend-api.api]`
+and are attached only to that exported service network. This keeps non-exported
+services in the provider project network private.
+
 The operational rule is the same as SST's app/stage model: keep app names
 stable and unique per product, and use environments as stages such as
 `production`, `staging`, or `preview`.

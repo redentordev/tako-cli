@@ -436,20 +436,21 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 	}
 
 	request := takod.ReconcileServiceRequest{
-		Project:         d.config.Project.Name,
-		Environment:     d.environment,
-		Service:         serviceName,
-		Image:           imageRef,
-		PullImage:       service.Image != "",
-		Restart:         service.Restart,
-		Network:         networkName,
-		NetworkAlias:    serviceName,
-		EnvFileContent:  envFileContent,
-		Mounts:          mounts,
-		Health:          d.buildTakodHealthSpec(service),
-		Command:         service.Command,
-		Labels:          serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
-		ExternalVolumes: externalVolumes,
+		Project:            d.config.Project.Name,
+		Environment:        d.environment,
+		Service:            serviceName,
+		Image:              imageRef,
+		PullImage:          service.Image != "",
+		Restart:            service.Restart,
+		Network:            networkName,
+		NetworkAlias:       serviceName,
+		NetworkAttachments: d.buildTakodNetworkAttachments(serviceName, service),
+		EnvFileContent:     envFileContent,
+		Mounts:             mounts,
+		Health:             d.buildTakodHealthSpec(service),
+		Command:            service.Command,
+		Labels:             serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
+		ExternalVolumes:    externalVolumes,
 	}
 	for _, slot := range slots {
 		meshPort := 0
@@ -467,6 +468,34 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 	}
 
 	return d.reconcileServiceViaTakod(client, request)
+}
+
+func (d *Deployer) buildTakodNetworkAttachments(serviceName string, service *config.ServiceConfig) []takod.NetworkAttachmentSpec {
+	attachments := make([]takod.NetworkAttachmentSpec, 0, 1+len(service.Imports))
+	if service.Export {
+		attachments = append(attachments, takod.NetworkAttachmentSpec{
+			Network: runtimeid.ExportNetworkName(d.config.Project.Name, d.environment, serviceName),
+			Aliases: []string{
+				runtimeid.ExportAlias(d.config.Project.Name, d.environment, serviceName),
+			},
+			Create: true,
+		})
+	}
+	for _, importSpec := range service.Imports {
+		project, importedService, ok := strings.Cut(importSpec, ".")
+		if !ok {
+			continue
+		}
+		project = strings.TrimSpace(project)
+		importedService = strings.TrimSpace(importedService)
+		if project == "" || importedService == "" {
+			continue
+		}
+		attachments = append(attachments, takod.NetworkAttachmentSpec{
+			Network: runtimeid.ExportNetworkName(project, d.environment, importedService),
+		})
+	}
+	return attachments
 }
 
 func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string, service *config.ServiceConfig, slot int, publishMeshUpstreams bool, meshPort int) (takod.ContainerSpec, error) {

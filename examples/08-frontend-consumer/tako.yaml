@@ -22,8 +22,8 @@ environments:
         env:
           NODE_ENV: production
           # DNS resolution automatically works for imported services
-          # Use the global export alias: {project}_{environment}_{service}
-          API_URL: http://backend-api_production_api:4000
+          # Use the readable export alias: {project}-{environment}-{service}
+          API_URL: http://backend-api-production-api:4000
         healthCheck:
           path: /health
           interval: 10s

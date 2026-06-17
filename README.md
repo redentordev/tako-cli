@@ -536,6 +536,12 @@ node. There is not yet a dedicated edge-node selector; every selected
 environment node with public routes reconciles the shared proxy for that
 app/stage.
 
+Services can opt into cross-project access with `export: true`. Tako attaches
+each exported service to its own export network, so importing another project
+does not expose that project's private services. Consumers declare
+`imports: [other-app.api]` and call the service through the readable DNS alias
+`other-app-production-api` in the same environment.
+
 ### Secrets Management
 
 ```yaml
