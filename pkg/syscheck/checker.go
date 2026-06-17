@@ -221,7 +221,20 @@ func (s *SystemChecker) CheckDocker() (bool, string) {
 		return true, "Docker daemon is running"
 	}
 
-	return false, "Docker daemon is not running. Please start Docker Desktop."
+	return false, dockerDaemonUnavailableMessage()
+}
+
+func dockerDaemonUnavailableMessage() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "Docker daemon is not running. Start Docker Desktop or Colima, then verify with `docker info`."
+	case "linux":
+		return "Docker daemon is not running. Start Docker, rootless Docker, or your configured Docker context, then verify with `docker info`."
+	case "windows":
+		return "Docker daemon is not running. Start Docker Desktop or your configured Docker context, then verify with `docker info`."
+	default:
+		return "Docker daemon is not running. Start your Docker-compatible daemon, then verify with `docker info`."
+	}
 }
 
 // InstallNixpacks installs Nixpacks based on the operating system
