@@ -36,7 +36,7 @@ current provisioning path from scratch.
 3. Install and enable Docker.
 4. Install WireGuard tools.
 5. Configure UFW for SSH, HTTP, HTTPS, HTTP/3 UDP 443, the mesh listen port,
-   and routed peer mesh traffic.
+   routed peer mesh traffic, and persistent IPv4 forwarding for mesh routing.
 6. Apply host hardening and auto-recovery checks.
 7. Ensure the deploy user and monitoring agent.
 8. Install or reuse the server-side tako binary.

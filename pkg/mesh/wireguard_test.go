@@ -217,12 +217,16 @@ func TestApplyLocalWithRunnerWritesConfigWithoutSudo(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"net.ipv4.ip_forward=1",
+		"/etc/sysctl.d/99-tako-mesh.conf",
 		"ufw route allow in on 'tako' from '10.210.0.2/32'",
 		"ufw route allow out on 'tako' to '10.210.0.2/32'",
 	} {
 		if !strings.Contains(routedFirewallCommand, expected) {
 			t.Fatalf("routed firewall command missing %q: %s", expected, routedFirewallCommand)
 		}
+	}
+	if strings.Index(routedFirewallCommand, "net.ipv4.ip_forward=1") > strings.Index(routedFirewallCommand, "command -v ufw") {
+		t.Fatalf("IPv4 forwarding should be enabled before optional UFW route rules: %s", routedFirewallCommand)
 	}
 	applyCommand := findCommandWithPrefix(runner.commands, "systemctl enable wg-quick@")
 	if applyCommand == "" {

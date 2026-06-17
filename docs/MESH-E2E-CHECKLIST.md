@@ -139,6 +139,8 @@ Expected result:
 - Proxy upstreams include healthy local and mesh-reachable service instances.
 - Host firewall rules allow the WireGuard listen UDP port and routed traffic to
   peer mesh /32 addresses on the Tako interface.
+- IPv4 forwarding is enabled live and persisted so mesh-to-Docker routing
+  survives host reboot.
 
 ## Proxy Protocol Flow
 
