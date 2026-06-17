@@ -28,22 +28,23 @@ const (
 )
 
 type ReconcileServiceRequest struct {
-	Project         string            `json:"project"`
-	Environment     string            `json:"environment"`
-	Service         string            `json:"service"`
-	Image           string            `json:"image"`
-	PullImage       bool              `json:"pullImage,omitempty"`
-	Restart         string            `json:"restart,omitempty"`
-	Network         string            `json:"network"`
-	NetworkAlias    string            `json:"networkAlias,omitempty"`
-	EnvFile         string            `json:"envFile,omitempty"`
-	EnvFileContent  string            `json:"envFileContent,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	Mounts          []string          `json:"mounts,omitempty"`
-	ExternalVolumes []string          `json:"externalVolumes,omitempty"`
-	Containers      []ContainerSpec   `json:"containers"`
-	Health          *HealthSpec       `json:"health,omitempty"`
-	Command         string            `json:"command,omitempty"`
+	Project            string                  `json:"project"`
+	Environment        string                  `json:"environment"`
+	Service            string                  `json:"service"`
+	Image              string                  `json:"image"`
+	PullImage          bool                    `json:"pullImage,omitempty"`
+	Restart            string                  `json:"restart,omitempty"`
+	Network            string                  `json:"network"`
+	NetworkAlias       string                  `json:"networkAlias,omitempty"`
+	NetworkAttachments []NetworkAttachmentSpec `json:"networkAttachments,omitempty"`
+	EnvFile            string                  `json:"envFile,omitempty"`
+	EnvFileContent     string                  `json:"envFileContent,omitempty"`
+	Labels             map[string]string       `json:"labels,omitempty"`
+	Mounts             []string                `json:"mounts,omitempty"`
+	ExternalVolumes    []string                `json:"externalVolumes,omitempty"`
+	Containers         []ContainerSpec         `json:"containers"`
+	Health             *HealthSpec             `json:"health,omitempty"`
+	Command            string                  `json:"command,omitempty"`
 }
 
 type RemoveServiceRequest struct {
@@ -56,6 +57,12 @@ type ContainerSpec struct {
 	Name           string   `json:"name"`
 	NetworkAliases []string `json:"networkAliases,omitempty"`
 	Publishes      []string `json:"publishes,omitempty"`
+}
+
+type NetworkAttachmentSpec struct {
+	Network string   `json:"network"`
+	Aliases []string `json:"aliases,omitempty"`
+	Create  bool     `json:"create,omitempty"`
 }
 
 type HealthSpec struct {
@@ -95,6 +102,7 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	if req.NetworkAlias == "" {
 		req.NetworkAlias = req.Service
 	}
+	req.NetworkAttachments = mergeNetworkAttachments(req.NetworkAttachments)
 
 	if len(req.Containers) == 0 {
 		removedContainers, err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service)
@@ -109,6 +117,9 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		}, nil
 	}
 	if err := ensureDockerNetwork(ctx, req.Network); err != nil {
+		return nil, err
+	}
+	if err := prepareNetworkAttachments(ctx, req.NetworkAttachments); err != nil {
 		return nil, err
 	}
 	if err := ensureServiceVolumes(ctx, req); err != nil {
@@ -141,6 +152,12 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 			return nil, err
 		}
 		started = append(started, container.Name)
+		if err := connectContainerNetworks(ctx, container.Name, req.NetworkAttachments); err != nil {
+			if cleanupErr := cleanupStartedContainers(started); cleanupErr != nil {
+				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
+			}
+			return nil, err
+		}
 		if err := waitForContainerHealthy(ctx, req.Network, container.Name, req.Health); err != nil {
 			if cleanupErr := cleanupStartedContainers(started); cleanupErr != nil {
 				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
@@ -203,6 +220,16 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	}
 	if req.NetworkAlias != "" && !isSafeRuntimeName(req.NetworkAlias) {
 		return fmt.Errorf("invalid network alias")
+	}
+	for _, attachment := range req.NetworkAttachments {
+		if !isSafeRuntimeName(attachment.Network) {
+			return fmt.Errorf("invalid network attachment")
+		}
+		for _, alias := range attachment.Aliases {
+			if !isSafeRuntimeName(alias) {
+				return fmt.Errorf("invalid network attachment alias")
+			}
+		}
 	}
 	if !isSafeRestartPolicy(req.Restart) {
 		return fmt.Errorf("invalid restart policy")
@@ -432,6 +459,73 @@ func ensureDockerNetwork(ctx context.Context, network string) error {
 		return fmt.Errorf("failed to ensure docker network %s: %w", network, err)
 	}
 	return nil
+}
+
+func prepareNetworkAttachments(ctx context.Context, attachments []NetworkAttachmentSpec) error {
+	for _, attachment := range attachments {
+		if attachment.Create {
+			if err := ensureDockerNetwork(ctx, attachment.Network); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := runDocker(ctx, "network", "inspect", attachment.Network); err != nil {
+			return fmt.Errorf("import network %s does not exist; deploy the exported provider service first", attachment.Network)
+		}
+	}
+	return nil
+}
+
+func connectContainerNetworks(ctx context.Context, containerName string, attachments []NetworkAttachmentSpec) error {
+	for _, attachment := range attachments {
+		args := []string{"network", "connect"}
+		for _, alias := range attachment.Aliases {
+			args = append(args, "--alias", alias)
+		}
+		args = append(args, attachment.Network, containerName)
+		if _, err := runDocker(ctx, args...); err != nil {
+			return fmt.Errorf("failed to connect container %s to network %s: %w", containerName, attachment.Network, err)
+		}
+	}
+	return nil
+}
+
+func mergeNetworkAttachments(attachments []NetworkAttachmentSpec) []NetworkAttachmentSpec {
+	byNetwork := make(map[string]*NetworkAttachmentSpec)
+	order := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		if attachment.Network == "" {
+			continue
+		}
+		existing := byNetwork[attachment.Network]
+		if existing == nil {
+			existing = &NetworkAttachmentSpec{
+				Network: attachment.Network,
+				Create:  attachment.Create,
+			}
+			byNetwork[attachment.Network] = existing
+			order = append(order, attachment.Network)
+		}
+		if attachment.Create {
+			existing.Create = true
+		}
+		seenAliases := make(map[string]bool, len(existing.Aliases))
+		for _, alias := range existing.Aliases {
+			seenAliases[alias] = true
+		}
+		for _, alias := range attachment.Aliases {
+			if alias == "" || seenAliases[alias] {
+				continue
+			}
+			existing.Aliases = append(existing.Aliases, alias)
+			seenAliases[alias] = true
+		}
+	}
+	merged := make([]NetworkAttachmentSpec, 0, len(order))
+	for _, network := range order {
+		merged = append(merged, *byNetwork[network])
+	}
+	return merged
 }
 
 func ensureServiceVolumes(ctx context.Context, req ReconcileServiceRequest) error {

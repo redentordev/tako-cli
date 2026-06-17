@@ -40,6 +40,35 @@ func TestContainerAliasIsDNSSafeAndCollisionResistant(t *testing.T) {
 	}
 }
 
+func TestExportAliasIsReadableAndDNSSafe(t *testing.T) {
+	alias := ExportAlias("backend-api", "production", "api")
+	if alias != "backend-api-production-api" {
+		t.Fatalf("export alias = %q, want readable project-environment-service alias", alias)
+	}
+	if strings.Contains(alias, "_") {
+		t.Fatalf("export alias %q should not contain underscores", alias)
+	}
+
+	longAlias := ExportAlias("very-long-provider-project-name", "production", "very-long-service-name")
+	if len(longAlias) > dockerNetworkMax {
+		t.Fatalf("export alias length = %d, want <= %d: %q", len(longAlias), dockerNetworkMax, longAlias)
+	}
+}
+
+func TestExportNetworkNameIsServiceScoped(t *testing.T) {
+	api := ExportNetworkName("backend-api", "production", "api")
+	db := ExportNetworkName("backend-api", "production", "database")
+	if api == db {
+		t.Fatalf("export networks should be service-scoped: %q", api)
+	}
+	if !strings.Contains(api, "export") {
+		t.Fatalf("export network should include export marker: %q", api)
+	}
+	if len(api) > dockerNetworkMax {
+		t.Fatalf("export network length = %d, want <= %d: %q", len(api), dockerNetworkMax, api)
+	}
+}
+
 func TestServiceIdentityAvoidsAmbiguousStageServiceCollision(t *testing.T) {
 	left := ServiceIdentity("demo", "prod_api", "web")
 	right := ServiceIdentity("demo", "prod", "api_web")

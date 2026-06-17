@@ -4,7 +4,7 @@ const app = express();
 const port = 3000;
 
 // Get API URL from environment variable (set in tako.yaml)
-const API_URL = process.env.API_URL || 'http://backend-api_api:4000';
+const API_URL = process.env.API_URL || 'http://backend-api-production-api:4000';
 
 app.use(express.json());
 

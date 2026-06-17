@@ -86,6 +86,18 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 
 	invalid = valid
+	invalid.NetworkAttachments = []NetworkAttachmentSpec{{Network: "bad/network"}}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe network attachment to be rejected")
+	}
+
+	invalid = valid
+	invalid.NetworkAttachments = []NetworkAttachmentSpec{{Network: "tako_backend_api_production_api_export", Aliases: []string{"bad/alias"}}}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe network attachment alias to be rejected")
+	}
+
+	invalid = valid
 	invalid.Containers = []ContainerSpec{{Name: "demo_production_web_1", Publishes: []string{"80:80\n--privileged"}}}
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe publish value to be rejected")
@@ -337,6 +349,75 @@ func TestReconcileServiceFailsMissingExternalVolumeBeforeRemovingContainers(t *t
 	for _, entry := range entries {
 		if strings.HasPrefix(entry, "docker ps -aq --filter label=tako.project=demo") || strings.HasPrefix(entry, "docker rm -f") {
 			t.Fatalf("missing external volume should fail before removing old containers; log %#v", entries)
+		}
+	}
+}
+
+func TestReconcileServiceCreatesAndConnectsExportNetworkAttachments(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_MISSING_NETWORK_INSPECT", "tako_backend_api_production_api_export")
+
+	_, err := ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:     "backend-api",
+		Environment: "production",
+		Service:     "api",
+		Image:       "registry.example.com/backend-api/api:abc",
+		Network:     "tako_backend_api_production",
+		NetworkAttachments: []NetworkAttachmentSpec{{
+			Network: "tako_backend_api_production_api_export",
+			Aliases: []string{
+				"backend-api-production-api",
+			},
+			Create: true,
+		}},
+		Containers: []ContainerSpec{{Name: "backend_api_production_api_1"}},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileService returned error: %v", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	for _, want := range []string{
+		"docker network inspect tako_backend_api_production_api_export",
+		"docker network create tako_backend_api_production_api_export",
+		"docker network connect --alias backend-api-production-api tako_backend_api_production_api_export backend_api_production_api_1",
+	} {
+		if !slices.Contains(entries, want) {
+			t.Fatalf("docker log missing %q in %#v", want, entries)
+		}
+	}
+}
+
+func TestReconcileServiceFailsMissingImportNetworkBeforeRemovingContainers(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_MISSING_NETWORK_INSPECT", "tako_backend_api_production_api_export")
+
+	_, err := ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:     "frontend",
+		Environment: "production",
+		Service:     "web",
+		Image:       "registry.example.com/frontend/web:abc",
+		Network:     "tako_frontend_production",
+		NetworkAttachments: []NetworkAttachmentSpec{{
+			Network: "tako_backend_api_production_api_export",
+		}},
+		Containers: []ContainerSpec{{Name: "frontend_production_web_1"}},
+	})
+	if err == nil {
+		t.Fatal("ReconcileService should fail for missing import network")
+	}
+	if !strings.Contains(err.Error(), "import network tako_backend_api_production_api_export does not exist") {
+		t.Fatalf("error = %q, want missing import network context", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry, "docker ps -aq --filter label=tako.project=frontend") || strings.HasPrefix(entry, "docker rm -f") {
+			t.Fatalf("missing import network should fail before removing old containers; log %#v", entries)
 		}
 	}
 }
@@ -662,6 +743,13 @@ func TestTakodCommandHelper(t *testing.T) {
 		}
 		os.Exit(0)
 	case "network":
+		if len(commandArgs) > 2 && commandArgs[1] == "inspect" {
+			missing := os.Getenv("TAKO_FAKE_MISSING_NETWORK_INSPECT")
+			if missing != "" && commandArgs[2] == missing {
+				_, _ = os.Stderr.WriteString("No such network")
+				os.Exit(1)
+			}
+		}
 		if len(commandArgs) > 1 && commandArgs[1] == "ls" {
 			if output := os.Getenv("TAKO_FAKE_NETWORK_LS_OUTPUT"); output != "" {
 				_, _ = os.Stdout.WriteString(output)
