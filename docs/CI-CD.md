@@ -73,6 +73,12 @@ servers:
 
 ## GitHub Actions
 
+The direct binary install below is the simplest runner path. Tako releases also
+publish `ghcr.io/redentordev/tako-cli:<version>` and `:latest` as multi-arch
+Linux images for AMD64 and ARM64 when you prefer a containerized CLI. Mount the
+checkout, SSH material, and Docker socket into that container before running
+`tako validate`, `tako upgrade servers`, or `tako deploy`.
+
 ```yaml
 name: Deploy
 

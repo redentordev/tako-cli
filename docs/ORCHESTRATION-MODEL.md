@@ -345,6 +345,7 @@ Done:
 8. Mutating operations acquire leases across their target nodes.
 9. Proxy setup supports HTTP/1.1, HTTP/2, HTTP/3, WebSocket traffic, and sticky sessions.
 10. `tako upgrade servers` explicitly patches stale server-side takod agents.
+11. Tag releases publish verified multi-arch Linux CLI images to GHCR.
 
 Next:
 1. Add a dedicated edge/proxy placement selector.

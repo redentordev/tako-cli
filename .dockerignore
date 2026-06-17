@@ -1,0 +1,13 @@
+.git
+.github
+.tmp
+goals
+bin
+dist
+coverage.out
+*.tmp
+*.tar.gz
+.DS_Store
+docs
+examples
+
