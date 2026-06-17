@@ -249,7 +249,7 @@ func cleanupNetworks(ctx context.Context, project string, environment string) (i
 			continue
 		}
 		if environment != "" {
-			if name == runtimeid.NetworkName(project, environment) {
+			if strings.HasPrefix(name, runtimeid.NetworkEnvironmentPrefix(project, environment)) {
 				names = append(names, name)
 			}
 			continue

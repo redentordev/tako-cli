@@ -109,6 +109,14 @@ func TestNetworkProjectPrefixMatchesSanitizedProjectName(t *testing.T) {
 	}
 }
 
+func TestNetworkEnvironmentPrefixMatchesSanitizedAppStage(t *testing.T) {
+	name := ExportNetworkName("demo-app", "production_1", "api")
+	prefix := NetworkEnvironmentPrefix("demo-app", "production_1")
+	if !strings.HasPrefix(name, prefix) {
+		t.Fatalf("network name %q should start with environment prefix %q", name, prefix)
+	}
+}
+
 func TestVolumePrefixesMatchSanitizedRuntimeNames(t *testing.T) {
 	name := VolumeName("demo-app", "production_1", "cache")
 	projectPrefix := VolumeProjectPrefix("demo-app")
