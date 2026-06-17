@@ -283,8 +283,15 @@ type MonitoringConfig struct {
 type EnvironmentConfig struct {
 	Servers        []string                 `yaml:"servers" json:"servers"`                                   // List of server names to use
 	ServerSelector *ServerSelector          `yaml:"serverSelector,omitempty" json:"serverSelector,omitempty"` // Label-based server selection
+	Proxy          *EnvironmentProxyConfig  `yaml:"proxy,omitempty" json:"proxy,omitempty"`                   // Environment-level proxy placement
 	Labels         map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`                 // Environment labels for nodes
 	Services       map[string]ServiceConfig `yaml:"services" json:"services"`                                 // Services to deploy in this environment
+}
+
+// EnvironmentProxyConfig controls where environment-level public proxy routes
+// are reconciled. Services still use their own placement for containers.
+type EnvironmentProxyConfig struct {
+	Placement *PlacementConfig `yaml:"placement,omitempty" json:"placement,omitempty"`
 }
 
 // ServerSelector defines label-based server selection
@@ -431,6 +438,30 @@ func (c *Config) GetEnvironmentServers(envName string) ([]string, error) {
 	}
 
 	return nil, fmt.Errorf("environment '%s' has no servers configured", envName)
+}
+
+// GetEnvironmentProxyServers returns the nodes that should reconcile public
+// proxy routes for an environment. Without an explicit environment proxy
+// placement, every selected environment server remains a proxy node.
+func (c *Config) GetEnvironmentProxyServers(envName string) ([]string, error) {
+	env, err := c.GetEnvironment(envName)
+	if err != nil {
+		return nil, err
+	}
+	environmentServers, err := c.GetEnvironmentServers(envName)
+	if err != nil {
+		return nil, err
+	}
+	return ResolveEnvironmentProxyTargets(env.Proxy, c.Servers, environmentServers, envName)
+}
+
+// ResolveEnvironmentProxyTargets applies environment proxy placement to the
+// selected environment node set.
+func ResolveEnvironmentProxyTargets(proxy *EnvironmentProxyConfig, servers map[string]ServerConfig, environmentServers []string, environment string) ([]string, error) {
+	if proxy == nil || proxy.Placement == nil {
+		return append([]string(nil), environmentServers...), nil
+	}
+	return ResolvePlacementTargets(proxy.Placement, servers, environmentServers, environment)
 }
 
 // matchesLabels checks if server labels match all selector labels

@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -213,6 +214,19 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		}
 	}
 
+	if env.Proxy != nil && env.Proxy.Placement != nil {
+		if err := ValidatePlacementConfig(env.Proxy.Placement); err != nil {
+			return fmt.Errorf("environment %s proxy placement: %w", envName, err)
+		}
+		environmentServers, err := environmentServerTargets(envName, env, cfg)
+		if err != nil {
+			return err
+		}
+		if _, err := ResolveEnvironmentProxyTargets(env.Proxy, cfg.Servers, environmentServers, envName); err != nil {
+			return fmt.Errorf("environment %s proxy placement: %w", envName, err)
+		}
+	}
+
 	// Validate services
 	if len(env.Services) == 0 {
 		return fmt.Errorf("environment %s: at least one service must be configured", envName)
@@ -232,6 +246,34 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 	}
 
 	return nil
+}
+
+func environmentServerTargets(envName string, env *EnvironmentConfig, cfg *Config) ([]string, error) {
+	if len(env.Servers) > 0 {
+		return append([]string(nil), env.Servers...), nil
+	}
+	if env.ServerSelector != nil {
+		if env.ServerSelector.Any {
+			servers := make([]string, 0, len(cfg.Servers))
+			for name := range cfg.Servers {
+				servers = append(servers, name)
+			}
+			sort.Strings(servers)
+			return servers, nil
+		}
+		var matched []string
+		for serverName, serverCfg := range cfg.Servers {
+			if matchesLabels(serverCfg.Labels, env.ServerSelector.Labels) {
+				matched = append(matched, serverName)
+			}
+		}
+		if len(matched) == 0 {
+			return nil, fmt.Errorf("no servers match the selector labels for environment '%s'", envName)
+		}
+		sort.Strings(matched)
+		return matched, nil
+	}
+	return nil, fmt.Errorf("environment %s: must specify either 'servers' or 'serverSelector'", envName)
 }
 
 func validateServer(name string, server *ServerConfig) error {

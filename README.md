@@ -548,9 +548,38 @@ node for HTTP on port 80, HTTPS on TCP 443, and HTTP/3 on UDP 443, while each
 app/stage owns its own dynamic routes. Proxy upstreams target deterministic
 project/stage-scoped container aliases instead of generic service names like
 `web`, so unrelated projects can safely use the same service names on the same
-node. There is not yet a dedicated edge-node selector; every selected
-environment node with public routes reconciles the shared proxy for that
-app/stage.
+node. By default every selected environment node with public routes reconciles
+the shared proxy for that app/stage. To keep public ingress on dedicated edge
+nodes, set `environment.proxy.placement` with pinned servers or node-label
+constraints:
+
+```yaml
+servers:
+  edge-1:
+    host: edge.example.com
+    user: deploy
+    labels:
+      role: edge
+  app-1:
+    host: app.example.com
+    user: deploy
+    labels:
+      role: app
+
+environments:
+  production:
+    servers: [edge-1, app-1]
+    proxy:
+      placement:
+        constraints:
+          - node.labels.role==edge
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: example.com
+```
 
 Services can opt into cross-project access with `export: true`. Tako attaches
 each exported service to its own export network, so importing another project

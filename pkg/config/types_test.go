@@ -454,6 +454,53 @@ func TestValidateConfigRejectsLoadBalancerHealthCheckPathWithoutSlash(t *testing
 	}
 }
 
+func TestValidateConfigAcceptsEnvironmentProxyPlacement(t *testing.T) {
+	cfg := validValidationConfig()
+	cfg.Servers["node-a"] = ServerConfig{Host: "10.0.0.1", User: "deploy", Password: "${SSH_PASSWORD}", Labels: map[string]string{"role": "edge"}}
+	cfg.Servers["node-b"] = ServerConfig{Host: "10.0.0.2", User: "deploy", Password: "${SSH_PASSWORD}", Labels: map[string]string{"role": "worker"}}
+	production := cfg.Environments["production"]
+	production.Proxy = &EnvironmentProxyConfig{
+		Placement: &PlacementConfig{
+			Constraints: []string{"node.labels.role==edge"},
+		},
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+
+	got, err := cfg.GetEnvironmentProxyServers("production")
+	if err != nil {
+		t.Fatalf("GetEnvironmentProxyServers returned error: %v", err)
+	}
+	if len(got) != 1 || got[0] != "node-a" {
+		t.Fatalf("proxy servers = %#v, want node-a", got)
+	}
+}
+
+func TestValidateConfigRejectsEnvironmentProxyPlacementOutsideEnvironment(t *testing.T) {
+	cfg := validValidationConfig()
+	cfg.Servers["node-c"] = ServerConfig{Host: "10.0.0.3", User: "deploy", Password: "${SSH_PASSWORD}"}
+	production := cfg.Environments["production"]
+	production.Proxy = &EnvironmentProxyConfig{
+		Placement: &PlacementConfig{
+			Strategy: "pinned",
+			Servers:  []string{"node-c"},
+		},
+	}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject proxy placement outside the environment")
+	}
+	if !strings.Contains(err.Error(), "environment production proxy placement") ||
+		!strings.Contains(err.Error(), "outside the selected takod node set") {
+		t.Fatalf("error = %q, want proxy placement environment guidance", err)
+	}
+}
+
 func TestValidateConfigRejectsUnsupportedLoadBalancerStrategy(t *testing.T) {
 	cfg := validValidationConfig()
 	production := cfg.Environments["production"]

@@ -98,19 +98,42 @@ type traefikRedirectRegex struct {
 	Permanent   bool   `yaml:"permanent"`
 }
 
+type takodProxyReconcileTarget struct {
+	ServerName string
+	Reconcile  bool
+}
+
 func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig) error {
-	targetServers, err := d.getTakodTargetServers()
+	allServers, err := d.getTakodTargetServers()
+	if err != nil {
+		return fmt.Errorf("failed to get takod proxy cleanup targets: %w", err)
+	}
+	proxyServers, err := d.getTakodProxyTargetServers()
 	if err != nil {
 		return fmt.Errorf("failed to get takod proxy targets: %w", err)
 	}
-	if len(targetServers) == 0 {
+	targets := takodProxyReconcileTargets(allServers, proxyServers)
+	if len(targets) == 0 {
 		return nil
 	}
 
-	return runTakodNodeActions(targetServers, func(serverName string) error {
+	targetNames := make([]string, 0, len(targets))
+	targetByName := make(map[string]takodProxyReconcileTarget, len(targets))
+	for _, target := range targets {
+		targetNames = append(targetNames, target.ServerName)
+		targetByName[target.ServerName] = target
+	}
+	return runTakodNodeActions(targetNames, func(serverName string) error {
+		target := targetByName[serverName]
 		client, err := d.getEnvironmentClient(serverName)
 		if err != nil {
 			return err
+		}
+		if !target.Reconcile {
+			if err := d.removeTakodProxyConfig(client); err != nil {
+				return fmt.Errorf("failed to remove proxy config: %w", err)
+			}
+			return nil
 		}
 
 		dynamicConfig, hasPublicServices, err := d.renderTakodProxyDynamicConfigForNode(services, serverName)
@@ -132,6 +155,44 @@ func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig)
 		}
 		return nil
 	})
+}
+
+func takodProxyReconcileTargets(allServers []string, proxyServers []string) []takodProxyReconcileTarget {
+	proxySet := make(map[string]bool, len(proxyServers))
+	for _, serverName := range proxyServers {
+		proxySet[serverName] = true
+	}
+	targets := make([]takodProxyReconcileTarget, 0, len(allServers))
+	seen := make(map[string]bool, len(allServers))
+	for _, serverName := range allServers {
+		if seen[serverName] {
+			continue
+		}
+		targets = append(targets, takodProxyReconcileTarget{
+			ServerName: serverName,
+			Reconcile:  proxySet[serverName],
+		})
+		seen[serverName] = true
+	}
+	return targets
+}
+
+func (d *Deployer) getTakodProxyTargetServers() ([]string, error) {
+	if d.config == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	if len(d.targetServers) > 0 {
+		environmentServers, err := d.config.GetEnvironmentServers(d.environment)
+		if err != nil {
+			return nil, err
+		}
+		env, err := d.config.GetEnvironment(d.environment)
+		if err != nil {
+			return nil, err
+		}
+		return config.ResolveEnvironmentProxyTargets(env.Proxy, d.config.Servers, environmentServers, d.environment)
+	}
+	return d.config.GetEnvironmentProxyServers(d.environment)
 }
 
 func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]config.ServiceConfig, proxyServerName string) ([]byte, bool, error) {
