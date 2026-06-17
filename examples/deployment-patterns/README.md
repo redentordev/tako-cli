@@ -45,4 +45,6 @@ to multiple nodes unless the service itself is built for replication.
 When multiple unrelated projects share one node, keep each template's
 `project.name`, environment name, proxy domain, and named volumes unique. Tako
 uses the project plus environment as the runtime boundary for containers,
-networks, proxy files, state, and cleanup.
+networks, proxy files, state, and cleanup. Public proxy upstreams use scoped
+container aliases instead of generic names like `web`, so examples can reuse
+common service names without cross-project routing conflicts.

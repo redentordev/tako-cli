@@ -528,9 +528,12 @@ app name and the environment as the stage; that app/stage pair scopes state,
 leases, env bundles, Docker labels, networks, containers, proxy files, and
 generated volume names. The Traefik-backed `tako-proxy` container is shared per
 node for HTTP on port 80, HTTPS on TCP 443, and HTTP/3 on UDP 443, while each
-app/stage owns its own dynamic routes. There is not yet a dedicated edge-node
-selector; every selected environment node with public routes reconciles the
-shared proxy for that app/stage.
+app/stage owns its own dynamic routes. Proxy upstreams target deterministic
+project/stage-scoped container aliases instead of generic service names like
+`web`, so unrelated projects can safely use the same service names on the same
+node. There is not yet a dedicated edge-node selector; every selected
+environment node with public routes reconciles the shared proxy for that
+app/stage.
 
 ### Secrets Management
 

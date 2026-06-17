@@ -247,7 +247,7 @@ func (d *Deployer) takodProxyUpstreamURL(proxyServerName string, upstreamServerN
 		if servicePort <= 0 {
 			return "", fmt.Errorf("service %s has invalid local proxy port %d", serviceName, servicePort)
 		}
-		return "http://" + net.JoinHostPort(serviceName, strconv.Itoa(servicePort)), nil
+		return "http://" + net.JoinHostPort(d.takodContainerAlias(serviceName, slot), strconv.Itoa(servicePort)), nil
 	}
 	return d.meshUpstreamURL(upstreamServerName, serviceName, slot, servicePort)
 }
