@@ -15,6 +15,8 @@ Offline node         Reachable nodes keep serving and the CLI reports the gap.
 New computer         A clean checkout can pull state/env and deploy.
 CI runner            Automation uses the same takod path and remote leases.
 State repair         Divergent reachable nodes can be repaired from freshest state.
+Agent upgrade        Stale takod agents can be patched and verified explicitly.
+Proxy protocols      HTTP/1.1, HTTP/2, HTTP/3, WebSocket, and sticky routes work.
 ```
 
 ## Prerequisites
@@ -85,6 +87,8 @@ SSH key from `tako.yaml`; use `--offline-host`, `--offline-user`,
 
 ```bash
 tako setup -e production
+tako upgrade servers -e production --dry-run
+tako upgrade servers -e production
 tako deploy -e production --yes
 tako state status -e production
 tako history -e production
@@ -95,6 +99,8 @@ tako drift -e production
 Expected result:
 
 - `setup` installs/refreshes Docker, WireGuard, takod, proxy, and firewall rules.
+- `upgrade servers` reports and patches stale takod agents, then verifies
+  `/v1/status` reports the CLI version.
 - `deploy` reconciles through takod, not a local Docker path.
 - `state status` shows one reachable node with deployment history, desired
   state, aggregate actual state, node-local actual state, agent status, mesh
@@ -120,6 +126,36 @@ Expected result:
 - Deployment history and desired state are available from both reachable nodes.
 - Actual state is reported per node and as an aggregate.
 - Proxy upstreams include healthy local and mesh-reachable service instances.
+- Host firewall rules allow the WireGuard listen UDP port and routed traffic to
+  peer mesh /32 addresses on the Tako interface.
+
+## Proxy Protocol Flow
+
+Run this against a public proxied service:
+
+```bash
+curl --http1.1 -I https://<domain>
+curl --http2 -I https://<domain>
+curl -I https://<domain>
+```
+
+If your client supports HTTP/3, also verify:
+
+```bash
+curl --http3 -I https://<domain>
+```
+
+For WebSocket services, open the WebSocket endpoint through the public domain
+and refresh several times when using `loadBalancer.strategy: sticky`.
+
+Expected result:
+
+- HTTP/1.1 and HTTP/2 requests succeed through `tako-proxy`.
+- UDP 443 is allowed for HTTP/3 and HTTP/3 succeeds when client/server support
+  is available.
+- WebSocket upgrade traffic passes through the same proxy.
+- Sticky services keep session-affine traffic on the same replica while the
+  sticky cookie is present.
 
 ## Env Bundle Flow
 
@@ -207,6 +243,8 @@ Expected result:
 CI should run the same steps as a fresh laptop:
 
 ```bash
+tako upgrade servers --dry-run
+tako upgrade servers
 tako env pull -e production --force
 tako state pull -e production
 tako state status -e production
@@ -217,6 +255,7 @@ tako deploy -e production --yes
 Expected result:
 
 - The runner has no dependency on a persisted `.tako/` workspace.
+- Stale takod agents are patched before app deployment.
 - `TAKO_HOST_KEY_MODE=strict` works after known hosts are installed.
 - Remote leases reject overlapping deploy, rollback, scale, maintenance, live,
   remove, cleanup, destroy, and repair operations.

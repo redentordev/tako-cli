@@ -1,15 +1,30 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
+	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/provisioner"
+	"github.com/redentordev/tako-cli/pkg/setup"
+	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/redentordev/tako-cli/pkg/updater"
 	"github.com/spf13/cobra"
 )
 
 var (
-	upgradeForce bool
-	upgradeCheck bool
+	upgradeForce              bool
+	upgradeCheck              bool
+	upgradeServersServer      string
+	upgradeServersDryRun      bool
+	upgradeServersTakodBinary string
+	upgradeServersStatusWait  = 30 * time.Second
+	upgradeServersStatusPoll  = 1 * time.Second
+	upgradeServersStatusProbe = 3 * time.Second
 )
 
 var upgradeCmd = &cobra.Command{
@@ -36,10 +51,40 @@ as the original installation.`,
 	RunE: runUpgrade,
 }
 
+var upgradeServersCmd = &cobra.Command{
+	Use:   "servers",
+	Short: "Upgrade server-side takod agents to this CLI version",
+	Long: `Upgrade server-side takod agents for the selected environment.
+
+This command patches stale or missing takod agents without changing application
+services. It installs the matching Tako release binary, restarts the takod
+systemd service, refreshes /etc/tako/version.json, and verifies /v1/status.
+
+Use --dry-run first to see current agent versions. Development builds must pass
+--takod-binary with a Linux tako binary because there is no release asset for
+version "dev".`,
+	Example: `  # Show current server agent versions
+  tako upgrade servers --dry-run
+
+  # Patch every server in the active environment
+  tako upgrade servers
+
+  # Patch one server
+  tako upgrade servers --server node-a
+
+  # Development/testing with a locally built Linux binary
+  tako upgrade servers --takod-binary ./dist/tako-linux-amd64`,
+	RunE: runUpgradeServers,
+}
+
 func init() {
 	rootCmd.AddCommand(upgradeCmd)
 	upgradeCmd.Flags().BoolVarP(&upgradeCheck, "check", "c", false, "Only check for updates, don't upgrade")
 	upgradeCmd.Flags().BoolVarP(&upgradeForce, "force", "f", false, "Force upgrade even if already on latest version")
+	upgradeCmd.AddCommand(upgradeServersCmd)
+	upgradeServersCmd.Flags().StringVarP(&upgradeServersServer, "server", "s", "", "Server to upgrade (default: all servers in environment)")
+	upgradeServersCmd.Flags().BoolVar(&upgradeServersDryRun, "dry-run", false, "Report server agent versions without changing remote state")
+	upgradeServersCmd.Flags().StringVar(&upgradeServersTakodBinary, "takod-binary", "", "Path to a Linux tako binary to install as takod (required for development builds)")
 }
 
 func runUpgrade(cmd *cobra.Command, args []string) error {
@@ -90,4 +135,156 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	fmt.Println("Verify with: tako --version")
 
 	return nil
+}
+
+func runUpgradeServers(cmd *cobra.Command, args []string) error {
+	if err := validateUpgradeServersOptions(Version, upgradeServersTakodBinary, upgradeServersDryRun); err != nil {
+		return err
+	}
+
+	cfg, err := loadDeployConfig(cfgFile)
+	if err != nil {
+		return err
+	}
+	if err := ensureDeployRuntimeSupported(cfg); err != nil {
+		return err
+	}
+
+	envName := getEnvironmentName(cfg)
+	targetServerNames, servers, err := setupTargetServers(cfg, envName, upgradeServersServer)
+	if err != nil {
+		return err
+	}
+	if len(targetServerNames) == 0 {
+		return fmt.Errorf("no servers configured for environment %s", envName)
+	}
+
+	sshPool := ssh.NewPool()
+	defer sshPool.CloseAll()
+
+	fmt.Println("🐙 Tako server agent upgrade")
+	fmt.Printf("Environment: %s\n", envName)
+	fmt.Printf("Target CLI version: %s\n", Version)
+	if upgradeServersDryRun {
+		fmt.Println("Mode: dry-run")
+	}
+
+	for _, name := range targetServerNames {
+		server := servers[name]
+		fmt.Printf("\n=== Server: %s (%s) ===\n", name, server.Host)
+		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		if err != nil {
+			return fmt.Errorf("failed to connect to server %s: %w", name, err)
+		}
+
+		status, statusErr := probeTakodAgentStatus(client, cfg, upgradeServersStatusProbe)
+		current := "unavailable"
+		if statusErr == nil {
+			current = status.Version
+		}
+		fmt.Printf("Current takod: %s\n", current)
+		if statusErr != nil {
+			fmt.Printf("Status check: %v\n", statusErr)
+		}
+
+		serverVersion, versionErr := setup.DetectServerVersion(client)
+		if upgradeServersDryRun {
+			if versionErr != nil {
+				fmt.Printf("Setup manifest: unavailable (%v)\n", versionErr)
+				fmt.Printf("Action: setup required (%s -> %s)\n", current, Version)
+				continue
+			}
+			action := "current"
+			if statusErr != nil {
+				action = "status unavailable"
+			} else if current != Version || serverVersion.TakoCLIVersion != Version {
+				action = "upgrade needed"
+			}
+			fmt.Printf("Setup manifest: v%s (CLI %s)\n", serverVersion.Version, serverVersion.TakoCLIVersion)
+			fmt.Printf("Action: %s (%s -> %s)\n", action, current, Version)
+			continue
+		}
+		if versionErr != nil {
+			return fmt.Errorf("server %s is not set up; run 'tako setup --server %s' first: %w", name, name, versionErr)
+		}
+
+		prov := provisioner.NewProvisioner(client, verbose)
+		if err := ensureTakodRuntimeWithBinary(prov, cfg, name, upgradeServersTakodBinary); err != nil {
+			return fmt.Errorf("failed to upgrade takod on server %s: %w", name, err)
+		}
+		if err := setup.WriteVersionFile(client, setupVersionManifest(serverVersion)); err != nil {
+			return setupVersionWriteError(name, err)
+		}
+		verified, err := waitForTakodAgentVersion(client, cfg, Version, upgradeServersStatusWait, upgradeServersStatusPoll, upgradeServersStatusProbe)
+		if err != nil {
+			return fmt.Errorf("server %s takod upgrade did not verify: %w", name, err)
+		}
+		fmt.Printf("✓ Upgraded takod: %s -> %s\n", current, verified.Version)
+	}
+
+	if upgradeServersDryRun {
+		fmt.Println("\nDry-run complete. Apply with: tako upgrade servers")
+		return nil
+	}
+
+	fmt.Println("\nAll selected server agents upgraded and verified.")
+	fmt.Println("Next:")
+	fmt.Printf("  tako state status -e %s\n", envName)
+	fmt.Printf("  tako deploy -e %s --yes\n", envName)
+	return nil
+}
+
+func validateUpgradeServersOptions(cliVersion string, takodBinary string, dryRun bool) error {
+	if dryRun {
+		return nil
+	}
+	version := strings.TrimSpace(cliVersion)
+	if (version == "" || version == "dev" || version == "unknown") && strings.TrimSpace(takodBinary) == "" {
+		return fmt.Errorf("server upgrades from a development CLI build require --takod-binary with a Linux tako binary")
+	}
+	return nil
+}
+
+func probeTakodAgentStatus(client takodclient.RequestExecutor, cfg *config.Config, timeout time.Duration) (*takod.Status, error) {
+	output, err := takodclient.RequestJSONWithTimeout(client, takodSocketFromConfig(cfg), "GET", "/v1/status", nil, timeout)
+	if err != nil {
+		return nil, err
+	}
+	var status takod.Status
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		return nil, fmt.Errorf("failed to parse takod status: %w", err)
+	}
+	return &status, nil
+}
+
+func waitForTakodAgentVersion(client takodclient.RequestExecutor, cfg *config.Config, wantVersion string, wait time.Duration, poll time.Duration, probe time.Duration) (*takod.Status, error) {
+	if wait <= 0 {
+		wait = 30 * time.Second
+	}
+	if poll <= 0 {
+		poll = time.Second
+	}
+	deadline := time.Now().Add(wait)
+	var lastErr error
+	var lastVersion string
+	for {
+		status, err := probeTakodAgentStatus(client, cfg, probe)
+		if err == nil {
+			lastVersion = status.Version
+			if status.Version == wantVersion {
+				return status, nil
+			}
+			lastErr = fmt.Errorf("reported version %s", status.Version)
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(poll)
+	}
+	if lastVersion != "" {
+		return nil, fmt.Errorf("expected version %s, last %s", wantVersion, lastVersion)
+	}
+	return nil, fmt.Errorf("expected version %s, status unavailable: %w", wantVersion, lastErr)
 }

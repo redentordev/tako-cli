@@ -6,8 +6,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/setup"
 )
 
 func TestSetupTargetServersUsesOnlyEnvironmentNodesByDefault(t *testing.T) {
@@ -64,6 +66,40 @@ func TestSetupVersionWriteErrorFailsSuccessfulProvisioning(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want %q", err, want)
 		}
+	}
+}
+
+func TestSetupVersionManifestPreservesInstallMetadataOnRefresh(t *testing.T) {
+	installedAt := time.Date(2026, 6, 14, 1, 2, 3, 0, time.UTC)
+	lastUpgrade := time.Date(2026, 6, 15, 4, 5, 6, 0, time.UTC)
+	existing := &setup.ServerVersion{
+		Version:     setup.CurrentVersion,
+		InstalledAt: installedAt,
+		LastUpgrade: lastUpgrade,
+		Components:  map[string]string{"docker": "29.1.3"},
+		Features:    []string{"docker"},
+	}
+
+	got := setupVersionManifest(existing)
+	if got.Version != setup.CurrentVersion {
+		t.Fatalf("manifest version = %q, want %q", got.Version, setup.CurrentVersion)
+	}
+	if got.TakoCLIVersion != Version {
+		t.Fatalf("cli version = %q, want %q", got.TakoCLIVersion, Version)
+	}
+	if !got.InstalledAt.Equal(installedAt) {
+		t.Fatalf("installed_at = %s, want %s", got.InstalledAt, installedAt)
+	}
+	if !got.LastUpgrade.Equal(lastUpgrade) {
+		t.Fatalf("last_upgrade = %s, want %s", got.LastUpgrade, lastUpgrade)
+	}
+	if got.Components["docker"] != "29.1.3" {
+		t.Fatalf("components = %#v, want docker version preserved", got.Components)
+	}
+
+	got.Components["docker"] = "changed"
+	if existing.Components["docker"] != "29.1.3" {
+		t.Fatalf("setupVersionManifest should not mutate existing components, got %#v", existing.Components)
 	}
 }
 

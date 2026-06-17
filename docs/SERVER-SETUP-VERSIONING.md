@@ -35,7 +35,8 @@ current provisioning path from scratch.
 2. Install or refresh system packages.
 3. Install and enable Docker.
 4. Install WireGuard tools.
-5. Configure UFW for SSH, HTTP, HTTPS, and the mesh port.
+5. Configure UFW for SSH, HTTP, HTTPS, HTTP/3 UDP 443, the mesh listen port,
+   and routed peer mesh traffic.
 6. Apply host hardening and auto-recovery checks.
 7. Ensure the deploy user and monitoring agent.
 8. Install or reuse the server-side tako binary.
@@ -59,6 +60,21 @@ upgrade path and then refreshes the takod runtime. If the manifest is already at
 the current setup version, setup still refreshes the takod binary and systemd
 service so runtime changes, including takod flags and background refresh
 behavior, are applied without needing a manifest bump.
+
+Use `tako upgrade servers` when you only need to patch stale server-side takod
+agents without rerunning the full setup path:
+
+```bash
+tako upgrade servers --dry-run
+tako upgrade servers
+tako state status
+tako deploy --yes
+```
+
+The command installs the matching release binary, restarts the `takod` systemd
+service, refreshes the setup manifest while preserving install metadata, and
+waits for `/v1/status` to report the expected CLI version. Development builds
+must pass `--takod-binary` with a Linux binary.
 
 ## Version Ownership
 

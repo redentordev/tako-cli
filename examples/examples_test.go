@@ -363,8 +363,8 @@ func assertStagesPattern(t *testing.T, cfg *config.Config) {
 func assertWebSocketPattern(t *testing.T, cfg *config.Config) {
 	realtime := productionServices(t, cfg)["realtime"]
 	assertPublicService(t, realtime, 3000)
-	if realtime.Replicas != 2 || realtime.LoadBalancer.Strategy != "ip_hash" {
-		t.Fatalf("websocket template should use replicated ip_hash balancing: %#v", realtime)
+	if realtime.Replicas != 2 || realtime.LoadBalancer.Strategy != "sticky" {
+		t.Fatalf("websocket template should use replicated sticky balancing: %#v", realtime)
 	}
 }
 

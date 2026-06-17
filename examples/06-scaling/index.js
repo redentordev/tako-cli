@@ -160,7 +160,7 @@ app.get('/', (req, res) => {
           <ul>
             <li><strong>High Availability:</strong> If one instance fails, others continue</li>
             <li><strong>Load Distribution:</strong> Traffic spread across instances</li>
-            <li><strong>Zero Downtime:</strong> Rolling updates without service interruption</li>
+            <li><strong>Reconciled Deployments:</strong> Containers converge to the configured replica count</li>
             <li><strong>Performance:</strong> Handle more concurrent requests</li>
           </ul>
 

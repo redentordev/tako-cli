@@ -19,6 +19,7 @@ func TestBuildProxyContainerArgs(t *testing.T) {
 		"--network", "tako_demo_production",
 		"--publish", "80:80",
 		"--publish", "443:443",
+		"--publish", "443:443/udp",
 		"--volume", "/etc/tako/proxy/acme:/acme",
 		"--volume", "/etc/tako/proxy/dynamic:/etc/traefik/dynamic:ro",
 		"--volume", "/var/log/tako/proxy:/var/log/traefik",
@@ -30,6 +31,8 @@ func TestBuildProxyContainerArgs(t *testing.T) {
 		"--providers.file.watch=true",
 		"--entryPoints.web.address=:80",
 		"--entryPoints.websecure.address=:443",
+		"--entryPoints.websecure.http3=true",
+		"--entryPoints.websecure.http3.advertisedPort=443",
 		"--certificatesResolvers.letsencrypt.acme.email=ops@example.com",
 		"--certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json",
 		"--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web",
@@ -39,6 +42,21 @@ func TestBuildProxyContainerArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected proxy args:\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestProxyContainerIsCurrentRequiresHTTP3(t *testing.T) {
+	args := `["--providers.file.directory=/etc/traefik/dynamic","--entryPoints.websecure.http3=true"]`
+	ports := `{"443/tcp":[{"HostPort":"443"}],"443/udp":[{"HostPort":"443"}]}`
+
+	if !proxyContainerIsCurrent(args, ports) {
+		t.Fatal("expected proxy with dynamic provider and HTTP/3 UDP publish to be current")
+	}
+	if proxyContainerIsCurrent(`["--providers.file.directory=/etc/traefik/dynamic"]`, ports) {
+		t.Fatal("expected proxy without HTTP/3 entrypoint to require replacement")
+	}
+	if proxyContainerIsCurrent(args, `{"443/tcp":[{"HostPort":"443"}]}`) {
+		t.Fatal("expected proxy without UDP 443 publish to require replacement")
 	}
 }
 

@@ -362,6 +362,26 @@ func TestValidateConfigRejectsLoadBalancerHealthCheckPathWithoutSlash(t *testing
 	}
 }
 
+func TestValidateConfigRejectsUnsupportedLoadBalancerStrategy(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Replicas = 2
+	web.LoadBalancer.Strategy = "ip_hash"
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject unsupported load balancer strategies")
+	}
+	for _, want := range []string{"invalid load balancer strategy", "round_robin and sticky"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestNormalizeProxyDomainTrimsAndPreservesWildcard(t *testing.T) {
 	got, err := NormalizeProxyDomain("  *.example.com  ")
 	if err != nil {

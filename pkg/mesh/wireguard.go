@@ -298,6 +298,15 @@ func applyLocalWithRunner(ctx context.Context, runner wireGuardRunner, node Node
 	if _, err := runner.Run(ctx, firewallCmd); err != nil {
 		return nil, fmt.Errorf("failed to update WireGuard firewall rule: %w", err)
 	}
+	routedFirewallCmd, err := wireGuardRoutedFirewallCommand(iface, node.Name, peers)
+	if err != nil {
+		return nil, err
+	}
+	if routedFirewallCmd != "" {
+		if _, err := runner.Run(ctx, routedFirewallCmd); err != nil {
+			return nil, fmt.Errorf("failed to update WireGuard routed firewall rules: %w", err)
+		}
+	}
 
 	quotedIface := shellQuote(iface)
 	syncCmd := shellQuote(fmt.Sprintf("wg syncconf %s <(wg-quick strip %s)", iface, iface))
@@ -317,6 +326,31 @@ func applyLocalWithRunner(ctx context.Context, runner wireGuardRunner, node Node
 	}
 
 	return readStatusWithRunner(ctx, runner, iface)
+}
+
+func wireGuardRoutedFirewallCommand(interfaceName string, currentNode string, peers []Node) (string, error) {
+	filtered := peerNodes(currentNode, peers)
+	if len(filtered) == 0 {
+		return "", nil
+	}
+
+	quotedIface := shellQuote(interfaceName)
+	commands := []string{
+		"command -v ufw >/dev/null 2>&1 || exit 0",
+		"sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true",
+	}
+	for _, peer := range filtered {
+		allowedIP, err := wireGuardAllowedIP(peer.Address)
+		if err != nil {
+			return "", fmt.Errorf("mesh peer %s has invalid address: %w", peer.Name, err)
+		}
+		quotedAllowedIP := shellQuote(allowedIP)
+		commands = append(commands,
+			fmt.Sprintf("ufw route allow in on %s from %s comment 'Tako mesh route ingress' >/dev/null 2>&1 || true", quotedIface, quotedAllowedIP),
+			fmt.Sprintf("ufw route allow out on %s to %s comment 'Tako mesh route egress' >/dev/null 2>&1 || true", quotedIface, quotedAllowedIP),
+		)
+	}
+	return strings.Join(commands, "; "), nil
 }
 
 func readStatusWithRunner(ctx context.Context, runner wireGuardRunner, interfaceName string) (*Status, error) {

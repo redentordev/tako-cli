@@ -68,7 +68,7 @@ This means:
 3. Deploy from root directory:
    ```bash
    cd 04-monorepo
-   start deploy prod
+   tako deploy -e production --yes
    ```
 
 The CLI will:
@@ -139,7 +139,7 @@ To add a new service:
 
 4. Deploy:
    ```bash
-   start deploy prod
+   tako deploy -e production --yes
    ```
 
 ## Service Communication
@@ -161,7 +161,7 @@ With `replicas: 2` for the API service, Docker automatically load balances reque
 
 1. Make changes in `web/` or `api/`
 2. Test locally in that subdirectory
-3. Deploy from root: `start deploy prod`
+3. Deploy from root: `tako deploy -e production --yes`
 4. CLI builds only changed services (smart detection)
 5. Services update independently
 

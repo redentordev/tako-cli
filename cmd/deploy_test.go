@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +72,50 @@ func TestRequireDeployPromptAllowedRejectsNonTerminalWithoutYes(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "terminal or --yes") {
 		t.Fatalf("error = %q, want terminal/--yes guidance", err)
+	}
+}
+
+func TestRunDeployFailsInvalidYAMLBeforeGit(t *testing.T) {
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	root := t.TempDir()
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+	})
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("failed to switch cwd: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), []byte("project:\n  name: demo\n  version: [\n"), 0600); err != nil {
+		t.Fatalf("failed to write invalid config: %v", err)
+	}
+	oldCfgFile := cfgFile
+	cfgFile = ""
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+	})
+
+	err = runDeploy(deployCmd, nil)
+	if err == nil {
+		t.Fatal("runDeploy should fail on invalid YAML")
+	}
+	for _, want := range []string{"YAML syntax error in tako.yaml", "line 3"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "Git repository") {
+		t.Fatalf("deploy should fail before git checks, got %q", err)
+	}
+}
+
+func TestFormatDeployConfigErrorReportsValidationFailures(t *testing.T) {
+	err := formatDeployConfigError("tako.yaml", errors.New(`invalid config: service web: invalid load balancer strategy "ip_hash"; supported strategies are round_robin and sticky`))
+	for _, want := range []string{"config validation failed in tako.yaml", "invalid load balancer strategy", "round_robin and sticky"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
 	}
 }
 

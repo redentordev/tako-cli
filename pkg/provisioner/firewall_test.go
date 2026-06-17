@@ -14,6 +14,9 @@ func TestFirewallAllowCommandsUseConfiguredMeshPort(t *testing.T) {
 	if strings.Contains(commands, "sudo ufw allow 51820/udp comment 'Tako mesh' || true") {
 		t.Fatalf("firewall commands should not hardcode default mesh port:\n%s", commands)
 	}
+	if !strings.Contains(commands, "sudo ufw allow 443/udp comment 'HTTPS HTTP/3' || true") {
+		t.Fatalf("firewall commands should allow UDP 443 for HTTP/3:\n%s", commands)
+	}
 }
 
 func TestConfigureFirewallRejectsInvalidMeshPort(t *testing.T) {

@@ -581,6 +581,7 @@ func firewallAllowCommands(meshListenPort int) []string {
 		// HTTP/HTTPS.
 		"sudo ufw allow 80/tcp comment 'HTTP' || true",
 		"sudo ufw allow 443/tcp comment 'HTTPS' || true",
+		"sudo ufw allow 443/udp comment 'HTTPS HTTP/3' || true",
 
 		fmt.Sprintf("sudo ufw allow %d/udp comment 'Tako mesh' || true", meshListenPort),
 	}

@@ -265,6 +265,8 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **State Management** - Deployment history tracked on the server with local sync for new machines
 - **Remote Lease** - CI, laptops, and mutating operations share remote operation locks
 - **Automatic HTTPS** - tako-proxy provisions SSL certificates via Let's Encrypt
+- **Modern HTTP Proxying** - HTTP/1.1, HTTP/2, HTTP/3, and WebSocket traffic route through the Traefik-backed tako-proxy
+- **Agent Upgrades** - Patch stale server-side takod agents with `tako upgrade servers`
 - **Domain Redirects** - Automatic www → non-www (or vice versa) with path preservation
 - **Health Checks** - Ensure containers are healthy after reconciliation
 - **Secrets Management** - Secure handling of environment secrets with automatic redaction
@@ -351,6 +353,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako state lease` | Show remote operation leases across reachable nodes |
 | `tako state lease release --id <id> --force` | Release an exact stale remote lease |
 | `tako upgrade` | Upgrade Tako CLI to the latest version |
+| `tako upgrade servers` | Upgrade and verify server-side takod agents to this CLI version |
 | `tako live` | Disable maintenance mode and restore service traffic |
 | `tako cleanup` | Clean up old node runtime resources |
 
@@ -523,8 +526,11 @@ storage.
 Unrelated projects can deploy to the same server. Treat `project.name` as the
 app name and the environment as the stage; that app/stage pair scopes state,
 leases, env bundles, Docker labels, networks, containers, proxy files, and
-generated volume names. The `tako-proxy` container is shared per node for ports
-80 and 443, while each app/stage owns its own dynamic routes.
+generated volume names. The Traefik-backed `tako-proxy` container is shared per
+node for HTTP on port 80, HTTPS on TCP 443, and HTTP/3 on UDP 443, while each
+app/stage owns its own dynamic routes. There is not yet a dedicated edge-node
+selector; every selected environment node with public routes reconciles the
+shared proxy for that app/stage.
 
 ### Secrets Management
 
