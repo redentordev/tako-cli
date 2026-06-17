@@ -150,11 +150,18 @@ Git plus the last accepted desired revision and event log replicated by takod.
 
 ## Local Docker Compatibility
 
-Local development only needs a Docker-compatible daemon when Tako has to build
-or inspect images from the machine running the CLI. Docker Desktop and Colima
-work for that path as long as the active Docker context answers `docker info`.
-Rootless Docker can also be used locally for builds when the current user can
-run normal `docker build`, `docker pull`, and `docker save` commands.
+Normal takod deploys do not build with the laptop's Docker daemon. For
+build-backed services, the CLI validates and archives the local build context,
+then streams it to a selected remote `takod` node where Docker performs the
+image build. The local machine still needs the source files, an accessible build
+directory, and either a Dockerfile or Nixpacks when no Dockerfile exists.
+`tako doctor --skip-remote` reports those local build inputs without contacting
+servers.
+
+Docker Desktop, Colima, and rootless Docker remain useful for custom local
+workflows outside the takod deploy path, or for manually pre-building images
+that are later referenced with `image:`. In those cases the active Docker
+context just needs to answer the normal Docker commands your workflow runs.
 
 Remote `takod` hosts have stricter requirements than a laptop build context.
 Setup and runtime reconciliation currently assume a Linux server with Docker

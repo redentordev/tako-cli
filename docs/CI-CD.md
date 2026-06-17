@@ -17,10 +17,12 @@ Tako uses the same deployment path from laptops and CI runners:
 1. Checkout the app repository.
 2. Restore SSH credentials.
 3. Validate `tako.yaml` with `tako validate`.
-4. Optionally patch stale server-side takod agents with `tako upgrade servers`.
-5. Pull the newest reachable encrypted environment bundle from takod.
-6. Pull remote deployment state into the local `.tako/` cache.
-7. Run `tako deploy --yes`.
+4. Optionally run `tako doctor --skip-remote` to prove local build inputs
+   without SSH.
+5. Optionally patch stale server-side takod agents with `tako upgrade servers`.
+6. Pull the newest reachable encrypted environment bundle from takod.
+7. Pull remote deployment state into the local `.tako/` cache.
+8. Run `tako deploy --yes`.
 
 Remote leases in takod prevent a CI job and a laptop from reconciling the same
 target nodes at the same time.
@@ -81,8 +83,10 @@ servers:
 The direct binary install below is the simplest runner path. Tako releases also
 publish `ghcr.io/redentordev/tako-cli:<version>` and `:latest` as multi-arch
 Linux images for AMD64 and ARM64 when you prefer a containerized CLI. Mount the
-checkout, SSH material, and Docker socket into that container before running
-`tako validate`, `tako upgrade servers`, or `tako deploy`.
+checkout and SSH material into that container before running `tako validate`,
+`tako doctor --skip-remote`, `tako upgrade servers`, or `tako deploy`. A Docker
+socket is only needed for custom local Docker steps outside the normal takod
+deploy path.
 
 ```yaml
 name: Deploy
@@ -121,6 +125,7 @@ jobs:
       - name: Restore environment and state
         run: |
           tako validate -e production
+          tako doctor -e production --skip-remote
           tako upgrade servers --dry-run
           tako upgrade servers
           tako env pull --force

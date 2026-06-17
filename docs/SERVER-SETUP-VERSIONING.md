@@ -53,10 +53,12 @@ routes exist; `tako doctor` verifies the live proxy container shape afterward.
 
 Remote deployment nodes currently require rootful system Docker because `takod`
 reconciles systemd, WireGuard, firewall rules, published ports, volumes, and the
-shared proxy. Rootless Docker can still be used for local build contexts when
-the active local Docker context supports normal `docker build`, `docker pull`,
-and `docker save`, but rootless remote server mode is blocked until it has a
-dedicated live proof.
+shared proxy. Normal takod deploys stream build contexts to a remote node and do
+not require the laptop's Docker daemon. Local Docker Desktop, Colima, or
+rootless Docker can still be used for custom local build workflows outside the
+takod deploy path, or for manually pre-building images referenced with
+`image:`. Rootless remote server mode is blocked until it has a dedicated live
+proof.
 
 Released CLI builds download the matching Linux release asset for the server
 architecture and install it as `/usr/local/bin/tako`. The takod runtime is also
