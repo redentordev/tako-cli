@@ -9,7 +9,7 @@
 #   apt-get update && apt-get install -y nmap hydra nikto sslscan netcat-openbsd jq
 #
 # Example:
-#   ./security-test.sh 77.42.21.99 hono.77.42.21.99.sslip.io
+#   ./security-test.sh 203.0.113.10 hono.203.0.113.10.sslip.io
 #
 
 set -e
@@ -34,7 +34,7 @@ if [ -z "$TARGET" ]; then
     echo "  apt-get update && apt-get install -y nmap hydra nikto sslscan netcat-openbsd jq"
     echo ""
     echo "Example:"
-    echo "  $0 77.42.21.99 hono.77.42.21.99.sslip.io"
+    echo "  $0 203.0.113.10 hono.203.0.113.10.sslip.io"
     exit 1
 fi
 
@@ -102,14 +102,16 @@ test_ports() {
         log_warn "nmap not installed, using basic port check"
         
         # Basic port check with nc
-        local common_ports="21 22 23 25 80 443 2377 3306 5432 6379 7946 8080 27017"
+        local common_ports="21 22 23 25 80 443 2375 2376 2377 3306 5432 6379 4789 7946 8080 27017"
         for port in $common_ports; do
             if timeout 2 nc -zv $TARGET $port 2>&1 | grep -q "succeeded\|open"; then
                 case $port in
-                    22|80|443|2377|7946) log_pass "Port $port open (expected)" ;;
+                    22|80|443) log_pass "Port $port open (expected)" ;;
                     21) log_fail "FTP port 21 is open!" ;;
                     23) log_fail "Telnet port 23 is open!" ;;
                     25) log_warn "SMTP port 25 is open" ;;
+                    2375|2376) log_fail "Docker API port $port is exposed!" ;;
+                    2377|4789|7946) log_fail "Docker Swarm/overlay infrastructure port $port is publicly exposed!" ;;
                     3306) log_fail "MySQL port 3306 is exposed!" ;;
                     5432) log_fail "PostgreSQL port 5432 is exposed!" ;;
                     6379) log_fail "Redis port 6379 is exposed!" ;;
@@ -130,7 +132,7 @@ test_ports() {
     echo ""
     
     # Check for dangerous open ports
-    local dangerous_ports="21 23 25 111 135 139 445 1433 3306 3389 5432 5900 6379 11211 27017"
+    local dangerous_ports="21 23 25 111 135 139 445 1433 2375 2376 2377 3306 3389 4789 5432 5900 6379 7946 11211 27017"
     for port in $dangerous_ports; do
         if echo "$scan_result" | grep -q "^$port/.*open"; then
             log_fail "Dangerous port $port is open!"
@@ -467,6 +469,15 @@ test_docker() {
             log_fail "Docker API exposed on port $port!"
         else
             log_pass "Docker API not exposed on port $port"
+        fi
+    done
+
+    log_info "Testing Docker Swarm/overlay port exposure..."
+    for port in 2377 4789 7946; do
+        if timeout 2 nc -zv $TARGET $port 2>&1 | grep -q "succeeded\|open"; then
+            log_fail "Docker Swarm/overlay infrastructure port $port is publicly exposed!"
+        else
+            log_pass "Docker Swarm/overlay port $port is not publicly exposed"
         fi
     done
     

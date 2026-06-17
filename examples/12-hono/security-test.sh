@@ -150,7 +150,7 @@ test_port_scan() {
     echo ""
     
     # Check for unexpected open ports
-    local expected_ports="22 80 443 2377 7946 4789"
+    local expected_ports="22 80 443"
     
     while IFS= read -r line; do
         port=$(echo "$line" | awk '{print $1}' | cut -d'/' -f1)
@@ -160,10 +160,17 @@ test_port_scan() {
     done <<< "$open_ports"
     
     # Check if dangerous ports are open
-    local dangerous_ports="21 23 25 3306 5432 6379 27017 11211"
+    local dangerous_ports="21 23 25 2375 2376 3306 5432 6379 27017 11211"
     for port in $dangerous_ports; do
         if echo "$open_ports" | grep -q "^$port/"; then
             log_fail "Dangerous port $port is open!"
+        fi
+    done
+
+    local infrastructure_ports="2377 4789 7946"
+    for port in $infrastructure_ports; do
+        if echo "$open_ports" | grep -q "^$port/"; then
+            log_fail "Docker Swarm/overlay infrastructure port $port is publicly exposed!"
         fi
     done
     
@@ -689,7 +696,7 @@ test_docker_exposure() {
     # Test if Docker API is exposed
     log_info "Testing for exposed Docker API..."
     
-    local docker_ports="2375 2376 2377"
+    local docker_ports="2375 2376"
     
     for port in $docker_ports; do
         local response=$(curl -s --max-time 5 "http://$TARGET:$port/version" 2>/dev/null)
@@ -698,6 +705,13 @@ test_docker_exposure() {
         fi
     done
     log_pass "Docker API is not publicly exposed"
+
+    log_info "Testing for exposed Docker Swarm/overlay ports..."
+    for port in 2377 4789 7946; do
+        if timeout 2 nc -zv "$TARGET" "$port" 2>&1 | grep -q "succeeded\|open"; then
+            log_fail "Docker Swarm/overlay infrastructure port $port is publicly exposed!"
+        fi
+    done
     
     # Test proxy dashboard exposure
     log_info "Testing for proxy dashboard exposure..."
