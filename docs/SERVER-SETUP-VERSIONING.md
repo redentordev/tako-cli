@@ -46,6 +46,11 @@ current provisioning path from scratch.
 11. Write /etc/tako/version.json.
 ```
 
+Setup opens the required host firewall path for HTTP/3, but it does not create
+the shared `tako-proxy` container by itself. Deploy, scale, rollback, and other
+proxy-reconciling operations create or refresh the shared proxy when public
+routes exist; `tako doctor` verifies the live proxy container shape afterward.
+
 Remote deployment nodes currently require rootful system Docker because `takod`
 reconciles systemd, WireGuard, firewall rules, published ports, volumes, and the
 shared proxy. Rootless Docker can still be used for local build contexts when

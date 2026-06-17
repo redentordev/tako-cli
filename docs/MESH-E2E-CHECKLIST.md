@@ -101,6 +101,7 @@ tako setup -e production
 tako upgrade servers -e production --dry-run
 tako upgrade servers -e production
 tako deploy -e production --yes
+tako doctor -e production
 tako state status -e production
 tako history -e production
 tako ps -e production
@@ -109,10 +110,15 @@ tako drift -e production
 
 Expected result:
 
-- `setup` installs/refreshes Docker, WireGuard, takod, proxy, and firewall rules.
+- `setup` installs/refreshes Docker, WireGuard, takod, firewall rules, and host
+  hardening.
 - `upgrade servers` reports and patches stale takod agents, then verifies
   `/v1/status` reports the CLI version.
-- `deploy` reconciles through takod, not a local Docker path.
+- `deploy` reconciles services and the shared `tako-proxy` through takod, not a
+  local Docker path.
+- `doctor` reports rootful remote Docker and `Proxy Runtime` readiness for
+  public services, including TCP 80/443, UDP 443, and Traefik file-provider
+  settings.
 - `state status` shows one reachable node with deployment history, desired
   state, aggregate actual state, node-local actual state, agent status, mesh
   status, and no state disagreement.
@@ -143,6 +149,16 @@ Expected result:
   survives host reboot.
 
 ## Proxy Protocol Flow
+
+First verify the node-local proxy shape:
+
+```bash
+tako doctor -e production
+```
+
+The `Proxy Runtime` section should pass for every proxy target before external
+protocol checks. It verifies the live container settings and UDP 443 publish,
+even when the local test client cannot negotiate HTTP/3.
 
 Run this against a public proxied service:
 

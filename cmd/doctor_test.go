@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -249,6 +250,200 @@ func TestCheckDockerRuntimeWithFailsProbeErrors(t *testing.T) {
 	}
 	if results[0].status != "FAIL" || !strings.Contains(results[0].message, "Docker runtime unsupported") || !strings.Contains(results[0].message, "daemon unavailable") {
 		t.Fatalf("result = %#v, want probe failure", results[0])
+	}
+}
+
+func TestPublicServiceNamesReturnsSortedProxyServices(t *testing.T) {
+	cfg := &config.Config{
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Services: map[string]config.ServiceConfig{
+					"worker": {},
+					"api":    {Port: 3000},
+					"web":    {Port: 3000, Proxy: &config.ProxyConfig{Domain: "web.example.com"}},
+					"admin":  {Port: 3000, Proxy: &config.ProxyConfig{Domain: "admin.example.com"}},
+				},
+			},
+		},
+	}
+
+	got, err := publicServiceNames(cfg, "production")
+	if err != nil {
+		t.Fatalf("publicServiceNames returned error: %v", err)
+	}
+	if strings.Join(got, ",") != "admin,web" {
+		t.Fatalf("public services = %#v, want sorted admin/web", got)
+	}
+}
+
+func TestCheckProxyRuntimeWithReportsReadyProxy(t *testing.T) {
+	var results []checkResult
+	checkProxyRuntimeWith(func(result checkResult) {
+		results = append(results, result)
+	}, "node-a", []string{"web"}, func() (*doctorProxyRuntimeInfo, error) {
+		return testDoctorProxyRuntimeInfo(), nil
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "PASS" || !strings.Contains(results[0].message, "HTTP/3 UDP 443") {
+		t.Fatalf("result = %#v, want proxy readiness pass", results[0])
+	}
+}
+
+func TestCheckProxyRuntimeWithWarnsWhenProxyMissing(t *testing.T) {
+	var results []checkResult
+	checkProxyRuntimeWith(func(result checkResult) {
+		results = append(results, result)
+	}, "node-a", []string{"admin", "web"}, func() (*doctorProxyRuntimeInfo, error) {
+		return nil, errDoctorProxyMissing
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "WARN" || !strings.Contains(results[0].message, "admin, web") {
+		t.Fatalf("result = %#v, want missing proxy warning with public services", results[0])
+	}
+	if !strings.Contains(results[0].fix, "tako deploy") {
+		t.Fatalf("fix = %q, want deploy guidance", results[0].fix)
+	}
+}
+
+func TestCheckProxyRuntimeWithFailsStaleProxy(t *testing.T) {
+	stale := testDoctorProxyRuntimeInfo()
+	delete(stale.Ports, "443/udp")
+
+	var results []checkResult
+	checkProxyRuntimeWith(func(result checkResult) {
+		results = append(results, result)
+	}, "node-a", []string{"web"}, func() (*doctorProxyRuntimeInfo, error) {
+		return stale, nil
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "FAIL" || !strings.Contains(results[0].message, "443/udp publish") {
+		t.Fatalf("result = %#v, want stale proxy failure", results[0])
+	}
+}
+
+func TestCheckProxyRuntimeWithFailsStoppedProxy(t *testing.T) {
+	stopped := testDoctorProxyRuntimeInfo()
+	stopped.Running = false
+
+	var results []checkResult
+	checkProxyRuntimeWith(func(result checkResult) {
+		results = append(results, result)
+	}, "node-a", []string{"web"}, func() (*doctorProxyRuntimeInfo, error) {
+		return stopped, nil
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "FAIL" || !strings.Contains(results[0].message, "exists but is not running") {
+		t.Fatalf("result = %#v, want stopped proxy failure", results[0])
+	}
+}
+
+func TestParseDoctorProxyRuntime(t *testing.T) {
+	info, err := parseDoctorProxyRuntime(`true
+["--providers.file.directory=/etc/traefik/dynamic","--entryPoints.websecure.http3=true"]
+{"443/udp":[{"HostPort":"443"}]}
+[{"Source":"/etc/tako/proxy/dynamic","Destination":"/etc/traefik/dynamic"}]
+traefik:v3.6.1`)
+	if err != nil {
+		t.Fatalf("parseDoctorProxyRuntime returned error: %v", err)
+	}
+	if !info.Running {
+		t.Fatal("expected running state")
+	}
+	if info.Image != "traefik:v3.6.1" {
+		t.Fatalf("image = %q, want traefik", info.Image)
+	}
+	if _, ok := info.Ports["443/udp"]; !ok {
+		t.Fatalf("ports = %#v, want UDP 443", info.Ports)
+	}
+}
+
+func TestParseDoctorProxyRuntimeRejectsInvalidOutput(t *testing.T) {
+	if _, err := parseDoctorProxyRuntime("true\n[]"); err == nil {
+		t.Fatal("expected short inspect output to fail")
+	}
+	if _, err := parseDoctorProxyRuntime("not-json\n[]\n{}\n[]\ntraefik:v3.6.1"); err == nil {
+		t.Fatal("expected invalid running state to fail")
+	}
+}
+
+func TestDetectDoctorProxyRuntimeUsesSudoDockerInspect(t *testing.T) {
+	executor := &fakeDoctorExecutor{
+		output: `true
+["--providers.file.directory=/etc/traefik/dynamic"]
+{}
+[]
+traefik:v3.6.1`,
+	}
+	if _, err := detectDoctorProxyRuntime(executor); err != nil {
+		t.Fatalf("detectDoctorProxyRuntime returned error: %v", err)
+	}
+	if !strings.Contains(executor.command, "sudo docker inspect tako-proxy") {
+		t.Fatalf("command = %q, want sudo docker inspect", executor.command)
+	}
+	if !strings.Contains(executor.command, "{{json .NetworkSettings.Ports}}") {
+		t.Fatalf("command = %q, want ports inspect", executor.command)
+	}
+}
+
+func TestDetectDoctorProxyRuntimeMapsMissingContainer(t *testing.T) {
+	executor := &fakeDoctorExecutor{
+		output: "Error: No such object: tako-proxy",
+		err:    errors.New("exit status 1"),
+	}
+	_, err := detectDoctorProxyRuntime(executor)
+	if !errors.Is(err, errDoctorProxyMissing) {
+		t.Fatalf("error = %v, want errDoctorProxyMissing", err)
+	}
+}
+
+type fakeDoctorExecutor struct {
+	command string
+	output  string
+	err     error
+}
+
+func (f *fakeDoctorExecutor) Execute(command string) (string, error) {
+	f.command = command
+	return f.output, f.err
+}
+
+func testDoctorProxyRuntimeInfo() *doctorProxyRuntimeInfo {
+	return &doctorProxyRuntimeInfo{
+		Image:   "traefik:v3.6.1",
+		Running: true,
+		Args: []string{
+			"--providers.file.directory=/etc/traefik/dynamic",
+			"--providers.file.watch=true",
+			"--entryPoints.web.address=:80",
+			"--entryPoints.websecure.address=:443",
+			"--entryPoints.websecure.http3=true",
+			"--entryPoints.websecure.http3.advertisedPort=443",
+			"--certificatesResolvers.letsencrypt.acme.email=ops@example.com",
+			"--certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json",
+			"--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web",
+		},
+		Ports: map[string]json.RawMessage{
+			"80/tcp":  json.RawMessage(`[{"HostPort":"80"}]`),
+			"443/tcp": json.RawMessage(`[{"HostPort":"443"}]`),
+			"443/udp": json.RawMessage(`[{"HostPort":"443"}]`),
+		},
+		Mounts: []doctorProxyMount{
+			{Source: "/etc/tako/proxy/acme", Destination: "/acme"},
+			{Source: "/etc/tako/proxy/dynamic", Destination: "/etc/traefik/dynamic"},
+			{Source: "/var/log/tako/proxy", Destination: "/var/log/traefik"},
+		},
 	}
 }
 
