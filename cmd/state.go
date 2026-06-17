@@ -25,8 +25,9 @@ import (
 )
 
 var stateCmd = &cobra.Command{
-	Use:   "state",
-	Short: "Manage deployment state synchronization",
+	Use:          "state",
+	Short:        "Manage deployment state synchronization",
+	SilenceUsage: true,
 	Long: `Manage deployment state between local .tako directory and the takod mesh.
 
 When you clone a project or work on a different machine, local state may be missing.
@@ -34,8 +35,9 @@ Use 'tako state pull' to sync remote state to your local machine.`,
 }
 
 var statePullCmd = &cobra.Command{
-	Use:   "pull",
-	Short: "Pull remote state to local .tako directory",
+	Use:          "pull",
+	Short:        "Pull remote state to local .tako directory",
+	SilenceUsage: true,
 	Long: `Pull deployment state from the takod mesh to your local .tako directory.
 
 This is useful when:
@@ -51,8 +53,9 @@ The command will:
 }
 
 var stateStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show state synchronization status",
+	Use:          "status",
+	Short:        "Show state synchronization status",
+	SilenceUsage: true,
 	Long: `Show the current state of local and remote mesh deployment state.
 
 Displays:
@@ -66,8 +69,9 @@ Displays:
 }
 
 var stateRepairCmd = &cobra.Command{
-	Use:   "repair",
-	Short: "Repair deployment and runtime state across reachable mesh nodes",
+	Use:          "repair",
+	Short:        "Repair deployment and runtime state across reachable mesh nodes",
+	SilenceUsage: true,
 	Long: `Repair deployment and runtime state across reachable nodes in the active environment.
 
 The command reads deployment history, desired revisions, and actual snapshots
@@ -81,8 +85,9 @@ the best available state before deploying.`,
 }
 
 var stateLeaseCmd = &cobra.Command{
-	Use:   "lease",
-	Short: "Show remote operation leases",
+	Use:          "lease",
+	Short:        "Show remote operation leases",
+	SilenceUsage: true,
 	Long: `Show remote operation leases held on reachable takod nodes.
 
 Use this when a mutating command reports that the environment is locked.`,
@@ -90,8 +95,9 @@ Use this when a mutating command reports that the environment is locked.`,
 }
 
 var stateLeaseReleaseCmd = &cobra.Command{
-	Use:   "release",
-	Short: "Release a remote operation lease by exact ID",
+	Use:          "release",
+	Short:        "Release a remote operation lease by exact ID",
+	SilenceUsage: true,
 	Long: `Release a remote operation lease by exact ID.
 
 This command only releases leases whose current remote ID matches --id. It
