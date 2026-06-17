@@ -80,7 +80,7 @@ jobs:
       TAKO_SERVER_HOST: ${{ secrets.TAKO_SERVER_HOST }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Tako
         run: |
