@@ -345,6 +345,18 @@ func TestBuildTakodNetworkAttachmentsUsesServiceScopedExportNetworks(t *testing.
 	if len(got[0].Aliases) != 1 || got[0].Aliases[0] != runtimeid.ExportAlias("frontend", "production", "web") {
 		t.Fatalf("export aliases = %#v, want readable export alias", got[0].Aliases)
 	}
+	for key, want := range map[string]string{
+		"tako.runtime":      "takod",
+		"tako.discovery":    "export",
+		"tako.project":      "frontend",
+		"tako.environment":  "production",
+		"tako.service":      "web",
+		"tako.export.alias": runtimeid.ExportAlias("frontend", "production", "web"),
+	} {
+		if got[0].Labels[key] != want {
+			t.Fatalf("export label %s = %q, want %q in %#v", key, got[0].Labels[key], want, got[0].Labels)
+		}
+	}
 	if got[1].Network != runtimeid.ExportNetworkName("backend-api", "production", "api") || got[1].Create {
 		t.Fatalf("first import attachment = %#v, want backend api import network", got[1])
 	}

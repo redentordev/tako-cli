@@ -544,7 +544,9 @@ Services can opt into cross-project access with `export: true`. Tako attaches
 each exported service to its own export network, so importing another project
 does not expose that project's private services. Consumers declare
 `imports: [other-app.api]` and call the service through the readable DNS alias
-`other-app-production-api` in the same environment.
+`other-app-production-api` in the same environment. Export networks carry
+`tako.discovery=export` labels with app, environment, service, and alias
+metadata for future service-discovery tooling.
 
 ### Secrets Management
 

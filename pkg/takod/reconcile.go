@@ -60,9 +60,10 @@ type ContainerSpec struct {
 }
 
 type NetworkAttachmentSpec struct {
-	Network string   `json:"network"`
-	Aliases []string `json:"aliases,omitempty"`
-	Create  bool     `json:"create,omitempty"`
+	Network string            `json:"network"`
+	Aliases []string          `json:"aliases,omitempty"`
+	Create  bool              `json:"create,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
 }
 
 type HealthSpec struct {
@@ -230,6 +231,9 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 				return fmt.Errorf("invalid network attachment alias")
 			}
 		}
+		if err := validateDockerLabels(attachment.Labels); err != nil {
+			return fmt.Errorf("invalid network attachment label: %w", err)
+		}
 	}
 	if !isSafeRestartPolicy(req.Restart) {
 		return fmt.Errorf("invalid restart policy")
@@ -265,10 +269,8 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 			return fmt.Errorf("invalid external volume name")
 		}
 	}
-	for key, value := range req.Labels {
-		if strings.TrimSpace(key) == "" || hasControlChars(key) || hasControlChars(value) {
-			return fmt.Errorf("invalid label")
-		}
+	if err := validateDockerLabels(req.Labels); err != nil {
+		return fmt.Errorf("invalid label: %w", err)
 	}
 	if req.Command != "" && strings.ContainsRune(req.Command, '\x00') {
 		return fmt.Errorf("command contains unsupported characters")
@@ -452,10 +454,24 @@ func sanitizeFilePatternPart(value string) string {
 }
 
 func ensureDockerNetwork(ctx context.Context, network string) error {
+	return ensureDockerNetworkWithLabels(ctx, network, nil)
+}
+
+func ensureDockerNetworkWithLabels(ctx context.Context, network string, labels map[string]string) error {
 	if _, err := runDocker(ctx, "network", "inspect", network); err == nil {
 		return nil
 	}
-	if _, err := runDocker(ctx, "network", "create", network); err != nil {
+	args := []string{"network", "create"}
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		args = append(args, "--label", key+"="+labels[key])
+	}
+	args = append(args, network)
+	if _, err := runDocker(ctx, args...); err != nil {
 		return fmt.Errorf("failed to ensure docker network %s: %w", network, err)
 	}
 	return nil
@@ -464,7 +480,7 @@ func ensureDockerNetwork(ctx context.Context, network string) error {
 func prepareNetworkAttachments(ctx context.Context, attachments []NetworkAttachmentSpec) error {
 	for _, attachment := range attachments {
 		if attachment.Create {
-			if err := ensureDockerNetwork(ctx, attachment.Network); err != nil {
+			if err := ensureDockerNetworkWithLabels(ctx, attachment.Network, attachment.Labels); err != nil {
 				return err
 			}
 			continue
@@ -502,12 +518,16 @@ func mergeNetworkAttachments(attachments []NetworkAttachmentSpec) []NetworkAttac
 			existing = &NetworkAttachmentSpec{
 				Network: attachment.Network,
 				Create:  attachment.Create,
+				Labels:  map[string]string{},
 			}
 			byNetwork[attachment.Network] = existing
 			order = append(order, attachment.Network)
 		}
 		if attachment.Create {
 			existing.Create = true
+		}
+		for key, value := range attachment.Labels {
+			existing.Labels[key] = value
 		}
 		seenAliases := make(map[string]bool, len(existing.Aliases))
 		for _, alias := range existing.Aliases {
@@ -612,6 +632,15 @@ func isSafeDockerVolumeName(name string) bool {
 		}
 	}
 	return true
+}
+
+func validateDockerLabels(labels map[string]string) error {
+	for key, value := range labels {
+		if strings.TrimSpace(key) == "" || hasControlChars(key) || hasControlChars(value) {
+			return fmt.Errorf("%q", key)
+		}
+	}
+	return nil
 }
 
 func removeServiceContainers(ctx context.Context, project string, environment string, service string) (int, error) {
