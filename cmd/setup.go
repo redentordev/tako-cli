@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -204,7 +206,14 @@ func refreshCurrentSetup(prov currentSetupRefresher, cfg *config.Config, nodeNam
 }
 
 func ensureTakodRuntimeForSetup(prov setupRuntimeInstaller, cfg *config.Config, nodeName string) error {
-	return ensureTakodRuntimeWithBinary(prov, cfg, nodeName, setupTakodBinary)
+	return ensureTakodRuntimeWithBinary(prov, cfg, nodeName, takodBinaryForSetup())
+}
+
+func takodBinaryForSetup() string {
+	if binary := strings.TrimSpace(setupTakodBinary); binary != "" {
+		return binary
+	}
+	return strings.TrimSpace(os.Getenv("TAKO_TAKOD_BINARY"))
 }
 
 func ensureTakodRuntimeWithBinary(prov setupRuntimeInstaller, cfg *config.Config, nodeName string, takodBinary string) error {

@@ -135,6 +135,50 @@ func TestRefreshCurrentSetupRegrantsDeployUserAccessBeforeTakodRestart(t *testin
 	}
 }
 
+func TestEnsureTakodRuntimeForSetupUsesTakodBinaryEnv(t *testing.T) {
+	oldTakodBinary := setupTakodBinary
+	setupTakodBinary = ""
+	t.Cleanup(func() {
+		setupTakodBinary = oldTakodBinary
+	})
+	t.Setenv("TAKO_TAKOD_BINARY", " /tmp/tako-linux-amd64 ")
+
+	prov := &recordingSetupRefresher{}
+	if err := ensureTakodRuntimeForSetup(prov, &config.Config{}, "node-a"); err != nil {
+		t.Fatalf("ensureTakodRuntimeForSetup returned error: %v", err)
+	}
+
+	want := []string{
+		"install-file:/tmp/tako-linux-amd64",
+		"service:::node-a",
+	}
+	if !slices.Equal(prov.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", prov.calls, want)
+	}
+}
+
+func TestEnsureTakodRuntimeForSetupPrefersFlagOverEnv(t *testing.T) {
+	oldTakodBinary := setupTakodBinary
+	setupTakodBinary = "/tmp/from-flag"
+	t.Cleanup(func() {
+		setupTakodBinary = oldTakodBinary
+	})
+	t.Setenv("TAKO_TAKOD_BINARY", "/tmp/from-env")
+
+	prov := &recordingSetupRefresher{}
+	if err := ensureTakodRuntimeForSetup(prov, &config.Config{}, "node-a"); err != nil {
+		t.Fatalf("ensureTakodRuntimeForSetup returned error: %v", err)
+	}
+
+	want := []string{
+		"install-file:/tmp/from-flag",
+		"service:::node-a",
+	}
+	if !slices.Equal(prov.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", prov.calls, want)
+	}
+}
+
 func TestRefreshCurrentSetupWrapsDeployUserAccessError(t *testing.T) {
 	prov := &recordingSetupRefresher{deployUserErr: errors.New("usermod failed")}
 
