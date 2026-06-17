@@ -98,6 +98,12 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 
 	invalid = valid
+	invalid.NetworkAttachments = []NetworkAttachmentSpec{{Network: "tako_backend_api_production_api_export", Labels: map[string]string{"tako.discovery": "export\nbad"}}}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe network attachment label to be rejected")
+	}
+
+	invalid = valid
 	invalid.Containers = []ContainerSpec{{Name: "demo_production_web_1", Publishes: []string{"80:80\n--privileged"}}}
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe publish value to be rejected")
@@ -371,6 +377,14 @@ func TestReconcileServiceCreatesAndConnectsExportNetworkAttachments(t *testing.T
 				"backend-api-production-api",
 			},
 			Create: true,
+			Labels: map[string]string{
+				"tako.discovery":    "export",
+				"tako.environment":  "production",
+				"tako.export.alias": "backend-api-production-api",
+				"tako.project":      "backend-api",
+				"tako.runtime":      "takod",
+				"tako.service":      "api",
+			},
 		}},
 		Containers: []ContainerSpec{{Name: "backend_api_production_api_1"}},
 	})
@@ -381,7 +395,7 @@ func TestReconcileServiceCreatesAndConnectsExportNetworkAttachments(t *testing.T
 	entries := readCommandLog(t, logPath)
 	for _, want := range []string{
 		"docker network inspect tako_backend_api_production_api_export",
-		"docker network create tako_backend_api_production_api_export",
+		"docker network create --label tako.discovery=export --label tako.environment=production --label tako.export.alias=backend-api-production-api --label tako.project=backend-api --label tako.runtime=takod --label tako.service=api tako_backend_api_production_api_export",
 		"docker network connect --alias backend-api-production-api tako_backend_api_production_api_export backend_api_production_api_1",
 	} {
 		if !slices.Contains(entries, want) {

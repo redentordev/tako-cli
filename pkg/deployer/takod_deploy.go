@@ -473,12 +473,21 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 func (d *Deployer) buildTakodNetworkAttachments(serviceName string, service *config.ServiceConfig) []takod.NetworkAttachmentSpec {
 	attachments := make([]takod.NetworkAttachmentSpec, 0, 1+len(service.Imports))
 	if service.Export {
+		exportAlias := runtimeid.ExportAlias(d.config.Project.Name, d.environment, serviceName)
 		attachments = append(attachments, takod.NetworkAttachmentSpec{
 			Network: runtimeid.ExportNetworkName(d.config.Project.Name, d.environment, serviceName),
 			Aliases: []string{
-				runtimeid.ExportAlias(d.config.Project.Name, d.environment, serviceName),
+				exportAlias,
 			},
 			Create: true,
+			Labels: map[string]string{
+				"tako.runtime":      "takod",
+				"tako.discovery":    "export",
+				"tako.project":      d.config.Project.Name,
+				"tako.environment":  d.environment,
+				"tako.service":      serviceName,
+				"tako.export.alias": exportAlias,
+			},
 		})
 	}
 	for _, importSpec := range service.Imports {
