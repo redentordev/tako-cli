@@ -263,13 +263,16 @@ replication, placement, and external persistence behavior.
           web@node-c
 ```
 
-Every selected environment node with public routes currently runs the shared
-node-local proxy. It routes to local containers through Docker DNS and remote
-containers through node-local mesh-only upstream ports. Health is enforced by
-the generated Traefik service health checks when configured. One-node
-deployments use the same proxy path with only local upstreams and do not publish
-mesh host ports. Multi-node upstream ports are allocated and
-recorded by the target node's `takod` agent. The CLI sends a deterministic
+Every selected environment node with public routes runs the shared node-local
+proxy by default. `environment.proxy.placement` can narrow ingress to dedicated
+edge nodes with pinned servers or node-label constraints while service
+containers keep their own placement. The proxy routes to local containers
+through Docker DNS and remote containers through node-local mesh-only upstream
+ports. Health is enforced by the generated Traefik service health checks when
+configured. One-node deployments use the same proxy path with only local
+upstreams and do not publish mesh host ports. Multi-node upstream ports are
+allocated and recorded by the target node's `takod` agent. The CLI sends a
+deterministic
 app/stage/service/slot preferred port, but `takod` checks existing Docker port
 bindings and its allocation registry before accepting it, then returns the
 actual assigned port for container publish and proxy rendering. This lets
@@ -346,10 +349,10 @@ Done:
 9. Proxy setup supports HTTP/1.1, HTTP/2, HTTP/3, WebSocket traffic, and sticky sessions.
 10. `tako upgrade servers` explicitly patches stale server-side takod agents.
 11. Tag releases publish verified multi-arch Linux CLI images to GHCR.
+12. Environment proxy placement can limit public ingress to dedicated edge nodes.
 
 Next:
-1. Add a dedicated edge/proxy placement selector.
-2. Add shared ACME/certificate storage for multi-edge deployments.
-3. Evaluate background peer anti-entropy after the explicit repair workflow is proven.
-4. Expand e2e validation across one-node and multi-node meshes.
+1. Add shared ACME/certificate storage for multi-edge deployments.
+2. Evaluate background peer anti-entropy after the explicit repair workflow is proven.
+3. Expand e2e validation across one-node and multi-node meshes.
 ```

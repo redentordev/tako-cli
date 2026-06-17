@@ -294,6 +294,39 @@
               "type": "string"
             }
           },
+          "proxy": {
+            "type": "object",
+            "description": "Environment-level public proxy settings",
+            "properties": {
+              "placement": {
+                "type": "object",
+                "description": "Where public proxy routes should be reconciled",
+                "properties": {
+                  "strategy": {
+                    "type": "string",
+                    "enum": [
+                      "spread",
+                      "pinned",
+                      "any",
+                      "global"
+                    ]
+                  },
+                  "servers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "constraints": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
           "services": {
             "type": "object",
             "description": "Services to deploy",

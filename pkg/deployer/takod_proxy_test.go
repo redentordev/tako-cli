@@ -203,6 +203,88 @@ func TestRenderTakodProxyDynamicConfigUsesStickyStrategy(t *testing.T) {
 	}
 }
 
+func TestGetTakodProxyTargetServersDefaultsToEnvironmentServers(t *testing.T) {
+	deploy := testProxyDeployer()
+
+	got, err := deploy.getTakodProxyTargetServers()
+	if err != nil {
+		t.Fatalf("getTakodProxyTargetServers returned error: %v", err)
+	}
+	if len(got) != 2 || got[0] != "node-a" || got[1] != "node-b" {
+		t.Fatalf("proxy targets = %#v, want node-a/node-b", got)
+	}
+}
+
+func TestGetTakodProxyTargetServersUsesEnvironmentProxyPlacement(t *testing.T) {
+	deploy := testProxyDeployer()
+	deploy.config.Servers["node-a"] = config.ServerConfig{Host: "203.0.113.10", User: "root", Port: 22, Password: "${SSH_PASSWORD}", Labels: map[string]string{"role": "edge"}}
+	deploy.config.Servers["node-b"] = config.ServerConfig{Host: "203.0.113.11", User: "root", Port: 22, Password: "${SSH_PASSWORD}", Labels: map[string]string{"role": "worker"}}
+	production := deploy.config.Environments["production"]
+	api := production.Services["api"]
+	api.Image = "nginx:alpine"
+	production.Services["api"] = api
+	web := production.Services["web"]
+	web.Image = "nginx:alpine"
+	production.Services["web"] = web
+	production.Proxy = &config.EnvironmentProxyConfig{
+		Placement: &config.PlacementConfig{
+			Constraints: []string{"node.labels.role==edge"},
+		},
+	}
+	deploy.config.Environments["production"] = production
+	if err := config.ValidateConfig(deploy.config); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+
+	got, err := deploy.getTakodProxyTargetServers()
+	if err != nil {
+		t.Fatalf("getTakodProxyTargetServers returned error: %v", err)
+	}
+	if len(got) != 1 || got[0] != "node-a" {
+		t.Fatalf("proxy targets = %#v, want node-a", got)
+	}
+
+	services := deploy.config.Environments["production"].Services
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNode(services, "node-a")
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
+	}
+	if !hasPublic {
+		t.Fatal("expected public services to be detected")
+	}
+	configText := string(data)
+	if !strings.Contains(configText, runtimeid.ContainerAlias("demo", "production", "web", 1)) {
+		t.Fatalf("edge proxy config missing local upstream:\n%s", configText)
+	}
+	remotePort, err := deploy.meshUpstreamPort("web", 2)
+	if err != nil {
+		t.Fatalf("meshUpstreamPort returned error: %v", err)
+	}
+	if !strings.Contains(configText, fmt.Sprintf("http://10.210.0.2:%d", remotePort)) {
+		t.Fatalf("edge proxy config missing remote mesh upstream:\n%s", configText)
+	}
+}
+
+func TestTakodProxyReconcileTargetsPrunesNonProxyNodes(t *testing.T) {
+	got := takodProxyReconcileTargets(
+		[]string{"node-a", "node-b", "node-c"},
+		[]string{"node-b"},
+	)
+	want := []takodProxyReconcileTarget{
+		{ServerName: "node-a", Reconcile: false},
+		{ServerName: "node-b", Reconcile: true},
+		{ServerName: "node-c", Reconcile: false},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("targets = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("targets[%d] = %#v, want %#v (all: %#v)", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestMeshUpstreamPortRejectsSlotRangeCollision(t *testing.T) {
 	deploy := testProxyDeployer()
 	if _, err := deploy.meshUpstreamPort("web", meshUpstreamPortSlotLimit+1); err == nil {

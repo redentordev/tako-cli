@@ -293,6 +293,11 @@ environments:
   production:
     servers:
       - production
+    # Optional: keep public ingress on dedicated edge nodes in multi-node setups.
+    # proxy:
+    #   placement:
+    #     constraints:
+    #       - node.labels.role==edge
     services:
       # ======================================================================
       # WEB SERVICE - Basic web application
