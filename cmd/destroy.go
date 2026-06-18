@@ -21,7 +21,7 @@ var (
 var destroyCmd = &cobra.Command{
 	Use:   "destroy",
 	Short: "Remove deployed application and optionally clean up app-owned leftovers",
-	Long: `Destroy the deployed application and cleanup resources.
+	Long: `Destroy the deployed application runtime and clean up app-owned resources.
 
 This command has two modes:
 
@@ -89,23 +89,23 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		mode = "PURGE"
 	}
 
-	fmt.Printf("⚠️  WARNING: You are about to %s the following servers:\n\n", mode)
+	fmt.Printf("⚠️  WARNING: You are about to %s this app/stage on the following node(s):\n\n", mode)
 	for _, serverName := range targetServerNames {
 		server := serversToDestroy[serverName]
 		fmt.Printf("   • %s (%s)\n", serverName, server.Host)
 	}
 
 	fmt.Printf("\n%s MODE will:\n", mode)
-	fmt.Println("   ✓ Stop and remove all application service replicas")
-	fmt.Println("   ✓ Remove application service images")
-	fmt.Println("   ✓ Remove deployment files and directories")
+	fmt.Println("   ✓ Stop and remove this app/stage service replicas")
+	fmt.Println("   ✓ Remove this app/stage service images")
+	fmt.Println("   ✓ Remove this app/stage deployment files and directories")
 
 	if destroyPurgeAll {
 		fmt.Println("   ✓ Prune unused app-owned volumes")
 		fmt.Println("   ✓ Prune stopped app containers and old app images")
-		fmt.Println("\nPreserving shared server setup (takod, tako-proxy, logs)")
+		fmt.Println("\nPreserving unrelated projects and shared server setup (takod, tako-proxy, logs)")
 	} else {
-		fmt.Println("\nPreserving server setup (takod, tako-proxy, logs)")
+		fmt.Println("\nPreserving unrelated projects and server setup (takod, tako-proxy, logs)")
 		fmt.Println("You can redeploy without running 'tako setup' again")
 	}
 
@@ -147,18 +147,18 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		fmt.Printf("→ Acquired remote destroy leases: %s\n", leaseSet.Summary())
 	}
 
-	fmt.Printf("\n🗑️  Destroying %d server(s)...\n\n", len(serversToDestroy))
+	fmt.Printf("\n🗑️  Removing app runtime on %d node(s)...\n\n", len(serversToDestroy))
 
 	totalErrors := 0
 
 	for _, serverName := range targetServerNames {
 		serverCfg := serversToDestroy[serverName]
-		fmt.Printf("=== Destroying server: %s (%s) ===\n", serverName, serverCfg.Host)
+		fmt.Printf("=== Removing app runtime on node: %s (%s) ===\n", serverName, serverCfg.Host)
 		if err := destroySingleServer(sshPool, serverName, serverCfg, cfg, envName, verbose, destroyPurgeAll); err != nil {
-			fmt.Printf("⚠️  Errors destroying %s: %v\n", serverName, err)
+			fmt.Printf("⚠️  Errors removing app runtime on %s: %v\n", serverName, err)
 			totalErrors++
 		} else {
-			fmt.Printf("✓ Server %s destroyed\n\n", serverName)
+			fmt.Printf("✓ App runtime removed on %s\n\n", serverName)
 		}
 	}
 
@@ -219,7 +219,7 @@ func destroySingleServerWithHooks(pool sshClientProvider, serverName string, ser
 		return fmt.Errorf("decommission failed: %w", err)
 	}
 
-	// Purge server setup if requested
+	// Prune app-owned leftovers if requested.
 	if purgeAll {
 		if err := purge(client, cfg, envName, verbose); err != nil {
 			return fmt.Errorf("purge failed: %w", err)

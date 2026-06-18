@@ -152,6 +152,31 @@ func TestCleanupSingleNodeReturnsPoolConnectionError(t *testing.T) {
 	}
 }
 
+func TestCleanupRequestForEnvironmentKeepsSharedDockerCacheOptIn(t *testing.T) {
+	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo"}}
+	repositories := []string{"demo/web"}
+	externalVolumes := []string{"shared-data"}
+
+	request := cleanupRequestForEnvironment(cfg, "production", repositories, externalVolumes, 3, false, true)
+	if request.Project != "demo" || request.Environment != "production" {
+		t.Fatalf("request scope = %s/%s, want demo/production", request.Project, request.Environment)
+	}
+	if !request.CleanOldImages || !request.CleanStoppedContainers || !request.CleanUnusedVolumes {
+		t.Fatalf("request should enable project-owned cleanup: %#v", request)
+	}
+	if request.CleanDanglingImages || request.CleanBuildCache {
+		t.Fatalf("default cleanup should not touch shared Docker cache: %#v", request)
+	}
+	if !request.SecureLogPermissions {
+		t.Fatalf("secure flag not propagated: %#v", request)
+	}
+
+	request = cleanupRequestForEnvironment(cfg, "production", repositories, externalVolumes, 2, true, false)
+	if !request.CleanDanglingImages || !request.CleanBuildCache {
+		t.Fatalf("docker cache flag should enable explicit shared Docker cache cleanup: %#v", request)
+	}
+}
+
 func waitForCleanupStarts(t *testing.T, started <-chan string, count int) {
 	t.Helper()
 	seen := map[string]bool{}

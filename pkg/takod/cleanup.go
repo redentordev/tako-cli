@@ -415,16 +415,6 @@ func runScopedProjectPrune(ctx context.Context, project string, environment stri
 			response.ImagesRemoved += count
 		}
 	}
-	if count, err := cleanupDanglingImages(ctx); err != nil {
-		warn("failed to remove dangling images during scoped prune: %v", err)
-	} else {
-		response.ImagesRemoved += count
-	}
-	if _, err := runDocker(ctx, "builder", "prune", "-f"); err != nil {
-		warn("failed to clean Docker build cache during scoped prune: %v", err)
-	} else {
-		response.BuildCacheCleaned = true
-	}
 	if _, err := cleanupUnusedProjectVolumes(ctx, project, environment, protectedVolumes); err != nil {
 		warn("failed to remove unused project volumes during scoped prune: %v", err)
 	} else {

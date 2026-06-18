@@ -219,11 +219,17 @@ func TestScopedProjectPruneDoesNotRunGlobalDockerSystemPrune(t *testing.T) {
 	if len(response.Warnings) > 0 {
 		t.Fatalf("CleanupProject warnings = %#v", response.Warnings)
 	}
+	if response.BuildCacheCleaned {
+		t.Fatal("scoped prune should not report shared Docker build cache cleanup")
+	}
 
 	entries := readCommandLog(t, logPath)
 	for _, entry := range entries {
 		if strings.Contains(entry, "docker system prune") || strings.Contains(entry, "docker volume prune") {
 			t.Fatalf("scoped prune should not run global prune command %q; all entries %#v", entry, entries)
+		}
+		if strings.Contains(entry, "docker builder prune") || strings.Contains(entry, "docker images -f dangling=true") {
+			t.Fatalf("scoped prune should not clean shared Docker cache via %q; all entries %#v", entry, entries)
 		}
 		if strings.Contains(entry, "docker images --format") {
 			t.Fatalf("environment-scoped prune should not remove project images across stages via %q; all entries %#v", entry, entries)

@@ -330,7 +330,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako deploy` | Deploy application to environment |
 | `tako deploy --force` | Reconcile unchanged app services; broad force skips persistent services unless a service is targeted |
 | `tako rollback [id]` | Rollback to previous/specific deployment |
-| `tako destroy` | Remove all services from server |
+| `tako destroy` | Remove this app/stage services while preserving shared server setup |
 
 ### Operations & Monitoring
 
@@ -387,7 +387,8 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako upgrade` | Upgrade Tako CLI to the latest version |
 | `tako upgrade servers` | Upgrade and verify server-side takod agents to this CLI version |
 | `tako live` | Disable maintenance mode and restore service traffic |
-| `tako cleanup` | Clean up old node runtime resources |
+| `tako cleanup` | Clean up old app/stage-owned node runtime resources |
+| `tako cleanup --docker-cache` | Also reclaim shared Docker build cache and dangling images |
 
 CI/CD runners use the same takod path as a laptop. See
 [CI/CD Deployments](./docs/CI-CD.md) and the
@@ -585,6 +586,12 @@ node. `tako doctor` checks the server-side takod agent version, then inspects
 proxy nodes and verifies that the live shared proxy has the required Traefik
 file-provider settings, TCP 80/443 publishes, UDP 443 publish for HTTP/3, and
 persistent ACME, dynamic-config, and access-log mounts.
+Destructive app operations are scoped to that same app/stage boundary. `tako
+remove`, `tako destroy`, and default `tako cleanup` do not remove unrelated
+project containers, volumes, proxy routes, or images. Node-wide Docker builder
+cache and dangling image cleanup can affect other projects' future build
+performance, so it only runs when `tako cleanup --docker-cache` is explicitly
+requested.
 By default every selected environment node with public routes reconciles the
 shared proxy for that app/stage. Built-in ACME TLS currently requires the
 proxy placement to resolve to one node, because distributed certificate

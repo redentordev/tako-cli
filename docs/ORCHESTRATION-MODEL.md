@@ -419,6 +419,16 @@ mutating runtime or state. CI and local machines compete for the same per-node
 leases, so concurrent operations fail fast instead of racing. The local `.tako`
 lock remains as a same-machine guard.
 
+On shared nodes, destructive commands are app/stage scoped. `remove`,
+`destroy`, and default `cleanup` target resources identified by the current
+`project.name` and environment, plus explicit service image repositories from
+the active config. They preserve unrelated containers, volumes, proxy routes,
+export networks, and the shared `takod`/`tako-proxy` runtime. Node-wide Docker
+builder cache and dangling image cleanup are intentionally excluded from default
+cleanup because those caches may be useful to unrelated projects on the same
+host; operators must pass `tako cleanup --docker-cache` to reclaim that shared
+cache.
+
 ## Implementation Status
 
 ```text

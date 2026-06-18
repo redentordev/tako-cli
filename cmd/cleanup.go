@@ -12,27 +12,32 @@ import (
 )
 
 var (
-	cleanupServer string
-	cleanupKeep   int
-	cleanupFull   bool
-	cleanupSecure bool
+	cleanupServer      string
+	cleanupKeep        int
+	cleanupFull        bool
+	cleanupSecure      bool
+	cleanupDockerCache bool
 )
 
 var cleanupCmd = &cobra.Command{
 	Use:   "cleanup",
-	Short: "Clean up node runtime resources and logs",
-	Long: `Clean up server resources to reclaim disk space.
+	Short: "Clean up app/stage runtime resources and logs",
+	Long: `Clean up app/stage runtime resources to reclaim disk space.
 
 This command helps maintain your servers by:
   - Removing old service images (keeps latest N)
   - Removing stopped service replicas
-  - Cleaning dangling images
-  - Pruning build cache
   - Removing unused Tako project volumes
   - Securing log file permissions
 
 Regular cleanup prevents disk space exhaustion and keeps your
 deployment servers lean and efficient.
+
+Shared-node safety:
+  - Default cleanup is scoped to the current project and environment
+  - It does not remove unrelated project containers, volumes, proxy routes, or images
+  - Docker builder cache and dangling image cleanup are global Docker operations;
+    use --docker-cache only when you intentionally want to reclaim shared cache
 
 Security:
   - Uses --secure flag to restrict log file permissions
@@ -43,7 +48,8 @@ Examples:
   tako cleanup                  # Clean all servers, keep 3 latest images
   tako cleanup --keep 5         # Keep 5 latest images
   tako cleanup --server prod    # Clean specific server
-  tako cleanup --full           # Aggressive cleanup
+  tako cleanup --full           # More aggressive app/stage cleanup
+  tako cleanup --docker-cache   # Also prune shared Docker build cache/dangling images
   tako cleanup --secure         # Also secure log permissions`,
 	RunE: runCleanup,
 }
@@ -52,8 +58,9 @@ func init() {
 	rootCmd.AddCommand(cleanupCmd)
 	cleanupCmd.Flags().StringVarP(&cleanupServer, "server", "s", "", "Specific server to clean (default: all servers)")
 	cleanupCmd.Flags().IntVarP(&cleanupKeep, "keep", "k", 3, "Number of latest images to keep per service")
-	cleanupCmd.Flags().BoolVarP(&cleanupFull, "full", "f", false, "Perform full cleanup (more aggressive)")
+	cleanupCmd.Flags().BoolVarP(&cleanupFull, "full", "f", false, "Perform more aggressive app/stage cleanup")
 	cleanupCmd.Flags().BoolVarP(&cleanupSecure, "secure", "", false, "Also secure log file permissions")
+	cleanupCmd.Flags().BoolVar(&cleanupDockerCache, "docker-cache", false, "Also clean Docker builder cache and dangling images shared by all projects")
 }
 
 func runCleanup(cmd *cobra.Command, args []string) error {
@@ -98,21 +105,16 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("🧹 Cleaning up %d server(s)...\n", len(serversToClean))
 	fmt.Printf("   Keeping %d latest images per service\n\n", keepImages)
+	fmt.Printf("Scope: project %s, environment %s\n", cfg.Project.Name, envName)
+	if cleanupDockerCache {
+		fmt.Println("⚠️  Shared Docker cache cleanup enabled: build cache and dangling images may be used by unrelated projects.")
+	} else {
+		fmt.Println("Shared Docker cache untouched. Use --docker-cache only when reclaiming node-wide Docker cache intentionally.")
+	}
+	fmt.Println()
 
 	results := collectCleanupNodes(serversToClean, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
-		return cleanupSingleNode(cfg, sshPool, serverCfg, takod.CleanupRequest{
-			Project:                cfg.Project.Name,
-			Environment:            envName,
-			ImageRepositories:      imageRepositories,
-			ExternalVolumes:        externalVolumes,
-			KeepImages:             keepImages,
-			CleanOldImages:         true,
-			CleanStoppedContainers: true,
-			CleanDanglingImages:    true,
-			CleanBuildCache:        true,
-			CleanUnusedVolumes:     true,
-			SecureLogPermissions:   cleanupSecure,
-		})
+		return cleanupSingleNode(cfg, sshPool, serverCfg, cleanupRequestForEnvironment(cfg, envName, imageRepositories, externalVolumes, keepImages, cleanupDockerCache, cleanupSecure))
 	})
 
 	totalErrors := 0
@@ -155,6 +157,22 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	fmt.Println("   Consider adding it to your deployment workflow or cron jobs")
 
 	return nil
+}
+
+func cleanupRequestForEnvironment(cfg *config.Config, envName string, imageRepositories []string, externalVolumes []string, keepImages int, includeDockerCache bool, secureLogs bool) takod.CleanupRequest {
+	return takod.CleanupRequest{
+		Project:                cfg.Project.Name,
+		Environment:            envName,
+		ImageRepositories:      imageRepositories,
+		ExternalVolumes:        externalVolumes,
+		KeepImages:             keepImages,
+		CleanOldImages:         true,
+		CleanStoppedContainers: true,
+		CleanDanglingImages:    includeDockerCache,
+		CleanBuildCache:        includeDockerCache,
+		CleanUnusedVolumes:     true,
+		SecureLogPermissions:   secureLogs,
+	}
 }
 
 type cleanupNodeAction func(serverName string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error)
