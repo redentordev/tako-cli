@@ -201,7 +201,10 @@ The phase writes response headers and bodies to the harness log directory. It
 always verifies HTTP/1.1, HTTP/2, and HTTP/3 `Alt-Svc` advertisement. If the
 local `curl` supports `--http3`, it also makes an HTTP/3 request. Set
 `TAKO_E2E_HTTP3_REQUIRED=1` or pass `--http3-required` when a test runner must
-fail instead of skipping an HTTP/3 wire request.
+fail instead of skipping an HTTP/3 wire request. If the default system `curl`
+lacks HTTP/3 support but another binary has it, set `TAKO_E2E_CURL` or pass
+`--curl /path/to/curl`. On macOS the harness also checks common Homebrew curl
+paths when HTTP/3 is required.
 
 For WebSocket services, include the WebSocket URL:
 
