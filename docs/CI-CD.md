@@ -161,6 +161,12 @@ its replicated actual snapshot from reachable nodes before the next deploy. The
 next deploy or state repair also rewrites the current target-node runtime state
 and prunes stale per-node actual snapshots for removed nodes.
 
+If a node still exists and you are intentionally shrinking the environment,
+clean up its services with `tako remove --server <node>` before removing its
+SSH config from `tako.yaml`. After a node is no longer configured, Tako can
+prune replicated state from reachable nodes, but it cannot stop containers on
+that removed host because it no longer has connection details for it.
+
 When a destroyed node is rebuilt with the same logical node name, keep it in
 `tako.yaml`, repair the node, and deploy through the normal mesh path:
 

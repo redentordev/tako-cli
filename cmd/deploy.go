@@ -191,6 +191,52 @@ func recordFailedDeploymentState(
 	return nil
 }
 
+func retiredDeploymentServers(previous []string, current []string) []string {
+	currentSet := make(map[string]struct{}, len(current))
+	for _, server := range current {
+		server = strings.TrimSpace(server)
+		if server != "" {
+			currentSet[server] = struct{}{}
+		}
+	}
+	seen := make(map[string]struct{}, len(previous))
+	retired := make([]string, 0)
+	for _, server := range previous {
+		server = strings.TrimSpace(server)
+		if server == "" {
+			continue
+		}
+		if _, ok := currentSet[server]; ok {
+			continue
+		}
+		if _, ok := seen[server]; ok {
+			continue
+		}
+		seen[server] = struct{}{}
+		retired = append(retired, server)
+	}
+	sort.Strings(retired)
+	return retired
+}
+
+func warnRetiredDeploymentServers(localStateMgr *localstate.Manager, currentServers []string) {
+	if localStateMgr == nil {
+		return
+	}
+	previous, err := localStateMgr.GetCurrentDeployment()
+	if err != nil || previous == nil || len(previous.Servers) == 0 {
+		return
+	}
+	retired := retiredDeploymentServers(previous.Servers, currentServers)
+	if len(retired) == 0 {
+		return
+	}
+	fmt.Printf("\n⚠ Previous deployment included node(s) no longer in this environment: %s\n", strings.Join(retired, ", "))
+	fmt.Println("  Tako cannot stop containers on nodes after their SSH config is removed.")
+	fmt.Println("  If the node still exists, re-add it temporarily and run 'tako remove --server <node>' before removing it.")
+	fmt.Println("  Use 'tako state forget-node <node> --yes' only to prune replicated state for a retired/destroyed node.")
+}
+
 func runDeploy(cmd *cobra.Command, args []string) error {
 	// Load deployment configuration
 	cfg, err := loadDeployConfig(cfgFile)
@@ -345,6 +391,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 		localStateMgr = nil // Continue without state management
 	}
+	warnRetiredDeploymentServers(localStateMgr, serverNames)
 
 	// Gather actual state from running containers across the selected mesh nodes.
 	actualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, localStateMgr)

@@ -8,9 +8,27 @@ import (
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
-func TestRemoveCommandDoesNotExposeServerFlag(t *testing.T) {
-	if flag := removeCmd.Flags().Lookup("server"); flag != nil {
-		t.Fatal("remove command should not expose a server flag")
+func TestRemoveCommandExposesServerFlag(t *testing.T) {
+	if flag := removeCmd.Flags().Lookup("server"); flag == nil {
+		t.Fatal("remove command should expose a server flag")
+	}
+}
+
+func TestResolveRemoveTargetServersFiltersEnvironmentServers(t *testing.T) {
+	got, err := resolveRemoveTargetServers("production", []string{"node-a", "node-b", "node-c"}, []string{"node-c", "node-a", "node-c"})
+	if err != nil {
+		t.Fatalf("resolveRemoveTargetServers returned error: %v", err)
+	}
+	want := []string{"node-a", "node-c"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("targets = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveRemoveTargetServersRejectsOutsideEnvironment(t *testing.T) {
+	_, err := resolveRemoveTargetServers("production", []string{"node-a"}, []string{"node-b"})
+	if err == nil {
+		t.Fatal("resolveRemoveTargetServers should reject servers outside environment")
 	}
 }
 

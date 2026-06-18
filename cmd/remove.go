@@ -13,7 +13,8 @@ import (
 )
 
 var (
-	removeForce bool
+	removeForce   bool
+	removeServers []string
 )
 
 var removeCmd = &cobra.Command{
@@ -33,6 +34,7 @@ To decommission an environment, use 'tako destroy'.
 
 Examples:
   tako remove
+  tako remove --server node-b --force
   tako remove --force`,
 	RunE: runRemove,
 }
@@ -40,6 +42,7 @@ Examples:
 func init() {
 	rootCmd.AddCommand(removeCmd)
 	removeCmd.Flags().BoolVarP(&removeForce, "force", "f", false, "Skip confirmation prompt")
+	removeCmd.Flags().StringSliceVar(&removeServers, "server", nil, "Only remove services from the named environment server(s)")
 }
 
 func runRemove(cmd *cobra.Command, args []string) error {
@@ -61,6 +64,10 @@ func runRemove(cmd *cobra.Command, args []string) error {
 	serverNames, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
 		return fmt.Errorf("failed to get environment servers: %w", err)
+	}
+	serverNames, err = resolveRemoveTargetServers(envName, serverNames, removeServers)
+	if err != nil {
+		return err
 	}
 	if len(serverNames) == 0 {
 		return fmt.Errorf("no servers configured for environment %s", envName)
@@ -94,6 +101,10 @@ func runRemove(cmd *cobra.Command, args []string) error {
 	fmt.Printf("   • Decommission the server\n")
 	fmt.Printf("   • Remove takod or tako-proxy\n")
 	fmt.Printf("   • Remove persistent volume data\n\n")
+	if len(removeServers) > 0 {
+		fmt.Printf("Scoped cleanup: only the selected server(s) above are targeted.\n")
+		fmt.Printf("Update tako.yaml after cleanup if you are retiring a node from the environment.\n\n")
+	}
 
 	// Confirmation unless --force
 	if !removeForce {
@@ -146,11 +157,43 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("remove incomplete: %s", strings.Join(errors, "; "))
 	}
 
-	fmt.Printf("\n✓ All services removed from environment %s\n", envName)
+	if len(removeServers) > 0 {
+		fmt.Printf("\n✓ Services removed from selected server(s) in environment %s\n", envName)
+	} else {
+		fmt.Printf("\n✓ All services removed from environment %s\n", envName)
+	}
 	fmt.Printf("\nThe servers are still provisioned and ready for new deployments.\n")
 	fmt.Printf("To deploy again: tako deploy\n")
 
 	return nil
+}
+
+func resolveRemoveTargetServers(envName string, environmentServers []string, selected []string) ([]string, error) {
+	if len(selected) == 0 {
+		return append([]string(nil), environmentServers...), nil
+	}
+	allowed := make(map[string]struct{}, len(environmentServers))
+	for _, serverName := range environmentServers {
+		allowed[serverName] = struct{}{}
+	}
+	selectedSet := make(map[string]struct{}, len(selected))
+	for _, serverName := range selected {
+		serverName = strings.TrimSpace(serverName)
+		if serverName == "" {
+			continue
+		}
+		if _, ok := allowed[serverName]; !ok {
+			return nil, fmt.Errorf("server %s is not listed in environment %s", serverName, envName)
+		}
+		selectedSet[serverName] = struct{}{}
+	}
+	targets := make([]string, 0, len(selectedSet))
+	for _, serverName := range environmentServers {
+		if _, ok := selectedSet[serverName]; ok {
+			targets = append(targets, serverName)
+		}
+	}
+	return targets, nil
 }
 
 func removeCleanupRequest(cfg *config.Config, envName string, services map[string]config.ServiceConfig) takod.CleanupRequest {

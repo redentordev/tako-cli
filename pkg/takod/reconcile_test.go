@@ -752,6 +752,12 @@ func TestTakodCommandHelper(t *testing.T) {
 		os.Exit(0)
 	}
 	switch commandArgs[0] {
+	case "build":
+		if output := os.Getenv("TAKO_FAKE_DOCKER_BUILD_ERROR"); output != "" {
+			_, _ = os.Stderr.WriteString(output)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	case "ps":
 		if output := os.Getenv("TAKO_FAKE_PS_OUTPUT"); output != "" {
 			_, _ = os.Stdout.WriteString(output)
