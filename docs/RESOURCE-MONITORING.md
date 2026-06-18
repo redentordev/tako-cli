@@ -53,6 +53,9 @@ Updated: 2024-01-15T10:30:45Z
 ### 2. `tako stats` - Container Statistics
 
 View per-container resource usage collected by `takod` from local containers.
+Tako containers use deterministic runtime names in the form
+`tako_<project>_<environment>_<service>_<slot>_<hash>`. Filtering uses Tako's
+Docker labels, so `--service web` does not depend on parsing those names.
 
 **Basic Usage:**
 ```bash
@@ -78,8 +81,8 @@ Timestamp: 2024-01-15 10:35:22
 ─────────────────────────────────────────────────────────────────────────────────────
 CONTAINER                                   CPU %        MEMORY     MEM %           NET I/O      BLOCK I/O
 ─────────────────────────────────────────────────────────────────────────────────────
-nextjs-todos_prod_web.1.abc123             2.45%    256MiB / 2GiB    12.5%    1.2MB / 850kB   10MB / 2MB
-nextjs-todos_prod_postgres.1.def456        0.89%    128MiB / 2GiB     6.3%     450kB / 320kB    5MB / 8MB
+tako_nextjs_todos_prod_web_1_0f3a54...     2.45%    256MiB / 2GiB    12.5%    1.2MB / 850kB   10MB / 2MB
+tako_nextjs_todos_prod_postgres_1_c20...   0.89%    128MiB / 2GiB     6.3%     450kB / 320kB    5MB / 8MB
 ```
 
 **Metrics Per Container:**
@@ -113,7 +116,7 @@ tako_memory_total_bytes{server="prod",host="203.0.113.10"} 4006387712
 
 # HELP tako_container_cpu_usage_percent Container CPU usage percentage
 # TYPE tako_container_cpu_usage_percent gauge
-tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="nextjs-todos_prod_web.1.abc"} 2.45
+tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="tako_nextjs_todos_prod_web_1_0f3a540c3d"} 2.45
 ```
 
 **Metrics Exported:**
