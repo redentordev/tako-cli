@@ -102,6 +102,39 @@ func TestRenderTakodProxyDynamicConfigUsesOnlyLocalUpstreamForOneNode(t *testing
 	}
 }
 
+func TestRenderTakodProxyDynamicConfigPrunesRemovedNodeUpstreams(t *testing.T) {
+	deploy := testProxyDeployer()
+	production := deploy.config.Environments["production"]
+	production.Servers = []string{"node-a"}
+	web := production.Services["web"]
+	web.Replicas = 2
+	production.Services["web"] = web
+	deploy.config.Environments["production"] = production
+
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNode(production.Services, "node-a")
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
+	}
+	if !hasPublic {
+		t.Fatal("expected public services to be detected")
+	}
+
+	configText := string(data)
+	for _, expected := range []string{
+		"url: http://" + runtimeid.ContainerAlias("demo", "production", "web", 1) + ":3000",
+		"url: http://" + runtimeid.ContainerAlias("demo", "production", "web", 2) + ":3000",
+	} {
+		if !strings.Contains(configText, expected) {
+			t.Fatalf("dynamic config missing %q after node removal:\n%s", expected, configText)
+		}
+	}
+	for _, removedNodeUpstream := range []string{"10.210.0.2", "node-b"} {
+		if strings.Contains(configText, removedNodeUpstream) {
+			t.Fatalf("dynamic config should not keep removed node upstream %q:\n%s", removedNodeUpstream, configText)
+		}
+	}
+}
+
 func TestRenderTakodProxyDynamicConfigSkipsScaleToZero(t *testing.T) {
 	deploy := testProxyDeployer()
 	services := deploy.config.Environments["production"].Services
