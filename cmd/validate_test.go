@@ -37,7 +37,28 @@ func TestRunValidateFailsInvalidYAMLBeforeGit(t *testing.T) {
 	if err == nil {
 		t.Fatal("runValidate should fail on invalid YAML")
 	}
-	for _, want := range []string{"YAML syntax error in tako.yaml", "line 3"} {
+	for _, want := range []string{"YAML syntax error in tako.yaml", "line 3", "3 |   version: [", "Check indentation"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "Git repository") {
+		t.Fatalf("validate should fail before git checks, got %q", err)
+	}
+}
+
+func TestRunValidateFailsInvalidJSONWithLineColumnBeforeGit(t *testing.T) {
+	root := switchToTempDir(t)
+	if err := os.WriteFile(filepath.Join(root, "tako.json"), []byte("{\n  \"project\": {\n    \"name\": \"demo\",\n  }\n}\n"), 0600); err != nil {
+		t.Fatalf("failed to write invalid config: %v", err)
+	}
+	resetValidateGlobals(t)
+
+	err := runValidate(&cobra.Command{}, nil)
+	if err == nil {
+		t.Fatal("runValidate should fail on invalid JSON")
+	}
+	for _, want := range []string{"JSON syntax error in tako.json", "line 4, column 3", "4 |   }", "^", "Check indentation"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want %q", err, want)
 		}
