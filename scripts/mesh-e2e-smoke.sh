@@ -95,6 +95,21 @@ run_invalid_config_check() {
     fail "invalid-config phase did not prove load balancer strategy preflight rejection"
   fi
 
+  if ! grep -Fq "Invalid placement failed during deploy config preflight" "$output"; then
+    cat "$output" >&2
+    fail "invalid-config phase did not prove placement preflight rejection"
+  fi
+
+  if ! grep -Fq "Invalid proxy domain failed during deploy config preflight" "$output"; then
+    cat "$output" >&2
+    fail "invalid-config phase did not prove proxy domain preflight rejection"
+  fi
+
+  if ! grep -Fq "Missing service source failed during deploy config preflight" "$output"; then
+    cat "$output" >&2
+    fail "invalid-config phase did not prove missing service source preflight rejection"
+  fi
+
   if grep -REq "=== Starting deployment ===|Acquired deployment lock|Acquired remote deploy leases|Starting takod deployment|upgrade servers|state repair" "$output" "$log_dir" 2>/dev/null; then
     cat "$output" >&2
     fail "invalid-config phase reached remote or mutating work"
