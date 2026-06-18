@@ -204,7 +204,9 @@ PORT=3002 HOSTNAME=instance-2 node index.js
 PORT=3003 HOSTNAME=instance-3 node index.js
 ```
 
-Then use a reverse proxy like nginx or haproxy to load balance.
+For deployed apps, Tako writes the `tako-proxy` route and upstream list from the
+replica plan. For local ad hoc testing, call each local port directly or run
+your own temporary local proxy; that proxy is outside the Tako deployment path.
 
 ## Health Checks
 
