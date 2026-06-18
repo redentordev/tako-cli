@@ -104,9 +104,9 @@ mesh-e2e:
 mesh-e2e-smoke:
 	@scripts/mesh-e2e-smoke.sh
 
-## examples: Validate deployment pattern examples
+## examples: Validate all example configs and deployment pattern assertions
 examples:
-	@examples/deployment-patterns/validate.sh
+	@examples/validate.sh
 
 ## ci-quality: Run formatting, diff, shell, examples, test, build, and vet gates
 ci-quality:
@@ -129,7 +129,7 @@ else
 	@find scripts examples -name '*.sh' -print0 | xargs -0 -n1 bash -n
 	@echo "Running mesh E2E harness smoke checks..."
 	@$(MAKE) mesh-e2e-smoke
-	@echo "Validating deployment pattern examples..."
+	@echo "Validating examples..."
 	@$(MAKE) examples
 	@echo "Running tests..."
 	@go test ./...

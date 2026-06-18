@@ -112,6 +112,23 @@ func TestDeploymentPatternDocsAndValidatorCoverCatalog(t *testing.T) {
 	}
 }
 
+func TestAllExamplesValidatorCoversTopLevelAndPatternConfigs(t *testing.T) {
+	validateScript := readExampleFile(t, "validate.sh")
+	for _, expected := range []string{
+		"find \"$ROOT/examples\" -mindepth 2 -maxdepth 2",
+		"-name 'tako-parallel.yaml'",
+		"find \"$ROOT/examples/deployment-patterns\" -mindepth 2 -maxdepth 2",
+		"VALIDATION_HOME=\"$TMP_DIR/home\"",
+		"HOME=\"$VALIDATION_HOME\"",
+		"\"$TMP_DIR/tako\" --config \"$file\" --env production validate --quiet",
+		"go test ./examples",
+	} {
+		if !strings.Contains(validateScript, expected) {
+			t.Fatalf("all examples validator missing %q", expected)
+		}
+	}
+}
+
 func TestExamplesDoNotUseKnownDemoDatabasePasswords(t *testing.T) {
 	forbidden := []string{
 		"dbpassword123",
