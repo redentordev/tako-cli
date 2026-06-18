@@ -470,6 +470,7 @@ func runStateStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	printStateStatusNodes(remoteNodes, cfg)
+	printStateStatusUnreachableGuidance(remoteNodes)
 
 	histories, desiredCandidates, actualCandidates, nodeActualCandidates := stateStatusCandidates(remoteNodes)
 	bestHistory, hasRemoteHistory := bestDeploymentHistory(histories)
@@ -1416,6 +1417,43 @@ func printStateStatusNodes(nodes []stateStatusNode, cfg *config.Config) {
 		printStateStatusDesired(node.desired, node.desiredErr)
 		printStateStatusActual(node.actual, node.actualErr, node.nodeActual)
 		printStateStatusLease(node.lease, node.leaseErr)
+	}
+}
+
+func printStateStatusUnreachableGuidance(nodes []stateStatusNode) {
+	lines := stateStatusUnreachableGuidance(nodes)
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Println()
+	for _, line := range lines {
+		fmt.Println(line)
+	}
+}
+
+func stateStatusUnreachableGuidance(nodes []stateStatusNode) []string {
+	names := make([]string, 0)
+	for _, node := range nodes {
+		if node.connectErr != nil {
+			names = append(names, node.name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+	nodeList := strings.Join(names, ", ")
+	if len(names) == 1 {
+		return []string{
+			fmt.Sprintf("Unreachable node: %s", nodeList),
+			fmt.Sprintf("  Destroyed node: remove %s from tako.yaml, then run 'tako state forget-node %s --yes' and 'tako deploy --yes'.", names[0], names[0]),
+			fmt.Sprintf("  Rebuilt same-name node: keep %s in tako.yaml, then run 'tako setup --server %s', 'tako upgrade servers --server %s', and 'tako deploy --yes'.", names[0], names[0], names[0]),
+		}
+	}
+	return []string{
+		fmt.Sprintf("Unreachable nodes: %s", nodeList),
+		"  Destroyed nodes: remove them from tako.yaml, then run 'tako state forget-node <node> --yes' for each removed node and 'tako deploy --yes'.",
+		"  Rebuilt same-name nodes: keep them in tako.yaml, then run 'tako setup --server <node>', 'tako upgrade servers --server <node>', and 'tako deploy --yes'.",
 	}
 }
 

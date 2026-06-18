@@ -923,6 +923,54 @@ func TestStateStatusReachableCount(t *testing.T) {
 	}
 }
 
+func TestStateStatusUnreachableGuidanceNamesRecoveryPaths(t *testing.T) {
+	lines := stateStatusUnreachableGuidance([]stateStatusNode{
+		{name: "node-a"},
+		{name: "node-b", connectErr: errors.New("timeout")},
+	})
+	output := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"Unreachable node: node-b",
+		"Destroyed node: remove node-b from tako.yaml",
+		"tako state forget-node node-b --yes",
+		"Rebuilt same-name node: keep node-b in tako.yaml",
+		"tako setup --server node-b",
+		"tako upgrade servers --server node-b",
+		"tako deploy --yes",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("guidance = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestStateStatusUnreachableGuidanceHandlesMultipleNodes(t *testing.T) {
+	lines := stateStatusUnreachableGuidance([]stateStatusNode{
+		{name: "node-c", connectErr: errors.New("timeout")},
+		{name: "node-a"},
+		{name: "node-b", connectErr: errors.New("connection refused")},
+	})
+	output := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"Unreachable nodes: node-b, node-c",
+		"Destroyed nodes: remove them from tako.yaml",
+		"tako state forget-node <node> --yes",
+		"Rebuilt same-name nodes: keep them in tako.yaml",
+		"tako setup --server <node>",
+		"tako upgrade servers --server <node>",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("guidance = %q, want %q", output, want)
+		}
+	}
+}
+
+func TestStateStatusUnreachableGuidanceEmptyWhenAllReachable(t *testing.T) {
+	if lines := stateStatusUnreachableGuidance([]stateStatusNode{{name: "node-a"}}); len(lines) != 0 {
+		t.Fatalf("guidance = %#v, want none", lines)
+	}
+}
+
 func TestStateStatusNoReachableErrorIncludesFailClosedGuidance(t *testing.T) {
 	err := stateStatusNoReachableError("production", []stateStatusNode{
 		{name: "node-a", connectErr: errors.New("timeout")},
