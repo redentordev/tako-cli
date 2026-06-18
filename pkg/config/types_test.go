@@ -34,6 +34,15 @@ func TestLoadConfigRejectsUnknownJSONStorageField(t *testing.T) {
 	}
 }
 
+func TestGetFullImageNameWithTagUsesExplicitTag(t *testing.T) {
+	cfg := &Config{Project: ProjectConfig{Name: "demo", Version: "1.0.0"}}
+
+	got := cfg.GetFullImageNameWithTag("web", "abcdef1234567890")
+	if got != "demo/web:abcdef1234567890" {
+		t.Fatalf("image = %q, want explicit commit tag", got)
+	}
+}
+
 func TestLoadConfigRejectsUnknownNestedJSONField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tako.json")
 	err := os.WriteFile(path, []byte(`{
@@ -145,6 +154,125 @@ func TestValidateConfigRejectsNFSVolumeSpecs(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "NFS volume") || !strings.Contains(err.Error(), "no longer supported") {
 		t.Fatalf("error = %q, want unsupported NFS volume error", err)
+	}
+}
+
+func TestValidateConfigRejectsPersistentServiceWithoutVolume(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["postgres"] = ServiceConfig{
+		Image:      "postgres:16-alpine",
+		Persistent: true,
+		Env: map[string]string{
+			"POSTGRES_PASSWORD": "secret",
+		},
+	}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject persistent services without volumes")
+	}
+	if !strings.Contains(err.Error(), "persistent services must declare at least one volume") {
+		t.Fatalf("error = %q, want persistent volume error", err)
+	}
+}
+
+func TestValidateConfigRejectsPersistentServiceWithoutMultiNodePlacement(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["postgres"] = ServiceConfig{
+		Image:      "postgres:16-alpine",
+		Persistent: true,
+		Volumes:    []string{"pgdata:/var/lib/postgresql/data"},
+	}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject floating persistent service in multi-node environment")
+	}
+	if !strings.Contains(err.Error(), "must set placement.strategy to pinned or global") {
+		t.Fatalf("error = %q, want persistent placement guidance", err)
+	}
+}
+
+func TestValidateConfigRejectsPersistentServiceWithSpreadPlacement(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["postgres"] = ServiceConfig{
+		Image:      "postgres:16-alpine",
+		Persistent: true,
+		Volumes:    []string{"pgdata:/var/lib/postgresql/data"},
+		Placement:  &PlacementConfig{Strategy: "spread"},
+	}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject spread placement for persistent service")
+	}
+	if !strings.Contains(err.Error(), "must use placement.strategy pinned or global") {
+		t.Fatalf("error = %q, want pinned/global guidance", err)
+	}
+}
+
+func TestValidateConfigRejectsPersistentServiceWithReplicas(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["postgres"] = ServiceConfig{
+		Image:      "postgres:16-alpine",
+		Persistent: true,
+		Replicas:   2,
+		Volumes:    []string{"pgdata:/var/lib/postgresql/data"},
+		Placement:  &PlacementConfig{Strategy: "pinned", Servers: []string{"node-a"}},
+	}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject replicas on persistent services")
+	}
+	if !strings.Contains(err.Error(), "persistent services do not support replicas > 1") {
+		t.Fatalf("error = %q, want persistent replicas guidance", err)
+	}
+}
+
+func TestValidateConfigAcceptsPersistentServiceWithPinnedPlacement(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Proxy = &EnvironmentProxyConfig{
+		Placement: &PlacementConfig{Strategy: "pinned", Servers: []string{"node-a"}},
+	}
+	production.Services["postgres"] = ServiceConfig{
+		Image:      "postgres:16-alpine",
+		Persistent: true,
+		Volumes:    []string{"pgdata:/var/lib/postgresql/data"},
+		Placement:  &PlacementConfig{Strategy: "pinned", Servers: []string{"node-a"}},
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+}
+
+func TestValidateConfigAcceptsPersistentServiceWithGlobalPlacement(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Proxy = &EnvironmentProxyConfig{
+		Placement: &PlacementConfig{Strategy: "pinned", Servers: []string{"node-a"}},
+	}
+	production.Services["redis-agent"] = ServiceConfig{
+		Image:      "redis:7-alpine",
+		Persistent: true,
+		Volumes:    []string{"redis_data:/data"},
+		Placement:  &PlacementConfig{Strategy: "global"},
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
 	}
 }
 

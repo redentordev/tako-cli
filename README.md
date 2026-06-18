@@ -268,6 +268,14 @@ and `tako doctor` verify that `sudo docker info` reaches a supported daemon.
 tako deploy -e production
 ```
 
+Build-backed services are tagged with the current Git commit hash, so changing
+app source and committing it is enough to produce a new deploy artifact. You do
+not need to bump `project.version` for redeploys; keep it as project metadata.
+Use `tako deploy --force` to intentionally reconcile unchanged app services.
+Broad force skips services marked `persistent: true`; use
+`tako deploy --service db --force` when you deliberately need to recreate a
+stateful service container.
+
 Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.sslip.io`!
 
 ---
@@ -279,7 +287,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Reconciled Deployments** - Recreate containers to match the desired takod state with health checks
 - **Parallel Deployment** - Deploy multiple services concurrently (default behavior)
 - **Instant Rollback** - Revert to any previous deployment with one command
-- **Git-Based Versioning** - Every deployment tied to a Git commit
+- **Git-Based Versioning** - Every deployment and build-backed image is tied to a Git commit
 - **State Management** - Deployment history tracked on the server with local sync for new machines
 - **Remote Lease** - CI, laptops, and mutating operations share remote operation locks
 - **Automatic HTTPS** - tako-proxy provisions SSL certificates via Let's Encrypt
@@ -320,6 +328,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako validate` | Validate config locally before Git, SSH, build, or deploy work |
 | `tako setup` | Set up or refresh an existing server with Docker, WireGuard, takod, firewall, and security hardening |
 | `tako deploy` | Deploy application to environment |
+| `tako deploy --force` | Reconcile unchanged app services; broad force skips persistent services unless a service is targeted |
 | `tako rollback [id]` | Rollback to previous/specific deployment |
 | `tako destroy` | Remove all services from server |
 
@@ -486,8 +495,12 @@ services:
 
   database:
     image: postgres:15
+    persistent: true
     volumes:
       - db_data:/var/lib/postgresql/data
+    placement:
+      strategy: pinned
+      servers: [production]
     env:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
 ```
@@ -528,16 +541,30 @@ services:
 
   redis:
     image: redis:7-alpine
+    persistent: true
     volumes:
       - redis_data:/data
+    placement:
+      strategy: pinned
+      servers: [production]
 ```
 
 ### Storage Model
 
 Tako treats Docker volumes as node-local by default. This keeps a one-node setup
 and a multi-node mesh on the same operational path: each service can keep
-persistent data on the node where it runs, and stateful services should use
-`pinned` placement unless they are designed for multi-writer operation.
+persistent data on the node where it runs. In multi-node environments, services
+with `persistent: true` must use explicit `pinned` or `global` placement.
+Use `pinned` for singleton accessories such as Postgres, MySQL, MongoDB, Redis,
+or n8n. Use `global` only when one independent stateful instance per node is
+intentional, such as a node-local agent or cache.
+
+Persistent services are singleton by design: `replicas` must stay at 1. If you
+need more than one copy of a stateful system, use an external managed service or
+the datastore's own clustering/replication model, then scale stateless app
+containers that connect to it. `placement.strategy: global` is the exception for
+one independent node-local instance per selected node; it is not one replicated
+database.
 
 For data that must be shared across nodes, use an external storage service or an
 application-level replication system such as a managed database, object storage,
@@ -687,6 +714,43 @@ deployment:
 - Dependency-aware scheduling
 - Automatic build caching
 - Concurrent builds and deploys
+
+---
+
+### Stateful Services And Volumes
+
+Containers are disposable; Docker volumes are the data boundary. Databases,
+queues, CMS storage, and tools such as n8n should use prebuilt images with
+`persistent: true` and at least one named or external volume:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    port: 5432
+    persistent: true
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    placement:
+      strategy: pinned
+      servers: [primary]
+    env:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: app
+```
+
+Tako validates that persistent services declare a volume before deploy. Normal
+commit deploys do not recreate unchanged image-only services, so a source
+change in `web` does not bounce `postgres`. In multi-node environments, Tako
+also requires explicit `placement.strategy: pinned` or `global` for persistent
+services so node-local data has a known home. Broad `tako deploy --force` skips
+persistent services; targeted `tako deploy --service postgres --force` is the
+explicit opt-in when you need to recreate one container while keeping the same
+volume.
+
+Do not add `replicas` to persistent services. Scale the stateless app tier, or
+move state to an external/clustered service before scaling multiple writers.
 
 ---
 

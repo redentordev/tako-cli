@@ -536,6 +536,7 @@ func (d *Deployer) shouldPublishMeshUpstreams() (bool, error) {
 func serviceRuntimeLabels(project string, environment string, serviceName string, service config.ServiceConfig) map[string]string {
 	labels := map[string]string{
 		runtimeid.ServiceIdentityLabel: runtimeid.ServiceIdentity(project, environment, serviceName),
+		"tako.persistent":              strconv.FormatBool(service.Persistent),
 	}
 	configHash, ok := reconcile.SafeServiceConfigHash(service)
 	if !ok {

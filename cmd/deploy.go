@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ var (
 	skipBuild     bool
 	deployYes     bool
 	allowDirty    bool
+	deployForce   bool
 )
 
 var deployCmd = &cobra.Command{
@@ -52,6 +54,7 @@ func init() {
 	deployCmd.Flags().BoolVar(&skipBuild, "skip-build", false, "Skip building the service image")
 	deployCmd.Flags().BoolVarP(&deployYes, "yes", "y", false, "Skip confirmation prompts (non-interactive mode)")
 	deployCmd.Flags().BoolVar(&allowDirty, "allow-dirty", false, "Allow deploying with uncommitted local changes")
+	deployCmd.Flags().BoolVar(&deployForce, "force", false, "Reconcile selected services even when no config drift is detected")
 }
 
 func ensureDeployRuntimeSupported(cfg *config.Config) error {
@@ -376,7 +379,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if plan.IsEmpty() && !hasBuildServices(services) {
+	if plan.IsEmpty() && !hasBuildServices(services) && !deployForce {
 		if err := deploy.ReconcileTakodProxy(services); err != nil {
 			return fmt.Errorf("failed to reconcile proxy routes: %w", err)
 		}
@@ -384,9 +387,17 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	if plan.IsEmpty() {
-		fmt.Println("\n-> No config drift detected; build services will still be reconciled for the current commit.")
+		if deployForce {
+			fmt.Println("\n-> No config drift detected; --force will reconcile selected services anyway.")
+		} else {
+			fmt.Println("\n-> No config drift detected; build services will still be reconciled for the current commit.")
+		}
 	}
-	servicesToDeploy := servicesToDeployForPlan(plan, services)
+	servicesToDeploy := servicesToDeployForPlan(plan, services, deployForce, deployService != "")
+	if skipped := persistentServicesSkippedByForce(services, servicesToDeploy, deployForce, deployService != ""); len(skipped) > 0 {
+		fmt.Printf("\n-> Skipping persistent service(s) during broad --force: %s\n", strings.Join(skipped, ", "))
+		fmt.Println("   Use --service <name> --force when you intentionally need to recreate one.")
+	}
 
 	if len(servers) == 1 {
 		fmt.Printf("\n🐙 Using takod mesh runtime (one node)\n\n")
@@ -448,7 +459,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	deploymentFailed := false
 	var deploymentError error
-	imageRefs := defaultImageRefs(cfg, envName, services)
+	buildImageTag := commitInfo.Hash
+	imageRefs := defaultDeployImageRefs(cfg, envName, services, buildImageTag)
 
 	// Resolve service deployment order based on dependencies
 	resolver := dependency.NewResolver(services, verbose)
@@ -471,13 +483,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("→ Deploying service: %s\n", serviceName)
 
-		// Get full image name
-		fullImageName := cfg.GetFullImageName(serviceName, envName)
+		fullImageName := deployImageRef(cfg, envName, serviceName, service, buildImageTag)
 
 		// Build the image if needed; runtime reconciliation still goes through takod.
 		if !skipBuild && service.Build != "" {
 			// Build the image on the first connected node
-			builtImageName, err := deploy.BuildImage(serviceName, &service)
+			builtImageName, err := deploy.BuildImage(serviceName, &service, fullImageName)
 			if err != nil {
 				fmt.Printf("  ✗ Build failed: %v\n", err)
 				deploymentFailed = true
@@ -569,10 +580,10 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			finalNodeActualState,
 			gitInfoFromCommit(commitInfo),
 			"deploy.succeeded",
-			fmt.Sprintf("deployed %d service(s)", len(services)),
+			fmt.Sprintf("deployed %d service(s)", len(servicesToDeploy)),
 			map[string]string{
 				"commit":          commitInfo.ShortHash,
-				"services":        fmt.Sprintf("%d", len(services)),
+				"services":        fmt.Sprintf("%d", len(servicesToDeploy)),
 				"desiredServices": fmt.Sprintf("%d", len(runtimeServices)),
 			},
 		); err != nil {
@@ -603,7 +614,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				DurationSeconds: int(time.Since(startTime).Seconds()),
 				GitCommit:       commitInfo.Hash,
 				TriggeredBy:     remotestate.GetCurrentUser(),
-				Notes:           fmt.Sprintf("Deployed %d services to %s runtime", len(services), cfg.GetRuntimeMode()),
+				Notes:           fmt.Sprintf("Deployed %d services to %s runtime", len(servicesToDeploy), cfg.GetRuntimeMode()),
 			}
 			if err := localStateMgr.SaveDeployment(localDeployment); err != nil && verbose {
 				fmt.Printf("Warning: failed to save local deployment state: %v\n", err)
@@ -866,32 +877,58 @@ func hasBuildServices(services map[string]config.ServiceConfig) bool {
 	return false
 }
 
-func servicesToDeployForPlan(plan *reconcile.ReconciliationPlan, services map[string]config.ServiceConfig) map[string]config.ServiceConfig {
+func servicesToDeployForPlan(plan *reconcile.ReconciliationPlan, services map[string]config.ServiceConfig, force bool, explicitServiceTarget bool) map[string]config.ServiceConfig {
 	if len(services) == 0 {
 		return map[string]config.ServiceConfig{}
 	}
-	if plan == nil {
+	if plan == nil && !force {
 		return cloneServiceMap(services)
 	}
 
 	selected := make(map[string]config.ServiceConfig)
-	if plan.IsEmpty() {
+	if plan != nil {
+		for _, change := range plan.Changes {
+			if change.Type != reconcile.ChangeAdd && change.Type != reconcile.ChangeUpdate {
+				continue
+			}
+			service, ok := services[change.ServiceName]
+			if ok {
+				selected[change.ServiceName] = service
+			}
+		}
+	}
+
+	if force {
 		for serviceName, service := range services {
-			if service.Build != "" {
+			if explicitServiceTarget || !service.Persistent {
 				selected[serviceName] = service
 			}
 		}
 		return selected
 	}
 
-	for _, change := range plan.Changes {
-		if change.Type != reconcile.ChangeAdd && change.Type != reconcile.ChangeUpdate {
-			continue
-		}
-		service, ok := services[change.ServiceName]
-		if ok {
-			selected[change.ServiceName] = service
+	for serviceName, service := range services {
+		if service.Build != "" {
+			selected[serviceName] = service
 		}
 	}
 	return selected
+}
+
+func persistentServicesSkippedByForce(services map[string]config.ServiceConfig, selected map[string]config.ServiceConfig, force bool, explicitServiceTarget bool) []string {
+	if !force || explicitServiceTarget || len(services) == 0 {
+		return nil
+	}
+	var skipped []string
+	for serviceName, service := range services {
+		if !service.Persistent {
+			continue
+		}
+		if _, ok := selected[serviceName]; ok {
+			continue
+		}
+		skipped = append(skipped, serviceName)
+	}
+	sort.Strings(skipped)
+	return skipped
 }

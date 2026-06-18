@@ -34,6 +34,8 @@ environments:
         image: ghost:5-alpine
         port: 2368
         persistent: true
+        volumes:
+          - ghost_content:/var/lib/ghost/content
         dependsOn:
           - mysql
         proxy:

@@ -161,6 +161,7 @@ type ActualService struct {
 	Containers     []string
 	ConfigHash     string
 	RuntimeID      string
+	Persistent     bool
 	ConfigSnapshot *config.ServiceConfig // Last deployed config
 }
 
@@ -195,6 +196,9 @@ func detectChanges(projectName string, environment string, serviceName string, d
 	}
 	if desiredReplicas != actual.Replicas {
 		reasons = append(reasons, fmt.Sprintf("Replicas changed: %d → %d", actual.Replicas, desiredReplicas))
+	}
+	if desired.Persistent != oldConfig.Persistent {
+		reasons = append(reasons, "Persistence metadata changed")
 	}
 	if len(reasons) > 0 {
 		return reasons

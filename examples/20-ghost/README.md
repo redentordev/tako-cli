@@ -209,10 +209,13 @@ This example is intentionally single-instance because Ghost content is stored in
 the `ghost_content` volume on the deployment node.
 
 You can add Ghost replicas only after moving uploaded content to external shared
-storage or adding application-level content replication:
+storage or adding application-level content replication. At that point, remove
+the node-local `persistent: true` and content volume from the Ghost app service,
+then scale the stateless Ghost containers:
 
 ```yaml
 ghost:
+  # persistent: false / omitted when content is externalized
   replicas: 2
 ```
 

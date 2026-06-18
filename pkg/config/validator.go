@@ -240,6 +240,10 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		env.Services[serviceName] = service
 	}
 
+	if err := validateEnvironmentPersistentPlacement(envName, env, cfg); err != nil {
+		return err
+	}
+
 	if err := validateEnvironmentProxyACMESafety(envName, env, cfg); err != nil {
 		return err
 	}
@@ -249,6 +253,38 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		return err
 	}
 
+	return nil
+}
+
+func validateEnvironmentPersistentPlacement(envName string, env *EnvironmentConfig, cfg *Config) error {
+	environmentServers, err := environmentServerTargets(envName, env, cfg)
+	if err != nil {
+		return err
+	}
+	if len(environmentServers) <= 1 {
+		return nil
+	}
+	for serviceName, service := range env.Services {
+		if !service.Persistent {
+			continue
+		}
+		if service.Placement == nil || strings.TrimSpace(service.Placement.Strategy) == "" {
+			return fmt.Errorf("environment %s service %s: persistent services in multi-node environments must set placement.strategy to pinned or global so node-local data has an explicit home", envName, serviceName)
+		}
+		strategy := strings.TrimSpace(service.Placement.Strategy)
+		if strategy != "pinned" && strategy != "global" {
+			return fmt.Errorf("environment %s service %s: persistent services in multi-node environments must use placement.strategy pinned or global, got %q", envName, serviceName, strategy)
+		}
+		if strategy == "pinned" {
+			targets, err := ResolvePlacementTargets(service.Placement, cfg.Servers, environmentServers, envName)
+			if err != nil {
+				return fmt.Errorf("environment %s service %s placement: %w", envName, serviceName, err)
+			}
+			if len(targets) == 0 {
+				return fmt.Errorf("environment %s service %s placement: pinned placement resolved to no servers", envName, serviceName)
+			}
+		}
+	}
 	return nil
 }
 
@@ -475,6 +511,9 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 	if err := validateServiceVolumes(name, service, cfg); err != nil {
 		return err
 	}
+	if service.Persistent && len(service.Volumes) == 0 {
+		return fmt.Errorf("service %s: persistent services must declare at least one volume so data is not stored only in the container filesystem", name)
+	}
 
 	// Set default replicas
 	if service.Replicas == 0 {
@@ -482,6 +521,9 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 	}
 	if service.Replicas < 0 {
 		return fmt.Errorf("service %s: replicas cannot be negative", name)
+	}
+	if service.Persistent && service.Replicas > 1 {
+		return fmt.Errorf("service %s: persistent services do not support replicas > 1 with node-local volumes; keep replicas at 1, use placement.strategy global for one independent instance per node, or move state to external/clustered storage before scaling app containers", name)
 	}
 	if err := ValidatePlacementConfig(service.Placement); err != nil {
 		return fmt.Errorf("service %s: %w", name, err)

@@ -559,12 +559,9 @@ func (c *Config) GetRegistryURL() string {
 	return ""
 }
 
-// GetFullImageName returns the full image name with registry and environment tag
-func (c *Config) GetFullImageName(serviceName string, envName string) string {
+// GetFullImageNameWithTag returns the full image name for an explicit tag.
+func (c *Config) GetFullImageNameWithTag(serviceName string, tag string) string {
 	registryURL := c.GetRegistryURL()
-
-	// Environment-specific tag: project/service:version-env
-	versionTag := fmt.Sprintf("%s-%s", c.Project.Version, envName)
 
 	if registryURL != "" {
 		// Multi-server setup with registry
@@ -572,15 +569,21 @@ func (c *Config) GetFullImageName(serviceName string, envName string) string {
 			registryURL,
 			c.Project.Name,
 			serviceName,
-			versionTag,
+			tag,
 		)
 	}
 	// Single-server setup without registry
 	return fmt.Sprintf("%s/%s:%s",
 		c.Project.Name,
 		serviceName,
-		versionTag,
+		tag,
 	)
+}
+
+// GetFullImageName returns the legacy config-version image name.
+func (c *Config) GetFullImageName(serviceName string, envName string) string {
+	versionTag := fmt.Sprintf("%s-%s", c.Project.Version, envName)
+	return c.GetFullImageNameWithTag(serviceName, versionTag)
 }
 
 // expandEnvWithTrim expands ${VAR} placeholders and trims their values.

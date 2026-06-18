@@ -63,6 +63,24 @@ func defaultImageRefs(cfg *config.Config, envName string, services map[string]co
 	return imageRefs
 }
 
+func defaultDeployImageRefs(cfg *config.Config, envName string, services map[string]config.ServiceConfig, buildTag string) map[string]string {
+	imageRefs := make(map[string]string, len(services))
+	for serviceName, service := range services {
+		imageRefs[serviceName] = deployImageRef(cfg, envName, serviceName, service, buildTag)
+	}
+	return imageRefs
+}
+
+func deployImageRef(cfg *config.Config, envName string, serviceName string, service config.ServiceConfig, buildTag string) string {
+	if service.Image != "" {
+		return service.Image
+	}
+	if service.Build != "" && buildTag != "" {
+		return cfg.GetFullImageNameWithTag(serviceName, buildTag)
+	}
+	return cfg.GetFullImageName(serviceName, envName)
+}
+
 func mergeRuntimeImageRefs(
 	cfg *config.Config,
 	envName string,

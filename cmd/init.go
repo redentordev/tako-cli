@@ -363,9 +363,13 @@ environments:
       # postgres:
       #   image: postgres:16-alpine
       #   port: 5432
-      #   persistent: true  # Mark as persistent to prevent accidental removal
+      #   persistent: true  # Requires a volume; broad --force skips persistent services
       #   volumes:
       #     - postgres_data:/var/lib/postgresql/data
+      #   # Required in multi-node environments so data has a known home.
+      #   # placement:
+      #   #   strategy: pinned
+      #   #   servers: [server1]
       #   env:
       #     POSTGRES_USER: myapp
       #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -381,6 +385,9 @@ environments:
       #   persistent: true
       #   volumes:
       #     - redis_data:/data
+      #   # placement:
+      #   #   strategy: pinned
+      #   #   servers: [server1]
 
       # ======================================================================
       # WORKER SERVICE - Background jobs example

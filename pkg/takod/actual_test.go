@@ -66,6 +66,37 @@ func TestParseActualStateUsesRuntimeLabelsForHashedContainers(t *testing.T) {
 	}
 }
 
+func TestParseActualStateReadsPersistentLabel(t *testing.T) {
+	output := `
+demo_production_postgres_1|postgres:16-alpine|container-a|hash-db||demo|production|postgres|true
+`
+
+	actual := ParseActualState("demo", "production", output)
+	postgres := actual.Services["postgres"]
+	if postgres == nil {
+		t.Fatalf("postgres service missing: %#v", actual.Services)
+	}
+	if !postgres.Persistent {
+		t.Fatalf("postgres persistent = false, want true")
+	}
+}
+
+func TestParseActualStateKeepsPersistentWhenAnyReplicaIsLabeled(t *testing.T) {
+	output := `
+demo_production_db_1|postgres:16-alpine|container-a|hash-db||demo|production|db|false
+demo_production_db_2|postgres:16-alpine|container-b|hash-db||demo|production|db|true
+`
+
+	actual := ParseActualState("demo", "production", output)
+	db := actual.Services["db"]
+	if db == nil {
+		t.Fatalf("db service missing: %#v", actual.Services)
+	}
+	if !db.Persistent {
+		t.Fatalf("mixed persistent labels should preserve true")
+	}
+}
+
 func TestParseActualStateClearsMixedRuntimeID(t *testing.T) {
 	identity := runtimeid.ServiceIdentity("demo", "production", "web")
 	output := `

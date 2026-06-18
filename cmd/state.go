@@ -2433,6 +2433,7 @@ func aggregateActualSnapshotFromNodeSnapshots(project string, environment string
 					existing.ConfigHash = ""
 				}
 				existing.RuntimeID = mergeActualRuntimeID(existing.RuntimeID, service.RuntimeID)
+				existing.Persistent = existing.Persistent || service.Persistent
 				snapshot.Services[serviceName] = existing
 				continue
 			}
@@ -2443,6 +2444,7 @@ func aggregateActualSnapshotFromNodeSnapshots(project string, environment string
 				Containers: append([]string(nil), service.Containers...),
 				ConfigHash: service.ConfigHash,
 				RuntimeID:  service.RuntimeID,
+				Persistent: service.Persistent,
 			}
 		}
 	}
@@ -3003,6 +3005,7 @@ func actualSnapshotFromTakodActual(project string, environment string, node stri
 			Containers: append([]string(nil), service.Containers...),
 			ConfigHash: service.ConfigHash,
 			RuntimeID:  service.RuntimeID,
+			Persistent: service.Persistent,
 		}
 	}
 	return snapshot
