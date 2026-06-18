@@ -60,81 +60,80 @@ tako_uptime_seconds{server="prod",host="203.0.113.10"} 73793
 
 # HELP tako_container_cpu_usage_percent Container CPU usage percentage
 # TYPE tako_container_cpu_usage_percent gauge
-tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_postgres.1.ljmlwn48ubxpmb1lttltc59d7"} 0.00
+tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="tako_fullstack_production_postgres_1_240bfb3c22"} 0.00
 
 # HELP tako_container_memory_used_bytes Container memory usage in bytes
 # TYPE tako_container_memory_used_bytes gauge
-tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="fullstack_production_postgres.1.ljmlwn48ubxpmb1lttltc59d7"} 20468203
+tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="tako_fullstack_production_postgres_1_240bfb3c22"} 20468203
 
 # HELP tako_container_memory_limit_bytes Container memory limit in bytes
 # TYPE tako_container_memory_limit_bytes gauge
-tako_container_memory_limit_bytes{server="prod",host="203.0.113.10",container="fullstack_production_postgres.1.ljmlwn48ubxpmb1lttltc59d7"} 4005057003
+tako_container_memory_limit_bytes{server="prod",host="203.0.113.10",container="tako_fullstack_production_postgres_1_240bfb3c22"} 4005057003
 
 # HELP tako_container_memory_usage_percent Container memory usage percentage
 # TYPE tako_container_memory_usage_percent gauge
-tako_container_memory_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_postgres.1.ljmlwn48ubxpmb1lttltc59d7"} 0.51
+tako_container_memory_usage_percent{server="prod",host="203.0.113.10",container="tako_fullstack_production_postgres_1_240bfb3c22"} 0.51
 
 # HELP tako_container_cpu_usage_percent Container CPU usage percentage
 # TYPE tako_container_cpu_usage_percent gauge
-tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_redis.1.8n67aw7evq22q3j16civ6yqhx"} 0.84
+tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="tako_fullstack_production_redis_1_57b143cbfb"} 0.84
 
 # HELP tako_container_memory_used_bytes Container memory usage in bytes
 # TYPE tako_container_memory_used_bytes gauge
-tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="fullstack_production_redis.1.8n67aw7evq22q3j16civ6yqhx"} 3403677
+tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="tako_fullstack_production_redis_1_57b143cbfb"} 3403677
 
 # HELP tako_container_memory_limit_bytes Container memory limit in bytes
 # TYPE tako_container_memory_limit_bytes gauge
-tako_container_memory_limit_bytes{server="prod",host="203.0.113.10",container="fullstack_production_redis.1.8n67aw7evq22q3j16civ6yqhx"} 4005057003
+tako_container_memory_limit_bytes{server="prod",host="203.0.113.10",container="tako_fullstack_production_redis_1_57b143cbfb"} 4005057003
 
 # HELP tako_container_memory_usage_percent Container memory usage percentage
 # TYPE tako_container_memory_usage_percent gauge
-tako_container_memory_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_redis.1.8n67aw7evq22q3j16civ6yqhx"} 0.08
+tako_container_memory_usage_percent{server="prod",host="203.0.113.10",container="tako_fullstack_production_redis_1_57b143cbfb"} 0.08
 
 # HELP tako_container_cpu_usage_percent Container CPU usage percentage
 # TYPE tako_container_cpu_usage_percent gauge
-tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_web.1.lahcygcrigxmjegq7e6d0p904"} 0.00
+tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="tako_fullstack_production_web_1_c460f1c670"} 0.00
 
 # HELP tako_container_memory_used_bytes Container memory usage in bytes
 # TYPE tako_container_memory_used_bytes gauge
-tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="fullstack_production_web.1.lahcygcrigxmjegq7e6d0p904"} 20761804
+tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="tako_fullstack_production_web_1_c460f1c670"} 20761804
 
 # HELP tako_container_memory_limit_bytes Container memory limit in bytes
 # TYPE tako_container_memory_limit_bytes gauge
-tako_container_memory_limit_bytes{server="prod",host="203.0.113.10",container="fullstack_production_web.1.lahcygcrigxmjegq7e6d0p904"} 4005057003
+tako_container_memory_limit_bytes{server="prod",host="203.0.113.10",container="tako_fullstack_production_web_1_c460f1c670"} 4005057003
 
 # HELP tako_container_memory_usage_percent Container memory usage percentage
 # TYPE tako_container_memory_usage_percent gauge
-tako_container_memory_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_web.1.lahcygcrigxmjegq7e6d0p904"} 0.52
+tako_container_memory_usage_percent{server="prod",host="203.0.113.10",container="tako_fullstack_production_web_1_c460f1c670"} 0.52
 
 # HELP tako_container_cpu_usage_percent Container CPU usage percentage
 # TYPE tako_container_cpu_usage_percent gauge
-tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_api.1.vxg0gd93vlkycfzb6twfgh7q6"} 0.00
+tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="tako_fullstack_production_api_1_129a15ce51"} 0.00
 
 # HELP tako_container_memory_used_bytes Container memory usage in bytes
 # TYPE tako_container_memory_used_bytes gauge
-tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="fullstack_production_api.1.vxg0gd93vlkycfzb6twfgh7q6"} 25260195
+tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="tako_fullstack_production_api_1_129a15ce51"} 25260195
 
 # HELP tako_container_memory_limit_bytes Container memory limit in bytes
 # TYPE tako_container_memory_limit_bytes gauge
-tako_container_memory_limit_bytes{server="prod",host="203.0.113.10",container="fullstack_production_api.1.vxg0gd93vlkycfzb6twfgh7q6"} 4005057003
+tako_container_memory_limit_bytes{server="prod",host="203.0.113.10",container="tako_fullstack_production_api_1_129a15ce51"} 4005057003
 
 # HELP tako_container_memory_usage_percent Container memory usage percentage
 # TYPE tako_container_memory_usage_percent gauge
-tako_container_memory_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_api.1.vxg0gd93vlkycfzb6twfgh7q6"} 0.63
+tako_container_memory_usage_percent{server="prod",host="203.0.113.10",container="tako_fullstack_production_api_1_129a15ce51"} 0.63
 
 # HELP tako_container_cpu_usage_percent Container CPU usage percentage
 # TYPE tako_container_cpu_usage_percent gauge
-tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_api.2.saca39ppgx2x8pjxd8yy0mlvy"} 0.00
+tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="tako_fullstack_production_api_2_bb23ec3770"} 0.00
 
 # HELP tako_container_memory_used_bytes Container memory usage in bytes
 # TYPE tako_container_memory_used_bytes gauge
-tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="fullstack_production_api.2.saca39ppgx2x8pjxd8yy0mlvy"} 25102909
+tako_container_memory_used_bytes{server="prod",host="203.0.113.10",container="tako_fullstack_production_api_2_bb23ec3770"} 25102909
 
 # HELP tako_container_memory_limit_bytes Container memory limit in bytes
 # TYPE tako_container_memory_limit_bytes gauge
-tako_container_memory_limit_bytes{server="prod",host="203.0.113.10",container="fullstack_production_api.2.saca39ppgx2x8pjxd8yy0mlvy"} 4005057003
+tako_container_memory_limit_bytes{server="prod",host="203.0.113.10",container="tako_fullstack_production_api_2_bb23ec3770"} 4005057003
 
 # HELP tako_container_memory_usage_percent Container memory usage percentage
 # TYPE tako_container_memory_usage_percent gauge
-tako_container_memory_usage_percent{server="prod",host="203.0.113.10",container="fullstack_production_api.2.saca39ppgx2x8pjxd8yy0mlvy"} 0.63
-
+tako_container_memory_usage_percent{server="prod",host="203.0.113.10",container="tako_fullstack_production_api_2_bb23ec3770"} 0.63
