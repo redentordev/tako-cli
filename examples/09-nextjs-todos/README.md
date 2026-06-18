@@ -87,7 +87,7 @@ The application will be:
 - `api.YOUR.IP.sslip.io` → Backend API
 - `app.YOUR.IP.sslip.io` → Frontend app
 
-All apps route through tako-proxy on ports 80/443, no port numbers needed!
+All apps route through tako-proxy on TCP ports 80/443, with UDP 443 used for HTTP/3 when available. No app-specific public port numbers are needed.
 
 ## Database Persistence
 

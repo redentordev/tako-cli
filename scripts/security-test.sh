@@ -146,6 +146,13 @@ test_ports() {
             log_pass "Port $port is open (expected)"
         fi
     done
+
+    local udp_443_scan=$(nmap -sU -p 443 --max-retries 1 --host-timeout 15s -Pn "$TARGET" 2>/dev/null | grep "^443/udp" || true)
+    if echo "$udp_443_scan" | grep -Eq "^443/udp[[:space:]]+(open|open\\|filtered)"; then
+        log_pass "UDP port 443 is reachable for HTTP/3 (expected)"
+    else
+        log_warn "UDP port 443 was not reported open/open|filtered; HTTP/3 may be unavailable"
+    fi
     
     # Full port scan for thorough testing
     log_info "Running full port scan (this may take a minute)..."

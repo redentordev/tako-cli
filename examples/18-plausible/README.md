@@ -6,7 +6,7 @@ This example demonstrates deploying **Plausible Analytics** using its official D
 
 **Prerequisites Checklist:**
 - [ ] Server with at least 2GB RAM
-- [ ] Ports 80 and 443 open in firewall
+- [ ] TCP ports 80/443 and UDP port 443 open in firewall
 - [ ] SSH access to server
 - [ ] Generated all required secrets (see step 2 below)
 
