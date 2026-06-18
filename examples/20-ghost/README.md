@@ -205,16 +205,20 @@ tako backup --volume ghost_content --restore <backup-id>
 
 ## Scaling
 
-Ghost can run multiple instances for high availability:
+This example is intentionally single-instance because Ghost content is stored in
+the `ghost_content` volume on the deployment node.
+
+You can add Ghost replicas only after moving uploaded content to external shared
+storage or adding application-level content replication:
 
 ```yaml
 ghost:
-  replicas: 2  # Multiple instances
+  replicas: 2
 ```
 
-However, you'll need:
-1. External shared storage or application-level replication for `ghost_content`
-2. Load balancing (handled by tako-proxy automatically)
+With that storage requirement handled, `tako-proxy` can route the replicas like
+any other proxied service. Without shared content storage, keep one Ghost
+container so admin uploads, themes, and generated media stay consistent.
 
 For most use cases, a single instance is sufficient.
 
