@@ -311,6 +311,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Create deployer with pool for takod support
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, verbose)
 	deploy.SetCLIVersion(Version)
+	deploy.SetSkipBuild(skipBuild)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return err
 	}
@@ -485,21 +486,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 		fullImageName := deployImageRef(cfg, envName, serviceName, service, buildImageTag)
 
-		// Build the image if needed; runtime reconciliation still goes through takod.
-		if !skipBuild && service.Build != "" {
-			// Build the image on the first connected node
-			builtImageName, err := deploy.BuildImage(serviceName, &service, fullImageName)
-			if err != nil {
-				fmt.Printf("  ✗ Build failed: %v\n", err)
-				deploymentFailed = true
-				deploymentError = fmt.Errorf("build failed for %s: %w", serviceName, err)
-				deployment.Status = remotestate.StatusFailed
-				deployment.Error = err.Error()
-				break
-			}
-			// Use the built image name
-			fullImageName = builtImageName
-		} else if service.Image != "" {
+		if service.Image != "" {
 			// Use pre-built image
 			fullImageName = service.Image
 		}

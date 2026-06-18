@@ -55,9 +55,9 @@ type Deployer struct {
 	environment       string
 	verbose           bool
 	sshPool           *ssh.Pool
-	distributedImages map[string]bool
 	targetServers     []string
 	cliVersion        string
+	skipBuild         bool
 	meshPortCache     map[meshUpstreamPortKey]int
 	meshPortCacheMu   sync.Mutex
 	meshPortAllocator func(serverName string, serviceName string, slot int, containerPort int) (int, error)
@@ -88,17 +88,20 @@ func NewDeployer(client *ssh.Client, cfg *config.Config, environment string, ver
 // NewDeployerWithPool creates a deployer with SSH pool for multi-server support
 func NewDeployerWithPool(client *ssh.Client, cfg *config.Config, environment string, sshPool *ssh.Pool, verbose bool) *Deployer {
 	return &Deployer{
-		client:            client,
-		config:            cfg,
-		environment:       environment,
-		verbose:           verbose,
-		sshPool:           sshPool,
-		distributedImages: make(map[string]bool),
+		client:      client,
+		config:      cfg,
+		environment: environment,
+		verbose:     verbose,
+		sshPool:     sshPool,
 	}
 }
 
 func (d *Deployer) SetCLIVersion(version string) {
 	d.cliVersion = strings.TrimSpace(version)
+}
+
+func (d *Deployer) SetSkipBuild(skip bool) {
+	d.skipBuild = skip
 }
 
 // SetTargetServers restricts takod reconciliation to a validated subset of the
@@ -272,6 +275,22 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 
 // BuildImage builds a Docker image for a service without deploying it.
 func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig, imageRef ...string) (string, error) {
+	return d.buildImageWithClient(d.client, serviceName, service, imageRef...)
+}
+
+func (d *Deployer) buildImageOnNode(serverName string, serviceName string, service *config.ServiceConfig, imageRef ...string) (string, error) {
+	client, err := d.getEnvironmentClient(serverName)
+	if err != nil {
+		return "", err
+	}
+	return d.buildImageWithClient(client, serviceName, service, imageRef...)
+}
+
+func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, service *config.ServiceConfig, imageRef ...string) (string, error) {
+	if client == nil {
+		return "", fmt.Errorf("ssh client is required")
+	}
+
 	fullImageName := d.config.GetFullImageName(serviceName, d.environment)
 	if len(imageRef) > 0 && strings.TrimSpace(imageRef[0]) != "" {
 		fullImageName = strings.TrimSpace(imageRef[0])
@@ -355,7 +374,7 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig,
 		}
 		defer archive.Close()
 
-		output, err := takodclient.StreamRequest(d.client, d.takodSocket(), "POST", takodclient.ImageBuildEndpoint(fullImageName, service.Dockerfile), archive)
+		output, err := takodclient.StreamRequest(client, d.takodSocket(), "POST", takodclient.ImageBuildEndpoint(fullImageName, service.Dockerfile), archive)
 		var response takod.ImageBuildResponse
 		if err == nil {
 			if decodeErr := json.Unmarshal([]byte(output), &response); decodeErr != nil {

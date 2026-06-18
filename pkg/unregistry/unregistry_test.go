@@ -24,14 +24,14 @@ func TestTakodImageStreamCommandsUseTakodEndpoints(t *testing.T) {
 		"--unix-socket '/run/tako/takod.sock'",
 		"/v1/images/import?image=demo%2Fweb%3Aabc123",
 		"-X 'POST'",
-		"--data-binary @-",
+		"--upload-file -",
 	} {
 		if !strings.Contains(importCmd, expected) {
 			t.Fatalf("import command missing %q: %s", expected, importCmd)
 		}
 	}
 	for _, cmd := range []string{exportCmd, importCmd} {
-		for _, unexpected := range []string{"docker save", "docker load", "docker image", " ssh ", "StrictHostKeyChecking", "/home/deploy/.ssh"} {
+		for _, unexpected := range []string{"docker save", "docker load", "docker image", " ssh ", "StrictHostKeyChecking", "/home/deploy/.ssh", "--data-binary"} {
 			if strings.Contains(cmd, unexpected) {
 				t.Fatalf("stream command should not contain %q: %s", unexpected, cmd)
 			}

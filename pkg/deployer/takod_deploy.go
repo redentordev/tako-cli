@@ -22,7 +22,6 @@ import (
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
-	"github.com/redentordev/tako-cli/pkg/unregistry"
 )
 
 type takodAssignment struct {
@@ -180,23 +179,9 @@ func (d *Deployer) DeployServiceTakod(serviceName string, service *config.Servic
 	}
 
 	assignmentServers := uniqueAssignmentServers(assignments)
-	if service.Build != "" && len(assignmentServers) > 1 {
-		if d.distributedImages != nil && d.distributedImages[imageRef] {
-			if d.verbose {
-				fmt.Printf("  Image already distributed in this run, skipping...\n")
-			}
-		} else {
-			sourceClient, err := d.getSourceEnvironmentClient()
-			if err != nil {
-				return err
-			}
-			unreg := unregistry.NewManager(d.config, d.sshPool, d.environment, d.verbose)
-			if err := unreg.DistributeImageParallel(sourceClient, imageRef); err != nil {
-				return fmt.Errorf("failed to distribute image across takod nodes: %w", err)
-			}
-			if d.distributedImages != nil {
-				d.distributedImages[imageRef] = true
-			}
+	if service.Build != "" && !d.skipBuild {
+		if err := d.buildImageOnTakodNodes(serviceName, service, imageRef, assignmentServers); err != nil {
+			return err
 		}
 	}
 
@@ -220,6 +205,29 @@ func (d *Deployer) DeployServiceTakod(serviceName string, service *config.Servic
 	}
 
 	return nil
+}
+
+func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames []string) error {
+	if len(serverNames) == 0 {
+		return fmt.Errorf("service %s has no assigned takod nodes for build", serviceName)
+	}
+
+	if d.verbose {
+		fmt.Printf("  Building image on %d assigned node(s)...\n", len(serverNames))
+	}
+
+	return runTakodNodeActions(serverNames, func(serverName string) error {
+		if d.verbose {
+			fmt.Printf("  [%s] Building %s\n", serverName, imageRef)
+		}
+		if _, err := d.buildImageOnNode(serverName, serviceName, service, imageRef); err != nil {
+			return fmt.Errorf("failed to build image on %s: %w", serverName, err)
+		}
+		if d.verbose {
+			fmt.Printf("  [%s] Image ready: %s\n", serverName, imageRef)
+		}
+		return nil
+	})
 }
 
 func (d *Deployer) RemoveServiceTakod(serviceName string) error {
@@ -864,17 +872,6 @@ func (d *Deployer) meshAddress(index int) (string, error) {
 	nodeIP := make(net.IP, 4)
 	binary.BigEndian.PutUint32(nodeIP, base+uint32(index+1))
 	return fmt.Sprintf("%s/%d", nodeIP.String(), d.config.Mesh.SubnetBits), nil
-}
-
-func (d *Deployer) getSourceEnvironmentClient() (*ssh.Client, error) {
-	servers, err := d.getTakodTargetServers()
-	if err != nil {
-		return nil, err
-	}
-	if len(servers) == 0 {
-		return nil, fmt.Errorf("environment %s has no target servers", d.environment)
-	}
-	return d.getEnvironmentClient(servers[0])
 }
 
 func (d *Deployer) getTakodTargetServers() ([]string, error) {

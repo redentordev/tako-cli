@@ -31,6 +31,8 @@
 #   TAKO_E2E_OFFLINE_STOP_CMD Command that makes the node agent unavailable.
 #   TAKO_E2E_OFFLINE_START_CMD Command that restores the node agent.
 #   TAKO_E2E_OFFLINE_STATUS_CMD Command that succeeds when the node agent is back.
+#   TAKO_E2E_OFFLINE_REJOIN_COOLDOWN Seconds to wait before the final rejoined deploy.
+#   TAKO_E2E_COMMAND_COOLDOWN Seconds to wait after each tako command.
 
 set -Eeuo pipefail
 
@@ -60,6 +62,8 @@ OFFLINE_SSH_OPTS="${TAKO_E2E_OFFLINE_SSH_OPTS:-}"
 OFFLINE_STOP_CMD="${TAKO_E2E_OFFLINE_STOP_CMD:-sudo systemctl stop takod}"
 OFFLINE_START_CMD="${TAKO_E2E_OFFLINE_START_CMD:-sudo systemctl start takod}"
 OFFLINE_STATUS_CMD="${TAKO_E2E_OFFLINE_STATUS_CMD:-sudo systemctl is-active --quiet takod}"
+OFFLINE_REJOIN_COOLDOWN="${TAKO_E2E_OFFLINE_REJOIN_COOLDOWN:-0}"
+COMMAND_COOLDOWN="${TAKO_E2E_COMMAND_COOLDOWN:-0}"
 OFFLINE_RESTORE_NEEDED=0
 PROTOCOL_URL="${TAKO_E2E_PROTOCOL_URL:-${TAKO_VALIDATE_URL:-}}"
 WEBSOCKET_URL="${TAKO_E2E_WEBSOCKET_URL:-}"
@@ -366,6 +370,15 @@ normalize_takod_binary() {
 
 LAST_LOG_FILE=""
 
+wait_for_command_cooldown() {
+  [[ "$COMMAND_COOLDOWN" =~ ^[0-9]+$ ]] ||
+    die "TAKO_E2E_COMMAND_COOLDOWN must be a non-negative integer"
+  if [[ "$COMMAND_COOLDOWN" -gt 0 ]]; then
+    note "Waiting ${COMMAND_COOLDOWN}s before next command"
+    sleep "$COMMAND_COOLDOWN"
+  fi
+}
+
 run_cmd_status() {
   local label="$1"
   shift
@@ -385,6 +398,7 @@ run_cmd_status() {
   if [[ $status -ne 0 ]]; then
     tail -n 80 "$log_file" >&2 || true
   fi
+  wait_for_command_cooldown
   return "$status"
 }
 
@@ -494,7 +508,7 @@ require_passphrase() {
 
 ssh_offline_node() {
   local remote_cmd="$1"
-  local args=("-p" "$OFFLINE_PORT" "-o" "BatchMode=yes")
+  local args=("-p" "$OFFLINE_PORT" "-o" "BatchMode=yes" "-o" "ConnectTimeout=10" "-o" "ConnectionAttempts=1")
 
   if [[ -n "$OFFLINE_SSH_KEY" ]]; then
     args+=("-i" "$OFFLINE_SSH_KEY")
@@ -514,11 +528,17 @@ restore_offline_node() {
   fi
 
   note "Restoring offline node agent: $OFFLINE_SERVER"
-  if ! ssh_offline_node "$OFFLINE_START_CMD" >/dev/null 2>&1; then
-    echo "warning: failed to restore offline node $OFFLINE_SERVER with: $OFFLINE_START_CMD" >&2
-    return
-  fi
-  OFFLINE_RESTORE_NEEDED=0
+  local attempt
+  for attempt in $(seq 1 6); do
+    if ssh_offline_node "$OFFLINE_START_CMD" >/dev/null 2>&1; then
+      OFFLINE_RESTORE_NEEDED=0
+      return
+    fi
+    echo "warning: restore attempt $attempt failed for offline node $OFFLINE_SERVER with: $OFFLINE_START_CMD" >&2
+    sleep 10
+  done
+  echo "warning: failed to restore offline node $OFFLINE_SERVER with: $OFFLINE_START_CMD" >&2
+  return
 }
 
 require_offline_node_control() {
@@ -582,6 +602,15 @@ wait_for_offline_status() {
   return 1
 }
 
+wait_for_offline_rejoin_cooldown() {
+  [[ "$OFFLINE_REJOIN_COOLDOWN" =~ ^[0-9]+$ ]] ||
+    die "TAKO_E2E_OFFLINE_REJOIN_COOLDOWN must be a non-negative integer"
+  if [[ "$OFFLINE_REJOIN_COOLDOWN" -gt 0 ]]; then
+    note "Waiting ${OFFLINE_REJOIN_COOLDOWN}s before rejoined deploy"
+    sleep "$OFFLINE_REJOIN_COOLDOWN"
+  fi
+}
+
 fresh_clone() {
   local label="$1"
   local temp_parent
@@ -626,7 +655,13 @@ phase_two_node() {
   run_tako "two-node setup" setup
   run_upgrade_servers_dry_run "two-node upgrade servers dry-run"
   run_upgrade_servers_apply "two-node upgrade servers"
-  run_tako "two-node repair" state repair
+  if ! run_tako_status "two-node repair" state repair; then
+    if grep -Fq "no deployment history or runtime state found on reachable nodes" "$LAST_LOG_FILE"; then
+      note "No existing replicated state to repair before first deploy"
+    else
+      die "two-node repair failed (log: $LAST_LOG_FILE)"
+    fi
+  fi
   run_tako "two-node status before deploy" state status
   run_tako "two-node lease before deploy" state lease
   run_tako "two-node deploy" deploy --yes
@@ -961,6 +996,7 @@ phase_offline() {
   run_tako "rejoined state status" state status
   run_tako "rejoined state lease" state lease
   run_tako "rejoined state repair" state repair
+  wait_for_offline_rejoin_cooldown
   run_tako "rejoined deploy" deploy --yes
 }
 

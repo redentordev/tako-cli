@@ -103,6 +103,9 @@ patching before deploy. If the harness is testing a local source-tree build
 instead of an already released binary, pass a Linux server binary with
 `--takod-binary` or `TAKO_E2E_TAKOD_BINARY`; otherwise there is no release asset
 for the server to download.
+The two-node phase runs `state repair` before deploy; for a brand-new project
+with no replicated state yet, the harness records that there is nothing to
+repair and continues to the first deploy.
 
 The offline phase stops `takod` on the selected node through SSH, verifies that
 status degrades and drift/deploy fail closed while the node agent is
@@ -113,6 +116,12 @@ trap. Override `TAKO_E2E_OFFLINE_STOP_CMD`,
 manager is not systemd. The harness infers offline-node host, user, port, and
 SSH key from `tako.yaml`; use `--offline-host`, `--offline-user`,
 `--offline-port`, or `--offline-ssh-key` only when you need to override config.
+On hardened hosts with SSH rate limiting, set `TAKO_E2E_COMMAND_COOLDOWN` to
+pause between separate CLI invocations and `TAKO_E2E_OFFLINE_REJOIN_COOLDOWN`
+to pause before the final rejoined deploy. If public SSH is rate-limited during
+offline simulation but the WireGuard mesh remains up, point the offline control
+connection at the node mesh address and pass a jump host through
+`TAKO_E2E_OFFLINE_SSH_OPTS`.
 
 ## One-Node Flow
 

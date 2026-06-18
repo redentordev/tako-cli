@@ -188,7 +188,7 @@ func takodImageExportCommand(socket string, imageName string) string {
 }
 
 func takodImageImportCommand(socket string, imageName string) string {
-	return takodCurlCommand(socket, "POST", "http://takod/v1/images/import?image="+url.QueryEscape(imageName), "--data-binary @-")
+	return takodCurlCommand(socket, "POST", "http://takod/v1/images/import?image="+url.QueryEscape(imageName), "--upload-file -")
 }
 
 func takodCurlCommand(socket string, method string, endpoint string, bodyArg string) string {
