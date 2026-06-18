@@ -100,9 +100,10 @@ Phases:
   new-computer    fresh clone, validate, env pull, state pull, status, deploy.
   ci              fresh clone with CI env, validate, upgrade, state pull, deploy.
   repair          state status, state repair, state status.
+  invalid-config  prove deploy rejects invalid YAML before remote work.
   protocols       HTTP/1.1, HTTP/2, optional HTTP/3, and optional WebSocket checks.
   offline         stop one takod, prove fail-closed behavior, restart, repair, deploy.
-  standard        preflight, one-node, env, new-computer, ci.
+  standard        preflight, invalid-config, one-node, env, new-computer, ci.
   full            standard plus two-node, repair, offline.
 
 Mutating phases require --yes or TAKO_E2E_CONFIRM=run.
@@ -370,9 +371,10 @@ run_tako() {
   run_tako_in "$APP_DIR" "$label" "$@"
 }
 
-run_tako_status() {
-  local label="$1"
-  shift
+run_tako_status_in() {
+  local dir="$1"
+  local label="$2"
+  shift 2
   run_cmd_status "$label" bash -c '
     cd "$1"
     takod_binary="$2"
@@ -381,7 +383,13 @@ run_tako_status() {
       export TAKO_TAKOD_BINARY="$takod_binary"
     fi
     TAKO_SKIP_UPDATE_CHECK=1 TAKO_NONINTERACTIVE=1 "$@"
-  ' _ "$APP_DIR" "$TAKOD_BINARY" "$TAKO_BIN" --env "$ENVIRONMENT" "$@"
+  ' _ "$dir" "$TAKOD_BINARY" "$TAKO_BIN" --env "$ENVIRONMENT" "$@"
+}
+
+run_tako_status() {
+  local label="$1"
+  shift
+  run_tako_status_in "$APP_DIR" "$label" "$@"
 }
 
 run_upgrade_servers_apply_in() {
@@ -646,6 +654,35 @@ phase_repair() {
   run_tako "repair lease after" state lease
 }
 
+phase_invalid_config() {
+  local temp_parent invalid_dir log_file
+  temp_parent="$(mktemp -d "${TMPDIR:-/tmp}/tako-e2e-invalid-config.XXXXXX")"
+  TEMP_DIRS+=("$temp_parent")
+  invalid_dir="$temp_parent/app"
+  mkdir -p "$invalid_dir"
+  cat >"$invalid_dir/tako.yaml" <<'EOF'
+project:
+  name: invalid-config-proof
+  version: [
+EOF
+
+  if run_tako_status_in "$invalid_dir" "invalid YAML deploy should fail preflight" deploy --yes; then
+    die "deploy unexpectedly succeeded with invalid YAML"
+  fi
+  log_file="$LAST_LOG_FILE"
+
+  if ! grep -q "YAML syntax error in tako.yaml" "$log_file"; then
+    tail -n 80 "$log_file" >&2 || true
+    die "invalid-config phase did not report the deploy config preflight error"
+  fi
+  if grep -Eq "=== Starting deployment ===|Acquired deployment lock|Acquired remote deploy leases|Starting takod deployment" "$log_file"; then
+    tail -n 80 "$log_file" >&2 || true
+    die "invalid-config phase reached deployment work instead of stopping at config preflight"
+  fi
+
+  note "Invalid YAML failed during deploy config preflight"
+}
+
 phase_protocols() {
   require_protocol_url
 
@@ -735,17 +772,17 @@ expand_phases() {
     phase="$(printf '%s' "$phase" | xargs)"
     case "$phase" in
       standard)
-        expanded+=(preflight one-node env new-computer ci)
+        expanded+=(preflight invalid-config one-node env new-computer ci)
         ;;
       full)
-        expanded+=(preflight one-node env new-computer ci two-node repair offline)
+        expanded+=(preflight invalid-config one-node env new-computer ci two-node repair offline)
         ;;
       all)
-        expanded+=(preflight one-node env new-computer ci two-node repair offline)
+        expanded+=(preflight invalid-config one-node env new-computer ci two-node repair offline)
         ;;
       "")
         ;;
-      preflight|one-node|two-node|env|new-computer|ci|repair|protocols|offline)
+      preflight|one-node|two-node|env|new-computer|ci|repair|invalid-config|protocols|offline)
         expanded+=("$phase")
         ;;
       *)
@@ -785,6 +822,7 @@ main() {
       new-computer) phase_new_computer ;;
       ci) phase_ci ;;
       repair) phase_repair ;;
+      invalid-config) phase_invalid_config ;;
       protocols) phase_protocols ;;
       offline) phase_offline ;;
     esac
