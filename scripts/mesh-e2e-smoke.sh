@@ -63,7 +63,41 @@ run_guard_check() {
   fi
 }
 
+run_invalid_config_check() {
+  local output="$TMP_ROOT/invalid-config.out"
+  local log_dir="$TMP_ROOT/invalid-config-logs"
+
+  echo "Checking invalid-config preflight..."
+  set +e
+  SERVER_HOST=example.com \
+    LETSENCRYPT_EMAIL=ops@example.com \
+    HOME="$SMOKE_HOME" \
+    TAKO_E2E_LOG_DIR="$log_dir" \
+    "$SCRIPT_DIR/mesh-e2e.sh" \
+    --app-dir "$APP_DIR" \
+    --tako-bin "$TAKO_BIN" \
+    --phases invalid-config >"$output" 2>&1
+  local status=$?
+  set -e
+
+  if [[ $status -ne 0 ]]; then
+    cat "$output" >&2
+    fail "invalid-config preflight unexpectedly failed"
+  fi
+
+  if ! grep -Fq "Invalid YAML failed during deploy config preflight" "$output"; then
+    cat "$output" >&2
+    fail "invalid-config phase did not prove deploy preflight rejection"
+  fi
+
+  if grep -REq "=== Starting deployment ===|Acquired deployment lock|Acquired remote deploy leases|Starting takod deployment|upgrade servers|state repair" "$output" "$log_dir" 2>/dev/null; then
+    cat "$output" >&2
+    fail "invalid-config phase reached remote or mutating work"
+  fi
+}
+
 run_guard_check two-node
 run_guard_check offline
+run_invalid_config_check
 
 echo "Mesh E2E smoke checks passed."

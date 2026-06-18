@@ -158,7 +158,7 @@ app.get('/', (req, res) => {
 
           <p><strong>Benefits of scaling:</strong></p>
           <ul>
-            <li><strong>High Availability:</strong> If one instance fails, others continue</li>
+            <li><strong>Replica Resilience:</strong> If one container exits, Tako reconciles back to the configured replica count</li>
             <li><strong>Load Distribution:</strong> Traffic spread across instances</li>
             <li><strong>Reconciled Deployments:</strong> Containers converge to the configured replica count</li>
             <li><strong>Performance:</strong> Handle more concurrent requests</li>
