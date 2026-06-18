@@ -8,7 +8,7 @@ This example demonstrates horizontal scaling with multiple replicas and automati
 - **Load Balancing**: Automatic request distribution
 - **Round-Robin Strategy**: Sequential distribution across instances
 - **Instance Identification**: Each instance shows its unique hostname
-- **High Availability**: Service continues if one instance fails
+- **Replica Resilience**: Service continues if one replica fails
 - **Reconciled Updates**: Tako recreates containers to match desired state
 
 ## How It Works
@@ -137,9 +137,10 @@ The system will:
 
 ## Benefits of Horizontal Scaling
 
-**High Availability:**
-- If one instance crashes, others continue serving
-- No single point of failure
+**Replica Resilience:**
+- If one replica crashes, others continue serving
+- A one-node deployment still depends on that host; spread replicas across
+  multiple nodes when the app needs host-level failure tolerance
 - Automatic health checks
 
 **Performance:**

@@ -95,7 +95,7 @@ Options:
 Phases:
   preflight       validate, doctor, state, lease, and upgrade dry-run checks.
   one-node        setup, upgrade servers, deploy, status, lease, history, ps, drift.
-  two-node        setup, repair, status, lease status, deploy, status.
+  two-node        setup, upgrade servers, repair, status, lease, deploy, status.
   env             env push, temporary local env removal, env pull --force.
   new-computer    fresh clone, validate, env pull, state pull, status, deploy.
   ci              fresh clone with CI env, validate, upgrade, state pull, deploy.
@@ -561,6 +561,8 @@ phase_two_node() {
   require_confirm "two-node"
   require_deploy_ready_worktree "$APP_DIR"
   run_tako "two-node setup" setup
+  run_upgrade_servers_dry_run "two-node upgrade servers dry-run"
+  run_upgrade_servers_apply "two-node upgrade servers"
   run_tako "two-node repair" state repair
   run_tako "two-node status before deploy" state status
   run_tako "two-node lease before deploy" state lease

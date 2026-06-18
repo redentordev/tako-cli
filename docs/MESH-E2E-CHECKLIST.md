@@ -148,6 +148,8 @@ Add a second server to the same environment, then run:
 
 ```bash
 tako setup -e production
+tako upgrade servers -e production --dry-run
+tako upgrade servers -e production
 tako state repair -e production
 tako state status -e production
 tako deploy -e production --yes
@@ -157,6 +159,8 @@ tako state status -e production
 Expected result:
 
 - Both nodes have takod running.
+- `upgrade servers` verifies every reachable node is running the CLI-matched
+  `takod` agent before state repair and deploy.
 - WireGuard mesh status lists both peers.
 - Deployment history and desired state are available from both reachable nodes.
 - Actual state is reported per node and as an aggregate.
