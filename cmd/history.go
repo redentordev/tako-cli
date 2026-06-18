@@ -114,10 +114,15 @@ func runHistory(cmd *cobra.Command, args []string) error {
 
 	fmt.Println(strings.Repeat("─", 120))
 	fmt.Printf("\nShowing %d deployment(s). Use --limit to show more.\n", len(deployments))
-	fmt.Printf("\nTo rollback to a specific deployment: tako rollback <deployment-id>\n")
-	fmt.Printf("To view detailed logs: tako logs show <deployment-id> (coming soon)\n\n")
+	fmt.Print(historyNextSteps())
 
 	return nil
+}
+
+func historyNextSteps() string {
+	return "\nTo rollback to a specific deployment: tako rollback <deployment-id>\n" +
+		"To inspect service logs: tako logs --service <service> --tail 200\n" +
+		"To inspect proxy access logs: tako access <service>\n\n"
 }
 
 func listDeploymentsFromHistory(history *state.DeploymentHistory, opts *state.HistoryOptions) []*state.DeploymentState {
