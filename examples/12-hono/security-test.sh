@@ -158,6 +158,13 @@ test_port_scan() {
             log_warn "Unexpected open port: $port"
         fi
     done <<< "$open_ports"
+
+    local udp_443_scan=$(nmap -sU -p 443 --max-retries 1 --host-timeout 15s -Pn "$TARGET" 2>/dev/null | grep "^443/udp" || true)
+    if echo "$udp_443_scan" | grep -Eq "^443/udp[[:space:]]+(open|open\\|filtered)"; then
+        log_pass "UDP port 443 is reachable for HTTP/3 (expected)"
+    else
+        log_warn "UDP port 443 was not reported open/open|filtered; HTTP/3 may be unavailable"
+    fi
     
     # Check if dangerous ports are open
     local dangerous_ports="21 23 25 2375 2376 3306 5432 6379 27017 11211"
