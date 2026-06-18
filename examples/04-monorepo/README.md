@@ -155,7 +155,12 @@ Docker's internal DNS resolves `api` to the correct container(s), even with mult
 
 ## Load Balancing
 
-With `replicas: 2` for the API service, Docker automatically load balances requests across both instances. Each request may hit a different replica, which you can see in the hostname field.
+With `replicas: 2` for the private API service, both API containers receive the
+same project-scoped service alias on the app network. Docker DNS can return
+multiple matching container addresses, but client connection reuse and DNS
+caching decide which replica is used for each request. Use `tako-proxy`
+`loadBalancer` settings on public services when you need explicit
+round-robin or sticky traffic behavior.
 
 ## Development Workflow
 
