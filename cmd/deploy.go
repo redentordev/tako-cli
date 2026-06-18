@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -90,20 +89,6 @@ func resolveDeployConfigPath(configPath string) string {
 		return "tako.json"
 	}
 	return "tako.yaml"
-}
-
-func formatDeployConfigError(configPath string, err error) error {
-	message := strings.TrimSpace(err.Error())
-	switch {
-	case strings.HasPrefix(message, "failed to parse YAML config:"):
-		return fmt.Errorf("YAML syntax error in %s:\n  %s", filepath.Clean(configPath), strings.TrimSpace(strings.TrimPrefix(message, "failed to parse YAML config:")))
-	case strings.HasPrefix(message, "failed to parse JSON config:"):
-		return fmt.Errorf("JSON syntax error in %s:\n  %s", filepath.Clean(configPath), strings.TrimSpace(strings.TrimPrefix(message, "failed to parse JSON config:")))
-	case strings.HasPrefix(message, "invalid config:"):
-		return fmt.Errorf("config validation failed in %s:\n  %s", filepath.Clean(configPath), strings.TrimSpace(strings.TrimPrefix(message, "invalid config:")))
-	default:
-		return fmt.Errorf("config preflight failed in %s:\n  %s", filepath.Clean(configPath), message)
-	}
 }
 
 type deployGitReader interface {
