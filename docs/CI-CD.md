@@ -42,6 +42,14 @@ but it does not create commits. CI should deploy a clean checkout; if generated
 files or dependency installers modify the worktree before deploy, commit or
 discard those changes earlier in the pipeline.
 
+Build-backed services are tagged with the clean checkout commit hash. A CI
+deploy does not require a `project.version` bump; the Git commit is the deploy
+artifact identity. Use `tako deploy --force --yes` only when you intentionally
+need to recreate unchanged app services. Broad force skips services marked
+`persistent: true`; targeted `tako deploy --service <name> --force --yes`
+is the explicit path for stateful containers that keep data in declared
+volumes.
+
 Each installed takod refreshes its own actual container snapshot in the
 background. CI still runs `tako state pull` for deployment history and local UX,
 but it does not depend on the runner's old `.tako/` directory to know what is

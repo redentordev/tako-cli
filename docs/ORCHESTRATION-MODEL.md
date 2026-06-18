@@ -85,6 +85,12 @@ The operational rule is the same as SST's app/stage model: keep app names
 stable and unique per product, and use environments as stages such as
 `production`, `staging`, or `preview`.
 
+`project.version` is project metadata, not the redeploy trigger. Deployment
+history, desired runtime state, and build-backed image tags use the Git commit
+from the clean checkout. Commit source/config changes, then run `tako deploy`;
+use `tako deploy --force` only when you need to recreate unchanged app
+containers.
+
 ## Config Contract
 
 ```yaml
@@ -270,6 +276,13 @@ Placement can also be filtered by supported node-label constraints such as
 `node.labels.role==web`. Stateful services should use `pinned` placement unless
 they are designed for multi-writer operation and external persistence.
 
+For persistent services, placement is part of the lifecycle contract. In a
+multi-node environment, `persistent: true` requires `placement.strategy:
+pinned` or `global`. `pinned` is the singleton accessory/database shape; `global`
+means one independent stateful instance per selected node. Persistent services
+do not support `replicas > 1`; scale stateless clients, or use external/clustered
+storage when the stateful system itself needs high availability.
+
 ## Mesh + Ingress
 
 ```text
@@ -320,6 +333,18 @@ the generated proxy config.
 For services without `proxy`, `port` is still the container port used by health
 checks and service-to-service networking, but it is not published on the host.
 This keeps databases, queues, and internal APIs private by default.
+
+Stateful image services should be declared with `persistent: true` and at least
+one named or external Docker volume. The validator rejects persistent services
+without volumes because container filesystems are replaced during reconcile. In
+multi-node environments it also rejects persistent services without explicit
+`pinned` or `global` placement so node-local data has a known home. Normal
+commit deploys leave unchanged image-only services alone, and broad `--force`
+skips persistent services; targeted `--service <name> --force` is the explicit
+opt-in for recreating one persistent container while retaining its volume.
+Persistent services with `replicas > 1` are rejected because two containers
+sharing or independently writing node-local data is not a safe generic
+deployment model.
 
 ## Switching Computers
 

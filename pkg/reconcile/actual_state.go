@@ -125,6 +125,7 @@ func AggregateActualStateByServer(actualByServer map[string]map[string]*ActualSe
 					existing.ConfigHash = ""
 				}
 				existing.RuntimeID = mergeRuntimeID(existing.RuntimeID, serviceState.RuntimeID)
+				existing.Persistent = existing.Persistent || serviceState.Persistent
 				continue
 			}
 			actualServices[serviceName] = cloneActualService(serviceState)
@@ -174,8 +175,10 @@ func gatherActualStateFromTakodWith(client takodclient.RequestExecutor, socket s
 			Containers: append([]string(nil), service.Containers...),
 			ConfigHash: service.ConfigHash,
 			RuntimeID:  service.RuntimeID,
+			Persistent: service.Persistent,
 			ConfigSnapshot: &config.ServiceConfig{
-				Image: service.Image,
+				Image:      service.Image,
+				Persistent: service.Persistent,
 			},
 		}
 	}

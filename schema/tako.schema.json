@@ -29,7 +29,7 @@
         },
         "version": {
           "type": "string",
-          "description": "Project version (semver recommended)"
+          "description": "Project metadata version. Build-backed deploy artifacts are tagged by Git commit; this does not need to change to redeploy."
         }
       }
     },
@@ -399,7 +399,7 @@
                 },
                 "persistent": {
                   "type": "boolean",
-                  "description": "Mark as persistent (databases, caches)"
+                  "description": "Mark as stateful/persistent. Requires at least one volume, and multi-node environments require pinned or global placement."
                 },
                 "dependsOn": {
                   "type": "array",

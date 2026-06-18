@@ -40,6 +40,7 @@ type persistedActualService struct {
 	Containers []string `json:"containers,omitempty"`
 	ConfigHash string   `json:"configHash,omitempty"`
 	RuntimeID  string   `json:"runtimeId,omitempty"`
+	Persistent bool     `json:"persistent,omitempty"`
 }
 
 func RefreshActualStateDocuments(ctx context.Context, dataDir string, node string) (int, error) {
@@ -213,6 +214,7 @@ func recomputePersistedAggregate(snapshot *persistedActualSnapshot) {
 					existing.ConfigHash = ""
 				}
 				existing.RuntimeID = mergeRuntimeID(existing.RuntimeID, service.RuntimeID)
+				existing.Persistent = existing.Persistent || service.Persistent
 				snapshot.Services[serviceName] = existing
 				continue
 			}
@@ -241,6 +243,7 @@ func persistedServicesFromActual(services map[string]*ActualService) map[string]
 			Containers: containers,
 			ConfigHash: service.ConfigHash,
 			RuntimeID:  service.RuntimeID,
+			Persistent: service.Persistent,
 		}
 	}
 	return out

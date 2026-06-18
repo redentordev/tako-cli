@@ -270,10 +270,12 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 	return d.DeployServiceTakod(serviceName, &rollbackService, serviceState.Image)
 }
 
-// BuildImage builds a Docker image for a service without deploying it
-func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig) (string, error) {
-	// Get full image name from config with environment
+// BuildImage builds a Docker image for a service without deploying it.
+func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig, imageRef ...string) (string, error) {
 	fullImageName := d.config.GetFullImageName(serviceName, d.environment)
+	if len(imageRef) > 0 && strings.TrimSpace(imageRef[0]) != "" {
+		fullImageName = strings.TrimSpace(imageRef[0])
+	}
 
 	if service.Build != "" {
 		// Use service.Build as the build context path

@@ -148,7 +148,11 @@ func runScaleTargets(cmd *cobra.Command, args []string) error {
 
 		imageRef := service.Image
 		if imageRef == "" {
-			imageRef = cfg.GetFullImageName(serviceName, envName)
+			if actual, ok := actualState[serviceName]; ok && actual.Image != "" {
+				imageRef = actual.Image
+			} else {
+				imageRef = cfg.GetFullImageName(serviceName, envName)
+			}
 		}
 
 		if err := deploy.DeployServiceTakod(serviceName, &service, imageRef); err != nil {

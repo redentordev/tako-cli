@@ -130,6 +130,35 @@ func TestDetectChangesDoesNotLetHashHideReplicaDrift(t *testing.T) {
 	}
 }
 
+func TestDetectChangesDoesNotLetHashHidePersistenceMetadataDrift(t *testing.T) {
+	service := config.ServiceConfig{
+		Image:      "postgres:16-alpine",
+		Persistent: true,
+		Volumes:    []string{"pgdata:/var/lib/postgresql/data"},
+	}
+	hash, ok := SafeServiceConfigHash(service)
+	if !ok {
+		t.Fatal("expected safe service hash")
+	}
+
+	reasons := detectChanges("demo", "production", "postgres", service, &ActualService{
+		Name:       "postgres",
+		Image:      "postgres:16-alpine",
+		Replicas:   1,
+		ConfigHash: hash,
+		RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "postgres"),
+		ConfigSnapshot: &config.ServiceConfig{
+			Image: "postgres:16-alpine",
+		},
+	})
+	if len(reasons) == 0 {
+		t.Fatal("detectChanges() should report persistence metadata drift")
+	}
+	if reasons[0] != "Persistence metadata changed" {
+		t.Fatalf("first reason = %q, want persistence metadata drift", reasons[0])
+	}
+}
+
 func TestDetectChangesDoesNotLetHashHideRuntimeIdentityDrift(t *testing.T) {
 	service := config.ServiceConfig{
 		Image: "nginx:1.27",

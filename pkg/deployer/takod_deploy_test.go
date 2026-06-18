@@ -485,9 +485,10 @@ func TestPlanTakodAssignmentsGlobalUsesConstrainedTargets(t *testing.T) {
 
 func TestServiceRuntimeLabelsIncludeSafeConfigHash(t *testing.T) {
 	service := config.ServiceConfig{
-		Image: "nginx:1.27",
-		Port:  8080,
-		Proxy: &config.ProxyConfig{Domain: "example.com"},
+		Image:      "postgres:16-alpine",
+		Port:       5432,
+		Persistent: true,
+		Volumes:    []string{"pgdata:/var/lib/postgresql/data"},
 	}
 	wantHash, ok := reconcile.SafeServiceConfigHash(service)
 	if !ok {
@@ -500,6 +501,9 @@ func TestServiceRuntimeLabelsIncludeSafeConfigHash(t *testing.T) {
 	}
 	if labels[runtimeid.ServiceIdentityLabel] != runtimeid.ServiceIdentity("demo", "production", "web") {
 		t.Fatalf("runtime identity label = %q, want runtime identity", labels[runtimeid.ServiceIdentityLabel])
+	}
+	if labels["tako.persistent"] != "true" {
+		t.Fatalf("persistent label = %q, want true", labels["tako.persistent"])
 	}
 }
 

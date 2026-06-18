@@ -24,6 +24,7 @@ type ActualService struct {
 	Containers []string `json:"containers,omitempty"`
 	ConfigHash string   `json:"configHash,omitempty"`
 	RuntimeID  string   `json:"runtimeId,omitempty"`
+	Persistent bool     `json:"persistent,omitempty"`
 }
 
 func GatherActualState(ctx context.Context, project string, environment string) (*ActualStateResponse, error) {
@@ -41,7 +42,7 @@ func GatherActualState(ctx context.Context, project string, environment string) 
 	}
 
 	format := fmt.Sprintf(
-		`{{.Names}}|{{.Image}}|{{.ID}}|{{.Label "tako.configHash"}}|{{.Label %q}}|{{.Label "tako.project"}}|{{.Label "tako.environment"}}|{{.Label "tako.service"}}`,
+		`{{.Names}}|{{.Image}}|{{.ID}}|{{.Label "tako.configHash"}}|{{.Label %q}}|{{.Label "tako.project"}}|{{.Label "tako.environment"}}|{{.Label "tako.service"}}|{{.Label "tako.persistent"}}`,
 		runtimeid.ServiceIdentityLabel,
 	)
 	cmd := actualDockerCommandContext(ctx, "docker", "ps", "--format", format)
@@ -87,6 +88,10 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 			strings.TrimSpace(parts[6]) == environment {
 			serviceName = strings.TrimSpace(parts[7])
 		}
+		persistent := false
+		if len(parts) >= 9 {
+			persistent = strings.EqualFold(strings.TrimSpace(parts[8]), "true")
+		}
 		if serviceName == "" {
 			continue
 		}
@@ -103,6 +108,7 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 				existing.ConfigHash = ""
 			}
 			existing.RuntimeID = mergeRuntimeID(existing.RuntimeID, runtimeID)
+			existing.Persistent = existing.Persistent || persistent
 			continue
 		}
 
@@ -113,6 +119,7 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 			Containers: []string{containerID},
 			ConfigHash: configHash,
 			RuntimeID:  runtimeID,
+			Persistent: persistent,
 		}
 	}
 
