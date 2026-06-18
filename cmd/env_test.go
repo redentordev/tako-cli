@@ -97,6 +97,27 @@ func TestSupportedEnvBundleFilesFiltersAndSortsPaths(t *testing.T) {
 	}
 }
 
+func TestSupportedEnvBundleFilesAllowsConfiguredEnvFiles(t *testing.T) {
+	allowed, paths, skipped := supportedEnvBundleFiles(
+		map[string]string{
+			".env.production": "prod-env",
+			".env.local":      "local-env",
+		},
+		map[string]bool{".env.production": true},
+	)
+
+	wantPaths := []string{".env.production"}
+	if !slices.Equal(paths, wantPaths) {
+		t.Fatalf("paths = %v, want %v", paths, wantPaths)
+	}
+	if allowed[".env.production"] != "prod-env" {
+		t.Fatalf("allowed bundle = %#v, want configured env file", allowed)
+	}
+	if !slices.Equal(skipped, []string{".env.local"}) {
+		t.Fatalf("skipped = %v, want .env.local", skipped)
+	}
+}
+
 func TestRestoreEnvBundleFilesWritesAllowedFiles(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
@@ -295,6 +316,55 @@ func TestRestoreDownloadedEnvBundleDecryptsAndWritesFiles(t *testing.T) {
 	}
 	if string(envData) != "TOKEN=secret\n" {
 		t.Fatalf(".env = %q", envData)
+	}
+}
+
+func TestRestoreDownloadedEnvBundleAllowsConfiguredEnvFile(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Chdir(tempDir)
+	passphrase := "correct horse battery staple"
+	t.Setenv(envPassphraseVar, passphrase)
+
+	bundleJSON, err := json.Marshal(map[string]string{
+		".env.production": base64.StdEncoding.EncodeToString([]byte("TOKEN=prod\n")),
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal bundle: %v", err)
+	}
+	encrypted, err := crypto.EncryptWithPassphrase(bundleJSON, passphrase)
+	if err != nil {
+		t.Fatalf("EncryptWithPassphrase returned error: %v", err)
+	}
+
+	cfg := &config.Config{
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Services: map[string]config.ServiceConfig{
+					"web": {EnvFile: ".env.production"},
+				},
+			},
+		},
+	}
+	restored, skipped, err := restoreDownloadedEnvBundle(&takod.EnvBundleResponse{
+		Found:   true,
+		Content: base64.StdEncoding.EncodeToString(encrypted),
+	}, false, cfg)
+	if err != nil {
+		t.Fatalf("restoreDownloadedEnvBundle returned error: %v", err)
+	}
+	if skipped {
+		t.Fatal("restoreDownloadedEnvBundle skipped unexpectedly")
+	}
+	if restored != 1 {
+		t.Fatalf("restored = %d, want 1", restored)
+	}
+
+	data, err := os.ReadFile(".env.production")
+	if err != nil {
+		t.Fatalf("failed to read restored .env.production: %v", err)
+	}
+	if string(data) != "TOKEN=prod\n" {
+		t.Fatalf(".env.production = %q", data)
 	}
 }
 

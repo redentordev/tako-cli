@@ -89,10 +89,16 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	// Collect files to bundle
 	bundle := make(map[string]string) // relative path -> base64 content
 
-	// Add .env if it exists
-	if data, err := os.ReadFile(".env"); err == nil {
-		bundle[".env"] = base64.StdEncoding.EncodeToString(data)
-		fmt.Println("Including: .env")
+	for _, envPath := range configuredEnvBundlePaths(cfg) {
+		data, err := os.ReadFile(envPath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				fmt.Printf("Warning: skipping %s: %v\n", envPath, err)
+			}
+			continue
+		}
+		bundle[envPath] = base64.StdEncoding.EncodeToString(data)
+		fmt.Printf("Including: %s\n", envPath)
 	}
 
 	// Add .tako/secrets* files
@@ -108,7 +114,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(bundle) == 0 {
-		return fmt.Errorf("no environment files found to push (.env, .tako/secrets*)")
+		return fmt.Errorf("no environment files found to push (.env, configured envFile, .tako/secrets*)")
 	}
 
 	// Prompt for passphrase
@@ -190,7 +196,7 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	restored, skipped, err := restoreDownloadedEnvBundle(response, envForce)
+	restored, skipped, err := restoreDownloadedEnvBundle(response, envForce, cfg)
 	if err != nil {
 		return err
 	}
@@ -202,7 +208,7 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func restoreDownloadedEnvBundle(response *takod.EnvBundleResponse, force bool) (int, bool, error) {
+func restoreDownloadedEnvBundle(response *takod.EnvBundleResponse, force bool, cfgs ...*config.Config) (int, bool, error) {
 	encrypted, err := base64.StdEncoding.DecodeString(strings.TrimSpace(response.Content))
 	if err != nil {
 		return 0, false, fmt.Errorf("failed to decode downloaded bundle: %w", err)
@@ -226,7 +232,8 @@ func restoreDownloadedEnvBundle(response *takod.EnvBundleResponse, force bool) (
 		return 0, false, fmt.Errorf("failed to parse bundle: %w", err)
 	}
 
-	allowedBundle, allowedPaths, skippedPaths := supportedEnvBundleFiles(bundle)
+	extraAllowedPaths := configuredEnvBundlePathSet(cfgs...)
+	allowedBundle, allowedPaths, skippedPaths := supportedEnvBundleFiles(bundle, extraAllowedPaths)
 	for _, path := range skippedPaths {
 		fmt.Printf("Warning: skipping unsupported bundle path: %s\n", path)
 	}
@@ -252,14 +259,14 @@ func restoreDownloadedEnvBundle(response *takod.EnvBundleResponse, force bool) (
 		}
 	}
 
-	restored, err := restoreEnvBundleFiles(allowedBundle, allowedPaths)
+	restored, err := restoreEnvBundleFiles(allowedBundle, allowedPaths, extraAllowedPaths)
 	if err != nil {
 		return restored, false, err
 	}
 	return restored, false, nil
 }
 
-func restoreEnvBundleFiles(allowedBundle map[string]string, allowedPaths []string) (int, error) {
+func restoreEnvBundleFiles(allowedBundle map[string]string, allowedPaths []string, extraAllowedPaths ...map[string]bool) (int, error) {
 	decoded := make(map[string][]byte, len(allowedPaths))
 	var decodeErrors []string
 	for _, path := range allowedPaths {
@@ -274,7 +281,7 @@ func restoreEnvBundleFiles(allowedBundle map[string]string, allowedPaths []strin
 		return 0, fmt.Errorf("failed to decode environment bundle file(s): %s", strings.Join(decodeErrors, "; "))
 	}
 
-	backups, createdDirs, err := prepareEnvRestoreTransaction(allowedPaths)
+	backups, createdDirs, err := prepareEnvRestoreTransaction(allowedPaths, mergeEnvBundleAllowedPathSets(extraAllowedPaths...))
 	if err != nil {
 		return 0, err
 	}
@@ -301,10 +308,10 @@ type envRestoreBackup struct {
 	mode    os.FileMode
 }
 
-func prepareEnvRestoreTransaction(paths []string) (map[string]envRestoreBackup, []string, error) {
+func prepareEnvRestoreTransaction(paths []string, extraAllowedPaths map[string]bool) (map[string]envRestoreBackup, []string, error) {
 	createdDirs := make([]string, 0)
 	for _, path := range paths {
-		if !isAllowedEnvBundlePath(path) {
+		if !isAllowedEnvBundlePath(path, extraAllowedPaths) {
 			return nil, nil, fmt.Errorf("%s: unsupported environment bundle path", path)
 		}
 
@@ -453,12 +460,13 @@ func rollbackEnvRestore(backups map[string]envRestoreBackup, createdDirs []strin
 	return nil
 }
 
-func supportedEnvBundleFiles(bundle map[string]string) (map[string]string, []string, []string) {
+func supportedEnvBundleFiles(bundle map[string]string, extraAllowedPaths ...map[string]bool) (map[string]string, []string, []string) {
 	allowed := make(map[string]string, len(bundle))
 	allowedPaths := make([]string, 0, len(bundle))
 	skippedPaths := make([]string, 0)
+	extraAllowed := mergeEnvBundleAllowedPathSets(extraAllowedPaths...)
 	for path, encodedContent := range bundle {
-		if !isAllowedEnvBundlePath(path) {
+		if !isAllowedEnvBundlePath(path, extraAllowed) {
 			skippedPaths = append(skippedPaths, path)
 			continue
 		}
@@ -741,9 +749,14 @@ func validateEnvPassphrase(passphrase string) error {
 	return nil
 }
 
-func isAllowedEnvBundlePath(path string) bool {
+func isAllowedEnvBundlePath(path string, extraAllowedPaths ...map[string]bool) bool {
 	if path == "" || filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return false
+	}
+	for _, allowed := range extraAllowedPaths {
+		if allowed != nil && allowed[path] {
+			return true
+		}
 	}
 	if path == ".env" {
 		return true
@@ -753,4 +766,69 @@ func isAllowedEnvBundlePath(path string) bool {
 	}
 	name := filepath.Base(path)
 	return name == "secrets" || strings.HasPrefix(name, "secrets.")
+}
+
+func configuredEnvBundlePaths(cfg *config.Config) []string {
+	pathSet := configuredEnvBundlePathSet(cfg)
+	paths := make([]string, 0, len(pathSet))
+	for path := range pathSet {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func configuredEnvBundlePathSet(cfgs ...*config.Config) map[string]bool {
+	allowed := map[string]bool{".env": true}
+	for _, cfg := range cfgs {
+		if cfg == nil {
+			continue
+		}
+		for _, env := range cfg.Environments {
+			for _, service := range env.Services {
+				if path, ok := normalizeEnvBundlePath(service.EnvFile); ok {
+					allowed[path] = true
+				}
+			}
+		}
+	}
+	return allowed
+}
+
+func normalizeEnvBundlePath(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", false
+	}
+	if filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", false
+		}
+		rel, err := filepath.Rel(cwd, path)
+		if err != nil {
+			return "", false
+		}
+		path = rel
+	}
+	path = filepath.Clean(path)
+	if path == "." || filepath.IsAbs(path) || strings.HasPrefix(path, ".."+string(os.PathSeparator)) || path == ".." {
+		return "", false
+	}
+	if strings.ContainsAny(path, "\x00\r\n") {
+		return "", false
+	}
+	return path, true
+}
+
+func mergeEnvBundleAllowedPathSets(pathSets ...map[string]bool) map[string]bool {
+	merged := make(map[string]bool)
+	for _, pathSet := range pathSets {
+		for path, allowed := range pathSet {
+			if allowed {
+				merged[path] = true
+			}
+		}
+	}
+	return merged
 }
