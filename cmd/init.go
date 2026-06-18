@@ -186,6 +186,7 @@ func generateJSONConfig(projectName string) string {
   },
   "runtime": {
     "mode": "takod",
+    "proxy": "tako-proxy",
     "agent": {
       "enabled": true,
       "socket": "/run/tako/takod.sock",
@@ -255,6 +256,7 @@ project:
 # ============================================================================
 runtime:
   mode: takod
+  proxy: tako-proxy
   agent:
     enabled: true
     socket: /run/tako/takod.sock

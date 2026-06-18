@@ -21,6 +21,9 @@ func TestGenerateYAMLConfigParsesRuntimeBlocks(t *testing.T) {
 	if cfg.Runtime == nil || cfg.Runtime.Agent == nil {
 		t.Fatal("generated YAML should include runtime agent config")
 	}
+	if cfg.Runtime.Proxy != config.RuntimeProxyTako {
+		t.Fatalf("generated YAML runtime proxy = %q, want %q", cfg.Runtime.Proxy, config.RuntimeProxyTako)
+	}
 	if cfg.State == nil {
 		t.Fatal("generated YAML should include state config")
 	}
@@ -41,6 +44,9 @@ func TestGenerateJSONConfigParsesRuntimeBlocks(t *testing.T) {
 	}
 	if cfg.Runtime == nil || cfg.Runtime.Agent == nil {
 		t.Fatal("generated JSON should include runtime agent config")
+	}
+	if cfg.Runtime.Proxy != config.RuntimeProxyTako {
+		t.Fatalf("generated JSON runtime proxy = %q, want %q", cfg.Runtime.Proxy, config.RuntimeProxyTako)
 	}
 	if cfg.State == nil {
 		t.Fatal("generated JSON should include state config")

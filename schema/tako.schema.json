@@ -45,6 +45,14 @@
           "default": "takod",
           "description": "Runtime engine"
         },
+        "proxy": {
+          "type": "string",
+          "enum": [
+            "tako-proxy"
+          ],
+          "default": "tako-proxy",
+          "description": "Built-in Traefik-backed ingress proxy"
+        },
         "agent": {
           "type": "object",
           "description": "takod node-local reconciler settings",
