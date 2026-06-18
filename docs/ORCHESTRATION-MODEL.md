@@ -90,6 +90,7 @@ stable and unique per product, and use environments as stages such as
 ```yaml
 runtime:
   mode: takod
+  proxy: tako-proxy
   agent:
     enabled: true
     socket: /run/tako/takod.sock
@@ -110,10 +111,12 @@ mesh:
   natTraversal: true
 ```
 
-`remoteCacheEnabled` must remain `true` in the current model. Local `.tako`
-files are a cache; deployment history and runtime revisions have to be
-replicated to `takod` so another laptop or CI runner can reconcile from the same
-state.
+`runtime.proxy` must remain `tako-proxy` in the current model. It is the
+Traefik-backed built-in ingress proxy that publishes HTTP on TCP 80, HTTPS on
+TCP 443, and HTTP/3 on UDP 443. `remoteCacheEnabled` must remain `true` in the
+current model. Local `.tako` files are a cache; deployment history and runtime
+revisions have to be replicated to `takod` so another laptop or CI runner can
+reconcile from the same state.
 
 During runtime preparation, Tako installs WireGuard tools when missing, creates a
 stable node key under `/etc/tako/wireguard`, writes `/etc/wireguard/tako.conf`,
