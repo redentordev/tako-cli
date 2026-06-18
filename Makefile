@@ -1,4 +1,4 @@
-.PHONY: build install test clean run help dev lint fmt build-all mesh-e2e examples ci-quality ci-race ci-check
+.PHONY: build install test clean run help dev lint fmt build-all mesh-e2e mesh-e2e-smoke examples ci-quality ci-race ci-check
 
 # Binary name
 BINARY_NAME=tako
@@ -100,6 +100,10 @@ mesh-e2e:
 	 TAKO_E2E_PHASES="$(or $(PHASES),preflight)" \
 	 scripts/mesh-e2e.sh $(ARGS)
 
+## mesh-e2e-smoke: Run non-remote mesh E2E harness smoke checks
+mesh-e2e-smoke:
+	@scripts/mesh-e2e-smoke.sh
+
 ## examples: Validate deployment pattern examples
 examples:
 	@examples/deployment-patterns/validate.sh
@@ -123,6 +127,8 @@ else
 	@git diff --check
 	@echo "Checking shell script syntax..."
 	@find scripts examples -name '*.sh' -print0 | xargs -0 -n1 bash -n
+	@echo "Running mesh E2E harness smoke checks..."
+	@$(MAKE) mesh-e2e-smoke
 	@echo "Validating deployment pattern examples..."
 	@$(MAKE) examples
 	@echo "Running tests..."
