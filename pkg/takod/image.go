@@ -163,12 +163,36 @@ func BuildImage(ctx context.Context, image string, r io.Reader, dockerfile ...st
 	cmd.Stdout = output
 	cmd.Stderr = output
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to build image %s: %w, output: %s", image, err, output.String())
+		return nil, fmt.Errorf("failed to build image %s: %w, output: %s", image, err, annotateDockerBuildFailure(output.String()))
 	}
 	if _, err := runDocker(ctx, "image", "inspect", image); err != nil {
 		return nil, fmt.Errorf("built image %s is not inspectable: %w", image, err)
 	}
 	return &ImageBuildResponse{Image: image, Output: strings.TrimSpace(output.String())}, nil
+}
+
+func annotateDockerBuildFailure(output string) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return output
+	}
+	hint := dockerBuildFailureHint(output)
+	if hint == "" || strings.Contains(output, hint) {
+		return output
+	}
+	return output + "\n\nHint: " + hint
+}
+
+func dockerBuildFailureHint(output string) string {
+	lower := strings.ToLower(output)
+	buildKitMissing := strings.Contains(lower, "buildkit") || strings.Contains(lower, "buildx")
+	buildKitOnlySyntax := strings.Contains(lower, "requires buildkit") ||
+		strings.Contains(lower, "dockerfile frontend") ||
+		strings.Contains(lower, "unknown flag: chmod")
+	if buildKitMissing || buildKitOnlySyntax {
+		return "the remote Docker builder cannot handle this BuildKit-dependent Dockerfile. Install/repair Docker buildx on the node, or replace BuildKit-only syntax such as COPY --chmod with portable RUN chmod steps."
+	}
+	return ""
 }
 
 func validateDockerfilePath(path string) error {

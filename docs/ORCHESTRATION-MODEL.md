@@ -190,6 +190,13 @@ Rootless Docker on remote deployment nodes is blocked until the live mesh
 checklist proves setup, proxy ports, WireGuard routing, volumes, and service
 reconciliation on that host.
 
+Dockerfile syntax is evaluated by the remote Docker builder, not by the local
+laptop. If a Dockerfile uses BuildKit-only features such as `COPY --chmod`, the
+target node must have working BuildKit/buildx support. When a remote builder is
+legacy-only or has a broken buildx install, takod surfaces the Docker output and
+adds a hint to either install/repair buildx on the node or replace the
+BuildKit-only syntax with portable steps such as `RUN chmod`.
+
 For build-based services in a multi-node environment, Tako builds the image on
 the selected source node through that node's `takod` socket, then brokers a
 stream from the source node's `takod` image export endpoint into each peer
@@ -364,7 +371,11 @@ desired revision, aggregate actual snapshot, and node-local actual snapshots
 back to the reachable mesh, and refreshes local `.tako` state when deployment
 history is available. When a node has been removed from the environment, deploy
 and state repair prune stale per-node actual snapshots for that node after the
-fresh target-node state is written. Operators can also run
+fresh target-node state is written. That state pruning does not stop containers
+on a still-running host after its SSH config is removed. If a node still exists,
+clean its services while the node remains in `tako.yaml` with
+`tako remove --server <node>`, or temporarily re-add it and run that cleanup
+before deleting it from the environment. Operators can run
 `tako state forget-node <node> --yes` after removing a destroyed node from
 `tako.yaml` to explicitly delete its standalone node snapshot and prune it from
 aggregate actual state on reachable nodes before the next deploy.

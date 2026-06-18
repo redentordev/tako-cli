@@ -131,6 +131,34 @@ func TestStreamRequestUsesLongDeadline(t *testing.T) {
 	}
 }
 
+func TestStreamRequestStripsTrailingHTTPStatusOnSuccess(t *testing.T) {
+	client := &fakeTakodExecutor{output: "{\"image\":\"demo/web:abc\"}\n__TAKO_HTTP_STATUS__:200"}
+
+	output, err := StreamRequest(client, DefaultSocket, "POST", "/v1/images/build", strings.NewReader("archive"))
+	if err != nil {
+		t.Fatalf("StreamRequest returned error: %v", err)
+	}
+	if output != "{\"image\":\"demo/web:abc\"}" {
+		t.Fatalf("output = %q, want response body without status marker", output)
+	}
+}
+
+func TestStreamRequestReturnsHTTPErrorBody(t *testing.T) {
+	body := "failed to build image demo/web:abc: the --chmod option requires BuildKit"
+	client := &fakeTakodExecutor{output: body + "\n__TAKO_HTTP_STATUS__:502"}
+
+	output, err := StreamRequest(client, DefaultSocket, "POST", "/v1/images/build", strings.NewReader("archive"))
+	if err == nil {
+		t.Fatal("StreamRequest should return HTTP errors")
+	}
+	if output != body {
+		t.Fatalf("output = %q, want response body", output)
+	}
+	if !strings.Contains(err.Error(), "HTTP 502") || !strings.Contains(err.Error(), body) {
+		t.Fatalf("error = %q, want HTTP status and response body", err.Error())
+	}
+}
+
 func TestProxyFileEndpointEscapesName(t *testing.T) {
 	got := ProxyFileEndpoint("demo production.yml")
 	want := "/v1/proxy-file?name=demo+production.yml"

@@ -365,6 +365,27 @@ func TestRecordFailedDeploymentStateReturnsRemoteSaveError(t *testing.T) {
 	}
 }
 
+func TestRetiredDeploymentServersDetectsRemovedNodes(t *testing.T) {
+	got := retiredDeploymentServers(
+		[]string{"node-b", "node-a", "node-b", "node-c", ""},
+		[]string{"node-a"},
+	)
+	want := []string{"node-b", "node-c"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("retiredDeploymentServers() = %#v, want %#v", got, want)
+	}
+}
+
+func TestRetiredDeploymentServersIgnoresUnchangedNodes(t *testing.T) {
+	got := retiredDeploymentServers(
+		[]string{"node-a", "node-b"},
+		[]string{"node-b", "node-a", "node-c"},
+	)
+	if len(got) != 0 {
+		t.Fatalf("retiredDeploymentServers() = %#v, want none", got)
+	}
+}
+
 func TestFilterActualStateForServicesScopesTargetedDeployPlan(t *testing.T) {
 	webActual := &reconcile.ActualService{Name: "web", Image: "demo/web:old", Replicas: 1}
 	actualState := map[string]*reconcile.ActualService{

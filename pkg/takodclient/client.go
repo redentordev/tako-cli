@@ -126,7 +126,8 @@ func StreamRequest(client RequestExecutor, socket string, method string, endpoin
 
 	args := []string{
 		"if test -S " + shellQuote(socket) + " && command -v curl >/dev/null 2>&1; then",
-		"curl --fail --silent --show-error",
+		"curl --silent --show-error",
+		"--write-out '\\n__TAKO_HTTP_STATUS__:%{http_code}'",
 		"--unix-socket " + shellQuote(socket),
 		"-X " + shellQuote(method),
 		"--data-binary @-",
@@ -138,10 +139,15 @@ func StreamRequest(client RequestExecutor, socket string, method string, endpoin
 	defer cancel()
 
 	output, err := client.ExecuteWithInput(ctx, curlCmd, reader)
+	bodyOutput, status, hasStatus := splitHTTPStatus(output)
 	if err != nil {
-		return output, fmt.Errorf("takod stream request %s %s failed: %w, output: %s", method, endpoint, err, output)
+		return bodyOutput, fmt.Errorf("takod stream request %s %s failed: %w, output: %s", method, endpoint, err, strings.TrimSpace(bodyOutput))
 	}
-	return output, nil
+	bodyOutput = sanitizeJSONOutput(bodyOutput)
+	if hasStatus && status >= 400 {
+		return bodyOutput, fmt.Errorf("takod stream request %s %s returned HTTP %d: %s", method, endpoint, status, strings.TrimSpace(bodyOutput))
+	}
+	return bodyOutput, nil
 }
 
 func StreamOutput(client StreamExecutor, socket string, endpoint string, stdout io.Writer, stderr io.Writer) error {

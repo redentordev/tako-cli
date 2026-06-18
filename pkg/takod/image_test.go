@@ -159,6 +159,27 @@ func TestBuildImageRejectsUnsafeCustomDockerfilePath(t *testing.T) {
 	}
 }
 
+func TestBuildImageAddsBuildKitHint(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_DOCKER_BUILD_ERROR", "the --chmod option requires BuildKit")
+
+	archive := testBuildContextArchive(t, map[string]string{
+		"Dockerfile": "FROM alpine\nCOPY --chmod=0644 app /app\n",
+		"app":        "ok\n",
+	})
+	_, err := BuildImage(context.Background(), "demo/web:abc", bytes.NewReader(archive))
+	if err == nil {
+		t.Fatal("BuildImage should fail when docker build fails")
+	}
+	for _, want := range []string{"the --chmod option requires BuildKit", "Hint:", "Docker buildx", "COPY --chmod"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err.Error(), want)
+		}
+	}
+}
+
 func TestExtractTarGzWithLimitsRejectsLargeFile(t *testing.T) {
 	archive := testBuildContextArchive(t, map[string]string{
 		"Dockerfile": strings.Repeat("A", 6),
