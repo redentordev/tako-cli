@@ -259,7 +259,7 @@ require_deploy_ignore_rules() {
   local dir="$1"
   local missing=()
 
-  for path in ".tako" ".env"; do
+  for path in ".tako/" ".env"; do
     if ! (cd "$dir" && git check-ignore -q "$path"); then
       missing+=("$path")
     fi
