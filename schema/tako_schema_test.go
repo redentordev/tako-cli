@@ -17,6 +17,7 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	schema := loadTakoSchema(t)
 
 	assertStringEnum(t, schemaPath(t, schema, "properties", "runtime", "properties", "mode"), []string{config.RuntimeModeTakod})
+	assertStringEnum(t, schemaPath(t, schema, "properties", "runtime", "properties", "proxy"), []string{config.RuntimeProxyTako})
 	assertBoolConst(t, schemaPath(t, schema, "properties", "mesh", "properties", "enabled"), true)
 	assertStringEnum(t, schemaPath(t, schema, "properties", "state", "properties", "backend"), []string{config.StateBackendReplicated})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "state", "properties", "deployConsistency"), []string{config.StateDeployConsistencyLease})
