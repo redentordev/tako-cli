@@ -36,9 +36,10 @@ Run the local validation command after changing these templates:
 make examples
 ```
 
-This runs `tako validate` against every `tako.yaml`, checks build contexts,
+This validates every example config in the repository, checks build contexts,
 verifies the CI/CD example, and runs the deployment pattern assertions without
-contacting a real server.
+contacting a real server. To validate only this catalog, run
+`examples/deployment-patterns/validate.sh`.
 
 Stateful templates use node-local volumes. Pin stateful services when moving
 to multiple nodes unless the service itself is built for replication.

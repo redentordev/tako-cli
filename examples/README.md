@@ -334,9 +334,18 @@ tako ps
 tako logs --service web --tail 50
 ```
 
+Before deploying an example, validate its Tako config locally:
+
+```bash
+make examples
+```
+
+This checks every example config with placeholder environment values and does
+not contact a real server.
+
 ## Environment Variables
 
-All examples use `${SERVER_HOST}` for the server configuration:
+Most examples use `${SERVER_HOST}` for the server configuration:
 
 ```yaml
 servers:
@@ -354,6 +363,11 @@ You can also set it in a `.env` file:
 ```bash
 SERVER_HOST=203.0.113.10
 ```
+
+Some multi-node, secrets, and app-specific examples also use variables such as
+`${SERVER1_HOST}`, `${SERVER2_HOST}`, `${SERVER_IP}`, `${SSH_KEY}`,
+`${LETSENCRYPT_EMAIL}`, or framework secrets. See the selected example's
+`tako.yaml` and `.env.example` when present.
 
 ## Customizing Examples
 
