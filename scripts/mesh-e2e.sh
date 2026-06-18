@@ -20,6 +20,7 @@
 #   TAKO_E2E_KEEP_WORKDIR=1   Keep temporary fresh-clone workdirs.
 #   TAKO_E2E_PROTOCOL_URL     Public HTTPS URL for protocol checks.
 #   TAKO_E2E_WEBSOCKET_URL    Optional public wss:// URL for WebSocket checks.
+#   TAKO_E2E_CURL             curl binary for protocol checks.
 #   TAKO_E2E_HTTP3_REQUIRED=1 Fail when curl cannot make HTTP/3 requests.
 #   TAKO_E2E_OFFLINE_SERVER   Node name to stop for the offline/rejoin phase.
 #   TAKO_E2E_OFFLINE_HOST     SSH host for TAKO_E2E_OFFLINE_SERVER.
@@ -62,6 +63,7 @@ OFFLINE_STATUS_CMD="${TAKO_E2E_OFFLINE_STATUS_CMD:-sudo systemctl is-active --qu
 OFFLINE_RESTORE_NEEDED=0
 PROTOCOL_URL="${TAKO_E2E_PROTOCOL_URL:-${TAKO_VALIDATE_URL:-}}"
 WEBSOCKET_URL="${TAKO_E2E_WEBSOCKET_URL:-}"
+CURL_BIN="${TAKO_E2E_CURL:-}"
 HTTP3_REQUIRED="${TAKO_E2E_HTTP3_REQUIRED:-0}"
 
 LOG_DIR=""
@@ -89,6 +91,7 @@ Options:
   --offline-ssh-key   Override SSH key for the offline node.
   --protocol-url      Public HTTPS URL for protocol checks.
   --websocket-url     Optional public wss:// URL for WebSocket checks.
+  --curl PATH         curl binary for protocol checks.
   --http3-required    Fail if curl cannot make HTTP/3 requests.
   --help, -h          Show this help.
 
@@ -217,6 +220,11 @@ while [[ $# -gt 0 ]]; do
       WEBSOCKET_URL="$2"
       shift 2
       ;;
+    --curl)
+      [[ $# -ge 2 ]] || die "--curl requires a value"
+      CURL_BIN="$2"
+      shift 2
+      ;;
     --http3-required)
       HTTP3_REQUIRED="1"
       shift
@@ -280,11 +288,47 @@ require_deploy_ready_worktree() {
 }
 
 curl_supports_http3() {
-  curl --http3 --version >/dev/null 2>&1
+  local candidate="$1"
+  "$candidate" --http3 --version >/dev/null 2>&1
+}
+
+select_curl_binary() {
+  local candidate
+
+  if [[ -n "$CURL_BIN" ]]; then
+    if [[ -x "$CURL_BIN" ]]; then
+      return
+    fi
+    if candidate="$(command -v "$CURL_BIN" 2>/dev/null)" && [[ -x "$candidate" ]]; then
+      CURL_BIN="$candidate"
+      return
+    fi
+    die "configured curl is not executable or on PATH: $CURL_BIN"
+  fi
+
+  if candidate="$(command -v curl 2>/dev/null)" && [[ -n "$candidate" ]]; then
+    CURL_BIN="$candidate"
+  fi
+
+  if [[ -n "$CURL_BIN" && "$HTTP3_REQUIRED" != "1" ]]; then
+    return
+  fi
+
+  if [[ -n "$CURL_BIN" ]] && curl_supports_http3 "$CURL_BIN"; then
+    return
+  fi
+
+  for candidate in /opt/homebrew/opt/curl/bin/curl /usr/local/opt/curl/bin/curl; do
+    if [[ -x "$candidate" ]] && curl_supports_http3 "$candidate"; then
+      CURL_BIN="$candidate"
+      return
+    fi
+  done
 }
 
 require_protocol_url() {
-  require_tool curl
+  select_curl_binary
+  [[ -n "$CURL_BIN" ]] || die "phase 'protocols' requires curl"
   [[ -n "$PROTOCOL_URL" ]] ||
     die "phase 'protocols' requires TAKO_E2E_PROTOCOL_URL or TAKO_VALIDATE_URL"
   case "$PROTOCOL_URL" in
@@ -841,8 +885,8 @@ EOF
 phase_protocols() {
   require_protocol_url
 
-  run_cmd "protocol HTTP/1.1" curl --http1.1 --fail --silent --show-error --location --max-time 20 --dump-header "$LOG_DIR/protocol-http1.headers" --output "$LOG_DIR/protocol-http1.body" "$PROTOCOL_URL"
-  run_cmd "protocol HTTP/2" curl --http2 --fail --silent --show-error --location --max-time 20 --dump-header "$LOG_DIR/protocol-http2.headers" --output "$LOG_DIR/protocol-http2.body" "$PROTOCOL_URL"
+  run_cmd "protocol HTTP/1.1" "$CURL_BIN" --http1.1 --fail --silent --show-error --location --max-time 20 --dump-header "$LOG_DIR/protocol-http1.headers" --output "$LOG_DIR/protocol-http1.body" "$PROTOCOL_URL"
+  run_cmd "protocol HTTP/2" "$CURL_BIN" --http2 --fail --silent --show-error --location --max-time 20 --dump-header "$LOG_DIR/protocol-http2.headers" --output "$LOG_DIR/protocol-http2.body" "$PROTOCOL_URL"
 
   if grep -qi '^alt-svc:.*h3' "$LOG_DIR/protocol-http1.headers" "$LOG_DIR/protocol-http2.headers"; then
     note "HTTP/3 Alt-Svc advertised"
@@ -850,12 +894,12 @@ phase_protocols() {
     die "protocol response did not advertise HTTP/3 Alt-Svc"
   fi
 
-  if curl_supports_http3; then
-    run_cmd "protocol HTTP/3" curl --http3 --fail --silent --show-error --location --max-time 20 --dump-header "$LOG_DIR/protocol-http3.headers" --output "$LOG_DIR/protocol-http3.body" "$PROTOCOL_URL"
+  if curl_supports_http3 "$CURL_BIN"; then
+    run_cmd "protocol HTTP/3" "$CURL_BIN" --http3 --fail --silent --show-error --location --max-time 20 --dump-header "$LOG_DIR/protocol-http3.headers" --output "$LOG_DIR/protocol-http3.body" "$PROTOCOL_URL"
   elif [[ "$HTTP3_REQUIRED" == "1" ]]; then
-    die "curl does not support --http3; install an HTTP/3-capable curl or unset TAKO_E2E_HTTP3_REQUIRED"
+    die "$CURL_BIN does not support --http3; install an HTTP/3-capable curl, pass --curl, or unset TAKO_E2E_HTTP3_REQUIRED"
   else
-    note "Skipping HTTP/3 wire request: curl does not support --http3"
+    note "Skipping HTTP/3 wire request: $CURL_BIN does not support --http3"
   fi
 
   if [[ -n "$WEBSOCKET_URL" ]]; then
