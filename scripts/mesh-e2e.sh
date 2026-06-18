@@ -676,18 +676,19 @@ phase_repair() {
 }
 
 phase_invalid_config() {
-  local temp_parent invalid_dir log_file
+  local temp_parent invalid_yaml_dir invalid_strategy_dir log_file
   temp_parent="$(mktemp -d "${TMPDIR:-/tmp}/tako-e2e-invalid-config.XXXXXX")"
   TEMP_DIRS+=("$temp_parent")
-  invalid_dir="$temp_parent/app"
-  mkdir -p "$invalid_dir"
-  cat >"$invalid_dir/tako.yaml" <<'EOF'
+  invalid_yaml_dir="$temp_parent/invalid-yaml"
+  invalid_strategy_dir="$temp_parent/invalid-strategy"
+  mkdir -p "$invalid_yaml_dir" "$invalid_strategy_dir"
+  cat >"$invalid_yaml_dir/tako.yaml" <<'EOF'
 project:
   name: invalid-config-proof
   version: [
 EOF
 
-  if run_tako_status_in "$invalid_dir" "invalid YAML deploy should fail preflight" deploy --yes; then
+  if run_tako_status_in "$invalid_yaml_dir" "invalid YAML deploy should fail preflight" deploy --yes; then
     die "deploy unexpectedly succeeded with invalid YAML"
   fi
   log_file="$LAST_LOG_FILE"
@@ -702,6 +703,45 @@ EOF
   fi
 
   note "Invalid YAML failed during deploy config preflight"
+
+  cat >"$invalid_strategy_dir/tako.yaml" <<'EOF'
+project:
+  name: invalid-strategy-proof
+  version: 1.0.0
+servers:
+  node-a:
+    host: example.com
+    user: deploy
+    password: ${TAKO_E2E_TEST_SSH_PASSWORD}
+environments:
+  production:
+    servers:
+      - node-a
+    services:
+      web:
+        image: nginx:alpine
+        replicas: 2
+        loadBalancer:
+          strategy: ip_hash
+EOF
+
+  local TAKO_E2E_TEST_SSH_PASSWORD=test-password
+  export TAKO_E2E_TEST_SSH_PASSWORD
+  if run_tako_status_in "$invalid_strategy_dir" "invalid load balancer strategy deploy should fail preflight" deploy --yes; then
+    die "deploy unexpectedly succeeded with invalid load balancer strategy"
+  fi
+  log_file="$LAST_LOG_FILE"
+
+  if ! grep -q "invalid load balancer strategy" "$log_file" || ! grep -q "round_robin and sticky" "$log_file"; then
+    tail -n 80 "$log_file" >&2 || true
+    die "invalid-config phase did not report the unsupported load balancer strategy"
+  fi
+  if grep -Eq "=== Starting deployment ===|Acquired deployment lock|Acquired remote deploy leases|Starting takod deployment" "$log_file"; then
+    tail -n 80 "$log_file" >&2 || true
+    die "invalid-config phase reached deployment work instead of stopping at config validation"
+  fi
+
+  note "Invalid load balancer strategy failed during deploy config preflight"
 }
 
 phase_protocols() {
