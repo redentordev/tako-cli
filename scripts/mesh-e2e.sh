@@ -107,6 +107,7 @@ Phases:
   full            standard plus two-node, repair, offline.
 
 Mutating phases require --yes or TAKO_E2E_CONFIRM=run.
+The two-node and offline phases require at least two configured environment nodes.
 Set TAKO_ENV_PASSPHRASE for env, new-computer, and ci phases.
 Set TAKO_E2E_PROTOCOL_URL for protocols phase.
 EOF
@@ -418,6 +419,23 @@ run_upgrade_servers_dry_run() {
   run_upgrade_servers_dry_run_in "$APP_DIR" "$label"
 }
 
+require_min_environment_servers() {
+  local phase="$1"
+  local minimum="$2"
+  local count log_file
+
+  run_tako "validate config for $phase server count" validate
+  log_file="$LAST_LOG_FILE"
+  count="$(awk -F': ' '/^Servers: / {print $2; exit}' "$log_file")"
+  if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+    tail -n 80 "$log_file" >&2 || true
+    die "phase '$phase' could not determine configured environment server count from validate output"
+  fi
+  if ((count < minimum)); then
+    die "phase '$phase' requires at least $minimum configured environment nodes; validate reported $count"
+  fi
+}
+
 require_confirm() {
   local phase="$1"
   [[ "$CONFIRM" == "run" ]] ||
@@ -559,6 +577,7 @@ phase_one_node() {
 
 phase_two_node() {
   require_confirm "two-node"
+  require_min_environment_servers "two-node" 2
   require_deploy_ready_worktree "$APP_DIR"
   run_tako "two-node setup" setup
   run_upgrade_servers_dry_run "two-node upgrade servers dry-run"
@@ -736,6 +755,7 @@ ws.addEventListener("error", (event) => {
 
 phase_offline() {
   require_confirm "offline"
+  require_min_environment_servers "offline" 2
   require_offline_node_control
   require_deploy_ready_worktree "$APP_DIR"
   run_tako "offline baseline target status" state status --server "$OFFLINE_SERVER"
