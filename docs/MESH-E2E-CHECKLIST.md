@@ -85,6 +85,8 @@ make mesh-e2e APP_DIR=/path/to/app ENV=production PHASES=standard ARGS=--yes
 Mutating phases refuse to run unless `--yes` or `TAKO_E2E_CONFIRM=run` is set.
 Deploy and env phases also fail early unless `.tako/` and `.env` are ignored
 and the app worktree is clean, matching `tako deploy`'s clean-check behavior.
+The `two-node` and `offline` phases also fail early unless `tako validate`
+reports at least two configured nodes for the selected environment.
 The env phase backs up the local `.env`, verifies that `env pull --force`
 restores the same content, and restores the original file if the check fails.
 The CI phase defaults to `TAKO_E2E_CI_HOST_KEY_MODE=tofu`; set it to `strict`
@@ -144,9 +146,11 @@ Expected result:
 
 ## Two-Node Flow
 
-Add a second server to the same environment, then run:
+Add a second server to the same environment, verify `tako validate` reports at
+least two servers, then run:
 
 ```bash
+tako validate -e production
 tako setup -e production
 tako upgrade servers -e production --dry-run
 tako upgrade servers -e production
@@ -262,7 +266,8 @@ Expected result:
 
 ## Offline-Node Flow
 
-Run the harness against one non-critical node:
+Run the harness against one non-critical node in an environment with at least
+two configured nodes:
 
 ```bash
 TAKO_ENV_PASSPHRASE=... \
