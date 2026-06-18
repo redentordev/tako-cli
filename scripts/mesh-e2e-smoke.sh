@@ -90,6 +90,11 @@ run_invalid_config_check() {
     fail "invalid-config phase did not prove deploy preflight rejection"
   fi
 
+  if ! grep -Fq "Invalid load balancer strategy failed during deploy config preflight" "$output"; then
+    cat "$output" >&2
+    fail "invalid-config phase did not prove load balancer strategy preflight rejection"
+  fi
+
   if grep -REq "=== Starting deployment ===|Acquired deployment lock|Acquired remote deploy leases|Starting takod deployment|upgrade servers|state repair" "$output" "$log_dir" 2>/dev/null; then
     cat "$output" >&2
     fail "invalid-config phase reached remote or mutating work"
