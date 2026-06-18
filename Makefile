@@ -104,7 +104,7 @@ mesh-e2e:
 examples:
 	@examples/deployment-patterns/validate.sh
 
-## ci-quality: Run formatting, diff, shell, test, build, and vet gates
+## ci-quality: Run formatting, diff, shell, examples, test, build, and vet gates
 ci-quality:
 ifeq ($(OS),Windows_NT)
 	@Write-Host "ci-quality is supported from a POSIX shell; run it in Git Bash, WSL, or CI."
@@ -123,6 +123,8 @@ else
 	@git diff --check
 	@echo "Checking shell script syntax..."
 	@find scripts examples -name '*.sh' -print0 | xargs -0 -n1 bash -n
+	@echo "Validating deployment pattern examples..."
+	@$(MAKE) examples
 	@echo "Running tests..."
 	@go test ./...
 	@echo "Building..."
