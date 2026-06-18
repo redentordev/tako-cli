@@ -253,21 +253,19 @@ revision. New deployments obey `state.onUnreachableNode`.
 ## Placement
 
 ```text
-global:
-  one instance on every selected node
-
-replicated:
-  N instances spread across selected nodes
-
+spread:
+  distribute the configured replica count across selected nodes
 pinned:
   instances stay on named nodes
-
-spread:
-  spread replicas across selected nodes, optionally filtered by node label constraints
+global:
+  one instance on every selected node
+any or omitted:
+  no placement preference; replicas are assigned across selected nodes
 ```
 
-Stateful services default to pinned unless the config explicitly defines
-replication, placement, and external persistence behavior.
+Placement can also be filtered by supported node-label constraints such as
+`node.labels.role==web`. Stateful services should use `pinned` placement unless
+they are designed for multi-writer operation and external persistence.
 
 ## Mesh + Ingress
 
