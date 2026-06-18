@@ -302,7 +302,7 @@ type ServerSelector struct {
 
 // PlacementConfig defines where service replicas should run
 type PlacementConfig struct {
-	Strategy    string   `yaml:"strategy,omitempty" json:"strategy,omitempty"`       // "spread", "pinned", "any"
+	Strategy    string   `yaml:"strategy,omitempty" json:"strategy,omitempty"`       // "spread", "pinned", "any", "global"
 	Servers     []string `yaml:"servers,omitempty" json:"servers,omitempty"`         // Pin to specific servers (for "pinned" strategy)
 	Constraints []string `yaml:"constraints,omitempty" json:"constraints,omitempty"` // Node label constraints (e.g., "node.labels.type==high-memory")
 	Preferences []string `yaml:"preferences,omitempty" json:"preferences,omitempty"` // Placement preferences (e.g., "spread=node.labels.region")
