@@ -9,18 +9,31 @@ import (
 
 // AccessLog represents a JSON proxy access log entry.
 type AccessLog struct {
-	ClientAddr            string `json:"ClientAddr"`
-	ClientHost            string `json:"ClientHost"`
-	DownstreamStatus      int    `json:"DownstreamStatus"`
-	RequestMethod         string `json:"RequestMethod"`
-	RequestPath           string `json:"RequestPath"`
-	RequestProtocol       string `json:"RequestProtocol"`
-	RequestHost           string `json:"RequestHost"`
-	ServiceName           string `json:"ServiceName"`
-	OriginDuration        int64  `json:"OriginDuration"` // nanoseconds
-	OriginContentSize     int64  `json:"OriginContentSize"`
-	Time                  string `json:"time"`
-	DownstreamContentSize int64  `json:"DownstreamContentSize"`
+	ClientAddr            string  `json:"ClientAddr"`
+	ClientHost            string  `json:"ClientHost"`
+	DownstreamStatus      int     `json:"DownstreamStatus"`
+	RequestMethod         string  `json:"RequestMethod"`
+	RequestPath           string  `json:"RequestPath"`
+	RequestProtocol       string  `json:"RequestProtocol"`
+	RequestHost           string  `json:"RequestHost"`
+	ServiceName           string  `json:"ServiceName"`
+	OriginDuration        int64   `json:"OriginDuration"` // nanoseconds
+	OriginContentSize     int64   `json:"OriginContentSize"`
+	Time                  string  `json:"time"`
+	Logger                string  `json:"logger"`
+	DownstreamContentSize int64   `json:"DownstreamContentSize"`
+	Timestamp             float64 `json:"ts"`
+	Status                int     `json:"status"`
+	Duration              float64 `json:"duration"`
+	Size                  int64   `json:"size"`
+	Request               struct {
+		RemoteIP string `json:"remote_ip"`
+		ClientIP string `json:"client_ip"`
+		Proto    string `json:"proto"`
+		Method   string `json:"method"`
+		Host     string `json:"host"`
+		URI      string `json:"uri"`
+	} `json:"request"`
 }
 
 // Formatter handles formatting of access logs
@@ -54,21 +67,38 @@ func (f *Formatter) FormatLine(line string) (string, error) {
 		return line, nil
 	}
 
+	if log.RequestMethod == "" {
+		log.RequestMethod = log.Request.Method
+	}
+	if log.RequestPath == "" {
+		log.RequestPath = log.Request.URI
+	}
+	if log.RequestHost == "" {
+		log.RequestHost = log.Request.Host
+	}
+	if log.ClientHost == "" {
+		log.ClientHost = log.Request.ClientIP
+	}
+	if log.ClientHost == "" {
+		log.ClientHost = log.Request.RemoteIP
+	}
+	if log.DownstreamStatus == 0 {
+		log.DownstreamStatus = log.Status
+	}
+	if log.DownstreamContentSize == 0 {
+		log.DownstreamContentSize = log.Size
+	}
+	if log.ServiceName == "" {
+		log.ServiceName = serviceNameFromCaddyLogger(log.Logger)
+	}
+
 	var timestamp string
 
 	// Apply service filter if set
 	if f.serviceFilter != "" {
-		// Extract service name from ServiceName field (format: project_env_service@provider)
-		serviceName := log.ServiceName
-		if serviceName != "" {
-			// Parse format: project_env_service@provider -> service
-			parts := strings.Split(serviceName, "_")
-			if len(parts) >= 3 {
-				actualService := strings.Split(parts[2], "@")[0]
-				if actualService != f.serviceFilter {
-					return "", nil // Skip this log entry
-				}
-			}
+		serviceName := normalizedServiceName(log.ServiceName)
+		if serviceName != "" && serviceName != f.serviceFilter {
+			return "", nil
 		}
 	}
 
@@ -83,11 +113,18 @@ func (f *Formatter) FormatLine(line string) (string, error) {
 		} else if len(log.Time) >= 8 {
 			timestamp = log.Time[:8]
 		}
+	} else if log.Timestamp > 0 {
+		seconds := int64(log.Timestamp)
+		nanos := int64((log.Timestamp - float64(seconds)) * 1_000_000_000)
+		timestamp = time.Unix(seconds, nanos).Format("15:04:05")
 	}
 	status := log.DownstreamStatus
 	method := log.RequestMethod
 	remoteIP := log.ClientHost
 	duration := float64(log.OriginDuration) / 1000000000.0 // nanoseconds to seconds
+	if duration == 0 {
+		duration = log.Duration
+	}
 	size := int(log.DownstreamContentSize)
 	uri := log.RequestPath
 
@@ -140,6 +177,28 @@ func (f *Formatter) FormatLine(line string) (string, error) {
 	}
 
 	return output, nil
+}
+
+func normalizedServiceName(serviceName string) string {
+	if serviceName == "" {
+		return ""
+	}
+	if strings.HasPrefix(serviceName, "tako_") {
+		return strings.TrimPrefix(serviceName, "tako_")
+	}
+	parts := strings.Split(serviceName, "_")
+	if len(parts) >= 3 {
+		return strings.Split(parts[2], "@")[0]
+	}
+	return serviceName
+}
+
+func serviceNameFromCaddyLogger(logger string) string {
+	const prefix = "http.log.access.tako_"
+	if !strings.HasPrefix(logger, prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(logger, "http.log.access.")
 }
 
 // formatDuration formats duration in milliseconds

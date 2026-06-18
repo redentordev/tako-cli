@@ -86,8 +86,8 @@ func TestProxyConfigFileNameIncludesAppStageIdentity(t *testing.T) {
 	if left == right {
 		t.Fatalf("proxy config names collided: %q", left)
 	}
-	if !strings.HasSuffix(left, ".yml") || !strings.HasSuffix(right, ".yml") {
-		t.Fatalf("proxy config names should end in .yml: %q %q", left, right)
+	if !strings.HasSuffix(left, ".json") || !strings.HasSuffix(right, ".json") {
+		t.Fatalf("proxy config names should end in .json: %q %q", left, right)
 	}
 }
 

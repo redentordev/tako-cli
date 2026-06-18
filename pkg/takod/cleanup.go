@@ -138,7 +138,7 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 		cleanupTakodState(req.Project, req.Environment, warn)
 	}
 	if req.SecureLogPermissions {
-		if err := secureProxyLogPermissions("/var/log/tako/proxy"); err != nil {
+		if err := secureProxyLogPermissions(proxyLogDir); err != nil {
 			warn("failed to secure proxy log permissions: %v", err)
 		} else {
 			response.LogPermissionsSecured = true

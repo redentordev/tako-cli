@@ -51,7 +51,7 @@
             "tako-proxy"
           ],
           "default": "tako-proxy",
-          "description": "Built-in Traefik-backed ingress proxy"
+          "description": "Built-in Caddy-backed ingress proxy"
         },
         "agent": {
           "type": "object",
@@ -439,6 +439,20 @@
                         },
                         "staging": {
                           "type": "boolean"
+                        }
+                      }
+                    },
+                    "dynamicDomains": {
+                      "type": "object",
+                      "description": "Optional Caddy on-demand TLS domain authority. ask uses <service>:<path> and is called before certificates are issued for generated/custom domains. The ask endpoint must approve only exact domains owned by this app/environment.",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean",
+                          "default": true
+                        },
+                        "ask": {
+                          "type": "string",
+                          "description": "Internal ask endpoint reference, for example admin:/api/domains/authorize"
                         }
                       }
                     }

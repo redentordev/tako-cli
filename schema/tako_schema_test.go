@@ -24,6 +24,7 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	assertStringEnum(t, schemaPath(t, schema, "properties", "state", "properties", "onUnreachableNode"), []string{config.StateUnreachableBlock})
 	assertBoolEnum(t, schemaPath(t, schema, "properties", "state", "properties", "remoteCacheEnabled"), []bool{true})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "loadBalancer", "properties", "strategy"), []string{"round_robin", "sticky"})
+	schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "proxy", "properties", "dynamicDomains", "properties", "ask")
 }
 
 func loadTakoSchema(t *testing.T) map[string]any {

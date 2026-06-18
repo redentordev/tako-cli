@@ -291,7 +291,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **State Management** - Deployment history tracked on the server with local sync for new machines
 - **Remote Lease** - CI, laptops, and mutating operations share remote operation locks
 - **Automatic HTTPS** - tako-proxy provisions SSL certificates via Let's Encrypt
-- **Modern HTTP Proxying** - HTTP/1.1, HTTP/2, HTTP/3, and WebSocket traffic route through the Traefik-backed tako-proxy; `tako doctor` verifies the live proxy container shape
+- **Modern HTTP Proxying** - HTTP/1.1, HTTP/2, HTTP/3, and WebSocket traffic route through the Caddy-backed tako-proxy; `tako doctor` verifies the live proxy container shape
 - **Agent Upgrades** - `tako doctor` reports stale server-side takod agents; patch them with `tako upgrade servers`
 - **Domain Redirects** - Automatic www → non-www (or vice versa) with path preservation
 - **Health Checks** - Ensure containers are healthy after reconciliation
@@ -445,6 +445,44 @@ environments:
 tako setup && tako deploy
 ```
 
+### Dynamic Customer Domains
+
+For CMS-style apps that authorize generated or customer domains at runtime, add
+an internal ask endpoint. The ask endpoint should return approval only for
+domains your app owns.
+
+The ask endpoint is the security boundary for dynamic domains. Return success
+only for exact domains that are registered to the current app and environment.
+Do not approve broad suffixes such as `*.example.com` unless every matching
+hostname should route to that renderer, because Caddy will issue TLS and route
+any hostname that the ask endpoint approves. Keep the lookup fast and backed by
+an indexed domain table; Caddy calls this endpoint during on-demand certificate
+authorization, so slow database scans can turn first requests for new domains
+into user-visible TLS failures.
+
+```yaml
+services:
+  admin:
+    build: ./admin
+    port: 3000
+  renderer:
+    build: ./renderer
+    port: 3000
+    proxy:
+      dynamicDomains:
+        ask: admin:/api/domains/authorize
+```
+
+You can combine a fixed app domain and dynamic customer domains on the same
+service:
+
+```yaml
+proxy:
+  domain: sites.example.com
+  dynamicDomains:
+    ask: admin:/api/domains/authorize
+```
+
 ### Multi-Server Deployment
 
 ```yaml
@@ -577,15 +615,18 @@ storage.
 Unrelated projects can deploy to the same server. Treat `project.name` as the
 app name and the environment as the stage; that app/stage pair scopes state,
 leases, env bundles, Docker labels, networks, containers, proxy files, and
-generated volume names. The Traefik-backed `tako-proxy` container is shared per
+generated volume names. The Caddy-backed `tako-proxy` container is shared per
 node for HTTP on port 80, HTTPS on TCP 443, and HTTP/3 on UDP 443, while each
-app/stage owns its own dynamic routes. Proxy upstreams target deterministic
+app/stage owns its own route manifest. Route manifests also record the owning
+app/stage network, so if the shared proxy is recreated it reconnects to every
+live network represented on the node instead of only the project that triggered
+the deploy. Proxy upstreams target deterministic
 project/stage-scoped container aliases instead of generic service names like
 `web`, so unrelated projects can safely use the same service names on the same
 node. `tako doctor` checks the server-side takod agent version, then inspects
-proxy nodes and verifies that the live shared proxy has the required Traefik
-file-provider settings, TCP 80/443 publishes, UDP 443 publish for HTTP/3, and
-persistent ACME, dynamic-config, and access-log mounts.
+proxy nodes and verifies that the live shared proxy has the required Caddy
+config watcher, TCP 80/443 publishes, UDP 443 publish for HTTP/3, and
+persistent certificate, runtime-config, route-manifest, and access-log mounts.
 Destructive app operations are scoped to that same app/stage boundary. `tako
 remove`, `tako destroy`, and default `tako cleanup` do not remove unrelated
 project containers, volumes, proxy routes, or images. Node-wide Docker builder

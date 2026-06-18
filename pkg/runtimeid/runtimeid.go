@@ -63,11 +63,11 @@ func VolumeEnvironmentPrefix(project string, environment string) string {
 }
 
 func ProxyConfigFileName(project string, environment string) string {
-	return compactName("-", proxyConfigNameMax-len(".yml"), []string{"tako", project, environment}, shortHash(project, environment)) + ".yml"
+	return compactName("-", proxyConfigNameMax-len(".json"), []string{"tako", project, environment}, shortHash(project, environment)) + ".json"
 }
 
 func MaintenanceProxyConfigFileName(project string, environment string, service string) string {
-	return compactName("-", proxyConfigNameMax-len(".yml"), []string{"tako", project, environment, service, "maintenance"}, shortHash(project, environment, service, "maintenance")) + ".yml"
+	return compactName("-", proxyConfigNameMax-len(".json"), []string{"tako", project, environment, service, "maintenance"}, shortHash(project, environment, service, "maintenance")) + ".json"
 }
 
 func RouterName(project string, environment string, service string) string {

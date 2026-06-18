@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
 const (
-	defaultProxyImage = "traefik:v3.6.1"
+	defaultProxyImage = "caddy:2.9-alpine"
 	defaultProxyEmail = "tako@redentor.dev"
 )
 
@@ -35,22 +37,36 @@ func ReconcileProxy(ctx context.Context, req ReconcileProxyRequest) (*ReconcileP
 	if err := ensureProxyDirectories(); err != nil {
 		return nil, err
 	}
+	networks, err := proxyNetworksForCurrentRoutes(req.Network)
+	if err != nil {
+		return nil, err
+	}
 
 	running, _ := runDocker(ctx, "ps", "--filter", "name=^tako-proxy$", "--format", "{{.Names}}")
 	if strings.TrimSpace(running) == "tako-proxy" {
 		args, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .Args}}")
 		ports, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .NetworkSettings.Ports}}")
+		hostPorts, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .HostConfig.PortBindings}}")
 		image, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{.Config.Image}}")
 		mounts, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .Mounts}}")
-		if proxyContainerIsCurrent(req, args, ports, image, mounts) {
-			_, _ = runDocker(ctx, "network", "connect", req.Network, "tako-proxy")
+		env, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .Config.Env}}")
+		if proxyContainerIsCurrent(req, args, ports, hostPorts, image, mounts, env) {
+			if err := ensureProxyNetworkAttachments(ctx, networks); err != nil {
+				return nil, err
+			}
 			return &ReconcileProxyResponse{Container: "tako-proxy", Image: req.Image}, nil
 		}
 	}
 
+	if err := renderAndWriteCaddyfile(ctx); err != nil {
+		return nil, err
+	}
 	_, _ = runDocker(ctx, "rm", "-f", "tako-proxy")
 	if output, err := runDocker(ctx, buildProxyContainerArgs(req)...); err != nil {
 		return nil, fmt.Errorf("failed to start tako-proxy: %w, output: %s", err, output)
+	}
+	if err := ensureProxyNetworkAttachments(ctx, networks); err != nil {
+		return nil, err
 	}
 	return &ReconcileProxyResponse{Container: "tako-proxy", Image: req.Image}, nil
 }
@@ -92,26 +108,65 @@ func isSafeProxyEmail(value string) bool {
 
 func ensureProxyDirectories() error {
 	for _, dir := range []string{
-		"/etc/tako/proxy/acme",
-		proxyDynamicDir,
-		"/var/log/tako/proxy",
+		proxyRoutesDir,
+		filepath.Dir(proxyCaddyfilePath),
+		proxyCaddyDataDir,
+		proxyCaddyConfigDir,
+		proxyLogDir,
 	} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create %s: %w", dir, err)
 		}
 	}
-	acmePath := "/etc/tako/proxy/acme/acme.json"
-	file, err := os.OpenFile(acmePath, os.O_RDWR|os.O_CREATE, 0600)
+	return nil
+}
+
+func proxyNetworksForCurrentRoutes(fallback string) ([]string, error) {
+	networkSet := make(map[string]bool)
+	if fallback != "" {
+		networkSet[fallback] = true
+	}
+	manifests, err := readProxyRouteManifests(proxyRoutesDir)
 	if err != nil {
-		return fmt.Errorf("failed to create %s: %w", acmePath, err)
+		return nil, err
 	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("failed to close %s: %w", acmePath, err)
+	for _, manifest := range manifests {
+		if manifest.Network != "" {
+			networkSet[manifest.Network] = true
+		}
 	}
-	if err := os.Chmod(acmePath, 0600); err != nil {
-		return fmt.Errorf("failed to chmod %s: %w", acmePath, err)
+	networks := make([]string, 0, len(networkSet))
+	for network := range networkSet {
+		if !isSafeRuntimeName(network) {
+			return nil, fmt.Errorf("invalid network name")
+		}
+		networks = append(networks, network)
+	}
+	sort.Strings(networks)
+	return networks, nil
+}
+
+func ensureProxyNetworkAttachments(ctx context.Context, networks []string) error {
+	for _, network := range networks {
+		if !dockerNetworkExists(ctx, network) {
+			continue
+		}
+		output, err := runDocker(ctx, "network", "connect", network, "tako-proxy")
+		if err != nil && !isAlreadyConnectedNetworkOutput(output) {
+			return fmt.Errorf("failed to connect tako-proxy to network %s: %w, output: %s", network, err, output)
+		}
 	}
 	return nil
+}
+
+func dockerNetworkExists(ctx context.Context, network string) bool {
+	_, err := runDocker(ctx, "network", "inspect", network)
+	return err == nil
+}
+
+func isAlreadyConnectedNetworkOutput(output string) bool {
+	output = strings.ToLower(output)
+	return strings.Contains(output, "already exists") || strings.Contains(output, "already connected")
 }
 
 func buildProxyContainerArgs(req ReconcileProxyRequest) []string {
@@ -123,45 +178,34 @@ func buildProxyContainerArgs(req ReconcileProxyRequest) []string {
 		"--publish", "80:80",
 		"--publish", "443:443",
 		"--publish", "443:443/udp",
-		"--volume", "/etc/tako/proxy/acme:/acme",
-		"--volume", "/etc/tako/proxy/dynamic:/etc/traefik/dynamic:ro",
-		"--volume", "/var/log/tako/proxy:/var/log/traefik",
+		"--env", "TAKO_PROXY_EMAIL=" + req.Email,
+		"--volume", filepath.Dir(proxyCaddyfilePath) + ":/etc/caddy:ro",
+		"--volume", proxyCaddyDataDir + ":/data",
+		"--volume", proxyCaddyConfigDir + ":/config",
+		"--volume", proxyLogDir + ":/var/log/caddy",
 		"--label", "tako.runtime=takod",
 		"--label", "tako.component=proxy",
 		req.Image,
-		"--api.dashboard=false",
-		"--providers.file.directory=/etc/traefik/dynamic",
-		"--providers.file.watch=true",
-		"--entryPoints.web.address=:80",
-		"--entryPoints.websecure.address=:443",
-		"--entryPoints.websecure.http3=true",
-		"--entryPoints.websecure.http3.advertisedPort=443",
-		"--certificatesResolvers.letsencrypt.acme.email=" + req.Email,
-		"--certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json",
-		"--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web",
-		"--log.level=INFO",
-		"--accessLog.filePath=/var/log/traefik/access.log",
-		"--accessLog.format=json",
+		"caddy",
+		"run",
+		"--config", "/etc/caddy/Caddyfile",
+		"--adapter", "caddyfile",
+		"--watch",
 	}
 }
 
-func proxyContainerIsCurrent(req ReconcileProxyRequest, argsJSON string, portsJSON string, image string, mountsJSON string) bool {
+func proxyContainerIsCurrent(req ReconcileProxyRequest, argsJSON string, portsJSON string, hostPortsJSON string, image string, mountsJSON string, envJSON string) bool {
 	if strings.TrimSpace(image) != req.Image {
 		return false
 	}
 
 	requiredArgs := []string{
-		"--providers.file.directory=/etc/traefik/dynamic",
-		"--providers.file.watch=true",
-		"--entryPoints.web.address=:80",
-		"--entryPoints.websecure.address=:443",
-		"--entryPoints.websecure.http3=true",
-		"--entryPoints.websecure.http3.advertisedPort=443",
-		"--certificatesResolvers.letsencrypt.acme.email=" + req.Email,
-		"--certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json",
-		"--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web",
-		"--accessLog.filePath=/var/log/traefik/access.log",
-		"--accessLog.format=json",
+		"run",
+		"--config",
+		"/etc/caddy/Caddyfile",
+		"--adapter",
+		"caddyfile",
+		"--watch",
 	}
 	args, err := parseProxyArgs(argsJSON)
 	if err != nil {
@@ -172,10 +216,10 @@ func proxyContainerIsCurrent(req ReconcileProxyRequest, argsJSON string, portsJS
 			return false
 		}
 	}
-	if !proxyPortsAreCurrent(portsJSON) {
+	if !proxyPortsAreCurrent(portsJSON, hostPortsJSON) {
 		return false
 	}
-	return proxyMountsAreCurrent(mountsJSON)
+	return proxyMountsAreCurrent(mountsJSON) && proxyEnvIsCurrent(envJSON, req.Email)
 }
 
 func parseProxyArgs(raw string) ([]string, error) {
@@ -195,17 +239,34 @@ func proxyArgExists(args []string, expected string) bool {
 	return false
 }
 
-func proxyPortsAreCurrent(raw string) bool {
-	var ports map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(raw), &ports); err != nil {
+func proxyPortsAreCurrent(networkRaw string, hostRaw string) bool {
+	networkPorts, networkOK := parseProxyPortMap(networkRaw)
+	hostPorts, hostOK := parseProxyPortMap(hostRaw)
+	if !networkOK && !hostOK {
 		return false
 	}
 	for _, port := range []string{"80/tcp", "443/tcp", "443/udp"} {
-		if _, ok := ports[port]; !ok {
+		if !proxyPortExists(networkPorts, port) && !proxyPortExists(hostPorts, port) {
 			return false
 		}
 	}
 	return true
+}
+
+func parseProxyPortMap(raw string) (map[string]json.RawMessage, bool) {
+	var ports map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &ports); err != nil {
+		return nil, false
+	}
+	return ports, true
+}
+
+func proxyPortExists(ports map[string]json.RawMessage, port string) bool {
+	if ports == nil {
+		return false
+	}
+	_, ok := ports[port]
+	return ok
 }
 
 func proxyMountsAreCurrent(raw string) bool {
@@ -217,9 +278,10 @@ func proxyMountsAreCurrent(raw string) bool {
 		return false
 	}
 	requiredMounts := map[string]string{
-		"/acme":                "/etc/tako/proxy/acme",
-		"/etc/traefik/dynamic": "/etc/tako/proxy/dynamic",
-		"/var/log/traefik":     "/var/log/tako/proxy",
+		"/etc/caddy":     filepath.Dir(proxyCaddyfilePath),
+		"/data":          proxyCaddyDataDir,
+		"/config":        proxyCaddyConfigDir,
+		"/var/log/caddy": proxyLogDir,
 	}
 	for destination, source := range requiredMounts {
 		if !proxyMountExists(mounts, source, destination) {
@@ -227,6 +289,20 @@ func proxyMountsAreCurrent(raw string) bool {
 		}
 	}
 	return true
+}
+
+func proxyEnvIsCurrent(raw string, email string) bool {
+	var env []string
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+		return false
+	}
+	expected := "TAKO_PROXY_EMAIL=" + email
+	for _, value := range env {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func proxyMountExists(mounts []struct {

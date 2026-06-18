@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -13,7 +14,6 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -21,40 +21,6 @@ var (
 )
 
 const maintenanceImage = "nginx:1.27-alpine"
-
-type maintenanceProxyConfig struct {
-	HTTP maintenanceHTTPConfig `yaml:"http"`
-}
-
-type maintenanceHTTPConfig struct {
-	Routers  map[string]maintenanceRouter         `yaml:"routers"`
-	Services map[string]maintenanceTraefikService `yaml:"services"`
-}
-
-type maintenanceRouter struct {
-	Rule        string          `yaml:"rule"`
-	EntryPoints []string        `yaml:"entryPoints"`
-	Service     string          `yaml:"service"`
-	Priority    int             `yaml:"priority"`
-	TLS         *maintenanceTLS `yaml:"tls,omitempty"`
-}
-
-type maintenanceTLS struct {
-	CertResolver string `yaml:"certResolver"`
-}
-
-type maintenanceTraefikService struct {
-	LoadBalancer maintenanceLoadBalancer `yaml:"loadBalancer"`
-}
-
-type maintenanceLoadBalancer struct {
-	Servers        []maintenanceServerURL `yaml:"servers"`
-	PassHostHeader bool                   `yaml:"passHostHeader"`
-}
-
-type maintenanceServerURL struct {
-	URL string `yaml:"url"`
-}
 
 var maintenanceCmd = &cobra.Command{
 	Use:   "maintenance",
@@ -468,8 +434,7 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	fmt.Printf("→ Creating maintenance page...\n")
 	encodedHTML := base64.StdEncoding.EncodeToString([]byte(maintenanceHTML))
 
-	// Deploy maintenance container and file-provider proxy config.
-	// Use priority 100 to ensure it takes precedence over normal service (priority 10)
+	// Deploy maintenance container and route-manifest proxy config.
 	fmt.Printf("→ Deploying maintenance container...\n")
 
 	containerName := maintenanceContainerName(cfg.Project.Name, envName, maintenanceService)
@@ -596,66 +561,49 @@ func enableMaintenanceOnNode(cfg *config.Config, pool sshClientProvider, server 
 }
 
 func renderMaintenanceProxyConfig(project string, environment string, serviceName string, proxy *config.ProxyConfig, containerName string) ([]byte, error) {
-	domains := maintenanceDomains(proxy)
+	domains, err := maintenanceDomains(proxy)
+	if err != nil {
+		return nil, err
+	}
 	if len(domains) == 0 {
 		return nil, fmt.Errorf("maintenance proxy requires at least one domain")
 	}
 
-	routerBase := runtimeid.RouterName(project, environment, serviceName) + "-maintenance"
-	serviceID := routerBase + "-svc"
-	cfg := maintenanceProxyConfig{
-		HTTP: maintenanceHTTPConfig{
-			Routers:  make(map[string]maintenanceRouter),
-			Services: make(map[string]maintenanceTraefikService),
+	manifest := takod.ProxyRouteManifest{
+		Version:     1,
+		Project:     project,
+		Environment: environment,
+		Routes: []takod.ProxyRoute{
+			{
+				Service:   maintenanceTakodServiceName(serviceName),
+				Domains:   domains,
+				Upstreams: []string{"http://" + containerName + ":80"},
+				Priority:  100,
+			},
 		},
 	}
 
-	rule, err := hostRuleForDomains(domains)
-	if err != nil {
-		return nil, err
-	}
-	cfg.HTTP.Routers[routerBase+"-https"] = maintenanceRouter{
-		Rule:        rule,
-		EntryPoints: []string{"websecure"},
-		Service:     serviceID,
-		Priority:    100,
-		TLS:         &maintenanceTLS{CertResolver: "letsencrypt"},
-	}
-	cfg.HTTP.Routers[routerBase+"-http"] = maintenanceRouter{
-		Rule:        rule,
-		EntryPoints: []string{"web"},
-		Service:     serviceID,
-		Priority:    100,
-	}
-	cfg.HTTP.Services[serviceID] = maintenanceTraefikService{
-		LoadBalancer: maintenanceLoadBalancer{
-			Servers:        []maintenanceServerURL{{URL: "http://" + containerName + ":80"}},
-			PassHostHeader: true,
-		},
-	}
-
-	return yaml.Marshal(cfg)
+	return json.MarshalIndent(manifest, "", "  ")
 }
 
-func maintenanceDomains(proxy *config.ProxyConfig) []string {
+func maintenanceDomains(proxy *config.ProxyConfig) ([]string, error) {
 	if proxy == nil {
-		return nil
+		return nil, nil
 	}
-	domains := append([]string(nil), proxy.GetAllDomains()...)
-	domains = append(domains, proxy.GetRedirectDomains()...)
-	return domains
-}
-
-func hostRuleForDomains(domains []string) (string, error) {
-	parts := make([]string, 0, len(domains))
-	for _, domain := range domains {
+	rawDomains := append([]string(nil), proxy.GetAllDomains()...)
+	rawDomains = append(rawDomains, proxy.GetRedirectDomains()...)
+	domains := make([]string, 0, len(rawDomains))
+	for _, domain := range rawDomains {
 		normalized, err := config.NormalizeProxyDomain(domain)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
-		parts = append(parts, "Host(`"+normalized+"`)")
+		if strings.HasPrefix(normalized, "*.") {
+			return nil, fmt.Errorf("wildcard proxy domain %q is not supported by maintenance mode", normalized)
+		}
+		domains = append(domains, normalized)
 	}
-	return strings.Join(parts, " || "), nil
+	return domains, nil
 }
 
 func writeMaintenanceProxyConfig(client *ssh.Client, socket string, project string, environment string, serviceName string, data []byte) error {

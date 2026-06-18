@@ -1,12 +1,14 @@
 package deployer
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"github.com/redentordev/tako-cli/pkg/takod"
 )
 
 func TestRenderTakodProxyDynamicConfigUsesLocalAndMeshUpstreams(t *testing.T) {
@@ -21,23 +23,22 @@ func TestRenderTakodProxyDynamicConfigUsesLocalAndMeshUpstreams(t *testing.T) {
 		t.Fatal("expected public services to be detected")
 	}
 
-	configText := string(data)
 	remotePort, err := deploy.meshUpstreamPort("web", 2)
 	if err != nil {
 		t.Fatalf("meshUpstreamPort returned error: %v", err)
 	}
-	for _, expected := range []string{
-		"rule: Host(`example.com`)",
-		"entryPoints:",
-		"certResolver: letsencrypt",
-		"url: http://" + runtimeid.ContainerAlias("demo", "production", "web", 1) + ":3000",
-		fmt.Sprintf("url: http://10.210.0.2:%d", remotePort),
-		"path: /health",
-		"interval: 15s",
-	} {
-		if !strings.Contains(configText, expected) {
-			t.Fatalf("dynamic config missing %q:\n%s", expected, configText)
-		}
+	manifest := parseProxyManifest(t, data)
+	if manifest.Network != runtimeid.NetworkName("demo", "production") {
+		t.Fatalf("manifest network = %q, want %q", manifest.Network, runtimeid.NetworkName("demo", "production"))
+	}
+	route := onlyProxyRoute(t, manifest)
+	assertStringsEqual(t, route.Domains, []string{"example.com"})
+	assertStringsEqual(t, route.Upstreams, []string{
+		"http://" + runtimeid.ContainerAlias("demo", "production", "web", 1) + ":3000",
+		fmt.Sprintf("http://10.210.0.2:%d", remotePort),
+	})
+	if route.HealthCheck == nil || route.HealthCheck.Path != "/health" || route.HealthCheck.Interval != "15s" {
+		t.Fatalf("healthCheck = %#v, want /health every 15s", route.HealthCheck)
 	}
 }
 
@@ -53,19 +54,15 @@ func TestRenderTakodProxyDynamicConfigUsesLocalUpstreamForCurrentNode(t *testing
 		t.Fatal("expected public services to be detected")
 	}
 
-	configText := string(data)
 	remotePort, err := deploy.meshUpstreamPort("web", 1)
 	if err != nil {
 		t.Fatalf("meshUpstreamPort returned error: %v", err)
 	}
-	for _, expected := range []string{
-		fmt.Sprintf("url: http://10.210.0.1:%d", remotePort),
-		"url: http://" + runtimeid.ContainerAlias("demo", "production", "web", 2) + ":3000",
-	} {
-		if !strings.Contains(configText, expected) {
-			t.Fatalf("dynamic config missing %q:\n%s", expected, configText)
-		}
-	}
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	assertStringsEqual(t, route.Upstreams, []string{
+		fmt.Sprintf("http://10.210.0.1:%d", remotePort),
+		"http://" + runtimeid.ContainerAlias("demo", "production", "web", 2) + ":3000",
+	})
 }
 
 func TestRenderTakodProxyDynamicConfigUsesOnlyLocalUpstreamForOneNode(t *testing.T) {
@@ -90,16 +87,10 @@ func TestRenderTakodProxyDynamicConfigUsesOnlyLocalUpstreamForOneNode(t *testing
 		t.Fatal("expected public services to be detected")
 	}
 
-	configText := string(data)
-	if !strings.Contains(configText, "url: http://"+runtimeid.ContainerAlias("demo", "production", "web", 1)+":3000") {
-		t.Fatalf("dynamic config missing local upstream:\n%s", configText)
-	}
-	if strings.Contains(configText, "url: http://web:3000") {
-		t.Fatalf("local proxy upstream must use project/stage-scoped container alias, not generic service DNS:\n%s", configText)
-	}
-	if strings.Contains(configText, "10.210.0.") {
-		t.Fatalf("one-node proxy config should not route through mesh IPs:\n%s", configText)
-	}
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	assertStringsEqual(t, route.Upstreams, []string{
+		"http://" + runtimeid.ContainerAlias("demo", "production", "web", 1) + ":3000",
+	})
 }
 
 func TestRenderTakodProxyDynamicConfigPrunesRemovedNodeUpstreams(t *testing.T) {
@@ -119,18 +110,18 @@ func TestRenderTakodProxyDynamicConfigPrunesRemovedNodeUpstreams(t *testing.T) {
 		t.Fatal("expected public services to be detected")
 	}
 
-	configText := string(data)
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
 	for _, expected := range []string{
-		"url: http://" + runtimeid.ContainerAlias("demo", "production", "web", 1) + ":3000",
-		"url: http://" + runtimeid.ContainerAlias("demo", "production", "web", 2) + ":3000",
+		"http://" + runtimeid.ContainerAlias("demo", "production", "web", 1) + ":3000",
+		"http://" + runtimeid.ContainerAlias("demo", "production", "web", 2) + ":3000",
 	} {
-		if !strings.Contains(configText, expected) {
-			t.Fatalf("dynamic config missing %q after node removal:\n%s", expected, configText)
+		if !containsString(route.Upstreams, expected) {
+			t.Fatalf("dynamic config missing upstream %q after node removal: %#v", expected, route.Upstreams)
 		}
 	}
-	for _, removedNodeUpstream := range []string{"10.210.0.2", "node-b"} {
-		if strings.Contains(configText, removedNodeUpstream) {
-			t.Fatalf("dynamic config should not keep removed node upstream %q:\n%s", removedNodeUpstream, configText)
+	for _, upstream := range route.Upstreams {
+		if strings.Contains(upstream, "10.210.0.2") || strings.Contains(upstream, "node-b") {
+			t.Fatalf("dynamic config should not keep removed node upstreams: %#v", route.Upstreams)
 		}
 	}
 }
@@ -166,18 +157,8 @@ func TestRenderTakodProxyDynamicConfigRendersRedirectFromRouters(t *testing.T) {
 		t.Fatal("expected public services to be detected")
 	}
 
-	configText := string(data)
-	for _, expected := range []string{
-		"rule: Host(`www.example.com`)",
-		"redirectRegex:",
-		`regex: ^https?://www\.example\.com(/.*)?$`,
-		"replacement: https://example.com${1}",
-		"permanent: true",
-	} {
-		if !strings.Contains(configText, expected) {
-			t.Fatalf("dynamic config missing %q:\n%s", expected, configText)
-		}
-	}
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	assertStringsEqual(t, route.RedirectFrom, []string{"www.example.com"})
 }
 
 func TestRenderTakodProxyDynamicConfigUsesServiceHealthCheckFallback(t *testing.T) {
@@ -196,14 +177,9 @@ func TestRenderTakodProxyDynamicConfigUsesServiceHealthCheckFallback(t *testing.
 		t.Fatal("expected public services to be detected")
 	}
 
-	configText := string(data)
-	for _, expected := range []string{
-		"path: /ready",
-		"interval: 20s",
-	} {
-		if !strings.Contains(configText, expected) {
-			t.Fatalf("dynamic config missing %q:\n%s", expected, configText)
-		}
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	if route.HealthCheck == nil || route.HealthCheck.Path != "/ready" || route.HealthCheck.Interval != "20s" {
+		t.Fatalf("healthCheck = %#v, want /ready every 20s", route.HealthCheck)
 	}
 }
 
@@ -222,17 +198,42 @@ func TestRenderTakodProxyDynamicConfigUsesStickyStrategy(t *testing.T) {
 		t.Fatal("expected public services to be detected")
 	}
 
-	configText := string(data)
-	for _, expected := range []string{
-		"sticky:",
-		"cookie:",
-		"name: tako_",
-		"secure: true",
-		"httpOnly: true",
-	} {
-		if !strings.Contains(configText, expected) {
-			t.Fatalf("dynamic config missing %q:\n%s", expected, configText)
-		}
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	if !route.Sticky {
+		t.Fatalf("expected route to use sticky load balancing: %#v", route)
+	}
+}
+
+func TestRenderTakodProxyDynamicConfigSupportsDynamicDomainOnlyRoute(t *testing.T) {
+	deploy := testProxyDeployer()
+	production := deploy.config.Environments["production"]
+	production.Services["web"] = config.ServiceConfig{
+		Port:     3000,
+		Replicas: 1,
+		Proxy: &config.ProxyConfig{
+			DynamicDomains: &config.DynamicDomainsConfig{Ask: "api:/api/domains/authorize"},
+		},
+	}
+	deploy.config.Environments["production"] = production
+
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNode(production.Services, "node-a")
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
+	}
+	if !hasPublic {
+		t.Fatal("expected dynamic-domain public service to be detected")
+	}
+
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	if len(route.Domains) != 0 {
+		t.Fatalf("domains = %#v, want dynamic-only route", route.Domains)
+	}
+	if route.DynamicDomain == nil {
+		t.Fatalf("dynamicDomain missing in route: %#v", route)
+	}
+	wantAsk := "http://" + runtimeid.ContainerAlias("demo", "production", "api", 1) + ":4000/api/domains/authorize"
+	if route.DynamicDomain.AskURL != wantAsk {
+		t.Fatalf("askUrl = %q, want %q", route.DynamicDomain.AskURL, wantAsk)
 	}
 }
 
@@ -358,27 +359,22 @@ func TestMeshUpstreamPortIsScopedByProjectEnvironmentAndService(t *testing.T) {
 }
 
 func TestProxyHostRuleRejectsWildcardDomain(t *testing.T) {
-	_, err := proxyHostRule(&config.ProxyConfig{Domain: " *.example.com "})
+	_, err := explicitProxyDomains(&config.ProxyConfig{Domain: " *.example.com "})
 	if err == nil {
-		t.Fatal("proxyHostRule should reject wildcard domains")
+		t.Fatal("explicitProxyDomains should reject wildcard domains")
 	}
 	if !strings.Contains(err.Error(), "wildcard proxy domain") {
 		t.Fatalf("error = %q, want wildcard proxy domain", err)
 	}
 }
 
-func TestAddRedirectFromRoutersRejectsWildcardDomain(t *testing.T) {
-	httpConfig := &traefikHTTPConfig{
-		Routers:     map[string]traefikRouter{},
-		Services:    map[string]traefikService{},
-		Middlewares: map[string]traefikMiddleware{},
-	}
-	err := addRedirectFromRouters(httpConfig, "web", &config.ProxyConfig{
+func TestRedirectProxyDomainsRejectsWildcardDomain(t *testing.T) {
+	_, err := redirectProxyDomains(&config.ProxyConfig{
 		Domain:       "example.com",
 		RedirectFrom: []string{"*.old.example.com"},
 	})
 	if err == nil {
-		t.Fatal("addRedirectFromRouters should reject wildcard domains")
+		t.Fatal("redirectProxyDomains should reject wildcard domains")
 	}
 	if !strings.Contains(err.Error(), "wildcard proxy domain") {
 		t.Fatalf("error = %q, want wildcard proxy domain", err)
@@ -386,9 +382,9 @@ func TestAddRedirectFromRoutersRejectsWildcardDomain(t *testing.T) {
 }
 
 func TestProxyHostRuleRejectsRuleInjection(t *testing.T) {
-	_, err := proxyHostRule(&config.ProxyConfig{Domain: "example.com`) || PathPrefix(`/"})
+	_, err := explicitProxyDomains(&config.ProxyConfig{Domain: "example.com`) || PathPrefix(`/"})
 	if err == nil {
-		t.Fatal("proxyHostRule should reject rule injection characters")
+		t.Fatal("explicitProxyDomains should reject rule injection characters")
 	}
 	if !strings.Contains(err.Error(), "invalid domain") {
 		t.Fatalf("error = %q, want invalid domain", err)
@@ -439,4 +435,42 @@ func testProxyDeployer() *Deployer {
 		return deploy.meshUpstreamPort(serviceName, slot)
 	}
 	return deploy
+}
+
+func parseProxyManifest(t *testing.T, data []byte) takod.ProxyRouteManifest {
+	t.Helper()
+	var manifest takod.ProxyRouteManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("failed to parse proxy route manifest: %v\n%s", err, string(data))
+	}
+	return manifest
+}
+
+func onlyProxyRoute(t *testing.T, manifest takod.ProxyRouteManifest) takod.ProxyRoute {
+	t.Helper()
+	if len(manifest.Routes) != 1 {
+		t.Fatalf("routes = %#v, want exactly one route", manifest.Routes)
+	}
+	return manifest.Routes[0]
+}
+
+func assertStringsEqual(t *testing.T, got []string, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %#v, want %#v", got, want)
+		}
+	}
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }

@@ -323,6 +323,11 @@ environments:
           # redirectFrom:
           #   - www.example.com      # www -> non-www
           #   - old.example.com      # old domain -> new domain
+
+          # Dynamic customer domains for CMS/site-renderer apps.
+          # Caddy asks this internal service/path before issuing a certificate.
+          # dynamicDomains:
+          #   ask: admin:/api/domains/authorize
           
           email: ${LETSENCRYPT_EMAIL}     # Email for Let's Encrypt SSL certificates
           # port: 3000      # Optional: specify if different from service port

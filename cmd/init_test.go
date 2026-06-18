@@ -11,8 +11,9 @@ import (
 )
 
 func TestGenerateYAMLConfigParsesRuntimeBlocks(t *testing.T) {
+	content := generateYAMLConfig("smoke-app")
 	var cfg config.Config
-	decoder := yaml.NewDecoder(strings.NewReader(generateYAMLConfig("smoke-app")))
+	decoder := yaml.NewDecoder(strings.NewReader(content))
 	decoder.KnownFields(true)
 
 	if err := decoder.Decode(&cfg); err != nil {
@@ -29,6 +30,9 @@ func TestGenerateYAMLConfigParsesRuntimeBlocks(t *testing.T) {
 	}
 	if cfg.Mesh == nil {
 		t.Fatal("generated YAML should include mesh config")
+	}
+	if !strings.Contains(content, "# dynamicDomains:") || !strings.Contains(content, "#   ask: admin:/api/domains/authorize") {
+		t.Fatal("generated YAML should include commented dynamic-domain proxy example")
 	}
 }
 

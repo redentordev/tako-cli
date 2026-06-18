@@ -819,8 +819,44 @@ func TestTakodCommandHelper(t *testing.T) {
 	case "run":
 		_, _ = os.Stdout.WriteString("container-id\n")
 		os.Exit(0)
+	case "exec":
+		if output := os.Getenv("TAKO_FAKE_DOCKER_EXEC_ERROR"); output != "" {
+			_, _ = os.Stderr.WriteString(output)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	case "inspect":
 		joined := strings.Join(commandArgs, " ")
+		if strings.Contains(joined, ".Args") {
+			if output := os.Getenv("TAKO_FAKE_INSPECT_ARGS"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+			}
+			os.Exit(0)
+		}
+		if strings.Contains(joined, ".NetworkSettings.Ports") {
+			if output := os.Getenv("TAKO_FAKE_INSPECT_PORTS"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+			}
+			os.Exit(0)
+		}
+		if strings.Contains(joined, ".Config.Image") {
+			if output := os.Getenv("TAKO_FAKE_INSPECT_IMAGE"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+			}
+			os.Exit(0)
+		}
+		if strings.Contains(joined, ".Mounts") {
+			if output := os.Getenv("TAKO_FAKE_INSPECT_MOUNTS"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+			}
+			os.Exit(0)
+		}
+		if strings.Contains(joined, ".Config.Env") {
+			if output := os.Getenv("TAKO_FAKE_INSPECT_ENV"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+			}
+			os.Exit(0)
+		}
 		if strings.Contains(joined, ".State.Health.Status") {
 			if output := os.Getenv("TAKO_FAKE_HEALTH_STATUS"); output != "" {
 				_, _ = os.Stdout.WriteString(output + "\n")

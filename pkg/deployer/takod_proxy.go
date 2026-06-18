@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,7 +14,6 @@ import (
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
-	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -29,73 +27,6 @@ type meshUpstreamPortKey struct {
 	ServiceName   string
 	Slot          int
 	ContainerPort int
-}
-
-type traefikDynamicConfig struct {
-	HTTP traefikHTTPConfig `yaml:"http,omitempty"`
-}
-
-type traefikHTTPConfig struct {
-	Routers     map[string]traefikRouter     `yaml:"routers,omitempty"`
-	Services    map[string]traefikService    `yaml:"services,omitempty"`
-	Middlewares map[string]traefikMiddleware `yaml:"middlewares,omitempty"`
-}
-
-type traefikRouter struct {
-	Rule        string      `yaml:"rule"`
-	EntryPoints []string    `yaml:"entryPoints"`
-	Service     string      `yaml:"service,omitempty"`
-	Middlewares []string    `yaml:"middlewares,omitempty"`
-	TLS         *traefikTLS `yaml:"tls,omitempty"`
-}
-
-type traefikTLS struct {
-	CertResolver string `yaml:"certResolver"`
-}
-
-type traefikService struct {
-	LoadBalancer traefikLoadBalancer `yaml:"loadBalancer"`
-}
-
-type traefikLoadBalancer struct {
-	Servers        []traefikServer     `yaml:"servers"`
-	HealthCheck    *traefikHealthCheck `yaml:"healthCheck,omitempty"`
-	PassHostHeader bool                `yaml:"passHostHeader"`
-	Sticky         *traefikSticky      `yaml:"sticky,omitempty"`
-}
-
-type traefikSticky struct {
-	Cookie *traefikStickyCookie `yaml:"cookie,omitempty"`
-}
-
-type traefikStickyCookie struct {
-	Name     string `yaml:"name,omitempty"`
-	Secure   bool   `yaml:"secure,omitempty"`
-	HTTPOnly bool   `yaml:"httpOnly,omitempty"`
-}
-
-type traefikServer struct {
-	URL string `yaml:"url"`
-}
-
-type traefikHealthCheck struct {
-	Path     string `yaml:"path,omitempty"`
-	Interval string `yaml:"interval,omitempty"`
-}
-
-type traefikMiddleware struct {
-	RedirectScheme *traefikRedirectScheme `yaml:"redirectScheme,omitempty"`
-	RedirectRegex  *traefikRedirectRegex  `yaml:"redirectRegex,omitempty"`
-}
-
-type traefikRedirectScheme struct {
-	Scheme string `yaml:"scheme"`
-}
-
-type traefikRedirectRegex struct {
-	Regex       string `yaml:"regex"`
-	Replacement string `yaml:"replacement"`
-	Permanent   bool   `yaml:"permanent"`
 }
 
 type takodProxyReconcileTarget struct {
@@ -199,11 +130,11 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 	if strings.TrimSpace(proxyServerName) == "" {
 		return nil, false, fmt.Errorf("proxy server name is required")
 	}
-
-	httpConfig := traefikHTTPConfig{
-		Routers:     make(map[string]traefikRouter),
-		Services:    make(map[string]traefikService),
-		Middlewares: make(map[string]traefikMiddleware),
+	manifest := takod.ProxyRouteManifest{
+		Version:     1,
+		Project:     d.config.Project.Name,
+		Environment: d.environment,
+		Network:     takodNetworkName(d.config.Project.Name, d.environment),
 	}
 
 	serviceNames := make([]string, 0, len(services))
@@ -228,23 +159,22 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 		if len(assignments) == 0 {
 			continue
 		}
-		sort.Slice(assignments, func(i, j int) bool {
-			if assignments[i].ServerName == assignments[j].ServerName {
-				return assignments[i].Slot < assignments[j].Slot
-			}
-			return assignments[i].ServerName < assignments[j].ServerName
-		})
+		sortTakodAssignments(assignments)
 
-		routerName := runtimeid.RouterName(d.config.Project.Name, d.environment, serviceName)
-		rule, err := proxyHostRule(service.Proxy)
+		dynamicDomainsEnabled := service.Proxy.DynamicDomains != nil && service.Proxy.DynamicDomains.IsEnabled()
+		domains, err := explicitProxyDomains(service.Proxy)
 		if err != nil {
 			return nil, false, fmt.Errorf("service %s has invalid proxy domains: %w", serviceName, err)
 		}
-		if rule == "" {
+		if len(domains) == 0 && !dynamicDomainsEnabled {
 			return nil, false, fmt.Errorf("service %s has proxy config but no domains", serviceName)
 		}
+		redirects, err := redirectProxyDomains(service.Proxy)
+		if err != nil {
+			return nil, false, fmt.Errorf("service %s has invalid redirect domains: %w", serviceName, err)
+		}
 
-		var upstreams []traefikServer
+		var upstreams []string
 		seenUpstreams := make(map[string]bool)
 		for _, assignment := range assignments {
 			url, err := d.takodProxyUpstreamURL(proxyServerName, assignment.ServerName, serviceName, assignment.Slot, service.Port)
@@ -255,52 +185,45 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 				continue
 			}
 			seenUpstreams[url] = true
-			upstreams = append(upstreams, traefikServer{URL: url})
+			upstreams = append(upstreams, url)
 		}
 
-		redirectName := routerName + "-redirect"
-		httpRouterName := routerName + "-http"
-		httpConfig.Routers[routerName] = traefikRouter{
-			Rule:        rule,
-			EntryPoints: []string{"websecure"},
-			Service:     routerName,
-			TLS:         &traefikTLS{CertResolver: "letsencrypt"},
+		route := takod.ProxyRoute{
+			Service:      serviceName,
+			Domains:      domains,
+			RedirectFrom: redirects,
+			Upstreams:    upstreams,
+			HealthCheck:  proxyRouteHealthCheckForService(service),
+			Sticky:       service.LoadBalancer.Strategy == "sticky",
 		}
-		httpConfig.Routers[httpRouterName] = traefikRouter{
-			Rule:        rule,
-			EntryPoints: []string{"web"},
-			Service:     routerName,
-			Middlewares: []string{redirectName},
+		if dynamicDomainsEnabled {
+			askURL, err := d.dynamicDomainAskURL(services, proxyServerName, service.Proxy.DynamicDomains.Ask)
+			if err != nil {
+				return nil, false, fmt.Errorf("service %s dynamic domain ask: %w", serviceName, err)
+			}
+			route.DynamicDomain = &takod.ProxyDynamicDomain{AskURL: askURL}
 		}
-		httpConfig.Middlewares[redirectName] = traefikMiddleware{
-			RedirectScheme: &traefikRedirectScheme{Scheme: "https"},
-		}
-		if err := addRedirectFromRouters(&httpConfig, routerName, service.Proxy); err != nil {
-			return nil, false, fmt.Errorf("service %s has invalid redirect domains: %w", serviceName, err)
-		}
-
-		lb := traefikLoadBalancer{
-			Servers:        upstreams,
-			PassHostHeader: true,
-		}
-		if service.LoadBalancer.Strategy == "sticky" {
-			lb.Sticky = stickyLoadBalancerCookie(routerName)
-		}
-		if healthCheck := proxyHealthCheckForService(service); healthCheck != nil {
-			lb.HealthCheck = healthCheck
-		}
-		httpConfig.Services[routerName] = traefikService{LoadBalancer: lb}
+		manifest.Routes = append(manifest.Routes, route)
 	}
 
-	if len(httpConfig.Routers) == 0 {
+	if len(manifest.Routes) == 0 {
 		return nil, false, nil
 	}
 
-	data, err := yaml.Marshal(traefikDynamicConfig{HTTP: httpConfig})
+	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to render proxy dynamic config: %w", err)
+		return nil, false, fmt.Errorf("failed to render proxy route manifest: %w", err)
 	}
 	return data, true, nil
+}
+
+func sortTakodAssignments(assignments []takodAssignment) {
+	sort.Slice(assignments, func(i, j int) bool {
+		if assignments[i].ServerName == assignments[j].ServerName {
+			return assignments[i].Slot < assignments[j].Slot
+		}
+		return assignments[i].ServerName < assignments[j].ServerName
+	})
 }
 
 func (d *Deployer) takodProxyUpstreamURL(proxyServerName string, upstreamServerName string, serviceName string, slot int, servicePort int) (string, error) {
@@ -313,9 +236,46 @@ func (d *Deployer) takodProxyUpstreamURL(proxyServerName string, upstreamServerN
 	return d.meshUpstreamURL(upstreamServerName, serviceName, slot, servicePort)
 }
 
-func proxyHealthCheckForService(service config.ServiceConfig) *traefikHealthCheck {
+func explicitProxyDomains(proxy *config.ProxyConfig) ([]string, error) {
+	if proxy == nil {
+		return nil, nil
+	}
+	domains := proxy.GetAllDomains()
+	if len(domains) == 0 {
+		primary := proxy.GetPrimaryDomain()
+		if primary != "" {
+			domains = []string{primary}
+		}
+	}
+	normalized := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		value, err := normalizeExplicitProxyDomain(domain)
+		if err != nil {
+			return nil, err
+		}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
+}
+
+func redirectProxyDomains(proxy *config.ProxyConfig) ([]string, error) {
+	if proxy == nil || len(proxy.GetRedirectDomains()) == 0 {
+		return nil, nil
+	}
+	normalized := make([]string, 0, len(proxy.GetRedirectDomains()))
+	for _, domain := range proxy.GetRedirectDomains() {
+		value, err := normalizeExplicitProxyDomain(domain)
+		if err != nil {
+			return nil, err
+		}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
+}
+
+func proxyRouteHealthCheckForService(service config.ServiceConfig) *takod.ProxyRouteHealth {
 	if service.LoadBalancer.HealthCheck.Enabled {
-		return &traefikHealthCheck{
+		return &takod.ProxyRouteHealth{
 			Path:     service.LoadBalancer.HealthCheck.Path,
 			Interval: service.LoadBalancer.HealthCheck.Interval,
 		}
@@ -327,20 +287,37 @@ func proxyHealthCheckForService(service config.ServiceConfig) *traefikHealthChec
 	if interval == "" {
 		interval = "10s"
 	}
-	return &traefikHealthCheck{
+	return &takod.ProxyRouteHealth{
 		Path:     service.HealthCheck.Path,
 		Interval: interval,
 	}
 }
 
-func stickyLoadBalancerCookie(routerName string) *traefikSticky {
-	return &traefikSticky{
-		Cookie: &traefikStickyCookie{
-			Name:     "tako_" + proxyNameHash(routerName),
-			Secure:   true,
-			HTTPOnly: true,
-		},
+func (d *Deployer) dynamicDomainAskURL(services map[string]config.ServiceConfig, proxyServerName string, ask string) (string, error) {
+	askService, askPath, err := config.ParseDynamicDomainAsk(ask)
+	if err != nil {
+		return "", err
 	}
+	service, ok := services[askService]
+	if !ok {
+		return "", fmt.Errorf("unknown service %q", askService)
+	}
+	if service.Port <= 0 {
+		return "", fmt.Errorf("service %q must expose a port", askService)
+	}
+	assignments, err := d.planTakodAssignments(&service)
+	if err != nil {
+		return "", err
+	}
+	if len(assignments) == 0 {
+		return "", fmt.Errorf("service %q has no active replicas", askService)
+	}
+	sortTakodAssignments(assignments)
+	baseURL, err := d.takodProxyUpstreamURL(proxyServerName, assignments[0].ServerName, askService, assignments[0].Slot, service.Port)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(baseURL, "/") + askPath, nil
 }
 
 func (d *Deployer) writeTakodProxyConfig(client *ssh.Client, data []byte) error {
@@ -532,29 +509,6 @@ func preferredMeshUpstreamPortBlock(project string, environment string, serviceN
 	return int(hash.Sum32() % uint32(blockCount))
 }
 
-func proxyHostRule(proxy *config.ProxyConfig) (string, error) {
-	if proxy == nil {
-		return "", nil
-	}
-	domains := proxy.GetAllDomains()
-	if len(domains) == 0 {
-		primary := proxy.GetPrimaryDomain()
-		if primary != "" {
-			domains = []string{primary}
-		}
-	}
-
-	var hostRules []string
-	for _, domain := range domains {
-		normalized, err := normalizeExplicitProxyDomain(domain)
-		if err != nil {
-			return "", err
-		}
-		hostRules = append(hostRules, "Host(`"+normalized+"`)")
-	}
-	return strings.Join(hostRules, " || "), nil
-}
-
 func normalizeExplicitProxyDomain(domain string) (string, error) {
 	normalized, err := config.NormalizeProxyDomain(domain)
 	if err != nil {
@@ -564,58 +518,6 @@ func normalizeExplicitProxyDomain(domain string) (string, error) {
 		return "", fmt.Errorf("wildcard proxy domain %q is not supported by the built-in tako-proxy yet", normalized)
 	}
 	return normalized, nil
-}
-
-func addRedirectFromRouters(httpConfig *traefikHTTPConfig, routerName string, proxy *config.ProxyConfig) error {
-	if proxy == nil || len(proxy.GetRedirectDomains()) == 0 {
-		return nil
-	}
-	primary, err := normalizeExplicitProxyDomain(proxy.GetPrimaryDomain())
-	if err != nil {
-		return err
-	}
-	for _, domain := range proxy.GetRedirectDomains() {
-		normalized, err := normalizeExplicitProxyDomain(domain)
-		if err != nil {
-			return err
-		}
-		redirectName := routerName + "-from-" + proxyNameHash(normalized)
-		rule := "Host(`" + normalized + "`)"
-		httpConfig.Middlewares[redirectName] = traefikMiddleware{
-			RedirectRegex: &traefikRedirectRegex{
-				Regex:       "^https?://" + redirectHostRegex(normalized) + "(/.*)?$",
-				Replacement: "https://" + primary + "${1}",
-				Permanent:   true,
-			},
-		}
-		httpConfig.Routers[redirectName+"-https"] = traefikRouter{
-			Rule:        rule,
-			EntryPoints: []string{"websecure"},
-			Service:     routerName,
-			Middlewares: []string{redirectName},
-			TLS:         &traefikTLS{CertResolver: "letsencrypt"},
-		}
-		httpConfig.Routers[redirectName+"-http"] = traefikRouter{
-			Rule:        rule,
-			EntryPoints: []string{"web"},
-			Service:     routerName,
-			Middlewares: []string{redirectName},
-		}
-	}
-	return nil
-}
-
-func redirectHostRegex(domain string) string {
-	if strings.HasPrefix(domain, "*.") {
-		return `[^/]+` + regexp.QuoteMeta(strings.TrimPrefix(domain, "*"))
-	}
-	return regexp.QuoteMeta(domain)
-}
-
-func proxyNameHash(value string) string {
-	hash := fnv.New32a()
-	_, _ = hash.Write([]byte(value))
-	return strconv.FormatUint(uint64(hash.Sum32()), 16)
 }
 
 func firstProxyEmail(services map[string]config.ServiceConfig) string {

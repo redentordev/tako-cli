@@ -221,6 +221,20 @@ type ProxyConfig struct {
 
 	Email string    `yaml:"email,omitempty" json:"email,omitempty"` // Email for Let's Encrypt
 	TLS   TLSConfig `yaml:"tls,omitempty" json:"tls,omitempty"`
+
+	// DynamicDomains enables ask-gated on-demand TLS for customer domains.
+	DynamicDomains *DynamicDomainsConfig `yaml:"dynamicDomains,omitempty" json:"dynamicDomains,omitempty"`
+}
+
+// DynamicDomainsConfig describes Caddy on-demand TLS for customer domains.
+type DynamicDomainsConfig struct {
+	Enabled *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Ask     string `yaml:"ask,omitempty" json:"ask,omitempty"` // "<service>:<path>"
+}
+
+// IsEnabled returns true when dynamic domain handling is active.
+func (d *DynamicDomainsConfig) IsEnabled() bool {
+	return d != nil && (d.Enabled == nil || *d.Enabled)
 }
 
 // GetPrimaryDomain returns the primary domain for this service

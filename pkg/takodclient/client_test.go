@@ -160,8 +160,8 @@ func TestStreamRequestReturnsHTTPErrorBody(t *testing.T) {
 }
 
 func TestProxyFileEndpointEscapesName(t *testing.T) {
-	got := ProxyFileEndpoint("demo production.yml")
-	want := "/v1/proxy-file?name=demo+production.yml"
+	got := ProxyFileEndpoint("demo production.json")
+	want := "/v1/proxy-file?name=demo+production.json"
 	if got != want {
 		t.Fatalf("ProxyFileEndpoint() = %q, want %q", got, want)
 	}

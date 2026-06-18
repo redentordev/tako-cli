@@ -363,6 +363,30 @@ func TestCheckProxyRuntimeWithReportsReadyProxy(t *testing.T) {
 	}
 }
 
+func TestCheckProxyRuntimeWithUsesHostPortBindingsFallback(t *testing.T) {
+	info := testDoctorProxyRuntimeInfo()
+	info.Ports = map[string]json.RawMessage{}
+	info.HostPorts = map[string]json.RawMessage{
+		"80/tcp":  json.RawMessage(`[{"HostPort":"80"}]`),
+		"443/tcp": json.RawMessage(`[{"HostPort":"443"}]`),
+		"443/udp": json.RawMessage(`[{"HostPort":"443"}]`),
+	}
+
+	var results []checkResult
+	checkProxyRuntimeWith(func(result checkResult) {
+		results = append(results, result)
+	}, "node-a", []string{"web"}, func() (*doctorProxyRuntimeInfo, error) {
+		return info, nil
+	})
+
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one", results)
+	}
+	if results[0].status != "PASS" {
+		t.Fatalf("result = %#v, want proxy readiness pass from host port bindings", results[0])
+	}
+}
+
 func TestCheckProxyRuntimeWithWarnsWhenProxyMissing(t *testing.T) {
 	var results []checkResult
 	checkProxyRuntimeWith(func(result checkResult) {
@@ -422,21 +446,38 @@ func TestCheckProxyRuntimeWithFailsStoppedProxy(t *testing.T) {
 
 func TestParseDoctorProxyRuntime(t *testing.T) {
 	info, err := parseDoctorProxyRuntime(`true
-["--providers.file.directory=/etc/traefik/dynamic","--entryPoints.websecure.http3=true"]
+["run","--config","/etc/caddy/Caddyfile","--adapter","caddyfile","--watch"]
 {"443/udp":[{"HostPort":"443"}]}
-[{"Source":"/etc/tako/proxy/dynamic","Destination":"/etc/traefik/dynamic"}]
-traefik:v3.6.1`)
+[{"Source":"/etc/tako/proxy/caddy","Destination":"/etc/caddy"}]
+["TAKO_PROXY_EMAIL=ops@example.com"]
+caddy:2.9-alpine`)
 	if err != nil {
 		t.Fatalf("parseDoctorProxyRuntime returned error: %v", err)
 	}
 	if !info.Running {
 		t.Fatal("expected running state")
 	}
-	if info.Image != "traefik:v3.6.1" {
-		t.Fatalf("image = %q, want traefik", info.Image)
+	if info.Image != "caddy:2.9-alpine" {
+		t.Fatalf("image = %q, want caddy", info.Image)
 	}
 	if _, ok := info.Ports["443/udp"]; !ok {
 		t.Fatalf("ports = %#v, want UDP 443", info.Ports)
+	}
+}
+
+func TestParseDoctorProxyRuntimeReadsHostPortBindings(t *testing.T) {
+	info, err := parseDoctorProxyRuntime(`true
+["run","--config","/etc/caddy/Caddyfile","--adapter","caddyfile","--watch"]
+{}
+{"443/udp":[{"HostPort":"443"}]}
+[{"Source":"/etc/tako/proxy/caddy","Destination":"/etc/caddy"}]
+["TAKO_PROXY_EMAIL=ops@example.com"]
+caddy:2.9-alpine`)
+	if err != nil {
+		t.Fatalf("parseDoctorProxyRuntime returned error: %v", err)
+	}
+	if _, ok := info.HostPorts["443/udp"]; !ok {
+		t.Fatalf("host ports = %#v, want UDP 443", info.HostPorts)
 	}
 }
 
@@ -444,7 +485,7 @@ func TestParseDoctorProxyRuntimeRejectsInvalidOutput(t *testing.T) {
 	if _, err := parseDoctorProxyRuntime("true\n[]"); err == nil {
 		t.Fatal("expected short inspect output to fail")
 	}
-	if _, err := parseDoctorProxyRuntime("not-json\n[]\n{}\n[]\ntraefik:v3.6.1"); err == nil {
+	if _, err := parseDoctorProxyRuntime("not-json\n[]\n{}\n[]\n[]\ncaddy:2.9-alpine"); err == nil {
 		t.Fatal("expected invalid running state to fail")
 	}
 }
@@ -452,10 +493,11 @@ func TestParseDoctorProxyRuntimeRejectsInvalidOutput(t *testing.T) {
 func TestDetectDoctorProxyRuntimeUsesSudoDockerInspect(t *testing.T) {
 	executor := &fakeDoctorExecutor{
 		output: `true
-["--providers.file.directory=/etc/traefik/dynamic"]
+["run","--config","/etc/caddy/Caddyfile"]
 {}
 []
-traefik:v3.6.1`,
+[]
+caddy:2.9-alpine`,
 	}
 	if _, err := detectDoctorProxyRuntime(executor); err != nil {
 		t.Fatalf("detectDoctorProxyRuntime returned error: %v", err)
@@ -465,6 +507,9 @@ traefik:v3.6.1`,
 	}
 	if !strings.Contains(executor.command, "{{json .NetworkSettings.Ports}}") {
 		t.Fatalf("command = %q, want ports inspect", executor.command)
+	}
+	if !strings.Contains(executor.command, "{{json .HostConfig.PortBindings}}") {
+		t.Fatalf("command = %q, want host port binding inspect", executor.command)
 	}
 }
 
@@ -766,18 +811,15 @@ func (f *fakeDoctorExecutor) Execute(command string) (string, error) {
 
 func testDoctorProxyRuntimeInfo() *doctorProxyRuntimeInfo {
 	return &doctorProxyRuntimeInfo{
-		Image:   "traefik:v3.6.1",
+		Image:   "caddy:2.9-alpine",
 		Running: true,
 		Args: []string{
-			"--providers.file.directory=/etc/traefik/dynamic",
-			"--providers.file.watch=true",
-			"--entryPoints.web.address=:80",
-			"--entryPoints.websecure.address=:443",
-			"--entryPoints.websecure.http3=true",
-			"--entryPoints.websecure.http3.advertisedPort=443",
-			"--certificatesResolvers.letsencrypt.acme.email=ops@example.com",
-			"--certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json",
-			"--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web",
+			"run",
+			"--config",
+			"/etc/caddy/Caddyfile",
+			"--adapter",
+			"caddyfile",
+			"--watch",
 		},
 		Ports: map[string]json.RawMessage{
 			"80/tcp":  json.RawMessage(`[{"HostPort":"80"}]`),
@@ -785,9 +827,13 @@ func testDoctorProxyRuntimeInfo() *doctorProxyRuntimeInfo {
 			"443/udp": json.RawMessage(`[{"HostPort":"443"}]`),
 		},
 		Mounts: []doctorProxyMount{
-			{Source: "/etc/tako/proxy/acme", Destination: "/acme"},
-			{Source: "/etc/tako/proxy/dynamic", Destination: "/etc/traefik/dynamic"},
-			{Source: "/var/log/tako/proxy", Destination: "/var/log/traefik"},
+			{Source: "/etc/tako/proxy/caddy", Destination: "/etc/caddy"},
+			{Source: "/etc/tako/proxy/caddy-data", Destination: "/data"},
+			{Source: "/etc/tako/proxy/caddy-config", Destination: "/config"},
+			{Source: "/var/log/tako/proxy", Destination: "/var/log/caddy"},
+		},
+		Env: []string{
+			"TAKO_PROXY_EMAIL=ops@example.com",
 		},
 	}
 }

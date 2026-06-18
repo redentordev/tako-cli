@@ -723,15 +723,12 @@ test_docker_exposure() {
     # Test proxy dashboard exposure
     log_info "Testing for proxy dashboard exposure..."
     
-    local traefik_paths=(
-        "/dashboard/"
-        "/api/rawdata"
-        "/api/overview"
-        ":8080/dashboard/"
-        ":8080/api"
+    local proxy_admin_paths=(
+        ":2019/config/"
+        ":2019/reverse_proxy/upstreams"
     )
     
-    for path in "${traefik_paths[@]}"; do
+    for path in "${proxy_admin_paths[@]}"; do
         local test_url
         if [[ $path == :* ]]; then
             test_url="http://$TARGET$path"

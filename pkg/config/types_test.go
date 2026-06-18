@@ -782,6 +782,59 @@ func TestValidateConfigTrimsProxyDomains(t *testing.T) {
 	}
 }
 
+func TestValidateConfigAllowsDynamicDomainProxyWithoutFixedDomain(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Proxy = &EnvironmentProxyConfig{
+		Placement: &PlacementConfig{
+			Strategy: "pinned",
+			Servers:  []string{"node-a"},
+		},
+	}
+	production.Services["admin"] = ServiceConfig{
+		Image: "nginx:alpine",
+		Port:  4000,
+	}
+	production.Services["web"] = ServiceConfig{
+		Image: "nginx:alpine",
+		Port:  3000,
+		Proxy: &ProxyConfig{
+			DynamicDomains: &DynamicDomainsConfig{Ask: "admin:/api/domains/authorize"},
+		},
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+}
+
+func TestValidateConfigRejectsRedirectFromWithoutFixedDomain(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["admin"] = ServiceConfig{
+		Image: "nginx:alpine",
+		Port:  4000,
+	}
+	production.Services["web"] = ServiceConfig{
+		Image: "nginx:alpine",
+		Port:  3000,
+		Proxy: &ProxyConfig{
+			RedirectFrom:   []string{"www.example.com"},
+			DynamicDomains: &DynamicDomainsConfig{Ask: "admin:/api/domains/authorize"},
+		},
+	}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject redirectFrom without a primary domain")
+	}
+	if !strings.Contains(err.Error(), "redirectFrom requires a primary proxy domain") {
+		t.Fatalf("error = %q, want redirectFrom guidance", err)
+	}
+}
+
 func TestExpandEnvWithTrimExpandsBracedVariables(t *testing.T) {
 	t.Setenv("SERVER_HOST", "  203.0.113.10  ")
 

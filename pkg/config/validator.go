@@ -248,11 +248,49 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		return err
 	}
 
+	if err := validateEnvironmentDynamicDomains(envName, env); err != nil {
+		return err
+	}
+
 	// Check for duplicate domains across services
 	if err := validateDomainUniqueness(envName, env); err != nil {
 		return err
 	}
 
+	return nil
+}
+
+func validateEnvironmentDynamicDomains(envName string, env *EnvironmentConfig) error {
+	var dynamicServices []string
+	for serviceName, service := range env.Services {
+		if service.Proxy == nil || service.Proxy.DynamicDomains == nil {
+			continue
+		}
+		if !service.Proxy.DynamicDomains.IsEnabled() {
+			continue
+		}
+		if service.Port <= 0 {
+			return fmt.Errorf("environment %s service %s: dynamicDomains requires service port", envName, serviceName)
+		}
+		askService, askPath, err := ParseDynamicDomainAsk(service.Proxy.DynamicDomains.Ask)
+		if err != nil {
+			return fmt.Errorf("environment %s service %s: invalid dynamicDomains.ask: %w", envName, serviceName, err)
+		}
+		askTarget, ok := env.Services[askService]
+		if !ok {
+			return fmt.Errorf("environment %s service %s: dynamicDomains.ask references unknown service %q", envName, serviceName, askService)
+		}
+		if askTarget.Port <= 0 {
+			return fmt.Errorf("environment %s service %s: dynamicDomains.ask service %q must expose a port", envName, serviceName, askService)
+		}
+		service.Proxy.DynamicDomains.Ask = askService + ":" + askPath
+		env.Services[serviceName] = service
+		dynamicServices = append(dynamicServices, serviceName)
+	}
+	if len(dynamicServices) > 1 {
+		sort.Strings(dynamicServices)
+		return fmt.Errorf("environment %s: dynamicDomains currently supports one authority per edge node; found %s", envName, strings.Join(dynamicServices, ", "))
+	}
 	return nil
 }
 
@@ -706,6 +744,28 @@ func normalizeHTTPPath(path string) (string, error) {
 	return path, nil
 }
 
+// ParseDynamicDomainAsk parses "<service>:<path>" ask endpoint references.
+func ParseDynamicDomainAsk(value string) (string, string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", "", fmt.Errorf("ask endpoint is required")
+	}
+	parts := strings.SplitN(value, ":", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("must use <service>:<path>")
+	}
+	service := strings.TrimSpace(parts[0])
+	path := strings.TrimSpace(parts[1])
+	if !isValidRuntimeIdentifier(service) {
+		return "", "", fmt.Errorf("invalid service %q", service)
+	}
+	normalizedPath, err := normalizeHTTPPath(path)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid path: %w", err)
+	}
+	return service, normalizedPath, nil
+}
+
 func validateServiceHealthTiming(serviceName string, health HealthCheckConfig) error {
 	for label, value := range map[string]string{
 		"interval":     health.Interval,
@@ -753,18 +813,24 @@ func validateDockerfilePath(path string) error {
 }
 
 func validateProxy(serviceName string, proxy *ProxyConfig) error {
+	dynamicDomainsEnabled := proxy.DynamicDomains != nil && proxy.DynamicDomains.IsEnabled()
 	if proxy.Domain == "" {
-		return fmt.Errorf("service %s: proxy configured but no domain specified (use 'domain')", serviceName)
+		if !dynamicDomainsEnabled {
+			return fmt.Errorf("service %s: proxy configured but no domain specified (use 'domain')", serviceName)
+		}
+		if len(proxy.RedirectFrom) > 0 {
+			return fmt.Errorf("service %s: redirectFrom requires a primary proxy domain", serviceName)
+		}
+	} else {
+		trimmed, err := NormalizeProxyDomain(proxy.Domain)
+		if err != nil {
+			return fmt.Errorf("service %s: invalid primary domain: %s", serviceName, strings.TrimSpace(proxy.Domain))
+		}
+		if isWildcardProxyDomain(trimmed) {
+			return fmt.Errorf("service %s: wildcard proxy domain %q is not supported by the built-in tako-proxy yet; use explicit hostnames until DNS-01 certificate handling is implemented", serviceName, trimmed)
+		}
+		proxy.Domain = trimmed
 	}
-
-	trimmed, err := NormalizeProxyDomain(proxy.Domain)
-	if err != nil {
-		return fmt.Errorf("service %s: invalid primary domain: %s", serviceName, strings.TrimSpace(proxy.Domain))
-	}
-	if isWildcardProxyDomain(trimmed) {
-		return fmt.Errorf("service %s: wildcard proxy domain %q is not supported by the built-in tako-proxy yet; use explicit hostnames until DNS-01 certificate handling is implemented", serviceName, trimmed)
-	}
-	proxy.Domain = trimmed
 
 	// Validate redirect domains
 	primaryDomain := proxy.GetPrimaryDomain()

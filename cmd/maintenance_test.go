@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -10,9 +11,10 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
 )
 
-func TestRenderMaintenanceProxyConfigUsesFileProviderRouters(t *testing.T) {
+func TestRenderMaintenanceProxyConfigUsesRouteManifest(t *testing.T) {
 	data, err := renderMaintenanceProxyConfig(
 		"demo",
 		"production",
@@ -27,18 +29,28 @@ func TestRenderMaintenanceProxyConfigUsesFileProviderRouters(t *testing.T) {
 		t.Fatalf("renderMaintenanceProxyConfig returned error: %v", err)
 	}
 
-	configText := string(data)
-	for _, expected := range []string{
-		"rule: Host(`example.com`) || Host(`www.example.com`)",
-		"entryPoints:",
-		"- websecure",
-		"priority: 100",
-		"certResolver: letsencrypt",
-		"url: http://demo_web_maintenance:80",
-	} {
-		if !strings.Contains(configText, expected) {
-			t.Fatalf("maintenance proxy config missing %q:\n%s", expected, configText)
-		}
+	var manifest takod.ProxyRouteManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("failed to parse maintenance proxy route manifest: %v\n%s", err, string(data))
+	}
+	if manifest.Project != "demo" || manifest.Environment != "production" {
+		t.Fatalf("manifest identity = %s/%s, want demo/production", manifest.Project, manifest.Environment)
+	}
+	if len(manifest.Routes) != 1 {
+		t.Fatalf("routes = %#v, want one", manifest.Routes)
+	}
+	route := manifest.Routes[0]
+	if route.Service != "web-maintenance" {
+		t.Fatalf("service = %q, want web-maintenance", route.Service)
+	}
+	if !slices.Equal(route.Domains, []string{"example.com", "www.example.com"}) {
+		t.Fatalf("domains = %#v, want example.com/www.example.com", route.Domains)
+	}
+	if !slices.Equal(route.Upstreams, []string{"http://demo_web_maintenance:80"}) {
+		t.Fatalf("upstreams = %#v, want maintenance upstream", route.Upstreams)
+	}
+	if route.Priority != 100 {
+		t.Fatalf("priority = %d, want 100", route.Priority)
 	}
 }
 

@@ -398,11 +398,13 @@ type doctorCommandExecutor interface {
 }
 
 type doctorProxyRuntimeInfo struct {
-	Image   string
-	Running bool
-	Args    []string
-	Ports   map[string]json.RawMessage
-	Mounts  []doctorProxyMount
+	Image     string
+	Running   bool
+	Args      []string
+	Ports     map[string]json.RawMessage
+	HostPorts map[string]json.RawMessage
+	Mounts    []doctorProxyMount
+	Env       []string
 }
 
 type doctorProxyMount struct {
@@ -484,7 +486,7 @@ func checkProxyRuntimeWith(record func(checkResult), serverName string, publicSe
 }
 
 func detectDoctorProxyRuntime(client doctorCommandExecutor) (*doctorProxyRuntimeInfo, error) {
-	const command = "sudo docker inspect tako-proxy --format '{{json .State.Running}}{{\"\\n\"}}{{json .Args}}{{\"\\n\"}}{{json .NetworkSettings.Ports}}{{\"\\n\"}}{{json .Mounts}}{{\"\\n\"}}{{.Config.Image}}'"
+	const command = "sudo docker inspect tako-proxy --format '{{json .State.Running}}{{\"\\n\"}}{{json .Args}}{{\"\\n\"}}{{json .NetworkSettings.Ports}}{{\"\\n\"}}{{json .HostConfig.PortBindings}}{{\"\\n\"}}{{json .Mounts}}{{\"\\n\"}}{{json .Config.Env}}{{\"\\n\"}}{{.Config.Image}}'"
 	output, err := client.Execute(command)
 	if err != nil {
 		combined := strings.ToLower(output + " " + err.Error())
@@ -498,7 +500,7 @@ func detectDoctorProxyRuntime(client doctorCommandExecutor) (*doctorProxyRuntime
 
 func parseDoctorProxyRuntime(output string) (*doctorProxyRuntimeInfo, error) {
 	lines := strings.Split(strings.TrimSpace(output), "\n")
-	if len(lines) < 5 {
+	if len(lines) < 6 {
 		return nil, fmt.Errorf("unexpected docker inspect output")
 	}
 
@@ -512,10 +514,20 @@ func parseDoctorProxyRuntime(output string) (*doctorProxyRuntimeInfo, error) {
 	if err := json.Unmarshal([]byte(lines[2]), &info.Ports); err != nil {
 		return nil, fmt.Errorf("invalid proxy ports: %w", err)
 	}
-	if err := json.Unmarshal([]byte(lines[3]), &info.Mounts); err != nil {
+	offset := 3
+	if len(lines) >= 7 {
+		if err := json.Unmarshal([]byte(lines[3]), &info.HostPorts); err != nil {
+			return nil, fmt.Errorf("invalid proxy host port bindings: %w", err)
+		}
+		offset = 4
+	}
+	if err := json.Unmarshal([]byte(lines[offset]), &info.Mounts); err != nil {
 		return nil, fmt.Errorf("invalid proxy mounts: %w", err)
 	}
-	info.Image = strings.TrimSpace(strings.Join(lines[4:], "\n"))
+	if err := json.Unmarshal([]byte(lines[offset+1]), &info.Env); err != nil {
+		return nil, fmt.Errorf("invalid proxy env: %w", err)
+	}
+	info.Image = strings.TrimSpace(strings.Join(lines[offset+2:], "\n"))
 	return &info, nil
 }
 
@@ -525,31 +537,30 @@ func doctorProxyRuntimeMissing(info *doctorProxyRuntimeInfo) []string {
 	}
 	var missing []string
 	for _, arg := range []string{
-		"--providers.file.directory=/etc/traefik/dynamic",
-		"--providers.file.watch=true",
-		"--entryPoints.web.address=:80",
-		"--entryPoints.websecure.address=:443",
-		"--entryPoints.websecure.http3=true",
-		"--entryPoints.websecure.http3.advertisedPort=443",
-		"--certificatesResolvers.letsencrypt.acme.storage=/acme/acme.json",
-		"--certificatesResolvers.letsencrypt.acme.httpChallenge.entryPoint=web",
+		"run",
+		"--config",
+		"/etc/caddy/Caddyfile",
+		"--adapter",
+		"caddyfile",
+		"--watch",
 	} {
 		if !doctorProxyArgExists(info.Args, arg) {
 			missing = append(missing, arg)
 		}
 	}
-	if !doctorProxyArgHasPrefix(info.Args, "--certificatesResolvers.letsencrypt.acme.email=") {
-		missing = append(missing, "letsencrypt ACME email")
+	if !doctorProxyEnvHasPrefix(info.Env, "TAKO_PROXY_EMAIL=") {
+		missing = append(missing, "TAKO_PROXY_EMAIL")
 	}
 	for _, port := range []string{"80/tcp", "443/tcp", "443/udp"} {
-		if _, ok := info.Ports[port]; !ok {
+		if !doctorProxyPortExists(info.Ports, port) && !doctorProxyPortExists(info.HostPorts, port) {
 			missing = append(missing, port+" publish")
 		}
 	}
 	requiredMounts := map[string]string{
-		"/acme":                "/etc/tako/proxy/acme",
-		"/etc/traefik/dynamic": "/etc/tako/proxy/dynamic",
-		"/var/log/traefik":     "/var/log/tako/proxy",
+		"/etc/caddy":     "/etc/tako/proxy/caddy",
+		"/data":          "/etc/tako/proxy/caddy-data",
+		"/config":        "/etc/tako/proxy/caddy-config",
+		"/var/log/caddy": "/var/log/tako/proxy",
 	}
 	for destination, source := range requiredMounts {
 		if !doctorProxyMountExists(info.Mounts, source, destination) {
@@ -557,6 +568,14 @@ func doctorProxyRuntimeMissing(info *doctorProxyRuntimeInfo) []string {
 		}
 	}
 	return missing
+}
+
+func doctorProxyPortExists(ports map[string]json.RawMessage, port string) bool {
+	if ports == nil {
+		return false
+	}
+	_, ok := ports[port]
+	return ok
 }
 
 func doctorProxyArgExists(args []string, expected string) bool {
@@ -568,9 +587,9 @@ func doctorProxyArgExists(args []string, expected string) bool {
 	return false
 }
 
-func doctorProxyArgHasPrefix(args []string, prefix string) bool {
-	for _, arg := range args {
-		if strings.HasPrefix(arg, prefix) {
+func doctorProxyEnvHasPrefix(env []string, prefix string) bool {
+	for _, value := range env {
+		if strings.HasPrefix(value, prefix) {
 			return true
 		}
 	}

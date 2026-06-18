@@ -9,7 +9,7 @@ There is one runtime path:
 tako CLI -> takod -> local Docker
                |
                +-> mesh
-               +-> local proxy (Traefik-backed tako-proxy)
+               +-> local proxy (Caddy-backed tako-proxy)
                +-> replicated state
                +-> health + reconciliation
 ```
@@ -58,9 +58,9 @@ state, actual snapshots, leases, env bundles, Docker labels, proxy files,
 networks, containers, and generated volume names.
 
 Multiple unrelated projects can share the same server when they use distinct
-app/stage pairs. The node-local Traefik-backed `tako-proxy` is intentionally
+app/stage pairs. The node-local Caddy-backed `tako-proxy` is intentionally
 shared because only one process can own ports 80, TCP 443, and UDP 443 for
-HTTP/3, but each app/stage writes its own dynamic proxy file and service routes.
+HTTP/3, but each app/stage writes its own route manifest and service routes.
 Runtime Docker artifacts include a deterministic short identity hash so similar
 names such as `prod_api/web` and
 `prod/api_web` cannot collapse into the same container, network, proxy, or
@@ -70,6 +70,9 @@ Proxy routes also target deterministic project/stage-scoped container aliases,
 not generic service DNS names. This matters because the shared proxy can be
 attached to several app networks at once; `web` may exist in many projects, but
 `tako-myapp-production-web-1-...` resolves to one intended upstream.
+Each route manifest records its owning app/stage network, so a recreated
+`tako-proxy` reconnects to every live network represented by current manifests
+before serving the regenerated Caddy config.
 
 Cross-project imports use a separate service-scoped export network. A service
 with `export: true` is attached to an export network with a readable alias such
@@ -118,7 +121,7 @@ mesh:
 ```
 
 `runtime.proxy` must remain `tako-proxy` in the current model. It is the
-Traefik-backed built-in ingress proxy that publishes HTTP on TCP 80, HTTPS on
+Caddy-backed built-in ingress proxy that publishes HTTP on TCP 80, HTTPS on
 TCP 443, and HTTP/3 on UDP 443. `remoteCacheEnabled` must remain `true` in the
 current model. Local `.tako` files are a cache; deployment history and runtime
 revisions have to be replicated to `takod` so another laptop or CI runner can
@@ -181,8 +184,9 @@ that rootful system Docker is reachable through `sudo docker info`, and
 `tako doctor` reports the same Docker runtime mode and compares reachable
 server-side takod agent versions with the running CLI. For environments with
 public routes, `tako doctor` also inspects the live shared proxy container and
-verifies the required Traefik file-provider settings, TCP 80/443 publishes,
-UDP 443 publish for HTTP/3, and ACME, dynamic-config, and access-log mounts.
+verifies the required Caddy config watcher, TCP 80/443 publishes, UDP 443
+publish for HTTP/3, and certificate, runtime-config, route-manifest, and
+access-log mounts.
 It also reads replicated deployment/runtime state through takod and reports
 whether deployment history, desired state, aggregate actual state, node-local
 actual snapshots, and the remote operation lease are healthy.
@@ -317,10 +321,19 @@ proxy placement to resolve to one node; multi-edge certificate issuance and
 storage is blocked at config validation until distributed certificate handling
 is implemented. Public proxy domains must be explicit hostnames; wildcard
 hostnames such as `*.example.com` are blocked until DNS-01 certificate handling
-is implemented in the generated Traefik proxy config. The proxy routes to local
+is implemented in the generated Caddy proxy config. The proxy routes to local
 containers through Docker DNS and remote containers through node-local mesh-only
-upstream ports. Health is enforced by the generated Traefik service health
+upstream ports. Health is enforced by the generated Caddy reverse-proxy health
 checks when configured.
+
+Dynamic customer domains use Caddy on-demand TLS with a same-project
+`dynamicDomains.ask` endpoint. That endpoint is the domain authority for the
+edge node: it must approve only exact domains owned by the current app/stage and
+should use an indexed domain lookup so first requests for new domains do not
+block on slow scans. Phase 1 allows one dynamic-domain authority per edge node;
+explicit-domain projects can still share that node through their own route
+manifests.
+
 One-node deployments use the same proxy path with only local upstreams and do
 not publish mesh host ports. Multi-node upstream ports are allocated and
 recorded by the target node's `takod` agent. The CLI sends a
@@ -332,7 +345,7 @@ unrelated apps with common service names such as `web` share the same server
 without taking each other's mesh upstream port.
 
 The built-in load balancer strategies are intentionally narrow:
-`round_robin` uses Traefik's default load balancing, and `sticky` enables secure
+`round_robin` uses Caddy's default load balancing, and `sticky` enables
 HTTP-only cookie stickiness for session-affine or WebSocket-heavy workloads.
 Other algorithms are rejected at config validation until they are implemented in
 the generated proxy config.
@@ -438,7 +451,7 @@ Done:
 3. State pull/status and env push/pull support clone and CI workflows.
 4. Desired revisions, actual snapshots, and events persist on nodes.
 5. WireGuard peer material and node configs reconcile through takod.
-6. Per-node proxies render mesh upstreams from desired placement and Traefik health checks.
+6. Per-node proxies render mesh upstreams from desired placement and Caddy health checks.
 7. State repair can rebuild deployment history and runtime state across reachable mesh nodes.
 8. Mutating operations acquire leases across their target nodes.
 9. Proxy setup supports HTTP/1.1, HTTP/2, HTTP/3, WebSocket traffic, and sticky sessions.

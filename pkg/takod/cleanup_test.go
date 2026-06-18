@@ -15,7 +15,7 @@ func TestValidateCleanupRequest(t *testing.T) {
 	valid := CleanupRequest{
 		Project:     "demo-app",
 		Environment: "production_1",
-		ProxyFiles:  []string{"demo-production.yml"},
+		ProxyFiles:  []string{"demo-production.json"},
 	}
 	if err := validateCleanupRequest(valid); err != nil {
 		t.Fatalf("valid cleanup request returned error: %v", err)
@@ -34,7 +34,7 @@ func TestValidateCleanupRequest(t *testing.T) {
 	}
 
 	invalid = valid
-	invalid.ProxyFiles = []string{"../demo.yml"}
+	invalid.ProxyFiles = []string{"../demo.json"}
 	if err := validateCleanupRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe proxy file to be rejected")
 	}
