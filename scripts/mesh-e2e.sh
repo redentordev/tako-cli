@@ -675,34 +675,59 @@ phase_repair() {
   run_tako "repair lease after" state lease
 }
 
+assert_deploy_preflight_failure() {
+  local dir="$1"
+  local label="$2"
+  local success_error="$3"
+  local note_message="$4"
+  shift 4
+  local expected log_file
+
+  if run_tako_status_in "$dir" "$label" deploy --yes; then
+    die "$success_error"
+  fi
+  log_file="$LAST_LOG_FILE"
+
+  for expected in "$@"; do
+    if ! grep -Fq "$expected" "$log_file"; then
+      tail -n 80 "$log_file" >&2 || true
+      die "invalid-config phase did not report expected preflight error: $expected"
+    fi
+  done
+  if grep -Eq "=== Starting deployment ===|Acquired deployment lock|Acquired remote deploy leases|Starting takod deployment" "$log_file"; then
+    tail -n 80 "$log_file" >&2 || true
+    die "invalid-config phase reached deployment work instead of stopping at config validation"
+  fi
+
+  note "$note_message"
+}
+
 phase_invalid_config() {
-  local temp_parent invalid_yaml_dir invalid_strategy_dir log_file
+  local temp_parent invalid_yaml_dir invalid_strategy_dir invalid_placement_dir invalid_domain_dir missing_source_dir
   temp_parent="$(mktemp -d "${TMPDIR:-/tmp}/tako-e2e-invalid-config.XXXXXX")"
   TEMP_DIRS+=("$temp_parent")
   invalid_yaml_dir="$temp_parent/invalid-yaml"
   invalid_strategy_dir="$temp_parent/invalid-strategy"
-  mkdir -p "$invalid_yaml_dir" "$invalid_strategy_dir"
+  invalid_placement_dir="$temp_parent/invalid-placement"
+  invalid_domain_dir="$temp_parent/invalid-domain"
+  missing_source_dir="$temp_parent/missing-source"
+  mkdir -p "$invalid_yaml_dir" "$invalid_strategy_dir" "$invalid_placement_dir" "$invalid_domain_dir" "$missing_source_dir"
+
+  local TAKO_E2E_TEST_SSH_PASSWORD=test-password
+  export TAKO_E2E_TEST_SSH_PASSWORD
+
   cat >"$invalid_yaml_dir/tako.yaml" <<'EOF'
 project:
   name: invalid-config-proof
   version: [
 EOF
 
-  if run_tako_status_in "$invalid_yaml_dir" "invalid YAML deploy should fail preflight" deploy --yes; then
-    die "deploy unexpectedly succeeded with invalid YAML"
-  fi
-  log_file="$LAST_LOG_FILE"
-
-  if ! grep -q "YAML syntax error in tako.yaml" "$log_file"; then
-    tail -n 80 "$log_file" >&2 || true
-    die "invalid-config phase did not report the deploy config preflight error"
-  fi
-  if grep -Eq "=== Starting deployment ===|Acquired deployment lock|Acquired remote deploy leases|Starting takod deployment" "$log_file"; then
-    tail -n 80 "$log_file" >&2 || true
-    die "invalid-config phase reached deployment work instead of stopping at config preflight"
-  fi
-
-  note "Invalid YAML failed during deploy config preflight"
+  assert_deploy_preflight_failure \
+    "$invalid_yaml_dir" \
+    "invalid YAML deploy should fail preflight" \
+    "deploy unexpectedly succeeded with invalid YAML" \
+    "Invalid YAML failed during deploy config preflight" \
+    "YAML syntax error in tako.yaml"
 
   cat >"$invalid_strategy_dir/tako.yaml" <<'EOF'
 project:
@@ -725,23 +750,92 @@ environments:
           strategy: ip_hash
 EOF
 
-  local TAKO_E2E_TEST_SSH_PASSWORD=test-password
-  export TAKO_E2E_TEST_SSH_PASSWORD
-  if run_tako_status_in "$invalid_strategy_dir" "invalid load balancer strategy deploy should fail preflight" deploy --yes; then
-    die "deploy unexpectedly succeeded with invalid load balancer strategy"
-  fi
-  log_file="$LAST_LOG_FILE"
+  assert_deploy_preflight_failure \
+    "$invalid_strategy_dir" \
+    "invalid load balancer strategy deploy should fail preflight" \
+    "deploy unexpectedly succeeded with invalid load balancer strategy" \
+    "Invalid load balancer strategy failed during deploy config preflight" \
+    "invalid load balancer strategy" \
+    "round_robin and sticky"
 
-  if ! grep -q "invalid load balancer strategy" "$log_file" || ! grep -q "round_robin and sticky" "$log_file"; then
-    tail -n 80 "$log_file" >&2 || true
-    die "invalid-config phase did not report the unsupported load balancer strategy"
-  fi
-  if grep -Eq "=== Starting deployment ===|Acquired deployment lock|Acquired remote deploy leases|Starting takod deployment" "$log_file"; then
-    tail -n 80 "$log_file" >&2 || true
-    die "invalid-config phase reached deployment work instead of stopping at config validation"
-  fi
+  cat >"$invalid_placement_dir/tako.yaml" <<'EOF'
+project:
+  name: invalid-placement-proof
+  version: 1.0.0
+servers:
+  node-a:
+    host: example.com
+    user: deploy
+    password: ${TAKO_E2E_TEST_SSH_PASSWORD}
+environments:
+  production:
+    servers:
+      - node-a
+    services:
+      web:
+        image: nginx:alpine
+        placement:
+          strategy: pinned
+EOF
 
-  note "Invalid load balancer strategy failed during deploy config preflight"
+  assert_deploy_preflight_failure \
+    "$invalid_placement_dir" \
+    "invalid placement deploy should fail preflight" \
+    "deploy unexpectedly succeeded with invalid placement" \
+    "Invalid placement failed during deploy config preflight" \
+    "pinned placement requires servers"
+
+  cat >"$invalid_domain_dir/tako.yaml" <<'EOF'
+project:
+  name: invalid-domain-proof
+  version: 1.0.0
+servers:
+  node-a:
+    host: example.com
+    user: deploy
+    password: ${TAKO_E2E_TEST_SSH_PASSWORD}
+environments:
+  production:
+    servers:
+      - node-a
+    services:
+      web:
+        image: nginx:alpine
+        proxy:
+          domain: bad domain
+EOF
+
+  assert_deploy_preflight_failure \
+    "$invalid_domain_dir" \
+    "invalid proxy domain deploy should fail preflight" \
+    "deploy unexpectedly succeeded with invalid proxy domain" \
+    "Invalid proxy domain failed during deploy config preflight" \
+    "invalid primary domain"
+
+  cat >"$missing_source_dir/tako.yaml" <<'EOF'
+project:
+  name: missing-source-proof
+  version: 1.0.0
+servers:
+  node-a:
+    host: example.com
+    user: deploy
+    password: ${TAKO_E2E_TEST_SSH_PASSWORD}
+environments:
+  production:
+    servers:
+      - node-a
+    services:
+      web:
+        replicas: 1
+EOF
+
+  assert_deploy_preflight_failure \
+    "$missing_source_dir" \
+    "missing service source deploy should fail preflight" \
+    "deploy unexpectedly succeeded with missing service source" \
+    "Missing service source failed during deploy config preflight" \
+    "either 'build' or 'image' is required"
 }
 
 phase_protocols() {
