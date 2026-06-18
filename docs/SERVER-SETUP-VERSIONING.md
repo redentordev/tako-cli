@@ -92,6 +92,19 @@ service, refreshes the setup manifest while preserving install metadata, and
 waits for `/v1/status` to report the expected CLI version. Development builds
 must pass `--takod-binary` with a Linux binary.
 
+For a rebuilt server that should keep the same logical node name, keep the node
+in `tako.yaml` and run the targeted repair path:
+
+```bash
+tako setup --server <node> -e production
+tako upgrade servers --server <node> -e production
+tako state repair -e production
+tako deploy -e production --yes
+```
+
+Use `tako state forget-node <node> --yes` only when the node is permanently
+retired and has already been removed from the active environment config.
+
 ## Version Ownership
 
 Setup versioning describes server prerequisites and node-local runtime

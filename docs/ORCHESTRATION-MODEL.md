@@ -343,6 +343,20 @@ fresh target-node state is written. Operators can also run
 `tako.yaml` to explicitly delete its standalone node snapshot and prune it from
 aggregate actual state on reachable nodes before the next deploy.
 
+When a destroyed node is rebuilt with the same logical name, keep it in
+`tako.yaml` and run:
+
+```bash
+tako setup --server <node> -e production
+tako upgrade servers --server <node> -e production
+tako state repair -e production
+tako deploy -e production --yes
+```
+
+That path recreates server runtime, verifies the matching `takod` agent,
+rewrites replicated state from the surviving mesh, and reconciles proxy,
+WireGuard, lease, and live container state through the normal deploy flow.
+
 ## CI/CD
 
 CI uses the same path as a laptop:

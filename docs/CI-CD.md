@@ -153,6 +153,20 @@ its replicated actual snapshot from reachable nodes before the next deploy. The
 next deploy or state repair also rewrites the current target-node runtime state
 and prunes stale per-node actual snapshots for removed nodes.
 
+When a destroyed node is rebuilt with the same logical node name, keep it in
+`tako.yaml`, repair the node, and deploy through the normal mesh path:
+
+```bash
+tako setup --server <node>
+tako upgrade servers --server <node>
+tako state repair
+tako deploy --yes
+```
+
+That sequence recreates server setup, verifies the matching `takod` agent,
+rewrites replicated state from reachable nodes, and reconciles proxy routes,
+WireGuard state, remote leases, and live containers.
+
 If `tako doctor` or a CI deploy reports that the server agent is stale or
 missing features from the current CLI, run `tako upgrade servers --dry-run` to
 see each node's agent version, then `tako upgrade servers` to install the

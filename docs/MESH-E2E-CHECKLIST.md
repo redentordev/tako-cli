@@ -287,6 +287,20 @@ Expected result:
   reachable nodes before the next deploy.
 - After `takod` restarts, `state repair` and `deploy` succeed again.
 
+For a destroyed node rebuilt with the same logical node name, keep the node in
+`tako.yaml` and repair it through the normal mesh path:
+
+```bash
+tako setup --server node-b -e production
+tako upgrade servers --server node-b -e production
+tako state repair -e production
+tako deploy -e production --yes
+```
+
+For a permanently retired node, remove it from `tako.yaml`, run
+`tako state forget-node node-b --yes -e production`, then deploy so proxy routes
+and replicated runtime state no longer reference that node.
+
 ## State Repair Flow
 
 Run this after replacing a node, restoring from backup, or finding divergent
