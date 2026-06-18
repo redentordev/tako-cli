@@ -100,7 +100,7 @@ Phases:
   new-computer    fresh clone, validate, env pull, state pull, status, deploy.
   ci              fresh clone with CI env, validate, upgrade, state pull, deploy.
   repair          state status, state repair, state status.
-  invalid-config  prove deploy rejects invalid YAML before remote work.
+  invalid-config  prove deploy rejects invalid YAML/config before remote work.
   protocols       HTTP/1.1, HTTP/2, optional HTTP/3, and optional WebSocket checks.
   offline         stop one takod, prove fail-closed behavior, restart, repair, deploy.
   standard        preflight, invalid-config, one-node, env, new-computer, ci.
