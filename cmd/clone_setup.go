@@ -213,7 +213,7 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 				fmt.Print("  Pull and decrypt environment files? [Y/n] ")
 				input, _ := reader.ReadString('\n')
 				if answer := strings.TrimSpace(input); answer == "" || strings.ToLower(answer) == "y" {
-					restored, skipped, err := restoreDownloadedEnvBundle(response, false)
+					restored, skipped, err := restoreDownloadedEnvBundle(response, false, cfg)
 					if err != nil {
 						warn(fmt.Sprintf("Environment pull failed: %v", err))
 					} else if skipped {
