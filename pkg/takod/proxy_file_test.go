@@ -348,3 +348,65 @@ func TestRenderCaddyfileRendersDynamicDomainAuthority(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderCaddyfileSetsHealthHostHeader(t *testing.T) {
+	caddyfile, err := renderCaddyfile([]ProxyRouteManifest{
+		{
+			Version:     1,
+			Project:     "demo",
+			Environment: "production",
+			Routes: []ProxyRoute{
+				{
+					Service:   "admin",
+					Domains:   []string{"admin.example.com"},
+					Upstreams: []string{"http://demo-admin:3000"},
+					HealthCheck: &ProxyRouteHealth{
+						Path:     "/api/health",
+						Interval: "10s",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("renderCaddyfile returned error: %v", err)
+	}
+	for _, expected := range []string{
+		"health_uri /api/health",
+		"health_headers {\n\t\t\tHost admin.example.com\n\t\t}",
+	} {
+		if !strings.Contains(caddyfile, expected) {
+			t.Fatalf("Caddyfile missing %q:\n%s", expected, caddyfile)
+		}
+	}
+}
+
+func TestRenderCaddyfileSetsDynamicHealthHostHeader(t *testing.T) {
+	caddyfile, err := renderCaddyfile([]ProxyRouteManifest{
+		{
+			Version:     1,
+			Project:     "cms",
+			Environment: "production",
+			Routes: []ProxyRoute{
+				{
+					Service:   "renderer",
+					Domains:   []string{"sites.example.com"},
+					Upstreams: []string{"http://cms-renderer:3000"},
+					HealthCheck: &ProxyRouteHealth{
+						Path:     "/api/health",
+						Interval: "10s",
+					},
+					DynamicDomain: &ProxyDynamicDomain{
+						AskURL: "http://cms-admin:3000/api/domains/authorize",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("renderCaddyfile returned error: %v", err)
+	}
+	if got := strings.Count(caddyfile, "Host sites.example.com"); got != 2 {
+		t.Fatalf("health Host header count = %d, want 2:\n%s", got, caddyfile)
+	}
+}

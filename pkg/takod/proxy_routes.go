@@ -370,6 +370,11 @@ func writeCaddyRoute(b *strings.Builder, address string, route ProxyRoute) {
 			if route.HealthCheck.Interval != "" {
 				b.WriteString("\t\thealth_interval " + route.HealthCheck.Interval + "\n")
 			}
+			if host := caddyHealthHost(address, route); host != "" {
+				b.WriteString("\t\thealth_headers {\n")
+				b.WriteString("\t\t\tHost " + host + "\n")
+				b.WriteString("\t\t}\n")
+			}
 		}
 		if route.Sticky {
 			b.WriteString("\t\tlb_policy cookie\n")
@@ -377,6 +382,16 @@ func writeCaddyRoute(b *strings.Builder, address string, route ProxyRoute) {
 		b.WriteString("\t}\n")
 	}
 	b.WriteString("}\n")
+}
+
+func caddyHealthHost(address string, route ProxyRoute) string {
+	if address != ":443" {
+		return address
+	}
+	if len(route.Domains) == 0 {
+		return ""
+	}
+	return route.Domains[0]
 }
 
 func caddyAccessLogName(service string) string {
