@@ -313,11 +313,21 @@ func (d *Deployer) dynamicDomainAskURL(services map[string]config.ServiceConfig,
 		return "", fmt.Errorf("service %q has no active replicas", askService)
 	}
 	sortTakodAssignments(assignments)
-	baseURL, err := d.takodProxyUpstreamURL(proxyServerName, assignments[0].ServerName, askService, assignments[0].Slot, service.Port)
+	baseURL, err := d.takodDynamicAskBaseURL(proxyServerName, assignments[0], askService, service.Port)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimRight(baseURL, "/") + askPath, nil
+}
+
+func (d *Deployer) takodDynamicAskBaseURL(proxyServerName string, assignment takodAssignment, serviceName string, servicePort int) (string, error) {
+	if assignment.ServerName == proxyServerName {
+		if servicePort <= 0 {
+			return "", fmt.Errorf("service %s has invalid local proxy port %d", serviceName, servicePort)
+		}
+		return "http://" + net.JoinHostPort(serviceName, strconv.Itoa(servicePort)), nil
+	}
+	return d.meshUpstreamURL(assignment.ServerName, serviceName, assignment.Slot, servicePort)
 }
 
 func (d *Deployer) writeTakodProxyConfig(client *ssh.Client, data []byte) error {

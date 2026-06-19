@@ -231,9 +231,44 @@ func TestRenderTakodProxyDynamicConfigSupportsDynamicDomainOnlyRoute(t *testing.
 	if route.DynamicDomain == nil {
 		t.Fatalf("dynamicDomain missing in route: %#v", route)
 	}
-	wantAsk := "http://" + runtimeid.ContainerAlias("demo", "production", "api", 1) + ":4000/api/domains/authorize"
+	wantAsk := "http://api:4000/api/domains/authorize"
 	if route.DynamicDomain.AskURL != wantAsk {
 		t.Fatalf("askUrl = %q, want %q", route.DynamicDomain.AskURL, wantAsk)
+	}
+}
+
+func TestRenderTakodProxyDynamicConfigUsesMeshAskURLForRemoteAskService(t *testing.T) {
+	deploy := testProxyDeployer()
+	production := deploy.config.Environments["production"]
+	production.Services["web"] = config.ServiceConfig{
+		Port:     3000,
+		Replicas: 1,
+		Proxy: &config.ProxyConfig{
+			DynamicDomains: &config.DynamicDomainsConfig{Ask: "api:/api/domains/authorize"},
+		},
+	}
+	api := production.Services["api"]
+	api.Replicas = 1
+	api.Placement = &config.PlacementConfig{Strategy: "pinned", Servers: []string{"node-b"}}
+	production.Services["api"] = api
+	deploy.config.Environments["production"] = production
+
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNode(production.Services, "node-a")
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
+	}
+	if !hasPublic {
+		t.Fatal("expected dynamic-domain public service to be detected")
+	}
+
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	remotePort, err := deploy.meshUpstreamPort("api", 1)
+	if err != nil {
+		t.Fatalf("meshUpstreamPort returned error: %v", err)
+	}
+	wantAsk := fmt.Sprintf("http://10.210.0.2:%d/api/domains/authorize", remotePort)
+	if route.DynamicDomain == nil || route.DynamicDomain.AskURL != wantAsk {
+		t.Fatalf("dynamicDomain = %#v, want ask %q", route.DynamicDomain, wantAsk)
 	}
 }
 
