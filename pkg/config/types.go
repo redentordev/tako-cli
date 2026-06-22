@@ -39,6 +39,17 @@ const (
 	StateDeployConsistencyLease = "lease"
 
 	StateUnreachableBlock = "block"
+
+	DeployStrategyRecreate  = "recreate"
+	DeployStrategyRolling   = "rolling"
+	DeployStrategyBlueGreen = "blue_green"
+
+	DeployPromotionAutomatic = "automatic"
+	DeployPromotionManual    = "manual"
+
+	BackupStorageProviderS3           = "s3"
+	BackupStorageProviderR2           = "r2"
+	BackupStorageProviderS3Compatible = "s3-compatible"
 )
 
 // RuntimeConfig selects the orchestration runtime. Tako has one public runtime:
@@ -192,8 +203,29 @@ type HealthCheckConfig struct {
 
 // DeployConfig defines deployment strategy
 type DeployConfig struct {
-	Strategy       string `yaml:"strategy" json:"strategy"` // recreate
-	MaxUnavailable int    `yaml:"maxUnavailable,omitempty" json:"maxUnavailable,omitempty"`
+	Strategy          string                `yaml:"strategy,omitempty" json:"strategy,omitempty"` // recreate, rolling, blue_green
+	MaxUnavailable    int                   `yaml:"maxUnavailable,omitempty" json:"maxUnavailable,omitempty"`
+	MaxSurge          int                   `yaml:"maxSurge,omitempty" json:"maxSurge,omitempty"`
+	RollbackOnFailure bool                  `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
+	Readiness         DeployReadinessConfig `yaml:"readiness,omitempty" json:"readiness,omitempty"`
+	SmokeTest         DeploySmokeTestConfig `yaml:"smokeTest,omitempty" json:"smokeTest,omitempty"`
+	Promotion         string                `yaml:"promotion,omitempty" json:"promotion,omitempty"` // automatic, manual
+	GracePeriod       string                `yaml:"gracePeriod,omitempty" json:"gracePeriod,omitempty"`
+}
+
+// DeployReadinessConfig defines service readiness checks for rollout strategies.
+type DeployReadinessConfig struct {
+	Path     string `yaml:"path,omitempty" json:"path,omitempty"`
+	TCPPort  int    `yaml:"tcpPort,omitempty" json:"tcpPort,omitempty"`
+	Timeout  string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"`
+	Retries  int    `yaml:"retries,omitempty" json:"retries,omitempty"`
+}
+
+// DeploySmokeTestConfig defines post-readiness checks for blue-green promotion.
+type DeploySmokeTestConfig struct {
+	Path           string `yaml:"path,omitempty" json:"path,omitempty"`
+	ExpectedStatus int    `yaml:"expectedStatus,omitempty" json:"expectedStatus,omitempty"`
 }
 
 // LoadBalancerConfig defines load balancing settings
@@ -279,10 +311,26 @@ type TLSConfig struct {
 	Staging  bool   `yaml:"staging,omitempty" json:"staging,omitempty"`
 }
 
-// BackupConfig defines per-service backup settings
+// BackupConfig defines per-service backup settings.
 type BackupConfig struct {
-	Schedule string `yaml:"schedule" json:"schedule"` // cron format (e.g., "0 2 * * *")
-	Retain   int    `yaml:"retain" json:"retain"`     // days to retain backups
+	Schedule string               `yaml:"schedule" json:"schedule"`                   // cron format (e.g., "0 2 * * *")
+	Retain   int                  `yaml:"retain" json:"retain"`                       // days to retain backups
+	Volumes  []string             `yaml:"volumes,omitempty" json:"volumes,omitempty"` // optional logical service volumes to back up
+	Storage  *BackupStorageConfig `yaml:"storage,omitempty" json:"storage,omitempty"` // optional object storage target
+}
+
+// BackupStorageConfig defines an S3-compatible object storage target for
+// off-node backup copies. R2, MinIO, B2, and Spaces use the s3-compatible API.
+type BackupStorageConfig struct {
+	Provider        string `yaml:"provider,omitempty" json:"provider,omitempty"`               // s3, r2, s3-compatible
+	Bucket          string `yaml:"bucket,omitempty" json:"bucket,omitempty"`                   // Object storage bucket
+	Region          string `yaml:"region,omitempty" json:"region,omitempty"`                   // AWS region or "auto" for R2
+	Endpoint        string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`               // Required for r2/s3-compatible
+	Prefix          string `yaml:"prefix,omitempty" json:"prefix,omitempty"`                   // Optional object key prefix
+	AccessKeyID     string `yaml:"accessKeyId,omitempty" json:"accessKeyId,omitempty"`         // Use ${ENV_VAR}
+	SecretAccessKey string `yaml:"secretAccessKey,omitempty" json:"secretAccessKey,omitempty"` // Use ${ENV_VAR}
+	SessionToken    string `yaml:"sessionToken,omitempty" json:"sessionToken,omitempty"`       // Optional temporary credential token
+	ForcePathStyle  bool   `yaml:"forcePathStyle,omitempty" json:"forcePathStyle,omitempty"`   // Needed by some S3-compatible stores
 }
 
 // MonitoringConfig defines per-service monitoring settings

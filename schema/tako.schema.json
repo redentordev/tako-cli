@@ -397,6 +397,78 @@
                   },
                   "description": "Volume mounts"
                 },
+                "backup": {
+                  "type": "object",
+                  "description": "Optional takod-managed periodic backups for named service volumes. Backups are created node-locally and can also be uploaded to S3-compatible object storage.",
+                  "required": [
+                    "schedule"
+                  ],
+                  "properties": {
+                    "schedule": {
+                      "type": "string",
+                      "description": "Cron schedule, for example 0 2 * * * or @daily"
+                    },
+                    "retain": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 3660,
+                      "default": 7,
+                      "description": "Days to retain local and object-storage backups"
+                    },
+                    "volumes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Optional logical service volume names to back up. Omit to back up every named volume on the service."
+                    },
+                    "storage": {
+                      "type": "object",
+                      "description": "Optional S3-compatible object storage target for off-node backup copies",
+                      "properties": {
+                        "provider": {
+                          "type": "string",
+                          "enum": [
+                            "s3",
+                            "r2",
+                            "s3-compatible"
+                          ],
+                          "default": "s3"
+                        },
+                        "bucket": {
+                          "type": "string"
+                        },
+                        "region": {
+                          "type": "string",
+                          "description": "AWS region or auto for Cloudflare R2"
+                        },
+                        "endpoint": {
+                          "type": "string",
+                          "description": "Required for r2 and s3-compatible providers"
+                        },
+                        "prefix": {
+                          "type": "string",
+                          "description": "Optional object key prefix"
+                        },
+                        "accessKeyId": {
+                          "type": "string",
+                          "description": "Use an environment variable such as ${TAKO_BACKUP_ACCESS_KEY_ID}"
+                        },
+                        "secretAccessKey": {
+                          "type": "string",
+                          "description": "Use an environment variable such as ${TAKO_BACKUP_SECRET_ACCESS_KEY}"
+                        },
+                        "sessionToken": {
+                          "type": "string"
+                        },
+                        "forcePathStyle": {
+                          "type": "boolean",
+                          "description": "Enable for MinIO and some S3-compatible stores"
+                        }
+                      }
+                    }
+                  }
+                },
                 "persistent": {
                   "type": "boolean",
                   "description": "Mark as stateful/persistent. Requires at least one volume, and multi-node environments require pinned or global placement."
@@ -481,16 +553,73 @@
                 },
                 "deploy": {
                   "type": "object",
-                  "description": "Deployment strategy for takod reconciliation",
+                  "description": "Deployment strategy for takod reconciliation. recreate is the conservative default. rolling warms a full replacement revision, waits for readiness, switches proxy routes, then prunes stale revisions. blue_green warms a full green revision for stateless public services, waits for readiness and optional smoke tests, and switches proxy routes only after checks pass. Default automatic promotion switches during deploy; promotion: manual warms green for a later tako promote <service>. deploy.gracePeriod can retain the previous blue-green revision after promotion before stale revision cleanup.",
                   "properties": {
                     "strategy": {
                       "type": "string",
                       "enum": [
-                        "recreate"
+                        "recreate",
+                        "rolling",
+                        "blue_green"
                       ]
                     },
                     "maxUnavailable": {
-                      "type": "integer"
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "maxSurge": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "rollbackOnFailure": {
+                      "type": "boolean"
+                    },
+                    "readiness": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "tcpPort": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 65535
+                        },
+                        "timeout": {
+                          "type": "string"
+                        },
+                        "interval": {
+                          "type": "string"
+                        },
+                        "retries": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      }
+                    },
+                    "smokeTest": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "expectedStatus": {
+                          "type": "integer",
+                          "minimum": 100,
+                          "maximum": 599
+                        }
+                      }
+                    },
+                    "promotion": {
+                      "type": "string",
+                      "enum": [
+                        "automatic",
+                        "manual"
+                      ]
+                    },
+                    "gracePeriod": {
+                      "type": "string",
+                      "description": "blue_green only. Duration such as 30s or 2m to keep the previous revision running after proxy promotion before stale revision cleanup."
                     }
                   }
                 },

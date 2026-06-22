@@ -116,7 +116,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 # Run: cp .env.example .env
 
 # Server Configuration
-SERVER_HOST=your.server.ip
+TAKO_PRODUCTION_HOST=your.server.ip
+TAKO_SSH_KEY=~/.ssh/id_ed25519
 
 # Let's Encrypt Email (required for HTTPS)
 LETSENCRYPT_EMAIL=you@example.com
@@ -184,35 +185,12 @@ func generateJSONConfig(projectName string) string {
     "name": "%s",
     "version": "1.0.0"
   },
-  "runtime": {
-    "mode": "takod",
-    "proxy": "tako-proxy",
-    "agent": {
-      "enabled": true,
-      "socket": "/run/tako/takod.sock",
-      "dataDir": "/var/lib/tako"
-    }
-  },
-  "state": {
-    "backend": "replicated",
-    "deployConsistency": "lease",
-    "onUnreachableNode": "block",
-    "remoteCacheEnabled": true
-  },
-  "mesh": {
-    "enabled": true,
-    "networkCIDR": "10.210.0.0/16",
-    "interface": "tako",
-    "listenPort": 51820,
-    "subnetBits": 24,
-    "natTraversal": true
-  },
   "servers": {
     "production": {
-      "host": "${SERVER_HOST}",
+      "host": "${TAKO_PRODUCTION_HOST}",
       "user": "root",
       "port": 22,
-      "sshKey": "~/.ssh/id_ed25519"
+      "sshKey": "${TAKO_SSH_KEY}"
     }
   },
   "environments": {
@@ -223,8 +201,14 @@ func generateJSONConfig(projectName string) string {
           "build": ".",
           "port": 3000,
           "proxy": {
-            "domain": "%s.${SERVER_HOST}.sslip.io",
+            "domain": "%s.${TAKO_PRODUCTION_HOST}.sslip.io",
             "email": "${LETSENCRYPT_EMAIL}"
+          },
+          "healthCheck": {
+            "path": "/",
+            "interval": "10s",
+            "timeout": "5s",
+            "retries": 3
           },
           "env": {
             "NODE_ENV": "production"
@@ -240,8 +224,8 @@ func generateJSONConfig(projectName string) string {
 // generateYAMLConfig creates a YAML configuration (moved from inline)
 func generateYAMLConfig(projectName string) string {
 	return fmt.Sprintf(`# 🐙 Tako CLI Configuration
-# Complete reference with all available options
-# Uncomment and customize options as needed
+# Minimal app-focused config. Tako infers the meshed takod runtime, replicated
+# state, and WireGuard mesh defaults unless you add advanced overrides.
 # Learn more: https://github.com/redentordev/tako-cli
 
 # ============================================================================
@@ -252,39 +236,14 @@ project:
   version: 1.0.0
 
 # ============================================================================
-# RUNTIME MODEL
-# ============================================================================
-runtime:
-  mode: takod
-  proxy: tako-proxy
-  agent:
-    enabled: true
-    socket: /run/tako/takod.sock
-    dataDir: /var/lib/tako
-
-state:
-  backend: replicated        # Remote takod state is the source of truth.
-  deployConsistency: lease   # Current deploy consistency policy.
-  onUnreachableNode: block   # Block deploys when a selected node is unreachable.
-  remoteCacheEnabled: true
-
-mesh:
-  enabled: true              # Single-node deployments are one-node meshes.
-  networkCIDR: 10.210.0.0/16
-  interface: tako
-  listenPort: 51820
-  subnetBits: 24
-  natTraversal: true
-
-# ============================================================================
 # SERVER DEFINITIONS (Required)
 # ============================================================================
 servers:
   production:
-    host: ${SERVER_HOST}       # Your VPS IP address or hostname
+    host: ${TAKO_PRODUCTION_HOST} # Your VPS IP address or hostname
     user: root                 # SSH user (root recommended for setup)
     port: 22                   # SSH port (default: 22)
-    sshKey: ~/.ssh/id_ed25519  # Path to your SSH private key
+    sshKey: ${TAKO_SSH_KEY}    # Path to your SSH private key
     # labels:                  # Optional: labels for placement/server selection
     #   zone: primary
 
@@ -317,7 +276,7 @@ environments:
         proxy:
           # Primary explicit hostname where traffic is served.
           # Wildcard hostnames such as *.example.com are not supported yet.
-          domain: %s.${SERVER_HOST}.sslip.io  # sslip.io provides automatic DNS
+          domain: %s.${TAKO_PRODUCTION_HOST}.sslip.io  # sslip.io provides automatic DNS
           
           # Domain redirects (301 redirect to primary domain with path preservation)
           # redirectFrom:
@@ -418,6 +377,34 @@ environments:
 #     type: local           # Cache type: local
 
 # ============================================================================
+# ADVANCED RUNTIME OVERRIDES (Optional)
+# ============================================================================
+# Tako infers these defaults. Add this block only when you intentionally need
+# to customize the node-local runtime, replicated state, or mesh network.
+#
+# runtime:
+#   mode: takod
+#   proxy: tako-proxy
+#   agent:
+#     enabled: true
+#     socket: /run/tako/takod.sock
+#     dataDir: /var/lib/tako
+#
+# state:
+#   backend: replicated
+#   deployConsistency: lease
+#   onUnreachableNode: block
+#   remoteCacheEnabled: true
+#
+# mesh:
+#   enabled: true
+#   networkCIDR: 10.210.0.0/16
+#   interface: tako
+#   listenPort: 51820
+#   subnetBits: 24
+#   natTraversal: true
+
+# ============================================================================
 # DOCKER REGISTRY (Optional - for private images)
 # ============================================================================
 # registry:
@@ -426,10 +413,10 @@ environments:
 #   password: ${REGISTRY_TOKEN}
 
 # ============================================================================
-	# MULTI-SERVER MESH CONFIGURATION (Optional - for 2+ servers)
-	# ============================================================================
-	# Additional servers join the same takod mesh model.
-# 
+# MULTI-SERVER MESH CONFIGURATION (Optional - for 2+ servers)
+# ============================================================================
+# Additional servers join the same takod mesh model.
+#
 # servers:
 #   server1:
 #     host: ${SERVER1_HOST}

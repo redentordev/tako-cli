@@ -119,6 +119,7 @@ func AggregateActualStateByServer(actualByServer map[string]map[string]*ActualSe
 				if existing.Image == "" {
 					existing.Image = serviceState.Image
 				}
+				existing.RevisionImages = mergeRevisionImageMaps(existing.RevisionImages, serviceState.RevisionImages)
 				if existing.ConfigHash == "" {
 					existing.ConfigHash = serviceState.ConfigHash
 				} else if serviceState.ConfigHash != "" && existing.ConfigHash != serviceState.ConfigHash {
@@ -126,6 +127,12 @@ func AggregateActualStateByServer(actualByServer map[string]map[string]*ActualSe
 				}
 				existing.RuntimeID = mergeRuntimeID(existing.RuntimeID, serviceState.RuntimeID)
 				existing.Persistent = existing.Persistent || serviceState.Persistent
+				existing.CurrentRevision = mergeOptionalLabel(existing.CurrentRevision, serviceState.CurrentRevision)
+				existing.PreviousRevision = mergeOptionalLabel(existing.PreviousRevision, serviceState.PreviousRevision)
+				existing.WarmingRevisions = mergeRevisionLists(existing.WarmingRevisions, serviceState.WarmingRevisions)
+				existing.DeployStrategy = mergeOptionalLabel(existing.DeployStrategy, serviceState.DeployStrategy)
+				existing.ActiveContainers = append(existing.ActiveContainers, serviceState.ActiveContainers...)
+				existing.WarmingContainers = append(existing.WarmingContainers, serviceState.WarmingContainers...)
 				continue
 			}
 			actualServices[serviceName] = cloneActualService(serviceState)
@@ -140,6 +147,10 @@ func cloneActualService(service *ActualService) *ActualService {
 	}
 	clone := *service
 	clone.Containers = append([]string(nil), service.Containers...)
+	clone.ActiveContainers = append([]string(nil), service.ActiveContainers...)
+	clone.WarmingContainers = append([]string(nil), service.WarmingContainers...)
+	clone.WarmingRevisions = append([]string(nil), service.WarmingRevisions...)
+	clone.RevisionImages = cloneStringMap(service.RevisionImages)
 	return &clone
 }
 
@@ -169,13 +180,20 @@ func gatherActualStateFromTakodWith(client takodclient.RequestExecutor, socket s
 			continue
 		}
 		actualServices[serviceName] = &ActualService{
-			Name:       service.Name,
-			Image:      service.Image,
-			Replicas:   service.Replicas,
-			Containers: append([]string(nil), service.Containers...),
-			ConfigHash: service.ConfigHash,
-			RuntimeID:  service.RuntimeID,
-			Persistent: service.Persistent,
+			Name:              service.Name,
+			Image:             service.Image,
+			RevisionImages:    cloneStringMap(service.RevisionImages),
+			Replicas:          service.Replicas,
+			Containers:        append([]string(nil), service.Containers...),
+			ConfigHash:        service.ConfigHash,
+			RuntimeID:         service.RuntimeID,
+			Persistent:        service.Persistent,
+			CurrentRevision:   service.CurrentRevision,
+			PreviousRevision:  service.PreviousRevision,
+			WarmingRevisions:  append([]string(nil), service.WarmingRevisions...),
+			DeployStrategy:    service.DeployStrategy,
+			ActiveContainers:  append([]string(nil), service.ActiveContainers...),
+			WarmingContainers: append([]string(nil), service.WarmingContainers...),
 			ConfigSnapshot: &config.ServiceConfig{
 				Image:      service.Image,
 				Persistent: service.Persistent,
@@ -190,4 +208,76 @@ func mergeRuntimeID(existing string, incoming string) string {
 		return existing
 	}
 	return ""
+}
+
+func mergeOptionalLabel(existing string, incoming string) string {
+	if incoming == "" {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
+	if existing == incoming {
+		return existing
+	}
+	return ""
+}
+
+func mergeRevisionLists(existing []string, incoming []string) []string {
+	if len(incoming) == 0 {
+		return existing
+	}
+	out := append([]string(nil), existing...)
+	for _, revision := range incoming {
+		revision = strings.TrimSpace(revision)
+		if revision == "" {
+			continue
+		}
+		found := false
+		for _, current := range out {
+			if current == revision {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, revision)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func mergeRevisionImageMaps(existing map[string]string, incoming map[string]string) map[string]string {
+	if len(incoming) == 0 {
+		return existing
+	}
+	out := cloneStringMap(existing)
+	if out == nil {
+		out = make(map[string]string)
+	}
+	for revision, image := range incoming {
+		revision = strings.TrimSpace(revision)
+		image = strings.TrimSpace(image)
+		if revision == "" || image == "" {
+			continue
+		}
+		if current := out[revision]; current != "" && current != image {
+			out[revision] = ""
+			continue
+		}
+		out[revision] = image
+	}
+	return out
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }

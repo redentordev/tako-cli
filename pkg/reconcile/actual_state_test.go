@@ -15,12 +15,15 @@ import (
 
 func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
 	nodeAWeb := &ActualService{
-		Name:       "web",
-		Image:      "demo/web:1",
-		Replicas:   1,
-		Containers: []string{"a1"},
-		ConfigHash: "hash-web",
-		RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "web"),
+		Name:             "web",
+		Image:            "demo/web:1",
+		Replicas:         1,
+		Containers:       []string{"a1"},
+		ConfigHash:       "hash-web",
+		RuntimeID:        runtimeid.ServiceIdentity("demo", "production", "web"),
+		CurrentRevision:  "rev-web",
+		DeployStrategy:   "recreate",
+		ActiveContainers: []string{"a1"},
 	}
 	actualByServer := map[string]map[string]*ActualService{
 		"node-a": {
@@ -28,12 +31,15 @@ func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
 		},
 		"node-b": {
 			"web": {
-				Name:       "web",
-				Image:      "demo/web:1",
-				Replicas:   2,
-				Containers: []string{"b1", "b2"},
-				ConfigHash: "hash-web",
-				RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "web"),
+				Name:             "web",
+				Image:            "demo/web:1",
+				Replicas:         2,
+				Containers:       []string{"b1", "b2"},
+				ConfigHash:       "hash-web",
+				RuntimeID:        runtimeid.ServiceIdentity("demo", "production", "web"),
+				CurrentRevision:  "rev-web",
+				DeployStrategy:   "recreate",
+				ActiveContainers: []string{"b1", "b2"},
 			},
 			"worker": {
 				Name:       "worker",
@@ -60,6 +66,12 @@ func TestAggregateActualStateByServerCombinesReplicas(t *testing.T) {
 	}
 	if got := aggregate["web"].RuntimeID; got != runtimeid.ServiceIdentity("demo", "production", "web") {
 		t.Fatalf("web runtime id = %q, want expected runtime id", got)
+	}
+	if got := aggregate["web"].CurrentRevision; got != "rev-web" {
+		t.Fatalf("web revision = %q, want rev-web", got)
+	}
+	if !slices.Equal(aggregate["web"].ActiveContainers, []string{"a1", "b1", "b2"}) {
+		t.Fatalf("active containers = %#v, want all web containers", aggregate["web"].ActiveContainers)
 	}
 
 	aggregate["web"].Containers[0] = "mutated"

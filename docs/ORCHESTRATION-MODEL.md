@@ -96,29 +96,56 @@ containers.
 
 ## Config Contract
 
+App repos should describe app intent first. A normal one-node or multi-node
+project does not need to declare `runtime`, `state`, or `mesh`:
+
 ```yaml
-runtime:
-  mode: takod
-  proxy: tako-proxy
-  agent:
-    enabled: true
-    socket: /run/tako/takod.sock
-    dataDir: /var/lib/tako
+project:
+  name: web-app
+  version: 1.0.0
 
-state:
-  backend: replicated
-  deployConsistency: lease
-  onUnreachableNode: block
-  remoteCacheEnabled: true
+servers:
+  production:
+    host: ${TAKO_PRODUCTION_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
 
-mesh:
-  enabled: true
-  networkCIDR: 10.210.0.0/16
-  interface: tako
-  listenPort: 51820
-  subnetBits: 24
-  natTraversal: true
+environments:
+  production:
+    servers: [production]
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: web.${TAKO_PRODUCTION_HOST}.sslip.io
+          email: ${LETSENCRYPT_EMAIL}
+        healthCheck:
+          path: /
 ```
+
+Tako infers the same runtime contract for every app:
+
+- `runtime.mode: takod`
+- `runtime.proxy: tako-proxy`
+- `runtime.agent.enabled: true`
+- `runtime.agent.socket: /run/tako/takod.sock`
+- `runtime.agent.dataDir: /var/lib/tako`
+- `state.backend: replicated`
+- `state.deployConsistency: lease`
+- `state.onUnreachableNode: block`
+- `state.remoteCacheEnabled: true`
+- `mesh.enabled: true`
+- `mesh.networkCIDR: 10.210.0.0/16`
+- `mesh.interface: tako`
+- `mesh.listenPort: 51820`
+- `mesh.subnetBits: 24`
+- `mesh.natTraversal: true`
+
+Use `tako config explain -e <environment>` to see the effective values and
+whether each value came from config, environment expansion, or a Tako default.
+Add explicit `runtime`, `state`, or `mesh` blocks only for intentional advanced
+overrides.
 
 `runtime.proxy` must remain `tako-proxy` in the current model. It is the
 Caddy-backed built-in ingress proxy that publishes HTTP on TCP 80, HTTPS on
@@ -270,6 +297,29 @@ Each node stores enough state to stand alone:
 If a node loses contact with the CLI or peers, it keeps serving its last accepted
 revision. New deployments obey `state.onUnreachableNode`.
 
+## Deployment Strategies
+
+`recreate` is the conservative default. Tako replaces the service containers
+that match the app, stage, and service identity, then reconciles proxy routes.
+
+`rolling` is supported for stateless services as a full-revision rollout. Tako
+starts the replacement revision side-by-side, waits for `deploy.readiness` when
+configured, points proxy routes at the new revision, then prunes stale revision
+containers and mesh port leases. Persistent services cannot use `rolling`.
+`maxUnavailable` is not accepted yet, and a configured `maxSurge` must be large
+enough to warm the full replacement revision.
+
+`blue_green` is supported for stateless public services. With the default
+automatic promotion, Tako starts the green revision side-by-side, waits for
+`deploy.readiness` when configured, runs `deploy.smokeTest` when configured,
+points proxy routes at the green revision only after those checks pass, then
+prunes stale revision containers and mesh port leases. Set
+`deploy.gracePeriod` to a duration such as `30s` or `2m` to keep the previous
+revision running after the proxy switch before stale revision cleanup. With
+`promotion: manual`, deploy warms green without moving public traffic, and
+`tako promote <service>` switches the route to the warmed revision. Persistent
+services cannot use `blue_green`.
+
 ## Placement
 
 ```text
@@ -325,6 +375,17 @@ is implemented in the generated Caddy proxy config. The proxy routes to local
 containers through Docker DNS and remote containers through node-local mesh-only
 upstream ports. Health is enforced by the generated Caddy reverse-proxy health
 checks when configured.
+
+Deploy success is intentionally separate from public DNS readiness. A deploy
+can reconcile containers, routes, state, and proxy config before a domain points
+at the edge. After successful reconciliation, the CLI checks public domains for
+DNS and TLS readiness and reports `pending_dns`, `wrong_dns`, `pending_tls`, or
+`active`; those states are warnings by default and become deploy failures only
+with `tako deploy --strict-domains`. The check infers expected DNS targets from
+`environment.proxy.placement` and accepts working HTTPS through an external
+CDN/proxy as active, so Cloudflare-style routing does not require direct A/AAAA
+records to the VPS. Use `--domain-target` for custom CNAME or edge targets and
+`tako domains status` to re-check domains without redeploying.
 
 Dynamic customer domains use Caddy on-demand TLS with a same-project
 `dynamicDomains.ask` endpoint. That endpoint is the domain authority for the

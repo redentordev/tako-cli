@@ -2,12 +2,16 @@ package cmd
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployer"
+	"github.com/redentordev/tako-cli/pkg/reconcile"
 )
 
 func TestDeploymentFromHistoryFindsRequestedDeployment(t *testing.T) {
@@ -139,6 +143,127 @@ func TestBuildRollbackDeploymentDoesNotMutateTarget(t *testing.T) {
 	if rollback.GitCommit != "abcdef" {
 		t.Fatalf("rollback git commit = %q, want abcdef", rollback.GitCommit)
 	}
+}
+
+func TestRollbackProxyInputsUseRollbackRevisionAndPreserveOtherActiveRevisions(t *testing.T) {
+	cfg := testRollbackConfig()
+	cfg.Project.Name = "demo"
+	services := map[string]config.ServiceConfig{
+		"web": {
+			Build:    ".",
+			Port:     3000,
+			Replicas: 2,
+			Deploy: config.DeployConfig{
+				Strategy: config.DeployStrategyRolling,
+			},
+		},
+		"api": {
+			Image: "api:stable",
+			Port:  4000,
+			Deploy: config.DeployConfig{
+				Strategy: config.DeployStrategyRolling,
+			},
+		},
+		"worker": {
+			Image: "worker:stable",
+		},
+	}
+	serviceState := remotestate.ServiceState{
+		Name:     "web",
+		Image:    "web:target",
+		Port:     8080,
+		Replicas: 1,
+	}
+	actualState := map[string]*reconcile.ActualService{
+		"web": {CurrentRevision: "rev-web-current"},
+		"api": {CurrentRevision: "rev-api-current"},
+	}
+
+	desiredServices, imageRefs, activeRevisions := rollbackProxyInputs(cfg, "production", services, "web", serviceState, actualState)
+	rollbackConfig := desiredServices["web"]
+	if rollbackConfig.Image != "web:target" || rollbackConfig.Port != 8080 || rollbackConfig.Replicas != 1 {
+		t.Fatalf("rollback service config = %#v, want target image/port/replicas", rollbackConfig)
+	}
+	if imageRefs["web"] != "web:target" {
+		t.Fatalf("image ref = %q, want rollback image", imageRefs["web"])
+	}
+	wantWebRevision := deployer.ServiceRevisionID(cfg.Project.Name, "production", "web", "web:target", rollbackConfig)
+	if activeRevisions["web"] != wantWebRevision {
+		t.Fatalf("web active revision = %q, want rollback revision %q", activeRevisions["web"], wantWebRevision)
+	}
+	if activeRevisions["api"] != "rev-api-current" {
+		t.Fatalf("api active revision = %q, want existing revision", activeRevisions["api"])
+	}
+	if _, ok := activeRevisions["worker"]; ok {
+		t.Fatalf("recreate worker should not get an active revision: %#v", activeRevisions)
+	}
+}
+
+func TestRollbackNeedsTargetWorktreeOnlyForBuildBackedGitTargets(t *testing.T) {
+	target := &remotestate.DeploymentState{GitCommit: "abcdef1234567890"}
+	if !rollbackNeedsTargetWorktree(config.ServiceConfig{Build: "."}, target) {
+		t.Fatal("build-backed rollback with a git commit should use a target worktree")
+	}
+	if rollbackNeedsTargetWorktree(config.ServiceConfig{Image: "nginx:1.27"}, target) {
+		t.Fatal("image-backed rollback should not use a target worktree")
+	}
+	if rollbackNeedsTargetWorktree(config.ServiceConfig{Build: "."}, &remotestate.DeploymentState{}) {
+		t.Fatal("rollback without a target commit should not use a target worktree")
+	}
+}
+
+func TestRollbackTargetCommitFallsBackToShortCommit(t *testing.T) {
+	if got := rollbackTargetCommit(&remotestate.DeploymentState{GitCommit: " full ", GitCommitShort: "short"}); got != "full" {
+		t.Fatalf("rollbackTargetCommit() = %q, want full", got)
+	}
+	if got := rollbackTargetCommit(&remotestate.DeploymentState{GitCommitShort: " short "}); got != "short" {
+		t.Fatalf("rollbackTargetCommit() = %q, want short", got)
+	}
+	if got := rollbackTargetCommit(nil); got != "" {
+		t.Fatalf("rollbackTargetCommit(nil) = %q, want empty", got)
+	}
+}
+
+func TestWithWorkingDirectoryRestoresOriginalDirectory(t *testing.T) {
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd returned error: %v", err)
+	}
+	tempDir := t.TempDir()
+
+	err = withWorkingDirectory(tempDir, func() error {
+		current, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		if canonicalPath(t, current) != canonicalPath(t, tempDir) {
+			t.Fatalf("working directory = %q, want %q", current, tempDir)
+		}
+		return errors.New("stop")
+	})
+	if err == nil || err.Error() != "stop" {
+		t.Fatalf("withWorkingDirectory error = %v, want stop", err)
+	}
+	current, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd after helper returned error: %v", err)
+	}
+	if canonicalPath(t, current) != canonicalPath(t, original) {
+		t.Fatalf("working directory after helper = %q, want %q", current, original)
+	}
+}
+
+func canonicalPath(t *testing.T, path string) string {
+	t.Helper()
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("Abs(%q) returned error: %v", path, err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err == nil {
+		return resolved
+	}
+	return absolute
 }
 
 func rollbackHistoryDeployment(id string, status remotestate.DeploymentStatus, timestamp time.Time, services ...string) *remotestate.DeploymentState {

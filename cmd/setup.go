@@ -136,13 +136,17 @@ func setupVersionWriteError(serverName string, err error) error {
 }
 
 func setupVersionManifest(existing *setup.ServerVersion) *setup.ServerVersion {
-	installedAt := time.Now()
+	return setupVersionManifestAt(existing, time.Now())
+}
+
+func setupVersionManifestAt(existing *setup.ServerVersion, now time.Time) *setup.ServerVersion {
+	installedAt := now
 	lastUpgrade := time.Time{}
 	components := make(map[string]string)
 
 	if existing != nil {
 		installedAt = existing.InstalledAt
-		lastUpgrade = existing.LastUpgrade
+		lastUpgrade = now
 		for key, value := range existing.Components {
 			components[key] = value
 		}

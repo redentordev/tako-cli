@@ -51,7 +51,9 @@ nul
 
 # Local planning drafts
 goals/*.md
+goals/**/*.md
 goals/*.draft.yaml
+goals/**/*.draft.yaml
 
 # Security reports
 security-report-*.html

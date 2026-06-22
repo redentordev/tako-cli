@@ -1447,13 +1447,13 @@ func stateStatusUnreachableGuidance(nodes []stateStatusNode) []string {
 		return []string{
 			fmt.Sprintf("Unreachable node: %s", nodeList),
 			fmt.Sprintf("  Destroyed node: remove %s from tako.yaml, then run 'tako state forget-node %s --yes' and 'tako deploy --yes'.", names[0], names[0]),
-			fmt.Sprintf("  Rebuilt same-name node: keep %s in tako.yaml, then run 'tako setup --server %s', 'tako upgrade servers --server %s', and 'tako deploy --yes'.", names[0], names[0], names[0]),
+			fmt.Sprintf("  Rebuilt same-name node: keep %s in tako.yaml, then run 'tako setup --server %s', 'tako upgrade servers --server %s', 'tako state repair', and 'tako deploy --yes'.", names[0], names[0], names[0]),
 		}
 	}
 	return []string{
 		fmt.Sprintf("Unreachable nodes: %s", nodeList),
 		"  Destroyed nodes: remove them from tako.yaml, then run 'tako state forget-node <node> --yes' for each removed node and 'tako deploy --yes'.",
-		"  Rebuilt same-name nodes: keep them in tako.yaml, then run 'tako setup --server <node>', 'tako upgrade servers --server <node>', and 'tako deploy --yes'.",
+		"  Rebuilt same-name nodes: keep them in tako.yaml, then run 'tako setup --server <node>', 'tako upgrade servers --server <node>', 'tako state repair', and 'tako deploy --yes'.",
 	}
 }
 
@@ -1763,7 +1763,17 @@ func printActualRuntimeServices(services map[string]takodstate.ActualService) {
 		if image == "" {
 			image = "<unknown>"
 		}
-		fmt.Printf("    - %s: %d replica(s), %s\n", name, service.Replicas, image)
+		details := []string{fmt.Sprintf("%d replica(s)", service.Replicas), image}
+		if service.CurrentRevision != "" {
+			details = append(details, "revision "+service.CurrentRevision)
+		}
+		if service.DeployStrategy != "" {
+			details = append(details, "strategy "+service.DeployStrategy)
+		}
+		if warming := len(service.WarmingContainers); warming > 0 {
+			details = append(details, fmt.Sprintf("%d warming", warming))
+		}
+		fmt.Printf("    - %s: %s\n", name, strings.Join(details, ", "))
 	}
 }
 
@@ -2434,17 +2444,27 @@ func aggregateActualSnapshotFromNodeSnapshots(project string, environment string
 				}
 				existing.RuntimeID = mergeActualRuntimeID(existing.RuntimeID, service.RuntimeID)
 				existing.Persistent = existing.Persistent || service.Persistent
+				existing.CurrentRevision = mergeActualOptionalLabel(existing.CurrentRevision, service.CurrentRevision)
+				existing.PreviousRevision = mergeActualOptionalLabel(existing.PreviousRevision, service.PreviousRevision)
+				existing.DeployStrategy = mergeActualOptionalLabel(existing.DeployStrategy, service.DeployStrategy)
+				existing.ActiveContainers = append(existing.ActiveContainers, service.ActiveContainers...)
+				existing.WarmingContainers = append(existing.WarmingContainers, service.WarmingContainers...)
 				snapshot.Services[serviceName] = existing
 				continue
 			}
 			snapshot.Services[serviceName] = takodstate.ActualService{
-				Name:       service.Name,
-				Image:      service.Image,
-				Replicas:   service.Replicas,
-				Containers: append([]string(nil), service.Containers...),
-				ConfigHash: service.ConfigHash,
-				RuntimeID:  service.RuntimeID,
-				Persistent: service.Persistent,
+				Name:              service.Name,
+				Image:             service.Image,
+				Replicas:          service.Replicas,
+				Containers:        append([]string(nil), service.Containers...),
+				ConfigHash:        service.ConfigHash,
+				RuntimeID:         service.RuntimeID,
+				Persistent:        service.Persistent,
+				CurrentRevision:   service.CurrentRevision,
+				PreviousRevision:  service.PreviousRevision,
+				DeployStrategy:    service.DeployStrategy,
+				ActiveContainers:  append([]string(nil), service.ActiveContainers...),
+				WarmingContainers: append([]string(nil), service.WarmingContainers...),
 			}
 		}
 	}
@@ -2999,19 +3019,37 @@ func actualSnapshotFromTakodActual(project string, environment string, node stri
 			replicas = len(service.Containers)
 		}
 		snapshot.Services[key] = takodstate.ActualService{
-			Name:       name,
-			Image:      service.Image,
-			Replicas:   replicas,
-			Containers: append([]string(nil), service.Containers...),
-			ConfigHash: service.ConfigHash,
-			RuntimeID:  service.RuntimeID,
-			Persistent: service.Persistent,
+			Name:              name,
+			Image:             service.Image,
+			Replicas:          replicas,
+			Containers:        append([]string(nil), service.Containers...),
+			ConfigHash:        service.ConfigHash,
+			RuntimeID:         service.RuntimeID,
+			Persistent:        service.Persistent,
+			CurrentRevision:   service.CurrentRevision,
+			PreviousRevision:  service.PreviousRevision,
+			DeployStrategy:    service.DeployStrategy,
+			ActiveContainers:  append([]string(nil), service.ActiveContainers...),
+			WarmingContainers: append([]string(nil), service.WarmingContainers...),
 		}
 	}
 	return snapshot
 }
 
 func mergeActualRuntimeID(existing string, incoming string) string {
+	if existing == incoming {
+		return existing
+	}
+	return ""
+}
+
+func mergeActualOptionalLabel(existing string, incoming string) string {
+	if incoming == "" {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
 	if existing == incoming {
 		return existing
 	}

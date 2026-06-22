@@ -4,21 +4,32 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 )
 
+type DNSResolver interface {
+	LookupHost(ctx context.Context, host string) ([]string, error)
+	LookupCNAME(ctx context.Context, host string) (string, error)
+}
+
 // HealthChecker performs network-level checks for public services.
 type HealthChecker struct {
-	timeout time.Duration
+	timeout    time.Duration
+	resolver   DNSResolver
+	sslChecker func(ctx context.Context, domain string) *SSLInfo
 }
 
 // NewHealthChecker creates a new network health checker.
 func NewHealthChecker() *HealthChecker {
-	return &HealthChecker{
-		timeout: 10 * time.Second,
+	checker := &HealthChecker{
+		timeout:  10 * time.Second,
+		resolver: net.DefaultResolver,
 	}
+	checker.sslChecker = checker.checkSSLWithContext
+	return checker
 }
 
 // MonitorSSLProvisioning monitors SSL certificate provisioning with periodic checks.
@@ -38,7 +49,7 @@ func (h *HealthChecker) MonitorSSLProvisioning(ctx context.Context, serviceName,
 		fmt.Printf("   [%d] Checking SSL status... ", attempt)
 		attempt++
 
-		sslInfo := h.checkSSL(domain)
+		sslInfo := h.CheckSSL(ctx, domain)
 		if sslInfo != nil && sslInfo.Valid {
 			elapsed := time.Since(startTime)
 			fmt.Printf("✓ SSL certificate active!\n")
@@ -86,6 +97,17 @@ type SSLInfo struct {
 
 // checkSSL checks HTTPS accessibility and SSL certificate validity.
 func (h *HealthChecker) checkSSL(domain string) *SSLInfo {
+	return h.CheckSSL(context.Background(), domain)
+}
+
+func (h *HealthChecker) CheckSSL(ctx context.Context, domain string) *SSLInfo {
+	if h.sslChecker != nil {
+		return h.sslChecker(ctx, domain)
+	}
+	return h.checkSSLWithContext(ctx, domain)
+}
+
+func (h *HealthChecker) checkSSLWithContext(ctx context.Context, domain string) *SSLInfo {
 	client := &http.Client{
 		Timeout: h.timeout,
 		Transport: &http.Transport{
@@ -95,7 +117,11 @@ func (h *HealthChecker) checkSSL(domain string) *SSLInfo {
 		},
 	}
 
-	resp, err := client.Get(fmt.Sprintf("https://%s", domain))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://%s", domain), nil)
+	if err != nil {
+		return &SSLInfo{Valid: false, Error: err.Error()}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		if strings.Contains(err.Error(), "certificate") {
 			return &SSLInfo{

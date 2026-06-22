@@ -21,23 +21,25 @@ const (
 var backupRootDir = BackupDir
 
 type BackupRequest struct {
-	Project        string `json:"project"`
-	Environment    string `json:"environment"`
-	Volume         string `json:"volume,omitempty"`
-	DockerVolume   string `json:"dockerVolume,omitempty"`
-	ExternalVolume bool   `json:"externalVolume,omitempty"`
-	BackupID       string `json:"backupId,omitempty"`
-	RetentionDays  int    `json:"retentionDays,omitempty"`
+	Project        string               `json:"project"`
+	Environment    string               `json:"environment"`
+	Volume         string               `json:"volume,omitempty"`
+	DockerVolume   string               `json:"dockerVolume,omitempty"`
+	ExternalVolume bool                 `json:"externalVolume,omitempty"`
+	BackupID       string               `json:"backupId,omitempty"`
+	RetentionDays  int                  `json:"retentionDays,omitempty"`
+	Storage        *BackupStorageConfig `json:"storage,omitempty"`
 }
 
 type BackupInfo struct {
-	ID          string    `json:"id"`
-	Service     string    `json:"service,omitempty"`
-	Volume      string    `json:"volume"`
-	Size        int64     `json:"size"`
-	CreatedAt   time.Time `json:"createdAt"`
-	Path        string    `json:"path"`
-	Compression string    `json:"compression"`
+	ID          string            `json:"id"`
+	Service     string            `json:"service,omitempty"`
+	Volume      string            `json:"volume"`
+	Size        int64             `json:"size"`
+	CreatedAt   time.Time         `json:"createdAt"`
+	Path        string            `json:"path"`
+	Compression string            `json:"compression"`
+	Remote      *BackupRemoteInfo `json:"remote,omitempty"`
 }
 
 type BackupListResponse struct {
@@ -46,6 +48,25 @@ type BackupListResponse struct {
 
 type BackupCleanupResponse struct {
 	Deleted int `json:"deleted"`
+}
+
+type BackupRemoteInfo struct {
+	Provider string `json:"provider"`
+	Bucket   string `json:"bucket"`
+	Key      string `json:"key"`
+	Endpoint string `json:"endpoint,omitempty"`
+}
+
+type BackupStorageConfig struct {
+	Provider        string `json:"provider,omitempty"`
+	Bucket          string `json:"bucket,omitempty"`
+	Region          string `json:"region,omitempty"`
+	Endpoint        string `json:"endpoint,omitempty"`
+	Prefix          string `json:"prefix,omitempty"`
+	AccessKeyID     string `json:"accessKeyId,omitempty"`
+	SecretAccessKey string `json:"secretAccessKey,omitempty"`
+	SessionToken    string `json:"sessionToken,omitempty"`
+	ForcePathStyle  bool   `json:"forcePathStyle,omitempty"`
 }
 
 func CreateVolumeBackup(ctx context.Context, req BackupRequest) (*BackupInfo, error) {
@@ -82,6 +103,30 @@ func CreateVolumeBackup(ctx context.Context, req BackupRequest) (*BackupInfo, er
 	info, err := backupInfoFromPath(backupPath, path)
 	if err != nil {
 		return nil, err
+	}
+	if req.Storage != nil {
+		remote, err := UploadBackupObject(ctx, *req.Storage, BackupObject{
+			Project:     req.Project,
+			Environment: req.Environment,
+			Volume:      req.Volume,
+			BackupID:    backupID,
+			Path:        path,
+			CreatedAt:   info.CreatedAt,
+		})
+		if err != nil {
+			return nil, err
+		}
+		info.Remote = remote
+		if req.RetentionDays > 0 {
+			if err := CleanupBackupObjects(ctx, *req.Storage, BackupObjectRetention{
+				Project:       req.Project,
+				Environment:   req.Environment,
+				Volume:        req.Volume,
+				RetentionDays: req.RetentionDays,
+			}); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return &info, nil
 }
@@ -212,6 +257,9 @@ func CleanupOldBackups(ctx context.Context, req BackupRequest) (*BackupCleanupRe
 		if info.CreatedAt.IsZero() || info.CreatedAt.After(cutoff) {
 			continue
 		}
+		if req.Volume != "" && info.Volume != req.Volume {
+			continue
+		}
 		if err := os.Remove(info.Path); err != nil {
 			return nil, fmt.Errorf("failed to delete old backup %s: %w", info.Path, err)
 		}
@@ -242,6 +290,11 @@ func validateBackupRequest(req BackupRequest, requireVolume bool, requireBackupI
 	}
 	if req.RetentionDays < 0 {
 		return fmt.Errorf("retentionDays cannot be negative")
+	}
+	if req.Storage != nil {
+		if err := ValidateBackupStorage(*req.Storage); err != nil {
+			return err
+		}
 	}
 	return nil
 }

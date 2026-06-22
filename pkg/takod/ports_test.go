@@ -22,6 +22,9 @@ func TestAllocatePortPersistsAndReusesAllocation(t *testing.T) {
 	if first.HostPort != req.PreferredPort {
 		t.Fatalf("host port = %d, want preferred %d", first.HostPort, req.PreferredPort)
 	}
+	if first.Key != "mesh-upstream/demo/production/web/1" {
+		t.Fatalf("allocation key = %q, want legacy no-revision key", first.Key)
+	}
 
 	second, err := AllocatePort(context.Background(), dataDir, req)
 	if err != nil {
@@ -79,6 +82,58 @@ func TestAllocatePortReusesSameServiceDockerPort(t *testing.T) {
 	}
 }
 
+func TestAllocatePortReusesSameRevisionDockerPort(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "container-a\n")
+	t.Setenv("TAKO_FAKE_INSPECT_PORT_BINDINGS", `{"3000/tcp":[{"HostIp":"10.210.0.1","HostPort":"31001"}]}`)
+	t.Setenv("TAKO_FAKE_INSPECT_LABELS", `{"tako.project":"demo","tako.environment":"production","tako.service":"web","tako.revision":"rev-blue"}`)
+
+	req := testPortAllocationRequest()
+	req.Revision = "rev-blue"
+	req.PreferredPort = 31001
+	req.MinPort = 31001
+	req.MaxPort = 31003
+
+	allocation, err := AllocatePort(context.Background(), t.TempDir(), req)
+	if err != nil {
+		t.Fatalf("AllocatePort returned error: %v", err)
+	}
+	if allocation.HostPort != 31001 {
+		t.Fatalf("host port = %d, want same-revision port 31001", allocation.HostPort)
+	}
+	if allocation.Revision != "rev-blue" {
+		t.Fatalf("revision = %q, want rev-blue", allocation.Revision)
+	}
+	if allocation.Key != "mesh-upstream/demo/production/web/rev-blue/1" {
+		t.Fatalf("allocation key = %q, want revision key", allocation.Key)
+	}
+}
+
+func TestAllocatePortTreatsDifferentRevisionDockerPortAsOccupied(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "container-a\n")
+	t.Setenv("TAKO_FAKE_INSPECT_PORT_BINDINGS", `{"3000/tcp":[{"HostIp":"10.210.0.1","HostPort":"31001"}]}`)
+	t.Setenv("TAKO_FAKE_INSPECT_LABELS", `{"tako.project":"demo","tako.environment":"production","tako.service":"web","tako.revision":"rev-blue"}`)
+
+	req := testPortAllocationRequest()
+	req.Revision = "rev-green"
+	req.PreferredPort = 31001
+	req.MinPort = 31001
+	req.MaxPort = 31003
+
+	allocation, err := AllocatePort(context.Background(), t.TempDir(), req)
+	if err != nil {
+		t.Fatalf("AllocatePort returned error: %v", err)
+	}
+	if allocation.HostPort != 31002 {
+		t.Fatalf("host port = %d, want next free port 31002", allocation.HostPort)
+	}
+}
+
 func TestReleaseServicePortAllocations(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "commands.log")
 	restore := useFakeCommands(t, logPath)
@@ -98,6 +153,49 @@ func TestReleaseServicePortAllocations(t *testing.T) {
 	}
 	if len(registry.Allocations) != 0 {
 		t.Fatalf("allocations after release = %#v, want empty", registry.Allocations)
+	}
+}
+
+func TestReleaseServicePortAllocationsExceptRevision(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	dataDir := t.TempDir()
+	blue := testPortAllocationRequest()
+	blue.Revision = "rev-blue"
+	blue.PreferredPort = 31001
+	if _, err := AllocatePort(context.Background(), dataDir, blue); err != nil {
+		t.Fatalf("blue AllocatePort returned error: %v", err)
+	}
+	green := testPortAllocationRequest()
+	green.Revision = "rev-green"
+	green.PreferredPort = 31002
+	if _, err := AllocatePort(context.Background(), dataDir, green); err != nil {
+		t.Fatalf("green AllocatePort returned error: %v", err)
+	}
+	legacy := testPortAllocationRequest()
+	legacy.Slot = 2
+	legacy.PreferredPort = 31003
+	if _, err := AllocatePort(context.Background(), dataDir, legacy); err != nil {
+		t.Fatalf("legacy AllocatePort returned error: %v", err)
+	}
+
+	if err := ReleaseServicePortAllocationsExceptRevision(context.Background(), dataDir, "demo", "production", "web", "rev-green"); err != nil {
+		t.Fatalf("ReleaseServicePortAllocationsExceptRevision returned error: %v", err)
+	}
+
+	registry, err := readPortAllocationRegistry(portAllocationRegistryPath(dataDir))
+	if err != nil {
+		t.Fatalf("readPortAllocationRegistry returned error: %v", err)
+	}
+	if len(registry.Allocations) != 1 {
+		t.Fatalf("allocations after release = %#v, want one kept revision", registry.Allocations)
+	}
+	for _, allocation := range registry.Allocations {
+		if allocation.Revision != "rev-green" {
+			t.Fatalf("remaining revision = %q, want rev-green", allocation.Revision)
+		}
 	}
 }
 
@@ -139,6 +237,12 @@ func TestValidatePortAllocationRequestRejectsInvalidInput(t *testing.T) {
 	req.Project = "../demo"
 	if err := validatePortAllocationRequest(req); err == nil {
 		t.Fatal("expected invalid project to be rejected")
+	}
+
+	req = testPortAllocationRequest()
+	req.Revision = "../rev"
+	if err := validatePortAllocationRequest(req); err == nil {
+		t.Fatal("expected invalid revision to be rejected")
 	}
 
 	req = testPortAllocationRequest()

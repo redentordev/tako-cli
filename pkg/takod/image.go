@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -24,8 +25,15 @@ type ImageImportResponse struct {
 }
 
 type ImageBuildResponse struct {
-	Image  string `json:"image"`
-	Output string `json:"output,omitempty"`
+	Image   string             `json:"image"`
+	Output  string             `json:"output,omitempty"`
+	Timings *ImageBuildTimings `json:"timings,omitempty"`
+}
+
+type ImageBuildTimings struct {
+	ExtractMS     int64 `json:"extractMs,omitempty"`
+	DockerBuildMS int64 `json:"dockerBuildMs,omitempty"`
+	TotalMS       int64 `json:"totalMs,omitempty"`
 }
 
 const (
@@ -123,6 +131,7 @@ func (r *maxBytesReader) Read(p []byte) (int, error) {
 }
 
 func BuildImage(ctx context.Context, image string, r io.Reader, dockerfile ...string) (*ImageBuildResponse, error) {
+	totalStart := time.Now()
 	if err := validateImageName(image); err != nil {
 		return nil, err
 	}
@@ -142,9 +151,11 @@ func BuildImage(ctx context.Context, image string, r io.Reader, dockerfile ...st
 	}
 	defer os.RemoveAll(buildDir)
 
+	extractStart := time.Now()
 	if err := extractTarGz(r, buildDir); err != nil {
 		return nil, err
 	}
+	extractDuration := time.Since(extractStart)
 
 	args := []string{"build", "-t", image}
 	if dockerfilePath != "" {
@@ -162,13 +173,23 @@ func BuildImage(ctx context.Context, image string, r io.Reader, dockerfile ...st
 	output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
 	cmd.Stdout = output
 	cmd.Stderr = output
+	buildStart := time.Now()
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("failed to build image %s: %w, output: %s", image, err, annotateDockerBuildFailure(output.String()))
 	}
+	buildDuration := time.Since(buildStart)
 	if _, err := runDocker(ctx, "image", "inspect", image); err != nil {
 		return nil, fmt.Errorf("built image %s is not inspectable: %w", image, err)
 	}
-	return &ImageBuildResponse{Image: image, Output: strings.TrimSpace(output.String())}, nil
+	return &ImageBuildResponse{
+		Image:  image,
+		Output: strings.TrimSpace(output.String()),
+		Timings: &ImageBuildTimings{
+			ExtractMS:     extractDuration.Milliseconds(),
+			DockerBuildMS: buildDuration.Milliseconds(),
+			TotalMS:       time.Since(totalStart).Milliseconds(),
+		},
+	}, nil
 }
 
 func annotateDockerBuildFailure(output string) string {

@@ -40,10 +40,30 @@ func TestSafeServiceConfigHashRedactsEnvAndSecretValues(t *testing.T) {
 		EnvFile:    ".env.production",
 		Secrets:    []string{"DATABASE_URL", "API_TOKEN:API_TOKEN"},
 		Monitoring: &config.MonitoringConfig{Webhook: "https://hooks.example.test/one"},
+		Backup: &config.BackupConfig{
+			Schedule: "@daily",
+			Storage: &config.BackupStorageConfig{
+				Provider:        config.BackupStorageProviderS3,
+				Bucket:          "backups",
+				Region:          "us-east-1",
+				AccessKeyID:     "access-one",
+				SecretAccessKey: "secret-one",
+			},
+		},
 	}
 	b := a
 	b.Env = map[string]string{"TOKEN": "secret-two"}
 	b.Monitoring = &config.MonitoringConfig{Webhook: "https://hooks.example.test/two"}
+	b.Backup = &config.BackupConfig{
+		Schedule: "@daily",
+		Storage: &config.BackupStorageConfig{
+			Provider:        config.BackupStorageProviderS3,
+			Bucket:          "backups",
+			Region:          "us-east-1",
+			AccessKeyID:     "access-two",
+			SecretAccessKey: "secret-two",
+		},
+	}
 
 	hashA, ok := SafeServiceConfigHash(a)
 	if !ok {

@@ -247,6 +247,12 @@ func ImageBuildEndpoint(image string, dockerfile ...string) string {
 	return "/v1/images/build?" + query.Encode()
 }
 
+func ImageExistsEndpoint(image string) string {
+	query := url.Values{}
+	query.Set("image", image)
+	return "/v1/images/exists?" + query.Encode()
+}
+
 func LogsEndpoint(project string, environment string, service string, tail int, follow bool) string {
 	query := url.Values{}
 	query.Set("project", project)

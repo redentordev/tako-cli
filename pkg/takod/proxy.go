@@ -51,10 +51,9 @@ func ReconcileProxy(ctx context.Context, req ReconcileProxyRequest) (*ReconcileP
 		mounts, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .Mounts}}")
 		env, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .Config.Env}}")
 		if proxyContainerIsCurrent(req, args, ports, hostPorts, image, mounts, env) {
-			if err := ensureProxyNetworkAttachments(ctx, networks); err != nil {
-				return nil, err
+			if err := ensureProxyNetworkAttachments(ctx, networks); err == nil {
+				return &ReconcileProxyResponse{Container: "tako-proxy", Image: req.Image}, nil
 			}
-			return &ReconcileProxyResponse{Container: "tako-proxy", Image: req.Image}, nil
 		}
 	}
 

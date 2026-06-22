@@ -345,11 +345,22 @@ func cleanupDanglingImages(ctx context.Context) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	removeArgs := append([]string{"rmi"}, ids...)
-	if _, err := runDocker(ctx, removeArgs...); err != nil {
-		return 0, fmt.Errorf("failed to remove dangling docker images: %w", err)
+	pruneOutput, err := runDocker(ctx, "image", "prune", "-f")
+	if err != nil {
+		return 0, fmt.Errorf("failed to prune dangling docker images: %w, output: %s", err, strings.TrimSpace(pruneOutput))
 	}
-	return len(ids), nil
+	return countDockerImagePruneEntries(pruneOutput), nil
+}
+
+func countDockerImagePruneEntries(output string) int {
+	count := 0
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "deleted:") || strings.HasPrefix(line, "untagged:") {
+			count++
+		}
+	}
+	return count
 }
 
 func cleanupUnusedProjectVolumes(ctx context.Context, project string, environment string, protectedVolumes []string) (int, error) {

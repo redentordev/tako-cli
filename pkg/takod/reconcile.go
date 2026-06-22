@@ -31,6 +31,8 @@ type ReconcileServiceRequest struct {
 	Project            string                  `json:"project"`
 	Environment        string                  `json:"environment"`
 	Service            string                  `json:"service"`
+	Revision           string                  `json:"revision,omitempty"`
+	DeployStrategy     string                  `json:"deployStrategy,omitempty"`
 	Image              string                  `json:"image"`
 	PullImage          bool                    `json:"pullImage,omitempty"`
 	Restart            string                  `json:"restart,omitempty"`
@@ -48,15 +50,17 @@ type ReconcileServiceRequest struct {
 }
 
 type RemoveServiceRequest struct {
-	Project     string `json:"project"`
-	Environment string `json:"environment"`
-	Service     string `json:"service"`
+	Project      string `json:"project"`
+	Environment  string `json:"environment"`
+	Service      string `json:"service"`
+	KeepRevision string `json:"keepRevision,omitempty"`
 }
 
 type ContainerSpec struct {
-	Name           string   `json:"name"`
-	NetworkAliases []string `json:"networkAliases,omitempty"`
-	Publishes      []string `json:"publishes,omitempty"`
+	Name           string            `json:"name"`
+	NetworkAliases []string          `json:"networkAliases,omitempty"`
+	Publishes      []string          `json:"publishes,omitempty"`
+	Labels         map[string]string `json:"labels,omitempty"`
 }
 
 type NetworkAttachmentSpec struct {
@@ -67,15 +71,18 @@ type NetworkAttachmentSpec struct {
 }
 
 type HealthSpec struct {
-	Command      string `json:"command,omitempty"`
-	Path         string `json:"path,omitempty"`
-	Port         int    `json:"port,omitempty"`
-	Scheme       string `json:"scheme,omitempty"`
-	Interval     string `json:"interval,omitempty"`
-	Timeout      string `json:"timeout,omitempty"`
-	Retries      int    `json:"retries,omitempty"`
-	StartPeriod  string `json:"startPeriod,omitempty"`
-	WaitAttempts int    `json:"waitAttempts,omitempty"`
+	Command             string `json:"command,omitempty"`
+	Path                string `json:"path,omitempty"`
+	Port                int    `json:"port,omitempty"`
+	Scheme              string `json:"scheme,omitempty"`
+	Interval            string `json:"interval,omitempty"`
+	Timeout             string `json:"timeout,omitempty"`
+	Retries             int    `json:"retries,omitempty"`
+	StartPeriod         string `json:"startPeriod,omitempty"`
+	WaitAttempts        int    `json:"waitAttempts,omitempty"`
+	SmokePath           string `json:"smokePath,omitempty"`
+	SmokePort           int    `json:"smokePort,omitempty"`
+	SmokeExpectedStatus int    `json:"smokeExpectedStatus,omitempty"`
 }
 
 type ReconcileServiceResponse struct {
@@ -97,6 +104,7 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	if err := validateReconcileServiceRequest(req); err != nil {
 		return nil, err
 	}
+	deployStrategy := normalizeTakodDeployStrategy(req.DeployStrategy)
 	if req.Restart == "" {
 		req.Restart = "unless-stopped"
 	}
@@ -106,7 +114,7 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	req.NetworkAttachments = mergeNetworkAttachments(req.NetworkAttachments)
 
 	if len(req.Containers) == 0 {
-		removedContainers, err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service)
+		removedContainers, err := removeServiceContainersForReconcile(ctx, req, deployStrategy)
 		if err != nil {
 			return nil, err
 		}
@@ -127,7 +135,7 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		return nil, err
 	}
 
-	removedContainers, err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service)
+	removedContainers, err := removeServiceContainersForReconcile(ctx, req, deployStrategy)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +188,7 @@ func RemoveService(ctx context.Context, req RemoveServiceRequest) (*RemoveServic
 	if err := validateRemoveServiceRequest(req); err != nil {
 		return nil, err
 	}
-	removedContainers, err := removeServiceContainers(ctx, req.Project, req.Environment, req.Service)
+	removedContainers, err := removeServiceContainersKeepingRevision(ctx, req.Project, req.Environment, req.Service, req.KeepRevision)
 	if err != nil {
 		return nil, err
 	}
@@ -212,6 +220,16 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	}
 	if !isSafeServiceName(req.Service) {
 		return fmt.Errorf("invalid service name")
+	}
+	strategy := normalizeTakodDeployStrategy(req.DeployStrategy)
+	if strategy == "" {
+		return fmt.Errorf("invalid deploy strategy")
+	}
+	if req.Revision != "" && !isSafeRuntimeName(req.Revision) {
+		return fmt.Errorf("invalid revision")
+	}
+	if takodDeployStrategyUsesRevisionScope(strategy) && req.Revision == "" {
+		return fmt.Errorf("revision is required for %s deploy strategy", strategy)
 	}
 	if err := validateImageName(req.Image); err != nil {
 		return err
@@ -258,6 +276,14 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 				return fmt.Errorf("invalid publish value")
 			}
 		}
+		if err := validateDockerLabels(container.Labels); err != nil {
+			return fmt.Errorf("invalid container label: %w", err)
+		}
+		if takodDeployStrategyUsesRevisionScope(strategy) {
+			if container.Labels["tako.revision"] != "" && container.Labels["tako.revision"] != req.Revision {
+				return fmt.Errorf("container %s revision label %q does not match request revision %q", container.Name, container.Labels["tako.revision"], req.Revision)
+			}
+		}
 	}
 	for _, mount := range req.Mounts {
 		if strings.TrimSpace(mount) == "" || hasControlChars(mount) {
@@ -294,11 +320,25 @@ func validateHealthSpec(health *HealthSpec) error {
 	if health.Path != "" && !strings.HasPrefix(health.Path, "/") {
 		return fmt.Errorf("invalid health path")
 	}
+	if len(health.SmokePath) > maxHealthFieldBytes || hasControlChars(health.SmokePath) {
+		return fmt.Errorf("invalid smoke path")
+	}
+	if health.SmokePath != "" && !strings.HasPrefix(health.SmokePath, "/") {
+		return fmt.Errorf("invalid smoke path")
+	}
+	if health.SmokeExpectedStatus != 0 && (health.SmokeExpectedStatus < 100 || health.SmokeExpectedStatus > 599) {
+		return fmt.Errorf("smoke expected status must be between 100 and 599")
+	}
 	if health.Port < 0 || health.Port > 65535 {
 		return fmt.Errorf("invalid health port")
 	}
-	if health.Path != "" && health.Port == 0 {
-		return fmt.Errorf("health port is required when health path is set")
+	if health.SmokePort < 0 || health.SmokePort > 65535 {
+		return fmt.Errorf("invalid smoke port")
+	}
+	if (health.Path != "" || health.SmokePath != "") && health.Port == 0 {
+		if health.Path != "" || health.SmokePort == 0 {
+			return fmt.Errorf("health port is required when HTTP health or smoke path is set")
+		}
 	}
 	if health.Scheme != "" && health.Scheme != "http" && health.Scheme != "https" {
 		return fmt.Errorf("invalid health scheme")
@@ -347,7 +387,27 @@ func validateRemoveServiceRequest(req RemoveServiceRequest) error {
 	if !isSafeServiceName(req.Service) {
 		return fmt.Errorf("invalid service name")
 	}
+	if req.KeepRevision != "" && !isSafeRuntimeName(req.KeepRevision) {
+		return fmt.Errorf("invalid keep revision")
+	}
 	return nil
+}
+
+func normalizeTakodDeployStrategy(strategy string) string {
+	strategy = strings.TrimSpace(strategy)
+	if strategy == "" {
+		return "recreate"
+	}
+	switch strategy {
+	case "recreate", "rolling", "blue_green":
+		return strategy
+	default:
+		return ""
+	}
+}
+
+func takodDeployStrategyUsesRevisionScope(strategy string) bool {
+	return strategy == "rolling" || strategy == "blue_green"
 }
 
 func isSafeServiceName(name string) bool {
@@ -644,6 +704,31 @@ func validateDockerLabels(labels map[string]string) error {
 }
 
 func removeServiceContainers(ctx context.Context, project string, environment string, service string) (int, error) {
+	return removeServiceContainersKeepingRevision(ctx, project, environment, service, "")
+}
+
+func removeServiceContainersForReconcile(ctx context.Context, req ReconcileServiceRequest, strategy string) (int, error) {
+	if takodDeployStrategyUsesRevisionScope(strategy) {
+		return removeServiceContainersMatchingRevision(ctx, req.Project, req.Environment, req.Service, req.Revision)
+	}
+	return removeServiceContainers(ctx, req.Project, req.Environment, req.Service)
+}
+
+func removeServiceContainersMatchingRevision(ctx context.Context, project string, environment string, service string, revision string) (int, error) {
+	if revision == "" {
+		return 0, nil
+	}
+	return removeServiceContainersWithRevisionFilter(ctx, project, environment, service, func(containerRevision string) bool {
+		return containerRevision == revision
+	})
+}
+
+func removeServiceContainersKeepingRevision(ctx context.Context, project string, environment string, service string, keepRevision string) (int, error) {
+	if keepRevision != "" {
+		return removeServiceContainersWithRevisionFilter(ctx, project, environment, service, func(containerRevision string) bool {
+			return containerRevision != keepRevision
+		})
+	}
 	output, err := runDocker(
 		ctx,
 		"ps",
@@ -656,6 +741,42 @@ func removeServiceContainers(ctx context.Context, project string, environment st
 		return 0, fmt.Errorf("failed to list old service containers: %w", err)
 	}
 	ids := strings.Fields(strings.TrimSpace(output))
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	return removeContainerIDs(ctx, ids)
+}
+
+func removeServiceContainersWithRevisionFilter(ctx context.Context, project string, environment string, service string, shouldRemove func(string) bool) (int, error) {
+	output, err := runDocker(
+		ctx,
+		"ps",
+		"-aq",
+		"--filter", "label=tako.project="+project,
+		"--filter", "label=tako.environment="+environment,
+		"--filter", "label=tako.service="+service,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to list old service containers: %w", err)
+	}
+	ids := strings.Fields(strings.TrimSpace(output))
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	filtered := make([]string, 0, len(ids))
+	for _, id := range ids {
+		labelsRaw, err := runDocker(ctx, "inspect", id, "--format", "{{json .Config.Labels}}")
+		if err != nil {
+			return 0, fmt.Errorf("failed to inspect old service container %s labels: %w", id, err)
+		}
+		if shouldRemove(parseDockerLabels(labelsRaw)["tako.revision"]) {
+			filtered = append(filtered, id)
+		}
+	}
+	return removeContainerIDs(ctx, filtered)
+}
+
+func removeContainerIDs(ctx context.Context, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -708,6 +829,15 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 		"tako.runtime":     "takod",
 	}
 	for key, value := range req.Labels {
+		labels[key] = value
+	}
+	if req.DeployStrategy != "" {
+		labels["tako.deployStrategy"] = normalizeTakodDeployStrategy(req.DeployStrategy)
+	}
+	if req.Revision != "" {
+		labels["tako.revision"] = req.Revision
+	}
+	for key, value := range container.Labels {
 		labels[key] = value
 	}
 	keys := make([]string, 0, len(labels))
@@ -763,35 +893,12 @@ func waitForContainerHealthy(ctx context.Context, networkName string, containerN
 		}
 		if strings.TrimSpace(running) != "true" {
 			lastErr = fmt.Errorf("container is not running")
-		} else if health == nil || (health.Command == "" && health.Path == "" && health.Port <= 0) {
+		} else if !healthSpecHasTarget(health) {
 			return nil
-		} else if health.Path != "" {
-			if err := checkContainerHTTPHealth(ctx, networkName, containerName, health); err == nil {
-				return nil
-			} else {
-				lastErr = err
-			}
-		} else if health.Port > 0 {
-			if err := checkContainerTCPHealth(ctx, networkName, containerName, health); err == nil {
-				return nil
-			} else {
-				lastErr = err
-			}
+		} else if err := checkContainerReadiness(ctx, networkName, containerName, health); err == nil {
+			return nil
 		} else {
-			status, err := runDocker(ctx, "inspect", containerName, "--format", "{{.State.Health.Status}}")
-			status = strings.TrimSpace(status)
-			if err == nil && status == "healthy" {
-				return nil
-			}
-			if err == nil && status == "unhealthy" {
-				logs, _ := runDocker(ctx, "logs", containerName, "--tail", "50")
-				return fmt.Errorf("container %s health check failed, last logs:\n%s", containerName, logs)
-			}
-			if err != nil {
-				lastErr = err
-			} else {
-				lastErr = fmt.Errorf("docker health status is %q", status)
-			}
+			lastErr = err
 		}
 
 		select {
@@ -817,10 +924,70 @@ func containerHealthWaitAttempts(health *HealthSpec) int {
 	return 30
 }
 
+func healthSpecHasTarget(health *HealthSpec) bool {
+	return health != nil && (health.Command != "" || health.Path != "" || health.Port > 0 || health.SmokePath != "")
+}
+
+func checkContainerReadiness(ctx context.Context, networkName string, containerName string, health *HealthSpec) error {
+	if health == nil {
+		return nil
+	}
+	if health.Path != "" {
+		if err := checkContainerHTTPHealth(ctx, networkName, containerName, health); err != nil {
+			return err
+		}
+		return checkContainerSmoke(ctx, networkName, containerName, health)
+	}
+	if health.Command != "" {
+		status, err := runDocker(ctx, "inspect", containerName, "--format", "{{.State.Health.Status}}")
+		status = strings.TrimSpace(status)
+		if err == nil && status == "healthy" {
+			return checkContainerSmoke(ctx, networkName, containerName, health)
+		}
+		if err == nil && status == "unhealthy" {
+			logs, _ := runDocker(ctx, "logs", containerName, "--tail", "50")
+			return fmt.Errorf("container %s health check failed, last logs:\n%s", containerName, logs)
+		}
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("docker health status is %q", status)
+	}
+	if health.Port > 0 {
+		if err := checkContainerTCPHealth(ctx, networkName, containerName, health); err != nil {
+			return err
+		}
+		return checkContainerSmoke(ctx, networkName, containerName, health)
+	}
+	return checkContainerSmoke(ctx, networkName, containerName, health)
+}
+
 func checkContainerHTTPHealth(ctx context.Context, networkName string, containerName string, health *HealthSpec) error {
+	return checkContainerHTTPPath(ctx, networkName, containerName, health, health.Path, health.Port, 0, "health")
+}
+
+func checkContainerSmoke(ctx context.Context, networkName string, containerName string, health *HealthSpec) error {
+	if health == nil || health.SmokePath == "" {
+		return nil
+	}
+	expectedStatus := health.SmokeExpectedStatus
+	if expectedStatus == 0 {
+		expectedStatus = http.StatusOK
+	}
+	port := health.SmokePort
+	if port == 0 {
+		port = health.Port
+	}
+	return checkContainerHTTPPath(ctx, networkName, containerName, health, health.SmokePath, port, expectedStatus, "smoke")
+}
+
+func checkContainerHTTPPath(ctx context.Context, networkName string, containerName string, health *HealthSpec, path string, port int, expectedStatus int, label string) error {
 	ip, err := containerNetworkIP(ctx, networkName, containerName)
 	if err != nil {
 		return err
+	}
+	if port <= 0 {
+		return fmt.Errorf("HTTP %s port is required", label)
 	}
 	scheme := health.Scheme
 	if scheme == "" {
@@ -830,19 +997,25 @@ func checkContainerHTTPHealth(ctx context.Context, networkName string, container
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	target := fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(ip, strconv.Itoa(health.Port)), health.Path)
+	target := fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(ip, strconv.Itoa(port)), path)
 	request, err := http.NewRequestWithContext(attemptCtx, http.MethodGet, target, nil)
 	if err != nil {
-		return fmt.Errorf("failed to build health request: %w", err)
+		return fmt.Errorf("failed to build %s request: %w", label, err)
 	}
 	response, err := healthHTTPClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("HTTP health request failed: %w", err)
+		return fmt.Errorf("HTTP %s request failed: %w", label, err)
 	}
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if expectedStatus != 0 {
+		if response.StatusCode != expectedStatus {
+			return fmt.Errorf("HTTP %s returned status %d, expected %d", label, response.StatusCode, expectedStatus)
+		}
+		return nil
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 400 {
-		return fmt.Errorf("HTTP health returned status %d", response.StatusCode)
+		return fmt.Errorf("HTTP %s returned status %d", label, response.StatusCode)
 	}
 	return nil
 }

@@ -11,7 +11,7 @@ type DeploymentState struct {
 	ProjectName string                  `json:"projectName"` // Project name
 	Environment string                  `json:"environment,omitempty"`
 	Version     string                  `json:"version"`         // Project version
-	Status      DeploymentStatus        `json:"status"`          // success, failed, rolled_back
+	Status      DeploymentStatus        `json:"status"`          // success, warmed, failed, rolled_back
 	Services    map[string]ServiceState `json:"services"`        // Deployed services
 	User        string                  `json:"user"`            // Who deployed
 	Host        string                  `json:"host"`            // Which server
@@ -55,6 +55,7 @@ type DeploymentStatus string
 const (
 	StatusInProgress DeploymentStatus = "in_progress"
 	StatusSuccess    DeploymentStatus = "success"
+	StatusWarmed     DeploymentStatus = "warmed"
 	StatusFailed     DeploymentStatus = "failed"
 	StatusRolledBack DeploymentStatus = "rolled_back"
 )

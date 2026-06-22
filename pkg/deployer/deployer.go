@@ -60,7 +60,7 @@ type Deployer struct {
 	skipBuild         bool
 	meshPortCache     map[meshUpstreamPortKey]int
 	meshPortCacheMu   sync.Mutex
-	meshPortAllocator func(serverName string, serviceName string, slot int, containerPort int) (int, error)
+	meshPortAllocator func(serverName string, serviceName string, revision string, slot int, containerPort int) (int, error)
 }
 
 const (
@@ -264,13 +264,14 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 	}
 
 	rollbackService := *service
+	options := takodRollbackDeployOptionsForService(service)
 	rollbackService.Image = serviceState.Image
 	rollbackService.Replicas = serviceState.Replicas
 	if serviceState.Port > 0 {
 		rollbackService.Port = serviceState.Port
 	}
 
-	return d.DeployServiceTakod(serviceName, &rollbackService, serviceState.Image)
+	return d.deployServiceTakod(serviceName, &rollbackService, serviceState.Image, options)
 }
 
 // BuildImage builds a Docker image for a service without deploying it.
@@ -363,10 +364,20 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 		}
 
 		archivePath := filepath.Join(os.TempDir(), fmt.Sprintf("tako-build-%s-%d.tar.gz", serviceName, time.Now().UnixNano()))
+		archiveStart := time.Now()
 		if err := createCrossPlatformTarGz(absContextPath, archivePath); err != nil {
 			return "", fmt.Errorf("failed to create build context archive: %w", err)
 		}
+		archiveDuration := time.Since(archiveStart)
 		defer os.Remove(archivePath)
+
+		archiveInfo, err := os.Stat(archivePath)
+		if err != nil {
+			return "", fmt.Errorf("failed to stat build context archive: %w", err)
+		}
+		if d.verbose {
+			fmt.Printf("  Build context archive: %s created in %s\n", formatBuildBytes(archiveInfo.Size()), formatBuildDuration(archiveDuration))
+		}
 
 		archive, err := os.Open(archivePath)
 		if err != nil {
@@ -374,7 +385,9 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 		}
 		defer archive.Close()
 
+		streamStart := time.Now()
 		output, err := takodclient.StreamRequest(client, d.takodSocket(), "POST", takodclient.ImageBuildEndpoint(fullImageName, service.Dockerfile), archive)
+		streamDuration := time.Since(streamStart)
 		var response takod.ImageBuildResponse
 		if err == nil {
 			if decodeErr := json.Unmarshal([]byte(output), &response); decodeErr != nil {
@@ -404,6 +417,14 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 		}
 
 		if d.verbose {
+			fmt.Printf("  Remote build request: %s\n", formatBuildDuration(streamDuration))
+			if response.Timings != nil {
+				fmt.Printf("  Remote build timings: extract=%s docker=%s total=%s\n",
+					formatBuildDuration(time.Duration(response.Timings.ExtractMS)*time.Millisecond),
+					formatBuildDuration(time.Duration(response.Timings.DockerBuildMS)*time.Millisecond),
+					formatBuildDuration(time.Duration(response.Timings.TotalMS)*time.Millisecond),
+				)
+			}
 			fmt.Printf("  ✓ Image built and verified: %s\n", fullImageName)
 		}
 
@@ -416,4 +437,26 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 	}
 
 	return fullImageName, nil
+}
+
+func formatBuildDuration(duration time.Duration) string {
+	if duration < time.Second {
+		return fmt.Sprintf("%dms", duration.Milliseconds())
+	}
+	return duration.Round(100 * time.Millisecond).String()
+}
+
+func formatBuildBytes(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	value := float64(size)
+	for _, suffix := range []string{"KiB", "MiB", "GiB"} {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%.1f TiB", value/unit)
 }
