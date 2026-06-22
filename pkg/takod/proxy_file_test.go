@@ -207,6 +207,28 @@ func TestRenderCaddyfileWithNoRoutesRespondsNotFound(t *testing.T) {
 	}
 }
 
+func TestParseProxyRouteManifestRejectsUnsafeRevision(t *testing.T) {
+	_, err := ParseProxyRouteManifest(`{
+		"version": 1,
+		"project": "demo",
+		"environment": "production",
+		"routes": [
+			{
+				"service": "web",
+				"revision": "../green",
+				"domains": ["example.com"],
+				"upstreams": ["http://demo-web:3000"]
+			}
+		]
+	}`)
+	if err == nil {
+		t.Fatal("expected unsafe route revision to be rejected")
+	}
+	if !strings.Contains(err.Error(), "invalid revision") {
+		t.Fatalf("error = %q, want invalid revision", err)
+	}
+}
+
 func TestRenderCaddyfileRejectsDuplicateDomains(t *testing.T) {
 	_, err := renderCaddyfile([]ProxyRouteManifest{
 		{

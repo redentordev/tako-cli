@@ -186,6 +186,39 @@ func TestReconcileProxyConnectsCurrentProxyToAllRouteManifestNetworks(t *testing
 	}
 }
 
+func TestReconcileProxyRecreatesCurrentProxyWhenNetworkAttachFails(t *testing.T) {
+	useTempProxyPaths(t)
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	demoNetwork := runtimeid.NetworkName("demo", "production")
+	writeRouteManifestForNetworkTest(t, "demo.json", "demo", "production", "demo.example.com", "http://demo-web:3000")
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "tako-proxy\n")
+	t.Setenv("TAKO_FAKE_INSPECT_ARGS", currentProxyArgsJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_INSPECT_PORTS", "{}")
+	t.Setenv("TAKO_FAKE_INSPECT_PORT_BINDINGS", currentProxyHostPortBindingsJSON())
+	t.Setenv("TAKO_FAKE_INSPECT_IMAGE", defaultProxyImage)
+	t.Setenv("TAKO_FAKE_INSPECT_MOUNTS", currentProxyMountsJSON())
+	t.Setenv("TAKO_FAKE_INSPECT_ENV", currentProxyEnvJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_FAIL_NETWORK_CONNECT_ONCE_FILE", filepath.Join(t.TempDir(), "failed-once"))
+
+	if _, err := ReconcileProxy(context.Background(), ReconcileProxyRequest{Network: demoNetwork}); err != nil {
+		t.Fatalf("ReconcileProxy returned error: %v", err)
+	}
+
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	for _, want := range []string{
+		"docker rm -f tako-proxy",
+		"docker run -d --name tako-proxy",
+		"docker network connect " + demoNetwork + " tako-proxy",
+	} {
+		if !strings.Contains(commands, want) {
+			t.Fatalf("expected command %q after failed attach, got:\n%s", want, commands)
+		}
+	}
+}
+
 func TestValidateReconcileProxyRequestAllowsDefaults(t *testing.T) {
 	req := ReconcileProxyRequest{Network: "tako_demo_production"}
 

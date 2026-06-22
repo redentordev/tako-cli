@@ -123,6 +123,62 @@ func TestRunTakodNodeActionsAggregatesSortedErrors(t *testing.T) {
 	}
 }
 
+func TestTakodDeployOptionsForService(t *testing.T) {
+	buildService := &config.ServiceConfig{Build: "."}
+	buildOptions := takodDeployOptionsForService(buildService, false)
+	if !buildOptions.BuildImage || buildOptions.PullImage {
+		t.Fatalf("build service options = %#v, want build without pull", buildOptions)
+	}
+
+	skipBuildOptions := takodDeployOptionsForService(buildService, true)
+	if skipBuildOptions.BuildImage || skipBuildOptions.PullImage {
+		t.Fatalf("skip-build options = %#v, want no build and no pull", skipBuildOptions)
+	}
+
+	imageOptions := takodDeployOptionsForService(&config.ServiceConfig{Image: "nginx:alpine"}, false)
+	if imageOptions.BuildImage || !imageOptions.PullImage {
+		t.Fatalf("image service options = %#v, want pull without build", imageOptions)
+	}
+}
+
+func TestTakodRollbackDeployOptionsForService(t *testing.T) {
+	buildOptions := takodRollbackDeployOptionsForService(&config.ServiceConfig{Build: "."})
+	if !buildOptions.BuildImage || buildOptions.PullImage {
+		t.Fatalf("build rollback options = %#v, want rebuild without pull", buildOptions)
+	}
+
+	imageOptions := takodRollbackDeployOptionsForService(&config.ServiceConfig{Image: "nginx:1.27"})
+	if imageOptions.BuildImage || !imageOptions.PullImage {
+		t.Fatalf("image rollback options = %#v, want pull without build", imageOptions)
+	}
+
+	emptyOptions := takodRollbackDeployOptionsForService(nil)
+	if emptyOptions.BuildImage || emptyOptions.PullImage {
+		t.Fatalf("nil rollback options = %#v, want no build and no pull", emptyOptions)
+	}
+}
+
+func TestTakodRevisionPruneRequestsAreSortedAndKeepActiveRevision(t *testing.T) {
+	got := takodRevisionPruneRequests("demo", "production", map[string]string{
+		"web": "rev-web",
+		"api": "rev-api",
+	})
+	if len(got) != 2 {
+		t.Fatalf("requests = %#v, want 2", got)
+	}
+	if got[0].Service != "api" || got[0].KeepRevision != "rev-api" {
+		t.Fatalf("first request = %#v, want api keep rev-api", got[0])
+	}
+	if got[1].Service != "web" || got[1].KeepRevision != "rev-web" {
+		t.Fatalf("second request = %#v, want web keep rev-web", got[1])
+	}
+	for _, request := range got {
+		if request.Project != "demo" || request.Environment != "production" {
+			t.Fatalf("request identity = %#v, want demo/production", request)
+		}
+	}
+}
+
 func TestShouldInstallTakodRelease(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -263,6 +319,168 @@ func TestBuildTakodHealthSpecUsesTCPPort(t *testing.T) {
 	}
 }
 
+func TestBuildTakodHealthSpecPrefersDeployReadinessHTTP(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
+		Port: 8080,
+		HealthCheck: config.HealthCheckConfig{
+			Path:     "/health",
+			Interval: "30s",
+		},
+		Deploy: config.DeployConfig{
+			Readiness: config.DeployReadinessConfig{
+				Path:     "/ready",
+				Interval: "10s",
+				Timeout:  "3s",
+				Retries:  4,
+			},
+		},
+	})
+	if spec == nil {
+		t.Fatal("buildTakodHealthSpec returned nil")
+	}
+	if spec.Path != "/ready" {
+		t.Fatalf("health path = %q, want deploy readiness path", spec.Path)
+	}
+	if spec.Port != 8080 || spec.Scheme != "http" {
+		t.Fatalf("readiness target = %s/%d, want http/8080", spec.Scheme, spec.Port)
+	}
+	if spec.Interval != "10s" || spec.Timeout != "3s" || spec.Retries != 4 {
+		t.Fatalf("readiness timing = interval %q timeout %q retries %d, want deploy readiness timing", spec.Interval, spec.Timeout, spec.Retries)
+	}
+	if spec.WaitAttempts != 55 {
+		t.Fatalf("wait attempts = %d, want deploy readiness window", spec.WaitAttempts)
+	}
+}
+
+func TestBuildTakodHealthSpecAttachesBlueGreenSmokeTest(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
+		Port: 8080,
+		Deploy: config.DeployConfig{
+			Strategy: config.DeployStrategyBlueGreen,
+			Readiness: config.DeployReadinessConfig{
+				Path: "/ready",
+			},
+			SmokeTest: config.DeploySmokeTestConfig{
+				Path:           "/smoke",
+				ExpectedStatus: 204,
+			},
+		},
+	})
+	if spec == nil {
+		t.Fatal("buildTakodHealthSpec returned nil")
+	}
+	if spec.Path != "/ready" || spec.SmokePath != "/smoke" {
+		t.Fatalf("health/smoke paths = %q/%q, want /ready and /smoke", spec.Path, spec.SmokePath)
+	}
+	if spec.SmokeExpectedStatus != 204 {
+		t.Fatalf("smoke expected status = %d, want 204", spec.SmokeExpectedStatus)
+	}
+	if spec.SmokePort != 8080 {
+		t.Fatalf("smoke port = %d, want service port 8080", spec.SmokePort)
+	}
+}
+
+func TestBuildTakodHealthSpecSupportsSmokeOnlyBlueGreen(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
+		Port: 8080,
+		Deploy: config.DeployConfig{
+			Strategy: config.DeployStrategyBlueGreen,
+			SmokeTest: config.DeploySmokeTestConfig{
+				Path: "/smoke",
+			},
+		},
+	})
+	if spec == nil {
+		t.Fatal("buildTakodHealthSpec returned nil")
+	}
+	if spec.Path != "" || spec.SmokePath != "/smoke" {
+		t.Fatalf("health/smoke paths = %q/%q, want smoke-only", spec.Path, spec.SmokePath)
+	}
+	if spec.Port != 0 || spec.SmokePort != 8080 || spec.Scheme != "http" {
+		t.Fatalf("smoke target = %s port=%d smokePort=%d, want http smokePort 8080", spec.Scheme, spec.Port, spec.SmokePort)
+	}
+	if spec.SmokeExpectedStatus != 200 {
+		t.Fatalf("default smoke expected status = %d, want 200", spec.SmokeExpectedStatus)
+	}
+}
+
+func TestBuildTakodHealthSpecKeepsReadinessTCPPortSeparateFromSmokePort(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
+		Port: 8080,
+		Deploy: config.DeployConfig{
+			Strategy: config.DeployStrategyBlueGreen,
+			Readiness: config.DeployReadinessConfig{
+				TCPPort: 9000,
+			},
+			SmokeTest: config.DeploySmokeTestConfig{
+				Path:           "/smoke",
+				ExpectedStatus: 204,
+			},
+		},
+	})
+	if spec == nil {
+		t.Fatal("buildTakodHealthSpec returned nil")
+	}
+	if spec.Port != 9000 || spec.SmokePort != 8080 {
+		t.Fatalf("readiness/smoke ports = %d/%d, want 9000 and 8080", spec.Port, spec.SmokePort)
+	}
+}
+
+func TestBuildTakodHealthSpecUsesDeployReadinessTCPPort(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
+		Port: 3000,
+		Deploy: config.DeployConfig{
+			Readiness: config.DeployReadinessConfig{
+				TCPPort:  9000,
+				Interval: "5s",
+				Timeout:  "2s",
+				Retries:  2,
+			},
+		},
+	})
+	if spec == nil {
+		t.Fatal("buildTakodHealthSpec returned nil")
+	}
+	if spec.Path != "" || spec.Scheme != "" {
+		t.Fatalf("tcp readiness path/scheme = %q/%q, want empty", spec.Path, spec.Scheme)
+	}
+	if spec.Port != 9000 {
+		t.Fatalf("readiness port = %d, want tcpPort", spec.Port)
+	}
+	if spec.Interval != "5s" || spec.Timeout != "2s" || spec.Retries != 2 {
+		t.Fatalf("readiness timing = interval %q timeout %q retries %d, want configured timing", spec.Interval, spec.Timeout, spec.Retries)
+	}
+}
+
+func TestBuildTakodHealthSpecIgnoresTimingOnlyDeployReadiness(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
+		Port: 8080,
+		HealthCheck: config.HealthCheckConfig{
+			Path: "/health",
+		},
+		Deploy: config.DeployConfig{
+			Readiness: config.DeployReadinessConfig{
+				Timeout: "1s",
+			},
+		},
+	})
+	if spec == nil {
+		t.Fatal("buildTakodHealthSpec returned nil")
+	}
+	if spec.Path != "/health" {
+		t.Fatalf("health path = %q, want service healthCheck fallback", spec.Path)
+	}
+	if spec.Timeout != "5s" {
+		t.Fatalf("health timeout = %q, want healthCheck default timeout", spec.Timeout)
+	}
+}
+
 func TestDeploymentHealthWaitAttemptsUsesFloorAndCap(t *testing.T) {
 	if got := deploymentHealthWaitAttempts("1s", "0s", 1); got != 30 {
 		t.Fatalf("short health wait attempts = %d, want floor 30", got)
@@ -315,7 +533,7 @@ func TestBuildTakodContainerSpecDoesNotPublishPublicOneNodeService(t *testing.T)
 	container, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
 		Port:  80,
 		Proxy: &config.ProxyConfig{Domain: "example.com"},
-	}, 1, false, 0)
+	}, 1, "rev-web", false, 0, false)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
@@ -324,6 +542,79 @@ func TestBuildTakodContainerSpecDoesNotPublishPublicOneNodeService(t *testing.T)
 	}
 	if len(container.NetworkAliases) != 1 || container.NetworkAliases[0] != runtimeid.ContainerAlias("demo", "production", "web", 1) {
 		t.Fatalf("network aliases = %#v, want generated DNS-safe alias", container.NetworkAliases)
+	}
+	for key, want := range map[string]string{
+		reconcile.RevisionLabel:       "rev-web",
+		reconcile.DeployStrategyLabel: config.DeployStrategyRecreate,
+		reconcile.SlotLabel:           "1",
+		reconcile.ActiveLabel:         "true",
+	} {
+		if container.Labels[key] != want {
+			t.Fatalf("container label %s = %q, want %q in %#v", key, container.Labels[key], want, container.Labels)
+		}
+	}
+}
+
+func TestBuildTakodContainerSpecUsesRevisionScopedIDsForNoDowntimeStrategies(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
+	service := &config.ServiceConfig{
+		Port: 8080,
+		Deploy: config.DeployConfig{
+			Strategy: config.DeployStrategyRolling,
+		},
+	}
+
+	container, err := deploy.buildTakodContainerSpec("node-a", "web", service, 2, "rev-green", false, 0, false)
+	if err != nil {
+		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
+	}
+	if container.Name != runtimeid.RevisionContainerName("demo", "production", "web", "rev-green", 2) {
+		t.Fatalf("container name = %q, want revision-scoped name", container.Name)
+	}
+	wantAlias := runtimeid.RevisionContainerAlias("demo", "production", "web", "rev-green", 2)
+	if len(container.NetworkAliases) != 1 || container.NetworkAliases[0] != wantAlias {
+		t.Fatalf("network aliases = %#v, want revision-scoped alias %q", container.NetworkAliases, wantAlias)
+	}
+	if got := container.Labels[reconcile.DeployStrategyLabel]; got != config.DeployStrategyRolling {
+		t.Fatalf("strategy label = %q, want rolling", got)
+	}
+	if got := container.Labels[reconcile.RevisionLabel]; got != "rev-green" {
+		t.Fatalf("revision label = %q, want rev-green", got)
+	}
+}
+
+func TestBuildTakodContainerSpecMarksWarmOnlyRevisionInactive(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
+	service := &config.ServiceConfig{
+		Port: 8080,
+		Deploy: config.DeployConfig{
+			Strategy:  config.DeployStrategyBlueGreen,
+			Promotion: config.DeployPromotionManual,
+		},
+	}
+
+	container, err := deploy.buildTakodContainerSpec("node-a", "web", service, 1, "rev-green", false, 0, true)
+	if err != nil {
+		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
+	}
+	if got := container.Labels[reconcile.ActiveLabel]; got != "false" {
+		t.Fatalf("active label = %q, want false for manual blue-green", got)
+	}
+}
+
+func TestBuildTakodContainerSpecRequiresRevisionForRevisionScopedStrategies(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
+	_, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
+		Port: 8080,
+		Deploy: config.DeployConfig{
+			Strategy: config.DeployStrategyBlueGreen,
+		},
+	}, 1, " ", false, 0, false)
+	if err == nil {
+		t.Fatal("expected missing revision to fail for blue-green container spec")
+	}
+	if !strings.Contains(err.Error(), "requires a revision-scoped container name") {
+		t.Fatalf("error = %v, want revision-scoped container name message", err)
 	}
 }
 
@@ -379,7 +670,7 @@ func TestBuildTakodContainerSpecPublishesPublicMultiNodeServiceOnMeshIP(t *testi
 	container, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
 		Port:  80,
 		Proxy: &config.ProxyConfig{Domain: "example.com"},
-	}, 1, true, 24321)
+	}, 1, "rev-web", true, 24321, false)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
@@ -393,7 +684,7 @@ func TestBuildTakodContainerSpecPublishesPublicMultiNodeServiceOnMeshIP(t *testi
 
 func TestBuildTakodContainerSpecDoesNotPublishInternalServicePort(t *testing.T) {
 	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
-	container, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, false, 0)
+	container, err := deploy.buildTakodContainerSpec("node-a", "metrics", &config.ServiceConfig{Port: 9100}, 1, "rev-metrics", false, 0, false)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
 	}
@@ -415,7 +706,7 @@ func TestAllocateMeshUpstreamPortUsesTakodAndCachesResult(t *testing.T) {
 
 	port, err := deploy.allocateMeshUpstreamPort(fakeTakodStatusExecutor{
 		output: `{"hostPort":24567}`,
-	}, "node-a", "web", 1, 80)
+	}, "node-a", "web", "", 1, 80)
 	if err != nil {
 		t.Fatalf("allocateMeshUpstreamPort returned error: %v", err)
 	}
@@ -425,12 +716,24 @@ func TestAllocateMeshUpstreamPortUsesTakodAndCachesResult(t *testing.T) {
 
 	port, err = deploy.allocateMeshUpstreamPort(fakeTakodStatusExecutor{
 		err: fmt.Errorf("should not be called after cache fill"),
-	}, "node-a", "web", 1, 80)
+	}, "node-a", "web", "", 1, 80)
 	if err != nil {
 		t.Fatalf("cached allocateMeshUpstreamPort returned error: %v", err)
 	}
 	if port != 24567 {
 		t.Fatalf("cached port = %d, want 24567", port)
+	}
+}
+
+func TestMeshUpstreamRevisionForStrategyOnlyUsesNoDowntimeRevisions(t *testing.T) {
+	if got := meshUpstreamRevisionForStrategy("rev-web", config.DeployStrategyRecreate); got != "" {
+		t.Fatalf("recreate mesh revision = %q, want empty legacy allocation key", got)
+	}
+	if got := meshUpstreamRevisionForStrategy(" rev-web ", config.DeployStrategyRolling); got != "rev-web" {
+		t.Fatalf("rolling mesh revision = %q, want trimmed revision", got)
+	}
+	if got := meshUpstreamRevisionForStrategy("rev-web", config.DeployStrategyBlueGreen); got != "rev-web" {
+		t.Fatalf("blue-green mesh revision = %q, want revision", got)
 	}
 }
 
@@ -606,6 +909,77 @@ func TestBuildTakodMountSpecsHonorsExternalVolumeNames(t *testing.T) {
 	wantExternal := []string{"captain--n8n-data"}
 	if !slices.Equal(externalVolumes, wantExternal) {
 		t.Fatalf("external volumes = %#v, want %#v", externalVolumes, wantExternal)
+	}
+}
+
+func TestBuildTakodBackupScheduleRequestUsesConfiguredVolumesAndStorage(t *testing.T) {
+	deploy := &Deployer{
+		config: &config.Config{
+			Project: config.ProjectConfig{Name: "demo"},
+			Volumes: map[string]config.VolumeConfig{
+				"pgdata": {External: true, Name: "captain--pgdata"},
+			},
+		},
+		environment: "production",
+	}
+
+	request, err := deploy.buildTakodBackupScheduleRequest("postgres", &config.ServiceConfig{
+		Volumes: []string{"pgdata:/var/lib/postgresql/data", "/cache", "/host/uploads:/uploads"},
+		Backup: &config.BackupConfig{
+			Schedule: "0 2 * * *",
+			Retain:   14,
+			Volumes:  []string{"pgdata"},
+			Storage: &config.BackupStorageConfig{
+				Provider:        config.BackupStorageProviderR2,
+				Bucket:          "backups",
+				Region:          "auto",
+				Endpoint:        "https://account.r2.cloudflarestorage.com",
+				Prefix:          "apps",
+				AccessKeyID:     "access",
+				SecretAccessKey: "secret",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildTakodBackupScheduleRequest returned error: %v", err)
+	}
+	if request.Project != "demo" || request.Environment != "production" || request.Service != "postgres" {
+		t.Fatalf("request identity = %#v", request)
+	}
+	if request.Schedule != "0 2 * * *" || request.RetentionDays != 14 {
+		t.Fatalf("request schedule = %q retain=%d", request.Schedule, request.RetentionDays)
+	}
+	wantVolume := takod.BackupScheduleVolume{
+		Volume:         "pgdata",
+		DockerVolume:   "captain--pgdata",
+		ExternalVolume: true,
+	}
+	if !slices.Equal(request.Volumes, []takod.BackupScheduleVolume{wantVolume}) {
+		t.Fatalf("request volumes = %#v, want %#v", request.Volumes, []takod.BackupScheduleVolume{wantVolume})
+	}
+	if request.Storage == nil || request.Storage.Provider != takod.BackupStorageProviderR2 || request.Storage.Bucket != "backups" {
+		t.Fatalf("request storage = %#v", request.Storage)
+	}
+}
+
+func TestBuildTakodBackupScheduleRequestDefaultsToBackupableServiceVolumes(t *testing.T) {
+	deploy := &Deployer{
+		config:      &config.Config{Project: config.ProjectConfig{Name: "demo"}},
+		environment: "production",
+	}
+
+	request, err := deploy.buildTakodBackupScheduleRequest("app", &config.ServiceConfig{
+		Volumes: []string{"cache:/cache", "/data", "/host/uploads:/uploads", "broken:"},
+		Backup:  &config.BackupConfig{Schedule: "@daily", Retain: 7},
+	})
+	if err != nil {
+		t.Fatalf("buildTakodBackupScheduleRequest returned error: %v", err)
+	}
+	got := []string{request.Volumes[0].Volume, request.Volumes[1].Volume}
+	slices.Sort(got)
+	want := []string{"cache", "data"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("backup volumes = %#v, want %#v", got, want)
 	}
 }
 

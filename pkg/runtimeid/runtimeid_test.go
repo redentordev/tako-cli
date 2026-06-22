@@ -40,6 +40,43 @@ func TestContainerAliasIsDNSSafeAndCollisionResistant(t *testing.T) {
 	}
 }
 
+func TestRevisionContainerIDsAreRevisionScopedAndDNSSafe(t *testing.T) {
+	stableName := ContainerName("demo", "production", "web", 1)
+	blueName := RevisionContainerName("demo", "production", "web", "rev-blue", 1)
+	greenName := RevisionContainerName("demo", "production", "web", "rev-green", 1)
+	if blueName == stableName {
+		t.Fatalf("revision container name %q should differ from stable name %q", blueName, stableName)
+	}
+	if blueName == greenName {
+		t.Fatalf("revision container names collided across revisions: %q", blueName)
+	}
+	if !strings.Contains(blueName, "_r_") {
+		t.Fatalf("revision container name %q should include revision marker", blueName)
+	}
+	if len(blueName) > dockerNameMax {
+		t.Fatalf("revision container name length = %d, want <= %d: %q", len(blueName), dockerNameMax, blueName)
+	}
+
+	stableAlias := ContainerAlias("demo", "production", "web", 1)
+	blueAlias := RevisionContainerAlias("demo", "production", "web", "rev-blue", 1)
+	greenAlias := RevisionContainerAlias("demo", "production", "web", "rev-green", 1)
+	if blueAlias == stableAlias {
+		t.Fatalf("revision container alias %q should differ from stable alias %q", blueAlias, stableAlias)
+	}
+	if blueAlias == greenAlias {
+		t.Fatalf("revision container aliases collided across revisions: %q", blueAlias)
+	}
+	if strings.Contains(blueAlias, "_") {
+		t.Fatalf("revision container alias %q should not contain underscores", blueAlias)
+	}
+	if !strings.Contains(blueAlias, "-r-") {
+		t.Fatalf("revision container alias %q should include revision marker", blueAlias)
+	}
+	if len(blueAlias) > dockerNetworkMax {
+		t.Fatalf("revision container alias length = %d, want <= %d: %q", len(blueAlias), dockerNetworkMax, blueAlias)
+	}
+}
+
 func TestExportAliasIsReadableAndDNSSafe(t *testing.T) {
 	alias := ExportAlias("backend-api", "production", "api")
 	if alias != "backend-api-production-api" {

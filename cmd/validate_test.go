@@ -103,6 +103,9 @@ environments:
 	for _, want := range []string{
 		"Config valid: tako.yaml",
 		"Environment: production",
+		"Runtime: takod",
+		"State: replicated (consistency: lease)",
+		"Mesh: enabled (10.210.0.0/16 via tako)",
 		"Servers: 1",
 		"Services: 1",
 	} {

@@ -50,6 +50,13 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		out := cmd.OutOrStdout()
 		fmt.Fprintf(out, "Config valid: %s\n", filepath.Clean(configPath))
 		fmt.Fprintf(out, "Environment: %s\n", envName)
+		fmt.Fprintf(out, "Runtime: %s\n", cfg.GetRuntimeMode())
+		fmt.Fprintf(out, "State: %s (consistency: %s)\n", cfg.GetStateBackend(), cfg.GetDeployConsistency())
+		mesh := "disabled"
+		if cfg.IsMeshEnabled() {
+			mesh = fmt.Sprintf("enabled (%s via %s)", cfg.Mesh.NetworkCIDR, cfg.Mesh.Interface)
+		}
+		fmt.Fprintf(out, "Mesh: %s\n", mesh)
 		fmt.Fprintf(out, "Servers: %d\n", len(servers))
 		fmt.Fprintf(out, "Services: %d\n", len(services))
 	}

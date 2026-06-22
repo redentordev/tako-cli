@@ -325,6 +325,13 @@ func (s *StateManager) requestJSON(method string, endpoint string, value any) (s
 	return takodclient.RequestJSON(s.client, s.socket, method, endpoint, value)
 }
 
+func (s *StateManager) requestJSONWithTimeout(method string, endpoint string, value any, timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		return s.requestJSON(method, endpoint, value)
+	}
+	return takodclient.RequestJSONWithTimeout(s.client, s.socket, method, endpoint, value, timeout)
+}
+
 func decodeStateDocumentContent(output string, document string) (string, error) {
 	var response takod.StateDocumentResponse
 	if err := json.Unmarshal([]byte(output), &response); err != nil {

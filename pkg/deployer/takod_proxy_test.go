@@ -93,6 +93,109 @@ func TestRenderTakodProxyDynamicConfigUsesOnlyLocalUpstreamForOneNode(t *testing
 	})
 }
 
+func TestRenderTakodProxyDynamicConfigCanRouteActiveRevision(t *testing.T) {
+	deploy := testProxyDeployer()
+	deploy.meshPortAllocator = func(_ string, serviceName string, revision string, slot int, _ int) (int, error) {
+		if serviceName == "web" && revision == "rev-green" {
+			return 43000 + slot, nil
+		}
+		return deploy.meshUpstreamPort(serviceName, slot)
+	}
+	services := deploy.config.Environments["production"].Services
+
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNodeWithOptions(services, "node-a", takodProxyRenderOptions{
+		ActiveRevisions: map[string]string{"web": "rev-green"},
+	})
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNodeWithOptions returned error: %v", err)
+	}
+	if !hasPublic {
+		t.Fatal("expected public services to be detected")
+	}
+
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	if route.Revision != "rev-green" {
+		t.Fatalf("route revision = %q, want rev-green", route.Revision)
+	}
+	assertStringsEqual(t, route.Upstreams, []string{
+		"http://" + runtimeid.RevisionContainerAlias("demo", "production", "web", "rev-green", 1) + ":3000",
+		"http://10.210.0.2:43002",
+	})
+	for _, upstream := range route.Upstreams {
+		if strings.Contains(upstream, runtimeid.ContainerAlias("demo", "production", "web", 1)) {
+			t.Fatalf("revision route should not include stable alias: %#v", route.Upstreams)
+		}
+	}
+}
+
+func TestNormalizeTakodProxyActiveRevisions(t *testing.T) {
+	deploy := testProxyDeployer()
+	services := deploy.config.Environments["production"].Services
+
+	got, err := normalizeTakodProxyActiveRevisions(services, map[string]string{
+		"web": " rev-green ",
+		"api": "rev_api",
+	})
+	if err != nil {
+		t.Fatalf("normalizeTakodProxyActiveRevisions returned error: %v", err)
+	}
+	if got["web"] != "rev-green" || got["api"] != "rev_api" {
+		t.Fatalf("normalized revisions = %#v, want trimmed safe values", got)
+	}
+
+	got, err = normalizeTakodProxyActiveRevisions(services, nil)
+	if err != nil {
+		t.Fatalf("nil normalizeTakodProxyActiveRevisions returned error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("nil active revisions normalized to %#v, want nil", got)
+	}
+}
+
+func TestNormalizeTakodProxyActiveRevisionsRejectsInvalidValues(t *testing.T) {
+	deploy := testProxyDeployer()
+	services := deploy.config.Environments["production"].Services
+
+	tests := []struct {
+		name            string
+		activeRevisions map[string]string
+		want            string
+	}{
+		{
+			name:            "unknown service",
+			activeRevisions: map[string]string{"worker": "rev-green"},
+			want:            "unknown service",
+		},
+		{
+			name:            "empty revision",
+			activeRevisions: map[string]string{"web": "  "},
+			want:            "is required",
+		},
+		{
+			name:            "unsafe revision",
+			activeRevisions: map[string]string{"web": "../rev"},
+			want:            "unsafe characters",
+		},
+		{
+			name:            "long revision",
+			activeRevisions: map[string]string{"web": strings.Repeat("a", 64)},
+			want:            "unsafe characters",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := normalizeTakodProxyActiveRevisions(services, tt.activeRevisions)
+			if err == nil {
+				t.Fatal("expected normalizeTakodProxyActiveRevisions to reject invalid active revision")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestRenderTakodProxyDynamicConfigPrunesRemovedNodeUpstreams(t *testing.T) {
 	deploy := testProxyDeployer()
 	production := deploy.config.Environments["production"]
@@ -267,6 +370,39 @@ func TestRenderTakodProxyDynamicConfigUsesMeshAskURLForRemoteAskService(t *testi
 		t.Fatalf("meshUpstreamPort returned error: %v", err)
 	}
 	wantAsk := fmt.Sprintf("http://10.210.0.2:%d/api/domains/authorize", remotePort)
+	if route.DynamicDomain == nil || route.DynamicDomain.AskURL != wantAsk {
+		t.Fatalf("dynamicDomain = %#v, want ask %q", route.DynamicDomain, wantAsk)
+	}
+}
+
+func TestRenderTakodProxyDynamicConfigUsesActiveRevisionForDynamicAskService(t *testing.T) {
+	deploy := testProxyDeployer()
+	production := deploy.config.Environments["production"]
+	production.Servers = []string{"node-a"}
+	production.Services["web"] = config.ServiceConfig{
+		Port:     3000,
+		Replicas: 1,
+		Proxy: &config.ProxyConfig{
+			DynamicDomains: &config.DynamicDomainsConfig{Ask: "api:/api/domains/authorize"},
+		},
+	}
+	api := production.Services["api"]
+	api.Replicas = 1
+	production.Services["api"] = api
+	deploy.config.Environments["production"] = production
+
+	data, hasPublic, err := deploy.renderTakodProxyDynamicConfigForNodeWithOptions(production.Services, "node-a", takodProxyRenderOptions{
+		ActiveRevisions: map[string]string{"api": "rev-api"},
+	})
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNodeWithOptions returned error: %v", err)
+	}
+	if !hasPublic {
+		t.Fatal("expected dynamic-domain public service to be detected")
+	}
+
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	wantAsk := "http://" + runtimeid.RevisionContainerAlias("demo", "production", "api", "rev-api", 1) + ":4000/api/domains/authorize"
 	if route.DynamicDomain == nil || route.DynamicDomain.AskURL != wantAsk {
 		t.Fatalf("dynamicDomain = %#v, want ask %q", route.DynamicDomain, wantAsk)
 	}
@@ -466,7 +602,7 @@ func testProxyDeployer() *Deployer {
 		},
 	}
 	deploy := &Deployer{config: cfg, environment: "production"}
-	deploy.meshPortAllocator = func(_ string, serviceName string, slot int, _ int) (int, error) {
+	deploy.meshPortAllocator = func(_ string, serviceName string, _ string, slot int, _ int) (int, error) {
 		return deploy.meshUpstreamPort(serviceName, slot)
 	}
 	return deploy

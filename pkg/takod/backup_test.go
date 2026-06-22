@@ -132,6 +132,38 @@ func TestCleanupOldBackupsUsesBackupIDTimestamp(t *testing.T) {
 	}
 }
 
+func TestCleanupOldBackupsFiltersVolume(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+
+	request := BackupRequest{Project: "demo", Environment: "production", Volume: "data", RetentionDays: 7}
+	dir := backupDirectory(request)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatalf("failed to create backup dir: %v", err)
+	}
+	deletePath := filepath.Join(dir, "data_20000101-120000.tar.gz")
+	keepPath := filepath.Join(dir, "pgdata_20000101-120000.tar.gz")
+	for _, path := range []string{deletePath, keepPath} {
+		if err := os.WriteFile(path, []byte("backup"), 0600); err != nil {
+			t.Fatalf("failed to write backup fixture: %v", err)
+		}
+	}
+
+	response, err := CleanupOldBackups(context.Background(), request)
+	if err != nil {
+		t.Fatalf("CleanupOldBackups returned error: %v", err)
+	}
+	if response.Deleted != 1 {
+		t.Fatalf("deleted = %d, want 1", response.Deleted)
+	}
+	if _, err := os.Stat(deletePath); !os.IsNotExist(err) {
+		t.Fatalf("expected data backup to be deleted, stat err=%v", err)
+	}
+	if _, err := os.Stat(keepPath); err != nil {
+		t.Fatalf("expected other volume backup to remain: %v", err)
+	}
+}
+
 func TestValidateBackupRequestRejectsUnsafeValues(t *testing.T) {
 	valid := BackupRequest{
 		Project:     "demo",

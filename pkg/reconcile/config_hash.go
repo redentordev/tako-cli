@@ -12,6 +12,14 @@ import (
 
 const ConfigHashLabel = "tako.configHash"
 
+const RevisionLabel = "tako.revision"
+
+const DeployStrategyLabel = "tako.deployStrategy"
+
+const SlotLabel = "tako.slot"
+
+const ActiveLabel = "tako.active"
+
 type safeServiceConfigFingerprint struct {
 	Build        string                    `json:"build,omitempty"`
 	Dockerfile   string                    `json:"dockerfile,omitempty"`
@@ -29,7 +37,7 @@ type safeServiceConfigFingerprint struct {
 	LoadBalancer config.LoadBalancerConfig `json:"loadBalancer,omitempty"`
 	HealthCheck  config.HealthCheckConfig  `json:"healthCheck,omitempty"`
 	Deploy       config.DeployConfig       `json:"deploy,omitempty"`
-	Backup       *config.BackupConfig      `json:"backup,omitempty"`
+	Backup       *backupFingerprint        `json:"backup,omitempty"`
 	Monitoring   *monitoringFingerprint    `json:"monitoring,omitempty"`
 	Export       bool                      `json:"export,omitempty"`
 	Imports      []string                  `json:"imports,omitempty"`
@@ -42,6 +50,25 @@ type monitoringFingerprint struct {
 	Interval          string `json:"interval,omitempty"`
 	WebhookConfigured bool   `json:"webhookConfigured,omitempty"`
 	CheckType         string `json:"checkType,omitempty"`
+}
+
+type backupFingerprint struct {
+	Schedule string                    `json:"schedule,omitempty"`
+	Retain   int                       `json:"retain,omitempty"`
+	Volumes  []string                  `json:"volumes,omitempty"`
+	Storage  *backupStorageFingerprint `json:"storage,omitempty"`
+}
+
+type backupStorageFingerprint struct {
+	Provider                  string `json:"provider,omitempty"`
+	Bucket                    string `json:"bucket,omitempty"`
+	Region                    string `json:"region,omitempty"`
+	Endpoint                  string `json:"endpoint,omitempty"`
+	Prefix                    string `json:"prefix,omitempty"`
+	AccessKeyIDConfigured     bool   `json:"accessKeyIdConfigured,omitempty"`
+	SecretAccessKeyConfigured bool   `json:"secretAccessKeyConfigured,omitempty"`
+	SessionTokenConfigured    bool   `json:"sessionTokenConfigured,omitempty"`
+	ForcePathStyle            bool   `json:"forcePathStyle,omitempty"`
 }
 
 func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
@@ -62,7 +89,7 @@ func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
 		LoadBalancer: service.LoadBalancer,
 		HealthCheck:  service.HealthCheck,
 		Deploy:       service.Deploy,
-		Backup:       service.Backup,
+		Backup:       cloneBackupFingerprint(service.Backup),
 		Monitoring:   cloneMonitoringFingerprint(service.Monitoring),
 		Export:       service.Export,
 		Imports:      sortedStrings(service.Imports),
@@ -75,6 +102,35 @@ func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), true
+}
+
+func cloneBackupFingerprint(backup *config.BackupConfig) *backupFingerprint {
+	if backup == nil {
+		return nil
+	}
+	return &backupFingerprint{
+		Schedule: backup.Schedule,
+		Retain:   backup.Retain,
+		Volumes:  sortedStrings(backup.Volumes),
+		Storage:  cloneBackupStorageFingerprint(backup.Storage),
+	}
+}
+
+func cloneBackupStorageFingerprint(storage *config.BackupStorageConfig) *backupStorageFingerprint {
+	if storage == nil {
+		return nil
+	}
+	return &backupStorageFingerprint{
+		Provider:                  storage.Provider,
+		Bucket:                    storage.Bucket,
+		Region:                    storage.Region,
+		Endpoint:                  storage.Endpoint,
+		Prefix:                    storage.Prefix,
+		AccessKeyIDConfigured:     strings.TrimSpace(storage.AccessKeyID) != "",
+		SecretAccessKeyConfigured: strings.TrimSpace(storage.SecretAccessKey) != "",
+		SessionTokenConfigured:    strings.TrimSpace(storage.SessionToken) != "",
+		ForcePathStyle:            storage.ForcePathStyle,
+	}
 }
 
 func sortedMapKeys(values map[string]string) []string {

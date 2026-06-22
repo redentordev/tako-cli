@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -34,13 +35,20 @@ type persistedActualNodeSnapshot struct {
 }
 
 type persistedActualService struct {
-	Name       string   `json:"name"`
-	Image      string   `json:"image,omitempty"`
-	Replicas   int      `json:"replicas"`
-	Containers []string `json:"containers,omitempty"`
-	ConfigHash string   `json:"configHash,omitempty"`
-	RuntimeID  string   `json:"runtimeId,omitempty"`
-	Persistent bool     `json:"persistent,omitempty"`
+	Name              string            `json:"name"`
+	Image             string            `json:"image,omitempty"`
+	RevisionImages    map[string]string `json:"revisionImages,omitempty"`
+	Replicas          int               `json:"replicas"`
+	Containers        []string          `json:"containers,omitempty"`
+	ConfigHash        string            `json:"configHash,omitempty"`
+	RuntimeID         string            `json:"runtimeId,omitempty"`
+	Persistent        bool              `json:"persistent,omitempty"`
+	CurrentRevision   string            `json:"currentRevision,omitempty"`
+	PreviousRevision  string            `json:"previousRevision,omitempty"`
+	WarmingRevisions  []string          `json:"warmingRevisions,omitempty"`
+	DeployStrategy    string            `json:"deployStrategy,omitempty"`
+	ActiveContainers  []string          `json:"activeContainers,omitempty"`
+	WarmingContainers []string          `json:"warmingContainers,omitempty"`
 }
 
 func RefreshActualStateDocuments(ctx context.Context, dataDir string, node string) (int, error) {
@@ -208,6 +216,7 @@ func recomputePersistedAggregate(snapshot *persistedActualSnapshot) {
 				if existing.Image == "" {
 					existing.Image = service.Image
 				}
+				existing.RevisionImages = mergeRevisionImageMaps(existing.RevisionImages, service.RevisionImages)
 				if existing.ConfigHash == "" {
 					existing.ConfigHash = service.ConfigHash
 				} else if service.ConfigHash != "" && existing.ConfigHash != service.ConfigHash {
@@ -215,10 +224,20 @@ func recomputePersistedAggregate(snapshot *persistedActualSnapshot) {
 				}
 				existing.RuntimeID = mergeRuntimeID(existing.RuntimeID, service.RuntimeID)
 				existing.Persistent = existing.Persistent || service.Persistent
+				existing.CurrentRevision = mergeOptionalLabel(existing.CurrentRevision, service.CurrentRevision)
+				existing.PreviousRevision = mergeOptionalLabel(existing.PreviousRevision, service.PreviousRevision)
+				existing.WarmingRevisions = mergeRevisionLists(existing.WarmingRevisions, service.WarmingRevisions)
+				existing.DeployStrategy = mergeOptionalLabel(existing.DeployStrategy, service.DeployStrategy)
+				existing.ActiveContainers = append(existing.ActiveContainers, service.ActiveContainers...)
+				existing.WarmingContainers = append(existing.WarmingContainers, service.WarmingContainers...)
 				snapshot.Services[serviceName] = existing
 				continue
 			}
 			service.Containers = append([]string(nil), service.Containers...)
+			service.ActiveContainers = append([]string(nil), service.ActiveContainers...)
+			service.WarmingContainers = append([]string(nil), service.WarmingContainers...)
+			service.WarmingRevisions = append([]string(nil), service.WarmingRevisions...)
+			service.RevisionImages = cloneStringMap(service.RevisionImages)
 			snapshot.Services[serviceName] = service
 		}
 	}
@@ -234,16 +253,25 @@ func persistedServicesFromActual(services map[string]*ActualService) map[string]
 		if service == nil {
 			continue
 		}
-		containers := append([]string(nil), service.Containers...)
-		sort.Strings(containers)
+		containers := sortedCopy(service.Containers)
+		activeContainers := sortedCopy(service.ActiveContainers)
+		warmingContainers := sortedCopy(service.WarmingContainers)
+		warmingRevisions := sortedCopy(service.WarmingRevisions)
 		out[serviceName] = persistedActualService{
-			Name:       service.Name,
-			Image:      service.Image,
-			Replicas:   service.Replicas,
-			Containers: containers,
-			ConfigHash: service.ConfigHash,
-			RuntimeID:  service.RuntimeID,
-			Persistent: service.Persistent,
+			Name:              service.Name,
+			Image:             service.Image,
+			RevisionImages:    cloneStringMap(service.RevisionImages),
+			Replicas:          service.Replicas,
+			Containers:        containers,
+			ConfigHash:        service.ConfigHash,
+			RuntimeID:         service.RuntimeID,
+			Persistent:        service.Persistent,
+			CurrentRevision:   service.CurrentRevision,
+			PreviousRevision:  service.PreviousRevision,
+			WarmingRevisions:  warmingRevisions,
+			DeployStrategy:    service.DeployStrategy,
+			ActiveContainers:  activeContainers,
+			WarmingContainers: warmingContainers,
 		}
 	}
 	return out
@@ -256,8 +284,80 @@ func clonePersistedServices(services map[string]persistedActualService) map[stri
 	out := make(map[string]persistedActualService, len(services))
 	for name, service := range services {
 		service.Containers = append([]string(nil), service.Containers...)
+		service.ActiveContainers = append([]string(nil), service.ActiveContainers...)
+		service.WarmingContainers = append([]string(nil), service.WarmingContainers...)
+		service.WarmingRevisions = append([]string(nil), service.WarmingRevisions...)
+		service.RevisionImages = cloneStringMap(service.RevisionImages)
 		out[name] = service
 	}
+	return out
+}
+
+func mergeRevisionLists(existing []string, incoming []string) []string {
+	if len(incoming) == 0 {
+		return existing
+	}
+	out := append([]string(nil), existing...)
+	for _, revision := range incoming {
+		revision = strings.TrimSpace(revision)
+		if revision == "" {
+			continue
+		}
+		found := false
+		for _, current := range out {
+			if current == revision {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, revision)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func mergeRevisionImageMaps(existing map[string]string, incoming map[string]string) map[string]string {
+	if len(incoming) == 0 {
+		return existing
+	}
+	out := cloneStringMap(existing)
+	if out == nil {
+		out = make(map[string]string)
+	}
+	for revision, image := range incoming {
+		revision = strings.TrimSpace(revision)
+		image = strings.TrimSpace(image)
+		if revision == "" || image == "" {
+			continue
+		}
+		if current := out[revision]; current != "" && current != image {
+			out[revision] = ""
+			continue
+		}
+		out[revision] = image
+	}
+	return out
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func sortedCopy(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := append([]string(nil), values...)
+	sort.Strings(out)
 	return out
 }
 

@@ -30,7 +30,7 @@ func init() {
 	rootCmd.AddCommand(historyCmd)
 	historyCmd.Flags().StringVarP(&historyServer, "server", "s", "", "Server to view history from instead of the full mesh")
 	historyCmd.Flags().IntVarP(&historyLimit, "limit", "n", 10, "Number of deployments to show")
-	historyCmd.Flags().StringVar(&historyStatus, "status", "", "Filter by status (success, failed, rolled_back)")
+	historyCmd.Flags().StringVar(&historyStatus, "status", "", "Filter by status (success, warmed, failed, rolled_back)")
 }
 
 func runHistory(cmd *cobra.Command, args []string) error {
@@ -168,6 +168,8 @@ func formatStatus(status state.DeploymentStatus) string {
 	switch status {
 	case state.StatusSuccess:
 		return "✓ success"
+	case state.StatusWarmed:
+		return "◌ warmed"
 	case state.StatusFailed:
 		return "✗ failed"
 	case state.StatusRolledBack:

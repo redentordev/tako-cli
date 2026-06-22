@@ -25,12 +25,18 @@ import (
 )
 
 var (
-	deployService string
-	skipBuild     bool
-	deployYes     bool
-	allowDirty    bool
-	deployForce   bool
+	deployService         string
+	skipBuild             bool
+	deployYes             bool
+	allowDirty            bool
+	deployForce           bool
+	deploySkipDomainCheck bool
+	deployStrictDomains   bool
+	deployDomainTimeout   = 2 * time.Minute
+	deployDomainTargets   []string
 )
+
+var blueGreenGraceSleep = time.Sleep
 
 var deployCmd = &cobra.Command{
 	Use:          "deploy",
@@ -55,6 +61,10 @@ func init() {
 	deployCmd.Flags().BoolVarP(&deployYes, "yes", "y", false, "Skip confirmation prompts (non-interactive mode)")
 	deployCmd.Flags().BoolVar(&allowDirty, "allow-dirty", false, "Allow deploying with uncommitted local changes")
 	deployCmd.Flags().BoolVar(&deployForce, "force", false, "Reconcile selected services even when no config drift is detected")
+	deployCmd.Flags().BoolVar(&deploySkipDomainCheck, "skip-domain-check", false, "Skip post-deploy DNS/TLS checks for public domains")
+	deployCmd.Flags().BoolVar(&deployStrictDomains, "strict-domains", false, "Fail deploy if public domains are not DNS/TLS active after waiting")
+	deployCmd.Flags().DurationVar(&deployDomainTimeout, "domain-timeout", 2*time.Minute, "Wait up to this duration for public DNS/TLS readiness; 0 checks once")
+	deployCmd.Flags().StringArrayVar(&deployDomainTargets, "domain-target", nil, "Expected DNS target; repeat for custom edge/CNAME targets (defaults to proxy server hosts)")
 }
 
 func ensureDeployRuntimeSupported(cfg *config.Config) error {
@@ -428,7 +438,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if plan.IsEmpty() && !hasBuildServices(services) && !deployForce {
-		if err := deploy.ReconcileTakodProxy(services); err != nil {
+		activeRevisions := deployProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
+		if err := reconcileDeployProxy(deploy, services, activeRevisions); err != nil {
 			return fmt.Errorf("failed to reconcile proxy routes: %w", err)
 		}
 		fmt.Println("\n✓ All services are up-to-date. Proxy routes reconciled.")
@@ -539,12 +550,18 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 		imageRefs[serviceName] = fullImageName
 
-		if err := deploy.DeployServiceTakod(serviceName, &service, fullImageName); err != nil {
-			fmt.Printf("  ✗ takod deployment failed: %v\n", err)
+		deployErr := error(nil)
+		if shouldWarmManualPromotionService(serviceName, service, actualState) {
+			deployErr = deploy.DeployServiceTakodWarmOnly(serviceName, &service, fullImageName)
+		} else {
+			deployErr = deploy.DeployServiceTakod(serviceName, &service, fullImageName)
+		}
+		if deployErr != nil {
+			fmt.Printf("  ✗ takod deployment failed: %v\n", deployErr)
 			deploymentFailed = true
-			deploymentError = fmt.Errorf("takod deployment failed for %s: %w", serviceName, err)
+			deploymentError = fmt.Errorf("takod deployment failed for %s: %w", serviceName, deployErr)
 			deployment.Status = remotestate.StatusFailed
-			deployment.Error = err.Error()
+			deployment.Error = deployErr.Error()
 			break
 		}
 
@@ -575,17 +592,32 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		if deployService != "" {
 			proxyServices = cloneServiceMap(allServices)
 		}
-		if err := deploy.ReconcileTakodProxy(proxyServices); err != nil {
+		manualPending := manualPromotionPendingServices(servicesToDeploy, actualState)
+		activeRevisions := deployProxyActiveRevisions(cfg, envName, proxyServices, servicesToDeploy, imageRefs, actualState)
+		if err := reconcileDeployProxy(deploy, proxyServices, activeRevisions); err != nil {
 			fmt.Printf("  ✗ proxy reconciliation failed: %v\n", err)
 			deploymentFailed = true
 			deploymentError = fmt.Errorf("proxy reconciliation failed: %w", err)
 			deployment.Status = remotestate.StatusFailed
 			deployment.Error = err.Error()
+		} else if err := pruneTakodServiceRevisionsAfterGrace(deploy, proxyServices, deployedProxyActiveRevisions(servicesToDeploy, activeRevisions)); err != nil {
+			fmt.Printf("  ✗ stale revision cleanup failed: %v\n", err)
+			deploymentFailed = true
+			deploymentError = fmt.Errorf("stale revision cleanup failed: %w", err)
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
+		} else if len(manualPending) > 0 {
+			fmt.Printf("\n✓ Warming revision ready for manual promotion: %s\n", strings.Join(manualPending, ", "))
+			fmt.Printf("  Promote when ready with: tako promote %s -e %s\n", manualPending[0], envName)
 		}
 	}
 
 	if !deploymentFailed {
-		deployment.Status = remotestate.StatusSuccess
+		manualPending := manualPromotionPendingServices(servicesToDeploy, actualState)
+		deployment.Status = deploymentSuccessStatus(manualPending)
+		if len(manualPending) > 0 {
+			deployment.Message = fmt.Sprintf("warmed %s for manual promotion", strings.Join(manualPending, ", "))
+		}
 		deployment.Duration = time.Since(startTime)
 		if err := stateManager.SaveDeployment(deployment); err != nil {
 			return deployRemoteHistoryError(err)
@@ -644,7 +676,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				Environment:     envName,
 				Mode:            cfg.GetRuntimeMode(),
 				Servers:         append([]string(nil), serverNames...),
-				Status:          "success",
+				Status:          string(deployment.Status),
 				DurationSeconds: int(time.Since(startTime).Seconds()),
 				GitCommit:       commitInfo.Hash,
 				TriggeredBy:     remotestate.GetCurrentUser(),
@@ -762,10 +794,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	// Show service URLs (iterate through services with proxy configured)
 	hasPublicServices := false
-	servicesWithProxy := []struct {
-		name    string
-		domains []string
-	}{}
+	domainSpecs := collectConfiguredDomainSpecs(services, "")
 
 	for serviceName, service := range services {
 		if service.Proxy != nil && service.Proxy.GetPrimaryDomain() != "" {
@@ -778,33 +807,27 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			for _, domain := range allDomains {
 				fmt.Printf("  https://%s\n", domain)
 			}
-			servicesWithProxy = append(servicesWithProxy, struct {
-				name    string
-				domains []string
-			}{serviceName, allDomains})
 		}
 	}
 
-	// Monitor SSL certificate provisioning if there are public services
-	if hasPublicServices {
-		fmt.Printf("\n")
-		healthChecker := health.NewHealthChecker()
-
-		for _, svc := range servicesWithProxy {
-			for _, domain := range svc.domains {
-				// Monitor SSL provisioning (max 2 minutes wait)
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				if err := healthChecker.MonitorSSLProvisioning(ctx, svc.name, domain, 2*time.Minute); err != nil {
-					if verbose {
-						fmt.Printf("\n⚠️  SSL certificate not yet available for %s\n", domain)
-						fmt.Printf("   This is normal for first deployment. Certificate will be provisioned automatically.\n")
-						fmt.Printf("   Re-run tako deploy after DNS propagation to reconcile the service.\n")
-					}
-				}
-				cancel()
-				break // Only check first domain per service
+	if hasPublicServices && !deploySkipDomainCheck {
+		targets, err := domainExpectedTargets(cfg, envName, deployDomainTargets)
+		if err != nil {
+			if deployStrictDomains {
+				return fmt.Errorf("failed to resolve domain check targets: %w", err)
 			}
+			if verbose {
+				fmt.Printf("\n⚠️  Skipping public domain DNS/TLS checks: %v\n", err)
+			}
+		} else if _, err := monitorDomainStatuses(context.Background(), health.NewHealthChecker(), domainSpecs, domainStatusOptions{
+			Timeout:         deployDomainTimeout,
+			Strict:          deployStrictDomains,
+			ExpectedTargets: targets,
+		}); err != nil {
+			return err
 		}
+	} else if hasPublicServices && deploySkipDomainCheck && verbose {
+		fmt.Println("\nSkipping public domain DNS/TLS checks (--skip-domain-check).")
 	}
 
 	return nil
@@ -947,6 +970,167 @@ func servicesToDeployForPlan(plan *reconcile.ReconciliationPlan, services map[st
 		}
 	}
 	return selected
+}
+
+func deployProxyActiveRevisions(
+	cfg *config.Config,
+	envName string,
+	services map[string]config.ServiceConfig,
+	servicesToDeploy map[string]config.ServiceConfig,
+	imageRefs map[string]string,
+	actualState map[string]*reconcile.ActualService,
+) map[string]string {
+	if cfg == nil || len(services) == 0 {
+		return nil
+	}
+	revisions := make(map[string]string)
+	for serviceName, service := range services {
+		switch service.Deploy.Strategy {
+		case config.DeployStrategyRolling, config.DeployStrategyBlueGreen:
+		default:
+			continue
+		}
+
+		if _, deploying := servicesToDeploy[serviceName]; deploying {
+			if isManualBlueGreenService(service) {
+				if actual := actualState[serviceName]; actual != nil && actual.CurrentRevision != "" {
+					revisions[serviceName] = actual.CurrentRevision
+					continue
+				}
+			}
+			imageRef := imageRefs[serviceName]
+			if imageRef == "" {
+				imageRef = deployImageRef(cfg, envName, serviceName, service, "")
+			}
+			revisions[serviceName] = deployer.ServiceRevisionID(cfg.Project.Name, envName, serviceName, imageRef, service)
+			continue
+		}
+
+		if actual := actualState[serviceName]; actual != nil && actual.CurrentRevision != "" {
+			revisions[serviceName] = actual.CurrentRevision
+		}
+	}
+	if len(revisions) == 0 {
+		return nil
+	}
+	return revisions
+}
+
+func reconcileDeployProxy(deploy *deployer.Deployer, services map[string]config.ServiceConfig, activeRevisions map[string]string) error {
+	if len(activeRevisions) > 0 {
+		return deploy.ReconcileTakodProxyWithActiveRevisions(services, activeRevisions)
+	}
+	return deploy.ReconcileTakodProxy(services)
+}
+
+func deployedProxyActiveRevisions(servicesToDeploy map[string]config.ServiceConfig, activeRevisions map[string]string) map[string]string {
+	if len(servicesToDeploy) == 0 || len(activeRevisions) == 0 {
+		return nil
+	}
+	deployed := make(map[string]string)
+	for serviceName, service := range servicesToDeploy {
+		if isManualBlueGreenService(service) {
+			continue
+		}
+		if revision := activeRevisions[serviceName]; revision != "" {
+			deployed[serviceName] = revision
+		}
+	}
+	if len(deployed) == 0 {
+		return nil
+	}
+	return deployed
+}
+
+type takodRevisionPruner interface {
+	PruneTakodServiceRevisions(services map[string]config.ServiceConfig, keepRevisions map[string]string) error
+}
+
+func pruneTakodServiceRevisionsAfterGrace(pruner takodRevisionPruner, services map[string]config.ServiceConfig, keepRevisions map[string]string) error {
+	if len(keepRevisions) == 0 {
+		return nil
+	}
+	grace, names, err := blueGreenPruneGracePeriod(services, keepRevisions)
+	if err != nil {
+		return err
+	}
+	if grace > 0 {
+		fmt.Printf("\n-> Retaining previous blue-green revision for %s before pruning: %s\n", grace.Round(time.Millisecond), strings.Join(names, ", "))
+		blueGreenGraceSleep(grace)
+	}
+	return pruner.PruneTakodServiceRevisions(services, keepRevisions)
+}
+
+func blueGreenPruneGracePeriod(services map[string]config.ServiceConfig, keepRevisions map[string]string) (time.Duration, []string, error) {
+	if len(services) == 0 || len(keepRevisions) == 0 {
+		return 0, nil, nil
+	}
+	var maxGrace time.Duration
+	var names []string
+	for serviceName := range keepRevisions {
+		service, ok := services[serviceName]
+		if !ok || service.Deploy.Strategy != config.DeployStrategyBlueGreen || strings.TrimSpace(service.Deploy.GracePeriod) == "" {
+			continue
+		}
+		grace, err := time.ParseDuration(strings.TrimSpace(service.Deploy.GracePeriod))
+		if err != nil {
+			return 0, nil, fmt.Errorf("service %s: invalid deploy.gracePeriod %q: %w", serviceName, service.Deploy.GracePeriod, err)
+		}
+		if grace < 0 {
+			return 0, nil, fmt.Errorf("service %s: deploy.gracePeriod cannot be negative", serviceName)
+		}
+		if grace == 0 {
+			continue
+		}
+		names = append(names, serviceName)
+		if grace > maxGrace {
+			maxGrace = grace
+		}
+	}
+	if maxGrace == 0 {
+		return 0, nil, nil
+	}
+	sort.Strings(names)
+	return maxGrace, names, nil
+}
+
+func isManualBlueGreenService(service config.ServiceConfig) bool {
+	return service.Deploy.Strategy == config.DeployStrategyBlueGreen &&
+		service.Deploy.Promotion == config.DeployPromotionManual
+}
+
+func manualPromotionPendingServices(servicesToDeploy map[string]config.ServiceConfig, actualState map[string]*reconcile.ActualService) []string {
+	if len(servicesToDeploy) == 0 {
+		return nil
+	}
+	var pending []string
+	for serviceName, service := range servicesToDeploy {
+		if !isManualBlueGreenService(service) {
+			continue
+		}
+		actual := actualState[serviceName]
+		if actual == nil || actual.CurrentRevision == "" {
+			continue
+		}
+		pending = append(pending, serviceName)
+	}
+	sort.Strings(pending)
+	return pending
+}
+
+func shouldWarmManualPromotionService(serviceName string, service config.ServiceConfig, actualState map[string]*reconcile.ActualService) bool {
+	if !isManualBlueGreenService(service) {
+		return false
+	}
+	actual := actualState[serviceName]
+	return actual != nil && actual.CurrentRevision != ""
+}
+
+func deploymentSuccessStatus(manualPending []string) remotestate.DeploymentStatus {
+	if len(manualPending) > 0 {
+		return remotestate.StatusWarmed
+	}
+	return remotestate.StatusSuccess
 }
 
 func persistentServicesSkippedByForce(services map[string]config.ServiceConfig, selected map[string]config.ServiceConfig, force bool, explicitServiceTarget bool) []string {

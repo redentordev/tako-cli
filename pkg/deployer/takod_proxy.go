@@ -25,6 +25,7 @@ const (
 type meshUpstreamPortKey struct {
 	ServerName    string
 	ServiceName   string
+	Revision      string
 	Slot          int
 	ContainerPort int
 }
@@ -34,7 +35,23 @@ type takodProxyReconcileTarget struct {
 	Reconcile  bool
 }
 
+type takodProxyRenderOptions struct {
+	ActiveRevisions map[string]string
+}
+
 func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig) error {
+	return d.reconcileTakodProxyWithOptions(services, takodProxyRenderOptions{})
+}
+
+func (d *Deployer) ReconcileTakodProxyWithActiveRevisions(services map[string]config.ServiceConfig, activeRevisions map[string]string) error {
+	normalizedRevisions, err := normalizeTakodProxyActiveRevisions(services, activeRevisions)
+	if err != nil {
+		return err
+	}
+	return d.reconcileTakodProxyWithOptions(services, takodProxyRenderOptions{ActiveRevisions: normalizedRevisions})
+}
+
+func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.ServiceConfig, options takodProxyRenderOptions) error {
 	allServers, err := d.getTakodTargetServers()
 	if err != nil {
 		return fmt.Errorf("failed to get takod proxy cleanup targets: %w", err)
@@ -67,7 +84,7 @@ func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig)
 			return nil
 		}
 
-		dynamicConfig, hasPublicServices, err := d.renderTakodProxyDynamicConfigForNode(services, serverName)
+		dynamicConfig, hasPublicServices, err := d.renderTakodProxyDynamicConfigForNodeWithOptions(services, serverName, options)
 		if err != nil {
 			return err
 		}
@@ -86,6 +103,40 @@ func (d *Deployer) ReconcileTakodProxy(services map[string]config.ServiceConfig)
 		}
 		return nil
 	})
+}
+
+func normalizeTakodProxyActiveRevisions(services map[string]config.ServiceConfig, activeRevisions map[string]string) (map[string]string, error) {
+	if len(activeRevisions) == 0 {
+		return nil, nil
+	}
+	normalized := make(map[string]string, len(activeRevisions))
+	for serviceName, revision := range activeRevisions {
+		if _, ok := services[serviceName]; !ok {
+			return nil, fmt.Errorf("active revision references unknown service %q", serviceName)
+		}
+		revision = strings.TrimSpace(revision)
+		if revision == "" {
+			return nil, fmt.Errorf("active revision for service %s is required", serviceName)
+		}
+		if !isSafeTakodProxyRevision(revision) {
+			return nil, fmt.Errorf("active revision for service %s contains unsafe characters", serviceName)
+		}
+		normalized[serviceName] = revision
+	}
+	return normalized, nil
+}
+
+func isSafeTakodProxyRevision(value string) bool {
+	if len(value) == 0 || len(value) > 63 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func takodProxyReconcileTargets(allServers []string, proxyServers []string) []takodProxyReconcileTarget {
@@ -127,6 +178,10 @@ func (d *Deployer) getTakodProxyTargetServers() ([]string, error) {
 }
 
 func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]config.ServiceConfig, proxyServerName string) ([]byte, bool, error) {
+	return d.renderTakodProxyDynamicConfigForNodeWithOptions(services, proxyServerName, takodProxyRenderOptions{})
+}
+
+func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[string]config.ServiceConfig, proxyServerName string, options takodProxyRenderOptions) ([]byte, bool, error) {
 	if strings.TrimSpace(proxyServerName) == "" {
 		return nil, false, fmt.Errorf("proxy server name is required")
 	}
@@ -174,10 +229,11 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 			return nil, false, fmt.Errorf("service %s has invalid redirect domains: %w", serviceName, err)
 		}
 
+		revision := proxyActiveRevisionForService(options.ActiveRevisions, serviceName)
 		var upstreams []string
 		seenUpstreams := make(map[string]bool)
 		for _, assignment := range assignments {
-			url, err := d.takodProxyUpstreamURL(proxyServerName, assignment.ServerName, serviceName, assignment.Slot, service.Port)
+			url, err := d.takodProxyUpstreamURLForRevision(proxyServerName, assignment.ServerName, serviceName, revision, assignment.Slot, service.Port)
 			if err != nil {
 				return nil, false, err
 			}
@@ -190,6 +246,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 
 		route := takod.ProxyRoute{
 			Service:      serviceName,
+			Revision:     revision,
 			Domains:      domains,
 			RedirectFrom: redirects,
 			Upstreams:    upstreams,
@@ -197,7 +254,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 			Sticky:       service.LoadBalancer.Strategy == "sticky",
 		}
 		if dynamicDomainsEnabled {
-			askURL, err := d.dynamicDomainAskURL(services, proxyServerName, service.Proxy.DynamicDomains.Ask)
+			askURL, err := d.dynamicDomainAskURL(services, proxyServerName, service.Proxy.DynamicDomains.Ask, options.ActiveRevisions)
 			if err != nil {
 				return nil, false, fmt.Errorf("service %s dynamic domain ask: %w", serviceName, err)
 			}
@@ -217,6 +274,13 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNode(services map[string]conf
 	return data, true, nil
 }
 
+func proxyActiveRevisionForService(activeRevisions map[string]string, serviceName string) string {
+	if len(activeRevisions) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(activeRevisions[serviceName])
+}
+
 func sortTakodAssignments(assignments []takodAssignment) {
 	sort.Slice(assignments, func(i, j int) bool {
 		if assignments[i].ServerName == assignments[j].ServerName {
@@ -227,13 +291,21 @@ func sortTakodAssignments(assignments []takodAssignment) {
 }
 
 func (d *Deployer) takodProxyUpstreamURL(proxyServerName string, upstreamServerName string, serviceName string, slot int, servicePort int) (string, error) {
+	return d.takodProxyUpstreamURLForRevision(proxyServerName, upstreamServerName, serviceName, "", slot, servicePort)
+}
+
+func (d *Deployer) takodProxyUpstreamURLForRevision(proxyServerName string, upstreamServerName string, serviceName string, revision string, slot int, servicePort int) (string, error) {
 	if upstreamServerName == proxyServerName {
 		if servicePort <= 0 {
 			return "", fmt.Errorf("service %s has invalid local proxy port %d", serviceName, servicePort)
 		}
-		return "http://" + net.JoinHostPort(d.takodContainerAlias(serviceName, slot), strconv.Itoa(servicePort)), nil
+		alias := d.takodContainerAlias(serviceName, slot)
+		if revision != "" {
+			alias = runtimeid.RevisionContainerAlias(d.config.Project.Name, d.environment, serviceName, revision, slot)
+		}
+		return "http://" + net.JoinHostPort(alias, strconv.Itoa(servicePort)), nil
 	}
-	return d.meshUpstreamURL(upstreamServerName, serviceName, slot, servicePort)
+	return d.meshUpstreamURLForRevision(upstreamServerName, serviceName, revision, slot, servicePort)
 }
 
 func explicitProxyDomains(proxy *config.ProxyConfig) ([]string, error) {
@@ -293,7 +365,7 @@ func proxyRouteHealthCheckForService(service config.ServiceConfig) *takod.ProxyR
 	}
 }
 
-func (d *Deployer) dynamicDomainAskURL(services map[string]config.ServiceConfig, proxyServerName string, ask string) (string, error) {
+func (d *Deployer) dynamicDomainAskURL(services map[string]config.ServiceConfig, proxyServerName string, ask string, activeRevisions map[string]string) (string, error) {
 	askService, askPath, err := config.ParseDynamicDomainAsk(ask)
 	if err != nil {
 		return "", err
@@ -313,7 +385,7 @@ func (d *Deployer) dynamicDomainAskURL(services map[string]config.ServiceConfig,
 		return "", fmt.Errorf("service %q has no active replicas", askService)
 	}
 	sortTakodAssignments(assignments)
-	baseURL, err := d.takodDynamicAskBaseURL(proxyServerName, assignments[0], askService, service.Port)
+	baseURL, err := d.takodDynamicAskBaseURLForRevision(proxyServerName, assignments[0], askService, proxyActiveRevisionForService(activeRevisions, askService), service.Port)
 	if err != nil {
 		return "", err
 	}
@@ -321,13 +393,21 @@ func (d *Deployer) dynamicDomainAskURL(services map[string]config.ServiceConfig,
 }
 
 func (d *Deployer) takodDynamicAskBaseURL(proxyServerName string, assignment takodAssignment, serviceName string, servicePort int) (string, error) {
+	return d.takodDynamicAskBaseURLForRevision(proxyServerName, assignment, serviceName, "", servicePort)
+}
+
+func (d *Deployer) takodDynamicAskBaseURLForRevision(proxyServerName string, assignment takodAssignment, serviceName string, revision string, servicePort int) (string, error) {
 	if assignment.ServerName == proxyServerName {
 		if servicePort <= 0 {
 			return "", fmt.Errorf("service %s has invalid local proxy port %d", serviceName, servicePort)
 		}
-		return "http://" + net.JoinHostPort(serviceName, strconv.Itoa(servicePort)), nil
+		host := serviceName
+		if revision != "" {
+			host = runtimeid.RevisionContainerAlias(d.config.Project.Name, d.environment, serviceName, revision, assignment.Slot)
+		}
+		return "http://" + net.JoinHostPort(host, strconv.Itoa(servicePort)), nil
 	}
-	return d.meshUpstreamURL(assignment.ServerName, serviceName, assignment.Slot, servicePort)
+	return d.meshUpstreamURLForRevision(assignment.ServerName, serviceName, revision, assignment.Slot, servicePort)
 }
 
 func (d *Deployer) writeTakodProxyConfig(client *ssh.Client, data []byte) error {
@@ -350,11 +430,15 @@ func (d *Deployer) takodProxyConfigFileName() string {
 }
 
 func (d *Deployer) meshUpstreamURL(serverName string, serviceName string, slot int, servicePort int) (string, error) {
+	return d.meshUpstreamURLForRevision(serverName, serviceName, "", slot, servicePort)
+}
+
+func (d *Deployer) meshUpstreamURLForRevision(serverName string, serviceName string, revision string, slot int, servicePort int) (string, error) {
 	hostIP, err := d.meshHostIPForServer(serverName)
 	if err != nil {
 		return "", err
 	}
-	port, err := d.meshUpstreamPortForServer(serverName, serviceName, slot, servicePort)
+	port, err := d.meshUpstreamPortForServerRevision(serverName, serviceName, revision, slot, servicePort)
 	if err != nil {
 		return "", err
 	}
@@ -362,18 +446,22 @@ func (d *Deployer) meshUpstreamURL(serverName string, serviceName string, slot i
 }
 
 func (d *Deployer) meshUpstreamPortForServer(serverName string, serviceName string, slot int, containerPort int) (int, error) {
+	return d.meshUpstreamPortForServerRevision(serverName, serviceName, "", slot, containerPort)
+}
+
+func (d *Deployer) meshUpstreamPortForServerRevision(serverName string, serviceName string, revision string, slot int, containerPort int) (int, error) {
 	if d.meshPortAllocator != nil {
-		return d.meshPortAllocator(serverName, serviceName, slot, containerPort)
+		return d.meshPortAllocator(serverName, serviceName, revision, slot, containerPort)
 	}
 	client, err := d.getEnvironmentClient(serverName)
 	if err != nil {
 		return 0, err
 	}
-	return d.allocateMeshUpstreamPort(client, serverName, serviceName, slot, containerPort)
+	return d.allocateMeshUpstreamPort(client, serverName, serviceName, revision, slot, containerPort)
 }
 
-func (d *Deployer) allocateMeshUpstreamPort(client takodclient.RequestExecutor, serverName string, serviceName string, slot int, containerPort int) (int, error) {
-	key := meshUpstreamPortKey{ServerName: serverName, ServiceName: serviceName, Slot: slot, ContainerPort: containerPort}
+func (d *Deployer) allocateMeshUpstreamPort(client takodclient.RequestExecutor, serverName string, serviceName string, revision string, slot int, containerPort int) (int, error) {
+	key := meshUpstreamPortKey{ServerName: serverName, ServiceName: serviceName, Revision: revision, Slot: slot, ContainerPort: containerPort}
 	if port, ok := d.cachedMeshUpstreamPort(key); ok {
 		return port, nil
 	}
@@ -391,6 +479,7 @@ func (d *Deployer) allocateMeshUpstreamPort(client takodclient.RequestExecutor, 
 		Project:       d.config.Project.Name,
 		Environment:   d.environment,
 		Service:       serviceName,
+		Revision:      revision,
 		Slot:          slot,
 		HostIP:        hostIP,
 		ContainerPort: containerPort,
@@ -410,6 +499,13 @@ func (d *Deployer) allocateMeshUpstreamPort(client takodclient.RequestExecutor, 
 	}
 	d.storeMeshUpstreamPort(key, response.HostPort)
 	return response.HostPort, nil
+}
+
+func meshUpstreamRevisionForStrategy(revision string, strategy string) string {
+	if deployStrategyUsesRevisionScopedContainers(strategy) {
+		return strings.TrimSpace(revision)
+	}
+	return ""
 }
 
 func (d *Deployer) cachedMeshUpstreamPort(key meshUpstreamPortKey) (int, bool) {

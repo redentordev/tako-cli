@@ -936,6 +936,7 @@ func TestStateStatusUnreachableGuidanceNamesRecoveryPaths(t *testing.T) {
 		"Rebuilt same-name node: keep node-b in tako.yaml",
 		"tako setup --server node-b",
 		"tako upgrade servers --server node-b",
+		"tako state repair",
 		"tako deploy --yes",
 	} {
 		if !strings.Contains(output, want) {
@@ -958,6 +959,7 @@ func TestStateStatusUnreachableGuidanceHandlesMultipleNodes(t *testing.T) {
 		"Rebuilt same-name nodes: keep them in tako.yaml",
 		"tako setup --server <node>",
 		"tako upgrade servers --server <node>",
+		"tako state repair",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("guidance = %q, want %q", output, want)

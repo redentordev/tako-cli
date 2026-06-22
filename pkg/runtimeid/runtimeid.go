@@ -25,9 +25,19 @@ func ContainerName(project string, environment string, service string, slot int)
 	return compactName("_", dockerNameMax, []string{"tako", project, environment, service, slotText}, shortHash(project, environment, service, slotText))
 }
 
+func RevisionContainerName(project string, environment string, service string, revision string, slot int) string {
+	slotText := strconv.Itoa(slot)
+	return compactName("_", dockerNameMax, []string{"tako", project, environment, service, "r", revision, slotText}, shortHash(project, environment, service, revision, slotText))
+}
+
 func ContainerAlias(project string, environment string, service string, slot int) string {
 	slotText := strconv.Itoa(slot)
 	return compactName("-", dockerNetworkMax, []string{"tako", project, environment, service, slotText}, shortHash(project, environment, service, slotText))
+}
+
+func RevisionContainerAlias(project string, environment string, service string, revision string, slot int) string {
+	slotText := strconv.Itoa(slot)
+	return compactName("-", dockerNetworkMax, []string{"tako", project, environment, service, "r", revision, slotText}, shortHash(project, environment, service, revision, slotText))
 }
 
 func ExportNetworkName(project string, environment string, service string) string {
@@ -60,6 +70,51 @@ func VolumeProjectPrefix(project string) string {
 
 func VolumeEnvironmentPrefix(project string, environment string) string {
 	return strings.Join([]string{"tako", sanitizePart(project, "_"), sanitizePart(environment, "_")}, "_") + "_"
+}
+
+func BackupArchiveVolumeName(volume string) string {
+	volume = strings.TrimSpace(volume)
+	if volume == "" {
+		return ""
+	}
+	if IsBackupArchiveVolumeName(volume) {
+		return volume
+	}
+	trimmed := strings.Trim(volume, "/")
+	var out strings.Builder
+	lastWasSeparator := false
+	for _, r := range trimmed {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			out.WriteRune(r)
+			lastWasSeparator = false
+			continue
+		}
+		if !lastWasSeparator {
+			out.WriteRune('_')
+			lastWasSeparator = true
+		}
+	}
+	cleaned := strings.Trim(out.String(), "_")
+	if cleaned == "" {
+		return "volume"
+	}
+	return cleaned
+}
+
+func IsBackupArchiveVolumeName(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for i, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		if i > 0 && (r == '-' || r == '_' || r == '.') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func ProxyConfigFileName(project string, environment string) string {

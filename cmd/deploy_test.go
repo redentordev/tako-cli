@@ -11,6 +11,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/git"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
@@ -589,6 +590,234 @@ func TestDefaultDeployImageRefsUseCommitTagForBuildServices(t *testing.T) {
 	}
 }
 
+func TestDeployProxyActiveRevisionsUsesDeployedAndExistingRevisions(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo", Version: "1.0.0"},
+	}
+	services := map[string]config.ServiceConfig{
+		"web": {
+			Build: ".",
+			Deploy: config.DeployConfig{
+				Strategy: config.DeployStrategyRolling,
+			},
+		},
+		"api": {
+			Image: "api:stable",
+			Deploy: config.DeployConfig{
+				Strategy: config.DeployStrategyBlueGreen,
+			},
+		},
+		"worker": {
+			Image: "worker:stable",
+		},
+	}
+	servicesToDeploy := map[string]config.ServiceConfig{
+		"web": services["web"],
+	}
+	imageRefs := map[string]string{
+		"web": "demo/web:abcdef1234567890",
+	}
+	actualState := map[string]*reconcile.ActualService{
+		"web": {CurrentRevision: "rev-web-old"},
+		"api": {CurrentRevision: "rev-api-current"},
+	}
+
+	got := deployProxyActiveRevisions(cfg, "production", services, servicesToDeploy, imageRefs, actualState)
+	wantWeb := deployer.ServiceRevisionID(cfg.Project.Name, "production", "web", imageRefs["web"], services["web"])
+	if got["web"] != wantWeb {
+		t.Fatalf("web revision = %q, want deployed revision %q", got["web"], wantWeb)
+	}
+	if got["api"] != "rev-api-current" {
+		t.Fatalf("api revision = %q, want current actual revision", got["api"])
+	}
+	if _, ok := got["worker"]; ok {
+		t.Fatalf("recreate service should not get active revision: %#v", got)
+	}
+}
+
+func TestDeployProxyActiveRevisionsKeepsCurrentRevisionForManualBlueGreenDeploy(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo", Version: "1.0.0"},
+	}
+	services := map[string]config.ServiceConfig{
+		"web": {
+			Build: ".",
+			Deploy: config.DeployConfig{
+				Strategy:  config.DeployStrategyBlueGreen,
+				Promotion: config.DeployPromotionManual,
+			},
+		},
+	}
+	servicesToDeploy := map[string]config.ServiceConfig{
+		"web": services["web"],
+	}
+	imageRefs := map[string]string{
+		"web": "demo/web:abcdef1234567890",
+	}
+	actualState := map[string]*reconcile.ActualService{
+		"web": {CurrentRevision: "rev-web-blue"},
+	}
+
+	got := deployProxyActiveRevisions(cfg, "production", services, servicesToDeploy, imageRefs, actualState)
+	if got["web"] != "rev-web-blue" {
+		t.Fatalf("web revision = %q, want current blue revision", got["web"])
+	}
+}
+
+func TestDeployedProxyActiveRevisionsOnlyIncludesDeployedServices(t *testing.T) {
+	servicesToDeploy := map[string]config.ServiceConfig{
+		"web":    {Build: "."},
+		"worker": {Image: "worker:stable"},
+	}
+	activeRevisions := map[string]string{
+		"web": "rev-web-new",
+		"api": "rev-api-current",
+	}
+
+	got := deployedProxyActiveRevisions(servicesToDeploy, activeRevisions)
+	if got["web"] != "rev-web-new" {
+		t.Fatalf("web revision = %q, want deployed active revision", got["web"])
+	}
+	if _, ok := got["api"]; ok {
+		t.Fatalf("unchanged service should not be pruned: %#v", got)
+	}
+	if _, ok := got["worker"]; ok {
+		t.Fatalf("deployed service without active revision should not be pruned: %#v", got)
+	}
+	if len(got) != 1 {
+		t.Fatalf("deployed active revisions = %#v, want only web", got)
+	}
+}
+
+func TestDeployedProxyActiveRevisionsSkipsManualBlueGreenWarmDeploys(t *testing.T) {
+	servicesToDeploy := map[string]config.ServiceConfig{
+		"web": {
+			Build: ".",
+			Deploy: config.DeployConfig{
+				Strategy:  config.DeployStrategyBlueGreen,
+				Promotion: config.DeployPromotionManual,
+			},
+		},
+	}
+	activeRevisions := map[string]string{
+		"web": "rev-web-blue",
+	}
+
+	got := deployedProxyActiveRevisions(servicesToDeploy, activeRevisions)
+	if len(got) != 0 {
+		t.Fatalf("manual warm deploy should not prune revisions: %#v", got)
+	}
+}
+
+func TestBlueGreenPruneGracePeriodUsesMaxConfiguredGrace(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"web": {
+			Deploy: config.DeployConfig{
+				Strategy:    config.DeployStrategyBlueGreen,
+				GracePeriod: "2s",
+			},
+		},
+		"api": {
+			Deploy: config.DeployConfig{
+				Strategy:    config.DeployStrategyBlueGreen,
+				GracePeriod: "5s",
+			},
+		},
+		"worker": {
+			Deploy: config.DeployConfig{
+				Strategy:    config.DeployStrategyRolling,
+				GracePeriod: "10s",
+			},
+		},
+	}
+	keepRevisions := map[string]string{
+		"api":    "rev-api",
+		"web":    "rev-web",
+		"worker": "rev-worker",
+	}
+
+	grace, names, err := blueGreenPruneGracePeriod(services, keepRevisions)
+	if err != nil {
+		t.Fatalf("blueGreenPruneGracePeriod returned error: %v", err)
+	}
+	if grace != 5*time.Second {
+		t.Fatalf("grace = %s, want 5s", grace)
+	}
+	if strings.Join(names, ",") != "api,web" {
+		t.Fatalf("names = %#v, want api and web sorted", names)
+	}
+}
+
+func TestPruneTakodServiceRevisionsAfterGraceSleepsBeforePrune(t *testing.T) {
+	pruner := &fakeTakodRevisionPruner{}
+	services := map[string]config.ServiceConfig{
+		"web": {
+			Deploy: config.DeployConfig{
+				Strategy:    config.DeployStrategyBlueGreen,
+				GracePeriod: "250ms",
+			},
+		},
+	}
+	keepRevisions := map[string]string{"web": "rev-web"}
+	var slept time.Duration
+	originalSleep := blueGreenGraceSleep
+	blueGreenGraceSleep = func(duration time.Duration) {
+		slept = duration
+		if pruner.called {
+			t.Fatal("prune was called before grace sleep")
+		}
+	}
+	t.Cleanup(func() {
+		blueGreenGraceSleep = originalSleep
+	})
+
+	if err := pruneTakodServiceRevisionsAfterGrace(pruner, services, keepRevisions); err != nil {
+		t.Fatalf("pruneTakodServiceRevisionsAfterGrace returned error: %v", err)
+	}
+	if slept != 250*time.Millisecond {
+		t.Fatalf("slept = %s, want 250ms", slept)
+	}
+	if !pruner.called {
+		t.Fatal("expected prune to be called after grace sleep")
+	}
+	if pruner.keepRevisions["web"] != "rev-web" {
+		t.Fatalf("keep revisions = %#v, want web rev-web", pruner.keepRevisions)
+	}
+}
+
+func TestManualPromotionPendingServicesOnlyIncludesUpdatesWithCurrentBlue(t *testing.T) {
+	servicesToDeploy := map[string]config.ServiceConfig{
+		"web": {
+			Deploy: config.DeployConfig{
+				Strategy:  config.DeployStrategyBlueGreen,
+				Promotion: config.DeployPromotionManual,
+			},
+		},
+		"api": {
+			Deploy: config.DeployConfig{
+				Strategy: config.DeployStrategyBlueGreen,
+			},
+		},
+		"new": {
+			Deploy: config.DeployConfig{
+				Strategy:  config.DeployStrategyBlueGreen,
+				Promotion: config.DeployPromotionManual,
+			},
+		},
+	}
+	actualState := map[string]*reconcile.ActualService{
+		"web": {CurrentRevision: "rev-blue"},
+	}
+
+	got := manualPromotionPendingServices(servicesToDeploy, actualState)
+	if len(got) != 1 || got[0] != "web" {
+		t.Fatalf("pending manual services = %#v, want web only", got)
+	}
+	if status := deploymentSuccessStatus(got); status != remotestate.StatusWarmed {
+		t.Fatalf("status = %q, want warmed", status)
+	}
+}
+
 func TestServicesToDeployForPlanForceIncludesAllSelectedServices(t *testing.T) {
 	services := map[string]config.ServiceConfig{
 		"web": {Build: "."},
@@ -704,4 +933,18 @@ func (f *fakeDeployServiceRemover) RemoveServiceTakod(serviceName string) error 
 	}
 	f.removed = append(f.removed, serviceName)
 	return nil
+}
+
+type fakeTakodRevisionPruner struct {
+	called        bool
+	services      map[string]config.ServiceConfig
+	keepRevisions map[string]string
+	err           error
+}
+
+func (f *fakeTakodRevisionPruner) PruneTakodServiceRevisions(services map[string]config.ServiceConfig, keepRevisions map[string]string) error {
+	f.called = true
+	f.services = services
+	f.keepRevisions = keepRevisions
+	return f.err
 }

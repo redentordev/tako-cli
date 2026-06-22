@@ -25,7 +25,7 @@ func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
 	restore := useFakeActualDocker(t)
 	defer restore()
 	runtimeID := runtimeid.ServiceIdentity("demo", "production", "web")
-	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1|demo/web:1|container-a|hash-web|"+runtimeID+"|demo|production|web\n")
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "demo_production_web_1|demo/web:1|container-a|hash-web|"+runtimeID+"|demo|production|web|false|rev-web|recreate|1|true\n")
 
 	refreshed, err := RefreshActualStateDocuments(context.Background(), dataDir, "node-a")
 	if err != nil {
@@ -53,6 +53,12 @@ func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
 	if got := nodeSnapshot.Services["web"].RuntimeID; got != runtimeID {
 		t.Fatalf("node web runtime id = %q, want %q", got, runtimeID)
 	}
+	if got := nodeSnapshot.Services["web"].CurrentRevision; got != "rev-web" {
+		t.Fatalf("node web current revision = %q, want rev-web", got)
+	}
+	if got := nodeSnapshot.Services["web"].DeployStrategy; got != "recreate" {
+		t.Fatalf("node web deploy strategy = %q, want recreate", got)
+	}
 
 	aggregate := readActualSnapshotFixture(t, dataDir, StateDocumentRequest{
 		Project:     "demo",
@@ -67,6 +73,9 @@ func TestRefreshActualStateDocumentsWritesNodeAndAggregateState(t *testing.T) {
 	}
 	if got := aggregate.Services["web"].RuntimeID; got != runtimeID {
 		t.Fatalf("aggregate web runtime id = %q, want %q", got, runtimeID)
+	}
+	if got := aggregate.Services["web"].CurrentRevision; got != "rev-web" {
+		t.Fatalf("aggregate web current revision = %q, want rev-web", got)
 	}
 	if _, ok := aggregate.Nodes["node-a"]; !ok {
 		t.Fatalf("aggregate missing node-a snapshot: %#v", aggregate.Nodes)

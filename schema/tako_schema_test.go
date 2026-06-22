@@ -16,6 +16,7 @@ func TestTakoSchemaIsValidJSON(t *testing.T) {
 func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	schema := loadTakoSchema(t)
 
+	assertRequiredDoesNotContain(t, schema, []string{"runtime", "state", "mesh"})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "runtime", "properties", "mode"), []string{config.RuntimeModeTakod})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "runtime", "properties", "proxy"), []string{config.RuntimeProxyTako})
 	assertBoolConst(t, schemaPath(t, schema, "properties", "mesh", "properties", "enabled"), true)
@@ -23,7 +24,9 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	assertStringEnum(t, schemaPath(t, schema, "properties", "state", "properties", "deployConsistency"), []string{config.StateDeployConsistencyLease})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "state", "properties", "onUnreachableNode"), []string{config.StateUnreachableBlock})
 	assertBoolEnum(t, schemaPath(t, schema, "properties", "state", "properties", "remoteCacheEnabled"), []bool{true})
+	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "deploy", "properties", "strategy"), []string{config.DeployStrategyRecreate, config.DeployStrategyRolling, config.DeployStrategyBlueGreen})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "loadBalancer", "properties", "strategy"), []string{"round_robin", "sticky"})
+	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "backup", "properties", "storage", "properties", "provider"), []string{config.BackupStorageProviderS3, config.BackupStorageProviderR2, config.BackupStorageProviderS3Compatible})
 	schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "proxy", "properties", "dynamicDomains", "properties", "ask")
 }
 
@@ -81,6 +84,28 @@ func assertStringEnum(t *testing.T, field map[string]any, want []string) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("schema enum = %#v, want %#v", got, want)
+	}
+}
+
+func assertRequiredDoesNotContain(t *testing.T, schema map[string]any, names []string) {
+	t.Helper()
+
+	requiredRaw, ok := schema["required"].([]any)
+	if !ok {
+		t.Fatalf("schema missing top-level required list: %#v", schema["required"])
+	}
+	required := make(map[string]bool, len(requiredRaw))
+	for _, value := range requiredRaw {
+		name, ok := value.(string)
+		if !ok {
+			t.Fatalf("required contains non-string value %#v", value)
+		}
+		required[name] = true
+	}
+	for _, name := range names {
+		if required[name] {
+			t.Fatalf("schema required contains %q, but runtime internals must be optional", name)
+		}
 	}
 }
 

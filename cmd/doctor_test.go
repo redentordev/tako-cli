@@ -112,7 +112,7 @@ func TestConfigLoadFixDistinguishesParseAndValidationErrors(t *testing.T) {
 		{
 			name: "missing host",
 			err:  errString("invalid config: server production: host is required"),
-			want: "SERVER_HOST",
+			want: "host variable",
 		},
 		{
 			name: "missing env",

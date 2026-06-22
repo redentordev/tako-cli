@@ -2,6 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
@@ -171,7 +175,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 
 	// Perform rollback using state
 	serviceState := targetDeployment.Services[rollbackService]
-	if err := deploy.RollbackToState(rollbackService, &serviceState); err != nil {
+	if err := rollbackToTargetState(deploy, rollbackService, services[rollbackService], targetDeployment, serviceState, verbose); err != nil {
 		// Send failure notification
 		if notifier != nil {
 			notifier.Notify(notification.Event{
@@ -193,18 +197,17 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		return rollbackRemoteHistoryError(err)
 	}
 
-	desiredServices := cloneServiceMap(services)
-	rollbackConfig := desiredServices[rollbackService]
-	rollbackConfig.Image = serviceState.Image
-	rollbackConfig.Replicas = serviceState.Replicas
-	if serviceState.Port > 0 {
-		rollbackConfig.Port = serviceState.Port
+	actualStateForProxy, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, envServers, nil)
+	if err != nil {
+		return fmt.Errorf("rollback succeeded but failed to gather actual state before proxy reconciliation: %w", err)
 	}
-	desiredServices[rollbackService] = rollbackConfig
-	rollbackImageRefs := map[string]string{rollbackService: serviceState.Image}
+	desiredServices, rollbackImageRefs, activeRevisions := rollbackProxyInputs(cfg, envName, services, rollbackService, serviceState, actualStateForProxy)
 
-	if err := deploy.ReconcileTakodProxy(desiredServices); err != nil {
+	if err := reconcileDeployProxy(deploy, desiredServices, activeRevisions); err != nil {
 		return fmt.Errorf("rollback succeeded but failed to reconcile proxy: %w", err)
+	}
+	if err := deploy.PruneTakodServiceRevisions(desiredServices, deployedProxyActiveRevisions(map[string]config.ServiceConfig{rollbackService: desiredServices[rollbackService]}, activeRevisions)); err != nil {
+		return fmt.Errorf("rollback succeeded but failed to prune stale service revisions: %w", err)
 	}
 
 	postRollbackNodeActualState, err := reconcile.GatherActualStateByServer(sshPool, cfg, envName, envServers)
@@ -273,6 +276,114 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\n✓ Successfully rolled back to deployment %s!\n", targetDeployment.ID)
 
 	return nil
+}
+
+func rollbackToTargetState(
+	deploy *deployer.Deployer,
+	serviceName string,
+	service config.ServiceConfig,
+	targetDeployment *remotestate.DeploymentState,
+	serviceState remotestate.ServiceState,
+	verbose bool,
+) error {
+	if !rollbackNeedsTargetWorktree(service, targetDeployment) {
+		return deploy.RollbackToState(serviceName, &serviceState)
+	}
+
+	commit := rollbackTargetCommit(targetDeployment)
+	if verbose {
+		fmt.Printf("  Rebuilding rollback image from commit %s...\n", commit)
+	}
+	return withRollbackGitWorktree(commit, func(worktreeDir string) error {
+		return withWorkingDirectory(worktreeDir, func() error {
+			return deploy.RollbackToState(serviceName, &serviceState)
+		})
+	})
+}
+
+func rollbackNeedsTargetWorktree(service config.ServiceConfig, targetDeployment *remotestate.DeploymentState) bool {
+	return strings.TrimSpace(service.Build) != "" && rollbackTargetCommit(targetDeployment) != ""
+}
+
+func rollbackTargetCommit(targetDeployment *remotestate.DeploymentState) string {
+	if targetDeployment == nil {
+		return ""
+	}
+	if commit := strings.TrimSpace(targetDeployment.GitCommit); commit != "" {
+		return commit
+	}
+	return strings.TrimSpace(targetDeployment.GitCommitShort)
+}
+
+func withRollbackGitWorktree(commit string, fn func(worktreeDir string) error) error {
+	commit = strings.TrimSpace(commit)
+	if commit == "" {
+		return fmt.Errorf("rollback target deployment does not include a git commit for rebuild")
+	}
+
+	tempRoot, err := os.MkdirTemp("", "tako-rollback-worktree-*")
+	if err != nil {
+		return fmt.Errorf("failed to create rollback worktree directory: %w", err)
+	}
+	defer os.RemoveAll(tempRoot)
+
+	worktreeDir := filepath.Join(tempRoot, "source")
+	if err := runRollbackGit("worktree", "add", "--detach", "--quiet", worktreeDir, commit); err != nil {
+		return fmt.Errorf("failed to create rollback worktree for commit %s: %w", commit, err)
+	}
+	defer func() {
+		_ = runRollbackGit("worktree", "remove", "--force", worktreeDir)
+	}()
+
+	return fn(worktreeDir)
+}
+
+func withWorkingDirectory(dir string, fn func() error) error {
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to read current working directory: %w", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		return fmt.Errorf("failed to enter rollback worktree: %w", err)
+	}
+	defer os.Chdir(currentDir)
+	return fn()
+}
+
+func runRollbackGit(args ...string) error {
+	cmd := exec.Command("git", args...)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		return fmt.Errorf("git %s failed: %w", strings.Join(args, " "), err)
+	}
+	return fmt.Errorf("git %s failed: %w: %s", strings.Join(args, " "), err, message)
+}
+
+func rollbackProxyInputs(
+	cfg *config.Config,
+	envName string,
+	services map[string]config.ServiceConfig,
+	rollbackService string,
+	serviceState remotestate.ServiceState,
+	actualState map[string]*reconcile.ActualService,
+) (map[string]config.ServiceConfig, map[string]string, map[string]string) {
+	desiredServices := cloneServiceMap(services)
+	rollbackConfig := desiredServices[rollbackService]
+	rollbackConfig.Image = serviceState.Image
+	rollbackConfig.Replicas = serviceState.Replicas
+	if serviceState.Port > 0 {
+		rollbackConfig.Port = serviceState.Port
+	}
+	desiredServices[rollbackService] = rollbackConfig
+
+	rollbackServices := map[string]config.ServiceConfig{rollbackService: rollbackConfig}
+	rollbackImageRefs := map[string]string{rollbackService: serviceState.Image}
+	activeRevisions := deployProxyActiveRevisions(cfg, envName, desiredServices, rollbackServices, rollbackImageRefs, actualState)
+	return desiredServices, rollbackImageRefs, activeRevisions
 }
 
 func selectRollbackHistorySource(cfg *config.Config, envName string, requestedServer string) (stateHistoryCandidate, error) {

@@ -67,6 +67,30 @@ func TestStateManagerWithRequestTimeoutUsesCustomDeadline(t *testing.T) {
 	}
 }
 
+func TestReleaseLeaseUsesShortCleanupDeadline(t *testing.T) {
+	client := &fakeStateManagerExecutor{
+		output: `{"released":true}`,
+	}
+	manager := &StateManager{
+		client:      client,
+		socket:      "/run/tako/takod.sock",
+		projectName: "demo",
+		environment: "production",
+		server:      "node-a",
+	}
+
+	err := manager.ReleaseLease(&LeaseInfo{
+		ID:          "lease-1",
+		Environment: "production",
+	})
+	if err != nil {
+		t.Fatalf("ReleaseLease returned error: %v", err)
+	}
+	if !client.deadlineWithin(leaseReleaseTimeout) {
+		t.Fatalf("deadline = %s, want near %s", client.deadline.Sub(client.startedAt), leaseReleaseTimeout)
+	}
+}
+
 func TestPruneAndSortDeploymentsDropsNilSortsAndLimits(t *testing.T) {
 	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	got := pruneAndSortDeployments([]*DeploymentState{

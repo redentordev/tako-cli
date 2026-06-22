@@ -77,16 +77,18 @@ func TestSetupVersionWriteErrorFailsSuccessfulProvisioning(t *testing.T) {
 
 func TestSetupVersionManifestPreservesInstallMetadataOnRefresh(t *testing.T) {
 	installedAt := time.Date(2026, 6, 14, 1, 2, 3, 0, time.UTC)
-	lastUpgrade := time.Date(2026, 6, 15, 4, 5, 6, 0, time.UTC)
+	oldLastUpgrade := time.Date(2026, 6, 15, 4, 5, 6, 0, time.UTC)
+	refreshedAt := time.Date(2026, 6, 16, 7, 8, 9, 0, time.UTC)
 	existing := &setup.ServerVersion{
-		Version:     setup.CurrentVersion,
-		InstalledAt: installedAt,
-		LastUpgrade: lastUpgrade,
-		Components:  map[string]string{"docker": "29.1.3"},
-		Features:    []string{"docker"},
+		Version:        setup.CurrentVersion,
+		InstalledAt:    installedAt,
+		LastUpgrade:    oldLastUpgrade,
+		TakoCLIVersion: "v0.4.0",
+		Components:     map[string]string{"docker": "29.1.3"},
+		Features:       []string{"docker"},
 	}
 
-	got := setupVersionManifest(existing)
+	got := setupVersionManifestAt(existing, refreshedAt)
 	if got.Version != setup.CurrentVersion {
 		t.Fatalf("manifest version = %q, want %q", got.Version, setup.CurrentVersion)
 	}
@@ -96,8 +98,8 @@ func TestSetupVersionManifestPreservesInstallMetadataOnRefresh(t *testing.T) {
 	if !got.InstalledAt.Equal(installedAt) {
 		t.Fatalf("installed_at = %s, want %s", got.InstalledAt, installedAt)
 	}
-	if !got.LastUpgrade.Equal(lastUpgrade) {
-		t.Fatalf("last_upgrade = %s, want %s", got.LastUpgrade, lastUpgrade)
+	if !got.LastUpgrade.Equal(refreshedAt) {
+		t.Fatalf("last_upgrade = %s, want refreshed time %s", got.LastUpgrade, refreshedAt)
 	}
 	if got.Components["docker"] != "29.1.3" {
 		t.Fatalf("components = %#v, want docker version preserved", got.Components)
@@ -106,6 +108,21 @@ func TestSetupVersionManifestPreservesInstallMetadataOnRefresh(t *testing.T) {
 	got.Components["docker"] = "changed"
 	if existing.Components["docker"] != "29.1.3" {
 		t.Fatalf("setupVersionManifest should not mutate existing components, got %#v", existing.Components)
+	}
+}
+
+func TestSetupVersionManifestForFreshInstallUsesInstallTimeOnly(t *testing.T) {
+	installedAt := time.Date(2026, 6, 16, 7, 8, 9, 0, time.UTC)
+
+	got := setupVersionManifestAt(nil, installedAt)
+	if !got.InstalledAt.Equal(installedAt) {
+		t.Fatalf("installed_at = %s, want %s", got.InstalledAt, installedAt)
+	}
+	if !got.LastUpgrade.IsZero() {
+		t.Fatalf("last_upgrade = %s, want zero for fresh install", got.LastUpgrade)
+	}
+	if got.TakoCLIVersion != Version {
+		t.Fatalf("cli version = %q, want %q", got.TakoCLIVersion, Version)
 	}
 }
 

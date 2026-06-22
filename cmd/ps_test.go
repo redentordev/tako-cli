@@ -138,10 +138,14 @@ func TestGatherPSActualStateWithRunsConcurrentlyAndMergesInServerOrder(t *testin
 			<-release
 			return map[string]*takod.ActualService{
 				"web": {
-					Name:       "web",
-					Image:      "image-" + serverName,
-					Replicas:   1,
-					Containers: []string{serverName + "-web"},
+					Name:              "web",
+					Image:             "image-" + serverName,
+					Replicas:          1,
+					Containers:        []string{serverName + "-web"},
+					CurrentRevision:   "abcdef1234567890",
+					DeployStrategy:    "rolling",
+					ActiveContainers:  []string{serverName + "-web"},
+					WarmingContainers: []string{serverName + "-warm"},
 				},
 			}, nil
 		})
@@ -169,6 +173,42 @@ func TestGatherPSActualStateWithRunsConcurrentlyAndMergesInServerOrder(t *testin
 	wantContainers := []string{"node-a-web", "node-b-web", "node-c-web"}
 	if !slices.Equal(web.Containers, wantContainers) {
 		t.Fatalf("containers = %#v, want %#v", web.Containers, wantContainers)
+	}
+	if web.CurrentRevision != "abcdef1234567890" {
+		t.Fatalf("revision = %q, want merged revision", web.CurrentRevision)
+	}
+	wantWarming := []string{"node-a-warm", "node-b-warm", "node-c-warm"}
+	if !slices.Equal(web.WarmingContainers, wantWarming) {
+		t.Fatalf("warming containers = %#v, want %#v", web.WarmingContainers, wantWarming)
+	}
+}
+
+func TestBuildPSServiceInfoShowsRevisionAndWarmingCount(t *testing.T) {
+	servers := testPSActualStateServers([]string{"node-a"})
+	services := map[string]config.ServiceConfig{
+		"web": {Image: "nginx:alpine", Port: 80},
+	}
+	actual := map[string]*takod.ActualService{
+		"web": {
+			Name:              "web",
+			Replicas:          2,
+			CurrentRevision:   "abcdef1234567890",
+			WarmingContainers: []string{"green-1"},
+		},
+	}
+
+	infos, err := buildPSServiceInfo(servers, services, actual, []string{"node-a"}, []string{"node-a"}, "")
+	if err != nil {
+		t.Fatalf("buildPSServiceInfo returned error: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("service infos = %#v, want one", infos)
+	}
+	if infos[0].Revision != "abcdef123456" {
+		t.Fatalf("revision = %q, want shortened revision", infos[0].Revision)
+	}
+	if infos[0].Warming != 1 {
+		t.Fatalf("warming = %d, want 1", infos[0].Warming)
 	}
 }
 

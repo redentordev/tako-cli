@@ -155,14 +155,21 @@ func ComputePlan(
 
 // ActualService represents a currently running service
 type ActualService struct {
-	Name           string
-	Image          string
-	Replicas       int
-	Containers     []string
-	ConfigHash     string
-	RuntimeID      string
-	Persistent     bool
-	ConfigSnapshot *config.ServiceConfig // Last deployed config
+	Name              string
+	Image             string
+	RevisionImages    map[string]string
+	Replicas          int
+	Containers        []string
+	ConfigHash        string
+	RuntimeID         string
+	Persistent        bool
+	CurrentRevision   string
+	PreviousRevision  string
+	WarmingRevisions  []string
+	DeployStrategy    string
+	ActiveContainers  []string
+	WarmingContainers []string
+	ConfigSnapshot    *config.ServiceConfig // Last deployed config
 }
 
 // detectChanges compares config with actual service and returns reasons for update

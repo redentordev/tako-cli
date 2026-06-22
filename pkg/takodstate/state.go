@@ -86,13 +86,20 @@ type ActualNodeSnapshot struct {
 }
 
 type ActualService struct {
-	Name       string   `json:"name"`
-	Image      string   `json:"image,omitempty"`
-	Replicas   int      `json:"replicas"`
-	Containers []string `json:"containers,omitempty"`
-	ConfigHash string   `json:"configHash,omitempty"`
-	RuntimeID  string   `json:"runtimeId,omitempty"`
-	Persistent bool     `json:"persistent,omitempty"`
+	Name              string            `json:"name"`
+	Image             string            `json:"image,omitempty"`
+	RevisionImages    map[string]string `json:"revisionImages,omitempty"`
+	Replicas          int               `json:"replicas"`
+	Containers        []string          `json:"containers,omitempty"`
+	ConfigHash        string            `json:"configHash,omitempty"`
+	RuntimeID         string            `json:"runtimeId,omitempty"`
+	Persistent        bool              `json:"persistent,omitempty"`
+	CurrentRevision   string            `json:"currentRevision,omitempty"`
+	PreviousRevision  string            `json:"previousRevision,omitempty"`
+	WarmingRevisions  []string          `json:"warmingRevisions,omitempty"`
+	DeployStrategy    string            `json:"deployStrategy,omitempty"`
+	ActiveContainers  []string          `json:"activeContainers,omitempty"`
+	WarmingContainers []string          `json:"warmingContainers,omitempty"`
 }
 
 type Event struct {
@@ -225,15 +232,36 @@ func BuildNodeActualSnapshot(project string, environment string, node string, ac
 
 func actualServiceFromReconcile(service *reconcile.ActualService) ActualService {
 	containers := sortedCopy(service.Containers)
+	activeContainers := sortedCopy(service.ActiveContainers)
+	warmingContainers := sortedCopy(service.WarmingContainers)
+	warmingRevisions := sortedCopy(service.WarmingRevisions)
 	return ActualService{
-		Name:       service.Name,
-		Image:      service.Image,
-		Replicas:   service.Replicas,
-		Containers: containers,
-		ConfigHash: service.ConfigHash,
-		RuntimeID:  service.RuntimeID,
-		Persistent: service.Persistent,
+		Name:              service.Name,
+		Image:             service.Image,
+		RevisionImages:    cloneStringMap(service.RevisionImages),
+		Replicas:          service.Replicas,
+		Containers:        containers,
+		ConfigHash:        service.ConfigHash,
+		RuntimeID:         service.RuntimeID,
+		Persistent:        service.Persistent,
+		CurrentRevision:   service.CurrentRevision,
+		PreviousRevision:  service.PreviousRevision,
+		WarmingRevisions:  warmingRevisions,
+		DeployStrategy:    service.DeployStrategy,
+		ActiveContainers:  activeContainers,
+		WarmingContainers: warmingContainers,
 	}
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func NewEvent(project string, environment string, eventType string, revisionID string, message string, details map[string]string) Event {

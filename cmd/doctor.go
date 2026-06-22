@@ -803,7 +803,7 @@ func configLoadFix(err error) string {
 		return "Set the missing variable in .env or your shell"
 	}
 	if strings.Contains(msg, "host is required") {
-		return "Set SERVER_HOST in .env or replace ${SERVER_HOST} in config"
+		return "Set the configured host variable in .env or replace the host placeholder in config"
 	}
 	if strings.Contains(msg, "SSH key not found") {
 		return "Check sshKey path, create the key, or configure password via an environment variable"

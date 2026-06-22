@@ -127,6 +127,39 @@ func TestUniqueFields(t *testing.T) {
 	}
 }
 
+func TestCleanupDanglingImagesUsesDockerImagePrune(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	t.Setenv("TAKO_FAKE_DANGLING_IMAGE_IDS", "sha256:a\nsha256:b\nsha256:a\n")
+
+	removed, err := cleanupDanglingImages(context.Background())
+	if err != nil {
+		t.Fatalf("cleanupDanglingImages returned error: %v", err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+
+	entries := readCommandLog(t, logPath)
+	if !slices.Contains(entries, "docker image prune -f") {
+		t.Fatalf("docker log missing image prune call in %#v", entries)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry, "docker rmi ") {
+			t.Fatalf("cleanup should not remove dangling image IDs directly via %q; all entries %#v", entry, entries)
+		}
+	}
+}
+
+func TestCountDockerImagePruneEntriesIgnoresNoopOutput(t *testing.T) {
+	output := "Total reclaimed space: 0B\n"
+	if got := countDockerImagePruneEntries(output); got != 0 {
+		t.Fatalf("countDockerImagePruneEntries() = %d, want 0", got)
+	}
+}
+
 func TestCleanupUnusedProjectVolumesScopesToProjectEnvironment(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "commands.log")
 	restore := useFakeCommands(t, logPath)

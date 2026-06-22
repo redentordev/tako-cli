@@ -31,6 +31,7 @@ type ProxyRouteManifest struct {
 
 type ProxyRoute struct {
 	Service       string              `json:"service"`
+	Revision      string              `json:"revision,omitempty"`
 	Domains       []string            `json:"domains,omitempty"`
 	RedirectFrom  []string            `json:"redirectFrom,omitempty"`
 	Upstreams     []string            `json:"upstreams"`
@@ -87,6 +88,9 @@ func validateProxyRouteManifest(manifest *ProxyRouteManifest) error {
 		route := &manifest.Routes[i]
 		if !isSafeRuntimeName(route.Service) {
 			return fmt.Errorf("route %d: invalid service name", i)
+		}
+		if route.Revision != "" && !isSafeRuntimeName(route.Revision) {
+			return fmt.Errorf("route %s: invalid revision", route.Service)
 		}
 		if len(route.Domains) == 0 && route.DynamicDomain == nil {
 			return fmt.Errorf("route %s: at least one explicit or dynamic domain is required", route.Service)

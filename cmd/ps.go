@@ -20,6 +20,8 @@ type ServiceInfo struct {
 	Running  int
 	Status   string
 	Ports    string
+	Revision string
+	Warming  int
 	Internal bool
 }
 
@@ -192,17 +194,103 @@ func gatherPSActualStateWith(servers map[string]config.ServerConfig, serverNames
 				if existing.Image == "" {
 					existing.Image = service.Image
 				}
+				existing.RevisionImages = mergePSRevisionImageMaps(existing.RevisionImages, service.RevisionImages)
+				existing.CurrentRevision = mergePSOptionalLabel(existing.CurrentRevision, service.CurrentRevision)
+				existing.PreviousRevision = mergePSOptionalLabel(existing.PreviousRevision, service.PreviousRevision)
+				existing.WarmingRevisions = mergePSRevisionLists(existing.WarmingRevisions, service.WarmingRevisions)
+				existing.DeployStrategy = mergePSOptionalLabel(existing.DeployStrategy, service.DeployStrategy)
+				existing.ActiveContainers = append(existing.ActiveContainers, service.ActiveContainers...)
+				existing.WarmingContainers = append(existing.WarmingContainers, service.WarmingContainers...)
 				continue
 			}
 			merged[serviceName] = &takod.ActualService{
-				Name:       service.Name,
-				Image:      service.Image,
-				Replicas:   service.Replicas,
-				Containers: append([]string(nil), service.Containers...),
+				Name:              service.Name,
+				Image:             service.Image,
+				RevisionImages:    clonePSStringMap(service.RevisionImages),
+				Replicas:          service.Replicas,
+				Containers:        append([]string(nil), service.Containers...),
+				CurrentRevision:   service.CurrentRevision,
+				PreviousRevision:  service.PreviousRevision,
+				WarmingRevisions:  append([]string(nil), service.WarmingRevisions...),
+				DeployStrategy:    service.DeployStrategy,
+				ActiveContainers:  append([]string(nil), service.ActiveContainers...),
+				WarmingContainers: append([]string(nil), service.WarmingContainers...),
 			}
 		}
 	}
 	return merged, nil
+}
+
+func mergePSOptionalLabel(existing string, incoming string) string {
+	if incoming == "" {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
+	if existing == incoming {
+		return existing
+	}
+	return ""
+}
+
+func mergePSRevisionLists(existing []string, incoming []string) []string {
+	if len(incoming) == 0 {
+		return existing
+	}
+	out := append([]string(nil), existing...)
+	for _, revision := range incoming {
+		revision = strings.TrimSpace(revision)
+		if revision == "" {
+			continue
+		}
+		found := false
+		for _, current := range out {
+			if current == revision {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, revision)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func mergePSRevisionImageMaps(existing map[string]string, incoming map[string]string) map[string]string {
+	if len(incoming) == 0 {
+		return existing
+	}
+	out := clonePSStringMap(existing)
+	if out == nil {
+		out = make(map[string]string)
+	}
+	for revision, image := range incoming {
+		revision = strings.TrimSpace(revision)
+		image = strings.TrimSpace(image)
+		if revision == "" || image == "" {
+			continue
+		}
+		if current := out[revision]; current != "" && current != image {
+			out[revision] = ""
+			continue
+		}
+		out[revision] = image
+	}
+	return out
+}
+
+func clonePSStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func buildPSServiceInfo(
@@ -233,6 +321,10 @@ func buildPSServiceInfo(
 			Desired:  desired,
 			Running:  running,
 			Internal: serviceConfig.IsInternal() || serviceConfig.IsWorker(),
+		}
+		if actual, ok := actualServices[serviceName]; ok && actual != nil {
+			info.Revision = shortRevision(actual.CurrentRevision)
+			info.Warming = len(actual.WarmingContainers)
 		}
 		info.Status = serviceStatus(running, desired)
 		info.Ports = servicePorts(serviceConfig, info.Internal, running)
@@ -308,8 +400,8 @@ func servicePorts(service config.ServiceConfig, internal bool, running int) stri
 
 func displayServices(services []ServiceInfo) {
 	fmt.Println()
-	fmt.Printf("%-15s %-12s %-10s %-15s\n", "SERVICE", "REPLICAS", "STATUS", "PORTS")
-	fmt.Println(strings.Repeat("─", 60))
+	fmt.Printf("%-15s %-12s %-10s %-15s %-14s %-8s\n", "SERVICE", "REPLICAS", "STATUS", "PORTS", "REVISION", "WARMING")
+	fmt.Println(strings.Repeat("─", 90))
 
 	for _, svc := range services {
 		replicaStr := fmt.Sprintf("%d/%d", svc.Running, svc.Desired)
@@ -329,13 +421,31 @@ func displayServices(services []ServiceInfo) {
 			statusStr = "↻ scaling"
 		}
 
-		fmt.Printf("%-15s %-12s %-10s %-15s\n",
+		revision := svc.Revision
+		if revision == "" {
+			revision = "-"
+		}
+		warming := "-"
+		if svc.Warming > 0 {
+			warming = fmt.Sprintf("%d", svc.Warming)
+		}
+
+		fmt.Printf("%-15s %-12s %-10s %-15s %-14s %-8s\n",
 			svc.Name,
 			replicaStr,
 			statusStr,
 			svc.Ports,
+			revision,
+			warming,
 		)
 	}
 
 	fmt.Println()
+}
+
+func shortRevision(revision string) string {
+	if len(revision) <= 12 {
+		return revision
+	}
+	return revision[:12]
 }

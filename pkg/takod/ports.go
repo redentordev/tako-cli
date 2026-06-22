@@ -26,6 +26,7 @@ type PortAllocationRequest struct {
 	Project       string `json:"project"`
 	Environment   string `json:"environment"`
 	Service       string `json:"service"`
+	Revision      string `json:"revision,omitempty"`
 	Slot          int    `json:"slot"`
 	HostIP        string `json:"hostIp"`
 	ContainerPort int    `json:"containerPort"`
@@ -39,6 +40,7 @@ type PortAllocationResponse struct {
 	Project       string `json:"project"`
 	Environment   string `json:"environment"`
 	Service       string `json:"service"`
+	Revision      string `json:"revision,omitempty"`
 	Slot          int    `json:"slot"`
 	HostIP        string `json:"hostIp"`
 	HostPort      int    `json:"hostPort"`
@@ -57,6 +59,7 @@ type portAllocationEntry struct {
 	Project       string    `json:"project"`
 	Environment   string    `json:"environment"`
 	Service       string    `json:"service"`
+	Revision      string    `json:"revision,omitempty"`
 	Slot          int       `json:"slot"`
 	HostIP        string    `json:"hostIp"`
 	HostPort      int       `json:"hostPort"`
@@ -73,6 +76,7 @@ type dockerHostPortUse struct {
 	Project     string
 	Environment string
 	Service     string
+	Revision    string
 }
 
 func AllocatePort(ctx context.Context, dataDir string, req PortAllocationRequest) (*PortAllocationResponse, error) {
@@ -95,7 +99,7 @@ func AllocatePort(ctx context.Context, dataDir string, req PortAllocationRequest
 		return nil, err
 	}
 
-	key := portAllocationKey(req.Kind, req.Project, req.Environment, req.Service, req.Slot)
+	key := portAllocationKey(req.Kind, req.Project, req.Environment, req.Service, req.Revision, req.Slot)
 	usedPorts, err := usedDockerHostPorts(ctx)
 	if err != nil {
 		return nil, err
@@ -130,6 +134,7 @@ func AllocatePort(ctx context.Context, dataDir string, req PortAllocationRequest
 		Project:       req.Project,
 		Environment:   req.Environment,
 		Service:       req.Service,
+		Revision:      req.Revision,
 		Slot:          req.Slot,
 		HostIP:        req.HostIP,
 		HostPort:      hostPort,
@@ -147,6 +152,14 @@ func AllocatePort(ctx context.Context, dataDir string, req PortAllocationRequest
 }
 
 func ReleaseServicePortAllocations(ctx context.Context, dataDir string, project string, environment string, service string) error {
+	return releaseServicePortAllocations(ctx, dataDir, project, environment, service, "")
+}
+
+func ReleaseServicePortAllocationsExceptRevision(ctx context.Context, dataDir string, project string, environment string, service string, keepRevision string) error {
+	return releaseServicePortAllocations(ctx, dataDir, project, environment, service, keepRevision)
+}
+
+func releaseServicePortAllocations(ctx context.Context, dataDir string, project string, environment string, service string, keepRevision string) error {
 	if !isSafeProjectName(project) {
 		return fmt.Errorf("invalid project name")
 	}
@@ -155,6 +168,9 @@ func ReleaseServicePortAllocations(ctx context.Context, dataDir string, project 
 	}
 	if !isSafeServiceName(service) {
 		return fmt.Errorf("invalid service name")
+	}
+	if keepRevision != "" && !isSafeRuntimeName(keepRevision) {
+		return fmt.Errorf("invalid keep revision")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -171,6 +187,9 @@ func ReleaseServicePortAllocations(ctx context.Context, dataDir string, project 
 	changed := false
 	for key, allocation := range registry.Allocations {
 		if allocation.Project == project && allocation.Environment == environment && allocation.Service == service {
+			if keepRevision != "" && allocation.Revision == keepRevision {
+				continue
+			}
 			delete(registry.Allocations, key)
 			changed = true
 		}
@@ -227,6 +246,9 @@ func validatePortAllocationRequest(req PortAllocationRequest) error {
 	}
 	if !isSafeServiceName(req.Service) {
 		return fmt.Errorf("invalid service name")
+	}
+	if req.Revision != "" && !isSafeRuntimeName(req.Revision) {
+		return fmt.Errorf("invalid revision")
 	}
 	if req.Slot <= 0 || req.Slot > 10000 {
 		return fmt.Errorf("slot must be between 1 and 10000")
@@ -303,12 +325,13 @@ func dockerHostPortUseFromLabels(labels map[string]string) dockerHostPortUse {
 		Project:     labels["tako.project"],
 		Environment: labels["tako.environment"],
 		Service:     labels["tako.service"],
+		Revision:    labels["tako.revision"],
 	}
 }
 
 func hostPortUsedByOtherService(uses []dockerHostPortUse, req PortAllocationRequest) bool {
 	for _, use := range uses {
-		if use.Project == req.Project && use.Environment == req.Environment && use.Service == req.Service {
+		if use.Project == req.Project && use.Environment == req.Environment && use.Service == req.Service && (req.Revision == "" || use.Revision == req.Revision) {
 			continue
 		}
 		return true
@@ -387,7 +410,10 @@ func portAllocationRegistryPath(dataDir string) string {
 	return filepath.Join(dataDir, "ports", "allocations.json")
 }
 
-func portAllocationKey(kind string, project string, environment string, service string, slot int) string {
+func portAllocationKey(kind string, project string, environment string, service string, revision string, slot int) string {
+	if revision != "" {
+		return fmt.Sprintf("%s/%s/%s/%s/%s/%d", kind, project, environment, service, revision, slot)
+	}
 	return fmt.Sprintf("%s/%s/%s/%s/%d", kind, project, environment, service, slot)
 }
 
@@ -397,6 +423,7 @@ func portAllocationResponse(key string, allocation portAllocationEntry) *PortAll
 		Project:       allocation.Project,
 		Environment:   allocation.Environment,
 		Service:       allocation.Service,
+		Revision:      allocation.Revision,
 		Slot:          allocation.Slot,
 		HostIP:        allocation.HostIP,
 		HostPort:      allocation.HostPort,

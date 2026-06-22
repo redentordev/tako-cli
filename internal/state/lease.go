@@ -11,6 +11,7 @@ import (
 )
 
 const DefaultLeaseTTL = 30 * time.Minute
+const leaseReleaseTimeout = 10 * time.Second
 
 // LeaseInfo describes a remote takod deployment lease.
 type LeaseInfo struct {
@@ -93,7 +94,7 @@ func (s *StateManager) ReleaseLease(lease *LeaseInfo) error {
 		Environment: lease.Environment,
 		ID:          lease.ID,
 	}
-	_, err := s.requestJSON("DELETE", "/v1/lease", request)
+	_, err := s.requestJSONWithTimeout("DELETE", "/v1/lease", request, leaseReleaseTimeout)
 	return err
 }
 

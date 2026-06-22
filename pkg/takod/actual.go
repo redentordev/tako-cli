@@ -18,13 +18,20 @@ type ActualStateResponse struct {
 }
 
 type ActualService struct {
-	Name       string   `json:"name"`
-	Image      string   `json:"image,omitempty"`
-	Replicas   int      `json:"replicas"`
-	Containers []string `json:"containers,omitempty"`
-	ConfigHash string   `json:"configHash,omitempty"`
-	RuntimeID  string   `json:"runtimeId,omitempty"`
-	Persistent bool     `json:"persistent,omitempty"`
+	Name              string            `json:"name"`
+	Image             string            `json:"image,omitempty"`
+	RevisionImages    map[string]string `json:"revisionImages,omitempty"`
+	Replicas          int               `json:"replicas"`
+	Containers        []string          `json:"containers,omitempty"`
+	ConfigHash        string            `json:"configHash,omitempty"`
+	RuntimeID         string            `json:"runtimeId,omitempty"`
+	Persistent        bool              `json:"persistent,omitempty"`
+	CurrentRevision   string            `json:"currentRevision,omitempty"`
+	PreviousRevision  string            `json:"previousRevision,omitempty"`
+	WarmingRevisions  []string          `json:"warmingRevisions,omitempty"`
+	DeployStrategy    string            `json:"deployStrategy,omitempty"`
+	ActiveContainers  []string          `json:"activeContainers,omitempty"`
+	WarmingContainers []string          `json:"warmingContainers,omitempty"`
 }
 
 func GatherActualState(ctx context.Context, project string, environment string) (*ActualStateResponse, error) {
@@ -42,7 +49,7 @@ func GatherActualState(ctx context.Context, project string, environment string) 
 	}
 
 	format := fmt.Sprintf(
-		`{{.Names}}|{{.Image}}|{{.ID}}|{{.Label "tako.configHash"}}|{{.Label %q}}|{{.Label "tako.project"}}|{{.Label "tako.environment"}}|{{.Label "tako.service"}}|{{.Label "tako.persistent"}}`,
+		`{{.Names}}|{{.Image}}|{{.ID}}|{{.Label "tako.configHash"}}|{{.Label %q}}|{{.Label "tako.project"}}|{{.Label "tako.environment"}}|{{.Label "tako.service"}}|{{.Label "tako.persistent"}}|{{.Label "tako.revision"}}|{{.Label "tako.deployStrategy"}}|{{.Label "tako.slot"}}|{{.Label "tako.active"}}`,
 		runtimeid.ServiceIdentityLabel,
 	)
 	cmd := actualDockerCommandContext(ctx, "docker", "ps", "--format", format)
@@ -92,6 +99,18 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 		if len(parts) >= 9 {
 			persistent = strings.EqualFold(strings.TrimSpace(parts[8]), "true")
 		}
+		revision := ""
+		if len(parts) >= 10 {
+			revision = strings.TrimSpace(parts[9])
+		}
+		strategy := ""
+		if len(parts) >= 11 {
+			strategy = strings.TrimSpace(parts[10])
+		}
+		active := true
+		if len(parts) >= 13 && strings.TrimSpace(parts[12]) != "" {
+			active = strings.EqualFold(strings.TrimSpace(parts[12]), "true")
+		}
 		if serviceName == "" {
 			continue
 		}
@@ -107,23 +126,104 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 			} else if configHash != "" && existing.ConfigHash != configHash {
 				existing.ConfigHash = ""
 			}
+			existing.RevisionImages = mergeRevisionImage(existing.RevisionImages, revision, image)
 			existing.RuntimeID = mergeRuntimeID(existing.RuntimeID, runtimeID)
 			existing.Persistent = existing.Persistent || persistent
+			existing.DeployStrategy = mergeOptionalLabel(existing.DeployStrategy, strategy)
+			if active {
+				existing.ActiveContainers = append(existing.ActiveContainers, containerID)
+				existing.CurrentRevision = mergeOptionalLabel(existing.CurrentRevision, revision)
+			} else {
+				existing.WarmingContainers = append(existing.WarmingContainers, containerID)
+				existing.PreviousRevision = mergeOptionalLabel(existing.PreviousRevision, revision)
+				existing.WarmingRevisions = appendUniqueRevision(existing.WarmingRevisions, revision)
+			}
 			continue
 		}
 
-		response.Services[serviceName] = &ActualService{
-			Name:       serviceName,
-			Image:      image,
-			Replicas:   1,
-			Containers: []string{containerID},
-			ConfigHash: configHash,
-			RuntimeID:  runtimeID,
-			Persistent: persistent,
+		actual := &ActualService{
+			Name:           serviceName,
+			Image:          image,
+			RevisionImages: mergeRevisionImage(nil, revision, image),
+			Replicas:       1,
+			Containers:     []string{containerID},
+			ConfigHash:     configHash,
+			RuntimeID:      runtimeID,
+			Persistent:     persistent,
 		}
+		actual.DeployStrategy = strategy
+		if active {
+			actual.ActiveContainers = []string{containerID}
+			actual.CurrentRevision = revision
+		} else {
+			actual.WarmingContainers = []string{containerID}
+			actual.PreviousRevision = revision
+			actual.WarmingRevisions = appendUniqueRevision(actual.WarmingRevisions, revision)
+		}
+		response.Services[serviceName] = actual
 	}
 
+	finalizeActualServiceRevisionStates(response.Services)
 	return response
+}
+
+func finalizeActualServiceRevisionStates(services map[string]*ActualService) {
+	for _, service := range services {
+		if service == nil || len(service.ActiveContainers) > 0 || service.CurrentRevision != "" {
+			continue
+		}
+		if len(service.WarmingRevisions) != 1 {
+			continue
+		}
+		service.CurrentRevision = service.WarmingRevisions[0]
+		service.PreviousRevision = ""
+		service.ActiveContainers = append([]string(nil), service.WarmingContainers...)
+		service.WarmingContainers = nil
+		service.WarmingRevisions = nil
+	}
+}
+
+func appendUniqueRevision(revisions []string, revision string) []string {
+	revision = strings.TrimSpace(revision)
+	if revision == "" {
+		return revisions
+	}
+	for _, existing := range revisions {
+		if existing == revision {
+			return revisions
+		}
+	}
+	return append(revisions, revision)
+}
+
+func mergeRevisionImage(images map[string]string, revision string, image string) map[string]string {
+	revision = strings.TrimSpace(revision)
+	image = strings.TrimSpace(image)
+	if revision == "" || image == "" {
+		return images
+	}
+	if images == nil {
+		images = make(map[string]string)
+	}
+	if existing := images[revision]; existing != "" && existing != image {
+		images[revision] = ""
+		return images
+	}
+	images[revision] = image
+	return images
+}
+
+func mergeOptionalLabel(existing string, incoming string) string {
+	if incoming == "" {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
+	if existing == incoming {
+		return existing
+	}
+	return ""
 }
 
 func mergeRuntimeID(existing string, incoming string) string {

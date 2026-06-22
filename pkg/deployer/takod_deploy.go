@@ -1,11 +1,14 @@
 package deployer
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -69,6 +72,12 @@ type takodMeshDesiredState struct {
 	ListenPort  int             `json:"listenPort"`
 	Peers       []takodMeshPeer `json:"peers"`
 	UpdatedAt   time.Time       `json:"updatedAt"`
+}
+
+type takodServiceDeployOptions struct {
+	BuildImage bool
+	PullImage  bool
+	WarmOnly   bool
 }
 
 // SetupTakodRuntime prepares every selected environment server for the takod runtime.
@@ -169,6 +178,46 @@ func (d *Deployer) shouldInstallTakodRelease(client takodclient.RequestExecutor)
 // DeployServiceTakod reconciles one service through standalone Docker containers
 // on the nodes chosen by takod placement.
 func (d *Deployer) DeployServiceTakod(serviceName string, service *config.ServiceConfig, imageRef string) error {
+	return d.deployServiceTakod(serviceName, service, imageRef, takodDeployOptionsForService(service, d.skipBuild))
+}
+
+func (d *Deployer) DeployServiceTakodWarmOnly(serviceName string, service *config.ServiceConfig, imageRef string) error {
+	options := takodDeployOptionsForService(service, d.skipBuild)
+	options.WarmOnly = true
+	return d.deployServiceTakod(serviceName, service, imageRef, options)
+}
+
+func (d *Deployer) ActivateTakodServiceRevision(serviceName string, service *config.ServiceConfig, imageRef string) error {
+	return d.deployServiceTakod(serviceName, service, imageRef, takodServiceDeployOptions{})
+}
+
+func takodDeployOptionsForService(service *config.ServiceConfig, skipBuild bool) takodServiceDeployOptions {
+	if service == nil {
+		return takodServiceDeployOptions{}
+	}
+	return takodServiceDeployOptions{
+		BuildImage: service.Build != "" && !skipBuild,
+		PullImage:  service.Image != "",
+	}
+}
+
+func takodRollbackDeployOptionsForService(service *config.ServiceConfig) takodServiceDeployOptions {
+	if service == nil {
+		return takodServiceDeployOptions{}
+	}
+	if service.Build != "" {
+		return takodServiceDeployOptions{
+			BuildImage: true,
+			PullImage:  false,
+		}
+	}
+	return takodServiceDeployOptions{
+		BuildImage: false,
+		PullImage:  service.Image != "",
+	}
+}
+
+func (d *Deployer) deployServiceTakod(serviceName string, service *config.ServiceConfig, imageRef string, options takodServiceDeployOptions) error {
 	if d.sshPool == nil {
 		return fmt.Errorf("ssh pool not initialized")
 	}
@@ -179,7 +228,7 @@ func (d *Deployer) DeployServiceTakod(serviceName string, service *config.Servic
 	}
 
 	assignmentServers := uniqueAssignmentServers(assignments)
-	if service.Build != "" && !d.skipBuild {
+	if options.BuildImage {
 		if err := d.buildImageOnTakodNodes(serviceName, service, imageRef, assignmentServers); err != nil {
 			return err
 		}
@@ -196,7 +245,7 @@ func (d *Deployer) DeployServiceTakod(serviceName string, service *config.Servic
 		if err != nil {
 			return err
 		}
-		if err := d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, slots); err != nil {
+		if err := d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, slots, options.PullImage, options.WarmOnly); err != nil {
 			return err
 		}
 		return nil
@@ -220,14 +269,42 @@ func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.Se
 		if d.verbose {
 			fmt.Printf("  [%s] Building %s\n", serverName, imageRef)
 		}
+		existsStart := time.Now()
+		exists, existsErr := d.imageExistsOnTakodNode(serverName, imageRef)
+		if existsErr == nil && exists {
+			if d.verbose {
+				fmt.Printf("  [%s] Image already exists: %s (checked in %s)\n", serverName, imageRef, formatBuildDuration(time.Since(existsStart)))
+			}
+			return nil
+		}
+		if existsErr != nil && d.verbose {
+			fmt.Printf("  [%s] Could not check existing image, rebuilding: %v\n", serverName, existsErr)
+		}
+		buildStart := time.Now()
 		if _, err := d.buildImageOnNode(serverName, serviceName, service, imageRef); err != nil {
 			return fmt.Errorf("failed to build image on %s: %w", serverName, err)
 		}
 		if d.verbose {
-			fmt.Printf("  [%s] Image ready: %s\n", serverName, imageRef)
+			fmt.Printf("  [%s] Image ready: %s (%s)\n", serverName, imageRef, formatBuildDuration(time.Since(buildStart)))
 		}
 		return nil
 	})
+}
+
+func (d *Deployer) imageExistsOnTakodNode(serverName string, imageRef string) (bool, error) {
+	client, err := d.getEnvironmentClient(serverName)
+	if err != nil {
+		return false, err
+	}
+	output, err := takodclient.RequestJSON(client, d.takodSocket(), "GET", takodclient.ImageExistsEndpoint(imageRef), nil)
+	if err != nil {
+		return false, err
+	}
+	var response takod.ImageExistsResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return false, fmt.Errorf("failed to parse image exists response: %w", err)
+	}
+	return response.Exists, nil
 }
 
 func (d *Deployer) RemoveServiceTakod(serviceName string) error {
@@ -248,12 +325,69 @@ func (d *Deployer) RemoveServiceTakod(serviceName string) error {
 		if err != nil {
 			return err
 		}
+		if err := d.deleteBackupScheduleViaTakod(client, serviceName); err != nil {
+			return err
+		}
 		return d.removeServiceViaTakod(client, takod.RemoveServiceRequest{
 			Project:     d.config.Project.Name,
 			Environment: d.environment,
 			Service:     serviceName,
 		})
 	})
+}
+
+func (d *Deployer) PruneTakodServiceRevisions(services map[string]config.ServiceConfig, keepRevisions map[string]string) error {
+	normalizedRevisions, err := normalizeTakodProxyActiveRevisions(services, keepRevisions)
+	if err != nil {
+		return err
+	}
+	if len(normalizedRevisions) == 0 {
+		return nil
+	}
+	if d.sshPool == nil {
+		return fmt.Errorf("ssh pool not initialized")
+	}
+
+	requests := takodRevisionPruneRequests(d.config.Project.Name, d.environment, normalizedRevisions)
+	targetServers, err := d.getTakodTargetServers()
+	if err != nil {
+		return fmt.Errorf("failed to get takod target servers: %w", err)
+	}
+	if len(targetServers) == 0 {
+		return fmt.Errorf("environment %s has no target servers", d.environment)
+	}
+
+	return runTakodNodeActions(targetServers, func(serverName string) error {
+		client, err := d.getEnvironmentClient(serverName)
+		if err != nil {
+			return err
+		}
+		for _, request := range requests {
+			if err := d.removeServiceViaTakod(client, request); err != nil {
+				return fmt.Errorf("failed to prune stale revisions for %s: %w", request.Service, err)
+			}
+		}
+		return nil
+	})
+}
+
+func takodRevisionPruneRequests(project string, environment string, keepRevisions map[string]string) []takod.RemoveServiceRequest {
+	serviceNames := make([]string, 0, len(keepRevisions))
+	for serviceName := range keepRevisions {
+		serviceNames = append(serviceNames, serviceName)
+	}
+	sort.Strings(serviceNames)
+
+	requests := make([]takod.RemoveServiceRequest, 0, len(serviceNames))
+	for _, serviceName := range serviceNames {
+		requests = append(requests, takod.RemoveServiceRequest{
+			Project:      project,
+			Environment:  environment,
+			Service:      serviceName,
+			KeepRevision: keepRevisions[serviceName],
+		})
+	}
+	return requests
 }
 
 type takodNodeActionResult struct {
@@ -415,7 +549,7 @@ func (d *Deployer) prepareTakodNodesWith(servers []string, prepare prepareTakodN
 	return nil
 }
 
-func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName string, serviceName string, service *config.ServiceConfig, imageRef string, slots []int) error {
+func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName string, serviceName string, service *config.ServiceConfig, imageRef string, slots []int, pullImage bool, warmOnly bool) error {
 	sort.Ints(slots)
 	if d.verbose {
 		fmt.Printf("  -> %s slots %v\n", serverName, slots)
@@ -448,7 +582,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Environment:        d.environment,
 		Service:            serviceName,
 		Image:              imageRef,
-		PullImage:          service.Image != "",
+		PullImage:          pullImage,
 		Restart:            service.Restart,
 		Network:            networkName,
 		NetworkAlias:       serviceName,
@@ -460,22 +594,33 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Labels:             serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
 		ExternalVolumes:    externalVolumes,
 	}
+	serviceRevision := takodServiceRevisionID(d.config.Project.Name, d.environment, serviceName, imageRef, *service)
+	serviceStrategy := effectiveDeployStrategy(service)
+	request.Revision = serviceRevision
+	request.DeployStrategy = serviceStrategy
+	meshRevision := meshUpstreamRevisionForStrategy(serviceRevision, serviceStrategy)
 	for _, slot := range slots {
 		meshPort := 0
 		if service.IsPublic() && publishMeshUpstreams {
-			meshPort, err = d.allocateMeshUpstreamPort(client, serverName, serviceName, slot, service.Port)
+			meshPort, err = d.allocateMeshUpstreamPort(client, serverName, serviceName, meshRevision, slot, service.Port)
 			if err != nil {
 				return err
 			}
 		}
-		container, err := d.buildTakodContainerSpec(serverName, serviceName, service, slot, publishMeshUpstreams, meshPort)
+		container, err := d.buildTakodContainerSpec(serverName, serviceName, service, slot, serviceRevision, publishMeshUpstreams, meshPort, warmOnly)
 		if err != nil {
 			return err
 		}
 		request.Containers = append(request.Containers, container)
 	}
 
-	return d.reconcileServiceViaTakod(client, request)
+	if err := d.reconcileServiceViaTakod(client, request); err != nil {
+		return err
+	}
+	if warmOnly {
+		return nil
+	}
+	return d.reconcileBackupScheduleViaTakod(client, serviceName, service, len(slots) > 0)
 }
 
 func (d *Deployer) buildTakodNetworkAttachments(serviceName string, service *config.ServiceConfig) []takod.NetworkAttachmentSpec {
@@ -515,10 +660,25 @@ func (d *Deployer) buildTakodNetworkAttachments(serviceName string, service *con
 	return attachments
 }
 
-func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string, service *config.ServiceConfig, slot int, publishMeshUpstreams bool, meshPort int) (takod.ContainerSpec, error) {
+func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string, service *config.ServiceConfig, slot int, revision string, publishMeshUpstreams bool, meshPort int, warmOnly bool) (takod.ContainerSpec, error) {
+	strategy := effectiveDeployStrategy(service)
+	containerName, err := d.takodContainerNameForStrategy(serviceName, slot, revision, strategy)
+	if err != nil {
+		return takod.ContainerSpec{}, err
+	}
+	containerAlias, err := d.takodContainerAliasForStrategy(serviceName, slot, revision, strategy)
+	if err != nil {
+		return takod.ContainerSpec{}, err
+	}
 	container := takod.ContainerSpec{
-		Name:           d.takodContainerName(serviceName, slot),
-		NetworkAliases: []string{d.takodContainerAlias(serviceName, slot)},
+		Name:           containerName,
+		NetworkAliases: []string{containerAlias},
+		Labels: map[string]string{
+			reconcile.RevisionLabel:       revision,
+			reconcile.DeployStrategyLabel: strategy,
+			reconcile.SlotLabel:           strconv.Itoa(slot),
+			reconcile.ActiveLabel:         strconv.FormatBool(!warmOnly),
+		},
 	}
 	if service.IsPublic() && publishMeshUpstreams {
 		meshHostIP, err := d.meshHostIPForServer(serverName)
@@ -531,6 +691,37 @@ func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string
 		container.Publishes = append(container.Publishes, fmt.Sprintf("%s:%d:%d", meshHostIP, meshPort, service.Port))
 	}
 	return container, nil
+}
+
+func takodServiceRevisionID(project string, environment string, serviceName string, imageRef string, service config.ServiceConfig) string {
+	configHash, ok := reconcile.SafeServiceConfigHash(service)
+	if !ok {
+		configHash = "unknown"
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		project,
+		environment,
+		serviceName,
+		imageRef,
+		configHash,
+		effectiveDeployStrategy(&service),
+	}, "\x00")))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+func ServiceRevisionID(project string, environment string, serviceName string, imageRef string, service config.ServiceConfig) string {
+	return takodServiceRevisionID(project, environment, serviceName, imageRef, service)
+}
+
+func effectiveDeployStrategy(service *config.ServiceConfig) string {
+	if service == nil || service.Deploy.Strategy == "" {
+		return config.DeployStrategyRecreate
+	}
+	return service.Deploy.Strategy
+}
+
+func deployStrategyUsesRevisionScopedContainers(strategy string) bool {
+	return strategy == config.DeployStrategyRolling || strategy == config.DeployStrategyBlueGreen
 }
 
 func (d *Deployer) shouldPublishMeshUpstreams() (bool, error) {
@@ -555,7 +746,13 @@ func serviceRuntimeLabels(project string, environment string, serviceName string
 }
 
 func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.HealthSpec {
+	if readinessSpec := d.buildTakodReadinessHealthSpec(service); readinessSpec != nil {
+		return attachTakodSmokeSpec(readinessSpec, service)
+	}
 	if service.HealthCheck.Path == "" && service.HealthCheck.TCPPort <= 0 {
+		if smokeSpec := buildTakodSmokeOnlyHealthSpec(service); smokeSpec != nil {
+			return smokeSpec
+		}
 		return nil
 	}
 
@@ -585,7 +782,7 @@ func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.He
 		port = service.HealthCheck.TCPPort
 	}
 
-	return &takod.HealthSpec{
+	return attachTakodSmokeSpec(&takod.HealthSpec{
 		Path:         service.HealthCheck.Path,
 		Port:         port,
 		Scheme:       scheme,
@@ -594,7 +791,75 @@ func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.He
 		Retries:      retries,
 		StartPeriod:  startPeriod,
 		WaitAttempts: deploymentHealthWaitAttempts(interval, startPeriod, retries),
+	}, service)
+}
+
+func (d *Deployer) buildTakodReadinessHealthSpec(service *config.ServiceConfig) *takod.HealthSpec {
+	readiness := service.Deploy.Readiness
+	if readiness.Path == "" && readiness.TCPPort <= 0 {
+		return nil
 	}
+
+	interval := readiness.Interval
+	if interval == "" {
+		interval = "10s"
+	}
+	timeout := readiness.Timeout
+	if timeout == "" {
+		timeout = "5s"
+	}
+	retries := readiness.Retries
+	if retries <= 0 {
+		retries = 3
+	}
+
+	port := service.Port
+	scheme := ""
+	if readiness.Path != "" {
+		scheme = "http"
+	}
+	if readiness.TCPPort > 0 {
+		port = readiness.TCPPort
+	}
+
+	return attachTakodSmokeSpec(&takod.HealthSpec{
+		Path:         readiness.Path,
+		Port:         port,
+		Scheme:       scheme,
+		Interval:     interval,
+		Timeout:      timeout,
+		Retries:      retries,
+		WaitAttempts: deploymentHealthWaitAttempts(interval, "0s", retries),
+	}, service)
+}
+
+func buildTakodSmokeOnlyHealthSpec(service *config.ServiceConfig) *takod.HealthSpec {
+	if service == nil || service.Deploy.SmokeTest.Path == "" {
+		return nil
+	}
+	return attachTakodSmokeSpec(&takod.HealthSpec{
+		Scheme:       "http",
+		Interval:     "10s",
+		Timeout:      "5s",
+		Retries:      3,
+		WaitAttempts: deploymentHealthWaitAttempts("10s", "0s", 3),
+	}, service)
+}
+
+func attachTakodSmokeSpec(spec *takod.HealthSpec, service *config.ServiceConfig) *takod.HealthSpec {
+	if spec == nil || service == nil || service.Deploy.SmokeTest.Path == "" {
+		return spec
+	}
+	spec.SmokePath = service.Deploy.SmokeTest.Path
+	spec.SmokePort = service.Port
+	spec.SmokeExpectedStatus = service.Deploy.SmokeTest.ExpectedStatus
+	if spec.SmokeExpectedStatus == 0 {
+		spec.SmokeExpectedStatus = 200
+	}
+	if spec.Scheme == "" {
+		spec.Scheme = "http"
+	}
+	return spec
 }
 
 func deploymentHealthWaitAttempts(interval string, startPeriod string, retries int) int {
@@ -656,6 +921,106 @@ func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.Serv
 	}
 	sort.Strings(externalVolumes)
 	return mounts, externalVolumes, nil
+}
+
+func (d *Deployer) reconcileBackupScheduleViaTakod(client *ssh.Client, serviceName string, service *config.ServiceConfig, serviceAssignedToNode bool) error {
+	if service.Backup == nil || !serviceAssignedToNode {
+		return d.deleteBackupScheduleViaTakod(client, serviceName)
+	}
+	request, err := d.buildTakodBackupScheduleRequest(serviceName, service)
+	if err != nil {
+		return err
+	}
+	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/backup-schedule", request); err != nil {
+		return fmt.Errorf("takod backup schedule reconciliation failed: %w", err)
+	}
+	return nil
+}
+
+func (d *Deployer) deleteBackupScheduleViaTakod(client *ssh.Client, serviceName string) error {
+	endpoint := fmt.Sprintf(
+		"/v1/backup-schedule?project=%s&environment=%s&service=%s",
+		url.QueryEscape(d.config.Project.Name),
+		url.QueryEscape(d.environment),
+		url.QueryEscape(serviceName),
+	)
+	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "DELETE", endpoint, nil); err != nil {
+		return fmt.Errorf("takod backup schedule cleanup failed: %w", err)
+	}
+	return nil
+}
+
+func (d *Deployer) buildTakodBackupScheduleRequest(serviceName string, service *config.ServiceConfig) (takod.BackupScheduleRequest, error) {
+	volumes := serviceBackupVolumeSources(service)
+	if len(service.Backup.Volumes) > 0 {
+		volumes = append([]string(nil), service.Backup.Volumes...)
+	}
+	if len(volumes) == 0 {
+		return takod.BackupScheduleRequest{}, fmt.Errorf("service %s has backup configured but no named volumes to back up", serviceName)
+	}
+
+	request := takod.BackupScheduleRequest{
+		Project:       d.config.Project.Name,
+		Environment:   d.environment,
+		Service:       serviceName,
+		Schedule:      service.Backup.Schedule,
+		RetentionDays: service.Backup.Retain,
+		Storage:       takodBackupStorageConfig(service.Backup.Storage),
+	}
+	for _, volume := range volumes {
+		request.Volumes = append(request.Volumes, takod.BackupScheduleVolume{
+			Volume:         runtimeid.BackupArchiveVolumeName(volume),
+			DockerVolume:   d.config.GetVolumeName(volume, d.environment),
+			ExternalVolume: d.config.IsVolumeExternal(volume),
+		})
+	}
+	return request, nil
+}
+
+func serviceBackupVolumeSources(service *config.ServiceConfig) []string {
+	seen := make(map[string]bool)
+	var volumes []string
+	for _, volume := range service.Volumes {
+		source, target, hasTarget := strings.Cut(volume, ":")
+		source = strings.TrimSpace(source)
+		target = strings.TrimSpace(target)
+		if source == "" {
+			continue
+		}
+		if !hasTarget {
+			if !seen[source] {
+				volumes = append(volumes, source)
+				seen[source] = true
+			}
+			continue
+		}
+		if target == "" || strings.HasPrefix(source, "/") || config.IsNFSVolume(volume) {
+			continue
+		}
+		if !seen[source] {
+			volumes = append(volumes, source)
+			seen[source] = true
+		}
+	}
+	sort.Strings(volumes)
+	return volumes
+}
+
+func takodBackupStorageConfig(storage *config.BackupStorageConfig) *takod.BackupStorageConfig {
+	if storage == nil {
+		return nil
+	}
+	return &takod.BackupStorageConfig{
+		Provider:        storage.Provider,
+		Bucket:          storage.Bucket,
+		Region:          storage.Region,
+		Endpoint:        storage.Endpoint,
+		Prefix:          storage.Prefix,
+		AccessKeyID:     storage.AccessKeyID,
+		SecretAccessKey: storage.SecretAccessKey,
+		SessionToken:    storage.SessionToken,
+		ForcePathStyle:  storage.ForcePathStyle,
+	}
 }
 
 func (d *Deployer) ensureTakodProxy(client *ssh.Client, networkName string, email string) error {
@@ -899,6 +1264,28 @@ func (d *Deployer) takodContainerName(serviceName string, slot int) string {
 
 func (d *Deployer) takodContainerAlias(serviceName string, slot int) string {
 	return runtimeid.ContainerAlias(d.config.Project.Name, d.environment, serviceName, slot)
+}
+
+func (d *Deployer) takodContainerNameForStrategy(serviceName string, slot int, revision string, strategy string) (string, error) {
+	if !deployStrategyUsesRevisionScopedContainers(strategy) {
+		return d.takodContainerName(serviceName, slot), nil
+	}
+	revision = strings.TrimSpace(revision)
+	if revision == "" {
+		return "", fmt.Errorf("service %s strategy %s requires a revision-scoped container name", serviceName, strategy)
+	}
+	return runtimeid.RevisionContainerName(d.config.Project.Name, d.environment, serviceName, revision, slot), nil
+}
+
+func (d *Deployer) takodContainerAliasForStrategy(serviceName string, slot int, revision string, strategy string) (string, error) {
+	if !deployStrategyUsesRevisionScopedContainers(strategy) {
+		return d.takodContainerAlias(serviceName, slot), nil
+	}
+	revision = strings.TrimSpace(revision)
+	if revision == "" {
+		return "", fmt.Errorf("service %s strategy %s requires a revision-scoped container alias", serviceName, strategy)
+	}
+	return runtimeid.RevisionContainerAlias(d.config.Project.Name, d.environment, serviceName, revision, slot), nil
 }
 
 func (d *Deployer) takodDataDir() string {

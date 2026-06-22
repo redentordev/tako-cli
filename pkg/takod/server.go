@@ -24,6 +24,7 @@ type Server struct {
 	actualRefreshInterval time.Duration
 	startedAt             time.Time
 	server                *http.Server
+	backupScheduler       *BackupScheduler
 	mu                    sync.Mutex
 }
 
@@ -78,6 +79,7 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 		nodeName:              opts.NodeName,
 		actualRefreshInterval: opts.ActualRefreshInterval,
 		startedAt:             time.Now().UTC(),
+		backupScheduler:       NewBackupScheduler(dataDir),
 	}
 }
 
@@ -121,6 +123,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/backups", s.handleBackups)
 	mux.HandleFunc("/v1/backups/restore", s.handleBackupRestore)
 	mux.HandleFunc("/v1/backups/cleanup", s.handleBackupCleanup)
+	mux.HandleFunc("/v1/backup-schedule", s.handleBackupSchedule)
 	mux.HandleFunc("/v1/metadata", s.handleMetadata)
 	mux.HandleFunc("/v1/mesh/key", s.handleMeshKey)
 	mux.HandleFunc("/v1/mesh/apply", s.handleMeshApply)
@@ -143,6 +146,7 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.actualRefreshInterval > 0 {
 		go s.runActualRefreshLoop(ctx)
 	}
+	go s.backupScheduler.Run(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -303,7 +307,7 @@ func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	if err := ReleaseServicePortAllocations(r.Context(), s.dataDir, request.Project, request.Environment, request.Service); err != nil {
+	if err := ReleaseServicePortAllocationsExceptRevision(r.Context(), s.dataDir, request.Project, request.Environment, request.Service, request.KeepRevision); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -642,6 +646,42 @@ func (s *Server) handleBackupCleanup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := CleanupOldBackups(r.Context(), request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleBackupSchedule(w http.ResponseWriter, r *http.Request) {
+	var (
+		response *BackupScheduleResponse
+		err      error
+	)
+	switch r.Method {
+	case http.MethodPut:
+		defer r.Body.Close()
+		var request BackupScheduleRequest
+		if err := decodeJSONRequest(w, r, &request); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		response, err = s.backupScheduler.Upsert(r.Context(), request)
+	case http.MethodDelete:
+		response, err = s.backupScheduler.Delete(
+			r.Context(),
+			r.URL.Query().Get("project"),
+			r.URL.Query().Get("environment"),
+			r.URL.Query().Get("service"),
+		)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

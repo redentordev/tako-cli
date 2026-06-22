@@ -223,6 +223,14 @@ func TestImageBuildEndpointEscapesDockerfile(t *testing.T) {
 	}
 }
 
+func TestImageExistsEndpointEscapesImage(t *testing.T) {
+	got := ImageExistsEndpoint("demo/web:abc123")
+	want := "/v1/images/exists?image=demo%2Fweb%3Aabc123"
+	if got != want {
+		t.Fatalf("ImageExistsEndpoint() = %q, want %q", got, want)
+	}
+}
+
 func TestLogsEndpointEscapesQueryValues(t *testing.T) {
 	got := LogsEndpoint("demo app", "prod/us", "web api", 250, true)
 	want := "/v1/logs?environment=prod%2Fus&follow=true&project=demo+app&service=web+api&tail=250"

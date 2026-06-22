@@ -104,12 +104,16 @@ func TestBuildActualSnapshotWithNodesEmbedsNodeSnapshots(t *testing.T) {
 	nodeActual := map[string]map[string]*reconcile.ActualService{
 		"node-b": {
 			"web": {
-				Name:       "web",
-				Image:      "demo/web:1",
-				Replicas:   1,
-				Containers: []string{"b2", "b1"},
-				ConfigHash: "hash-web",
-				RuntimeID:  runtimeid.ServiceIdentity("demo", "production", "web"),
+				Name:              "web",
+				Image:             "demo/web:1",
+				Replicas:          1,
+				Containers:        []string{"b2", "b1"},
+				ConfigHash:        "hash-web",
+				RuntimeID:         runtimeid.ServiceIdentity("demo", "production", "web"),
+				CurrentRevision:   "rev-web",
+				DeployStrategy:    "recreate",
+				ActiveContainers:  []string{"b2", "b1"},
+				WarmingContainers: []string{"b-warm"},
 			},
 		},
 		"node-a": {
@@ -147,6 +151,15 @@ func TestBuildActualSnapshotWithNodesEmbedsNodeSnapshots(t *testing.T) {
 	}
 	if got := snapshot.Services["web"].RuntimeID; got != runtimeid.ServiceIdentity("demo", "production", "web") {
 		t.Fatalf("aggregate runtime id = %q, want expected runtime id", got)
+	}
+	if got := snapshot.Services["web"].CurrentRevision; got != "rev-web" {
+		t.Fatalf("aggregate revision = %q, want rev-web", got)
+	}
+	if !slices.Equal(snapshot.Nodes["node-b"].Services["web"].ActiveContainers, []string{"b1", "b2"}) {
+		t.Fatalf("active containers were not sorted: %#v", snapshot.Nodes["node-b"].Services["web"].ActiveContainers)
+	}
+	if !slices.Equal(snapshot.Nodes["node-b"].Services["web"].WarmingContainers, []string{"b-warm"}) {
+		t.Fatalf("warming containers = %#v", snapshot.Nodes["node-b"].Services["web"].WarmingContainers)
 	}
 	if snapshot.Nodes["node-a"].CapturedAt.IsZero() || snapshot.Nodes["node-b"].CapturedAt.IsZero() {
 		t.Fatalf("expected embedded node snapshots to have capture times: %#v", snapshot.Nodes)

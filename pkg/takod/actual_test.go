@@ -81,6 +81,64 @@ demo_production_postgres_1|postgres:16-alpine|container-a|hash-db||demo|producti
 	}
 }
 
+func TestParseActualStateReadsRevisionStrategyAndActiveState(t *testing.T) {
+	output := `
+demo_production_web_1|demo/web:1|container-a|hash-web||demo|production|web|false|rev-new|rolling|1|true
+demo_production_web_2|demo/web:2|container-b|hash-web||demo|production|web|false|rev-old|rolling|2|false
+`
+
+	actual := ParseActualState("demo", "production", output)
+	web := actual.Services["web"]
+	if web == nil {
+		t.Fatalf("web service missing: %#v", actual.Services)
+	}
+	if web.CurrentRevision != "rev-new" {
+		t.Fatalf("current revision = %q, want rev-new", web.CurrentRevision)
+	}
+	if web.PreviousRevision != "rev-old" {
+		t.Fatalf("previous revision = %q, want rev-old", web.PreviousRevision)
+	}
+	if web.DeployStrategy != "rolling" {
+		t.Fatalf("deploy strategy = %q, want rolling", web.DeployStrategy)
+	}
+	if len(web.ActiveContainers) != 1 || web.ActiveContainers[0] != "container-a" {
+		t.Fatalf("active containers = %#v, want container-a", web.ActiveContainers)
+	}
+	if len(web.WarmingContainers) != 1 || web.WarmingContainers[0] != "container-b" {
+		t.Fatalf("warming containers = %#v, want container-b", web.WarmingContainers)
+	}
+	if len(web.WarmingRevisions) != 1 || web.WarmingRevisions[0] != "rev-old" {
+		t.Fatalf("warming revisions = %#v, want rev-old", web.WarmingRevisions)
+	}
+	if web.RevisionImages["rev-new"] != "demo/web:1" || web.RevisionImages["rev-old"] != "demo/web:2" {
+		t.Fatalf("revision images = %#v, want images keyed by revision", web.RevisionImages)
+	}
+}
+
+func TestParseActualStateTreatsOnlyRemainingInactiveRevisionAsCurrent(t *testing.T) {
+	output := `
+demo_production_web_1|demo/web:2|container-a|hash-web||demo|production|web|false|rev-green|blue_green|1|false
+`
+
+	actual := ParseActualState("demo", "production", output)
+	web := actual.Services["web"]
+	if web == nil {
+		t.Fatalf("web service missing: %#v", actual.Services)
+	}
+	if web.CurrentRevision != "rev-green" {
+		t.Fatalf("current revision = %q, want rev-green", web.CurrentRevision)
+	}
+	if web.PreviousRevision != "" {
+		t.Fatalf("previous revision = %q, want empty", web.PreviousRevision)
+	}
+	if len(web.ActiveContainers) != 1 || web.ActiveContainers[0] != "container-a" {
+		t.Fatalf("active containers = %#v, want container-a", web.ActiveContainers)
+	}
+	if len(web.WarmingContainers) != 0 {
+		t.Fatalf("warming containers = %#v, want empty after fallback", web.WarmingContainers)
+	}
+}
+
 func TestParseActualStateKeepsPersistentWhenAnyReplicaIsLabeled(t *testing.T) {
 	output := `
 demo_production_db_1|postgres:16-alpine|container-a|hash-db||demo|production|db|false

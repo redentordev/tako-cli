@@ -88,9 +88,10 @@ tako deploy --yes
 ```
 
 The command installs the matching release binary, restarts the `takod` systemd
-service, refreshes the setup manifest while preserving install metadata, and
-waits for `/v1/status` to report the expected CLI version. Development builds
-must pass `--takod-binary` with a Linux binary.
+service, refreshes the setup manifest, preserves `installed_at` and component
+metadata, updates `last_upgrade`, and waits for `/v1/status` to report the
+expected CLI version. Development builds must pass `--takod-binary` with a
+Linux binary.
 
 For a rebuilt server that should keep the same logical node name, keep the node
 in `tako.yaml` and run the targeted repair path:

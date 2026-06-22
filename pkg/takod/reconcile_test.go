@@ -32,6 +32,14 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 		t.Fatalf("valid request returned error: %v", err)
 	}
 
+	validNoDowntime := valid
+	validNoDowntime.DeployStrategy = "rolling"
+	validNoDowntime.Revision = "rev-green"
+	validNoDowntime.Containers = []ContainerSpec{{Name: "demo_production_web_r_rev_green_1", Labels: map[string]string{"tako.revision": "rev-green"}}}
+	if err := validateReconcileServiceRequest(validNoDowntime); err != nil {
+		t.Fatalf("valid no-downtime request returned error: %v", err)
+	}
+
 	invalid := valid
 	invalid.EnvFile = "/tmp/demo.env"
 	if err := validateReconcileServiceRequest(invalid); err == nil {
@@ -147,6 +155,24 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 
 	invalid = valid
+	invalid.Health = &HealthSpec{SmokePath: "smoke", SmokePort: 3000}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected smoke path without slash to be rejected")
+	}
+
+	invalid = valid
+	invalid.Health = &HealthSpec{SmokePath: "/smoke"}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected smoke path without port to be rejected")
+	}
+
+	invalid = valid
+	invalid.Health = &HealthSpec{SmokePath: "/smoke", SmokePort: 3000, SmokeExpectedStatus: 99}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected invalid smoke expected status to be rejected")
+	}
+
+	invalid = valid
 	invalid.Health = &HealthSpec{Interval: "not-a-duration"}
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected invalid health interval to be rejected")
@@ -163,6 +189,32 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected oversized health waitAttempts to be rejected")
 	}
+
+	invalid = valid
+	invalid.DeployStrategy = "canary"
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected invalid deploy strategy to be rejected")
+	}
+
+	invalid = valid
+	invalid.DeployStrategy = "rolling"
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected rolling request without revision to be rejected")
+	}
+
+	invalid = valid
+	invalid.Revision = "../rev"
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe revision to be rejected")
+	}
+
+	invalid = valid
+	invalid.DeployStrategy = "blue_green"
+	invalid.Revision = "rev-green"
+	invalid.Containers = []ContainerSpec{{Name: "demo_production_web_r_rev_blue_1", Labels: map[string]string{"tako.revision": "rev-blue"}}}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected mismatched container revision label to be rejected")
+	}
 }
 
 func TestValidateRemoveServiceRequest(t *testing.T) {
@@ -173,6 +225,11 @@ func TestValidateRemoveServiceRequest(t *testing.T) {
 	}
 	if err := validateRemoveServiceRequest(valid); err != nil {
 		t.Fatalf("valid remove request returned error: %v", err)
+	}
+
+	valid.KeepRevision = "rev-green"
+	if err := validateRemoveServiceRequest(valid); err != nil {
+		t.Fatalf("valid keep revision returned error: %v", err)
 	}
 
 	invalid := valid
@@ -191,6 +248,12 @@ func TestValidateRemoveServiceRequest(t *testing.T) {
 	invalid.Service = "Web"
 	if err := validateRemoveServiceRequest(invalid); err == nil {
 		t.Fatal("expected unsafe service name to be rejected")
+	}
+
+	invalid = valid
+	invalid.KeepRevision = "../rev"
+	if err := validateRemoveServiceRequest(invalid); err == nil {
+		t.Fatal("expected unsafe keep revision to be rejected")
 	}
 }
 
@@ -224,6 +287,10 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 		Name:           "demo_production_web_1",
 		NetworkAliases: []string{"tako-demo-production-web-1"},
 		Publishes:      []string{"10.42.0.2:31001:3000"},
+		Labels: map[string]string{
+			"tako.revision": "rev1",
+			"tako.slot":     "1",
+		},
 	})
 
 	want := []string{
@@ -235,9 +302,11 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 		"--network-alias", "tako-demo-production-web-1",
 		"--label", "tako.environment=production",
 		"--label", "tako.project=demo",
+		"--label", "tako.revision=rev1",
 		"--label", "tako.role=frontend",
 		"--label", "tako.runtime=takod",
 		"--label", "tako.service=web",
+		"--label", "tako.slot=1",
 		"--env-file", "/tmp/web.env",
 		"--mount", "type=volume,source=demo_data,target=/data",
 		"--publish", "10.42.0.2:31001:3000",
@@ -246,6 +315,40 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected docker args:\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestBuildServiceContainerArgsAppliesRequestRevisionLabels(t *testing.T) {
+	req := ReconcileServiceRequest{
+		Project:        "demo",
+		Environment:    "production",
+		Service:        "web",
+		Image:          "registry.example.com/demo/web:abc",
+		Restart:        "unless-stopped",
+		Network:        "tako_demo_production",
+		NetworkAlias:   "web",
+		Revision:       "rev-green",
+		DeployStrategy: "blue_green",
+	}
+
+	got := buildServiceContainerArgs(req, ContainerSpec{
+		Name: "demo_production_web_r_rev_green_1",
+		Labels: map[string]string{
+			"tako.active": "false",
+			"tako.slot":   "1",
+		},
+	})
+
+	for _, want := range []string{
+		"--label",
+		"tako.deployStrategy=blue_green",
+		"tako.revision=rev-green",
+		"tako.active=false",
+		"tako.slot=1",
+	} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("docker args missing %q in %#v", want, got)
+		}
 	}
 }
 
@@ -582,6 +685,153 @@ func TestReconcileServiceUsesHostSideHTTPHealthWithoutDockerHealthCommand(t *tes
 	}
 }
 
+func TestReconcileServiceRunsSmokeTestAfterHTTPReadiness(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			_, _ = w.Write([]byte("ready"))
+		case "/smoke":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+	host, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("failed to split test server host: %v", err)
+	}
+
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_CONTAINER_IP", host)
+
+	_, err = ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		Image:       "registry.example.com/demo/web:abc",
+		Network:     "tako_demo_production",
+		Containers:  []ContainerSpec{{Name: "demo_production_web_1"}},
+		Health: &HealthSpec{
+			Path:                "/ready",
+			Port:                mustAtoi(t, port),
+			SmokePath:           "/smoke",
+			SmokePort:           mustAtoi(t, port),
+			SmokeExpectedStatus: http.StatusNoContent,
+			Timeout:             "2s",
+			WaitAttempts:        1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileService returned error: %v", err)
+	}
+}
+
+func TestReconcileServiceSupportsSmokeOnlyHealthSpec(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/smoke" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+	host, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("failed to split test server host: %v", err)
+	}
+
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_CONTAINER_IP", host)
+
+	_, err = ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		Image:       "registry.example.com/demo/web:abc",
+		Network:     "tako_demo_production",
+		Containers:  []ContainerSpec{{Name: "demo_production_web_1"}},
+		Health: &HealthSpec{
+			SmokePath:           "/smoke",
+			SmokePort:           mustAtoi(t, port),
+			SmokeExpectedStatus: http.StatusNoContent,
+			Timeout:             "2s",
+			WaitAttempts:        1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileService returned error: %v", err)
+	}
+}
+
+func TestReconcileServiceCleansStartedContainersOnSmokeFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ready":
+			_, _ = w.Write([]byte("ready"))
+		case "/smoke":
+			http.Error(w, "bad", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse test server URL: %v", err)
+	}
+	host, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		t.Fatalf("failed to split test server host: %v", err)
+	}
+
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_CONTAINER_IP", host)
+
+	_, err = ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		Image:       "registry.example.com/demo/web:abc",
+		Network:     "tako_demo_production",
+		Containers:  []ContainerSpec{{Name: "demo_production_web_1"}},
+		Health: &HealthSpec{
+			Path:                "/ready",
+			Port:                mustAtoi(t, port),
+			SmokePath:           "/smoke",
+			SmokePort:           mustAtoi(t, port),
+			SmokeExpectedStatus: http.StatusNoContent,
+			Timeout:             "2s",
+			WaitAttempts:        1,
+		},
+	})
+	if err == nil {
+		t.Fatal("ReconcileService should fail when smoke test status is wrong")
+	}
+	if !strings.Contains(err.Error(), "HTTP smoke returned status") {
+		t.Fatalf("error = %v, want smoke status failure", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	if !slices.Contains(entries, "docker rm -f demo_production_web_1") {
+		t.Fatalf("docker log missing cleanup of started container in %#v", entries)
+	}
+}
+
 func TestReconcileServiceUsesHostSideTCPHealthWithoutDockerHealthCommand(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -649,6 +899,104 @@ func TestContainerHealthWaitAttemptsDoesNotUseDockerRetryCount(t *testing.T) {
 	}
 }
 
+func TestReconcileServiceNoDowntimeStrategyReplacesOnlyTargetRevision(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "blue123\ngreen456\nlegacy789\n")
+	t.Setenv("TAKO_FAKE_INSPECT_LABELS_BY_ID", `{
+		"blue123":"{\"tako.revision\":\"rev-blue\"}",
+		"green456":"{\"tako.revision\":\"rev-green\"}",
+		"legacy789":"{}"
+	}`)
+
+	_, err := ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:        "demo",
+		Environment:    "production",
+		Service:        "web",
+		Revision:       "rev-green",
+		DeployStrategy: "blue_green",
+		Image:          "registry.example.com/demo/web:abc",
+		Network:        "tako_demo_production",
+		Containers: []ContainerSpec{{
+			Name:           "demo_production_web_r_rev_green_1",
+			NetworkAliases: []string{"tako-demo-production-web-r-rev-green-1"},
+			Labels: map[string]string{
+				"tako.active":   "false",
+				"tako.revision": "rev-green",
+				"tako.slot":     "1",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ReconcileService returned error: %v", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	if !slices.Contains(entries, "docker rm -f green456") {
+		t.Fatalf("docker log missing target revision removal in %#v", entries)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry, "docker rm") && (strings.Contains(entry, "blue123") || strings.Contains(entry, "legacy789")) {
+			t.Fatalf("side-by-side reconcile removed non-target revision: %#v", entries)
+		}
+	}
+	runEntry := ""
+	for _, entry := range entries {
+		if strings.HasPrefix(entry, "docker run ") {
+			runEntry = entry
+			break
+		}
+	}
+	for _, want := range []string{
+		"--label tako.deployStrategy=blue_green",
+		"--label tako.revision=rev-green",
+		"--label tako.active=false",
+	} {
+		if !strings.Contains(runEntry, want) {
+			t.Fatalf("docker run entry missing %q in %q", want, runEntry)
+		}
+	}
+}
+
+func TestReconcileServiceNoDowntimeEmptyRequestRemovesOnlyTargetRevision(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "blue123\ngreen456\nlegacy789\n")
+	t.Setenv("TAKO_FAKE_INSPECT_LABELS_BY_ID", `{
+		"blue123":"{\"tako.revision\":\"rev-blue\"}",
+		"green456":"{\"tako.revision\":\"rev-green\"}",
+		"legacy789":"{}"
+	}`)
+
+	response, err := ReconcileService(context.Background(), ReconcileServiceRequest{
+		Project:        "demo",
+		Environment:    "production",
+		Service:        "web",
+		Revision:       "rev-green",
+		DeployStrategy: "rolling",
+		Image:          "registry.example.com/demo/web:abc",
+		Network:        "tako_demo_production",
+	})
+	if err != nil {
+		t.Fatalf("ReconcileService returned error: %v", err)
+	}
+	if response.RemovedContainers != 1 {
+		t.Fatalf("removed containers = %d, want only target revision", response.RemovedContainers)
+	}
+
+	entries := readCommandLog(t, logPath)
+	if !slices.Contains(entries, "docker rm -f green456") {
+		t.Fatalf("docker log missing target revision removal in %#v", entries)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry, "docker rm") && (strings.Contains(entry, "blue123") || strings.Contains(entry, "legacy789")) {
+			t.Fatalf("cleanup-only reconcile removed non-target revision: %#v", entries)
+		}
+	}
+}
+
 func mustAtoi(t *testing.T, value string) int {
 	t.Helper()
 	var out int
@@ -693,6 +1041,41 @@ func TestRemoveServiceRemovesMatchingContainers(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("docker log missing %q in %#v", want, entries)
+		}
+	}
+}
+
+func TestRemoveServiceKeepsRequestedRevisionContainers(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "blue123\ngreen456\nlegacy789\n")
+	t.Setenv("TAKO_FAKE_INSPECT_LABELS_BY_ID", `{
+		"blue123":"{\"tako.revision\":\"rev-blue\"}",
+		"green456":"{\"tako.revision\":\"rev-green\"}",
+		"legacy789":"{}"
+	}`)
+
+	response, err := RemoveService(context.Background(), RemoveServiceRequest{
+		Project:      "demo",
+		Environment:  "production",
+		Service:      "web",
+		KeepRevision: "rev-green",
+	})
+	if err != nil {
+		t.Fatalf("RemoveService returned error: %v", err)
+	}
+	if response.RemovedContainers != 2 {
+		t.Fatalf("removed containers = %d, want 2 stale containers", response.RemovedContainers)
+	}
+
+	entries := readCommandLog(t, logPath)
+	if !slices.Contains(entries, "docker rm -f blue123 legacy789") {
+		t.Fatalf("docker log missing stale revision removal in %#v", entries)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry, "docker rm") && strings.Contains(entry, "green456") {
+			t.Fatalf("kept revision container was removed: %#v", entries)
 		}
 	}
 }
@@ -758,6 +1141,28 @@ func TestTakodCommandHelper(t *testing.T) {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	case "image":
+		if len(commandArgs) > 1 && commandArgs[1] == "prune" {
+			if output := os.Getenv("TAKO_FAKE_DOCKER_IMAGE_PRUNE_ERROR"); output != "" {
+				_, _ = os.Stderr.WriteString(output)
+				os.Exit(1)
+			}
+			_, _ = os.Stdout.WriteString("Deleted Images:\n")
+			for _, id := range uniqueFields(os.Getenv("TAKO_FAKE_DANGLING_IMAGE_IDS")) {
+				_, _ = os.Stdout.WriteString("deleted: " + id + "\n")
+			}
+			os.Exit(0)
+		}
+		os.Exit(0)
+	case "images":
+		joined := strings.Join(commandArgs, " ")
+		if strings.Contains(joined, "dangling=true") {
+			if output := os.Getenv("TAKO_FAKE_DANGLING_IMAGE_IDS"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+			}
+			os.Exit(0)
+		}
+		os.Exit(0)
 	case "ps":
 		if output := os.Getenv("TAKO_FAKE_PS_OUTPUT"); output != "" {
 			_, _ = os.Stdout.WriteString(output)
@@ -788,6 +1193,15 @@ func TestTakodCommandHelper(t *testing.T) {
 				_, _ = os.Stdout.WriteString(output)
 			}
 			os.Exit(0)
+		}
+		if len(commandArgs) > 2 && commandArgs[1] == "connect" {
+			if marker := os.Getenv("TAKO_FAKE_FAIL_NETWORK_CONNECT_ONCE_FILE"); marker != "" {
+				if _, err := os.Stat(marker); os.IsNotExist(err) {
+					_ = os.WriteFile(marker, []byte("failed"), 0600)
+					_, _ = os.Stderr.WriteString("could not find a network matching network mode stale")
+					os.Exit(1)
+				}
+			}
 		}
 		_, _ = os.Stdout.WriteString("network-ok\n")
 		os.Exit(0)
@@ -876,6 +1290,16 @@ func TestTakodCommandHelper(t *testing.T) {
 			os.Exit(0)
 		}
 		if strings.Contains(joined, ".Config.Labels") {
+			if byIDRaw := os.Getenv("TAKO_FAKE_INSPECT_LABELS_BY_ID"); byIDRaw != "" {
+				byID := make(map[string]string)
+				if err := json.Unmarshal([]byte(byIDRaw), &byID); err != nil {
+					os.Exit(2)
+				}
+				if len(commandArgs) > 1 {
+					_, _ = os.Stdout.WriteString(byID[commandArgs[1]])
+				}
+				os.Exit(0)
+			}
 			if output := os.Getenv("TAKO_FAKE_INSPECT_LABELS"); output != "" {
 				_, _ = os.Stdout.WriteString(output)
 			}

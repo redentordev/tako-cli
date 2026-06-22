@@ -187,7 +187,7 @@ tako init my-app
 ```
 
 This creates:
-- `tako.yaml` - Deployment configuration with comprehensive examples
+- `tako.yaml` - App-focused deployment configuration with optional examples
 - `.env.example` - Environment variables template
 - `.gitignore` - Git ignore rules
 
@@ -201,7 +201,8 @@ cp .env.example .env
 
 Edit `.env`:
 ```bash
-SERVER_HOST=203.0.113.10              # Your VPS IP
+TAKO_PRODUCTION_HOST=203.0.113.10     # Your VPS IP
+TAKO_SSH_KEY=~/.ssh/id_ed25519        # SSH key path
 LETSENCRYPT_EMAIL=admin@example.com   # For SSL certificates
 ```
 
@@ -216,9 +217,9 @@ project:
 
 servers:
   production:
-    host: ${SERVER_HOST}
+    host: ${TAKO_PRODUCTION_HOST}
     user: root
-    sshKey: ~/.ssh/id_ed25519
+    sshKey: ${TAKO_SSH_KEY}
 
 environments:
   production:
@@ -228,10 +229,20 @@ environments:
         build: .                                      # Build from current directory
         port: 3000                                    # Container port
         proxy:
-          domain: my-app.${SERVER_HOST}.sslip.io         # Auto-DNS with sslip.io
+          domain: my-app.${TAKO_PRODUCTION_HOST}.sslip.io # Auto-DNS with sslip.io
           email: ${LETSENCRYPT_EMAIL}
+        healthCheck:
+          path: /
         env:
           NODE_ENV: production
+```
+
+Tako infers the normal meshed `takod` runtime, replicated state, and WireGuard
+mesh settings. Run this when you want to see the effective defaults without
+copying them into your YAML:
+
+```bash
+tako config explain -e production
 ```
 
 The template includes commented examples for:
@@ -284,7 +295,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 
 ### Deployment & Operations
 
-- **Reconciled Deployments** - Recreate containers to match the desired takod state with health checks
+- **Reconciled Deployments** - Recreate by default, or use constrained rolling/blue-green deploys with automatic or manual proxy promotion
 - **Parallel Deployment** - Deploy multiple services concurrently (default behavior)
 - **Instant Rollback** - Revert to any previous deployment with one command
 - **Git-Based Versioning** - Every deployment and build-backed image is tied to a Git commit
@@ -302,7 +313,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 ### Servers & Scaling
 
 - **Multi-Server** - Deploy across multiple servers with takod mesh placement
-- **Build Image Streaming** - Broker locally built images between node-local takod agents without node-to-node SSH keys
+- **Commit Image Reuse** - Build-backed services are tagged by Git commit and existing node-local images are reused during forced reconciliation
 - **Server Setup** - Configure existing VPS hosts with Docker, local proxy, firewall rules, and monitoring
 - **Placement Strategies** - Control where services run (spread, pinned, global, any, label constraints)
 
@@ -326,9 +337,12 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 |---------|-------------|
 | `tako init` | Initialize new project with template config |
 | `tako validate` | Validate config locally before Git, SSH, build, or deploy work |
+| `tako config explain` | Show inferred runtime, state, mesh, server, and service defaults |
 | `tako setup` | Set up or refresh an existing server with Docker, WireGuard, takod, firewall, and security hardening |
 | `tako deploy` | Deploy application to environment |
 | `tako deploy --force` | Reconcile unchanged app services; broad force skips persistent services unless a service is targeted |
+| `tako domains status` | Check configured or ad-hoc public domain DNS/TLS readiness without redeploying |
+| `tako promote <service>` | Promote a warmed manual blue-green revision |
 | `tako rollback [id]` | Rollback to previous/specific deployment |
 | `tako destroy` | Remove this app/stage services while preserving shared server setup |
 
@@ -362,6 +376,36 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako backup --cleanup <days>` | Delete backups older than N days across environment nodes |
 | `tako drift` | Detect configuration drift between config and running services |
 | `tako drift --watch` | Continuously monitor for drift |
+
+Scheduled off-node backups are opt-in per service. Tako schedules them on the
+takod node that owns the service volume and can upload archives to any
+S3-compatible object store, including AWS S3, Cloudflare R2, MinIO, Backblaze B2
+S3, and DigitalOcean Spaces:
+
+```yaml
+environments:
+  production:
+    services:
+      postgres:
+        image: postgres:16-alpine
+        persistent: true
+        volumes:
+          - pgdata:/var/lib/postgresql/data
+        placement:
+          strategy: pinned
+          servers: [production]
+        backup:
+          schedule: "0 2 * * *" # daily at 02:00 UTC
+          retain: 14
+          storage:
+            provider: r2 # s3, r2, or s3-compatible
+            bucket: ${TAKO_BACKUP_BUCKET}
+            region: auto
+            endpoint: ${TAKO_BACKUP_ENDPOINT}
+            prefix: postgres
+            accessKeyId: ${TAKO_BACKUP_ACCESS_KEY_ID}
+            secretAccessKey: ${TAKO_BACKUP_SECRET_ACCESS_KEY}
+```
 
 ### Secrets Management
 
@@ -424,9 +468,9 @@ services:
 ```yaml
 servers:
   production:
-    host: ${SERVER_HOST}
+    host: ${TAKO_PRODUCTION_HOST}
     user: root
-    sshKey: ~/.ssh/id_ed25519
+    sshKey: ${TAKO_SSH_KEY}
 
 environments:
   production:
@@ -736,6 +780,23 @@ services:
 - Wildcard domains such as `*.example.com` are rejected for now; the built-in
   proxy uses HTTP-01 certificate issuance and needs DNS-01 support before
   wildcard certificates can be automated.
+
+Deployments do not fail by default when DNS is still propagating. After a
+successful reconciliation, `tako deploy` checks DNS and TLS for public domains
+for up to two minutes, reports states such as `pending_dns`, `wrong_dns`,
+`pending_tls`, or `active`, and exits successfully unless `--strict-domains` is
+set. Use `--domain-timeout 0` for a single non-waiting check,
+`--skip-domain-check` to skip the check, and `--domain-target <host-or-ip>` when
+domains should point at a custom edge, CNAME target, or external proxy instead
+of the inferred proxy server host.
+
+Check domains without redeploying:
+
+```bash
+tako domains status -e production
+tako domains status staging.example.com --target sites.example.com --wait 5m
+tako domains status --strict --wait 2m
+```
 
 ### Parallel Deployment (Default)
 

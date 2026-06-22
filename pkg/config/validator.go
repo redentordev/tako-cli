@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/utils"
+	"github.com/robfig/cron/v3"
 )
 
 const (
@@ -642,19 +644,16 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 
 	// Validate deployment strategy
 	if service.Deploy.Strategy == "" {
-		service.Deploy.Strategy = "recreate"
+		service.Deploy.Strategy = DeployStrategyRecreate
 	}
-	if service.Deploy.Strategy != "recreate" {
-		return fmt.Errorf("service %s: invalid deployment strategy %q; takod currently supports recreate", name, service.Deploy.Strategy)
+	if err := validateDeployStrategy(name, service); err != nil {
+		return err
 	}
 
 	// Validate backup if configured
 	if service.Backup != nil {
-		if service.Backup.Schedule == "" {
-			return fmt.Errorf("service %s: backup schedule is required", name)
-		}
-		if service.Backup.Retain <= 0 {
-			service.Backup.Retain = 7 // Default 7 days
+		if err := validateBackupConfig(name, service); err != nil {
+			return err
 		}
 	}
 
@@ -725,6 +724,264 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 		}
 	}
 
+	return nil
+}
+
+func validateBackupConfig(name string, service *ServiceConfig) error {
+	if service.Backup.Schedule == "" {
+		return fmt.Errorf("service %s: backup schedule is required", name)
+	}
+	if err := validateBackupSchedule(service.Backup.Schedule); err != nil {
+		return fmt.Errorf("service %s: invalid backup schedule: %w", name, err)
+	}
+	if service.Backup.Retain <= 0 {
+		service.Backup.Retain = 7
+	}
+	if service.Backup.Retain > 3660 {
+		return fmt.Errorf("service %s: backup retain must be 3660 days or less", name)
+	}
+	if len(service.Backup.Volumes) > 0 {
+		serviceVolumes := backupableServiceVolumeNames(service.Volumes)
+		for index, volume := range service.Backup.Volumes {
+			volume = strings.TrimSpace(volume)
+			if volume == "" {
+				return fmt.Errorf("service %s: backup.volumes[%d] cannot be empty", name, index)
+			}
+			if !serviceVolumes[volume] {
+				return fmt.Errorf("service %s: backup volume %q is not a named service volume", name, volume)
+			}
+			service.Backup.Volumes[index] = volume
+		}
+	}
+	if service.Backup.Storage != nil {
+		if err := validateBackupStorageConfig(name, service.Backup.Storage); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateBackupSchedule(schedule string) error {
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	_, err := parser.Parse(schedule)
+	return err
+}
+
+func validateBackupStorageConfig(name string, storage *BackupStorageConfig) error {
+	storage.Provider = strings.TrimSpace(storage.Provider)
+	if storage.Provider == "" {
+		storage.Provider = BackupStorageProviderS3
+	}
+	switch storage.Provider {
+	case BackupStorageProviderS3, BackupStorageProviderR2, BackupStorageProviderS3Compatible:
+	default:
+		return fmt.Errorf("service %s: backup.storage.provider must be s3, r2, or s3-compatible", name)
+	}
+	storage.Bucket = strings.TrimSpace(storage.Bucket)
+	if storage.Bucket == "" {
+		return fmt.Errorf("service %s: backup.storage.bucket is required", name)
+	}
+	storage.Region = strings.TrimSpace(storage.Region)
+	if storage.Region == "" {
+		if storage.Provider == BackupStorageProviderR2 {
+			storage.Region = "auto"
+		} else {
+			return fmt.Errorf("service %s: backup.storage.region is required", name)
+		}
+	}
+	storage.Endpoint = strings.TrimSpace(storage.Endpoint)
+	if storage.Provider != BackupStorageProviderS3 && storage.Endpoint == "" {
+		return fmt.Errorf("service %s: backup.storage.endpoint is required for %s", name, storage.Provider)
+	}
+	if storage.Endpoint != "" {
+		parsed, err := url.Parse(storage.Endpoint)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("service %s: backup.storage.endpoint must be an absolute URL", name)
+		}
+		if parsed.Scheme != "https" && parsed.Scheme != "http" {
+			return fmt.Errorf("service %s: backup.storage.endpoint must use http or https", name)
+		}
+	}
+	storage.Prefix = cleanBackupStoragePrefix(storage.Prefix)
+	storage.AccessKeyID = strings.TrimSpace(storage.AccessKeyID)
+	if storage.AccessKeyID == "" {
+		return fmt.Errorf("service %s: backup.storage.accessKeyId is required", name)
+	}
+	storage.SecretAccessKey = strings.TrimSpace(storage.SecretAccessKey)
+	if storage.SecretAccessKey == "" {
+		return fmt.Errorf("service %s: backup.storage.secretAccessKey is required", name)
+	}
+	storage.SessionToken = strings.TrimSpace(storage.SessionToken)
+	return nil
+}
+
+func cleanBackupStoragePrefix(prefix string) string {
+	prefix = strings.TrimSpace(prefix)
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "." {
+		return ""
+	}
+	return prefix
+}
+
+func backupableServiceVolumeNames(volumes []string) map[string]bool {
+	names := make(map[string]bool)
+	for _, volume := range volumes {
+		source, target, hasTarget := strings.Cut(volume, ":")
+		source = strings.TrimSpace(source)
+		target = strings.TrimSpace(target)
+		if source == "" {
+			continue
+		}
+		if !hasTarget {
+			names[source] = true
+			continue
+		}
+		if target == "" || strings.HasPrefix(source, "/") || IsNFSVolume(volume) {
+			continue
+		}
+		names[source] = true
+	}
+	return names
+}
+
+func validateDeployStrategy(name string, service *ServiceConfig) error {
+	switch service.Deploy.Strategy {
+	case DeployStrategyRecreate:
+		if service.Deploy.MaxUnavailable < 0 {
+			return fmt.Errorf("service %s: deploy.maxUnavailable cannot be negative", name)
+		}
+		if service.Deploy.GracePeriod != "" {
+			return fmt.Errorf("service %s: deploy.gracePeriod is only supported by blue_green", name)
+		}
+		return nil
+	case DeployStrategyRolling, DeployStrategyBlueGreen:
+		if service.Persistent {
+			return fmt.Errorf("service %s: deploy.strategy=%s is not supported for persistent services; use recreate with declared volumes or move state outside the app container before using no-downtime strategies", name, service.Deploy.Strategy)
+		}
+		if service.Replicas <= 0 {
+			return fmt.Errorf("service %s: deploy.strategy=%s requires replicas greater than 0", name, service.Deploy.Strategy)
+		}
+		if service.Deploy.MaxUnavailable < 0 {
+			return fmt.Errorf("service %s: deploy.maxUnavailable cannot be negative", name)
+		}
+		if service.Deploy.MaxSurge < 0 {
+			return fmt.Errorf("service %s: deploy.maxSurge cannot be negative", name)
+		}
+		if service.Deploy.Promotion != "" && service.Deploy.Promotion != DeployPromotionAutomatic && service.Deploy.Promotion != DeployPromotionManual {
+			return fmt.Errorf("service %s: deploy.promotion must be automatic or manual", name)
+		}
+		if err := validateDeployReadiness(name, service.Deploy.Readiness); err != nil {
+			return err
+		}
+		if err := validateDeploySmokeTest(name, service.Deploy.SmokeTest); err != nil {
+			return err
+		}
+		if service.Deploy.Strategy == DeployStrategyRolling {
+			if service.Deploy.GracePeriod != "" {
+				return fmt.Errorf("service %s: deploy.gracePeriod is only supported by blue_green", name)
+			}
+			if service.Deploy.MaxUnavailable > 0 {
+				return fmt.Errorf("service %s: deploy.maxUnavailable is not supported for rolling yet; current rolling deploys keep the previous revision serving until the new revision is ready", name)
+			}
+			if service.Deploy.MaxSurge > 0 && service.Deploy.MaxSurge < service.Replicas {
+				return fmt.Errorf("service %s: deploy.maxSurge must be at least replicas (%d) for the current rolling engine, or omit it to let Tako warm a full replacement revision", name, service.Replicas)
+			}
+			if service.Deploy.Promotion != "" {
+				return fmt.Errorf("service %s: deploy.promotion is only supported by blue_green", name)
+			}
+			if service.Deploy.SmokeTest.Path != "" || service.Deploy.SmokeTest.ExpectedStatus != 0 {
+				return fmt.Errorf("service %s: deploy.smokeTest is only supported by blue_green", name)
+			}
+			return nil
+		}
+		if service.Deploy.Strategy == DeployStrategyBlueGreen && service.Proxy == nil {
+			return fmt.Errorf("service %s: deploy.strategy=blue_green requires a public proxy route until explicit internal promotion targets are implemented", name)
+		}
+		if service.Deploy.Strategy == DeployStrategyBlueGreen {
+			if service.Deploy.SmokeTest.Path != "" && service.Port <= 0 {
+				return fmt.Errorf("service %s: deploy.smokeTest requires service port", name)
+			}
+			if service.Deploy.MaxUnavailable > 0 {
+				return fmt.Errorf("service %s: deploy.maxUnavailable is not supported for blue_green yet; current blue-green deploys keep the previous revision serving until the new revision is ready and promoted", name)
+			}
+			if service.Deploy.MaxSurge > 0 && service.Deploy.MaxSurge < service.Replicas {
+				return fmt.Errorf("service %s: deploy.maxSurge must be at least replicas (%d) for the current blue_green engine, or omit it to let Tako warm a full green revision", name, service.Replicas)
+			}
+			if err := validateBlueGreenGracePeriod(name, service.Deploy.GracePeriod); err != nil {
+				return err
+			}
+			return nil
+		}
+		return nil
+	default:
+		return fmt.Errorf("service %s: invalid deployment strategy %q; supported strategies are recreate, rolling, and blue_green", name, service.Deploy.Strategy)
+	}
+}
+
+func validateDeployReadiness(name string, readiness DeployReadinessConfig) error {
+	hasHTTP := readiness.Path != ""
+	hasTCP := readiness.TCPPort > 0
+	if readiness.TCPPort < 0 || readiness.TCPPort > 65535 {
+		return fmt.Errorf("service %s: deploy.readiness.tcpPort must be between 1 and 65535", name)
+	}
+	if hasHTTP && hasTCP {
+		return fmt.Errorf("service %s: deploy.readiness cannot set both path and tcpPort", name)
+	}
+	if hasHTTP {
+		if _, err := normalizeHTTPPath(readiness.Path); err != nil {
+			return fmt.Errorf("service %s: invalid deploy.readiness.path: %w", name, err)
+		}
+	}
+	return validateRolloutDurations(name, "deploy.readiness", readiness.Timeout, readiness.Interval)
+}
+
+func validateDeploySmokeTest(name string, smoke DeploySmokeTestConfig) error {
+	if smoke.Path != "" {
+		if _, err := normalizeHTTPPath(smoke.Path); err != nil {
+			return fmt.Errorf("service %s: invalid deploy.smokeTest.path: %w", name, err)
+		}
+	}
+	if smoke.ExpectedStatus != 0 && (smoke.ExpectedStatus < 100 || smoke.ExpectedStatus > 599) {
+		return fmt.Errorf("service %s: deploy.smokeTest.expectedStatus must be between 100 and 599", name)
+	}
+	return nil
+}
+
+func validateBlueGreenGracePeriod(name string, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("service %s: deploy.gracePeriod must be a duration like 30s or 2m: %w", name, err)
+	}
+	if duration < 0 {
+		return fmt.Errorf("service %s: deploy.gracePeriod cannot be negative", name)
+	}
+	if duration > maxServiceHealthDuration {
+		return fmt.Errorf("service %s: deploy.gracePeriod cannot exceed %s", name, maxServiceHealthDuration)
+	}
+	return nil
+}
+
+func validateRolloutDurations(name string, path string, durations ...string) error {
+	for _, value := range durations {
+		if value == "" {
+			continue
+		}
+		duration, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("service %s: %s duration %q is invalid: %w", name, path, value, err)
+		}
+		if duration <= 0 {
+			return fmt.Errorf("service %s: %s duration %q must be positive", name, path, value)
+		}
+		if duration > maxServiceHealthDuration {
+			return fmt.Errorf("service %s: %s duration %q is too large; max is %s", name, path, value, maxServiceHealthDuration)
+		}
+	}
 	return nil
 }
 
