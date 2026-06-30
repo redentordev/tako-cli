@@ -1,0 +1,58 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-rollback - Rollback to previous deployment
+
+
+.SH SYNOPSIS
+\fBtako rollback [deployment-id] [flags]\fP
+
+
+.SH DESCRIPTION
+Rollback to a previous deployment.
+
+.PP
+If no deployment-id is provided, rolls back to the most recent successful deployment.
+Specify a deployment-id to rollback to a specific deployment.
+
+.PP
+Rollback reads the freshest reachable deployment history from the mesh.
+
+.PP
+Use 'tako history' to view available deployments.
+
+.PP
+Examples:
+  tako rollback --service web                 # Rollback to previous deployment
+  tako rollback --service web deploy-123      # Rollback to specific deployment
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for rollback
+
+.PP
+\fB--service\fP=""
+	Service to rollback (required)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

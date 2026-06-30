@@ -17,20 +17,25 @@ import (
 )
 
 type Server struct {
-	socket                string
-	dataDir               string
-	version               string
-	nodeName              string
-	actualRefreshInterval time.Duration
-	startedAt             time.Time
-	server                *http.Server
-	backupScheduler       *BackupScheduler
-	mu                    sync.Mutex
+	socket                  string
+	dataDir                 string
+	version                 string
+	nodeName                string
+	actualRefreshInterval   time.Duration
+	buildCachePruneInterval time.Duration
+	buildCacheKeepStorage   string
+	startedAt               time.Time
+	server                  *http.Server
+	backupScheduler         *BackupScheduler
+	mu                      sync.Mutex
 }
 
 const (
-	takodReadHeaderTimeout = 5 * time.Second
-	takodMaxJSONBodyBytes  = 16 << 20
+	takodReadHeaderTimeout         = 5 * time.Second
+	takodMaxJSONBodyBytes          = 16 << 20
+	DefaultBuildCachePruneInterval = 24 * time.Hour
+	buildCachePruneCommandTimeout  = 30 * time.Minute
+	buildCachePruneMaxInitialDelay = 5 * time.Minute
 )
 
 func decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst any) error {
@@ -67,19 +72,23 @@ func NewServer(socket string, dataDir string, version string) *Server {
 }
 
 type ServerOptions struct {
-	NodeName              string
-	ActualRefreshInterval time.Duration
+	NodeName                string
+	ActualRefreshInterval   time.Duration
+	BuildCachePruneInterval time.Duration
+	BuildCacheKeepStorage   string
 }
 
 func NewServerWithOptions(socket string, dataDir string, version string, opts ServerOptions) *Server {
 	return &Server{
-		socket:                socket,
-		dataDir:               dataDir,
-		version:               version,
-		nodeName:              opts.NodeName,
-		actualRefreshInterval: opts.ActualRefreshInterval,
-		startedAt:             time.Now().UTC(),
-		backupScheduler:       NewBackupScheduler(dataDir),
+		socket:                  socket,
+		dataDir:                 dataDir,
+		version:                 version,
+		nodeName:                opts.NodeName,
+		actualRefreshInterval:   opts.ActualRefreshInterval,
+		buildCachePruneInterval: opts.BuildCachePruneInterval,
+		buildCacheKeepStorage:   opts.BuildCacheKeepStorage,
+		startedAt:               time.Now().UTC(),
+		backupScheduler:         NewBackupScheduler(dataDir),
 	}
 }
 
@@ -146,6 +155,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.actualRefreshInterval > 0 {
 		go s.runActualRefreshLoop(ctx)
 	}
+	if s.buildCachePruneInterval > 0 {
+		go s.runBuildCachePruneLoop(ctx)
+	}
 	go s.backupScheduler.Run(ctx)
 
 	errCh := make(chan error, 1)
@@ -200,6 +212,44 @@ func (s *Server) runActualRefreshLoop(ctx context.Context) {
 			refresh()
 		}
 	}
+}
+
+func (s *Server) runBuildCachePruneLoop(ctx context.Context) {
+	interval := s.buildCachePruneInterval
+	if interval <= 0 {
+		return
+	}
+	keepStorage := s.buildCacheKeepStorage
+	if keepStorage == "" {
+		keepStorage = DefaultBuildCacheKeepStorage
+	}
+	if !isSafeBuildCacheKeepStorage(keepStorage) {
+		fmt.Fprintf(os.Stderr, "takod build cache pruning disabled: invalid keep-storage value %q\n", keepStorage)
+		return
+	}
+
+	timer := time.NewTimer(buildCachePruneInitialDelay(interval))
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			pruneCtx, cancel := context.WithTimeout(ctx, buildCachePruneCommandTimeout)
+			if _, err := cleanupBuildCache(pruneCtx, keepStorage); err != nil && !errors.Is(err, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "takod build cache prune failed: %v\n", err)
+			}
+			cancel()
+			timer.Reset(interval)
+		}
+	}
+}
+
+func buildCachePruneInitialDelay(interval time.Duration) time.Duration {
+	if interval < buildCachePruneMaxInitialDelay {
+		return interval
+	}
+	return buildCachePruneMaxInitialDelay
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

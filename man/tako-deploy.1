@@ -1,0 +1,89 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-deploy - Deploy your application to configured servers
+
+
+.SH SYNOPSIS
+\fBtako deploy [flags]\fP
+
+
+.SH DESCRIPTION
+Deploy your application by reconciling desired services on the takod mesh.
+
+.PP
+The deployment process:
+  1. Build or select the service image
+  2. Prepare environment takod nodes
+  3. Recreate service containers to match desired state
+  4. Replicate deployment state
+
+.PP
+If a step fails, deployment stops and records the failed state for inspection or rollback.
+
+
+.SH OPTIONS
+\fB--allow-dirty\fP[=false]
+	Allow deploying with uncommitted local changes
+
+.PP
+\fB--build-strategy\fP=""
+	Override image build strategy: remote, local, or auto
+
+.PP
+\fB--domain-target\fP=[]
+	Expected DNS target; repeat for custom edge/CNAME targets (defaults to proxy server hosts)
+
+.PP
+\fB--domain-timeout\fP=2m0s
+	Wait up to this duration for public DNS/TLS readiness; 0 checks once
+
+.PP
+\fB--force\fP[=false]
+	Reconcile selected services even when no config drift is detected
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for deploy
+
+.PP
+\fB--service\fP=""
+	Deploy specific service
+
+.PP
+\fB--skip-build\fP[=false]
+	Skip building the service image
+
+.PP
+\fB--skip-domain-check\fP[=false]
+	Skip post-deploy DNS/TLS checks for public domains
+
+.PP
+\fB--strict-domains\fP[=false]
+	Fail deploy if public domains are not DNS/TLS active after waiting
+
+.PP
+\fB-y\fP, \fB--yes\fP[=false]
+	Skip confirmation prompts (non-interactive mode)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

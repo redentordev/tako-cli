@@ -1,0 +1,71 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-upgrade - Upgrade Tako CLI to the latest version
+
+
+.SH SYNOPSIS
+\fBtako upgrade [flags]\fP
+
+
+.SH DESCRIPTION
+Upgrade Tako CLI to the latest version from GitHub releases.
+
+.PP
+This command will:
+  - Check for the latest version
+  - Download the appropriate binary for your platform
+  - Replace the current binary with the new version
+  - Create a backup of the current version (just in case)
+
+.PP
+The upgrade is performed in-place and requires the same permissions
+as the original installation.
+
+
+.SH OPTIONS
+\fB-c\fP, \fB--check\fP[=false]
+	Only check for updates, don't upgrade
+
+.PP
+\fB-f\fP, \fB--force\fP[=false]
+	Force upgrade even if already on latest version
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for upgrade
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH EXAMPLE
+.EX
+  # Check for updates without upgrading
+  tako upgrade --check
+
+  # Upgrade to the latest version
+  tako upgrade
+
+  # Force upgrade even if already on latest
+  tako upgrade --force
+.EE
+
+
+.SH SEE ALSO
+\fBtako(1)\fP, \fBtako-upgrade-servers(1)\fP

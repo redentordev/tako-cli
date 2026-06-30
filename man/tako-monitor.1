@@ -1,0 +1,98 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-monitor - Continuously monitor deployed services
+
+
+.SH SYNOPSIS
+\fBtako monitor [flags]\fP
+
+
+.SH DESCRIPTION
+Monitor service health and send webhook alerts on failures.
+
+.PP
+This command continuously checks service health at configured intervals.
+When a service fails, it sends a POST request to the configured webhook
+with failure details.
+
+.PP
+For services with domains (load-balanced), it checks the domain endpoint.
+For internal services, it checks individual container replicas.
+For services without health checks, it verifies containers are running.
+
+.PP
+The monitor runs indefinitely until stopped with Ctrl+C. Use --once to
+run a single check and exit.
+
+.PP
+Examples:
+  tako monitor                  # Monitor all services continuously
+  tako monitor --service web    # Monitor specific service only
+  tako monitor --once           # Run single check and exit
+  tako monitor -v               # Verbose output
+
+.PP
+Configuration:
+Services must have monitoring enabled in tako.yaml:
+
+.PP
+services:
+    web:
+      port: 3000
+      proxy:
+        domain: example.com
+      healthCheck:
+        path: /health
+      monitoring:
+        enabled: true
+        interval: 60s
+        webhook: https://hooks.slack.com/services/xxx
+
+.PP
+Webhooks receive JSON payloads on service failures:
+  {
+    "event": "service_down",
+    "project": "myapp",
+    "service": "web",
+    "severity": "critical",
+    "details": {
+      "error": "Health check failed: 503",
+      "replicas_down": 2
+    }
+  }
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for monitor
+
+.PP
+\fB--once\fP[=false]
+	Run single check and exit (don't monitor continuously)
+
+.PP
+\fB-s\fP, \fB--service\fP=""
+	Monitor specific service only
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

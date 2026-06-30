@@ -35,7 +35,8 @@ brew install tako
    ```
 
 3. Update `Formula/tako.rb` in `redentordev/homebrew-tako` with the new
-   version, binary URLs, and SHA256 values.
+   version, binary URLs, SHA256 values, and `tako-manpages.tar.gz` asset.
+   The formula should install the manual pages into `man1`.
 4. Commit and push the tap update.
 5. Verify the published tap:
 

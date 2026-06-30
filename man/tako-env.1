@@ -1,0 +1,52 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-env - Manage environment credentials in the takod mesh
+
+
+.SH SYNOPSIS
+\fBtako env [flags]\fP
+
+
+.SH DESCRIPTION
+Push and pull encrypted environment files (.env, secrets) to/from the takod mesh.
+
+.PP
+This allows you to securely transfer credentials between machines. Files are
+encrypted with a passphrase using Argon2id + AES-256-GCM before upload.
+
+.PP
+Examples:
+  tako env push              # Encrypt and upload .env + secrets
+  tako env pull              # Download and decrypt to local
+  tako env pull --force      # Overwrite existing local files
+
+.PP
+For CI, set TAKO_ENV_PASSPHRASE to avoid interactive prompts.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for env
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP, \fBtako-env-pull(1)\fP, \fBtako-env-push(1)\fP

@@ -83,6 +83,16 @@ func TestNewTakodHTTPServerSetsHeaderTimeout(t *testing.T) {
 	}
 }
 
+func TestBuildCachePruneInitialDelayCapsLongIntervals(t *testing.T) {
+	if got := buildCachePruneInitialDelay(DefaultBuildCachePruneInterval); got != buildCachePruneMaxInitialDelay {
+		t.Fatalf("initial delay = %s, want %s", got, buildCachePruneMaxInitialDelay)
+	}
+	short := 30 * time.Second
+	if got := buildCachePruneInitialDelay(short); got != short {
+		t.Fatalf("short initial delay = %s, want %s", got, short)
+	}
+}
+
 func TestRemoveStaleSocketRejectsNonSocket(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "takod.sock")
 	if err := os.WriteFile(path, []byte("not a socket"), 0600); err != nil {

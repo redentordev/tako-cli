@@ -1,0 +1,64 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-logs - View logs from deployed services
+
+
+.SH SYNOPSIS
+\fBtako logs [flags]\fP
+
+
+.SH DESCRIPTION
+View logs from deployed services across the environment mesh.
+
+.PP
+If --server is not specified, streams logs from every configured environment node.
+
+.PP
+Examples:
+  tako logs --service web               # View logs from the environment mesh
+  tako logs --service web --server prod # View logs from a specific node
+  tako logs --service web -f            # Follow logs in real-time
+
+
+.SH OPTIONS
+\fB-f\fP, \fB--follow\fP[=false]
+	Follow log output
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for logs
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Node to view logs from (default: all environment nodes)
+
+.PP
+\fB--service\fP=""
+	Service to view logs from (required)
+
+.PP
+\fB-n\fP, \fB--tail\fP=100
+	Number of lines to show
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

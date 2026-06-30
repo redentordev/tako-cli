@@ -1,0 +1,58 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-setup - Set up server with takod, proxy, and security hardening
+
+
+.SH SYNOPSIS
+\fBtako setup [flags]\fP
+
+
+.SH DESCRIPTION
+Setup configures your VPS server with all necessary components:
+  - Container runtime prerequisites
+  - WireGuard mesh networking
+  - takod node-local runtime
+  - tako-proxy for automatic SSL and load balancing
+  - UFW firewall configuration
+  - Security hardening (disable root login, fail2ban)
+  - Deploy user creation and SSH key setup
+  - Monitoring agent for system metrics
+
+.PP
+This only needs to be run once per server.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for setup
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Server to set up (default: all servers)
+
+.PP
+\fB--takod-binary\fP=""
+	Path to a Linux tako binary to install as takod during setup (for development/testing)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

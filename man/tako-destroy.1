@@ -1,0 +1,93 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-destroy - Remove deployed application and optionally clean up app-owned leftovers
+
+
+.SH SYNOPSIS
+\fBtako destroy [flags]\fP
+
+
+.SH DESCRIPTION
+Destroy the deployed application runtime and clean up app-owned resources.
+
+.PP
+This command has two modes:
+.IP "  1." 5
+DECOMMISSION MODE (default):
+.RS
+.IP \(bu 2
+Stops and removes application service replicas
+.IP \(bu 2
+Removes application service images
+.IP \(bu 2
+Removes deployment files
+.IP \(bu 2
+Keeps tako-proxy, logs, and server setup
+.IP \(bu 2
+Safe for production - can redeploy later
+.RE
+.IP "  2." 5
+PURGE MODE (--purge-all):
+.RS
+.IP \(bu 2
+Everything from decommission mode, PLUS:
+.IP \(bu 2
+Prunes unused app-owned volumes
+.IP \(bu 2
+Prunes stopped app containers and old app images
+.IP \(bu 2
+Keeps shared takod and tako-proxy runtime intact
+.IP \(bu 2
+Safe when unrelated projects share the same node
+.RE
+
+.PP
+Safety Features:
+   - Production servers require explicit confirmation
+   - Shows what will be removed before proceeding
+   - Use --force to skip confirmation prompts
+
+.PP
+Examples:
+   tako destroy                    # Decommission app, keep server setup
+   tako destroy --purge-all        # Also prune app-owned leftovers
+   tako destroy --force            # Skip confirmation prompts
+
+.PP
+PURGE MODE is app/stage scoped. It does not remove shared takod or tako-proxy.
+
+
+.SH OPTIONS
+\fB--force\fP[=false]
+	Skip confirmation prompts
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for destroy
+
+.PP
+\fB--purge-all\fP[=false]
+	Also prune app-owned leftovers after decommission
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

@@ -1,0 +1,70 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-drift - Detect configuration drift
+
+
+.SH SYNOPSIS
+\fBtako drift [flags]\fP
+
+
+.SH DESCRIPTION
+Check for drift between your configuration and running services.
+
+.PP
+Drift detection compares:
+  - Service existence (missing services)
+  - Replica counts (services with fewer replicas than expected)
+  - Unexpected services (running but not in config)
+
+.PP
+Examples:
+  # Check once
+  tako drift
+
+.PP
+# Watch continuously (check every 5 minutes)
+  tako drift --watch --interval 5m
+
+.PP
+# Watch with notifications
+  tako drift --watch --webhook https://hooks.slack.com/...
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for drift
+
+.PP
+\fB--interval\fP=5m0s
+	Check interval for watch mode
+
+.PP
+\fB--watch\fP[=false]
+	Continuously watch for drift
+
+.PP
+\fB--webhook\fP=""
+	Webhook URL for notifications (Slack/Discord/generic)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

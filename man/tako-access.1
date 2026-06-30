@@ -1,0 +1,73 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-access - Stream proxy access logs
+
+
+.SH SYNOPSIS
+\fBtako access [service] [flags]\fP
+
+
+.SH DESCRIPTION
+Stream and format access logs from tako-proxy.
+
+.PP
+This command shows HTTP request logs including:
+  - Timestamp
+  - HTTP status code (color-coded)
+  - HTTP method
+  - Client IP address
+  - Response time
+  - Response size
+  - Request path
+
+.PP
+Similar to Vercel or Cloudflare observability, but for your own infrastructure.
+
+.PP
+Examples:
+  tako access              # Show recent logs from the environment mesh
+  tako access -f           # Follow logs in real-time
+  tako access web          # Show logs for 'web' service
+  tako access --server prod # Show logs from a specific node
+  tako access --tail 50    # Show last 50 log entries
+  tako access -v           # Verbose mode (includes User-Agent, Referer)
+
+
+.SH OPTIONS
+\fB-f\fP, \fB--follow\fP[=false]
+	Follow log output
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for access
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Node to fetch logs from (default: all environment nodes)
+
+.PP
+\fB-n\fP, \fB--tail\fP=50
+	Number of lines to show from the end
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

@@ -11,6 +11,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/updater"
 	"github.com/spf13/cobra"
+	"github.com/spf13/cobra/doc"
 	"github.com/spf13/viper"
 )
 
@@ -57,6 +58,30 @@ func Execute() {
 	err := rootCmd.Execute()
 	if err != nil {
 		os.Exit(1)
+	}
+}
+
+// GenerateManPages writes Unix manual pages for the current command tree.
+func GenerateManPages(dir string) error {
+	if dir == "" {
+		return fmt.Errorf("manual page output directory is required")
+	}
+	disableManPageAutoGenTag(rootCmd)
+	manualDate := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	header := &doc.GenManHeader{
+		Title:   "TAKO",
+		Section: "1",
+		Date:    &manualDate,
+		Source:  "Tako CLI",
+		Manual:  "Tako CLI Manual",
+	}
+	return doc.GenManTree(rootCmd, header, dir)
+}
+
+func disableManPageAutoGenTag(command *cobra.Command) {
+	command.DisableAutoGenTag = true
+	for _, child := range command.Commands() {
+		disableManPageAutoGenTag(child)
 	}
 }
 

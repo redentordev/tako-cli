@@ -1,0 +1,55 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-state-pull - Pull remote state to local .tako directory
+
+
+.SH SYNOPSIS
+\fBtako state pull [flags]\fP
+
+
+.SH DESCRIPTION
+Pull deployment state from the takod mesh to your local .tako directory.
+
+.PP
+This is useful when:
+  - Cloning a project that has already been deployed
+  - Working on a different machine
+  - Recovering local state after accidental deletion
+
+.PP
+The command will:
+  1. Connect to reachable environment nodes
+  2. Read deployment history from takod state
+  3. Refresh local deployment records in .tako without touching local secrets
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for pull
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Pull state from a specific server instead of the full mesh
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-state(1)\fP

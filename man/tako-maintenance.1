@@ -1,0 +1,65 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-maintenance - Enable maintenance mode for a service
+
+
+.SH SYNOPSIS
+\fBtako maintenance [flags]\fP
+
+
+.SH DESCRIPTION
+Enable maintenance mode for a public-facing service.
+
+.PP
+This command deploys a maintenance page container with proxy routing
+that takes priority over the main service. The main service continues
+running in the background.
+
+.PP
+Custom Maintenance Page:
+  Create a 'maintenance.html' file in your project directory to use a custom page.
+  If not provided, a simple default page will be used.
+
+.PP
+To restore normal operation, use 'tako live'.
+
+.PP
+Examples:
+  tako maintenance --service web               # Enable on all environment nodes
+
+.PP
+# With custom page
+  echo 'Custom Maintenance\&' > maintenance.html
+  tako maintenance --service web
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for maintenance
+
+.PP
+\fB--service\fP=""
+	Service to put in maintenance mode (required)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

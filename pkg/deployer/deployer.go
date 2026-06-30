@@ -61,6 +61,7 @@ type Deployer struct {
 	meshPortCache     map[meshUpstreamPortKey]int
 	meshPortCacheMu   sync.Mutex
 	meshPortAllocator func(serverName string, serviceName string, revision string, slot int, containerPort int) (int, error)
+	localImageClient  localImageClient
 }
 
 const (
@@ -287,6 +288,78 @@ func (d *Deployer) buildImageOnNode(serverName string, serviceName string, servi
 	return d.buildImageWithClient(client, serviceName, service, imageRef...)
 }
 
+type preparedBuildContext struct {
+	ContextPath    string
+	AbsContextPath string
+	Dockerfile     string
+}
+
+func (d *Deployer) prepareBuildContext(service *config.ServiceConfig) (*preparedBuildContext, error) {
+	if service == nil || service.Build == "" {
+		return nil, fmt.Errorf("service build context is required")
+	}
+
+	contextPath := service.Build
+	if service.Dockerfile != "" {
+		dockerfilePath := filepath.Join(contextPath, filepath.Clean(service.Dockerfile))
+		if _, err := os.Stat(dockerfilePath); err != nil {
+			return nil, fmt.Errorf("dockerfile does not exist in build context: %s", service.Dockerfile)
+		}
+		if d.verbose {
+			fmt.Printf("  Found Dockerfile: %s\n", service.Dockerfile)
+		}
+	} else {
+		dockerfilePaths := []string{
+			filepath.Join(contextPath, "Dockerfile"),
+			filepath.Join(contextPath, "Dockerfile.prod"),
+			filepath.Join(contextPath, "dockerfile"),
+			filepath.Join(contextPath, ".dockerfile"),
+		}
+
+		hasDockerfile := false
+		for _, path := range dockerfilePaths {
+			if _, err := os.Stat(path); err == nil {
+				hasDockerfile = true
+				if d.verbose {
+					fmt.Printf("  Found Dockerfile: %s\n", filepath.Base(path))
+				}
+				break
+			}
+		}
+
+		if !hasDockerfile {
+			if d.verbose {
+				fmt.Printf("  No Dockerfile found - using Nixpacks auto-detection...\n")
+			}
+
+			detector := nixpacks.NewDetector(contextPath, d.verbose)
+			framework, err := detector.DetectFramework()
+			if err != nil {
+				return nil, fmt.Errorf("failed to detect framework: %w\nHint: Either add a Dockerfile or ensure your project has recognizable framework files (package.json, go.mod, etc.)", err)
+			}
+
+			if d.verbose {
+				fmt.Printf("  Detected framework: %s\n", framework)
+			}
+
+			if err := detector.GenerateDockerfile(); err != nil {
+				return nil, fmt.Errorf("failed to generate Dockerfile: %w", err)
+			}
+		}
+	}
+
+	absContextPath, err := filepath.Abs(contextPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
+	return &preparedBuildContext{
+		ContextPath:    contextPath,
+		AbsContextPath: absContextPath,
+		Dockerfile:     service.Dockerfile,
+	}, nil
+}
+
 func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, service *config.ServiceConfig, imageRef ...string) (string, error) {
 	if client == nil {
 		return "", fmt.Errorf("ssh client is required")
@@ -298,74 +371,19 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 	}
 
 	if service.Build != "" {
-		// Use service.Build as the build context path
-		contextPath := service.Build
-
-		if service.Dockerfile != "" {
-			dockerfilePath := filepath.Join(contextPath, filepath.Clean(service.Dockerfile))
-			if _, err := os.Stat(dockerfilePath); err != nil {
-				return "", fmt.Errorf("dockerfile does not exist in build context: %s", service.Dockerfile)
-			}
-			if d.verbose {
-				fmt.Printf("  Found Dockerfile: %s\n", service.Dockerfile)
-			}
-		} else {
-			// Auto-detect Dockerfile in the build context
-			dockerfilePaths := []string{
-				filepath.Join(contextPath, "Dockerfile"),
-				filepath.Join(contextPath, "Dockerfile.prod"),
-				filepath.Join(contextPath, "dockerfile"),
-				filepath.Join(contextPath, ".dockerfile"),
-			}
-
-			hasDockerfile := false
-			for _, path := range dockerfilePaths {
-				if _, err := os.Stat(path); err == nil {
-					hasDockerfile = true
-					if d.verbose {
-						fmt.Printf("  Found Dockerfile: %s\n", filepath.Base(path))
-					}
-					break
-				}
-			}
-
-			if !hasDockerfile {
-				// No Dockerfile - try to use Nixpacks
-				if d.verbose {
-					fmt.Printf("  No Dockerfile found - using Nixpacks auto-detection...\n")
-				}
-
-				detector := nixpacks.NewDetector(contextPath, d.verbose)
-
-				// Detect framework
-				framework, err := detector.DetectFramework()
-				if err != nil {
-					return "", fmt.Errorf("failed to detect framework: %w\nHint: Either add a Dockerfile or ensure your project has recognizable framework files (package.json, go.mod, etc.)", err)
-				}
-
-				if d.verbose {
-					fmt.Printf("  Detected framework: %s\n", framework)
-				}
-
-				if err := detector.GenerateDockerfile(); err != nil {
-					return "", fmt.Errorf("failed to generate Dockerfile: %w", err)
-				}
-			}
+		prepared, err := d.prepareBuildContext(service)
+		if err != nil {
+			return "", err
 		}
 
 		if d.verbose {
 			fmt.Printf("  Streaming build context to takod...\n")
-			fmt.Printf("  Context path: %s\n", contextPath)
-		}
-
-		absContextPath, err := filepath.Abs(contextPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to get absolute path: %w", err)
+			fmt.Printf("  Context path: %s\n", prepared.ContextPath)
 		}
 
 		archivePath := filepath.Join(os.TempDir(), fmt.Sprintf("tako-build-%s-%d.tar.gz", serviceName, time.Now().UnixNano()))
 		archiveStart := time.Now()
-		if err := createCrossPlatformTarGz(absContextPath, archivePath); err != nil {
+		if err := createCrossPlatformTarGz(prepared.AbsContextPath, archivePath); err != nil {
 			return "", fmt.Errorf("failed to create build context archive: %w", err)
 		}
 		archiveDuration := time.Since(archiveStart)

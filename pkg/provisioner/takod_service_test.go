@@ -121,7 +121,7 @@ func TestTakodSystemdUnitGrantsTakoGroupSocketAccess(t *testing.T) {
 		"RuntimeDirectoryMode=0770",
 		"UMask=0007",
 		"Requires=docker.service",
-		"ExecStart=/usr/local/bin/tako takod run --socket /run/tako/takod.sock --data-dir /var/lib/tako --node node-a --actual-refresh-interval 30s",
+		"ExecStart=/usr/local/bin/tako takod run --socket /run/tako/takod.sock --data-dir /var/lib/tako --node node-a --actual-refresh-interval 30s --build-cache-prune-interval 24h0m0s --build-cache-keep-storage 20GB",
 	} {
 		if !strings.Contains(unit, required) {
 			t.Fatalf("systemd unit is missing %q:\n%s", required, unit)

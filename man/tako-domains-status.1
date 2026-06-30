@@ -1,0 +1,64 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-domains-status - Check DNS routing and TLS readiness for configured or ad-hoc domains
+
+
+.SH SYNOPSIS
+\fBtako domains status [domain...] [flags]\fP
+
+
+.SH DESCRIPTION
+Check public domain DNS and TLS readiness without redeploying.
+
+.PP
+Without arguments, Tako checks the explicit proxy domains configured for the
+selected environment. With domain arguments, Tako checks those domains as
+ad-hoc domains against the same expected proxy targets.
+
+.PP
+The check is flexible: a domain is considered active when HTTPS works, even if
+DNS resolves through a CDN or external proxy instead of directly to the VPS.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for status
+
+.PP
+\fB-s\fP, \fB--service\fP=""
+	Only check configured domains for one service
+
+.PP
+\fB--strict\fP[=false]
+	Exit non-zero if any checked domain is not active
+
+.PP
+\fB--target\fP=[]
+	Expected DNS target; repeat for custom edge/CNAME targets (defaults to proxy server hosts)
+
+.PP
+\fB--wait\fP=0s
+	Wait up to this duration for DNS/TLS to become active (for example 2m); 0 checks once
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-domains(1)\fP

@@ -1,216 +1,174 @@
-// Package unregistry distributes locally built images across the takod mesh
-// without running Docker mutations from the CLI.
+// Package unregistry builds local images and transfers them to remote Docker
+// hosts through psviderski/unregistry's docker-pussh plugin.
 package unregistry
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"net/url"
+	"os"
+	"os/exec"
 	"strings"
-
-	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/ssh"
-	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
-// Manager handles image distribution across takod nodes.
-type Manager struct {
-	config      *config.Config
-	sshPool     *ssh.Pool
-	environment string
-	verbose     bool
+// CommandSpec describes a local command invocation.
+type CommandSpec struct {
+	Dir  string
+	Env  []string
+	Name string
+	Args []string
 }
 
-// NewManager creates a new unregistry manager.
-func NewManager(cfg *config.Config, sshPool *ssh.Pool, environment string, verbose bool) *Manager {
-	return &Manager{
-		config:      cfg,
-		sshPool:     sshPool,
-		environment: environment,
-		verbose:     verbose,
-	}
+// Runner executes local commands. Tests use this to verify exact Docker CLI
+// invocations without requiring Docker.
+type Runner interface {
+	Run(ctx context.Context, spec CommandSpec) (string, error)
 }
 
-// DistributeImageParallel streams an image from the source node's takod daemon
-// into every peer node's takod daemon. The CLI brokers bytes over its existing
-// SSH sessions so peer nodes do not need operator SSH keys or direct SSH trust
-// between each other.
-func (m *Manager) DistributeImageParallel(sourceClient *ssh.Client, imageName string) error {
-	if m.verbose {
-		fmt.Printf("\n-> Distributing image to takod peers...\n")
-		fmt.Printf("   Image: %s\n", imageName)
+// ExecRunner runs commands with os/exec.
+type ExecRunner struct {
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
+// Run executes a local command and returns combined stdout/stderr output.
+func (r ExecRunner) Run(ctx context.Context, spec CommandSpec) (string, error) {
+	if strings.TrimSpace(spec.Name) == "" {
+		return "", fmt.Errorf("command name is required")
+	}
+	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
+	if spec.Dir != "" {
+		cmd.Dir = spec.Dir
+	}
+	if len(spec.Env) > 0 {
+		cmd.Env = append(os.Environ(), spec.Env...)
 	}
 
-	sourceHost := ""
-	if sourceClient != nil {
-		sourceHost = sourceClient.Host()
+	var combined bytes.Buffer
+	if r.Stdout != nil {
+		cmd.Stdout = io.MultiWriter(r.Stdout, &combined)
+	} else {
+		cmd.Stdout = &combined
 	}
-	peers, err := unregistryPeerServers(m.config, m.environment, sourceHost)
-	if err != nil {
-		return err
+	if r.Stderr != nil {
+		cmd.Stderr = io.MultiWriter(r.Stderr, &combined)
+	} else {
+		cmd.Stderr = &combined
 	}
-	if len(peers) == 0 {
-		if m.verbose {
-			fmt.Printf("   No peer nodes to distribute to\n")
+
+	if err := cmd.Run(); err != nil {
+		output := strings.TrimSpace(combined.String())
+		if output != "" {
+			return output, fmt.Errorf("%s %s failed: %w: %s", spec.Name, strings.Join(spec.Args, " "), err, output)
 		}
-		return nil
+		return "", fmt.Errorf("%s %s failed: %w", spec.Name, strings.Join(spec.Args, " "), err)
 	}
+	return combined.String(), nil
+}
 
-	if m.verbose {
-		fmt.Printf("   Streaming to %d peer node(s) in parallel...\n", len(peers))
-	}
+// Client wraps Docker buildx and docker-pussh.
+type Client struct {
+	Runner Runner
+	Stdout io.Writer
+	Stderr io.Writer
+}
 
-	type result struct {
-		serverName string
-		err        error
+func (c Client) runner() Runner {
+	if c.Runner != nil {
+		return c.Runner
 	}
-	results := make(chan result, len(peers))
-	for _, serverName := range peers {
-		go func(name string) {
-			server := m.config.Servers[name]
-			err := m.streamImageViaTakod(sourceClient, server, imageName)
-			results <- result{serverName: name, err: err}
-		}(serverName)
-	}
+	return ExecRunner{Stdout: c.Stdout, Stderr: c.Stderr}
+}
 
-	var failures []string
-	for i := 0; i < len(peers); i++ {
-		result := <-results
-		if result.err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", result.serverName, result.err))
-			if m.verbose {
-				fmt.Printf("   X %s: failed\n", result.serverName)
-			}
-			continue
+// CheckAvailable verifies local Docker, buildx, and docker-pussh are usable.
+func (c Client) CheckAvailable(ctx context.Context) error {
+	checks := []CommandSpec{
+		{Name: "docker", Args: []string{"version"}},
+		{Name: "docker", Args: []string{"buildx", "version"}},
+		{Name: "docker", Args: []string{"pussh", "--help"}},
+	}
+	for _, check := range checks {
+		if _, err := c.runner().Run(ctx, check); err != nil {
+			return fmt.Errorf("local unregistry build prerequisites are not ready: %w", err)
 		}
-		if m.verbose {
-			fmt.Printf("   ✓ %s: done\n", result.serverName)
-		}
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("failed to distribute image to some nodes:\n  %s", strings.Join(failures, "\n  "))
-	}
-	if m.verbose {
-		fmt.Printf("   Image distributed successfully to all nodes\n")
 	}
 	return nil
 }
 
-func unregistryPeerServers(cfg *config.Config, environment string, sourceHost string) ([]string, error) {
-	servers, err := cfg.GetEnvironmentServers(environment)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get environment servers: %w", err)
-	}
-
-	peers := make([]string, 0, len(servers))
-	for _, serverName := range servers {
-		server, ok := cfg.Servers[serverName]
-		if !ok {
-			return nil, fmt.Errorf("server %s not found in configuration", serverName)
-		}
-		if sourceHost != "" && server.Host == sourceHost {
-			continue
-		}
-		peers = append(peers, serverName)
-	}
-	return peers, nil
+// BuildRequest describes a platform-specific local build.
+type BuildRequest struct {
+	Image      string
+	ContextDir string
+	Dockerfile string
+	Platform   string
 }
 
-func (m *Manager) streamImageViaTakod(sourceClient *ssh.Client, peerServer config.ServerConfig, imageName string) error {
-	if sourceClient == nil {
-		return fmt.Errorf("source SSH client is required")
+// Build builds and loads a single-platform image into local Docker.
+func (c Client) Build(ctx context.Context, req BuildRequest) error {
+	if strings.TrimSpace(req.Image) == "" {
+		return fmt.Errorf("image is required")
 	}
-	if m.sshPool == nil {
-		return fmt.Errorf("ssh pool is required")
+	if strings.TrimSpace(req.ContextDir) == "" {
+		return fmt.Errorf("build context directory is required")
 	}
-
-	port := peerServer.Port
-	if port == 0 {
-		port = 22
-	}
-	peerClient, err := m.sshPool.GetOrCreateWithAuth(peerServer.Host, port, peerServer.User, peerServer.SSHKey, peerServer.Password)
-	if err != nil {
-		return fmt.Errorf("failed to connect to peer node: %w", err)
+	if strings.TrimSpace(req.Platform) == "" {
+		return fmt.Errorf("build platform is required")
 	}
 
-	socket := m.takodSocket()
-	sourceStream, err := sourceClient.StartStream(takodImageExportCommand(socket, imageName))
-	if err != nil {
-		return fmt.Errorf("failed to start takod image export: %w", err)
+	args := []string{
+		"buildx", "build",
+		"--platform", req.Platform,
+		"--load",
+		"-t", req.Image,
 	}
-	defer sourceStream.Close()
-
-	sourceStderrCh := make(chan string, 1)
-	go func() {
-		sourceStderrCh <- readLimitedStreamText(sourceStream.Stderr, 64*1024)
-	}()
-
-	importOutput, importErr := peerClient.ExecuteWithInput(context.Background(), takodImageImportCommand(socket, imageName), sourceStream.Stdout)
-	if importErr != nil {
-		_ = sourceStream.Close()
-		sourceStderr := <-sourceStderrCh
-		if sourceStderr != "" {
-			return fmt.Errorf("failed to import image into peer takod: %w, output: %s, source stderr: %s", importErr, strings.TrimSpace(importOutput), sourceStderr)
-		}
-		return fmt.Errorf("failed to import image into peer takod: %w, output: %s", importErr, strings.TrimSpace(importOutput))
+	if strings.TrimSpace(req.Dockerfile) != "" {
+		args = append(args, "-f", req.Dockerfile)
 	}
+	args = append(args, ".")
 
-	sourceErr := sourceStream.Wait()
-	sourceStderr := <-sourceStderrCh
-	if sourceErr != nil {
-		if sourceStderr != "" {
-			return fmt.Errorf("failed to export image from source takod: %w, output: %s", sourceErr, sourceStderr)
-		}
-		return fmt.Errorf("failed to export image from source takod: %w", sourceErr)
+	if _, err := c.runner().Run(ctx, CommandSpec{
+		Dir:  req.ContextDir,
+		Name: "docker",
+		Args: args,
+	}); err != nil {
+		return fmt.Errorf("failed to build local image with buildx: %w", err)
 	}
 	return nil
 }
 
-func readLimitedStreamText(reader io.Reader, limit int64) string {
-	var captured strings.Builder
-	if limit > 0 {
-		_, _ = io.Copy(&captured, io.LimitReader(reader, limit))
-	}
-	_, _ = io.Copy(io.Discard, reader)
-	return strings.TrimSpace(captured.String())
+// PushRequest describes a docker-pussh transfer to one remote Docker host.
+type PushRequest struct {
+	Image      string
+	Target     string
+	SSHKey     string
+	Platform   string
+	NoHostKeys bool
 }
 
-func (m *Manager) takodSocket() string {
-	if m.config != nil && m.config.Runtime != nil && m.config.Runtime.Agent != nil && m.config.Runtime.Agent.Socket != "" {
-		return m.config.Runtime.Agent.Socket
+// Push transfers an image to a remote Docker host using docker-pussh.
+func (c Client) Push(ctx context.Context, req PushRequest) error {
+	if strings.TrimSpace(req.Image) == "" {
+		return fmt.Errorf("image is required")
 	}
-	return takodclient.DefaultSocket
-}
+	if strings.TrimSpace(req.Target) == "" {
+		return fmt.Errorf("target is required")
+	}
 
-func takodImageExportCommand(socket string, imageName string) string {
-	return takodCurlCommand(socket, "GET", "http://takod/v1/images/export?image="+url.QueryEscape(imageName), "")
-}
+	args := []string{"pussh"}
+	if strings.TrimSpace(req.Platform) != "" {
+		args = append(args, "--platform", req.Platform)
+	}
+	if req.NoHostKeys {
+		args = append(args, "--no-host-key-check")
+	}
+	args = append(args, req.Image, req.Target)
+	if strings.TrimSpace(req.SSHKey) != "" {
+		args = append(args, "-i", req.SSHKey)
+	}
 
-func takodImageImportCommand(socket string, imageName string) string {
-	return takodCurlCommand(socket, "POST", "http://takod/v1/images/import?image="+url.QueryEscape(imageName), "--upload-file -")
-}
-
-func takodCurlCommand(socket string, method string, endpoint string, bodyArg string) string {
-	if socket == "" {
-		socket = takodclient.DefaultSocket
+	if _, err := c.runner().Run(ctx, CommandSpec{Name: "docker", Args: args}); err != nil {
+		return fmt.Errorf("failed to push image with docker-pussh: %w", err)
 	}
-	parts := []string{
-		"if test -S " + shellQuote(socket) + " && command -v curl >/dev/null 2>&1; then",
-		"curl --fail --silent --show-error",
-		"--unix-socket " + shellQuote(socket),
-		"-X " + shellQuote(method),
-	}
-	if bodyArg != "" {
-		parts = append(parts, bodyArg)
-	}
-	parts = append(parts, shellQuote(endpoint), "; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi")
-	return strings.Join(parts, " ")
-}
-
-func shellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+	return nil
 }

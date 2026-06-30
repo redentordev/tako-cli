@@ -15,6 +15,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
+	takounregistry "github.com/redentordev/tako-cli/pkg/unregistry"
 )
 
 func TestEnsureTakodMeshKeysWithRunsConcurrently(t *testing.T) {
@@ -155,6 +156,112 @@ func TestTakodRollbackDeployOptionsForService(t *testing.T) {
 	emptyOptions := takodRollbackDeployOptionsForService(nil)
 	if emptyOptions.BuildImage || emptyOptions.PullImage {
 		t.Fatalf("nil rollback options = %#v, want no build and no pull", emptyOptions)
+	}
+}
+
+func TestNormalizeLinuxBuildPlatform(t *testing.T) {
+	tests := map[string]string{
+		"x86_64\n": "linux/amd64",
+		"amd64":    "linux/amd64",
+		"aarch64":  "linux/arm64",
+		"arm64\n":  "linux/arm64",
+	}
+	for input, want := range tests {
+		got, err := normalizeLinuxBuildPlatform(input)
+		if err != nil {
+			t.Fatalf("normalizeLinuxBuildPlatform(%q) returned error: %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("normalizeLinuxBuildPlatform(%q) = %q, want %q", input, got, want)
+		}
+	}
+
+	if _, err := normalizeLinuxBuildPlatform("riscv64"); err == nil {
+		t.Fatal("normalizeLinuxBuildPlatform should reject unsupported architecture")
+	}
+}
+
+func TestUnregistryPushTarget(t *testing.T) {
+	target, key, err := unregistryPushTarget("node-a", config.ServerConfig{
+		Host:   "203.0.113.10",
+		User:   "deploy",
+		Port:   2222,
+		SSHKey: "/keys/id_ed25519",
+	})
+	if err != nil {
+		t.Fatalf("unregistryPushTarget returned error: %v", err)
+	}
+	if target != "deploy@203.0.113.10:2222" {
+		t.Fatalf("target = %q, want deploy@203.0.113.10:2222", target)
+	}
+	if key != "/keys/id_ed25519" {
+		t.Fatalf("key = %q, want /keys/id_ed25519", key)
+	}
+}
+
+func TestUnregistryPushTargetRejectsPasswordOnlyAuth(t *testing.T) {
+	_, _, err := unregistryPushTarget("node-a", config.ServerConfig{
+		Host:     "203.0.113.10",
+		User:     "deploy",
+		Password: "${SSH_PASSWORD}",
+	})
+	if err == nil {
+		t.Fatal("unregistryPushTarget should reject password-only auth")
+	}
+	if !strings.Contains(err.Error(), "password-only SSH auth") {
+		t.Fatalf("error = %q, want password-only guidance", err)
+	}
+}
+
+func TestLocalBuildPushesSelectedPlatform(t *testing.T) {
+	client := &recordingLocalImageClient{}
+	deployer := &Deployer{
+		config: &config.Config{
+			Project: config.ProjectConfig{Name: "demo", Version: "1.0.0"},
+			Servers: map[string]config.ServerConfig{
+				"node-a": {Host: "203.0.113.10", User: "deploy", SSHKey: "/keys/id_ed25519"},
+			},
+		},
+		localImageClient: client,
+		verbose:          false,
+	}
+	if err := deployer.pushLocalImageToTakodNode(context.Background(), client, "demo/web:abc123", "linux/arm64", "node-a"); err != nil {
+		t.Fatalf("pushLocalImageToTakodNode returned error: %v", err)
+	}
+	if len(client.pushes) != 1 {
+		t.Fatalf("pushes = %#v, want 1", client.pushes)
+	}
+	if got := client.pushes[0].Platform; got != "linux/arm64" {
+		t.Fatalf("push platform = %q, want linux/arm64", got)
+	}
+}
+
+type recordingLocalImageClient struct {
+	pushes []takounregistry.PushRequest
+}
+
+func (c *recordingLocalImageClient) CheckAvailable(context.Context) error {
+	return nil
+}
+
+func (c *recordingLocalImageClient) Build(context.Context, takounregistry.BuildRequest) error {
+	return nil
+}
+
+func (c *recordingLocalImageClient) Push(_ context.Context, req takounregistry.PushRequest) error {
+	c.pushes = append(c.pushes, req)
+	return nil
+}
+
+func TestServiceMemoryLimit(t *testing.T) {
+	if got := serviceMemoryLimit(&config.ServiceConfig{}); got != "" {
+		t.Fatalf("empty service memory limit = %q, want empty", got)
+	}
+	got := serviceMemoryLimit(&config.ServiceConfig{
+		Resources: &config.ResourceLimitsConfig{Memory: "512m"},
+	})
+	if got != "512m" {
+		t.Fatalf("service memory limit = %q, want 512m", got)
 	}
 }
 

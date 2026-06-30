@@ -1,0 +1,77 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-upgrade-servers - Upgrade server-side takod agents to this CLI version
+
+
+.SH SYNOPSIS
+\fBtako upgrade servers [flags]\fP
+
+
+.SH DESCRIPTION
+Upgrade server-side takod agents for the selected environment.
+
+.PP
+This command patches stale or missing takod agents without changing application
+services. It installs the matching Tako release binary, restarts the takod
+systemd service, refreshes /etc/tako/version.json, and verifies /v1/status.
+
+.PP
+Use --dry-run first to see current agent versions. Development builds must pass
+--takod-binary with a Linux tako binary because there is no release asset for
+version "dev".
+
+
+.SH OPTIONS
+\fB--dry-run\fP[=false]
+	Report server agent versions without changing remote state
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for servers
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Server to upgrade (default: all servers in environment)
+
+.PP
+\fB--takod-binary\fP=""
+	Path to a Linux tako binary to install as takod (required for development builds)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH EXAMPLE
+.EX
+  # Show current server agent versions
+  tako upgrade servers --dry-run
+
+  # Patch every server in the active environment
+  tako upgrade servers
+
+  # Patch one server
+  tako upgrade servers --server node-a
+
+  # Development/testing with a locally built Linux binary
+  tako upgrade servers --takod-binary ./dist/tako-linux-amd64
+.EE
+
+
+.SH SEE ALSO
+\fBtako-upgrade(1)\fP

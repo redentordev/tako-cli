@@ -1,0 +1,43 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-prometheus - Export metrics in Prometheus format
+
+
+.SH SYNOPSIS
+\fBtako prometheus [flags]\fP
+
+
+.SH DESCRIPTION
+Export system and container metrics in Prometheus exposition format.
+
+.PP
+This command outputs metrics that can be scraped by Prometheus or viewed directly.
+The output follows the Prometheus text-based exposition format.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for prometheus
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

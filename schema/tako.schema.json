@@ -237,6 +237,21 @@
               "description": "Cache retention period (e.g., 7d)"
             }
           }
+        },
+        "build": {
+          "type": "object",
+          "description": "Where build-backed service images are produced before takod reconciles containers. remote keeps the current server-side build path. local builds with Docker buildx on the developer or CI machine and pushes to each assigned node through docker-pussh/unregistry. auto tries local first and falls back to remote.",
+          "properties": {
+            "strategy": {
+              "type": "string",
+              "enum": [
+                "remote",
+                "local",
+                "auto"
+              ],
+              "default": "remote"
+            }
+          }
         }
       }
     },
@@ -472,6 +487,17 @@
                 "persistent": {
                   "type": "boolean",
                   "description": "Mark as stateful/persistent. Requires at least one volume, and multi-node environments require pinned or global placement."
+                },
+                "resources": {
+                  "type": "object",
+                  "description": "Container runtime resource limits",
+                  "properties": {
+                    "memory": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]*([bBkKmMgG]|[kKmMgG][bB]|[kKmMgG][iI][bB])?$",
+                      "description": "Docker memory limit passed as --memory, for example 512m or 1g"
+                    }
+                  }
                 },
                 "dependsOn": {
                   "type": "array",

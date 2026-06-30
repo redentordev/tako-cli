@@ -1,0 +1,48 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-promote - Promote a warmed blue-green revision
+
+
+.SH SYNOPSIS
+\fBtako promote SERVICE [flags]\fP
+
+
+.SH DESCRIPTION
+Promote a warmed blue-green revision.
+
+.PP
+For services using deploy.strategy=blue_green and promotion=manual, deploy warms
+the new revision without moving public traffic. promote switches proxy routes to
+the warmed revision, prunes stale revisions, and persists the promoted state.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for promote
+
+.PP
+\fB--revision\fP=""
+	Specific warmed revision to promote (full value or unique prefix)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

@@ -1,0 +1,65 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-remove - Remove deployed services from the environment mesh
+
+
+.SH SYNOPSIS
+\fBtako remove [flags]\fP
+
+
+.SH DESCRIPTION
+Remove deployed services from every node in the active environment.
+
+.PP
+This command:
+  - Stops and removes all service replicas
+  - Removes service images for this project
+  - Removes proxy configurations
+  - Preserves server setup (takod and tako-proxy remain installed)
+  - Does NOT decommission the servers
+
+.PP
+The environment can be reused for new deployments after removal.
+To decommission an environment, use 'tako destroy'.
+
+.PP
+Examples:
+  tako remove
+  tako remove --server node-b --force
+  tako remove --force
+
+
+.SH OPTIONS
+\fB-f\fP, \fB--force\fP[=false]
+	Skip confirmation prompt
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for remove
+
+.PP
+\fB--server\fP=[]
+	Only remove services from the named environment server(s)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

@@ -189,18 +189,31 @@ Git plus the last accepted desired revision and event log replicated by takod.
 
 ## Local Docker Compatibility
 
-Normal takod deploys do not build with the laptop's Docker daemon. For
+The default build strategy is `deployment.build.strategy: remote`. For
 build-backed services, the CLI validates and archives the local build context,
-then streams it to a selected remote `takod` node where Docker performs the
+then streams it to each assigned remote `takod` node where Docker performs the
 image build. The local machine still needs the source files, an accessible build
 directory, and either a Dockerfile or Nixpacks when no Dockerfile exists.
 `tako doctor --skip-remote` reports those local build inputs without contacting
 servers.
 
-Docker Desktop, Colima, and rootless Docker remain useful for custom local
-workflows outside the takod deploy path, or for manually pre-building images
-that are later referenced with `image:`. In those cases the active Docker
-context just needs to answer the normal Docker commands your workflow runs.
+`deployment.build.strategy: local` uses the developer or CI machine as the
+builder. Tako detects each assigned node's architecture, groups targets by
+`linux/amd64` or `linux/arm64`, runs `docker buildx build --platform ... --load`
+once per architecture, and transfers the loaded image to every assigned target
+with psviderski/unregistry's `docker pussh` plugin. `auto` tries this local path
+first and falls back to the remote takod builder if local Docker, buildx,
+docker-pussh, SSH key/agent auth, or remote Docker prerequisites are not ready.
+
+Local build mode requires Docker CLI plugin support and `docker pussh` on the
+client machine. The remote SSH user must be able to run Docker directly or with
+passwordless `sudo docker`, matching upstream docker-pussh requirements. Password
+only SSH auth from `tako.yaml` is not usable by docker-pussh because it uses the
+system OpenSSH client.
+
+Docker Desktop, Colima, and rootless Docker can be used as the local builder
+when buildx can produce the target platform and load it into local Docker. In
+remote build mode, the active local Docker context is not used by deploy.
 
 Remote `takod` hosts have stricter requirements than a laptop build context.
 Setup and runtime reconciliation currently assume a Linux server with Docker
@@ -228,13 +241,14 @@ legacy-only or has a broken buildx install, takod surfaces the Docker output and
 adds a hint to either install/repair buildx on the node or replace the
 BuildKit-only syntax with portable steps such as `RUN chmod`.
 
-For build-based services in a multi-node environment, Tako builds the image on
-the selected source node through that node's `takod` socket, then brokers a
-stream from the source node's `takod` image export endpoint into each peer
-node's `takod` image import endpoint over the CLI's existing SSH sessions. Peer
-nodes do not need the operator's private key on disk, and runtime Docker
-save/load still runs only inside node-local agents. This is full-image transfer;
-layer-delta peer distribution is still future work.
+For build-based services in a multi-node environment, remote build mode builds
+the image on each assigned node, skipping nodes where the exact commit image
+already exists. Local build mode builds once per target architecture on the
+client and pushes directly to every assigned node through docker-pussh. The
+docker-pussh path starts a temporary unregistry container on the target over SSH
+and transfers only missing layers; when the target Docker daemon does not use
+the containerd image store, upstream docker-pussh pulls the temporary registry
+image back into Docker's classic image store so takod can run it.
 
 ## Runtime Flow
 
@@ -502,8 +516,11 @@ builder cache and dangling image cleanup are intentionally excluded from default
 cleanup because those caches may be useful to unrelated projects on the same
 host. Successful deploys and explicit `tako cleanup --docker-cache` requests run
 Docker builder cache pruning with a default `20GB` keep-storage budget instead
-of clearing the entire cache; operators can tune explicit cleanup with
-`--docker-cache-keep-storage <size>`.
+of clearing the entire cache. The installed takod service also runs a scheduled
+builder-cache prune loop every 24 hours with the same keep-storage budget;
+operators can tune explicit cleanup with `--docker-cache-keep-storage <size>`
+or disable the agent loop with `takod run --build-cache-prune-interval 0` in a
+custom service unit.
 
 ## Implementation Status
 

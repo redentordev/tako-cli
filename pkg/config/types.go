@@ -47,6 +47,10 @@ const (
 	DeployPromotionAutomatic = "automatic"
 	DeployPromotionManual    = "manual"
 
+	BuildStrategyRemote = "remote"
+	BuildStrategyLocal  = "local"
+	BuildStrategyAuto   = "auto"
+
 	BackupStorageProviderS3           = "s3"
 	BackupStorageProviderR2           = "r2"
 	BackupStorageProviderS3Compatible = "s3-compatible"
@@ -114,6 +118,7 @@ type DeploymentConfig struct {
 	Strategy string          `yaml:"strategy,omitempty" json:"strategy,omitempty"` // "parallel" or "sequential" (default: sequential)
 	Parallel *ParallelConfig `yaml:"parallel,omitempty" json:"parallel,omitempty"`
 	Cache    *CacheConfig    `yaml:"cache,omitempty" json:"cache,omitempty"`
+	Build    *BuildConfig    `yaml:"build,omitempty" json:"build,omitempty"`
 }
 
 // ParallelConfig defines parallel deployment settings
@@ -128,6 +133,11 @@ type CacheConfig struct {
 	Enabled   bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`     // Enable build caching (default: true)
 	Type      string `yaml:"type,omitempty" json:"type,omitempty"`           // "local" (default), "registry"
 	Retention string `yaml:"retention,omitempty" json:"retention,omitempty"` // Cache retention period (e.g., "7d")
+}
+
+// BuildConfig selects where build-backed service images are produced.
+type BuildConfig struct {
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"` // remote, local, auto
 }
 
 // ServerConfig defines server connection details
@@ -179,6 +189,9 @@ type ServiceConfig struct {
 
 	// Per-service monitoring
 	Monitoring *MonitoringConfig `yaml:"monitoring,omitempty" json:"monitoring,omitempty"`
+
+	// Container resource limits.
+	Resources *ResourceLimitsConfig `yaml:"resources,omitempty" json:"resources,omitempty"`
 
 	// Cross-project networking
 	Export  bool     `yaml:"export,omitempty" json:"export,omitempty"`   // Attach this service to a service-scoped export network
@@ -331,6 +344,11 @@ type BackupStorageConfig struct {
 	SecretAccessKey string `yaml:"secretAccessKey,omitempty" json:"secretAccessKey,omitempty"` // Use ${ENV_VAR}
 	SessionToken    string `yaml:"sessionToken,omitempty" json:"sessionToken,omitempty"`       // Optional temporary credential token
 	ForcePathStyle  bool   `yaml:"forcePathStyle,omitempty" json:"forcePathStyle,omitempty"`   // Needed by some S3-compatible stores
+}
+
+// ResourceLimitsConfig defines container runtime resource limits.
+type ResourceLimitsConfig struct {
+	Memory string `yaml:"memory,omitempty" json:"memory,omitempty"` // Docker memory limit, for example 512m or 1g
 }
 
 // MonitoringConfig defines per-service monitoring settings
@@ -611,6 +629,44 @@ func (c *Config) IsRemoteCacheEnabled() bool {
 		return true
 	}
 	return *c.State.RemoteCacheEnabled
+}
+
+// GetBuildStrategy returns where build-backed service images should be built.
+func (c *Config) GetBuildStrategy() string {
+	if c == nil || c.Deployment == nil || c.Deployment.Build == nil || c.Deployment.Build.Strategy == "" {
+		return BuildStrategyRemote
+	}
+	return c.Deployment.Build.Strategy
+}
+
+// SetBuildStrategy overrides the configured image build strategy.
+func (c *Config) SetBuildStrategy(strategy string) error {
+	normalized, err := NormalizeBuildStrategy(strategy)
+	if err != nil {
+		return err
+	}
+	if c.Deployment == nil {
+		c.Deployment = &DeploymentConfig{}
+	}
+	if c.Deployment.Build == nil {
+		c.Deployment.Build = &BuildConfig{}
+	}
+	c.Deployment.Build.Strategy = normalized
+	return nil
+}
+
+// NormalizeBuildStrategy validates and canonicalizes a build strategy value.
+func NormalizeBuildStrategy(strategy string) (string, error) {
+	strategy = strings.ToLower(strings.TrimSpace(strategy))
+	if strategy == "" {
+		return BuildStrategyRemote, nil
+	}
+	switch strategy {
+	case BuildStrategyRemote, BuildStrategyLocal, BuildStrategyAuto:
+		return strategy, nil
+	default:
+		return "", fmt.Errorf("deployment.build.strategy must be remote, local, or auto")
+	}
 }
 
 // GetRegistryURL returns the auto-configured local registry URL

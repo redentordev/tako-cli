@@ -14,10 +14,12 @@ import (
 )
 
 var (
-	takodSocket                string
-	takodDataDir               string
-	takodNode                  string
-	takodActualRefreshInterval time.Duration
+	takodSocket                  string
+	takodDataDir                 string
+	takodNode                    string
+	takodActualRefreshInterval   time.Duration
+	takodBuildCachePruneInterval time.Duration = takod.DefaultBuildCachePruneInterval
+	takodBuildCacheKeepStorage   string        = takod.DefaultBuildCacheKeepStorage
 )
 
 var takodCmd = &cobra.Command{
@@ -44,6 +46,8 @@ func init() {
 	takodRunCmd.Flags().StringVar(&takodDataDir, "data-dir", "", "takod data directory")
 	takodRunCmd.Flags().StringVar(&takodNode, "node", "", "Configured Tako node name")
 	takodRunCmd.Flags().DurationVar(&takodActualRefreshInterval, "actual-refresh-interval", 0, "Refresh node-local actual state at this interval (0 disables)")
+	takodRunCmd.Flags().DurationVar(&takodBuildCachePruneInterval, "build-cache-prune-interval", takod.DefaultBuildCachePruneInterval, "Prune Docker build cache at this interval (0 disables)")
+	takodRunCmd.Flags().StringVar(&takodBuildCacheKeepStorage, "build-cache-keep-storage", takod.DefaultBuildCacheKeepStorage, "Docker builder cache storage budget to keep during scheduled pruning")
 }
 
 func runTakod(cmd *cobra.Command, args []string) error {
@@ -75,8 +79,10 @@ func runTakod(cmd *cobra.Command, args []string) error {
 		fmt.Printf("takod listening on %s with data dir %s\n", socket, dataDir)
 	}
 	err := takod.NewServerWithOptions(socket, dataDir, Version, takod.ServerOptions{
-		NodeName:              takodNode,
-		ActualRefreshInterval: takodActualRefreshInterval,
+		NodeName:                takodNode,
+		ActualRefreshInterval:   takodActualRefreshInterval,
+		BuildCachePruneInterval: takodBuildCachePruneInterval,
+		BuildCacheKeepStorage:   takodBuildCacheKeepStorage,
 	}).Run(ctx)
 	if errors.Is(err, context.Canceled) {
 		return nil

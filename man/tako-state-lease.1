@@ -1,0 +1,46 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-state-lease - Show remote operation leases
+
+
+.SH SYNOPSIS
+\fBtako state lease [flags]\fP
+
+
+.SH DESCRIPTION
+Show remote operation leases held on reachable takod nodes.
+
+.PP
+Use this when a mutating command reports that the environment is locked.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for lease
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Show a specific server lease instead of the full mesh
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-state(1)\fP, \fBtako-state-lease-release(1)\fP

@@ -71,6 +71,16 @@ jobs:
           echo "✅ All builds complete!"
           ls -lh dist/
 
+      - name: Verify manual pages
+        run: |
+          make man
+          git diff --exit-code -- man
+
+      - name: Package manual pages
+        run: |
+          tar -czf dist/tako-manpages.tar.gz -C man .
+          ls -lh dist/tako-manpages.tar.gz
+
       - name: Generate checksums
         run: |
           cd dist
@@ -89,6 +99,7 @@ jobs:
             tako-darwin-amd64
             tako-darwin-arm64
             tako-windows-amd64.exe
+            tako-manpages.tar.gz
           )
 
           cd dist
@@ -229,6 +240,14 @@ jobs:
             docker run --rm ghcr.io/redentordev/tako-cli:$VERSION --version
             \`\`\`
 
+            ### Manual Pages
+            \`\`\`bash
+            gh release download $VERSION --pattern tako-manpages.tar.gz
+            sudo mkdir -p /usr/local/share/man/man1
+            sudo tar -xzf tako-manpages.tar.gz -C /usr/local/share/man/man1
+            man tako
+            \`\`\`
+
             ## 🚀 Quick Start
 
             \`\`\`bash
@@ -273,6 +292,7 @@ jobs:
             dist/tako-darwin-amd64
             dist/tako-darwin-arm64
             dist/tako-windows-amd64.exe
+            dist/tako-manpages.tar.gz
             dist/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -287,6 +307,7 @@ jobs:
           echo "  ✅ tako-darwin-amd64"
           echo "  ✅ tako-darwin-arm64"
           echo "  ✅ tako-windows-amd64.exe"
+          echo "  ✅ tako-manpages.tar.gz"
           echo "  ✅ checksums.txt"
           echo "  ✅ ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }} (linux/amd64, linux/arm64)"
           echo ""

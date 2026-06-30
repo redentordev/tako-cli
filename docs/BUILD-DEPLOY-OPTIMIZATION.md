@@ -37,33 +37,40 @@ app and included first-time create work.
   and `docker builder prune -f --keep-storage 20GB` for BuildKit cache pressure.
   The builder cache threshold avoids clearing the whole shared cache after every
   deploy while still preventing unbounded cache growth.
+- The installed takod service also schedules Docker builder cache pruning every
+  24 hours with the same `20GB` keep-storage budget. `takod run
+  --build-cache-prune-interval 0` disables that loop for custom installs.
+- Build-backed services can opt into `deployment.build.strategy: local` to build
+  on the developer or CI machine with `docker buildx build --platform
+  linux/$arch --load` and push directly to each assigned server with
+  psviderski/unregistry's `docker pussh` plugin. `auto` tries the same local
+  path and falls back to the remote takod builder if local Docker, buildx,
+  docker-pussh, SSH auth, or remote Docker prerequisites are not available.
 - Docker can still list a dangling image when a running container references an
   untagged image. Tako leaves those alone because Docker does not consider them
   reclaimable.
 
 ## Not Yet Tested
 
-- Two-node build distribution where one node builds once and another node
-  receives the image.
-- Real unregistry layer-delta transfer. `pkg/unregistry` exists, but the live
-  deploy path does not call it yet.
-- Multi-architecture builds and manifests.
-- Peer image transfer over WireGuard-only paths.
-- Peer image transfer through an SSH tunnel when mesh reachability is degraded.
+- Two-node local build distribution with the same architecture where one local
+  build is pushed to multiple assigned nodes.
+- Mixed AMD64/ARM64 local builds from the same client. The code builds once per
+  target architecture, but this still needs live timing and compatibility data.
+- Registry-backed multi-architecture manifests.
 - Large build contexts where context compression/upload time dominates.
 - Local Docker build handoff from Docker Desktop, Colima, or rootless Docker.
 - CI runner timing against a remote node.
 - Cache behavior after a remote node is destroyed and replaced.
+- Containerd image-store cleanup behavior on remote hosts that use Docker's
+  classic image store. Upstream unregistry can leave an extra containerd copy
+  when Docker must pull back from the temporary registry.
 
 ## Next Optimization Work
 
-1. Build once per architecture and make peer image availability a separate
-   reconciliation step before container rollout.
-2. Replace full `docker save`/`docker load` transfer with a short-lived
-   unregistry pull path so peers fetch only missing layers.
-3. Add build context diagnostics that report total archive size and largest
-   included files before upload.
-4. Keep BuildKit cache hot on builder nodes and expose explicit config knobs
-   later, such as build strategy, cache policy, and distribution policy.
-5. Add a local-build fast path only when local Docker exists and the target
-   platform matches; otherwise keep the current remote-builder path.
+1. Collect live timings for `deployment.build.strategy: local` and `auto`
+   against one-node, same-arch multi-node, and mixed-arch environments.
+2. Add build context diagnostics that report total archive size and largest
+   included files before remote upload.
+3. Expose cache policy knobs for remote builder cache and local buildx cache.
+4. Add an optional registry-backed path for GHCR/ECR/private registries when a
+   team wants durable image distribution instead of direct SSH transfer.

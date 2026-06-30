@@ -47,6 +47,7 @@ type ReconcileServiceRequest struct {
 	Containers         []ContainerSpec         `json:"containers"`
 	Health             *HealthSpec             `json:"health,omitempty"`
 	Command            string                  `json:"command,omitempty"`
+	MemoryLimit        string                  `json:"memoryLimit,omitempty"`
 }
 
 type RemoveServiceRequest struct {
@@ -301,6 +302,9 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	if req.Command != "" && strings.ContainsRune(req.Command, '\x00') {
 		return fmt.Errorf("command contains unsupported characters")
 	}
+	if req.MemoryLimit != "" && !isSafeDockerMemoryLimit(req.MemoryLimit) {
+		return fmt.Errorf("invalid memory limit")
+	}
 	if err := validateHealthSpec(req.Health); err != nil {
 		return err
 	}
@@ -457,6 +461,36 @@ func isSafeRestartPolicy(value string) bool {
 
 func hasControlChars(value string) bool {
 	return strings.ContainsAny(value, "\x00\r\n")
+}
+
+func isSafeDockerMemoryLimit(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || len(value) > 32 {
+		return false
+	}
+	unitStart := len(value)
+	for unitStart > 0 && value[unitStart-1] >= 'a' && value[unitStart-1] <= 'z' {
+		unitStart--
+	}
+	number := value[:unitStart]
+	unit := value[unitStart:]
+	if number == "" {
+		return false
+	}
+	for i := 0; i < len(number); i++ {
+		if number[i] < '0' || number[i] > '9' {
+			return false
+		}
+		if i == 0 && number[i] == '0' {
+			return false
+		}
+	}
+	switch unit {
+	case "", "b", "k", "m", "g", "kb", "mb", "gb", "kib", "mib", "gib":
+		return true
+	default:
+		return false
+	}
 }
 
 func prepareServiceEnvFile(req *ReconcileServiceRequest) (func(), error) {
@@ -858,6 +892,9 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 	}
 	for _, publish := range container.Publishes {
 		args = append(args, "--publish", publish)
+	}
+	if req.MemoryLimit != "" {
+		args = append(args, "--memory", req.MemoryLimit)
 	}
 	if req.Health != nil && req.Health.Command != "" {
 		args = append(args, "--health-cmd", req.Health.Command)
