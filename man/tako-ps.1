@@ -1,0 +1,62 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-ps - List running services and their replicas
+
+
+.SH SYNOPSIS
+\fBtako ps [SERVICE] [flags]\fP
+
+
+.SH DESCRIPTION
+Show deployed service status from the takod mesh.
+
+.PP
+This command displays:
+  - Running vs desired replica count
+  - Service status
+  - Configured port or internal service designation
+
+.PP
+Examples:
+  tako ps                    # Show all services in the environment
+  tako ps web                # Show a specific service
+  tako ps --server prod      # Show the selected node only
+
+.PP
+Output columns:
+  SERVICE   - Service name
+  REPLICAS  - Running/desired replica count
+  STATUS    - Overall service status
+  PORTS     - Configured port or "internal"
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for ps
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Show services on a specific node
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

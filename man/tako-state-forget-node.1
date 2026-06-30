@@ -1,0 +1,61 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-state-forget-node - Remove a retired node from replicated runtime state
+
+
+.SH SYNOPSIS
+\fBtako state forget-node  [flags]\fP
+
+
+.SH DESCRIPTION
+Remove a retired or destroyed node from replicated runtime state.
+
+.PP
+This command does not edit tako.yaml and does not touch application containers.
+It deletes the node-local actual snapshot for the named node and rewrites the
+aggregate actual snapshot without that node on every reachable environment node.
+
+.PP
+Use this after removing a destroyed node from the active environment config, or
+pass --force when you intentionally need to forget a node that is still listed
+in the environment.
+
+
+.SH OPTIONS
+\fB--force\fP[=false]
+	Allow forgetting a node that is still listed in the active environment
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for forget-node
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Write to a specific reachable server instead of the full mesh
+
+.PP
+\fB-y\fP, \fB--yes\fP[=false]
+	Skip confirmation prompt
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-state(1)\fP

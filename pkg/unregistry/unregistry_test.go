@@ -1,99 +1,111 @@
 package unregistry
 
 import (
-	"strings"
+	"context"
+	"errors"
+	"slices"
 	"testing"
-
-	"github.com/redentordev/tako-cli/pkg/config"
 )
 
-func TestTakodImageStreamCommandsUseTakodEndpoints(t *testing.T) {
-	exportCmd := takodImageExportCommand("/run/tako/takod.sock", "demo/web:abc123")
-	importCmd := takodImageImportCommand("/run/tako/takod.sock", "demo/web:abc123")
+type recordingRunner struct {
+	calls []CommandSpec
+	errAt int
+}
 
-	for _, expected := range []string{
-		"--unix-socket '/run/tako/takod.sock'",
-		"/v1/images/export?image=demo%2Fweb%3Aabc123",
-		"-X 'GET'",
-	} {
-		if !strings.Contains(exportCmd, expected) {
-			t.Fatalf("export command missing %q: %s", expected, exportCmd)
-		}
+func (r *recordingRunner) Run(_ context.Context, spec CommandSpec) (string, error) {
+	r.calls = append(r.calls, spec)
+	if r.errAt > 0 && len(r.calls) == r.errAt {
+		return "failed", errors.New("boom")
 	}
-	for _, expected := range []string{
-		"--unix-socket '/run/tako/takod.sock'",
-		"/v1/images/import?image=demo%2Fweb%3Aabc123",
-		"-X 'POST'",
-		"--upload-file -",
-	} {
-		if !strings.Contains(importCmd, expected) {
-			t.Fatalf("import command missing %q: %s", expected, importCmd)
-		}
+	return "ok", nil
+}
+
+func TestCheckAvailableChecksDockerBuildxAndPussh(t *testing.T) {
+	runner := &recordingRunner{}
+	client := Client{Runner: runner}
+
+	if err := client.CheckAvailable(context.Background()); err != nil {
+		t.Fatalf("CheckAvailable returned error: %v", err)
 	}
-	for _, cmd := range []string{exportCmd, importCmd} {
-		for _, unexpected := range []string{"docker save", "docker load", "docker image", " ssh ", "StrictHostKeyChecking", "/home/deploy/.ssh", "--data-binary"} {
-			if strings.Contains(cmd, unexpected) {
-				t.Fatalf("stream command should not contain %q: %s", unexpected, cmd)
-			}
+
+	want := [][]string{
+		{"version"},
+		{"buildx", "version"},
+		{"pussh", "--help"},
+	}
+	if len(runner.calls) != len(want) {
+		t.Fatalf("calls = %#v, want %d", runner.calls, len(want))
+	}
+	for i, args := range want {
+		if runner.calls[i].Name != "docker" || !slices.Equal(runner.calls[i].Args, args) {
+			t.Fatalf("call %d = %#v, want docker %v", i, runner.calls[i], args)
 		}
 	}
 }
 
-func TestReadLimitedStreamTextCapturesPrefixAndDrainsReader(t *testing.T) {
-	reader := strings.NewReader("abcdefghijklmnopqrstuvwxyz")
+func TestBuildUsesBuildxLoadForSinglePlatform(t *testing.T) {
+	runner := &recordingRunner{}
+	client := Client{Runner: runner}
 
-	got := readLimitedStreamText(reader, 5)
-	if got != "abcde" {
-		t.Fatalf("captured text = %q, want prefix", got)
-	}
-	if rest := reader.Len(); rest != 0 {
-		t.Fatalf("reader still has %d byte(s), want drained", rest)
-	}
-}
-
-func TestUnregistryPeerServersExcludeSourceHost(t *testing.T) {
-	cfg := &config.Config{
-		Servers: map[string]config.ServerConfig{
-			"node-a": {Host: "10.0.0.1"},
-			"node-b": {Host: "10.0.0.2"},
-			"node-c": {Host: "10.0.0.3"},
-		},
-		Environments: map[string]config.EnvironmentConfig{
-			"production": {
-				Servers: []string{"node-a", "node-b", "node-c"},
-			},
-		},
-	}
-
-	peers, err := unregistryPeerServers(cfg, "production", "10.0.0.2")
+	err := client.Build(context.Background(), BuildRequest{
+		Image:      "demo/web:abc123",
+		ContextDir: "/work/app",
+		Dockerfile: "packages/web/Dockerfile",
+		Platform:   "linux/arm64",
+	})
 	if err != nil {
-		t.Fatalf("unregistryPeerServers returned error: %v", err)
+		t.Fatalf("Build returned error: %v", err)
 	}
 
-	want := []string{"node-a", "node-c"}
-	if len(peers) != len(want) {
-		t.Fatalf("peers = %v, want %v", peers, want)
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls = %#v, want 1", runner.calls)
 	}
-	for i := range want {
-		if peers[i] != want[i] {
-			t.Fatalf("peers = %v, want %v", peers, want)
-		}
+	got := runner.calls[0]
+	wantArgs := []string{"buildx", "build", "--platform", "linux/arm64", "--load", "-t", "demo/web:abc123", "-f", "packages/web/Dockerfile", "."}
+	if got.Name != "docker" || got.Dir != "/work/app" || !slices.Equal(got.Args, wantArgs) {
+		t.Fatalf("build command = %#v, want docker %v in /work/app", got, wantArgs)
 	}
 }
 
-func TestUnregistryPeerServersReportsMissingEnvironmentServer(t *testing.T) {
-	cfg := &config.Config{
-		Servers: map[string]config.ServerConfig{
-			"node-a": {Host: "10.0.0.1"},
-		},
-		Environments: map[string]config.EnvironmentConfig{
-			"production": {
-				Servers: []string{"node-a", "missing"},
-			},
-		},
+func TestPushUsesDockerPusshTargetAndKey(t *testing.T) {
+	runner := &recordingRunner{}
+	client := Client{Runner: runner}
+
+	err := client.Push(context.Background(), PushRequest{
+		Image:  "demo/web:abc123",
+		Target: "deploy@example.test:2222",
+		SSHKey: "/keys/id_ed25519",
+	})
+	if err != nil {
+		t.Fatalf("Push returned error: %v", err)
 	}
 
-	if _, err := unregistryPeerServers(cfg, "production", ""); err == nil {
-		t.Fatal("unregistryPeerServers should reject a missing environment server")
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls = %#v, want 1", runner.calls)
+	}
+	got := runner.calls[0]
+	wantArgs := []string{"pussh", "demo/web:abc123", "deploy@example.test:2222", "-i", "/keys/id_ed25519"}
+	if got.Name != "docker" || !slices.Equal(got.Args, wantArgs) {
+		t.Fatalf("push command = %#v, want docker %v", got, wantArgs)
+	}
+}
+
+func TestPushCanSpecifyPlatformAndNoHostKeyCheck(t *testing.T) {
+	runner := &recordingRunner{}
+	client := Client{Runner: runner}
+
+	err := client.Push(context.Background(), PushRequest{
+		Image:      "demo/web:abc123",
+		Target:     "deploy@example.test",
+		Platform:   "linux/amd64",
+		NoHostKeys: true,
+	})
+	if err != nil {
+		t.Fatalf("Push returned error: %v", err)
+	}
+
+	wantArgs := []string{"pussh", "--platform", "linux/amd64", "--no-host-key-check", "demo/web:abc123", "deploy@example.test"}
+	if !slices.Equal(runner.calls[0].Args, wantArgs) {
+		t.Fatalf("push args = %#v, want %#v", runner.calls[0].Args, wantArgs)
 	}
 }

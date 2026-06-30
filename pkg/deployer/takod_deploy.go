@@ -1,6 +1,7 @@
 package deployer
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -25,6 +26,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
+	takounregistry "github.com/redentordev/tako-cli/pkg/unregistry"
 )
 
 type takodAssignment struct {
@@ -78,6 +80,12 @@ type takodServiceDeployOptions struct {
 	BuildImage bool
 	PullImage  bool
 	WarmOnly   bool
+}
+
+type localImageClient interface {
+	CheckAvailable(context.Context) error
+	Build(context.Context, takounregistry.BuildRequest) error
+	Push(context.Context, takounregistry.PushRequest) error
 }
 
 // SetupTakodRuntime prepares every selected environment server for the takod runtime.
@@ -257,12 +265,34 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 }
 
 func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames []string) error {
+	strategy := config.BuildStrategyRemote
+	if d.config != nil {
+		strategy = d.config.GetBuildStrategy()
+	}
+	switch strategy {
+	case config.BuildStrategyLocal:
+		return d.buildImageLocallyAndPushToTakodNodes(serviceName, service, imageRef, serverNames)
+	case config.BuildStrategyAuto:
+		err := d.buildImageLocallyAndPushToTakodNodes(serviceName, service, imageRef, serverNames)
+		if err == nil {
+			return nil
+		}
+		if d.verbose {
+			fmt.Printf("  Local build unavailable, falling back to remote takod build: %v\n", err)
+		}
+		return d.buildImageRemotelyOnTakodNodes(serviceName, service, imageRef, serverNames)
+	default:
+		return d.buildImageRemotelyOnTakodNodes(serviceName, service, imageRef, serverNames)
+	}
+}
+
+func (d *Deployer) buildImageRemotelyOnTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames []string) error {
 	if len(serverNames) == 0 {
 		return fmt.Errorf("service %s has no assigned takod nodes for build", serviceName)
 	}
 
 	if d.verbose {
-		fmt.Printf("  Building image on %d assigned node(s)...\n", len(serverNames))
+		fmt.Printf("  Building image on %d assigned node(s) with remote takod builder...\n", len(serverNames))
 	}
 
 	return runTakodNodeActions(serverNames, func(serverName string) error {
@@ -289,6 +319,196 @@ func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.Se
 		}
 		return nil
 	})
+}
+
+func (d *Deployer) buildImageLocallyAndPushToTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames []string) error {
+	if len(serverNames) == 0 {
+		return fmt.Errorf("service %s has no assigned takod nodes for build", serviceName)
+	}
+
+	missingServers := d.takodNodesMissingImage(serverNames, imageRef)
+	if len(missingServers) == 0 {
+		if d.verbose {
+			fmt.Printf("  Image already exists on all assigned node(s): %s\n", imageRef)
+		}
+		return nil
+	}
+
+	if d.verbose {
+		fmt.Printf("  Building image locally with docker buildx and pushing via unregistry to %d node(s)...\n", len(missingServers))
+	}
+
+	ctx := context.Background()
+	localClient := d.localImageTransferClient()
+	if err := localClient.CheckAvailable(ctx); err != nil {
+		return err
+	}
+
+	prepared, err := d.prepareBuildContext(service)
+	if err != nil {
+		return err
+	}
+
+	platformGroups, err := d.groupTakodNodesByPlatform(missingServers)
+	if err != nil {
+		return err
+	}
+	platforms := make([]string, 0, len(platformGroups))
+	for platform := range platformGroups {
+		platforms = append(platforms, platform)
+	}
+	sort.Strings(platforms)
+
+	for _, platform := range platforms {
+		targets := platformGroups[platform]
+		sort.Strings(targets)
+		if d.verbose {
+			fmt.Printf("  Building %s for %s\n", imageRef, platform)
+		}
+		buildStart := time.Now()
+		if err := localClient.Build(ctx, takounregistry.BuildRequest{
+			Image:      imageRef,
+			ContextDir: prepared.AbsContextPath,
+			Dockerfile: prepared.Dockerfile,
+			Platform:   platform,
+		}); err != nil {
+			return err
+		}
+		if d.verbose {
+			fmt.Printf("  Local build ready for %s (%s)\n", platform, formatBuildDuration(time.Since(buildStart)))
+		}
+
+		for _, serverName := range targets {
+			if err := d.pushLocalImageToTakodNode(ctx, localClient, imageRef, platform, serverName); err != nil {
+				return err
+			}
+			if d.verbose {
+				fmt.Printf("  [%s] Image ready: %s\n", serverName, imageRef)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (d *Deployer) pushLocalImageToTakodNode(ctx context.Context, localClient localImageClient, imageRef string, platform string, serverName string) error {
+	server, ok := d.config.Servers[serverName]
+	if !ok {
+		return fmt.Errorf("server %s not found", serverName)
+	}
+	target, sshKey, err := unregistryPushTarget(serverName, server)
+	if err != nil {
+		return err
+	}
+	if d.verbose {
+		fmt.Printf("  [%s] Pushing %s with docker pussh\n", serverName, imageRef)
+	}
+	pushStart := time.Now()
+	if err := localClient.Push(ctx, takounregistry.PushRequest{
+		Image:    imageRef,
+		Target:   target,
+		SSHKey:   sshKey,
+		Platform: platform,
+	}); err != nil {
+		return fmt.Errorf("failed to push image to %s: %w", serverName, err)
+	}
+	if d.verbose {
+		fmt.Printf("  [%s] Push complete: %s\n", serverName, formatBuildDuration(time.Since(pushStart)))
+	}
+	return nil
+}
+
+func (d *Deployer) localImageTransferClient() localImageClient {
+	if d.localImageClient != nil {
+		return d.localImageClient
+	}
+	client := takounregistry.Client{}
+	if d.verbose {
+		client.Stdout = os.Stdout
+		client.Stderr = os.Stderr
+	}
+	return client
+}
+
+func (d *Deployer) takodNodesMissingImage(serverNames []string, imageRef string) []string {
+	missing := make([]string, 0, len(serverNames))
+	for _, serverName := range serverNames {
+		existsStart := time.Now()
+		exists, existsErr := d.imageExistsOnTakodNode(serverName, imageRef)
+		if existsErr == nil && exists {
+			if d.verbose {
+				fmt.Printf("  [%s] Image already exists: %s (checked in %s)\n", serverName, imageRef, formatBuildDuration(time.Since(existsStart)))
+			}
+			continue
+		}
+		if existsErr != nil && d.verbose {
+			fmt.Printf("  [%s] Could not check existing image, will push local image: %v\n", serverName, existsErr)
+		}
+		missing = append(missing, serverName)
+	}
+	return missing
+}
+
+func (d *Deployer) groupTakodNodesByPlatform(serverNames []string) (map[string][]string, error) {
+	groups := make(map[string][]string)
+	for _, serverName := range serverNames {
+		platform, err := d.detectTakodNodePlatform(serverName)
+		if err != nil {
+			return nil, err
+		}
+		groups[platform] = append(groups[platform], serverName)
+	}
+	return groups, nil
+}
+
+func (d *Deployer) detectTakodNodePlatform(serverName string) (string, error) {
+	client, err := d.getEnvironmentClient(serverName)
+	if err != nil {
+		return "", err
+	}
+	output, err := client.Execute("uname -m")
+	if err != nil {
+		return "", fmt.Errorf("failed to detect architecture on %s: %w", serverName, err)
+	}
+	platform, err := normalizeLinuxBuildPlatform(output)
+	if err != nil {
+		return "", fmt.Errorf("failed to detect architecture on %s: %w", serverName, err)
+	}
+	return platform, nil
+}
+
+func normalizeLinuxBuildPlatform(machine string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(machine)) {
+	case "x86_64", "amd64":
+		return "linux/amd64", nil
+	case "aarch64", "arm64":
+		return "linux/arm64", nil
+	default:
+		return "", fmt.Errorf("unsupported Linux architecture %q", strings.TrimSpace(machine))
+	}
+}
+
+func unregistryPushTarget(serverName string, server config.ServerConfig) (string, string, error) {
+	host := strings.TrimSpace(server.Host)
+	user := strings.TrimSpace(server.User)
+	if host == "" {
+		return "", "", fmt.Errorf("server %s host is required for local unregistry push", serverName)
+	}
+	if user == "" {
+		return "", "", fmt.Errorf("server %s user is required for local unregistry push", serverName)
+	}
+	if strings.TrimSpace(server.Password) != "" && strings.TrimSpace(server.SSHKey) == "" {
+		return "", "", fmt.Errorf("server %s uses password-only SSH auth; deployment.build.strategy=local requires SSH key or agent auth because docker pussh uses the system ssh client", serverName)
+	}
+	if strings.Contains(host, ":") && net.ParseIP(host) != nil {
+		return "", "", fmt.Errorf("server %s uses IPv6 host %s; docker pussh currently expects [user@]host[:port] without IPv6 literals", serverName, host)
+	}
+
+	target := user + "@" + host
+	if server.Port != 0 && server.Port != 22 {
+		target += ":" + strconv.Itoa(server.Port)
+	}
+	return target, strings.TrimSpace(server.SSHKey), nil
 }
 
 func (d *Deployer) imageExistsOnTakodNode(serverName string, imageRef string) (bool, error) {
@@ -593,6 +813,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Command:            service.Command,
 		Labels:             serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
 		ExternalVolumes:    externalVolumes,
+		MemoryLimit:        serviceMemoryLimit(service),
 	}
 	serviceRevision := takodServiceRevisionID(d.config.Project.Name, d.environment, serviceName, imageRef, *service)
 	serviceStrategy := effectiveDeployStrategy(service)
@@ -1323,6 +1544,13 @@ func uniqueAssignmentServers(assignments []takodAssignment) []string {
 	}
 	sort.Strings(servers)
 	return servers
+}
+
+func serviceMemoryLimit(service *config.ServiceConfig) string {
+	if service == nil || service.Resources == nil {
+		return ""
+	}
+	return strings.TrimSpace(service.Resources.Memory)
 }
 
 func (d *Deployer) reconcileServiceViaTakod(client *ssh.Client, request takod.ReconcileServiceRequest) error {

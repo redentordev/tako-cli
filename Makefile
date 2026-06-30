@@ -1,4 +1,4 @@
-.PHONY: build install test clean run help dev lint fmt build-all mesh-e2e mesh-e2e-smoke examples ci-quality ci-race ci-check
+.PHONY: build install test clean run help dev lint fmt build-all man mesh-e2e mesh-e2e-smoke examples ci-quality ci-race ci-check
 
 # Binary name
 BINARY_NAME=tako
@@ -80,6 +80,14 @@ endif
 	@GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe .
 
 	@echo "All builds complete in $(BUILD_DIR)/"
+
+## man: Generate tracked Unix manual pages
+man:
+	@echo "Generating manual pages..."
+	@rm -rf man
+	@mkdir -p man
+	@go run ./scripts/generate-man.go --dir man
+	@echo "Manual pages generated in man/"
 
 ## test: Run tests
 test:

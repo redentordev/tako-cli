@@ -1,0 +1,55 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-history - View deployment history
+
+
+.SH SYNOPSIS
+\fBtako history [flags]\fP
+
+
+.SH DESCRIPTION
+View deployment history stored in the takod mesh.
+
+.PP
+This shows all past deployments with their status, timestamp, and services.
+You can view details and rollback to any previous deployment.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for history
+
+.PP
+\fB-n\fP, \fB--limit\fP=10
+	Number of deployments to show
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Server to view history from instead of the full mesh
+
+.PP
+\fB--status\fP=""
+	Filter by status (success, warmed, failed, rolled_back)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

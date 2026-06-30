@@ -1,0 +1,63 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-takod-run - Run the takod Unix-socket server
+
+
+.SH SYNOPSIS
+\fBtako takod run [flags]\fP
+
+
+.SH DESCRIPTION
+Run the takod Unix-socket server
+
+
+.SH OPTIONS
+\fB--actual-refresh-interval\fP=0s
+	Refresh node-local actual state at this interval (0 disables)
+
+.PP
+\fB--build-cache-keep-storage\fP="20GB"
+	Docker builder cache storage budget to keep during scheduled pruning
+
+.PP
+\fB--build-cache-prune-interval\fP=24h0m0s
+	Prune Docker build cache at this interval (0 disables)
+
+.PP
+\fB--data-dir\fP=""
+	takod data directory
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for run
+
+.PP
+\fB--node\fP=""
+	Configured Tako node name
+
+.PP
+\fB--socket\fP=""
+	Unix socket path
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-takod(1)\fP

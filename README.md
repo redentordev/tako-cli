@@ -157,6 +157,28 @@ cp completions/tako.fish ~/.config/fish/completions/
 
 See [completions/README.md](./completions/README.md) for detailed instructions.
 
+#### Manual Pages
+
+Homebrew and the install script install Unix manual pages when the release
+includes `tako-manpages.tar.gz`:
+
+```bash
+man tako
+man tako-deploy
+man tako-takod-run
+```
+
+For direct binary installs, download and install the release manual archive:
+
+```bash
+gh release download vX.Y.Z --pattern tako-manpages.tar.gz
+sudo mkdir -p /usr/local/share/man/man1
+sudo tar -xzf tako-manpages.tar.gz -C /usr/local/share/man/man1
+```
+
+Set `TAKO_INSTALL_MANPAGES=false` to skip manual page installation in
+`install.sh`, or `TAKO_MAN_DIR=/path/to/man1` to choose the destination.
+
 #### Upgrading
 
 ```bash
@@ -442,12 +464,20 @@ CI/CD runners use the same takod path as a laptop. See
 [CI/CD Deployments](./docs/CI-CD.md) and the
 [meshed takod E2E checklist](./docs/MESH-E2E-CHECKLIST.md).
 
+Generated Unix manual pages are tracked under [`man/`](./man). Regenerate them
+after command or flag changes with:
+
+```bash
+make man
+```
+
 ### Common Flags
 
 - `-v, --verbose` - Show detailed output
 - `-e, --env <name>` - Target specific environment
 - `--service <name>` - Target specific service
 - `--config <path>` - Use custom config file
+- `--host-key-mode <tofu|strict|ask>` - Control SSH host key verification
 
 ---
 
@@ -681,9 +711,10 @@ project containers, volumes, proxy routes, or images. Node-wide Docker builder
 cache and dangling image cleanup can affect other projects' future build
 performance. Successful deploys and `tako cleanup --docker-cache` prune builder
 cache with a default `20GB` keep-storage budget instead of wiping the whole
-cache; override explicit cleanup with `--docker-cache-keep-storage <size>`.
-Dangling image cleanup only runs during deploy cleanup or when
-`tako cleanup --docker-cache` is explicitly requested.
+cache; takod also prunes Docker builder cache on a daily background interval
+using that same budget. Override explicit cleanup with
+`--docker-cache-keep-storage <size>`. Dangling image cleanup only runs during
+deploy cleanup or when `tako cleanup --docker-cache` is explicitly requested.
 By default every selected environment node with public routes reconciles the
 shared proxy for that app/stage. Built-in ACME TLS currently requires the
 proxy placement to resolve to one node, because distributed certificate
@@ -823,6 +854,8 @@ deployment:
   cache:
     enabled: true     # Enable build caching
     type: local       # Cache type
+  build:
+    strategy: remote  # remote, local, or auto
 ```
 
 **Benefits:**
@@ -830,6 +863,73 @@ deployment:
 - Dependency-aware scheduling
 - Automatic build caching
 - Concurrent builds and deploys
+
+### Build Strategy
+
+Build-backed services use `deployment.build.strategy: remote` by default: Tako
+streams the build context to each assigned server and builds there with takod.
+For stronger developer or CI machines, use local build mode:
+
+```yaml
+deployment:
+  build:
+    strategy: auto # try local buildx/unregistry, fall back to remote takod build
+```
+
+`local` builds once per target architecture with `docker buildx build
+--platform linux/amd64|linux/arm64 --load` and pushes the image to each assigned
+server with psviderski/unregistry's `docker pussh`. `auto` uses the same path
+when available and falls back to `remote` when Docker, buildx, docker-pussh, SSH
+key/agent auth, or remote Docker permissions are not ready.
+
+Use `remote` when the server is intentionally the build host, `local` when CI or
+a developer workstation should build and push images to the VPS, and `auto` for
+portable config that prefers local builds but preserves the older server-build
+path.
+
+Use a one-off override from CI or a dev machine:
+
+```bash
+tako deploy --build-strategy local
+tako deploy --build-strategy auto
+```
+
+Install docker-pussh on the client machine:
+
+```bash
+brew install psviderski/tap/docker-pussh
+mkdir -p ~/.docker/cli-plugins
+ln -sf "$(brew --prefix)/bin/docker-pussh" ~/.docker/cli-plugins/docker-pussh
+docker pussh --help
+```
+
+### Container Resource Limits
+
+Set a Docker memory limit per service with `resources.memory`:
+
+```yaml
+services:
+  web:
+    build: .
+    resources:
+      memory: 512m
+```
+
+Tako passes this to Docker as `--memory`. Accepted units are Docker-style byte,
+k, m, or g values such as `512m`, `1g`, or `768mb`.
+
+### Docker Build Cache Pruning
+
+Successful deploy cleanup and `tako cleanup --docker-cache` prune Docker builder
+cache above the default `20GB` storage budget. Installed takod agents also run a
+scheduled builder-cache prune every `24h`:
+
+```bash
+tako takod run --build-cache-prune-interval 24h --build-cache-keep-storage 20GB
+```
+
+Set `--build-cache-prune-interval 0` to disable the scheduled prune, or lower
+`--build-cache-keep-storage` on small VPS disks.
 
 ---
 

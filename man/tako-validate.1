@@ -1,0 +1,52 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-validate - Validate tako.yaml without contacting servers
+
+
+.SH SYNOPSIS
+\fBtako validate [flags]\fP
+
+
+.SH DESCRIPTION
+Validate the Tako configuration file using the same strict preflight path
+that deploy uses before Git checks, SSH, builds, leases, setup, or proxy changes.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for validate
+
+.PP
+\fB--quiet\fP[=false]
+	Only print validation errors
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH EXAMPLE
+.EX
+  tako validate
+  tako validate -e production
+  tako --config ./deploy/tako.yaml validate --quiet
+.EE
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

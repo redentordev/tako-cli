@@ -1,0 +1,53 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-state-repair - Repair deployment and runtime state across reachable mesh nodes
+
+
+.SH SYNOPSIS
+\fBtako state repair [flags]\fP
+
+
+.SH DESCRIPTION
+Repair deployment and runtime state across reachable nodes in the active environment.
+
+.PP
+The command reads deployment history, desired revisions, and actual snapshots
+from every reachable environment node. It chooses the freshest copies, writes
+them back to all reachable nodes under the remote operation lease, and refreshes
+local .tako deployment state when deployment history is available.
+
+.PP
+Use this when nodes disagree, a node was replaced, or a new laptop needs
+the best available state before deploying.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for repair
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Prefer this server when acquiring the repair lease
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-state(1)\fP

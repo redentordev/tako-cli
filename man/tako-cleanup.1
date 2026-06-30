@@ -1,0 +1,97 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-cleanup - Clean up app/stage runtime resources and logs
+
+
+.SH SYNOPSIS
+\fBtako cleanup [flags]\fP
+
+
+.SH DESCRIPTION
+Clean up app/stage runtime resources to reclaim disk space.
+
+.PP
+This command helps maintain your servers by:
+  - Removing old service images (keeps latest N)
+  - Removing stopped service replicas
+  - Removing unused Tako project volumes
+  - Securing log file permissions
+
+.PP
+Regular cleanup prevents disk space exhaustion and keeps your
+deployment servers lean and efficient.
+
+.PP
+Shared-node safety:
+  - Default cleanup is scoped to the current project and environment
+  - It does not remove unrelated project containers, volumes, proxy routes, or images
+  - Docker builder cache and dangling image cleanup are global Docker operations;
+    use --docker-cache only when you intentionally want to reclaim shared cache
+
+.PP
+Security:
+  - Uses --secure flag to restrict log file permissions
+  - Logs are readable only by appropriate system users and root
+  - Prevents unauthorized access to request logs
+
+.PP
+Examples:
+  tako cleanup                  # Clean all servers, keep 3 latest images
+  tako cleanup --keep 5         # Keep 5 latest images
+  tako cleanup --server prod    # Clean specific server
+  tako cleanup --full           # More aggressive app/stage cleanup
+  tako cleanup --docker-cache   # Also prune shared Docker build cache/dangling images
+  tako cleanup --docker-cache --docker-cache-keep-storage 10GB
+  tako cleanup --secure         # Also secure log permissions
+
+
+.SH OPTIONS
+\fB--docker-cache\fP[=false]
+	Also clean Docker builder cache and dangling images shared by all projects
+
+.PP
+\fB--docker-cache-keep-storage\fP="20GB"
+	Docker builder cache storage budget to keep when --docker-cache is used
+
+.PP
+\fB-f\fP, \fB--full\fP[=false]
+	Perform more aggressive app/stage cleanup
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for cleanup
+
+.PP
+\fB-k\fP, \fB--keep\fP=3
+	Number of latest images to keep per service
+
+.PP
+\fB--secure\fP[=false]
+	Also secure log file permissions
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Specific server to clean (default: all servers)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

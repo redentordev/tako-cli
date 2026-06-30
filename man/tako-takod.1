@@ -1,0 +1,44 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-takod - Run the takod node agent
+
+
+.SH SYNOPSIS
+\fBtako takod [flags]\fP
+
+
+.SH DESCRIPTION
+Run the node-local takod agent.
+
+.PP
+The agent listens on a Unix socket and exposes node-local runtime status for
+CLI status, actual-state discovery, service container reconcile, and proxy
+runtime operations.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for takod
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP, \fBtako-takod-run(1)\fP

@@ -1,0 +1,92 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-backup - Backup and restore service volumes
+
+
+.SH SYNOPSIS
+\fBtako backup [flags]\fP
+
+
+.SH DESCRIPTION
+Backup and restore service volumes.
+
+.PP
+Examples:
+  # Backup a specific volume across the environment mesh
+  tako backup --volume data
+
+.PP
+# Backup a specific node's volume
+  tako backup --server node-a --volume data
+
+.PP
+# Backup all configured volumes across the environment mesh
+  tako backup --all
+
+.PP
+# List backups on every reachable environment node
+  tako backup --list
+
+.PP
+# Restore a node-local volume from a backup
+  tako backup --server node-a --volume data --restore 20240101-120000
+
+.PP
+# Delete old backups across the environment mesh
+  tako backup --cleanup 7  # Delete backups older than 7 days
+
+
+.SH OPTIONS
+\fB--all\fP[=false]
+	Backup all volumes
+
+.PP
+\fB--cleanup\fP=0
+	Delete backups older than N days
+
+.PP
+\fB--delete\fP=""
+	Backup ID to delete
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for backup
+
+.PP
+\fB--list\fP[=false]
+	List available backups
+
+.PP
+\fB--restore\fP=""
+	Backup ID to restore from
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Node to run the backup operation on
+
+.PP
+\fB--volume\fP=""
+	Volume name to backup/restore
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

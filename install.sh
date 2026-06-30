@@ -17,6 +17,11 @@ NC='\033[0m' # No Color
 REPO="redentordev/tako-cli"
 VERSION="${TAKO_VERSION:-latest}"
 VERIFY_CHECKSUM="${TAKO_VERIFY_CHECKSUM:-true}"
+INSTALL_MANPAGES="${TAKO_INSTALL_MANPAGES:-true}"
+MAN_DIR="${TAKO_MAN_DIR:-}"
+tmp_file=""
+tmp_man_archive=""
+tmp_man_dir=""
 
 # Determine best install directory
 if [ -n "$TAKO_INSTALL_DIR" ]; then
@@ -159,11 +164,10 @@ download_checksums() {
     echo "$tmp_checksums"
 }
 
-# Verify binary checksum
-verify_checksum() {
-    local binary_file=$1
-    local platform=$2
-    local binary_name="tako-${platform}"
+# Verify a release asset checksum
+verify_asset_checksum() {
+    local asset_file=$1
+    local asset_name=$2
 
     if [ "$VERIFY_CHECKSUM" != "true" ]; then
         return 0
@@ -193,23 +197,23 @@ verify_checksum() {
         return 1
     fi
 
-    # Calculate checksum of downloaded binary
+    # Calculate checksum of downloaded asset
     local calculated_checksum
-    calculated_checksum=$($sha_cmd "$binary_file" | awk '{print $1}')
+    calculated_checksum=$($sha_cmd "$asset_file" | awk '{print $1}')
 
     # Get expected checksum from checksums file
     local expected_checksum
-    expected_checksum=$(awk -v name="$binary_name" '$2 == name || $2 == "*" name { print $1; found = 1; exit } END { if (!found) exit 1 }' "$checksums_file" || true)
+    expected_checksum=$(awk -v name="$asset_name" '$2 == name || $2 == "*" name { print $1; found = 1; exit } END { if (!found) exit 1 }' "$checksums_file" || true)
 
     rm -f "$checksums_file"
 
     if [ -z "$expected_checksum" ]; then
-        print_error "Checksum for ${binary_name} not found in checksums.txt"
+        print_error "Checksum for ${asset_name} not found in checksums.txt"
         return 1
     fi
 
     if ! echo "$expected_checksum" | grep -Eq '^[0-9a-fA-F]{64}$'; then
-        print_error "Checksum for ${binary_name} is not a valid SHA-256 digest"
+        print_error "Checksum for ${asset_name} is not a valid SHA-256 digest"
         return 1
     fi
 
@@ -222,6 +226,15 @@ verify_checksum() {
 
     print_success "Checksum verified"
     return 0
+}
+
+# Verify binary checksum
+verify_checksum() {
+    local binary_file=$1
+    local platform=$2
+    local binary_name="tako-${platform}"
+
+    verify_asset_checksum "$binary_file" "$binary_name"
 }
 
 # Install binary
@@ -251,6 +264,115 @@ install_binary() {
     fi
     
     print_success "Tako CLI installed to ${target_file}"
+}
+
+# Resolve manpage install directory
+resolve_man_dir() {
+    if [ -n "$MAN_DIR" ]; then
+        echo "$MAN_DIR"
+        return 0
+    fi
+
+    if [ -d "/usr/local/share/man/man1" ] && [ -w "/usr/local/share/man/man1" ]; then
+        echo "/usr/local/share/man/man1"
+        return 0
+    fi
+    if [ -d "/usr/local/share/man" ] && [ -w "/usr/local/share/man" ]; then
+        echo "/usr/local/share/man/man1"
+        return 0
+    fi
+    if [ ! -e "/usr/local/share/man" ] && [ -w "/usr/local/share" ]; then
+        echo "/usr/local/share/man/man1"
+        return 0
+    fi
+
+    echo "$HOME/.local/share/man/man1"
+}
+
+# Download and install man pages
+install_man_pages() {
+    if [ "$INSTALL_MANPAGES" != "true" ]; then
+        return 0
+    fi
+    if ! command -v tar &> /dev/null; then
+        print_warning "tar not found; skipping manual page installation"
+        return 0
+    fi
+
+    local asset_name="tako-manpages.tar.gz"
+    local download_url="https://github.com/${REPO}/releases/download/${VERSION}/${asset_name}"
+    tmp_man_archive="/tmp/tako-manpages-$$.tar.gz"
+
+    print_info "Downloading manual pages..."
+    if command -v curl &> /dev/null; then
+        if ! curl -fsSL "$download_url" -o "$tmp_man_archive"; then
+            print_warning "Manual pages are not available for ${VERSION}; skipping"
+            rm -f "$tmp_man_archive"
+            tmp_man_archive=""
+            return 0
+        fi
+    elif command -v wget &> /dev/null; then
+        if ! wget -q "$download_url" -O "$tmp_man_archive"; then
+            print_warning "Manual pages are not available for ${VERSION}; skipping"
+            rm -f "$tmp_man_archive"
+            tmp_man_archive=""
+            return 0
+        fi
+    else
+        print_warning "Neither curl nor wget is available; skipping manual page installation"
+        return 0
+    fi
+
+    if ! verify_asset_checksum "$tmp_man_archive" "$asset_name"; then
+        print_warning "Manual page checksum verification failed; skipping manual page installation"
+        rm -f "$tmp_man_archive"
+        tmp_man_archive=""
+        return 0
+    fi
+
+    if ! tmp_man_dir=$(mktemp -d "${TMPDIR:-/tmp}/tako-manpages.XXXXXX"); then
+        print_warning "Failed to create temporary directory; skipping manual page installation"
+        return 0
+    fi
+    if ! tar -xzf "$tmp_man_archive" -C "$tmp_man_dir"; then
+        print_warning "Failed to extract manual pages; skipping"
+        return 0
+    fi
+
+    local target_dir
+    target_dir=$(resolve_man_dir)
+    if [ ! -d "$target_dir" ]; then
+        if ! mkdir -p "$target_dir" 2>/dev/null; then
+            if ! sudo mkdir -p "$target_dir"; then
+                print_warning "Could not create ${target_dir}; skipping manual page installation"
+                return 0
+            fi
+        fi
+    fi
+
+    local found=false
+    local page
+    for page in "$tmp_man_dir"/*.1; do
+        [ -e "$page" ] || continue
+        found=true
+        if [ -w "$target_dir" ]; then
+            if ! install -m 0644 "$page" "$target_dir/"; then
+                print_warning "Failed to install manual pages to ${target_dir}; skipping"
+                return 0
+            fi
+        else
+            if ! sudo install -m 0644 "$page" "$target_dir/"; then
+                print_warning "Failed to install manual pages to ${target_dir}; skipping"
+                return 0
+            fi
+        fi
+    done
+    if [ "$found" != "true" ]; then
+        print_warning "Manual page archive did not contain .1 files; skipping"
+        return 0
+    fi
+
+    print_success "Manual pages installed to ${target_dir}"
 }
 
 # Detect user's shell
@@ -386,6 +508,12 @@ cleanup() {
     if [ -n "$tmp_file" ] && [ -f "$tmp_file" ]; then
         rm -f "$tmp_file"
     fi
+    if [ -n "$tmp_man_archive" ] && [ -f "$tmp_man_archive" ]; then
+        rm -f "$tmp_man_archive"
+    fi
+    if [ -n "$tmp_man_dir" ] && [ -d "$tmp_man_dir" ]; then
+        rm -rf "$tmp_man_dir"
+    fi
 }
 
 trap cleanup EXIT
@@ -417,6 +545,9 @@ main() {
 
     # Install binary
     install_binary "$tmp_file"
+
+    # Install manual pages when the release provides them
+    install_man_pages
     
     # Verify installation
     verify_installation

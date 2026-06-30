@@ -99,6 +99,13 @@ checkout and SSH material into that container before running `tako validate`,
 socket is only needed for custom local Docker steps outside the normal takod
 deploy path.
 
+If the runner should build images instead of the VPS, set
+`deployment.build.strategy: auto` or pass `tako deploy --build-strategy local`.
+That path requires the runner to have Docker, buildx, and psviderski/unregistry's
+`docker pussh` plugin installed, plus SSH key or agent auth to the remote Docker
+host. `auto` falls back to the remote takod builder when those prerequisites are
+not available.
+
 ```yaml
 name: Deploy
 

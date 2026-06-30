@@ -34,6 +34,7 @@ var (
 	deployStrictDomains   bool
 	deployDomainTimeout   = 2 * time.Minute
 	deployDomainTargets   []string
+	deployBuildStrategy   string
 )
 
 var blueGreenGraceSleep = time.Sleep
@@ -65,6 +66,7 @@ func init() {
 	deployCmd.Flags().BoolVar(&deployStrictDomains, "strict-domains", false, "Fail deploy if public domains are not DNS/TLS active after waiting")
 	deployCmd.Flags().DurationVar(&deployDomainTimeout, "domain-timeout", 2*time.Minute, "Wait up to this duration for public DNS/TLS readiness; 0 checks once")
 	deployCmd.Flags().StringArrayVar(&deployDomainTargets, "domain-target", nil, "Expected DNS target; repeat for custom edge/CNAME targets (defaults to proxy server hosts)")
+	deployCmd.Flags().StringVar(&deployBuildStrategy, "build-strategy", "", "Override image build strategy: remote, local, or auto")
 }
 
 func ensureDeployRuntimeSupported(cfg *config.Config) error {
@@ -253,6 +255,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(deployBuildStrategy) != "" {
+		if err := cfg.SetBuildStrategy(deployBuildStrategy); err != nil {
+			return err
+		}
+	}
 	if err := ensureDeployRuntimeSupported(cfg); err != nil {
 		return err
 	}
@@ -332,6 +339,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Environment: %s\n", envName)
 	fmt.Printf("Runtime: %s\n", cfg.GetRuntimeMode())
 	fmt.Printf("State: %s (consistency: %s)\n", cfg.GetStateBackend(), cfg.GetDeployConsistency())
+	fmt.Printf("Build strategy: %s\n", cfg.GetBuildStrategy())
 	if cfg.IsMeshEnabled() {
 		fmt.Printf("Mesh: enabled (%s via %s)\n", cfg.Mesh.NetworkCIDR, cfg.Mesh.Interface)
 	} else {

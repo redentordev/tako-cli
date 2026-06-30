@@ -238,6 +238,40 @@ func TestValidateConfigRejectsPersistentServiceWithReplicas(t *testing.T) {
 	}
 }
 
+func TestValidateConfigAcceptsServiceMemoryLimit(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Resources = &ResourceLimitsConfig{Memory: " 512M "}
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+	got := cfg.Environments["production"].Services["web"].Resources.Memory
+	if got != "512m" {
+		t.Fatalf("resources.memory = %q, want normalized 512m", got)
+	}
+}
+
+func TestValidateConfigRejectsUnsafeServiceMemoryLimit(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Resources = &ResourceLimitsConfig{Memory: "512m --privileged"}
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject unsafe resources.memory")
+	}
+	if !strings.Contains(err.Error(), "invalid resources.memory") {
+		t.Fatalf("error = %q, want resources.memory guidance", err)
+	}
+}
+
 func TestValidateConfigAcceptsBackupStorageConfig(t *testing.T) {
 	cfg := validValidationConfig()
 	production := cfg.Environments["production"]
@@ -770,6 +804,51 @@ func TestValidateConfigDefaultsDeploymentStrategy(t *testing.T) {
 	got := cfg.Environments["production"].Services["web"].Deploy.Strategy
 	if got != DeployStrategyRecreate {
 		t.Fatalf("deploy strategy = %q, want %q", got, DeployStrategyRecreate)
+	}
+}
+
+func TestValidateConfigDefaultsBuildStrategyRemote(t *testing.T) {
+	cfg := validValidationConfig()
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+
+	if got := cfg.GetBuildStrategy(); got != BuildStrategyRemote {
+		t.Fatalf("build strategy = %q, want %q", got, BuildStrategyRemote)
+	}
+}
+
+func TestValidateConfigAcceptsBuildStrategies(t *testing.T) {
+	for _, strategy := range []string{BuildStrategyRemote, BuildStrategyLocal, BuildStrategyAuto, " LOCAL "} {
+		t.Run(strategy, func(t *testing.T) {
+			cfg := validValidationConfig()
+			cfg.Deployment = &DeploymentConfig{
+				Build: &BuildConfig{Strategy: strategy},
+			}
+
+			if err := ValidateConfig(cfg); err != nil {
+				t.Fatalf("ValidateConfig returned error: %v", err)
+			}
+			if got := cfg.GetBuildStrategy(); got == "" || got != strings.ToLower(strings.TrimSpace(strategy)) {
+				t.Fatalf("build strategy = %q, want normalized %q", got, strings.ToLower(strings.TrimSpace(strategy)))
+			}
+		})
+	}
+}
+
+func TestValidateConfigRejectsUnknownBuildStrategy(t *testing.T) {
+	cfg := validValidationConfig()
+	cfg.Deployment = &DeploymentConfig{
+		Build: &BuildConfig{Strategy: "registry"},
+	}
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject unsupported build strategy")
+	}
+	if !strings.Contains(err.Error(), "deployment.build.strategy must be remote, local, or auto") {
+		t.Fatalf("error = %q, want build strategy guidance", err)
 	}
 }
 

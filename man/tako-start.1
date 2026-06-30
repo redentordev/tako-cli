@@ -1,0 +1,49 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-start - Start a stopped service
+
+
+.SH SYNOPSIS
+\fBtako start [flags]\fP
+
+
+.SH DESCRIPTION
+Start a stopped takod service by reconciling it back to its configured
+replica count.
+
+.PP
+Examples:
+  tako start --service web
+  tako start --service api
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for start
+
+.PP
+\fB--service\fP=""
+	Service to start (required)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

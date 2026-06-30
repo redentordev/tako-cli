@@ -36,6 +36,9 @@ func ValidateConfig(cfg *Config) error {
 	if err := validateRuntimeConfig(cfg); err != nil {
 		return err
 	}
+	if err := validateDeploymentConfig(cfg); err != nil {
+		return err
+	}
 
 	// Validate servers
 	if len(cfg.Servers) == 0 {
@@ -74,6 +77,18 @@ func ValidateConfig(cfg *Config) error {
 		}
 	}
 
+	return nil
+}
+
+func validateDeploymentConfig(cfg *Config) error {
+	if cfg.Deployment == nil || cfg.Deployment.Build == nil {
+		return nil
+	}
+	strategy, err := NormalizeBuildStrategy(cfg.Deployment.Build.Strategy)
+	if err != nil {
+		return err
+	}
+	cfg.Deployment.Build.Strategy = strategy
 	return nil
 }
 
@@ -551,6 +566,9 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 	if err := validateServiceVolumes(name, service, cfg); err != nil {
 		return err
 	}
+	if err := validateResourceLimits(name, service.Resources); err != nil {
+		return err
+	}
 	if service.Persistent && len(service.Volumes) == 0 {
 		return fmt.Errorf("service %s: persistent services must declare at least one volume so data is not stored only in the container filesystem", name)
 	}
@@ -759,6 +777,53 @@ func validateBackupConfig(name string, service *ServiceConfig) error {
 		}
 	}
 	return nil
+}
+
+func validateResourceLimits(name string, resources *ResourceLimitsConfig) error {
+	if resources == nil {
+		return nil
+	}
+	memory, err := normalizeDockerMemoryLimit(resources.Memory)
+	if err != nil {
+		return fmt.Errorf("service %s: invalid resources.memory: %w", name, err)
+	}
+	resources.Memory = memory
+	return nil
+}
+
+func normalizeDockerMemoryLimit(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "", nil
+	}
+
+	unitStart := len(value)
+	for unitStart > 0 && value[unitStart-1] >= 'a' && value[unitStart-1] <= 'z' {
+		unitStart--
+	}
+	number := value[:unitStart]
+	unit := value[unitStart:]
+	if number == "" {
+		return "", fmt.Errorf("must start with a positive integer")
+	}
+	if len(number) > 18 {
+		return "", fmt.Errorf("numeric value is too large")
+	}
+	for i, r := range number {
+		if r < '0' || r > '9' {
+			return "", fmt.Errorf("must use a positive integer with optional unit b, k, m, g, kb, mb, gb, kib, mib, or gib")
+		}
+		if i == 0 && r == '0' {
+			return "", fmt.Errorf("must be greater than zero")
+		}
+	}
+
+	switch unit {
+	case "", "b", "k", "m", "g", "kb", "mb", "gb", "kib", "mib", "gib":
+		return number + unit, nil
+	default:
+		return "", fmt.Errorf("unsupported unit %q", unit)
+	}
 }
 
 func validateBackupSchedule(schedule string) error {

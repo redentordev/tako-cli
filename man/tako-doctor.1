@@ -1,0 +1,63 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-doctor - Check project health and diagnose common issues
+
+
+.SH SYNOPSIS
+\fBtako doctor [flags]\fP
+
+
+.SH DESCRIPTION
+Run health checks on your Tako project to identify missing files,
+broken SSH connections, missing secrets, and other common issues.
+
+.PP
+Checks performed:
+  - Configuration file (tako.yaml / tako.json)
+  - Environment file (.env)
+  - SSH key accessibility and permissions
+  - Secrets configuration
+  - Local state (.tako directory)
+  - Local build inputs
+  - Server connectivity (skip with --skip-remote)
+  - Server agent version (skip with --skip-remote)
+  - Docker runtime and proxy runtime (skip with --skip-remote)
+  - Replicated deployment/runtime state (skip with --skip-remote)
+  - Running services (skip with --skip-remote)
+
+.PP
+Examples:
+  tako doctor                  # Run all checks
+  tako doctor --skip-remote    # Skip SSH and service checks
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for doctor
+
+.PP
+\fB--skip-remote\fP[=false]
+	Skip SSH connectivity and service checks
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

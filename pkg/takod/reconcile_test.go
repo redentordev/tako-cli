@@ -137,6 +137,12 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 
 	invalid = valid
+	invalid.MemoryLimit = "512m --privileged"
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe memory limit to be rejected")
+	}
+
+	invalid = valid
 	invalid.Health = &HealthSpec{Command: "curl -sf /health\n--privileged"}
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe health command to be rejected")
@@ -270,8 +276,9 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 		Labels: map[string]string{
 			"tako.role": "frontend",
 		},
-		Mounts:  []string{"type=volume,source=demo_data,target=/data"},
-		Command: "npm run worker",
+		Mounts:      []string{"type=volume,source=demo_data,target=/data"},
+		Command:     "npm run worker",
+		MemoryLimit: "512m",
 		Health: &HealthSpec{
 			Path:        "/health",
 			Port:        3000,
@@ -310,6 +317,7 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 		"--env-file", "/tmp/web.env",
 		"--mount", "type=volume,source=demo_data,target=/data",
 		"--publish", "10.42.0.2:31001:3000",
+		"--memory", "512m",
 		"registry.example.com/demo/web:abc",
 		"sh", "-c", "npm run worker",
 	}
@@ -619,7 +627,8 @@ func TestReconcileServiceCleansStartedContainersOnHealthFailure(t *testing.T) {
 		Network:     "tako_demo_production",
 		Containers:  []ContainerSpec{{Name: "demo_production_web_1"}},
 		Health: &HealthSpec{
-			Command: "curl -sf http://127.0.0.1:3000/health || exit 1",
+			Command:      "curl -sf http://127.0.0.1:3000/health || exit 1",
+			WaitAttempts: 1,
 		},
 	})
 	if err == nil {

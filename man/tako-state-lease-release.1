@@ -1,0 +1,55 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-state-lease-release - Release a remote operation lease by exact ID
+
+
+.SH SYNOPSIS
+\fBtako state lease release [flags]\fP
+
+
+.SH DESCRIPTION
+Release a remote operation lease by exact ID.
+
+.PP
+This command only releases leases whose current remote ID matches --id. It
+refuses to release a non-expired lease unless --force is set.
+
+
+.SH OPTIONS
+\fB--force\fP[=false]
+	Release a matching non-expired lease
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for release
+
+.PP
+\fB--id\fP=""
+	Exact remote lease ID to release
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Release a lease on a specific server instead of the full mesh
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-state-lease(1)\fP

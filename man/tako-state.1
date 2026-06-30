@@ -1,0 +1,43 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-state - Manage deployment state synchronization
+
+
+.SH SYNOPSIS
+\fBtako state [flags]\fP
+
+
+.SH DESCRIPTION
+Manage deployment state between local .tako directory and the takod mesh.
+
+.PP
+When you clone a project or work on a different machine, local state may be missing.
+Use 'tako state pull' to sync remote state to your local machine.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for state
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP, \fBtako-state-forget-node(1)\fP, \fBtako-state-lease(1)\fP, \fBtako-state-pull(1)\fP, \fBtako-state-repair(1)\fP, \fBtako-state-status(1)\fP
