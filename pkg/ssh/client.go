@@ -23,11 +23,12 @@ import (
 const DefaultCommandTimeout = 30 * time.Minute
 
 const (
-	connectDefaultTCPAttempts   = 3
-	connectMaxHandshakeAttempts = 3
-	connectDefaultTimeout       = 10 * time.Second
-	connectMaxTimeout           = 5 * time.Minute
-	connectBackoffMax           = 10 * time.Second
+	connectDefaultTCPAttempts    = 3
+	connectAutomationTCPAttempts = 6
+	connectMaxHandshakeAttempts  = 3
+	connectDefaultTimeout        = 10 * time.Second
+	connectMaxTimeout            = 5 * time.Minute
+	connectBackoffMax            = 10 * time.Second
 )
 
 // Client wraps an SSH connection with additional functionality
@@ -394,6 +395,9 @@ func connectTimeout() time.Duration {
 func connectTCPAttempts() int {
 	raw := strings.TrimSpace(os.Getenv("TAKO_SSH_CONNECT_ATTEMPTS"))
 	if raw == "" {
+		if truthyEnv("CI") || truthyEnv("TAKO_NONINTERACTIVE") {
+			return connectAutomationTCPAttempts
+		}
 		return connectDefaultTCPAttempts
 	}
 	attempts, err := strconv.Atoi(raw)
@@ -442,6 +446,15 @@ func isTransientDialError(err error) bool {
 		}
 	}
 	return false
+}
+
+func truthyEnv(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // Close closes the SSH connection and any associated resources

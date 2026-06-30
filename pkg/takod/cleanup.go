@@ -29,6 +29,7 @@ type CleanupRequest struct {
 	CleanStoppedContainers bool     `json:"cleanStoppedContainers,omitempty"`
 	CleanDanglingImages    bool     `json:"cleanDanglingImages,omitempty"`
 	CleanBuildCache        bool     `json:"cleanBuildCache,omitempty"`
+	BuildCacheKeepStorage  string   `json:"buildCacheKeepStorage,omitempty"`
 	CleanUnusedVolumes     bool     `json:"cleanUnusedVolumes,omitempty"`
 	SecureLogPermissions   bool     `json:"secureLogPermissions,omitempty"`
 }
@@ -48,6 +49,8 @@ type CleanupResponse struct {
 	DockerDiskUsage       string   `json:"dockerDiskUsage,omitempty"`
 	Warnings              []string `json:"warnings,omitempty"`
 }
+
+const DefaultBuildCacheKeepStorage = "20GB"
 
 func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, error) {
 	if err := validateCleanupRequest(req); err != nil {
@@ -111,7 +114,7 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 		response.ImagesRemoved += count
 	}
 	if req.CleanBuildCache {
-		if _, err := runDocker(ctx, "builder", "prune", "-f"); err != nil {
+		if _, err := cleanupBuildCache(ctx, req.BuildCacheKeepStorage); err != nil {
 			warn("failed to clean Docker build cache: %v", err)
 		} else {
 			response.BuildCacheCleaned = true
@@ -176,6 +179,9 @@ func validateCleanupRequest(req CleanupRequest) error {
 		if !isSafeDockerVolumeName(volume) {
 			return fmt.Errorf("invalid external volume name")
 		}
+	}
+	if req.BuildCacheKeepStorage != "" && !isSafeBuildCacheKeepStorage(req.BuildCacheKeepStorage) {
+		return fmt.Errorf("invalid build cache keep storage")
 	}
 	return nil
 }
@@ -352,6 +358,17 @@ func cleanupDanglingImages(ctx context.Context) (int, error) {
 	return countDockerImagePruneEntries(pruneOutput), nil
 }
 
+func cleanupBuildCache(ctx context.Context, keepStorage string) (string, error) {
+	keepStorage = strings.TrimSpace(keepStorage)
+	if keepStorage == "" {
+		keepStorage = DefaultBuildCacheKeepStorage
+	}
+	if !isSafeBuildCacheKeepStorage(keepStorage) {
+		return "", fmt.Errorf("invalid build cache keep storage")
+	}
+	return runDocker(ctx, "builder", "prune", "-f", "--keep-storage", keepStorage)
+}
+
 func countDockerImagePruneEntries(output string) int {
 	count := 0
 	for _, line := range strings.Split(output, "\n") {
@@ -361,6 +378,26 @@ func countDockerImagePruneEntries(output string) int {
 		}
 	}
 	return count
+}
+
+func isSafeBuildCacheKeepStorage(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 32 || strings.HasPrefix(value, "-") {
+		return false
+	}
+	hasDigit := false
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r == '.':
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 func cleanupUnusedProjectVolumes(ctx context.Context, project string, environment string, protectedVolumes []string) (int, error) {

@@ -2,6 +2,7 @@ package takod
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -231,6 +232,47 @@ func TestFullBackupVolumeNameUsesExplicitDockerVolume(t *testing.T) {
 	}
 	if got := fullBackupVolumeName(request); got != "captain--n8n-data" {
 		t.Fatalf("full backup volume name = %q, want explicit Docker volume", got)
+	}
+}
+
+func TestCreateVolumeBackupReturnsWarningWhenRemoteUploadFails(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+
+	oldUpload := uploadBackupObjectS3With
+	uploadBackupObjectS3With = func(context.Context, BackupStorageConfig, BackupObject) (*BackupRemoteInfo, error) {
+		return nil, errors.New("object store unavailable")
+	}
+	t.Cleanup(func() { uploadBackupObjectS3With = oldUpload })
+
+	info, err := CreateVolumeBackup(context.Background(), BackupRequest{
+		Project:       "demo",
+		Environment:   "production",
+		Volume:        "data",
+		BackupID:      "20260629-120000",
+		RetentionDays: 7,
+		Storage: &BackupStorageConfig{
+			Provider:        BackupStorageProviderS3,
+			Bucket:          "backups",
+			Region:          "us-west-2",
+			AccessKeyID:     "access",
+			SecretAccessKey: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolumeBackup returned error: %v", err)
+	}
+	if info == nil || info.ID != "20260629-120000" {
+		t.Fatalf("backup info = %#v, want created backup", info)
+	}
+	if len(info.Warnings) != 1 || !strings.Contains(info.Warnings[0], "upload failed") {
+		t.Fatalf("warnings = %#v, want upload warning", info.Warnings)
+	}
+	if _, err := os.Stat(info.Path); err != nil {
+		t.Fatalf("expected local backup archive to remain: %v", err)
 	}
 }
 

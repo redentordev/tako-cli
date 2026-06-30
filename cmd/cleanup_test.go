@@ -157,7 +157,7 @@ func TestCleanupRequestForEnvironmentKeepsSharedDockerCacheOptIn(t *testing.T) {
 	repositories := []string{"demo/web"}
 	externalVolumes := []string{"shared-data"}
 
-	request := cleanupRequestForEnvironment(cfg, "production", repositories, externalVolumes, 3, false, true)
+	request := cleanupRequestForEnvironment(cfg, "production", repositories, externalVolumes, 3, false, "10GB", true)
 	if request.Project != "demo" || request.Environment != "production" {
 		t.Fatalf("request scope = %s/%s, want demo/production", request.Project, request.Environment)
 	}
@@ -167,13 +167,19 @@ func TestCleanupRequestForEnvironmentKeepsSharedDockerCacheOptIn(t *testing.T) {
 	if request.CleanDanglingImages || request.CleanBuildCache {
 		t.Fatalf("default cleanup should not touch shared Docker cache: %#v", request)
 	}
+	if request.BuildCacheKeepStorage != "" {
+		t.Fatalf("default cleanup should not send build cache keep storage: %#v", request)
+	}
 	if !request.SecureLogPermissions {
 		t.Fatalf("secure flag not propagated: %#v", request)
 	}
 
-	request = cleanupRequestForEnvironment(cfg, "production", repositories, externalVolumes, 2, true, false)
+	request = cleanupRequestForEnvironment(cfg, "production", repositories, externalVolumes, 2, true, "8GB", false)
 	if !request.CleanDanglingImages || !request.CleanBuildCache {
 		t.Fatalf("docker cache flag should enable explicit shared Docker cache cleanup: %#v", request)
+	}
+	if request.BuildCacheKeepStorage != "8GB" {
+		t.Fatalf("build cache keep storage = %q, want 8GB", request.BuildCacheKeepStorage)
 	}
 }
 

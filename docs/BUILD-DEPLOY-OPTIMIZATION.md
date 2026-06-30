@@ -33,9 +33,10 @@ app and included first-time create work.
 - Build-backed takod deploys check `/v1/images/exists` before building on a
   node. If the exact commit image exists, deploy skips archive creation,
   context upload, and Docker build.
-- Automatic post-deploy dangling image cleanup uses `docker image prune -f`
-  instead of passing BuildKit-generated dangling image IDs directly to
-  `docker rmi`.
+- Automatic post-deploy cleanup uses `docker image prune -f` for dangling images
+  and `docker builder prune -f --keep-storage 20GB` for BuildKit cache pressure.
+  The builder cache threshold avoids clearing the whole shared cache after every
+  deploy while still preventing unbounded cache growth.
 - Docker can still list a dangling image when a running container references an
   untagged image. Tako leaves those alone because Docker does not consider them
   reclaimable.

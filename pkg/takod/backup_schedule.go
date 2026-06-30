@@ -224,7 +224,7 @@ func (s *BackupScheduler) runScheduledBackup(request BackupScheduleRequest) {
 	defer cancel()
 	backupID := backupIDForRequest(BackupRequest{}, time.Now())
 	for _, volume := range request.Volumes {
-		_, err := CreateVolumeBackup(ctx, BackupRequest{
+		info, err := CreateVolumeBackup(ctx, BackupRequest{
 			Project:        request.Project,
 			Environment:    request.Environment,
 			Volume:         volume.Volume,
@@ -236,6 +236,11 @@ func (s *BackupScheduler) runScheduledBackup(request BackupScheduleRequest) {
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "takod scheduled backup failed for %s/%s/%s volume %s: %v\n", request.Project, request.Environment, request.Service, volume.Volume, err)
+		}
+		if info != nil {
+			for _, warning := range info.Warnings {
+				fmt.Fprintf(os.Stderr, "takod scheduled backup warning for %s/%s/%s volume %s: %s\n", request.Project, request.Environment, request.Service, volume.Volume, warning)
+			}
 		}
 		if request.RetentionDays <= 0 {
 			continue

@@ -144,6 +144,52 @@ func TestBackupVolumesFromConfigIncludesTakoVolumeShorthand(t *testing.T) {
 	}
 }
 
+func TestBackupVolumesFromConfigCarriesServiceBackupStorage(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Services: map[string]config.ServiceConfig{
+					"postgres": {
+						Volumes: []string{"pgdata:/var/lib/postgresql/data", "cache:/cache"},
+						Backup: &config.BackupConfig{
+							Schedule: "@daily",
+							Retain:   14,
+							Volumes:  []string{"pgdata"},
+							Storage: &config.BackupStorageConfig{
+								Provider:        config.BackupStorageProviderR2,
+								Bucket:          "backups",
+								Region:          "auto",
+								Endpoint:        "https://account.r2.cloudflarestorage.com",
+								Prefix:          "apps",
+								AccessKeyID:     "access",
+								SecretAccessKey: "secret",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got, err := backupVolumesFromConfig(cfg, "production")
+	if err != nil {
+		t.Fatalf("backupVolumesFromConfig returned error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("backup volumes = %#v, want two volumes", got)
+	}
+	if got[0].name != "cache" || got[0].storage != nil {
+		t.Fatalf("cache should not inherit pgdata-only storage: %#v", got[0])
+	}
+	if got[1].name != "pgdata" || got[1].retentionDays != 14 {
+		t.Fatalf("pgdata backup spec = %#v, want retention", got[1])
+	}
+	if got[1].storage == nil || got[1].storage.Provider != config.BackupStorageProviderR2 || got[1].storage.Bucket != "backups" {
+		t.Fatalf("pgdata storage = %#v, want R2 backup storage", got[1].storage)
+	}
+}
+
 func TestBackupRequestResolvesExternalDockerVolumeName(t *testing.T) {
 	cfg := &config.Config{
 		Project: config.ProjectConfig{Name: "demo"},
@@ -177,6 +223,33 @@ func TestBackupRequestUsesSafeArchiveNameForPathShorthand(t *testing.T) {
 	wantDockerVolume := cfg.GetVolumeName("/data/uploads", "production")
 	if got.DockerVolume != wantDockerVolume {
 		t.Fatalf("docker volume = %q, want generated runtime volume", got.DockerVolume)
+	}
+}
+
+func TestBackupRequestForSpecIncludesStorage(t *testing.T) {
+	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo"}}
+
+	got := backupRequestForSpec(cfg, "production", backupVolumeSpec{
+		name:          "pgdata",
+		retentionDays: 14,
+		storage: &config.BackupStorageConfig{
+			Provider:        config.BackupStorageProviderS3,
+			Bucket:          "backups",
+			Region:          "us-west-1",
+			Prefix:          "apps",
+			AccessKeyID:     "access",
+			SecretAccessKey: "secret",
+		},
+	}, "20260616-120000")
+
+	if got.RetentionDays != 14 {
+		t.Fatalf("retentionDays = %d, want 14", got.RetentionDays)
+	}
+	if got.Storage == nil || got.Storage.Provider != takod.BackupStorageProviderS3 || got.Storage.Bucket != "backups" {
+		t.Fatalf("storage = %#v, want S3 storage", got.Storage)
+	}
+	if got.Storage.SecretAccessKey != "secret" {
+		t.Fatalf("secret access key was not copied into takod request")
 	}
 }
 

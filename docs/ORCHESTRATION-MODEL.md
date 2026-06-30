@@ -500,8 +500,10 @@ the active config. They preserve unrelated containers, volumes, proxy routes,
 export networks, and the shared `takod`/`tako-proxy` runtime. Node-wide Docker
 builder cache and dangling image cleanup are intentionally excluded from default
 cleanup because those caches may be useful to unrelated projects on the same
-host; operators must pass `tako cleanup --docker-cache` to reclaim that shared
-cache.
+host. Successful deploys and explicit `tako cleanup --docker-cache` requests run
+Docker builder cache pruning with a default `20GB` keep-storage budget instead
+of clearing the entire cache; operators can tune explicit cleanup with
+`--docker-cache-keep-storage <size>`.
 
 ## Implementation Status
 

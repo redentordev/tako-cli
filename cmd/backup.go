@@ -26,8 +26,9 @@ var (
 )
 
 var backupCmd = &cobra.Command{
-	Use:   "backup",
-	Short: "Backup and restore service volumes",
+	Use:          "backup",
+	Short:        "Backup and restore service volumes",
+	SilenceUsage: true,
 	Long: `Backup and restore service volumes.
 
 Examples:
@@ -184,8 +185,13 @@ func createBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName
 	fmt.Printf("=== Backing up volume: %s ===\n", volumeName)
 	fmt.Printf("Backup ID: %s\n\n", backupID)
 
+	spec, err := backupVolumeSpecForName(cfg, envName, volumeName)
+	if err != nil {
+		return fmt.Errorf("backup failed: %w", err)
+	}
+
 	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
-		info, err := createBackupOnNode(cfg, pool, serverCfg, envName, volumeName, backupID)
+		info, err := createBackupOnNode(cfg, pool, serverCfg, envName, spec, backupID)
 		if backupVolumeMissing(err) {
 			return backupNodeActionResult{skipped: []string{fmt.Sprintf("%s: volume not present on node", volumeName)}}, nil
 		}
@@ -274,7 +280,7 @@ func backupAllVolumesAcrossNodes(cfg *config.Config, pool sshClientProvider, env
 		var payload backupNodeActionResult
 		var failures []string
 		for _, volume := range volumes {
-			info, err := createBackupOnNode(cfg, pool, serverCfg, envName, volume.name, backupID)
+			info, err := createBackupOnNode(cfg, pool, serverCfg, envName, volume, backupID)
 			if backupVolumeMissing(err) {
 				payload.skipped = append(payload.skipped, fmt.Sprintf("%s: volume not present on node", volume.name))
 				continue
@@ -389,6 +395,12 @@ func printBackupMutationResults(results []backupNodeResult, operation string, em
 				serviceLabel = " (" + backup.Service + ")"
 			}
 			fmt.Printf("  Created: %s%s  %s  %s\n", backup.Volume, serviceLabel, backup.ID, sizeStr)
+			if backup.Remote != nil {
+				fmt.Printf("    Remote: %s://%s/%s\n", backup.Remote.Provider, backup.Remote.Bucket, backup.Remote.Key)
+			}
+			for _, warning := range backup.Warnings {
+				fmt.Printf("    Warning: %s\n", warning)
+			}
 		}
 		if result.err != nil {
 			failures++
@@ -452,8 +464,10 @@ func printBackupCleanupResults(results []backupNodeResult) error {
 }
 
 type backupVolumeSpec struct {
-	name    string
-	service string
+	name          string
+	service       string
+	retentionDays int
+	storage       *config.BackupStorageConfig
 }
 
 func backupVolumesFromConfig(cfg *config.Config, envName string) ([]backupVolumeSpec, error) {
@@ -463,14 +477,18 @@ func backupVolumesFromConfig(cfg *config.Config, envName string) ([]backupVolume
 	}
 
 	seen := make(map[string]backupVolumeSpec)
-	for serviceName, service := range services {
-		for _, volume := range service.Volumes {
-			source, ok := backupVolumeNameFromSpec(volume)
-			if !ok {
-				continue
-			}
-			if _, ok := seen[source]; !ok {
-				seen[source] = backupVolumeSpec{name: source, service: serviceName}
+	serviceNames := make([]string, 0, len(services))
+	for serviceName := range services {
+		serviceNames = append(serviceNames, serviceName)
+	}
+	sort.Strings(serviceNames)
+
+	for _, serviceName := range serviceNames {
+		service := services[serviceName]
+		for _, spec := range backupVolumeSpecsForService(serviceName, service) {
+			existing, ok := seen[spec.name]
+			if !ok || (existing.storage == nil && spec.storage != nil) {
+				seen[spec.name] = spec
 			}
 		}
 	}
@@ -483,6 +501,43 @@ func backupVolumesFromConfig(cfg *config.Config, envName string) ([]backupVolume
 		return volumes[i].name < volumes[j].name
 	})
 	return volumes, nil
+}
+
+func backupVolumeSpecForName(cfg *config.Config, envName string, volumeName string) (backupVolumeSpec, error) {
+	volumes, err := backupVolumesFromConfig(cfg, envName)
+	if err != nil {
+		return backupVolumeSpec{}, err
+	}
+	for _, volume := range volumes {
+		if volume.name == volumeName {
+			return volume, nil
+		}
+	}
+	return backupVolumeSpec{name: volumeName}, nil
+}
+
+func backupVolumeSpecsForService(serviceName string, service config.ServiceConfig) []backupVolumeSpec {
+	backupVolumeSet := map[string]bool{}
+	if service.Backup != nil && len(service.Backup.Volumes) > 0 {
+		for _, volume := range service.Backup.Volumes {
+			backupVolumeSet[strings.TrimSpace(volume)] = true
+		}
+	}
+
+	var specs []backupVolumeSpec
+	for _, volume := range service.Volumes {
+		source, ok := backupVolumeNameFromSpec(volume)
+		if !ok {
+			continue
+		}
+		spec := backupVolumeSpec{name: source, service: serviceName}
+		if service.Backup != nil && (len(backupVolumeSet) == 0 || backupVolumeSet[source]) {
+			spec.retentionDays = service.Backup.Retain
+			spec.storage = cloneConfigBackupStorage(service.Backup.Storage)
+		}
+		specs = append(specs, spec)
+	}
+	return specs
 }
 
 func backupVolumeNameFromSpec(volume string) (string, bool) {
@@ -502,16 +557,21 @@ func backupVolumeNameFromSpec(volume string) (string, bool) {
 }
 
 func backupRequest(cfg *config.Config, envName string, volumeName string, backupID string, retentionDays int) takod.BackupRequest {
+	return backupRequestForSpec(cfg, envName, backupVolumeSpec{name: volumeName, retentionDays: retentionDays}, backupID)
+}
+
+func backupRequestForSpec(cfg *config.Config, envName string, volume backupVolumeSpec, backupID string) takod.BackupRequest {
 	request := takod.BackupRequest{
 		Project:       cfg.Project.Name,
 		Environment:   envName,
-		Volume:        backupArchiveVolumeName(volumeName),
+		Volume:        backupArchiveVolumeName(volume.name),
 		BackupID:      backupID,
-		RetentionDays: retentionDays,
+		RetentionDays: volume.retentionDays,
+		Storage:       takodBackupStorageFromConfig(volume.storage),
 	}
-	if volumeName != "" {
-		request.DockerVolume = cfg.GetVolumeName(volumeName, envName)
-		request.ExternalVolume = cfg.IsVolumeExternal(volumeName)
+	if volume.name != "" {
+		request.DockerVolume = cfg.GetVolumeName(volume.name, envName)
+		request.ExternalVolume = cfg.IsVolumeExternal(volume.name)
 	}
 	return request
 }
@@ -537,7 +597,7 @@ func readBackupsFromNode(cfg *config.Config, pool sshClientProvider, serverCfg c
 	return response.Backups, nil
 }
 
-func createBackupOnNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, envName string, volumeName string, backupID string) (takod.BackupInfo, error) {
+func createBackupOnNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, envName string, volume backupVolumeSpec, backupID string) (takod.BackupInfo, error) {
 	client, err := connectBackupNode(pool, serverCfg)
 	if err != nil {
 		return takod.BackupInfo{}, err
@@ -549,7 +609,7 @@ func createBackupOnNode(cfg *config.Config, pool sshClientProvider, serverCfg co
 		cfg,
 		"POST",
 		"/v1/backups",
-		backupRequest(cfg, envName, volumeName, backupID, 0),
+		backupRequestForSpec(cfg, envName, volume, backupID),
 		&info,
 	)
 	if err != nil {
@@ -638,6 +698,31 @@ func backupArchiveVolumeName(volumeName string) string {
 		return "volume"
 	}
 	return cleaned
+}
+
+func cloneConfigBackupStorage(storage *config.BackupStorageConfig) *config.BackupStorageConfig {
+	if storage == nil {
+		return nil
+	}
+	copied := *storage
+	return &copied
+}
+
+func takodBackupStorageFromConfig(storage *config.BackupStorageConfig) *takod.BackupStorageConfig {
+	if storage == nil {
+		return nil
+	}
+	return &takod.BackupStorageConfig{
+		Provider:        storage.Provider,
+		Bucket:          storage.Bucket,
+		Region:          storage.Region,
+		Endpoint:        storage.Endpoint,
+		Prefix:          storage.Prefix,
+		AccessKeyID:     storage.AccessKeyID,
+		SecretAccessKey: storage.SecretAccessKey,
+		SessionToken:    storage.SessionToken,
+		ForcePathStyle:  storage.ForcePathStyle,
+	}
 }
 
 func isBackupArchiveVolumeName(value string) bool {

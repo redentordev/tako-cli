@@ -40,6 +40,7 @@ type BackupInfo struct {
 	Path        string            `json:"path"`
 	Compression string            `json:"compression"`
 	Remote      *BackupRemoteInfo `json:"remote,omitempty"`
+	Warnings    []string          `json:"warnings,omitempty"`
 }
 
 type BackupListResponse struct {
@@ -114,7 +115,8 @@ func CreateVolumeBackup(ctx context.Context, req BackupRequest) (*BackupInfo, er
 			CreatedAt:   info.CreatedAt,
 		})
 		if err != nil {
-			return nil, err
+			info.Warnings = append(info.Warnings, fmt.Sprintf("local backup created but upload failed: %v", err))
+			return &info, nil
 		}
 		info.Remote = remote
 		if req.RetentionDays > 0 {
@@ -124,7 +126,7 @@ func CreateVolumeBackup(ctx context.Context, req BackupRequest) (*BackupInfo, er
 				Volume:        req.Volume,
 				RetentionDays: req.RetentionDays,
 			}); err != nil {
-				return nil, err
+				info.Warnings = append(info.Warnings, fmt.Sprintf("remote backup retention cleanup failed: %v", err))
 			}
 		}
 	}

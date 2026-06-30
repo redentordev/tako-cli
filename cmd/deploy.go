@@ -749,6 +749,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				CleanOldImages:         true,
 				CleanStoppedContainers: true,
 				CleanDanglingImages:    true,
+				CleanBuildCache:        true,
+				BuildCacheKeepStorage:  takod.DefaultBuildCacheKeepStorage,
 			})
 			if cleanupErr != nil && verbose {
 				fmt.Printf("  Warning: failed to clean %s: %v\n", serverName, cleanupErr)

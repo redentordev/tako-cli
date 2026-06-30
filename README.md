@@ -377,10 +377,14 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako drift` | Detect configuration drift between config and running services |
 | `tako drift --watch` | Continuously monitor for drift |
 
-Scheduled off-node backups are opt-in per service. Tako schedules them on the
-takod node that owns the service volume and can upload archives to any
-S3-compatible object store, including AWS S3, Cloudflare R2, MinIO, Backblaze B2
-S3, and DigitalOcean Spaces:
+Off-node backups are opt-in per service. Tako schedules them on the takod node
+that owns the service volume and can upload archives to any S3-compatible object
+store, including AWS S3, Cloudflare R2, MinIO, Backblaze B2 S3, and DigitalOcean
+Spaces. Manual `tako backup --all` and `tako backup --volume <name>` runs reuse
+the same storage settings when the target volume belongs to a service with
+`backup.storage` configured. If remote upload or remote retention cleanup fails
+after the local archive is created, Tako keeps the local archive and reports a
+warning so the backup remains available for node-local restore:
 
 ```yaml
 environments:
@@ -432,7 +436,7 @@ environments:
 | `tako upgrade servers` | Upgrade and verify server-side takod agents to this CLI version |
 | `tako live` | Disable maintenance mode and restore service traffic |
 | `tako cleanup` | Clean up old app/stage-owned node runtime resources |
-| `tako cleanup --docker-cache` | Also reclaim shared Docker build cache and dangling images |
+| `tako cleanup --docker-cache` | Also reclaim shared Docker build cache above 20GB and dangling images |
 
 CI/CD runners use the same takod path as a laptop. See
 [CI/CD Deployments](./docs/CI-CD.md) and the
@@ -675,8 +679,11 @@ Destructive app operations are scoped to that same app/stage boundary. `tako
 remove`, `tako destroy`, and default `tako cleanup` do not remove unrelated
 project containers, volumes, proxy routes, or images. Node-wide Docker builder
 cache and dangling image cleanup can affect other projects' future build
-performance, so it only runs when `tako cleanup --docker-cache` is explicitly
-requested.
+performance. Successful deploys and `tako cleanup --docker-cache` prune builder
+cache with a default `20GB` keep-storage budget instead of wiping the whole
+cache; override explicit cleanup with `--docker-cache-keep-storage <size>`.
+Dangling image cleanup only runs during deploy cleanup or when
+`tako cleanup --docker-cache` is explicitly requested.
 By default every selected environment node with public routes reconciles the
 shared proxy for that app/stage. Built-in ACME TLS currently requires the
 proxy placement to resolve to one node, because distributed certificate
