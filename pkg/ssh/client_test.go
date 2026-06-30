@@ -159,6 +159,27 @@ func TestConnectTCPAttemptsUsesEnvironmentOverride(t *testing.T) {
 	}
 }
 
+func TestConnectTCPAttemptsUsesAutomationDefault(t *testing.T) {
+	t.Setenv("CI", "true")
+	if got := connectTCPAttempts(); got != connectAutomationTCPAttempts {
+		t.Fatalf("CI connectTCPAttempts = %d, want %d", got, connectAutomationTCPAttempts)
+	}
+
+	t.Setenv("CI", "")
+	t.Setenv("TAKO_NONINTERACTIVE", "1")
+	if got := connectTCPAttempts(); got != connectAutomationTCPAttempts {
+		t.Fatalf("noninteractive connectTCPAttempts = %d, want %d", got, connectAutomationTCPAttempts)
+	}
+}
+
+func TestConnectTCPAttemptsOverrideWinsInAutomation(t *testing.T) {
+	t.Setenv("CI", "true")
+	t.Setenv("TAKO_SSH_CONNECT_ATTEMPTS", "2")
+	if got := connectTCPAttempts(); got != 2 {
+		t.Fatalf("override connectTCPAttempts = %d, want 2", got)
+	}
+}
+
 func TestIsTransientDialErrorClassifiesRateLimitFailures(t *testing.T) {
 	refused := &net.OpError{
 		Op:  "dial",

@@ -114,7 +114,7 @@ jobs:
       TAKO_NONINTERACTIVE: "1"
       TAKO_HOST_KEY_MODE: strict
       TAKO_SSH_CONNECT_TIMEOUT: 10s
-      TAKO_SSH_CONNECT_ATTEMPTS: "3"
+      TAKO_SSH_CONNECT_ATTEMPTS: "6"
       TAKO_ENV_PASSPHRASE: ${{ secrets.TAKO_ENV_PASSPHRASE }}
       TAKO_SSH_KEY: ~/.ssh/tako_deploy
       TAKO_SERVER_HOST: ${{ secrets.TAKO_SERVER_HOST }}
@@ -152,6 +152,10 @@ jobs:
 Use `TAKO_HOST_KEY_MODE=strict` when the runner image already has trusted host
 keys. For first-time automation, run one manual bootstrap with `tofu` or install
 known hosts before switching CI to `strict`.
+
+In CI and non-interactive shells, Tako defaults to six SSH TCP attempts because
+fresh firewall/security-group changes can take a short time to become usable.
+Set `TAKO_SSH_CONNECT_ATTEMPTS` explicitly when you want a different budget.
 
 When a node is destroyed or firewalled, state and deploy commands still fail
 closed, but SSH should not hang for minutes. Use `TAKO_SSH_CONNECT_TIMEOUT` and

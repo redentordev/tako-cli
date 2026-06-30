@@ -119,6 +119,26 @@ func TestCleanupRequestIncludesMaintenanceCleanup(t *testing.T) {
 	}
 }
 
+func TestValidateCleanupRequestRejectsUnsafeBuildCacheKeepStorage(t *testing.T) {
+	err := validateCleanupRequest(CleanupRequest{
+		Project:               "demo",
+		CleanBuildCache:       true,
+		BuildCacheKeepStorage: "--all",
+	})
+	if err == nil {
+		t.Fatal("expected unsafe build cache keep storage to be rejected")
+	}
+
+	err = validateCleanupRequest(CleanupRequest{
+		Project:               "demo",
+		CleanBuildCache:       true,
+		BuildCacheKeepStorage: "10 GB",
+	})
+	if err == nil {
+		t.Fatal("expected whitespace in build cache keep storage to be rejected")
+	}
+}
+
 func TestUniqueFields(t *testing.T) {
 	got := uniqueFields("a\nb\na\tc\n")
 	want := []string{"a", "b", "c"}
@@ -157,6 +177,37 @@ func TestCountDockerImagePruneEntriesIgnoresNoopOutput(t *testing.T) {
 	output := "Total reclaimed space: 0B\n"
 	if got := countDockerImagePruneEntries(output); got != 0 {
 		t.Fatalf("countDockerImagePruneEntries() = %d, want 0", got)
+	}
+}
+
+func TestCleanupBuildCacheUsesDefaultKeepStorage(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	if _, err := cleanupBuildCache(context.Background(), ""); err != nil {
+		t.Fatalf("cleanupBuildCache returned error: %v", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	want := "docker builder prune -f --keep-storage " + DefaultBuildCacheKeepStorage
+	if !slices.Contains(entries, want) {
+		t.Fatalf("docker log missing %q in %#v", want, entries)
+	}
+}
+
+func TestCleanupBuildCacheUsesRequestedKeepStorage(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	if _, err := cleanupBuildCache(context.Background(), "8GB"); err != nil {
+		t.Fatalf("cleanupBuildCache returned error: %v", err)
+	}
+
+	entries := readCommandLog(t, logPath)
+	if !slices.Contains(entries, "docker builder prune -f --keep-storage 8GB") {
+		t.Fatalf("docker log missing requested keep-storage in %#v", entries)
 	}
 }
 

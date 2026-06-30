@@ -1231,6 +1231,7 @@ func TestTakodCommandHelper(t *testing.T) {
 		_, _ = os.Stdout.WriteString("pulled\n")
 		os.Exit(0)
 	case "run":
+		createFakeBackupArchive(commandArgs)
 		_, _ = os.Stdout.WriteString("container-id\n")
 		os.Exit(0)
 	case "exec":
@@ -1319,6 +1320,32 @@ func TestTakodCommandHelper(t *testing.T) {
 		os.Exit(0)
 	default:
 		os.Exit(0)
+	}
+}
+
+func createFakeBackupArchive(commandArgs []string) {
+	backupPath := ""
+	for i := 0; i+1 < len(commandArgs); i++ {
+		if commandArgs[i] != "-v" {
+			continue
+		}
+		hostPath, containerPath, ok := strings.Cut(commandArgs[i+1], ":")
+		if ok && containerPath == "/backup" {
+			backupPath = hostPath
+			break
+		}
+	}
+	if backupPath == "" {
+		return
+	}
+	for i := 0; i+1 < len(commandArgs); i++ {
+		if commandArgs[i] != "-czf" || !strings.HasPrefix(commandArgs[i+1], "/backup/") {
+			continue
+		}
+		name := strings.TrimPrefix(commandArgs[i+1], "/backup/")
+		_ = os.MkdirAll(backupPath, 0750)
+		_ = os.WriteFile(filepath.Join(backupPath, name), []byte("backup"), 0600)
+		return
 	}
 }
 

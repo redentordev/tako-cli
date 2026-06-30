@@ -17,6 +17,7 @@ var (
 	cleanupFull        bool
 	cleanupSecure      bool
 	cleanupDockerCache bool
+	cleanupCacheKeep   string
 )
 
 var cleanupCmd = &cobra.Command{
@@ -50,6 +51,7 @@ Examples:
   tako cleanup --server prod    # Clean specific server
   tako cleanup --full           # More aggressive app/stage cleanup
   tako cleanup --docker-cache   # Also prune shared Docker build cache/dangling images
+  tako cleanup --docker-cache --docker-cache-keep-storage 10GB
   tako cleanup --secure         # Also secure log permissions`,
 	RunE: runCleanup,
 }
@@ -61,6 +63,7 @@ func init() {
 	cleanupCmd.Flags().BoolVarP(&cleanupFull, "full", "f", false, "Perform more aggressive app/stage cleanup")
 	cleanupCmd.Flags().BoolVarP(&cleanupSecure, "secure", "", false, "Also secure log file permissions")
 	cleanupCmd.Flags().BoolVar(&cleanupDockerCache, "docker-cache", false, "Also clean Docker builder cache and dangling images shared by all projects")
+	cleanupCmd.Flags().StringVar(&cleanupCacheKeep, "docker-cache-keep-storage", takod.DefaultBuildCacheKeepStorage, "Docker builder cache storage budget to keep when --docker-cache is used")
 }
 
 func runCleanup(cmd *cobra.Command, args []string) error {
@@ -107,14 +110,14 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("   Keeping %d latest images per service\n\n", keepImages)
 	fmt.Printf("Scope: project %s, environment %s\n", cfg.Project.Name, envName)
 	if cleanupDockerCache {
-		fmt.Println("⚠️  Shared Docker cache cleanup enabled: build cache and dangling images may be used by unrelated projects.")
+		fmt.Printf("⚠️  Shared Docker cache cleanup enabled: build cache will keep about %s and dangling images may be used by unrelated projects.\n", cleanupCacheKeep)
 	} else {
 		fmt.Println("Shared Docker cache untouched. Use --docker-cache only when reclaiming node-wide Docker cache intentionally.")
 	}
 	fmt.Println()
 
 	results := collectCleanupNodes(serversToClean, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
-		return cleanupSingleNode(cfg, sshPool, serverCfg, cleanupRequestForEnvironment(cfg, envName, imageRepositories, externalVolumes, keepImages, cleanupDockerCache, cleanupSecure))
+		return cleanupSingleNode(cfg, sshPool, serverCfg, cleanupRequestForEnvironment(cfg, envName, imageRepositories, externalVolumes, keepImages, cleanupDockerCache, cleanupCacheKeep, cleanupSecure))
 	})
 
 	totalErrors := 0
@@ -159,8 +162,8 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func cleanupRequestForEnvironment(cfg *config.Config, envName string, imageRepositories []string, externalVolumes []string, keepImages int, includeDockerCache bool, secureLogs bool) takod.CleanupRequest {
-	return takod.CleanupRequest{
+func cleanupRequestForEnvironment(cfg *config.Config, envName string, imageRepositories []string, externalVolumes []string, keepImages int, includeDockerCache bool, buildCacheKeepStorage string, secureLogs bool) takod.CleanupRequest {
+	request := takod.CleanupRequest{
 		Project:                cfg.Project.Name,
 		Environment:            envName,
 		ImageRepositories:      imageRepositories,
@@ -173,6 +176,10 @@ func cleanupRequestForEnvironment(cfg *config.Config, envName string, imageRepos
 		CleanUnusedVolumes:     true,
 		SecureLogPermissions:   secureLogs,
 	}
+	if includeDockerCache {
+		request.BuildCacheKeepStorage = buildCacheKeepStorage
+	}
+	return request
 }
 
 type cleanupNodeAction func(serverName string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error)
