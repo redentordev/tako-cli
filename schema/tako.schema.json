@@ -159,6 +159,10 @@
             "type": "string",
             "description": "Server IP or hostname"
           },
+          "privateHost": {
+            "type": "string",
+            "description": "Private/LAN/VPN address used by `tako domains hosts` for internal proxy routes"
+          },
           "user": {
             "type": "string",
             "description": "SSH user"
@@ -319,11 +323,11 @@
           },
           "proxy": {
             "type": "object",
-            "description": "Environment-level public proxy settings. Built-in ACME TLS requires placement to resolve to one proxy node until distributed certificate handling is implemented.",
+            "description": "Environment-level proxy placement. Built-in public ACME TLS requires placement to resolve to one proxy node until distributed certificate handling is implemented.",
             "properties": {
               "placement": {
                 "type": "object",
-                "description": "Where public proxy routes should be reconciled",
+                "description": "Where proxy routes should be reconciled",
                 "properties": {
                   "strategy": {
                     "type": "string",
@@ -508,11 +512,24 @@
                 },
                 "proxy": {
                   "type": "object",
-                  "description": "Public proxy settings",
+                  "description": "Proxy settings. Public routes use ACME-backed HTTPS; internal routes are HTTP-only private-network routes.",
                   "properties": {
+                    "visibility": {
+                      "type": "string",
+                      "enum": [
+                        "public",
+                        "internal"
+                      ],
+                      "default": "public",
+                      "description": "Use public for DNS/ACME ingress or internal for private-network HTTP ingress"
+                    },
                     "domain": {
                       "type": "string",
-                      "description": "Primary hostname. Wildcard hostnames are not supported by the built-in proxy yet."
+                      "description": "Primary public hostname. Wildcard hostnames are not supported by the built-in proxy yet."
+                    },
+                    "host": {
+                      "type": "string",
+                      "description": "Internal hostname for proxy.visibility=internal. Defaults to <service>.<environment>.<project>.tako.internal."
                     },
                     "redirectFrom": {
                       "type": "array",
@@ -528,6 +545,14 @@
                     "tls": {
                       "type": "object",
                       "properties": {
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "auto",
+                            "off"
+                          ],
+                          "description": "auto for public ACME-backed routes; off for internal HTTP-only routes"
+                        },
                         "provider": {
                           "type": "string",
                           "enum": [

@@ -76,8 +76,8 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if service has proxy configuration
-	if !service.IsPublic() {
-		return fmt.Errorf("service %s is not public-facing (no proxy configuration)", maintenanceService)
+	if !service.IsProxied() {
+		return fmt.Errorf("service %s has no proxy configuration", maintenanceService)
 	}
 
 	targetServers, err := cfg.GetEnvironmentServers(envName)
@@ -561,12 +561,12 @@ func enableMaintenanceOnNode(cfg *config.Config, pool sshClientProvider, server 
 }
 
 func renderMaintenanceProxyConfig(project string, environment string, serviceName string, proxy *config.ProxyConfig, containerName string) ([]byte, error) {
-	domains, err := maintenanceDomains(proxy)
+	hosts, err := maintenanceHosts(proxy)
 	if err != nil {
 		return nil, err
 	}
-	if len(domains) == 0 {
-		return nil, fmt.Errorf("maintenance proxy requires at least one domain")
+	if len(hosts) == 0 {
+		return nil, fmt.Errorf("maintenance proxy requires at least one host")
 	}
 
 	manifest := takod.ProxyRouteManifest{
@@ -575,10 +575,11 @@ func renderMaintenanceProxyConfig(project string, environment string, serviceNam
 		Environment: environment,
 		Routes: []takod.ProxyRoute{
 			{
-				Service:   maintenanceTakodServiceName(serviceName),
-				Domains:   domains,
-				Upstreams: []string{"http://" + containerName + ":80"},
-				Priority:  100,
+				Service:    maintenanceTakodServiceName(serviceName),
+				Domains:    hosts,
+				Upstreams:  []string{"http://" + containerName + ":80"},
+				Priority:   100,
+				Visibility: proxy.EffectiveVisibility(),
 			},
 		},
 	}
@@ -586,24 +587,24 @@ func renderMaintenanceProxyConfig(project string, environment string, serviceNam
 	return json.MarshalIndent(manifest, "", "  ")
 }
 
-func maintenanceDomains(proxy *config.ProxyConfig) ([]string, error) {
+func maintenanceHosts(proxy *config.ProxyConfig) ([]string, error) {
 	if proxy == nil {
 		return nil, nil
 	}
-	rawDomains := append([]string(nil), proxy.GetAllDomains()...)
-	rawDomains = append(rawDomains, proxy.GetRedirectDomains()...)
-	domains := make([]string, 0, len(rawDomains))
-	for _, domain := range rawDomains {
-		normalized, err := config.NormalizeProxyDomain(domain)
+	rawHosts := append([]string(nil), proxy.GetAllHosts()...)
+	rawHosts = append(rawHosts, proxy.GetRedirectDomains()...)
+	hosts := make([]string, 0, len(rawHosts))
+	for _, host := range rawHosts {
+		normalized, err := config.NormalizeProxyDomain(host)
 		if err != nil {
 			return nil, err
 		}
 		if strings.HasPrefix(normalized, "*.") {
 			return nil, fmt.Errorf("wildcard proxy domain %q is not supported by maintenance mode", normalized)
 		}
-		domains = append(domains, normalized)
+		hosts = append(hosts, normalized)
 	}
-	return domains, nil
+	return hosts, nil
 }
 
 func writeMaintenanceProxyConfig(client *ssh.Client, socket string, project string, environment string, serviceName string, data []byte) error {

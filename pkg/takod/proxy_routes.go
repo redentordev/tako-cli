@@ -14,6 +14,11 @@ import (
 
 const proxyRouteManifestVersion = 1
 
+const (
+	proxyRouteVisibilityPublic   = "public"
+	proxyRouteVisibilityInternal = "internal"
+)
+
 var (
 	proxyCaddyfilePath  = "/etc/tako/proxy/caddy/Caddyfile"
 	proxyCaddyDataDir   = "/etc/tako/proxy/caddy-data"
@@ -38,6 +43,7 @@ type ProxyRoute struct {
 	HealthCheck   *ProxyRouteHealth   `json:"healthCheck,omitempty"`
 	Sticky        bool                `json:"sticky,omitempty"`
 	Priority      int                 `json:"priority,omitempty"`
+	Visibility    string              `json:"visibility,omitempty"`
 	DynamicDomain *ProxyDynamicDomain `json:"dynamicDomain,omitempty"`
 }
 
@@ -100,6 +106,22 @@ func validateProxyRouteManifest(manifest *ProxyRouteManifest) error {
 		}
 		if route.Priority < 0 {
 			return fmt.Errorf("route %s: priority cannot be negative", route.Service)
+		}
+		if route.Visibility == "" {
+			route.Visibility = proxyRouteVisibilityPublic
+		}
+		switch route.Visibility {
+		case proxyRouteVisibilityPublic, proxyRouteVisibilityInternal:
+		default:
+			return fmt.Errorf("route %s: invalid visibility %q", route.Service, route.Visibility)
+		}
+		if route.Visibility == proxyRouteVisibilityInternal {
+			if route.DynamicDomain != nil {
+				return fmt.Errorf("route %s: internal routes do not support dynamic domains", route.Service)
+			}
+			if len(route.RedirectFrom) > 0 {
+				return fmt.Errorf("route %s: internal routes do not support redirects", route.Service)
+			}
 		}
 		for _, domain := range append(append([]string{}, route.Domains...), route.RedirectFrom...) {
 			if !isSafeProxyHost(domain) {
@@ -206,7 +228,7 @@ func renderCaddyfile(manifests []ProxyRouteManifest) (string, error) {
 
 	for _, route := range effectiveRoutes {
 		for _, domain := range route.Domains {
-			writeCaddyRoute(&b, domain, route)
+			writeCaddyRoute(&b, caddyRouteAddress(domain, route), route)
 		}
 		primary := ""
 		if len(route.Domains) > 0 {
@@ -390,12 +412,19 @@ func writeCaddyRoute(b *strings.Builder, address string, route ProxyRoute) {
 
 func caddyHealthHost(address string, route ProxyRoute) string {
 	if address != ":443" {
-		return address
+		return strings.TrimPrefix(strings.TrimPrefix(address, "http://"), "https://")
 	}
 	if len(route.Domains) == 0 {
 		return ""
 	}
 	return route.Domains[0]
+}
+
+func caddyRouteAddress(host string, route ProxyRoute) string {
+	if route.Visibility == proxyRouteVisibilityInternal {
+		return "http://" + host
+	}
+	return host
 }
 
 func caddyAccessLogName(service string) string {

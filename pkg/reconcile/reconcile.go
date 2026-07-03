@@ -269,7 +269,32 @@ func domainsEqual(a, b *config.ProxyConfig) bool {
 	if (a == nil) != (b == nil) {
 		return false
 	}
-	return a.Domain == b.Domain && stringSlicesEqual(a.RedirectFrom, b.RedirectFrom)
+	return a.Domain == b.Domain &&
+		a.Host == b.Host &&
+		a.Visibility == b.Visibility &&
+		a.TLS.Mode == b.TLS.Mode &&
+		a.TLS.Provider == b.TLS.Provider &&
+		a.TLS.Staging == b.TLS.Staging &&
+		dynamicDomainsEqual(a.DynamicDomains, b.DynamicDomains) &&
+		stringSlicesEqual(a.RedirectFrom, b.RedirectFrom)
+}
+
+func dynamicDomainsEqual(a, b *config.DynamicDomainsConfig) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	aEnabled := true
+	bEnabled := true
+	if a.Enabled != nil {
+		aEnabled = *a.Enabled
+	}
+	if b.Enabled != nil {
+		bEnabled = *b.Enabled
+	}
+	return aEnabled == bEnabled && a.Ask == b.Ask
 }
 
 func stringSlicesEqual(a, b []string) bool {

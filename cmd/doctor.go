@@ -413,13 +413,13 @@ type doctorProxyMount struct {
 }
 
 func checkProxyRuntime(record func(checkResult), cfg *config.Config, envName string, clients map[string]*ssh.Client) {
-	publicServices, err := publicServiceNames(cfg, envName)
+	proxiedServices, err := publicServiceNames(cfg, envName)
 	if err != nil {
-		record(checkResult{"WARN", fmt.Sprintf("Cannot resolve public services: %v", err), ""})
+		record(checkResult{"WARN", fmt.Sprintf("Cannot resolve proxied services: %v", err), ""})
 		return
 	}
-	if len(publicServices) == 0 {
-		record(checkResult{"PASS", "No public proxy routes configured", ""})
+	if len(proxiedServices) == 0 {
+		record(checkResult{"PASS", "No proxy routes configured", ""})
 		return
 	}
 
@@ -436,7 +436,7 @@ func checkProxyRuntime(record func(checkResult), cfg *config.Config, envName str
 			record(checkResult{"SKIP", fmt.Sprintf("%s: Proxy target not connected", serverName), ""})
 			continue
 		}
-		checkProxyRuntimeWith(record, serverName, publicServices, func() (*doctorProxyRuntimeInfo, error) {
+		checkProxyRuntimeWith(record, serverName, proxiedServices, func() (*doctorProxyRuntimeInfo, error) {
 			return detectDoctorProxyRuntime(client)
 		})
 	}
@@ -449,7 +449,7 @@ func publicServiceNames(cfg *config.Config, envName string) ([]string, error) {
 	}
 	names := make([]string, 0)
 	for name, service := range services {
-		if service.IsPublic() {
+		if service.IsProxied() {
 			names = append(names, name)
 		}
 	}
@@ -460,7 +460,7 @@ func publicServiceNames(cfg *config.Config, envName string) ([]string, error) {
 func checkProxyRuntimeWith(record func(checkResult), serverName string, publicServices []string, probe func() (*doctorProxyRuntimeInfo, error)) {
 	info, err := probe()
 	if errors.Is(err, errDoctorProxyMissing) {
-		record(checkResult{"WARN", fmt.Sprintf("%s: tako-proxy is not running for public service(s): %s", serverName, strings.Join(publicServices, ", ")), "Run 'tako deploy' to reconcile proxy routes"})
+		record(checkResult{"WARN", fmt.Sprintf("%s: tako-proxy is not running for proxied service(s): %s", serverName, strings.Join(publicServices, ", ")), "Run 'tako deploy' to reconcile proxy routes"})
 		return
 	}
 	if err != nil {

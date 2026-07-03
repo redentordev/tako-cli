@@ -200,7 +200,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 
 	for _, serviceName := range serviceNames {
 		service := services[serviceName]
-		if !service.IsPublic() {
+		if !service.IsProxied() {
 			continue
 		}
 		if service.Port <= 0 {
@@ -252,6 +252,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 			Upstreams:    upstreams,
 			HealthCheck:  proxyRouteHealthCheckForService(service),
 			Sticky:       service.LoadBalancer.Strategy == "sticky",
+			Visibility:   service.Proxy.EffectiveVisibility(),
 		}
 		if dynamicDomainsEnabled {
 			askURL, err := d.dynamicDomainAskURL(services, proxyServerName, service.Proxy.DynamicDomains.Ask, options.ActiveRevisions)
@@ -312,7 +313,7 @@ func explicitProxyDomains(proxy *config.ProxyConfig) ([]string, error) {
 	if proxy == nil {
 		return nil, nil
 	}
-	domains := proxy.GetAllDomains()
+	domains := proxy.GetAllHosts()
 	if len(domains) == 0 {
 		primary := proxy.GetPrimaryDomain()
 		if primary != "" {

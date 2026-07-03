@@ -34,6 +34,12 @@ const (
 
 	RuntimeProxyTako = "tako-proxy"
 
+	ProxyVisibilityPublic   = "public"
+	ProxyVisibilityInternal = "internal"
+
+	ProxyTLSModeAuto = "auto"
+	ProxyTLSModeOff  = "off"
+
 	StateBackendReplicated = "replicated"
 
 	StateDeployConsistencyLease = "lease"
@@ -142,12 +148,13 @@ type BuildConfig struct {
 
 // ServerConfig defines server connection details
 type ServerConfig struct {
-	Host     string            `yaml:"host" json:"host"`
-	User     string            `yaml:"user" json:"user"`
-	Port     int               `yaml:"port,omitempty" json:"port,omitempty"`
-	SSHKey   string            `yaml:"sshKey,omitempty" json:"sshKey,omitempty"`     // Path to SSH private key (mutually exclusive with password)
-	Password string            `yaml:"password,omitempty" json:"password,omitempty"` // SSH password (mutually exclusive with sshKey, use env var for security)
-	Labels   map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`     // Custom labels for server selection
+	Host        string            `yaml:"host" json:"host"`
+	PrivateHost string            `yaml:"privateHost,omitempty" json:"privateHost,omitempty"`
+	User        string            `yaml:"user" json:"user"`
+	Port        int               `yaml:"port,omitempty" json:"port,omitempty"`
+	SSHKey      string            `yaml:"sshKey,omitempty" json:"sshKey,omitempty"`     // Path to SSH private key (mutually exclusive with password)
+	Password    string            `yaml:"password,omitempty" json:"password,omitempty"` // SSH password (mutually exclusive with sshKey, use env var for security)
+	Labels      map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`     // Custom labels for server selection
 }
 
 // ServiceConfig defines service deployment settings
@@ -254,10 +261,17 @@ type LoadBalancerHealthCheck struct {
 	Interval string `yaml:"interval" json:"interval"`
 }
 
-// ProxyConfig defines per-service public proxy settings.
+// ProxyConfig defines per-service proxy settings.
 type ProxyConfig struct {
-	// Domain is where traffic is served.
+	// Domain is where public traffic is served.
 	Domain string `yaml:"domain,omitempty" json:"domain,omitempty"`
+
+	// Host is where internal traffic is served when visibility is internal.
+	Host string `yaml:"host,omitempty" json:"host,omitempty"`
+
+	// Visibility controls whether the route is public ACME-backed ingress or
+	// private HTTP-only ingress intended for LAN/VPN/hosts-file resolution.
+	Visibility string `yaml:"visibility,omitempty" json:"visibility,omitempty"`
 
 	// RedirectFrom specifies domains that should redirect to the primary Domain
 	// These domains will get their own TLS certificates and 301 redirect to Domain
@@ -282,21 +296,65 @@ func (d *DynamicDomainsConfig) IsEnabled() bool {
 	return d != nil && (d.Enabled == nil || *d.Enabled)
 }
 
+func (p *ProxyConfig) EffectiveVisibility() string {
+	if p == nil {
+		return ProxyVisibilityPublic
+	}
+	switch strings.ToLower(strings.TrimSpace(p.Visibility)) {
+	case ProxyVisibilityInternal:
+		return ProxyVisibilityInternal
+	default:
+		return ProxyVisibilityPublic
+	}
+}
+
+func (p *ProxyConfig) IsInternal() bool {
+	return p != nil && p.EffectiveVisibility() == ProxyVisibilityInternal
+}
+
+func (p *ProxyConfig) IsPublic() bool {
+	return p != nil && p.EffectiveVisibility() == ProxyVisibilityPublic
+}
+
 // GetPrimaryDomain returns the primary domain for this service
 func (p *ProxyConfig) GetPrimaryDomain() string {
+	if p.IsInternal() {
+		return ""
+	}
 	return p.Domain
 }
 
 // GetAllDomains returns all serving domains, excluding redirect domains.
 func (p *ProxyConfig) GetAllDomains() []string {
-	if p.Domain == "" {
+	if p == nil || p.IsInternal() || p.Domain == "" {
 		return nil
 	}
 	return []string{p.Domain}
 }
 
+func (p *ProxyConfig) GetPrimaryHost() string {
+	if p == nil {
+		return ""
+	}
+	if p.IsInternal() {
+		return p.Host
+	}
+	return p.Domain
+}
+
+func (p *ProxyConfig) GetAllHosts() []string {
+	host := p.GetPrimaryHost()
+	if host == "" {
+		return nil
+	}
+	return []string{host}
+}
+
 // GetRedirectDomains returns all domains that should redirect to the primary domain
 func (p *ProxyConfig) GetRedirectDomains() []string {
+	if p == nil || p.IsInternal() {
+		return nil
+	}
 	return p.RedirectFrom
 }
 
@@ -320,6 +378,7 @@ func NormalizeProxyDomain(domain string) (string, error) {
 
 // TLSConfig defines TLS settings
 type TLSConfig struct {
+	Mode     string `yaml:"mode,omitempty" json:"mode,omitempty"`         // auto, off
 	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"` // letsencrypt, zerossl (default: letsencrypt)
 	Staging  bool   `yaml:"staging,omitempty" json:"staging,omitempty"`
 }
@@ -368,8 +427,8 @@ type EnvironmentConfig struct {
 	Services       map[string]ServiceConfig `yaml:"services" json:"services"`                                 // Services to deploy in this environment
 }
 
-// EnvironmentProxyConfig controls where environment-level public proxy routes
-// are reconciled. Services still use their own placement for containers.
+// EnvironmentProxyConfig controls where environment-level proxy routes are
+// reconciled. Services still use their own placement for containers.
 type EnvironmentProxyConfig struct {
 	Placement *PlacementConfig `yaml:"placement,omitempty" json:"placement,omitempty"`
 }
@@ -393,7 +452,7 @@ func (s *ServiceConfig) GetServiceType() string {
 	if s.Persistent {
 		return "persistent" // Database, cache, etc.
 	}
-	if s.Proxy != nil {
+	if s.IsPublic() {
 		return "public" // Public web service
 	}
 	if s.Port > 0 {
@@ -404,12 +463,17 @@ func (s *ServiceConfig) GetServiceType() string {
 
 // IsPublic returns true if service should be exposed publicly
 func (s *ServiceConfig) IsPublic() bool {
+	return s.Proxy != nil && s.Proxy.IsPublic()
+}
+
+// IsProxied returns true when the service should be routed through tako-proxy.
+func (s *ServiceConfig) IsProxied() bool {
 	return s.Proxy != nil
 }
 
 // IsInternal returns true if service is internal-only
 func (s *ServiceConfig) IsInternal() bool {
-	return s.Port > 0 && s.Proxy == nil
+	return s.Port > 0 && (s.Proxy == nil || s.Proxy.IsInternal())
 }
 
 // IsWorker returns true if service is a background worker

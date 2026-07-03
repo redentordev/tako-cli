@@ -250,7 +250,7 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 	}
 
 	for serviceName, service := range env.Services {
-		if err := validateService(serviceName, &service, cfg); err != nil {
+		if err := validateService(envName, serviceName, &service, cfg); err != nil {
 			return fmt.Errorf("environment %s: %w", envName, err)
 		}
 		// Update the service in the map with defaults applied
@@ -358,7 +358,7 @@ func validateEnvironmentProxyACMESafety(envName string, env *EnvironmentConfig, 
 
 	var publicServices []string
 	for serviceName, service := range env.Services {
-		if service.Proxy == nil {
+		if service.Proxy == nil || !service.IsPublic() {
 			continue
 		}
 		if isAutomaticACMETLSProvider(service.Proxy.TLS.Provider) {
@@ -421,11 +421,13 @@ func validateServer(name string, server *ServerConfig) error {
 		return fmt.Errorf("server %s: host is required", name)
 	}
 
-	// Validate host is a valid IP or hostname
-	if net.ParseIP(server.Host) == nil {
-		// If not an IP, check if it looks like a valid hostname
-		if !isValidHostname(server.Host) {
-			return fmt.Errorf("server %s: invalid host %s", name, server.Host)
+	if err := validateHostOrIP(server.Host); err != nil {
+		return fmt.Errorf("server %s: invalid host %s", name, server.Host)
+	}
+	if strings.TrimSpace(server.PrivateHost) != "" {
+		server.PrivateHost = strings.TrimSpace(server.PrivateHost)
+		if err := validateHostOrIP(server.PrivateHost); err != nil {
+			return fmt.Errorf("server %s: invalid privateHost %s", name, server.PrivateHost)
 		}
 	}
 
@@ -485,7 +487,24 @@ func validateServer(name string, server *ServerConfig) error {
 	return nil
 }
 
-func validateService(name string, service *ServiceConfig, cfg *Config) error {
+func validateHostOrIP(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("host is required")
+	}
+	if strings.ContainsAny(value, " \t\r\n`{}[]") {
+		return fmt.Errorf("host contains unsafe characters")
+	}
+	if net.ParseIP(value) != nil {
+		return nil
+	}
+	if !isValidHostname(value) {
+		return fmt.Errorf("host must be an IP address or valid hostname")
+	}
+	return nil
+}
+
+func validateService(envName string, name string, service *ServiceConfig, cfg *Config) error {
 	// Validate service name format
 	if !isValidRuntimeIdentifier(name) {
 		return fmt.Errorf("service name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, hyphens, and underscores, and be 1-63 characters long", name)
@@ -589,7 +608,7 @@ func validateService(name string, service *ServiceConfig, cfg *Config) error {
 
 	// Validate proxy if configured (per-service)
 	if service.Proxy != nil {
-		if err := validateProxy(name, service.Proxy); err != nil {
+		if err := validateProxy(cfg.Project.Name, envName, name, service.Proxy); err != nil {
 			return err
 		}
 	}
@@ -1134,7 +1153,24 @@ func validateDockerfilePath(path string) error {
 	return nil
 }
 
-func validateProxy(serviceName string, proxy *ProxyConfig) error {
+func validateProxy(projectName string, envName string, serviceName string, proxy *ProxyConfig) error {
+	visibility := strings.ToLower(strings.TrimSpace(proxy.Visibility))
+	if visibility == "" {
+		visibility = ProxyVisibilityPublic
+	}
+	switch visibility {
+	case ProxyVisibilityPublic, ProxyVisibilityInternal:
+		proxy.Visibility = visibility
+	default:
+		return fmt.Errorf("service %s: invalid proxy visibility %q (must be public or internal)", serviceName, proxy.Visibility)
+	}
+	if proxy.Visibility == ProxyVisibilityInternal {
+		return validateInternalProxy(projectName, envName, serviceName, proxy)
+	}
+	if strings.TrimSpace(proxy.Host) != "" {
+		return fmt.Errorf("service %s: proxy.host is only supported when proxy.visibility is internal", serviceName)
+	}
+
 	dynamicDomainsEnabled := proxy.DynamicDomains != nil && proxy.DynamicDomains.IsEnabled()
 	if proxy.Domain == "" {
 		if !dynamicDomainsEnabled {
@@ -1185,6 +1221,13 @@ func validateProxy(serviceName string, proxy *ProxyConfig) error {
 		return fmt.Errorf("service %s: invalid email address: %s", serviceName, proxy.Email)
 	}
 
+	if proxy.TLS.Mode == "" {
+		proxy.TLS.Mode = ProxyTLSModeAuto
+	}
+	if proxy.TLS.Mode != ProxyTLSModeAuto {
+		return fmt.Errorf("service %s: public proxy tls.mode must be %s", serviceName, ProxyTLSModeAuto)
+	}
+
 	// Set TLS provider default
 	if proxy.TLS.Provider == "" {
 		proxy.TLS.Provider = "letsencrypt" // Default
@@ -1199,6 +1242,61 @@ func validateProxy(serviceName string, proxy *ProxyConfig) error {
 	}
 
 	return nil
+}
+
+func validateInternalProxy(projectName string, envName string, serviceName string, proxy *ProxyConfig) error {
+	if proxy.DynamicDomains != nil && proxy.DynamicDomains.IsEnabled() {
+		return fmt.Errorf("service %s: dynamicDomains requires public proxy visibility", serviceName)
+	}
+	if len(proxy.RedirectFrom) > 0 {
+		return fmt.Errorf("service %s: redirectFrom requires public proxy visibility", serviceName)
+	}
+	if proxy.TLS.Mode == "" {
+		proxy.TLS.Mode = ProxyTLSModeOff
+	}
+	if proxy.TLS.Mode != ProxyTLSModeOff {
+		return fmt.Errorf("service %s: internal proxy tls.mode must be %s", serviceName, ProxyTLSModeOff)
+	}
+	if proxy.TLS.Provider != "" {
+		return fmt.Errorf("service %s: internal proxy does not support tls.provider", serviceName)
+	}
+
+	rawHost := strings.TrimSpace(proxy.Host)
+	rawDomain := strings.TrimSpace(proxy.Domain)
+	if rawHost != "" && rawDomain != "" && !strings.EqualFold(rawHost, rawDomain) {
+		return fmt.Errorf("service %s: internal proxy uses host; remove domain or set it to the same value", serviceName)
+	}
+	if rawHost == "" {
+		rawHost = rawDomain
+	}
+	if rawHost == "" {
+		rawHost = defaultInternalProxyHost(projectName, envName, serviceName)
+	}
+	host, err := NormalizeProxyDomain(rawHost)
+	if err != nil {
+		return fmt.Errorf("service %s: invalid internal proxy host: %s", serviceName, rawHost)
+	}
+	if isWildcardProxyDomain(host) {
+		return fmt.Errorf("service %s: wildcard internal proxy host %q is not supported", serviceName, host)
+	}
+	proxy.Host = host
+	proxy.Domain = ""
+	proxy.RedirectFrom = nil
+	return nil
+}
+
+func defaultInternalProxyHost(projectName string, envName string, serviceName string) string {
+	return strings.Join([]string{
+		internalHostLabel(serviceName),
+		internalHostLabel(envName),
+		internalHostLabel(projectName),
+		"tako",
+		"internal",
+	}, ".")
+}
+
+func internalHostLabel(value string) string {
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(value)), "_", "-")
 }
 
 func isWildcardProxyDomain(domain string) bool {

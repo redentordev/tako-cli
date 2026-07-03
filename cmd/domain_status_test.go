@@ -70,6 +70,28 @@ func TestCollectConfiguredDomainSpecsIncludesRedirectDomains(t *testing.T) {
 	}
 }
 
+func TestCollectConfiguredDomainSpecsSkipsInternalProxyHosts(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"admin": {
+			Proxy: &config.ProxyConfig{
+				Host:       "admin.production.demo.tako.internal",
+				Visibility: config.ProxyVisibilityInternal,
+			},
+		},
+		"web": {
+			Proxy: &config.ProxyConfig{Domain: "app.example.com"},
+		},
+	}
+
+	specs := collectConfiguredDomainSpecs(services, "")
+	if len(specs) != 1 {
+		t.Fatalf("specs = %#v, want only public domain", specs)
+	}
+	if specs[0].Domain != "app.example.com" {
+		t.Fatalf("domain = %q, want app.example.com", specs[0].Domain)
+	}
+}
+
 func TestDomainStatusStrictErrorOnlyFailsPending(t *testing.T) {
 	active := []health.DomainStatus{{Domain: "app.example.com", State: health.DomainStateActive}}
 	if err := domainStatusStrictError(active, true); err != nil {

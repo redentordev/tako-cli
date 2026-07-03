@@ -364,6 +364,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako deploy` | Deploy application to environment |
 | `tako deploy --force` | Reconcile unchanged app services; broad force skips persistent services unless a service is targeted |
 | `tako domains status` | Check configured or ad-hoc public domain DNS/TLS readiness without redeploying |
+| `tako domains hosts` | Print `/etc/hosts` entries for internal proxy routes |
 | `tako promote <service>` | Promote a warmed manual blue-green revision |
 | `tako rollback [id]` | Rollback to previous/specific deployment |
 | `tako destroy` | Remove this app/stage services while preserving shared server setup |
@@ -715,12 +716,12 @@ cache; takod also prunes Docker builder cache on a daily background interval
 using that same budget. Override explicit cleanup with
 `--docker-cache-keep-storage <size>`. Dangling image cleanup only runs during
 deploy cleanup or when `tako cleanup --docker-cache` is explicitly requested.
-By default every selected environment node with public routes reconciles the
-shared proxy for that app/stage. Built-in ACME TLS currently requires the
-proxy placement to resolve to one node, because distributed certificate
-issuance/storage is not implemented yet. To keep public ingress on a dedicated
-edge node, set `environment.proxy.placement` with a pinned server or node-label
-constraint:
+By default every selected environment node with proxy routes reconciles the
+shared proxy for that app/stage. Built-in ACME TLS for public routes currently
+requires the proxy placement to resolve to one node, because distributed
+certificate issuance/storage is not implemented yet. To keep ingress on a
+dedicated edge node, set `environment.proxy.placement` with a pinned server or
+node-label constraint:
 
 ```yaml
 servers:
@@ -835,6 +836,45 @@ tako domains status -e production
 tako domains status staging.example.com --target sites.example.com --wait 5m
 tako domains status --strict --wait 2m
 ```
+
+#### Internal Proxy Routes Without Public DNS
+
+Use `proxy.visibility: internal` when a service should be reachable through the
+shared proxy from a private network, VPN, or hosts-file mapping, but should not
+be treated as a public DNS/ACME domain. Internal routes are HTTP-only in this
+release and are skipped by public DNS/TLS readiness checks.
+
+```yaml
+servers:
+  edge:
+    host: ${TAKO_EDGE_HOST}
+    privateHost: 10.0.1.10
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+
+environments:
+  production:
+    servers: [edge]
+    services:
+      admin:
+        build: ./admin
+        port: 3000
+        proxy:
+          visibility: internal
+          # Optional. Defaults to admin.production.<project>.tako.internal.
+          host: admin.production.example.tako.internal
+```
+
+Print host-file entries for clients that can reach the private address:
+
+```bash
+tako domains hosts -e production
+tako domains hosts -e production --address private
+tako domains hosts -e production --address mesh
+```
+
+`--address auto` is the default: it uses `servers.<name>.privateHost` when set
+and falls back to the deterministic Tako mesh IP for the proxy node.
 
 ### Parallel Deployment (Default)
 
