@@ -93,6 +93,41 @@ func TestRenderTakodProxyDynamicConfigUsesOnlyLocalUpstreamForOneNode(t *testing
 	})
 }
 
+func TestRenderTakodProxyDynamicConfigIncludesInternalProxyRoute(t *testing.T) {
+	deploy := testProxyDeployer()
+	deploy.config.Environments["production"] = config.EnvironmentConfig{
+		Servers: []string{"node-a"},
+		Services: map[string]config.ServiceConfig{
+			"web": {
+				Port:     3000,
+				Replicas: 1,
+				Proxy: &config.ProxyConfig{
+					Host:       "web.production.demo.tako.internal",
+					Visibility: config.ProxyVisibilityInternal,
+				},
+			},
+		},
+	}
+	services := deploy.config.Environments["production"].Services
+
+	data, hasProxy, err := deploy.renderTakodProxyDynamicConfigForNode(services, "node-a")
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
+	}
+	if !hasProxy {
+		t.Fatal("expected proxied service to be detected")
+	}
+
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	assertStringsEqual(t, route.Domains, []string{"web.production.demo.tako.internal"})
+	if route.Visibility != config.ProxyVisibilityInternal {
+		t.Fatalf("visibility = %q, want internal", route.Visibility)
+	}
+	assertStringsEqual(t, route.Upstreams, []string{
+		"http://" + runtimeid.ContainerAlias("demo", "production", "web", 1) + ":3000",
+	})
+}
+
 func TestRenderTakodProxyDynamicConfigCanRouteActiveRevision(t *testing.T) {
 	deploy := testProxyDeployer()
 	deploy.meshPortAllocator = func(_ string, serviceName string, revision string, slot int, _ int) (int, error) {

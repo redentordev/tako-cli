@@ -30,7 +30,7 @@ func collectConfiguredDomainSpecs(services map[string]config.ServiceConfig, serv
 			continue
 		}
 		service := services[serviceName]
-		if service.Proxy == nil {
+		if service.Proxy == nil || !service.IsPublic() {
 			continue
 		}
 		for _, domain := range service.Proxy.GetAllDomains() {

@@ -377,18 +377,21 @@ storage when the stateful system itself needs high availability.
           web@node-c
 ```
 
-Every selected environment node with public routes runs the shared node-local
+Every selected environment node with proxy routes runs the shared node-local
 proxy by default. `environment.proxy.placement` can narrow ingress to dedicated
 edge nodes with pinned servers or node-label constraints while service
-containers keep their own placement. Built-in ACME TLS currently requires the
+containers keep their own placement. Built-in ACME TLS currently requires public
 proxy placement to resolve to one node; multi-edge certificate issuance and
 storage is blocked at config validation until distributed certificate handling
 is implemented. Public proxy domains must be explicit hostnames; wildcard
 hostnames such as `*.example.com` are blocked until DNS-01 certificate handling
-is implemented in the generated Caddy proxy config. The proxy routes to local
-containers through Docker DNS and remote containers through node-local mesh-only
-upstream ports. Health is enforced by the generated Caddy reverse-proxy health
-checks when configured.
+is implemented in the generated Caddy proxy config. Internal proxy hosts use
+`proxy.visibility: internal`, render as HTTP-only Caddy routes such as
+`http://admin.production.demo.tako.internal`, and are intended for private
+network, VPN, or `/etc/hosts` resolution rather than public DNS/ACME. The proxy
+routes to local containers through Docker DNS and remote containers through
+node-local mesh-only upstream ports. Health is enforced by the generated Caddy
+reverse-proxy health checks when configured.
 
 Deploy success is intentionally separate from public DNS readiness. A deploy
 can reconcile containers, routes, state, and proxy config before a domain points
@@ -400,6 +403,13 @@ with `tako deploy --strict-domains`. The check infers expected DNS targets from
 CDN/proxy as active, so Cloudflare-style routing does not require direct A/AAAA
 records to the VPS. Use `--domain-target` for custom CNAME or edge targets and
 `tako domains status` to re-check domains without redeploying.
+
+Internal routes are intentionally excluded from public DNS/TLS readiness checks.
+Run `tako domains hosts` to print host-file entries for internal proxy hosts.
+The command maps each internal host to `servers.<name>.privateHost` when present
+and otherwise to the deterministic mesh IP for that proxy node; `--address
+private`, `--address mesh`, and `--address ssh` make the target selection
+explicit.
 
 Dynamic customer domains use Caddy on-demand TLS with a same-project
 `dynamicDomains.ask` endpoint. That endpoint is the domain authority for the
@@ -427,7 +437,9 @@ the generated proxy config.
 
 For services without `proxy`, `port` is still the container port used by health
 checks and service-to-service networking, but it is not published on the host.
-This keeps databases, queues, and internal APIs private by default.
+This keeps databases, queues, and internal APIs private by default. Internal
+proxy routes are a deliberate exception for HTTP services that should be
+reachable through the shared proxy on a private address without public DNS.
 
 Stateful image services should be declared with `persistent: true` and at least
 one named or external Docker volume. The validator rejects persistent services

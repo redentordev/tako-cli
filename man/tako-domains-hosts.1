@@ -1,0 +1,51 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-domains-hosts - Print /etc/hosts entries for internal proxy routes
+
+
+.SH SYNOPSIS
+\fBtako domains hosts [flags]\fP
+
+
+.SH DESCRIPTION
+Print host-file entries for services configured with proxy.visibility=internal.
+
+.PP
+By default, Tako maps each internal host to servers.NODE.privateHost when it
+is configured and falls back to the generated mesh IP for that proxy node.
+
+
+.SH OPTIONS
+\fB--address\fP="auto"
+	Address source: auto, private, mesh, or ssh
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for hosts
+
+.PP
+\fB-s\fP, \fB--service\fP=""
+	Only print internal hosts for one service
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-domains(1)\fP

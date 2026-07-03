@@ -777,7 +777,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 
 	networkName := takodNetworkName(d.config.Project.Name, d.environment)
 
-	if service.IsPublic() {
+	if service.IsProxied() {
 		if service.Port <= 0 {
 			return fmt.Errorf("service %s has proxy config but no port", serviceName)
 		}
@@ -822,7 +822,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 	meshRevision := meshUpstreamRevisionForStrategy(serviceRevision, serviceStrategy)
 	for _, slot := range slots {
 		meshPort := 0
-		if service.IsPublic() && publishMeshUpstreams {
+		if service.IsProxied() && publishMeshUpstreams {
 			meshPort, err = d.allocateMeshUpstreamPort(client, serverName, serviceName, meshRevision, slot, service.Port)
 			if err != nil {
 				return err
@@ -901,7 +901,7 @@ func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string
 			reconcile.ActiveLabel:         strconv.FormatBool(!warmOnly),
 		},
 	}
-	if service.IsPublic() && publishMeshUpstreams {
+	if service.IsProxied() && publishMeshUpstreams {
 		meshHostIP, err := d.meshHostIPForServer(serverName)
 		if err != nil {
 			return container, err

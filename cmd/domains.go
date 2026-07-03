@@ -15,11 +15,13 @@ var (
 	domainsWait            time.Duration
 	domainsStrict          bool
 	domainsExpectedTargets []string
+	domainsHostsService    string
+	domainsHostsAddress    string
 )
 
 var domainsCmd = &cobra.Command{
 	Use:   "domains",
-	Short: "Inspect public domain DNS and TLS status",
+	Short: "Inspect public domains and internal route hosts",
 }
 
 var domainsStatusCmd = &cobra.Command{
@@ -38,13 +40,27 @@ DNS resolves through a CDN or external proxy instead of directly to the VPS.`,
 	RunE: runDomainsStatus,
 }
 
+var domainsHostsCmd = &cobra.Command{
+	Use:          "hosts",
+	Short:        "Print /etc/hosts entries for internal proxy routes",
+	SilenceUsage: true,
+	Long: `Print host-file entries for services configured with proxy.visibility=internal.
+
+By default, Tako maps each internal host to servers.NODE.privateHost when it
+is configured and falls back to the generated mesh IP for that proxy node.`,
+	RunE: runDomainsHosts,
+}
+
 func init() {
 	rootCmd.AddCommand(domainsCmd)
 	domainsCmd.AddCommand(domainsStatusCmd)
+	domainsCmd.AddCommand(domainsHostsCmd)
 	domainsStatusCmd.Flags().StringVarP(&domainsService, "service", "s", "", "Only check configured domains for one service")
 	domainsStatusCmd.Flags().DurationVar(&domainsWait, "wait", 0, "Wait up to this duration for DNS/TLS to become active (for example 2m); 0 checks once")
 	domainsStatusCmd.Flags().BoolVar(&domainsStrict, "strict", false, "Exit non-zero if any checked domain is not active")
 	domainsStatusCmd.Flags().StringArrayVar(&domainsExpectedTargets, "target", nil, "Expected DNS target; repeat for custom edge/CNAME targets (defaults to proxy server hosts)")
+	domainsHostsCmd.Flags().StringVarP(&domainsHostsService, "service", "s", "", "Only print internal hosts for one service")
+	domainsHostsCmd.Flags().StringVar(&domainsHostsAddress, "address", "auto", "Address source: auto, private, mesh, or ssh")
 }
 
 func runDomainsStatus(cmd *cobra.Command, args []string) error {

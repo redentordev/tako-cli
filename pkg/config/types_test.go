@@ -1213,6 +1213,79 @@ func TestValidateConfigTrimsProxyDomains(t *testing.T) {
 	}
 }
 
+func TestValidateConfigDefaultsInternalProxyHost(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Image: "nginx:alpine",
+		Port:  3000,
+		Proxy: &ProxyConfig{
+			Visibility: ProxyVisibilityInternal,
+		},
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+	proxy := cfg.Environments["production"].Services["web"].Proxy
+	if proxy.Host != "web.production.demo.tako.internal" {
+		t.Fatalf("host = %q, want default internal host", proxy.Host)
+	}
+	if proxy.Domain != "" {
+		t.Fatalf("domain = %q, want no public domain", proxy.Domain)
+	}
+	if proxy.TLS.Mode != ProxyTLSModeOff {
+		t.Fatalf("tls.mode = %q, want off", proxy.TLS.Mode)
+	}
+	if proxy.GetPrimaryDomain() != "" {
+		t.Fatalf("primary domain = %q, want empty", proxy.GetPrimaryDomain())
+	}
+	if got := proxy.GetPrimaryHost(); got != "web.production.demo.tako.internal" {
+		t.Fatalf("primary host = %q", got)
+	}
+}
+
+func TestValidateConfigAllowsInternalProxyOnMultipleProxyNodes(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Image: "nginx:alpine",
+		Port:  3000,
+		Proxy: &ProxyConfig{
+			Host:       "web.internal.example",
+			Visibility: ProxyVisibilityInternal,
+		},
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+}
+
+func TestValidateConfigRejectsPublicProxyHost(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["web"] = ServiceConfig{
+		Image: "nginx:alpine",
+		Port:  3000,
+		Proxy: &ProxyConfig{
+			Domain: "web.example.com",
+			Host:   "web.production.demo.tako.internal",
+		},
+	}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("ValidateConfig should reject proxy.host on public routes")
+	}
+	if !strings.Contains(err.Error(), "proxy.host is only supported") {
+		t.Fatalf("error = %q, want proxy.host guidance", err)
+	}
+}
+
 func TestValidateConfigAllowsDynamicDomainProxyWithoutFixedDomain(t *testing.T) {
 	cfg := validValidationConfig()
 	production := cfg.Environments["production"]

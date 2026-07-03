@@ -93,6 +93,9 @@ func runConfigExplain(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "    host: %s (%s)\n", server.Host, explainStringSource(rawServer.Host))
 		fmt.Fprintf(out, "    user: %s (%s)\n", server.User, explainStringSource(rawServer.User))
 		fmt.Fprintf(out, "    port: %d (%s)\n", server.Port, runtimeIntSource(rawServer.Port != 0))
+		if server.PrivateHost != "" {
+			fmt.Fprintf(out, "    privateHost: %s (%s)\n", server.PrivateHost, explainStringSource(rawServer.PrivateHost))
+		}
 		if server.SSHKey != "" {
 			fmt.Fprintf(out, "    auth: sshKey (%s)\n", explainStringSource(rawServer.SSHKey))
 		} else if server.Password != "" {
@@ -116,8 +119,12 @@ func runConfigExplain(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "    replicas: %d (%s)\n", effectiveReplicas(service), runtimeIntSource(rawService.Replicas != 0))
 		fmt.Fprintf(out, "    deploy.strategy: %s (%s)\n", service.Deploy.Strategy, runtimeStringSource(rawCfg, rawService.Deploy.Strategy != "", rawService.Deploy.Strategy))
 		if service.Proxy != nil {
+			fmt.Fprintf(out, "    proxy.visibility: %s (%s)\n", service.Proxy.EffectiveVisibility(), runtimeStringSource(rawCfg, rawService.Proxy != nil && rawService.Proxy.Visibility != "", rawServiceProxyVisibility(rawService)))
 			if service.Proxy.Domain != "" {
 				fmt.Fprintf(out, "    proxy.domain: %s (%s)\n", service.Proxy.Domain, explainStringSource(rawServiceProxyDomain(rawService)))
+			}
+			if service.Proxy.Host != "" {
+				fmt.Fprintf(out, "    proxy.host: %s (%s)\n", service.Proxy.Host, runtimeStringSource(rawCfg, rawService.Proxy != nil && rawService.Proxy.Host != "", rawServiceProxyHost(rawService)))
 			}
 			if service.Proxy.DynamicDomains != nil && service.Proxy.DynamicDomains.IsEnabled() {
 				fmt.Fprintf(out, "    proxy.dynamicDomains.ask: %s (%s)\n", service.Proxy.DynamicDomains.Ask, explainStringSource(rawServiceProxyDynamicAsk(rawService)))
@@ -213,6 +220,20 @@ func rawServiceProxyDomain(service takoconfig.ServiceConfig) string {
 		return ""
 	}
 	return service.Proxy.Domain
+}
+
+func rawServiceProxyHost(service takoconfig.ServiceConfig) string {
+	if service.Proxy == nil {
+		return ""
+	}
+	return service.Proxy.Host
+}
+
+func rawServiceProxyVisibility(service takoconfig.ServiceConfig) string {
+	if service.Proxy == nil {
+		return ""
+	}
+	return service.Proxy.Visibility
 }
 
 func rawServiceProxyDynamicAsk(service takoconfig.ServiceConfig) string {

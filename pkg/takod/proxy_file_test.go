@@ -207,6 +207,36 @@ func TestRenderCaddyfileWithNoRoutesRespondsNotFound(t *testing.T) {
 	}
 }
 
+func TestRenderCaddyfileUsesHTTPOnlyInternalRoutes(t *testing.T) {
+	caddyfile, err := renderCaddyfile([]ProxyRouteManifest{
+		{
+			Version:     1,
+			Project:     "demo",
+			Environment: "production",
+			Routes: []ProxyRoute{
+				{
+					Service:    "web",
+					Domains:    []string{"web.production.demo.tako.internal"},
+					Upstreams:  []string{"http://demo-web:3000"},
+					Visibility: proxyRouteVisibilityInternal,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("renderCaddyfile returned error: %v", err)
+	}
+	if !strings.Contains(caddyfile, "http://web.production.demo.tako.internal {") {
+		t.Fatalf("internal route should be HTTP-only:\n%s", caddyfile)
+	}
+	if strings.Contains(caddyfile, "web.production.demo.tako.internal {\n\ttls") {
+		t.Fatalf("internal route should not request ACME TLS:\n%s", caddyfile)
+	}
+	if !strings.Contains(caddyfile, "reverse_proxy http://demo-web:3000") {
+		t.Fatalf("internal route missing upstream:\n%s", caddyfile)
+	}
+}
+
 func TestParseProxyRouteManifestRejectsUnsafeRevision(t *testing.T) {
 	_, err := ParseProxyRouteManifest(`{
 		"version": 1,

@@ -778,7 +778,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		// Collect deployed service URLs
 		var urls []string
 		for _, svc := range services {
-			if svc.Proxy != nil {
+			if svc.Proxy != nil && svc.IsPublic() {
 				for _, domain := range svc.Proxy.GetAllDomains() {
 					urls = append(urls, fmt.Sprintf("https://%s", domain))
 				}
@@ -804,10 +804,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	// Show service URLs (iterate through services with proxy configured)
 	hasPublicServices := false
+	hasInternalServices := false
 	domainSpecs := collectConfiguredDomainSpecs(services, "")
 
 	for serviceName, service := range services {
-		if service.Proxy != nil && service.Proxy.GetPrimaryDomain() != "" {
+		if service.Proxy != nil && service.IsPublic() && service.Proxy.GetPrimaryDomain() != "" {
 			allDomains := service.Proxy.GetAllDomains()
 			if !hasPublicServices {
 				fmt.Printf("Your application is available at:\n")
@@ -818,6 +819,22 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  https://%s\n", domain)
 			}
 		}
+	}
+
+	for serviceName, service := range services {
+		if service.Proxy != nil && service.Proxy.IsInternal() && service.Proxy.GetPrimaryHost() != "" {
+			if !hasInternalServices {
+				fmt.Printf("\nInternal routes:\n")
+				hasInternalServices = true
+			}
+			fmt.Printf("\n%s:\n", serviceName)
+			for _, host := range service.Proxy.GetAllHosts() {
+				fmt.Printf("  http://%s\n", host)
+			}
+		}
+	}
+	if hasInternalServices {
+		fmt.Printf("\nRun `tako domains hosts -e %s` to print /etc/hosts entries for internal routes.\n", envName)
 	}
 
 	if hasPublicServices && !deploySkipDomainCheck {

@@ -287,6 +287,11 @@ environments:
           # Caddy asks this internal service/path before issuing a certificate.
           # dynamicDomains:
           #   ask: admin:/api/domains/authorize
+
+          # Internal private-network route instead of public DNS/ACME.
+          # This is HTTP-only and skipped by public DNS/TLS checks.
+          # visibility: internal
+          # host: web.production.%s.tako.internal
           
           email: ${LETSENCRYPT_EMAIL}     # Email for Let's Encrypt SSL certificates
           # port: 3000      # Optional: specify if different from service port
@@ -497,5 +502,5 @@ environments:
 #     - postgres_data:/var/lib/postgresql/data
 #   env:
 #     POSTGRES_PASSWORD: ${DB_PASSWORD}
-`, projectName, projectName)
+`, projectName, projectName, projectName)
 }
