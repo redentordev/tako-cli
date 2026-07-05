@@ -72,3 +72,39 @@ func TestSourceBuildTagGeneratesUTCTimestampTag(t *testing.T) {
 		t.Fatalf("generated tag is invalid: %v", err)
 	}
 }
+
+func TestImageBuildTagDerivesDeterministicTag(t *testing.T) {
+	got, err := ImageBuildTag("", " registry.example.com/web:sha \n")
+	if err != nil {
+		t.Fatalf("ImageBuildTag() returned error: %v", err)
+	}
+	const want = "image-8a5076f3bc4d"
+	if got != want {
+		t.Fatalf("ImageBuildTag() = %q, want %q", got, want)
+	}
+	if err := ValidateBuildTag(got); err != nil {
+		t.Fatalf("generated tag is invalid: %v", err)
+	}
+}
+
+func TestImageBuildTagUsesExplicitRevision(t *testing.T) {
+	got, err := ImageBuildTag("release_2026.07-05", "registry.example.com/web:sha")
+	if err != nil {
+		t.Fatalf("ImageBuildTag() returned error: %v", err)
+	}
+	if got != "release_2026.07-05" {
+		t.Fatalf("ImageBuildTag() = %q, want explicit revision unchanged", got)
+	}
+}
+
+func TestImageBuildTagRejectsInvalidExplicitRevision(t *testing.T) {
+	if got, err := ImageBuildTag("bad/tag", "registry.example.com/web:sha"); err == nil {
+		t.Fatalf("ImageBuildTag() = %q, nil error; want invalid revision error", got)
+	}
+}
+
+func TestImageBuildTagRejectsEmptyImageRefWhenDeriving(t *testing.T) {
+	if got, err := ImageBuildTag("", " \t\n"); err == nil {
+		t.Fatalf("ImageBuildTag() = %q, nil error; want empty image ref error", got)
+	}
+}

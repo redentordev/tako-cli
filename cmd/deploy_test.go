@@ -367,9 +367,9 @@ func TestDeploySourceLabelForImageOverrideActivatesSourceMode(t *testing.T) {
 	}
 }
 
-func TestResolveDeploySourceInfoImageModeBypassesGitAndGeneratesTag(t *testing.T) {
+func TestResolveDeploySourceInfoImageModeBypassesGitAndDerivesImageTag(t *testing.T) {
 	now := time.Date(2026, 7, 5, 4, 34, 56, 0, time.UTC)
-	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, deploySourceLabelForImageOverride("", "registry.example.com/web:sha"), "", now)
+	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, deploySourceLabelForImageOverride("", "registry.example.com/web:sha"), "", "registry.example.com/web:sha", now)
 	if err != nil {
 		t.Fatalf("resolveDeploySourceInfo returned error: %v", err)
 	}
@@ -379,13 +379,16 @@ func TestResolveDeploySourceInfoImageModeBypassesGitAndGeneratesTag(t *testing.T
 	if info.StateSource != "image" {
 		t.Fatalf("StateSource = %q, want image", info.StateSource)
 	}
-	if info.BuildImageTag != "source-20260705T043456Z" {
-		t.Fatalf("BuildImageTag = %q, want generated source tag", info.BuildImageTag)
+	if info.BuildImageTag != "image-8a5076f3bc4d" {
+		t.Fatalf("BuildImageTag = %q, want derived image tag", info.BuildImageTag)
+	}
+	if info.CommitInfo != nil {
+		t.Fatalf("CommitInfo = %#v, want nil", info.CommitInfo)
 	}
 }
 
 func TestResolveDeploySourceInfoImageModeAllowsExplicitRevision(t *testing.T) {
-	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, deploySourceLabelForImageOverride("", "registry.example.com/web:sha"), "ci-123", time.Now())
+	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, deploySourceLabelForImageOverride("", "registry.example.com/web:sha"), "ci-123", "registry.example.com/web:sha", time.Now())
 	if err != nil {
 		t.Fatalf("resolveDeploySourceInfo returned error: %v", err)
 	}
@@ -401,7 +404,7 @@ func TestResolveDeploySourceInfoImageModeAllowsExplicitRevision(t *testing.T) {
 }
 
 func TestResolveDeploySourceInfoDefaultModeRequiresGitRepository(t *testing.T) {
-	_, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, "", "", time.Date(2026, 7, 5, 4, 34, 56, 0, time.UTC))
+	_, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, "", "", "", time.Date(2026, 7, 5, 4, 34, 56, 0, time.UTC))
 	if err == nil {
 		t.Fatal("resolveDeploySourceInfo should reject non-git repositories in default mode")
 	}
@@ -411,7 +414,7 @@ func TestResolveDeploySourceInfoDefaultModeRequiresGitRepository(t *testing.T) {
 }
 
 func TestResolveDeploySourceInfoWhitespaceOnlyFlagsUseDefaultGitMode(t *testing.T) {
-	_, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, " \t", "\n ", time.Now())
+	_, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, " \t", "\n ", "", time.Now())
 	if err == nil {
 		t.Fatal("resolveDeploySourceInfo should use default git mode for whitespace-only source flags")
 	}
@@ -421,7 +424,7 @@ func TestResolveDeploySourceInfoWhitespaceOnlyFlagsUseDefaultGitMode(t *testing.
 }
 
 func TestResolveDeploySourceInfoTrimsSourceAndRevision(t *testing.T) {
-	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, " ./app \t", " ci-123 \n", time.Now())
+	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, " ./app \t", " ci-123 \n", "", time.Now())
 	if err != nil {
 		t.Fatalf("resolveDeploySourceInfo returned error: %v", err)
 	}
@@ -451,7 +454,7 @@ func TestDeployStartNotificationMessageIncludesCommitMessage(t *testing.T) {
 
 func TestResolveDeploySourceInfoSourceModeBypassesGitAndGeneratesTag(t *testing.T) {
 	now := time.Date(2026, 7, 5, 4, 34, 56, 0, time.UTC)
-	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, ".", "", now)
+	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, ".", "", "", now)
 	if err != nil {
 		t.Fatalf("resolveDeploySourceInfo returned error: %v", err)
 	}
@@ -474,7 +477,7 @@ func TestResolveDeploySourceInfoSourceModeBypassesGitAndGeneratesTag(t *testing.
 }
 
 func TestResolveDeploySourceInfoRevisionModeUsesExplicitTag(t *testing.T) {
-	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, "", "ci-123", time.Now())
+	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, "", "ci-123", "", time.Now())
 	if err != nil {
 		t.Fatalf("resolveDeploySourceInfo returned error: %v", err)
 	}
@@ -487,7 +490,7 @@ func TestResolveDeploySourceInfoRevisionModeUsesExplicitTag(t *testing.T) {
 }
 
 func TestResolveDeploySourceInfoRejectsInvalidExplicitRevision(t *testing.T) {
-	_, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, ".", "bad/tag", time.Now())
+	_, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, ".", "bad/tag", "", time.Now())
 	if err == nil {
 		t.Fatal("resolveDeploySourceInfo should reject invalid revision")
 	}

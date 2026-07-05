@@ -183,11 +183,18 @@ func applyDeploySourceOverride(service config.ServiceConfig, source string) conf
 	return service
 }
 
-func resolveDeploySourceInfo(gitClient deployGitReader, allowDirty bool, source string, revision string, now time.Time) (deploySourceInfo, error) {
+func resolveDeploySourceInfo(gitClient deployGitReader, allowDirty bool, source string, revision string, imageRef string, now time.Time) (deploySourceInfo, error) {
 	source = strings.TrimSpace(source)
 	revision = strings.TrimSpace(revision)
+	imageRef = strings.TrimSpace(imageRef)
 	if source != "" || revision != "" {
-		buildTag, err := deployplan.SourceBuildTag(revision, now)
+		var buildTag string
+		var err error
+		if imageRef != "" {
+			buildTag, err = deployplan.ImageBuildTag(revision, imageRef)
+		} else {
+			buildTag, err = deployplan.SourceBuildTag(revision, now)
+		}
 		if err != nil {
 			return deploySourceInfo{}, err
 		}
@@ -394,7 +401,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Initialize source metadata. Default mode requires Git; source mode skips Git validation.
 	gitClient := git.NewClient(".")
 
-	sourceInfo, err := resolveDeploySourceInfo(gitClient, allowDirty, deploySourceLabel, deployRevision, time.Now())
+	sourceInfo, err := resolveDeploySourceInfo(gitClient, allowDirty, deploySourceLabel, deployRevision, deployImageRef, time.Now())
 	if err != nil {
 		return err
 	}

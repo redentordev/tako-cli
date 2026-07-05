@@ -1,7 +1,10 @@
 package deployplan
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -39,6 +42,26 @@ func SourceBuildTag(explicitRevision string, now time.Time) (string, error) {
 		return explicitRevision, nil
 	}
 	return "source-" + now.UTC().Format("20060102T150405Z"), nil
+}
+
+// ImageBuildTag returns the build tag for a deploy from an existing image.
+// An explicit revision is validated and returned unchanged. If no explicit
+// revision is provided, a deterministic tag is derived from the trimmed image ref.
+func ImageBuildTag(explicitRevision string, imageRef string) (string, error) {
+	if explicitRevision != "" {
+		if err := ValidateBuildTag(explicitRevision); err != nil {
+			return "", err
+		}
+		return explicitRevision, nil
+	}
+
+	trimmedImageRef := strings.TrimSpace(imageRef)
+	if trimmedImageRef == "" {
+		return "", fmt.Errorf("image ref must not be empty when deriving image build tag")
+	}
+
+	sum := sha256.Sum256([]byte(trimmedImageRef))
+	return "image-" + hex.EncodeToString(sum[:])[:12], nil
 }
 
 func isDockerTagFirstChar(c byte) bool {
