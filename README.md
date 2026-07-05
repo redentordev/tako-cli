@@ -308,6 +308,8 @@ artifact. For configured projects outside Git, use `tako deploy --source .` or
 To deploy one service from an existing image without Git or a build, use
 `tako deploy --service web --image registry.example.com/web:sha`. To deploy one
 service from a targeted build context, use `tako deploy --service web --source .`.
+To deploy one service from a local source archive, use
+`tako deploy --service web --archive app.tar.gz`.
 You do not need to bump `project.version` for redeploys; keep it as project metadata.
 Use `tako deploy --force` to intentionally reconcile unchanged app services.
 Broad force skips services marked `persistent: true`; use
@@ -370,6 +372,7 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako deploy --force` | Reconcile unchanged app services; broad force skips persistent services unless a service is targeted |
 | `tako deploy --service web --image registry.example.com/web:sha` | Deploy one service from an existing image without building |
 | `tako deploy --service web --source .` | Deploy one service from a targeted build context |
+| `tako deploy --service web --archive app.tar.gz` | Deploy one service from a local source archive |
 | `tako domains status` | Check configured or ad-hoc public domain DNS/TLS readiness without redeploying |
 | `tako domains hosts` | Print `/etc/hosts` entries for internal proxy routes |
 | `tako promote <service>` | Promote a warmed manual blue-green revision |

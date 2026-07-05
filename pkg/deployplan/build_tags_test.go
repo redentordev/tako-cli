@@ -108,3 +108,42 @@ func TestImageBuildTagRejectsEmptyImageRefWhenDeriving(t *testing.T) {
 		t.Fatalf("ImageBuildTag() = %q, nil error; want empty image ref error", got)
 	}
 }
+
+func TestArchiveBuildTagDerivesDeterministicTag(t *testing.T) {
+	digest := []byte{0x87, 0x77, 0x8d, 0x46, 0x16, 0xcb, 0xee}
+	got, err := ArchiveBuildTag("", digest)
+	if err != nil {
+		t.Fatalf("ArchiveBuildTag() returned error: %v", err)
+	}
+	const want = "archive-87778d4616cb"
+	if got != want {
+		t.Fatalf("ArchiveBuildTag() = %q, want %q", got, want)
+	}
+	if err := ValidateBuildTag(got); err != nil {
+		t.Fatalf("generated tag is invalid: %v", err)
+	}
+}
+
+func TestArchiveBuildTagUsesExplicitRevision(t *testing.T) {
+	got, err := ArchiveBuildTag("release_2026.07-05", []byte{1, 2, 3, 4, 5, 6})
+	if err != nil {
+		t.Fatalf("ArchiveBuildTag() returned error: %v", err)
+	}
+	if got != "release_2026.07-05" {
+		t.Fatalf("ArchiveBuildTag() = %q, want explicit revision unchanged", got)
+	}
+}
+
+func TestArchiveBuildTagRejectsInvalidExplicitRevision(t *testing.T) {
+	if got, err := ArchiveBuildTag("bad/tag", []byte{1, 2, 3, 4, 5, 6}); err == nil {
+		t.Fatalf("ArchiveBuildTag() = %q, nil error; want invalid revision error", got)
+	}
+}
+
+func TestArchiveBuildTagRejectsShortDigestWhenDeriving(t *testing.T) {
+	for _, digest := range [][]byte{nil, []byte{1, 2, 3, 4, 5}} {
+		if got, err := ArchiveBuildTag("", digest); err == nil {
+			t.Fatalf("ArchiveBuildTag() = %q, nil error; want short digest error", got)
+		}
+	}
+}

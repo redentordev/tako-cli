@@ -64,6 +64,22 @@ func ImageBuildTag(explicitRevision string, imageRef string) (string, error) {
 	return "image-" + hex.EncodeToString(sum[:])[:12], nil
 }
 
+// ArchiveBuildTag returns the build tag for a deploy from a local source archive.
+// An explicit revision is validated and returned unchanged. If no explicit
+// revision is provided, a deterministic tag is derived from the archive digest.
+func ArchiveBuildTag(explicitRevision string, digest []byte) (string, error) {
+	if explicitRevision != "" {
+		if err := ValidateBuildTag(explicitRevision); err != nil {
+			return "", err
+		}
+		return explicitRevision, nil
+	}
+	if len(digest) < 6 {
+		return "", fmt.Errorf("archive digest must be at least 6 bytes when deriving archive build tag")
+	}
+	return "archive-" + hex.EncodeToString(digest)[:12], nil
+}
+
 func isDockerTagFirstChar(c byte) bool {
 	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'
 }

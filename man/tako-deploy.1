@@ -25,11 +25,16 @@ If a step fails, deployment stops and records the failed state for inspection or
 .PP
 Use 'tako deploy --service web --image registry.example.com/web:sha' to deploy one service from an existing image without building.
 Use 'tako deploy --service web --source .' to deploy one service from a targeted build context.
+Use 'tako deploy --service web --archive app.tar.gz' to deploy one service from a local source archive.
 
 
 .SH OPTIONS
 \fB--allow-dirty\fP[=false]
 	Allow deploying with uncommitted local changes
+
+.PP
+\fB--archive\fP=""
+	Deploy target service from a local source archive (.tar, .tar.gz, .tgz, .zip)
 
 .PP
 \fB--build-strategy\fP=""

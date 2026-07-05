@@ -1,10 +1,17 @@
 package cmd
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bufio"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
+	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -39,6 +46,7 @@ var (
 	deploySource          string
 	deployRevision        string
 	deployImage           string
+	deployArchive         string
 )
 
 var blueGreenGraceSleep = time.Sleep
@@ -58,7 +66,8 @@ The deployment process:
 If a step fails, deployment stops and records the failed state for inspection or rollback.
 
 Use 'tako deploy --service web --image registry.example.com/web:sha' to deploy one service from an existing image without building.
-Use 'tako deploy --service web --source .' to deploy one service from a targeted build context.`,
+Use 'tako deploy --service web --source .' to deploy one service from a targeted build context.
+Use 'tako deploy --service web --archive app.tar.gz' to deploy one service from a local source archive.`,
 	RunE: runDeploy,
 }
 
@@ -77,6 +86,7 @@ func init() {
 	deployCmd.Flags().StringVar(&deploySource, "source", "", "Deploy configured project from a non-git source label/path; with --service, override that service build context")
 	deployCmd.Flags().StringVar(&deployRevision, "revision", "", "Explicit non-git source revision/build tag")
 	deployCmd.Flags().StringVar(&deployImage, "image", "", "Override target service image for this deploy")
+	deployCmd.Flags().StringVar(&deployArchive, "archive", "", "Deploy target service from a local source archive (.tar, .tar.gz, .tgz, .zip)")
 }
 
 func ensureDeployRuntimeSupported(cfg *config.Config) error {
@@ -156,6 +166,41 @@ func validateDeployImageOptions(serviceName string, imageRef string, source stri
 	return trimmedImage, nil
 }
 
+func validateDeployArchiveOptions(serviceName string, archivePath string, source string, imageRef string) (string, error) {
+	trimmedArchive := strings.TrimSpace(archivePath)
+	if trimmedArchive == "" {
+		if archivePath != "" {
+			return "", fmt.Errorf("--archive must not be empty")
+		}
+		return "", nil
+	}
+	if strings.TrimSpace(serviceName) == "" {
+		return "", fmt.Errorf("--archive requires --service to select the target service")
+	}
+	if strings.TrimSpace(source) != "" {
+		return "", fmt.Errorf("--archive cannot be combined with --source")
+	}
+	if strings.TrimSpace(imageRef) != "" {
+		return "", fmt.Errorf("--archive cannot be combined with --image")
+	}
+	if !isSupportedDeployArchive(trimmedArchive) {
+		return "", fmt.Errorf("unsupported archive format %q: supported formats are .tar, .tar.gz, .tgz, .zip", trimmedArchive)
+	}
+	info, err := os.Stat(trimmedArchive)
+	if err != nil {
+		return "", fmt.Errorf("archive %q is not accessible: %w", trimmedArchive, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("archive %q must be a regular file", trimmedArchive)
+	}
+	return trimmedArchive, nil
+}
+
+func isSupportedDeployArchive(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".tar") || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".zip")
+}
+
 func deploySourceLabelForImageOverride(source string, imageRef string) string {
 	if strings.TrimSpace(imageRef) != "" && strings.TrimSpace(source) == "" {
 		return "image"
@@ -181,6 +226,184 @@ func applyDeploySourceOverride(service config.ServiceConfig, source string) conf
 	service.Build = trimmedSource
 	service.Image = ""
 	return service
+}
+
+func deploySourceLabelForArchive(archivePath string) string {
+	return "archive:" + filepath.Base(strings.TrimSpace(archivePath))
+}
+
+func applyDeployArchiveOverride(service config.ServiceConfig, buildContext string) config.ServiceConfig {
+	trimmedBuildContext := strings.TrimSpace(buildContext)
+	if trimmedBuildContext == "" {
+		return service
+	}
+	service.Build = trimmedBuildContext
+	service.Image = ""
+	return service
+}
+
+func deployArchiveBuildTag(explicitRevision string, archivePath string) (string, error) {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open archive %q: %w", archivePath, err)
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", fmt.Errorf("failed to hash archive %q: %w", archivePath, err)
+	}
+	return deployplan.ArchiveBuildTag(strings.TrimSpace(explicitRevision), hash.Sum(nil))
+}
+
+func extractDeployArchive(archivePath string, destDir string) error {
+	lower := strings.ToLower(archivePath)
+	if strings.HasSuffix(lower, ".zip") {
+		return extractDeployZipArchive(archivePath, destDir)
+	}
+	return extractDeployTarArchive(archivePath, destDir, strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz"))
+}
+
+func extractDeployTarArchive(archivePath string, destDir string, gzipCompressed bool) error {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	var reader io.Reader = file
+	if gzipCompressed {
+		gz, err := gzip.NewReader(file)
+		if err != nil {
+			return err
+		}
+		defer gz.Close()
+		reader = gz
+	}
+	tr := tar.NewReader(reader)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch header.Typeflag {
+		case tar.TypeXHeader, tar.TypeXGlobalHeader, tar.TypeGNULongName, tar.TypeGNULongLink:
+			continue
+		}
+		target, err := safeDeployArchivePath(destDir, header.Name)
+		if err != nil {
+			return err
+		}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, header.FileInfo().Mode().Perm())
+			if err != nil {
+				return err
+			}
+			_, copyErr := io.Copy(out, tr)
+			closeErr := out.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+		case tar.TypeSymlink, tar.TypeLink:
+			return fmt.Errorf("archive entry %q is a link; links are not supported", header.Name)
+		default:
+			return fmt.Errorf("archive entry %q has unsupported type", header.Name)
+		}
+	}
+}
+
+func extractDeployZipArchive(archivePath string, destDir string) error {
+	zr, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	for _, entry := range zr.File {
+		if entry.FileInfo().Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("archive entry %q is a link; links are not supported", entry.Name)
+		}
+		target, err := safeDeployArchivePath(destDir, entry.Name)
+		if err != nil {
+			return err
+		}
+		if entry.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if !entry.FileInfo().Mode().IsRegular() {
+			return fmt.Errorf("archive entry %q has unsupported type", entry.Name)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		in, err := entry.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, entry.FileInfo().Mode().Perm())
+		if err != nil {
+			in.Close()
+			return err
+		}
+		_, copyErr := io.Copy(out, in)
+		closeInErr := in.Close()
+		closeOutErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeInErr != nil {
+			return closeInErr
+		}
+		if closeOutErr != nil {
+			return closeOutErr
+		}
+	}
+	return nil
+}
+
+func safeDeployArchivePath(destDir string, entryName string) (string, error) {
+	if entryName == "" {
+		return "", fmt.Errorf("archive entry name must not be empty")
+	}
+	if strings.Contains(entryName, "\\") {
+		return "", fmt.Errorf("archive entry %q contains backslashes; use slash-separated paths", entryName)
+	}
+	if strings.Contains(entryName, ":") {
+		return "", fmt.Errorf("archive entry %q contains colons; colons are not supported in archive paths", entryName)
+	}
+	if strings.HasPrefix(entryName, "/") {
+		return "", fmt.Errorf("archive entry %q uses an absolute path", entryName)
+	}
+	cleanName := path.Clean(entryName)
+	if cleanName == "." {
+		return destDir, nil
+	}
+	if cleanName == ".." || strings.HasPrefix(cleanName, "../") {
+		return "", fmt.Errorf("archive entry %q would escape destination", entryName)
+	}
+	target := filepath.Join(destDir, filepath.FromSlash(cleanName))
+	rel, err := filepath.Rel(destDir, target)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("archive entry %q would escape destination", entryName)
+	}
+	return target, nil
 }
 
 func resolveDeploySourceInfo(gitClient deployGitReader, allowDirty bool, source string, revision string, imageRef string, now time.Time) (deploySourceInfo, error) {
@@ -392,16 +615,40 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if err := ensureDeployRuntimeSupported(cfg); err != nil {
 		return err
 	}
+	deployArchivePath, err := validateDeployArchiveOptions(deployService, deployArchive, deploySource, deployImage)
+	if err != nil {
+		return err
+	}
 	deployImageRef, err := validateDeployImageOptions(deployService, deployImage, deploySource)
 	if err != nil {
 		return err
 	}
 	deploySourceLabel := deploySourceLabelForImageOverride(deploySource, deployImageRef)
+	deployRevisionForSourceInfo := deployRevision
+	if deployArchivePath != "" {
+		deploySourceLabel = deploySourceLabelForArchive(deployArchivePath)
+		deployRevisionForSourceInfo, err = deployArchiveBuildTag(deployRevision, deployArchivePath)
+		if err != nil {
+			return err
+		}
+	}
+
+	archiveBuildContext := ""
+	if deployArchivePath != "" {
+		archiveBuildContext, err = os.MkdirTemp("", "tako-archive-*")
+		if err != nil {
+			return fmt.Errorf("failed to create archive build context: %w", err)
+		}
+		defer os.RemoveAll(archiveBuildContext)
+		if err := extractDeployArchive(deployArchivePath, archiveBuildContext); err != nil {
+			return fmt.Errorf("failed to extract archive %q: %w", deployArchivePath, err)
+		}
+	}
 
 	// Initialize source metadata. Default mode requires Git; source mode skips Git validation.
 	gitClient := git.NewClient(".")
 
-	sourceInfo, err := resolveDeploySourceInfo(gitClient, allowDirty, deploySourceLabel, deployRevision, deployImageRef, time.Now())
+	sourceInfo, err := resolveDeploySourceInfo(gitClient, allowDirty, deploySourceLabel, deployRevisionForSourceInfo, deployImageRef, time.Now())
 	if err != nil {
 		return err
 	}
@@ -477,6 +724,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 		if deployImageRef != "" {
 			service = applyDeployImageOverride(service, deployImageRef)
+		} else if archiveBuildContext != "" {
+			service = applyDeployArchiveOverride(service, archiveBuildContext)
 		} else {
 			service = applyDeploySourceOverride(service, deploySource)
 		}
