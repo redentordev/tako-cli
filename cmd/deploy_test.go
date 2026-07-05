@@ -11,6 +11,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/git"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
@@ -323,6 +324,37 @@ func TestApplyDeployImageOverrideSetsImageAndClearsBuild(t *testing.T) {
 	}
 	if original.Image != "demo/web:old" || original.Build != "." {
 		t.Fatalf("original service mutated: %#v", original)
+	}
+}
+
+func TestApplyDeploySourceOverrideSetsBuildClearsImageAndTrims(t *testing.T) {
+	original := config.ServiceConfig{Build: "./old", Image: "demo/web:old"}
+	got := applyDeploySourceOverride(original, " ./services/web \t")
+	if got.Build != "./services/web" {
+		t.Fatalf("Build = %q, want trimmed source", got.Build)
+	}
+	if got.Image != "" {
+		t.Fatalf("Image = %q, want cleared", got.Image)
+	}
+	if original.Image != "demo/web:old" || original.Build != "./old" {
+		t.Fatalf("original service mutated: %#v", original)
+	}
+}
+
+func TestApplyDeploySourceOverrideNoopsForBlankSource(t *testing.T) {
+	original := config.ServiceConfig{Build: "./old", Image: "demo/web:old"}
+	got := applyDeploySourceOverride(original, " \t\n")
+	if got.Image != original.Image || got.Build != original.Build {
+		t.Fatalf("blank source changed service: got %#v want %#v", got, original)
+	}
+}
+
+func TestApplyDeploySourceOverrideMakesImageServiceDeployableOnEmptyPlan(t *testing.T) {
+	service := applyDeploySourceOverride(config.ServiceConfig{Image: "demo/web:old"}, ".")
+	services := map[string]config.ServiceConfig{"web": service}
+	got := deployplan.ServicesToDeployForPlan(&reconcile.ReconciliationPlan{}, services, false, true)
+	if _, ok := got["web"]; !ok {
+		t.Fatalf("overridden build service missing from deploy set: %#v", got)
 	}
 }
 

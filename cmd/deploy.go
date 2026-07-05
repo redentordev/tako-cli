@@ -57,7 +57,8 @@ The deployment process:
 
 If a step fails, deployment stops and records the failed state for inspection or rollback.
 
-Use 'tako deploy --service web --image registry.example.com/web:sha' to deploy one service from an existing image without building.`,
+Use 'tako deploy --service web --image registry.example.com/web:sha' to deploy one service from an existing image without building.
+Use 'tako deploy --service web --source .' to deploy one service from a targeted build context.`,
 	RunE: runDeploy,
 }
 
@@ -73,7 +74,7 @@ func init() {
 	deployCmd.Flags().DurationVar(&deployDomainTimeout, "domain-timeout", 2*time.Minute, "Wait up to this duration for public DNS/TLS readiness; 0 checks once")
 	deployCmd.Flags().StringArrayVar(&deployDomainTargets, "domain-target", nil, "Expected DNS target; repeat for custom edge/CNAME targets (defaults to proxy server hosts)")
 	deployCmd.Flags().StringVar(&deployBuildStrategy, "build-strategy", "", "Override image build strategy: remote, local, or auto")
-	deployCmd.Flags().StringVar(&deploySource, "source", "", "Deploy configured project from a non-git source label/path")
+	deployCmd.Flags().StringVar(&deploySource, "source", "", "Deploy configured project from a non-git source label/path; with --service, override that service build context")
 	deployCmd.Flags().StringVar(&deployRevision, "revision", "", "Explicit non-git source revision/build tag")
 	deployCmd.Flags().StringVar(&deployImage, "image", "", "Override target service image for this deploy")
 }
@@ -169,6 +170,16 @@ func applyDeployImageOverride(service config.ServiceConfig, imageRef string) con
 	}
 	service.Image = trimmedImage
 	service.Build = ""
+	return service
+}
+
+func applyDeploySourceOverride(service config.ServiceConfig, source string) config.ServiceConfig {
+	trimmedSource := strings.TrimSpace(source)
+	if trimmedSource == "" {
+		return service
+	}
+	service.Build = trimmedSource
+	service.Image = ""
 	return service
 }
 
@@ -457,7 +468,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		if !exists {
 			return fmt.Errorf("service %s not found in environment %s", deployService, envName)
 		}
-		service = applyDeployImageOverride(service, deployImageRef)
+		if deployImageRef != "" {
+			service = applyDeployImageOverride(service, deployImageRef)
+		} else {
+			service = applyDeploySourceOverride(service, deploySource)
+		}
 		services = map[string]config.ServiceConfig{deployService: service}
 	}
 

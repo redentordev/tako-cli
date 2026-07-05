@@ -24,6 +24,7 @@ If a step fails, deployment stops and records the failed state for inspection or
 
 .PP
 Use 'tako deploy --service web --image registry.example.com/web:sha' to deploy one service from an existing image without building.
+Use 'tako deploy --service web --source .' to deploy one service from a targeted build context.
 
 
 .SH OPTIONS
@@ -72,7 +73,7 @@ Use 'tako deploy --service web --image registry.example.com/web:sha' to deploy o
 
 .PP
 \fB--source\fP=""
-	Deploy configured project from a non-git source label/path
+	Deploy configured project from a non-git source label/path; with --service, override that service build context
 
 .PP
 \fB--strict-domains\fP[=false]
