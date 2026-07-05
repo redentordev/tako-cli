@@ -447,7 +447,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if plan.IsEmpty() && !deployplan.HasBuildServices(services) && !deployForce {
-		activeRevisions := deployProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
+		activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
 		if err := reconcileDeployProxy(deploy, services, activeRevisions); err != nil {
 			return fmt.Errorf("failed to reconcile proxy routes: %w", err)
 		}
@@ -602,14 +602,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			proxyServices = cloneServiceMap(allServices)
 		}
 		manualPending := deployplan.ManualPromotionPendingServices(servicesToDeploy, actualState)
-		activeRevisions := deployProxyActiveRevisions(cfg, envName, proxyServices, servicesToDeploy, imageRefs, actualState)
+		activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, proxyServices, servicesToDeploy, imageRefs, actualState)
 		if err := reconcileDeployProxy(deploy, proxyServices, activeRevisions); err != nil {
 			fmt.Printf("  ✗ proxy reconciliation failed: %v\n", err)
 			deploymentFailed = true
 			deploymentError = fmt.Errorf("proxy reconciliation failed: %w", err)
 			deployment.Status = remotestate.StatusFailed
 			deployment.Error = err.Error()
-		} else if err := pruneTakodServiceRevisionsAfterGrace(deploy, proxyServices, deployedProxyActiveRevisions(servicesToDeploy, activeRevisions)); err != nil {
+		} else if err := pruneTakodServiceRevisionsAfterGrace(deploy, proxyServices, deployplan.DeployedProxyActiveRevisions(servicesToDeploy, activeRevisions)); err != nil {
 			fmt.Printf("  ✗ stale revision cleanup failed: %v\n", err)
 			deploymentFailed = true
 			deploymentError = fmt.Errorf("stale revision cleanup failed: %w", err)
@@ -940,74 +940,11 @@ func applyDeployRemovals(remover deployServiceRemover, plan *reconcile.Reconcili
 	return nil
 }
 
-func deployProxyActiveRevisions(
-	cfg *config.Config,
-	envName string,
-	services map[string]config.ServiceConfig,
-	servicesToDeploy map[string]config.ServiceConfig,
-	imageRefs map[string]string,
-	actualState map[string]*reconcile.ActualService,
-) map[string]string {
-	if cfg == nil || len(services) == 0 {
-		return nil
-	}
-	revisions := make(map[string]string)
-	for serviceName, service := range services {
-		switch service.Deploy.Strategy {
-		case config.DeployStrategyRolling, config.DeployStrategyBlueGreen:
-		default:
-			continue
-		}
-
-		if _, deploying := servicesToDeploy[serviceName]; deploying {
-			if deployplan.IsManualBlueGreenService(service) {
-				if actual := actualState[serviceName]; actual != nil && actual.CurrentRevision != "" {
-					revisions[serviceName] = actual.CurrentRevision
-					continue
-				}
-			}
-			imageRef := imageRefs[serviceName]
-			if imageRef == "" {
-				imageRef = deployplan.ImageRef(cfg, envName, serviceName, service, "")
-			}
-			revisions[serviceName] = deployer.ServiceRevisionID(cfg.Project.Name, envName, serviceName, imageRef, service)
-			continue
-		}
-
-		if actual := actualState[serviceName]; actual != nil && actual.CurrentRevision != "" {
-			revisions[serviceName] = actual.CurrentRevision
-		}
-	}
-	if len(revisions) == 0 {
-		return nil
-	}
-	return revisions
-}
-
 func reconcileDeployProxy(deploy *deployer.Deployer, services map[string]config.ServiceConfig, activeRevisions map[string]string) error {
 	if len(activeRevisions) > 0 {
 		return deploy.ReconcileTakodProxyWithActiveRevisions(services, activeRevisions)
 	}
 	return deploy.ReconcileTakodProxy(services)
-}
-
-func deployedProxyActiveRevisions(servicesToDeploy map[string]config.ServiceConfig, activeRevisions map[string]string) map[string]string {
-	if len(servicesToDeploy) == 0 || len(activeRevisions) == 0 {
-		return nil
-	}
-	deployed := make(map[string]string)
-	for serviceName, service := range servicesToDeploy {
-		if deployplan.IsManualBlueGreenService(service) {
-			continue
-		}
-		if revision := activeRevisions[serviceName]; revision != "" {
-			deployed[serviceName] = revision
-		}
-	}
-	if len(deployed) == 0 {
-		return nil
-	}
-	return deployed
 }
 
 type takodRevisionPruner interface {

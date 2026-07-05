@@ -124,7 +124,7 @@ func runPromote(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot promote %s: %w", serviceName, err)
 	}
 
-	activeRevisions := deployProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
+	activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
 	if activeRevisions == nil {
 		activeRevisions = make(map[string]string)
 	}

@@ -207,7 +207,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 	if err := reconcileDeployProxy(deploy, desiredServices, activeRevisions); err != nil {
 		return fmt.Errorf("rollback succeeded but failed to reconcile proxy: %w", err)
 	}
-	if err := deploy.PruneTakodServiceRevisions(desiredServices, deployedProxyActiveRevisions(map[string]config.ServiceConfig{rollbackService: desiredServices[rollbackService]}, activeRevisions)); err != nil {
+	if err := deploy.PruneTakodServiceRevisions(desiredServices, deployplan.DeployedProxyActiveRevisions(map[string]config.ServiceConfig{rollbackService: desiredServices[rollbackService]}, activeRevisions)); err != nil {
 		return fmt.Errorf("rollback succeeded but failed to prune stale service revisions: %w", err)
 	}
 
@@ -383,7 +383,7 @@ func rollbackProxyInputs(
 
 	rollbackServices := map[string]config.ServiceConfig{rollbackService: rollbackConfig}
 	rollbackImageRefs := map[string]string{rollbackService: serviceState.Image}
-	activeRevisions := deployProxyActiveRevisions(cfg, envName, desiredServices, rollbackServices, rollbackImageRefs, actualState)
+	activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, desiredServices, rollbackServices, rollbackImageRefs, actualState)
 	return desiredServices, rollbackImageRefs, activeRevisions
 }
 
