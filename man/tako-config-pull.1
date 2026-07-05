@@ -1,0 +1,86 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-config-pull - Materialize remote takod state into a tako.yaml
+
+
+.SH SYNOPSIS
+\fBtako config pull [flags]\fP
+
+
+.SH DESCRIPTION
+Read desired, actual, and deployment history state from a remote takod node
+through SSH and takod's Unix socket, then materialize that Tako state into a
+valid tako.yaml. This reads Tako-managed replicated state; it does not discover
+arbitrary non-Tako containers.
+
+
+.SH OPTIONS
+\fB--environment\fP="production"
+	Environment name to read from takod state
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for pull
+
+.PP
+\fB--no-validate\fP[=false]
+	Skip validation of the generated config
+
+.PP
+\fB-o\fP, \fB--output\fP=""
+	Write generated config to this file instead of stdout
+
+.PP
+\fB--password\fP=""
+	SSH password for the remote takod node (not written to output)
+
+.PP
+\fB--project\fP=""
+	Project name to read from takod state (required)
+
+.PP
+\fB--server\fP=""
+	SSH host for the remote takod node (required)
+
+.PP
+\fB--server-name\fP=""
+	Server name to write in tako.yaml (defaults to a sanitized form of --server)
+
+.PP
+\fB--socket\fP=""
+	Remote takod Unix socket path
+
+.PP
+\fB--ssh-key\fP="~/.ssh/id_rsa"
+	SSH private key for the remote takod node
+
+.PP
+\fB--ssh-port\fP=22
+	SSH port for the remote takod node
+
+.PP
+\fB--user\fP=""
+	SSH user for the remote takod node (defaults to current user)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-config(1)\fP
