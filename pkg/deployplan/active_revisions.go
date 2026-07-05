@@ -2,7 +2,6 @@ package deployplan
 
 import (
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 )
 
@@ -37,7 +36,7 @@ func ProxyActiveRevisions(
 			if imageRef == "" {
 				imageRef = ImageRef(cfg, envName, serviceName, service, "")
 			}
-			revisions[serviceName] = deployer.ServiceRevisionID(cfg.Project.Name, envName, serviceName, imageRef, service)
+			revisions[serviceName] = ServiceRevisionID(cfg.Project.Name, envName, serviceName, imageRef, service)
 			continue
 		}
 

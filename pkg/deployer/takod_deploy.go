@@ -2,9 +2,7 @@ package deployer
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +16,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
@@ -915,30 +914,15 @@ func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string
 }
 
 func takodServiceRevisionID(project string, environment string, serviceName string, imageRef string, service config.ServiceConfig) string {
-	configHash, ok := reconcile.SafeServiceConfigHash(service)
-	if !ok {
-		configHash = "unknown"
-	}
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		project,
-		environment,
-		serviceName,
-		imageRef,
-		configHash,
-		effectiveDeployStrategy(&service),
-	}, "\x00")))
-	return hex.EncodeToString(sum[:])[:12]
+	return deployplan.ServiceRevisionID(project, environment, serviceName, imageRef, service)
 }
 
 func ServiceRevisionID(project string, environment string, serviceName string, imageRef string, service config.ServiceConfig) string {
-	return takodServiceRevisionID(project, environment, serviceName, imageRef, service)
+	return deployplan.ServiceRevisionID(project, environment, serviceName, imageRef, service)
 }
 
 func effectiveDeployStrategy(service *config.ServiceConfig) string {
-	if service == nil || service.Deploy.Strategy == "" {
-		return config.DeployStrategyRecreate
-	}
-	return service.Deploy.Strategy
+	return deployplan.EffectiveDeployStrategy(service)
 }
 
 func deployStrategyUsesRevisionScopedContainers(strategy string) bool {

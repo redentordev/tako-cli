@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 )
 
@@ -41,7 +40,7 @@ func TestProxyActiveRevisionsUsesDeployedAndExistingRevisions(t *testing.T) {
 	}
 
 	got := ProxyActiveRevisions(cfg, "production", services, servicesToDeploy, imageRefs, actualState)
-	wantWeb := deployer.ServiceRevisionID(cfg.Project.Name, "production", "web", imageRefs["web"], services["web"])
+	wantWeb := ServiceRevisionID(cfg.Project.Name, "production", "web", imageRefs["web"], services["web"])
 	if got["web"] != wantWeb {
 		t.Fatalf("web revision = %q, want deployed revision %q", got["web"], wantWeb)
 	}
