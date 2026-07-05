@@ -7,6 +7,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -82,7 +83,7 @@ func addConfigExportFlags(cmd *cobra.Command, opts *configExportOptions) {
 	flags.StringVar(&opts.Project, "project", opts.Project, "Project name to read from takod state (required)")
 	flags.StringVar(&opts.Environment, "environment", opts.Environment, "Environment name to read from takod state")
 	flags.StringVar(&opts.Server, "server", opts.Server, "SSH host for the remote takod node (required)")
-	flags.StringVar(&opts.ServerName, "server-name", opts.ServerName, "Server name to write in tako.yaml (defaults to a sanitized form of --server)")
+	flags.StringVar(&opts.ServerName, "server-name", opts.ServerName, "Remote target node/server key to attach connection details to when exporting multi-node state (defaults to a sanitized form of --server)")
 	flags.StringVar(&opts.User, "user", opts.User, "SSH user for the remote takod node (defaults to current user)")
 	flags.IntVar(&opts.SSHPort, "ssh-port", opts.SSHPort, "SSH port for the remote takod node")
 	flags.StringVar(&opts.SSHKey, "ssh-key", opts.SSHKey, "SSH private key for the remote takod node")
@@ -185,14 +186,14 @@ func readConfigExportState(reader configExportStateReader, project, environment 
 
 func writeMaterializedConfig(cmd *cobra.Command, opts configExportOptions, docs configExportStateDocs) error {
 	cfg, warnings, err := materializeConfigExport(opts, docs)
-	if err != nil {
-		return err
-	}
 	for _, warning := range warnings {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning.Message)
 	}
 	if opts.Password != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "warning: SSH password was redacted; generated config uses %s\n", configExportPasswordPlaceholder)
+	}
+	if err != nil {
+		return err
 	}
 	if opts.Output != "" {
 		return takoconfig.SaveConfig(opts.Output, cfg)
@@ -218,13 +219,73 @@ func materializeConfigExport(opts configExportOptions, docs configExportStateDoc
 	} else if opts.SSHKey != "" {
 		server.SSHKey = opts.SSHKey
 	}
-	return configmaterialize.BuildConfig(configmaterialize.Options{
+	servers, mappingWarnings, err := configExportServerMapping(opts, docs, server)
+	if err != nil {
+		return nil, mappingWarnings, err
+	}
+	cfg, warnings, err := configmaterialize.BuildConfig(configmaterialize.Options{
 		Desired:  docs.Desired,
 		Actual:   docs.Actual,
 		History:  docs.History,
-		Servers:  map[string]takoconfig.ServerConfig{opts.ServerName: server},
+		Servers:  servers,
 		Validate: !opts.NoValidate,
 	})
+	warnings = append(mappingWarnings, warnings...)
+	return cfg, warnings, err
+}
+
+func configExportServerMapping(opts configExportOptions, docs configExportStateDocs, server takoconfig.ServerConfig) (map[string]takoconfig.ServerConfig, []configmaterialize.Warning, error) {
+	targetNodes := remoteConfigExportTargetNodes(docs)
+	if len(targetNodes) == 0 {
+		return map[string]takoconfig.ServerConfig{opts.ServerName: server}, nil, nil
+	}
+	if len(targetNodes) == 1 {
+		targetNode := targetNodes[0]
+		var warnings []configmaterialize.Warning
+		if targetNode != opts.ServerName {
+			warnings = append(warnings, configmaterialize.Warning{
+				Code:    "server_name_remapped",
+				Server:  targetNode,
+				Message: fmt.Sprintf("remote state targets server key %q; attached supplied connection details there instead of %q", targetNode, opts.ServerName),
+			})
+		}
+		return map[string]takoconfig.ServerConfig{targetNode: server}, warnings, nil
+	}
+	for _, targetNode := range targetNodes {
+		if targetNode == opts.ServerName {
+			return map[string]takoconfig.ServerConfig{targetNode: server}, nil, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("--server-name %q does not match any remote target node (%s); pass --server-name with one of the remote target node keys", opts.ServerName, strings.Join(targetNodes, ", "))
+}
+
+func remoteConfigExportTargetNodes(docs configExportStateDocs) []string {
+	if docs.Desired != nil {
+		if nodes := cleanConfigExportTargetNodes(docs.Desired.TargetNodes); len(nodes) > 0 {
+			return nodes
+		}
+	}
+	if docs.Actual != nil {
+		if nodes := cleanConfigExportTargetNodes(docs.Actual.TargetNodes); len(nodes) > 0 {
+			return nodes
+		}
+	}
+	return nil
+}
+
+func cleanConfigExportTargetNodes(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 var invalidConfigExportServerNameChars = regexp.MustCompile(`[^a-z0-9_-]+`)

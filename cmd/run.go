@@ -29,6 +29,7 @@ type runOptions struct {
 	Domain      string
 	Replicas    int
 	Env         []string
+	Yes         bool
 }
 
 type runDeployRunner func(cmd *cobra.Command, imageRef string, opts runOptions, cfg *config.Config, service config.ServiceConfig, envVars map[string]string) error
@@ -75,6 +76,7 @@ func newRunCommand() *cobra.Command {
 	flags.StringVar(&opts.Domain, "domain", opts.Domain, "Public domain to route to the service")
 	flags.IntVar(&opts.Replicas, "replicas", opts.Replicas, "Number of replicas")
 	flags.StringArrayVar(&opts.Env, "env", nil, "Environment variable KEY=VALUE (repeatable)")
+	flags.BoolVarP(&opts.Yes, "yes", "y", opts.Yes, "Skip confirmation prompts (non-interactive mode)")
 	return cmd
 }
 
@@ -224,6 +226,19 @@ func validateRunImageRef(imageRef string) error {
 	return nil
 }
 
+func runDeploymentPlan(cfg *config.Config, envName string, serviceName string, service config.ServiceConfig, actualState map[string]*reconcile.ActualService) (map[string]config.ServiceConfig, *reconcile.ReconciliationPlan) {
+	services := map[string]config.ServiceConfig{serviceName: service}
+	planActualState := deployplan.FilterActualStateForServices(actualState, services)
+	return services, reconcile.ComputePlan(cfg.Project.Name, envName, services, planActualState)
+}
+
+func recordRunFailureAndReturn(cmd *cobra.Command, stateManager remoteDeploymentSaver, deployment *remotestate.DeploymentState, cfg *config.Config, envName string, serverNames []string, startTime time.Time, deployErr error) error {
+	if recordErr := recordFailedDeploymentState(stateManager, nil, deployment, cfg, envName, serverNames, nil, startTime, deployErr); recordErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to record failed deployment state: %v\n", recordErr)
+	}
+	return deployErr
+}
+
 func runImageDeploy(cmd *cobra.Command, imageRef string, opts runOptions, cfg *config.Config, service config.ServiceConfig, envVars map[string]string) error {
 	envName := opts.Environment
 	serverNames := []string{opts.ServerName}
@@ -258,30 +273,28 @@ func runImageDeploy(cmd *cobra.Command, imageRef string, opts runOptions, cfg *c
 		return deployActualStateError(err)
 	}
 
-	fmt.Printf("Deploying %s as %s to %s...\n", imageRef, opts.Name, opts.Server)
-	startTime := time.Now()
-	if err := deploy.DeployServiceTakod(opts.Name, &service, imageRef); err != nil {
-		return fmt.Errorf("takod deployment failed for %s: %w", opts.Name, err)
-	}
-	imageRefs := map[string]string{opts.Name: imageRef}
-	services := map[string]config.ServiceConfig{opts.Name: service}
-	activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, services, services, imageRefs, actualState)
-	if err := reconcileDeployProxy(deploy, services, activeRevisions); err != nil {
-		return fmt.Errorf("proxy reconciliation failed: %w", err)
-	}
+	services, plan := runDeploymentPlan(cfg, envName, opts.Name, service, actualState)
+	fmt.Println()
+	fmt.Print(plan.FormatPlan())
 
-	postNodeActualState, err := reconcile.GatherActualStateByServer(sshPool, cfg, envName, serverNames)
-	if err != nil {
-		return fmt.Errorf("deployment succeeded but failed to gather final actual state: %w", err)
+	if plan.NeedsConfirmation() && !opts.Yes {
+		confirmed, err := confirmDeployAction("\nProceed with deployment? (y/N): ", "deployment plan includes updates to an existing service")
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			fmt.Println("Deployment cancelled")
+			return nil
+		}
 	}
-	postActualState := reconcile.AggregateActualStateByServer(postNodeActualState)
 
 	stateManager := remotestate.NewStateManagerWithSocket(sourceClient, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
+	startTime := time.Now()
 	deployment := &remotestate.DeploymentState{
 		Timestamp:   startTime,
 		ProjectName: cfg.Project.Name,
 		Version:     cfg.Project.Version,
-		Status:      remotestate.StatusSuccess,
+		Status:      remotestate.StatusInProgress,
 		Services: map[string]remotestate.ServiceState{
 			opts.Name: {
 				Name:     opts.Name,
@@ -293,14 +306,38 @@ func runImageDeploy(cmd *cobra.Command, imageRef string, opts runOptions, cfg *c
 		},
 		User:       remotestate.GetCurrentUser(),
 		Host:       server.Host,
-		Duration:   time.Since(startTime),
 		Message:    "deployed image",
 		CLIVersion: Version,
 		CLICommit:  GitCommit,
 	}
-	if err := stateManager.SaveDeployment(deployment); err != nil {
-		return deployRemoteHistoryError(err)
+	imageRefs := map[string]string{opts.Name: imageRef}
+
+	if plan.IsEmpty() {
+		fmt.Printf("%s is up-to-date on %s; reconciling proxy and state...\n", opts.Name, opts.Server)
+		activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
+		if err := reconcileDeployProxy(deploy, services, activeRevisions); err != nil {
+			deployErr := fmt.Errorf("proxy reconciliation failed: %w", err)
+			return recordRunFailureAndReturn(cmd, stateManager, deployment, cfg, envName, serverNames, startTime, deployErr)
+		}
+	} else {
+		fmt.Printf("Deploying %s as %s to %s...\n", imageRef, opts.Name, opts.Server)
+		if err := deploy.DeployServiceTakod(opts.Name, &service, imageRef); err != nil {
+			deployErr := fmt.Errorf("takod deployment failed for %s: %w", opts.Name, err)
+			return recordRunFailureAndReturn(cmd, stateManager, deployment, cfg, envName, serverNames, startTime, deployErr)
+		}
+		activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, services, services, imageRefs, actualState)
+		if err := reconcileDeployProxy(deploy, services, activeRevisions); err != nil {
+			deployErr := fmt.Errorf("proxy reconciliation failed: %w", err)
+			return recordRunFailureAndReturn(cmd, stateManager, deployment, cfg, envName, serverNames, startTime, deployErr)
+		}
 	}
+
+	postNodeActualState, err := reconcile.GatherActualStateByServer(sshPool, cfg, envName, serverNames)
+	if err != nil {
+		deployErr := fmt.Errorf("deployment succeeded but failed to gather final actual state: %w", err)
+		return recordRunFailureAndReturn(cmd, stateManager, deployment, cfg, envName, serverNames, startTime, deployErr)
+	}
+	postActualState := reconcile.AggregateActualStateByServer(postNodeActualState)
 
 	if err := persistTakodRuntimeState(
 		sshPool,
@@ -321,10 +358,26 @@ func runImageDeploy(cmd *cobra.Command, imageRef string, opts runOptions, cfg *c
 			"replicas": fmt.Sprintf("%d", service.Replicas),
 		},
 	); err != nil {
-		return fmt.Errorf("deployment succeeded but failed to persist takod state: %w", err)
+		deployErr := fmt.Errorf("deployment succeeded but failed to persist takod state: %w", err)
+		return recordRunFailureAndReturn(cmd, stateManager, deployment, cfg, envName, serverNames, startTime, deployErr)
 	}
 
-	fmt.Printf("✓ Deployed %s as %s to %s (%s)\n", imageRef, opts.Name, opts.Server, envName)
+	deployment.Status = remotestate.StatusSuccess
+	deployment.Duration = time.Since(startTime)
+	if plan.IsEmpty() {
+		deployment.Message = "service up-to-date; proxy and state reconciled"
+	} else {
+		deployment.Message = "deployed image"
+	}
+	if err := stateManager.SaveDeployment(deployment); err != nil {
+		return deployRemoteHistoryError(err)
+	}
+
+	if plan.IsEmpty() {
+		fmt.Printf("✓ %s is up-to-date. Proxy routes and takod state reconciled (%s).\n", opts.Name, envName)
+	} else {
+		fmt.Printf("✓ Deployed %s as %s to %s (%s)\n", imageRef, opts.Name, opts.Server, envName)
+	}
 	if service.Proxy != nil && service.Proxy.GetPrimaryDomain() != "" {
 		fmt.Printf("URL: https://%s\n", service.Proxy.GetPrimaryDomain())
 	}

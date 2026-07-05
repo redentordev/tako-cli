@@ -326,7 +326,9 @@ tako run nginx:1.27 --name web --port 80 --server prod-1 --user deploy
 `tako run` synthesizes Tako desired state and still uses takod, labels, leases,
 history, and proxy reconciliation. It is public-image-only in this milestone;
 private registry auth, compose import, cloud provisioning, and discovery of
-arbitrary non-Tako Docker containers are not included.
+arbitrary non-Tako Docker containers are not included. When updating an existing
+service identity from automation, pass `--yes` to accept the update plan
+noninteractively.
 
 To materialize remote takod state into a local config after a configless run or
 from another machine, use:
@@ -336,9 +338,17 @@ tako config export --project web --server prod-1 --user deploy -o tako.yaml
 tako config pull --project web --server prod-1 --user deploy -o tako.yaml
 ```
 
-Both commands read Tako-managed remote state; they do not discover arbitrary
-Docker containers. If you connect with `--password`, the password is redacted
-and is not written to the generated config.
+Both commands read Tako-managed desired/actual/history state; they do not
+discover arbitrary Docker containers. For multi-node state, `--server-name` must
+match a remote target node/server key so Tako knows which node receives the
+supplied SSH details. Single-node exports automatically attach those SSH details
+to the remote target key, even if it differs from the sanitized `--server` name.
+
+Generated config is best-effort: environment values are emitted as redacted empty
+placeholders, envFile paths/values are not stored in takod state, and unsupported
+or actual-only fields may need manual restoration before redeploy. If you connect
+with `--password`, the password is redacted and is not written to the generated
+config.
 
 Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.sslip.io`!
 

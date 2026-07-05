@@ -6,6 +6,8 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
+	"github.com/redentordev/tako-cli/pkg/reconcile"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/spf13/cobra"
 )
 
@@ -134,7 +136,7 @@ func TestRunCommandUsesFakeRunnerAfterSynthesis(t *testing.T) {
 	called := false
 	runRunner = func(cmd *cobra.Command, imageRef string, opts runOptions, cfg *config.Config, service config.ServiceConfig, envVars map[string]string) error {
 		called = true
-		if imageRef != "nginx:1.27" || opts.Name != "web" || service.Image != "nginx:1.27" || envVars["FOO"] != "bar" {
+		if imageRef != "nginx:1.27" || opts.Name != "web" || !opts.Yes || service.Image != "nginx:1.27" || envVars["FOO"] != "bar" {
 			t.Fatalf("unexpected runner args: image=%q opts=%#v service=%#v env=%#v", imageRef, opts, service, envVars)
 		}
 		if cfg.Project.Name != "web" || cfg.Environments["production"].Servers[0] == "" {
@@ -144,12 +146,58 @@ func TestRunCommandUsesFakeRunnerAfterSynthesis(t *testing.T) {
 	}
 
 	cmd := newRunCommand()
-	cmd.SetArgs([]string{"nginx:1.27", "--name", "web", "--port", "80", "--server", "prod-1", "--user", "deploy", "--password", "${PW}", "--env", "FOO=bar"})
+	cmd.SetArgs([]string{"nginx:1.27", "--name", "web", "--port", "80", "--server", "prod-1", "--user", "deploy", "--password", "${PW}", "--env", "FOO=bar", "--yes"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("command returned error: %v", err)
 	}
 	if !called {
 		t.Fatal("fake runner was not called")
+	}
+}
+
+func TestRunDeploymentPlanScopesActualStateToTargetService(t *testing.T) {
+	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo"}}
+	service := config.ServiceConfig{Image: "nginx:1.27", Port: 80, Replicas: 1}
+	actual := map[string]*reconcile.ActualService{
+		"web": {
+			Name:           "web",
+			Image:          "nginx:1.26",
+			Replicas:       1,
+			ConfigSnapshot: &config.ServiceConfig{Image: "nginx:1.26", Port: 80, Replicas: 1},
+		},
+		"worker": {
+			Name:           "worker",
+			Image:          "busybox:latest",
+			Replicas:       1,
+			ConfigSnapshot: &config.ServiceConfig{Image: "busybox:latest", Replicas: 1},
+		},
+	}
+
+	_, plan := runDeploymentPlan(cfg, "production", "web", service, actual)
+	if plan.Summary.Removes != 0 {
+		t.Fatalf("plan removals = %d, want unrelated worker ignored", plan.Summary.Removes)
+	}
+	if plan.Summary.Updates != 1 || !plan.NeedsConfirmation() {
+		t.Fatalf("plan summary = %#v, want one confirming update", plan.Summary)
+	}
+}
+
+func TestRunDeploymentPlanEmptyWhenTargetServiceUpToDate(t *testing.T) {
+	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo"}}
+	service := config.ServiceConfig{Image: "nginx:1.27", Port: 80, Replicas: 1}
+	actual := map[string]*reconcile.ActualService{
+		"web": {
+			Name:           "web",
+			Image:          "nginx:1.27",
+			Replicas:       1,
+			RuntimeID:      runtimeid.ServiceIdentity("demo", "production", "web"),
+			ConfigSnapshot: &service,
+		},
+	}
+
+	_, plan := runDeploymentPlan(cfg, "production", "web", service, actual)
+	if !plan.IsEmpty() || plan.NeedsConfirmation() {
+		t.Fatalf("plan summary = %#v, want empty non-confirming plan", plan.Summary)
 	}
 }
 

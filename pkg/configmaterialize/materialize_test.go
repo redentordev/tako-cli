@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,8 +22,8 @@ func TestBuildConfigDesiredOverActualPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildConfig() error = %v", err)
 	}
-	if len(warnings) != 0 {
-		t.Fatalf("warnings = %#v, want none", warnings)
+	if !hasWarning(warnings, "default_project_version", "") {
+		t.Fatalf("warnings = %#v, want default_project_version", warnings)
 	}
 
 	service := cfg.Environments["production"].Services["web"]
@@ -35,9 +36,12 @@ func TestBuildConfigEnvKeysAreRedacted(t *testing.T) {
 	desired := baseDesired()
 	desired.Services["web"] = takoapi.DesiredServiceDocument{Image: "nginx:latest", EnvKeys: []string{"DATABASE_URL", "API_KEY"}}
 
-	cfg, _, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t)})
+	cfg, warnings, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t)})
 	if err != nil {
 		t.Fatalf("BuildConfig() error = %v", err)
+	}
+	if !hasWarning(warnings, "env_values_redacted", "web") {
+		t.Fatalf("warnings = %#v, want env_values_redacted", warnings)
 	}
 
 	env := cfg.Environments["production"].Services["web"].Env
@@ -120,6 +124,57 @@ func TestBuildConfigActualOnlyFallbackWithWarning(t *testing.T) {
 	}
 }
 
+func TestBuildConfigActualOnlyPersistentPreservedWithWarning(t *testing.T) {
+	desired := baseDesired()
+	actual := baseActual()
+	actual.Services["db"] = takoapi.ActualServiceDocument{Image: "postgres:16", Replicas: 1, Persistent: true, DeployStrategy: config.DeployStrategyBlueGreen}
+
+	cfg, warnings, err := BuildConfig(Options{Desired: desired, Actual: actual, Servers: baseServers(t)})
+	if err != nil {
+		t.Fatalf("BuildConfig() error = %v", err)
+	}
+
+	service := cfg.Environments["production"].Services["db"]
+	if !service.Persistent || service.Deploy.Strategy != config.DeployStrategyBlueGreen {
+		t.Fatalf("service = %#v, want persistent blue-green", service)
+	}
+	if !hasWarning(warnings, "actual_only_persistent_service", "db") {
+		t.Fatalf("warnings = %#v, want actual_only_persistent_service", warnings)
+	}
+}
+
+func TestBuildConfigActualOnlyPersistentValidationErrorReturnsWarnings(t *testing.T) {
+	actual := baseActual()
+	actual.Services["db"] = takoapi.ActualServiceDocument{Image: "postgres:16", Replicas: 1, Persistent: true}
+
+	cfg, warnings, err := BuildConfig(Options{Actual: actual, Servers: baseServers(t), Validate: true})
+	if err == nil {
+		t.Fatal("BuildConfig() error = nil, want persistent volume validation error")
+	}
+	if !strings.Contains(err.Error(), "persistent services must declare at least one volume") {
+		t.Fatalf("error = %q, want persistent volume requirement", err)
+	}
+	if !hasWarning(warnings, "actual_only_persistent_service", "db") {
+		t.Fatalf("warnings = %#v, want actual_only_persistent_service", warnings)
+	}
+	if cfg != nil {
+		t.Fatalf("cfg = %#v, want nil on validation failure", cfg)
+	}
+}
+
+func TestBuildConfigDesiredEnvFileWarning(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["web"] = takoapi.DesiredServiceDocument{Image: "nginx:latest", EnvFile: true}
+
+	_, warnings, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t)})
+	if err != nil {
+		t.Fatalf("BuildConfig() error = %v", err)
+	}
+	if !hasWarning(warnings, "env_file_not_recovered", "web") {
+		t.Fatalf("warnings = %#v, want env_file_not_recovered", warnings)
+	}
+}
+
 func TestBuildConfigProjectVersionFromLatestDeploymentHistory(t *testing.T) {
 	desired := baseDesired()
 	desired.Services["web"] = takoapi.DesiredServiceDocument{Image: "nginx:latest"}
@@ -153,8 +208,8 @@ func TestBuildConfigValidationSucceedsRepresentativeSingleServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildConfig() error = %v", err)
 	}
-	if len(warnings) != 0 {
-		t.Fatalf("warnings = %#v, want none", warnings)
+	if !hasWarning(warnings, "default_project_version", "") {
+		t.Fatalf("warnings = %#v, want default_project_version", warnings)
 	}
 	if cfg.Runtime == nil || cfg.Runtime.Mode != config.RuntimeModeTakod {
 		t.Fatalf("runtime defaults were not applied: %#v", cfg.Runtime)

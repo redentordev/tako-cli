@@ -60,6 +60,7 @@ func BuildConfig(opts Options) (*config.Config, []Warning, error) {
 	}
 	if cfg.Project.Version == "" {
 		cfg.Project.Version = defaultExportedVersion
+		warnings = append(warnings, Warning{Code: "default_project_version", Message: "project version was not present in deployment history; using exported"})
 	}
 
 	targetNodes := environmentServers(opts.Desired, opts.Actual, cfg.Servers)
@@ -116,15 +117,27 @@ func materializeServices(desired *takoapi.DesiredStateDocument, actual *takoapi.
 				continue
 			}
 			actualService := actual.Services[name]
-			services[name] = config.ServiceConfig{
-				Image:    strings.TrimSpace(actualService.Image),
-				Replicas: actualService.Replicas,
+			service := config.ServiceConfig{
+				Image:      strings.TrimSpace(actualService.Image),
+				Replicas:   actualService.Replicas,
+				Persistent: actualService.Persistent,
 			}
+			if strings.TrimSpace(actualService.DeployStrategy) != "" {
+				service.Deploy.Strategy = strings.TrimSpace(actualService.DeployStrategy)
+			}
+			services[name] = service
 			warnings = append(warnings, Warning{
 				Code:    "actual_only_service",
 				Service: name,
-				Message: fmt.Sprintf("service %q was not present in desired state; reconstructed only image and replicas from actual state", name),
+				Message: fmt.Sprintf("service %q was not present in desired state; reconstructed only image, replicas, persistence, and deploy strategy from actual state", name),
 			})
+			if actualService.Persistent {
+				warnings = append(warnings, Warning{
+					Code:    "actual_only_persistent_service",
+					Service: name,
+					Message: fmt.Sprintf("persistent service %q was reconstructed from actual state only; volumes, placement, and environment could not be recovered and must be reviewed before deploy", name),
+				})
+			}
 		}
 	}
 
@@ -154,6 +167,20 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 				out.Env[key] = ""
 			}
 		}
+		if len(out.Env) > 0 {
+			warnings = append(warnings, Warning{
+				Code:    "env_values_redacted",
+				Service: name,
+				Message: fmt.Sprintf("service %q environment values are redacted in takod state; emitted empty placeholders that must be restored manually", name),
+			})
+		}
+	}
+	if service.EnvFile {
+		warnings = append(warnings, Warning{
+			Code:    "env_file_not_recovered",
+			Service: name,
+			Message: fmt.Sprintf("service %q used envFile, but env file path and values are not stored in takod state and must be restored manually", name),
+		})
 	}
 
 	if len(service.Domains) > 0 {

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/redentordev/tako-cli/pkg/configmaterialize"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/stateclient"
 	"github.com/spf13/cobra"
@@ -80,6 +81,43 @@ func TestMaterializeConfigExportRedactsPasswordPlaceholder(t *testing.T) {
 	}
 }
 
+func TestMaterializeConfigExportSingleTargetNodeRemapsConnectionDetails(t *testing.T) {
+	desired := desiredDoc("web", "production")
+	desired.TargetNodes = []string{"node-a"}
+	cfg, warnings, err := materializeConfigExport(configExportOptions{
+		Project: "web", Environment: "production", Server: "203.0.113.10", ServerName: "prod-1", User: "deploy", SSHPort: 2222, Password: "secret", NoValidate: true,
+	}, configExportStateDocs{Desired: desired})
+	if err != nil {
+		t.Fatalf("materializeConfigExport returned error: %v", err)
+	}
+	if _, ok := cfg.Servers["prod-1"]; ok {
+		t.Fatalf("unexpected server prod-1 in %#v", cfg.Servers)
+	}
+	server := cfg.Servers["node-a"]
+	if server.Host != "203.0.113.10" || server.User != "deploy" || server.Port != 2222 {
+		t.Fatalf("server node-a = %#v", server)
+	}
+	if !hasConfigExportWarning(warnings, "server_name_remapped") {
+		t.Fatalf("warnings = %#v, want server_name_remapped", warnings)
+	}
+}
+
+func TestMaterializeConfigExportMultiTargetNodeRequiresMatchingServerName(t *testing.T) {
+	desired := desiredDoc("web", "production")
+	desired.TargetNodes = []string{"node-b", "node-a"}
+	_, _, err := materializeConfigExport(configExportOptions{
+		Project: "web", Environment: "production", Server: "203.0.113.10", ServerName: "prod-1", User: "deploy", SSHPort: 22, Password: "secret", NoValidate: true,
+	}, configExportStateDocs{Desired: desired})
+	if err == nil {
+		t.Fatal("materializeConfigExport returned nil error")
+	}
+	for _, want := range []string{"--server-name", "node-a", "node-b", "remote target node"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestReadConfigExportStateErrorsWhenDesiredAndActualMissing(t *testing.T) {
 	_, err := readConfigExportState(fakeConfigExportReader{
 		desiredErr: stateclient.ErrNotFound,
@@ -113,6 +151,25 @@ func TestWriteMaterializedConfigEmitsStdoutYAML(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "redacted") {
 		t.Fatalf("stderr = %q, want redaction warning", stderr.String())
+	}
+}
+
+func TestWriteMaterializedConfigPrintsWarningsBeforeValidationError(t *testing.T) {
+	desired := desiredDoc("web", "production")
+	desired.Services = map[string]takoapi.DesiredServiceDocument{
+		"Web": {Name: "Web", Image: "nginx:alpine", EnvKeys: []string{"SECRET_KEY"}},
+	}
+	cmd := &cobra.Command{}
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	err := writeMaterializedConfig(cmd, configExportOptions{
+		Project: "web", Environment: "production", Server: "prod-1", ServerName: "prod-1", User: "deploy", SSHPort: 22, Password: "secret",
+	}, configExportStateDocs{Desired: desired})
+	if err == nil {
+		t.Fatal("writeMaterializedConfig returned nil error")
+	}
+	if !strings.Contains(stderr.String(), "environment values are redacted") {
+		t.Fatalf("stderr = %q, want materialization warning", stderr.String())
 	}
 }
 
@@ -169,6 +226,15 @@ func (f fakeConfigExportReader) ReadHistory(project, environment string) (*takoa
 		return nil, f.historyErr
 	}
 	return f.history, nil
+}
+
+func hasConfigExportWarning(warnings []configmaterialize.Warning, code string) bool {
+	for _, warning := range warnings {
+		if warning.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 var _ configExportStateReader = fakeConfigExportReader{}
