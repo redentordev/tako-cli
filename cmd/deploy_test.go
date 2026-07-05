@@ -117,6 +117,64 @@ func TestRunDeployFailsInvalidYAMLBeforeGit(t *testing.T) {
 	}
 }
 
+func TestRunDeployImageRequiresServiceBeforeGit(t *testing.T) {
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	root := t.TempDir()
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+	})
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("failed to switch cwd: %v", err)
+	}
+	t.Setenv("SSH_PASSWORD", "test-password")
+	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), []byte(`
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: example.com
+    user: deploy
+    password: ${SSH_PASSWORD}
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+`), 0600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	oldCfgFile := cfgFile
+	oldDeployImage := deployImage
+	oldDeployService := deployService
+	oldDeploySource := deploySource
+	cfgFile = ""
+	deployImage = "registry.example.com/web:sha"
+	deployService = ""
+	deploySource = ""
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+		deployImage = oldDeployImage
+		deployService = oldDeployService
+		deploySource = oldDeploySource
+	})
+
+	err = runDeploy(deployCmd, nil)
+	if err == nil {
+		t.Fatal("runDeploy should fail when --image is used without --service")
+	}
+	if !strings.Contains(err.Error(), "--image requires --service") {
+		t.Fatalf("error = %q, want --service guidance", err)
+	}
+	if strings.Contains(err.Error(), "Git repository") {
+		t.Fatalf("deploy should fail before git checks, got %q", err)
+	}
+}
+
 func TestRunDeployFailsInvalidConfigBeforeGit(t *testing.T) {
 	oldDir, err := os.Getwd()
 	if err != nil {
@@ -221,6 +279,92 @@ func TestDeployRemoteHistoryErrorFailsSuccessfulRuntimeMutation(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want %q", err, want)
 		}
+	}
+}
+
+func TestValidateDeployImageOptionsRequiresService(t *testing.T) {
+	_, err := validateDeployImageOptions("", "registry.example.com/web:sha", "")
+	if err == nil {
+		t.Fatal("validateDeployImageOptions should require --service with --image")
+	}
+	if !strings.Contains(err.Error(), "--image requires --service") {
+		t.Fatalf("error = %q, want --service guidance", err)
+	}
+}
+
+func TestValidateDeployImageOptionsRejectsWhitespaceImage(t *testing.T) {
+	_, err := validateDeployImageOptions("web", " \t\n", "")
+	if err == nil {
+		t.Fatal("validateDeployImageOptions should reject whitespace-only --image")
+	}
+	if !strings.Contains(err.Error(), "--image must not be empty") {
+		t.Fatalf("error = %q, want empty image guidance", err)
+	}
+}
+
+func TestValidateDeployImageOptionsRejectsSourceCombination(t *testing.T) {
+	_, err := validateDeployImageOptions("web", "registry.example.com/web:sha", ".")
+	if err == nil {
+		t.Fatal("validateDeployImageOptions should reject --image with --source")
+	}
+	if !strings.Contains(err.Error(), "--image cannot be combined with --source") {
+		t.Fatalf("error = %q, want source combination guidance", err)
+	}
+}
+
+func TestApplyDeployImageOverrideSetsImageAndClearsBuild(t *testing.T) {
+	original := config.ServiceConfig{Build: ".", Image: "demo/web:old"}
+	got := applyDeployImageOverride(original, " registry.example.com/web:sha ")
+	if got.Image != "registry.example.com/web:sha" {
+		t.Fatalf("Image = %q, want override", got.Image)
+	}
+	if got.Build != "" {
+		t.Fatalf("Build = %q, want cleared", got.Build)
+	}
+	if original.Image != "demo/web:old" || original.Build != "." {
+		t.Fatalf("original service mutated: %#v", original)
+	}
+}
+
+func TestDeploySourceLabelForImageOverrideActivatesSourceMode(t *testing.T) {
+	if got := deploySourceLabelForImageOverride("", "registry.example.com/web:sha"); got != "image" {
+		t.Fatalf("source label = %q, want image", got)
+	}
+	if got := deploySourceLabelForImageOverride(".", "registry.example.com/web:sha"); got != "." {
+		t.Fatalf("explicit source label = %q, want preserved source", got)
+	}
+}
+
+func TestResolveDeploySourceInfoImageModeBypassesGitAndGeneratesTag(t *testing.T) {
+	now := time.Date(2026, 7, 5, 4, 34, 56, 0, time.UTC)
+	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, deploySourceLabelForImageOverride("", "registry.example.com/web:sha"), "", now)
+	if err != nil {
+		t.Fatalf("resolveDeploySourceInfo returned error: %v", err)
+	}
+	if !info.SourceMode {
+		t.Fatal("SourceMode = false, want true")
+	}
+	if info.StateSource != "image" {
+		t.Fatalf("StateSource = %q, want image", info.StateSource)
+	}
+	if info.BuildImageTag != "source-20260705T043456Z" {
+		t.Fatalf("BuildImageTag = %q, want generated source tag", info.BuildImageTag)
+	}
+}
+
+func TestResolveDeploySourceInfoImageModeAllowsExplicitRevision(t *testing.T) {
+	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, deploySourceLabelForImageOverride("", "registry.example.com/web:sha"), "ci-123", time.Now())
+	if err != nil {
+		t.Fatalf("resolveDeploySourceInfo returned error: %v", err)
+	}
+	if !info.SourceMode {
+		t.Fatal("SourceMode = false, want true")
+	}
+	if info.StateSource != "image" {
+		t.Fatalf("StateSource = %q, want image", info.StateSource)
+	}
+	if info.BuildImageTag != "ci-123" {
+		t.Fatalf("BuildImageTag = %q, want explicit revision", info.BuildImageTag)
 	}
 }
 

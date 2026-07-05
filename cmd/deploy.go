@@ -38,6 +38,7 @@ var (
 	deployBuildStrategy   string
 	deploySource          string
 	deployRevision        string
+	deployImage           string
 )
 
 var blueGreenGraceSleep = time.Sleep
@@ -54,7 +55,9 @@ The deployment process:
   3. Recreate service containers to match desired state
   4. Replicate deployment state
 
-If a step fails, deployment stops and records the failed state for inspection or rollback.`,
+If a step fails, deployment stops and records the failed state for inspection or rollback.
+
+Use 'tako deploy --service web --image registry.example.com/web:sha' to deploy one service from an existing image without building.`,
 	RunE: runDeploy,
 }
 
@@ -72,6 +75,7 @@ func init() {
 	deployCmd.Flags().StringVar(&deployBuildStrategy, "build-strategy", "", "Override image build strategy: remote, local, or auto")
 	deployCmd.Flags().StringVar(&deploySource, "source", "", "Deploy configured project from a non-git source label/path")
 	deployCmd.Flags().StringVar(&deployRevision, "revision", "", "Explicit non-git source revision/build tag")
+	deployCmd.Flags().StringVar(&deployImage, "image", "", "Override target service image for this deploy")
 }
 
 func ensureDeployRuntimeSupported(cfg *config.Config) error {
@@ -132,6 +136,40 @@ type deployGitStrings struct {
 	Branch    string
 	Message   string
 	Author    string
+}
+
+func validateDeployImageOptions(serviceName string, imageRef string, source string) (string, error) {
+	trimmedImage := strings.TrimSpace(imageRef)
+	if trimmedImage == "" {
+		if imageRef != "" {
+			return "", fmt.Errorf("--image must not be empty")
+		}
+		return "", nil
+	}
+	if strings.TrimSpace(serviceName) == "" {
+		return "", fmt.Errorf("--image requires --service to select the target service")
+	}
+	if strings.TrimSpace(source) != "" {
+		return "", fmt.Errorf("--image cannot be combined with --source")
+	}
+	return trimmedImage, nil
+}
+
+func deploySourceLabelForImageOverride(source string, imageRef string) string {
+	if strings.TrimSpace(imageRef) != "" && strings.TrimSpace(source) == "" {
+		return "image"
+	}
+	return source
+}
+
+func applyDeployImageOverride(service config.ServiceConfig, imageRef string) config.ServiceConfig {
+	trimmedImage := strings.TrimSpace(imageRef)
+	if trimmedImage == "" {
+		return service
+	}
+	service.Image = trimmedImage
+	service.Build = ""
+	return service
 }
 
 func resolveDeploySourceInfo(gitClient deployGitReader, allowDirty bool, source string, revision string, now time.Time) (deploySourceInfo, error) {
@@ -336,11 +374,16 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if err := ensureDeployRuntimeSupported(cfg); err != nil {
 		return err
 	}
+	deployImageRef, err := validateDeployImageOptions(deployService, deployImage, deploySource)
+	if err != nil {
+		return err
+	}
+	deploySourceLabel := deploySourceLabelForImageOverride(deploySource, deployImageRef)
 
 	// Initialize source metadata. Default mode requires Git; source mode skips Git validation.
 	gitClient := git.NewClient(".")
 
-	sourceInfo, err := resolveDeploySourceInfo(gitClient, allowDirty, deploySource, deployRevision, time.Now())
+	sourceInfo, err := resolveDeploySourceInfo(gitClient, allowDirty, deploySourceLabel, deployRevision, time.Now())
 	if err != nil {
 		return err
 	}
@@ -414,6 +457,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		if !exists {
 			return fmt.Errorf("service %s not found in environment %s", deployService, envName)
 		}
+		service = applyDeployImageOverride(service, deployImageRef)
 		services = map[string]config.ServiceConfig{deployService: service}
 	}
 

@@ -22,6 +22,9 @@ The deployment process:
 .PP
 If a step fails, deployment stops and records the failed state for inspection or rollback.
 
+.PP
+Use 'tako deploy --service web --image registry.example.com/web:sha' to deploy one service from an existing image without building.
+
 
 .SH OPTIONS
 \fB--allow-dirty\fP[=false]
@@ -46,6 +49,10 @@ If a step fails, deployment stops and records the failed state for inspection or
 .PP
 \fB-h\fP, \fB--help\fP[=false]
 	help for deploy
+
+.PP
+\fB--image\fP=""
+	Override target service image for this deploy
 
 .PP
 \fB--revision\fP=""
