@@ -424,7 +424,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	planActualState := actualState
 	if deployService != "" {
-		planActualState = filterActualStateForServices(actualState, services)
+		planActualState = deployplan.FilterActualStateForServices(actualState, services)
 	}
 
 	// Compute reconciliation plan
@@ -446,7 +446,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if plan.IsEmpty() && !hasBuildServices(services) && !deployForce {
+	if plan.IsEmpty() && !deployplan.HasBuildServices(services) && !deployForce {
 		activeRevisions := deployProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
 		if err := reconcileDeployProxy(deploy, services, activeRevisions); err != nil {
 			return fmt.Errorf("failed to reconcile proxy routes: %w", err)
@@ -461,8 +461,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			fmt.Println("\n-> No config drift detected; build services will still be reconciled for the current commit.")
 		}
 	}
-	servicesToDeploy := servicesToDeployForPlan(plan, services, deployForce, deployService != "")
-	if skipped := persistentServicesSkippedByForce(services, servicesToDeploy, deployForce, deployService != ""); len(skipped) > 0 {
+	servicesToDeploy := deployplan.ServicesToDeployForPlan(plan, services, deployForce, deployService != "")
+	if skipped := deployplan.PersistentServicesSkippedByForce(services, servicesToDeploy, deployForce, deployService != ""); len(skipped) > 0 {
 		fmt.Printf("\n-> Skipping persistent service(s) during broad --force: %s\n", strings.Join(skipped, ", "))
 		fmt.Println("   Use --service <name> --force when you intentionally need to recreate one.")
 	}
@@ -560,7 +560,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		imageRefs[serviceName] = fullImageName
 
 		deployErr := error(nil)
-		if shouldWarmManualPromotionService(serviceName, service, actualState) {
+		if deployplan.ShouldWarmManualPromotionService(serviceName, service, actualState) {
 			deployErr = deploy.DeployServiceTakodWarmOnly(serviceName, &service, fullImageName)
 		} else {
 			deployErr = deploy.DeployServiceTakod(serviceName, &service, fullImageName)
@@ -601,7 +601,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		if deployService != "" {
 			proxyServices = cloneServiceMap(allServices)
 		}
-		manualPending := manualPromotionPendingServices(servicesToDeploy, actualState)
+		manualPending := deployplan.ManualPromotionPendingServices(servicesToDeploy, actualState)
 		activeRevisions := deployProxyActiveRevisions(cfg, envName, proxyServices, servicesToDeploy, imageRefs, actualState)
 		if err := reconcileDeployProxy(deploy, proxyServices, activeRevisions); err != nil {
 			fmt.Printf("  ✗ proxy reconciliation failed: %v\n", err)
@@ -622,7 +622,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 
 	if !deploymentFailed {
-		manualPending := manualPromotionPendingServices(servicesToDeploy, actualState)
+		manualPending := deployplan.ManualPromotionPendingServices(servicesToDeploy, actualState)
 		deployment.Status = deploymentSuccessStatus(manualPending)
 		if len(manualPending) > 0 {
 			deployment.Message = fmt.Sprintf("warmed %s for manual promotion", strings.Join(manualPending, ", "))
@@ -940,66 +940,6 @@ func applyDeployRemovals(remover deployServiceRemover, plan *reconcile.Reconcili
 	return nil
 }
 
-func filterActualStateForServices(actualState map[string]*reconcile.ActualService, services map[string]config.ServiceConfig) map[string]*reconcile.ActualService {
-	if len(actualState) == 0 || len(services) == 0 {
-		return map[string]*reconcile.ActualService{}
-	}
-	filtered := make(map[string]*reconcile.ActualService, len(services))
-	for serviceName := range services {
-		if actual, ok := actualState[serviceName]; ok {
-			filtered[serviceName] = actual
-		}
-	}
-	return filtered
-}
-
-func hasBuildServices(services map[string]config.ServiceConfig) bool {
-	for _, service := range services {
-		if service.Build != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func servicesToDeployForPlan(plan *reconcile.ReconciliationPlan, services map[string]config.ServiceConfig, force bool, explicitServiceTarget bool) map[string]config.ServiceConfig {
-	if len(services) == 0 {
-		return map[string]config.ServiceConfig{}
-	}
-	if plan == nil && !force {
-		return cloneServiceMap(services)
-	}
-
-	selected := make(map[string]config.ServiceConfig)
-	if plan != nil {
-		for _, change := range plan.Changes {
-			if change.Type != reconcile.ChangeAdd && change.Type != reconcile.ChangeUpdate {
-				continue
-			}
-			service, ok := services[change.ServiceName]
-			if ok {
-				selected[change.ServiceName] = service
-			}
-		}
-	}
-
-	if force {
-		for serviceName, service := range services {
-			if explicitServiceTarget || !service.Persistent {
-				selected[serviceName] = service
-			}
-		}
-		return selected
-	}
-
-	for serviceName, service := range services {
-		if service.Build != "" {
-			selected[serviceName] = service
-		}
-	}
-	return selected
-}
-
 func deployProxyActiveRevisions(
 	cfg *config.Config,
 	envName string,
@@ -1020,7 +960,7 @@ func deployProxyActiveRevisions(
 		}
 
 		if _, deploying := servicesToDeploy[serviceName]; deploying {
-			if isManualBlueGreenService(service) {
+			if deployplan.IsManualBlueGreenService(service) {
 				if actual := actualState[serviceName]; actual != nil && actual.CurrentRevision != "" {
 					revisions[serviceName] = actual.CurrentRevision
 					continue
@@ -1057,7 +997,7 @@ func deployedProxyActiveRevisions(servicesToDeploy map[string]config.ServiceConf
 	}
 	deployed := make(map[string]string)
 	for serviceName, service := range servicesToDeploy {
-		if isManualBlueGreenService(service) {
+		if deployplan.IsManualBlueGreenService(service) {
 			continue
 		}
 		if revision := activeRevisions[serviceName]; revision != "" {
@@ -1078,7 +1018,7 @@ func pruneTakodServiceRevisionsAfterGrace(pruner takodRevisionPruner, services m
 	if len(keepRevisions) == 0 {
 		return nil
 	}
-	grace, names, err := blueGreenPruneGracePeriod(services, keepRevisions)
+	grace, names, err := deployplan.BlueGreenPruneGracePeriod(services, keepRevisions)
 	if err != nil {
 		return err
 	}
@@ -1089,92 +1029,9 @@ func pruneTakodServiceRevisionsAfterGrace(pruner takodRevisionPruner, services m
 	return pruner.PruneTakodServiceRevisions(services, keepRevisions)
 }
 
-func blueGreenPruneGracePeriod(services map[string]config.ServiceConfig, keepRevisions map[string]string) (time.Duration, []string, error) {
-	if len(services) == 0 || len(keepRevisions) == 0 {
-		return 0, nil, nil
-	}
-	var maxGrace time.Duration
-	var names []string
-	for serviceName := range keepRevisions {
-		service, ok := services[serviceName]
-		if !ok || service.Deploy.Strategy != config.DeployStrategyBlueGreen || strings.TrimSpace(service.Deploy.GracePeriod) == "" {
-			continue
-		}
-		grace, err := time.ParseDuration(strings.TrimSpace(service.Deploy.GracePeriod))
-		if err != nil {
-			return 0, nil, fmt.Errorf("service %s: invalid deploy.gracePeriod %q: %w", serviceName, service.Deploy.GracePeriod, err)
-		}
-		if grace < 0 {
-			return 0, nil, fmt.Errorf("service %s: deploy.gracePeriod cannot be negative", serviceName)
-		}
-		if grace == 0 {
-			continue
-		}
-		names = append(names, serviceName)
-		if grace > maxGrace {
-			maxGrace = grace
-		}
-	}
-	if maxGrace == 0 {
-		return 0, nil, nil
-	}
-	sort.Strings(names)
-	return maxGrace, names, nil
-}
-
-func isManualBlueGreenService(service config.ServiceConfig) bool {
-	return service.Deploy.Strategy == config.DeployStrategyBlueGreen &&
-		service.Deploy.Promotion == config.DeployPromotionManual
-}
-
-func manualPromotionPendingServices(servicesToDeploy map[string]config.ServiceConfig, actualState map[string]*reconcile.ActualService) []string {
-	if len(servicesToDeploy) == 0 {
-		return nil
-	}
-	var pending []string
-	for serviceName, service := range servicesToDeploy {
-		if !isManualBlueGreenService(service) {
-			continue
-		}
-		actual := actualState[serviceName]
-		if actual == nil || actual.CurrentRevision == "" {
-			continue
-		}
-		pending = append(pending, serviceName)
-	}
-	sort.Strings(pending)
-	return pending
-}
-
-func shouldWarmManualPromotionService(serviceName string, service config.ServiceConfig, actualState map[string]*reconcile.ActualService) bool {
-	if !isManualBlueGreenService(service) {
-		return false
-	}
-	actual := actualState[serviceName]
-	return actual != nil && actual.CurrentRevision != ""
-}
-
 func deploymentSuccessStatus(manualPending []string) remotestate.DeploymentStatus {
 	if len(manualPending) > 0 {
 		return remotestate.StatusWarmed
 	}
 	return remotestate.StatusSuccess
-}
-
-func persistentServicesSkippedByForce(services map[string]config.ServiceConfig, selected map[string]config.ServiceConfig, force bool, explicitServiceTarget bool) []string {
-	if !force || explicitServiceTarget || len(services) == 0 {
-		return nil
-	}
-	var skipped []string
-	for serviceName, service := range services {
-		if !service.Persistent {
-			continue
-		}
-		if _, ok := selected[serviceName]; ok {
-			continue
-		}
-		skipped = append(skipped, serviceName)
-	}
-	sort.Strings(skipped)
-	return skipped
 }
