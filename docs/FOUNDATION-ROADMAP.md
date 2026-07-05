@@ -1,9 +1,36 @@
 # Tako Foundation Roadmap
 
-This document is a planning artifact for moving Tako CLI toward a stronger
-PaaS-like platform foundation while preserving the existing scope: deploy to
-operator-owned VPS hosts, through one `takod` orchestration path. It does not
-propose cloud infrastructure provisioning or an unmanaged Docker mode.
+This document tracks Tako CLI's platform foundation while preserving the
+existing scope: deploy to operator-owned VPS hosts, through one `takod`
+orchestration path. It does not propose cloud infrastructure provisioning or an
+unmanaged Docker mode. For the current importable schema/client/planning
+surface, see [API and SDK Foundation](API-SDK.md).
+
+## Implementation Status
+
+Completed foundation pieces:
+
+- `pkg/takoapi` now defines importable identity, desired/actual/event, and
+  deployment history schemas with version and kind constants.
+- `pkg/takoapi/stateclient` provides a typed `/v1/state` client over the
+  existing private `takodclient` SSH/Unix-socket transport.
+- `pkg/deployplan` contains importable helpers for image references, source and
+  image build tags, service selection, active proxy revision planning, and
+  per-service revision IDs.
+- `tako deploy` supports raw source-directory deployment with `--source`,
+  explicit revision labels with `--revision`, targeted source deploys with
+  `--service --source`, and targeted prebuilt image deploys with
+  `--service --image`.
+- `pkg/deployer.Deployer.SetOutput(io.Writer)` can redirect or silence deployer
+  progress output.
+
+Deferred items:
+
+- Archive input adapter support.
+- Compose/configless deploy support.
+- Public network API, auth/TLS design, and operator opt-in serving mode.
+- Broader stdout/progress injection beyond the deployer package.
+- Long-term SDK compatibility guarantees and schema compatibility test suite.
 
 ## Current-State Review
 
@@ -24,20 +51,18 @@ propose cloud infrastructure provisioning or an unmanaged Docker mode.
 
 ### Constraints And Gaps
 
-- `tako deploy` currently requires git source state. It hard-errors outside a
-  git repository or when dirty without `--allow-dirty`, constructs a git client
-  unconditionally, and uses the git commit hash as the build tag.
-- Existing fallback image-reference behavior for empty build tags is present in
-  takod state handling, but the deploy path does not exercise it.
-- Current deployment source identity, revision identity, and git commit identity
-  are coupled. Rollback code may treat a non-empty `GitCommit` as a real git ref,
-  so synthetic commit values would be unsafe.
+- Git-backed deploy remains the normal default, while raw adapters are limited
+  to current `--source`, `--revision`, targeted `--service --source`, and
+  targeted `--service --image` paths. Archive, compose, and configless deploys
+  are not implemented.
+- Deployment source identity, revision identity, and git commit identity now
+  have foundation types, but older history and rollback paths still need care:
+  synthetic git commit values would be unsafe.
 - State is split across local `.tako` cache, replicated deployment history, and
-  desired/actual takod state schemas. Some local state get/set helpers exist but
-  are not active in the main flow.
-- `cmd/deploy.go` is monolithic and CLI-bound. Some lower packages print
-  directly to stdout, which limits SDK reuse.
-- `internal/state` cannot be imported by external SDK consumers.
+  desired/actual takod state schemas. Public mirrors now exist in `pkg/takoapi`,
+  but long-term compatibility tests and migration tooling are still pending.
+- `cmd/deploy.go` is still partly CLI-bound. Some lower packages print directly
+  to stdout; only `pkg/deployer` has an output injection hook today.
 - The takod API is not a public network API today. Access is via SSH exec plus
   curl to a Unix socket, with no public auth/TLS story.
 

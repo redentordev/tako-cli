@@ -16,8 +16,9 @@ tako CLI -> takod -> local Docker
 
 Tako does not expose multiple orchestration modes. Single-node deployments are
 one-node meshes, and multi-node deployments use the same takod reconciliation
-path. For planned foundation work around raw inputs, canonical state APIs, and
-SDK extraction, see [Foundation Roadmap](FOUNDATION-ROADMAP.md).
+path. For foundation status around raw inputs, canonical state APIs, and SDK
+extraction, see [Foundation Roadmap](FOUNDATION-ROADMAP.md) and
+[API and SDK Foundation](API-SDK.md).
 
 ## Mental Model
 
