@@ -118,6 +118,66 @@ func TestActualStateDocumentJSONIdentityShape(t *testing.T) {
 	}
 }
 
+func TestDeploymentHistoryDocumentsDecodeInternalStateJSON(t *testing.T) {
+	input := `{
+		"projectName":"demo",
+		"environment":"production",
+		"server":"node-a",
+		"deployments":[{
+			"id":"deploy_123",
+			"timestamp":"2026-07-05T12:00:00Z",
+			"projectName":"demo",
+			"environment":"production",
+			"version":"v1",
+			"status":"success",
+			"services":{"web":{"name":"web","image":"ghcr.io/acme/web:1","imageId":"sha256:abc","containerId":"container-a","port":8080,"replicas":2,"env":{"PORT":"8080"},"healthCheck":{"enabled":true,"path":"/health","healthy":true,"lastCheck":"2026-07-05T12:01:00Z"}}},
+			"user":"alice",
+			"host":"node-a",
+			"duration":5000000000,
+			"message":"deployed",
+			"gitCommit":"abcdef123456",
+			"gitCommitShort":"abcdef1",
+			"gitBranch":"main",
+			"gitCommitMsg":"ship it",
+			"gitAuthor":"Alice",
+			"cliVersion":"1.2.3",
+			"cliCommit":"cliabcdef"
+		}],
+		"lastUpdated":"2026-07-05T12:02:00Z"
+	}`
+
+	var history DeploymentHistoryDocument
+	if err := json.Unmarshal([]byte(input), &history); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if history.ProjectName != "demo" || history.Environment != "production" || len(history.Deployments) != 1 {
+		t.Fatalf("history identity = %#v", history)
+	}
+	deployment := history.Deployments[0]
+	if deployment.ID != "deploy_123" || deployment.Status != StatusSuccess || deployment.Duration != 5*time.Second {
+		t.Fatalf("deployment fields = %#v", deployment)
+	}
+	service := deployment.Services["web"]
+	if service.ImageID != "sha256:abc" || service.ContainerID != "container-a" || service.HealthCheck.Path != "/health" || !service.HealthCheck.Healthy {
+		t.Fatalf("service fields = %#v", service)
+	}
+
+	got := mustMarshalMap(t, history)
+	assertJSONField(t, got, "projectName", "demo")
+	deployments, ok := got["deployments"].([]any)
+	if !ok || len(deployments) != 1 {
+		t.Fatalf("deployments shape = %#v", got["deployments"])
+	}
+	deploymentMap, ok := deployments[0].(map[string]any)
+	if !ok {
+		t.Fatalf("deployment shape = %#v", deployments[0])
+	}
+	assertJSONField(t, deploymentMap, "gitCommitShort", "abcdef1")
+	if deploymentMap["duration"] != float64((5 * time.Second).Nanoseconds()) {
+		t.Fatalf("duration = %v, want %d", deploymentMap["duration"], (5 * time.Second).Nanoseconds())
+	}
+}
+
 func TestTakodAcceptsCanonicalStateDocuments(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -172,6 +232,47 @@ func TestTakodAcceptsCanonicalStateDocuments(t *testing.T) {
 		Content:     eventContent,
 	}); err != nil {
 		t.Fatalf("AppendStateEvent(event) error = %v", err)
+	}
+
+	deployment := DeploymentStateDocument{
+		ID:          "deploy_1",
+		Timestamp:   time.Date(2026, 7, 5, 12, 3, 0, 0, time.UTC),
+		ProjectName: "demo",
+		Environment: "production",
+		Version:     "rev-1",
+		Status:      StatusSuccess,
+		Services:    map[string]ServiceStateDocument{"web": {Name: "web", Replicas: 1}},
+		User:        "alice",
+		Host:        "node-a",
+		Duration:    time.Second,
+		Message:     "deployment completed",
+	}
+	deploymentContent := mustMarshalString(t, deployment)
+	if _, err := takod.WriteStateDocument(ctx, dataDir, takod.StateDocumentRequest{
+		Project:     deployment.ProjectName,
+		Environment: deployment.Environment,
+		Document:    StateDocumentDeployment,
+		RevisionID:  deployment.ID,
+		Content:     deploymentContent,
+	}); err != nil {
+		t.Fatalf("WriteStateDocument(deployment) error = %v", err)
+	}
+
+	history := DeploymentHistoryDocument{
+		ProjectName: "demo",
+		Environment: "production",
+		Server:      "node-a",
+		Deployments: []*DeploymentStateDocument{&deployment},
+		LastUpdated: time.Date(2026, 7, 5, 12, 4, 0, 0, time.UTC),
+	}
+	historyContent := mustMarshalString(t, history)
+	if _, err := takod.WriteStateDocument(ctx, dataDir, takod.StateDocumentRequest{
+		Project:     history.ProjectName,
+		Environment: history.Environment,
+		Document:    StateDocumentHistory,
+		Content:     historyContent,
+	}); err != nil {
+		t.Fatalf("WriteStateDocument(history) error = %v", err)
 	}
 }
 

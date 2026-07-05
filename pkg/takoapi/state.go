@@ -18,6 +18,10 @@ const (
 	StateDocumentActualNode = "actual-node"
 	// StateDocumentEvent is the takod /v1/state document name for append-only events.
 	StateDocumentEvent = "event"
+	// StateDocumentHistory is the takod /v1/state document name for deployment history.
+	StateDocumentHistory = "history"
+	// StateDocumentDeployment is the takod /v1/state document name for a deployment record.
+	StateDocumentDeployment = "deployment"
 
 	// KindDesiredStateDocument identifies a canonical desired state document.
 	KindDesiredStateDocument = "DesiredState"
@@ -31,6 +35,22 @@ const (
 	KindActualServiceDocument = "ActualService"
 	// KindStateEventDocument identifies a canonical state event document.
 	KindStateEventDocument = "StateEvent"
+)
+
+// DeploymentStatus represents a deployment outcome.
+type DeploymentStatus string
+
+const (
+	// StatusInProgress means a deployment is still running.
+	StatusInProgress DeploymentStatus = "in_progress"
+	// StatusSuccess means a deployment completed successfully.
+	StatusSuccess DeploymentStatus = "success"
+	// StatusWarmed means a deployment warmed a new revision without switching all traffic.
+	StatusWarmed DeploymentStatus = "warmed"
+	// StatusFailed means a deployment failed.
+	StatusFailed DeploymentStatus = "failed"
+	// StatusRolledBack means a deployment was rolled back.
+	StatusRolledBack DeploymentStatus = "rolled_back"
 )
 
 // DesiredStateDocument is Tako's canonical desired state schema for takod
@@ -141,6 +161,61 @@ type StateEventDocument struct {
 	Message       string            `json:"message,omitempty"`
 	Details       map[string]string `json:"details,omitempty"`
 	Time          time.Time         `json:"time"`
+}
+
+// DeploymentStateDocument represents one historical deployment record. Its
+// JSON shape intentionally matches internal/state.DeploymentState so existing
+// replicated deployment documents can be decoded into this public schema.
+type DeploymentStateDocument struct {
+	ID             string                          `json:"id"`
+	Timestamp      time.Time                       `json:"timestamp"`
+	ProjectName    string                          `json:"projectName"`
+	Environment    string                          `json:"environment,omitempty"`
+	Version        string                          `json:"version"`
+	Status         DeploymentStatus                `json:"status"`
+	Services       map[string]ServiceStateDocument `json:"services"`
+	User           string                          `json:"user"`
+	Host           string                          `json:"host"`
+	Duration       time.Duration                   `json:"duration"`
+	Message        string                          `json:"message"`
+	Error          string                          `json:"error,omitempty"`
+	GitCommit      string                          `json:"gitCommit,omitempty"`
+	GitCommitShort string                          `json:"gitCommitShort,omitempty"`
+	GitBranch      string                          `json:"gitBranch,omitempty"`
+	GitCommitMsg   string                          `json:"gitCommitMsg,omitempty"`
+	GitAuthor      string                          `json:"gitAuthor,omitempty"`
+	CLIVersion     string                          `json:"cliVersion,omitempty"`
+	CLICommit      string                          `json:"cliCommit,omitempty"`
+}
+
+// ServiceStateDocument represents one service in a deployment history record.
+type ServiceStateDocument struct {
+	Name        string                   `json:"name"`
+	Image       string                   `json:"image"`
+	ImageID     string                   `json:"imageId"`
+	ContainerID string                   `json:"containerId"`
+	Port        int                      `json:"port"`
+	Replicas    int                      `json:"replicas"`
+	Env         map[string]string        `json:"env"`
+	HealthCheck HealthCheckStateDocument `json:"healthCheck"`
+}
+
+// HealthCheckStateDocument represents health check status in deployment history.
+type HealthCheckStateDocument struct {
+	Enabled   bool      `json:"enabled"`
+	Path      string    `json:"path"`
+	Healthy   bool      `json:"healthy"`
+	LastCheck time.Time `json:"lastCheck"`
+}
+
+// DeploymentHistoryDocument contains all historical deployments for a project
+// environment. Its JSON shape intentionally matches internal/state.DeploymentHistory.
+type DeploymentHistoryDocument struct {
+	ProjectName string                     `json:"projectName"`
+	Environment string                     `json:"environment,omitempty"`
+	Server      string                     `json:"server"`
+	Deployments []*DeploymentStateDocument `json:"deployments"`
+	LastUpdated time.Time                  `json:"lastUpdated"`
 }
 
 // NewDesiredStateDocument returns a desired state document initialized for the

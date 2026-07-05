@@ -151,6 +151,110 @@ func TestWriteAndReadActualNodeUseNodeIdentity(t *testing.T) {
 	}
 }
 
+func TestWriteAndReadHistoryUseProjectNameIdentity(t *testing.T) {
+	history := takoapi.DeploymentHistoryDocument{
+		ProjectName: "demo",
+		Environment: "production",
+		Server:      "node-a",
+		Deployments: []*takoapi.DeploymentStateDocument{},
+		LastUpdated: time.Date(2026, 7, 5, 1, 2, 3, 0, time.UTC),
+	}
+	content, err := json.Marshal(history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := json.Marshal(map[string]any{"found": true, "content": string(content)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := &fakeExecutor{queue: []string{`{"found":true}`, string(response)}}
+	client := New(exec)
+
+	if err := client.WriteHistory(history); err != nil {
+		t.Fatalf("WriteHistory returned error: %v", err)
+	}
+	got, err := client.ReadHistory("demo", "production")
+	if err != nil {
+		t.Fatalf("ReadHistory returned error: %v", err)
+	}
+	if got.ProjectName != "demo" || got.Environment != "production" || got.Server != "node-a" {
+		t.Fatalf("decoded history = %#v", got)
+	}
+
+	if len(exec.calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(exec.calls))
+	}
+	request := decodeRequest(t, exec.calls[0].body)
+	if request.Project != "demo" || request.Environment != "production" || request.Document != takoapi.StateDocumentHistory || request.RevisionID != "" {
+		t.Fatalf("history write request = %#v", request)
+	}
+	var written takoapi.DeploymentHistoryDocument
+	if err := json.Unmarshal([]byte(request.Content), &written); err != nil {
+		t.Fatalf("content is not history document JSON: %v", err)
+	}
+	if written.ProjectName != "demo" || written.Environment != "production" {
+		t.Fatalf("history content identity = %#v", written)
+	}
+	if !strings.Contains(exec.calls[1].cmd, "document=history") || !strings.Contains(exec.calls[1].cmd, "environment=production") || !strings.Contains(exec.calls[1].cmd, "project=demo") {
+		t.Fatalf("read command missing history identity: %s", exec.calls[1].cmd)
+	}
+}
+
+func TestWriteAndReadDeploymentUseIDAsRevision(t *testing.T) {
+	deployment := takoapi.DeploymentStateDocument{
+		ID:          "deploy_123",
+		Timestamp:   time.Date(2026, 7, 5, 1, 2, 3, 0, time.UTC),
+		ProjectName: "demo",
+		Environment: "production",
+		Version:     "rev-1",
+		Status:      takoapi.StatusSuccess,
+		Services:    map[string]takoapi.ServiceStateDocument{"web": {Name: "web", Replicas: 1}},
+		User:        "alice",
+		Host:        "node-a",
+		Duration:    time.Second,
+		Message:     "deployed",
+	}
+	content, err := json.Marshal(deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := json.Marshal(map[string]any{"found": true, "content": string(content)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := &fakeExecutor{queue: []string{`{"found":true}`, string(response)}}
+	client := New(exec)
+
+	if err := client.WriteDeployment(deployment); err != nil {
+		t.Fatalf("WriteDeployment returned error: %v", err)
+	}
+	got, err := client.ReadDeployment("demo", "production", "deploy_123")
+	if err != nil {
+		t.Fatalf("ReadDeployment returned error: %v", err)
+	}
+	if got.ID != "deploy_123" || got.ProjectName != "demo" || got.Environment != "production" || got.Status != takoapi.StatusSuccess {
+		t.Fatalf("decoded deployment = %#v", got)
+	}
+
+	if len(exec.calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(exec.calls))
+	}
+	request := decodeRequest(t, exec.calls[0].body)
+	if request.Project != "demo" || request.Environment != "production" || request.Document != takoapi.StateDocumentDeployment || request.RevisionID != "deploy_123" {
+		t.Fatalf("deployment write request = %#v", request)
+	}
+	var written takoapi.DeploymentStateDocument
+	if err := json.Unmarshal([]byte(request.Content), &written); err != nil {
+		t.Fatalf("content is not deployment document JSON: %v", err)
+	}
+	if written.ID != "deploy_123" || written.ProjectName != "demo" || written.Environment != "production" {
+		t.Fatalf("deployment content identity = %#v", written)
+	}
+	if !strings.Contains(exec.calls[1].cmd, "document=deployment") || !strings.Contains(exec.calls[1].cmd, "revisionId=deploy_123") {
+		t.Fatalf("read command missing deployment identity: %s", exec.calls[1].cmd)
+	}
+}
+
 func TestAppendEventSendsPostStateRequest(t *testing.T) {
 	exec := &fakeExecutor{}
 	event := takoapi.NewStateEventDocument("demo", "production", "deploy.started")

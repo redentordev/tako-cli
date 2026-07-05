@@ -102,6 +102,35 @@ func (c *Client) DeleteActualNode(project, environment, node string) error {
 	return decodeFound(output)
 }
 
+// ReadHistory reads the deployment history document.
+func (c *Client) ReadHistory(project, environment string) (*takoapi.DeploymentHistoryDocument, error) {
+	var document takoapi.DeploymentHistoryDocument
+	if err := c.read(takodclient.StateEndpoint(project, environment, takoapi.StateDocumentHistory), project, environment, takoapi.StateDocumentHistory, &document); err != nil {
+		return nil, err
+	}
+	return &document, nil
+}
+
+// WriteHistory writes the deployment history document.
+func (c *Client) WriteHistory(document takoapi.DeploymentHistoryDocument) error {
+	return c.write(takoapi.StateDocumentHistory, document.ProjectName, document.Environment, "", "", document)
+}
+
+// ReadDeployment reads a single deployment history record by deployment ID.
+func (c *Client) ReadDeployment(project, environment, deploymentID string) (*takoapi.DeploymentStateDocument, error) {
+	var document takoapi.DeploymentStateDocument
+	endpoint := takodclient.StateRevisionEndpoint(project, environment, takoapi.StateDocumentDeployment, deploymentID)
+	if err := c.read(endpoint, project, environment, takoapi.StateDocumentDeployment, &document); err != nil {
+		return nil, err
+	}
+	return &document, nil
+}
+
+// WriteDeployment writes a single deployment history record, using ID as the state revision ID.
+func (c *Client) WriteDeployment(document takoapi.DeploymentStateDocument) error {
+	return c.write(takoapi.StateDocumentDeployment, document.ProjectName, document.Environment, "", document.ID, document)
+}
+
 // AppendEvent appends a canonical state event document.
 func (c *Client) AppendEvent(document takoapi.StateEventDocument) error {
 	return c.postEvent(document.Project, document.Environment, document)
