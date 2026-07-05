@@ -305,9 +305,9 @@ By default, build-backed services are tagged with the current Git commit hash,
 so changing app source and committing it is enough to produce a new deploy
 artifact. For configured projects outside Git, use `tako deploy --source .` or
 `tako deploy --revision ci-123` to deploy with a validated source revision tag.
-To deploy one service from an existing image without Git or a build, use
-`tako deploy --service web --image registry.example.com/web:sha`. To deploy one
-service from a targeted build context, use `tako deploy --service web --source .`.
+To deploy one configured service from an existing image without Git or a build,
+use `tako deploy --service web --image registry.example.com/web:sha`. To deploy
+one service from a targeted build context, use `tako deploy --service web --source .`.
 To deploy one service from a local source archive, use
 `tako deploy --service web --archive app.tar.gz`.
 You do not need to bump `project.version` for redeploys; keep it as project metadata.
@@ -315,6 +315,30 @@ Use `tako deploy --force` to intentionally reconcile unchanged app services.
 Broad force skips services marked `persistent: true`; use
 `tako deploy --service db --force` when you deliberately need to recreate a
 stateful service container.
+
+For a configless first deploy of a public image, target an existing VPS/takod
+node directly over SSH:
+
+```bash
+tako run nginx:1.27 --name web --port 80 --server prod-1 --user deploy
+```
+
+`tako run` synthesizes Tako desired state and still uses takod, labels, leases,
+history, and proxy reconciliation. It is public-image-only in this milestone;
+private registry auth, compose import, cloud provisioning, and discovery of
+arbitrary non-Tako Docker containers are not included.
+
+To materialize remote takod state into a local config after a configless run or
+from another machine, use:
+
+```bash
+tako config export --project web --server prod-1 --user deploy -o tako.yaml
+tako config pull --project web --server prod-1 --user deploy -o tako.yaml
+```
+
+Both commands read Tako-managed remote state; they do not discover arbitrary
+Docker containers. If you connect with `--password`, the password is redacted
+and is not written to the generated config.
 
 Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.sslip.io`!
 
@@ -368,9 +392,10 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 | `tako validate` | Validate config locally before Git, SSH, build, or deploy work |
 | `tako config explain` | Show inferred runtime, state, mesh, server, and service defaults |
 | `tako setup` | Set up or refresh an existing server with Docker, WireGuard, takod, firewall, and security hardening |
-| `tako deploy` | Deploy application to environment |
+| `tako deploy` | Deploy configured application to environment |
+| `tako run nginx:1.27 --name web --port 80 --server prod-1` | Deploy a public image to an existing takod node without local `tako.yaml` |
 | `tako deploy --force` | Reconcile unchanged app services; broad force skips persistent services unless a service is targeted |
-| `tako deploy --service web --image registry.example.com/web:sha` | Deploy one service from an existing image without building |
+| `tako deploy --service web --image registry.example.com/web:sha` | Deploy one configured service from an existing image without building |
 | `tako deploy --service web --source .` | Deploy one service from a targeted build context |
 | `tako deploy --service web --archive app.tar.gz` | Deploy one service from a local source archive |
 | `tako domains status` | Check configured or ad-hoc public domain DNS/TLS readiness without redeploying |
@@ -458,6 +483,8 @@ environments:
 
 | Command | Description |
 |---------|-------------|
+| `tako config export --project web --server prod-1 -o tako.yaml` | Materialize remote takod state into `tako.yaml` |
+| `tako config pull --project web --server prod-1 -o tako.yaml` | Pull remote takod state into config; `--password` is not written to output |
 | `tako state pull` | Sync remote deployment state into local `.tako/` |
 | `tako state status` | Compare local/remote state and show the remote lease |
 | `tako state repair` | Repair deployment and runtime state across reachable mesh nodes |

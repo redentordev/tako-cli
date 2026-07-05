@@ -47,12 +47,20 @@ Viper, or command output.
 
 ## Current Image Deploy Boundary
 
-The current targeted image path, `tako deploy --service <name> --image <ref>`,
-still requires an existing configured Tako project with `tako.yaml`, including a
-defined service, server, and environment. Configless public-image deploys such
-as a future `tako run nginx:1.27 --name web --server prod-1` are planned in the
-[foundation roadmap](FOUNDATION-ROADMAP.md#configless-public-image-deploy-direction),
-but are not implemented today.
+Tako has two image deploy paths today:
+
+- `tako deploy --service <name> --image <ref>` deploys an image for one service
+  in an existing configured Tako project. It still requires `tako.yaml` with a
+  defined service, server, and environment.
+- `tako run IMAGE --name <name> --port <port> --server <host>` is the first
+  configless path. It deploys a public image to an existing SSH-reachable
+  VPS/takod node without local `tako.yaml`, while still using takod state,
+  labels, leases, history, and proxy reconciliation.
+
+`tako run` is public-image-only in this milestone. Private registry auth,
+compose import, cloud provisioning, and discovery of arbitrary non-Tako Docker
+containers are outside the current boundary. See the
+[foundation roadmap](FOUNDATION-ROADMAP.md#configless-public-image-deploy-direction).
 
 ## Transport Boundary
 
