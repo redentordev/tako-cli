@@ -102,7 +102,7 @@ func (d *Deployer) SetupTakodRuntime() error {
 	}
 
 	if d.verbose {
-		fmt.Printf("\n-> Preparing takod mesh runtime...\n")
+		d.printf("\n-> Preparing takod mesh runtime...\n")
 	}
 
 	if err := d.ensureTakodAgents(servers); err != nil {
@@ -124,7 +124,7 @@ func (d *Deployer) SetupTakodRuntime() error {
 	}
 
 	if d.verbose {
-		fmt.Printf("  ✓ takod runtime prepared on %d node(s)\n", len(servers))
+		d.printf("  ✓ takod runtime prepared on %d node(s)\n", len(servers))
 	}
 
 	return nil
@@ -277,7 +277,7 @@ func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.Se
 			return nil
 		}
 		if d.verbose {
-			fmt.Printf("  Local build unavailable, falling back to remote takod build: %v\n", err)
+			d.printf("  Local build unavailable, falling back to remote takod build: %v\n", err)
 		}
 		return d.buildImageRemotelyOnTakodNodes(serviceName, service, imageRef, serverNames)
 	default:
@@ -291,30 +291,30 @@ func (d *Deployer) buildImageRemotelyOnTakodNodes(serviceName string, service *c
 	}
 
 	if d.verbose {
-		fmt.Printf("  Building image on %d assigned node(s) with remote takod builder...\n", len(serverNames))
+		d.printf("  Building image on %d assigned node(s) with remote takod builder...\n", len(serverNames))
 	}
 
 	return runTakodNodeActions(serverNames, func(serverName string) error {
 		if d.verbose {
-			fmt.Printf("  [%s] Building %s\n", serverName, imageRef)
+			d.printf("  [%s] Building %s\n", serverName, imageRef)
 		}
 		existsStart := time.Now()
 		exists, existsErr := d.imageExistsOnTakodNode(serverName, imageRef)
 		if existsErr == nil && exists {
 			if d.verbose {
-				fmt.Printf("  [%s] Image already exists: %s (checked in %s)\n", serverName, imageRef, formatBuildDuration(time.Since(existsStart)))
+				d.printf("  [%s] Image already exists: %s (checked in %s)\n", serverName, imageRef, formatBuildDuration(time.Since(existsStart)))
 			}
 			return nil
 		}
 		if existsErr != nil && d.verbose {
-			fmt.Printf("  [%s] Could not check existing image, rebuilding: %v\n", serverName, existsErr)
+			d.printf("  [%s] Could not check existing image, rebuilding: %v\n", serverName, existsErr)
 		}
 		buildStart := time.Now()
 		if _, err := d.buildImageOnNode(serverName, serviceName, service, imageRef); err != nil {
 			return fmt.Errorf("failed to build image on %s: %w", serverName, err)
 		}
 		if d.verbose {
-			fmt.Printf("  [%s] Image ready: %s (%s)\n", serverName, imageRef, formatBuildDuration(time.Since(buildStart)))
+			d.printf("  [%s] Image ready: %s (%s)\n", serverName, imageRef, formatBuildDuration(time.Since(buildStart)))
 		}
 		return nil
 	})
@@ -328,13 +328,13 @@ func (d *Deployer) buildImageLocallyAndPushToTakodNodes(serviceName string, serv
 	missingServers := d.takodNodesMissingImage(serverNames, imageRef)
 	if len(missingServers) == 0 {
 		if d.verbose {
-			fmt.Printf("  Image already exists on all assigned node(s): %s\n", imageRef)
+			d.printf("  Image already exists on all assigned node(s): %s\n", imageRef)
 		}
 		return nil
 	}
 
 	if d.verbose {
-		fmt.Printf("  Building image locally with docker buildx and pushing via unregistry to %d node(s)...\n", len(missingServers))
+		d.printf("  Building image locally with docker buildx and pushing via unregistry to %d node(s)...\n", len(missingServers))
 	}
 
 	ctx := context.Background()
@@ -362,7 +362,7 @@ func (d *Deployer) buildImageLocallyAndPushToTakodNodes(serviceName string, serv
 		targets := platformGroups[platform]
 		sort.Strings(targets)
 		if d.verbose {
-			fmt.Printf("  Building %s for %s\n", imageRef, platform)
+			d.printf("  Building %s for %s\n", imageRef, platform)
 		}
 		buildStart := time.Now()
 		if err := localClient.Build(ctx, takounregistry.BuildRequest{
@@ -374,7 +374,7 @@ func (d *Deployer) buildImageLocallyAndPushToTakodNodes(serviceName string, serv
 			return err
 		}
 		if d.verbose {
-			fmt.Printf("  Local build ready for %s (%s)\n", platform, formatBuildDuration(time.Since(buildStart)))
+			d.printf("  Local build ready for %s (%s)\n", platform, formatBuildDuration(time.Since(buildStart)))
 		}
 
 		for _, serverName := range targets {
@@ -382,7 +382,7 @@ func (d *Deployer) buildImageLocallyAndPushToTakodNodes(serviceName string, serv
 				return err
 			}
 			if d.verbose {
-				fmt.Printf("  [%s] Image ready: %s\n", serverName, imageRef)
+				d.printf("  [%s] Image ready: %s\n", serverName, imageRef)
 			}
 		}
 	}
@@ -400,7 +400,7 @@ func (d *Deployer) pushLocalImageToTakodNode(ctx context.Context, localClient lo
 		return err
 	}
 	if d.verbose {
-		fmt.Printf("  [%s] Pushing %s with docker pussh\n", serverName, imageRef)
+		d.printf("  [%s] Pushing %s with docker pussh\n", serverName, imageRef)
 	}
 	pushStart := time.Now()
 	if err := localClient.Push(ctx, takounregistry.PushRequest{
@@ -412,7 +412,7 @@ func (d *Deployer) pushLocalImageToTakodNode(ctx context.Context, localClient lo
 		return fmt.Errorf("failed to push image to %s: %w", serverName, err)
 	}
 	if d.verbose {
-		fmt.Printf("  [%s] Push complete: %s\n", serverName, formatBuildDuration(time.Since(pushStart)))
+		d.printf("  [%s] Push complete: %s\n", serverName, formatBuildDuration(time.Since(pushStart)))
 	}
 	return nil
 }
@@ -436,12 +436,12 @@ func (d *Deployer) takodNodesMissingImage(serverNames []string, imageRef string)
 		exists, existsErr := d.imageExistsOnTakodNode(serverName, imageRef)
 		if existsErr == nil && exists {
 			if d.verbose {
-				fmt.Printf("  [%s] Image already exists: %s (checked in %s)\n", serverName, imageRef, formatBuildDuration(time.Since(existsStart)))
+				d.printf("  [%s] Image already exists: %s (checked in %s)\n", serverName, imageRef, formatBuildDuration(time.Since(existsStart)))
 			}
 			continue
 		}
 		if existsErr != nil && d.verbose {
-			fmt.Printf("  [%s] Could not check existing image, will push local image: %v\n", serverName, existsErr)
+			d.printf("  [%s] Could not check existing image, will push local image: %v\n", serverName, existsErr)
 		}
 		missing = append(missing, serverName)
 	}
@@ -722,7 +722,7 @@ func (d *Deployer) prepareTakodNodes(servers []string, peers []takodMeshPeer, pu
 		}
 
 		if d.verbose {
-			fmt.Printf("  -> %s (%s)\n", serverName, server.Host)
+			d.printf("  -> %s (%s)\n", serverName, server.Host)
 		}
 
 		if err := d.prepareTakodNode(client, serverName, server, index, peers, publicKeys[serverName]); err != nil {
@@ -771,7 +771,7 @@ func (d *Deployer) prepareTakodNodesWith(servers []string, prepare prepareTakodN
 func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName string, serviceName string, service *config.ServiceConfig, imageRef string, slots []int, pullImage bool, warmOnly bool) error {
 	sort.Ints(slots)
 	if d.verbose {
-		fmt.Printf("  -> %s slots %v\n", serverName, slots)
+		d.printf("  -> %s slots %v\n", serverName, slots)
 	}
 
 	networkName := takodNetworkName(d.config.Project.Name, d.environment)
@@ -1263,7 +1263,7 @@ func (d *Deployer) buildTakodEnvFileContent(service *config.ServiceConfig) (stri
 	}
 
 	if d.verbose {
-		fmt.Printf("  ✓ Env file created with %d variables\n", envFile.Count())
+		d.printf("  ✓ Env file created with %d variables\n", envFile.Count())
 	}
 
 	return string(data), nil

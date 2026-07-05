@@ -24,6 +24,7 @@ import (
 // streamWriter wraps an io.Writer with a prefix for each line
 type streamWriter struct {
 	prefix string
+	writer io.Writer
 	buffer bytes.Buffer
 }
 
@@ -42,7 +43,12 @@ func (sw *streamWriter) Write(p []byte) (n int, err error) {
 			break
 		}
 		// Print line with prefix
-		fmt.Print(sw.prefix + line)
+		if sw.writer == nil {
+			sw.writer = os.Stdout
+		}
+		if _, err := fmt.Fprint(sw.writer, sw.prefix+line); err != nil {
+			return n, err
+		}
 	}
 
 	return n, nil
@@ -62,6 +68,8 @@ type Deployer struct {
 	meshPortCacheMu   sync.Mutex
 	meshPortAllocator func(serverName string, serviceName string, revision string, slot int, containerPort int) (int, error)
 	localImageClient  localImageClient
+	output            io.Writer
+	outputMu          sync.Mutex
 }
 
 const (
@@ -103,6 +111,30 @@ func (d *Deployer) SetCLIVersion(version string) {
 
 func (d *Deployer) SetSkipBuild(skip bool) {
 	d.skipBuild = skip
+}
+
+// SetOutput redirects deployer progress output. Passing nil resets output to os.Stdout.
+func (d *Deployer) SetOutput(w io.Writer) {
+	d.outputMu.Lock()
+	defer d.outputMu.Unlock()
+	if w == nil {
+		d.output = os.Stdout
+		return
+	}
+	d.output = w
+}
+
+func (d *Deployer) outputWriter() io.Writer {
+	if d.output == nil {
+		return os.Stdout
+	}
+	return d.output
+}
+
+func (d *Deployer) printf(format string, args ...any) {
+	d.outputMu.Lock()
+	defer d.outputMu.Unlock()
+	fmt.Fprintf(d.outputWriter(), format, args...)
 }
 
 // SetTargetServers restricts takod reconciliation to a validated subset of the
@@ -256,7 +288,7 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 	}
 
 	if d.verbose {
-		fmt.Printf("  Rolling back service %s to image %s...\n", serviceName, serviceState.Image)
+		d.printf("  Rolling back service %s to image %s...\n", serviceName, serviceState.Image)
 	}
 
 	service, err := d.config.GetService(d.environment, serviceName)
@@ -306,7 +338,7 @@ func (d *Deployer) prepareBuildContext(service *config.ServiceConfig) (*prepared
 			return nil, fmt.Errorf("dockerfile does not exist in build context: %s", service.Dockerfile)
 		}
 		if d.verbose {
-			fmt.Printf("  Found Dockerfile: %s\n", service.Dockerfile)
+			d.printf("  Found Dockerfile: %s\n", service.Dockerfile)
 		}
 	} else {
 		dockerfilePaths := []string{
@@ -321,7 +353,7 @@ func (d *Deployer) prepareBuildContext(service *config.ServiceConfig) (*prepared
 			if _, err := os.Stat(path); err == nil {
 				hasDockerfile = true
 				if d.verbose {
-					fmt.Printf("  Found Dockerfile: %s\n", filepath.Base(path))
+					d.printf("  Found Dockerfile: %s\n", filepath.Base(path))
 				}
 				break
 			}
@@ -329,7 +361,7 @@ func (d *Deployer) prepareBuildContext(service *config.ServiceConfig) (*prepared
 
 		if !hasDockerfile {
 			if d.verbose {
-				fmt.Printf("  No Dockerfile found - using Nixpacks auto-detection...\n")
+				d.printf("  No Dockerfile found - using Nixpacks auto-detection...\n")
 			}
 
 			detector := nixpacks.NewDetector(contextPath, d.verbose)
@@ -339,7 +371,7 @@ func (d *Deployer) prepareBuildContext(service *config.ServiceConfig) (*prepared
 			}
 
 			if d.verbose {
-				fmt.Printf("  Detected framework: %s\n", framework)
+				d.printf("  Detected framework: %s\n", framework)
 			}
 
 			if err := detector.GenerateDockerfile(); err != nil {
@@ -377,8 +409,8 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 		}
 
 		if d.verbose {
-			fmt.Printf("  Streaming build context to takod...\n")
-			fmt.Printf("  Context path: %s\n", prepared.ContextPath)
+			d.printf("  Streaming build context to takod...\n")
+			d.printf("  Context path: %s\n", prepared.ContextPath)
 		}
 
 		archivePath := filepath.Join(os.TempDir(), fmt.Sprintf("tako-build-%s-%d.tar.gz", serviceName, time.Now().UnixNano()))
@@ -394,7 +426,7 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 			return "", fmt.Errorf("failed to stat build context archive: %w", err)
 		}
 		if d.verbose {
-			fmt.Printf("  Build context archive: %s created in %s\n", formatBuildBytes(archiveInfo.Size()), formatBuildDuration(archiveDuration))
+			d.printf("  Build context archive: %s created in %s\n", formatBuildBytes(archiveInfo.Size()), formatBuildDuration(archiveDuration))
 		}
 
 		archive, err := os.Open(archivePath)
@@ -422,10 +454,10 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 			if start < 0 {
 				start = 0
 			}
-			fmt.Printf("  Build output (last 30 lines):\n")
+			d.printf("  Build output (last 30 lines):\n")
 			for _, line := range lines[start:] {
 				if line != "" {
-					fmt.Printf("    %s\n", line)
+					d.printf("    %s\n", line)
 				}
 			}
 		}
@@ -435,21 +467,21 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 		}
 
 		if d.verbose {
-			fmt.Printf("  Remote build request: %s\n", formatBuildDuration(streamDuration))
+			d.printf("  Remote build request: %s\n", formatBuildDuration(streamDuration))
 			if response.Timings != nil {
-				fmt.Printf("  Remote build timings: extract=%s docker=%s total=%s\n",
+				d.printf("  Remote build timings: extract=%s docker=%s total=%s\n",
 					formatBuildDuration(time.Duration(response.Timings.ExtractMS)*time.Millisecond),
 					formatBuildDuration(time.Duration(response.Timings.DockerBuildMS)*time.Millisecond),
 					formatBuildDuration(time.Duration(response.Timings.TotalMS)*time.Millisecond),
 				)
 			}
-			fmt.Printf("  ✓ Image built and verified: %s\n", fullImageName)
+			d.printf("  ✓ Image built and verified: %s\n", fullImageName)
 		}
 
 	} else if service.Image != "" {
 		// Service uses pre-built image (e.g., postgres, redis)
 		if d.verbose {
-			fmt.Printf("  Using pre-built image: %s\n", service.Image)
+			d.printf("  Using pre-built image: %s\n", service.Image)
 		}
 		fullImageName = service.Image
 	}
