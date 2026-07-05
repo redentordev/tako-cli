@@ -37,6 +37,33 @@ func TestStateCommandsSilenceUsageOnExecutionErrors(t *testing.T) {
 	}
 }
 
+func TestDeploymentCommitsEquivalent(t *testing.T) {
+	tests := []struct {
+		name         string
+		localCommit  string
+		remoteCommit string
+		remoteShort  string
+		want         bool
+	}{
+		{name: "empty local is equivalent to git-optional remote", remoteCommit: "abcdef", remoteShort: "abc", want: true},
+		{name: "empty remote commit and short are equivalent", localCommit: "abcdef", want: true},
+		{name: "whitespace is trimmed", localCommit: " abcdef ", remoteCommit: "\tabcdef\n", want: true},
+		{name: "exact full commit match", localCommit: "abcdef", remoteCommit: "abcdef", want: true},
+		{name: "local full commit matches remote short", localCommit: "abcdef123", remoteShort: "abcdef", want: true},
+		{name: "remote full commit matches local short", localCommit: "abcdef", remoteCommit: "abcdef123", want: true},
+		{name: "mismatch", localCommit: "abcdef", remoteCommit: "123456", remoteShort: "123", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deploymentCommitsEquivalent(tt.localCommit, tt.remoteCommit, tt.remoteShort)
+			if got != tt.want {
+				t.Fatalf("deploymentCommitsEquivalent(%q, %q, %q) = %v, want %v", tt.localCommit, tt.remoteCommit, tt.remoteShort, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateStateForgetNodeNameRejectsUnsafeValues(t *testing.T) {
 	for _, nodeName := range []string{"", "../node", "node/b", "node b", "..", "node..b"} {
 		t.Run(nodeName, func(t *testing.T) {

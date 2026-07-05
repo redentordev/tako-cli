@@ -243,6 +243,41 @@ func TestResolveDeployCommitInfoRejectsDirtyWorktree(t *testing.T) {
 	}
 }
 
+func TestResolveDeployCommitInfoWrapsGitStatusCheckError(t *testing.T) {
+	reader := fakeDeployGitReader{
+		repository: true,
+		dirtyErr:   errors.New("git unavailable"),
+	}
+
+	_, _, err := resolveDeployCommitInfo(reader, false)
+	if err == nil {
+		t.Fatal("resolveDeployCommitInfo should return git status check error")
+	}
+	for _, want := range []string{"failed to check git status", "git unavailable"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestResolveDeployCommitInfoWrapsDirtyStatusError(t *testing.T) {
+	reader := fakeDeployGitReader{
+		repository: true,
+		dirty:      true,
+		statusErr:  errors.New("status failed"),
+	}
+
+	_, _, err := resolveDeployCommitInfo(reader, true)
+	if err == nil {
+		t.Fatal("resolveDeployCommitInfo should return dirty status error")
+	}
+	for _, want := range []string{"failed to get git status", "status failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestResolveDeployCommitInfoReturnsCleanCommitInfo(t *testing.T) {
 	want := &git.CommitInfo{
 		Hash:      "abcdef",
@@ -302,6 +337,27 @@ func TestResolveDeployCommitInfoAllowsDirtyWorktreeWhenExplicit(t *testing.T) {
 	}
 	if dirtyStatus != "M .dockerignore" {
 		t.Fatalf("dirtyStatus = %q, want dirty file list", dirtyStatus)
+	}
+}
+
+func TestResolveDeployCommitInfoUsesDirtyLabelForBlankStatus(t *testing.T) {
+	want := &git.CommitInfo{Hash: "abcdef", ShortHash: "abc"}
+	reader := fakeDeployGitReader{
+		repository: true,
+		dirty:      true,
+		status:     " \n\t ",
+		commitInfo: want,
+	}
+
+	got, dirtyStatus, err := resolveDeployCommitInfo(reader, true)
+	if err != nil {
+		t.Fatalf("resolveDeployCommitInfo returned error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("commitInfo = %#v, want %#v", got, want)
+	}
+	if dirtyStatus != "(dirty worktree)" {
+		t.Fatalf("dirtyStatus = %q, want fallback dirty label", dirtyStatus)
 	}
 }
 
@@ -873,7 +929,9 @@ func TestServicesToDeployForPlanTargetedForceIncludesPersistentService(t *testin
 type fakeDeployGitReader struct {
 	repository bool
 	dirty      bool
+	dirtyErr   error
 	status     string
+	statusErr  error
 	commitInfo *git.CommitInfo
 }
 
@@ -882,10 +940,16 @@ func (f fakeDeployGitReader) IsRepository() bool {
 }
 
 func (f fakeDeployGitReader) HasUncommittedChanges() (bool, error) {
+	if f.dirtyErr != nil {
+		return false, f.dirtyErr
+	}
 	return f.dirty, nil
 }
 
 func (f fakeDeployGitReader) GetStatus() (string, error) {
+	if f.statusErr != nil {
+		return "", f.statusErr
+	}
 	return f.status, nil
 }
 

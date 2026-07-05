@@ -207,6 +207,9 @@ func TestRollbackNeedsTargetWorktreeOnlyForBuildBackedGitTargets(t *testing.T) {
 	if rollbackNeedsTargetWorktree(config.ServiceConfig{Image: "nginx:1.27"}, target) {
 		t.Fatal("image-backed rollback should not use a target worktree")
 	}
+	if rollbackNeedsTargetWorktree(config.ServiceConfig{Build: " \n\t "}, target) {
+		t.Fatal("whitespace-only build should not use a target worktree")
+	}
 	if rollbackNeedsTargetWorktree(config.ServiceConfig{Build: "."}, &remotestate.DeploymentState{}) {
 		t.Fatal("rollback without a target commit should not use a target worktree")
 	}
@@ -218,6 +221,9 @@ func TestRollbackTargetCommitFallsBackToShortCommit(t *testing.T) {
 	}
 	if got := rollbackTargetCommit(&remotestate.DeploymentState{GitCommitShort: " short "}); got != "short" {
 		t.Fatalf("rollbackTargetCommit() = %q, want short", got)
+	}
+	if got := rollbackTargetCommit(&remotestate.DeploymentState{GitCommit: " \n\t ", GitCommitShort: "  "}); got != "" {
+		t.Fatalf("rollbackTargetCommit() = %q, want empty", got)
 	}
 	if got := rollbackTargetCommit(nil); got != "" {
 		t.Fatalf("rollbackTargetCommit(nil) = %q, want empty", got)

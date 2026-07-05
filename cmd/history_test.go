@@ -3,7 +3,31 @@ package cmd
 import (
 	"strings"
 	"testing"
+
+	"github.com/redentordev/tako-cli/internal/state"
 )
+
+func TestFormatStatus(t *testing.T) {
+	tests := []struct {
+		status state.DeploymentStatus
+		want   string
+	}{
+		{status: state.StatusSuccess, want: "✓ success"},
+		{status: state.StatusWarmed, want: "◌ warmed"},
+		{status: state.StatusFailed, want: "✗ failed"},
+		{status: state.StatusRolledBack, want: "↺ rolled_back"},
+		{status: state.StatusInProgress, want: "⋯ in_progress"},
+		{status: state.DeploymentStatus("custom"), want: "custom"},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			if got := formatStatus(tt.status); got != tt.want {
+				t.Fatalf("formatStatus(%q) = %q, want %q", tt.status, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestHistoryNextStepsReferenceCurrentCommands(t *testing.T) {
 	output := historyNextSteps()
