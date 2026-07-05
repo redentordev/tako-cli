@@ -34,8 +34,10 @@ appending state events.
 `pkg/deployplan` contains CLI-independent deploy planning helpers, including:
 
 - Image reference selection and merging with deployed/actual state.
-- Source and image build tag generation for non-git and image-backed deploys.
-- Service selection for targeted deploys and force behavior.
+- Source, archive, and image build tag generation for non-git,
+  archive-backed, and image-backed deploys.
+- Service selection for targeted deploys and force behavior, including targeted
+  archive deploy adapters used by `tako deploy --service <name> --archive <file>`.
 - Active revision planning for rolling and blue/green proxy behavior.
 - Stable per-service revision IDs derived from project, environment, service,
   image reference, service config hash, and deploy strategy.
@@ -129,7 +131,10 @@ state document was absent.
 - Prefer additive fields. Readers should ignore unknown fields and tolerate
   omitted optional fields.
 - Git metadata is optional display/trace information. Do not require it for
-  directory, image, archive, CI, or other non-git inputs.
+  directory, archive, image, CI, or other non-git inputs.
+- Archive-backed deploys should use archive content identity (or an explicit
+  revision label) for build tags; `pkg/deployplan.ArchiveBuildTag` implements
+  the current deterministic tag helper.
 - Do not treat a git commit as the deployment revision ID. Use
   `RevisionIdentity.ID`, deployment history `ID`, or service revision IDs for
   Tako revision identity.

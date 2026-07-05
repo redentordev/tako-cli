@@ -14,19 +14,18 @@ Completed foundation pieces:
   deployment history schemas with version and kind constants.
 - `pkg/takoapi/stateclient` provides a typed `/v1/state` client over the
   existing private `takodclient` SSH/Unix-socket transport.
-- `pkg/deployplan` contains importable helpers for image references, source and
-  image build tags, service selection, active proxy revision planning, and
-  per-service revision IDs.
+- `pkg/deployplan` contains importable helpers for image references, source,
+  archive, and image build tags, service selection, active proxy revision
+  planning, and per-service revision IDs.
 - `tako deploy` supports raw source-directory deployment with `--source`,
   explicit revision labels with `--revision`, targeted source deploys with
-  `--service --source`, and targeted prebuilt image deploys with
-  `--service --image`.
+  `--service --source`, targeted archive deploys with `--service --archive`,
+  and targeted prebuilt image deploys with `--service --image`.
 - `pkg/deployer.Deployer.SetOutput(io.Writer)` can redirect or silence deployer
   progress output.
 
 Deferred items:
 
-- Archive input adapter support.
 - Compose/configless deploy support.
 - Public network API, auth/TLS design, and operator opt-in serving mode.
 - Broader stdout/progress injection beyond the deployer package.
@@ -52,9 +51,9 @@ Deferred items:
 ### Constraints And Gaps
 
 - Git-backed deploy remains the normal default, while raw adapters are limited
-  to current `--source`, `--revision`, targeted `--service --source`, and
-  targeted `--service --image` paths. Archive, compose, and configless deploys
-  are not implemented.
+  to current `--source`, `--revision`, targeted `--service --source`, targeted
+  `--service --archive`, and targeted `--service --image` paths. Compose and
+  configless deploys are not implemented.
 - Deployment source identity, revision identity, and git commit identity now
   have foundation types, but older history and rollback paths still need care:
   synthetic git commit values would be unsafe.
@@ -110,6 +109,9 @@ tako deploy --image ghcr.io/acme/web:2026-07-05 -e production
 
 # CI supplies an explicit revision label without pretending it is a git commit.
 tako deploy --source . --revision ci-20260705.12
+
+# Deploy one service from a local source archive.
+tako deploy --service web --archive app.tar.gz
 ```
 
 Implementation seams:
@@ -227,8 +229,8 @@ Non-goals:
 
 Milestones:
 
-- Add directory/archive/image input adapters that produce canonical deployment
-  requests.
+- Expand raw input adapters beyond the current directory, targeted archive, and
+  targeted image deploy paths where needed.
 - Generate durable revision IDs from explicit revision labels or content/image
   identity.
 - Store optional git metadata only when a real git repository is available.
@@ -274,8 +276,8 @@ Non-goals:
 
 - How should Tako generate revision IDs for large directories without expensive
   hashing or surprising ignored-file behavior?
-- What source archive format and ignore rules should be canonical for non-git
-  directory deploys?
+- Should archive deploy support expand beyond the current targeted service
+  adapter and supported `.tar`, `.tar.gz`, `.tgz`, and `.zip` formats?
 - Which state fields are durable API contract versus CLI display detail?
 - How much of the current takod `/v1/*` surface should become public SDK API,
   and how much should remain node-internal?
