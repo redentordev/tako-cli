@@ -30,6 +30,13 @@ func TestImageRefUsesBuildTagForBuildService(t *testing.T) {
 	}
 }
 
+func TestImageRefAcceptsSourceBuildTagForBuildService(t *testing.T) {
+	got := ImageRef(testConfig(), "production", "web", config.ServiceConfig{Build: "."}, "source-20260705T043456Z")
+	if got != "demo/web:source-20260705T043456Z" {
+		t.Fatalf("ImageRef() = %q, want source-tagged image", got)
+	}
+}
+
 func TestImageRefBuildWithoutTagFallsBackToEnvironmentTag(t *testing.T) {
 	got := ImageRef(testConfig(), "production", "web", config.ServiceConfig{Build: "."}, "")
 	if got != "demo/web:1.2.3-production" {
