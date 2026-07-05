@@ -465,38 +465,6 @@ func TestFilterActualStateForServicesScopesTargetedDeployPlan(t *testing.T) {
 	}
 }
 
-func TestMergeRuntimeImageRefsPreservesNonDeployedActualImages(t *testing.T) {
-	cfg := &config.Config{
-		Project: config.ProjectConfig{Name: "demo", Version: "1.2.3"},
-	}
-	services := map[string]config.ServiceConfig{
-		"web":    {Build: "."},
-		"api":    {Build: "./api"},
-		"cache":  {Image: "redis:7"},
-		"worker": {Build: "./worker"},
-	}
-	deployedImageRefs := map[string]string{
-		"web": "demo/web:built",
-	}
-	actualState := map[string]*reconcile.ActualService{
-		"api":   {Name: "api", Image: "demo/api:old", Replicas: 1},
-		"cache": {Name: "cache", Image: "redis:6", Replicas: 1},
-	}
-
-	got := mergeRuntimeImageRefs(cfg, "production", services, deployedImageRefs, actualState)
-	want := map[string]string{
-		"web":    "demo/web:built",
-		"api":    "demo/api:old",
-		"cache":  "redis:6",
-		"worker": "demo/worker:1.2.3-production",
-	}
-	for serviceName, wantImage := range want {
-		if got[serviceName] != wantImage {
-			t.Fatalf("image ref for %s = %q, want %q", serviceName, got[serviceName], wantImage)
-		}
-	}
-}
-
 func TestApplyDeployRemovalsCallsRemoveChangesOnly(t *testing.T) {
 	remover := &fakeDeployServiceRemover{}
 	plan := &reconcile.ReconciliationPlan{
@@ -625,24 +593,6 @@ func TestServicesToDeployForPlanAlwaysIncludesBuildServices(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Fatalf("servicesToDeployForPlan returned %d service(s), want 3: %#v", len(got), got)
-	}
-}
-
-func TestDefaultDeployImageRefsUseCommitTagForBuildServices(t *testing.T) {
-	cfg := &config.Config{
-		Project: config.ProjectConfig{Name: "demo", Version: "1.0.0"},
-	}
-	services := map[string]config.ServiceConfig{
-		"web": {Build: "."},
-		"db":  {Image: "postgres:16-alpine"},
-	}
-
-	got := defaultDeployImageRefs(cfg, "production", services, "abcdef1234567890")
-	if got["web"] != "demo/web:abcdef1234567890" {
-		t.Fatalf("web image ref = %q, want commit-tagged image", got["web"])
-	}
-	if got["db"] != "postgres:16-alpine" {
-		t.Fatalf("db image ref = %q, want prebuilt image unchanged", got["db"])
 	}
 }
 

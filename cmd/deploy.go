@@ -13,6 +13,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/dependency"
 	"github.com/redentordev/tako-cli/pkg/deployer"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/git"
 	"github.com/redentordev/tako-cli/pkg/health"
 	"github.com/redentordev/tako-cli/pkg/notification"
@@ -527,7 +528,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	deploymentFailed := false
 	var deploymentError error
 	buildImageTag := commitInfo.Hash
-	imageRefs := defaultDeployImageRefs(cfg, envName, services, buildImageTag)
+	imageRefs := deployplan.DefaultDeployImageRefs(cfg, envName, services, buildImageTag)
 
 	// Resolve service deployment order based on dependencies
 	resolver := dependency.NewResolver(services, verbose)
@@ -550,7 +551,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("→ Deploying service: %s\n", serviceName)
 
-		fullImageName := deployImageRef(cfg, envName, serviceName, service, buildImageTag)
+		fullImageName := deployplan.ImageRef(cfg, envName, serviceName, service, buildImageTag)
 
 		if service.Image != "" {
 			// Use pre-built image
@@ -640,7 +641,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		runtimeImageRefs := imageRefs
 		if deployService != "" {
 			runtimeServices = cloneServiceMap(allServices)
-			runtimeImageRefs = mergeRuntimeImageRefs(cfg, envName, runtimeServices, imageRefs, finalActualState)
+			runtimeImageRefs = deployplan.MergeRuntimeImageRefs(cfg, envName, runtimeServices, imageRefs, finalActualState)
 		}
 		if err := persistTakodRuntimeState(
 			sshPool,
@@ -1027,7 +1028,7 @@ func deployProxyActiveRevisions(
 			}
 			imageRef := imageRefs[serviceName]
 			if imageRef == "" {
-				imageRef = deployImageRef(cfg, envName, serviceName, service, "")
+				imageRef = deployplan.ImageRef(cfg, envName, serviceName, service, "")
 			}
 			revisions[serviceName] = deployer.ServiceRevisionID(cfg.Project.Name, envName, serviceName, imageRef, service)
 			continue

@@ -51,56 +51,6 @@ func buildNodeActualSnapshots(project string, environment string, nodeActualStat
 	return snapshots
 }
 
-func defaultImageRefs(cfg *config.Config, envName string, services map[string]config.ServiceConfig) map[string]string {
-	imageRefs := make(map[string]string, len(services))
-	for serviceName, service := range services {
-		if service.Image != "" {
-			imageRefs[serviceName] = service.Image
-		} else {
-			imageRefs[serviceName] = cfg.GetFullImageName(serviceName, envName)
-		}
-	}
-	return imageRefs
-}
-
-func defaultDeployImageRefs(cfg *config.Config, envName string, services map[string]config.ServiceConfig, buildTag string) map[string]string {
-	imageRefs := make(map[string]string, len(services))
-	for serviceName, service := range services {
-		imageRefs[serviceName] = deployImageRef(cfg, envName, serviceName, service, buildTag)
-	}
-	return imageRefs
-}
-
-func deployImageRef(cfg *config.Config, envName string, serviceName string, service config.ServiceConfig, buildTag string) string {
-	if service.Image != "" {
-		return service.Image
-	}
-	if service.Build != "" && buildTag != "" {
-		return cfg.GetFullImageNameWithTag(serviceName, buildTag)
-	}
-	return cfg.GetFullImageName(serviceName, envName)
-}
-
-func mergeRuntimeImageRefs(
-	cfg *config.Config,
-	envName string,
-	services map[string]config.ServiceConfig,
-	deployedImageRefs map[string]string,
-	actualState map[string]*reconcile.ActualService,
-) map[string]string {
-	imageRefs := defaultImageRefs(cfg, envName, services)
-	for serviceName := range services {
-		if imageRef := deployedImageRefs[serviceName]; imageRef != "" {
-			imageRefs[serviceName] = imageRef
-			continue
-		}
-		if actual := actualState[serviceName]; actual != nil && actual.Image != "" {
-			imageRefs[serviceName] = actual.Image
-		}
-	}
-	return imageRefs
-}
-
 func cloneServiceMap(services map[string]config.ServiceConfig) map[string]config.ServiceConfig {
 	out := make(map[string]config.ServiceConfig, len(services))
 	for name, service := range services {

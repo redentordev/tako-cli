@@ -9,6 +9,7 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/git"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -148,7 +149,7 @@ func runPromote(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("promotion succeeded but failed to gather post-promotion actual state: %w", err)
 	}
 	postActualState := reconcile.AggregateActualStateByServer(postNodeActualState)
-	runtimeImageRefs := mergeRuntimeImageRefs(cfg, envName, services, nil, postActualState)
+	runtimeImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, services, nil, postActualState)
 	if err := persistTakodRuntimeState(
 		sshPool,
 		cfg,

@@ -11,6 +11,7 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -215,7 +216,7 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("rollback succeeded but failed to gather post-rollback actual state: %w", err)
 	}
 	postRollbackActualState := reconcile.AggregateActualStateByServer(postRollbackNodeActualState)
-	runtimeImageRefs := mergeRuntimeImageRefs(cfg, envName, desiredServices, rollbackImageRefs, postRollbackActualState)
+	runtimeImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredServices, rollbackImageRefs, postRollbackActualState)
 	if err := persistTakodRuntimeState(
 		sshPool,
 		cfg,

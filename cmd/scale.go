@@ -10,6 +10,7 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -182,7 +183,7 @@ func runScaleTargets(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("scale succeeded but failed to gather post-scale actual state: %w", err)
 	}
 	postScaleActualState := reconcile.AggregateActualStateByServer(postScaleNodeActualState)
-	runtimeImageRefs := mergeRuntimeImageRefs(cfg, envName, desiredServices, scaledImageRefs, postScaleActualState)
+	runtimeImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredServices, scaledImageRefs, postScaleActualState)
 	if err := persistTakodRuntimeState(
 		sshPool,
 		cfg,
