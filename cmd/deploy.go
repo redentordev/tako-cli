@@ -36,6 +36,8 @@ var (
 	deployDomainTimeout   = 2 * time.Minute
 	deployDomainTargets   []string
 	deployBuildStrategy   string
+	deploySource          string
+	deployRevision        string
 )
 
 var blueGreenGraceSleep = time.Sleep
@@ -68,6 +70,8 @@ func init() {
 	deployCmd.Flags().DurationVar(&deployDomainTimeout, "domain-timeout", 2*time.Minute, "Wait up to this duration for public DNS/TLS readiness; 0 checks once")
 	deployCmd.Flags().StringArrayVar(&deployDomainTargets, "domain-target", nil, "Expected DNS target; repeat for custom edge/CNAME targets (defaults to proxy server hosts)")
 	deployCmd.Flags().StringVar(&deployBuildStrategy, "build-strategy", "", "Override image build strategy: remote, local, or auto")
+	deployCmd.Flags().StringVar(&deploySource, "source", "", "Deploy configured project from a non-git source label/path")
+	deployCmd.Flags().StringVar(&deployRevision, "revision", "", "Explicit non-git source revision/build tag")
 }
 
 func ensureDeployRuntimeSupported(cfg *config.Config) error {
@@ -112,6 +116,74 @@ type deployGitReader interface {
 	HasUncommittedChanges() (bool, error)
 	GetStatus() (string, error)
 	GetCommitInfo(string) (*git.CommitInfo, error)
+}
+
+type deploySourceInfo struct {
+	CommitInfo    *git.CommitInfo
+	DirtyStatus   string
+	BuildImageTag string
+	StateSource   string
+	SourceMode    bool
+}
+
+type deployGitStrings struct {
+	Hash      string
+	ShortHash string
+	Branch    string
+	Message   string
+	Author    string
+}
+
+func resolveDeploySourceInfo(gitClient deployGitReader, allowDirty bool, source string, revision string, now time.Time) (deploySourceInfo, error) {
+	source = strings.TrimSpace(source)
+	revision = strings.TrimSpace(revision)
+	if source != "" || revision != "" {
+		buildTag, err := deployplan.SourceBuildTag(revision, now)
+		if err != nil {
+			return deploySourceInfo{}, err
+		}
+		stateSource := source
+		if stateSource == "" {
+			stateSource = "source"
+		}
+		return deploySourceInfo{
+			BuildImageTag: buildTag,
+			StateSource:   stateSource,
+			SourceMode:    true,
+		}, nil
+	}
+
+	commitInfo, dirtyStatus, err := resolveDeployCommitInfo(gitClient, allowDirty)
+	if err != nil {
+		return deploySourceInfo{}, err
+	}
+	return deploySourceInfo{
+		CommitInfo:    commitInfo,
+		DirtyStatus:   dirtyStatus,
+		BuildImageTag: commitInfo.Hash,
+		StateSource:   "deploy",
+	}, nil
+}
+
+func deployStartNotificationMessage(project string, version string, envName string, revisionLabel string, revisionValue string, commitMessage string) string {
+	message := fmt.Sprintf("Starting deployment of `%s` v%s to `%s`\n%s: `%s`", project, version, envName, revisionLabel, revisionValue)
+	if commitMessage != "" {
+		message += " - " + commitMessage
+	}
+	return message
+}
+
+func deployGitStringsFromCommit(commitInfo *git.CommitInfo) deployGitStrings {
+	if commitInfo == nil {
+		return deployGitStrings{}
+	}
+	return deployGitStrings{
+		Hash:      commitInfo.Hash,
+		ShortHash: commitInfo.ShortHash,
+		Branch:    commitInfo.Branch,
+		Message:   commitInfo.Message,
+		Author:    commitInfo.Author,
+	}
 }
 
 func resolveDeployCommitInfo(gitClient deployGitReader, allowDirty bool) (*git.CommitInfo, string, error) {
@@ -265,13 +337,17 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Initialize Git client
+	// Initialize source metadata. Default mode requires Git; source mode skips Git validation.
 	gitClient := git.NewClient(".")
 
-	commitInfo, dirtyStatus, err := resolveDeployCommitInfo(gitClient, allowDirty)
+	sourceInfo, err := resolveDeploySourceInfo(gitClient, allowDirty, deploySource, deployRevision, time.Now())
 	if err != nil {
 		return err
 	}
+	commitInfo := sourceInfo.CommitInfo
+	gitStrings := deployGitStringsFromCommit(commitInfo)
+	dirtyStatus := sourceInfo.DirtyStatus
+	buildImageTag := sourceInfo.BuildImageTag
 
 	// Acquire state lock to prevent concurrent deployments
 	stateLock := localstate.NewStateLock(".tako")
@@ -285,12 +361,18 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		fmt.Printf("→ Acquired deployment lock (ID: %s)\n", lockInfo.ID)
 	}
 
-	// Display commit info
-	fmt.Printf("\n📦 Deploying commit:\n")
-	fmt.Printf("  Hash:    %s\n", commitInfo.ShortHash)
-	fmt.Printf("  Branch:  %s\n", commitInfo.Branch)
-	fmt.Printf("  Author:  %s\n", commitInfo.Author)
-	fmt.Printf("  Message: %s\n", commitInfo.Message)
+	// Display source info
+	if sourceInfo.SourceMode {
+		fmt.Printf("\n📦 Deploying source:\n")
+		fmt.Printf("  Source:   %s\n", sourceInfo.StateSource)
+		fmt.Printf("  Revision: %s\n", buildImageTag)
+	} else {
+		fmt.Printf("\n📦 Deploying commit:\n")
+		fmt.Printf("  Hash:    %s\n", gitStrings.ShortHash)
+		fmt.Printf("  Branch:  %s\n", gitStrings.Branch)
+		fmt.Printf("  Author:  %s\n", gitStrings.Author)
+		fmt.Printf("  Message: %s\n", gitStrings.Message)
+	}
 	if dirtyStatus != "" {
 		fmt.Printf("\n⚠ Deploying with uncommitted local changes (--allow-dirty).\n")
 		fmt.Printf("  Deployment history records HEAD only; uncommitted file contents are not recoverable from Git.\n")
@@ -457,6 +539,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if plan.IsEmpty() {
 		if deployForce {
 			fmt.Println("\n-> No config drift detected; --force will reconcile selected services anyway.")
+		} else if sourceInfo.SourceMode {
+			fmt.Println("\n-> No config drift detected; build services will still be reconciled for the current source revision.")
 		} else {
 			fmt.Println("\n-> No config drift detected; build services will still be reconciled for the current commit.")
 		}
@@ -476,7 +560,11 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Log deployment start
 	if localStateMgr != nil {
 		localStateMgr.LogDeployment(fmt.Sprintf("Starting takod deployment to %s", envName))
-		localStateMgr.LogDeployment(fmt.Sprintf("Git commit: %s", commitInfo.ShortHash))
+		if sourceInfo.SourceMode {
+			localStateMgr.LogDeployment(fmt.Sprintf("Source revision: %s", buildImageTag))
+		} else {
+			localStateMgr.LogDeployment(fmt.Sprintf("Git commit: %s", gitStrings.ShortHash))
+		}
 	}
 
 	startTime := time.Now()
@@ -488,13 +576,20 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		Services:       make(map[string]remotestate.ServiceState),
 		User:           remotestate.GetCurrentUser(),
 		Host:           sourceServer.Host,
-		GitCommit:      commitInfo.Hash,
-		GitCommitShort: commitInfo.ShortHash,
-		GitBranch:      commitInfo.Branch,
-		GitCommitMsg:   commitInfo.Message,
-		GitAuthor:      commitInfo.Author,
+		GitCommit:      gitStrings.Hash,
+		GitCommitShort: gitStrings.ShortHash,
+		GitBranch:      gitStrings.Branch,
+		GitCommitMsg:   gitStrings.Message,
+		GitAuthor:      gitStrings.Author,
 		CLIVersion:     Version,
 		CLICommit:      GitCommit,
+	}
+
+	notificationRevisionLabel := "Commit"
+	notificationRevisionValue := gitStrings.ShortHash
+	if sourceInfo.SourceMode {
+		notificationRevisionLabel = "Revision"
+		notificationRevisionValue = buildImageTag
 	}
 
 	// Setup notifications if configured
@@ -511,12 +606,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			Type:        notification.EventDeployStarted,
 			Project:     cfg.Project.Name,
 			Environment: envName,
-			Message:     fmt.Sprintf("Starting deployment of `%s` v%s to `%s`\nCommit: `%s` - %s", cfg.Project.Name, cfg.Project.Version, envName, commitInfo.ShortHash, commitInfo.Message),
+			Message:     deployStartNotificationMessage(cfg.Project.Name, cfg.Project.Version, envName, notificationRevisionLabel, notificationRevisionValue, gitStrings.Message),
 			Details: map[string]string{
 				"version":  cfg.Project.Version,
-				"commit":   commitInfo.ShortHash,
-				"branch":   commitInfo.Branch,
-				"author":   commitInfo.Author,
+				"commit":   gitStrings.ShortHash,
+				"revision": buildImageTag,
+				"branch":   gitStrings.Branch,
+				"author":   gitStrings.Author,
 				"user":     remotestate.GetCurrentUser(),
 				"services": fmt.Sprintf("%d", len(services)),
 			},
@@ -527,7 +623,6 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	deploymentFailed := false
 	var deploymentError error
-	buildImageTag := commitInfo.Hash
 	imageRefs := deployplan.DefaultDeployImageRefs(cfg, envName, services, buildImageTag)
 
 	// Resolve service deployment order based on dependencies
@@ -648,7 +743,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			cfg,
 			envName,
 			serverNames,
-			"deploy",
+			sourceInfo.StateSource,
 			runtimeServices,
 			runtimeImageRefs,
 			finalActualState,
@@ -657,7 +752,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			"deploy.succeeded",
 			fmt.Sprintf("deployed %d service(s)", len(servicesToDeploy)),
 			map[string]string{
-				"commit":          commitInfo.ShortHash,
+				"commit":          gitStrings.ShortHash,
+				"revision":        buildImageTag,
 				"services":        fmt.Sprintf("%d", len(servicesToDeploy)),
 				"desiredServices": fmt.Sprintf("%d", len(runtimeServices)),
 			},
@@ -687,7 +783,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				Servers:         append([]string(nil), serverNames...),
 				Status:          string(deployment.Status),
 				DurationSeconds: int(time.Since(startTime).Seconds()),
-				GitCommit:       commitInfo.Hash,
+				GitCommit:       gitStrings.Hash,
 				TriggeredBy:     remotestate.GetCurrentUser(),
 				Notes:           fmt.Sprintf("Deployed %d services to %s runtime", len(servicesToDeploy), cfg.GetRuntimeMode()),
 			}
@@ -726,9 +822,10 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				Error:       deploymentError.Error(),
 				Duration:    deploymentDuration,
 				Details: map[string]string{
-					"version": cfg.Project.Version,
-					"commit":  commitInfo.ShortHash,
-					"user":    remotestate.GetCurrentUser(),
+					"version":  cfg.Project.Version,
+					"commit":   gitStrings.ShortHash,
+					"revision": buildImageTag,
+					"user":     remotestate.GetCurrentUser(),
 				},
 			})
 		}
@@ -794,8 +891,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			Duration:    deploymentDuration,
 			Details: map[string]string{
 				"version":  cfg.Project.Version,
-				"commit":   commitInfo.ShortHash,
-				"branch":   commitInfo.Branch,
+				"commit":   gitStrings.ShortHash,
+				"revision": buildImageTag,
+				"branch":   gitStrings.Branch,
 				"user":     remotestate.GetCurrentUser(),
 				"services": fmt.Sprintf("%d", len(services)),
 				"urls":     fmt.Sprintf("%v", urls),

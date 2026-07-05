@@ -301,9 +301,11 @@ and `tako doctor` verify that `sudo docker info` reaches a supported daemon.
 tako deploy -e production
 ```
 
-Build-backed services are tagged with the current Git commit hash, so changing
-app source and committing it is enough to produce a new deploy artifact. You do
-not need to bump `project.version` for redeploys; keep it as project metadata.
+By default, build-backed services are tagged with the current Git commit hash,
+so changing app source and committing it is enough to produce a new deploy
+artifact. For configured projects outside Git, use `tako deploy --source .` or
+`tako deploy --revision ci-123` to deploy with a validated source revision tag.
+You do not need to bump `project.version` for redeploys; keep it as project metadata.
 Use `tako deploy --force` to intentionally reconcile unchanged app services.
 Broad force skips services marked `persistent: true`; use
 `tako deploy --service db --force` when you deliberately need to recreate a

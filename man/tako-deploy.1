@@ -48,6 +48,10 @@ If a step fails, deployment stops and records the failed state for inspection or
 	help for deploy
 
 .PP
+\fB--revision\fP=""
+	Explicit non-git source revision/build tag
+
+.PP
 \fB--service\fP=""
 	Deploy specific service
 
@@ -58,6 +62,10 @@ If a step fails, deployment stops and records the failed state for inspection or
 .PP
 \fB--skip-domain-check\fP[=false]
 	Skip post-deploy DNS/TLS checks for public domains
+
+.PP
+\fB--source\fP=""
+	Deploy configured project from a non-git source label/path
 
 .PP
 \fB--strict-domains\fP[=false]

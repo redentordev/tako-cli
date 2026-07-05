@@ -224,6 +224,102 @@ func TestDeployRemoteHistoryErrorFailsSuccessfulRuntimeMutation(t *testing.T) {
 	}
 }
 
+func TestResolveDeploySourceInfoDefaultModeRequiresGitRepository(t *testing.T) {
+	_, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, "", "", time.Date(2026, 7, 5, 4, 34, 56, 0, time.UTC))
+	if err == nil {
+		t.Fatal("resolveDeploySourceInfo should reject non-git repositories in default mode")
+	}
+	if !strings.Contains(err.Error(), "not a Git repository") {
+		t.Fatalf("error = %q, want git repository guidance", err)
+	}
+}
+
+func TestResolveDeploySourceInfoWhitespaceOnlyFlagsUseDefaultGitMode(t *testing.T) {
+	_, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, " \t", "\n ", time.Now())
+	if err == nil {
+		t.Fatal("resolveDeploySourceInfo should use default git mode for whitespace-only source flags")
+	}
+	if !strings.Contains(err.Error(), "not a Git repository") {
+		t.Fatalf("error = %q, want git repository guidance", err)
+	}
+}
+
+func TestResolveDeploySourceInfoTrimsSourceAndRevision(t *testing.T) {
+	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, " ./app \t", " ci-123 \n", time.Now())
+	if err != nil {
+		t.Fatalf("resolveDeploySourceInfo returned error: %v", err)
+	}
+	if info.BuildImageTag != "ci-123" {
+		t.Fatalf("BuildImageTag = %q, want trimmed explicit revision", info.BuildImageTag)
+	}
+	if info.StateSource != "./app" {
+		t.Fatalf("StateSource = %q, want trimmed source", info.StateSource)
+	}
+}
+
+func TestDeployStartNotificationMessageOmitsEmptyCommitMessageSuffix(t *testing.T) {
+	got := deployStartNotificationMessage("demo", "1.0.0", "production", "Revision", "source-20260705T043456Z", "")
+	want := "Starting deployment of `demo` v1.0.0 to `production`\nRevision: `source-20260705T043456Z`"
+	if got != want {
+		t.Fatalf("message = %q, want %q", got, want)
+	}
+}
+
+func TestDeployStartNotificationMessageIncludesCommitMessage(t *testing.T) {
+	got := deployStartNotificationMessage("demo", "1.0.0", "production", "Commit", "abc123", "deploy me")
+	want := "Starting deployment of `demo` v1.0.0 to `production`\nCommit: `abc123` - deploy me"
+	if got != want {
+		t.Fatalf("message = %q, want %q", got, want)
+	}
+}
+
+func TestResolveDeploySourceInfoSourceModeBypassesGitAndGeneratesTag(t *testing.T) {
+	now := time.Date(2026, 7, 5, 4, 34, 56, 0, time.UTC)
+	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, ".", "", now)
+	if err != nil {
+		t.Fatalf("resolveDeploySourceInfo returned error: %v", err)
+	}
+	if !info.SourceMode {
+		t.Fatal("SourceMode = false, want true")
+	}
+	if info.CommitInfo != nil {
+		t.Fatalf("CommitInfo = %#v, want nil", info.CommitInfo)
+	}
+	if info.BuildImageTag != "source-20260705T043456Z" {
+		t.Fatalf("BuildImageTag = %q, want generated source tag", info.BuildImageTag)
+	}
+	if info.StateSource != "." {
+		t.Fatalf("StateSource = %q, want source label", info.StateSource)
+	}
+	gitFields := deployGitStringsFromCommit(info.CommitInfo)
+	if gitFields != (deployGitStrings{}) {
+		t.Fatalf("git fields = %#v, want empty", gitFields)
+	}
+}
+
+func TestResolveDeploySourceInfoRevisionModeUsesExplicitTag(t *testing.T) {
+	info, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, "", "ci-123", time.Now())
+	if err != nil {
+		t.Fatalf("resolveDeploySourceInfo returned error: %v", err)
+	}
+	if info.BuildImageTag != "ci-123" {
+		t.Fatalf("BuildImageTag = %q, want explicit revision", info.BuildImageTag)
+	}
+	if info.CommitInfo != nil {
+		t.Fatalf("CommitInfo = %#v, want nil", info.CommitInfo)
+	}
+}
+
+func TestResolveDeploySourceInfoRejectsInvalidExplicitRevision(t *testing.T) {
+	_, err := resolveDeploySourceInfo(fakeDeployGitReader{}, false, ".", "bad/tag", time.Now())
+	if err == nil {
+		t.Fatal("resolveDeploySourceInfo should reject invalid revision")
+	}
+	if !strings.Contains(err.Error(), "build tag") {
+		t.Fatalf("error = %q, want build tag validation", err)
+	}
+}
+
 func TestResolveDeployCommitInfoRejectsDirtyWorktree(t *testing.T) {
 	reader := fakeDeployGitReader{
 		repository: true,
