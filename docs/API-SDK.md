@@ -45,6 +45,15 @@ appending state events.
 Use this package for planning logic that should be unit-testable without Cobra,
 Viper, or command output.
 
+## Current Image Deploy Boundary
+
+The current targeted image path, `tako deploy --service <name> --image <ref>`,
+still requires an existing configured Tako project with `tako.yaml`, including a
+defined service, server, and environment. Configless public-image deploys such
+as a future `tako run nginx:1.27 --name web --server prod-1` are planned in the
+[foundation roadmap](FOUNDATION-ROADMAP.md#configless-public-image-deploy-direction),
+but are not implemented today.
+
 ## Transport Boundary
 
 Today the state client is intentionally private-control-plane only:

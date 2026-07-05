@@ -26,7 +26,9 @@ Completed foundation pieces:
 
 Deferred items:
 
-- Compose/configless deploy support.
+- Configless public-image deploy from Docker Hub/public registries without a
+  `tako.yaml` (planned below; not implemented in this PR).
+- Broader compose import and configless workflows beyond public images.
 - Public network API, auth/TLS design, and operator opt-in serving mode.
 - Broader stdout/progress injection beyond the deployer package.
 - Long-term SDK compatibility guarantees and schema compatibility test suite.
@@ -52,8 +54,10 @@ Deferred items:
 
 - Git-backed deploy remains the normal default, while raw adapters are limited
   to current `--source`, `--revision`, targeted `--service --source`, targeted
-  `--service --archive`, and targeted `--service --image` paths. Compose and
-  configless deploys are not implemented.
+  `--service --archive`, and targeted `--service --image` paths. The current
+  `--service --image` path still requires an existing `tako.yaml` project with
+  a defined service, server, and environment. Configless public-image deploys
+  and compose import are not implemented.
 - Deployment source identity, revision identity, and git commit identity now
   have foundation types, but older history and rollback paths still need care:
   synthetic git commit values would be unsafe.
@@ -104,8 +108,8 @@ Desired future UX examples:
 # Deploy the current directory even when it is not a git repo.
 tako deploy --source .
 
-# Deploy a prebuilt image through takod state/reconcile.
-tako deploy --image ghcr.io/acme/web:2026-07-05 -e production
+# Deploy a prebuilt image through takod state/reconcile in a configured project.
+tako deploy --service web --image ghcr.io/acme/web:2026-07-05 -e production
 
 # CI supplies an explicit revision label without pretending it is a git commit.
 tako deploy --source . --revision ci-20260705.12
@@ -124,6 +128,76 @@ Implementation seams:
   is absent, and rely on image refs/digests for image-only deploys.
 - Keep rollback keyed to accepted revision IDs and stored artifacts. Never write
   fake git commits to make non-git revisions fit old rollback paths.
+
+## Configless Public Image Deploy Direction
+
+A future configless public-image flow should let an operator deploy a public
+Docker Hub or public registry image to an existing Tako-managed VPS without
+writing `tako.yaml` first. This is future work; the current PR does not
+implement these commands, and current `tako deploy --service --image` still
+requires configured project YAML.
+
+Proposed UX examples:
+
+```bash
+# Deploy a public image as a new Tako-managed app/service on an existing server.
+tako run nginx:1.27 --name web --port 80 --server prod-1
+
+# Add routing and replicas when the target server/environment can host them.
+tako run caddy:2 --name docs --port 80 --domain docs.example.com \
+  --environment production --server prod-1 --replicas 2
+```
+
+Minimal required inputs:
+
+- Public image reference, preferably normalized to a digest after resolution.
+- Stable app/service name, or a generated app name plus explicit service name.
+- Target existing server or environment that maps to operator-owned VPS hosts.
+- Port mappings, domains, replicas, and environment variables only when needed
+  to make the service reachable or reproducible.
+
+Desired behavior:
+
+- Synthesize the same canonical desired deployment/service document a
+  `tako.yaml` project would produce: app, environment, target nodes, service
+  image identity, ports/domains, replicas, revision ID, source type `image`, and
+  config digest.
+- Submit that document through takod state APIs, leases, labels, reconciliation,
+  replicated history, and proxy configuration. Do not run direct unmanaged
+  Docker containers from the CLI.
+- Persist accepted desired state and deployment history remotely through takod;
+  any local cache is rebuildable and not the source of truth.
+- Derive generated configless project identity from an explicit name when
+  provided. If a name is generated, persist the assigned app/environment/service
+  IDs and require later commands to refer to those stable IDs instead of
+  regenerating from image tags.
+
+Milestone acceptance criteria:
+
+- A public image such as `nginx:1.27` can be deployed to an existing named Tako
+  server without a local `tako.yaml`.
+- The resulting containers carry normal Tako labels and are visible through
+  desired/actual state, deployment history, rollback targets, and proxy state.
+- Re-running the same command updates the canonical desired document
+  idempotently for the same generated or explicit app identity.
+- Failure modes clearly report missing server/environment, missing port/domain
+  information, invalid image refs, and unsupported private registry auth.
+
+Non-goals for the first milestone:
+
+- Private registry authentication; add it later as an explicit credentials
+  design, not as an implicit Docker config leak.
+- Compose import or multi-service conversion.
+- Generating and committing a persistent `tako.yaml`; this can be a later export
+  or "materialize config" command.
+- Cloud provider infrastructure provisioning or bypassing takod.
+
+Deferred extensions:
+
+- Private registry auth with scoped credentials and auditability.
+- Compose import that converts compose services into canonical Tako services.
+- Optional generated persistent config for teams that want to transition from
+  configless experimentation to checked-in `tako.yaml`.
 
 ## Canonical State Model And Get/Set Direction
 
@@ -231,6 +305,8 @@ Milestones:
 
 - Expand raw input adapters beyond the current directory, targeted archive, and
   targeted image deploy paths where needed.
+- Add configless public-image deploy as the first no-`tako.yaml` workflow,
+  producing canonical desired state for an existing server/environment.
 - Generate durable revision IDs from explicit revision labels or content/image
   identity.
 - Store optional git metadata only when a real git repository is available.
@@ -241,6 +317,8 @@ Acceptance criteria:
   reconciliation.
 - An image deploy records image identity without requiring a build tag derived
   from git.
+- A public image can be deployed without local project YAML while still using
+  takod state, labels, leases, reconcile, history, and proxy paths.
 - Rollback targets canonical revision IDs and does not attempt to checkout fake
   git refs.
 
@@ -248,6 +326,8 @@ Non-goals:
 
 - Direct Docker execution from the CLI.
 - Multiple orchestration modes.
+- Private registry auth and compose import in the first configless image
+  milestone.
 
 ### Phase 4: SDK And API Hardening
 
@@ -278,6 +358,8 @@ Non-goals:
   hashing or surprising ignored-file behavior?
 - Should archive deploy support expand beyond the current targeted service
   adapter and supported `.tar`, `.tar.gz`, `.tgz`, and `.zip` formats?
+- What is the right UX for selecting a default server/environment during
+  configless image deploy without hiding the owned-VPS scope?
 - Which state fields are durable API contract versus CLI display detail?
 - How much of the current takod `/v1/*` surface should become public SDK API,
   and how much should remain node-internal?
