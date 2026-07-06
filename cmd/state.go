@@ -953,10 +953,17 @@ func runStateForgetNode(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("node %s is still listed in environment %s; remove it from tako.yaml first or rerun with --force", nodeName, envName)
 	}
 
+	confirmationReason := fmt.Sprintf("forget-node mutates replicated runtime state for node %q", nodeName)
 	if !stateForgetNodeYes {
+		if machineOutputEnabled() {
+			if err := emitResultDocument(newStateForgetNodeConfirmationRequiredDocument(confirmationReason, cfg.Project.Name, envName, nodeName)); err != nil {
+				return err
+			}
+			return &engine.ConfirmationRequiredError{Reason: confirmationReason}
+		}
 		confirmed, err := confirmDeployAction(
 			fmt.Sprintf("Forget node %q from replicated runtime state for %s? (y/N): ", nodeName, envName),
-			fmt.Sprintf("forget-node mutates replicated runtime state for node %q", nodeName),
+			confirmationReason,
 		)
 		if err != nil {
 			return err
@@ -967,9 +974,11 @@ func runStateForgetNode(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("Project: %s\n", cfg.Project.Name)
-	fmt.Printf("Environment: %s\n", envName)
-	fmt.Printf("Retired node: %s\n\n", nodeName)
+	if !machineOutputEnabled() {
+		fmt.Printf("Project: %s\n", cfg.Project.Name)
+		fmt.Printf("Environment: %s\n", envName)
+		fmt.Printf("Retired node: %s\n\n", nodeName)
+	}
 
 	pool := ssh.NewPool()
 	defer pool.CloseAll()
@@ -987,192 +996,103 @@ func runStateForgetNode(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer releaseStateRepairLeases(repairLeases, verbose)
-	if verbose {
+	if verbose && !machineOutputEnabled() {
 		fmt.Printf("Acquired state cleanup leases: %s\n", stateRepairLeaseSummary(repairLeases))
 	}
 
-	results, err := forgetNodeFromRepairNodes(repair.nodes, cfg.Project.Name, envName, nodeName)
+	result, err := cliEngine().StateForgetNode(cmd.Context(), engine.StateForgetNodeRequest{
+		Config:      cfg,
+		Environment: envName,
+		Server:      stateServer,
+		NodeName:    nodeName,
+		Force:       stateForgetNodeForce,
+		Nodes:       stateForgetNodeEngineNodes(repair.nodes),
+	})
+	if result != nil && machineOutputEnabled() {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	if err != nil {
 		return err
 	}
-	printStateForgetNodeSummary(nodeName, results)
-	return nil
+	if machineOutputEnabled() {
+		return nil
+	}
+	return renderStateForgetNodeResult(result)
 }
 
 func forgetNodeFromRepairNodes(nodes []stateRepairNode, project string, envName string, nodeName string) ([]stateForgetNodeResult, error) {
-	results := make([]stateForgetNodeResult, len(nodes))
-	resultCh := make(chan stateForgetNodeIndexedResult, len(nodes))
-	for index, node := range nodes {
-		go func(index int, node stateRepairNode) {
-			result := forgetNodeOnRepairNode(node, project, envName, nodeName)
-			result.nodeName = node.name
-			resultCh <- stateForgetNodeIndexedResult{index: index, result: result}
-		}(index, node)
-	}
-
-	var fatalErrors []string
-	for range nodes {
-		indexed := <-resultCh
-		result := indexed.result
-		results[indexed.index] = result
-		if result.err != nil {
-			fatalErrors = append(fatalErrors, fmt.Sprintf("%s: %v", result.nodeName, result.err))
-		}
-	}
-	if len(fatalErrors) > 0 {
-		sort.Strings(fatalErrors)
-		return results, fmt.Errorf("failed to forget node %s: %s", nodeName, strings.Join(fatalErrors, "; "))
-	}
-	return results, nil
+	results, err := engine.ForgetNodeFromRuntimeNodes(stateForgetNodeEngineNodes(nodes), project, envName, nodeName)
+	return stateForgetNodeResultsFromEngine(results), err
 }
 
 func forgetNodeOnRepairNode(node stateRepairNode, project string, envName string, nodeName string) stateForgetNodeResult {
-	result := stateForgetNodeResult{nodeName: node.name}
-	if node.runtime == nil {
-		result.err = fmt.Errorf("runtime state manager unavailable")
-		return result
-	}
+	return stateForgetNodeResultFromEngine(engine.ForgetNodeOnRuntimeNode(context.Background(), stateForgetNodeEngineNode(node), project, envName, nodeName))
+}
 
-	if _, err := node.runtime.ReadNodeActual(nodeName); err == nil {
-		result.nodeActualExisted = true
-	} else if err != nil && !errors.Is(err, takodstate.ErrNotFound) {
-		result.warnings = append(result.warnings, fmt.Sprintf("could not check existing node actual snapshot: %v", err))
-	}
+func stateForgetNodeEngineNode(node stateRepairNode) engine.StateForgetNodeNode {
+	return engine.StateForgetNodeNode{Name: node.name, Runtime: node.runtime}
+}
 
-	actual, err := node.runtime.ReadActual()
-	if err != nil && !errors.Is(err, takodstate.ErrNotFound) {
-		result.err = fmt.Errorf("failed to read aggregate actual state: %w", err)
-		return result
+func stateForgetNodeEngineNodes(nodes []stateRepairNode) []engine.StateForgetNodeNode {
+	out := make([]engine.StateForgetNodeNode, len(nodes))
+	for i, node := range nodes {
+		out[i] = stateForgetNodeEngineNode(node)
 	}
-	if err == nil {
-		pruned, changed := actualSnapshotWithoutNode(actual, nodeName)
-		if changed {
-			if err := node.runtime.WriteActual(pruned); err != nil {
-				result.err = fmt.Errorf("failed to write pruned aggregate actual state: %w", err)
-				return result
-			}
-			result.aggregatePruned = true
-		}
-	}
+	return out
+}
 
-	if err := node.runtime.DeleteNodeActual(nodeName); err != nil {
-		result.err = fmt.Errorf("failed to delete node actual snapshot: %w", err)
-		return result
+func stateForgetNodeResultFromEngine(result engine.StateForgetNodeNodeResult) stateForgetNodeResult {
+	return stateForgetNodeResult{
+		nodeName:          result.Name,
+		nodeActualExisted: result.NodeActualExisted,
+		aggregatePruned:   result.AggregatePruned,
+		warnings:          append([]string(nil), result.Warnings...),
+		err:               result.Err,
 	}
+}
 
-	event := takodstate.NewEvent(project, envName, "state_node_forgotten", "", fmt.Sprintf("Forgot node %s from replicated runtime state", nodeName), map[string]string{
-		"node": nodeName,
-	})
-	if err := node.runtime.AppendEvent(event); err != nil {
-		result.warnings = append(result.warnings, fmt.Sprintf("failed to append state cleanup event: %v", err))
+func stateForgetNodeResultsFromEngine(results []engine.StateForgetNodeNodeResult) []stateForgetNodeResult {
+	out := make([]stateForgetNodeResult, len(results))
+	for i, result := range results {
+		out[i] = stateForgetNodeResultFromEngine(result)
 	}
-
-	return result
+	return out
 }
 
 func actualSnapshotWithoutNode(snapshot *takodstate.ActualSnapshot, nodeName string) (*takodstate.ActualSnapshot, bool) {
-	if snapshot == nil {
-		return nil, false
-	}
-
-	targetNodes, targetChanged := removeStateNodeName(snapshot.TargetNodes, nodeName)
-	nodes, nodeChanged := removeActualEmbeddedNode(snapshot.Nodes, nodeName)
-	if !targetChanged && !nodeChanged {
-		return snapshot, false
-	}
-
-	pruned := *snapshot
-	pruned.TargetNodes = targetNodes
-	pruned.Nodes = nodes
-	pruned.Services = copyActualServices(snapshot.Services)
-	pruned.CapturedAt = time.Now().UTC()
-	return &pruned, true
+	return engine.ActualSnapshotWithoutNode(snapshot, nodeName)
 }
 
 func removeStateNodeName(nodes []string, nodeName string) ([]string, bool) {
-	if len(nodes) == 0 {
-		return nil, false
-	}
-	out := make([]string, 0, len(nodes))
-	changed := false
-	for _, node := range nodes {
-		if node == nodeName {
-			changed = true
-			continue
-		}
-		out = append(out, node)
-	}
-	if !changed {
-		return append([]string(nil), nodes...), false
-	}
-	return out, true
+	return engine.RemoveStateNodeName(nodes, nodeName)
 }
 
 func removeActualEmbeddedNode(nodes map[string]takodstate.ActualNodeSnapshot, nodeName string) (map[string]takodstate.ActualNodeSnapshot, bool) {
-	if len(nodes) == 0 {
-		return nil, false
-	}
-	if _, ok := nodes[nodeName]; !ok {
-		return copyActualNodeSnapshots(nodes), false
-	}
-	out := make(map[string]takodstate.ActualNodeSnapshot, len(nodes)-1)
-	for node, snapshot := range nodes {
-		if node == nodeName {
-			continue
-		}
-		copied := snapshot
-		copied.Services = copyActualServices(snapshot.Services)
-		out[node] = copied
-	}
-	if len(out) == 0 {
-		return nil, true
-	}
-	return out, true
+	return engine.RemoveActualEmbeddedNode(nodes, nodeName)
 }
 
 func copyActualServices(services map[string]takodstate.ActualService) map[string]takodstate.ActualService {
-	if services == nil {
-		return nil
-	}
-	out := make(map[string]takodstate.ActualService, len(services))
-	for serviceName, service := range services {
-		service.Containers = append([]string(nil), service.Containers...)
-		out[serviceName] = service
-	}
-	return out
+	return engine.CopyActualServices(services)
 }
 
 func copyActualNodeSnapshots(nodes map[string]takodstate.ActualNodeSnapshot) map[string]takodstate.ActualNodeSnapshot {
-	if nodes == nil {
-		return nil
-	}
-	out := make(map[string]takodstate.ActualNodeSnapshot, len(nodes))
-	for nodeName, snapshot := range nodes {
-		copied := snapshot
-		copied.Services = copyActualServices(snapshot.Services)
-		out[nodeName] = copied
-	}
-	return out
+	return engine.CopyActualNodeSnapshots(nodes)
 }
 
 func validateStateForgetNodeName(nodeName string) error {
-	if nodeName == "" {
-		return fmt.Errorf("node name is required")
+	return engine.ValidateStateForgetNodeName(nodeName)
+}
+
+func renderStateForgetNodeResult(result *engine.StateForgetNodeResult) error {
+	if result == nil {
+		return nil
 	}
-	for _, ch := range nodeName {
-		if (ch >= 'a' && ch <= 'z') ||
-			(ch >= 'A' && ch <= 'Z') ||
-			(ch >= '0' && ch <= '9') ||
-			ch == '-' ||
-			ch == '_' ||
-			ch == '.' {
-			continue
-		}
-		return fmt.Errorf("node name %q contains unsupported characters", nodeName)
+	if machineOutputEnabled() {
+		return emitResultDocument(result)
 	}
-	if nodeName == "." || nodeName == ".." || strings.Contains(nodeName, "..") {
-		return fmt.Errorf("node name %q is not allowed", nodeName)
-	}
+	printStateForgetNodeSummary(result.RetiredNode, stateForgetNodeResultsFromEngine(result.Nodes))
 	return nil
 }
 
@@ -1959,6 +1879,7 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 		actual:     make([]stateActualCandidate, 0, len(serverNames)),
 		nodeActual: make([]stateNodeActualCandidate, 0, len(serverNames)),
 	}
+	quiet := machineOutputEnabled()
 
 	for _, serverName := range serverNames {
 		server, ok := cfg.Servers[serverName]
@@ -1967,7 +1888,9 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 			return nil, fmt.Errorf("server %s not found in configuration", serverName)
 		}
 
-		fmt.Printf("Checking %s (%s)...\n", serverName, server.Host)
+		if !quiet {
+			fmt.Printf("Checking %s (%s)...\n", serverName, server.Host)
+		}
 		client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: cannot connect to %s: %v\n", serverName, err)
@@ -1986,11 +1909,11 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 
 		history, err := manager.LoadHistory()
 		if errors.Is(err, remotestate.ErrNotFound) || !historyHasDeployments(history) {
-			if verbose {
+			if verbose && !quiet {
 				fmt.Printf("No deployment history found on %s\n", serverName)
 			}
 		} else if err != nil {
-			if verbose {
+			if verbose && !quiet {
 				fmt.Printf("Unable to read deployment history on %s: %v\n", serverName, err)
 			}
 		} else {
@@ -1998,10 +1921,12 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 				source:  serverName,
 				history: history,
 			})
-			fmt.Printf("  history: %d deployment(s), freshness %s\n",
-				deploymentHistoryCount(history),
-				deploymentHistoryFreshness(history).Format(time.RFC3339),
-			)
+			if !quiet {
+				fmt.Printf("  history: %d deployment(s), freshness %s\n",
+					deploymentHistoryCount(history),
+					deploymentHistoryFreshness(history).Format(time.RFC3339),
+				)
+			}
 		}
 
 		desired, err := runtime.ReadDesired()
@@ -2010,11 +1935,13 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 				source:  serverName,
 				desired: desired,
 			})
-			fmt.Printf("  desired: %s, freshness %s\n",
-				desired.RevisionID,
-				desiredRevisionFreshness(desired).Format(time.RFC3339),
-			)
-		} else if verbose && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+			if !quiet {
+				fmt.Printf("  desired: %s, freshness %s\n",
+					desired.RevisionID,
+					desiredRevisionFreshness(desired).Format(time.RFC3339),
+				)
+			}
+		} else if verbose && !quiet && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
 			fmt.Printf("Unable to read desired runtime state on %s: %v\n", serverName, err)
 		}
 
@@ -2024,10 +1951,12 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 				source: serverName,
 				actual: actual,
 			})
-			fmt.Printf("  actual: %d service(s), freshness %s\n",
-				actualSnapshotServiceCount(actual),
-				actualSnapshotFreshness(actual).Format(time.RFC3339),
-			)
+			if !quiet {
+				fmt.Printf("  actual: %d service(s), freshness %s\n",
+					actualSnapshotServiceCount(actual),
+					actualSnapshotFreshness(actual).Format(time.RFC3339),
+				)
+			}
 			for nodeName, nodeSnapshot := range actual.Nodes {
 				if !stateNodeNameInList(serverNames, nodeName) {
 					continue
@@ -2038,7 +1967,7 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 					actual: actualSnapshotFromEmbeddedNode(actual.Project, actual.Environment, nodeSnapshot),
 				})
 			}
-		} else if verbose && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+		} else if verbose && !quiet && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
 			fmt.Printf("Unable to read actual runtime state on %s: %v\n", serverName, err)
 		}
 
@@ -2052,11 +1981,11 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 					actual: nodeActual,
 				})
 				nodeActualCount++
-			} else if verbose && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+			} else if verbose && !quiet && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
 				fmt.Printf("Unable to read node actual runtime state for %s on %s: %v\n", nodeName, serverName, err)
 			}
 		}
-		if nodeActualCount > 0 {
+		if nodeActualCount > 0 && !quiet {
 			fmt.Printf("  node actual: %d snapshot(s)\n", nodeActualCount)
 		}
 	}

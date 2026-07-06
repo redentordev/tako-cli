@@ -58,6 +58,12 @@ commands in `cmd/` are thin adapters over this package.
   `ReleaseStateLease` force-releases only the exact requested lease ID on
   selected nodes, refuses active leases unless `Force` is true, and returns a
   `StateLeaseReleaseResult` with released nodes and per-node lease/error data.
+- Runtime-state retired-node cleanup is available as `StateForgetNode(ctx,
+  StateForgetNodeRequest)`. Adapters provide already-collected reachable node
+  runtime managers (the CLI reuses the state-repair inventory seam) and own
+  confirmation/lease handling. The engine validates the request, removes the
+  retired node from aggregate actual state, deletes standalone node-actual
+  snapshots, appends cleanup events, and returns a `StateForgetNodeResult`.
 - Mutation contexts are cancellation-aware for local checks, takod JSON
   state/lease requests, remote lease fan-out, and deployment-history
   replication. Remote SSH commands are not all interruptible yet, but leases
@@ -126,6 +132,23 @@ if err != nil {
     return err
 }
 _ = result.Released // node names where the exact lease ID was released
+```
+
+#### State forget-node example
+
+```go
+result, err := eng.StateForgetNode(ctx, engine.StateForgetNodeRequest{
+    Config:      cfg,
+    Environment: "production",
+    NodeName:    "old-node",
+    Nodes: []engine.StateForgetNodeNode{
+        {Name: "node-a", Runtime: runtimeManager}, // supplied by adapter inventory
+    },
+})
+if err != nil {
+    return err
+}
+_ = result.Summary.AggregateActualStatesPruned
 ```
 
 ### `pkg/takoapi/events`

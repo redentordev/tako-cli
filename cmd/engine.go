@@ -9,6 +9,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 )
 
@@ -88,6 +89,30 @@ func newConfirmationRequiredDocument(reason string, plan engine.DeployPlan) conf
 		Kind:       "ConfirmationRequired",
 		Reason:     reason,
 		Plan:       plan,
+	}
+}
+
+// stateForgetNodeConfirmationRequiredDocument is emitted in machine modes when
+// forget-node needs --yes approval before mutating replicated runtime state.
+type stateForgetNodeConfirmationRequiredDocument struct {
+	APIVersion  string `json:"apiVersion"`
+	Kind        string `json:"kind"`
+	Reason      string `json:"reason"`
+	Operation   string `json:"operation"`
+	Project     string `json:"project"`
+	Environment string `json:"environment"`
+	RetiredNode string `json:"retiredNode"`
+}
+
+func newStateForgetNodeConfirmationRequiredDocument(reason string, project string, environment string, retiredNode string) stateForgetNodeConfirmationRequiredDocument {
+	return stateForgetNodeConfirmationRequiredDocument{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        "ConfirmationRequired",
+		Reason:      reason,
+		Operation:   "state.forget-node",
+		Project:     project,
+		Environment: environment,
+		RetiredNode: retiredNode,
 	}
 }
 

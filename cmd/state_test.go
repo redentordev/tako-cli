@@ -551,6 +551,104 @@ func TestReleaseStateLeaseByIDReportsMissingReachableLease(t *testing.T) {
 	}
 }
 
+func TestRunStateForgetNodeMachineJSONRequiresYesWithoutPrompting(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		oldCfgFile, oldEnvFlag := cfgFile, envFlag
+		oldServer, oldYes, oldForce := stateServer, stateForgetNodeYes, stateForgetNodeForce
+		defer func() {
+			cfgFile, envFlag = oldCfgFile, oldEnvFlag
+			stateServer, stateForgetNodeYes, stateForgetNodeForce = oldServer, oldYes, oldForce
+		}()
+
+		tempDir := t.TempDir()
+		configPath := filepath.Join(tempDir, "tako.yaml")
+		if err := os.WriteFile(configPath, []byte(`project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: root
+    password: ${TEST_SSH_PASSWORD}
+environments:
+  production:
+    servers:
+      - node-a
+    services:
+      web:
+        image: nginx:alpine
+        port: 80
+`), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		t.Setenv("TEST_SSH_PASSWORD", "secret")
+		cfgFile = configPath
+		envFlag = "production"
+		stateServer = ""
+		stateForgetNodeYes = false
+		stateForgetNodeForce = false
+
+		var runErr error
+		stdout := captureConfigExportStdout(t, func() {
+			runErr = runStateForgetNode(&cobra.Command{}, []string{"node-b"})
+		})
+		var confirmation *engine.ConfirmationRequiredError
+		if !errors.As(runErr, &confirmation) {
+			t.Fatalf("error = %T %v, want ConfirmationRequiredError", runErr, runErr)
+		}
+		if strings.Contains(stdout, "Forget node") || strings.Contains(stdout, "Project:") {
+			t.Fatalf("machine stdout contains prompt/human text: %q", stdout)
+		}
+		var decoded struct {
+			Kind        string `json:"kind"`
+			Operation   string `json:"operation"`
+			Project     string `json:"project"`
+			Environment string `json:"environment"`
+			RetiredNode string `json:"retiredNode"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable confirmation JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != "ConfirmationRequired" || decoded.Operation != "state.forget-node" || decoded.Project != "demo" || decoded.RetiredNode != "node-b" {
+			t.Fatalf("decoded confirmation = %#v", decoded)
+		}
+	})
+}
+
+func TestRenderStateForgetNodeResultMachineJSONSuppressesHumanOutput(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		result := &engine.StateForgetNodeResult{
+			APIVersion:  "tako.redentor.dev/v1alpha1",
+			Kind:        engine.KindStateForgetNodeResult,
+			Project:     "demo",
+			Environment: "production",
+			RetiredNode: "node-b",
+			Status:      engine.StateForgetNodeStatusSuccess,
+			Nodes: []engine.StateForgetNodeNodeResult{{
+				Name:              "node-a",
+				NodeActualExisted: true,
+				AggregatePruned:   true,
+			}},
+			Summary: engine.StateForgetNodeResultSummary{ReachableNodes: 1, StandaloneSnapshotsFound: 1, AggregateActualStatesPruned: 1},
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderStateForgetNodeResult(result); err != nil {
+				t.Fatalf("renderStateForgetNodeResult returned error: %v", err)
+			}
+		})
+		if strings.Contains(stdout, "Forgot node") || strings.Contains(stdout, "Next:") {
+			t.Fatalf("machine stdout contains human forget-node output: %q", stdout)
+		}
+		var decoded engine.StateForgetNodeResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable forget-node JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStateForgetNodeResult || decoded.RetiredNode != "node-b" || decoded.Summary.ReachableNodes != 1 {
+			t.Fatalf("decoded result = %#v", decoded)
+		}
+	})
+}
+
 func TestRenderStateLeaseResultMachineJSONSuppressesHumanOutput(t *testing.T) {
 	withMachineOutput(t, outputFormatJSON, "", func() {
 		result := &engine.StateLeaseResult{
