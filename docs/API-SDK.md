@@ -4,7 +4,41 @@ This document describes the importable foundation APIs that exist today. These
 packages are building blocks for Tako integrations and tests; they are not a
 promise that `takod` exposes a public TCP REST API.
 
+Non-Go consumers (control planes in other languages, CI scripts) should drive
+the CLI through the machine interface instead: structured JSON/NDJSON output,
+deterministic exit codes, and plan handoff are documented in
+`docs/MACHINE-INTERFACE.md`.
+
 ## Importable Packages
+
+### `pkg/engine`
+
+`pkg/engine` is the deployment engine behind the CLI commands. It never
+prompts, prints, or exits the process; progress flows through a typed event
+sink and outcomes are returned as typed results and errors. The Cobra
+commands in `cmd/` are thin adapters over this package.
+
+- Construct with `engine.New(engine.Options{CLIVersion, CLICommit, Sink,
+  BuildOutput, StateAutoSync})`. `Sink` receives the event stream
+  (`pkg/takoapi/events`); `BuildOutput` redirects deployer build logs.
+- Mutations with confirmation gates use a plan/apply session:
+  `PlanDeploy(ctx, req)` / `PlanRun(ctx, req)` return sessions exposing the
+  serializable plan document (`Plan()`, `NeedsConfirmation()`), then
+  `Apply(ctx)` executes and `Close()` releases the local lock, remote
+  leases, and SSH connections.
+- Simpler mutations are single calls: `Rollback`, `Promote`, `Scale`.
+- Errors are classified for exit-code mapping via `engine.Classify`:
+  invalid request, locked/leased, connectivity, cancelled, attention.
+- Every emitted event passes through a secrets redactor; operations
+  register service env values and SSH passwords before emitting.
+
+### `pkg/takoapi/events`
+
+Canonical engine event schema: `Event` (apiVersion, kind, seq, time, type,
+phase, level, service, node, message, data), the `Sink` interface, and
+ready-made sinks (`NopSink`, `BufferSink`, `FanoutSink`, `NDJSONSink`).
+`Stream` stamps sequence/time/schema and applies redaction. Event `message`
+carries the exact human rendering; machine consumers parse `type`/`data`.
 
 ### `pkg/takoapi`
 
@@ -146,6 +180,13 @@ state document was absent.
   `takoapi.StateSchemaVersionCurrent`.
 - Prefer additive fields. Readers should ignore unknown fields and tolerate
   omitted optional fields.
+- Compatibility policy: within an apiVersion (`v1alpha1` today), changes are
+  additive only — new documents, new fields, new event types, new `data`
+  keys. Renaming or removing fields, changing a field's type or meaning, or
+  changing the semantics of an existing event type requires a new
+  apiVersion. Engine result documents (`DeployPlan`, `DeployResult`,
+  `RollbackResult`, ...) and events follow the same policy as state
+  documents.
 - Git metadata is optional display/trace information. Do not require it for
   directory, archive, image, CI, or other non-git inputs.
 - Archive-backed deploys should use archive content identity (or an explicit
