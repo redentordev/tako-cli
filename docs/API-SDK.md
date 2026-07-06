@@ -124,8 +124,17 @@ uses the existing private `pkg/takodclient` request executor abstraction, which
 normally runs commands over SSH and talks to takod through its Unix socket.
 
 Supported helpers include reading and writing desired state, aggregate actual
-state, per-node actual state, deployment history, single deployment records, and
-appending state events.
+state, per-node actual state, deleting per-node actual state, deployment
+history, single deployment records, and appending state events. Every helper has
+a `Context` variant (for example `ReadDesiredContext` and
+`AppendEventContext`); the legacy non-context methods remain and call the
+context variants with `context.Background()`.
+
+The state client also exposes typed `/v1/lease` helpers over the same private
+transport: `ReadLeaseContext`, `AcquireLeaseContext`, and
+`ReleaseLeaseContext` plus non-context wrappers. Lease request/response structs
+are public in `stateclient` and mirror the node-local takod JSON shape without
+importing `internal/state`.
 
 ### `pkg/deployplan`
 
@@ -230,6 +239,19 @@ func writeDesired() error {
     }
 
     return client.WriteDesired(doc)
+}
+
+func readLease(ctx context.Context) error {
+    client := stateclient.New(fakeExecutor{})
+
+    response, err := client.ReadLeaseContext(ctx, "web-app", "production")
+    if err != nil {
+        return err
+    }
+    if response.Found {
+        _ = response.Lease.ID
+    }
+    return nil
 }
 ```
 

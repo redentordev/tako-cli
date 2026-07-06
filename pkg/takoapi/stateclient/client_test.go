@@ -13,8 +13,9 @@ import (
 )
 
 type fakeExecutor struct {
-	calls []fakeCall
-	queue []string
+	calls  []fakeCall
+	queue  []string
+	ctxErr error
 }
 
 type fakeCall struct {
@@ -23,11 +24,19 @@ type fakeCall struct {
 }
 
 func (f *fakeExecutor) ExecuteWithContext(ctx context.Context, cmd string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		f.ctxErr = err
+		return "", err
+	}
 	f.calls = append(f.calls, fakeCall{cmd: cmd})
 	return f.next(), nil
 }
 
 func (f *fakeExecutor) ExecuteWithInput(ctx context.Context, cmd string, input io.Reader) (string, error) {
+	if err := ctx.Err(); err != nil {
+		f.ctxErr = err
+		return "", err
+	}
 	data, err := io.ReadAll(input)
 	if err != nil {
 		return "", err
@@ -279,6 +288,149 @@ func TestAppendEventSendsPostStateRequest(t *testing.T) {
 	}
 	if content.Type != "deploy.started" || content.RevisionID != "rev-123" {
 		t.Fatalf("event content = %#v", content)
+	}
+}
+
+func TestContextCancellationPropagatesToExecutor(t *testing.T) {
+	exec := &fakeExecutor{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := New(exec).ReadDesiredContext(ctx, "demo", "production")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadDesiredContext error = %v, want context.Canceled", err)
+	}
+	if !errors.Is(exec.ctxErr, context.Canceled) {
+		t.Fatalf("executor ctx err = %v, want context.Canceled", exec.ctxErr)
+	}
+	if len(exec.calls) != 0 {
+		t.Fatalf("recorded calls = %d, want 0 after canceled executor", len(exec.calls))
+	}
+}
+
+func TestReadLeaseContextDecodesLeaseResponse(t *testing.T) {
+	createdAt := time.Date(2026, 7, 5, 1, 2, 3, 0, time.UTC)
+	expiresAt := createdAt.Add(30 * time.Minute)
+	response, err := json.Marshal(map[string]any{
+		"found": true,
+		"lease": map[string]any{
+			"id":          "lease-123",
+			"project":     "demo",
+			"environment": "production",
+			"operation":   "deploy",
+			"who":         "alice@host",
+			"holder":      "alice@host",
+			"user":        "alice",
+			"host":        "host",
+			"pid":         1234,
+			"acquiredAt":  createdAt.Format(time.RFC3339),
+			"expiresAt":   expiresAt.Format(time.RFC3339),
+			"ttlSeconds":  int64(1800),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := &fakeExecutor{queue: []string{string(response)}}
+
+	got, err := New(exec).ReadLeaseContext(context.Background(), "demo", "production")
+	if err != nil {
+		t.Fatalf("ReadLeaseContext returned error: %v", err)
+	}
+	if !got.Found || got.Lease == nil {
+		t.Fatalf("lease response = %#v", got)
+	}
+	if got.Lease.ID != "lease-123" || got.Lease.Project != "demo" || got.Lease.ProjectName != "demo" || got.Lease.Environment != "production" {
+		t.Fatalf("lease identity = %#v", got.Lease)
+	}
+	if got.Lease.Who != "alice@host" || got.Lease.Holder != "alice@host" || got.Lease.User != "alice" || got.Lease.Host != "host" || got.Lease.PID != 1234 || got.Lease.TTLSeconds != 1800 {
+		t.Fatalf("lease owner fields = %#v", got.Lease)
+	}
+	if !got.Lease.AcquiredAt.Equal(createdAt) || !got.Lease.CreatedAt.Equal(createdAt) || !got.Lease.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("lease times = %#v", got.Lease)
+	}
+	call := onlyCall(t, exec)
+	if !strings.Contains(call.cmd, "-X 'GET'") || !strings.Contains(call.cmd, "http://takod/v1/lease?") || !strings.Contains(call.cmd, "project=demo") || !strings.Contains(call.cmd, "environment=production") {
+		t.Fatalf("unexpected lease read command: %s", call.cmd)
+	}
+}
+
+func TestAcquireLeaseContextSendsRequestAndDecodesResponse(t *testing.T) {
+	acquiredAt := time.Date(2026, 7, 5, 1, 2, 3, 0, time.UTC)
+	response, err := json.Marshal(LeaseResponse{
+		Acquired: true,
+		Found:    true,
+		Lease: &LeaseInfo{
+			ID:          "lease-123",
+			ProjectName: "demo",
+			Environment: "production",
+			Operation:   "deploy",
+			Who:         "alice@host",
+			PID:         1234,
+			CreatedAt:   acquiredAt,
+			ExpiresAt:   acquiredAt.Add(30 * time.Minute),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := &fakeExecutor{queue: []string{string(response)}}
+	request := LeaseRequest{
+		Project:     "demo",
+		Environment: "production",
+		ID:          "lease-123",
+		Operation:   "deploy",
+		Who:         "alice@host",
+		PID:         1234,
+		TTLSeconds:  1800,
+	}
+
+	got, err := New(exec).AcquireLeaseContext(context.Background(), request)
+	if err != nil {
+		t.Fatalf("AcquireLeaseContext returned error: %v", err)
+	}
+	if !got.Acquired || got.Lease == nil || got.Lease.ID != "lease-123" || got.Lease.Project != "demo" {
+		t.Fatalf("lease acquire response = %#v", got)
+	}
+	call := onlyCall(t, exec)
+	if !strings.Contains(call.cmd, "-X 'POST'") || !strings.Contains(call.cmd, "http://takod/v1/lease") {
+		t.Fatalf("unexpected lease acquire command: %s", call.cmd)
+	}
+	var body LeaseRequest
+	if err := json.Unmarshal([]byte(call.body), &body); err != nil {
+		t.Fatalf("failed to decode lease acquire body: %v", err)
+	}
+	if body != request {
+		t.Fatalf("lease acquire body = %#v, want %#v", body, request)
+	}
+}
+
+func TestReleaseLeaseContextSendsRequestAndDecodesResponse(t *testing.T) {
+	released := LeaseInfo{ID: "lease-123", ProjectName: "demo", Environment: "production", Operation: "deploy"}
+	response, err := json.Marshal(LeaseResponse{Found: false, Lease: &released})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := &fakeExecutor{queue: []string{string(response)}}
+	request := LeaseRequest{Project: "demo", Environment: "production", ID: "lease-123"}
+
+	got, err := New(exec).ReleaseLeaseContext(context.Background(), request)
+	if err != nil {
+		t.Fatalf("ReleaseLeaseContext returned error: %v", err)
+	}
+	if got.Found || got.Lease == nil || got.Lease.ID != "lease-123" || got.Lease.Project != "demo" {
+		t.Fatalf("lease release response = %#v", got)
+	}
+	call := onlyCall(t, exec)
+	if !strings.Contains(call.cmd, "-X 'DELETE'") || !strings.Contains(call.cmd, "http://takod/v1/lease") {
+		t.Fatalf("unexpected lease release command: %s", call.cmd)
+	}
+	var body LeaseRequest
+	if err := json.Unmarshal([]byte(call.body), &body); err != nil {
+		t.Fatalf("failed to decode lease release body: %v", err)
+	}
+	if body.Project != "demo" || body.Environment != "production" || body.ID != "lease-123" || body.Operation != "" || body.TTLSeconds != 0 {
+		t.Fatalf("lease release body = %#v", body)
 	}
 }
 
