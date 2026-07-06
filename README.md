@@ -350,6 +350,16 @@ or actual-only fields may need manual restoration before redeploy. If you connec
 with `--password`, the password is redacted and is not written to the generated
 config.
 
+Current workflow highlights:
+
+- `tako run` bootstraps a Tako-managed public image service on an existing
+  takod node without requiring a local `tako.yaml` first.
+- `tako config export` and `tako config pull` recover Tako-managed remote state
+  into local config for handoff, CI, or continuing from another machine.
+- Targeted deploy inputs (`--service` with `--image`, `--source`, or
+  `--archive`) let automation update one configured service without forcing a
+  full app rebuild.
+
 Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.sslip.io`!
 
 ---
