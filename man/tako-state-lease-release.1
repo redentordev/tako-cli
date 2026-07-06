@@ -43,8 +43,16 @@ refuses to release a non-expired lease unless --force is set.
 	environment to deploy (default: production or only environment)
 
 .PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
 \fB--host-key-mode\fP=""
 	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
 
 .PP
 \fB-v\fP, \fB--verbose\fP[=false]

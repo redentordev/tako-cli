@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/updater"
@@ -26,6 +27,33 @@ var (
 	BuildTime = "unknown"
 )
 
+// Machine output modes; see docs/MACHINE-INTERFACE.md.
+const (
+	outputFormatText = "text"
+	outputFormatJSON = "json"
+
+	eventsFormatNDJSON = "ndjson"
+)
+
+var (
+	outputFormatFlag = outputFormatText
+	eventsFormatFlag string
+)
+
+func validateMachineOutputFlags() error {
+	switch outputFormatFlag {
+	case outputFormatText, outputFormatJSON:
+	default:
+		return fmt.Errorf("invalid --output %q: supported values are text, json", outputFormatFlag)
+	}
+	switch eventsFormatFlag {
+	case "", eventsFormatNDJSON:
+	default:
+		return fmt.Errorf("invalid --events %q: supported value is ndjson", eventsFormatFlag)
+	}
+	return nil
+}
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "tako",
@@ -36,6 +64,9 @@ One server is a one-node mesh; adding nodes keeps the same config and commands.
 The CLI uses SSH for bootstrap and a node-local takod agent for Docker
 reconciliation, proxy config, remote leases, and replicated deployment state.`,
 	Version: Version,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		return validateMachineOutputFlags()
+	},
 }
 
 // GetVersionInfo returns formatted version information
@@ -57,7 +88,30 @@ func Execute() {
 
 	err := rootCmd.Execute()
 	if err != nil {
-		os.Exit(1)
+		os.Exit(exitCodeForError(err))
+	}
+}
+
+// exitCodeForError maps engine error classes to the documented process exit
+// codes: 0 success, 1 operation failed, 2 invalid request or confirmation
+// required, 3 lock/lease held, 4 connectivity, 5 cancelled, 6 partial
+// success needing attention.
+func exitCodeForError(err error) int {
+	switch engine.Classify(err) {
+	case engine.ClassNone:
+		return 0
+	case engine.ClassInvalid:
+		return 2
+	case engine.ClassLocked:
+		return 3
+	case engine.ClassConnectivity:
+		return 4
+	case engine.ClassCancelled:
+		return 5
+	case engine.ClassAttention:
+		return 6
+	default:
+		return 1
 	}
 }
 
@@ -155,6 +209,8 @@ Built:   %s
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 	rootCmd.PersistentFlags().StringVarP(&envFlag, "env", "e", "", "environment to deploy (default: production or only environment)")
 	rootCmd.PersistentFlags().StringVar(&hostKeyModeFlag, "host-key-mode", "", "SSH host key verification mode: tofu, strict, ask (default: tofu)")
+	rootCmd.PersistentFlags().StringVar(&outputFormatFlag, "output", outputFormatText, "output format: text or json (json reserves stdout for the final result document)")
+	rootCmd.PersistentFlags().StringVar(&eventsFormatFlag, "events", "", "stream progress events to stdout: ndjson (human output moves to stderr)")
 
 	// Bind flags to viper
 	viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))

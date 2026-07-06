@@ -32,6 +32,8 @@ var (
 	deployRevision        string
 	deployImage           string
 	deployArchive         string
+	deployPlanOnly        bool
+	deployPlanFile        string
 )
 
 var blueGreenGraceSleep = time.Sleep
@@ -72,6 +74,8 @@ func init() {
 	deployCmd.Flags().StringVar(&deployRevision, "revision", "", "Explicit non-git source revision/build tag")
 	deployCmd.Flags().StringVar(&deployImage, "image", "", "Override target service image for this deploy")
 	deployCmd.Flags().StringVar(&deployArchive, "archive", "", "Deploy target service from a local source archive (.tar, .tar.gz, .tgz, .zip)")
+	deployCmd.Flags().BoolVar(&deployPlanOnly, "plan-only", false, "Compute and show the deployment plan without applying it")
+	deployCmd.Flags().StringVar(&deployPlanFile, "plan", "", "Path to a reviewed plan document; apply fails if the computed plan drifted from it")
 }
 
 func loadDeployConfig(configPath string) (*config.Config, error) {
@@ -126,8 +130,24 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 	defer session.Close()
 
+	if deployPlanFile != "" {
+		if err := verifyPlanFileMatches(deployPlanFile, session.Plan()); err != nil {
+			return err
+		}
+	}
+	if deployPlanOnly {
+		return emitResultDocument(session.Plan())
+	}
+
 	if session.NeedsConfirmation() && !deployYes {
-		confirmed, err := confirmDeployAction("\nProceed with deployment? (y/N): ", "deployment plan includes destructive changes")
+		reason := "deployment plan includes destructive changes"
+		if machineOutputEnabled() {
+			if err := emitResultDocument(newConfirmationRequiredDocument(reason, session.Plan())); err != nil {
+				return err
+			}
+			return &engine.ConfirmationRequiredError{Reason: reason}
+		}
+		confirmed, err := confirmDeployAction("\nProceed with deployment? (y/N): ", reason)
 		if err != nil {
 			return err
 		}
@@ -137,7 +157,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	_, err = session.Apply(cmd.Context())
+	result, err := session.Apply(cmd.Context())
+	if result != nil {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	return err
 }
 

@@ -26,6 +26,8 @@ type runOptions struct {
 	Replicas    int
 	Env         []string
 	Yes         bool
+	PlanOnly    bool
+	PlanFile    string
 }
 
 type runDeployRunner func(cmd *cobra.Command, imageRef string, opts runOptions, cfg *config.Config, service config.ServiceConfig, envVars map[string]string) error
@@ -73,6 +75,8 @@ func newRunCommand() *cobra.Command {
 	flags.IntVar(&opts.Replicas, "replicas", opts.Replicas, "Number of replicas")
 	flags.StringArrayVar(&opts.Env, "env", nil, "Environment variable KEY=VALUE (repeatable)")
 	flags.BoolVarP(&opts.Yes, "yes", "y", opts.Yes, "Skip confirmation prompts (non-interactive mode)")
+	flags.BoolVar(&opts.PlanOnly, "plan-only", opts.PlanOnly, "Compute and show the reconciliation plan without applying it")
+	flags.StringVar(&opts.PlanFile, "plan", opts.PlanFile, "Path to a reviewed plan document; apply fails if the computed plan drifted from it")
 	return cmd
 }
 
@@ -245,8 +249,24 @@ func runImageDeploy(cmd *cobra.Command, imageRef string, opts runOptions, cfg *c
 	}
 	defer session.Close()
 
+	if opts.PlanFile != "" {
+		if err := verifyPlanFileMatches(opts.PlanFile, session.Plan()); err != nil {
+			return err
+		}
+	}
+	if opts.PlanOnly {
+		return emitResultDocument(session.Plan())
+	}
+
 	if session.NeedsConfirmation() && !opts.Yes {
-		confirmed, err := confirmDeployAction("\nProceed with deployment? (y/N): ", "deployment plan includes updates to an existing service")
+		reason := "deployment plan includes updates to an existing service"
+		if machineOutputEnabled() {
+			if err := emitResultDocument(newConfirmationRequiredDocument(reason, session.Plan())); err != nil {
+				return err
+			}
+			return &engine.ConfirmationRequiredError{Reason: reason}
+		}
+		confirmed, err := confirmDeployAction("\nProceed with deployment? (y/N): ", reason)
 		if err != nil {
 			return err
 		}
@@ -256,6 +276,11 @@ func runImageDeploy(cmd *cobra.Command, imageRef string, opts runOptions, cfg *c
 		}
 	}
 
-	_, err = session.Apply(cmd.Context())
+	result, err := session.Apply(cmd.Context())
+	if result != nil {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	return err
 }

@@ -38,6 +38,14 @@ Deploy a public image to an existing takod node without tako.yaml
 	SSH password
 
 .PP
+\fB--plan\fP=""
+	Path to a reviewed plan document; apply fails if the computed plan drifted from it
+
+.PP
+\fB--plan-only\fP[=false]
+	Compute and show the reconciliation plan without applying it
+
+.PP
 \fB--port\fP=0
 	Container port to expose (required)
 
@@ -75,8 +83,16 @@ Deploy a public image to an existing takod node without tako.yaml
 	config file (default is ./tako.yaml or ./tako.json)
 
 .PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
 \fB--host-key-mode\fP=""
 	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
 
 .PP
 \fB-v\fP, \fB--verbose\fP[=false]
