@@ -102,9 +102,13 @@ selected from the mesh, and deployment rows (`id`, `displayId`, `commit`,
 `ConfigExportResult` document with project/environment, source node, target
 nodes, present state documents, generated server entries, warnings,
 password-redaction status, `outputPath` when a file was written, the
-materialized `config` object, and `yaml` when no file was written. The Go
-definitions in `pkg/engine` (`types.go` and per-command files) are the source
-of truth.
+materialized `config` object, and `yaml` when no file was written. `tako state
+lease --output json` returns a `StateLeaseResult` with selected servers and
+per-node lease/error entries. `tako state lease release --output json --id
+<lease> --force` returns a `StateLeaseReleaseResult` with the exact `leaseId`,
+selected servers, released node names/count, and node lease/error entries. The
+Go definitions in `pkg/engine` (`types.go` and per-command files) are the
+source of truth.
 
 ## Config Export / Pull
 
@@ -212,4 +216,8 @@ jq '.services[] | {name, running, desired, status}' status.json
 # 5. Query deployment history without human table output on stdout
 tako history --output json > history.json
 jq '.deployments[] | {id, status, timestamp}' history.json
+
+# 6. Inspect or force-release a remote operation lease by exact ID
+tako state lease --output json > leases.json
+tako state lease release --output json --id "$LEASE_ID" --force > lease-release.json
 ```

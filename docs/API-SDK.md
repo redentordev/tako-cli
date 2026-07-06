@@ -47,6 +47,11 @@ commands in `cmd/` are thin adapters over this package.
   and deployment-listing seams shared with rollback; the engine applies the
   requested server/status/limit/include-failed options and returns a
   `HistoryResult` with source server and JSON-friendly deployment rows.
+- Remote operation lease inspection/unlock is available as `StateLease(ctx,
+  StateLeaseRequest)` and `ReleaseStateLease(ctx, StateLeaseReleaseRequest)`.
+  `ReleaseStateLease` force-releases only the exact requested lease ID on
+  selected nodes, refuses active leases unless `Force` is true, and returns a
+  `StateLeaseReleaseResult` with released nodes and per-node lease/error data.
 - Mutation contexts are cancellation-aware for local checks, remote lease fan-out,
   and deployment-history replication. Remote SSH commands are not all
   interruptible yet, but leases acquired after cancellation are best-effort
@@ -73,6 +78,21 @@ if err != nil {
 }
 _ = result.Config // *config.Config for SDK callers
 _ = result.YAML   // exact YAML text when callers want to write tako.yaml
+```
+
+#### State lease release example
+
+```go
+result, err := eng.ReleaseStateLease(ctx, engine.StateLeaseReleaseRequest{
+    Config:      cfg,
+    Environment: "production",
+    ID:          "1234-lease-id",
+    Force:       true,
+})
+if err != nil {
+    return err
+}
+_ = result.Released // node names where the exact lease ID was released
 ```
 
 ### `pkg/takoapi/events`

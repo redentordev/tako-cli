@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
@@ -547,6 +549,72 @@ func TestReleaseStateLeaseByIDReportsMissingReachableLease(t *testing.T) {
 			t.Fatalf("error = %q, want %q", err, want)
 		}
 	}
+}
+
+func TestRenderStateLeaseResultMachineJSONSuppressesHumanOutput(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		result := &engine.StateLeaseResult{
+			APIVersion:  "tako.redentor.dev/v1alpha1",
+			Kind:        engine.KindStateLeaseResult,
+			Project:     "demo",
+			Environment: "production",
+			Servers:     []string{"node-a"},
+			Nodes: []engine.StateLeaseNodeResult{{
+				Name: "node-a",
+				Host: "10.0.0.1",
+				Lease: &remotestate.LeaseInfo{
+					ID:        "lease-1",
+					Operation: "deploy",
+				},
+			}},
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderStateLeaseResult(result); err != nil {
+				t.Fatalf("renderStateLeaseResult returned error: %v", err)
+			}
+		})
+		if strings.Contains(stdout, "Project:") || strings.Contains(stdout, "Node:") || strings.Contains(stdout, "Lease:") {
+			t.Fatalf("machine stdout contains human lease output: %q", stdout)
+		}
+		var decoded engine.StateLeaseResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable lease JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStateLeaseResult || len(decoded.Nodes) != 1 || decoded.Nodes[0].Lease.ID != "lease-1" {
+			t.Fatalf("decoded result = %#v", decoded)
+		}
+	})
+}
+
+func TestRunStateLeaseReleaseMachineJSONSuppressesReleaseProse(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		result := &engine.StateLeaseReleaseResult{
+			APIVersion:    "tako.redentor.dev/v1alpha1",
+			Kind:          engine.KindStateLeaseReleaseResult,
+			Project:       "demo",
+			Environment:   "production",
+			Servers:       []string{"node-a"},
+			LeaseID:       "lease-1",
+			Force:         true,
+			Released:      []string{"node-a"},
+			ReleasedCount: 1,
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderStateLeaseReleaseResult(result); err != nil {
+				t.Fatalf("renderStateLeaseReleaseResult returned error: %v", err)
+			}
+		})
+		if strings.Contains(stdout, "Released lease") {
+			t.Fatalf("machine stdout contains human release prose: %q", stdout)
+		}
+		var decoded engine.StateLeaseReleaseResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable release JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStateLeaseReleaseResult || decoded.LeaseID != "lease-1" || decoded.ReleasedCount != 1 {
+			t.Fatalf("decoded result = %#v", decoded)
+		}
+	})
 }
 
 func TestRunStateStatusReturnsConfigurationErrors(t *testing.T) {
