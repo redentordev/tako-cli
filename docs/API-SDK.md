@@ -47,6 +47,12 @@ commands in `cmd/` are thin adapters over this package.
   and deployment-listing seams shared with rollback; the engine applies the
   requested server/status/limit/include-failed options and returns a
   `HistoryResult` with source server and JSON-friendly deployment rows.
+- State pull orchestration is available as `StatePull(ctx, StatePullRequest)`.
+  Adapters provide seams for selecting deployment history, syncing deployment
+  records locally, and the two runtime recovery fallbacks. The engine returns a
+  `StatePullResult` with status (`synced_history`, `recovered_mesh_actual`,
+  `recovered_running_mesh`, or `none_found`), source server, synced count,
+  latest deployment summary, and non-fatal recovery warning/error details.
 - Remote operation lease inspection/unlock is available as `StateLease(ctx,
   StateLeaseRequest)` and `ReleaseStateLease(ctx, StateLeaseReleaseRequest)`.
   `ReleaseStateLease` force-releases only the exact requested lease ID on
@@ -79,6 +85,32 @@ if err != nil {
 }
 _ = result.Config // *config.Config for SDK callers
 _ = result.YAML   // exact YAML text when callers want to write tako.yaml
+```
+
+#### State pull example
+
+```go
+result, err := eng.StatePull(ctx, engine.StatePullRequest{
+    Config:      cfg,
+    Environment: "production",
+    HistorySource: func() (string, *state.DeploymentHistory, error) {
+        return source, history, nil // choose the freshest reachable history
+    },
+    SyncDeployments: func(deployments []*state.DeploymentState) (int, error) {
+        return syncLocal(deployments)
+    },
+    RecoverFromMeshActual: func() (engine.StatePullRecoveryResult, error) {
+        return recoverFromReplicatedActual()
+    },
+    RecoverFromRunningMesh: func() (engine.StatePullRecoveryResult, error) {
+        return recoverFromRunningContainers()
+    },
+})
+if err != nil {
+    return err
+}
+_ = result.Status
+_ = result.Latest
 ```
 
 #### State lease release example

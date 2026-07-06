@@ -163,64 +163,143 @@ func init() {
 }
 
 func runStatePull(cmd *cobra.Command, args []string) error {
-	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-
 	envName := getEnvironmentName(cfg)
 
-	histories, err := collectStatePullHistories(cfg, envName, stateServer)
+	result, err := cliEngine().StatePull(cmd.Context(), engine.StatePullRequest{
+		Config:      cfg,
+		Environment: envName,
+		Server:      stateServer,
+		HistorySource: func() (string, *remotestate.DeploymentHistory, error) {
+			histories, err := collectStatePullHistoriesForCommand(cfg, envName, stateServer)
+			if err != nil {
+				return "", nil, err
+			}
+			best, ok := bestDeploymentHistory(histories)
+			if !ok {
+				return "", nil, nil
+			}
+			return best.source, best.history, nil
+		},
+		SyncDeployments: func(deployments []*remotestate.DeploymentState) (int, error) {
+			localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+			if err != nil {
+				return 0, fmt.Errorf("failed to initialize local state: %w", err)
+			}
+			return syncRemoteDeploymentsToLocal(localMgr, deployments, envName)
+		},
+		RecoverFromMeshActual: func() (engine.StatePullRecoveryResult, error) {
+			return recoverStatePullFromMeshActualForCommand(cfg, envName, stateServer)
+		},
+		RecoverFromRunningMesh: func() (engine.StatePullRecoveryResult, error) {
+			return recoverStatePullFromRunningMeshForCommand(cfg, envName, stateServer)
+		},
+	})
+	if result != nil && machineOutputEnabled() {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	if err != nil {
 		return err
 	}
-	bestHistory, hasHistory := bestDeploymentHistory(histories)
-	if hasHistory {
-		fmt.Printf("Selected deployment history from %s\n", bestHistory.source)
+	if machineOutputEnabled() {
+		return nil
+	}
+	return renderStatePullResult(result)
+}
 
-		localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
-		if err != nil {
-			return fmt.Errorf("failed to initialize local state: %w", err)
-		}
-		synced, err := syncRemoteDeploymentsToLocal(localMgr, bestHistory.history.Deployments, envName)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
+func collectStatePullHistoriesForCommand(cfg *config.Config, envName string, requestedServer string) ([]stateHistoryCandidate, error) {
+	if !machineOutputEnabled() {
+		return collectStatePullHistories(cfg, envName, requestedServer)
+	}
+	oldVerbose := verbose
+	verbose = false
+	defer func() { verbose = oldVerbose }()
+	return collectStateDeploymentHistories(cfg, envName, requestedServer, true)
+}
 
-		latest := latestDeploymentByTimestamp(bestHistory.history.Deployments)
-		if latest != nil {
+func recoverStatePullFromMeshActualForCommand(cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	if !machineOutputEnabled() {
+		return recoverAndSaveStateFromMeshActualResult(cfg, envName, requestedServer)
+	}
+	oldVerbose := verbose
+	verbose = false
+	defer func() { verbose = oldVerbose }()
+	return recoverAndSaveStateFromMeshActualResult(cfg, envName, requestedServer)
+}
+
+func recoverStatePullFromRunningMeshForCommand(cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	if !machineOutputEnabled() {
+		return recoverAndSaveStateFromRunningMeshResult(cfg, envName, requestedServer)
+	}
+	oldVerbose := verbose
+	verbose = false
+	defer func() { verbose = oldVerbose }()
+	return recoverAndSaveStateFromRunningMeshResult(cfg, envName, requestedServer)
+}
+
+func renderStatePullResult(result *engine.StatePullResult) error {
+	if result == nil {
+		return nil
+	}
+	if machineOutputEnabled() {
+		return emitResultDocument(result)
+	}
+	switch result.Status {
+	case engine.StatePullStatusSyncedHistory:
+		fmt.Printf("Selected deployment history from %s\n", result.SourceServer)
+		fmt.Printf("Synced %d deployment(s) to local .tako directory\n", result.SyncedCount)
+		if result.Latest != nil {
+			displayID := result.Latest.DisplayID
+			if displayID == "" {
+				displayID = remotestate.FormatDeploymentID(result.Latest.ID)
+			}
 			fmt.Printf("\nLatest deployment:\n")
-			fmt.Printf("  ID:      %s\n", remotestate.FormatDeploymentID(latest.ID))
-			fmt.Printf("  Status:  %s\n", latest.Status)
-			fmt.Printf("  Time:    %s (%s ago)\n", latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(latest.Timestamp)))
-			fmt.Printf("  User:    %s\n", latest.User)
-			if latest.GitCommitShort != "" {
-				fmt.Printf("  Commit:  %s\n", latest.GitCommitShort)
+			fmt.Printf("  ID:      %s\n", displayID)
+			fmt.Printf("  Status:  %s\n", result.Latest.Status)
+			fmt.Printf("  Time:    %s (%s ago)\n", result.Latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(result.Latest.Timestamp)))
+			fmt.Printf("  User:    %s\n", result.Latest.User)
+			if result.Latest.Commit != "" {
+				fmt.Printf("  Commit:  %s\n", result.Latest.Commit)
 			}
 		}
 		fmt.Println("\nLocal state is now synchronized with remote.")
-		return nil
+	case engine.StatePullStatusRecoveredActual:
+		fmt.Println("No remote deployment history found, attempting recovery from mesh runtime state...")
+		printStatePullRecovered(result)
+	case engine.StatePullStatusRecoveredRunning:
+		fmt.Println("No remote deployment history found, attempting recovery from mesh runtime state...")
+		if verbose && result.MeshActualError != "" {
+			fmt.Printf("Warning: mesh runtime state recovery failed: %s\n", result.MeshActualError)
+		}
+		fmt.Println("No mesh runtime state found, attempting recovery from running services across reachable nodes...")
+		printStatePullRecovered(result)
+	case engine.StatePullStatusNoneFound:
+		fmt.Println("No remote deployment history found, attempting recovery from mesh runtime state...")
+		if verbose && result.MeshActualError != "" {
+			fmt.Printf("Warning: mesh runtime state recovery failed: %s\n", result.MeshActualError)
+		}
+		fmt.Println("No mesh runtime state found, attempting recovery from running services across reachable nodes...")
+		if verbose && result.RunningMeshError != "" {
+			fmt.Printf("Warning: running service recovery failed: %s\n", result.RunningMeshError)
+		}
+		fmt.Println("\nNo remote state or running services found.")
+		fmt.Println("This project has not been deployed yet, or state was cleaned up.")
+		fmt.Println("\nRun 'tako deploy' to create initial deployment.")
 	}
-
-	fmt.Println("No remote deployment history found, attempting recovery from mesh runtime state...")
-	if err := recoverAndSaveStateFromMeshActual(cfg, envName, stateServer); err == nil {
-		return nil
-	} else if verbose {
-		fmt.Printf("Warning: mesh runtime state recovery failed: %v\n", err)
-	}
-
-	fmt.Println("No mesh runtime state found, attempting recovery from running services across reachable nodes...")
-	if err := recoverAndSaveStateFromRunningMesh(cfg, envName, stateServer); err == nil {
-		return nil
-	} else if verbose {
-		fmt.Printf("Warning: running service recovery failed: %v\n", err)
-	}
-	fmt.Println("\nNo remote state or running services found.")
-	fmt.Println("This project has not been deployed yet, or state was cleaned up.")
-	fmt.Println("\nRun 'tako deploy' to create initial deployment.")
 	return nil
+}
+
+func printStatePullRecovered(result *engine.StatePullResult) {
+	serviceCount := 0
+	if result != nil && result.Recovered != nil {
+		serviceCount = result.Recovered.ServiceCount
+	}
+	fmt.Printf("Recovered state from %d running service(s)\n", serviceCount)
 }
 
 func collectStatePullHistories(cfg *config.Config, envName string, requestedServer string) ([]stateHistoryCandidate, error) {
@@ -2837,21 +2916,34 @@ func recoverAndSaveStateFromMeshActual(cfg *config.Config, envName string, reque
 }
 
 func recoverAndSaveStateFromMeshActualWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) error {
-	nodes, err := collectStateStatusNodesWithPool(pool, cfg, envName, requestedServer)
+	result, err := recoverAndSaveStateFromMeshActualResultWithPool(pool, cfg, envName, requestedServer)
 	if err != nil {
 		return err
+	}
+	fmt.Printf("Recovered state from %d running service(s)\n", result.ServiceCount)
+	return nil
+}
+
+func recoverAndSaveStateFromMeshActualResult(cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	return recoverAndSaveStateFromMeshActualResultWithPool(nil, cfg, envName, requestedServer)
+}
+
+func recoverAndSaveStateFromMeshActualResultWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	nodes, err := collectStateStatusNodesWithPool(pool, cfg, envName, requestedServer)
+	if err != nil {
+		return engine.StatePullRecoveryResult{}, err
 	}
 	_, _, actualCandidates, nodeActualCandidates := stateStatusCandidates(nodes)
 	bestActual, hasActual, _ := bestStateStatusActual(cfg.Project.Name, envName, actualCandidates, nodeActualCandidates)
 	if !hasActual {
-		return fmt.Errorf("no mesh actual state found")
+		return engine.StatePullRecoveryResult{}, fmt.Errorf("no mesh actual state found")
 	}
 
 	deployment, err := ReconcileStateFromActualSnapshot(cfg, envName, bestActual.actual, "State recovered from replicated takod actual state")
 	if err != nil {
-		return err
+		return engine.StatePullRecoveryResult{}, err
 	}
-	return saveRecoveredDeployment(cfg, envName, deployment)
+	return saveRecoveredDeploymentResult(cfg, envName, deployment)
 }
 
 type runningActualNodeResult struct {
@@ -2867,20 +2959,33 @@ func recoverAndSaveStateFromRunningMesh(cfg *config.Config, envName string, requ
 }
 
 func recoverAndSaveStateFromRunningMeshWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) error {
-	candidates, err := collectRunningActualNodeSnapshotsWithPool(pool, cfg, envName, requestedServer)
+	result, err := recoverAndSaveStateFromRunningMeshResultWithPool(pool, cfg, envName, requestedServer)
 	if err != nil {
 		return err
 	}
+	fmt.Printf("Recovered state from %d running service(s)\n", result.ServiceCount)
+	return nil
+}
+
+func recoverAndSaveStateFromRunningMeshResult(cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	return recoverAndSaveStateFromRunningMeshResultWithPool(nil, cfg, envName, requestedServer)
+}
+
+func recoverAndSaveStateFromRunningMeshResultWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	candidates, err := collectRunningActualNodeSnapshotsWithPool(pool, cfg, envName, requestedServer)
+	if err != nil {
+		return engine.StatePullRecoveryResult{}, err
+	}
 	bestNodeActual := bestNodeActualSnapshots(candidates)
 	if len(bestNodeActual) == 0 {
-		return fmt.Errorf("no running takod containers found on reachable mesh nodes")
+		return engine.StatePullRecoveryResult{}, fmt.Errorf("no running takod containers found on reachable mesh nodes")
 	}
 	aggregate := aggregateActualSnapshotFromNodeSnapshots(cfg.Project.Name, envName, bestNodeActual)
 	deployment, err := ReconcileStateFromActualSnapshot(cfg, envName, aggregate, "State recovered from running takod containers across the mesh")
 	if err != nil {
-		return err
+		return engine.StatePullRecoveryResult{}, err
 	}
-	return saveRecoveredDeployment(cfg, envName, deployment)
+	return saveRecoveredDeploymentResult(cfg, envName, deployment)
 }
 
 func collectRunningActualNodeSnapshots(cfg *config.Config, envName string, requestedServer string) ([]stateNodeActualCandidate, error) {
@@ -3072,18 +3177,25 @@ func ReconcileStateFromActualSnapshot(cfg *config.Config, envName string, actual
 }
 
 func saveRecoveredDeployment(cfg *config.Config, envName string, deployment *localstate.DeploymentState) error {
+	result, err := saveRecoveredDeploymentResult(cfg, envName, deployment)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Recovered state from %d running service(s)\n", result.ServiceCount)
+	return nil
+}
+
+func saveRecoveredDeploymentResult(cfg *config.Config, envName string, deployment *localstate.DeploymentState) (engine.StatePullRecoveryResult, error) {
 	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
 	if err != nil {
-		return fmt.Errorf("failed to initialize local state: %w", err)
+		return engine.StatePullRecoveryResult{}, fmt.Errorf("failed to initialize local state: %w", err)
 	}
 
 	if err := localMgr.SaveDeployment(deployment); err != nil {
-		return fmt.Errorf("failed to save recovered state: %w", err)
+		return engine.StatePullRecoveryResult{}, fmt.Errorf("failed to save recovered state: %w", err)
 	}
 
-	fmt.Printf("Recovered state from %d running service(s)\n", len(deployment.Services))
-
-	return nil
+	return engine.StatePullRecoveryResult{ServiceCount: len(deployment.Services)}, nil
 }
 
 // ExportState exports current state to a JSON file

@@ -586,6 +586,74 @@ func TestRenderStateLeaseResultMachineJSONSuppressesHumanOutput(t *testing.T) {
 	})
 }
 
+func TestRenderStatePullResultMachineJSONSuppressesHumanOutput(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		result := &engine.StatePullResult{
+			APIVersion:   "tako.redentor.dev/v1alpha1",
+			Kind:         engine.KindStatePullResult,
+			Project:      "demo",
+			Environment:  "production",
+			Status:       engine.StatePullStatusSyncedHistory,
+			SourceServer: "node-a",
+			SyncedCount:  1,
+			Latest:       &engine.StatePullLatestDeployment{ID: "deploy-1", DisplayID: "deploy", Status: remotestate.StatusSuccess, Timestamp: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC), User: "alice", Commit: "abc1234"},
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderStatePullResult(result); err != nil {
+				t.Fatalf("renderStatePullResult returned error: %v", err)
+			}
+		})
+		for _, human := range []string{"Selected deployment history", "Synced", "Latest deployment", "Local state"} {
+			if strings.Contains(stdout, human) {
+				t.Fatalf("machine stdout contains human state pull output %q: %q", human, stdout)
+			}
+		}
+		var decoded engine.StatePullResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable state pull JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStatePullResult || decoded.Status != engine.StatePullStatusSyncedHistory || decoded.Latest == nil || decoded.Latest.ID != "deploy-1" {
+			t.Fatalf("decoded result = %#v", decoded)
+		}
+	})
+}
+
+func TestRenderStatePullResultNDJSONSuppressesHumanOutput(t *testing.T) {
+	withMachineOutput(t, outputFormatText, eventsFormatNDJSON, func() {
+		result := &engine.StatePullResult{
+			APIVersion:  "tako.redentor.dev/v1alpha1",
+			Kind:        engine.KindStatePullResult,
+			Project:     "demo",
+			Environment: "production",
+			Status:      engine.StatePullStatusNoneFound,
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderStatePullResult(result); err != nil {
+				t.Fatalf("renderStatePullResult returned error: %v", err)
+			}
+		})
+		if strings.Contains(stdout, "No remote deployment history found") || strings.Contains(stdout, "Run 'tako deploy'") {
+			t.Fatalf("NDJSON stdout contains human state pull output: %q", stdout)
+		}
+		lines := strings.Split(strings.TrimSpace(stdout), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("NDJSON stdout lines = %d, want 1: %q", len(lines), stdout)
+		}
+		var event struct {
+			Type string `json:"type"`
+			Data struct {
+				Result engine.StatePullResult `json:"result"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+			t.Fatalf("stdout is not parseable NDJSON: %v\n%s", err, stdout)
+		}
+		if event.Type != "result" || event.Data.Result.Kind != engine.KindStatePullResult || event.Data.Result.Status != engine.StatePullStatusNoneFound {
+			t.Fatalf("decoded event = %#v", event)
+		}
+	})
+}
+
 func TestRunStateLeaseReleaseMachineJSONSuppressesReleaseProse(t *testing.T) {
 	withMachineOutput(t, outputFormatJSON, "", func() {
 		result := &engine.StateLeaseReleaseResult{

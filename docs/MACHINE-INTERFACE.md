@@ -103,12 +103,16 @@ selected from the mesh, and deployment rows (`id`, `displayId`, `commit`,
 nodes, present state documents, generated server entries, warnings,
 password-redaction status, `outputPath` when a file was written, the
 materialized `config` object, and `yaml` when no file was written. `tako state
-lease --output json` returns a `StateLeaseResult` with selected servers and
-per-node lease/error entries. `tako state lease release --output json --id
-<lease> --force` returns a `StateLeaseReleaseResult` with the exact `leaseId`,
-selected servers, released node names/count, and node lease/error entries. The
-Go definitions in `pkg/engine` (`types.go` and per-command files) are the
-source of truth.
+pull --output json` returns a `StatePullResult` with project/environment,
+requested server, status (`synced_history`, `recovered_mesh_actual`,
+`recovered_running_mesh`, or `none_found`), source server and latest deployment
+summary when history was synced, synced count, recovery counts, and recovery
+warning/error details when fallbacks failed. `tako state lease --output json`
+returns a `StateLeaseResult` with selected servers and per-node lease/error
+entries. `tako state lease release --output json --id <lease> --force` returns
+a `StateLeaseReleaseResult` with the exact `leaseId`, selected servers,
+released node names/count, and node lease/error entries. The Go definitions in
+`pkg/engine` (`types.go` and per-command files) are the source of truth.
 
 ## Config Export / Pull
 
@@ -217,7 +221,11 @@ jq '.services[] | {name, running, desired, status}' status.json
 tako history --output json > history.json
 jq '.deployments[] | {id, status, timestamp}' history.json
 
-# 6. Inspect or force-release a remote operation lease by exact ID
+# 6. Refresh local .tako state from the mesh without prose on stdout
+tako state pull --output json > state-pull.json
+jq '.status' state-pull.json
+
+# 7. Inspect or force-release a remote operation lease by exact ID
 tako state lease --output json > leases.json
 tako state lease release --output json --id "$LEASE_ID" --force > lease-release.json
 ```
