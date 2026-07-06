@@ -88,9 +88,12 @@ Mutation commands return versioned result documents (for example
 `tako.redentor.dev/v1alpha1`) containing: project, environment, `status`
 (`success`, `warmed`, `failed`, ...), revision, per-service outcomes
 (`deployed`, `warmed`, `removed`, `up_to_date`, `failed`), URLs, timings,
-`planHash`, and `error` when failed. `tako logs` returns a `LogsResult`
-document with project, environment, service, tail/follow options, per-node
-stream outcomes, timings, and `error` when any node stream failed.
+`planHash`, and `error` when failed. `tako ps --output json` returns a
+`StatusResult` document with project/environment, selected server(s), optional
+service filter, and service rows (`name`, `running`, `desired`, `status`,
+`ports`, `revision`, `warming`, `internal`). `tako logs` returns a
+`LogsResult` document with project, environment, service, tail/follow options,
+per-node stream outcomes, timings, and `error` when any node stream failed.
 `tako config export` and `tako config pull` return a `ConfigExportResult`
 document with project/environment, source node, target nodes, present state
 documents, generated server entries, warnings, password-redaction status,
@@ -196,4 +199,8 @@ echo "exit=$?"
 
 # 3. The last line of events.ndjson is the terminal result event
 tail -n 1 events.ndjson | jq '.data.result.status'
+
+# 4. Query current service status without human table output on stdout
+tako ps --output json > status.json
+jq '.services[] | {name, running, desired, status}' status.json
 ```

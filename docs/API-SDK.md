@@ -34,6 +34,11 @@ commands in `cmd/` are thin adapters over this package.
   and YAML text. The engine does not write files, infer the current user, or
   expand `~` paths; adapters persist the config and supply explicit connection
   fields themselves (the CLI uses `tako config export --file/-o`).
+- Status is available as `Status(ctx, StatusRequest)`, the engine backing
+  `tako ps`. It resolves the project/environment/server/service selection,
+  gathers actual state from takod nodes, and returns a `StatusResult` with
+  selected servers and service rows (`running`, `desired`, `status`, `ports`,
+  revision/warming metadata). The engine does not render the human table.
 - Log streaming is available as `StreamLogs(ctx, LogsRequest)`, which emits
   `log.line` events carrying service/node/raw-line data and returns a
   `LogsResult` summary when the stream completes.
