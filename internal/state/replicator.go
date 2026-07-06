@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
+	"github.com/redentordev/tako-cli/pkg/takoapi/stateclient"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
@@ -133,23 +136,18 @@ func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string
 		return fmt.Errorf("connect: %w", err)
 	}
 
-	deploymentCopy, err := cloneDeploymentState(deployment)
+	deploymentDocument, err := deploymentStateDocument(deployment)
 	if err != nil {
 		return fmt.Errorf("clone deployment: %w", err)
 	}
-	historyCopy, err := cloneDeploymentHistory(history)
+	historyDocument, err := deploymentHistoryDocument(history)
 	if err != nil {
 		return fmt.Errorf("clone history: %w", err)
 	}
+	r.prepareReplicaDocuments(server.Host, deploymentDocument, historyDocument)
 
-	manager := NewStateManagerWithSocket(client, r.projectName, r.environment, server.Host, r.socket)
-	if err := manager.SaveDeploymentContext(ctx, deploymentCopy); err != nil {
-		return fmt.Errorf("deployment: %w", err)
-	}
-	if historyCopy != nil {
-		if err := manager.SaveHistoryContext(ctx, historyCopy); err != nil {
-			return fmt.Errorf("history: %w", err)
-		}
+	if err := stateclient.New(client).WithSocket(r.socket).ReplicateDeploymentContext(ctx, *deploymentDocument, historyDocument); err != nil {
+		return err
 	}
 
 	if r.verbose {
@@ -158,7 +156,24 @@ func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string
 	return nil
 }
 
-func cloneDeploymentState(deployment *DeploymentState) (*DeploymentState, error) {
+func (r *StateReplicator) prepareReplicaDocuments(serverHost string, deployment *takoapi.DeploymentStateDocument, history *takoapi.DeploymentHistoryDocument) {
+	if deployment != nil {
+		if deployment.ID == "" {
+			deployment.ID = fmt.Sprintf("%d_%d", time.Now().UnixNano(), os.Getpid())
+		}
+		deployment.ProjectName = r.projectName
+		deployment.Environment = r.environment
+		deployment.Host = serverHost
+	}
+	if history != nil {
+		history.ProjectName = r.projectName
+		history.Environment = r.environment
+		history.Server = serverHost
+		history.LastUpdated = time.Now().UTC()
+	}
+}
+
+func deploymentStateDocument(deployment *DeploymentState) (*takoapi.DeploymentStateDocument, error) {
 	if deployment == nil {
 		return nil, fmt.Errorf("deployment is nil")
 	}
@@ -166,14 +181,14 @@ func cloneDeploymentState(deployment *DeploymentState) (*DeploymentState, error)
 	if err != nil {
 		return nil, err
 	}
-	var out DeploymentState
+	var out takoapi.DeploymentStateDocument
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func cloneDeploymentHistory(history *DeploymentHistory) (*DeploymentHistory, error) {
+func deploymentHistoryDocument(history *DeploymentHistory) (*takoapi.DeploymentHistoryDocument, error) {
 	if history == nil {
 		return nil, nil
 	}
@@ -181,7 +196,7 @@ func cloneDeploymentHistory(history *DeploymentHistory) (*DeploymentHistory, err
 	if err != nil {
 		return nil, err
 	}
-	var out DeploymentHistory
+	var out takoapi.DeploymentHistoryDocument
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, err
 	}

@@ -237,9 +237,13 @@ normally runs commands over SSH and talks to takod through its Unix socket.
 
 Supported helpers include reading and writing desired state, aggregate actual
 state, per-node actual state, deleting per-node actual state, deployment
-history, single deployment records, and appending state events. Every helper has
-a `Context` variant (for example `ReadDesiredContext` and
-`AppendEventContext`); the legacy non-context methods remain and call the
+history, single deployment records, and appending state events. The
+`ReplicateDeploymentContext` helper writes a deployment record first and then an
+optional deployment history document, matching the write primitive used by the
+CLI's internal mesh replication. SSH/config-aware fan-out remains in
+`internal/state`; it delegates each per-node write to this public stateclient
+helper. Every helper has a `Context` variant (for example `ReadDesiredContext`
+and `AppendEventContext`); the legacy non-context methods remain and call the
 context variants with `context.Background()`.
 
 The state client also exposes typed `/v1/lease` helpers over the same private
@@ -351,6 +355,25 @@ func writeDesired() error {
     }
 
     return client.WriteDesired(doc)
+}
+
+func replicateDeployment(ctx context.Context) error {
+    client := stateclient.New(fakeExecutor{})
+
+    deployment := takoapi.DeploymentStateDocument{
+        ID:          "deploy_123",
+        ProjectName: "web-app",
+        Environment: "production",
+        Status:      takoapi.StatusSuccess,
+    }
+    history := &takoapi.DeploymentHistoryDocument{
+        ProjectName:  "web-app",
+        Environment:  "production",
+        Deployments: []*takoapi.DeploymentStateDocument{&deployment},
+        LastUpdated: time.Now().UTC(),
+    }
+
+    return client.ReplicateDeploymentContext(ctx, deployment, history)
 }
 
 func readLease(ctx context.Context) error {

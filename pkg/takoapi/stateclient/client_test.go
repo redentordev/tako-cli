@@ -264,6 +264,98 @@ func TestWriteAndReadDeploymentUseIDAsRevision(t *testing.T) {
 	}
 }
 
+func TestReplicateDeploymentWritesDeploymentThenHistory(t *testing.T) {
+	exec := &fakeExecutor{}
+	client := New(exec)
+	deployment := takoapi.DeploymentStateDocument{
+		ID:          "deploy_123",
+		ProjectName: "demo",
+		Environment: "production",
+		Status:      takoapi.StatusSuccess,
+		Services:    map[string]takoapi.ServiceStateDocument{"web": {Name: "web", Replicas: 1}},
+	}
+	history := &takoapi.DeploymentHistoryDocument{
+		ProjectName: "demo",
+		Environment: "production",
+		Deployments: []*takoapi.DeploymentStateDocument{&deployment},
+	}
+
+	if err := client.ReplicateDeploymentContext(context.Background(), deployment, history); err != nil {
+		t.Fatalf("ReplicateDeploymentContext returned error: %v", err)
+	}
+
+	if len(exec.calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(exec.calls))
+	}
+	deploymentRequest := decodeRequest(t, exec.calls[0].body)
+	if deploymentRequest.Document != takoapi.StateDocumentDeployment || deploymentRequest.RevisionID != "deploy_123" {
+		t.Fatalf("first request = %#v, want deployment write", deploymentRequest)
+	}
+	historyRequest := decodeRequest(t, exec.calls[1].body)
+	if historyRequest.Document != takoapi.StateDocumentHistory || historyRequest.RevisionID != "" {
+		t.Fatalf("second request = %#v, want history write", historyRequest)
+	}
+}
+
+func TestReplicateDeploymentSkipsNilHistory(t *testing.T) {
+	exec := &fakeExecutor{}
+	deployment := takoapi.DeploymentStateDocument{
+		ID:          "deploy_123",
+		ProjectName: "demo",
+		Environment: "production",
+	}
+
+	if err := New(exec).ReplicateDeployment(deployment, nil); err != nil {
+		t.Fatalf("ReplicateDeployment returned error: %v", err)
+	}
+
+	call := onlyCall(t, exec)
+	request := decodeRequest(t, call.body)
+	if request.Document != takoapi.StateDocumentDeployment || request.RevisionID != "deploy_123" {
+		t.Fatalf("request = %#v, want deployment write", request)
+	}
+}
+
+func TestReplicateDeploymentStopsWhenDeploymentWriteFails(t *testing.T) {
+	exec := &fakeExecutor{queue: []string{"not-json"}}
+	deployment := takoapi.DeploymentStateDocument{
+		ID:          "deploy_123",
+		ProjectName: "demo",
+		Environment: "production",
+	}
+	history := &takoapi.DeploymentHistoryDocument{ProjectName: "demo", Environment: "production"}
+
+	err := New(exec).ReplicateDeploymentContext(context.Background(), deployment, history)
+	if err == nil {
+		t.Fatal("ReplicateDeploymentContext returned nil, want error")
+	}
+	if len(exec.calls) != 1 {
+		t.Fatalf("calls = %d, want 1 after deployment write failure", len(exec.calls))
+	}
+}
+
+func TestReplicateDeploymentContextCancellationPropagatesToExecutor(t *testing.T) {
+	exec := &fakeExecutor{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	deployment := takoapi.DeploymentStateDocument{
+		ID:          "deploy_123",
+		ProjectName: "demo",
+		Environment: "production",
+	}
+
+	err := New(exec).ReplicateDeploymentContext(ctx, deployment, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReplicateDeploymentContext error = %v, want context.Canceled", err)
+	}
+	if !errors.Is(exec.ctxErr, context.Canceled) {
+		t.Fatalf("executor ctx err = %v, want context.Canceled", exec.ctxErr)
+	}
+	if len(exec.calls) != 0 {
+		t.Fatalf("recorded calls = %d, want 0 after canceled executor", len(exec.calls))
+	}
+}
+
 func TestAppendEventSendsPostStateRequest(t *testing.T) {
 	exec := &fakeExecutor{}
 	event := takoapi.NewStateEventDocument("demo", "production", "deploy.started")
