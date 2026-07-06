@@ -111,13 +111,18 @@ warning/error details when fallbacks failed. `tako state lease --output json`
 returns a `StateLeaseResult` with selected servers and per-node lease/error
 entries. `tako state lease release --output json --id <lease> --force` returns
 a `StateLeaseReleaseResult` with the exact `leaseId`, selected servers,
-released node names/count, and node lease/error entries. `tako state forget-node
-NODE --yes --output json` returns a `StateForgetNodeResult` with selected
-servers, the retired node, requested server filter, per-node cleanup outcomes
+released node names/count, and node lease/error entries. `tako state status
+--output json` returns a `StateStatusResult` with project/environment,
+requested server filter, local `.tako` summary, per-node remote history,
+desired/actual runtime state, lease and reachability details, best-known
+sources, sync recommendations, node counts, unreachable-node guidance, and
+`error` when no selected node is reachable. `tako state forget-node NODE --yes
+--output json` returns a `StateForgetNodeResult` with selected servers, the
+retired node, requested server filter, per-node cleanup outcomes
 (`nodeActualExisted`, `aggregatePruned`, warnings/errors), and a summary of
-reachable nodes, standalone snapshots found, and aggregate actual states pruned. The Go
-definitions in `pkg/engine` (`types.go` and per-command files) are the source
-of truth.
+reachable nodes, standalone snapshots found, and aggregate actual states
+pruned. The Go definitions in `pkg/engine` (`types.go` and per-command files)
+are the source of truth.
 
 ## Config Export / Pull
 
@@ -236,7 +241,11 @@ jq '.status' state-pull.json
 tako state lease --output json > leases.json
 tako state lease release --output json --id "$LEASE_ID" --force > lease-release.json
 
-# 8. After removing a retired node from tako.yaml, clean replicated runtime state
+# 8. Inspect local/remote state sync without prose on stdout
+tako state status --output json > state-status.json
+jq '.bestKnown.history.source, .sync.recommendations[]' state-status.json
+
+# 9. After removing a retired node from tako.yaml, clean replicated runtime state
 tako state forget-node old-node --yes --output json > forget-node.json
 jq '.summary' forget-node.json
 ```

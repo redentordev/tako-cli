@@ -828,6 +828,63 @@ environments:
 	}
 }
 
+func TestRunStateStatusMachineJSONSuppressesHumanOutput(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		tempDir := t.TempDir()
+		t.Chdir(tempDir)
+		configPath := filepath.Join(tempDir, "tako.yaml")
+		if err := os.WriteFile(configPath, []byte(`
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+    password: test-password
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+`), 0600); err != nil {
+			t.Fatalf("failed to write config: %v", err)
+		}
+
+		oldCfgFile, oldStateServer, oldEnvFlag := cfgFile, stateServer, envFlag
+		oldCollect := collectStateStatusNodesForCommand
+		cfgFile = configPath
+		stateServer = ""
+		envFlag = "production"
+		collectStateStatusNodesForCommand = func(cfg *config.Config, envName string, requestedServer string) ([]stateStatusNode, error) {
+			return []stateStatusNode{{name: "node-a", host: "10.0.0.1", envNodes: []string{"node-a"}, connectErr: errors.New("dial timeout")}}, nil
+		}
+		defer func() {
+			cfgFile = oldCfgFile
+			stateServer = oldStateServer
+			envFlag = oldEnvFlag
+			collectStateStatusNodesForCommand = oldCollect
+		}()
+
+		stdout := captureConfigExportStdout(t, func() {
+			if err := runStateStatus(&cobra.Command{}, nil); err == nil {
+				t.Fatal("runStateStatus should return no-reachable error")
+			}
+		})
+		if strings.Contains(stdout, "Project:") || strings.Contains(stdout, "=== Local State ===") {
+			t.Fatalf("machine stdout contains human status prose: %q", stdout)
+		}
+		var decoded engine.StateStatusResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable status JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStateStatusResult || decoded.Project != "demo" || decoded.Counts.ReachableNodes != 0 || decoded.Error == "" {
+			t.Fatalf("decoded result = %#v", decoded)
+		}
+	})
+}
+
 func TestStateSyncRecommendationReportsSyncedState(t *testing.T) {
 	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	lines := stateSyncRecommendation(

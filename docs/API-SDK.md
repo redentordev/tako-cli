@@ -53,6 +53,14 @@ commands in `cmd/` are thin adapters over this package.
   `StatePullResult` with status (`synced_history`, `recovered_mesh_actual`,
   `recovered_running_mesh`, or `none_found`), source server, synced count,
   latest deployment summary, and non-fatal recovery warning/error details.
+- State status summarization is available as `StateStatus(ctx,
+  StateStatusRequest)`. Adapters collect local `.tako` and remote node
+  documents (history, desired, actual, node-actual, leases, agent/mesh status)
+  and pass them to the engine; the engine returns a `StateStatusResult` with
+  per-node summaries, best-known sources, sync recommendations, counts,
+  unreachable guidance, and a populated `error` when no selected node is
+  reachable. The engine does not connect to nodes or render the human status
+  sections.
 - Remote operation lease inspection/unlock is available as `StateLease(ctx,
   StateLeaseRequest)` and `ReleaseStateLease(ctx, StateLeaseReleaseRequest)`.
   `ReleaseStateLease` force-releases only the exact requested lease ID on
@@ -117,6 +125,24 @@ if err != nil {
 }
 _ = result.Status
 _ = result.Latest
+```
+
+#### State status example
+
+```go
+result, err := eng.StateStatus(ctx, engine.StateStatusRequest{
+    Project:     "myapp",
+    Environment: "production",
+    Local: engine.StateStatusLocalInput{Path: ".tako", Exists: true, Current: currentLocal},
+    Nodes: []engine.StateStatusRemoteNodeInput{
+        {Name: "node-a", Host: "10.0.0.1", History: history, Desired: desired, Actual: actual, Lease: lease},
+    },
+})
+if err != nil && result == nil {
+    return err
+}
+_ = result.BestKnown
+_ = result.Sync.Recommendations
 ```
 
 #### State lease release example

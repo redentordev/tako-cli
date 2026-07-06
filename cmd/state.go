@@ -134,6 +134,7 @@ var (
 	syncStateCollectDeploymentHistories = collectStateDeploymentHistoriesWithPool
 	syncStateRecoverFromMeshActual      = recoverAndSaveStateFromMeshActualWithPool
 	syncStateRecoverFromRunningMesh     = recoverAndSaveStateFromRunningMeshWithPool
+	collectStateStatusNodesForCommand   = collectStateStatusNodes
 )
 
 const stateStatusRequestTimeout = 10 * time.Second
@@ -491,169 +492,316 @@ func latestDeploymentByTimestamp(deployments []*remotestate.DeploymentState) *re
 }
 
 func runStateStatus(cmd *cobra.Command, args []string) error {
-	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-
 	envName := getEnvironmentName(cfg)
 
-	fmt.Printf("Project: %s\n", cfg.Project.Name)
-	fmt.Printf("Environment: %s\n\n", envName)
-
-	// Check local state
-	fmt.Println("=== Local State ===")
-	localPath := ".tako"
-	localExists := false
-	var localCurrent *localstate.DeploymentState
-
-	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
-		localExists = true
-		fmt.Printf("Directory: %s (exists)\n", localPath)
-
-		// Try to load local state
-		localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
-		if err != nil {
-			fmt.Printf("Status: Error loading state: %v\n", err)
-		} else {
-			currentDep, err := localMgr.GetCurrentDeployment()
-			if err != nil || currentDep == nil {
-				fmt.Println("Status: No deployments recorded locally")
-			} else {
-				localCurrent = currentDep
-				fmt.Printf("Last deployment:\n")
-				fmt.Printf("  ID:      %s\n", currentDep.DeploymentID)
-				fmt.Printf("  Time:    %s (%s ago)\n", currentDep.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(currentDep.Timestamp)))
-				fmt.Printf("  Status:  %s\n", currentDep.Status)
-				if currentDep.GitCommit != "" {
-					fmt.Printf("  Commit:  %s\n", currentDep.GitCommit[:min(7, len(currentDep.GitCommit))])
-				}
-			}
-		}
-	} else {
-		fmt.Printf("Directory: %s (missing)\n", localPath)
-		fmt.Println("Status: No local state")
-	}
-
-	fmt.Println()
-
-	// Check remote state across the mesh by default. A requested --server keeps
-	// this command useful for focused one-node debugging.
-	if stateServer == "" {
-		fmt.Println("=== Remote Mesh State ===")
-	} else {
-		fmt.Println("=== Remote State ===")
-	}
-
-	remoteNodes, err := collectStateStatusNodes(cfg, envName, stateServer)
+	localInput := collectStateStatusLocal(cfg, envName)
+	remoteNodes, err := collectStateStatusNodesForCommand(cfg, envName, stateServer)
 	if err != nil {
 		return err
 	}
-	printStateStatusNodes(remoteNodes, cfg)
-	printStateStatusUnreachableGuidance(remoteNodes)
 
-	histories, desiredCandidates, actualCandidates, nodeActualCandidates := stateStatusCandidates(remoteNodes)
-	bestHistory, hasRemoteHistory := bestDeploymentHistory(histories)
-	bestDesired, hasDesired := bestDesiredRevision(desiredCandidates)
-	bestActual, hasActual, bestNodeActual := bestStateStatusActual(cfg.Project.Name, envName, actualCandidates, nodeActualCandidates)
-
-	fmt.Println()
-	printBestKnownState(bestHistory, hasRemoteHistory, bestDesired, hasDesired, bestActual, hasActual, bestNodeActual)
-
-	fmt.Println()
-
-	// Sync recommendation
-	fmt.Println("=== Sync Status ===")
-	for _, line := range stateSyncRecommendation(localExists, localCurrent, bestHistory, hasRemoteHistory, stateStatusUnreachableCount(remoteNodes)) {
-		fmt.Println(line)
+	ctx := context.Background()
+	if cmd != nil {
+		ctx = cmd.Context()
 	}
-
-	if stateStatusReachableCount(remoteNodes) == 0 {
-		return stateStatusNoReachableError(envName, remoteNodes)
+	result, statusErr := cliEngine().StateStatus(ctx, engine.StateStatusRequest{
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Server:      stateServer,
+		Local:       localInput,
+		Nodes:       engineStateStatusNodes(remoteNodes),
+	})
+	if result != nil && machineOutputEnabled() {
+		if emitErr := emitResultDocument(result); emitErr != nil && statusErr == nil {
+			statusErr = emitErr
+		}
 	}
+	if machineOutputEnabled() {
+		return statusErr
+	}
+	if result != nil {
+		renderStateStatusResult(result, cfg)
+	}
+	return statusErr
+}
 
-	return nil
+func collectStateStatusLocal(cfg *config.Config, envName string) engine.StateStatusLocalInput {
+	localPath := ".tako"
+	input := engine.StateStatusLocalInput{Path: localPath}
+	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
+		input.Exists = true
+		localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+		if err != nil {
+			input.Error = err.Error()
+			return input
+		}
+		currentDep, err := localMgr.GetCurrentDeployment()
+		if err == nil && currentDep != nil {
+			input.Current = currentDep
+		}
+	}
+	return input
 }
 
 func stateSyncRecommendation(localExists bool, localCurrent *localstate.DeploymentState, bestHistory stateHistoryCandidate, hasRemoteHistory bool, unreachableCount int) []string {
-	lines := make([]string, 0, 4)
-	if !localExists {
-		lines = append(lines, "Local state is missing.")
-		if hasRemoteHistory {
-			lines = append(lines, fmt.Sprintf("Remote deployment history is available from %s.", bestHistory.source))
-			lines = append(lines, "Run 'tako state pull' to sync from the freshest reachable node.")
-			return lines
-		}
-		lines = append(lines, "No remote deployment history was found on reachable nodes.")
-		return lines
-	}
+	return engine.StateStatusSyncRecommendation(localExists, localCurrent, engine.StateStatusHistoryCandidate{Source: bestHistory.source, History: bestHistory.history}, hasRemoteHistory, unreachableCount)
+}
 
-	lines = append(lines, "Local state exists.")
-	if localCurrent == nil {
-		lines = append(lines, "No current local deployment is recorded.")
-		if hasRemoteHistory {
-			lines = append(lines, fmt.Sprintf("Remote deployment history is available from %s.", bestHistory.source))
-			lines = append(lines, "Run 'tako state pull' to sync from the freshest reachable node.")
-		} else {
-			lines = append(lines, "No remote deployment history was found on reachable nodes.")
+func engineStateStatusNodes(nodes []stateStatusNode) []engine.StateStatusRemoteNodeInput {
+	out := make([]engine.StateStatusRemoteNodeInput, 0, len(nodes))
+	for _, node := range nodes {
+		input := engine.StateStatusRemoteNodeInput{
+			Name:       node.name,
+			Host:       node.host,
+			EnvNodes:   append([]string(nil), node.envNodes...),
+			ConnectErr: node.connectErr,
+			History:    node.history,
+			HistoryErr: node.historyErr,
+			Desired:    node.desired,
+			DesiredErr: node.desiredErr,
+			Actual:     node.actual,
+			ActualErr:  node.actualErr,
+			Lease:      node.lease,
+			LeaseErr:   node.leaseErr,
 		}
-		return lines
-	}
-
-	if !hasRemoteHistory {
-		lines = append(lines, "No remote deployment history was found on reachable nodes; local deployment records are the best known copy.")
-		if unreachableCount > 0 {
-			lines = append(lines, "Some checked nodes are unreachable; restore reachability or remove destroyed nodes from config before pulling state.")
-		} else {
-			lines = append(lines, "Run 'tako deploy --yes' to reconcile the reachable mesh and publish fresh deployment state.")
-		}
-		return lines
-	}
-
-	remoteLatest := latestDeploymentByTimestamp(bestHistory.history.Deployments)
-	if remoteLatest == nil {
-		lines = append(lines, "No remote deployment history was found on reachable nodes; local deployment records are the best known copy.")
-		if unreachableCount > 0 {
-			lines = append(lines, "Some checked nodes are unreachable; restore reachability or remove destroyed nodes from config before pulling state.")
-		} else {
-			lines = append(lines, "Run 'tako deploy --yes' to reconcile the reachable mesh and publish fresh deployment state.")
-		}
-		return lines
-	}
-
-	if localCurrent.DeploymentID == remoteLatest.ID {
-		lines = append(lines, fmt.Sprintf("Local deployment records match the freshest reachable remote deployment from %s.", bestHistory.source))
-		lines = append(lines, "No state pull needed.")
-		return lines
-	}
-	if deploymentsEquivalentExceptID(localCurrent, remoteLatest) {
-		lines = append(lines, fmt.Sprintf("Local and remote deployment records describe the same deployment from %s, but use different ID formats.", bestHistory.source))
-		lines = append(lines, "No state pull needed.")
-		return lines
-	}
-
-	if !localCurrent.Timestamp.IsZero() && !remoteLatest.Timestamp.IsZero() {
-		if localCurrent.Timestamp.Before(remoteLatest.Timestamp) {
-			lines = append(lines, fmt.Sprintf("Remote deployment history from %s is newer than local state.", bestHistory.source))
-			lines = append(lines, "Run 'tako state pull' to refresh local deployment records.")
-			return lines
-		}
-		if localCurrent.Timestamp.After(remoteLatest.Timestamp) {
-			lines = append(lines, fmt.Sprintf("Local deployment records are newer than the freshest reachable remote history from %s.", bestHistory.source))
-			if unreachableCount > 0 {
-				lines = append(lines, "Some checked nodes are unreachable; restore reachability or remove destroyed nodes from config before pulling state.")
-			} else {
-				lines = append(lines, "All checked nodes are reachable, so remote deployment history appears stale.")
-				lines = append(lines, "Run 'tako deploy --yes' to reconcile the mesh and publish fresh state; avoid 'tako state pull' unless you intend to replace local records.")
+		if node.agent != nil {
+			input.Agent = &engine.StateStatusAgentSummary{
+				Runtime:   node.agent.Runtime,
+				Version:   node.agent.Version,
+				Hostname:  node.agent.Hostname,
+				Socket:    node.agent.Socket,
+				DataDir:   node.agent.DataDir,
+				StartedAt: node.agent.StartedAt,
+				Now:       node.agent.Now,
 			}
-			return lines
+		}
+		input.AgentErr = node.agentErr
+		if node.mesh != nil {
+			input.Mesh = &engine.StateStatusMeshSummary{
+				Interface:  node.mesh.Interface,
+				Up:         node.mesh.Up,
+				ListenPort: node.mesh.ListenPort,
+				Peers:      node.mesh.Peers,
+				PublicKey:  node.mesh.PublicKey,
+			}
+		}
+		input.MeshErr = node.meshErr
+		for _, candidate := range node.nodeActual {
+			input.NodeActual = append(input.NodeActual, engine.StateStatusNodeActualCandidate{
+				Source: candidate.source,
+				Node:   candidate.node,
+				Actual: candidate.actual,
+			})
+		}
+		out = append(out, input)
+	}
+	return out
+}
+
+func renderStateStatusResult(result *engine.StateStatusResult, cfg *config.Config) {
+	fmt.Printf("Project: %s\n", result.Project)
+	fmt.Printf("Environment: %s\n\n", result.Environment)
+
+	fmt.Println("=== Local State ===")
+	renderStateStatusLocal(result.Local)
+	fmt.Println()
+
+	fmt.Printf("=== %s ===\n", result.Remote.Title)
+	renderStateStatusNodes(result.Remote.Nodes, cfg)
+	if len(result.Remote.UnreachableGuidance) > 0 {
+		fmt.Println()
+		for _, line := range result.Remote.UnreachableGuidance {
+			fmt.Println(line)
 		}
 	}
 
-	lines = append(lines, fmt.Sprintf("Local and remote deployment timestamps match, but deployment IDs differ from %s.", bestHistory.source))
-	lines = append(lines, "Run 'tako state pull' to normalize local deployment records.")
-	return lines
+	fmt.Println()
+	renderBestKnownState(result.BestKnown)
+	fmt.Println()
+
+	fmt.Println("=== Sync Status ===")
+	for _, line := range result.Sync.Recommendations {
+		fmt.Println(line)
+	}
+}
+
+func renderStateStatusLocal(local engine.StateStatusLocalSummary) {
+	if local.Exists {
+		fmt.Printf("Directory: %s (exists)\n", local.Path)
+		if local.Error != "" {
+			fmt.Printf("Status: Error loading state: %s\n", local.Error)
+			return
+		}
+		if local.LastDeployment == nil {
+			fmt.Println("Status: No deployments recorded locally")
+			return
+		}
+		dep := local.LastDeployment
+		fmt.Printf("Last deployment:\n")
+		fmt.Printf("  ID:      %s\n", dep.ID)
+		fmt.Printf("  Time:    %s (%s ago)\n", dep.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(dep.Timestamp)))
+		fmt.Printf("  Status:  %s\n", dep.Status)
+		if dep.Commit != "" {
+			fmt.Printf("  Commit:  %s\n", dep.Commit[:min(7, len(dep.Commit))])
+		}
+		return
+	}
+	fmt.Printf("Directory: %s (missing)\n", local.Path)
+	fmt.Println("Status: No local state")
+}
+
+func renderStateStatusNodes(nodes []engine.StateStatusNodeResult, cfg *config.Config) {
+	fmt.Printf("Nodes: %d configured, %d reachable\n", len(nodes), engineStateStatusReachableCount(nodes))
+	for _, node := range nodes {
+		fmt.Printf("\nNode: %s (%s)\n", node.Name, node.Host)
+		if !node.Reachable {
+			fmt.Printf("Status: unreachable - %s\n", node.Error)
+			continue
+		}
+		fmt.Println("Status: reachable")
+		renderStateStatusAgent(node.Agent)
+		renderStateStatusMesh(node.Mesh, cfg)
+		renderStateStatusHistory(node.History)
+		renderStateStatusDesired(node.Desired)
+		renderStateStatusActual(node.Actual)
+		renderStateStatusLease(node.Lease)
+	}
+}
+
+func engineStateStatusReachableCount(nodes []engine.StateStatusNodeResult) int {
+	reachable := 0
+	for _, node := range nodes {
+		if node.Reachable {
+			reachable++
+		}
+	}
+	return reachable
+}
+
+func renderStateStatusAgent(status *engine.StateStatusAgentSummary) {
+	if status == nil || status.Error != "" {
+		errText := "<nil>"
+		if status != nil && status.Error != "" {
+			errText = status.Error
+		}
+		fmt.Printf("Agent: unavailable - %s\n", errText)
+		return
+	}
+	fmt.Printf("Agent: %s %s on %s\n", status.Runtime, status.Version, status.Hostname)
+	if !status.StartedAt.IsZero() {
+		fmt.Printf("  Started: %s (%s ago)\n", status.StartedAt.Format(time.RFC3339), formatStateDuration(status.Now.Sub(status.StartedAt)))
+	}
+}
+
+func renderStateStatusMesh(status *engine.StateStatusMeshSummary, cfg *config.Config) {
+	if cfg.Mesh == nil {
+		return
+	}
+	if status == nil || status.Error != "" {
+		errText := "<nil>"
+		if status != nil && status.Error != "" {
+			errText = status.Error
+		}
+		fmt.Printf("Mesh: unavailable - %s\n", errText)
+		return
+	}
+	if !status.Up {
+		fmt.Printf("Mesh: %s is down\n", status.Interface)
+		return
+	}
+	fmt.Printf("Mesh: %s is up, peers %d\n", status.Interface, status.Peers)
+}
+
+func renderStateStatusHistory(history engine.StateStatusHistorySummary) {
+	if !history.Recorded {
+		if history.Missing {
+			fmt.Println("History: not recorded")
+		} else if history.Error != "" {
+			fmt.Printf("History: unavailable - %s\n", history.Error)
+		} else {
+			fmt.Println("History: empty")
+		}
+		return
+	}
+	fmt.Printf("History: %d deployment(s), freshness %s\n", history.Count, history.Freshness.Format(time.RFC3339))
+	if history.Latest != nil {
+		fmt.Printf("  Latest: %s, %s, %s (%s ago)\n", history.Latest.DisplayID, history.Latest.Status, history.Latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(history.Latest.Timestamp)))
+	}
+}
+
+func renderStateStatusDesired(desired engine.StateStatusDesiredSummary) {
+	if !desired.Recorded {
+		if desired.Error != "" {
+			fmt.Printf("Desired: error - %s\n", desired.Error)
+		} else {
+			fmt.Println("Desired: not recorded")
+		}
+		return
+	}
+	fmt.Printf("Desired: %s, %d service(s), freshness %s\n", desired.RevisionID, desired.ServiceCount, desired.Freshness.Format(time.RFC3339))
+}
+
+func renderStateStatusActual(actual engine.StateStatusActualSummary) {
+	if !actual.Recorded {
+		if actual.Error != "" {
+			fmt.Printf("Actual: error - %s\n", actual.Error)
+		} else {
+			fmt.Println("Actual: not recorded")
+		}
+	} else {
+		fmt.Printf("Actual: %d service(s), freshness %s\n", actual.ServiceCount, actual.Freshness.Format(time.RFC3339))
+	}
+	if actual.NodeActualCount > 0 {
+		fmt.Printf("Node actual: %d snapshot(s)\n", actual.NodeActualCount)
+	}
+}
+
+func renderStateStatusLease(lease engine.StateStatusLeaseSummary) {
+	if lease.Error != "" {
+		fmt.Printf("Lease: error - %s\n", lease.Error)
+		return
+	}
+	if lease.Lease == nil {
+		fmt.Println("Lease: free")
+		return
+	}
+	fmt.Printf("Lease: held by %s\n", lease.Lease.Who)
+	fmt.Printf("  ID:        %s\n", lease.Lease.ID)
+	fmt.Printf("  Operation: %s\n", lease.Lease.Operation)
+	fmt.Printf("  Created:   %s (%s ago)\n", lease.Lease.CreatedAt.Format(time.RFC3339), formatStateDuration(time.Since(lease.Lease.CreatedAt)))
+	fmt.Printf("  Expires:   %s (in %s)\n", lease.Lease.ExpiresAt.Format(time.RFC3339), time.Until(lease.Lease.ExpiresAt).Round(time.Second))
+}
+
+func renderBestKnownState(best engine.StateStatusBestKnown) {
+	fmt.Println("=== Best Known State ===")
+	if best.History != nil {
+		fmt.Printf("Deployment history: %s (%d deployment(s), freshness %s)\n", best.History.Source, best.History.Count, best.History.Freshness.Format(time.RFC3339))
+		if best.History.Latest != nil {
+			fmt.Printf("  Latest: %s, %s, %s (%s ago)\n", best.History.Latest.DisplayID, best.History.Latest.Status, best.History.Latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(best.History.Latest.Timestamp)))
+		}
+	} else {
+		fmt.Println("Deployment history: not found on reachable nodes")
+	}
+	if best.Desired != nil {
+		fmt.Printf("Desired runtime: %s (%s, freshness %s)\n", best.Desired.Source, best.Desired.RevisionID, best.Desired.Freshness.Format(time.RFC3339))
+	} else {
+		fmt.Println("Desired runtime: not found on reachable nodes")
+	}
+	if best.Actual != nil {
+		fmt.Printf("Actual runtime: %s (%d service(s), freshness %s)\n", best.Actual.Source, best.Actual.ServiceCount, best.Actual.Freshness.Format(time.RFC3339))
+	} else {
+		fmt.Println("Actual runtime: not found on reachable nodes")
+	}
+	if len(best.NodeActual) > 0 {
+		fmt.Printf("Node actual: %d node(s)\n", len(best.NodeActual))
+		for _, node := range best.NodeActual {
+			fmt.Printf("  %s: %s, freshness %s\n", node.Node, node.Source, node.Freshness.Format(time.RFC3339))
+		}
+	}
 }
 
 func deploymentsEquivalentExceptID(localCurrent *localstate.DeploymentState, remoteLatest *remotestate.DeploymentState) bool {
