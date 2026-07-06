@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -98,5 +99,27 @@ func TestReleaseStateLeaseByIDReportsMissingReachableLeaseWithUnreachableNodes(t
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want %q", err, want)
 		}
+	}
+}
+
+func TestReleaseStateLeaseByIDContextCancelledBeforeWorkDoesNotRelease(t *testing.T) {
+	manager := &recordingStateLeaseManager{}
+	nodes := []StateLeaseNodeResult{{
+		Name:    "node-a",
+		Manager: manager,
+		Lease: &remotestate.LeaseInfo{
+			ID:        "lease-active",
+			ExpiresAt: time.Now().Add(time.Minute),
+		},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := ReleaseStateLeaseByIDContext(ctx, nodes, "lease-active", true, time.Now())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if released := manager.Released(); len(released) != 0 {
+		t.Fatalf("released leases = %#v, want none", released)
 	}
 }

@@ -761,16 +761,18 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	result.Duration = deploymentDuration.Seconds()
 
 	if deploymentFailed {
-		recordErr := RecordFailedDeploymentStateContext(ctx, s.stateManager, localSaverOrNil(s.localStateMgr), deployment, cfg, envName, serverNames, s.sourceInfo.CommitInfo, startTime, deploymentError)
+		recordCtx, recordCancel := failedDeploymentRecordContext(ctx)
+		recordErr := RecordFailedDeploymentStateContext(recordCtx, s.stateManager, localSaverOrNil(s.localStateMgr), deployment, cfg, envName, serverNames, s.sourceInfo.CommitInfo, startTime, deploymentError)
 		if recordErr == nil && len(s.servers) > 1 {
 			replicator := remotestate.NewStateReplicator(s.sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
-			history, err := s.stateManager.LoadHistoryContext(ctx)
+			history, err := s.stateManager.LoadHistoryContext(recordCtx)
 			if err != nil {
 				recordErr = fmt.Errorf("failed to load failed deployment history for replication: %w", err)
-			} else if err := replicator.ReplicateDeploymentContext(ctx, deployment, history); err != nil {
+			} else if err := replicator.ReplicateDeploymentContext(recordCtx, deployment, history); err != nil {
 				recordErr = fmt.Errorf("failed to replicate failed deployment history: %w", err)
 			}
 		}
+		recordCancel()
 		if recordErr != nil {
 			e.debug(events.TypeWarning, events.PhaseState, fmt.Sprintf("Warning: failed to record failed deployment state: %v\n", recordErr))
 		}

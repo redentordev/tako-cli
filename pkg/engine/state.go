@@ -31,6 +31,22 @@ type LocalDeploymentSaver interface {
 	SaveDeployment(*localstate.DeploymentState) error
 }
 
+const (
+	// FailedDeploymentCleanupTimeout bounds best-effort failure-state writes after
+	// the operation context has already been cancelled or exceeded its deadline.
+	FailedDeploymentCleanupTimeout = 10 * time.Second
+)
+
+func failedDeploymentRecordContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.Background(), func() {}
+	}
+	if ctx.Err() == nil {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(context.Background(), FailedDeploymentCleanupTimeout)
+}
+
 // PersistTakodRuntimeState writes desired/actual/event state documents to
 // every target node.
 func PersistTakodRuntimeState(
@@ -127,9 +143,8 @@ func RecordFailedDeploymentStateContext(
 	startTime time.Time,
 	deploymentErr error,
 ) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx, cancel := failedDeploymentRecordContext(ctx)
+	defer cancel()
 	if deployment == nil {
 		return fmt.Errorf("deployment state is nil")
 	}

@@ -243,7 +243,10 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 	}
 
 	recordFailure := func(deployErr error) (*DeployResult, error) {
-		if recordErr := RecordFailedDeploymentStateContext(ctx, stateManager, nil, deployment, cfg, envName, serverNames, nil, startTime, deployErr); recordErr != nil {
+		recordCtx, recordCancel := failedDeploymentRecordContext(ctx)
+		recordErr := RecordFailedDeploymentStateContext(recordCtx, stateManager, nil, deployment, cfg, envName, serverNames, nil, startTime, deployErr)
+		recordCancel()
+		if recordErr != nil {
 			e.emit(events.Event{
 				Type:    events.TypeWarning,
 				Phase:   events.PhaseState,

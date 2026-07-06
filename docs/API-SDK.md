@@ -85,7 +85,11 @@ commands in `cmd/` are thin adapters over this package.
   state/lease requests, remote lease fan-out, and deployment-history
   replication. Remote SSH commands are not all interruptible yet, but leases
   acquired after cancellation are best-effort released and cancellation
-  classifies as `cancelled`.
+  classifies as `cancelled`. Cancelled deploy/run failure paths use a short
+  cleanup context to persist failed/interrupted deployment state and history;
+  repeated saves for the same deployment ID replace the history entry rather
+  than duplicating it. Local locks and remote leases are force-releasable and
+  expire if left stale.
 - Errors are classified for exit-code mapping via `engine.Classify`:
   invalid request, locked/leased, connectivity, cancelled, attention.
 - Every emitted event passes through a secrets redactor; operations
