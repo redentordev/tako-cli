@@ -315,13 +315,25 @@ func NewClientFromConfig(cfg ServerConfig) (*Client, error) {
 	return NewClient(cfg.Host, cfg.Port, cfg.User, cfg.SSHKey)
 }
 
-// Connect establishes the SSH connection with retry logic and optimized TCP settings
+// Connect establishes the SSH connection with retry logic and optimized TCP settings.
 func (c *Client) Connect() error {
+	return c.ConnectContext(context.Background())
+}
+
+// ConnectContext establishes the SSH connection with retry logic and context cancellation support.
+func (c *Client) ConnectContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.conn != nil {
 		return nil // Already connected
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	addr := net.JoinHostPort(c.host, strconv.Itoa(c.port))
@@ -332,42 +344,97 @@ func (c *Client) Connect() error {
 	timeout := connectTimeout()
 
 	for attempt := 1; attempt <= tcpAttempts; attempt++ {
-		// Create TCP connection with custom dialer for better timeout control
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		// Create TCP connection with custom dialer for better timeout control.
 		dialer := &net.Dialer{
 			Timeout:   timeout,
 			KeepAlive: 30 * time.Second,
 		}
 
-		// Establish TCP connection first
-		tcpConn, err := dialer.Dial("tcp", addr)
+		// Establish TCP connection first.
+		tcpConn, err := dialer.DialContext(ctx, "tcp", addr)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			lastErr = fmt.Errorf("TCP dial failed: %w", err)
 			if attempt < tcpAttempts && isTransientDialError(err) {
-				time.Sleep(connectBackoff(attempt))
+				if err := sleepWithContext(ctx, connectBackoff(attempt)); err != nil {
+					return err
+				}
 				continue
 			}
 			return fmt.Errorf("failed to connect after %d attempt(s): %w", attempt, lastErr)
 		}
 
-		// Now establish SSH connection over TCP
-		sshConn, chans, reqs, err := ssh.NewClientConn(tcpConn, addr, c.config)
+		// Now establish SSH connection over TCP. Close the TCP connection on
+		// cancellation so the SSH handshake unblocks promptly.
+		sshConn, chans, reqs, err := newClientConnContext(ctx, tcpConn, addr, c.config)
 		if err != nil {
 			tcpConn.Close()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			lastErr = fmt.Errorf("SSH handshake failed: %w", err)
 			handshakeAttempts++
 			if handshakeAttempts < connectMaxHandshakeAttempts {
-				time.Sleep(connectBackoff(handshakeAttempts))
+				if err := sleepWithContext(ctx, connectBackoff(handshakeAttempts)); err != nil {
+					return err
+				}
 				continue
 			}
 			return fmt.Errorf("failed to establish SSH after %d handshake attempt(s): %w", handshakeAttempts, lastErr)
 		}
+		if err := ctx.Err(); err != nil {
+			_ = sshConn.Close()
+			return err
+		}
 
-		// Create SSH client
+		// Create SSH client.
 		c.conn = ssh.NewClient(sshConn, chans, reqs)
 		return nil
 	}
 
 	return fmt.Errorf("failed to connect after %d attempt(s): %w", tcpAttempts, lastErr)
+}
+
+func newClientConnContext(ctx context.Context, tcpConn net.Conn, addr string, config *ssh.ClientConfig) (ssh.Conn, <-chan ssh.NewChannel, <-chan *ssh.Request, error) {
+	type result struct {
+		conn  ssh.Conn
+		chans <-chan ssh.NewChannel
+		reqs  <-chan *ssh.Request
+		err   error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		conn, chans, reqs, err := ssh.NewClientConn(tcpConn, addr, config)
+		resultCh <- result{conn: conn, chans: chans, reqs: reqs, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		_ = tcpConn.Close()
+		return nil, nil, nil, ctx.Err()
+	case res := <-resultCh:
+		return res.conn, res.chans, res.reqs, res.err
+	}
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func connectTimeout() time.Duration {
@@ -503,7 +570,7 @@ func (c *Client) ExecuteWithContext(ctx context.Context, cmd string) (string, er
 	ctx, cancel, defaultDeadline := withDefaultCommandDeadline(ctx)
 	defer cancel()
 
-	conn, err := c.getConnection()
+	conn, err := c.getConnectionContext(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -543,9 +610,17 @@ func (c *Client) ExecuteWithContext(ctx context.Context, cmd string) (string, er
 	}
 }
 
-// ExecuteStream runs a command and streams output in real-time
+// ExecuteStream runs a command and streams output in real-time.
 func (c *Client) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
-	conn, err := c.getConnection()
+	return c.ExecuteStreamWithContext(context.Background(), cmd, stdout, stderr)
+}
+
+// ExecuteStreamWithContext runs a command, streams output in real-time, and respects context cancellation.
+func (c *Client) ExecuteStreamWithContext(ctx context.Context, cmd string, stdout, stderr io.Writer) error {
+	ctx, cancel, defaultDeadline := withDefaultCommandDeadline(ctx)
+	defer cancel()
+
+	conn, err := c.getConnectionContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -559,7 +634,19 @@ func (c *Client) ExecuteStream(cmd string, stdout, stderr io.Writer) error {
 	session.Stdout = stdout
 	session.Stderr = stderr
 
-	if err := session.Run(cmd); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := session.Start(cmd); err != nil {
+		return fmt.Errorf("failed to start command: %w", err)
+	}
+	if err := waitSessionWithContext(ctx, session); err != nil {
+		if defaultDeadline && errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("remote command timed out after %s", DefaultCommandTimeout)
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		return fmt.Errorf("command failed: %w", err)
 	}
 
@@ -572,7 +659,7 @@ func (c *Client) ExecuteWithInput(ctx context.Context, cmd string, input io.Read
 	ctx, cancel, defaultDeadline := withDefaultCommandDeadline(ctx)
 	defer cancel()
 
-	conn, err := c.getConnection()
+	conn, err := c.getConnectionContext(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -826,20 +913,27 @@ func (c *Client) IsHealthy() bool {
 // getConnection returns the current connection, establishing it if needed
 // This method properly handles the connection state to avoid TOCTOU race conditions
 func (c *Client) getConnection() (*ssh.Client, error) {
+	return c.getConnectionContext(context.Background())
+}
+
+func (c *Client) getConnectionContext(ctx context.Context) (*ssh.Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.conn == nil {
-		// Release lock during connection to avoid blocking other operations
+		// Release lock during connection to avoid blocking other operations.
 		c.mu.Unlock()
-		if err := c.Connect(); err != nil {
-			c.mu.Lock() // Re-acquire before returning
+		if err := c.ConnectContext(ctx); err != nil {
+			c.mu.Lock() // Re-acquire before returning.
 			return nil, err
 		}
-		c.mu.Lock() // Re-acquire after connection
+		c.mu.Lock() // Re-acquire after connection.
 	}
 
-	// Double-check connection is still valid
+	// Double-check connection is still valid.
 	if c.conn == nil {
 		return nil, fmt.Errorf("connection failed: connection is nil after connect")
 	}

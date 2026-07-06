@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/takod"
 )
 
@@ -225,6 +227,39 @@ func TestGatherPSActualStateWithAggregatesSortedErrors(t *testing.T) {
 	if got, want := err.Error(), "node-a: unavailable; node-b: unavailable"; !strings.Contains(got, want) {
 		t.Fatalf("error = %q, want to contain %q", got, want)
 	}
+}
+
+func TestRenderPSResultMachineJSONKeepsStdoutParseable(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		result := &engine.StatusResult{
+			Kind:        engine.KindStatusResult,
+			Project:     "demo",
+			Environment: "production",
+			Servers:     []string{"node-a"},
+			Services: []engine.StatusService{{
+				Name:    "web",
+				Desired: 1,
+				Running: 1,
+				Status:  "running",
+				Ports:   "80",
+			}},
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderPSResult(result); err != nil {
+				t.Fatalf("renderPSResult returned error: %v", err)
+			}
+		})
+		if strings.Contains(stdout, "SERVICE") || strings.Contains(stdout, "No services configured") {
+			t.Fatalf("machine stdout contains human table/prose: %q", stdout)
+		}
+		var decoded engine.StatusResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable status JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStatusResult || len(decoded.Services) != 1 || decoded.Services[0].Name != "web" {
+			t.Fatalf("decoded status result = %#v", decoded)
+		}
+	})
 }
 
 func waitForPSActualStateStarts(t *testing.T, started <-chan string, count int) {

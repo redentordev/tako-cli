@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/spf13/cobra"
 )
 
@@ -34,44 +36,67 @@ func init() {
 }
 
 func runHistory(cmd *cobra.Command, args []string) error {
-	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	envName := getEnvironmentName(cfg)
 
-	opts := &state.HistoryOptions{
+	result, err := cliEngine().History(cmd.Context(), engine.HistoryRequest{
+		Config:        cfg,
+		Environment:   envName,
+		Server:        historyServer,
 		Limit:         historyLimit,
+		Status:        historyStatus,
 		IncludeFailed: true,
-	}
-	if historyStatus != "" {
-		opts.Status = state.DeploymentStatus(historyStatus)
-	}
-
-	histories, err := collectStateDeploymentHistories(cfg, envName, historyServer, false)
+		HistorySource: func() (string, *state.DeploymentHistory, error) {
+			histories, err := collectHistoryDeploymentHistoriesForCommand(cfg, envName, historyServer)
+			if err != nil {
+				return "", nil, fmt.Errorf("failed to load deployment history: %w", err)
+			}
+			best, ok := bestDeploymentHistory(histories)
+			if !ok {
+				return "", nil, nil
+			}
+			return best.source, best.history, nil
+		},
+		ListDeployments: listDeploymentsFromHistory,
+	})
 	if err != nil {
-		return fmt.Errorf("failed to load deployment history: %w", err)
+		return err
 	}
-	best, ok := bestDeploymentHistory(histories)
-	if !ok {
-		fmt.Println("No deployments found")
+	return renderHistoryResult(result)
+}
+
+func collectHistoryDeploymentHistoriesForCommand(cfg *config.Config, envName string, requestedServer string) ([]stateHistoryCandidate, error) {
+	if !machineOutputEnabled() {
+		return collectStateDeploymentHistories(cfg, envName, requestedServer, false)
+	}
+	oldVerbose := verbose
+	verbose = false
+	defer func() { verbose = oldVerbose }()
+	return collectStateDeploymentHistories(cfg, envName, requestedServer, true)
+}
+
+func renderHistoryResult(result *engine.HistoryResult) error {
+	if result == nil {
 		return nil
 	}
-	deployments := listDeploymentsFromHistory(best.history, opts)
-
-	if len(deployments) == 0 {
+	if machineOutputEnabled() {
+		return emitResultDocument(result)
+	}
+	if len(result.Deployments) == 0 {
 		fmt.Println("No deployments found")
 		return nil
 	}
 
 	// Display deployments
-	fmt.Printf("\nDeployment History for %s from %s\n\n", cfg.Project.Name, best.source)
+	fmt.Printf("\nDeployment History for %s from %s\n\n", result.Project, result.SourceServer)
 	fmt.Println(strings.Repeat("─", 120))
 	fmt.Printf("%-12s %-10s %-20s %-10s %-10s %-15s %-40s\n", "ID", "COMMIT", "TIMESTAMP", "VERSION", "STATUS", "DURATION", "MESSAGE")
 	fmt.Println(strings.Repeat("─", 120))
 
-	for _, dep := range deployments {
+	for _, dep := range result.Deployments {
 		// Format timestamp
 		timestamp := dep.Timestamp.Format("2006-01-02 15:04:05")
 
@@ -79,13 +104,13 @@ func runHistory(cmd *cobra.Command, args []string) error {
 		status := formatStatus(dep.Status)
 
 		// Format commit hash
-		commit := dep.GitCommitShort
+		commit := dep.Commit
 		if commit == "" {
 			commit = "-"
 		}
 
 		// Format commit message
-		commitMsg := dep.GitCommitMsg
+		commitMsg := dep.Message
 		if commitMsg == "" {
 			commitMsg = "-"
 		}
@@ -93,11 +118,17 @@ func runHistory(cmd *cobra.Command, args []string) error {
 			commitMsg = commitMsg[:35] + "..."
 		}
 
-		// Format duration
-		duration := state.FormatDuration(dep.Duration)
+		displayID := dep.DisplayID
+		if displayID == "" {
+			displayID = state.FormatDeploymentID(dep.ID)
+		}
+		duration := dep.Duration
+		if duration == "" {
+			duration = state.FormatDuration(time.Duration(dep.DurationSeconds * float64(time.Second)))
+		}
 
 		fmt.Printf("%-12s %-10s %-20s %-10s %-10s %-15s %-40s\n",
-			state.FormatDeploymentID(dep.ID),
+			displayID,
 			commit,
 			timestamp,
 			dep.Version,
@@ -113,7 +144,7 @@ func runHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println(strings.Repeat("─", 120))
-	fmt.Printf("\nShowing %d deployment(s). Use --limit to show more.\n", len(deployments))
+	fmt.Printf("\nShowing %d deployment(s). Use --limit to show more.\n", len(result.Deployments))
 	fmt.Print(historyNextSteps())
 
 	return nil

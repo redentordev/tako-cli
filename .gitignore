@@ -54,6 +54,7 @@ goals/*.md
 goals/**/*.md
 goals/*.draft.yaml
 goals/**/*.draft.yaml
+.tako-pr-summary.md
 
 # Security reports
 security-report-*.html

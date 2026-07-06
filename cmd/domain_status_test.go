@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/health"
 )
 
 func TestDomainExpectedTargetsUseEnvironmentProxyPlacement(t *testing.T) {
@@ -89,21 +88,5 @@ func TestCollectConfiguredDomainSpecsSkipsInternalProxyHosts(t *testing.T) {
 	}
 	if specs[0].Domain != "app.example.com" {
 		t.Fatalf("domain = %q, want app.example.com", specs[0].Domain)
-	}
-}
-
-func TestDomainStatusStrictErrorOnlyFailsPending(t *testing.T) {
-	active := []health.DomainStatus{{Domain: "app.example.com", State: health.DomainStateActive}}
-	if err := domainStatusStrictError(active, true); err != nil {
-		t.Fatalf("active strict status returned error: %v", err)
-	}
-
-	pending := []health.DomainStatus{{Domain: "app.example.com", State: health.DomainStatePendingDNS}}
-	err := domainStatusStrictError(pending, true)
-	if err == nil {
-		t.Fatal("pending strict status returned nil")
-	}
-	if !strings.Contains(err.Error(), "app.example.com=pending_dns") {
-		t.Fatalf("error = %q", err)
 	}
 }

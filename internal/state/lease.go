@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -27,6 +28,11 @@ type LeaseInfo struct {
 
 // AcquireLease acquires the remote deployment lease for this project.
 func (s *StateManager) AcquireLease(operation, environment string, ttl time.Duration) (*LeaseInfo, error) {
+	return s.AcquireLeaseContext(context.Background(), operation, environment, ttl)
+}
+
+// AcquireLeaseContext acquires the remote deployment lease bounded by ctx.
+func (s *StateManager) AcquireLeaseContext(ctx context.Context, operation, environment string, ttl time.Duration) (*LeaseInfo, error) {
 	if environment == "" {
 		environment = s.environment
 	}
@@ -43,7 +49,7 @@ func (s *StateManager) AcquireLease(operation, environment string, ttl time.Dura
 		PID:         os.Getpid(),
 		TTLSeconds:  int64(ttl.Seconds()),
 	}
-	output, err := s.requestJSON("POST", "/v1/lease", request)
+	output, err := s.requestJSONContext(ctx, "POST", "/v1/lease", request)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +76,12 @@ func (s *StateManager) AcquireLease(operation, environment string, ttl time.Dura
 
 // ReadLease returns the currently held remote lease, or nil if none exists.
 func (s *StateManager) ReadLease() (*LeaseInfo, error) {
-	output, err := s.requestJSON("GET", takodclient.LeaseEndpoint(s.projectName, s.environment), nil)
+	return s.ReadLeaseContext(context.Background())
+}
+
+// ReadLeaseContext returns the currently held remote lease bounded by ctx, or nil if none exists.
+func (s *StateManager) ReadLeaseContext(ctx context.Context) (*LeaseInfo, error) {
+	output, err := s.requestJSONContext(ctx, "GET", takodclient.LeaseEndpoint(s.projectName, s.environment), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +97,11 @@ func (s *StateManager) ReadLease() (*LeaseInfo, error) {
 
 // ReleaseLease releases the remote lease if it is still owned by this process.
 func (s *StateManager) ReleaseLease(lease *LeaseInfo) error {
+	return s.ReleaseLeaseContext(context.Background(), lease)
+}
+
+// ReleaseLeaseContext releases the remote lease if it is still owned by this process, bounded by ctx and the cleanup timeout.
+func (s *StateManager) ReleaseLeaseContext(ctx context.Context, lease *LeaseInfo) error {
 	if lease == nil {
 		return nil
 	}
@@ -94,7 +110,7 @@ func (s *StateManager) ReleaseLease(lease *LeaseInfo) error {
 		Environment: lease.Environment,
 		ID:          lease.ID,
 	}
-	_, err := s.requestJSONWithTimeout("DELETE", "/v1/lease", request, leaseReleaseTimeout)
+	_, err := s.requestJSONWithTimeoutContext(ctx, "DELETE", "/v1/lease", request, leaseReleaseTimeout)
 	return err
 }
 

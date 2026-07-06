@@ -27,6 +27,10 @@ reconciliation, proxy config, remote leases, and replicated deployment state.
 	environment to deploy (default: production or only environment)
 
 .PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
 \fB-h\fP, \fB--help\fP[=false]
 	help for tako
 
@@ -35,9 +39,13 @@ reconciliation, proxy config, remote leases, and replicated deployment state.
 	SSH host key verification mode: tofu, strict, ask (default: tofu)
 
 .PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
 \fB-v\fP, \fB--verbose\fP[=false]
 	verbose output
 
 
 .SH SEE ALSO
-\fBtako-access(1)\fP, \fBtako-backup(1)\fP, \fBtako-cleanup(1)\fP, \fBtako-clone-setup(1)\fP, \fBtako-config(1)\fP, \fBtako-deploy(1)\fP, \fBtako-destroy(1)\fP, \fBtako-discovery(1)\fP, \fBtako-doctor(1)\fP, \fBtako-domains(1)\fP, \fBtako-drift(1)\fP, \fBtako-env(1)\fP, \fBtako-history(1)\fP, \fBtako-init(1)\fP, \fBtako-live(1)\fP, \fBtako-logs(1)\fP, \fBtako-maintenance(1)\fP, \fBtako-metrics(1)\fP, \fBtako-monitor(1)\fP, \fBtako-prometheus(1)\fP, \fBtako-promote(1)\fP, \fBtako-ps(1)\fP, \fBtako-remove(1)\fP, \fBtako-rollback(1)\fP, \fBtako-scale(1)\fP, \fBtako-secrets(1)\fP, \fBtako-setup(1)\fP, \fBtako-start(1)\fP, \fBtako-state(1)\fP, \fBtako-stats(1)\fP, \fBtako-stop(1)\fP, \fBtako-takod(1)\fP, \fBtako-upgrade(1)\fP, \fBtako-validate(1)\fP
+\fBtako-access(1)\fP, \fBtako-backup(1)\fP, \fBtako-cleanup(1)\fP, \fBtako-clone-setup(1)\fP, \fBtako-config(1)\fP, \fBtako-deploy(1)\fP, \fBtako-destroy(1)\fP, \fBtako-discovery(1)\fP, \fBtako-doctor(1)\fP, \fBtako-domains(1)\fP, \fBtako-drift(1)\fP, \fBtako-env(1)\fP, \fBtako-history(1)\fP, \fBtako-init(1)\fP, \fBtako-live(1)\fP, \fBtako-logs(1)\fP, \fBtako-maintenance(1)\fP, \fBtako-metrics(1)\fP, \fBtako-monitor(1)\fP, \fBtako-prometheus(1)\fP, \fBtako-promote(1)\fP, \fBtako-ps(1)\fP, \fBtako-remove(1)\fP, \fBtako-rollback(1)\fP, \fBtako-run(1)\fP, \fBtako-scale(1)\fP, \fBtako-secrets(1)\fP, \fBtako-setup(1)\fP, \fBtako-start(1)\fP, \fBtako-state(1)\fP, \fBtako-stats(1)\fP, \fBtako-stop(1)\fP, \fBtako-takod(1)\fP, \fBtako-upgrade(1)\fP, \fBtako-validate(1)\fP

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -132,6 +134,7 @@ var (
 	syncStateCollectDeploymentHistories = collectStateDeploymentHistoriesWithPool
 	syncStateRecoverFromMeshActual      = recoverAndSaveStateFromMeshActualWithPool
 	syncStateRecoverFromRunningMesh     = recoverAndSaveStateFromRunningMeshWithPool
+	collectStateStatusNodesForCommand   = collectStateStatusNodes
 )
 
 const stateStatusRequestTimeout = 10 * time.Second
@@ -161,64 +164,143 @@ func init() {
 }
 
 func runStatePull(cmd *cobra.Command, args []string) error {
-	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-
 	envName := getEnvironmentName(cfg)
 
-	histories, err := collectStatePullHistories(cfg, envName, stateServer)
+	result, err := cliEngine().StatePull(cmd.Context(), engine.StatePullRequest{
+		Config:      cfg,
+		Environment: envName,
+		Server:      stateServer,
+		HistorySource: func() (string, *remotestate.DeploymentHistory, error) {
+			histories, err := collectStatePullHistoriesForCommand(cfg, envName, stateServer)
+			if err != nil {
+				return "", nil, err
+			}
+			best, ok := bestDeploymentHistory(histories)
+			if !ok {
+				return "", nil, nil
+			}
+			return best.source, best.history, nil
+		},
+		SyncDeployments: func(deployments []*remotestate.DeploymentState) (int, error) {
+			localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+			if err != nil {
+				return 0, fmt.Errorf("failed to initialize local state: %w", err)
+			}
+			return syncRemoteDeploymentsToLocal(localMgr, deployments, envName)
+		},
+		RecoverFromMeshActual: func() (engine.StatePullRecoveryResult, error) {
+			return recoverStatePullFromMeshActualForCommand(cfg, envName, stateServer)
+		},
+		RecoverFromRunningMesh: func() (engine.StatePullRecoveryResult, error) {
+			return recoverStatePullFromRunningMeshForCommand(cfg, envName, stateServer)
+		},
+	})
+	if result != nil && machineOutputEnabled() {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	if err != nil {
 		return err
 	}
-	bestHistory, hasHistory := bestDeploymentHistory(histories)
-	if hasHistory {
-		fmt.Printf("Selected deployment history from %s\n", bestHistory.source)
+	if machineOutputEnabled() {
+		return nil
+	}
+	return renderStatePullResult(result)
+}
 
-		localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
-		if err != nil {
-			return fmt.Errorf("failed to initialize local state: %w", err)
-		}
-		synced, err := syncRemoteDeploymentsToLocal(localMgr, bestHistory.history.Deployments, envName)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
+func collectStatePullHistoriesForCommand(cfg *config.Config, envName string, requestedServer string) ([]stateHistoryCandidate, error) {
+	if !machineOutputEnabled() {
+		return collectStatePullHistories(cfg, envName, requestedServer)
+	}
+	oldVerbose := verbose
+	verbose = false
+	defer func() { verbose = oldVerbose }()
+	return collectStateDeploymentHistories(cfg, envName, requestedServer, true)
+}
 
-		latest := latestDeploymentByTimestamp(bestHistory.history.Deployments)
-		if latest != nil {
+func recoverStatePullFromMeshActualForCommand(cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	if !machineOutputEnabled() {
+		return recoverAndSaveStateFromMeshActualResult(cfg, envName, requestedServer)
+	}
+	oldVerbose := verbose
+	verbose = false
+	defer func() { verbose = oldVerbose }()
+	return recoverAndSaveStateFromMeshActualResult(cfg, envName, requestedServer)
+}
+
+func recoverStatePullFromRunningMeshForCommand(cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	if !machineOutputEnabled() {
+		return recoverAndSaveStateFromRunningMeshResult(cfg, envName, requestedServer)
+	}
+	oldVerbose := verbose
+	verbose = false
+	defer func() { verbose = oldVerbose }()
+	return recoverAndSaveStateFromRunningMeshResult(cfg, envName, requestedServer)
+}
+
+func renderStatePullResult(result *engine.StatePullResult) error {
+	if result == nil {
+		return nil
+	}
+	if machineOutputEnabled() {
+		return emitResultDocument(result)
+	}
+	switch result.Status {
+	case engine.StatePullStatusSyncedHistory:
+		fmt.Printf("Selected deployment history from %s\n", result.SourceServer)
+		fmt.Printf("Synced %d deployment(s) to local .tako directory\n", result.SyncedCount)
+		if result.Latest != nil {
+			displayID := result.Latest.DisplayID
+			if displayID == "" {
+				displayID = remotestate.FormatDeploymentID(result.Latest.ID)
+			}
 			fmt.Printf("\nLatest deployment:\n")
-			fmt.Printf("  ID:      %s\n", remotestate.FormatDeploymentID(latest.ID))
-			fmt.Printf("  Status:  %s\n", latest.Status)
-			fmt.Printf("  Time:    %s (%s ago)\n", latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(latest.Timestamp)))
-			fmt.Printf("  User:    %s\n", latest.User)
-			if latest.GitCommitShort != "" {
-				fmt.Printf("  Commit:  %s\n", latest.GitCommitShort)
+			fmt.Printf("  ID:      %s\n", displayID)
+			fmt.Printf("  Status:  %s\n", result.Latest.Status)
+			fmt.Printf("  Time:    %s (%s ago)\n", result.Latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(result.Latest.Timestamp)))
+			fmt.Printf("  User:    %s\n", result.Latest.User)
+			if result.Latest.Commit != "" {
+				fmt.Printf("  Commit:  %s\n", result.Latest.Commit)
 			}
 		}
 		fmt.Println("\nLocal state is now synchronized with remote.")
-		return nil
+	case engine.StatePullStatusRecoveredActual:
+		fmt.Println("No remote deployment history found, attempting recovery from mesh runtime state...")
+		printStatePullRecovered(result)
+	case engine.StatePullStatusRecoveredRunning:
+		fmt.Println("No remote deployment history found, attempting recovery from mesh runtime state...")
+		if verbose && result.MeshActualError != "" {
+			fmt.Printf("Warning: mesh runtime state recovery failed: %s\n", result.MeshActualError)
+		}
+		fmt.Println("No mesh runtime state found, attempting recovery from running services across reachable nodes...")
+		printStatePullRecovered(result)
+	case engine.StatePullStatusNoneFound:
+		fmt.Println("No remote deployment history found, attempting recovery from mesh runtime state...")
+		if verbose && result.MeshActualError != "" {
+			fmt.Printf("Warning: mesh runtime state recovery failed: %s\n", result.MeshActualError)
+		}
+		fmt.Println("No mesh runtime state found, attempting recovery from running services across reachable nodes...")
+		if verbose && result.RunningMeshError != "" {
+			fmt.Printf("Warning: running service recovery failed: %s\n", result.RunningMeshError)
+		}
+		fmt.Println("\nNo remote state or running services found.")
+		fmt.Println("This project has not been deployed yet, or state was cleaned up.")
+		fmt.Println("\nRun 'tako deploy' to create initial deployment.")
 	}
-
-	fmt.Println("No remote deployment history found, attempting recovery from mesh runtime state...")
-	if err := recoverAndSaveStateFromMeshActual(cfg, envName, stateServer); err == nil {
-		return nil
-	} else if verbose {
-		fmt.Printf("Warning: mesh runtime state recovery failed: %v\n", err)
-	}
-
-	fmt.Println("No mesh runtime state found, attempting recovery from running services across reachable nodes...")
-	if err := recoverAndSaveStateFromRunningMesh(cfg, envName, stateServer); err == nil {
-		return nil
-	} else if verbose {
-		fmt.Printf("Warning: running service recovery failed: %v\n", err)
-	}
-	fmt.Println("\nNo remote state or running services found.")
-	fmt.Println("This project has not been deployed yet, or state was cleaned up.")
-	fmt.Println("\nRun 'tako deploy' to create initial deployment.")
 	return nil
+}
+
+func printStatePullRecovered(result *engine.StatePullResult) {
+	serviceCount := 0
+	if result != nil && result.Recovered != nil {
+		serviceCount = result.Recovered.ServiceCount
+	}
+	fmt.Printf("Recovered state from %d running service(s)\n", serviceCount)
 }
 
 func collectStatePullHistories(cfg *config.Config, envName string, requestedServer string) ([]stateHistoryCandidate, error) {
@@ -410,169 +492,316 @@ func latestDeploymentByTimestamp(deployments []*remotestate.DeploymentState) *re
 }
 
 func runStateStatus(cmd *cobra.Command, args []string) error {
-	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-
 	envName := getEnvironmentName(cfg)
 
-	fmt.Printf("Project: %s\n", cfg.Project.Name)
-	fmt.Printf("Environment: %s\n\n", envName)
-
-	// Check local state
-	fmt.Println("=== Local State ===")
-	localPath := ".tako"
-	localExists := false
-	var localCurrent *localstate.DeploymentState
-
-	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
-		localExists = true
-		fmt.Printf("Directory: %s (exists)\n", localPath)
-
-		// Try to load local state
-		localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
-		if err != nil {
-			fmt.Printf("Status: Error loading state: %v\n", err)
-		} else {
-			currentDep, err := localMgr.GetCurrentDeployment()
-			if err != nil || currentDep == nil {
-				fmt.Println("Status: No deployments recorded locally")
-			} else {
-				localCurrent = currentDep
-				fmt.Printf("Last deployment:\n")
-				fmt.Printf("  ID:      %s\n", currentDep.DeploymentID)
-				fmt.Printf("  Time:    %s (%s ago)\n", currentDep.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(currentDep.Timestamp)))
-				fmt.Printf("  Status:  %s\n", currentDep.Status)
-				if currentDep.GitCommit != "" {
-					fmt.Printf("  Commit:  %s\n", currentDep.GitCommit[:min(7, len(currentDep.GitCommit))])
-				}
-			}
-		}
-	} else {
-		fmt.Printf("Directory: %s (missing)\n", localPath)
-		fmt.Println("Status: No local state")
-	}
-
-	fmt.Println()
-
-	// Check remote state across the mesh by default. A requested --server keeps
-	// this command useful for focused one-node debugging.
-	if stateServer == "" {
-		fmt.Println("=== Remote Mesh State ===")
-	} else {
-		fmt.Println("=== Remote State ===")
-	}
-
-	remoteNodes, err := collectStateStatusNodes(cfg, envName, stateServer)
+	localInput := collectStateStatusLocal(cfg, envName)
+	remoteNodes, err := collectStateStatusNodesForCommand(cfg, envName, stateServer)
 	if err != nil {
 		return err
 	}
-	printStateStatusNodes(remoteNodes, cfg)
-	printStateStatusUnreachableGuidance(remoteNodes)
 
-	histories, desiredCandidates, actualCandidates, nodeActualCandidates := stateStatusCandidates(remoteNodes)
-	bestHistory, hasRemoteHistory := bestDeploymentHistory(histories)
-	bestDesired, hasDesired := bestDesiredRevision(desiredCandidates)
-	bestActual, hasActual, bestNodeActual := bestStateStatusActual(cfg.Project.Name, envName, actualCandidates, nodeActualCandidates)
-
-	fmt.Println()
-	printBestKnownState(bestHistory, hasRemoteHistory, bestDesired, hasDesired, bestActual, hasActual, bestNodeActual)
-
-	fmt.Println()
-
-	// Sync recommendation
-	fmt.Println("=== Sync Status ===")
-	for _, line := range stateSyncRecommendation(localExists, localCurrent, bestHistory, hasRemoteHistory, stateStatusUnreachableCount(remoteNodes)) {
-		fmt.Println(line)
+	ctx := context.Background()
+	if cmd != nil {
+		ctx = cmd.Context()
 	}
-
-	if stateStatusReachableCount(remoteNodes) == 0 {
-		return stateStatusNoReachableError(envName, remoteNodes)
+	result, statusErr := cliEngine().StateStatus(ctx, engine.StateStatusRequest{
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Server:      stateServer,
+		Local:       localInput,
+		Nodes:       engineStateStatusNodes(remoteNodes),
+	})
+	if result != nil && machineOutputEnabled() {
+		if emitErr := emitResultDocument(result); emitErr != nil && statusErr == nil {
+			statusErr = emitErr
+		}
 	}
+	if machineOutputEnabled() {
+		return statusErr
+	}
+	if result != nil {
+		renderStateStatusResult(result, cfg)
+	}
+	return statusErr
+}
 
-	return nil
+func collectStateStatusLocal(cfg *config.Config, envName string) engine.StateStatusLocalInput {
+	localPath := ".tako"
+	input := engine.StateStatusLocalInput{Path: localPath}
+	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
+		input.Exists = true
+		localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+		if err != nil {
+			input.Error = err.Error()
+			return input
+		}
+		currentDep, err := localMgr.GetCurrentDeployment()
+		if err == nil && currentDep != nil {
+			input.Current = currentDep
+		}
+	}
+	return input
 }
 
 func stateSyncRecommendation(localExists bool, localCurrent *localstate.DeploymentState, bestHistory stateHistoryCandidate, hasRemoteHistory bool, unreachableCount int) []string {
-	lines := make([]string, 0, 4)
-	if !localExists {
-		lines = append(lines, "Local state is missing.")
-		if hasRemoteHistory {
-			lines = append(lines, fmt.Sprintf("Remote deployment history is available from %s.", bestHistory.source))
-			lines = append(lines, "Run 'tako state pull' to sync from the freshest reachable node.")
-			return lines
-		}
-		lines = append(lines, "No remote deployment history was found on reachable nodes.")
-		return lines
-	}
+	return engine.StateStatusSyncRecommendation(localExists, localCurrent, engine.StateStatusHistoryCandidate{Source: bestHistory.source, History: bestHistory.history}, hasRemoteHistory, unreachableCount)
+}
 
-	lines = append(lines, "Local state exists.")
-	if localCurrent == nil {
-		lines = append(lines, "No current local deployment is recorded.")
-		if hasRemoteHistory {
-			lines = append(lines, fmt.Sprintf("Remote deployment history is available from %s.", bestHistory.source))
-			lines = append(lines, "Run 'tako state pull' to sync from the freshest reachable node.")
-		} else {
-			lines = append(lines, "No remote deployment history was found on reachable nodes.")
+func engineStateStatusNodes(nodes []stateStatusNode) []engine.StateStatusRemoteNodeInput {
+	out := make([]engine.StateStatusRemoteNodeInput, 0, len(nodes))
+	for _, node := range nodes {
+		input := engine.StateStatusRemoteNodeInput{
+			Name:       node.name,
+			Host:       node.host,
+			EnvNodes:   append([]string(nil), node.envNodes...),
+			ConnectErr: node.connectErr,
+			History:    node.history,
+			HistoryErr: node.historyErr,
+			Desired:    node.desired,
+			DesiredErr: node.desiredErr,
+			Actual:     node.actual,
+			ActualErr:  node.actualErr,
+			Lease:      node.lease,
+			LeaseErr:   node.leaseErr,
 		}
-		return lines
-	}
-
-	if !hasRemoteHistory {
-		lines = append(lines, "No remote deployment history was found on reachable nodes; local deployment records are the best known copy.")
-		if unreachableCount > 0 {
-			lines = append(lines, "Some checked nodes are unreachable; restore reachability or remove destroyed nodes from config before pulling state.")
-		} else {
-			lines = append(lines, "Run 'tako deploy --yes' to reconcile the reachable mesh and publish fresh deployment state.")
-		}
-		return lines
-	}
-
-	remoteLatest := latestDeploymentByTimestamp(bestHistory.history.Deployments)
-	if remoteLatest == nil {
-		lines = append(lines, "No remote deployment history was found on reachable nodes; local deployment records are the best known copy.")
-		if unreachableCount > 0 {
-			lines = append(lines, "Some checked nodes are unreachable; restore reachability or remove destroyed nodes from config before pulling state.")
-		} else {
-			lines = append(lines, "Run 'tako deploy --yes' to reconcile the reachable mesh and publish fresh deployment state.")
-		}
-		return lines
-	}
-
-	if localCurrent.DeploymentID == remoteLatest.ID {
-		lines = append(lines, fmt.Sprintf("Local deployment records match the freshest reachable remote deployment from %s.", bestHistory.source))
-		lines = append(lines, "No state pull needed.")
-		return lines
-	}
-	if deploymentsEquivalentExceptID(localCurrent, remoteLatest) {
-		lines = append(lines, fmt.Sprintf("Local and remote deployment records describe the same deployment from %s, but use different ID formats.", bestHistory.source))
-		lines = append(lines, "No state pull needed.")
-		return lines
-	}
-
-	if !localCurrent.Timestamp.IsZero() && !remoteLatest.Timestamp.IsZero() {
-		if localCurrent.Timestamp.Before(remoteLatest.Timestamp) {
-			lines = append(lines, fmt.Sprintf("Remote deployment history from %s is newer than local state.", bestHistory.source))
-			lines = append(lines, "Run 'tako state pull' to refresh local deployment records.")
-			return lines
-		}
-		if localCurrent.Timestamp.After(remoteLatest.Timestamp) {
-			lines = append(lines, fmt.Sprintf("Local deployment records are newer than the freshest reachable remote history from %s.", bestHistory.source))
-			if unreachableCount > 0 {
-				lines = append(lines, "Some checked nodes are unreachable; restore reachability or remove destroyed nodes from config before pulling state.")
-			} else {
-				lines = append(lines, "All checked nodes are reachable, so remote deployment history appears stale.")
-				lines = append(lines, "Run 'tako deploy --yes' to reconcile the mesh and publish fresh state; avoid 'tako state pull' unless you intend to replace local records.")
+		if node.agent != nil {
+			input.Agent = &engine.StateStatusAgentSummary{
+				Runtime:   node.agent.Runtime,
+				Version:   node.agent.Version,
+				Hostname:  node.agent.Hostname,
+				Socket:    node.agent.Socket,
+				DataDir:   node.agent.DataDir,
+				StartedAt: node.agent.StartedAt,
+				Now:       node.agent.Now,
 			}
-			return lines
+		}
+		input.AgentErr = node.agentErr
+		if node.mesh != nil {
+			input.Mesh = &engine.StateStatusMeshSummary{
+				Interface:  node.mesh.Interface,
+				Up:         node.mesh.Up,
+				ListenPort: node.mesh.ListenPort,
+				Peers:      node.mesh.Peers,
+				PublicKey:  node.mesh.PublicKey,
+			}
+		}
+		input.MeshErr = node.meshErr
+		for _, candidate := range node.nodeActual {
+			input.NodeActual = append(input.NodeActual, engine.StateStatusNodeActualCandidate{
+				Source: candidate.source,
+				Node:   candidate.node,
+				Actual: candidate.actual,
+			})
+		}
+		out = append(out, input)
+	}
+	return out
+}
+
+func renderStateStatusResult(result *engine.StateStatusResult, cfg *config.Config) {
+	fmt.Printf("Project: %s\n", result.Project)
+	fmt.Printf("Environment: %s\n\n", result.Environment)
+
+	fmt.Println("=== Local State ===")
+	renderStateStatusLocal(result.Local)
+	fmt.Println()
+
+	fmt.Printf("=== %s ===\n", result.Remote.Title)
+	renderStateStatusNodes(result.Remote.Nodes, cfg)
+	if len(result.Remote.UnreachableGuidance) > 0 {
+		fmt.Println()
+		for _, line := range result.Remote.UnreachableGuidance {
+			fmt.Println(line)
 		}
 	}
 
-	lines = append(lines, fmt.Sprintf("Local and remote deployment timestamps match, but deployment IDs differ from %s.", bestHistory.source))
-	lines = append(lines, "Run 'tako state pull' to normalize local deployment records.")
-	return lines
+	fmt.Println()
+	renderBestKnownState(result.BestKnown)
+	fmt.Println()
+
+	fmt.Println("=== Sync Status ===")
+	for _, line := range result.Sync.Recommendations {
+		fmt.Println(line)
+	}
+}
+
+func renderStateStatusLocal(local engine.StateStatusLocalSummary) {
+	if local.Exists {
+		fmt.Printf("Directory: %s (exists)\n", local.Path)
+		if local.Error != "" {
+			fmt.Printf("Status: Error loading state: %s\n", local.Error)
+			return
+		}
+		if local.LastDeployment == nil {
+			fmt.Println("Status: No deployments recorded locally")
+			return
+		}
+		dep := local.LastDeployment
+		fmt.Printf("Last deployment:\n")
+		fmt.Printf("  ID:      %s\n", dep.ID)
+		fmt.Printf("  Time:    %s (%s ago)\n", dep.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(dep.Timestamp)))
+		fmt.Printf("  Status:  %s\n", dep.Status)
+		if dep.Commit != "" {
+			fmt.Printf("  Commit:  %s\n", dep.Commit[:min(7, len(dep.Commit))])
+		}
+		return
+	}
+	fmt.Printf("Directory: %s (missing)\n", local.Path)
+	fmt.Println("Status: No local state")
+}
+
+func renderStateStatusNodes(nodes []engine.StateStatusNodeResult, cfg *config.Config) {
+	fmt.Printf("Nodes: %d configured, %d reachable\n", len(nodes), engineStateStatusReachableCount(nodes))
+	for _, node := range nodes {
+		fmt.Printf("\nNode: %s (%s)\n", node.Name, node.Host)
+		if !node.Reachable {
+			fmt.Printf("Status: unreachable - %s\n", node.Error)
+			continue
+		}
+		fmt.Println("Status: reachable")
+		renderStateStatusAgent(node.Agent)
+		renderStateStatusMesh(node.Mesh, cfg)
+		renderStateStatusHistory(node.History)
+		renderStateStatusDesired(node.Desired)
+		renderStateStatusActual(node.Actual)
+		renderStateStatusLease(node.Lease)
+	}
+}
+
+func engineStateStatusReachableCount(nodes []engine.StateStatusNodeResult) int {
+	reachable := 0
+	for _, node := range nodes {
+		if node.Reachable {
+			reachable++
+		}
+	}
+	return reachable
+}
+
+func renderStateStatusAgent(status *engine.StateStatusAgentSummary) {
+	if status == nil || status.Error != "" {
+		errText := "<nil>"
+		if status != nil && status.Error != "" {
+			errText = status.Error
+		}
+		fmt.Printf("Agent: unavailable - %s\n", errText)
+		return
+	}
+	fmt.Printf("Agent: %s %s on %s\n", status.Runtime, status.Version, status.Hostname)
+	if !status.StartedAt.IsZero() {
+		fmt.Printf("  Started: %s (%s ago)\n", status.StartedAt.Format(time.RFC3339), formatStateDuration(status.Now.Sub(status.StartedAt)))
+	}
+}
+
+func renderStateStatusMesh(status *engine.StateStatusMeshSummary, cfg *config.Config) {
+	if cfg.Mesh == nil {
+		return
+	}
+	if status == nil || status.Error != "" {
+		errText := "<nil>"
+		if status != nil && status.Error != "" {
+			errText = status.Error
+		}
+		fmt.Printf("Mesh: unavailable - %s\n", errText)
+		return
+	}
+	if !status.Up {
+		fmt.Printf("Mesh: %s is down\n", status.Interface)
+		return
+	}
+	fmt.Printf("Mesh: %s is up, peers %d\n", status.Interface, status.Peers)
+}
+
+func renderStateStatusHistory(history engine.StateStatusHistorySummary) {
+	if !history.Recorded {
+		if history.Missing {
+			fmt.Println("History: not recorded")
+		} else if history.Error != "" {
+			fmt.Printf("History: unavailable - %s\n", history.Error)
+		} else {
+			fmt.Println("History: empty")
+		}
+		return
+	}
+	fmt.Printf("History: %d deployment(s), freshness %s\n", history.Count, history.Freshness.Format(time.RFC3339))
+	if history.Latest != nil {
+		fmt.Printf("  Latest: %s, %s, %s (%s ago)\n", history.Latest.DisplayID, history.Latest.Status, history.Latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(history.Latest.Timestamp)))
+	}
+}
+
+func renderStateStatusDesired(desired engine.StateStatusDesiredSummary) {
+	if !desired.Recorded {
+		if desired.Error != "" {
+			fmt.Printf("Desired: error - %s\n", desired.Error)
+		} else {
+			fmt.Println("Desired: not recorded")
+		}
+		return
+	}
+	fmt.Printf("Desired: %s, %d service(s), freshness %s\n", desired.RevisionID, desired.ServiceCount, desired.Freshness.Format(time.RFC3339))
+}
+
+func renderStateStatusActual(actual engine.StateStatusActualSummary) {
+	if !actual.Recorded {
+		if actual.Error != "" {
+			fmt.Printf("Actual: error - %s\n", actual.Error)
+		} else {
+			fmt.Println("Actual: not recorded")
+		}
+	} else {
+		fmt.Printf("Actual: %d service(s), freshness %s\n", actual.ServiceCount, actual.Freshness.Format(time.RFC3339))
+	}
+	if actual.NodeActualCount > 0 {
+		fmt.Printf("Node actual: %d snapshot(s)\n", actual.NodeActualCount)
+	}
+}
+
+func renderStateStatusLease(lease engine.StateStatusLeaseSummary) {
+	if lease.Error != "" {
+		fmt.Printf("Lease: error - %s\n", lease.Error)
+		return
+	}
+	if lease.Lease == nil {
+		fmt.Println("Lease: free")
+		return
+	}
+	fmt.Printf("Lease: held by %s\n", lease.Lease.Who)
+	fmt.Printf("  ID:        %s\n", lease.Lease.ID)
+	fmt.Printf("  Operation: %s\n", lease.Lease.Operation)
+	fmt.Printf("  Created:   %s (%s ago)\n", lease.Lease.CreatedAt.Format(time.RFC3339), formatStateDuration(time.Since(lease.Lease.CreatedAt)))
+	fmt.Printf("  Expires:   %s (in %s)\n", lease.Lease.ExpiresAt.Format(time.RFC3339), time.Until(lease.Lease.ExpiresAt).Round(time.Second))
+}
+
+func renderBestKnownState(best engine.StateStatusBestKnown) {
+	fmt.Println("=== Best Known State ===")
+	if best.History != nil {
+		fmt.Printf("Deployment history: %s (%d deployment(s), freshness %s)\n", best.History.Source, best.History.Count, best.History.Freshness.Format(time.RFC3339))
+		if best.History.Latest != nil {
+			fmt.Printf("  Latest: %s, %s, %s (%s ago)\n", best.History.Latest.DisplayID, best.History.Latest.Status, best.History.Latest.Timestamp.Format(time.RFC3339), formatStateDuration(time.Since(best.History.Latest.Timestamp)))
+		}
+	} else {
+		fmt.Println("Deployment history: not found on reachable nodes")
+	}
+	if best.Desired != nil {
+		fmt.Printf("Desired runtime: %s (%s, freshness %s)\n", best.Desired.Source, best.Desired.RevisionID, best.Desired.Freshness.Format(time.RFC3339))
+	} else {
+		fmt.Println("Desired runtime: not found on reachable nodes")
+	}
+	if best.Actual != nil {
+		fmt.Printf("Actual runtime: %s (%d service(s), freshness %s)\n", best.Actual.Source, best.Actual.ServiceCount, best.Actual.Freshness.Format(time.RFC3339))
+	} else {
+		fmt.Println("Actual runtime: not found on reachable nodes")
+	}
+	if len(best.NodeActual) > 0 {
+		fmt.Printf("Node actual: %d node(s)\n", len(best.NodeActual))
+		for _, node := range best.NodeActual {
+			fmt.Printf("  %s: %s, freshness %s\n", node.Node, node.Source, node.Freshness.Format(time.RFC3339))
+		}
+	}
 }
 
 func deploymentsEquivalentExceptID(localCurrent *localstate.DeploymentState, remoteLatest *remotestate.DeploymentState) bool {
@@ -660,17 +889,16 @@ func runStateLease(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	envName := getEnvironmentName(cfg)
-	pool := ssh.NewPool()
-	defer pool.CloseAll()
 
-	nodes, err := collectStateLeaseNodes(pool, cfg, envName, stateServer)
+	result, err := cliEngine().StateLease(cmd.Context(), engine.StateLeaseRequest{
+		Config:      cfg,
+		Environment: envName,
+		Server:      stateServer,
+	})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Project: %s\n", cfg.Project.Name)
-	fmt.Printf("Environment: %s\n\n", envName)
-	printStateLeaseNodes(nodes)
-	return nil
+	return renderStateLeaseResult(result)
 }
 
 func runStateLeaseRelease(cmd *cobra.Command, args []string) error {
@@ -679,18 +907,49 @@ func runStateLeaseRelease(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	envName := getEnvironmentName(cfg)
-	pool := ssh.NewPool()
-	defer pool.CloseAll()
 
-	nodes, err := collectStateLeaseNodes(pool, cfg, envName, stateServer)
+	result, err := cliEngine().ReleaseStateLease(cmd.Context(), engine.StateLeaseReleaseRequest{
+		Config:      cfg,
+		Environment: envName,
+		Server:      stateServer,
+		ID:          stateLeaseID,
+		Force:       stateLeaseForce,
+	})
+	if result != nil && machineOutputEnabled() {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	if err != nil {
 		return err
 	}
-	released, err := releaseStateLeaseByID(nodes, stateLeaseID, stateLeaseForce, time.Now().UTC())
-	if err != nil {
-		return err
+	if machineOutputEnabled() {
+		return nil
 	}
-	fmt.Printf("Released lease %s on %d node(s): %s\n", strings.TrimSpace(stateLeaseID), len(released), strings.Join(released, ", "))
+	return renderStateLeaseReleaseResult(result)
+}
+
+func renderStateLeaseResult(result *engine.StateLeaseResult) error {
+	if result == nil {
+		return nil
+	}
+	if machineOutputEnabled() {
+		return emitResultDocument(result)
+	}
+	fmt.Printf("Project: %s\n", result.Project)
+	fmt.Printf("Environment: %s\n\n", result.Environment)
+	printStateLeaseNodes(stateLeaseNodesFromEngine(result.Nodes))
+	return nil
+}
+
+func renderStateLeaseReleaseResult(result *engine.StateLeaseReleaseResult) error {
+	if result == nil {
+		return nil
+	}
+	if machineOutputEnabled() {
+		return emitResultDocument(result)
+	}
+	fmt.Printf("Released lease %s on %d node(s): %s\n", result.LeaseID, result.ReleasedCount, strings.Join(result.Released, ", "))
 	return nil
 }
 
@@ -699,47 +958,11 @@ func collectStateLeaseNodes(pool *ssh.Pool, cfg *config.Config, envName string, 
 	if err != nil {
 		return nil, err
 	}
-	nodes := make([]stateLeaseNode, len(serverNames))
-	resultCh := make(chan struct {
-		index int
-		node  stateLeaseNode
-	}, len(serverNames))
-	var wg sync.WaitGroup
-	for index, serverName := range serverNames {
-		server, ok := cfg.Servers[serverName]
-		if !ok {
-			return nil, fmt.Errorf("server %s not found in configuration", serverName)
-		}
-		wg.Add(1)
-		go func(index int, serverName string, server config.ServerConfig) {
-			defer wg.Done()
-			node := stateLeaseNode{name: serverName, host: server.Host}
-			client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
-			if err != nil {
-				node.err = err
-				resultCh <- struct {
-					index int
-					node  stateLeaseNode
-				}{index: index, node: node}
-				return
-			}
-			defer cleanup()
-
-			manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
-			node.manager = manager
-			node.lease, node.err = manager.ReadLease()
-			resultCh <- struct {
-				index int
-				node  stateLeaseNode
-			}{index: index, node: node}
-		}(index, serverName, server)
+	nodes, err := engine.CollectStateLeaseNodes(context.Background(), pool, cfg, envName, serverNames)
+	if err != nil {
+		return nil, err
 	}
-	wg.Wait()
-	close(resultCh)
-	for result := range resultCh {
-		nodes[result.index] = result.node
-	}
-	return nodes, nil
+	return stateLeaseNodesFromEngine(nodes), nil
 }
 
 func printStateLeaseNodes(nodes []stateLeaseNode) {
@@ -750,54 +973,40 @@ func printStateLeaseNodes(nodes []stateLeaseNode) {
 	}
 }
 
-func releaseStateLeaseByID(nodes []stateLeaseNode, leaseID string, force bool, now time.Time) ([]string, error) {
-	leaseID = strings.TrimSpace(leaseID)
-	if leaseID == "" {
-		return nil, fmt.Errorf("--id is required")
-	}
-
-	var released []string
-	var releaseErrors []string
-	var nodeErrors []string
-	found := false
+func stateLeaseNodesFromEngine(nodes []engine.StateLeaseNodeResult) []stateLeaseNode {
+	out := make([]stateLeaseNode, 0, len(nodes))
 	for _, node := range nodes {
+		out = append(out, stateLeaseNode{
+			name:    node.Name,
+			host:    node.Host,
+			manager: node.Manager,
+			lease:   node.Lease,
+			err:     node.Err,
+		})
+	}
+	return out
+}
+
+func engineStateLeaseNodes(nodes []stateLeaseNode) []engine.StateLeaseNodeResult {
+	out := make([]engine.StateLeaseNodeResult, 0, len(nodes))
+	for _, node := range nodes {
+		result := engine.StateLeaseNodeResult{
+			Name:    node.name,
+			Host:    node.host,
+			Manager: node.manager,
+			Lease:   node.lease,
+			Err:     node.err,
+		}
 		if node.err != nil {
-			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", node.name, node.err))
-			continue
+			result.Error = node.err.Error()
 		}
-		if node.lease == nil || node.lease.ID != leaseID {
-			continue
-		}
-		found = true
-		if node.manager == nil {
-			releaseErrors = append(releaseErrors, fmt.Sprintf("%s: lease manager unavailable", node.name))
-			continue
-		}
-		if !force && now.Before(node.lease.ExpiresAt) {
-			releaseErrors = append(releaseErrors, fmt.Sprintf("%s: lease has not expired yet; use --force to release it", node.name))
-			continue
-		}
-		if err := node.manager.ReleaseLease(node.lease); err != nil {
-			releaseErrors = append(releaseErrors, fmt.Sprintf("%s: %v", node.name, err))
-			continue
-		}
-		released = append(released, node.name)
+		out = append(out, result)
 	}
-	if len(releaseErrors) > 0 {
-		sort.Strings(releaseErrors)
-		return released, fmt.Errorf("failed to release lease %s: %s", leaseID, strings.Join(releaseErrors, "; "))
-	}
-	if !found {
-		if len(nodeErrors) > 0 {
-			sort.Strings(nodeErrors)
-			return nil, fmt.Errorf("lease %s not found on reachable nodes; unreachable nodes: %s", leaseID, strings.Join(nodeErrors, "; "))
-		}
-		return nil, fmt.Errorf("lease %s not found on reachable nodes", leaseID)
-	}
-	if len(released) == 0 {
-		return nil, fmt.Errorf("lease %s was found but not released", leaseID)
-	}
-	return released, nil
+	return out
+}
+
+func releaseStateLeaseByID(nodes []stateLeaseNode, leaseID string, force bool, now time.Time) ([]string, error) {
+	return engine.ReleaseStateLeaseByID(engineStateLeaseNodes(nodes), leaseID, force, now)
 }
 
 func runStateRepair(cmd *cobra.Command, args []string) error {
@@ -807,68 +1016,83 @@ func runStateRepair(cmd *cobra.Command, args []string) error {
 	}
 
 	envName := getEnvironmentName(cfg)
-	fmt.Printf("Project: %s\n", cfg.Project.Name)
-	fmt.Printf("Environment: %s\n\n", envName)
+	if !machineOutputEnabled() {
+		fmt.Printf("Project: %s\n", cfg.Project.Name)
+		fmt.Printf("Environment: %s\n\n", envName)
+	}
 
 	pool := ssh.NewPool()
 	defer pool.CloseAll()
 
-	repair, err := collectStateRepairNodesWithPool(pool, cfg, envName, stateServer)
+	repair, err := collectStateRepairNodesForCommand(pool, cfg, envName, stateServer)
 	if err != nil {
 		return err
 	}
 
-	if len(repair.nodes) == 0 {
-		return fmt.Errorf("no reachable environment nodes found")
+	ctx := context.Background()
+	if cmd != nil {
+		ctx = cmd.Context()
 	}
 
-	bestHistory, hasHistory := bestDeploymentHistory(repair.histories)
-	bestDesired, hasDesired := bestDesiredRevision(repair.desired)
-	bestActual, hasActual := bestActualSnapshot(repair.actual)
-	bestNodeActual := bestNodeActualSnapshots(repair.nodeActual)
-	hasNodeActual := len(bestNodeActual) > 0
-	if hasActual && hasNodeActual {
-		bestActual.actual = actualSnapshotWithNodeSnapshots(bestActual.actual, bestNodeActual)
-	} else if !hasActual && hasNodeActual {
-		bestActual = stateActualCandidate{
-			source: "node actual snapshots",
-			actual: aggregateActualSnapshotFromNodeSnapshots(cfg.Project.Name, envName, bestNodeActual),
+	var repairLeases []stateRepairLease
+	result, repairErr := cliEngine().StateRepair(ctx, engine.StateRepairRequest{
+		Config:      cfg,
+		Environment: envName,
+		Server:      stateServer,
+		Nodes:       engineStateRepairNodes(repair.nodes),
+		Histories:   engineStateRepairHistories(repair.histories),
+		Desired:     engineStateRepairDesired(repair.desired),
+		Actual:      engineStateRepairActual(repair.actual),
+		NodeActual:  engineStateRepairNodeActual(repair.nodeActual),
+		BeforeWrite: func(ctx context.Context, result *engine.StateRepairResult) error {
+			if !machineOutputEnabled() {
+				renderStateRepairSources(result)
+			}
+			leases, err := acquireStateRepairLeasesForCommand(repair.nodes, envName)
+			if err != nil {
+				return err
+			}
+			repairLeases = leases
+			if verbose && !machineOutputEnabled() {
+				fmt.Printf("Acquired state repair leases: %s\n", stateRepairLeaseSummary(repairLeases))
+			}
+			return nil
+		},
+	})
+	if len(repairLeases) > 0 {
+		defer releaseStateRepairLeases(repairLeases, verbose)
+	}
+
+	if result != nil && !machineOutputEnabled() {
+		renderStateRepairWarnings(result)
+	}
+	if repairErr == nil && result != nil && result.Sources.HasHistory {
+		synced, syncErr := syncStateRepairHistoryToLocalForCommand(cfg, envName, result.SelectedHistory)
+		if syncErr != nil {
+			repairErr = syncErr
+			result.Status = engine.StateRepairStatusFailed
+			result.Error = syncErr.Error()
+			result.Local.Status = engine.StateRepairLocalSyncStatusFailed
+			result.Local.Error = syncErr.Error()
+		} else {
+			result.Local.Status = engine.StateRepairLocalSyncStatusSynced
+			result.Local.Count = synced
+			if !machineOutputEnabled() {
+				fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
+			}
 		}
-		hasActual = actualSnapshotRepairable(bestActual.actual)
 	}
-	if !hasHistory && !hasDesired && !hasActual && !hasNodeActual {
-		return fmt.Errorf("no deployment history or runtime state found on reachable nodes")
-	}
-
-	printStateRepairSource(hasHistory, bestHistory, hasDesired, bestDesired, hasActual, bestActual, bestNodeActual)
-
-	repairLeases, err := acquireStateRepairLeases(repair.nodes, envName)
-	if err != nil {
-		return err
-	}
-	defer releaseStateRepairLeases(repairLeases, verbose)
-	if verbose {
-		fmt.Printf("Acquired state repair leases: %s\n", stateRepairLeaseSummary(repairLeases))
-	}
-
-	historyWritten, desiredWritten, actualWritten, nodeActualWritten, err := writeStateRepairDocuments(repair.nodes, bestHistory, hasHistory, bestDesired, hasDesired, bestActual, hasActual, bestNodeActual)
-	if err != nil {
-		return err
-	}
-
-	if hasHistory {
-		localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
-		if err != nil {
-			return fmt.Errorf("remote state repaired, but local state initialization failed: %w", err)
+	if result != nil && machineOutputEnabled() {
+		if emitErr := emitResultDocument(result); emitErr != nil && repairErr == nil {
+			repairErr = emitErr
 		}
-		synced, err := syncRemoteDeploymentsToLocal(localMgr, bestHistory.history.Deployments, envName)
-		if err != nil {
-			return fmt.Errorf("remote state repaired, but local state sync failed: %w", err)
-		}
-		fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
 	}
-
-	printStateRepairWriteSummary(len(repair.nodes), hasHistory, historyWritten, hasDesired, desiredWritten, hasActual, actualWritten, hasNodeActual, nodeActualWritten)
+	if repairErr != nil {
+		return repairErr
+	}
+	if result != nil && !machineOutputEnabled() {
+		renderStateRepairWriteSummary(result)
+	}
 	return nil
 }
 
@@ -892,10 +1116,17 @@ func runStateForgetNode(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("node %s is still listed in environment %s; remove it from tako.yaml first or rerun with --force", nodeName, envName)
 	}
 
+	confirmationReason := fmt.Sprintf("forget-node mutates replicated runtime state for node %q", nodeName)
 	if !stateForgetNodeYes {
+		if machineOutputEnabled() {
+			if err := emitResultDocument(newStateForgetNodeConfirmationRequiredDocument(confirmationReason, cfg.Project.Name, envName, nodeName)); err != nil {
+				return err
+			}
+			return &engine.ConfirmationRequiredError{Reason: confirmationReason}
+		}
 		confirmed, err := confirmDeployAction(
 			fmt.Sprintf("Forget node %q from replicated runtime state for %s? (y/N): ", nodeName, envName),
-			fmt.Sprintf("forget-node mutates replicated runtime state for node %q", nodeName),
+			confirmationReason,
 		)
 		if err != nil {
 			return err
@@ -906,9 +1137,11 @@ func runStateForgetNode(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("Project: %s\n", cfg.Project.Name)
-	fmt.Printf("Environment: %s\n", envName)
-	fmt.Printf("Retired node: %s\n\n", nodeName)
+	if !machineOutputEnabled() {
+		fmt.Printf("Project: %s\n", cfg.Project.Name)
+		fmt.Printf("Environment: %s\n", envName)
+		fmt.Printf("Retired node: %s\n\n", nodeName)
+	}
 
 	pool := ssh.NewPool()
 	defer pool.CloseAll()
@@ -926,192 +1159,103 @@ func runStateForgetNode(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer releaseStateRepairLeases(repairLeases, verbose)
-	if verbose {
+	if verbose && !machineOutputEnabled() {
 		fmt.Printf("Acquired state cleanup leases: %s\n", stateRepairLeaseSummary(repairLeases))
 	}
 
-	results, err := forgetNodeFromRepairNodes(repair.nodes, cfg.Project.Name, envName, nodeName)
+	result, err := cliEngine().StateForgetNode(cmd.Context(), engine.StateForgetNodeRequest{
+		Config:      cfg,
+		Environment: envName,
+		Server:      stateServer,
+		NodeName:    nodeName,
+		Force:       stateForgetNodeForce,
+		Nodes:       stateForgetNodeEngineNodes(repair.nodes),
+	})
+	if result != nil && machineOutputEnabled() {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	if err != nil {
 		return err
 	}
-	printStateForgetNodeSummary(nodeName, results)
-	return nil
+	if machineOutputEnabled() {
+		return nil
+	}
+	return renderStateForgetNodeResult(result)
 }
 
 func forgetNodeFromRepairNodes(nodes []stateRepairNode, project string, envName string, nodeName string) ([]stateForgetNodeResult, error) {
-	results := make([]stateForgetNodeResult, len(nodes))
-	resultCh := make(chan stateForgetNodeIndexedResult, len(nodes))
-	for index, node := range nodes {
-		go func(index int, node stateRepairNode) {
-			result := forgetNodeOnRepairNode(node, project, envName, nodeName)
-			result.nodeName = node.name
-			resultCh <- stateForgetNodeIndexedResult{index: index, result: result}
-		}(index, node)
-	}
-
-	var fatalErrors []string
-	for range nodes {
-		indexed := <-resultCh
-		result := indexed.result
-		results[indexed.index] = result
-		if result.err != nil {
-			fatalErrors = append(fatalErrors, fmt.Sprintf("%s: %v", result.nodeName, result.err))
-		}
-	}
-	if len(fatalErrors) > 0 {
-		sort.Strings(fatalErrors)
-		return results, fmt.Errorf("failed to forget node %s: %s", nodeName, strings.Join(fatalErrors, "; "))
-	}
-	return results, nil
+	results, err := engine.ForgetNodeFromRuntimeNodes(stateForgetNodeEngineNodes(nodes), project, envName, nodeName)
+	return stateForgetNodeResultsFromEngine(results), err
 }
 
 func forgetNodeOnRepairNode(node stateRepairNode, project string, envName string, nodeName string) stateForgetNodeResult {
-	result := stateForgetNodeResult{nodeName: node.name}
-	if node.runtime == nil {
-		result.err = fmt.Errorf("runtime state manager unavailable")
-		return result
-	}
+	return stateForgetNodeResultFromEngine(engine.ForgetNodeOnRuntimeNode(context.Background(), stateForgetNodeEngineNode(node), project, envName, nodeName))
+}
 
-	if _, err := node.runtime.ReadNodeActual(nodeName); err == nil {
-		result.nodeActualExisted = true
-	} else if err != nil && !errors.Is(err, takodstate.ErrNotFound) {
-		result.warnings = append(result.warnings, fmt.Sprintf("could not check existing node actual snapshot: %v", err))
-	}
+func stateForgetNodeEngineNode(node stateRepairNode) engine.StateForgetNodeNode {
+	return engine.StateForgetNodeNode{Name: node.name, Runtime: node.runtime}
+}
 
-	actual, err := node.runtime.ReadActual()
-	if err != nil && !errors.Is(err, takodstate.ErrNotFound) {
-		result.err = fmt.Errorf("failed to read aggregate actual state: %w", err)
-		return result
+func stateForgetNodeEngineNodes(nodes []stateRepairNode) []engine.StateForgetNodeNode {
+	out := make([]engine.StateForgetNodeNode, len(nodes))
+	for i, node := range nodes {
+		out[i] = stateForgetNodeEngineNode(node)
 	}
-	if err == nil {
-		pruned, changed := actualSnapshotWithoutNode(actual, nodeName)
-		if changed {
-			if err := node.runtime.WriteActual(pruned); err != nil {
-				result.err = fmt.Errorf("failed to write pruned aggregate actual state: %w", err)
-				return result
-			}
-			result.aggregatePruned = true
-		}
-	}
+	return out
+}
 
-	if err := node.runtime.DeleteNodeActual(nodeName); err != nil {
-		result.err = fmt.Errorf("failed to delete node actual snapshot: %w", err)
-		return result
+func stateForgetNodeResultFromEngine(result engine.StateForgetNodeNodeResult) stateForgetNodeResult {
+	return stateForgetNodeResult{
+		nodeName:          result.Name,
+		nodeActualExisted: result.NodeActualExisted,
+		aggregatePruned:   result.AggregatePruned,
+		warnings:          append([]string(nil), result.Warnings...),
+		err:               result.Err,
 	}
+}
 
-	event := takodstate.NewEvent(project, envName, "state_node_forgotten", "", fmt.Sprintf("Forgot node %s from replicated runtime state", nodeName), map[string]string{
-		"node": nodeName,
-	})
-	if err := node.runtime.AppendEvent(event); err != nil {
-		result.warnings = append(result.warnings, fmt.Sprintf("failed to append state cleanup event: %v", err))
+func stateForgetNodeResultsFromEngine(results []engine.StateForgetNodeNodeResult) []stateForgetNodeResult {
+	out := make([]stateForgetNodeResult, len(results))
+	for i, result := range results {
+		out[i] = stateForgetNodeResultFromEngine(result)
 	}
-
-	return result
+	return out
 }
 
 func actualSnapshotWithoutNode(snapshot *takodstate.ActualSnapshot, nodeName string) (*takodstate.ActualSnapshot, bool) {
-	if snapshot == nil {
-		return nil, false
-	}
-
-	targetNodes, targetChanged := removeStateNodeName(snapshot.TargetNodes, nodeName)
-	nodes, nodeChanged := removeActualEmbeddedNode(snapshot.Nodes, nodeName)
-	if !targetChanged && !nodeChanged {
-		return snapshot, false
-	}
-
-	pruned := *snapshot
-	pruned.TargetNodes = targetNodes
-	pruned.Nodes = nodes
-	pruned.Services = copyActualServices(snapshot.Services)
-	pruned.CapturedAt = time.Now().UTC()
-	return &pruned, true
+	return engine.ActualSnapshotWithoutNode(snapshot, nodeName)
 }
 
 func removeStateNodeName(nodes []string, nodeName string) ([]string, bool) {
-	if len(nodes) == 0 {
-		return nil, false
-	}
-	out := make([]string, 0, len(nodes))
-	changed := false
-	for _, node := range nodes {
-		if node == nodeName {
-			changed = true
-			continue
-		}
-		out = append(out, node)
-	}
-	if !changed {
-		return append([]string(nil), nodes...), false
-	}
-	return out, true
+	return engine.RemoveStateNodeName(nodes, nodeName)
 }
 
 func removeActualEmbeddedNode(nodes map[string]takodstate.ActualNodeSnapshot, nodeName string) (map[string]takodstate.ActualNodeSnapshot, bool) {
-	if len(nodes) == 0 {
-		return nil, false
-	}
-	if _, ok := nodes[nodeName]; !ok {
-		return copyActualNodeSnapshots(nodes), false
-	}
-	out := make(map[string]takodstate.ActualNodeSnapshot, len(nodes)-1)
-	for node, snapshot := range nodes {
-		if node == nodeName {
-			continue
-		}
-		copied := snapshot
-		copied.Services = copyActualServices(snapshot.Services)
-		out[node] = copied
-	}
-	if len(out) == 0 {
-		return nil, true
-	}
-	return out, true
+	return engine.RemoveActualEmbeddedNode(nodes, nodeName)
 }
 
 func copyActualServices(services map[string]takodstate.ActualService) map[string]takodstate.ActualService {
-	if services == nil {
-		return nil
-	}
-	out := make(map[string]takodstate.ActualService, len(services))
-	for serviceName, service := range services {
-		service.Containers = append([]string(nil), service.Containers...)
-		out[serviceName] = service
-	}
-	return out
+	return engine.CopyActualServices(services)
 }
 
 func copyActualNodeSnapshots(nodes map[string]takodstate.ActualNodeSnapshot) map[string]takodstate.ActualNodeSnapshot {
-	if nodes == nil {
-		return nil
-	}
-	out := make(map[string]takodstate.ActualNodeSnapshot, len(nodes))
-	for nodeName, snapshot := range nodes {
-		copied := snapshot
-		copied.Services = copyActualServices(snapshot.Services)
-		out[nodeName] = copied
-	}
-	return out
+	return engine.CopyActualNodeSnapshots(nodes)
 }
 
 func validateStateForgetNodeName(nodeName string) error {
-	if nodeName == "" {
-		return fmt.Errorf("node name is required")
+	return engine.ValidateStateForgetNodeName(nodeName)
+}
+
+func renderStateForgetNodeResult(result *engine.StateForgetNodeResult) error {
+	if result == nil {
+		return nil
 	}
-	for _, ch := range nodeName {
-		if (ch >= 'a' && ch <= 'z') ||
-			(ch >= 'A' && ch <= 'Z') ||
-			(ch >= '0' && ch <= '9') ||
-			ch == '-' ||
-			ch == '_' ||
-			ch == '.' {
-			continue
-		}
-		return fmt.Errorf("node name %q contains unsupported characters", nodeName)
+	if machineOutputEnabled() {
+		return emitResultDocument(result)
 	}
-	if nodeName == "." || nodeName == ".." || strings.Contains(nodeName, "..") {
-		return fmt.Errorf("node name %q is not allowed", nodeName)
-	}
+	printStateForgetNodeSummary(result.RetiredNode, stateForgetNodeResultsFromEngine(result.Nodes))
 	return nil
 }
 
@@ -1847,6 +1991,10 @@ type stateRepairInventory struct {
 	nodeActual []stateNodeActualCandidate
 }
 
+var collectStateRepairNodesForCommand = collectStateRepairNodesWithPool
+var acquireStateRepairLeasesForCommand = acquireStateRepairLeases
+var syncStateRepairHistoryToLocalForCommand = syncStateRepairHistoryToLocal
+
 type stateHistoryCandidate struct {
 	source  string
 	history *remotestate.DeploymentHistory
@@ -1898,6 +2046,7 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 		actual:     make([]stateActualCandidate, 0, len(serverNames)),
 		nodeActual: make([]stateNodeActualCandidate, 0, len(serverNames)),
 	}
+	quiet := machineOutputEnabled()
 
 	for _, serverName := range serverNames {
 		server, ok := cfg.Servers[serverName]
@@ -1906,7 +2055,9 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 			return nil, fmt.Errorf("server %s not found in configuration", serverName)
 		}
 
-		fmt.Printf("Checking %s (%s)...\n", serverName, server.Host)
+		if !quiet {
+			fmt.Printf("Checking %s (%s)...\n", serverName, server.Host)
+		}
 		client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: cannot connect to %s: %v\n", serverName, err)
@@ -1925,11 +2076,11 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 
 		history, err := manager.LoadHistory()
 		if errors.Is(err, remotestate.ErrNotFound) || !historyHasDeployments(history) {
-			if verbose {
+			if verbose && !quiet {
 				fmt.Printf("No deployment history found on %s\n", serverName)
 			}
 		} else if err != nil {
-			if verbose {
+			if verbose && !quiet {
 				fmt.Printf("Unable to read deployment history on %s: %v\n", serverName, err)
 			}
 		} else {
@@ -1937,10 +2088,12 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 				source:  serverName,
 				history: history,
 			})
-			fmt.Printf("  history: %d deployment(s), freshness %s\n",
-				deploymentHistoryCount(history),
-				deploymentHistoryFreshness(history).Format(time.RFC3339),
-			)
+			if !quiet {
+				fmt.Printf("  history: %d deployment(s), freshness %s\n",
+					deploymentHistoryCount(history),
+					deploymentHistoryFreshness(history).Format(time.RFC3339),
+				)
+			}
 		}
 
 		desired, err := runtime.ReadDesired()
@@ -1949,11 +2102,13 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 				source:  serverName,
 				desired: desired,
 			})
-			fmt.Printf("  desired: %s, freshness %s\n",
-				desired.RevisionID,
-				desiredRevisionFreshness(desired).Format(time.RFC3339),
-			)
-		} else if verbose && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+			if !quiet {
+				fmt.Printf("  desired: %s, freshness %s\n",
+					desired.RevisionID,
+					desiredRevisionFreshness(desired).Format(time.RFC3339),
+				)
+			}
+		} else if verbose && !quiet && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
 			fmt.Printf("Unable to read desired runtime state on %s: %v\n", serverName, err)
 		}
 
@@ -1963,10 +2118,12 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 				source: serverName,
 				actual: actual,
 			})
-			fmt.Printf("  actual: %d service(s), freshness %s\n",
-				actualSnapshotServiceCount(actual),
-				actualSnapshotFreshness(actual).Format(time.RFC3339),
-			)
+			if !quiet {
+				fmt.Printf("  actual: %d service(s), freshness %s\n",
+					actualSnapshotServiceCount(actual),
+					actualSnapshotFreshness(actual).Format(time.RFC3339),
+				)
+			}
 			for nodeName, nodeSnapshot := range actual.Nodes {
 				if !stateNodeNameInList(serverNames, nodeName) {
 					continue
@@ -1977,7 +2134,7 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 					actual: actualSnapshotFromEmbeddedNode(actual.Project, actual.Environment, nodeSnapshot),
 				})
 			}
-		} else if verbose && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+		} else if verbose && !quiet && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
 			fmt.Printf("Unable to read actual runtime state on %s: %v\n", serverName, err)
 		}
 
@@ -1991,11 +2148,11 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 					actual: nodeActual,
 				})
 				nodeActualCount++
-			} else if verbose && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
+			} else if verbose && !quiet && err != nil && !errors.Is(err, takodstate.ErrNotFound) {
 				fmt.Printf("Unable to read node actual runtime state for %s on %s: %v\n", nodeName, serverName, err)
 			}
 		}
-		if nodeActualCount > 0 {
+		if nodeActualCount > 0 && !quiet {
 			fmt.Printf("  node actual: %d snapshot(s)\n", nodeActualCount)
 		}
 	}
@@ -2011,6 +2168,46 @@ func closeStateRepairNodes(nodes []stateRepairNode) {
 			_ = node.client.Close()
 		}
 	}
+}
+
+func engineStateRepairNodes(nodes []stateRepairNode) []engine.StateRepairNode {
+	out := make([]engine.StateRepairNode, 0, len(nodes))
+	for _, node := range nodes {
+		out = append(out, engine.StateRepairNode{Name: node.name, HistoryManager: node.manager, Runtime: node.runtime})
+	}
+	return out
+}
+
+func engineStateRepairHistories(candidates []stateHistoryCandidate) []engine.StateRepairHistoryCandidate {
+	out := make([]engine.StateRepairHistoryCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, engine.StateRepairHistoryCandidate{Source: candidate.source, History: candidate.history})
+	}
+	return out
+}
+
+func engineStateRepairDesired(candidates []stateDesiredCandidate) []engine.StateRepairDesiredCandidate {
+	out := make([]engine.StateRepairDesiredCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, engine.StateRepairDesiredCandidate{Source: candidate.source, Desired: candidate.desired})
+	}
+	return out
+}
+
+func engineStateRepairActual(candidates []stateActualCandidate) []engine.StateRepairActualCandidate {
+	out := make([]engine.StateRepairActualCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, engine.StateRepairActualCandidate{Source: candidate.source, Actual: candidate.actual})
+	}
+	return out
+}
+
+func engineStateRepairNodeActual(candidates []stateNodeActualCandidate) []engine.StateRepairNodeActualCandidate {
+	out := make([]engine.StateRepairNodeActualCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, engine.StateRepairNodeActualCandidate{Source: candidate.source, Node: candidate.node, Actual: candidate.actual})
+	}
+	return out
 }
 
 func acquireStateRepairLeases(nodes []stateRepairNode, envName string) ([]stateRepairLease, error) {
@@ -2146,64 +2343,119 @@ func printStateRepairSource(hasHistory bool, history stateHistoryCandidate, hasD
 	}
 }
 
-func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCandidate, hasHistory bool, desired stateDesiredCandidate, hasDesired bool, actual stateActualCandidate, hasActual bool, nodeActual map[string]stateNodeActualCandidate) (int, int, int, int, error) {
-	historyWritten := 0
-	desiredWritten := 0
-	actualWritten := 0
-	nodeActualWritten := 0
-
-	resultCh := make(chan stateRepairWriteResult, len(nodes))
-	var wg sync.WaitGroup
-	for _, node := range nodes {
-		wg.Add(1)
-		go func(node stateRepairNode) {
-			defer wg.Done()
-			resultCh <- writeStateRepairDocumentsToNode(node, history, hasHistory, desired, hasDesired, actual, hasActual, nodeActual)
-		}(node)
+func renderStateRepairSources(result *engine.StateRepairResult) {
+	if result == nil {
+		return
 	}
-
-	wg.Wait()
-	close(resultCh)
-
-	var warnings []string
-	var fatalErrors []string
-	for result := range resultCh {
-		historyWritten += result.counts.history
-		desiredWritten += result.counts.desired
-		actualWritten += result.counts.actual
-		nodeActualWritten += result.counts.nodeActual
-		warnings = append(warnings, result.warnings...)
-		if result.err != nil {
-			fatalErrors = append(fatalErrors, fmt.Sprintf("%s: %v", result.nodeName, result.err))
+	if history := result.Sources.History; history != nil {
+		fmt.Printf("Deployment history source: %s (%d deployment(s), freshness %s)\n", history.Source, history.Count, history.Freshness.Format(time.RFC3339))
+	}
+	if desired := result.Sources.Desired; desired != nil {
+		fmt.Printf("Desired runtime source: %s (%s, freshness %s)\n", desired.Source, desired.RevisionID, desired.Freshness.Format(time.RFC3339))
+	}
+	if actual := result.Sources.Actual; actual != nil {
+		fmt.Printf("Actual runtime source: %s (%d service(s), freshness %s)\n", actual.Source, actual.ServiceCount, actual.Freshness.Format(time.RFC3339))
+	}
+	if len(result.Sources.NodeActual) > 0 {
+		fmt.Printf("Node actual sources: %d node(s)\n", len(result.Sources.NodeActual))
+		for _, candidate := range result.Sources.NodeActual {
+			fmt.Printf("  %s: %s (%d service(s), freshness %s)\n", candidate.Node, candidate.Source, candidate.ServiceCount, candidate.Freshness.Format(time.RFC3339))
 		}
 	}
+}
 
-	sort.Strings(warnings)
-	for _, warning := range warnings {
+func renderStateRepairWarnings(result *engine.StateRepairResult) {
+	if result == nil || machineOutputEnabled() {
+		return
+	}
+	for _, warning := range result.Warnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
 	}
+}
 
-	if len(fatalErrors) > 0 {
-		sort.Strings(fatalErrors)
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to prepare state repair documents: %s", strings.Join(fatalErrors, "; "))
+func renderStateRepairWriteSummary(result *engine.StateRepairResult) {
+	if result == nil {
+		return
+	}
+	counts := result.Writes.Counts
+	nodeCount := result.Counts.ReachableNodes
+	if result.Sources.HasHistory {
+		fmt.Printf("Repaired deployment history on %d/%d reachable node(s)\n", counts.History, nodeCount)
+	}
+	if result.Sources.HasDesired {
+		fmt.Printf("Repaired desired runtime state on %d/%d reachable node(s)\n", counts.Desired, nodeCount)
+	}
+	if result.Sources.HasActual {
+		fmt.Printf("Repaired actual runtime state on %d/%d reachable node(s)\n", counts.Actual, nodeCount)
+	}
+	if result.Sources.HasNodeActual {
+		fmt.Printf("Repaired node actual runtime state with %d document write(s)\n", counts.NodeActual)
+	}
+}
+
+func renderStateRepairResult(result *engine.StateRepairResult) error {
+	if result == nil {
+		return nil
+	}
+	if machineOutputEnabled() {
+		return emitResultDocument(result)
+	}
+	renderStateRepairSources(result)
+	renderStateRepairWarnings(result)
+	if result.Status == engine.StateRepairStatusSuccess {
+		renderStateRepairWriteSummary(result)
+	}
+	return nil
+}
+
+func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCandidate, hasHistory bool, desired stateDesiredCandidate, hasDesired bool, actual stateActualCandidate, hasActual bool, nodeActual map[string]stateNodeActualCandidate) (int, int, int, int, error) {
+	project, envName := stateRepairDocumentProjectEnvironment(history, hasHistory, desired, hasDesired, actual, hasActual, nodeActual)
+	req := engine.StateRepairRequest{
+		Config:      &config.Config{Project: config.ProjectConfig{Name: project}},
+		Environment: envName,
+		Nodes:       engineStateRepairNodes(nodes),
+	}
+	if hasHistory {
+		req.Histories = []engine.StateRepairHistoryCandidate{{Source: history.source, History: history.history}}
+	}
+	if hasDesired {
+		req.Desired = []engine.StateRepairDesiredCandidate{{Source: desired.source, Desired: desired.desired}}
+	}
+	if hasActual {
+		req.Actual = []engine.StateRepairActualCandidate{{Source: actual.source, Actual: actual.actual}}
+	}
+	for _, nodeName := range sortedStateNodeActualNames(nodeActual) {
+		candidate := nodeActual[nodeName]
+		req.NodeActual = append(req.NodeActual, engine.StateRepairNodeActualCandidate{Source: candidate.source, Node: candidate.node, Actual: candidate.actual})
 	}
 
-	if hasHistory && historyWritten == 0 {
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired deployment history to any reachable node")
+	result, err := cliEngine().StateRepair(context.Background(), req)
+	if result == nil {
+		return 0, 0, 0, 0, err
 	}
-	if hasDesired && desiredWritten == 0 {
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired desired runtime state to any reachable node")
+	for _, warning := range result.Warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
 	}
-	if hasActual && actualWritten == 0 {
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired actual runtime state to any reachable node")
+	counts := result.Writes.Counts
+	return counts.History, counts.Desired, counts.Actual, counts.NodeActual, err
+}
+
+func stateRepairDocumentProjectEnvironment(history stateHistoryCandidate, hasHistory bool, desired stateDesiredCandidate, hasDesired bool, actual stateActualCandidate, hasActual bool, nodeActual map[string]stateNodeActualCandidate) (string, string) {
+	if hasHistory && history.history != nil {
+		return history.history.ProjectName, history.history.Environment
 	}
-	if len(nodeActual) > 0 && nodeActualWritten == 0 {
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired node actual runtime state to any reachable node")
+	if hasDesired && desired.desired != nil {
+		return desired.desired.Project, desired.desired.Environment
 	}
-	if len(warnings) > 0 {
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("state repair incomplete: %s", strings.Join(warnings, "; "))
+	if hasActual && actual.actual != nil {
+		return actual.actual.Project, actual.actual.Environment
 	}
-	return historyWritten, desiredWritten, actualWritten, nodeActualWritten, nil
+	for _, candidate := range nodeActual {
+		if candidate.actual != nil {
+			return candidate.actual.Project, candidate.actual.Environment
+		}
+	}
+	return "", ""
 }
 
 type stateRepairWriteCounts struct {
@@ -2725,6 +2977,22 @@ func boolToHealth(healthy bool) string {
 	return "unknown"
 }
 
+func syncStateRepairHistoryToLocal(cfg *config.Config, envName string, history *remotestate.DeploymentHistory) (int, error) {
+	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+	if err != nil {
+		return 0, fmt.Errorf("remote state repaired, but local state initialization failed: %w", err)
+	}
+	var deployments []*remotestate.DeploymentState
+	if history != nil {
+		deployments = history.Deployments
+	}
+	synced, err := syncRemoteDeploymentsToLocal(localMgr, deployments, envName)
+	if err != nil {
+		return synced, fmt.Errorf("remote state repaired, but local state sync failed: %w", err)
+	}
+	return synced, nil
+}
+
 func syncRemoteDeploymentsToLocal(localMgr *localstate.Manager, remoteDeployments []*remotestate.DeploymentState, envName string) (int, error) {
 	ordered := append([]*remotestate.DeploymentState(nil), remoteDeployments...)
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -2855,21 +3123,34 @@ func recoverAndSaveStateFromMeshActual(cfg *config.Config, envName string, reque
 }
 
 func recoverAndSaveStateFromMeshActualWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) error {
-	nodes, err := collectStateStatusNodesWithPool(pool, cfg, envName, requestedServer)
+	result, err := recoverAndSaveStateFromMeshActualResultWithPool(pool, cfg, envName, requestedServer)
 	if err != nil {
 		return err
+	}
+	fmt.Printf("Recovered state from %d running service(s)\n", result.ServiceCount)
+	return nil
+}
+
+func recoverAndSaveStateFromMeshActualResult(cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	return recoverAndSaveStateFromMeshActualResultWithPool(nil, cfg, envName, requestedServer)
+}
+
+func recoverAndSaveStateFromMeshActualResultWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	nodes, err := collectStateStatusNodesWithPool(pool, cfg, envName, requestedServer)
+	if err != nil {
+		return engine.StatePullRecoveryResult{}, err
 	}
 	_, _, actualCandidates, nodeActualCandidates := stateStatusCandidates(nodes)
 	bestActual, hasActual, _ := bestStateStatusActual(cfg.Project.Name, envName, actualCandidates, nodeActualCandidates)
 	if !hasActual {
-		return fmt.Errorf("no mesh actual state found")
+		return engine.StatePullRecoveryResult{}, fmt.Errorf("no mesh actual state found")
 	}
 
 	deployment, err := ReconcileStateFromActualSnapshot(cfg, envName, bestActual.actual, "State recovered from replicated takod actual state")
 	if err != nil {
-		return err
+		return engine.StatePullRecoveryResult{}, err
 	}
-	return saveRecoveredDeployment(cfg, envName, deployment)
+	return saveRecoveredDeploymentResult(cfg, envName, deployment)
 }
 
 type runningActualNodeResult struct {
@@ -2885,20 +3166,33 @@ func recoverAndSaveStateFromRunningMesh(cfg *config.Config, envName string, requ
 }
 
 func recoverAndSaveStateFromRunningMeshWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) error {
-	candidates, err := collectRunningActualNodeSnapshotsWithPool(pool, cfg, envName, requestedServer)
+	result, err := recoverAndSaveStateFromRunningMeshResultWithPool(pool, cfg, envName, requestedServer)
 	if err != nil {
 		return err
 	}
+	fmt.Printf("Recovered state from %d running service(s)\n", result.ServiceCount)
+	return nil
+}
+
+func recoverAndSaveStateFromRunningMeshResult(cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	return recoverAndSaveStateFromRunningMeshResultWithPool(nil, cfg, envName, requestedServer)
+}
+
+func recoverAndSaveStateFromRunningMeshResultWithPool(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) (engine.StatePullRecoveryResult, error) {
+	candidates, err := collectRunningActualNodeSnapshotsWithPool(pool, cfg, envName, requestedServer)
+	if err != nil {
+		return engine.StatePullRecoveryResult{}, err
+	}
 	bestNodeActual := bestNodeActualSnapshots(candidates)
 	if len(bestNodeActual) == 0 {
-		return fmt.Errorf("no running takod containers found on reachable mesh nodes")
+		return engine.StatePullRecoveryResult{}, fmt.Errorf("no running takod containers found on reachable mesh nodes")
 	}
 	aggregate := aggregateActualSnapshotFromNodeSnapshots(cfg.Project.Name, envName, bestNodeActual)
 	deployment, err := ReconcileStateFromActualSnapshot(cfg, envName, aggregate, "State recovered from running takod containers across the mesh")
 	if err != nil {
-		return err
+		return engine.StatePullRecoveryResult{}, err
 	}
-	return saveRecoveredDeployment(cfg, envName, deployment)
+	return saveRecoveredDeploymentResult(cfg, envName, deployment)
 }
 
 func collectRunningActualNodeSnapshots(cfg *config.Config, envName string, requestedServer string) ([]stateNodeActualCandidate, error) {
@@ -3090,18 +3384,25 @@ func ReconcileStateFromActualSnapshot(cfg *config.Config, envName string, actual
 }
 
 func saveRecoveredDeployment(cfg *config.Config, envName string, deployment *localstate.DeploymentState) error {
+	result, err := saveRecoveredDeploymentResult(cfg, envName, deployment)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Recovered state from %d running service(s)\n", result.ServiceCount)
+	return nil
+}
+
+func saveRecoveredDeploymentResult(cfg *config.Config, envName string, deployment *localstate.DeploymentState) (engine.StatePullRecoveryResult, error) {
 	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
 	if err != nil {
-		return fmt.Errorf("failed to initialize local state: %w", err)
+		return engine.StatePullRecoveryResult{}, fmt.Errorf("failed to initialize local state: %w", err)
 	}
 
 	if err := localMgr.SaveDeployment(deployment); err != nil {
-		return fmt.Errorf("failed to save recovered state: %w", err)
+		return engine.StatePullRecoveryResult{}, fmt.Errorf("failed to save recovered state: %w", err)
 	}
 
-	fmt.Printf("Recovered state from %d running service(s)\n", len(deployment.Services))
-
-	return nil
+	return engine.StatePullRecoveryResult{ServiceCount: len(deployment.Services)}, nil
 }
 
 // ExportState exports current state to a JSON file

@@ -27,8 +27,16 @@ Inspect effective Tako configuration
 	environment to deploy (default: production or only environment)
 
 .PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
 \fB--host-key-mode\fP=""
 	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
 
 .PP
 \fB-v\fP, \fB--verbose\fP[=false]
@@ -36,4 +44,4 @@ Inspect effective Tako configuration
 
 
 .SH SEE ALSO
-\fBtako(1)\fP, \fBtako-config-explain(1)\fP
+\fBtako(1)\fP, \fBtako-config-explain(1)\fP, \fBtako-config-export(1)\fP, \fBtako-config-pull(1)\fP

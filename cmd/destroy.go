@@ -7,9 +7,8 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/ssh"
-	"github.com/redentordev/tako-cli/pkg/state"
-	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
 
@@ -65,227 +64,45 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-	if err := requireTakodRuntime(cfg); err != nil {
-		return err
+
+	request := engine.DestroyRequest{
+		Config:      cfg,
+		Environment: getEnvironmentName(cfg),
+		PurgeAll:    destroyPurgeAll,
+		Force:       destroyForce,
+		Verbose:     verbose,
 	}
 
-	// Acquire state lock to prevent concurrent operations
-	stateLock := state.NewStateLock(".tako")
-	lockInfo, err := stateLock.Acquire("destroy")
-	if err != nil {
-		return fmt.Errorf("cannot destroy: %w", err)
-	}
-	defer stateLock.Release(lockInfo)
-
-	envName := getEnvironmentName(cfg)
-	serversToDestroy, targetServerNames, err := destroyEnvironmentTargets(cfg, envName)
+	session, err := cliEngine().PlanDestroy(cmd.Context(), request)
 	if err != nil {
 		return err
 	}
-
-	// Show warning and get confirmation
-	mode := "DECOMMISSION"
-	if destroyPurgeAll {
-		mode = "PURGE"
-	}
-
-	fmt.Printf("⚠️  WARNING: You are about to %s this app/stage on the following node(s):\n\n", mode)
-	for _, serverName := range targetServerNames {
-		server := serversToDestroy[serverName]
-		fmt.Printf("   • %s (%s)\n", serverName, server.Host)
-	}
-
-	fmt.Printf("\n%s MODE will:\n", mode)
-	fmt.Println("   ✓ Stop and remove this app/stage service replicas")
-	fmt.Println("   ✓ Remove this app/stage service images")
-	fmt.Println("   ✓ Remove this app/stage deployment files and directories")
-
-	if destroyPurgeAll {
-		fmt.Println("   ✓ Prune unused app-owned volumes")
-		fmt.Println("   ✓ Prune stopped app containers and old app images")
-		fmt.Println("\nPreserving unrelated projects and shared server setup (takod, tako-proxy, logs)")
-	} else {
-		fmt.Println("\nPreserving unrelated projects and server setup (takod, tako-proxy, logs)")
-		fmt.Println("You can redeploy without running 'tako setup' again")
-	}
-
-	// Check if any production servers
-	hasProduction := false
-	for serverName := range serversToDestroy {
-		if strings.Contains(strings.ToLower(serverName), "prod") {
-			hasProduction = true
-			break
-		}
-	}
-
-	if hasProduction && !destroyForce {
-		fmt.Println("\n🚨 PRODUCTION SERVER DETECTED!")
-		fmt.Println("   This is a destructive operation.")
-	}
+	defer session.Close()
 
 	// Get confirmation
 	if !destroyForce {
-		fmt.Printf("\nType the project name '%s' to confirm: ", cfg.Project.Name)
+		fmt.Printf("\nType the project name '%s' to confirm: ", session.ProjectName())
 		reader := bufio.NewReader(os.Stdin)
 		confirmation, _ := reader.ReadString('\n')
 		confirmation = strings.TrimSpace(confirmation)
 
-		if confirmation != cfg.Project.Name {
+		if confirmation != session.ProjectName() {
 			fmt.Println("\n❌ Confirmation failed. Operation cancelled.")
 			return nil
 		}
 	}
 
-	sshPool := ssh.NewPool()
-	defer sshPool.CloseAll()
-	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServerNames, "destroy")
-	if err != nil {
-		return err
-	}
-	defer leaseSet.Release(verbose)
-	if verbose {
-		fmt.Printf("→ Acquired remote destroy leases: %s\n", leaseSet.Summary())
-	}
-
-	fmt.Printf("\n🗑️  Removing app runtime on %d node(s)...\n\n", len(serversToDestroy))
-
-	totalErrors := 0
-
-	for _, serverName := range targetServerNames {
-		serverCfg := serversToDestroy[serverName]
-		fmt.Printf("=== Removing app runtime on node: %s (%s) ===\n", serverName, serverCfg.Host)
-		if err := destroySingleServer(sshPool, serverName, serverCfg, cfg, envName, verbose, destroyPurgeAll); err != nil {
-			fmt.Printf("⚠️  Errors removing app runtime on %s: %v\n", serverName, err)
-			totalErrors++
-		} else {
-			fmt.Printf("✓ App runtime removed on %s\n\n", serverName)
-		}
-	}
-
-	// Summary
-	if totalErrors > 0 {
-		fmt.Printf("⚠️  Destroy completed with %d errors\n", totalErrors)
-		fmt.Println("   Run with -v (verbose) flag for more details")
-		return fmt.Errorf("destroy incomplete: %d server(s) failed", totalErrors)
-	} else {
-		fmt.Println("✨ All servers destroyed successfully!")
-
-		if destroyPurgeAll {
-			fmt.Println("\n💡 App-owned leftovers pruned. Shared server setup was preserved.")
-		} else {
-			fmt.Println("\n💡 Server setup preserved. You can redeploy without running 'tako setup'.")
-		}
-	}
-
-	return nil
+	_, err = session.Apply(cmd.Context())
+	return err
 }
+
+// The destroy pipeline lives in pkg/engine; these aliases keep the helpers'
+// previous cmd names working for tests and callers.
 
 func destroyEnvironmentTargets(cfg *config.Config, envName string) (map[string]config.ServerConfig, []string, error) {
-	envServerNames, err := cfg.GetEnvironmentServers(envName)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get environment servers: %w", err)
-	}
-	if len(envServerNames) == 0 {
-		return nil, nil, fmt.Errorf("no servers configured for environment %s", envName)
-	}
-
-	servers := make(map[string]config.ServerConfig, len(envServerNames))
-	for _, serverName := range envServerNames {
-		server, ok := cfg.Servers[serverName]
-		if !ok {
-			return nil, nil, fmt.Errorf("server %s not found in config", serverName)
-		}
-		servers[serverName] = server
-	}
-	return servers, append([]string(nil), envServerNames...), nil
-}
-
-// destroySingleServer handles destruction of a single server.
-func destroySingleServer(pool sshClientProvider, serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool) error {
-	return destroySingleServerWithHooks(pool, serverName, serverCfg, cfg, envName, verbose, purgeAll, decommissionApp, purgeProjectRuntime)
+	return engine.DestroyEnvironmentTargets(cfg, envName)
 }
 
 func destroySingleServerWithHooks(pool sshClientProvider, serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool, decommission func(*ssh.Client, *config.Config, string, bool) error, purge func(*ssh.Client, *config.Config, string, bool) error) error {
-	if pool == nil {
-		return fmt.Errorf("ssh pool is not initialized")
-	}
-	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
-	if err != nil {
-		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
-	}
-
-	// Decommission application
-	if err := decommission(client, cfg, envName, verbose); err != nil {
-		return fmt.Errorf("decommission failed: %w", err)
-	}
-
-	// Prune app-owned leftovers if requested.
-	if purgeAll {
-		if err := purge(client, cfg, envName, verbose); err != nil {
-			return fmt.Errorf("purge failed: %w", err)
-		}
-	}
-
-	return nil
-}
-
-// decommissionApp stops and removes the deployed application
-func decommissionApp(client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
-	if verbose {
-		fmt.Println("  → Removing takod-managed services...")
-	}
-	services, err := cfg.GetServices(envName)
-	if err != nil {
-		return fmt.Errorf("failed to get services for environment %s: %w", envName, err)
-	}
-	response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
-		Project:           cfg.Project.Name,
-		Environment:       envName,
-		RemoveContainers:  true,
-		RemoveImages:      true,
-		RemoveNetworks:    true,
-		RemoveDeployFiles: true,
-		RemoveTakodState:  true,
-		ProxyFiles:        cleanupProxyFiles(cfg.Project.Name, envName, services),
-		ImageRepositories: cleanupImageRepositories(cfg, envName, services),
-		ExternalVolumes:   externalVolumeNamesForEnvironment(cfg, envName),
-	})
-	if err != nil {
-		return err
-	}
-	if verbose {
-		printCleanupWarnings(response)
-	}
-
-	if verbose {
-		fmt.Println("  ✓ Application decommissioned")
-	}
-
-	return nil
-}
-
-// purgeProjectRuntime removes app-owned leftovers without touching shared takod
-// or tako-proxy runtime used by other projects on the same node.
-func purgeProjectRuntime(client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
-	if verbose {
-		fmt.Println("  → Pruning app-owned leftovers...")
-	}
-	response, err := cleanupViaTakod(client, cfg, takod.CleanupRequest{
-		Project:         cfg.Project.Name,
-		Environment:     envName,
-		PruneDocker:     true,
-		ExternalVolumes: externalVolumeNamesForEnvironment(cfg, envName),
-	})
-	if err != nil {
-		return err
-	}
-	if verbose {
-		printCleanupWarnings(response)
-	}
-
-	if verbose {
-		fmt.Println("  ✓ App-owned leftovers pruned")
-	}
-
-	return nil
+	return engine.DestroySingleServerWithHooks(pool, serverName, serverCfg, cfg, envName, verbose, purgeAll, decommission, purge)
 }

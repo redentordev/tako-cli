@@ -37,6 +37,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Check system requirements
 	checker := syscheck.NewSystemChecker(verbose)
+	checker.SetPromptFunc(syscheck.InteractiveNixpacksPrompt)
 	result := checker.CheckAll()
 	checker.PrintResults(result)
 

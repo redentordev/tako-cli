@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
@@ -34,6 +36,33 @@ func TestStateCommandsSilenceUsageOnExecutionErrors(t *testing.T) {
 		if !cmd.SilenceUsage {
 			t.Fatalf("%s command should silence usage on execution errors", cmd.CommandPath())
 		}
+	}
+}
+
+func TestDeploymentCommitsEquivalent(t *testing.T) {
+	tests := []struct {
+		name         string
+		localCommit  string
+		remoteCommit string
+		remoteShort  string
+		want         bool
+	}{
+		{name: "empty local is equivalent to git-optional remote", remoteCommit: "abcdef", remoteShort: "abc", want: true},
+		{name: "empty remote commit and short are equivalent", localCommit: "abcdef", want: true},
+		{name: "whitespace is trimmed", localCommit: " abcdef ", remoteCommit: "\tabcdef\n", want: true},
+		{name: "exact full commit match", localCommit: "abcdef", remoteCommit: "abcdef", want: true},
+		{name: "local full commit matches remote short", localCommit: "abcdef123", remoteShort: "abcdef", want: true},
+		{name: "remote full commit matches local short", localCommit: "abcdef", remoteCommit: "abcdef123", want: true},
+		{name: "mismatch", localCommit: "abcdef", remoteCommit: "123456", remoteShort: "123", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deploymentCommitsEquivalent(tt.localCommit, tt.remoteCommit, tt.remoteShort)
+			if got != tt.want {
+				t.Fatalf("deploymentCommitsEquivalent(%q, %q, %q) = %v, want %v", tt.localCommit, tt.remoteCommit, tt.remoteShort, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -522,6 +551,238 @@ func TestReleaseStateLeaseByIDReportsMissingReachableLease(t *testing.T) {
 	}
 }
 
+func TestRunStateForgetNodeMachineJSONRequiresYesWithoutPrompting(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		oldCfgFile, oldEnvFlag := cfgFile, envFlag
+		oldServer, oldYes, oldForce := stateServer, stateForgetNodeYes, stateForgetNodeForce
+		defer func() {
+			cfgFile, envFlag = oldCfgFile, oldEnvFlag
+			stateServer, stateForgetNodeYes, stateForgetNodeForce = oldServer, oldYes, oldForce
+		}()
+
+		tempDir := t.TempDir()
+		configPath := filepath.Join(tempDir, "tako.yaml")
+		if err := os.WriteFile(configPath, []byte(`project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: root
+    password: ${TEST_SSH_PASSWORD}
+environments:
+  production:
+    servers:
+      - node-a
+    services:
+      web:
+        image: nginx:alpine
+        port: 80
+`), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		t.Setenv("TEST_SSH_PASSWORD", "secret")
+		cfgFile = configPath
+		envFlag = "production"
+		stateServer = ""
+		stateForgetNodeYes = false
+		stateForgetNodeForce = false
+
+		var runErr error
+		stdout := captureConfigExportStdout(t, func() {
+			runErr = runStateForgetNode(&cobra.Command{}, []string{"node-b"})
+		})
+		var confirmation *engine.ConfirmationRequiredError
+		if !errors.As(runErr, &confirmation) {
+			t.Fatalf("error = %T %v, want ConfirmationRequiredError", runErr, runErr)
+		}
+		if strings.Contains(stdout, "Forget node") || strings.Contains(stdout, "Project:") {
+			t.Fatalf("machine stdout contains prompt/human text: %q", stdout)
+		}
+		var decoded struct {
+			Kind        string `json:"kind"`
+			Operation   string `json:"operation"`
+			Project     string `json:"project"`
+			Environment string `json:"environment"`
+			RetiredNode string `json:"retiredNode"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable confirmation JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != "ConfirmationRequired" || decoded.Operation != "state.forget-node" || decoded.Project != "demo" || decoded.RetiredNode != "node-b" {
+			t.Fatalf("decoded confirmation = %#v", decoded)
+		}
+	})
+}
+
+func TestRenderStateForgetNodeResultMachineJSONSuppressesHumanOutput(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		result := &engine.StateForgetNodeResult{
+			APIVersion:  "tako.redentor.dev/v1alpha1",
+			Kind:        engine.KindStateForgetNodeResult,
+			Project:     "demo",
+			Environment: "production",
+			RetiredNode: "node-b",
+			Status:      engine.StateForgetNodeStatusSuccess,
+			Nodes: []engine.StateForgetNodeNodeResult{{
+				Name:              "node-a",
+				NodeActualExisted: true,
+				AggregatePruned:   true,
+			}},
+			Summary: engine.StateForgetNodeResultSummary{ReachableNodes: 1, StandaloneSnapshotsFound: 1, AggregateActualStatesPruned: 1},
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderStateForgetNodeResult(result); err != nil {
+				t.Fatalf("renderStateForgetNodeResult returned error: %v", err)
+			}
+		})
+		if strings.Contains(stdout, "Forgot node") || strings.Contains(stdout, "Next:") {
+			t.Fatalf("machine stdout contains human forget-node output: %q", stdout)
+		}
+		var decoded engine.StateForgetNodeResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable forget-node JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStateForgetNodeResult || decoded.RetiredNode != "node-b" || decoded.Summary.ReachableNodes != 1 {
+			t.Fatalf("decoded result = %#v", decoded)
+		}
+	})
+}
+
+func TestRenderStateLeaseResultMachineJSONSuppressesHumanOutput(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		result := &engine.StateLeaseResult{
+			APIVersion:  "tako.redentor.dev/v1alpha1",
+			Kind:        engine.KindStateLeaseResult,
+			Project:     "demo",
+			Environment: "production",
+			Servers:     []string{"node-a"},
+			Nodes: []engine.StateLeaseNodeResult{{
+				Name: "node-a",
+				Host: "10.0.0.1",
+				Lease: &remotestate.LeaseInfo{
+					ID:        "lease-1",
+					Operation: "deploy",
+				},
+			}},
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderStateLeaseResult(result); err != nil {
+				t.Fatalf("renderStateLeaseResult returned error: %v", err)
+			}
+		})
+		if strings.Contains(stdout, "Project:") || strings.Contains(stdout, "Node:") || strings.Contains(stdout, "Lease:") {
+			t.Fatalf("machine stdout contains human lease output: %q", stdout)
+		}
+		var decoded engine.StateLeaseResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable lease JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStateLeaseResult || len(decoded.Nodes) != 1 || decoded.Nodes[0].Lease.ID != "lease-1" {
+			t.Fatalf("decoded result = %#v", decoded)
+		}
+	})
+}
+
+func TestRenderStatePullResultMachineJSONSuppressesHumanOutput(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		result := &engine.StatePullResult{
+			APIVersion:   "tako.redentor.dev/v1alpha1",
+			Kind:         engine.KindStatePullResult,
+			Project:      "demo",
+			Environment:  "production",
+			Status:       engine.StatePullStatusSyncedHistory,
+			SourceServer: "node-a",
+			SyncedCount:  1,
+			Latest:       &engine.StatePullLatestDeployment{ID: "deploy-1", DisplayID: "deploy", Status: remotestate.StatusSuccess, Timestamp: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC), User: "alice", Commit: "abc1234"},
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderStatePullResult(result); err != nil {
+				t.Fatalf("renderStatePullResult returned error: %v", err)
+			}
+		})
+		for _, human := range []string{"Selected deployment history", "Synced", "Latest deployment", "Local state"} {
+			if strings.Contains(stdout, human) {
+				t.Fatalf("machine stdout contains human state pull output %q: %q", human, stdout)
+			}
+		}
+		var decoded engine.StatePullResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable state pull JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStatePullResult || decoded.Status != engine.StatePullStatusSyncedHistory || decoded.Latest == nil || decoded.Latest.ID != "deploy-1" {
+			t.Fatalf("decoded result = %#v", decoded)
+		}
+	})
+}
+
+func TestRenderStatePullResultNDJSONSuppressesHumanOutput(t *testing.T) {
+	withMachineOutput(t, outputFormatText, eventsFormatNDJSON, func() {
+		result := &engine.StatePullResult{
+			APIVersion:  "tako.redentor.dev/v1alpha1",
+			Kind:        engine.KindStatePullResult,
+			Project:     "demo",
+			Environment: "production",
+			Status:      engine.StatePullStatusNoneFound,
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderStatePullResult(result); err != nil {
+				t.Fatalf("renderStatePullResult returned error: %v", err)
+			}
+		})
+		if strings.Contains(stdout, "No remote deployment history found") || strings.Contains(stdout, "Run 'tako deploy'") {
+			t.Fatalf("NDJSON stdout contains human state pull output: %q", stdout)
+		}
+		lines := strings.Split(strings.TrimSpace(stdout), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("NDJSON stdout lines = %d, want 1: %q", len(lines), stdout)
+		}
+		var event struct {
+			Type string `json:"type"`
+			Data struct {
+				Result engine.StatePullResult `json:"result"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+			t.Fatalf("stdout is not parseable NDJSON: %v\n%s", err, stdout)
+		}
+		if event.Type != "result" || event.Data.Result.Kind != engine.KindStatePullResult || event.Data.Result.Status != engine.StatePullStatusNoneFound {
+			t.Fatalf("decoded event = %#v", event)
+		}
+	})
+}
+
+func TestRunStateLeaseReleaseMachineJSONSuppressesReleaseProse(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		result := &engine.StateLeaseReleaseResult{
+			APIVersion:    "tako.redentor.dev/v1alpha1",
+			Kind:          engine.KindStateLeaseReleaseResult,
+			Project:       "demo",
+			Environment:   "production",
+			Servers:       []string{"node-a"},
+			LeaseID:       "lease-1",
+			Force:         true,
+			Released:      []string{"node-a"},
+			ReleasedCount: 1,
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderStateLeaseReleaseResult(result); err != nil {
+				t.Fatalf("renderStateLeaseReleaseResult returned error: %v", err)
+			}
+		})
+		if strings.Contains(stdout, "Released lease") {
+			t.Fatalf("machine stdout contains human release prose: %q", stdout)
+		}
+		var decoded engine.StateLeaseReleaseResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable release JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStateLeaseReleaseResult || decoded.LeaseID != "lease-1" || decoded.ReleasedCount != 1 {
+			t.Fatalf("decoded result = %#v", decoded)
+		}
+	})
+}
+
 func TestRunStateStatusReturnsConfigurationErrors(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
@@ -565,6 +826,63 @@ environments:
 	if !strings.Contains(err.Error(), "server node-b not found") {
 		t.Fatalf("error = %q, want server config context", err)
 	}
+}
+
+func TestRunStateStatusMachineJSONSuppressesHumanOutput(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		tempDir := t.TempDir()
+		t.Chdir(tempDir)
+		configPath := filepath.Join(tempDir, "tako.yaml")
+		if err := os.WriteFile(configPath, []byte(`
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+    password: test-password
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+`), 0600); err != nil {
+			t.Fatalf("failed to write config: %v", err)
+		}
+
+		oldCfgFile, oldStateServer, oldEnvFlag := cfgFile, stateServer, envFlag
+		oldCollect := collectStateStatusNodesForCommand
+		cfgFile = configPath
+		stateServer = ""
+		envFlag = "production"
+		collectStateStatusNodesForCommand = func(cfg *config.Config, envName string, requestedServer string) ([]stateStatusNode, error) {
+			return []stateStatusNode{{name: "node-a", host: "10.0.0.1", envNodes: []string{"node-a"}, connectErr: errors.New("dial timeout")}}, nil
+		}
+		defer func() {
+			cfgFile = oldCfgFile
+			stateServer = oldStateServer
+			envFlag = oldEnvFlag
+			collectStateStatusNodesForCommand = oldCollect
+		}()
+
+		stdout := captureConfigExportStdout(t, func() {
+			if err := runStateStatus(&cobra.Command{}, nil); err == nil {
+				t.Fatal("runStateStatus should return no-reachable error")
+			}
+		})
+		if strings.Contains(stdout, "Project:") || strings.Contains(stdout, "=== Local State ===") {
+			t.Fatalf("machine stdout contains human status prose: %q", stdout)
+		}
+		var decoded engine.StateStatusResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable status JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStateStatusResult || decoded.Project != "demo" || decoded.Counts.ReachableNodes != 0 || decoded.Error == "" {
+			t.Fatalf("decoded result = %#v", decoded)
+		}
+	})
 }
 
 func TestStateSyncRecommendationReportsSyncedState(t *testing.T) {

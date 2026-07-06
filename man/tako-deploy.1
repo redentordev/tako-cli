@@ -22,10 +22,19 @@ The deployment process:
 .PP
 If a step fails, deployment stops and records the failed state for inspection or rollback.
 
+.PP
+Use 'tako deploy --service web --image registry.example.com/web:sha' to deploy one service from an existing image without building.
+Use 'tako deploy --service web --source .' to deploy one service from a targeted build context.
+Use 'tako deploy --service web --archive app.tar.gz' to deploy one service from a local source archive.
+
 
 .SH OPTIONS
 \fB--allow-dirty\fP[=false]
 	Allow deploying with uncommitted local changes
+
+.PP
+\fB--archive\fP=""
+	Deploy target service from a local source archive (.tar, .tar.gz, .tgz, .zip)
 
 .PP
 \fB--build-strategy\fP=""
@@ -48,6 +57,22 @@ If a step fails, deployment stops and records the failed state for inspection or
 	help for deploy
 
 .PP
+\fB--image\fP=""
+	Override target service image for this deploy
+
+.PP
+\fB--plan\fP=""
+	Path to a reviewed plan document; apply fails if the computed plan drifted from it
+
+.PP
+\fB--plan-only\fP[=false]
+	Compute and show the deployment plan without applying it
+
+.PP
+\fB--revision\fP=""
+	Explicit non-git source revision/build tag
+
+.PP
 \fB--service\fP=""
 	Deploy specific service
 
@@ -58,6 +83,10 @@ If a step fails, deployment stops and records the failed state for inspection or
 .PP
 \fB--skip-domain-check\fP[=false]
 	Skip post-deploy DNS/TLS checks for public domains
+
+.PP
+\fB--source\fP=""
+	Deploy configured project from a non-git source label/path; with --service, override that service build context
 
 .PP
 \fB--strict-domains\fP[=false]
@@ -77,8 +106,16 @@ If a step fails, deployment stops and records the failed state for inspection or
 	environment to deploy (default: production or only environment)
 
 .PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
 \fB--host-key-mode\fP=""
 	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
 
 .PP
 \fB-v\fP, \fB--verbose\fP[=false]

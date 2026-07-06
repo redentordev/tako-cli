@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ func TestStreamAccessNodesWithRunsConcurrentlyAndKeepsSortedOrder(t *testing.T) 
 
 	resultsDone := make(chan []accessNodeResult, 1)
 	go func() {
-		resultsDone <- streamAccessNodesWith(servers, func(serverName string, _ config.ServerConfig, prefix bool) error {
+		resultsDone <- streamAccessNodesWith(context.Background(), servers, func(serverName string, _ config.ServerConfig, prefix bool) error {
 			if !prefix {
 				return fmt.Errorf("expected multi-node stream to request prefixes")
 			}
@@ -51,7 +52,7 @@ func TestStreamAccessNodesWithOmitsPrefixForSingleNode(t *testing.T) {
 		"node-a": {Host: "node-a.example.test"},
 	}
 
-	results := streamAccessNodesWith(servers, func(_ string, _ config.ServerConfig, prefix bool) error {
+	results := streamAccessNodesWith(context.Background(), servers, func(_ string, _ config.ServerConfig, prefix bool) error {
 		if prefix {
 			return fmt.Errorf("single-node stream should not request prefixes")
 		}

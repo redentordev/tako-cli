@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
+	"github.com/redentordev/tako-cli/pkg/takoapi/stateclient"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
@@ -43,15 +46,26 @@ func NewStateReplicator(pool *ssh.Pool, cfg *config.Config, environment, project
 }
 
 // ReplicateDeployment replicates a deployment and its history to every
-// environment mesh node. Writes are idempotent, so including the node that
-// initially saved the deployment is acceptable.
+// environment mesh node using the legacy 30s background timeout. Writes are
+// idempotent, so including the node that initially saved the deployment is
+// acceptable.
 func (r *StateReplicator) ReplicateDeployment(deployment *DeploymentState, history *DeploymentHistory) error {
+	return r.ReplicateDeploymentContext(context.Background(), deployment, history)
+}
+
+// ReplicateDeploymentContext replicates a deployment and its history to every
+// environment mesh node, bounded by both ctx and the legacy 30s timeout.
+func (r *StateReplicator) ReplicateDeploymentContext(ctx context.Context, deployment *DeploymentState, history *DeploymentHistory) error {
 	peers := r.getReplicaServers()
 	if len(peers) == 0 {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	parentCtx := ctx
+	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer cancel()
 
 	replicateNode := r.replicateToNode
@@ -87,7 +101,13 @@ func (r *StateReplicator) ReplicateDeployment(deployment *DeploymentState, histo
 	select {
 	case <-done:
 	case <-ctx.Done():
-		return fmt.Errorf("state replication timed out after 30s: %w", ctx.Err())
+		if parentErr := parentCtx.Err(); parentErr != nil {
+			return fmt.Errorf("state replication cancelled: %w", parentErr)
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("state replication timed out after 30s: %w", ctx.Err())
+		}
+		return fmt.Errorf("state replication cancelled: %w", ctx.Err())
 	}
 
 	close(errs)
@@ -116,23 +136,18 @@ func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string
 		return fmt.Errorf("connect: %w", err)
 	}
 
-	deploymentCopy, err := cloneDeploymentState(deployment)
+	deploymentDocument, err := deploymentStateDocument(deployment)
 	if err != nil {
 		return fmt.Errorf("clone deployment: %w", err)
 	}
-	historyCopy, err := cloneDeploymentHistory(history)
+	historyDocument, err := deploymentHistoryDocument(history)
 	if err != nil {
 		return fmt.Errorf("clone history: %w", err)
 	}
+	r.prepareReplicaDocuments(server.Host, deploymentDocument, historyDocument)
 
-	manager := NewStateManagerWithSocket(client, r.projectName, r.environment, server.Host, r.socket)
-	if err := manager.SaveDeployment(deploymentCopy); err != nil {
-		return fmt.Errorf("deployment: %w", err)
-	}
-	if historyCopy != nil {
-		if err := manager.SaveHistory(historyCopy); err != nil {
-			return fmt.Errorf("history: %w", err)
-		}
+	if err := stateclient.New(client).WithSocket(r.socket).ReplicateDeploymentContext(ctx, *deploymentDocument, historyDocument); err != nil {
+		return err
 	}
 
 	if r.verbose {
@@ -141,7 +156,24 @@ func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string
 	return nil
 }
 
-func cloneDeploymentState(deployment *DeploymentState) (*DeploymentState, error) {
+func (r *StateReplicator) prepareReplicaDocuments(serverHost string, deployment *takoapi.DeploymentStateDocument, history *takoapi.DeploymentHistoryDocument) {
+	if deployment != nil {
+		if deployment.ID == "" {
+			deployment.ID = fmt.Sprintf("%d_%d", time.Now().UnixNano(), os.Getpid())
+		}
+		deployment.ProjectName = r.projectName
+		deployment.Environment = r.environment
+		deployment.Host = serverHost
+	}
+	if history != nil {
+		history.ProjectName = r.projectName
+		history.Environment = r.environment
+		history.Server = serverHost
+		history.LastUpdated = time.Now().UTC()
+	}
+}
+
+func deploymentStateDocument(deployment *DeploymentState) (*takoapi.DeploymentStateDocument, error) {
 	if deployment == nil {
 		return nil, fmt.Errorf("deployment is nil")
 	}
@@ -149,14 +181,14 @@ func cloneDeploymentState(deployment *DeploymentState) (*DeploymentState, error)
 	if err != nil {
 		return nil, err
 	}
-	var out DeploymentState
+	var out takoapi.DeploymentStateDocument
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func cloneDeploymentHistory(history *DeploymentHistory) (*DeploymentHistory, error) {
+func deploymentHistoryDocument(history *DeploymentHistory) (*takoapi.DeploymentHistoryDocument, error) {
 	if history == nil {
 		return nil, nil
 	}
@@ -164,7 +196,7 @@ func cloneDeploymentHistory(history *DeploymentHistory) (*DeploymentHistory, err
 	if err != nil {
 		return nil, err
 	}
-	var out DeploymentHistory
+	var out takoapi.DeploymentHistoryDocument
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, err
 	}

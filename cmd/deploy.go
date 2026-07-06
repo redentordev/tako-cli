@@ -2,24 +2,17 @@ package cmd
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
-	"github.com/redentordev/tako-cli/pkg/dependency"
 	"github.com/redentordev/tako-cli/pkg/deployer"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/git"
-	"github.com/redentordev/tako-cli/pkg/health"
-	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
-	"github.com/redentordev/tako-cli/pkg/ssh"
-	localstate "github.com/redentordev/tako-cli/pkg/state"
-	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -35,6 +28,12 @@ var (
 	deployDomainTimeout   = 2 * time.Minute
 	deployDomainTargets   []string
 	deployBuildStrategy   string
+	deploySource          string
+	deployRevision        string
+	deployImage           string
+	deployArchive         string
+	deployPlanOnly        bool
+	deployPlanFile        string
 )
 
 var blueGreenGraceSleep = time.Sleep
@@ -51,7 +50,11 @@ The deployment process:
   3. Recreate service containers to match desired state
   4. Replicate deployment state
 
-If a step fails, deployment stops and records the failed state for inspection or rollback.`,
+If a step fails, deployment stops and records the failed state for inspection or rollback.
+
+Use 'tako deploy --service web --image registry.example.com/web:sha' to deploy one service from an existing image without building.
+Use 'tako deploy --service web --source .' to deploy one service from a targeted build context.
+Use 'tako deploy --service web --archive app.tar.gz' to deploy one service from a local source archive.`,
 	RunE: runDeploy,
 }
 
@@ -67,28 +70,18 @@ func init() {
 	deployCmd.Flags().DurationVar(&deployDomainTimeout, "domain-timeout", 2*time.Minute, "Wait up to this duration for public DNS/TLS readiness; 0 checks once")
 	deployCmd.Flags().StringArrayVar(&deployDomainTargets, "domain-target", nil, "Expected DNS target; repeat for custom edge/CNAME targets (defaults to proxy server hosts)")
 	deployCmd.Flags().StringVar(&deployBuildStrategy, "build-strategy", "", "Override image build strategy: remote, local, or auto")
-}
-
-func ensureDeployRuntimeSupported(cfg *config.Config) error {
-	if err := requireTakodRuntime(cfg); err != nil {
-		return err
-	}
-	if !cfg.IsMeshEnabled() {
-		return fmt.Errorf("mesh.enabled=false is not supported; single-node deploys use a one-node mesh")
-	}
-	if cfg.GetStateBackend() != config.StateBackendReplicated {
-		return fmt.Errorf("state.backend=%s is not supported; takod deployments use replicated state", cfg.GetStateBackend())
-	}
-	if cfg.GetDeployConsistency() != config.StateDeployConsistencyLease {
-		return fmt.Errorf("state.deployConsistency=%s is not implemented yet; current deploys support lease", cfg.GetDeployConsistency())
-	}
-	return nil
+	deployCmd.Flags().StringVar(&deploySource, "source", "", "Deploy configured project from a non-git source label/path; with --service, override that service build context")
+	deployCmd.Flags().StringVar(&deployRevision, "revision", "", "Explicit non-git source revision/build tag")
+	deployCmd.Flags().StringVar(&deployImage, "image", "", "Override target service image for this deploy")
+	deployCmd.Flags().StringVar(&deployArchive, "archive", "", "Deploy target service from a local source archive (.tar, .tar.gz, .tgz, .zip)")
+	deployCmd.Flags().BoolVar(&deployPlanOnly, "plan-only", false, "Compute and show the deployment plan without applying it")
+	deployCmd.Flags().StringVar(&deployPlanFile, "plan", "", "Path to a reviewed plan document; apply fails if the computed plan drifted from it")
 }
 
 func loadDeployConfig(configPath string) (*config.Config, error) {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
-		return nil, formatDeployConfigError(resolveDeployConfigPath(configPath), err)
+		return nil, &engine.InvalidRequestError{Err: formatDeployConfigError(resolveDeployConfigPath(configPath), err)}
 	}
 	return cfg, nil
 }
@@ -106,336 +99,55 @@ func resolveDeployConfigPath(configPath string) string {
 	return "tako.yaml"
 }
 
-type deployGitReader interface {
-	IsRepository() bool
-	HasUncommittedChanges() (bool, error)
-	GetStatus() (string, error)
-	GetCommitInfo(string) (*git.CommitInfo, error)
-}
-
-func resolveDeployCommitInfo(gitClient deployGitReader, allowDirty bool) (*git.CommitInfo, string, error) {
-	if !gitClient.IsRepository() {
-		return nil, "", fmt.Errorf("❌ This project is not a Git repository.\n\nPlease initialize Git first:\n  git init\n  git add .\n  git commit -m \"Initial commit\"\n\nGit is required for deployment tracking and rollback functionality.")
-	}
-
-	hasChanges, err := gitClient.HasUncommittedChanges()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to check git status: %w", err)
-	}
-	dirtyStatus := ""
-	if hasChanges {
-		status, err := gitClient.GetStatus()
-		if err != nil {
-			return nil, "", fmt.Errorf("failed to get git status: %w", err)
-		}
-		if strings.TrimSpace(status) == "" {
-			status = "(dirty worktree)"
-		}
-		dirtyStatus = strings.TrimSpace(status)
-		if !allowDirty {
-			return nil, "", fmt.Errorf("cannot deploy with uncommitted changes; commit, stash, or discard changes first:\n%s", dirtyStatus)
-		}
-	}
-
-	commitInfo, err := gitClient.GetCommitInfo("")
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to get commit info: %w", err)
-	}
-	return commitInfo, dirtyStatus, nil
-}
-
-type remoteDeploymentSaver interface {
-	SaveDeployment(*remotestate.DeploymentState) error
-}
-
-type localDeploymentSaver interface {
-	SaveDeployment(*localstate.DeploymentState) error
-}
-
-func recordFailedDeploymentState(
-	remoteSaver remoteDeploymentSaver,
-	localSaver localDeploymentSaver,
-	deployment *remotestate.DeploymentState,
-	cfg *config.Config,
-	envName string,
-	serverNames []string,
-	commitInfo *git.CommitInfo,
-	startTime time.Time,
-	deploymentErr error,
-) error {
-	if deployment == nil {
-		return fmt.Errorf("deployment state is nil")
-	}
-	deployment.Status = remotestate.StatusFailed
-	deployment.Duration = time.Since(startTime)
-	if deploymentErr != nil {
-		deployment.Error = deploymentErr.Error()
-	} else if deployment.Error == "" {
-		deployment.Error = "deployment failed"
-	}
-
-	if remoteSaver == nil {
-		return fmt.Errorf("remote deployment recorder is nil")
-	}
-	if err := remoteSaver.SaveDeployment(deployment); err != nil {
-		return fmt.Errorf("failed to save failed remote deployment state: %w", err)
-	}
-
-	if localSaver != nil {
-		localDeployment := &localstate.DeploymentState{
-			DeploymentID:    fmt.Sprintf("deploy-%s", startTime.Format("20060102-150405")),
-			Timestamp:       startTime,
-			Environment:     envName,
-			Mode:            cfg.GetRuntimeMode(),
-			Servers:         append([]string(nil), serverNames...),
-			Status:          "failed",
-			DurationSeconds: int(time.Since(startTime).Seconds()),
-			TriggeredBy:     remotestate.GetCurrentUser(),
-			Notes:           deployment.Error,
-		}
-		if commitInfo != nil {
-			localDeployment.GitCommit = commitInfo.Hash
-		}
-		if err := localSaver.SaveDeployment(localDeployment); err != nil {
-			return fmt.Errorf("failed to save failed local deployment state: %w", err)
-		}
-	}
-	return nil
-}
-
-func retiredDeploymentServers(previous []string, current []string) []string {
-	currentSet := make(map[string]struct{}, len(current))
-	for _, server := range current {
-		server = strings.TrimSpace(server)
-		if server != "" {
-			currentSet[server] = struct{}{}
-		}
-	}
-	seen := make(map[string]struct{}, len(previous))
-	retired := make([]string, 0)
-	for _, server := range previous {
-		server = strings.TrimSpace(server)
-		if server == "" {
-			continue
-		}
-		if _, ok := currentSet[server]; ok {
-			continue
-		}
-		if _, ok := seen[server]; ok {
-			continue
-		}
-		seen[server] = struct{}{}
-		retired = append(retired, server)
-	}
-	sort.Strings(retired)
-	return retired
-}
-
-func warnRetiredDeploymentServers(localStateMgr *localstate.Manager, currentServers []string) {
-	if localStateMgr == nil {
-		return
-	}
-	previous, err := localStateMgr.GetCurrentDeployment()
-	if err != nil || previous == nil || len(previous.Servers) == 0 {
-		return
-	}
-	retired := retiredDeploymentServers(previous.Servers, currentServers)
-	if len(retired) == 0 {
-		return
-	}
-	fmt.Printf("\n⚠ Previous deployment included node(s) no longer in this environment: %s\n", strings.Join(retired, ", "))
-	fmt.Println("  Tako cannot stop containers on nodes after their SSH config is removed.")
-	fmt.Println("  If the node still exists, re-add it temporarily and run 'tako remove --server <node>' before removing it.")
-	fmt.Println("  Use 'tako state forget-node <node> --yes' only to prune replicated state for a retired/destroyed node.")
-}
-
 func runDeploy(cmd *cobra.Command, args []string) error {
-	// Load deployment configuration
 	cfg, err := loadDeployConfig(cfgFile)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(deployBuildStrategy) != "" {
-		if err := cfg.SetBuildStrategy(deployBuildStrategy); err != nil {
+
+	request := engine.DeployRequest{
+		Config:          cfg,
+		Environment:     getEnvironmentName(cfg),
+		Service:         deployService,
+		Image:           deployImage,
+		Source:          deploySource,
+		Archive:         deployArchive,
+		Revision:        deployRevision,
+		BuildStrategy:   deployBuildStrategy,
+		SkipBuild:       skipBuild,
+		AllowDirty:      allowDirty,
+		Force:           deployForce,
+		Verbose:         verbose,
+		SkipDomainCheck: deploySkipDomainCheck,
+		StrictDomains:   deployStrictDomains,
+		DomainTimeout:   deployDomainTimeout,
+		DomainTargets:   deployDomainTargets,
+	}
+
+	session, err := cliEngine().PlanDeploy(cmd.Context(), request)
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	if deployPlanFile != "" {
+		if err := verifyPlanFileMatches(deployPlanFile, session.Plan()); err != nil {
 			return err
 		}
 	}
-	if err := ensureDeployRuntimeSupported(cfg); err != nil {
-		return err
+	if deployPlanOnly {
+		return emitResultDocument(session.Plan())
 	}
 
-	// Initialize Git client
-	gitClient := git.NewClient(".")
-
-	commitInfo, dirtyStatus, err := resolveDeployCommitInfo(gitClient, allowDirty)
-	if err != nil {
-		return err
-	}
-
-	// Acquire state lock to prevent concurrent deployments
-	stateLock := localstate.NewStateLock(".tako")
-	lockInfo, err := stateLock.Acquire("deploy")
-	if err != nil {
-		return fmt.Errorf("cannot deploy: %w", err)
-	}
-	defer stateLock.Release(lockInfo)
-
-	if verbose {
-		fmt.Printf("→ Acquired deployment lock (ID: %s)\n", lockInfo.ID)
-	}
-
-	// Display commit info
-	fmt.Printf("\n📦 Deploying commit:\n")
-	fmt.Printf("  Hash:    %s\n", commitInfo.ShortHash)
-	fmt.Printf("  Branch:  %s\n", commitInfo.Branch)
-	fmt.Printf("  Author:  %s\n", commitInfo.Author)
-	fmt.Printf("  Message: %s\n", commitInfo.Message)
-	if dirtyStatus != "" {
-		fmt.Printf("\n⚠ Deploying with uncommitted local changes (--allow-dirty).\n")
-		fmt.Printf("  Deployment history records HEAD only; uncommitted file contents are not recoverable from Git.\n")
-		if verbose {
-			fmt.Printf("  Dirty files:\n%s\n", dirtyStatus)
+	if session.NeedsConfirmation() && !deployYes {
+		reason := "deployment plan includes destructive changes"
+		if machineOutputEnabled() {
+			if err := emitResultDocument(newConfirmationRequiredDocument(reason, session.Plan())); err != nil {
+				return err
+			}
+			return &engine.ConfirmationRequiredError{Reason: reason}
 		}
-	}
-
-	// Get environment and services
-	envName := getEnvironmentName(cfg)
-	allServices, err := cfg.GetServices(envName)
-	if err != nil {
-		return fmt.Errorf("failed to get services: %w", err)
-	}
-
-	// Create SSH pool
-	sshPool := ssh.NewPool()
-	defer sshPool.CloseAll()
-
-	// Determine which environment nodes to deploy to.
-	envServerNames, err := cfg.GetEnvironmentServers(envName)
-	if err != nil {
-		return fmt.Errorf("failed to get environment servers: %w", err)
-	}
-	servers := make(map[string]config.ServerConfig, len(envServerNames))
-	serverNames := append([]string(nil), envServerNames...)
-	for _, serverName := range serverNames {
-		server, exists := cfg.Servers[serverName]
-		if !exists {
-			return fmt.Errorf("server %s not found in configuration", serverName)
-		}
-		servers[serverName] = server
-	}
-
-	// Determine which services to deploy
-	services := allServices
-	if deployService != "" {
-		service, exists := allServices[deployService]
-		if !exists {
-			return fmt.Errorf("service %s not found in environment %s", deployService, envName)
-		}
-		services = map[string]config.ServiceConfig{deployService: service}
-	}
-
-	fmt.Printf("\n=== Starting deployment ===\n\n")
-	fmt.Printf("Project: %s v%s\n", cfg.Project.Name, cfg.Project.Version)
-	fmt.Printf("Environment: %s\n", envName)
-	fmt.Printf("Runtime: %s\n", cfg.GetRuntimeMode())
-	fmt.Printf("State: %s (consistency: %s)\n", cfg.GetStateBackend(), cfg.GetDeployConsistency())
-	fmt.Printf("Build strategy: %s\n", cfg.GetBuildStrategy())
-	if cfg.IsMeshEnabled() {
-		fmt.Printf("Mesh: enabled (%s via %s)\n", cfg.Mesh.NetworkCIDR, cfg.Mesh.Interface)
-	} else {
-		fmt.Printf("Mesh: disabled\n")
-	}
-	fmt.Printf("Servers: %d\n", len(servers))
-	fmt.Printf("Services: %d\n\n", len(services))
-
-	if len(serverNames) == 0 {
-		return fmt.Errorf("no servers configured")
-	}
-
-	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, serverNames, "deploy")
-	if err != nil {
-		return err
-	}
-	defer leaseSet.Release(verbose)
-	if verbose {
-		fmt.Printf("→ Acquired remote deploy leases: %s\n", leaseSet.Summary())
-	}
-
-	sourceServerName := serverNames[0]
-	sourceServer := servers[sourceServerName]
-
-	// Use one reachable target as the build/source node; runtime state is still
-	// persisted and reconciled across the selected mesh.
-	sourceClient, err := sshPool.GetOrCreateWithAuth(sourceServer.Host, sourceServer.Port, sourceServer.User, sourceServer.SSHKey, sourceServer.Password)
-	if err != nil {
-		return fmt.Errorf("failed to connect to server %s: %w", sourceServerName, err)
-	}
-	stateManager := remotestate.NewStateManagerWithSocket(sourceClient, cfg.Project.Name, envName, sourceServer.Host, takodSocketFromConfig(cfg))
-
-	// Create deployer with pool for takod support
-	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, verbose)
-	deploy.SetCLIVersion(Version)
-	deploy.SetSkipBuild(skipBuild)
-	if err := deploy.SetTargetServers(serverNames); err != nil {
-		return err
-	}
-
-	if err := deploy.SetupTakodRuntime(); err != nil {
-		return fmt.Errorf("failed to setup takod runtime: %w", err)
-	}
-
-	// === AUTO-SYNC STATE ===
-	// If local .tako directory doesn't exist but remote state does,
-	// automatically sync from remote to help users who cloned the project
-	if err := SyncStateOnDeployWithPool(sshPool, cfg, envName); err != nil {
-		if verbose {
-			fmt.Printf("Warning: auto-sync failed: %v\n", err)
-		}
-	}
-
-	// === STATE RECONCILIATION ===
-	// Compare desired state (config) with actual state (running services)
-	// This ensures we properly handle service removals and updates
-
-	if verbose {
-		fmt.Printf("\n→ Computing deployment plan...\n")
-	}
-
-	// Initialize state manager to track deployments
-	localStateMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
-	if err != nil {
-		if verbose {
-			fmt.Printf("Warning: failed to initialize local state: %v\n", err)
-		}
-		localStateMgr = nil // Continue without state management
-	}
-	warnRetiredDeploymentServers(localStateMgr, serverNames)
-
-	// Gather actual state from running containers across the selected mesh nodes.
-	actualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, localStateMgr)
-	if err != nil {
-		return deployActualStateError(err)
-	}
-
-	if verbose && len(actualState) > 0 {
-		fmt.Printf("  Found %d running service(s)\n", len(actualState))
-	}
-
-	planActualState := actualState
-	if deployService != "" {
-		planActualState = filterActualStateForServices(actualState, services)
-	}
-
-	// Compute reconciliation plan
-	plan := reconcile.ComputePlan(cfg.Project.Name, envName, services, planActualState)
-
-	// Show plan to user
-	fmt.Println()
-	fmt.Print(plan.FormatPlan())
-
-	if plan.NeedsConfirmation() && !deployYes {
-		// Ask for confirmation if there are destructive changes
-		confirmed, err := confirmDeployAction("\nProceed with deployment? (y/N): ", "deployment plan includes destructive changes")
+		confirmed, err := confirmDeployAction("\nProceed with deployment? (y/N): ", reason)
 		if err != nil {
 			return err
 		}
@@ -445,419 +157,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if plan.IsEmpty() && !hasBuildServices(services) && !deployForce {
-		activeRevisions := deployProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
-		if err := reconcileDeployProxy(deploy, services, activeRevisions); err != nil {
-			return fmt.Errorf("failed to reconcile proxy routes: %w", err)
-		}
-		fmt.Println("\n✓ All services are up-to-date. Proxy routes reconciled.")
-		return nil
-	}
-	if plan.IsEmpty() {
-		if deployForce {
-			fmt.Println("\n-> No config drift detected; --force will reconcile selected services anyway.")
-		} else {
-			fmt.Println("\n-> No config drift detected; build services will still be reconciled for the current commit.")
+	result, err := session.Apply(cmd.Context())
+	if result != nil {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
 		}
 	}
-	servicesToDeploy := servicesToDeployForPlan(plan, services, deployForce, deployService != "")
-	if skipped := persistentServicesSkippedByForce(services, servicesToDeploy, deployForce, deployService != ""); len(skipped) > 0 {
-		fmt.Printf("\n-> Skipping persistent service(s) during broad --force: %s\n", strings.Join(skipped, ", "))
-		fmt.Println("   Use --service <name> --force when you intentionally need to recreate one.")
-	}
-
-	if len(servers) == 1 {
-		fmt.Printf("\n🐙 Using takod mesh runtime (one node)\n\n")
-	} else {
-		fmt.Printf("\n🐙 Using takod mesh runtime (%d nodes)\n\n", len(servers))
-	}
-
-	// Log deployment start
-	if localStateMgr != nil {
-		localStateMgr.LogDeployment(fmt.Sprintf("Starting takod deployment to %s", envName))
-		localStateMgr.LogDeployment(fmt.Sprintf("Git commit: %s", commitInfo.ShortHash))
-	}
-
-	startTime := time.Now()
-	deployment := &remotestate.DeploymentState{
-		Timestamp:      startTime,
-		ProjectName:    cfg.Project.Name,
-		Version:        cfg.Project.Version,
-		Status:         remotestate.StatusInProgress,
-		Services:       make(map[string]remotestate.ServiceState),
-		User:           remotestate.GetCurrentUser(),
-		Host:           sourceServer.Host,
-		GitCommit:      commitInfo.Hash,
-		GitCommitShort: commitInfo.ShortHash,
-		GitBranch:      commitInfo.Branch,
-		GitCommitMsg:   commitInfo.Message,
-		GitAuthor:      commitInfo.Author,
-		CLIVersion:     Version,
-		CLICommit:      GitCommit,
-	}
-
-	// Setup notifications if configured
-	var notifier *notification.Notifier
-	if cfg.Notifications != nil && (cfg.Notifications.Slack != "" || cfg.Notifications.Discord != "" || cfg.Notifications.Webhook != "") {
-		notifier = notification.NewNotifier(notification.NotifierConfig{
-			SlackWebhook:   cfg.Notifications.Slack,
-			DiscordWebhook: cfg.Notifications.Discord,
-			Webhook:        cfg.Notifications.Webhook,
-		}, verbose)
-
-		// Send deployment started notification
-		if err := notifier.Notify(notification.Event{
-			Type:        notification.EventDeployStarted,
-			Project:     cfg.Project.Name,
-			Environment: envName,
-			Message:     fmt.Sprintf("Starting deployment of `%s` v%s to `%s`\nCommit: `%s` - %s", cfg.Project.Name, cfg.Project.Version, envName, commitInfo.ShortHash, commitInfo.Message),
-			Details: map[string]string{
-				"version":  cfg.Project.Version,
-				"commit":   commitInfo.ShortHash,
-				"branch":   commitInfo.Branch,
-				"author":   commitInfo.Author,
-				"user":     remotestate.GetCurrentUser(),
-				"services": fmt.Sprintf("%d", len(services)),
-			},
-		}); err != nil && verbose {
-			fmt.Printf("  Warning: failed to send start notification: %v\n", err)
-		}
-	}
-
-	deploymentFailed := false
-	var deploymentError error
-	buildImageTag := commitInfo.Hash
-	imageRefs := defaultDeployImageRefs(cfg, envName, services, buildImageTag)
-
-	// Resolve service deployment order based on dependencies
-	resolver := dependency.NewResolver(services, verbose)
-
-	// Optionally infer dependencies from environment variables
-	inferredDeps := resolver.InferDependencies()
-	resolver.MergeDependencies(inferredDeps)
-
-	// Get deployment order
-	deploymentOrder, err := resolver.ResolveOrder()
-	if err != nil {
-		return fmt.Errorf("failed to resolve service dependencies: %w", err)
-	}
-
-	// Deploy each service through takod placement in dependency order
-	for _, serviceName := range deploymentOrder {
-		service, shouldDeploy := servicesToDeploy[serviceName]
-		if !shouldDeploy {
-			continue
-		}
-		fmt.Printf("→ Deploying service: %s\n", serviceName)
-
-		fullImageName := deployImageRef(cfg, envName, serviceName, service, buildImageTag)
-
-		if service.Image != "" {
-			// Use pre-built image
-			fullImageName = service.Image
-		}
-		imageRefs[serviceName] = fullImageName
-
-		deployErr := error(nil)
-		if shouldWarmManualPromotionService(serviceName, service, actualState) {
-			deployErr = deploy.DeployServiceTakodWarmOnly(serviceName, &service, fullImageName)
-		} else {
-			deployErr = deploy.DeployServiceTakod(serviceName, &service, fullImageName)
-		}
-		if deployErr != nil {
-			fmt.Printf("  ✗ takod deployment failed: %v\n", deployErr)
-			deploymentFailed = true
-			deploymentError = fmt.Errorf("takod deployment failed for %s: %w", serviceName, deployErr)
-			deployment.Status = remotestate.StatusFailed
-			deployment.Error = deployErr.Error()
-			break
-		}
-
-		fmt.Printf("  ✓ Service %s reconciled by takod\n", serviceName)
-
-		// Save service state
-		deployment.Services[serviceName] = remotestate.ServiceState{
-			Name:     serviceName,
-			Image:    fullImageName,
-			Port:     service.Port,
-			Replicas: service.Replicas,
-			Env:      redactedEnvKeys(service.Env),
-		}
-	}
-
-	if !deploymentFailed {
-		if err := applyDeployRemovals(deploy, plan); err != nil {
-			fmt.Printf("  ✗ service removal failed: %v\n", err)
-			deploymentFailed = true
-			deploymentError = err
-			deployment.Status = remotestate.StatusFailed
-			deployment.Error = err.Error()
-		}
-	}
-
-	if !deploymentFailed {
-		proxyServices := services
-		if deployService != "" {
-			proxyServices = cloneServiceMap(allServices)
-		}
-		manualPending := manualPromotionPendingServices(servicesToDeploy, actualState)
-		activeRevisions := deployProxyActiveRevisions(cfg, envName, proxyServices, servicesToDeploy, imageRefs, actualState)
-		if err := reconcileDeployProxy(deploy, proxyServices, activeRevisions); err != nil {
-			fmt.Printf("  ✗ proxy reconciliation failed: %v\n", err)
-			deploymentFailed = true
-			deploymentError = fmt.Errorf("proxy reconciliation failed: %w", err)
-			deployment.Status = remotestate.StatusFailed
-			deployment.Error = err.Error()
-		} else if err := pruneTakodServiceRevisionsAfterGrace(deploy, proxyServices, deployedProxyActiveRevisions(servicesToDeploy, activeRevisions)); err != nil {
-			fmt.Printf("  ✗ stale revision cleanup failed: %v\n", err)
-			deploymentFailed = true
-			deploymentError = fmt.Errorf("stale revision cleanup failed: %w", err)
-			deployment.Status = remotestate.StatusFailed
-			deployment.Error = err.Error()
-		} else if len(manualPending) > 0 {
-			fmt.Printf("\n✓ Warming revision ready for manual promotion: %s\n", strings.Join(manualPending, ", "))
-			fmt.Printf("  Promote when ready with: tako promote %s -e %s\n", manualPending[0], envName)
-		}
-	}
-
-	if !deploymentFailed {
-		manualPending := manualPromotionPendingServices(servicesToDeploy, actualState)
-		deployment.Status = deploymentSuccessStatus(manualPending)
-		if len(manualPending) > 0 {
-			deployment.Message = fmt.Sprintf("warmed %s for manual promotion", strings.Join(manualPending, ", "))
-		}
-		deployment.Duration = time.Since(startTime)
-		if err := stateManager.SaveDeployment(deployment); err != nil {
-			return deployRemoteHistoryError(err)
-		}
-
-		finalNodeActualState, err := reconcile.GatherActualStateByServer(sshPool, cfg, envName, serverNames)
-		if err != nil {
-			return fmt.Errorf("deployment succeeded but failed to gather final actual state: %w", err)
-		}
-		finalActualState := reconcile.AggregateActualStateByServer(finalNodeActualState)
-		runtimeServices := services
-		runtimeImageRefs := imageRefs
-		if deployService != "" {
-			runtimeServices = cloneServiceMap(allServices)
-			runtimeImageRefs = mergeRuntimeImageRefs(cfg, envName, runtimeServices, imageRefs, finalActualState)
-		}
-		if err := persistTakodRuntimeState(
-			sshPool,
-			cfg,
-			envName,
-			serverNames,
-			"deploy",
-			runtimeServices,
-			runtimeImageRefs,
-			finalActualState,
-			finalNodeActualState,
-			gitInfoFromCommit(commitInfo),
-			"deploy.succeeded",
-			fmt.Sprintf("deployed %d service(s)", len(servicesToDeploy)),
-			map[string]string{
-				"commit":          commitInfo.ShortHash,
-				"services":        fmt.Sprintf("%d", len(servicesToDeploy)),
-				"desiredServices": fmt.Sprintf("%d", len(runtimeServices)),
-			},
-		); err != nil {
-			return fmt.Errorf("deployment succeeded but failed to persist takod state: %w", err)
-		}
-
-		// Replicate state to the rest of the mesh.
-		if len(servers) > 1 {
-			replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
-			history, err := stateManager.LoadHistory()
-			if err != nil {
-				return fmt.Errorf("deployment succeeded but failed to load remote deployment history for replication: %w", err)
-			}
-			if err := replicator.ReplicateDeployment(deployment, history); err != nil {
-				return fmt.Errorf("deployment succeeded but failed to replicate remote deployment history: %w", err)
-			}
-		}
-
-		// Save local deployment state
-		if localStateMgr != nil {
-			localDeployment := &localstate.DeploymentState{
-				DeploymentID:    fmt.Sprintf("deploy-%s", time.Now().Format("20060102-150405")),
-				Timestamp:       startTime,
-				Environment:     envName,
-				Mode:            cfg.GetRuntimeMode(),
-				Servers:         append([]string(nil), serverNames...),
-				Status:          string(deployment.Status),
-				DurationSeconds: int(time.Since(startTime).Seconds()),
-				GitCommit:       commitInfo.Hash,
-				TriggeredBy:     remotestate.GetCurrentUser(),
-				Notes:           fmt.Sprintf("Deployed %d services to %s runtime", len(servicesToDeploy), cfg.GetRuntimeMode()),
-			}
-			if err := localStateMgr.SaveDeployment(localDeployment); err != nil && verbose {
-				fmt.Printf("Warning: failed to save local deployment state: %v\n", err)
-			}
-		}
-
-	}
-
-	// Calculate deployment duration
-	deploymentDuration := time.Since(startTime)
-
-	if deploymentFailed {
-		recordErr := recordFailedDeploymentState(stateManager, localStateMgr, deployment, cfg, envName, serverNames, commitInfo, startTime, deploymentError)
-		if recordErr == nil && len(servers) > 1 {
-			replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
-			history, err := stateManager.LoadHistory()
-			if err != nil {
-				recordErr = fmt.Errorf("failed to load failed deployment history for replication: %w", err)
-			} else if err := replicator.ReplicateDeployment(deployment, history); err != nil {
-				recordErr = fmt.Errorf("failed to replicate failed deployment history: %w", err)
-			}
-		}
-		if recordErr != nil && verbose {
-			fmt.Printf("Warning: failed to record failed deployment state: %v\n", recordErr)
-		}
-
-		// Send failure notification
-		if notifier != nil {
-			notifier.Notify(notification.Event{
-				Type:        notification.EventDeployFailed,
-				Project:     cfg.Project.Name,
-				Environment: envName,
-				Message:     fmt.Sprintf("Deployment of `%s` to `%s` failed after %s", cfg.Project.Name, envName, deploymentDuration.Round(time.Second)),
-				Error:       deploymentError.Error(),
-				Duration:    deploymentDuration,
-				Details: map[string]string{
-					"version": cfg.Project.Version,
-					"commit":  commitInfo.ShortHash,
-					"user":    remotestate.GetCurrentUser(),
-				},
-			})
-		}
-		if recordErr != nil {
-			return fmt.Errorf("takod deployment failed; additionally failed to record failed deployment state: %w", recordErr)
-		}
-		return fmt.Errorf("takod deployment failed")
-	}
-
-	fmt.Printf("\n✓ takod deployment completed!\n")
-
-	// Automatic cleanup after successful deployment.
-	if verbose {
-		fmt.Printf("\n→ Running automatic cleanup...\n")
-	}
-	imageRepositories := cleanupImageRepositories(cfg, envName, services)
-	externalVolumes := externalVolumeNamesForEnvironment(cfg, envName)
-	for serverName, server := range servers {
-		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
-		if err == nil {
-			response, cleanupErr := cleanupViaTakod(client, cfg, takod.CleanupRequest{
-				Project:                cfg.Project.Name,
-				Environment:            envName,
-				ImageRepositories:      imageRepositories,
-				ExternalVolumes:        externalVolumes,
-				KeepImages:             3,
-				CleanOldImages:         true,
-				CleanStoppedContainers: true,
-				CleanDanglingImages:    true,
-				CleanBuildCache:        true,
-				BuildCacheKeepStorage:  takod.DefaultBuildCacheKeepStorage,
-			})
-			if cleanupErr != nil && verbose {
-				fmt.Printf("  Warning: failed to clean %s: %v\n", serverName, cleanupErr)
-				continue
-			}
-			if cleanupErr == nil && verbose {
-				printCleanupWarnings(response)
-				fmt.Printf("  ✓ Cleaned up %s\n", serverName)
-			}
-		}
-	}
-
-	fmt.Printf("\n✓ Deployment completed successfully!\n\n")
-
-	// Send success notification
-	if notifier != nil {
-		// Collect deployed service URLs
-		var urls []string
-		for _, svc := range services {
-			if svc.Proxy != nil && svc.IsPublic() {
-				for _, domain := range svc.Proxy.GetAllDomains() {
-					urls = append(urls, fmt.Sprintf("https://%s", domain))
-				}
-			}
-		}
-
-		notifier.Notify(notification.Event{
-			Type:        notification.EventDeploySucceeded,
-			Project:     cfg.Project.Name,
-			Environment: envName,
-			Message:     fmt.Sprintf("Successfully deployed `%s` v%s to `%s` in %s", cfg.Project.Name, cfg.Project.Version, envName, deploymentDuration.Round(time.Second)),
-			Duration:    deploymentDuration,
-			Details: map[string]string{
-				"version":  cfg.Project.Version,
-				"commit":   commitInfo.ShortHash,
-				"branch":   commitInfo.Branch,
-				"user":     remotestate.GetCurrentUser(),
-				"services": fmt.Sprintf("%d", len(services)),
-				"urls":     fmt.Sprintf("%v", urls),
-			},
-		})
-	}
-
-	// Show service URLs (iterate through services with proxy configured)
-	hasPublicServices := false
-	hasInternalServices := false
-	domainSpecs := collectConfiguredDomainSpecs(services, "")
-
-	for serviceName, service := range services {
-		if service.Proxy != nil && service.IsPublic() && service.Proxy.GetPrimaryDomain() != "" {
-			allDomains := service.Proxy.GetAllDomains()
-			if !hasPublicServices {
-				fmt.Printf("Your application is available at:\n")
-				hasPublicServices = true
-			}
-			fmt.Printf("\n%s:\n", serviceName)
-			for _, domain := range allDomains {
-				fmt.Printf("  https://%s\n", domain)
-			}
-		}
-	}
-
-	for serviceName, service := range services {
-		if service.Proxy != nil && service.Proxy.IsInternal() && service.Proxy.GetPrimaryHost() != "" {
-			if !hasInternalServices {
-				fmt.Printf("\nInternal routes:\n")
-				hasInternalServices = true
-			}
-			fmt.Printf("\n%s:\n", serviceName)
-			for _, host := range service.Proxy.GetAllHosts() {
-				fmt.Printf("  http://%s\n", host)
-			}
-		}
-	}
-	if hasInternalServices {
-		fmt.Printf("\nRun `tako domains hosts -e %s` to print /etc/hosts entries for internal routes.\n", envName)
-	}
-
-	if hasPublicServices && !deploySkipDomainCheck {
-		targets, err := domainExpectedTargets(cfg, envName, deployDomainTargets)
-		if err != nil {
-			if deployStrictDomains {
-				return fmt.Errorf("failed to resolve domain check targets: %w", err)
-			}
-			if verbose {
-				fmt.Printf("\n⚠️  Skipping public domain DNS/TLS checks: %v\n", err)
-			}
-		} else if _, err := monitorDomainStatuses(context.Background(), health.NewHealthChecker(), domainSpecs, domainStatusOptions{
-			Timeout:         deployDomainTimeout,
-			Strict:          deployStrictDomains,
-			ExpectedTargets: targets,
-		}); err != nil {
-			return err
-		}
-	} else if hasPublicServices && deploySkipDomainCheck && verbose {
-		fmt.Println("\nSkipping public domain DNS/TLS checks (--skip-domain-check).")
-	}
-
-	return nil
+	return err
 }
 
 // isNonInteractive checks if running in non-interactive mode
@@ -907,273 +213,122 @@ func isAffirmative(response string) bool {
 	}
 }
 
-func deployActualStateError(err error) error {
-	return fmt.Errorf("failed to gather actual state from takod; refusing to plan against unknown running services: %w", err)
+// The deploy pipeline lives in pkg/engine; the aliases below keep the
+// historical cmd-level names for the other commands and tests that still
+// reference them. They are removed as each command moves onto the engine.
+
+type deployGitReader = engine.GitReader
+
+type deploySourceInfo = engine.SourceInfo
+
+type deployGitStrings = engine.GitStrings
+
+type remoteDeploymentSaver = engine.RemoteDeploymentSaver
+
+type localDeploymentSaver = engine.LocalDeploymentSaver
+
+type deployServiceRemover = engine.ServiceRemover
+
+type takodRevisionPruner = engine.RevisionPruner
+
+func ensureDeployRuntimeSupported(cfg *config.Config) error {
+	return engine.EnsureDeployRuntimeSupported(cfg)
 }
 
-func deployRemoteHistoryError(err error) error {
-	return fmt.Errorf("deployment succeeded but failed to save remote deployment history: %w", err)
+func validateDeployImageOptions(serviceName string, imageRef string, source string) (string, error) {
+	return engine.ValidateImageOptions(serviceName, imageRef, source)
 }
 
-type deployServiceRemover interface {
-	RemoveServiceTakod(serviceName string) error
+func validateDeployArchiveOptions(serviceName string, archivePath string, source string, imageRef string) (string, error) {
+	return engine.ValidateArchiveOptions(serviceName, archivePath, source, imageRef)
 }
 
-func applyDeployRemovals(remover deployServiceRemover, plan *reconcile.ReconciliationPlan) error {
-	if remover == nil {
-		return fmt.Errorf("service remover is nil")
-	}
-	if plan == nil {
-		return nil
-	}
-	for _, change := range plan.Changes {
-		if change.Type != reconcile.ChangeRemove {
-			continue
-		}
-		fmt.Printf("→ Removing service: %s\n", change.ServiceName)
-		if err := remover.RemoveServiceTakod(change.ServiceName); err != nil {
-			return fmt.Errorf("remove failed for %s: %w", change.ServiceName, err)
-		}
-		fmt.Printf("  ✓ Service %s removed\n", change.ServiceName)
-	}
-	return nil
+func isSupportedDeployArchive(path string) bool {
+	return engine.IsSupportedArchive(path)
 }
 
-func filterActualStateForServices(actualState map[string]*reconcile.ActualService, services map[string]config.ServiceConfig) map[string]*reconcile.ActualService {
-	if len(actualState) == 0 || len(services) == 0 {
-		return map[string]*reconcile.ActualService{}
-	}
-	filtered := make(map[string]*reconcile.ActualService, len(services))
-	for serviceName := range services {
-		if actual, ok := actualState[serviceName]; ok {
-			filtered[serviceName] = actual
-		}
-	}
-	return filtered
+func deploySourceLabelForImageOverride(source string, imageRef string) string {
+	return engine.SourceLabelForImageOverride(source, imageRef)
 }
 
-func hasBuildServices(services map[string]config.ServiceConfig) bool {
-	for _, service := range services {
-		if service.Build != "" {
-			return true
-		}
-	}
-	return false
+func applyDeployImageOverride(service config.ServiceConfig, imageRef string) config.ServiceConfig {
+	return engine.ApplyImageOverride(service, imageRef)
 }
 
-func servicesToDeployForPlan(plan *reconcile.ReconciliationPlan, services map[string]config.ServiceConfig, force bool, explicitServiceTarget bool) map[string]config.ServiceConfig {
-	if len(services) == 0 {
-		return map[string]config.ServiceConfig{}
-	}
-	if plan == nil && !force {
-		return cloneServiceMap(services)
-	}
-
-	selected := make(map[string]config.ServiceConfig)
-	if plan != nil {
-		for _, change := range plan.Changes {
-			if change.Type != reconcile.ChangeAdd && change.Type != reconcile.ChangeUpdate {
-				continue
-			}
-			service, ok := services[change.ServiceName]
-			if ok {
-				selected[change.ServiceName] = service
-			}
-		}
-	}
-
-	if force {
-		for serviceName, service := range services {
-			if explicitServiceTarget || !service.Persistent {
-				selected[serviceName] = service
-			}
-		}
-		return selected
-	}
-
-	for serviceName, service := range services {
-		if service.Build != "" {
-			selected[serviceName] = service
-		}
-	}
-	return selected
+func applyDeploySourceOverride(service config.ServiceConfig, source string) config.ServiceConfig {
+	return engine.ApplySourceOverride(service, source)
 }
 
-func deployProxyActiveRevisions(
+func deploySourceLabelForArchive(archivePath string) string {
+	return engine.SourceLabelForArchive(archivePath)
+}
+
+func applyDeployArchiveOverride(service config.ServiceConfig, buildContext string) config.ServiceConfig {
+	return engine.ApplyArchiveOverride(service, buildContext)
+}
+
+func deployArchiveBuildTag(explicitRevision string, archivePath string) (string, error) {
+	return engine.ArchiveBuildTag(explicitRevision, archivePath)
+}
+
+func extractDeployArchive(archivePath string, destDir string) error {
+	return engine.ExtractArchive(archivePath, destDir)
+}
+
+func resolveDeploySourceInfo(gitClient deployGitReader, allowDirty bool, source string, revision string, imageRef string, now time.Time) (deploySourceInfo, error) {
+	return engine.ResolveSourceInfo(gitClient, allowDirty, source, revision, imageRef, now)
+}
+
+func deployStartNotificationMessage(project string, version string, envName string, revisionLabel string, revisionValue string, commitMessage string) string {
+	return engine.StartNotificationMessage(project, version, envName, revisionLabel, revisionValue, commitMessage)
+}
+
+func deployGitStringsFromCommit(commitInfo *git.CommitInfo) deployGitStrings {
+	return engine.GitStringsFromCommit(commitInfo)
+}
+
+func resolveDeployCommitInfo(gitClient deployGitReader, allowDirty bool) (*git.CommitInfo, string, error) {
+	return engine.ResolveCommitInfo(gitClient, allowDirty)
+}
+
+func recordFailedDeploymentState(
+	remoteSaver remoteDeploymentSaver,
+	localSaver localDeploymentSaver,
+	deployment *remotestate.DeploymentState,
 	cfg *config.Config,
 	envName string,
-	services map[string]config.ServiceConfig,
-	servicesToDeploy map[string]config.ServiceConfig,
-	imageRefs map[string]string,
-	actualState map[string]*reconcile.ActualService,
-) map[string]string {
-	if cfg == nil || len(services) == 0 {
-		return nil
-	}
-	revisions := make(map[string]string)
-	for serviceName, service := range services {
-		switch service.Deploy.Strategy {
-		case config.DeployStrategyRolling, config.DeployStrategyBlueGreen:
-		default:
-			continue
-		}
-
-		if _, deploying := servicesToDeploy[serviceName]; deploying {
-			if isManualBlueGreenService(service) {
-				if actual := actualState[serviceName]; actual != nil && actual.CurrentRevision != "" {
-					revisions[serviceName] = actual.CurrentRevision
-					continue
-				}
-			}
-			imageRef := imageRefs[serviceName]
-			if imageRef == "" {
-				imageRef = deployImageRef(cfg, envName, serviceName, service, "")
-			}
-			revisions[serviceName] = deployer.ServiceRevisionID(cfg.Project.Name, envName, serviceName, imageRef, service)
-			continue
-		}
-
-		if actual := actualState[serviceName]; actual != nil && actual.CurrentRevision != "" {
-			revisions[serviceName] = actual.CurrentRevision
-		}
-	}
-	if len(revisions) == 0 {
-		return nil
-	}
-	return revisions
+	serverNames []string,
+	commitInfo *git.CommitInfo,
+	startTime time.Time,
+	deploymentErr error,
+) error {
+	return engine.RecordFailedDeploymentState(remoteSaver, localSaver, deployment, cfg, envName, serverNames, commitInfo, startTime, deploymentErr)
 }
 
-func reconcileDeployProxy(deploy *deployer.Deployer, services map[string]config.ServiceConfig, activeRevisions map[string]string) error {
-	if len(activeRevisions) > 0 {
-		return deploy.ReconcileTakodProxyWithActiveRevisions(services, activeRevisions)
-	}
-	return deploy.ReconcileTakodProxy(services)
-}
-
-func deployedProxyActiveRevisions(servicesToDeploy map[string]config.ServiceConfig, activeRevisions map[string]string) map[string]string {
-	if len(servicesToDeploy) == 0 || len(activeRevisions) == 0 {
-		return nil
-	}
-	deployed := make(map[string]string)
-	for serviceName, service := range servicesToDeploy {
-		if isManualBlueGreenService(service) {
-			continue
-		}
-		if revision := activeRevisions[serviceName]; revision != "" {
-			deployed[serviceName] = revision
-		}
-	}
-	if len(deployed) == 0 {
-		return nil
-	}
-	return deployed
-}
-
-type takodRevisionPruner interface {
-	PruneTakodServiceRevisions(services map[string]config.ServiceConfig, keepRevisions map[string]string) error
-}
-
-func pruneTakodServiceRevisionsAfterGrace(pruner takodRevisionPruner, services map[string]config.ServiceConfig, keepRevisions map[string]string) error {
-	if len(keepRevisions) == 0 {
-		return nil
-	}
-	grace, names, err := blueGreenPruneGracePeriod(services, keepRevisions)
-	if err != nil {
-		return err
-	}
-	if grace > 0 {
-		fmt.Printf("\n-> Retaining previous blue-green revision for %s before pruning: %s\n", grace.Round(time.Millisecond), strings.Join(names, ", "))
-		blueGreenGraceSleep(grace)
-	}
-	return pruner.PruneTakodServiceRevisions(services, keepRevisions)
-}
-
-func blueGreenPruneGracePeriod(services map[string]config.ServiceConfig, keepRevisions map[string]string) (time.Duration, []string, error) {
-	if len(services) == 0 || len(keepRevisions) == 0 {
-		return 0, nil, nil
-	}
-	var maxGrace time.Duration
-	var names []string
-	for serviceName := range keepRevisions {
-		service, ok := services[serviceName]
-		if !ok || service.Deploy.Strategy != config.DeployStrategyBlueGreen || strings.TrimSpace(service.Deploy.GracePeriod) == "" {
-			continue
-		}
-		grace, err := time.ParseDuration(strings.TrimSpace(service.Deploy.GracePeriod))
-		if err != nil {
-			return 0, nil, fmt.Errorf("service %s: invalid deploy.gracePeriod %q: %w", serviceName, service.Deploy.GracePeriod, err)
-		}
-		if grace < 0 {
-			return 0, nil, fmt.Errorf("service %s: deploy.gracePeriod cannot be negative", serviceName)
-		}
-		if grace == 0 {
-			continue
-		}
-		names = append(names, serviceName)
-		if grace > maxGrace {
-			maxGrace = grace
-		}
-	}
-	if maxGrace == 0 {
-		return 0, nil, nil
-	}
-	sort.Strings(names)
-	return maxGrace, names, nil
-}
-
-func isManualBlueGreenService(service config.ServiceConfig) bool {
-	return service.Deploy.Strategy == config.DeployStrategyBlueGreen &&
-		service.Deploy.Promotion == config.DeployPromotionManual
-}
-
-func manualPromotionPendingServices(servicesToDeploy map[string]config.ServiceConfig, actualState map[string]*reconcile.ActualService) []string {
-	if len(servicesToDeploy) == 0 {
-		return nil
-	}
-	var pending []string
-	for serviceName, service := range servicesToDeploy {
-		if !isManualBlueGreenService(service) {
-			continue
-		}
-		actual := actualState[serviceName]
-		if actual == nil || actual.CurrentRevision == "" {
-			continue
-		}
-		pending = append(pending, serviceName)
-	}
-	sort.Strings(pending)
-	return pending
-}
-
-func shouldWarmManualPromotionService(serviceName string, service config.ServiceConfig, actualState map[string]*reconcile.ActualService) bool {
-	if !isManualBlueGreenService(service) {
-		return false
-	}
-	actual := actualState[serviceName]
-	return actual != nil && actual.CurrentRevision != ""
+func retiredDeploymentServers(previous []string, current []string) []string {
+	return engine.RetiredDeploymentServers(previous, current)
 }
 
 func deploymentSuccessStatus(manualPending []string) remotestate.DeploymentStatus {
-	if len(manualPending) > 0 {
-		return remotestate.StatusWarmed
-	}
-	return remotestate.StatusSuccess
+	return engine.DeploymentSuccessStatus(manualPending)
 }
 
-func persistentServicesSkippedByForce(services map[string]config.ServiceConfig, selected map[string]config.ServiceConfig, force bool, explicitServiceTarget bool) []string {
-	if !force || explicitServiceTarget || len(services) == 0 {
-		return nil
-	}
-	var skipped []string
-	for serviceName, service := range services {
-		if !service.Persistent {
-			continue
-		}
-		if _, ok := selected[serviceName]; ok {
-			continue
-		}
-		skipped = append(skipped, serviceName)
-	}
-	sort.Strings(skipped)
-	return skipped
+func deployActualStateError(err error) error {
+	return engine.ActualStateError(err)
+}
+
+func deployRemoteHistoryError(err error) error {
+	return engine.RemoteHistoryError(err)
+}
+
+func applyDeployRemovals(remover deployServiceRemover, plan *reconcile.ReconciliationPlan) error {
+	return cliEngine().ApplyRemovals(remover, plan)
+}
+
+func reconcileDeployProxy(deploy *deployer.Deployer, services map[string]config.ServiceConfig, activeRevisions map[string]string) error {
+	return engine.ReconcileProxy(deploy, services, activeRevisions)
+}
+
+func pruneTakodServiceRevisionsAfterGrace(pruner takodRevisionPruner, services map[string]config.ServiceConfig, keepRevisions map[string]string) error {
+	return cliEngine().PruneRevisionsAfterGrace(pruner, services, keepRevisions, blueGreenGraceSleep)
 }

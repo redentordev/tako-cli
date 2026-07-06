@@ -1,13 +1,19 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
+	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
@@ -92,6 +98,81 @@ func TestAcquireStateForgetNodeLeasesUsesForgetOperation(t *testing.T) {
 	if got := strings.Join(manager.operations, ","); got != "state-forget-node" {
 		t.Fatalf("operations = %q, want state-forget-node", got)
 	}
+}
+
+func TestRunStateRepairMachineJSONSuppressesHumanOutput(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		tempDir := t.TempDir()
+		configPath := filepath.Join(tempDir, "tako.yaml")
+		if err := os.WriteFile(configPath, []byte(`project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+    password: ${TEST_SSH_PASSWORD}
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+`), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+
+		t.Setenv("TEST_SSH_PASSWORD", "secret")
+
+		oldCfgFile, oldEnvFlag, oldStateServer := cfgFile, envFlag, stateServer
+		oldCollect := collectStateRepairNodesForCommand
+		oldAcquire := acquireStateRepairLeasesForCommand
+		oldSync := syncStateRepairHistoryToLocalForCommand
+		oldEngine := cliEngineInstance
+		cfgFile = configPath
+		envFlag = "production"
+		stateServer = ""
+		cliEngineInstance = nil
+		collectStateRepairNodesForCommand = func(pool *ssh.Pool, cfg *config.Config, envName string, requestedServer string) (*stateRepairInventory, error) {
+			return &stateRepairInventory{
+				nodes:     []stateRepairNode{{name: "node-a", manager: &blockingHistoryRepairManager{}, runtime: &recordingStateRepairRuntime{}}},
+				histories: []stateHistoryCandidate{{source: "node-a", history: testRepairHistory()}},
+			}, nil
+		}
+		acquireStateRepairLeasesForCommand = func(nodes []stateRepairNode, envName string) ([]stateRepairLease, error) {
+			return nil, nil
+		}
+		syncStateRepairHistoryToLocalForCommand = func(cfg *config.Config, envName string, history *remotestate.DeploymentHistory) (int, error) {
+			return 1, nil
+		}
+		defer func() {
+			cfgFile = oldCfgFile
+			envFlag = oldEnvFlag
+			stateServer = oldStateServer
+			collectStateRepairNodesForCommand = oldCollect
+			acquireStateRepairLeasesForCommand = oldAcquire
+			syncStateRepairHistoryToLocalForCommand = oldSync
+			cliEngineInstance = oldEngine
+		}()
+
+		stdout := captureConfigExportStdout(t, func() {
+			if err := runStateRepair(nil, nil); err != nil {
+				t.Fatalf("runStateRepair returned error: %v", err)
+			}
+		})
+		for _, human := range []string{"Project:", "Deployment history source", "Synced", "Repaired deployment history"} {
+			if strings.Contains(stdout, human) {
+				t.Fatalf("machine stdout contains human repair output %q: %q", human, stdout)
+			}
+		}
+		var decoded engine.StateRepairResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable repair JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindStateRepairResult || decoded.Project != "demo" || decoded.Counts.ReachableNodes != 1 || decoded.Local.Status != engine.StateRepairLocalSyncStatusSynced {
+			t.Fatalf("decoded result = %#v", decoded)
+		}
+	})
 }
 
 func TestWriteStateRepairDocumentsWritesHistoryConcurrently(t *testing.T) {

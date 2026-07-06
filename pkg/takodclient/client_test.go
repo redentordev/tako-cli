@@ -2,6 +2,7 @@ package takodclient
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -81,6 +82,38 @@ func TestRequestJSONWithTimeoutUsesCustomDeadline(t *testing.T) {
 	}
 }
 
+func TestRequestJSONWithContextPassesCanceledContext(t *testing.T) {
+	client := &fakeTakodExecutor{returnContextErr: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := RequestJSONWithContext(ctx, client, DefaultSocket, "GET", "/v1/health", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if client.contextCalls != 1 {
+		t.Fatalf("ExecuteWithContext calls = %d, want 1", client.contextCalls)
+	}
+	if !errors.Is(client.contextErr, context.Canceled) {
+		t.Fatalf("executor ctx err = %v, want context.Canceled", client.contextErr)
+	}
+}
+
+func TestRequestJSONWithTimeoutLegacyWrapperStillWorks(t *testing.T) {
+	client := &fakeTakodExecutor{}
+
+	output, err := RequestJSONWithTimeout(client, DefaultSocket, "GET", "/v1/health", nil, time.Second)
+	if err != nil {
+		t.Fatalf("RequestJSONWithTimeout returned error: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("output = %q, want ok", output)
+	}
+	if client.contextErr != nil {
+		t.Fatalf("legacy wrapper ctx err = %v, want nil", client.contextErr)
+	}
+}
+
 func TestSanitizeJSONOutputStripsLeadingNUL(t *testing.T) {
 	got := sanitizeJSONOutput("\x00\x00{\"ok\":true}")
 	if got != "{\"ok\":true}" {
@@ -129,6 +162,23 @@ func TestStreamRequestUsesLongDeadline(t *testing.T) {
 	if client.body != "archive" {
 		t.Fatalf("body = %q, want archive", client.body)
 	}
+	if !strings.Contains(client.inputCmd, "--data-binary @-") || !strings.Contains(client.inputCmd, "http://takod/v1/images/import") {
+		t.Fatalf("unexpected stream request command: %s", client.inputCmd)
+	}
+}
+
+func TestStreamRequestWithContextPassesCancellation(t *testing.T) {
+	client := &fakeTakodExecutor{returnContextErr: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := StreamRequestWithContext(ctx, client, DefaultSocket, "POST", "/v1/images/import", strings.NewReader("archive"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if client.inputCalls != 1 {
+		t.Fatalf("ExecuteWithInput calls = %d, want 1", client.inputCalls)
+	}
 }
 
 func TestStreamRequestStripsTrailingHTTPStatusOnSuccess(t *testing.T) {
@@ -156,6 +206,59 @@ func TestStreamRequestReturnsHTTPErrorBody(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HTTP 502") || !strings.Contains(err.Error(), body) {
 		t.Fatalf("error = %q, want HTTP status and response body", err.Error())
+	}
+}
+
+func TestStreamOutputBuildsCurlCommand(t *testing.T) {
+	client := &fakeTakodExecutor{}
+
+	if err := StreamOutput(client, DefaultSocket, "/v1/logs?follow=true", io.Discard, io.Discard); err != nil {
+		t.Fatalf("StreamOutput returned error: %v", err)
+	}
+	if client.streamCalls != 1 {
+		t.Fatalf("ExecuteStream calls = %d, want 1", client.streamCalls)
+	}
+	if !strings.Contains(client.streamCmd, "curl --fail --silent --show-error --no-buffer") || !strings.Contains(client.streamCmd, "http://takod/v1/logs?follow=true") {
+		t.Fatalf("unexpected stream output command: %s", client.streamCmd)
+	}
+}
+
+func TestStreamOutputWithContextCancelsContextAwareExecutor(t *testing.T) {
+	client := &blockingStreamExecutor{started: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-client.started
+		cancel()
+	}()
+
+	start := time.Now()
+	err := StreamOutputWithContext(ctx, client, DefaultSocket, "/v1/logs?follow=true", io.Discard, io.Discard)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("cancellation took %s, want under 1s", elapsed)
+	}
+	if client.streamContextCalls != 1 {
+		t.Fatalf("ExecuteStreamWithContext calls = %d, want 1", client.streamContextCalls)
+	}
+	if !strings.Contains(client.streamCmd, "http://takod/v1/logs?follow=true") {
+		t.Fatalf("unexpected stream output command: %s", client.streamCmd)
+	}
+}
+
+func TestStreamOutputWithContextFallbackReturnsAlreadyCanceledContext(t *testing.T) {
+	client := &fakeTakodExecutor{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := StreamOutputWithContext(ctx, client, DefaultSocket, "/v1/logs", io.Discard, io.Discard)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if client.streamCalls != 0 {
+		t.Fatalf("ExecuteStream calls = %d, want 0", client.streamCalls)
 	}
 }
 
@@ -264,13 +367,18 @@ func TestAccessLogsEndpointWithFollow(t *testing.T) {
 }
 
 type fakeTakodExecutor struct {
-	contextCalls int
-	inputCalls   int
-	deadline     time.Time
-	startedAt    time.Time
-	body         string
-	output       string
-	err          error
+	contextCalls     int
+	inputCalls       int
+	streamCalls      int
+	deadline         time.Time
+	startedAt        time.Time
+	body             string
+	inputCmd         string
+	streamCmd        string
+	output           string
+	err              error
+	contextErr       error
+	returnContextErr bool
 }
 
 func (f *fakeTakodExecutor) ExecuteWithContext(ctx context.Context, _ string) (string, error) {
@@ -279,8 +387,9 @@ func (f *fakeTakodExecutor) ExecuteWithContext(ctx context.Context, _ string) (s
 	return f.response()
 }
 
-func (f *fakeTakodExecutor) ExecuteWithInput(ctx context.Context, _ string, input io.Reader) (string, error) {
+func (f *fakeTakodExecutor) ExecuteWithInput(ctx context.Context, cmd string, input io.Reader) (string, error) {
 	f.inputCalls++
+	f.inputCmd = cmd
 	f.captureDeadline(ctx)
 	data, err := io.ReadAll(input)
 	if err != nil {
@@ -290,16 +399,22 @@ func (f *fakeTakodExecutor) ExecuteWithInput(ctx context.Context, _ string, inpu
 	return f.response()
 }
 
-func (f *fakeTakodExecutor) ExecuteStream(_ string, _ io.Writer, _ io.Writer) error {
-	return nil
+func (f *fakeTakodExecutor) ExecuteStream(cmd string, _ io.Writer, _ io.Writer) error {
+	f.streamCalls++
+	f.streamCmd = cmd
+	return f.err
 }
 
 func (f *fakeTakodExecutor) captureDeadline(ctx context.Context) {
 	f.startedAt = time.Now()
 	f.deadline, _ = ctx.Deadline()
+	f.contextErr = ctx.Err()
 }
 
 func (f *fakeTakodExecutor) response() (string, error) {
+	if f.returnContextErr && f.contextErr != nil {
+		return "", f.contextErr
+	}
 	if f.output != "" || f.err != nil {
 		return f.output, f.err
 	}
@@ -312,4 +427,18 @@ func (f *fakeTakodExecutor) deadlineWithin(timeout time.Duration) bool {
 	}
 	got := f.deadline.Sub(f.startedAt)
 	return got > timeout-5*time.Second && got <= timeout
+}
+
+type blockingStreamExecutor struct {
+	fakeTakodExecutor
+	started            chan struct{}
+	streamContextCalls int
+}
+
+func (f *blockingStreamExecutor) ExecuteStreamWithContext(ctx context.Context, cmd string, _ io.Writer, _ io.Writer) error {
+	f.streamContextCalls++
+	f.streamCmd = cmd
+	close(f.started)
+	<-ctx.Done()
+	return ctx.Err()
 }
