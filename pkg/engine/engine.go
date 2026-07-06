@@ -7,6 +7,8 @@
 package engine
 
 import (
+	"io"
+
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 )
@@ -18,6 +20,7 @@ type Engine struct {
 	redactor      *secrets.Redactor
 	stream        *events.Stream
 	stateAutoSync StateAutoSyncFunc
+	buildOutput   io.Writer
 }
 
 // Options configures an Engine.
@@ -30,6 +33,10 @@ type Options struct {
 	// StateAutoSync optionally refreshes local deployment state from the
 	// remote mesh before planning; errors are non-fatal.
 	StateAutoSync StateAutoSyncFunc
+	// BuildOutput redirects deployer build/progress output. Nil keeps the
+	// deployer's default (stdout); machine-output modes route this to
+	// stderr so stdout stays parseable.
+	BuildOutput io.Writer
 }
 
 // New constructs an Engine. Every emitted event passes through a secrets
@@ -43,6 +50,7 @@ func New(opts Options) *Engine {
 		redactor:      redactor,
 		stream:        events.NewStream(opts.Sink, redactor.Redact),
 		stateAutoSync: opts.StateAutoSync,
+		buildOutput:   opts.BuildOutput,
 	}
 }
 

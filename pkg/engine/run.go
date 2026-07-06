@@ -138,6 +138,9 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, req.Environment, session.sshPool, req.Verbose)
 	deploy.SetCLIVersion(e.cliVersion)
 	deploy.SetSkipBuild(true)
+	if e.buildOutput != nil {
+		deploy.SetOutput(e.buildOutput)
+	}
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
 	}

@@ -309,6 +309,9 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, session.envName, session.sshPool, req.Verbose)
 	deploy.SetCLIVersion(e.cliVersion)
 	deploy.SetSkipBuild(req.SkipBuild)
+	if e.buildOutput != nil {
+		deploy.SetOutput(e.buildOutput)
+	}
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
 	}

@@ -41,14 +41,23 @@ type CheckResult struct {
 
 // SystemChecker checks system requirements
 type SystemChecker struct {
-	verbose bool
+	verbose  bool
+	promptFn func() bool
 }
 
-// NewSystemChecker creates a new system checker
+// NewSystemChecker creates a new system checker. By default the checker never
+// prompts; interactive callers must inject a prompt with SetPromptFunc (see
+// InteractiveNixpacksPrompt).
 func NewSystemChecker(verbose bool) *SystemChecker {
 	return &SystemChecker{
 		verbose: verbose,
 	}
+}
+
+// SetPromptFunc injects the decision used by PromptNixpacksInstall.
+// Non-interactive embedders leave it unset (install is skipped).
+func (s *SystemChecker) SetPromptFunc(fn func() bool) {
+	s.promptFn = fn
 }
 
 // CheckAll checks all system requirements
@@ -336,8 +345,19 @@ func runSyscheckCommandOutput(timeout time.Duration, name string, args ...string
 	return output, err
 }
 
-// PromptNixpacksInstall asks the user if they want to install Nixpacks
+// PromptNixpacksInstall resolves whether to install Nixpacks using the
+// injected prompt. Without an injected prompt it declines, so library
+// embedders can never block on stdin.
 func (s *SystemChecker) PromptNixpacksInstall() bool {
+	if s.promptFn == nil {
+		return false
+	}
+	return s.promptFn()
+}
+
+// InteractiveNixpacksPrompt asks on the terminal whether to install Nixpacks.
+// Use with SetPromptFunc for interactive CLI sessions.
+func InteractiveNixpacksPrompt() bool {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return false
 	}
