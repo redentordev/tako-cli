@@ -105,10 +105,10 @@ func (s *Stream) SetNowFunc(now func() time.Time) {
 // through the redactor.
 func (s *Stream) Emit(event Event) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.seq++
 	event.Seq = s.seq
-	s.mu.Unlock()
-
 	event.APIVersion = APIVersionCurrent
 	event.Kind = KindEvent
 	event.Time = s.now()

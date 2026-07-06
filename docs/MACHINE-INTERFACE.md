@@ -46,6 +46,12 @@ ending with a terminal event of type `result` whose `data.result` field
 carries the same result document. Combine with `--output json` to also get
 the bare result document appended after the event stream.
 
+`tako logs --events ndjson` emits service log entries as structured
+`log.line` events on stdout. Each event sets `service`, `node`, and
+`data.data` (the raw log line without the trailing newline); `message`
+contains the human rendering, including the node prefix used for multi-node
+text output.
+
 ### Event schema
 
 Events follow `pkg/takoapi/events.Event` (apiVersion
@@ -82,8 +88,11 @@ Mutation commands return versioned result documents (for example
 `tako.redentor.dev/v1alpha1`) containing: project, environment, `status`
 (`success`, `warmed`, `failed`, ...), revision, per-service outcomes
 (`deployed`, `warmed`, `removed`, `up_to_date`, `failed`), URLs, timings,
-`planHash`, and `error` when failed. The Go definitions in `pkg/engine`
-(`types.go` and per-command files) are the source of truth.
+`planHash`, and `error` when failed. `tako logs` returns a `LogsResult`
+document with project, environment, service, tail/follow options, per-node
+stream outcomes, timings, and `error` when any node stream failed. The Go
+definitions in `pkg/engine` (`types.go` and per-command files) are the
+source of truth.
 
 ## Plan / Approve / Apply
 

@@ -40,6 +40,7 @@ const (
 	PhaseCleanup = "cleanup"
 	PhaseDomains = "domains"
 	PhaseNotify  = "notify"
+	PhaseLogs    = "logs"
 )
 
 // Event types. Consumers must tolerate unknown types (additive schema).

@@ -27,6 +27,9 @@ commands in `cmd/` are thin adapters over this package.
   `Apply(ctx)` executes and `Close()` releases the local lock, remote
   leases, and SSH connections.
 - Simpler mutations are single calls: `Rollback`, `Promote`, `Scale`.
+- Log streaming is available as `StreamLogs(ctx, LogsRequest)`, which emits
+  `log.line` events carrying service/node/raw-line data and returns a
+  `LogsResult` summary when the stream completes.
 - Mutation contexts are cancellation-aware for local checks, remote lease fan-out,
   and deployment-history replication. Remote SSH commands are not all
   interruptible yet, but leases acquired after cancellation are best-effort
