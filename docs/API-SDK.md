@@ -27,6 +27,10 @@ commands in `cmd/` are thin adapters over this package.
   `Apply(ctx)` executes and `Close()` releases the local lock, remote
   leases, and SSH connections.
 - Simpler mutations are single calls: `Rollback`, `Promote`, `Scale`.
+- Mutation contexts are cancellation-aware for local checks, remote lease fan-out,
+  and deployment-history replication. Remote SSH commands are not all
+  interruptible yet, but leases acquired after cancellation are best-effort
+  released and cancellation classifies as `cancelled`.
 - Errors are classified for exit-code mapping via `engine.Classify`:
   invalid request, locked/leased, connectivity, cancelled, attention.
 - Every emitted event passes through a secrets redactor; operations

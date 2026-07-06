@@ -98,3 +98,30 @@ func TestStateReplicatorReturnsReplicaFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestStateReplicatorContextCancellation(t *testing.T) {
+	cfg := &config.Config{
+		Servers: map[string]config.ServerConfig{
+			"node-a": {Host: "10.0.0.1"},
+			"node-b": {Host: "10.0.0.2"},
+		},
+		Environments: map[string]config.EnvironmentConfig{
+			"production": {
+				Servers: []string{"node-a", "node-b"},
+			},
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	replicator := NewStateReplicator(nil, cfg, "production", "demo", false)
+	replicator.replicateNode = func(ctx context.Context, serverName string, server config.ServerConfig, deployment *DeploymentState, history *DeploymentHistory) error {
+		cancel()
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	err := replicator.ReplicateDeploymentContext(ctx, &DeploymentState{ID: "dep-1"}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}

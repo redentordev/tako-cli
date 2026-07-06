@@ -261,7 +261,7 @@ func (s *DestroySession) Apply(ctx context.Context) (*DestroyResult, error) {
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
-	leaseSet, err := AcquireRemoteOperationLeases(sshPool, cfg, envName, s.serverNames, "destroy")
+	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, sshPool, cfg, envName, s.serverNames, "destroy")
 	if err != nil {
 		result.Error = err.Error()
 		result.Duration = time.Since(startTime).Seconds()

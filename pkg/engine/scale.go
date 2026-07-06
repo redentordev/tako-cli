@@ -126,7 +126,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
-	leaseSet, err := AcquireRemoteOperationLeases(sshPool, cfg, envName, serverNames, "scale")
+	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, sshPool, cfg, envName, serverNames, "scale")
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +273,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 
 	scaleDuration := time.Since(startTime)
 	scaleDeployment := BuildScaleDeploymentState(cfg, envName, sourceServer.Host, startTime, scaleDuration, scaleTargets, desiredServices, scaledImageRefs, e.cliVersion, e.cliCommit)
-	if err := e.recordScaleDeploymentState(sshPool, sourceClient, cfg, envName, serverNames, scaleDeployment, req.Verbose); err != nil {
+	if err := e.recordScaleDeploymentState(ctx, sshPool, sourceClient, cfg, envName, serverNames, scaleDeployment, req.Verbose); err != nil {
 		return nil, fmt.Errorf("scale succeeded but failed to record deployment history: %w", err)
 	}
 
@@ -336,6 +336,7 @@ func BuildScaleDeploymentState(
 }
 
 func (e *Engine) recordScaleDeploymentState(
+	ctx context.Context,
 	sshPool *ssh.Pool,
 	sourceClient *ssh.Client,
 	cfg *config.Config,
@@ -355,7 +356,7 @@ func (e *Engine) recordScaleDeploymentState(
 		if err != nil {
 			return fmt.Errorf("failed to load scale history for replication: %w", err)
 		}
-		if err := replicator.ReplicateDeployment(deployment, history); err != nil {
+		if err := replicator.ReplicateDeploymentContext(ctx, deployment, history); err != nil {
 			return fmt.Errorf("failed to replicate scale history: %w", err)
 		}
 	}

@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -86,7 +89,10 @@ func Execute() {
 	// Check for updates on startup (once per day, non-blocking)
 	checkForUpdatesOnStartup()
 
-	err := rootCmd.Execute()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	err := rootCmd.ExecuteContext(ctx)
 	if err != nil {
 		os.Exit(exitCodeForError(err))
 	}

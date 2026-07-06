@@ -1,6 +1,8 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -85,6 +87,74 @@ func TestAcquireRemoteOperationLeasesWithClassifiesLockedFailure(t *testing.T) {
 	}
 }
 
+func TestAcquireRemoteOperationLeasesWithContextCancelledBeforeFanout(t *testing.T) {
+	serverNames := []string{"node-a"}
+	servers := testLeaseServers(serverNames)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	called := false
+	_, err := AcquireRemoteOperationLeasesWithContext(ctx, servers, serverNames, "deploy", func(context.Context, string, config.ServerConfig) (RemoteLease, error) {
+		called = true
+		return RemoteLease{}, nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if Classify(err) != ClassCancelled {
+		t.Fatalf("Classify(%v) = %d, want ClassCancelled", err, Classify(err))
+	}
+	if called {
+		t.Fatal("acquire function was called after context cancellation")
+	}
+}
+
+func TestAcquireRemoteOperationLeasesWithContextCancelledDuringFanoutReleasesLeases(t *testing.T) {
+	serverNames := []string{"node-a", "node-b"}
+	servers := testLeaseServers(serverNames)
+	manager := &recordingLeaseManager{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	acquiredA := make(chan struct{})
+	startedB := make(chan struct{})
+	releaseB := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := AcquireRemoteOperationLeasesWithContext(ctx, servers, serverNames, "deploy", func(_ context.Context, serverName string, _ config.ServerConfig) (RemoteLease, error) {
+			if serverName == "node-b" {
+				close(startedB)
+				<-releaseB
+			} else {
+				close(acquiredA)
+			}
+			return RemoteLease{
+				ServerName: serverName,
+				Manager:    manager,
+				Lease:      &remotestate.LeaseInfo{ID: "lease-" + serverName},
+			}, nil
+		})
+		errCh <- err
+	}()
+
+	waitForClosed(t, acquiredA, "node-a acquisition")
+	waitForClosed(t, startedB, "node-b acquisition start")
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cancelled lease acquisition to return")
+	}
+
+	waitForReleased(t, manager, "lease-node-a")
+	close(releaseB)
+	waitForReleased(t, manager, "lease-node-b")
+}
+
 func waitForLeaseStarts(t *testing.T, started <-chan string, count int) {
 	t.Helper()
 	seen := map[string]bool{}
@@ -95,6 +165,32 @@ func waitForLeaseStarts(t *testing.T, started <-chan string, count int) {
 			seen[name] = true
 		case <-deadline:
 			t.Fatalf("timed out waiting for lease acquisition fanout; saw %v", seen)
+		}
+	}
+}
+
+func waitForClosed(t *testing.T, ch <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+
+func waitForReleased(t *testing.T, manager *recordingLeaseManager, leaseID string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		for _, released := range manager.Released() {
+			if released == leaseID {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for release of %s; released %v", leaseID, manager.Released())
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }

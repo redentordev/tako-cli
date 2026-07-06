@@ -120,7 +120,7 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	session.sshPool = ssh.NewPool()
 	serverNames := []string{req.ServerName}
 
-	leaseSet, err := AcquireRemoteOperationLeases(session.sshPool, cfg, req.Environment, serverNames, "run")
+	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, session.sshPool, cfg, req.Environment, serverNames, "run")
 	if err != nil {
 		return nil, err
 	}

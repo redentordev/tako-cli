@@ -284,7 +284,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		return nil, err
 	}
 
-	leaseSet, err := AcquireRemoteOperationLeases(session.sshPool, cfg, session.envName, serverNames, "deploy")
+	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, session.sshPool, cfg, session.envName, serverNames, "deploy")
 	if err != nil {
 		return nil, err
 	}
@@ -731,7 +731,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			if err != nil {
 				return nil, fmt.Errorf("deployment succeeded but failed to load remote deployment history for replication: %w", err)
 			}
-			if err := replicator.ReplicateDeployment(deployment, history); err != nil {
+			if err := replicator.ReplicateDeploymentContext(ctx, deployment, history); err != nil {
 				return nil, fmt.Errorf("deployment succeeded but failed to replicate remote deployment history: %w", err)
 			}
 			e.debug(events.TypeStateReplicated, events.PhaseState, "")
@@ -767,7 +767,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			history, err := s.stateManager.LoadHistory()
 			if err != nil {
 				recordErr = fmt.Errorf("failed to load failed deployment history for replication: %w", err)
-			} else if err := replicator.ReplicateDeployment(deployment, history); err != nil {
+			} else if err := replicator.ReplicateDeploymentContext(ctx, deployment, history); err != nil {
 				recordErr = fmt.Errorf("failed to replicate failed deployment history: %w", err)
 			}
 		}

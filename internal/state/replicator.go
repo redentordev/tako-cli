@@ -43,15 +43,26 @@ func NewStateReplicator(pool *ssh.Pool, cfg *config.Config, environment, project
 }
 
 // ReplicateDeployment replicates a deployment and its history to every
-// environment mesh node. Writes are idempotent, so including the node that
-// initially saved the deployment is acceptable.
+// environment mesh node using the legacy 30s background timeout. Writes are
+// idempotent, so including the node that initially saved the deployment is
+// acceptable.
 func (r *StateReplicator) ReplicateDeployment(deployment *DeploymentState, history *DeploymentHistory) error {
+	return r.ReplicateDeploymentContext(context.Background(), deployment, history)
+}
+
+// ReplicateDeploymentContext replicates a deployment and its history to every
+// environment mesh node, bounded by both ctx and the legacy 30s timeout.
+func (r *StateReplicator) ReplicateDeploymentContext(ctx context.Context, deployment *DeploymentState, history *DeploymentHistory) error {
 	peers := r.getReplicaServers()
 	if len(peers) == 0 {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	parentCtx := ctx
+	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer cancel()
 
 	replicateNode := r.replicateToNode
@@ -87,7 +98,13 @@ func (r *StateReplicator) ReplicateDeployment(deployment *DeploymentState, histo
 	select {
 	case <-done:
 	case <-ctx.Done():
-		return fmt.Errorf("state replication timed out after 30s: %w", ctx.Err())
+		if parentErr := parentCtx.Err(); parentErr != nil {
+			return fmt.Errorf("state replication cancelled: %w", parentErr)
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("state replication timed out after 30s: %w", ctx.Err())
+		}
+		return fmt.Errorf("state replication cancelled: %w", ctx.Err())
 	}
 
 	close(errs)

@@ -226,7 +226,7 @@ func (s *RemoveSession) Apply(ctx context.Context) (*RemoveResult, error) {
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
-	leaseSet, err := AcquireRemoteOperationLeases(sshPool, cfg, envName, s.serverNames, "remove")
+	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, sshPool, cfg, envName, s.serverNames, "remove")
 	if err != nil {
 		result.Error = err.Error()
 		result.Duration = time.Since(startTime).Seconds()

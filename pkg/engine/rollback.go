@@ -141,7 +141,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
-	leaseSet, err := AcquireRemoteOperationLeases(sshPool, cfg, envName, envServers, "rollback")
+	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, sshPool, cfg, envName, envServers, "rollback")
 	if err != nil {
 		return nil, err
 	}
@@ -329,7 +329,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 		if err != nil {
 			return nil, fmt.Errorf("rollback succeeded but failed to load remote deployment history for replication: %w", err)
 		}
-		if err := replicator.ReplicateDeployment(rollbackDeployment, history); err != nil {
+		if err := replicator.ReplicateDeploymentContext(ctx, rollbackDeployment, history); err != nil {
 			return nil, fmt.Errorf("rollback succeeded but failed to replicate remote deployment history: %w", err)
 		}
 		e.debug(events.TypeStateReplicated, events.PhaseState, "")

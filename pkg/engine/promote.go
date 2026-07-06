@@ -122,7 +122,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
-	leaseSet, err := AcquireRemoteOperationLeases(sshPool, cfg, envName, serverNames, "promote")
+	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, sshPool, cfg, envName, serverNames, "promote")
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +246,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 		if err != nil {
 			return nil, fmt.Errorf("promotion succeeded but failed to load remote deployment history for replication: %w", err)
 		}
-		if err := replicator.ReplicateDeployment(promoteDeployment, history); err != nil {
+		if err := replicator.ReplicateDeploymentContext(ctx, promoteDeployment, history); err != nil {
 			return nil, fmt.Errorf("promotion succeeded but failed to replicate remote deployment history: %w", err)
 		}
 		e.debug(events.TypeStateReplicated, events.PhaseState, "")
