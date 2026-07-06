@@ -1,9 +1,8 @@
 package cmd
 
 import (
-	"fmt"
-
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	gitpkg "github.com/redentordev/tako-cli/pkg/git"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -25,60 +24,21 @@ func persistTakodRuntimeState(
 	message string,
 	details map[string]string,
 ) error {
-	desired, err := takodstate.BuildDesiredRevision(cfg, envName, source, services, imageRefs, serverNames, gitInfo)
-	if err != nil {
-		return fmt.Errorf("failed to build desired revision: %w", err)
-	}
-	actual := takodstate.BuildActualSnapshotWithNodes(cfg.Project.Name, envName, serverNames, actualState, nodeActualState)
-	nodeActual := buildNodeActualSnapshots(cfg.Project.Name, envName, nodeActualState)
-	if details == nil {
-		details = make(map[string]string)
-	}
-	details["revisionId"] = desired.RevisionID
-
-	event := takodstate.NewEvent(cfg.Project.Name, envName, eventType, desired.RevisionID, message, details)
-	return takodstate.PersistToServers(sshPool, cfg, envName, serverNames, desired, actual, nodeActual, event, verbose)
+	return engine.PersistTakodRuntimeState(sshPool, cfg, envName, serverNames, source, services, imageRefs, actualState, nodeActualState, gitInfo, eventType, message, details, verbose)
 }
 
 func buildNodeActualSnapshots(project string, environment string, nodeActualState map[string]map[string]*reconcile.ActualService) map[string]*takodstate.ActualSnapshot {
-	if len(nodeActualState) == 0 {
-		return nil
-	}
-	snapshots := make(map[string]*takodstate.ActualSnapshot, len(nodeActualState))
-	for node, actual := range nodeActualState {
-		snapshots[node] = takodstate.BuildNodeActualSnapshot(project, environment, node, actual)
-	}
-	return snapshots
+	return engine.BuildNodeActualSnapshots(project, environment, nodeActualState)
 }
 
 func cloneServiceMap(services map[string]config.ServiceConfig) map[string]config.ServiceConfig {
-	out := make(map[string]config.ServiceConfig, len(services))
-	for name, service := range services {
-		out[name] = service
-	}
-	return out
+	return engine.CloneServiceMap(services)
 }
 
 func redactedEnvKeys(env map[string]string) map[string]string {
-	if len(env) == 0 {
-		return nil
-	}
-	redacted := make(map[string]string, len(env))
-	for key := range env {
-		redacted[key] = "<redacted>"
-	}
-	return redacted
+	return engine.RedactedEnvKeys(env)
 }
 
 func gitInfoFromCommit(commitInfo *gitpkg.CommitInfo) takodstate.GitInfo {
-	if commitInfo == nil {
-		return takodstate.GitInfo{}
-	}
-	return takodstate.GitInfo{
-		Commit:      commitInfo.Hash,
-		CommitShort: commitInfo.ShortHash,
-		Branch:      commitInfo.Branch,
-		Message:     commitInfo.Message,
-		Author:      commitInfo.Author,
-	}
+	return engine.GitInfoFromCommit(commitInfo)
 }

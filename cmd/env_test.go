@@ -15,6 +15,7 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/crypto"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 )
@@ -428,11 +429,10 @@ environments:
 		leasedServers = append([]string(nil), serverNames...)
 		leaseAcquired = true
 		return &remoteOperationLeaseSet{
-			operation: operation,
-			leases: []remoteOperationLease{
-				{serverName: "node-a", manager: manager, lease: &remotestate.LeaseInfo{ID: "lease-node-a", Environment: envName}},
-				{serverName: "node-b", manager: manager, lease: &remotestate.LeaseInfo{ID: "lease-node-b", Environment: envName}},
-			},
+			RemoteLeaseSet: engine.NewRemoteLeaseSet(operation, []engine.RemoteLease{
+				{ServerName: "node-a", Manager: manager, Lease: &remotestate.LeaseInfo{ID: "lease-node-a", Environment: envName}},
+				{ServerName: "node-b", Manager: manager, Lease: &remotestate.LeaseInfo{ID: "lease-node-b", Environment: envName}},
+			}),
 		}, nil
 	}
 	t.Cleanup(func() {

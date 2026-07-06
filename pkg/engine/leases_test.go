@@ -1,4 +1,4 @@
-package cmd
+package engine
 
 import (
 	"fmt"
@@ -17,16 +17,16 @@ func TestAcquireRemoteOperationLeasesWithRunsConcurrently(t *testing.T) {
 	started := make(chan string, len(serverNames))
 	release := make(chan struct{})
 
-	setDone := make(chan *remoteOperationLeaseSet, 1)
+	setDone := make(chan *RemoteLeaseSet, 1)
 	errDone := make(chan error, 1)
 	go func() {
-		set, err := acquireRemoteOperationLeasesWith(servers, serverNames, "deploy", func(serverName string, _ config.ServerConfig) (remoteOperationLease, error) {
+		set, err := AcquireRemoteOperationLeasesWith(servers, serverNames, "deploy", func(serverName string, _ config.ServerConfig) (RemoteLease, error) {
 			started <- serverName
 			<-release
-			return remoteOperationLease{
-				serverName: serverName,
-				manager:    &recordingLeaseManager{},
-				lease:      &remotestate.LeaseInfo{ID: "lease-" + serverName},
+			return RemoteLease{
+				ServerName: serverName,
+				Manager:    &recordingLeaseManager{},
+				Lease:      &remotestate.LeaseInfo{ID: "lease-" + serverName},
 			}, nil
 		})
 		setDone <- set
@@ -37,7 +37,7 @@ func TestAcquireRemoteOperationLeasesWithRunsConcurrently(t *testing.T) {
 	close(release)
 
 	if err := <-errDone; err != nil {
-		t.Fatalf("acquireRemoteOperationLeasesWith returned error: %v", err)
+		t.Fatalf("AcquireRemoteOperationLeasesWith returned error: %v", err)
 	}
 	set := <-setDone
 	if got, want := set.Summary(), "node-a:lease-node-a, node-b:lease-node-b, node-c:lease-node-c"; got != want {
@@ -50,14 +50,14 @@ func TestAcquireRemoteOperationLeasesWithReleasesOnFailure(t *testing.T) {
 	servers := testLeaseServers(serverNames)
 	manager := &recordingLeaseManager{}
 
-	_, err := acquireRemoteOperationLeasesWith(servers, serverNames, "deploy", func(serverName string, _ config.ServerConfig) (remoteOperationLease, error) {
+	_, err := AcquireRemoteOperationLeasesWith(servers, serverNames, "deploy", func(serverName string, _ config.ServerConfig) (RemoteLease, error) {
 		if serverName == "node-c" {
-			return remoteOperationLease{}, fmt.Errorf("node-c failed")
+			return RemoteLease{}, fmt.Errorf("node-c failed")
 		}
-		return remoteOperationLease{
-			serverName: serverName,
-			manager:    manager,
-			lease:      &remotestate.LeaseInfo{ID: "lease-" + serverName},
+		return RemoteLease{
+			ServerName: serverName,
+			Manager:    manager,
+			Lease:      &remotestate.LeaseInfo{ID: "lease-" + serverName},
 		}, nil
 	})
 	if err == nil || !strings.Contains(err.Error(), "node-c failed") {
@@ -67,6 +67,21 @@ func TestAcquireRemoteOperationLeasesWithReleasesOnFailure(t *testing.T) {
 	released := manager.Released()
 	if got, want := strings.Join(released, ","), "lease-node-b,lease-node-a"; got != want {
 		t.Fatalf("released leases = %q, want %q", got, want)
+	}
+}
+
+func TestAcquireRemoteOperationLeasesWithClassifiesLockedFailure(t *testing.T) {
+	serverNames := []string{"node-a"}
+	servers := testLeaseServers(serverNames)
+
+	_, err := AcquireRemoteOperationLeasesWith(servers, serverNames, "deploy", func(serverName string, _ config.ServerConfig) (RemoteLease, error) {
+		return RemoteLease{}, &LockedError{Operation: "deploy", Err: fmt.Errorf("lease held")}
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if Classify(err) != ClassLocked {
+		t.Fatalf("Classify(%v) = %d, want ClassLocked", err, Classify(err))
 	}
 }
 
