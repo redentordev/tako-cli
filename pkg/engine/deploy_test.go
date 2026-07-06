@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -149,5 +150,26 @@ func TestPlanDeployRejectsInvalidRequests(t *testing.T) {
 	}
 	if _, err := eng.PlanDeploy(t.Context(), DeployRequest{Config: &config.Config{}}); Classify(err) != ClassInvalid {
 		t.Fatalf("missing environment: Classify = %d, want ClassInvalid (%v)", Classify(err), err)
+	}
+}
+
+func TestDeployStartedStateRecordedAfterDependencyResolutionBeforeMutations(t *testing.T) {
+	source, err := os.ReadFile("deploy.go")
+	if err != nil {
+		t.Fatalf("read deploy.go: %v", err)
+	}
+	body := string(source)
+	recordCall := "RecordStartedDeploymentStateContext(ctx, s.stateManager, deployment)"
+	if count := strings.Count(body, recordCall); count != 1 {
+		t.Fatalf("started-state record call count = %d, want 1", count)
+	}
+	resolveIndex := strings.Index(body, "deploymentOrder, err := resolver.ResolveOrder()")
+	recordIndex := strings.Index(body, recordCall)
+	loopIndex := strings.Index(body, "for _, serviceName := range deploymentOrder")
+	if resolveIndex < 0 || recordIndex < 0 || loopIndex < 0 {
+		t.Fatalf("missing expected deploy Apply ordering markers: resolve=%d record=%d loop=%d", resolveIndex, recordIndex, loopIndex)
+	}
+	if !(resolveIndex < recordIndex && recordIndex < loopIndex) {
+		t.Fatalf("started-state record ordering invalid: resolve=%d record=%d loop=%d", resolveIndex, recordIndex, loopIndex)
 	}
 }

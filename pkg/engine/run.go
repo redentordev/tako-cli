@@ -242,6 +242,11 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 		StartedAt:   startTime,
 	}
 
+	if err := RecordStartedDeploymentStateContext(ctx, stateManager, deployment); err != nil {
+		return nil, fmt.Errorf("failed to record started deployment state before applying mutations: %w", err)
+	}
+	e.debug(events.TypeLogLine, events.PhaseState, fmt.Sprintf("→ Recorded in-progress deployment state (%s)\n", deployment.ID))
+
 	recordFailure := func(deployErr error) (*DeployResult, error) {
 		recordCtx, recordCancel := failedDeploymentRecordContext(ctx)
 		recordErr := RecordFailedDeploymentStateContext(recordCtx, stateManager, nil, deployment, cfg, envName, serverNames, nil, startTime, deployErr)

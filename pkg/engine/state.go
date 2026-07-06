@@ -47,6 +47,50 @@ func failedDeploymentRecordContext(ctx context.Context) (context.Context, contex
 	return context.WithTimeout(context.Background(), FailedDeploymentCleanupTimeout)
 }
 
+// RecordStartedDeploymentState marks a deployment in progress and persists it
+// to remote state before any deployment mutations start.
+func RecordStartedDeploymentState(
+	remoteSaver RemoteDeploymentSaver,
+	deployment *remotestate.DeploymentState,
+) error {
+	return RecordStartedDeploymentStateContext(context.Background(), remoteSaver, deployment)
+}
+
+// RecordStartedDeploymentStateContext marks a deployment in progress and
+// persists it to remote state before any deployment mutations start, bounded by
+// ctx. Unlike failed-state cleanup, this helper honors cancellation directly so
+// a canceled operation fails before mutating remote services.
+func RecordStartedDeploymentStateContext(
+	ctx context.Context,
+	remoteSaver RemoteDeploymentSaver,
+	deployment *remotestate.DeploymentState,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deployment == nil {
+		return fmt.Errorf("deployment state is nil")
+	}
+	if remoteSaver == nil {
+		return fmt.Errorf("remote deployment recorder is nil")
+	}
+
+	deployment.Status = remotestate.StatusInProgress
+	if contextSaver, ok := remoteSaver.(RemoteDeploymentContextSaver); ok {
+		if err := contextSaver.SaveDeploymentContext(ctx, deployment); err != nil {
+			return fmt.Errorf("failed to save started remote deployment state: %w", err)
+		}
+		return nil
+	}
+	if err := remoteSaver.SaveDeployment(deployment); err != nil {
+		return fmt.Errorf("failed to save started remote deployment state: %w", err)
+	}
+	return nil
+}
+
 // PersistTakodRuntimeState writes desired/actual/event state documents to
 // every target node.
 func PersistTakodRuntimeState(

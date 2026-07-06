@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,73 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 )
+
+func TestRecordStartedDeploymentStateSavesInProgressAndAssignedID(t *testing.T) {
+	saver := newHistoryDeploymentSaver()
+	deployment := &remotestate.DeploymentState{Status: remotestate.StatusFailed}
+
+	if err := RecordStartedDeploymentStateContext(context.Background(), saver, deployment); err != nil {
+		t.Fatalf("RecordStartedDeploymentStateContext returned error: %v", err)
+	}
+	if deployment.ID == "" {
+		t.Fatal("deployment ID was not populated")
+	}
+	if len(saver.history) != 1 {
+		t.Fatalf("history entries = %d, want 1", len(saver.history))
+	}
+	if saver.history[0].Status != remotestate.StatusInProgress {
+		t.Fatalf("saved status = %q, want %q", saver.history[0].Status, remotestate.StatusInProgress)
+	}
+	if saver.history[0].ID != deployment.ID {
+		t.Fatalf("saved ID = %q, want assigned ID %q", saver.history[0].ID, deployment.ID)
+	}
+}
+
+func TestRecordStartedThenFailedDeploymentStateReplacesHistoryEntry(t *testing.T) {
+	saver := newHistoryDeploymentSaver()
+	deployment := &remotestate.DeploymentState{}
+	start := time.Now()
+
+	if err := RecordStartedDeploymentStateContext(context.Background(), saver, deployment); err != nil {
+		t.Fatalf("RecordStartedDeploymentStateContext returned error: %v", err)
+	}
+	assignedID := deployment.ID
+	if err := RecordFailedDeploymentStateContext(context.Background(), saver, nil, deployment, testFailedStateConfig(), "production", []string{"node-a"}, nil, start, errors.New("failed after start")); err != nil {
+		t.Fatalf("RecordFailedDeploymentStateContext returned error: %v", err)
+	}
+
+	if len(saver.history) != 1 {
+		t.Fatalf("history entries = %d, want 1", len(saver.history))
+	}
+	if saver.history[0].ID != assignedID {
+		t.Fatalf("history ID = %q, want assigned ID %q", saver.history[0].ID, assignedID)
+	}
+	if saver.history[0].Status != remotestate.StatusFailed {
+		t.Fatalf("history status = %q, want %q", saver.history[0].Status, remotestate.StatusFailed)
+	}
+	if !strings.Contains(saver.history[0].Error, "failed after start") {
+		t.Fatalf("history error = %q, want failed after start", saver.history[0].Error)
+	}
+}
+
+func TestRecordStartedDeploymentStateHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	saver := &contextAwareDeploymentSaver{rejectCanceled: true}
+	deployment := &remotestate.DeploymentState{}
+
+	err := RecordStartedDeploymentStateContext(ctx, saver, deployment)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if saver.saved != nil {
+		t.Fatalf("deployment saved despite canceled context: %#v", saver.saved)
+	}
+	if saver.seenCtx != nil {
+		t.Fatalf("saver was called with context %#v, want no save before mutation", saver.seenCtx)
+	}
+}
 
 func TestRecordFailedDeploymentStateUsesCleanupContextWhenParentCanceled(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
@@ -124,6 +192,7 @@ func (s *contextAwareDeploymentSaver) SaveDeploymentContext(ctx context.Context,
 type historyDeploymentSaver struct {
 	byID    map[string]*remotestate.DeploymentState
 	history []*remotestate.DeploymentState
+	nextID  int
 }
 
 func newHistoryDeploymentSaver() *historyDeploymentSaver {
@@ -137,6 +206,10 @@ func (s *historyDeploymentSaver) SaveDeployment(deployment *remotestate.Deployme
 func (s *historyDeploymentSaver) SaveDeploymentContext(ctx context.Context, deployment *remotestate.DeploymentState) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if deployment.ID == "" {
+		s.nextID++
+		deployment.ID = fmt.Sprintf("fake-deploy-%d", s.nextID)
 	}
 	copy := *deployment
 	s.byID[copy.ID] = &copy

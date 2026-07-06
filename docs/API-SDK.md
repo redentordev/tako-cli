@@ -88,11 +88,13 @@ commands in `cmd/` are thin adapters over this package.
   interrupt connects and live streams. Remote SSH commands are not all
   interruptible yet, and deployer build archive streaming remains a known
   follow-up, but leases acquired after cancellation are best-effort released and
-  cancellation classifies as `cancelled`. Cancelled deploy/run failure paths use
-  a short cleanup context to persist failed/interrupted deployment state and
-  history; repeated saves for the same deployment ID replace the history entry
-  rather than duplicating it. Local locks and remote leases are force-releasable
-  and expire if left stale.
+  cancellation classifies as `cancelled`. Deploy/run writes an `in_progress`
+  remote deployment record before service/proxy mutations start, so a hard kill
+  after mutations begin leaves history evidence. Cancelled deploy/run failure
+  paths use a short cleanup context to persist failed/interrupted deployment
+  state and history; repeated saves for the same deployment ID replace the
+  history entry rather than duplicating it. Local locks and remote leases are
+  force-releasable and expire if left stale.
 - Errors are classified for exit-code mapping via `engine.Classify`:
   invalid request, locked/leased, connectivity, cancelled, attention.
 - Every emitted event passes through a secrets redactor; operations

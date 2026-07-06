@@ -518,7 +518,6 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		CLIVersion:     e.cliVersion,
 		CLICommit:      e.cliCommit,
 	}
-
 	notificationRevisionLabel := "Commit"
 	notificationRevisionValue := s.gitStrings.ShortHash
 	if s.sourceInfo.SourceMode {
@@ -566,6 +565,11 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve service dependencies: %w", err)
 	}
+
+	if err := RecordStartedDeploymentStateContext(ctx, s.stateManager, deployment); err != nil {
+		return nil, fmt.Errorf("failed to record started deployment state before applying mutations: %w", err)
+	}
+	e.debug(events.TypeLogLine, events.PhaseState, fmt.Sprintf("→ Recorded in-progress deployment state (%s)\n", deployment.ID))
 
 	// Deploy each service through takod placement in dependency order.
 	for _, serviceName := range deploymentOrder {
