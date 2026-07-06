@@ -44,12 +44,12 @@ func validateMachineOutputFlags() error {
 	switch outputFormatFlag {
 	case outputFormatText, outputFormatJSON:
 	default:
-		return fmt.Errorf("invalid --output %q: supported values are text, json", outputFormatFlag)
+		return &engine.InvalidRequestError{Err: fmt.Errorf("invalid --output %q: supported values are text, json", outputFormatFlag)}
 	}
 	switch eventsFormatFlag {
 	case "", eventsFormatNDJSON:
 	default:
-		return fmt.Errorf("invalid --events %q: supported value is ndjson", eventsFormatFlag)
+		return &engine.InvalidRequestError{Err: fmt.Errorf("invalid --events %q: supported value is ndjson", eventsFormatFlag)}
 	}
 	return nil
 }

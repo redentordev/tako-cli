@@ -81,7 +81,7 @@ func init() {
 func loadDeployConfig(configPath string) (*config.Config, error) {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
-		return nil, formatDeployConfigError(resolveDeployConfigPath(configPath), err)
+		return nil, &engine.InvalidRequestError{Err: formatDeployConfigError(resolveDeployConfigPath(configPath), err)}
 	}
 	return cfg, nil
 }
