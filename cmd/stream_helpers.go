@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"io"
 	"sync"
 
@@ -20,6 +21,10 @@ func (w *lockedLogWriter) Write(p []byte) (int, error) {
 }
 
 func connectTakodStreamNode(server config.ServerConfig) (*ssh.Client, error) {
+	return connectTakodStreamNodeContext(context.Background(), server)
+}
+
+func connectTakodStreamNodeContext(ctx context.Context, server config.ServerConfig) (*ssh.Client, error) {
 	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
 		Host:     server.Host,
 		Port:     server.Port,
@@ -30,7 +35,7 @@ func connectTakodStreamNode(server config.ServerConfig) (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := client.Connect(); err != nil {
+	if err := client.ConnectContext(ctx); err != nil {
 		_ = client.Close()
 		return nil, err
 	}

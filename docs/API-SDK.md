@@ -83,13 +83,16 @@ commands in `cmd/` are thin adapters over this package.
   fill, and `error` when repair is incomplete or fails.
 - Mutation contexts are cancellation-aware for local checks, takod JSON
   state/lease requests, remote lease fan-out, and deployment-history
-  replication. Remote SSH commands are not all interruptible yet, but leases
-  acquired after cancellation are best-effort released and cancellation
-  classifies as `cancelled`. Cancelled deploy/run failure paths use a short
-  cleanup context to persist failed/interrupted deployment state and history;
-  repeated saves for the same deployment ID replace the history entry rather
-  than duplicating it. Local locks and remote leases are force-releasable and
-  expire if left stale.
+  replication. SSH connect and stream output now have context-aware variants;
+  engine log streaming and CLI access-log streaming use them so cancellation can
+  interrupt connects and live streams. Remote SSH commands are not all
+  interruptible yet, and deployer build archive streaming remains a known
+  follow-up, but leases acquired after cancellation are best-effort released and
+  cancellation classifies as `cancelled`. Cancelled deploy/run failure paths use
+  a short cleanup context to persist failed/interrupted deployment state and
+  history; repeated saves for the same deployment ID replace the history entry
+  rather than duplicating it. Local locks and remote leases are force-releasable
+  and expire if left stale.
 - Errors are classified for exit-code mapping via `engine.Classify`:
   invalid request, locked/leased, connectivity, cancelled, attention.
 - Every emitted event passes through a secrets redactor; operations

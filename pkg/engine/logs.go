@@ -252,7 +252,7 @@ func (e *Engine) streamLogsFromNode(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	client, err := connectTakodStreamNode(server)
+	client, err := connectTakodStreamNodeContext(ctx, server)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node %s: %w", serverName, err)
 	}
@@ -275,7 +275,7 @@ func (e *Engine) streamLogsFromNode(
 	reader, writer := io.Pipe()
 	streamDone := make(chan error, 1)
 	go func() {
-		err := takodclient.StreamOutput(client, TakodSocketFromConfig(cfg), endpoint, writer, writer)
+		err := takodclient.StreamOutputWithContext(ctx, client, TakodSocketFromConfig(cfg), endpoint, writer, writer)
 		if err != nil {
 			_ = writer.CloseWithError(err)
 		} else {
@@ -301,6 +301,10 @@ func (e *Engine) streamLogsFromNode(
 }
 
 func connectTakodStreamNode(server config.ServerConfig) (*ssh.Client, error) {
+	return connectTakodStreamNodeContext(context.Background(), server)
+}
+
+func connectTakodStreamNodeContext(ctx context.Context, server config.ServerConfig) (*ssh.Client, error) {
 	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
 		Host:     server.Host,
 		Port:     server.Port,
@@ -311,7 +315,7 @@ func connectTakodStreamNode(server config.ServerConfig) (*ssh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := client.Connect(); err != nil {
+	if err := client.ConnectContext(ctx); err != nil {
 		_ = client.Close()
 		return nil, err
 	}

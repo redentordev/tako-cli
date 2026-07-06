@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -103,9 +104,13 @@ func runAccess(cmd *cobra.Command, args []string) error {
 	fmt.Println(formatter.FormatHeader())
 	fmt.Println()
 
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	output := &lockedLogWriter{writer: os.Stdout}
-	results := streamAccessNodesWith(servers, func(serverName string, server config.ServerConfig, prefix bool) error {
-		return streamAccessFromNode(cfg, serverName, server, formatter, accessService, accessTail, accessFollow, prefix, output)
+	results := streamAccessNodesWith(ctx, servers, func(serverName string, server config.ServerConfig, prefix bool) error {
+		return streamAccessFromNode(ctx, cfg, serverName, server, formatter, accessService, accessTail, accessFollow, prefix, output)
 	})
 	if err := summarizeAccessStreamResults(results); err != nil {
 		return err
@@ -122,7 +127,10 @@ type accessNodeResult struct {
 	err        error
 }
 
-func streamAccessNodesWith(servers map[string]config.ServerConfig, stream accessNodeStreamFunc) []accessNodeResult {
+func streamAccessNodesWith(ctx context.Context, servers map[string]config.ServerConfig, stream accessNodeStreamFunc) []accessNodeResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	names := sortedAccessServerNames(servers)
 	prefix := len(names) > 1
 	resultCh := make(chan accessNodeResult, len(names))
@@ -132,11 +140,17 @@ func streamAccessNodesWith(servers map[string]config.ServerConfig, stream access
 		wg.Add(1)
 		go func(index int, serverName string, server config.ServerConfig) {
 			defer wg.Done()
+			var err error
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				err = ctxErr
+			} else {
+				err = stream(serverName, server, prefix)
+			}
 			resultCh <- accessNodeResult{
 				index:      index,
 				serverName: serverName,
 				host:       server.Host,
-				err:        stream(serverName, server, prefix),
+				err:        err,
 			}
 		}(index, serverName, server)
 	}
@@ -151,6 +165,7 @@ func streamAccessNodesWith(servers map[string]config.ServerConfig, stream access
 }
 
 func streamAccessFromNode(
+	ctx context.Context,
 	cfg *config.Config,
 	serverName string,
 	server config.ServerConfig,
@@ -161,7 +176,10 @@ func streamAccessFromNode(
 	prefix bool,
 	output io.Writer,
 ) error {
-	client, err := connectTakodStreamNode(server)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, err := connectTakodStreamNodeContext(ctx, server)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node %s: %w", serverName, err)
 	}
@@ -175,7 +193,7 @@ func streamAccessFromNode(
 	errCh := make(chan error, 1)
 	go func() {
 		endpoint := takodclient.AccessLogsEndpoint(tail, follow)
-		err := takodclient.StreamOutput(client, takodSocketFromConfig(cfg), endpoint, writer, writer)
+		err := takodclient.StreamOutputWithContext(ctx, client, takodSocketFromConfig(cfg), endpoint, writer, writer)
 		if err != nil {
 			_ = writer.CloseWithError(err)
 		} else {
@@ -199,11 +217,16 @@ func streamAccessFromNode(
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading access logs: %w", err)
+	scanErr := scanner.Err()
+	streamErr := <-errCh
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	if err := <-errCh; err != nil {
-		return fmt.Errorf("failed to stream access logs: %w", err)
+	if scanErr != nil {
+		return fmt.Errorf("error reading access logs: %w", scanErr)
+	}
+	if streamErr != nil {
+		return fmt.Errorf("failed to stream access logs: %w", streamErr)
 	}
 	return nil
 }

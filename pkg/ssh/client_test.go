@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -177,6 +178,24 @@ func TestConnectTCPAttemptsOverrideWinsInAutomation(t *testing.T) {
 	t.Setenv("TAKO_SSH_CONNECT_ATTEMPTS", "2")
 	if got := connectTCPAttempts(); got != 2 {
 		t.Fatalf("override connectTCPAttempts = %d, want 2", got)
+	}
+}
+
+func TestConnectContextCanceledBeforeDial(t *testing.T) {
+	client := &Client{host: "203.0.113.1", port: 22}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	err := client.ConnectContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ConnectContext error = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("ConnectContext took %s, want no dial/retry delay", elapsed)
+	}
+	if client.conn != nil {
+		t.Fatal("client should not be connected after canceled ConnectContext")
 	}
 }
 

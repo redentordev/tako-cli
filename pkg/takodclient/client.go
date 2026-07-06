@@ -29,6 +29,10 @@ type StreamExecutor interface {
 	ExecuteStream(cmd string, stdout io.Writer, stderr io.Writer) error
 }
 
+type contextStreamExecutor interface {
+	ExecuteStreamWithContext(ctx context.Context, cmd string, stdout io.Writer, stderr io.Writer) error
+}
+
 func RequestJSON(client RequestExecutor, socket string, method string, endpoint string, value any) (string, error) {
 	return RequestJSONWithContext(context.Background(), client, socket, method, endpoint, value)
 }
@@ -125,6 +129,13 @@ func splitHTTPStatus(output string) (string, int, bool) {
 }
 
 func StreamRequest(client RequestExecutor, socket string, method string, endpoint string, reader io.Reader) (string, error) {
+	return StreamRequestWithContext(context.Background(), client, socket, method, endpoint, reader)
+}
+
+func StreamRequestWithContext(ctx context.Context, client RequestExecutor, socket string, method string, endpoint string, reader io.Reader) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if socket == "" {
 		socket = DefaultSocket
 	}
@@ -135,18 +146,8 @@ func StreamRequest(client RequestExecutor, socket string, method string, endpoin
 		method = "POST"
 	}
 
-	args := []string{
-		"if test -S " + shellQuote(socket) + " && command -v curl >/dev/null 2>&1; then",
-		"curl --silent --show-error",
-		"--write-out '\\n__TAKO_HTTP_STATUS__:%{http_code}'",
-		"--unix-socket " + shellQuote(socket),
-		"-X " + shellQuote(method),
-		"--data-binary @-",
-		shellQuote("http://takod" + endpoint),
-		"; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi",
-	}
-	curlCmd := strings.Join(args, " ")
-	ctx, cancel := context.WithTimeout(context.Background(), StreamRequestTimeout)
+	curlCmd := buildStreamRequestCommand(socket, method, endpoint)
+	ctx, cancel := context.WithTimeout(ctx, StreamRequestTimeout)
 	defer cancel()
 
 	output, err := client.ExecuteWithInput(ctx, curlCmd, reader)
@@ -161,7 +162,28 @@ func StreamRequest(client RequestExecutor, socket string, method string, endpoin
 	return bodyOutput, nil
 }
 
+func buildStreamRequestCommand(socket string, method string, endpoint string) string {
+	args := []string{
+		"if test -S " + shellQuote(socket) + " && command -v curl >/dev/null 2>&1; then",
+		"curl --silent --show-error",
+		"--write-out '\\n__TAKO_HTTP_STATUS__:%{http_code}'",
+		"--unix-socket " + shellQuote(socket),
+		"-X " + shellQuote(method),
+		"--data-binary @-",
+		shellQuote("http://takod" + endpoint),
+		"; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi",
+	}
+	return strings.Join(args, " ")
+}
+
 func StreamOutput(client StreamExecutor, socket string, endpoint string, stdout io.Writer, stderr io.Writer) error {
+	return StreamOutputWithContext(context.Background(), client, socket, endpoint, stdout, stderr)
+}
+
+func StreamOutputWithContext(ctx context.Context, client StreamExecutor, socket string, endpoint string, stdout io.Writer, stderr io.Writer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if socket == "" {
 		socket = DefaultSocket
 	}
@@ -169,6 +191,23 @@ func StreamOutput(client StreamExecutor, socket string, endpoint string, stdout 
 		return fmt.Errorf("takod endpoint must start with /")
 	}
 
+	curlCmd := buildStreamOutputCommand(socket, endpoint)
+	var err error
+	if contextClient, ok := client.(contextStreamExecutor); ok {
+		err = contextClient.ExecuteStreamWithContext(ctx, curlCmd, stdout, stderr)
+	} else {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		err = client.ExecuteStream(curlCmd, stdout, stderr)
+	}
+	if err != nil {
+		return fmt.Errorf("takod stream request %s failed: %w", endpoint, err)
+	}
+	return nil
+}
+
+func buildStreamOutputCommand(socket string, endpoint string) string {
 	args := []string{
 		"if test -S " + shellQuote(socket) + " && command -v curl >/dev/null 2>&1; then",
 		"curl --fail --silent --show-error --no-buffer",
@@ -176,11 +215,7 @@ func StreamOutput(client StreamExecutor, socket string, endpoint string, stdout 
 		shellQuote("http://takod" + endpoint),
 		"; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi",
 	}
-	curlCmd := strings.Join(args, " ")
-	if err := client.ExecuteStream(curlCmd, stdout, stderr); err != nil {
-		return fmt.Errorf("takod stream request %s failed: %w", endpoint, err)
-	}
-	return nil
+	return strings.Join(args, " ")
 }
 
 func ProxyFileEndpoint(name string) string {
