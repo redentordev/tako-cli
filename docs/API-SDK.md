@@ -42,6 +42,11 @@ commands in `cmd/` are thin adapters over this package.
 - Log streaming is available as `StreamLogs(ctx, LogsRequest)`, which emits
   `log.line` events carrying service/node/raw-line data and returns a
   `LogsResult` summary when the stream completes.
+- Deployment history is available as `History(ctx, HistoryRequest)`, the engine
+  backing `tako history --output json`. Adapters provide the mesh history source
+  and deployment-listing seams shared with rollback; the engine applies the
+  requested server/status/limit/include-failed options and returns a
+  `HistoryResult` with source server and JSON-friendly deployment rows.
 - Mutation contexts are cancellation-aware for local checks, remote lease fan-out,
   and deployment-history replication. Remote SSH commands are not all
   interruptible yet, but leases acquired after cancellation are best-effort

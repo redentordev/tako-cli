@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/redentordev/tako-cli/internal/state"
+	"github.com/redentordev/tako-cli/pkg/engine"
 )
 
 func TestFormatStatus(t *testing.T) {
@@ -27,6 +30,45 @@ func TestFormatStatus(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRenderHistoryResultMachineJSONKeepsStdoutParseable(t *testing.T) {
+	withMachineOutput(t, outputFormatJSON, "", func() {
+		result := &engine.HistoryResult{
+			APIVersion:    "tako.redentor.dev/v1alpha1",
+			Kind:          engine.KindHistoryResult,
+			Project:       "demo",
+			Environment:   "production",
+			SourceServer:  "node-a",
+			Limit:         10,
+			IncludeFailed: true,
+			Deployments: []engine.HistoryDeployment{{
+				ID:        "deployment-1234567890",
+				DisplayID: "deployment",
+				Commit:    "abc1234",
+				Timestamp: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+				Version:   "v1",
+				Status:    state.StatusSuccess,
+				Duration:  "1.0s",
+				Message:   "deploy web",
+			}},
+		}
+		stdout := captureConfigExportStdout(t, func() {
+			if err := renderHistoryResult(result); err != nil {
+				t.Fatalf("renderHistoryResult returned error: %v", err)
+			}
+		})
+		if strings.Contains(stdout, "Deployment History") || strings.Contains(stdout, "No deployments found") || strings.Contains(stdout, "To rollback") {
+			t.Fatalf("machine stdout contains human table/prose: %q", stdout)
+		}
+		var decoded engine.HistoryResult
+		if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+			t.Fatalf("stdout is not parseable history JSON: %v\n%s", err, stdout)
+		}
+		if decoded.Kind != engine.KindHistoryResult || len(decoded.Deployments) != 1 || decoded.Deployments[0].ID != "deployment-1234567890" {
+			t.Fatalf("decoded history result = %#v", decoded)
+		}
+	})
 }
 
 func TestHistoryNextStepsReferenceCurrentCommands(t *testing.T) {

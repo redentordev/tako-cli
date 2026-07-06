@@ -94,12 +94,17 @@ service filter, and service rows (`name`, `running`, `desired`, `status`,
 `ports`, `revision`, `warming`, `internal`). `tako logs` returns a
 `LogsResult` document with project, environment, service, tail/follow options,
 per-node stream outcomes, timings, and `error` when any node stream failed.
-`tako config export` and `tako config pull` return a `ConfigExportResult`
-document with project/environment, source node, target nodes, present state
-documents, generated server entries, warnings, password-redaction status,
-`outputPath` when a file was written, the materialized `config` object, and
-`yaml` when no file was written. The Go definitions in `pkg/engine`
-(`types.go` and per-command files) are the source of truth.
+`tako history --output json` returns a `HistoryResult` document with
+project/environment, requested server/status/limit filters, the source server
+selected from the mesh, and deployment rows (`id`, `displayId`, `commit`,
+`timestamp`, `version`, `status`, `durationSeconds`, `duration`, `message`,
+`error`). `tako config export` and `tako config pull` return a
+`ConfigExportResult` document with project/environment, source node, target
+nodes, present state documents, generated server entries, warnings,
+password-redaction status, `outputPath` when a file was written, the
+materialized `config` object, and `yaml` when no file was written. The Go
+definitions in `pkg/engine` (`types.go` and per-command files) are the source
+of truth.
 
 ## Config Export / Pull
 
@@ -203,4 +208,8 @@ tail -n 1 events.ndjson | jq '.data.result.status'
 # 4. Query current service status without human table output on stdout
 tako ps --output json > status.json
 jq '.services[] | {name, running, desired, status}' status.json
+
+# 5. Query deployment history without human table output on stdout
+tako history --output json > history.json
+jq '.deployments[] | {id, status, timestamp}' history.json
 ```
