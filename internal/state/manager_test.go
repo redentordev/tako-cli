@@ -67,6 +67,48 @@ func TestStateManagerWithRequestTimeoutUsesCustomDeadline(t *testing.T) {
 	}
 }
 
+func TestStateManagerLoadHistoryContextPassesCanceledContext(t *testing.T) {
+	client := &fakeStateManagerExecutor{returnContextErr: true}
+	manager := &StateManager{
+		client:      client,
+		socket:      "/run/tako/takod.sock",
+		projectName: "demo",
+		environment: "production",
+		server:      "node-a",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := manager.LoadHistoryContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if !errors.Is(client.contextErr, context.Canceled) {
+		t.Fatalf("executor ctx err = %v, want context.Canceled", client.contextErr)
+	}
+}
+
+func TestStateManagerReadLeaseContextPassesCanceledContext(t *testing.T) {
+	client := &fakeStateManagerExecutor{returnContextErr: true}
+	manager := &StateManager{
+		client:      client,
+		socket:      "/run/tako/takod.sock",
+		projectName: "demo",
+		environment: "production",
+		server:      "node-a",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := manager.ReadLeaseContext(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if !errors.Is(client.contextErr, context.Canceled) {
+		t.Fatalf("executor ctx err = %v, want context.Canceled", client.contextErr)
+	}
+}
+
 func TestReleaseLeaseUsesShortCleanupDeadline(t *testing.T) {
 	client := &fakeStateManagerExecutor{
 		output: `{"released":true}`,
@@ -109,25 +151,35 @@ func TestPruneAndSortDeploymentsDropsNilSortsAndLimits(t *testing.T) {
 }
 
 type fakeStateManagerExecutor struct {
-	output    string
-	startedAt time.Time
-	deadline  time.Time
+	output           string
+	startedAt        time.Time
+	deadline         time.Time
+	contextErr       error
+	returnContextErr bool
 }
 
 func (f *fakeStateManagerExecutor) ExecuteWithContext(ctx context.Context, cmd string) (string, error) {
-	f.startedAt = time.Now()
-	if deadline, ok := ctx.Deadline(); ok {
-		f.deadline = deadline
+	f.captureContext(ctx)
+	if f.returnContextErr && f.contextErr != nil {
+		return "", f.contextErr
 	}
 	return f.output, nil
 }
 
 func (f *fakeStateManagerExecutor) ExecuteWithInput(ctx context.Context, cmd string, input io.Reader) (string, error) {
+	f.captureContext(ctx)
+	if f.returnContextErr && f.contextErr != nil {
+		return "", f.contextErr
+	}
+	return f.output, nil
+}
+
+func (f *fakeStateManagerExecutor) captureContext(ctx context.Context) {
 	f.startedAt = time.Now()
 	if deadline, ok := ctx.Deadline(); ok {
 		f.deadline = deadline
 	}
-	return f.output, nil
+	f.contextErr = ctx.Err()
 }
 
 func (f *fakeStateManagerExecutor) deadlineWithin(want time.Duration) bool {

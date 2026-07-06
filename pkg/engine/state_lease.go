@@ -164,7 +164,7 @@ func (e *Engine) ReleaseStateLease(ctx context.Context, req StateLeaseReleaseReq
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	released, releaseErr := ReleaseStateLeaseByID(leaseResult.Nodes, req.ID, req.Force, now)
+	released, releaseErr := ReleaseStateLeaseByIDContext(ctx, leaseResult.Nodes, req.ID, req.Force, now)
 	result := &StateLeaseReleaseResult{
 		APIVersion:    takoapi.APIVersionCurrent,
 		Kind:          KindStateLeaseReleaseResult,
@@ -274,7 +274,7 @@ func CollectStateLeaseNodes(ctx context.Context, pool *ssh.Pool, cfg *config.Con
 
 			manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, TakodSocketFromConfig(cfg))
 			node.Manager = manager
-			node.Lease, node.Err = manager.ReadLease()
+			node.Lease, node.Err = manager.ReadLeaseContext(ctx)
 			if node.Err == nil {
 				node.Err = ctx.Err()
 			}
@@ -297,6 +297,14 @@ func CollectStateLeaseNodes(ctx context.Context, pool *ssh.Pool, cfg *config.Con
 
 // ReleaseStateLeaseByID releases a matching lease ID from already-collected nodes.
 func ReleaseStateLeaseByID(nodes []StateLeaseNodeResult, leaseID string, force bool, now time.Time) ([]string, error) {
+	return ReleaseStateLeaseByIDContext(context.Background(), nodes, leaseID, force, now)
+}
+
+// ReleaseStateLeaseByIDContext releases a matching lease ID from already-collected nodes bounded by ctx.
+func ReleaseStateLeaseByIDContext(ctx context.Context, nodes []StateLeaseNodeResult, leaseID string, force bool, now time.Time) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	leaseID = strings.TrimSpace(leaseID)
 	if leaseID == "" {
 		return nil, fmt.Errorf("--id is required")
@@ -307,6 +315,9 @@ func ReleaseStateLeaseByID(nodes []StateLeaseNodeResult, leaseID string, force b
 	var nodeErrors []string
 	found := false
 	for _, node := range nodes {
+		if err := ctx.Err(); err != nil {
+			return released, err
+		}
 		if node.Err != nil {
 			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", node.Name, node.Err))
 			continue
@@ -323,7 +334,12 @@ func ReleaseStateLeaseByID(nodes []StateLeaseNodeResult, leaseID string, force b
 			releaseErrors = append(releaseErrors, fmt.Sprintf("%s: lease has not expired yet; use --force to release it", node.Name))
 			continue
 		}
-		if err := node.Manager.ReleaseLease(node.Lease); err != nil {
+		if contextManager, ok := node.Manager.(RemoteLeaseContextManager); ok {
+			if err := contextManager.ReleaseLeaseContext(ctx, node.Lease); err != nil {
+				releaseErrors = append(releaseErrors, fmt.Sprintf("%s: %v", node.Name, err))
+				continue
+			}
+		} else if err := node.Manager.ReleaseLease(node.Lease); err != nil {
 			releaseErrors = append(releaseErrors, fmt.Sprintf("%s: %v", node.Name, err))
 			continue
 		}

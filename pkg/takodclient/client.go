@@ -30,10 +30,21 @@ type StreamExecutor interface {
 }
 
 func RequestJSON(client RequestExecutor, socket string, method string, endpoint string, value any) (string, error) {
-	return RequestJSONWithTimeout(client, socket, method, endpoint, value, JSONRequestTimeout)
+	return RequestJSONWithContext(context.Background(), client, socket, method, endpoint, value)
+}
+
+func RequestJSONWithContext(ctx context.Context, client RequestExecutor, socket string, method string, endpoint string, value any) (string, error) {
+	return RequestJSONWithTimeoutContext(ctx, client, socket, method, endpoint, value, JSONRequestTimeout)
 }
 
 func RequestJSONWithTimeout(client RequestExecutor, socket string, method string, endpoint string, value any, timeout time.Duration) (string, error) {
+	return RequestJSONWithTimeoutContext(context.Background(), client, socket, method, endpoint, value, timeout)
+}
+
+func RequestJSONWithTimeoutContext(ctx context.Context, client RequestExecutor, socket string, method string, endpoint string, value any, timeout time.Duration) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if socket == "" {
 		socket = DefaultSocket
 	}
@@ -59,7 +70,7 @@ func RequestJSONWithTimeout(client RequestExecutor, socket string, method string
 	if timeout <= 0 {
 		timeout = JSONRequestTimeout
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var output string

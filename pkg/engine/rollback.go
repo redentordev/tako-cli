@@ -270,7 +270,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	rollbackDuration := time.Since(startTime)
 
 	rollbackDeployment := BuildRollbackDeployment(cfg, envName, server.Host, startTime, rollbackDuration, targetDeployment, req.Service, serviceState, e.cliVersion, e.cliCommit)
-	if err := stateManager.SaveDeployment(rollbackDeployment); err != nil {
+	if err := stateManager.SaveDeploymentContext(ctx, rollbackDeployment); err != nil {
 		return nil, RollbackRemoteHistoryError(err)
 	}
 
@@ -325,7 +325,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	// Replicate updated state to mesh nodes.
 	if cfg.IsMultiServer() {
 		replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
-		history, err := stateManager.LoadHistory()
+		history, err := stateManager.LoadHistoryContext(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("rollback succeeded but failed to load remote deployment history for replication: %w", err)
 		}

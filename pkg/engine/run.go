@@ -243,7 +243,7 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 	}
 
 	recordFailure := func(deployErr error) (*DeployResult, error) {
-		if recordErr := RecordFailedDeploymentState(stateManager, nil, deployment, cfg, envName, serverNames, nil, startTime, deployErr); recordErr != nil {
+		if recordErr := RecordFailedDeploymentStateContext(ctx, stateManager, nil, deployment, cfg, envName, serverNames, nil, startTime, deployErr); recordErr != nil {
 			e.emit(events.Event{
 				Type:    events.TypeWarning,
 				Phase:   events.PhaseState,
@@ -318,7 +318,7 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 	} else {
 		deployment.Message = "deployed image"
 	}
-	if err := stateManager.SaveDeployment(deployment); err != nil {
+	if err := stateManager.SaveDeploymentContext(ctx, deployment); err != nil {
 		return nil, RemoteHistoryError(err)
 	}
 

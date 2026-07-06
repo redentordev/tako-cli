@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -18,6 +19,11 @@ import (
 // RemoteDeploymentSaver persists deployment records to remote state.
 type RemoteDeploymentSaver interface {
 	SaveDeployment(*remotestate.DeploymentState) error
+}
+
+// RemoteDeploymentContextSaver persists deployment records to remote state with cancellation.
+type RemoteDeploymentContextSaver interface {
+	SaveDeploymentContext(context.Context, *remotestate.DeploymentState) error
 }
 
 // LocalDeploymentSaver persists deployment records to local .tako state.
@@ -104,6 +110,26 @@ func RecordFailedDeploymentState(
 	startTime time.Time,
 	deploymentErr error,
 ) error {
+	return RecordFailedDeploymentStateContext(context.Background(), remoteSaver, localSaver, deployment, cfg, envName, serverNames, commitInfo, startTime, deploymentErr)
+}
+
+// RecordFailedDeploymentStateContext marks a deployment failed and persists it to
+// remote (and optionally local) state bounded by ctx for remote writes.
+func RecordFailedDeploymentStateContext(
+	ctx context.Context,
+	remoteSaver RemoteDeploymentSaver,
+	localSaver LocalDeploymentSaver,
+	deployment *remotestate.DeploymentState,
+	cfg *config.Config,
+	envName string,
+	serverNames []string,
+	commitInfo *git.CommitInfo,
+	startTime time.Time,
+	deploymentErr error,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if deployment == nil {
 		return fmt.Errorf("deployment state is nil")
 	}
@@ -118,7 +144,11 @@ func RecordFailedDeploymentState(
 	if remoteSaver == nil {
 		return fmt.Errorf("remote deployment recorder is nil")
 	}
-	if err := remoteSaver.SaveDeployment(deployment); err != nil {
+	if contextSaver, ok := remoteSaver.(RemoteDeploymentContextSaver); ok {
+		if err := contextSaver.SaveDeploymentContext(ctx, deployment); err != nil {
+			return fmt.Errorf("failed to save failed remote deployment state: %w", err)
+		}
+	} else if err := remoteSaver.SaveDeployment(deployment); err != nil {
 		return fmt.Errorf("failed to save failed remote deployment state: %w", err)
 	}
 

@@ -237,12 +237,12 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 
 	stateManager := remotestate.NewStateManagerWithSocket(sourceClient, cfg.Project.Name, envName, sourceServer.Host, TakodSocketFromConfig(cfg))
 	promoteDeployment := buildPromoteDeployment(cfg, envName, sourceServer.Host, serviceName, service, postActualState[serviceName], startTime, time.Since(startTime), e.cliVersion, e.cliCommit)
-	if err := stateManager.SaveDeployment(promoteDeployment); err != nil {
+	if err := stateManager.SaveDeploymentContext(ctx, promoteDeployment); err != nil {
 		return nil, fmt.Errorf("promotion succeeded but failed to save deployment history: %w", err)
 	}
 	if cfg.IsMultiServer() {
 		replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
-		history, err := stateManager.LoadHistory()
+		history, err := stateManager.LoadHistoryContext(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("promotion succeeded but failed to load remote deployment history for replication: %w", err)
 		}

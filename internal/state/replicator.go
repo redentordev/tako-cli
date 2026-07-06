@@ -143,11 +143,11 @@ func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string
 	}
 
 	manager := NewStateManagerWithSocket(client, r.projectName, r.environment, server.Host, r.socket)
-	if err := manager.SaveDeployment(deploymentCopy); err != nil {
+	if err := manager.SaveDeploymentContext(ctx, deploymentCopy); err != nil {
 		return fmt.Errorf("deployment: %w", err)
 	}
 	if historyCopy != nil {
-		if err := manager.SaveHistory(historyCopy); err != nil {
+		if err := manager.SaveHistoryContext(ctx, historyCopy); err != nil {
 			return fmt.Errorf("history: %w", err)
 		}
 	}

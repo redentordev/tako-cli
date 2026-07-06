@@ -64,6 +64,14 @@ func (s *StateManager) Initialize() error {
 
 // SaveDeployment saves a deployment state with retry logic.
 func (s *StateManager) SaveDeployment(deployment *DeploymentState) error {
+	return s.SaveDeploymentContext(context.Background(), deployment)
+}
+
+// SaveDeploymentContext saves a deployment state with retry logic bounded by ctx.
+func (s *StateManager) SaveDeploymentContext(ctx context.Context, deployment *DeploymentState) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if deployment.ID == "" {
 		deployment.ID = s.generateDeploymentID()
 	}
@@ -71,9 +79,8 @@ func (s *StateManager) SaveDeployment(deployment *DeploymentState) error {
 	deployment.Environment = s.environment
 	deployment.Host = s.server
 
-	ctx := context.Background()
 	return resilience.RetryWithBackoff(ctx, func() error {
-		return s.saveDeploymentOnce(deployment)
+		return s.saveDeploymentOnceContext(ctx, deployment)
 	},
 		resilience.WithMaxElapsed(30*time.Second),
 		resilience.WithMaxRetries(3),
@@ -81,10 +88,14 @@ func (s *StateManager) SaveDeployment(deployment *DeploymentState) error {
 }
 
 func (s *StateManager) saveDeploymentOnce(deployment *DeploymentState) error {
-	if err := s.writeDocument("deployment", deployment.ID, deployment); err != nil {
+	return s.saveDeploymentOnceContext(context.Background(), deployment)
+}
+
+func (s *StateManager) saveDeploymentOnceContext(ctx context.Context, deployment *DeploymentState) error {
+	if err := s.writeDocumentContext(ctx, "deployment", deployment.ID, deployment); err != nil {
 		return fmt.Errorf("failed to write deployment state: %w", err)
 	}
-	return s.updateHistory(deployment)
+	return s.updateHistoryContext(ctx, deployment)
 }
 
 // GetDeployment retrieves a specific deployment by ID.
@@ -208,7 +219,11 @@ func (s *StateManager) generateDeploymentID() string {
 }
 
 func (s *StateManager) updateHistory(deployment *DeploymentState) error {
-	history, err := s.loadHistory()
+	return s.updateHistoryContext(context.Background(), deployment)
+}
+
+func (s *StateManager) updateHistoryContext(ctx context.Context, deployment *DeploymentState) error {
+	history, err := s.loadHistoryContext(ctx)
 	if errors.Is(err, ErrNotFound) {
 		history = &DeploymentHistory{
 			ProjectName: s.projectName,
@@ -237,7 +252,7 @@ func (s *StateManager) updateHistory(deployment *DeploymentState) error {
 	history.Environment = s.environment
 	history.Server = s.server
 	history.LastUpdated = time.Now().UTC()
-	return s.SaveHistory(history)
+	return s.SaveHistoryContext(ctx, history)
 }
 
 func pruneAndSortDeployments(deployments []*DeploymentState, limit int) []*DeploymentState {
@@ -258,12 +273,21 @@ func pruneAndSortDeployments(deployments []*DeploymentState, limit int) []*Deplo
 
 // LoadHistory returns the deployment history from takod state.
 func (s *StateManager) LoadHistory() (*DeploymentHistory, error) {
-	return s.loadHistory()
+	return s.LoadHistoryContext(context.Background())
+}
+
+// LoadHistoryContext returns the deployment history from takod state bounded by ctx.
+func (s *StateManager) LoadHistoryContext(ctx context.Context) (*DeploymentHistory, error) {
+	return s.loadHistoryContext(ctx)
 }
 
 func (s *StateManager) loadHistory() (*DeploymentHistory, error) {
+	return s.loadHistoryContext(context.Background())
+}
+
+func (s *StateManager) loadHistoryContext(ctx context.Context) (*DeploymentHistory, error) {
 	var history DeploymentHistory
-	if err := s.readDocument("history", "", &history); err != nil {
+	if err := s.readDocumentContext(ctx, "history", "", &history); err != nil {
 		return nil, err
 	}
 	return &history, nil
@@ -271,6 +295,11 @@ func (s *StateManager) loadHistory() (*DeploymentHistory, error) {
 
 // SaveHistory writes a full deployment history document through takod.
 func (s *StateManager) SaveHistory(history *DeploymentHistory) error {
+	return s.SaveHistoryContext(context.Background(), history)
+}
+
+// SaveHistoryContext writes a full deployment history document through takod bounded by ctx.
+func (s *StateManager) SaveHistoryContext(ctx context.Context, history *DeploymentHistory) error {
 	if history == nil {
 		return fmt.Errorf("history is nil")
 	}
@@ -278,10 +307,14 @@ func (s *StateManager) SaveHistory(history *DeploymentHistory) error {
 	history.Environment = s.environment
 	history.Server = s.server
 	history.LastUpdated = time.Now().UTC()
-	return s.writeDocument("history", "", history)
+	return s.writeDocumentContext(ctx, "history", "", history)
 }
 
 func (s *StateManager) writeDocument(document string, revisionID string, value any) error {
+	return s.writeDocumentContext(context.Background(), document, revisionID, value)
+}
+
+func (s *StateManager) writeDocumentContext(ctx context.Context, document string, revisionID string, value any) error {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
@@ -294,12 +327,16 @@ func (s *StateManager) writeDocument(document string, revisionID string, value a
 		RevisionID:  revisionID,
 		Content:     string(data),
 	}
-	_, err = s.requestJSON("PUT", "/v1/state", request)
+	_, err = s.requestJSONContext(ctx, "PUT", "/v1/state", request)
 	return err
 }
 
 func (s *StateManager) readDocument(document string, revisionID string, value any) error {
-	content, err := s.readRawDocument(document, revisionID)
+	return s.readDocumentContext(context.Background(), document, revisionID, value)
+}
+
+func (s *StateManager) readDocumentContext(ctx context.Context, document string, revisionID string, value any) error {
+	content, err := s.readRawDocumentContext(ctx, document, revisionID)
 	if err != nil {
 		return err
 	}
@@ -310,8 +347,12 @@ func (s *StateManager) readDocument(document string, revisionID string, value an
 }
 
 func (s *StateManager) readRawDocument(document string, revisionID string) (string, error) {
+	return s.readRawDocumentContext(context.Background(), document, revisionID)
+}
+
+func (s *StateManager) readRawDocumentContext(ctx context.Context, document string, revisionID string) (string, error) {
 	endpoint := takodclient.StateRevisionEndpoint(s.projectName, s.environment, document, revisionID)
-	output, err := s.requestJSON("GET", endpoint, nil)
+	output, err := s.requestJSONContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return "", err
 	}
@@ -319,17 +360,25 @@ func (s *StateManager) readRawDocument(document string, revisionID string) (stri
 }
 
 func (s *StateManager) requestJSON(method string, endpoint string, value any) (string, error) {
+	return s.requestJSONContext(context.Background(), method, endpoint, value)
+}
+
+func (s *StateManager) requestJSONContext(ctx context.Context, method string, endpoint string, value any) (string, error) {
 	if s.requestTimeout > 0 {
-		return takodclient.RequestJSONWithTimeout(s.client, s.socket, method, endpoint, value, s.requestTimeout)
+		return takodclient.RequestJSONWithTimeoutContext(ctx, s.client, s.socket, method, endpoint, value, s.requestTimeout)
 	}
-	return takodclient.RequestJSON(s.client, s.socket, method, endpoint, value)
+	return takodclient.RequestJSONWithContext(ctx, s.client, s.socket, method, endpoint, value)
 }
 
 func (s *StateManager) requestJSONWithTimeout(method string, endpoint string, value any, timeout time.Duration) (string, error) {
+	return s.requestJSONWithTimeoutContext(context.Background(), method, endpoint, value, timeout)
+}
+
+func (s *StateManager) requestJSONWithTimeoutContext(ctx context.Context, method string, endpoint string, value any, timeout time.Duration) (string, error) {
 	if timeout <= 0 {
-		return s.requestJSON(method, endpoint, value)
+		return s.requestJSONContext(ctx, method, endpoint, value)
 	}
-	return takodclient.RequestJSONWithTimeout(s.client, s.socket, method, endpoint, value, timeout)
+	return takodclient.RequestJSONWithTimeoutContext(ctx, s.client, s.socket, method, endpoint, value, timeout)
 }
 
 func decodeStateDocumentContent(output string, document string) (string, error) {

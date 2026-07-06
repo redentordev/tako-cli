@@ -52,10 +52,11 @@ commands in `cmd/` are thin adapters over this package.
   `ReleaseStateLease` force-releases only the exact requested lease ID on
   selected nodes, refuses active leases unless `Force` is true, and returns a
   `StateLeaseReleaseResult` with released nodes and per-node lease/error data.
-- Mutation contexts are cancellation-aware for local checks, remote lease fan-out,
-  and deployment-history replication. Remote SSH commands are not all
-  interruptible yet, but leases acquired after cancellation are best-effort
-  released and cancellation classifies as `cancelled`.
+- Mutation contexts are cancellation-aware for local checks, takod JSON
+  state/lease requests, remote lease fan-out, and deployment-history
+  replication. Remote SSH commands are not all interruptible yet, but leases
+  acquired after cancellation are best-effort released and cancellation
+  classifies as `cancelled`.
 - Errors are classified for exit-code mapping via `engine.Classify`:
   invalid request, locked/leased, connectivity, cancelled, attention.
 - Every emitted event passes through a secrets redactor; operations

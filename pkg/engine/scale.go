@@ -346,13 +346,13 @@ func (e *Engine) recordScaleDeploymentState(
 	verbose bool,
 ) error {
 	stateManager := remotestate.NewStateManagerWithSocket(sourceClient, cfg.Project.Name, envName, deployment.Host, TakodSocketFromConfig(cfg))
-	if err := stateManager.SaveDeployment(deployment); err != nil {
+	if err := stateManager.SaveDeploymentContext(ctx, deployment); err != nil {
 		return fmt.Errorf("failed to save remote scale history: %w", err)
 	}
 
 	if len(serverNames) > 1 {
 		replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
-		history, err := stateManager.LoadHistory()
+		history, err := stateManager.LoadHistoryContext(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to load scale history for replication: %w", err)
 		}

@@ -17,6 +17,11 @@ type RemoteLeaseManager interface {
 	ReleaseLease(*remotestate.LeaseInfo) error
 }
 
+// RemoteLeaseContextManager releases remote operation leases with cancellation.
+type RemoteLeaseContextManager interface {
+	ReleaseLeaseContext(context.Context, *remotestate.LeaseInfo) error
+}
+
 // RemoteLease is one acquired lease on one node.
 type RemoteLease struct {
 	ServerName string
@@ -82,7 +87,7 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 		}
 
 		manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, TakodSocketFromConfig(cfg))
-		lease, err := manager.AcquireLease(operation, envName, remotestate.DefaultLeaseTTL)
+		lease, err := manager.AcquireLeaseContext(ctx, operation, envName, remotestate.DefaultLeaseTTL)
 		if err != nil {
 			return RemoteLease{}, &LockedError{
 				Operation: operation,
@@ -90,7 +95,7 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 			}
 		}
 		if err := ctx.Err(); err != nil {
-			_ = manager.ReleaseLease(lease)
+			_ = manager.ReleaseLeaseContext(context.Background(), lease)
 			return RemoteLease{}, err
 		}
 
@@ -256,10 +261,17 @@ func cleanupLeaseResults(operation string, resultCh <-chan remoteLeaseResult, wg
 }
 
 func releaseRemoteLease(operation string, lease RemoteLease) {
+	_ = releaseRemoteLeaseErr(lease)
+}
+
+func releaseRemoteLeaseErr(lease RemoteLease) error {
 	if lease.Manager == nil || lease.Lease == nil {
-		return
+		return nil
 	}
-	_ = lease.Manager.ReleaseLease(lease.Lease)
+	if contextManager, ok := lease.Manager.(RemoteLeaseContextManager); ok {
+		return contextManager.ReleaseLeaseContext(context.Background(), lease.Lease)
+	}
+	return lease.Manager.ReleaseLease(lease.Lease)
 }
 
 // Release releases held leases in reverse order. Failures route to the
@@ -273,7 +285,7 @@ func (s *RemoteLeaseSet) Release() {
 		if lease.Manager == nil || lease.Lease == nil {
 			continue
 		}
-		if err := lease.Manager.ReleaseLease(lease.Lease); err != nil && s.warn != nil {
+		if err := releaseRemoteLeaseErr(lease); err != nil && s.warn != nil {
 			s.warn(fmt.Sprintf("Warning: failed to release remote %s lease on %s: %v\n", s.operation, lease.ServerName, err))
 		}
 	}

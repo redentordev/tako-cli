@@ -684,7 +684,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			deployment.Message = fmt.Sprintf("warmed %s for manual promotion", strings.Join(manualPending, ", "))
 		}
 		deployment.Duration = time.Since(startTime)
-		if err := s.stateManager.SaveDeployment(deployment); err != nil {
+		if err := s.stateManager.SaveDeploymentContext(ctx, deployment); err != nil {
 			return nil, RemoteHistoryError(err)
 		}
 
@@ -727,7 +727,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		// Replicate state to the rest of the mesh.
 		if len(s.servers) > 1 {
 			replicator := remotestate.NewStateReplicator(s.sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
-			history, err := s.stateManager.LoadHistory()
+			history, err := s.stateManager.LoadHistoryContext(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("deployment succeeded but failed to load remote deployment history for replication: %w", err)
 			}
@@ -761,10 +761,10 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	result.Duration = deploymentDuration.Seconds()
 
 	if deploymentFailed {
-		recordErr := RecordFailedDeploymentState(s.stateManager, localSaverOrNil(s.localStateMgr), deployment, cfg, envName, serverNames, s.sourceInfo.CommitInfo, startTime, deploymentError)
+		recordErr := RecordFailedDeploymentStateContext(ctx, s.stateManager, localSaverOrNil(s.localStateMgr), deployment, cfg, envName, serverNames, s.sourceInfo.CommitInfo, startTime, deploymentError)
 		if recordErr == nil && len(s.servers) > 1 {
 			replicator := remotestate.NewStateReplicator(s.sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
-			history, err := s.stateManager.LoadHistory()
+			history, err := s.stateManager.LoadHistoryContext(ctx)
 			if err != nil {
 				recordErr = fmt.Errorf("failed to load failed deployment history for replication: %w", err)
 			} else if err := replicator.ReplicateDeploymentContext(ctx, deployment, history); err != nil {

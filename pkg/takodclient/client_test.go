@@ -2,6 +2,7 @@ package takodclient
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -78,6 +79,38 @@ func TestRequestJSONWithTimeoutUsesCustomDeadline(t *testing.T) {
 	}
 	if !client.deadlineWithin(timeout) {
 		t.Fatalf("deadline = %s, want near %s", client.deadline.Sub(client.startedAt), timeout)
+	}
+}
+
+func TestRequestJSONWithContextPassesCanceledContext(t *testing.T) {
+	client := &fakeTakodExecutor{returnContextErr: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := RequestJSONWithContext(ctx, client, DefaultSocket, "GET", "/v1/health", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if client.contextCalls != 1 {
+		t.Fatalf("ExecuteWithContext calls = %d, want 1", client.contextCalls)
+	}
+	if !errors.Is(client.contextErr, context.Canceled) {
+		t.Fatalf("executor ctx err = %v, want context.Canceled", client.contextErr)
+	}
+}
+
+func TestRequestJSONWithTimeoutLegacyWrapperStillWorks(t *testing.T) {
+	client := &fakeTakodExecutor{}
+
+	output, err := RequestJSONWithTimeout(client, DefaultSocket, "GET", "/v1/health", nil, time.Second)
+	if err != nil {
+		t.Fatalf("RequestJSONWithTimeout returned error: %v", err)
+	}
+	if output != "ok" {
+		t.Fatalf("output = %q, want ok", output)
+	}
+	if client.contextErr != nil {
+		t.Fatalf("legacy wrapper ctx err = %v, want nil", client.contextErr)
 	}
 }
 
@@ -264,13 +297,15 @@ func TestAccessLogsEndpointWithFollow(t *testing.T) {
 }
 
 type fakeTakodExecutor struct {
-	contextCalls int
-	inputCalls   int
-	deadline     time.Time
-	startedAt    time.Time
-	body         string
-	output       string
-	err          error
+	contextCalls     int
+	inputCalls       int
+	deadline         time.Time
+	startedAt        time.Time
+	body             string
+	output           string
+	err              error
+	contextErr       error
+	returnContextErr bool
 }
 
 func (f *fakeTakodExecutor) ExecuteWithContext(ctx context.Context, _ string) (string, error) {
@@ -297,9 +332,13 @@ func (f *fakeTakodExecutor) ExecuteStream(_ string, _ io.Writer, _ io.Writer) er
 func (f *fakeTakodExecutor) captureDeadline(ctx context.Context) {
 	f.startedAt = time.Now()
 	f.deadline, _ = ctx.Deadline()
+	f.contextErr = ctx.Err()
 }
 
 func (f *fakeTakodExecutor) response() (string, error) {
+	if f.returnContextErr && f.contextErr != nil {
+		return "", f.contextErr
+	}
 	if f.output != "" || f.err != nil {
 		return f.output, f.err
 	}
