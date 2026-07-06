@@ -15,10 +15,19 @@ through SSH and takod's Unix socket, then materialize that Tako state into a
 valid tako.yaml. This reads Tako-managed replicated state; it does not discover
 arbitrary non-Tako containers.
 
+.PP
+Use --file/-o to write the generated YAML/JSON config to a file. The deprecated
+local --output FILE form is still accepted for file paths, while --output text
+and --output json select the global machine-output format for compatibility.
+
 
 .SH OPTIONS
 \fB--environment\fP="production"
 	Environment name to read from takod state
+
+.PP
+\fB-o\fP, \fB--file\fP=""
+	Write generated config to this file instead of stdout
 
 .PP
 \fB-h\fP, \fB--help\fP[=false]
@@ -29,8 +38,8 @@ arbitrary non-Tako containers.
 	Skip validation of the generated config
 
 .PP
-\fB-o\fP, \fB--output\fP=""
-	Write generated config to this file instead of stdout
+\fB--output\fP=""
+	Legacy config file path; use --file/-o. Values text/json select machine output format
 
 .PP
 \fB--password\fP=""

@@ -90,9 +90,35 @@ Mutation commands return versioned result documents (for example
 (`deployed`, `warmed`, `removed`, `up_to_date`, `failed`), URLs, timings,
 `planHash`, and `error` when failed. `tako logs` returns a `LogsResult`
 document with project, environment, service, tail/follow options, per-node
-stream outcomes, timings, and `error` when any node stream failed. The Go
-definitions in `pkg/engine` (`types.go` and per-command files) are the
-source of truth.
+stream outcomes, timings, and `error` when any node stream failed.
+`tako config export` and `tako config pull` return a `ConfigExportResult`
+document with project/environment, source node, target nodes, present state
+documents, generated server entries, warnings, password-redaction status,
+`outputPath` when a file was written, the materialized `config` object, and
+`yaml` when no file was written. The Go definitions in `pkg/engine`
+(`types.go` and per-command files) are the source of truth.
+
+## Config Export / Pull
+
+Use `--file/-o` for the generated config path:
+
+```bash
+tako config pull --project myapp --server prod-1.example.com -o tako.yaml
+```
+
+In machine modes stdout remains parseable. Without `--file`, raw YAML is not
+printed to stdout; it is carried in the result document's `yaml` field:
+
+```bash
+tako config export --project myapp --server prod-1.example.com --output json \
+  > config-export.json
+jq -r '.yaml' config-export.json > tako.yaml
+```
+
+The old command-local `--output FILE` form is accepted for config export/pull
+when `FILE` is not `text` or `json`. Values `--output text` and
+`--output json` select the global output mode for compatibility with the
+machine-output contract.
 
 ## Plan / Approve / Apply
 

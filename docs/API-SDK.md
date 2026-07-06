@@ -27,6 +27,13 @@ commands in `cmd/` are thin adapters over this package.
   `Apply(ctx)` executes and `Close()` releases the local lock, remote
   leases, and SSH connections.
 - Simpler mutations are single calls: `Rollback`, `Promote`, `Scale`.
+- Config materialization is available as `ExportConfig(ctx,
+  ConfigExportRequest)`, which reads desired/actual/history state through the
+  private takod state client and returns a `ConfigExportResult` containing the
+  generated `config`, warnings, source/target node details, redaction status,
+  and YAML text. The engine does not write files, infer the current user, or
+  expand `~` paths; adapters persist the config and supply explicit connection
+  fields themselves (the CLI uses `tako config export --file/-o`).
 - Log streaming is available as `StreamLogs(ctx, LogsRequest)`, which emits
   `log.line` events carrying service/node/raw-line data and returns a
   `LogsResult` summary when the stream completes.
@@ -38,6 +45,25 @@ commands in `cmd/` are thin adapters over this package.
   invalid request, locked/leased, connectivity, cancelled, attention.
 - Every emitted event passes through a secrets redactor; operations
   register service env values and SSH passwords before emitting.
+
+#### Config export example
+
+```go
+eng := engine.New(engine.Options{})
+result, err := eng.ExportConfig(ctx, engine.ConfigExportRequest{
+    Project:     "myapp",
+    Environment: "production",
+    Server:      "prod-1.example.com",
+    User:        "deploy",
+    SSHPort:     22,
+    SSHKey:      "/home/deploy/.ssh/id_rsa", // callers expand ~ before passing
+})
+if err != nil {
+    return err
+}
+_ = result.Config // *config.Config for SDK callers
+_ = result.YAML   // exact YAML text when callers want to write tako.yaml
+```
 
 ### `pkg/takoapi/events`
 
