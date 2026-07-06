@@ -1016,68 +1016,83 @@ func runStateRepair(cmd *cobra.Command, args []string) error {
 	}
 
 	envName := getEnvironmentName(cfg)
-	fmt.Printf("Project: %s\n", cfg.Project.Name)
-	fmt.Printf("Environment: %s\n\n", envName)
+	if !machineOutputEnabled() {
+		fmt.Printf("Project: %s\n", cfg.Project.Name)
+		fmt.Printf("Environment: %s\n\n", envName)
+	}
 
 	pool := ssh.NewPool()
 	defer pool.CloseAll()
 
-	repair, err := collectStateRepairNodesWithPool(pool, cfg, envName, stateServer)
+	repair, err := collectStateRepairNodesForCommand(pool, cfg, envName, stateServer)
 	if err != nil {
 		return err
 	}
 
-	if len(repair.nodes) == 0 {
-		return fmt.Errorf("no reachable environment nodes found")
+	ctx := context.Background()
+	if cmd != nil {
+		ctx = cmd.Context()
 	}
 
-	bestHistory, hasHistory := bestDeploymentHistory(repair.histories)
-	bestDesired, hasDesired := bestDesiredRevision(repair.desired)
-	bestActual, hasActual := bestActualSnapshot(repair.actual)
-	bestNodeActual := bestNodeActualSnapshots(repair.nodeActual)
-	hasNodeActual := len(bestNodeActual) > 0
-	if hasActual && hasNodeActual {
-		bestActual.actual = actualSnapshotWithNodeSnapshots(bestActual.actual, bestNodeActual)
-	} else if !hasActual && hasNodeActual {
-		bestActual = stateActualCandidate{
-			source: "node actual snapshots",
-			actual: aggregateActualSnapshotFromNodeSnapshots(cfg.Project.Name, envName, bestNodeActual),
+	var repairLeases []stateRepairLease
+	result, repairErr := cliEngine().StateRepair(ctx, engine.StateRepairRequest{
+		Config:      cfg,
+		Environment: envName,
+		Server:      stateServer,
+		Nodes:       engineStateRepairNodes(repair.nodes),
+		Histories:   engineStateRepairHistories(repair.histories),
+		Desired:     engineStateRepairDesired(repair.desired),
+		Actual:      engineStateRepairActual(repair.actual),
+		NodeActual:  engineStateRepairNodeActual(repair.nodeActual),
+		BeforeWrite: func(ctx context.Context, result *engine.StateRepairResult) error {
+			if !machineOutputEnabled() {
+				renderStateRepairSources(result)
+			}
+			leases, err := acquireStateRepairLeasesForCommand(repair.nodes, envName)
+			if err != nil {
+				return err
+			}
+			repairLeases = leases
+			if verbose && !machineOutputEnabled() {
+				fmt.Printf("Acquired state repair leases: %s\n", stateRepairLeaseSummary(repairLeases))
+			}
+			return nil
+		},
+	})
+	if len(repairLeases) > 0 {
+		defer releaseStateRepairLeases(repairLeases, verbose)
+	}
+
+	if result != nil && !machineOutputEnabled() {
+		renderStateRepairWarnings(result)
+	}
+	if repairErr == nil && result != nil && result.Sources.HasHistory {
+		synced, syncErr := syncStateRepairHistoryToLocalForCommand(cfg, envName, result.SelectedHistory)
+		if syncErr != nil {
+			repairErr = syncErr
+			result.Status = engine.StateRepairStatusFailed
+			result.Error = syncErr.Error()
+			result.Local.Status = engine.StateRepairLocalSyncStatusFailed
+			result.Local.Error = syncErr.Error()
+		} else {
+			result.Local.Status = engine.StateRepairLocalSyncStatusSynced
+			result.Local.Count = synced
+			if !machineOutputEnabled() {
+				fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
+			}
 		}
-		hasActual = actualSnapshotRepairable(bestActual.actual)
 	}
-	if !hasHistory && !hasDesired && !hasActual && !hasNodeActual {
-		return fmt.Errorf("no deployment history or runtime state found on reachable nodes")
-	}
-
-	printStateRepairSource(hasHistory, bestHistory, hasDesired, bestDesired, hasActual, bestActual, bestNodeActual)
-
-	repairLeases, err := acquireStateRepairLeases(repair.nodes, envName)
-	if err != nil {
-		return err
-	}
-	defer releaseStateRepairLeases(repairLeases, verbose)
-	if verbose {
-		fmt.Printf("Acquired state repair leases: %s\n", stateRepairLeaseSummary(repairLeases))
-	}
-
-	historyWritten, desiredWritten, actualWritten, nodeActualWritten, err := writeStateRepairDocuments(repair.nodes, bestHistory, hasHistory, bestDesired, hasDesired, bestActual, hasActual, bestNodeActual)
-	if err != nil {
-		return err
-	}
-
-	if hasHistory {
-		localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
-		if err != nil {
-			return fmt.Errorf("remote state repaired, but local state initialization failed: %w", err)
+	if result != nil && machineOutputEnabled() {
+		if emitErr := emitResultDocument(result); emitErr != nil && repairErr == nil {
+			repairErr = emitErr
 		}
-		synced, err := syncRemoteDeploymentsToLocal(localMgr, bestHistory.history.Deployments, envName)
-		if err != nil {
-			return fmt.Errorf("remote state repaired, but local state sync failed: %w", err)
-		}
-		fmt.Printf("Synced %d deployment(s) to local .tako directory\n", synced)
 	}
-
-	printStateRepairWriteSummary(len(repair.nodes), hasHistory, historyWritten, hasDesired, desiredWritten, hasActual, actualWritten, hasNodeActual, nodeActualWritten)
+	if repairErr != nil {
+		return repairErr
+	}
+	if result != nil && !machineOutputEnabled() {
+		renderStateRepairWriteSummary(result)
+	}
 	return nil
 }
 
@@ -1976,6 +1991,10 @@ type stateRepairInventory struct {
 	nodeActual []stateNodeActualCandidate
 }
 
+var collectStateRepairNodesForCommand = collectStateRepairNodesWithPool
+var acquireStateRepairLeasesForCommand = acquireStateRepairLeases
+var syncStateRepairHistoryToLocalForCommand = syncStateRepairHistoryToLocal
+
 type stateHistoryCandidate struct {
 	source  string
 	history *remotestate.DeploymentHistory
@@ -2151,6 +2170,46 @@ func closeStateRepairNodes(nodes []stateRepairNode) {
 	}
 }
 
+func engineStateRepairNodes(nodes []stateRepairNode) []engine.StateRepairNode {
+	out := make([]engine.StateRepairNode, 0, len(nodes))
+	for _, node := range nodes {
+		out = append(out, engine.StateRepairNode{Name: node.name, HistoryManager: node.manager, Runtime: node.runtime})
+	}
+	return out
+}
+
+func engineStateRepairHistories(candidates []stateHistoryCandidate) []engine.StateRepairHistoryCandidate {
+	out := make([]engine.StateRepairHistoryCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, engine.StateRepairHistoryCandidate{Source: candidate.source, History: candidate.history})
+	}
+	return out
+}
+
+func engineStateRepairDesired(candidates []stateDesiredCandidate) []engine.StateRepairDesiredCandidate {
+	out := make([]engine.StateRepairDesiredCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, engine.StateRepairDesiredCandidate{Source: candidate.source, Desired: candidate.desired})
+	}
+	return out
+}
+
+func engineStateRepairActual(candidates []stateActualCandidate) []engine.StateRepairActualCandidate {
+	out := make([]engine.StateRepairActualCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, engine.StateRepairActualCandidate{Source: candidate.source, Actual: candidate.actual})
+	}
+	return out
+}
+
+func engineStateRepairNodeActual(candidates []stateNodeActualCandidate) []engine.StateRepairNodeActualCandidate {
+	out := make([]engine.StateRepairNodeActualCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, engine.StateRepairNodeActualCandidate{Source: candidate.source, Node: candidate.node, Actual: candidate.actual})
+	}
+	return out
+}
+
 func acquireStateRepairLeases(nodes []stateRepairNode, envName string) ([]stateRepairLease, error) {
 	return acquireStateOperationLeases(nodes, envName, "state-repair")
 }
@@ -2284,64 +2343,119 @@ func printStateRepairSource(hasHistory bool, history stateHistoryCandidate, hasD
 	}
 }
 
-func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCandidate, hasHistory bool, desired stateDesiredCandidate, hasDesired bool, actual stateActualCandidate, hasActual bool, nodeActual map[string]stateNodeActualCandidate) (int, int, int, int, error) {
-	historyWritten := 0
-	desiredWritten := 0
-	actualWritten := 0
-	nodeActualWritten := 0
-
-	resultCh := make(chan stateRepairWriteResult, len(nodes))
-	var wg sync.WaitGroup
-	for _, node := range nodes {
-		wg.Add(1)
-		go func(node stateRepairNode) {
-			defer wg.Done()
-			resultCh <- writeStateRepairDocumentsToNode(node, history, hasHistory, desired, hasDesired, actual, hasActual, nodeActual)
-		}(node)
+func renderStateRepairSources(result *engine.StateRepairResult) {
+	if result == nil {
+		return
 	}
-
-	wg.Wait()
-	close(resultCh)
-
-	var warnings []string
-	var fatalErrors []string
-	for result := range resultCh {
-		historyWritten += result.counts.history
-		desiredWritten += result.counts.desired
-		actualWritten += result.counts.actual
-		nodeActualWritten += result.counts.nodeActual
-		warnings = append(warnings, result.warnings...)
-		if result.err != nil {
-			fatalErrors = append(fatalErrors, fmt.Sprintf("%s: %v", result.nodeName, result.err))
+	if history := result.Sources.History; history != nil {
+		fmt.Printf("Deployment history source: %s (%d deployment(s), freshness %s)\n", history.Source, history.Count, history.Freshness.Format(time.RFC3339))
+	}
+	if desired := result.Sources.Desired; desired != nil {
+		fmt.Printf("Desired runtime source: %s (%s, freshness %s)\n", desired.Source, desired.RevisionID, desired.Freshness.Format(time.RFC3339))
+	}
+	if actual := result.Sources.Actual; actual != nil {
+		fmt.Printf("Actual runtime source: %s (%d service(s), freshness %s)\n", actual.Source, actual.ServiceCount, actual.Freshness.Format(time.RFC3339))
+	}
+	if len(result.Sources.NodeActual) > 0 {
+		fmt.Printf("Node actual sources: %d node(s)\n", len(result.Sources.NodeActual))
+		for _, candidate := range result.Sources.NodeActual {
+			fmt.Printf("  %s: %s (%d service(s), freshness %s)\n", candidate.Node, candidate.Source, candidate.ServiceCount, candidate.Freshness.Format(time.RFC3339))
 		}
 	}
+}
 
-	sort.Strings(warnings)
-	for _, warning := range warnings {
+func renderStateRepairWarnings(result *engine.StateRepairResult) {
+	if result == nil || machineOutputEnabled() {
+		return
+	}
+	for _, warning := range result.Warnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
 	}
+}
 
-	if len(fatalErrors) > 0 {
-		sort.Strings(fatalErrors)
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to prepare state repair documents: %s", strings.Join(fatalErrors, "; "))
+func renderStateRepairWriteSummary(result *engine.StateRepairResult) {
+	if result == nil {
+		return
+	}
+	counts := result.Writes.Counts
+	nodeCount := result.Counts.ReachableNodes
+	if result.Sources.HasHistory {
+		fmt.Printf("Repaired deployment history on %d/%d reachable node(s)\n", counts.History, nodeCount)
+	}
+	if result.Sources.HasDesired {
+		fmt.Printf("Repaired desired runtime state on %d/%d reachable node(s)\n", counts.Desired, nodeCount)
+	}
+	if result.Sources.HasActual {
+		fmt.Printf("Repaired actual runtime state on %d/%d reachable node(s)\n", counts.Actual, nodeCount)
+	}
+	if result.Sources.HasNodeActual {
+		fmt.Printf("Repaired node actual runtime state with %d document write(s)\n", counts.NodeActual)
+	}
+}
+
+func renderStateRepairResult(result *engine.StateRepairResult) error {
+	if result == nil {
+		return nil
+	}
+	if machineOutputEnabled() {
+		return emitResultDocument(result)
+	}
+	renderStateRepairSources(result)
+	renderStateRepairWarnings(result)
+	if result.Status == engine.StateRepairStatusSuccess {
+		renderStateRepairWriteSummary(result)
+	}
+	return nil
+}
+
+func writeStateRepairDocuments(nodes []stateRepairNode, history stateHistoryCandidate, hasHistory bool, desired stateDesiredCandidate, hasDesired bool, actual stateActualCandidate, hasActual bool, nodeActual map[string]stateNodeActualCandidate) (int, int, int, int, error) {
+	project, envName := stateRepairDocumentProjectEnvironment(history, hasHistory, desired, hasDesired, actual, hasActual, nodeActual)
+	req := engine.StateRepairRequest{
+		Config:      &config.Config{Project: config.ProjectConfig{Name: project}},
+		Environment: envName,
+		Nodes:       engineStateRepairNodes(nodes),
+	}
+	if hasHistory {
+		req.Histories = []engine.StateRepairHistoryCandidate{{Source: history.source, History: history.history}}
+	}
+	if hasDesired {
+		req.Desired = []engine.StateRepairDesiredCandidate{{Source: desired.source, Desired: desired.desired}}
+	}
+	if hasActual {
+		req.Actual = []engine.StateRepairActualCandidate{{Source: actual.source, Actual: actual.actual}}
+	}
+	for _, nodeName := range sortedStateNodeActualNames(nodeActual) {
+		candidate := nodeActual[nodeName]
+		req.NodeActual = append(req.NodeActual, engine.StateRepairNodeActualCandidate{Source: candidate.source, Node: candidate.node, Actual: candidate.actual})
 	}
 
-	if hasHistory && historyWritten == 0 {
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired deployment history to any reachable node")
+	result, err := cliEngine().StateRepair(context.Background(), req)
+	if result == nil {
+		return 0, 0, 0, 0, err
 	}
-	if hasDesired && desiredWritten == 0 {
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired desired runtime state to any reachable node")
+	for _, warning := range result.Warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
 	}
-	if hasActual && actualWritten == 0 {
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired actual runtime state to any reachable node")
+	counts := result.Writes.Counts
+	return counts.History, counts.Desired, counts.Actual, counts.NodeActual, err
+}
+
+func stateRepairDocumentProjectEnvironment(history stateHistoryCandidate, hasHistory bool, desired stateDesiredCandidate, hasDesired bool, actual stateActualCandidate, hasActual bool, nodeActual map[string]stateNodeActualCandidate) (string, string) {
+	if hasHistory && history.history != nil {
+		return history.history.ProjectName, history.history.Environment
 	}
-	if len(nodeActual) > 0 && nodeActualWritten == 0 {
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("failed to write repaired node actual runtime state to any reachable node")
+	if hasDesired && desired.desired != nil {
+		return desired.desired.Project, desired.desired.Environment
 	}
-	if len(warnings) > 0 {
-		return historyWritten, desiredWritten, actualWritten, nodeActualWritten, fmt.Errorf("state repair incomplete: %s", strings.Join(warnings, "; "))
+	if hasActual && actual.actual != nil {
+		return actual.actual.Project, actual.actual.Environment
 	}
-	return historyWritten, desiredWritten, actualWritten, nodeActualWritten, nil
+	for _, candidate := range nodeActual {
+		if candidate.actual != nil {
+			return candidate.actual.Project, candidate.actual.Environment
+		}
+	}
+	return "", ""
 }
 
 type stateRepairWriteCounts struct {
@@ -2861,6 +2975,22 @@ func boolToHealth(healthy bool) string {
 		return "healthy"
 	}
 	return "unknown"
+}
+
+func syncStateRepairHistoryToLocal(cfg *config.Config, envName string, history *remotestate.DeploymentHistory) (int, error) {
+	localMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
+	if err != nil {
+		return 0, fmt.Errorf("remote state repaired, but local state initialization failed: %w", err)
+	}
+	var deployments []*remotestate.DeploymentState
+	if history != nil {
+		deployments = history.Deployments
+	}
+	synced, err := syncRemoteDeploymentsToLocal(localMgr, deployments, envName)
+	if err != nil {
+		return synced, fmt.Errorf("remote state repaired, but local state sync failed: %w", err)
+	}
+	return synced, nil
 }
 
 func syncRemoteDeploymentsToLocal(localMgr *localstate.Manager, remoteDeployments []*remotestate.DeploymentState, envName string) (int, error) {

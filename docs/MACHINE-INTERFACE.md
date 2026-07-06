@@ -121,8 +121,12 @@ sources, sync recommendations, node counts, unreachable-node guidance, and
 retired node, requested server filter, per-node cleanup outcomes
 (`nodeActualExisted`, `aggregatePruned`, warnings/errors), and a summary of
 reachable nodes, standalone snapshots found, and aggregate actual states
-pruned. The Go definitions in `pkg/engine` (`types.go` and per-command files)
-are the source of truth.
+pruned. `tako state repair --output json` returns a `StateRepairResult` with
+project/environment, requested server filter, reachable node count, selected
+history/desired/actual/node-actual sources, per-node and aggregate write
+counts, warning/error details, local `.tako` sync status/count, and final
+`error` when repair is incomplete or fails. The Go definitions in `pkg/engine`
+(`types.go` and per-command files) are the source of truth.
 
 ## Config Export / Pull
 
@@ -248,4 +252,8 @@ jq '.bestKnown.history.source, .sync.recommendations[]' state-status.json
 # 9. After removing a retired node from tako.yaml, clean replicated runtime state
 tako state forget-node old-node --yes --output json > forget-node.json
 jq '.summary' forget-node.json
+
+# 10. Repair replicated state from the freshest reachable copies without prose
+tako state repair --output json > state-repair.json
+jq '.selectedSources, .writes.counts, .localSync' state-repair.json
 ```

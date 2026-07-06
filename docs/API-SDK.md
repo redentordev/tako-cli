@@ -72,6 +72,15 @@ commands in `cmd/` are thin adapters over this package.
   confirmation/lease handling. The engine validates the request, removes the
   retired node from aggregate actual state, deletes standalone node-actual
   snapshots, appends cleanup events, and returns a `StateForgetNodeResult`.
+- State repair is available as `StateRepair(ctx, StateRepairRequest)`. Adapters
+  collect reachable nodes and source candidates (history, desired, aggregate
+  actual, and node-actual snapshots), provide write-capable managers, and own
+  SSH, lease acquisition, rendering, and local `.tako` sync. The engine selects
+  the freshest repairable sources, optionally calls `BeforeWrite` before remote
+  writes, writes cloned documents to each node, prunes stale node-actual
+  documents, and returns a `StateRepairResult` with selected sources, per-node
+  warnings/errors, aggregate write counts, local-sync fields for adapters to
+  fill, and `error` when repair is incomplete or fails.
 - Mutation contexts are cancellation-aware for local checks, takod JSON
   state/lease requests, remote lease fan-out, and deployment-history
   replication. Remote SSH commands are not all interruptible yet, but leases
@@ -175,6 +184,28 @@ if err != nil {
     return err
 }
 _ = result.Summary.AggregateActualStatesPruned
+```
+
+#### State repair example
+
+```go
+result, err := eng.StateRepair(ctx, engine.StateRepairRequest{
+    Config:      cfg,
+    Environment: "production",
+    Nodes: []engine.StateRepairNode{
+        {Name: "node-a", HistoryManager: historyManager, Runtime: runtimeManager},
+    },
+    Histories: []engine.StateRepairHistoryCandidate{{Source: "node-a", History: history}},
+    Desired:   []engine.StateRepairDesiredCandidate{{Source: "node-a", Desired: desired}},
+    BeforeWrite: func(ctx context.Context, result *engine.StateRepairResult) error {
+        return acquireRepairLeases(result.Servers) // adapter-owned
+    },
+})
+if err != nil && result == nil {
+    return err
+}
+_ = result.Sources
+_ = result.Writes.Counts
 ```
 
 ### `pkg/takoapi/events`
