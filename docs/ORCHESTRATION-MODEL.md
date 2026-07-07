@@ -185,6 +185,30 @@ background. The loop is lease-aware: if a mutating operation holds the
 environment lease, the background refresh skips that project/environment until
 the lease is clear.
 
+Private registry images declare credentials in a top-level `registries:`
+block keyed by registry host:
+
+```yaml
+registries:
+  ghcr.io:
+    username: octocat
+    password: ${GHCR_TOKEN}
+```
+
+Passwords must be `${ENV_VAR}` references — config load rejects literal
+values before expansion. Credentials are request-scoped by design: the CLI
+sends them inside typed request bodies to `takod` (never argv or query
+strings, so they cannot leak through remote `ps` or shell history), `takod`
+materializes an ephemeral `DOCKER_CONFIG` directory (0700/0600) for the one
+pull or build and removes it before responding, and nothing credential-shaped
+is ever written to replicated state, deployment records, or job specs.
+`docker.io` and its aliases normalize to the canonical
+`https://index.docker.io/v1/` auth key. Authentication failures are
+classified distinctly from missing images and surface as an
+`image.pull.auth_failed` event plus a typed error, so operators rotate
+credentials instead of retrying. One-off runs pass credentials with
+`tako run --registry-user <user> --registry-password-stdin`.
+
 Local `.tako` files are cache and UX acceleration. The durable truth lives in
 Git plus the last accepted desired revision and event log replicated by takod.
 

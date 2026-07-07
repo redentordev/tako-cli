@@ -40,6 +40,11 @@ func ValidateConfig(cfg *Config) error {
 		return err
 	}
 
+	// Validate registries
+	if err := validateRegistries(cfg.Registries); err != nil {
+		return err
+	}
+
 	// Validate servers
 	if len(cfg.Servers) == 0 {
 		return fmt.Errorf("at least one server must be configured")

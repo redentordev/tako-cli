@@ -366,6 +366,13 @@ func ImageBuildEndpoint(image string, dockerfile ...string) string {
 	return "/v1/images/build?" + query.Encode()
 }
 
+// ImageBuildEndpointWithAuth marks the build request body as carrying a
+// registry-auth JSON preamble line ahead of the tar stream. The flag is the
+// only auth-related value in the URL; credentials ride the body.
+func ImageBuildEndpointWithAuth(image string, dockerfile ...string) string {
+	return ImageBuildEndpoint(image, dockerfile...) + "&auth=preamble"
+}
+
 func ImageExistsEndpoint(image string) string {
 	query := url.Values{}
 	query.Set("image", image)

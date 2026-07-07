@@ -104,6 +104,7 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 		e.RegisterSecret(value)
 	}
 	e.RegisterSecret(server.Password)
+	e.RegisterRegistrySecrets(req.Config)
 
 	session := &RunSession{
 		engine: e,

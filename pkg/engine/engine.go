@@ -9,6 +9,7 @@ package engine
 import (
 	"io"
 
+	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 )
@@ -58,6 +59,17 @@ func New(opts Options) *Engine {
 func (e *Engine) RegisterSecret(value string) {
 	if value != "" {
 		e.redactor.Register(value)
+	}
+}
+
+// RegisterRegistrySecrets adds every configured registry credential to the
+// event redactor so pull/build output and result docs never carry them.
+func (e *Engine) RegisterRegistrySecrets(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	for _, registry := range cfg.Registries {
+		e.RegisterSecret(registry.Password)
 	}
 }
 
