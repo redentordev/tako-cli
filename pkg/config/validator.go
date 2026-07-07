@@ -1271,6 +1271,29 @@ func validateProxy(projectName string, envName string, serviceName string, proxy
 		proxy.Domain = trimmed
 	}
 
+	// Validate additional serving domains
+	if len(proxy.Domains) > 0 && proxy.Domain == "" {
+		return fmt.Errorf("service %s: proxy.domains requires a primary proxy domain", serviceName)
+	}
+	seenServing := map[string]bool{}
+	if proxy.Domain != "" {
+		seenServing[strings.ToLower(proxy.Domain)] = true
+	}
+	for i, extraDomain := range proxy.Domains {
+		trimmed, err := NormalizeProxyDomain(extraDomain)
+		if err != nil {
+			return fmt.Errorf("service %s: invalid additional domain: %s", serviceName, strings.TrimSpace(extraDomain))
+		}
+		if isWildcardProxyDomain(trimmed) {
+			return fmt.Errorf("service %s: wildcard proxy domain %q is not supported by the built-in tako-proxy yet; use explicit hostnames until DNS-01 certificate handling is implemented", serviceName, trimmed)
+		}
+		if seenServing[strings.ToLower(trimmed)] {
+			return fmt.Errorf("service %s: duplicate serving domain '%s'", serviceName, trimmed)
+		}
+		seenServing[strings.ToLower(trimmed)] = true
+		proxy.Domains[i] = trimmed
+	}
+
 	// Validate redirect domains
 	primaryDomain := proxy.GetPrimaryDomain()
 	for i, redirectDomain := range proxy.RedirectFrom {
@@ -1331,6 +1354,9 @@ func validateInternalProxy(projectName string, envName string, serviceName strin
 	}
 	if len(proxy.RedirectFrom) > 0 {
 		return fmt.Errorf("service %s: redirectFrom requires public proxy visibility", serviceName)
+	}
+	if len(proxy.Domains) > 0 {
+		return fmt.Errorf("service %s: proxy.domains requires public proxy visibility", serviceName)
 	}
 	if proxy.TLS.Mode == "" {
 		proxy.TLS.Mode = ProxyTLSModeOff

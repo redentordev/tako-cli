@@ -333,6 +333,7 @@ func domainsEqual(a, b *config.ProxyConfig) bool {
 		return false
 	}
 	return a.Domain == b.Domain &&
+		stringSlicesEqual(a.Domains, b.Domains) &&
 		a.Host == b.Host &&
 		a.Visibility == b.Visibility &&
 		a.TLS.Mode == b.TLS.Mode &&

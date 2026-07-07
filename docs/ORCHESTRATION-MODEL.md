@@ -451,7 +451,20 @@ proxy placement to resolve to one node; multi-edge certificate issuance and
 storage is blocked at config validation until distributed certificate handling
 is implemented. Public proxy domains must be explicit hostnames; wildcard
 hostnames such as `*.example.com` are blocked until DNS-01 certificate handling
-is implemented in the generated Caddy proxy config. Internal proxy hosts use
+is implemented in the generated Caddy proxy config.
+
+A service can serve on several hostnames: `proxy.domain` is the primary (used
+for URL display and as the target of `redirectFrom` redirects) and
+`proxy.domains: []` adds co-equal serving hostnames. Every serving hostname
+gets its own Caddy site block over the same upstream set and its own ACME
+certificate, exactly like redirect hostnames do. A hostname may appear once
+per environment across all services' `domain`/`domains`/`redirectFrom` —
+duplicates fail validation (and therefore `deploy`/`--plan-only`) with exit
+code 2. Static serving hostnames are exact-host Caddy sites, so they always
+take precedence over a `dynamicDomains` on-demand authority's catch-all: keep
+a hostname out of `domains` if the dynamic authority is supposed to serve it.
+Re-deploying with an unchanged domain set is a proxy no-op — the route
+manifest hash is unchanged, so no certificate churn and no Caddy reload. Internal proxy hosts use
 `proxy.visibility: internal`, render as HTTP-only Caddy routes such as
 `http://admin.production.demo.tako.internal`, and are intended for private
 network, VPN, or `/etc/hosts` resolution rather than public DNS/ACME. The proxy
