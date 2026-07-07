@@ -21,32 +21,33 @@ const SlotLabel = "tako.slot"
 const ActiveLabel = "tako.active"
 
 type safeServiceConfigFingerprint struct {
-	Kind         string                    `json:"kind,omitempty"`
-	Schedule     string                    `json:"schedule,omitempty"`
-	Timezone     string                    `json:"timezone,omitempty"`
-	Timeout      string                    `json:"timeout,omitempty"`
-	Build        string                    `json:"build,omitempty"`
-	Dockerfile   string                    `json:"dockerfile,omitempty"`
-	Image        string                    `json:"image,omitempty"`
-	Port         int                       `json:"port,omitempty"`
-	Command      string                    `json:"command,omitempty"`
-	Replicas     int                       `json:"replicas,omitempty"`
-	Restart      string                    `json:"restart,omitempty"`
-	EnvKeys      []string                  `json:"envKeys,omitempty"`
-	EnvFile      string                    `json:"envFile,omitempty"`
-	Secrets      []string                  `json:"secrets,omitempty"`
-	Volumes      []string                  `json:"volumes,omitempty"`
-	Persistent   bool                      `json:"persistent,omitempty"`
-	Proxy        *config.ProxyConfig       `json:"proxy,omitempty"`
-	LoadBalancer config.LoadBalancerConfig `json:"loadBalancer,omitempty"`
-	HealthCheck  config.HealthCheckConfig  `json:"healthCheck,omitempty"`
-	Deploy       config.DeployConfig       `json:"deploy,omitempty"`
-	Backup       *backupFingerprint        `json:"backup,omitempty"`
-	Monitoring   *monitoringFingerprint    `json:"monitoring,omitempty"`
-	Export       bool                      `json:"export,omitempty"`
-	Imports      []string                  `json:"imports,omitempty"`
-	Placement    *config.PlacementConfig   `json:"placement,omitempty"`
-	DependsOn    []string                  `json:"dependsOn,omitempty"`
+	Kind         string                       `json:"kind,omitempty"`
+	Schedule     string                       `json:"schedule,omitempty"`
+	Timezone     string                       `json:"timezone,omitempty"`
+	Timeout      string                       `json:"timeout,omitempty"`
+	Build        string                       `json:"build,omitempty"`
+	Dockerfile   string                       `json:"dockerfile,omitempty"`
+	Image        string                       `json:"image,omitempty"`
+	Port         int                          `json:"port,omitempty"`
+	Command      string                       `json:"command,omitempty"`
+	Replicas     int                          `json:"replicas,omitempty"`
+	Restart      string                       `json:"restart,omitempty"`
+	EnvKeys      []string                     `json:"envKeys,omitempty"`
+	EnvFile      string                       `json:"envFile,omitempty"`
+	Secrets      []string                     `json:"secrets,omitempty"`
+	Volumes      []string                     `json:"volumes,omitempty"`
+	Persistent   bool                         `json:"persistent,omitempty"`
+	Proxy        *config.ProxyConfig          `json:"proxy,omitempty"`
+	LoadBalancer config.LoadBalancerConfig    `json:"loadBalancer,omitempty"`
+	HealthCheck  config.HealthCheckConfig     `json:"healthCheck,omitempty"`
+	Deploy       config.DeployConfig          `json:"deploy,omitempty"`
+	Backup       *backupFingerprint           `json:"backup,omitempty"`
+	Monitoring   *monitoringFingerprint       `json:"monitoring,omitempty"`
+	Export       bool                         `json:"export,omitempty"`
+	Imports      []string                     `json:"imports,omitempty"`
+	Placement    *config.PlacementConfig      `json:"placement,omitempty"`
+	DependsOn    []string                     `json:"dependsOn,omitempty"`
+	Resources    *config.ResourceLimitsConfig `json:"resources,omitempty"`
 }
 
 type monitoringFingerprint struct {
@@ -103,6 +104,7 @@ func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
 		Imports:      sortedStrings(service.Imports),
 		Placement:    clonePlacement(service.Placement),
 		DependsOn:    sortedStrings(service.DependsOn),
+		Resources:    cloneResourcesFingerprint(service.Resources),
 	}
 	data, err := json.Marshal(fingerprint)
 	if err != nil {
@@ -172,6 +174,14 @@ func cloneMonitoringFingerprint(monitoring *config.MonitoringConfig) *monitoring
 		WebhookConfigured: strings.TrimSpace(monitoring.Webhook) != "",
 		CheckType:         monitoring.CheckType,
 	}
+}
+
+func cloneResourcesFingerprint(resources *config.ResourceLimitsConfig) *config.ResourceLimitsConfig {
+	if resources == nil || (resources.Memory == "" && resources.CPUs == "") {
+		return nil
+	}
+	clone := *resources
+	return &clone
 }
 
 func clonePlacement(placement *config.PlacementConfig) *config.PlacementConfig {

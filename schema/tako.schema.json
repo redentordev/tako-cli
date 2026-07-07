@@ -539,6 +539,11 @@
                       "type": "string",
                       "pattern": "^[1-9][0-9]*([bBkKmMgG]|[kKmMgG][bB]|[kKmMgG][iI][bB])?$",
                       "description": "Docker memory limit passed as --memory, for example 512m or 1g"
+                    },
+                    "cpus": {
+                      "type": "string",
+                      "pattern": "^[0-9]+(\\.[0-9]+)?$",
+                      "description": "Docker CPU limit passed as --cpus, for example 0.5 or 2"
                     }
                   }
                 },
@@ -587,6 +592,33 @@
                     "email": {
                       "type": "string",
                       "description": "Let's Encrypt email"
+                    },
+                    "basicAuth": {
+                      "type": "object",
+                      "description": "HTTP basic authentication enforced at the proxy for every route of this service.",
+                      "properties": {
+                        "username": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9._@-]+$",
+                          "maxLength": 64,
+                          "description": "Basic auth username"
+                        },
+                        "passwordBcrypt": {
+                          "type": "string",
+                          "description": "Pre-computed bcrypt hash of the password (never the plaintext). Mint one with `tako proxy hash-password`."
+                        }
+                      },
+                      "required": [
+                        "username",
+                        "passwordBcrypt"
+                      ]
+                    },
+                    "allowIps": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Client IPs/CIDRs allowed to reach this service through the proxy; all others get 403. Matches the TCP peer address, so requests through a CDN match the CDN's address."
                     },
                     "tls": {
                       "type": "object",

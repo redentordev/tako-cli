@@ -335,6 +335,25 @@ type ProxyConfig struct {
 
 	// DynamicDomains enables ask-gated on-demand TLS for customer domains.
 	DynamicDomains *DynamicDomainsConfig `yaml:"dynamicDomains,omitempty" json:"dynamicDomains,omitempty"`
+
+	// BasicAuth protects every serving domain of this route with HTTP
+	// basic authentication before requests reach the service.
+	BasicAuth *ProxyBasicAuthConfig `yaml:"basicAuth,omitempty" json:"basicAuth,omitempty"`
+
+	// AllowIps restricts the route to the listed client IPs/CIDRs; other
+	// addresses receive 403. The match uses the TCP peer address, so it
+	// does not see original client IPs behind a CDN or other proxy.
+	AllowIps []string `yaml:"allowIps,omitempty" json:"allowIps,omitempty"`
+}
+
+// ProxyBasicAuthConfig protects a proxy route with HTTP basic auth.
+type ProxyBasicAuthConfig struct {
+	Username string `yaml:"username" json:"username"`
+	// PasswordBcrypt is the pre-computed bcrypt hash of the password —
+	// never the plaintext. Mint one with `tako proxy hash-password`.
+	// A pre-computed hash keeps redeploys idempotent (hashing at deploy
+	// time would salt fresh every run and churn the proxy config).
+	PasswordBcrypt string `yaml:"passwordBcrypt" json:"passwordBcrypt"`
 }
 
 // DynamicDomainsConfig describes Caddy on-demand TLS for customer domains.
@@ -476,6 +495,7 @@ type BackupStorageConfig struct {
 // ResourceLimitsConfig defines container runtime resource limits.
 type ResourceLimitsConfig struct {
 	Memory string `yaml:"memory,omitempty" json:"memory,omitempty"` // Docker memory limit, for example 512m or 1g
+	CPUs   string `yaml:"cpus,omitempty" json:"cpus,omitempty"`     // Docker --cpus limit, for example 0.5 or 2
 }
 
 // MonitoringConfig defines per-service monitoring settings

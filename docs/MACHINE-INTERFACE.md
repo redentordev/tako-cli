@@ -246,7 +246,11 @@ mirrors the job's exit code. Job services appear in the `StatusResult` with
 `kind: "job"`, their `schedule`, the last run's status (`lastRun`), and
 `nextRun` instead of replica counts; `tako logs JOB` returns the recorded
 output of the latest run (no `--follow`). Deploys reconcile job schedules
-declaratively and emit `deploy.jobs.applied` events per node. The
+declaratively and emit `deploy.jobs.applied` events per node. `tako proxy
+hash-password` returns a `ProxyHashPasswordResult` with the bcrypt `cost` and
+`hash` for `proxy.basicAuth.passwordBcrypt`; the plaintext password is read
+from stdin (machine modes require piped stdin) and never appears in any
+output. The
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
 
@@ -257,7 +261,7 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger` |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
 | Human-only by design | `init`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON) |

@@ -597,6 +597,30 @@ func TestProxyHostRuleRejectsRuleInjection(t *testing.T) {
 	}
 }
 
+func TestRenderTakodProxyDynamicConfigCarriesAccessControls(t *testing.T) {
+	deploy := testProxyDeployer()
+	services := deploy.config.Environments["production"].Services
+	web := services["web"]
+	// bcrypt("s3cret", cost 10) — a fixed fixture, not a secret.
+	hash := "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+	web.Proxy = &config.ProxyConfig{
+		Domain:    "example.com",
+		BasicAuth: &config.ProxyBasicAuthConfig{Username: "admin", PasswordBcrypt: hash},
+		AllowIps:  []string{"203.0.113.0/24", "10.0.0.1"},
+	}
+	services["web"] = web
+
+	data, _, err := deploy.renderTakodProxyDynamicConfigForNode(services, "node-a")
+	if err != nil {
+		t.Fatalf("renderTakodProxyDynamicConfigForNode returned error: %v", err)
+	}
+	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	if route.BasicAuth == nil || route.BasicAuth.Username != "admin" || route.BasicAuth.PasswordBcrypt != hash {
+		t.Fatalf("basicAuth = %#v, want admin + hash carried into manifest", route.BasicAuth)
+	}
+	assertStringsEqual(t, route.AllowIPs, []string{"203.0.113.0/24", "10.0.0.1"})
+}
+
 func testProxyDeployer() *Deployer {
 	cfg := &config.Config{
 		Project: config.ProjectConfig{Name: "demo", Version: "1.0.0"},

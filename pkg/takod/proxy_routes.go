@@ -3,9 +3,11 @@ package takod
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -35,16 +37,25 @@ type ProxyRouteManifest struct {
 }
 
 type ProxyRoute struct {
-	Service       string              `json:"service"`
-	Revision      string              `json:"revision,omitempty"`
-	Domains       []string            `json:"domains,omitempty"`
-	RedirectFrom  []string            `json:"redirectFrom,omitempty"`
-	Upstreams     []string            `json:"upstreams"`
-	HealthCheck   *ProxyRouteHealth   `json:"healthCheck,omitempty"`
-	Sticky        bool                `json:"sticky,omitempty"`
-	Priority      int                 `json:"priority,omitempty"`
-	Visibility    string              `json:"visibility,omitempty"`
-	DynamicDomain *ProxyDynamicDomain `json:"dynamicDomain,omitempty"`
+	Service       string               `json:"service"`
+	Revision      string               `json:"revision,omitempty"`
+	Domains       []string             `json:"domains,omitempty"`
+	RedirectFrom  []string             `json:"redirectFrom,omitempty"`
+	Upstreams     []string             `json:"upstreams"`
+	HealthCheck   *ProxyRouteHealth    `json:"healthCheck,omitempty"`
+	Sticky        bool                 `json:"sticky,omitempty"`
+	Priority      int                  `json:"priority,omitempty"`
+	Visibility    string               `json:"visibility,omitempty"`
+	DynamicDomain *ProxyDynamicDomain  `json:"dynamicDomain,omitempty"`
+	BasicAuth     *ProxyRouteBasicAuth `json:"basicAuth,omitempty"`
+	AllowIPs      []string             `json:"allowIps,omitempty"`
+}
+
+// ProxyRouteBasicAuth protects a route's serving domains with HTTP basic
+// auth. PasswordBcrypt is a pre-computed hash, never plaintext.
+type ProxyRouteBasicAuth struct {
+	Username       string `json:"username"`
+	PasswordBcrypt string `json:"passwordBcrypt"`
 }
 
 type ProxyRouteHealth struct {
@@ -139,6 +150,19 @@ func validateProxyRouteManifest(manifest *ProxyRouteManifest) error {
 		if route.DynamicDomain != nil {
 			if err := validateProxyUpstreamURL(route.DynamicDomain.AskURL); err != nil {
 				return fmt.Errorf("route %s: invalid dynamic ask URL: %w", route.Service, err)
+			}
+		}
+		if route.BasicAuth != nil {
+			if !isSafeProxyBasicAuthUser(route.BasicAuth.Username) {
+				return fmt.Errorf("route %s: invalid basic auth username", route.Service)
+			}
+			if !isSafeProxyBcryptHash(route.BasicAuth.PasswordBcrypt) {
+				return fmt.Errorf("route %s: basic auth password must be a bcrypt hash", route.Service)
+			}
+		}
+		for _, entry := range route.AllowIPs {
+			if !isSafeProxyAllowIP(entry) {
+				return fmt.Errorf("route %s: invalid allow IP entry %q", route.Service, entry)
 			}
 		}
 	}
@@ -383,31 +407,57 @@ func writeCaddyRoute(b *strings.Builder, address string, route ProxyRoute) {
 	}
 	writeCaddyAccessLog(b, caddyAccessLogName(route.Service))
 	b.WriteString("\tencode zstd gzip\n")
-	b.WriteString("\treverse_proxy")
+	if len(route.AllowIPs) > 0 {
+		// handle blocks force the allowlist to win before basic_auth:
+		// Caddy's default directive order would otherwise run basic_auth
+		// ahead of a bare respond matcher and 401 denied addresses.
+		b.WriteString("\t@tako_allowed remote_ip " + strings.Join(route.AllowIPs, " ") + "\n")
+		b.WriteString("\thandle @tako_allowed {\n")
+		writeCaddyBasicAuth(b, "\t\t", route)
+		writeCaddyReverseProxy(b, "\t\t", address, route)
+		b.WriteString("\t}\n")
+		b.WriteString("\thandle {\n\t\trespond 403\n\t}\n")
+	} else {
+		writeCaddyBasicAuth(b, "\t", route)
+		writeCaddyReverseProxy(b, "\t", address, route)
+	}
+	b.WriteString("}\n")
+}
+
+func writeCaddyBasicAuth(b *strings.Builder, indent string, route ProxyRoute) {
+	if route.BasicAuth == nil {
+		return
+	}
+	b.WriteString(indent + "basic_auth {\n")
+	b.WriteString(indent + "\t" + route.BasicAuth.Username + " " + route.BasicAuth.PasswordBcrypt + "\n")
+	b.WriteString(indent + "}\n")
+}
+
+func writeCaddyReverseProxy(b *strings.Builder, indent string, address string, route ProxyRoute) {
+	b.WriteString(indent + "reverse_proxy")
 	for _, upstream := range route.Upstreams {
 		b.WriteString(" " + upstream)
 	}
 	if route.HealthCheck == nil && !route.Sticky {
 		b.WriteString("\n")
-	} else {
-		b.WriteString(" {\n")
-		if route.HealthCheck != nil && route.HealthCheck.Path != "" {
-			b.WriteString("\t\thealth_uri " + route.HealthCheck.Path + "\n")
-			if route.HealthCheck.Interval != "" {
-				b.WriteString("\t\thealth_interval " + route.HealthCheck.Interval + "\n")
-			}
-			if host := caddyHealthHost(address, route); host != "" {
-				b.WriteString("\t\thealth_headers {\n")
-				b.WriteString("\t\t\tHost " + host + "\n")
-				b.WriteString("\t\t}\n")
-			}
-		}
-		if route.Sticky {
-			b.WriteString("\t\tlb_policy cookie\n")
-		}
-		b.WriteString("\t}\n")
+		return
 	}
-	b.WriteString("}\n")
+	b.WriteString(" {\n")
+	if route.HealthCheck != nil && route.HealthCheck.Path != "" {
+		b.WriteString(indent + "\thealth_uri " + route.HealthCheck.Path + "\n")
+		if route.HealthCheck.Interval != "" {
+			b.WriteString(indent + "\thealth_interval " + route.HealthCheck.Interval + "\n")
+		}
+		if host := caddyHealthHost(address, route); host != "" {
+			b.WriteString(indent + "\thealth_headers {\n")
+			b.WriteString(indent + "\t\tHost " + host + "\n")
+			b.WriteString(indent + "\t}\n")
+		}
+	}
+	if route.Sticky {
+		b.WriteString(indent + "\tlb_policy cookie\n")
+	}
+	b.WriteString(indent + "}\n")
 }
 
 func caddyHealthHost(address string, route ProxyRoute) string {
@@ -432,6 +482,37 @@ func caddyAccessLogName(service string) string {
 		return "tako_proxy"
 	}
 	return "tako_" + service
+}
+
+var proxyBcryptHashPattern = regexp.MustCompile(`^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$`)
+
+func isSafeProxyBasicAuthUser(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == '@' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isSafeProxyBcryptHash(value string) bool {
+	return proxyBcryptHashPattern.MatchString(value)
+}
+
+func isSafeProxyAllowIP(value string) bool {
+	if strings.TrimSpace(value) != value || value == "" {
+		return false
+	}
+	if strings.Contains(value, "/") {
+		_, _, err := net.ParseCIDR(value)
+		return err == nil
+	}
+	return net.ParseIP(value) != nil
 }
 
 func isSafeProxyHost(value string) bool {
