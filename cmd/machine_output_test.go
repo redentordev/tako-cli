@@ -949,6 +949,116 @@ func TestBackupResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestSetupResultDocumentGolden pins the machine-facing setup schema.
+func TestSetupResultDocumentGolden(t *testing.T) {
+	result := engine.SetupResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindSetupResult,
+		Project:     "demo",
+		Environment: "production",
+		Nodes: []engine.SetupNodeResult{
+			{
+				Server:        "node-a",
+				Host:          "10.0.0.1",
+				Mode:          engine.SetupModeFresh,
+				OS:            "Ubuntu 24.04 LTS",
+				DockerVersion: "27.0.3",
+				TakodVersion:  "1.2.3",
+				SetupVersion:  "3",
+				FirewallPorts: []string{"22/tcp", "80/tcp", "443/tcp", "443/udp", "51820/udp"},
+				HostKey: &engine.SetupHostKey{
+					Type:        "ssh-ed25519",
+					Key:         "AAAAC3NzaC1lZDI1NTE5AAAAIP//////////////////////////////////////////",
+					Fingerprint: "SHA256:HP0d5nqvfsCJyg2NPMRnyoRNS7RhBkkAn1V6HzsccAo",
+				},
+				Steps: []engine.SetupStepOutcome{
+					{Step: engine.SetupStepOSCheck, Title: "Checking system requirements", Status: engine.SetupStepCompleted},
+					{Step: engine.SetupStepTakodService, Title: "Configuring takod service", Status: engine.SetupStepCompleted},
+				},
+			},
+			{
+				Server: "node-b",
+				Host:   "10.0.0.2",
+				Mode:   engine.SetupModeConverge,
+				Steps: []engine.SetupStepOutcome{
+					{Step: engine.SetupStepOSCheck, Title: "Checking system requirements", Status: engine.SetupStepSkipped},
+					{Step: engine.SetupStepFirewall, Title: "Configuring firewall (UFW)", Status: engine.SetupStepFailed, Error: "ufw not available"},
+				},
+				Error: "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available",
+			},
+		},
+		Error: "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "SetupResult",
+  "project": "demo",
+  "environment": "production",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "mode": "fresh",
+      "os": "Ubuntu 24.04 LTS",
+      "dockerVersion": "27.0.3",
+      "takodVersion": "1.2.3",
+      "setupVersion": "3",
+      "firewallPorts": [
+        "22/tcp",
+        "80/tcp",
+        "443/tcp",
+        "443/udp",
+        "51820/udp"
+      ],
+      "hostKey": {
+        "type": "ssh-ed25519",
+        "key": "AAAAC3NzaC1lZDI1NTE5AAAAIP//////////////////////////////////////////",
+        "fingerprint": "SHA256:HP0d5nqvfsCJyg2NPMRnyoRNS7RhBkkAn1V6HzsccAo"
+      },
+      "steps": [
+        {
+          "step": "os-check",
+          "title": "Checking system requirements",
+          "status": "completed"
+        },
+        {
+          "step": "takod-service",
+          "title": "Configuring takod service",
+          "status": "completed"
+        }
+      ]
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "mode": "converge",
+      "steps": [
+        {
+          "step": "os-check",
+          "title": "Checking system requirements",
+          "status": "skipped"
+        },
+        {
+          "step": "firewall",
+          "title": "Configuring firewall (UFW)",
+          "status": "failed",
+          "error": "ufw not available"
+        }
+      ],
+      "error": "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available"
+    }
+  ],
+  "error": "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available"
+}`
+	if string(payload) != want {
+		t.Fatalf("setup result document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",

@@ -41,6 +41,7 @@ const (
 	PhaseDomains = "domains"
 	PhaseNotify  = "notify"
 	PhaseLogs    = "logs"
+	PhaseSetup   = "setup"
 )
 
 // Event types. Consumers must tolerate unknown types (additive schema).
@@ -80,6 +81,14 @@ const (
 	// `tako access --events ndjson`; data holds node and the raw log line
 	// (`data.data`), mirroring `log.line`.
 	TypeAccessLine = "access.line"
+
+	// Setup step lifecycle events carry `data.step` (stable step key) and
+	// `data.title` (human step name); failed adds `data.error`. Node names
+	// ride the top-level `node` field.
+	TypeSetupStepStarted   = "setup.step.started"
+	TypeSetupStepCompleted = "setup.step.completed"
+	TypeSetupStepFailed    = "setup.step.failed"
+	TypeSetupStepSkipped   = "setup.step.skipped"
 
 	TypeWarning = "warning"
 

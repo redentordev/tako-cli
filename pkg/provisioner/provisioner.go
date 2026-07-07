@@ -610,6 +610,18 @@ func shouldSkipUFWFirewall(osInfo *OSInfo) bool {
 	return osInfo.Family != OSFamilyDebian
 }
 
+// FirewallAllowedPorts lists the port/protocol pairs setup allows through
+// UFW, in the order the rules are applied.
+func FirewallAllowedPorts(meshListenPort int) []string {
+	return []string{
+		"22/tcp",
+		"80/tcp",
+		"443/tcp",
+		"443/udp",
+		fmt.Sprintf("%d/udp", meshListenPort),
+	}
+}
+
 func firewallAllowCommands(meshListenPort int) []string {
 	return []string{
 		// SSH with rate limiting (max 10 connections per 30 seconds per IP).
