@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -48,6 +49,12 @@ type StatusService struct {
 	Revision string `json:"revision,omitempty"`
 	Warming  int    `json:"warming,omitempty"`
 	Internal bool   `json:"internal"`
+	// Job fields: kind is "job" for scheduled jobs, lastRun carries the most
+	// recent run's status, nextRun the owning node's next fire time.
+	Kind     string     `json:"kind,omitempty"`
+	Schedule string     `json:"schedule,omitempty"`
+	LastRun  string     `json:"lastRun,omitempty"`
+	NextRun  *time.Time `json:"nextRun,omitempty"`
 }
 
 // StatusActualStateReadFunc reads actual service state for one server.
@@ -113,7 +120,23 @@ func (e *Engine) Status(ctx context.Context, req StatusRequest) (*StatusResult, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	serviceInfos, err := BuildStatusServiceInfo(cfg.Servers, services, actualServices, envServers, serverNames, filterService)
+	var jobStatuses map[string]*takod.JobStatus
+	if HasJobServices(services) {
+		jobStatuses = make(map[string]*takod.JobStatus)
+		for _, serverName := range serverNames {
+			statuses, err := e.queryNodeJobs(ctx, cfg, envName, serverName)
+			if err != nil {
+				return nil, err
+			}
+			for i := range statuses {
+				if _, ok := jobStatuses[statuses[i].Name]; !ok {
+					jobStatuses[statuses[i].Name] = &statuses[i]
+				}
+			}
+		}
+	}
+
+	serviceInfos, err := BuildStatusServiceInfo(cfg.Servers, services, actualServices, jobStatuses, envServers, serverNames, filterService)
 	if err != nil {
 		return nil, err
 	}
@@ -366,6 +389,7 @@ func BuildStatusServiceInfo(
 	servers map[string]config.ServerConfig,
 	services map[string]config.ServiceConfig,
 	actualServices map[string]*takod.ActualService,
+	jobStatuses map[string]*takod.JobStatus,
 	envServers []string,
 	selectedServers []string,
 	filterService string,
@@ -373,6 +397,11 @@ func BuildStatusServiceInfo(
 	serviceInfos := make([]StatusService, 0, len(services))
 	for serviceName, serviceConfig := range services {
 		if filterService != "" && serviceName != filterService {
+			continue
+		}
+
+		if serviceConfig.IsJob() {
+			serviceInfos = append(serviceInfos, buildStatusJobInfo(serviceName, serviceConfig, jobStatuses[serviceName]))
 			continue
 		}
 
@@ -404,6 +433,31 @@ func BuildStatusServiceInfo(
 		return serviceInfos[i].Name < serviceInfos[j].Name
 	})
 	return serviceInfos, nil
+}
+
+// buildStatusJobInfo renders a kind:job service row: jobs have no replica
+// counts, so status reflects whether the cron schedule is registered.
+func buildStatusJobInfo(serviceName string, serviceConfig config.ServiceConfig, job *takod.JobStatus) StatusService {
+	info := StatusService{
+		Name:     serviceName,
+		Internal: true,
+		Kind:     config.ServiceKindJob,
+		Schedule: serviceConfig.Schedule,
+		Ports:    "-",
+		Status:   "unscheduled",
+	}
+	if job != nil {
+		info.Status = "scheduled"
+		info.Schedule = job.Schedule
+		if job.NextRun != nil {
+			nextRun := job.NextRun.UTC()
+			info.NextRun = &nextRun
+		}
+		if job.LastRun != nil {
+			info.LastRun = job.LastRun.Status
+		}
+	}
+	return info
 }
 
 func DesiredReplicasForSelection(servers map[string]config.ServerConfig, service config.ServiceConfig, envServers []string, selectedServers []string) (int, error) {

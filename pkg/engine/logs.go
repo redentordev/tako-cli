@@ -102,8 +102,12 @@ func (e *Engine) StreamLogs(ctx context.Context, req LogsRequest) (*LogsResult, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get services: %w", err)
 	}
-	if _, exists := services[req.Service]; !exists {
+	service, exists := services[req.Service]
+	if !exists {
 		return nil, invalidRequestf("service %s not found in environment %s", req.Service, envName)
+	}
+	if service.IsJob() {
+		return e.streamJobLogs(ctx, req, cfg, envName)
 	}
 
 	servers, err := ResolveLogTargetServers(cfg, envName, req.Server)
@@ -207,6 +211,53 @@ func (e *Engine) StreamLogs(ctx context.Context, req LogsRequest) (*LogsResult, 
 		Service: req.Service,
 		Data:    map[string]any{"status": result.Status, "nodes": len(result.Nodes)},
 	})
+	return result, nil
+}
+
+// streamJobLogs serves `tako logs JOB`: jobs have no long-running
+// containers, so logs are the recorded output of the most recent run.
+func (e *Engine) streamJobLogs(ctx context.Context, req LogsRequest, cfg *config.Config, envName string) (*LogsResult, error) {
+	if req.Follow {
+		return nil, invalidRequestf("jobs run on a schedule; --follow is not supported for job logs (see tako jobs runs %s)", req.Service)
+	}
+
+	startedAt := time.Now()
+	result := &LogsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        KindLogsResult,
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Service:     req.Service,
+		Tail:        req.Tail,
+		StartedAt:   startedAt,
+	}
+
+	runs, err := e.JobRuns(ctx, JobRunsRequest{Config: cfg, Environment: envName, Job: req.Service, Server: req.Server})
+	if err != nil {
+		result.Status = logsStatusFailed
+		result.Error = err.Error()
+		result.Duration = time.Since(startedAt).Seconds()
+		return result, err
+	}
+	result.Duration = time.Since(startedAt).Seconds()
+	result.Status = logsStatusSuccess
+
+	if len(runs.Runs) == 0 {
+		result.Message = "job has no recorded runs yet"
+		e.info(events.TypePhaseCompleted, events.PhaseLogs, fmt.Sprintf("Job %s has no recorded runs yet.\n", req.Service))
+		return result, nil
+	}
+
+	latest := runs.Runs[0]
+	result.Nodes = append(result.Nodes, LogsNodeResult{Name: latest.Server, Status: logsStatusSuccess})
+	e.info(events.TypePhaseStarted, events.PhaseLogs, fmt.Sprintf("Showing last run of job %s on %s (%s, started %s):\n\n", req.Service, latest.Server, latest.Status, latest.StartedAt.Format(time.RFC3339)))
+	output := strings.TrimRight(latest.Output, "\n")
+	if output != "" {
+		for _, line := range strings.Split(output, "\n") {
+			e.emitLogLine(req.Service, latest.Server, line, false)
+		}
+	}
+	result.Message = fmt.Sprintf("showed last run output from %s", latest.Server)
 	return result, nil
 }
 

@@ -136,7 +136,7 @@ func buildPSServiceInfo(
 	selectedServers []string,
 	filterService string,
 ) ([]ServiceInfo, error) {
-	return engine.BuildStatusServiceInfo(servers, services, actualServices, envServers, selectedServers, filterService)
+	return engine.BuildStatusServiceInfo(servers, services, actualServices, nil, envServers, selectedServers, filterService)
 }
 
 func desiredReplicasForSelection(servers map[string]config.ServerConfig, service config.ServiceConfig, envServers []string, selectedServers []string) (int, error) {
@@ -161,8 +161,14 @@ func displayServices(services []ServiceInfo) {
 		if svc.Desired == 0 {
 			replicaStr = fmt.Sprintf("%d", svc.Running)
 		}
+		if svc.Kind == config.ServiceKindJob {
+			replicaStr = "cron"
+		}
 
 		statusStr := svc.Status
+		if svc.Kind == config.ServiceKindJob && svc.LastRun != "" {
+			statusStr = fmt.Sprintf("%s (%s)", svc.Status, svc.LastRun)
+		}
 		switch svc.Status {
 		case "running":
 			statusStr = "✓ running"
