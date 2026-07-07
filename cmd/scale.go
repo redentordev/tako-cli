@@ -60,7 +60,12 @@ func runScaleTargets(cmd *cobra.Command, args []string) error {
 		Verbose:     verbose,
 	}
 
-	_, err = cliEngine().Scale(cmd.Context(), request)
+	result, err := cliEngine().Scale(cmd.Context(), request)
+	if result != nil {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	return err
 }
 

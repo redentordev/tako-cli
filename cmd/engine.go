@@ -92,6 +92,31 @@ func newConfirmationRequiredDocument(reason string, plan engine.DeployPlan) conf
 	}
 }
 
+// operationConfirmationRequiredDocument is emitted in machine modes when a
+// destructive operation without a deploy plan (remove, destroy) needs
+// explicit approval before executing.
+type operationConfirmationRequiredDocument struct {
+	APIVersion  string   `json:"apiVersion"`
+	Kind        string   `json:"kind"`
+	Reason      string   `json:"reason"`
+	Operation   string   `json:"operation"`
+	Project     string   `json:"project"`
+	Environment string   `json:"environment"`
+	Servers     []string `json:"servers,omitempty"`
+}
+
+func newOperationConfirmationRequiredDocument(reason string, operation string, project string, environment string, servers []string) operationConfirmationRequiredDocument {
+	return operationConfirmationRequiredDocument{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        "ConfirmationRequired",
+		Reason:      reason,
+		Operation:   operation,
+		Project:     project,
+		Environment: environment,
+		Servers:     servers,
+	}
+}
+
 // stateForgetNodeConfirmationRequiredDocument is emitted in machine modes when
 // forget-node needs --yes approval before mutating replicated runtime state.
 type stateForgetNodeConfirmationRequiredDocument struct {

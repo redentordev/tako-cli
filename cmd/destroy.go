@@ -15,6 +15,7 @@ import (
 var (
 	destroyPurgeAll bool
 	destroyForce    bool
+	destroyYes      bool
 )
 
 var destroyCmd = &cobra.Command{
@@ -56,6 +57,7 @@ func init() {
 	rootCmd.AddCommand(destroyCmd)
 	destroyCmd.Flags().BoolVar(&destroyPurgeAll, "purge-all", false, "Also prune app-owned leftovers after decommission")
 	destroyCmd.Flags().BoolVar(&destroyForce, "force", false, "Skip confirmation prompts")
+	destroyCmd.Flags().BoolVar(&destroyYes, "yes", false, "Approve destruction without the confirmation prompt (same as --force)")
 }
 
 func runDestroy(cmd *cobra.Command, args []string) error {
@@ -80,7 +82,17 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 	defer session.Close()
 
 	// Get confirmation
-	if !destroyForce {
+	if !destroyForce && !destroyYes {
+		reason := "destroy decommissions this app/stage runtime on every environment node"
+		if machineOutputEnabled() {
+			if err := emitResultDocument(newOperationConfirmationRequiredDocument(reason, "destroy", session.ProjectName(), session.Environment(), session.ServerNames())); err != nil {
+				return err
+			}
+			return &engine.ConfirmationRequiredError{Reason: reason}
+		}
+		if err := requireDeployPromptAllowed(reason); err != nil {
+			return &engine.ConfirmationRequiredError{Reason: err.Error()}
+		}
 		fmt.Printf("\nType the project name '%s' to confirm: ", session.ProjectName())
 		reader := bufio.NewReader(os.Stdin)
 		confirmation, _ := reader.ReadString('\n')
@@ -92,7 +104,12 @@ func runDestroy(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	_, err = session.Apply(cmd.Context())
+	result, err := session.Apply(cmd.Context())
+	if result != nil {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	return err
 }
 

@@ -125,7 +125,20 @@ pruned. `tako state repair --output json` returns a `StateRepairResult` with
 project/environment, requested server filter, reachable node count, selected
 history/desired/actual/node-actual sources, per-node and aggregate write
 counts, warning/error details, local `.tako` sync status/count, and final
-`error` when repair is incomplete or fails. The Go definitions in `pkg/engine`
+`error` when repair is incomplete or fails. `tako rollback` returns a
+`RollbackResult` with project/environment, the service, the target
+`deploymentId`, restored `version`, `status`, and timings. `tako promote`
+returns a `PromoteResult` with project/environment, the service, the promoted
+`revision` and `image`, `status`, and timings. `tako scale` (and its `start`/
+`stop` wrappers) returns a `ScaleResult` with project/environment, `status`,
+per-service outcomes with replica counts, timings, and `error` when
+reconciliation failed. `tako remove` returns a `RemoveResult` with
+project/environment, `scoped` when `--server` narrowed the target set,
+per-server outcomes (`name`, `host`, `removed`, `error`), timings, and
+`error` when removal was incomplete. `tako destroy` returns a `DestroyResult`
+with project/environment, `mode` (`DECOMMISSION` or `PURGE`), `purgeAll`,
+per-server outcomes (`name`, `host`, `destroyed`, `error`), timings, and
+`error` when destruction was incomplete. The Go definitions in `pkg/engine`
 (`types.go` and per-command files) are the source of truth.
 
 ## Config Export / Pull
@@ -172,6 +185,10 @@ emits a `ConfirmationRequired` document (reason + full plan) and exits
 with code 2. `tako state forget-node NODE` follows the same non-interactive
 rule for its state mutation: in machine modes it emits a `ConfirmationRequired`
 document with `operation: "state.forget-node"` unless `--yes` is passed.
+`tako remove` and `tako destroy` likewise never prompt in machine modes:
+without `--yes` (or `--force`) they emit a `ConfirmationRequired` document
+carrying `operation` (`remove` or `destroy`), `project`, `environment`, and
+the target `servers`, and exit with code 2.
 
 ## Exit Codes
 

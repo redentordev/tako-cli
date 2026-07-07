@@ -67,7 +67,12 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		ListDeployments: listDeploymentsFromHistory,
 	}
 
-	_, err = cliEngine().Rollback(cmd.Context(), request)
+	result, err := cliEngine().Rollback(cmd.Context(), request)
+	if result != nil {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	return err
 }
 

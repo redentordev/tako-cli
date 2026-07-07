@@ -48,7 +48,12 @@ func runPromote(cmd *cobra.Command, args []string) error {
 		ShortRevision: shortRevision,
 	}
 
-	_, err = cliEngine().Promote(cmd.Context(), request)
+	result, err := cliEngine().Promote(cmd.Context(), request)
+	if result != nil {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	return err
 }
 

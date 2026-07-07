@@ -161,6 +161,231 @@ func TestDeployResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestRollbackResultDocumentGolden pins the machine-facing rollback schema.
+func TestRollbackResultDocumentGolden(t *testing.T) {
+	result := engine.RollbackResult{
+		APIVersion:   takoapi.APIVersionCurrent,
+		Kind:         engine.KindRollbackResult,
+		Project:      "demo",
+		Environment:  "production",
+		Service:      "web",
+		DeploymentID: "deploy-123",
+		Version:      "abc123",
+		Status:       takoapi.StatusSuccess,
+		StartedAt:    time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:     3.5,
+		Message:      "rolled back web to deploy-123",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "RollbackResult",
+  "project": "demo",
+  "environment": "production",
+  "service": "web",
+  "deploymentId": "deploy-123",
+  "version": "abc123",
+  "status": "success",
+  "startedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 3.5,
+  "message": "rolled back web to deploy-123"
+}`
+	if string(payload) != want {
+		t.Fatalf("rollback result document drifted:\n%s", payload)
+	}
+}
+
+// TestPromoteResultDocumentGolden pins the machine-facing promote schema.
+func TestPromoteResultDocumentGolden(t *testing.T) {
+	result := engine.PromoteResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindPromoteResult,
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		Revision:    "abc123",
+		Image:       "demo/web:abc123",
+		Status:      takoapi.StatusSuccess,
+		StartedAt:   time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:    2.1,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "PromoteResult",
+  "project": "demo",
+  "environment": "production",
+  "service": "web",
+  "revision": "abc123",
+  "image": "demo/web:abc123",
+  "status": "success",
+  "startedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 2.1
+}`
+	if string(payload) != want {
+		t.Fatalf("promote result document drifted:\n%s", payload)
+	}
+}
+
+// TestScaleResultDocumentGolden pins the machine-facing scale schema.
+func TestScaleResultDocumentGolden(t *testing.T) {
+	result := engine.ScaleResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindScaleResult,
+		Project:     "demo",
+		Environment: "production",
+		Status:      takoapi.StatusSuccess,
+		Services: []engine.ServiceOutcome{
+			{Name: "web", Action: engine.OutcomeDeployed, Replicas: 3},
+		},
+		StartedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:  1.2,
+		Message:   "scaled web=3",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "ScaleResult",
+  "project": "demo",
+  "environment": "production",
+  "status": "success",
+  "services": [
+    {
+      "name": "web",
+      "action": "deployed",
+      "replicas": 3
+    }
+  ],
+  "startedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 1.2,
+  "message": "scaled web=3"
+}`
+	if string(payload) != want {
+		t.Fatalf("scale result document drifted:\n%s", payload)
+	}
+}
+
+// TestRemoveResultDocumentGolden pins the machine-facing remove schema.
+func TestRemoveResultDocumentGolden(t *testing.T) {
+	result := engine.RemoveResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindRemoveResult,
+		Project:     "demo",
+		Environment: "production",
+		Scoped:      true,
+		Servers: []engine.RemoveServerOutcome{
+			{Name: "node-a", Host: "10.0.0.1", Removed: true},
+		},
+		StartedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:  6.7,
+		Message:   "services removed from selected server(s) in environment production",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "RemoveResult",
+  "project": "demo",
+  "environment": "production",
+  "scoped": true,
+  "servers": [
+    {
+      "name": "node-a",
+      "host": "10.0.0.1",
+      "removed": true
+    }
+  ],
+  "startedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 6.7,
+  "message": "services removed from selected server(s) in environment production"
+}`
+	if string(payload) != want {
+		t.Fatalf("remove result document drifted:\n%s", payload)
+	}
+}
+
+// TestDestroyResultDocumentGolden pins the machine-facing destroy schema.
+func TestDestroyResultDocumentGolden(t *testing.T) {
+	result := engine.DestroyResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDestroyResult,
+		Project:     "demo",
+		Environment: "production",
+		Mode:        engine.DestroyModePurge,
+		PurgeAll:    true,
+		Servers: []engine.DestroyServerOutcome{
+			{Name: "node-a", Host: "10.0.0.1", Destroyed: true},
+		},
+		StartedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:  8.9,
+		Message:   "app-owned leftovers pruned; shared server setup preserved",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DestroyResult",
+  "project": "demo",
+  "environment": "production",
+  "mode": "PURGE",
+  "purgeAll": true,
+  "servers": [
+    {
+      "name": "node-a",
+      "host": "10.0.0.1",
+      "destroyed": true
+    }
+  ],
+  "startedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 8.9,
+  "message": "app-owned leftovers pruned; shared server setup preserved"
+}`
+	if string(payload) != want {
+		t.Fatalf("destroy result document drifted:\n%s", payload)
+	}
+}
+
+func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
+	doc := newOperationConfirmationRequiredDocument(
+		"remove deletes all deployed services for this project from the environment",
+		"remove", "demo", "production", []string{"node-a", "node-b"},
+	)
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal confirmation doc: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	if decoded["kind"] != "ConfirmationRequired" {
+		t.Fatalf("kind = %v", decoded["kind"])
+	}
+	if decoded["operation"] != "remove" {
+		t.Fatalf("operation = %v", decoded["operation"])
+	}
+	if decoded["project"] != "demo" || decoded["environment"] != "production" {
+		t.Fatalf("identity fields wrong: %s", payload)
+	}
+	servers, ok := decoded["servers"].([]any)
+	if !ok || len(servers) != 2 {
+		t.Fatalf("servers missing from document: %s", payload)
+	}
+}
+
 func TestConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newConfirmationRequiredDocument("deployment plan includes destructive changes", sampleDeployPlan())
 	payload, err := json.Marshal(doc)

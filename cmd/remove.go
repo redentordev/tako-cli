@@ -14,6 +14,7 @@ import (
 
 var (
 	removeForce   bool
+	removeYes     bool
 	removeServers []string
 )
 
@@ -42,6 +43,7 @@ Examples:
 func init() {
 	rootCmd.AddCommand(removeCmd)
 	removeCmd.Flags().BoolVarP(&removeForce, "force", "f", false, "Skip confirmation prompt")
+	removeCmd.Flags().BoolVar(&removeYes, "yes", false, "Approve removal without the confirmation prompt (same as --force)")
 	removeCmd.Flags().StringSliceVar(&removeServers, "server", nil, "Only remove services from the named environment server(s)")
 }
 
@@ -65,8 +67,18 @@ func runRemove(cmd *cobra.Command, args []string) error {
 	}
 	defer session.Close()
 
-	// Confirmation unless --force
-	if !removeForce {
+	// Confirmation unless --force/--yes
+	if !removeForce && !removeYes {
+		reason := "remove deletes all deployed services for this project from the environment"
+		if machineOutputEnabled() {
+			if err := emitResultDocument(newOperationConfirmationRequiredDocument(reason, "remove", session.ProjectName(), session.Environment(), session.ServerNames())); err != nil {
+				return err
+			}
+			return &engine.ConfirmationRequiredError{Reason: reason}
+		}
+		if err := requireDeployPromptAllowed(reason); err != nil {
+			return &engine.ConfirmationRequiredError{Reason: err.Error()}
+		}
 		fmt.Printf("Type the project name '%s' to confirm: ", session.ProjectName())
 		reader := bufio.NewReader(os.Stdin)
 		input, err := reader.ReadString('\n')
@@ -81,7 +93,12 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	_, err = session.Apply(cmd.Context())
+	result, err := session.Apply(cmd.Context())
+	if result != nil {
+		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+			err = emitErr
+		}
+	}
 	return err
 }
 
