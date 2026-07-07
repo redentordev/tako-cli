@@ -838,6 +838,55 @@ func TestDiscoveryExportsResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestActionResultDocumentGolden pins the machine-facing ack schema used by
+// maintenance, live, and cleanup.
+func TestActionResultDocumentGolden(t *testing.T) {
+	result := engine.ActionResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindActionResult,
+		Project:     "demo",
+		Environment: "production",
+		Action:      engine.ActionMaintenanceEnable,
+		Service:     "web",
+		Outcome:     engine.ActionOutcomePartial,
+		Servers: []engine.ActionNodeOutcome{
+			{Server: "node-a", Host: "10.0.0.1", Done: true},
+			{Server: "node-b", Host: "10.0.0.2", Done: false, Error: "connect: refused"},
+		},
+		Error: "maintenance mode failed on 1/2 node(s): node-b: connect: refused",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "ActionResult",
+  "project": "demo",
+  "environment": "production",
+  "action": "maintenance.enable",
+  "service": "web",
+  "outcome": "partial",
+  "servers": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "done": true
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "done": false,
+      "error": "connect: refused"
+    }
+  ],
+  "error": "maintenance mode failed on 1/2 node(s): node-b: connect: refused"
+}`
+	if string(payload) != want {
+		t.Fatalf("action result document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",

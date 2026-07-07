@@ -4,13 +4,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
@@ -53,6 +56,12 @@ func init() {
 }
 
 func runMaintenance(cmd *cobra.Command, args []string) error {
+	// Machine modes reserve stdout for parseable output.
+	var out io.Writer = os.Stdout
+	if machineOutputEnabled() {
+		out = os.Stderr
+	}
+
 	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
@@ -95,10 +104,10 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	}
 	defer leaseSet.Release(verbose)
 	if verbose {
-		fmt.Printf("→ Acquired remote maintenance leases: %s\n", leaseSet.Summary())
+		fmt.Fprintf(out, "→ Acquired remote maintenance leases: %s\n", leaseSet.Summary())
 	}
 
-	fmt.Printf("Enabling maintenance mode for %s on %d node(s)...\n\n", maintenanceService, len(targetServers))
+	fmt.Fprintf(out, "Enabling maintenance mode for %s on %d node(s)...\n\n", maintenanceService, len(targetServers))
 
 	// Check if user has a custom maintenance.html in the project directory
 	customMaintenancePath := "maintenance.html"
@@ -112,7 +121,7 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 		}
 		maintenanceHTML = string(content)
 		if verbose {
-			fmt.Printf("Using custom maintenance page from ./maintenance.html\n")
+			fmt.Fprintf(out, "Using custom maintenance page from ./maintenance.html\n")
 		}
 	} else {
 		// Use default maintenance page with Tako branding and space shooter game
@@ -425,17 +434,17 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 </body>
 </html>`
 		if verbose {
-			fmt.Printf("Using default maintenance page\n")
-			fmt.Printf("Tip: Create a maintenance.html file in your project to customize this page\n")
+			fmt.Fprintf(out, "Using default maintenance page\n")
+			fmt.Fprintf(out, "Tip: Create a maintenance.html file in your project to customize this page\n")
 		}
 	}
 
 	// Prepare maintenance page content for the container.
-	fmt.Printf("→ Creating maintenance page...\n")
+	fmt.Fprintf(out, "→ Creating maintenance page...\n")
 	encodedHTML := base64.StdEncoding.EncodeToString([]byte(maintenanceHTML))
 
 	// Deploy maintenance container and route-manifest proxy config.
-	fmt.Printf("→ Deploying maintenance container...\n")
+	fmt.Fprintf(out, "→ Deploying maintenance container...\n")
 
 	containerName := maintenanceContainerName(cfg.Project.Name, envName, maintenanceService)
 	networkName := maintenanceNetworkName(cfg.Project.Name, envName)
@@ -464,17 +473,23 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	results := runMaintenanceNodeActions(cfg.Servers, targetServers, func(_ string, server config.ServerConfig) error {
 		return enableMaintenanceOnNode(cfg, sshPool, server, socket, envName, maintenanceService, dynamicConfig, request)
 	})
-	nodeErrors := printMaintenanceNodeResults("Enabling", "enabled", results)
+	nodeErrors := printMaintenanceNodeResults(out, "Enabling", "enabled", results)
+	ack := maintenanceActionResult(cfg, envName, engine.ActionMaintenanceEnable, maintenanceService, results)
 	if len(nodeErrors) > 0 {
-		return fmt.Errorf("maintenance mode failed on %d/%d node(s): %s", len(nodeErrors), len(targetServers), strings.Join(nodeErrors, "; "))
+		err := fmt.Errorf("maintenance mode failed on %d/%d node(s): %s", len(nodeErrors), len(targetServers), strings.Join(nodeErrors, "; "))
+		ack.Error = err.Error()
+		if emitErr := emitResultDocument(ack); emitErr != nil {
+			return emitErr
+		}
+		return err
 	}
 
-	fmt.Printf("✓ Maintenance mode enabled for %s\n", maintenanceService)
-	fmt.Printf("\nThe service is now showing a maintenance page to visitors.\n")
-	fmt.Printf("Service containers are still running in the background.\n")
-	fmt.Printf("\nTo restore normal operation: tako live --service %s\n", maintenanceService)
+	fmt.Fprintf(out, "✓ Maintenance mode enabled for %s\n", maintenanceService)
+	fmt.Fprintf(out, "\nThe service is now showing a maintenance page to visitors.\n")
+	fmt.Fprintf(out, "Service containers are still running in the background.\n")
+	fmt.Fprintf(out, "\nTo restore normal operation: tako live --service %s\n", maintenanceService)
 
-	return nil
+	return emitResultDocument(ack)
 }
 
 type maintenanceNodeAction func(serverName string, server config.ServerConfig) error
@@ -523,18 +538,50 @@ func runMaintenanceNodeActions(servers map[string]config.ServerConfig, targetSer
 	return results
 }
 
-func printMaintenanceNodeResults(actionLabel string, successLabel string, results []maintenanceNodeResult) []string {
+func printMaintenanceNodeResults(out io.Writer, actionLabel string, successLabel string, results []maintenanceNodeResult) []string {
 	var nodeErrors []string
 	for _, result := range results {
-		fmt.Printf("→ %s on %s (%s)...\n", actionLabel, result.serverName, result.host)
+		fmt.Fprintf(out, "→ %s on %s (%s)...\n", actionLabel, result.serverName, result.host)
 		if result.err != nil {
 			nodeErrors = append(nodeErrors, fmt.Sprintf("%s: %v", result.serverName, result.err))
-			fmt.Printf("  failed: %v\n", result.err)
+			fmt.Fprintf(out, "  failed: %v\n", result.err)
 			continue
 		}
-		fmt.Printf("  %s\n", successLabel)
+		fmt.Fprintf(out, "  %s\n", successLabel)
 	}
 	return nodeErrors
+}
+
+// maintenanceActionResult builds the minimal acknowledgement document for a
+// maintenance/live node fanout.
+func maintenanceActionResult(cfg *config.Config, envName string, action string, service string, results []maintenanceNodeResult) engine.ActionResult {
+	ack := engine.ActionResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindActionResult,
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Action:      action,
+		Service:     service,
+		Servers:     []engine.ActionNodeOutcome{},
+	}
+	failures := 0
+	for _, result := range results {
+		outcome := engine.ActionNodeOutcome{Server: result.serverName, Host: result.host, Done: result.err == nil}
+		if result.err != nil {
+			outcome.Error = result.err.Error()
+			failures++
+		}
+		ack.Servers = append(ack.Servers, outcome)
+	}
+	switch {
+	case failures == 0:
+		ack.Outcome = engine.ActionOutcomeOK
+	case failures == len(results):
+		ack.Outcome = engine.ActionOutcomeFailed
+	default:
+		ack.Outcome = engine.ActionOutcomePartial
+	}
+	return ack
 }
 
 func runMaintenanceWithClient(pool sshClientProvider, server config.ServerConfig, execute func(*ssh.Client) error) error {

@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -50,12 +51,12 @@ func decodeTakodJSON(output string, value any) error {
 	return nil
 }
 
-func printCleanupWarnings(response *takod.CleanupResponse) {
+func printCleanupWarnings(out io.Writer, response *takod.CleanupResponse) {
 	if response == nil {
 		return
 	}
 	for _, warning := range response.Warnings {
-		fmt.Printf("  Warning: %s\n", warning)
+		fmt.Fprintf(out, "  Warning: %s\n", warning)
 	}
 }
 

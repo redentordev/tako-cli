@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -196,7 +197,7 @@ func TestRunMaintenanceNodeActionsRecordsErrors(t *testing.T) {
 		t.Fatalf("missing node should record configuration error")
 	}
 
-	errors := printMaintenanceNodeResults("Testing", "done", results)
+	errors := printMaintenanceNodeResults(os.Stdout, "Testing", "done", results)
 	if !slices.Equal(errors, []string{"node-a: takod unavailable", "missing: server not found in configuration"}) {
 		t.Fatalf("errors = %#v", errors)
 	}

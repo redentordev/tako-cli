@@ -183,7 +183,14 @@ discovery exports --output json` returns a `DiscoveryExportsResult` with
 the environment (or `allEnvironments`) and per-node export records
 (takod discovery schema: `network`, `project`, `environment`, `service`,
 `alias`) or a per-node `error`; the command-local `--json` flag predates
-this contract and is rejected together with the global machine modes. The
+this contract and is rejected together with the global machine modes.
+`tako maintenance`, `tako live`, and `tako cleanup` return an
+`ActionResult` acknowledgement with `action` (`maintenance.enable`,
+`maintenance.disable`, `cleanup`), optional `service`, overall `outcome`
+(`ok`, `partial`, `failed`), and per-server outcomes (`done`, `error`,
+cleanup `warnings`); cleanup errors/warnings exit 6 (previously 0) and
+still emit the document. `tako start`/`tako stop` return the same
+`ScaleResult` as `tako scale`. The
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
 
