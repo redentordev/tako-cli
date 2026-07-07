@@ -14,6 +14,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
+	"github.com/redentordev/tako-cli/pkg/takod"
 )
 
 func TestExitCodeForErrorTaxonomy(t *testing.T) {
@@ -571,6 +572,65 @@ func TestMetricsResultDocumentGolden(t *testing.T) {
 }`
 	if string(payload) != want {
 		t.Fatalf("metrics result document drifted:\n%s", payload)
+	}
+}
+
+// TestStatsResultDocumentGolden pins the machine-facing stats schema.
+func TestStatsResultDocumentGolden(t *testing.T) {
+	result := engine.StatsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindStatsResult,
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		CollectedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Nodes: []engine.StatsNodeSample{
+			{
+				Server: "node-a",
+				Host:   "10.0.0.1",
+				Containers: []takod.ContainerStat{
+					{Name: "demo-production-web-1", CPUPercent: "1.2%", MemUsage: "64MiB / 1GiB", MemPercent: "6.4%", NetIO: "1kB / 2kB", BlockIO: "0B / 0B", PIDs: "4"},
+				},
+			},
+			{Server: "node-b", Host: "10.0.0.2", Error: "stats: takod unreachable"},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "StatsResult",
+  "project": "demo",
+  "environment": "production",
+  "service": "web",
+  "collectedAt": "2026-07-06T12:00:00Z",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "containers": [
+        {
+          "name": "demo-production-web-1",
+          "cpuPercent": "1.2%",
+          "memUsage": "64MiB / 1GiB",
+          "memPercent": "6.4%",
+          "netIO": "1kB / 2kB",
+          "blockIO": "0B / 0B",
+          "pids": "4"
+        }
+      ]
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "error": "stats: takod unreachable"
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("stats result document drifted:\n%s", payload)
 	}
 }
 

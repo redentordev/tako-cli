@@ -2,22 +2,29 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
+	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 )
 
 var (
-	statsLive    bool
-	statsService string
-	statsAll     bool
+	statsLive     bool
+	statsFollow   bool
+	statsInterval time.Duration
+	statsService  string
+	statsAll      bool
 )
 
 var statsCmd = &cobra.Command{
@@ -33,6 +40,8 @@ By default, shows stats for the current project's containers.`,
 func init() {
 	rootCmd.AddCommand(statsCmd)
 	statsCmd.Flags().BoolVar(&statsLive, "live", false, "Continuous live updates")
+	statsCmd.Flags().BoolVar(&statsFollow, "follow", false, "Stream stats.sample events (requires --events ndjson)")
+	statsCmd.Flags().DurationVar(&statsInterval, "interval", 5*time.Second, "Sample interval for --follow")
 	statsCmd.Flags().StringVarP(&statsService, "service", "s", "", "Filter by service name")
 	statsCmd.Flags().BoolVar(&statsAll, "all", false, "Show all containers (not just current project)")
 }
@@ -66,29 +75,117 @@ func runStats(cmd *cobra.Command, args []string) error {
 	defer sshPool.CloseAll()
 
 	if statsLive {
+		if machineOutputEnabled() {
+			return &engine.InvalidRequestError{Err: fmt.Errorf("--live is interactive-only; use --follow --events ndjson to stream stats in machine output modes")}
+		}
 		return showLiveStats(cfg, servers, sshPool, envName)
+	}
+
+	if statsFollow {
+		if eventsFormatFlag != eventsFormatNDJSON {
+			return &engine.InvalidRequestError{Err: fmt.Errorf("--follow streams stats.sample events and requires --events ndjson")}
+		}
+		return followStats(cmd, cfg, servers, sshPool, envName)
 	}
 
 	return showStatsOnce(cfg, servers, sshPool, envName)
 }
 
-func showStatsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, envName string) error {
-	fmt.Printf("\n=== Container Statistics ===\n")
-	fmt.Printf("Timestamp: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
+// followStats streams one stats.sample event per node per interval until the
+// command context is cancelled (Ctrl+C / SIGTERM), mirroring `logs --follow`.
+func followStats(cmd *cobra.Command, cfg *config.Config, servers []string, sshPool *ssh.Pool, envName string) error {
+	interval := statsInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 
-	for _, result := range collectStatsOnce(cfg, servers, sshPool, envName) {
-		if result.connectErr != nil {
-			fmt.Printf("❌ %s (%s): Failed to connect - %v\n\n", result.serverName, result.host, result.connectErr)
-			continue
+	for {
+		for _, nodeResult := range collectStatsOnce(cfg, servers, sshPool, envName) {
+			sample := statsNodeSampleDocument(nodeResult)
+			data := map[string]any{
+				"server":     sample.Server,
+				"host":       sample.Host,
+				"containers": sample.Containers,
+			}
+			if sample.Error != "" {
+				data["error"] = sample.Error
+			}
+			cliEngine().EventStream().Emit(events.Event{
+				Type:  events.TypeStatsSample,
+				Phase: events.PhaseLogs,
+				Level: events.LevelInfo,
+				Data:  data,
+			})
 		}
-		if result.statsErr != nil {
-			fmt.Printf("❌ %s (%s): Failed to get stats - %v\n\n", result.serverName, result.host, result.statsErr)
-			continue
+		select {
+		case <-cmd.Context().Done():
+			return nil
+		case <-ticker.C:
 		}
-		displayContainerStats(result.serverName, result.host, result.stats)
+	}
+}
+
+func statsNodeSampleDocument(nodeResult statsNodeResult) engine.StatsNodeSample {
+	sample := engine.StatsNodeSample{Server: nodeResult.serverName, Host: nodeResult.host}
+	switch {
+	case nodeResult.connectErr != nil:
+		sample.Error = nodeResult.connectErr.Error()
+	case nodeResult.statsErr != nil:
+		sample.Error = nodeResult.statsErr.Error()
+	default:
+		sample.Containers = nodeResult.stats
+	}
+	return sample
+}
+
+func showStatsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, envName string) error {
+	// Machine modes reserve stdout for parseable output.
+	var out io.Writer = os.Stdout
+	if machineOutputEnabled() {
+		out = os.Stderr
+	}
+	fmt.Fprintf(out, "\n=== Container Statistics ===\n")
+	fmt.Fprintf(out, "Timestamp: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
+
+	result := engine.StatsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindStatsResult,
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Service:     statsService,
+		All:         statsAll,
+		CollectedAt: time.Now().UTC(),
+		Nodes:       []engine.StatsNodeSample{},
+	}
+	failures := 0
+	for _, nodeResult := range collectStatsOnce(cfg, servers, sshPool, envName) {
+		if nodeResult.connectErr != nil {
+			fmt.Fprintf(out, "❌ %s (%s): Failed to connect - %v\n\n", nodeResult.serverName, nodeResult.host, nodeResult.connectErr)
+			failures++
+		} else if nodeResult.statsErr != nil {
+			fmt.Fprintf(out, "❌ %s (%s): Failed to get stats - %v\n\n", nodeResult.serverName, nodeResult.host, nodeResult.statsErr)
+			failures++
+		} else {
+			displayContainerStats(out, nodeResult.serverName, nodeResult.host, nodeResult.stats)
+		}
+		result.Nodes = append(result.Nodes, statsNodeSampleDocument(nodeResult))
 	}
 
-	return nil
+	var err error
+	switch {
+	case failures == len(result.Nodes) && failures > 0:
+		err = fmt.Errorf("failed to read stats from all %d node(s)", failures)
+		result.Error = err.Error()
+	case failures > 0:
+		err = &engine.AttentionError{Err: fmt.Errorf("failed to read stats from %d of %d node(s)", failures, len(result.Nodes))}
+		result.Error = err.Error()
+	}
+	if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+		err = emitErr
+	}
+	return err
 }
 
 type statsNodeResult struct {
@@ -194,7 +291,7 @@ func showLiveStats(cfg *config.Config, servers []string, sshPool *ssh.Pool, envN
 				continue
 			}
 
-			displayContainerStats(serverName, server.Host, response.Stats)
+			displayContainerStats(os.Stdout, serverName, server.Host, response.Stats)
 		}
 
 		<-ticker.C
@@ -218,10 +315,10 @@ func readStatsViaTakodWithOptions(client *ssh.Client, cfg *config.Config, envNam
 	return &response, nil
 }
 
-func displayContainerStats(serverName, serverHost string, stats []takod.ContainerStat) {
+func displayContainerStats(out io.Writer, serverName, serverHost string, stats []takod.ContainerStat) {
 	if len(stats) == 0 {
-		fmt.Printf("📊 %s (%s)\n", serverName, serverHost)
-		fmt.Printf("No containers found\n\n")
+		fmt.Fprintf(out, "📊 %s (%s)\n", serverName, serverHost)
+		fmt.Fprintf(out, "No containers found\n\n")
 		return
 	}
 
@@ -229,10 +326,10 @@ func displayContainerStats(serverName, serverHost string, stats []takod.Containe
 		return stats[i].Name < stats[j].Name
 	})
 
-	fmt.Printf("📊 %s (%s)\n", serverName, serverHost)
-	fmt.Printf("─────────────────────────────────────────────────────────────────────────────────────\n")
-	fmt.Printf("%-40s %10s %20s %10s %20s %15s\n", "CONTAINER", "CPU %", "MEMORY", "MEM %", "NET I/O", "BLOCK I/O")
-	fmt.Printf("─────────────────────────────────────────────────────────────────────────────────────\n")
+	fmt.Fprintf(out, "📊 %s (%s)\n", serverName, serverHost)
+	fmt.Fprintf(out, "─────────────────────────────────────────────────────────────────────────────────────\n")
+	fmt.Fprintf(out, "%-40s %10s %20s %10s %20s %15s\n", "CONTAINER", "CPU %", "MEMORY", "MEM %", "NET I/O", "BLOCK I/O")
+	fmt.Fprintf(out, "─────────────────────────────────────────────────────────────────────────────────────\n")
 
 	for _, stat := range stats {
 		// Truncate container name if too long
@@ -241,7 +338,7 @@ func displayContainerStats(serverName, serverHost string, stats []takod.Containe
 			name = name[:35] + "..."
 		}
 
-		fmt.Printf("%-40s %10s %20s %10s %20s %15s\n",
+		fmt.Fprintf(out, "%-40s %10s %20s %10s %20s %15s\n",
 			name,
 			stat.CPUPercent,
 			stat.MemUsage,
@@ -251,5 +348,5 @@ func displayContainerStats(serverName, serverHost string, stats []takod.Containe
 		)
 	}
 
-	fmt.Printf("\n")
+	fmt.Fprintf(out, "\n")
 }

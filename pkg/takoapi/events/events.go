@@ -71,6 +71,11 @@ const (
 	TypeNotificationSent = "notification.sent"
 	TypeDomainStatus     = "domain.status"
 
+	// TypeStatsSample carries one node's point-in-time container stats in
+	// `tako stats --follow --events ndjson`; data holds server, host, and
+	// containers (same shape as the StatsResult node samples).
+	TypeStatsSample = "stats.sample"
+
 	TypeWarning = "warning"
 
 	// TypeResult is the terminal event carrying the operation result document

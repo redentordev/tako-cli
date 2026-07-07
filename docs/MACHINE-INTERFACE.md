@@ -158,7 +158,15 @@ project/environment, the `--server` filter when set, `collectedAt`, and
 per-node samples where `metrics` carries the takod `/v1/metrics` document
 verbatim (monitoring-agent schema) or `error` says why the read failed;
 all nodes failing exits 1, a partial read exits 6, both still emit the
-document. The Go definitions in `pkg/engine` (`types.go`
+document. `tako stats --output json` (point-in-time; `--live` is rejected
+in machine modes) returns a `StatsResult` with project/environment, the
+`--service`/`--all` filters, `collectedAt`, and per-node samples whose
+`containers` reuse the takod stats schema (`name`, `cpuPercent`,
+`memUsage`, `memPercent`, `netIO`, `blockIO`, `pids`); the same
+all-fail/partial exit rule applies. `tako stats --follow --events ndjson`
+streams one `stats.sample` event per node per `--interval` (default 5s)
+whose `data` carries `server`, `host`, and `containers` in the same shape,
+until cancelled. The Go definitions in `pkg/engine` (`types.go`
 and per-command files) are the source of truth.
 
 ## Config Export / Pull
