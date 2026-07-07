@@ -651,12 +651,14 @@ func validateJobSpec(spec *JobSpec) error {
 }
 
 // jobCronSpec renders the cron spec, carrying the job's timezone via the
-// CRON_TZ= prefix robfig/cron parses natively.
+// CRON_TZ= prefix robfig/cron parses natively. Jobs default to UTC so a
+// schedule means the same thing on every node, unlike server-local time.
 func jobCronSpec(spec JobSpec) string {
-	if spec.Timezone != "" {
-		return "CRON_TZ=" + spec.Timezone + " " + spec.Schedule
+	timezone := spec.Timezone
+	if timezone == "" {
+		timezone = "UTC"
 	}
-	return spec.Schedule
+	return "CRON_TZ=" + timezone + " " + spec.Schedule
 }
 
 func (s *JobScheduler) loadSpecs(ctx context.Context) error {

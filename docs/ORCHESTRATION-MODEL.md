@@ -364,6 +364,42 @@ For ad-hoc commands against a deployed service (debugging, framework tasks),
 use `tako exec SERVICE -- CMD` — attach to a running replica, or `--oneoff`
 for a fresh container from the service's current image.
 
+### Scheduled jobs
+
+`kind: job` declares a service that runs on a cron schedule instead of as
+long-running replicas:
+
+```yaml
+services:
+  report:
+    kind: job
+    schedule: "*/5 * * * *"   # robfig/cron, @every/@daily also accepted
+    timezone: Europe/Berlin    # optional; default UTC
+    timeout: 30m               # optional; kill + record failed (default 1h)
+    build: ./report            # or image:
+    command: generate-report
+```
+
+Jobs require `schedule` and `command`; they accept `image`/`build`, `env`,
+`envFile`, `secrets`, `volumes`, `placement`, and `dependsOn`, and reject
+`proxy`, `replicas`, `healthCheck`, `loadBalancer`, and `persistent`. A
+deploy builds the job's image exactly like a service's, distributes it to
+the **owning node** — the job's first placement target, so multi-node
+meshes never double-fire — and registers the schedule with that node's
+agent. The agent fires each run as a one-off `--rm` container with the
+job's env/secrets and the project network, records a bounded history (last
+50 runs with an output tail), skips a firing whose previous run is still in
+progress (recorded as `skipped`), and kills runs that exceed `timeout`
+(recorded as `timeout`). Deploys reconcile schedules declaratively: a job
+removed from the config (or a full `tako remove`) is unscheduled on every
+node in the same pass.
+
+`tako jobs` lists schedules with next/last runs, `tako jobs runs [JOB]`
+shows history, `tako jobs trigger JOB` fires a run immediately and streams
+its output, and `tako logs JOB` prints the latest run's recorded output.
+In plans and `tako ps`, a job's actual state is its registered schedule —
+not container presence — so an idle job is "up-to-date", never drift.
+
 ## Placement
 
 ```text

@@ -76,8 +76,8 @@ func TestValidateJobSpecRejectsBadInput(t *testing.T) {
 
 func TestJobCronSpecCarriesTimezone(t *testing.T) {
 	spec := validJobSpecFixture()
-	if got := jobCronSpec(spec); got != spec.Schedule {
-		t.Fatalf("spec without timezone = %q", got)
+	if got := jobCronSpec(spec); got != "CRON_TZ=UTC */5 * * * *" {
+		t.Fatalf("spec without timezone = %q, want UTC default", got)
 	}
 	spec.Timezone = "Europe/Berlin"
 	if got := jobCronSpec(spec); got != "CRON_TZ=Europe/Berlin */5 * * * *" {
