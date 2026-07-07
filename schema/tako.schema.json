@@ -145,6 +145,25 @@
         }
       }
     },
+    "registries": {
+      "type": "object",
+      "description": "Private image registry credentials keyed by host (e.g. ghcr.io). Passwords must be ${ENV_VAR} references; credentials are request-scoped and never persisted on nodes.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "Registry username. Use ${ENV_VAR}."
+          },
+          "password": {
+            "type": "string",
+            "description": "Registry password or token. Must be an ${ENV_VAR} reference."
+          }
+        },
+        "required": ["username", "password"],
+        "additionalProperties": false
+      }
+    },
     "servers": {
       "type": "object",
       "description": "Explicit SSH server connection details",

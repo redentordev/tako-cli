@@ -131,8 +131,17 @@ func (r *maxBytesReader) Read(p []byte) (int, error) {
 }
 
 func BuildImage(ctx context.Context, image string, r io.Reader, dockerfile ...string) (*ImageBuildResponse, error) {
+	return BuildImageWithAuth(ctx, image, r, nil, dockerfile...)
+}
+
+// BuildImageWithAuth builds like BuildImage; auths feed an ephemeral
+// DOCKER_CONFIG so the daemon can pull private base images during FROM.
+func BuildImageWithAuth(ctx context.Context, image string, r io.Reader, auths []RegistryAuth, dockerfile ...string) (*ImageBuildResponse, error) {
 	totalStart := time.Now()
 	if err := validateImageName(image); err != nil {
+		return nil, err
+	}
+	if err := validateRegistryAuths(auths); err != nil {
 		return nil, err
 	}
 	dockerfilePath := ""
@@ -170,12 +179,20 @@ func BuildImage(ctx context.Context, image string, r io.Reader, dockerfile ...st
 	args = append(args, ".")
 	cmd := dockerCommandContext(ctx, "docker", args...)
 	cmd.Dir = buildDir
+	if len(auths) > 0 {
+		authDir, cleanupAuth, err := writeEphemeralDockerConfig(auths)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanupAuth()
+		cmd.Env = dockerAuthEnv(authDir)
+	}
 	output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
 	cmd.Stdout = output
 	cmd.Stderr = output
 	buildStart := time.Now()
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to build image %s: %w, output: %s", image, err, annotateDockerBuildFailure(output.String()))
+		return nil, fmt.Errorf("failed to build image %s: %w, output: %s", image, err, annotateRegistryAuthFailure(annotateDockerBuildFailure(output.String())))
 	}
 	buildDuration := time.Since(buildStart)
 	if _, err := runDocker(ctx, "image", "inspect", image); err != nil {

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"unicode"
 
@@ -28,6 +29,12 @@ type runOptions struct {
 	Yes         bool
 	PlanOnly    bool
 	PlanFile    string
+	// RegistryUser pairs with a password read from stdin
+	// (--registry-password-stdin); a bare password argv flag would leak
+	// through process listings.
+	RegistryUser          string
+	RegistryPasswordStdin bool
+	registryPassword      string
 }
 
 type runDeployRunner func(cmd *cobra.Command, imageRef string, opts runOptions, cfg *config.Config, service config.ServiceConfig, envVars map[string]string) error
@@ -54,6 +61,9 @@ func newRunCommand() *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			imageRef := strings.TrimSpace(args[0])
+			if err := readRunRegistryPassword(cmd, &opts); err != nil {
+				return err
+			}
 			cfg, service, envVars, err := synthesizeRunConfig(imageRef, &opts)
 			if err != nil {
 				return err
@@ -77,7 +87,48 @@ func newRunCommand() *cobra.Command {
 	flags.BoolVarP(&opts.Yes, "yes", "y", opts.Yes, "Skip confirmation prompts (non-interactive mode)")
 	flags.BoolVar(&opts.PlanOnly, "plan-only", opts.PlanOnly, "Compute and show the reconciliation plan without applying it")
 	flags.StringVar(&opts.PlanFile, "plan", opts.PlanFile, "Path to a reviewed plan document; apply fails if the computed plan drifted from it")
+	flags.StringVar(&opts.RegistryUser, "registry-user", opts.RegistryUser, "Username for the image's registry (pair with --registry-password-stdin)")
+	flags.BoolVar(&opts.RegistryPasswordStdin, "registry-password-stdin", opts.RegistryPasswordStdin, "Read the registry password from stdin")
 	return cmd
+}
+
+// readRunRegistryPassword consumes the registry password from stdin when
+// requested. There is deliberately no --registry-password flag: argv is
+// visible in process listings.
+func readRunRegistryPassword(cmd *cobra.Command, opts *runOptions) error {
+	if opts.RegistryPasswordStdin && strings.TrimSpace(opts.RegistryUser) == "" {
+		return fmt.Errorf("--registry-password-stdin requires --registry-user")
+	}
+	if !opts.RegistryPasswordStdin {
+		if strings.TrimSpace(opts.RegistryUser) != "" {
+			return fmt.Errorf("--registry-user requires --registry-password-stdin")
+		}
+		return nil
+	}
+	data, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		return fmt.Errorf("failed to read registry password from stdin: %w", err)
+	}
+	opts.registryPassword = strings.TrimSpace(string(data))
+	if opts.registryPassword == "" {
+		return fmt.Errorf("registry password on stdin is empty")
+	}
+	return nil
+}
+
+// runImageRegistryHost extracts the registry host from an image reference;
+// bare Docker Hub references map to docker.io.
+func runImageRegistryHost(imageRef string) string {
+	first := imageRef
+	if idx := strings.IndexByte(imageRef, '/'); idx >= 0 {
+		first = imageRef[:idx]
+	} else {
+		return "docker.io"
+	}
+	if strings.ContainsAny(first, ".:") || first == "localhost" {
+		return first
+	}
+	return "docker.io"
 }
 
 func synthesizeRunConfig(imageRef string, opts *runOptions) (*config.Config, config.ServiceConfig, map[string]string, error) {
@@ -111,11 +162,21 @@ func synthesizeRunConfig(imageRef string, opts *runOptions) (*config.Config, con
 			Visibility: config.ProxyVisibilityPublic,
 		}
 	}
+	var registries map[string]config.RegistryConfig
+	if opts.registryPassword != "" {
+		registries = map[string]config.RegistryConfig{
+			runImageRegistryHost(imageRef): {
+				Username: opts.RegistryUser,
+				Password: opts.registryPassword,
+			},
+		}
+	}
 	cfg := &config.Config{
 		Project: config.ProjectConfig{
 			Name:    opts.Name,
 			Version: version,
 		},
+		Registries: registries,
 		Servers: map[string]config.ServerConfig{
 			opts.ServerName: {
 				Host:     opts.Server,

@@ -833,6 +833,9 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		ExternalVolumes:    externalVolumes,
 		MemoryLimit:        serviceMemoryLimit(service),
 	}
+	if pullImage {
+		request.RegistryAuths = d.registryAuths()
+	}
 	serviceRevision := takodServiceRevisionID(d.config.Project.Name, d.environment, serviceName, imageRef, *service)
 	serviceStrategy := effectiveDeployStrategy(service)
 	request.Revision = serviceRevision
@@ -853,7 +856,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		request.Containers = append(request.Containers, container)
 	}
 
-	if err := d.reconcileServiceViaTakod(client, request); err != nil {
+	if err := d.wrapRegistryAuthError(serverName, d.reconcileServiceViaTakod(client, request)); err != nil {
 		return err
 	}
 	if warmOnly {

@@ -67,6 +67,73 @@ func TestSynthesizeRunConfigShape(t *testing.T) {
 	}
 }
 
+func TestRunImageRegistryHost(t *testing.T) {
+	for image, want := range map[string]string{
+		"nginx:1.27":                       "docker.io",
+		"acme/app:v1":                      "docker.io",
+		"ghcr.io/acme/app:v1":              "ghcr.io",
+		"localhost:5000/app:v1":            "localhost:5000",
+		"registry.example.com:8443/app:v1": "registry.example.com:8443",
+		"localhost/app:v1":                 "localhost",
+	} {
+		if got := runImageRegistryHost(image); got != want {
+			t.Fatalf("runImageRegistryHost(%q) = %q, want %q", image, got, want)
+		}
+	}
+}
+
+func TestSynthesizeRunConfigCarriesRegistryCredentials(t *testing.T) {
+	opts := runOptions{
+		Name:             "web",
+		Port:             80,
+		Server:           "prod-1.example.com",
+		Environment:      "production",
+		User:             "deploy",
+		Password:         "${PW}",
+		SSHPort:          22,
+		Replicas:         1,
+		RegistryUser:     "octocat",
+		registryPassword: "gh-token",
+	}
+	cfg, _, _, err := synthesizeRunConfig("ghcr.io/acme/web:v1", &opts)
+	if err != nil {
+		t.Fatalf("synthesizeRunConfig returned error: %v", err)
+	}
+	registry, ok := cfg.Registries["ghcr.io"]
+	if !ok {
+		t.Fatalf("registries = %#v, want ghcr.io entry", cfg.Registries)
+	}
+	if registry.Username != "octocat" || registry.Password != "gh-token" {
+		t.Fatalf("registry = %#v", registry)
+	}
+}
+
+func TestReadRunRegistryPasswordFromStdin(t *testing.T) {
+	cmd := newRunCommand()
+	cmd.SetIn(strings.NewReader("gh-token\n"))
+	opts := runOptions{RegistryUser: "octocat", RegistryPasswordStdin: true}
+	if err := readRunRegistryPassword(cmd, &opts); err != nil {
+		t.Fatalf("readRunRegistryPassword: %v", err)
+	}
+	if opts.registryPassword != "gh-token" {
+		t.Fatalf("password = %q, want trimmed stdin value", opts.registryPassword)
+	}
+}
+
+func TestReadRunRegistryPasswordFlagPairing(t *testing.T) {
+	cmd := newRunCommand()
+	cmd.SetIn(strings.NewReader(""))
+	if err := readRunRegistryPassword(cmd, &runOptions{RegistryPasswordStdin: true}); err == nil {
+		t.Fatal("stdin flag without --registry-user accepted")
+	}
+	if err := readRunRegistryPassword(cmd, &runOptions{RegistryUser: "octocat"}); err == nil {
+		t.Fatal("--registry-user without --registry-password-stdin accepted")
+	}
+	if err := readRunRegistryPassword(cmd, &runOptions{RegistryUser: "octocat", RegistryPasswordStdin: true}); err == nil {
+		t.Fatal("empty stdin password accepted")
+	}
+}
+
 func TestSynthesizeRunConfigDefaults(t *testing.T) {
 	opts := runOptions{Name: "web", Port: 8080, Server: "prod-1", User: "deploy", Password: "${PW}"}
 	cfg, service, _, err := synthesizeRunConfig("nginx", &opts)

@@ -441,8 +441,21 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 		}
 		defer archive.Close()
 
+		endpoint := takodclient.ImageBuildEndpoint(fullImageName, service.Dockerfile)
+		body := io.Reader(archive)
+		if auths := d.registryAuths(); len(auths) > 0 {
+			// Credentials ride the body as a JSON preamble line ahead of
+			// the tar stream — never the URL or argv (ADR 10).
+			preamble, err := json.Marshal(map[string]any{"registryAuths": auths})
+			if err != nil {
+				return "", fmt.Errorf("failed to encode registry auth preamble: %w", err)
+			}
+			endpoint = takodclient.ImageBuildEndpointWithAuth(fullImageName, service.Dockerfile)
+			body = io.MultiReader(bytes.NewReader(append(preamble, '\n')), archive)
+		}
+
 		streamStart := time.Now()
-		output, err := takodclient.StreamRequest(client, d.takodSocket(), "POST", takodclient.ImageBuildEndpoint(fullImageName, service.Dockerfile), archive)
+		output, err := takodclient.StreamRequest(client, d.takodSocket(), "POST", endpoint, body)
 		streamDuration := time.Since(streamStart)
 		var response takod.ImageBuildResponse
 		if err == nil {
@@ -469,7 +482,7 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 		}
 
 		if err != nil {
-			return "", fmt.Errorf("failed to build Docker image through takod: %w", err)
+			return "", d.wrapRegistryAuthError("", fmt.Errorf("failed to build Docker image through takod: %w", err))
 		}
 
 		if d.verbose {

@@ -334,6 +334,16 @@ The mapping is derived from typed engine error classes
 - Service environment values and SSH passwords are registered with a
   redactor before any event is emitted; event messages and string data
   values pass through it.
+- Registry passwords from the top-level `registries:` block are registered
+  with the same redactor. Config validation rejects literal registry
+  passwords before environment expansion — they must be `${ENV_VAR}`
+  references — so plaintext credentials never live in `tako.yaml`.
+- Registry credentials are request-scoped: they ride typed request bodies
+  to `takod` (never argv, query strings, or replicated state), back an
+  ephemeral `DOCKER_CONFIG` for the single pull/build, and are deleted
+  before the response returns. An authentication failure surfaces as an
+  `image.pull.auth_failed` event and a failed result (exit 1); the
+  credential values themselves never appear in events or result documents.
 - Deployment records store env **keys** only (`<redacted>` values).
 - Generated configs (`tako config export`) redact SSH passwords and
   placeholder env values.

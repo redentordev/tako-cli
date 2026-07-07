@@ -85,6 +85,26 @@ func TestApplyRemovalsStopsOnFailure(t *testing.T) {
 	}
 }
 
+func TestRegisterRegistrySecretsRedactsCredentials(t *testing.T) {
+	sink := &events.BufferSink{}
+	eng := New(Options{Sink: sink})
+	eng.RegisterRegistrySecrets(&config.Config{
+		Registries: map[string]config.RegistryConfig{
+			"ghcr.io": {Username: "octocat", Password: "gh-registry-token"},
+		},
+	})
+
+	eng.info(events.TypeLogLine, events.PhaseDeploy, "pull failed: login with gh-registry-token rejected\n")
+
+	emitted := sink.Events()
+	if len(emitted) != 1 {
+		t.Fatalf("events = %d, want 1", len(emitted))
+	}
+	if strings.Contains(emitted[0].Message, "gh-registry-token") {
+		t.Fatalf("event leaked registry credential: %q", emitted[0].Message)
+	}
+}
+
 func TestEngineEventsRedactRegisteredSecrets(t *testing.T) {
 	sink := &events.BufferSink{}
 	eng := New(Options{Sink: sink})

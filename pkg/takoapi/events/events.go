@@ -110,6 +110,11 @@ const (
 	// reconciliation during a deploy.
 	TypeDeployJobsApplied = "deploy.jobs.applied"
 
+	// TypeImagePullAuthFailed marks an image pull/build that failed due to
+	// registry credentials, distinct from image-not-found, so control
+	// planes can prompt for credential rotation.
+	TypeImagePullAuthFailed = "image.pull.auth_failed"
+
 	// Job command events mirror the exec stream for `tako jobs trigger`.
 	TypeJobTriggerStarted   = "jobs.trigger.started"
 	TypeJobTriggerOutput    = "jobs.trigger.output"

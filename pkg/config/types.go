@@ -17,16 +17,23 @@ import (
 
 // Config represents the main configuration structure
 type Config struct {
-	Schema        string                       `yaml:"$schema,omitempty" json:"$schema,omitempty"` // JSON Schema reference
-	Project       ProjectConfig                `yaml:"project" json:"project"`
-	Runtime       *RuntimeConfig               `yaml:"runtime,omitempty" json:"runtime,omitempty"`
-	Mesh          *MeshConfig                  `yaml:"mesh,omitempty" json:"mesh,omitempty"`
-	State         *StateConfig                 `yaml:"state,omitempty" json:"state,omitempty"`
-	Deployment    *DeploymentConfig            `yaml:"deployment,omitempty" json:"deployment,omitempty"`
-	Notifications *NotificationsConfig         `yaml:"notifications,omitempty" json:"notifications,omitempty"`
-	Volumes       map[string]VolumeConfig      `yaml:"volumes,omitempty" json:"volumes,omitempty"` // Top-level volume definitions
-	Servers       map[string]ServerConfig      `yaml:"servers" json:"servers"`
-	Environments  map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
+	Schema        string                  `yaml:"$schema,omitempty" json:"$schema,omitempty"` // JSON Schema reference
+	Project       ProjectConfig           `yaml:"project" json:"project"`
+	Runtime       *RuntimeConfig          `yaml:"runtime,omitempty" json:"runtime,omitempty"`
+	Mesh          *MeshConfig             `yaml:"mesh,omitempty" json:"mesh,omitempty"`
+	State         *StateConfig            `yaml:"state,omitempty" json:"state,omitempty"`
+	Deployment    *DeploymentConfig       `yaml:"deployment,omitempty" json:"deployment,omitempty"`
+	Notifications *NotificationsConfig    `yaml:"notifications,omitempty" json:"notifications,omitempty"`
+	Volumes       map[string]VolumeConfig `yaml:"volumes,omitempty" json:"volumes,omitempty"` // Top-level volume definitions
+	// Registries holds private image registry credentials keyed by host
+	// (e.g. ghcr.io). Values must be ${ENV_VAR} references — literal
+	// passwords in the config file are rejected at load time. Credentials
+	// are request-scoped: they ride individual pull/build requests and are
+	// never persisted on nodes.
+	Registries map[string]RegistryConfig `yaml:"registries,omitempty" json:"registries,omitempty"`
+
+	Servers      map[string]ServerConfig      `yaml:"servers" json:"servers"`
+	Environments map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
 }
 
 const (
@@ -114,6 +121,12 @@ type NotificationsConfig struct {
 }
 
 // ProjectConfig defines project metadata
+// RegistryConfig holds credentials for one private image registry.
+type RegistryConfig struct {
+	Username string `yaml:"username,omitempty" json:"username,omitempty"` // Use ${ENV_VAR}
+	Password string `yaml:"password,omitempty" json:"password,omitempty"` // Use ${ENV_VAR}
+}
+
 type ProjectConfig struct {
 	Name    string `yaml:"name" json:"name"`
 	Version string `yaml:"version" json:"version"`
@@ -924,6 +937,12 @@ func LoadConfig(configPath string) (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	// Registry passwords must be env refs, not literals; the check runs on
+	// the raw content because expansion below erases the distinction.
+	if err := validateRawRegistryCredentials(data, isJSON); err != nil {
+		return nil, err
 	}
 
 	// Expand environment variables in the content with trimming

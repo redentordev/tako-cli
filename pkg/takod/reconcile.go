@@ -48,6 +48,10 @@ type ReconcileServiceRequest struct {
 	Health             *HealthSpec             `json:"health,omitempty"`
 	Command            string                  `json:"command,omitempty"`
 	MemoryLimit        string                  `json:"memoryLimit,omitempty"`
+	// RegistryAuths carries request-scoped pull credentials; they feed an
+	// ephemeral DOCKER_CONFIG for this reconcile only and are never
+	// persisted (ADR 10).
+	RegistryAuths []RegistryAuth `json:"registryAuths,omitempty"`
 }
 
 type RemoveServiceRequest struct {
@@ -148,8 +152,8 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		defer cleanupEnvFile()
 	}
 	if req.PullImage {
-		if _, err := runDocker(ctx, "pull", req.Image); err != nil {
-			return nil, fmt.Errorf("failed to pull image %s: %w", req.Image, err)
+		if output, err := runDockerWithAuth(ctx, req.RegistryAuths, "pull", req.Image); err != nil {
+			return nil, fmt.Errorf("failed to pull image %s: %w: %s", req.Image, err, annotateRegistryAuthFailure(strings.TrimSpace(output)))
 		}
 	}
 
@@ -231,6 +235,9 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	}
 	if takodDeployStrategyUsesRevisionScope(strategy) && req.Revision == "" {
 		return fmt.Errorf("revision is required for %s deploy strategy", strategy)
+	}
+	if err := validateRegistryAuths(req.RegistryAuths); err != nil {
+		return err
 	}
 	if err := validateImageName(req.Image); err != nil {
 		return err

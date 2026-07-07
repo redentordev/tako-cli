@@ -1,6 +1,7 @@
 package takod
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -945,7 +946,29 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	response, err := BuildImage(r.Context(), image, http.MaxBytesReader(w, r.Body, defaultBuildContextMaxBytes), dockerfile)
+	body := io.Reader(http.MaxBytesReader(w, r.Body, defaultBuildContextMaxBytes))
+	var auths []RegistryAuth
+	if r.URL.Query().Get("auth") == "preamble" {
+		// Credentials ride the body as a single JSON line ahead of the tar
+		// stream: never the query string or argv, never persisted (ADR 10).
+		buffered := bufio.NewReader(body)
+		line, err := buffered.ReadString('\n')
+		if err != nil {
+			http.Error(w, "invalid registry auth preamble: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		var preamble struct {
+			RegistryAuths []RegistryAuth `json:"registryAuths"`
+		}
+		if err := json.Unmarshal([]byte(line), &preamble); err != nil {
+			http.Error(w, "invalid registry auth preamble: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		auths = preamble.RegistryAuths
+		body = buffered
+	}
+
+	response, err := BuildImageWithAuth(r.Context(), image, body, auths, dockerfile)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
