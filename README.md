@@ -382,6 +382,12 @@ Your app is now live with automatic HTTPS at `https://my-app.YOUR-SERVER-IP.ssli
 - **Secrets Management** - Secure handling of environment secrets with automatic redaction
 - **Volume Backup/Restore** - Backup and restore service volumes with `tako backup`
 - **Drift Detection** - Detect configuration drift with `tako drift`
+- **Scheduled Jobs** - `kind: job` services run on cron schedules through the node agent, with run history (`tako jobs runs`) and manual trigger (`tako jobs trigger`)
+- **Remote Exec** - `tako exec` runs commands in running service containers or as one-off containers from the service image, mirroring the remote exit code
+- **Release Hooks** - Per-service `release:` commands (migrations, warmups) gate the deploy before traffic switches
+- **Multiple Domains** - Serve one service on several hostnames with `proxy.domains`, each with automatic HTTPS
+- **Private Registries** - Authenticate pulls and builds via a `registries:` config block (`${ENV_VAR}` credentials, request-scoped, never persisted) or `tako run --registry-user --registry-password-stdin`
+- **Machine Interface** - Every command supports `--output json` (versioned result documents), `--events ndjson` (typed progress events), and stable exit codes for control planes and automation ([docs](./docs/MACHINE-INTERFACE.md))
 
 ### Servers & Scaling
 

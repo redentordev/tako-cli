@@ -13,12 +13,10 @@ environments:
     servers:
       - prod
     services:
-      jobs:
+      hourly-maintenance:
+        kind: job
+        schedule: "0 * * * *"
         image: alpine:3.20
-        command: sh -c "while true; do { date -u; echo running scheduled task; } | tee -a /var/log/tako-cron/run.log; sleep 3600; done"
-        restart: unless-stopped
-        volumes:
-          - cron_logs:/var/log/tako-cron
+        command: sh -c "date -u; echo running scheduled task"
         env:
-          TZ: UTC
           JOB_NAME: hourly-maintenance

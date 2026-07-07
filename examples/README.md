@@ -34,6 +34,8 @@ We have ready-to-deploy examples covering common use cases:
 | [06-scaling](./06-scaling/) | Load balancing | Multiple replicas, round-robin, scaling |
 | [07-backend-api](./07-backend-api/) | RESTful API | Export services for other projects |
 | [08-frontend-consumer](./08-frontend-consumer/) | Frontend consumer | Import and use services from other projects |
+| [21-scheduled-jobs](./21-scheduled-jobs/) | Scheduled jobs | `kind: job` cron services, run history, manual trigger |
+| [22-private-registry](./22-private-registry/) | Private registry | `registries:` block, request-scoped credentials, `tako run` flags |
 
 ### Third-Party Applications
 | Example | Description | Features |

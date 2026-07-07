@@ -663,6 +663,19 @@ Done:
     nodes.
 18. `tako doctor` verifies takod agent versions, rootful remote Docker, and live
     proxy runtime shape.
+19. Every command has a machine interface: versioned result documents
+    (`--output json`), ndjson event streams (`--events ndjson`), and stable
+    exit codes, pinned by golden tests.
+20. `tako exec` runs commands in running service containers or one-off
+    containers; per-service `release:` hooks gate deploys.
+21. `kind: job` services run on cron schedules through takod with run
+    history, manual trigger, and declarative per-node reconciliation.
+22. Services can serve multiple public domains (`proxy.domains`).
+23. Private registry credentials flow request-scoped from a `registries:`
+    config block or `tako run --registry-user/--registry-password-stdin`.
+24. SIGKILL crash recovery is proven by a repeatable harness
+    (`scripts/kill-mid-deploy-e2e.sh`): in-progress history, lease
+    force-release, clean redeploy.
 
 Next:
 1. Add distributed certificate handling for multi-edge deployments.

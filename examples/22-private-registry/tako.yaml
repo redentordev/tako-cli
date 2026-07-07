@@ -1,0 +1,29 @@
+# Private Registry Example
+# Deploy a private image with request-scoped registry credentials
+
+project:
+  name: private-registry
+  version: 1.0.0
+
+# Passwords MUST be ${ENV_VAR} references — tako rejects literal secrets
+# in tako.yaml. Credentials ride each deploy request to the node agent and
+# are never persisted on the server or written to state.
+registries:
+  ghcr.io:
+    username: ${REGISTRY_USER}
+    password: ${REGISTRY_TOKEN}
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        image: ghcr.io/${REGISTRY_USER}/my-private-app:latest
+        port: 3000

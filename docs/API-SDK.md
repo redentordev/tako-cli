@@ -22,11 +22,29 @@ commands in `cmd/` are thin adapters over this package.
   BuildOutput, StateAutoSync})`. `Sink` receives the event stream
   (`pkg/takoapi/events`); `BuildOutput` redirects deployer build logs.
 - Mutations with confirmation gates use a plan/apply session:
-  `PlanDeploy(ctx, req)` / `PlanRun(ctx, req)` return sessions exposing the
-  serializable plan document (`Plan()`, `NeedsConfirmation()`), then
-  `Apply(ctx)` executes and `Close()` releases the local lock, remote
-  leases, and SSH connections.
+  `PlanDeploy(ctx, req)` / `PlanRun(ctx, req)` / `PlanRemove(ctx, req)` /
+  `PlanDestroy(ctx, req)` return sessions exposing the serializable plan
+  document (`Plan()`, `NeedsConfirmation()`), then `Apply(ctx)` executes
+  and `Close()` releases the local lock, remote leases, and SSH
+  connections.
 - Simpler mutations are single calls: `Rollback`, `Promote`, `Scale`.
+- Remote command execution is available as `Exec(ctx, ExecRequest)`, the
+  engine backing `tako exec`: run a command in a running service container
+  or as a one-off container from the service image. Output streams as
+  events; the remote exit code returns as a typed `RemoteExitError` so
+  adapters can mirror it. Release hooks are config-driven, not a separate
+  API: a service `release:` block runs as a gated one-off container inside
+  deploy, and `deployer.ReleaseRunFor(service)` exposes the recorded run.
+- Scheduled jobs are available as `Jobs(ctx, JobsRequest)` (list with
+  schedule/next-run/last-run), `JobRuns(ctx, JobRunsRequest)` (bounded run
+  history with redacted output tails), and `TriggerJob(ctx,
+  JobTriggerRequest)` (immediate run streaming output events and returning
+  the remote exit code). `StreamLogs` on a `kind: job` service returns the
+  latest run's recorded output.
+- Public domain reachability is available as `MonitorDomainStatuses(ctx,
+  checker, specs, options)`, which probes serving domains (including
+  `proxy.domains` extras) and emits progress events; `tako domains status`
+  wraps it into a `DomainsResult`.
 - Config materialization is available as `ExportConfig(ctx,
   ConfigExportRequest)`, which reads desired/actual/history state through the
   private takod state client and returns a `ConfigExportResult` containing the
@@ -82,13 +100,13 @@ commands in `cmd/` are thin adapters over this package.
   warnings/errors, aggregate write counts, local-sync fields for adapters to
   fill, and `error` when repair is incomplete or fails.
 - Mutation contexts are cancellation-aware for local checks, takod JSON
-  state/lease requests, remote lease fan-out, and deployment-history
-  replication. SSH connect and stream output now have context-aware variants;
-  engine log streaming and CLI access-log streaming use them so cancellation can
-  interrupt connects and live streams. Remote SSH commands are not all
-  interruptible yet, and deployer build archive streaming remains a known
-  follow-up, but leases acquired after cancellation are best-effort released and
-  cancellation classifies as `cancelled`. Deploy/run writes an `in_progress`
+  state/lease requests, remote lease fan-out, deployment-history
+  replication, and the long deployer streams: build-context archive
+  uploads, local buildx/unregistry pushes, reconcile-service requests, and
+  release exec streams all derive from the caller's context
+  (`Deployer.SetBaseContext`, wired by deploy/run/scale). Leases acquired
+  after cancellation are best-effort released and cancellation classifies
+  as `cancelled`. Deploy/run writes an `in_progress`
   remote deployment record before service/proxy mutations start, so a hard kill
   after mutations begin leaves history evidence. Cancelled deploy/run failure
   paths use a short cleanup context to persist failed/interrupted deployment
@@ -99,6 +117,9 @@ commands in `cmd/` are thin adapters over this package.
   invalid request, locked/leased, connectivity, cancelled, attention.
 - Every emitted event passes through a secrets redactor; operations
   register service env values and SSH passwords before emitting.
+  `RegisterSecret(value)` adds ad-hoc values; `RegisterRegistrySecrets(cfg)`
+  registers every `registries:` password (deploy and run call it before
+  any event is emitted).
 
 #### Config export example
 
@@ -289,9 +310,11 @@ Tako currently has two image deploy paths:
   VPS/takod node without local `tako.yaml`, while still using takod state,
   labels, leases, history, and proxy reconciliation.
 
-`tako run` is currently public-image-only. Private registry auth, compose
-import, cloud provisioning, and discovery of arbitrary non-Tako Docker
-containers are outside the current boundary.
+`tako run` supports private registries via `--registry-user` and
+`--registry-password-stdin` (never an argv password flag); configured
+projects declare a top-level `registries:` block with `${ENV_VAR}`
+passwords. Compose import, cloud provisioning, and discovery of arbitrary
+non-Tako Docker containers remain outside the current boundary.
 
 ## Transport Boundary
 
