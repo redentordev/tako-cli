@@ -237,6 +237,38 @@ func TestRenderCaddyfileUsesHTTPOnlyInternalRoutes(t *testing.T) {
 	}
 }
 
+func TestRenderCaddyfileServesMultipleDomainsForOneRoute(t *testing.T) {
+	caddyfile, err := renderCaddyfile([]ProxyRouteManifest{
+		{
+			Version:     1,
+			Project:     "demo",
+			Environment: "production",
+			Routes: []ProxyRoute{
+				{
+					Service:      "web",
+					Domains:      []string{"example.com", "app.example.com", "example.app"},
+					RedirectFrom: []string{"www.example.com"},
+					Upstreams:    []string{"http://demo-web:3000"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("renderCaddyfile returned error: %v", err)
+	}
+	for _, domain := range []string{"example.com", "app.example.com", "example.app"} {
+		if !strings.Contains(caddyfile, "\n"+domain+" {") {
+			t.Fatalf("missing serving site for %s:\n%s", domain, caddyfile)
+		}
+	}
+	if !strings.Contains(caddyfile, "redir https://example.com{uri} 308") {
+		t.Fatalf("redirect should target the primary domain:\n%s", caddyfile)
+	}
+	if strings.Count(caddyfile, "reverse_proxy http://demo-web:3000") != 3 {
+		t.Fatalf("each serving domain should proxy the same upstreams:\n%s", caddyfile)
+	}
+}
+
 func TestParseProxyRouteManifestRejectsUnsafeRevision(t *testing.T) {
 	_, err := ParseProxyRouteManifest(`{
 		"version": 1,

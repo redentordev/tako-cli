@@ -178,7 +178,8 @@ domains status --output json` returns a `DomainsResult` with
 project/environment, the expected DNS targets, `allActive`, and per-domain
 entries (`service`, `domain`, `role` `serving|redirect|ad-hoc`, `state`,
 `dns`, `tls`, resolved IPs, cname, errors); with `--strict`, pending
-domains exit 6 and still emit the document. `tako domains hosts --output
+domains exit 6 and still emit the document. Serving entries cover the
+primary `proxy.domain` plus every additional `proxy.domains` hostname. `tako domains hosts --output
 json` returns a `DomainsHostsResult` with the `--address` mode and
 `entries` (`service`, `host`, `address`, `server`, `source`). `tako
 discovery exports --output json` returns a `DiscoveryExportsResult` with

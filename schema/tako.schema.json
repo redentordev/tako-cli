@@ -551,6 +551,13 @@
                       "type": "string",
                       "description": "Internal hostname for proxy.visibility=internal. Defaults to <service>.<environment>.<project>.tako.internal."
                     },
+                    "domains": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Additional co-equal serving hostnames beside domain. Each serves the same upstreams with its own certificate; domain stays the primary for URLs and redirects."
+                    },
                     "redirectFrom": {
                       "type": "array",
                       "items": {

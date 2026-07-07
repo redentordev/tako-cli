@@ -300,6 +300,11 @@ type ProxyConfig struct {
 	// Domain is where public traffic is served.
 	Domain string `yaml:"domain,omitempty" json:"domain,omitempty"`
 
+	// Domains adds co-equal serving hostnames beside Domain. Each serves
+	// the same upstreams with its own ACME certificate; Domain stays the
+	// primary for URL display and as the redirect target.
+	Domains []string `yaml:"domains,omitempty" json:"domains,omitempty"`
+
 	// Host is where internal traffic is served when visibility is internal.
 	Host string `yaml:"host,omitempty" json:"host,omitempty"`
 
@@ -358,12 +363,23 @@ func (p *ProxyConfig) GetPrimaryDomain() string {
 	return p.Domain
 }
 
-// GetAllDomains returns all serving domains, excluding redirect domains.
+// GetAllDomains returns all serving domains — the primary first, then the
+// additional `domains` entries — excluding redirect domains.
 func (p *ProxyConfig) GetAllDomains() []string {
 	if p == nil || p.IsInternal() || p.Domain == "" {
 		return nil
 	}
-	return []string{p.Domain}
+	domains := []string{p.Domain}
+	seen := map[string]bool{strings.ToLower(p.Domain): true}
+	for _, domain := range p.Domains {
+		key := strings.ToLower(strings.TrimSpace(domain))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		domains = append(domains, strings.TrimSpace(domain))
+	}
+	return domains
 }
 
 func (p *ProxyConfig) GetPrimaryHost() string {
@@ -377,11 +393,16 @@ func (p *ProxyConfig) GetPrimaryHost() string {
 }
 
 func (p *ProxyConfig) GetAllHosts() []string {
-	host := p.GetPrimaryHost()
-	if host == "" {
+	if p == nil {
 		return nil
 	}
-	return []string{host}
+	if p.IsInternal() {
+		if p.Host == "" {
+			return nil
+		}
+		return []string{p.Host}
+	}
+	return p.GetAllDomains()
 }
 
 // GetRedirectDomains returns all domains that should redirect to the primary domain
