@@ -5,20 +5,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
 	"github.com/redentordev/tako-cli/pkg/utils"
 	"github.com/spf13/cobra"
@@ -152,6 +157,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	remoteSections := []string{
 		"Server Connectivity",
 		"Server Agent Version",
+		"Node Agent Health",
 		"Docker Runtime",
 		"Proxy Runtime",
 		"Running Services",
@@ -166,18 +172,21 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		checkServerAgentVersion(record, cfg, clients)
 
 		heading(remoteSections[2])
-		checkDockerRuntime(record, clients)
+		checkNodeAgentHealth(record, cfg, clients)
 
 		heading(remoteSections[3])
-		checkProxyRuntime(record, cfg, envName, clients)
+		checkDockerRuntime(record, clients)
 
 		heading(remoteSections[4])
-		checkRunningServices(record, cfg, envName, clients)
+		checkProxyRuntime(record, cfg, envName, clients)
 
 		heading(remoteSections[5])
-		checkReplicatedState(record, cfg, envName, clients)
+		checkRunningServices(record, cfg, envName, clients)
 
 		heading(remoteSections[6])
+		checkReplicatedState(record, cfg, envName, clients)
+
+		heading(remoteSections[7])
 		checkExternalVolumes(record, cfg, envName, clients)
 
 		// Clean up clients
@@ -192,6 +201,135 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	return finish()
+}
+
+// Node agent health probes use a short timeout so a wedged takod cannot
+// stall the whole diagnosis.
+const doctorNodeProbeTimeout = 3 * time.Second
+
+// Disk pressure thresholds for the root filesystem, in percent used.
+const (
+	doctorDiskWarnPercent = 85
+	doctorDiskFailPercent = 95
+)
+
+// doctorNodeHealthInfo carries one node's agent-health probe results:
+// takod socket health (/healthz), mesh peer status (/v1/mesh/status), and
+// root-filesystem disk pressure.
+type doctorNodeHealthInfo struct {
+	HealthzErr      string
+	Mesh            *mesh.Status
+	MeshErr         string
+	DiskUsedPercent int // -1 when unknown
+	DiskErr         string
+}
+
+func checkNodeAgentHealth(record func(checkResult), cfg *config.Config, clients map[string]*ssh.Client) {
+	if len(clients) == 0 {
+		record(checkResult{"SKIP", "No connected servers to check node agent health", ""})
+		return
+	}
+
+	clientNames := make([]string, 0, len(clients))
+	for name := range clients {
+		clientNames = append(clientNames, name)
+	}
+	sort.Strings(clientNames)
+
+	checkNodeAgentHealthWith(record, clientNames, cfg.Mesh != nil, func(clientName string) (*doctorNodeHealthInfo, error) {
+		return detectDoctorNodeHealth(clients[clientName], cfg)
+	})
+}
+
+func checkNodeAgentHealthWith(record func(checkResult), clientNames []string, meshConfigured bool, probe func(string) (*doctorNodeHealthInfo, error)) {
+	for _, clientName := range clientNames {
+		info, err := probe(clientName)
+		if err != nil || info == nil {
+			record(checkResult{"FAIL", fmt.Sprintf("%s: Cannot probe node agent health: %v", clientName, err), "Run 'tako setup' or check 'systemctl status takod' on the node"})
+			continue
+		}
+
+		if info.HealthzErr != "" {
+			record(checkResult{"FAIL", fmt.Sprintf("%s: takod /healthz unreachable: %s", clientName, info.HealthzErr), "Run 'tako setup' or check 'systemctl status takod' on the node"})
+		} else {
+			record(checkResult{"PASS", fmt.Sprintf("%s: takod /healthz ok", clientName), ""})
+		}
+
+		if meshConfigured {
+			switch {
+			case info.MeshErr != "":
+				record(checkResult{"WARN", fmt.Sprintf("%s: mesh status unavailable: %s", clientName, info.MeshErr), "Run 'tako deploy' or 'tako state repair' to reapply mesh configuration"})
+			case info.Mesh == nil || !info.Mesh.Up:
+				record(checkResult{"FAIL", fmt.Sprintf("%s: mesh interface is down", clientName), "Run 'tako deploy' to reapply mesh configuration"})
+			default:
+				record(checkResult{"PASS", fmt.Sprintf("%s: mesh %s up (%d peer(s))", clientName, info.Mesh.Interface, info.Mesh.Peers), ""})
+			}
+		}
+
+		switch {
+		case info.DiskErr != "" || info.DiskUsedPercent < 0:
+			record(checkResult{"WARN", fmt.Sprintf("%s: Cannot read root filesystem usage: %s", clientName, info.DiskErr), ""})
+		case info.DiskUsedPercent >= doctorDiskFailPercent:
+			record(checkResult{"FAIL", fmt.Sprintf("%s: root filesystem %d%% used", clientName, info.DiskUsedPercent), "Free disk space or run 'tako cleanup' before the next deploy"})
+		case info.DiskUsedPercent >= doctorDiskWarnPercent:
+			record(checkResult{"WARN", fmt.Sprintf("%s: root filesystem %d%% used", clientName, info.DiskUsedPercent), "Free disk space or run 'tako cleanup'"})
+		default:
+			record(checkResult{"PASS", fmt.Sprintf("%s: root filesystem %d%% used", clientName, info.DiskUsedPercent), ""})
+		}
+	}
+}
+
+func detectDoctorNodeHealth(client *ssh.Client, cfg *config.Config) (*doctorNodeHealthInfo, error) {
+	info := &doctorNodeHealthInfo{DiskUsedPercent: -1}
+	socket := takodSocketFromConfig(cfg)
+
+	if output, err := takodclient.RequestJSONWithTimeout(client, socket, "GET", "/healthz", nil, doctorNodeProbeTimeout); err != nil {
+		info.HealthzErr = err.Error()
+	} else {
+		var health struct {
+			OK bool `json:"ok"`
+		}
+		if err := json.Unmarshal([]byte(output), &health); err != nil || !health.OK {
+			info.HealthzErr = "unexpected /healthz response"
+		}
+	}
+
+	if cfg.Mesh != nil {
+		path := "/v1/mesh/status?interface=" + url.QueryEscape(cfg.Mesh.Interface)
+		if output, err := takodclient.RequestJSONWithTimeout(client, socket, "GET", path, nil, doctorNodeProbeTimeout); err != nil {
+			info.MeshErr = err.Error()
+		} else {
+			var status mesh.Status
+			if err := json.Unmarshal([]byte(output), &status); err != nil {
+				info.MeshErr = fmt.Sprintf("unreadable mesh status: %v", err)
+			} else {
+				info.Mesh = &status
+			}
+		}
+	}
+
+	if output, err := client.Execute("df -P / | tail -1"); err != nil {
+		info.DiskErr = err.Error()
+	} else if percent, err := parseDoctorDiskUsedPercent(output); err != nil {
+		info.DiskErr = err.Error()
+	} else {
+		info.DiskUsedPercent = percent
+	}
+
+	return info, nil
+}
+
+// parseDoctorDiskUsedPercent extracts the use% column from one `df -P` row.
+func parseDoctorDiskUsedPercent(output string) (int, error) {
+	fields := strings.Fields(strings.TrimSpace(output))
+	if len(fields) < 5 {
+		return -1, fmt.Errorf("unexpected df output")
+	}
+	percent, err := strconv.Atoi(strings.TrimSuffix(fields[4], "%"))
+	if err != nil {
+		return -1, fmt.Errorf("unexpected df use%% value %q", fields[4])
+	}
+	return percent, nil
 }
 
 func checkDockerRuntime(record func(checkResult), clients map[string]*ssh.Client) {
