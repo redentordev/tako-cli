@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
@@ -111,7 +113,7 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	}
 	defer leaseSet.Release(verbose)
 	if verbose {
-		fmt.Printf("→ Acquired remote backup leases: %s\n", leaseSet.Summary())
+		fmt.Fprintf(humanOut(), "→ Acquired remote backup leases: %s\n", leaseSet.Summary())
 	}
 
 	switch {
@@ -147,7 +149,7 @@ func ensureSingleBackupRestoreTarget(targetServerNames []string, requestedServer
 }
 
 func listBackupsAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, volumeName string) error {
-	fmt.Printf("=== Volume Backups ===\n\n")
+	fmt.Fprintf(humanOut(), "=== Volume Backups ===\n\n")
 
 	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
 		backups, err := readBackupsFromNode(cfg, pool, serverCfg, envName, volumeName)
@@ -157,33 +159,34 @@ func listBackupsAcrossNodes(cfg *config.Config, pool sshClientProvider, envName 
 	totalBackups := 0
 	totalErrors := 0
 	for _, result := range results {
-		fmt.Printf("Node: %s (%s)\n", result.serverName, result.host)
+		fmt.Fprintf(humanOut(), "Node: %s (%s)\n", result.serverName, result.host)
 		if result.err != nil {
 			totalErrors++
-			fmt.Printf("  Failed: %v\n\n", result.err)
+			fmt.Fprintf(humanOut(), "  Failed: %v\n\n", result.err)
 			continue
 		}
 		totalBackups += len(result.backups)
 		if len(result.backups) == 0 {
-			fmt.Println("  No backups found")
-			fmt.Println()
+			fmt.Fprintln(humanOut(), "  No backups found")
+			fmt.Fprintln(humanOut())
 			continue
 		}
 		printBackupGroups(result.backups)
 	}
 
 	if totalBackups == 0 && totalErrors == 0 {
-		fmt.Println("No backups found on target nodes")
+		fmt.Fprintln(humanOut(), "No backups found on target nodes")
 	}
+	var err error
 	if totalErrors == len(results) {
-		return fmt.Errorf("failed to list backups on all target nodes")
+		err = fmt.Errorf("failed to list backups on all target nodes")
 	}
-	return nil
+	return emitBackupResult(cfg, envName, engine.BackupActionList, volumeName, "", results, err)
 }
 
 func createBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, volumeName string, backupID string) error {
-	fmt.Printf("=== Backing up volume: %s ===\n", volumeName)
-	fmt.Printf("Backup ID: %s\n\n", backupID)
+	fmt.Fprintf(humanOut(), "=== Backing up volume: %s ===\n", volumeName)
+	fmt.Fprintf(humanOut(), "Backup ID: %s\n\n", backupID)
 
 	spec, err := backupVolumeSpecForName(cfg, envName, volumeName)
 	if err != nil {
@@ -201,12 +204,13 @@ func createBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName
 		return backupNodeActionResult{backups: []takod.BackupInfo{info}}, nil
 	})
 
-	return printBackupMutationResults(results, "backup", "No target node had that volume")
+	err = printBackupMutationResults(results, "backup", "No target node had that volume")
+	return emitBackupResult(cfg, envName, engine.BackupActionCreate, volumeName, backupID, results, err)
 }
 
 func restoreBackup(client *ssh.Client, cfg *config.Config, envName string, volumeName string, backupID string) error {
-	fmt.Printf("=== Restoring volume: %s from backup %s ===\n\n", volumeName, backupID)
-	fmt.Printf("⚠️  WARNING: This will overwrite all data in the volume!\n\n")
+	fmt.Fprintf(humanOut(), "=== Restoring volume: %s from backup %s ===\n\n", volumeName, backupID)
+	fmt.Fprintf(humanOut(), "⚠️  WARNING: This will overwrite all data in the volume!\n\n")
 
 	var response map[string]bool
 	err := takodBackupRequestJSON(
@@ -221,7 +225,7 @@ func restoreBackup(client *ssh.Client, cfg *config.Config, envName string, volum
 		return fmt.Errorf("restore failed: %w", err)
 	}
 
-	fmt.Printf("\n✓ Volume restored successfully\n")
+	fmt.Fprintf(humanOut(), "\n✓ Volume restored successfully\n")
 	return nil
 }
 
@@ -231,13 +235,15 @@ func restoreBackupOnNode(cfg *config.Config, pool sshClientProvider, envName str
 		return fmt.Errorf("failed to connect to node %s: %w", serverName, err)
 	}
 	if verbose {
-		fmt.Printf("Using node: %s (%s)\n", serverName, serverCfg.Host)
+		fmt.Fprintf(humanOut(), "Using node: %s (%s)\n", serverName, serverCfg.Host)
 	}
-	return restoreBackup(client, cfg, envName, volumeName, backupID)
+	err = restoreBackup(client, cfg, envName, volumeName, backupID)
+	results := []backupNodeResult{{serverName: serverName, host: serverCfg.Host, err: err}}
+	return emitBackupResult(cfg, envName, engine.BackupActionRestore, volumeName, backupID, results, err)
 }
 
 func deleteBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, volumeName string, backupID string) error {
-	fmt.Printf("=== Deleting backup: %s_%s ===\n\n", volumeName, backupID)
+	fmt.Fprintf(humanOut(), "=== Deleting backup: %s_%s ===\n\n", volumeName, backupID)
 
 	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
 		err := deleteBackupOnNode(cfg, pool, serverCfg, envName, volumeName, backupID)
@@ -247,11 +253,12 @@ func deleteBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName
 		return backupNodeActionResult{deleted: 1}, nil
 	})
 
-	return printBackupDeleteResults(results)
+	err := printBackupDeleteResults(results)
+	return emitBackupResult(cfg, envName, engine.BackupActionDelete, volumeName, backupID, results, err)
 }
 
 func cleanupBackupsAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, days int) error {
-	fmt.Printf("=== Cleaning up backups older than %d days ===\n\n", days)
+	fmt.Fprintf(humanOut(), "=== Cleaning up backups older than %d days ===\n\n", days)
 
 	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
 		response, err := cleanupBackupsOnNode(cfg, pool, serverCfg, envName, days)
@@ -261,7 +268,8 @@ func cleanupBackupsAcrossNodes(cfg *config.Config, pool sshClientProvider, envNa
 		return backupNodeActionResult{deleted: response.Deleted}, nil
 	})
 
-	return printBackupCleanupResults(results)
+	err := printBackupCleanupResults(results)
+	return emitBackupResult(cfg, envName, engine.BackupActionCleanup, "", "", results, err)
 }
 
 func backupAllVolumesAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, backupID string) error {
@@ -273,8 +281,8 @@ func backupAllVolumesAcrossNodes(cfg *config.Config, pool sshClientProvider, env
 		return fmt.Errorf("no named service volumes configured")
 	}
 
-	fmt.Printf("=== Backing up all configured volumes ===\n")
-	fmt.Printf("Backup ID: %s\n\n", backupID)
+	fmt.Fprintf(humanOut(), "=== Backing up all configured volumes ===\n")
+	fmt.Fprintf(humanOut(), "Backup ID: %s\n\n", backupID)
 
 	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
 		var payload backupNodeActionResult
@@ -298,7 +306,8 @@ func backupAllVolumesAcrossNodes(cfg *config.Config, pool sshClientProvider, env
 		return payload, nil
 	})
 
-	return printBackupMutationResults(results, "backup", "No configured volumes were present on target nodes")
+	err = printBackupMutationResults(results, "backup", "No configured volumes were present on target nodes")
+	return emitBackupResult(cfg, envName, engine.BackupActionCreate, "", backupID, results, err)
 }
 
 type backupNodeActionResult struct {
@@ -346,6 +355,41 @@ func collectBackupNodes(servers map[string]config.ServerConfig, action backupNod
 	return results
 }
 
+// emitBackupResult builds the versioned BackupResult document from per-node
+// outcomes, emits it in machine modes, and passes the operation error through.
+func emitBackupResult(cfg *config.Config, envName string, action string, volume string, backupID string, results []backupNodeResult, opErr error) error {
+	doc := engine.BackupResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindBackupResult,
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Action:      action,
+		Volume:      volume,
+		BackupID:    backupID,
+		Nodes:       []engine.BackupNodeOutcome{},
+	}
+	for _, result := range results {
+		outcome := engine.BackupNodeOutcome{
+			Server:  result.serverName,
+			Host:    result.host,
+			Backups: result.backups,
+			Deleted: result.deleted,
+			Skipped: result.skipped,
+		}
+		if result.err != nil {
+			outcome.Error = result.err.Error()
+		}
+		doc.Nodes = append(doc.Nodes, outcome)
+	}
+	if opErr != nil {
+		doc.Error = opErr.Error()
+	}
+	if emitErr := emitResultDocument(doc); emitErr != nil && opErr == nil {
+		return emitErr
+	}
+	return opErr
+}
+
 func sortedBackupServerNames(servers map[string]config.ServerConfig) []string {
 	names := make([]string, 0, len(servers))
 	for name := range servers {
@@ -368,13 +412,13 @@ func printBackupGroups(backups []takod.BackupInfo) {
 	sort.Strings(volumes)
 
 	for _, volume := range volumes {
-		fmt.Printf("  Volume: %s\n", volume)
+		fmt.Fprintf(humanOut(), "  Volume: %s\n", volume)
 		for _, backup := range byVolume[volume] {
 			sizeStr := formatSize(backup.Size)
-			fmt.Printf("    - %s  %s  %s\n", backup.ID, backup.CreatedAt.Format("2006-01-02 15:04"), sizeStr)
+			fmt.Fprintf(humanOut(), "    - %s  %s  %s\n", backup.ID, backup.CreatedAt.Format("2006-01-02 15:04"), sizeStr)
 		}
 	}
-	fmt.Println()
+	fmt.Fprintln(humanOut())
 }
 
 func printBackupMutationResults(results []backupNodeResult, operation string, emptyMessage string) error {
@@ -382,10 +426,10 @@ func printBackupMutationResults(results []backupNodeResult, operation string, em
 	failures := 0
 	skipped := 0
 	for _, result := range results {
-		fmt.Printf("Node: %s (%s)\n", result.serverName, result.host)
+		fmt.Fprintf(humanOut(), "Node: %s (%s)\n", result.serverName, result.host)
 		for _, message := range result.skipped {
 			skipped++
-			fmt.Printf("  Skipped: %s\n", message)
+			fmt.Fprintf(humanOut(), "  Skipped: %s\n", message)
 		}
 		for _, backup := range result.backups {
 			successes++
@@ -394,19 +438,19 @@ func printBackupMutationResults(results []backupNodeResult, operation string, em
 			if backup.Service != "" {
 				serviceLabel = " (" + backup.Service + ")"
 			}
-			fmt.Printf("  Created: %s%s  %s  %s\n", backup.Volume, serviceLabel, backup.ID, sizeStr)
+			fmt.Fprintf(humanOut(), "  Created: %s%s  %s  %s\n", backup.Volume, serviceLabel, backup.ID, sizeStr)
 			if backup.Remote != nil {
-				fmt.Printf("    Remote: %s://%s/%s\n", backup.Remote.Provider, backup.Remote.Bucket, backup.Remote.Key)
+				fmt.Fprintf(humanOut(), "    Remote: %s://%s/%s\n", backup.Remote.Provider, backup.Remote.Bucket, backup.Remote.Key)
 			}
 			for _, warning := range backup.Warnings {
-				fmt.Printf("    Warning: %s\n", warning)
+				fmt.Fprintf(humanOut(), "    Warning: %s\n", warning)
 			}
 		}
 		if result.err != nil {
 			failures++
-			fmt.Printf("  Failed: %v\n", result.err)
+			fmt.Fprintf(humanOut(), "  Failed: %v\n", result.err)
 		}
-		fmt.Println()
+		fmt.Fprintln(humanOut())
 	}
 
 	if successes == 0 && failures == 0 {
@@ -418,7 +462,7 @@ func printBackupMutationResults(results []backupNodeResult, operation string, em
 	if failures > 0 {
 		return fmt.Errorf("%s completed with %d error(s)", operation, failures)
 	}
-	fmt.Printf("✓ %s completed on %d node volume(s)\n", backupOperationTitle(operation), successes)
+	fmt.Fprintf(humanOut(), "✓ %s completed on %d node volume(s)\n", backupOperationTitle(operation), successes)
 	return nil
 }
 
@@ -426,20 +470,20 @@ func printBackupDeleteResults(results []backupNodeResult) error {
 	failures := 0
 	deleted := 0
 	for _, result := range results {
-		fmt.Printf("Node: %s (%s)\n", result.serverName, result.host)
+		fmt.Fprintf(humanOut(), "Node: %s (%s)\n", result.serverName, result.host)
 		if result.err != nil {
 			failures++
-			fmt.Printf("  Failed: %v\n\n", result.err)
+			fmt.Fprintf(humanOut(), "  Failed: %v\n\n", result.err)
 			continue
 		}
 		deleted += result.deleted
-		fmt.Println("  Deleted")
-		fmt.Println()
+		fmt.Fprintln(humanOut(), "  Deleted")
+		fmt.Fprintln(humanOut())
 	}
 	if failures > 0 {
 		return fmt.Errorf("delete completed with %d error(s)", failures)
 	}
-	fmt.Printf("✓ Delete completed on %d node(s)\n", deleted)
+	fmt.Fprintf(humanOut(), "✓ Delete completed on %d node(s)\n", deleted)
 	return nil
 }
 
@@ -447,19 +491,19 @@ func printBackupCleanupResults(results []backupNodeResult) error {
 	failures := 0
 	totalDeleted := 0
 	for _, result := range results {
-		fmt.Printf("Node: %s (%s)\n", result.serverName, result.host)
+		fmt.Fprintf(humanOut(), "Node: %s (%s)\n", result.serverName, result.host)
 		if result.err != nil {
 			failures++
-			fmt.Printf("  Failed: %v\n\n", result.err)
+			fmt.Fprintf(humanOut(), "  Failed: %v\n\n", result.err)
 			continue
 		}
 		totalDeleted += result.deleted
-		fmt.Printf("  Cleaned up %d old backup(s)\n\n", result.deleted)
+		fmt.Fprintf(humanOut(), "  Cleaned up %d old backup(s)\n\n", result.deleted)
 	}
 	if failures > 0 {
 		return fmt.Errorf("cleanup completed with %d error(s)", failures)
 	}
-	fmt.Printf("✓ Cleaned up %d old backup(s)\n", totalDeleted)
+	fmt.Fprintf(humanOut(), "✓ Cleaned up %d old backup(s)\n", totalDeleted)
 	return nil
 }
 

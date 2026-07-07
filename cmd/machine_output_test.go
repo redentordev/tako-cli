@@ -887,6 +887,68 @@ func TestActionResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestBackupResultDocumentGolden pins the machine-facing backup schema.
+func TestBackupResultDocumentGolden(t *testing.T) {
+	result := engine.BackupResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindBackupResult,
+		Project:     "demo",
+		Environment: "production",
+		Action:      engine.BackupActionCreate,
+		Volume:      "data",
+		BackupID:    "20260706-120000",
+		Nodes: []engine.BackupNodeOutcome{
+			{
+				Server: "node-a",
+				Host:   "10.0.0.1",
+				Backups: []takod.BackupInfo{
+					{ID: "20260706-120000", Volume: "data", Size: 1024, CreatedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC), Path: "/var/lib/tako/backups/data_20260706-120000.tar.gz", Compression: "gzip"},
+				},
+			},
+			{Server: "node-b", Host: "10.0.0.2", Skipped: []string{"data: volume not present on node"}},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "BackupResult",
+  "project": "demo",
+  "environment": "production",
+  "action": "create",
+  "volume": "data",
+  "backupId": "20260706-120000",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "backups": [
+        {
+          "id": "20260706-120000",
+          "volume": "data",
+          "size": 1024,
+          "createdAt": "2026-07-06T12:00:00Z",
+          "path": "/var/lib/tako/backups/data_20260706-120000.tar.gz",
+          "compression": "gzip"
+        }
+      ]
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "skipped": [
+        "data: volume not present on node"
+      ]
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("backup result document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",

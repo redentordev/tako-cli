@@ -192,7 +192,11 @@ this contract and is rejected together with the global machine modes.
 (`ok`, `partial`, `failed`), and per-server outcomes (`done`, `error`,
 cleanup `warnings`); cleanup errors/warnings exit 6 (previously 0) and
 still emit the document. `tako start`/`tako stop` return the same
-`ScaleResult` as `tako scale`. The
+`ScaleResult` as `tako scale`. Every `tako backup` action (`list`,
+`create` — single volume or `--all`, `restore`, `delete`, `cleanup`)
+returns a `BackupResult` with the action, volume/backupId when relevant,
+and per-node outcomes whose `backups` reuse the takod backup schema plus
+`deleted` counts, `skipped` volumes, and per-node `error`. The
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
 

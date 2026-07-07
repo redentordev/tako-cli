@@ -53,6 +53,15 @@ func machineOutputEnabled() bool {
 	return outputFormatFlag == outputFormatJSON || eventsFormatFlag == eventsFormatNDJSON
 }
 
+// humanOut returns the writer for human terminal output: stdout in text
+// mode, stderr when a machine mode reserves stdout for parseable output.
+func humanOut() io.Writer {
+	if machineOutputEnabled() {
+		return os.Stderr
+	}
+	return os.Stdout
+}
+
 // emitResultDocument delivers an operation's final result to machine
 // consumers: as a terminal `result` event in NDJSON mode and/or as a JSON
 // document on stdout in --output json mode. Text mode emits nothing.
