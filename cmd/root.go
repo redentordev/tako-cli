@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -103,6 +104,10 @@ func Execute() {
 // required, 3 lock/lease held, 4 connectivity, 5 cancelled, 6 partial
 // success needing attention.
 func exitCodeForError(err error) int {
+	var remote *engine.RemoteExitError
+	if errors.As(err, &remote) {
+		return remote.Code
+	}
 	switch engine.Classify(err) {
 	case engine.ClassNone:
 		return 0
