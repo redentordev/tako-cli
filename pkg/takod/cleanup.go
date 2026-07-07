@@ -40,6 +40,7 @@ type CleanupResponse struct {
 	ContainersRemoved     int      `json:"containersRemoved,omitempty"`
 	ImagesRemoved         int      `json:"imagesRemoved,omitempty"`
 	NetworksRemoved       int      `json:"networksRemoved,omitempty"`
+	JobsRemoved           int      `json:"jobsRemoved,omitempty"`
 	ProxyFilesRemoved     int      `json:"proxyFilesRemoved,omitempty"`
 	BuildCacheCleaned     bool     `json:"buildCacheCleaned,omitempty"`
 	UnusedVolumesCleaned  bool     `json:"unusedVolumesCleaned,omitempty"`
