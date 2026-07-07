@@ -148,8 +148,12 @@ invalid configs exit with code 2 and still emit the document. `tako doctor
 `skipRemote`, overall `status` (`ok` or `attention`), pass/warn/fail
 counts, and `checks` (`name`, `status` `pass|warn|fail|skip`, `detail`,
 `remediation`); any failed check exits with code 6 and still emits the
-document. The Go definitions in `pkg/engine` (`types.go` and per-command
-files) are the source of truth.
+document. `tako drift --output json` (single-shot; `--watch` is rejected in
+machine modes) returns a `DriftResult` with project/environment, `drifted`,
+per-drift entries (`service`, `type`, `severity`, `expected`, `actual`,
+`details`), `servicesOk`, and timings; detected drift exits with code 6 and
+still emits the document. The Go definitions in `pkg/engine` (`types.go`
+and per-command files) are the source of truth.
 
 ## Config Export / Pull
 

@@ -484,6 +484,51 @@ func TestDoctorResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestDriftResultDocumentGolden pins the machine-facing drift schema.
+func TestDriftResultDocumentGolden(t *testing.T) {
+	result := engine.DriftResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDriftResult,
+		Project:     "demo",
+		Environment: "production",
+		Drifted:     true,
+		Drifts: []engine.DriftEntry{
+			{Service: "web", Type: "replica_count", Severity: "high", Expected: "3 replicas", Actual: "1 replicas"},
+		},
+		ServicesOK: []string{"api"},
+		CheckedAt:  time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:   0.8,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DriftResult",
+  "project": "demo",
+  "environment": "production",
+  "drifted": true,
+  "drifts": [
+    {
+      "service": "web",
+      "type": "replica_count",
+      "severity": "high",
+      "expected": "3 replicas",
+      "actual": "1 replicas"
+    }
+  ],
+  "servicesOk": [
+    "api"
+  ],
+  "checkedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 0.8
+}`
+	if string(payload) != want {
+		t.Fatalf("drift result document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",
