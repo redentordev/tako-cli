@@ -283,6 +283,10 @@ func buildStreamRequestOutputCommand(socket string, method string, endpoint stri
 }
 
 // ExecEndpoint returns the takod exec endpoint path.
+func JobsApplyEndpoint() string {
+	return "/v1/jobs/apply"
+}
+
 func ExecEndpoint() string {
 	return "/v1/exec"
 }

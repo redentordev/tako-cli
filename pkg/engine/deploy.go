@@ -649,6 +649,22 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	}
 
 	if !deploymentFailed {
+		jobServices := services
+		if req.Service != "" {
+			jobServices = CloneServiceMap(s.allServices)
+		}
+		if HasJobServices(jobServices) || planRemovesJob(plan) {
+			if err := s.deployer.ApplyJobSchedules(jobServices); err != nil {
+				e.emit(events.Event{Type: events.TypeDeployFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ job schedule reconciliation failed: %v\n", err)})
+				deploymentFailed = true
+				deploymentError = fmt.Errorf("job schedule reconciliation failed: %w", err)
+				deployment.Status = remotestate.StatusFailed
+				deployment.Error = err.Error()
+			}
+		}
+	}
+
+	if !deploymentFailed {
 		if err := s.applyRemovals(plan); err != nil {
 			e.emit(events.Event{Type: events.TypeDeployServiceFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ service removal failed: %v\n", err)})
 			deploymentFailed = true
@@ -997,6 +1013,30 @@ func (e *Engine) ApplyRemovals(remover ServiceRemover, plan *reconcile.Reconcili
 		})
 	}
 	return nil
+}
+
+// HasJobServices reports whether any service in the map is a kind:job.
+func HasJobServices(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.IsJob() {
+			return true
+		}
+	}
+	return false
+}
+
+// planRemovesJob reports whether the plan unschedules a job that left the
+// config; the declarative jobs-apply pass must still run for that.
+func planRemovesJob(plan *reconcile.ReconciliationPlan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, change := range plan.Changes {
+		if change.Type == reconcile.ChangeRemove && change.OldConfig != nil && change.OldConfig.IsJob() {
+			return true
+		}
+	}
+	return false
 }
 
 // ProxyReconciler reconciles proxy routes for services.

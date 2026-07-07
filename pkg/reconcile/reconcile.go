@@ -66,6 +66,23 @@ func ComputePlan(
 	for serviceName, desiredConfig := range desiredServices {
 		actual, exists := actualServices[serviceName]
 
+		if desiredConfig.IsJob() {
+			// Jobs reconcile against the owning node's cron schedule, not
+			// container presence; a transient run container must not count.
+			matchedActual[serviceName] = true
+			change := jobChange(serviceName, desiredConfig, actual)
+			plan.Changes = append(plan.Changes, change)
+			switch change.Type {
+			case ChangeAdd:
+				plan.Summary.Adds++
+			case ChangeUpdate:
+				plan.Summary.Updates++
+			default:
+				plan.Summary.NoOps++
+			}
+			continue
+		}
+
 		if !exists {
 			// Service in config but not running -> ADD
 			change := ServiceChange{
@@ -111,6 +128,22 @@ func ComputePlan(
 	// 2. Check for services running but not in config (should be removed)
 	for serviceName, actual := range actualServices {
 		if !matchedActual[serviceName] {
+			if actual.ConfigSnapshot != nil && actual.ConfigSnapshot.IsJob() {
+				// Stale job schedule: the next deploy's declarative
+				// jobs-apply unschedules it on every node.
+				change := ServiceChange{
+					Type:        ChangeRemove,
+					ServiceName: serviceName,
+					OldConfig:   actual.ConfigSnapshot,
+					Reasons: []string{
+						"Job is scheduled but no longer defined in tako.yaml",
+						"Will unschedule the job and remove its run history",
+					},
+				}
+				plan.Changes = append(plan.Changes, change)
+				plan.Summary.Removes++
+				continue
+			}
 			// Check if service is marked as persistent (don't auto-remove)
 			isPersistent := false
 			if actual.ConfigSnapshot != nil && actual.ConfigSnapshot.Persistent {
@@ -170,6 +203,36 @@ type ActualService struct {
 	ActiveContainers  []string
 	WarmingContainers []string
 	ConfigSnapshot    *config.ServiceConfig // Last deployed config
+}
+
+// jobChange plans one kind:job service: absent schedule -> add, config-hash
+// mismatch -> update, match -> none.
+func jobChange(serviceName string, desired config.ServiceConfig, actual *ActualService) ServiceChange {
+	scheduled := actual != nil && actual.ConfigSnapshot != nil && actual.ConfigSnapshot.IsJob()
+	if !scheduled {
+		return ServiceChange{
+			Type:        ChangeAdd,
+			ServiceName: serviceName,
+			NewConfig:   &desired,
+			Reasons:     []string{"Job defined in config but not scheduled"},
+		}
+	}
+	if desiredHash, ok := SafeServiceConfigHash(desired); ok && actual.ConfigHash == desiredHash {
+		return ServiceChange{
+			Type:        ChangeNone,
+			ServiceName: serviceName,
+			OldConfig:   actual.ConfigSnapshot,
+			NewConfig:   &desired,
+			Reasons:     []string{"Job schedule is up-to-date"},
+		}
+	}
+	return ServiceChange{
+		Type:        ChangeUpdate,
+		ServiceName: serviceName,
+		OldConfig:   actual.ConfigSnapshot,
+		NewConfig:   &desired,
+		Reasons:     []string{"Job configuration changed"},
+	}
 }
 
 // detectChanges compares config with actual service and returns reasons for update

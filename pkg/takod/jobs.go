@@ -69,6 +69,9 @@ type JobSpec struct {
 	Network        string   `json:"network,omitempty"`
 	Mounts         []string `json:"mounts,omitempty"`
 	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
+	// ConfigHash is the deployer's fingerprint of the job's service config,
+	// reported back through actual state for drift/plan comparison.
+	ConfigHash string `json:"configHash,omitempty"`
 }
 
 // JobsApplyRequest declaratively replaces this node's job set for one
@@ -85,6 +88,7 @@ type JobsApplyResponse struct {
 	Environment string    `json:"environment"`
 	Applied     []string  `json:"applied,omitempty"`
 	Removed     []string  `json:"removed,omitempty"`
+	Warnings    []string  `json:"warnings,omitempty"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
@@ -106,6 +110,7 @@ type JobStatus struct {
 	Image          string        `json:"image"`
 	Command        []string      `json:"command"`
 	TimeoutSeconds int           `json:"timeoutSeconds,omitempty"`
+	ConfigHash     string        `json:"configHash,omitempty"`
 	NextRun        *time.Time    `json:"nextRun,omitempty"`
 	LastRun        *JobRunRecord `json:"lastRun,omitempty"`
 }
@@ -187,10 +192,25 @@ func (s *JobScheduler) Apply(ctx context.Context, request JobsApplyRequest) (*Jo
 		return nil, fmt.Errorf("invalid environment name")
 	}
 	desired := map[string]JobSpec{}
+	var warnings []string
 	for i := range request.Jobs {
 		spec := request.Jobs[i]
 		spec.Project = request.Project
 		spec.Environment = request.Environment
+		if spec.Image == "" {
+			// An unchanged job's deploy sends no image; keep the one the
+			// last image-bearing apply left on this node. A job this node
+			// has never seen cannot be scheduled yet, but must not fail
+			// the apply (a service-scoped deploy still reconciles jobs).
+			s.mu.Lock()
+			existing, ok := s.specs[jobKey(spec.Project, spec.Environment, spec.Name)]
+			s.mu.Unlock()
+			if !ok || existing.Image == "" {
+				warnings = append(warnings, fmt.Sprintf("job %s skipped: no image on this node yet; deploy the job to schedule it", spec.Name))
+				continue
+			}
+			spec.Image = existing.Image
+		}
 		if err := validateJobSpec(&spec); err != nil {
 			return nil, fmt.Errorf("job %s: %w", spec.Name, err)
 		}
@@ -243,6 +263,7 @@ func (s *JobScheduler) Apply(ctx context.Context, request JobsApplyRequest) (*Jo
 		Environment: request.Environment,
 		Applied:     applied,
 		Removed:     removed,
+		Warnings:    warnings,
 		UpdatedAt:   time.Now().UTC(),
 	}, nil
 }
@@ -330,6 +351,7 @@ func (s *JobScheduler) List(project string, environment string) []JobStatus {
 			Image:          spec.Image,
 			Command:        append([]string(nil), spec.Command...),
 			TimeoutSeconds: spec.TimeoutSeconds,
+			ConfigHash:     spec.ConfigHash,
 		}
 		if item.has {
 			if next := s.cron.Entry(item.entry).Next; !next.IsZero() {
@@ -621,6 +643,9 @@ func validateJobSpec(spec *JobSpec) error {
 	}
 	if spec.TimeoutSeconds < 0 || spec.TimeoutSeconds > maxExecTimeoutSeconds {
 		return fmt.Errorf("timeoutSeconds must be between 0 and %d", maxExecTimeoutSeconds)
+	}
+	if len(spec.ConfigHash) > 128 || hasControlChars(spec.ConfigHash) {
+		return fmt.Errorf("invalid configHash")
 	}
 	return nil
 }

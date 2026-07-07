@@ -113,6 +113,11 @@ func (d *Detector) CheckOnce() (*DriftState, error) {
 
 	// Check each configured service
 	for serviceName, serviceCfg := range env.Services {
+		if serviceCfg.IsJob() {
+			// Jobs run on a cron schedule, not as replicas; container
+			// absence is their normal state.
+			continue
+		}
 		actual, exists := actualServices[serviceName]
 		if !exists {
 			// Service doesn't exist at all

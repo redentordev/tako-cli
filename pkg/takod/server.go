@@ -307,6 +307,13 @@ func (s *Server) handleActual(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	if jobs := s.jobScheduler.List(project, environment); len(jobs) > 0 {
+		actual.Jobs = make(map[string]*JobStatus, len(jobs))
+		for i := range jobs {
+			job := jobs[i]
+			actual.Jobs[job.Name] = &job
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)

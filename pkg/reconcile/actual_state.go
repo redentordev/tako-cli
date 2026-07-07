@@ -200,6 +200,25 @@ func gatherActualStateFromTakodWith(client takodclient.RequestExecutor, socket s
 			},
 		}
 	}
+	// Scheduled jobs have no long-running containers; surface each as a
+	// zero-replica service whose identity is its cron schedule. A job's
+	// transient run container (same service labels) is superseded here.
+	for jobName, job := range response.Jobs {
+		if job == nil {
+			continue
+		}
+		actualServices[jobName] = &ActualService{
+			Name:       jobName,
+			Image:      job.Image,
+			ConfigHash: job.ConfigHash,
+			ConfigSnapshot: &config.ServiceConfig{
+				Kind:     config.ServiceKindJob,
+				Schedule: job.Schedule,
+				Timezone: job.Timezone,
+				Image:    job.Image,
+			},
+		}
+	}
 	return actualServices, nil
 }
 

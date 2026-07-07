@@ -15,6 +15,9 @@ type ActualStateResponse struct {
 	Project     string                    `json:"project"`
 	Environment string                    `json:"environment"`
 	Services    map[string]*ActualService `json:"services"`
+	// Jobs carries the node's scheduled jobs: kind:job services have no
+	// long-running containers, so their actual state is the cron schedule.
+	Jobs map[string]*JobStatus `json:"jobs,omitempty"`
 }
 
 type ActualService struct {
