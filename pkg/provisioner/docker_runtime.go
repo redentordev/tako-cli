@@ -35,9 +35,7 @@ func (p *Provisioner) VerifySupportedDockerRuntime() error {
 	if info.Rootless {
 		return fmt.Errorf("rootless Docker is not supported for takod servers yet; use a rootful system Docker daemon for remote deployment nodes")
 	}
-	if p.verbose {
-		fmt.Printf("  Docker server: %s (root dir: %s)\n", emptyFallback(info.ServerVersion, "unknown"), emptyFallback(info.RootDir, "unknown"))
-	}
+	p.logf("  Docker server: %s (root dir: %s)\n", emptyFallback(info.ServerVersion, "unknown"), emptyFallback(info.RootDir, "unknown"))
 	return nil
 }
 

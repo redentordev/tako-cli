@@ -18,18 +18,22 @@ type PackageManager interface {
 
 // NewPackageManager creates a package manager for the detected OS
 func NewPackageManager(client *ssh.Client, osInfo *OSInfo, verbose bool) (PackageManager, error) {
+	return newPackageManagerWithLog(client, osInfo, provisionLog{verbose: verbose})
+}
+
+func newPackageManagerWithLog(client *ssh.Client, osInfo *OSInfo, log provisionLog) (PackageManager, error) {
 	switch osInfo.Family {
 	case OSFamilyDebian:
-		return &AptManager{client: client, verbose: verbose}, nil
+		return &AptManager{provisionLog: log, client: client}, nil
 	case OSFamilyRHEL:
 		if osInfo.PackageManager == "dnf" {
-			return &DnfManager{client: client, verbose: verbose}, nil
+			return &DnfManager{provisionLog: log, client: client}, nil
 		}
-		return &YumManager{client: client, verbose: verbose}, nil
+		return &YumManager{provisionLog: log, client: client}, nil
 	case OSFamilySUSE:
-		return &ZypperManager{client: client, verbose: verbose}, nil
+		return &ZypperManager{provisionLog: log, client: client}, nil
 	case OSFamilyAlpine:
-		return &ApkManager{client: client, verbose: verbose}, nil
+		return &ApkManager{provisionLog: log, client: client}, nil
 	default:
 		return nil, fmt.Errorf("unsupported OS family: %s", osInfo.Family)
 	}
@@ -37,14 +41,12 @@ func NewPackageManager(client *ssh.Client, osInfo *OSInfo, verbose bool) (Packag
 
 // AptManager manages packages using apt/apt-get
 type AptManager struct {
-	client  *ssh.Client
-	verbose bool
+	provisionLog
+	client *ssh.Client
 }
 
 func (a *AptManager) Update() error {
-	if a.verbose {
-		fmt.Println("  Updating package lists (apt)...")
-	}
+	a.logf("  Updating package lists (apt)...\n")
 	_, err := a.client.Execute("sudo DEBIAN_FRONTEND=noninteractive apt-get update -y")
 	return err
 }
@@ -57,9 +59,7 @@ func (a *AptManager) Install(packages ...string) error {
 	if err != nil {
 		return err
 	}
-	if a.verbose {
-		fmt.Printf("  Installing packages: %s\n", strings.Join(packages, ", "))
-	}
+	a.logf("  Installing packages: %s\n", strings.Join(packages, ", "))
 	cmd := fmt.Sprintf("sudo DEBIAN_FRONTEND=noninteractive apt-get install -y %s", args)
 	_, err = a.client.Execute(cmd)
 	return err
@@ -92,14 +92,12 @@ func (a *AptManager) Search(packageName string) (bool, error) {
 
 // DnfManager manages packages using dnf
 type DnfManager struct {
-	client  *ssh.Client
-	verbose bool
+	provisionLog
+	client *ssh.Client
 }
 
 func (d *DnfManager) Update() error {
-	if d.verbose {
-		fmt.Println("  Updating package lists (dnf)...")
-	}
+	d.logf("  Updating package lists (dnf)...\n")
 	_, err := d.client.Execute("sudo dnf check-update -y || true")
 	return err
 }
@@ -112,9 +110,7 @@ func (d *DnfManager) Install(packages ...string) error {
 	if err != nil {
 		return err
 	}
-	if d.verbose {
-		fmt.Printf("  Installing packages: %s\n", strings.Join(packages, ", "))
-	}
+	d.logf("  Installing packages: %s\n", strings.Join(packages, ", "))
 	cmd := fmt.Sprintf("sudo dnf install -y %s", args)
 	_, err = d.client.Execute(cmd)
 	return err
@@ -147,14 +143,12 @@ func (d *DnfManager) Search(packageName string) (bool, error) {
 
 // YumManager manages packages using yum
 type YumManager struct {
-	client  *ssh.Client
-	verbose bool
+	provisionLog
+	client *ssh.Client
 }
 
 func (y *YumManager) Update() error {
-	if y.verbose {
-		fmt.Println("  Updating package lists (yum)...")
-	}
+	y.logf("  Updating package lists (yum)...\n")
 	_, err := y.client.Execute("sudo yum check-update -y || true")
 	return err
 }
@@ -167,9 +161,7 @@ func (y *YumManager) Install(packages ...string) error {
 	if err != nil {
 		return err
 	}
-	if y.verbose {
-		fmt.Printf("  Installing packages: %s\n", strings.Join(packages, ", "))
-	}
+	y.logf("  Installing packages: %s\n", strings.Join(packages, ", "))
 	cmd := fmt.Sprintf("sudo yum install -y %s", args)
 	_, err = y.client.Execute(cmd)
 	return err
@@ -202,14 +194,12 @@ func (y *YumManager) Search(packageName string) (bool, error) {
 
 // ZypperManager manages packages using zypper
 type ZypperManager struct {
-	client  *ssh.Client
-	verbose bool
+	provisionLog
+	client *ssh.Client
 }
 
 func (z *ZypperManager) Update() error {
-	if z.verbose {
-		fmt.Println("  Updating package lists (zypper)...")
-	}
+	z.logf("  Updating package lists (zypper)...\n")
 	_, err := z.client.Execute("sudo zypper refresh")
 	return err
 }
@@ -222,9 +212,7 @@ func (z *ZypperManager) Install(packages ...string) error {
 	if err != nil {
 		return err
 	}
-	if z.verbose {
-		fmt.Printf("  Installing packages: %s\n", strings.Join(packages, " "))
-	}
+	z.logf("  Installing packages: %s\n", strings.Join(packages, " "))
 	cmd := fmt.Sprintf("sudo zypper install -y --no-confirm %s", args)
 	_, err = z.client.Execute(cmd)
 	return err
@@ -257,14 +245,12 @@ func (z *ZypperManager) Search(packageName string) (bool, error) {
 
 // ApkManager manages packages using apk
 type ApkManager struct {
-	client  *ssh.Client
-	verbose bool
+	provisionLog
+	client *ssh.Client
 }
 
 func (ap *ApkManager) Update() error {
-	if ap.verbose {
-		fmt.Println("  Updating package lists (apk)...")
-	}
+	ap.logf("  Updating package lists (apk)...\n")
 	_, err := ap.client.Execute("sudo apk update")
 	return err
 }
@@ -277,9 +263,7 @@ func (ap *ApkManager) Install(packages ...string) error {
 	if err != nil {
 		return err
 	}
-	if ap.verbose {
-		fmt.Printf("  Installing packages: %s\n", strings.Join(packages, ", "))
-	}
+	ap.logf("  Installing packages: %s\n", strings.Join(packages, ", "))
 	cmd := fmt.Sprintf("sudo apk add %s", args)
 	_, err = ap.client.Execute(cmd)
 	return err

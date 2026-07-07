@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -19,18 +20,42 @@ const takodAccessGroup = "tako"
 const takodActualRefreshInterval = "30s"
 const securityCommandTimeout = 10 * time.Minute
 
+// provisionLog routes provisioning progress prose to an injectable writer so
+// machine-output modes can keep stdout reserved for parseable output.
+type provisionLog struct {
+	verbose bool
+	output  io.Writer
+}
+
+func (l provisionLog) logf(format string, args ...any) {
+	if !l.verbose {
+		return
+	}
+	writer := l.output
+	if writer == nil {
+		writer = os.Stdout
+	}
+	fmt.Fprintf(writer, format, args...)
+}
+
 // Provisioner handles server provisioning
 type Provisioner struct {
-	client  *ssh.Client
-	verbose bool
+	provisionLog
+	client *ssh.Client
 }
 
 // NewProvisioner creates a new provisioner
 func NewProvisioner(client *ssh.Client, verbose bool) *Provisioner {
 	return &Provisioner{
-		client:  client,
-		verbose: verbose,
+		provisionLog: provisionLog{verbose: verbose},
+		client:       client,
 	}
+}
+
+// SetOutput redirects provisioning progress output. Passing nil resets
+// output to os.Stdout.
+func (p *Provisioner) SetOutput(w io.Writer) {
+	p.output = w
 }
 
 // CheckRequirements checks if the server meets basic requirements
@@ -43,18 +68,14 @@ func (p *Provisioner) CheckRequirements() error {
 		return fmt.Errorf("unsupported OS: %s", osInfo.String())
 	}
 
-	if p.verbose {
-		fmt.Printf("  OS: %s\n", osInfo.String())
-	}
+	p.logf("  OS: %s\n", osInfo.String())
 
 	return nil
 }
 
 // UpdateSystem updates system packages
 func (p *Provisioner) UpdateSystem() error {
-	if p.verbose {
-		fmt.Printf("  Updating system packages with detected package manager...\n")
-	}
+	p.logf("  Updating system packages with detected package manager...\n")
 	if _, err := p.client.Execute(runRootScript(basePackageInstallScript())); err != nil {
 		return fmt.Errorf("failed to update system packages: %w", err)
 	}
@@ -65,9 +86,7 @@ func (p *Provisioner) UpdateSystem() error {
 func (p *Provisioner) InstallDocker() error {
 	// Check if Docker is already installed
 	if output, err := p.client.Execute("which docker"); err == nil && output != "" {
-		if p.verbose {
-			fmt.Printf("  Docker already installed, ensuring it's enabled on boot...\n")
-		}
+		p.logf("  Docker already installed, ensuring it's enabled on boot...\n")
 		// Make sure Docker is enabled to start on boot
 		p.client.Execute("sudo systemctl enable docker")
 		p.client.Execute("sudo systemctl enable containerd")
@@ -75,17 +94,13 @@ func (p *Provisioner) InstallDocker() error {
 
 		// Verify Docker is running
 		if _, err := p.client.Execute("sudo systemctl is-active docker"); err != nil {
-			if p.verbose {
-				fmt.Printf("  Starting Docker service...\n")
-			}
+			p.logf("  Starting Docker service...\n")
 			p.client.Execute("sudo systemctl start docker")
 		}
 		return p.VerifySupportedDockerRuntime()
 	}
 
-	if p.verbose {
-		fmt.Printf("  Installing Docker from OS packages...\n")
-	}
+	p.logf("  Installing Docker from OS packages...\n")
 	if _, err := p.client.Execute(runRootScript(dockerInstallScript())); err != nil {
 		return fmt.Errorf("failed to install Docker packages: %w", err)
 	}
@@ -93,9 +108,7 @@ func (p *Provisioner) InstallDocker() error {
 	_, _ = p.client.Execute("sudo usermod -aG docker $(id -un) 2>/dev/null || true")
 
 	// Enable Docker to start on boot
-	if p.verbose {
-		fmt.Printf("  Enabling Docker to start on boot...\n")
-	}
+	p.logf("  Enabling Docker to start on boot...\n")
 	enableCommands := []string{
 		"sudo systemctl enable docker",
 		"sudo systemctl enable containerd",
@@ -104,9 +117,7 @@ func (p *Provisioner) InstallDocker() error {
 	}
 
 	for _, cmd := range enableCommands {
-		if p.verbose {
-			fmt.Printf("  Running: %s\n", cmd)
-		}
+		p.logf("  Running: %s\n", cmd)
 		// Don't fail if containerd doesn't exist (older Docker versions)
 		p.client.Execute(cmd)
 	}
@@ -175,7 +186,7 @@ command -v docker >/dev/null 2>&1
 }
 
 func (p *Provisioner) InstallWireGuard() error {
-	return mesh.EnsureWireGuardTools(p.client, p.verbose)
+	return mesh.EnsureWireGuardToolsWithOutput(p.client, p.verbose, p.output)
 }
 
 func (p *Provisioner) InstallTakodBinary(version string) error {
@@ -183,9 +194,7 @@ func (p *Provisioner) InstallTakodBinary(version string) error {
 	if err != nil {
 		existing, _ := p.client.Execute("command -v tako 2>/dev/null || true")
 		if strings.TrimSpace(existing) != "" {
-			if p.verbose {
-				fmt.Printf("  Using existing server-side tako binary: %s\n", strings.TrimSpace(existing))
-			}
+			p.logf("  Using existing server-side tako binary: %s\n", strings.TrimSpace(existing))
 			return nil
 		}
 		return fmt.Errorf("cannot install takod binary from release: %w; pass --takod-binary with a Linux tako binary for development setup", err)
@@ -219,9 +228,7 @@ func (p *Provisioner) InstallTakodBinaryFromFile(localPath string) error {
 	defer file.Close()
 
 	remoteTemp := fmt.Sprintf("/tmp/tako-upload-%d", time.Now().UnixNano())
-	if p.verbose {
-		fmt.Printf("  Uploading local takod binary: %s\n", localPath)
-	}
+	p.logf("  Uploading local takod binary: %s\n", localPath)
 	if err := p.client.UploadReader(file, remoteTemp, 0755); err != nil {
 		return fmt.Errorf("failed to upload local takod binary: %w", err)
 	}
@@ -532,14 +539,10 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 	if !hasUFW {
 		osInfo, err := DetectOS(p.client)
 		if err == nil && shouldSkipUFWFirewall(osInfo) {
-			if p.verbose {
-				fmt.Printf("  UFW not available on %s; relying on provider/native firewall\n", osInfo.String())
-			}
+			p.logf("  UFW not available on %s; relying on provider/native firewall\n", osInfo.String())
 			return nil
 		}
-		if p.verbose {
-			fmt.Printf("  Running: sudo apt-get install -y ufw\n")
-		}
+		p.logf("  Running: sudo apt-get install -y ufw\n")
 		if _, err := p.client.Execute("sudo apt-get install -y ufw"); err != nil {
 			return fmt.Errorf("failed to install ufw: %w", err)
 		}
@@ -549,23 +552,19 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 	output, _ := p.client.Execute("sudo ufw status | grep -i 'Status: active'")
 	isActive := strings.TrimSpace(output) != ""
 
-	if isActive && p.verbose {
-		fmt.Printf("  UFW already active, updating rules...\n")
+	if isActive {
+		p.logf("  UFW already active, updating rules...\n")
 	}
 
 	// Disable UFW temporarily to safely update rules
 	if isActive {
-		if p.verbose {
-			fmt.Printf("  Temporarily disabling UFW to update rules\n")
-		}
+		p.logf("  Temporarily disabling UFW to update rules\n")
 		p.client.Execute("sudo ufw --force disable")
 	}
 
 	// Reset UFW to clean state (only if not active before)
 	if !isActive {
-		if p.verbose {
-			fmt.Printf("  Running: sudo ufw --force reset\n")
-		}
+		p.logf("  Running: sudo ufw --force reset\n")
 		p.client.Execute("sudo ufw --force reset")
 	}
 
@@ -576,9 +575,7 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 	}
 
 	for _, cmd := range commands {
-		if p.verbose {
-			fmt.Printf("  Running: %s\n", cmd)
-		}
+		p.logf("  Running: %s\n", cmd)
 		if _, err := p.client.Execute(cmd); err != nil {
 			return fmt.Errorf("command failed '%s': %w", cmd, err)
 		}
@@ -586,17 +583,13 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 
 	// Allow essential services with rate limiting for SSH (use || true to ignore "Skipping adding existing rule" errors)
 	for _, cmd := range firewallAllowCommands(meshListenPort) {
-		if p.verbose {
-			fmt.Printf("  Running: %s\n", cmd)
-		}
+		p.logf("  Running: %s\n", cmd)
 		// Execute but don't fail on "rule already exists" errors
 		p.client.Execute(cmd)
 	}
 
 	// Enable UFW
-	if p.verbose {
-		fmt.Printf("  Running: sudo ufw --force enable\n")
-	}
+	p.logf("  Running: sudo ufw --force enable\n")
 	if _, err := p.client.Execute("sudo ufw --force enable"); err != nil {
 		return fmt.Errorf("failed to enable ufw: %w", err)
 	}
@@ -604,7 +597,7 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 	// Show status
 	if p.verbose {
 		output, _ := p.client.Execute("sudo ufw status verbose")
-		fmt.Printf("\n  UFW Status:\n%s\n", output)
+		p.logf("\n  UFW Status:\n%s\n", output)
 	}
 
 	return nil
@@ -633,13 +626,9 @@ func firewallAllowCommands(meshListenPort int) []string {
 
 // HardenSecurity applies comprehensive security hardening
 func (p *Provisioner) HardenSecurity() error {
-	if p.verbose {
-		fmt.Printf("  Installing and configuring security tools...\n")
-	}
+	p.logf("  Installing and configuring security tools...\n")
 
-	if p.verbose {
-		fmt.Printf("  Installing security packages...\n")
-	}
+	p.logf("  Installing security packages...\n")
 	if _, err := p.executeSecurityCommand(runRootScript(securityPackagesInstallScript())); err != nil {
 		return fmt.Errorf("failed to install security packages: %w", err)
 	}
@@ -648,9 +637,7 @@ func (p *Provisioner) HardenSecurity() error {
 		// Configure fail2ban with custom jail for SSH
 		fail2banConfig := fail2banSSHDJailConfig(p.detectSSHClientIP())
 
-		if p.verbose {
-			fmt.Printf("  Configuring fail2ban jail for SSH...\n")
-		}
+		p.logf("  Configuring fail2ban jail for SSH...\n")
 
 		// Write fail2ban jail config
 		fail2banCmd := fmt.Sprintf("sudo mkdir -p /etc/fail2ban/jail.d && sudo tee /etc/fail2ban/jail.d/sshd.local > /dev/null << 'EOF'\n%s\nEOF", fail2banConfig)
@@ -665,14 +652,12 @@ func (p *Provisioner) HardenSecurity() error {
 		if _, err := p.executeSecurityCommand("sudo systemctl restart fail2ban"); err != nil {
 			return fmt.Errorf("failed to restart fail2ban: %w", err)
 		}
-	} else if p.verbose {
-		fmt.Printf("  fail2ban unavailable on this host; skipping fail2ban jail\n")
+	} else {
+		p.logf("  fail2ban unavailable on this host; skipping fail2ban jail\n")
 	}
 
 	// Configure SSH hardening
-	if p.verbose {
-		fmt.Printf("  Hardening SSH configuration...\n")
-	}
+	p.logf("  Hardening SSH configuration...\n")
 
 	sshHardeningCommands := []string{
 		// Increase connection limits to prevent lockouts
@@ -709,23 +694,17 @@ func (p *Provisioner) HardenSecurity() error {
 	}
 
 	// Configure automatic security updates
-	if p.verbose {
-		fmt.Printf("  Enabling automatic security updates...\n")
-	}
+	p.logf("  Enabling automatic security updates...\n")
 	if _, err := p.executeSecurityCommand(runRootScript(unattendedUpgradesConfigScript())); err != nil {
 		return fmt.Errorf("failed to configure unattended upgrades: %w", err)
 	}
 
 	// Enable and restart SSH service
-	if p.verbose {
-		fmt.Printf("  Enabling and restarting SSH service...\n")
-	}
+	p.logf("  Enabling and restarting SSH service...\n")
 
 	// CRITICAL: Enable SSH to start on boot
 	if _, err := p.client.Execute("sudo systemctl enable ssh"); err != nil {
-		if p.verbose {
-			fmt.Printf("  Warning: Failed to enable SSH service: %v\n", err)
-		}
+		p.logf("  Warning: Failed to enable SSH service: %v\n", err)
 	}
 
 	// Restart SSH service to apply changes (try both ssh and sshd)
@@ -735,18 +714,14 @@ func (p *Provisioner) HardenSecurity() error {
 	// Verify SSH is running
 	output, err := p.client.Execute("sudo systemctl is-active ssh")
 	if err != nil || strings.TrimSpace(output) != "active" {
-		if p.verbose {
-			fmt.Printf("  Warning: SSH service may not be running properly\n")
-		}
+		p.logf("  Warning: SSH service may not be running properly\n")
 	}
 
-	if p.verbose {
-		fmt.Printf("  ✓ Security hardening completed\n")
-		fmt.Printf("  - fail2ban: enabled (5 retries in 10min = 1hr ban)\n")
-		fmt.Printf("  - SSH: hardened (key-based auth only)\n")
-		fmt.Printf("  - Auto-updates: enabled\n")
-		fmt.Printf("  - SSH service: enabled on boot\n")
-	}
+	p.logf("  ✓ Security hardening completed\n")
+	p.logf("  - fail2ban: enabled (5 retries in 10min = 1hr ban)\n")
+	p.logf("  - SSH: hardened (key-based auth only)\n")
+	p.logf("  - Auto-updates: enabled\n")
+	p.logf("  - SSH service: enabled on boot\n")
 
 	return nil
 }
@@ -843,20 +818,14 @@ func (p *Provisioner) SetupDeployUser(username string) error {
 		}
 
 		for _, cmd := range commands {
-			if p.verbose {
-				fmt.Printf("  Running: %s\n", cmd)
-			}
+			p.logf("  Running: %s\n", cmd)
 			if _, err := p.client.Execute(cmd); err != nil {
 				// May fail if user already exists, that's okay
-				if p.verbose {
-					fmt.Printf("  Warning: %v\n", err)
-				}
+				p.logf("  Warning: %v\n", err)
 			}
 		}
 	} else {
-		if p.verbose {
-			fmt.Printf("  User %s already exists\n", username)
-		}
+		p.logf("  User %s already exists\n", username)
 	}
 
 	// Runtime access is mediated by takod's Unix socket, not broad sudo or Docker group membership.
@@ -883,9 +852,7 @@ func buildTakodAccessCommand(username string) string {
 
 // VerifyAutoRecovery verifies that critical services are enabled for auto-recovery
 func (p *Provisioner) VerifyAutoRecovery() error {
-	if p.verbose {
-		fmt.Printf("→ Verifying auto-recovery configuration...\n")
-	}
+	p.logf("→ Verifying auto-recovery configuration...\n")
 
 	// Check if critical services are enabled
 	services := []string{"docker", "containerd", "ssh"}
@@ -895,14 +862,10 @@ func (p *Provisioner) VerifyAutoRecovery() error {
 		status := strings.TrimSpace(output)
 
 		if err != nil || (status != "enabled" && status != "static") {
-			if p.verbose {
-				fmt.Printf("  ⚠ %s is not enabled, enabling now...\n", service)
-			}
+			p.logf("  ⚠ %s is not enabled, enabling now...\n", service)
 			p.client.Execute(fmt.Sprintf("sudo systemctl enable %s", service))
 		} else {
-			if p.verbose {
-				fmt.Printf("  ✓ %s is enabled on boot\n", service)
-			}
+			p.logf("  ✓ %s is enabled on boot\n", service)
 		}
 	}
 
@@ -912,36 +875,28 @@ func (p *Provisioner) VerifyAutoRecovery() error {
 		status := strings.TrimSpace(output)
 
 		if status != "active" {
-			if p.verbose {
-				fmt.Printf("  ⚠ %s is not running, starting...\n", service)
-			}
+			p.logf("  ⚠ %s is not running, starting...\n", service)
 			p.client.Execute(fmt.Sprintf("sudo systemctl start %s", service))
 		} else {
-			if p.verbose {
-				fmt.Printf("  ✓ %s is running\n", service)
-			}
+			p.logf("  ✓ %s is running\n", service)
 		}
 	}
 
-	if p.verbose {
-		fmt.Printf("  ✓ Auto-recovery verification complete\n")
-	}
+	p.logf("  ✓ Auto-recovery verification complete\n")
 
 	return nil
 }
 
 // InstallMonitoringAgent installs the lightweight monitoring agent
 func (p *Provisioner) InstallMonitoringAgent() error {
-	if p.verbose {
-		fmt.Printf("→ Installing monitoring agent...\n")
-	}
+	p.logf("→ Installing monitoring agent...\n")
 
 	// Check if already installed and running (but allow updates)
 	output, err := p.client.Execute("systemctl is-active tako-monitor 2>/dev/null")
 	alreadyRunning := err == nil && strings.TrimSpace(output) == "active"
 
-	if alreadyRunning && p.verbose {
-		fmt.Printf("  Updating monitoring agent...\n")
+	if alreadyRunning {
+		p.logf("  Updating monitoring agent...\n")
 	}
 
 	// Read the agent script from embedded file
@@ -1086,17 +1041,13 @@ WantedBy=multi-user.target
 `
 
 	// Install bc (required for floating point calculations)
-	if p.verbose {
-		fmt.Printf("  Installing bc (calculator)...\n")
-	}
+	p.logf("  Installing bc (calculator)...\n")
 	if err := p.installPackages("bc"); err != nil {
 		return fmt.Errorf("failed to install bc: %w", err)
 	}
 
 	// Upload agent script
-	if p.verbose {
-		fmt.Printf("  Uploading monitoring agent script...\n")
-	}
+	p.logf("  Uploading monitoring agent script...\n")
 	scriptPath := "/usr/local/bin/tako-monitor.sh"
 	uploadCmd := fmt.Sprintf("sudo tee %s > /dev/null << 'EOFSCRIPT'\n%s\nEOFSCRIPT", scriptPath, agentScript)
 	_, err = p.client.Execute(uploadCmd)
@@ -1111,9 +1062,7 @@ WantedBy=multi-user.target
 	}
 
 	// Upload systemd service
-	if p.verbose {
-		fmt.Printf("  Creating systemd service...\n")
-	}
+	p.logf("  Creating systemd service...\n")
 	servicePath := "/etc/systemd/system/tako-monitor.service"
 	uploadServiceCmd := fmt.Sprintf("sudo tee %s > /dev/null << 'EOFSERVICE'\n%s\nEOFSERVICE", servicePath, systemdService)
 	_, err = p.client.Execute(uploadServiceCmd)
@@ -1122,9 +1071,7 @@ WantedBy=multi-user.target
 	}
 
 	// Reload systemd, enable and start service
-	if p.verbose {
-		fmt.Printf("  Starting monitoring service...\n")
-	}
+	p.logf("  Starting monitoring service...\n")
 	commands := []string{
 		"sudo systemctl daemon-reload",
 		"sudo systemctl enable tako-monitor",
@@ -1143,9 +1090,7 @@ WantedBy=multi-user.target
 		return fmt.Errorf("monitoring service failed to start")
 	}
 
-	if p.verbose {
-		fmt.Printf("  ✓ Monitoring agent installed and running\n")
-	}
+	p.logf("  ✓ Monitoring agent installed and running\n")
 
 	return nil
 }
@@ -1155,7 +1100,7 @@ func (p *Provisioner) installPackages(packages ...string) error {
 	if err != nil {
 		return fmt.Errorf("failed to detect OS: %w", err)
 	}
-	manager, err := NewPackageManager(p.client, osInfo, p.verbose)
+	manager, err := newPackageManagerWithLog(p.client, osInfo, p.provisionLog)
 	if err != nil {
 		return err
 	}
