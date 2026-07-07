@@ -48,6 +48,11 @@ func TestValidateExecRequestRejectsBadInput(t *testing.T) {
 		{"blank mount", func(r *ExecRequest) { r.Mounts = []string{" "} }},
 		{"negative replica", func(r *ExecRequest) { r.Replica = -1 }},
 		{"excessive timeout", func(r *ExecRequest) { r.TimeoutSeconds = maxExecTimeoutSeconds + 1 }},
+		{"oversized cols", func(r *ExecRequest) { r.PTY = true; r.Cols = maxExecTerminalDim + 1 }},
+		{"negative rows", func(r *ExecRequest) { r.PTY = true; r.Rows = -1 }},
+		{"size without pty", func(r *ExecRequest) { r.Cols = 80; r.Rows = 24 }},
+		{"idle timeout without interactive", func(r *ExecRequest) { r.IdleTimeoutSeconds = 60 }},
+		{"excessive idle timeout", func(r *ExecRequest) { r.Interactive = true; r.IdleTimeoutSeconds = maxExecTimeoutSeconds + 1 }},
 	}
 	for _, tc := range cases {
 		req := validExecRequestFixture()
@@ -67,6 +72,47 @@ func TestBuildExecAttachArgs(t *testing.T) {
 	want := []string{"exec", "-e", "FOO=bar", "tako_demo_production_web_1", "sh", "-c", "echo hi"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+func TestValidateExecRequestPTYImpliesInteractive(t *testing.T) {
+	req := validExecRequestFixture()
+	req.PTY = true
+	req.Cols = 120
+	req.Rows = 40
+	if err := validateExecRequest(&req); err != nil {
+		t.Fatalf("pty request rejected: %v", err)
+	}
+	if !req.Interactive {
+		t.Fatal("pty must imply interactive")
+	}
+}
+
+func TestBuildExecArgsInteractiveFlags(t *testing.T) {
+	req := validExecRequestFixture()
+	req.Interactive = true
+	got := buildExecAttachArgs(req, "c1")
+	if !slices.Equal(got[:2], []string{"exec", "-i"}) {
+		t.Fatalf("interactive attach args = %#v, want exec -i prefix", got)
+	}
+
+	req.PTY = true
+	got = buildExecAttachArgs(req, "c1")
+	if !slices.Equal(got[:3], []string{"exec", "-i", "-t"}) {
+		t.Fatalf("pty attach args = %#v, want exec -i -t prefix", got)
+	}
+
+	req.Mode = ExecModeOneOff
+	got = buildExecOneOffArgs(req, "c1", "img", "")
+	if !slices.Equal(got[:4], []string{"run", "--rm", "-i", "-t"}) {
+		t.Fatalf("pty oneoff args = %#v, want run --rm -i -t prefix", got)
+	}
+
+	// Non-interactive stays byte-identical: no -i/-t anywhere.
+	plain := validExecRequestFixture()
+	got = buildExecAttachArgs(plain, "c1")
+	if slices.Contains(got, "-i") || slices.Contains(got, "-t") {
+		t.Fatalf("non-interactive args gained tty flags: %#v", got)
 	}
 }
 

@@ -386,7 +386,13 @@ re-runnable (as `migrate` is) is the application's responsibility.
 
 For ad-hoc commands against a deployed service (debugging, framework tasks),
 use `tako exec SERVICE -- CMD` — attach to a running replica, or `--oneoff`
-for a fresh container from the service's current image.
+for a fresh container from the service's current image. `tako exec -it
+SERVICE -- sh` opens an interactive shell: the CLI dials the takod socket
+over an SSH direct-streamlocal channel and the remote command runs under a
+pseudo-terminal that follows local window resizes (see the ptystream
+terminal stream contract in MACHINE-INTERFACE.md). Sessions carry a 4h
+absolute and 30m idle timeout, and disconnects kill the remote process and
+remove one-off containers.
 
 ### Scheduled jobs
 
@@ -676,6 +682,10 @@ Done:
 24. SIGKILL crash recovery is proven by a repeatable harness
     (`scripts/kill-mid-deploy-e2e.sh`): in-progress history, lease
     force-release, clean redeploy.
+25. Interactive exec: `tako exec -it` runs a real PTY session over an SSH
+    direct-streamlocal channel and the documented ptystream frame protocol
+    (resize, exit codes, idle/absolute timeouts, disconnect cleanup). This
+    resolves the interactive-exec deferral from the exec design (ADR 7).
 
 Next:
 1. Add distributed certificate handling for multi-edge deployments.

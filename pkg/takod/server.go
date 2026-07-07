@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/takoapi/ptystream"
 )
 
 type Server struct {
@@ -1043,11 +1045,54 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if request.Interactive || request.PTY {
+		s.handleExecStream(w, r, request)
+		return
+	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	counting := &countingWriter{writer: &flushResponseWriter{writer: w}}
 	if err := StreamExec(r.Context(), request, counting); err != nil && counting.written == 0 {
 		http.Error(w, err.Error(), http.StatusBadGateway)
+	}
+}
+
+// handleExecStream upgrades the connection to the ptystream frame protocol
+// and runs an interactive exec session over it. Validation already passed;
+// resolution failures surface as Error frames after the upgrade.
+func (s *Server) handleExecStream(w http.ResponseWriter, r *http.Request, request ExecRequest) {
+	if !strings.EqualFold(r.Header.Get("Upgrade"), ptystream.Protocol) {
+		http.Error(w, fmt.Sprintf("interactive exec requires an Upgrade: %s handshake", ptystream.Protocol), http.StatusUpgradeRequired)
+		return
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "connection does not support upgrades", http.StatusInternalServerError)
+		return
+	}
+	conn, buffered, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to hijack connection: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer conn.Close()
+
+	response := "HTTP/1.1 101 Switching Protocols\r\n" +
+		"Upgrade: " + ptystream.Protocol + "\r\n" +
+		"Connection: Upgrade\r\n\r\n"
+	if _, err := buffered.Writer.WriteString(response); err != nil {
+		return
+	}
+	if err := buffered.Writer.Flush(); err != nil {
+		return
+	}
+
+	// The request context dies with the hijack; the session owns its own
+	// lifecycle (client disconnect, absolute and idle timeouts).
+	if err := RunExecStream(context.Background(), request, buffered.Reader, conn); err != nil {
+		writer := ptystream.NewWriter(conn)
+		_ = writer.WriteFrame(ptystream.FrameError, []byte(err.Error()))
+		_ = writer.WriteFrame(ptystream.FrameExit, ptystream.EncodeExit(-1))
 	}
 }
 

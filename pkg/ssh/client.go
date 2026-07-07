@@ -952,6 +952,26 @@ func (c *Client) IsHealthy() bool {
 
 // getConnection returns the current connection, establishing it if needed
 // This method properly handles the connection state to avoid TOCTOU race conditions
+// DialUnixSocket opens a direct-streamlocal@openssh.com channel to a Unix
+// socket on the remote host, returning a full-duplex connection to it. This
+// is how interactive takod endpoints are reached: real HTTP over the socket,
+// no remote curl process. Requires sshd's default
+// AllowStreamLocalForwarding=yes.
+func (c *Client) DialUnixSocket(ctx context.Context, path string) (net.Conn, error) {
+	if path == "" {
+		return nil, fmt.Errorf("unix socket path is required")
+	}
+	conn, err := c.getConnectionContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	socketConn, err := conn.DialContext(ctx, "unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial remote unix socket %s (sshd must allow streamlocal forwarding): %w", path, err)
+	}
+	return socketConn, nil
+}
+
 func (c *Client) getConnection() (*ssh.Client, error) {
 	return c.getConnectionContext(context.Background())
 }
