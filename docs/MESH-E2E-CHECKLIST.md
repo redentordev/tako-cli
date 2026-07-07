@@ -1,8 +1,8 @@
 # Meshed takod E2E Checklist
 
-Use this checklist to prove the single runtime path before treating the mesh
-migration as complete. The same commands should work for one node, two nodes,
-and CI runners.
+Use this checklist to validate the runtime path before a release or after
+substantial runtime changes. The same commands should work for one node, two
+nodes, and CI runners.
 
 ## Test Matrix
 
@@ -368,8 +368,8 @@ Expected result:
 
 ## Completion Bar
 
-The migration is proven only when the checklist passes against real servers and
-the following local gates pass:
+The runtime path is proven only when the checklist passes against real
+servers and the following local gates pass:
 
 ```bash
 make ci-check

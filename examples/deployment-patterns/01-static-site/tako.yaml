@@ -18,6 +18,8 @@ environments:
         port: 80
         proxy:
           domain: static.${SERVER_HOST}.sslip.io
+          domains:
+            - static-alt.${SERVER_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}
         healthCheck:
           path: /

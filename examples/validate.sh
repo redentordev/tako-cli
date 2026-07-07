@@ -33,6 +33,8 @@ export APP_KEY="${APP_KEY:-base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}"
 export APP_SECRET="${APP_SECRET:-example-app-secret}"
 export MAILER_EMAIL="${MAILER_EMAIL:-ops@example.com}"
 export SECRET_KEY_BASE="${SECRET_KEY_BASE:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
+export REGISTRY_USER="${REGISTRY_USER:-example-registry-user}"
+export REGISTRY_TOKEN="${REGISTRY_TOKEN:-example-registry-token}"
 
 validate_config() {
   local config_path="$1"

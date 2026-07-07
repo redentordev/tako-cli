@@ -13,7 +13,7 @@ minimal so the deployment shape is easy to see and adapt.
 | `03-volume-sqlite` | App-owned local data | Named volume, backup schedule |
 | `04-postgres-app` | Web app with database | App service, PostgreSQL, persistence, dependency |
 | `05-workers-redis` | API plus background workers | Web/API, worker command, Redis queue |
-| `06-cron-runner` | Scheduled/background task runner | No public port, loop command, restart policy |
+| `06-cron-runner` | Scheduled job on a cron schedule | `kind: job`, cron `schedule`, run history via `tako jobs runs` |
 | `07-python-fastapi` | Python web service | FastAPI/Uvicorn Docker build |
 | `08-go-web` | Go web service | Multi-stage Dockerfile, replicas, load balancing |
 | `09-monorepo-web-api` | Monorepo with public web and internal API | Separate build contexts, dependency order, internal routing |

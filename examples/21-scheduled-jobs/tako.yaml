@@ -1,0 +1,39 @@
+# Scheduled Jobs Example
+# A web app plus a nightly cleanup job managed by the node agent
+
+project:
+  name: scheduled-jobs
+  version: 1.0.0
+
+servers:
+  prod:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+
+environments:
+  production:
+    servers:
+      - prod
+    services:
+      web:
+        image: nginx:alpine
+        port: 80
+
+      # Runs at 03:00 UTC every day. No port, no replicas, no proxy —
+      # takod starts a one-off container per run and records the output.
+      nightly-cleanup:
+        kind: job
+        schedule: "0 3 * * *"
+        image: alpine:3.20
+        command: sh -c "date -u; echo cleaning expired sessions"
+
+      # Five-field cron or descriptors like @hourly both work.
+      # Schedules default to UTC; set timezone for local-time runs.
+      hourly-report:
+        kind: job
+        schedule: "@hourly"
+        timezone: America/New_York
+        image: alpine:3.20
+        command: sh -c "echo generating report"
+        timeout: 10m

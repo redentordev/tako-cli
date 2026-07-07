@@ -267,6 +267,9 @@ func assertStaticSitePattern(t *testing.T, cfg *config.Config) {
 		t.Fatalf("static web should build local nginx image: %#v", web)
 	}
 	assertPublicService(t, web, 80)
+	if len(web.Proxy.GetAllDomains()) != 2 {
+		t.Fatalf("static web should serve primary plus one extra domain: %#v", web.Proxy)
+	}
 }
 
 func assertNodeAPIPattern(t *testing.T, cfg *config.Config) {
@@ -318,12 +321,12 @@ func assertWorkersPattern(t *testing.T, cfg *config.Config) {
 }
 
 func assertCronRunnerPattern(t *testing.T, cfg *config.Config) {
-	jobs := productionServices(t, cfg)["jobs"]
-	if jobs.Port != 0 || jobs.Proxy != nil || jobs.Command == "" {
-		t.Fatalf("cron runner should be an internal command-only service: %#v", jobs)
+	job := productionServices(t, cfg)["hourly-maintenance"]
+	if !job.IsJob() || job.Schedule == "" || job.Command == "" {
+		t.Fatalf("cron runner should be a scheduled kind: job service: %#v", job)
 	}
-	if !slices.Contains(jobs.Volumes, "cron_logs:/var/log/tako-cron") {
-		t.Fatalf("cron runner should keep logs in a named volume: %#v", jobs.Volumes)
+	if job.Port != 0 || job.Proxy != nil {
+		t.Fatalf("scheduled job should not expose a port or proxy: %#v", job)
 	}
 }
 
