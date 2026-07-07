@@ -522,6 +522,17 @@ block on slow scans. Phase 1 allows one dynamic-domain authority per edge node;
 explicit-domain projects can still share that node through their own route
 manifests.
 
+Per-service proxy access controls guard every route of a service.
+`proxy.basicAuth` takes a username and a pre-computed bcrypt hash
+(`passwordBcrypt`, minted with `tako proxy hash-password`) — never a plaintext
+password, because a fresh bcrypt salt per deploy would churn the route-manifest
+hash and defeat idempotent redeploys. `proxy.allowIps` lists client IPs/CIDRs
+allowed through the proxy; all other addresses receive 403 before basic auth is
+evaluated. The allowlist matches the TCP peer address, so behind a CDN the
+CDN's egress address is what must be listed. Both controls are validated at
+config time and again by `takod` before route manifests reach the generated
+Caddy config.
+
 One-node deployments use the same proxy path with only local upstreams and do
 not publish mesh host ports. Multi-node upstream ports are allocated and
 recorded by the target node's `takod` agent. The CLI sends a

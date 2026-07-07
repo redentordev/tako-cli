@@ -32,6 +32,45 @@ func TestSafeServiceConfigHashStableAcrossOrderOnlyFields(t *testing.T) {
 	}
 }
 
+func TestSafeServiceConfigHashTracksResourceLimits(t *testing.T) {
+	base := config.ServiceConfig{Image: "nginx:1.27", Port: 8080}
+	baseHash, ok := SafeServiceConfigHash(base)
+	if !ok {
+		t.Fatal("expected safe service hash")
+	}
+
+	// An empty resources block must not change existing hashes.
+	empty := base
+	empty.Resources = &config.ResourceLimitsConfig{}
+	emptyHash, ok := SafeServiceConfigHash(empty)
+	if !ok {
+		t.Fatal("expected safe service hash")
+	}
+	if emptyHash != baseHash {
+		t.Fatalf("empty resources changed the hash: %q != %q", emptyHash, baseHash)
+	}
+
+	limited := base
+	limited.Resources = &config.ResourceLimitsConfig{Memory: "512m", CPUs: "1.5"}
+	limitedHash, ok := SafeServiceConfigHash(limited)
+	if !ok {
+		t.Fatal("expected safe service hash")
+	}
+	if limitedHash == baseHash {
+		t.Fatal("resource limits should change the hash so limit edits trigger UPDATE plans")
+	}
+
+	changed := base
+	changed.Resources = &config.ResourceLimitsConfig{Memory: "512m", CPUs: "2"}
+	changedHash, ok := SafeServiceConfigHash(changed)
+	if !ok {
+		t.Fatal("expected safe service hash")
+	}
+	if changedHash == limitedHash {
+		t.Fatal("cpu limit change should change the hash")
+	}
+}
+
 func TestSafeServiceConfigHashRedactsEnvAndSecretValues(t *testing.T) {
 	a := config.ServiceConfig{
 		Image:      "nginx",

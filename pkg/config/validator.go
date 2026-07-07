@@ -6,12 +6,15 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/utils"
 	"github.com/robfig/cron/v3"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -816,7 +819,27 @@ func validateResourceLimits(name string, resources *ResourceLimitsConfig) error 
 		return fmt.Errorf("service %s: invalid resources.memory: %w", name, err)
 	}
 	resources.Memory = memory
+	cpus, err := normalizeDockerCPULimit(resources.CPUs)
+	if err != nil {
+		return fmt.Errorf("service %s: invalid resources.cpus: %w", name, err)
+	}
+	resources.CPUs = cpus
 	return nil
+}
+
+func normalizeDockerCPULimit(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) > 12 || !dockerCPULimitPattern.MatchString(value) {
+		return "", fmt.Errorf("must be a positive decimal number of CPUs, for example 0.5 or 2")
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed <= 0 {
+		return "", fmt.Errorf("must be greater than zero")
+	}
+	return value, nil
 }
 
 func normalizeDockerMemoryLimit(value string) (string, error) {
@@ -1240,6 +1263,9 @@ func validateDockerfilePath(path string) error {
 }
 
 func validateProxy(projectName string, envName string, serviceName string, proxy *ProxyConfig) error {
+	if err := validateProxyAccessControls(serviceName, proxy); err != nil {
+		return err
+	}
 	visibility := strings.ToLower(strings.TrimSpace(proxy.Visibility))
 	if visibility == "" {
 		visibility = ProxyVisibilityPublic
@@ -1350,6 +1376,45 @@ func validateProxy(projectName string, envName string, serviceName string, proxy
 		return fmt.Errorf("service %s: invalid TLS provider: %s", serviceName, proxy.TLS.Provider)
 	}
 
+	return nil
+}
+
+var (
+	dockerCPULimitPattern     = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
+	proxyBasicAuthUserPattern = regexp.MustCompile(`^[A-Za-z0-9._@-]+$`)
+)
+
+func validateProxyAccessControls(serviceName string, proxy *ProxyConfig) error {
+	if auth := proxy.BasicAuth; auth != nil {
+		auth.Username = strings.TrimSpace(auth.Username)
+		if auth.Username == "" {
+			return fmt.Errorf("service %s: proxy.basicAuth.username is required", serviceName)
+		}
+		if len(auth.Username) > 64 || !proxyBasicAuthUserPattern.MatchString(auth.Username) {
+			return fmt.Errorf("service %s: invalid proxy.basicAuth.username %q (letters, digits, . _ @ - only)", serviceName, auth.Username)
+		}
+		auth.PasswordBcrypt = strings.TrimSpace(auth.PasswordBcrypt)
+		if auth.PasswordBcrypt == "" {
+			return fmt.Errorf("service %s: proxy.basicAuth.passwordBcrypt is required", serviceName)
+		}
+		if _, err := bcrypt.Cost([]byte(auth.PasswordBcrypt)); err != nil {
+			return fmt.Errorf("service %s: proxy.basicAuth.passwordBcrypt is not a bcrypt hash (mint one with 'tako proxy hash-password'); plaintext passwords are not accepted", serviceName)
+		}
+	}
+	for i, entry := range proxy.AllowIps {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			return fmt.Errorf("service %s: proxy.allowIps entries cannot be empty", serviceName)
+		}
+		if strings.Contains(trimmed, "/") {
+			if _, _, err := net.ParseCIDR(trimmed); err != nil {
+				return fmt.Errorf("service %s: invalid proxy.allowIps CIDR %q", serviceName, trimmed)
+			}
+		} else if net.ParseIP(trimmed) == nil {
+			return fmt.Errorf("service %s: invalid proxy.allowIps address %q", serviceName, trimmed)
+		}
+		proxy.AllowIps[i] = trimmed
+	}
 	return nil
 }
 

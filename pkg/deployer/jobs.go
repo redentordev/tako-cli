@@ -80,6 +80,8 @@ func (d *Deployer) buildJobSpec(serviceName string, service *config.ServiceConfi
 		EnvFileContent: envContent,
 		Network:        runtimeid.NetworkName(d.config.Project.Name, d.environment),
 		Mounts:         mounts,
+		MemoryLimit:    serviceMemoryLimit(service),
+		CPULimit:       serviceCPULimit(service),
 		TimeoutSeconds: timeoutSeconds,
 		ConfigHash:     hash,
 	}, nil

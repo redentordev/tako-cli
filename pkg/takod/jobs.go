@@ -68,6 +68,8 @@ type JobSpec struct {
 	// Network attaches run containers; default tako_<project>_<env>.
 	Network        string   `json:"network,omitempty"`
 	Mounts         []string `json:"mounts,omitempty"`
+	MemoryLimit    string   `json:"memoryLimit,omitempty"`
+	CPULimit       string   `json:"cpuLimit,omitempty"`
 	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
 	// ConfigHash is the deployer's fingerprint of the job's service config,
 	// reported back through actual state for drift/plan comparison.
@@ -596,6 +598,12 @@ func buildJobRunArgs(spec JobSpec, container string, envFile string) []string {
 	for _, mount := range spec.Mounts {
 		args = append(args, "--mount", mount)
 	}
+	if spec.MemoryLimit != "" {
+		args = append(args, "--memory", spec.MemoryLimit)
+	}
+	if spec.CPULimit != "" {
+		args = append(args, "--cpus", spec.CPULimit)
+	}
 	args = append(args, spec.Image)
 	args = append(args, spec.Command...)
 	return args
@@ -653,6 +661,12 @@ func validateJobSpec(spec *JobSpec) error {
 	}
 	if len(spec.ConfigHash) > 128 || hasControlChars(spec.ConfigHash) {
 		return fmt.Errorf("invalid configHash")
+	}
+	if spec.MemoryLimit != "" && !isSafeDockerMemoryLimit(spec.MemoryLimit) {
+		return fmt.Errorf("invalid memory limit")
+	}
+	if spec.CPULimit != "" && !isSafeDockerCPULimit(spec.CPULimit) {
+		return fmt.Errorf("invalid cpu limit")
 	}
 	return nil
 }

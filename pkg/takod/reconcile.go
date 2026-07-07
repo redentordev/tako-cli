@@ -48,6 +48,7 @@ type ReconcileServiceRequest struct {
 	Health             *HealthSpec             `json:"health,omitempty"`
 	Command            string                  `json:"command,omitempty"`
 	MemoryLimit        string                  `json:"memoryLimit,omitempty"`
+	CPULimit           string                  `json:"cpuLimit,omitempty"`
 	// RegistryAuths carries request-scoped pull credentials; they feed an
 	// ephemeral DOCKER_CONFIG for this reconcile only and are never
 	// persisted (ADR 10).
@@ -312,6 +313,9 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	if req.MemoryLimit != "" && !isSafeDockerMemoryLimit(req.MemoryLimit) {
 		return fmt.Errorf("invalid memory limit")
 	}
+	if req.CPULimit != "" && !isSafeDockerCPULimit(req.CPULimit) {
+		return fmt.Errorf("invalid cpu limit")
+	}
 	if err := validateHealthSpec(req.Health); err != nil {
 		return err
 	}
@@ -498,6 +502,31 @@ func isSafeDockerMemoryLimit(value string) bool {
 	default:
 		return false
 	}
+}
+
+func isSafeDockerCPULimit(value string) bool {
+	if value == "" || len(value) > 12 {
+		return false
+	}
+	dot := false
+	digits := 0
+	for _, r := range value {
+		if r == '.' {
+			if dot {
+				return false
+			}
+			dot = true
+			continue
+		}
+		if r < '0' || r > '9' {
+			return false
+		}
+		digits++
+	}
+	if digits == 0 {
+		return false
+	}
+	return strings.Trim(value, "0.") != ""
 }
 
 func prepareServiceEnvFile(req *ReconcileServiceRequest) (func(), error) {
@@ -916,6 +945,9 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 	}
 	if req.MemoryLimit != "" {
 		args = append(args, "--memory", req.MemoryLimit)
+	}
+	if req.CPULimit != "" {
+		args = append(args, "--cpus", req.CPULimit)
 	}
 	if req.Health != nil && req.Health.Command != "" {
 		args = append(args, "--health-cmd", req.Health.Command)
