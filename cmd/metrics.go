@@ -3,12 +3,16 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
@@ -121,30 +125,68 @@ func runMetrics(cmd *cobra.Command, args []string) error {
 	defer sshPool.CloseAll()
 
 	if metricsLive {
+		if machineOutputEnabled() {
+			return &engine.InvalidRequestError{Err: fmt.Errorf("--live is interactive-only; run single-shot metrics reads in machine output modes")}
+		}
 		return showLiveMetrics(cfg, servers, sshPool)
 	}
 
-	return showMetricsOnce(cfg, servers, sshPool, metricsOnce)
+	return showMetricsOnce(cfg, envName, servers, sshPool, metricsOnce)
 }
 
-func showMetricsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, collectNew bool) error {
-	fmt.Printf("\n=== System Metrics ===\n")
-	fmt.Printf("Timestamp: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
+func showMetricsOnce(cfg *config.Config, envName string, servers []string, sshPool *ssh.Pool, collectNew bool) error {
+	// Machine modes reserve stdout for parseable output.
+	var out io.Writer = os.Stdout
+	if machineOutputEnabled() {
+		out = os.Stderr
+	}
+	fmt.Fprintf(out, "\n=== System Metrics ===\n")
+	fmt.Fprintf(out, "Timestamp: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
 
-	for _, result := range collectMetricsOnce(cfg, servers, sshPool, collectNew) {
-		if result.connectErr != nil {
-			fmt.Printf("❌ %s (%s): Failed to connect - %v\n\n", result.serverName, result.host, result.connectErr)
-			continue
+	result := engine.MetricsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindMetricsResult,
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Server:      metricsServer,
+		CollectedAt: time.Now().UTC(),
+		Nodes:       []engine.MetricsNodeSample{},
+	}
+	failures := 0
+	for _, nodeResult := range collectMetricsOnce(cfg, servers, sshPool, collectNew) {
+		sample := engine.MetricsNodeSample{Server: nodeResult.serverName, Host: nodeResult.host}
+		switch {
+		case nodeResult.connectErr != nil:
+			fmt.Fprintf(out, "❌ %s (%s): Failed to connect - %v\n\n", nodeResult.serverName, nodeResult.host, nodeResult.connectErr)
+			sample.Error = nodeResult.connectErr.Error()
+			failures++
+		case nodeResult.metricsErr != nil:
+			fmt.Fprintf(out, "❌ %s (%s): Monitoring agent not installed or not running\n", nodeResult.serverName, nodeResult.host)
+			fmt.Fprintf(out, "   Run: tako setup --server %s\n\n", nodeResult.serverName)
+			sample.Error = nodeResult.metricsErr.Error()
+			failures++
+		default:
+			displayServerMetrics(out, nodeResult.serverName, nodeResult.host, nodeResult.metrics)
+			if payload, err := json.Marshal(nodeResult.metrics); err == nil {
+				sample.Metrics = payload
+			}
 		}
-		if result.metricsErr != nil {
-			fmt.Printf("❌ %s (%s): Monitoring agent not installed or not running\n", result.serverName, result.host)
-			fmt.Printf("   Run: tako setup --server %s\n\n", result.serverName)
-			continue
-		}
-		displayServerMetrics(result.serverName, result.host, result.metrics)
+		result.Nodes = append(result.Nodes, sample)
 	}
 
-	return nil
+	var err error
+	switch {
+	case failures == len(result.Nodes) && failures > 0:
+		err = fmt.Errorf("failed to read metrics from all %d node(s)", failures)
+		result.Error = err.Error()
+	case failures > 0:
+		err = &engine.AttentionError{Err: fmt.Errorf("failed to read metrics from %d of %d node(s)", failures, len(result.Nodes))}
+		result.Error = err.Error()
+	}
+	if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+		err = emitErr
+	}
+	return err
 }
 
 type metricsNodeResult struct {
@@ -248,7 +290,7 @@ func showLiveMetrics(cfg *config.Config, servers []string, sshPool *ssh.Pool) er
 				continue
 			}
 
-			displayServerMetrics(serverName, server.Host, metrics)
+			displayServerMetrics(os.Stdout, serverName, server.Host, metrics)
 		}
 
 		<-ticker.C
@@ -272,52 +314,52 @@ func readMetricsViaTakod(client *ssh.Client, cfg *config.Config, collect bool) (
 	return &metrics, nil
 }
 
-func displayServerMetrics(serverName, serverHost string, metrics *MetricsData) {
-	fmt.Printf("📊 %s (%s)\n", serverName, serverHost)
-	fmt.Printf("─────────────────────────────────────────────────\n")
+func displayServerMetrics(out io.Writer, serverName, serverHost string, metrics *MetricsData) {
+	fmt.Fprintf(out, "📊 %s (%s)\n", serverName, serverHost)
+	fmt.Fprintf(out, "─────────────────────────────────────────────────\n")
 
 	// CPU
-	fmt.Printf("CPU:    %s%%", metrics.CPUPercent)
+	fmt.Fprintf(out, "CPU:    %s%%", metrics.CPUPercent)
 	cpuBar := createProgressBar(metrics.CPUPercent, 20)
-	fmt.Printf(" %s\n", cpuBar)
+	fmt.Fprintf(out, " %s\n", cpuBar)
 
 	// Memory
-	fmt.Printf("Memory: %s%% (%d MB / %d MB)", metrics.Memory.Percent, metrics.Memory.UsedMB, metrics.Memory.TotalMB)
+	fmt.Fprintf(out, "Memory: %s%% (%d MB / %d MB)", metrics.Memory.Percent, metrics.Memory.UsedMB, metrics.Memory.TotalMB)
 	memBar := createProgressBar(metrics.Memory.Percent, 20)
-	fmt.Printf(" %s\n", memBar)
+	fmt.Fprintf(out, " %s\n", memBar)
 
 	// Swap (if used)
 	if metrics.Memory.SwapUsedMB > 0 {
 		swapPct := fmt.Sprintf("%.1f", float64(metrics.Memory.SwapUsedMB)/float64(metrics.Memory.SwapTotalMB)*100)
-		fmt.Printf("Swap:   %s%% (%d MB / %d MB)\n", swapPct, metrics.Memory.SwapUsedMB, metrics.Memory.SwapTotalMB)
+		fmt.Fprintf(out, "Swap:   %s%% (%d MB / %d MB)\n", swapPct, metrics.Memory.SwapUsedMB, metrics.Memory.SwapTotalMB)
 	}
 
 	// Disk
-	fmt.Printf("Disk:   %s%% (%d MB / %d MB)", metrics.Disk.Percent, metrics.Disk.UsedMB, metrics.Disk.TotalMB)
+	fmt.Fprintf(out, "Disk:   %s%% (%d MB / %d MB)", metrics.Disk.Percent, metrics.Disk.UsedMB, metrics.Disk.TotalMB)
 	diskBar := createProgressBar(metrics.Disk.Percent, 20)
-	fmt.Printf(" %s\n", diskBar)
+	fmt.Fprintf(out, " %s\n", diskBar)
 
 	// Network I/O (if available)
 	if metrics.Network.RxMB != "" && metrics.Network.TxMB != "" {
-		fmt.Printf("Net I/O: ↓ %s MB  ↑ %s MB (since last check)\n", metrics.Network.RxMB, metrics.Network.TxMB)
+		fmt.Fprintf(out, "Net I/O: ↓ %s MB  ↑ %s MB (since last check)\n", metrics.Network.RxMB, metrics.Network.TxMB)
 	}
 
 	// Disk I/O (if available)
 	if metrics.DiskIO.ReadMB != "" && metrics.DiskIO.WriteMB != "" {
-		fmt.Printf("Disk I/O: ⬇ %s MB  ⬆ %s MB (since last check)\n", metrics.DiskIO.ReadMB, metrics.DiskIO.WriteMB)
+		fmt.Fprintf(out, "Disk I/O: ⬇ %s MB  ⬆ %s MB (since last check)\n", metrics.DiskIO.ReadMB, metrics.DiskIO.WriteMB)
 	}
 
 	// Load Average
-	fmt.Printf("Load:   %s (1m) / %s (5m) / %s (15m)\n",
+	fmt.Fprintf(out, "Load:   %s (1m) / %s (5m) / %s (15m)\n",
 		metrics.LoadAverage.OneMin, metrics.LoadAverage.FiveMin, metrics.LoadAverage.FifteenMin)
 
 	// Uptime
 	uptime := formatUptime(metrics.UptimeSeconds)
-	fmt.Printf("Uptime: %s\n", uptime)
+	fmt.Fprintf(out, "Uptime: %s\n", uptime)
 
 	// Last updated
-	fmt.Printf("Updated: %s\n", metrics.Timestamp)
-	fmt.Printf("\n")
+	fmt.Fprintf(out, "Updated: %s\n", metrics.Timestamp)
+	fmt.Fprintf(out, "\n")
 }
 
 func createProgressBar(percentStr string, width int) string {

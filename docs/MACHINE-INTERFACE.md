@@ -152,7 +152,13 @@ document. `tako drift --output json` (single-shot; `--watch` is rejected in
 machine modes) returns a `DriftResult` with project/environment, `drifted`,
 per-drift entries (`service`, `type`, `severity`, `expected`, `actual`,
 `details`), `servicesOk`, and timings; detected drift exits with code 6 and
-still emits the document. The Go definitions in `pkg/engine` (`types.go`
+still emits the document. `tako metrics --output json` (single-shot;
+`--live` is rejected in machine modes) returns a `MetricsResult` with
+project/environment, the `--server` filter when set, `collectedAt`, and
+per-node samples where `metrics` carries the takod `/v1/metrics` document
+verbatim (monitoring-agent schema) or `error` says why the read failed;
+all nodes failing exits 1, a partial read exits 6, both still emit the
+document. The Go definitions in `pkg/engine` (`types.go`
 and per-command files) are the source of truth.
 
 ## Config Export / Pull

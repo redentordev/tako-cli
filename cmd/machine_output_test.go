@@ -529,6 +529,51 @@ func TestDriftResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestMetricsResultDocumentGolden pins the machine-facing metrics schema.
+// The per-node `metrics` payload is the takod /v1/metrics document verbatim
+// (monitoring-agent schema) and is intentionally not repinned field-by-field.
+func TestMetricsResultDocumentGolden(t *testing.T) {
+	result := engine.MetricsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindMetricsResult,
+		Project:     "demo",
+		Environment: "production",
+		CollectedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Nodes: []engine.MetricsNodeSample{
+			{Server: "node-a", Host: "10.0.0.1", Metrics: json.RawMessage(`{"cpu_percent":"12.5"}`)},
+			{Server: "node-b", Host: "10.0.0.2", Error: "connect: dial tcp: refused"},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "MetricsResult",
+  "project": "demo",
+  "environment": "production",
+  "collectedAt": "2026-07-06T12:00:00Z",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "metrics": {
+        "cpu_percent": "12.5"
+      }
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "error": "connect: dial tcp: refused"
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("metrics result document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",
