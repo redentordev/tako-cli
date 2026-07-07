@@ -138,8 +138,14 @@ per-server outcomes (`name`, `host`, `removed`, `error`), timings, and
 `error` when removal was incomplete. `tako destroy` returns a `DestroyResult`
 with project/environment, `mode` (`DECOMMISSION` or `PURGE`), `purgeAll`,
 per-server outcomes (`name`, `host`, `destroyed`, `error`), timings, and
-`error` when destruction was incomplete. The Go definitions in `pkg/engine`
-(`types.go` and per-command files) are the source of truth.
+`error` when destruction was incomplete. `tako validate --output json`
+returns a `ValidateResult` with the resolved `configPath`,
+project/environment, `valid`, `findings` (`severity`, `path`, `field`,
+`message`) when invalid, and the resolved environment summary (runtime,
+state backend, consistency, mesh, server/service counts) when valid;
+invalid configs exit with code 2 and still emit the document. The Go
+definitions in `pkg/engine` (`types.go` and per-command files) are the
+source of truth.
 
 ## Config Export / Pull
 

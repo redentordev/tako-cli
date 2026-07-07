@@ -358,6 +358,82 @@ func TestDestroyResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestValidateResultDocumentGolden pins the machine-facing validate schema.
+func TestValidateResultDocumentGolden(t *testing.T) {
+	result := engine.ValidateResult{
+		APIVersion:      takoapi.APIVersionCurrent,
+		Kind:            engine.KindValidateResult,
+		ConfigPath:      "tako.yaml",
+		Project:         "demo",
+		Environment:     "production",
+		Valid:           true,
+		Runtime:         "takod",
+		StateBackend:    "replicated",
+		Consistency:     "lease",
+		MeshEnabled:     true,
+		MeshNetworkCIDR: "10.210.0.0/16",
+		MeshInterface:   "tako",
+		Servers:         1,
+		Services:        1,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "ValidateResult",
+  "configPath": "tako.yaml",
+  "project": "demo",
+  "environment": "production",
+  "valid": true,
+  "runtime": "takod",
+  "stateBackend": "replicated",
+  "consistency": "lease",
+  "meshEnabled": true,
+  "meshNetworkCIDR": "10.210.0.0/16",
+  "meshInterface": "tako",
+  "servers": 1,
+  "services": 1
+}`
+	if string(payload) != want {
+		t.Fatalf("validate result document drifted:\n%s", payload)
+	}
+}
+
+// TestValidateResultFindingGolden pins the finding schema on the invalid path.
+func TestValidateResultFindingGolden(t *testing.T) {
+	result := engine.ValidateResult{
+		APIVersion: takoapi.APIVersionCurrent,
+		Kind:       engine.KindValidateResult,
+		ConfigPath: "tako.yaml",
+		Valid:      false,
+		Findings: []engine.ValidateFinding{
+			{Severity: engine.ValidateSeverityError, Path: "tako.yaml", Message: "config validation failed"},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "ValidateResult",
+  "configPath": "tako.yaml",
+  "valid": false,
+  "findings": [
+    {
+      "severity": "error",
+      "path": "tako.yaml",
+      "message": "config validation failed"
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("validate finding document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",

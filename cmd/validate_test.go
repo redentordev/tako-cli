@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/spf13/cobra"
 )
 
@@ -112,6 +114,97 @@ environments:
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("output = %q, want %q", out.String(), want)
 		}
+	}
+}
+
+func TestRunValidateMachineOutputInvalidConfig(t *testing.T) {
+	root := switchToTempDir(t)
+	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), []byte("project:\n  name: demo\n  version: [\n"), 0600); err != nil {
+		t.Fatalf("failed to write invalid config: %v", err)
+	}
+	resetValidateGlobals(t)
+	restoreOutput := outputFormatFlag
+	outputFormatFlag = outputFormatJSON
+	t.Cleanup(func() { outputFormatFlag = restoreOutput })
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = runValidate(&cobra.Command{}, nil)
+	})
+	if runErr == nil {
+		t.Fatal("runValidate should fail on invalid YAML")
+	}
+	if engine.Classify(runErr) != engine.ClassInvalid {
+		t.Fatalf("invalid config classified as %d, want ClassInvalid", engine.Classify(runErr))
+	}
+
+	var result engine.ValidateResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\n%s", err, stdout)
+	}
+	if result.Kind != engine.KindValidateResult || result.Valid {
+		t.Fatalf("unexpected result document: %+v", result)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Severity != engine.ValidateSeverityError {
+		t.Fatalf("findings = %+v", result.Findings)
+	}
+	if !strings.Contains(result.Findings[0].Message, "YAML syntax error") {
+		t.Fatalf("finding message = %q", result.Findings[0].Message)
+	}
+}
+
+func TestRunValidateMachineOutputValidConfig(t *testing.T) {
+	root := switchToTempDir(t)
+	sshKey := filepath.Join(root, "id_ed25519")
+	if err := os.WriteFile(sshKey, []byte("test-key"), 0600); err != nil {
+		t.Fatalf("failed to write ssh key fixture: %v", err)
+	}
+	configData := []byte(`project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 203.0.113.10
+    user: deploy
+    sshKey: ` + sshKey + `
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+`)
+	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), configData, 0600); err != nil {
+		t.Fatalf("failed to write valid config: %v", err)
+	}
+	resetValidateGlobals(t)
+	restoreOutput := outputFormatFlag
+	outputFormatFlag = outputFormatJSON
+	t.Cleanup(func() { outputFormatFlag = restoreOutput })
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = runValidate(&cobra.Command{}, nil)
+	})
+	if runErr != nil {
+		t.Fatalf("runValidate returned error: %v", runErr)
+	}
+
+	var result engine.ValidateResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\n%s", err, stdout)
+	}
+	if !result.Valid || result.Kind != engine.KindValidateResult {
+		t.Fatalf("unexpected result document: %+v", result)
+	}
+	if result.Project != "demo" || result.Environment != "production" {
+		t.Fatalf("identity fields wrong: %+v", result)
+	}
+	if result.Servers != 1 || result.Services != 1 || result.Runtime != "takod" {
+		t.Fatalf("summary fields wrong: %+v", result)
+	}
+	if !result.MeshEnabled || result.MeshNetworkCIDR == "" {
+		t.Fatalf("mesh summary missing: %+v", result)
 	}
 }
 
