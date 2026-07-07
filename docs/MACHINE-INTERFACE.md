@@ -171,7 +171,14 @@ until cancelled. `tako secrets list --output json` returns a
 values never appear in machine output (test-enforced). `tako secrets
 validate --output json` returns a `SecretsValidateResult` with
 project/environment, `valid`, `required` key names, and `missing` key
-names; missing secrets exit with code 2 and still emit the document. The
+names; missing secrets exit with code 2 and still emit the document. `tako
+domains status --output json` returns a `DomainsResult` with
+project/environment, the expected DNS targets, `allActive`, and per-domain
+entries (`service`, `domain`, `role` `serving|redirect|ad-hoc`, `state`,
+`dns`, `tls`, resolved IPs, cname, errors); with `--strict`, pending
+domains exit 6 and still emit the document. `tako domains hosts --output
+json` returns a `DomainsHostsResult` with the `--address` mode and
+`entries` (`service`, `host`, `address`, `server`, `source`). The
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
 

@@ -11,6 +11,63 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 )
 
+// Kinds of serialized domains result documents.
+const (
+	KindDomainsResult      = "DomainsResult"
+	KindDomainsHostsResult = "DomainsHostsResult"
+)
+
+// DomainStatusEntry is one public domain's DNS/TLS readiness.
+type DomainStatusEntry struct {
+	Service string `json:"service"`
+	Domain  string `json:"domain"`
+	// Role is "serving", "redirect", or "ad-hoc".
+	Role        string   `json:"role"`
+	State       string   `json:"state"`
+	DNS         string   `json:"dns"`
+	TLS         string   `json:"tls"`
+	ResolvedIPs []string `json:"resolvedIps,omitempty"`
+	CNAME       string   `json:"cname,omitempty"`
+	Message     string   `json:"message,omitempty"`
+	DNSError    string   `json:"dnsError,omitempty"`
+	TLSError    string   `json:"tlsError,omitempty"`
+}
+
+// DomainsResult is the serializable outcome of `tako domains status`.
+// With --strict, pending domains exit 6 and still emit the document.
+type DomainsResult struct {
+	APIVersion  string `json:"apiVersion"`
+	Kind        string `json:"kind"`
+	Project     string `json:"project"`
+	Environment string `json:"environment"`
+	// Service is the --service filter when one was requested.
+	Service         string              `json:"service,omitempty"`
+	ExpectedTargets []string            `json:"expectedTargets,omitempty"`
+	AllActive       bool                `json:"allActive"`
+	Domains         []DomainStatusEntry `json:"domains"`
+}
+
+// InternalHostEntry is one /etc/hosts mapping for an internal proxy route.
+type InternalHostEntry struct {
+	Service string `json:"service"`
+	Host    string `json:"host"`
+	Address string `json:"address"`
+	Server  string `json:"server,omitempty"`
+	Source  string `json:"source,omitempty"`
+}
+
+// DomainsHostsResult is the serializable outcome of `tako domains hosts`.
+type DomainsHostsResult struct {
+	APIVersion  string `json:"apiVersion"`
+	Kind        string `json:"kind"`
+	Project     string `json:"project"`
+	Environment string `json:"environment"`
+	// Service is the --service filter; AddressMode mirrors --address.
+	Service     string              `json:"service,omitempty"`
+	AddressMode string              `json:"addressMode,omitempty"`
+	Entries     []InternalHostEntry `json:"entries"`
+}
+
 // DomainStatusSpec identifies one public domain to check.
 type DomainStatusSpec struct {
 	Service string

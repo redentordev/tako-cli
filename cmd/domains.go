@@ -1,12 +1,15 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
+	"io"
+	"os"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/health"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/spf13/cobra"
 )
 
@@ -85,22 +88,65 @@ func runDomainsStatus(cmd *cobra.Command, args []string) error {
 			specs = append(specs, domainStatusSpec{Service: serviceName, Domain: domain, Role: "ad-hoc"})
 		}
 	}
+
+	result := engine.DomainsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDomainsResult,
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Service:     domainsService,
+		Domains:     []engine.DomainStatusEntry{},
+	}
+
 	if len(specs) == 0 {
 		if domainsService != "" {
-			return fmt.Errorf("service %s has no configured public domains", domainsService)
+			return &engine.InvalidRequestError{Err: fmt.Errorf("service %s has no configured public domains", domainsService)}
 		}
-		fmt.Println("No configured public domains found.")
-		return nil
+		var out io.Writer = os.Stdout
+		if machineOutputEnabled() {
+			out = os.Stderr
+		}
+		fmt.Fprintln(out, "No configured public domains found.")
+		result.AllActive = true
+		return emitResultDocument(result)
 	}
 
 	targets, err := domainExpectedTargets(cfg, envName, domainsExpectedTargets)
 	if err != nil {
 		return err
 	}
-	_, err = monitorDomainStatuses(context.Background(), health.NewHealthChecker(), specs, domainStatusOptions{
+	result.ExpectedTargets = targets
+	statuses, err := monitorDomainStatuses(cmd.Context(), health.NewHealthChecker(), specs, domainStatusOptions{
 		Timeout:         domainsWait,
 		Strict:          domainsStrict,
 		ExpectedTargets: targets,
 	})
+
+	// MonitorDomainStatuses returns statuses in spec order.
+	result.AllActive = true
+	for index, status := range statuses {
+		entry := engine.DomainStatusEntry{
+			Service:     status.Service,
+			Domain:      status.Domain,
+			State:       string(status.State),
+			DNS:         string(status.DNS),
+			TLS:         string(status.TLS),
+			ResolvedIPs: status.ResolvedIPs,
+			CNAME:       status.CNAME,
+			Message:     status.Message,
+			DNSError:    status.DNSError,
+			TLSError:    status.TLSError,
+		}
+		if index < len(specs) {
+			entry.Role = specs[index].Role
+		}
+		if status.Pending() {
+			result.AllActive = false
+		}
+		result.Domains = append(result.Domains, entry)
+	}
+	if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+		err = emitErr
+	}
 	return err
 }

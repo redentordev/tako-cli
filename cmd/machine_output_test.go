@@ -694,6 +694,95 @@ func TestSecretsResultDocumentsGolden(t *testing.T) {
 	}
 }
 
+// TestDomainsResultDocumentsGolden pins the machine-facing domains schemas.
+func TestDomainsResultDocumentsGolden(t *testing.T) {
+	status := engine.DomainsResult{
+		APIVersion:      takoapi.APIVersionCurrent,
+		Kind:            engine.KindDomainsResult,
+		Project:         "demo",
+		Environment:     "production",
+		ExpectedTargets: []string{"203.0.113.10"},
+		AllActive:       false,
+		Domains: []engine.DomainStatusEntry{
+			{Service: "web", Domain: "app.example.com", Role: "serving", State: "active", DNS: "direct", TLS: "active", ResolvedIPs: []string{"203.0.113.10"}},
+			{Service: "web", Domain: "www.example.com", Role: "redirect", State: "pending_dns", DNS: "unresolved", TLS: "unknown", DNSError: "no such host"},
+		},
+	}
+	payload, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal domains result: %v", err)
+	}
+	wantStatus := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DomainsResult",
+  "project": "demo",
+  "environment": "production",
+  "expectedTargets": [
+    "203.0.113.10"
+  ],
+  "allActive": false,
+  "domains": [
+    {
+      "service": "web",
+      "domain": "app.example.com",
+      "role": "serving",
+      "state": "active",
+      "dns": "direct",
+      "tls": "active",
+      "resolvedIps": [
+        "203.0.113.10"
+      ]
+    },
+    {
+      "service": "web",
+      "domain": "www.example.com",
+      "role": "redirect",
+      "state": "pending_dns",
+      "dns": "unresolved",
+      "tls": "unknown",
+      "dnsError": "no such host"
+    }
+  ]
+}`
+	if string(payload) != wantStatus {
+		t.Fatalf("domains status document drifted:\n%s", payload)
+	}
+
+	hosts := engine.DomainsHostsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDomainsHostsResult,
+		Project:     "demo",
+		Environment: "production",
+		AddressMode: "auto",
+		Entries: []engine.InternalHostEntry{
+			{Service: "api", Host: "api.internal", Address: "10.210.0.1", Server: "node-a", Source: "mesh"},
+		},
+	}
+	payload, err = json.MarshalIndent(hosts, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal hosts result: %v", err)
+	}
+	wantHosts := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DomainsHostsResult",
+  "project": "demo",
+  "environment": "production",
+  "addressMode": "auto",
+  "entries": [
+    {
+      "service": "api",
+      "host": "api.internal",
+      "address": "10.210.0.1",
+      "server": "node-a",
+      "source": "mesh"
+    }
+  ]
+}`
+	if string(payload) != wantHosts {
+		t.Fatalf("domains hosts document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",
