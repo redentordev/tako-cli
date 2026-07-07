@@ -143,9 +143,13 @@ returns a `ValidateResult` with the resolved `configPath`,
 project/environment, `valid`, `findings` (`severity`, `path`, `field`,
 `message`) when invalid, and the resolved environment summary (runtime,
 state backend, consistency, mesh, server/service counts) when valid;
-invalid configs exit with code 2 and still emit the document. The Go
-definitions in `pkg/engine` (`types.go` and per-command files) are the
-source of truth.
+invalid configs exit with code 2 and still emit the document. `tako doctor
+--output json` returns a `DoctorResult` with project/environment,
+`skipRemote`, overall `status` (`ok` or `attention`), pass/warn/fail
+counts, and `checks` (`name`, `status` `pass|warn|fail|skip`, `detail`,
+`remediation`); any failed check exits with code 6 and still emits the
+document. The Go definitions in `pkg/engine` (`types.go` and per-command
+files) are the source of truth.
 
 ## Config Export / Pull
 

@@ -434,6 +434,56 @@ func TestValidateResultFindingGolden(t *testing.T) {
 	}
 }
 
+// TestDoctorResultDocumentGolden pins the machine-facing doctor schema.
+func TestDoctorResultDocumentGolden(t *testing.T) {
+	result := engine.DoctorResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDoctorResult,
+		Project:     "demo",
+		Environment: "production",
+		SkipRemote:  true,
+		Status:      "attention",
+		Checks: []engine.DoctorCheck{
+			{Name: "Configuration", Status: engine.DoctorStatusPass, Detail: "Config file: Found tako.yaml"},
+			{Name: "SSH Keys", Status: engine.DoctorStatusFail, Detail: "node-a: SSH key not found: /tmp/id", Remediation: "Check key path or copy key to this machine"},
+		},
+		Passed: 1,
+		Warned: 0,
+		Failed: 1,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DoctorResult",
+  "project": "demo",
+  "environment": "production",
+  "skipRemote": true,
+  "status": "attention",
+  "checks": [
+    {
+      "name": "Configuration",
+      "status": "pass",
+      "detail": "Config file: Found tako.yaml"
+    },
+    {
+      "name": "SSH Keys",
+      "status": "fail",
+      "detail": "node-a: SSH key not found: /tmp/id",
+      "remediation": "Check key path or copy key to this machine"
+    }
+  ],
+  "passed": 1,
+  "warned": 0,
+  "failed": 1
+}`
+	if string(payload) != want {
+		t.Fatalf("doctor result document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",

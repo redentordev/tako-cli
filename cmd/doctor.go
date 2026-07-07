@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,10 +13,12 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
 	"github.com/redentordev/tako-cli/pkg/utils"
 	"github.com/spf13/cobra"
@@ -61,7 +64,28 @@ type checkResult struct {
 
 func runDoctor(cmd *cobra.Command, args []string) error {
 	passed, warned, failed := 0, 0, 0
+	result := engine.DoctorResult{
+		APIVersion: takoapi.APIVersionCurrent,
+		Kind:       engine.KindDoctorResult,
+		SkipRemote: doctorSkipRemote,
+		Checks:     []engine.DoctorCheck{},
+	}
 
+	// Machine modes reserve stdout for parseable output.
+	var out io.Writer = os.Stdout
+	if machineOutputEnabled() {
+		out = os.Stderr
+	}
+
+	section := ""
+	heading := func(name string) {
+		section = name
+		if len(result.Checks) == 0 {
+			fmt.Fprintf(out, "=== %s ===\n", name)
+		} else {
+			fmt.Fprintf(out, "\n=== %s ===\n", name)
+		}
+	}
 	record := func(r checkResult) {
 		switch r.status {
 		case "PASS":
@@ -71,66 +95,89 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		case "FAIL":
 			failed++
 		}
-		fmt.Printf("  [%s] %s", r.status, r.message)
+		result.Checks = append(result.Checks, engine.DoctorCheck{
+			Name:        section,
+			Status:      strings.ToLower(r.status),
+			Detail:      r.message,
+			Remediation: r.fix,
+		})
+		fmt.Fprintf(out, "  [%s] %s", r.status, r.message)
 		if r.fix != "" {
-			fmt.Printf(" (Fix: %s)", r.fix)
+			fmt.Fprintf(out, " (Fix: %s)", r.fix)
 		}
-		fmt.Println()
+		fmt.Fprintln(out)
 	}
-
-	// === Configuration ===
-	fmt.Println("=== Configuration ===")
-	cfg, cfgErr := checkConfig(record)
-
-	if cfgErr != nil {
-		fmt.Printf("\nSummary: %d passed, %d warning(s), %d failed\n", passed, warned, failed)
+	finish := func() error {
+		fmt.Fprintf(out, "\nSummary: %d passed, %d warning(s), %d failed\n", passed, warned, failed)
+		result.Passed, result.Warned, result.Failed = passed, warned, failed
+		result.Status = "ok"
+		if failed > 0 {
+			result.Status = "attention"
+		}
+		if err := emitResultDocument(result); err != nil {
+			return err
+		}
+		if failed > 0 {
+			return &engine.AttentionError{Err: fmt.Errorf("doctor found %d issue(s)", failed)}
+		}
 		return nil
 	}
 
-	envName := getEnvironmentName(cfg)
+	heading("Configuration")
+	cfg, cfgErr := checkConfig(record)
 
-	// === Environment ===
-	fmt.Println("\n=== Environment ===")
+	if cfgErr != nil {
+		return finish()
+	}
+	result.Project = cfg.Project.Name
+
+	envName := getEnvironmentName(cfg)
+	result.Environment = envName
+
+	heading("Environment")
 	checkEnvFile(record)
 
-	// === SSH Keys ===
-	fmt.Println("\n=== SSH Keys ===")
+	heading("SSH Keys")
 	checkSSHKeys(record, cfg, envName)
 
-	// === Secrets ===
-	fmt.Println("\n=== Secrets ===")
+	heading("Secrets")
 	checkSecrets(record, cfg, envName)
 
-	// === Local State ===
-	fmt.Println("\n=== Local State ===")
+	heading("Local State")
 	checkLocalState(record)
 
-	// === Local Build Inputs ===
-	fmt.Println("\n=== Local Build Inputs ===")
+	heading("Local Build Inputs")
 	checkLocalBuildInputs(record, cfg, envName)
 
-	// === Server Connectivity ===
+	remoteSections := []string{
+		"Server Connectivity",
+		"Server Agent Version",
+		"Docker Runtime",
+		"Proxy Runtime",
+		"Running Services",
+		"Replicated State",
+		"External Volumes",
+	}
 	if !doctorSkipRemote {
-		fmt.Println("\n=== Server Connectivity ===")
+		heading(remoteSections[0])
 		clients := checkServerConnectivity(record, cfg, envName)
 
-		fmt.Println("\n=== Server Agent Version ===")
+		heading(remoteSections[1])
 		checkServerAgentVersion(record, cfg, clients)
 
-		fmt.Println("\n=== Docker Runtime ===")
+		heading(remoteSections[2])
 		checkDockerRuntime(record, clients)
 
-		fmt.Println("\n=== Proxy Runtime ===")
+		heading(remoteSections[3])
 		checkProxyRuntime(record, cfg, envName, clients)
 
-		// === Running Services ===
-		fmt.Println("\n=== Running Services ===")
+		heading(remoteSections[4])
 		checkRunningServices(record, cfg, envName, clients)
 
-		fmt.Println("\n=== Replicated State ===")
+		heading(remoteSections[5])
 		checkReplicatedState(record, cfg, envName, clients)
 
-		fmt.Println("\n=== External Volumes ===")
+		heading(remoteSections[6])
 		checkExternalVolumes(record, cfg, envName, clients)
 
 		// Clean up clients
@@ -138,28 +185,13 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			c.Close()
 		}
 	} else {
-		fmt.Println("\n=== Server Connectivity ===")
-		fmt.Println("  [SKIP] Skipped (--skip-remote)")
-		fmt.Println("\n=== Server Agent Version ===")
-		fmt.Println("  [SKIP] Skipped (--skip-remote)")
-		fmt.Println("\n=== Docker Runtime ===")
-		fmt.Println("  [SKIP] Skipped (--skip-remote)")
-		fmt.Println("\n=== Proxy Runtime ===")
-		fmt.Println("  [SKIP] Skipped (--skip-remote)")
-		fmt.Println("\n=== Running Services ===")
-		fmt.Println("  [SKIP] Skipped (--skip-remote)")
-		fmt.Println("\n=== Replicated State ===")
-		fmt.Println("  [SKIP] Skipped (--skip-remote)")
-		fmt.Println("\n=== External Volumes ===")
-		fmt.Println("  [SKIP] Skipped (--skip-remote)")
+		for _, name := range remoteSections {
+			heading(name)
+			record(checkResult{"SKIP", "Skipped (--skip-remote)", ""})
+		}
 	}
 
-	// Summary
-	fmt.Printf("\nSummary: %d passed, %d warning(s), %d failed\n", passed, warned, failed)
-	if failed > 0 {
-		return fmt.Errorf("doctor found %d issue(s)", failed)
-	}
-	return nil
+	return finish()
 }
 
 func checkDockerRuntime(record func(checkResult), clients map[string]*ssh.Client) {
