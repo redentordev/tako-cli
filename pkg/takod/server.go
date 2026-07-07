@@ -27,6 +27,7 @@ type Server struct {
 	startedAt               time.Time
 	server                  *http.Server
 	backupScheduler         *BackupScheduler
+	jobScheduler            *JobScheduler
 	mu                      sync.Mutex
 }
 
@@ -89,6 +90,7 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 		buildCacheKeepStorage:   opts.BuildCacheKeepStorage,
 		startedAt:               time.Now().UTC(),
 		backupScheduler:         NewBackupScheduler(dataDir),
+		jobScheduler:            NewJobScheduler(dataDir),
 	}
 }
 
@@ -143,6 +145,10 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/images/build", s.handleImageBuild)
 	mux.HandleFunc("/v1/logs", s.handleLogs)
 	mux.HandleFunc("/v1/exec", s.handleExec)
+	mux.HandleFunc("/v1/jobs", s.handleJobs)
+	mux.HandleFunc("/v1/jobs/apply", s.handleJobsApply)
+	mux.HandleFunc("/v1/jobs/runs", s.handleJobRuns)
+	mux.HandleFunc("/v1/jobs/trigger", s.handleJobsTrigger)
 	mux.HandleFunc("/v1/stats", s.handleStats)
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/access-logs", s.handleAccessLogs)
@@ -160,6 +166,7 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.runBuildCachePruneLoop(ctx)
 	}
 	go s.backupScheduler.Run(ctx)
+	go s.jobScheduler.Run(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -299,6 +306,13 @@ func (s *Server) handleActual(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
+	}
+	if jobs := s.jobScheduler.List(project, environment); len(jobs) > 0 {
+		actual.Jobs = make(map[string]*JobStatus, len(jobs))
+		for i := range jobs {
+			job := jobs[i]
+			actual.Jobs[job.Name] = &job
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -477,6 +491,11 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		if err := ReleaseProjectPortAllocations(r.Context(), s.dataDir, request.Project, request.Environment); err != nil {
 			response.Warnings = append(response.Warnings, fmt.Sprintf("failed to release port allocations: %v", err))
 		}
+		removedJobs, err := s.jobScheduler.RemoveProject(request.Project, request.Environment)
+		if err != nil {
+			response.Warnings = append(response.Warnings, fmt.Sprintf("failed to unschedule jobs: %v", err))
+		}
+		response.JobsRemoved = len(removedJobs)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -1006,6 +1025,86 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	counting := &countingWriter{writer: &flushResponseWriter{writer: w}}
 	if err := StreamExec(r.Context(), request, counting); err != nil && counting.written == 0 {
 		http.Error(w, err.Error(), http.StatusBadGateway)
+	}
+}
+
+// handleJobs lists scheduled jobs, optionally filtered by project/environment.
+func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	jobs := s.jobScheduler.List(r.URL.Query().Get("project"), r.URL.Query().Get("environment"))
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(map[string]any{"jobs": jobs})
+}
+
+// handleJobsApply declaratively replaces this node's job set for one
+// project/environment.
+func (s *Server) handleJobsApply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request JobsApplyRequest
+	if err := decodeJSONRequest(w, r, &request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	response, err := s.jobScheduler.Apply(r.Context(), request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+// handleJobRuns returns run history for one job or a whole environment.
+func (s *Server) handleJobRuns(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	runs, err := s.jobScheduler.Runs(
+		r.URL.Query().Get("project"),
+		r.URL.Query().Get("environment"),
+		r.URL.Query().Get("job"),
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(map[string]any{"runs": runs})
+}
+
+// handleJobsTrigger runs a job immediately, streaming output framed by the
+// exec markers. Pre-stream failures (unknown job, overlap) map to 400.
+func (s *Server) handleJobsTrigger(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request JobTriggerRequest
+	if err := decodeJSONRequest(w, r, &request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	counting := &countingWriter{writer: &flushResponseWriter{writer: w}}
+	if err := s.jobScheduler.Trigger(r.Context(), request.Project, request.Environment, request.Job, counting); err != nil && counting.written == 0 {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 	}
 }
 

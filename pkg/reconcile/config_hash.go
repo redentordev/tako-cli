@@ -21,6 +21,10 @@ const SlotLabel = "tako.slot"
 const ActiveLabel = "tako.active"
 
 type safeServiceConfigFingerprint struct {
+	Kind         string                    `json:"kind,omitempty"`
+	Schedule     string                    `json:"schedule,omitempty"`
+	Timezone     string                    `json:"timezone,omitempty"`
+	Timeout      string                    `json:"timeout,omitempty"`
 	Build        string                    `json:"build,omitempty"`
 	Dockerfile   string                    `json:"dockerfile,omitempty"`
 	Image        string                    `json:"image,omitempty"`
@@ -73,6 +77,10 @@ type backupStorageFingerprint struct {
 
 func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
 	fingerprint := safeServiceConfigFingerprint{
+		Kind:         service.Kind,
+		Schedule:     service.Schedule,
+		Timezone:     service.Timezone,
+		Timeout:      service.Timeout,
 		Build:        service.Build,
 		Dockerfile:   service.Dockerfile,
 		Image:        service.Image,

@@ -235,6 +235,18 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 	}
 
 	assignmentServers := uniqueAssignmentServers(assignments)
+	if service.IsJob() {
+		// Jobs run no containers: distribute the image to the owning node
+		// and record it; the post-deploy ApplyJobSchedules pass registers
+		// the cron schedule declaratively on every node.
+		if options.BuildImage {
+			if err := d.buildImageOnTakodNodes(serviceName, service, imageRef, assignmentServers); err != nil {
+				return err
+			}
+		}
+		d.recordJobImage(serviceName, imageRef)
+		return nil
+	}
 	if options.BuildImage {
 		if err := d.buildImageOnTakodNodes(serviceName, service, imageRef, assignmentServers); err != nil {
 			return err
@@ -1290,6 +1302,11 @@ func (d *Deployer) planTakodAssignments(service *config.ServiceConfig) ([]takodA
 		return nil, fmt.Errorf("replicas cannot be negative")
 	}
 	scaleToZero := replicas == 0
+	if service.IsJob() {
+		// A job occupies exactly one slot on its owning node; replicas do
+		// not apply and zero must not mean scale-to-zero.
+		scaleToZero = false
+	}
 	if replicas <= 0 {
 		replicas = 1
 	}

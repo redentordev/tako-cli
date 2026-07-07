@@ -74,6 +74,8 @@ type Deployer struct {
 	events            events.Sink
 	releaseRuns       map[string]*ReleaseRun
 	releaseMu         sync.Mutex
+	jobImages         map[string]string
+	jobMu             sync.Mutex
 }
 
 const (

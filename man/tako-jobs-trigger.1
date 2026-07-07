@@ -1,0 +1,59 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-jobs-trigger - Run a scheduled job immediately
+
+
+.SH SYNOPSIS
+\fBtako jobs trigger JOB [flags]\fP
+
+
+.SH DESCRIPTION
+Run a job now on the node holding its schedule, streaming output
+until the run finishes. The run is recorded in the job's history with
+trigger "manual". A run already in progress is not interrupted; the trigger
+fails instead.
+
+.PP
+In the default text mode the tako process mirrors the job's exit code; in
+machine modes the exit code is structured into the JobTriggerResult document
+instead.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for trigger
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Limit to a specific node
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-jobs(1)\fP

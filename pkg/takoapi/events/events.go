@@ -106,6 +106,15 @@ const (
 	TypeDeployReleaseCompleted = "deploy.release.completed"
 	TypeDeployReleaseFailed    = "deploy.release.failed"
 
+	// TypeDeployJobsApplied reports one node's declarative job-schedule
+	// reconciliation during a deploy.
+	TypeDeployJobsApplied = "deploy.jobs.applied"
+
+	// Job command events mirror the exec stream for `tako jobs trigger`.
+	TypeJobTriggerStarted   = "jobs.trigger.started"
+	TypeJobTriggerOutput    = "jobs.trigger.output"
+	TypeJobTriggerCompleted = "jobs.trigger.completed"
+
 	TypeWarning = "warning"
 
 	// TypeResult is the terminal event carrying the operation result document

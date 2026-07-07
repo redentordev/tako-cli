@@ -1148,6 +1148,169 @@ func TestExecResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestJobsResultDocumentGolden pins the machine-facing jobs list schema.
+func TestJobsResultDocumentGolden(t *testing.T) {
+	nextRun := time.Date(2026, 7, 6, 12, 5, 0, 0, time.UTC)
+	started := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	finished := started.Add(3 * time.Second)
+	result := engine.JobsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindJobsResult,
+		Project:     "demo",
+		Environment: "production",
+		Jobs: []engine.JobInfo{
+			{
+				Name:           "report",
+				Server:         "node-a",
+				Schedule:       "*/5 * * * *",
+				Timezone:       "Europe/Berlin",
+				Image:          "demo-production-report:abc123",
+				Command:        []string{"sh", "-c", "generate-report"},
+				TimeoutSeconds: 1800,
+				NextRun:        &nextRun,
+				LastRun: &engine.JobRunInfo{
+					Job:        "report",
+					Server:     "node-a",
+					Trigger:    "schedule",
+					Container:  "tako_demo_production_report_job_1",
+					StartedAt:  started,
+					FinishedAt: finished,
+					DurationMs: 3000,
+					ExitCode:   0,
+					Status:     "succeeded",
+				},
+			},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "JobsResult",
+  "project": "demo",
+  "environment": "production",
+  "jobs": [
+    {
+      "name": "report",
+      "server": "node-a",
+      "schedule": "*/5 * * * *",
+      "timezone": "Europe/Berlin",
+      "image": "demo-production-report:abc123",
+      "command": [
+        "sh",
+        "-c",
+        "generate-report"
+      ],
+      "timeoutSeconds": 1800,
+      "nextRun": "2026-07-06T12:05:00Z",
+      "lastRun": {
+        "job": "report",
+        "server": "node-a",
+        "trigger": "schedule",
+        "container": "tako_demo_production_report_job_1",
+        "startedAt": "2026-07-06T12:00:00Z",
+        "finishedAt": "2026-07-06T12:00:03Z",
+        "durationMs": 3000,
+        "exitCode": 0,
+        "status": "succeeded"
+      }
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("jobs result document drifted:\n%s", payload)
+	}
+}
+
+// TestJobRunsResultDocumentGolden pins the machine-facing run history schema.
+func TestJobRunsResultDocumentGolden(t *testing.T) {
+	started := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	result := engine.JobRunsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindJobRunsResult,
+		Project:     "demo",
+		Environment: "production",
+		Job:         "report",
+		Runs: []engine.JobRunInfo{
+			{
+				Job:        "report",
+				Server:     "node-a",
+				Trigger:    "manual",
+				Container:  "tako_demo_production_report_job_2",
+				StartedAt:  started,
+				FinishedAt: started.Add(2 * time.Second),
+				DurationMs: 2000,
+				ExitCode:   1,
+				Status:     "failed",
+				Output:     "boom\n",
+			},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "JobRunsResult",
+  "project": "demo",
+  "environment": "production",
+  "job": "report",
+  "runs": [
+    {
+      "job": "report",
+      "server": "node-a",
+      "trigger": "manual",
+      "container": "tako_demo_production_report_job_2",
+      "startedAt": "2026-07-06T12:00:00Z",
+      "finishedAt": "2026-07-06T12:00:02Z",
+      "durationMs": 2000,
+      "exitCode": 1,
+      "status": "failed",
+      "output": "boom\n"
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("job runs result document drifted:\n%s", payload)
+	}
+}
+
+// TestJobTriggerResultDocumentGolden pins the machine-facing trigger schema.
+func TestJobTriggerResultDocumentGolden(t *testing.T) {
+	result := engine.JobTriggerResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindJobTriggerResult,
+		Project:     "demo",
+		Environment: "production",
+		Job:         "report",
+		Server:      "node-a",
+		Container:   "tako_demo_production_report_job_3",
+		ExitCode:    0,
+		DurationMs:  2150,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "JobTriggerResult",
+  "project": "demo",
+  "environment": "production",
+  "job": "report",
+  "server": "node-a",
+  "container": "tako_demo_production_report_job_3",
+  "exitCode": 0,
+  "durationMs": 2150
+}`
+	if string(payload) != want {
+		t.Fatalf("job trigger result document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",

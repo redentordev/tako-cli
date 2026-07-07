@@ -124,7 +124,7 @@ func TestBuildStatusServiceInfoShowsRevisionWarmingAndPlacement(t *testing.T) {
 		},
 	}
 
-	infos, err := BuildStatusServiceInfo(servers, services, actual, []string{"node-a", "node-b", "node-c"}, []string{"node-a"}, "")
+	infos, err := BuildStatusServiceInfo(servers, services, actual, nil, []string{"node-a", "node-b", "node-c"}, []string{"node-a"}, "")
 	if err != nil {
 		t.Fatalf("BuildStatusServiceInfo returned error: %v", err)
 	}

@@ -229,7 +229,23 @@ for scripting. Deploys with a `deploy.release` command emit
 changes carry `releaseCommand`, and the `DeployResult` service outcome
 gains a `release` entry `{command, server, image, exitCode, durationMs}` —
 a failing release aborts the rollout before cutover and the deploy fails
-with the standard taxonomy. The
+with the standard taxonomy. `tako jobs` returns a `JobsResult` listing each
+scheduled `kind: job` service with its owning `server`, `schedule`,
+optional `timezone` (UTC when omitted), `image`, `command`,
+`timeoutSeconds`, the owning node's `nextRun`, and the most recent run
+(`lastRun`: trigger, container, timestamps, `exitCode`, `status` —
+`succeeded`/`failed`/`timeout`/`skipped`). `tako jobs runs [JOB]` returns a
+`JobRunsResult` with the bounded run history (newest first, last 50 per
+job) including each run's redacted `output` tail. `tako jobs trigger JOB`
+returns a `JobTriggerResult` with the run's `server`, `container`,
+`exitCode`, and `durationMs`; output streams as `jobs.trigger.output`
+events between `jobs.trigger.started` and `jobs.trigger.completed`, and —
+like exec — machine modes exit 0 whenever the run completed while text mode
+mirrors the job's exit code. Job services appear in the `StatusResult` with
+`kind: "job"`, their `schedule`, the last run's status (`lastRun`), and
+`nextRun` instead of replica counts; `tako logs JOB` returns the recorded
+output of the latest run (no `--follow`). Deploys reconcile job schedules
+declaratively and emit `deploy.jobs.applied` events per node. The
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
 
@@ -240,8 +256,8 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec` |
-| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`) |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger` |
+| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
 | Human-only by design | `init`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON) |
 

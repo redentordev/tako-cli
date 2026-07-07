@@ -492,6 +492,26 @@
                   "type": "boolean",
                   "description": "Mark as stateful/persistent. Requires at least one volume, and multi-node environments require pinned or global placement."
                 },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "service",
+                    "job"
+                  ],
+                  "description": "Workload kind: service (default, long-running) or job (command run on a cron schedule by takod on one owning node)."
+                },
+                "schedule": {
+                  "type": "string",
+                  "description": "kind: job only. Cron expression (five fields or descriptors like @hourly), evaluated in UTC unless timezone is set."
+                },
+                "timezone": {
+                  "type": "string",
+                  "description": "kind: job only. IANA timezone the schedule is evaluated in (e.g. Asia/Manila)."
+                },
+                "timeout": {
+                  "type": "string",
+                  "description": "kind: job only. Duration such as 30m to kill a job run after (default 1h)."
+                },
                 "resources": {
                   "type": "object",
                   "description": "Container runtime resource limits",

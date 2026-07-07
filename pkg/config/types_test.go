@@ -1542,3 +1542,53 @@ func captureConfigOutput(t *testing.T, fn func()) (string, string) {
 
 	return string(stdout), string(stderr)
 }
+
+func TestValidateConfigAcceptsJobService(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Services["report"] = ServiceConfig{
+		Kind:     ServiceKindJob,
+		Image:    "busybox:1.36",
+		Schedule: "*/5 * * * *",
+		Timezone: "UTC",
+		Timeout:  "30m",
+		Command:  "echo report",
+	}
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig rejected a valid job: %v", err)
+	}
+}
+
+func TestValidateConfigRejectsInvalidJobServices(t *testing.T) {
+	cases := []struct {
+		name    string
+		service ServiceConfig
+		want    string
+	}{
+		{"missing schedule", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Command: "true"}, "requires a schedule"},
+		{"bad schedule", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "often", Command: "true"}, "invalid schedule"},
+		{"missing command", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly"}, "requires a command"},
+		{"bad timezone", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: "true", Timezone: "Mars/Olympus"}, "invalid timezone"},
+		{"proxied job", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: "true", Proxy: &ProxyConfig{Domain: "example.com"}}, "cannot be proxied"},
+		{"job replicas", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: "true", Replicas: 3}, "cannot set replicas"},
+		{"persistent job", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: "true", Persistent: true}, "cannot be persistent"},
+		{"bad kind", ServiceConfig{Kind: "cronjob", Image: "busybox"}, "kind must be service or job"},
+		{"schedule on plain service", ServiceConfig{Image: "busybox", Schedule: "@hourly"}, "schedule requires kind: job"},
+	}
+	for _, tc := range cases {
+		cfg := validValidationConfig()
+		production := cfg.Environments["production"]
+		production.Services["candidate"] = tc.service
+		cfg.Environments["production"] = production
+
+		err := ValidateConfig(cfg)
+		if err == nil {
+			t.Fatalf("%s: config accepted", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: error = %q, want %q", tc.name, err, tc.want)
+		}
+	}
+}
