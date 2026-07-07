@@ -671,6 +671,32 @@
                     "gracePeriod": {
                       "type": "string",
                       "description": "blue_green only. Duration such as 30s or 2m to keep the previous revision running after proxy promotion before stale revision cleanup."
+                    },
+                    "release": {
+                      "type": "object",
+                      "description": "Release command run from the new image exactly once per deploy, before traffic cutover; a non-zero exit aborts the rollout.",
+                      "properties": {
+                        "command": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "minItems": 1,
+                          "description": "Command and arguments, e.g. [\"php\", \"artisan\", \"migrate\", \"--force\"]."
+                        },
+                        "timeout": {
+                          "type": "string",
+                          "description": "Duration such as 5m to kill the release command after (default 5m)."
+                        },
+                        "volumes": {
+                          "type": "boolean",
+                          "description": "Mount the service's volumes into the release container (default false)."
+                        }
+                      },
+                      "required": [
+                        "command"
+                      ],
+                      "additionalProperties": false
                     }
                   }
                 },
