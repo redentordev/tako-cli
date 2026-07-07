@@ -253,6 +253,13 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 			HealthCheck:  proxyRouteHealthCheckForService(service),
 			Sticky:       service.LoadBalancer.Strategy == "sticky",
 			Visibility:   service.Proxy.EffectiveVisibility(),
+			AllowIPs:     append([]string(nil), service.Proxy.AllowIps...),
+		}
+		if auth := service.Proxy.BasicAuth; auth != nil {
+			route.BasicAuth = &takod.ProxyRouteBasicAuth{
+				Username:       auth.Username,
+				PasswordBcrypt: auth.PasswordBcrypt,
+			}
 		}
 		if dynamicDomainsEnabled {
 			askURL, err := d.dynamicDomainAskURL(services, proxyServerName, service.Proxy.DynamicDomains.Ask, options.ActiveRevisions)

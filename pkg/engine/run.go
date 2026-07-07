@@ -132,7 +132,11 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 
 	sourceClient, err := session.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
 	if err != nil {
-		return nil, &ConnectivityError{Server: req.ServerName, Err: fmt.Errorf("failed to connect to server %s: %w", req.ServerName, err)}
+		display := req.ServerDisplay
+		if display == "" {
+			display = req.ServerName
+		}
+		return nil, &ConnectivityError{Server: req.ServerName, Err: fmt.Errorf("failed to connect to server %s: %w", display, err)}
 	}
 	session.sourceClient = sourceClient
 

@@ -832,6 +832,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Labels:             serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
 		ExternalVolumes:    externalVolumes,
 		MemoryLimit:        serviceMemoryLimit(service),
+		CPULimit:           serviceCPULimit(service),
 	}
 	if pullImage {
 		request.RegistryAuths = d.registryAuths()
@@ -1562,6 +1563,13 @@ func serviceMemoryLimit(service *config.ServiceConfig) string {
 		return ""
 	}
 	return strings.TrimSpace(service.Resources.Memory)
+}
+
+func serviceCPULimit(service *config.ServiceConfig) string {
+	if service == nil || service.Resources == nil {
+		return ""
+	}
+	return strings.TrimSpace(service.Resources.CPUs)
 }
 
 func (d *Deployer) reconcileServiceViaTakod(client *ssh.Client, request takod.ReconcileServiceRequest) error {

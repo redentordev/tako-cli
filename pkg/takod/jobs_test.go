@@ -65,6 +65,8 @@ func TestValidateJobSpecRejectsBadInput(t *testing.T) {
 		{"blank mount", func(s *JobSpec) { s.Mounts = []string{" "} }},
 		{"negative timeout", func(s *JobSpec) { s.TimeoutSeconds = -1 }},
 		{"excessive timeout", func(s *JobSpec) { s.TimeoutSeconds = maxExecTimeoutSeconds + 1 }},
+		{"unsafe memory limit", func(s *JobSpec) { s.MemoryLimit = "512m --privileged" }},
+		{"unsafe cpu limit", func(s *JobSpec) { s.CPULimit = "1.5 --privileged" }},
 	}
 	for _, tc := range cases {
 		spec := validJobSpecFixture()
@@ -90,6 +92,8 @@ func TestBuildJobRunArgsLabelsAndDefaults(t *testing.T) {
 	spec := validJobSpecFixture()
 	spec.Env = []string{"REPORT_KIND=daily"}
 	spec.Mounts = []string{"type=volume,source=data,target=/data"}
+	spec.MemoryLimit = "512m"
+	spec.CPULimit = "0.5"
 
 	got := buildJobRunArgs(spec, "tako_demo_production_report_job_1", "/tmp/envfile")
 	joined := strings.Join(got, " ")
@@ -102,6 +106,8 @@ func TestBuildJobRunArgsLabelsAndDefaults(t *testing.T) {
 		"--env-file /tmp/envfile",
 		"-e REPORT_KIND=daily",
 		"--mount type=volume,source=data,target=/data",
+		"--memory 512m",
+		"--cpus 0.5",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args missing %q: %s", want, joined)

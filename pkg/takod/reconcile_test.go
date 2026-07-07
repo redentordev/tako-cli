@@ -145,6 +145,24 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 
 	invalid = valid
+	invalid.CPULimit = "1.5 --privileged"
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe cpu limit to be rejected")
+	}
+
+	invalid = valid
+	invalid.CPULimit = "0.0"
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected zero cpu limit to be rejected")
+	}
+
+	invalid = valid
+	invalid.CPULimit = "1.5"
+	if err := validateReconcileServiceRequest(invalid); err != nil {
+		t.Fatalf("expected fractional cpu limit to be accepted, got %v", err)
+	}
+
+	invalid = valid
 	invalid.Health = &HealthSpec{Command: "curl -sf /health\n--privileged"}
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe health command to be rejected")
@@ -281,6 +299,7 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 		Mounts:      []string{"type=volume,source=demo_data,target=/data"},
 		Command:     "npm run worker",
 		MemoryLimit: "512m",
+		CPULimit:    "1.5",
 		Health: &HealthSpec{
 			Path:        "/health",
 			Port:        3000,
@@ -320,6 +339,7 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 		"--mount", "type=volume,source=demo_data,target=/data",
 		"--publish", "10.42.0.2:31001:3000",
 		"--memory", "512m",
+		"--cpus", "1.5",
 		"registry.example.com/demo/web:abc",
 		"sh", "-c", "npm run worker",
 	}
