@@ -230,7 +230,10 @@ for scripting. Deploys with a `deploy.release` command emit
 changes carry `releaseCommand`, and the `DeployResult` service outcome
 gains a `release` entry `{command, server, image, exitCode, durationMs}` —
 a failing release aborts the rollout before cutover and the deploy fails
-with the standard taxonomy. `tako jobs` returns a `JobsResult` listing each
+with the standard taxonomy. Interactive exec (`-i`/`-t`) is rejected in machine modes with exit 2:
+raw terminal bytes are not events. Control planes drive interactive exec
+through the ptystream frame protocol (below) over their own SSH
+connection. `tako jobs` returns a `JobsResult` listing each
 scheduled `kind: job` service with its owning `server`, `schedule`,
 optional `timezone` (UTC when omitted), `image`, `command`,
 `timeoutSeconds`, the owning node's `nextRun`, and the most recent run
@@ -253,6 +256,45 @@ from stdin (machine modes require piped stdin) and never appears in any
 output. The
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
+
+### Terminal stream contract (ptystream)
+
+Interactive exec speaks a versioned framed byte protocol instead of events.
+Transport: open an SSH `direct-streamlocal@openssh.com` channel to
+`/run/tako/takod.sock`, then send a real HTTP/1.1 request over it:
+
+```
+POST /v1/exec HTTP/1.1
+Host: takod
+Content-Type: application/json
+Connection: Upgrade
+Upgrade: tako-pty/1
+
+{"project":"myapp","environment":"production","service":"web",
+ "mode":"attach","command":["sh"],"interactive":true,"pty":true,
+ "cols":120,"rows":40}
+```
+
+The exec request body is the same document non-interactive exec posts, plus
+`interactive` (attach stdin), `pty` (allocate a server-side pseudo-terminal;
+implies `interactive`), initial `cols`/`rows`, and optional
+`idleTimeoutSeconds`. Validation failures return normal HTTP errors; on
+success the server replies `101 Switching Protocols` with
+`Upgrade: tako-pty/1` and the connection becomes a full-duplex frame stream.
+
+Each frame is 1 type byte + 4-byte big-endian payload length + payload
+(max 1 MiB). Client-to-server: `1` stdin bytes (a zero-length stdin frame
+closes remote stdin for piping), `3` resize (cols, rows as big-endian
+uint16s). Server-to-client: `5` container name (first), `2` output bytes
+(PTY merges stdout/stderr), `6` fatal error text, `4` exit code (big-endian
+int32, terminal frame; `-1` means the run failed without a code). Unknown
+frame types must be ignored — the protocol grows additively; incompatible
+changes bump the Upgrade token.
+
+Server-side sessions default to a 4h absolute timeout (`timeoutSeconds`)
+and a 30m idle timeout; on client disconnect the process is killed and
+one-off containers are removed. The Go definitions live in
+`pkg/takoapi/ptystream`.
 
 ### Command coverage
 

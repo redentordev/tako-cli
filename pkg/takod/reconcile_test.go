@@ -1,6 +1,7 @@
 package takod
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -1267,6 +1269,21 @@ func TestTakodCommandHelper(t *testing.T) {
 		if output := os.Getenv("TAKO_FAKE_DOCKER_EXEC_ERROR"); output != "" {
 			_, _ = os.Stderr.WriteString(output)
 			os.Exit(1)
+		}
+		if os.Getenv("TAKO_FAKE_DOCKER_EXEC_INTERACTIVE") == "echo" {
+			scanner := bufio.NewScanner(os.Stdin)
+			for scanner.Scan() {
+				line := strings.TrimRight(scanner.Text(), "\r")
+				if line == "exit" {
+					break
+				}
+				_, _ = os.Stdout.WriteString("echo:" + line + "\n")
+			}
+			code := 0
+			if v := os.Getenv("TAKO_FAKE_DOCKER_EXEC_EXIT"); v != "" {
+				code, _ = strconv.Atoi(v)
+			}
+			os.Exit(code)
 		}
 		os.Exit(0)
 	case "inspect":

@@ -30,6 +30,13 @@ const ExecExitMarker = "__TAKO_EXEC_EXIT__:"
 const (
 	defaultExecTimeoutSeconds = 600
 	maxExecTimeoutSeconds     = 24 * 60 * 60
+	maxExecTerminalDim        = 4096
+
+	// Interactive sessions get a longer absolute default than one-shot
+	// commands (a shell open for an hour is normal), plus an idle timeout
+	// so abandoned sessions do not hold containers forever.
+	defaultExecStreamTimeoutSeconds     = 4 * 60 * 60
+	defaultExecStreamIdleTimeoutSeconds = 30 * 60
 )
 
 // execRoleLabel marks one-off exec containers so orphans are identifiable
@@ -59,6 +66,18 @@ type ExecRequest struct {
 	// Mounts adds --mount specs to oneoff containers (volumes opt-in).
 	Mounts         []string `json:"mounts,omitempty"`
 	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
+	// Interactive attaches the caller's stdin over the hijacked frame
+	// stream (docker exec/run -i). Requires the Upgrade handshake.
+	Interactive bool `json:"interactive,omitempty"`
+	// PTY allocates a server-side pseudo-terminal around the docker
+	// process (implies Interactive). Cols/Rows set the initial size;
+	// resize frames adjust it live.
+	PTY  bool `json:"pty,omitempty"`
+	Cols int  `json:"cols,omitempty"`
+	Rows int  `json:"rows,omitempty"`
+	// IdleTimeoutSeconds ends an interactive session after this long
+	// without input or output; 0 uses the default.
+	IdleTimeoutSeconds int `json:"idleTimeoutSeconds,omitempty"`
 }
 
 func validateExecRequest(req *ExecRequest) error {
@@ -101,7 +120,62 @@ func validateExecRequest(req *ExecRequest) error {
 	if req.TimeoutSeconds < 0 || req.TimeoutSeconds > maxExecTimeoutSeconds {
 		return fmt.Errorf("timeoutSeconds must be between 0 and %d", maxExecTimeoutSeconds)
 	}
+	if req.PTY {
+		req.Interactive = true
+	}
+	if req.Cols < 0 || req.Cols > maxExecTerminalDim || req.Rows < 0 || req.Rows > maxExecTerminalDim {
+		return fmt.Errorf("cols and rows must be between 0 and %d", maxExecTerminalDim)
+	}
+	if (req.Cols != 0 || req.Rows != 0) && !req.PTY {
+		return fmt.Errorf("cols and rows require pty")
+	}
+	if req.IdleTimeoutSeconds < 0 || req.IdleTimeoutSeconds > maxExecTimeoutSeconds {
+		return fmt.Errorf("idleTimeoutSeconds must be between 0 and %d", maxExecTimeoutSeconds)
+	}
+	if req.IdleTimeoutSeconds != 0 && !req.Interactive {
+		return fmt.Errorf("idleTimeoutSeconds requires an interactive session")
+	}
 	return nil
+}
+
+// execRun is a resolved exec ready to start: the docker argv, the target
+// container name, and any temp-file cleanup.
+type execRun struct {
+	args      []string
+	container string
+	cleanup   func()
+}
+
+// prepareExecRun resolves the attach container or oneoff image/env-file and
+// builds the docker argv. Callers own calling cleanup.
+func prepareExecRun(ctx context.Context, req ExecRequest) (*execRun, error) {
+	switch req.Mode {
+	case ExecModeAttach:
+		container, err := resolveExecContainer(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		return &execRun{args: buildExecAttachArgs(req, container), container: container}, nil
+	default: // oneoff
+		image := req.Image
+		if image == "" {
+			resolved, err := resolveExecImage(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			image = resolved
+		}
+		envFile, envCleanup, err := writeTempEnvFile(req.EnvFileContent, req.Project, req.Environment, req.Service)
+		if err != nil {
+			return nil, err
+		}
+		container := fmt.Sprintf("tako_%s_%s_%s_exec_%d", req.Project, req.Environment, req.Service, time.Now().UnixNano())
+		return &execRun{
+			args:      buildExecOneOffArgs(req, container, image, envFile),
+			container: container,
+			cleanup:   envCleanup,
+		}, nil
+	}
 }
 
 // StreamExec runs the requested command and streams its combined output to
@@ -119,37 +193,15 @@ func StreamExec(ctx context.Context, req ExecRequest, writer io.Writer) error {
 	}
 	timeout := time.Duration(timeoutSeconds) * time.Second
 
-	var args []string
-	var container string
-	var cleanup func()
-	switch req.Mode {
-	case ExecModeAttach:
-		resolved, err := resolveExecContainer(ctx, req)
-		if err != nil {
-			return err
-		}
-		container = resolved
-		args = buildExecAttachArgs(req, container)
-	default: // oneoff
-		image := req.Image
-		if image == "" {
-			resolved, err := resolveExecImage(ctx, req)
-			if err != nil {
-				return err
-			}
-			image = resolved
-		}
-		envFile, envCleanup, err := writeTempEnvFile(req.EnvFileContent, req.Project, req.Environment, req.Service)
-		if err != nil {
-			return err
-		}
-		cleanup = envCleanup
-		container = fmt.Sprintf("tako_%s_%s_%s_exec_%d", req.Project, req.Environment, req.Service, time.Now().UnixNano())
-		args = buildExecOneOffArgs(req, container, image, envFile)
+	run, err := prepareExecRun(ctx, req)
+	if err != nil {
+		return err
 	}
-	if cleanup != nil {
-		defer cleanup()
+	if run.cleanup != nil {
+		defer run.cleanup()
 	}
+	args := run.args
+	container := run.container
 
 	out := &lineStartWriter{writer: writer}
 	fmt.Fprintf(out, "%s%s\n", ExecContainerMarker, container)
@@ -218,6 +270,12 @@ func resolveExecImage(ctx context.Context, req ExecRequest) (string, error) {
 
 func buildExecAttachArgs(req ExecRequest, container string) []string {
 	args := []string{"exec"}
+	if req.Interactive {
+		args = append(args, "-i")
+	}
+	if req.PTY {
+		args = append(args, "-t")
+	}
 	for _, entry := range req.Env {
 		args = append(args, "-e", entry)
 	}
@@ -231,16 +289,22 @@ func buildExecOneOffArgs(req ExecRequest, container string, image string, envFil
 	if network == "" {
 		network = fmt.Sprintf("tako_%s_%s", req.Project, req.Environment)
 	}
-	args := []string{
-		"run", "--rm",
+	args := []string{"run", "--rm"}
+	if req.Interactive {
+		args = append(args, "-i")
+	}
+	if req.PTY {
+		args = append(args, "-t")
+	}
+	args = append(args,
 		"--name", container,
 		"--network", network,
-		"--label", "tako.project=" + req.Project,
-		"--label", "tako.environment=" + req.Environment,
-		"--label", "tako.service=" + req.Service,
+		"--label", "tako.project="+req.Project,
+		"--label", "tako.environment="+req.Environment,
+		"--label", "tako.service="+req.Service,
 		"--label", "tako.runtime=takod",
 		"--label", execRoleLabel,
-	}
+	)
 	if envFile != "" {
 		args = append(args, "--env-file", envFile)
 	}
