@@ -335,6 +335,35 @@ revision running after the proxy switch before stale revision cleanup. With
 `tako promote <service>` switches the route to the warmed revision. Persistent
 services cannot use `blue_green`.
 
+### Release commands
+
+`deploy.release` runs a command from the **new** revision's image exactly once
+per applied deploy — after the image exists on the assigned nodes and before
+any rollout activation (before warm/activate for `blue_green`, before the
+first replica replacement for `rolling`, before stop-old for `recreate`):
+
+```yaml
+services:
+  web:
+    build: .
+    deploy:
+      strategy: blue_green
+      release:
+        command: ["php", "artisan", "migrate", "--force"]
+        timeout: 5m        # default 5m
+        volumes: false     # opt-in to the service's volume mounts
+```
+
+The command runs in a one-off container with the service's env, secrets, and
+network. A non-zero exit aborts the rollout before traffic cutover; the failed
+deploy is recorded in history with the release step's exit code. Tako runs the
+command exactly once per applied deploy — making the command itself
+re-runnable (as `migrate` is) is the application's responsibility.
+
+For ad-hoc commands against a deployed service (debugging, framework tasks),
+use `tako exec SERVICE -- CMD` — attach to a running replica, or `--oneoff`
+for a fresh container from the service's current image.
+
 ## Placement
 
 ```text
