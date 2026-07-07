@@ -196,7 +196,29 @@ still emit the document. `tako start`/`tako stop` return the same
 `create` — single volume or `--all`, `restore`, `delete`, `cleanup`)
 returns a `BackupResult` with the action, volume/backupId when relevant,
 and per-node outcomes whose `backups` reuse the takod backup schema plus
-`deleted` counts, `skipped` volumes, and per-node `error`. The
+`deleted` counts, `skipped` volumes, and per-node `error`. `tako setup`
+returns a `SetupResult` with per-node provisioning outcomes: `mode`
+(`fresh`, `reapply`, or `converge` — converge re-runs only firewall,
+deploy access, and the takod runtime and reports the untouched steps as
+`skipped`), per-step outcomes keyed by stable step names (`os-check`,
+`packages`, `docker`, `wireguard`, `firewall`, `hardening`,
+`auto-recovery`, `deploy-user`, `monitor-agent`, `takod-install`,
+`takod-service`), the detected `os`, installed `dockerVersion` and
+`takodVersion`, the applied `firewallPorts`, and the node's recorded SSH
+`hostKey` (`type`, base64 `key`, SHA256 `fingerprint`) so callers can pin
+it for `--host-key-mode strict`; with `--events ndjson` each step also
+emits `setup.step.started/.completed/.failed/.skipped` events carrying
+`data.step`. Setup aborts on the first failing node and the document lists
+the nodes attempted. `tako upgrade servers` returns an
+`UpgradeServersResult` with the `targetVersion`, `dryRun`, and per-node
+`{server, fromVersion, toVersion, outcome}` entries (`upgraded`/`failed`
+on apply; `current`/`upgrade-needed`/`setup-required`/`status-unavailable`
+on `--dry-run`); nodes are attempted independently — partial failure exits
+6, total failure exits 1, both still emit the document. `tako clone-setup`
+returns a `CloneSetupResult` (doctor-style `checks` with pass/warn/fail
+counts covering config, .env, SSH connectivity, env bundle, state, and
+secrets); machine modes skip its interactive fix-up prompts and any failed
+check exits 6. The
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
 
@@ -207,10 +229,9 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup` |
-| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`) |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers` |
+| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
-| Pending machine surface (node lifecycle, next phase) | `setup`, `clone-setup`, `upgrade servers` |
 | Human-only by design | `init`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON) |
 
 Interactive-only flags (`drift --watch`, `metrics --live`, `stats --live`)
