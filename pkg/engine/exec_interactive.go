@@ -143,15 +143,8 @@ func (e *Engine) ExecInteractive(ctx context.Context, req ExecRequest, terminal 
 
 	// ctx cancellation tears the connection down, which unblocks the frame
 	// read loop below.
-	watchDone := make(chan struct{})
-	defer close(watchDone)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = stream.Close()
-		case <-watchDone:
-		}
-	}()
+	stopWatch := context.AfterFunc(ctx, func() { _ = stream.Close() })
+	defer stopWatch()
 
 	writer := ptystream.NewWriter(stream.Conn)
 	go func() {

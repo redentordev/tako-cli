@@ -204,8 +204,10 @@ func runExecStreamProcess(ctx context.Context, req ExecRequest, run *execRun, st
 		}
 	}()
 
-	err := cmd.Wait()
+	// Drain output to EOF before Wait: Wait closes the stdout pipe, and
+	// waiting first can discard output the pump has not read yet.
 	<-outputDone
+	err := cmd.Wait()
 	if err == nil {
 		return 0, nil
 	}

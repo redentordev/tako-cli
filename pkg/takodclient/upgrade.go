@@ -70,18 +70,12 @@ func UpgradeStream(ctx context.Context, dialer UnixSocketDialer, socket string, 
 
 	// SSH streamlocal channels do not support SetDeadline, so the handshake
 	// timeout (and ctx cancellation) closes the connection instead, which
-	// unblocks the request write / response read below.
-	handshakeDone := make(chan struct{})
-	defer close(handshakeDone)
-	timer := time.AfterFunc(upgradeHandshakeTimeout, func() { _ = conn.Close() })
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-handshakeDone:
-		}
-		timer.Stop()
-	}()
+	// unblocks the request write / response read below. The stop deferral
+	// disarms the guard once the handshake completes.
+	handshakeCtx, cancelHandshake := context.WithTimeout(ctx, upgradeHandshakeTimeout)
+	defer cancelHandshake()
+	stopGuard := context.AfterFunc(handshakeCtx, func() { _ = conn.Close() })
+	defer stopGuard()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://takod"+endpoint, strings.NewReader(string(payload)))
 	if err != nil {
