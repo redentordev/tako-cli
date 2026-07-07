@@ -494,12 +494,28 @@ func isSafeDockerMemoryLimit(value string) bool {
 }
 
 func prepareServiceEnvFile(req *ReconcileServiceRequest) (func(), error) {
-	if req.EnvFileContent == "" {
+	path, cleanup, err := writeTempEnvFile(req.EnvFileContent, req.Project, req.Environment, req.Service)
+	if err != nil {
+		return nil, err
+	}
+	if path == "" {
 		return nil, nil
 	}
-	file, err := os.CreateTemp("", envFilePattern(req.Project, req.Environment, req.Service))
+	req.EnvFile = path
+	req.EnvFileContent = ""
+	return cleanup, nil
+}
+
+// writeTempEnvFile persists env-file content to a 0600 temp file for a
+// docker --env-file flag; the returned cleanup removes it. Empty content
+// yields an empty path and no cleanup.
+func writeTempEnvFile(content string, patternParts ...string) (string, func(), error) {
+	if content == "" {
+		return "", nil, nil
+	}
+	file, err := os.CreateTemp("", envFilePattern(patternParts...))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create env file: %w", err)
+		return "", nil, fmt.Errorf("failed to create env file: %w", err)
 	}
 	cleanup := func() {
 		_ = os.Remove(file.Name())
@@ -507,20 +523,18 @@ func prepareServiceEnvFile(req *ReconcileServiceRequest) (func(), error) {
 	if err := os.Chmod(file.Name(), 0600); err != nil {
 		file.Close()
 		cleanup()
-		return nil, fmt.Errorf("failed to secure env file: %w", err)
+		return "", nil, fmt.Errorf("failed to secure env file: %w", err)
 	}
-	if _, err := file.WriteString(req.EnvFileContent); err != nil {
+	if _, err := file.WriteString(content); err != nil {
 		file.Close()
 		cleanup()
-		return nil, fmt.Errorf("failed to write env file: %w", err)
+		return "", nil, fmt.Errorf("failed to write env file: %w", err)
 	}
 	if err := file.Close(); err != nil {
 		cleanup()
-		return nil, fmt.Errorf("failed to close env file: %w", err)
+		return "", nil, fmt.Errorf("failed to close env file: %w", err)
 	}
-	req.EnvFile = file.Name()
-	req.EnvFileContent = ""
-	return cleanup, nil
+	return file.Name(), cleanup, nil
 }
 
 func envFilePattern(parts ...string) string {

@@ -142,6 +142,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/images/import", s.handleImageImport)
 	mux.HandleFunc("/v1/images/build", s.handleImageBuild)
 	mux.HandleFunc("/v1/logs", s.handleLogs)
+	mux.HandleFunc("/v1/exec", s.handleExec)
 	mux.HandleFunc("/v1/stats", s.handleStats)
 	mux.HandleFunc("/v1/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/access-logs", s.handleAccessLogs)
@@ -979,6 +980,46 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+}
+
+// handleExec streams a service-context command run. Validation and
+// resolution errors return HTTP errors before any output; once the stream
+// starts, failures surface as output text and the terminal exit marker.
+func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request ExecRequest
+	if err := decodeJSONRequest(w, r, &request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateExecRequest(&request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	counting := &countingWriter{writer: &flushResponseWriter{writer: w}}
+	if err := StreamExec(r.Context(), request, counting); err != nil && counting.written == 0 {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+	}
+}
+
+// countingWriter tracks whether any bytes reached the response so handlers
+// know if an HTTP error can still be written.
+type countingWriter struct {
+	writer  io.Writer
+	written int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	w.written += int64(n)
+	return n, err
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

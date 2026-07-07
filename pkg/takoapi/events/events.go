@@ -90,6 +90,22 @@ const (
 	TypeSetupStepFailed    = "setup.step.failed"
 	TypeSetupStepSkipped   = "setup.step.skipped"
 
+	// Exec lifecycle events for `tako exec`: started carries the resolved
+	// placement (`data.mode`, `data.container`), output carries one chunk of
+	// combined remote output in `data.data`, completed carries
+	// `data.exitCode` and `data.durationMs`.
+	TypeExecStarted   = "exec.started"
+	TypeExecOutput    = "exec.output"
+	TypeExecCompleted = "exec.completed"
+
+	// Release-command lifecycle events during deploy: started carries the
+	// service and image, output lines ride log.line-style `data.data`,
+	// completed/failed carry `data.exitCode` and `data.durationMs`.
+	TypeDeployReleaseStarted   = "deploy.release.started"
+	TypeDeployReleaseOutput    = "deploy.release.output"
+	TypeDeployReleaseCompleted = "deploy.release.completed"
+	TypeDeployReleaseFailed    = "deploy.release.failed"
+
 	TypeWarning = "warning"
 
 	// TypeResult is the terminal event carrying the operation result document
