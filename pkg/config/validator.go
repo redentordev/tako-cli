@@ -510,6 +510,10 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		return fmt.Errorf("service name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, hyphens, and underscores, and be 1-63 characters long", name)
 	}
 
+	if err := validateServiceKind(name, service); err != nil {
+		return err
+	}
+
 	// Must have either Build or Image, but not both
 	if service.Build == "" && service.Image == "" {
 		return fmt.Errorf("service %s: either 'build' or 'image' is required", name)
@@ -1006,6 +1010,66 @@ func validateDeployStrategy(name string, service *ServiceConfig) error {
 	default:
 		return fmt.Errorf("service %s: invalid deployment strategy %q; supported strategies are recreate, rolling, and blue_green", name, service.Deploy.Strategy)
 	}
+}
+
+// validateServiceKind enforces the kind: job contract: schedule + command
+// required, long-running-service surfaces rejected. Plain services must not
+// carry job-only fields.
+func validateServiceKind(name string, service *ServiceConfig) error {
+	switch service.Kind {
+	case "", ServiceKindService:
+		if service.Schedule != "" {
+			return fmt.Errorf("service %s: schedule requires kind: job", name)
+		}
+		if service.Timezone != "" {
+			return fmt.Errorf("service %s: timezone requires kind: job", name)
+		}
+		if service.Timeout != "" {
+			return fmt.Errorf("service %s: timeout requires kind: job", name)
+		}
+		return nil
+	case ServiceKindJob:
+		// fallthrough to job validation below
+	default:
+		return fmt.Errorf("service %s: kind must be service or job", name)
+	}
+
+	if strings.TrimSpace(service.Schedule) == "" {
+		return fmt.Errorf("service %s: kind: job requires a schedule (cron expression)", name)
+	}
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	if _, err := parser.Parse(service.Schedule); err != nil {
+		return fmt.Errorf("service %s: invalid schedule: %v", name, err)
+	}
+	if strings.TrimSpace(service.Command) == "" {
+		return fmt.Errorf("service %s: kind: job requires a command", name)
+	}
+	if service.Timezone != "" {
+		if _, err := time.LoadLocation(service.Timezone); err != nil {
+			return fmt.Errorf("service %s: invalid timezone: %v", name, err)
+		}
+	}
+	if service.Timeout != "" {
+		if err := validateRolloutDurations(name, "timeout", service.Timeout); err != nil {
+			return err
+		}
+	}
+	if service.Proxy != nil {
+		return fmt.Errorf("service %s: kind: job cannot be proxied (remove proxy)", name)
+	}
+	if service.Replicas > 1 {
+		return fmt.Errorf("service %s: kind: job cannot set replicas", name)
+	}
+	if service.HealthCheck.Path != "" || service.HealthCheck.TCPPort != 0 {
+		return fmt.Errorf("service %s: kind: job cannot set healthCheck", name)
+	}
+	if service.LoadBalancer.Strategy != "" || service.LoadBalancer.HealthCheck.Enabled {
+		return fmt.Errorf("service %s: kind: job cannot set loadBalancer", name)
+	}
+	if service.Persistent {
+		return fmt.Errorf("service %s: kind: job cannot be persistent", name)
+	}
+	return nil
 }
 
 func validateDeployRelease(name string, release *ReleaseConfig) error {

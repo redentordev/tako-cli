@@ -157,8 +157,25 @@ type ServerConfig struct {
 	Labels      map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`     // Custom labels for server selection
 }
 
+// Service kinds.
+const (
+	ServiceKindService = "service"
+	ServiceKindJob     = "job"
+)
+
 // ServiceConfig defines service deployment settings
 type ServiceConfig struct {
+	// Kind selects the workload type: "service" (default, long-running
+	// containers) or "job" (a command run on a cron schedule by takod).
+	Kind string `yaml:"kind,omitempty" json:"kind,omitempty"`
+	// Schedule is the cron expression for kind: job (five-field cron or
+	// descriptors like @hourly). Evaluated in UTC unless timezone is set.
+	Schedule string `yaml:"schedule,omitempty" json:"schedule,omitempty"`
+	// Timezone is the IANA zone the schedule is evaluated in (kind: job).
+	Timezone string `yaml:"timezone,omitempty" json:"timezone,omitempty"`
+	// Timeout kills a job run after this duration (kind: job, default 1h).
+	Timeout string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+
 	// Build or Image (mutually exclusive)
 	Build      string `yaml:"build,omitempty" json:"build,omitempty"`           // Path to build context (auto-detects Dockerfile)
 	Dockerfile string `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"` // Dockerfile path relative to build context
@@ -209,6 +226,11 @@ type ServiceConfig struct {
 
 	// Service dependencies (controls deployment order)
 	DependsOn []string `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"` // List of service names this service depends on
+}
+
+// IsJob reports whether the service is a scheduled job workload.
+func (s *ServiceConfig) IsJob() bool {
+	return s.Kind == ServiceKindJob
 }
 
 // HealthCheckConfig defines health check settings
