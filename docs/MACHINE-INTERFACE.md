@@ -178,7 +178,12 @@ entries (`service`, `domain`, `role` `serving|redirect|ad-hoc`, `state`,
 `dns`, `tls`, resolved IPs, cname, errors); with `--strict`, pending
 domains exit 6 and still emit the document. `tako domains hosts --output
 json` returns a `DomainsHostsResult` with the `--address` mode and
-`entries` (`service`, `host`, `address`, `server`, `source`). The
+`entries` (`service`, `host`, `address`, `server`, `source`). `tako
+discovery exports --output json` returns a `DiscoveryExportsResult` with
+the environment (or `allEnvironments`) and per-node export records
+(takod discovery schema: `network`, `project`, `environment`, `service`,
+`alias`) or a per-node `error`; the command-local `--json` flag predates
+this contract and is rejected together with the global machine modes. The
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
 

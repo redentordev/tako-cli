@@ -84,10 +84,8 @@ func TestPrintDiscoveryExportsTextIncludesRecordsAndWarnings(t *testing.T) {
 		{ServerName: "node-b", ConnectErr: errors.New("refused")},
 	}
 	var buf bytes.Buffer
-	cmd := &cobra.Command{}
-	cmd.SetOut(&buf)
 
-	if err := printDiscoveryExportsText(cmd, "production", false, results); err != nil {
+	if err := printDiscoveryExportsText(&buf, "production", false, results); err != nil {
 		t.Fatalf("printDiscoveryExportsText returned error: %v", err)
 	}
 	output := buf.String()

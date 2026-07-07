@@ -783,6 +783,61 @@ func TestDomainsResultDocumentsGolden(t *testing.T) {
 	}
 }
 
+// TestDiscoveryExportsResultDocumentGolden pins the machine-facing discovery schema.
+func TestDiscoveryExportsResultDocumentGolden(t *testing.T) {
+	result := engine.DiscoveryExportsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDiscoveryExportsResult,
+		Environment: "production",
+		Nodes: []engine.DiscoveryNodeExports{
+			{
+				Server: "node-a",
+				Host:   "10.0.0.1",
+				Exports: []takod.ExportDiscoveryRecord{{
+					Network:     "tako_backend_api_production_api_export",
+					Project:     "backend-api",
+					Environment: "production",
+					Service:     "api",
+					Alias:       "backend-api-production-api",
+				}},
+			},
+			{Server: "node-b", Host: "10.0.0.2", Error: "connect: refused"},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DiscoveryExportsResult",
+  "environment": "production",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "exports": [
+        {
+          "network": "tako_backend_api_production_api_export",
+          "project": "backend-api",
+          "environment": "production",
+          "service": "api",
+          "alias": "backend-api-production-api"
+        }
+      ]
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "error": "connect: refused"
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("discovery exports document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",

@@ -3,12 +3,16 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
@@ -52,6 +56,10 @@ func init() {
 }
 
 func runDiscoveryExports(cmd *cobra.Command, args []string) error {
+	if discoveryJSON && machineOutputEnabled() {
+		return &engine.InvalidRequestError{Err: fmt.Errorf("--json conflicts with the global machine output modes; use --output json for the versioned DiscoveryExportsResult document")}
+	}
+
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
@@ -73,10 +81,57 @@ func runDiscoveryExports(cmd *cobra.Command, args []string) error {
 	defer sshPool.CloseAll()
 
 	results := collectDiscoveryExports(cfg, serverNames, envName, sshPool)
+	if machineOutputEnabled() {
+		// Human table renders to stderr; stdout carries the result document.
+		_ = printDiscoveryExportsText(os.Stderr, envName, discoveryAllEnvironments, results)
+		return emitDiscoveryExportsResult(envName, discoveryAllEnvironments, results)
+	}
 	if discoveryJSON {
 		return printDiscoveryExportsJSON(cmd, envName, discoveryAllEnvironments, results)
 	}
-	return printDiscoveryExportsText(cmd, envName, discoveryAllEnvironments, results)
+	return printDiscoveryExportsText(cmd.OutOrStdout(), envName, discoveryAllEnvironments, results)
+}
+
+// emitDiscoveryExportsResult builds and emits the versioned document; all
+// nodes failing exits 1, a partial read exits 6.
+func emitDiscoveryExportsResult(envName string, allEnvironments bool, results []discoveryNodeResult) error {
+	result := engine.DiscoveryExportsResult{
+		APIVersion:      takoapi.APIVersionCurrent,
+		Kind:            engine.KindDiscoveryExportsResult,
+		Environment:     envName,
+		AllEnvironments: allEnvironments,
+		Nodes:           []engine.DiscoveryNodeExports{},
+	}
+	failures := 0
+	for _, nodeResult := range results {
+		node := engine.DiscoveryNodeExports{
+			Server:  nodeResult.ServerName,
+			Host:    nodeResult.Host,
+			Exports: nodeResult.Exports,
+		}
+		if nodeResult.ConnectErr != nil {
+			node.Error = "connect: " + nodeResult.ConnectErr.Error()
+			failures++
+		} else if nodeResult.ReadErr != nil {
+			node.Error = "discovery: " + nodeResult.ReadErr.Error()
+			failures++
+		}
+		result.Nodes = append(result.Nodes, node)
+	}
+
+	var err error
+	switch {
+	case failures == len(result.Nodes) && failures > 0:
+		err = fmt.Errorf("no reachable nodes returned discovery records")
+		result.Error = err.Error()
+	case failures > 0:
+		err = &engine.AttentionError{Err: fmt.Errorf("failed to read discovery records from %d of %d node(s)", failures, len(result.Nodes))}
+		result.Error = err.Error()
+	}
+	if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
+		err = emitErr
+	}
+	return err
 }
 
 func discoveryTargetServers(cfg *config.Config, envName string, serverName string, allEnvironments bool) ([]string, error) {
@@ -231,8 +286,7 @@ func printDiscoveryExportsJSON(cmd *cobra.Command, envName string, allEnvironmen
 	return nil
 }
 
-func printDiscoveryExportsText(cmd *cobra.Command, envName string, allEnvironments bool, results []discoveryNodeResult) error {
-	out := cmd.OutOrStdout()
+func printDiscoveryExportsText(out io.Writer, envName string, allEnvironments bool, results []discoveryNodeResult) error {
 	fmt.Fprintln(out, "Export discovery records")
 	if allEnvironments {
 		fmt.Fprintln(out, "Environment: all")
