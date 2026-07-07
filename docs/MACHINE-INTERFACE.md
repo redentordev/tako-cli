@@ -50,7 +50,9 @@ the bare result document appended after the event stream.
 `log.line` events on stdout. Each event sets `service`, `node`, and
 `data.data` (the raw log line without the trailing newline); `message`
 contains the human rendering, including the node prefix used for multi-node
-text output.
+text output. `tako access --events ndjson` mirrors this with `access.line`
+events carrying the raw proxy access-log entry in `data.data`, the source
+node in `data.node`, and the formatted rendering in `message`.
 
 ### Event schema
 
