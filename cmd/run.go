@@ -55,8 +55,16 @@ func newRunCommand() *cobra.Command {
 		Replicas:    1,
 	}
 	cmd := &cobra.Command{
-		Use:          "run IMAGE",
-		Short:        "Deploy a public image to an existing takod node without tako.yaml",
+		Use:   "run IMAGE",
+		Short: "Deploy a public image to an existing takod node without tako.yaml",
+		Long: `Deploy a public image to an existing takod node without tako.yaml.
+
+--server takes the SSH host or IP address to connect to — there is no
+configuration to resolve named servers against in this mode. A config server
+key is derived from the host (203.0.113.10 becomes ip-203-0-113-10) and used
+for remote state and later config export; pass --server-name to choose it.`,
+		Example: `  tako run nginx:1.27 --name web --port 80 --server 203.0.113.10 --user root
+  tako run ghcr.io/acme/api:v3 --name api --port 8080 --server vps1.example.com --user deploy --domain api.example.com`,
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -74,8 +82,8 @@ func newRunCommand() *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVar(&opts.Name, "name", opts.Name, "Project and service name (required)")
 	flags.IntVar(&opts.Port, "port", opts.Port, "Container port to expose (required)")
-	flags.StringVar(&opts.Server, "server", opts.Server, "SSH host for the remote takod node (required)")
-	flags.StringVar(&opts.ServerName, "server-name", opts.ServerName, "Generated config server name (defaults to sanitized --server)")
+	flags.StringVar(&opts.Server, "server", opts.Server, "SSH host or IP address of the remote takod node (required; not a tako.yaml server name)")
+	flags.StringVar(&opts.ServerName, "server-name", opts.ServerName, "Config server key recorded in remote state (defaults to a name derived from --server)")
 	flags.StringVar(&opts.Environment, "environment", opts.Environment, "Environment name")
 	flags.StringVar(&opts.User, "user", opts.User, "SSH user (defaults to current user)")
 	flags.StringVar(&opts.SSHKey, "ssh-key", opts.SSHKey, "SSH private key path")

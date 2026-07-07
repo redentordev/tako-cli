@@ -10,7 +10,13 @@ tako-run - Deploy a public image to an existing takod node without tako.yaml
 
 
 .SH DESCRIPTION
-Deploy a public image to an existing takod node without tako.yaml
+Deploy a public image to an existing takod node without tako.yaml.
+
+.PP
+--server takes the SSH host or IP address to connect to — there is no
+configuration to resolve named servers against in this mode. A config server
+key is derived from the host (203.0.113.10 becomes ip-203-0-113-10) and used
+for remote state and later config export; pass --server-name to choose it.
 
 
 .SH OPTIONS
@@ -63,11 +69,11 @@ Deploy a public image to an existing takod node without tako.yaml
 
 .PP
 \fB--server\fP=""
-	SSH host for the remote takod node (required)
+	SSH host or IP address of the remote takod node (required; not a tako.yaml server name)
 
 .PP
 \fB--server-name\fP=""
-	Generated config server name (defaults to sanitized --server)
+	Config server key recorded in remote state (defaults to a name derived from --server)
 
 .PP
 \fB--ssh-key\fP="~/.ssh/id_rsa"
@@ -105,6 +111,13 @@ Deploy a public image to an existing takod node without tako.yaml
 .PP
 \fB-v\fP, \fB--verbose\fP[=false]
 	verbose output
+
+
+.SH EXAMPLE
+.EX
+  tako run nginx:1.27 --name web --port 80 --server 203.0.113.10 --user root
+  tako run ghcr.io/acme/api:v3 --name api --port 8080 --server vps1.example.com --user deploy --domain api.example.com
+.EE
 
 
 .SH SEE ALSO

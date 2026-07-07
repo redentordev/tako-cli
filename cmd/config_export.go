@@ -72,7 +72,7 @@ func addConfigExportFlags(cmd *cobra.Command, opts *configExportOptions) {
 	flags := cmd.Flags()
 	flags.StringVar(&opts.Project, "project", opts.Project, "Project name to read from takod state (required)")
 	flags.StringVar(&opts.Environment, "environment", opts.Environment, "Environment name to read from takod state")
-	flags.StringVar(&opts.Server, "server", opts.Server, "SSH host for the remote takod node (required)")
+	flags.StringVar(&opts.Server, "server", opts.Server, "SSH host or IP address of the remote takod node (required; not a tako.yaml server name)")
 	flags.StringVar(&opts.ServerName, "server-name", opts.ServerName, "Remote target node/server key to attach connection details to when exporting multi-node state (defaults to a sanitized form of --server)")
 	flags.StringVar(&opts.User, "user", opts.User, "SSH user for the remote takod node (defaults to current user)")
 	flags.IntVar(&opts.SSHPort, "ssh-port", opts.SSHPort, "SSH port for the remote takod node")

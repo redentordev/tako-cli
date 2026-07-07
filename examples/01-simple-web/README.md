@@ -236,8 +236,8 @@ Once you've deployed this example, try:
 ## Learn More
 
 - [Tako CLI Documentation](../../README.md)
-- [Configuration Reference](../../README.md#configuration-examples)
-- [Deployment Commands](../../README.md#core-commands)
+- [Configuration Guide](../../docs/CONFIGURATION.md)
+- [Commands Reference](../../README.md#commands)
 
 ## What Makes This Simple?
 

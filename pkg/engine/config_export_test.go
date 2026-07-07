@@ -41,6 +41,31 @@ func TestNormalizeConfigExportRequestValidatesAndDefaults(t *testing.T) {
 	}
 }
 
+func TestSanitizeConfigExportServerName(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"prod-1.example.com", "prod-1-example-com"},
+		{"Prod-1.example.com:2222", "prod-1-example-com"},
+		{"MyServer", "myserver"},
+		{"prod_1", "prod_1"},
+		// IP hosts must derive a stable per-address key, not collapse to
+		// the generic "server" fallback (keys must start with a letter).
+		{"203.0.113.10", "ip-203-0-113-10"},
+		{"203.0.113.10:2222", "ip-203-0-113-10"},
+		{"2001:db8::1", "ip-2001-db8-1"},
+		{"[2001:db8::1]:2222", "ip-2001-db8-1"},
+		{"...", "server"},
+		{"", "server"},
+	}
+	for _, tc := range cases {
+		if got := SanitizeConfigExportServerName(tc.in); got != tc.want {
+			t.Errorf("SanitizeConfigExportServerName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestMaterializeConfigExportRedactsAndRemapsConnectionDetails(t *testing.T) {
 	desired := engineDesiredDoc("web", "production")
 	desired.TargetNodes = []string{"node-a"}
