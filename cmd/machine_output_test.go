@@ -634,6 +634,66 @@ func TestStatsResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestSecretsResultDocumentsGolden pins the machine-facing secrets schemas.
+// These documents carry secret KEYS only — never values.
+func TestSecretsResultDocumentsGolden(t *testing.T) {
+	list := engine.SecretsListResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindSecretsListResult,
+		Environment: "production",
+		Keys:        []string{"API_KEY", "DATABASE_URL"},
+		Count:       2,
+	}
+	payload, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal list result: %v", err)
+	}
+	wantList := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "SecretsListResult",
+  "environment": "production",
+  "keys": [
+    "API_KEY",
+    "DATABASE_URL"
+  ],
+  "count": 2
+}`
+	if string(payload) != wantList {
+		t.Fatalf("secrets list document drifted:\n%s", payload)
+	}
+
+	validate := engine.SecretsValidateResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindSecretsValidateResult,
+		Project:     "demo",
+		Environment: "production",
+		Valid:       false,
+		Required:    []string{"API_KEY", "DATABASE_URL"},
+		Missing:     []string{"DATABASE_URL"},
+	}
+	payload, err = json.MarshalIndent(validate, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal validate result: %v", err)
+	}
+	wantValidate := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "SecretsValidateResult",
+  "project": "demo",
+  "environment": "production",
+  "valid": false,
+  "required": [
+    "API_KEY",
+    "DATABASE_URL"
+  ],
+  "missing": [
+    "DATABASE_URL"
+  ]
+}`
+	if string(payload) != wantValidate {
+		t.Fatalf("secrets validate document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",

@@ -166,8 +166,14 @@ in machine modes) returns a `StatsResult` with project/environment, the
 all-fail/partial exit rule applies. `tako stats --follow --events ndjson`
 streams one `stats.sample` event per node per `--interval` (default 5s)
 whose `data` carries `server`, `host`, and `containers` in the same shape,
-until cancelled. The Go definitions in `pkg/engine` (`types.go`
-and per-command files) are the source of truth.
+until cancelled. `tako secrets list --output json` returns a
+`SecretsListResult` with the `--env` filter and secret `keys` only —
+values never appear in machine output (test-enforced). `tako secrets
+validate --output json` returns a `SecretsValidateResult` with
+project/environment, `valid`, `required` key names, and `missing` key
+names; missing secrets exit with code 2 and still emit the document. The
+Go definitions in `pkg/engine` (`types.go` and per-command files) are the
+source of truth.
 
 ## Config Export / Pull
 
