@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"strings"
@@ -375,11 +376,23 @@ func CleanConfigExportTargetNodes(values []string) []string {
 var invalidConfigExportServerNameChars = regexp.MustCompile(`[^a-z0-9_-]+`)
 
 // SanitizeConfigExportServerName converts a host or supplied name into a valid
-// generated server key.
+// generated server key. IP hosts get an "ip-" prefix because server keys must
+// start with a lowercase letter — 203.0.113.10 derives "ip-203-0-113-10", so
+// each address keeps a stable, unique key instead of collapsing to "server".
 func SanitizeConfigExportServerName(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
-	if host, _, ok := strings.Cut(value, ":"); ok {
+	if host, _, err := net.SplitHostPort(value); err == nil {
 		value = host
+	} else if net.ParseIP(value) == nil {
+		// Not host:port and not a bare IPv6 address: treat a single
+		// colon as a port separator, matching prior behavior.
+		if host, _, ok := strings.Cut(value, ":"); ok {
+			value = host
+		}
+	}
+	value = strings.Trim(value, "[]")
+	if ip := net.ParseIP(value); ip != nil {
+		value = "ip-" + ip.String()
 	}
 	var b strings.Builder
 	lastDash := false
