@@ -200,6 +200,22 @@ and per-node outcomes whose `backups` reuse the takod backup schema plus
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
 
+### Command coverage
+
+Every command falls into exactly one category — there is no undocumented
+machine behavior:
+
+| Category | Commands |
+| -------- | -------- |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup` |
+| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`) |
+| Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
+| Pending machine surface (node lifecycle, next phase) | `setup`, `clone-setup`, `upgrade servers` |
+| Human-only by design | `init`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON) |
+
+Interactive-only flags (`drift --watch`, `metrics --live`, `stats --live`)
+are rejected with exit code 2 when a machine mode is enabled.
+
 ## Config Export / Pull
 
 Use `--file/-o` for the generated config path:
