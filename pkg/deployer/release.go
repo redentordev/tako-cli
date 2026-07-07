@@ -133,7 +133,7 @@ func (d *Deployer) runReleaseCommand(serviceName string, service *config.Service
 		Data:    map[string]any{"command": request.Command, "image": imageRef, "node": serverName},
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout+releaseStreamGrace)
+	ctx, cancel := context.WithTimeout(d.baseContext(), timeout+releaseStreamGrace)
 	defer cancel()
 
 	started := time.Now()

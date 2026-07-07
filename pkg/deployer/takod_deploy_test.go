@@ -253,6 +253,22 @@ func (c *recordingLocalImageClient) Push(_ context.Context, req takounregistry.P
 	return nil
 }
 
+func TestBaseContextDefaultsToBackgroundAndThreadsCancellation(t *testing.T) {
+	d := &Deployer{}
+	if d.baseContext() != context.Background() {
+		t.Fatalf("unset base context = %v, want context.Background()", d.baseContext())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.SetBaseContext(ctx)
+	if d.baseContext() != ctx {
+		t.Fatalf("base context not threaded")
+	}
+	cancel()
+	if err := d.baseContext().Err(); err != context.Canceled {
+		t.Fatalf("base context err = %v, want context.Canceled", err)
+	}
+}
+
 func TestServiceMemoryLimit(t *testing.T) {
 	if got := serviceMemoryLimit(&config.ServiceConfig{}); got != "" {
 		t.Fatalf("empty service memory limit = %q, want empty", got)

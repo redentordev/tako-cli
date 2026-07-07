@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -398,5 +399,29 @@ func TestRemoveProjectUnschedulesAndDeletesState(t *testing.T) {
 	runs, err := scheduler.Runs("demo", "production", "report")
 	if err != nil || len(runs) != 0 {
 		t.Fatalf("runs after removal = %+v, err %v", runs, err)
+	}
+}
+
+// runJobDocker must tolerate the nil cleanup writeTempEnvFile returns for
+// env-less jobs; a bare defer panicked here after the container finished.
+func TestRunJobDockerWithoutEnvFileDoesNotPanic(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	spec := JobSpec{
+		Project:     "demo",
+		Environment: "production",
+		Name:        "tick",
+		Image:       "busybox:1.36",
+		Command:     []string{"echo", "ok"},
+	}
+	var out bytes.Buffer
+	exitCode, err := runJobDocker(context.Background(), spec, "tako_demo_production_tick_job_1", &out)
+	if err != nil {
+		t.Fatalf("runJobDocker: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", exitCode)
 	}
 }

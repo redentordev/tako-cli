@@ -356,7 +356,7 @@ func (d *Deployer) buildImageLocallyAndPushToTakodNodes(serviceName string, serv
 		d.printf("  Building image locally with docker buildx and pushing via unregistry to %d node(s)...\n", len(missingServers))
 	}
 
-	ctx := context.Background()
+	ctx := d.baseContext()
 	localClient := d.localImageTransferClient()
 	if err := localClient.CheckAvailable(ctx); err != nil {
 		return err
@@ -1566,7 +1566,7 @@ func serviceMemoryLimit(service *config.ServiceConfig) string {
 
 func (d *Deployer) reconcileServiceViaTakod(client *ssh.Client, request takod.ReconcileServiceRequest) error {
 	timeout := reconcileServiceRequestTimeout(request)
-	if _, err := takodclient.RequestJSONWithTimeout(client, d.takodSocket(), "POST", "/v1/reconcile-service", request, timeout); err != nil {
+	if _, err := takodclient.RequestJSONWithTimeoutContext(d.baseContext(), client, d.takodSocket(), "POST", "/v1/reconcile-service", request, timeout); err != nil {
 		return fmt.Errorf("takod service reconciliation failed: %w", err)
 	}
 	return nil

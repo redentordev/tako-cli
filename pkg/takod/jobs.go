@@ -311,6 +311,11 @@ func (s *JobScheduler) RemoveProject(project string, environment string) ([]stri
 		if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
 			return removed, fmt.Errorf("failed to remove job state: %w", err)
 		}
+		if environment != "" {
+			// Prune the project dir when this was its last environment;
+			// os.Remove refuses non-empty dirs, which is exactly right.
+			_ = os.Remove(filepath.Join(s.dataDir, dir, project))
+		}
 	}
 	return removed, nil
 }
@@ -561,7 +566,9 @@ func runJobDocker(ctx context.Context, spec JobSpec, container string, output io
 	if err != nil {
 		return -1, err
 	}
-	defer cleanup()
+	if cleanup != nil {
+		defer cleanup()
+	}
 	return runExecDocker(ctx, output, buildJobRunArgs(spec, container, envFile))
 }
 
