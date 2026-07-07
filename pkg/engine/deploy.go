@@ -438,6 +438,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		return nil, fmt.Errorf("deploy session was already applied")
 	}
 	s.applied = true
+	s.deployer.SetBaseContext(ctx)
 
 	e := s.engine
 	req := s.req

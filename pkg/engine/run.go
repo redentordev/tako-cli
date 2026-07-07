@@ -200,6 +200,7 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 		return nil, fmt.Errorf("run session was already applied")
 	}
 	s.applied = true
+	s.deployer.SetBaseContext(ctx)
 
 	e := s.engine
 	req := s.req

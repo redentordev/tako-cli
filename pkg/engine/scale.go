@@ -147,6 +147,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	}
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, req.Verbose)
+	deploy.SetBaseContext(ctx)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err

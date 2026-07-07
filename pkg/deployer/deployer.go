@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -76,6 +77,7 @@ type Deployer struct {
 	releaseMu         sync.Mutex
 	jobImages         map[string]string
 	jobMu             sync.Mutex
+	baseCtx           context.Context
 }
 
 const (
@@ -109,6 +111,21 @@ func NewDeployerWithPool(client *ssh.Client, cfg *config.Config, environment str
 		verbose:     verbose,
 		sshPool:     sshPool,
 	}
+}
+
+// SetBaseContext threads the caller's context into long-running deployer
+// streams (image builds, build-context archive uploads, service reconcile
+// pulls) so cancelling a deploy interrupts in-flight remote work instead of
+// waiting for it to finish.
+func (d *Deployer) SetBaseContext(ctx context.Context) {
+	d.baseCtx = ctx
+}
+
+func (d *Deployer) baseContext() context.Context {
+	if d.baseCtx != nil {
+		return d.baseCtx
+	}
+	return context.Background()
 }
 
 func (d *Deployer) SetCLIVersion(version string) {
@@ -455,7 +472,7 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 		}
 
 		streamStart := time.Now()
-		output, err := takodclient.StreamRequest(client, d.takodSocket(), "POST", endpoint, body)
+		output, err := takodclient.StreamRequestWithContext(d.baseContext(), client, d.takodSocket(), "POST", endpoint, body)
 		streamDuration := time.Since(streamStart)
 		var response takod.ImageBuildResponse
 		if err == nil {
