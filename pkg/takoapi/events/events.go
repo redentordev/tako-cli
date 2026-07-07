@@ -71,6 +71,16 @@ const (
 	TypeNotificationSent = "notification.sent"
 	TypeDomainStatus     = "domain.status"
 
+	// TypeStatsSample carries one node's point-in-time container stats in
+	// `tako stats --follow --events ndjson`; data holds server, host, and
+	// containers (same shape as the StatsResult node samples).
+	TypeStatsSample = "stats.sample"
+
+	// TypeAccessLine carries one proxy access-log entry in
+	// `tako access --events ndjson`; data holds node and the raw log line
+	// (`data.data`), mirroring `log.line`.
+	TypeAccessLine = "access.line"
+
 	TypeWarning = "warning"
 
 	// TypeResult is the terminal event carrying the operation result document

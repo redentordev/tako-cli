@@ -2,11 +2,15 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
@@ -67,6 +71,12 @@ func init() {
 }
 
 func runCleanup(cmd *cobra.Command, args []string) error {
+	// Machine modes reserve stdout for parseable output.
+	var out io.Writer = os.Stdout
+	if machineOutputEnabled() {
+		out = os.Stderr
+	}
+
 	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
@@ -97,7 +107,7 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 	defer leaseSet.Release(verbose)
 	if verbose {
-		fmt.Printf("→ Acquired remote cleanup leases: %s\n", leaseSet.Summary())
+		fmt.Fprintf(out, "→ Acquired remote cleanup leases: %s\n", leaseSet.Summary())
 	}
 
 	// If full cleanup, keep fewer images
@@ -106,15 +116,15 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 		keepImages = 2
 	}
 
-	fmt.Printf("🧹 Cleaning up %d server(s)...\n", len(serversToClean))
-	fmt.Printf("   Keeping %d latest images per service\n\n", keepImages)
-	fmt.Printf("Scope: project %s, environment %s\n", cfg.Project.Name, envName)
+	fmt.Fprintf(out, "🧹 Cleaning up %d server(s)...\n", len(serversToClean))
+	fmt.Fprintf(out, "   Keeping %d latest images per service\n\n", keepImages)
+	fmt.Fprintf(out, "Scope: project %s, environment %s\n", cfg.Project.Name, envName)
 	if cleanupDockerCache {
-		fmt.Printf("⚠️  Shared Docker cache cleanup enabled: build cache will keep about %s and dangling images may be used by unrelated projects.\n", cleanupCacheKeep)
+		fmt.Fprintf(out, "⚠️  Shared Docker cache cleanup enabled: build cache will keep about %s and dangling images may be used by unrelated projects.\n", cleanupCacheKeep)
 	} else {
-		fmt.Println("Shared Docker cache untouched. Use --docker-cache only when reclaiming node-wide Docker cache intentionally.")
+		fmt.Fprintln(out, "Shared Docker cache untouched. Use --docker-cache only when reclaiming node-wide Docker cache intentionally.")
 	}
-	fmt.Println()
+	fmt.Fprintln(out)
 
 	results := collectCleanupNodes(serversToClean, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
 		return cleanupSingleNode(cfg, sshPool, serverCfg, cleanupRequestForEnvironment(cfg, envName, imageRepositories, externalVolumes, keepImages, cleanupDockerCache, cleanupCacheKeep, cleanupSecure))
@@ -122,44 +132,77 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 
 	totalErrors := 0
 	for _, result := range results {
-		fmt.Printf("=== Cleaning server: %s (%s) ===\n", result.serverName, result.host)
+		fmt.Fprintf(out, "=== Cleaning server: %s (%s) ===\n", result.serverName, result.host)
 		if result.err != nil {
-			fmt.Printf("❌ Cleanup failed: %v\n\n", result.err)
+			fmt.Fprintf(out, "❌ Cleanup failed: %v\n\n", result.err)
 			totalErrors++
 			continue
 		}
 
 		if len(result.response.Warnings) > 0 {
 			totalErrors += len(result.response.Warnings)
-			printCleanupWarnings(result.response)
+			printCleanupWarnings(out, result.response)
 		}
 		if verbose {
 			if result.response.InitialDiskUsage != "" {
-				fmt.Printf("  Disk before: %s\n", result.response.InitialDiskUsage)
+				fmt.Fprintf(out, "  Disk before: %s\n", result.response.InitialDiskUsage)
 			}
 			if result.response.FinalDiskUsage != "" {
-				fmt.Printf("  Disk after:  %s\n", result.response.FinalDiskUsage)
+				fmt.Fprintf(out, "  Disk after:  %s\n", result.response.FinalDiskUsage)
 			}
 			if result.response.ImagesRemoved > 0 || result.response.ContainersRemoved > 0 {
-				fmt.Printf("  Removed %d image(s), %d stopped container(s)\n", result.response.ImagesRemoved, result.response.ContainersRemoved)
+				fmt.Fprintf(out, "  Removed %d image(s), %d stopped container(s)\n", result.response.ImagesRemoved, result.response.ContainersRemoved)
 			}
 		}
 
-		fmt.Printf("✓ Server %s cleaned successfully\n\n", result.serverName)
+		fmt.Fprintf(out, "✓ Server %s cleaned successfully\n\n", result.serverName)
+	}
+
+	ack := engine.ActionResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindActionResult,
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Action:      engine.ActionCleanup,
+		Servers:     []engine.ActionNodeOutcome{},
+	}
+	failedNodes := 0
+	for _, result := range results {
+		outcome := engine.ActionNodeOutcome{Server: result.serverName, Host: result.host, Done: result.err == nil}
+		if result.err != nil {
+			outcome.Error = result.err.Error()
+			failedNodes++
+		} else if result.response != nil {
+			outcome.Warnings = append(outcome.Warnings, result.response.Warnings...)
+		}
+		ack.Servers = append(ack.Servers, outcome)
+	}
+	switch {
+	case failedNodes == len(results) && failedNodes > 0:
+		ack.Outcome = engine.ActionOutcomeFailed
+	case totalErrors > 0:
+		ack.Outcome = engine.ActionOutcomePartial
+	default:
+		ack.Outcome = engine.ActionOutcomeOK
 	}
 
 	// Summary
 	if totalErrors > 0 {
-		fmt.Printf("⚠️  Cleanup completed with %d errors\n", totalErrors)
-		fmt.Println("   Run with -v (verbose) flag for more details")
-		return nil
+		fmt.Fprintf(out, "⚠️  Cleanup completed with %d errors\n", totalErrors)
+		fmt.Fprintln(out, "   Run with -v (verbose) flag for more details")
+		err := &engine.AttentionError{Err: fmt.Errorf("cleanup completed with %d errors", totalErrors)}
+		ack.Error = err.Error()
+		if emitErr := emitResultDocument(ack); emitErr != nil {
+			return emitErr
+		}
+		return err
 	}
 
-	fmt.Println("✨ All servers cleaned successfully!")
-	fmt.Println("\n💡 Tip: Run 'tako cleanup' regularly to maintain optimal disk usage")
-	fmt.Println("   Consider adding it to your deployment workflow or cron jobs")
+	fmt.Fprintln(out, "✨ All servers cleaned successfully!")
+	fmt.Fprintln(out, "\n💡 Tip: Run 'tako cleanup' regularly to maintain optimal disk usage")
+	fmt.Fprintln(out, "   Consider adding it to your deployment workflow or cron jobs")
 
-	return nil
+	return emitResultDocument(ack)
 }
 
 func cleanupRequestForEnvironment(cfg *config.Config, envName string, imageRepositories []string, externalVolumes []string, keepImages int, includeDockerCache bool, buildCacheKeepStorage string, secureLogs bool) takod.CleanupRequest {

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -10,9 +11,11 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/drift"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/spf13/cobra"
 )
 
@@ -84,6 +87,9 @@ func runDrift(cmd *cobra.Command, args []string) error {
 	})
 
 	if driftWatch {
+		if machineOutputEnabled() {
+			return &engine.InvalidRequestError{Err: fmt.Errorf("--watch is interactive-only; run single-shot drift checks in machine output modes")}
+		}
 		return watchDrift(detector, driftInterval)
 	}
 
@@ -107,14 +113,46 @@ func driftServicesFromReconcile(actual map[string]*reconcile.ActualService) map[
 }
 
 func checkDriftOnce(detector *drift.Detector) error {
-	fmt.Printf("=== Drift Detection ===\n\n")
+	// Machine modes reserve stdout for parseable output.
+	var out io.Writer = os.Stdout
+	if machineOutputEnabled() {
+		out = os.Stderr
+	}
+	fmt.Fprintf(out, "=== Drift Detection ===\n\n")
 
 	state, err := detector.CheckOnce()
 	if err != nil {
 		return fmt.Errorf("drift check failed: %w", err)
 	}
 
-	printDriftState(state)
+	printDriftState(out, state)
+
+	result := engine.DriftResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDriftResult,
+		Project:     state.Project,
+		Environment: state.Environment,
+		Drifted:     len(state.Drifts) > 0,
+		ServicesOK:  state.ServicesOK,
+		CheckedAt:   state.LastCheck,
+		Duration:    state.CheckDuration.Seconds(),
+	}
+	for _, d := range state.Drifts {
+		result.Drifts = append(result.Drifts, engine.DriftEntry{
+			Service:  d.Service,
+			Type:     string(d.Type),
+			Severity: d.Severity,
+			Expected: d.Expected,
+			Actual:   d.Actual,
+			Details:  d.Details,
+		})
+	}
+	if err := emitResultDocument(result); err != nil {
+		return err
+	}
+	if result.Drifted {
+		return &engine.AttentionError{Err: fmt.Errorf("drift detected in %d service(s)", len(state.Drifts))}
+	}
 	return nil
 }
 
@@ -138,18 +176,18 @@ func watchDrift(detector *drift.Detector, interval time.Duration) error {
 	return detector.Start(ctx, interval)
 }
 
-func printDriftState(state *drift.DriftState) {
-	fmt.Printf("Project:     %s\n", state.Project)
-	fmt.Printf("Environment: %s\n", state.Environment)
-	fmt.Printf("Last Check:  %s\n", state.LastCheck.Format("2006-01-02 15:04:05"))
-	fmt.Printf("Duration:    %s\n\n", state.CheckDuration.Round(time.Millisecond))
+func printDriftState(out io.Writer, state *drift.DriftState) {
+	fmt.Fprintf(out, "Project:     %s\n", state.Project)
+	fmt.Fprintf(out, "Environment: %s\n", state.Environment)
+	fmt.Fprintf(out, "Last Check:  %s\n", state.LastCheck.Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(out, "Duration:    %s\n\n", state.CheckDuration.Round(time.Millisecond))
 
 	if len(state.Drifts) == 0 {
-		fmt.Printf("✓ No drift detected - all %d services are in sync\n", len(state.ServicesOK))
+		fmt.Fprintf(out, "✓ No drift detected - all %d services are in sync\n", len(state.ServicesOK))
 		return
 	}
 
-	fmt.Printf("⚠️  Detected %d drift(s):\n\n", len(state.Drifts))
+	fmt.Fprintf(out, "⚠️  Detected %d drift(s):\n\n", len(state.Drifts))
 
 	// Group by severity
 	bySeverity := map[string][]drift.DriftReport{
@@ -177,16 +215,16 @@ func printDriftState(state *drift.DriftState) {
 			continue
 		}
 
-		fmt.Printf("%s %s:\n", severityEmoji[sev], sev)
+		fmt.Fprintf(out, "%s %s:\n", severityEmoji[sev], sev)
 		for _, d := range drifts {
-			fmt.Printf("  • %s (%s)\n", d.Service, d.Type)
-			fmt.Printf("    Expected: %s\n", d.Expected)
-			fmt.Printf("    Actual:   %s\n", d.Actual)
+			fmt.Fprintf(out, "  • %s (%s)\n", d.Service, d.Type)
+			fmt.Fprintf(out, "    Expected: %s\n", d.Expected)
+			fmt.Fprintf(out, "    Actual:   %s\n", d.Actual)
 		}
-		fmt.Println()
+		fmt.Fprintln(out)
 	}
 
 	if len(state.ServicesOK) > 0 {
-		fmt.Printf("✓ %d service(s) OK: %v\n", len(state.ServicesOK), state.ServicesOK)
+		fmt.Fprintf(out, "✓ %d service(s) OK: %v\n", len(state.ServicesOK), state.ServicesOK)
 	}
 }

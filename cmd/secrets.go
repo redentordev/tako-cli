@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
 	"unicode"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/secrets"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/spf13/cobra"
 )
 
@@ -119,32 +122,44 @@ var secretsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all secret keys",
 	Long:  `List all secret keys (values are redacted for security).`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		env, _ := cmd.Flags().GetString("env")
+	RunE:  runSecretsList,
+}
 
-		// Create manager
-		mgr, err := secrets.NewManager(env)
-		if err != nil {
-			return err
-		}
+func runSecretsList(cmd *cobra.Command, args []string) error {
+	env, _ := cmd.Flags().GetString("env")
 
-		// Get all keys
-		keys := mgr.List()
+	// Create manager
+	mgr, err := secrets.NewManager(env)
+	if err != nil {
+		return err
+	}
 
-		if len(keys) == 0 {
-			fmt.Println("No secrets configured")
-			return nil
-		}
+	// Get all keys
+	keys := mgr.List()
 
-		fmt.Printf("Secrets (%s):\n", getEnvDisplay(env))
+	// Machine modes reserve stdout for parseable output. The result document
+	// carries KEYS only; secret values never reach any machine output.
+	var out io.Writer = os.Stdout
+	if machineOutputEnabled() {
+		out = os.Stderr
+	}
+	if len(keys) == 0 {
+		fmt.Fprintln(out, "No secrets configured")
+	} else {
+		fmt.Fprintf(out, "Secrets (%s):\n", getEnvDisplay(env))
 		for _, key := range keys {
-			fmt.Printf("  %s=[REDACTED]\n", key)
+			fmt.Fprintf(out, "  %s=[REDACTED]\n", key)
 		}
+		fmt.Fprintf(out, "\nTotal: %d secret(s)\n", len(keys))
+	}
 
-		fmt.Printf("\nTotal: %d secret(s)\n", len(keys))
-
-		return nil
-	},
+	return emitResultDocument(engine.SecretsListResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindSecretsListResult,
+		Environment: env,
+		Keys:        keys,
+		Count:       len(keys),
+	})
 }
 
 var secretsDeleteCmd = &cobra.Command{
@@ -182,46 +197,73 @@ var secretsValidateCmd = &cobra.Command{
 	Use:   "validate",
 	Short: "Validate required secrets are present",
 	Long:  `Validate that all required secrets referenced in tako.yaml are configured.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		env, _ := cmd.Flags().GetString("env")
+	RunE:  runSecretsValidate,
+}
 
-		// Load config
-		cfg, err := config.LoadConfig(cfgFile)
-		if err != nil {
-			return fmt.Errorf("failed to load config: %w", err)
+func runSecretsValidate(cmd *cobra.Command, args []string) error {
+	env, _ := cmd.Flags().GetString("env")
+
+	// Load config
+	cfg, err := config.LoadConfig(cfgFile)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	// Create manager
+	mgr, err := secrets.NewManager(env)
+	if err != nil {
+		return err
+	}
+
+	// Get services for the environment
+	services, err := cfg.GetServices(env)
+	if err != nil {
+		return fmt.Errorf("failed to get services: %w", err)
+	}
+
+	// Collect all required secrets (string array format)
+	required := []string{}
+	for _, service := range services {
+		// Service.Secrets is now []string in the new format
+		required = append(required, service.Secrets...)
+	}
+	sort.Strings(required)
+
+	missing := []string{}
+	for _, key := range required {
+		if !mgr.Has(key) {
+			missing = append(missing, key)
 		}
+	}
 
-		// Create manager
-		mgr, err := secrets.NewManager(env)
-		if err != nil {
-			return err
+	result := engine.SecretsValidateResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindSecretsValidateResult,
+		Project:     cfg.Project.Name,
+		Environment: env,
+		Valid:       len(missing) == 0,
+		Required:    required,
+		Missing:     missing,
+	}
+
+	if len(missing) > 0 {
+		if emitErr := emitResultDocument(result); emitErr != nil {
+			return emitErr
 		}
+		return &engine.InvalidRequestError{Err: fmt.Errorf("missing required secrets: %s", strings.Join(missing, ", "))}
+	}
 
-		// Get services for the environment
-		services, err := cfg.GetServices(env)
-		if err != nil {
-			return fmt.Errorf("failed to get services: %w", err)
-		}
+	// Machine modes reserve stdout for parseable output.
+	var out io.Writer = os.Stdout
+	if machineOutputEnabled() {
+		out = os.Stderr
+	}
+	fmt.Fprintln(out, "✓ All required secrets are configured")
+	fmt.Fprintf(out, "  Environment: %s\n", getEnvDisplay(env))
+	fmt.Fprintf(out, "  Required: %d\n", len(required))
+	fmt.Fprintf(out, "  Configured: %d\n", len(required))
 
-		// Collect all required secrets (string array format)
-		required := []string{}
-		for _, service := range services {
-			// Service.Secrets is now []string in the new format
-			required = append(required, service.Secrets...)
-		}
-
-		// Validate
-		if err := mgr.ValidateRequired(required); err != nil {
-			return err
-		}
-
-		fmt.Println("✓ All required secrets are configured")
-		fmt.Printf("  Environment: %s\n", getEnvDisplay(env))
-		fmt.Printf("  Required: %d\n", len(required))
-		fmt.Printf("  Configured: %d\n", len(required))
-
-		return nil
-	},
+	return emitResultDocument(result)
 }
 
 var secretsFetchCmd = &cobra.Command{

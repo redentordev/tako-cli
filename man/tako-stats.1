@@ -22,8 +22,16 @@ By default, shows stats for the current project's containers.
 	Show all containers (not just current project)
 
 .PP
+\fB--follow\fP[=false]
+	Stream stats.sample events (requires --events ndjson)
+
+.PP
 \fB-h\fP, \fB--help\fP[=false]
 	help for stats
+
+.PP
+\fB--interval\fP=5s
+	Sample interval for --follow
 
 .PP
 \fB--live\fP[=false]

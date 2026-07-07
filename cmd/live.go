@@ -2,9 +2,12 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -35,6 +38,12 @@ func init() {
 }
 
 func runLive(cmd *cobra.Command, args []string) error {
+	// Machine modes reserve stdout for parseable output.
+	var out io.Writer = os.Stdout
+	if machineOutputEnabled() {
+		out = os.Stderr
+	}
+
 	// Load configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
@@ -62,10 +71,10 @@ func runLive(cmd *cobra.Command, args []string) error {
 	}
 	defer leaseSet.Release(verbose)
 	if verbose {
-		fmt.Printf("→ Acquired remote live leases: %s\n", leaseSet.Summary())
+		fmt.Fprintf(out, "→ Acquired remote live leases: %s\n", leaseSet.Summary())
 	}
 
-	fmt.Printf("Disabling maintenance mode for %s on %d node(s)...\n\n", liveService, len(targetServers))
+	fmt.Fprintf(out, "Disabling maintenance mode for %s on %d node(s)...\n\n", liveService, len(targetServers))
 
 	socket := takodSocketFromConfig(cfg)
 	networkName := maintenanceNetworkName(cfg.Project.Name, envName)
@@ -80,16 +89,22 @@ func runLive(cmd *cobra.Command, args []string) error {
 	results := runMaintenanceNodeActions(cfg.Servers, targetServers, func(_ string, server config.ServerConfig) error {
 		return disableMaintenanceOnNode(cfg, sshPool, server, socket, envName, liveService, request)
 	})
-	nodeErrors := printMaintenanceNodeResults("Disabling", "disabled", results)
+	nodeErrors := printMaintenanceNodeResults(out, "Disabling", "disabled", results)
+	ack := maintenanceActionResult(cfg, envName, engine.ActionMaintenanceDisable, liveService, results)
 	if len(nodeErrors) > 0 {
-		return fmt.Errorf("maintenance disable failed on %d/%d node(s): %s", len(nodeErrors), len(targetServers), strings.Join(nodeErrors, "; "))
+		err := fmt.Errorf("maintenance disable failed on %d/%d node(s): %s", len(nodeErrors), len(targetServers), strings.Join(nodeErrors, "; "))
+		ack.Error = err.Error()
+		if emitErr := emitResultDocument(ack); emitErr != nil {
+			return emitErr
+		}
+		return err
 	}
 
-	fmt.Printf("✓ Maintenance mode disabled for %s\n", liveService)
-	fmt.Printf("\nService is now accepting normal traffic.\n")
-	fmt.Printf("tako-proxy has removed the maintenance routing override.\n")
+	fmt.Fprintf(out, "✓ Maintenance mode disabled for %s\n", liveService)
+	fmt.Fprintf(out, "\nService is now accepting normal traffic.\n")
+	fmt.Fprintf(out, "tako-proxy has removed the maintenance routing override.\n")
 
-	return nil
+	return emitResultDocument(ack)
 }
 
 func disableMaintenanceOnNode(cfg *config.Config, pool sshClientProvider, server config.ServerConfig, socket string, envName string, serviceName string, request takod.ReconcileServiceRequest) error {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/accesslog"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
 )
@@ -99,24 +100,53 @@ func runAccess(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Machine modes reserve stdout for parseable output: entries stream as
+	// access.line events and the human rendering moves to stderr.
+	var headerOut io.Writer = os.Stdout
+	var sink accessLineSink
+	if machineOutputEnabled() {
+		headerOut = os.Stderr
+		service := accessService
+		sink = func(serverName string, rawLine string, formatted string, prefix bool) {
+			var message strings.Builder
+			writeAccessLogLine(&message, serverName, formatted, prefix)
+			cliEngine().EventStream().Emit(events.Event{
+				Type:    events.TypeAccessLine,
+				Phase:   events.PhaseLogs,
+				Level:   events.LevelInfo,
+				Service: service,
+				Message: message.String(),
+				Data:    map[string]any{"node": serverName, "data": rawLine},
+			})
+		}
+	} else {
+		output := &lockedLogWriter{writer: os.Stdout}
+		sink = func(serverName string, _ string, formatted string, prefix bool) {
+			writeAccessLogLine(output, serverName, formatted, prefix)
+		}
+	}
+
 	// Print header
-	fmt.Println()
-	fmt.Println(formatter.FormatHeader())
-	fmt.Println()
+	fmt.Fprintln(headerOut)
+	fmt.Fprintln(headerOut, formatter.FormatHeader())
+	fmt.Fprintln(headerOut)
 
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	output := &lockedLogWriter{writer: os.Stdout}
 	results := streamAccessNodesWith(ctx, servers, func(serverName string, server config.ServerConfig, prefix bool) error {
-		return streamAccessFromNode(ctx, cfg, serverName, server, formatter, accessService, accessTail, accessFollow, prefix, output)
+		return streamAccessFromNode(ctx, cfg, serverName, server, formatter, accessService, accessTail, accessFollow, prefix, sink)
 	})
 	if err := summarizeAccessStreamResults(results); err != nil {
 		return err
 	}
 	return nil
 }
+
+// accessLineSink delivers one formatted access-log entry; machine modes emit
+// access.line events, text mode writes to stdout.
+type accessLineSink func(serverName string, rawLine string, formatted string, prefix bool)
 
 type accessNodeStreamFunc func(serverName string, server config.ServerConfig, prefix bool) error
 
@@ -174,7 +204,7 @@ func streamAccessFromNode(
 	tail int,
 	follow bool,
 	prefix bool,
-	output io.Writer,
+	sink accessLineSink,
 ) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -213,7 +243,7 @@ func streamAccessFromNode(
 			continue
 		}
 		if formatted != "" {
-			writeAccessLogLine(output, serverName, formatted, prefix)
+			sink(serverName, line, formatted, prefix)
 		}
 	}
 

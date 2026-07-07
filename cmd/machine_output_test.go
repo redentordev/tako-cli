@@ -14,6 +14,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
+	"github.com/redentordev/tako-cli/pkg/takod"
 )
 
 func TestExitCodeForErrorTaxonomy(t *testing.T) {
@@ -158,6 +159,821 @@ func TestDeployResultDocumentGolden(t *testing.T) {
 }`
 	if string(payload) != want {
 		t.Fatalf("result document drifted:\n%s", payload)
+	}
+}
+
+// TestRollbackResultDocumentGolden pins the machine-facing rollback schema.
+func TestRollbackResultDocumentGolden(t *testing.T) {
+	result := engine.RollbackResult{
+		APIVersion:   takoapi.APIVersionCurrent,
+		Kind:         engine.KindRollbackResult,
+		Project:      "demo",
+		Environment:  "production",
+		Service:      "web",
+		DeploymentID: "deploy-123",
+		Version:      "abc123",
+		Status:       takoapi.StatusSuccess,
+		StartedAt:    time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:     3.5,
+		Message:      "rolled back web to deploy-123",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "RollbackResult",
+  "project": "demo",
+  "environment": "production",
+  "service": "web",
+  "deploymentId": "deploy-123",
+  "version": "abc123",
+  "status": "success",
+  "startedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 3.5,
+  "message": "rolled back web to deploy-123"
+}`
+	if string(payload) != want {
+		t.Fatalf("rollback result document drifted:\n%s", payload)
+	}
+}
+
+// TestPromoteResultDocumentGolden pins the machine-facing promote schema.
+func TestPromoteResultDocumentGolden(t *testing.T) {
+	result := engine.PromoteResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindPromoteResult,
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		Revision:    "abc123",
+		Image:       "demo/web:abc123",
+		Status:      takoapi.StatusSuccess,
+		StartedAt:   time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:    2.1,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "PromoteResult",
+  "project": "demo",
+  "environment": "production",
+  "service": "web",
+  "revision": "abc123",
+  "image": "demo/web:abc123",
+  "status": "success",
+  "startedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 2.1
+}`
+	if string(payload) != want {
+		t.Fatalf("promote result document drifted:\n%s", payload)
+	}
+}
+
+// TestScaleResultDocumentGolden pins the machine-facing scale schema.
+func TestScaleResultDocumentGolden(t *testing.T) {
+	result := engine.ScaleResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindScaleResult,
+		Project:     "demo",
+		Environment: "production",
+		Status:      takoapi.StatusSuccess,
+		Services: []engine.ServiceOutcome{
+			{Name: "web", Action: engine.OutcomeDeployed, Replicas: 3},
+		},
+		StartedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:  1.2,
+		Message:   "scaled web=3",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "ScaleResult",
+  "project": "demo",
+  "environment": "production",
+  "status": "success",
+  "services": [
+    {
+      "name": "web",
+      "action": "deployed",
+      "replicas": 3
+    }
+  ],
+  "startedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 1.2,
+  "message": "scaled web=3"
+}`
+	if string(payload) != want {
+		t.Fatalf("scale result document drifted:\n%s", payload)
+	}
+}
+
+// TestRemoveResultDocumentGolden pins the machine-facing remove schema.
+func TestRemoveResultDocumentGolden(t *testing.T) {
+	result := engine.RemoveResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindRemoveResult,
+		Project:     "demo",
+		Environment: "production",
+		Scoped:      true,
+		Servers: []engine.RemoveServerOutcome{
+			{Name: "node-a", Host: "10.0.0.1", Removed: true},
+		},
+		StartedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:  6.7,
+		Message:   "services removed from selected server(s) in environment production",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "RemoveResult",
+  "project": "demo",
+  "environment": "production",
+  "scoped": true,
+  "servers": [
+    {
+      "name": "node-a",
+      "host": "10.0.0.1",
+      "removed": true
+    }
+  ],
+  "startedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 6.7,
+  "message": "services removed from selected server(s) in environment production"
+}`
+	if string(payload) != want {
+		t.Fatalf("remove result document drifted:\n%s", payload)
+	}
+}
+
+// TestDestroyResultDocumentGolden pins the machine-facing destroy schema.
+func TestDestroyResultDocumentGolden(t *testing.T) {
+	result := engine.DestroyResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDestroyResult,
+		Project:     "demo",
+		Environment: "production",
+		Mode:        engine.DestroyModePurge,
+		PurgeAll:    true,
+		Servers: []engine.DestroyServerOutcome{
+			{Name: "node-a", Host: "10.0.0.1", Destroyed: true},
+		},
+		StartedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:  8.9,
+		Message:   "app-owned leftovers pruned; shared server setup preserved",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DestroyResult",
+  "project": "demo",
+  "environment": "production",
+  "mode": "PURGE",
+  "purgeAll": true,
+  "servers": [
+    {
+      "name": "node-a",
+      "host": "10.0.0.1",
+      "destroyed": true
+    }
+  ],
+  "startedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 8.9,
+  "message": "app-owned leftovers pruned; shared server setup preserved"
+}`
+	if string(payload) != want {
+		t.Fatalf("destroy result document drifted:\n%s", payload)
+	}
+}
+
+// TestValidateResultDocumentGolden pins the machine-facing validate schema.
+func TestValidateResultDocumentGolden(t *testing.T) {
+	result := engine.ValidateResult{
+		APIVersion:      takoapi.APIVersionCurrent,
+		Kind:            engine.KindValidateResult,
+		ConfigPath:      "tako.yaml",
+		Project:         "demo",
+		Environment:     "production",
+		Valid:           true,
+		Runtime:         "takod",
+		StateBackend:    "replicated",
+		Consistency:     "lease",
+		MeshEnabled:     true,
+		MeshNetworkCIDR: "10.210.0.0/16",
+		MeshInterface:   "tako",
+		Servers:         1,
+		Services:        1,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "ValidateResult",
+  "configPath": "tako.yaml",
+  "project": "demo",
+  "environment": "production",
+  "valid": true,
+  "runtime": "takod",
+  "stateBackend": "replicated",
+  "consistency": "lease",
+  "meshEnabled": true,
+  "meshNetworkCIDR": "10.210.0.0/16",
+  "meshInterface": "tako",
+  "servers": 1,
+  "services": 1
+}`
+	if string(payload) != want {
+		t.Fatalf("validate result document drifted:\n%s", payload)
+	}
+}
+
+// TestValidateResultFindingGolden pins the finding schema on the invalid path.
+func TestValidateResultFindingGolden(t *testing.T) {
+	result := engine.ValidateResult{
+		APIVersion: takoapi.APIVersionCurrent,
+		Kind:       engine.KindValidateResult,
+		ConfigPath: "tako.yaml",
+		Valid:      false,
+		Findings: []engine.ValidateFinding{
+			{Severity: engine.ValidateSeverityError, Path: "tako.yaml", Message: "config validation failed"},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "ValidateResult",
+  "configPath": "tako.yaml",
+  "valid": false,
+  "findings": [
+    {
+      "severity": "error",
+      "path": "tako.yaml",
+      "message": "config validation failed"
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("validate finding document drifted:\n%s", payload)
+	}
+}
+
+// TestDoctorResultDocumentGolden pins the machine-facing doctor schema.
+func TestDoctorResultDocumentGolden(t *testing.T) {
+	result := engine.DoctorResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDoctorResult,
+		Project:     "demo",
+		Environment: "production",
+		SkipRemote:  true,
+		Status:      "attention",
+		Checks: []engine.DoctorCheck{
+			{Name: "Configuration", Status: engine.DoctorStatusPass, Detail: "Config file: Found tako.yaml"},
+			{Name: "SSH Keys", Status: engine.DoctorStatusFail, Detail: "node-a: SSH key not found: /tmp/id", Remediation: "Check key path or copy key to this machine"},
+		},
+		Passed: 1,
+		Warned: 0,
+		Failed: 1,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DoctorResult",
+  "project": "demo",
+  "environment": "production",
+  "skipRemote": true,
+  "status": "attention",
+  "checks": [
+    {
+      "name": "Configuration",
+      "status": "pass",
+      "detail": "Config file: Found tako.yaml"
+    },
+    {
+      "name": "SSH Keys",
+      "status": "fail",
+      "detail": "node-a: SSH key not found: /tmp/id",
+      "remediation": "Check key path or copy key to this machine"
+    }
+  ],
+  "passed": 1,
+  "warned": 0,
+  "failed": 1
+}`
+	if string(payload) != want {
+		t.Fatalf("doctor result document drifted:\n%s", payload)
+	}
+}
+
+// TestDriftResultDocumentGolden pins the machine-facing drift schema.
+func TestDriftResultDocumentGolden(t *testing.T) {
+	result := engine.DriftResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDriftResult,
+		Project:     "demo",
+		Environment: "production",
+		Drifted:     true,
+		Drifts: []engine.DriftEntry{
+			{Service: "web", Type: "replica_count", Severity: "high", Expected: "3 replicas", Actual: "1 replicas"},
+		},
+		ServicesOK: []string{"api"},
+		CheckedAt:  time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:   0.8,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DriftResult",
+  "project": "demo",
+  "environment": "production",
+  "drifted": true,
+  "drifts": [
+    {
+      "service": "web",
+      "type": "replica_count",
+      "severity": "high",
+      "expected": "3 replicas",
+      "actual": "1 replicas"
+    }
+  ],
+  "servicesOk": [
+    "api"
+  ],
+  "checkedAt": "2026-07-06T12:00:00Z",
+  "durationSeconds": 0.8
+}`
+	if string(payload) != want {
+		t.Fatalf("drift result document drifted:\n%s", payload)
+	}
+}
+
+// TestMetricsResultDocumentGolden pins the machine-facing metrics schema.
+// The per-node `metrics` payload is the takod /v1/metrics document verbatim
+// (monitoring-agent schema) and is intentionally not repinned field-by-field.
+func TestMetricsResultDocumentGolden(t *testing.T) {
+	result := engine.MetricsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindMetricsResult,
+		Project:     "demo",
+		Environment: "production",
+		CollectedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Nodes: []engine.MetricsNodeSample{
+			{Server: "node-a", Host: "10.0.0.1", Metrics: json.RawMessage(`{"cpu_percent":"12.5"}`)},
+			{Server: "node-b", Host: "10.0.0.2", Error: "connect: dial tcp: refused"},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "MetricsResult",
+  "project": "demo",
+  "environment": "production",
+  "collectedAt": "2026-07-06T12:00:00Z",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "metrics": {
+        "cpu_percent": "12.5"
+      }
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "error": "connect: dial tcp: refused"
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("metrics result document drifted:\n%s", payload)
+	}
+}
+
+// TestStatsResultDocumentGolden pins the machine-facing stats schema.
+func TestStatsResultDocumentGolden(t *testing.T) {
+	result := engine.StatsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindStatsResult,
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		CollectedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Nodes: []engine.StatsNodeSample{
+			{
+				Server: "node-a",
+				Host:   "10.0.0.1",
+				Containers: []takod.ContainerStat{
+					{Name: "demo-production-web-1", CPUPercent: "1.2%", MemUsage: "64MiB / 1GiB", MemPercent: "6.4%", NetIO: "1kB / 2kB", BlockIO: "0B / 0B", PIDs: "4"},
+				},
+			},
+			{Server: "node-b", Host: "10.0.0.2", Error: "stats: takod unreachable"},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "StatsResult",
+  "project": "demo",
+  "environment": "production",
+  "service": "web",
+  "collectedAt": "2026-07-06T12:00:00Z",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "containers": [
+        {
+          "name": "demo-production-web-1",
+          "cpuPercent": "1.2%",
+          "memUsage": "64MiB / 1GiB",
+          "memPercent": "6.4%",
+          "netIO": "1kB / 2kB",
+          "blockIO": "0B / 0B",
+          "pids": "4"
+        }
+      ]
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "error": "stats: takod unreachable"
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("stats result document drifted:\n%s", payload)
+	}
+}
+
+// TestSecretsResultDocumentsGolden pins the machine-facing secrets schemas.
+// These documents carry secret KEYS only — never values.
+func TestSecretsResultDocumentsGolden(t *testing.T) {
+	list := engine.SecretsListResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindSecretsListResult,
+		Environment: "production",
+		Keys:        []string{"API_KEY", "DATABASE_URL"},
+		Count:       2,
+	}
+	payload, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal list result: %v", err)
+	}
+	wantList := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "SecretsListResult",
+  "environment": "production",
+  "keys": [
+    "API_KEY",
+    "DATABASE_URL"
+  ],
+  "count": 2
+}`
+	if string(payload) != wantList {
+		t.Fatalf("secrets list document drifted:\n%s", payload)
+	}
+
+	validate := engine.SecretsValidateResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindSecretsValidateResult,
+		Project:     "demo",
+		Environment: "production",
+		Valid:       false,
+		Required:    []string{"API_KEY", "DATABASE_URL"},
+		Missing:     []string{"DATABASE_URL"},
+	}
+	payload, err = json.MarshalIndent(validate, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal validate result: %v", err)
+	}
+	wantValidate := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "SecretsValidateResult",
+  "project": "demo",
+  "environment": "production",
+  "valid": false,
+  "required": [
+    "API_KEY",
+    "DATABASE_URL"
+  ],
+  "missing": [
+    "DATABASE_URL"
+  ]
+}`
+	if string(payload) != wantValidate {
+		t.Fatalf("secrets validate document drifted:\n%s", payload)
+	}
+}
+
+// TestDomainsResultDocumentsGolden pins the machine-facing domains schemas.
+func TestDomainsResultDocumentsGolden(t *testing.T) {
+	status := engine.DomainsResult{
+		APIVersion:      takoapi.APIVersionCurrent,
+		Kind:            engine.KindDomainsResult,
+		Project:         "demo",
+		Environment:     "production",
+		ExpectedTargets: []string{"203.0.113.10"},
+		AllActive:       false,
+		Domains: []engine.DomainStatusEntry{
+			{Service: "web", Domain: "app.example.com", Role: "serving", State: "active", DNS: "direct", TLS: "active", ResolvedIPs: []string{"203.0.113.10"}},
+			{Service: "web", Domain: "www.example.com", Role: "redirect", State: "pending_dns", DNS: "unresolved", TLS: "unknown", DNSError: "no such host"},
+		},
+	}
+	payload, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal domains result: %v", err)
+	}
+	wantStatus := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DomainsResult",
+  "project": "demo",
+  "environment": "production",
+  "expectedTargets": [
+    "203.0.113.10"
+  ],
+  "allActive": false,
+  "domains": [
+    {
+      "service": "web",
+      "domain": "app.example.com",
+      "role": "serving",
+      "state": "active",
+      "dns": "direct",
+      "tls": "active",
+      "resolvedIps": [
+        "203.0.113.10"
+      ]
+    },
+    {
+      "service": "web",
+      "domain": "www.example.com",
+      "role": "redirect",
+      "state": "pending_dns",
+      "dns": "unresolved",
+      "tls": "unknown",
+      "dnsError": "no such host"
+    }
+  ]
+}`
+	if string(payload) != wantStatus {
+		t.Fatalf("domains status document drifted:\n%s", payload)
+	}
+
+	hosts := engine.DomainsHostsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDomainsHostsResult,
+		Project:     "demo",
+		Environment: "production",
+		AddressMode: "auto",
+		Entries: []engine.InternalHostEntry{
+			{Service: "api", Host: "api.internal", Address: "10.210.0.1", Server: "node-a", Source: "mesh"},
+		},
+	}
+	payload, err = json.MarshalIndent(hosts, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal hosts result: %v", err)
+	}
+	wantHosts := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DomainsHostsResult",
+  "project": "demo",
+  "environment": "production",
+  "addressMode": "auto",
+  "entries": [
+    {
+      "service": "api",
+      "host": "api.internal",
+      "address": "10.210.0.1",
+      "server": "node-a",
+      "source": "mesh"
+    }
+  ]
+}`
+	if string(payload) != wantHosts {
+		t.Fatalf("domains hosts document drifted:\n%s", payload)
+	}
+}
+
+// TestDiscoveryExportsResultDocumentGolden pins the machine-facing discovery schema.
+func TestDiscoveryExportsResultDocumentGolden(t *testing.T) {
+	result := engine.DiscoveryExportsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDiscoveryExportsResult,
+		Environment: "production",
+		Nodes: []engine.DiscoveryNodeExports{
+			{
+				Server: "node-a",
+				Host:   "10.0.0.1",
+				Exports: []takod.ExportDiscoveryRecord{{
+					Network:     "tako_backend_api_production_api_export",
+					Project:     "backend-api",
+					Environment: "production",
+					Service:     "api",
+					Alias:       "backend-api-production-api",
+				}},
+			},
+			{Server: "node-b", Host: "10.0.0.2", Error: "connect: refused"},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "DiscoveryExportsResult",
+  "environment": "production",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "exports": [
+        {
+          "network": "tako_backend_api_production_api_export",
+          "project": "backend-api",
+          "environment": "production",
+          "service": "api",
+          "alias": "backend-api-production-api"
+        }
+      ]
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "error": "connect: refused"
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("discovery exports document drifted:\n%s", payload)
+	}
+}
+
+// TestActionResultDocumentGolden pins the machine-facing ack schema used by
+// maintenance, live, and cleanup.
+func TestActionResultDocumentGolden(t *testing.T) {
+	result := engine.ActionResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindActionResult,
+		Project:     "demo",
+		Environment: "production",
+		Action:      engine.ActionMaintenanceEnable,
+		Service:     "web",
+		Outcome:     engine.ActionOutcomePartial,
+		Servers: []engine.ActionNodeOutcome{
+			{Server: "node-a", Host: "10.0.0.1", Done: true},
+			{Server: "node-b", Host: "10.0.0.2", Done: false, Error: "connect: refused"},
+		},
+		Error: "maintenance mode failed on 1/2 node(s): node-b: connect: refused",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "ActionResult",
+  "project": "demo",
+  "environment": "production",
+  "action": "maintenance.enable",
+  "service": "web",
+  "outcome": "partial",
+  "servers": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "done": true
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "done": false,
+      "error": "connect: refused"
+    }
+  ],
+  "error": "maintenance mode failed on 1/2 node(s): node-b: connect: refused"
+}`
+	if string(payload) != want {
+		t.Fatalf("action result document drifted:\n%s", payload)
+	}
+}
+
+// TestBackupResultDocumentGolden pins the machine-facing backup schema.
+func TestBackupResultDocumentGolden(t *testing.T) {
+	result := engine.BackupResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindBackupResult,
+		Project:     "demo",
+		Environment: "production",
+		Action:      engine.BackupActionCreate,
+		Volume:      "data",
+		BackupID:    "20260706-120000",
+		Nodes: []engine.BackupNodeOutcome{
+			{
+				Server: "node-a",
+				Host:   "10.0.0.1",
+				Backups: []takod.BackupInfo{
+					{ID: "20260706-120000", Volume: "data", Size: 1024, CreatedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC), Path: "/var/lib/tako/backups/data_20260706-120000.tar.gz", Compression: "gzip"},
+				},
+			},
+			{Server: "node-b", Host: "10.0.0.2", Skipped: []string{"data: volume not present on node"}},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "BackupResult",
+  "project": "demo",
+  "environment": "production",
+  "action": "create",
+  "volume": "data",
+  "backupId": "20260706-120000",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "backups": [
+        {
+          "id": "20260706-120000",
+          "volume": "data",
+          "size": 1024,
+          "createdAt": "2026-07-06T12:00:00Z",
+          "path": "/var/lib/tako/backups/data_20260706-120000.tar.gz",
+          "compression": "gzip"
+        }
+      ]
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "skipped": [
+        "data: volume not present on node"
+      ]
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("backup result document drifted:\n%s", payload)
+	}
+}
+
+func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
+	doc := newOperationConfirmationRequiredDocument(
+		"remove deletes all deployed services for this project from the environment",
+		"remove", "demo", "production", []string{"node-a", "node-b"},
+	)
+	payload, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal confirmation doc: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	if decoded["kind"] != "ConfirmationRequired" {
+		t.Fatalf("kind = %v", decoded["kind"])
+	}
+	if decoded["operation"] != "remove" {
+		t.Fatalf("operation = %v", decoded["operation"])
+	}
+	if decoded["project"] != "demo" || decoded["environment"] != "production" {
+		t.Fatalf("identity fields wrong: %s", payload)
+	}
+	servers, ok := decoded["servers"].([]any)
+	if !ok || len(servers) != 2 {
+		t.Fatalf("servers missing from document: %s", payload)
 	}
 }
 

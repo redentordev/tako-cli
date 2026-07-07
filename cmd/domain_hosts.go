@@ -3,11 +3,15 @@ package cmd
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/spf13/cobra"
 )
 
@@ -34,16 +38,41 @@ func runDomainsHosts(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(entries) == 0 {
-		if domainsHostsService != "" {
-			return fmt.Errorf("service %s has no configured internal proxy hosts", domainsHostsService)
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), "No configured internal proxy hosts found.")
-		return nil
+
+	result := engine.DomainsHostsResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindDomainsHostsResult,
+		Project:     cfg.Project.Name,
+		Environment: envName,
+		Service:     domainsHostsService,
+		AddressMode: domainsHostsAddress,
+		Entries:     []engine.InternalHostEntry{},
+	}
+	for _, entry := range entries {
+		result.Entries = append(result.Entries, engine.InternalHostEntry{
+			Service: entry.Service,
+			Host:    entry.Host,
+			Address: entry.Address,
+			Server:  entry.Server,
+			Source:  entry.Source,
+		})
 	}
 
-	printInternalHostEntries(cmd, cfg.Project.Name, envName, entries)
-	return nil
+	// Machine modes reserve stdout for parseable output.
+	var out io.Writer = cmd.OutOrStdout()
+	if machineOutputEnabled() {
+		out = os.Stderr
+	}
+	if len(entries) == 0 {
+		if domainsHostsService != "" {
+			return &engine.InvalidRequestError{Err: fmt.Errorf("service %s has no configured internal proxy hosts", domainsHostsService)}
+		}
+		fmt.Fprintln(out, "No configured internal proxy hosts found.")
+		return emitResultDocument(result)
+	}
+
+	printInternalHostEntries(out, cfg.Project.Name, envName, entries)
+	return emitResultDocument(result)
 }
 
 func collectInternalHostEntries(cfg *config.Config, envName string, services map[string]config.ServiceConfig, serviceFilter string, addressMode string) ([]internalHostEntry, error) {
@@ -170,8 +199,7 @@ func meshHostIPs(cfg *config.Config, envServers []string) (map[string]string, er
 	return ips, nil
 }
 
-func printInternalHostEntries(cmd *cobra.Command, project string, envName string, entries []internalHostEntry) {
-	out := cmd.OutOrStdout()
+func printInternalHostEntries(out io.Writer, project string, envName string, entries []internalHostEntry) {
 	fmt.Fprintf(out, "# Tako internal hosts for %s/%s\n", project, envName)
 	fmt.Fprintln(out, "# Add these on clients that can reach the listed private or mesh addresses.")
 	for _, entry := range entries {

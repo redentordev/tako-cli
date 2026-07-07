@@ -11,9 +11,102 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/spf13/cobra"
 )
+
+func TestRunDoctorMachineOutputMissingConfig(t *testing.T) {
+	switchToTempDir(t)
+	oldCfgFile, oldSkipRemote, oldOutput := cfgFile, doctorSkipRemote, outputFormatFlag
+	cfgFile, doctorSkipRemote, outputFormatFlag = "", true, outputFormatJSON
+	t.Cleanup(func() { cfgFile, doctorSkipRemote, outputFormatFlag = oldCfgFile, oldSkipRemote, oldOutput })
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = runDoctor(&cobra.Command{}, nil)
+	})
+	if runErr == nil {
+		t.Fatal("runDoctor should surface failed checks")
+	}
+	if engine.Classify(runErr) != engine.ClassAttention {
+		t.Fatalf("doctor failure classified as %d, want ClassAttention", engine.Classify(runErr))
+	}
+
+	var result engine.DoctorResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\n%s", err, stdout)
+	}
+	if result.Kind != engine.KindDoctorResult || result.Status != "attention" {
+		t.Fatalf("unexpected result document: %+v", result)
+	}
+	if result.Failed == 0 || len(result.Checks) == 0 {
+		t.Fatalf("missing config should record a failed check: %+v", result)
+	}
+	if result.Checks[0].Name != "Configuration" || result.Checks[0].Status != engine.DoctorStatusFail {
+		t.Fatalf("first check = %+v", result.Checks[0])
+	}
+}
+
+func TestRunDoctorSkipRemoteRecordsSkippedChecks(t *testing.T) {
+	root := switchToTempDir(t)
+	sshKey := filepath.Join(root, "id_ed25519")
+	if err := os.WriteFile(sshKey, []byte("test-key"), 0600); err != nil {
+		t.Fatalf("failed to write ssh key fixture: %v", err)
+	}
+	configData := []byte(`project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 203.0.113.10
+    user: deploy
+    sshKey: ` + sshKey + `
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+`)
+	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), configData, 0600); err != nil {
+		t.Fatalf("failed to write valid config: %v", err)
+	}
+	oldCfgFile, oldEnvFlag, oldSkipRemote, oldOutput := cfgFile, envFlag, doctorSkipRemote, outputFormatFlag
+	cfgFile, envFlag, doctorSkipRemote, outputFormatFlag = "", "", true, outputFormatJSON
+	t.Cleanup(func() {
+		cfgFile, envFlag, doctorSkipRemote, outputFormatFlag = oldCfgFile, oldEnvFlag, oldSkipRemote, oldOutput
+	})
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = runDoctor(&cobra.Command{}, nil)
+	})
+	if runErr != nil {
+		t.Fatalf("runDoctor returned error: %v", runErr)
+	}
+
+	var result engine.DoctorResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\n%s", err, stdout)
+	}
+	if result.Status != "ok" || !result.SkipRemote {
+		t.Fatalf("unexpected result document: %+v", result)
+	}
+	if result.Project != "demo" || result.Environment != "production" {
+		t.Fatalf("identity fields wrong: %+v", result)
+	}
+	skips := 0
+	for _, check := range result.Checks {
+		if check.Status == engine.DoctorStatusSkip {
+			skips++
+		}
+	}
+	if skips < 7 {
+		t.Fatalf("expected the 7 remote sections to record skip checks, got %d: %+v", skips, result.Checks)
+	}
+}
 
 func TestCheckConfigHonorsConfigFlag(t *testing.T) {
 	tempDir := t.TempDir()

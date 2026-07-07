@@ -50,7 +50,9 @@ the bare result document appended after the event stream.
 `log.line` events on stdout. Each event sets `service`, `node`, and
 `data.data` (the raw log line without the trailing newline); `message`
 contains the human rendering, including the node prefix used for multi-node
-text output.
+text output. `tako access --events ndjson` mirrors this with `access.line`
+events carrying the raw proxy access-log entry in `data.data`, the source
+node in `data.node`, and the formatted rendering in `message`.
 
 ### Event schema
 
@@ -125,8 +127,94 @@ pruned. `tako state repair --output json` returns a `StateRepairResult` with
 project/environment, requested server filter, reachable node count, selected
 history/desired/actual/node-actual sources, per-node and aggregate write
 counts, warning/error details, local `.tako` sync status/count, and final
-`error` when repair is incomplete or fails. The Go definitions in `pkg/engine`
-(`types.go` and per-command files) are the source of truth.
+`error` when repair is incomplete or fails. `tako rollback` returns a
+`RollbackResult` with project/environment, the service, the target
+`deploymentId`, restored `version`, `status`, and timings. `tako promote`
+returns a `PromoteResult` with project/environment, the service, the promoted
+`revision` and `image`, `status`, and timings. `tako scale` (and its `start`/
+`stop` wrappers) returns a `ScaleResult` with project/environment, `status`,
+per-service outcomes with replica counts, timings, and `error` when
+reconciliation failed. `tako remove` returns a `RemoveResult` with
+project/environment, `scoped` when `--server` narrowed the target set,
+per-server outcomes (`name`, `host`, `removed`, `error`), timings, and
+`error` when removal was incomplete. `tako destroy` returns a `DestroyResult`
+with project/environment, `mode` (`DECOMMISSION` or `PURGE`), `purgeAll`,
+per-server outcomes (`name`, `host`, `destroyed`, `error`), timings, and
+`error` when destruction was incomplete. `tako validate --output json`
+returns a `ValidateResult` with the resolved `configPath`,
+project/environment, `valid`, `findings` (`severity`, `path`, `field`,
+`message`) when invalid, and the resolved environment summary (runtime,
+state backend, consistency, mesh, server/service counts) when valid;
+invalid configs exit with code 2 and still emit the document. `tako doctor
+--output json` returns a `DoctorResult` with project/environment,
+`skipRemote`, overall `status` (`ok` or `attention`), pass/warn/fail
+counts, and `checks` (`name`, `status` `pass|warn|fail|skip`, `detail`,
+`remediation`); any failed check exits with code 6 and still emits the
+document. `tako drift --output json` (single-shot; `--watch` is rejected in
+machine modes) returns a `DriftResult` with project/environment, `drifted`,
+per-drift entries (`service`, `type`, `severity`, `expected`, `actual`,
+`details`), `servicesOk`, and timings; detected drift exits with code 6 and
+still emits the document. `tako metrics --output json` (single-shot;
+`--live` is rejected in machine modes) returns a `MetricsResult` with
+project/environment, the `--server` filter when set, `collectedAt`, and
+per-node samples where `metrics` carries the takod `/v1/metrics` document
+verbatim (monitoring-agent schema) or `error` says why the read failed;
+all nodes failing exits 1, a partial read exits 6, both still emit the
+document. `tako stats --output json` (point-in-time; `--live` is rejected
+in machine modes) returns a `StatsResult` with project/environment, the
+`--service`/`--all` filters, `collectedAt`, and per-node samples whose
+`containers` reuse the takod stats schema (`name`, `cpuPercent`,
+`memUsage`, `memPercent`, `netIO`, `blockIO`, `pids`); the same
+all-fail/partial exit rule applies. `tako stats --follow --events ndjson`
+streams one `stats.sample` event per node per `--interval` (default 5s)
+whose `data` carries `server`, `host`, and `containers` in the same shape,
+until cancelled. `tako secrets list --output json` returns a
+`SecretsListResult` with the `--env` filter and secret `keys` only —
+values never appear in machine output (test-enforced). `tako secrets
+validate --output json` returns a `SecretsValidateResult` with
+project/environment, `valid`, `required` key names, and `missing` key
+names; missing secrets exit with code 2 and still emit the document. `tako
+domains status --output json` returns a `DomainsResult` with
+project/environment, the expected DNS targets, `allActive`, and per-domain
+entries (`service`, `domain`, `role` `serving|redirect|ad-hoc`, `state`,
+`dns`, `tls`, resolved IPs, cname, errors); with `--strict`, pending
+domains exit 6 and still emit the document. `tako domains hosts --output
+json` returns a `DomainsHostsResult` with the `--address` mode and
+`entries` (`service`, `host`, `address`, `server`, `source`). `tako
+discovery exports --output json` returns a `DiscoveryExportsResult` with
+the environment (or `allEnvironments`) and per-node export records
+(takod discovery schema: `network`, `project`, `environment`, `service`,
+`alias`) or a per-node `error`; the command-local `--json` flag predates
+this contract and is rejected together with the global machine modes.
+`tako maintenance`, `tako live`, and `tako cleanup` return an
+`ActionResult` acknowledgement with `action` (`maintenance.enable`,
+`maintenance.disable`, `cleanup`), optional `service`, overall `outcome`
+(`ok`, `partial`, `failed`), and per-server outcomes (`done`, `error`,
+cleanup `warnings`); cleanup errors/warnings exit 6 (previously 0) and
+still emit the document. `tako start`/`tako stop` return the same
+`ScaleResult` as `tako scale`. Every `tako backup` action (`list`,
+`create` — single volume or `--all`, `restore`, `delete`, `cleanup`)
+returns a `BackupResult` with the action, volume/backupId when relevant,
+and per-node outcomes whose `backups` reuse the takod backup schema plus
+`deleted` counts, `skipped` volumes, and per-node `error`. The
+Go definitions in `pkg/engine` (`types.go` and per-command files) are the
+source of truth.
+
+### Command coverage
+
+Every command falls into exactly one category — there is no undocumented
+machine behavior:
+
+| Category | Commands |
+| -------- | -------- |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup` |
+| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`) |
+| Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
+| Pending machine surface (node lifecycle, next phase) | `setup`, `clone-setup`, `upgrade servers` |
+| Human-only by design | `init`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON) |
+
+Interactive-only flags (`drift --watch`, `metrics --live`, `stats --live`)
+are rejected with exit code 2 when a machine mode is enabled.
 
 ## Config Export / Pull
 
@@ -172,6 +260,10 @@ emits a `ConfirmationRequired` document (reason + full plan) and exits
 with code 2. `tako state forget-node NODE` follows the same non-interactive
 rule for its state mutation: in machine modes it emits a `ConfirmationRequired`
 document with `operation: "state.forget-node"` unless `--yes` is passed.
+`tako remove` and `tako destroy` likewise never prompt in machine modes:
+without `--yes` (or `--force`) they emit a `ConfirmationRequired` document
+carrying `operation` (`remove` or `destroy`), `project`, `environment`, and
+the target `servers`, and exit with code 2.
 
 ## Exit Codes
 
