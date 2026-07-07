@@ -1059,6 +1059,54 @@ func TestSetupResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestUpgradeServersResultDocumentGolden pins the machine-facing server
+// agent upgrade schema.
+func TestUpgradeServersResultDocumentGolden(t *testing.T) {
+	result := engine.UpgradeServersResult{
+		APIVersion:    takoapi.APIVersionCurrent,
+		Kind:          engine.KindUpgradeServersResult,
+		Project:       "demo",
+		Environment:   "production",
+		TargetVersion: "1.2.4",
+		Nodes: []engine.UpgradeServersNodeOutcome{
+			{Server: "node-a", Host: "10.0.0.1", FromVersion: "1.2.3", ToVersion: "1.2.4", Outcome: engine.UpgradeOutcomeUpgraded},
+			{Server: "node-b", Host: "10.0.0.2", ToVersion: "1.2.4", Outcome: engine.UpgradeOutcomeFailed, Error: "server node-b is not set up; run 'tako setup --server node-b' first"},
+		},
+		Error: "server agent upgrade failed on 1 of 2 node(s)",
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "UpgradeServersResult",
+  "project": "demo",
+  "environment": "production",
+  "targetVersion": "1.2.4",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "10.0.0.1",
+      "fromVersion": "1.2.3",
+      "toVersion": "1.2.4",
+      "outcome": "upgraded"
+    },
+    {
+      "server": "node-b",
+      "host": "10.0.0.2",
+      "toVersion": "1.2.4",
+      "outcome": "failed",
+      "error": "server node-b is not set up; run 'tako setup --server node-b' first"
+    }
+  ],
+  "error": "server agent upgrade failed on 1 of 2 node(s)"
+}`
+	if string(payload) != want {
+		t.Fatalf("upgrade servers result document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",
