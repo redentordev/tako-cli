@@ -163,7 +163,7 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	session.services = services
 	session.plan = plan
 
-	planDoc := newDeployPlanDocument(cfg.Project.Name, req.Environment, plan)
+	planDoc := newDeployPlanDocument(cfg.Project.Name, req.Environment, plan, services)
 	planDoc.Revision = cfg.Project.Version
 	planDoc.Source = "image"
 	planDoc.Servers = serverNames

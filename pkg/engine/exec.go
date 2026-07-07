@@ -321,3 +321,27 @@ func buildExecEnvFileContent(e *Engine, envName string, service *config.ServiceC
 	}
 	return string(data), nil
 }
+
+// registerServiceSecretValues adds every referenced secret value to the
+// event redactor so streamed output (logs, exec, release commands) never
+// carries plaintext secrets.
+func (e *Engine) registerServiceSecretValues(envName string, services map[string]config.ServiceConfig) {
+	var mgr *secrets.Manager
+	for _, service := range services {
+		if len(service.Secrets) == 0 {
+			continue
+		}
+		if mgr == nil {
+			created, err := secrets.NewManager(envName)
+			if err != nil {
+				return
+			}
+			mgr = created
+		}
+		for _, key := range service.Secrets {
+			if value, err := mgr.Get(key); err == nil {
+				e.RegisterSecret(value)
+			}
+		}
+	}
+}

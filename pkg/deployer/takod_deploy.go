@@ -241,6 +241,13 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		}
 	}
 
+	// Release command: once per service per deploy, from the new image,
+	// after it exists on the assigned nodes and before any rollout
+	// activation (warm/replace/stop-old all happen in the reconcile below).
+	if err := d.runReleaseCommand(serviceName, service, imageRef, assignmentServers); err != nil {
+		return err
+	}
+
 	grouped := groupTakodAssignments(assignments)
 	targetServers, err := d.getTakodTargetServers()
 	if err != nil {
