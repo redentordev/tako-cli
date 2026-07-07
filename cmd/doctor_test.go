@@ -12,6 +12,7 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/spf13/cobra"
@@ -951,4 +952,85 @@ func testDoctorServers(names []string) map[string]config.ServerConfig {
 		servers[name] = config.ServerConfig{Host: name + ".example.test", User: "root"}
 	}
 	return servers
+}
+
+func TestCheckNodeAgentHealthWithReportsHealthyNode(t *testing.T) {
+	var results []checkResult
+	checkNodeAgentHealthWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, true, func(string) (*doctorNodeHealthInfo, error) {
+		return &doctorNodeHealthInfo{
+			Mesh:            &mesh.Status{Interface: "tako", Up: true, Peers: 2},
+			DiskUsedPercent: 41,
+		}, nil
+	})
+
+	if len(results) != 3 {
+		t.Fatalf("results = %#v, want three", results)
+	}
+	if results[0].status != "PASS" || !strings.Contains(results[0].message, "takod /healthz ok") {
+		t.Fatalf("healthz result = %#v, want pass", results[0])
+	}
+	if results[1].status != "PASS" || !strings.Contains(results[1].message, "mesh tako up (2 peer(s))") {
+		t.Fatalf("mesh result = %#v, want pass", results[1])
+	}
+	if results[2].status != "PASS" || !strings.Contains(results[2].message, "root filesystem 41% used") {
+		t.Fatalf("disk result = %#v, want pass", results[2])
+	}
+}
+
+func TestCheckNodeAgentHealthWithFlagsUnhealthyNode(t *testing.T) {
+	var results []checkResult
+	checkNodeAgentHealthWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, true, func(string) (*doctorNodeHealthInfo, error) {
+		return &doctorNodeHealthInfo{
+			HealthzErr:      "connection refused",
+			Mesh:            &mesh.Status{Interface: "tako", Up: false},
+			DiskUsedPercent: 97,
+		}, nil
+	})
+
+	if len(results) != 3 {
+		t.Fatalf("results = %#v, want three", results)
+	}
+	if results[0].status != "FAIL" || !strings.Contains(results[0].message, "takod /healthz unreachable") {
+		t.Fatalf("healthz result = %#v, want fail", results[0])
+	}
+	if results[1].status != "FAIL" || !strings.Contains(results[1].message, "mesh interface is down") {
+		t.Fatalf("mesh result = %#v, want fail", results[1])
+	}
+	if results[2].status != "FAIL" || !strings.Contains(results[2].message, "root filesystem 97% used") {
+		t.Fatalf("disk result = %#v, want fail", results[2])
+	}
+}
+
+func TestCheckNodeAgentHealthWithSkipsMeshWhenNotConfigured(t *testing.T) {
+	var results []checkResult
+	checkNodeAgentHealthWith(func(result checkResult) {
+		results = append(results, result)
+	}, []string{"node-a"}, false, func(string) (*doctorNodeHealthInfo, error) {
+		return &doctorNodeHealthInfo{DiskUsedPercent: 88}, nil
+	})
+
+	if len(results) != 2 {
+		t.Fatalf("results = %#v, want two (no mesh check)", results)
+	}
+	if results[1].status != "WARN" || !strings.Contains(results[1].message, "root filesystem 88% used") {
+		t.Fatalf("disk result = %#v, want warn", results[1])
+	}
+}
+
+func TestParseDoctorDiskUsedPercent(t *testing.T) {
+	percent, err := parseDoctorDiskUsedPercent("/dev/vda1  81106868 30924356  50166128  39% /\n")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if percent != 39 {
+		t.Fatalf("percent = %d, want 39", percent)
+	}
+
+	if _, err := parseDoctorDiskUsedPercent("garbage"); err == nil {
+		t.Fatal("parse accepted malformed df output")
+	}
 }

@@ -8,9 +8,11 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
@@ -48,25 +50,55 @@ var cloneSetupRecoverStateFromMeshActual = recoverAndSaveStateFromMeshActual
 func runCloneSetup(cmd *cobra.Command, args []string) error {
 	reader := bufio.NewReader(os.Stdin)
 	passed, warned, failed := 0, 0, 0
-
-	printStep := func(num int, title string) {
-		fmt.Printf("\n=== Step %d: %s ===\n", num, title)
+	result := engine.CloneSetupResult{
+		APIVersion: takoapi.APIVersionCurrent,
+		Kind:       engine.KindCloneSetupResult,
+		Checks:     []engine.DoctorCheck{},
 	}
 
+	// Machine modes reserve stdout for parseable output.
+	out := humanOut()
+
+	section := ""
+	printStep := func(num int, title string) {
+		section = title
+		fmt.Fprintf(out, "\n=== Step %d: %s ===\n", num, title)
+	}
+
+	record := func(status string, msg string) {
+		result.Checks = append(result.Checks, engine.DoctorCheck{Name: section, Status: status, Detail: msg})
+		fmt.Fprintf(out, "  [%s] %s\n", strings.ToUpper(status), msg)
+	}
 	pass := func(msg string) {
 		passed++
-		fmt.Printf("  [PASS] %s\n", msg)
+		record(engine.DoctorStatusPass, msg)
 	}
 	warn := func(msg string) {
 		warned++
-		fmt.Printf("  [WARN] %s\n", msg)
+		record(engine.DoctorStatusWarn, msg)
 	}
 	fail := func(msg string) {
 		failed++
-		fmt.Printf("  [FAIL] %s\n", msg)
+		record(engine.DoctorStatusFail, msg)
 	}
 
-	isInteractive := term.IsTerminal(int(os.Stdin.Fd()))
+	finish := func() error {
+		result.Passed, result.Warned, result.Failed = passed, warned, failed
+		result.Status = "ok"
+		if failed > 0 {
+			result.Status = "attention"
+		}
+		if err := emitResultDocument(result); err != nil {
+			return err
+		}
+		if failed > 0 {
+			return &engine.AttentionError{Err: fmt.Errorf("clone-setup found %d issue(s)", failed)}
+		}
+		return nil
+	}
+
+	// Machine modes must not block on interactive fix-up prompts.
+	isInteractive := term.IsTerminal(int(os.Stdin.Fd())) && !machineOutputEnabled()
 
 	// Step 1: Check config
 	printStep(1, "Configuration")
@@ -74,12 +106,14 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		fail(fmt.Sprintf("Cannot load config: %v", err))
-		fmt.Println("\n  Make sure you're in the project root with a valid tako.yaml or tako.json.")
-		return nil
+		fmt.Fprintln(out, "\n  Make sure you're in the project root with a valid tako.yaml or tako.json.")
+		return finish()
 	}
+	result.Project = cfg.Project.Name
 	pass(fmt.Sprintf("Config loaded: %s (project: %s)", cfgFile, cfg.Project.Name))
 
 	envName := getEnvironmentName(cfg)
+	result.Environment = envName
 
 	// Step 2: Check .env
 	printStep(2, "Environment File")
@@ -100,7 +134,7 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 				}
 			}
 		} else {
-			fmt.Println("  Fix: cp .env.example .env && edit .env")
+			fmt.Fprintln(out, "  Fix: cp .env.example .env && edit .env")
 		}
 	} else {
 		warn(".env file missing (no .env.example either)")
@@ -245,7 +279,7 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		warn("Local deployment state missing and no server connections available")
-		fmt.Println("  Fix: tako state pull")
+		fmt.Fprintln(out, "  Fix: tako state pull")
 	}
 
 	// Step 6: Validate secrets
@@ -267,7 +301,7 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 			} else {
 				if err := mgr.ValidateRequired(required); err != nil {
 					warn(fmt.Sprintf("Missing secrets: %v", err))
-					fmt.Println("  Fix: tako secrets set KEY=VALUE")
+					fmt.Fprintln(out, "  Fix: tako secrets set KEY=VALUE")
 				} else {
 					pass(fmt.Sprintf("All %d required secret(s) present", len(required)))
 				}
@@ -281,23 +315,23 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 	}
 
 	// Summary
-	fmt.Println("\n=== Summary ===")
-	fmt.Printf("  %d passed, %d warning(s), %d failed\n", passed, warned, failed)
+	fmt.Fprintln(out, "\n=== Summary ===")
+	fmt.Fprintf(out, "  %d passed, %d warning(s), %d failed\n", passed, warned, failed)
 
 	if failed > 0 || warned > 0 {
-		fmt.Println("\nNext steps:")
+		fmt.Fprintln(out, "\nNext steps:")
 		if failed > 0 {
-			fmt.Println("  - Fix failed checks above before deploying")
+			fmt.Fprintln(out, "  - Fix failed checks above before deploying")
 		}
 		if warned > 0 {
-			fmt.Println("  - Address warnings for full functionality")
+			fmt.Fprintln(out, "  - Address warnings for full functionality")
 		}
-		fmt.Println("  - Run 'tako doctor' for detailed diagnostics")
+		fmt.Fprintln(out, "  - Run 'tako doctor' for detailed diagnostics")
 	} else {
-		fmt.Println("\nYour project is ready! Run 'tako deploy' to deploy.")
+		fmt.Fprintln(out, "\nYour project is ready! Run 'tako deploy' to deploy.")
 	}
 
-	return nil
+	return finish()
 }
 
 func cloneSetupSyncMissingState(cfg *config.Config, envName string) (string, error) {

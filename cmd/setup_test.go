@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/setup"
 )
 
@@ -126,7 +127,7 @@ func TestSetupVersionManifestForFreshInstallUsesInstallTimeOnly(t *testing.T) {
 	}
 }
 
-func TestRefreshCurrentSetupRegrantsDeployUserAccessBeforeTakodRestart(t *testing.T) {
+func TestConvergeSetupStepsRegrantDeployUserAccessBeforeTakodRestart(t *testing.T) {
 	oldTakodBinary := setupTakodBinary
 	setupTakodBinary = ""
 	t.Cleanup(func() {
@@ -143,8 +144,13 @@ func TestRefreshCurrentSetupRegrantsDeployUserAccessBeforeTakodRestart(t *testin
 	}
 	prov := &recordingSetupRefresher{}
 
-	if err := refreshCurrentSetup(prov, cfg, "node-a", "deploy", 42420); err != nil {
-		t.Fatalf("refreshCurrentSetup returned error: %v", err)
+	for _, step := range setupNodeSteps(prov, cfg, "node-a", "deploy", 42420, takodBinaryForSetup(), true) {
+		if step.skip {
+			continue
+		}
+		if err := step.fn(); err != nil {
+			t.Fatalf("step %s returned error: %v", step.key, err)
+		}
 	}
 
 	want := []string{
@@ -202,15 +208,29 @@ func TestEnsureTakodRuntimeForSetupPrefersFlagOverEnv(t *testing.T) {
 	}
 }
 
-func TestRefreshCurrentSetupWrapsDeployUserAccessError(t *testing.T) {
+func TestConvergeSetupStepsSurfaceDeployUserAccessError(t *testing.T) {
 	prov := &recordingSetupRefresher{deployUserErr: errors.New("usermod failed")}
 
-	err := refreshCurrentSetup(prov, &config.Config{}, "node-a", "deploy", 51820)
-	if err == nil {
-		t.Fatal("refreshCurrentSetup returned nil error")
+	var stepErr error
+	failedStep := ""
+	for _, step := range setupNodeSteps(prov, &config.Config{}, "node-a", "deploy", 51820, "", true) {
+		if step.skip {
+			continue
+		}
+		if err := step.fn(); err != nil {
+			stepErr = err
+			failedStep = step.key
+			break
+		}
 	}
-	if !strings.Contains(err.Error(), "refresh deploy user access") || !strings.Contains(err.Error(), "usermod failed") {
-		t.Fatalf("error = %q, want deploy access context", err)
+	if stepErr == nil {
+		t.Fatal("converge steps returned nil error")
+	}
+	if failedStep != engine.SetupStepDeployUser {
+		t.Fatalf("failed step = %q, want %q", failedStep, engine.SetupStepDeployUser)
+	}
+	if !strings.Contains(stepErr.Error(), "usermod failed") {
+		t.Fatalf("error = %q, want usermod context", stepErr)
 	}
 }
 
@@ -246,4 +266,39 @@ func (r *recordingSetupRefresher) InstallTakodBinaryFromFile(path string) error 
 func (r *recordingSetupRefresher) InstallTakodService(socket string, dataDir string, nodeName string) error {
 	r.calls = append(r.calls, "service:"+socket+":"+dataDir+":"+nodeName)
 	return r.serviceErr
+}
+
+func (r *recordingSetupRefresher) CheckRequirements() error {
+	r.calls = append(r.calls, "check-requirements")
+	return nil
+}
+
+func (r *recordingSetupRefresher) UpdateSystem() error {
+	r.calls = append(r.calls, "update-system")
+	return nil
+}
+
+func (r *recordingSetupRefresher) InstallDocker() error {
+	r.calls = append(r.calls, "install-docker")
+	return nil
+}
+
+func (r *recordingSetupRefresher) InstallWireGuard() error {
+	r.calls = append(r.calls, "install-wireguard")
+	return nil
+}
+
+func (r *recordingSetupRefresher) HardenSecurity() error {
+	r.calls = append(r.calls, "harden-security")
+	return nil
+}
+
+func (r *recordingSetupRefresher) VerifyAutoRecovery() error {
+	r.calls = append(r.calls, "verify-auto-recovery")
+	return nil
+}
+
+func (r *recordingSetupRefresher) InstallMonitoringAgent() error {
+	r.calls = append(r.calls, "install-monitoring-agent")
+	return nil
 }

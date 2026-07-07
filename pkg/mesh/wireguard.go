@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -47,12 +48,21 @@ type Status struct {
 }
 
 func EnsureWireGuardTools(client *ssh.Client, verbose bool) error {
+	return EnsureWireGuardToolsWithOutput(client, verbose, nil)
+}
+
+// EnsureWireGuardToolsWithOutput installs WireGuard tooling, writing progress
+// prose to out (os.Stdout when nil) so machine modes can redirect it.
+func EnsureWireGuardToolsWithOutput(client *ssh.Client, verbose bool, out io.Writer) error {
 	if _, err := client.Execute("command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1"); err == nil {
 		return nil
 	}
 
 	if verbose {
-		fmt.Println("  Installing WireGuard tools...")
+		if out == nil {
+			out = os.Stdout
+		}
+		fmt.Fprintln(out, "  Installing WireGuard tools...")
 	}
 
 	if _, err := client.Execute(runRootScript(wireGuardInstallScript())); err != nil {
