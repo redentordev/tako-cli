@@ -653,6 +653,46 @@ func (c *Client) ExecuteStreamWithContext(ctx context.Context, cmd string, stdou
 	return nil
 }
 
+// ExecuteStreamWithInput runs a command feeding input to stdin while
+// streaming output in real-time, respecting context cancellation.
+func (c *Client) ExecuteStreamWithInput(ctx context.Context, cmd string, input io.Reader, stdout, stderr io.Writer) error {
+	ctx, cancel, defaultDeadline := withDefaultCommandDeadline(ctx)
+	defer cancel()
+
+	conn, err := c.getConnectionContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	session, err := conn.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	defer session.Close()
+
+	session.Stdin = input
+	session.Stdout = stdout
+	session.Stderr = stderr
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := session.Start(cmd); err != nil {
+		return fmt.Errorf("failed to start command: %w", err)
+	}
+	if err := waitSessionWithContext(ctx, session); err != nil {
+		if defaultDeadline && errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("remote command timed out after %s", DefaultCommandTimeout)
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		return fmt.Errorf("command failed: %w", err)
+	}
+
+	return nil
+}
+
 // ExecuteWithInput runs a command on the remote server, streams input to stdin,
 // and returns combined stdout/stderr output.
 func (c *Client) ExecuteWithInput(ctx context.Context, cmd string, input io.Reader) (string, error) {

@@ -17,6 +17,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
@@ -70,6 +71,9 @@ type Deployer struct {
 	localImageClient  localImageClient
 	output            io.Writer
 	outputMu          sync.Mutex
+	events            events.Sink
+	releaseRuns       map[string]*ReleaseRun
+	releaseMu         sync.Mutex
 }
 
 const (

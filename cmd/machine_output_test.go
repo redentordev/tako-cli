@@ -1107,6 +1107,47 @@ func TestUpgradeServersResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestExecResultDocumentGolden pins the machine-facing exec schema.
+func TestExecResultDocumentGolden(t *testing.T) {
+	result := engine.ExecResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindExecResult,
+		Project:     "demo",
+		Environment: "production",
+		Service:     "web",
+		Server:      "node-a",
+		Host:        "10.0.0.1",
+		Container:   "tako_demo_production_web_1",
+		Mode:        "attach",
+		Command:     []string{"env"},
+		ExitCode:    0,
+		DurationMs:  431,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "ExecResult",
+  "project": "demo",
+  "environment": "production",
+  "service": "web",
+  "server": "node-a",
+  "host": "10.0.0.1",
+  "container": "tako_demo_production_web_1",
+  "mode": "attach",
+  "command": [
+    "env"
+  ],
+  "exitCode": 0,
+  "durationMs": 431
+}`
+	if string(payload) != want {
+		t.Fatalf("exec result document drifted:\n%s", payload)
+	}
+}
+
 func TestOperationConfirmationRequiredDocumentShape(t *testing.T) {
 	doc := newOperationConfirmationRequiredDocument(
 		"remove deletes all deployed services for this project from the environment",

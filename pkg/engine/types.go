@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 )
@@ -64,6 +65,9 @@ type PlanChange struct {
 	Type    string   `json:"type"`
 	Service string   `json:"service"`
 	Reasons []string `json:"reasons,omitempty"`
+	// ReleaseCommand surfaces the service's deploy.release command that
+	// will run before cutover when this change applies.
+	ReleaseCommand []string `json:"releaseCommand,omitempty"`
 }
 
 // DeployPlan is the serializable outcome of PlanDeploy: what would change,
@@ -106,11 +110,42 @@ func (p *DeployPlan) Hash() string {
 
 // ServiceOutcome reports what happened to one service during apply.
 type ServiceOutcome struct {
-	Name     string `json:"name"`
-	Image    string `json:"image,omitempty"`
-	Action   string `json:"action"`
-	Replicas int    `json:"replicas,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Name     string          `json:"name"`
+	Image    string          `json:"image,omitempty"`
+	Action   string          `json:"action"`
+	Replicas int             `json:"replicas,omitempty"`
+	Release  *ReleaseOutcome `json:"release,omitempty"`
+	Error    string          `json:"error,omitempty"`
+}
+
+// ReleaseOutcome reports the service's release command run: executed once
+// per applied deploy from the new image, before traffic cutover.
+type ReleaseOutcome struct {
+	Command    []string `json:"command"`
+	Server     string   `json:"server,omitempty"`
+	Image      string   `json:"image,omitempty"`
+	ExitCode   int      `json:"exitCode"`
+	DurationMs int64    `json:"durationMs"`
+}
+
+// releaseOutcomeFor converts the deployer's recorded release run for the
+// result document; nil when the service declares no release command or it
+// never ran.
+func releaseOutcomeFor(d *deployer.Deployer, serviceName string) *ReleaseOutcome {
+	if d == nil {
+		return nil
+	}
+	run := d.ReleaseRunFor(serviceName)
+	if run == nil {
+		return nil
+	}
+	return &ReleaseOutcome{
+		Command:    append([]string(nil), run.Command...),
+		Server:     run.Server,
+		Image:      run.Image,
+		ExitCode:   run.ExitCode,
+		DurationMs: run.DurationMs,
+	}
 }
 
 // Service outcome actions.
@@ -143,7 +178,7 @@ type DeployResult struct {
 	Error         string    `json:"error,omitempty"`
 }
 
-func newDeployPlanDocument(project string, environment string, plan *reconcile.ReconciliationPlan) DeployPlan {
+func newDeployPlanDocument(project string, environment string, plan *reconcile.ReconciliationPlan, services map[string]config.ServiceConfig) DeployPlan {
 	doc := DeployPlan{
 		APIVersion:  takoapi.APIVersionCurrent,
 		Kind:        KindDeployPlan,
@@ -155,11 +190,15 @@ func newDeployPlanDocument(project string, environment string, plan *reconcile.R
 		if change.Type == reconcile.ChangeNone {
 			continue
 		}
-		doc.Changes = append(doc.Changes, PlanChange{
+		planChange := PlanChange{
 			Type:    string(change.Type),
 			Service: change.ServiceName,
 			Reasons: append([]string(nil), change.Reasons...),
-		})
+		}
+		if service, ok := services[change.ServiceName]; ok && service.Deploy.Release != nil {
+			planChange.ReleaseCommand = append([]string(nil), service.Deploy.Release.Command...)
+		}
+		doc.Changes = append(doc.Changes, planChange)
 	}
 	sort.Slice(doc.Changes, func(i, j int) bool {
 		if doc.Changes[i].Service != doc.Changes[j].Service {

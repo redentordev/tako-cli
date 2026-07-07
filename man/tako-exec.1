@@ -1,0 +1,90 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-exec - Run a command in a running service container
+
+
+.SH SYNOPSIS
+\fBtako exec SERVICE -- COMMAND [ARGS...] [flags]\fP
+
+
+.SH DESCRIPTION
+Run a non-interactive command in the context of a deployed service.
+
+.PP
+By default the command runs inside a running replica (docker exec). With
+--oneoff it runs in a fresh temporary container created from the service's
+current image with the service's env, secrets, and network — useful for
+framework tasks that should not share a serving process.
+
+.PP
+Output streams back combined (stdout+stderr). In the default text mode the
+tako process mirrors the remote command's exit code; in machine modes the
+exit code is structured into the ExecResult document instead.
+
+.PP
+There is no TTY or stdin: exec is for commands, not interactive shells.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for exec
+
+.PP
+\fB--oneoff\fP[=false]
+	Run in a fresh temporary container from the service's current image
+
+.PP
+\fB--replica\fP=0
+	Running replica to attach to, 1-based (default: first)
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Node to run on (default: first node where the service is deployed)
+
+.PP
+\fB--timeout\fP=10m0s
+	Kill the remote command after this duration
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH EXAMPLE
+.EX
+  # Inspect the environment inside the running web service
+  tako exec web -- env
+
+  # Run a framework task in a fresh container from the current image
+  tako exec web --oneoff -- php artisan tinker --execute='dump(1)'
+
+  # Target a specific node and replica
+  tako exec web --server node-b --replica 2 -- date
+.EE
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

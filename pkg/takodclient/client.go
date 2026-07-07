@@ -2,6 +2,7 @@ package takodclient
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -216,6 +217,74 @@ func buildStreamOutputCommand(socket string, endpoint string) string {
 		"; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi",
 	}
 	return strings.Join(args, " ")
+}
+
+// inputStreamExecutor is satisfied by clients that can stream a command's
+// live output while feeding its stdin (pkg/ssh.Client).
+type inputStreamExecutor interface {
+	ExecuteStreamWithInput(ctx context.Context, cmd string, input io.Reader, stdout io.Writer, stderr io.Writer) error
+}
+
+// StreamRequestOutputWithContext sends a request body and streams the
+// chunked response live to stdout/stderr (no buffering, no status marker) —
+// the POST counterpart of StreamOutputWithContext. Clients without stdin
+// streaming get the body embedded base64-encoded in the remote command.
+func StreamRequestOutputWithContext(ctx context.Context, client StreamExecutor, socket string, method string, endpoint string, body io.Reader, stdout io.Writer, stderr io.Writer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if socket == "" {
+		socket = DefaultSocket
+	}
+	if !strings.HasPrefix(endpoint, "/") {
+		return fmt.Errorf("takod endpoint must start with /")
+	}
+	if method == "" {
+		method = "POST"
+	}
+
+	curlCmd := buildStreamRequestOutputCommand(socket, method, endpoint)
+	var err error
+	if inputClient, ok := client.(inputStreamExecutor); ok {
+		err = inputClient.ExecuteStreamWithInput(ctx, curlCmd, body, stdout, stderr)
+	} else {
+		payload, readErr := io.ReadAll(body)
+		if readErr != nil {
+			return fmt.Errorf("failed to read request body: %w", readErr)
+		}
+		embedded := "printf '%s' " + shellQuote(base64.StdEncoding.EncodeToString(payload)) + " | base64 -d | " + curlCmd
+		if contextClient, ok := client.(contextStreamExecutor); ok {
+			err = contextClient.ExecuteStreamWithContext(ctx, embedded, stdout, stderr)
+		} else {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			err = client.ExecuteStream(embedded, stdout, stderr)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("takod stream request %s %s failed: %w", method, endpoint, err)
+	}
+	return nil
+}
+
+func buildStreamRequestOutputCommand(socket string, method string, endpoint string) string {
+	args := []string{
+		"if test -S " + shellQuote(socket) + " && command -v curl >/dev/null 2>&1; then",
+		"curl --fail --silent --show-error --no-buffer",
+		"--unix-socket " + shellQuote(socket),
+		"-X " + shellQuote(method),
+		"-H 'Content-Type: application/json'",
+		"--data-binary @-",
+		shellQuote("http://takod" + endpoint),
+		"; else echo 'takod socket or curl is unavailable' >&2; exit 42; fi",
+	}
+	return strings.Join(args, " ")
+}
+
+// ExecEndpoint returns the takod exec endpoint path.
+func ExecEndpoint() string {
+	return "/v1/exec"
 }
 
 func ProxyFileEndpoint(name string) string {

@@ -231,6 +231,18 @@ type DeployConfig struct {
 	SmokeTest         DeploySmokeTestConfig `yaml:"smokeTest,omitempty" json:"smokeTest,omitempty"`
 	Promotion         string                `yaml:"promotion,omitempty" json:"promotion,omitempty"` // automatic, manual
 	GracePeriod       string                `yaml:"gracePeriod,omitempty" json:"gracePeriod,omitempty"`
+	Release           *ReleaseConfig        `yaml:"release,omitempty" json:"release,omitempty"`
+}
+
+// ReleaseConfig runs a command from the new revision's image exactly once
+// per applied deploy, before traffic cutover; a non-zero exit aborts the
+// rollout. Making the command itself re-runnable (e.g. migrations) is the
+// application's responsibility.
+type ReleaseConfig struct {
+	Command []string `yaml:"command,omitempty" json:"command,omitempty"`
+	Timeout string   `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// Volumes opts the release container into the service's volume mounts.
+	Volumes bool `yaml:"volumes,omitempty" json:"volumes,omitempty"`
 }
 
 // DeployReadinessConfig defines service readiness checks for rollout strategies.

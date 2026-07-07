@@ -961,6 +961,11 @@ func validateDeployStrategy(name string, service *ServiceConfig) error {
 		if err := validateDeploySmokeTest(name, service.Deploy.SmokeTest); err != nil {
 			return err
 		}
+		if service.Deploy.Release != nil {
+			if err := validateDeployRelease(name, service.Deploy.Release); err != nil {
+				return err
+			}
+		}
 		if service.Deploy.Strategy == DeployStrategyRolling {
 			if service.Deploy.GracePeriod != "" {
 				return fmt.Errorf("service %s: deploy.gracePeriod is only supported by blue_green", name)
@@ -1001,6 +1006,18 @@ func validateDeployStrategy(name string, service *ServiceConfig) error {
 	default:
 		return fmt.Errorf("service %s: invalid deployment strategy %q; supported strategies are recreate, rolling, and blue_green", name, service.Deploy.Strategy)
 	}
+}
+
+func validateDeployRelease(name string, release *ReleaseConfig) error {
+	if len(release.Command) == 0 || strings.TrimSpace(release.Command[0]) == "" {
+		return fmt.Errorf("service %s: deploy.release.command is required", name)
+	}
+	for _, arg := range release.Command {
+		if strings.ContainsRune(arg, 0) {
+			return fmt.Errorf("service %s: deploy.release.command contains invalid characters", name)
+		}
+	}
+	return validateRolloutDurations(name, "deploy.release", release.Timeout)
 }
 
 func validateDeployReadiness(name string, readiness DeployReadinessConfig) error {

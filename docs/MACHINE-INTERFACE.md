@@ -218,7 +218,18 @@ on `--dry-run`); nodes are attempted independently — partial failure exits
 returns a `CloneSetupResult` (doctor-style `checks` with pass/warn/fail
 counts covering config, .env, SSH connectivity, env bundle, state, and
 secrets); machine modes skip its interactive fix-up prompts and any failed
-check exits 6. The
+check exits 6. `tako exec` returns an `ExecResult` with the resolved
+`server`/`host`, the target `container`, `mode` (`attach` or `oneoff`), the
+command, the remote `exitCode`, and `durationMs`; output streams as
+`exec.output` events between `exec.started` and `exec.completed`. In machine
+modes the tako process exits 0 whenever the exec ran to completion — the
+remote code lives in the document; text mode mirrors the remote exit code
+for scripting. Deploys with a `deploy.release` command emit
+`deploy.release.started/.output/.completed/.failed` events, the plan's
+changes carry `releaseCommand`, and the `DeployResult` service outcome
+gains a `release` entry `{command, server, image, exitCode, durationMs}` —
+a failing release aborts the rollout before cutover and the deploy fails
+with the standard taxonomy. The
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
 
@@ -229,8 +240,8 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers` |
-| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`) |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec` |
+| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
 | Human-only by design | `init`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON) |
 

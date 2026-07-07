@@ -225,6 +225,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 			e.RegisterSecret(value)
 		}
 	}
+	e.registerServiceSecretValues(session.envName, allServices)
 	for _, server := range cfg.Servers {
 		e.RegisterSecret(server.Password)
 	}
@@ -312,6 +313,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	if e.buildOutput != nil {
 		deploy.SetOutput(e.buildOutput)
 	}
+	deploy.SetEventSink(e.stream)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
 	}
@@ -362,7 +364,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	plan := reconcile.ComputePlan(cfg.Project.Name, session.envName, services, planActualState)
 	session.plan = plan
 
-	planDoc := newDeployPlanDocument(cfg.Project.Name, session.envName, plan)
+	planDoc := newDeployPlanDocument(cfg.Project.Name, session.envName, plan, services)
 	planDoc.Revision = session.buildTag
 	planDoc.Source = sourceInfo.StateSource
 	planDoc.Servers = append([]string(nil), serverNames...)
@@ -614,7 +616,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 				Service: serviceName,
 				Message: fmt.Sprintf("  ✗ takod deployment failed: %v\n", deployErr),
 			})
-			result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: fullImageName, Action: OutcomeFailed, Replicas: service.Replicas, Error: deployErr.Error()})
+			result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: fullImageName, Action: OutcomeFailed, Replicas: service.Replicas, Error: deployErr.Error(), Release: releaseOutcomeFor(s.deployer, serviceName)})
 			deploymentFailed = true
 			deploymentError = fmt.Errorf("takod deployment failed for %s: %w", serviceName, deployErr)
 			deployment.Status = remotestate.StatusFailed
@@ -634,7 +636,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		if warmed {
 			outcomeAction = OutcomeWarmed
 		}
-		result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: fullImageName, Action: outcomeAction, Replicas: service.Replicas})
+		result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: fullImageName, Action: outcomeAction, Replicas: service.Replicas, Release: releaseOutcomeFor(s.deployer, serviceName)})
 
 		// Save service state.
 		deployment.Services[serviceName] = remotestate.ServiceState{
