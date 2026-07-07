@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1407,10 +1408,10 @@ func validateProxyAccessControls(serviceName string, proxy *ProxyConfig) error {
 			return fmt.Errorf("service %s: proxy.allowIps entries cannot be empty", serviceName)
 		}
 		if strings.Contains(trimmed, "/") {
-			if _, _, err := net.ParseCIDR(trimmed); err != nil {
+			if _, err := netip.ParsePrefix(trimmed); err != nil {
 				return fmt.Errorf("service %s: invalid proxy.allowIps CIDR %q", serviceName, trimmed)
 			}
-		} else if net.ParseIP(trimmed) == nil {
+		} else if _, err := netip.ParseAddr(trimmed); err != nil {
 			return fmt.Errorf("service %s: invalid proxy.allowIps address %q", serviceName, trimmed)
 		}
 		proxy.AllowIps[i] = trimmed
