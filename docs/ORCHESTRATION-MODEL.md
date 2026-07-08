@@ -561,6 +561,16 @@ This keeps databases, queues, and internal APIs private by default. Internal
 proxy routes are a deliberate exception for HTTP services that should be
 reachable through the shared proxy on a private address without public DNS.
 
+Raw TCP/UDP workloads (game servers, MQTT, SMTP, externally reachable
+databases) opt out of the proxy entirely with `ports`, which publishes host
+ports on the node through the same container-publish primitive the mesh
+upstreams use. Because a host port binds once per node, `ports` services are
+restricted to the recreate strategy and a single replica, host ports 80/443
+stay reserved for the proxy in proxied environments, and multi-node
+environments require pinned or global placement so the endpoint is
+deterministic. These constraints are enforced at config validation, and port
+changes participate in the service config hash so redeploys rebind cleanly.
+
 Stateful image services should be declared with `persistent: true` and at least
 one named or external Docker volume. The validator rejects persistent services
 without volumes because container filesystems are replaced during reconcile. In
@@ -697,6 +707,8 @@ Done:
     direct-streamlocal channel and the documented ptystream frame protocol
     (resize, exit codes, idle/absolute timeouts, disconnect cleanup). This
     resolves the interactive-exec deferral from the exec design (ADR 7).
+26. Raw TCP/UDP host port publishing (`ports`) for non-HTTP services, with
+    recreate/single-replica/placement guardrails validated at config time.
 
 Next:
 1. Add distributed certificate handling for multi-edge deployments.

@@ -195,7 +195,12 @@ type ServiceConfig struct {
 	Image      string `yaml:"image,omitempty" json:"image,omitempty"`           // Pre-built image (for postgres, redis, etc)
 
 	// Basic settings
-	Port     int               `yaml:"port,omitempty" json:"port,omitempty"`
+	Port int `yaml:"port,omitempty" json:"port,omitempty"`
+	// Ports publishes raw TCP/UDP host ports directly on the node, bypassing
+	// tako-proxy (docker-compose syntax: "PORT", "HOST:CONTAINER",
+	// "IP:HOST:CONTAINER", optional "/tcp" or "/udp"). Requires the recreate
+	// deploy strategy and at most one replica.
+	Ports    []string          `yaml:"ports,omitempty" json:"ports,omitempty"`
 	Command  string            `yaml:"command,omitempty" json:"command,omitempty"`
 	Replicas int               `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
 	Restart  string            `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)

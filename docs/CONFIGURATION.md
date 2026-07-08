@@ -481,6 +481,45 @@ services:
 Tako passes this to Docker as `--memory`. Accepted units are Docker-style
 byte, k, m, or g values such as `512m`, `1g`, or `768mb`.
 
+## Raw TCP/UDP Ports
+
+`proxy` covers HTTP(S) traffic. For protocols the proxy cannot terminate —
+game servers, MQTT brokers, SMTP, externally reachable databases — publish
+host ports directly on the node with `ports`:
+
+```yaml
+services:
+  minecraft:
+    image: itzg/minecraft-server
+    persistent: true
+    volumes:
+      - mc-data:/data
+    ports:
+      - "25565:25565"       # host:container, TCP by default
+      - "19132:19132/udp"
+      - "127.0.0.1:9090:9090"  # bind a specific interface only
+```
+
+Entries use docker-compose publish syntax (`PORT`, `HOST:CONTAINER`,
+`IP:HOST:CONTAINER`, optional `/tcp` or `/udp`) and are passed to Docker as
+`--publish`. Traffic reaches the container directly — no TLS termination,
+health-gated routing, or basic auth from tako-proxy applies. Constraints:
+
+- **`deploy.strategy` must be `recreate`** (the default). Rolling and
+  blue-green keep the old and new revision running at once, and the second
+  container cannot bind an already-bound host port, so raw port services
+  take a brief listener gap on deploy.
+- **At most one replica** — a host port binds once per node.
+- Host ports **80 and 443 are reserved** for tako-proxy in environments
+  that route any service through it.
+- A host port (per protocol) can be published by **only one service** per
+  environment.
+- In **multi-node environments** the service must set `placement.strategy`
+  to `pinned` or `global` so the published endpoint has an explicit home
+  (`global` binds the port on every node).
+- On multi-node setups, prefer host ports below 20000 — Tako allocates
+  20000–65000 dynamically for cross-node proxy upstreams.
+
 ## Volume Backups
 
 Off-node backups are opt-in per service. Tako schedules them on the takod node

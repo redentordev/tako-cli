@@ -29,6 +29,7 @@ type safeServiceConfigFingerprint struct {
 	Dockerfile   string                       `json:"dockerfile,omitempty"`
 	Image        string                       `json:"image,omitempty"`
 	Port         int                          `json:"port,omitempty"`
+	Ports        []string                     `json:"ports,omitempty"`
 	Command      string                       `json:"command,omitempty"`
 	Replicas     int                          `json:"replicas,omitempty"`
 	Restart      string                       `json:"restart,omitempty"`
@@ -86,6 +87,7 @@ func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
 		Dockerfile:   service.Dockerfile,
 		Image:        service.Image,
 		Port:         service.Port,
+		Ports:        sortedStrings(service.Ports),
 		Command:      service.Command,
 		Replicas:     service.Replicas,
 		Restart:      service.Restart,

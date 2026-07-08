@@ -391,6 +391,13 @@
                   "type": "integer",
                   "description": "Container port"
                 },
+                "ports": {
+                  "type": "array",
+                  "description": "Raw TCP/UDP host ports published directly on the node, bypassing tako-proxy (\"PORT\", \"HOST:CONTAINER\", \"IP:HOST:CONTAINER\", optional /tcp or /udp). Requires deploy.strategy recreate and at most one replica.",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "command": {
                   "type": "string",
                   "description": "Override container command"
