@@ -270,14 +270,11 @@ func (m *Manager) writeSecrets(path string, secrets map[string]string) error {
 	sort.Strings(keys)
 
 	for _, key := range keys {
-		value := secrets[key]
-
-		// Escape value if it contains special characters
-		if strings.ContainsAny(value, " \t\n\"'$") || strings.Contains(value, "=") {
-			value = fmt.Sprintf("\"%s\"", strings.ReplaceAll(value, "\"", "\\\""))
+		encoded, err := encodeSecretValue(secrets[key])
+		if err != nil {
+			return fmt.Errorf("secret %s: %w", key, err)
 		}
-
-		buf.WriteString(fmt.Sprintf("%s=%s\n", key, value))
+		buf.WriteString(fmt.Sprintf("%s=%s\n", key, encoded))
 	}
 
 	// Load encryption key and encrypt
@@ -338,6 +335,36 @@ func (m *Manager) Delete(key string, environment string) error {
 
 	// Reload secrets
 	return m.loadSecrets()
+}
+
+// encodeSecretValue renders a secret value as an env-file token that
+// godotenv reads back byte-identically. Values with special characters are
+// single-quoted, which godotenv treats as fully literal; values that also
+// contain a single quote fall back to double quotes, where every backslash
+// must be doubled (godotenv strips one backslash from each escape pair and
+// turns \n into a real newline) and $ must become \$ (otherwise godotenv
+// expands it as a variable reference, silently corrupting the secret). Two
+// shapes are unrepresentable in godotenv quoting and are rejected instead of
+// corrupted: quoted values ending in a backslash (the closing quote parses
+// as escaped) and single-quote-containing values ending in a double quote
+// (the parser trims the trailing escaped quote away).
+func encodeSecretValue(value string) (string, error) {
+	if !strings.ContainsAny(value, " \t\n\r\"'$") && !strings.Contains(value, "=") {
+		return value, nil
+	}
+	if strings.HasSuffix(value, "\\") {
+		return "", fmt.Errorf("values ending in a backslash cannot be stored in the env-format secrets file")
+	}
+	if !strings.Contains(value, "'") {
+		return "'" + value + "'", nil
+	}
+	if strings.HasSuffix(value, "\"") {
+		return "", fmt.Errorf("values containing a single quote and ending in a double quote cannot be stored in the env-format secrets file")
+	}
+	escaped := strings.ReplaceAll(value, "\\", "\\\\")
+	escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
+	escaped = strings.ReplaceAll(escaped, "$", "\\$")
+	return "\"" + escaped + "\"", nil
 }
 
 func readSecretsFile(path string) (map[string]string, error) {
