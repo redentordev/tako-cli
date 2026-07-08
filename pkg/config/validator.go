@@ -270,6 +270,10 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		return err
 	}
 
+	if err := validateEnvironmentPublishedPorts(envName, env, cfg); err != nil {
+		return err
+	}
+
 	if err := validateEnvironmentProxyACMESafety(envName, env, cfg); err != nil {
 		return err
 	}
@@ -316,6 +320,66 @@ func validateEnvironmentDynamicDomains(envName string, env *EnvironmentConfig) e
 	if len(dynamicServices) > 1 {
 		sort.Strings(dynamicServices)
 		return fmt.Errorf("environment %s: dynamicDomains currently supports one authority per edge node; found %s", envName, strings.Join(dynamicServices, ", "))
+	}
+	return nil
+}
+
+// validateEnvironmentPublishedPorts enforces environment-wide raw port
+// invariants: host ports are unique across services, 80/443 stay reserved
+// for tako-proxy when the environment routes through it, and multi-node
+// environments pin port-publishing services so the endpoint has a stable
+// home (mirroring the persistent-service placement rule).
+func validateEnvironmentPublishedPorts(envName string, env *EnvironmentConfig, cfg *Config) error {
+	proxyDeployed := false
+	for _, service := range env.Services {
+		if service.IsProxied() {
+			proxyDeployed = true
+			break
+		}
+	}
+
+	var environmentServers []string
+	claimed := make(map[string]string)
+	serviceNames := make([]string, 0, len(env.Services))
+	for serviceName := range env.Services {
+		serviceNames = append(serviceNames, serviceName)
+	}
+	sort.Strings(serviceNames)
+	for _, serviceName := range serviceNames {
+		service := env.Services[serviceName]
+		if len(service.Ports) == 0 {
+			continue
+		}
+		if environmentServers == nil {
+			servers, err := environmentServerTargets(envName, env, cfg)
+			if err != nil {
+				return err
+			}
+			environmentServers = servers
+		}
+		if len(environmentServers) > 1 {
+			strategy := ""
+			if service.Placement != nil {
+				strategy = strings.TrimSpace(service.Placement.Strategy)
+			}
+			if strategy != "pinned" && strategy != "global" {
+				return fmt.Errorf("environment %s service %s: ports in multi-node environments requires placement.strategy pinned or global so the published endpoint has an explicit home", envName, serviceName)
+			}
+		}
+		for _, entry := range service.Ports {
+			publish, err := ParsePortPublish(entry)
+			if err != nil {
+				return fmt.Errorf("environment %s service %s: %w", envName, serviceName, err)
+			}
+			if proxyDeployed && (publish.HostPort == 80 || publish.HostPort == 443) {
+				return fmt.Errorf("environment %s service %s: host port %d is reserved by tako-proxy in proxied environments", envName, serviceName, publish.HostPort)
+			}
+			key := fmt.Sprintf("%d/%s", publish.HostPort, publish.Protocol)
+			if owner, ok := claimed[key]; ok {
+				return fmt.Errorf("environment %s: services %s and %s both publish host port %s", envName, owner, serviceName, key)
+			}
+			claimed[key] = serviceName
+		}
 	}
 	return nil
 }
@@ -700,6 +764,10 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		return err
 	}
 
+	if err := validateServicePorts(name, service); err != nil {
+		return err
+	}
+
 	// Validate backup if configured
 	if service.Backup != nil {
 		if err := validateBackupConfig(name, service); err != nil {
@@ -1044,6 +1112,40 @@ func validateDeployStrategy(name string, service *ServiceConfig) error {
 // validateServiceKind enforces the kind: job contract: schedule + command
 // required, long-running-service surfaces rejected. Plain services must not
 // carry job-only fields.
+// validateServicePorts checks raw host port publishing (ports). Published
+// host ports bind directly on the node, so only one container may hold a
+// port at a time: rolling and blue_green keep old and new revisions running
+// together and would fail the second bind, and a second replica on the same
+// node would collide with the first.
+func validateServicePorts(name string, service *ServiceConfig) error {
+	if len(service.Ports) == 0 {
+		return nil
+	}
+	if service.IsJob() {
+		return fmt.Errorf("service %s: kind: job cannot publish ports", name)
+	}
+	if service.Deploy.Strategy != DeployStrategyRecreate {
+		return fmt.Errorf("service %s: ports requires deploy.strategy recreate; %s keeps two revisions running and the second cannot bind the same host port", name, service.Deploy.Strategy)
+	}
+	if service.Replicas > 1 {
+		return fmt.Errorf("service %s: ports requires at most one replica; a host port can only be bound once per node", name)
+	}
+	seen := make(map[string]bool, len(service.Ports))
+	for i, entry := range service.Ports {
+		publish, err := ParsePortPublish(entry)
+		if err != nil {
+			return fmt.Errorf("service %s: %w", name, err)
+		}
+		key := fmt.Sprintf("%d/%s", publish.HostPort, publish.Protocol)
+		if seen[key] {
+			return fmt.Errorf("service %s: duplicate ports host port %s", name, key)
+		}
+		seen[key] = true
+		service.Ports[i] = publish.String()
+	}
+	return nil
+}
+
 func validateServiceKind(name string, service *ServiceConfig) error {
 	switch service.Kind {
 	case "", ServiceKindService:

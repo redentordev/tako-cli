@@ -933,6 +933,13 @@ func (d *Deployer) buildTakodContainerSpec(serverName string, serviceName string
 		}
 		container.Publishes = append(container.Publishes, fmt.Sprintf("%s:%d:%d", meshHostIP, meshPort, service.Port))
 	}
+	for _, entry := range service.Ports {
+		publish, err := config.ParsePortPublish(entry)
+		if err != nil {
+			return container, fmt.Errorf("service %s: %w", serviceName, err)
+		}
+		container.Publishes = append(container.Publishes, publish.String())
+	}
 	return container, nil
 }
 

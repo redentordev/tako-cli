@@ -32,6 +32,24 @@ func TestSafeServiceConfigHashStableAcrossOrderOnlyFields(t *testing.T) {
 	}
 }
 
+func TestSafeServiceConfigHashTracksPublishedPorts(t *testing.T) {
+	base := config.ServiceConfig{Image: "itzg/minecraft-server", Port: 0}
+	baseHash, ok := SafeServiceConfigHash(base)
+	if !ok {
+		t.Fatal("expected safe service hash")
+	}
+
+	published := base
+	published.Ports = []string{"25565:25565/tcp"}
+	publishedHash, ok := SafeServiceConfigHash(published)
+	if !ok {
+		t.Fatal("expected safe service hash")
+	}
+	if publishedHash == baseHash {
+		t.Fatal("adding ports must change the config hash so redeploys rebind")
+	}
+}
+
 func TestSafeServiceConfigHashTracksResourceLimits(t *testing.T) {
 	base := config.ServiceConfig{Image: "nginx:1.27", Port: 8080}
 	baseHash, ok := SafeServiceConfigHash(base)

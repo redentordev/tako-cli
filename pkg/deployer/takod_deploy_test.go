@@ -678,6 +678,25 @@ func TestBuildTakodContainerSpecDoesNotPublishPublicOneNodeService(t *testing.T)
 	}
 }
 
+func TestBuildTakodContainerSpecPublishesRawServicePorts(t *testing.T) {
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
+	container, err := deploy.buildTakodContainerSpec("node-a", "game", &config.ServiceConfig{
+		Ports: []string{"25565:25565/tcp", "127.0.0.1:9000:3000/udp"},
+	}, 1, "rev-game", false, 0, false)
+	if err != nil {
+		t.Fatalf("buildTakodContainerSpec returned error: %v", err)
+	}
+	want := []string{"25565:25565/tcp", "127.0.0.1:9000:3000/udp"}
+	if len(container.Publishes) != len(want) {
+		t.Fatalf("publishes = %#v, want %#v", container.Publishes, want)
+	}
+	for i, publish := range want {
+		if container.Publishes[i] != publish {
+			t.Fatalf("publishes[%d] = %q, want %q", i, container.Publishes[i], publish)
+		}
+	}
+}
+
 func TestBuildTakodContainerSpecUsesRevisionScopedIDsForNoDowntimeStrategies(t *testing.T) {
 	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
 	service := &config.ServiceConfig{
