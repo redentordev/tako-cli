@@ -67,6 +67,79 @@ func TestManagerSetPreservesExistingEncryptedSecrets(t *testing.T) {
 	}
 }
 
+// TestManagerSetRoundTripsSpecialCharacterValues pins byte-identical
+// Set/Get round trips for values that stress the env-file quoting layer.
+// Dollar signs are the regression focus: godotenv expands unescaped $NAME
+// and ${NAME} references inside double-quoted values on read, which used to
+// silently corrupt secrets like passwords and JSON templates.
+func TestManagerSetRoundTripsSpecialCharacterValues(t *testing.T) {
+	withTempWorkingDir(t)
+
+	cases := map[string]string{
+		"PLAIN":        "hunter2",
+		"SIMPLE_JSON":  `{"a":"b","n":1}`,
+		"NESTED_JSON":  `{"msg":"say \"hi\""}`,
+		"JSON_DOLLAR":  `{"tpl":"${GREETING} world"}`,
+		"DOLLAR_REF":   "pre${HOME}post",
+		"DOLLAR_NAME":  "a$HOMEz",
+		"DOLLAR_BARE":  "cost: $5",
+		"DOUBLE_DLR":   "pa$$word$$",
+		"TRAIL_DLR":    "ends with $",
+		"BSLASH_DLR":   `re: \$cost`,
+		"BACKSLASH":    `C:\path\d+`,
+		"EQUALS_URL":   "postgres://u:p@host:5432/db?sslmode=require&a=b",
+		"SPACES_QUOTE": `it has spaces and "quotes"`,
+		"APOSTROPHE":   "it's a $ecret with \"quotes\" inside",
+		"LITERAL_NL":   `line1\nline2 isn't a newline`,
+		"REAL_NL":      "line1\nline2",
+		"PEM_LIKE":     "-----BEGIN KEY-----\nab$c/d+e=\n-----END KEY-----",
+	}
+
+	mgr, err := NewManager("production")
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	for key, value := range cases {
+		if err := mgr.Set(key, value, "production"); err != nil {
+			t.Fatalf("Set %s returned error: %v", key, err)
+		}
+	}
+
+	reloaded, err := NewManager("production")
+	if err != nil {
+		t.Fatalf("reloading manager returned error: %v", err)
+	}
+	for key, want := range cases {
+		got, err := reloaded.Get(key)
+		if err != nil {
+			t.Fatalf("Get %s returned error: %v", key, err)
+		}
+		if got != want {
+			t.Fatalf("secret %s mangled through Set/Get: wrote %q, read %q", key, want, got)
+		}
+	}
+}
+
+// TestManagerSetRejectsUnrepresentableValues pins that the two value shapes
+// godotenv quoting cannot round-trip fail loudly at Set time instead of
+// being silently corrupted at read time.
+func TestManagerSetRejectsUnrepresentableValues(t *testing.T) {
+	withTempWorkingDir(t)
+
+	mgr, err := NewManager("production")
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	for name, value := range map[string]string{
+		"trailing backslash":               `spaced \`,
+		"single quote plus trailing quote": `it's "quoted"`,
+	} {
+		if err := mgr.Set("BAD", value, "production"); err == nil || !strings.Contains(err.Error(), "cannot be stored") {
+			t.Fatalf("%s: Set should reject unrepresentable value, got %v", name, err)
+		}
+	}
+}
+
 func TestManagerDeletePreservesOtherEncryptedSecrets(t *testing.T) {
 	withTempWorkingDir(t)
 
