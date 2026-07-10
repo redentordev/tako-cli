@@ -10,6 +10,50 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestServiceConfigYAMLMergePreservesNestedAliasesAndStructuredBuild(t *testing.T) {
+	input := `
+base: &base
+  build:
+    context: ./app
+    args:
+      NODE_ENV: production
+  env: &shared_env
+    CACHE_HOST: redis
+service:
+  <<: *base
+  env: *shared_env
+  command: ["run", "worker"]
+`
+	var doc struct {
+		Base    ServiceConfig `yaml:"base"`
+		Service ServiceConfig `yaml:"service"`
+	}
+	decoder := yaml.NewDecoder(strings.NewReader(input))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&doc); err != nil {
+		t.Fatalf("Decode returned error: %v", err)
+	}
+	if doc.Service.Build != "./app" || doc.Service.BuildArgs["NODE_ENV"] != "production" {
+		t.Fatalf("merged structured build = %q %#v", doc.Service.Build, doc.Service.BuildArgs)
+	}
+	if doc.Service.Env["CACHE_HOST"] != "redis" || !doc.Service.Command.IsList() {
+		t.Fatalf("merged service = %#v", doc.Service)
+	}
+}
+
+func TestMaterializeYAMLAliasesRejectsAmplification(t *testing.T) {
+	var target *yaml.Node = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "leaf"}
+	for i := 0; i < 17; i++ {
+		target = &yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+			{Kind: yaml.AliasNode, Value: "branch", Alias: target},
+			{Kind: yaml.AliasNode, Value: "branch", Alias: target},
+		}}
+	}
+	if _, err := materializeYAMLAliases(target); err == nil || !strings.Contains(err.Error(), "maximum size") {
+		t.Fatalf("amplification error = %v", err)
+	}
+}
+
 func TestServiceConfigStructuredBuildAndRuntimeControlsRoundTrip(t *testing.T) {
 	input := `build:
   context: ./sentry

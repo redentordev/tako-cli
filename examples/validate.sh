@@ -35,6 +35,15 @@ export MAILER_EMAIL="${MAILER_EMAIL:-ops@example.com}"
 export SECRET_KEY_BASE="${SECRET_KEY_BASE:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
 export REGISTRY_USER="${REGISTRY_USER:-example-registry-user}"
 export REGISTRY_TOKEN="${REGISTRY_TOKEN:-example-registry-token}"
+export SENTRY_BIND="${SENTRY_BIND:-9000}"
+export SENTRY_MAIL_HOST="${SENTRY_MAIL_HOST:-sentry.example.com}"
+export SENTRY_EVENT_RETENTION_DAYS="${SENTRY_EVENT_RETENTION_DAYS:-90}"
+export SENTRY_MAX_EXTERNAL_SOURCEMAP_SIZE="${SENTRY_MAX_EXTERNAL_SOURCEMAP_SIZE:-1M}"
+export SENTRY_KAFKA_MAX_POLL_INTERVAL_MS="${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS:-300000}"
+export SENTRY_TASKWORKER_CONCURRENCY="${SENTRY_TASKWORKER_CONCURRENCY:-4}"
+SENTRY_RELAY_CREDENTIALS_FILE="$TMP_DIR/relay-credentials.json"
+printf '%s\n' '{"id":"validation","public_key":"validation","secret_key":"validation"}' > "$SENTRY_RELAY_CREDENTIALS_FILE"
+export SENTRY_RELAY_CREDENTIALS_FILE
 
 validate_config() {
   local config_path="$1"

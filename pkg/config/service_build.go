@@ -88,16 +88,15 @@ func (s *ServiceConfig) UnmarshalYAML(node *yaml.Node) error {
 	if node == nil || node.Kind != yaml.MappingNode {
 		return fmt.Errorf("service must be a mapping")
 	}
-	copyNode := *node
-	copyNode.Content = append([]*yaml.Node(nil), node.Content...)
+	resolved, err := materializeYAMLAliases(node)
+	if err != nil {
+		return err
+	}
+	copyNode := *resolved
 	structured := false
 	var buildArgs map[string]string
 	var buildTarget string
-	for i := 0; i+1 < len(copyNode.Content); i += 2 {
-		if copyNode.Content[i].Value != "build" {
-			continue
-		}
-		value := copyNode.Content[i+1]
+	if value, valueIndex := yamlMappingValue(&copyNode, "build"); value != nil {
 		if value.Kind == yaml.MappingNode {
 			var build structuredServiceBuild
 			data, err := yaml.Marshal(value)
@@ -112,12 +111,19 @@ func (s *ServiceConfig) UnmarshalYAML(node *yaml.Node) error {
 			if strings.TrimSpace(build.Context) == "" {
 				return fmt.Errorf("invalid structured build: context is required")
 			}
-			copyNode.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: build.Context}
+			contextNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: build.Context}
+			if valueIndex >= 0 {
+				copyNode.Content[valueIndex] = contextNode
+			} else {
+				copyNode.Content = append(copyNode.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "build"},
+					contextNode,
+				)
+			}
 			buildArgs = build.Args
 			buildTarget = build.Target
 			structured = true
 		}
-		break
 	}
 
 	type plainServiceConfig ServiceConfig
@@ -136,6 +142,100 @@ func (s *ServiceConfig) UnmarshalYAML(node *yaml.Node) error {
 	s.BuildTarget = buildTarget
 	s.buildStructured = structured
 	return nil
+}
+
+// yamlMappingValue returns a mapping value using YAML merge precedence. The
+// index is the value's position when it is explicit in node, or -1 when it was
+// inherited through <<. Aliases have already been materialized.
+func yamlMappingValue(node *yaml.Node, key string) (*yaml.Node, int) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil, -1
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key && node.Content[i].Value != "<<" {
+			return node.Content[i+1], i + 1
+		}
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value != "<<" {
+			continue
+		}
+		merged := node.Content[i+1]
+		if merged.Kind == yaml.MappingNode {
+			value, _ := yamlMappingValue(merged, key)
+			if value != nil {
+				return value, -1
+			}
+		}
+		if merged.Kind == yaml.SequenceNode {
+			for _, candidate := range merged.Content {
+				value, _ := yamlMappingValue(candidate, key)
+				if value != nil {
+					return value, -1
+				}
+			}
+		}
+	}
+	return nil, -1
+}
+
+// materializeYAMLAliases clones a YAML node and replaces aliases with their
+// anchored values. ServiceConfig has a custom decoder for the build union and
+// therefore re-serializes one service node at a time; unresolved aliases that
+// point to anchors elsewhere in the document would otherwise be orphaned.
+// Merge keys remain merge keys, so yaml.v3 applies normal YAML precedence when
+// the isolated service is strictly decoded below.
+const (
+	maxYAMLAliasExpansionNodes = 100000
+	maxYAMLAliasExpansionDepth = 100
+)
+
+type yamlAliasMaterializer struct {
+	visiting map[*yaml.Node]bool
+	nodes    int
+}
+
+func materializeYAMLAliases(node *yaml.Node) (*yaml.Node, error) {
+	materializer := yamlAliasMaterializer{visiting: make(map[*yaml.Node]bool)}
+	return materializer.materialize(node, 0)
+}
+
+func (m *yamlAliasMaterializer) materialize(node *yaml.Node, depth int) (*yaml.Node, error) {
+	if node == nil {
+		return nil, nil
+	}
+	if depth > maxYAMLAliasExpansionDepth {
+		return nil, fmt.Errorf("YAML alias expansion exceeds maximum depth %d", maxYAMLAliasExpansionDepth)
+	}
+	m.nodes++
+	if m.nodes > maxYAMLAliasExpansionNodes {
+		return nil, fmt.Errorf("YAML alias expansion exceeds maximum size %d nodes", maxYAMLAliasExpansionNodes)
+	}
+	if node.Kind == yaml.AliasNode {
+		if node.Alias == nil {
+			return nil, fmt.Errorf("YAML alias %q has no target", node.Value)
+		}
+		if m.visiting[node.Alias] {
+			return nil, fmt.Errorf("cyclic YAML alias %q", node.Value)
+		}
+		m.visiting[node.Alias] = true
+		resolved, err := m.materialize(node.Alias, depth+1)
+		delete(m.visiting, node.Alias)
+		return resolved, err
+	}
+
+	clone := *node
+	clone.Anchor = ""
+	clone.Alias = nil
+	clone.Content = make([]*yaml.Node, len(node.Content))
+	for i, child := range node.Content {
+		resolved, err := m.materialize(child, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		clone.Content[i] = resolved
+	}
+	return &clone, nil
 }
 
 // MarshalYAML preserves structured build form when it was configured or when

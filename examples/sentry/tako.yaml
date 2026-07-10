@@ -1,0 +1,718 @@
+# Native Tako capability recipe for getsentry/self-hosted 26.6.0.
+# production = errors-only; feature-complete = production plus the upstream profile delta.
+
+project:
+  name: sentry-native
+  version: 26.6.0
+
+runtime:
+  mode: takod
+  proxy: tako-proxy
+
+deployment:
+  build:
+    strategy: remote
+
+builds:
+  sentry:
+    context: ./image
+    args:
+      SENTRY_IMAGE: ghcr.io/getsentry/sentry:26.6.0
+
+servers:
+  sentry:
+    host: ${SERVER_HOST}
+    user: root
+    sshKey: ${SSH_KEY}
+
+volumes:
+  sentry-data: {external: true, name: sentry-data}
+  sentry-postgres: {external: true, name: sentry-postgres}
+  sentry-redis: {external: true, name: sentry-redis}
+  sentry-kafka: {external: true, name: sentry-kafka}
+  sentry-clickhouse: {external: true, name: sentry-clickhouse}
+  sentry-seaweedfs: {external: true, name: sentry-seaweedfs}
+  sentry-symbolicator: {}
+  sentry-nginx-www: {}
+  sentry-nginx-cache: {}
+  sentry-taskbroker: {}
+  sentry-secrets: {}
+  sentry-smtp: {}
+  sentry-smtp-log: {}
+  sentry-kafka-log: {}
+  sentry-clickhouse-log: {}
+  sentry-vroom: {}
+
+environments:
+  production:
+    servers: [sentry]
+    labels:
+      sentryProfile: errors-only
+    services: &errors_only_services
+      smtp:
+        image: registry.gitlab.com/egos-tech/smtp
+        restart: unless-stopped
+        volumes:
+          - sentry-smtp:/var/spool/exim4
+          - sentry-smtp-log:/var/log/exim4
+        env:
+          MAILNAME: ${SENTRY_MAIL_HOST}
+
+      memcached:
+        image: memcached:1.6.26-alpine
+        restart: unless-stopped
+        command: ["-I", "${SENTRY_MAX_EXTERNAL_SOURCEMAP_SIZE}"]
+        healthCheck:
+          command: echo stats | nc 127.0.0.1 11211
+          interval: 30s
+          timeout: 10s
+          retries: 10
+
+      redis:
+        image: redis:6.2.20-alpine
+        restart: unless-stopped
+        persistent: true
+        command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+        volumes: [sentry-redis:/data]
+        ulimits:
+          nofile: {soft: 10032, hard: 10032}
+        files:
+          - source: ./config/redis.conf
+            target: /usr/local/etc/redis/redis.conf
+        healthCheck:
+          command: redis-cli ping | grep PONG
+          interval: 30s
+          timeout: 10s
+          retries: 10
+
+      postgres:
+        image: postgres:14.23-bookworm
+        restart: unless-stopped
+        persistent: true
+        shmSize: 256m
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        volumes: [sentry-postgres:/var/lib/postgresql/data]
+        healthCheck:
+          command: pg_isready -U postgres
+          interval: 30s
+          timeout: 10s
+          retries: 10
+
+      pgbouncer:
+        image: edoburu/pgbouncer:v1.24.1-p1
+        restart: unless-stopped
+        dependsOn: [postgres]
+        env:
+          DB_USER: postgres
+          DB_HOST: postgres
+          DB_NAME: postgres
+          AUTH_TYPE: trust
+          POOL_MODE: transaction
+          ADMIN_USERS: postgres,sentry
+          MAX_CLIENT_CONN: "10000"
+        healthCheck:
+          command: psql -U postgres -p 5432 -h 127.0.0.1 -tA -c 'select 1' -d postgres >/dev/null
+          interval: 30s
+          timeout: 10s
+          retries: 10
+
+      kafka:
+        image: confluentinc/cp-kafka:7.6.6
+        restart: unless-stopped
+        persistent: true
+        volumes:
+          - sentry-kafka:/var/lib/kafka/data
+          - sentry-kafka-log:/var/lib/kafka/log
+          - sentry-secrets:/etc/kafka/secrets
+        ulimits:
+          nofile: {soft: 4096, hard: 4096}
+        env:
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1001@127.0.0.1:29093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_NODE_ID: "1001"
+          CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+          KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,INTERNAL://0.0.0.0:9093,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:29093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:29092,INTERNAL://kafka:9093,EXTERNAL://kafka:9092
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+          KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS: "1"
+          KAFKA_LOG_RETENTION_HOURS: "24"
+          KAFKA_MESSAGE_MAX_BYTES: "50000000"
+          KAFKA_MAX_REQUEST_SIZE: "50000000"
+          CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+        healthCheck:
+          command: nc -z localhost 9092
+          interval: 10s
+          timeout: 10s
+          retries: 30
+
+      clickhouse:
+        image: altinity/clickhouse-server:25.3.6.10034.altinitystable
+        restart: unless-stopped
+        persistent: true
+        volumes:
+          - sentry-clickhouse:/var/lib/clickhouse
+          - sentry-clickhouse-log:/var/log/clickhouse-server
+        ulimits:
+          nofile: {soft: 262144, hard: 262144}
+        files:
+          - source: ./config/clickhouse/config.xml
+            target: /etc/clickhouse-server/config.d/sentry.xml
+          - source: ./config/clickhouse/default-password.xml
+            target: /etc/clickhouse-server/users.d/default-password.xml
+        env:
+          MAX_MEMORY_USAGE_RATIO: "0.3"
+        healthCheck:
+          command: HTTP_PROXY='' http_proxy='' wget -nv -t1 --spider http://localhost:8123/
+          interval: 10s
+          timeout: 10s
+          retries: 30
+
+      seaweedfs:
+        image: chrislusf/seaweedfs:4.17_large_disk
+        restart: unless-stopped
+        persistent: true
+        entrypoint: ["weed"]
+        command: ["server", "-dir=/data", "-filer=true", "-filer.port=8888", "-filer.port.grpc=18888", "-filer.defaultReplicaPlacement=000", "-master=true", "-master.port=9333", "-master.port.grpc=19333", "-metricsPort=9091", "-s3=true", "-s3.port=8333", "-s3.port.grpc=18333", "-volume=true", "-volume.dir.idx=/data/idx", "-volume.index=leveldbLarge", "-volume.max=0", "-volume.preStopSeconds=8", "-volume.readMode=redirect", "-volume.port=8080", "-volume.port.grpc=18080", "-ip.bind=0.0.0.0", "-webdav=false"]
+        env: &seaweed_env
+          AWS_ACCESS_KEY_ID: sentry
+          AWS_SECRET_ACCESS_KEY: sentry
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+        volumes: [sentry-seaweedfs:/data]
+        healthCheck:
+          command: http_proxy='' wget -q -O- http://localhost:8080/healthz http://localhost:9333/cluster/healthz http://localhost:8333/healthz
+          interval: 30s
+          timeout: 20s
+          retries: 5
+          startPeriod: 60s
+
+      seaweedfs-admin:
+        image: chrislusf/seaweedfs:4.17_large_disk
+        restart: unless-stopped
+        entrypoint: ["weed"]
+        command: ["admin", "-port=23646", "-master=seaweedfs:9333"]
+        env: *seaweed_env
+        dependsOn: [seaweedfs]
+
+      seaweedfs-worker:
+        image: chrislusf/seaweedfs:4.17_large_disk
+        restart: unless-stopped
+        entrypoint: ["weed"]
+        command: ["worker", "-admin=seaweedfs-admin:23646", "-jobType=all"]
+        env: *seaweed_env
+        dependsOn: [seaweedfs-admin]
+
+      snuba-api:
+        image: ghcr.io/getsentry/snuba:26.6.0
+        port: 1218
+        restart: unless-stopped
+        dependsOn: [clickhouse, kafka, redis]
+        env: &snuba_env
+          SNUBA_SETTINGS: self_hosted
+          CLICKHOUSE_HOST: clickhouse
+          DEFAULT_BROKERS: kafka:9092
+          REDIS_HOST: redis
+          UWSGI_MAX_REQUESTS: "10000"
+          UWSGI_DISABLE_LOGGING: "true"
+          SENTRY_EVENT_RETENTION_DAYS: ${SENTRY_EVENT_RETENTION_DAYS}
+          SENTRY_KAFKA_MAX_POLL_INTERVAL_MS: ${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}
+        healthCheck:
+          tcpPort: 1218
+          interval: 30s
+          timeout: 10s
+          retries: 10
+
+      snuba-errors-consumer: &snuba_worker
+        image: ghcr.io/getsentry/snuba:26.6.0
+        restart: unless-stopped
+        dependsOn: [clickhouse, kafka, redis, snuba-bootstrap]
+        env: *snuba_env
+        command: ["rust-consumer","--storage","errors","--consumer-group","snuba-consumers","--auto-offset-reset=latest","--max-batch-time-ms","750","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+        healthCheck:
+          command: test -f /tmp/health.txt && rm /tmp/health.txt
+          interval: 60s
+          timeout: 10s
+          retries: 3
+          startPeriod: 600s
+
+      snuba-outcomes-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","outcomes_raw","--consumer-group","snuba-consumers","--auto-offset-reset=earliest","--max-batch-time-ms","750","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+
+      snuba-outcomes-billing-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","outcomes_raw","--consumer-group","snuba-consumers","--auto-offset-reset=earliest","--max-batch-time-ms","750","--no-strict-offset-reset","--raw-events-topic","outcomes-billing","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+
+      snuba-group-attributes-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","group_attributes","--consumer-group","snuba-group-attributes-consumers","--auto-offset-reset=latest","--max-batch-time-ms","750","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+
+      snuba-replacer:
+        <<: *snuba_worker
+        command: ["replacer","--storage","errors","--auto-offset-reset=latest","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+
+      snuba-subscription-consumer-events:
+        <<: *snuba_worker
+        command: ["subscriptions-scheduler-executor","--dataset","events","--entity","events","--auto-offset-reset=latest","--no-strict-offset-reset","--consumer-group=snuba-events-subscriptions-consumers","--followed-consumer-group=snuba-consumers","--schedule-ttl=60","--stale-threshold-seconds=900","--health-check-file","/tmp/health.txt"]
+
+      snuba-subscription-consumer-eap-items:
+        <<: *snuba_worker
+        command: ["subscriptions-scheduler-executor","--dataset","events_analytics_platform","--entity","eap_items","--auto-offset-reset=latest","--no-strict-offset-reset","--consumer-group=snuba-eap-items-subscriptions-consumers","--followed-consumer-group=eap_items_group","--schedule-ttl=60","--stale-threshold-seconds=900","--health-check-file","/tmp/health.txt"]
+
+      symbolicator:
+        image: ghcr.io/getsentry/symbolicator:26.6.0
+        port: 3021
+        restart: unless-stopped
+        command: ["run", "-c", "/etc/symbolicator/config.yml"]
+        env:
+          SYMBOLICATOR_STATSD_ADDR: 127.0.0.1:8125
+        volumes: [sentry-symbolicator:/data]
+        files:
+          - source: ./config/symbolicator
+            target: /etc/symbolicator
+        healthCheck:
+          command: /bin/symbolicator healthcheck -c /etc/symbolicator/config.yml
+          interval: 30s
+          timeout: 10s
+          retries: 10
+
+      symbolicator-cleanup:
+        image: ghcr.io/getsentry/symbolicator:26.6.0
+        restart: unless-stopped
+        command: ["cleanup", "-c", "/etc/symbolicator/config.yml", "--repeat", "1h"]
+        env:
+          SYMBOLICATOR_STATSD_ADDR: 127.0.0.1:8125
+        volumes: [sentry-symbolicator:/data]
+        files:
+          - source: ./config/symbolicator
+            target: /etc/symbolicator
+
+      events-consumer: &sentry_worker
+        imageFrom: sentry
+        restart: unless-stopped
+        entrypoint: ["/etc/sentry/entrypoint.sh"]
+        dependsOn: [redis, kafka, pgbouncer, memcached, smtp, seaweedfs, snuba-api, symbolicator, sentry-upgrade]
+        env: &sentry_env
+          PYTHONUSERBASE: /data/custom-packages
+          SENTRY_CONF: /etc/sentry
+          SNUBA: http://snuba-api:1218
+          VROOM: http://vroom:8085
+          COMPOSE_PROFILES: errors-only
+          SENTRY_MAIL_HOST: ${SENTRY_MAIL_HOST}
+          SENTRY_EVENT_RETENTION_DAYS: ${SENTRY_EVENT_RETENTION_DAYS}
+          SENTRY_TASKWORKER_CONCURRENCY: ${SENTRY_TASKWORKER_CONCURRENCY}
+          SENTRY_KAFKA_MAX_POLL_INTERVAL_MS: ${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}
+        secrets: [SENTRY_SYSTEM_SECRET_KEY]
+        volumes: [sentry-data:/data]
+        files: &sentry_files
+          - source: ./config/sentry
+            target: /etc/sentry
+        command: ["run","consumer","ingest-events","--consumer-group","ingest-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+        healthCheck:
+          command: test -f /tmp/health.txt && rm /tmp/health.txt
+          interval: 60s
+          timeout: 10s
+          retries: 3
+          startPeriod: 600s
+
+      web:
+        <<: *sentry_worker
+        port: 9000
+        command: ["run", "web"]
+        ulimits:
+          nofile: {soft: 4096, hard: 4096}
+        healthCheck:
+          path: /_health/
+          interval: 30s
+          timeout: 10s
+          retries: 10
+
+      attachments-consumer:
+        <<: *sentry_worker
+        command: ["run","consumer","ingest-attachments","--consumer-group","ingest-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+
+      post-process-forwarder-errors:
+        <<: *sentry_worker
+        command: ["run","consumer","--no-strict-offset-reset","post-process-forwarder-errors","--consumer-group","post-process-forwarder","--synchronize-commit-log-topic=snuba-commit-log","--synchronize-commit-group=snuba-consumers","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+
+      subscription-consumer-events:
+        <<: *sentry_worker
+        command: ["run","consumer","events-subscription-results","--consumer-group","query-subscription-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+
+      sentry-cleanup:
+        kind: job
+        schedule: "0 0 * * *"
+        imageFrom: sentry
+        entrypoint: ["/etc/sentry/entrypoint.sh"]
+        command: ["cleanup", "--days", "${SENTRY_EVENT_RETENTION_DAYS}"]
+        env: *sentry_env
+        secrets: [SENTRY_SYSTEM_SECRET_KEY]
+        volumes: [sentry-data:/data]
+        files: *sentry_files
+        dependsOn: [sentry-upgrade]
+
+      nginx:
+        image: nginx:1.31.0-alpine
+        port: 80
+        restart: unless-stopped
+        ports: ["${SENTRY_BIND}:80/tcp"]
+        volumes:
+          - sentry-nginx-cache:/var/cache/nginx
+          - sentry-nginx-www:/var/www
+        files:
+          - source: ./config/nginx.conf
+            target: /etc/nginx/nginx.conf
+        dependsOn: [web, relay]
+        deploy:
+          strategy: recreate
+        healthCheck:
+          path: /
+          interval: 30s
+          timeout: 10s
+          retries: 10
+
+      relay:
+        image: ghcr.io/getsentry/relay:26.6.0
+        restart: unless-stopped
+        dependsOn: [kafka, redis, web]
+        env:
+          RELAY_STATSD_ADDR: 127.0.0.1:8125
+        files:
+          - source: ./config/relay/config.yml
+            target: /work/.relay/config.yml
+          - source: ${SENTRY_RELAY_CREDENTIALS_FILE}
+            target: /work/.relay/credentials.json
+            secret: true
+
+      taskbroker:
+        image: ghcr.io/getsentry/taskbroker:26.6.0
+        port: 50051
+        restart: unless-stopped
+        command: ["/opt/taskbroker", "-c", "/etc/taskbroker/config.yml"]
+        env:
+          TASKBROKER_KAFKA_CLUSTERS__DEFAULT__ADDRESS: kafka:9092
+          TASKBROKER_DB_PATH: /opt/sqlite/taskbroker-activations.sqlite
+        volumes: [sentry-taskbroker:/opt/sqlite]
+        files:
+          - source: ./config/taskbroker
+            target: /etc/taskbroker
+        dependsOn: [kafka]
+
+      taskscheduler:
+        imageFrom: sentry
+        restart: unless-stopped
+        entrypoint: ["/etc/sentry/entrypoint.sh"]
+        env: *sentry_env
+        secrets: [SENTRY_SYSTEM_SECRET_KEY]
+        volumes: [sentry-data:/data]
+        files: *sentry_files
+        command: ["run", "taskworker-scheduler"]
+        dependsOn: [redis, kafka, pgbouncer, memcached, smtp, seaweedfs, snuba-api, symbolicator, sentry-upgrade, taskbroker]
+
+      taskworker:
+        <<: *sentry_worker
+        command: ["run", "taskworker", "--concurrency=${SENTRY_TASKWORKER_CONCURRENCY}", "--rpc-host=taskbroker:50051", "--health-check-file-path=/tmp/health.txt", "--max-child-task-count=10000"]
+        dependsOn: [redis, kafka, pgbouncer, memcached, smtp, seaweedfs, snuba-api, symbolicator, sentry-upgrade, taskbroker]
+
+      snuba-bootstrap:
+        kind: run
+        image: ghcr.io/getsentry/snuba:26.6.0
+        command: ["bootstrap", "--force"]
+        env: *snuba_env
+        dependsOn: [clickhouse, kafka, redis]
+        timeout: 30m
+
+      sentry-upgrade:
+        kind: run
+        imageFrom: sentry
+        entrypoint: ["/etc/sentry/entrypoint.sh"]
+        command: ["upgrade", "--noinput", "--create-kafka-topics"]
+        env: *sentry_env
+        secrets: [SENTRY_SYSTEM_SECRET_KEY]
+        volumes: [sentry-data:/data]
+        files: *sentry_files
+        dependsOn: [postgres, redis, kafka, pgbouncer, memcached, smtp, seaweedfs, snuba-api, symbolicator, snuba-bootstrap, s3-nodestore-bootstrap]
+        timeout: 1h
+
+      s3-nodestore-bootstrap:
+        kind: run
+        image: chrislusf/seaweedfs:4.17_large_disk
+        entrypoint: ["/bin/sh"]
+        command: ["/opt/tako/bootstrap-s3.sh"]
+        env:
+          SENTRY_BUCKET: nodestore
+          SENTRY_EVENT_RETENTION_DAYS: ${SENTRY_EVENT_RETENTION_DAYS}
+        files:
+          - source: ./scripts/bootstrap-s3.sh
+            target: /opt/tako/bootstrap-s3.sh
+        volumes: [sentry-seaweedfs:/data]
+        dependsOn: [seaweedfs]
+        timeout: 10m
+
+  feature-complete:
+    servers: [sentry]
+    labels:
+      sentryProfile: feature-complete
+    services:
+      <<: *errors_only_services
+
+      # The inherited Sentry processes must also see the full-profile flag;
+      # the service-map merge is shallow, so these are explicit overrides.
+      events-consumer: &feature_sentry_worker
+        <<: *sentry_worker
+        env: &feature_sentry_env
+          PYTHONUSERBASE: /data/custom-packages
+          SENTRY_CONF: /etc/sentry
+          SNUBA: http://snuba-api:1218
+          VROOM: http://vroom:8085
+          COMPOSE_PROFILES: feature-complete
+          SENTRY_MAIL_HOST: ${SENTRY_MAIL_HOST}
+          SENTRY_EVENT_RETENTION_DAYS: ${SENTRY_EVENT_RETENTION_DAYS}
+          SENTRY_TASKWORKER_CONCURRENCY: ${SENTRY_TASKWORKER_CONCURRENCY}
+          SENTRY_KAFKA_MAX_POLL_INTERVAL_MS: ${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}
+        secrets: [SENTRY_SYSTEM_SECRET_KEY, LAUNCHPAD_RPC_SHARED_SECRET]
+        command: ["run","consumer","ingest-events","--consumer-group","ingest-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      web:
+        <<: *feature_sentry_worker
+        port: 9000
+        command: ["run", "web"]
+        ulimits:
+          nofile: {soft: 4096, hard: 4096}
+        healthCheck:
+          path: /_health/
+          interval: 30s
+          timeout: 10s
+          retries: 10
+      attachments-consumer:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","ingest-attachments","--consumer-group","ingest-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      post-process-forwarder-errors:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","--no-strict-offset-reset","post-process-forwarder-errors","--consumer-group","post-process-forwarder","--synchronize-commit-log-topic=snuba-commit-log","--synchronize-commit-group=snuba-consumers","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      subscription-consumer-events:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","events-subscription-results","--consumer-group","query-subscription-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      taskscheduler:
+        imageFrom: sentry
+        restart: unless-stopped
+        entrypoint: ["/etc/sentry/entrypoint.sh"]
+        env: *feature_sentry_env
+        secrets: [SENTRY_SYSTEM_SECRET_KEY, LAUNCHPAD_RPC_SHARED_SECRET]
+        volumes: [sentry-data:/data]
+        files: *sentry_files
+        command: ["run", "taskworker-scheduler"]
+        dependsOn: [redis, kafka, pgbouncer, memcached, smtp, seaweedfs, snuba-api, symbolicator, sentry-upgrade, taskbroker]
+      taskworker:
+        <<: *feature_sentry_worker
+        command: ["run", "taskworker", "--concurrency=${SENTRY_TASKWORKER_CONCURRENCY}", "--rpc-host=taskbroker:50051", "--health-check-file-path=/tmp/health.txt", "--max-child-task-count=10000"]
+        dependsOn: [redis, kafka, pgbouncer, memcached, smtp, seaweedfs, snuba-api, symbolicator, sentry-upgrade, taskbroker]
+      sentry-cleanup:
+        kind: job
+        schedule: "0 0 * * *"
+        imageFrom: sentry
+        entrypoint: ["/etc/sentry/entrypoint.sh"]
+        command: ["cleanup", "--days", "${SENTRY_EVENT_RETENTION_DAYS}"]
+        env: *feature_sentry_env
+        secrets: [SENTRY_SYSTEM_SECRET_KEY, LAUNCHPAD_RPC_SHARED_SECRET]
+        volumes: [sentry-data:/data]
+        files: *sentry_files
+        dependsOn: [sentry-upgrade]
+      sentry-upgrade:
+        kind: run
+        imageFrom: sentry
+        entrypoint: ["/etc/sentry/entrypoint.sh"]
+        command: ["upgrade", "--noinput", "--create-kafka-topics"]
+        env: *feature_sentry_env
+        secrets: [SENTRY_SYSTEM_SECRET_KEY, LAUNCHPAD_RPC_SHARED_SECRET]
+        volumes: [sentry-data:/data]
+        files: *sentry_files
+        dependsOn: [postgres, redis, kafka, pgbouncer, memcached, smtp, seaweedfs, snuba-api, symbolicator, snuba-bootstrap, s3-nodestore-bootstrap, s3-profiles-bootstrap]
+        timeout: 1h
+
+      snuba-transactions-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","transactions","--consumer-group","transactions_group","--auto-offset-reset=latest","--max-batch-time-ms","750","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      snuba-replays-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","replays","--consumer-group","snuba-consumers","--auto-offset-reset=latest","--max-batch-time-ms","750","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      snuba-issue-occurrence-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","search_issues","--consumer-group","generic_events_group","--auto-offset-reset=latest","--max-batch-time-ms","750","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      snuba-metrics-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","metrics_raw","--consumer-group","snuba-metrics-consumers","--auto-offset-reset=latest","--max-batch-time-ms","750","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      snuba-subscription-consumer-transactions:
+        <<: *snuba_worker
+        command: ["subscriptions-scheduler-executor","--dataset","transactions","--entity","transactions","--auto-offset-reset=latest","--no-strict-offset-reset","--consumer-group=snuba-transactions-subscriptions-consumers","--followed-consumer-group=transactions_group","--schedule-ttl=60","--stale-threshold-seconds=900","--health-check-file","/tmp/health.txt"]
+      snuba-subscription-consumer-metrics:
+        <<: *snuba_worker
+        command: ["subscriptions-scheduler-executor","--dataset","metrics","--entity","metrics_sets","--entity","metrics_counters","--auto-offset-reset=latest","--no-strict-offset-reset","--consumer-group=snuba-metrics-subscriptions-consumers","--followed-consumer-group=snuba-metrics-consumers","--schedule-ttl=60","--stale-threshold-seconds=900","--health-check-file","/tmp/health.txt"]
+      snuba-subscription-consumer-generic-metrics-distributions:
+        <<: *snuba_worker
+        command: ["subscriptions-scheduler-executor","--dataset","generic_metrics","--entity=generic_metrics_distributions","--auto-offset-reset=latest","--no-strict-offset-reset","--consumer-group=snuba-generic-metrics-distributions-subscriptions-schedulers","--followed-consumer-group=snuba-gen-metrics-distributions-consumers","--schedule-ttl=60","--stale-threshold-seconds=900","--health-check-file","/tmp/health.txt"]
+      snuba-subscription-consumer-generic-metrics-sets:
+        <<: *snuba_worker
+        command: ["subscriptions-scheduler-executor","--dataset","generic_metrics","--entity=generic_metrics_sets","--auto-offset-reset=latest","--no-strict-offset-reset","--consumer-group=snuba-generic-metrics-sets-subscriptions-schedulers","--followed-consumer-group=snuba-gen-metrics-sets-consumers","--schedule-ttl=60","--stale-threshold-seconds=900","--health-check-file","/tmp/health.txt"]
+      snuba-subscription-consumer-generic-metrics-counters:
+        <<: *snuba_worker
+        command: ["subscriptions-scheduler-executor","--dataset","generic_metrics","--entity=generic_metrics_counters","--auto-offset-reset=latest","--no-strict-offset-reset","--consumer-group=snuba-generic-metrics-counters-subscriptions-schedulers","--followed-consumer-group=snuba-gen-metrics-counters-consumers","--schedule-ttl=60","--stale-threshold-seconds=900","--health-check-file","/tmp/health.txt"]
+      snuba-subscription-consumer-generic-metrics-gauges:
+        <<: *snuba_worker
+        command: ["subscriptions-scheduler-executor","--dataset","generic_metrics","--entity=generic_metrics_gauges","--auto-offset-reset=latest","--no-strict-offset-reset","--consumer-group=snuba-generic-metrics-gauges-subscriptions-schedulers","--followed-consumer-group=snuba-gen-metrics-gauges-consumers","--schedule-ttl=60","--stale-threshold-seconds=900","--health-check-file","/tmp/health.txt"]
+      snuba-generic-metrics-distributions-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","generic_metrics_distributions_raw","--consumer-group","snuba-gen-metrics-distributions-consumers","--auto-offset-reset=latest","--max-batch-time-ms","750","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      snuba-generic-metrics-sets-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","generic_metrics_sets_raw","--consumer-group","snuba-gen-metrics-sets-consumers","--auto-offset-reset=latest","--max-batch-time-ms","750","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      snuba-generic-metrics-counters-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","generic_metrics_counters_raw","--consumer-group","snuba-gen-metrics-counters-consumers","--auto-offset-reset=latest","--max-batch-time-ms","750","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      snuba-generic-metrics-gauges-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","generic_metrics_gauges_raw","--consumer-group","snuba-gen-metrics-gauges-consumers","--auto-offset-reset=latest","--max-batch-time-ms","750","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      snuba-profiling-profiles-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","profiles","--consumer-group","snuba-consumers","--auto-offset-reset=latest","--max-batch-time-ms","1000","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+        dependsOn: [clickhouse, kafka, redis, snuba-bootstrap, s3-profiles-bootstrap]
+      snuba-profiling-functions-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","functions_raw","--consumer-group","snuba-consumers","--auto-offset-reset=latest","--max-batch-time-ms","1000","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+        dependsOn: [clickhouse, kafka, redis, snuba-bootstrap, s3-profiles-bootstrap]
+      snuba-profiling-profile-chunks-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","profile_chunks","--consumer-group","snuba-consumers","--auto-offset-reset=latest","--max-batch-time-ms","1000","--no-strict-offset-reset","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+        dependsOn: [clickhouse, kafka, redis, snuba-bootstrap, s3-profiles-bootstrap]
+      snuba-eap-items-consumer:
+        <<: *snuba_worker
+        command: ["rust-consumer","--storage","eap_items","--consumer-group","eap_items_group","--auto-offset-reset=latest","--max-batch-time-ms","1000","--no-strict-offset-reset","--use-rust-processor","--health-check-file","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+
+      transactions-consumer:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","ingest-transactions","--consumer-group","ingest-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      metrics-consumer:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","ingest-metrics","--consumer-group","metrics-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      generic-metrics-consumer:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","ingest-generic-metrics","--consumer-group","generic-metrics-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      billing-metrics-consumer:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","billing-metrics-consumer","--consumer-group","billing-metrics-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      ingest-replay-recordings:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","ingest-replay-recordings","--consumer-group","ingest-replay-recordings","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      ingest-occurrences:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","ingest-occurrences","--consumer-group","ingest-occurrences","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      ingest-profiles:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","ingest-profiles","--consumer-group","ingest-profiles","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      ingest-monitors:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","ingest-monitors","--consumer-group","ingest-monitors","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      ingest-feedback-events:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","ingest-feedback-events","--consumer-group","ingest-feedback","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      process-spans:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","--no-strict-offset-reset","process-spans","--consumer-group","process-spans","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      process-segments:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","--no-strict-offset-reset","process-segments","--consumer-group","process-segments","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      monitors-clock-tick:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","monitors-clock-tick","--consumer-group","monitors-clock-tick","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      monitors-clock-tasks:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","monitors-clock-tasks","--consumer-group","monitors-clock-tasks","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      uptime-results:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","uptime-results","--consumer-group","uptime-results","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      post-process-forwarder-transactions:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","--no-strict-offset-reset","post-process-forwarder-transactions","--consumer-group","post-process-forwarder","--synchronize-commit-log-topic=snuba-transactions-commit-log","--synchronize-commit-group=transactions_group","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      post-process-forwarder-issue-platform:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","--no-strict-offset-reset","post-process-forwarder-issue-platform","--consumer-group","post-process-forwarder","--synchronize-commit-log-topic=snuba-generic-events-commit-log","--synchronize-commit-group=generic_events_group","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      subscription-consumer-transactions:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","transactions-subscription-results","--consumer-group","query-subscription-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      subscription-consumer-eap-items:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","subscription-results-eap-items","--consumer-group","subscription-results-eap-items","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      subscription-consumer-metrics:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","metrics-subscription-results","--consumer-group","query-subscription-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+      subscription-consumer-generic-metrics:
+        <<: *feature_sentry_worker
+        command: ["run","consumer","generic-metrics-subscription-results","--consumer-group","query-subscription-consumer","--healthcheck-file-path","/tmp/health.txt","--max-poll-interval-ms","${SENTRY_KAFKA_MAX_POLL_INTERVAL_MS}"]
+
+      launchpad-taskworker:
+        image: ghcr.io/getsentry/launchpad:26.6.0
+        restart: unless-stopped
+        command: ["worker", "--verbose"]
+        env:
+          LAUNCHPAD_WORKER_RPC_HOST: taskbroker:50051
+          LAUNCHPAD_WORKER_CONCURRENCY: "4"
+          LAUNCHPAD_WORKER_HEALTH_CHECK_FILE_PATH: /tmp/health.txt
+          KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+          SENTRY_BASE_URL: http://web:9000
+          LAUNCHPAD_ENV: self-hosted
+        secrets: [LAUNCHPAD_RPC_SHARED_SECRET]
+        dependsOn: [kafka, taskbroker, web]
+        healthCheck:
+          command: test -f /tmp/health.txt && rm /tmp/health.txt
+          interval: 60s
+          timeout: 10s
+          retries: 3
+          startPeriod: 600s
+
+      vroom:
+        image: ghcr.io/getsentry/vroom:26.6.0
+        port: 8085
+        restart: unless-stopped
+        env:
+          SENTRY_KAFKA_BROKERS_PROFILING: kafka:9092
+          SENTRY_KAFKA_BROKERS_OCCURRENCES: kafka:9092
+          SENTRY_BUCKET_PROFILES: s3://profiles?region=us-east-1&endpoint=seaweedfs:8333&s3ForcePathStyle=true&disableSSL=true
+          AWS_ACCESS_KEY: sentry
+          AWS_SECRET_KEY: sentry
+          SENTRY_SNUBA_HOST: http://snuba-api:1218
+        volumes: [sentry-vroom:/var/vroom/sentry-profiles]
+        dependsOn: [kafka, s3-profiles-bootstrap]
+        healthCheck:
+          tcpPort: 8085
+          interval: 30s
+          timeout: 10s
+          retries: 10
+
+      uptime-checker:
+        image: ghcr.io/getsentry/uptime-checker:26.6.0
+        restart: unless-stopped
+        command: ["run"]
+        env:
+          UPTIME_CHECKER_RESULTS_KAFKA_CLUSTER: kafka:9092
+          UPTIME_CHECKER_REDIS_HOST: redis://redis:6379
+          UPTIME_CHECKER_ALLOW_INTERNAL_IPS: "false"
+          UPTIME_CHECKER_FAILURE_RETRIES: "1"
+        dependsOn: [kafka, redis]
+
+      s3-profiles-bootstrap:
+        kind: run
+        image: chrislusf/seaweedfs:4.17_large_disk
+        entrypoint: ["/bin/sh"]
+        command: ["/opt/tako/bootstrap-s3.sh"]
+        env:
+          SENTRY_BUCKET: profiles
+          SENTRY_EVENT_RETENTION_DAYS: ${SENTRY_EVENT_RETENTION_DAYS}
+        files:
+          - source: ./scripts/bootstrap-s3.sh
+            target: /opt/tako/bootstrap-s3.sh
+        volumes: [sentry-seaweedfs:/data]
+        dependsOn: [seaweedfs]
+        timeout: 10m
