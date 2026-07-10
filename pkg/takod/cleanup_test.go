@@ -44,18 +44,12 @@ func TestImageRepositoryMatchesProject(t *testing.T) {
 	for _, repo := range []string{
 		"demo/web",
 		"demo",
-		"registry.example.com/demo/web",
-		"localhost:5000/demo/web",
-	} {
-		if !imageRepositoryMatchesProject(repo, "demo", nil) {
-			t.Fatalf("expected repository %q to match project", repo)
-		}
-	}
-
-	for _, repo := range []string{
 		"demo-app/web",
 		"company/demo-web",
 		"registry.example.com/notdemo/web",
+		"registry.example.com/demo/web",
+		"localhost:5000/demo/web",
+		"getsentry/sentry",
 	} {
 		if imageRepositoryMatchesProject(repo, "demo", nil) {
 			t.Fatalf("expected repository %q not to match project", repo)
@@ -163,13 +157,146 @@ func TestCleanupDanglingImagesUsesDockerImagePrune(t *testing.T) {
 	}
 
 	entries := readCommandLog(t, logPath)
-	if !slices.Contains(entries, "docker image prune -f") {
-		t.Fatalf("docker log missing image prune call in %#v", entries)
+	listWant := "docker images -f dangling=true --filter label!=" + composeProjectImageLabel + " -q"
+	if !slices.Contains(entries, listWant) {
+		t.Fatalf("docker log missing %q in %#v", listWant, entries)
+	}
+	want := "docker image prune -f --filter label!=" + composeProjectImageLabel
+	if !slices.Contains(entries, want) {
+		t.Fatalf("docker log missing %q in %#v", want, entries)
 	}
 	for _, entry := range entries {
 		if strings.HasPrefix(entry, "docker rmi ") {
 			t.Fatalf("cleanup should not remove dangling image IDs directly via %q; all entries %#v", entry, entries)
 		}
+	}
+}
+
+func TestCleanupImagesExcludesComposeOwnedImages(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	// The fake output represents Docker's already-filtered candidate list.
+	t.Setenv("TAKO_FAKE_IMAGE_LIST_OUTPUT", "tako-id\tdemo/web\ttako\n")
+
+	removed, err := cleanupImages(context.Background(), "demo", []string{"demo/web"})
+	if err != nil {
+		t.Fatalf("cleanupImages returned error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	entries := readCommandLog(t, logPath)
+	listWant := "docker images --filter label!=" + composeProjectImageLabel + " --format {{.ID}}\t{{.Repository}}\t{{.Tag}}"
+	if !slices.Contains(entries, listWant) {
+		t.Fatalf("docker log missing Compose exclusion %q in %#v", listWant, entries)
+	}
+	if !slices.Contains(entries, "docker rmi -f demo/web:tako") {
+		t.Fatalf("docker log missing Tako image removal in %#v", entries)
+	}
+}
+
+func TestCleanupImagesRemovesOnlyAllowlistedTagWhenImageIDIsShared(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	t.Setenv("TAKO_FAKE_IMAGE_LIST_OUTPUT", strings.Join([]string{
+		"shared-id\tdemo/web\ttako",
+		"shared-id\tunrelated/cache\tlatest",
+	}, "\n")+"\n")
+	removed, err := cleanupImages(context.Background(), "demo", []string{"demo/web"})
+	if err != nil {
+		t.Fatalf("cleanupImages returned error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	entries := readCommandLog(t, logPath)
+	if !slices.Contains(entries, "docker rmi -f demo/web:tako") {
+		t.Fatalf("docker log missing allowlisted tag removal in %#v", entries)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry, "unrelated/cache") || strings.Contains(entry, "rmi -f shared-id") {
+			t.Fatalf("cleanup exceeded allowlist via %q", entry)
+		}
+	}
+}
+
+func TestCleanupOldProjectImagesExcludesComposeOwnedImages(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	t.Setenv("TAKO_FAKE_IMAGE_LIST_OUTPUT", strings.Join([]string{
+		"tako-new\tdemo/web\tnew",
+		"tako-old\tdemo/web\told",
+	}, "\n")+"\n")
+
+	removed, err := cleanupOldProjectImages(context.Background(), "demo", 1, []string{"demo/web"})
+	if err != nil {
+		t.Fatalf("cleanupOldProjectImages returned error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	entries := readCommandLog(t, logPath)
+	listWant := "docker images --filter label!=" + composeProjectImageLabel + " --format {{.ID}}\t{{.Repository}}\t{{.Tag}}"
+	if !slices.Contains(entries, listWant) {
+		t.Fatalf("docker log missing Compose exclusion %q in %#v", listWant, entries)
+	}
+	if !slices.Contains(entries, "docker rmi -f demo/web:old") {
+		t.Fatalf("docker log missing Tako image removal in %#v", entries)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry, "rmi") && strings.Contains(entry, "compose-id") {
+			t.Fatalf("cleanup removed Compose-owned image via %q", entry)
+		}
+	}
+}
+
+func TestCleanupImagesFailsClosedWhenComposeImageInventoryFails(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	t.Setenv("TAKO_FAKE_IMAGE_LIST_ERROR", "inventory failed")
+	if _, err := cleanupImages(context.Background(), "demo", []string{"demo/web"}); err == nil || !strings.Contains(err.Error(), "list docker images") {
+		t.Fatalf("expected image inventory error, got %v", err)
+	}
+	for _, entry := range readCommandLog(t, logPath) {
+		if strings.HasPrefix(entry, "docker rmi ") {
+			t.Fatalf("cleanup should fail before removal, got %q", entry)
+		}
+	}
+}
+
+func TestCleanupImagesWithoutExplicitAllowlistRemovesNothing(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	t.Setenv("TAKO_FAKE_IMAGE_LIST_OUTPUT", strings.Join([]string{
+		"upstream\tpostgres\tlatest",
+		"namespace\tgetsentry/sentry\tlatest",
+		"local\tdemo/web\tlatest",
+	}, "\n")+"\n")
+	removed, err := cleanupImages(context.Background(), "postgres", nil)
+	if err != nil {
+		t.Fatalf("cleanupImages returned error: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed = %d, want 0", removed)
+	}
+	if _, err := os.Stat(logPath); err == nil {
+		for _, entry := range readCommandLog(t, logPath) {
+			if strings.HasPrefix(entry, "docker rmi ") {
+				t.Fatalf("cleanup without allowlist removed an image via %q", entry)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("failed to stat command log: %v", err)
 	}
 }
 

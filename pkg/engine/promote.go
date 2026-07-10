@@ -127,6 +127,9 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 		return nil, err
 	}
 	defer leaseSet.Release()
+	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
 	leaseSet.SetWarnFunc(func(message string) {
 		e.debug(events.TypeWarning, events.PhaseDeploy, message)
 	})
@@ -143,6 +146,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	}
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, req.Verbose)
+	deploy.SetBaseContext(ctx)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err

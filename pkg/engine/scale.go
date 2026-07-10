@@ -134,6 +134,9 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 		e.debug(events.TypeWarning, events.PhaseDeploy, message)
 	})
 	defer leaseSet.Release()
+	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
 	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("→ Acquired remote scale leases: %s\n", leaseSet.Summary()))
 
 	sourceServerName := serverNames[0]

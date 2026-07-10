@@ -126,6 +126,9 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 		return nil, err
 	}
 	session.leases = leaseSet
+	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
 	leaseSet.SetWarnFunc(func(message string) {
 		e.debug(events.TypeWarning, events.PhaseDeploy, message)
 	})
@@ -204,6 +207,12 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 		return nil, fmt.Errorf("run session was already applied")
 	}
 	s.applied = true
+	leaseCtx, cancelLeaseContext := s.leases.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
+	if err := s.leases.Err(); err != nil {
+		return nil, err
+	}
 	s.deployer.SetBaseContext(ctx)
 
 	e := s.engine

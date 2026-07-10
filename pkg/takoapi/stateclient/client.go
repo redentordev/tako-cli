@@ -227,6 +227,7 @@ type LeaseRequest struct {
 	Who         string `json:"who,omitempty"`
 	PID         int    `json:"pid,omitempty"`
 	TTLSeconds  int64  `json:"ttlSeconds,omitempty"`
+	Renew       bool   `json:"renew,omitempty"`
 }
 
 // LeaseResponse is the public response shape returned by takod /v1/lease.

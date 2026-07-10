@@ -271,16 +271,24 @@ func (s *DestroySession) Apply(ctx context.Context) (*DestroyResult, error) {
 		e.debug(events.TypeWarning, events.PhaseDeploy, message)
 	})
 	defer leaseSet.Release()
+	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
 	e.debug(events.TypeLogLine, events.PhaseCleanup, fmt.Sprintf("→ Acquired remote destroy leases: %s\n", leaseSet.Summary()))
 
 	e.info(events.TypePhaseStarted, events.PhaseCleanup, fmt.Sprintf("\n🗑️  Removing app runtime on %d node(s)...\n\n", len(s.servers)))
 
 	totalErrors := 0
 	for _, serverName := range s.serverNames {
+		if err := ctx.Err(); err != nil {
+			result.Error = err.Error()
+			result.Duration = time.Since(startTime).Seconds()
+			return result, err
+		}
 		serverCfg := s.servers[serverName]
 		e.info(events.TypeLogLine, events.PhaseCleanup, fmt.Sprintf("=== Removing app runtime on node: %s (%s) ===\n", serverName, serverCfg.Host))
 		outcome := DestroyServerOutcome{Name: serverName, Host: serverCfg.Host}
-		if err := DestroySingleServerWithHooks(sshPool, serverName, serverCfg, cfg, envName, s.req.Verbose, s.req.PurgeAll, s.decommissionApp, s.purgeProjectRuntime); err != nil {
+		if err := DestroySingleServerWithHooksContext(ctx, sshPool, serverName, serverCfg, cfg, envName, s.req.Verbose, s.req.PurgeAll, s.decommissionApp, s.purgeProjectRuntime); err != nil {
 			e.warn(events.PhaseCleanup, fmt.Sprintf("⚠️  Errors removing app runtime on %s: %v\n", serverName, err))
 			outcome.Error = err.Error()
 			totalErrors++
@@ -344,8 +352,26 @@ type SSHClientProvider interface {
 // app/stage runtime, and purges app-owned leftovers when requested. Purge
 // never runs after a failed decommission.
 func DestroySingleServerWithHooks(pool SSHClientProvider, serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool, decommission func(*ssh.Client, *config.Config, string, bool) error, purge func(*ssh.Client, *config.Config, string, bool) error) error {
+	return DestroySingleServerWithHooksContext(
+		context.Background(), pool, serverName, serverCfg, cfg, envName, verbose, purgeAll,
+		func(_ context.Context, client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
+			return decommission(client, cfg, envName, verbose)
+		},
+		func(_ context.Context, client *ssh.Client, cfg *config.Config, envName string, verbose bool) error {
+			return purge(client, cfg, envName, verbose)
+		},
+	)
+}
+
+// DestroySingleServerWithHooksContext is the context-aware destroy primitive.
+// It stops before each destructive phase when lease loss or caller
+// cancellation cancels ctx.
+func DestroySingleServerWithHooksContext(ctx context.Context, pool SSHClientProvider, serverName string, serverCfg config.ServerConfig, cfg *config.Config, envName string, verbose bool, purgeAll bool, decommission func(context.Context, *ssh.Client, *config.Config, string, bool) error, purge func(context.Context, *ssh.Client, *config.Config, string, bool) error) error {
 	if pool == nil {
 		return fmt.Errorf("ssh pool is not initialized")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
 	if err != nil {
@@ -353,13 +379,16 @@ func DestroySingleServerWithHooks(pool SSHClientProvider, serverName string, ser
 	}
 
 	// Decommission application
-	if err := decommission(client, cfg, envName, verbose); err != nil {
+	if err := decommission(ctx, client, cfg, envName, verbose); err != nil {
 		return fmt.Errorf("decommission failed: %w", err)
 	}
 
 	// Prune app-owned leftovers if requested.
 	if purgeAll {
-		if err := purge(client, cfg, envName, verbose); err != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := purge(ctx, client, cfg, envName, verbose); err != nil {
 			return fmt.Errorf("purge failed: %w", err)
 		}
 	}
@@ -370,14 +399,14 @@ func DestroySingleServerWithHooks(pool SSHClientProvider, serverName string, ser
 // decommissionApp stops and removes the deployed application. Progress that
 // the CLI printed only with --verbose is emitted as debug events; renderers
 // filter by level.
-func (s *DestroySession) decommissionApp(client *ssh.Client, cfg *config.Config, envName string, _ bool) error {
+func (s *DestroySession) decommissionApp(ctx context.Context, client *ssh.Client, cfg *config.Config, envName string, _ bool) error {
 	e := s.engine
 	e.debug(events.TypeLogLine, events.PhaseCleanup, "  → Removing takod-managed services...\n")
 	services, err := cfg.GetServices(envName)
 	if err != nil {
 		return fmt.Errorf("failed to get services for environment %s: %w", envName, err)
 	}
-	response, err := CleanupViaTakod(client, cfg, RemoveCleanupRequest(cfg, envName, services))
+	response, err := CleanupViaTakodContext(ctx, client, cfg, RemoveCleanupRequest(cfg, envName, services))
 	if err != nil {
 		return err
 	}
@@ -390,10 +419,10 @@ func (s *DestroySession) decommissionApp(client *ssh.Client, cfg *config.Config,
 
 // purgeProjectRuntime removes app-owned leftovers without touching shared
 // takod or tako-proxy runtime used by other projects on the same node.
-func (s *DestroySession) purgeProjectRuntime(client *ssh.Client, cfg *config.Config, envName string, _ bool) error {
+func (s *DestroySession) purgeProjectRuntime(ctx context.Context, client *ssh.Client, cfg *config.Config, envName string, _ bool) error {
 	e := s.engine
 	e.debug(events.TypeLogLine, events.PhaseCleanup, "  → Pruning app-owned leftovers...\n")
-	response, err := CleanupViaTakod(client, cfg, takod.CleanupRequest{
+	response, err := CleanupViaTakodContext(ctx, client, cfg, takod.CleanupRequest{
 		Project:         cfg.Project.Name,
 		Environment:     envName,
 		PruneDocker:     true,

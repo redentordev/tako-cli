@@ -280,7 +280,12 @@ The state client also exposes typed `/v1/lease` helpers over the same private
 transport: `ReadLeaseContext`, `AcquireLeaseContext`, and
 `ReleaseLeaseContext` plus non-context wrappers. Lease request/response structs
 are public in `stateclient` and mirror the node-local takod JSON shape without
-importing `internal/state`.
+importing `internal/state`. Internal engine operations renew the exact holder ID
+in the background; renewal requires the existing lease to be unexpired and
+matching, and loss cancels the bound operation context before expiry. A legacy
+same-holder response is surfaced as `state.ErrLeaseRenewalUnsupported`; the
+engine permits a bounded in-place agent-upgrade window but still fails closed
+before the last confirmed expiry.
 
 ### `pkg/deployplan`
 

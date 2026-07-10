@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -48,8 +49,13 @@ func EnsureDeployRuntimeSupported(cfg *config.Config) error {
 
 // CleanupViaTakod runs post-deploy cleanup on one node through takod.
 func CleanupViaTakod(client *ssh.Client, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
+	return CleanupViaTakodContext(context.Background(), client, cfg, request)
+}
+
+// CleanupViaTakodContext runs cleanup through takod bounded by ctx.
+func CleanupViaTakodContext(ctx context.Context, client *ssh.Client, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
 	var response takod.CleanupResponse
-	output, err := takodclient.RequestJSON(client, TakodSocketFromConfig(cfg), "POST", "/v1/cleanup", request)
+	output, err := takodclient.RequestJSONWithContext(ctx, client, TakodSocketFromConfig(cfg), "POST", "/v1/cleanup", request)
 	if err != nil {
 		return nil, err
 	}

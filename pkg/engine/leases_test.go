@@ -155,6 +155,121 @@ func TestAcquireRemoteOperationLeasesWithContextCancelledDuringFanoutReleasesLea
 	waitForReleased(t, manager, "lease-node-b")
 }
 
+func TestRemoteLeaseSetRenewsUntilReleaseAndThenStops(t *testing.T) {
+	manager := &recordingRenewingLeaseManager{}
+	original := &remotestate.LeaseInfo{
+		ID:          "lease-node-a",
+		Environment: "production",
+		Operation:   "deploy",
+		Who:         "tester",
+		ExpiresAt:   time.Now().Add(time.Minute),
+	}
+	set := NewRemoteLeaseSet("deploy", []RemoteLease{{ServerName: "node-a", Manager: manager, Lease: original}})
+	set.startRenewal(time.Minute, 5*time.Millisecond)
+
+	deadline := time.After(2 * time.Second)
+	for manager.Renewed() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for lease renewal")
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	set.Release()
+	renewedAtRelease := manager.Renewed()
+	time.Sleep(20 * time.Millisecond)
+	if got := manager.Renewed(); got != renewedAtRelease {
+		t.Fatalf("renewals continued after release: before=%d after=%d", renewedAtRelease, got)
+	}
+	if got := manager.Released(); got != 1 {
+		t.Fatalf("release calls = %d, want 1", got)
+	}
+
+	set.Release()
+	if got := manager.Released(); got != 1 {
+		t.Fatalf("second Release call released again: %d", got)
+	}
+}
+
+func TestRemoteLeaseSetCancelsBoundContextWhenHolderIsLost(t *testing.T) {
+	manager := &recordingRenewingLeaseManager{renewErr: remotestate.ErrLeaseLost}
+	set := NewRemoteLeaseSet("deploy", []RemoteLease{{
+		ServerName: "node-a",
+		Manager:    manager,
+		Lease:      &remotestate.LeaseInfo{ID: "lease-node-a", ExpiresAt: time.Now().Add(time.Minute)},
+	}})
+	ctx, cancel := set.BindContext(context.Background())
+	defer cancel()
+	set.startRenewal(time.Minute, 5*time.Millisecond)
+	defer set.Release()
+
+	select {
+	case <-ctx.Done():
+		if !errors.Is(context.Cause(ctx), remotestate.ErrLeaseLost) {
+			t.Fatalf("context cause = %v, want ErrLeaseLost", context.Cause(ctx))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for lease-loss cancellation")
+	}
+}
+
+func TestRemoteLeaseSetFailsClosedBeforeTransientErrorsReachExpiry(t *testing.T) {
+	manager := &recordingRenewingLeaseManager{renewErr: fmt.Errorf("transport unavailable")}
+	set := NewRemoteLeaseSet("deploy", []RemoteLease{{
+		ServerName: "node-a",
+		Manager:    manager,
+		Lease:      &remotestate.LeaseInfo{ID: "lease-node-a", ExpiresAt: time.Now().Add(10 * time.Millisecond)},
+	}})
+	ctx, cancel := set.BindContext(context.Background())
+	defer cancel()
+	set.startRenewal(40*time.Millisecond, 5*time.Millisecond)
+	defer set.Release()
+
+	select {
+	case <-ctx.Done():
+		if cause := context.Cause(ctx); cause == nil || !strings.Contains(cause.Error(), "transport unavailable") {
+			t.Fatalf("context cause = %v, want transport failure", cause)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fail-closed cancellation")
+	}
+}
+
+func TestRemoteLeaseSetAllowsBoundedLegacyAgentUpgradeWindow(t *testing.T) {
+	manager := &recordingRenewingLeaseManager{renewErr: remotestate.ErrLeaseRenewalUnsupported}
+	set := NewRemoteLeaseSet("deploy", []RemoteLease{{
+		ServerName: "node-a",
+		Manager:    manager,
+		Lease:      &remotestate.LeaseInfo{ID: "lease-node-a", ExpiresAt: time.Now().Add(time.Minute)},
+	}})
+	ctx, cancel := set.BindContext(context.Background())
+	defer cancel()
+	set.startRenewal(100*time.Millisecond, 10*time.Millisecond)
+	defer set.Release()
+	if err := set.Err(); err != nil {
+		t.Fatalf("legacy response failed before the confirmed expiry margin: %v", err)
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatalf("legacy response canceled the operation immediately: %v", context.Cause(ctx))
+	default:
+	}
+
+	manager.SetRenewError(nil) // SetupTakodRuntime upgraded the agent.
+	deadline := time.After(2 * time.Second)
+	for manager.Renewed() < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for post-upgrade renewal")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := set.Err(); err != nil {
+		t.Fatalf("post-upgrade renewal left terminal error: %v", err)
+	}
+}
+
 func waitForLeaseStarts(t *testing.T, started <-chan string, count int) {
 	t.Helper()
 	seen := map[string]bool{}
@@ -206,6 +321,50 @@ func testLeaseServers(names []string) map[string]config.ServerConfig {
 type recordingLeaseManager struct {
 	mu       sync.Mutex
 	released []string
+}
+
+type recordingRenewingLeaseManager struct {
+	mu       sync.Mutex
+	renewed  int
+	released int
+	renewErr error
+}
+
+func (m *recordingRenewingLeaseManager) RenewLeaseContext(_ context.Context, lease *remotestate.LeaseInfo, ttl time.Duration) (*remotestate.LeaseInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.renewed++
+	if m.renewErr != nil {
+		return nil, m.renewErr
+	}
+	renewed := *lease
+	renewed.ExpiresAt = time.Now().Add(ttl)
+	return &renewed, nil
+}
+
+func (m *recordingRenewingLeaseManager) ReleaseLease(*remotestate.LeaseInfo) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.released++
+	return nil
+}
+
+func (m *recordingRenewingLeaseManager) Renewed() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.renewed
+}
+
+func (m *recordingRenewingLeaseManager) Released() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.released
+}
+
+func (m *recordingRenewingLeaseManager) SetRenewError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.renewErr = err
 }
 
 func (m *recordingLeaseManager) ReleaseLease(lease *remotestate.LeaseInfo) error {
