@@ -453,11 +453,18 @@ func checkLocalBuildInputsWith(record func(checkResult), cfg *config.Config, env
 		return
 	}
 
-	buildServiceNames := make([]string, 0)
+	buildInputs := make(map[string]config.ServiceConfig)
 	for name, service := range services {
 		if strings.TrimSpace(service.Build) != "" {
-			buildServiceNames = append(buildServiceNames, name)
+			buildInputs[name] = service
 		}
+	}
+	for name, build := range cfg.Builds {
+		buildInputs["build:"+name] = config.ServiceConfig{Build: build.Context, BuildArgs: build.Args, BuildTarget: build.Target, Dockerfile: build.Dockerfile}
+	}
+	buildServiceNames := make([]string, 0, len(buildInputs))
+	for name := range buildInputs {
+		buildServiceNames = append(buildServiceNames, name)
 	}
 	sort.Strings(buildServiceNames)
 
@@ -468,7 +475,7 @@ func checkLocalBuildInputsWith(record func(checkResult), cfg *config.Config, env
 
 	record(checkResult{"PASS", "Build images stream to remote takod; local Docker daemon is not required for takod deploys", ""})
 	for _, serviceName := range buildServiceNames {
-		service := services[serviceName]
+		service := buildInputs[serviceName]
 		info, err := inspectDoctorBuildInput(serviceName, service, nixpacksAvailable)
 		if err != nil {
 			record(checkResult{"FAIL", fmt.Sprintf("%s: %v", serviceName, err), "Fix the build context, Dockerfile, or Nixpacks setup before deploy"})

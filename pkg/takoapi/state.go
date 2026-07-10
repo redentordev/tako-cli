@@ -65,9 +65,17 @@ type DesiredStateDocument struct {
 	Environment   string                            `json:"environment"`
 	Source        string                            `json:"source"`
 	TargetNodes   []string                          `json:"targetNodes"`
+	Builds        map[string]DesiredBuildDocument   `json:"builds,omitempty"`
 	Services      map[string]DesiredServiceDocument `json:"services"`
 	Git           *GitMetadata                      `json:"git,omitempty"`
 	CreatedAt     time.Time                         `json:"createdAt"`
+}
+
+type DesiredBuildDocument struct {
+	Context    string   `json:"context"`
+	ArgKeys    []string `json:"argKeys,omitempty"`
+	Target     string   `json:"target,omitempty"`
+	Dockerfile string   `json:"dockerfile,omitempty"`
 }
 
 // DesiredServiceDocument is a JSON-friendly desired service schema. Config-like
@@ -222,6 +230,8 @@ type ServiceStateDocument struct {
 	Name             string                     `json:"name"`
 	Image            string                     `json:"image"`
 	ConfigHash       string                     `json:"configHash,omitempty"`
+	SharedBuild      string                     `json:"sharedBuild,omitempty"`
+	SharedBuildHash  string                     `json:"sharedBuildHash,omitempty"`
 	FilesContentHash string                     `json:"filesContentHash,omitempty"`
 	Files            []ServiceFileStateDocument `json:"files,omitempty"`
 	Run              *RunStateDocument          `json:"run,omitempty"`

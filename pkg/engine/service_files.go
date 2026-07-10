@@ -23,6 +23,13 @@ func historyServiceFiles(files []config.ServiceFileConfig) []remotestate.Service
 	return out
 }
 
+func sharedBuildName(service config.ServiceConfig) string {
+	if service.SharedBuildHash == "" {
+		return ""
+	}
+	return service.ImageFrom
+}
+
 func prepareServiceFileHashes(d *deployer.Deployer, services map[string]config.ServiceConfig) (map[string]config.ServiceConfig, error) {
 	out := CloneServiceMap(services)
 	for name, service := range out {

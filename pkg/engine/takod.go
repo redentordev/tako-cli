@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -70,6 +71,13 @@ func CleanupViaTakodContext(ctx context.Context, client *ssh.Client, cfg *config
 func CleanupImageRepositories(cfg *config.Config, environment string, services map[string]config.ServiceConfig) []string {
 	seen := make(map[string]bool)
 	for serviceName, service := range services {
+		if service.SharedBuildHash != "" {
+			repository := ImageRepositoryFromRef(deployplan.SharedBuildImageRef(cfg, environment, service.ImageFrom, ""))
+			if repository != "" {
+				seen[repository] = true
+			}
+			continue
+		}
 		if service.IsRun() {
 			continue
 		}

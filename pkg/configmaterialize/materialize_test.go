@@ -374,6 +374,48 @@ func TestBuildConfigValidationChecksStaticMetadataForUnrecoveredFiles(t *testing
 	}
 }
 
+func TestBuildConfigRestoresSharedBuildDefinitions(t *testing.T) {
+	contextDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(contextDir, "Dockerfile"), []byte("FROM scratch\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	desired := baseDesired()
+	desired.Builds = map[string]takoapi.DesiredBuildDocument{
+		"application": {Context: contextDir, ArgKeys: []string{"BASE", "TOKEN"}, Target: "runtime"},
+	}
+	desired.Services["web"] = takoapi.DesiredServiceDocument{Image: "demo/application:revision", ImageFrom: "application", Replicas: 1}
+	cfg, warnings, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := cfg.Builds["application"]
+	service := cfg.Environments["production"].Services["web"]
+	if build.Context != contextDir || len(build.Args) != 2 || build.Target != "runtime" || service.Image != "" || service.ImageFrom != "application" || service.SharedBuildHash == "" {
+		t.Fatalf("build/service = %#v / %#v", build, service)
+	}
+	if !hasWarning(warnings, "shared_build_arg_values_redacted", "") {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+}
+
+func TestBuildConfigValidationKeepsUnrecoveredSharedBuildContext(t *testing.T) {
+	desired := baseDesired()
+	desired.Builds = map[string]takoapi.DesiredBuildDocument{
+		"application": {Context: "/missing/exported/shared-build", Dockerfile: "docker/Dockerfile"},
+	}
+	desired.Services["web"] = takoapi.DesiredServiceDocument{Image: "demo/application:revision", ImageFrom: "application", Replicas: 1}
+	cfg, warnings, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Builds["application"].Context != "/missing/exported/shared-build" {
+		t.Fatalf("build = %#v", cfg.Builds["application"])
+	}
+	if !hasWarning(warnings, "shared_build_context_unrecovered", "") {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+}
+
 func baseDesired() *takoapi.DesiredStateDocument {
 	return &takoapi.DesiredStateDocument{
 		Project:     "demo",

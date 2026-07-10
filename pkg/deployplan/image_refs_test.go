@@ -1,6 +1,7 @@
 package deployplan
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -71,6 +72,37 @@ func TestDefaultDeployImageRefsUsesBuildTagForBuildServices(t *testing.T) {
 	}
 	if got["db"] != "postgres:16-alpine" {
 		t.Fatalf("db image ref = %q, want prebuilt image unchanged", got["db"])
+	}
+}
+
+func TestSharedBuildConsumersResolveOneBuildImageRef(t *testing.T) {
+	cfg := testConfig()
+	cfg.Builds = map[string]config.SharedBuildConfig{"application": {Context: "."}}
+	services := map[string]config.ServiceConfig{
+		"web":     {ImageFrom: "application", SharedBuildHash: "hash"},
+		"worker":  {ImageFrom: "application", SharedBuildHash: "hash"},
+		"migrate": {Kind: config.ServiceKindRun, ImageFrom: "application", SharedBuildHash: "hash", Command: config.ListValue("migrate")},
+	}
+	got := DefaultDeployImageRefs(cfg, "production", services, "abcdef")
+	want := SharedBuildImageRef(cfg, "production", "application", "abcdef")
+	for _, name := range []string{"web", "worker", "migrate"} {
+		if got[name] != want {
+			t.Fatalf("%s image = %q", name, got[name])
+		}
+	}
+	if got[SharedBuildImageRefKey("application")] != want {
+		t.Fatalf("build ref = %q", got[SharedBuildImageRefKey("application")])
+	}
+}
+
+func TestSharedBuildImageRefSeparatesNamespaceAndDefinitionFingerprint(t *testing.T) {
+	cfg := testConfig()
+	cfg.Builds = map[string]config.SharedBuildConfig{"web": {Context: ".", Args: map[string]string{"BASE": "first"}}}
+	first := SharedBuildImageRef(cfg, "production", "web", "revision")
+	cfg.Builds["web"] = config.SharedBuildConfig{Context: ".", Args: map[string]string{"BASE": "second"}}
+	second := SharedBuildImageRef(cfg, "production", "web", "revision")
+	if first == second || !strings.HasPrefix(first, "demo/shared/web:revision-sb-") || !strings.HasPrefix(second, "demo/shared/web:revision-sb-") {
+		t.Fatalf("refs = %q %q", first, second)
 	}
 }
 

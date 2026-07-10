@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
@@ -43,9 +44,17 @@ type DesiredRevision struct {
 	Environment   string                    `json:"environment"`
 	Source        string                    `json:"source"`
 	TargetNodes   []string                  `json:"targetNodes"`
+	Builds        map[string]DesiredBuild   `json:"builds,omitempty"`
 	Services      map[string]DesiredService `json:"services"`
 	Git           GitInfo                   `json:"git,omitempty"`
 	CreatedAt     time.Time                 `json:"createdAt"`
+}
+
+type DesiredBuild struct {
+	Context    string   `json:"context"`
+	ArgKeys    []string `json:"argKeys,omitempty"`
+	Target     string   `json:"target,omitempty"`
+	Dockerfile string   `json:"dockerfile,omitempty"`
 }
 
 type DesiredService struct {
@@ -170,9 +179,13 @@ func BuildDesiredRevision(cfg *config.Config, environment string, source string,
 		Environment:   environment,
 		Source:        source,
 		TargetNodes:   sortedCopy(targetNodes),
+		Builds:        make(map[string]DesiredBuild, len(cfg.Builds)),
 		Services:      make(map[string]DesiredService, len(services)),
 		Git:           git,
 		CreatedAt:     now,
+	}
+	for name, build := range cfg.Builds {
+		revision.Builds[name] = DesiredBuild{Context: build.DeclaredContext(), ArgKeys: sortedKeys(build.Args), Target: build.Target, Dockerfile: build.Dockerfile}
 	}
 
 	for serviceName, service := range services {
@@ -180,6 +193,8 @@ func BuildDesiredRevision(cfg *config.Config, environment string, source string,
 		if imageRef == "" {
 			if service.Image != "" {
 				imageRef = service.Image
+			} else if _, ok := cfg.Builds[service.ImageFrom]; ok {
+				imageRef = deployplan.SharedBuildImageRef(cfg, environment, service.ImageFrom, "")
 			} else {
 				imageRef = cfg.GetFullImageName(serviceName, environment)
 			}

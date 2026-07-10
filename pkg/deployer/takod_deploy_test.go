@@ -2,6 +2,7 @@ package deployer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -1043,6 +1044,58 @@ func TestReconcileServiceRequestTimeoutCoversHealthWindowPerReplica(t *testing.T
 	})
 	if got != takodclient.StreamRequestTimeout {
 		t.Fatalf("file payload timeout = %s, want %s", got, takodclient.StreamRequestTimeout)
+	}
+}
+
+func TestConvergeRemoteImageBuildsOncePerPlatformAndTransfersExactImage(t *testing.T) {
+	groups := map[string][]string{"linux/arm64": {"arm-b", "arm-a"}, "linux/amd64": {"amd-b", "amd-a"}}
+	available := map[string]bool{"amd-b": true}
+	var builds []string
+	var transfers []string
+	err := convergeRemoteImageByPlatform(groups,
+		func(server string) bool { return available[server] },
+		func(platform string, source string) error {
+			builds = append(builds, platform+":"+source)
+			available[source] = true
+			return nil
+		},
+		func(source string, target string) error {
+			transfers = append(transfers, source+"->"+target)
+			available[target] = true
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(builds, []string{"linux/arm64:arm-a"}) {
+		t.Fatalf("builds = %#v", builds)
+	}
+	if !slices.Equal(transfers, []string{"amd-b->amd-a", "arm-a->arm-b"}) {
+		t.Fatalf("transfers = %#v", transfers)
+	}
+}
+
+func TestStreamExactImageTransferCancelsExporterWhenImporterFails(t *testing.T) {
+	importErr := errors.New("import failed")
+	started := make(chan struct{})
+	start := time.Now()
+	sourceErr, targetErr := streamExactImageTransfer(context.Background(),
+		func(ctx context.Context, output io.Writer) error {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		func(ctx context.Context, input io.Reader) error {
+			<-started
+			return importErr
+		},
+	)
+	if !errors.Is(targetErr, importErr) || !errors.Is(sourceErr, context.Canceled) {
+		t.Fatalf("source=%v target=%v", sourceErr, targetErr)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("failed transfer cancellation took %s", time.Since(start))
 	}
 }
 

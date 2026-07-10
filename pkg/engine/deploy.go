@@ -117,6 +117,7 @@ func (r *DeployRequest) workDirOrDefault() string {
 // leases, gathers running state, and computes the reconciliation plan. The
 // returned session must be Closed; call Apply to execute the plan.
 func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySession, error) {
+	defer e.flushBuildOutput()
 	if req.Config == nil {
 		return nil, invalidRequestf("deploy request requires a loaded config")
 	}
@@ -227,6 +228,11 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 			e.RegisterSecret(value)
 		}
 	}
+	for _, build := range cfg.Builds {
+		for _, value := range build.Args {
+			e.RegisterSecret(value)
+		}
+	}
 	e.registerServiceSecretValues(session.envName, allServices)
 	for _, server := range cfg.Servers {
 		e.RegisterSecret(server.Password)
@@ -316,8 +322,8 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, session.envName, session.sshPool, req.Verbose)
 	deploy.SetCLIVersion(e.cliVersion)
 	deploy.SetSkipBuild(req.SkipBuild)
-	if e.buildOutput != nil {
-		deploy.SetOutput(e.buildOutput)
+	if output := e.buildOutputWriter(); output != nil {
+		deploy.SetOutput(output)
 	}
 	allServices, err = prepareServiceFileHashes(deploy, allServices)
 	if err != nil {
@@ -382,7 +388,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	session.actualState = actualState
 	planImageRefs := deployplan.DefaultDeployImageRefs(cfg, session.envName, allServices, session.buildTag)
 	if req.Service != "" {
-		if targeted, ok := services[req.Service]; ok && targeted.IsRun() && targeted.ImageFrom != "" {
+		if targeted, ok := services[req.Service]; ok && targeted.IsRun() && targeted.ImageFrom != "" && targeted.SharedBuildHash == "" {
 			sourceConfig := allServices[targeted.ImageFrom]
 			if source := actualState[targeted.ImageFrom]; source != nil && source.Image != "" {
 				planImageRefs[targeted.ImageFrom] = source.Image
@@ -403,7 +409,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 			return nil, err
 		}
 		for name, prerequisite := range runPrerequisites {
-			if prerequisite.ImageFrom == "" {
+			if prerequisite.ImageFrom == "" || prerequisite.SharedBuildHash != "" {
 				continue
 			}
 			source := allServices[prerequisite.ImageFrom]
@@ -448,6 +454,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 
 	planDoc := newDeployPlanDocument(cfg.Project.Name, session.envName, plan, services)
 	planDoc.Revision = session.buildTag
+	planDoc.SharedBuilds = planSharedBuilds(cfg, session.envName, session.buildTag, services)
 	planDoc.Source = sourceInfo.StateSource
 	planDoc.Servers = append([]string(nil), serverNames...)
 	planDoc.Services = sortedServiceNames(services)
@@ -528,6 +535,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	s.deployer.SetBaseContext(ctx)
 
 	e := s.engine
+	defer e.flushBuildOutput()
 	req := s.req
 	cfg := s.cfg
 	envName := s.envName
@@ -649,7 +657,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	imageRefs := deployplan.DefaultDeployImageRefs(cfg, envName, services, s.buildTag)
 	allImageRefs := deployplan.DefaultDeployImageRefs(cfg, envName, s.allServices, s.buildTag)
 	if req.Service != "" {
-		if targeted, ok := services[req.Service]; ok && targeted.IsRun() && targeted.ImageFrom != "" {
+		if targeted, ok := services[req.Service]; ok && targeted.IsRun() && targeted.ImageFrom != "" && targeted.SharedBuildHash == "" {
 			if source := actualState[targeted.ImageFrom]; source != nil && source.Image != "" {
 				allImageRefs[targeted.ImageFrom] = source.Image
 			}
@@ -684,9 +692,19 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		return nil, fmt.Errorf("failed to record started deployment state before applying mutations: %w", err)
 	}
 	e.debug(events.TypeLogLine, events.PhaseState, fmt.Sprintf("→ Recorded in-progress deployment state (%s)\n", deployment.ID))
+	if err := buildSharedImages(s.deployer, cfg, envName, s.buildTag, servicesToDeploy, req.SkipBuild); err != nil {
+		err = fmt.Errorf("%s", e.redactor.Redact(err.Error()))
+		deploymentFailed = true
+		deploymentError = err
+		deployment.Status = remotestate.StatusFailed
+		deployment.Error = err.Error()
+	}
 
 	// Deploy each service through takod placement in dependency order.
 	for _, serviceName := range deploymentOrder {
+		if deploymentFailed {
+			break
+		}
 		if err := ctx.Err(); err != nil {
 			deploymentFailed = true
 			deploymentError = err
@@ -718,7 +736,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			imageRefs[serviceName] = resolvedImage
 			allImageRefs[serviceName] = resolvedImage
 			var availableImageNodes []string
-			if req.Service != "" && service.ImageFrom != "" && s.allServices[service.ImageFrom].Build != "" {
+			if req.Service != "" && service.ImageFrom != "" && service.SharedBuildHash == "" && s.allServices[service.ImageFrom].Build != "" {
 				availableImageNodes = make([]string, 0)
 				for node, nodeState := range s.actualByNode {
 					if source := nodeState[service.ImageFrom]; source != nil && source.Image == resolvedImage {
@@ -752,7 +770,9 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 
 		warmed := deployplan.ShouldWarmManualPromotionService(serviceName, service, actualState)
 		deployErr := error(nil)
-		if warmed {
+		if service.SharedBuildHash != "" {
+			deployErr = s.deployer.DeployPreparedServiceTakod(serviceName, &service, fullImageName, warmed)
+		} else if warmed {
 			deployErr = s.deployer.DeployServiceTakodWarmOnly(serviceName, &service, fullImageName)
 		} else {
 			deployErr = s.deployer.DeployServiceTakod(serviceName, &service, fullImageName)
@@ -791,6 +811,8 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		deployment.Services[serviceName] = remotestate.ServiceState{
 			Name:             serviceName,
 			Image:            fullImageName,
+			SharedBuild:      sharedBuildName(service),
+			SharedBuildHash:  service.SharedBuildHash,
 			FilesContentHash: service.FilesContentHash,
 			Files:            historyServiceFiles(service.Files),
 			Port:             service.Port,

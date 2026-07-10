@@ -31,6 +31,7 @@ type safeServiceConfigFingerprint struct {
 	Dockerfile       string                         `json:"dockerfile,omitempty"`
 	Image            string                         `json:"image,omitempty"`
 	ImageFrom        string                         `json:"imageFrom,omitempty"`
+	SharedBuildHash  string                         `json:"sharedBuildHash,omitempty"`
 	Port             int                            `json:"port,omitempty"`
 	Ports            []string                       `json:"ports,omitempty"`
 	Command          any                            `json:"command,omitempty"`
@@ -111,6 +112,7 @@ func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
 		Dockerfile:       service.Dockerfile,
 		Image:            service.Image,
 		ImageFrom:        service.ImageFrom,
+		SharedBuildHash:  service.SharedBuildHash,
 		Port:             service.Port,
 		Ports:            sortedStrings(service.Ports),
 		Command:          stringOrListFingerprint(service.Command),

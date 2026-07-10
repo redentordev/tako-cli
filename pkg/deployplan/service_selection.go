@@ -27,7 +27,7 @@ func FilterActualStateForServices(actualState map[string]*reconcile.ActualServic
 // HasBuildServices reports whether any service is build-backed.
 func HasBuildServices(services map[string]config.ServiceConfig) bool {
 	for _, service := range services {
-		if service.Build != "" {
+		if service.Build != "" || (service.SharedBuildHash != "" && !service.IsRun()) {
 			return true
 		}
 	}
@@ -66,7 +66,7 @@ func ServicesToDeployForPlan(plan *reconcile.ReconciliationPlan, services map[st
 	}
 
 	for serviceName, service := range services {
-		if service.Build != "" {
+		if service.Build != "" || (service.SharedBuildHash != "" && !service.IsRun()) {
 			selected[serviceName] = service
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 )
 
@@ -111,6 +112,13 @@ func resolveRunImage(service config.ServiceConfig, allServices map[string]config
 	if service.Image != "" {
 		return service.Image, true, nil
 	}
+	if service.SharedBuildHash != "" {
+		image := imageRefs[deployplan.SharedBuildImageRefKey(service.ImageFrom)]
+		if image == "" {
+			return "", false, fmt.Errorf("imageFrom build %q has no resolved image", service.ImageFrom)
+		}
+		return image, false, nil
+	}
 	source, ok := allServices[service.ImageFrom]
 	if !ok {
 		return "", false, fmt.Errorf("imageFrom service %q not found", service.ImageFrom)
@@ -180,7 +188,8 @@ func runOutcome(result *deployer.DeployRunResult) *RunOutcome {
 func runHistoryServiceState(name string, service config.ServiceConfig, image string, result *deployer.DeployRunResult) remotestate.ServiceState {
 	state := remotestate.ServiceState{
 		Kind: config.ServiceKindRun, Name: name, Image: image,
-		ConfigHash: runServiceFingerprint(service, image), FilesContentHash: service.FilesContentHash, Files: historyServiceFiles(service.Files),
+		ConfigHash: runServiceFingerprint(service, image), SharedBuild: sharedBuildName(service), SharedBuildHash: service.SharedBuildHash,
+		FilesContentHash: service.FilesContentHash, Files: historyServiceFiles(service.Files),
 	}
 	if result != nil {
 		state.Run = &remotestate.RunState{

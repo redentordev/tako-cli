@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,14 +19,15 @@ import (
 
 // Config represents the main configuration structure
 type Config struct {
-	Schema        string                  `yaml:"$schema,omitempty" json:"$schema,omitempty"` // JSON Schema reference
-	Project       ProjectConfig           `yaml:"project" json:"project"`
-	Runtime       *RuntimeConfig          `yaml:"runtime,omitempty" json:"runtime,omitempty"`
-	Mesh          *MeshConfig             `yaml:"mesh,omitempty" json:"mesh,omitempty"`
-	State         *StateConfig            `yaml:"state,omitempty" json:"state,omitempty"`
-	Deployment    *DeploymentConfig       `yaml:"deployment,omitempty" json:"deployment,omitempty"`
-	Notifications *NotificationsConfig    `yaml:"notifications,omitempty" json:"notifications,omitempty"`
-	Volumes       map[string]VolumeConfig `yaml:"volumes,omitempty" json:"volumes,omitempty"` // Top-level volume definitions
+	Schema        string                       `yaml:"$schema,omitempty" json:"$schema,omitempty"` // JSON Schema reference
+	Project       ProjectConfig                `yaml:"project" json:"project"`
+	Runtime       *RuntimeConfig               `yaml:"runtime,omitempty" json:"runtime,omitempty"`
+	Mesh          *MeshConfig                  `yaml:"mesh,omitempty" json:"mesh,omitempty"`
+	State         *StateConfig                 `yaml:"state,omitempty" json:"state,omitempty"`
+	Deployment    *DeploymentConfig            `yaml:"deployment,omitempty" json:"deployment,omitempty"`
+	Notifications *NotificationsConfig         `yaml:"notifications,omitempty" json:"notifications,omitempty"`
+	Volumes       map[string]VolumeConfig      `yaml:"volumes,omitempty" json:"volumes,omitempty"` // Top-level volume definitions
+	Builds        map[string]SharedBuildConfig `yaml:"builds,omitempty" json:"builds,omitempty"`
 	// Registries holds private image registry credentials keyed by host
 	// (e.g. ghcr.io). Values must be ${ENV_VAR} references — literal
 	// passwords in the config file are rejected at load time. Credentials
@@ -159,6 +162,36 @@ type BuildConfig struct {
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"` // remote, local, auto
 }
 
+// SharedBuildConfig declares one image build consumed by any number of
+// services through imageFrom.
+type SharedBuildConfig struct {
+	Context         string            `yaml:"context" json:"context"`
+	Args            map[string]string `yaml:"args,omitempty" json:"args,omitempty"`
+	Target          string            `yaml:"target,omitempty" json:"target,omitempty"`
+	Dockerfile      string            `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"`
+	declaredContext string
+}
+
+func (b SharedBuildConfig) Fingerprint() string {
+	contextPath := b.DeclaredContext()
+	data, _ := json.Marshal(struct {
+		Context    string            `json:"context"`
+		Args       map[string]string `json:"args,omitempty"`
+		Target     string            `json:"target,omitempty"`
+		Dockerfile string            `json:"dockerfile,omitempty"`
+	}{Context: contextPath, Args: b.Args, Target: b.Target, Dockerfile: b.Dockerfile})
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
+}
+
+func (b SharedBuildConfig) DeclaredContext() string {
+	contextPath := b.declaredContext
+	if contextPath == "" {
+		contextPath = strings.TrimSpace(b.Context)
+	}
+	return filepath.ToSlash(filepath.Clean(contextPath))
+}
+
 // ServerConfig defines server connection details
 type ServerConfig struct {
 	Host        string            `yaml:"host" json:"host"`
@@ -198,7 +231,10 @@ type ServiceConfig struct {
 	BuildTarget string            `yaml:"-" json:"-"`
 	Dockerfile  string            `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"` // Dockerfile path relative to build context
 	Image       string            `yaml:"image,omitempty" json:"image,omitempty"`           // Pre-built image (for postgres, redis, etc)
-	ImageFrom   string            `yaml:"imageFrom,omitempty" json:"imageFrom,omitempty"`   // kind: run image source service
+	ImageFrom   string            `yaml:"imageFrom,omitempty" json:"imageFrom,omitempty"`   // shared build, or source service for kind: run
+	// SharedBuildHash fingerprints the resolved top-level build definition
+	// without duplicating it into each service's public config shape.
+	SharedBuildHash string `yaml:"-" json:"-"`
 
 	// Basic settings
 	Port int `yaml:"port,omitempty" json:"port,omitempty"`
@@ -1088,6 +1124,13 @@ func normalizeConfigRelativePaths(cfg *Config, configDir string) {
 	for name, server := range cfg.Servers {
 		server.SSHKey = resolveConfigRelativePath(absConfigDir, server.SSHKey)
 		cfg.Servers[name] = server
+	}
+	for name, build := range cfg.Builds {
+		if build.declaredContext == "" {
+			build.declaredContext = filepath.ToSlash(filepath.Clean(strings.TrimSpace(build.Context)))
+		}
+		build.Context = resolveConfigRelativePath(absConfigDir, build.Context)
+		cfg.Builds[name] = build
 	}
 	for envName, env := range cfg.Environments {
 		for serviceName, service := range env.Services {

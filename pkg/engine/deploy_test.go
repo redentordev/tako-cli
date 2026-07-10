@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strings"
@@ -118,6 +119,25 @@ func TestEngineEventsRedactRegisteredSecrets(t *testing.T) {
 	}
 	if strings.Contains(emitted[0].Message, "hunter2-super-secret") {
 		t.Fatalf("event leaked registered secret: %q", emitted[0].Message)
+	}
+}
+
+func TestEngineBuildOutputRedactsRegisteredSecrets(t *testing.T) {
+	var output bytes.Buffer
+	eng := New(Options{BuildOutput: &output})
+	eng.RegisterSecret("shared-build-secret")
+	writer := eng.buildOutputWriter()
+	if _, err := writer.Write([]byte("build failed with shared-")); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("partial line was emitted before it could be safely redacted: %q", output.String())
+	}
+	if _, err := writer.Write([]byte("build-secret\n")); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "shared-build-secret") {
+		t.Fatalf("build output leaked secret: %q", output.String())
 	}
 }
 

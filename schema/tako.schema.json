@@ -33,6 +33,27 @@
         }
       }
     },
+    "builds": {
+      "type": "object",
+      "description": "Reusable image builds referenced by services through imageFrom.",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_-]{0,62}$" },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["context"],
+        "additionalProperties": false,
+        "properties": {
+          "context": { "type": "string", "minLength": 1 },
+          "args": {
+            "type": "object",
+            "maxProperties": 128,
+            "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+            "additionalProperties": { "type": "string" }
+          },
+          "target": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$" },
+          "dockerfile": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "runtime": {
       "type": "object",
       "description": "takod mesh runtime settings. One node and many nodes use the same runtime model.",
@@ -406,7 +427,7 @@
                 },
                 "imageFrom": {
                   "type": "string",
-                  "description": "kind: run only. Reuse the resolved image of another service; that service becomes an implicit dependency."
+                  "description": "Reference a top-level shared build. For kind: run, this may instead reference another service, which becomes an implicit dependency."
                 },
                 "port": {
                   "type": "integer",

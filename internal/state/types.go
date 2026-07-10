@@ -35,6 +35,8 @@ type ServiceState struct {
 	Name             string             `json:"name"`
 	Image            string             `json:"image"` // Image name with tag
 	ConfigHash       string             `json:"configHash,omitempty"`
+	SharedBuild      string             `json:"sharedBuild,omitempty"`
+	SharedBuildHash  string             `json:"sharedBuildHash,omitempty"`
 	FilesContentHash string             `json:"filesContentHash,omitempty"`
 	Files            []ServiceFileState `json:"files,omitempty"`
 	Run              *RunState          `json:"run,omitempty"`

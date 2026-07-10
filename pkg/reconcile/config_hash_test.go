@@ -342,3 +342,16 @@ func TestDetectChangesDoesNotLetHashHideRuntimeIdentityDrift(t *testing.T) {
 		t.Fatalf("first reason = %q, want runtime identity drift", reasons[0])
 	}
 }
+
+func TestSafeServiceConfigHashIncludesSharedBuildDefinition(t *testing.T) {
+	service := config.ServiceConfig{ImageFrom: "application", SharedBuildHash: "first"}
+	first, ok := SafeServiceConfigHash(service)
+	if !ok {
+		t.Fatal("first hash failed")
+	}
+	service.SharedBuildHash = "second"
+	second, ok := SafeServiceConfigHash(service)
+	if !ok || first == second {
+		t.Fatalf("hashes = %q %q", first, second)
+	}
+}

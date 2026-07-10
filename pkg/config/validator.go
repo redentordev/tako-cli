@@ -61,6 +61,9 @@ func ValidateConfig(cfg *Config) error {
 	if err := validateDeploymentConfig(cfg); err != nil {
 		return err
 	}
+	if err := validateSharedBuilds(cfg.Builds); err != nil {
+		return err
+	}
 
 	// Validate registries
 	if err := validateRegistries(cfg.Registries); err != nil {
@@ -283,7 +286,7 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		// Update the service in the map with defaults applied
 		env.Services[serviceName] = service
 	}
-	if err := validateRunImageSources(envName, env); err != nil {
+	if err := validateRunImageSources(envName, env, cfg.Builds); err != nil {
 		return err
 	}
 
@@ -623,13 +626,20 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		return err
 	}
 
-	// Must have either Build or Image. kind: run may reference another
-	// service's resolved image through imageFrom instead.
-	if service.Build == "" && service.Image == "" && !(service.IsRun() && service.ImageFrom != "") {
-		return fmt.Errorf("service %s: either 'build' or 'image' is required", name)
+	sharedBuild, usesSharedBuild := cfg.Builds[service.ImageFrom]
+	if service.ImageFrom != "" && usesSharedBuild {
+		if service.Build != "" || service.Image != "" {
+			return fmt.Errorf("service %s: imageFrom shared build cannot be combined with build or image", name)
+		}
+		service.SharedBuildHash = sharedBuild.Fingerprint()
+	} else if service.ImageFrom != "" && !service.IsRun() {
+		return fmt.Errorf("service %s: imageFrom must reference a top-level build", name)
+	}
+	if service.Build == "" && service.Image == "" && service.ImageFrom == "" {
+		return fmt.Errorf("service %s: either 'build' or 'image' is required (or reference a shared build with imageFrom)", name)
 	}
 	if service.Build != "" && service.Image != "" {
-		return fmt.Errorf("service %s: cannot specify both 'build' and 'image'", name)
+		return fmt.Errorf("service %s: cannot specify both build and image", name)
 	}
 	if service.Dockerfile != "" {
 		if service.Build == "" {
@@ -988,12 +998,19 @@ func validateServiceFiles(serviceName string, service *ServiceConfig) error {
 	return nil
 }
 
-func validateRunImageSources(envName string, env *EnvironmentConfig) error {
+func validateRunImageSources(envName string, env *EnvironmentConfig, builds map[string]SharedBuildConfig) error {
 	for name, service := range env.Services {
 		if !service.IsRun() || service.ImageFrom == "" {
 			continue
 		}
+		_, buildExists := builds[service.ImageFrom]
 		source, ok := env.Services[service.ImageFrom]
+		if buildExists && ok {
+			return fmt.Errorf("environment %s: service %s imageFrom %q is ambiguous between a build and service", envName, name, service.ImageFrom)
+		}
+		if buildExists {
+			continue
+		}
 		if !ok {
 			return fmt.Errorf("environment %s: service %s imageFrom references unknown service %q", envName, name, service.ImageFrom)
 		}
@@ -1465,9 +1482,6 @@ func validateServicePorts(name string, service *ServiceConfig) error {
 func validateServiceKind(name string, service *ServiceConfig) error {
 	switch service.Kind {
 	case "", ServiceKindService:
-		if service.ImageFrom != "" {
-			return fmt.Errorf("service %s: imageFrom requires kind: run", name)
-		}
 		if service.Schedule != "" {
 			return fmt.Errorf("service %s: schedule requires kind: job", name)
 		}
@@ -1479,9 +1493,6 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 		}
 		return nil
 	case ServiceKindJob:
-		if service.ImageFrom != "" {
-			return fmt.Errorf("service %s: imageFrom requires kind: run", name)
-		}
 		// fallthrough to job validation below
 	case ServiceKindRun:
 		return validateRunServiceKind(name, service)
@@ -1523,6 +1534,42 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 	}
 	if service.Persistent {
 		return fmt.Errorf("service %s: kind: job cannot be persistent", name)
+	}
+	return nil
+}
+
+func validateSharedBuilds(builds map[string]SharedBuildConfig) error {
+	for name, build := range builds {
+		if !isValidRuntimeIdentifier(name) {
+			return fmt.Errorf("build name %q is invalid", name)
+		}
+		build.Context = strings.TrimSpace(build.Context)
+		build.Target = strings.TrimSpace(build.Target)
+		build.Dockerfile = strings.TrimSpace(build.Dockerfile)
+		if build.Context == "" {
+			return fmt.Errorf("build %s: context is required", name)
+		}
+		synthetic := &ServiceConfig{Build: build.Context, BuildArgs: build.Args, BuildTarget: build.Target, Dockerfile: build.Dockerfile}
+		if err := validateServiceBuildOptions("build "+name, synthetic); err != nil {
+			return err
+		}
+		if build.Dockerfile != "" {
+			if err := validateDockerfilePath(build.Dockerfile); err != nil {
+				return fmt.Errorf("build %s: invalid dockerfile path: %w", name, err)
+			}
+		}
+		info, err := os.Stat(build.Context)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("build %s: context is not an accessible directory: %s", name, build.Context)
+		}
+		if build.Dockerfile != "" {
+			if _, err := os.Stat(filepath.Join(build.Context, filepath.Clean(build.Dockerfile))); err != nil {
+				return fmt.Errorf("build %s: dockerfile does not exist: %s", name, build.Dockerfile)
+			}
+		}
+		build.Args = synthetic.BuildArgs
+		build.Target = synthetic.BuildTarget
+		builds[name] = build
 	}
 	return nil
 }

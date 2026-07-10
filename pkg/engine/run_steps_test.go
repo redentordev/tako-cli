@@ -158,9 +158,9 @@ func TestRunHistoryDoesNotOverwriteExistingLongRunningService(t *testing.T) {
 }
 
 func TestApplyImageOverrideClearsRunImageFrom(t *testing.T) {
-	run := config.ServiceConfig{Kind: config.ServiceKindRun, ImageFrom: "app", Command: config.ListValue("migrate")}
+	run := config.ServiceConfig{Kind: config.ServiceKindRun, ImageFrom: "app", SharedBuildHash: "shared", Command: config.ListValue("migrate")}
 	overridden := ApplyImageOverride(run, "registry.example.com/migrate:1")
-	if overridden.Image != "registry.example.com/migrate:1" || overridden.ImageFrom != "" || overridden.Build != "" {
+	if overridden.Image != "registry.example.com/migrate:1" || overridden.ImageFrom != "" || overridden.SharedBuildHash != "" || overridden.Build != "" {
 		t.Fatalf("image override = %#v", overridden)
 	}
 }

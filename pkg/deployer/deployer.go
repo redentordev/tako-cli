@@ -320,14 +320,29 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 	}
 
 	rollbackService := *service
-	if err := applyRollbackServiceFiles(&rollbackService, serviceState); err != nil {
-		return fmt.Errorf("service %s: %w", serviceName, err)
-	}
-	options := takodRollbackDeployOptionsForService(service)
-	rollbackService.Image = serviceState.Image
 	rollbackService.Replicas = serviceState.Replicas
 	if serviceState.Port > 0 {
 		rollbackService.Port = serviceState.Port
+	}
+	rollbackService.ImageFrom = serviceState.SharedBuild
+	rollbackService.SharedBuildHash = serviceState.SharedBuildHash
+	options := takodRollbackDeployOptionsForService(service)
+	if serviceState.SharedBuildHash != "" {
+		if serviceState.SharedBuild == "" {
+			return fmt.Errorf("deployment state for %s does not include the shared build name needed for exact rollback", serviceName)
+		}
+		rollbackService.ClearBuild()
+		rollbackService.Image = ""
+		options = takodServiceDeployOptions{}
+		if err := d.EnsurePreparedServiceImage(serviceName, &rollbackService, serviceState.Image); err != nil {
+			return fmt.Errorf("historical shared image is unavailable: %w", err)
+		}
+	}
+	if err := applyRollbackServiceFiles(&rollbackService, serviceState); err != nil {
+		return fmt.Errorf("service %s: %w", serviceName, err)
+	}
+	if serviceState.SharedBuildHash == "" {
+		rollbackService.Image = serviceState.Image
 	}
 
 	return d.deployServiceTakod(serviceName, &rollbackService, serviceState.Image, options)

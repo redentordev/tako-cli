@@ -199,6 +199,23 @@ func TestRollbackProxyInputsUseRollbackRevisionAndPreserveOtherActiveRevisions(t
 	}
 }
 
+func TestRollbackProxyInputsUseHistoricalSharedBuildIdentity(t *testing.T) {
+	cfg := testRollbackConfig()
+	cfg.Project.Name = "demo"
+	current := config.ServiceConfig{ImageFrom: "application", SharedBuildHash: "current", Port: 3000, Replicas: 1, Deploy: config.DeployConfig{Strategy: config.DeployStrategyRolling}}
+	services := map[string]config.ServiceConfig{"web": current}
+	historical := remotestate.ServiceState{Name: "web", Image: "demo/shared/application:old", SharedBuild: "application", SharedBuildHash: "historical", Port: 3000, Replicas: 2}
+	desired, refs, active := rollbackProxyInputs(cfg, "production", services, "web", historical, map[string]*reconcile.ActualService{"web": {CurrentRevision: "current"}})
+	rollback := desired["web"]
+	if rollback.Image != "" || rollback.ImageFrom != "application" || rollback.SharedBuildHash != "historical" || rollback.Build != "" || refs["web"] != historical.Image {
+		t.Fatalf("rollback shared config/refs = %#v %#v", rollback, refs)
+	}
+	want := deployer.ServiceRevisionID("demo", "production", "web", historical.Image, rollback)
+	if active["web"] != want {
+		t.Fatalf("active revision = %q, want %q", active["web"], want)
+	}
+}
+
 func TestRollbackNeedsTargetWorktreeOnlyForBuildBackedGitTargets(t *testing.T) {
 	target := &remotestate.DeploymentState{GitCommit: "abcdef1234567890"}
 	if !rollbackNeedsTargetWorktree(config.ServiceConfig{Build: "."}, target) {

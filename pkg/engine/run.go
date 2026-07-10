@@ -146,8 +146,8 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, req.Environment, session.sshPool, req.Verbose)
 	deploy.SetCLIVersion(e.cliVersion)
 	deploy.SetSkipBuild(true)
-	if e.buildOutput != nil {
-		deploy.SetOutput(e.buildOutput)
+	if output := e.buildOutputWriter(); output != nil {
+		deploy.SetOutput(output)
 	}
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
@@ -216,6 +216,7 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 	s.deployer.SetBaseContext(ctx)
 
 	e := s.engine
+	defer e.flushBuildOutput()
 	req := s.req
 	cfg := req.Config
 	envName := req.Environment
@@ -242,6 +243,8 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 			req.ServiceName: {
 				Name:             req.ServiceName,
 				Image:            req.ImageRef,
+				SharedBuild:      sharedBuildName(req.Service),
+				SharedBuildHash:  req.Service.SharedBuildHash,
 				FilesContentHash: req.Service.FilesContentHash,
 				Files:            historyServiceFiles(req.Service.Files),
 				Port:             req.Service.Port,

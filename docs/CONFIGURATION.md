@@ -491,6 +491,10 @@ server-build path.
 Build services may use the legacy context string or structured build options.
 Both remote takod builds and local buildx builds receive the same arguments and
 target stage. Build-arg values travel in the streamed request body, not its URL.
+Build arguments are ordinary build configuration, not a secret channel: their
+values affect one-way config/artifact digests and must not contain passwords,
+tokens, or other low-entropy secrets. Use runtime `secrets:` or operator files
+for secret material instead.
 
 ```yaml
 services:
@@ -501,6 +505,50 @@ services:
         BASE_IMAGE: node:24-alpine
       target: runtime
 ```
+
+When several services are variants of one image, declare a top-level shared
+build and reference it with `imageFrom`. Tako assigns one image repository and
+revision tag to the build, builds/transfers it once across the union of consumer
+placement nodes, then starts every consumer from that exact image without
+rebuilding or pulling it again.
+
+```yaml
+builds:
+  application:
+    context: ./sentry
+    args:
+      SENTRY_IMAGE: getsentry/sentry:26.6.0
+    target: runtime
+    dockerfile: Dockerfile
+
+environments:
+  production:
+    services:
+      web:
+        imageFrom: application
+        command: [sentry, run, web]
+      worker:
+        imageFrom: application
+        command: [sentry, run, worker]
+      cleanup:
+        kind: job
+        imageFrom: application
+        schedule: "0 0 * * *"
+        command: [sentry, cleanup, --days, "30"]
+```
+
+Shared build definitions accept `context`, `args`, `target`, and `dockerfile`.
+Their definition fingerprint joins every consumer's drift/revision identity, so
+changing the context path, arguments, target, or Dockerfile reconciles all
+consumers. For `kind: run`, `imageFrom` may still reference another service;
+Tako rejects a run reference that is ambiguous between a build and a service.
+Shared images use a dedicated `<project>/shared/<build>` repository and a tag
+that combines the deploy revision with the build-definition fingerprint, so a
+service of the same name cannot overwrite them and changed build options cannot
+silently reuse an older image. Scale and rollback transfer the exact selected
+image from a same-architecture environment node to newly assigned nodes; they
+fail before reconciliation with guidance to run a normal deploy when no source
+node retains it.
 
 Use `envFiles` when a service composes multiple environment files. Files load
 in list order (later files override earlier files), then explicit `env:` and

@@ -18,6 +18,9 @@ import (
 func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	cfg := &config.Config{
 		Project: config.ProjectConfig{Name: "demo"},
+		Builds: map[string]config.SharedBuildConfig{
+			"application": {Context: "./app", Args: map[string]string{"BASE": "alpine", "TOKEN": "shared-build-secret"}, Target: "runtime", Dockerfile: "Dockerfile.shared"},
+		},
 	}
 	services := map[string]config.ServiceConfig{
 		"web": {
@@ -81,13 +84,17 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	if !slices.Equal(revision.TargetNodes, []string{"node-a", "node-b"}) {
 		t.Fatalf("target nodes were not sorted: %#v", revision.TargetNodes)
 	}
+	shared := revision.Builds["application"]
+	if shared.Context != "app" || !slices.Equal(shared.ArgKeys, []string{"BASE", "TOKEN"}) || shared.Target != "runtime" || shared.Dockerfile != "Dockerfile.shared" {
+		t.Fatalf("shared build state = %#v", shared)
+	}
 
 	data, err := json.Marshal(revision)
 	if err != nil {
 		t.Fatalf("failed to marshal revision: %v", err)
 	}
 	serialized := string(data)
-	for _, secretValue := range []string{"postgres://user:password@example/db", "top-secret-token", "build-secret"} {
+	for _, secretValue := range []string{"postgres://user:password@example/db", "top-secret-token", "build-secret", "shared-build-secret"} {
 		if strings.Contains(serialized, secretValue) {
 			t.Fatalf("desired revision leaked raw env value %q: %s", secretValue, serialized)
 		}

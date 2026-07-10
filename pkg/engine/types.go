@@ -9,6 +9,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 )
@@ -71,26 +72,53 @@ type PlanChange struct {
 	RunCommand     []string `json:"runCommand,omitempty"`
 }
 
+type PlanSharedBuild struct {
+	Key       string   `json:"key"`
+	Image     string   `json:"image"`
+	Consumers []string `json:"consumers"`
+}
+
 // DeployPlan is the serializable outcome of PlanDeploy: what would change,
 // whether that needs confirmation, and the identity of what would deploy.
 // It feeds confirmation screens and the --plan-only machine output.
 type DeployPlan struct {
-	APIVersion  string       `json:"apiVersion"`
-	Kind        string       `json:"kind"`
-	Project     string       `json:"project"`
-	Environment string       `json:"environment"`
-	Revision    string       `json:"revision"`
-	Source      string       `json:"source"`
-	Git         *GitInfo     `json:"git,omitempty"`
-	Servers     []string     `json:"servers"`
-	Services    []string     `json:"services"`
-	Changes     []PlanChange `json:"changes"`
-	Destructive bool         `json:"destructive"`
-	Empty       bool         `json:"empty"`
+	APIVersion   string            `json:"apiVersion"`
+	Kind         string            `json:"kind"`
+	Project      string            `json:"project"`
+	Environment  string            `json:"environment"`
+	Revision     string            `json:"revision"`
+	Source       string            `json:"source"`
+	Git          *GitInfo          `json:"git,omitempty"`
+	Servers      []string          `json:"servers"`
+	Services     []string          `json:"services"`
+	Changes      []PlanChange      `json:"changes"`
+	SharedBuilds []PlanSharedBuild `json:"sharedBuilds,omitempty"`
+	Destructive  bool              `json:"destructive"`
+	Empty        bool              `json:"empty"`
 
 	// HumanText is reconcile plan text exactly as the CLI displays it.
 	// Excluded from the plan hash.
 	HumanText string `json:"humanText,omitempty"`
+}
+
+func planSharedBuilds(cfg *config.Config, environment string, revision string, services map[string]config.ServiceConfig) []PlanSharedBuild {
+	consumers := make(map[string][]string)
+	for serviceName, service := range services {
+		if service.SharedBuildHash != "" {
+			consumers[service.ImageFrom] = append(consumers[service.ImageFrom], serviceName)
+		}
+	}
+	keys := make([]string, 0, len(consumers))
+	for key := range consumers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]PlanSharedBuild, 0, len(keys))
+	for _, key := range keys {
+		sort.Strings(consumers[key])
+		out = append(out, PlanSharedBuild{Key: key, Image: deployplan.SharedBuildImageRef(cfg, environment, key, revision), Consumers: consumers[key]})
+	}
+	return out
 }
 
 // Hash returns a stable fingerprint of the plan's decision-relevant fields,

@@ -469,7 +469,16 @@ func RollbackProxyInputs(
 ) (map[string]config.ServiceConfig, map[string]string, map[string]string) {
 	desiredServices := CloneServiceMap(services)
 	rollbackConfig := desiredServices[rollbackService]
-	rollbackConfig.Image = serviceState.Image
+	if serviceState.SharedBuildHash != "" {
+		rollbackConfig.ClearBuild()
+		rollbackConfig.Image = ""
+		rollbackConfig.ImageFrom = serviceState.SharedBuild
+		rollbackConfig.SharedBuildHash = serviceState.SharedBuildHash
+	} else {
+		rollbackConfig.Image = serviceState.Image
+		rollbackConfig.ImageFrom = ""
+		rollbackConfig.SharedBuildHash = ""
+	}
 	rollbackConfig.Replicas = serviceState.Replicas
 	if serviceState.Port > 0 {
 		rollbackConfig.Port = serviceState.Port

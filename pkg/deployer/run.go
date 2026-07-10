@@ -191,6 +191,14 @@ func (d *Deployer) runStepServer(service *config.ServiceConfig, assignments []ta
 		}
 		return "", fmt.Errorf("placement has no node carrying the resolved run image")
 	}
+	if service.SharedBuildHash != "" {
+		for _, assignment := range assignments {
+			if isAvailable(assignment.ServerName) {
+				return assignment.ServerName, nil
+			}
+		}
+		return "", fmt.Errorf("placement has no node carrying shared build %s", service.ImageFrom)
+	}
 	services, err := d.config.GetServices(d.environment)
 	if err != nil {
 		return "", err

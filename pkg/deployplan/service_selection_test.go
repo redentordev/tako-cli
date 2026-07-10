@@ -67,6 +67,20 @@ func TestServicesToDeployForEmptyPlanIncludesOnlyBuildServices(t *testing.T) {
 	}
 }
 
+func TestEmptyPlanRebuildsSharedServicesButSkipsCompletedSharedRun(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"web":     {ImageFrom: "application", SharedBuildHash: "hash"},
+		"migrate": {Kind: config.ServiceKindRun, ImageFrom: "application", SharedBuildHash: "hash", Command: config.ListValue("migrate")},
+	}
+	got := ServicesToDeployForPlan(&reconcile.ReconciliationPlan{}, services, false, false)
+	if _, ok := got["web"]; !ok {
+		t.Fatalf("shared service missing: %#v", got)
+	}
+	if _, ok := got["migrate"]; ok {
+		t.Fatalf("completed shared run selected without fingerprint drift: %#v", got)
+	}
+}
+
 func TestServicesToDeployForPlanIncludesAddsAndUpdatesOnly(t *testing.T) {
 	services := map[string]config.ServiceConfig{
 		"web":    {Build: "."},

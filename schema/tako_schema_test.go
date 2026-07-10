@@ -28,6 +28,10 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "loadBalancer", "properties", "strategy"), []string{"round_robin", "sticky"})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "backup", "properties", "storage", "properties", "provider"), []string{config.BackupStorageProviderS3, config.BackupStorageProviderR2, config.BackupStorageProviderS3Compatible})
 	serviceProperties := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties")
+	sharedBuildProperties := schemaPath(t, schema, "properties", "builds", "additionalProperties", "properties")
+	for _, field := range []string{"context", "args", "target", "dockerfile"} {
+		schemaPath(t, sharedBuildProperties, field)
+	}
 	assertStringEnum(t, schemaPath(t, serviceProperties, "kind"), []string{config.ServiceKindService, config.ServiceKindJob, config.ServiceKindRun})
 	schemaPath(t, serviceProperties, "imageFrom")
 	assertStringOrListSchema(t, schemaPath(t, serviceProperties, "command"))

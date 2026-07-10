@@ -207,6 +207,11 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 		Image:       targetImage,
 		StartedAt:   startTime,
 	}
+	if service.SharedBuildHash != "" {
+		if err := deploy.EnsurePreparedServiceImage(serviceName, &service, targetImage); err != nil {
+			return nil, fmt.Errorf("failed to prepare exact shared image before promotion: %w", err)
+		}
+	}
 
 	if err := deploy.ActivateTakodServiceRevision(serviceName, &service, targetImage); err != nil {
 		return nil, fmt.Errorf("failed to activate warmed revision before proxy promotion: %w", err)
@@ -371,6 +376,8 @@ func buildPromoteDeployment(
 ) *remotestate.DeploymentState {
 	serviceState := remotestate.ServiceState{
 		Name:             serviceName,
+		SharedBuild:      sharedBuildName(service),
+		SharedBuildHash:  service.SharedBuildHash,
 		FilesContentHash: service.FilesContentHash,
 		Files:            historyServiceFiles(service.Files),
 		Port:             service.Port,

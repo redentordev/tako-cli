@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -57,7 +58,23 @@ func BuildConfig(opts Options) (*config.Config, []Warning, error) {
 			Version: latestHistoryVersion(opts.History),
 		},
 		Servers:      cloneServers(opts.Servers),
+		Builds:       map[string]config.SharedBuildConfig{},
 		Environments: map[string]config.EnvironmentConfig{},
+	}
+	if opts.Desired != nil {
+		for name, build := range opts.Desired.Builds {
+			args := make(map[string]string, len(build.ArgKeys))
+			for _, key := range build.ArgKeys {
+				args[key] = ""
+			}
+			cfg.Builds[name] = config.SharedBuildConfig{Context: strings.TrimSpace(build.Context), Args: args, Target: strings.TrimSpace(build.Target), Dockerfile: strings.TrimSpace(build.Dockerfile)}
+			if info, err := os.Stat(strings.TrimSpace(build.Context)); err != nil || !info.IsDir() {
+				warnings = append(warnings, Warning{Code: "shared_build_context_unrecovered", Message: fmt.Sprintf("shared build %q context %q is not available on this machine; restore it before deploying", name, build.Context)})
+			}
+			if len(build.ArgKeys) > 0 {
+				warnings = append(warnings, Warning{Code: "shared_build_arg_values_redacted", Message: fmt.Sprintf("shared build %q argument values were redacted; restore them before deploying", name)})
+			}
+		}
 	}
 	if cfg.Project.Version == "" {
 		cfg.Project.Version = defaultExportedVersion
@@ -88,20 +105,74 @@ func BuildConfig(opts Options) (*config.Config, []Warning, error) {
 	}
 
 	if opts.Validate {
-		restoredFiles, cleanup, err := substituteUnrecoveredFilesForValidation(cfg)
+		restoredBuilds, cleanupBuilds, err := substituteUnrecoveredBuildsForValidation(cfg)
 		if err != nil {
 			return nil, warnings, err
 		}
+		restoredFiles, cleanup, err := substituteUnrecoveredFilesForValidation(cfg)
+		if err != nil {
+			cleanupBuilds()
+			return nil, warnings, err
+		}
 		if err := config.ValidateConfig(cfg); err != nil {
+			restoreMaterializedBuilds(cfg, restoredBuilds)
 			restoreMaterializedFiles(cfg, restoredFiles)
+			cleanupBuilds()
 			cleanup()
 			return nil, warnings, err
 		}
+		restoreMaterializedBuilds(cfg, restoredBuilds)
 		restoreMaterializedFiles(cfg, restoredFiles)
+		cleanupBuilds()
 		cleanup()
 	}
 
 	return cfg, warnings, nil
+}
+
+func substituteUnrecoveredBuildsForValidation(cfg *config.Config) (map[string]config.SharedBuildConfig, func(), error) {
+	restored := make(map[string]config.SharedBuildConfig)
+	standIn, err := os.MkdirTemp("", "tako-export-build-stand-in-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create shared build validation stand-in: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(standIn) }
+	for name, build := range cfg.Builds {
+		if info, err := os.Stat(build.Context); err == nil && info.IsDir() {
+			continue
+		}
+		restored[name] = build
+		buildStandIn := filepath.Join(standIn, name)
+		if err := os.MkdirAll(buildStandIn, 0700); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		dockerfile := strings.TrimSpace(build.Dockerfile)
+		if dockerfile == "" {
+			dockerfile = "Dockerfile"
+		}
+		clean := filepath.Clean(dockerfile)
+		if !filepath.IsAbs(clean) && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			path := filepath.Join(buildStandIn, clean)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				cleanup()
+				return nil, nil, err
+			}
+			if err := os.WriteFile(path, []byte("FROM scratch\n"), 0600); err != nil {
+				cleanup()
+				return nil, nil, err
+			}
+		}
+		build.Context = buildStandIn
+		cfg.Builds[name] = build
+	}
+	return restored, cleanup, nil
+}
+
+func restoreMaterializedBuilds(cfg *config.Config, restored map[string]config.SharedBuildConfig) {
+	for name, build := range restored {
+		cfg.Builds[name] = build
+	}
 }
 
 func materializeServices(desired *takoapi.DesiredStateDocument, actual *takoapi.ActualStateDocument) (map[string]config.ServiceConfig, []Warning, error) {
@@ -114,6 +185,9 @@ func materializeServices(desired *takoapi.DesiredStateDocument, actual *takoapi.
 			service, serviceWarnings, err := desiredServiceToConfig(name, serviceDoc)
 			if err != nil {
 				return nil, warnings, err
+			}
+			if _, shared := desired.Builds[serviceDoc.ImageFrom]; shared {
+				service.Image = ""
 			}
 			services[name] = service
 			warnings = append(warnings, serviceWarnings...)

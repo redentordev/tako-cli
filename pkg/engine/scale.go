@@ -180,6 +180,20 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to gather current replica state: %w", err)
 	}
+	for serviceName, desiredReplicas := range scaleTargets {
+		service := services[serviceName]
+		service.Replicas = desiredReplicas
+		if service.SharedBuildHash == "" {
+			continue
+		}
+		actual := actualState[serviceName]
+		if actual == nil || actual.Image == "" {
+			return nil, fmt.Errorf("shared-build service %s has no deployed image to scale; run a deploy first", serviceName)
+		}
+		if err := deploy.EnsurePreparedServiceImage(serviceName, &service, actual.Image); err != nil {
+			return nil, err
+		}
+	}
 
 	notifier := scaleNotifier(cfg, req.Verbose)
 	desiredServices := CloneServiceMap(services)
@@ -208,19 +222,25 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 			if actual, ok := actualState[serviceName]; ok && actual.Image != "" {
 				imageRef = actual.Image
 			} else {
-				imageRef = cfg.GetFullImageName(serviceName, envName)
+				imageRef = deployplan.ImageRef(cfg, envName, serviceName, service, "")
 			}
 		}
 
-		if err := deploy.DeployServiceTakod(serviceName, &service, imageRef); err != nil {
+		var deployErr error
+		if service.SharedBuildHash != "" {
+			deployErr = deploy.DeployPreparedServiceTakod(serviceName, &service, imageRef, false)
+		} else {
+			deployErr = deploy.DeployServiceTakod(serviceName, &service, imageRef)
+		}
+		if deployErr != nil {
 			e.emit(events.Event{
 				Type:    events.TypeDeployServiceFailed,
 				Phase:   events.PhaseDeploy,
 				Level:   events.LevelError,
 				Service: serviceName,
-				Message: fmt.Sprintf("  Failed: %v\n", err),
+				Message: fmt.Sprintf("  Failed: %v\n", deployErr),
 			})
-			result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: imageRef, Action: OutcomeFailed, Replicas: desiredReplicas, Error: err.Error()})
+			result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: imageRef, Action: OutcomeFailed, Replicas: desiredReplicas, Error: deployErr.Error()})
 			totalErrors++
 			continue
 		}
@@ -321,6 +341,8 @@ func BuildScaleDeploymentState(
 		serviceStates[serviceName] = remotestate.ServiceState{
 			Name:             serviceName,
 			Image:            imageRefs[serviceName],
+			SharedBuild:      sharedBuildName(service),
+			SharedBuildHash:  service.SharedBuildHash,
 			FilesContentHash: service.FilesContentHash,
 			Files:            historyServiceFiles(service.Files),
 			Port:             service.Port,

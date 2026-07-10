@@ -7,7 +7,10 @@
 package engine
 
 import (
+	"bytes"
 	"io"
+	"os"
+	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/secrets"
@@ -22,6 +25,47 @@ type Engine struct {
 	stream        *events.Stream
 	stateAutoSync StateAutoSyncFunc
 	buildOutput   io.Writer
+	buildWriter   *redactingWriter
+}
+
+type redactingWriter struct {
+	mu      sync.Mutex
+	writer  io.Writer
+	redact  func(string) string
+	pending bytes.Buffer
+}
+
+func (w *redactingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_, _ = w.pending.Write(p)
+	data := w.pending.Bytes()
+	lastNewline := bytes.LastIndexByte(data, '\n')
+	if carriage := bytes.LastIndexByte(data, '\r'); carriage > lastNewline {
+		lastNewline = carriage
+	}
+	if lastNewline < 0 {
+		return len(p), nil
+	}
+	complete := append([]byte(nil), data[:lastNewline+1]...)
+	remainder := append([]byte(nil), data[lastNewline+1:]...)
+	w.pending.Reset()
+	_, _ = w.pending.Write(remainder)
+	if _, err := io.WriteString(w.writer, w.redact(string(complete))); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (w *redactingWriter) Flush() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.pending.Len() == 0 {
+		return nil
+	}
+	_, err := io.WriteString(w.writer, w.redact(w.pending.String()))
+	w.pending.Reset()
+	return err
 }
 
 // Options configures an Engine.
@@ -59,6 +103,24 @@ func New(opts Options) *Engine {
 func (e *Engine) RegisterSecret(value string) {
 	if value != "" {
 		e.redactor.Register(value)
+	}
+}
+
+func (e *Engine) buildOutputWriter() io.Writer {
+	if e.buildWriter != nil {
+		return e.buildWriter
+	}
+	target := e.buildOutput
+	if target == nil {
+		target = os.Stdout
+	}
+	e.buildWriter = &redactingWriter{writer: target, redact: e.redactor.Redact}
+	return e.buildWriter
+}
+
+func (e *Engine) flushBuildOutput() {
+	if e.buildWriter != nil {
+		_ = e.buildWriter.Flush()
 	}
 }
 
