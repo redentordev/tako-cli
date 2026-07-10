@@ -387,6 +387,57 @@ func TestTriggerUnknownJobFailsBeforeStreaming(t *testing.T) {
 	}
 }
 
+func TestTriggerReservesFileSetBeforeApplyCanPruneIt(t *testing.T) {
+	oldRoot := serviceFilesRoot
+	serviceFilesRoot = t.TempDir()
+	defer func() { serviceFilesRoot = oldRoot }()
+	scheduler := newTestJobScheduler(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	scheduler.runJob = func(ctx context.Context, spec JobSpec, container string, output io.Writer) (int, error) {
+		close(started)
+		<-release
+		return 0, nil
+	}
+
+	oldFiles := []ServiceFileBundle{{Name: "file-000", Target: "/run/config", UID: os.Getuid(), GID: os.Getgid(), Entries: []ServiceFileEntry{{Data: []byte("old"), Mode: 0600}}}}
+	oldSetID := testServiceFileSetID(t, oldFiles)
+	if err := PublishServiceFiles(context.Background(), ServiceFilesRequest{Project: "demo", Environment: "production", Service: "report", FileSetID: oldSetID, Files: oldFiles}); err != nil {
+		t.Fatal(err)
+	}
+	oldSpec := validJobSpecFixture()
+	oldSpec.FileSetID = oldSetID
+	if _, err := scheduler.Apply(context.Background(), JobsApplyRequest{Project: "demo", Environment: "production", Jobs: []JobSpec{oldSpec}}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- scheduler.Trigger(context.Background(), "demo", "production", "report", nil) }()
+	<-started
+
+	newFiles := []ServiceFileBundle{{Name: "file-000", Target: "/run/config", UID: os.Getuid(), GID: os.Getgid(), Entries: []ServiceFileEntry{{Data: []byte("new"), Mode: 0600}}}}
+	newSetID := testServiceFileSetID(t, newFiles)
+	if err := PublishServiceFiles(context.Background(), ServiceFilesRequest{Project: "demo", Environment: "production", Service: "report", FileSetID: newSetID, Files: newFiles}); err != nil {
+		t.Fatal(err)
+	}
+	newSpec := validJobSpecFixture()
+	newSpec.FileSetID = newSetID
+	if _, err := scheduler.Apply(context.Background(), JobsApplyRequest{Project: "demo", Environment: "production", Jobs: []JobSpec{newSpec}}); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(serviceFilesRoot, "demo", "production", "report", oldSetID)
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("running job's file set was pruned: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old file set remained after run handoff: %v", err)
+	}
+}
+
 func TestScheduledJobFires(t *testing.T) {
 	scheduler := newTestJobScheduler(t)
 	var fired atomic.Int32

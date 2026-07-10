@@ -37,13 +37,18 @@ type Server struct {
 const (
 	takodReadHeaderTimeout         = 5 * time.Second
 	takodMaxJSONBodyBytes          = 16 << 20
+	takodMaxServiceJSONBodyBytes   = 384 << 20
 	DefaultBuildCachePruneInterval = 24 * time.Hour
 	buildCachePruneCommandTimeout  = 30 * time.Minute
 	buildCachePruneMaxInitialDelay = 5 * time.Minute
 )
 
 func decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, takodMaxJSONBodyBytes)
+	return decodeJSONRequestWithLimit(w, r, dst, takodMaxJSONBodyBytes)
+}
+
+func decodeJSONRequestWithLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(dst); err != nil {
 		return err
@@ -87,6 +92,10 @@ const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
 // CapabilityExecOneOffControlsV1 covers pull auth, entrypoint, labels, and
 // runtime controls on deploy-time one-off exec requests.
 const CapabilityExecOneOffControlsV1 = "exec.oneoff-controls-v1"
+
+// CapabilityServiceFilesV1 means reconcile, jobs, and one-off execution can
+// atomically publish request-scoped operator file bundles and bind mount them.
+const CapabilityServiceFilesV1 = "service.files-v1"
 
 func NewServer(socket string, dataDir string, version string) *Server {
 	return NewServerWithOptions(socket, dataDir, version, ServerOptions{})
@@ -143,6 +152,8 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/actual", s.handleActual)
 	mux.HandleFunc("/v1/reconcile-service", s.handleReconcileService)
+	mux.HandleFunc("/v1/service-files", s.handleServiceFiles)
+	mux.HandleFunc("/v1/service-files/check", s.handleServiceFilesCheck)
 	mux.HandleFunc("/v1/remove-service", s.handleRemoveService)
 	mux.HandleFunc("/v1/proxy-file", s.handleProxyFile)
 	mux.HandleFunc("/v1/proxy", s.handleProxy)
@@ -349,7 +360,7 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 	defer r.Body.Close()
 
 	var request ReconcileServiceRequest
-	if err := decodeJSONRequest(w, r, &request); err != nil {
+	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxServiceJSONBodyBytes); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -368,6 +379,44 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleServiceFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	var request ServiceFilesRequest
+	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxServiceJSONBodyBytes); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := PublishServiceFiles(r.Context(), request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"fileSetId": request.FileSetID})
+}
+
+func (s *Server) handleServiceFilesCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	var request ServiceFilesCheckRequest
+	if err := decodeJSONRequest(w, r, &request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := CheckServiceFiles(request); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"fileSetId": request.FileSetID})
 }
 
 func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
@@ -1064,7 +1113,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request ExecRequest
-	if err := decodeJSONRequest(w, r, &request); err != nil {
+	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxServiceJSONBodyBytes); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1146,7 +1195,7 @@ func (s *Server) handleJobsApply(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request JobsApplyRequest
-	if err := decodeJSONRequest(w, r, &request); err != nil {
+	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxServiceJSONBodyBytes); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1342,7 +1391,7 @@ func (s *Server) Status() Status {
 	status := Status{
 		Runtime:      "takod",
 		Version:      s.version,
-		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1},
+		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1},
 		Hostname:     hostname,
 		Socket:       s.socket,
 		DataDir:      s.dataDir,

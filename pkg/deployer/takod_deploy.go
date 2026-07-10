@@ -235,6 +235,13 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 	if d.sshPool == nil {
 		return fmt.Errorf("ssh pool not initialized")
 	}
+	if len(service.Files) > 0 {
+		_, _, filesHash, err := d.PrepareServiceFiles(serviceName, service)
+		if err != nil {
+			return err
+		}
+		service.FilesContentHash = filesHash
+	}
 
 	assignments, err := d.planTakodAssignments(service)
 	if err != nil {
@@ -247,6 +254,11 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		// and record it; the post-deploy ApplyJobSchedules pass registers
 		// the cron schedule declaratively on every node.
 		return runTakodJobBuildPhases(func() error {
+			if len(service.Files) > 0 {
+				if err := d.preflightTakodCapability(assignmentServers, takod.CapabilityServiceFilesV1, "operator file distribution"); err != nil {
+					return fmt.Errorf("job %s uses files: %w", serviceName, err)
+				}
+			}
 			if service.Entrypoint.IsSet() {
 				if err := d.preflightTakodCapability(assignmentServers, takod.CapabilityContainerArgvV1, "container argv payloads"); err != nil {
 					return fmt.Errorf("job %s uses an entrypoint: %w", serviceName, err)
@@ -272,9 +284,19 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		return fmt.Errorf("failed to get takod target servers: %w", err)
 	}
 	grouped := groupTakodAssignments(assignments)
-	needsCapabilities := serviceNeedsContainerArgvCapability(service) || serviceNeedsRuntimeControlsCapability(service)
+	needsCapabilities := serviceNeedsTakodCapabilityPreflight(service)
 	return runTakodServiceRollout(needsCapabilities, takodServiceRolloutOperations{
 		Preflight: func() error {
+			if len(service.Files) > 0 {
+				if err := d.preflightTakodCapability(targetServers, takod.CapabilityServiceFilesV1, "operator file distribution"); err != nil {
+					return fmt.Errorf("service %s uses files: %w", serviceName, err)
+				}
+				if service.ReuseFiles {
+					if err := d.preflightTakodServiceFileSet(assignmentServers, serviceName, service.FilesContentHash); err != nil {
+						return fmt.Errorf("service %s historical operator files are unavailable: %w", serviceName, err)
+					}
+				}
+			}
 			if serviceNeedsContainerArgvCapability(service) {
 				if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerArgvV1, "container argv payloads"); err != nil {
 					return fmt.Errorf("service %s uses list-form command or entrypoint: %w", serviceName, err)
@@ -345,6 +367,10 @@ func serviceNeedsRuntimeControlsCapability(service *config.ServiceConfig) bool {
 	return service != nil && (service.User != "" || service.WorkingDir != "" || service.StopGracePeriod != "" || service.Init || len(service.ExtraHosts) > 0 || len(service.Ulimits) > 0 || service.ShmSize != "")
 }
 
+func serviceNeedsTakodCapabilityPreflight(service *config.ServiceConfig) bool {
+	return serviceNeedsContainerArgvCapability(service) || serviceNeedsRuntimeControlsCapability(service) || (service != nil && len(service.Files) > 0)
+}
+
 func (d *Deployer) preflightTakodContainerArgv(serverNames []string) error {
 	return d.preflightTakodCapability(serverNames, takod.CapabilityContainerArgvV1, "container argv payloads")
 }
@@ -356,6 +382,26 @@ func (d *Deployer) preflightTakodCapability(serverNames []string, capability str
 			return err
 		}
 		return d.ensureTakodCapability(client, serverName, capability, feature)
+	})
+}
+
+func (d *Deployer) preflightTakodServiceFileSet(serverNames []string, serviceName string, contentHash string) error {
+	setID, err := serviceFileSetID(contentHash)
+	if err != nil {
+		return err
+	}
+	return runTakodNodeActions(serverNames, func(serverName string) error {
+		client, err := d.getEnvironmentClient(serverName)
+		if err != nil {
+			return err
+		}
+		_, err = takodclient.RequestJSONWithContext(d.baseContext(), client, d.takodSocket(), "POST", "/v1/service-files/check", takod.ServiceFilesCheckRequest{
+			Project: d.config.Project.Name, Environment: d.environment, Service: serviceName, FileSetID: setID,
+		})
+		if err != nil {
+			return fmt.Errorf("%s: %w", serverName, err)
+		}
+		return nil
 	})
 }
 
@@ -945,6 +991,22 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 	if err != nil {
 		return err
 	}
+	var fileBundles []takod.ServiceFileBundle
+	fileSetID := ""
+	if len(service.Files) > 0 && (!service.ReuseFiles || len(slots) > 0) {
+		var fileMounts []string
+		fileBundles, fileMounts, _, err = d.PrepareServiceFiles(serviceName, service)
+		if err != nil {
+			return err
+		}
+		if len(slots) > 0 {
+			mounts = append(mounts, fileMounts...)
+		}
+		fileSetID, err = serviceFileSetID(service.FilesContentHash)
+		if err != nil {
+			return err
+		}
+	}
 
 	request := takod.ReconcileServiceRequest{
 		Project:            d.config.Project.Name,
@@ -963,6 +1025,8 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Entrypoint:         service.Entrypoint,
 		Labels:             serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
 		ExternalVolumes:    externalVolumes,
+		Files:              fileBundles,
+		FileSetID:          fileSetID,
 		MemoryLimit:        serviceMemoryLimit(service),
 		CPULimit:           serviceCPULimit(service),
 		User:               service.User,
@@ -1760,6 +1824,9 @@ func (d *Deployer) reconcileServiceViaTakod(client *ssh.Client, request takod.Re
 
 func reconcileServiceRequestTimeout(request takod.ReconcileServiceRequest) time.Duration {
 	timeout := takodclient.JSONRequestTimeout
+	if len(request.Files) > 0 {
+		timeout = takodclient.StreamRequestTimeout
+	}
 	if request.Health == nil || request.Health.WaitAttempts <= 0 {
 		return timeout
 	}

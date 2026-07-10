@@ -42,6 +42,15 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	if schemaPath(t, serviceProperties, "envFiles")["maxItems"] != float64(32) {
 		t.Fatalf("envFiles maxItems mismatch")
 	}
+	files := schemaPath(t, serviceProperties, "files")
+	if files["maxItems"] != float64(128) {
+		t.Fatalf("files maxItems mismatch")
+	}
+	fileItem := schemaPath(t, files, "items", "properties")
+	schemaPath(t, fileItem, "source")
+	schemaPath(t, fileItem, "target")
+	schemaPath(t, fileItem, "secret")
+	schemaPath(t, fileItem, "owner")
 	for _, field := range []string{"user", "workingDir", "stopGracePeriod", "init", "extraHosts", "ulimits", "shmSize"} {
 		schemaPath(t, serviceProperties, field)
 	}

@@ -222,6 +222,14 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 	serverNames := []string{req.ServerName}
 	services := s.services
 	plan := s.plan
+	if len(req.Service.Files) > 0 {
+		_, _, filesHash, err := s.deployer.PrepareServiceFiles(req.ServiceName, &req.Service)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fingerprint operator files for %s: %w", req.ServiceName, err)
+		}
+		req.Service.FilesContentHash = filesHash
+		services[req.ServiceName] = req.Service
+	}
 
 	stateManager := remotestate.NewStateManagerWithSocket(s.sourceClient, cfg.Project.Name, envName, s.server.Host, TakodSocketFromConfig(cfg))
 	startTime := time.Now()
@@ -232,11 +240,13 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 		Status:      remotestate.StatusInProgress,
 		Services: map[string]remotestate.ServiceState{
 			req.ServiceName: {
-				Name:     req.ServiceName,
-				Image:    req.ImageRef,
-				Port:     req.Service.Port,
-				Replicas: req.Service.Replicas,
-				Env:      RedactedEnvKeys(req.EnvVars),
+				Name:             req.ServiceName,
+				Image:            req.ImageRef,
+				FilesContentHash: req.Service.FilesContentHash,
+				Files:            historyServiceFiles(req.Service.Files),
+				Port:             req.Service.Port,
+				Replicas:         req.Service.Replicas,
+				Env:              RedactedEnvKeys(req.EnvVars),
 			},
 		},
 		User:       remotestate.GetCurrentUser(),

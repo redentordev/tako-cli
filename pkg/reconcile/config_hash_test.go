@@ -50,6 +50,25 @@ func TestSafeServiceConfigHashTracksPublishedPorts(t *testing.T) {
 	}
 }
 
+func TestSafeServiceConfigHashTracksOperatorFileContentWithoutLocalSourcePath(t *testing.T) {
+	first := config.ServiceConfig{
+		Image: "nginx:1.27", Files: []config.ServiceFileConfig{{Source: "/checkout-a/nginx.conf", Target: "/etc/nginx/nginx.conf", Secret: true}},
+		FilesContentHash: "sha256:first",
+	}
+	second := first
+	second.Files = []config.ServiceFileConfig{{Source: "/checkout-b/nginx.conf", Target: "/etc/nginx/nginx.conf", Secret: true}}
+	firstHash, _ := SafeServiceConfigHash(first)
+	secondHash, _ := SafeServiceConfigHash(second)
+	if firstHash != secondHash {
+		t.Fatalf("local source paths changed service hash: %q != %q", firstHash, secondHash)
+	}
+	second.FilesContentHash = "sha256:second"
+	changedHash, _ := SafeServiceConfigHash(second)
+	if changedHash == firstHash {
+		t.Fatal("operator file content hash did not change service hash")
+	}
+}
+
 func TestSafeServiceConfigHashTracksContainerGapAFields(t *testing.T) {
 	base := config.ServiceConfig{Image: "busybox:latest"}
 	baseHash, ok := SafeServiceConfigHash(base)

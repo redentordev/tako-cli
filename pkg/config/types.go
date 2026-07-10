@@ -227,8 +227,12 @@ type ServiceConfig struct {
 	ShmSize         string                  `yaml:"shmSize,omitempty" json:"shmSize,omitempty"`
 
 	// Secrets: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"].
-	Secrets []string `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
-	Volumes []string `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	Secrets []string            `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
+	Volumes []string            `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	Files   []ServiceFileConfig `yaml:"files,omitempty" json:"files,omitempty"`
+	// FilesContentHash is an internal digest of fully resolved operator file
+	// metadata and bytes; file contents never enter desired state or labels.
+	FilesContentHash string `yaml:"-" json:"-"`
 
 	// Service type flags
 	Persistent bool `yaml:"persistent,omitempty" json:"persistent,omitempty"` // Don't remove on redeploy (databases, caches)
@@ -263,6 +267,19 @@ type ServiceConfig struct {
 
 	// Service dependencies (controls deployment order)
 	DependsOn []string `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"` // List of service names this service depends on
+
+	// ReuseFiles tells rollback paths to mount an already-published immutable
+	// FilesContentHash instead of reading today's local sources.
+	ReuseFiles bool `yaml:"-" json:"-"`
+}
+
+// ServiceFileConfig distributes one local regular file or directory into a
+// service container as a read-only bind mount. Secret forces private modes.
+type ServiceFileConfig struct {
+	Source string `yaml:"source" json:"source"`
+	Target string `yaml:"target" json:"target"`
+	Secret bool   `yaml:"secret,omitempty" json:"secret,omitempty"`
+	Owner  string `yaml:"owner,omitempty" json:"owner,omitempty"`
 }
 
 // IsJob reports whether the service is a scheduled job workload.
@@ -1078,6 +1095,9 @@ func normalizeConfigRelativePaths(cfg *Config, configDir string) {
 			service.EnvFile = resolveConfigRelativePath(absConfigDir, service.EnvFile)
 			for i := range service.EnvFiles {
 				service.EnvFiles[i] = resolveConfigRelativePath(absConfigDir, service.EnvFiles[i])
+			}
+			for i := range service.Files {
+				service.Files[i].Source = resolveConfigRelativePath(absConfigDir, service.Files[i].Source)
 			}
 			env.Services[serviceName] = service
 		}

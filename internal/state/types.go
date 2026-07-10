@@ -31,17 +31,25 @@ type DeploymentState struct {
 
 // ServiceState represents a deployed service's state
 type ServiceState struct {
-	Kind        string            `json:"kind,omitempty"`
-	Name        string            `json:"name"`
-	Image       string            `json:"image"` // Image name with tag
-	ConfigHash  string            `json:"configHash,omitempty"`
-	Run         *RunState         `json:"run,omitempty"`
-	ImageID     string            `json:"imageId"`     // Docker image ID
-	ContainerID string            `json:"containerId"` // Running container ID
-	Port        int               `json:"port"`
-	Replicas    int               `json:"replicas"`
-	Env         map[string]string `json:"env"`
-	HealthCheck HealthCheckState  `json:"healthCheck"`
+	Kind             string             `json:"kind,omitempty"`
+	Name             string             `json:"name"`
+	Image            string             `json:"image"` // Image name with tag
+	ConfigHash       string             `json:"configHash,omitempty"`
+	FilesContentHash string             `json:"filesContentHash,omitempty"`
+	Files            []ServiceFileState `json:"files,omitempty"`
+	Run              *RunState          `json:"run,omitempty"`
+	ImageID          string             `json:"imageId"`     // Docker image ID
+	ContainerID      string             `json:"containerId"` // Running container ID
+	Port             int                `json:"port"`
+	Replicas         int                `json:"replicas"`
+	Env              map[string]string  `json:"env"`
+	HealthCheck      HealthCheckState   `json:"healthCheck"`
+}
+
+type ServiceFileState struct {
+	Target string `json:"target"`
+	Secret bool   `json:"secret,omitempty"`
+	Owner  string `json:"owner,omitempty"`
 }
 
 // RunState records a completed deploy-time kind:run execution.

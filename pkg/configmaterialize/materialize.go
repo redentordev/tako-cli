@@ -3,6 +3,7 @@ package configmaterialize
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -87,9 +88,17 @@ func BuildConfig(opts Options) (*config.Config, []Warning, error) {
 	}
 
 	if opts.Validate {
-		if err := config.ValidateConfig(cfg); err != nil {
+		restoredFiles, cleanup, err := substituteUnrecoveredFilesForValidation(cfg)
+		if err != nil {
 			return nil, warnings, err
 		}
+		if err := config.ValidateConfig(cfg); err != nil {
+			restoreMaterializedFiles(cfg, restoredFiles)
+			cleanup()
+			return nil, warnings, err
+		}
+		restoreMaterializedFiles(cfg, restoredFiles)
+		cleanup()
 	}
 
 	return cfg, warnings, nil
@@ -162,6 +171,7 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 		Restart:         strings.TrimSpace(service.Restart),
 		Persistent:      service.Persistent,
 		Volumes:         cleanStrings(service.Volumes),
+		Files:           materializeServiceFiles(service.Files),
 		Secrets:         cleanStrings(service.SecretRefs),
 		DependsOn:       cleanStrings(service.DependsOn),
 		User:            strings.TrimSpace(service.User),
@@ -186,6 +196,14 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 		// never applied to deploy-time runs. Do not turn them into invalid config.
 		out.Restart = ""
 		out.Deploy = config.DeployConfig{}
+	}
+	for _, file := range out.Files {
+		if _, err := os.Lstat(file.Source); err != nil {
+			warnings = append(warnings, Warning{
+				Code: "operator_file_content_unrecovered", Service: name,
+				Message: fmt.Sprintf("service %q operator file source %q is not available on this machine; restore the file or update files[].source before deploying", name, file.Source),
+			})
+		}
 	}
 	if len(service.BuildArgKeys) > 0 {
 		warnings = append(warnings, Warning{
@@ -259,6 +277,60 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 	}
 
 	return out, warnings, nil
+}
+
+func materializeServiceFiles(files []takoapi.ServiceFileDocument) []config.ServiceFileConfig {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]config.ServiceFileConfig, 0, len(files))
+	for _, file := range files {
+		out = append(out, config.ServiceFileConfig{Source: strings.TrimSpace(file.Source), Target: strings.TrimSpace(file.Target), Secret: file.Secret, Owner: strings.TrimSpace(file.Owner)})
+	}
+	return out
+}
+
+func substituteUnrecoveredFilesForValidation(cfg *config.Config) (map[string][]config.ServiceFileConfig, func(), error) {
+	restored := make(map[string][]config.ServiceFileConfig)
+	standIn, err := os.CreateTemp("", "tako-export-file-stand-in-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create operator file validation stand-in: %w", err)
+	}
+	standInPath := standIn.Name()
+	if err := standIn.Close(); err != nil {
+		os.Remove(standInPath)
+		return nil, nil, fmt.Errorf("close operator file validation stand-in: %w", err)
+	}
+	cleanup := func() { _ = os.Remove(standInPath) }
+	for envName, env := range cfg.Environments {
+		for serviceName, service := range env.Services {
+			if len(service.Files) == 0 {
+				continue
+			}
+			key := envName + "\x00" + serviceName
+			restored[key] = append([]config.ServiceFileConfig(nil), service.Files...)
+			for i, file := range service.Files {
+				if _, err := os.Lstat(file.Source); err == nil {
+					continue
+				}
+				service.Files[i].Source = standInPath
+			}
+			env.Services[serviceName] = service
+		}
+		cfg.Environments[envName] = env
+	}
+	return restored, cleanup, nil
+}
+
+func restoreMaterializedFiles(cfg *config.Config, restored map[string][]config.ServiceFileConfig) {
+	for key, files := range restored {
+		envName, serviceName, _ := strings.Cut(key, "\x00")
+		env := cfg.Environments[envName]
+		service := env.Services[serviceName]
+		service.Files = files
+		env.Services[serviceName] = service
+		cfg.Environments[envName] = env
+	}
 }
 
 func materializeUlimits(source map[string]takoapi.UlimitDocument) map[string]config.UlimitConfig {

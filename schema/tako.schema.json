@@ -533,6 +533,22 @@
                   },
                   "description": "Volume mounts"
                 },
+                "files": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "description": "Local regular files or directories distributed through takod and mounted read-only into the container.",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["source", "target"],
+                    "properties": {
+                      "source": { "type": "string", "minLength": 1 },
+                      "target": { "type": "string", "pattern": "^/", "minLength": 2 },
+                      "secret": { "type": "boolean", "description": "Force private 0700/0600 modes for the distributed tree." },
+                      "owner": { "type": "string", "pattern": "^[0-9]+(:[0-9]+)?$", "description": "Numeric uid or uid:gid that owns the published tree; defaults to a numeric service user or root." }
+                    }
+                  }
+                },
                 "backup": {
                   "type": "object",
                   "description": "Optional takod-managed periodic backups for named service volumes. Backups are created node-locally and can also be uploaded to S3-compatible object storage.",

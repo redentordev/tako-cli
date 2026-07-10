@@ -180,7 +180,7 @@ func runOutcome(result *deployer.DeployRunResult) *RunOutcome {
 func runHistoryServiceState(name string, service config.ServiceConfig, image string, result *deployer.DeployRunResult) remotestate.ServiceState {
 	state := remotestate.ServiceState{
 		Kind: config.ServiceKindRun, Name: name, Image: image,
-		ConfigHash: runServiceFingerprint(service, image),
+		ConfigHash: runServiceFingerprint(service, image), FilesContentHash: service.FilesContentHash, Files: historyServiceFiles(service.Files),
 	}
 	if result != nil {
 		state.Run = &remotestate.RunState{

@@ -70,6 +70,11 @@ func (d *Deployer) RunDeployStepOnNodes(serviceName string, service *config.Serv
 	if err := d.preflightTakodCapability([]string{serverName}, takod.CapabilityExecOneOffControlsV1, "deploy-time one-off controls"); err != nil {
 		return nil, fmt.Errorf("run %s: %w", serviceName, err)
 	}
+	if len(service.Files) > 0 {
+		if err := d.preflightTakodCapability([]string{serverName}, takod.CapabilityServiceFilesV1, "operator file distribution"); err != nil {
+			return nil, fmt.Errorf("run %s uses files: %w", serviceName, err)
+		}
+	}
 	client, err := d.getEnvironmentClient(serverName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to node %s for run %s: %w", serverName, serviceName, err)
@@ -84,6 +89,21 @@ func (d *Deployer) RunDeployStepOnNodes(serviceName string, service *config.Serv
 	mounts, externalVolumes, err := d.buildTakodMountSpecs(serviceName, service)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve run mounts for %s: %w", serviceName, err)
+	}
+	fileBundles, fileMounts, filesHash, err := d.PrepareServiceFiles(serviceName, service)
+	if err != nil {
+		return nil, err
+	}
+	if filesHash != "" {
+		service.FilesContentHash = filesHash
+	}
+	mounts = append(mounts, fileMounts...)
+	fileSetID := ""
+	if filesHash != "" {
+		fileSetID, err = serviceFileSetID(filesHash)
+		if err != nil {
+			return nil, err
+		}
 	}
 	timeout := DefaultDeployRunTimeout
 	if strings.TrimSpace(service.Timeout) != "" {
@@ -106,6 +126,9 @@ func (d *Deployer) RunDeployStepOnNodes(serviceName string, service *config.Serv
 		Network:            runtimeid.NetworkName(d.config.Project.Name, d.environment),
 		Mounts:             mounts,
 		ExternalVolumes:    externalVolumes,
+		Files:              fileBundles,
+		FileSetID:          fileSetID,
+		CleanupFiles:       len(fileBundles) > 0,
 		Labels:             copyJobLabels(service.Labels),
 		User:               service.User,
 		WorkingDir:         service.WorkingDir,

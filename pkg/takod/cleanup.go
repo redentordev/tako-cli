@@ -139,6 +139,11 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 	}
 	if req.RemoveDeployFiles {
 		removeFixedPath(filepath.Join("/opt", req.Project), "deployment files", warn)
+		filesPath := filepath.Join(serviceFilesRoot, req.Project)
+		if req.Environment != "" {
+			filesPath = filepath.Join(filesPath, req.Environment)
+		}
+		removeFixedPath(filesPath, "operator files", warn)
 	}
 	if req.RemoveTakodState {
 		cleanupTakodState(req.Project, req.Environment, warn)

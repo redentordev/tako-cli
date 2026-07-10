@@ -70,6 +70,9 @@ type ExecRequest struct {
 	// Mounts adds --mount specs to oneoff containers (volumes opt-in).
 	Mounts             []string                       `json:"mounts,omitempty"`
 	ExternalVolumes    []string                       `json:"externalVolumes,omitempty"`
+	Files              []ServiceFileBundle            `json:"files,omitempty"`
+	FileSetID          string                         `json:"fileSetId,omitempty"`
+	CleanupFiles       bool                           `json:"cleanupFiles,omitempty"`
 	Entrypoint         []string                       `json:"entrypoint,omitempty"`
 	Labels             map[string]string              `json:"labels,omitempty"`
 	User               string                         `json:"user,omitempty"`
@@ -161,6 +164,16 @@ func validateExecRequest(req *ExecRequest) error {
 			return fmt.Errorf("invalid external volume")
 		}
 	}
+	if err := validateServiceFileBundles(req.Files); err != nil {
+		return err
+	}
+	if req.FileSetID != "" {
+		if err := validateServiceFileSetID(req.FileSetID); err != nil {
+			return err
+		}
+	} else if len(req.Files) > 0 {
+		return fmt.Errorf("fileSetId is required when service files are present")
+	}
 	if req.Replica < 0 {
 		return fmt.Errorf("replica must be positive")
 	}
@@ -182,7 +195,7 @@ func validateExecRequest(req *ExecRequest) error {
 	if req.IdleTimeoutSeconds != 0 && !req.Interactive {
 		return fmt.Errorf("idleTimeoutSeconds requires an interactive session")
 	}
-	if req.Mode != ExecModeOneOff && (req.PullImage || len(req.RegistryAuths) > 0 || len(req.Entrypoint) > 0 || len(req.Labels) > 0 || req.User != "" || req.WorkingDir != "" || req.StopTimeoutSeconds != 0 || req.Init || len(req.ExtraHosts) > 0 || len(req.Ulimits) > 0 || req.ShmSize != "" || req.MemoryLimit != "" || req.CPULimit != "" || len(req.ExternalVolumes) > 0) {
+	if req.Mode != ExecModeOneOff && (req.PullImage || len(req.RegistryAuths) > 0 || len(req.Entrypoint) > 0 || len(req.Labels) > 0 || req.User != "" || req.WorkingDir != "" || req.StopTimeoutSeconds != 0 || req.Init || len(req.ExtraHosts) > 0 || len(req.Ulimits) > 0 || req.ShmSize != "" || req.MemoryLimit != "" || req.CPULimit != "" || len(req.ExternalVolumes) > 0 || len(req.Files) > 0 || req.FileSetID != "" || req.CleanupFiles) {
 		return fmt.Errorf("container run controls require oneoff mode")
 	}
 	return nil
@@ -193,7 +206,7 @@ func validateExecRequest(req *ExecRequest) error {
 type execRun struct {
 	args      []string
 	container string
-	cleanup   func()
+	cleanup   func() error
 }
 
 // prepareExecRun resolves the attach container or oneoff image/env-file and
@@ -233,15 +246,41 @@ func prepareExecRun(ctx context.Context, req ExecRequest) (*execRun, error) {
 				return nil, fmt.Errorf("failed to pull image %s: %w: %s", image, err, annotateRegistryAuthFailure(strings.TrimSpace(output)))
 			}
 		}
+		if req.FileSetID != "" {
+			if len(req.Files) > 0 {
+				if err := prepareServiceFiles(ctx, req.Project, req.Environment, req.Service, req.FileSetID, req.Files); err != nil {
+					return nil, err
+				}
+			} else if err := ensureServiceFileSet(req.Project, req.Environment, req.Service, req.FileSetID); err != nil {
+				return nil, err
+			}
+		}
 		envFile, envCleanup, err := writeTempEnvFile(req.EnvFileContent, req.Project, req.Environment, req.Service)
 		if err != nil {
+			if req.CleanupFiles {
+				if cleanupErr := removeServiceFiles(req.Project, req.Environment, req.Service); cleanupErr != nil {
+					return nil, fmt.Errorf("%w; failed to clean up one-off files: %v", err, cleanupErr)
+				}
+			}
 			return nil, err
 		}
 		container := fmt.Sprintf("tako_%s_%s_%s_exec_%d", req.Project, req.Environment, req.Service, time.Now().UnixNano())
+		var cleanup func() error
+		if envCleanup != nil {
+			cleanup = func() error { envCleanup(); return nil }
+		}
+		if req.CleanupFiles {
+			cleanup = func() error {
+				if envCleanup != nil {
+					envCleanup()
+				}
+				return removeServiceFiles(req.Project, req.Environment, req.Service)
+			}
+		}
 		return &execRun{
 			args:      buildExecOneOffArgs(req, container, image, envFile),
 			container: container,
-			cleanup:   envCleanup,
+			cleanup:   cleanup,
 		}, nil
 	}
 }
@@ -265,9 +304,6 @@ func StreamExec(ctx context.Context, req ExecRequest, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if run.cleanup != nil {
-		defer run.cleanup()
-	}
 	args := run.args
 	container := run.container
 
@@ -279,6 +315,16 @@ func StreamExec(ctx context.Context, req ExecRequest, writer io.Writer) error {
 	exitCode, runErr := runExecDocker(runCtx, out, args)
 	if req.Mode == ExecModeOneOff && runCtx.Err() != nil {
 		removeExecContainer(container)
+	}
+	if run.cleanup != nil {
+		if cleanupErr := run.cleanup(); cleanupErr != nil {
+			if runErr == nil {
+				runErr = fmt.Errorf("failed to clean up one-off files: %w", cleanupErr)
+			}
+			if exitCode == 0 {
+				exitCode = 1
+			}
+		}
 	}
 	if runErr != nil {
 		out.ensureLineStart()

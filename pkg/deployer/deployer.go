@@ -320,6 +320,9 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 	}
 
 	rollbackService := *service
+	if err := applyRollbackServiceFiles(&rollbackService, serviceState); err != nil {
+		return fmt.Errorf("service %s: %w", serviceName, err)
+	}
 	options := takodRollbackDeployOptionsForService(service)
 	rollbackService.Image = serviceState.Image
 	rollbackService.Replicas = serviceState.Replicas
@@ -328,6 +331,29 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 	}
 
 	return d.deployServiceTakod(serviceName, &rollbackService, serviceState.Image, options)
+}
+
+func applyRollbackServiceFiles(service *config.ServiceConfig, serviceState *state.ServiceState) error {
+	if serviceState.FilesContentHash == "" {
+		service.Files = nil
+		service.FilesContentHash = ""
+		service.ReuseFiles = false
+		return nil
+	}
+	if len(serviceState.Files) == 0 {
+		return fmt.Errorf("deployment state does not include operator file mount metadata needed for exact rollback")
+	}
+	service.Files = make([]config.ServiceFileConfig, 0, len(serviceState.Files))
+	for _, file := range serviceState.Files {
+		service.Files = append(service.Files, config.ServiceFileConfig{
+			Target: file.Target,
+			Secret: file.Secret,
+			Owner:  file.Owner,
+		})
+	}
+	service.FilesContentHash = serviceState.FilesContentHash
+	service.ReuseFiles = true
+	return nil
 }
 
 // BuildImage builds a Docker image for a service without deploying it.

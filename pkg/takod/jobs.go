@@ -71,6 +71,8 @@ type JobSpec struct {
 	// Network attaches run containers; default tako_<project>_<env>.
 	Network            string                         `json:"network,omitempty"`
 	Mounts             []string                       `json:"mounts,omitempty"`
+	Files              []ServiceFileBundle            `json:"files,omitempty"`
+	FileSetID          string                         `json:"fileSetId,omitempty"`
 	MemoryLimit        string                         `json:"memoryLimit,omitempty"`
 	CPULimit           string                         `json:"cpuLimit,omitempty"`
 	User               string                         `json:"user,omitempty"`
@@ -247,6 +249,16 @@ func (s *JobScheduler) Apply(ctx context.Context, request JobsApplyRequest) (*Jo
 	sort.Strings(applied)
 	for _, name := range applied {
 		spec := desired[name]
+		if spec.FileSetID != "" {
+			if err := ensureServiceFileSet(spec.Project, spec.Environment, spec.Name, spec.FileSetID); err != nil {
+				return nil, fmt.Errorf("job %s files: %w", spec.Name, err)
+			}
+		}
+		spec.Files = nil
+		desired[name] = spec
+	}
+	for _, name := range applied {
+		spec := desired[name]
 		if err := s.persistSpec(spec); err != nil {
 			return nil, err
 		}
@@ -255,6 +267,14 @@ func (s *JobScheduler) Apply(ctx context.Context, request JobsApplyRequest) (*Jo
 		s.mu.Unlock()
 		if err != nil {
 			return nil, err
+		}
+		s.mu.Lock()
+		running := s.running[jobKey(spec.Project, spec.Environment, spec.Name)]
+		s.mu.Unlock()
+		if !running {
+			if err := cleanupServiceFileVersions(spec.Project, spec.Environment, spec.Name, spec.FileSetID); err != nil {
+				return nil, fmt.Errorf("failed to clean old job files: %w", err)
+			}
 		}
 	}
 
@@ -448,12 +468,22 @@ func (s *JobScheduler) Trigger(ctx context.Context, project string, environment 
 		return fmt.Errorf("invalid job name")
 	}
 	s.mu.Lock()
-	spec, ok := s.specs[jobKey(project, environment, job)]
+	key := jobKey(project, environment, job)
+	spec, ok := s.specs[key]
+	reserved := ok && !s.running[key]
+	if reserved {
+		s.running[key] = true
+	}
 	s.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("job %s is not scheduled for %s/%s on this node", job, project, environment)
 	}
-	record := s.executeJob(ctx, spec, JobTriggerManual, stream)
+	var record JobRunRecord
+	if reserved {
+		record = s.executeReservedJob(ctx, spec, JobTriggerManual, stream)
+	} else {
+		record = s.recordSkippedJob(spec, JobTriggerManual)
+	}
 	if record.Status == JobRunStatusSkipped {
 		return fmt.Errorf("job %s is already running; try again after it finishes", job)
 	}
@@ -466,31 +496,48 @@ func (s *JobScheduler) Trigger(ctx context.Context, project string, environment 
 // skipped and recorded as such without touching the stream.
 func (s *JobScheduler) executeJob(ctx context.Context, spec JobSpec, trigger string, stream io.Writer) JobRunRecord {
 	key := jobKey(spec.Project, spec.Environment, spec.Name)
-	started := time.Now().UTC()
-
 	s.mu.Lock()
 	if s.running[key] {
 		s.mu.Unlock()
-		record := JobRunRecord{
-			Project:     spec.Project,
-			Environment: spec.Environment,
-			Job:         spec.Name,
-			Trigger:     trigger,
-			StartedAt:   started,
-			FinishedAt:  started,
-			ExitCode:    -1,
-			Status:      JobRunStatusSkipped,
-			Output:      "skipped: previous run still in progress",
-		}
-		s.appendRunRecord(record)
-		return record
+		return s.recordSkippedJob(spec, trigger)
 	}
 	s.running[key] = true
 	s.mu.Unlock()
+	return s.executeReservedJob(ctx, spec, trigger, stream)
+}
+
+func (s *JobScheduler) recordSkippedJob(spec JobSpec, trigger string) JobRunRecord {
+	started := time.Now().UTC()
+	record := JobRunRecord{
+		Project:     spec.Project,
+		Environment: spec.Environment,
+		Job:         spec.Name,
+		Trigger:     trigger,
+		StartedAt:   started,
+		FinishedAt:  started,
+		ExitCode:    -1,
+		Status:      JobRunStatusSkipped,
+		Output:      "skipped: previous run still in progress",
+	}
+	s.appendRunRecord(record)
+	return record
+}
+
+// executeReservedJob runs a job whose running reference was acquired while
+// the scheduler spec was still protected by s.mu.
+func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, trigger string, stream io.Writer) JobRunRecord {
+	key := jobKey(spec.Project, spec.Environment, spec.Name)
+	started := time.Now().UTC()
 	defer func() {
 		s.mu.Lock()
 		delete(s.running, key)
+		current, exists := s.specs[key]
 		s.mu.Unlock()
+		keep := ""
+		if exists {
+			keep = current.FileSetID
+		}
+		_ = cleanupServiceFileVersions(spec.Project, spec.Environment, spec.Name, keep)
 	}()
 
 	timeoutSeconds := spec.TimeoutSeconds
@@ -561,11 +608,20 @@ func (s *JobScheduler) executeJob(ctx context.Context, spec JobSpec, trigger str
 func (s *JobScheduler) runScheduledJob(key string) {
 	s.mu.Lock()
 	spec, ok := s.specs[key]
+	reserved := ok && !s.running[key]
+	if reserved {
+		s.running[key] = true
+	}
 	s.mu.Unlock()
 	if !ok {
 		return
 	}
-	record := s.executeJob(context.Background(), spec, JobTriggerSchedule, nil)
+	var record JobRunRecord
+	if reserved {
+		record = s.executeReservedJob(context.Background(), spec, JobTriggerSchedule, nil)
+	} else {
+		record = s.recordSkippedJob(spec, JobTriggerSchedule)
+	}
 	if record.Status != JobRunStatusSucceeded {
 		fmt.Fprintf(os.Stderr, "takod scheduled job %s finished %s (exit %d)\n", key, record.Status, record.ExitCode)
 	}
@@ -695,6 +751,16 @@ func validateJobSpec(spec *JobSpec) error {
 			return fmt.Errorf("invalid mount value")
 		}
 	}
+	if err := validateServiceFileBundles(spec.Files); err != nil {
+		return err
+	}
+	if spec.FileSetID != "" {
+		if err := validateServiceFileSetID(spec.FileSetID); err != nil {
+			return err
+		}
+	} else if len(spec.Files) > 0 {
+		return fmt.Errorf("fileSetId is required when job files are present")
+	}
 	if spec.TimeoutSeconds < 0 || spec.TimeoutSeconds > maxExecTimeoutSeconds {
 		return fmt.Errorf("timeoutSeconds must be between 0 and %d", maxExecTimeoutSeconds)
 	}
@@ -798,12 +864,18 @@ func (s *JobScheduler) removeJob(project string, environment string, name string
 		delete(s.entries, key)
 	}
 	delete(s.specs, key)
+	running := s.running[key]
 	s.mu.Unlock()
 	if err := os.Remove(jobSpecPath(s.dataDir, project, environment, name)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove job spec: %w", err)
 	}
 	if err := os.Remove(jobRunsPath(s.dataDir, project, environment, name)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove job run history: %w", err)
+	}
+	if !running {
+		if err := removeServiceFiles(project, environment, name); err != nil {
+			return fmt.Errorf("failed to remove job files: %w", err)
+		}
 	}
 	return nil
 }

@@ -702,6 +702,13 @@ func TestTakodServiceRolloutLegacyScalarSkipsCapabilityAndReconciles(t *testing.
 	}
 }
 
+func TestServiceFilesRequireTakodCapabilityPreflight(t *testing.T) {
+	service := &config.ServiceConfig{Files: []config.ServiceFileConfig{{Source: "/tmp/config", Target: "/etc/config"}}}
+	if !serviceNeedsTakodCapabilityPreflight(service) {
+		t.Fatal("file-only service skipped capability preflight")
+	}
+}
+
 type fakeTakodStatusExecutor struct {
 	output string
 	err    error
@@ -1029,6 +1036,13 @@ func TestReconcileServiceRequestTimeoutCoversHealthWindowPerReplica(t *testing.T
 	})
 	if got != takodclient.JSONRequestTimeout {
 		t.Fatalf("default timeout = %s, want %s", got, takodclient.JSONRequestTimeout)
+	}
+
+	got = reconcileServiceRequestTimeout(takod.ReconcileServiceRequest{
+		Files: []takod.ServiceFileBundle{{Name: "file-000"}},
+	})
+	if got != takodclient.StreamRequestTimeout {
+		t.Fatalf("file payload timeout = %s, want %s", got, takodclient.StreamRequestTimeout)
 	}
 }
 

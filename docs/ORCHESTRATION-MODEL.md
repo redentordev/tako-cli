@@ -396,6 +396,22 @@ remove one-off containers.
 
 ### Scheduled jobs
 
+Service `files:` are request-scoped binary bundles. The CLI hashes the fully
+resolved file tree during planning; takod validates every bundle and relative
+entry name, stages it in a content-addressed version below
+`/var/lib/tako/files`, then atomically publishes that immutable version before
+container reconcile. Existing containers keep their prior version, and failed
+rollouts leave it intact. Containers receive read-only bind
+mounts. Desired state retains source/target metadata but never file bytes;
+secret-marked trees receive private modes. Standard-service sets are retained
+on every server that belonged to the environment at deploy time, allowing
+rollback after placement changes within that fleet. Rollback fails before
+container reconciliation when a newly added or replaced target node lacks the
+historical set; Tako never silently substitutes current local content.
+This immutable-version retention applies to standard services. Deploy-time run
+sets are request-lifetime data, while scheduled jobs retain the current set and
+defer pruning any prior set until its in-flight run releases it.
+
 `kind: run` is a fingerprinted run-to-completion vertex in the deploy DAG.
 Tako executes it through takod's one-off container path, records its machine
 outcome in deployment history, skips completed unchanged fingerprints, reruns

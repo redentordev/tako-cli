@@ -27,6 +27,8 @@ const (
 	maxContainerCommandBytes = 64 * 1024
 	maxContainerHealthBytes  = 4096
 	maxServiceEnvFiles       = 32
+	maxServiceFiles          = 128
+	maxServiceFileEntries    = 16384
 	maxServiceBuildArgs      = 128
 	maxServiceExtraHosts     = 128
 	maxServiceUlimits        = 64
@@ -714,6 +716,9 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	if err := validateServiceVolumes(name, service, cfg); err != nil {
 		return err
 	}
+	if err := validateServiceFiles(name, service); err != nil {
+		return err
+	}
 	if err := validateResourceLimits(name, service.Resources); err != nil {
 		return err
 	}
@@ -905,6 +910,81 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		}
 	}
 
+	return nil
+}
+
+func validateServiceFiles(serviceName string, service *ServiceConfig) error {
+	files := service.Files
+	if len(files) > maxServiceFiles {
+		return fmt.Errorf("service %s: files has too many entries (maximum %d)", serviceName, maxServiceFiles)
+	}
+	seenTargets := make(map[string]bool, len(files))
+	volumeTargets := make(map[string]bool, len(service.Volumes))
+	for _, volume := range service.Volumes {
+		parts := strings.SplitN(volume, ":", 2)
+		target := strings.TrimSpace(parts[0])
+		if len(parts) == 2 {
+			target = strings.TrimSpace(parts[1])
+		}
+		if target != "" {
+			volumeTargets[path.Clean(target)] = true
+		}
+	}
+	entryCount := 0
+	for i := range files {
+		file := &files[i]
+		file.Source = strings.TrimSpace(file.Source)
+		file.Target = path.Clean(strings.TrimSpace(file.Target))
+		if file.Source == "" {
+			return fmt.Errorf("service %s: files[%d].source is required", serviceName, i)
+		}
+		if len(file.Target) > 4096 || !path.IsAbs(file.Target) || file.Target == "/" || file.Target == "." || strings.ContainsAny(file.Target, ",\\\r\n\t") {
+			return fmt.Errorf("service %s: files[%d].target must be an absolute container path below /", serviceName, i)
+		}
+		if strings.ContainsRune(file.Target, '\x00') || seenTargets[file.Target] {
+			return fmt.Errorf("service %s: files target %q is invalid or duplicated", serviceName, file.Target)
+		}
+		if volumeTargets[file.Target] {
+			return fmt.Errorf("service %s: files target %q conflicts with a volume mount target", serviceName, file.Target)
+		}
+		seenTargets[file.Target] = true
+		if _, _, _, err := ParseServiceFileOwner(file.Owner); err != nil {
+			return fmt.Errorf("service %s: files[%d].owner: %w", serviceName, i, err)
+		}
+		info, err := os.Lstat(file.Source)
+		if err != nil {
+			return fmt.Errorf("service %s: files source %q is not accessible: %w", serviceName, file.Source, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("service %s: files source %q must not be a symlink", serviceName, file.Source)
+		}
+		if !info.Mode().IsRegular() && !info.IsDir() {
+			return fmt.Errorf("service %s: files source %q must be a regular file or directory", serviceName, file.Source)
+		}
+		if info.IsDir() {
+			err = filepath.WalkDir(file.Source, func(path string, entry os.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				entryCount++
+				if entry.Type()&os.ModeSymlink != 0 {
+					return fmt.Errorf("symlink %s is not supported", path)
+				}
+				if !entry.IsDir() && !entry.Type().IsRegular() {
+					return fmt.Errorf("non-regular entry %s is not supported", path)
+				}
+				if entryCount > maxServiceFileEntries {
+					return fmt.Errorf("directory exceeds %d entries", maxServiceFileEntries)
+				}
+				return nil
+			})
+			if err != nil {
+				return fmt.Errorf("service %s: invalid files source %q: %w", serviceName, file.Source, err)
+			}
+		} else {
+			entryCount++
+		}
+	}
 	return nil
 }
 

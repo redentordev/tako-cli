@@ -96,6 +96,7 @@ type DesiredServiceDocument struct {
 	Placement       json.RawMessage           `json:"placement,omitempty"`
 	Domains         []string                  `json:"domains,omitempty"`
 	Volumes         []string                  `json:"volumes,omitempty"`
+	Files           []ServiceFileDocument     `json:"files,omitempty"`
 	EnvKeys         []string                  `json:"envKeys,omitempty"`
 	EnvFile         bool                      `json:"envFile,omitempty"`
 	User            string                    `json:"user,omitempty"`
@@ -109,6 +110,13 @@ type DesiredServiceDocument struct {
 	DependsOn       []string                  `json:"dependsOn,omitempty"`
 	HealthCheck     json.RawMessage           `json:"healthCheck,omitempty"`
 	DeployStrategy  string                    `json:"deployStrategy,omitempty"`
+}
+
+type ServiceFileDocument struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Secret bool   `json:"secret,omitempty"`
+	Owner  string `json:"owner,omitempty"`
 }
 
 type UlimitDocument struct {
@@ -210,17 +218,25 @@ type DeploymentStateDocument struct {
 
 // ServiceStateDocument represents one service in a deployment history record.
 type ServiceStateDocument struct {
-	Kind        string                   `json:"kind,omitempty"`
-	Name        string                   `json:"name"`
-	Image       string                   `json:"image"`
-	ConfigHash  string                   `json:"configHash,omitempty"`
-	Run         *RunStateDocument        `json:"run,omitempty"`
-	ImageID     string                   `json:"imageId"`
-	ContainerID string                   `json:"containerId"`
-	Port        int                      `json:"port"`
-	Replicas    int                      `json:"replicas"`
-	Env         map[string]string        `json:"env"`
-	HealthCheck HealthCheckStateDocument `json:"healthCheck"`
+	Kind             string                     `json:"kind,omitempty"`
+	Name             string                     `json:"name"`
+	Image            string                     `json:"image"`
+	ConfigHash       string                     `json:"configHash,omitempty"`
+	FilesContentHash string                     `json:"filesContentHash,omitempty"`
+	Files            []ServiceFileStateDocument `json:"files,omitempty"`
+	Run              *RunStateDocument          `json:"run,omitempty"`
+	ImageID          string                     `json:"imageId"`
+	ContainerID      string                     `json:"containerId"`
+	Port             int                        `json:"port"`
+	Replicas         int                        `json:"replicas"`
+	Env              map[string]string          `json:"env"`
+	HealthCheck      HealthCheckStateDocument   `json:"healthCheck"`
+}
+
+type ServiceFileStateDocument struct {
+	Target string `json:"target"`
+	Secret bool   `json:"secret,omitempty"`
+	Owner  string `json:"owner,omitempty"`
 }
 
 type RunStateDocument struct {

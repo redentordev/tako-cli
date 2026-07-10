@@ -105,6 +105,18 @@ func (d *Deployer) runReleaseCommand(serviceName string, service *config.Service
 			return fmt.Errorf("failed to resolve release mounts for %s: %w", serviceName, err)
 		}
 	}
+	fileBundles, fileMounts, _, err := d.PrepareServiceFiles(serviceName, service)
+	if err != nil {
+		return err
+	}
+	mounts = append(mounts, fileMounts...)
+	fileSetID := ""
+	if len(service.Files) > 0 {
+		fileSetID, err = serviceFileSetID(service.FilesContentHash)
+		if err != nil {
+			return err
+		}
+	}
 
 	request := takod.ExecRequest{
 		Project:        d.config.Project.Name,
@@ -116,6 +128,8 @@ func (d *Deployer) runReleaseCommand(serviceName string, service *config.Service
 		EnvFileContent: envContent,
 		Network:        runtimeid.NetworkName(d.config.Project.Name, d.environment),
 		Mounts:         mounts,
+		Files:          fileBundles,
+		FileSetID:      fileSetID,
 		TimeoutSeconds: int(timeout / time.Second),
 	}
 	payload, err := json.Marshal(request)

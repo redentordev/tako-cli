@@ -89,6 +89,19 @@ func TestDesiredServiceToConfigDoesNotTreatDocumentKindAsWorkloadKind(t *testing
 	}
 }
 
+func TestDesiredServiceToConfigRestoresOperatorFileMetadata(t *testing.T) {
+	service, _, err := desiredServiceToConfig("relay", takoapi.DesiredServiceDocument{
+		Image: "getsentry/relay:26.6.0",
+		Files: []takoapi.ServiceFileDocument{{Source: "./relay/credentials.json", Target: "/work/.relay/credentials.json", Secret: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(service.Files) != 1 || !service.Files[0].Secret || service.Files[0].Target != "/work/.relay/credentials.json" {
+		t.Fatalf("materialized files = %#v", service.Files)
+	}
+}
+
 func TestDesiredServiceToConfigReadsLegacyScalarCommand(t *testing.T) {
 	service, _, err := desiredServiceToConfig("worker", takoapi.DesiredServiceDocument{
 		Image: "busybox:latest", Command: "echo legacy",
@@ -324,6 +337,40 @@ func TestBuildConfigValidationRoundTripsRunWithoutContainerDefaults(t *testing.T
 	run := cfg.Environments["production"].Services["migrate"]
 	if !run.IsRun() || run.Restart != "" || run.Deploy.Strategy != "" {
 		t.Fatalf("round-tripped run defaults = %#v", run)
+	}
+}
+
+func TestBuildConfigValidationKeepsUnrecoveredOperatorFileWithWarning(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["relay"] = takoapi.DesiredServiceDocument{
+		Image: "getsentry/relay:26.6.0", Replicas: 1,
+		Files: []takoapi.ServiceFileDocument{{Source: "/missing/exported/credentials.json", Target: "/work/.relay/credentials.json", Secret: true, Owner: "1000:1000"}},
+	}
+	cfg, warnings, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err != nil {
+		t.Fatalf("BuildConfig() error = %v", err)
+	}
+	files := cfg.Environments["production"].Services["relay"].Files
+	if len(files) != 1 || files[0].Source != "/missing/exported/credentials.json" || files[0].Owner != "1000:1000" {
+		t.Fatalf("exported files = %#v", files)
+	}
+	if !hasWarning(warnings, "operator_file_content_unrecovered", "relay") {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+}
+
+func TestBuildConfigValidationChecksStaticMetadataForUnrecoveredFiles(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["relay"] = takoapi.DesiredServiceDocument{
+		Image: "getsentry/relay:26.6.0", Replicas: 1,
+		Files: []takoapi.ServiceFileDocument{
+			{Source: "/missing/exported/one", Target: "/work/config"},
+			{Source: "/missing/exported/two", Target: "/work/config"},
+		},
+	}
+	_, _, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err == nil || !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("error = %v, want duplicate target validation", err)
 	}
 }
 

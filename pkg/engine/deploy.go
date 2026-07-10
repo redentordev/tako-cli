@@ -319,6 +319,18 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	if e.buildOutput != nil {
 		deploy.SetOutput(e.buildOutput)
 	}
+	allServices, err = prepareServiceFileHashes(deploy, allServices)
+	if err != nil {
+		return nil, err
+	}
+	if req.Service == "" {
+		services = allServices
+	} else {
+		services, err = prepareServiceFileHashes(deploy, services)
+		if err != nil {
+			return nil, err
+		}
+	}
 	services, err = prepareRunInputHashes(deploy, services)
 	if err != nil {
 		return nil, err
@@ -777,11 +789,13 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 
 		// Save service state.
 		deployment.Services[serviceName] = remotestate.ServiceState{
-			Name:     serviceName,
-			Image:    fullImageName,
-			Port:     service.Port,
-			Replicas: service.Replicas,
-			Env:      RedactedEnvKeys(service.Env),
+			Name:             serviceName,
+			Image:            fullImageName,
+			FilesContentHash: service.FilesContentHash,
+			Files:            historyServiceFiles(service.Files),
+			Port:             service.Port,
+			Replicas:         service.Replicas,
+			Env:              RedactedEnvKeys(service.Env),
 		}
 	}
 

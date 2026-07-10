@@ -49,6 +49,8 @@ type ReconcileServiceRequest struct {
 	Labels             map[string]string              `json:"labels,omitempty"`
 	Mounts             []string                       `json:"mounts,omitempty"`
 	ExternalVolumes    []string                       `json:"externalVolumes,omitempty"`
+	Files              []ServiceFileBundle            `json:"files,omitempty"`
+	FileSetID          string                         `json:"fileSetId,omitempty"`
 	Containers         []ContainerSpec                `json:"containers"`
 	Health             *HealthSpec                    `json:"health,omitempty"`
 	Command            config.StringOrList            `json:"command,omitempty,omitzero"`
@@ -66,6 +68,25 @@ type ReconcileServiceRequest struct {
 	// ephemeral DOCKER_CONFIG for this reconcile only and are never
 	// persisted (ADR 10).
 	RegistryAuths []RegistryAuth `json:"registryAuths,omitempty"`
+}
+
+// ServiceFileBundle is one operator-managed file or directory mounted into a
+// container. Data is request-scoped and is never written to desired state.
+type ServiceFileBundle struct {
+	Name      string             `json:"name"`
+	Target    string             `json:"target"`
+	Directory bool               `json:"directory,omitempty"`
+	Secret    bool               `json:"secret,omitempty"`
+	UID       int                `json:"uid,omitempty"`
+	GID       int                `json:"gid,omitempty"`
+	Entries   []ServiceFileEntry `json:"entries"`
+}
+
+type ServiceFileEntry struct {
+	Path      string `json:"path,omitempty"`
+	Data      []byte `json:"data,omitempty"`
+	Mode      uint32 `json:"mode"`
+	Directory bool   `json:"directory,omitempty"`
 }
 
 type RemoveServiceRequest struct {
@@ -131,6 +152,15 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		req.NetworkAlias = req.Service
 	}
 	req.NetworkAttachments = mergeNetworkAttachments(req.NetworkAttachments)
+	if req.FileSetID != "" {
+		if len(req.Files) > 0 {
+			if err := prepareServiceFiles(ctx, req.Project, req.Environment, req.Service, req.FileSetID, req.Files); err != nil {
+				return nil, err
+			}
+		} else if err := ensureServiceFileSet(req.Project, req.Environment, req.Service, req.FileSetID); err != nil {
+			return nil, err
+		}
+	}
 
 	if len(req.Containers) == 0 {
 		removedContainers, err := removeServiceContainersForReconcile(ctx, req, deployStrategy)
@@ -193,7 +223,6 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 			return nil, err
 		}
 	}
-
 	return &ReconcileServiceResponse{
 		Project:           req.Project,
 		Environment:       req.Environment,
@@ -210,6 +239,11 @@ func RemoveService(ctx context.Context, req RemoveServiceRequest) (*RemoveServic
 	removedContainers, err := removeServiceContainersKeepingRevision(ctx, req.Project, req.Environment, req.Service, req.KeepRevision)
 	if err != nil {
 		return nil, err
+	}
+	if req.KeepRevision == "" {
+		if err := removeServiceFiles(req.Project, req.Environment, req.Service); err != nil {
+			return nil, fmt.Errorf("failed to remove service files: %w", err)
+		}
 	}
 	return &RemoveServiceResponse{
 		Project:           req.Project,
@@ -319,6 +353,16 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 		if !isSafeDockerVolumeName(volume) {
 			return fmt.Errorf("invalid external volume name")
 		}
+	}
+	if err := validateServiceFileBundles(req.Files); err != nil {
+		return err
+	}
+	if req.FileSetID != "" {
+		if err := validateServiceFileSetID(req.FileSetID); err != nil {
+			return err
+		}
+	} else if len(req.Files) > 0 {
+		return fmt.Errorf("fileSetId is required when service files are present")
 	}
 	if err := validateDockerLabels(req.Labels); err != nil {
 		return fmt.Errorf("invalid label: %w", err)

@@ -540,6 +540,59 @@ accepts either a positive scalar (same soft/hard value) or explicit positive
 reconciliation and fails with upgrade guidance when a development node is
 stale.
 
+## Operator Files
+
+`files:` distributes local regular files or whole directories to the node and
+mounts them read-only into a service. Sources are resolved relative to
+`tako.yaml`. Content is transported in the reconcile request, written
+atomically into a content-addressed version below
+`/var/lib/tako/files/<project>/<environment>/<service>/`, and is not stored in
+desired state or deployment history.
+
+```yaml
+services:
+  relay:
+    image: getsentry/relay:26.6.0
+    files:
+      - source: ./relay/config.yml
+        target: /work/.relay/config.yml
+      - source: ./relay/credentials.json
+        target: /work/.relay/credentials.json
+        secret: true
+        owner: "1000:1000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    files:
+      - source: ./nginx
+        target: /etc/nginx
+```
+
+File bytes are binary-safe, and directory sources preserve their relative
+tree, empty directories, and executable bits. Symlinks and special files are
+rejected. `secret: true` forces directories to `0700` and files to `0600`
+(or `0700` when the source is owner-executable). `owner` accepts a numeric
+`uid` or `uid:gid`; it defaults to a numeric service `user`, then `root:root`.
+Set it whenever a non-root image user must read a secret tree. A service may
+declare up to 128 roots, 16,384 total entries, 128 MiB of raw file content, and
+256 MiB in the encoded bundle; service-file HTTP requests are capped at 384
+MiB. File target, mode, and content digests join the service fingerprint;
+changing only file bytes therefore triggers reconciliation without exposing
+the bytes in state, events, labels, or machine results.
+
+Published versions are immutable. Standard-service deploys replicate each set,
+including `secret: true` content, to every server currently configured for the
+environment so later placement changes within that fleet can reuse it. A failed
+rollout leaves earlier versions untouched, and deployment history records the
+selected content hash and mount metadata so rollback can remount the exact
+prior bytes without rereading today's source files. A server added or replaced
+after that revision does not have its retained set; rollback fails before
+reconciliation if the selected placement needs such a node. Versions are
+removed only when the standard service/project is removed or deployment files
+are explicitly cleaned. Deploy-time `kind: run` sets are deleted after the
+one-off exits, and `kind: job` retains only the currently scheduled set once no
+run still references an older one.
+
 ## Deploy-Time Runs
 
 `kind: run` declares a run-to-completion step inside the deployment dependency

@@ -319,11 +319,13 @@ func BuildScaleDeploymentState(
 	for _, serviceName := range sortedScaleTargetNames(scaleTargets) {
 		service := services[serviceName]
 		serviceStates[serviceName] = remotestate.ServiceState{
-			Name:     serviceName,
-			Image:    imageRefs[serviceName],
-			Port:     service.Port,
-			Replicas: service.Replicas,
-			Env:      RedactedEnvKeys(service.Env),
+			Name:             serviceName,
+			Image:            imageRefs[serviceName],
+			FilesContentHash: service.FilesContentHash,
+			Files:            historyServiceFiles(service.Files),
+			Port:             service.Port,
+			Replicas:         service.Replicas,
+			Env:              RedactedEnvKeys(service.Env),
 		}
 	}
 

@@ -71,6 +71,7 @@ type DesiredService struct {
 	Placement       *config.PlacementConfig        `json:"placement,omitempty"`
 	Domains         []string                       `json:"domains,omitempty"`
 	Volumes         []string                       `json:"volumes,omitempty"`
+	Files           []config.ServiceFileConfig     `json:"files,omitempty"`
 	EnvKeys         []string                       `json:"envKeys,omitempty"`
 	EnvFile         bool                           `json:"envFile,omitempty"`
 	User            string                         `json:"user,omitempty"`
@@ -641,6 +642,7 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 		Placement:       service.Placement,
 		Domains:         domains,
 		Volumes:         sortedCopy(service.Volumes),
+		Files:           append([]config.ServiceFileConfig(nil), service.Files...),
 		EnvKeys:         sortedKeys(service.Env),
 		EnvFile:         service.EnvFile != "" || len(service.EnvFiles) > 0,
 		User:            service.User,

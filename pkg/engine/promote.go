@@ -164,6 +164,14 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 		return nil, ActualStateError(err)
 	}
 	actual := actualState[serviceName]
+	if len(service.Files) > 0 {
+		_, _, filesHash, err := deploy.PrepareServiceFiles(serviceName, &service)
+		if err != nil {
+			return nil, fmt.Errorf("cannot promote %s: failed to fingerprint operator files: %w", serviceName, err)
+		}
+		service.FilesContentHash = filesHash
+		services[serviceName] = service
+	}
 	targetRevision, err := SelectPromotionRevision(actual, req.Revision)
 	if err != nil {
 		return nil, invalidRequestf("cannot promote %s: %w", serviceName, err)
@@ -362,10 +370,12 @@ func buildPromoteDeployment(
 	cliCommit string,
 ) *remotestate.DeploymentState {
 	serviceState := remotestate.ServiceState{
-		Name:     serviceName,
-		Port:     service.Port,
-		Replicas: service.Replicas,
-		Env:      RedactedEnvKeys(service.Env),
+		Name:             serviceName,
+		FilesContentHash: service.FilesContentHash,
+		Files:            historyServiceFiles(service.Files),
+		Port:             service.Port,
+		Replicas:         service.Replicas,
+		Env:              RedactedEnvKeys(service.Env),
 	}
 	if actual != nil {
 		serviceState.Image = actual.Image
