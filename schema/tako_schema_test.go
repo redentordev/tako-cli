@@ -27,7 +27,30 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "deploy", "properties", "strategy"), []string{config.DeployStrategyRecreate, config.DeployStrategyRolling, config.DeployStrategyBlueGreen})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "loadBalancer", "properties", "strategy"), []string{"round_robin", "sticky"})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "backup", "properties", "storage", "properties", "provider"), []string{config.BackupStorageProviderS3, config.BackupStorageProviderR2, config.BackupStorageProviderS3Compatible})
+	serviceProperties := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties")
+	assertStringOrListSchema(t, schemaPath(t, serviceProperties, "command"))
+	assertStringOrListSchema(t, schemaPath(t, serviceProperties, "entrypoint"))
+	labels := schemaPath(t, serviceProperties, "labels")
+	if labels["maxProperties"] != float64(256) {
+		t.Fatalf("labels maxProperties = %#v, want 256", labels["maxProperties"])
+	}
+	healthCommand := schemaPath(t, serviceProperties, "healthCheck", "properties", "command")
+	if healthCommand["maxLength"] != float64(4096) {
+		t.Fatalf("health command maxLength = %#v, want 4096", healthCommand["maxLength"])
+	}
 	schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "proxy", "properties", "dynamicDomains", "properties", "ask")
+}
+
+func assertStringOrListSchema(t *testing.T, field map[string]any) {
+	t.Helper()
+	oneOf, ok := field["oneOf"].([]any)
+	if !ok || len(oneOf) != 2 {
+		t.Fatalf("string-or-list schema missing two oneOf branches: %#v", field)
+	}
+	list, ok := oneOf[1].(map[string]any)
+	if !ok || list["type"] != "array" || list["maxItems"] != float64(256) {
+		t.Fatalf("list branch = %#v, want array maxItems 256", oneOf[1])
+	}
 }
 
 func loadTakoSchema(t *testing.T) map[string]any {

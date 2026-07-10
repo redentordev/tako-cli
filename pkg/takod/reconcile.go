@@ -2,6 +2,7 @@ package takod
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 var (
@@ -21,7 +25,7 @@ var (
 
 const (
 	maxHealthRetries      = 100
-	maxHealthWaitAttempts = 600
+	maxHealthWaitAttempts = 24 * 60 * 60
 	maxHealthFieldBytes   = 4096
 	maxHealthDuration     = 24 * time.Hour
 	maxDockerVolumeName   = 255
@@ -46,7 +50,8 @@ type ReconcileServiceRequest struct {
 	ExternalVolumes    []string                `json:"externalVolumes,omitempty"`
 	Containers         []ContainerSpec         `json:"containers"`
 	Health             *HealthSpec             `json:"health,omitempty"`
-	Command            string                  `json:"command,omitempty"`
+	Command            config.StringOrList     `json:"command,omitempty,omitzero"`
+	Entrypoint         config.StringOrList     `json:"entrypoint,omitempty,omitzero"`
 	MemoryLimit        string                  `json:"memoryLimit,omitempty"`
 	CPULimit           string                  `json:"cpuLimit,omitempty"`
 	// RegistryAuths carries request-scoped pull credentials; they feed an
@@ -288,6 +293,9 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 		if err := validateDockerLabels(container.Labels); err != nil {
 			return fmt.Errorf("invalid container label: %w", err)
 		}
+		if err := validateContainerRuntimeLabels(req, container.Labels); err != nil {
+			return err
+		}
 		if takodDeployStrategyUsesRevisionScope(strategy) {
 			if container.Labels["tako.revision"] != "" && container.Labels["tako.revision"] != req.Revision {
 				return fmt.Errorf("container %s revision label %q does not match request revision %q", container.Name, container.Labels["tako.revision"], req.Revision)
@@ -307,8 +315,14 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	if err := validateDockerLabels(req.Labels); err != nil {
 		return fmt.Errorf("invalid label: %w", err)
 	}
-	if req.Command != "" && strings.ContainsRune(req.Command, '\x00') {
-		return fmt.Errorf("command contains unsupported characters")
+	if err := validateRequestRuntimeLabels(req); err != nil {
+		return err
+	}
+	if err := validateContainerArgv("command", req.Command.Arguments()); err != nil {
+		return err
+	}
+	if err := validateContainerArgv("entrypoint", req.Entrypoint.Arguments()); err != nil {
+		return err
 	}
 	if req.MemoryLimit != "" && !isSafeDockerMemoryLimit(req.MemoryLimit) {
 		return fmt.Errorf("invalid memory limit")
@@ -318,6 +332,87 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	}
 	if err := validateHealthSpec(req.Health); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateRequestRuntimeLabels(req ReconcileServiceRequest) error {
+	for key, value := range req.Labels {
+		if !strings.HasPrefix(key, "tako.") {
+			continue
+		}
+		switch key {
+		case runtimeid.ServiceIdentityLabel:
+			want := runtimeid.ServiceIdentity(req.Project, req.Environment, req.Service)
+			if value != want {
+				return fmt.Errorf("runtime identity label does not match request")
+			}
+		case "tako.persistent":
+			if _, err := strconv.ParseBool(value); err != nil {
+				return fmt.Errorf("invalid persistent runtime label")
+			}
+		case "tako.configHash":
+			decoded, err := hex.DecodeString(value)
+			if err != nil || len(decoded) != 32 {
+				return fmt.Errorf("invalid config hash runtime label")
+			}
+		default:
+			return fmt.Errorf("request label %q uses reserved tako. prefix", key)
+		}
+	}
+	return nil
+}
+
+func validateContainerRuntimeLabels(req ReconcileServiceRequest, labels map[string]string) error {
+	strategy := normalizeTakodDeployStrategy(req.DeployStrategy)
+	for key, value := range labels {
+		if !strings.HasPrefix(key, "tako.") {
+			continue
+		}
+		switch key {
+		case "tako.revision":
+			if value != req.Revision {
+				return fmt.Errorf("container revision label does not match request")
+			}
+		case "tako.deployStrategy":
+			if normalizeTakodDeployStrategy(value) != strategy {
+				return fmt.Errorf("container deploy strategy label does not match request")
+			}
+		case "tako.slot":
+			slot, err := strconv.Atoi(value)
+			if err != nil || slot <= 0 {
+				return fmt.Errorf("invalid container slot label")
+			}
+		case "tako.active":
+			if _, err := strconv.ParseBool(value); err != nil {
+				return fmt.Errorf("invalid container active label")
+			}
+		default:
+			return fmt.Errorf("container label %q uses reserved tako. prefix", key)
+		}
+	}
+	return nil
+}
+
+func validateContainerArgv(field string, values []string) error {
+	if len(values) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(values[0]) == "" {
+		return fmt.Errorf("%s first argument is empty", field)
+	}
+	if len(values) > 256 {
+		return fmt.Errorf("%s has too many arguments", field)
+	}
+	total := 0
+	for _, value := range values {
+		if hasControlChars(value) {
+			return fmt.Errorf("%s contains unsupported characters", field)
+		}
+		total += len(value)
+	}
+	if total > 64*1024 {
+		return fmt.Errorf("%s is too large", field)
 	}
 	return nil
 }
@@ -779,10 +874,18 @@ func isSafeDockerVolumeName(name string) bool {
 }
 
 func validateDockerLabels(labels map[string]string) error {
+	if len(labels) > 256 {
+		return fmt.Errorf("too many labels")
+	}
+	total := 0
 	for key, value := range labels {
 		if strings.TrimSpace(key) == "" || hasControlChars(key) || hasControlChars(value) {
 			return fmt.Errorf("%q", key)
 		}
+		total += len(key) + len(value)
+	}
+	if total > 64*1024 {
+		return fmt.Errorf("labels are too large")
 	}
 	return nil
 }
@@ -924,6 +1027,13 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 	for key, value := range container.Labels {
 		labels[key] = value
 	}
+	// Identity labels are authoritative even for direct API callers. Custom
+	// request/container labels must never move a container into another Tako
+	// ownership scope.
+	labels["tako.project"] = req.Project
+	labels["tako.environment"] = req.Environment
+	labels["tako.service"] = req.Service
+	labels["tako.runtime"] = "takod"
 	keys := make([]string, 0, len(labels))
 	for key := range labels {
 		keys = append(keys, key)
@@ -965,10 +1075,15 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 		}
 	}
 
-	args = append(args, req.Image)
-	if req.Command != "" {
-		args = append(args, "sh", "-c", req.Command)
+	entrypoint := req.Entrypoint.Arguments()
+	if len(entrypoint) > 0 {
+		args = append(args, "--entrypoint", entrypoint[0])
 	}
+	args = append(args, req.Image)
+	if len(entrypoint) > 1 {
+		args = append(args, entrypoint[1:]...)
+	}
+	args = append(args, req.Command.ContainerCommand()...)
 	return args
 }
 

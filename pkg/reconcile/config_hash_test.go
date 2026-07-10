@@ -50,6 +50,41 @@ func TestSafeServiceConfigHashTracksPublishedPorts(t *testing.T) {
 	}
 }
 
+func TestSafeServiceConfigHashTracksContainerGapAFields(t *testing.T) {
+	base := config.ServiceConfig{Image: "busybox:latest"}
+	baseHash, ok := SafeServiceConfigHash(base)
+	if !ok {
+		t.Fatal("expected safe service hash")
+	}
+	variants := []config.ServiceConfig{
+		func() config.ServiceConfig {
+			value := base
+			value.Command = config.ListValue("echo", "ok")
+			return value
+		}(),
+		func() config.ServiceConfig {
+			value := base
+			value.Entrypoint = config.ListValue("/bin/sh", "-e")
+			return value
+		}(),
+		func() config.ServiceConfig {
+			value := base
+			value.Labels = map[string]string{"com.example.role": "worker"}
+			return value
+		}(),
+		func() config.ServiceConfig { value := base; value.HealthCheck.Command = "true"; return value }(),
+	}
+	for i, variant := range variants {
+		hash, ok := SafeServiceConfigHash(variant)
+		if !ok {
+			t.Fatalf("variant %d did not hash", i)
+		}
+		if hash == baseHash {
+			t.Fatalf("variant %d did not change config hash", i)
+		}
+	}
+}
+
 func TestSafeServiceConfigHashTracksResourceLimits(t *testing.T) {
 	base := config.ServiceConfig{Image: "nginx:1.27", Port: 8080}
 	baseHash, ok := SafeServiceConfigHash(base)

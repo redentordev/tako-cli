@@ -464,7 +464,7 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 		Restart:      "unless-stopped",
 		Network:      networkName,
 		NetworkAlias: containerName,
-		Command:      command,
+		Command:      config.StringValue(command),
 		Containers: []takod.ContainerSpec{
 			{Name: containerName},
 		},

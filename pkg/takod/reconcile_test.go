@@ -17,6 +17,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 func TestValidateReconcileServiceRequest(t *testing.T) {
@@ -32,6 +35,16 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 	if err := validateReconcileServiceRequest(valid); err != nil {
 		t.Fatalf("valid request returned error: %v", err)
+	}
+	validRuntimeLabels := valid
+	validRuntimeLabels.Labels = map[string]string{
+		runtimeid.ServiceIdentityLabel: runtimeid.ServiceIdentity("demo", "production", "web"),
+		"tako.persistent":              "false",
+		"tako.configHash":              strings.Repeat("a", 64),
+		"com.example.role":             "frontend",
+	}
+	if err := validateReconcileServiceRequest(validRuntimeLabels); err != nil {
+		t.Fatalf("valid runtime labels returned error: %v", err)
 	}
 
 	validNoDowntime := valid
@@ -139,6 +152,18 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 
 	invalid = valid
+	invalid.Labels = map[string]string{"tako.role": "spoofed"}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected arbitrary reserved request label to be rejected")
+	}
+
+	invalid = valid
+	invalid.Containers = []ContainerSpec{{Name: "demo_production_web_1", Labels: map[string]string{"tako.active": "not-bool"}}}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected invalid reserved container label to be rejected")
+	}
+
+	invalid = valid
 	invalid.MemoryLimit = "512m --privileged"
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe memory limit to be rejected")
@@ -243,6 +268,27 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 }
 
+func TestReconcileServiceRequestCommandWireAcceptsLegacyStringAndExecList(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		json string
+		want []string
+	}{
+		{name: "legacy string", json: `{"command":"echo legacy"}`, want: []string{"sh", "-c", "echo legacy"}},
+		{name: "exec list", json: `{"command":["echo","raw"]}`, want: []string{"echo", "raw"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var request ReconcileServiceRequest
+			if err := json.Unmarshal([]byte(tt.json), &request); err != nil {
+				t.Fatalf("json.Unmarshal returned error: %v", err)
+			}
+			if !reflect.DeepEqual(request.Command.ContainerCommand(), tt.want) {
+				t.Fatalf("command = %#v, want %#v", request.Command.ContainerCommand(), tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateRemoveServiceRequest(t *testing.T) {
 	valid := RemoveServiceRequest{
 		Project:     "demo",
@@ -294,10 +340,10 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 		NetworkAlias: "web",
 		EnvFile:      "/tmp/web.env",
 		Labels: map[string]string{
-			"tako.role": "frontend",
+			"com.example.role": "frontend",
 		},
 		Mounts:      []string{"type=volume,source=demo_data,target=/data"},
-		Command:     "npm run worker",
+		Command:     config.StringValue("npm run worker"),
 		MemoryLimit: "512m",
 		CPULimit:    "1.5",
 		Health: &HealthSpec{
@@ -328,10 +374,10 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 		"--network", "tako_demo_production",
 		"--network-alias", "web",
 		"--network-alias", "tako-demo-production-web-1",
+		"--label", "com.example.role=frontend",
 		"--label", "tako.environment=production",
 		"--label", "tako.project=demo",
 		"--label", "tako.revision=rev1",
-		"--label", "tako.role=frontend",
 		"--label", "tako.runtime=takod",
 		"--label", "tako.service=web",
 		"--label", "tako.slot=1",
@@ -345,6 +391,29 @@ func TestBuildServiceContainerArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected docker args:\ngot:  %#v\nwant: %#v", got, want)
+	}
+}
+
+func TestBuildServiceContainerArgsUsesEntrypointAndRawExecCommand(t *testing.T) {
+	req := ReconcileServiceRequest{
+		Project: "demo", Environment: "production", Service: "consumer",
+		Image: "getsentry/sentry:26.6.0", Restart: "unless-stopped",
+		Network: "tako_demo_production", NetworkAlias: "consumer",
+		Entrypoint: config.ListValue("/etc/sentry/entrypoint.sh", "run"),
+		Command:    config.ListValue("sentry", "run", "consumer", "errors"),
+		Labels:     map[string]string{"com.example.role": "consumer"},
+	}
+	got := buildServiceContainerArgs(req, ContainerSpec{Name: "demo_production_consumer_1"})
+	wantTail := []string{
+		"--entrypoint", "/etc/sentry/entrypoint.sh",
+		"getsentry/sentry:26.6.0",
+		"run", "sentry", "run", "consumer", "errors",
+	}
+	if len(got) < len(wantTail) || !reflect.DeepEqual(got[len(got)-len(wantTail):], wantTail) {
+		t.Fatalf("docker args tail = %#v, want %#v; all args %#v", got[len(got)-len(wantTail):], wantTail, got)
+	}
+	if !slices.Contains(got, "com.example.role=consumer") {
+		t.Fatalf("docker args missing custom label: %#v", got)
 	}
 }
 

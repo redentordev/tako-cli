@@ -53,6 +53,10 @@ type DesiredService struct {
 	Image          string                   `json:"image,omitempty"`
 	Build          string                   `json:"build,omitempty"`
 	Command        string                   `json:"command,omitempty"`
+	CommandArgs    []string                 `json:"commandArgs,omitempty"`
+	Entrypoint     string                   `json:"entrypoint,omitempty"`
+	EntrypointArgs []string                 `json:"entrypointArgs,omitempty"`
+	Labels         map[string]string        `json:"labels,omitempty"`
 	Port           int                      `json:"port,omitempty"`
 	Replicas       int                      `json:"replicas"`
 	Restart        string                   `json:"restart,omitempty"`
@@ -598,12 +602,18 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 		domains = sortedCopy(service.Proxy.GetAllDomains())
 	}
 
+	command, commandArgs := stateStringOrList(service.Command)
+	entrypoint, entrypointArgs := stateStringOrList(service.Entrypoint)
 	return DesiredService{
 		Name:           serviceName,
 		Type:           service.GetServiceType(),
 		Image:          imageRef,
 		Build:          service.Build,
-		Command:        service.Command,
+		Command:        command,
+		CommandArgs:    commandArgs,
+		Entrypoint:     entrypoint,
+		EntrypointArgs: entrypointArgs,
+		Labels:         cloneStringMap(service.Labels),
 		Port:           service.Port,
 		Replicas:       replicas,
 		Restart:        service.Restart,
@@ -618,6 +628,16 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 		HealthCheck:    service.HealthCheck,
 		DeployStrategy: service.Deploy.Strategy,
 	}
+}
+
+func stateStringOrList(value config.StringOrList) (string, []string) {
+	if scalar, ok := value.Scalar(); ok {
+		return scalar, nil
+	}
+	if value.IsList() {
+		return "", value.Arguments()
+	}
+	return "", nil
 }
 
 func revisionID(revision *DesiredRevision) string {

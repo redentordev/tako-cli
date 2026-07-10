@@ -81,6 +81,13 @@ type takodServiceDeployOptions struct {
 	WarmOnly   bool
 }
 
+type takodServiceRolloutOperations struct {
+	Preflight func() error
+	Build     func() error
+	Release   func() error
+	Reconcile func() error
+}
+
 type localImageClient interface {
 	CheckAvailable(context.Context) error
 	Build(context.Context, takounregistry.BuildRequest) error
@@ -247,39 +254,90 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		d.recordJobImage(serviceName, imageRef)
 		return nil
 	}
-	if options.BuildImage {
-		if err := d.buildImageOnTakodNodes(serviceName, service, imageRef, assignmentServers); err != nil {
-			return err
-		}
-	}
-
-	// Release command: once per service per deploy, from the new image,
-	// after it exists on the assigned nodes and before any rollout
-	// activation (warm/replace/stop-old all happen in the reconcile below).
-	if err := d.runReleaseCommand(serviceName, service, imageRef, assignmentServers); err != nil {
-		return err
-	}
-
-	grouped := groupTakodAssignments(assignments)
 	targetServers, err := d.getTakodTargetServers()
 	if err != nil {
 		return fmt.Errorf("failed to get takod target servers: %w", err)
 	}
-	if err := runTakodNodeActions(targetServers, func(serverName string) error {
-		slots := grouped[serverName]
+	grouped := groupTakodAssignments(assignments)
+	return runTakodServiceRollout(serviceNeedsContainerArgvCapability(service), takodServiceRolloutOperations{
+		Preflight: func() error {
+			if err := d.preflightTakodContainerArgv(targetServers); err != nil {
+				return fmt.Errorf("service %s uses list-form command or entrypoint: %w", serviceName, err)
+			}
+			return nil
+		},
+		Build: func() error {
+			if !options.BuildImage {
+				return nil
+			}
+			return d.buildImageOnTakodNodes(serviceName, service, imageRef, assignmentServers)
+		},
+		// Release runs once per service after its image exists and before any
+		// rollout activation in reconcile.
+		Release: func() error {
+			return d.runReleaseCommand(serviceName, service, imageRef, assignmentServers)
+		},
+		Reconcile: func() error {
+			return runTakodNodeActions(targetServers, func(serverName string) error {
+				slots := grouped[serverName]
+				client, err := d.getEnvironmentClient(serverName)
+				if err != nil {
+					return err
+				}
+				return d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, slots, options.PullImage, options.WarmOnly)
+			})
+		},
+	})
+}
+
+func runTakodServiceRollout(needsArgvCapability bool, operations takodServiceRolloutOperations) error {
+	if needsArgvCapability {
+		if err := operations.Preflight(); err != nil {
+			return err
+		}
+	}
+	if err := operations.Build(); err != nil {
+		return err
+	}
+	if err := operations.Release(); err != nil {
+		return err
+	}
+	return operations.Reconcile()
+}
+
+func serviceNeedsContainerArgvCapability(service *config.ServiceConfig) bool {
+	return service != nil && (service.Command.IsList() || service.Entrypoint.IsSet())
+}
+
+func (d *Deployer) preflightTakodContainerArgv(serverNames []string) error {
+	return preflightTakodContainerArgvWithCheck(serverNames, func(serverName string) error {
 		client, err := d.getEnvironmentClient(serverName)
 		if err != nil {
 			return err
 		}
-		if err := d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, slots, options.PullImage, options.WarmOnly); err != nil {
-			return err
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
+		return d.ensureTakodContainerArgvCapability(client, serverName)
+	})
+}
 
-	return nil
+func preflightTakodContainerArgvWithCheck(serverNames []string, check func(string) error) error {
+	return runTakodNodeActions(serverNames, check)
+}
+
+func (d *Deployer) ensureTakodContainerArgvCapability(client takodclient.RequestExecutor, serverName string) error {
+	output, err := takodclient.RequestJSON(client, d.takodSocket(), "GET", "/v1/status", nil)
+	if err != nil {
+		return fmt.Errorf("failed to verify takod capabilities on %s: %w", serverName, err)
+	}
+	var status takod.Status
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		return fmt.Errorf("failed to parse takod status from %s: %w", serverName, err)
+	}
+	for _, capability := range status.Capabilities {
+		if capability == takod.CapabilityContainerArgvV1 {
+			return nil
+		}
+	}
+	return fmt.Errorf("takod on %s does not support container argv payloads; upgrade the node agent (development builds can set TAKO_TAKOD_BINARY to a matching Linux binary)", serverName)
 }
 
 func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames []string) error {
@@ -829,6 +887,7 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		Mounts:             mounts,
 		Health:             d.buildTakodHealthSpec(service),
 		Command:            service.Command,
+		Entrypoint:         service.Entrypoint,
 		Labels:             serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
 		ExternalVolumes:    externalVolumes,
 		MemoryLimit:        serviceMemoryLimit(service),
@@ -968,10 +1027,12 @@ func (d *Deployer) shouldPublishMeshUpstreams() (bool, error) {
 }
 
 func serviceRuntimeLabels(project string, environment string, serviceName string, service config.ServiceConfig) map[string]string {
-	labels := map[string]string{
-		runtimeid.ServiceIdentityLabel: runtimeid.ServiceIdentity(project, environment, serviceName),
-		"tako.persistent":              strconv.FormatBool(service.Persistent),
+	labels := make(map[string]string, len(service.Labels)+3)
+	for key, value := range service.Labels {
+		labels[key] = value
 	}
+	labels[runtimeid.ServiceIdentityLabel] = runtimeid.ServiceIdentity(project, environment, serviceName)
+	labels["tako.persistent"] = strconv.FormatBool(service.Persistent)
 	configHash, ok := reconcile.SafeServiceConfigHash(service)
 	if !ok {
 		return labels
@@ -982,9 +1043,10 @@ func serviceRuntimeLabels(project string, environment string, serviceName string
 
 func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.HealthSpec {
 	if readinessSpec := d.buildTakodReadinessHealthSpec(service); readinessSpec != nil {
+		readinessSpec.Command = service.HealthCheck.Command
 		return attachTakodSmokeSpec(readinessSpec, service)
 	}
-	if service.HealthCheck.Path == "" && service.HealthCheck.TCPPort <= 0 {
+	if service.HealthCheck.Command == "" && service.HealthCheck.Path == "" && service.HealthCheck.TCPPort <= 0 {
 		if smokeSpec := buildTakodSmokeOnlyHealthSpec(service); smokeSpec != nil {
 			return smokeSpec
 		}
@@ -1018,6 +1080,7 @@ func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.He
 	}
 
 	return attachTakodSmokeSpec(&takod.HealthSpec{
+		Command:      service.HealthCheck.Command,
 		Path:         service.HealthCheck.Path,
 		Port:         port,
 		Scheme:       scheme,
@@ -1116,8 +1179,8 @@ func deploymentHealthWaitAttempts(interval string, startPeriod string, retries i
 	if attempts < 30 {
 		return 30
 	}
-	if attempts > 600 {
-		return 600
+	if attempts > 24*60*60 {
+		return 24 * 60 * 60
 	}
 	return attempts
 }

@@ -21,6 +21,9 @@ import (
 const (
 	maxServiceHealthRetries  = 100
 	maxServiceHealthDuration = 24 * time.Hour
+	maxContainerCommandArgs  = 256
+	maxContainerCommandBytes = 64 * 1024
+	maxContainerHealthBytes  = 4096
 )
 
 // ValidateConfig validates the configuration
@@ -586,6 +589,15 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	if err := validateServiceKind(name, service); err != nil {
 		return err
 	}
+	if err := validateStringOrList(name, "command", service.Command); err != nil {
+		return err
+	}
+	if err := validateStringOrList(name, "entrypoint", service.Entrypoint); err != nil {
+		return err
+	}
+	if err := validateContainerLabels(name, service.Labels); err != nil {
+		return err
+	}
 
 	// Must have either Build or Image, but not both
 	if service.Build == "" && service.Image == "" {
@@ -723,13 +735,20 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	}
 
 	// Validate health check if configured
+	hasCommandHealthCheck := service.HealthCheck.Command != ""
 	hasHTTPHealthCheck := service.HealthCheck.Path != ""
 	hasTCPHealthCheck := service.HealthCheck.TCPPort > 0
 	if service.HealthCheck.TCPPort < 0 || service.HealthCheck.TCPPort > 65535 {
 		return fmt.Errorf("service %s: health check tcpPort must be between 1 and 65535", name)
 	}
-	if hasHTTPHealthCheck && hasTCPHealthCheck {
-		return fmt.Errorf("service %s: health check cannot set both path and tcpPort", name)
+	if len(service.HealthCheck.Command) > maxContainerHealthBytes {
+		return fmt.Errorf("service %s: health check command is too large", name)
+	}
+	if hasControlChars(service.HealthCheck.Command) {
+		return fmt.Errorf("service %s: health check command contains control characters", name)
+	}
+	if boolCount(hasCommandHealthCheck, hasHTTPHealthCheck, hasTCPHealthCheck) > 1 {
+		return fmt.Errorf("service %s: health check can set only one of command, path, or tcpPort", name)
 	}
 	if hasHTTPHealthCheck {
 		path, err := normalizeHTTPPath(service.HealthCheck.Path)
@@ -741,7 +760,7 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 			return fmt.Errorf("service %s: port is required when health check is configured", name)
 		}
 	}
-	if hasHTTPHealthCheck || hasTCPHealthCheck {
+	if hasCommandHealthCheck || hasHTTPHealthCheck || hasTCPHealthCheck {
 		if service.HealthCheck.Interval == "" {
 			service.HealthCheck.Interval = "10s"
 		}
@@ -842,6 +861,60 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		}
 	}
 
+	return nil
+}
+
+func boolCount(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
+}
+
+func validateStringOrList(serviceName string, field string, value StringOrList) error {
+	if !value.IsSet() {
+		return nil
+	}
+	args := value.Arguments()
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		return fmt.Errorf("service %s: %s must not be empty", serviceName, field)
+	}
+	if len(args) > maxContainerCommandArgs {
+		return fmt.Errorf("service %s: %s has too many arguments (maximum %d)", serviceName, field, maxContainerCommandArgs)
+	}
+	total := 0
+	for _, arg := range args {
+		if hasControlChars(arg) {
+			return fmt.Errorf("service %s: %s contains control characters", serviceName, field)
+		}
+		total += len(arg)
+	}
+	if total > maxContainerCommandBytes {
+		return fmt.Errorf("service %s: %s is too large", serviceName, field)
+	}
+	return nil
+}
+
+func validateContainerLabels(serviceName string, labels map[string]string) error {
+	if len(labels) > 256 {
+		return fmt.Errorf("service %s: too many container labels", serviceName)
+	}
+	total := 0
+	for key, value := range labels {
+		if strings.TrimSpace(key) == "" || hasControlChars(key) || hasControlChars(value) {
+			return fmt.Errorf("service %s: invalid container label %q", serviceName, key)
+		}
+		if strings.HasPrefix(key, "tako.") {
+			return fmt.Errorf("service %s: container label %q uses reserved tako. prefix", serviceName, key)
+		}
+		total += len(key) + len(value)
+	}
+	if total > 64*1024 {
+		return fmt.Errorf("service %s: container labels are too large", serviceName)
+	}
 	return nil
 }
 
@@ -1172,7 +1245,7 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 	if _, err := parser.Parse(service.Schedule); err != nil {
 		return fmt.Errorf("service %s: invalid schedule: %v", name, err)
 	}
-	if strings.TrimSpace(service.Command) == "" {
+	if !service.Command.IsSet() {
 		return fmt.Errorf("service %s: kind: job requires a command", name)
 	}
 	if service.Timezone != "" {
@@ -1191,7 +1264,7 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 	if service.Replicas > 1 {
 		return fmt.Errorf("service %s: kind: job cannot set replicas", name)
 	}
-	if service.HealthCheck.Path != "" || service.HealthCheck.TCPPort != 0 {
+	if service.HealthCheck.Command != "" || service.HealthCheck.Path != "" || service.HealthCheck.TCPPort != 0 {
 		return fmt.Errorf("service %s: kind: job cannot set healthCheck", name)
 	}
 	if service.LoadBalancer.Strategy != "" || service.LoadBalancer.HealthCheck.Enabled {

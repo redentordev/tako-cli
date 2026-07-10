@@ -200,12 +200,14 @@ type ServiceConfig struct {
 	// tako-proxy (docker-compose syntax: "PORT", "HOST:CONTAINER",
 	// "IP:HOST:CONTAINER", optional "/tcp" or "/udp"). Requires the recreate
 	// deploy strategy and at most one replica.
-	Ports    []string          `yaml:"ports,omitempty" json:"ports,omitempty"`
-	Command  string            `yaml:"command,omitempty" json:"command,omitempty"`
-	Replicas int               `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
-	Restart  string            `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
-	Env      map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	EnvFile  string            `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Path to .env file (e.g., .env.production)
+	Ports      []string          `yaml:"ports,omitempty" json:"ports,omitempty"`
+	Command    StringOrList      `yaml:"command,omitempty" json:"command,omitempty,omitzero"`
+	Entrypoint StringOrList      `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty,omitzero"`
+	Labels     map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Replicas   int               `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
+	Restart    string            `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
+	Env        map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	EnvFile    string            `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Path to .env file (e.g., .env.production)
 
 	// Secrets: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"].
 	Secrets []string `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
@@ -253,6 +255,7 @@ func (s *ServiceConfig) IsJob() bool {
 
 // HealthCheckConfig defines health check settings
 type HealthCheckConfig struct {
+	Command     string `yaml:"command,omitempty" json:"command,omitempty"`
 	Path        string `yaml:"path" json:"path"`
 	TCPPort     int    `yaml:"tcpPort,omitempty" json:"tcpPort,omitempty"`
 	Interval    string `yaml:"interval" json:"interval"`

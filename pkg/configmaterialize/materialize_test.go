@@ -12,6 +12,43 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 )
 
+func TestDesiredServiceToConfigPreservesCommandEntrypointAndLabels(t *testing.T) {
+	service, warnings, err := desiredServiceToConfig("consumer", takoapi.DesiredServiceDocument{
+		Image:          "getsentry/sentry:26.6.0",
+		CommandArgs:    []string{"sentry", "run", "consumer", "errors"},
+		EntrypointArgs: []string{"/etc/sentry/entrypoint.sh", "run"},
+		Labels:         map[string]string{"com.example.role": "consumer"},
+	})
+	if err != nil {
+		t.Fatalf("desiredServiceToConfig returned error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if !service.Command.IsList() || strings.Join(service.Command.Arguments(), "|") != "sentry|run|consumer|errors" {
+		t.Fatalf("command = %#v", service.Command.Arguments())
+	}
+	if !service.Entrypoint.IsList() || strings.Join(service.Entrypoint.Arguments(), "|") != "/etc/sentry/entrypoint.sh|run" {
+		t.Fatalf("entrypoint = %#v", service.Entrypoint.Arguments())
+	}
+	if service.Labels["com.example.role"] != "consumer" {
+		t.Fatalf("labels = %#v", service.Labels)
+	}
+}
+
+func TestDesiredServiceToConfigReadsLegacyScalarCommand(t *testing.T) {
+	service, _, err := desiredServiceToConfig("worker", takoapi.DesiredServiceDocument{
+		Image: "busybox:latest", Command: "echo legacy",
+	})
+	if err != nil {
+		t.Fatalf("desiredServiceToConfig returned error: %v", err)
+	}
+	command, ok := service.Command.Scalar()
+	if !ok || command != "echo legacy" {
+		t.Fatalf("legacy command = %q scalar=%v", command, ok)
+	}
+}
+
 func TestBuildConfigDesiredOverActualPrecedence(t *testing.T) {
 	desired := baseDesired()
 	desired.Services["web"] = takoapi.DesiredServiceDocument{Image: "desired:image", Replicas: 2, Port: 8080}

@@ -146,10 +146,14 @@ func materializeServices(desired *takoapi.DesiredStateDocument, actual *takoapi.
 
 func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument) (config.ServiceConfig, []Warning, error) {
 	var warnings []Warning
+	command := stateStringOrList(service.Command, service.CommandArgs)
+	entrypoint := stateStringOrList(service.Entrypoint, service.EntrypointArgs)
 	out := config.ServiceConfig{
 		Image:      strings.TrimSpace(service.Image),
 		Build:      strings.TrimSpace(service.Build),
-		Command:    strings.TrimSpace(service.Command),
+		Command:    command,
+		Entrypoint: entrypoint,
+		Labels:     copyStringMap(service.Labels),
 		Port:       service.Port,
 		Replicas:   service.Replicas,
 		Restart:    strings.TrimSpace(service.Restart),
@@ -219,6 +223,27 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 	}
 
 	return out, warnings, nil
+}
+
+func stateStringOrList(scalar string, args []string) config.StringOrList {
+	if len(args) > 0 {
+		return config.ListValue(args...)
+	}
+	if scalar != "" {
+		return config.StringValue(scalar)
+	}
+	return config.StringOrList{}
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	copy := make(map[string]string, len(values))
+	for key, value := range values {
+		copy[key] = value
+	}
+	return copy
 }
 
 func decodeRaw[T any](raw json.RawMessage, field string, service string) (T, error) {

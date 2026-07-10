@@ -74,26 +74,30 @@ type DesiredStateDocument struct {
 // nested fields that belong to deployment configuration, not state identity, are
 // represented without importing pkg/config.
 type DesiredServiceDocument struct {
-	APIVersion     string          `json:"apiVersion,omitempty"`
-	Kind           string          `json:"kind,omitempty"`
-	Name           string          `json:"name"`
-	Type           string          `json:"type,omitempty"`
-	Image          string          `json:"image,omitempty"`
-	Build          string          `json:"build,omitempty"`
-	Command        string          `json:"command,omitempty"`
-	Port           int             `json:"port,omitempty"`
-	Replicas       int             `json:"replicas"`
-	Restart        string          `json:"restart,omitempty"`
-	Persistent     bool            `json:"persistent,omitempty"`
-	Placement      json.RawMessage `json:"placement,omitempty"`
-	Domains        []string        `json:"domains,omitempty"`
-	Volumes        []string        `json:"volumes,omitempty"`
-	EnvKeys        []string        `json:"envKeys,omitempty"`
-	EnvFile        bool            `json:"envFile,omitempty"`
-	SecretRefs     []string        `json:"secretRefs,omitempty"`
-	DependsOn      []string        `json:"dependsOn,omitempty"`
-	HealthCheck    json.RawMessage `json:"healthCheck,omitempty"`
-	DeployStrategy string          `json:"deployStrategy,omitempty"`
+	APIVersion     string            `json:"apiVersion,omitempty"`
+	Kind           string            `json:"kind,omitempty"`
+	Name           string            `json:"name"`
+	Type           string            `json:"type,omitempty"`
+	Image          string            `json:"image,omitempty"`
+	Build          string            `json:"build,omitempty"`
+	Command        string            `json:"command,omitempty"`
+	CommandArgs    []string          `json:"commandArgs,omitempty"`
+	Entrypoint     string            `json:"entrypoint,omitempty"`
+	EntrypointArgs []string          `json:"entrypointArgs,omitempty"`
+	Labels         map[string]string `json:"labels,omitempty"`
+	Port           int               `json:"port,omitempty"`
+	Replicas       int               `json:"replicas"`
+	Restart        string            `json:"restart,omitempty"`
+	Persistent     bool              `json:"persistent,omitempty"`
+	Placement      json.RawMessage   `json:"placement,omitempty"`
+	Domains        []string          `json:"domains,omitempty"`
+	Volumes        []string          `json:"volumes,omitempty"`
+	EnvKeys        []string          `json:"envKeys,omitempty"`
+	EnvFile        bool              `json:"envFile,omitempty"`
+	SecretRefs     []string          `json:"secretRefs,omitempty"`
+	DependsOn      []string          `json:"dependsOn,omitempty"`
+	HealthCheck    json.RawMessage   `json:"healthCheck,omitempty"`
+	DeployStrategy string            `json:"deployStrategy,omitempty"`
 }
 
 // ActualStateDocument is Tako's canonical aggregate runtime state schema for

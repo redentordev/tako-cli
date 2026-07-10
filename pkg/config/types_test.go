@@ -666,7 +666,7 @@ func TestValidateConfigRejectsAmbiguousHealthCheckProtocol(t *testing.T) {
 	if err == nil {
 		t.Fatal("ValidateConfig should reject health checks with both path and tcpPort")
 	}
-	if !strings.Contains(err.Error(), "both path and tcpPort") {
+	if !strings.Contains(err.Error(), "only one of command, path, or tcpPort") {
 		t.Fatalf("error = %q, want ambiguity guidance", err)
 	}
 }
@@ -1552,7 +1552,7 @@ func TestValidateConfigAcceptsJobService(t *testing.T) {
 		Schedule: "*/5 * * * *",
 		Timezone: "UTC",
 		Timeout:  "30m",
-		Command:  "echo report",
+		Command:  StringValue("echo report"),
 	}
 	cfg.Environments["production"] = production
 
@@ -1567,13 +1567,13 @@ func TestValidateConfigRejectsInvalidJobServices(t *testing.T) {
 		service ServiceConfig
 		want    string
 	}{
-		{"missing schedule", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Command: "true"}, "requires a schedule"},
-		{"bad schedule", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "often", Command: "true"}, "invalid schedule"},
+		{"missing schedule", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Command: StringValue("true")}, "requires a schedule"},
+		{"bad schedule", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "often", Command: StringValue("true")}, "invalid schedule"},
 		{"missing command", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly"}, "requires a command"},
-		{"bad timezone", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: "true", Timezone: "Mars/Olympus"}, "invalid timezone"},
-		{"proxied job", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: "true", Proxy: &ProxyConfig{Domain: "example.com"}}, "cannot be proxied"},
-		{"job replicas", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: "true", Replicas: 3}, "cannot set replicas"},
-		{"persistent job", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: "true", Persistent: true}, "cannot be persistent"},
+		{"bad timezone", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: StringValue("true"), Timezone: "Mars/Olympus"}, "invalid timezone"},
+		{"proxied job", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: StringValue("true"), Proxy: &ProxyConfig{Domain: "example.com"}}, "cannot be proxied"},
+		{"job replicas", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: StringValue("true"), Replicas: 3}, "cannot set replicas"},
+		{"persistent job", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: StringValue("true"), Persistent: true}, "cannot be persistent"},
 		{"bad kind", ServiceConfig{Kind: "cronjob", Image: "busybox"}, "kind must be service or job"},
 		{"schedule on plain service", ServiceConfig{Image: "busybox", Schedule: "@hourly"}, "schedule requires kind: job"},
 	}

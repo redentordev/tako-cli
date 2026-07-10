@@ -127,6 +127,44 @@ services:
       servers: [production]
 ```
 
+## Container Command, Entrypoint, Health, And Labels
+
+`command` accepts either the legacy string form (executed through `sh -c`) or
+an argv list passed directly to the image without a shell. Use list form for
+distroless images and exact Compose-style exec semantics. `entrypoint` accepts
+a single executable or a list; additional list entries are placed before the
+service command arguments.
+
+```yaml
+services:
+  consumer:
+    image: getsentry/sentry:26.6.0
+    entrypoint: [/etc/sentry/entrypoint.sh, run]
+    command: [sentry, run, consumer, errors]
+    labels:
+      com.example.role: errors-consumer
+    healthCheck:
+      command: test -f /tmp/healthy
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      startPeriod: 10m
+```
+
+`healthCheck.command` becomes Docker's container health command and is mutually
+exclusive with `healthCheck.path` and `healthCheck.tcpPort`. Custom label keys
+starting with `tako.` are rejected because Tako reserves that namespace for
+runtime identity, revision, and drift metadata. Command/entrypoint lists accept
+at most 256 arguments (64 KiB total), health commands at most 4096 bytes, and
+services at most 256 custom labels (64 KiB total).
+
+List-form commands and all entrypoints require a matching takod. Release deploys
+refresh the agent during runtime setup; when using a local/dev CLI build,
+upgrade the agent with `tako upgrade servers --takod-binary <linux-binary>`
+before relying on the new forms. The CLI checks the agent capability before
+container or schedule reconciliation, so a stale agent rejects these configs
+explicitly rather than silently changing their semantics.
+
 ## Stateful Services And Volumes
 
 Containers are disposable; Docker volumes are the data boundary. Databases,

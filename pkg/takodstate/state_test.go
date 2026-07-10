@@ -79,6 +79,26 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	}
 }
 
+func TestDesiredServiceCommandStateIsAdditiveAndLegacyCompatible(t *testing.T) {
+	legacy := sanitizeDesiredService("worker", config.ServiceConfig{Command: config.StringValue("echo legacy")}, "busybox:latest")
+	legacyJSON, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("json.Marshal legacy state: %v", err)
+	}
+	if !strings.Contains(string(legacyJSON), `"command":"echo legacy"`) || strings.Contains(string(legacyJSON), "commandArgs") {
+		t.Fatalf("legacy desired state changed shape: %s", legacyJSON)
+	}
+
+	execForm := sanitizeDesiredService("worker", config.ServiceConfig{Command: config.ListValue("echo", "raw")}, "busybox:latest")
+	execJSON, err := json.Marshal(execForm)
+	if err != nil {
+		t.Fatalf("json.Marshal exec state: %v", err)
+	}
+	if strings.Contains(string(execJSON), `"command":`) || !strings.Contains(string(execJSON), `"commandArgs":["echo","raw"]`) {
+		t.Fatalf("exec desired state is not additive: %s", execJSON)
+	}
+}
+
 func TestBuildDesiredRevisionNormalizesNegativeReplicaCount(t *testing.T) {
 	cfg := &config.Config{
 		Project: config.ProjectConfig{Name: "demo"},

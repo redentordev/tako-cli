@@ -67,6 +67,7 @@ func TestValidateJobSpecRejectsBadInput(t *testing.T) {
 		{"excessive timeout", func(s *JobSpec) { s.TimeoutSeconds = maxExecTimeoutSeconds + 1 }},
 		{"unsafe memory limit", func(s *JobSpec) { s.MemoryLimit = "512m --privileged" }},
 		{"unsafe cpu limit", func(s *JobSpec) { s.CPULimit = "1.5 --privileged" }},
+		{"reserved label", func(s *JobSpec) { s.Labels = map[string]string{"tako.project": "other"} }},
 	}
 	for _, tc := range cases {
 		spec := validJobSpecFixture()
@@ -74,6 +75,22 @@ func TestValidateJobSpecRejectsBadInput(t *testing.T) {
 		if err := validateJobSpec(&spec); err == nil {
 			t.Fatalf("%s: spec accepted", tc.name)
 		}
+	}
+}
+
+func TestBuildJobRunArgsUsesEntrypointExecCommandAndCustomLabels(t *testing.T) {
+	spec := validJobSpecFixture()
+	spec.Command = []string{"report", "--format", "json"}
+	spec.Entrypoint = []string{"/usr/bin/env", "python3"}
+	spec.Labels = map[string]string{"com.example.role": "report"}
+	got := buildJobRunArgs(spec, "tako_demo_production_report_job_1", "")
+	wantTail := []string{spec.Image, "python3", "report", "--format", "json"}
+	if len(got) < len(wantTail) || strings.Join(got[len(got)-len(wantTail):], "|") != strings.Join(wantTail, "|") {
+		t.Fatalf("args tail = %#v, want %#v; all args %#v", got, wantTail, got)
+	}
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "--entrypoint /usr/bin/env") || !strings.Contains(joined, "--label com.example.role=report") {
+		t.Fatalf("args missing entrypoint or custom label: %s", joined)
 	}
 }
 

@@ -30,7 +30,9 @@ type safeServiceConfigFingerprint struct {
 	Image        string                       `json:"image,omitempty"`
 	Port         int                          `json:"port,omitempty"`
 	Ports        []string                     `json:"ports,omitempty"`
-	Command      string                       `json:"command,omitempty"`
+	Command      any                          `json:"command,omitempty"`
+	Entrypoint   any                          `json:"entrypoint,omitempty"`
+	Labels       map[string]string            `json:"labels,omitempty"`
 	Replicas     int                          `json:"replicas,omitempty"`
 	Restart      string                       `json:"restart,omitempty"`
 	EnvKeys      []string                     `json:"envKeys,omitempty"`
@@ -88,7 +90,9 @@ func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
 		Image:        service.Image,
 		Port:         service.Port,
 		Ports:        sortedStrings(service.Ports),
-		Command:      service.Command,
+		Command:      stringOrListFingerprint(service.Command),
+		Entrypoint:   stringOrListFingerprint(service.Entrypoint),
+		Labels:       cloneStringMap(service.Labels),
 		Replicas:     service.Replicas,
 		Restart:      service.Restart,
 		EnvKeys:      sortedMapKeys(service.Env),
@@ -114,6 +118,16 @@ func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), true
+}
+
+func stringOrListFingerprint(value config.StringOrList) any {
+	if !value.IsSet() {
+		return nil
+	}
+	if scalar, ok := value.Scalar(); ok {
+		return scalar
+	}
+	return value.Arguments()
 }
 
 func cloneBackupFingerprint(backup *config.BackupConfig) *backupFingerprint {

@@ -311,7 +311,7 @@ func assertWorkersPattern(t *testing.T, cfg *config.Config) {
 	services := productionServices(t, cfg)
 	assertPublicService(t, services["api"], 3000)
 	worker := services["worker"]
-	if worker.Port != 0 || worker.Command == "" || worker.Replicas != 3 {
+	if worker.Port != 0 || !worker.Command.IsSet() || worker.Replicas != 3 {
 		t.Fatalf("worker should be a replicated background command: %#v", worker)
 	}
 	redis := services["redis"]
@@ -322,7 +322,7 @@ func assertWorkersPattern(t *testing.T, cfg *config.Config) {
 
 func assertCronRunnerPattern(t *testing.T, cfg *config.Config) {
 	job := productionServices(t, cfg)["hourly-maintenance"]
-	if !job.IsJob() || job.Schedule == "" || job.Command == "" {
+	if !job.IsJob() || job.Schedule == "" || !job.Command.IsSet() {
 		t.Fatalf("cron runner should be a scheduled kind: job service: %#v", job)
 	}
 	if job.Port != 0 || job.Proxy != nil {

@@ -54,13 +54,15 @@ const (
 // the spec at deploy time via /v1/jobs/apply and fires it with its local
 // cron; each run is a fresh one-off container from Image.
 type JobSpec struct {
-	Project     string   `json:"project"`
-	Environment string   `json:"environment"`
-	Name        string   `json:"name"`
-	Schedule    string   `json:"schedule"`
-	Timezone    string   `json:"timezone,omitempty"`
-	Image       string   `json:"image"`
-	Command     []string `json:"command"`
+	Project     string            `json:"project"`
+	Environment string            `json:"environment"`
+	Name        string            `json:"name"`
+	Schedule    string            `json:"schedule"`
+	Timezone    string            `json:"timezone,omitempty"`
+	Image       string            `json:"image"`
+	Command     []string          `json:"command"`
+	Entrypoint  []string          `json:"entrypoint,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
 	// EnvFileContent carries the job's env/secrets; it is written to a 0600
 	// temp file per run and passed via --env-file.
 	EnvFileContent string   `json:"envFileContent,omitempty"`
@@ -589,6 +591,14 @@ func buildJobRunArgs(spec JobSpec, container string, envFile string) []string {
 		"--label", "tako.runtime=takod",
 		"--label", jobRoleLabel,
 	}
+	labelKeys := make([]string, 0, len(spec.Labels))
+	for key := range spec.Labels {
+		labelKeys = append(labelKeys, key)
+	}
+	sort.Strings(labelKeys)
+	for _, key := range labelKeys {
+		args = append(args, "--label", key+"="+spec.Labels[key])
+	}
 	if envFile != "" {
 		args = append(args, "--env-file", envFile)
 	}
@@ -604,7 +614,13 @@ func buildJobRunArgs(spec JobSpec, container string, envFile string) []string {
 	if spec.CPULimit != "" {
 		args = append(args, "--cpus", spec.CPULimit)
 	}
+	if len(spec.Entrypoint) > 0 {
+		args = append(args, "--entrypoint", spec.Entrypoint[0])
+	}
 	args = append(args, spec.Image)
+	if len(spec.Entrypoint) > 1 {
+		args = append(args, spec.Entrypoint[1:]...)
+	}
 	args = append(args, spec.Command...)
 	return args
 }
@@ -634,8 +650,22 @@ func validateJobSpec(spec *JobSpec) error {
 	if _, err := parser.Parse(jobCronSpec(*spec)); err != nil {
 		return fmt.Errorf("invalid schedule: %w", err)
 	}
-	if len(spec.Command) == 0 || strings.TrimSpace(spec.Command[0]) == "" {
+	if err := validateContainerArgv("command", spec.Command); err != nil {
+		return err
+	}
+	if len(spec.Command) == 0 {
 		return fmt.Errorf("command is required")
+	}
+	if err := validateContainerArgv("entrypoint", spec.Entrypoint); err != nil {
+		return err
+	}
+	if err := validateDockerLabels(spec.Labels); err != nil {
+		return fmt.Errorf("invalid label: %w", err)
+	}
+	for key := range spec.Labels {
+		if strings.HasPrefix(key, "tako.") {
+			return fmt.Errorf("invalid label: %q uses reserved tako. prefix", key)
+		}
 	}
 	if spec.Image == "" {
 		return fmt.Errorf("image is required")

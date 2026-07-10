@@ -354,6 +354,163 @@ func TestShouldInstallTakodRelease(t *testing.T) {
 	}
 }
 
+func TestEnsureTakodContainerArgvCapability(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusJSON string
+		statusErr  error
+		wantError  string
+	}{
+		{
+			name:       "matching agent advertises support",
+			statusJSON: `{"capabilities":["container.argv-v1"]}`,
+		},
+		{
+			name:       "stale agent has no capabilities",
+			statusJSON: `{"version":"dev"}`,
+			wantError:  "does not support container argv payloads",
+		},
+		{
+			name:       "malformed status fails closed",
+			statusJSON: `{`,
+			wantError:  "failed to parse takod status",
+		},
+		{
+			name:      "unreachable status fails closed",
+			statusErr: fmt.Errorf("takod unavailable"),
+			wantError: "failed to verify takod capabilities",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deploy := &Deployer{config: &config.Config{}}
+			err := deploy.ensureTakodContainerArgvCapability(fakeTakodStatusExecutor{
+				output: tt.statusJSON,
+				err:    tt.statusErr,
+			}, "node-a")
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("ensureTakodContainerArgvCapability() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("ensureTakodContainerArgvCapability() error = %v, want containing %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestServiceNeedsContainerArgvCapability(t *testing.T) {
+	tests := []struct {
+		name    string
+		service *config.ServiceConfig
+		want    bool
+	}{
+		{name: "nil service", service: nil, want: false},
+		{name: "legacy scalar command", service: &config.ServiceConfig{Command: config.StringValue("echo legacy")}, want: false},
+		{name: "list command", service: &config.ServiceConfig{Command: config.ListValue("echo", "raw")}, want: true},
+		{name: "scalar entrypoint", service: &config.ServiceConfig{Entrypoint: config.StringValue("/init")}, want: true},
+		{name: "list entrypoint", service: &config.ServiceConfig{Entrypoint: config.ListValue("/init", "run")}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := serviceNeedsContainerArgvCapability(tt.service); got != tt.want {
+				t.Fatalf("serviceNeedsContainerArgvCapability() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTakodServiceRolloutPreflightsArgvBeforeEveryMutation(t *testing.T) {
+	featureServices := []struct {
+		name    string
+		service *config.ServiceConfig
+	}{
+		{name: "list command", service: &config.ServiceConfig{Command: config.ListValue("echo", "raw")}},
+		{name: "scalar entrypoint", service: &config.ServiceConfig{Entrypoint: config.StringValue("/init")}},
+		{name: "list entrypoint", service: &config.ServiceConfig{Entrypoint: config.ListValue("/init", "run")}},
+	}
+	failures := []struct {
+		name       string
+		statusJSON string
+		statusErr  error
+	}{
+		{name: "stale", statusJSON: `{"version":"dev"}`},
+		{name: "malformed", statusJSON: `{`},
+		{name: "unreachable", statusErr: fmt.Errorf("takod unavailable")},
+	}
+	serverNames := []string{"node-a", "node-b", "node-c"}
+
+	for _, feature := range featureServices {
+		for _, failure := range failures {
+			t.Run(feature.name+"/"+failure.name, func(t *testing.T) {
+				deploy := &Deployer{config: &config.Config{}}
+				var mu sync.Mutex
+				checked := make(map[string]bool)
+				var mutations []string
+				recordMutation := func(name string) error {
+					mu.Lock()
+					defer mu.Unlock()
+					mutations = append(mutations, name)
+					return nil
+				}
+				err := runTakodServiceRollout(serviceNeedsContainerArgvCapability(feature.service), takodServiceRolloutOperations{
+					Preflight: func() error {
+						return preflightTakodContainerArgvWithCheck(serverNames, func(serverName string) error {
+							mu.Lock()
+							checked[serverName] = true
+							mu.Unlock()
+							return deploy.ensureTakodContainerArgvCapability(fakeTakodStatusExecutor{
+								output: failure.statusJSON,
+								err:    failure.statusErr,
+							}, serverName)
+						})
+					},
+					Build:     func() error { return recordMutation("build") },
+					Release:   func() error { return recordMutation("release") },
+					Reconcile: func() error { return recordMutation("reconcile") },
+				})
+				if err == nil {
+					t.Fatal("runTakodServiceRollout() succeeded with incompatible agents")
+				}
+				if len(checked) != len(serverNames) {
+					t.Fatalf("preflight checked %v, want every target %v", checked, serverNames)
+				}
+				if len(mutations) != 0 {
+					t.Fatalf("mutations ran after failed preflight: %v", mutations)
+				}
+			})
+		}
+	}
+}
+
+func TestTakodServiceRolloutLegacyScalarSkipsCapabilityAndReconciles(t *testing.T) {
+	service := &config.ServiceConfig{Command: config.StringValue("echo legacy")}
+	var phases []string
+	record := func(name string) error {
+		phases = append(phases, name)
+		return nil
+	}
+	err := runTakodServiceRollout(serviceNeedsContainerArgvCapability(service), takodServiceRolloutOperations{
+		Preflight: func() error {
+			t.Fatal("legacy scalar command must not require a capability status")
+			return nil
+		},
+		Build:     func() error { return record("build") },
+		Release:   func() error { return record("release") },
+		Reconcile: func() error { return record("reconcile") },
+	})
+	if err != nil {
+		t.Fatalf("runTakodServiceRollout() error = %v", err)
+	}
+	if got, want := strings.Join(phases, ","), "build,release,reconcile"; got != want {
+		t.Fatalf("phases = %q, want %q", got, want)
+	}
+}
+
 type fakeTakodStatusExecutor struct {
 	output string
 	err    error
@@ -390,6 +547,42 @@ func TestBuildTakodHealthSpecUsesHostSideHTTPPathAndPort(t *testing.T) {
 	}
 	if spec.Scheme != "http" {
 		t.Fatalf("health scheme = %q, want http", spec.Scheme)
+	}
+}
+
+func TestBuildTakodHealthSpecUsesContainerCommand(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
+		HealthCheck: config.HealthCheckConfig{
+			Command:     "test -f /tmp/healthy",
+			Interval:    "30s",
+			Timeout:     "5s",
+			Retries:     4,
+			StartPeriod: "2m",
+		},
+	})
+	if spec == nil || spec.Command != "test -f /tmp/healthy" {
+		t.Fatalf("health spec = %#v, want Docker command", spec)
+	}
+	if spec.Path != "" || spec.Port != 0 {
+		t.Fatalf("command health should not synthesize host target: %#v", spec)
+	}
+}
+
+func TestServiceRuntimeLabelsIncludeCustomLabelsWithoutOverridingTakoIdentity(t *testing.T) {
+	service := config.ServiceConfig{
+		Image: "nginx:latest",
+		Labels: map[string]string{
+			"com.example.role":             "frontend",
+			runtimeid.ServiceIdentityLabel: "malicious",
+		},
+	}
+	labels := serviceRuntimeLabels("demo", "production", "web", service)
+	if labels["com.example.role"] != "frontend" {
+		t.Fatalf("custom label missing: %#v", labels)
+	}
+	if labels[runtimeid.ServiceIdentityLabel] != runtimeid.ServiceIdentity("demo", "production", "web") {
+		t.Fatalf("runtime identity was overridden: %#v", labels)
 	}
 }
 
@@ -608,8 +801,25 @@ func TestDeploymentHealthWaitAttemptsUsesFloorAndCap(t *testing.T) {
 	if got := deploymentHealthWaitAttempts("1s", "0s", 1); got != 30 {
 		t.Fatalf("short health wait attempts = %d, want floor 30", got)
 	}
-	if got := deploymentHealthWaitAttempts("10m", "10m", 100); got != 600 {
-		t.Fatalf("long health wait attempts = %d, want cap 600", got)
+	if got := deploymentHealthWaitAttempts("24h", "24h", 100); got != 24*60*60 {
+		t.Fatalf("long health wait attempts = %d, want cap %d", got, 24*60*60)
+	}
+}
+
+func TestBuildTakodCommandHealthSpecCoversTenMinuteStartPeriod(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{HealthCheck: config.HealthCheckConfig{
+		Command: "test -f /tmp/heartbeat", Interval: "30s", Timeout: "5s", Retries: 3, StartPeriod: "10m",
+	}})
+	if spec == nil {
+		t.Fatal("buildTakodHealthSpec returned nil")
+	}
+	want := 10*60 + 4*30 + 5
+	if spec.WaitAttempts != want {
+		t.Fatalf("wait attempts = %d, want %d to cover start period and retries", spec.WaitAttempts, want)
+	}
+	if spec.WaitAttempts <= 600 {
+		t.Fatalf("wait attempts = %d, must extend beyond ten-minute grace", spec.WaitAttempts)
 	}
 }
 

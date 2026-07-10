@@ -66,6 +66,9 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 			if status.Version != "test" {
 				t.Fatalf("unexpected version %q", status.Version)
 			}
+			if len(status.Capabilities) != 1 || status.Capabilities[0] != CapabilityContainerArgvV1 {
+				t.Fatalf("unexpected capabilities %#v", status.Capabilities)
+			}
 			return
 		}
 		lastErr = err

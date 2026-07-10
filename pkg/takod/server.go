@@ -60,16 +60,21 @@ func decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst any) error {
 }
 
 type Status struct {
-	Runtime   string         `json:"runtime"`
-	Version   string         `json:"version"`
-	Hostname  string         `json:"hostname"`
-	Socket    string         `json:"socket"`
-	DataDir   string         `json:"dataDir"`
-	StartedAt time.Time      `json:"startedAt"`
-	Now       time.Time      `json:"now"`
-	Node      map[string]any `json:"node,omitempty"`
-	Peers     map[string]any `json:"peers,omitempty"`
+	Runtime      string         `json:"runtime"`
+	Version      string         `json:"version"`
+	Capabilities []string       `json:"capabilities,omitempty"`
+	Hostname     string         `json:"hostname"`
+	Socket       string         `json:"socket"`
+	DataDir      string         `json:"dataDir"`
+	StartedAt    time.Time      `json:"startedAt"`
+	Now          time.Time      `json:"now"`
+	Node         map[string]any `json:"node,omitempty"`
+	Peers        map[string]any `json:"peers,omitempty"`
 }
+
+// CapabilityContainerArgvV1 means reconcile and job payloads preserve the
+// container command/entrypoint argv fields introduced with config exec form.
+const CapabilityContainerArgvV1 = "container.argv-v1"
 
 func NewServer(socket string, dataDir string, version string) *Server {
 	return NewServerWithOptions(socket, dataDir, version, ServerOptions{})
@@ -1313,13 +1318,14 @@ func (s *Server) handleDiscoveryExports(w http.ResponseWriter, r *http.Request) 
 func (s *Server) Status() Status {
 	hostname, _ := os.Hostname()
 	status := Status{
-		Runtime:   "takod",
-		Version:   s.version,
-		Hostname:  hostname,
-		Socket:    s.socket,
-		DataDir:   s.dataDir,
-		StartedAt: s.startedAt,
-		Now:       time.Now().UTC(),
+		Runtime:      "takod",
+		Version:      s.version,
+		Capabilities: []string{CapabilityContainerArgvV1},
+		Hostname:     hostname,
+		Socket:       s.socket,
+		DataDir:      s.dataDir,
+		StartedAt:    s.startedAt,
+		Now:          time.Now().UTC(),
 	}
 
 	status.Node = readJSONMap(filepath.Join(s.dataDir, "node.json"))

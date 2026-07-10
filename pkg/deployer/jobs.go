@@ -76,7 +76,9 @@ func (d *Deployer) buildJobSpec(serviceName string, service *config.ServiceConfi
 		Schedule:       service.Schedule,
 		Timezone:       service.Timezone,
 		Image:          image,
-		Command:        []string{"sh", "-c", service.Command},
+		Command:        service.Command.ContainerCommand(),
+		Entrypoint:     service.Entrypoint.Arguments(),
+		Labels:         copyJobLabels(service.Labels),
 		EnvFileContent: envContent,
 		Network:        runtimeid.NetworkName(d.config.Project.Name, d.environment),
 		Mounts:         mounts,
@@ -85,6 +87,17 @@ func (d *Deployer) buildJobSpec(serviceName string, service *config.ServiceConfi
 		TimeoutSeconds: timeoutSeconds,
 		ConfigHash:     hash,
 	}, nil
+}
+
+func copyJobLabels(labels map[string]string) map[string]string {
+	if len(labels) == 0 {
+		return nil
+	}
+	copy := make(map[string]string, len(labels))
+	for key, value := range labels {
+		copy[key] = value
+	}
+	return copy
 }
 
 // ApplyJobSchedules declaratively reconciles the environment's whole job set
@@ -125,7 +138,16 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 		jobsByNode[owner] = append(jobsByNode[owner], spec)
 	}
 
-	return runTakodNodeActions(targetServers, func(serverName string) error {
+	var argvServers []string
+	for _, serverName := range targetServers {
+		for _, job := range jobsByNode[serverName] {
+			if len(job.Entrypoint) > 0 {
+				argvServers = append(argvServers, serverName)
+				break
+			}
+		}
+	}
+	return runTakodJobApplyPhases(targetServers, argvServers, d.preflightTakodContainerArgv, func(serverName string) error {
 		client, err := d.getEnvironmentClient(serverName)
 		if err != nil {
 			return err
@@ -165,4 +187,11 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 		}
 		return nil
 	})
+}
+
+func runTakodJobApplyPhases(targetServers []string, argvServers []string, preflight func([]string) error, apply func(string) error) error {
+	if err := preflight(argvServers); err != nil {
+		return fmt.Errorf("job entrypoint requires container argv support: %w", err)
+	}
+	return runTakodNodeActions(targetServers, apply)
 }
