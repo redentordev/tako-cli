@@ -118,6 +118,10 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	if _, exists := services[req.Service]; !exists {
 		return nil, invalidRequestf("service %s not found in environment %s", req.Service, envName)
 	}
+	rollbackService := services[req.Service]
+	if rollbackService.IsRun() || rollbackService.IsJob() {
+		return nil, invalidRequestf("service %s is kind: %s and cannot be rolled back as a long-running service", req.Service, rollbackService.Kind)
+	}
 
 	envServers, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {

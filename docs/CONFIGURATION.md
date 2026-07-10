@@ -540,6 +540,49 @@ accepts either a positive scalar (same soft/hard value) or explicit positive
 reconciliation and fails with upgrade guidance when a development node is
 stale.
 
+## Deploy-Time Runs
+
+`kind: run` declares a run-to-completion step inside the deployment dependency
+graph. Its `command` must be an argv list. The step runs in a fresh `--rm`
+container at its topological slot, and dependent services start only after it
+exits 0. A non-zero exit aborts the deployment.
+
+```yaml
+services:
+  migrate:
+    kind: run
+    image: getsentry/sentry:26.6.0
+    command: [sentry, upgrade, --noinput]
+    timeout: 30m
+
+  web:
+    image: getsentry/sentry:26.6.0
+    dependsOn: [migrate]
+```
+
+Use `imageFrom` to reuse another service's resolved image. Tako adds that
+service as an implicit dependency; build-backed image sources must share at
+least one eligible node with the run.
+
+```yaml
+services:
+  app:
+    build: .
+  migrate:
+    kind: run
+    imageFrom: app
+    command: [bin/app, migrate]
+```
+
+Successful runs record their resolved-image/config fingerprint, command, node,
+exit code, and duration in deployment history and machine-readable deploy
+results. The fingerprint includes a non-reversible digest of resolved env-file
+and secret values, so value-only input changes rerun without storing those
+values. A later deploy skips an already-completed fingerprint. `tako deploy
+--force` reruns it. Run services accept env/envFiles, secrets, volumes,
+entrypoint, labels, placement, resources, and the runtime controls above; they
+do not create a persistent service, route, schedule, or health check.
+
 Use a one-off override from CI or a dev machine:
 
 ```bash

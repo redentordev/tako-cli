@@ -174,6 +174,7 @@ type ServerConfig struct {
 const (
 	ServiceKindService = "service"
 	ServiceKindJob     = "job"
+	ServiceKindRun     = "run"
 )
 
 // ServiceConfig defines service deployment settings
@@ -197,6 +198,7 @@ type ServiceConfig struct {
 	BuildTarget string            `yaml:"-" json:"-"`
 	Dockerfile  string            `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"` // Dockerfile path relative to build context
 	Image       string            `yaml:"image,omitempty" json:"image,omitempty"`           // Pre-built image (for postgres, redis, etc)
+	ImageFrom   string            `yaml:"imageFrom,omitempty" json:"imageFrom,omitempty"`   // kind: run image source service
 
 	// Basic settings
 	Port int `yaml:"port,omitempty" json:"port,omitempty"`
@@ -204,15 +206,18 @@ type ServiceConfig struct {
 	// tako-proxy (docker-compose syntax: "PORT", "HOST:CONTAINER",
 	// "IP:HOST:CONTAINER", optional "/tcp" or "/udp"). Requires the recreate
 	// deploy strategy and at most one replica.
-	Ports           []string                `yaml:"ports,omitempty" json:"ports,omitempty"`
-	Command         StringOrList            `yaml:"command,omitempty" json:"command,omitempty,omitzero"`
-	Entrypoint      StringOrList            `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty,omitzero"`
-	Labels          map[string]string       `yaml:"labels,omitempty" json:"labels,omitempty"`
-	Replicas        int                     `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
-	Restart         string                  `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
-	Env             map[string]string       `yaml:"env,omitempty" json:"env,omitempty"`
-	EnvFile         string                  `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Legacy single .env file path
-	EnvFiles        []string                `yaml:"envFiles,omitempty" json:"envFiles,omitempty"`
+	Ports      []string          `yaml:"ports,omitempty" json:"ports,omitempty"`
+	Command    StringOrList      `yaml:"command,omitempty" json:"command,omitempty,omitzero"`
+	Entrypoint StringOrList      `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty,omitzero"`
+	Labels     map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Replicas   int               `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
+	Restart    string            `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
+	Env        map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	EnvFile    string            `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Legacy single .env file path
+	EnvFiles   []string          `yaml:"envFiles,omitempty" json:"envFiles,omitempty"`
+	// RunInputHash is an internal digest of the fully resolved env/secret file
+	// used to fingerprint kind:run executions without persisting secret values.
+	RunInputHash    string                  `yaml:"-" json:"-"`
 	User            string                  `yaml:"user,omitempty" json:"user,omitempty"`
 	WorkingDir      string                  `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
 	StopGracePeriod string                  `yaml:"stopGracePeriod,omitempty" json:"stopGracePeriod,omitempty"`
@@ -263,6 +268,11 @@ type ServiceConfig struct {
 // IsJob reports whether the service is a scheduled job workload.
 func (s *ServiceConfig) IsJob() bool {
 	return s.Kind == ServiceKindJob
+}
+
+// IsRun reports whether the service is a deploy-time run-to-completion step.
+func (s *ServiceConfig) IsRun() bool {
+	return s.Kind == ServiceKindRun
 }
 
 // ClearBuild removes the complete build definition when an image override
@@ -567,6 +577,12 @@ type PlacementConfig struct {
 
 // GetServiceType returns the auto-detected service type
 func (s *ServiceConfig) GetServiceType() string {
+	if s.IsRun() {
+		return ServiceKindRun
+	}
+	if s.IsJob() {
+		return ServiceKindJob
+	}
 	if s.Persistent {
 		return "persistent" // Database, cache, etc.
 	}

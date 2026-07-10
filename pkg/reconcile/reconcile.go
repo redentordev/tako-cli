@@ -65,6 +65,20 @@ func ComputePlan(
 	// 1. Check all services in config (desired state)
 	for serviceName, desiredConfig := range desiredServices {
 		actual, exists := actualServices[serviceName]
+		if desiredConfig.IsRun() {
+			matchedActual[serviceName] = true
+			change := runChange(serviceName, desiredConfig, actual)
+			plan.Changes = append(plan.Changes, change)
+			switch change.Type {
+			case ChangeAdd:
+				plan.Summary.Adds++
+			case ChangeUpdate:
+				plan.Summary.Updates++
+			default:
+				plan.Summary.NoOps++
+			}
+			continue
+		}
 
 		if desiredConfig.IsJob() {
 			// Jobs reconcile against the owning node's cron schedule, not
@@ -184,6 +198,19 @@ func ComputePlan(
 	plan.Summary.Total = len(plan.Changes)
 
 	return plan
+}
+
+// runChange plans a deploy-time run against its last successful fingerprint,
+// synthesized from deployment history by the engine.
+func runChange(serviceName string, desired config.ServiceConfig, actual *ActualService) ServiceChange {
+	recorded := actual != nil && actual.ConfigSnapshot != nil && actual.ConfigSnapshot.IsRun()
+	if !recorded {
+		return ServiceChange{Type: ChangeAdd, ServiceName: serviceName, NewConfig: &desired, Reasons: []string{"Deploy-time run has not completed"}}
+	}
+	if desiredHash, ok := SafeServiceConfigHash(desired); ok && actual.ConfigHash == desiredHash {
+		return ServiceChange{Type: ChangeNone, ServiceName: serviceName, OldConfig: actual.ConfigSnapshot, NewConfig: &desired, Reasons: []string{"Deploy-time run fingerprint already completed"}}
+	}
+	return ServiceChange{Type: ChangeUpdate, ServiceName: serviceName, OldConfig: actual.ConfigSnapshot, NewConfig: &desired, Reasons: []string{"Deploy-time run fingerprint changed"}}
 }
 
 // ActualService represents a currently running service

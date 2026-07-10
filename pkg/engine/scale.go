@@ -97,8 +97,12 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 		return nil, fmt.Errorf("failed to get services: %w", err)
 	}
 	for serviceName := range scaleTargets {
-		if _, exists := services[serviceName]; !exists {
+		service, exists := services[serviceName]
+		if !exists {
 			return nil, invalidRequestf("service '%s' not found in environment %s", serviceName, envName)
+		}
+		if service.IsRun() || service.IsJob() {
+			return nil, invalidRequestf("service %s is kind: %s and cannot be scaled", serviceName, service.Kind)
 		}
 	}
 

@@ -79,6 +79,19 @@ func TestStreamReleaseExecParsesMarkersAndEmitsOutput(t *testing.T) {
 	}
 }
 
+func TestStreamDeployExecUsesRunOutputEvent(t *testing.T) {
+	sink := &capturingSink{}
+	d := releaseTestDeployer(sink)
+	client := &fakeExecStreamExecutor{response: "bootstrapping\n" + takod.ExecExitMarker + "0\n"}
+	exitCode, exitSeen, err := d.streamDeployExec(context.Background(), client, "bootstrap", "node-a", []byte("{}"), events.TypeDeployRunOutput)
+	if err != nil || !exitSeen || exitCode != 0 {
+		t.Fatalf("stream = %d %v %v", exitCode, exitSeen, err)
+	}
+	if len(sink.events) != 1 || sink.events[0].Type != events.TypeDeployRunOutput {
+		t.Fatalf("events = %#v", sink.events)
+	}
+}
+
 func TestStreamReleaseExecReportsNonZeroExit(t *testing.T) {
 	d := releaseTestDeployer(&capturingSink{})
 	client := &fakeExecStreamExecutor{response: takod.ExecExitMarker + "1\n"}

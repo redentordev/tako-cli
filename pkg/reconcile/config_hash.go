@@ -30,6 +30,7 @@ type safeServiceConfigFingerprint struct {
 	BuildTarget     string                         `json:"buildTarget,omitempty"`
 	Dockerfile      string                         `json:"dockerfile,omitempty"`
 	Image           string                         `json:"image,omitempty"`
+	ImageFrom       string                         `json:"imageFrom,omitempty"`
 	Port            int                            `json:"port,omitempty"`
 	Ports           []string                       `json:"ports,omitempty"`
 	Command         any                            `json:"command,omitempty"`
@@ -40,6 +41,7 @@ type safeServiceConfigFingerprint struct {
 	EnvKeys         []string                       `json:"envKeys,omitempty"`
 	EnvFile         string                         `json:"envFile,omitempty"`
 	EnvFiles        []string                       `json:"envFiles,omitempty"`
+	RunInputHash    string                         `json:"runInputHash,omitempty"`
 	User            string                         `json:"user,omitempty"`
 	WorkingDir      string                         `json:"workingDir,omitempty"`
 	StopGracePeriod string                         `json:"stopGracePeriod,omitempty"`
@@ -100,6 +102,7 @@ func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
 		BuildTarget:     service.BuildTarget,
 		Dockerfile:      service.Dockerfile,
 		Image:           service.Image,
+		ImageFrom:       service.ImageFrom,
 		Port:            service.Port,
 		Ports:           sortedStrings(service.Ports),
 		Command:         stringOrListFingerprint(service.Command),
@@ -110,6 +113,7 @@ func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
 		EnvKeys:         sortedMapKeys(service.Env),
 		EnvFile:         service.EnvFile,
 		EnvFiles:        append([]string(nil), service.EnvFiles...),
+		RunInputHash:    service.RunInputHash,
 		User:            service.User,
 		WorkingDir:      service.WorkingDir,
 		StopGracePeriod: service.StopGracePeriod,

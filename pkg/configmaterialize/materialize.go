@@ -149,7 +149,9 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 	command := stateStringOrList(service.Command, service.CommandArgs)
 	entrypoint := stateStringOrList(service.Entrypoint, service.EntrypointArgs)
 	out := config.ServiceConfig{
+		Kind:            strings.TrimSpace(service.WorkloadKind),
 		Image:           strings.TrimSpace(service.Image),
+		ImageFrom:       strings.TrimSpace(service.ImageFrom),
 		Build:           strings.TrimSpace(service.Build),
 		BuildTarget:     strings.TrimSpace(service.BuildTarget),
 		Command:         command,
@@ -169,6 +171,21 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 		ExtraHosts:      cleanStrings(service.ExtraHosts),
 		Ulimits:         materializeUlimits(service.Ulimits),
 		ShmSize:         strings.TrimSpace(service.ShmSize),
+	}
+	serviceType := strings.TrimSpace(service.Type)
+	if out.Kind == "" && (serviceType == config.ServiceKindRun || serviceType == config.ServiceKindJob) {
+		out.Kind = serviceType
+	}
+	if out.IsRun() && out.ImageFrom != "" {
+		// Desired state also carries the resolved image used by the completed
+		// run; config source remains imageFrom so the next plan can resolve it.
+		out.Image = ""
+	}
+	if out.IsRun() {
+		// Older desired documents may contain generic container defaults that
+		// never applied to deploy-time runs. Do not turn them into invalid config.
+		out.Restart = ""
+		out.Deploy = config.DeployConfig{}
 	}
 	if len(service.BuildArgKeys) > 0 {
 		warnings = append(warnings, Warning{
@@ -235,6 +252,10 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 			return config.ServiceConfig{}, warnings, err
 		}
 		out.HealthCheck = healthCheck
+	}
+	if out.IsRun() {
+		out.Restart = ""
+		out.Deploy = config.DeployConfig{}
 	}
 
 	return out, warnings, nil

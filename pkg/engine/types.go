@@ -68,6 +68,7 @@ type PlanChange struct {
 	// ReleaseCommand surfaces the service's deploy.release command that
 	// will run before cutover when this change applies.
 	ReleaseCommand []string `json:"releaseCommand,omitempty"`
+	RunCommand     []string `json:"runCommand,omitempty"`
 }
 
 // DeployPlan is the serializable outcome of PlanDeploy: what would change,
@@ -115,7 +116,16 @@ type ServiceOutcome struct {
 	Action   string          `json:"action"`
 	Replicas int             `json:"replicas,omitempty"`
 	Release  *ReleaseOutcome `json:"release,omitempty"`
+	Run      *RunOutcome     `json:"run,omitempty"`
 	Error    string          `json:"error,omitempty"`
+}
+
+type RunOutcome struct {
+	Command    []string `json:"command"`
+	Server     string   `json:"server"`
+	Image      string   `json:"image"`
+	ExitCode   int      `json:"exitCode"`
+	DurationMs int64    `json:"durationMs"`
 }
 
 // ReleaseOutcome reports the service's release command run: executed once
@@ -155,6 +165,7 @@ const (
 	OutcomeRemoved  = "removed"
 	OutcomeUpToDate = "up_to_date"
 	OutcomeFailed   = "failed"
+	OutcomeRan      = "ran"
 )
 
 // DeployResult is the serializable outcome of ApplyDeploy.
@@ -197,6 +208,9 @@ func newDeployPlanDocument(project string, environment string, plan *reconcile.R
 		}
 		if service, ok := services[change.ServiceName]; ok && service.Deploy.Release != nil {
 			planChange.ReleaseCommand = append([]string(nil), service.Deploy.Release.Command...)
+		}
+		if service, ok := services[change.ServiceName]; ok && service.IsRun() {
+			planChange.RunCommand = service.Command.Arguments()
 		}
 		doc.Changes = append(doc.Changes, planChange)
 	}

@@ -206,6 +206,8 @@ func effectiveReplicas(service takoconfig.ServiceConfig) int {
 
 func explainServiceSource(service, raw takoconfig.ServiceConfig) string {
 	switch {
+	case service.IsRun() && service.ImageFrom != "":
+		return fmt.Sprintf("imageFrom %q (%s)", service.ImageFrom, explainStringSource(raw.ImageFrom))
 	case service.Build != "":
 		return fmt.Sprintf("build %q (%s)", service.Build, explainStringSource(raw.Build))
 	case service.Image != "":

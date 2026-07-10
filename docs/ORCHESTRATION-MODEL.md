@@ -396,6 +396,14 @@ remove one-off containers.
 
 ### Scheduled jobs
 
+`kind: run` is a fingerprinted run-to-completion vertex in the deploy DAG.
+Tako executes it through takod's one-off container path, records its machine
+outcome in deployment history, skips completed unchanged fingerprints, reruns
+under `--force`, and does not advance dependents until exit 0. `imageFrom`
+reuses another service's resolved image and adds that service as an implicit
+dependency. The fingerprint includes a non-reversible digest of fully resolved
+environment and secret values without persisting those values in state.
+
 `kind: job` declares a service that runs on a cron schedule instead of as
 long-running replicas:
 

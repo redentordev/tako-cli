@@ -84,6 +84,10 @@ const CapabilityContainerRuntimeControlsV1 = "container.runtime-controls-v1"
 // buildArgs and target from the request preamble.
 const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
 
+// CapabilityExecOneOffControlsV1 covers pull auth, entrypoint, labels, and
+// runtime controls on deploy-time one-off exec requests.
+const CapabilityExecOneOffControlsV1 = "exec.oneoff-controls-v1"
+
 func NewServer(socket string, dataDir string, version string) *Server {
 	return NewServerWithOptions(socket, dataDir, version, ServerOptions{})
 }
@@ -1338,7 +1342,7 @@ func (s *Server) Status() Status {
 	status := Status{
 		Runtime:      "takod",
 		Version:      s.version,
-		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1},
+		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1},
 		Hostname:     hostname,
 		Socket:       s.socket,
 		DataDir:      s.dataDir,

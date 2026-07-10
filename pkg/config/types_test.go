@@ -1574,7 +1574,7 @@ func TestValidateConfigRejectsInvalidJobServices(t *testing.T) {
 		{"proxied job", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: StringValue("true"), Proxy: &ProxyConfig{Domain: "example.com"}}, "cannot be proxied"},
 		{"job replicas", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: StringValue("true"), Replicas: 3}, "cannot set replicas"},
 		{"persistent job", ServiceConfig{Kind: ServiceKindJob, Image: "busybox", Schedule: "@hourly", Command: StringValue("true"), Persistent: true}, "cannot be persistent"},
-		{"bad kind", ServiceConfig{Kind: "cronjob", Image: "busybox"}, "kind must be service or job"},
+		{"bad kind", ServiceConfig{Kind: "cronjob", Image: "busybox"}, "kind must be service, job, or run"},
 		{"schedule on plain service", ServiceConfig{Image: "busybox", Schedule: "@hourly"}, "schedule requires kind: job"},
 	}
 	for _, tc := range cases {

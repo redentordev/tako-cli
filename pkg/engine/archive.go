@@ -86,6 +86,7 @@ func ApplyImageOverride(service config.ServiceConfig, imageRef string) config.Se
 		return service
 	}
 	service.Image = trimmedImage
+	service.ImageFrom = ""
 	service.ClearBuild()
 	return service
 }

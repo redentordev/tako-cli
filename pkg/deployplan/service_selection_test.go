@@ -233,6 +233,20 @@ func TestServicesToDeployForPlanForceIncludesAllSelectedServices(t *testing.T) {
 	}
 }
 
+func TestServicesToDeployForPlanForceRerunsCompletedRun(t *testing.T) {
+	run := config.ServiceConfig{Kind: config.ServiceKindRun, Image: "busybox", Command: config.ListValue("true")}
+	services := map[string]config.ServiceConfig{"migrate": run}
+	plan := &reconcile.ReconciliationPlan{Changes: []reconcile.ServiceChange{{Type: reconcile.ChangeNone, ServiceName: "migrate", NewConfig: &run}}}
+	if got := ServicesToDeployForPlan(plan, services, false, false); len(got) != 0 {
+		t.Fatalf("completed run selected without force: %#v", got)
+	}
+	got := ServicesToDeployForPlan(plan, services, true, false)
+	selected, ok := got["migrate"]
+	if !ok || !selected.IsRun() {
+		t.Fatalf("completed run not selected by force: %#v", got)
+	}
+}
+
 func TestServicesToDeployForPlanBroadForceSkipsPersistentServices(t *testing.T) {
 	services := map[string]config.ServiceConfig{
 		"web": {Build: "."},

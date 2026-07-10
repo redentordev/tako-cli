@@ -12,6 +12,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
@@ -48,9 +49,13 @@ type DesiredRevision struct {
 }
 
 type DesiredService struct {
+	APIVersion      string                         `json:"apiVersion,omitempty"`
+	Kind            string                         `json:"kind,omitempty"`
 	Name            string                         `json:"name"`
+	WorkloadKind    string                         `json:"workloadKind,omitempty"`
 	Type            string                         `json:"type"`
 	Image           string                         `json:"image,omitempty"`
+	ImageFrom       string                         `json:"imageFrom,omitempty"`
 	Build           string                         `json:"build,omitempty"`
 	BuildArgKeys    []string                       `json:"buildArgKeys,omitempty"`
 	BuildTarget     string                         `json:"buildTarget,omitempty"`
@@ -614,9 +619,13 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 	command, commandArgs := stateStringOrList(service.Command)
 	entrypoint, entrypointArgs := stateStringOrList(service.Entrypoint)
 	return DesiredService{
+		APIVersion:      takoapi.APIVersionCurrent,
+		Kind:            takoapi.KindDesiredServiceDocument,
 		Name:            serviceName,
+		WorkloadKind:    service.Kind,
 		Type:            service.GetServiceType(),
 		Image:           imageRef,
+		ImageFrom:       service.ImageFrom,
 		Build:           service.Build,
 		BuildArgKeys:    sortedKeys(service.BuildArgs),
 		BuildTarget:     service.BuildTarget,

@@ -1416,30 +1416,35 @@ func (d *Deployer) ensureTakodProxy(client *ssh.Client, networkName string, emai
 }
 
 func (d *Deployer) buildTakodEnvFileContent(service *config.ServiceConfig) (string, error) {
+	content, _, err := d.buildTakodEnvFileContentAndHash(service)
+	return content, err
+}
+
+func (d *Deployer) buildTakodEnvFileContentAndHash(service *config.ServiceConfig) (string, string, error) {
 	hasEnvVars := len(service.Env) > 0 || len(service.Secrets) > 0 || service.EnvFile != "" || len(service.EnvFiles) > 0
 	if !hasEnvVars {
-		return "", nil
+		return "", runInputValuesHash(nil), nil
 	}
 
 	secretsMgr, err := secrets.NewManager(d.environment)
 	if err != nil {
-		return "", fmt.Errorf("failed to create secrets manager: %w", err)
+		return "", "", fmt.Errorf("failed to create secrets manager: %w", err)
 	}
 	envFile, err := secretsMgr.CreateEnvFile(service)
 	if err != nil {
-		return "", fmt.Errorf("failed to create env file: %w", err)
+		return "", "", fmt.Errorf("failed to create env file: %w", err)
 	}
 
 	data, err := io.ReadAll(envFile.ToReader())
 	if err != nil {
-		return "", fmt.Errorf("failed to read env file: %w", err)
+		return "", "", fmt.Errorf("failed to read env file: %w", err)
 	}
 
 	if d.verbose {
 		d.printf("  ✓ Env file created with %d variables\n", envFile.Count())
 	}
 
-	return string(data), nil
+	return string(data), runInputValuesHash(envFile.GetAll()), nil
 }
 
 func (d *Deployer) planTakodAssignments(service *config.ServiceConfig) ([]takodAssignment, error) {
@@ -1456,10 +1461,11 @@ func (d *Deployer) planTakodAssignments(service *config.ServiceConfig) ([]takodA
 		return nil, fmt.Errorf("replicas cannot be negative")
 	}
 	scaleToZero := replicas == 0
-	if service.IsJob() {
-		// A job occupies exactly one slot on its owning node; replicas do
+	if service.IsJob() || service.IsRun() {
+		// Jobs and deploy-time runs have exactly one owning node; replicas do
 		// not apply and zero must not mean scale-to-zero.
 		scaleToZero = false
+		replicas = 1
 	}
 	if replicas <= 0 {
 		replicas = 1

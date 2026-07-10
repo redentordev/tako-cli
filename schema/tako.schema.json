@@ -404,6 +404,10 @@
                   "type": "string",
                   "description": "Docker image"
                 },
+                "imageFrom": {
+                  "type": "string",
+                  "description": "kind: run only. Reuse the resolved image of another service; that service becomes an implicit dependency."
+                },
                 "port": {
                   "type": "integer",
                   "description": "Container port"
@@ -609,9 +613,10 @@
                   "type": "string",
                   "enum": [
                     "service",
-                    "job"
+                    "job",
+                    "run"
                   ],
-                  "description": "Workload kind: service (default, long-running) or job (command run on a cron schedule by takod on one owning node)."
+                  "description": "Workload kind: service (default), job (cron schedule), or run (fingerprinted deploy-time run-to-completion step)."
                 },
                 "schedule": {
                   "type": "string",
@@ -623,7 +628,7 @@
                 },
                 "timeout": {
                   "type": "string",
-                  "description": "kind: job only. Duration such as 30m to kill a job run after (default 1h)."
+                  "description": "kind: job or kind: run only. Duration such as 30m to kill an execution after (default 1h)."
                 },
                 "resources": {
                   "type": "object",

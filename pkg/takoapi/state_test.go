@@ -55,6 +55,7 @@ func TestDesiredStateDocumentJSONIdentityShape(t *testing.T) {
 	doc.Services["web"] = DesiredServiceDocument{
 		APIVersion:     APIVersionCurrent,
 		Kind:           KindDesiredServiceDocument,
+		WorkloadKind:   "run",
 		Name:           "web",
 		Type:           "web",
 		Image:          "ghcr.io/acme/web:1",
@@ -82,6 +83,9 @@ func TestDesiredStateDocumentJSONIdentityShape(t *testing.T) {
 	}
 	if web["kind"] != KindDesiredServiceDocument || web["name"] != "web" {
 		t.Fatalf("web service identity mismatch: %#v", web)
+	}
+	if web["workloadKind"] != "run" {
+		t.Fatalf("web workload kind mismatch: %#v", web)
 	}
 }
 

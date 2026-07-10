@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -279,6 +280,9 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		}
 		// Update the service in the map with defaults applied
 		env.Services[serviceName] = service
+	}
+	if err := validateRunImageSources(envName, env); err != nil {
+		return err
 	}
 
 	if err := validateEnvironmentPersistentPlacement(envName, env, cfg); err != nil {
@@ -617,8 +621,9 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		return err
 	}
 
-	// Must have either Build or Image, but not both
-	if service.Build == "" && service.Image == "" {
+	// Must have either Build or Image. kind: run may reference another
+	// service's resolved image through imageFrom instead.
+	if service.Build == "" && service.Image == "" && !(service.IsRun() && service.ImageFrom != "") {
 		return fmt.Errorf("service %s: either 'build' or 'image' is required", name)
 	}
 	if service.Build != "" && service.Image != "" {
@@ -810,12 +815,14 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		}
 	}
 
-	// Validate deployment strategy
-	if service.Deploy.Strategy == "" {
-		service.Deploy.Strategy = DeployStrategyRecreate
-	}
-	if err := validateDeployStrategy(name, service); err != nil {
-		return err
+	// Deploy-time runs do not have a rollout strategy or restart policy.
+	if !service.IsRun() {
+		if service.Deploy.Strategy == "" {
+			service.Deploy.Strategy = DeployStrategyRecreate
+		}
+		if err := validateDeployStrategy(name, service); err != nil {
+			return err
+		}
 	}
 
 	if err := validateServicePorts(name, service); err != nil {
@@ -829,23 +836,25 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		}
 	}
 
-	// Validate and set restart policy
-	if service.Restart == "" {
-		// Default restart policy based on service type
-		if service.Persistent {
-			service.Restart = "always" // Databases always restart
-		} else {
-			service.Restart = "unless-stopped" // Apps restart unless manually stopped
+	// Validate and set restart policy for persistent containers only.
+	if !service.IsRun() {
+		if service.Restart == "" {
+			// Default restart policy based on service type
+			if service.Persistent {
+				service.Restart = "always" // Databases always restart
+			} else {
+				service.Restart = "unless-stopped" // Apps restart unless manually stopped
+			}
 		}
-	}
-	validRestartPolicies := map[string]bool{
-		"always":         true,
-		"unless-stopped": true,
-		"on-failure":     true,
-		"no":             true,
-	}
-	if !validRestartPolicies[service.Restart] {
-		return fmt.Errorf("service %s: invalid restart policy: %s (must be: always, unless-stopped, on-failure, or no)", name, service.Restart)
+		validRestartPolicies := map[string]bool{
+			"always":         true,
+			"unless-stopped": true,
+			"on-failure":     true,
+			"no":             true,
+		}
+		if !validRestartPolicies[service.Restart] {
+			return fmt.Errorf("service %s: invalid restart policy: %s (must be: always, unless-stopped, on-failure, or no)", name, service.Restart)
+		}
 	}
 
 	// Validate monitoring if configured
@@ -896,6 +905,26 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		}
 	}
 
+	return nil
+}
+
+func validateRunImageSources(envName string, env *EnvironmentConfig) error {
+	for name, service := range env.Services {
+		if !service.IsRun() || service.ImageFrom == "" {
+			continue
+		}
+		source, ok := env.Services[service.ImageFrom]
+		if !ok {
+			return fmt.Errorf("environment %s: service %s imageFrom references unknown service %q", envName, name, service.ImageFrom)
+		}
+		if service.ImageFrom == name || source.IsRun() {
+			return fmt.Errorf("environment %s: service %s imageFrom must reference a non-run service", envName, name)
+		}
+		if !slices.Contains(service.DependsOn, service.ImageFrom) {
+			service.DependsOn = append(service.DependsOn, service.ImageFrom)
+			env.Services[name] = service
+		}
+	}
 	return nil
 }
 
@@ -1356,6 +1385,9 @@ func validateServicePorts(name string, service *ServiceConfig) error {
 func validateServiceKind(name string, service *ServiceConfig) error {
 	switch service.Kind {
 	case "", ServiceKindService:
+		if service.ImageFrom != "" {
+			return fmt.Errorf("service %s: imageFrom requires kind: run", name)
+		}
 		if service.Schedule != "" {
 			return fmt.Errorf("service %s: schedule requires kind: job", name)
 		}
@@ -1367,9 +1399,14 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 		}
 		return nil
 	case ServiceKindJob:
+		if service.ImageFrom != "" {
+			return fmt.Errorf("service %s: imageFrom requires kind: run", name)
+		}
 		// fallthrough to job validation below
+	case ServiceKindRun:
+		return validateRunServiceKind(name, service)
 	default:
-		return fmt.Errorf("service %s: kind must be service or job", name)
+		return fmt.Errorf("service %s: kind must be service, job, or run", name)
 	}
 
 	if strings.TrimSpace(service.Schedule) == "" {
@@ -1406,6 +1443,60 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 	}
 	if service.Persistent {
 		return fmt.Errorf("service %s: kind: job cannot be persistent", name)
+	}
+	return nil
+}
+
+func validateRunServiceKind(name string, service *ServiceConfig) error {
+	if service.Schedule != "" || service.Timezone != "" {
+		return fmt.Errorf("service %s: kind: run cannot set schedule or timezone", name)
+	}
+	if !service.Command.IsList() {
+		return fmt.Errorf("service %s: kind: run requires command in argv list form", name)
+	}
+	if service.Build != "" {
+		return fmt.Errorf("service %s: kind: run cannot set build; use image or imageFrom", name)
+	}
+	if (service.Image == "") == (service.ImageFrom == "") {
+		return fmt.Errorf("service %s: kind: run requires exactly one of image or imageFrom", name)
+	}
+	if service.ImageFrom != "" && !isValidRuntimeIdentifier(service.ImageFrom) {
+		return fmt.Errorf("service %s: invalid imageFrom service %q", name, service.ImageFrom)
+	}
+	if service.Timeout != "" {
+		if err := validateRolloutDurations(name, "timeout", service.Timeout); err != nil {
+			return err
+		}
+	}
+	if service.Port != 0 || len(service.Ports) > 0 || service.Proxy != nil {
+		return fmt.Errorf("service %s: kind: run cannot expose ports or proxy routes", name)
+	}
+	if service.Replicas > 1 || service.Persistent {
+		return fmt.Errorf("service %s: kind: run cannot set replicas or persistent", name)
+	}
+	if service.Restart != "" {
+		return fmt.Errorf("service %s: kind: run cannot set restart", name)
+	}
+	if service.HealthCheck != (HealthCheckConfig{}) {
+		return fmt.Errorf("service %s: kind: run cannot set healthCheck", name)
+	}
+	if service.LoadBalancer != (LoadBalancerConfig{}) {
+		return fmt.Errorf("service %s: kind: run cannot set loadBalancer", name)
+	}
+	if service.Export || len(service.Imports) > 0 {
+		return fmt.Errorf("service %s: kind: run cannot set export or imports", name)
+	}
+	if service.Backup != nil || service.Monitoring != nil {
+		return fmt.Errorf("service %s: kind: run cannot set backup or monitoring", name)
+	}
+	if service.Placement != nil && service.Placement.Strategy == "global" {
+		return fmt.Errorf("service %s: kind: run cannot use placement.strategy global because deploy-time runs execute exactly once", name)
+	}
+	deploy := service.Deploy
+	if deploy.Strategy != "" || deploy.MaxUnavailable != 0 || deploy.MaxSurge != 0 || deploy.RollbackOnFailure ||
+		deploy.Readiness != (DeployReadinessConfig{}) || deploy.SmokeTest != (DeploySmokeTestConfig{}) ||
+		deploy.Promotion != "" || deploy.GracePeriod != "" || deploy.Release != nil {
+		return fmt.Errorf("service %s: kind: run cannot set deploy rollout controls", name)
 	}
 	return nil
 }

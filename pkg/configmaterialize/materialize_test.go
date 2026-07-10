@@ -64,6 +64,31 @@ func TestDesiredServiceToConfigPreservesRuntimeControlsAndRedactsBuildArgs(t *te
 	}
 }
 
+func TestDesiredServiceToConfigRestoresRunImageFromWithoutResolvedImageConflict(t *testing.T) {
+	service, _, err := desiredServiceToConfig("migrate", takoapi.DesiredServiceDocument{
+		Kind: takoapi.KindDesiredServiceDocument, WorkloadKind: config.ServiceKindRun, Image: "demo/app:rev", ImageFrom: "app",
+		CommandArgs: []string{"bin/app", "migrate"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !service.IsRun() || service.Image != "" || service.ImageFrom != "app" || !service.Command.IsList() {
+		t.Fatalf("materialized run = %#v", service)
+	}
+}
+
+func TestDesiredServiceToConfigDoesNotTreatDocumentKindAsWorkloadKind(t *testing.T) {
+	service, _, err := desiredServiceToConfig("web", takoapi.DesiredServiceDocument{
+		Kind: takoapi.KindDesiredServiceDocument, Type: "public", Image: "nginx:alpine", Replicas: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Kind != "" || service.IsRun() || service.IsJob() {
+		t.Fatalf("materialized document identity as workload kind: %#v", service)
+	}
+}
+
 func TestDesiredServiceToConfigReadsLegacyScalarCommand(t *testing.T) {
 	service, _, err := desiredServiceToConfig("worker", takoapi.DesiredServiceDocument{
 		Image: "busybox:latest", Command: "echo legacy",
@@ -281,6 +306,24 @@ func TestBuildConfigValidationSucceedsRepresentativeSingleServer(t *testing.T) {
 	}
 	if cfg.Environments["production"].Servers[0] != "node1" {
 		t.Fatalf("environment servers = %#v, want node1", cfg.Environments["production"].Servers)
+	}
+}
+
+func TestBuildConfigValidationRoundTripsRunWithoutContainerDefaults(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["migrate"] = takoapi.DesiredServiceDocument{
+		Kind: takoapi.KindDesiredServiceDocument, WorkloadKind: config.ServiceKindRun, Type: config.ServiceKindRun,
+		Image: "busybox:1.36", CommandArgs: []string{"true"}, Replicas: 1,
+		// Compatibility with desired documents written before run defaults were suppressed.
+		Restart: "unless-stopped", DeployStrategy: config.DeployStrategyRecreate,
+	}
+	cfg, _, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err != nil {
+		t.Fatalf("BuildConfig() run roundtrip error = %v", err)
+	}
+	run := cfg.Environments["production"].Services["migrate"]
+	if !run.IsRun() || run.Restart != "" || run.Deploy.Strategy != "" {
+		t.Fatalf("round-tripped run defaults = %#v", run)
 	}
 }
 

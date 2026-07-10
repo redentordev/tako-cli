@@ -554,6 +554,67 @@ func TestTakodJobBuildPreflightBeforeBuildAndRecord(t *testing.T) {
 	}
 }
 
+func TestRunStepServerRequiresBuildImagePlacementIntersection(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a", "node-b"})
+	env := cfg.Environments["production"]
+	env.Services = map[string]config.ServiceConfig{
+		"app": {Build: ".", Replicas: 1, Placement: &config.PlacementConfig{Strategy: "pinned", Servers: []string{"node-b"}}},
+	}
+	cfg.Environments["production"] = env
+	deploy := &Deployer{config: cfg, environment: "production", targetServers: []string{"node-a", "node-b"}}
+	run := &config.ServiceConfig{Kind: config.ServiceKindRun, ImageFrom: "app"}
+	server, err := deploy.runStepServer(run, []takodAssignment{{ServerName: "node-b", Slot: 1}}, nil)
+	if err != nil || server != "node-b" {
+		t.Fatalf("runStepServer = %q, %v", server, err)
+	}
+	if _, err := deploy.runStepServer(run, []takodAssignment{{ServerName: "node-a", Slot: 1}}, nil); err == nil || !strings.Contains(err.Error(), "no node carrying") {
+		t.Fatalf("non-intersecting placement error = %v", err)
+	}
+}
+
+func TestRunStepServerRequiresLocalBuildImageOnTargetedNode(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a", "node-b"})
+	env := cfg.Environments["production"]
+	env.Services = map[string]config.ServiceConfig{
+		"app": {Build: ".", Replicas: 2, Placement: &config.PlacementConfig{Strategy: "spread"}},
+	}
+	cfg.Environments["production"] = env
+	deploy := &Deployer{config: cfg, environment: "production", targetServers: []string{"node-a", "node-b"}}
+	run := &config.ServiceConfig{Kind: config.ServiceKindRun, ImageFrom: "app"}
+	assignments := []takodAssignment{{ServerName: "node-a", Slot: 1}, {ServerName: "node-b", Slot: 1}}
+	server, err := deploy.runStepServer(run, assignments, []string{"node-b"})
+	if err != nil || server != "node-b" {
+		t.Fatalf("runStepServer = %q, %v; want node-b", server, err)
+	}
+	if _, err := deploy.runStepServer(run, assignments, []string{}); err == nil || !strings.Contains(err.Error(), "no node carrying") {
+		t.Fatalf("runStepServer() missing-image error = %v", err)
+	}
+}
+
+func TestRunInputHashChangesWithResolvedEnvironment(t *testing.T) {
+	deploy := &Deployer{environment: "production"}
+	first := &config.ServiceConfig{Env: map[string]string{"TOKEN": "first"}}
+	second := &config.ServiceConfig{Env: map[string]string{"TOKEN": "second"}}
+	firstHash, err := deploy.RunInputHash(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondHash, err := deploy.RunInputHash(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstHash == secondHash || !strings.HasPrefix(firstHash, "sha256:") {
+		t.Fatalf("run input hashes = %q %q", firstHash, secondHash)
+	}
+	repeatedHash, err := deploy.RunInputHash(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedHash != firstHash {
+		t.Fatalf("identical run input hash changed: %q != %q", repeatedHash, firstHash)
+	}
+}
+
 func TestTakodServiceRolloutPreflightsArgvBeforeEveryMutation(t *testing.T) {
 	featureServices := []struct {
 		name    string

@@ -76,9 +76,11 @@ type DesiredStateDocument struct {
 type DesiredServiceDocument struct {
 	APIVersion      string                    `json:"apiVersion,omitempty"`
 	Kind            string                    `json:"kind,omitempty"`
+	WorkloadKind    string                    `json:"workloadKind,omitempty"`
 	Name            string                    `json:"name"`
 	Type            string                    `json:"type,omitempty"`
 	Image           string                    `json:"image,omitempty"`
+	ImageFrom       string                    `json:"imageFrom,omitempty"`
 	Build           string                    `json:"build,omitempty"`
 	BuildArgKeys    []string                  `json:"buildArgKeys,omitempty"`
 	BuildTarget     string                    `json:"buildTarget,omitempty"`
@@ -208,14 +210,25 @@ type DeploymentStateDocument struct {
 
 // ServiceStateDocument represents one service in a deployment history record.
 type ServiceStateDocument struct {
+	Kind        string                   `json:"kind,omitempty"`
 	Name        string                   `json:"name"`
 	Image       string                   `json:"image"`
+	ConfigHash  string                   `json:"configHash,omitempty"`
+	Run         *RunStateDocument        `json:"run,omitempty"`
 	ImageID     string                   `json:"imageId"`
 	ContainerID string                   `json:"containerId"`
 	Port        int                      `json:"port"`
 	Replicas    int                      `json:"replicas"`
 	Env         map[string]string        `json:"env"`
 	HealthCheck HealthCheckStateDocument `json:"healthCheck"`
+}
+
+type RunStateDocument struct {
+	Command    []string `json:"command"`
+	Server     string   `json:"server"`
+	Image      string   `json:"image"`
+	ExitCode   int      `json:"exitCode"`
+	DurationMs int64    `json:"durationMs"`
 }
 
 // HealthCheckStateDocument represents health check status in deployment history.

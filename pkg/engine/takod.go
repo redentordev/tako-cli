@@ -70,6 +70,9 @@ func CleanupViaTakodContext(ctx context.Context, client *ssh.Client, cfg *config
 func CleanupImageRepositories(cfg *config.Config, environment string, services map[string]config.ServiceConfig) []string {
 	seen := make(map[string]bool)
 	for serviceName, service := range services {
+		if service.IsRun() {
+			continue
+		}
 		if service.Build == "" && service.Image != "" {
 			continue
 		}

@@ -137,7 +137,7 @@ func (d *Deployer) runReleaseCommand(serviceName string, service *config.Service
 	defer cancel()
 
 	started := time.Now()
-	exitCode, exitSeen, streamErr := d.streamReleaseExec(ctx, client, serviceName, serverName, payload)
+	exitCode, exitSeen, streamErr := d.streamDeployExec(ctx, client, serviceName, serverName, payload, events.TypeDeployReleaseOutput)
 	run := &ReleaseRun{
 		Service:    serviceName,
 		Server:     serverName,
@@ -185,6 +185,10 @@ func (d *Deployer) runReleaseCommand(serviceName string, service *config.Service
 // streamReleaseExec streams the exec response, forwarding output lines as
 // deploy.release.output events and parsing the marker frames.
 func (d *Deployer) streamReleaseExec(ctx context.Context, client takodclient.StreamExecutor, serviceName string, serverName string, payload []byte) (int, bool, error) {
+	return d.streamDeployExec(ctx, client, serviceName, serverName, payload, events.TypeDeployReleaseOutput)
+}
+
+func (d *Deployer) streamDeployExec(ctx context.Context, client takodclient.StreamExecutor, serviceName string, serverName string, payload []byte, outputEventType string) (int, bool, error) {
 	reader, writer := io.Pipe()
 	streamDone := make(chan error, 1)
 	go func() {
@@ -214,7 +218,7 @@ func (d *Deployer) streamReleaseExec(ctx context.Context, client takodclient.Str
 			continue
 		}
 		d.emitEvent(events.Event{
-			Type:    events.TypeDeployReleaseOutput,
+			Type:    outputEventType,
 			Phase:   events.PhaseDeploy,
 			Level:   events.LevelInfo,
 			Service: serviceName,

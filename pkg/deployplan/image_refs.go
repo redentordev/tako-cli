@@ -15,6 +15,7 @@ func DefaultImageRefs(cfg *config.Config, envName string, services map[string]co
 			imageRefs[serviceName] = cfg.GetFullImageName(serviceName, envName)
 		}
 	}
+	resolveRunImageFromRefs(services, imageRefs)
 	return imageRefs
 }
 
@@ -24,7 +25,16 @@ func DefaultDeployImageRefs(cfg *config.Config, envName string, services map[str
 	for serviceName, service := range services {
 		imageRefs[serviceName] = ImageRef(cfg, envName, serviceName, service, buildTag)
 	}
+	resolveRunImageFromRefs(services, imageRefs)
 	return imageRefs
+}
+
+func resolveRunImageFromRefs(services map[string]config.ServiceConfig, imageRefs map[string]string) {
+	for serviceName, service := range services {
+		if service.IsRun() && service.ImageFrom != "" && imageRefs[service.ImageFrom] != "" {
+			imageRefs[serviceName] = imageRefs[service.ImageFrom]
+		}
+	}
 }
 
 // ImageRef returns the image reference for a single service during deploy planning.
@@ -56,5 +66,6 @@ func MergeRuntimeImageRefs(
 			imageRefs[serviceName] = actual.Image
 		}
 	}
+	resolveRunImageFromRefs(services, imageRefs)
 	return imageRefs
 }
