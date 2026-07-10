@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 )
 
 const DefaultServiceFilesRoot = "/var/lib/tako/files"
@@ -364,8 +363,7 @@ func verifyServiceFileSet(root string, setID string) error {
 			if uint32(info.Mode().Perm()) != entry.Mode {
 				return fmt.Errorf("entry mode changed for %s", filepath.ToSlash(relative))
 			}
-			stat, ok := info.Sys().(*syscall.Stat_t)
-			if !ok || int(stat.Uid) != bundle.UID || int(stat.Gid) != bundle.GID {
+			if !serviceFileOwnershipMatches(info, bundle.UID, bundle.GID) {
 				return fmt.Errorf("entry ownership changed for %s", filepath.ToSlash(relative))
 			}
 			if !entry.Directory {

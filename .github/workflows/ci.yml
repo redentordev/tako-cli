@@ -31,6 +31,9 @@ jobs:
       - name: Run quality checks
         run: make ci-quality
 
+      - name: Cross-compile Windows release binary
+        run: GOOS=windows GOARCH=amd64 go build -o /tmp/tako-windows-amd64.exe .
+
   race:
     name: Race Tests
     runs-on: ubuntu-latest
