@@ -1,4 +1,4 @@
-.PHONY: build install test clean run help dev lint fmt build-all man mesh-e2e mesh-e2e-smoke examples ci-quality ci-race ci-check
+.PHONY: build install test clean run help dev lint fmt build-all man mesh-e2e mesh-e2e-smoke examples validate-examples ci-quality ci-race ci-check
 
 # Binary name
 BINARY_NAME=tako
@@ -115,6 +115,9 @@ mesh-e2e-smoke:
 ## examples: Validate all example configs and deployment pattern assertions
 examples:
 	@examples/validate.sh
+
+## validate-examples: Alias for validating every checked-in example
+validate-examples: examples
 
 ## ci-quality: Run formatting, diff, shell, examples, test, build, and vet gates
 ci-quality:

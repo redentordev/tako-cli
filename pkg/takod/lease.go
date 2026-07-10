@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -13,6 +14,12 @@ const (
 	defaultLeaseTTL = 30 * time.Minute
 	maxLeaseTTL     = 24 * time.Hour
 )
+
+// Lease files are owned by one takod process. Serialize read-modify-write
+// operations so a renewal cannot race a release followed by a new acquire and
+// overwrite the new holder. The file itself remains the durable source of
+// truth; the mutex only provides process-local compare-and-swap semantics.
+var leaseMu sync.Mutex
 
 type LeaseInfo struct {
 	ID          string    `json:"id"`
@@ -33,6 +40,7 @@ type LeaseRequest struct {
 	Who         string `json:"who,omitempty"`
 	PID         int    `json:"pid,omitempty"`
 	TTLSeconds  int64  `json:"ttlSeconds,omitempty"`
+	Renew       bool   `json:"renew,omitempty"`
 }
 
 type LeaseResponse struct {
@@ -70,8 +78,13 @@ func AcquireLease(ctx context.Context, dataDir string, req LeaseRequest) (*Lease
 	if err != nil {
 		return nil, err
 	}
+	leaseMu.Lock()
+	defer leaseMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create lease directory: %w", err)
+	}
+	if req.Renew {
+		return renewLease(path, req.ID, ttl, now)
 	}
 
 	content, err := json.MarshalIndent(lease, "", "  ")
@@ -105,11 +118,30 @@ func AcquireLease(ctx context.Context, dataDir string, req LeaseRequest) (*Lease
 		if current == nil {
 			continue
 		}
-		if now.After(current.ExpiresAt) {
+		if !now.Before(current.ExpiresAt) {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return nil, fmt.Errorf("failed to remove expired lease: %w", err)
 			}
 			continue
+		}
+		if current.ID == req.ID {
+			// The lease ID is the holder token (release uses the same rule). A
+			// same-holder acquire is a renewal: preserve the original holder
+			// metadata and creation time, and extend only the expiry.
+			renewed := *current
+			candidateExpiry := now.Add(ttl)
+			if candidateExpiry.After(renewed.ExpiresAt) {
+				renewed.ExpiresAt = candidateExpiry
+			}
+			renewedContent, err := json.MarshalIndent(&renewed, "", "  ")
+			if err != nil {
+				return nil, err
+			}
+			renewedContent = append(renewedContent, '\n')
+			if err := writeFileAtomic(path, renewedContent, 0600); err != nil {
+				return nil, fmt.Errorf("failed to renew lease: %w", err)
+			}
+			return &LeaseResponse{Acquired: true, Found: true, Lease: &renewed, Message: "lease renewed"}, nil
 		}
 		return &LeaseResponse{
 			Acquired: false,
@@ -120,6 +152,37 @@ func AcquireLease(ctx context.Context, dataDir string, req LeaseRequest) (*Lease
 	}
 
 	return nil, fmt.Errorf("failed to acquire lease after removing expired lease")
+}
+
+func renewLease(path string, id string, ttl time.Duration, now time.Time) (*LeaseResponse, error) {
+	current, err := readLeaseFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read lease for renewal: %w", err)
+	}
+	if current == nil {
+		return &LeaseResponse{Acquired: false, Found: false, Message: "lease not found"}, nil
+	}
+	if !now.Before(current.ExpiresAt) {
+		return &LeaseResponse{Acquired: false, Found: true, Lease: current, Message: "lease expired"}, nil
+	}
+	if current.ID != id {
+		return &LeaseResponse{Acquired: false, Found: true, Lease: current, Message: "lease is held"}, nil
+	}
+
+	renewed := *current
+	candidateExpiry := now.Add(ttl)
+	if candidateExpiry.After(renewed.ExpiresAt) {
+		renewed.ExpiresAt = candidateExpiry
+	}
+	content, err := json.MarshalIndent(&renewed, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	content = append(content, '\n')
+	if err := writeFileAtomic(path, content, 0600); err != nil {
+		return nil, fmt.Errorf("failed to renew lease: %w", err)
+	}
+	return &LeaseResponse{Acquired: true, Found: true, Lease: &renewed, Message: "lease renewed"}, nil
 }
 
 func ReadLease(ctx context.Context, dataDir string, req LeaseRequest) (*LeaseResponse, error) {
@@ -133,6 +196,8 @@ func ReadLease(ctx context.Context, dataDir string, req LeaseRequest) (*LeaseRes
 	if err != nil {
 		return nil, err
 	}
+	leaseMu.Lock()
+	defer leaseMu.Unlock()
 	lease, err := readLeaseFile(path)
 	if err != nil {
 		return nil, err
@@ -140,7 +205,7 @@ func ReadLease(ctx context.Context, dataDir string, req LeaseRequest) (*LeaseRes
 	if lease == nil {
 		return &LeaseResponse{Found: false}, nil
 	}
-	if time.Now().UTC().After(lease.ExpiresAt) {
+	if !time.Now().UTC().Before(lease.ExpiresAt) {
 		_ = os.Remove(path)
 		return &LeaseResponse{Found: false}, nil
 	}
@@ -161,6 +226,8 @@ func ReleaseLease(ctx context.Context, dataDir string, req LeaseRequest) (*Lease
 	if err != nil {
 		return nil, err
 	}
+	leaseMu.Lock()
+	defer leaseMu.Unlock()
 	current, err := readLeaseFile(path)
 	if err != nil {
 		return nil, err

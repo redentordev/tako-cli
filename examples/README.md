@@ -44,6 +44,7 @@ We have ready-to-deploy examples covering common use cases:
 | [18-plausible](./18-plausible/) | Plausible Analytics | Privacy-friendly web analytics |
 | [19-umami](./19-umami/) | Umami Analytics | Simple, fast web analytics |
 | [20-ghost](./20-ghost/) | Ghost CMS | Headless CMS for content |
+| [sentry](./sentry/) | Native Sentry capability recipe | 31-service errors-only and 72-service feature-complete profiles, deploy-time migrations, operator files |
 
 ### Testing & Advanced Examples
 | Example | Description | Features |

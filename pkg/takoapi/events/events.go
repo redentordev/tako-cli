@@ -105,6 +105,10 @@ const (
 	TypeDeployReleaseOutput    = "deploy.release.output"
 	TypeDeployReleaseCompleted = "deploy.release.completed"
 	TypeDeployReleaseFailed    = "deploy.release.failed"
+	TypeDeployRunStarted       = "deploy.run.started"
+	TypeDeployRunOutput        = "deploy.run.output"
+	TypeDeployRunCompleted     = "deploy.run.completed"
+	TypeDeployRunFailed        = "deploy.run.failed"
 
 	// TypeDeployJobsApplied reports one node's declarative job-schedule
 	// reconciliation during a deploy.

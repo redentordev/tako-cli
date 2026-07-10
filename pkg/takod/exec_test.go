@@ -2,9 +2,14 @@ package takod
 
 import (
 	"bytes"
+	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/redentordev/tako-cli/pkg/config"
 )
 
 func validExecRequestFixture() ExecRequest {
@@ -151,6 +156,90 @@ func TestBuildExecOneOffArgsHonorsExplicitNetwork(t *testing.T) {
 	}
 	if strings.Contains(got, "--env-file") {
 		t.Fatalf("args %q has env-file without content", got)
+	}
+}
+
+func TestBuildExecOneOffArgsExactDeployRunControls(t *testing.T) {
+	req := ExecRequest{
+		Project: "demo", Environment: "production", Service: "migrate", Mode: ExecModeOneOff,
+		Command:    []string{"sentry", "upgrade", "--noinput"},
+		Entrypoint: []string{"/etc/sentry/entrypoint.sh", "run"},
+		Labels:     map[string]string{"com.example.role": "migration"},
+		User:       "1000:1000", WorkingDir: "/work", StopTimeoutSeconds: 60, Init: true,
+		ExtraHosts:  []string{"database:10.0.0.2"},
+		Ulimits:     map[string]config.UlimitConfig{"nofile": {Soft: 262144, Hard: 262144}},
+		ShmSize:     "256m",
+		MemoryLimit: "512m", CPULimit: "1.5",
+		Mounts: []string{"type=volume,source=data,target=/data"},
+	}
+	got := buildExecOneOffArgs(req, "tako_demo_production_migrate_exec_1", "getsentry/sentry:26.6.0", "/tmp/env")
+	want := []string{
+		"run", "--rm", "--name", "tako_demo_production_migrate_exec_1", "--network", "tako_demo_production",
+		"--label", "tako.project=demo", "--label", "tako.environment=production", "--label", "tako.service=migrate",
+		"--label", "tako.runtime=takod", "--label", execRoleLabel, "--label", "com.example.role=migration",
+		"--env-file", "/tmp/env", "--mount", "type=volume,source=data,target=/data",
+		"--memory", "512m", "--cpus", "1.5",
+		"--user", "1000:1000", "--workdir", "/work", "--stop-timeout", "60", "--init",
+		"--add-host", "database:10.0.0.2", "--ulimit", "nofile=262144:262144", "--shm-size", "256m",
+		"--entrypoint", "/etc/sentry/entrypoint.sh", "getsentry/sentry:26.6.0", "run", "sentry", "upgrade", "--noinput",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+func TestValidateExecRequestRejectsOneOffControlsInAttachMode(t *testing.T) {
+	req := validExecRequestFixture()
+	req.PullImage = true
+	if err := validateExecRequest(&req); err == nil || !strings.Contains(err.Error(), "require oneoff mode") {
+		t.Fatalf("attach controls error = %v", err)
+	}
+}
+
+func TestValidateExecRequestValidatesOneOffResourceLimits(t *testing.T) {
+	req := validExecRequestFixture()
+	req.Mode = ExecModeOneOff
+	req.Image = "busybox:1.36"
+	req.MemoryLimit = "512m"
+	req.CPULimit = "1.5"
+	if err := validateExecRequest(&req); err != nil {
+		t.Fatalf("valid resource limits rejected: %v", err)
+	}
+	req.MemoryLimit = "512m --privileged"
+	if err := validateExecRequest(&req); err == nil || !strings.Contains(err.Error(), "memory") {
+		t.Fatalf("unsafe memory limit error = %v", err)
+	}
+}
+
+func TestPrepareExecRunEnsuresNetworkAndLabeledVolumes(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_MISSING_NETWORK_INSPECT", "tako_demo_production")
+	req := ExecRequest{
+		Project: "demo", Environment: "production", Service: "migrate", Mode: ExecModeOneOff,
+		Image: "busybox:1.36", Command: []string{"true"},
+		Mounts: []string{"type=volume,source=tako_demo_production_data,target=/data"},
+	}
+	run, err := prepareExecRun(context.Background(), req)
+	if err != nil {
+		t.Fatalf("prepareExecRun: %v", err)
+	}
+	if run.cleanup != nil {
+		run.cleanup()
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(data)
+	for _, want := range []string{
+		"docker network create tako_demo_production",
+		"docker volume create --label tako.project=demo --label tako.environment=production --label tako.runtime=takod --label tako.service=migrate tako_demo_production_data",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("command log missing %q: %s", want, log)
+		}
 	}
 }
 

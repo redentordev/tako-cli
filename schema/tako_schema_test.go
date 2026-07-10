@@ -27,7 +27,58 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "deploy", "properties", "strategy"), []string{config.DeployStrategyRecreate, config.DeployStrategyRolling, config.DeployStrategyBlueGreen})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "loadBalancer", "properties", "strategy"), []string{"round_robin", "sticky"})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "backup", "properties", "storage", "properties", "provider"), []string{config.BackupStorageProviderS3, config.BackupStorageProviderR2, config.BackupStorageProviderS3Compatible})
+	serviceProperties := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties")
+	sharedBuildProperties := schemaPath(t, schema, "properties", "builds", "additionalProperties", "properties")
+	for _, field := range []string{"context", "args", "target", "dockerfile"} {
+		schemaPath(t, sharedBuildProperties, field)
+	}
+	assertStringEnum(t, schemaPath(t, serviceProperties, "kind"), []string{config.ServiceKindService, config.ServiceKindJob, config.ServiceKindRun})
+	schemaPath(t, serviceProperties, "imageFrom")
+	assertStringOrListSchema(t, schemaPath(t, serviceProperties, "command"))
+	assertStringOrListSchema(t, schemaPath(t, serviceProperties, "entrypoint"))
+	build := schemaPath(t, serviceProperties, "build")
+	if branches, ok := build["oneOf"].([]any); !ok || len(branches) != 2 {
+		t.Fatalf("build schema = %#v, want scalar and structured branches", build)
+	}
+	structuredBuild := schemaPath(t, build["oneOf"].([]any)[1], "properties")
+	schemaPath(t, structuredBuild, "args")
+	schemaPath(t, structuredBuild, "target")
+	if schemaPath(t, serviceProperties, "envFiles")["maxItems"] != float64(32) {
+		t.Fatalf("envFiles maxItems mismatch")
+	}
+	files := schemaPath(t, serviceProperties, "files")
+	if files["maxItems"] != float64(128) {
+		t.Fatalf("files maxItems mismatch")
+	}
+	fileItem := schemaPath(t, files, "items", "properties")
+	schemaPath(t, fileItem, "source")
+	schemaPath(t, fileItem, "target")
+	schemaPath(t, fileItem, "secret")
+	schemaPath(t, fileItem, "owner")
+	for _, field := range []string{"user", "workingDir", "stopGracePeriod", "init", "extraHosts", "ulimits", "shmSize"} {
+		schemaPath(t, serviceProperties, field)
+	}
+	labels := schemaPath(t, serviceProperties, "labels")
+	if labels["maxProperties"] != float64(256) {
+		t.Fatalf("labels maxProperties = %#v, want 256", labels["maxProperties"])
+	}
+	healthCommand := schemaPath(t, serviceProperties, "healthCheck", "properties", "command")
+	if healthCommand["maxLength"] != float64(4096) {
+		t.Fatalf("health command maxLength = %#v, want 4096", healthCommand["maxLength"])
+	}
 	schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "proxy", "properties", "dynamicDomains", "properties", "ask")
+}
+
+func assertStringOrListSchema(t *testing.T, field map[string]any) {
+	t.Helper()
+	oneOf, ok := field["oneOf"].([]any)
+	if !ok || len(oneOf) != 2 {
+		t.Fatalf("string-or-list schema missing two oneOf branches: %#v", field)
+	}
+	list, ok := oneOf[1].(map[string]any)
+	if !ok || list["type"] != "array" || list["maxItems"] != float64(256) {
+		t.Fatalf("list branch = %#v, want array maxItems 256", oneOf[1])
+	}
 }
 
 func loadTakoSchema(t *testing.T) map[string]any {

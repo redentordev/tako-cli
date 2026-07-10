@@ -127,6 +127,44 @@ services:
       servers: [production]
 ```
 
+## Container Command, Entrypoint, Health, And Labels
+
+`command` accepts either the legacy string form (executed through `sh -c`) or
+an argv list passed directly to the image without a shell. Use list form for
+distroless images and exact Compose-style exec semantics. `entrypoint` accepts
+a single executable or a list; additional list entries are placed before the
+service command arguments.
+
+```yaml
+services:
+  consumer:
+    image: getsentry/sentry:26.6.0
+    entrypoint: [/etc/sentry/entrypoint.sh, run]
+    command: [sentry, run, consumer, errors]
+    labels:
+      com.example.role: errors-consumer
+    healthCheck:
+      command: test -f /tmp/healthy
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      startPeriod: 10m
+```
+
+`healthCheck.command` becomes Docker's container health command and is mutually
+exclusive with `healthCheck.path` and `healthCheck.tcpPort`. Custom label keys
+starting with `tako.` are rejected because Tako reserves that namespace for
+runtime identity, revision, and drift metadata. Command/entrypoint lists accept
+at most 256 arguments (64 KiB total), health commands at most 4096 bytes, and
+services at most 256 custom labels (64 KiB total).
+
+List-form commands and all entrypoints require a matching takod. Release deploys
+refresh the agent during runtime setup; when using a local/dev CLI build,
+upgrade the agent with `tako upgrade servers --takod-binary <linux-binary>`
+before relying on the new forms. The CLI checks the agent capability before
+container or schedule reconciliation, so a stale agent rejects these configs
+explicitly rather than silently changing their semantics.
+
 ## Stateful Services And Volumes
 
 Containers are disposable; Docker volumes are the data boundary. Databases,
@@ -449,6 +487,202 @@ Use `remote` when the server is intentionally the build host, `local` when CI
 or a developer workstation should build and push images to the VPS, and `auto`
 for portable config that prefers local builds but preserves the older
 server-build path.
+
+Build services may use the legacy context string or structured build options.
+Both remote takod builds and local buildx builds receive the same arguments and
+target stage. Build-arg values travel in the streamed request body, not its URL.
+Build arguments are ordinary build configuration, not a secret channel: their
+values affect one-way config/artifact digests and must not contain passwords,
+tokens, or other low-entropy secrets. Use runtime `secrets:` or operator files
+for secret material instead.
+
+```yaml
+services:
+  web:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: node:24-alpine
+      target: runtime
+```
+
+When several services are variants of one image, declare a top-level shared
+build and reference it with `imageFrom`. Tako assigns one image repository and
+revision tag to the build, builds/transfers it once across the union of consumer
+placement nodes, then starts every consumer from that exact image without
+rebuilding or pulling it again.
+
+```yaml
+builds:
+  application:
+    context: ./sentry
+    args:
+      SENTRY_IMAGE: getsentry/sentry:26.6.0
+    target: runtime
+    dockerfile: Dockerfile
+
+environments:
+  production:
+    services:
+      web:
+        imageFrom: application
+        command: [sentry, run, web]
+      worker:
+        imageFrom: application
+        command: [sentry, run, worker]
+      cleanup:
+        kind: job
+        imageFrom: application
+        schedule: "0 0 * * *"
+        command: [sentry, cleanup, --days, "30"]
+```
+
+Shared build definitions accept `context`, `args`, `target`, and `dockerfile`.
+Their definition fingerprint joins every consumer's drift/revision identity, so
+changing the context path, arguments, target, or Dockerfile reconciles all
+consumers. For `kind: run`, `imageFrom` may still reference another service;
+Tako rejects a run reference that is ambiguous between a build and a service.
+Shared images use a dedicated `<project>/shared/<build>` repository and a tag
+that combines the deploy revision with the build-definition fingerprint, so a
+service of the same name cannot overwrite them and changed build options cannot
+silently reuse an older image. Scale and rollback transfer the exact selected
+image from a same-architecture environment node to newly assigned nodes; they
+fail before reconciliation with guidance to run a normal deploy when no source
+node retains it.
+
+Use `envFiles` when a service composes multiple environment files. Files load
+in list order (later files override earlier files), then explicit `env:` and
+Tako `secrets:` take precedence. `envFile` remains supported for one file;
+configuring both forms is rejected.
+
+```yaml
+services:
+  worker:
+    image: example/worker:latest
+    envFiles: [.env.base, .env.production]
+```
+
+Container runtime controls map directly to Docker run options and work for
+long-running services and scheduled jobs:
+
+```yaml
+services:
+  database:
+    image: postgres:17
+    user: "999:999"
+    workingDir: /var/lib/postgresql
+    stopGracePeriod: 60s
+    init: true
+    extraHosts: [host.docker.internal:host-gateway]
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    shmSize: 256m
+```
+
+`stopGracePeriod` uses whole seconds and is capped at 24 hours. `ulimits`
+accepts either a positive scalar (same soft/hard value) or explicit positive
+`soft`/`hard` values. These controls require an agent advertising
+`container.runtime-controls-v1`; Tako checks before container or schedule
+reconciliation and fails with upgrade guidance when a development node is
+stale.
+
+## Operator Files
+
+`files:` distributes local regular files or whole directories to the node and
+mounts them read-only into a service. Sources are resolved relative to
+`tako.yaml`. Content is transported in the reconcile request, written
+atomically into a content-addressed version below
+`/var/lib/tako/files/<project>/<environment>/<service>/`, and is not stored in
+desired state or deployment history.
+
+```yaml
+services:
+  relay:
+    image: getsentry/relay:26.6.0
+    files:
+      - source: ./relay/config.yml
+        target: /work/.relay/config.yml
+      - source: ./relay/credentials.json
+        target: /work/.relay/credentials.json
+        secret: true
+        owner: "1000:1000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    files:
+      - source: ./nginx
+        target: /etc/nginx
+```
+
+File bytes are binary-safe, and directory sources preserve their relative
+tree, empty directories, and executable bits. Symlinks and special files are
+rejected. `secret: true` forces directories to `0700` and files to `0600`
+(or `0700` when the source is owner-executable). `owner` accepts a numeric
+`uid` or `uid:gid`; it defaults to a numeric service `user`, then `root:root`.
+Set it whenever a non-root image user must read a secret tree. A service may
+declare up to 128 roots, 16,384 total entries, 128 MiB of raw file content, and
+256 MiB in the encoded bundle; service-file HTTP requests are capped at 384
+MiB. File target, mode, and content digests join the service fingerprint;
+changing only file bytes therefore triggers reconciliation without exposing
+the bytes in state, events, labels, or machine results.
+
+Published versions are immutable. Standard-service deploys replicate each set,
+including `secret: true` content, to every server currently configured for the
+environment so later placement changes within that fleet can reuse it. A failed
+rollout leaves earlier versions untouched, and deployment history records the
+selected content hash and mount metadata so rollback can remount the exact
+prior bytes without rereading today's source files. A server added or replaced
+after that revision does not have its retained set; rollback fails before
+reconciliation if the selected placement needs such a node. Versions are
+removed only when the standard service/project is removed or deployment files
+are explicitly cleaned. Deploy-time `kind: run` sets are deleted after the
+one-off exits, and `kind: job` retains only the currently scheduled set once no
+run still references an older one.
+
+## Deploy-Time Runs
+
+`kind: run` declares a run-to-completion step inside the deployment dependency
+graph. Its `command` must be an argv list. The step runs in a fresh `--rm`
+container at its topological slot, and dependent services start only after it
+exits 0. A non-zero exit aborts the deployment.
+
+```yaml
+services:
+  migrate:
+    kind: run
+    image: getsentry/sentry:26.6.0
+    command: [sentry, upgrade, --noinput]
+    timeout: 30m
+
+  web:
+    image: getsentry/sentry:26.6.0
+    dependsOn: [migrate]
+```
+
+Use `imageFrom` to reuse another service's resolved image. Tako adds that
+service as an implicit dependency; build-backed image sources must share at
+least one eligible node with the run.
+
+```yaml
+services:
+  app:
+    build: .
+  migrate:
+    kind: run
+    imageFrom: app
+    command: [bin/app, migrate]
+```
+
+Successful runs record their resolved-image/config fingerprint, command, node,
+exit code, and duration in deployment history and machine-readable deploy
+results. The fingerprint includes a non-reversible digest of resolved env-file
+and secret values, so value-only input changes rerun without storing those
+values. A later deploy skips an already-completed fingerprint. `tako deploy
+--force` reruns it. Run services accept env/envFiles, secrets, volumes,
+entrypoint, labels, placement, resources, and the runtime controls above; they
+do not create a persistent service, route, schedule, or health check.
 
 Use a one-off override from CI or a dev machine:
 

@@ -65,35 +65,71 @@ type DesiredStateDocument struct {
 	Environment   string                            `json:"environment"`
 	Source        string                            `json:"source"`
 	TargetNodes   []string                          `json:"targetNodes"`
+	Builds        map[string]DesiredBuildDocument   `json:"builds,omitempty"`
 	Services      map[string]DesiredServiceDocument `json:"services"`
 	Git           *GitMetadata                      `json:"git,omitempty"`
 	CreatedAt     time.Time                         `json:"createdAt"`
+}
+
+type DesiredBuildDocument struct {
+	Context    string   `json:"context"`
+	ArgKeys    []string `json:"argKeys,omitempty"`
+	Target     string   `json:"target,omitempty"`
+	Dockerfile string   `json:"dockerfile,omitempty"`
 }
 
 // DesiredServiceDocument is a JSON-friendly desired service schema. Config-like
 // nested fields that belong to deployment configuration, not state identity, are
 // represented without importing pkg/config.
 type DesiredServiceDocument struct {
-	APIVersion     string          `json:"apiVersion,omitempty"`
-	Kind           string          `json:"kind,omitempty"`
-	Name           string          `json:"name"`
-	Type           string          `json:"type,omitempty"`
-	Image          string          `json:"image,omitempty"`
-	Build          string          `json:"build,omitempty"`
-	Command        string          `json:"command,omitempty"`
-	Port           int             `json:"port,omitempty"`
-	Replicas       int             `json:"replicas"`
-	Restart        string          `json:"restart,omitempty"`
-	Persistent     bool            `json:"persistent,omitempty"`
-	Placement      json.RawMessage `json:"placement,omitempty"`
-	Domains        []string        `json:"domains,omitempty"`
-	Volumes        []string        `json:"volumes,omitempty"`
-	EnvKeys        []string        `json:"envKeys,omitempty"`
-	EnvFile        bool            `json:"envFile,omitempty"`
-	SecretRefs     []string        `json:"secretRefs,omitempty"`
-	DependsOn      []string        `json:"dependsOn,omitempty"`
-	HealthCheck    json.RawMessage `json:"healthCheck,omitempty"`
-	DeployStrategy string          `json:"deployStrategy,omitempty"`
+	APIVersion      string                    `json:"apiVersion,omitempty"`
+	Kind            string                    `json:"kind,omitempty"`
+	WorkloadKind    string                    `json:"workloadKind,omitempty"`
+	Name            string                    `json:"name"`
+	Type            string                    `json:"type,omitempty"`
+	Image           string                    `json:"image,omitempty"`
+	ImageFrom       string                    `json:"imageFrom,omitempty"`
+	Build           string                    `json:"build,omitempty"`
+	BuildArgKeys    []string                  `json:"buildArgKeys,omitempty"`
+	BuildTarget     string                    `json:"buildTarget,omitempty"`
+	Command         string                    `json:"command,omitempty"`
+	CommandArgs     []string                  `json:"commandArgs,omitempty"`
+	Entrypoint      string                    `json:"entrypoint,omitempty"`
+	EntrypointArgs  []string                  `json:"entrypointArgs,omitempty"`
+	Labels          map[string]string         `json:"labels,omitempty"`
+	Port            int                       `json:"port,omitempty"`
+	Replicas        int                       `json:"replicas"`
+	Restart         string                    `json:"restart,omitempty"`
+	Persistent      bool                      `json:"persistent,omitempty"`
+	Placement       json.RawMessage           `json:"placement,omitempty"`
+	Domains         []string                  `json:"domains,omitempty"`
+	Volumes         []string                  `json:"volumes,omitempty"`
+	Files           []ServiceFileDocument     `json:"files,omitempty"`
+	EnvKeys         []string                  `json:"envKeys,omitempty"`
+	EnvFile         bool                      `json:"envFile,omitempty"`
+	User            string                    `json:"user,omitempty"`
+	WorkingDir      string                    `json:"workingDir,omitempty"`
+	StopGracePeriod string                    `json:"stopGracePeriod,omitempty"`
+	Init            bool                      `json:"init,omitempty"`
+	ExtraHosts      []string                  `json:"extraHosts,omitempty"`
+	Ulimits         map[string]UlimitDocument `json:"ulimits,omitempty"`
+	ShmSize         string                    `json:"shmSize,omitempty"`
+	SecretRefs      []string                  `json:"secretRefs,omitempty"`
+	DependsOn       []string                  `json:"dependsOn,omitempty"`
+	HealthCheck     json.RawMessage           `json:"healthCheck,omitempty"`
+	DeployStrategy  string                    `json:"deployStrategy,omitempty"`
+}
+
+type ServiceFileDocument struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Secret bool   `json:"secret,omitempty"`
+	Owner  string `json:"owner,omitempty"`
+}
+
+type UlimitDocument struct {
+	Soft int64 `json:"soft"`
+	Hard int64 `json:"hard"`
 }
 
 // ActualStateDocument is Tako's canonical aggregate runtime state schema for
@@ -190,14 +226,35 @@ type DeploymentStateDocument struct {
 
 // ServiceStateDocument represents one service in a deployment history record.
 type ServiceStateDocument struct {
-	Name        string                   `json:"name"`
-	Image       string                   `json:"image"`
-	ImageID     string                   `json:"imageId"`
-	ContainerID string                   `json:"containerId"`
-	Port        int                      `json:"port"`
-	Replicas    int                      `json:"replicas"`
-	Env         map[string]string        `json:"env"`
-	HealthCheck HealthCheckStateDocument `json:"healthCheck"`
+	Kind             string                     `json:"kind,omitempty"`
+	Name             string                     `json:"name"`
+	Image            string                     `json:"image"`
+	ConfigHash       string                     `json:"configHash,omitempty"`
+	SharedBuild      string                     `json:"sharedBuild,omitempty"`
+	SharedBuildHash  string                     `json:"sharedBuildHash,omitempty"`
+	FilesContentHash string                     `json:"filesContentHash,omitempty"`
+	Files            []ServiceFileStateDocument `json:"files,omitempty"`
+	Run              *RunStateDocument          `json:"run,omitempty"`
+	ImageID          string                     `json:"imageId"`
+	ContainerID      string                     `json:"containerId"`
+	Port             int                        `json:"port"`
+	Replicas         int                        `json:"replicas"`
+	Env              map[string]string          `json:"env"`
+	HealthCheck      HealthCheckStateDocument   `json:"healthCheck"`
+}
+
+type ServiceFileStateDocument struct {
+	Target string `json:"target"`
+	Secret bool   `json:"secret,omitempty"`
+	Owner  string `json:"owner,omitempty"`
+}
+
+type RunStateDocument struct {
+	Command    []string `json:"command"`
+	Server     string   `json:"server"`
+	Image      string   `json:"image"`
+	ExitCode   int      `json:"exitCode"`
+	DurationMs int64    `json:"durationMs"`
 }
 
 // HealthCheckStateDocument represents health check status in deployment history.

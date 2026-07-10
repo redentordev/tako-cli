@@ -29,6 +29,14 @@ Tako uses the same deployment path from laptops and CI runners:
 Remote leases in takod prevent a CI job and a laptop from reconciling the same
 target nodes at the same time.
 
+For operations that exceed the default lease TTL, the engine renews the same
+holder ID in the background until the operation releases it. Renewal preserves
+the original holder metadata and creation time; a different ID still fails fast
+as locked. When an older takod does not recognize explicit renewal, the engine
+keeps the original confirmed lease only long enough for normal runtime setup to
+upgrade the agent; if renewal is still unavailable near expiry, the operation
+is canceled before another holder can acquire it.
+
 If a runner is cancelled while holding a lease, inspect it with
 `tako state lease`. Release only the exact stale ID shown by the mesh:
 

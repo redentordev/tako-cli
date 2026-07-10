@@ -108,7 +108,7 @@ func TestValidateServicePortsRejections(t *testing.T) {
 					Kind:     ServiceKindJob,
 					Image:    "alpine",
 					Schedule: "@hourly",
-					Command:  "true",
+					Command:  StringValue("true"),
 					Ports:    []string{"9000"},
 				}
 			},

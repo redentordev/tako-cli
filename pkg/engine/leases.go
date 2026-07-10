@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -22,6 +23,12 @@ type RemoteLeaseContextManager interface {
 	ReleaseLeaseContext(context.Context, *remotestate.LeaseInfo) error
 }
 
+// RemoteLeaseRenewContextManager renews a remote lease using its existing ID
+// holder token. StateManager implements this optional interface.
+type RemoteLeaseRenewContextManager interface {
+	RenewLeaseContext(context.Context, *remotestate.LeaseInfo, time.Duration) (*remotestate.LeaseInfo, error)
+}
+
 // RemoteLease is one acquired lease on one node.
 type RemoteLease struct {
 	ServerName string
@@ -33,13 +40,23 @@ type RemoteLease struct {
 type RemoteLeaseSet struct {
 	operation string
 	leases    []RemoteLease
+	mu        sync.RWMutex
 	// warn receives non-fatal release failures; nil discards them.
-	warn func(message string)
+	warn        func(message string)
+	renewCancel context.CancelFunc
+	renewDone   chan struct{}
+	releaseOnce sync.Once
+	lostOnce    sync.Once
+	lostErr     error
+	lost        chan struct{}
+	released    chan struct{}
 }
 
 // SetWarnFunc routes non-fatal lease release failures to a warning consumer.
 func (s *RemoteLeaseSet) SetWarnFunc(warn func(message string)) {
 	if s != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		s.warn = warn
 	}
 }
@@ -50,6 +67,8 @@ func NewRemoteLeaseSet(operation string, leases []RemoteLease) *RemoteLeaseSet {
 	return &RemoteLeaseSet{
 		operation: operation,
 		leases:    append([]RemoteLease(nil), leases...),
+		lost:      make(chan struct{}),
+		released:  make(chan struct{}),
 	}
 }
 
@@ -74,7 +93,9 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 		return nil, invalidRequestf("no target nodes configured for %s", operation)
 	}
 
-	return AcquireRemoteOperationLeasesWithContext(ctx, cfg.Servers, serverNames, operation, func(ctx context.Context, serverName string, server config.ServerConfig) (RemoteLease, error) {
+	acquireCtx, cancelAcquire := context.WithTimeout(ctx, remotestate.DefaultLeaseTTL/4)
+	defer cancelAcquire()
+	set, err := AcquireRemoteOperationLeasesWithContext(acquireCtx, cfg.Servers, serverNames, operation, func(ctx context.Context, serverName string, server config.ServerConfig) (RemoteLease, error) {
 		if err := ctx.Err(); err != nil {
 			return RemoteLease{}, err
 		}
@@ -105,6 +126,18 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 			Lease:      lease,
 		}, nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Keep the holder token alive for long deploys (for example, a first
+	// Sentry deployment can exceed the default 30-minute lease). Renewal is
+	// stopped and joined before Release removes any lease.
+	set.startRenewal(remotestate.DefaultLeaseTTL, remotestate.DefaultLeaseTTL/4)
+	if renewErr := set.Err(); renewErr != nil {
+		set.Release()
+		return nil, renewErr
+	}
+	return set, nil
 }
 
 // RemoteLeaseAcquireFunc acquires one node's lease.
@@ -180,6 +213,8 @@ func AcquireRemoteOperationLeasesWithContext(ctx context.Context, servers map[st
 	set := &RemoteLeaseSet{
 		operation: operation,
 		leases:    make([]RemoteLease, 0, len(serverNames)),
+		lost:      make(chan struct{}),
+		released:  make(chan struct{}),
 	}
 	ordered := make([]RemoteLease, len(serverNames))
 	var failures []string
@@ -274,26 +309,225 @@ func releaseRemoteLeaseErr(lease RemoteLease) error {
 	return lease.Manager.ReleaseLease(lease.Lease)
 }
 
+const remoteLeaseRenewRequestTimeout = 30 * time.Second
+
+func (s *RemoteLeaseSet) startRenewal(ttl time.Duration, interval time.Duration) {
+	if s == nil || ttl <= 0 || interval <= 0 {
+		return
+	}
+
+	s.mu.Lock()
+	if s.renewCancel != nil {
+		s.mu.Unlock()
+		return
+	}
+	hasRenewer := false
+	for _, lease := range s.leases {
+		if _, ok := lease.Manager.(RemoteLeaseRenewContextManager); ok && lease.Lease != nil {
+			hasRenewer = true
+			break
+		}
+	}
+	if !hasRenewer {
+		s.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.renewCancel = cancel
+	s.renewDone = done
+	s.mu.Unlock()
+
+	// Refresh every lease immediately after bounded fan-out acquisition so
+	// early nodes receive a full TTL before the caller starts work.
+	s.renewAll(ctx, ttl, interval)
+	if s.Err() != nil {
+		cancel()
+		close(done)
+		return
+	}
+	go s.runRenewalLoop(ctx, done, ttl, interval)
+}
+
+func (s *RemoteLeaseSet) runRenewalLoop(ctx context.Context, done chan<- struct{}, ttl time.Duration, interval time.Duration) {
+	defer close(done)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.renewAll(ctx, ttl, interval)
+			if s.Err() != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *RemoteLeaseSet) renewAll(ctx context.Context, ttl time.Duration, interval time.Duration) {
+	s.mu.RLock()
+	leases := append([]RemoteLease(nil), s.leases...)
+	s.mu.RUnlock()
+
+	var wg sync.WaitGroup
+	for index, lease := range leases {
+		renewer, ok := lease.Manager.(RemoteLeaseRenewContextManager)
+		if !ok || lease.Lease == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(index int, lease RemoteLease, renewer RemoteLeaseRenewContextManager) {
+			defer wg.Done()
+			timeout := remoteLeaseRenewRequestTimeout
+			if ttl/4 < timeout {
+				timeout = ttl / 4
+			}
+			if timeout <= 0 {
+				timeout = time.Second
+			}
+			renewCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			renewed, err := renewer.RenewLeaseContext(renewCtx, lease.Lease, ttl)
+			if err != nil {
+				s.warnf("Warning: failed to renew remote %s lease on %s: %v\n", s.operation, lease.ServerName, err)
+				// A confirmed holder mismatch/expiry is immediately fatal. For
+				// transport failures, fail closed while enough confirmed TTL
+				// remains to stop the operation before another holder can enter.
+				margin := interval + timeout
+				if errors.Is(err, remotestate.ErrLeaseLost) || !time.Now().Add(margin).Before(lease.Lease.ExpiresAt) {
+					s.markLost(fmt.Errorf("remote %s lease on %s was lost: %w", s.operation, lease.ServerName, err))
+				}
+				return
+			}
+			if renewed == nil || renewed.ID != lease.Lease.ID {
+				err := fmt.Errorf("renewal returned a different holder")
+				s.warnf("Warning: failed to renew remote %s lease on %s: %v\n", s.operation, lease.ServerName, err)
+				s.markLost(fmt.Errorf("remote %s lease on %s was lost: %w", s.operation, lease.ServerName, err))
+				return
+			}
+			s.mu.Lock()
+			if index < len(s.leases) && s.leases[index].Lease != nil && s.leases[index].Lease.ID == renewed.ID {
+				s.leases[index].Lease = renewed
+			}
+			s.mu.Unlock()
+		}(index, lease, renewer)
+	}
+	wg.Wait()
+}
+
+func (s *RemoteLeaseSet) markLost(err error) {
+	if s == nil || err == nil {
+		return
+	}
+	s.lostOnce.Do(func() {
+		s.mu.Lock()
+		s.lostErr = err
+		lost := s.lost
+		s.mu.Unlock()
+		close(lost)
+	})
+}
+
+// Err returns the terminal renewal error, if continued ownership could no
+// longer be proven.
+func (s *RemoteLeaseSet) Err() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lostErr
+}
+
+// BindContext returns a child canceled when lease ownership is lost or the
+// set is released. Callers must invoke the returned cancel function.
+func (s *RemoteLeaseSet) BindContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancelCause := context.WithCancelCause(parent)
+	if s == nil {
+		return ctx, func() { cancelCause(context.Canceled) }
+	}
+	s.mu.RLock()
+	lost := s.lost
+	released := s.released
+	err := s.lostErr
+	s.mu.RUnlock()
+	if err != nil {
+		cancelCause(err)
+		return ctx, func() { cancelCause(context.Canceled) }
+	}
+	go func() {
+		select {
+		case <-lost:
+			cancelCause(s.Err())
+		case <-released:
+			cancelCause(context.Canceled)
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() { cancelCause(context.Canceled) }
+}
+
+func (s *RemoteLeaseSet) warnf(format string, args ...any) {
+	s.mu.RLock()
+	warn := s.warn
+	s.mu.RUnlock()
+	if warn != nil {
+		warn(fmt.Sprintf(format, args...))
+	}
+}
+
+func (s *RemoteLeaseSet) stopRenewal() {
+	s.mu.Lock()
+	cancel := s.renewCancel
+	done := s.renewDone
+	s.renewCancel = nil
+	s.renewDone = nil
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
+}
+
 // Release releases held leases in reverse order. Failures route to the
 // warning consumer; release is best-effort by design.
 func (s *RemoteLeaseSet) Release() {
 	if s == nil {
 		return
 	}
-	for i := len(s.leases) - 1; i >= 0; i-- {
-		lease := s.leases[i]
-		if lease.Manager == nil || lease.Lease == nil {
-			continue
+	s.releaseOnce.Do(func() {
+		s.stopRenewal()
+		close(s.released)
+		s.mu.RLock()
+		leases := append([]RemoteLease(nil), s.leases...)
+		s.mu.RUnlock()
+		for i := len(leases) - 1; i >= 0; i-- {
+			lease := leases[i]
+			if lease.Manager == nil || lease.Lease == nil {
+				continue
+			}
+			if err := releaseRemoteLeaseErr(lease); err != nil {
+				s.warnf("Warning: failed to release remote %s lease on %s: %v\n", s.operation, lease.ServerName, err)
+			}
 		}
-		if err := releaseRemoteLeaseErr(lease); err != nil && s.warn != nil {
-			s.warn(fmt.Sprintf("Warning: failed to release remote %s lease on %s: %v\n", s.operation, lease.ServerName, err))
-		}
-	}
+	})
 }
 
 // Summary lists the held leases as "server:leaseID" pairs.
 func (s *RemoteLeaseSet) Summary() string {
-	if s == nil || len(s.leases) == 0 {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.leases) == 0 {
 		return ""
 	}
 	parts := make([]string, 0, len(s.leases))

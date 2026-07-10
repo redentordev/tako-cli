@@ -2,6 +2,7 @@ package deployer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -354,6 +355,361 @@ func TestShouldInstallTakodRelease(t *testing.T) {
 	}
 }
 
+func TestEnsureTakodContainerArgvCapability(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusJSON string
+		statusErr  error
+		wantError  string
+	}{
+		{
+			name:       "matching agent advertises support",
+			statusJSON: `{"capabilities":["container.argv-v1"]}`,
+		},
+		{
+			name:       "stale agent has no capabilities",
+			statusJSON: `{"version":"dev"}`,
+			wantError:  "does not support container argv payloads",
+		},
+		{
+			name:       "malformed status fails closed",
+			statusJSON: `{`,
+			wantError:  "failed to parse takod status",
+		},
+		{
+			name:      "unreachable status fails closed",
+			statusErr: fmt.Errorf("takod unavailable"),
+			wantError: "failed to verify takod capabilities",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deploy := &Deployer{config: &config.Config{}}
+			err := deploy.ensureTakodContainerArgvCapability(fakeTakodStatusExecutor{
+				output: tt.statusJSON,
+				err:    tt.statusErr,
+			}, "node-a")
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("ensureTakodContainerArgvCapability() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("ensureTakodContainerArgvCapability() error = %v, want containing %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestServiceNeedsContainerArgvCapability(t *testing.T) {
+	tests := []struct {
+		name    string
+		service *config.ServiceConfig
+		want    bool
+	}{
+		{name: "nil service", service: nil, want: false},
+		{name: "legacy scalar command", service: &config.ServiceConfig{Command: config.StringValue("echo legacy")}, want: false},
+		{name: "list command", service: &config.ServiceConfig{Command: config.ListValue("echo", "raw")}, want: true},
+		{name: "scalar entrypoint", service: &config.ServiceConfig{Entrypoint: config.StringValue("/init")}, want: true},
+		{name: "list entrypoint", service: &config.ServiceConfig{Entrypoint: config.ListValue("/init", "run")}, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := serviceNeedsContainerArgvCapability(tt.service); got != tt.want {
+				t.Fatalf("serviceNeedsContainerArgvCapability() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServiceNeedsRuntimeControlsCapability(t *testing.T) {
+	tests := []struct {
+		name    string
+		service *config.ServiceConfig
+		want    bool
+	}{
+		{name: "nil", service: nil},
+		{name: "none", service: &config.ServiceConfig{}},
+		{name: "user", service: &config.ServiceConfig{User: "1000"}, want: true},
+		{name: "working dir", service: &config.ServiceConfig{WorkingDir: "/work"}, want: true},
+		{name: "stop grace", service: &config.ServiceConfig{StopGracePeriod: "60s"}, want: true},
+		{name: "init", service: &config.ServiceConfig{Init: true}, want: true},
+		{name: "extra hosts", service: &config.ServiceConfig{ExtraHosts: []string{"db:10.0.0.2"}}, want: true},
+		{name: "ulimits", service: &config.ServiceConfig{Ulimits: map[string]config.UlimitConfig{"nofile": {Soft: 1, Hard: 1}}}, want: true},
+		{name: "shm", service: &config.ServiceConfig{ShmSize: "256m"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := serviceNeedsRuntimeControlsCapability(tt.service); got != tt.want {
+				t.Fatalf("serviceNeedsRuntimeControlsCapability() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnsureTakodRuntimeControlsCapabilityFailsClosed(t *testing.T) {
+	deploy := &Deployer{config: &config.Config{}}
+	err := deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+		output: `{"capabilities":["container.argv-v1"]}`,
+	}, "node-a", takod.CapabilityContainerRuntimeControlsV1, "container runtime controls")
+	if err == nil || !strings.Contains(err.Error(), "does not support container runtime controls") {
+		t.Fatalf("ensureTakodCapability() error = %v", err)
+	}
+}
+
+func TestRunTakodBuildStrategyPreflightsEveryRemoteBuild(t *testing.T) {
+	tests := []struct {
+		name         string
+		strategy     string
+		localErr     error
+		preflightErr error
+		wantPhases   string
+		wantError    bool
+	}{
+		{name: "remote stale", strategy: config.BuildStrategyRemote, preflightErr: fmt.Errorf("stale"), wantPhases: "preflight", wantError: true},
+		{name: "remote current", strategy: config.BuildStrategyRemote, wantPhases: "preflight,remote"},
+		{name: "auto local succeeds without daemon build capability", strategy: config.BuildStrategyAuto, wantPhases: "local"},
+		{name: "auto fallback stale", strategy: config.BuildStrategyAuto, localErr: fmt.Errorf("local unavailable"), preflightErr: fmt.Errorf("stale"), wantPhases: "local,preflight", wantError: true},
+		{name: "auto fallback current", strategy: config.BuildStrategyAuto, localErr: fmt.Errorf("local unavailable"), wantPhases: "local,preflight,remote"},
+		{name: "local never checks daemon build capability", strategy: config.BuildStrategyLocal, wantPhases: "local"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var phases []string
+			_, err := runTakodBuildStrategy(tt.strategy,
+				func() error { phases = append(phases, "local"); return tt.localErr },
+				func() error { phases = append(phases, "preflight"); return tt.preflightErr },
+				func() error { phases = append(phases, "remote"); return nil },
+			)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("error = %v, wantError %v", err, tt.wantError)
+			}
+			if got := strings.Join(phases, ","); got != tt.wantPhases {
+				t.Fatalf("phases = %q, want %q", got, tt.wantPhases)
+			}
+		})
+	}
+}
+
+func TestEnsureTakodBuildOptionsCapabilityFailsClosed(t *testing.T) {
+	deploy := &Deployer{config: &config.Config{}}
+	err := deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+		output: `{"capabilities":["container.argv-v1","container.runtime-controls-v1"]}`,
+	}, "node-a", takod.CapabilityImageBuildOptionsV1, "structured image build options")
+	if err == nil || !strings.Contains(err.Error(), "does not support structured image build options") {
+		t.Fatalf("ensureTakodCapability() error = %v", err)
+	}
+}
+
+func TestTakodServiceRolloutRuntimeControlsPreflightBeforeMutations(t *testing.T) {
+	service := &config.ServiceConfig{User: "1000:1000", ShmSize: "256m"}
+	var phases []string
+	err := runTakodServiceRollout(serviceNeedsContainerArgvCapability(service) || serviceNeedsRuntimeControlsCapability(service), takodServiceRolloutOperations{
+		Preflight: func() error {
+			phases = append(phases, "preflight")
+			deploy := &Deployer{config: &config.Config{}}
+			return deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+				output: `{"capabilities":["container.argv-v1"]}`,
+			}, "node-a", takod.CapabilityContainerRuntimeControlsV1, "container runtime controls")
+		},
+		Build: func() error {
+			phases = append(phases, "build")
+			return nil
+		},
+		Release: func() error {
+			phases = append(phases, "release")
+			return nil
+		},
+		Reconcile: func() error {
+			phases = append(phases, "reconcile")
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("runtime controls rollout succeeded with stale agent")
+	}
+	if got := strings.Join(phases, ","); got != "preflight" {
+		t.Fatalf("phases = %q, want preflight only", got)
+	}
+}
+
+func TestTakodJobBuildPreflightBeforeBuildAndRecord(t *testing.T) {
+	var phases []string
+	err := runTakodJobBuildPhases(func() error {
+		phases = append(phases, "preflight")
+		return fmt.Errorf("stale agent")
+	}, func() error {
+		phases = append(phases, "build")
+		return nil
+	}, func() {
+		phases = append(phases, "record")
+	})
+	if err == nil {
+		t.Fatal("job build phases succeeded after failed preflight")
+	}
+	if got := strings.Join(phases, ","); got != "preflight" {
+		t.Fatalf("phases = %q, want preflight only", got)
+	}
+}
+
+func TestRunStepServerRequiresBuildImagePlacementIntersection(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a", "node-b"})
+	env := cfg.Environments["production"]
+	env.Services = map[string]config.ServiceConfig{
+		"app": {Build: ".", Replicas: 1, Placement: &config.PlacementConfig{Strategy: "pinned", Servers: []string{"node-b"}}},
+	}
+	cfg.Environments["production"] = env
+	deploy := &Deployer{config: cfg, environment: "production", targetServers: []string{"node-a", "node-b"}}
+	run := &config.ServiceConfig{Kind: config.ServiceKindRun, ImageFrom: "app"}
+	server, err := deploy.runStepServer(run, []takodAssignment{{ServerName: "node-b", Slot: 1}}, nil)
+	if err != nil || server != "node-b" {
+		t.Fatalf("runStepServer = %q, %v", server, err)
+	}
+	if _, err := deploy.runStepServer(run, []takodAssignment{{ServerName: "node-a", Slot: 1}}, nil); err == nil || !strings.Contains(err.Error(), "no node carrying") {
+		t.Fatalf("non-intersecting placement error = %v", err)
+	}
+}
+
+func TestRunStepServerRequiresLocalBuildImageOnTargetedNode(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a", "node-b"})
+	env := cfg.Environments["production"]
+	env.Services = map[string]config.ServiceConfig{
+		"app": {Build: ".", Replicas: 2, Placement: &config.PlacementConfig{Strategy: "spread"}},
+	}
+	cfg.Environments["production"] = env
+	deploy := &Deployer{config: cfg, environment: "production", targetServers: []string{"node-a", "node-b"}}
+	run := &config.ServiceConfig{Kind: config.ServiceKindRun, ImageFrom: "app"}
+	assignments := []takodAssignment{{ServerName: "node-a", Slot: 1}, {ServerName: "node-b", Slot: 1}}
+	server, err := deploy.runStepServer(run, assignments, []string{"node-b"})
+	if err != nil || server != "node-b" {
+		t.Fatalf("runStepServer = %q, %v; want node-b", server, err)
+	}
+	if _, err := deploy.runStepServer(run, assignments, []string{}); err == nil || !strings.Contains(err.Error(), "no node carrying") {
+		t.Fatalf("runStepServer() missing-image error = %v", err)
+	}
+}
+
+func TestRunInputHashChangesWithResolvedEnvironment(t *testing.T) {
+	deploy := &Deployer{environment: "production"}
+	first := &config.ServiceConfig{Env: map[string]string{"TOKEN": "first"}}
+	second := &config.ServiceConfig{Env: map[string]string{"TOKEN": "second"}}
+	firstHash, err := deploy.RunInputHash(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondHash, err := deploy.RunInputHash(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstHash == secondHash || !strings.HasPrefix(firstHash, "sha256:") {
+		t.Fatalf("run input hashes = %q %q", firstHash, secondHash)
+	}
+	repeatedHash, err := deploy.RunInputHash(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedHash != firstHash {
+		t.Fatalf("identical run input hash changed: %q != %q", repeatedHash, firstHash)
+	}
+}
+
+func TestTakodServiceRolloutPreflightsArgvBeforeEveryMutation(t *testing.T) {
+	featureServices := []struct {
+		name    string
+		service *config.ServiceConfig
+	}{
+		{name: "list command", service: &config.ServiceConfig{Command: config.ListValue("echo", "raw")}},
+		{name: "scalar entrypoint", service: &config.ServiceConfig{Entrypoint: config.StringValue("/init")}},
+		{name: "list entrypoint", service: &config.ServiceConfig{Entrypoint: config.ListValue("/init", "run")}},
+	}
+	failures := []struct {
+		name       string
+		statusJSON string
+		statusErr  error
+	}{
+		{name: "stale", statusJSON: `{"version":"dev"}`},
+		{name: "malformed", statusJSON: `{`},
+		{name: "unreachable", statusErr: fmt.Errorf("takod unavailable")},
+	}
+	serverNames := []string{"node-a", "node-b", "node-c"}
+
+	for _, feature := range featureServices {
+		for _, failure := range failures {
+			t.Run(feature.name+"/"+failure.name, func(t *testing.T) {
+				deploy := &Deployer{config: &config.Config{}}
+				var mu sync.Mutex
+				checked := make(map[string]bool)
+				var mutations []string
+				recordMutation := func(name string) error {
+					mu.Lock()
+					defer mu.Unlock()
+					mutations = append(mutations, name)
+					return nil
+				}
+				err := runTakodServiceRollout(serviceNeedsContainerArgvCapability(feature.service), takodServiceRolloutOperations{
+					Preflight: func() error {
+						return preflightTakodContainerArgvWithCheck(serverNames, func(serverName string) error {
+							mu.Lock()
+							checked[serverName] = true
+							mu.Unlock()
+							return deploy.ensureTakodContainerArgvCapability(fakeTakodStatusExecutor{
+								output: failure.statusJSON,
+								err:    failure.statusErr,
+							}, serverName)
+						})
+					},
+					Build:     func() error { return recordMutation("build") },
+					Release:   func() error { return recordMutation("release") },
+					Reconcile: func() error { return recordMutation("reconcile") },
+				})
+				if err == nil {
+					t.Fatal("runTakodServiceRollout() succeeded with incompatible agents")
+				}
+				if len(checked) != len(serverNames) {
+					t.Fatalf("preflight checked %v, want every target %v", checked, serverNames)
+				}
+				if len(mutations) != 0 {
+					t.Fatalf("mutations ran after failed preflight: %v", mutations)
+				}
+			})
+		}
+	}
+}
+
+func TestTakodServiceRolloutLegacyScalarSkipsCapabilityAndReconciles(t *testing.T) {
+	service := &config.ServiceConfig{Command: config.StringValue("echo legacy")}
+	var phases []string
+	record := func(name string) error {
+		phases = append(phases, name)
+		return nil
+	}
+	err := runTakodServiceRollout(serviceNeedsContainerArgvCapability(service), takodServiceRolloutOperations{
+		Preflight: func() error {
+			t.Fatal("legacy scalar command must not require a capability status")
+			return nil
+		},
+		Build:     func() error { return record("build") },
+		Release:   func() error { return record("release") },
+		Reconcile: func() error { return record("reconcile") },
+	})
+	if err != nil {
+		t.Fatalf("runTakodServiceRollout() error = %v", err)
+	}
+	if got, want := strings.Join(phases, ","), "build,release,reconcile"; got != want {
+		t.Fatalf("phases = %q, want %q", got, want)
+	}
+}
+
+func TestServiceFilesRequireTakodCapabilityPreflight(t *testing.T) {
+	service := &config.ServiceConfig{Files: []config.ServiceFileConfig{{Source: "/tmp/config", Target: "/etc/config"}}}
+	if !serviceNeedsTakodCapabilityPreflight(service) {
+		t.Fatal("file-only service skipped capability preflight")
+	}
+}
+
 type fakeTakodStatusExecutor struct {
 	output string
 	err    error
@@ -390,6 +746,42 @@ func TestBuildTakodHealthSpecUsesHostSideHTTPPathAndPort(t *testing.T) {
 	}
 	if spec.Scheme != "http" {
 		t.Fatalf("health scheme = %q, want http", spec.Scheme)
+	}
+}
+
+func TestBuildTakodHealthSpecUsesContainerCommand(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{
+		HealthCheck: config.HealthCheckConfig{
+			Command:     "test -f /tmp/healthy",
+			Interval:    "30s",
+			Timeout:     "5s",
+			Retries:     4,
+			StartPeriod: "2m",
+		},
+	})
+	if spec == nil || spec.Command != "test -f /tmp/healthy" {
+		t.Fatalf("health spec = %#v, want Docker command", spec)
+	}
+	if spec.Path != "" || spec.Port != 0 {
+		t.Fatalf("command health should not synthesize host target: %#v", spec)
+	}
+}
+
+func TestServiceRuntimeLabelsIncludeCustomLabelsWithoutOverridingTakoIdentity(t *testing.T) {
+	service := config.ServiceConfig{
+		Image: "nginx:latest",
+		Labels: map[string]string{
+			"com.example.role":             "frontend",
+			runtimeid.ServiceIdentityLabel: "malicious",
+		},
+	}
+	labels := serviceRuntimeLabels("demo", "production", "web", service)
+	if labels["com.example.role"] != "frontend" {
+		t.Fatalf("custom label missing: %#v", labels)
+	}
+	if labels[runtimeid.ServiceIdentityLabel] != runtimeid.ServiceIdentity("demo", "production", "web") {
+		t.Fatalf("runtime identity was overridden: %#v", labels)
 	}
 }
 
@@ -608,8 +1000,25 @@ func TestDeploymentHealthWaitAttemptsUsesFloorAndCap(t *testing.T) {
 	if got := deploymentHealthWaitAttempts("1s", "0s", 1); got != 30 {
 		t.Fatalf("short health wait attempts = %d, want floor 30", got)
 	}
-	if got := deploymentHealthWaitAttempts("10m", "10m", 100); got != 600 {
-		t.Fatalf("long health wait attempts = %d, want cap 600", got)
+	if got := deploymentHealthWaitAttempts("24h", "24h", 100); got != 24*60*60 {
+		t.Fatalf("long health wait attempts = %d, want cap %d", got, 24*60*60)
+	}
+}
+
+func TestBuildTakodCommandHealthSpecCoversTenMinuteStartPeriod(t *testing.T) {
+	deploy := &Deployer{}
+	spec := deploy.buildTakodHealthSpec(&config.ServiceConfig{HealthCheck: config.HealthCheckConfig{
+		Command: "test -f /tmp/heartbeat", Interval: "30s", Timeout: "5s", Retries: 3, StartPeriod: "10m",
+	}})
+	if spec == nil {
+		t.Fatal("buildTakodHealthSpec returned nil")
+	}
+	want := 10*60 + 4*30 + 5
+	if spec.WaitAttempts != want {
+		t.Fatalf("wait attempts = %d, want %d to cover start period and retries", spec.WaitAttempts, want)
+	}
+	if spec.WaitAttempts <= 600 {
+		t.Fatalf("wait attempts = %d, must extend beyond ten-minute grace", spec.WaitAttempts)
 	}
 }
 
@@ -628,6 +1037,65 @@ func TestReconcileServiceRequestTimeoutCoversHealthWindowPerReplica(t *testing.T
 	})
 	if got != takodclient.JSONRequestTimeout {
 		t.Fatalf("default timeout = %s, want %s", got, takodclient.JSONRequestTimeout)
+	}
+
+	got = reconcileServiceRequestTimeout(takod.ReconcileServiceRequest{
+		Files: []takod.ServiceFileBundle{{Name: "file-000"}},
+	})
+	if got != takodclient.StreamRequestTimeout {
+		t.Fatalf("file payload timeout = %s, want %s", got, takodclient.StreamRequestTimeout)
+	}
+}
+
+func TestConvergeRemoteImageBuildsOncePerPlatformAndTransfersExactImage(t *testing.T) {
+	groups := map[string][]string{"linux/arm64": {"arm-b", "arm-a"}, "linux/amd64": {"amd-b", "amd-a"}}
+	available := map[string]bool{"amd-b": true}
+	var builds []string
+	var transfers []string
+	err := convergeRemoteImageByPlatform(groups,
+		func(server string) bool { return available[server] },
+		func(platform string, source string) error {
+			builds = append(builds, platform+":"+source)
+			available[source] = true
+			return nil
+		},
+		func(source string, target string) error {
+			transfers = append(transfers, source+"->"+target)
+			available[target] = true
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(builds, []string{"linux/arm64:arm-a"}) {
+		t.Fatalf("builds = %#v", builds)
+	}
+	if !slices.Equal(transfers, []string{"amd-b->amd-a", "arm-a->arm-b"}) {
+		t.Fatalf("transfers = %#v", transfers)
+	}
+}
+
+func TestStreamExactImageTransferCancelsExporterWhenImporterFails(t *testing.T) {
+	importErr := errors.New("import failed")
+	started := make(chan struct{})
+	start := time.Now()
+	sourceErr, targetErr := streamExactImageTransfer(context.Background(),
+		func(ctx context.Context, output io.Writer) error {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		func(ctx context.Context, input io.Reader) error {
+			<-started
+			return importErr
+		},
+	)
+	if !errors.Is(targetErr, importErr) || !errors.Is(sourceErr, context.Canceled) {
+		t.Fatalf("source=%v target=%v", sourceErr, targetErr)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("failed transfer cancellation took %s", time.Since(start))
 	}
 }
 

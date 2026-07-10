@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,14 +19,15 @@ import (
 
 // Config represents the main configuration structure
 type Config struct {
-	Schema        string                  `yaml:"$schema,omitempty" json:"$schema,omitempty"` // JSON Schema reference
-	Project       ProjectConfig           `yaml:"project" json:"project"`
-	Runtime       *RuntimeConfig          `yaml:"runtime,omitempty" json:"runtime,omitempty"`
-	Mesh          *MeshConfig             `yaml:"mesh,omitempty" json:"mesh,omitempty"`
-	State         *StateConfig            `yaml:"state,omitempty" json:"state,omitempty"`
-	Deployment    *DeploymentConfig       `yaml:"deployment,omitempty" json:"deployment,omitempty"`
-	Notifications *NotificationsConfig    `yaml:"notifications,omitempty" json:"notifications,omitempty"`
-	Volumes       map[string]VolumeConfig `yaml:"volumes,omitempty" json:"volumes,omitempty"` // Top-level volume definitions
+	Schema        string                       `yaml:"$schema,omitempty" json:"$schema,omitempty"` // JSON Schema reference
+	Project       ProjectConfig                `yaml:"project" json:"project"`
+	Runtime       *RuntimeConfig               `yaml:"runtime,omitempty" json:"runtime,omitempty"`
+	Mesh          *MeshConfig                  `yaml:"mesh,omitempty" json:"mesh,omitempty"`
+	State         *StateConfig                 `yaml:"state,omitempty" json:"state,omitempty"`
+	Deployment    *DeploymentConfig            `yaml:"deployment,omitempty" json:"deployment,omitempty"`
+	Notifications *NotificationsConfig         `yaml:"notifications,omitempty" json:"notifications,omitempty"`
+	Volumes       map[string]VolumeConfig      `yaml:"volumes,omitempty" json:"volumes,omitempty"` // Top-level volume definitions
+	Builds        map[string]SharedBuildConfig `yaml:"builds,omitempty" json:"builds,omitempty"`
 	// Registries holds private image registry credentials keyed by host
 	// (e.g. ghcr.io). Values must be ${ENV_VAR} references — literal
 	// passwords in the config file are rejected at load time. Credentials
@@ -159,6 +162,36 @@ type BuildConfig struct {
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"` // remote, local, auto
 }
 
+// SharedBuildConfig declares one image build consumed by any number of
+// services through imageFrom.
+type SharedBuildConfig struct {
+	Context         string            `yaml:"context" json:"context"`
+	Args            map[string]string `yaml:"args,omitempty" json:"args,omitempty"`
+	Target          string            `yaml:"target,omitempty" json:"target,omitempty"`
+	Dockerfile      string            `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"`
+	declaredContext string
+}
+
+func (b SharedBuildConfig) Fingerprint() string {
+	contextPath := b.DeclaredContext()
+	data, _ := json.Marshal(struct {
+		Context    string            `json:"context"`
+		Args       map[string]string `json:"args,omitempty"`
+		Target     string            `json:"target,omitempty"`
+		Dockerfile string            `json:"dockerfile,omitempty"`
+	}{Context: contextPath, Args: b.Args, Target: b.Target, Dockerfile: b.Dockerfile})
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
+}
+
+func (b SharedBuildConfig) DeclaredContext() string {
+	contextPath := b.declaredContext
+	if contextPath == "" {
+		contextPath = strings.TrimSpace(b.Context)
+	}
+	return filepath.ToSlash(filepath.Clean(contextPath))
+}
+
 // ServerConfig defines server connection details
 type ServerConfig struct {
 	Host        string            `yaml:"host" json:"host"`
@@ -174,10 +207,13 @@ type ServerConfig struct {
 const (
 	ServiceKindService = "service"
 	ServiceKindJob     = "job"
+	ServiceKindRun     = "run"
 )
 
 // ServiceConfig defines service deployment settings
 type ServiceConfig struct {
+	buildStructured bool
+
 	// Kind selects the workload type: "service" (default, long-running
 	// containers) or "job" (a command run on a cron schedule by takod).
 	Kind string `yaml:"kind,omitempty" json:"kind,omitempty"`
@@ -190,9 +226,15 @@ type ServiceConfig struct {
 	Timeout string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 
 	// Build or Image (mutually exclusive)
-	Build      string `yaml:"build,omitempty" json:"build,omitempty"`           // Path to build context (auto-detects Dockerfile)
-	Dockerfile string `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"` // Dockerfile path relative to build context
-	Image      string `yaml:"image,omitempty" json:"image,omitempty"`           // Pre-built image (for postgres, redis, etc)
+	Build       string            `yaml:"build,omitempty" json:"build,omitempty"` // Path to build context (auto-detects Dockerfile)
+	BuildArgs   map[string]string `yaml:"-" json:"-"`
+	BuildTarget string            `yaml:"-" json:"-"`
+	Dockerfile  string            `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"` // Dockerfile path relative to build context
+	Image       string            `yaml:"image,omitempty" json:"image,omitempty"`           // Pre-built image (for postgres, redis, etc)
+	ImageFrom   string            `yaml:"imageFrom,omitempty" json:"imageFrom,omitempty"`   // shared build, or source service for kind: run
+	// SharedBuildHash fingerprints the resolved top-level build definition
+	// without duplicating it into each service's public config shape.
+	SharedBuildHash string `yaml:"-" json:"-"`
 
 	// Basic settings
 	Port int `yaml:"port,omitempty" json:"port,omitempty"`
@@ -200,16 +242,33 @@ type ServiceConfig struct {
 	// tako-proxy (docker-compose syntax: "PORT", "HOST:CONTAINER",
 	// "IP:HOST:CONTAINER", optional "/tcp" or "/udp"). Requires the recreate
 	// deploy strategy and at most one replica.
-	Ports    []string          `yaml:"ports,omitempty" json:"ports,omitempty"`
-	Command  string            `yaml:"command,omitempty" json:"command,omitempty"`
-	Replicas int               `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
-	Restart  string            `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
-	Env      map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	EnvFile  string            `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Path to .env file (e.g., .env.production)
+	Ports      []string          `yaml:"ports,omitempty" json:"ports,omitempty"`
+	Command    StringOrList      `yaml:"command,omitempty" json:"command,omitempty,omitzero"`
+	Entrypoint StringOrList      `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty,omitzero"`
+	Labels     map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Replicas   int               `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
+	Restart    string            `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
+	Env        map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	EnvFile    string            `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Legacy single .env file path
+	EnvFiles   []string          `yaml:"envFiles,omitempty" json:"envFiles,omitempty"`
+	// RunInputHash is an internal digest of the fully resolved env/secret file
+	// used to fingerprint kind:run executions without persisting secret values.
+	RunInputHash    string                  `yaml:"-" json:"-"`
+	User            string                  `yaml:"user,omitempty" json:"user,omitempty"`
+	WorkingDir      string                  `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
+	StopGracePeriod string                  `yaml:"stopGracePeriod,omitempty" json:"stopGracePeriod,omitempty"`
+	Init            bool                    `yaml:"init,omitempty" json:"init,omitempty"`
+	ExtraHosts      []string                `yaml:"extraHosts,omitempty" json:"extraHosts,omitempty"`
+	Ulimits         map[string]UlimitConfig `yaml:"ulimits,omitempty" json:"ulimits,omitempty"`
+	ShmSize         string                  `yaml:"shmSize,omitempty" json:"shmSize,omitempty"`
 
 	// Secrets: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"].
-	Secrets []string `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
-	Volumes []string `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	Secrets []string            `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
+	Volumes []string            `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	Files   []ServiceFileConfig `yaml:"files,omitempty" json:"files,omitempty"`
+	// FilesContentHash is an internal digest of fully resolved operator file
+	// metadata and bytes; file contents never enter desired state or labels.
+	FilesContentHash string `yaml:"-" json:"-"`
 
 	// Service type flags
 	Persistent bool `yaml:"persistent,omitempty" json:"persistent,omitempty"` // Don't remove on redeploy (databases, caches)
@@ -244,6 +303,19 @@ type ServiceConfig struct {
 
 	// Service dependencies (controls deployment order)
 	DependsOn []string `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"` // List of service names this service depends on
+
+	// ReuseFiles tells rollback paths to mount an already-published immutable
+	// FilesContentHash instead of reading today's local sources.
+	ReuseFiles bool `yaml:"-" json:"-"`
+}
+
+// ServiceFileConfig distributes one local regular file or directory into a
+// service container as a read-only bind mount. Secret forces private modes.
+type ServiceFileConfig struct {
+	Source string `yaml:"source" json:"source"`
+	Target string `yaml:"target" json:"target"`
+	Secret bool   `yaml:"secret,omitempty" json:"secret,omitempty"`
+	Owner  string `yaml:"owner,omitempty" json:"owner,omitempty"`
 }
 
 // IsJob reports whether the service is a scheduled job workload.
@@ -251,8 +323,24 @@ func (s *ServiceConfig) IsJob() bool {
 	return s.Kind == ServiceKindJob
 }
 
+// IsRun reports whether the service is a deploy-time run-to-completion step.
+func (s *ServiceConfig) IsRun() bool {
+	return s.Kind == ServiceKindRun
+}
+
+// ClearBuild removes the complete build definition when an image override
+// changes the service to a prebuilt image.
+func (s *ServiceConfig) ClearBuild() {
+	s.Build = ""
+	s.BuildArgs = nil
+	s.BuildTarget = ""
+	s.Dockerfile = ""
+	s.buildStructured = false
+}
+
 // HealthCheckConfig defines health check settings
 type HealthCheckConfig struct {
+	Command     string `yaml:"command,omitempty" json:"command,omitempty"`
 	Path        string `yaml:"path" json:"path"`
 	TCPPort     int    `yaml:"tcpPort,omitempty" json:"tcpPort,omitempty"`
 	Interval    string `yaml:"interval" json:"interval"`
@@ -542,6 +630,12 @@ type PlacementConfig struct {
 
 // GetServiceType returns the auto-detected service type
 func (s *ServiceConfig) GetServiceType() string {
+	if s.IsRun() {
+		return ServiceKindRun
+	}
+	if s.IsJob() {
+		return ServiceKindJob
+	}
 	if s.Persistent {
 		return "persistent" // Database, cache, etc.
 	}
@@ -1031,10 +1125,23 @@ func normalizeConfigRelativePaths(cfg *Config, configDir string) {
 		server.SSHKey = resolveConfigRelativePath(absConfigDir, server.SSHKey)
 		cfg.Servers[name] = server
 	}
+	for name, build := range cfg.Builds {
+		if build.declaredContext == "" {
+			build.declaredContext = filepath.ToSlash(filepath.Clean(strings.TrimSpace(build.Context)))
+		}
+		build.Context = resolveConfigRelativePath(absConfigDir, build.Context)
+		cfg.Builds[name] = build
+	}
 	for envName, env := range cfg.Environments {
 		for serviceName, service := range env.Services {
 			service.Build = resolveConfigRelativePath(absConfigDir, service.Build)
 			service.EnvFile = resolveConfigRelativePath(absConfigDir, service.EnvFile)
+			for i := range service.EnvFiles {
+				service.EnvFiles[i] = resolveConfigRelativePath(absConfigDir, service.EnvFiles[i])
+			}
+			for i := range service.Files {
+				service.Files[i].Source = resolveConfigRelativePath(absConfigDir, service.Files[i].Source)
+			}
 			env.Services[serviceName] = service
 		}
 		cfg.Environments[envName] = env

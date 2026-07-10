@@ -3,6 +3,8 @@ package configmaterialize
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -56,7 +58,23 @@ func BuildConfig(opts Options) (*config.Config, []Warning, error) {
 			Version: latestHistoryVersion(opts.History),
 		},
 		Servers:      cloneServers(opts.Servers),
+		Builds:       map[string]config.SharedBuildConfig{},
 		Environments: map[string]config.EnvironmentConfig{},
+	}
+	if opts.Desired != nil {
+		for name, build := range opts.Desired.Builds {
+			args := make(map[string]string, len(build.ArgKeys))
+			for _, key := range build.ArgKeys {
+				args[key] = ""
+			}
+			cfg.Builds[name] = config.SharedBuildConfig{Context: strings.TrimSpace(build.Context), Args: args, Target: strings.TrimSpace(build.Target), Dockerfile: strings.TrimSpace(build.Dockerfile)}
+			if info, err := os.Stat(strings.TrimSpace(build.Context)); err != nil || !info.IsDir() {
+				warnings = append(warnings, Warning{Code: "shared_build_context_unrecovered", Message: fmt.Sprintf("shared build %q context %q is not available on this machine; restore it before deploying", name, build.Context)})
+			}
+			if len(build.ArgKeys) > 0 {
+				warnings = append(warnings, Warning{Code: "shared_build_arg_values_redacted", Message: fmt.Sprintf("shared build %q argument values were redacted; restore them before deploying", name)})
+			}
+		}
 	}
 	if cfg.Project.Version == "" {
 		cfg.Project.Version = defaultExportedVersion
@@ -87,12 +105,74 @@ func BuildConfig(opts Options) (*config.Config, []Warning, error) {
 	}
 
 	if opts.Validate {
-		if err := config.ValidateConfig(cfg); err != nil {
+		restoredBuilds, cleanupBuilds, err := substituteUnrecoveredBuildsForValidation(cfg)
+		if err != nil {
 			return nil, warnings, err
 		}
+		restoredFiles, cleanup, err := substituteUnrecoveredFilesForValidation(cfg)
+		if err != nil {
+			cleanupBuilds()
+			return nil, warnings, err
+		}
+		if err := config.ValidateConfig(cfg); err != nil {
+			restoreMaterializedBuilds(cfg, restoredBuilds)
+			restoreMaterializedFiles(cfg, restoredFiles)
+			cleanupBuilds()
+			cleanup()
+			return nil, warnings, err
+		}
+		restoreMaterializedBuilds(cfg, restoredBuilds)
+		restoreMaterializedFiles(cfg, restoredFiles)
+		cleanupBuilds()
+		cleanup()
 	}
 
 	return cfg, warnings, nil
+}
+
+func substituteUnrecoveredBuildsForValidation(cfg *config.Config) (map[string]config.SharedBuildConfig, func(), error) {
+	restored := make(map[string]config.SharedBuildConfig)
+	standIn, err := os.MkdirTemp("", "tako-export-build-stand-in-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create shared build validation stand-in: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(standIn) }
+	for name, build := range cfg.Builds {
+		if info, err := os.Stat(build.Context); err == nil && info.IsDir() {
+			continue
+		}
+		restored[name] = build
+		buildStandIn := filepath.Join(standIn, name)
+		if err := os.MkdirAll(buildStandIn, 0700); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		dockerfile := strings.TrimSpace(build.Dockerfile)
+		if dockerfile == "" {
+			dockerfile = "Dockerfile"
+		}
+		clean := filepath.Clean(dockerfile)
+		if !filepath.IsAbs(clean) && clean != ".." && !strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			path := filepath.Join(buildStandIn, clean)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				cleanup()
+				return nil, nil, err
+			}
+			if err := os.WriteFile(path, []byte("FROM scratch\n"), 0600); err != nil {
+				cleanup()
+				return nil, nil, err
+			}
+		}
+		build.Context = buildStandIn
+		cfg.Builds[name] = build
+	}
+	return restored, cleanup, nil
+}
+
+func restoreMaterializedBuilds(cfg *config.Config, restored map[string]config.SharedBuildConfig) {
+	for name, build := range restored {
+		cfg.Builds[name] = build
+	}
 }
 
 func materializeServices(desired *takoapi.DesiredStateDocument, actual *takoapi.ActualStateDocument) (map[string]config.ServiceConfig, []Warning, error) {
@@ -105,6 +185,9 @@ func materializeServices(desired *takoapi.DesiredStateDocument, actual *takoapi.
 			service, serviceWarnings, err := desiredServiceToConfig(name, serviceDoc)
 			if err != nil {
 				return nil, warnings, err
+			}
+			if _, shared := desired.Builds[serviceDoc.ImageFrom]; shared {
+				service.Image = ""
 			}
 			services[name] = service
 			warnings = append(warnings, serviceWarnings...)
@@ -146,17 +229,62 @@ func materializeServices(desired *takoapi.DesiredStateDocument, actual *takoapi.
 
 func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument) (config.ServiceConfig, []Warning, error) {
 	var warnings []Warning
+	command := stateStringOrList(service.Command, service.CommandArgs)
+	entrypoint := stateStringOrList(service.Entrypoint, service.EntrypointArgs)
 	out := config.ServiceConfig{
-		Image:      strings.TrimSpace(service.Image),
-		Build:      strings.TrimSpace(service.Build),
-		Command:    strings.TrimSpace(service.Command),
-		Port:       service.Port,
-		Replicas:   service.Replicas,
-		Restart:    strings.TrimSpace(service.Restart),
-		Persistent: service.Persistent,
-		Volumes:    cleanStrings(service.Volumes),
-		Secrets:    cleanStrings(service.SecretRefs),
-		DependsOn:  cleanStrings(service.DependsOn),
+		Kind:            strings.TrimSpace(service.WorkloadKind),
+		Image:           strings.TrimSpace(service.Image),
+		ImageFrom:       strings.TrimSpace(service.ImageFrom),
+		Build:           strings.TrimSpace(service.Build),
+		BuildTarget:     strings.TrimSpace(service.BuildTarget),
+		Command:         command,
+		Entrypoint:      entrypoint,
+		Labels:          copyStringMap(service.Labels),
+		Port:            service.Port,
+		Replicas:        service.Replicas,
+		Restart:         strings.TrimSpace(service.Restart),
+		Persistent:      service.Persistent,
+		Volumes:         cleanStrings(service.Volumes),
+		Files:           materializeServiceFiles(service.Files),
+		Secrets:         cleanStrings(service.SecretRefs),
+		DependsOn:       cleanStrings(service.DependsOn),
+		User:            strings.TrimSpace(service.User),
+		WorkingDir:      strings.TrimSpace(service.WorkingDir),
+		StopGracePeriod: strings.TrimSpace(service.StopGracePeriod),
+		Init:            service.Init,
+		ExtraHosts:      cleanStrings(service.ExtraHosts),
+		Ulimits:         materializeUlimits(service.Ulimits),
+		ShmSize:         strings.TrimSpace(service.ShmSize),
+	}
+	serviceType := strings.TrimSpace(service.Type)
+	if out.Kind == "" && (serviceType == config.ServiceKindRun || serviceType == config.ServiceKindJob) {
+		out.Kind = serviceType
+	}
+	if out.IsRun() && out.ImageFrom != "" {
+		// Desired state also carries the resolved image used by the completed
+		// run; config source remains imageFrom so the next plan can resolve it.
+		out.Image = ""
+	}
+	if out.IsRun() {
+		// Older desired documents may contain generic container defaults that
+		// never applied to deploy-time runs. Do not turn them into invalid config.
+		out.Restart = ""
+		out.Deploy = config.DeployConfig{}
+	}
+	for _, file := range out.Files {
+		if _, err := os.Lstat(file.Source); err != nil {
+			warnings = append(warnings, Warning{
+				Code: "operator_file_content_unrecovered", Service: name,
+				Message: fmt.Sprintf("service %q operator file source %q is not available on this machine; restore the file or update files[].source before deploying", name, file.Source),
+			})
+		}
+	}
+	if len(service.BuildArgKeys) > 0 {
+		warnings = append(warnings, Warning{
+			Code:    "build_arg_values_redacted",
+			Service: name,
+			Message: fmt.Sprintf("service %q build arg values are not stored in takod state and must be restored manually for keys: %s", name, strings.Join(sortedStrings(service.BuildArgKeys), ", ")),
+		})
 	}
 
 	if len(service.EnvKeys) > 0 {
@@ -217,8 +345,98 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 		}
 		out.HealthCheck = healthCheck
 	}
+	if out.IsRun() {
+		out.Restart = ""
+		out.Deploy = config.DeployConfig{}
+	}
 
 	return out, warnings, nil
+}
+
+func materializeServiceFiles(files []takoapi.ServiceFileDocument) []config.ServiceFileConfig {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]config.ServiceFileConfig, 0, len(files))
+	for _, file := range files {
+		out = append(out, config.ServiceFileConfig{Source: strings.TrimSpace(file.Source), Target: strings.TrimSpace(file.Target), Secret: file.Secret, Owner: strings.TrimSpace(file.Owner)})
+	}
+	return out
+}
+
+func substituteUnrecoveredFilesForValidation(cfg *config.Config) (map[string][]config.ServiceFileConfig, func(), error) {
+	restored := make(map[string][]config.ServiceFileConfig)
+	standIn, err := os.CreateTemp("", "tako-export-file-stand-in-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create operator file validation stand-in: %w", err)
+	}
+	standInPath := standIn.Name()
+	if err := standIn.Close(); err != nil {
+		os.Remove(standInPath)
+		return nil, nil, fmt.Errorf("close operator file validation stand-in: %w", err)
+	}
+	cleanup := func() { _ = os.Remove(standInPath) }
+	for envName, env := range cfg.Environments {
+		for serviceName, service := range env.Services {
+			if len(service.Files) == 0 {
+				continue
+			}
+			key := envName + "\x00" + serviceName
+			restored[key] = append([]config.ServiceFileConfig(nil), service.Files...)
+			for i, file := range service.Files {
+				if _, err := os.Lstat(file.Source); err == nil {
+					continue
+				}
+				service.Files[i].Source = standInPath
+			}
+			env.Services[serviceName] = service
+		}
+		cfg.Environments[envName] = env
+	}
+	return restored, cleanup, nil
+}
+
+func restoreMaterializedFiles(cfg *config.Config, restored map[string][]config.ServiceFileConfig) {
+	for key, files := range restored {
+		envName, serviceName, _ := strings.Cut(key, "\x00")
+		env := cfg.Environments[envName]
+		service := env.Services[serviceName]
+		service.Files = files
+		env.Services[serviceName] = service
+		cfg.Environments[envName] = env
+	}
+}
+
+func materializeUlimits(source map[string]takoapi.UlimitDocument) map[string]config.UlimitConfig {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]config.UlimitConfig, len(source))
+	for name, limit := range source {
+		out[name] = config.UlimitConfig{Soft: limit.Soft, Hard: limit.Hard}
+	}
+	return out
+}
+
+func stateStringOrList(scalar string, args []string) config.StringOrList {
+	if len(args) > 0 {
+		return config.ListValue(args...)
+	}
+	if scalar != "" {
+		return config.StringValue(scalar)
+	}
+	return config.StringOrList{}
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	copy := make(map[string]string, len(values))
+	for key, value := range values {
+		copy[key] = value
+	}
+	return copy
 }
 
 func decodeRaw[T any](raw json.RawMessage, field string, service string) (T, error) {

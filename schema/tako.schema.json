@@ -33,6 +33,27 @@
         }
       }
     },
+    "builds": {
+      "type": "object",
+      "description": "Reusable image builds referenced by services through imageFrom.",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_-]{0,62}$" },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["context"],
+        "additionalProperties": false,
+        "properties": {
+          "context": { "type": "string", "minLength": 1 },
+          "args": {
+            "type": "object",
+            "maxProperties": 128,
+            "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+            "additionalProperties": { "type": "string" }
+          },
+          "target": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$" },
+          "dockerfile": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "runtime": {
       "type": "object",
       "description": "takod mesh runtime settings. One node and many nodes use the same runtime model.",
@@ -380,12 +401,33 @@
               "type": "object",
               "properties": {
                 "build": {
-                  "type": "string",
-                  "description": "Build context path"
+                  "description": "Build context path or structured build options",
+                  "oneOf": [
+                    { "type": "string", "minLength": 1 },
+                    {
+                      "type": "object",
+                      "required": ["context"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "context": { "type": "string", "minLength": 1 },
+                        "args": {
+                          "type": "object",
+                          "maxProperties": 128,
+                          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+                          "additionalProperties": { "type": "string" }
+                        },
+                        "target": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$" }
+                      }
+                    }
+                  ]
                 },
                 "image": {
                   "type": "string",
                   "description": "Docker image"
+                },
+                "imageFrom": {
+                  "type": "string",
+                  "description": "Reference a top-level shared build. For kind: run, this may instead reference another service, which becomes an implicit dependency."
                 },
                 "port": {
                   "type": "integer",
@@ -399,8 +441,25 @@
                   }
                 },
                 "command": {
-                  "type": "string",
-                  "description": "Override container command"
+                  "description": "Override container command. String form preserves Tako's legacy sh -c behavior; list form is passed as raw exec argv.",
+                  "oneOf": [
+                    { "type": "string", "minLength": 1 },
+                    { "type": "array", "minItems": 1, "maxItems": 256, "items": { "type": "string" } }
+                  ]
+                },
+                "entrypoint": {
+                  "description": "Override the image entrypoint as a string executable or argv list.",
+                  "oneOf": [
+                    { "type": "string", "minLength": 1 },
+                    { "type": "array", "minItems": 1, "maxItems": 256, "items": { "type": "string" } }
+                  ]
+                },
+                "labels": {
+                  "type": "object",
+                  "description": "Custom container labels. Keys beginning with tako. are reserved.",
+                  "maxProperties": 256,
+                  "propertyNames": { "not": { "pattern": "^tako\\." } },
+                  "additionalProperties": { "type": "string" }
                 },
                 "replicas": {
                   "type": "integer",
@@ -428,6 +487,59 @@
                   "type": "string",
                   "description": "Path to .env file"
                 },
+                "envFiles": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 32,
+                  "uniqueItems": true,
+                  "items": { "type": "string", "minLength": 1 },
+                  "description": "Ordered .env files; later files override earlier files"
+                },
+                "user": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "workingDir": {
+                  "type": "string",
+                  "pattern": "^/"
+                },
+                "stopGracePeriod": {
+                  "type": "string",
+                  "description": "Whole-second container stop timeout, for example 60s"
+                },
+                "init": {
+                  "type": "boolean"
+                },
+                "extraHosts": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "uniqueItems": true,
+                  "items": { "type": "string", "minLength": 3 }
+                },
+                "ulimits": {
+                  "type": "object",
+                  "maxProperties": 64,
+                  "propertyNames": { "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+                  "additionalProperties": {
+                    "oneOf": [
+                      { "type": "integer", "minimum": 1 },
+                      {
+                        "type": "object",
+                        "required": ["soft", "hard"],
+                        "additionalProperties": false,
+                        "properties": {
+                          "soft": { "type": "integer", "minimum": 1 },
+                          "hard": { "type": "integer", "minimum": 1 }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "shmSize": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*([bBkKmMgG]|[kKmMgG][bB]|[kKmMgG][iI][bB])?$"
+                },
                 "secrets": {
                   "type": "array",
                   "items": {
@@ -441,6 +553,22 @@
                     "type": "string"
                   },
                   "description": "Volume mounts"
+                },
+                "files": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "description": "Local regular files or directories distributed through takod and mounted read-only into the container.",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["source", "target"],
+                    "properties": {
+                      "source": { "type": "string", "minLength": 1 },
+                      "target": { "type": "string", "pattern": "^/", "minLength": 2 },
+                      "secret": { "type": "boolean", "description": "Force private 0700/0600 modes for the distributed tree." },
+                      "owner": { "type": "string", "pattern": "^[0-9]+(:[0-9]+)?$", "description": "Numeric uid or uid:gid that owns the published tree; defaults to a numeric service user or root." }
+                    }
+                  }
                 },
                 "backup": {
                   "type": "object",
@@ -522,9 +650,10 @@
                   "type": "string",
                   "enum": [
                     "service",
-                    "job"
+                    "job",
+                    "run"
                   ],
-                  "description": "Workload kind: service (default, long-running) or job (command run on a cron schedule by takod on one owning node)."
+                  "description": "Workload kind: service (default), job (cron schedule), or run (fingerprinted deploy-time run-to-completion step)."
                 },
                 "schedule": {
                   "type": "string",
@@ -536,7 +665,7 @@
                 },
                 "timeout": {
                   "type": "string",
-                  "description": "kind: job only. Duration such as 30m to kill a job run after (default 1h)."
+                  "description": "kind: job or kind: run only. Duration such as 30m to kill an execution after (default 1h)."
                 },
                 "resources": {
                   "type": "object",
@@ -670,8 +799,18 @@
                   "type": "object",
                   "description": "Health check configuration",
                   "properties": {
+                    "command": {
+                      "type": "string",
+                      "maxLength": 4096,
+                      "description": "Docker health command (mutually exclusive with path and tcpPort)."
+                    },
                     "path": {
                       "type": "string"
+                    },
+                    "tcpPort": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
                     },
                     "interval": {
                       "type": "string"
@@ -685,7 +824,12 @@
                     "startPeriod": {
                       "type": "string"
                     }
-                  }
+                  },
+                  "allOf": [
+                    { "not": { "required": ["command", "path"] } },
+                    { "not": { "required": ["command", "tcpPort"] } },
+                    { "not": { "required": ["path", "tcpPort"] } }
+                  ]
                 },
                 "deploy": {
                   "type": "object",
@@ -836,7 +980,10 @@
                   },
                   "description": "Import services from other projects as project.service in the same environment"
                 }
-              }
+              },
+              "allOf": [
+                { "not": { "required": ["envFile", "envFiles"] } }
+              ]
             }
           }
         }

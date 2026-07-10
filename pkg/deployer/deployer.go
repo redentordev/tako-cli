@@ -320,14 +320,55 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 	}
 
 	rollbackService := *service
-	options := takodRollbackDeployOptionsForService(service)
-	rollbackService.Image = serviceState.Image
 	rollbackService.Replicas = serviceState.Replicas
 	if serviceState.Port > 0 {
 		rollbackService.Port = serviceState.Port
 	}
+	rollbackService.ImageFrom = serviceState.SharedBuild
+	rollbackService.SharedBuildHash = serviceState.SharedBuildHash
+	options := takodRollbackDeployOptionsForService(service)
+	if serviceState.SharedBuildHash != "" {
+		if serviceState.SharedBuild == "" {
+			return fmt.Errorf("deployment state for %s does not include the shared build name needed for exact rollback", serviceName)
+		}
+		rollbackService.ClearBuild()
+		rollbackService.Image = ""
+		options = takodServiceDeployOptions{}
+		if err := d.EnsurePreparedServiceImage(serviceName, &rollbackService, serviceState.Image); err != nil {
+			return fmt.Errorf("historical shared image is unavailable: %w", err)
+		}
+	}
+	if err := applyRollbackServiceFiles(&rollbackService, serviceState); err != nil {
+		return fmt.Errorf("service %s: %w", serviceName, err)
+	}
+	if serviceState.SharedBuildHash == "" {
+		rollbackService.Image = serviceState.Image
+	}
 
 	return d.deployServiceTakod(serviceName, &rollbackService, serviceState.Image, options)
+}
+
+func applyRollbackServiceFiles(service *config.ServiceConfig, serviceState *state.ServiceState) error {
+	if serviceState.FilesContentHash == "" {
+		service.Files = nil
+		service.FilesContentHash = ""
+		service.ReuseFiles = false
+		return nil
+	}
+	if len(serviceState.Files) == 0 {
+		return fmt.Errorf("deployment state does not include operator file mount metadata needed for exact rollback")
+	}
+	service.Files = make([]config.ServiceFileConfig, 0, len(serviceState.Files))
+	for _, file := range serviceState.Files {
+		service.Files = append(service.Files, config.ServiceFileConfig{
+			Target: file.Target,
+			Secret: file.Secret,
+			Owner:  file.Owner,
+		})
+	}
+	service.FilesContentHash = serviceState.FilesContentHash
+	service.ReuseFiles = true
+	return nil
 }
 
 // BuildImage builds a Docker image for a service without deploying it.
@@ -460,14 +501,23 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 
 		endpoint := takodclient.ImageBuildEndpoint(fullImageName, service.Dockerfile)
 		body := io.Reader(archive)
-		if auths := d.registryAuths(); len(auths) > 0 {
+		auths := d.registryAuths()
+		if len(auths) > 0 || len(service.BuildArgs) > 0 || service.BuildTarget != "" {
 			// Credentials ride the body as a JSON preamble line ahead of
 			// the tar stream — never the URL or argv (ADR 10).
-			preamble, err := json.Marshal(map[string]any{"registryAuths": auths})
+			preamble, err := json.Marshal(map[string]any{
+				"registryAuths": auths,
+				"buildArgs":     service.BuildArgs,
+				"target":        service.BuildTarget,
+			})
 			if err != nil {
-				return "", fmt.Errorf("failed to encode registry auth preamble: %w", err)
+				return "", fmt.Errorf("failed to encode build options preamble: %w", err)
 			}
-			endpoint = takodclient.ImageBuildEndpointWithAuth(fullImageName, service.Dockerfile)
+			if len(service.BuildArgs) > 0 || service.BuildTarget != "" {
+				endpoint = takodclient.ImageBuildEndpointWithOptions(fullImageName, service.Dockerfile, len(auths) > 0)
+			} else {
+				endpoint = takodclient.ImageBuildEndpointWithAuth(fullImageName, service.Dockerfile)
+			}
 			body = io.MultiReader(bytes.NewReader(append(preamble, '\n')), archive)
 		}
 

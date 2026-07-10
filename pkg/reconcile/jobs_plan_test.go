@@ -11,7 +11,7 @@ func jobServiceFixture() config.ServiceConfig {
 		Kind:     config.ServiceKindJob,
 		Schedule: "*/5 * * * *",
 		Build:    "./report",
-		Command:  "generate-report",
+		Command:  config.StringValue("generate-report"),
 	}
 }
 

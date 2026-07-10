@@ -180,6 +180,130 @@ func TestExamplesDoNotUseKnownDemoDatabasePasswords(t *testing.T) {
 	}
 }
 
+func TestNativeSentryRecipeLoadsAnchorsAndPreservesProfiles(t *testing.T) {
+	sshKey := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(sshKey, []byte("test-key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	relayCredentials := filepath.Join(t.TempDir(), "relay-credentials.json")
+	if err := os.WriteFile(relayCredentials, []byte(`{"id":"test","public_key":"test","secret_key":"test"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]string{
+		"SERVER_HOST":                        "203.0.113.10",
+		"SSH_KEY":                            sshKey,
+		"SENTRY_BIND":                        "9000",
+		"SENTRY_MAIL_HOST":                   "sentry.example.test",
+		"SENTRY_EVENT_RETENTION_DAYS":        "90",
+		"SENTRY_MAX_EXTERNAL_SOURCEMAP_SIZE": "1M",
+		"SENTRY_KAFKA_MAX_POLL_INTERVAL_MS":  "300000",
+		"SENTRY_TASKWORKER_CONCURRENCY":      "4",
+		"SENTRY_RELAY_CREDENTIALS_FILE":      relayCredentials,
+	} {
+		t.Setenv(key, value)
+	}
+
+	cfg := loadPatternConfig(t, filepath.Join("sentry", "tako.yaml"))
+	production := cfg.Environments["production"].Services
+	feature := cfg.Environments["feature-complete"].Services
+	assertSentryProfileCounts(t, "production", production, 31, 3)
+	assertSentryProfileCounts(t, "feature-complete", feature, 72, 4)
+
+	if got := production["snuba-outcomes-consumer"].Image; got != "ghcr.io/getsentry/snuba:26.6.0" {
+		t.Fatalf("YAML service merge did not inherit Snuba image: %q", got)
+	}
+	if got := production["seaweedfs-admin"].Env["AWS_ACCESS_KEY_ID"]; got != "sentry" {
+		t.Fatalf("nested YAML alias did not inherit environment: %q", got)
+	}
+	if got := production["attachments-consumer"].ImageFrom; got != "sentry" {
+		t.Fatalf("YAML service merge did not inherit shared image: %q", got)
+	}
+	if got := feature["events-consumer"].Env["COMPOSE_PROFILES"]; got != "feature-complete" {
+		t.Fatalf("feature profile flag = %q", got)
+	}
+	for profile, services := range map[string]map[string]config.ServiceConfig{"production": production, "feature-complete": feature} {
+		for name, service := range services {
+			isSentry := service.ImageFrom == "sentry"
+			isSnuba := strings.Contains(service.Image, "/snuba:26.6.0")
+			if (isSentry || isSnuba) && service.Command.IsSet() && !service.Command.IsList() {
+				t.Fatalf("%s %s command must use argv list form with its image entrypoint", profile, name)
+			}
+		}
+	}
+	if production["taskscheduler"].HealthCheck.Command != "" || feature["taskscheduler"].HealthCheck.Command != "" {
+		t.Fatal("taskscheduler must not inherit the consumer heartbeat health check")
+	}
+	if feature["launchpad-taskworker"].HealthCheck.Command == "" {
+		t.Fatal("launchpad taskworker is missing its heartbeat health check")
+	}
+	if _, ok := feature["snuba-profiling-profiles-consumer"]; !ok {
+		t.Fatal("feature-complete profile missing profiling consumer")
+	}
+
+	for _, run := range []string{"snuba-bootstrap", "sentry-upgrade", "s3-nodestore-bootstrap"} {
+		if production[run].Kind != config.ServiceKindRun {
+			t.Fatalf("%s is not a deploy-time run", run)
+		}
+	}
+	if feature["s3-profiles-bootstrap"].Kind != config.ServiceKindRun {
+		t.Fatal("feature-complete profile missing profiles bucket run")
+	}
+	if build, ok := cfg.Builds["sentry"]; !ok || !strings.Contains(build.Args["SENTRY_IMAGE"], "26.6.0") {
+		t.Fatalf("shared Sentry build is not pinned: %#v", build)
+	}
+	for _, name := range []string{"sentry-data", "sentry-postgres", "sentry-redis", "sentry-kafka", "sentry-clickhouse", "sentry-seaweedfs"} {
+		if !cfg.Volumes[name].External {
+			t.Fatalf("durable volume %s is not external", name)
+		}
+	}
+}
+
+func assertSentryProfileCounts(t *testing.T, profile string, services map[string]config.ServiceConfig, workloads, runs int) {
+	t.Helper()
+	gotRuns := 0
+	for _, service := range services {
+		if service.IsRun() {
+			gotRuns++
+		}
+	}
+	if gotRuns != runs || len(services)-gotRuns != workloads {
+		t.Fatalf("%s profile = %d workloads + %d runs, want %d + %d", profile, len(services)-gotRuns, gotRuns, workloads, runs)
+	}
+}
+
+func TestNativeSentryRecipeDocumentsUnsupportedOperatingBoundary(t *testing.T) {
+	readme := readExampleFile(t, filepath.Join("sentry", "README.md"))
+	upgrade := readExampleFile(t, filepath.Join("sentry", "UPGRADE.md"))
+	for _, expected := range []string{
+		"not a supported Sentry",
+		"2 CPU and 7 GB RAM",
+		"4 CPU and 14 GB RAM",
+		"SSE4.2",
+		"1-2 operator hours",
+		"Relay credentials",
+		"external: true",
+		"old consumers can therefore overlap briefly",
+		"Kafka buffers",
+		"`stops:` primitive is intentionally deferred",
+	} {
+		if !strings.Contains(readme, expected) {
+			t.Fatalf("Sentry README missing %q", expected)
+		}
+	}
+	for _, expected := range []string{
+		"26.6.0 -> <next-tag>",
+		"install.sh",
+		"stateful/manual",
+		"stop-world migration",
+		"make validate-examples",
+		"rollback cannot reverse a",
+	} {
+		if !strings.Contains(upgrade, expected) {
+			t.Fatalf("Sentry upgrade playbook missing %q", expected)
+		}
+	}
+}
+
 func readExampleFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -311,7 +435,7 @@ func assertWorkersPattern(t *testing.T, cfg *config.Config) {
 	services := productionServices(t, cfg)
 	assertPublicService(t, services["api"], 3000)
 	worker := services["worker"]
-	if worker.Port != 0 || worker.Command == "" || worker.Replicas != 3 {
+	if worker.Port != 0 || !worker.Command.IsSet() || worker.Replicas != 3 {
 		t.Fatalf("worker should be a replicated background command: %#v", worker)
 	}
 	redis := services["redis"]
@@ -322,7 +446,7 @@ func assertWorkersPattern(t *testing.T, cfg *config.Config) {
 
 func assertCronRunnerPattern(t *testing.T, cfg *config.Config) {
 	job := productionServices(t, cfg)["hourly-maintenance"]
-	if !job.IsJob() || job.Schedule == "" || job.Command == "" {
+	if !job.IsJob() || job.Schedule == "" || !job.Command.IsSet() {
 		t.Fatalf("cron runner should be a scheduled kind: job service: %#v", job)
 	}
 	if job.Port != 0 || job.Proxy != nil {

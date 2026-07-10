@@ -127,6 +127,9 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 		return nil, err
 	}
 	defer leaseSet.Release()
+	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
 	leaseSet.SetWarnFunc(func(message string) {
 		e.debug(events.TypeWarning, events.PhaseDeploy, message)
 	})
@@ -143,6 +146,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	}
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, req.Verbose)
+	deploy.SetBaseContext(ctx)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
@@ -160,6 +164,14 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 		return nil, ActualStateError(err)
 	}
 	actual := actualState[serviceName]
+	if len(service.Files) > 0 {
+		_, _, filesHash, err := deploy.PrepareServiceFiles(serviceName, &service)
+		if err != nil {
+			return nil, fmt.Errorf("cannot promote %s: failed to fingerprint operator files: %w", serviceName, err)
+		}
+		service.FilesContentHash = filesHash
+		services[serviceName] = service
+	}
 	targetRevision, err := SelectPromotionRevision(actual, req.Revision)
 	if err != nil {
 		return nil, invalidRequestf("cannot promote %s: %w", serviceName, err)
@@ -194,6 +206,11 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 		Revision:    targetRevision,
 		Image:       targetImage,
 		StartedAt:   startTime,
+	}
+	if service.SharedBuildHash != "" {
+		if err := deploy.EnsurePreparedServiceImage(serviceName, &service, targetImage); err != nil {
+			return nil, fmt.Errorf("failed to prepare exact shared image before promotion: %w", err)
+		}
 	}
 
 	if err := deploy.ActivateTakodServiceRevision(serviceName, &service, targetImage); err != nil {
@@ -358,10 +375,14 @@ func buildPromoteDeployment(
 	cliCommit string,
 ) *remotestate.DeploymentState {
 	serviceState := remotestate.ServiceState{
-		Name:     serviceName,
-		Port:     service.Port,
-		Replicas: service.Replicas,
-		Env:      RedactedEnvKeys(service.Env),
+		Name:             serviceName,
+		SharedBuild:      sharedBuildName(service),
+		SharedBuildHash:  service.SharedBuildHash,
+		FilesContentHash: service.FilesContentHash,
+		Files:            historyServiceFiles(service.Files),
+		Port:             service.Port,
+		Replicas:         service.Replicas,
+		Env:              RedactedEnvKeys(service.Env),
 	}
 	if actual != nil {
 		serviceState.Image = actual.Image

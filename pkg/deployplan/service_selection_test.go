@@ -67,6 +67,20 @@ func TestServicesToDeployForEmptyPlanIncludesOnlyBuildServices(t *testing.T) {
 	}
 }
 
+func TestEmptyPlanRebuildsSharedServicesButSkipsCompletedSharedRun(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"web":     {ImageFrom: "application", SharedBuildHash: "hash"},
+		"migrate": {Kind: config.ServiceKindRun, ImageFrom: "application", SharedBuildHash: "hash", Command: config.ListValue("migrate")},
+	}
+	got := ServicesToDeployForPlan(&reconcile.ReconciliationPlan{}, services, false, false)
+	if _, ok := got["web"]; !ok {
+		t.Fatalf("shared service missing: %#v", got)
+	}
+	if _, ok := got["migrate"]; ok {
+		t.Fatalf("completed shared run selected without fingerprint drift: %#v", got)
+	}
+}
+
 func TestServicesToDeployForPlanIncludesAddsAndUpdatesOnly(t *testing.T) {
 	services := map[string]config.ServiceConfig{
 		"web":    {Build: "."},
@@ -230,6 +244,20 @@ func TestServicesToDeployForPlanForceIncludesAllSelectedServices(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("forced deploy set has %d service(s), want 2: %#v", len(got), got)
+	}
+}
+
+func TestServicesToDeployForPlanForceRerunsCompletedRun(t *testing.T) {
+	run := config.ServiceConfig{Kind: config.ServiceKindRun, Image: "busybox", Command: config.ListValue("true")}
+	services := map[string]config.ServiceConfig{"migrate": run}
+	plan := &reconcile.ReconciliationPlan{Changes: []reconcile.ServiceChange{{Type: reconcile.ChangeNone, ServiceName: "migrate", NewConfig: &run}}}
+	if got := ServicesToDeployForPlan(plan, services, false, false); len(got) != 0 {
+		t.Fatalf("completed run selected without force: %#v", got)
+	}
+	got := ServicesToDeployForPlan(plan, services, true, false)
+	selected, ok := got["migrate"]
+	if !ok || !selected.IsRun() {
+		t.Fatalf("completed run not selected by force: %#v", got)
 	}
 }
 

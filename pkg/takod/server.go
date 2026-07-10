@@ -37,13 +37,18 @@ type Server struct {
 const (
 	takodReadHeaderTimeout         = 5 * time.Second
 	takodMaxJSONBodyBytes          = 16 << 20
+	takodMaxServiceJSONBodyBytes   = 384 << 20
 	DefaultBuildCachePruneInterval = 24 * time.Hour
 	buildCachePruneCommandTimeout  = 30 * time.Minute
 	buildCachePruneMaxInitialDelay = 5 * time.Minute
 )
 
 func decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, takodMaxJSONBodyBytes)
+	return decodeJSONRequestWithLimit(w, r, dst, takodMaxJSONBodyBytes)
+}
+
+func decodeJSONRequestWithLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(dst); err != nil {
 		return err
@@ -60,16 +65,37 @@ func decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst any) error {
 }
 
 type Status struct {
-	Runtime   string         `json:"runtime"`
-	Version   string         `json:"version"`
-	Hostname  string         `json:"hostname"`
-	Socket    string         `json:"socket"`
-	DataDir   string         `json:"dataDir"`
-	StartedAt time.Time      `json:"startedAt"`
-	Now       time.Time      `json:"now"`
-	Node      map[string]any `json:"node,omitempty"`
-	Peers     map[string]any `json:"peers,omitempty"`
+	Runtime      string         `json:"runtime"`
+	Version      string         `json:"version"`
+	Capabilities []string       `json:"capabilities,omitempty"`
+	Hostname     string         `json:"hostname"`
+	Socket       string         `json:"socket"`
+	DataDir      string         `json:"dataDir"`
+	StartedAt    time.Time      `json:"startedAt"`
+	Now          time.Time      `json:"now"`
+	Node         map[string]any `json:"node,omitempty"`
+	Peers        map[string]any `json:"peers,omitempty"`
 }
+
+// CapabilityContainerArgvV1 means reconcile and job payloads preserve the
+// container command/entrypoint argv fields introduced with config exec form.
+const CapabilityContainerArgvV1 = "container.argv-v1"
+
+// CapabilityContainerRuntimeControlsV1 covers user/workdir/stop/init/hosts,
+// ulimits, and shm-size fields on service and job payloads.
+const CapabilityContainerRuntimeControlsV1 = "container.runtime-controls-v1"
+
+// CapabilityImageBuildOptionsV1 means the streamed image builder consumes
+// buildArgs and target from the request preamble.
+const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
+
+// CapabilityExecOneOffControlsV1 covers pull auth, entrypoint, labels, and
+// runtime controls on deploy-time one-off exec requests.
+const CapabilityExecOneOffControlsV1 = "exec.oneoff-controls-v1"
+
+// CapabilityServiceFilesV1 means reconcile, jobs, and one-off execution can
+// atomically publish request-scoped operator file bundles and bind mount them.
+const CapabilityServiceFilesV1 = "service.files-v1"
 
 func NewServer(socket string, dataDir string, version string) *Server {
 	return NewServerWithOptions(socket, dataDir, version, ServerOptions{})
@@ -126,6 +152,8 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/actual", s.handleActual)
 	mux.HandleFunc("/v1/reconcile-service", s.handleReconcileService)
+	mux.HandleFunc("/v1/service-files", s.handleServiceFiles)
+	mux.HandleFunc("/v1/service-files/check", s.handleServiceFilesCheck)
 	mux.HandleFunc("/v1/remove-service", s.handleRemoveService)
 	mux.HandleFunc("/v1/proxy-file", s.handleProxyFile)
 	mux.HandleFunc("/v1/proxy", s.handleProxy)
@@ -332,7 +360,7 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 	defer r.Body.Close()
 
 	var request ReconcileServiceRequest
-	if err := decodeJSONRequest(w, r, &request); err != nil {
+	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxServiceJSONBodyBytes); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -351,6 +379,44 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleServiceFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	var request ServiceFilesRequest
+	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxServiceJSONBodyBytes); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := PublishServiceFiles(r.Context(), request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"fileSetId": request.FileSetID})
+}
+
+func (s *Server) handleServiceFilesCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	var request ServiceFilesCheckRequest
+	if err := decodeJSONRequest(w, r, &request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := CheckServiceFiles(request); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"fileSetId": request.FileSetID})
 }
 
 func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
@@ -950,7 +1016,9 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 
 	body := io.Reader(http.MaxBytesReader(w, r.Body, defaultBuildContextMaxBytes))
 	var auths []RegistryAuth
-	if r.URL.Query().Get("auth") == "preamble" {
+	var buildArgs map[string]string
+	var target string
+	if r.URL.Query().Get("auth") == "preamble" || r.URL.Query().Get("options") == "preamble" {
 		// Credentials ride the body as a single JSON line ahead of the tar
 		// stream: never the query string or argv, never persisted (ADR 10).
 		buffered := bufio.NewReader(body)
@@ -960,17 +1028,25 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var preamble struct {
-			RegistryAuths []RegistryAuth `json:"registryAuths"`
+			RegistryAuths []RegistryAuth    `json:"registryAuths"`
+			BuildArgs     map[string]string `json:"buildArgs"`
+			Target        string            `json:"target"`
 		}
 		if err := json.Unmarshal([]byte(line), &preamble); err != nil {
 			http.Error(w, "invalid registry auth preamble: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		auths = preamble.RegistryAuths
+		buildArgs = preamble.BuildArgs
+		target = preamble.Target
 		body = buffered
 	}
 
-	response, err := BuildImageWithAuth(r.Context(), image, body, auths, dockerfile)
+	response, err := BuildImageWithOptions(r.Context(), image, body, auths, ImageBuildOptions{
+		Dockerfile: dockerfile,
+		BuildArgs:  buildArgs,
+		Target:     target,
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1037,7 +1113,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request ExecRequest
-	if err := decodeJSONRequest(w, r, &request); err != nil {
+	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxServiceJSONBodyBytes); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1119,7 +1195,7 @@ func (s *Server) handleJobsApply(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var request JobsApplyRequest
-	if err := decodeJSONRequest(w, r, &request); err != nil {
+	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxServiceJSONBodyBytes); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1313,13 +1389,14 @@ func (s *Server) handleDiscoveryExports(w http.ResponseWriter, r *http.Request) 
 func (s *Server) Status() Status {
 	hostname, _ := os.Hostname()
 	status := Status{
-		Runtime:   "takod",
-		Version:   s.version,
-		Hostname:  hostname,
-		Socket:    s.socket,
-		DataDir:   s.dataDir,
-		StartedAt: s.startedAt,
-		Now:       time.Now().UTC(),
+		Runtime:      "takod",
+		Version:      s.version,
+		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1},
+		Hostname:     hostname,
+		Socket:       s.socket,
+		DataDir:      s.dataDir,
+		StartedAt:    s.startedAt,
+		Now:          time.Now().UTC(),
 	}
 
 	status.Node = readJSONMap(filepath.Join(s.dataDir, "node.json"))

@@ -58,6 +58,21 @@ func (d *Deployer) buildJobSpec(serviceName string, service *config.ServiceConfi
 	if err != nil {
 		return takod.JobSpec{}, fmt.Errorf("failed to resolve mounts for job %s: %w", serviceName, err)
 	}
+	fileBundles, fileMounts, filesHash, err := d.PrepareServiceFiles(serviceName, service)
+	if err != nil {
+		return takod.JobSpec{}, err
+	}
+	if filesHash != "" {
+		service.FilesContentHash = filesHash
+	}
+	mounts = append(mounts, fileMounts...)
+	fileSetID := ""
+	if filesHash != "" {
+		fileSetID, err = serviceFileSetID(filesHash)
+		if err != nil {
+			return takod.JobSpec{}, err
+		}
+	}
 	timeoutSeconds := 0
 	if strings.TrimSpace(service.Timeout) != "" {
 		parsed, err := time.ParseDuration(service.Timeout)
@@ -72,19 +87,41 @@ func (d *Deployer) buildJobSpec(serviceName string, service *config.ServiceConfi
 	}
 	hash, _ := reconcile.SafeServiceConfigHash(*service)
 	return takod.JobSpec{
-		Name:           serviceName,
-		Schedule:       service.Schedule,
-		Timezone:       service.Timezone,
-		Image:          image,
-		Command:        []string{"sh", "-c", service.Command},
-		EnvFileContent: envContent,
-		Network:        runtimeid.NetworkName(d.config.Project.Name, d.environment),
-		Mounts:         mounts,
-		MemoryLimit:    serviceMemoryLimit(service),
-		CPULimit:       serviceCPULimit(service),
-		TimeoutSeconds: timeoutSeconds,
-		ConfigHash:     hash,
+		Name:               serviceName,
+		Schedule:           service.Schedule,
+		Timezone:           service.Timezone,
+		Image:              image,
+		Command:            service.Command.ContainerCommand(),
+		Entrypoint:         service.Entrypoint.Arguments(),
+		Labels:             copyJobLabels(service.Labels),
+		EnvFileContent:     envContent,
+		Network:            runtimeid.NetworkName(d.config.Project.Name, d.environment),
+		Mounts:             mounts,
+		Files:              fileBundles,
+		FileSetID:          fileSetID,
+		MemoryLimit:        serviceMemoryLimit(service),
+		CPULimit:           serviceCPULimit(service),
+		User:               service.User,
+		WorkingDir:         service.WorkingDir,
+		StopTimeoutSeconds: serviceStopTimeoutSeconds(service),
+		Init:               service.Init,
+		ExtraHosts:         append([]string(nil), service.ExtraHosts...),
+		Ulimits:            copyServiceUlimits(service.Ulimits),
+		ShmSize:            service.ShmSize,
+		TimeoutSeconds:     timeoutSeconds,
+		ConfigHash:         hash,
 	}, nil
+}
+
+func copyJobLabels(labels map[string]string) map[string]string {
+	if len(labels) == 0 {
+		return nil
+	}
+	copy := make(map[string]string, len(labels))
+	for key, value := range labels {
+		copy[key] = value
+	}
+	return copy
 }
 
 // ApplyJobSchedules declaratively reconciles the environment's whole job set
@@ -125,15 +162,67 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 		jobsByNode[owner] = append(jobsByNode[owner], spec)
 	}
 
-	return runTakodNodeActions(targetServers, func(serverName string) error {
+	var argvServers []string
+	var runtimeControlServers []string
+	var fileServers []string
+	for _, serverName := range targetServers {
+		needsArgv := false
+		needsRuntimeControls := false
+		needsFiles := false
+		for _, job := range jobsByNode[serverName] {
+			if len(job.Entrypoint) > 0 {
+				needsArgv = true
+			}
+			if jobSpecNeedsRuntimeControls(job) {
+				needsRuntimeControls = true
+			}
+			if len(job.Files) > 0 {
+				needsFiles = true
+			}
+		}
+		if needsArgv {
+			argvServers = append(argvServers, serverName)
+		}
+		if needsRuntimeControls {
+			runtimeControlServers = append(runtimeControlServers, serverName)
+		}
+		if needsFiles {
+			fileServers = append(fileServers, serverName)
+		}
+	}
+	return runTakodJobApplyPhases(targetServers, func() error {
+		if err := d.preflightTakodCapability(argvServers, takod.CapabilityContainerArgvV1, "container argv payloads"); err != nil {
+			return fmt.Errorf("job entrypoint requires container argv support: %w", err)
+		}
+		if err := d.preflightTakodCapability(runtimeControlServers, takod.CapabilityContainerRuntimeControlsV1, "container runtime controls"); err != nil {
+			return fmt.Errorf("job uses container runtime controls: %w", err)
+		}
+		if err := d.preflightTakodCapability(fileServers, takod.CapabilityServiceFilesV1, "operator file distribution"); err != nil {
+			return fmt.Errorf("job files require operator file support: %w", err)
+		}
+		return nil
+	}, func(serverName string) error {
 		client, err := d.getEnvironmentClient(serverName)
 		if err != nil {
 			return err
 		}
+		jobs := append([]takod.JobSpec(nil), jobsByNode[serverName]...)
+		for i := range jobs {
+			if len(jobs[i].Files) == 0 {
+				continue
+			}
+			if _, err := takodclient.RequestJSONWithTimeoutContext(d.baseContext(), client, d.takodSocket(), "PUT", "/v1/service-files", takod.ServiceFilesRequest{
+				Project: d.config.Project.Name, Environment: d.environment, Service: jobs[i].Name,
+				FileSetID: jobs[i].FileSetID, Files: jobs[i].Files,
+			}, takodclient.StreamRequestTimeout); err != nil {
+				return fmt.Errorf("failed to publish files for job %s on %s: %w", jobs[i].Name, serverName, err)
+			}
+			jobs[i].Files = nil
+		}
 		request := takod.JobsApplyRequest{
 			Project:     d.config.Project.Name,
 			Environment: d.environment,
-			Jobs:        jobsByNode[serverName],
+			Jobs:        jobs,
 		}
 		output, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", takodclient.JobsApplyEndpoint(), request)
 		if err != nil {
@@ -165,4 +254,15 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 		}
 		return nil
 	})
+}
+
+func runTakodJobApplyPhases(targetServers []string, preflight func() error, apply func(string) error) error {
+	if err := preflight(); err != nil {
+		return err
+	}
+	return runTakodNodeActions(targetServers, apply)
+}
+
+func jobSpecNeedsRuntimeControls(spec takod.JobSpec) bool {
+	return spec.User != "" || spec.WorkingDir != "" || spec.StopTimeoutSeconds > 0 || spec.Init || len(spec.ExtraHosts) > 0 || len(spec.Ulimits) > 0 || spec.ShmSize != ""
 }

@@ -1,12 +1,14 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -48,8 +50,13 @@ func EnsureDeployRuntimeSupported(cfg *config.Config) error {
 
 // CleanupViaTakod runs post-deploy cleanup on one node through takod.
 func CleanupViaTakod(client *ssh.Client, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
+	return CleanupViaTakodContext(context.Background(), client, cfg, request)
+}
+
+// CleanupViaTakodContext runs cleanup through takod bounded by ctx.
+func CleanupViaTakodContext(ctx context.Context, client *ssh.Client, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
 	var response takod.CleanupResponse
-	output, err := takodclient.RequestJSON(client, TakodSocketFromConfig(cfg), "POST", "/v1/cleanup", request)
+	output, err := takodclient.RequestJSONWithContext(ctx, client, TakodSocketFromConfig(cfg), "POST", "/v1/cleanup", request)
 	if err != nil {
 		return nil, err
 	}
@@ -64,6 +71,16 @@ func CleanupViaTakod(client *ssh.Client, cfg *config.Config, request takod.Clean
 func CleanupImageRepositories(cfg *config.Config, environment string, services map[string]config.ServiceConfig) []string {
 	seen := make(map[string]bool)
 	for serviceName, service := range services {
+		if service.SharedBuildHash != "" {
+			repository := ImageRepositoryFromRef(deployplan.SharedBuildImageRef(cfg, environment, service.ImageFrom, ""))
+			if repository != "" {
+				seen[repository] = true
+			}
+			continue
+		}
+		if service.IsRun() {
+			continue
+		}
 		if service.Build == "" && service.Image != "" {
 			continue
 		}

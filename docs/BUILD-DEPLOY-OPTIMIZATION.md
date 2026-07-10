@@ -34,7 +34,11 @@ app and included first-time create work.
   node. If the exact commit image exists, deploy skips archive creation,
   context upload, and Docker build.
 - Automatic post-deploy cleanup uses `docker image prune -f` for dangling images
-  and `docker builder prune -f --keep-storage 20GB` for BuildKit cache pressure.
+  with a negative `com.docker.compose.project` label filter, and `docker builder
+  prune -f --keep-storage 20GB` for BuildKit cache pressure. Explicit project
+  image cleanup also inventories and excludes Compose-labeled images before
+  removing anything. Project image deletion requires the engine's exact
+  repository allowlist; takod does not infer ownership from repository names.
   The builder cache threshold avoids clearing the whole shared cache after every
   deploy while still preventing unbounded cache growth.
 - The installed takod service also schedules Docker builder cache pruning every

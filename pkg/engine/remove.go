@@ -236,12 +236,15 @@ func (s *RemoveSession) Apply(ctx context.Context) (*RemoveResult, error) {
 		e.debug(events.TypeWarning, events.PhaseDeploy, message)
 	})
 	defer leaseSet.Release()
+	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
 	e.debug(events.TypeLogLine, events.PhaseCleanup, fmt.Sprintf("→ Acquired remote remove leases: %s\n", leaseSet.Summary()))
 
 	e.info(events.TypeLogLine, events.PhaseCleanup, fmt.Sprintf("→ Reconciling cleanup through takod on %d node(s)...\n", len(s.serverNames)))
 	request := RemoveCleanupRequest(cfg, envName, s.services)
 	outcomes := collectCleanupNodeOutcomes(s.servers, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
-		return cleanupNodeViaTakod(cfg, sshPool, serverCfg, request)
+		return cleanupNodeViaTakod(ctx, cfg, sshPool, serverCfg, request)
 	})
 
 	var failures []string
@@ -409,10 +412,10 @@ func collectCleanupNodeOutcomes(servers map[string]config.ServerConfig, action f
 
 // cleanupNodeViaTakod connects to one node and runs the cleanup request
 // through takod.
-func cleanupNodeViaTakod(cfg *config.Config, pool *ssh.Pool, serverCfg config.ServerConfig, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
+func cleanupNodeViaTakod(ctx context.Context, cfg *config.Config, pool *ssh.Pool, serverCfg config.ServerConfig, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
 	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
 	if err != nil {
 		return nil, &ConnectivityError{Server: serverCfg.Host, Err: fmt.Errorf("failed to connect: %w", err)}
 	}
-	return CleanupViaTakod(client, cfg, request)
+	return CleanupViaTakodContext(ctx, client, cfg, request)
 }

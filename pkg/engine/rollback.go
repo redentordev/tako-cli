@@ -118,6 +118,10 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	if _, exists := services[req.Service]; !exists {
 		return nil, invalidRequestf("service %s not found in environment %s", req.Service, envName)
 	}
+	rollbackService := services[req.Service]
+	if rollbackService.IsRun() || rollbackService.IsJob() {
+		return nil, invalidRequestf("service %s is kind: %s and cannot be rolled back as a long-running service", req.Service, rollbackService.Kind)
+	}
 
 	envServers, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
@@ -146,6 +150,9 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 		return nil, err
 	}
 	defer leaseSet.Release()
+	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
 	leaseSet.SetWarnFunc(func(message string) {
 		e.debug(events.TypeWarning, events.PhaseDeploy, message)
 	})
@@ -238,6 +245,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	}
 
 	deploy := deployer.NewDeployerWithPool(client, cfg, envName, sshPool, req.Verbose)
+	deploy.SetBaseContext(ctx)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(envServers); err != nil {
 		return nil, err
@@ -461,7 +469,16 @@ func RollbackProxyInputs(
 ) (map[string]config.ServiceConfig, map[string]string, map[string]string) {
 	desiredServices := CloneServiceMap(services)
 	rollbackConfig := desiredServices[rollbackService]
-	rollbackConfig.Image = serviceState.Image
+	if serviceState.SharedBuildHash != "" {
+		rollbackConfig.ClearBuild()
+		rollbackConfig.Image = ""
+		rollbackConfig.ImageFrom = serviceState.SharedBuild
+		rollbackConfig.SharedBuildHash = serviceState.SharedBuildHash
+	} else {
+		rollbackConfig.Image = serviceState.Image
+		rollbackConfig.ImageFrom = ""
+		rollbackConfig.SharedBuildHash = ""
+	}
 	rollbackConfig.Replicas = serviceState.Replicas
 	if serviceState.Port > 0 {
 		rollbackConfig.Port = serviceState.Port

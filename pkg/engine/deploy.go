@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,11 +52,12 @@ type DeploySession struct {
 	dirtyStatus string
 	buildTag    string
 
-	allServices map[string]config.ServiceConfig
-	services    map[string]config.ServiceConfig
-	serverNames []string
-	servers     map[string]config.ServerConfig
-	actualState map[string]*reconcile.ActualService
+	allServices  map[string]config.ServiceConfig
+	services     map[string]config.ServiceConfig
+	serverNames  []string
+	servers      map[string]config.ServerConfig
+	actualState  map[string]*reconcile.ActualService
+	actualByNode map[string]map[string]*reconcile.ActualService
 
 	archiveDir    string
 	stateLock     *localstate.StateLock
@@ -115,6 +117,7 @@ func (r *DeployRequest) workDirOrDefault() string {
 // leases, gathers running state, and computes the reconciliation plan. The
 // returned session must be Closed; call Apply to execute the plan.
 func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySession, error) {
+	defer e.flushBuildOutput()
 	if req.Config == nil {
 		return nil, invalidRequestf("deploy request requires a loaded config")
 	}
@@ -225,6 +228,11 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 			e.RegisterSecret(value)
 		}
 	}
+	for _, build := range cfg.Builds {
+		for _, value := range build.Args {
+			e.RegisterSecret(value)
+		}
+	}
 	e.registerServiceSecretValues(session.envName, allServices)
 	for _, server := range cfg.Servers {
 		e.RegisterSecret(server.Password)
@@ -291,6 +299,9 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		return nil, err
 	}
 	session.leases = leaseSet
+	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
 	leaseSet.SetWarnFunc(func(message string) {
 		e.debug(events.TypeWarning, events.PhaseDeploy, message)
 	})
@@ -311,9 +322,30 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, session.envName, session.sshPool, req.Verbose)
 	deploy.SetCLIVersion(e.cliVersion)
 	deploy.SetSkipBuild(req.SkipBuild)
-	if e.buildOutput != nil {
-		deploy.SetOutput(e.buildOutput)
+	if output := e.buildOutputWriter(); output != nil {
+		deploy.SetOutput(output)
 	}
+	allServices, err = prepareServiceFileHashes(deploy, allServices)
+	if err != nil {
+		return nil, err
+	}
+	if req.Service == "" {
+		services = allServices
+	} else {
+		services, err = prepareServiceFileHashes(deploy, services)
+		if err != nil {
+			return nil, err
+		}
+	}
+	services, err = prepareRunInputHashes(deploy, services)
+	if err != nil {
+		return nil, err
+	}
+	for name, service := range services {
+		allServices[name] = service
+	}
+	session.services = services
+	session.allServices = allServices
 	deploy.SetEventSink(e.stream)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
@@ -347,11 +379,66 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 
 	// Gather actual state from running containers across the selected mesh nodes.
-	actualState, err := reconcile.GatherActualStateFromServers(session.sshPool, cfg, session.envName, serverNames, localStateMgr)
+	actualByNode, err := reconcile.GatherActualStateByServer(session.sshPool, cfg, session.envName, serverNames)
 	if err != nil {
 		return nil, ActualStateError(err)
 	}
+	actualState := reconcile.AggregateActualStateByServer(actualByNode)
+	session.actualByNode = actualByNode
 	session.actualState = actualState
+	planImageRefs := deployplan.DefaultDeployImageRefs(cfg, session.envName, allServices, session.buildTag)
+	if req.Service != "" {
+		if targeted, ok := services[req.Service]; ok && targeted.IsRun() && targeted.ImageFrom != "" && targeted.SharedBuildHash == "" {
+			sourceConfig := allServices[targeted.ImageFrom]
+			if source := actualState[targeted.ImageFrom]; source != nil && source.Image != "" {
+				planImageRefs[targeted.ImageFrom] = source.Image
+			} else if sourceConfig.Build != "" {
+				return nil, fmt.Errorf("targeted run %s needs a deployed image from build-backed service %s; deploy that service first or run a full deploy", req.Service, targeted.ImageFrom)
+			}
+		}
+	}
+	planServices, err := prepareRunPlanServices(services, allServices, planImageRefs)
+	if err != nil {
+		return nil, err
+	}
+	runPrerequisites := map[string]config.ServiceConfig{}
+	if req.Service != "" {
+		runPrerequisites = targetRunPrerequisites(allServices, req.Service)
+		runPrerequisites, err = prepareRunInputHashes(deploy, runPrerequisites)
+		if err != nil {
+			return nil, err
+		}
+		for name, prerequisite := range runPrerequisites {
+			if prerequisite.ImageFrom == "" || prerequisite.SharedBuildHash != "" {
+				continue
+			}
+			source := allServices[prerequisite.ImageFrom]
+			if source.Build != "" {
+				deployed := actualState[prerequisite.ImageFrom]
+				if deployed == nil || deployed.Image == "" {
+					return nil, fmt.Errorf("targeted service %s requires deploy-time run %s, but its build-backed imageFrom service %s is not deployed; run a full deploy first", req.Service, name, prerequisite.ImageFrom)
+				}
+				planImageRefs[prerequisite.ImageFrom] = deployed.Image
+			}
+		}
+		runPrerequisites, err = prepareRunPlanServices(runPrerequisites, allServices, planImageRefs)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if HasRunServices(planServices) || len(runPrerequisites) > 0 {
+		history, historyErr := session.stateManager.LoadHistoryContext(ctx)
+		if historyErr != nil && !errors.Is(historyErr, remotestate.ErrNotFound) {
+			return nil, fmt.Errorf("failed to load deploy-time run history: %w", historyErr)
+		}
+		addRunHistoryActual(actualState, planServices, history)
+		if err := ensureRunPrerequisitesCompleted(req.Service, runPrerequisites, history); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateRunKindTransitions(planServices, actualState); err != nil {
+		return nil, err
+	}
 	if len(actualState) > 0 {
 		e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("  Found %d running service(s)\n", len(actualState)))
 	}
@@ -362,11 +449,12 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 
 	// Compute reconciliation plan.
-	plan := reconcile.ComputePlan(cfg.Project.Name, session.envName, services, planActualState)
+	plan := reconcile.ComputePlan(cfg.Project.Name, session.envName, planServices, planActualState)
 	session.plan = plan
 
 	planDoc := newDeployPlanDocument(cfg.Project.Name, session.envName, plan, services)
 	planDoc.Revision = session.buildTag
+	planDoc.SharedBuilds = planSharedBuilds(cfg, session.envName, session.buildTag, services)
 	planDoc.Source = sourceInfo.StateSource
 	planDoc.Servers = append([]string(nil), serverNames...)
 	planDoc.Services = sortedServiceNames(services)
@@ -438,9 +526,16 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		return nil, fmt.Errorf("deploy session was already applied")
 	}
 	s.applied = true
+	leaseCtx, cancelLeaseContext := s.leases.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
+	if err := s.leases.Err(); err != nil {
+		return nil, err
+	}
 	s.deployer.SetBaseContext(ctx)
 
 	e := s.engine
+	defer e.flushBuildOutput()
 	req := s.req
 	cfg := s.cfg
 	envName := s.envName
@@ -560,9 +655,32 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	deploymentFailed := false
 	var deploymentError error
 	imageRefs := deployplan.DefaultDeployImageRefs(cfg, envName, services, s.buildTag)
+	allImageRefs := deployplan.DefaultDeployImageRefs(cfg, envName, s.allServices, s.buildTag)
+	if req.Service != "" {
+		if targeted, ok := services[req.Service]; ok && targeted.IsRun() && targeted.ImageFrom != "" && targeted.SharedBuildHash == "" {
+			if source := actualState[targeted.ImageFrom]; source != nil && source.Image != "" {
+				allImageRefs[targeted.ImageFrom] = source.Image
+			}
+		}
+	}
+	for name, service := range services {
+		if !service.IsRun() {
+			continue
+		}
+		resolved, _, err := resolveRunImage(service, s.allServices, allImageRefs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve run %s image: %w", name, err)
+		}
+		imageRefs[name] = resolved
+		allImageRefs[name] = resolved
+	}
 
 	// Resolve service deployment order based on dependencies.
-	resolver := dependency.NewResolver(services, req.Verbose)
+	resolverServices := services
+	if req.Service != "" {
+		resolverServices = s.allServices
+	}
+	resolver := dependency.NewResolver(resolverServices, req.Verbose)
 	inferredDeps := resolver.InferDependencies()
 	resolver.MergeDependencies(inferredDeps)
 	deploymentOrder, err := resolver.ResolveOrder()
@@ -574,9 +692,19 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		return nil, fmt.Errorf("failed to record started deployment state before applying mutations: %w", err)
 	}
 	e.debug(events.TypeLogLine, events.PhaseState, fmt.Sprintf("→ Recorded in-progress deployment state (%s)\n", deployment.ID))
+	if err := buildSharedImages(s.deployer, cfg, envName, s.buildTag, servicesToDeploy, req.SkipBuild); err != nil {
+		err = fmt.Errorf("%s", e.redactor.Redact(err.Error()))
+		deploymentFailed = true
+		deploymentError = err
+		deployment.Status = remotestate.StatusFailed
+		deployment.Error = err.Error()
+	}
 
 	// Deploy each service through takod placement in dependency order.
 	for _, serviceName := range deploymentOrder {
+		if deploymentFailed {
+			break
+		}
 		if err := ctx.Err(); err != nil {
 			deploymentFailed = true
 			deploymentError = err
@@ -595,6 +723,42 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			Service: serviceName,
 			Message: fmt.Sprintf("→ Deploying service: %s\n", serviceName),
 		})
+		if service.IsRun() {
+			resolvedImage, pullImage, resolveErr := resolveRunImage(service, s.allServices, allImageRefs)
+			if resolveErr != nil {
+				deploymentFailed = true
+				deploymentError = fmt.Errorf("failed to resolve run %s image: %w", serviceName, resolveErr)
+				deployment.Status = remotestate.StatusFailed
+				deployment.Error = deploymentError.Error()
+				result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Action: OutcomeFailed, Error: deploymentError.Error()})
+				break
+			}
+			imageRefs[serviceName] = resolvedImage
+			allImageRefs[serviceName] = resolvedImage
+			var availableImageNodes []string
+			if req.Service != "" && service.ImageFrom != "" && service.SharedBuildHash == "" && s.allServices[service.ImageFrom].Build != "" {
+				availableImageNodes = make([]string, 0)
+				for node, nodeState := range s.actualByNode {
+					if source := nodeState[service.ImageFrom]; source != nil && source.Image == resolvedImage {
+						availableImageNodes = append(availableImageNodes, node)
+					}
+				}
+			}
+			runResult, runErr := s.deployer.RunDeployStepOnNodes(serviceName, &service, resolvedImage, pullImage, availableImageNodes)
+			outcome := runOutcome(runResult)
+			if runErr != nil {
+				result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: resolvedImage, Action: OutcomeFailed, Error: runErr.Error(), Run: outcome})
+				deploymentFailed = true
+				deploymentError = fmt.Errorf("deploy-time run failed for %s: %w", serviceName, runErr)
+				deployment.Status = remotestate.StatusFailed
+				deployment.Error = runErr.Error()
+				deployment.Services[serviceName] = runHistoryServiceState(serviceName, service, resolvedImage, runResult)
+				break
+			}
+			result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: resolvedImage, Action: OutcomeRan, Run: outcome})
+			deployment.Services[serviceName] = runHistoryServiceState(serviceName, service, resolvedImage, runResult)
+			continue
+		}
 
 		fullImageName := deployplan.ImageRef(cfg, envName, serviceName, service, s.buildTag)
 		if service.Image != "" {
@@ -602,10 +766,13 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			fullImageName = service.Image
 		}
 		imageRefs[serviceName] = fullImageName
+		allImageRefs[serviceName] = fullImageName
 
 		warmed := deployplan.ShouldWarmManualPromotionService(serviceName, service, actualState)
 		deployErr := error(nil)
-		if warmed {
+		if service.SharedBuildHash != "" {
+			deployErr = s.deployer.DeployPreparedServiceTakod(serviceName, &service, fullImageName, warmed)
+		} else if warmed {
 			deployErr = s.deployer.DeployServiceTakodWarmOnly(serviceName, &service, fullImageName)
 		} else {
 			deployErr = s.deployer.DeployServiceTakod(serviceName, &service, fullImageName)
@@ -642,11 +809,15 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 
 		// Save service state.
 		deployment.Services[serviceName] = remotestate.ServiceState{
-			Name:     serviceName,
-			Image:    fullImageName,
-			Port:     service.Port,
-			Replicas: service.Replicas,
-			Env:      RedactedEnvKeys(service.Env),
+			Name:             serviceName,
+			Image:            fullImageName,
+			SharedBuild:      sharedBuildName(service),
+			SharedBuildHash:  service.SharedBuildHash,
+			FilesContentHash: service.FilesContentHash,
+			Files:            historyServiceFiles(service.Files),
+			Port:             service.Port,
+			Replicas:         service.Replicas,
+			Env:              RedactedEnvKeys(service.Env),
 		}
 	}
 

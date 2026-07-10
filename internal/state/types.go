@@ -31,14 +31,36 @@ type DeploymentState struct {
 
 // ServiceState represents a deployed service's state
 type ServiceState struct {
-	Name        string            `json:"name"`
-	Image       string            `json:"image"`       // Image name with tag
-	ImageID     string            `json:"imageId"`     // Docker image ID
-	ContainerID string            `json:"containerId"` // Running container ID
-	Port        int               `json:"port"`
-	Replicas    int               `json:"replicas"`
-	Env         map[string]string `json:"env"`
-	HealthCheck HealthCheckState  `json:"healthCheck"`
+	Kind             string             `json:"kind,omitempty"`
+	Name             string             `json:"name"`
+	Image            string             `json:"image"` // Image name with tag
+	ConfigHash       string             `json:"configHash,omitempty"`
+	SharedBuild      string             `json:"sharedBuild,omitempty"`
+	SharedBuildHash  string             `json:"sharedBuildHash,omitempty"`
+	FilesContentHash string             `json:"filesContentHash,omitempty"`
+	Files            []ServiceFileState `json:"files,omitempty"`
+	Run              *RunState          `json:"run,omitempty"`
+	ImageID          string             `json:"imageId"`     // Docker image ID
+	ContainerID      string             `json:"containerId"` // Running container ID
+	Port             int                `json:"port"`
+	Replicas         int                `json:"replicas"`
+	Env              map[string]string  `json:"env"`
+	HealthCheck      HealthCheckState   `json:"healthCheck"`
+}
+
+type ServiceFileState struct {
+	Target string `json:"target"`
+	Secret bool   `json:"secret,omitempty"`
+	Owner  string `json:"owner,omitempty"`
+}
+
+// RunState records a completed deploy-time kind:run execution.
+type RunState struct {
+	Command    []string `json:"command"`
+	Server     string   `json:"server"`
+	Image      string   `json:"image"`
+	ExitCode   int      `json:"exitCode"`
+	DurationMs int64    `json:"durationMs"`
 }
 
 // HealthCheckState represents health check status

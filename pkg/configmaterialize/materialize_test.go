@@ -12,6 +12,109 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 )
 
+func TestDesiredServiceToConfigPreservesCommandEntrypointAndLabels(t *testing.T) {
+	service, warnings, err := desiredServiceToConfig("consumer", takoapi.DesiredServiceDocument{
+		Image:          "getsentry/sentry:26.6.0",
+		CommandArgs:    []string{"sentry", "run", "consumer", "errors"},
+		EntrypointArgs: []string{"/etc/sentry/entrypoint.sh", "run"},
+		Labels:         map[string]string{"com.example.role": "consumer"},
+	})
+	if err != nil {
+		t.Fatalf("desiredServiceToConfig returned error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if !service.Command.IsList() || strings.Join(service.Command.Arguments(), "|") != "sentry|run|consumer|errors" {
+		t.Fatalf("command = %#v", service.Command.Arguments())
+	}
+	if !service.Entrypoint.IsList() || strings.Join(service.Entrypoint.Arguments(), "|") != "/etc/sentry/entrypoint.sh|run" {
+		t.Fatalf("entrypoint = %#v", service.Entrypoint.Arguments())
+	}
+	if service.Labels["com.example.role"] != "consumer" {
+		t.Fatalf("labels = %#v", service.Labels)
+	}
+}
+
+func TestDesiredServiceToConfigPreservesRuntimeControlsAndRedactsBuildArgs(t *testing.T) {
+	service, warnings, err := desiredServiceToConfig("web", takoapi.DesiredServiceDocument{
+		Image:           "demo/web:latest",
+		Build:           ".",
+		BuildArgKeys:    []string{"BASE_IMAGE", "TOKEN"},
+		BuildTarget:     "runtime",
+		User:            "1000:1000",
+		WorkingDir:      "/work",
+		StopGracePeriod: "60s",
+		Init:            true,
+		ExtraHosts:      []string{"database:10.0.0.2"},
+		Ulimits:         map[string]takoapi.UlimitDocument{"nofile": {Soft: 262144, Hard: 262144}},
+		ShmSize:         "256m",
+	})
+	if err != nil {
+		t.Fatalf("desiredServiceToConfig: %v", err)
+	}
+	if service.BuildTarget != "runtime" || service.User != "1000:1000" || service.WorkingDir != "/work" || !service.Init || service.ShmSize != "256m" {
+		t.Fatalf("materialized runtime controls = %#v", service)
+	}
+	if service.Ulimits["nofile"].Hard != 262144 || len(service.BuildArgs) != 0 {
+		t.Fatalf("materialized ulimits/build args = %#v / %#v", service.Ulimits, service.BuildArgs)
+	}
+	if len(warnings) != 1 || warnings[0].Code != "build_arg_values_redacted" {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+}
+
+func TestDesiredServiceToConfigRestoresRunImageFromWithoutResolvedImageConflict(t *testing.T) {
+	service, _, err := desiredServiceToConfig("migrate", takoapi.DesiredServiceDocument{
+		Kind: takoapi.KindDesiredServiceDocument, WorkloadKind: config.ServiceKindRun, Image: "demo/app:rev", ImageFrom: "app",
+		CommandArgs: []string{"bin/app", "migrate"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !service.IsRun() || service.Image != "" || service.ImageFrom != "app" || !service.Command.IsList() {
+		t.Fatalf("materialized run = %#v", service)
+	}
+}
+
+func TestDesiredServiceToConfigDoesNotTreatDocumentKindAsWorkloadKind(t *testing.T) {
+	service, _, err := desiredServiceToConfig("web", takoapi.DesiredServiceDocument{
+		Kind: takoapi.KindDesiredServiceDocument, Type: "public", Image: "nginx:alpine", Replicas: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Kind != "" || service.IsRun() || service.IsJob() {
+		t.Fatalf("materialized document identity as workload kind: %#v", service)
+	}
+}
+
+func TestDesiredServiceToConfigRestoresOperatorFileMetadata(t *testing.T) {
+	service, _, err := desiredServiceToConfig("relay", takoapi.DesiredServiceDocument{
+		Image: "getsentry/relay:26.6.0",
+		Files: []takoapi.ServiceFileDocument{{Source: "./relay/credentials.json", Target: "/work/.relay/credentials.json", Secret: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(service.Files) != 1 || !service.Files[0].Secret || service.Files[0].Target != "/work/.relay/credentials.json" {
+		t.Fatalf("materialized files = %#v", service.Files)
+	}
+}
+
+func TestDesiredServiceToConfigReadsLegacyScalarCommand(t *testing.T) {
+	service, _, err := desiredServiceToConfig("worker", takoapi.DesiredServiceDocument{
+		Image: "busybox:latest", Command: "echo legacy",
+	})
+	if err != nil {
+		t.Fatalf("desiredServiceToConfig returned error: %v", err)
+	}
+	command, ok := service.Command.Scalar()
+	if !ok || command != "echo legacy" {
+		t.Fatalf("legacy command = %q scalar=%v", command, ok)
+	}
+}
+
 func TestBuildConfigDesiredOverActualPrecedence(t *testing.T) {
 	desired := baseDesired()
 	desired.Services["web"] = takoapi.DesiredServiceDocument{Image: "desired:image", Replicas: 2, Port: 8080}
@@ -216,6 +319,100 @@ func TestBuildConfigValidationSucceedsRepresentativeSingleServer(t *testing.T) {
 	}
 	if cfg.Environments["production"].Servers[0] != "node1" {
 		t.Fatalf("environment servers = %#v, want node1", cfg.Environments["production"].Servers)
+	}
+}
+
+func TestBuildConfigValidationRoundTripsRunWithoutContainerDefaults(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["migrate"] = takoapi.DesiredServiceDocument{
+		Kind: takoapi.KindDesiredServiceDocument, WorkloadKind: config.ServiceKindRun, Type: config.ServiceKindRun,
+		Image: "busybox:1.36", CommandArgs: []string{"true"}, Replicas: 1,
+		// Compatibility with desired documents written before run defaults were suppressed.
+		Restart: "unless-stopped", DeployStrategy: config.DeployStrategyRecreate,
+	}
+	cfg, _, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err != nil {
+		t.Fatalf("BuildConfig() run roundtrip error = %v", err)
+	}
+	run := cfg.Environments["production"].Services["migrate"]
+	if !run.IsRun() || run.Restart != "" || run.Deploy.Strategy != "" {
+		t.Fatalf("round-tripped run defaults = %#v", run)
+	}
+}
+
+func TestBuildConfigValidationKeepsUnrecoveredOperatorFileWithWarning(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["relay"] = takoapi.DesiredServiceDocument{
+		Image: "getsentry/relay:26.6.0", Replicas: 1,
+		Files: []takoapi.ServiceFileDocument{{Source: "/missing/exported/credentials.json", Target: "/work/.relay/credentials.json", Secret: true, Owner: "1000:1000"}},
+	}
+	cfg, warnings, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err != nil {
+		t.Fatalf("BuildConfig() error = %v", err)
+	}
+	files := cfg.Environments["production"].Services["relay"].Files
+	if len(files) != 1 || files[0].Source != "/missing/exported/credentials.json" || files[0].Owner != "1000:1000" {
+		t.Fatalf("exported files = %#v", files)
+	}
+	if !hasWarning(warnings, "operator_file_content_unrecovered", "relay") {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+}
+
+func TestBuildConfigValidationChecksStaticMetadataForUnrecoveredFiles(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["relay"] = takoapi.DesiredServiceDocument{
+		Image: "getsentry/relay:26.6.0", Replicas: 1,
+		Files: []takoapi.ServiceFileDocument{
+			{Source: "/missing/exported/one", Target: "/work/config"},
+			{Source: "/missing/exported/two", Target: "/work/config"},
+		},
+	}
+	_, _, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err == nil || !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("error = %v, want duplicate target validation", err)
+	}
+}
+
+func TestBuildConfigRestoresSharedBuildDefinitions(t *testing.T) {
+	contextDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(contextDir, "Dockerfile"), []byte("FROM scratch\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	desired := baseDesired()
+	desired.Builds = map[string]takoapi.DesiredBuildDocument{
+		"application": {Context: contextDir, ArgKeys: []string{"BASE", "TOKEN"}, Target: "runtime"},
+	}
+	desired.Services["web"] = takoapi.DesiredServiceDocument{Image: "demo/application:revision", ImageFrom: "application", Replicas: 1}
+	cfg, warnings, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := cfg.Builds["application"]
+	service := cfg.Environments["production"].Services["web"]
+	if build.Context != contextDir || len(build.Args) != 2 || build.Target != "runtime" || service.Image != "" || service.ImageFrom != "application" || service.SharedBuildHash == "" {
+		t.Fatalf("build/service = %#v / %#v", build, service)
+	}
+	if !hasWarning(warnings, "shared_build_arg_values_redacted", "") {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+}
+
+func TestBuildConfigValidationKeepsUnrecoveredSharedBuildContext(t *testing.T) {
+	desired := baseDesired()
+	desired.Builds = map[string]takoapi.DesiredBuildDocument{
+		"application": {Context: "/missing/exported/shared-build", Dockerfile: "docker/Dockerfile"},
+	}
+	desired.Services["web"] = takoapi.DesiredServiceDocument{Image: "demo/application:revision", ImageFrom: "application", Replicas: 1}
+	cfg, warnings, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Builds["application"].Context != "/missing/exported/shared-build" {
+		t.Fatalf("build = %#v", cfg.Builds["application"])
+	}
+	if !hasWarning(warnings, "shared_build_context_unrecovered", "") {
+		t.Fatalf("warnings = %#v", warnings)
 	}
 }
 

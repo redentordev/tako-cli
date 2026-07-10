@@ -385,13 +385,16 @@ func TestDeployArchiveBuildTagDerivesDeterministicTagAndAllowsExplicitRevision(t
 }
 
 func TestApplyDeployImageOverrideSetsImageAndClearsBuild(t *testing.T) {
-	original := config.ServiceConfig{Build: ".", Image: "demo/web:old"}
+	original := config.ServiceConfig{Build: ".", BuildArgs: map[string]string{"BASE": "alpine"}, BuildTarget: "runtime", Dockerfile: "Dockerfile.web", Image: "demo/web:old"}
 	got := applyDeployImageOverride(original, " registry.example.com/web:sha ")
 	if got.Image != "registry.example.com/web:sha" {
 		t.Fatalf("Image = %q, want override", got.Image)
 	}
 	if got.Build != "" {
 		t.Fatalf("Build = %q, want cleared", got.Build)
+	}
+	if len(got.BuildArgs) != 0 || got.BuildTarget != "" || got.Dockerfile != "" {
+		t.Fatalf("structured build options not cleared: %#v", got)
 	}
 	if original.Image != "demo/web:old" || original.Build != "." {
 		t.Fatalf("original service mutated: %#v", original)

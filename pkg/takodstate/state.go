@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
@@ -42,30 +44,56 @@ type DesiredRevision struct {
 	Environment   string                    `json:"environment"`
 	Source        string                    `json:"source"`
 	TargetNodes   []string                  `json:"targetNodes"`
+	Builds        map[string]DesiredBuild   `json:"builds,omitempty"`
 	Services      map[string]DesiredService `json:"services"`
 	Git           GitInfo                   `json:"git,omitempty"`
 	CreatedAt     time.Time                 `json:"createdAt"`
 }
 
+type DesiredBuild struct {
+	Context    string   `json:"context"`
+	ArgKeys    []string `json:"argKeys,omitempty"`
+	Target     string   `json:"target,omitempty"`
+	Dockerfile string   `json:"dockerfile,omitempty"`
+}
+
 type DesiredService struct {
-	Name           string                   `json:"name"`
-	Type           string                   `json:"type"`
-	Image          string                   `json:"image,omitempty"`
-	Build          string                   `json:"build,omitempty"`
-	Command        string                   `json:"command,omitempty"`
-	Port           int                      `json:"port,omitempty"`
-	Replicas       int                      `json:"replicas"`
-	Restart        string                   `json:"restart,omitempty"`
-	Persistent     bool                     `json:"persistent,omitempty"`
-	Placement      *config.PlacementConfig  `json:"placement,omitempty"`
-	Domains        []string                 `json:"domains,omitempty"`
-	Volumes        []string                 `json:"volumes,omitempty"`
-	EnvKeys        []string                 `json:"envKeys,omitempty"`
-	EnvFile        bool                     `json:"envFile,omitempty"`
-	SecretRefs     []string                 `json:"secretRefs,omitempty"`
-	DependsOn      []string                 `json:"dependsOn,omitempty"`
-	HealthCheck    config.HealthCheckConfig `json:"healthCheck,omitempty"`
-	DeployStrategy string                   `json:"deployStrategy,omitempty"`
+	APIVersion      string                         `json:"apiVersion,omitempty"`
+	Kind            string                         `json:"kind,omitempty"`
+	Name            string                         `json:"name"`
+	WorkloadKind    string                         `json:"workloadKind,omitempty"`
+	Type            string                         `json:"type"`
+	Image           string                         `json:"image,omitempty"`
+	ImageFrom       string                         `json:"imageFrom,omitempty"`
+	Build           string                         `json:"build,omitempty"`
+	BuildArgKeys    []string                       `json:"buildArgKeys,omitempty"`
+	BuildTarget     string                         `json:"buildTarget,omitempty"`
+	Command         string                         `json:"command,omitempty"`
+	CommandArgs     []string                       `json:"commandArgs,omitempty"`
+	Entrypoint      string                         `json:"entrypoint,omitempty"`
+	EntrypointArgs  []string                       `json:"entrypointArgs,omitempty"`
+	Labels          map[string]string              `json:"labels,omitempty"`
+	Port            int                            `json:"port,omitempty"`
+	Replicas        int                            `json:"replicas"`
+	Restart         string                         `json:"restart,omitempty"`
+	Persistent      bool                           `json:"persistent,omitempty"`
+	Placement       *config.PlacementConfig        `json:"placement,omitempty"`
+	Domains         []string                       `json:"domains,omitempty"`
+	Volumes         []string                       `json:"volumes,omitempty"`
+	Files           []config.ServiceFileConfig     `json:"files,omitempty"`
+	EnvKeys         []string                       `json:"envKeys,omitempty"`
+	EnvFile         bool                           `json:"envFile,omitempty"`
+	User            string                         `json:"user,omitempty"`
+	WorkingDir      string                         `json:"workingDir,omitempty"`
+	StopGracePeriod string                         `json:"stopGracePeriod,omitempty"`
+	Init            bool                           `json:"init,omitempty"`
+	ExtraHosts      []string                       `json:"extraHosts,omitempty"`
+	Ulimits         map[string]config.UlimitConfig `json:"ulimits,omitempty"`
+	ShmSize         string                         `json:"shmSize,omitempty"`
+	SecretRefs      []string                       `json:"secretRefs,omitempty"`
+	DependsOn       []string                       `json:"dependsOn,omitempty"`
+	HealthCheck     config.HealthCheckConfig       `json:"healthCheck,omitempty"`
+	DeployStrategy  string                         `json:"deployStrategy,omitempty"`
 }
 
 type ActualSnapshot struct {
@@ -151,9 +179,13 @@ func BuildDesiredRevision(cfg *config.Config, environment string, source string,
 		Environment:   environment,
 		Source:        source,
 		TargetNodes:   sortedCopy(targetNodes),
+		Builds:        make(map[string]DesiredBuild, len(cfg.Builds)),
 		Services:      make(map[string]DesiredService, len(services)),
 		Git:           git,
 		CreatedAt:     now,
+	}
+	for name, build := range cfg.Builds {
+		revision.Builds[name] = DesiredBuild{Context: build.DeclaredContext(), ArgKeys: sortedKeys(build.Args), Target: build.Target, Dockerfile: build.Dockerfile}
 	}
 
 	for serviceName, service := range services {
@@ -161,6 +193,8 @@ func BuildDesiredRevision(cfg *config.Config, environment string, source string,
 		if imageRef == "" {
 			if service.Image != "" {
 				imageRef = service.Image
+			} else if _, ok := cfg.Builds[service.ImageFrom]; ok {
+				imageRef = deployplan.SharedBuildImageRef(cfg, environment, service.ImageFrom, "")
 			} else {
 				imageRef = cfg.GetFullImageName(serviceName, environment)
 			}
@@ -598,26 +632,67 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 		domains = sortedCopy(service.Proxy.GetAllDomains())
 	}
 
+	command, commandArgs := stateStringOrList(service.Command)
+	entrypoint, entrypointArgs := stateStringOrList(service.Entrypoint)
 	return DesiredService{
-		Name:           serviceName,
-		Type:           service.GetServiceType(),
-		Image:          imageRef,
-		Build:          service.Build,
-		Command:        service.Command,
-		Port:           service.Port,
-		Replicas:       replicas,
-		Restart:        service.Restart,
-		Persistent:     service.Persistent,
-		Placement:      service.Placement,
-		Domains:        domains,
-		Volumes:        sortedCopy(service.Volumes),
-		EnvKeys:        sortedKeys(service.Env),
-		EnvFile:        service.EnvFile != "",
-		SecretRefs:     sortedCopy(service.Secrets),
-		DependsOn:      sortedCopy(service.DependsOn),
-		HealthCheck:    service.HealthCheck,
-		DeployStrategy: service.Deploy.Strategy,
+		APIVersion:      takoapi.APIVersionCurrent,
+		Kind:            takoapi.KindDesiredServiceDocument,
+		Name:            serviceName,
+		WorkloadKind:    service.Kind,
+		Type:            service.GetServiceType(),
+		Image:           imageRef,
+		ImageFrom:       service.ImageFrom,
+		Build:           service.Build,
+		BuildArgKeys:    sortedKeys(service.BuildArgs),
+		BuildTarget:     service.BuildTarget,
+		Command:         command,
+		CommandArgs:     commandArgs,
+		Entrypoint:      entrypoint,
+		EntrypointArgs:  entrypointArgs,
+		Labels:          cloneStringMap(service.Labels),
+		Port:            service.Port,
+		Replicas:        replicas,
+		Restart:         service.Restart,
+		Persistent:      service.Persistent,
+		Placement:       service.Placement,
+		Domains:         domains,
+		Volumes:         sortedCopy(service.Volumes),
+		Files:           append([]config.ServiceFileConfig(nil), service.Files...),
+		EnvKeys:         sortedKeys(service.Env),
+		EnvFile:         service.EnvFile != "" || len(service.EnvFiles) > 0,
+		User:            service.User,
+		WorkingDir:      service.WorkingDir,
+		StopGracePeriod: service.StopGracePeriod,
+		Init:            service.Init,
+		ExtraHosts:      sortedCopy(service.ExtraHosts),
+		Ulimits:         cloneUlimits(service.Ulimits),
+		ShmSize:         service.ShmSize,
+		SecretRefs:      sortedCopy(service.Secrets),
+		DependsOn:       sortedCopy(service.DependsOn),
+		HealthCheck:     service.HealthCheck,
+		DeployStrategy:  service.Deploy.Strategy,
 	}
+}
+
+func stateStringOrList(value config.StringOrList) (string, []string) {
+	if scalar, ok := value.Scalar(); ok {
+		return scalar, nil
+	}
+	if value.IsList() {
+		return "", value.Arguments()
+	}
+	return "", nil
+}
+
+func cloneUlimits(source map[string]config.UlimitConfig) map[string]config.UlimitConfig {
+	if len(source) == 0 {
+		return nil
+	}
+	copy := make(map[string]config.UlimitConfig, len(source))
+	for name, limit := range source {
+		copy[name] = limit
+	}
+	return copy
 }
 
 func revisionID(revision *DesiredRevision) string {

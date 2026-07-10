@@ -109,6 +109,66 @@ func TestStateManagerReadLeaseContextPassesCanceledContext(t *testing.T) {
 	}
 }
 
+func TestStateManagerRenewLeaseReportsLostHolder(t *testing.T) {
+	client := &fakeStateManagerExecutor{
+		output: `{"acquired":false,"found":true,"message":"lease is held","lease":{"id":"other","projectName":"demo","environment":"production"}}`,
+	}
+	manager := &StateManager{
+		client: client, socket: "/run/tako/takod.sock",
+		projectName: "demo", environment: "production", server: "node-a",
+	}
+	_, err := manager.RenewLeaseContext(context.Background(), &LeaseInfo{
+		ID: "lease-1", Environment: "production", Operation: "deploy", Who: "tester",
+	}, time.Minute)
+	if !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("error = %v, want ErrLeaseLost", err)
+	}
+}
+
+func TestStateManagerRenewLeaseIdentifiesLegacySameHolderResponse(t *testing.T) {
+	client := &fakeStateManagerExecutor{
+		output: `{"acquired":false,"found":true,"message":"lease is held","lease":{"id":"lease-1","projectName":"demo","environment":"production"}}`,
+	}
+	manager := &StateManager{
+		client: client, socket: "/run/tako/takod.sock",
+		projectName: "demo", environment: "production", server: "node-a",
+	}
+	_, err := manager.RenewLeaseContext(context.Background(), &LeaseInfo{
+		ID: "lease-1", Environment: "production", Operation: "deploy", Who: "tester",
+	}, time.Minute)
+	if !errors.Is(err, ErrLeaseRenewalUnsupported) {
+		t.Fatalf("error = %v, want ErrLeaseRenewalUnsupported", err)
+	}
+	if errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("legacy same-holder response must not be reported as lease loss: %v", err)
+	}
+}
+
+func TestStateManagerLeaseRequestsDistinguishAcquireFromRenew(t *testing.T) {
+	client := &fakeStateManagerExecutor{
+		output: `{"acquired":true,"found":true,"lease":{"id":"lease-1","projectName":"demo","environment":"production","operation":"deploy","who":"tester","expiresAt":"2099-01-01T00:00:00Z"}}`,
+	}
+	manager := &StateManager{
+		client: client, socket: "/run/tako/takod.sock",
+		projectName: "demo", environment: "production", server: "node-a",
+	}
+	if _, err := manager.AcquireLeaseContext(context.Background(), "deploy", "production", time.Minute); err != nil {
+		t.Fatalf("AcquireLeaseContext returned error: %v", err)
+	}
+	if strings.Contains(client.input, `"renew": true`) {
+		t.Fatalf("acquire request unexpectedly enabled renewal: %s", client.input)
+	}
+
+	if _, err := manager.RenewLeaseContext(context.Background(), &LeaseInfo{
+		ID: "lease-1", Environment: "production", Operation: "deploy", Who: "tester",
+	}, time.Minute); err != nil {
+		t.Fatalf("RenewLeaseContext returned error: %v", err)
+	}
+	if !strings.Contains(client.input, `"renew": true`) {
+		t.Fatalf("renew request missing renewal marker: %s", client.input)
+	}
+}
+
 func TestReleaseLeaseUsesShortCleanupDeadline(t *testing.T) {
 	client := &fakeStateManagerExecutor{
 		output: `{"released":true}`,
@@ -152,6 +212,7 @@ func TestPruneAndSortDeploymentsDropsNilSortsAndLimits(t *testing.T) {
 
 type fakeStateManagerExecutor struct {
 	output           string
+	input            string
 	startedAt        time.Time
 	deadline         time.Time
 	contextErr       error
@@ -168,6 +229,9 @@ func (f *fakeStateManagerExecutor) ExecuteWithContext(ctx context.Context, cmd s
 
 func (f *fakeStateManagerExecutor) ExecuteWithInput(ctx context.Context, cmd string, input io.Reader) (string, error) {
 	f.captureContext(ctx)
+	if data, err := io.ReadAll(input); err == nil {
+		f.input = string(data)
+	}
 	if f.returnContextErr && f.contextErr != nil {
 		return "", f.contextErr
 	}

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/robfig/cron/v3"
 )
 
@@ -54,23 +55,34 @@ const (
 // the spec at deploy time via /v1/jobs/apply and fires it with its local
 // cron; each run is a fresh one-off container from Image.
 type JobSpec struct {
-	Project     string   `json:"project"`
-	Environment string   `json:"environment"`
-	Name        string   `json:"name"`
-	Schedule    string   `json:"schedule"`
-	Timezone    string   `json:"timezone,omitempty"`
-	Image       string   `json:"image"`
-	Command     []string `json:"command"`
+	Project     string            `json:"project"`
+	Environment string            `json:"environment"`
+	Name        string            `json:"name"`
+	Schedule    string            `json:"schedule"`
+	Timezone    string            `json:"timezone,omitempty"`
+	Image       string            `json:"image"`
+	Command     []string          `json:"command"`
+	Entrypoint  []string          `json:"entrypoint,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
 	// EnvFileContent carries the job's env/secrets; it is written to a 0600
 	// temp file per run and passed via --env-file.
 	EnvFileContent string   `json:"envFileContent,omitempty"`
 	Env            []string `json:"env,omitempty"`
 	// Network attaches run containers; default tako_<project>_<env>.
-	Network        string   `json:"network,omitempty"`
-	Mounts         []string `json:"mounts,omitempty"`
-	MemoryLimit    string   `json:"memoryLimit,omitempty"`
-	CPULimit       string   `json:"cpuLimit,omitempty"`
-	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
+	Network            string                         `json:"network,omitempty"`
+	Mounts             []string                       `json:"mounts,omitempty"`
+	Files              []ServiceFileBundle            `json:"files,omitempty"`
+	FileSetID          string                         `json:"fileSetId,omitempty"`
+	MemoryLimit        string                         `json:"memoryLimit,omitempty"`
+	CPULimit           string                         `json:"cpuLimit,omitempty"`
+	User               string                         `json:"user,omitempty"`
+	WorkingDir         string                         `json:"workingDir,omitempty"`
+	StopTimeoutSeconds int                            `json:"stopTimeoutSeconds,omitempty"`
+	Init               bool                           `json:"init,omitempty"`
+	ExtraHosts         []string                       `json:"extraHosts,omitempty"`
+	Ulimits            map[string]config.UlimitConfig `json:"ulimits,omitempty"`
+	ShmSize            string                         `json:"shmSize,omitempty"`
+	TimeoutSeconds     int                            `json:"timeoutSeconds,omitempty"`
 	// ConfigHash is the deployer's fingerprint of the job's service config,
 	// reported back through actual state for drift/plan comparison.
 	ConfigHash string `json:"configHash,omitempty"`
@@ -237,6 +249,16 @@ func (s *JobScheduler) Apply(ctx context.Context, request JobsApplyRequest) (*Jo
 	sort.Strings(applied)
 	for _, name := range applied {
 		spec := desired[name]
+		if spec.FileSetID != "" {
+			if err := ensureServiceFileSet(spec.Project, spec.Environment, spec.Name, spec.FileSetID); err != nil {
+				return nil, fmt.Errorf("job %s files: %w", spec.Name, err)
+			}
+		}
+		spec.Files = nil
+		desired[name] = spec
+	}
+	for _, name := range applied {
+		spec := desired[name]
 		if err := s.persistSpec(spec); err != nil {
 			return nil, err
 		}
@@ -245,6 +267,14 @@ func (s *JobScheduler) Apply(ctx context.Context, request JobsApplyRequest) (*Jo
 		s.mu.Unlock()
 		if err != nil {
 			return nil, err
+		}
+		s.mu.Lock()
+		running := s.running[jobKey(spec.Project, spec.Environment, spec.Name)]
+		s.mu.Unlock()
+		if !running {
+			if err := cleanupServiceFileVersions(spec.Project, spec.Environment, spec.Name, spec.FileSetID); err != nil {
+				return nil, fmt.Errorf("failed to clean old job files: %w", err)
+			}
 		}
 	}
 
@@ -438,12 +468,22 @@ func (s *JobScheduler) Trigger(ctx context.Context, project string, environment 
 		return fmt.Errorf("invalid job name")
 	}
 	s.mu.Lock()
-	spec, ok := s.specs[jobKey(project, environment, job)]
+	key := jobKey(project, environment, job)
+	spec, ok := s.specs[key]
+	reserved := ok && !s.running[key]
+	if reserved {
+		s.running[key] = true
+	}
 	s.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("job %s is not scheduled for %s/%s on this node", job, project, environment)
 	}
-	record := s.executeJob(ctx, spec, JobTriggerManual, stream)
+	var record JobRunRecord
+	if reserved {
+		record = s.executeReservedJob(ctx, spec, JobTriggerManual, stream)
+	} else {
+		record = s.recordSkippedJob(spec, JobTriggerManual)
+	}
 	if record.Status == JobRunStatusSkipped {
 		return fmt.Errorf("job %s is already running; try again after it finishes", job)
 	}
@@ -456,31 +496,48 @@ func (s *JobScheduler) Trigger(ctx context.Context, project string, environment 
 // skipped and recorded as such without touching the stream.
 func (s *JobScheduler) executeJob(ctx context.Context, spec JobSpec, trigger string, stream io.Writer) JobRunRecord {
 	key := jobKey(spec.Project, spec.Environment, spec.Name)
-	started := time.Now().UTC()
-
 	s.mu.Lock()
 	if s.running[key] {
 		s.mu.Unlock()
-		record := JobRunRecord{
-			Project:     spec.Project,
-			Environment: spec.Environment,
-			Job:         spec.Name,
-			Trigger:     trigger,
-			StartedAt:   started,
-			FinishedAt:  started,
-			ExitCode:    -1,
-			Status:      JobRunStatusSkipped,
-			Output:      "skipped: previous run still in progress",
-		}
-		s.appendRunRecord(record)
-		return record
+		return s.recordSkippedJob(spec, trigger)
 	}
 	s.running[key] = true
 	s.mu.Unlock()
+	return s.executeReservedJob(ctx, spec, trigger, stream)
+}
+
+func (s *JobScheduler) recordSkippedJob(spec JobSpec, trigger string) JobRunRecord {
+	started := time.Now().UTC()
+	record := JobRunRecord{
+		Project:     spec.Project,
+		Environment: spec.Environment,
+		Job:         spec.Name,
+		Trigger:     trigger,
+		StartedAt:   started,
+		FinishedAt:  started,
+		ExitCode:    -1,
+		Status:      JobRunStatusSkipped,
+		Output:      "skipped: previous run still in progress",
+	}
+	s.appendRunRecord(record)
+	return record
+}
+
+// executeReservedJob runs a job whose running reference was acquired while
+// the scheduler spec was still protected by s.mu.
+func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, trigger string, stream io.Writer) JobRunRecord {
+	key := jobKey(spec.Project, spec.Environment, spec.Name)
+	started := time.Now().UTC()
 	defer func() {
 		s.mu.Lock()
 		delete(s.running, key)
+		current, exists := s.specs[key]
 		s.mu.Unlock()
+		keep := ""
+		if exists {
+			keep = current.FileSetID
+		}
+		_ = cleanupServiceFileVersions(spec.Project, spec.Environment, spec.Name, keep)
 	}()
 
 	timeoutSeconds := spec.TimeoutSeconds
@@ -551,11 +608,20 @@ func (s *JobScheduler) executeJob(ctx context.Context, spec JobSpec, trigger str
 func (s *JobScheduler) runScheduledJob(key string) {
 	s.mu.Lock()
 	spec, ok := s.specs[key]
+	reserved := ok && !s.running[key]
+	if reserved {
+		s.running[key] = true
+	}
 	s.mu.Unlock()
 	if !ok {
 		return
 	}
-	record := s.executeJob(context.Background(), spec, JobTriggerSchedule, nil)
+	var record JobRunRecord
+	if reserved {
+		record = s.executeReservedJob(context.Background(), spec, JobTriggerSchedule, nil)
+	} else {
+		record = s.recordSkippedJob(spec, JobTriggerSchedule)
+	}
 	if record.Status != JobRunStatusSucceeded {
 		fmt.Fprintf(os.Stderr, "takod scheduled job %s finished %s (exit %d)\n", key, record.Status, record.ExitCode)
 	}
@@ -589,6 +655,14 @@ func buildJobRunArgs(spec JobSpec, container string, envFile string) []string {
 		"--label", "tako.runtime=takod",
 		"--label", jobRoleLabel,
 	}
+	labelKeys := make([]string, 0, len(spec.Labels))
+	for key := range spec.Labels {
+		labelKeys = append(labelKeys, key)
+	}
+	sort.Strings(labelKeys)
+	for _, key := range labelKeys {
+		args = append(args, "--label", key+"="+spec.Labels[key])
+	}
 	if envFile != "" {
 		args = append(args, "--env-file", envFile)
 	}
@@ -604,7 +678,14 @@ func buildJobRunArgs(spec JobSpec, container string, envFile string) []string {
 	if spec.CPULimit != "" {
 		args = append(args, "--cpus", spec.CPULimit)
 	}
+	args = appendContainerRuntimeArgs(args, spec.User, spec.WorkingDir, spec.StopTimeoutSeconds, spec.Init, spec.ExtraHosts, spec.Ulimits, spec.ShmSize)
+	if len(spec.Entrypoint) > 0 {
+		args = append(args, "--entrypoint", spec.Entrypoint[0])
+	}
 	args = append(args, spec.Image)
+	if len(spec.Entrypoint) > 1 {
+		args = append(args, spec.Entrypoint[1:]...)
+	}
 	args = append(args, spec.Command...)
 	return args
 }
@@ -634,8 +715,22 @@ func validateJobSpec(spec *JobSpec) error {
 	if _, err := parser.Parse(jobCronSpec(*spec)); err != nil {
 		return fmt.Errorf("invalid schedule: %w", err)
 	}
-	if len(spec.Command) == 0 || strings.TrimSpace(spec.Command[0]) == "" {
+	if err := validateContainerArgv("command", spec.Command); err != nil {
+		return err
+	}
+	if len(spec.Command) == 0 {
 		return fmt.Errorf("command is required")
+	}
+	if err := validateContainerArgv("entrypoint", spec.Entrypoint); err != nil {
+		return err
+	}
+	if err := validateDockerLabels(spec.Labels); err != nil {
+		return fmt.Errorf("invalid label: %w", err)
+	}
+	for key := range spec.Labels {
+		if strings.HasPrefix(key, "tako.") {
+			return fmt.Errorf("invalid label: %q uses reserved tako. prefix", key)
+		}
 	}
 	if spec.Image == "" {
 		return fmt.Errorf("image is required")
@@ -656,6 +751,16 @@ func validateJobSpec(spec *JobSpec) error {
 			return fmt.Errorf("invalid mount value")
 		}
 	}
+	if err := validateServiceFileBundles(spec.Files); err != nil {
+		return err
+	}
+	if spec.FileSetID != "" {
+		if err := validateServiceFileSetID(spec.FileSetID); err != nil {
+			return err
+		}
+	} else if len(spec.Files) > 0 {
+		return fmt.Errorf("fileSetId is required when job files are present")
+	}
 	if spec.TimeoutSeconds < 0 || spec.TimeoutSeconds > maxExecTimeoutSeconds {
 		return fmt.Errorf("timeoutSeconds must be between 0 and %d", maxExecTimeoutSeconds)
 	}
@@ -667,6 +772,9 @@ func validateJobSpec(spec *JobSpec) error {
 	}
 	if spec.CPULimit != "" && !isSafeDockerCPULimit(spec.CPULimit) {
 		return fmt.Errorf("invalid cpu limit")
+	}
+	if err := validateContainerRuntimeControls(spec.User, spec.WorkingDir, spec.StopTimeoutSeconds, spec.ExtraHosts, spec.Ulimits, spec.ShmSize); err != nil {
+		return err
 	}
 	return nil
 }
@@ -756,12 +864,18 @@ func (s *JobScheduler) removeJob(project string, environment string, name string
 		delete(s.entries, key)
 	}
 	delete(s.specs, key)
+	running := s.running[key]
 	s.mu.Unlock()
 	if err := os.Remove(jobSpecPath(s.dataDir, project, environment, name)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove job spec: %w", err)
 	}
 	if err := os.Remove(jobRunsPath(s.dataDir, project, environment, name)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove job run history: %w", err)
+	}
+	if !running {
+		if err := removeServiceFiles(project, environment, name); err != nil {
+			return fmt.Errorf("failed to remove job files: %w", err)
+		}
 	}
 	return nil
 }

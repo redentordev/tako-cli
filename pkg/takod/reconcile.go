@@ -2,16 +2,21 @@ package takod
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
 var (
@@ -21,38 +26,67 @@ var (
 
 const (
 	maxHealthRetries      = 100
-	maxHealthWaitAttempts = 600
+	maxHealthWaitAttempts = 24 * 60 * 60
 	maxHealthFieldBytes   = 4096
 	maxHealthDuration     = 24 * time.Hour
 	maxDockerVolumeName   = 255
 )
 
 type ReconcileServiceRequest struct {
-	Project            string                  `json:"project"`
-	Environment        string                  `json:"environment"`
-	Service            string                  `json:"service"`
-	Revision           string                  `json:"revision,omitempty"`
-	DeployStrategy     string                  `json:"deployStrategy,omitempty"`
-	Image              string                  `json:"image"`
-	PullImage          bool                    `json:"pullImage,omitempty"`
-	Restart            string                  `json:"restart,omitempty"`
-	Network            string                  `json:"network"`
-	NetworkAlias       string                  `json:"networkAlias,omitempty"`
-	NetworkAttachments []NetworkAttachmentSpec `json:"networkAttachments,omitempty"`
-	EnvFile            string                  `json:"envFile,omitempty"`
-	EnvFileContent     string                  `json:"envFileContent,omitempty"`
-	Labels             map[string]string       `json:"labels,omitempty"`
-	Mounts             []string                `json:"mounts,omitempty"`
-	ExternalVolumes    []string                `json:"externalVolumes,omitempty"`
-	Containers         []ContainerSpec         `json:"containers"`
-	Health             *HealthSpec             `json:"health,omitempty"`
-	Command            string                  `json:"command,omitempty"`
-	MemoryLimit        string                  `json:"memoryLimit,omitempty"`
-	CPULimit           string                  `json:"cpuLimit,omitempty"`
+	Project            string                         `json:"project"`
+	Environment        string                         `json:"environment"`
+	Service            string                         `json:"service"`
+	Revision           string                         `json:"revision,omitempty"`
+	DeployStrategy     string                         `json:"deployStrategy,omitempty"`
+	Image              string                         `json:"image"`
+	PullImage          bool                           `json:"pullImage,omitempty"`
+	Restart            string                         `json:"restart,omitempty"`
+	Network            string                         `json:"network"`
+	NetworkAlias       string                         `json:"networkAlias,omitempty"`
+	NetworkAttachments []NetworkAttachmentSpec        `json:"networkAttachments,omitempty"`
+	EnvFile            string                         `json:"envFile,omitempty"`
+	EnvFileContent     string                         `json:"envFileContent,omitempty"`
+	Labels             map[string]string              `json:"labels,omitempty"`
+	Mounts             []string                       `json:"mounts,omitempty"`
+	ExternalVolumes    []string                       `json:"externalVolumes,omitempty"`
+	Files              []ServiceFileBundle            `json:"files,omitempty"`
+	FileSetID          string                         `json:"fileSetId,omitempty"`
+	Containers         []ContainerSpec                `json:"containers"`
+	Health             *HealthSpec                    `json:"health,omitempty"`
+	Command            config.StringOrList            `json:"command,omitempty,omitzero"`
+	Entrypoint         config.StringOrList            `json:"entrypoint,omitempty,omitzero"`
+	MemoryLimit        string                         `json:"memoryLimit,omitempty"`
+	CPULimit           string                         `json:"cpuLimit,omitempty"`
+	User               string                         `json:"user,omitempty"`
+	WorkingDir         string                         `json:"workingDir,omitempty"`
+	StopTimeoutSeconds int                            `json:"stopTimeoutSeconds,omitempty"`
+	Init               bool                           `json:"init,omitempty"`
+	ExtraHosts         []string                       `json:"extraHosts,omitempty"`
+	Ulimits            map[string]config.UlimitConfig `json:"ulimits,omitempty"`
+	ShmSize            string                         `json:"shmSize,omitempty"`
 	// RegistryAuths carries request-scoped pull credentials; they feed an
 	// ephemeral DOCKER_CONFIG for this reconcile only and are never
 	// persisted (ADR 10).
 	RegistryAuths []RegistryAuth `json:"registryAuths,omitempty"`
+}
+
+// ServiceFileBundle is one operator-managed file or directory mounted into a
+// container. Data is request-scoped and is never written to desired state.
+type ServiceFileBundle struct {
+	Name      string             `json:"name"`
+	Target    string             `json:"target"`
+	Directory bool               `json:"directory,omitempty"`
+	Secret    bool               `json:"secret,omitempty"`
+	UID       int                `json:"uid,omitempty"`
+	GID       int                `json:"gid,omitempty"`
+	Entries   []ServiceFileEntry `json:"entries"`
+}
+
+type ServiceFileEntry struct {
+	Path      string `json:"path,omitempty"`
+	Data      []byte `json:"data,omitempty"`
+	Mode      uint32 `json:"mode"`
+	Directory bool   `json:"directory,omitempty"`
 }
 
 type RemoveServiceRequest struct {
@@ -118,6 +152,15 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		req.NetworkAlias = req.Service
 	}
 	req.NetworkAttachments = mergeNetworkAttachments(req.NetworkAttachments)
+	if req.FileSetID != "" {
+		if len(req.Files) > 0 {
+			if err := prepareServiceFiles(ctx, req.Project, req.Environment, req.Service, req.FileSetID, req.Files); err != nil {
+				return nil, err
+			}
+		} else if err := ensureServiceFileSet(req.Project, req.Environment, req.Service, req.FileSetID); err != nil {
+			return nil, err
+		}
+	}
 
 	if len(req.Containers) == 0 {
 		removedContainers, err := removeServiceContainersForReconcile(ctx, req, deployStrategy)
@@ -180,7 +223,6 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 			return nil, err
 		}
 	}
-
 	return &ReconcileServiceResponse{
 		Project:           req.Project,
 		Environment:       req.Environment,
@@ -197,6 +239,11 @@ func RemoveService(ctx context.Context, req RemoveServiceRequest) (*RemoveServic
 	removedContainers, err := removeServiceContainersKeepingRevision(ctx, req.Project, req.Environment, req.Service, req.KeepRevision)
 	if err != nil {
 		return nil, err
+	}
+	if req.KeepRevision == "" {
+		if err := removeServiceFiles(req.Project, req.Environment, req.Service); err != nil {
+			return nil, fmt.Errorf("failed to remove service files: %w", err)
+		}
 	}
 	return &RemoveServiceResponse{
 		Project:           req.Project,
@@ -288,6 +335,9 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 		if err := validateDockerLabels(container.Labels); err != nil {
 			return fmt.Errorf("invalid container label: %w", err)
 		}
+		if err := validateContainerRuntimeLabels(req, container.Labels); err != nil {
+			return err
+		}
 		if takodDeployStrategyUsesRevisionScope(strategy) {
 			if container.Labels["tako.revision"] != "" && container.Labels["tako.revision"] != req.Revision {
 				return fmt.Errorf("container %s revision label %q does not match request revision %q", container.Name, container.Labels["tako.revision"], req.Revision)
@@ -304,11 +354,27 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 			return fmt.Errorf("invalid external volume name")
 		}
 	}
+	if err := validateServiceFileBundles(req.Files); err != nil {
+		return err
+	}
+	if req.FileSetID != "" {
+		if err := validateServiceFileSetID(req.FileSetID); err != nil {
+			return err
+		}
+	} else if len(req.Files) > 0 {
+		return fmt.Errorf("fileSetId is required when service files are present")
+	}
 	if err := validateDockerLabels(req.Labels); err != nil {
 		return fmt.Errorf("invalid label: %w", err)
 	}
-	if req.Command != "" && strings.ContainsRune(req.Command, '\x00') {
-		return fmt.Errorf("command contains unsupported characters")
+	if err := validateRequestRuntimeLabels(req); err != nil {
+		return err
+	}
+	if err := validateContainerArgv("command", req.Command.Arguments()); err != nil {
+		return err
+	}
+	if err := validateContainerArgv("entrypoint", req.Entrypoint.Arguments()); err != nil {
+		return err
 	}
 	if req.MemoryLimit != "" && !isSafeDockerMemoryLimit(req.MemoryLimit) {
 		return fmt.Errorf("invalid memory limit")
@@ -316,8 +382,163 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	if req.CPULimit != "" && !isSafeDockerCPULimit(req.CPULimit) {
 		return fmt.Errorf("invalid cpu limit")
 	}
+	if err := validateContainerRuntimeControls(req.User, req.WorkingDir, req.StopTimeoutSeconds, req.ExtraHosts, req.Ulimits, req.ShmSize); err != nil {
+		return err
+	}
 	if err := validateHealthSpec(req.Health); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateContainerRuntimeControls(user string, workingDir string, stopTimeoutSeconds int, extraHosts []string, ulimits map[string]config.UlimitConfig, shmSize string) error {
+	if len(user) > 256 || strings.HasPrefix(user, "-") || hasControlChars(user) || strings.ContainsAny(user, " \t\r\n") {
+		return fmt.Errorf("invalid user")
+	}
+	if workingDir != "" && (len(workingDir) > 4096 || !path.IsAbs(workingDir) || hasControlChars(workingDir)) {
+		return fmt.Errorf("invalid working directory")
+	}
+	if stopTimeoutSeconds < 0 || stopTimeoutSeconds > int((24*time.Hour)/time.Second) {
+		return fmt.Errorf("invalid stop timeout")
+	}
+	if len(extraHosts) > 128 {
+		return fmt.Errorf("too many extra hosts")
+	}
+	seenHosts := make(map[string]bool, len(extraHosts))
+	for _, entry := range extraHosts {
+		host, address, ok := strings.Cut(entry, ":")
+		if !ok || !isSafeExtraHostName(host) {
+			return fmt.Errorf("invalid extra host")
+		}
+		if address != "host-gateway" && net.ParseIP(strings.Trim(address, "[]")) == nil {
+			return fmt.Errorf("invalid extra host address")
+		}
+		if seenHosts[host] {
+			return fmt.Errorf("duplicate extra host")
+		}
+		seenHosts[host] = true
+	}
+	if len(ulimits) > 64 {
+		return fmt.Errorf("too many ulimits")
+	}
+	for name, limit := range ulimits {
+		if !isSafeUlimitName(name) {
+			return fmt.Errorf("invalid ulimit name")
+		}
+		if limit.Soft <= 0 || limit.Hard <= 0 || limit.Soft > limit.Hard {
+			return fmt.Errorf("invalid ulimit %s", name)
+		}
+	}
+	if shmSize != "" && !isSafeDockerMemoryLimit(shmSize) {
+		return fmt.Errorf("invalid shm size")
+	}
+	return nil
+}
+
+func isSafeUlimitName(name string) bool {
+	if name == "" || len(name) > 64 || name[0] < 'a' || name[0] > 'z' {
+		return false
+	}
+	for _, r := range name[1:] {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeExtraHostName(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for index, r := range host {
+		if index == 0 && !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+		if index > 0 && !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateRequestRuntimeLabels(req ReconcileServiceRequest) error {
+	for key, value := range req.Labels {
+		if !strings.HasPrefix(key, "tako.") {
+			continue
+		}
+		switch key {
+		case runtimeid.ServiceIdentityLabel:
+			want := runtimeid.ServiceIdentity(req.Project, req.Environment, req.Service)
+			if value != want {
+				return fmt.Errorf("runtime identity label does not match request")
+			}
+		case "tako.persistent":
+			if _, err := strconv.ParseBool(value); err != nil {
+				return fmt.Errorf("invalid persistent runtime label")
+			}
+		case "tako.configHash":
+			decoded, err := hex.DecodeString(value)
+			if err != nil || len(decoded) != 32 {
+				return fmt.Errorf("invalid config hash runtime label")
+			}
+		default:
+			return fmt.Errorf("request label %q uses reserved tako. prefix", key)
+		}
+	}
+	return nil
+}
+
+func validateContainerRuntimeLabels(req ReconcileServiceRequest, labels map[string]string) error {
+	strategy := normalizeTakodDeployStrategy(req.DeployStrategy)
+	for key, value := range labels {
+		if !strings.HasPrefix(key, "tako.") {
+			continue
+		}
+		switch key {
+		case "tako.revision":
+			if value != req.Revision {
+				return fmt.Errorf("container revision label does not match request")
+			}
+		case "tako.deployStrategy":
+			if normalizeTakodDeployStrategy(value) != strategy {
+				return fmt.Errorf("container deploy strategy label does not match request")
+			}
+		case "tako.slot":
+			slot, err := strconv.Atoi(value)
+			if err != nil || slot <= 0 {
+				return fmt.Errorf("invalid container slot label")
+			}
+		case "tako.active":
+			if _, err := strconv.ParseBool(value); err != nil {
+				return fmt.Errorf("invalid container active label")
+			}
+		default:
+			return fmt.Errorf("container label %q uses reserved tako. prefix", key)
+		}
+	}
+	return nil
+}
+
+func validateContainerArgv(field string, values []string) error {
+	if len(values) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(values[0]) == "" {
+		return fmt.Errorf("%s first argument is empty", field)
+	}
+	if len(values) > 256 {
+		return fmt.Errorf("%s has too many arguments", field)
+	}
+	total := 0
+	for _, value := range values {
+		if hasControlChars(value) {
+			return fmt.Errorf("%s contains unsupported characters", field)
+		}
+		total += len(value)
+	}
+	if total > 64*1024 {
+		return fmt.Errorf("%s is too large", field)
 	}
 	return nil
 }
@@ -485,7 +706,7 @@ func isSafeDockerMemoryLimit(value string) bool {
 	}
 	number := value[:unitStart]
 	unit := value[unitStart:]
-	if number == "" {
+	if number == "" || len(number) > 18 {
 		return false
 	}
 	for i := 0; i < len(number); i++ {
@@ -779,10 +1000,18 @@ func isSafeDockerVolumeName(name string) bool {
 }
 
 func validateDockerLabels(labels map[string]string) error {
+	if len(labels) > 256 {
+		return fmt.Errorf("too many labels")
+	}
+	total := 0
 	for key, value := range labels {
 		if strings.TrimSpace(key) == "" || hasControlChars(key) || hasControlChars(value) {
 			return fmt.Errorf("%q", key)
 		}
+		total += len(key) + len(value)
+	}
+	if total > 64*1024 {
+		return fmt.Errorf("labels are too large")
 	}
 	return nil
 }
@@ -924,6 +1153,13 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 	for key, value := range container.Labels {
 		labels[key] = value
 	}
+	// Identity labels are authoritative even for direct API callers. Custom
+	// request/container labels must never move a container into another Tako
+	// ownership scope.
+	labels["tako.project"] = req.Project
+	labels["tako.environment"] = req.Environment
+	labels["tako.service"] = req.Service
+	labels["tako.runtime"] = "takod"
 	keys := make([]string, 0, len(labels))
 	for key := range labels {
 		keys = append(keys, key)
@@ -949,6 +1185,7 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 	if req.CPULimit != "" {
 		args = append(args, "--cpus", req.CPULimit)
 	}
+	args = appendContainerRuntimeArgs(args, req.User, req.WorkingDir, req.StopTimeoutSeconds, req.Init, req.ExtraHosts, req.Ulimits, req.ShmSize)
 	if req.Health != nil && req.Health.Command != "" {
 		args = append(args, "--health-cmd", req.Health.Command)
 		if req.Health.Interval != "" {
@@ -965,9 +1202,45 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 		}
 	}
 
+	entrypoint := req.Entrypoint.Arguments()
+	if len(entrypoint) > 0 {
+		args = append(args, "--entrypoint", entrypoint[0])
+	}
 	args = append(args, req.Image)
-	if req.Command != "" {
-		args = append(args, "sh", "-c", req.Command)
+	if len(entrypoint) > 1 {
+		args = append(args, entrypoint[1:]...)
+	}
+	args = append(args, req.Command.ContainerCommand()...)
+	return args
+}
+
+func appendContainerRuntimeArgs(args []string, user string, workingDir string, stopTimeoutSeconds int, init bool, extraHosts []string, ulimits map[string]config.UlimitConfig, shmSize string) []string {
+	if user != "" {
+		args = append(args, "--user", user)
+	}
+	if workingDir != "" {
+		args = append(args, "--workdir", workingDir)
+	}
+	if stopTimeoutSeconds > 0 {
+		args = append(args, "--stop-timeout", strconv.Itoa(stopTimeoutSeconds))
+	}
+	if init {
+		args = append(args, "--init")
+	}
+	for _, host := range extraHosts {
+		args = append(args, "--add-host", host)
+	}
+	limitNames := make([]string, 0, len(ulimits))
+	for name := range ulimits {
+		limitNames = append(limitNames, name)
+	}
+	sort.Strings(limitNames)
+	for _, name := range limitNames {
+		limit := ulimits[name]
+		args = append(args, "--ulimit", fmt.Sprintf("%s=%d:%d", name, limit.Soft, limit.Hard))
+	}
+	if shmSize != "" {
+		args = append(args, "--shm-size", shmSize)
 	}
 	return args
 }

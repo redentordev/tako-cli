@@ -1,12 +1,15 @@
 package deployer
 
 import (
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"github.com/redentordev/tako-cli/pkg/takod"
 )
 
 func jobDeployerFixture() (*Deployer, *config.ServiceConfig) {
@@ -25,7 +28,7 @@ func jobDeployerFixture() (*Deployer, *config.ServiceConfig) {
 		Schedule: "*/5 * * * *",
 		Timezone: "Europe/Berlin",
 		Build:    "./report",
-		Command:  "generate-report",
+		Command:  config.StringValue("generate-report"),
 		Timeout:  "30m",
 	}
 	return NewDeployer(nil, cfg, "production", false), service
@@ -60,6 +63,39 @@ func TestBuildJobSpecRendersServiceConfig(t *testing.T) {
 	}
 }
 
+func TestBuildJobSpecPreservesExecCommandEntrypointAndLabels(t *testing.T) {
+	d, service := jobDeployerFixture()
+	service.Command = config.ListValue("report", "--format", "json")
+	service.Entrypoint = config.ListValue("/usr/bin/env", "python3")
+	service.Labels = map[string]string{"com.example.role": "report"}
+	service.User = "1000:1000"
+	service.WorkingDir = "/work"
+	service.StopGracePeriod = "60s"
+	service.Init = true
+	service.ExtraHosts = []string{"database:10.0.0.2"}
+	service.Ulimits = map[string]config.UlimitConfig{"nofile": {Soft: 262144, Hard: 262144}}
+	service.ShmSize = "256m"
+	spec, err := d.buildJobSpec("report", service)
+	if err != nil {
+		t.Fatalf("buildJobSpec: %v", err)
+	}
+	if strings.Join(spec.Command, "|") != "report|--format|json" {
+		t.Fatalf("command = %#v", spec.Command)
+	}
+	if strings.Join(spec.Entrypoint, "|") != "/usr/bin/env|python3" {
+		t.Fatalf("entrypoint = %#v", spec.Entrypoint)
+	}
+	if spec.Labels["com.example.role"] != "report" {
+		t.Fatalf("labels = %#v", spec.Labels)
+	}
+	if spec.User != "1000:1000" || spec.WorkingDir != "/work" || spec.StopTimeoutSeconds != 60 || !spec.Init || spec.ShmSize != "256m" {
+		t.Fatalf("runtime controls = %#v", spec)
+	}
+	if len(spec.ExtraHosts) != 1 || spec.Ulimits["nofile"].Hard != 262144 {
+		t.Fatalf("hosts/ulimits = %#v / %#v", spec.ExtraHosts, spec.Ulimits)
+	}
+}
+
 func TestBuildJobSpecWithoutBuiltImageLeavesImageEmpty(t *testing.T) {
 	d, service := jobDeployerFixture()
 	spec, err := d.buildJobSpec("report", service)
@@ -81,6 +117,77 @@ func TestBuildJobSpecUsesRegistryImage(t *testing.T) {
 	}
 	if spec.Image != "registry.example.com/report:v1" {
 		t.Fatalf("image = %q", spec.Image)
+	}
+}
+
+func TestTakodJobApplyPreflightsAllOwnersBeforeAnyApply(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusJSON string
+		statusErr  error
+	}{
+		{name: "stale", statusJSON: `{"version":"dev"}`},
+		{name: "malformed", statusJSON: `{`},
+		{name: "unreachable", statusErr: fmt.Errorf("takod unavailable")},
+	}
+	targetServers := []string{"node-a", "node-b", "node-c"}
+	entrypointOwners := []string{"node-a", "node-c"}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deploy := &Deployer{config: &config.Config{}}
+			var mu sync.Mutex
+			checked := make(map[string]bool)
+			var applied []string
+			err := runTakodJobApplyPhases(targetServers, func() error {
+				return preflightTakodContainerArgvWithCheck(entrypointOwners, func(serverName string) error {
+					mu.Lock()
+					checked[serverName] = true
+					mu.Unlock()
+					return deploy.ensureTakodContainerArgvCapability(fakeTakodStatusExecutor{
+						output: tt.statusJSON,
+						err:    tt.statusErr,
+					}, serverName)
+				})
+			}, func(serverName string) error {
+				mu.Lock()
+				defer mu.Unlock()
+				applied = append(applied, serverName)
+				return nil
+			})
+			if err == nil {
+				t.Fatal("runTakodJobApplyPhases() succeeded with incompatible owner")
+			}
+			if len(checked) != len(entrypointOwners) {
+				t.Fatalf("preflight checked %v, want every owner %v", checked, entrypointOwners)
+			}
+			if len(applied) != 0 {
+				t.Fatalf("job apply ran after failed preflight: %v", applied)
+			}
+		})
+	}
+}
+
+func TestTakodJobRuntimeControlsPreflightPreventsEveryApply(t *testing.T) {
+	targetServers := []string{"node-a", "node-b"}
+	runtimeOwners := []string{"node-b"}
+	deploy := &Deployer{config: &config.Config{}}
+	var applied []string
+	err := runTakodJobApplyPhases(targetServers, func() error {
+		return preflightTakodContainerArgvWithCheck(runtimeOwners, func(serverName string) error {
+			return deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+				output: `{"capabilities":["container.argv-v1"]}`,
+			}, serverName, takod.CapabilityContainerRuntimeControlsV1, "container runtime controls")
+		})
+	}, func(serverName string) error {
+		applied = append(applied, serverName)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("job apply succeeded with stale runtime-controls agent")
+	}
+	if len(applied) != 0 {
+		t.Fatalf("job apply ran after failed runtime preflight: %v", applied)
 	}
 }
 

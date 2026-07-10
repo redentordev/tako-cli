@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -13,6 +14,15 @@ import (
 
 const DefaultLeaseTTL = 30 * time.Minute
 const leaseReleaseTimeout = 10 * time.Second
+
+// ErrLeaseLost means a renewal could not prove continued ownership of the
+// existing, unexpired holder token.
+var ErrLeaseLost = errors.New("remote lease lost")
+
+// ErrLeaseRenewalUnsupported means the contacted takod predates explicit
+// renewal. The original lease remains valid until its confirmed expiry, which
+// gives normal deploy setup a bounded window to upgrade the agent in place.
+var ErrLeaseRenewalUnsupported = errors.New("takod does not support explicit lease renewal; upgrade takod")
 
 // LeaseInfo describes a remote takod deployment lease.
 type LeaseInfo struct {
@@ -70,6 +80,54 @@ func (s *StateManager) AcquireLeaseContext(ctx context.Context, operation, envir
 	}
 	if response.Lease == nil {
 		return nil, fmt.Errorf("remote lease was acquired but metadata is missing")
+	}
+	return leaseFromTakod(response.Lease), nil
+}
+
+// RenewLease extends a lease still held by the same ID token.
+func (s *StateManager) RenewLease(lease *LeaseInfo, ttl time.Duration) (*LeaseInfo, error) {
+	return s.RenewLeaseContext(context.Background(), lease, ttl)
+}
+
+// RenewLeaseContext extends a lease still held by the same ID token, bounded
+// by ctx. Takod preserves the original holder metadata and creation time.
+func (s *StateManager) RenewLeaseContext(ctx context.Context, lease *LeaseInfo, ttl time.Duration) (*LeaseInfo, error) {
+	if lease == nil || lease.ID == "" {
+		return nil, fmt.Errorf("lease is required")
+	}
+	if ttl <= 0 {
+		ttl = DefaultLeaseTTL
+	}
+	environment := lease.Environment
+	if environment == "" {
+		environment = s.environment
+	}
+	request := takod.LeaseRequest{
+		Project:     s.projectName,
+		Environment: environment,
+		ID:          lease.ID,
+		Operation:   lease.Operation,
+		Who:         lease.Who,
+		PID:         lease.PID,
+		TTLSeconds:  int64(ttl.Seconds()),
+		Renew:       true,
+	}
+	output, err := s.requestJSONContext(ctx, "POST", "/v1/lease", request)
+	if err != nil {
+		return nil, err
+	}
+	response, err := decodeLeaseResponse(output)
+	if err != nil {
+		return nil, err
+	}
+	if !response.Acquired || response.Lease == nil || response.Lease.ID != lease.ID {
+		if response.Lease != nil {
+			if response.Lease.ID == lease.ID && response.Message == "lease is held" {
+				return nil, fmt.Errorf("%w", ErrLeaseRenewalUnsupported)
+			}
+			return nil, fmt.Errorf("%w: %s (requested %s, current %s)", ErrLeaseLost, response.Message, lease.ID, response.Lease.ID)
+		}
+		return nil, fmt.Errorf("%w: %s", ErrLeaseLost, response.Message)
 	}
 	return leaseFromTakod(response.Lease), nil
 }

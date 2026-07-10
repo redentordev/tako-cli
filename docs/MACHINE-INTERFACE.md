@@ -340,8 +340,10 @@ flow mirrors the interactive confirmation:
 
 1. **Plan**: `tako deploy --plan-only --output json` computes the plan,
    holds nothing, applies nothing, and prints a `DeployPlan` document:
-   servers, services, typed changes with reasons, `destructive`, `empty`,
-   the human plan text, and a content hash (via `planHash` on results).
+   servers, services, typed changes with reasons, redacted `sharedBuilds`
+   artifact identities (`key`, resolved `image`, and `consumers`),
+   `destructive`, `empty`, the human plan text, and a content hash (via
+   `planHash` on results).
    `tako run ... --plan-only` behaves the same.
 2. **Review**: present `changes`/`humanText` to the approver; persist the
    plan document.

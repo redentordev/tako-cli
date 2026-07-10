@@ -139,6 +139,19 @@ func TestBuildStatusServiceInfoShowsRevisionWarmingAndPlacement(t *testing.T) {
 	}
 }
 
+func TestBuildStatusServiceInfoRepresentsRunAsDeployStep(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"migrate": {Kind: config.ServiceKindRun, Image: "busybox", Command: config.ListValue("true")},
+	}
+	infos, err := BuildStatusServiceInfo(map[string]config.ServerConfig{"node-a": {}}, services, nil, nil, []string{"node-a"}, []string{"node-a"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 || infos[0].Kind != config.ServiceKindRun || infos[0].Status != "deploy-step" || infos[0].Desired != 0 || infos[0].Running != 0 {
+		t.Fatalf("run status = %#v", infos)
+	}
+}
+
 func TestStatusResultJSONShape(t *testing.T) {
 	result := StatusResult{
 		APIVersion:  takoapi.APIVersionCurrent,

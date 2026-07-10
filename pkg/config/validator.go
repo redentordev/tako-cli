@@ -6,8 +6,10 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +23,22 @@ import (
 const (
 	maxServiceHealthRetries  = 100
 	maxServiceHealthDuration = 24 * time.Hour
+	maxContainerCommandArgs  = 256
+	maxContainerCommandBytes = 64 * 1024
+	maxContainerHealthBytes  = 4096
+	maxServiceEnvFiles       = 32
+	maxServiceFiles          = 128
+	maxServiceFileEntries    = 16384
+	maxServiceBuildArgs      = 128
+	maxServiceExtraHosts     = 128
+	maxServiceUlimits        = 64
+)
+
+var (
+	buildArgNamePattern  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	buildTargetPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	extraHostNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,252}$`)
+	ulimitNamePattern    = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 )
 
 // ValidateConfig validates the configuration
@@ -41,6 +59,9 @@ func ValidateConfig(cfg *Config) error {
 		return err
 	}
 	if err := validateDeploymentConfig(cfg); err != nil {
+		return err
+	}
+	if err := validateSharedBuilds(cfg.Builds); err != nil {
 		return err
 	}
 
@@ -264,6 +285,9 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		}
 		// Update the service in the map with defaults applied
 		env.Services[serviceName] = service
+	}
+	if err := validateRunImageSources(envName, env, cfg.Builds); err != nil {
+		return err
 	}
 
 	if err := validateEnvironmentPersistentPlacement(envName, env, cfg); err != nil {
@@ -586,13 +610,36 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	if err := validateServiceKind(name, service); err != nil {
 		return err
 	}
+	if err := validateStringOrList(name, "command", service.Command); err != nil {
+		return err
+	}
+	if err := validateStringOrList(name, "entrypoint", service.Entrypoint); err != nil {
+		return err
+	}
+	if err := validateContainerLabels(name, service.Labels); err != nil {
+		return err
+	}
+	if err := validateServiceBuildOptions(name, service); err != nil {
+		return err
+	}
+	if err := validateContainerRuntimeControls(name, service); err != nil {
+		return err
+	}
 
-	// Must have either Build or Image, but not both
-	if service.Build == "" && service.Image == "" {
-		return fmt.Errorf("service %s: either 'build' or 'image' is required", name)
+	sharedBuild, usesSharedBuild := cfg.Builds[service.ImageFrom]
+	if service.ImageFrom != "" && usesSharedBuild {
+		if service.Build != "" || service.Image != "" {
+			return fmt.Errorf("service %s: imageFrom shared build cannot be combined with build or image", name)
+		}
+		service.SharedBuildHash = sharedBuild.Fingerprint()
+	} else if service.ImageFrom != "" && !service.IsRun() {
+		return fmt.Errorf("service %s: imageFrom must reference a top-level build", name)
+	}
+	if service.Build == "" && service.Image == "" && service.ImageFrom == "" {
+		return fmt.Errorf("service %s: either 'build' or 'image' is required (or reference a shared build with imageFrom)", name)
 	}
 	if service.Build != "" && service.Image != "" {
-		return fmt.Errorf("service %s: cannot specify both 'build' and 'image'", name)
+		return fmt.Errorf("service %s: cannot specify both build and image", name)
 	}
 	if service.Dockerfile != "" {
 		if service.Build == "" {
@@ -644,9 +691,26 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		}
 	}
 
-	// Validate envFile if specified
+	if service.EnvFile != "" && len(service.EnvFiles) > 0 {
+		return fmt.Errorf("service %s: envFile and envFiles are mutually exclusive", name)
+	}
+	envFiles := service.EnvFiles
 	if service.EnvFile != "" {
-		envFilePath := service.EnvFile
+		envFiles = []string{service.EnvFile}
+	}
+	if len(envFiles) > maxServiceEnvFiles {
+		return fmt.Errorf("service %s: envFiles has too many entries (maximum %d)", name, maxServiceEnvFiles)
+	}
+	seenEnvFiles := make(map[string]bool, len(envFiles))
+	for _, configuredPath := range envFiles {
+		envFilePath := strings.TrimSpace(configuredPath)
+		if envFilePath == "" {
+			return fmt.Errorf("service %s: envFiles must not contain empty paths", name)
+		}
+		if seenEnvFiles[envFilePath] {
+			return fmt.Errorf("service %s: duplicate env file %s", name, envFilePath)
+		}
+		seenEnvFiles[envFilePath] = true
 		if !filepath.IsAbs(envFilePath) {
 			// Make it absolute relative to current directory
 			cwd, _ := os.Getwd()
@@ -655,11 +719,14 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 
 		// Check if env file exists
 		if _, err := os.Stat(envFilePath); os.IsNotExist(err) {
-			return fmt.Errorf("service %s: envFile not found: %s", name, service.EnvFile)
+			return fmt.Errorf("service %s: env file not found: %s", name, configuredPath)
 		}
 	}
 
 	if err := validateServiceVolumes(name, service, cfg); err != nil {
+		return err
+	}
+	if err := validateServiceFiles(name, service); err != nil {
 		return err
 	}
 	if err := validateResourceLimits(name, service.Resources); err != nil {
@@ -723,13 +790,20 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	}
 
 	// Validate health check if configured
+	hasCommandHealthCheck := service.HealthCheck.Command != ""
 	hasHTTPHealthCheck := service.HealthCheck.Path != ""
 	hasTCPHealthCheck := service.HealthCheck.TCPPort > 0
 	if service.HealthCheck.TCPPort < 0 || service.HealthCheck.TCPPort > 65535 {
 		return fmt.Errorf("service %s: health check tcpPort must be between 1 and 65535", name)
 	}
-	if hasHTTPHealthCheck && hasTCPHealthCheck {
-		return fmt.Errorf("service %s: health check cannot set both path and tcpPort", name)
+	if len(service.HealthCheck.Command) > maxContainerHealthBytes {
+		return fmt.Errorf("service %s: health check command is too large", name)
+	}
+	if hasControlChars(service.HealthCheck.Command) {
+		return fmt.Errorf("service %s: health check command contains control characters", name)
+	}
+	if boolCount(hasCommandHealthCheck, hasHTTPHealthCheck, hasTCPHealthCheck) > 1 {
+		return fmt.Errorf("service %s: health check can set only one of command, path, or tcpPort", name)
 	}
 	if hasHTTPHealthCheck {
 		path, err := normalizeHTTPPath(service.HealthCheck.Path)
@@ -741,7 +815,7 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 			return fmt.Errorf("service %s: port is required when health check is configured", name)
 		}
 	}
-	if hasHTTPHealthCheck || hasTCPHealthCheck {
+	if hasCommandHealthCheck || hasHTTPHealthCheck || hasTCPHealthCheck {
 		if service.HealthCheck.Interval == "" {
 			service.HealthCheck.Interval = "10s"
 		}
@@ -756,12 +830,14 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		}
 	}
 
-	// Validate deployment strategy
-	if service.Deploy.Strategy == "" {
-		service.Deploy.Strategy = DeployStrategyRecreate
-	}
-	if err := validateDeployStrategy(name, service); err != nil {
-		return err
+	// Deploy-time runs do not have a rollout strategy or restart policy.
+	if !service.IsRun() {
+		if service.Deploy.Strategy == "" {
+			service.Deploy.Strategy = DeployStrategyRecreate
+		}
+		if err := validateDeployStrategy(name, service); err != nil {
+			return err
+		}
 	}
 
 	if err := validateServicePorts(name, service); err != nil {
@@ -775,23 +851,25 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		}
 	}
 
-	// Validate and set restart policy
-	if service.Restart == "" {
-		// Default restart policy based on service type
-		if service.Persistent {
-			service.Restart = "always" // Databases always restart
-		} else {
-			service.Restart = "unless-stopped" // Apps restart unless manually stopped
+	// Validate and set restart policy for persistent containers only.
+	if !service.IsRun() {
+		if service.Restart == "" {
+			// Default restart policy based on service type
+			if service.Persistent {
+				service.Restart = "always" // Databases always restart
+			} else {
+				service.Restart = "unless-stopped" // Apps restart unless manually stopped
+			}
 		}
-	}
-	validRestartPolicies := map[string]bool{
-		"always":         true,
-		"unless-stopped": true,
-		"on-failure":     true,
-		"no":             true,
-	}
-	if !validRestartPolicies[service.Restart] {
-		return fmt.Errorf("service %s: invalid restart policy: %s (must be: always, unless-stopped, on-failure, or no)", name, service.Restart)
+		validRestartPolicies := map[string]bool{
+			"always":         true,
+			"unless-stopped": true,
+			"on-failure":     true,
+			"no":             true,
+		}
+		if !validRestartPolicies[service.Restart] {
+			return fmt.Errorf("service %s: invalid restart policy: %s (must be: always, unless-stopped, on-failure, or no)", name, service.Restart)
+		}
 	}
 
 	// Validate monitoring if configured
@@ -845,6 +923,162 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	return nil
 }
 
+func validateServiceFiles(serviceName string, service *ServiceConfig) error {
+	files := service.Files
+	if len(files) > maxServiceFiles {
+		return fmt.Errorf("service %s: files has too many entries (maximum %d)", serviceName, maxServiceFiles)
+	}
+	seenTargets := make(map[string]bool, len(files))
+	volumeTargets := make(map[string]bool, len(service.Volumes))
+	for _, volume := range service.Volumes {
+		parts := strings.SplitN(volume, ":", 2)
+		target := strings.TrimSpace(parts[0])
+		if len(parts) == 2 {
+			target = strings.TrimSpace(parts[1])
+		}
+		if target != "" {
+			volumeTargets[path.Clean(target)] = true
+		}
+	}
+	entryCount := 0
+	for i := range files {
+		file := &files[i]
+		file.Source = strings.TrimSpace(file.Source)
+		file.Target = path.Clean(strings.TrimSpace(file.Target))
+		if file.Source == "" {
+			return fmt.Errorf("service %s: files[%d].source is required", serviceName, i)
+		}
+		if len(file.Target) > 4096 || !path.IsAbs(file.Target) || file.Target == "/" || file.Target == "." || strings.ContainsAny(file.Target, ",\\\r\n\t") {
+			return fmt.Errorf("service %s: files[%d].target must be an absolute container path below /", serviceName, i)
+		}
+		if strings.ContainsRune(file.Target, '\x00') || seenTargets[file.Target] {
+			return fmt.Errorf("service %s: files target %q is invalid or duplicated", serviceName, file.Target)
+		}
+		if volumeTargets[file.Target] {
+			return fmt.Errorf("service %s: files target %q conflicts with a volume mount target", serviceName, file.Target)
+		}
+		seenTargets[file.Target] = true
+		if _, _, _, err := ParseServiceFileOwner(file.Owner); err != nil {
+			return fmt.Errorf("service %s: files[%d].owner: %w", serviceName, i, err)
+		}
+		info, err := os.Lstat(file.Source)
+		if err != nil {
+			return fmt.Errorf("service %s: files source %q is not accessible: %w", serviceName, file.Source, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("service %s: files source %q must not be a symlink", serviceName, file.Source)
+		}
+		if !info.Mode().IsRegular() && !info.IsDir() {
+			return fmt.Errorf("service %s: files source %q must be a regular file or directory", serviceName, file.Source)
+		}
+		if info.IsDir() {
+			err = filepath.WalkDir(file.Source, func(path string, entry os.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				entryCount++
+				if entry.Type()&os.ModeSymlink != 0 {
+					return fmt.Errorf("symlink %s is not supported", path)
+				}
+				if !entry.IsDir() && !entry.Type().IsRegular() {
+					return fmt.Errorf("non-regular entry %s is not supported", path)
+				}
+				if entryCount > maxServiceFileEntries {
+					return fmt.Errorf("directory exceeds %d entries", maxServiceFileEntries)
+				}
+				return nil
+			})
+			if err != nil {
+				return fmt.Errorf("service %s: invalid files source %q: %w", serviceName, file.Source, err)
+			}
+		} else {
+			entryCount++
+		}
+	}
+	return nil
+}
+
+func validateRunImageSources(envName string, env *EnvironmentConfig, builds map[string]SharedBuildConfig) error {
+	for name, service := range env.Services {
+		if !service.IsRun() || service.ImageFrom == "" {
+			continue
+		}
+		_, buildExists := builds[service.ImageFrom]
+		source, ok := env.Services[service.ImageFrom]
+		if buildExists && ok {
+			return fmt.Errorf("environment %s: service %s imageFrom %q is ambiguous between a build and service", envName, name, service.ImageFrom)
+		}
+		if buildExists {
+			continue
+		}
+		if !ok {
+			return fmt.Errorf("environment %s: service %s imageFrom references unknown service %q", envName, name, service.ImageFrom)
+		}
+		if service.ImageFrom == name || source.IsRun() {
+			return fmt.Errorf("environment %s: service %s imageFrom must reference a non-run service", envName, name)
+		}
+		if !slices.Contains(service.DependsOn, service.ImageFrom) {
+			service.DependsOn = append(service.DependsOn, service.ImageFrom)
+			env.Services[name] = service
+		}
+	}
+	return nil
+}
+
+func boolCount(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
+}
+
+func validateStringOrList(serviceName string, field string, value StringOrList) error {
+	if !value.IsSet() {
+		return nil
+	}
+	args := value.Arguments()
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		return fmt.Errorf("service %s: %s must not be empty", serviceName, field)
+	}
+	if len(args) > maxContainerCommandArgs {
+		return fmt.Errorf("service %s: %s has too many arguments (maximum %d)", serviceName, field, maxContainerCommandArgs)
+	}
+	total := 0
+	for _, arg := range args {
+		if hasControlChars(arg) {
+			return fmt.Errorf("service %s: %s contains control characters", serviceName, field)
+		}
+		total += len(arg)
+	}
+	if total > maxContainerCommandBytes {
+		return fmt.Errorf("service %s: %s is too large", serviceName, field)
+	}
+	return nil
+}
+
+func validateContainerLabels(serviceName string, labels map[string]string) error {
+	if len(labels) > 256 {
+		return fmt.Errorf("service %s: too many container labels", serviceName)
+	}
+	total := 0
+	for key, value := range labels {
+		if strings.TrimSpace(key) == "" || hasControlChars(key) || hasControlChars(value) {
+			return fmt.Errorf("service %s: invalid container label %q", serviceName, key)
+		}
+		if strings.HasPrefix(key, "tako.") {
+			return fmt.Errorf("service %s: container label %q uses reserved tako. prefix", serviceName, key)
+		}
+		total += len(key) + len(value)
+	}
+	if total > 64*1024 {
+		return fmt.Errorf("service %s: container labels are too large", serviceName)
+	}
+	return nil
+}
+
 func validateBackupConfig(name string, service *ServiceConfig) error {
 	if service.Backup.Schedule == "" {
 		return fmt.Errorf("service %s: backup schedule is required", name)
@@ -894,6 +1128,105 @@ func validateResourceLimits(name string, resources *ResourceLimitsConfig) error 
 	}
 	resources.CPUs = cpus
 	return nil
+}
+
+func validateServiceBuildOptions(name string, service *ServiceConfig) error {
+	if len(service.BuildArgs) > 0 && service.Build == "" {
+		return fmt.Errorf("service %s: build.args requires build", name)
+	}
+	if service.BuildTarget != "" && service.Build == "" {
+		return fmt.Errorf("service %s: build.target requires build", name)
+	}
+	if len(service.BuildArgs) > maxServiceBuildArgs {
+		return fmt.Errorf("service %s: build.args has too many entries (maximum %d)", name, maxServiceBuildArgs)
+	}
+	totalBytes := 0
+	for key, value := range service.BuildArgs {
+		if !buildArgNamePattern.MatchString(key) {
+			return fmt.Errorf("service %s: invalid build arg name %q", name, key)
+		}
+		if hasControlChars(value) {
+			return fmt.Errorf("service %s: build arg %s contains control characters", name, key)
+		}
+		totalBytes += len(key) + len(value)
+	}
+	if totalBytes > maxContainerCommandBytes {
+		return fmt.Errorf("service %s: build.args is too large", name)
+	}
+	service.BuildTarget = strings.TrimSpace(service.BuildTarget)
+	if service.BuildTarget != "" && !buildTargetPattern.MatchString(service.BuildTarget) {
+		return fmt.Errorf("service %s: invalid build target %q", name, service.BuildTarget)
+	}
+	return nil
+}
+
+func validateContainerRuntimeControls(name string, service *ServiceConfig) error {
+	service.User = strings.TrimSpace(service.User)
+	if len(service.User) > 256 || strings.HasPrefix(service.User, "-") || hasControlChars(service.User) || strings.ContainsAny(service.User, " \t\r\n") {
+		return fmt.Errorf("service %s: invalid user", name)
+	}
+	service.WorkingDir = strings.TrimSpace(service.WorkingDir)
+	if service.WorkingDir != "" {
+		workingDir, err := normalizeContainerWorkingDir(service.WorkingDir)
+		if err != nil {
+			return fmt.Errorf("service %s: %w", name, err)
+		}
+		service.WorkingDir = workingDir
+	}
+	service.StopGracePeriod = strings.TrimSpace(service.StopGracePeriod)
+	if service.StopGracePeriod != "" {
+		duration, err := time.ParseDuration(service.StopGracePeriod)
+		if err != nil || duration <= 0 || duration > maxServiceHealthDuration {
+			return fmt.Errorf("service %s: stopGracePeriod must be a positive duration no greater than %s", name, maxServiceHealthDuration)
+		}
+		if duration%time.Second != 0 {
+			return fmt.Errorf("service %s: stopGracePeriod must use whole seconds", name)
+		}
+	}
+	if len(service.ExtraHosts) > maxServiceExtraHosts {
+		return fmt.Errorf("service %s: extraHosts has too many entries (maximum %d)", name, maxServiceExtraHosts)
+	}
+	seenHosts := make(map[string]bool, len(service.ExtraHosts))
+	for index, entry := range service.ExtraHosts {
+		entry = strings.TrimSpace(entry)
+		host, address, ok := strings.Cut(entry, ":")
+		if !ok || !extraHostNamePattern.MatchString(host) || (address != "host-gateway" && net.ParseIP(strings.Trim(address, "[]")) == nil) {
+			return fmt.Errorf("service %s: invalid extraHosts[%d] %q (want host:IP or host:host-gateway)", name, index, entry)
+		}
+		if seenHosts[host] {
+			return fmt.Errorf("service %s: duplicate extra host %q", name, host)
+		}
+		seenHosts[host] = true
+		service.ExtraHosts[index] = entry
+	}
+	if len(service.Ulimits) > maxServiceUlimits {
+		return fmt.Errorf("service %s: ulimits has too many entries (maximum %d)", name, maxServiceUlimits)
+	}
+	for limitName, limit := range service.Ulimits {
+		if !ulimitNamePattern.MatchString(limitName) {
+			return fmt.Errorf("service %s: invalid ulimit name %q", name, limitName)
+		}
+		if limit.Soft <= 0 || limit.Hard <= 0 || limit.Soft > limit.Hard {
+			return fmt.Errorf("service %s: ulimit %s must have positive soft/hard values with soft <= hard", name, limitName)
+		}
+	}
+	shmSize, err := normalizeDockerMemoryLimit(service.ShmSize)
+	if err != nil {
+		return fmt.Errorf("service %s: invalid shmSize: %w", name, err)
+	}
+	service.ShmSize = shmSize
+	return nil
+}
+
+func normalizeContainerWorkingDir(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) > 4096 || !path.IsAbs(value) || hasControlChars(value) {
+		return "", fmt.Errorf("workingDir must be an absolute POSIX container path")
+	}
+	return path.Clean(value), nil
 }
 
 func normalizeDockerCPULimit(value string) (string, error) {
@@ -1161,8 +1494,10 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 		return nil
 	case ServiceKindJob:
 		// fallthrough to job validation below
+	case ServiceKindRun:
+		return validateRunServiceKind(name, service)
 	default:
-		return fmt.Errorf("service %s: kind must be service or job", name)
+		return fmt.Errorf("service %s: kind must be service, job, or run", name)
 	}
 
 	if strings.TrimSpace(service.Schedule) == "" {
@@ -1172,7 +1507,7 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 	if _, err := parser.Parse(service.Schedule); err != nil {
 		return fmt.Errorf("service %s: invalid schedule: %v", name, err)
 	}
-	if strings.TrimSpace(service.Command) == "" {
+	if !service.Command.IsSet() {
 		return fmt.Errorf("service %s: kind: job requires a command", name)
 	}
 	if service.Timezone != "" {
@@ -1191,7 +1526,7 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 	if service.Replicas > 1 {
 		return fmt.Errorf("service %s: kind: job cannot set replicas", name)
 	}
-	if service.HealthCheck.Path != "" || service.HealthCheck.TCPPort != 0 {
+	if service.HealthCheck.Command != "" || service.HealthCheck.Path != "" || service.HealthCheck.TCPPort != 0 {
 		return fmt.Errorf("service %s: kind: job cannot set healthCheck", name)
 	}
 	if service.LoadBalancer.Strategy != "" || service.LoadBalancer.HealthCheck.Enabled {
@@ -1199,6 +1534,96 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 	}
 	if service.Persistent {
 		return fmt.Errorf("service %s: kind: job cannot be persistent", name)
+	}
+	return nil
+}
+
+func validateSharedBuilds(builds map[string]SharedBuildConfig) error {
+	for name, build := range builds {
+		if !isValidRuntimeIdentifier(name) {
+			return fmt.Errorf("build name %q is invalid", name)
+		}
+		build.Context = strings.TrimSpace(build.Context)
+		build.Target = strings.TrimSpace(build.Target)
+		build.Dockerfile = strings.TrimSpace(build.Dockerfile)
+		if build.Context == "" {
+			return fmt.Errorf("build %s: context is required", name)
+		}
+		synthetic := &ServiceConfig{Build: build.Context, BuildArgs: build.Args, BuildTarget: build.Target, Dockerfile: build.Dockerfile}
+		if err := validateServiceBuildOptions("build "+name, synthetic); err != nil {
+			return err
+		}
+		if build.Dockerfile != "" {
+			if err := validateDockerfilePath(build.Dockerfile); err != nil {
+				return fmt.Errorf("build %s: invalid dockerfile path: %w", name, err)
+			}
+		}
+		info, err := os.Stat(build.Context)
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("build %s: context is not an accessible directory: %s", name, build.Context)
+		}
+		if build.Dockerfile != "" {
+			if _, err := os.Stat(filepath.Join(build.Context, filepath.Clean(build.Dockerfile))); err != nil {
+				return fmt.Errorf("build %s: dockerfile does not exist: %s", name, build.Dockerfile)
+			}
+		}
+		build.Args = synthetic.BuildArgs
+		build.Target = synthetic.BuildTarget
+		builds[name] = build
+	}
+	return nil
+}
+
+func validateRunServiceKind(name string, service *ServiceConfig) error {
+	if service.Schedule != "" || service.Timezone != "" {
+		return fmt.Errorf("service %s: kind: run cannot set schedule or timezone", name)
+	}
+	if !service.Command.IsList() {
+		return fmt.Errorf("service %s: kind: run requires command in argv list form", name)
+	}
+	if service.Build != "" {
+		return fmt.Errorf("service %s: kind: run cannot set build; use image or imageFrom", name)
+	}
+	if (service.Image == "") == (service.ImageFrom == "") {
+		return fmt.Errorf("service %s: kind: run requires exactly one of image or imageFrom", name)
+	}
+	if service.ImageFrom != "" && !isValidRuntimeIdentifier(service.ImageFrom) {
+		return fmt.Errorf("service %s: invalid imageFrom service %q", name, service.ImageFrom)
+	}
+	if service.Timeout != "" {
+		if err := validateRolloutDurations(name, "timeout", service.Timeout); err != nil {
+			return err
+		}
+	}
+	if service.Port != 0 || len(service.Ports) > 0 || service.Proxy != nil {
+		return fmt.Errorf("service %s: kind: run cannot expose ports or proxy routes", name)
+	}
+	if service.Replicas > 1 || service.Persistent {
+		return fmt.Errorf("service %s: kind: run cannot set replicas or persistent", name)
+	}
+	if service.Restart != "" {
+		return fmt.Errorf("service %s: kind: run cannot set restart", name)
+	}
+	if service.HealthCheck != (HealthCheckConfig{}) {
+		return fmt.Errorf("service %s: kind: run cannot set healthCheck", name)
+	}
+	if service.LoadBalancer != (LoadBalancerConfig{}) {
+		return fmt.Errorf("service %s: kind: run cannot set loadBalancer", name)
+	}
+	if service.Export || len(service.Imports) > 0 {
+		return fmt.Errorf("service %s: kind: run cannot set export or imports", name)
+	}
+	if service.Backup != nil || service.Monitoring != nil {
+		return fmt.Errorf("service %s: kind: run cannot set backup or monitoring", name)
+	}
+	if service.Placement != nil && service.Placement.Strategy == "global" {
+		return fmt.Errorf("service %s: kind: run cannot use placement.strategy global because deploy-time runs execute exactly once", name)
+	}
+	deploy := service.Deploy
+	if deploy.Strategy != "" || deploy.MaxUnavailable != 0 || deploy.MaxSurge != 0 || deploy.RollbackOnFailure ||
+		deploy.Readiness != (DeployReadinessConfig{}) || deploy.SmokeTest != (DeploySmokeTestConfig{}) ||
+		deploy.Promotion != "" || deploy.GracePeriod != "" || deploy.Release != nil {
+		return fmt.Errorf("service %s: kind: run cannot set deploy rollout controls", name)
 	}
 	return nil
 }

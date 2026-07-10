@@ -4,12 +4,28 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 )
 
 type recordingRunner struct {
 	calls []CommandSpec
 	errAt int
+}
+
+func TestExecRunnerRedactsSensitiveBuildArgsFromErrors(t *testing.T) {
+	var streamed strings.Builder
+	output, err := (ExecRunner{Stdout: &streamed, Stderr: &streamed}).Run(context.Background(), CommandSpec{
+		Name:                "sh",
+		Args:                []string{"-c", `echo "$1" >&2; exit 1`, "sh", "TOKEN=super-secret"},
+		SensitiveArgIndexes: []int{3},
+	})
+	if err == nil {
+		t.Fatal("expected command failure")
+	}
+	if strings.Contains(err.Error(), "super-secret") || strings.Contains(output, "super-secret") || strings.Contains(streamed.String(), "super-secret") || !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("error did not redact sensitive arg: %v", err)
+	}
 }
 
 func (r *recordingRunner) Run(_ context.Context, spec CommandSpec) (string, error) {
@@ -52,6 +68,8 @@ func TestBuildUsesBuildxLoadForSinglePlatform(t *testing.T) {
 		ContextDir: "/work/app",
 		Dockerfile: "packages/web/Dockerfile",
 		Platform:   "linux/arm64",
+		Args:       map[string]string{"SENTRY_IMAGE": "getsentry/sentry:26.6.0", "A": "first"},
+		Target:     "runtime",
 	})
 	if err != nil {
 		t.Fatalf("Build returned error: %v", err)
@@ -61,9 +79,12 @@ func TestBuildUsesBuildxLoadForSinglePlatform(t *testing.T) {
 		t.Fatalf("calls = %#v, want 1", runner.calls)
 	}
 	got := runner.calls[0]
-	wantArgs := []string{"buildx", "build", "--platform", "linux/arm64", "--load", "-t", "demo/web:abc123", "-f", "packages/web/Dockerfile", "."}
+	wantArgs := []string{"buildx", "build", "--platform", "linux/arm64", "--load", "-t", "demo/web:abc123", "-f", "packages/web/Dockerfile", "--build-arg", "A=first", "--build-arg", "SENTRY_IMAGE=getsentry/sentry:26.6.0", "--target", "runtime", "."}
 	if got.Name != "docker" || got.Dir != "/work/app" || !slices.Equal(got.Args, wantArgs) {
 		t.Fatalf("build command = %#v, want docker %v in /work/app", got, wantArgs)
+	}
+	if want := []int{10, 12}; !slices.Equal(got.SensitiveArgIndexes, want) {
+		t.Fatalf("sensitive arg indexes = %v, want %v", got.SensitiveArgIndexes, want)
 	}
 }
 

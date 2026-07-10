@@ -86,7 +86,9 @@ func ApplyImageOverride(service config.ServiceConfig, imageRef string) config.Se
 		return service
 	}
 	service.Image = trimmedImage
-	service.Build = ""
+	service.ImageFrom = ""
+	service.SharedBuildHash = ""
+	service.ClearBuild()
 	return service
 }
 
@@ -98,6 +100,8 @@ func ApplySourceOverride(service config.ServiceConfig, source string) config.Ser
 	}
 	service.Build = trimmedSource
 	service.Image = ""
+	service.ImageFrom = ""
+	service.SharedBuildHash = ""
 	return service
 }
 
@@ -114,6 +118,8 @@ func ApplyArchiveOverride(service config.ServiceConfig, buildContext string) con
 	}
 	service.Build = trimmedBuildContext
 	service.Image = ""
+	service.ImageFrom = ""
+	service.SharedBuildHash = ""
 	return service
 }
 

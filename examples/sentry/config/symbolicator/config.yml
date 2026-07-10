@@ -1,0 +1,12 @@
+# See: https://getsentry.github.io/symbolicator/#configuration
+cache_dir: "/data"
+bind: "0.0.0.0:3021"
+logging:
+  level: "warn"
+
+sentry_dsn: null # TODO: Automatically fill this with the internal project DSN
+
+# If you have statsd server, you can utilize that to monitor self-hosted Symbolicator.
+metrics:
+  statsd: "${SYMBOLICATOR_STATSD_ADDR}" # It is recommended to use IP address instead of domain name
+  prefix: "sentry.symbolicator" # Adjust this to your needs, default is "symbolicator"

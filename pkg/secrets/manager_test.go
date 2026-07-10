@@ -253,6 +253,34 @@ func TestCreateEnvFileLoadsServiceEnvFileWithExplicitEnvAndSecretsTakingPriority
 	}
 }
 
+func TestCreateEnvFileLoadsOrderedEnvFilesWithLaterOverrides(t *testing.T) {
+	withTempWorkingDir(t)
+	base := filepath.Join(t.TempDir(), "base.env")
+	override := filepath.Join(t.TempDir(), "override.env")
+	if err := os.WriteFile(base, []byte("SHARED=base\nBASE_ONLY=yes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(override, []byte("SHARED=override\nOVERRIDE_ONLY=yes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewManager("production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	envFile, err := mgr.CreateEnvFile(&config.ServiceConfig{
+		EnvFiles: []string{base, override},
+		Env:      map[string]string{"SHARED": "explicit"},
+	})
+	if err != nil {
+		t.Fatalf("CreateEnvFile: %v", err)
+	}
+	for key, want := range map[string]string{"SHARED": "explicit", "BASE_ONLY": "yes", "OVERRIDE_ONLY": "yes"} {
+		if got, _ := envFile.Get(key); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestCreateEnvFileSupportsSecretAliases(t *testing.T) {
 	withTempWorkingDir(t)
 	mgr := &Manager{secrets: map[string]string{"INTERNAL_TOKEN": "secret-token"}}

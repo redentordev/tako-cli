@@ -404,6 +404,12 @@ func BuildStatusServiceInfo(
 			serviceInfos = append(serviceInfos, buildStatusJobInfo(serviceName, serviceConfig, jobStatuses[serviceName]))
 			continue
 		}
+		if serviceConfig.IsRun() {
+			serviceInfos = append(serviceInfos, StatusService{
+				Name: serviceName, Kind: config.ServiceKindRun, Status: "deploy-step", Ports: "-", Internal: true,
+			})
+			continue
+		}
 
 		running := 0
 		if actual, ok := actualServices[serviceName]; ok && actual != nil {

@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/config"
 )
 
 // Exec modes: attach runs the command inside a running replica via
@@ -60,12 +62,29 @@ type ExecRequest struct {
 	EnvFileContent string `json:"envFileContent,omitempty"`
 	// Image overrides the oneoff image; default is the service's current
 	// image from actual state.
-	Image string `json:"image,omitempty"`
+	Image         string         `json:"image,omitempty"`
+	PullImage     bool           `json:"pullImage,omitempty"`
+	RegistryAuths []RegistryAuth `json:"registryAuths,omitempty"`
 	// Network attaches the oneoff container; default tako_<project>_<env>.
 	Network string `json:"network,omitempty"`
 	// Mounts adds --mount specs to oneoff containers (volumes opt-in).
-	Mounts         []string `json:"mounts,omitempty"`
-	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
+	Mounts             []string                       `json:"mounts,omitempty"`
+	ExternalVolumes    []string                       `json:"externalVolumes,omitempty"`
+	Files              []ServiceFileBundle            `json:"files,omitempty"`
+	FileSetID          string                         `json:"fileSetId,omitempty"`
+	CleanupFiles       bool                           `json:"cleanupFiles,omitempty"`
+	Entrypoint         []string                       `json:"entrypoint,omitempty"`
+	Labels             map[string]string              `json:"labels,omitempty"`
+	User               string                         `json:"user,omitempty"`
+	WorkingDir         string                         `json:"workingDir,omitempty"`
+	StopTimeoutSeconds int                            `json:"stopTimeoutSeconds,omitempty"`
+	Init               bool                           `json:"init,omitempty"`
+	ExtraHosts         []string                       `json:"extraHosts,omitempty"`
+	Ulimits            map[string]config.UlimitConfig `json:"ulimits,omitempty"`
+	ShmSize            string                         `json:"shmSize,omitempty"`
+	MemoryLimit        string                         `json:"memoryLimit,omitempty"`
+	CPULimit           string                         `json:"cpuLimit,omitempty"`
+	TimeoutSeconds     int                            `json:"timeoutSeconds,omitempty"`
 	// Interactive attaches the caller's stdin over the hijacked frame
 	// stream (docker exec/run -i). Requires the Upgrade handshake.
 	Interactive bool `json:"interactive,omitempty"`
@@ -96,6 +115,9 @@ func validateExecRequest(req *ExecRequest) error {
 	if len(req.Command) == 0 || strings.TrimSpace(req.Command[0]) == "" {
 		return fmt.Errorf("command is required")
 	}
+	if err := validateContainerArgv("command", req.Command); err != nil {
+		return err
+	}
 	for _, entry := range req.Env {
 		if !strings.Contains(entry, "=") || hasControlChars(entry) {
 			return fmt.Errorf("env entries must be KEY=VALUE")
@@ -106,6 +128,29 @@ func validateExecRequest(req *ExecRequest) error {
 			return err
 		}
 	}
+	if err := validateRegistryAuths(req.RegistryAuths); err != nil {
+		return err
+	}
+	if err := validateContainerArgv("entrypoint", req.Entrypoint); err != nil {
+		return err
+	}
+	if err := validateDockerLabels(req.Labels); err != nil {
+		return fmt.Errorf("invalid label: %w", err)
+	}
+	for key := range req.Labels {
+		if strings.HasPrefix(key, "tako.") {
+			return fmt.Errorf("invalid label: %q uses reserved tako. prefix", key)
+		}
+	}
+	if err := validateContainerRuntimeControls(req.User, req.WorkingDir, req.StopTimeoutSeconds, req.ExtraHosts, req.Ulimits, req.ShmSize); err != nil {
+		return err
+	}
+	if req.MemoryLimit != "" && !isSafeDockerMemoryLimit(req.MemoryLimit) {
+		return fmt.Errorf("invalid memory limit")
+	}
+	if req.CPULimit != "" && !isSafeDockerCPULimit(req.CPULimit) {
+		return fmt.Errorf("invalid CPU limit")
+	}
 	if req.Network != "" && !isSafeRuntimeName(req.Network) {
 		return fmt.Errorf("invalid network name")
 	}
@@ -113,6 +158,21 @@ func validateExecRequest(req *ExecRequest) error {
 		if strings.TrimSpace(mount) == "" || hasControlChars(mount) {
 			return fmt.Errorf("invalid mount value")
 		}
+	}
+	for _, volume := range req.ExternalVolumes {
+		if !isSafeDockerVolumeName(volume) {
+			return fmt.Errorf("invalid external volume")
+		}
+	}
+	if err := validateServiceFileBundles(req.Files); err != nil {
+		return err
+	}
+	if req.FileSetID != "" {
+		if err := validateServiceFileSetID(req.FileSetID); err != nil {
+			return err
+		}
+	} else if len(req.Files) > 0 {
+		return fmt.Errorf("fileSetId is required when service files are present")
 	}
 	if req.Replica < 0 {
 		return fmt.Errorf("replica must be positive")
@@ -135,6 +195,9 @@ func validateExecRequest(req *ExecRequest) error {
 	if req.IdleTimeoutSeconds != 0 && !req.Interactive {
 		return fmt.Errorf("idleTimeoutSeconds requires an interactive session")
 	}
+	if req.Mode != ExecModeOneOff && (req.PullImage || len(req.RegistryAuths) > 0 || len(req.Entrypoint) > 0 || len(req.Labels) > 0 || req.User != "" || req.WorkingDir != "" || req.StopTimeoutSeconds != 0 || req.Init || len(req.ExtraHosts) > 0 || len(req.Ulimits) > 0 || req.ShmSize != "" || req.MemoryLimit != "" || req.CPULimit != "" || len(req.ExternalVolumes) > 0 || len(req.Files) > 0 || req.FileSetID != "" || req.CleanupFiles) {
+		return fmt.Errorf("container run controls require oneoff mode")
+	}
 	return nil
 }
 
@@ -143,7 +206,7 @@ func validateExecRequest(req *ExecRequest) error {
 type execRun struct {
 	args      []string
 	container string
-	cleanup   func()
+	cleanup   func() error
 }
 
 // prepareExecRun resolves the attach container or oneoff image/env-file and
@@ -157,6 +220,19 @@ func prepareExecRun(ctx context.Context, req ExecRequest) (*execRun, error) {
 		}
 		return &execRun{args: buildExecAttachArgs(req, container), container: container}, nil
 	default: // oneoff
+		network := req.Network
+		if network == "" {
+			network = fmt.Sprintf("tako_%s_%s", req.Project, req.Environment)
+		}
+		if err := ensureDockerNetwork(ctx, network); err != nil {
+			return nil, err
+		}
+		if err := ensureServiceVolumes(ctx, ReconcileServiceRequest{
+			Project: req.Project, Environment: req.Environment, Service: req.Service,
+			Mounts: req.Mounts, ExternalVolumes: req.ExternalVolumes,
+		}); err != nil {
+			return nil, err
+		}
 		image := req.Image
 		if image == "" {
 			resolved, err := resolveExecImage(ctx, req)
@@ -165,15 +241,46 @@ func prepareExecRun(ctx context.Context, req ExecRequest) (*execRun, error) {
 			}
 			image = resolved
 		}
+		if req.PullImage {
+			if output, err := runDockerWithAuth(ctx, req.RegistryAuths, "pull", image); err != nil {
+				return nil, fmt.Errorf("failed to pull image %s: %w: %s", image, err, annotateRegistryAuthFailure(strings.TrimSpace(output)))
+			}
+		}
+		if req.FileSetID != "" {
+			if len(req.Files) > 0 {
+				if err := prepareServiceFiles(ctx, req.Project, req.Environment, req.Service, req.FileSetID, req.Files); err != nil {
+					return nil, err
+				}
+			} else if err := ensureServiceFileSet(req.Project, req.Environment, req.Service, req.FileSetID); err != nil {
+				return nil, err
+			}
+		}
 		envFile, envCleanup, err := writeTempEnvFile(req.EnvFileContent, req.Project, req.Environment, req.Service)
 		if err != nil {
+			if req.CleanupFiles {
+				if cleanupErr := removeServiceFiles(req.Project, req.Environment, req.Service); cleanupErr != nil {
+					return nil, fmt.Errorf("%w; failed to clean up one-off files: %v", err, cleanupErr)
+				}
+			}
 			return nil, err
 		}
 		container := fmt.Sprintf("tako_%s_%s_%s_exec_%d", req.Project, req.Environment, req.Service, time.Now().UnixNano())
+		var cleanup func() error
+		if envCleanup != nil {
+			cleanup = func() error { envCleanup(); return nil }
+		}
+		if req.CleanupFiles {
+			cleanup = func() error {
+				if envCleanup != nil {
+					envCleanup()
+				}
+				return removeServiceFiles(req.Project, req.Environment, req.Service)
+			}
+		}
 		return &execRun{
 			args:      buildExecOneOffArgs(req, container, image, envFile),
 			container: container,
-			cleanup:   envCleanup,
+			cleanup:   cleanup,
 		}, nil
 	}
 }
@@ -197,9 +304,6 @@ func StreamExec(ctx context.Context, req ExecRequest, writer io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if run.cleanup != nil {
-		defer run.cleanup()
-	}
 	args := run.args
 	container := run.container
 
@@ -211,6 +315,16 @@ func StreamExec(ctx context.Context, req ExecRequest, writer io.Writer) error {
 	exitCode, runErr := runExecDocker(runCtx, out, args)
 	if req.Mode == ExecModeOneOff && runCtx.Err() != nil {
 		removeExecContainer(container)
+	}
+	if run.cleanup != nil {
+		if cleanupErr := run.cleanup(); cleanupErr != nil {
+			if runErr == nil {
+				runErr = fmt.Errorf("failed to clean up one-off files: %w", cleanupErr)
+			}
+			if exitCode == 0 {
+				exitCode = 1
+			}
+		}
 	}
 	if runErr != nil {
 		out.ensureLineStart()
@@ -305,6 +419,14 @@ func buildExecOneOffArgs(req ExecRequest, container string, image string, envFil
 		"--label", "tako.runtime=takod",
 		"--label", execRoleLabel,
 	)
+	labelKeys := make([]string, 0, len(req.Labels))
+	for key := range req.Labels {
+		labelKeys = append(labelKeys, key)
+	}
+	sort.Strings(labelKeys)
+	for _, key := range labelKeys {
+		args = append(args, "--label", key+"="+req.Labels[key])
+	}
 	if envFile != "" {
 		args = append(args, "--env-file", envFile)
 	}
@@ -314,7 +436,20 @@ func buildExecOneOffArgs(req ExecRequest, container string, image string, envFil
 	for _, mount := range req.Mounts {
 		args = append(args, "--mount", mount)
 	}
+	if req.MemoryLimit != "" {
+		args = append(args, "--memory", req.MemoryLimit)
+	}
+	if req.CPULimit != "" {
+		args = append(args, "--cpus", req.CPULimit)
+	}
+	args = appendContainerRuntimeArgs(args, req.User, req.WorkingDir, req.StopTimeoutSeconds, req.Init, req.ExtraHosts, req.Ulimits, req.ShmSize)
+	if len(req.Entrypoint) > 0 {
+		args = append(args, "--entrypoint", req.Entrypoint[0])
+	}
 	args = append(args, image)
+	if len(req.Entrypoint) > 1 {
+		args = append(args, req.Entrypoint[1:]...)
+	}
 	args = append(args, req.Command...)
 	return args
 }

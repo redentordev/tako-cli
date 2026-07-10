@@ -267,13 +267,32 @@ adds a hint to either install/repair buildx on the node or replace the
 BuildKit-only syntax with portable steps such as `RUN chmod`.
 
 For build-based services in a multi-node environment, remote build mode builds
-the image on each assigned node, skipping nodes where the exact commit image
+once on one assigned node per target architecture, then streams that exact
+Docker image to same-architecture peers, skipping nodes where the exact image
 already exists. Local build mode builds once per target architecture on the
 client and pushes directly to every assigned node through docker-pussh. The
 docker-pussh path starts a temporary unregistry container on the target over SSH
 and transfers only missing layers; when the target Docker daemon does not use
 the containerd image store, upstream docker-pussh pulls the temporary registry
 image back into Docker's classic image store so takod can run it.
+
+Top-level `builds:` are scheduled before their selected consumers. Tako groups
+all selected services by build key and computes the union of their placement
+nodes. Remote mode builds once on one source node per target architecture and
+streams that exact Docker image to same-architecture peers; local mode builds
+once per target architecture and pushes to its peers. Each consumer then
+reconciles through a prepared-image path with both
+per-service build and pull disabled. The shared definition integrity digest is
+part of each consumer's config hash and resolved artifact tag; desired state
+records the context, argument names, target, Dockerfile, and resolved image, but
+never argument values. Build args are explicitly non-secret configuration:
+their digests are identity, not confidentiality, and secret values must use
+runtime secrets or operator files instead.
+Shared images live in a repository namespace separate from service builds, and
+the definition fingerprint is also appended to the image tag. Scale and
+rollback transfer a retained exact image to newly assigned same-architecture
+nodes and fail before container mutation when no exact source remains; they
+never rebuild a historical tag from today's source.
 
 ## Runtime Flow
 
@@ -396,6 +415,30 @@ remove one-off containers.
 
 ### Scheduled jobs
 
+Service `files:` are request-scoped binary bundles. The CLI hashes the fully
+resolved file tree during planning; takod validates every bundle and relative
+entry name, stages it in a content-addressed version below
+`/var/lib/tako/files`, then atomically publishes that immutable version before
+container reconcile. Existing containers keep their prior version, and failed
+rollouts leave it intact. Containers receive read-only bind
+mounts. Desired state retains source/target metadata but never file bytes;
+secret-marked trees receive private modes. Standard-service sets are retained
+on every server that belonged to the environment at deploy time, allowing
+rollback after placement changes within that fleet. Rollback fails before
+container reconciliation when a newly added or replaced target node lacks the
+historical set; Tako never silently substitutes current local content.
+This immutable-version retention applies to standard services. Deploy-time run
+sets are request-lifetime data, while scheduled jobs retain the current set and
+defer pruning any prior set until its in-flight run releases it.
+
+`kind: run` is a fingerprinted run-to-completion vertex in the deploy DAG.
+Tako executes it through takod's one-off container path, records its machine
+outcome in deployment history, skips completed unchanged fingerprints, reruns
+under `--force`, and does not advance dependents until exit 0. `imageFrom`
+reuses another service's resolved image and adds that service as an implicit
+dependency. The fingerprint includes a non-reversible digest of fully resolved
+environment and secret values without persisting those values in state.
+
 `kind: job` declares a service that runs on a cron schedule instead of as
 long-running replicas:
 
@@ -410,8 +453,9 @@ services:
     command: generate-report
 ```
 
-Jobs require `schedule` and `command`; they accept `image`/`build`, `env`,
-`envFile`, `secrets`, `volumes`, `placement`, and `dependsOn`, and reject
+Jobs require `schedule` and `command`; they accept `image`/`build`/`imageFrom`, `env`,
+`envFile`/`envFiles`, `secrets`, `volumes`, `placement`, `dependsOn`, and the
+container runtime controls documented in `CONFIGURATION.md`, and reject
 `proxy`, `replicas`, `healthCheck`, `loadBalancer`, and `persistent`. A
 deploy builds the job's image exactly like a service's, distributes it to
 the **owning node** — the job's first placement target, so multi-node

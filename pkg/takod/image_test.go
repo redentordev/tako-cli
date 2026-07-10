@@ -115,6 +115,38 @@ func TestBuildImageUsesCustomDockerfilePath(t *testing.T) {
 	}
 }
 
+func TestBuildImageWithOptionsUsesSortedBuildArgsAndTarget(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	archive := testBuildContextArchive(t, map[string]string{"Dockerfile": "FROM scratch\n"})
+	_, err := BuildImageWithOptions(context.Background(), "demo/web:abc", bytes.NewReader(archive), nil, ImageBuildOptions{
+		BuildArgs: map[string]string{"SENTRY_IMAGE": "getsentry/sentry:26.6.0", "A": "first"},
+		Target:    "runtime",
+	})
+	if err != nil {
+		t.Fatalf("BuildImageWithOptions: %v", err)
+	}
+	want := "docker build -t demo/web:abc --build-arg A=first --build-arg SENTRY_IMAGE=getsentry/sentry:26.6.0 --target runtime ."
+	if entries := readCommandLog(t, logPath); !slices.Contains(entries, want) {
+		t.Fatalf("commands = %#v, want %q", entries, want)
+	}
+}
+
+func TestValidateImageBuildOptionsRejectsUnsafeDirectPayloads(t *testing.T) {
+	for _, options := range []ImageBuildOptions{
+		{BuildArgs: map[string]string{"--secret": "value"}},
+		{BuildArgs: map[string]string{"VALID": "line\nbreak"}},
+		{Target: "--output"},
+		{Target: "bad target"},
+	} {
+		if err := validateImageBuildOptions(options); err == nil {
+			t.Fatalf("unsafe build options accepted: %#v", options)
+		}
+	}
+}
+
 func TestBuildImageRejectsMissingCustomDockerfilePath(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "commands.log")
 	restore := useFakeCommands(t, logPath)

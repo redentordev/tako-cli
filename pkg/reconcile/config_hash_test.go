@@ -50,6 +50,60 @@ func TestSafeServiceConfigHashTracksPublishedPorts(t *testing.T) {
 	}
 }
 
+func TestSafeServiceConfigHashTracksOperatorFileContentWithoutLocalSourcePath(t *testing.T) {
+	first := config.ServiceConfig{
+		Image: "nginx:1.27", Files: []config.ServiceFileConfig{{Source: "/checkout-a/nginx.conf", Target: "/etc/nginx/nginx.conf", Secret: true}},
+		FilesContentHash: "sha256:first",
+	}
+	second := first
+	second.Files = []config.ServiceFileConfig{{Source: "/checkout-b/nginx.conf", Target: "/etc/nginx/nginx.conf", Secret: true}}
+	firstHash, _ := SafeServiceConfigHash(first)
+	secondHash, _ := SafeServiceConfigHash(second)
+	if firstHash != secondHash {
+		t.Fatalf("local source paths changed service hash: %q != %q", firstHash, secondHash)
+	}
+	second.FilesContentHash = "sha256:second"
+	changedHash, _ := SafeServiceConfigHash(second)
+	if changedHash == firstHash {
+		t.Fatal("operator file content hash did not change service hash")
+	}
+}
+
+func TestSafeServiceConfigHashTracksContainerGapAFields(t *testing.T) {
+	base := config.ServiceConfig{Image: "busybox:latest"}
+	baseHash, ok := SafeServiceConfigHash(base)
+	if !ok {
+		t.Fatal("expected safe service hash")
+	}
+	variants := []config.ServiceConfig{
+		func() config.ServiceConfig {
+			value := base
+			value.Command = config.ListValue("echo", "ok")
+			return value
+		}(),
+		func() config.ServiceConfig {
+			value := base
+			value.Entrypoint = config.ListValue("/bin/sh", "-e")
+			return value
+		}(),
+		func() config.ServiceConfig {
+			value := base
+			value.Labels = map[string]string{"com.example.role": "worker"}
+			return value
+		}(),
+		func() config.ServiceConfig { value := base; value.HealthCheck.Command = "true"; return value }(),
+	}
+	for i, variant := range variants {
+		hash, ok := SafeServiceConfigHash(variant)
+		if !ok {
+			t.Fatalf("variant %d did not hash", i)
+		}
+		if hash == baseHash {
+			t.Fatalf("variant %d did not change config hash", i)
+		}
+	}
+}
+
 func TestSafeServiceConfigHashTracksResourceLimits(t *testing.T) {
 	base := config.ServiceConfig{Image: "nginx:1.27", Port: 8080}
 	baseHash, ok := SafeServiceConfigHash(base)
@@ -152,6 +206,32 @@ func TestSafeServiceConfigHashRedactsEnvAndSecretValues(t *testing.T) {
 	}
 	if hashA == hashD {
 		t.Fatal("hash should change when secret refs change")
+	}
+}
+
+func TestSafeServiceConfigHashIncludesBuildAndRuntimeControls(t *testing.T) {
+	base := config.ServiceConfig{Image: "demo/web:latest"}
+	baseHash, ok := SafeServiceConfigHash(base)
+	if !ok {
+		t.Fatal("expected base hash")
+	}
+	variants := []config.ServiceConfig{
+		{Image: "demo/web:latest", BuildArgs: map[string]string{"BASE": "alpine"}},
+		{Image: "demo/web:latest", BuildTarget: "runtime"},
+		{Image: "demo/web:latest", EnvFiles: []string{".env.base", ".env.prod"}},
+		{Image: "demo/web:latest", User: "1000"},
+		{Image: "demo/web:latest", WorkingDir: "/work"},
+		{Image: "demo/web:latest", StopGracePeriod: "60s"},
+		{Image: "demo/web:latest", Init: true},
+		{Image: "demo/web:latest", ExtraHosts: []string{"db:10.0.0.2"}},
+		{Image: "demo/web:latest", Ulimits: map[string]config.UlimitConfig{"nofile": {Soft: 1, Hard: 1}}},
+		{Image: "demo/web:latest", ShmSize: "256m"},
+	}
+	for index, variant := range variants {
+		hash, ok := SafeServiceConfigHash(variant)
+		if !ok || hash == baseHash {
+			t.Fatalf("variant %d did not change hash", index)
+		}
 	}
 }
 
@@ -260,5 +340,18 @@ func TestDetectChangesDoesNotLetHashHideRuntimeIdentityDrift(t *testing.T) {
 	}
 	if reasons[0] != "Runtime identity changed" {
 		t.Fatalf("first reason = %q, want runtime identity drift", reasons[0])
+	}
+}
+
+func TestSafeServiceConfigHashIncludesSharedBuildDefinition(t *testing.T) {
+	service := config.ServiceConfig{ImageFrom: "application", SharedBuildHash: "first"}
+	first, ok := SafeServiceConfigHash(service)
+	if !ok {
+		t.Fatal("first hash failed")
+	}
+	service.SharedBuildHash = "second"
+	second, ok := SafeServiceConfigHash(service)
+	if !ok || first == second {
+		t.Fatalf("hashes = %q %q", first, second)
 	}
 }

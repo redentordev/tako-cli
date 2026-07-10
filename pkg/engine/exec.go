@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
@@ -162,6 +163,17 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error)
 			return nil, err
 		}
 		takodReq.EnvFileContent = envContent
+		_, mounts, filesHash, err := deployer.PrepareServiceFilesPayload(cfg.Project.Name, envName, req.Service, &service)
+		if err != nil {
+			return nil, err
+		}
+		takodReq.Mounts = append(takodReq.Mounts, mounts...)
+		if filesHash != "" {
+			takodReq.FileSetID, err = deployer.ServiceFileSetID(filesHash)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	payload, err := json.Marshal(takodReq)
@@ -174,6 +186,11 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error)
 		return nil, &ConnectivityError{Err: fmt.Errorf("failed to connect to node %s: %w", serverName, err)}
 	}
 	defer client.Close()
+	if req.OneOff && len(service.Files) > 0 {
+		if err := ensureServiceFilesCapability(ctx, client, TakodSocketFromConfig(cfg)); err != nil {
+			return nil, err
+		}
+	}
 
 	e.emit(events.Event{
 		Type:    events.TypeExecStarted,
@@ -299,7 +316,7 @@ func (e *Engine) resolveExecServer(ctx context.Context, cfg *config.Config, envN
 // buildExecEnvFileContent renders the service's env/secrets exactly as a
 // deploy would, registering secret values with the event redactor first.
 func buildExecEnvFileContent(e *Engine, envName string, service *config.ServiceConfig) (string, error) {
-	if len(service.Env) == 0 && len(service.Secrets) == 0 && service.EnvFile == "" {
+	if len(service.Env) == 0 && len(service.Secrets) == 0 && service.EnvFile == "" && len(service.EnvFiles) == 0 {
 		return "", nil
 	}
 	mgr, err := secrets.NewManager(envName)

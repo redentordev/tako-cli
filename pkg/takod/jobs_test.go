@@ -7,10 +7,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/config"
 )
 
 func validJobSpecFixture() JobSpec {
@@ -67,6 +70,7 @@ func TestValidateJobSpecRejectsBadInput(t *testing.T) {
 		{"excessive timeout", func(s *JobSpec) { s.TimeoutSeconds = maxExecTimeoutSeconds + 1 }},
 		{"unsafe memory limit", func(s *JobSpec) { s.MemoryLimit = "512m --privileged" }},
 		{"unsafe cpu limit", func(s *JobSpec) { s.CPULimit = "1.5 --privileged" }},
+		{"reserved label", func(s *JobSpec) { s.Labels = map[string]string{"tako.project": "other"} }},
 	}
 	for _, tc := range cases {
 		spec := validJobSpecFixture()
@@ -74,6 +78,22 @@ func TestValidateJobSpecRejectsBadInput(t *testing.T) {
 		if err := validateJobSpec(&spec); err == nil {
 			t.Fatalf("%s: spec accepted", tc.name)
 		}
+	}
+}
+
+func TestBuildJobRunArgsUsesEntrypointExecCommandAndCustomLabels(t *testing.T) {
+	spec := validJobSpecFixture()
+	spec.Command = []string{"report", "--format", "json"}
+	spec.Entrypoint = []string{"/usr/bin/env", "python3"}
+	spec.Labels = map[string]string{"com.example.role": "report"}
+	got := buildJobRunArgs(spec, "tako_demo_production_report_job_1", "")
+	wantTail := []string{spec.Image, "python3", "report", "--format", "json"}
+	if len(got) < len(wantTail) || strings.Join(got[len(got)-len(wantTail):], "|") != strings.Join(wantTail, "|") {
+		t.Fatalf("args tail = %#v, want %#v; all args %#v", got, wantTail, got)
+	}
+	joined := strings.Join(got, " ")
+	if !strings.Contains(joined, "--entrypoint /usr/bin/env") || !strings.Contains(joined, "--label com.example.role=report") {
+		t.Fatalf("args missing entrypoint or custom label: %s", joined)
 	}
 }
 
@@ -115,6 +135,29 @@ func TestBuildJobRunArgsLabelsAndDefaults(t *testing.T) {
 	}
 	if got[len(got)-4] != spec.Image {
 		t.Fatalf("image not before command: %s", joined)
+	}
+}
+
+func TestBuildJobRunArgsUsesRuntimeControls(t *testing.T) {
+	spec := validJobSpecFixture()
+	spec.User = "1000:1000"
+	spec.WorkingDir = "/work"
+	spec.StopTimeoutSeconds = 60
+	spec.Init = true
+	spec.ExtraHosts = []string{"database:10.0.0.2"}
+	spec.Ulimits = map[string]config.UlimitConfig{"nofile": {Soft: 262144, Hard: 262144}}
+	spec.ShmSize = "256m"
+	got := buildJobRunArgs(spec, "tako_demo_production_report_job_1", "")
+	want := []string{
+		"run", "--rm", "--name", "tako_demo_production_report_job_1", "--network", "tako_demo_production",
+		"--label", "tako.project=demo", "--label", "tako.environment=production",
+		"--label", "tako.service=report", "--label", "tako.runtime=takod", "--label", jobRoleLabel,
+		"--user", "1000:1000", "--workdir", "/work", "--stop-timeout", "60", "--init",
+		"--add-host", "database:10.0.0.2", "--ulimit", "nofile=262144:262144", "--shm-size", "256m",
+		spec.Image, "sh", "-c", "generate-report",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("job args = %#v, want %#v", got, want)
 	}
 }
 
@@ -341,6 +384,57 @@ func TestTriggerUnknownJobFailsBeforeStreaming(t *testing.T) {
 	err := scheduler.Trigger(context.Background(), "demo", "production", "ghost", &stream)
 	if err == nil || stream.Len() != 0 {
 		t.Fatalf("err = %v, stream = %q", err, stream.String())
+	}
+}
+
+func TestTriggerReservesFileSetBeforeApplyCanPruneIt(t *testing.T) {
+	oldRoot := serviceFilesRoot
+	serviceFilesRoot = t.TempDir()
+	defer func() { serviceFilesRoot = oldRoot }()
+	scheduler := newTestJobScheduler(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	scheduler.runJob = func(ctx context.Context, spec JobSpec, container string, output io.Writer) (int, error) {
+		close(started)
+		<-release
+		return 0, nil
+	}
+
+	oldFiles := []ServiceFileBundle{{Name: "file-000", Target: "/run/config", UID: os.Getuid(), GID: os.Getgid(), Entries: []ServiceFileEntry{{Data: []byte("old"), Mode: 0600}}}}
+	oldSetID := testServiceFileSetID(t, oldFiles)
+	if err := PublishServiceFiles(context.Background(), ServiceFilesRequest{Project: "demo", Environment: "production", Service: "report", FileSetID: oldSetID, Files: oldFiles}); err != nil {
+		t.Fatal(err)
+	}
+	oldSpec := validJobSpecFixture()
+	oldSpec.FileSetID = oldSetID
+	if _, err := scheduler.Apply(context.Background(), JobsApplyRequest{Project: "demo", Environment: "production", Jobs: []JobSpec{oldSpec}}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- scheduler.Trigger(context.Background(), "demo", "production", "report", nil) }()
+	<-started
+
+	newFiles := []ServiceFileBundle{{Name: "file-000", Target: "/run/config", UID: os.Getuid(), GID: os.Getgid(), Entries: []ServiceFileEntry{{Data: []byte("new"), Mode: 0600}}}}
+	newSetID := testServiceFileSetID(t, newFiles)
+	if err := PublishServiceFiles(context.Background(), ServiceFilesRequest{Project: "demo", Environment: "production", Service: "report", FileSetID: newSetID, Files: newFiles}); err != nil {
+		t.Fatal(err)
+	}
+	newSpec := validJobSpecFixture()
+	newSpec.FileSetID = newSetID
+	if _, err := scheduler.Apply(context.Background(), JobsApplyRequest{Project: "demo", Environment: "production", Jobs: []JobSpec{newSpec}}); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(serviceFilesRoot, "demo", "production", "report", oldSetID)
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("running job's file set was pruned: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old file set remained after run handoff: %v", err)
 	}
 }
 

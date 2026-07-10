@@ -53,6 +53,8 @@ type CleanupResponse struct {
 
 const DefaultBuildCacheKeepStorage = "20GB"
 
+const composeProjectImageLabel = "com.docker.compose.project"
+
 func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, error) {
 	if err := validateCleanupRequest(req); err != nil {
 		return nil, err
@@ -137,6 +139,11 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 	}
 	if req.RemoveDeployFiles {
 		removeFixedPath(filepath.Join("/opt", req.Project), "deployment files", warn)
+		filesPath := filepath.Join(serviceFilesRoot, req.Project)
+		if req.Environment != "" {
+			filesPath = filepath.Join(filesPath, req.Environment)
+		}
+		removeFixedPath(filesPath, "operator files", warn)
 	}
 	if req.RemoveTakodState {
 		cleanupTakodState(req.Project, req.Environment, warn)
@@ -281,25 +288,31 @@ func disconnectProxyFromNetwork(ctx context.Context, network string) {
 }
 
 func cleanupImages(ctx context.Context, project string, imageRepositories []string) (int, error) {
-	output, err := runDocker(ctx, "images", "--format", "{{.Repository}}\t{{.Tag}}")
+	if len(imageRepositories) == 0 {
+		return 0, nil
+	}
+	output, err := runDocker(ctx, "images", "--filter", "label!="+composeProjectImageLabel, "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}")
 	if err != nil {
 		return 0, fmt.Errorf("failed to list docker images: %w", err)
 	}
 	var refs []string
+	seen := make(map[string]bool)
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 2 {
+		if len(fields) != 3 {
 			continue
 		}
-		repo, tag := fields[0], fields[1]
-		if repo == "<none>" || tag == "<none>" || !imageRepositoryMatchesProject(repo, project, imageRepositories) {
+		id, repo, tag := fields[0], fields[1], fields[2]
+		ref := repo + ":" + tag
+		if id == "" || seen[ref] || repo == "<none>" || tag == "<none>" || !imageRepositoryMatchesProject(repo, project, imageRepositories) {
 			continue
 		}
-		refs = append(refs, repo+":"+tag)
+		seen[ref] = true
+		refs = append(refs, ref)
 	}
 	if len(refs) == 0 {
 		return 0, nil
@@ -312,31 +325,40 @@ func cleanupImages(ctx context.Context, project string, imageRepositories []stri
 }
 
 func cleanupOldProjectImages(ctx context.Context, project string, keepLatest int, imageRepositories []string) (int, error) {
-	output, err := runDocker(ctx, "images", "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}")
+	if len(imageRepositories) == 0 {
+		return 0, nil
+	}
+	output, err := runDocker(ctx, "images", "--filter", "label!="+composeProjectImageLabel, "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}")
 	if err != nil {
 		return 0, fmt.Errorf("failed to list docker images: %w", err)
 	}
 
 	var ids []string
-	seen := make(map[string]bool)
+	refsByID := make(map[string][]string)
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Split(strings.TrimSpace(line), "\t")
 		if len(fields) != 3 {
 			continue
 		}
 		id, repo, tag := fields[0], fields[1], fields[2]
-		if id == "" || repo == "<none>" || tag == "<none>" || !imageRepositoryMatchesProject(repo, project, imageRepositories) || seen[id] {
+		if id == "" || repo == "<none>" || tag == "<none>" || !imageRepositoryMatchesProject(repo, project, imageRepositories) {
 			continue
 		}
-		seen[id] = true
-		ids = append(ids, id)
+		if _, exists := refsByID[id]; !exists {
+			ids = append(ids, id)
+		}
+		refsByID[id] = append(refsByID[id], repo+":"+tag)
 	}
 	if len(ids) <= keepLatest {
 		return 0, nil
 	}
 
 	removeIDs := ids[keepLatest:]
-	removeArgs := append([]string{"rmi", "-f"}, removeIDs...)
+	var removeRefs []string
+	for _, id := range removeIDs {
+		removeRefs = append(removeRefs, refsByID[id]...)
+	}
+	removeArgs := append([]string{"rmi", "-f"}, removeRefs...)
 	if _, err := runDocker(ctx, removeArgs...); err != nil {
 		return 0, fmt.Errorf("failed to remove old project images: %w", err)
 	}
@@ -344,7 +366,11 @@ func cleanupOldProjectImages(ctx context.Context, project string, keepLatest int
 }
 
 func cleanupDanglingImages(ctx context.Context) (int, error) {
-	output, err := runDocker(ctx, "images", "-f", "dangling=true", "-q")
+	// Docker's negative label filter keeps Compose-built images out of both
+	// the preflight list and the global dangling-image prune. Compose images
+	// can be dangling during an upstream upgrade and are not Tako-owned.
+	labelExclusion := "label!=" + composeProjectImageLabel
+	output, err := runDocker(ctx, "images", "-f", "dangling=true", "--filter", labelExclusion, "-q")
 	if err != nil {
 		return 0, fmt.Errorf("failed to list dangling docker images: %w", err)
 	}
@@ -352,7 +378,7 @@ func cleanupDanglingImages(ctx context.Context) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	pruneOutput, err := runDocker(ctx, "image", "prune", "-f")
+	pruneOutput, err := runDocker(ctx, "image", "prune", "-f", "--filter", labelExclusion)
 	if err != nil {
 		return 0, fmt.Errorf("failed to prune dangling docker images: %w, output: %s", err, strings.TrimSpace(pruneOutput))
 	}
@@ -471,20 +497,9 @@ func runScopedProjectPrune(ctx context.Context, project string, environment stri
 	}
 }
 
-func imageRepositoryMatchesProject(repository string, project string, allowedRepositories []string) bool {
-	if len(allowedRepositories) > 0 {
-		for _, allowed := range allowedRepositories {
-			if repository == allowed {
-				return true
-			}
-		}
-		return false
-	}
-	if repository == project || strings.HasPrefix(repository, project+"/") {
-		return true
-	}
-	for _, segment := range strings.Split(repository, "/") {
-		if segment == project {
+func imageRepositoryMatchesProject(repository string, _ string, allowedRepositories []string) bool {
+	for _, allowed := range allowedRepositories {
+		if repository == allowed {
 			return true
 		}
 	}

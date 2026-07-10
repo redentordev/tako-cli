@@ -109,6 +109,9 @@ func (e *Engine) StreamLogs(ctx context.Context, req LogsRequest) (*LogsResult, 
 	if service.IsJob() {
 		return e.streamJobLogs(ctx, req, cfg, envName)
 	}
+	if service.IsRun() {
+		return nil, invalidRequestf("service %s is a deploy-time run and has no persistent container logs; inspect deployment history or deploy output", req.Service)
+	}
 
 	servers, err := ResolveLogTargetServers(cfg, envName, req.Server)
 	if err != nil {

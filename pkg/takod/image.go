@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -34,6 +35,12 @@ type ImageBuildTimings struct {
 	ExtractMS     int64 `json:"extractMs,omitempty"`
 	DockerBuildMS int64 `json:"dockerBuildMs,omitempty"`
 	TotalMS       int64 `json:"totalMs,omitempty"`
+}
+
+type ImageBuildOptions struct {
+	Dockerfile string
+	BuildArgs  map[string]string
+	Target     string
 }
 
 const (
@@ -137,6 +144,16 @@ func BuildImage(ctx context.Context, image string, r io.Reader, dockerfile ...st
 // BuildImageWithAuth builds like BuildImage; auths feed an ephemeral
 // DOCKER_CONFIG so the daemon can pull private base images during FROM.
 func BuildImageWithAuth(ctx context.Context, image string, r io.Reader, auths []RegistryAuth, dockerfile ...string) (*ImageBuildResponse, error) {
+	options := ImageBuildOptions{}
+	if len(dockerfile) > 0 {
+		options.Dockerfile = dockerfile[0]
+	}
+	return BuildImageWithOptions(ctx, image, r, auths, options)
+}
+
+// BuildImageWithOptions builds an uploaded context with validated target and
+// build args. Values arrive in the request body preamble, never the URL.
+func BuildImageWithOptions(ctx context.Context, image string, r io.Reader, auths []RegistryAuth, options ImageBuildOptions) (*ImageBuildResponse, error) {
 	totalStart := time.Now()
 	if err := validateImageName(image); err != nil {
 		return nil, err
@@ -144,14 +161,14 @@ func BuildImageWithAuth(ctx context.Context, image string, r io.Reader, auths []
 	if err := validateRegistryAuths(auths); err != nil {
 		return nil, err
 	}
-	dockerfilePath := ""
-	if len(dockerfile) > 0 {
-		dockerfilePath = strings.TrimSpace(dockerfile[0])
-	}
+	dockerfilePath := strings.TrimSpace(options.Dockerfile)
 	if dockerfilePath != "" {
 		if err := validateDockerfilePath(dockerfilePath); err != nil {
 			return nil, err
 		}
+	}
+	if err := validateImageBuildOptions(options); err != nil {
+		return nil, err
 	}
 	r = newMaxBytesReader(r, defaultBuildContextMaxBytes, "build context upload")
 	buildDir, err := os.MkdirTemp("", "tako-build-*")
@@ -175,6 +192,17 @@ func BuildImageWithAuth(ctx context.Context, image string, r io.Reader, auths []
 			return nil, fmt.Errorf("dockerfile does not exist in build context: %s", dockerfilePath)
 		}
 		args = append(args, "-f", dockerfilePath)
+	}
+	keys := make([]string, 0, len(options.BuildArgs))
+	for key := range options.BuildArgs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		args = append(args, "--build-arg", key+"="+options.BuildArgs[key])
+	}
+	if options.Target != "" {
+		args = append(args, "--target", options.Target)
 	}
 	args = append(args, ".")
 	cmd := dockerCommandContext(ctx, "docker", args...)
@@ -207,6 +235,48 @@ func BuildImageWithAuth(ctx context.Context, image string, r io.Reader, auths []
 			TotalMS:       time.Since(totalStart).Milliseconds(),
 		},
 	}, nil
+}
+
+func validateImageBuildOptions(options ImageBuildOptions) error {
+	if len(options.BuildArgs) > 128 {
+		return fmt.Errorf("build args exceed maximum count 128")
+	}
+	total := 0
+	for key, value := range options.BuildArgs {
+		if key == "" || !isBuildArgName(key) {
+			return fmt.Errorf("invalid build arg name %q", key)
+		}
+		if strings.ContainsAny(value, "\x00\r\n") {
+			return fmt.Errorf("build arg %s contains unsupported control characters", key)
+		}
+		total += len(key) + len(value)
+	}
+	if total > 64*1024 {
+		return fmt.Errorf("build args exceed maximum size 65536")
+	}
+	if options.Target != "" {
+		if len(options.Target) > 128 || strings.HasPrefix(options.Target, "-") {
+			return fmt.Errorf("invalid build target")
+		}
+		for _, r := range options.Target {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-') {
+				return fmt.Errorf("invalid build target")
+			}
+		}
+	}
+	return nil
+}
+
+func isBuildArgName(value string) bool {
+	for index, r := range value {
+		if index == 0 && !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_') {
+			return false
+		}
+		if index > 0 && !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
+			return false
+		}
+	}
+	return value != ""
 }
 
 func annotateDockerBuildFailure(output string) string {
