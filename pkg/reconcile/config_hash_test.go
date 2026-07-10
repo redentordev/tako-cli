@@ -190,6 +190,32 @@ func TestSafeServiceConfigHashRedactsEnvAndSecretValues(t *testing.T) {
 	}
 }
 
+func TestSafeServiceConfigHashIncludesBuildAndRuntimeControls(t *testing.T) {
+	base := config.ServiceConfig{Image: "demo/web:latest"}
+	baseHash, ok := SafeServiceConfigHash(base)
+	if !ok {
+		t.Fatal("expected base hash")
+	}
+	variants := []config.ServiceConfig{
+		{Image: "demo/web:latest", BuildArgs: map[string]string{"BASE": "alpine"}},
+		{Image: "demo/web:latest", BuildTarget: "runtime"},
+		{Image: "demo/web:latest", EnvFiles: []string{".env.base", ".env.prod"}},
+		{Image: "demo/web:latest", User: "1000"},
+		{Image: "demo/web:latest", WorkingDir: "/work"},
+		{Image: "demo/web:latest", StopGracePeriod: "60s"},
+		{Image: "demo/web:latest", Init: true},
+		{Image: "demo/web:latest", ExtraHosts: []string{"db:10.0.0.2"}},
+		{Image: "demo/web:latest", Ulimits: map[string]config.UlimitConfig{"nofile": {Soft: 1, Hard: 1}}},
+		{Image: "demo/web:latest", ShmSize: "256m"},
+	}
+	for index, variant := range variants {
+		hash, ok := SafeServiceConfigHash(variant)
+		if !ok || hash == baseHash {
+			t.Fatalf("variant %d did not change hash", index)
+		}
+	}
+}
+
 func TestDetectChangesUsesMatchingSafeConfigHash(t *testing.T) {
 	service := config.ServiceConfig{
 		Image:   "nginx:1.27",

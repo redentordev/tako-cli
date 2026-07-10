@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -66,7 +67,7 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 			if status.Version != "test" {
 				t.Fatalf("unexpected version %q", status.Version)
 			}
-			if len(status.Capabilities) != 1 || status.Capabilities[0] != CapabilityContainerArgvV1 {
+			if len(status.Capabilities) != 3 || status.Capabilities[0] != CapabilityContainerArgvV1 || status.Capabilities[1] != CapabilityContainerRuntimeControlsV1 || status.Capabilities[2] != CapabilityImageBuildOptionsV1 {
 				t.Fatalf("unexpected capabilities %#v", status.Capabilities)
 			}
 			return
@@ -897,6 +898,26 @@ func TestHandleImageBuildRejectsUnsafeDockerfilePath(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "dockerfile path must stay inside") {
 		t.Fatalf("response = %q, want dockerfile path error", recorder.Body.String())
+	}
+}
+
+func TestHandleImageBuildReadsOptionsPreamble(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	archive := testBuildContextArchive(t, map[string]string{"Dockerfile": "FROM scratch\n"})
+	body := append([]byte(`{"buildArgs":{"SENTRY_IMAGE":"getsentry/sentry:26.6.0"},"target":"runtime"}`+"\n"), archive...)
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/build?image=demo/web:abc&options=preamble", bytes.NewReader(body))
+	recorder := httptest.NewRecorder()
+
+	server.handleImageBuild(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	want := "docker build -t demo/web:abc --build-arg SENTRY_IMAGE=getsentry/sentry:26.6.0 --target runtime ."
+	if entries := readCommandLog(t, logPath); !slices.Contains(entries, want) {
+		t.Fatalf("commands = %#v, want %q", entries, want)
 	}
 }
 

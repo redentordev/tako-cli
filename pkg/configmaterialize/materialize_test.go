@@ -36,6 +36,34 @@ func TestDesiredServiceToConfigPreservesCommandEntrypointAndLabels(t *testing.T)
 	}
 }
 
+func TestDesiredServiceToConfigPreservesRuntimeControlsAndRedactsBuildArgs(t *testing.T) {
+	service, warnings, err := desiredServiceToConfig("web", takoapi.DesiredServiceDocument{
+		Image:           "demo/web:latest",
+		Build:           ".",
+		BuildArgKeys:    []string{"BASE_IMAGE", "TOKEN"},
+		BuildTarget:     "runtime",
+		User:            "1000:1000",
+		WorkingDir:      "/work",
+		StopGracePeriod: "60s",
+		Init:            true,
+		ExtraHosts:      []string{"database:10.0.0.2"},
+		Ulimits:         map[string]takoapi.UlimitDocument{"nofile": {Soft: 262144, Hard: 262144}},
+		ShmSize:         "256m",
+	})
+	if err != nil {
+		t.Fatalf("desiredServiceToConfig: %v", err)
+	}
+	if service.BuildTarget != "runtime" || service.User != "1000:1000" || service.WorkingDir != "/work" || !service.Init || service.ShmSize != "256m" {
+		t.Fatalf("materialized runtime controls = %#v", service)
+	}
+	if service.Ulimits["nofile"].Hard != 262144 || len(service.BuildArgs) != 0 {
+		t.Fatalf("materialized ulimits/build args = %#v / %#v", service.Ulimits, service.BuildArgs)
+	}
+	if len(warnings) != 1 || warnings[0].Code != "build_arg_values_redacted" {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+}
+
 func TestDesiredServiceToConfigReadsLegacyScalarCommand(t *testing.T) {
 	service, _, err := desiredServiceToConfig("worker", takoapi.DesiredServiceDocument{
 		Image: "busybox:latest", Command: "echo legacy",

@@ -72,20 +72,27 @@ func (d *Deployer) buildJobSpec(serviceName string, service *config.ServiceConfi
 	}
 	hash, _ := reconcile.SafeServiceConfigHash(*service)
 	return takod.JobSpec{
-		Name:           serviceName,
-		Schedule:       service.Schedule,
-		Timezone:       service.Timezone,
-		Image:          image,
-		Command:        service.Command.ContainerCommand(),
-		Entrypoint:     service.Entrypoint.Arguments(),
-		Labels:         copyJobLabels(service.Labels),
-		EnvFileContent: envContent,
-		Network:        runtimeid.NetworkName(d.config.Project.Name, d.environment),
-		Mounts:         mounts,
-		MemoryLimit:    serviceMemoryLimit(service),
-		CPULimit:       serviceCPULimit(service),
-		TimeoutSeconds: timeoutSeconds,
-		ConfigHash:     hash,
+		Name:               serviceName,
+		Schedule:           service.Schedule,
+		Timezone:           service.Timezone,
+		Image:              image,
+		Command:            service.Command.ContainerCommand(),
+		Entrypoint:         service.Entrypoint.Arguments(),
+		Labels:             copyJobLabels(service.Labels),
+		EnvFileContent:     envContent,
+		Network:            runtimeid.NetworkName(d.config.Project.Name, d.environment),
+		Mounts:             mounts,
+		MemoryLimit:        serviceMemoryLimit(service),
+		CPULimit:           serviceCPULimit(service),
+		User:               service.User,
+		WorkingDir:         service.WorkingDir,
+		StopTimeoutSeconds: serviceStopTimeoutSeconds(service),
+		Init:               service.Init,
+		ExtraHosts:         append([]string(nil), service.ExtraHosts...),
+		Ulimits:            copyServiceUlimits(service.Ulimits),
+		ShmSize:            service.ShmSize,
+		TimeoutSeconds:     timeoutSeconds,
+		ConfigHash:         hash,
 	}, nil
 }
 
@@ -139,15 +146,34 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 	}
 
 	var argvServers []string
+	var runtimeControlServers []string
 	for _, serverName := range targetServers {
+		needsArgv := false
+		needsRuntimeControls := false
 		for _, job := range jobsByNode[serverName] {
 			if len(job.Entrypoint) > 0 {
-				argvServers = append(argvServers, serverName)
-				break
+				needsArgv = true
+			}
+			if jobSpecNeedsRuntimeControls(job) {
+				needsRuntimeControls = true
 			}
 		}
+		if needsArgv {
+			argvServers = append(argvServers, serverName)
+		}
+		if needsRuntimeControls {
+			runtimeControlServers = append(runtimeControlServers, serverName)
+		}
 	}
-	return runTakodJobApplyPhases(targetServers, argvServers, d.preflightTakodContainerArgv, func(serverName string) error {
+	return runTakodJobApplyPhases(targetServers, func() error {
+		if err := d.preflightTakodCapability(argvServers, takod.CapabilityContainerArgvV1, "container argv payloads"); err != nil {
+			return fmt.Errorf("job entrypoint requires container argv support: %w", err)
+		}
+		if err := d.preflightTakodCapability(runtimeControlServers, takod.CapabilityContainerRuntimeControlsV1, "container runtime controls"); err != nil {
+			return fmt.Errorf("job uses container runtime controls: %w", err)
+		}
+		return nil
+	}, func(serverName string) error {
 		client, err := d.getEnvironmentClient(serverName)
 		if err != nil {
 			return err
@@ -189,9 +215,13 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 	})
 }
 
-func runTakodJobApplyPhases(targetServers []string, argvServers []string, preflight func([]string) error, apply func(string) error) error {
-	if err := preflight(argvServers); err != nil {
-		return fmt.Errorf("job entrypoint requires container argv support: %w", err)
+func runTakodJobApplyPhases(targetServers []string, preflight func() error, apply func(string) error) error {
+	if err := preflight(); err != nil {
+		return err
 	}
 	return runTakodNodeActions(targetServers, apply)
+}
+
+func jobSpecNeedsRuntimeControls(spec takod.JobSpec) bool {
+	return spec.User != "" || spec.WorkingDir != "" || spec.StopTimeoutSeconds > 0 || spec.Init || len(spec.ExtraHosts) > 0 || len(spec.Ulimits) > 0 || spec.ShmSize != ""
 }

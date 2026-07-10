@@ -21,19 +21,28 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	}
 	services := map[string]config.ServiceConfig{
 		"web": {
-			Build:    ".",
-			Port:     3000,
-			Replicas: 0,
+			Build:       ".",
+			BuildArgs:   map[string]string{"SENTRY_IMAGE": "getsentry/sentry:26.6.0", "TOKEN": "build-secret"},
+			BuildTarget: "runtime",
+			Port:        3000,
+			Replicas:    0,
 			Env: map[string]string{
 				"DATABASE_URL": "postgres://user:password@example/db",
 				"TOKEN":        "top-secret-token",
 			},
-			EnvFile:   ".env.production",
-			Secrets:   []string{"TOKEN:prod/token", "DATABASE_URL"},
-			Volumes:   []string{"data:/data"},
-			Proxy:     &config.ProxyConfig{Domain: "example.com"},
-			Deploy:    config.DeployConfig{Strategy: "recreate"},
-			DependsOn: []string{"db"},
+			EnvFiles:        []string{".env.base", ".env.production"},
+			User:            "1000:1000",
+			WorkingDir:      "/work",
+			StopGracePeriod: "60s",
+			Init:            true,
+			ExtraHosts:      []string{"database:10.0.0.2"},
+			Ulimits:         map[string]config.UlimitConfig{"nofile": {Soft: 262144, Hard: 262144}},
+			ShmSize:         "256m",
+			Secrets:         []string{"TOKEN:prod/token", "DATABASE_URL"},
+			Volumes:         []string{"data:/data"},
+			Proxy:           &config.ProxyConfig{Domain: "example.com"},
+			Deploy:          config.DeployConfig{Strategy: "recreate"},
+			DependsOn:       []string{"db"},
 		},
 	}
 
@@ -63,6 +72,12 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	if !service.EnvFile {
 		t.Fatal("expected env file presence to be recorded")
 	}
+	if !slices.Equal(service.BuildArgKeys, []string{"SENTRY_IMAGE", "TOKEN"}) || service.BuildTarget != "runtime" {
+		t.Fatalf("safe build state = %#v / %q", service.BuildArgKeys, service.BuildTarget)
+	}
+	if service.User != "1000:1000" || service.WorkingDir != "/work" || !service.Init || service.ShmSize != "256m" {
+		t.Fatalf("runtime controls not persisted: %#v", service)
+	}
 	if !slices.Equal(revision.TargetNodes, []string{"node-a", "node-b"}) {
 		t.Fatalf("target nodes were not sorted: %#v", revision.TargetNodes)
 	}
@@ -72,7 +87,7 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 		t.Fatalf("failed to marshal revision: %v", err)
 	}
 	serialized := string(data)
-	for _, secretValue := range []string{"postgres://user:password@example/db", "top-secret-token"} {
+	for _, secretValue := range []string{"postgres://user:password@example/db", "top-secret-token", "build-secret"} {
 		if strings.Contains(serialized, secretValue) {
 			t.Fatalf("desired revision leaked raw env value %q: %s", secretValue, serialized)
 		}

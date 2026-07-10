@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -24,6 +25,17 @@ const (
 	maxContainerCommandArgs  = 256
 	maxContainerCommandBytes = 64 * 1024
 	maxContainerHealthBytes  = 4096
+	maxServiceEnvFiles       = 32
+	maxServiceBuildArgs      = 128
+	maxServiceExtraHosts     = 128
+	maxServiceUlimits        = 64
+)
+
+var (
+	buildArgNamePattern  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	buildTargetPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	extraHostNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,252}$`)
+	ulimitNamePattern    = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 )
 
 // ValidateConfig validates the configuration
@@ -598,6 +610,12 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	if err := validateContainerLabels(name, service.Labels); err != nil {
 		return err
 	}
+	if err := validateServiceBuildOptions(name, service); err != nil {
+		return err
+	}
+	if err := validateContainerRuntimeControls(name, service); err != nil {
+		return err
+	}
 
 	// Must have either Build or Image, but not both
 	if service.Build == "" && service.Image == "" {
@@ -656,9 +674,26 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		}
 	}
 
-	// Validate envFile if specified
+	if service.EnvFile != "" && len(service.EnvFiles) > 0 {
+		return fmt.Errorf("service %s: envFile and envFiles are mutually exclusive", name)
+	}
+	envFiles := service.EnvFiles
 	if service.EnvFile != "" {
-		envFilePath := service.EnvFile
+		envFiles = []string{service.EnvFile}
+	}
+	if len(envFiles) > maxServiceEnvFiles {
+		return fmt.Errorf("service %s: envFiles has too many entries (maximum %d)", name, maxServiceEnvFiles)
+	}
+	seenEnvFiles := make(map[string]bool, len(envFiles))
+	for _, configuredPath := range envFiles {
+		envFilePath := strings.TrimSpace(configuredPath)
+		if envFilePath == "" {
+			return fmt.Errorf("service %s: envFiles must not contain empty paths", name)
+		}
+		if seenEnvFiles[envFilePath] {
+			return fmt.Errorf("service %s: duplicate env file %s", name, envFilePath)
+		}
+		seenEnvFiles[envFilePath] = true
 		if !filepath.IsAbs(envFilePath) {
 			// Make it absolute relative to current directory
 			cwd, _ := os.Getwd()
@@ -667,7 +702,7 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 
 		// Check if env file exists
 		if _, err := os.Stat(envFilePath); os.IsNotExist(err) {
-			return fmt.Errorf("service %s: envFile not found: %s", name, service.EnvFile)
+			return fmt.Errorf("service %s: env file not found: %s", name, configuredPath)
 		}
 	}
 
@@ -967,6 +1002,105 @@ func validateResourceLimits(name string, resources *ResourceLimitsConfig) error 
 	}
 	resources.CPUs = cpus
 	return nil
+}
+
+func validateServiceBuildOptions(name string, service *ServiceConfig) error {
+	if len(service.BuildArgs) > 0 && service.Build == "" {
+		return fmt.Errorf("service %s: build.args requires build", name)
+	}
+	if service.BuildTarget != "" && service.Build == "" {
+		return fmt.Errorf("service %s: build.target requires build", name)
+	}
+	if len(service.BuildArgs) > maxServiceBuildArgs {
+		return fmt.Errorf("service %s: build.args has too many entries (maximum %d)", name, maxServiceBuildArgs)
+	}
+	totalBytes := 0
+	for key, value := range service.BuildArgs {
+		if !buildArgNamePattern.MatchString(key) {
+			return fmt.Errorf("service %s: invalid build arg name %q", name, key)
+		}
+		if hasControlChars(value) {
+			return fmt.Errorf("service %s: build arg %s contains control characters", name, key)
+		}
+		totalBytes += len(key) + len(value)
+	}
+	if totalBytes > maxContainerCommandBytes {
+		return fmt.Errorf("service %s: build.args is too large", name)
+	}
+	service.BuildTarget = strings.TrimSpace(service.BuildTarget)
+	if service.BuildTarget != "" && !buildTargetPattern.MatchString(service.BuildTarget) {
+		return fmt.Errorf("service %s: invalid build target %q", name, service.BuildTarget)
+	}
+	return nil
+}
+
+func validateContainerRuntimeControls(name string, service *ServiceConfig) error {
+	service.User = strings.TrimSpace(service.User)
+	if len(service.User) > 256 || strings.HasPrefix(service.User, "-") || hasControlChars(service.User) || strings.ContainsAny(service.User, " \t\r\n") {
+		return fmt.Errorf("service %s: invalid user", name)
+	}
+	service.WorkingDir = strings.TrimSpace(service.WorkingDir)
+	if service.WorkingDir != "" {
+		workingDir, err := normalizeContainerWorkingDir(service.WorkingDir)
+		if err != nil {
+			return fmt.Errorf("service %s: %w", name, err)
+		}
+		service.WorkingDir = workingDir
+	}
+	service.StopGracePeriod = strings.TrimSpace(service.StopGracePeriod)
+	if service.StopGracePeriod != "" {
+		duration, err := time.ParseDuration(service.StopGracePeriod)
+		if err != nil || duration <= 0 || duration > maxServiceHealthDuration {
+			return fmt.Errorf("service %s: stopGracePeriod must be a positive duration no greater than %s", name, maxServiceHealthDuration)
+		}
+		if duration%time.Second != 0 {
+			return fmt.Errorf("service %s: stopGracePeriod must use whole seconds", name)
+		}
+	}
+	if len(service.ExtraHosts) > maxServiceExtraHosts {
+		return fmt.Errorf("service %s: extraHosts has too many entries (maximum %d)", name, maxServiceExtraHosts)
+	}
+	seenHosts := make(map[string]bool, len(service.ExtraHosts))
+	for index, entry := range service.ExtraHosts {
+		entry = strings.TrimSpace(entry)
+		host, address, ok := strings.Cut(entry, ":")
+		if !ok || !extraHostNamePattern.MatchString(host) || (address != "host-gateway" && net.ParseIP(strings.Trim(address, "[]")) == nil) {
+			return fmt.Errorf("service %s: invalid extraHosts[%d] %q (want host:IP or host:host-gateway)", name, index, entry)
+		}
+		if seenHosts[host] {
+			return fmt.Errorf("service %s: duplicate extra host %q", name, host)
+		}
+		seenHosts[host] = true
+		service.ExtraHosts[index] = entry
+	}
+	if len(service.Ulimits) > maxServiceUlimits {
+		return fmt.Errorf("service %s: ulimits has too many entries (maximum %d)", name, maxServiceUlimits)
+	}
+	for limitName, limit := range service.Ulimits {
+		if !ulimitNamePattern.MatchString(limitName) {
+			return fmt.Errorf("service %s: invalid ulimit name %q", name, limitName)
+		}
+		if limit.Soft <= 0 || limit.Hard <= 0 || limit.Soft > limit.Hard {
+			return fmt.Errorf("service %s: ulimit %s must have positive soft/hard values with soft <= hard", name, limitName)
+		}
+	}
+	shmSize, err := normalizeDockerMemoryLimit(service.ShmSize)
+	if err != nil {
+		return fmt.Errorf("service %s: invalid shmSize: %w", name, err)
+	}
+	service.ShmSize = shmSize
+	return nil
+}
+
+func normalizeContainerWorkingDir(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) > 4096 || !path.IsAbs(value) || hasControlChars(value) {
+		return "", fmt.Errorf("workingDir must be an absolute POSIX container path")
+	}
+	return path.Clean(value), nil
 }
 
 func normalizeDockerCPULimit(value string) (string, error) {

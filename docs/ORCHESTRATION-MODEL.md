@@ -411,7 +411,8 @@ services:
 ```
 
 Jobs require `schedule` and `command`; they accept `image`/`build`, `env`,
-`envFile`, `secrets`, `volumes`, `placement`, and `dependsOn`, and reject
+`envFile`/`envFiles`, `secrets`, `volumes`, `placement`, `dependsOn`, and the
+container runtime controls documented in `CONFIGURATION.md`, and reject
 `proxy`, `replicas`, `healthCheck`, `loadBalancer`, and `persistent`. A
 deploy builds the job's image exactly like a service's, distributes it to
 the **owning node** — the job's first placement target, so multi-node

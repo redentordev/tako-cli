@@ -420,13 +420,17 @@ func (m *Manager) CreateEnvFile(service *config.ServiceConfig) (*EnvFile, error)
 	envFile := NewEnvFile()
 
 	serviceEnv := make(map[string]string)
+	paths := service.EnvFiles
 	if service.EnvFile != "" {
-		loaded, err := config.LoadEnvFile(service.EnvFile)
+		paths = []string{service.EnvFile}
+	}
+	for _, path := range paths {
+		loaded, err := config.LoadEnvFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load service envFile %s: %w", service.EnvFile, err)
+			return nil, fmt.Errorf("failed to load service env file %s: %w", path, err)
 		}
-		serviceEnv = loaded
-		for key, value := range serviceEnv {
+		for key, value := range loaded {
+			serviceEnv[key] = value
 			envFile.Set(key, value)
 		}
 	}

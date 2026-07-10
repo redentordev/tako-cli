@@ -7,10 +7,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/config"
 )
 
 func validJobSpecFixture() JobSpec {
@@ -132,6 +135,29 @@ func TestBuildJobRunArgsLabelsAndDefaults(t *testing.T) {
 	}
 	if got[len(got)-4] != spec.Image {
 		t.Fatalf("image not before command: %s", joined)
+	}
+}
+
+func TestBuildJobRunArgsUsesRuntimeControls(t *testing.T) {
+	spec := validJobSpecFixture()
+	spec.User = "1000:1000"
+	spec.WorkingDir = "/work"
+	spec.StopTimeoutSeconds = 60
+	spec.Init = true
+	spec.ExtraHosts = []string{"database:10.0.0.2"}
+	spec.Ulimits = map[string]config.UlimitConfig{"nofile": {Soft: 262144, Hard: 262144}}
+	spec.ShmSize = "256m"
+	got := buildJobRunArgs(spec, "tako_demo_production_report_job_1", "")
+	want := []string{
+		"run", "--rm", "--name", "tako_demo_production_report_job_1", "--network", "tako_demo_production",
+		"--label", "tako.project=demo", "--label", "tako.environment=production",
+		"--label", "tako.service=report", "--label", "tako.runtime=takod", "--label", jobRoleLabel,
+		"--user", "1000:1000", "--workdir", "/work", "--stop-timeout", "60", "--init",
+		"--add-host", "database:10.0.0.2", "--ulimit", "nofile=262144:262144", "--shm-size", "256m",
+		spec.Image, "sh", "-c", "generate-report",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("job args = %#v, want %#v", got, want)
 	}
 }
 

@@ -488,6 +488,58 @@ or a developer workstation should build and push images to the VPS, and `auto`
 for portable config that prefers local builds but preserves the older
 server-build path.
 
+Build services may use the legacy context string or structured build options.
+Both remote takod builds and local buildx builds receive the same arguments and
+target stage. Build-arg values travel in the streamed request body, not its URL.
+
+```yaml
+services:
+  web:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: node:24-alpine
+      target: runtime
+```
+
+Use `envFiles` when a service composes multiple environment files. Files load
+in list order (later files override earlier files), then explicit `env:` and
+Tako `secrets:` take precedence. `envFile` remains supported for one file;
+configuring both forms is rejected.
+
+```yaml
+services:
+  worker:
+    image: example/worker:latest
+    envFiles: [.env.base, .env.production]
+```
+
+Container runtime controls map directly to Docker run options and work for
+long-running services and scheduled jobs:
+
+```yaml
+services:
+  database:
+    image: postgres:17
+    user: "999:999"
+    workingDir: /var/lib/postgresql
+    stopGracePeriod: 60s
+    init: true
+    extraHosts: [host.docker.internal:host-gateway]
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    shmSize: 256m
+```
+
+`stopGracePeriod` uses whole seconds and is capped at 24 hours. `ulimits`
+accepts either a positive scalar (same soft/hard value) or explicit positive
+`soft`/`hard` values. These controls require an agent advertising
+`container.runtime-controls-v1`; Tako checks before container or schedule
+reconciliation and fails with upgrade guidance when a development node is
+stale.
+
 Use a one-off override from CI or a dev machine:
 
 ```bash

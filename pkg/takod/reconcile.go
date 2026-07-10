@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,28 +33,35 @@ const (
 )
 
 type ReconcileServiceRequest struct {
-	Project            string                  `json:"project"`
-	Environment        string                  `json:"environment"`
-	Service            string                  `json:"service"`
-	Revision           string                  `json:"revision,omitempty"`
-	DeployStrategy     string                  `json:"deployStrategy,omitempty"`
-	Image              string                  `json:"image"`
-	PullImage          bool                    `json:"pullImage,omitempty"`
-	Restart            string                  `json:"restart,omitempty"`
-	Network            string                  `json:"network"`
-	NetworkAlias       string                  `json:"networkAlias,omitempty"`
-	NetworkAttachments []NetworkAttachmentSpec `json:"networkAttachments,omitempty"`
-	EnvFile            string                  `json:"envFile,omitempty"`
-	EnvFileContent     string                  `json:"envFileContent,omitempty"`
-	Labels             map[string]string       `json:"labels,omitempty"`
-	Mounts             []string                `json:"mounts,omitempty"`
-	ExternalVolumes    []string                `json:"externalVolumes,omitempty"`
-	Containers         []ContainerSpec         `json:"containers"`
-	Health             *HealthSpec             `json:"health,omitempty"`
-	Command            config.StringOrList     `json:"command,omitempty,omitzero"`
-	Entrypoint         config.StringOrList     `json:"entrypoint,omitempty,omitzero"`
-	MemoryLimit        string                  `json:"memoryLimit,omitempty"`
-	CPULimit           string                  `json:"cpuLimit,omitempty"`
+	Project            string                         `json:"project"`
+	Environment        string                         `json:"environment"`
+	Service            string                         `json:"service"`
+	Revision           string                         `json:"revision,omitempty"`
+	DeployStrategy     string                         `json:"deployStrategy,omitempty"`
+	Image              string                         `json:"image"`
+	PullImage          bool                           `json:"pullImage,omitempty"`
+	Restart            string                         `json:"restart,omitempty"`
+	Network            string                         `json:"network"`
+	NetworkAlias       string                         `json:"networkAlias,omitempty"`
+	NetworkAttachments []NetworkAttachmentSpec        `json:"networkAttachments,omitempty"`
+	EnvFile            string                         `json:"envFile,omitempty"`
+	EnvFileContent     string                         `json:"envFileContent,omitempty"`
+	Labels             map[string]string              `json:"labels,omitempty"`
+	Mounts             []string                       `json:"mounts,omitempty"`
+	ExternalVolumes    []string                       `json:"externalVolumes,omitempty"`
+	Containers         []ContainerSpec                `json:"containers"`
+	Health             *HealthSpec                    `json:"health,omitempty"`
+	Command            config.StringOrList            `json:"command,omitempty,omitzero"`
+	Entrypoint         config.StringOrList            `json:"entrypoint,omitempty,omitzero"`
+	MemoryLimit        string                         `json:"memoryLimit,omitempty"`
+	CPULimit           string                         `json:"cpuLimit,omitempty"`
+	User               string                         `json:"user,omitempty"`
+	WorkingDir         string                         `json:"workingDir,omitempty"`
+	StopTimeoutSeconds int                            `json:"stopTimeoutSeconds,omitempty"`
+	Init               bool                           `json:"init,omitempty"`
+	ExtraHosts         []string                       `json:"extraHosts,omitempty"`
+	Ulimits            map[string]config.UlimitConfig `json:"ulimits,omitempty"`
+	ShmSize            string                         `json:"shmSize,omitempty"`
 	// RegistryAuths carries request-scoped pull credentials; they feed an
 	// ephemeral DOCKER_CONFIG for this reconcile only and are never
 	// persisted (ADR 10).
@@ -330,10 +338,84 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	if req.CPULimit != "" && !isSafeDockerCPULimit(req.CPULimit) {
 		return fmt.Errorf("invalid cpu limit")
 	}
+	if err := validateContainerRuntimeControls(req.User, req.WorkingDir, req.StopTimeoutSeconds, req.ExtraHosts, req.Ulimits, req.ShmSize); err != nil {
+		return err
+	}
 	if err := validateHealthSpec(req.Health); err != nil {
 		return err
 	}
 	return nil
+}
+
+func validateContainerRuntimeControls(user string, workingDir string, stopTimeoutSeconds int, extraHosts []string, ulimits map[string]config.UlimitConfig, shmSize string) error {
+	if len(user) > 256 || strings.HasPrefix(user, "-") || hasControlChars(user) || strings.ContainsAny(user, " \t\r\n") {
+		return fmt.Errorf("invalid user")
+	}
+	if workingDir != "" && (len(workingDir) > 4096 || !path.IsAbs(workingDir) || hasControlChars(workingDir)) {
+		return fmt.Errorf("invalid working directory")
+	}
+	if stopTimeoutSeconds < 0 || stopTimeoutSeconds > int((24*time.Hour)/time.Second) {
+		return fmt.Errorf("invalid stop timeout")
+	}
+	if len(extraHosts) > 128 {
+		return fmt.Errorf("too many extra hosts")
+	}
+	seenHosts := make(map[string]bool, len(extraHosts))
+	for _, entry := range extraHosts {
+		host, address, ok := strings.Cut(entry, ":")
+		if !ok || !isSafeExtraHostName(host) {
+			return fmt.Errorf("invalid extra host")
+		}
+		if address != "host-gateway" && net.ParseIP(strings.Trim(address, "[]")) == nil {
+			return fmt.Errorf("invalid extra host address")
+		}
+		if seenHosts[host] {
+			return fmt.Errorf("duplicate extra host")
+		}
+		seenHosts[host] = true
+	}
+	if len(ulimits) > 64 {
+		return fmt.Errorf("too many ulimits")
+	}
+	for name, limit := range ulimits {
+		if !isSafeUlimitName(name) {
+			return fmt.Errorf("invalid ulimit name")
+		}
+		if limit.Soft <= 0 || limit.Hard <= 0 || limit.Soft > limit.Hard {
+			return fmt.Errorf("invalid ulimit %s", name)
+		}
+	}
+	if shmSize != "" && !isSafeDockerMemoryLimit(shmSize) {
+		return fmt.Errorf("invalid shm size")
+	}
+	return nil
+}
+
+func isSafeUlimitName(name string) bool {
+	if name == "" || len(name) > 64 || name[0] < 'a' || name[0] > 'z' {
+		return false
+	}
+	for _, r := range name[1:] {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeExtraHostName(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for index, r := range host {
+		if index == 0 && !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+		if index > 0 && !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func validateRequestRuntimeLabels(req ReconcileServiceRequest) error {
@@ -580,7 +662,7 @@ func isSafeDockerMemoryLimit(value string) bool {
 	}
 	number := value[:unitStart]
 	unit := value[unitStart:]
-	if number == "" {
+	if number == "" || len(number) > 18 {
 		return false
 	}
 	for i := 0; i < len(number); i++ {
@@ -1059,6 +1141,7 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 	if req.CPULimit != "" {
 		args = append(args, "--cpus", req.CPULimit)
 	}
+	args = appendContainerRuntimeArgs(args, req.User, req.WorkingDir, req.StopTimeoutSeconds, req.Init, req.ExtraHosts, req.Ulimits, req.ShmSize)
 	if req.Health != nil && req.Health.Command != "" {
 		args = append(args, "--health-cmd", req.Health.Command)
 		if req.Health.Interval != "" {
@@ -1084,6 +1167,37 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 		args = append(args, entrypoint[1:]...)
 	}
 	args = append(args, req.Command.ContainerCommand()...)
+	return args
+}
+
+func appendContainerRuntimeArgs(args []string, user string, workingDir string, stopTimeoutSeconds int, init bool, extraHosts []string, ulimits map[string]config.UlimitConfig, shmSize string) []string {
+	if user != "" {
+		args = append(args, "--user", user)
+	}
+	if workingDir != "" {
+		args = append(args, "--workdir", workingDir)
+	}
+	if stopTimeoutSeconds > 0 {
+		args = append(args, "--stop-timeout", strconv.Itoa(stopTimeoutSeconds))
+	}
+	if init {
+		args = append(args, "--init")
+	}
+	for _, host := range extraHosts {
+		args = append(args, "--add-host", host)
+	}
+	limitNames := make([]string, 0, len(ulimits))
+	for name := range ulimits {
+		limitNames = append(limitNames, name)
+	}
+	sort.Strings(limitNames)
+	for _, name := range limitNames {
+		limit := ulimits[name]
+		args = append(args, "--ulimit", fmt.Sprintf("%s=%d:%d", name, limit.Soft, limit.Hard))
+	}
+	if shmSize != "" {
+		args = append(args, "--shm-size", shmSize)
+	}
 	return args
 }
 

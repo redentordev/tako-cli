@@ -74,30 +74,44 @@ type DesiredStateDocument struct {
 // nested fields that belong to deployment configuration, not state identity, are
 // represented without importing pkg/config.
 type DesiredServiceDocument struct {
-	APIVersion     string            `json:"apiVersion,omitempty"`
-	Kind           string            `json:"kind,omitempty"`
-	Name           string            `json:"name"`
-	Type           string            `json:"type,omitempty"`
-	Image          string            `json:"image,omitempty"`
-	Build          string            `json:"build,omitempty"`
-	Command        string            `json:"command,omitempty"`
-	CommandArgs    []string          `json:"commandArgs,omitempty"`
-	Entrypoint     string            `json:"entrypoint,omitempty"`
-	EntrypointArgs []string          `json:"entrypointArgs,omitempty"`
-	Labels         map[string]string `json:"labels,omitempty"`
-	Port           int               `json:"port,omitempty"`
-	Replicas       int               `json:"replicas"`
-	Restart        string            `json:"restart,omitempty"`
-	Persistent     bool              `json:"persistent,omitempty"`
-	Placement      json.RawMessage   `json:"placement,omitempty"`
-	Domains        []string          `json:"domains,omitempty"`
-	Volumes        []string          `json:"volumes,omitempty"`
-	EnvKeys        []string          `json:"envKeys,omitempty"`
-	EnvFile        bool              `json:"envFile,omitempty"`
-	SecretRefs     []string          `json:"secretRefs,omitempty"`
-	DependsOn      []string          `json:"dependsOn,omitempty"`
-	HealthCheck    json.RawMessage   `json:"healthCheck,omitempty"`
-	DeployStrategy string            `json:"deployStrategy,omitempty"`
+	APIVersion      string                    `json:"apiVersion,omitempty"`
+	Kind            string                    `json:"kind,omitempty"`
+	Name            string                    `json:"name"`
+	Type            string                    `json:"type,omitempty"`
+	Image           string                    `json:"image,omitempty"`
+	Build           string                    `json:"build,omitempty"`
+	BuildArgKeys    []string                  `json:"buildArgKeys,omitempty"`
+	BuildTarget     string                    `json:"buildTarget,omitempty"`
+	Command         string                    `json:"command,omitempty"`
+	CommandArgs     []string                  `json:"commandArgs,omitempty"`
+	Entrypoint      string                    `json:"entrypoint,omitempty"`
+	EntrypointArgs  []string                  `json:"entrypointArgs,omitempty"`
+	Labels          map[string]string         `json:"labels,omitempty"`
+	Port            int                       `json:"port,omitempty"`
+	Replicas        int                       `json:"replicas"`
+	Restart         string                    `json:"restart,omitempty"`
+	Persistent      bool                      `json:"persistent,omitempty"`
+	Placement       json.RawMessage           `json:"placement,omitempty"`
+	Domains         []string                  `json:"domains,omitempty"`
+	Volumes         []string                  `json:"volumes,omitempty"`
+	EnvKeys         []string                  `json:"envKeys,omitempty"`
+	EnvFile         bool                      `json:"envFile,omitempty"`
+	User            string                    `json:"user,omitempty"`
+	WorkingDir      string                    `json:"workingDir,omitempty"`
+	StopGracePeriod string                    `json:"stopGracePeriod,omitempty"`
+	Init            bool                      `json:"init,omitempty"`
+	ExtraHosts      []string                  `json:"extraHosts,omitempty"`
+	Ulimits         map[string]UlimitDocument `json:"ulimits,omitempty"`
+	ShmSize         string                    `json:"shmSize,omitempty"`
+	SecretRefs      []string                  `json:"secretRefs,omitempty"`
+	DependsOn       []string                  `json:"dependsOn,omitempty"`
+	HealthCheck     json.RawMessage           `json:"healthCheck,omitempty"`
+	DeployStrategy  string                    `json:"deployStrategy,omitempty"`
+}
+
+type UlimitDocument struct {
+	Soft int64 `json:"soft"`
+	Hard int64 `json:"hard"`
 }
 
 // ActualStateDocument is Tako's canonical aggregate runtime state schema for

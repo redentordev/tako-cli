@@ -417,6 +417,67 @@ func TestBuildServiceContainerArgsUsesEntrypointAndRawExecCommand(t *testing.T) 
 	}
 }
 
+func TestBuildServiceContainerArgsUsesRuntimeControls(t *testing.T) {
+	req := ReconcileServiceRequest{
+		Project: "demo", Environment: "production", Service: "web",
+		Image: "demo/web:latest", Restart: "unless-stopped",
+		Network: "tako_demo_production", NetworkAlias: "web",
+		User:               "1000:1000",
+		WorkingDir:         "/work",
+		StopTimeoutSeconds: 60,
+		Init:               true,
+		ExtraHosts:         []string{"database:10.0.0.2", "host.docker.internal:host-gateway"},
+		Ulimits: map[string]config.UlimitConfig{
+			"nofile": {Soft: 262144, Hard: 262144},
+			"nproc":  {Soft: 4096, Hard: 8192},
+		},
+		ShmSize: "256m",
+	}
+	got := buildServiceContainerArgs(req, ContainerSpec{Name: "demo_production_web_1"})
+	want := []string{
+		"run", "-d", "--name", "demo_production_web_1", "--restart", "unless-stopped",
+		"--network", "tako_demo_production", "--network-alias", "web",
+		"--label", "tako.environment=production", "--label", "tako.project=demo",
+		"--label", "tako.runtime=takod", "--label", "tako.service=web",
+		"--user", "1000:1000", "--workdir", "/work", "--stop-timeout", "60", "--init",
+		"--add-host", "database:10.0.0.2", "--add-host", "host.docker.internal:host-gateway",
+		"--ulimit", "nofile=262144:262144", "--ulimit", "nproc=4096:8192",
+		"--shm-size", "256m", "demo/web:latest",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("docker args = %#v, want %#v", got, want)
+	}
+}
+
+func TestValidateContainerRuntimeControlsRejectsUnsafeDirectPayloads(t *testing.T) {
+	tests := []struct {
+		name       string
+		user       string
+		workingDir string
+		stop       int
+		hosts      []string
+		ulimits    map[string]config.UlimitConfig
+		shm        string
+	}{
+		{name: "flag user", user: "--privileged"},
+		{name: "relative workdir", workingDir: "work"},
+		{name: "oversized timeout", stop: 86401},
+		{name: "host flag", hosts: []string{"--privileged:host-gateway"}},
+		{name: "invalid address", hosts: []string{"db:not-an-ip"}},
+		{name: "invalid ulimit", ulimits: map[string]config.UlimitConfig{"nofile": {Soft: 10, Hard: 1}}},
+		{name: "invalid ulimit name", ulimits: map[string]config.UlimitConfig{"nofile=value": {Soft: 1, Hard: 1}}},
+		{name: "shm flag", shm: "--privileged"},
+		{name: "oversized shm number", shm: "12345678901234567890m"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateContainerRuntimeControls(tt.user, tt.workingDir, tt.stop, tt.hosts, tt.ulimits, tt.shm); err == nil {
+				t.Fatal("unsafe runtime controls accepted")
+			}
+		})
+	}
+}
+
 func TestBuildServiceContainerArgsAppliesRequestRevisionLabels(t *testing.T) {
 	req := ReconcileServiceRequest{
 		Project:        "demo",

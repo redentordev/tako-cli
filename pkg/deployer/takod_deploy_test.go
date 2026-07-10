@@ -424,6 +424,136 @@ func TestServiceNeedsContainerArgvCapability(t *testing.T) {
 	}
 }
 
+func TestServiceNeedsRuntimeControlsCapability(t *testing.T) {
+	tests := []struct {
+		name    string
+		service *config.ServiceConfig
+		want    bool
+	}{
+		{name: "nil", service: nil},
+		{name: "none", service: &config.ServiceConfig{}},
+		{name: "user", service: &config.ServiceConfig{User: "1000"}, want: true},
+		{name: "working dir", service: &config.ServiceConfig{WorkingDir: "/work"}, want: true},
+		{name: "stop grace", service: &config.ServiceConfig{StopGracePeriod: "60s"}, want: true},
+		{name: "init", service: &config.ServiceConfig{Init: true}, want: true},
+		{name: "extra hosts", service: &config.ServiceConfig{ExtraHosts: []string{"db:10.0.0.2"}}, want: true},
+		{name: "ulimits", service: &config.ServiceConfig{Ulimits: map[string]config.UlimitConfig{"nofile": {Soft: 1, Hard: 1}}}, want: true},
+		{name: "shm", service: &config.ServiceConfig{ShmSize: "256m"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := serviceNeedsRuntimeControlsCapability(tt.service); got != tt.want {
+				t.Fatalf("serviceNeedsRuntimeControlsCapability() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnsureTakodRuntimeControlsCapabilityFailsClosed(t *testing.T) {
+	deploy := &Deployer{config: &config.Config{}}
+	err := deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+		output: `{"capabilities":["container.argv-v1"]}`,
+	}, "node-a", takod.CapabilityContainerRuntimeControlsV1, "container runtime controls")
+	if err == nil || !strings.Contains(err.Error(), "does not support container runtime controls") {
+		t.Fatalf("ensureTakodCapability() error = %v", err)
+	}
+}
+
+func TestRunTakodBuildStrategyPreflightsEveryRemoteBuild(t *testing.T) {
+	tests := []struct {
+		name         string
+		strategy     string
+		localErr     error
+		preflightErr error
+		wantPhases   string
+		wantError    bool
+	}{
+		{name: "remote stale", strategy: config.BuildStrategyRemote, preflightErr: fmt.Errorf("stale"), wantPhases: "preflight", wantError: true},
+		{name: "remote current", strategy: config.BuildStrategyRemote, wantPhases: "preflight,remote"},
+		{name: "auto local succeeds without daemon build capability", strategy: config.BuildStrategyAuto, wantPhases: "local"},
+		{name: "auto fallback stale", strategy: config.BuildStrategyAuto, localErr: fmt.Errorf("local unavailable"), preflightErr: fmt.Errorf("stale"), wantPhases: "local,preflight", wantError: true},
+		{name: "auto fallback current", strategy: config.BuildStrategyAuto, localErr: fmt.Errorf("local unavailable"), wantPhases: "local,preflight,remote"},
+		{name: "local never checks daemon build capability", strategy: config.BuildStrategyLocal, wantPhases: "local"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var phases []string
+			_, err := runTakodBuildStrategy(tt.strategy,
+				func() error { phases = append(phases, "local"); return tt.localErr },
+				func() error { phases = append(phases, "preflight"); return tt.preflightErr },
+				func() error { phases = append(phases, "remote"); return nil },
+			)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("error = %v, wantError %v", err, tt.wantError)
+			}
+			if got := strings.Join(phases, ","); got != tt.wantPhases {
+				t.Fatalf("phases = %q, want %q", got, tt.wantPhases)
+			}
+		})
+	}
+}
+
+func TestEnsureTakodBuildOptionsCapabilityFailsClosed(t *testing.T) {
+	deploy := &Deployer{config: &config.Config{}}
+	err := deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+		output: `{"capabilities":["container.argv-v1","container.runtime-controls-v1"]}`,
+	}, "node-a", takod.CapabilityImageBuildOptionsV1, "structured image build options")
+	if err == nil || !strings.Contains(err.Error(), "does not support structured image build options") {
+		t.Fatalf("ensureTakodCapability() error = %v", err)
+	}
+}
+
+func TestTakodServiceRolloutRuntimeControlsPreflightBeforeMutations(t *testing.T) {
+	service := &config.ServiceConfig{User: "1000:1000", ShmSize: "256m"}
+	var phases []string
+	err := runTakodServiceRollout(serviceNeedsContainerArgvCapability(service) || serviceNeedsRuntimeControlsCapability(service), takodServiceRolloutOperations{
+		Preflight: func() error {
+			phases = append(phases, "preflight")
+			deploy := &Deployer{config: &config.Config{}}
+			return deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+				output: `{"capabilities":["container.argv-v1"]}`,
+			}, "node-a", takod.CapabilityContainerRuntimeControlsV1, "container runtime controls")
+		},
+		Build: func() error {
+			phases = append(phases, "build")
+			return nil
+		},
+		Release: func() error {
+			phases = append(phases, "release")
+			return nil
+		},
+		Reconcile: func() error {
+			phases = append(phases, "reconcile")
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("runtime controls rollout succeeded with stale agent")
+	}
+	if got := strings.Join(phases, ","); got != "preflight" {
+		t.Fatalf("phases = %q, want preflight only", got)
+	}
+}
+
+func TestTakodJobBuildPreflightBeforeBuildAndRecord(t *testing.T) {
+	var phases []string
+	err := runTakodJobBuildPhases(func() error {
+		phases = append(phases, "preflight")
+		return fmt.Errorf("stale agent")
+	}, func() error {
+		phases = append(phases, "build")
+		return nil
+	}, func() {
+		phases = append(phases, "record")
+	})
+	if err == nil {
+		t.Fatal("job build phases succeeded after failed preflight")
+	}
+	if got := strings.Join(phases, ","); got != "preflight" {
+		t.Fatalf("phases = %q, want preflight only", got)
+	}
+}
+
 func TestTakodServiceRolloutPreflightsArgvBeforeEveryMutation(t *testing.T) {
 	featureServices := []struct {
 		name    string

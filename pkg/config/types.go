@@ -178,6 +178,8 @@ const (
 
 // ServiceConfig defines service deployment settings
 type ServiceConfig struct {
+	buildStructured bool
+
 	// Kind selects the workload type: "service" (default, long-running
 	// containers) or "job" (a command run on a cron schedule by takod).
 	Kind string `yaml:"kind,omitempty" json:"kind,omitempty"`
@@ -190,9 +192,11 @@ type ServiceConfig struct {
 	Timeout string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 
 	// Build or Image (mutually exclusive)
-	Build      string `yaml:"build,omitempty" json:"build,omitempty"`           // Path to build context (auto-detects Dockerfile)
-	Dockerfile string `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"` // Dockerfile path relative to build context
-	Image      string `yaml:"image,omitempty" json:"image,omitempty"`           // Pre-built image (for postgres, redis, etc)
+	Build       string            `yaml:"build,omitempty" json:"build,omitempty"` // Path to build context (auto-detects Dockerfile)
+	BuildArgs   map[string]string `yaml:"-" json:"-"`
+	BuildTarget string            `yaml:"-" json:"-"`
+	Dockerfile  string            `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"` // Dockerfile path relative to build context
+	Image       string            `yaml:"image,omitempty" json:"image,omitempty"`           // Pre-built image (for postgres, redis, etc)
 
 	// Basic settings
 	Port int `yaml:"port,omitempty" json:"port,omitempty"`
@@ -200,14 +204,22 @@ type ServiceConfig struct {
 	// tako-proxy (docker-compose syntax: "PORT", "HOST:CONTAINER",
 	// "IP:HOST:CONTAINER", optional "/tcp" or "/udp"). Requires the recreate
 	// deploy strategy and at most one replica.
-	Ports      []string          `yaml:"ports,omitempty" json:"ports,omitempty"`
-	Command    StringOrList      `yaml:"command,omitempty" json:"command,omitempty,omitzero"`
-	Entrypoint StringOrList      `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty,omitzero"`
-	Labels     map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
-	Replicas   int               `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
-	Restart    string            `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
-	Env        map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	EnvFile    string            `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Path to .env file (e.g., .env.production)
+	Ports           []string                `yaml:"ports,omitempty" json:"ports,omitempty"`
+	Command         StringOrList            `yaml:"command,omitempty" json:"command,omitempty,omitzero"`
+	Entrypoint      StringOrList            `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty,omitzero"`
+	Labels          map[string]string       `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Replicas        int                     `yaml:"replicas,omitempty" json:"replicas,omitempty"` // Default: 1
+	Restart         string                  `yaml:"restart,omitempty" json:"restart,omitempty"`   // Docker restart policy (always, unless-stopped, on-failure, no)
+	Env             map[string]string       `yaml:"env,omitempty" json:"env,omitempty"`
+	EnvFile         string                  `yaml:"envFile,omitempty" json:"envFile,omitempty"` // Legacy single .env file path
+	EnvFiles        []string                `yaml:"envFiles,omitempty" json:"envFiles,omitempty"`
+	User            string                  `yaml:"user,omitempty" json:"user,omitempty"`
+	WorkingDir      string                  `yaml:"workingDir,omitempty" json:"workingDir,omitempty"`
+	StopGracePeriod string                  `yaml:"stopGracePeriod,omitempty" json:"stopGracePeriod,omitempty"`
+	Init            bool                    `yaml:"init,omitempty" json:"init,omitempty"`
+	ExtraHosts      []string                `yaml:"extraHosts,omitempty" json:"extraHosts,omitempty"`
+	Ulimits         map[string]UlimitConfig `yaml:"ulimits,omitempty" json:"ulimits,omitempty"`
+	ShmSize         string                  `yaml:"shmSize,omitempty" json:"shmSize,omitempty"`
 
 	// Secrets: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"].
 	Secrets []string `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
@@ -251,6 +263,16 @@ type ServiceConfig struct {
 // IsJob reports whether the service is a scheduled job workload.
 func (s *ServiceConfig) IsJob() bool {
 	return s.Kind == ServiceKindJob
+}
+
+// ClearBuild removes the complete build definition when an image override
+// changes the service to a prebuilt image.
+func (s *ServiceConfig) ClearBuild() {
+	s.Build = ""
+	s.BuildArgs = nil
+	s.BuildTarget = ""
+	s.Dockerfile = ""
+	s.buildStructured = false
 }
 
 // HealthCheckConfig defines health check settings
@@ -1038,6 +1060,9 @@ func normalizeConfigRelativePaths(cfg *Config, configDir string) {
 		for serviceName, service := range env.Services {
 			service.Build = resolveConfigRelativePath(absConfigDir, service.Build)
 			service.EnvFile = resolveConfigRelativePath(absConfigDir, service.EnvFile)
+			for i := range service.EnvFiles {
+				service.EnvFiles[i] = resolveConfigRelativePath(absConfigDir, service.EnvFiles[i])
+			}
 			env.Services[serviceName] = service
 		}
 		cfg.Environments[envName] = env

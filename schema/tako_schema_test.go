@@ -30,6 +30,19 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	serviceProperties := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties")
 	assertStringOrListSchema(t, schemaPath(t, serviceProperties, "command"))
 	assertStringOrListSchema(t, schemaPath(t, serviceProperties, "entrypoint"))
+	build := schemaPath(t, serviceProperties, "build")
+	if branches, ok := build["oneOf"].([]any); !ok || len(branches) != 2 {
+		t.Fatalf("build schema = %#v, want scalar and structured branches", build)
+	}
+	structuredBuild := schemaPath(t, build["oneOf"].([]any)[1], "properties")
+	schemaPath(t, structuredBuild, "args")
+	schemaPath(t, structuredBuild, "target")
+	if schemaPath(t, serviceProperties, "envFiles")["maxItems"] != float64(32) {
+		t.Fatalf("envFiles maxItems mismatch")
+	}
+	for _, field := range []string{"user", "workingDir", "stopGracePeriod", "init", "extraHosts", "ulimits", "shmSize"} {
+		schemaPath(t, serviceProperties, field)
+	}
 	labels := schemaPath(t, serviceProperties, "labels")
 	if labels["maxProperties"] != float64(256) {
 		t.Fatalf("labels maxProperties = %#v, want 256", labels["maxProperties"])

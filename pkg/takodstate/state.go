@@ -48,28 +48,37 @@ type DesiredRevision struct {
 }
 
 type DesiredService struct {
-	Name           string                   `json:"name"`
-	Type           string                   `json:"type"`
-	Image          string                   `json:"image,omitempty"`
-	Build          string                   `json:"build,omitempty"`
-	Command        string                   `json:"command,omitempty"`
-	CommandArgs    []string                 `json:"commandArgs,omitempty"`
-	Entrypoint     string                   `json:"entrypoint,omitempty"`
-	EntrypointArgs []string                 `json:"entrypointArgs,omitempty"`
-	Labels         map[string]string        `json:"labels,omitempty"`
-	Port           int                      `json:"port,omitempty"`
-	Replicas       int                      `json:"replicas"`
-	Restart        string                   `json:"restart,omitempty"`
-	Persistent     bool                     `json:"persistent,omitempty"`
-	Placement      *config.PlacementConfig  `json:"placement,omitempty"`
-	Domains        []string                 `json:"domains,omitempty"`
-	Volumes        []string                 `json:"volumes,omitempty"`
-	EnvKeys        []string                 `json:"envKeys,omitempty"`
-	EnvFile        bool                     `json:"envFile,omitempty"`
-	SecretRefs     []string                 `json:"secretRefs,omitempty"`
-	DependsOn      []string                 `json:"dependsOn,omitempty"`
-	HealthCheck    config.HealthCheckConfig `json:"healthCheck,omitempty"`
-	DeployStrategy string                   `json:"deployStrategy,omitempty"`
+	Name            string                         `json:"name"`
+	Type            string                         `json:"type"`
+	Image           string                         `json:"image,omitempty"`
+	Build           string                         `json:"build,omitempty"`
+	BuildArgKeys    []string                       `json:"buildArgKeys,omitempty"`
+	BuildTarget     string                         `json:"buildTarget,omitempty"`
+	Command         string                         `json:"command,omitempty"`
+	CommandArgs     []string                       `json:"commandArgs,omitempty"`
+	Entrypoint      string                         `json:"entrypoint,omitempty"`
+	EntrypointArgs  []string                       `json:"entrypointArgs,omitempty"`
+	Labels          map[string]string              `json:"labels,omitempty"`
+	Port            int                            `json:"port,omitempty"`
+	Replicas        int                            `json:"replicas"`
+	Restart         string                         `json:"restart,omitempty"`
+	Persistent      bool                           `json:"persistent,omitempty"`
+	Placement       *config.PlacementConfig        `json:"placement,omitempty"`
+	Domains         []string                       `json:"domains,omitempty"`
+	Volumes         []string                       `json:"volumes,omitempty"`
+	EnvKeys         []string                       `json:"envKeys,omitempty"`
+	EnvFile         bool                           `json:"envFile,omitempty"`
+	User            string                         `json:"user,omitempty"`
+	WorkingDir      string                         `json:"workingDir,omitempty"`
+	StopGracePeriod string                         `json:"stopGracePeriod,omitempty"`
+	Init            bool                           `json:"init,omitempty"`
+	ExtraHosts      []string                       `json:"extraHosts,omitempty"`
+	Ulimits         map[string]config.UlimitConfig `json:"ulimits,omitempty"`
+	ShmSize         string                         `json:"shmSize,omitempty"`
+	SecretRefs      []string                       `json:"secretRefs,omitempty"`
+	DependsOn       []string                       `json:"dependsOn,omitempty"`
+	HealthCheck     config.HealthCheckConfig       `json:"healthCheck,omitempty"`
+	DeployStrategy  string                         `json:"deployStrategy,omitempty"`
 }
 
 type ActualSnapshot struct {
@@ -605,28 +614,37 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 	command, commandArgs := stateStringOrList(service.Command)
 	entrypoint, entrypointArgs := stateStringOrList(service.Entrypoint)
 	return DesiredService{
-		Name:           serviceName,
-		Type:           service.GetServiceType(),
-		Image:          imageRef,
-		Build:          service.Build,
-		Command:        command,
-		CommandArgs:    commandArgs,
-		Entrypoint:     entrypoint,
-		EntrypointArgs: entrypointArgs,
-		Labels:         cloneStringMap(service.Labels),
-		Port:           service.Port,
-		Replicas:       replicas,
-		Restart:        service.Restart,
-		Persistent:     service.Persistent,
-		Placement:      service.Placement,
-		Domains:        domains,
-		Volumes:        sortedCopy(service.Volumes),
-		EnvKeys:        sortedKeys(service.Env),
-		EnvFile:        service.EnvFile != "",
-		SecretRefs:     sortedCopy(service.Secrets),
-		DependsOn:      sortedCopy(service.DependsOn),
-		HealthCheck:    service.HealthCheck,
-		DeployStrategy: service.Deploy.Strategy,
+		Name:            serviceName,
+		Type:            service.GetServiceType(),
+		Image:           imageRef,
+		Build:           service.Build,
+		BuildArgKeys:    sortedKeys(service.BuildArgs),
+		BuildTarget:     service.BuildTarget,
+		Command:         command,
+		CommandArgs:     commandArgs,
+		Entrypoint:      entrypoint,
+		EntrypointArgs:  entrypointArgs,
+		Labels:          cloneStringMap(service.Labels),
+		Port:            service.Port,
+		Replicas:        replicas,
+		Restart:         service.Restart,
+		Persistent:      service.Persistent,
+		Placement:       service.Placement,
+		Domains:         domains,
+		Volumes:         sortedCopy(service.Volumes),
+		EnvKeys:         sortedKeys(service.Env),
+		EnvFile:         service.EnvFile != "" || len(service.EnvFiles) > 0,
+		User:            service.User,
+		WorkingDir:      service.WorkingDir,
+		StopGracePeriod: service.StopGracePeriod,
+		Init:            service.Init,
+		ExtraHosts:      sortedCopy(service.ExtraHosts),
+		Ulimits:         cloneUlimits(service.Ulimits),
+		ShmSize:         service.ShmSize,
+		SecretRefs:      sortedCopy(service.Secrets),
+		DependsOn:       sortedCopy(service.DependsOn),
+		HealthCheck:     service.HealthCheck,
+		DeployStrategy:  service.Deploy.Strategy,
 	}
 }
 
@@ -638,6 +656,17 @@ func stateStringOrList(value config.StringOrList) (string, []string) {
 		return "", value.Arguments()
 	}
 	return "", nil
+}
+
+func cloneUlimits(source map[string]config.UlimitConfig) map[string]config.UlimitConfig {
+	if len(source) == 0 {
+		return nil
+	}
+	copy := make(map[string]config.UlimitConfig, len(source))
+	for name, limit := range source {
+		copy[name] = limit
+	}
+	return copy
 }
 
 func revisionID(revision *DesiredRevision) string {

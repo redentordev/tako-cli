@@ -460,14 +460,23 @@ func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, 
 
 		endpoint := takodclient.ImageBuildEndpoint(fullImageName, service.Dockerfile)
 		body := io.Reader(archive)
-		if auths := d.registryAuths(); len(auths) > 0 {
+		auths := d.registryAuths()
+		if len(auths) > 0 || len(service.BuildArgs) > 0 || service.BuildTarget != "" {
 			// Credentials ride the body as a JSON preamble line ahead of
 			// the tar stream — never the URL or argv (ADR 10).
-			preamble, err := json.Marshal(map[string]any{"registryAuths": auths})
+			preamble, err := json.Marshal(map[string]any{
+				"registryAuths": auths,
+				"buildArgs":     service.BuildArgs,
+				"target":        service.BuildTarget,
+			})
 			if err != nil {
-				return "", fmt.Errorf("failed to encode registry auth preamble: %w", err)
+				return "", fmt.Errorf("failed to encode build options preamble: %w", err)
 			}
-			endpoint = takodclient.ImageBuildEndpointWithAuth(fullImageName, service.Dockerfile)
+			if len(service.BuildArgs) > 0 || service.BuildTarget != "" {
+				endpoint = takodclient.ImageBuildEndpointWithOptions(fullImageName, service.Dockerfile, len(auths) > 0)
+			} else {
+				endpoint = takodclient.ImageBuildEndpointWithAuth(fullImageName, service.Dockerfile)
+			}
 			body = io.MultiReader(bytes.NewReader(append(preamble, '\n')), archive)
 		}
 

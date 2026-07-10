@@ -246,23 +246,44 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		// Jobs run no containers: distribute the image to the owning node
 		// and record it; the post-deploy ApplyJobSchedules pass registers
 		// the cron schedule declaratively on every node.
-		if options.BuildImage {
-			if err := d.buildImageOnTakodNodes(serviceName, service, imageRef, assignmentServers); err != nil {
-				return err
+		return runTakodJobBuildPhases(func() error {
+			if service.Entrypoint.IsSet() {
+				if err := d.preflightTakodCapability(assignmentServers, takod.CapabilityContainerArgvV1, "container argv payloads"); err != nil {
+					return fmt.Errorf("job %s uses an entrypoint: %w", serviceName, err)
+				}
 			}
-		}
-		d.recordJobImage(serviceName, imageRef)
-		return nil
+			if serviceNeedsRuntimeControlsCapability(service) {
+				if err := d.preflightTakodCapability(assignmentServers, takod.CapabilityContainerRuntimeControlsV1, "container runtime controls"); err != nil {
+					return fmt.Errorf("job %s uses container runtime controls: %w", serviceName, err)
+				}
+			}
+			return nil
+		}, func() error {
+			if options.BuildImage {
+				return d.buildImageOnTakodNodes(serviceName, service, imageRef, assignmentServers)
+			}
+			return nil
+		}, func() {
+			d.recordJobImage(serviceName, imageRef)
+		})
 	}
 	targetServers, err := d.getTakodTargetServers()
 	if err != nil {
 		return fmt.Errorf("failed to get takod target servers: %w", err)
 	}
 	grouped := groupTakodAssignments(assignments)
-	return runTakodServiceRollout(serviceNeedsContainerArgvCapability(service), takodServiceRolloutOperations{
+	needsCapabilities := serviceNeedsContainerArgvCapability(service) || serviceNeedsRuntimeControlsCapability(service)
+	return runTakodServiceRollout(needsCapabilities, takodServiceRolloutOperations{
 		Preflight: func() error {
-			if err := d.preflightTakodContainerArgv(targetServers); err != nil {
-				return fmt.Errorf("service %s uses list-form command or entrypoint: %w", serviceName, err)
+			if serviceNeedsContainerArgvCapability(service) {
+				if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerArgvV1, "container argv payloads"); err != nil {
+					return fmt.Errorf("service %s uses list-form command or entrypoint: %w", serviceName, err)
+				}
+			}
+			if serviceNeedsRuntimeControlsCapability(service) {
+				if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerRuntimeControlsV1, "container runtime controls"); err != nil {
+					return fmt.Errorf("service %s uses container runtime controls: %w", serviceName, err)
+				}
 			}
 			return nil
 		},
@@ -290,6 +311,17 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 	})
 }
 
+func runTakodJobBuildPhases(preflight func() error, build func() error, record func()) error {
+	if err := preflight(); err != nil {
+		return err
+	}
+	if err := build(); err != nil {
+		return err
+	}
+	record()
+	return nil
+}
+
 func runTakodServiceRollout(needsArgvCapability bool, operations takodServiceRolloutOperations) error {
 	if needsArgvCapability {
 		if err := operations.Preflight(); err != nil {
@@ -309,13 +341,21 @@ func serviceNeedsContainerArgvCapability(service *config.ServiceConfig) bool {
 	return service != nil && (service.Command.IsList() || service.Entrypoint.IsSet())
 }
 
+func serviceNeedsRuntimeControlsCapability(service *config.ServiceConfig) bool {
+	return service != nil && (service.User != "" || service.WorkingDir != "" || service.StopGracePeriod != "" || service.Init || len(service.ExtraHosts) > 0 || len(service.Ulimits) > 0 || service.ShmSize != "")
+}
+
 func (d *Deployer) preflightTakodContainerArgv(serverNames []string) error {
+	return d.preflightTakodCapability(serverNames, takod.CapabilityContainerArgvV1, "container argv payloads")
+}
+
+func (d *Deployer) preflightTakodCapability(serverNames []string, capability string, feature string) error {
 	return preflightTakodContainerArgvWithCheck(serverNames, func(serverName string) error {
 		client, err := d.getEnvironmentClient(serverName)
 		if err != nil {
 			return err
 		}
-		return d.ensureTakodContainerArgvCapability(client, serverName)
+		return d.ensureTakodCapability(client, serverName, capability, feature)
 	})
 }
 
@@ -324,6 +364,10 @@ func preflightTakodContainerArgvWithCheck(serverNames []string, check func(strin
 }
 
 func (d *Deployer) ensureTakodContainerArgvCapability(client takodclient.RequestExecutor, serverName string) error {
+	return d.ensureTakodCapability(client, serverName, takod.CapabilityContainerArgvV1, "container argv payloads")
+}
+
+func (d *Deployer) ensureTakodCapability(client takodclient.RequestExecutor, serverName string, required string, feature string) error {
 	output, err := takodclient.RequestJSON(client, d.takodSocket(), "GET", "/v1/status", nil)
 	if err != nil {
 		return fmt.Errorf("failed to verify takod capabilities on %s: %w", serverName, err)
@@ -333,11 +377,11 @@ func (d *Deployer) ensureTakodContainerArgvCapability(client takodclient.Request
 		return fmt.Errorf("failed to parse takod status from %s: %w", serverName, err)
 	}
 	for _, capability := range status.Capabilities {
-		if capability == takod.CapabilityContainerArgvV1 {
+		if capability == required {
 			return nil
 		}
 	}
-	return fmt.Errorf("takod on %s does not support container argv payloads; upgrade the node agent (development builds can set TAKO_TAKOD_BINARY to a matching Linux binary)", serverName)
+	return fmt.Errorf("takod on %s does not support %s; upgrade the node agent (development builds can set TAKO_TAKOD_BINARY to a matching Linux binary)", serverName, feature)
 }
 
 func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames []string) error {
@@ -345,21 +389,48 @@ func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.Se
 	if d.config != nil {
 		strategy = d.config.GetBuildStrategy()
 	}
-	switch strategy {
-	case config.BuildStrategyLocal:
-		return d.buildImageLocallyAndPushToTakodNodes(serviceName, service, imageRef, serverNames)
-	case config.BuildStrategyAuto:
-		err := d.buildImageLocallyAndPushToTakodNodes(serviceName, service, imageRef, serverNames)
-		if err == nil {
-			return nil
-		}
-		if d.verbose {
-			d.printf("  Local build unavailable, falling back to remote takod build: %v\n", err)
-		}
-		return d.buildImageRemotelyOnTakodNodes(serviceName, service, imageRef, serverNames)
-	default:
-		return d.buildImageRemotelyOnTakodNodes(serviceName, service, imageRef, serverNames)
+	fallbackCause, err := runTakodBuildStrategy(
+		strategy,
+		func() error {
+			return d.buildImageLocallyAndPushToTakodNodes(serviceName, service, imageRef, serverNames)
+		},
+		func() error { return d.preflightTakodBuildOptions(service, serverNames) },
+		func() error { return d.buildImageRemotelyOnTakodNodes(serviceName, service, imageRef, serverNames) },
+	)
+	if fallbackCause != nil && d.verbose {
+		d.printf("  Local build unavailable, falling back to remote takod build: %v\n", fallbackCause)
 	}
+	return err
+}
+
+func runTakodBuildStrategy(strategy string, local func() error, preflightRemote func() error, remote func() error) (error, error) {
+	if strategy == config.BuildStrategyLocal {
+		return nil, local()
+	}
+	if strategy == config.BuildStrategyAuto {
+		localErr := local()
+		if localErr == nil {
+			return nil, nil
+		}
+		if err := preflightRemote(); err != nil {
+			return localErr, err
+		}
+		return localErr, remote()
+	}
+	if err := preflightRemote(); err != nil {
+		return nil, err
+	}
+	return nil, remote()
+}
+
+func (d *Deployer) preflightTakodBuildOptions(service *config.ServiceConfig, serverNames []string) error {
+	if service == nil || (len(service.BuildArgs) == 0 && service.BuildTarget == "") {
+		return nil
+	}
+	if err := d.preflightTakodCapability(serverNames, takod.CapabilityImageBuildOptionsV1, "structured image build options"); err != nil {
+		return fmt.Errorf("build uses args or target: %w", err)
+	}
+	return nil
 }
 
 func (d *Deployer) buildImageRemotelyOnTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames []string) error {
@@ -447,6 +518,8 @@ func (d *Deployer) buildImageLocallyAndPushToTakodNodes(serviceName string, serv
 			ContextDir: prepared.AbsContextPath,
 			Dockerfile: prepared.Dockerfile,
 			Platform:   platform,
+			Args:       service.BuildArgs,
+			Target:     service.BuildTarget,
 		}); err != nil {
 			return err
 		}
@@ -892,6 +965,13 @@ func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName strin
 		ExternalVolumes:    externalVolumes,
 		MemoryLimit:        serviceMemoryLimit(service),
 		CPULimit:           serviceCPULimit(service),
+		User:               service.User,
+		WorkingDir:         service.WorkingDir,
+		StopTimeoutSeconds: serviceStopTimeoutSeconds(service),
+		Init:               service.Init,
+		ExtraHosts:         append([]string(nil), service.ExtraHosts...),
+		Ulimits:            copyServiceUlimits(service.Ulimits),
+		ShmSize:            service.ShmSize,
 	}
 	if pullImage {
 		request.RegistryAuths = d.registryAuths()
@@ -1336,7 +1416,7 @@ func (d *Deployer) ensureTakodProxy(client *ssh.Client, networkName string, emai
 }
 
 func (d *Deployer) buildTakodEnvFileContent(service *config.ServiceConfig) (string, error) {
-	hasEnvVars := len(service.Env) > 0 || len(service.Secrets) > 0 || service.EnvFile != ""
+	hasEnvVars := len(service.Env) > 0 || len(service.Secrets) > 0 || service.EnvFile != "" || len(service.EnvFiles) > 0
 	if !hasEnvVars {
 		return "", nil
 	}
@@ -1640,6 +1720,28 @@ func serviceCPULimit(service *config.ServiceConfig) string {
 		return ""
 	}
 	return strings.TrimSpace(service.Resources.CPUs)
+}
+
+func serviceStopTimeoutSeconds(service *config.ServiceConfig) int {
+	if service == nil || strings.TrimSpace(service.StopGracePeriod) == "" {
+		return 0
+	}
+	duration, err := time.ParseDuration(service.StopGracePeriod)
+	if err != nil || duration <= 0 {
+		return 0
+	}
+	return int(duration / time.Second)
+}
+
+func copyServiceUlimits(source map[string]config.UlimitConfig) map[string]config.UlimitConfig {
+	if len(source) == 0 {
+		return nil
+	}
+	copy := make(map[string]config.UlimitConfig, len(source))
+	for name, limit := range source {
+		copy[name] = limit
+	}
+	return copy
 }
 
 func (d *Deployer) reconcileServiceViaTakod(client *ssh.Client, request takod.ReconcileServiceRequest) error {

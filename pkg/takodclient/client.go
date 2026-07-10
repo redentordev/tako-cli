@@ -373,6 +373,16 @@ func ImageBuildEndpointWithAuth(image string, dockerfile ...string) string {
 	return ImageBuildEndpoint(image, dockerfile...) + "&auth=preamble"
 }
 
+// ImageBuildEndpointWithOptions marks the body as carrying a JSON options
+// preamble before the build-context archive. Build arg values stay out of URLs.
+func ImageBuildEndpointWithOptions(image string, dockerfile string, withAuth bool) string {
+	endpoint := ImageBuildEndpoint(image, dockerfile) + "&options=preamble"
+	if withAuth {
+		endpoint += "&auth=preamble"
+	}
+	return endpoint
+}
+
 func ImageExistsEndpoint(image string) string {
 	query := url.Values{}
 	query.Set("image", image)

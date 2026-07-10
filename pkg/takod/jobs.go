@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/robfig/cron/v3"
 )
 
@@ -68,11 +69,18 @@ type JobSpec struct {
 	EnvFileContent string   `json:"envFileContent,omitempty"`
 	Env            []string `json:"env,omitempty"`
 	// Network attaches run containers; default tako_<project>_<env>.
-	Network        string   `json:"network,omitempty"`
-	Mounts         []string `json:"mounts,omitempty"`
-	MemoryLimit    string   `json:"memoryLimit,omitempty"`
-	CPULimit       string   `json:"cpuLimit,omitempty"`
-	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
+	Network            string                         `json:"network,omitempty"`
+	Mounts             []string                       `json:"mounts,omitempty"`
+	MemoryLimit        string                         `json:"memoryLimit,omitempty"`
+	CPULimit           string                         `json:"cpuLimit,omitempty"`
+	User               string                         `json:"user,omitempty"`
+	WorkingDir         string                         `json:"workingDir,omitempty"`
+	StopTimeoutSeconds int                            `json:"stopTimeoutSeconds,omitempty"`
+	Init               bool                           `json:"init,omitempty"`
+	ExtraHosts         []string                       `json:"extraHosts,omitempty"`
+	Ulimits            map[string]config.UlimitConfig `json:"ulimits,omitempty"`
+	ShmSize            string                         `json:"shmSize,omitempty"`
+	TimeoutSeconds     int                            `json:"timeoutSeconds,omitempty"`
 	// ConfigHash is the deployer's fingerprint of the job's service config,
 	// reported back through actual state for drift/plan comparison.
 	ConfigHash string `json:"configHash,omitempty"`
@@ -614,6 +622,7 @@ func buildJobRunArgs(spec JobSpec, container string, envFile string) []string {
 	if spec.CPULimit != "" {
 		args = append(args, "--cpus", spec.CPULimit)
 	}
+	args = appendContainerRuntimeArgs(args, spec.User, spec.WorkingDir, spec.StopTimeoutSeconds, spec.Init, spec.ExtraHosts, spec.Ulimits, spec.ShmSize)
 	if len(spec.Entrypoint) > 0 {
 		args = append(args, "--entrypoint", spec.Entrypoint[0])
 	}
@@ -697,6 +706,9 @@ func validateJobSpec(spec *JobSpec) error {
 	}
 	if spec.CPULimit != "" && !isSafeDockerCPULimit(spec.CPULimit) {
 		return fmt.Errorf("invalid cpu limit")
+	}
+	if err := validateContainerRuntimeControls(spec.User, spec.WorkingDir, spec.StopTimeoutSeconds, spec.ExtraHosts, spec.Ulimits, spec.ShmSize); err != nil {
+		return err
 	}
 	return nil
 }

@@ -149,18 +149,33 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 	command := stateStringOrList(service.Command, service.CommandArgs)
 	entrypoint := stateStringOrList(service.Entrypoint, service.EntrypointArgs)
 	out := config.ServiceConfig{
-		Image:      strings.TrimSpace(service.Image),
-		Build:      strings.TrimSpace(service.Build),
-		Command:    command,
-		Entrypoint: entrypoint,
-		Labels:     copyStringMap(service.Labels),
-		Port:       service.Port,
-		Replicas:   service.Replicas,
-		Restart:    strings.TrimSpace(service.Restart),
-		Persistent: service.Persistent,
-		Volumes:    cleanStrings(service.Volumes),
-		Secrets:    cleanStrings(service.SecretRefs),
-		DependsOn:  cleanStrings(service.DependsOn),
+		Image:           strings.TrimSpace(service.Image),
+		Build:           strings.TrimSpace(service.Build),
+		BuildTarget:     strings.TrimSpace(service.BuildTarget),
+		Command:         command,
+		Entrypoint:      entrypoint,
+		Labels:          copyStringMap(service.Labels),
+		Port:            service.Port,
+		Replicas:        service.Replicas,
+		Restart:         strings.TrimSpace(service.Restart),
+		Persistent:      service.Persistent,
+		Volumes:         cleanStrings(service.Volumes),
+		Secrets:         cleanStrings(service.SecretRefs),
+		DependsOn:       cleanStrings(service.DependsOn),
+		User:            strings.TrimSpace(service.User),
+		WorkingDir:      strings.TrimSpace(service.WorkingDir),
+		StopGracePeriod: strings.TrimSpace(service.StopGracePeriod),
+		Init:            service.Init,
+		ExtraHosts:      cleanStrings(service.ExtraHosts),
+		Ulimits:         materializeUlimits(service.Ulimits),
+		ShmSize:         strings.TrimSpace(service.ShmSize),
+	}
+	if len(service.BuildArgKeys) > 0 {
+		warnings = append(warnings, Warning{
+			Code:    "build_arg_values_redacted",
+			Service: name,
+			Message: fmt.Sprintf("service %q build arg values are not stored in takod state and must be restored manually for keys: %s", name, strings.Join(sortedStrings(service.BuildArgKeys), ", ")),
+		})
 	}
 
 	if len(service.EnvKeys) > 0 {
@@ -223,6 +238,17 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 	}
 
 	return out, warnings, nil
+}
+
+func materializeUlimits(source map[string]takoapi.UlimitDocument) map[string]config.UlimitConfig {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]config.UlimitConfig, len(source))
+	for name, limit := range source {
+		out[name] = config.UlimitConfig{Soft: limit.Soft, Hard: limit.Hard}
+	}
+	return out
 }
 
 func stateStringOrList(scalar string, args []string) config.StringOrList {

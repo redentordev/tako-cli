@@ -789,6 +789,11 @@ func configuredEnvBundlePathSet(cfgs ...*config.Config) map[string]bool {
 				if path, ok := normalizeEnvBundlePath(service.EnvFile); ok {
 					allowed[path] = true
 				}
+				for _, configuredPath := range service.EnvFiles {
+					if path, ok := normalizeEnvBundlePath(configuredPath); ok {
+						allowed[path] = true
+					}
+				}
 			}
 		}
 	}

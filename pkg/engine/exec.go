@@ -299,7 +299,7 @@ func (e *Engine) resolveExecServer(ctx context.Context, cfg *config.Config, envN
 // buildExecEnvFileContent renders the service's env/secrets exactly as a
 // deploy would, registering secret values with the event redactor first.
 func buildExecEnvFileContent(e *Engine, envName string, service *config.ServiceConfig) (string, error) {
-	if len(service.Env) == 0 && len(service.Secrets) == 0 && service.EnvFile == "" {
+	if len(service.Env) == 0 && len(service.Secrets) == 0 && service.EnvFile == "" && len(service.EnvFiles) == 0 {
 		return "", nil
 	}
 	mgr, err := secrets.NewManager(envName)

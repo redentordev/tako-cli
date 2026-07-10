@@ -326,6 +326,17 @@ func TestImageBuildEndpointEscapesDockerfile(t *testing.T) {
 	}
 }
 
+func TestImageBuildEndpointWithOptionsKeepsValuesOutOfURL(t *testing.T) {
+	got := ImageBuildEndpointWithOptions("demo/web:abc123", "packages/web/Dockerfile", true)
+	want := "/v1/images/build?dockerfile=packages%2Fweb%2FDockerfile&image=demo%2Fweb%3Aabc123&options=preamble&auth=preamble"
+	if got != want {
+		t.Fatalf("ImageBuildEndpointWithOptions() = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "SENTRY_IMAGE") {
+		t.Fatalf("build arg value leaked into URL: %q", got)
+	}
+}
+
 func TestImageExistsEndpointEscapesImage(t *testing.T) {
 	got := ImageExistsEndpoint("demo/web:abc123")
 	want := "/v1/images/exists?image=demo%2Fweb%3Aabc123"

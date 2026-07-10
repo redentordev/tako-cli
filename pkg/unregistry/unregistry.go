@@ -9,15 +9,17 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
 // CommandSpec describes a local command invocation.
 type CommandSpec struct {
-	Dir  string
-	Env  []string
-	Name string
-	Args []string
+	Dir                 string
+	Env                 []string
+	Name                string
+	Args                []string
+	SensitiveArgIndexes []int
 }
 
 // Runner executes local commands. Tests use this to verify exact Docker CLI
@@ -46,25 +48,68 @@ func (r ExecRunner) Run(ctx context.Context, spec CommandSpec) (string, error) {
 	}
 
 	var combined bytes.Buffer
-	if r.Stdout != nil {
-		cmd.Stdout = io.MultiWriter(r.Stdout, &combined)
-	} else {
+	sensitive := len(spec.SensitiveArgIndexes) > 0
+	if sensitive {
+		// Buffer sensitive commands so build-arg values cannot leak through
+		// verbose streaming before they are redacted.
 		cmd.Stdout = &combined
-	}
-	if r.Stderr != nil {
-		cmd.Stderr = io.MultiWriter(r.Stderr, &combined)
-	} else {
 		cmd.Stderr = &combined
+	} else {
+		if r.Stdout != nil {
+			cmd.Stdout = io.MultiWriter(r.Stdout, &combined)
+		} else {
+			cmd.Stdout = &combined
+		}
+		if r.Stderr != nil {
+			cmd.Stderr = io.MultiWriter(r.Stderr, &combined)
+		} else {
+			cmd.Stderr = &combined
+		}
 	}
 
-	if err := cmd.Run(); err != nil {
-		output := strings.TrimSpace(combined.String())
-		if output != "" {
-			return output, fmt.Errorf("%s %s failed: %w: %s", spec.Name, strings.Join(spec.Args, " "), err, output)
+	err := cmd.Run()
+	outputText := combined.String()
+	if sensitive {
+		outputText = redactSensitiveArgValues(outputText, spec.Args, spec.SensitiveArgIndexes)
+		if r.Stdout != nil {
+			_, _ = io.WriteString(r.Stdout, outputText)
+		} else if r.Stderr != nil {
+			_, _ = io.WriteString(r.Stderr, outputText)
 		}
-		return "", fmt.Errorf("%s %s failed: %w", spec.Name, strings.Join(spec.Args, " "), err)
 	}
-	return combined.String(), nil
+	if err != nil {
+		output := strings.TrimSpace(outputText)
+		displayArgs := redactedCommandArgs(spec.Args, spec.SensitiveArgIndexes)
+		if output != "" {
+			return output, fmt.Errorf("%s %s failed: %w: %s", spec.Name, strings.Join(displayArgs, " "), err, output)
+		}
+		return "", fmt.Errorf("%s %s failed: %w", spec.Name, strings.Join(displayArgs, " "), err)
+	}
+	return outputText, nil
+}
+
+func redactSensitiveArgValues(output string, args []string, sensitiveIndexes []int) string {
+	for _, index := range sensitiveIndexes {
+		if index < 0 || index >= len(args) {
+			continue
+		}
+		value := args[index]
+		output = strings.ReplaceAll(output, value, "[REDACTED]")
+		if _, secret, ok := strings.Cut(value, "="); ok && secret != "" {
+			output = strings.ReplaceAll(output, secret, "[REDACTED]")
+		}
+	}
+	return output
+}
+
+func redactedCommandArgs(args []string, sensitiveIndexes []int) []string {
+	out := append([]string(nil), args...)
+	for _, index := range sensitiveIndexes {
+		if index >= 0 && index < len(out) {
+			out[index] = "[REDACTED]"
+		}
+	}
+	return out
 }
 
 // Client wraps Docker buildx and docker-pussh.
@@ -102,6 +147,8 @@ type BuildRequest struct {
 	ContextDir string
 	Dockerfile string
 	Platform   string
+	Args       map[string]string
+	Target     string
 }
 
 // Build builds and loads a single-platform image into local Docker.
@@ -125,12 +172,26 @@ func (c Client) Build(ctx context.Context, req BuildRequest) error {
 	if strings.TrimSpace(req.Dockerfile) != "" {
 		args = append(args, "-f", req.Dockerfile)
 	}
+	var sensitiveArgIndexes []int
+	keys := make([]string, 0, len(req.Args))
+	for key := range req.Args {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		sensitiveArgIndexes = append(sensitiveArgIndexes, len(args)+1)
+		args = append(args, "--build-arg", key+"="+req.Args[key])
+	}
+	if strings.TrimSpace(req.Target) != "" {
+		args = append(args, "--target", req.Target)
+	}
 	args = append(args, ".")
 
 	if _, err := c.runner().Run(ctx, CommandSpec{
-		Dir:  req.ContextDir,
-		Name: "docker",
-		Args: args,
+		Dir:                 req.ContextDir,
+		Name:                "docker",
+		Args:                args,
+		SensitiveArgIndexes: sensitiveArgIndexes,
 	}); err != nil {
 		return fmt.Errorf("failed to build local image with buildx: %w", err)
 	}

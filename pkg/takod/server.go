@@ -76,6 +76,14 @@ type Status struct {
 // container command/entrypoint argv fields introduced with config exec form.
 const CapabilityContainerArgvV1 = "container.argv-v1"
 
+// CapabilityContainerRuntimeControlsV1 covers user/workdir/stop/init/hosts,
+// ulimits, and shm-size fields on service and job payloads.
+const CapabilityContainerRuntimeControlsV1 = "container.runtime-controls-v1"
+
+// CapabilityImageBuildOptionsV1 means the streamed image builder consumes
+// buildArgs and target from the request preamble.
+const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
+
 func NewServer(socket string, dataDir string, version string) *Server {
 	return NewServerWithOptions(socket, dataDir, version, ServerOptions{})
 }
@@ -955,7 +963,9 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 
 	body := io.Reader(http.MaxBytesReader(w, r.Body, defaultBuildContextMaxBytes))
 	var auths []RegistryAuth
-	if r.URL.Query().Get("auth") == "preamble" {
+	var buildArgs map[string]string
+	var target string
+	if r.URL.Query().Get("auth") == "preamble" || r.URL.Query().Get("options") == "preamble" {
 		// Credentials ride the body as a single JSON line ahead of the tar
 		// stream: never the query string or argv, never persisted (ADR 10).
 		buffered := bufio.NewReader(body)
@@ -965,17 +975,25 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var preamble struct {
-			RegistryAuths []RegistryAuth `json:"registryAuths"`
+			RegistryAuths []RegistryAuth    `json:"registryAuths"`
+			BuildArgs     map[string]string `json:"buildArgs"`
+			Target        string            `json:"target"`
 		}
 		if err := json.Unmarshal([]byte(line), &preamble); err != nil {
 			http.Error(w, "invalid registry auth preamble: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		auths = preamble.RegistryAuths
+		buildArgs = preamble.BuildArgs
+		target = preamble.Target
 		body = buffered
 	}
 
-	response, err := BuildImageWithAuth(r.Context(), image, body, auths, dockerfile)
+	response, err := BuildImageWithOptions(r.Context(), image, body, auths, ImageBuildOptions{
+		Dockerfile: dockerfile,
+		BuildArgs:  buildArgs,
+		Target:     target,
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1320,7 +1338,7 @@ func (s *Server) Status() Status {
 	status := Status{
 		Runtime:      "takod",
 		Version:      s.version,
-		Capabilities: []string{CapabilityContainerArgvV1},
+		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1},
 		Hostname:     hostname,
 		Socket:       s.socket,
 		DataDir:      s.dataDir,
