@@ -93,7 +93,13 @@ Mutation commands return versioned result documents (for example
 `planHash`, and `error` when failed. `tako ps --output json` returns a
 `StatusResult` document with project/environment, selected server(s), optional
 service filter, and service rows (`name`, `running`, `desired`, `status`,
-`ports`, `revision`, `warming`, `internal`). `tako logs` returns a
+`ports`, `revision`, `warming`, `internal`, `image`, `strategy`, `health`,
+`nodes`). `health` aggregates the docker health-check state of the service's
+active containers (worst wins: `unhealthy` > `starting` > `healthy`) and is
+empty when no container defines a health check or the node agent predates
+health capture. `nodes` breaks placement down per selected node (`name`,
+`running`, `warming`, `health`); nodes not running the service are omitted,
+and job/run rows carry no breakdown. `tako logs` returns a
 `LogsResult` document with project, environment, service, tail/follow options,
 per-node stream outcomes, timings, and `error` when any node stream failed.
 `tako access` returns an `AccessResult` document with the same shape (project,

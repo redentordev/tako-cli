@@ -115,6 +115,87 @@ demo_production_web_2|demo/web:2|container-b|hash-web||demo|production|web|false
 	}
 }
 
+func TestParseContainerHealth(t *testing.T) {
+	cases := []struct {
+		status string
+		want   string
+	}{
+		{"Up 5 minutes (healthy)", HealthStateHealthy},
+		{"Up 2 seconds (health: starting)", HealthStateStarting},
+		{"Up About an hour (unhealthy)", HealthStateUnhealthy},
+		{"Up 5 minutes", ""},
+		{"Restarting (1) 5 seconds ago", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := ParseContainerHealth(tc.status); got != tc.want {
+			t.Errorf("ParseContainerHealth(%q) = %q, want %q", tc.status, got, tc.want)
+		}
+	}
+}
+
+func TestMergeHealthStatesWorstWins(t *testing.T) {
+	cases := []struct {
+		existing string
+		incoming string
+		want     string
+	}{
+		{"", HealthStateHealthy, HealthStateHealthy},
+		{HealthStateHealthy, "", HealthStateHealthy},
+		{HealthStateHealthy, HealthStateStarting, HealthStateStarting},
+		{HealthStateUnhealthy, HealthStateHealthy, HealthStateUnhealthy},
+		{HealthStateStarting, HealthStateUnhealthy, HealthStateUnhealthy},
+		{"", "", ""},
+	}
+	for _, tc := range cases {
+		if got := MergeHealthStates(tc.existing, tc.incoming); got != tc.want {
+			t.Errorf("MergeHealthStates(%q, %q) = %q, want %q", tc.existing, tc.incoming, got, tc.want)
+		}
+	}
+}
+
+func TestParseActualStateAggregatesActiveContainerHealth(t *testing.T) {
+	output := `
+demo_production_web_1|demo/web:1|container-a|hash-web||demo|production|web|false|rev-new|rolling|1|true|Up 5 minutes (healthy)
+demo_production_web_2|demo/web:1|container-b|hash-web||demo|production|web|false|rev-new|rolling|2|true|Up 10 seconds (unhealthy)
+demo_production_web_3|demo/web:2|container-c|hash-web||demo|production|web|false|rev-old|rolling|3|false|Up 2 seconds (health: starting)
+demo_production_api_1|demo/api:1|container-d|hash-api||demo|production|api|false|rev-1|rolling|1|true|Up 3 hours
+`
+
+	actual := ParseActualState("demo", "production", output)
+	web := actual.Services["web"]
+	if web == nil {
+		t.Fatalf("web service missing: %#v", actual.Services)
+	}
+	if web.Health != HealthStateUnhealthy {
+		t.Fatalf("web health = %q, want unhealthy (worst active container wins; warming excluded)", web.Health)
+	}
+	api := actual.Services["api"]
+	if api == nil {
+		t.Fatalf("api service missing: %#v", actual.Services)
+	}
+	if api.Health != "" {
+		t.Fatalf("api health = %q, want empty for containers without a health check", api.Health)
+	}
+}
+
+// TestParseActualStateWithoutStatusColumn pins version-skew behavior: output
+// from an older docker ps format (no status column) parses with empty health.
+func TestParseActualStateWithoutStatusColumn(t *testing.T) {
+	output := `
+demo_production_web_1|demo/web:1|container-a|hash-web||demo|production|web|false|rev-new|rolling|1|true
+`
+
+	actual := ParseActualState("demo", "production", output)
+	web := actual.Services["web"]
+	if web == nil {
+		t.Fatalf("web service missing: %#v", actual.Services)
+	}
+	if web.Health != "" {
+		t.Fatalf("web health = %q, want empty without a status column", web.Health)
+	}
+}
+
 func TestParseActualStateTreatsOnlyRemainingInactiveRevisionAsCurrent(t *testing.T) {
 	output := `
 demo_production_web_1|demo/web:2|container-a|hash-web||demo|production|web|false|rev-green|blue_green|1|false

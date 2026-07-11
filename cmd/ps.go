@@ -179,6 +179,9 @@ func displayServices(services []ServiceInfo) {
 		case "scaling":
 			statusStr = "↻ scaling"
 		}
+		if svc.Health != "" {
+			statusStr = fmt.Sprintf("%s (%s)", statusStr, svc.Health)
+		}
 
 		revision := svc.Revision
 		if revision == "" {

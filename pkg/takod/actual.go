@@ -35,7 +35,19 @@ type ActualService struct {
 	DeployStrategy    string            `json:"deployStrategy,omitempty"`
 	ActiveContainers  []string          `json:"activeContainers,omitempty"`
 	WarmingContainers []string          `json:"warmingContainers,omitempty"`
+	// Health aggregates the docker health-check state of the service's
+	// active containers (worst wins: unhealthy > starting > healthy).
+	// Empty when no active container defines a health check, or when the
+	// reporting node agent predates health capture.
+	Health string `json:"health,omitempty"`
 }
+
+// Docker health-check states surfaced in actual state and status rows.
+const (
+	HealthStateHealthy   = "healthy"
+	HealthStateStarting  = "starting"
+	HealthStateUnhealthy = "unhealthy"
+)
 
 func GatherActualState(ctx context.Context, project string, environment string) (*ActualStateResponse, error) {
 	if project == "" {
@@ -52,7 +64,7 @@ func GatherActualState(ctx context.Context, project string, environment string) 
 	}
 
 	format := fmt.Sprintf(
-		`{{.Names}}|{{.Image}}|{{.ID}}|{{.Label "tako.configHash"}}|{{.Label %q}}|{{.Label "tako.project"}}|{{.Label "tako.environment"}}|{{.Label "tako.service"}}|{{.Label "tako.persistent"}}|{{.Label "tako.revision"}}|{{.Label "tako.deployStrategy"}}|{{.Label "tako.slot"}}|{{.Label "tako.active"}}`,
+		`{{.Names}}|{{.Image}}|{{.ID}}|{{.Label "tako.configHash"}}|{{.Label %q}}|{{.Label "tako.project"}}|{{.Label "tako.environment"}}|{{.Label "tako.service"}}|{{.Label "tako.persistent"}}|{{.Label "tako.revision"}}|{{.Label "tako.deployStrategy"}}|{{.Label "tako.slot"}}|{{.Label "tako.active"}}|{{.Status}}`,
 		runtimeid.ServiceIdentityLabel,
 	)
 	cmd := actualDockerCommandContext(ctx, "docker", "ps", "--format", format)
@@ -114,6 +126,10 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 		if len(parts) >= 13 && strings.TrimSpace(parts[12]) != "" {
 			active = strings.EqualFold(strings.TrimSpace(parts[12]), "true")
 		}
+		health := ""
+		if len(parts) >= 14 {
+			health = ParseContainerHealth(parts[13])
+		}
 		if serviceName == "" {
 			continue
 		}
@@ -136,6 +152,7 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 			if active {
 				existing.ActiveContainers = append(existing.ActiveContainers, containerID)
 				existing.CurrentRevision = mergeOptionalLabel(existing.CurrentRevision, revision)
+				existing.Health = MergeHealthStates(existing.Health, health)
 			} else {
 				existing.WarmingContainers = append(existing.WarmingContainers, containerID)
 				existing.PreviousRevision = mergeOptionalLabel(existing.PreviousRevision, revision)
@@ -158,6 +175,7 @@ func ParseActualState(project string, environment string, dockerPSOutput string)
 		if active {
 			actual.ActiveContainers = []string{containerID}
 			actual.CurrentRevision = revision
+			actual.Health = health
 		} else {
 			actual.WarmingContainers = []string{containerID}
 			actual.PreviousRevision = revision
@@ -183,6 +201,46 @@ func finalizeActualServiceRevisionStates(services map[string]*ActualService) {
 		service.ActiveContainers = append([]string(nil), service.WarmingContainers...)
 		service.WarmingContainers = nil
 		service.WarmingRevisions = nil
+	}
+}
+
+// ParseContainerHealth extracts the docker health-check state from a
+// `docker ps` status column value such as "Up 5 minutes (healthy)".
+// Containers without a health check report no parenthesized state and yield
+// the empty string.
+func ParseContainerHealth(dockerStatus string) string {
+	status := strings.ToLower(strings.TrimSpace(dockerStatus))
+	switch {
+	case strings.Contains(status, "(unhealthy)"):
+		return HealthStateUnhealthy
+	case strings.Contains(status, "(health: starting)"):
+		return HealthStateStarting
+	case strings.Contains(status, "(healthy)"):
+		return HealthStateHealthy
+	default:
+		return ""
+	}
+}
+
+// MergeHealthStates aggregates two health-check states with worst-wins
+// semantics: unhealthy > starting > healthy > unknown (empty).
+func MergeHealthStates(existing string, incoming string) string {
+	if healthStateRank(incoming) > healthStateRank(existing) {
+		return incoming
+	}
+	return existing
+}
+
+func healthStateRank(state string) int {
+	switch state {
+	case HealthStateUnhealthy:
+		return 3
+	case HealthStateStarting:
+		return 2
+	case HealthStateHealthy:
+		return 1
+	default:
+		return 0
 	}
 }
 
