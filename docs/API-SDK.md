@@ -45,6 +45,10 @@ commands in `cmd/` are thin adapters over this package.
   checker, specs, options)`, which probes serving domains (including
   `proxy.domains` extras) and emits progress events; `tako domains status`
   wraps it into a `DomainsResult`.
+- Certificate command adapters use the additive `CertsResult` contract. Node
+  entries expose certificate domain, source, and validity timestamps only;
+  private PEM material is write-only to takod and is never represented in the
+  engine result or event schemas.
 - Config materialization is available as `ExportConfig(ctx,
   ConfigExportRequest)`, which reads desired/actual/history state through the
   private takod state client and returns a `ConfigExportResult` containing the

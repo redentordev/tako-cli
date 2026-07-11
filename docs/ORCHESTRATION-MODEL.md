@@ -595,6 +595,30 @@ an access-controlled route appears to be behind a CDN without trusted proxies.
 Caddy's JSON access entries retain both `request.client_ip` and
 `request.remote_ip`; `tako access --verbose` labels the distinct TCP peer.
 
+The proxy certificate store lives at `/var/lib/tako/certs/<domain>/` on each
+node. It is node-global and cross-project by design: all projects already share
+one Caddy TLS boundary, so an ingress project can push `*.platform.example.com`
+and customer-project routes on the same node can consume it. Selection is
+deterministic per hostname: exact entry, then the most-specific covering
+wildcard, then unchanged automatic HTTPS. Internal HTTP routes never consume a
+certificate-store entry.
+
+`tako certs push` sends the PEM pair in the takod request body. Before atomic
+0600 publication, takod parses the chain and key, proves the keypair matches,
+checks validity and hostname/wildcard coverage, and rejects expired material.
+Caddyfiles reference only entries revalidated from disk. The store is mounted
+read-only into stock Caddy, and proxy recreation regenerates and validates the
+Caddyfile before starting the container, guarding the reboot/startup path that
+`caddy adapt` alone cannot validate. Push/remove operations are lease-free and
+serialized locally; atomic replacement plus graceful reload makes a concurrent
+deploy benign, with the last valid Caddyfile winning.
+
+Certificate files and keys are intentionally excluded from replicated state,
+drift, and backups. They are lost with the node and must be re-pushed; CLI-only
+operators must keep their own secure copies. `tako certs ls` exposes source and
+expiry so an external control plane can track replacement without ever reading
+private keys back from the node.
+
 One-node deployments use the same proxy path with only local upstreams and do
 not publish mesh host ports. Multi-node upstream ports are allocated and
 recorded by the target node's `takod` agent. The CLI sends a

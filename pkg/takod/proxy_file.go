@@ -6,10 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 var proxyDynamicDir = "/etc/tako/proxy/dynamic"
 var proxyRoutesDir = "/etc/tako/proxy/routes"
+
+var proxyRenderMu sync.Mutex
 
 type ProxyFileRequest struct {
 	Name    string `json:"name"`
@@ -116,7 +119,26 @@ func validateProxyFileName(name string) (string, error) {
 }
 
 func renderAndWriteCaddyfile(ctx context.Context) error {
-	caddyfile, err := renderCaddyfileFromRouteManifests(proxyRoutesDir)
+	proxyRenderMu.Lock()
+	defer proxyRenderMu.Unlock()
+	return renderAndWriteCaddyfileLocked(ctx, "")
+}
+
+func renderAndWriteCaddyfileThen(ctx context.Context, excludedCertificateDomain string, afterPublish func() error) error {
+	proxyRenderMu.Lock()
+	defer proxyRenderMu.Unlock()
+	if err := renderAndWriteCaddyfileLocked(ctx, excludedCertificateDomain); err != nil {
+		return err
+	}
+	if err := afterPublish(); err != nil {
+		_ = renderAndWriteCaddyfileLocked(ctx, "")
+		return err
+	}
+	return nil
+}
+
+func renderAndWriteCaddyfileLocked(ctx context.Context, excludedCertificateDomain string) error {
+	caddyfile, err := renderCaddyfileFromRouteManifestsExcluding(proxyRoutesDir, excludedCertificateDomain)
 	if err != nil {
 		return err
 	}

@@ -881,6 +881,56 @@ func TestDomainsResultDocumentsGolden(t *testing.T) {
 	}
 }
 
+func TestCertsResultDocumentGoldenExcludesPrivateMaterial(t *testing.T) {
+	started := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	expires := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	result := engine.CertsResult{
+		APIVersion: takoapi.APIVersionCurrent,
+		Kind:       engine.KindCertsResult,
+		Project:    "demo", Environment: "production", Action: "list",
+		Nodes: []engine.CertsNodeResult{{
+			Server: "node-a", Host: "203.0.113.10",
+			Certificates: []takod.ProxyCertificateMetadata{{Domain: "*.example.com", Source: takod.CertificateSourcePushed, NotAfter: expires}},
+		}},
+		StartedAt: started, Duration: 0.25,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "CertsResult",
+  "project": "demo",
+  "environment": "production",
+  "action": "list",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "203.0.113.10",
+      "certificates": [
+        {
+          "domain": "*.example.com",
+          "source": "pushed",
+          "notBefore": "0001-01-01T00:00:00Z",
+          "notAfter": "2026-10-09T12:00:00Z",
+          "issuedAt": "0001-01-01T00:00:00Z",
+          "updatedAt": "0001-01-01T00:00:00Z"
+        }
+      ]
+    }
+  ],
+  "startedAt": "2026-07-11T12:00:00Z",
+  "durationSeconds": 0.25
+}`
+	if string(payload) != want {
+		t.Fatalf("certs result document drifted:\n%s", payload)
+	}
+	if strings.Contains(string(payload), "PRIVATE KEY") || strings.Contains(string(payload), "certPem") || strings.Contains(string(payload), "keyPem") {
+		t.Fatal("CertsResult leaked private key material")
+	}
+}
+
 // TestDiscoveryExportsResultDocumentGolden pins the machine-facing discovery schema.
 func TestDiscoveryExportsResultDocumentGolden(t *testing.T) {
 	result := engine.DiscoveryExportsResult{

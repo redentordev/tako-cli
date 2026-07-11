@@ -177,11 +177,19 @@ func validateProxyRouteManifest(manifest *ProxyRouteManifest) error {
 }
 
 func renderCaddyfileFromRouteManifests(dir string) (string, error) {
+	return renderCaddyfileFromRouteManifestsExcluding(dir, "")
+}
+
+func renderCaddyfileFromRouteManifestsExcluding(dir string, excludedCertificateDomain string) (string, error) {
 	manifests, err := readProxyRouteManifests(dir)
 	if err != nil {
 		return "", err
 	}
-	return renderCaddyfile(manifests)
+	certificates, err := loadProxyCertificateEntriesExcluding(true, excludedCertificateDomain)
+	if err != nil {
+		return "", err
+	}
+	return renderCaddyfileWithCertificates(manifests, certificates)
 }
 
 func readProxyRouteManifests(dir string) ([]ProxyRouteManifest, error) {
@@ -213,6 +221,10 @@ func readProxyRouteManifests(dir string) ([]ProxyRouteManifest, error) {
 }
 
 func renderCaddyfile(manifests []ProxyRouteManifest) (string, error) {
+	return renderCaddyfileWithCertificates(manifests, nil)
+}
+
+func renderCaddyfileWithCertificates(manifests []ProxyRouteManifest, certificates []proxyCertificateEntry) (string, error) {
 	var routes []ProxyRoute
 	for _, manifest := range manifests {
 		routes = append(routes, manifest.Routes...)
@@ -269,7 +281,11 @@ func renderCaddyfile(manifests []ProxyRouteManifest) (string, error) {
 
 	for _, route := range effectiveRoutes {
 		for _, domain := range route.Domains {
-			writeCaddyRoute(&b, caddyRouteAddress(domain, route), route)
+			var certificate *proxyCertificateEntry
+			if route.Visibility != proxyRouteVisibilityInternal {
+				certificate = selectProxyCertificate(certificates, domain)
+			}
+			writeCaddyRoute(&b, caddyRouteAddress(domain, route), route, certificate)
 		}
 		primary := ""
 		if len(route.Domains) > 0 {
@@ -280,6 +296,9 @@ func renderCaddyfile(manifests []ProxyRouteManifest) (string, error) {
 				continue
 			}
 			b.WriteString("\n" + redirect + " {\n")
+			if certificate := selectProxyCertificate(certificates, redirect); certificate != nil {
+				writeCaddyCertificate(&b, "\t", certificate)
+			}
 			writeCaddyAccessLog(&b, caddyAccessLogName(route.Service))
 			b.WriteString("\tredir https://" + primary + "{uri} 308\n")
 			b.WriteString("}\n")
@@ -287,7 +306,7 @@ func renderCaddyfile(manifests []ProxyRouteManifest) (string, error) {
 	}
 
 	if dynamicRoute != nil {
-		writeCaddyRoute(&b, ":443", *dynamicRoute)
+		writeCaddyRoute(&b, ":443", *dynamicRoute, nil)
 	}
 	return b.String(), nil
 }
@@ -417,10 +436,12 @@ func removeString(values []string, value string) []string {
 	return values
 }
 
-func writeCaddyRoute(b *strings.Builder, address string, route ProxyRoute) {
+func writeCaddyRoute(b *strings.Builder, address string, route ProxyRoute, certificate *proxyCertificateEntry) {
 	b.WriteString("\n" + address + " {\n")
 	if address == ":443" {
 		b.WriteString("\ttls {\n\t\ton_demand\n\t}\n")
+	} else if certificate != nil {
+		writeCaddyCertificate(b, "\t", certificate)
 	}
 	writeCaddyAccessLog(b, caddyAccessLogName(route.Service))
 	b.WriteString("\tencode zstd gzip\n")
@@ -443,6 +464,10 @@ func writeCaddyRoute(b *strings.Builder, address string, route ProxyRoute) {
 		writeCaddyReverseProxy(b, "\t", address, route)
 	}
 	b.WriteString("}\n")
+}
+
+func writeCaddyCertificate(b *strings.Builder, indent string, certificate *proxyCertificateEntry) {
+	b.WriteString(indent + "tls " + certificate.CertPath + " " + certificate.KeyPath + "\n")
 }
 
 func writeCaddyBasicAuth(b *strings.Builder, indent string, route ProxyRoute) {

@@ -33,6 +33,28 @@ func TestBuildRequestCommandWithoutBodyOmitsStdinBody(t *testing.T) {
 	}
 }
 
+func TestRequireCapabilityReturnsTypedUpgradeError(t *testing.T) {
+	executor := &fakeTakodExecutor{output: `{"capabilities":["proxy.trusted-proxies-v1"]}`}
+	err := RequireCapability(context.Background(), executor, DefaultSocket, "node-a", "proxy.certs-v1", "proxy certificate management")
+	var capabilityErr *CapabilityRequiredError
+	if !errors.As(err, &capabilityErr) || capabilityErr.Capability != "proxy.certs-v1" || !strings.Contains(err.Error(), "tako upgrade servers") {
+		t.Fatalf("RequireCapability error = %v", err)
+	}
+}
+
+func TestRequireCapabilityAcceptsAdvertisedCapability(t *testing.T) {
+	executor := &fakeTakodExecutor{output: `{"capabilities":["proxy.certs-v1"]}`}
+	if err := RequireCapability(context.Background(), executor, DefaultSocket, "node-a", "proxy.certs-v1", "proxy certificate management"); err != nil {
+		t.Fatalf("RequireCapability returned error: %v", err)
+	}
+}
+
+func TestCertificatesEndpointEscapesDomain(t *testing.T) {
+	if got, want := CertificatesEndpoint("*.example.com"), "/v1/certs?domain=%2A.example.com"; got != want {
+		t.Fatalf("CertificatesEndpoint() = %q, want %q", got, want)
+	}
+}
+
 func TestRequestJSONUsesDeadlineForGET(t *testing.T) {
 	client := &fakeTakodExecutor{}
 
@@ -133,6 +155,10 @@ func TestRequestJSONReturnsHTTPErrorBody(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HTTP 502") || !strings.Contains(err.Error(), "container web health check failed") {
 		t.Fatalf("error = %q, want HTTP status and response body", err.Error())
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Status != 502 || httpErr.Endpoint != "/v1/reconcile-service" {
+		t.Fatalf("error type = %#v, want HTTPError", err)
 	}
 }
 

@@ -30,6 +30,7 @@ func TestBuildProxyContainerArgs(t *testing.T) {
 		"--volume", "/etc/tako/proxy/caddy-data:/data",
 		"--volume", "/etc/tako/proxy/caddy-config:/config",
 		"--volume", "/var/log/tako/proxy:/var/log/caddy",
+		"--volume", "/var/lib/tako/certs:/var/lib/tako/certs:ro",
 		"--label", "tako.runtime=takod",
 		"--label", "tako.component=proxy",
 		"caddy:2.9-alpine",
@@ -115,6 +116,13 @@ func TestProxyContainerIsCurrentRejectsStaleImageEmailAndMounts(t *testing.T) {
 			args:   args,
 			image:  req.Image,
 			mounts: `[{"Source":"/tmp/proxy/caddy","Destination":"/etc/caddy"},{"Source":"/etc/tako/proxy/caddy-data","Destination":"/data"},{"Source":"/etc/tako/proxy/caddy-config","Destination":"/config"},{"Source":"/var/log/tako/proxy","Destination":"/var/log/caddy"}]`,
+			env:    env,
+		},
+		{
+			name:   "writable certificate store mount",
+			args:   args,
+			image:  req.Image,
+			mounts: strings.Replace(mounts, `"Destination":"/var/lib/tako/certs"`, `"Destination":"/var/lib/tako/certs","RW":true`, 1),
 			env:    env,
 		},
 	}
@@ -281,7 +289,8 @@ func currentProxyMountsJSON() string {
 		`{"Source":"` + filepath.Dir(proxyCaddyfilePath) + `","Destination":"/etc/caddy"},` +
 		`{"Source":"` + proxyCaddyDataDir + `","Destination":"/data"},` +
 		`{"Source":"` + proxyCaddyConfigDir + `","Destination":"/config"},` +
-		`{"Source":"` + proxyLogDir + `","Destination":"/var/log/caddy"}` +
+		`{"Source":"` + proxyLogDir + `","Destination":"/var/log/caddy"},` +
+		`{"Source":"` + proxyCertStoreDir + `","Destination":"` + proxyCertContainerDir + `"}` +
 		`]`
 }
 

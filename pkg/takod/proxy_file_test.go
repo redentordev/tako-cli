@@ -13,11 +13,12 @@ import (
 func TestCaddyfileConformanceMatrix(t *testing.T) {
 	hash := takodTestBcryptHash
 	tests := []struct {
-		name      string
-		route     ProxyRoute
-		wantHash  string
-		contains  []string
-		forbidden []string
+		name         string
+		route        ProxyRoute
+		certificates []proxyCertificateEntry
+		wantHash     string
+		contains     []string
+		forbidden    []string
 	}{
 		{
 			name:      "public baseline",
@@ -53,13 +54,24 @@ func TestCaddyfileConformanceMatrix(t *testing.T) {
 			contains:  []string{"trusted_proxies static 10.0.0.0/8 203.0.113.0/24", "trusted_proxies_strict", "@tako_allowed client_ip 198.51.100.0/24", "basic_auth {", "redir https://example.com{uri} 308"},
 			forbidden: []string{"@tako_allowed remote_ip"},
 		},
+		{
+			name:  "BYO certificates with dynamic authority redirects and multiple domains",
+			route: ProxyRoute{Service: "renderer", Domains: []string{"example.com", "app.example.com"}, RedirectFrom: []string{"www.example.com"}, Upstreams: []string{"http://renderer:3000"}, DynamicDomain: &ProxyDynamicDomain{AskURL: "http://admin:3000/api/domains/authorize"}},
+			certificates: []proxyCertificateEntry{
+				{Metadata: ProxyCertificateMetadata{Domain: "example.com"}, CertPath: "/var/lib/tako/certs/example.com/cert.pem", KeyPath: "/var/lib/tako/certs/example.com/key.pem"},
+				{Metadata: ProxyCertificateMetadata{Domain: "app.example.com"}, CertPath: "/var/lib/tako/certs/app.example.com/cert.pem", KeyPath: "/var/lib/tako/certs/app.example.com/key.pem"},
+				{Metadata: ProxyCertificateMetadata{Domain: "www.example.com"}, CertPath: "/var/lib/tako/certs/www.example.com/cert.pem", KeyPath: "/var/lib/tako/certs/www.example.com/key.pem"},
+			},
+			wantHash: "c78fec120cd6e4bb894374f79673887767aa7452947fa7d00e448cdb99336315",
+			contains: []string{"tls /var/lib/tako/certs/example.com/cert.pem /var/lib/tako/certs/example.com/key.pem", "tls /var/lib/tako/certs/app.example.com/cert.pem /var/lib/tako/certs/app.example.com/key.pem", "tls /var/lib/tako/certs/www.example.com/cert.pem /var/lib/tako/certs/www.example.com/key.pem", "on_demand_tls", ":443 {"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := renderCaddyfile([]ProxyRouteManifest{{
+			got, err := renderCaddyfileWithCertificates([]ProxyRouteManifest{{
 				Version: 1, Project: "demo", Environment: "production", Routes: []ProxyRoute{tt.route},
-			}})
+			}}, tt.certificates)
 			if err != nil {
 				t.Fatalf("renderCaddyfile returned error: %v", err)
 			}
@@ -140,18 +152,21 @@ func useTempProxyPaths(t *testing.T) string {
 	oldCaddyDataDir := proxyCaddyDataDir
 	oldCaddyConfigDir := proxyCaddyConfigDir
 	oldLogDir := proxyLogDir
+	oldCertStoreDir := proxyCertStoreDir
 	root := t.TempDir()
 	proxyRoutesDir = filepath.Join(root, "routes")
 	proxyCaddyfilePath = filepath.Join(root, "caddy", "Caddyfile")
 	proxyCaddyDataDir = filepath.Join(root, "caddy-data")
 	proxyCaddyConfigDir = filepath.Join(root, "caddy-config")
 	proxyLogDir = filepath.Join(root, "logs")
+	proxyCertStoreDir = filepath.Join(root, "certs")
 	t.Cleanup(func() {
 		proxyRoutesDir = oldRoutesDir
 		proxyCaddyfilePath = oldCaddyfilePath
 		proxyCaddyDataDir = oldCaddyDataDir
 		proxyCaddyConfigDir = oldCaddyConfigDir
 		proxyLogDir = oldLogDir
+		proxyCertStoreDir = oldCertStoreDir
 	})
 	return root
 }

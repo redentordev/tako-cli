@@ -9,3 +9,7 @@ import (
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	return fileutil.WriteFileAtomic(path, data, mode)
 }
+
+func syncDirectory(path string) error {
+	return fileutil.SyncDirectory(path)
+}
