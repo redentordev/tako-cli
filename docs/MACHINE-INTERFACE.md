@@ -96,6 +96,10 @@ service filter, and service rows (`name`, `running`, `desired`, `status`,
 `ports`, `revision`, `warming`, `internal`). `tako logs` returns a
 `LogsResult` document with project, environment, service, tail/follow options,
 per-node stream outcomes, timings, and `error` when any node stream failed.
+`tako access` returns an `AccessResult` document with the same shape (project,
+environment, optional service filter, tail/follow options, per-node stream
+outcomes, timings, `error`); the log entries themselves stream as
+`access.line` events.
 `tako history --output json` returns a `HistoryResult` document with
 project/environment, requested server/status/limit filters, the source server
 selected from the mesh, and deployment rows (`id`, `displayId`, `commit`,
@@ -303,10 +307,16 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
-| Human-only by design | `init`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON) |
+| Human-only by design | `init`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
+
+Human-only commands reject `--output json` and `--events ndjson` with a
+typed invalid-request error (exit code 2) instead of printing human text to
+a stdout the caller expected to parse. The categorization is test-enforced:
+`cmd/machine_coverage_test.go` walks the registered command tree and fails
+when a runnable command is missing from this table or listed twice.
 
 Interactive-only flags (`drift --watch`, `metrics --live`, `stats --live`)
 are rejected with exit code 2 when a machine mode is enabled.

@@ -9,9 +9,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/accesslog"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
@@ -135,13 +137,31 @@ func runAccess(cmd *cobra.Command, args []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	startedAt := time.Now()
 	results := streamAccessNodesWith(ctx, servers, func(serverName string, server config.ServerConfig, prefix bool) error {
 		return streamAccessFromNode(ctx, cfg, serverName, server, formatter, accessService, accessTail, accessFollow, prefix, sink)
 	})
-	if err := summarizeAccessStreamResults(results); err != nil {
-		return err
+	summaryErr := summarizeAccessStreamResults(results)
+	result := engine.NewAccessResult(cfg.Project.Name, envName, accessService, accessTail, accessFollow, startedAt, accessNodeResultDocuments(results), summaryErr)
+	if emitErr := emitResultDocument(result); emitErr != nil && summaryErr == nil {
+		summaryErr = emitErr
 	}
-	return nil
+	return summaryErr
+}
+
+// accessNodeResultDocuments maps fan-out outcomes to the serializable
+// per-node entries of the AccessResult document.
+func accessNodeResultDocuments(results []accessNodeResult) []engine.AccessNodeResult {
+	docs := make([]engine.AccessNodeResult, 0, len(results))
+	for _, result := range results {
+		doc := engine.AccessNodeResult{Name: result.serverName, Host: result.host, Status: "success"}
+		if result.err != nil {
+			doc.Status = "failed"
+			doc.Error = result.err.Error()
+		}
+		docs = append(docs, doc)
+	}
+	return docs
 }
 
 // accessLineSink delivers one formatted access-log entry; machine modes emit

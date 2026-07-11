@@ -58,6 +58,32 @@ func validateMachineOutputFlags() error {
 	return nil
 }
 
+// humanOnlyAnnotation marks commands whose output is human terminal text by
+// design (docs/MACHINE-INTERFACE.md command coverage). Machine output modes
+// are rejected for them so stdout never mixes prose with parseable output.
+const humanOnlyAnnotation = "tako.humanOnly"
+
+func markHumanOnly(cmds ...*cobra.Command) {
+	for _, command := range cmds {
+		if command.Annotations == nil {
+			command.Annotations = map[string]string{}
+		}
+		command.Annotations[humanOnlyAnnotation] = "true"
+	}
+}
+
+// rejectMachineOutputForHumanOnly fails fast with a typed invalid-request
+// error when --output json or --events ndjson targets a human-only command.
+func rejectMachineOutputForHumanOnly(cmd *cobra.Command) error {
+	if cmd == nil || !machineOutputEnabled() {
+		return nil
+	}
+	if cmd.Annotations[humanOnlyAnnotation] != "true" {
+		return nil
+	}
+	return &engine.InvalidRequestError{Err: fmt.Errorf("%s is human-only and does not support --output json or --events ndjson; see the command coverage table in docs/MACHINE-INTERFACE.md", cmd.CommandPath())}
+}
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "tako",
@@ -69,7 +95,10 @@ The CLI uses SSH for bootstrap and a node-local takod agent for Docker
 reconciliation, proxy config, remote leases, and replicated deployment state.`,
 	Version: Version,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		return validateMachineOutputFlags()
+		if err := validateMachineOutputFlags(); err != nil {
+			return err
+		}
+		return rejectMachineOutputForHumanOnly(cmd)
 	},
 }
 
@@ -208,6 +237,24 @@ func shouldCheckForUpdate() bool {
 
 func init() {
 	cobra.OnInitialize(initConfig)
+
+	// Human-only command registry (docs/MACHINE-INTERFACE.md command
+	// coverage): these print terminal text or prompt by design, so machine
+	// output modes are rejected up front. `upgrade servers` keeps its full
+	// machine contract; only the CLI self-update is human-only.
+	markHumanOnly(
+		initCmd,
+		configExplainCmd,
+		monitorCmd,
+		envPushCmd,
+		envPullCmd,
+		secretsInitCmd,
+		secretsSetCmd,
+		secretsDeleteCmd,
+		secretsFetchCmd,
+		secretsImportCmd,
+		upgradeCmd,
+	)
 
 	// Set custom version template
 	rootCmd.SetVersionTemplate(fmt.Sprintf(`Tako CLI {{.Version}}
