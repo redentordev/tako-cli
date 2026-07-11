@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/caddyserver/certmagic"
 )
 
 const (
@@ -41,12 +43,22 @@ type ProxyCertificatePushRequest struct {
 }
 
 type ProxyCertificateMetadata struct {
-	Domain    string    `json:"domain"`
-	Source    string    `json:"source"`
-	NotBefore time.Time `json:"notBefore"`
-	NotAfter  time.Time `json:"notAfter"`
-	IssuedAt  time.Time `json:"issuedAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Domain           string     `json:"domain"`
+	Source           string     `json:"source"`
+	NotBefore        time.Time  `json:"notBefore"`
+	NotAfter         time.Time  `json:"notAfter"`
+	IssuedAt         time.Time  `json:"issuedAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+	OwnerProject     string     `json:"ownerProject,omitempty"`
+	OwnerEnvironment string     `json:"ownerEnvironment,omitempty"`
+	DNSProvider      string     `json:"dnsProvider,omitempty"`
+	CAProvider       string     `json:"caProvider,omitempty"`
+	Staging          bool       `json:"staging,omitempty"`
+	Orphaned         bool       `json:"orphaned,omitempty"`
+	LastAttemptAt    *time.Time `json:"lastAttemptAt,omitempty"`
+	LastSuccessAt    *time.Time `json:"lastSuccessAt,omitempty"`
+	LastError        string     `json:"lastError,omitempty"`
+	RetryAfter       *time.Time `json:"retryAfter,omitempty"`
 }
 
 type ProxyCertificateListResponse struct {
@@ -96,9 +108,53 @@ func ListProxyCertificates(ctx context.Context) (*ProxyCertificateListResponse, 
 		return nil, err
 	}
 	result := &ProxyCertificateListResponse{Certificates: make([]ProxyCertificateMetadata, 0, len(entries))}
+	existing := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		result.Certificates = append(result.Certificates, entry.Metadata)
+		existing[entry.Metadata.Domain] = true
 	}
+	owners, err := loadACMEDNSOwnerDocuments()
+	if err != nil {
+		return nil, err
+	}
+	for _, owner := range owners {
+		for _, certificate := range owner.Certificates {
+			if existing[certificate.Domain] {
+				continue
+			}
+			metadata := ProxyCertificateMetadata{
+				Domain: certificate.Domain, Source: CertificateSourceACMEDNS,
+				OwnerProject: owner.Project, OwnerEnvironment: owner.Environment,
+				DNSProvider: owner.DNSProvider, CAProvider: certificate.CAProvider, Staging: certificate.Staging,
+			}
+			if failure, failureErr := readACMEDNSFailure(certificate.Domain); failureErr != nil {
+				return nil, failureErr
+			} else if failure != nil {
+				metadata.LastAttemptAt = timePointer(failure.FailedAt)
+				metadata.LastError = failure.Error
+				metadata.RetryAfter = timePointer(failure.RetryAfter)
+			}
+			result.Certificates = append(result.Certificates, metadata)
+			existing[certificate.Domain] = true
+		}
+	}
+	failures, err := loadACMEDNSFailures()
+	if err != nil {
+		return nil, err
+	}
+	for _, failure := range failures {
+		if existing[failure.Domain] {
+			continue
+		}
+		result.Certificates = append(result.Certificates, ProxyCertificateMetadata{
+			Domain: failure.Domain, Source: CertificateSourceACMEDNS,
+			OwnerProject: failure.Project, OwnerEnvironment: failure.Environment,
+			DNSProvider: failure.DNSProvider, CAProvider: failure.CAProvider, Staging: failure.Staging,
+			LastAttemptAt: timePointer(failure.FailedAt), LastError: failure.Error, RetryAfter: timePointer(failure.RetryAfter),
+		})
+		existing[failure.Domain] = true
+	}
+	sort.Slice(result.Certificates, func(i, j int) bool { return result.Certificates[i].Domain < result.Certificates[j].Domain })
 	return result, nil
 }
 
@@ -148,7 +204,112 @@ func RemoveProxyCertificate(ctx context.Context, domain string) (*ProxyCertifica
 	}); err != nil {
 		return nil, err
 	}
+	if entry.Metadata.Source == CertificateSourceACMEDNS {
+		if err := removeACMEDNSCertificateOwnership(entry.Metadata); err != nil {
+			return nil, err
+		}
+	}
 	return &ProxyCertificateMutationResponse{Certificate: entry.Metadata}, nil
+}
+
+func removeACMEDNSCertificateOwnership(metadata ProxyCertificateMetadata) error {
+	_ = os.Remove(acmeDNSFailurePath(metadata.Domain))
+	if err := removeACMEDNSManagedAssets(metadata.Domain); err != nil {
+		return err
+	}
+	if metadata.OwnerProject == "" || metadata.OwnerEnvironment == "" {
+		return nil
+	}
+	if err := removeACMEDNSPendingCertificate(metadata.OwnerProject, metadata.OwnerEnvironment, metadata.Domain); err != nil {
+		return err
+	}
+
+	ownerPath := acmeDNSOwnerPath(metadata.OwnerProject, metadata.OwnerEnvironment)
+	data, err := readProxyCertificateStoreFile(ownerPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read ACME DNS ownership while removing %s: %w", metadata.Domain, err)
+	}
+	var owner acmeDNSOwnerDocument
+	if err := json.Unmarshal(data, &owner); err != nil {
+		return fmt.Errorf("invalid ACME DNS ownership while removing %s: %w", metadata.Domain, err)
+	}
+	remaining := owner.Certificates[:0]
+	for _, certificate := range owner.Certificates {
+		if certificate.Domain != metadata.Domain {
+			remaining = append(remaining, certificate)
+		}
+	}
+	if len(remaining) == len(owner.Certificates) {
+		return nil
+	}
+	if len(remaining) > 0 {
+		owner.Certificates = remaining
+		owner.UpdatedAt = acmeDNSNow().UTC()
+		if err := writePrivateJSON(ownerPath, owner); err != nil {
+			return fmt.Errorf("failed to update ACME DNS ownership while removing %s: %w", metadata.Domain, err)
+		}
+		return nil
+	}
+	for _, path := range []string{ownerPath, acmeDNSCredentialsPath(metadata.OwnerProject, metadata.OwnerEnvironment)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to retire ACME DNS ownership while removing %s: %w", metadata.Domain, err)
+		}
+	}
+	return nil
+}
+
+func removeACMEDNSPendingCertificate(project, environment, domain string) error {
+	path := acmeDNSPendingPath(project, environment)
+	data, err := readProxyCertificateStoreFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read staged ACME DNS ownership while removing %s: %w", domain, err)
+	}
+	var pending acmeDNSPendingDocument
+	if err := json.Unmarshal(data, &pending); err != nil {
+		return fmt.Errorf("invalid staged ACME DNS ownership while removing %s: %w", domain, err)
+	}
+	remaining := pending.Owner.Certificates[:0]
+	for _, certificate := range pending.Owner.Certificates {
+		if certificate.Domain != domain {
+			remaining = append(remaining, certificate)
+		}
+	}
+	if len(remaining) == len(pending.Owner.Certificates) {
+		return nil
+	}
+	if len(remaining) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove staged ACME DNS ownership for %s: %w", domain, err)
+		}
+		return nil
+	}
+	pending.Owner.Certificates = remaining
+	pending.Owner.UpdatedAt = acmeDNSNow().UTC()
+	if err := writePrivateJSON(path, pending); err != nil {
+		return fmt.Errorf("failed to update staged ACME DNS ownership while removing %s: %w", domain, err)
+	}
+	return nil
+}
+
+func removeACMEDNSManagedAssets(domain string) error {
+	safeDomain := certmagic.StorageKeys.Safe(domain)
+	pattern := filepath.Join(acmeDNSStoragePath(), "certificates", "*", safeDomain)
+	paths, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("failed to locate CertMagic assets for %s: %w", domain, err)
+	}
+	for _, path := range paths {
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("failed to remove CertMagic assets for %s: %w", domain, err)
+		}
+	}
+	return nil
 }
 
 func publishProxyCertificate(ctx context.Context, entry *proxyCertificateEntry, certPEM []byte, keyPEM []byte) error {

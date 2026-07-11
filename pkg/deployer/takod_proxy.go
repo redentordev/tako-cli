@@ -2,16 +2,19 @@ package deployer
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"net"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
@@ -54,19 +57,20 @@ func (d *Deployer) ReconcileTakodProxyWithActiveRevisions(services map[string]co
 // PreflightTakodProxyCapabilities verifies every proxy target understands all
 // route-manifest fields before an applying workflow mutates service state.
 func (d *Deployer) PreflightTakodProxyCapabilities(services map[string]config.ServiceConfig) error {
-	if !proxyServicesUseTrustedProxies(services) {
+	requirements := takodProxyCapabilityRequirements(services)
+	if len(requirements) == 0 {
 		return nil
 	}
 	proxyServers, err := d.getTakodProxyTargetServers()
 	if err != nil {
 		return fmt.Errorf("failed to get takod proxy targets: %w", err)
 	}
-	return preflightTakodProxyCapabilitiesWithCheck(services, proxyServers, func(serverName string) error {
+	return preflightTakodProxyRequirements(proxyServers, requirements, func(serverName string, requirement takodProxyCapabilityRequirement) error {
 		client, err := d.getEnvironmentClient(serverName)
 		if err != nil {
 			return err
 		}
-		return d.ensureTakodCapability(client, serverName, takod.CapabilityProxyTrustedProxiesV1, "proxy trusted proxies")
+		return d.ensureTakodCapability(client, serverName, requirement.Capability, requirement.Feature)
 	})
 }
 
@@ -102,6 +106,9 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 					if err := d.removeTakodProxyConfig(client); err != nil {
 						return fmt.Errorf("failed to remove proxy config: %w", err)
 					}
+					if err := d.removeTakodProxyACME(client); err != nil {
+						return fmt.Errorf("failed to remove proxy ACME ownership: %w", err)
+					}
 					return nil
 				}
 
@@ -113,11 +120,25 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 					if err := d.removeTakodProxyConfig(client); err != nil {
 						return fmt.Errorf("failed to remove proxy config: %w", err)
 					}
+					if err := d.removeTakodProxyACME(client); err != nil {
+						return fmt.Errorf("failed to remove proxy ACME ownership: %w", err)
+					}
 					return nil
 				}
 
+				acmeRequest, err := d.syncTakodProxyACMEForServices(client, serverName, services)
+				if err != nil {
+					return fmt.Errorf("failed to issue proxy DNS certificate: %w", err)
+				}
 				if err := d.writeTakodProxyConfig(client, dynamicConfig); err != nil {
 					return fmt.Errorf("failed to write proxy config: %w", err)
+				}
+				if acmeRequest == nil {
+					if err := d.removeTakodProxyACME(client); err != nil {
+						return fmt.Errorf("failed to remove proxy ACME ownership: %w", err)
+					}
+				} else if err := d.finalizeTakodProxyACME(client, *acmeRequest); err != nil {
+					return fmt.Errorf("failed to finalize proxy ACME ownership: %w", err)
 				}
 				if err := d.ensureTakodProxy(client, takodNetworkName(d.config.Project.Name, d.environment), firstProxyEmail(services)); err != nil {
 					return fmt.Errorf("failed to reconcile proxy: %w", err)
@@ -126,6 +147,20 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 			})
 		},
 	)
+}
+
+func (d *Deployer) syncTakodProxyACMEForServices(client takodclient.RequestExecutor, serverName string, services map[string]config.ServiceConfig) (*takod.ACMEDNSReconcileRequest, error) {
+	request, err := d.takodProxyACMEDNSRequest(services)
+	if err != nil {
+		return nil, err
+	}
+	if request == nil {
+		return nil, nil
+	}
+	if err := d.syncTakodProxyACME(client, serverName, *request); err != nil {
+		return nil, err
+	}
+	return request, nil
 }
 
 func runTakodProxyReconcile(preflight func() error, mutate func() error) error {
@@ -322,6 +357,182 @@ func proxyServicesUseTrustedProxies(services map[string]config.ServiceConfig) bo
 	return false
 }
 
+func proxyServicesUseACMEDNS(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.Proxy == nil || !service.IsPublic() {
+			continue
+		}
+		if service.Proxy.TLS.Challenge == config.ProxyTLSChallengeDNS {
+			return true
+		}
+		for _, domain := range append(service.Proxy.GetAllDomains(), service.Proxy.GetRedirectDomains()...) {
+			if strings.HasPrefix(domain, "*.") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type takodProxyCapabilityRequirement struct {
+	Capability string
+	Feature    string
+}
+
+func takodProxyCapabilityRequirements(services map[string]config.ServiceConfig) []takodProxyCapabilityRequirement {
+	var requirements []takodProxyCapabilityRequirement
+	if proxyServicesUseTrustedProxies(services) {
+		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyTrustedProxiesV1, Feature: "proxy trusted proxies"})
+	}
+	if proxyServicesUseACMEDNS(services) {
+		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityAcmeDNSV1, Feature: "embedded ACME DNS-01 issuance"})
+	}
+	return requirements
+}
+
+func preflightTakodProxyRequirements(proxyServers []string, requirements []takodProxyCapabilityRequirement, check func(string, takodProxyCapabilityRequirement) error) error {
+	return runTakodNodeActions(proxyServers, func(serverName string) error {
+		for _, requirement := range requirements {
+			if err := check(serverName, requirement); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (d *Deployer) takodProxyACMEDNSRequest(services map[string]config.ServiceConfig) (*takod.ACMEDNSReconcileRequest, error) {
+	if !proxyServicesUseACMEDNS(services) {
+		return nil, nil
+	}
+	environment, err := d.config.GetEnvironment(d.environment)
+	if err != nil {
+		return nil, err
+	}
+	if environment.Proxy == nil || environment.Proxy.ACME == nil {
+		return nil, fmt.Errorf("environment %s DNS-01 routes require proxy.acme configuration", d.environment)
+	}
+	request := &takod.ACMEDNSReconcileRequest{
+		Project: d.config.Project.Name, Environment: d.environment,
+		DNSProvider: environment.Proxy.ACME.DNSProvider,
+		Credentials: cloneTakodProxyStringMap(environment.Proxy.ACME.Credentials),
+	}
+	seen := make(map[string]bool)
+	serviceNames := make([]string, 0, len(services))
+	for name := range services {
+		serviceNames = append(serviceNames, name)
+	}
+	sort.Strings(serviceNames)
+	for _, serviceName := range serviceNames {
+		service := services[serviceName]
+		if service.Proxy == nil || !service.IsPublic() {
+			continue
+		}
+		domains := append(append([]string(nil), service.Proxy.GetAllDomains()...), service.Proxy.GetRedirectDomains()...)
+		dnsRoute := service.Proxy.TLS.Challenge == config.ProxyTLSChallengeDNS
+		for _, domain := range domains {
+			if !dnsRoute && !strings.HasPrefix(domain, "*.") {
+				continue
+			}
+			domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+			if seen[domain] {
+				continue
+			}
+			seen[domain] = true
+			request.Certificates = append(request.Certificates, takod.ACMEDNSCertificateRequest{
+				Domain: domain, Email: service.Proxy.Email,
+				CAProvider: service.Proxy.TLS.Provider, Staging: service.Proxy.TLS.Staging,
+			})
+		}
+	}
+	sort.Slice(request.Certificates, func(i, j int) bool { return request.Certificates[i].Domain < request.Certificates[j].Domain })
+	return request, nil
+}
+
+func (d *Deployer) syncTakodProxyACME(client takodclient.RequestExecutor, serverName string, request takod.ACMEDNSReconcileRequest) error {
+	for _, certificate := range request.Certificates {
+		d.emitEvent(events.Event{
+			Type: events.TypeCertIssueStarted, Phase: events.PhaseDomains, Level: events.LevelInfo, Node: serverName,
+			Message: fmt.Sprintf("  -> Issuing DNS certificate for %s on %s\n", certificate.Domain, serverName),
+			Data:    map[string]any{"domain": certificate.Domain, "dnsProvider": request.DNSProvider},
+		})
+	}
+	output, err := takodclient.RequestJSONWithTimeoutContext(d.baseContext(), client, d.takodSocket(), "PUT", takodclient.ACMEDNSEndpoint("", ""), request, takodclient.ACMEDNSRequestTimeout)
+	if err != nil {
+		typed := takodclient.ParseACMEDNSError(serverName, err)
+		var operationErr *takodclient.ACMEOperationError
+		if errors.As(typed, &operationErr) {
+			for _, completed := range operationErr.Completed {
+				d.emitACMEDNSCompletedEvent(serverName, request.DNSProvider, completed.Domain, completed.Action, completed.Certificate.NotAfter)
+			}
+		}
+		for _, certificate := range request.Certificates {
+			if operationErr != nil && operationErr.Domain != "" && certificate.Domain != operationErr.Domain {
+				continue
+			}
+			data := map[string]any{"domain": certificate.Domain, "dnsProvider": request.DNSProvider, "error": typed.Error()}
+			if operationErr != nil {
+				data["errorClass"] = operationErr.Code
+				if !operationErr.RetryAfter.IsZero() {
+					data["retryAfter"] = operationErr.RetryAfter.UTC().Format(time.RFC3339)
+				}
+			}
+			d.emitEvent(events.Event{
+				Type: events.TypeCertIssueFailed, Phase: events.PhaseDomains, Level: events.LevelError, Node: serverName,
+				Message: fmt.Sprintf("  ✗ DNS certificate issuance failed for %s on %s: %v\n", certificate.Domain, serverName, typed),
+				Data:    data,
+			})
+		}
+		return typed
+	}
+	var response takod.ACMEDNSReconcileResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return fmt.Errorf("invalid ACME DNS response: %w", err)
+	}
+	for _, certificate := range response.Certificates {
+		d.emitACMEDNSCompletedEvent(serverName, request.DNSProvider, certificate.Domain, certificate.Action, certificate.Certificate.NotAfter)
+	}
+	return nil
+}
+
+func (d *Deployer) emitACMEDNSCompletedEvent(serverName, dnsProvider, domain, action string, notAfter time.Time) {
+	eventType := events.TypeCertIssueCompleted
+	message := fmt.Sprintf("  ✓ DNS certificate issued for %s on %s\n", domain, serverName)
+	if action == "reused" {
+		eventType = events.TypeCertIssueSkipped
+		message = fmt.Sprintf("  ✓ DNS certificate for %s already valid on %s\n", domain, serverName)
+	}
+	data := map[string]any{"domain": domain, "dnsProvider": dnsProvider, "action": action}
+	if !notAfter.IsZero() {
+		data["notAfter"] = notAfter
+	}
+	d.emitEvent(events.Event{Type: eventType, Phase: events.PhaseDomains, Level: events.LevelInfo, Node: serverName, Message: message, Data: data})
+}
+
+func (d *Deployer) removeTakodProxyACME(client takodclient.RequestExecutor) error {
+	_, err := takodclient.RequestJSONWithContext(d.baseContext(), client, d.takodSocket(), "DELETE", takodclient.ACMEDNSEndpoint(d.config.Project.Name, d.environment), nil)
+	if err != nil {
+		var httpErr *takodclient.HTTPError
+		if errors.As(err, &httpErr) && httpErr.Status == 404 {
+			return nil
+		}
+	}
+	return err
+}
+
+func (d *Deployer) finalizeTakodProxyACME(client takodclient.RequestExecutor, request takod.ACMEDNSReconcileRequest) error {
+	_, err := takodclient.RequestJSONWithContext(d.baseContext(), client, d.takodSocket(), "POST", takodclient.ACMEDNSEndpoint(request.Project, request.Environment), nil)
+	return err
+}
+
+func cloneTakodProxyStringMap(values map[string]string) map[string]string {
+	clone := make(map[string]string, len(values))
+	for key, value := range values {
+		clone[key] = value
+	}
+	return clone
+}
+
 func preflightTakodProxyCapabilitiesWithCheck(services map[string]config.ServiceConfig, proxyServers []string, check func(string) error) error {
 	if !proxyServicesUseTrustedProxies(services) {
 		return nil
@@ -394,6 +605,9 @@ func redirectProxyDomains(proxy *config.ProxyConfig) ([]string, error) {
 		value, err := normalizeExplicitProxyDomain(domain)
 		if err != nil {
 			return nil, err
+		}
+		if strings.HasPrefix(value, "*.") {
+			return nil, fmt.Errorf("wildcard proxy domain %q is not supported in redirectFrom", value)
 		}
 		normalized = append(normalized, value)
 	}
@@ -674,9 +888,6 @@ func normalizeExplicitProxyDomain(domain string) (string, error) {
 	normalized, err := config.NormalizeProxyDomain(domain)
 	if err != nil {
 		return "", err
-	}
-	if strings.HasPrefix(normalized, "*.") {
-		return "", fmt.Errorf("wildcard proxy domain %q is not supported by the built-in tako-proxy yet", normalized)
 	}
 	return normalized, nil
 }

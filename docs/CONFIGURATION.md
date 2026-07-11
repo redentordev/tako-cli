@@ -342,6 +342,76 @@ matching the single-operator trust model of the shared Caddy ingress. Files are
 0600 and node-local: they are not replicated, drift-checked, or backed up, and
 node replacement requires a re-push. Keep your own secure certificate copies.
 
+### Embedded DNS-01 certificates
+
+Use environment-scoped DNS-01 when HTTP-01 cannot reach the origin (for
+example, an orange-clouded CDN route) or when one wildcard certificate should
+cover many app hostnames. Grey-cloud routes do not need this configuration and
+continue to use Caddy's automatic HTTP-01 flow unchanged.
+
+```yaml
+environments:
+  production:
+    proxy:
+      placement:
+        servers: [edge-1]
+      acme:
+        dnsProvider: cloudflare
+        credentials:
+          apiToken: ${CLOUDFLARE_DNS_API_TOKEN}
+    services:
+      web:
+        port: 3000
+        proxy:
+          domain: "*.platform.example.com"
+          email: ops@example.com
+          tls:
+            challenge: dns
+            provider: letsencrypt
+```
+
+Supported providers are `cloudflare`, `hetzner`, and `digitalocean`. Each
+requires `credentials.apiToken`; Cloudflare also accepts an optional
+`credentials.zoneToken` when zone lookup uses a separate token. Credential
+values must be whole `${ENV_VAR}` references. Literal tokens are rejected
+before environment expansion. Scope tokens to DNS-edit access for only the
+delegated zone: each edge node stores the expanded value in a 0600 file under
+the node-local certificate store so scheduled renewal can run, but the value is
+never placed in the proxy container, route manifests, replicated state, result
+documents, or events.
+
+Wildcards imply DNS-01. An exact hostname opts in with
+`tls.challenge: dns`; both require the environment `proxy.acme` block.
+`dynamicDomains` remains Caddy-managed HTTP-01. It may coexist with a DNS-01
+wildcard or explicit hostname on the same service: the explicit host block uses
+the stored certificate and takes precedence over the on-demand `:443`
+catch-all. DNS-01 never applies to customer hostnames admitted by the dynamic
+authority. `tls.provider` supports `letsencrypt` and `zerossl`; ZeroSSL requires
+`proxy.email`, and `tls.staging` uses the Let's Encrypt staging CA.
+
+The declaring project/environment owns issuance and renewal. A different
+project on the same node may consume a covering wildcard, but never issues it.
+First issuance is synchronous and must finish before the route manifest is
+published. Provider credentials and ownership changes are staged during
+issuance and promoted only after that manifest succeeds, so a failed domain
+replacement leaves the prior live route eligible for renewal. A valid stored
+certificate with matching CA/staging settings makes later deploys skip
+issuance. After a crash in the narrow post-route window, the scheduler promotes
+a matching staged document; an unmatched abandoned stage expires after one
+hour and its certificate becomes orphaned. Provider/CA failures enter a
+cooldown reported by typed errors and
+`tako certs ls`; rate-limit failures use the CA hint when available and a
+conservative backoff otherwise. The daily scheduler asks CertMagic to refresh
+ARI before applying the normal 30-day renewal window. Removing the owner route
+marks the certificate orphaned and stops renewal; it is never deleted
+automatically. Use `tako certs rm` after confirming it is no longer needed;
+explicit removal also deletes CertMagic's managed certificate and private key.
+
+`tako doctor` reports orphaned managed certificates and failed issuance or
+renewal attempts inside the renewal window. If DNS propagation checks fail on
+a split-DNS host, fix the node resolver or authoritative delegation; Tako does
+not bypass propagation validation.
+
 ## Dynamic Customer Domains
 
 For CMS-style apps that authorize generated or customer domains at runtime,

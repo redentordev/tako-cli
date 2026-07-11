@@ -46,9 +46,13 @@ commands in `cmd/` are thin adapters over this package.
   `proxy.domains` extras) and emits progress events; `tako domains status`
   wraps it into a `DomainsResult`.
 - Certificate command adapters use the additive `CertsResult` contract. Node
-  entries expose certificate domain, source, and validity timestamps only;
-  private PEM material is write-only to takod and is never represented in the
-  engine result or event schemas.
+  entries expose certificate domain, source, validity timestamps, and, for
+  managed DNS-01 certificates, ownership/DNS-provider/CA-provider/orphan/attempt/cooldown
+  metadata. Private PEM material and DNS credentials are write-only to takod
+  and are never represented in engine results, replicated state, route
+  manifests, or event schemas. Deploy emits typed
+  `cert.issue.started|completed|failed|skipped` events; takod appends
+  `cert.renew.completed|failed` to the node state-event log.
 - Config materialization is available as `ExportConfig(ctx,
   ConfigExportRequest)`, which reads desired/actual/history state through the
   private takod state client and returns a `ConfigExportResult` containing the

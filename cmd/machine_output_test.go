@@ -884,13 +884,15 @@ func TestDomainsResultDocumentsGolden(t *testing.T) {
 func TestCertsResultDocumentGoldenExcludesPrivateMaterial(t *testing.T) {
 	started := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	expires := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	attempted := time.Date(2026, 7, 11, 11, 55, 0, 0, time.UTC)
+	retry := time.Date(2026, 7, 11, 12, 10, 0, 0, time.UTC)
 	result := engine.CertsResult{
 		APIVersion: takoapi.APIVersionCurrent,
 		Kind:       engine.KindCertsResult,
 		Project:    "demo", Environment: "production", Action: "list",
 		Nodes: []engine.CertsNodeResult{{
 			Server: "node-a", Host: "203.0.113.10",
-			Certificates: []takod.ProxyCertificateMetadata{{Domain: "*.example.com", Source: takod.CertificateSourcePushed, NotAfter: expires}},
+			Certificates: []takod.ProxyCertificateMetadata{{Domain: "*.example.com", Source: takod.CertificateSourceACMEDNS, NotAfter: expires, OwnerProject: "platform", OwnerEnvironment: "production", DNSProvider: "cloudflare", CAProvider: "letsencrypt", Orphaned: true, LastAttemptAt: &attempted, LastError: "DNS provider rejected request", RetryAfter: &retry}},
 		}},
 		StartedAt: started, Duration: 0.25,
 	}
@@ -911,11 +913,19 @@ func TestCertsResultDocumentGoldenExcludesPrivateMaterial(t *testing.T) {
       "certificates": [
         {
           "domain": "*.example.com",
-          "source": "pushed",
+          "source": "acme-dns",
           "notBefore": "0001-01-01T00:00:00Z",
           "notAfter": "2026-10-09T12:00:00Z",
           "issuedAt": "0001-01-01T00:00:00Z",
-          "updatedAt": "0001-01-01T00:00:00Z"
+          "updatedAt": "0001-01-01T00:00:00Z",
+          "ownerProject": "platform",
+          "ownerEnvironment": "production",
+          "dnsProvider": "cloudflare",
+          "caProvider": "letsencrypt",
+          "orphaned": true,
+          "lastAttemptAt": "2026-07-11T11:55:00Z",
+          "lastError": "DNS provider rejected request",
+          "retryAfter": "2026-07-11T12:10:00Z"
         }
       ]
     }

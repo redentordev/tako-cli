@@ -262,6 +262,12 @@ environments:
     #   placement:
     #     constraints:
     #       - node.labels.role==edge
+    #   # Optional DNS-01 for CDN-fronted origins and wildcard certificates.
+    #   # Use a per-zone, DNS-edit-only token; literal credentials are rejected.
+    #   acme:
+    #     dnsProvider: cloudflare  # cloudflare, hetzner, or digitalocean
+    #     credentials:
+    #       apiToken: ${CLOUDFLARE_DNS_API_TOKEN}
     services:
       # ======================================================================
       # WEB SERVICE - Basic web application
@@ -276,7 +282,7 @@ environments:
         # Public proxy routing
         proxy:
           # Primary explicit hostname where traffic is served.
-          # Wildcard hostnames such as *.example.com are not supported yet.
+          # Wildcards such as *.example.com require environment.proxy.acme.
           domain: %s.${TAKO_PRODUCTION_HOST}.sslip.io  # sslip.io provides automatic DNS
           
           # Domain redirects (301 redirect to primary domain with path preservation)
@@ -288,6 +294,13 @@ environments:
           # Caddy asks this internal service/path before issuing a certificate.
           # dynamicDomains:
           #   ask: admin:/api/domains/authorize
+          # Dynamic customer domains remain Caddy HTTP-01 even when the same
+          # service also has a DNS-01 wildcard or explicit hostname.
+
+          # tls:
+          #   challenge: dns  # Explicit DNS-01 for a non-wildcard hostname
+          #   provider: letsencrypt  # or zerossl
+          #   staging: false
 
           # Internal private-network route instead of public DNS/ACME.
           # This is HTTP-only and skipped by public DNS/TLS checks.

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
@@ -566,13 +568,13 @@ func TestMeshUpstreamPortIsScopedByProjectEnvironmentAndService(t *testing.T) {
 	}
 }
 
-func TestProxyHostRuleRejectsWildcardDomain(t *testing.T) {
-	_, err := explicitProxyDomains(&config.ProxyConfig{Domain: " *.example.com "})
-	if err == nil {
-		t.Fatal("explicitProxyDomains should reject wildcard domains")
+func TestProxyHostRuleAcceptsWildcardDomain(t *testing.T) {
+	domains, err := explicitProxyDomains(&config.ProxyConfig{Domain: " *.example.com "})
+	if err != nil {
+		t.Fatalf("explicitProxyDomains rejected wildcard: %v", err)
 	}
-	if !strings.Contains(err.Error(), "wildcard proxy domain") {
-		t.Fatalf("error = %q, want wildcard proxy domain", err)
+	if len(domains) != 1 || domains[0] != "*.example.com" {
+		t.Fatalf("domains = %#v", domains)
 	}
 }
 
@@ -636,6 +638,173 @@ func TestProxyServicesUseTrustedProxiesOnlyForProxiedServices(t *testing.T) {
 		"worker": {},
 	}) {
 		t.Fatal("services without trusted proxies must not require the daemon capability")
+	}
+}
+
+func TestTakodProxyACMEDNSRequestIssuesOnlyOwningRoutes(t *testing.T) {
+	deploy := testProxyDeployer()
+	env := deploy.config.Environments["production"]
+	env.Proxy = &config.EnvironmentProxyConfig{ACME: &config.EnvironmentACMEConfig{
+		DNSProvider: config.ACMEDNSProviderCloudflare,
+		Credentials: map[string]string{"apiToken": "zone-secret"},
+	}}
+	env.Services = map[string]config.ServiceConfig{
+		"owner": {
+			Port: 3000, Replicas: 1,
+			Proxy: &config.ProxyConfig{Domain: "*.example.com", Email: "ops@example.com", TLS: config.TLSConfig{Challenge: config.ProxyTLSChallengeDNS}},
+		},
+		"consumer": {
+			Port: 3001, Replicas: 1,
+			Proxy: &config.ProxyConfig{Domain: "app.example.com"},
+		},
+	}
+	deploy.config.Environments["production"] = env
+	request, err := deploy.takodProxyACMEDNSRequest(env.Services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request == nil || request.DNSProvider != "cloudflare" || request.Credentials["apiToken"] != "zone-secret" || len(request.Certificates) != 1 || request.Certificates[0].Domain != "*.example.com" {
+		t.Fatalf("request = %#v", request)
+	}
+	data, _, err := deploy.renderTakodProxyDynamicConfigForNode(env.Services, "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "zone-secret") || strings.Contains(string(data), "credentials") || strings.Contains(string(data), "apiToken") {
+		t.Fatalf("route manifest leaked ACME credentials: %s", data)
+	}
+}
+
+func TestCrossProjectWildcardConsumerEmitsNoIssuanceEvents(t *testing.T) {
+	deploy := testProxyDeployer()
+	deploy.config.Project.Name = "consumer"
+	env := deploy.config.Environments["production"]
+	env.Proxy = nil // the wildcard provider and ownership belong to another project
+	env.Services = map[string]config.ServiceConfig{
+		"web": {Port: 3000, Replicas: 1, Proxy: &config.ProxyConfig{Domain: "app.example.com"}},
+	}
+	deploy.config.Environments["production"] = env
+	sink := &events.BufferSink{}
+	deploy.SetEventSink(sink)
+
+	request, err := deploy.syncTakodProxyACMEForServices(fakeTakodStatusExecutor{}, "node-a", env.Services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request != nil {
+		t.Fatal("covered consumer claimed ACME DNS ownership")
+	}
+	for _, event := range sink.Events() {
+		if strings.HasPrefix(event.Type, "cert.issue.") {
+			t.Fatalf("covered consumer emitted issuance event: %+v", event)
+		}
+	}
+}
+
+func TestACMEDNSIssuanceFailureEmitsTypedEventAndFailsDeployPath(t *testing.T) {
+	deploy := testProxyDeployer()
+	sink := &events.BufferSink{}
+	deploy.SetEventSink(sink)
+	request := takod.ACMEDNSReconcileRequest{
+		Project: "platform", Environment: "production", DNSProvider: "cloudflare",
+		Credentials:  map[string]string{"apiToken": "redacted-by-engine"},
+		Certificates: []takod.ACMEDNSCertificateRequest{{Domain: "api.example.com"}, {Domain: "www.example.com"}},
+	}
+	retryAfter := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	client := fakeTakodStatusExecutor{err: &takodclient.HTTPError{
+		Method: "PUT", Endpoint: "/v1/acme-dns", Status: 502,
+		Body: fmt.Sprintf(`{"code":"rate_limited","domain":"www.example.com","retryAfter":%q,"error":"DNS provider rejected request","completed":[{"domain":"api.example.com","action":"issued","certificate":{"notAfter":%q}}]}`, retryAfter.Format(time.RFC3339), retryAfter.Add(90*24*time.Hour).Format(time.RFC3339)),
+	}}
+	err := deploy.syncTakodProxyACME(client, "node-a", request)
+	var operationErr *takodclient.ACMEOperationError
+	if err == nil || !errors.As(err, &operationErr) || operationErr.Code != "rate_limited" || operationErr.Domain != "www.example.com" || len(operationErr.Completed) != 1 {
+		t.Fatalf("issuance error = %#v", err)
+	}
+	var started, failed, completed bool
+	for _, event := range sink.Events() {
+		started = started || event.Type == events.TypeCertIssueStarted
+		if event.Type == events.TypeCertIssueCompleted && event.Data["domain"] == "api.example.com" {
+			if _, ok := event.Data["notAfter"]; !ok {
+				t.Fatalf("partial success event omitted notAfter: %+v", event)
+			}
+			completed = true
+		}
+		if event.Type == events.TypeCertIssueFailed {
+			if event.Data["domain"] != "www.example.com" || event.Data["errorClass"] != "rate_limited" || event.Data["retryAfter"] != retryAfter.Format(time.RFC3339) {
+				t.Fatalf("untruthful failure event: %+v", event)
+			}
+			failed = true
+		}
+	}
+	if !started || !failed || !completed {
+		t.Fatalf("issuance events = %+v", sink.Events())
+	}
+}
+
+func TestTakodProxyACMEDNSRequestIncludesAllExplicitDNSRouteHostnames(t *testing.T) {
+	deploy := testProxyDeployer()
+	env := deploy.config.Environments["production"]
+	env.Proxy = &config.EnvironmentProxyConfig{ACME: &config.EnvironmentACMEConfig{
+		DNSProvider: config.ACMEDNSProviderDigitalOcean,
+		Credentials: map[string]string{"apiToken": "token"},
+	}}
+	service := env.Services["web"]
+	service.Proxy = &config.ProxyConfig{
+		Domain: "app.example.com", Domains: []string{"api.example.com"}, RedirectFrom: []string{"www.example.com"},
+		TLS: config.TLSConfig{Challenge: config.ProxyTLSChallengeDNS, Provider: "letsencrypt", Staging: true},
+	}
+	env.Services = map[string]config.ServiceConfig{"web": service}
+	deploy.config.Environments["production"] = env
+	request, err := deploy.takodProxyACMEDNSRequest(env.Services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var domains []string
+	for _, certificate := range request.Certificates {
+		domains = append(domains, certificate.Domain)
+		if certificate.CAProvider != "letsencrypt" || !certificate.Staging {
+			t.Fatalf("certificate = %+v", certificate)
+		}
+	}
+	assertStringsEqual(t, domains, []string{"api.example.com", "app.example.com", "www.example.com"})
+}
+
+func TestProxyServicesUseACMEDNSRequiresCapabilityOnlyForOwners(t *testing.T) {
+	if !proxyServicesUseACMEDNS(map[string]config.ServiceConfig{
+		"owner": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "*.example.com"}},
+	}) {
+		t.Fatal("wildcard owner must require ACME DNS capability")
+	}
+	if proxyServicesUseACMEDNS(map[string]config.ServiceConfig{
+		"consumer": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "app.example.com"}},
+	}) {
+		t.Fatal("covered consumer without DNS ownership must not request issuance capability")
+	}
+}
+
+func TestACMEDNSCapabilityPreflightFailsBeforeMutation(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"owner": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "*.example.com", TLS: config.TLSConfig{Challenge: config.ProxyTLSChallengeDNS}}},
+	}
+	requirements := takodProxyCapabilityRequirements(services)
+	if len(requirements) != 1 || requirements[0].Capability != takod.CapabilityAcmeDNSV1 {
+		t.Fatalf("requirements = %+v", requirements)
+	}
+	mutations := 0
+	err := runTakodProxyReconcile(func() error {
+		return preflightTakodProxyRequirements([]string{"node-a"}, requirements, func(server string, requirement takodProxyCapabilityRequirement) error {
+			return &takodclient.CapabilityRequiredError{Server: server, Capability: requirement.Capability, Feature: requirement.Feature}
+		})
+	}, func() error {
+		mutations++
+		return nil
+	})
+	var capabilityErr *takodclient.CapabilityRequiredError
+	if !errors.As(err, &capabilityErr) || capabilityErr.Capability != takod.CapabilityAcmeDNSV1 || !strings.Contains(err.Error(), "tako upgrade servers") {
+		t.Fatalf("preflight error = %v", err)
+	}
+	if mutations != 0 {
+		t.Fatalf("mutations = %d, want zero", mutations)
 	}
 }
 

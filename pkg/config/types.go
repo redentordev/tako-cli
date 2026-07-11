@@ -47,8 +47,13 @@ const (
 	ProxyVisibilityPublic   = "public"
 	ProxyVisibilityInternal = "internal"
 
-	ProxyTLSModeAuto = "auto"
-	ProxyTLSModeOff  = "off"
+	ProxyTLSModeAuto            = "auto"
+	ProxyTLSModeOff             = "off"
+	ProxyTLSChallengeAuto       = "auto"
+	ProxyTLSChallengeDNS        = "dns"
+	ACMEDNSProviderCloudflare   = "cloudflare"
+	ACMEDNSProviderHetzner      = "hetzner"
+	ACMEDNSProviderDigitalOcean = "digitalocean"
 
 	StateBackendReplicated = "replicated"
 
@@ -562,9 +567,10 @@ func NormalizeProxyDomain(domain string) (string, error) {
 
 // TLSConfig defines TLS settings
 type TLSConfig struct {
-	Mode     string `yaml:"mode,omitempty" json:"mode,omitempty"`         // auto, off
-	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"` // letsencrypt, zerossl (default: letsencrypt)
-	Staging  bool   `yaml:"staging,omitempty" json:"staging,omitempty"`
+	Mode      string `yaml:"mode,omitempty" json:"mode,omitempty"`         // auto, off
+	Provider  string `yaml:"provider,omitempty" json:"provider,omitempty"` // letsencrypt, zerossl (default: letsencrypt)
+	Staging   bool   `yaml:"staging,omitempty" json:"staging,omitempty"`
+	Challenge string `yaml:"challenge,omitempty" json:"challenge,omitempty"` // auto, dns
 }
 
 // BackupConfig defines per-service backup settings.
@@ -616,6 +622,16 @@ type EnvironmentConfig struct {
 // reconciled. Services still use their own placement for containers.
 type EnvironmentProxyConfig struct {
 	Placement *PlacementConfig `yaml:"placement,omitempty" json:"placement,omitempty"`
+	// ACME is the environment-scoped DNS-01 provider used by routes that
+	// explicitly opt in. Raw credential values must be whole ${ENV_VAR}
+	// references and never enter route manifests or replicated state.
+	ACME *EnvironmentACMEConfig `yaml:"acme,omitempty" json:"acme,omitempty"`
+}
+
+// EnvironmentACMEConfig configures takod-managed DNS-01 issuance.
+type EnvironmentACMEConfig struct {
+	DNSProvider string            `yaml:"dnsProvider" json:"dnsProvider"`
+	Credentials map[string]string `yaml:"credentials" json:"credentials"`
 }
 
 // ServerSelector defines label-based server selection
@@ -1065,6 +1081,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	// Registry passwords must be env refs, not literals; the check runs on
 	// the raw content because expansion below erases the distinction.
 	if err := validateRawRegistryCredentials(data, isJSON); err != nil {
+		return nil, err
+	}
+	if err := validateRawACMEDNSCredentials(data, isJSON); err != nil {
 		return nil, err
 	}
 

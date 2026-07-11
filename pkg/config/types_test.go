@@ -1154,10 +1154,8 @@ func TestValidateConfigRejectsWildcardProxyDomains(t *testing.T) {
 			if err == nil {
 				t.Fatal("ValidateConfig should reject wildcard proxy domains")
 			}
-			for _, want := range []string{tt.want, "DNS-01 certificate handling"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Fatalf("error = %q, want %q", err, want)
-				}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want %q", err, tt.want)
 			}
 		})
 	}

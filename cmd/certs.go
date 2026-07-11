@@ -333,7 +333,30 @@ func printCertsResult(cmd *cobra.Command, result engine.CertsResult) {
 			continue
 		}
 		for _, certificate := range node.Certificates {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: %s source=%s expires=%s\n", node.Server, certificate.Domain, certificate.Source, certificate.NotAfter.UTC().Format(time.RFC3339))
+			expires := "pending"
+			if !certificate.NotAfter.IsZero() {
+				expires = certificate.NotAfter.UTC().Format(time.RFC3339)
+			}
+			state := ""
+			if certificate.OwnerProject != "" {
+				state += " owner=" + certificate.OwnerProject + "/" + certificate.OwnerEnvironment
+			}
+			if certificate.DNSProvider != "" {
+				state += " dnsProvider=" + certificate.DNSProvider
+			}
+			if certificate.CAProvider != "" {
+				state += " caProvider=" + certificate.CAProvider
+			}
+			if certificate.Staging {
+				state += " staging=true"
+			}
+			if certificate.Orphaned {
+				state = " orphaned=true"
+			}
+			if certificate.LastError != "" {
+				state += " lastError=" + certificate.LastError
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s: %s source=%s expires=%s%s\n", node.Server, certificate.Domain, certificate.Source, expires, state)
 		}
 	}
 }

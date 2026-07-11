@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -136,6 +137,11 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 			continue
 		}
 		response.ProxyFilesRemoved++
+	}
+	if req.Environment != "" && slices.Contains(req.ProxyFiles, runtimeid.ProxyConfigFileName(req.Project, req.Environment)) {
+		if _, err := RemoveACMEDNSConfiguration(ctx, req.Project, req.Environment); err != nil {
+			warn("failed to remove proxy ACME ownership: %v", err)
+		}
 	}
 	if req.RemoveDeployFiles {
 		removeFixedPath(filepath.Join("/opt", req.Project), "deployment files", warn)

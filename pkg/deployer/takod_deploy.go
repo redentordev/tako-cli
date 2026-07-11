@@ -1035,17 +1035,37 @@ func runTakodNodeActions(targetServers []string, action func(serverName string) 
 	wg.Wait()
 	close(resultCh)
 
-	var errors []string
+	var failures []takodNodeActionResult
 	for result := range resultCh {
 		if result.err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %v", result.serverName, result.err))
+			failures = append(failures, result)
 		}
 	}
-	if len(errors) > 0 {
-		sort.Strings(errors)
-		return fmt.Errorf("%s", strings.Join(errors, "; "))
+	if len(failures) > 0 {
+		sort.Slice(failures, func(i, j int) bool { return failures[i].serverName < failures[j].serverName })
+		return &takodNodeActionsError{failures: failures}
 	}
 	return nil
+}
+
+type takodNodeActionsError struct {
+	failures []takodNodeActionResult
+}
+
+func (e *takodNodeActionsError) Error() string {
+	parts := make([]string, 0, len(e.failures))
+	for _, failure := range e.failures {
+		parts = append(parts, fmt.Sprintf("%s: %v", failure.serverName, failure.err))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func (e *takodNodeActionsError) Unwrap() []error {
+	errs := make([]error, 0, len(e.failures))
+	for _, failure := range e.failures {
+		errs = append(errs, failure.err)
+	}
+	return errs
 }
 
 func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, server config.ServerConfig, index int, peers []takodMeshPeer, publicKey string) error {

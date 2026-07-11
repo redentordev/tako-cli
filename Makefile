@@ -1,4 +1,4 @@
-.PHONY: build install test clean run help dev lint fmt build-all man mesh-e2e mesh-e2e-smoke examples validate-examples ci-quality ci-race ci-check
+.PHONY: build install test clean run help dev lint fmt build-all man mesh-e2e mesh-e2e-smoke pebble-test examples validate-examples ci-quality ci-race ci-check
 
 # Binary name
 BINARY_NAME=tako
@@ -111,6 +111,33 @@ mesh-e2e:
 ## mesh-e2e-smoke: Run non-remote mesh E2E harness smoke checks
 mesh-e2e-smoke:
 	@scripts/mesh-e2e-smoke.sh
+
+## pebble-test: Run the embedded DNS-01 issue/store/render/renew integration test
+pebble-test:
+	@set -eu; \
+		root_path="$$(pwd)/test/pebble/.pebble-root.pem"; \
+		docker compose -p tako-pebble -f test/pebble/docker-compose.yml up -d; \
+		trap 'docker compose -p tako-pebble -f test/pebble/docker-compose.yml down -v; rm -f "$$root_path"' EXIT; \
+		ready=0; \
+		for attempt in $$(seq 1 60); do \
+			if curl -ksf https://localhost:14000/dir >/dev/null; then ready=1; break; fi; \
+			sleep 1; \
+		done; \
+		if [ "$$ready" -ne 1 ]; then echo "Pebble did not become ready"; exit 1; fi; \
+		docker cp tako-test-pebble:/test/certs/pebble.minica.pem "$$root_path"; \
+		docker run --rm \
+			--network tako-pebble_pebble \
+			-v "$$(pwd):/workspace" \
+			-v "$$root_path:/tmp/tako-pebble-root.pem:ro" \
+			-v tako-pebble-gomod:/go/pkg/mod \
+			-v tako-pebble-gocache:/root/.cache/go-build \
+			-w /workspace \
+			-e TAKO_PEBBLE_DIRECTORY=https://pebble:14000/dir \
+			-e TAKO_PEBBLE_CHALLTESTSRV=http://challtestsrv:8055 \
+			-e TAKO_PEBBLE_RESOLVER=10.30.50.3:8053 \
+			-e TAKO_PEBBLE_ROOT=/tmp/tako-pebble-root.pem \
+			golang@sha256:f96cc555eb8db430159a3aa6797cd5bae561945b7b0fe7d0e284c63a3b291609 \
+			go test ./pkg/takod -run '^TestPebbleACMEDNSIssueStoreRenderRenew$$' -count=1
 
 ## examples: Validate all example configs and deployment pattern assertions
 examples:

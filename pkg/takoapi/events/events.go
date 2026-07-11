@@ -64,14 +64,20 @@ const (
 	TypeDeployFailed            = "deploy.failed"
 	TypeDeployCancelled         = "deploy.cancelled"
 
-	TypeProxyReconciled  = "proxy.reconciled"
-	TypeRevisionsPruned  = "revisions.pruned"
-	TypeStatePersisted   = "state.persisted"
-	TypeStateReplicated  = "state.replicated"
-	TypeCleanupCompleted = "cleanup.completed"
-	TypeNotificationSent = "notification.sent"
-	TypeDomainStatus     = "domain.status"
-	TypeCertificate      = "certificate.operation"
+	TypeProxyReconciled    = "proxy.reconciled"
+	TypeRevisionsPruned    = "revisions.pruned"
+	TypeStatePersisted     = "state.persisted"
+	TypeStateReplicated    = "state.replicated"
+	TypeCleanupCompleted   = "cleanup.completed"
+	TypeNotificationSent   = "notification.sent"
+	TypeDomainStatus       = "domain.status"
+	TypeCertificate        = "certificate.operation"
+	TypeCertIssueStarted   = "cert.issue.started"
+	TypeCertIssueCompleted = "cert.issue.completed"
+	TypeCertIssueFailed    = "cert.issue.failed"
+	TypeCertIssueSkipped   = "cert.issue.skipped"
+	TypeCertRenewCompleted = "cert.renew.completed"
+	TypeCertRenewFailed    = "cert.renew.failed"
 
 	// TypeStatsSample carries one node's point-in-time container stats in
 	// `tako stats --follow --events ndjson`; data holds server, host, and

@@ -16,6 +16,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
 
@@ -36,6 +37,37 @@ func TestCheckProxyClientIPTopologyWarnsForWrongOrProxiedDNS(t *testing.T) {
 	})
 	if len(results) != 2 || results[0].status != "WARN" || results[1].status != "WARN" {
 		t.Fatalf("results = %#v, want two warnings", results)
+	}
+}
+
+func TestCheckACMEDNSCertificatesFlagsFailuresAndOrphans(t *testing.T) {
+	now := time.Now().UTC()
+	retry := now.Add(time.Hour)
+	var results []checkResult
+	checkACMEDNSCertificatesWith(func(result checkResult) { results = append(results, result) }, true, "demo", "production", []string{"node-a"}, func(string) ([]takod.ProxyCertificateMetadata, error) {
+		return []takod.ProxyCertificateMetadata{
+			{Domain: "healthy.example.com", Source: takod.CertificateSourceACMEDNS, OwnerProject: "demo", OwnerEnvironment: "production", NotAfter: now.Add(90 * 24 * time.Hour)},
+			{Domain: "failed.example.com", Source: takod.CertificateSourceACMEDNS, OwnerProject: "demo", OwnerEnvironment: "production", NotAfter: now.Add(20 * 24 * time.Hour), LastError: "bad token", RetryAfter: &retry},
+			{Domain: "*.old.example.com", Source: takod.CertificateSourceACMEDNS, OwnerProject: "demo", OwnerEnvironment: "production", NotAfter: now.Add(60 * 24 * time.Hour), Orphaned: true},
+			{Domain: "unrelated.example.net", Source: takod.CertificateSourceACMEDNS, OwnerProject: "other", OwnerEnvironment: "production", LastError: "must not be reported"},
+		}, nil
+	})
+	if len(results) != 3 || results[0].status != "PASS" || results[1].status != "WARN" || results[2].status != "WARN" {
+		t.Fatalf("results = %#v", results)
+	}
+	if !strings.Contains(results[1].message, "retry after") || !strings.Contains(results[2].message, "will not renew") {
+		t.Fatalf("results = %#v", results)
+	}
+}
+
+func TestCheckACMEDNSCertificatesSkipsWhenEnvironmentOwnsNone(t *testing.T) {
+	var results []checkResult
+	checkACMEDNSCertificatesWith(func(result checkResult) { results = append(results, result) }, false, "demo", "production", []string{"node-a"}, func(string) ([]takod.ProxyCertificateMetadata, error) {
+		t.Fatal("probe should not run")
+		return nil, nil
+	})
+	if len(results) != 1 || results[0].status != "SKIP" {
+		t.Fatalf("results = %#v", results)
 	}
 }
 

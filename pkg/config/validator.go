@@ -273,6 +273,9 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 			return fmt.Errorf("environment %s proxy placement: %w", envName, err)
 		}
 	}
+	if err := validateEnvironmentACME(envName, env.Proxy); err != nil {
+		return err
+	}
 
 	// Validate services
 	if len(env.Services) == 0 {
@@ -280,7 +283,7 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 	}
 
 	for serviceName, service := range env.Services {
-		if err := validateService(envName, serviceName, &service, cfg); err != nil {
+		if err := validateService(envName, serviceName, &service, cfg, env.Proxy); err != nil {
 			return fmt.Errorf("environment %s: %w", envName, err)
 		}
 		// Update the service in the map with defaults applied
@@ -601,7 +604,7 @@ func validateHostOrIP(value string) error {
 	return nil
 }
 
-func validateService(envName string, name string, service *ServiceConfig, cfg *Config) error {
+func validateService(envName string, name string, service *ServiceConfig, cfg *Config, environmentProxy *EnvironmentProxyConfig) error {
 	// Validate service name format
 	if !isValidRuntimeIdentifier(name) {
 		return fmt.Errorf("service name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, hyphens, and underscores, and be 1-63 characters long", name)
@@ -752,7 +755,7 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 
 	// Validate proxy if configured (per-service)
 	if service.Proxy != nil {
-		if err := validateProxy(cfg.Project.Name, envName, name, service.Proxy); err != nil {
+		if err := validateProxy(cfg.Project.Name, envName, name, service.Proxy, environmentProxy); err != nil {
 			return err
 		}
 	}
@@ -1790,7 +1793,7 @@ func validateDockerfilePath(path string) error {
 	return nil
 }
 
-func validateProxy(projectName string, envName string, serviceName string, proxy *ProxyConfig) error {
+func validateProxy(projectName string, envName string, serviceName string, proxy *ProxyConfig, environmentProxy *EnvironmentProxyConfig) error {
 	if err := validateProxyAccessControls(serviceName, proxy); err != nil {
 		return err
 	}
@@ -1825,7 +1828,10 @@ func validateProxy(projectName string, envName string, serviceName string, proxy
 			return fmt.Errorf("service %s: invalid primary domain: %s", serviceName, strings.TrimSpace(proxy.Domain))
 		}
 		if isWildcardProxyDomain(trimmed) {
-			return fmt.Errorf("service %s: wildcard proxy domain %q is not supported by the built-in tako-proxy yet; use explicit hostnames until DNS-01 certificate handling is implemented", serviceName, trimmed)
+			if !environmentHasACMEDNS(environmentProxy) {
+				return fmt.Errorf("service %s: wildcard proxy domain %q requires environment proxy.acme DNS provider configuration", serviceName, trimmed)
+			}
+			proxy.TLS.Challenge = ProxyTLSChallengeDNS
 		}
 		proxy.Domain = trimmed
 	}
@@ -1844,7 +1850,10 @@ func validateProxy(projectName string, envName string, serviceName string, proxy
 			return fmt.Errorf("service %s: invalid additional domain: %s", serviceName, strings.TrimSpace(extraDomain))
 		}
 		if isWildcardProxyDomain(trimmed) {
-			return fmt.Errorf("service %s: wildcard proxy domain %q is not supported by the built-in tako-proxy yet; use explicit hostnames until DNS-01 certificate handling is implemented", serviceName, trimmed)
+			if !environmentHasACMEDNS(environmentProxy) {
+				return fmt.Errorf("service %s: wildcard proxy domain %q requires environment proxy.acme DNS provider configuration", serviceName, trimmed)
+			}
+			proxy.TLS.Challenge = ProxyTLSChallengeDNS
 		}
 		if seenServing[strings.ToLower(trimmed)] {
 			return fmt.Errorf("service %s: duplicate serving domain '%s'", serviceName, trimmed)
@@ -1861,7 +1870,7 @@ func validateProxy(projectName string, envName string, serviceName string, proxy
 			return fmt.Errorf("service %s: invalid redirect domain: %s", serviceName, strings.TrimSpace(redirectDomain))
 		}
 		if isWildcardProxyDomain(trimmed) {
-			return fmt.Errorf("service %s: wildcard redirect domain %q is not supported by the built-in tako-proxy yet; use explicit hostnames until DNS-01 certificate handling is implemented", serviceName, trimmed)
+			return fmt.Errorf("service %s: wildcard redirect domain %q is not supported; redirects must name an explicit source hostname", serviceName, trimmed)
 		}
 		proxy.RedirectFrom[i] = trimmed
 
@@ -1890,6 +1899,17 @@ func validateProxy(projectName string, envName string, serviceName string, proxy
 	if proxy.TLS.Mode != ProxyTLSModeAuto {
 		return fmt.Errorf("service %s: public proxy tls.mode must be %s", serviceName, ProxyTLSModeAuto)
 	}
+	challenge := strings.ToLower(strings.TrimSpace(proxy.TLS.Challenge))
+	if challenge == ProxyTLSChallengeAuto {
+		challenge = ""
+	}
+	if challenge != "" && challenge != ProxyTLSChallengeDNS {
+		return fmt.Errorf("service %s: proxy.tls.challenge must be auto or dns", serviceName)
+	}
+	if challenge == ProxyTLSChallengeDNS && !environmentHasACMEDNS(environmentProxy) {
+		return fmt.Errorf("service %s: proxy.tls.challenge=dns requires environment proxy.acme DNS provider configuration", serviceName)
+	}
+	proxy.TLS.Challenge = challenge
 
 	// Set TLS provider default
 	if proxy.TLS.Provider == "" {
@@ -1902,6 +1922,9 @@ func validateProxy(projectName string, envName string, serviceName string, proxy
 	}
 	if !validProviders[proxy.TLS.Provider] {
 		return fmt.Errorf("service %s: invalid TLS provider: %s", serviceName, proxy.TLS.Provider)
+	}
+	if challenge == ProxyTLSChallengeDNS && proxy.TLS.Provider == "zerossl" && strings.TrimSpace(proxy.Email) == "" {
+		return fmt.Errorf("service %s: proxy.email is required for ZeroSSL DNS-01 certificates", serviceName)
 	}
 
 	return nil
@@ -1990,6 +2013,9 @@ func validateInternalProxy(projectName string, envName string, serviceName strin
 	if proxy.TLS.Provider != "" {
 		return fmt.Errorf("service %s: internal proxy does not support tls.provider", serviceName)
 	}
+	if proxy.TLS.Challenge != "" {
+		return fmt.Errorf("service %s: internal proxy does not support tls.challenge", serviceName)
+	}
 
 	rawHost := strings.TrimSpace(proxy.Host)
 	rawDomain := strings.TrimSpace(proxy.Domain)
@@ -2031,6 +2057,10 @@ func internalHostLabel(value string) string {
 
 func isWildcardProxyDomain(domain string) bool {
 	return strings.HasPrefix(strings.TrimSpace(domain), "*.")
+}
+
+func environmentHasACMEDNS(proxy *EnvironmentProxyConfig) bool {
+	return proxy != nil && proxy.ACME != nil && strings.TrimSpace(proxy.ACME.DNSProvider) != ""
 }
 
 func isValidHostname(hostname string) bool {
