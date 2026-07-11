@@ -238,6 +238,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		e.RegisterSecret(server.Password)
 	}
 	e.RegisterRegistrySecrets(cfg)
+	e.RegisterACMEDNSSecrets(cfg)
 
 	// Create SSH pool.
 	session.sshPool = ssh.NewPool()

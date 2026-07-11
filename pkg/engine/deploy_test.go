@@ -106,6 +106,21 @@ func TestRegisterRegistrySecretsRedactsCredentials(t *testing.T) {
 	}
 }
 
+func TestRegisterACMEDNSSecretsRedactsProviderTokens(t *testing.T) {
+	sink := &events.BufferSink{}
+	eng := New(Options{Sink: sink})
+	eng.RegisterACMEDNSSecrets(&config.Config{Environments: map[string]config.EnvironmentConfig{
+		"production": {Proxy: &config.EnvironmentProxyConfig{ACME: &config.EnvironmentACMEConfig{
+			DNSProvider: "cloudflare", Credentials: map[string]string{"apiToken": "dns-zone-token"},
+		}}},
+	}})
+	eng.info(events.TypeCertIssueFailed, events.PhaseDomains, "provider rejected dns-zone-token\n")
+	emitted := sink.Events()
+	if len(emitted) != 1 || strings.Contains(emitted[0].Message, "dns-zone-token") {
+		t.Fatalf("event leaked DNS provider credential: %+v", emitted)
+	}
+}
+
 func TestEngineEventsRedactRegisteredSecrets(t *testing.T) {
 	sink := &events.BufferSink{}
 	eng := New(Options{Sink: sink})

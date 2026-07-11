@@ -141,6 +141,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	for _, server := range cfg.Servers {
 		e.RegisterSecret(server.Password)
 	}
+	e.RegisterACMEDNSSecrets(cfg)
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
@@ -246,6 +247,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 
 	deploy := deployer.NewDeployerWithPool(client, cfg, envName, sshPool, req.Verbose)
 	deploy.SetBaseContext(ctx)
+	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(envServers); err != nil {
 		return nil, err

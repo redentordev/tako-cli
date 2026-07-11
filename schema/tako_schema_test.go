@@ -67,6 +67,21 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 		t.Fatalf("health command maxLength = %#v, want 4096", healthCommand["maxLength"])
 	}
 	schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "proxy", "properties", "dynamicDomains", "properties", "ask")
+	acme := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "proxy", "properties", "acme")
+	conditions, ok := acme["allOf"].([]any)
+	if !ok || len(conditions) != 1 {
+		t.Fatalf("ACME provider credential conditions = %#v", acme["allOf"])
+	}
+	condition := conditions[0].(map[string]any)
+	cloudflareCredentials := schemaPath(t, condition, "then", "properties", "credentials")
+	if !reflect.DeepEqual(cloudflareCredentials["required"], []any{"apiToken"}) || cloudflareCredentials["additionalProperties"] != false {
+		t.Fatalf("cloudflare credentials schema = %#v", cloudflareCredentials)
+	}
+	schemaPath(t, cloudflareCredentials, "properties", "zoneToken")
+	otherCredentials := schemaPath(t, condition, "else", "properties", "credentials")
+	if !reflect.DeepEqual(otherCredentials["required"], []any{"apiToken"}) || otherCredentials["additionalProperties"] != false {
+		t.Fatalf("non-cloudflare credentials schema = %#v", otherCredentials)
+	}
 }
 
 func assertStringOrListSchema(t *testing.T, field map[string]any) {

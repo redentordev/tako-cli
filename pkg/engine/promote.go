@@ -107,6 +107,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	for _, server := range cfg.Servers {
 		e.RegisterSecret(server.Password)
 	}
+	e.RegisterACMEDNSSecrets(cfg)
 
 	stateLock := localstate.NewStateLock(".tako")
 	lockInfo, err := stateLock.Acquire("promote")
@@ -147,6 +148,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, req.Verbose)
 	deploy.SetBaseContext(ctx)
+	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err

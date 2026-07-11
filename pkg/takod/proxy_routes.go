@@ -189,7 +189,11 @@ func renderCaddyfileFromRouteManifestsExcluding(dir string, excludedCertificateD
 	if err != nil {
 		return "", err
 	}
-	return renderCaddyfileWithCertificates(manifests, certificates)
+	owners, err := loadACMEDNSOwnerClaims()
+	if err != nil {
+		return "", err
+	}
+	return renderCaddyfileWithCertificatesAndOwners(manifests, certificates, owners)
 }
 
 func readProxyRouteManifests(dir string) ([]ProxyRouteManifest, error) {
@@ -225,6 +229,10 @@ func renderCaddyfile(manifests []ProxyRouteManifest) (string, error) {
 }
 
 func renderCaddyfileWithCertificates(manifests []ProxyRouteManifest, certificates []proxyCertificateEntry) (string, error) {
+	return renderCaddyfileWithCertificatesAndOwners(manifests, certificates, nil)
+}
+
+func renderCaddyfileWithCertificatesAndOwners(manifests []ProxyRouteManifest, certificates []proxyCertificateEntry, owners []acmeDNSOwnerClaim) (string, error) {
 	var routes []ProxyRoute
 	for _, manifest := range manifests {
 		routes = append(routes, manifest.Routes...)
@@ -285,6 +293,11 @@ func renderCaddyfileWithCertificates(manifests []ProxyRouteManifest, certificate
 			if route.Visibility != proxyRouteVisibilityInternal {
 				certificate = selectProxyCertificate(certificates, domain)
 			}
+			if certificate == nil {
+				if owner := selectACMEDNSOwner(owners, domain); owner != nil {
+					return "", fmt.Errorf("domain %s is covered by ACME DNS certificate %s owned by %s/%s, but no valid certificate is stored; deploy the owning configuration first", domain, owner.Domain, owner.Project, owner.Environment)
+				}
+			}
 			writeCaddyRoute(&b, caddyRouteAddress(domain, route), route, certificate)
 		}
 		primary := ""
@@ -298,6 +311,8 @@ func renderCaddyfileWithCertificates(manifests []ProxyRouteManifest, certificate
 			b.WriteString("\n" + redirect + " {\n")
 			if certificate := selectProxyCertificate(certificates, redirect); certificate != nil {
 				writeCaddyCertificate(&b, "\t", certificate)
+			} else if owner := selectACMEDNSOwner(owners, redirect); owner != nil {
+				return "", fmt.Errorf("redirect domain %s is covered by ACME DNS certificate %s owned by %s/%s, but no valid certificate is stored; deploy the owning configuration first", redirect, owner.Domain, owner.Project, owner.Environment)
 			}
 			writeCaddyAccessLog(&b, caddyAccessLogName(route.Service))
 			b.WriteString("\tredir https://" + primary + "{uri} 308\n")
@@ -604,7 +619,14 @@ func proxyTrustedProxySet(routes []ProxyRoute) ([]string, error) {
 }
 
 func isSafeProxyHost(value string) bool {
-	if strings.TrimSpace(value) != value || value == "" || strings.Contains(value, "*") {
+	if strings.TrimSpace(value) != value || value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, "*.") {
+		base := strings.TrimPrefix(value, "*.")
+		return !strings.Contains(base, "*") && isSafeRuntimeHost(base)
+	}
+	if strings.Contains(value, "*") {
 		return false
 	}
 	return isSafeRuntimeHost(value)

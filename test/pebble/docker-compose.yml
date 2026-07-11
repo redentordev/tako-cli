@@ -1,0 +1,31 @@
+services:
+  pebble:
+    image: ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199
+    container_name: tako-test-pebble
+    command: -config test/config/pebble-config.json -strict -dnsserver 10.30.50.3:8053
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+    ports:
+      - "14000:14000"
+    networks:
+      pebble:
+        ipv4_address: 10.30.50.2
+
+  challtestsrv:
+    image: ghcr.io/letsencrypt/pebble-challtestsrv@sha256:12ce21884def456bcf9786542113949e1f19dc7738d2c70e156c2d0c38a1405b
+    container_name: tako-test-pebble-challtestsrv
+    command: -defaultIPv4 10.30.50.3 -defaultIPv6 ""
+    ports:
+      - "8053:8053/tcp"
+      - "8053:8053/udp"
+      - "8055:8055"
+    networks:
+      pebble:
+        ipv4_address: 10.30.50.3
+
+networks:
+  pebble:
+    ipam:
+      config:
+        - subnet: 10.30.50.0/24

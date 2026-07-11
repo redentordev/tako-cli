@@ -141,6 +141,22 @@ func (e *Engine) RegisterRegistrySecrets(cfg *config.Config) {
 	}
 }
 
+// RegisterACMEDNSSecrets adds environment-scoped DNS provider credentials to
+// the same redactor used for event streams, progress output, and result docs.
+func (e *Engine) RegisterACMEDNSSecrets(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	for _, environment := range cfg.Environments {
+		if environment.Proxy == nil || environment.Proxy.ACME == nil {
+			continue
+		}
+		for _, credential := range environment.Proxy.ACME.Credentials {
+			e.RegisterSecret(credential)
+		}
+	}
+}
+
 // EventStream exposes the engine's stamped, redacting event stream so
 // adapters can bridge auxiliary output (for example build logs) into it.
 func (e *Engine) EventStream() *events.Stream {

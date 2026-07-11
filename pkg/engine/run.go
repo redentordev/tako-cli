@@ -105,6 +105,7 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	}
 	e.RegisterSecret(server.Password)
 	e.RegisterRegistrySecrets(req.Config)
+	e.RegisterACMEDNSSecrets(req.Config)
 
 	session := &RunSession{
 		engine: e,
@@ -144,6 +145,8 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	session.sourceClient = sourceClient
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, req.Environment, session.sshPool, req.Verbose)
+	deploy.SetBaseContext(ctx)
+	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
 	deploy.SetSkipBuild(true)
 	if output := e.buildOutputWriter(); output != nil {

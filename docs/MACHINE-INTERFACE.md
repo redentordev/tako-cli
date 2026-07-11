@@ -186,9 +186,13 @@ project/environment, `valid`, `required` key names, and `missing` key
 names; missing secrets exit with code 2 and still emit the document. `tako
 certs push|ls|rm --output json` returns a `CertsResult` with the action,
 optional domain, timing, and per-proxy-node records (`server`, `host`,
-`certificates`, optional `error`). Certificate rows contain only `domain`,
-`source`, `notBefore`, `notAfter`, `issuedAt`, and `updatedAt`; PEM and private
-keys never appear. All target nodes are capability-checked before push/remove,
+`certificates`, optional `error`). Certificate rows contain `domain`, `source`,
+`notBefore`, `notAfter`, `issuedAt`, and `updatedAt`. Managed DNS-01 rows add
+`ownerProject`, `ownerEnvironment`, `dnsProvider`, `caProvider`, optional `staging`,
+`orphaned`, `lastAttemptAt`, `lastSuccessAt`, `lastError`, and `retryAfter`.
+These additive fields make failed first issuance and renewal cooldowns
+pollable; PEM, private keys, and provider credentials never appear. All target
+nodes are capability-checked before push/remove,
 and an old agent returns a typed upgrade-required error naming `tako upgrade
 servers`. Certificate operations intentionally do not acquire project leases:
 node-local atomic replacement plus Caddy's graceful reload makes a concurrent
@@ -327,7 +331,7 @@ machine behavior:
 | Category | Commands |
 | -------- | -------- |
 | Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
-| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
+| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
 | Human-only by design | `init`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
 

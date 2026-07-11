@@ -619,6 +619,22 @@ operators must keep their own secure copies. `tako certs ls` exposes source and
 expiry so an external control plane can track replacement without ever reading
 private keys back from the node.
 
+Embedded DNS-01 is the second writer into this same store. Its environment
+provider credentials deliberately persist in a 0600 node-local file so takod's
+single daily renewal driver can operate after the CLI exits. This is a narrow
+exception to request-scoped credential handling: the expanded token never
+enters Caddy's environment, route manifests, replicated state, results, or
+events, and is removed with the owning environment configuration. Only the
+declaring project/environment may issue; other projects can consume a covering
+node-global wildcard without receiving the credential or starting an order.
+Replacement ownership and credentials are staged separately and become active
+only after the new route manifest is valid, preserving the previous route's
+renewal state on a failed deployment. The scheduler refreshes ARI synchronously
+and serializes renewal with reconcile and removal operations.
+Managed certificate material is retained when unreferenced, marked orphaned,
+and never renewed or automatically deleted; explicit removal purges both the
+exported store copy and CertMagic's managed key material.
+
 One-node deployments use the same proxy path with only local upstreams and do
 not publish mesh host ports. Multi-node upstream ports are allocated and
 recorded by the target node's `takod` agent. The CLI sends a

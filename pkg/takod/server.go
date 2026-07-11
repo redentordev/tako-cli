@@ -31,6 +31,7 @@ type Server struct {
 	server                  *http.Server
 	backupScheduler         *BackupScheduler
 	jobScheduler            *JobScheduler
+	certificateScheduler    *CertificateScheduler
 	mu                      sync.Mutex
 }
 
@@ -128,6 +129,7 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 		startedAt:               time.Now().UTC(),
 		backupScheduler:         NewBackupScheduler(dataDir),
 		jobScheduler:            NewJobScheduler(dataDir),
+		certificateScheduler:    NewCertificateScheduler(dataDir),
 	}
 }
 
@@ -166,6 +168,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/proxy-file", s.handleProxyFile)
 	mux.HandleFunc("/v1/proxy", s.handleProxy)
 	mux.HandleFunc("/v1/certs", s.handleProxyCertificates)
+	mux.HandleFunc("/v1/acme-dns", s.handleProxyACMEDNS)
 	mux.HandleFunc("/v1/ports/allocate", s.handlePortAllocate)
 	mux.HandleFunc("/v1/cleanup", s.handleCleanup)
 	mux.HandleFunc("/v1/state", s.handleState)
@@ -207,6 +210,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	go s.backupScheduler.Run(ctx)
 	go s.jobScheduler.Run(ctx)
+	go s.certificateScheduler.Run(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -571,6 +575,57 @@ func (s *Server) handleProxyCertificates(w http.ResponseWriter, r *http.Request)
 	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleProxyACMEDNS(w http.ResponseWriter, r *http.Request) {
+	var (
+		response any
+		err      error
+		secrets  map[string]string
+	)
+	switch r.Method {
+	case http.MethodPut:
+		defer r.Body.Close()
+		var request ACMEDNSReconcileRequest
+		if decodeErr := decodeJSONRequest(w, r, &request); decodeErr != nil {
+			http.Error(w, "invalid JSON body: "+decodeErr.Error(), http.StatusBadRequest)
+			return
+		}
+		secrets = request.Credentials
+		response, err = PrepareACMEDNS(r.Context(), request)
+	case http.MethodPost:
+		response, err = FinalizeACMEDNS(r.Context(), r.URL.Query().Get("project"), r.URL.Query().Get("environment"))
+	case http.MethodDelete:
+		response, err = RemoveACMEDNSConfiguration(r.Context(), r.URL.Query().Get("project"), r.URL.Query().Get("environment"))
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		status := http.StatusBadRequest
+		payload := map[string]any{"code": "invalid_request", "error": redactACMEDNSError(err, secrets).Error()}
+		var operationErr *ACMEDNSError
+		if errors.As(err, &operationErr) {
+			status = http.StatusBadGateway
+			if operationErr.Code == "cooldown" || operationErr.Code == "rate_limited" {
+				status = http.StatusTooManyRequests
+			}
+			payload["code"] = operationErr.Code
+			payload["domain"] = operationErr.Domain
+			payload["retryAfter"] = operationErr.RetryAfter.UTC()
+			if len(operationErr.Completed) > 0 {
+				payload["completed"] = operationErr.Completed
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(payload)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1432,7 +1487,7 @@ func (s *Server) Status() Status {
 	status := Status{
 		Runtime:      "takod",
 		Version:      s.version,
-		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1},
+		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
 		Hostname:     hostname,
 		Socket:       s.socket,
 		DataDir:      s.dataDir,

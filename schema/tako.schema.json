@@ -391,6 +391,55 @@
                     }
                   }
                 }
+              },
+              "acme": {
+                "type": "object",
+                "description": "Environment-scoped DNS-01 provider used by wildcard routes and routes with proxy.tls.challenge=dns. Credentials must be whole ${ENV_VAR} references and are persisted only on proxy nodes.",
+                "additionalProperties": false,
+                "required": ["dnsProvider", "credentials"],
+                "properties": {
+                  "dnsProvider": {
+                    "type": "string",
+                    "enum": ["cloudflare", "hetzner", "digitalocean"]
+                  },
+                  "credentials": {
+                    "type": "object",
+                    "description": "Provider credential values. apiToken is required; cloudflare also accepts optional zoneToken."
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {"dnsProvider": {"const": "cloudflare"}},
+                      "required": ["dnsProvider"]
+                    },
+                    "then": {
+                      "properties": {
+                        "credentials": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": ["apiToken"],
+                          "properties": {
+                            "apiToken": {"type": "string", "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}$"},
+                            "zoneToken": {"type": "string", "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}$"}
+                          }
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "credentials": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": ["apiToken"],
+                          "properties": {
+                            "apiToken": {"type": "string", "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}$"}
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             }
           },
@@ -705,7 +754,7 @@
                     },
                     "domain": {
                       "type": "string",
-                      "description": "Primary public hostname. Wildcard hostnames are not supported by the built-in proxy yet."
+                      "description": "Primary public hostname. Wildcards require environment proxy.acme and use DNS-01."
                     },
                     "host": {
                       "type": "string",
@@ -784,6 +833,11 @@
                         },
                         "staging": {
                           "type": "boolean"
+                        },
+                        "challenge": {
+                          "type": "string",
+                          "enum": ["auto", "dns"],
+                          "description": "dns opts explicit hostnames into takod-managed DNS-01. Wildcard hostnames imply dns."
                         }
                       }
                     },

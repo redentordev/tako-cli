@@ -3,6 +3,7 @@ package takod
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -64,6 +65,18 @@ func TestCaddyfileConformanceMatrix(t *testing.T) {
 			},
 			wantHash: "c78fec120cd6e4bb894374f79673887767aa7452947fa7d00e448cdb99336315",
 			contains: []string{"tls /var/lib/tako/certs/example.com/cert.pem /var/lib/tako/certs/example.com/key.pem", "tls /var/lib/tako/certs/app.example.com/cert.pem /var/lib/tako/certs/app.example.com/key.pem", "tls /var/lib/tako/certs/www.example.com/cert.pem /var/lib/tako/certs/www.example.com/key.pem", "on_demand_tls", ":443 {"},
+		},
+		{
+			name:  "DNS wildcard exact host with dynamic authority catch-all",
+			route: ProxyRoute{Service: "renderer", Domains: []string{"app.example.com"}, Upstreams: []string{"http://renderer:3000"}, DynamicDomain: &ProxyDynamicDomain{AskURL: "http://admin:3000/api/domains/authorize"}},
+			certificates: []proxyCertificateEntry{
+				{Metadata: ProxyCertificateMetadata{Domain: "*.example.com", Source: CertificateSourceACMEDNS}, Leaf: &x509.Certificate{DNSNames: []string{"*.example.com"}}, CertPath: "/var/lib/tako/certs/.versions/wildcard/cert.pem", KeyPath: "/var/lib/tako/certs/.versions/wildcard/key.pem"},
+			},
+			wantHash: "d4e879dde05d921342cd0c1a5cc5be5802e00a92a06148a1cd40d44afefa33cf",
+			contains: []string{
+				"app.example.com {", "tls /var/lib/tako/certs/.versions/wildcard/cert.pem /var/lib/tako/certs/.versions/wildcard/key.pem",
+				"on_demand_tls", ":443 {", "tls {\n\t\ton_demand",
+			},
 		},
 	}
 

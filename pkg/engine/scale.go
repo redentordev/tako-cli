@@ -124,6 +124,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	for _, server := range cfg.Servers {
 		e.RegisterSecret(server.Password)
 	}
+	e.RegisterACMEDNSSecrets(cfg)
 
 	e.info(events.TypeDeployStarted, events.PhaseDeploy, fmt.Sprintf("Scaling %d service(s) on %d takod node(s)...\n\n", len(scaleTargets), len(serverNames)))
 
@@ -155,6 +156,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, req.Verbose)
 	deploy.SetBaseContext(ctx)
+	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err

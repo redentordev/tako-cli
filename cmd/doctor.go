@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
+	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
 	"github.com/redentordev/tako-cli/pkg/utils"
@@ -165,6 +167,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		"Docker Runtime",
 		"Proxy Runtime",
 		"Proxy Client IP",
+		"Certificates",
 		"Running Services",
 		"Replicated State",
 		"External Volumes",
@@ -189,12 +192,15 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		checkProxyClientIPTopology(cmd.Context(), record, cfg, envName)
 
 		heading(remoteSections[6])
-		checkRunningServices(record, cfg, envName, clients)
+		checkACMEDNSCertificates(record, cfg, envName, clients)
 
 		heading(remoteSections[7])
-		checkReplicatedState(record, cfg, envName, clients)
+		checkRunningServices(record, cfg, envName, clients)
 
 		heading(remoteSections[8])
+		checkReplicatedState(record, cfg, envName, clients)
+
+		heading(remoteSections[9])
 		checkExternalVolumes(record, cfg, envName, clients)
 
 		// Clean up clients
@@ -245,6 +251,101 @@ func checkProxyClientIPTopologyWith(record func(checkResult), specs []engine.Dom
 	}
 	if checked == 0 {
 		record(checkResult{"SKIP", "No access-controlled public routes without trusted proxies", ""})
+	}
+}
+
+func checkACMEDNSCertificates(record func(checkResult), cfg *config.Config, envName string, clients map[string]*ssh.Client) {
+	services, err := cfg.GetServices(envName)
+	if err != nil {
+		record(checkResult{"WARN", fmt.Sprintf("Cannot inspect managed certificates: %v", err), "Fix the environment configuration"})
+		return
+	}
+	env, envErr := cfg.GetEnvironment(envName)
+	expected := false
+	if envErr == nil && env.Proxy != nil && env.Proxy.ACME != nil {
+		for _, service := range env.Services {
+			if service.Proxy == nil || !service.IsPublic() {
+				continue
+			}
+			if service.Proxy.TLS.Challenge == config.ProxyTLSChallengeDNS {
+				expected = true
+				break
+			}
+			for _, domain := range service.Proxy.GetAllDomains() {
+				if strings.HasPrefix(domain, "*.") {
+					expected = true
+					break
+				}
+			}
+		}
+	}
+	for _, service := range services {
+		if service.Proxy == nil || !service.IsPublic() {
+			continue
+		}
+		if service.Proxy.TLS.Challenge == config.ProxyTLSChallengeDNS || strings.HasPrefix(service.Proxy.Domain, "*.") {
+			expected = true
+			break
+		}
+	}
+	proxyServers, err := cfg.GetEnvironmentProxyServers(envName)
+	if err != nil {
+		record(checkResult{"WARN", fmt.Sprintf("Cannot resolve proxy certificate nodes: %v", err), "Check environment proxy placement"})
+		return
+	}
+	checkACMEDNSCertificatesWith(record, expected, cfg.Project.Name, envName, proxyServers, func(serverName string) ([]takod.ProxyCertificateMetadata, error) {
+		client := clients[serverName]
+		if client == nil {
+			return nil, fmt.Errorf("server is not connected")
+		}
+		output, err := takodclient.RequestJSONWithTimeout(client, takodSocketFromConfig(cfg), http.MethodGet, takodclient.CertificatesEndpoint(""), nil, doctorNodeProbeTimeout)
+		if err != nil {
+			return nil, err
+		}
+		var response takod.ProxyCertificateListResponse
+		if err := json.Unmarshal([]byte(output), &response); err != nil {
+			return nil, fmt.Errorf("invalid certificate response: %w", err)
+		}
+		return response.Certificates, nil
+	})
+}
+
+func checkACMEDNSCertificatesWith(record func(checkResult), expected bool, project, environment string, serverNames []string, probe func(string) ([]takod.ProxyCertificateMetadata, error)) {
+	if !expected {
+		record(checkResult{"SKIP", "No routes owned by embedded ACME DNS-01 in this environment", ""})
+		return
+	}
+	now := time.Now().UTC()
+	managed := 0
+	for _, serverName := range serverNames {
+		certificates, err := probe(serverName)
+		if err != nil {
+			record(checkResult{"WARN", fmt.Sprintf("%s: cannot inspect managed certificates: %v", serverName, err), "Run tako upgrade servers and retry"})
+			continue
+		}
+		for _, certificate := range certificates {
+			if certificate.Source != takod.CertificateSourceACMEDNS || certificate.OwnerProject != project || certificate.OwnerEnvironment != environment {
+				continue
+			}
+			managed++
+			switch {
+			case certificate.Orphaned:
+				record(checkResult{"WARN", fmt.Sprintf("%s: %s is orphaned and will not renew", serverName, certificate.Domain), "Remove it with tako certs rm when it is no longer needed"})
+			case certificate.LastError != "" && (certificate.NotAfter.IsZero() || certificate.NotAfter.Before(now.Add(30*24*time.Hour))):
+				retry := ""
+				if certificate.RetryAfter != nil {
+					retry = fmt.Sprintf("; retry after %s", certificate.RetryAfter.UTC().Format(time.RFC3339))
+				}
+				record(checkResult{"WARN", fmt.Sprintf("%s: %s renewal/issuance failed: %s%s", serverName, certificate.Domain, certificate.LastError, retry), "Fix the DNS provider credential or zone delegation before expiry"})
+			case certificate.NotAfter.IsZero():
+				record(checkResult{"WARN", fmt.Sprintf("%s: %s has no issued certificate yet", serverName, certificate.Domain), "Inspect certs ls and redeploy after the cooldown"})
+			default:
+				record(checkResult{"PASS", fmt.Sprintf("%s: %s managed certificate is valid until %s", serverName, certificate.Domain, certificate.NotAfter.UTC().Format(time.RFC3339)), ""})
+			}
+		}
+	}
+	if managed == 0 {
+		record(checkResult{"WARN", "DNS-01 routes are configured but no managed certificates were reported", "Deploy the owning configuration and inspect cert.issue events"})
 	}
 }
 
