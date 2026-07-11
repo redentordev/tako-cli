@@ -49,6 +49,7 @@ type persistedActualService struct {
 	DeployStrategy    string            `json:"deployStrategy,omitempty"`
 	ActiveContainers  []string          `json:"activeContainers,omitempty"`
 	WarmingContainers []string          `json:"warmingContainers,omitempty"`
+	Health            string            `json:"health,omitempty"`
 }
 
 func RefreshActualStateDocuments(ctx context.Context, dataDir string, node string) (int, error) {
@@ -230,6 +231,7 @@ func recomputePersistedAggregate(snapshot *persistedActualSnapshot) {
 				existing.DeployStrategy = mergeOptionalLabel(existing.DeployStrategy, service.DeployStrategy)
 				existing.ActiveContainers = append(existing.ActiveContainers, service.ActiveContainers...)
 				existing.WarmingContainers = append(existing.WarmingContainers, service.WarmingContainers...)
+				existing.Health = MergeHealthStates(existing.Health, service.Health)
 				snapshot.Services[serviceName] = existing
 				continue
 			}
@@ -272,6 +274,7 @@ func persistedServicesFromActual(services map[string]*ActualService) map[string]
 			DeployStrategy:    service.DeployStrategy,
 			ActiveContainers:  activeContainers,
 			WarmingContainers: warmingContainers,
+			Health:            service.Health,
 		}
 	}
 	return out
