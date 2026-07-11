@@ -56,7 +56,9 @@ commands in `cmd/` are thin adapters over this package.
   `tako ps`. It resolves the project/environment/server/service selection,
   gathers actual state from takod nodes, and returns a `StatusResult` with
   selected servers and service rows (`running`, `desired`, `status`, `ports`,
-  revision/warming metadata). The engine does not render the human table.
+  revision/warming metadata, `image`, `strategy`, aggregated docker `health`,
+  and a per-node `nodes` placement breakdown). The engine does not render the
+  human table.
 - Log streaming is available as `StreamLogs(ctx, LogsRequest)`, which emits
   `log.line` events carrying service/node/raw-line data and returns a
   `LogsResult` summary when the stream completes.
