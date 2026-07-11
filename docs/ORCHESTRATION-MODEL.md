@@ -523,9 +523,9 @@ edge nodes with pinned servers or node-label constraints while service
 containers keep their own placement. Built-in ACME TLS currently requires public
 proxy placement to resolve to one node; multi-edge certificate issuance and
 storage is blocked at config validation until distributed certificate handling
-is implemented. Public proxy domains must be explicit hostnames; wildcard
-hostnames such as `*.example.com` are blocked until DNS-01 certificate handling
-is implemented in the generated Caddy proxy config.
+is implemented. Public proxy domains may be explicit hostnames or DNS-01-backed
+wildcards. Wildcards require the environment's embedded ACME DNS provider and
+are issued into the node-local certificate store before route publication.
 
 A service can serve on several hostnames: `proxy.domain` is the primary (used
 for URL display and as the target of `redirectFrom` redirects) and
@@ -552,10 +552,13 @@ at the edge. After successful reconciliation, the CLI checks public domains for
 DNS and TLS readiness and reports `pending_dns`, `wrong_dns`, `pending_tls`, or
 `active`; those states are warnings by default and become deploy failures only
 with `tako deploy --strict-domains`. The check infers expected DNS targets from
-`environment.proxy.placement` and accepts working HTTPS through an external
-CDN/proxy as active, so Cloudflare-style routing does not require direct A/AAAA
-records to the VPS. Use `--domain-target` for custom CNAME or edge targets and
-`tako domains status` to re-check domains without redeploying.
+`environment.proxy.placement`. Working HTTPS at another edge is reported as
+`dns: proxied` only when the service explicitly declares
+`proxy.cdn: cloudflare|generic`. Without that declaration, suspected-CDN detail
+is human diagnostics while machine state remains wrong/unready. Thus a CDN
+heuristic cannot silently change an exit code. Use
+`--domain-target` for custom CNAME or edge targets and `tako domains status` to
+re-check domains without redeploying.
 
 Internal routes are intentionally excluded from public DNS/TLS readiness checks.
 Run `tako domains hosts` to print host-file entries for internal proxy hosts.
@@ -570,7 +573,10 @@ edge node: it must approve only exact domains owned by the current app/stage and
 should use an indexed domain lookup so first requests for new domains do not
 block on slow scans. Phase 1 allows one dynamic-domain authority per edge node;
 explicit-domain projects can still share that node through their own route
-manifests.
+manifests. These customer domains remain HTTP-01-managed. Validation warns
+when a service combines `dynamicDomains` with `proxy.cdn`, because a CDN that
+does not forward ACME challenge requests can break first-request issuance and
+renewal.
 
 Per-service proxy access controls guard every route of a service.
 `proxy.basicAuth` takes a username and a pre-computed bcrypt hash
@@ -778,8 +784,8 @@ Done:
 12. Environment proxy placement can limit public ingress to dedicated edge nodes.
 13. Config validation blocks unsafe multi-edge automatic ACME TLS.
 14. Build-image distribution is brokered by the CLI between node-local takod agents.
-15. Config validation blocks wildcard public hostnames until DNS-01 certificate
-    handling is implemented.
+15. Config validation requires embedded DNS-01 configuration for wildcard
+    public hostnames.
 16. `tako state forget-node` explicitly prunes retired nodes from replicated
     runtime state.
 17. `tako discovery exports` lists exported service records from reachable
@@ -808,8 +814,7 @@ Done:
 
 Next:
 1. Add distributed certificate handling for multi-edge deployments.
-2. Add DNS-01 certificate handling for wildcard public hostnames.
-3. Evaluate background peer anti-entropy after the explicit repair workflow is proven.
-4. Add layer-delta peer image distribution.
-5. Expand e2e validation across one-node and multi-node meshes.
+2. Evaluate background peer anti-entropy after the explicit repair workflow is proven.
+3. Add layer-delta peer image distribution.
+4. Expand e2e validation across one-node and multi-node meshes.
 ```

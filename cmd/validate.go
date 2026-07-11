@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/spf13/cobra"
@@ -62,6 +63,14 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		return fail(err)
 	}
 	result.Project = cfg.Project.Name
+	for _, warning := range config.ValidationWarnings(cfg) {
+		result.Findings = append(result.Findings, engine.ValidateFinding{
+			Severity: engine.ValidateSeverityWarn,
+			Path:     configPath,
+			Field:    warning.Field,
+			Message:  warning.Message,
+		})
+	}
 	if err := ensureDeployRuntimeSupported(cfg); err != nil {
 		return fail(formatDeployConfigError(configPath, fmt.Errorf("invalid config: %w", err)))
 	}
@@ -106,6 +115,11 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "Mesh: %s\n", mesh)
 		fmt.Fprintf(out, "Servers: %d\n", len(servers))
 		fmt.Fprintf(out, "Services: %d\n", len(services))
+		for _, finding := range result.Findings {
+			if finding.Severity == engine.ValidateSeverityWarn {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", finding.Message)
+			}
+		}
 	}
 
 	return emitResultDocument(result)

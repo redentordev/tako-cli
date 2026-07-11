@@ -28,6 +28,7 @@ type DomainStatusEntry struct {
 	TLS         string   `json:"tls"`
 	ResolvedIPs []string `json:"resolvedIps,omitempty"`
 	CNAME       string   `json:"cname,omitempty"`
+	CDN         string   `json:"cdn,omitempty"`
 	Message     string   `json:"message,omitempty"`
 	Warning     string   `json:"warning,omitempty"`
 	DNSError    string   `json:"dnsError,omitempty"`
@@ -74,6 +75,7 @@ type DomainStatusSpec struct {
 	Service                     string
 	Domain                      string
 	Role                        string
+	CDN                         string
 	WarnUntrustedAccessControls bool
 }
 
@@ -99,10 +101,10 @@ func CollectConfiguredDomainSpecs(services map[string]config.ServiceConfig, serv
 		}
 		warnUntrustedAccessControls := (service.Proxy.BasicAuth != nil || len(service.Proxy.AllowIps) > 0) && len(service.Proxy.TrustedProxies) == 0
 		for _, domain := range service.Proxy.GetAllDomains() {
-			specs = append(specs, DomainStatusSpec{Service: serviceName, Domain: domain, Role: "serving", WarnUntrustedAccessControls: warnUntrustedAccessControls})
+			specs = append(specs, DomainStatusSpec{Service: serviceName, Domain: domain, Role: "serving", CDN: service.Proxy.CDN, WarnUntrustedAccessControls: warnUntrustedAccessControls})
 		}
 		for _, domain := range service.Proxy.GetRedirectDomains() {
-			specs = append(specs, DomainStatusSpec{Service: serviceName, Domain: domain, Role: "redirect", WarnUntrustedAccessControls: warnUntrustedAccessControls})
+			specs = append(specs, DomainStatusSpec{Service: serviceName, Domain: domain, Role: "redirect", CDN: service.Proxy.CDN, WarnUntrustedAccessControls: warnUntrustedAccessControls})
 		}
 	}
 	return specs
@@ -149,6 +151,7 @@ func (e *Engine) MonitorDomainStatuses(ctx context.Context, checker *health.Heal
 		allReady := true
 		for _, spec := range specs {
 			status := checker.CheckDomain(ctx, spec.Service, spec.Domain, options.ExpectedTargets)
+			applyDomainCDNPolicy(&status, spec)
 			applyDomainAccessControlWarning(&status, spec)
 			results = append(results, status)
 			if status.Pending() {
@@ -183,9 +186,32 @@ func (e *Engine) MonitorDomainStatuses(ctx context.Context, checker *health.Heal
 		case <-ticker.C:
 			latest = check()
 			if allDomainStatusesReady(latest) {
-				return latest, nil
+				return latest, domainStatusStrictError(latest, options.Strict)
 			}
 		}
+	}
+}
+
+func applyDomainCDNPolicy(status *health.DomainStatus, spec DomainStatusSpec) {
+	if status == nil {
+		return
+	}
+	status.CDN = normalizeDeclaredCDN(spec.CDN)
+	if status.DNS == health.DomainDNSProxied && status.CDN == "" {
+		status.State = health.DomainStateWrongDNS
+		status.DNS = health.DomainDNSWrong
+		status.Message = "TLS is active at a suspected external proxy/CDN, but proxy.cdn is not declared"
+		appendDomainWarning(status, "DNS appears to use an external proxy/CDN, but proxy.cdn is not declared; strict readiness requires proxy.cdn: cloudflare or generic")
+	}
+}
+
+func normalizeDeclaredCDN(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case config.ProxyCDNCloudflare, config.ProxyCDNGeneric:
+		return value
+	default:
+		return ""
 	}
 }
 
@@ -193,7 +219,15 @@ func applyDomainAccessControlWarning(status *health.DomainStatus, spec DomainSta
 	if status == nil || !spec.WarnUntrustedAccessControls || (status.DNS != health.DomainDNSProxied && status.DNS != health.DomainDNSWrong) {
 		return
 	}
-	status.Warning = "access controls are configured behind a suspected proxy/CDN without proxy.trustedProxies; original client IPs cannot be trusted"
+	appendDomainWarning(status, "access controls are configured behind a suspected proxy/CDN without proxy.trustedProxies; original client IPs cannot be trusted")
+}
+
+func appendDomainWarning(status *health.DomainStatus, warning string) {
+	if status.Warning == "" {
+		status.Warning = warning
+		return
+	}
+	status.Warning += "; " + warning
 }
 
 func (e *Engine) emitDomainStatusAttempt(attempt int, statuses []health.DomainStatus) {
@@ -271,13 +305,19 @@ func domainStatusStrictError(statuses []health.DomainStatus, strict bool) error 
 	if !strict {
 		return nil
 	}
-	pending := pendingDomainStatuses(statuses)
+	pending := make([]health.DomainStatus, 0, len(statuses))
+	for _, status := range statuses {
+		if !status.Ready() || (status.DNS == health.DomainDNSProxied && normalizeDeclaredCDN(status.CDN) == "") {
+			pending = append(pending, status)
+		}
+	}
 	if len(pending) == 0 {
 		return nil
 	}
 	parts := make([]string, 0, len(pending))
 	for _, status := range pending {
-		parts = append(parts, fmt.Sprintf("%s=%s", status.Domain, status.State))
+		state := string(status.State)
+		parts = append(parts, fmt.Sprintf("%s=%s", status.Domain, state))
 	}
 	return &AttentionError{Err: fmt.Errorf("public domain check failed in strict mode: %s", strings.Join(parts, ", "))}
 }

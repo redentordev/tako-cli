@@ -46,6 +46,8 @@ const (
 
 	ProxyVisibilityPublic   = "public"
 	ProxyVisibilityInternal = "internal"
+	ProxyCDNCloudflare      = "cloudflare"
+	ProxyCDNGeneric         = "generic"
 
 	ProxyTLSModeAuto            = "auto"
 	ProxyTLSModeOff             = "off"
@@ -422,6 +424,10 @@ type ProxyConfig struct {
 	// Visibility controls whether the route is public ACME-backed ingress or
 	// private HTTP-only ingress intended for LAN/VPN/hosts-file resolution.
 	Visibility string `yaml:"visibility,omitempty" json:"visibility,omitempty"`
+
+	// CDN declares that public DNS intentionally terminates at an external
+	// CDN. Domain readiness heuristics never substitute for this declaration.
+	CDN string `yaml:"cdn,omitempty" json:"cdn,omitempty"`
 
 	// RedirectFrom specifies domains that should redirect to the primary Domain
 	// These domains will get their own TLS certificates and 301 redirect to Domain

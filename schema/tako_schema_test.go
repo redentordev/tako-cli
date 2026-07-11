@@ -67,6 +67,7 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 		t.Fatalf("health command maxLength = %#v, want 4096", healthCommand["maxLength"])
 	}
 	schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "proxy", "properties", "dynamicDomains", "properties", "ask")
+	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "proxy", "properties", "cdn"), []string{config.ProxyCDNCloudflare, config.ProxyCDNGeneric})
 	acme := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "proxy", "properties", "acme")
 	conditions, ok := acme["allOf"].([]any)
 	if !ok || len(conditions) != 1 {

@@ -52,6 +52,7 @@ func TestCollectConfiguredDomainSpecsIncludesRedirectDomains(t *testing.T) {
 		"web": {
 			Proxy: &config.ProxyConfig{
 				Domain:       "app.example.com",
+				CDN:          config.ProxyCDNCloudflare,
 				RedirectFrom: []string{"www.example.com"},
 			},
 		},
@@ -63,6 +64,9 @@ func TestCollectConfiguredDomainSpecsIncludesRedirectDomains(t *testing.T) {
 	}
 	if specs[0].Domain != "app.example.com" || specs[0].Role != "serving" {
 		t.Fatalf("serving spec = %#v", specs[0])
+	}
+	if specs[0].CDN != config.ProxyCDNCloudflare || specs[1].CDN != config.ProxyCDNCloudflare {
+		t.Fatalf("CDN declaration not carried to all specs: %#v", specs)
 	}
 	if specs[1].Domain != "www.example.com" || specs[1].Role != "redirect" {
 		t.Fatalf("redirect spec = %#v", specs[1])
@@ -88,5 +92,19 @@ func TestCollectConfiguredDomainSpecsSkipsInternalProxyHosts(t *testing.T) {
 	}
 	if specs[0].Domain != "app.example.com" {
 		t.Fatalf("domain = %q, want app.example.com", specs[0].Domain)
+	}
+}
+
+func TestCollectAdHocDomainSpecsPreservesOnlyMatchingConfiguredCDN(t *testing.T) {
+	configured := []domainStatusSpec{{Service: "web", Domain: "app.example.com", Role: "serving", CDN: config.ProxyCDNCloudflare}}
+	specs := collectAdHocDomainSpecs([]string{"APP.EXAMPLE.COM.", "other.example.com"}, configured, "")
+	if len(specs) != 2 {
+		t.Fatalf("specs = %#v", specs)
+	}
+	if specs[0].Service != "web" || specs[0].Role != "ad-hoc" || specs[0].CDN != config.ProxyCDNCloudflare {
+		t.Fatalf("matching spec = %#v", specs[0])
+	}
+	if specs[1].Service != "ad-hoc" || specs[1].CDN != "" {
+		t.Fatalf("unconfigured spec = %#v", specs[1])
 	}
 }

@@ -6,6 +6,7 @@ const KindValidateResult = "ValidateResult"
 // Validate finding severities.
 const (
 	ValidateSeverityError = "error"
+	ValidateSeverityWarn  = "warning"
 )
 
 // ValidateFinding is one problem found while validating a configuration.

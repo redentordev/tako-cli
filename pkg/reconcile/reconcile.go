@@ -363,6 +363,7 @@ func domainsEqual(a, b *config.ProxyConfig) bool {
 		stringSlicesEqual(a.Domains, b.Domains) &&
 		a.Host == b.Host &&
 		a.Visibility == b.Visibility &&
+		a.CDN == b.CDN &&
 		a.TLS.Mode == b.TLS.Mode &&
 		a.TLS.Provider == b.TLS.Provider &&
 		a.TLS.Staging == b.TLS.Staging &&

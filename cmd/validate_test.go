@@ -173,11 +173,18 @@ environments:
     services:
       web:
         image: nginx:alpine
+        port: 3000
+        proxy:
+          domain: app.example.com
+          cdn: cloudflare
+          dynamicDomains:
+            ask: web:/api/domains/authorize
 `)
 	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), configData, 0600); err != nil {
 		t.Fatalf("failed to write valid config: %v", err)
 	}
 	resetValidateGlobals(t)
+	validateQuiet = true
 	restoreOutput := outputFormatFlag
 	outputFormatFlag = outputFormatJSON
 	t.Cleanup(func() { outputFormatFlag = restoreOutput })
@@ -205,6 +212,9 @@ environments:
 	}
 	if !result.MeshEnabled || result.MeshNetworkCIDR == "" {
 		t.Fatalf("mesh summary missing: %+v", result)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Severity != engine.ValidateSeverityWarn || result.Findings[0].Field != "proxy.dynamicDomains" {
+		t.Fatalf("warning findings missing: %+v", result.Findings)
 	}
 }
 

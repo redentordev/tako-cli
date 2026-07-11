@@ -46,6 +46,67 @@ func TestValidateConfigAcceptsAdditionalServingDomains(t *testing.T) {
 	}
 }
 
+func TestValidateConfigNormalizesAndValidatesCDN(t *testing.T) {
+	cfg := multiDomainValidationConfig(func(p *ProxyConfig) { p.CDN = " Cloudflare " })
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+	if got := cfg.Environments["production"].Services["web"].Proxy.CDN; got != ProxyCDNCloudflare {
+		t.Fatalf("proxy.cdn = %q, want cloudflare", got)
+	}
+
+	cfg = multiDomainValidationConfig(func(p *ProxyConfig) { p.CDN = "mystery-edge" })
+	if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "invalid proxy.cdn") {
+		t.Fatalf("invalid proxy.cdn error = %v", err)
+	}
+}
+
+func TestValidateConfigRejectsCDNOnInternalProxy(t *testing.T) {
+	cfg := multiDomainValidationConfig(func(p *ProxyConfig) {
+		p.Visibility = ProxyVisibilityInternal
+		p.Domain = ""
+		p.Domains = nil
+		p.CDN = ProxyCDNGeneric
+	})
+	if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "proxy.cdn requires public") {
+		t.Fatalf("internal proxy.cdn error = %v", err)
+	}
+}
+
+func TestValidateConfigWarnsForDynamicDomainsBehindCDN(t *testing.T) {
+	cfg := multiDomainValidationConfig(func(p *ProxyConfig) {
+		p.CDN = ProxyCDNCloudflare
+		p.DynamicDomains = &DynamicDomainsConfig{Ask: "web:/api/domains/authorize"}
+	})
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Port = 3000
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+	warnings := ValidationWarnings(cfg)
+	if len(warnings) != 1 || warnings[0].Field != "proxy.dynamicDomains" || !strings.Contains(warnings[0].Message, "dynamicDomains behind proxy.cdn=cloudflare") {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+}
+
+func TestValidateConfigClearsBlankCDNOnInternalProxy(t *testing.T) {
+	cfg := multiDomainValidationConfig(func(p *ProxyConfig) {
+		p.Visibility = ProxyVisibilityInternal
+		p.Domain = ""
+		p.Domains = nil
+		p.CDN = "   "
+	})
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+	if got := cfg.Environments["production"].Services["web"].Proxy.CDN; got != "" {
+		t.Fatalf("internal blank proxy.cdn = %q, want empty", got)
+	}
+}
+
 func TestValidateConfigNormalizesAdditionalDomains(t *testing.T) {
 	cfg := multiDomainValidationConfig(func(p *ProxyConfig) {
 		p.Domains = []string{" app.example.com "}

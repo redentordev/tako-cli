@@ -18,8 +18,9 @@ selected environment. With domain arguments, Tako checks those domains as
 ad-hoc domains against the same expected proxy targets.
 
 .PP
-The check is flexible: a domain is considered active when HTTPS works, even if
-DNS resolves through a CDN or external proxy instead of directly to the VPS.
+The probe reports a domain active when HTTPS works, even if DNS resolves through
+a CDN or external proxy instead of directly to the VPS. Strict mode accepts
+that heuristic only when the configured service declares proxy.cdn.
 
 
 .SH OPTIONS
@@ -32,7 +33,7 @@ DNS resolves through a CDN or external proxy instead of directly to the VPS.
 
 .PP
 \fB--strict\fP[=false]
-	Exit non-zero if any checked domain is not active
+	Exit non-zero unless every domain is active and any detected CDN is explicitly declared
 
 .PP
 \fB--target\fP=[]

@@ -264,14 +264,27 @@ services:
 - 301 permanent redirects for SEO
 - Path preservation (`www.example.com/api/users` → `example.com/api/users`)
 - Works with both HTTP and HTTPS traffic
-- Wildcard domains such as `*.example.com` are rejected for now; the built-in
-  proxy uses HTTP-01 certificate issuance and needs DNS-01 support before
-  wildcard certificates can be automated.
+- Wildcard domains such as `*.example.com` use the environment's embedded
+  DNS-01 provider configuration described below.
 
 Serve one service on several hostnames with `proxy.domains`, each with
 automatic HTTPS.
 
 ### Domain Readiness Checks
+
+#### Do you need DNS-01?
+
+| DNS and hostname model | Recommended certificate path | DNS API token? |
+| --- | --- | --- |
+| Grey-cloud `*.domain` A record with explicit hostnames | Caddy HTTP-01 (default) | No |
+| CDN-proxied/orange-cloud hostname | Tako DNS-01 or a pushed CDN Origin CA certificate | Yes for DNS-01; no for a pushed certificate |
+| More than 50 new hostnames per week under one registered domain | One DNS-01 wildcard certificate | Yes |
+
+Prefer the first row when it fits: a wildcard DNS record is not the same as a
+wildcard certificate. It can route any explicit hostname to Tako while Caddy
+issues an ordinary HTTP-01 certificate for each configured hostname, with no
+DNS token. Add DNS credentials only when the CDN prevents direct HTTP-01 or
+one wildcard certificate is the safer issuance model at scale.
 
 Deployments do not fail by default when DNS is still propagating. After a
 successful reconciliation, `tako deploy` checks DNS and TLS for public domains
@@ -290,6 +303,40 @@ tako domains status staging.example.com --target sites.example.com --wait 5m
 tako domains status --strict --wait 2m
 ```
 
+When DNS intentionally terminates at a CDN, declare that fact in config:
+
+```yaml
+services:
+  web:
+    port: 3000
+    proxy:
+      domain: example.com
+      cdn: cloudflare # or generic
+```
+
+When `proxy.cdn` is declared, valid HTTPS served from addresses other than the
+Tako origin reports the additive `dns: proxied` state and passes `--strict` and
+`--strict-domains`. Without the declaration, the same network observation is
+only a suspected-CDN human diagnostic; machine state remains `wrong_dns` /
+`wrong_target` and exits 6. Genuinely unpointed or TLS-pending domains also exit
+6 even with a CDN declaration.
+
+#### Cloudflare encryption modes
+
+| Cloudflare mode | Tako support | Certificate at the Tako origin |
+| --- | --- | --- |
+| Flexible | Unsupported | Cloudflare uses HTTP to the origin, which loops against Tako's `:80` HTTPS redirect |
+| Full | Works | Any certificate accepted by Cloudflare, including a Tako public certificate or pushed Origin CA certificate |
+| Full (Strict) | Recommended | A valid public certificate from Tako DNS-01, or a matching unexpired Cloudflare Origin CA certificate pushed with `tako certs push` |
+
+Cloudflare's **Always Use HTTPS** redirect can prevent HTTP-01 issuance or
+renewal from reaching Tako. Use DNS-01 or a pushed origin certificate before
+enabling it on proxied hostnames. The same reachability caveat applies to
+`dynamicDomains`: those customer hostnames remain Caddy-managed on-demand
+HTTP-01, so a CDN that intercepts challenges can turn the first TLS request
+into an issuance failure. Config validation warns when `dynamicDomains` and
+`proxy.cdn` are combined.
+
 When a service is behind a CDN or reverse proxy, declare only that provider's
 published egress CIDRs so Tako can recover the original client IP safely:
 
@@ -299,6 +346,7 @@ services:
     port: 3000
     proxy:
       domain: example.com
+      cdn: cloudflare
       allowIps:
         - 198.51.100.0/24
       trustedProxies:
