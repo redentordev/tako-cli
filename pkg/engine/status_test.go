@@ -152,6 +152,86 @@ func TestBuildStatusServiceInfoRepresentsRunAsDeployStep(t *testing.T) {
 	}
 }
 
+func TestMergeStatusActualStatesAggregatesHealthWorstWins(t *testing.T) {
+	nodeStates := []StatusNodeActualState{
+		{Server: "node-a", Services: map[string]*takod.ActualService{
+			"web": {Name: "web", Replicas: 1, Health: takod.HealthStateHealthy},
+		}},
+		{Server: "node-b", Services: map[string]*takod.ActualService{
+			"web": {Name: "web", Replicas: 1, Health: takod.HealthStateUnhealthy},
+		}},
+	}
+	merged := MergeStatusActualStates(nodeStates)
+	web := merged["web"]
+	if web == nil {
+		t.Fatal("missing merged web service")
+	}
+	if web.Health != takod.HealthStateUnhealthy {
+		t.Fatalf("merged health = %q, want unhealthy", web.Health)
+	}
+	if web.Replicas != 2 {
+		t.Fatalf("merged replicas = %d, want 2", web.Replicas)
+	}
+}
+
+func TestBuildStatusServiceInfoSurfacesImageStrategyAndHealth(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"web": {Image: "nginx:alpine", Port: 80},
+	}
+	actual := map[string]*takod.ActualService{
+		"web": {
+			Name:            "web",
+			Image:           "nginx:alpine",
+			Replicas:        1,
+			CurrentRevision: "abcdef1234567890",
+			DeployStrategy:  "rolling",
+			Health:          takod.HealthStateHealthy,
+		},
+	}
+	infos, err := BuildStatusServiceInfo(map[string]config.ServerConfig{"node-a": {Host: "node-a"}}, services, actual, nil, []string{"node-a"}, []string{"node-a"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("service infos = %#v, want one", infos)
+	}
+	if infos[0].Image != "nginx:alpine" || infos[0].Strategy != "rolling" || infos[0].Health != takod.HealthStateHealthy {
+		t.Fatalf("image/strategy/health = %q/%q/%q", infos[0].Image, infos[0].Strategy, infos[0].Health)
+	}
+}
+
+func TestAttachStatusServiceNodesBreaksDownPlacement(t *testing.T) {
+	infos := []StatusService{
+		{Name: "web"},
+		{Name: "reporter", Kind: config.ServiceKindJob},
+	}
+	nodeStates := []StatusNodeActualState{
+		{Server: "node-a", Services: map[string]*takod.ActualService{
+			"web": {Name: "web", Replicas: 2, WarmingContainers: []string{"warm-1"}, Health: takod.HealthStateHealthy},
+		}},
+		{Server: "node-b", Services: map[string]*takod.ActualService{}},
+		{Server: "node-c", Services: map[string]*takod.ActualService{
+			"web": {Name: "web", Replicas: 1, Health: takod.HealthStateStarting},
+		}},
+	}
+
+	AttachStatusServiceNodes(infos, nodeStates)
+
+	web := infos[0]
+	if len(web.Nodes) != 2 {
+		t.Fatalf("web nodes = %#v, want node-a and node-c only", web.Nodes)
+	}
+	if web.Nodes[0].Name != "node-a" || web.Nodes[0].Running != 2 || web.Nodes[0].Warming != 1 || web.Nodes[0].Health != takod.HealthStateHealthy {
+		t.Fatalf("node-a breakdown = %#v", web.Nodes[0])
+	}
+	if web.Nodes[1].Name != "node-c" || web.Nodes[1].Running != 1 || web.Nodes[1].Health != takod.HealthStateStarting {
+		t.Fatalf("node-c breakdown = %#v", web.Nodes[1])
+	}
+	if infos[1].Nodes != nil {
+		t.Fatalf("job rows must not gain a node breakdown, got %#v", infos[1].Nodes)
+	}
+}
+
 func TestStatusResultJSONShape(t *testing.T) {
 	result := StatusResult{
 		APIVersion:  takoapi.APIVersionCurrent,
@@ -169,6 +249,10 @@ func TestStatusResultJSONShape(t *testing.T) {
 			Ports:    "80",
 			Revision: "abcdef123456",
 			Warming:  1,
+			Image:    "nginx:alpine",
+			Strategy: "rolling",
+			Health:   takod.HealthStateHealthy,
+			Nodes:    []StatusServiceNode{{Name: "node-a", Running: 1, Health: takod.HealthStateHealthy}},
 		}},
 	}
 	payload, err := json.Marshal(result)
@@ -176,7 +260,7 @@ func TestStatusResultJSONShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	jsonText := string(payload)
-	for _, want := range []string{`"kind":"StatusResult"`, `"project":"demo"`, `"servers":["node-a"]`, `"services":[{"name":"web"`, `"desired":2`, `"running":1`} {
+	for _, want := range []string{`"kind":"StatusResult"`, `"project":"demo"`, `"servers":["node-a"]`, `"services":[{"name":"web"`, `"desired":2`, `"running":1`, `"image":"nginx:alpine"`, `"strategy":"rolling"`, `"health":"healthy"`, `"nodes":[{"name":"node-a","running":1,"health":"healthy"}]`} {
 		if !strings.Contains(jsonText, want) {
 			t.Fatalf("status JSON missing %s: %s", want, jsonText)
 		}

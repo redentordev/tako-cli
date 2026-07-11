@@ -530,6 +530,103 @@ func TestDriftResultDocumentGolden(t *testing.T) {
 	}
 }
 
+// TestStatusResultDocumentGolden pins the machine-facing ps schema,
+// including the dashboard fields (image, strategy, health, per-node
+// placement breakdown). health and nodes are empty when the node agent
+// predates health capture.
+func TestStatusResultDocumentGolden(t *testing.T) {
+	result := engine.StatusResult{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindStatusResult,
+		Project:     "demo",
+		Environment: "production",
+		Servers:     []string{"node-a", "node-b"},
+		Services: []engine.StatusService{
+			{
+				Name:     "web",
+				Desired:  2,
+				Running:  2,
+				Status:   "running",
+				Ports:    "8080-8081",
+				Revision: "abcdef123456",
+				Warming:  1,
+				Internal: false,
+				Image:    "demo/web:abcdef123456",
+				Strategy: "rolling",
+				Health:   takod.HealthStateHealthy,
+				Nodes: []engine.StatusServiceNode{
+					{Name: "node-a", Running: 1, Warming: 1, Health: takod.HealthStateHealthy},
+					{Name: "node-b", Running: 1},
+				},
+			},
+			{
+				Name:     "reporter",
+				Status:   "scheduled",
+				Ports:    "-",
+				Internal: true,
+				Kind:     "job",
+				Schedule: "0 3 * * *",
+				LastRun:  "success",
+			},
+		},
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "StatusResult",
+  "project": "demo",
+  "environment": "production",
+  "servers": [
+    "node-a",
+    "node-b"
+  ],
+  "services": [
+    {
+      "name": "web",
+      "desired": 2,
+      "running": 2,
+      "status": "running",
+      "ports": "8080-8081",
+      "revision": "abcdef123456",
+      "warming": 1,
+      "internal": false,
+      "image": "demo/web:abcdef123456",
+      "strategy": "rolling",
+      "health": "healthy",
+      "nodes": [
+        {
+          "name": "node-a",
+          "running": 1,
+          "warming": 1,
+          "health": "healthy"
+        },
+        {
+          "name": "node-b",
+          "running": 1
+        }
+      ]
+    },
+    {
+      "name": "reporter",
+      "desired": 0,
+      "running": 0,
+      "status": "scheduled",
+      "ports": "-",
+      "internal": true,
+      "kind": "job",
+      "schedule": "0 3 * * *",
+      "lastRun": "success"
+    }
+  ]
+}`
+	if string(payload) != want {
+		t.Fatalf("status result document drifted:\n%s", payload)
+	}
+}
+
 // TestMetricsResultDocumentGolden pins the machine-facing metrics schema.
 // The per-node `metrics` payload is the takod /v1/metrics document verbatim
 // (monitoring-agent schema) and is intentionally not repinned field-by-field.
