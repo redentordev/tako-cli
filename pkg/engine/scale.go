@@ -162,6 +162,9 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	if err := deploy.SetupTakodRuntime(); err != nil {
 		return nil, fmt.Errorf("failed to setup takod runtime: %w", err)
 	}
+	if err := deploy.PreflightTakodProxyCapabilities(services); err != nil {
+		return nil, err
+	}
 	startTime := time.Now()
 
 	if err := ctx.Err(); err != nil {

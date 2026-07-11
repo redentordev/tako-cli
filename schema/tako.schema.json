@@ -754,7 +754,15 @@
                       "items": {
                         "type": "string"
                       },
-                      "description": "Client IPs/CIDRs allowed to reach this service through the proxy; all others get 403. Matches the TCP peer address, so requests through a CDN match the CDN's address."
+                      "description": "Client IPs/CIDRs allowed to reach this service through the proxy; all others get 403. Matches the TCP peer unless trustedProxies is configured, then matches the parsed client IP."
+                    },
+                    "trustedProxies": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[^/]+/[0-9]+$"
+                      },
+                      "description": "Explicit proxy/CDN CIDRs whose forwarded client IP headers may be trusted. IPv4 prefixes broader than /8 and IPv6 prefixes broader than /24 are rejected. All routes sharing a proxy node must use the same nonempty set."
                     },
                     "tls": {
                       "type": "object",

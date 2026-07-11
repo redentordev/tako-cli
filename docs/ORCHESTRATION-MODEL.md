@@ -578,10 +578,22 @@ Per-service proxy access controls guard every route of a service.
 password, because a fresh bcrypt salt per deploy would churn the route-manifest
 hash and defeat idempotent redeploys. `proxy.allowIps` lists client IPs/CIDRs
 allowed through the proxy; all other addresses receive 403 before basic auth is
-evaluated. The allowlist matches the TCP peer address, so behind a CDN the
-CDN's egress address is what must be listed. Both controls are validated at
-config time and again by `takod` before route manifests reach the generated
-Caddy config.
+evaluated. By default the allowlist matches the TCP peer address. Set
+`proxy.trustedProxies` to the explicit CIDRs of a CDN or upstream proxy to make
+Caddy trust forwarded client addresses and evaluate `allowIps` against the real
+client IP. Forwarded chains are parsed right-to-left with Caddy's strict mode so
+client-supplied leftmost entries cannot override the trusted proxy chain.
+Prefixes broader than `/8` for IPv4 or `/24` for IPv6 are rejected;
+`0.0.0.0/0` and `::/0` are never accepted. Because Caddy's trust set is
+server-global, every route sharing a node that declares `trustedProxies` must
+declare the same nonempty CIDR set; conflicting sets fail before publication
+instead of letting one project weaken another project's trust boundary. Routes
+without `trustedProxies` keep evaluating their allowlist with `remote_ip`.
+Both controls are validated at config time and again by `takod` before route
+manifests reach the generated Caddy config. Networked domain checks warn when
+an access-controlled route appears to be behind a CDN without trusted proxies.
+Caddy's JSON access entries retain both `request.client_ip` and
+`request.remote_ip`; `tako access --verbose` labels the distinct TCP peer.
 
 One-node deployments use the same proxy path with only local upstreams and do
 not publish mesh host ports. Multi-node upstream ports are allocated and

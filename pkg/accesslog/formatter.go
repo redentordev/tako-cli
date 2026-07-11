@@ -174,6 +174,12 @@ func (f *Formatter) FormatLine(line string) (string, error) {
 		if log.RequestHost != "" {
 			output += fmt.Sprintf("\n  %sHost:%s %s", colorGray, colorReset, log.RequestHost)
 		}
+
+		// Caddy's JSON access log preserves both the parsed client address and
+		// the immediate TCP peer when trusted proxies are enabled.
+		if log.Request.RemoteIP != "" && log.Request.RemoteIP != log.ClientHost {
+			output += fmt.Sprintf("\n  %sPeer:%s %s", colorGray, colorReset, log.Request.RemoteIP)
+		}
 	}
 
 	return output, nil

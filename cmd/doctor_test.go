@@ -12,11 +12,32 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/health"
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/spf13/cobra"
 )
+
+func TestCheckProxyClientIPTopologyWarnsForWrongOrProxiedDNS(t *testing.T) {
+	specs := []engine.DomainStatusSpec{
+		{Service: "wrong", Domain: "wrong.example.com", WarnUntrustedAccessControls: true},
+		{Service: "proxied", Domain: "proxied.example.com", WarnUntrustedAccessControls: true},
+		{Service: "trusted", Domain: "trusted.example.com"},
+	}
+	var results []checkResult
+	checkProxyClientIPTopologyWith(func(result checkResult) {
+		results = append(results, result)
+	}, specs, []string{"203.0.113.10"}, func(spec engine.DomainStatusSpec) health.DomainStatus {
+		if spec.Service == "wrong" {
+			return health.DomainStatus{DNS: health.DomainDNSWrong}
+		}
+		return health.DomainStatus{DNS: health.DomainDNSProxied}
+	})
+	if len(results) != 2 || results[0].status != "WARN" || results[1].status != "WARN" {
+		t.Fatalf("results = %#v, want two warnings", results)
+	}
+}
 
 func TestRunDoctorMachineOutputMissingConfig(t *testing.T) {
 	switchToTempDir(t)

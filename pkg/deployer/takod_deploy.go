@@ -496,7 +496,7 @@ func (d *Deployer) ensureTakodCapability(client takodclient.RequestExecutor, ser
 			return nil
 		}
 	}
-	return fmt.Errorf("takod on %s does not support %s; upgrade the node agent (development builds can set TAKO_TAKOD_BINARY to a matching Linux binary)", serverName, feature)
+	return &takodclient.CapabilityRequiredError{Server: serverName, Capability: required, Feature: feature}
 }
 
 func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames []string) error {

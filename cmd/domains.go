@@ -134,6 +134,7 @@ func runDomainsStatus(cmd *cobra.Command, args []string) error {
 			ResolvedIPs: status.ResolvedIPs,
 			CNAME:       status.CNAME,
 			Message:     status.Message,
+			Warning:     status.Warning,
 			DNSError:    status.DNSError,
 			TLSError:    status.TLSError,
 		}

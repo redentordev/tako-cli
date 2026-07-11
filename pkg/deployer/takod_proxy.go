@@ -51,6 +51,25 @@ func (d *Deployer) ReconcileTakodProxyWithActiveRevisions(services map[string]co
 	return d.reconcileTakodProxyWithOptions(services, takodProxyRenderOptions{ActiveRevisions: normalizedRevisions})
 }
 
+// PreflightTakodProxyCapabilities verifies every proxy target understands all
+// route-manifest fields before an applying workflow mutates service state.
+func (d *Deployer) PreflightTakodProxyCapabilities(services map[string]config.ServiceConfig) error {
+	if !proxyServicesUseTrustedProxies(services) {
+		return nil
+	}
+	proxyServers, err := d.getTakodProxyTargetServers()
+	if err != nil {
+		return fmt.Errorf("failed to get takod proxy targets: %w", err)
+	}
+	return preflightTakodProxyCapabilitiesWithCheck(services, proxyServers, func(serverName string) error {
+		client, err := d.getEnvironmentClient(serverName)
+		if err != nil {
+			return err
+		}
+		return d.ensureTakodCapability(client, serverName, takod.CapabilityProxyTrustedProxiesV1, "proxy trusted proxies")
+	})
+}
+
 func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.ServiceConfig, options takodProxyRenderOptions) error {
 	allServers, err := d.getTakodTargetServers()
 	if err != nil {
@@ -64,45 +83,56 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 	if len(targets) == 0 {
 		return nil
 	}
-
 	targetNames := make([]string, 0, len(targets))
 	targetByName := make(map[string]takodProxyReconcileTarget, len(targets))
 	for _, target := range targets {
 		targetNames = append(targetNames, target.ServerName)
 		targetByName[target.ServerName] = target
 	}
-	return runTakodNodeActions(targetNames, func(serverName string) error {
-		target := targetByName[serverName]
-		client, err := d.getEnvironmentClient(serverName)
-		if err != nil {
-			return err
-		}
-		if !target.Reconcile {
-			if err := d.removeTakodProxyConfig(client); err != nil {
-				return fmt.Errorf("failed to remove proxy config: %w", err)
-			}
-			return nil
-		}
+	return runTakodProxyReconcile(
+		func() error { return d.PreflightTakodProxyCapabilities(services) },
+		func() error {
+			return runTakodNodeActions(targetNames, func(serverName string) error {
+				target := targetByName[serverName]
+				client, err := d.getEnvironmentClient(serverName)
+				if err != nil {
+					return err
+				}
+				if !target.Reconcile {
+					if err := d.removeTakodProxyConfig(client); err != nil {
+						return fmt.Errorf("failed to remove proxy config: %w", err)
+					}
+					return nil
+				}
 
-		dynamicConfig, hasPublicServices, err := d.renderTakodProxyDynamicConfigForNodeWithOptions(services, serverName, options)
-		if err != nil {
-			return err
-		}
-		if !hasPublicServices {
-			if err := d.removeTakodProxyConfig(client); err != nil {
-				return fmt.Errorf("failed to remove proxy config: %w", err)
-			}
-			return nil
-		}
+				dynamicConfig, hasPublicServices, err := d.renderTakodProxyDynamicConfigForNodeWithOptions(services, serverName, options)
+				if err != nil {
+					return err
+				}
+				if !hasPublicServices {
+					if err := d.removeTakodProxyConfig(client); err != nil {
+						return fmt.Errorf("failed to remove proxy config: %w", err)
+					}
+					return nil
+				}
 
-		if err := d.writeTakodProxyConfig(client, dynamicConfig); err != nil {
-			return fmt.Errorf("failed to write proxy config: %w", err)
-		}
-		if err := d.ensureTakodProxy(client, takodNetworkName(d.config.Project.Name, d.environment), firstProxyEmail(services)); err != nil {
-			return fmt.Errorf("failed to reconcile proxy: %w", err)
-		}
-		return nil
-	})
+				if err := d.writeTakodProxyConfig(client, dynamicConfig); err != nil {
+					return fmt.Errorf("failed to write proxy config: %w", err)
+				}
+				if err := d.ensureTakodProxy(client, takodNetworkName(d.config.Project.Name, d.environment), firstProxyEmail(services)); err != nil {
+					return fmt.Errorf("failed to reconcile proxy: %w", err)
+				}
+				return nil
+			})
+		},
+	)
+}
+
+func runTakodProxyReconcile(preflight func() error, mutate func() error) error {
+	if err := preflight(); err != nil {
+		return err
+	}
+	return mutate()
 }
 
 func normalizeTakodProxyActiveRevisions(services map[string]config.ServiceConfig, activeRevisions map[string]string) (map[string]string, error) {
@@ -245,15 +275,16 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 		}
 
 		route := takod.ProxyRoute{
-			Service:      serviceName,
-			Revision:     revision,
-			Domains:      domains,
-			RedirectFrom: redirects,
-			Upstreams:    upstreams,
-			HealthCheck:  proxyRouteHealthCheckForService(service),
-			Sticky:       service.LoadBalancer.Strategy == "sticky",
-			Visibility:   service.Proxy.EffectiveVisibility(),
-			AllowIPs:     append([]string(nil), service.Proxy.AllowIps...),
+			Service:        serviceName,
+			Revision:       revision,
+			Domains:        domains,
+			RedirectFrom:   redirects,
+			Upstreams:      upstreams,
+			HealthCheck:    proxyRouteHealthCheckForService(service),
+			Sticky:         service.LoadBalancer.Strategy == "sticky",
+			Visibility:     service.Proxy.EffectiveVisibility(),
+			AllowIPs:       append([]string(nil), service.Proxy.AllowIps...),
+			TrustedProxies: append([]string(nil), service.Proxy.TrustedProxies...),
 		}
 		if auth := service.Proxy.BasicAuth; auth != nil {
 			route.BasicAuth = &takod.ProxyRouteBasicAuth{
@@ -280,6 +311,22 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 		return nil, false, fmt.Errorf("failed to render proxy route manifest: %w", err)
 	}
 	return data, true, nil
+}
+
+func proxyServicesUseTrustedProxies(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.IsProxied() && service.Proxy != nil && len(service.Proxy.TrustedProxies) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func preflightTakodProxyCapabilitiesWithCheck(services map[string]config.ServiceConfig, proxyServers []string, check func(string) error) error {
+	if !proxyServicesUseTrustedProxies(services) {
+		return nil
+	}
+	return runTakodNodeActions(proxyServers, check)
 }
 
 func proxyActiveRevisionForService(activeRevisions map[string]string, serviceName string) string {

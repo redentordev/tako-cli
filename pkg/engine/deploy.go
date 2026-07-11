@@ -533,6 +533,9 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		return nil, err
 	}
 	s.deployer.SetBaseContext(ctx)
+	if err := s.deployer.PreflightTakodProxyCapabilities(s.allServices); err != nil {
+		return nil, err
+	}
 
 	e := s.engine
 	defer e.flushBuildOutput()

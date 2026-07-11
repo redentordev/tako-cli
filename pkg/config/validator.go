@@ -1943,7 +1943,32 @@ func validateProxyAccessControls(serviceName string, proxy *ProxyConfig) error {
 		}
 		proxy.AllowIps[i] = trimmed
 	}
+	trustedProxies := make(map[string]struct{}, len(proxy.TrustedProxies))
+	for _, entry := range proxy.TrustedProxies {
+		trimmed := strings.TrimSpace(entry)
+		prefix, err := netip.ParsePrefix(trimmed)
+		if err != nil {
+			return fmt.Errorf("service %s: invalid proxy.trustedProxies CIDR %q", serviceName, trimmed)
+		}
+		prefix = prefix.Masked()
+		if trustedProxyPrefixTooBroad(prefix) {
+			return fmt.Errorf("service %s: proxy.trustedProxies CIDR %q is too broad (minimum prefix is /8 for IPv4 and /24 for IPv6)", serviceName, trimmed)
+		}
+		trustedProxies[prefix.String()] = struct{}{}
+	}
+	proxy.TrustedProxies = proxy.TrustedProxies[:0]
+	for prefix := range trustedProxies {
+		proxy.TrustedProxies = append(proxy.TrustedProxies, prefix)
+	}
+	sort.Strings(proxy.TrustedProxies)
 	return nil
+}
+
+func trustedProxyPrefixTooBroad(prefix netip.Prefix) bool {
+	if prefix.Addr().Is4() {
+		return prefix.Bits() < 8
+	}
+	return prefix.Bits() < 24
 }
 
 func validateInternalProxy(projectName string, envName string, serviceName string, proxy *ProxyConfig) error {

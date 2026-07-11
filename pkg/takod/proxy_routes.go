@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -37,18 +38,19 @@ type ProxyRouteManifest struct {
 }
 
 type ProxyRoute struct {
-	Service       string               `json:"service"`
-	Revision      string               `json:"revision,omitempty"`
-	Domains       []string             `json:"domains,omitempty"`
-	RedirectFrom  []string             `json:"redirectFrom,omitempty"`
-	Upstreams     []string             `json:"upstreams"`
-	HealthCheck   *ProxyRouteHealth    `json:"healthCheck,omitempty"`
-	Sticky        bool                 `json:"sticky,omitempty"`
-	Priority      int                  `json:"priority,omitempty"`
-	Visibility    string               `json:"visibility,omitempty"`
-	DynamicDomain *ProxyDynamicDomain  `json:"dynamicDomain,omitempty"`
-	BasicAuth     *ProxyRouteBasicAuth `json:"basicAuth,omitempty"`
-	AllowIPs      []string             `json:"allowIps,omitempty"`
+	Service        string               `json:"service"`
+	Revision       string               `json:"revision,omitempty"`
+	Domains        []string             `json:"domains,omitempty"`
+	RedirectFrom   []string             `json:"redirectFrom,omitempty"`
+	Upstreams      []string             `json:"upstreams"`
+	HealthCheck    *ProxyRouteHealth    `json:"healthCheck,omitempty"`
+	Sticky         bool                 `json:"sticky,omitempty"`
+	Priority       int                  `json:"priority,omitempty"`
+	Visibility     string               `json:"visibility,omitempty"`
+	DynamicDomain  *ProxyDynamicDomain  `json:"dynamicDomain,omitempty"`
+	BasicAuth      *ProxyRouteBasicAuth `json:"basicAuth,omitempty"`
+	AllowIPs       []string             `json:"allowIps,omitempty"`
+	TrustedProxies []string             `json:"trustedProxies,omitempty"`
 }
 
 // ProxyRouteBasicAuth protects a route's serving domains with HTTP basic
@@ -165,6 +167,11 @@ func validateProxyRouteManifest(manifest *ProxyRouteManifest) error {
 				return fmt.Errorf("route %s: invalid allow IP entry %q", route.Service, entry)
 			}
 		}
+		for _, entry := range route.TrustedProxies {
+			if !isSafeTrustedProxyPrefix(entry) {
+				return fmt.Errorf("route %s: invalid trusted proxy CIDR %q", route.Service, entry)
+			}
+		}
 	}
 	return nil
 }
@@ -240,6 +247,16 @@ func renderCaddyfile(manifests []ProxyRouteManifest) (string, error) {
 	var b strings.Builder
 	b.WriteString("{\n")
 	b.WriteString("\temail {$TAKO_PROXY_EMAIL}\n")
+	trustedProxies, err := proxyTrustedProxySet(effectiveRoutes)
+	if err != nil {
+		return "", err
+	}
+	if len(trustedProxies) > 0 {
+		b.WriteString("\tservers {\n")
+		b.WriteString("\t\ttrusted_proxies static " + strings.Join(trustedProxies, " ") + "\n")
+		b.WriteString("\t\ttrusted_proxies_strict\n")
+		b.WriteString("\t}\n")
+	}
 	if dynamicRoute != nil {
 		b.WriteString("\ton_demand_tls {\n")
 		b.WriteString("\t\task " + dynamicRoute.DynamicDomain.AskURL + "\n")
@@ -411,7 +428,11 @@ func writeCaddyRoute(b *strings.Builder, address string, route ProxyRoute) {
 		// handle blocks force the allowlist to win before basic_auth:
 		// Caddy's default directive order would otherwise run basic_auth
 		// ahead of a bare respond matcher and 401 denied addresses.
-		b.WriteString("\t@tako_allowed remote_ip " + strings.Join(route.AllowIPs, " ") + "\n")
+		matcher := "remote_ip"
+		if len(route.TrustedProxies) > 0 {
+			matcher = "client_ip"
+		}
+		b.WriteString("\t@tako_allowed " + matcher + " " + strings.Join(route.AllowIPs, " ") + "\n")
 		b.WriteString("\thandle @tako_allowed {\n")
 		writeCaddyBasicAuth(b, "\t\t", route)
 		writeCaddyReverseProxy(b, "\t\t", address, route)
@@ -513,6 +534,48 @@ func isSafeProxyAllowIP(value string) bool {
 		return err == nil
 	}
 	return net.ParseIP(value) != nil
+}
+
+func isSafeTrustedProxyPrefix(value string) bool {
+	if strings.TrimSpace(value) != value || value == "" {
+		return false
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil || prefix != prefix.Masked() {
+		return false
+	}
+	if prefix.Addr().Is4() {
+		return prefix.Bits() >= 8
+	}
+	return prefix.Bits() >= 24
+}
+
+func proxyTrustedProxySet(routes []ProxyRoute) ([]string, error) {
+	var selected []string
+	selectedService := ""
+	for _, route := range routes {
+		if len(route.TrustedProxies) == 0 {
+			continue
+		}
+		seen := make(map[string]struct{}, len(route.TrustedProxies))
+		for _, prefix := range route.TrustedProxies {
+			seen[prefix] = struct{}{}
+		}
+		current := make([]string, 0, len(seen))
+		for prefix := range seen {
+			current = append(current, prefix)
+		}
+		sort.Strings(current)
+		if selected == nil {
+			selected = current
+			selectedService = route.Service
+			continue
+		}
+		if strings.Join(current, "\x00") != strings.Join(selected, "\x00") {
+			return nil, fmt.Errorf("proxy routes %s and %s declare conflicting trusted proxy CIDR sets; all routes sharing a node must use the same nonempty proxy.trustedProxies set", selectedService, route.Service)
+		}
+	}
+	return selected, nil
 }
 
 func isSafeProxyHost(value string) bool {

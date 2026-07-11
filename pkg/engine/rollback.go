@@ -253,6 +253,9 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	if err := deploy.SetupTakodRuntime(); err != nil {
 		return nil, fmt.Errorf("failed to setup takod runtime: %w", err)
 	}
+	if err := deploy.PreflightTakodProxyCapabilities(services); err != nil {
+		return nil, err
+	}
 
 	if err := ctx.Err(); err != nil {
 		return nil, err

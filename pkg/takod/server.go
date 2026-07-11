@@ -97,6 +97,10 @@ const CapabilityExecOneOffControlsV1 = "exec.oneoff-controls-v1"
 // atomically publish request-scoped operator file bundles and bind mount them.
 const CapabilityServiceFilesV1 = "service.files-v1"
 
+// CapabilityProxyTrustedProxiesV1 means proxy route manifests accept explicit
+// trusted proxy CIDRs and render Caddy's trusted client IP handling.
+const CapabilityProxyTrustedProxiesV1 = "proxy.trusted-proxies-v1"
+
 func NewServer(socket string, dataDir string, version string) *Server {
 	return NewServerWithOptions(socket, dataDir, version, ServerOptions{})
 }
@@ -1391,7 +1395,7 @@ func (s *Server) Status() Status {
 	status := Status{
 		Runtime:      "takod",
 		Version:      s.version,
-		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1},
+		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1},
 		Hostname:     hostname,
 		Socket:       s.socket,
 		DataDir:      s.dataDir,

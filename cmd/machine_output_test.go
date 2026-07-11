@@ -801,7 +801,7 @@ func TestDomainsResultDocumentsGolden(t *testing.T) {
 		ExpectedTargets: []string{"203.0.113.10"},
 		AllActive:       false,
 		Domains: []engine.DomainStatusEntry{
-			{Service: "web", Domain: "app.example.com", Role: "serving", State: "active", DNS: "direct", TLS: "active", ResolvedIPs: []string{"203.0.113.10"}},
+			{Service: "web", Domain: "app.example.com", Role: "serving", State: "active", DNS: "proxied", TLS: "active", ResolvedIPs: []string{"198.51.100.20"}, Warning: "access controls are configured behind a suspected proxy/CDN without proxy.trustedProxies"},
 			{Service: "web", Domain: "www.example.com", Role: "redirect", State: "pending_dns", DNS: "unresolved", TLS: "unknown", DNSError: "no such host"},
 		},
 	}
@@ -824,11 +824,12 @@ func TestDomainsResultDocumentsGolden(t *testing.T) {
       "domain": "app.example.com",
       "role": "serving",
       "state": "active",
-      "dns": "direct",
+      "dns": "proxied",
       "tls": "active",
       "resolvedIps": [
-        "203.0.113.10"
-      ]
+        "198.51.100.20"
+      ],
+      "warning": "access controls are configured behind a suspected proxy/CDN without proxy.trustedProxies"
     },
     {
       "service": "web",

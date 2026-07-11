@@ -29,6 +29,7 @@ type DomainStatusEntry struct {
 	ResolvedIPs []string `json:"resolvedIps,omitempty"`
 	CNAME       string   `json:"cname,omitempty"`
 	Message     string   `json:"message,omitempty"`
+	Warning     string   `json:"warning,omitempty"`
 	DNSError    string   `json:"dnsError,omitempty"`
 	TLSError    string   `json:"tlsError,omitempty"`
 }
@@ -70,9 +71,10 @@ type DomainsHostsResult struct {
 
 // DomainStatusSpec identifies one public domain to check.
 type DomainStatusSpec struct {
-	Service string
-	Domain  string
-	Role    string
+	Service                     string
+	Domain                      string
+	Role                        string
+	WarnUntrustedAccessControls bool
 }
 
 // DomainStatusOptions controls domain readiness monitoring.
@@ -95,11 +97,12 @@ func CollectConfiguredDomainSpecs(services map[string]config.ServiceConfig, serv
 		if service.Proxy == nil || !service.IsPublic() {
 			continue
 		}
+		warnUntrustedAccessControls := (service.Proxy.BasicAuth != nil || len(service.Proxy.AllowIps) > 0) && len(service.Proxy.TrustedProxies) == 0
 		for _, domain := range service.Proxy.GetAllDomains() {
-			specs = append(specs, DomainStatusSpec{Service: serviceName, Domain: domain, Role: "serving"})
+			specs = append(specs, DomainStatusSpec{Service: serviceName, Domain: domain, Role: "serving", WarnUntrustedAccessControls: warnUntrustedAccessControls})
 		}
 		for _, domain := range service.Proxy.GetRedirectDomains() {
-			specs = append(specs, DomainStatusSpec{Service: serviceName, Domain: domain, Role: "redirect"})
+			specs = append(specs, DomainStatusSpec{Service: serviceName, Domain: domain, Role: "redirect", WarnUntrustedAccessControls: warnUntrustedAccessControls})
 		}
 	}
 	return specs
@@ -146,6 +149,7 @@ func (e *Engine) MonitorDomainStatuses(ctx context.Context, checker *health.Heal
 		allReady := true
 		for _, spec := range specs {
 			status := checker.CheckDomain(ctx, spec.Service, spec.Domain, options.ExpectedTargets)
+			applyDomainAccessControlWarning(&status, spec)
 			results = append(results, status)
 			if status.Pending() {
 				allReady = false
@@ -185,6 +189,13 @@ func (e *Engine) MonitorDomainStatuses(ctx context.Context, checker *health.Heal
 	}
 }
 
+func applyDomainAccessControlWarning(status *health.DomainStatus, spec DomainStatusSpec) {
+	if status == nil || !spec.WarnUntrustedAccessControls || (status.DNS != health.DomainDNSProxied && status.DNS != health.DomainDNSWrong) {
+		return
+	}
+	status.Warning = "access controls are configured behind a suspected proxy/CDN without proxy.trustedProxies; original client IPs cannot be trusted"
+}
+
 func (e *Engine) emitDomainStatusAttempt(attempt int, statuses []health.DomainStatus) {
 	for _, status := range statuses {
 		message := fmt.Sprintf("   [%d] %s (%s): %s", attempt, status.Domain, status.Service, status.State)
@@ -197,11 +208,18 @@ func (e *Engine) emitDomainStatusAttempt(attempt int, statuses []health.DomainSt
 		if status.CNAME != "" {
 			message += fmt.Sprintf(" [cname: %s]", status.CNAME)
 		}
+		if status.Warning != "" {
+			message += fmt.Sprintf(" [warning: %s]", status.Warning)
+		}
 		message += "\n"
+		level := events.LevelInfo
+		if status.Warning != "" {
+			level = events.LevelWarn
+		}
 		e.emit(events.Event{
 			Type:    events.TypeDomainStatus,
 			Phase:   events.PhaseDomains,
-			Level:   events.LevelInfo,
+			Level:   level,
 			Service: status.Service,
 			Message: message,
 			Data: map[string]any{

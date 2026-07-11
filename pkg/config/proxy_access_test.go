@@ -92,6 +92,29 @@ func TestValidateProxyAllowIps(t *testing.T) {
 	}
 }
 
+func TestValidateProxyTrustedProxies(t *testing.T) {
+	cfg := proxyAccessValidationConfig(func(p *ProxyConfig) {
+		p.TrustedProxies = []string{" 2001:db8::1/32 ", "203.0.113.99/24", "203.0.113.0/24"}
+	})
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+	got := cfg.Environments["production"].Services["web"].Proxy.TrustedProxies
+	want := []string{"2001:db8::/32", "203.0.113.0/24"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("trustedProxies = %v, want canonical sorted %v", got, want)
+	}
+
+	for _, bad := range []string{"", "203.0.113.1", "0.0.0.0/0", "10.0.0.0/7", "::/0", "2001:db8::/23"} {
+		cfg := proxyAccessValidationConfig(func(p *ProxyConfig) {
+			p.TrustedProxies = []string{bad}
+		})
+		if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "trustedProxies") {
+			t.Fatalf("trustedProxies entry %q: error = %v, want trustedProxies error", bad, err)
+		}
+	}
+}
+
 func TestValidateResourcesCPUs(t *testing.T) {
 	for _, good := range []string{"0.5", "2", "1.25"} {
 		cfg := proxyAccessValidationConfig(nil)
