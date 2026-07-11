@@ -46,6 +46,7 @@ environments:
         port: 80
         proxy:
           domain: app.example.com
+          cdn: cloudflare
 `)
 	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), configData, 0600); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -77,6 +78,7 @@ environments:
 		"replicas: 1 (default)",
 		"deploy.strategy: recreate (default)",
 		"proxy.domain: app.example.com (config)",
+		"proxy.cdn: cloudflare (config)",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("output = %q, want %q", out.String(), want)

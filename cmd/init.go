@@ -284,6 +284,7 @@ environments:
           # Primary explicit hostname where traffic is served.
           # Wildcards such as *.example.com require environment.proxy.acme.
           domain: %s.${TAKO_PRODUCTION_HOST}.sslip.io  # sslip.io provides automatic DNS
+          # cdn: cloudflare  # or generic; required for strict checks when DNS is CDN-proxied
           
           # Domain redirects (301 redirect to primary domain with path preservation)
           # redirectFrom:

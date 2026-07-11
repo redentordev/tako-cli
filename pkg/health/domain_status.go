@@ -44,6 +44,7 @@ type DomainStatus struct {
 	TLS             DomainTLSState
 	ResolvedIPs     []string
 	CNAME           string
+	CDN             string
 	ExpectedTargets []string
 	ExpectedIPs     []string
 	Message         string

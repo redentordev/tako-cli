@@ -104,6 +104,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	for _, warning := range config.ValidationWarnings(cfg) {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning.Message)
+	}
 
 	request := engine.DeployRequest{
 		Config:          cfg,

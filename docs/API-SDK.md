@@ -44,7 +44,10 @@ commands in `cmd/` are thin adapters over this package.
 - Public domain reachability is available as `MonitorDomainStatuses(ctx,
   checker, specs, options)`, which probes serving domains (including
   `proxy.domains` extras) and emits progress events; `tako domains status`
-  wraps it into a `DomainsResult`.
+  wraps it into a `DomainsResult`. `DomainStatusSpec.CDN` carries the explicit
+  config declaration separately from heuristic `dns: proxied` detection, and
+  strict mode returns the typed attention/exit-6 class when that declaration
+  is absent.
 - Certificate command adapters use the additive `CertsResult` contract. Node
   entries expose certificate domain, source, validity timestamps, and, for
   managed DNS-01 certificates, ownership/DNS-provider/CA-provider/orphan/attempt/cooldown

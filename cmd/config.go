@@ -123,6 +123,9 @@ func runConfigExplain(cmd *cobra.Command, args []string) error {
 			if service.Proxy.Domain != "" {
 				fmt.Fprintf(out, "    proxy.domain: %s (%s)\n", service.Proxy.Domain, explainStringSource(rawServiceProxyDomain(rawService)))
 			}
+			if service.Proxy.CDN != "" {
+				fmt.Fprintf(out, "    proxy.cdn: %s (%s)\n", service.Proxy.CDN, explainStringSource(rawServiceProxyCDN(rawService)))
+			}
 			if service.Proxy.Host != "" {
 				fmt.Fprintf(out, "    proxy.host: %s (%s)\n", service.Proxy.Host, runtimeStringSource(rawCfg, rawService.Proxy != nil && rawService.Proxy.Host != "", rawServiceProxyHost(rawService)))
 			}
@@ -229,6 +232,13 @@ func rawServiceProxyHost(service takoconfig.ServiceConfig) string {
 		return ""
 	}
 	return service.Proxy.Host
+}
+
+func rawServiceProxyCDN(service takoconfig.ServiceConfig) string {
+	if service.Proxy == nil {
+		return ""
+	}
+	return service.Proxy.CDN
 }
 
 func rawServiceProxyVisibility(service takoconfig.ServiceConfig) string {

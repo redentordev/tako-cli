@@ -110,6 +110,47 @@ func ValidateConfig(cfg *Config) error {
 	return nil
 }
 
+// ValidationWarning is a non-fatal, structured config diagnostic.
+type ValidationWarning struct {
+	Environment string
+	Service     string
+	Field       string
+	Message     string
+}
+
+// ValidationWarnings returns deterministic diagnostics after ValidateConfig.
+func ValidationWarnings(cfg *Config) []ValidationWarning {
+	var warnings []ValidationWarning
+	if cfg == nil {
+		return warnings
+	}
+	environmentNames := make([]string, 0, len(cfg.Environments))
+	for name := range cfg.Environments {
+		environmentNames = append(environmentNames, name)
+	}
+	sort.Strings(environmentNames)
+	for _, environmentName := range environmentNames {
+		environment := cfg.Environments[environmentName]
+		serviceNames := make([]string, 0, len(environment.Services))
+		for name := range environment.Services {
+			serviceNames = append(serviceNames, name)
+		}
+		sort.Strings(serviceNames)
+		for _, serviceName := range serviceNames {
+			proxy := environment.Services[serviceName].Proxy
+			if proxy != nil && proxy.CDN != "" && proxy.DynamicDomains != nil && proxy.DynamicDomains.IsEnabled() {
+				warnings = append(warnings, ValidationWarning{
+					Environment: environmentName,
+					Service:     serviceName,
+					Field:       "proxy.dynamicDomains",
+					Message:     fmt.Sprintf("environment %s service %s uses proxy.dynamicDomains behind proxy.cdn=%s; on-demand HTTP-01 issuance can fail when the CDN does not pass ACME challenge requests through to Tako", environmentName, serviceName, proxy.CDN),
+				})
+			}
+		}
+	}
+	return warnings
+}
+
 func validateDeploymentConfig(cfg *Config) error {
 	if cfg.Deployment == nil || cfg.Deployment.Build == nil {
 		return nil
@@ -1807,8 +1848,14 @@ func validateProxy(projectName string, envName string, serviceName string, proxy
 	default:
 		return fmt.Errorf("service %s: invalid proxy visibility %q (must be public or internal)", serviceName, proxy.Visibility)
 	}
+	proxy.CDN = strings.ToLower(strings.TrimSpace(proxy.CDN))
 	if proxy.Visibility == ProxyVisibilityInternal {
 		return validateInternalProxy(projectName, envName, serviceName, proxy)
+	}
+	switch proxy.CDN {
+	case "", ProxyCDNCloudflare, ProxyCDNGeneric:
+	default:
+		return fmt.Errorf("service %s: invalid proxy.cdn %q (must be cloudflare or generic)", serviceName, proxy.CDN)
 	}
 	if strings.TrimSpace(proxy.Host) != "" {
 		return fmt.Errorf("service %s: proxy.host is only supported when proxy.visibility is internal", serviceName)
@@ -1995,6 +2042,9 @@ func trustedProxyPrefixTooBroad(prefix netip.Prefix) bool {
 }
 
 func validateInternalProxy(projectName string, envName string, serviceName string, proxy *ProxyConfig) error {
+	if strings.TrimSpace(proxy.CDN) != "" {
+		return fmt.Errorf("service %s: proxy.cdn requires public proxy visibility", serviceName)
+	}
 	if proxy.DynamicDomains != nil && proxy.DynamicDomains.IsEnabled() {
 		return fmt.Errorf("service %s: dynamicDomains requires public proxy visibility", serviceName)
 	}

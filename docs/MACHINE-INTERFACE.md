@@ -153,7 +153,7 @@ per-server outcomes (`name`, `host`, `destroyed`, `error`), timings, and
 `error` when destruction was incomplete. `tako validate --output json`
 returns a `ValidateResult` with the resolved `configPath`,
 project/environment, `valid`, `findings` (`severity`, `path`, `field`,
-`message`) when invalid, and the resolved environment summary (runtime,
+`message`) for errors and non-fatal validation warnings, and the resolved environment summary (runtime,
 state backend, consistency, mesh, server/service counts) when valid;
 invalid configs exit with code 2 and still emit the document. `tako doctor
 --output json` returns a `DoctorResult` with project/environment,
@@ -203,9 +203,11 @@ certificate copies. `tako
 domains status --output json` returns a `DomainsResult` with
 project/environment, the expected DNS targets, `allActive`, and per-domain
 entries (`service`, `domain`, `role` `serving|redirect|ad-hoc`, `state`,
-`dns`, `tls`, resolved IPs, cname, message, optional access-control
-`warning`, and errors); with `--strict`, pending
-domains exit 6 and still emit the document. Serving entries cover the
+`dns`, `tls`, resolved IPs, cname, the additive explicit `cdn` declaration,
+message, optional `warning`, and errors). `state: active,dns: proxied` is
+reported only when `cdn` is explicitly `cloudflare` or `generic`; an
+undeclared suspected CDN stays wrong/unready. Pending domains also exit 6,
+and every strict failure still emits the document. Serving entries cover the
 primary `proxy.domain` plus every additional `proxy.domains` hostname. `tako domains hosts --output
 json` returns a `DomainsHostsResult` with the `--address` mode and
 `entries` (`service`, `host`, `address`, `server`, `source`). `tako

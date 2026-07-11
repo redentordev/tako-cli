@@ -813,6 +813,11 @@
                       },
                       "description": "Explicit proxy/CDN CIDRs whose forwarded client IP headers may be trusted. IPv4 prefixes broader than /8 and IPv6 prefixes broader than /24 are rejected. All routes sharing a proxy node must use the same nonempty set."
                     },
+                    "cdn": {
+                      "type": "string",
+                      "enum": ["cloudflare", "generic"],
+                      "description": "Explicitly declares that DNS terminates at an external CDN. Required for strict domain readiness when DNS probes detect a proxied edge."
+                    },
                     "tls": {
                       "type": "object",
                       "properties": {

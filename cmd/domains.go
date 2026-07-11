@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -38,8 +39,9 @@ Without arguments, Tako checks the explicit proxy domains configured for the
 selected environment. With domain arguments, Tako checks those domains as
 ad-hoc domains against the same expected proxy targets.
 
-The check is flexible: a domain is considered active when HTTPS works, even if
-DNS resolves through a CDN or external proxy instead of directly to the VPS.`,
+The probe reports a domain active when HTTPS works, even if DNS resolves through
+a CDN or external proxy instead of directly to the VPS. Strict mode accepts
+that heuristic only when the configured service declares proxy.cdn.`,
 	RunE: runDomainsStatus,
 }
 
@@ -60,7 +62,7 @@ func init() {
 	domainsCmd.AddCommand(domainsHostsCmd)
 	domainsStatusCmd.Flags().StringVarP(&domainsService, "service", "s", "", "Only check configured domains for one service")
 	domainsStatusCmd.Flags().DurationVar(&domainsWait, "wait", 0, "Wait up to this duration for DNS/TLS to become active (for example 2m); 0 checks once")
-	domainsStatusCmd.Flags().BoolVar(&domainsStrict, "strict", false, "Exit non-zero if any checked domain is not active")
+	domainsStatusCmd.Flags().BoolVar(&domainsStrict, "strict", false, "Exit non-zero unless every domain is active and any detected CDN is explicitly declared")
 	domainsStatusCmd.Flags().StringArrayVar(&domainsExpectedTargets, "target", nil, "Expected DNS target; repeat for custom edge/CNAME targets (defaults to proxy server hosts)")
 	domainsHostsCmd.Flags().StringVarP(&domainsHostsService, "service", "s", "", "Only print internal hosts for one service")
 	domainsHostsCmd.Flags().StringVar(&domainsHostsAddress, "address", "auto", "Address source: auto, private, mesh, or ssh")
@@ -77,16 +79,10 @@ func runDomainsStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	specs := collectConfiguredDomainSpecs(env.Services, domainsService)
+	configuredSpecs := collectConfiguredDomainSpecs(env.Services, domainsService)
+	specs := configuredSpecs
 	if len(args) > 0 {
-		specs = make([]domainStatusSpec, 0, len(args))
-		serviceName := domainsService
-		if serviceName == "" {
-			serviceName = "ad-hoc"
-		}
-		for _, domain := range args {
-			specs = append(specs, domainStatusSpec{Service: serviceName, Domain: domain, Role: "ad-hoc"})
-		}
+		specs = collectAdHocDomainSpecs(args, configuredSpecs, domainsService)
 	}
 
 	result := engine.DomainsResult{
@@ -133,6 +129,7 @@ func runDomainsStatus(cmd *cobra.Command, args []string) error {
 			TLS:         string(status.TLS),
 			ResolvedIPs: status.ResolvedIPs,
 			CNAME:       status.CNAME,
+			CDN:         status.CDN,
 			Message:     status.Message,
 			Warning:     status.Warning,
 			DNSError:    status.DNSError,
@@ -150,4 +147,31 @@ func runDomainsStatus(cmd *cobra.Command, args []string) error {
 		err = emitErr
 	}
 	return err
+}
+
+func collectAdHocDomainSpecs(domains []string, configured []domainStatusSpec, serviceFilter string) []domainStatusSpec {
+	configuredByDomain := make(map[string]domainStatusSpec, len(configured))
+	for _, spec := range configured {
+		configuredByDomain[domainStatusKey(spec.Domain)] = spec
+	}
+	specs := make([]domainStatusSpec, 0, len(domains))
+	for _, domain := range domains {
+		serviceName := serviceFilter
+		cdn := ""
+		if match, ok := configuredByDomain[domainStatusKey(domain)]; ok {
+			cdn = match.CDN
+			if serviceName == "" {
+				serviceName = match.Service
+			}
+		}
+		if serviceName == "" {
+			serviceName = "ad-hoc"
+		}
+		specs = append(specs, domainStatusSpec{Service: serviceName, Domain: domain, Role: "ad-hoc", CDN: cdn})
+	}
+	return specs
+}
+
+func domainStatusKey(domain string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
 }
