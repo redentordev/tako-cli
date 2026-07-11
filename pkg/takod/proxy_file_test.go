@@ -2,11 +2,96 @@ package takod
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestCaddyfileConformanceMatrix(t *testing.T) {
+	hash := takodTestBcryptHash
+	tests := []struct {
+		name         string
+		route        ProxyRoute
+		certificates []proxyCertificateEntry
+		wantHash     string
+		contains     []string
+		forbidden    []string
+	}{
+		{
+			name:      "public baseline",
+			route:     ProxyRoute{Service: "web", Domains: []string{"example.com"}, Upstreams: []string{"http://web:3000"}},
+			wantHash:  "2513ff975e992f48aca49ea69612b422c909227b22dff2553666d872a0b1385c",
+			forbidden: []string{"trusted_proxies", "client_ip", "basic_auth"},
+		},
+		{
+			name:      "internal",
+			route:     ProxyRoute{Service: "admin", Domains: []string{"admin.production.demo.tako.internal"}, Upstreams: []string{"http://admin:3000"}, Visibility: proxyRouteVisibilityInternal},
+			wantHash:  "ebc4578f22e9cfff8bbe992c8c32098e90f607c1679dc9eab84448fad148cd64",
+			contains:  []string{"http://admin.production.demo.tako.internal {"},
+			forbidden: []string{"trusted_proxies", "client_ip"},
+		},
+		{
+			name:      "dynamic domains",
+			route:     ProxyRoute{Service: "renderer", Upstreams: []string{"http://renderer:3000"}, DynamicDomain: &ProxyDynamicDomain{AskURL: "http://admin:3000/api/domains/authorize"}},
+			wantHash:  "8ec4fe390767814fb199bc1a450ed0c98b873c81d1ee2d587daaab686c701e50",
+			contains:  []string{"on_demand_tls", "ask http://admin:3000/api/domains/authorize", ":443 {"},
+			forbidden: []string{"trusted_proxies", "client_ip"},
+		},
+		{
+			name:      "auth allowlist redirects and multiple domains",
+			route:     ProxyRoute{Service: "web", Domains: []string{"example.com", "app.example.com"}, RedirectFrom: []string{"www.example.com"}, Upstreams: []string{"http://web:3000"}, BasicAuth: &ProxyRouteBasicAuth{Username: "admin", PasswordBcrypt: hash}, AllowIPs: []string{"198.51.100.0/24"}},
+			wantHash:  "4809415a93d6e12e97eff76f3d31cf9d099a295ddecf037bd58fa98f5a60659c",
+			contains:  []string{"basic_auth {", "@tako_allowed remote_ip 198.51.100.0/24", "redir https://example.com{uri} 308"},
+			forbidden: []string{"trusted_proxies", "client_ip"},
+		},
+		{
+			name:      "trusted proxies with auth allowlist redirects and multiple domains",
+			route:     ProxyRoute{Service: "web", Domains: []string{"example.com", "app.example.com"}, RedirectFrom: []string{"www.example.com"}, Upstreams: []string{"http://web:3000"}, BasicAuth: &ProxyRouteBasicAuth{Username: "admin", PasswordBcrypt: hash}, AllowIPs: []string{"198.51.100.0/24"}, TrustedProxies: []string{"10.0.0.0/8", "203.0.113.0/24"}},
+			wantHash:  "6acd3bc8534bf8b222764737e8aaadb3ef66f4d8eef542577e50a8a1f42658bb",
+			contains:  []string{"trusted_proxies static 10.0.0.0/8 203.0.113.0/24", "trusted_proxies_strict", "@tako_allowed client_ip 198.51.100.0/24", "basic_auth {", "redir https://example.com{uri} 308"},
+			forbidden: []string{"@tako_allowed remote_ip"},
+		},
+		{
+			name:  "BYO certificates with dynamic authority redirects and multiple domains",
+			route: ProxyRoute{Service: "renderer", Domains: []string{"example.com", "app.example.com"}, RedirectFrom: []string{"www.example.com"}, Upstreams: []string{"http://renderer:3000"}, DynamicDomain: &ProxyDynamicDomain{AskURL: "http://admin:3000/api/domains/authorize"}},
+			certificates: []proxyCertificateEntry{
+				{Metadata: ProxyCertificateMetadata{Domain: "example.com"}, CertPath: "/var/lib/tako/certs/example.com/cert.pem", KeyPath: "/var/lib/tako/certs/example.com/key.pem"},
+				{Metadata: ProxyCertificateMetadata{Domain: "app.example.com"}, CertPath: "/var/lib/tako/certs/app.example.com/cert.pem", KeyPath: "/var/lib/tako/certs/app.example.com/key.pem"},
+				{Metadata: ProxyCertificateMetadata{Domain: "www.example.com"}, CertPath: "/var/lib/tako/certs/www.example.com/cert.pem", KeyPath: "/var/lib/tako/certs/www.example.com/key.pem"},
+			},
+			wantHash: "c78fec120cd6e4bb894374f79673887767aa7452947fa7d00e448cdb99336315",
+			contains: []string{"tls /var/lib/tako/certs/example.com/cert.pem /var/lib/tako/certs/example.com/key.pem", "tls /var/lib/tako/certs/app.example.com/cert.pem /var/lib/tako/certs/app.example.com/key.pem", "tls /var/lib/tako/certs/www.example.com/cert.pem /var/lib/tako/certs/www.example.com/key.pem", "on_demand_tls", ":443 {"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := renderCaddyfileWithCertificates([]ProxyRouteManifest{{
+				Version: 1, Project: "demo", Environment: "production", Routes: []ProxyRoute{tt.route},
+			}}, tt.certificates)
+			if err != nil {
+				t.Fatalf("renderCaddyfile returned error: %v", err)
+			}
+			gotHash := fmt.Sprintf("%x", sha256.Sum256([]byte(got)))
+			if gotHash != tt.wantHash {
+				t.Errorf("Caddyfile golden hash = %s, want %s\n%s", gotHash, tt.wantHash, got)
+			}
+			for _, fragment := range tt.contains {
+				if !strings.Contains(got, fragment) {
+					t.Errorf("Caddyfile missing %q:\n%s", fragment, got)
+				}
+			}
+			for _, fragment := range tt.forbidden {
+				if strings.Contains(got, fragment) {
+					t.Errorf("Caddyfile unexpectedly contains %q:\n%s", fragment, got)
+				}
+			}
+		})
+	}
+}
 
 func TestWriteAndRemoveProxyFile(t *testing.T) {
 	useTempProxyPaths(t)
@@ -67,18 +152,21 @@ func useTempProxyPaths(t *testing.T) string {
 	oldCaddyDataDir := proxyCaddyDataDir
 	oldCaddyConfigDir := proxyCaddyConfigDir
 	oldLogDir := proxyLogDir
+	oldCertStoreDir := proxyCertStoreDir
 	root := t.TempDir()
 	proxyRoutesDir = filepath.Join(root, "routes")
 	proxyCaddyfilePath = filepath.Join(root, "caddy", "Caddyfile")
 	proxyCaddyDataDir = filepath.Join(root, "caddy-data")
 	proxyCaddyConfigDir = filepath.Join(root, "caddy-config")
 	proxyLogDir = filepath.Join(root, "logs")
+	proxyCertStoreDir = filepath.Join(root, "certs")
 	t.Cleanup(func() {
 		proxyRoutesDir = oldRoutesDir
 		proxyCaddyfilePath = oldCaddyfilePath
 		proxyCaddyDataDir = oldCaddyDataDir
 		proxyCaddyConfigDir = oldCaddyConfigDir
 		proxyLogDir = oldLogDir
+		proxyCertStoreDir = oldCertStoreDir
 	})
 	return root
 }

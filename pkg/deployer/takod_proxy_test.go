@@ -2,6 +2,7 @@ package deployer
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 func TestRenderTakodProxyDynamicConfigUsesLocalAndMeshUpstreams(t *testing.T) {
@@ -604,9 +606,10 @@ func TestRenderTakodProxyDynamicConfigCarriesAccessControls(t *testing.T) {
 	// bcrypt("s3cret", cost 10) — a fixed fixture, not a secret.
 	hash := "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
 	web.Proxy = &config.ProxyConfig{
-		Domain:    "example.com",
-		BasicAuth: &config.ProxyBasicAuthConfig{Username: "admin", PasswordBcrypt: hash},
-		AllowIps:  []string{"203.0.113.0/24", "10.0.0.1"},
+		Domain:         "example.com",
+		BasicAuth:      &config.ProxyBasicAuthConfig{Username: "admin", PasswordBcrypt: hash},
+		AllowIps:       []string{"203.0.113.0/24", "10.0.0.1"},
+		TrustedProxies: []string{"10.0.0.0/8", "2001:db8::/32"},
 	}
 	services["web"] = web
 
@@ -619,6 +622,69 @@ func TestRenderTakodProxyDynamicConfigCarriesAccessControls(t *testing.T) {
 		t.Fatalf("basicAuth = %#v, want admin + hash carried into manifest", route.BasicAuth)
 	}
 	assertStringsEqual(t, route.AllowIPs, []string{"203.0.113.0/24", "10.0.0.1"})
+	assertStringsEqual(t, route.TrustedProxies, []string{"10.0.0.0/8", "2001:db8::/32"})
+}
+
+func TestProxyServicesUseTrustedProxiesOnlyForProxiedServices(t *testing.T) {
+	if proxyServicesUseTrustedProxies(map[string]config.ServiceConfig{
+		"web": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "example.com", TrustedProxies: []string{"10.0.0.0/8"}}},
+	}) != true {
+		t.Fatal("proxied service with trusted proxies must require the daemon capability")
+	}
+	if proxyServicesUseTrustedProxies(map[string]config.ServiceConfig{
+		"web":    {Port: 3000, Proxy: &config.ProxyConfig{Domain: "example.com"}},
+		"worker": {},
+	}) {
+		t.Fatal("services without trusted proxies must not require the daemon capability")
+	}
+}
+
+func TestPreflightTakodProxyCapabilitiesRunsBeforeMutationAndSkipsWhenUnset(t *testing.T) {
+	trusted := map[string]config.ServiceConfig{
+		"web": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "example.com", TrustedProxies: []string{"203.0.113.0/24"}}},
+	}
+	var phases []string
+	err := preflightTakodProxyCapabilitiesWithCheck(trusted, []string{"node-a"}, func(string) error {
+		phases = append(phases, "status")
+		return &takodclient.CapabilityRequiredError{Server: "node-a", Capability: takod.CapabilityProxyTrustedProxiesV1, Feature: "proxy trusted proxies"}
+	})
+	if err == nil {
+		phases = append(phases, "mutation")
+	}
+	if got := strings.Join(phases, ","); got != "status" {
+		t.Fatalf("phases = %q, want status only", got)
+	}
+
+	checks := 0
+	unset := map[string]config.ServiceConfig{
+		"web": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "example.com"}},
+	}
+	if err := preflightTakodProxyCapabilitiesWithCheck(unset, []string{"node-a"}, func(string) error {
+		checks++
+		return nil
+	}); err != nil {
+		t.Fatalf("unset preflight returned error: %v", err)
+	}
+	if checks != 0 {
+		t.Fatalf("unset trusted proxies performed %d status check(s), want 0", checks)
+	}
+}
+
+func TestRunTakodProxyReconcileStaleAgentStopsBeforeMutation(t *testing.T) {
+	mutations := 0
+	err := runTakodProxyReconcile(func() error {
+		return &takodclient.CapabilityRequiredError{Server: "node-a", Capability: takod.CapabilityProxyTrustedProxiesV1, Feature: "proxy trusted proxies"}
+	}, func() error {
+		mutations++
+		return nil
+	})
+	var capabilityErr *takodclient.CapabilityRequiredError
+	if !errors.As(err, &capabilityErr) {
+		t.Fatalf("error = %v, want CapabilityRequiredError", err)
+	}
+	if mutations != 0 {
+		t.Fatalf("mutations = %d, want 0", mutations)
+	}
 }
 
 func testProxyDeployer() *Deployer {

@@ -214,6 +214,9 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 		return nil, err
 	}
 	s.deployer.SetBaseContext(ctx)
+	if err := s.deployer.PreflightTakodProxyCapabilities(s.services); err != nil {
+		return nil, err
+	}
 
 	e := s.engine
 	defer e.flushBuildOutput()

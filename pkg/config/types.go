@@ -434,9 +434,13 @@ type ProxyConfig struct {
 	BasicAuth *ProxyBasicAuthConfig `yaml:"basicAuth,omitempty" json:"basicAuth,omitempty"`
 
 	// AllowIps restricts the route to the listed client IPs/CIDRs; other
-	// addresses receive 403. The match uses the TCP peer address, so it
-	// does not see original client IPs behind a CDN or other proxy.
+	// addresses receive 403. It matches the TCP peer unless TrustedProxies
+	// is configured, in which case it matches Caddy's parsed client IP.
 	AllowIps []string `yaml:"allowIps,omitempty" json:"allowIps,omitempty"`
+
+	// TrustedProxies declares the explicit proxy/CDN CIDRs whose forwarded
+	// client IP headers Caddy may trust for this route. CIDRs only.
+	TrustedProxies []string `yaml:"trustedProxies,omitempty" json:"trustedProxies,omitempty"`
 }
 
 // ProxyBasicAuthConfig protects a proxy route with HTTP basic auth.

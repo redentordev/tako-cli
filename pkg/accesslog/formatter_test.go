@@ -33,6 +33,19 @@ func TestFormatterVerboseIncludesCaddyHost(t *testing.T) {
 	}
 }
 
+func TestFormatterPreservesDistinctTrustedClientAndTCPPeer(t *testing.T) {
+	formatter := NewFormatter(true)
+	line := `{"ts":1813348800,"request":{"method":"GET","host":"app.example.com","uri":"/","client_ip":"198.51.100.25","remote_ip":"203.0.113.10"},"status":200}`
+
+	got, err := formatter.FormatLine(line)
+	if err != nil {
+		t.Fatalf("FormatLine returned error: %v", err)
+	}
+	if !strings.Contains(got, "198.51.100.25") || !strings.Contains(got, "Peer:") || !strings.Contains(got, "203.0.113.10") {
+		t.Fatalf("formatted log did not preserve distinct client and peer: %q", got)
+	}
+}
+
 func TestFormatterFiltersCaddyServiceLogger(t *testing.T) {
 	formatter := NewFormatter(false)
 	formatter.SetServiceFilter("web")

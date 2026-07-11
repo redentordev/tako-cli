@@ -47,6 +47,7 @@ type DomainStatus struct {
 	ExpectedTargets []string
 	ExpectedIPs     []string
 	Message         string
+	Warning         string
 	DNSError        string
 	TLSError        string
 	SSL             *SSLInfo

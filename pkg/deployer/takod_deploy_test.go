@@ -460,6 +460,17 @@ func TestEnsureTakodRuntimeControlsCapabilityFailsClosed(t *testing.T) {
 	}
 }
 
+func TestEnsureTakodTrustedProxyCapabilityFailsClosedWithUpgradeCommand(t *testing.T) {
+	deploy := &Deployer{config: &config.Config{}}
+	err := deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+		output: `{"capabilities":["service.files-v1"]}`,
+	}, "node-a", takod.CapabilityProxyTrustedProxiesV1, "proxy trusted proxies")
+	var capabilityErr *takodclient.CapabilityRequiredError
+	if err == nil || !errors.As(err, &capabilityErr) || capabilityErr.Capability != takod.CapabilityProxyTrustedProxiesV1 || !strings.Contains(err.Error(), "does not support proxy trusted proxies") || !strings.Contains(err.Error(), "tako upgrade servers") {
+		t.Fatalf("ensureTakodCapability() error = %v", err)
+	}
+}
+
 func TestRunTakodBuildStrategyPreflightsEveryRemoteBuild(t *testing.T) {
 	tests := []struct {
 		name         string

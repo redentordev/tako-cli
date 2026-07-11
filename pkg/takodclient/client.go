@@ -34,6 +34,19 @@ type contextStreamExecutor interface {
 	ExecuteStreamWithContext(ctx context.Context, cmd string, stdout io.Writer, stderr io.Writer) error
 }
 
+// HTTPError preserves a non-success takod response status so command adapters
+// can map rejected input to their typed machine error taxonomy.
+type HTTPError struct {
+	Method   string
+	Endpoint string
+	Status   int
+	Body     string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("takod request %s %s returned HTTP %d: %s", e.Method, e.Endpoint, e.Status, strings.TrimSpace(e.Body))
+}
+
 func RequestJSON(client RequestExecutor, socket string, method string, endpoint string, value any) (string, error) {
 	return RequestJSONWithContext(context.Background(), client, socket, method, endpoint, value)
 }
@@ -91,7 +104,7 @@ func RequestJSONWithTimeoutContext(ctx context.Context, client RequestExecutor, 
 	}
 	bodyOutput = sanitizeJSONOutput(bodyOutput)
 	if hasStatus && status >= 400 {
-		return bodyOutput, fmt.Errorf("takod request %s %s returned HTTP %d: %s", method, endpoint, status, strings.TrimSpace(bodyOutput))
+		return bodyOutput, &HTTPError{Method: method, Endpoint: endpoint, Status: status, Body: bodyOutput}
 	}
 	return bodyOutput, nil
 }
@@ -293,6 +306,13 @@ func ExecEndpoint() string {
 
 func ProxyFileEndpoint(name string) string {
 	return "/v1/proxy-file?name=" + url.QueryEscape(name)
+}
+
+func CertificatesEndpoint(domain string) string {
+	if strings.TrimSpace(domain) == "" {
+		return "/v1/certs"
+	}
+	return "/v1/certs?domain=" + url.QueryEscape(domain)
 }
 
 func StateEndpoint(project string, environment string, document string) string {

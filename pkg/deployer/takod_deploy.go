@@ -483,20 +483,7 @@ func (d *Deployer) ensureTakodContainerArgvCapability(client takodclient.Request
 }
 
 func (d *Deployer) ensureTakodCapability(client takodclient.RequestExecutor, serverName string, required string, feature string) error {
-	output, err := takodclient.RequestJSON(client, d.takodSocket(), "GET", "/v1/status", nil)
-	if err != nil {
-		return fmt.Errorf("failed to verify takod capabilities on %s: %w", serverName, err)
-	}
-	var status takod.Status
-	if err := json.Unmarshal([]byte(output), &status); err != nil {
-		return fmt.Errorf("failed to parse takod status from %s: %w", serverName, err)
-	}
-	for _, capability := range status.Capabilities {
-		if capability == required {
-			return nil
-		}
-	}
-	return fmt.Errorf("takod on %s does not support %s; upgrade the node agent (development builds can set TAKO_TAKOD_BINARY to a matching Linux binary)", serverName, feature)
+	return takodclient.RequireCapability(d.baseContext(), client, d.takodSocket(), serverName, required, feature)
 }
 
 func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames []string) error {

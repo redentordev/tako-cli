@@ -578,10 +578,46 @@ Per-service proxy access controls guard every route of a service.
 password, because a fresh bcrypt salt per deploy would churn the route-manifest
 hash and defeat idempotent redeploys. `proxy.allowIps` lists client IPs/CIDRs
 allowed through the proxy; all other addresses receive 403 before basic auth is
-evaluated. The allowlist matches the TCP peer address, so behind a CDN the
-CDN's egress address is what must be listed. Both controls are validated at
-config time and again by `takod` before route manifests reach the generated
-Caddy config.
+evaluated. By default the allowlist matches the TCP peer address. Set
+`proxy.trustedProxies` to the explicit CIDRs of a CDN or upstream proxy to make
+Caddy trust forwarded client addresses and evaluate `allowIps` against the real
+client IP. Forwarded chains are parsed right-to-left with Caddy's strict mode so
+client-supplied leftmost entries cannot override the trusted proxy chain.
+Prefixes broader than `/8` for IPv4 or `/24` for IPv6 are rejected;
+`0.0.0.0/0` and `::/0` are never accepted. Because Caddy's trust set is
+server-global, every route sharing a node that declares `trustedProxies` must
+declare the same nonempty CIDR set; conflicting sets fail before publication
+instead of letting one project weaken another project's trust boundary. Routes
+without `trustedProxies` keep evaluating their allowlist with `remote_ip`.
+Both controls are validated at config time and again by `takod` before route
+manifests reach the generated Caddy config. Networked domain checks warn when
+an access-controlled route appears to be behind a CDN without trusted proxies.
+Caddy's JSON access entries retain both `request.client_ip` and
+`request.remote_ip`; `tako access --verbose` labels the distinct TCP peer.
+
+The proxy certificate store lives at `/var/lib/tako/certs/<domain>/` on each
+node. It is node-global and cross-project by design: all projects already share
+one Caddy TLS boundary, so an ingress project can push `*.platform.example.com`
+and customer-project routes on the same node can consume it. Selection is
+deterministic per hostname: exact entry, then the most-specific covering
+wildcard, then unchanged automatic HTTPS. Internal HTTP routes never consume a
+certificate-store entry.
+
+`tako certs push` sends the PEM pair in the takod request body. Before atomic
+0600 publication, takod parses the chain and key, proves the keypair matches,
+checks validity and hostname/wildcard coverage, and rejects expired material.
+Caddyfiles reference only entries revalidated from disk. The store is mounted
+read-only into stock Caddy, and proxy recreation regenerates and validates the
+Caddyfile before starting the container, guarding the reboot/startup path that
+`caddy adapt` alone cannot validate. Push/remove operations are lease-free and
+serialized locally; atomic replacement plus graceful reload makes a concurrent
+deploy benign, with the last valid Caddyfile winning.
+
+Certificate files and keys are intentionally excluded from replicated state,
+drift, and backups. They are lost with the node and must be re-pushed; CLI-only
+operators must keep their own secure copies. `tako certs ls` exposes source and
+expiry so an external control plane can track replacement without ever reading
+private keys back from the node.
 
 One-node deployments use the same proxy path with only local upstreams and do
 not publish mesh host ports. Multi-node upstream ports are allocated and

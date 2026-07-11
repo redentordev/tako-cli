@@ -71,6 +71,7 @@ const (
 	TypeCleanupCompleted = "cleanup.completed"
 	TypeNotificationSent = "notification.sent"
 	TypeDomainStatus     = "domain.status"
+	TypeCertificate      = "certificate.operation"
 
 	// TypeStatsSample carries one node's point-in-time container stats in
 	// `tako stats --follow --events ndjson`; data holds server, host, and

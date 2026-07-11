@@ -290,6 +290,58 @@ tako domains status staging.example.com --target sites.example.com --wait 5m
 tako domains status --strict --wait 2m
 ```
 
+When a service is behind a CDN or reverse proxy, declare only that provider's
+published egress CIDRs so Tako can recover the original client IP safely:
+
+```yaml
+services:
+  web:
+    port: 3000
+    proxy:
+      domain: example.com
+      allowIps:
+        - 198.51.100.0/24
+      trustedProxies:
+        - 203.0.113.0/24
+        - 2001:db8::/32
+```
+
+`trustedProxies` accepts CIDRs only. IPv4 prefixes broader than `/8` and IPv6
+prefixes broader than `/24` are rejected, including the catch-all networks
+`0.0.0.0/0` and `::/0`. Without this setting, `allowIps` continues to match the
+direct TCP peer. Networked domain checks emit a warning when access controls
+appear to sit behind an external proxy/CDN without trusted proxies configured.
+All routes sharing one proxy node that set `trustedProxies` must use the same
+CIDR set because Caddy's client-IP trust policy is server-global; conflicting
+sets are rejected rather than merged.
+
+### Bring-your-own TLS certificates
+
+Push a pre-issued public or origin certificate to every proxy node in the
+selected environment:
+
+```bash
+tako certs push '*.platform.example.com' \
+  --cert ./fullchain.pem \
+  --key ./private-key.pem \
+  -e production
+tako certs ls -e production
+tako certs rm '*.platform.example.com' -e production
+```
+
+Use `--server node-a` to target one proxy node explicitly. Certificate and key
+PEM are sent in the request body, never command arguments. The node rejects
+garbage, mismatched, not-yet-valid, expired, or hostname-incompatible pairs
+before changing the Caddyfile. Exact-domain certificates take precedence over
+the most-specific covering wildcard; a route with no covering store entry
+continues to use automatic HTTPS. Removing an entry regenerates the proxy
+configuration and returns affected routes to automatic handling.
+
+The store is node-global and deliberately shared by all projects on that node,
+matching the single-operator trust model of the shared Caddy ingress. Files are
+0600 and node-local: they are not replicated, drift-checked, or backed up, and
+node replacement requires a re-push. Keep your own secure certificate copies.
+
 ## Dynamic Customer Domains
 
 For CMS-style apps that authorize generated or customer domains at runtime,

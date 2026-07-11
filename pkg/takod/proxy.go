@@ -117,6 +117,9 @@ func ensureProxyDirectories() error {
 			return fmt.Errorf("failed to create %s: %w", dir, err)
 		}
 	}
+	if err := ensureSecureProxyCertificateDirectory(proxyCertStoreDir); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -182,6 +185,7 @@ func buildProxyContainerArgs(req ReconcileProxyRequest) []string {
 		"--volume", proxyCaddyDataDir + ":/data",
 		"--volume", proxyCaddyConfigDir + ":/config",
 		"--volume", proxyLogDir + ":/var/log/caddy",
+		"--volume", proxyCertStoreDir + ":" + proxyCertContainerDir + ":ro",
 		"--label", "tako.runtime=takod",
 		"--label", "tako.component=proxy",
 		req.Image,
@@ -268,22 +272,31 @@ func proxyPortExists(ports map[string]json.RawMessage, port string) bool {
 	return ok
 }
 
+type proxyMount struct {
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+	RW          bool   `json:"RW"`
+}
+
 func proxyMountsAreCurrent(raw string) bool {
-	var mounts []struct {
-		Source      string `json:"Source"`
-		Destination string `json:"Destination"`
-	}
+	var mounts []proxyMount
 	if err := json.Unmarshal([]byte(raw), &mounts); err != nil {
 		return false
 	}
 	requiredMounts := map[string]string{
-		"/etc/caddy":     filepath.Dir(proxyCaddyfilePath),
-		"/data":          proxyCaddyDataDir,
-		"/config":        proxyCaddyConfigDir,
-		"/var/log/caddy": proxyLogDir,
+		"/etc/caddy":          filepath.Dir(proxyCaddyfilePath),
+		"/data":               proxyCaddyDataDir,
+		"/config":             proxyCaddyConfigDir,
+		"/var/log/caddy":      proxyLogDir,
+		proxyCertContainerDir: proxyCertStoreDir,
 	}
 	for destination, source := range requiredMounts {
 		if !proxyMountExists(mounts, source, destination) {
+			return false
+		}
+	}
+	for _, mount := range mounts {
+		if mount.Destination == proxyCertContainerDir && mount.RW {
 			return false
 		}
 	}
@@ -304,10 +317,7 @@ func proxyEnvIsCurrent(raw string, email string) bool {
 	return false
 }
 
-func proxyMountExists(mounts []struct {
-	Source      string `json:"Source"`
-	Destination string `json:"Destination"`
-}, source string, destination string) bool {
+func proxyMountExists(mounts []proxyMount, source string, destination string) bool {
 	for _, mount := range mounts {
 		if mount.Source == source && mount.Destination == destination {
 			return true

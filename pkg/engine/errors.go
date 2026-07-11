@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 // Class categorizes engine errors for machine consumers. The CLI maps
@@ -91,6 +93,10 @@ func Classify(err error) Class {
 	}
 	var confirmation *ConfirmationRequiredError
 	if errors.As(err, &confirmation) {
+		return ClassInvalid
+	}
+	var capability *takodclient.CapabilityRequiredError
+	if errors.As(err, &capability) {
 		return ClassInvalid
 	}
 	var locked *LockedError

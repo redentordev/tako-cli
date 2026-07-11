@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/health"
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
@@ -48,6 +50,7 @@ Checks performed:
   - Server agent version (skip with --skip-remote)
   - Node agent health: takod /healthz, mesh status, disk pressure (skip with --skip-remote)
   - Docker runtime and proxy runtime (skip with --skip-remote)
+  - Proxy/CDN client-IP topology (skip with --skip-remote)
   - Replicated deployment/runtime state (skip with --skip-remote)
   - Running services (skip with --skip-remote)
 
@@ -161,6 +164,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		"Node Agent Health",
 		"Docker Runtime",
 		"Proxy Runtime",
+		"Proxy Client IP",
 		"Running Services",
 		"Replicated State",
 		"External Volumes",
@@ -182,12 +186,15 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		checkProxyRuntime(record, cfg, envName, clients)
 
 		heading(remoteSections[5])
-		checkRunningServices(record, cfg, envName, clients)
+		checkProxyClientIPTopology(cmd.Context(), record, cfg, envName)
 
 		heading(remoteSections[6])
-		checkReplicatedState(record, cfg, envName, clients)
+		checkRunningServices(record, cfg, envName, clients)
 
 		heading(remoteSections[7])
+		checkReplicatedState(record, cfg, envName, clients)
+
+		heading(remoteSections[8])
 		checkExternalVolumes(record, cfg, envName, clients)
 
 		// Clean up clients
@@ -202,6 +209,43 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	return finish()
+}
+
+func checkProxyClientIPTopology(ctx context.Context, record func(checkResult), cfg *config.Config, envName string) {
+	services, err := cfg.GetServices(envName)
+	if err != nil {
+		record(checkResult{"WARN", fmt.Sprintf("Cannot inspect proxy client-IP topology: %v", err), "Fix the environment configuration"})
+		return
+	}
+	specs := engine.CollectConfiguredDomainSpecs(services, "")
+	targets, err := engine.DomainExpectedTargets(cfg, envName, nil)
+	if err != nil {
+		record(checkResult{"WARN", fmt.Sprintf("Cannot resolve expected proxy targets: %v", err), "Check environment proxy placement"})
+		return
+	}
+	checker := health.NewHealthChecker()
+	checkProxyClientIPTopologyWith(record, specs, targets, func(spec engine.DomainStatusSpec) health.DomainStatus {
+		return checker.CheckDomain(ctx, spec.Service, spec.Domain, targets)
+	})
+}
+
+func checkProxyClientIPTopologyWith(record func(checkResult), specs []engine.DomainStatusSpec, targets []string, check func(engine.DomainStatusSpec) health.DomainStatus) {
+	checked := 0
+	for _, spec := range specs {
+		if !spec.WarnUntrustedAccessControls {
+			continue
+		}
+		checked++
+		status := check(spec)
+		if status.DNS == health.DomainDNSProxied || status.DNS == health.DomainDNSWrong {
+			record(checkResult{"WARN", fmt.Sprintf("%s (%s): access controls appear behind a proxy/CDN without proxy.trustedProxies", spec.Domain, spec.Service), "Set proxy.trustedProxies to the upstream proxy's explicit CIDRs"})
+			continue
+		}
+		record(checkResult{"PASS", fmt.Sprintf("%s (%s): no untrusted proxy/CDN client-IP mismatch detected", spec.Domain, spec.Service), ""})
+	}
+	if checked == 0 {
+		record(checkResult{"SKIP", "No access-controlled public routes without trusted proxies", ""})
+	}
 }
 
 // Node agent health probes use a short timeout so a wedged takod cannot

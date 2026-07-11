@@ -801,7 +801,7 @@ func TestDomainsResultDocumentsGolden(t *testing.T) {
 		ExpectedTargets: []string{"203.0.113.10"},
 		AllActive:       false,
 		Domains: []engine.DomainStatusEntry{
-			{Service: "web", Domain: "app.example.com", Role: "serving", State: "active", DNS: "direct", TLS: "active", ResolvedIPs: []string{"203.0.113.10"}},
+			{Service: "web", Domain: "app.example.com", Role: "serving", State: "active", DNS: "proxied", TLS: "active", ResolvedIPs: []string{"198.51.100.20"}, Warning: "access controls are configured behind a suspected proxy/CDN without proxy.trustedProxies"},
 			{Service: "web", Domain: "www.example.com", Role: "redirect", State: "pending_dns", DNS: "unresolved", TLS: "unknown", DNSError: "no such host"},
 		},
 	}
@@ -824,11 +824,12 @@ func TestDomainsResultDocumentsGolden(t *testing.T) {
       "domain": "app.example.com",
       "role": "serving",
       "state": "active",
-      "dns": "direct",
+      "dns": "proxied",
       "tls": "active",
       "resolvedIps": [
-        "203.0.113.10"
-      ]
+        "198.51.100.20"
+      ],
+      "warning": "access controls are configured behind a suspected proxy/CDN without proxy.trustedProxies"
     },
     {
       "service": "web",
@@ -877,6 +878,56 @@ func TestDomainsResultDocumentsGolden(t *testing.T) {
 }`
 	if string(payload) != wantHosts {
 		t.Fatalf("domains hosts document drifted:\n%s", payload)
+	}
+}
+
+func TestCertsResultDocumentGoldenExcludesPrivateMaterial(t *testing.T) {
+	started := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	expires := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	result := engine.CertsResult{
+		APIVersion: takoapi.APIVersionCurrent,
+		Kind:       engine.KindCertsResult,
+		Project:    "demo", Environment: "production", Action: "list",
+		Nodes: []engine.CertsNodeResult{{
+			Server: "node-a", Host: "203.0.113.10",
+			Certificates: []takod.ProxyCertificateMetadata{{Domain: "*.example.com", Source: takod.CertificateSourcePushed, NotAfter: expires}},
+		}},
+		StartedAt: started, Duration: 0.25,
+	}
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "CertsResult",
+  "project": "demo",
+  "environment": "production",
+  "action": "list",
+  "nodes": [
+    {
+      "server": "node-a",
+      "host": "203.0.113.10",
+      "certificates": [
+        {
+          "domain": "*.example.com",
+          "source": "pushed",
+          "notBefore": "0001-01-01T00:00:00Z",
+          "notAfter": "2026-10-09T12:00:00Z",
+          "issuedAt": "0001-01-01T00:00:00Z",
+          "updatedAt": "0001-01-01T00:00:00Z"
+        }
+      ]
+    }
+  ],
+  "startedAt": "2026-07-11T12:00:00Z",
+  "durationSeconds": 0.25
+}`
+	if string(payload) != want {
+		t.Fatalf("certs result document drifted:\n%s", payload)
+	}
+	if strings.Contains(string(payload), "PRIVATE KEY") || strings.Contains(string(payload), "certPem") || strings.Contains(string(payload), "keyPem") {
+		t.Fatal("CertsResult leaked private key material")
 	}
 }
 

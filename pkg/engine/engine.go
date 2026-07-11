@@ -106,6 +106,12 @@ func (e *Engine) RegisterSecret(value string) {
 	}
 }
 
+// RedactSensitive applies the same registered-secret redaction used by the
+// event stream to adapter-owned result and error fields.
+func (e *Engine) RedactSensitive(value string) string {
+	return e.redactor.Redact(value)
+}
+
 func (e *Engine) buildOutputWriter() io.Writer {
 	if e.buildWriter != nil {
 		return e.buildWriter

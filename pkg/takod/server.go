@@ -97,6 +97,14 @@ const CapabilityExecOneOffControlsV1 = "exec.oneoff-controls-v1"
 // atomically publish request-scoped operator file bundles and bind mount them.
 const CapabilityServiceFilesV1 = "service.files-v1"
 
+// CapabilityProxyTrustedProxiesV1 means proxy route manifests accept explicit
+// trusted proxy CIDRs and render Caddy's trusted client IP handling.
+const CapabilityProxyTrustedProxiesV1 = "proxy.trusted-proxies-v1"
+
+// CapabilityProxyCertsV1 means the node exposes the validated certificate
+// store API and can render store-backed TLS directives safely.
+const CapabilityProxyCertsV1 = "proxy.certs-v1"
+
 func NewServer(socket string, dataDir string, version string) *Server {
 	return NewServerWithOptions(socket, dataDir, version, ServerOptions{})
 }
@@ -157,6 +165,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/remove-service", s.handleRemoveService)
 	mux.HandleFunc("/v1/proxy-file", s.handleProxyFile)
 	mux.HandleFunc("/v1/proxy", s.handleProxy)
+	mux.HandleFunc("/v1/certs", s.handleProxyCertificates)
 	mux.HandleFunc("/v1/ports/allocate", s.handlePortAllocate)
 	mux.HandleFunc("/v1/cleanup", s.handleCleanup)
 	mux.HandleFunc("/v1/state", s.handleState)
@@ -532,6 +541,38 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handleProxyCertificates(w http.ResponseWriter, r *http.Request) {
+	var (
+		response any
+		err      error
+	)
+	switch r.Method {
+	case http.MethodGet:
+		response, err = ListProxyCertificates(r.Context())
+	case http.MethodPut:
+		defer r.Body.Close()
+		var request ProxyCertificatePushRequest
+		if decodeErr := decodeJSONRequest(w, r, &request); decodeErr != nil {
+			http.Error(w, "invalid JSON body: "+decodeErr.Error(), http.StatusBadRequest)
+			return
+		}
+		response, err = PushProxyCertificate(r.Context(), request)
+	case http.MethodDelete:
+		response, err = RemoveProxyCertificate(r.Context(), r.URL.Query().Get("domain"))
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
@@ -1391,7 +1432,7 @@ func (s *Server) Status() Status {
 	status := Status{
 		Runtime:      "takod",
 		Version:      s.version,
-		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1},
+		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1},
 		Hostname:     hostname,
 		Socket:       s.socket,
 		DataDir:      s.dataDir,
