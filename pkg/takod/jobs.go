@@ -153,6 +153,7 @@ type JobScheduler struct {
 	cron    *cron.Cron
 	// runJob is the container-execution seam; tests stub it.
 	runJob func(ctx context.Context, spec JobSpec, container string, output io.Writer) (int, error)
+	admit  func(...string) error
 
 	mu      sync.Mutex
 	entries map[string]cron.EntryID
@@ -539,6 +540,14 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 		}
 		_ = cleanupServiceFileVersions(spec.Project, spec.Environment, spec.Name, keep)
 	}()
+	if s.admit != nil {
+		if err := s.admit(s.dataDir); err != nil {
+			finished := time.Now().UTC()
+			record := JobRunRecord{Project: spec.Project, Environment: spec.Environment, Job: spec.Name, Trigger: trigger, StartedAt: started, FinishedAt: finished, DurationMs: finished.Sub(started).Milliseconds(), ExitCode: -1, Status: JobRunStatusFailed, Output: "job denied by resource admission: " + err.Error()}
+			s.appendRunRecord(record)
+			return record
+		}
+	}
 
 	timeoutSeconds := spec.TimeoutSeconds
 	if timeoutSeconds == 0 {

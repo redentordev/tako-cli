@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,7 +17,6 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/mesh"
-	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/secrets"
@@ -112,7 +110,7 @@ func (d *Deployer) SetupTakodRuntime() error {
 		d.printf("\n-> Preparing takod mesh runtime...\n")
 	}
 
-	if err := d.ensureTakodAgents(servers); err != nil {
+	if err := d.verifyTakodAgents(servers); err != nil {
 		return err
 	}
 
@@ -137,7 +135,10 @@ func (d *Deployer) SetupTakodRuntime() error {
 	return nil
 }
 
-func (d *Deployer) ensureTakodAgents(servers []string) error {
+// verifyTakodAgents is deliberately read-only. Application operations never
+// install, restart, or upgrade node software; setup and node lifecycle
+// commands own that privileged boundary.
+func (d *Deployer) verifyTakodAgents(servers []string) error {
 	return runTakodNodeActions(servers, func(serverName string) error {
 		server, ok := d.config.Servers[serverName]
 		if !ok {
@@ -148,45 +149,34 @@ func (d *Deployer) ensureTakodAgents(servers []string) error {
 			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 		}
 
-		prov := provisioner.NewProvisioner(client, d.verbose)
-		if localBinary := strings.TrimSpace(os.Getenv("TAKO_TAKOD_BINARY")); localBinary != "" {
-			if err := prov.InstallTakodBinaryFromFile(localBinary); err != nil {
-				return fmt.Errorf("failed to install local takod binary on %s: %w", serverName, err)
-			}
-		} else if d.shouldInstallTakodRelease(client) {
-			if err := prov.InstallTakodBinary(d.cliVersion); err != nil {
-				return fmt.Errorf("failed to install takod binary on %s: %w", serverName, err)
-			}
+		output, err := takodclient.RequestJSON(client, d.takodSocket(), "GET", "/v1/status", nil)
+		if err != nil {
+			return fmt.Errorf("takod is unavailable on %s; run 'tako setup --server %s' or 'tako upgrade servers --server %s': %w", serverName, serverName, serverName, err)
 		}
-
-		socket := ""
-		dataDir := ""
-		if d.config.Runtime != nil && d.config.Runtime.Agent != nil {
-			socket = d.config.Runtime.Agent.Socket
-			dataDir = d.config.Runtime.Agent.DataDir
+		var status takod.Status
+		if err := json.Unmarshal([]byte(output), &status); err != nil {
+			return fmt.Errorf("takod returned invalid status on %s: %w", serverName, err)
 		}
-		if err := prov.InstallTakodService(socket, dataDir, serverName); err != nil {
-			return fmt.Errorf("failed to install takod service on %s: %w", serverName, err)
+		if err := validateTakodAgentForAppOperation(serverName, d.cliVersion, status); err != nil {
+			return err
 		}
 		return nil
 	})
 }
 
-func (d *Deployer) shouldInstallTakodRelease(client takodclient.RequestExecutor) bool {
-	version := strings.TrimSpace(d.cliVersion)
-	if version == "" || version == "dev" {
-		return false
+func validateTakodAgentForAppOperation(serverName string, cliVersion string, status takod.Status) error {
+	if strings.TrimSpace(status.Runtime) != "takod" {
+		return fmt.Errorf("unexpected node runtime %q on %s", status.Runtime, serverName)
 	}
-
-	output, err := takodclient.RequestJSON(client, d.takodSocket(), "GET", "/v1/status", nil)
-	if err != nil {
-		return true
+	want := strings.TrimSpace(cliVersion)
+	if want == "" || want == "dev" {
+		return nil
 	}
-	var status takod.Status
-	if err := json.Unmarshal([]byte(output), &status); err != nil {
-		return true
+	got := strings.TrimSpace(status.Version)
+	if got != want {
+		return fmt.Errorf("takod version %q on %s is incompatible with CLI %q; run 'tako upgrade servers --server %s' before the application operation", got, serverName, want, serverName)
 	}
-	return strings.TrimSpace(status.Version) != version
+	return nil
 }
 
 // DeployServiceTakod reconciles one service through standalone Docker containers

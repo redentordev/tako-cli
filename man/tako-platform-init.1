@@ -1,0 +1,91 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-platform-init - Initialize this server as the first Tako platform node
+
+
+.SH SYNOPSIS
+\fBtako platform init [flags]\fP
+
+
+.SH DESCRIPTION
+Initialize this server as the first Tako platform node
+
+
+.SH OPTIONS
+\fB--binary\fP=""
+	Source Tako binary staged into a protected root-owned service path (default: current executable)
+
+.PP
+\fB--cluster-id\fP=""
+	Existing cluster UUID (generated when omitted)
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for init
+
+.PP
+\fB--max-concurrent-builds\fP=1
+	Maximum concurrent image builds
+
+.PP
+\fB--max-concurrent-operations\fP=2
+	Maximum concurrent platform operations
+
+.PP
+\fB--minimum-free-disk-bytes\fP=10737418240
+	Reject platform operations below this free-disk floor
+
+.PP
+\fB--node\fP=""
+	Logical name for the first node (default: node-1; existing name on resume)
+
+.PP
+\fB--node-id\fP=""
+	First-node UUID (generated when omitted)
+
+.PP
+\fB--reserved-disk-bytes\fP=5368709120
+	Disk reserved for controller and management state
+
+.PP
+\fB--reserved-memory-bytes\fP=536870912
+	Memory reserved for controller and management services
+
+.PP
+\fB--worker-group\fP="tako-platform"
+	Dedicated platform worker system group
+
+.PP
+\fB--worker-user\fP="tako-platform"
+	Dedicated platform worker system user
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-platform(1)\fP

@@ -1,0 +1,47 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-platform - Manage the local-first Tako platform foundation
+
+
+.SH SYNOPSIS
+\fBtako platform [flags]\fP
+
+
+.SH DESCRIPTION
+Manage the local-first Tako platform foundation
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for platform
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako(1)\fP, \fBtako-platform-init(1)\fP

@@ -27,6 +27,11 @@ type Server struct {
 	nodeName                string
 	identityFile            string
 	installation            *nodeidentity.Installation
+	minimumFreeDiskBytes    int64
+	dockerDataRoot          string
+	buildSlots              chan struct{}
+	diskAvailable           func(string) (int64, error)
+	diskIdentity            func(string) (string, error)
 	actualRefreshInterval   time.Duration
 	buildCachePruneInterval time.Duration
 	buildCacheKeepStorage   string
@@ -35,6 +40,9 @@ type Server struct {
 	backupScheduler         *BackupScheduler
 	jobScheduler            *JobScheduler
 	certificateScheduler    *CertificateScheduler
+	uploadReadTimeout       time.Duration
+	diskReservationMu       sync.Mutex
+	diskReservations        map[string]int64
 	mu                      sync.Mutex
 }
 
@@ -45,6 +53,7 @@ const (
 	DefaultBuildCachePruneInterval = 24 * time.Hour
 	buildCachePruneCommandTimeout  = 30 * time.Minute
 	buildCachePruneMaxInitialDelay = 5 * time.Minute
+	takodUploadReadTimeout         = 30 * time.Minute
 )
 
 func decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst any) error {
@@ -127,10 +136,16 @@ type ServerOptions struct {
 	ActualRefreshInterval   time.Duration
 	BuildCachePruneInterval time.Duration
 	BuildCacheKeepStorage   string
+	MinimumFreeDiskBytes    int64
+	DockerDataRoot          string
+	MaximumConcurrentBuilds int
+	DiskAvailable           func(string) (int64, error)
+	DiskIdentity            func(string) (string, error)
+	UploadReadTimeout       time.Duration
 }
 
 func NewServerWithOptions(socket string, dataDir string, version string, opts ServerOptions) *Server {
-	return &Server{
+	server := &Server{
 		socket:                  socket,
 		dataDir:                 dataDir,
 		version:                 version,
@@ -139,11 +154,36 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 		actualRefreshInterval:   opts.ActualRefreshInterval,
 		buildCachePruneInterval: opts.BuildCachePruneInterval,
 		buildCacheKeepStorage:   opts.BuildCacheKeepStorage,
+		minimumFreeDiskBytes:    opts.MinimumFreeDiskBytes,
+		dockerDataRoot:          opts.DockerDataRoot,
+		diskAvailable:           opts.DiskAvailable,
+		diskIdentity:            opts.DiskIdentity,
 		startedAt:               time.Now().UTC(),
 		backupScheduler:         NewBackupScheduler(dataDir),
 		jobScheduler:            NewJobScheduler(dataDir),
 		certificateScheduler:    NewCertificateScheduler(dataDir),
+		uploadReadTimeout:       opts.UploadReadTimeout,
+		diskReservations:        make(map[string]int64),
 	}
+	if server.diskAvailable == nil {
+		server.diskAvailable = availableDiskBytes
+	}
+	if server.diskIdentity == nil {
+		server.diskIdentity = diskFilesystemIdentity
+	}
+	if server.uploadReadTimeout <= 0 {
+		server.uploadReadTimeout = takodUploadReadTimeout
+	}
+	if strings.TrimSpace(server.dockerDataRoot) == "" {
+		server.dockerDataRoot = server.dataDir
+	}
+	if opts.MaximumConcurrentBuilds > 0 {
+		server.buildSlots = make(chan struct{}, opts.MaximumConcurrentBuilds)
+	}
+	server.backupScheduler.admit = func(...string) error { return server.checkFreeDisk(0, backupRootDir) }
+	server.jobScheduler.admit = func(...string) error { return server.checkFreeDisk(0, server.dataDir, server.dockerDataRoot) }
+	server.certificateScheduler.admit = func(paths ...string) error { return server.checkFreeDisk(0, paths...) }
+	return server
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -407,6 +447,18 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	paths := make([]string, 0, 2)
+	if len(request.Containers) > 0 {
+		paths = append(paths, s.dockerDataRoot)
+	}
+	if len(request.Files) > 0 {
+		paths = append(paths, serviceFilesRoot)
+	}
+	if len(paths) > 0 {
+		if !s.requireFreeDisk(w, paths...) {
+			return
+		}
+	}
 
 	response, err := ReconcileService(r.Context(), request)
 	if err != nil {
@@ -429,6 +481,13 @@ func (s *Server) handleServiceFiles(w http.ResponseWriter, r *http.Request) {
 	var request ServiceFilesRequest
 	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxServiceJSONBodyBytes); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateServiceFilesRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !s.requireFreeDisk(w, serviceFilesRoot) {
 		return
 	}
 	if err := PublishServiceFiles(r.Context(), request); err != nil {
@@ -503,6 +562,16 @@ func (s *Server) handlePortAllocate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if request.Kind == "" {
+		request.Kind = PortAllocationKindMeshUpstream
+	}
+	if err := validatePortAllocationRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !s.requireFreeDisk(w, s.dataDir) {
+		return
+	}
 	response, err := AllocatePort(r.Context(), s.dataDir, request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -527,6 +596,9 @@ func (s *Server) handleProxyFile(w http.ResponseWriter, r *http.Request) {
 		var request ProxyFileRequest
 		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !s.requireFreeDisk(w, proxyRoutesDir, proxyDynamicDir) {
 			return
 		}
 		response, err = WriteProxyFile(r.Context(), request)
@@ -564,6 +636,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !s.requireFreeDisk(w, proxyDynamicDir, proxyLogDir, proxyCertStoreDir, s.dockerDataRoot) {
+		return
+	}
 
 	response, err := ReconcileProxy(r.Context(), request)
 	if err != nil {
@@ -590,6 +665,9 @@ func (s *Server) handleProxyCertificates(w http.ResponseWriter, r *http.Request)
 		var request ProxyCertificatePushRequest
 		if decodeErr := decodeJSONRequest(w, r, &request); decodeErr != nil {
 			http.Error(w, "invalid JSON body: "+decodeErr.Error(), http.StatusBadRequest)
+			return
+		}
+		if !s.requireFreeDisk(w, proxyCertStoreDir) {
 			return
 		}
 		response, err = PushProxyCertificate(r.Context(), request)
@@ -623,9 +701,15 @@ func (s *Server) handleProxyACMEDNS(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+decodeErr.Error(), http.StatusBadRequest)
 			return
 		}
+		if !s.requireFreeDisk(w, proxyDynamicDir, proxyCertStoreDir) {
+			return
+		}
 		secrets = request.Credentials
 		response, err = PrepareACMEDNS(r.Context(), request)
 	case http.MethodPost:
+		if !s.requireFreeDisk(w, proxyDynamicDir, proxyCertStoreDir) {
+			return
+		}
 		response, err = FinalizeACMEDNS(r.Context(), r.URL.Query().Get("project"), r.URL.Query().Get("environment"))
 	case http.MethodDelete:
 		response, err = RemoveACMEDNSConfiguration(r.Context(), r.URL.Query().Get("project"), r.URL.Query().Get("environment"))
@@ -717,12 +801,18 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if !s.requireFreeDisk(w, s.dataDir) {
+			return
+		}
 		response, err = WriteStateDocument(r.Context(), s.dataDir, request)
 	case http.MethodPost:
 		defer r.Body.Close()
 		var request StateDocumentRequest
 		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !s.requireFreeDisk(w, s.dataDir) {
 			return
 		}
 		response, err = AppendStateEvent(r.Context(), s.dataDir, request)
@@ -768,6 +858,9 @@ func (s *Server) handleLease(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if !s.requireFreeDisk(w, s.dataDir) {
+			return
+		}
 		response, err = AcquireLease(r.Context(), s.dataDir, request)
 	case http.MethodDelete:
 		defer r.Body.Close()
@@ -811,6 +904,9 @@ func (s *Server) handleEnvBundle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if !s.requireFreeDisk(w, s.dataDir) {
+			return
+		}
 		response, err = WriteEnvBundle(r.Context(), s.dataDir, request)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -847,6 +943,13 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if err := validateBackupRequest(request, true, false); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !s.requireFreeDisk(w, backupRootDir) {
+			return
+		}
 		response, err = CreateVolumeBackup(r.Context(), request)
 	case http.MethodDelete:
 		err = DeleteVolumeBackup(r.Context(), BackupRequest{
@@ -881,6 +984,13 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	var request BackupRequest
 	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateBackupRequest(request, true, true); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !s.requireFreeDisk(w, s.dockerDataRoot) {
 		return
 	}
 	if err := RestoreVolumeBackup(r.Context(), request); err != nil {
@@ -931,6 +1041,13 @@ func (s *Server) handleBackupSchedule(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if err := validateBackupScheduleRequest(request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !s.requireFreeDisk(w, s.dataDir) {
+			return
+		}
 		response, err = s.backupScheduler.Upsert(r.Context(), request)
 	case http.MethodDelete:
 		response, err = s.backupScheduler.Delete(
@@ -966,6 +1083,9 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !s.requireFreeDisk(w, s.dataDir) {
+		return
+	}
 	response, err := WriteMetadata(r.Context(), s.dataDir, request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -981,6 +1101,9 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMeshKey(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireFreeDisk(w, "/etc/wireguard") {
 		return
 	}
 
@@ -1010,6 +1133,9 @@ func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateMeshApplyRequest(request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !s.requireFreeDisk(w, "/etc/wireguard") {
 		return
 	}
 	response, err := ReconcileMesh(r.Context(), request)
@@ -1099,6 +1225,13 @@ func (s *Server) handleImageImport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("image import exceeds maximum size %d bytes", defaultImageImportMaxBytes), http.StatusRequestEntityTooLarge)
 		return
 	}
+	releaseDisk, ok := s.reserveFreeDisk(w, uploadReservation(r.ContentLength, defaultImageImportMaxBytes), s.dockerDataRoot)
+	if !ok {
+		return
+	}
+	defer releaseDisk()
+	clearReadDeadline := setUploadReadDeadline(w, s.uploadReadTimeout)
+	defer clearReadDeadline()
 	defer r.Body.Close()
 
 	response, err := ImportImage(r.Context(), image, http.MaxBytesReader(w, r.Body, defaultImageImportMaxBytes))
@@ -1134,6 +1267,19 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	releaseDisk, ok := s.reserveFreeDisk(w, uploadReservation(r.ContentLength, defaultBuildContextMaxBytes), s.dockerDataRoot)
+	if !ok {
+		return
+	}
+	defer releaseDisk()
+	releaseBuild, ok := s.acquireBuildSlot()
+	if !ok {
+		http.Error(w, "maximum concurrent image builds are already running", http.StatusTooManyRequests)
+		return
+	}
+	defer releaseBuild()
+	clearReadDeadline := setUploadReadDeadline(w, s.uploadReadTimeout)
+	defer clearReadDeadline()
 	defer r.Body.Close()
 
 	body := io.Reader(http.MaxBytesReader(w, r.Body, defaultBuildContextMaxBytes))
@@ -1178,6 +1324,148 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(response)
+}
+
+func setUploadReadDeadline(w http.ResponseWriter, timeout time.Duration) func() {
+	if timeout <= 0 {
+		return func() {}
+	}
+	controller := http.NewResponseController(w)
+	if err := controller.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return func() {}
+	}
+	return func() { _ = controller.SetReadDeadline(time.Time{}) }
+}
+
+func (s *Server) requireFreeDisk(w http.ResponseWriter, paths ...string) bool {
+	return s.requireFreeDiskFor(w, 0, paths...)
+}
+
+func uploadReservation(contentLength int64, maximum int64) int64 {
+	if contentLength >= 0 {
+		return contentLength
+	}
+	return maximum
+}
+
+func (s *Server) checkFreeDisk(requiredBytes int64, paths ...string) error {
+	if s.minimumFreeDiskBytes <= 0 {
+		return nil
+	}
+	if len(paths) == 0 {
+		paths = []string{s.dataDir}
+	}
+	s.diskReservationMu.Lock()
+	defer s.diskReservationMu.Unlock()
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		path = filepath.Clean(path)
+		filesystem, err := s.diskIdentity(path)
+		if err != nil {
+			return fmt.Errorf("failed to identify filesystem for %s: %w", path, err)
+		}
+		if _, exists := seen[filesystem]; exists {
+			continue
+		}
+		seen[filesystem] = struct{}{}
+		available, err := s.diskAvailable(path)
+		if err != nil {
+			return fmt.Errorf("failed to verify free disk on %s: %w", path, err)
+		}
+		reserved := s.diskReservations[filesystem]
+		if available < s.minimumFreeDiskBytes {
+			return fmt.Errorf("operation denied on %s: %d free bytes is below %d-byte platform minimum", path, available, s.minimumFreeDiskBytes)
+		}
+		if requiredBytes == 0 && reserved > 0 {
+			return fmt.Errorf("operation denied on %s while %d bytes are reserved by active uploads on the same filesystem", path, reserved)
+		}
+		if requiredBytes > available-s.minimumFreeDiskBytes-reserved {
+			return fmt.Errorf("operation denied on %s: %d free bytes cannot preserve %d-byte platform minimum plus %d already-reserved and %d requested bytes", path, available, s.minimumFreeDiskBytes, reserved, requiredBytes)
+		}
+	}
+	return nil
+}
+
+func (s *Server) requireFreeDiskFor(w http.ResponseWriter, requiredBytes int64, paths ...string) bool {
+	err := s.checkFreeDisk(requiredBytes, paths...)
+	if err == nil {
+		return true
+	}
+	status := http.StatusInsufficientStorage
+	if strings.HasPrefix(err.Error(), "failed to verify free disk") || strings.HasPrefix(err.Error(), "failed to identify filesystem") {
+		status = http.StatusServiceUnavailable
+	}
+	http.Error(w, err.Error(), status)
+	return false
+}
+
+func (s *Server) reserveFreeDisk(w http.ResponseWriter, requiredBytes int64, paths ...string) (func(), bool) {
+	if s.minimumFreeDiskBytes <= 0 || requiredBytes <= 0 {
+		if !s.requireFreeDiskFor(w, requiredBytes, paths...) {
+			return nil, false
+		}
+		return func() {}, true
+	}
+	if len(paths) == 0 {
+		paths = []string{s.dataDir}
+	}
+	s.diskReservationMu.Lock()
+	defer s.diskReservationMu.Unlock()
+	type diskTarget struct{ path, filesystem string }
+	unique := make([]diskTarget, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		path = filepath.Clean(path)
+		filesystem, err := s.diskIdentity(path)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to identify filesystem for %s: %v", path, err), http.StatusServiceUnavailable)
+			return nil, false
+		}
+		if _, exists := seen[filesystem]; exists {
+			continue
+		}
+		seen[filesystem] = struct{}{}
+		available, err := s.diskAvailable(path)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to verify free disk on %s: %v", path, err), http.StatusServiceUnavailable)
+			return nil, false
+		}
+		reserved := s.diskReservations[filesystem]
+		if available < s.minimumFreeDiskBytes || requiredBytes > available-s.minimumFreeDiskBytes-reserved {
+			http.Error(w, fmt.Sprintf("operation denied on %s: %d free bytes cannot preserve %d-byte platform minimum plus %d already-reserved and %d requested bytes", path, available, s.minimumFreeDiskBytes, reserved, requiredBytes), http.StatusInsufficientStorage)
+			return nil, false
+		}
+		unique = append(unique, diskTarget{path: path, filesystem: filesystem})
+	}
+	for _, target := range unique {
+		s.diskReservations[target.filesystem] += requiredBytes
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.diskReservationMu.Lock()
+			defer s.diskReservationMu.Unlock()
+			for _, target := range unique {
+				s.diskReservations[target.filesystem] -= requiredBytes
+				if s.diskReservations[target.filesystem] == 0 {
+					delete(s.diskReservations, target.filesystem)
+				}
+			}
+		})
+	}, true
+}
+
+func (s *Server) acquireBuildSlot() (func(), bool) {
+	if s.buildSlots == nil {
+		return func() {}, true
+	}
+	select {
+	case s.buildSlots <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-s.buildSlots }) }, true
+	default:
+		return nil, false
+	}
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -1241,6 +1529,9 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateExecRequest(&request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if request.Mode == ExecModeOneOff && !s.requireFreeDisk(w, s.dockerDataRoot) {
 		return
 	}
 	if request.Interactive || request.PTY {
@@ -1321,6 +1612,9 @@ func (s *Server) handleJobsApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !s.requireFreeDisk(w, s.dataDir, serviceFilesRoot) {
+		return
+	}
 	response, err := s.jobScheduler.Apply(r.Context(), request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1365,6 +1659,13 @@ func (s *Server) handleJobsTrigger(w http.ResponseWriter, r *http.Request) {
 	var request JobTriggerRequest
 	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !isSafeProjectName(request.Project) || !isSafeRuntimeName(request.Environment) || !isSafeServiceName(request.Job) {
+		http.Error(w, "invalid job trigger identity", http.StatusBadRequest)
+		return
+	}
+	if !s.requireFreeDisk(w, s.dataDir, s.dockerDataRoot) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

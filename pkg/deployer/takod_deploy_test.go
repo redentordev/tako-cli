@@ -303,53 +303,50 @@ func TestTakodRevisionPruneRequestsAreSortedAndKeepActiveRevision(t *testing.T) 
 	}
 }
 
-func TestShouldInstallTakodRelease(t *testing.T) {
+func TestValidateTakodAgentForAppOperationNeverRequestsImplicitUpgrade(t *testing.T) {
 	tests := []struct {
-		name       string
-		version    string
-		statusJSON string
-		statusErr  error
-		want       bool
+		name      string
+		version   string
+		status    takod.Status
+		wantError string
 	}{
 		{
-			name:       "matching release",
-			version:    "v1.2.3",
-			statusJSON: `{"version":"v1.2.3"}`,
-			want:       false,
+			name:    "matching release",
+			version: "v1.2.3",
+			status:  takod.Status{Runtime: "takod", Version: "v1.2.3"},
 		},
 		{
-			name:       "different release",
-			version:    "v1.2.4",
-			statusJSON: `{"version":"v1.2.3"}`,
-			want:       true,
-		},
-		{
-			name:      "missing agent",
+			name:      "different release requires explicit upgrade",
 			version:   "v1.2.4",
-			statusErr: fmt.Errorf("takod unavailable"),
-			want:      true,
+			status:    takod.Status{Runtime: "takod", Version: "v1.2.3"},
+			wantError: "tako upgrade servers --server node-a",
 		},
 		{
-			name:    "dev build does not download release",
+			name:      "wrong runtime",
+			version:   "v1.2.4",
+			status:    takod.Status{Runtime: "other", Version: "v1.2.4"},
+			wantError: "unexpected node runtime",
+		},
+		{
+			name:    "dev build accepts runtime without mutating it",
 			version: "dev",
-			want:    false,
+			status:  takod.Status{Runtime: "takod", Version: "older"},
 		},
 		{
-			name:    "empty version does not download release",
+			name:    "empty version accepts runtime without mutating it",
 			version: "",
-			want:    false,
+			status:  takod.Status{Runtime: "takod", Version: "older"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			deploy := &Deployer{cliVersion: tt.version, config: &config.Config{}}
-			got := deploy.shouldInstallTakodRelease(fakeTakodStatusExecutor{
-				output: tt.statusJSON,
-				err:    tt.statusErr,
-			})
-			if got != tt.want {
-				t.Fatalf("shouldInstallTakodRelease() = %v, want %v", got, tt.want)
+			err := validateTakodAgentForAppOperation("node-a", tt.version, tt.status)
+			if tt.wantError == "" && err != nil {
+				t.Fatalf("validate returned error: %v", err)
+			}
+			if tt.wantError != "" && (err == nil || !strings.Contains(err.Error(), tt.wantError)) {
+				t.Fatalf("validate error = %v, want %q", err, tt.wantError)
 			}
 		})
 	}

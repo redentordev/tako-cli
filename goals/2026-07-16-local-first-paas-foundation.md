@@ -1,8 +1,8 @@
 # Goal: Local-First PaaS Foundation
 
 Date: 2026-07-16
-Status: in progress — Phase 1 completed and adversarially reviewed on
-`goal/paas-foundation-phase1-identity-transport`; Phase 2 is next.
+Status: in progress — Phases 1 and 2 are complete and adversarially reviewed;
+Phase 3 is next.
 
 ## Objective
 
@@ -112,6 +112,16 @@ Acceptance:
 
 ### Phase 2 — First-node bootstrap
 
+Progress: complete. Both mandatory reviewers closed their architecture,
+correctness, security, operations, and failure-mode findings after bootstrap
+resume hardening, protected binary/account validation, durable operation
+recovery, resource admission, background-work admission, bounded journal
+recovery, systemd write-root protection, and stalled-upload handling were
+added. The established `tako` socket group remains temporarily so existing
+SSH deployments are not cut off before Phase 3 migrates all operation
+producers to the durable worker. Phase 3 must introduce protected worker
+ingress and only then revoke direct legacy socket access.
+
 - Add an explicit platform-init workflow that creates the cluster and node
   identities and enrolls node 1 as control-plane, worker, edge, and builder.
 - Run the deployment worker as a protected service with a durable operation
@@ -128,6 +138,11 @@ Acceptance:
 - Reuse a local image only after digest, platform, and Docker-daemon identity
   agree; never treat a matching tag as sufficient.
 - Transfer images only to remote targets that lack the exact digest.
+- Bind every proxy upstream and dynamic-domain authorization destination to a
+  project/environment service identity. Local destinations must match a Tako
+  runtime alias; remote IP/port destinations must match an authenticated mesh
+  allocation and cluster inventory record. Reject loopback, link-local,
+  metadata, userinfo, unrelated-service, and unproven raw-IP destinations.
 
 ### Phase 4 — Cluster inventory and node lifecycle
 

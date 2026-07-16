@@ -22,6 +22,7 @@ var (
 // only component allowed to renew managed certificates.
 type CertificateScheduler struct {
 	dataDir string
+	admit   func(...string) error
 }
 
 type certificateStateEventDocument struct {
@@ -60,6 +61,11 @@ func (s *CertificateScheduler) Run(ctx context.Context) {
 }
 
 func (s *CertificateScheduler) Check(ctx context.Context) error {
+	if s.admit != nil {
+		if err := s.admit(proxyDynamicDir, proxyCertStoreDir, s.dataDir); err != nil {
+			return fmt.Errorf("certificate scheduler denied by resource admission: %w", err)
+		}
+	}
 	manifests, err := readProxyRouteManifests(proxyRoutesDir)
 	if err != nil {
 		return err

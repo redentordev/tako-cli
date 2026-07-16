@@ -70,10 +70,20 @@ func CheckServiceFiles(request ServiceFilesCheckRequest) error {
 }
 
 func PublishServiceFiles(ctx context.Context, request ServiceFilesRequest) error {
+	if err := validateServiceFilesRequest(request); err != nil {
+		return err
+	}
+	return prepareServiceFiles(ctx, request.Project, request.Environment, request.Service, request.FileSetID, request.Files)
+}
+
+func validateServiceFilesRequest(request ServiceFilesRequest) error {
 	if !isSafeProjectName(request.Project) || !isSafeRuntimeName(request.Environment) || !isSafeServiceName(request.Service) {
 		return fmt.Errorf("invalid service file identity")
 	}
-	return prepareServiceFiles(ctx, request.Project, request.Environment, request.Service, request.FileSetID, request.Files)
+	if err := validateServiceFileSetID(request.FileSetID); err != nil {
+		return err
+	}
+	return validateServiceFileBundles(request.Files)
 }
 
 func ServiceFileBundlePath(project, environment, service, setID, bundle string) string {

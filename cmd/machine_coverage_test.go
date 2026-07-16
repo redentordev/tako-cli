@@ -76,6 +76,7 @@ var humanOnlyCommands = map[string]bool{
 	"tako env push":       true,
 	"tako init":           true,
 	"tako monitor":        true,
+	"tako platform init":  true,
 	"tako secrets delete": true,
 	"tako secrets fetch":  true,
 	"tako secrets import": true,
@@ -90,6 +91,7 @@ var humanOnlyCommands = map[string]bool{
 // likewise out of scope.
 var infrastructureCommands = map[string]bool{
 	"tako internal e2e-server-ssh": true,
+	"tako platform worker run":     true,
 	"tako takod run":               true,
 }
 

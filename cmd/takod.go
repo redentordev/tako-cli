@@ -22,6 +22,9 @@ var (
 	takodActualRefreshInterval   time.Duration
 	takodBuildCachePruneInterval time.Duration = takod.DefaultBuildCachePruneInterval
 	takodBuildCacheKeepStorage   string        = takod.DefaultBuildCacheKeepStorage
+	takodMinimumFreeDiskBytes    int64
+	takodMaximumConcurrentBuilds int
+	takodDockerDataRoot          string
 )
 
 var takodCmd = &cobra.Command{
@@ -51,6 +54,9 @@ func init() {
 	takodRunCmd.Flags().DurationVar(&takodActualRefreshInterval, "actual-refresh-interval", 0, "Refresh node-local actual state at this interval (0 disables)")
 	takodRunCmd.Flags().DurationVar(&takodBuildCachePruneInterval, "build-cache-prune-interval", takod.DefaultBuildCachePruneInterval, "Prune Docker build cache at this interval (0 disables)")
 	takodRunCmd.Flags().StringVar(&takodBuildCacheKeepStorage, "build-cache-keep-storage", takod.DefaultBuildCacheKeepStorage, "Docker builder cache storage budget to keep during scheduled pruning")
+	takodRunCmd.Flags().Int64Var(&takodMinimumFreeDiskBytes, "minimum-free-disk-bytes", 0, "Reject disk-growing operations below this free-disk floor (0 disables)")
+	takodRunCmd.Flags().IntVar(&takodMaximumConcurrentBuilds, "max-concurrent-builds", 0, "Maximum concurrent image builds (0 keeps legacy unlimited behavior)")
+	takodRunCmd.Flags().StringVar(&takodDockerDataRoot, "docker-data-root", "", "Docker data-root filesystem used for image and volume admission")
 }
 
 func runTakod(cmd *cobra.Command, args []string) error {
@@ -87,6 +93,9 @@ func runTakod(cmd *cobra.Command, args []string) error {
 		ActualRefreshInterval:   takodActualRefreshInterval,
 		BuildCachePruneInterval: takodBuildCachePruneInterval,
 		BuildCacheKeepStorage:   takodBuildCacheKeepStorage,
+		MinimumFreeDiskBytes:    takodMinimumFreeDiskBytes,
+		MaximumConcurrentBuilds: takodMaximumConcurrentBuilds,
+		DockerDataRoot:          takodDockerDataRoot,
 	}).Run(ctx)
 	if errors.Is(err, context.Canceled) {
 		return nil

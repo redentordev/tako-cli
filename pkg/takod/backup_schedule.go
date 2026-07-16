@@ -42,6 +42,7 @@ type BackupScheduler struct {
 	dataDir string
 	parser  cron.Parser
 	cron    *cron.Cron
+	admit   func(...string) error
 
 	mu      sync.Mutex
 	entries map[string]cron.EntryID
@@ -219,11 +220,16 @@ func (s *BackupScheduler) runScheduledBackup(request BackupScheduleRequest) {
 		delete(s.running, key)
 		s.mu.Unlock()
 	}()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
 	backupID := backupIDForRequest(BackupRequest{}, time.Now())
 	for _, volume := range request.Volumes {
+		if s.admit != nil {
+			if err := s.admit(backupRootDir); err != nil {
+				fmt.Fprintf(os.Stderr, "takod backup schedule denied by resource admission for %s volume %s: %v\n", key, volume.Volume, err)
+				continue
+			}
+		}
 		info, err := CreateVolumeBackup(ctx, BackupRequest{
 			Project:        request.Project,
 			Environment:    request.Environment,
