@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/mesh"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/utils"
@@ -361,15 +362,15 @@ Type=simple
 User=root
 Group=%s
 RuntimeDirectory=tako
-RuntimeDirectoryMode=0770
+RuntimeDirectoryMode=0750
 UMask=0007
-ExecStart=%s takod run --socket %s --data-dir %s --node %s --actual-refresh-interval %s --build-cache-prune-interval %s --build-cache-keep-storage %s
+ExecStart=%s takod run --socket %s --data-dir %s --node %s --identity-file %s --actual-refresh-interval %s --build-cache-prune-interval %s --build-cache-keep-storage %s
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, takodAccessGroup, binaryPath, socket, dataDir, nodeName, actualRefreshInterval, takod.DefaultBuildCachePruneInterval, takod.DefaultBuildCacheKeepStorage)
+`, takodAccessGroup, binaryPath, socket, dataDir, nodeName, nodeidentity.DefaultPath, actualRefreshInterval, takod.DefaultBuildCachePruneInterval, takod.DefaultBuildCacheKeepStorage)
 }
 
 func (p *Provisioner) ensureTakodAccessGroup() error {

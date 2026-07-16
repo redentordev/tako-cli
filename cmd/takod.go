@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
@@ -17,6 +18,7 @@ var (
 	takodSocket                  string
 	takodDataDir                 string
 	takodNode                    string
+	takodIdentityFile            string
 	takodActualRefreshInterval   time.Duration
 	takodBuildCachePruneInterval time.Duration = takod.DefaultBuildCachePruneInterval
 	takodBuildCacheKeepStorage   string        = takod.DefaultBuildCacheKeepStorage
@@ -45,6 +47,7 @@ func init() {
 	takodRunCmd.Flags().StringVar(&takodSocket, "socket", "", "Unix socket path")
 	takodRunCmd.Flags().StringVar(&takodDataDir, "data-dir", "", "takod data directory")
 	takodRunCmd.Flags().StringVar(&takodNode, "node", "", "Configured Tako node name")
+	takodRunCmd.Flags().StringVar(&takodIdentityFile, "identity-file", nodeidentity.DefaultPath, "Root-owned Tako installation identity file")
 	takodRunCmd.Flags().DurationVar(&takodActualRefreshInterval, "actual-refresh-interval", 0, "Refresh node-local actual state at this interval (0 disables)")
 	takodRunCmd.Flags().DurationVar(&takodBuildCachePruneInterval, "build-cache-prune-interval", takod.DefaultBuildCachePruneInterval, "Prune Docker build cache at this interval (0 disables)")
 	takodRunCmd.Flags().StringVar(&takodBuildCacheKeepStorage, "build-cache-keep-storage", takod.DefaultBuildCacheKeepStorage, "Docker builder cache storage budget to keep during scheduled pruning")
@@ -80,6 +83,7 @@ func runTakod(cmd *cobra.Command, args []string) error {
 	}
 	err := takod.NewServerWithOptions(socket, dataDir, Version, takod.ServerOptions{
 		NodeName:                takodNode,
+		IdentityFile:            takodIdentityFile,
 		ActualRefreshInterval:   takodActualRefreshInterval,
 		BuildCachePruneInterval: takodBuildCachePruneInterval,
 		BuildCacheKeepStorage:   takodBuildCacheKeepStorage,

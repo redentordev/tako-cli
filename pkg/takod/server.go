@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/takoapi/ptystream"
 )
 
@@ -24,6 +25,8 @@ type Server struct {
 	dataDir                 string
 	version                 string
 	nodeName                string
+	identityFile            string
+	installation            *nodeidentity.Installation
 	actualRefreshInterval   time.Duration
 	buildCachePruneInterval time.Duration
 	buildCacheKeepStorage   string
@@ -66,16 +69,20 @@ func decodeJSONRequestWithLimit(w http.ResponseWriter, r *http.Request, dst any,
 }
 
 type Status struct {
-	Runtime      string         `json:"runtime"`
-	Version      string         `json:"version"`
-	Capabilities []string       `json:"capabilities,omitempty"`
-	Hostname     string         `json:"hostname"`
-	Socket       string         `json:"socket"`
-	DataDir      string         `json:"dataDir"`
-	StartedAt    time.Time      `json:"startedAt"`
-	Now          time.Time      `json:"now"`
-	Node         map[string]any `json:"node,omitempty"`
-	Peers        map[string]any `json:"peers,omitempty"`
+	Runtime      string                 `json:"runtime"`
+	Version      string                 `json:"version"`
+	Capabilities []string               `json:"capabilities,omitempty"`
+	Hostname     string                 `json:"hostname"`
+	Socket       string                 `json:"socket"`
+	DataDir      string                 `json:"dataDir"`
+	StartedAt    time.Time              `json:"startedAt"`
+	Now          time.Time              `json:"now"`
+	Identity     *nodeidentity.Identity `json:"identity,omitempty"`
+	// EnrollmentRoles are immutable bootstrap facts. Current control-plane
+	// roles are separate mutable state and must not be inferred from this list.
+	EnrollmentRoles []string       `json:"enrollmentRoles,omitempty"`
+	Node            map[string]any `json:"node,omitempty"`
+	Peers           map[string]any `json:"peers,omitempty"`
 }
 
 // CapabilityContainerArgvV1 means reconcile and job payloads preserve the
@@ -106,12 +113,17 @@ const CapabilityProxyTrustedProxiesV1 = "proxy.trusted-proxies-v1"
 // store API and can render store-backed TLS directives safely.
 const CapabilityProxyCertsV1 = "proxy.certs-v1"
 
+// CapabilityNodeIdentityV1 means status exposes an immutable installation
+// identity separately from mutable project/environment node metadata.
+const CapabilityNodeIdentityV1 = nodeidentity.Capability
+
 func NewServer(socket string, dataDir string, version string) *Server {
 	return NewServerWithOptions(socket, dataDir, version, ServerOptions{})
 }
 
 type ServerOptions struct {
 	NodeName                string
+	IdentityFile            string
 	ActualRefreshInterval   time.Duration
 	BuildCachePruneInterval time.Duration
 	BuildCacheKeepStorage   string
@@ -123,6 +135,7 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 		dataDir:                 dataDir,
 		version:                 version,
 		nodeName:                opts.NodeName,
+		identityFile:            opts.IdentityFile,
 		actualRefreshInterval:   opts.ActualRefreshInterval,
 		buildCachePruneInterval: opts.BuildCachePruneInterval,
 		buildCacheKeepStorage:   opts.BuildCacheKeepStorage,
@@ -139,6 +152,19 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	if s.dataDir == "" {
 		return fmt.Errorf("data directory is required")
+	}
+	if s.identityFile != "" {
+		installation, err := nodeidentity.ReadOptional(s.identityFile)
+		if err != nil {
+			return fmt.Errorf("failed to load installation identity: %w", err)
+		}
+		if installation != nil {
+			if s.nodeName != "" && s.nodeName != installation.NodeName {
+				return fmt.Errorf("configured node name %q does not match installation identity node name %q", s.nodeName, installation.NodeName)
+			}
+			s.installation = installation
+			s.nodeName = installation.NodeName
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(s.socket), 0755); err != nil {
@@ -1485,19 +1511,36 @@ func (s *Server) handleDiscoveryExports(w http.ResponseWriter, r *http.Request) 
 func (s *Server) Status() Status {
 	hostname, _ := os.Hostname()
 	status := Status{
-		Runtime:      "takod",
-		Version:      s.version,
-		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
-		Hostname:     hostname,
-		Socket:       s.socket,
-		DataDir:      s.dataDir,
-		StartedAt:    s.startedAt,
-		Now:          time.Now().UTC(),
+		Runtime:         "takod",
+		Version:         s.version,
+		Capabilities:    []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityNodeIdentityV1},
+		Hostname:        hostname,
+		Socket:          s.socket,
+		DataDir:         s.dataDir,
+		StartedAt:       s.startedAt,
+		Now:             time.Now().UTC(),
+		Identity:        cloneNodeIdentity(s.installation),
+		EnrollmentRoles: cloneEnrollmentRoles(s.installation),
 	}
 
 	status.Node = readJSONMap(filepath.Join(s.dataDir, "node.json"))
 	status.Peers = readJSONMap(filepath.Join(s.dataDir, "mesh", "peers.json"))
 	return status
+}
+
+func cloneNodeIdentity(installation *nodeidentity.Installation) *nodeidentity.Identity {
+	if installation == nil {
+		return nil
+	}
+	clone := installation.Identity
+	return &clone
+}
+
+func cloneEnrollmentRoles(installation *nodeidentity.Installation) []string {
+	if installation == nil {
+		return nil
+	}
+	return append([]string(nil), installation.EnrollmentRoles...)
 }
 
 func readJSONMap(path string) map[string]any {
