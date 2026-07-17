@@ -12,7 +12,7 @@ import (
 
 func TestVerifyPassivePromotionProvesColdSingleController(t *testing.T) {
 	store, controller, now := newTestMembershipStore(t)
-	root := t.TempDir()
+	root := securePromotionTestDir(t)
 	configDir := filepath.Join(root, "etc", "tako")
 	controlDir := filepath.Join(root, "var", "lib", "tako", DefaultMembershipDirName)
 	if err := os.MkdirAll(configDir, 0700); err != nil {
@@ -59,7 +59,7 @@ func TestVerifyPassivePromotionProvesColdSingleController(t *testing.T) {
 	if _, err := VerifyPassivePromotion(root, controller.ClusterID, "SHA256:not-the-controller"); err == nil || !strings.Contains(err.Error(), "externally trusted") {
 		t.Fatalf("untrusted controller key accepted: %v", err)
 	}
-	linkedRoot := t.TempDir()
+	linkedRoot := securePromotionTestDir(t)
 	if err := os.Symlink(filepath.Join(root, "etc"), filepath.Join(linkedRoot, "etc")); err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestVerifyPassivePromotionProvesColdSingleController(t *testing.T) {
 
 func TestVerifyPassivePromotionRejectsInvalidResourcePolicy(t *testing.T) {
 	store, controller, now := newTestMembershipStore(t)
-	root := t.TempDir()
+	root := securePromotionTestDir(t)
 	configDir := filepath.Join(root, "etc", "tako")
 	controlDir := filepath.Join(root, "var", "lib", "tako", DefaultMembershipDirName)
 	if err := os.MkdirAll(configDir, 0700); err != nil {
@@ -107,6 +107,25 @@ func TestVerifyPassivePromotionRejectsInvalidResourcePolicy(t *testing.T) {
 	if _, err := VerifyPassivePromotion(root, controller.ClusterID, fingerprint); err == nil || !strings.Contains(err.Error(), "memory reservation") {
 		t.Fatalf("invalid staged resource policy accepted: %v", err)
 	}
+}
+
+func securePromotionTestDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", ".tako-promotion-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatal(err)
+	}
+	if err := os.Chmod(abs, 0700); err != nil {
+		_ = os.RemoveAll(abs)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(abs) })
+	return abs
 }
 
 func copyPromotionFixture(source, destination string) error {

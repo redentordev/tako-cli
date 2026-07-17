@@ -3,6 +3,7 @@
 package provisioner
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -169,5 +170,10 @@ func runUpgradeLeaseScript(root string, script string) ([]byte, error) {
 }
 
 func rewriteUpgradeScriptRoot(root string, script string) string {
-	return strings.ReplaceAll(script, "/var/lib/tako", filepath.Join(root, "var", "lib", "tako"))
+	script = strings.ReplaceAll(script, "/var/lib/tako", filepath.Join(root, "var", "lib", "tako"))
+	// The production scripts deliberately require root ownership. These
+	// integration fixtures run as the CI account, so preserve every lock and
+	// mode assertion while substituting only the fixture owner.
+	script = strings.ReplaceAll(script, "install -d -m 0700 -o root -g root", "install -d -m 0700")
+	return strings.ReplaceAll(script, "0:0:700", fmt.Sprintf("%d:%d:700", os.Geteuid(), os.Getegid()))
 }
