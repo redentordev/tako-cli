@@ -35,7 +35,11 @@ func (s *Server) handleMembershipReconcile(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	store, err := platform.NewMembershipStore(s.membershipFile, s.inventoryFile)
+	newStore := platform.NewMembershipStore
+	if lifecycleMutationBarrierHeld(r.Context()) {
+		newStore = platform.NewMembershipStoreWithinMutationBarrier
+	}
+	store, err := newStore(s.membershipFile, s.inventoryFile)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -1,6 +1,8 @@
 package takod
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"os"
 
@@ -48,6 +50,26 @@ var lifecycleSafeMutationPaths = map[string]struct{}{
 	"/v1/mesh/apply":         {},
 }
 
+type lifecycleMutationBarrierContextKey struct{}
+
+func lifecycleMutationBarrierHeld(ctx context.Context) bool {
+	held, _ := ctx.Value(lifecycleMutationBarrierContextKey{}).(bool)
+	return held
+}
+
+func requestRequiresNodeLifecycleExclusion(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.URL.Path == "/v1/platform/inventory" {
+		return true
+	}
+	if r.Method != http.MethodPost {
+		return false
+	}
+	return r.URL.Path == "/v1/platform/membership/reconcile" || r.URL.Path == "/v1/platform/allocations/authorize"
+}
+
 // enrolledLifecycleHandler is the last node-local enforcement boundary. App
 // config or a stale scheduler cannot mutate workloads on a joining, ready,
 // cordoned, draining, removed, or revoked node merely because SSH still works.
@@ -57,12 +79,29 @@ func (s *Server) enrolledLifecycleHandler(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		var unlockLifecycle func()
+		if requestRequiresNodeLifecycleExclusion(r) {
+			var lockErr error
+			unlockLifecycle, lockErr = recovery.AcquireNodeUpgradeLifecycleExclusionForDataDir(s.dataDir)
+			if lockErr != nil {
+				status := http.StatusServiceUnavailable
+				if errors.Is(lockErr, recovery.ErrNodeUpgradeLeaseActive) {
+					status = http.StatusConflict
+				}
+				http.Error(w, lockErr.Error(), status)
+				return
+			}
+			defer unlockLifecycle()
+		}
 		unlockSnapshot, lockErr := recovery.AcquireMutationLock(s.dataDir)
 		if lockErr != nil {
 			http.Error(w, "platform snapshot authority is unavailable: "+lockErr.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		defer unlockSnapshot()
+		if unlockLifecycle != nil {
+			r = r.WithContext(context.WithValue(r.Context(), lifecycleMutationBarrierContextKey{}, true))
+		}
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			next.ServeHTTP(w, r)
 			return

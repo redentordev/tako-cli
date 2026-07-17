@@ -217,7 +217,11 @@ func runPlatformBackupCreate(cmd *cobra.Command, _ []string) error {
 		}
 		localPath = destination
 	}
-	fmt.Fprintf(humanOut(), "Platform recovery uploaded and read back\nCluster: %s\nObject: %s/%s\nEncrypted SHA256: %s\nLocal: %s\n", installation.ClusterID, remote.Bucket, remote.Key, encryptedSHA, localPath)
+	authorityFingerprint, err := platform.ControllerRecoveryKeyFingerprint(installation.AllocationPublicKey)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(humanOut(), "Platform recovery uploaded and read back\nCluster: %s\nController key SHA256: %s\nObject: %s/%s\nEncrypted SHA256: %s\nLocal: %s\n", installation.ClusterID, authorityFingerprint, remote.Bucket, remote.Key, encryptedSHA, localPath)
 	return nil
 }
 

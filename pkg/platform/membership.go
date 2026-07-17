@@ -157,10 +157,23 @@ type EnrollWorkerRequest struct {
 }
 
 type MembershipStore struct {
-	path          string
-	inventoryPath string
-	now           func() time.Time
-	mu            sync.Mutex
+	path                string
+	inventoryPath       string
+	mutationBarrierHeld bool
+	now                 func() time.Time
+	mu                  sync.Mutex
+}
+
+// NewMembershipStoreWithinMutationBarrier opens a store for a caller that
+// already holds the node-upgrade lifecycle guard followed by the recovery
+// mutation barrier. It prevents a nested reverse-order acquisition.
+func NewMembershipStoreWithinMutationBarrier(path, inventoryPath string) (*MembershipStore, error) {
+	store, err := NewMembershipStore(path, inventoryPath)
+	if err != nil {
+		return nil, err
+	}
+	store.mutationBarrierHeld = true
+	return store, nil
 }
 
 func NewMembershipStore(path, inventoryPath string) (*MembershipStore, error) {
@@ -995,11 +1008,29 @@ func (s *MembershipStore) lock() (*os.File, func(), error) {
 // uses the production <data-dir>/control layout. Tests and explicitly custom
 // stores remain independent because their parent directory is not "control".
 func (s *MembershipStore) acquireSnapshotMutation() (func(), error) {
+	if s.mutationBarrierHeld {
+		return func() {}, nil
+	}
 	controlDir := filepath.Dir(s.path)
 	if filepath.Base(controlDir) != DefaultMembershipDirName {
 		return func() {}, nil
 	}
-	return recovery.AcquireMutationLock(filepath.Dir(controlDir))
+	if filepath.Clean(s.path) != filepath.Clean(DefaultMembershipPath(DefaultStateDir)) {
+		return recovery.AcquireMutationLock(filepath.Dir(controlDir))
+	}
+	releaseUpgrade, err := recovery.AcquireNodeUpgradeLifecycleExclusion()
+	if err != nil {
+		return nil, err
+	}
+	releaseSnapshot, err := recovery.AcquireMutationLock(filepath.Dir(controlDir))
+	if err != nil {
+		releaseUpgrade()
+		return nil, err
+	}
+	return func() {
+		releaseSnapshot()
+		releaseUpgrade()
+	}, nil
 }
 
 func (s *MembershipStore) reconcileInventory(state *MembershipState) error {

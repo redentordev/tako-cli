@@ -106,4 +106,16 @@ func TestWorkerInventoryPublicationPreservesOperatorReadableMode(t *testing.T) {
 	if !strings.Contains(command, "-m 0644") || strings.Contains(command, "-m 0600") {
 		t.Fatalf("worker inventory publication mode is not readable: %s", command)
 	}
+	if !strings.Contains(command, "flock -x 9") || !strings.Contains(command, "chmod 0600 \"$lock_dir/.guard\"") || !strings.Contains(command, "cluster-inventory.json.lock") || !strings.Contains(command, "flock -x 8") {
+		t.Fatalf("worker inventory publication does not join upgrade and inventory barriers: %s", command)
+	}
+}
+
+func TestRemovedWorkerRevocationJoinsUpgradeAndInventoryBarriers(t *testing.T) {
+	command := removedWorkerRevocationCommand("/tmp/revoked-inventory")
+	for _, required := range []string{"flock -x 9", "chmod 0600 \"$lock_dir/.guard\"", "node lifecycle mutation blocked by active node upgrade lease", "exit 73", "cluster-inventory.json.lock", "flock -x 8", "install -o root -g root -m 0644", "systemctl stop takod.service"} {
+		if !strings.Contains(command, required) {
+			t.Fatalf("removed-worker revocation lacks %q: %s", required, command)
+		}
+	}
 }

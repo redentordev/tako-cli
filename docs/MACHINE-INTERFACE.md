@@ -246,10 +246,11 @@ emits `setup.step.started/.completed/.failed/.skipped` events carrying
 `data.step`. Setup aborts on the first failing node and the document lists
 the nodes attempted. `tako upgrade servers` returns an
 `UpgradeServersResult` with the `targetVersion`, `dryRun`, and per-node
-`{server, fromVersion, toVersion, outcome}` entries (`upgraded`/`failed`
-on apply; `current`/`upgrade-needed`/`setup-required`/`status-unavailable`
-on `--dry-run`); nodes are attempted independently — partial failure exits
-6, total failure exits 1, both still emit the document. `tako clone-setup`
+`{server, fromVersion, toVersion, stage, protocol, rolledBack, outcome}` entries (`upgraded`/`failed`/`rolled-back`/`blocked`
+on apply; `current`/`upgrade-needed`/`downgrade-blocked`/`setup-required`/`status-unavailable`
+on `--dry-run`). Enrolled nodes are ordered as worker canary, remaining
+workers, and controller last; a failed stage blocks later stages. Partial
+failure exits 6, total failure exits 1, and both still emit the document. `tako clone-setup`
 returns a `CloneSetupResult` (doctor-style `checks` with pass/warn/fail
 counts covering config, .env, SSH connectivity, env bundle, state, and
 secrets); machine modes skip its interactive fix-up prompts and any failed
@@ -340,8 +341,8 @@ machine behavior:
 | Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
-| Human-only by design | `init`, `platform init`, `platform backup create\|verify\|restore`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
-| Infrastructure-only | `takod run`, hidden `platform worker run\|prepare-enrollment\|verify-enrollment\|reconcile-mesh`, and hidden internal E2E helpers |
+| Human-only by design | `init`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
+| Infrastructure-only | `takod run`, hidden `platform worker run\|prepare-enrollment\|verify-enrollment\|reconcile-mesh`, hidden `platform node upgrade-publication-guard`, and hidden internal E2E helpers |
 
 Human-only commands reject `--output json` and `--events ndjson` with a
 typed invalid-request error (exit code 2) instead of printing human text to

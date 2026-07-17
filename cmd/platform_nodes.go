@@ -352,7 +352,51 @@ func platformWorkerInventoryInstallCommand(remoteTemp, clusterID, nodeID, exclud
 	if excludeMeshNodeID != "" {
 		reconcile += " --exclude-node-id " + shellQuotePlatform(excludeMeshNodeID)
 	}
-	return fmt.Sprintf("sudo install -d -m 0755 /etc/tako && sudo install -o root -g root -m 0644 %s /etc/tako/cluster-inventory.json && %s && sudo systemctl restart takod.service", shellQuotePlatform(remoteTemp), reconcile)
+	script := platformWorkerInventoryMutationScript(remoteTemp, reconcile+"\nsystemctl restart takod.service")
+	return "sudo sh -c " + shellQuotePlatform(script)
+}
+
+func platformWorkerInventoryMutationScript(remoteTemp string, afterInstall string) string {
+	return fmt.Sprintf(`set -eu
+umask 077
+upgrade_dir=/var/lib/tako/node-upgrade
+lock_dir="$upgrade_dir/locks"
+if test -e "$upgrade_dir" || test -L "$upgrade_dir"; then
+  test -d "$upgrade_dir"
+  test ! -L "$upgrade_dir"
+else
+  install -d -m 0700 -o root -g root "$upgrade_dir"
+fi
+if test -e "$lock_dir" || test -L "$lock_dir"; then
+  test -d "$lock_dir"
+  test ! -L "$lock_dir"
+else
+  install -d -m 0700 -o root -g root "$lock_dir"
+fi
+test "$(stat -c '%%u:%%g:%%a' "$upgrade_dir")" = "0:0:700"
+test "$(stat -c '%%u:%%g:%%a' "$lock_dir")" = "0:0:700"
+exec 9>"$lock_dir/.guard"
+flock -x 9
+chmod 0600 "$lock_dir/.guard"
+node_lock="$lock_dir/node"
+if test -d "$node_lock" && test ! -L "$node_lock"; then
+  expiry="$(cat "$node_lock/expiry" 2>/dev/null || true)"
+  case "$expiry" in ''|*[!0-9]*) expiry=0;; esac
+  if test "$expiry" -gt "$(date +%%s)"; then
+    echo "node lifecycle mutation blocked by active node upgrade lease" >&2
+    exit 73
+  fi
+  rm -rf -- "$node_lock"
+elif test -e "$node_lock" || test -L "$node_lock"; then
+  echo "unsafe node upgrade lease path" >&2
+  exit 74
+fi
+install -d -m 0755 /etc/tako
+exec 8>/etc/tako/cluster-inventory.json.lock
+flock -x 8
+install -o root -g root -m 0644 %s /etc/tako/cluster-inventory.json
+%s
+`, shellQuotePlatform(remoteTemp), afterInstall)
 }
 
 func decodeEnrollmentMarker(output, marker string, destination any) error {
@@ -647,12 +691,23 @@ func revokeRemovedWorker(cmd *cobra.Command, client *takossh.Client) error {
 		return err
 	}
 	defer cleanupTemp()
-	cleanup := fmt.Sprintf("sudo install -o root -g root -m 0644 %s /etc/tako/cluster-inventory.json && sudo systemctl stop takod.service && sudo sh -c 'for f in /etc/wireguard/tako*.conf; do test -e \"$f\" || continue; wg-quick down \"$f\" >/dev/null 2>&1 || true; rm -f -- \"$f\"; done; rm -rf -- /etc/tako/wireguard'", shellQuotePlatform(remoteTemp))
+	cleanup := removedWorkerRevocationCommand(remoteTemp)
 	output, err := client.ExecuteWithContext(cmd.Context(), cleanup)
 	if err != nil {
 		return fmt.Errorf("revoke remote mesh identity and stop takod: %w, output: %s", err, strings.TrimSpace(output))
 	}
 	return nil
+}
+
+func removedWorkerRevocationCommand(remoteTemp string) string {
+	afterInstall := `systemctl stop takod.service
+for f in /etc/wireguard/tako*.conf; do
+  test -e "$f" || continue
+  wg-quick down "$f" >/dev/null 2>&1 || true
+  rm -f -- "$f"
+done
+rm -rf -- /etc/tako/wireguard`
+	return "sudo sh -c " + shellQuotePlatform(platformWorkerInventoryMutationScript(remoteTemp, afterInstall))
 }
 
 func platformSSHPassword() string {

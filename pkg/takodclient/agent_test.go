@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/upgradeprotocol"
 )
 
 type pipeUnixDialer struct {
@@ -137,7 +138,7 @@ func TestAgentClientStatusValidatesInstallationIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	statusBody, err := json.Marshal(AgentStatus{Runtime: "takod", Version: "test", Capabilities: []string{nodeidentity.Capability}, Identity: &identity.Identity})
+	statusBody, err := json.Marshal(AgentStatus{Runtime: "takod", Version: "test", UpgradeProtocol: upgradeprotocol.Current, MinimumUpgradeProtocol: upgradeprotocol.Current, Capabilities: []string{nodeidentity.Capability}, Identity: &identity.Identity})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,6 +155,9 @@ func TestAgentClientStatusValidatesInstallationIdentity(t *testing.T) {
 	}
 	if status.Identity == nil || !status.Identity.Matches(identity.ClusterID, identity.NodeID) {
 		t.Fatalf("status identity = %#v", status.Identity)
+	}
+	if status.UpgradeProtocol != upgradeprotocol.Current || status.MinimumUpgradeProtocol != upgradeprotocol.Current {
+		t.Fatalf("status upgrade protocol = %d/%d", status.UpgradeProtocol, status.MinimumUpgradeProtocol)
 	}
 }
 
@@ -188,6 +192,19 @@ func TestAgentClientStatusRejectsMalformedIdentity(t *testing.T) {
 	}
 	if _, err := client.Status(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid installation identity") {
 		t.Fatalf("Status error = %v", err)
+	}
+}
+
+func TestAgentClientStatusRejectsMalformedUpgradeProtocolRange(t *testing.T) {
+	dialer := &pipeUnixDialer{handler: func(*http.Request) (int, http.Header, string) {
+		return http.StatusOK, nil, `{"runtime":"takod","version":"v0.9.4","upgradeProtocol":1,"minimumUpgradeProtocol":2}`
+	}}
+	client, err := NewAgentClient(dialer, DefaultSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Status(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid node upgrade protocol") {
+		t.Fatalf("malformed upgrade range error = %v", err)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/upgradeprotocol"
 )
 
 func TestServerStatusOverUnixSocket(t *testing.T) {
@@ -68,7 +69,10 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 			if status.Version != "test" {
 				t.Fatalf("unexpected version %q", status.Version)
 			}
-			if len(status.Capabilities) != 11 || status.Capabilities[0] != CapabilityContainerArgvV1 || status.Capabilities[1] != CapabilityContainerRuntimeControlsV1 || status.Capabilities[2] != CapabilityImageBuildOptionsV1 || status.Capabilities[3] != CapabilityImageDescriptorV1 || status.Capabilities[4] != CapabilityNodePlatformV1 || status.Capabilities[5] != CapabilityExecOneOffControlsV1 || status.Capabilities[6] != CapabilityServiceFilesV1 || status.Capabilities[7] != CapabilityProxyTrustedProxiesV1 || status.Capabilities[8] != CapabilityProxyCertsV1 || status.Capabilities[9] != CapabilityAcmeDNSV1 || status.Capabilities[10] != CapabilityNodeIdentityV1 {
+			if status.UpgradeProtocol != upgradeprotocol.Current || status.MinimumUpgradeProtocol != upgradeprotocol.Current {
+				t.Fatalf("unexpected upgrade protocol window %d/%d", status.UpgradeProtocol, status.MinimumUpgradeProtocol)
+			}
+			if len(status.Capabilities) != 12 || status.Capabilities[0] != CapabilityContainerArgvV1 || status.Capabilities[1] != CapabilityContainerRuntimeControlsV1 || status.Capabilities[2] != CapabilityImageBuildOptionsV1 || status.Capabilities[3] != CapabilityImageDescriptorV1 || status.Capabilities[4] != CapabilityNodePlatformV1 || status.Capabilities[5] != CapabilityExecOneOffControlsV1 || status.Capabilities[6] != CapabilityServiceFilesV1 || status.Capabilities[7] != CapabilityProxyTrustedProxiesV1 || status.Capabilities[8] != CapabilityProxyCertsV1 || status.Capabilities[9] != CapabilityAcmeDNSV1 || status.Capabilities[10] != CapabilityNodeIdentityV1 || status.Capabilities[11] != CapabilityNodeUpgradeV1 {
 				t.Fatalf("unexpected capabilities %#v", status.Capabilities)
 			}
 			return

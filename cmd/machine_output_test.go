@@ -1228,8 +1228,8 @@ func TestUpgradeServersResultDocumentGolden(t *testing.T) {
 		Environment:   "production",
 		TargetVersion: "1.2.4",
 		Nodes: []engine.UpgradeServersNodeOutcome{
-			{Server: "node-a", Host: "10.0.0.1", FromVersion: "1.2.3", ToVersion: "1.2.4", Outcome: engine.UpgradeOutcomeUpgraded},
-			{Server: "node-b", Host: "10.0.0.2", ToVersion: "1.2.4", Outcome: engine.UpgradeOutcomeFailed, Error: "server node-b is not set up; run 'tako setup --server node-b' first"},
+			{Server: "node-a", Host: "10.0.0.1", FromVersion: "1.2.3", ToVersion: "1.2.4", Stage: engine.UpgradeStageCanary, Protocol: engine.UpgradeProtocolCurrent, Outcome: engine.UpgradeOutcomeUpgraded},
+			{Server: "node-b", Host: "10.0.0.2", FromVersion: "1.2.3", ToVersion: "1.2.4", Stage: engine.UpgradeStageWorkers, Protocol: engine.UpgradeProtocolCurrent, RolledBack: true, Outcome: engine.UpgradeOutcomeRolledBack, Error: "candidate failed readiness"},
 		},
 		Error: "server agent upgrade failed on 1 of 2 node(s)",
 	}
@@ -1249,14 +1249,20 @@ func TestUpgradeServersResultDocumentGolden(t *testing.T) {
       "host": "10.0.0.1",
       "fromVersion": "1.2.3",
       "toVersion": "1.2.4",
+      "stage": "worker-canary",
+      "protocol": 1,
       "outcome": "upgraded"
     },
     {
       "server": "node-b",
       "host": "10.0.0.2",
+      "fromVersion": "1.2.3",
       "toVersion": "1.2.4",
-      "outcome": "failed",
-      "error": "server node-b is not set up; run 'tako setup --server node-b' first"
+      "stage": "workers",
+      "protocol": 1,
+      "rolledBack": true,
+      "outcome": "rolled-back",
+      "error": "candidate failed readiness"
     }
   ],
   "error": "server agent upgrade failed on 1 of 2 node(s)"

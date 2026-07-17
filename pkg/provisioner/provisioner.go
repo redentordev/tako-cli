@@ -2,7 +2,11 @@ package provisioner
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -42,7 +46,19 @@ func (l provisionLog) logf(format string, args ...any) {
 // Provisioner handles server provisioning
 type Provisioner struct {
 	provisionLog
-	client *ssh.Client
+	client       *ssh.Client
+	upgradeLocks map[string]string
+}
+
+const (
+	takodUpgradeLockBase         = "/var/lib/tako/node-upgrade/locks"
+	takodUpgradeNodeLockScope    = "node"
+	takodUpgradeClusterLockScope = "cluster"
+	takodUpgradeNodeLockTTL      = 3 * time.Minute
+)
+
+type upgradeCommandExecutor interface {
+	Execute(string) (string, error)
 }
 
 // NewProvisioner creates a new provisioner
@@ -50,6 +66,7 @@ func NewProvisioner(client *ssh.Client, verbose bool) *Provisioner {
 	return &Provisioner{
 		provisionLog: provisionLog{verbose: verbose},
 		client:       client,
+		upgradeLocks: make(map[string]string),
 	}
 }
 
@@ -240,6 +257,667 @@ func (p *Provisioner) InstallTakodBinaryFromFile(localPath string) error {
 		return fmt.Errorf("failed to install uploaded takod binary: %w", err)
 	}
 	return nil
+}
+
+// BeginTakodUpgrade publishes a verified candidate with a durable rollback
+// copy. When the protected platform-worker binary exists it is included in
+// the same transaction, so the deployment worker never remains permanently
+// pinned to an older executable. An interrupted prior transaction is rolled
+// back before a new one begins.
+func (p *Provisioner) BeginTakodUpgrade(version string, localPath string, revalidate func() (*nodeidentity.UpgradeContract, error)) error {
+	if _, err := p.client.Execute(runRootScript(installTakodUpgradeRecoveryScript())); err != nil {
+		return fmt.Errorf("install node upgrade boot recovery: %w", err)
+	}
+	randomSuffix := make([]byte, 16)
+	if _, err := rand.Read(randomSuffix); err != nil {
+		return fmt.Errorf("create node upgrade candidate name: %w", err)
+	}
+	candidate := "/tmp/tako-upgrade-candidate-" + hex.EncodeToString(randomSuffix)
+	removeCandidate := true
+	defer func() {
+		if removeCandidate {
+			_, _ = p.client.Execute(runRootScript("rm -f -- " + shellQuote(candidate)))
+		}
+	}()
+	expectedDigest := ""
+	if strings.TrimSpace(localPath) != "" {
+		info, err := os.Stat(localPath)
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			return fmt.Errorf("local takod binary path must be a non-empty regular file: %s", localPath)
+		}
+		file, err := os.Open(localPath)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		hash := sha256.New()
+		if _, err := io.Copy(hash, file); err != nil {
+			return fmt.Errorf("hash local node upgrade candidate: %w", err)
+		}
+		expectedDigest = hex.EncodeToString(hash.Sum(nil))
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		if err := p.client.UploadReader(file, candidate, 0755); err != nil {
+			return fmt.Errorf("upload node upgrade candidate: %w", err)
+		}
+	} else {
+		release, err := releaseVersionArg(version)
+		if err != nil {
+			return err
+		}
+		arch, err := p.detectLinuxArch()
+		if err != nil {
+			return err
+		}
+		binaryName := fmt.Sprintf("tako-linux-%s", arch)
+		if _, err := p.client.Execute(runRootScript(takodBinaryDownloadScript(release, binaryName, candidate))); err != nil {
+			return fmt.Errorf("download verified node upgrade candidate: %w", err)
+		}
+	}
+
+	// Candidate transfer and checksum verification happen outside the short
+	// mutation lease. Once leased, recover an expired prior transaction and
+	// re-attest protected membership immediately before publication.
+	if err := p.acquireTakodUpgradeLock(takodUpgradeNodeLockScope, takodUpgradeNodeLockTTL); err != nil {
+		return fmt.Errorf("acquire node upgrade transaction lock: %w", err)
+	}
+	completed := false
+	defer func() {
+		if !completed {
+			_ = p.releaseTakodUpgradeLock(takodUpgradeNodeLockScope)
+		}
+	}()
+	leaseToken := p.upgradeLocks[takodUpgradeNodeLockScope]
+	if _, err := p.client.Execute(runRootScript(recoverPendingTakodUpgradeScript(leaseToken))); err != nil {
+		return fmt.Errorf("recover expired pending node upgrade before staging: %w", err)
+	}
+	contractBase64 := ""
+	if revalidate != nil {
+		contract, err := revalidate()
+		if err != nil {
+			return fmt.Errorf("revalidate node upgrade publication contract: %w", err)
+		}
+		if contract == nil {
+			return fmt.Errorf("revalidate node upgrade publication contract returned no contract")
+		}
+		if err := contract.Validate(); err != nil {
+			return fmt.Errorf("validate node upgrade publication contract: %w", err)
+		}
+		encoded, err := json.Marshal(contract)
+		if err != nil {
+			return err
+		}
+		contractBase64 = base64.StdEncoding.EncodeToString(encoded)
+	}
+	if _, err := p.client.Execute(runRootScript(beginTakodUpgradeScriptWithContract(candidate, expectedDigest, contractBase64, leaseToken))); err != nil {
+		_, _ = p.client.Execute(runRootScript("rm -f -- " + shellQuote(candidate)))
+		if rollbackErr := p.RollbackTakodUpgrade(); rollbackErr != nil {
+			return fmt.Errorf("begin atomic node upgrade: %v; rollback failed: %w", err, rollbackErr)
+		}
+		return fmt.Errorf("begin atomic node upgrade: %w", err)
+	}
+	completed = true
+	removeCandidate = false
+	return nil
+}
+
+// ActivateTakodUpgrade restarts both services after their binary handoff.
+func (p *Provisioner) ActivateTakodUpgrade() error {
+	if err := p.refreshTakodUpgradeLock(takodUpgradeNodeLockScope, takodUpgradeNodeLockTTL); err != nil {
+		return fmt.Errorf("retain node upgrade transaction lock: %w", err)
+	}
+	if _, err := p.client.Execute(runRootScript(guardTakodUpgradeScript(p.upgradeLocks[takodUpgradeNodeLockScope], `set -eu
+test -f /var/lib/tako/node-upgrade/pending
+systemctl restart takod
+if test -f /var/lib/tako/node-upgrade/had-platform-worker; then
+  systemctl restart tako-platform-worker
+fi
+`))); err != nil {
+		return fmt.Errorf("activate node upgrade: %w", err)
+	}
+	return nil
+}
+
+func (p *Provisioner) CommitTakodUpgrade() error {
+	if err := p.refreshTakodUpgradeLock(takodUpgradeNodeLockScope, takodUpgradeNodeLockTTL); err != nil {
+		return fmt.Errorf("retain node upgrade transaction lock before commit: %w", err)
+	}
+	err := commitTakodUpgrade(p.client, p.upgradeLocks[takodUpgradeNodeLockScope])
+	if err == nil {
+		if releaseErr := p.releaseTakodUpgradeLock(takodUpgradeNodeLockScope); releaseErr != nil {
+			// The committed marker is authoritative and the lease expires. Never
+			// turn a completed commit into a rollback because lock release was
+			// transport-ambiguous.
+			p.logf("  Warning: node upgrade lock release will rely on lease expiry: %v\n", releaseErr)
+		}
+	}
+	return err
+}
+
+func commitTakodUpgrade(executor upgradeCommandExecutor, leaseToken string) error {
+	if _, err := executor.Execute(runRootScript(guardTakodUpgradeScript(leaseToken, commitTakodUpgradeScript()))); err != nil {
+		if _, probeErr := executor.Execute(runRootScript(`set -eu
+dir=/var/lib/tako/node-upgrade
+test -f "$dir/committed"
+sync -f "$dir"
+`)); probeErr == nil {
+			return nil
+		}
+		return fmt.Errorf("commit node upgrade: %w", err)
+	}
+	return nil
+}
+
+func commitTakodUpgradeScript() string {
+	return `set -eu
+dir=/var/lib/tako/node-upgrade
+test -f "$dir/pending"
+mv "$dir/pending" "$dir/committed"
+sync -f "$dir"
+`
+}
+
+// VerifyTakodUpgradeServices checks the protected handoff before rollback
+// evidence is discarded. systemd starts both units from the newly published
+// inode; a worker that immediately crashes therefore fails the transaction.
+func (p *Provisioner) VerifyTakodUpgradeServices(requirePlatformWorker bool) error {
+	if err := p.refreshTakodUpgradeLock(takodUpgradeNodeLockScope, takodUpgradeNodeLockTTL); err != nil {
+		return fmt.Errorf("retain node upgrade transaction lock before verification: %w", err)
+	}
+	if _, err := p.client.Execute(runRootScript(guardTakodUpgradeScript(p.upgradeLocks[takodUpgradeNodeLockScope], verifyTakodUpgradeServicesScript(requirePlatformWorker)))); err != nil {
+		return fmt.Errorf("verify upgraded node services: %w", err)
+	}
+	return nil
+}
+
+func verifyTakodUpgradeServicesScript(requirePlatformWorker bool) string {
+	requireWorker := "false"
+	if requirePlatformWorker {
+		requireWorker = "true"
+	}
+	return fmt.Sprintf(`set -eu
+dir=/var/lib/tako/node-upgrade
+test -f "$dir/pending"
+if %s; then
+  test -f "$dir/had-platform-worker"
+fi
+systemctl is-active --quiet takod
+test "$(systemctl show -p MainPID --value takod)" != "0"
+if test -f "$dir/had-platform-worker"; then
+  systemctl is-active --quiet tako-platform-worker
+  test "$(systemctl show -p MainPID --value tako-platform-worker)" != "0"
+fi
+`, requireWorker)
+}
+
+func (p *Provisioner) RollbackTakodUpgrade() error {
+	var rollbackErr error
+	if p.upgradeLocks[takodUpgradeNodeLockScope] == "" {
+		if err := p.acquireTakodUpgradeLock(takodUpgradeNodeLockScope, takodUpgradeNodeLockTTL); err != nil {
+			return fmt.Errorf("acquire node upgrade transaction lock before rollback: %w", err)
+		}
+	} else if err := p.refreshTakodUpgradeLock(takodUpgradeNodeLockScope, takodUpgradeNodeLockTTL); err != nil {
+		return fmt.Errorf("retain node upgrade transaction lock before rollback: %w", err)
+	}
+	rollbackScript := guardTakodUpgradeScript(p.upgradeLocks[takodUpgradeNodeLockScope], rollbackTakodUpgradeScript())
+	if _, err := p.client.Execute(runRootScript(rollbackScript)); err != nil {
+		if _, retryErr := p.client.Execute(runRootScript(rollbackScript)); retryErr == nil {
+			rollbackErr = nil
+		} else {
+			rollbackErr = fmt.Errorf("rollback node upgrade: %w", err)
+		}
+	}
+	releaseErr := p.releaseTakodUpgradeLock(takodUpgradeNodeLockScope)
+	if rollbackErr != nil {
+		return rollbackErr
+	}
+	if releaseErr != nil {
+		return fmt.Errorf("release node upgrade transaction lock: %w", releaseErr)
+	}
+	return nil
+}
+
+// AcquireTakodUpgradeCoordinatorLock serializes staged upgrade coordinators on
+// the authoritative controller. The token-bound lease rejects overlap while
+// still allowing recovery after a dead CLI.
+func (p *Provisioner) AcquireTakodUpgradeCoordinatorLock(ttl time.Duration) error {
+	return p.acquireTakodUpgradeLock(takodUpgradeClusterLockScope, ttl)
+}
+
+func (p *Provisioner) RefreshTakodUpgradeCoordinatorLock(ttl time.Duration) error {
+	return p.refreshTakodUpgradeLock(takodUpgradeClusterLockScope, ttl)
+}
+
+func (p *Provisioner) ReleaseTakodUpgradeCoordinatorLock() error {
+	return p.releaseTakodUpgradeLock(takodUpgradeClusterLockScope)
+}
+
+func (p *Provisioner) acquireTakodUpgradeLock(scope string, ttl time.Duration) error {
+	if p == nil || p.client == nil {
+		return fmt.Errorf("upgrade lock requires an SSH client")
+	}
+	if ttl <= 0 {
+		return fmt.Errorf("upgrade lock TTL must be positive")
+	}
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return fmt.Errorf("create upgrade lock token: %w", err)
+	}
+	token := hex.EncodeToString(tokenBytes)
+	if err := acquireTakodUpgradeLock(p.client, scope, token, ttl); err != nil {
+		return err
+	}
+	p.upgradeLocks[scope] = token
+	return nil
+}
+
+func acquireTakodUpgradeLock(executor upgradeCommandExecutor, scope string, token string, ttl time.Duration) error {
+	if _, err := executor.Execute(runRootScript(acquireTakodUpgradeLockScript(scope, token, ttl))); err != nil {
+		if _, probeErr := executor.Execute(runRootScript(probeTakodUpgradeLockScript(scope, token))); probeErr == nil {
+			return nil
+		}
+		return fmt.Errorf("acquire upgrade %s lock: %w", scope, err)
+	}
+	return nil
+}
+
+func probeTakodUpgradeLockScript(scope string, token string) string {
+	return fmt.Sprintf(`set -eu
+lock=%s/%s
+token=%s
+test -d "$lock"
+test ! -L "$lock"
+test "$(cat "$lock/owner")" = "$token"
+expiry="$(cat "$lock/expiry")"
+case "$expiry" in ''|*[!0-9]*) exit 1;; esac
+test "$expiry" -gt "$(date +%%s)"
+`, shellQuote(takodUpgradeLockBase), scope, shellQuote(token))
+}
+
+func guardTakodUpgradeScript(token string, body string) string {
+	return fmt.Sprintf(`set -eu
+umask 077
+base=/var/lib/tako/node-upgrade/locks
+token=%s
+exec 9>"$base/.guard"
+flock -x 9
+chmod 0600 "$base/.guard"
+lock="$base/node"
+test -d "$lock"
+test ! -L "$lock"
+test "$(cat "$lock/owner")" = "$token"
+expiry="$(cat "$lock/expiry")"
+case "$expiry" in ''|*[!0-9]*) exit 1;; esac
+test "$expiry" -gt "$(date +%%s)"
+%s
+`, shellQuote(token), body)
+}
+
+func (p *Provisioner) refreshTakodUpgradeLock(scope string, ttl time.Duration) error {
+	token := p.upgradeLocks[scope]
+	if token == "" {
+		return fmt.Errorf("upgrade %s lock is not owned by this coordinator", scope)
+	}
+	if _, err := p.client.Execute(runRootScript(refreshTakodUpgradeLockScript(scope, token, ttl))); err != nil {
+		return fmt.Errorf("refresh upgrade %s lock: %w", scope, err)
+	}
+	return nil
+}
+
+func (p *Provisioner) releaseTakodUpgradeLock(scope string) error {
+	token := p.upgradeLocks[scope]
+	if token == "" {
+		return nil
+	}
+	if _, err := p.client.Execute(runRootScript(releaseTakodUpgradeLockScript(scope, token))); err != nil {
+		return err
+	}
+	delete(p.upgradeLocks, scope)
+	return nil
+}
+
+func acquireTakodUpgradeLockScript(scope string, token string, ttl time.Duration) string {
+	return fmt.Sprintf(`set -eu
+umask 077
+parent=/var/lib/tako/node-upgrade
+base=%s
+scope=%s
+token=%s
+ttl=%d
+if test -e "$parent" || test -L "$parent"; then
+  test -d "$parent"
+  test ! -L "$parent"
+else
+  install -d -m 0700 -o root -g root "$parent"
+fi
+test "$(stat -c '%%u:%%g:%%a' "$parent")" = "0:0:700"
+if test -e "$base" || test -L "$base"; then
+  test -d "$base"
+  test ! -L "$base"
+else
+  install -d -m 0700 -o root -g root "$base"
+fi
+test ! -L "$base"
+test "$(stat -c '%%u:%%g:%%a' "$base")" = "0:0:700"
+exec 9>"$base/.guard"
+flock -x 9
+chmod 0600 "$base/.guard"
+lock="$base/$scope"
+now="$(date +%%s)"
+if test -d "$lock" && test ! -L "$lock"; then
+  owner="$(cat "$lock/owner" 2>/dev/null || true)"
+  expiry="$(cat "$lock/expiry" 2>/dev/null || true)"
+  case "$expiry" in ''|*[!0-9]*) expiry=0;; esac
+  if test "$owner" != "$token" && test "$expiry" -gt "$now"; then
+    echo "upgrade $scope lock held until $expiry" >&2
+    exit 73
+  fi
+  rm -rf -- "$lock"
+elif test -e "$lock" || test -L "$lock"; then
+  echo "unsafe upgrade lock path" >&2
+  exit 74
+fi
+mkdir -m 0700 "$lock"
+printf '%%s\n' "$token" > "$lock/owner.tmp"
+printf '%%s\n' "$((now + ttl))" > "$lock/expiry.tmp"
+chmod 0600 "$lock/owner.tmp" "$lock/expiry.tmp"
+mv "$lock/owner.tmp" "$lock/owner"
+mv "$lock/expiry.tmp" "$lock/expiry"
+sync -f "$lock"
+sync -f "$base"
+`, shellQuote(takodUpgradeLockBase), shellQuote(scope), shellQuote(token), int64(ttl/time.Second))
+}
+
+func refreshTakodUpgradeLockScript(scope string, token string, ttl time.Duration) string {
+	return fmt.Sprintf(`set -eu
+umask 077
+base=%s
+lock="$base/%s"
+token=%s
+ttl=%d
+exec 9>"$base/.guard"
+flock -x 9
+chmod 0600 "$base/.guard"
+test -d "$lock"
+test ! -L "$lock"
+test "$(cat "$lock/owner")" = "$token"
+now="$(date +%%s)"
+expiry="$(cat "$lock/expiry")"
+case "$expiry" in ''|*[!0-9]*) exit 1;; esac
+test "$expiry" -gt "$now"
+printf '%%s\n' "$((now + ttl))" > "$lock/expiry.tmp"
+chmod 0600 "$lock/expiry.tmp"
+mv "$lock/expiry.tmp" "$lock/expiry"
+sync -f "$lock"
+`, shellQuote(takodUpgradeLockBase), scope, shellQuote(token), int64(ttl/time.Second))
+}
+
+func releaseTakodUpgradeLockScript(scope string, token string) string {
+	return fmt.Sprintf(`set -eu
+umask 077
+base=%s
+lock="$base/%s"
+token=%s
+exec 9>"$base/.guard"
+flock -x 9
+chmod 0600 "$base/.guard"
+if ! test -e "$lock" && ! test -L "$lock"; then
+  exit 0
+fi
+test -d "$lock"
+test ! -L "$lock"
+test "$(cat "$lock/owner")" = "$token"
+rm -rf -- "$lock"
+sync -f "$base"
+`, shellQuote(takodUpgradeLockBase), scope, shellQuote(token))
+}
+
+func beginTakodUpgradeScript(candidate string) string {
+	return beginTakodUpgradeScriptWithDigest(candidate, "")
+}
+
+func beginTakodUpgradeScriptWithDigest(candidate string, expectedDigest string) string {
+	return beginTakodUpgradeScriptWithContract(candidate, expectedDigest, "", "test-node-lease")
+}
+
+func beginTakodUpgradeScriptWithContract(candidate string, expectedDigest string, contractBase64 string, leaseToken string) string {
+	contractArg := ""
+	if contractBase64 != "" {
+		contractArg = " --contract-base64 " + shellQuote(contractBase64)
+	}
+	return fmt.Sprintf(`set -eu
+umask 077
+dir=/var/lib/tako/node-upgrade
+base=/var/lib/tako/node-upgrade/locks
+token=%s
+renew_ttl=%d
+if test -e "$dir" || test -L "$dir"; then
+  test ! -L "$dir"
+else
+  install -d -m 0700 -o root -g root "$dir"
+fi
+test "$(stat -c '%%u:%%g:%%a' "$dir")" = "0:0:700"
+test -d "$base"
+test ! -L "$base"
+exec 9>"$base/.guard"
+flock -x 9
+chmod 0600 "$base/.guard"
+lock="$base/node"
+test -d "$lock"
+test ! -L "$lock"
+test "$(cat "$lock/owner")" = "$token"
+expiry="$(cat "$lock/expiry")"
+case "$expiry" in ''|*[!0-9]*) exit 1;; esac
+test "$expiry" -gt "$(date +%%s)"
+renew_node_lease() {
+  now="$(date +%%s)"
+  printf '%%s\n' "$((now + renew_ttl))" > "$lock/expiry.tmp"
+  chmod 0600 "$lock/expiry.tmp"
+  mv "$lock/expiry.tmp" "$lock/expiry"
+  sync -f "$lock"
+}
+trap renew_node_lease EXIT
+if test -f "$dir/committed" || test -f "$dir/rolled-back"; then
+  sync -f "$dir"
+  rm -f -- "$dir/candidate" "$dir/previous-takod" "$dir/previous-platform-worker" "$dir/previous-version-manifest" "$dir/had-platform-worker" "$dir/had-version-manifest" "$dir/committed" "$dir/rolled-back"
+  sync -f "$dir"
+fi
+if test -f "$dir/pending"; then
+%s
+fi
+test -f %s
+test -x %s
+test ! -L %s
+install -m 0755 %s "$dir/candidate"
+rm -f -- %s
+expected=%s
+if test -n "$expected"; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$dir/candidate" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "$dir/candidate" | awk '{print $1}')"
+  fi
+	  test "$actual" = "$expected"
+fi
+"$dir/candidate" platform node upgrade-publication-guard --lease-token "$token"%s
+`, shellQuote(leaseToken), int64(takodUpgradeNodeLockTTL/time.Second), indentRootScript(rollbackTakodUpgradeScript(), "  "), shellQuote(candidate), shellQuote(candidate), shellQuote(candidate), shellQuote(candidate), shellQuote(candidate), shellQuote(expectedDigest), contractArg)
+}
+
+func recoverPendingTakodUpgradeScript(leaseToken string) string {
+	return fmt.Sprintf(`set -eu
+umask 077
+dir=/var/lib/tako/node-upgrade
+base=/var/lib/tako/node-upgrade/locks
+token=%s
+exec 9>"$base/.guard"
+flock -x 9
+chmod 0600 "$base/.guard"
+lock="$base/node"
+test -d "$lock"
+test ! -L "$lock"
+test "$(cat "$lock/owner")" = "$token"
+expiry="$(cat "$lock/expiry")"
+case "$expiry" in ''|*[!0-9]*) exit 1;; esac
+test "$expiry" -gt "$(date +%%s)"
+if test -f "$dir/pending"; then
+%s
+fi
+`, shellQuote(leaseToken), indentRootScript(rollbackTakodUpgradeScript(), "  "))
+}
+
+func rollbackTakodUpgradeScript() string {
+	return `set -eu
+dir=/var/lib/tako/node-upgrade
+if ! test -f "$dir/pending"; then
+	if test -f "$dir/committed"; then
+	  echo "node upgrade is already durably committed" >&2
+	  exit 75
+	fi
+	if test -f "$dir/rolled-back"; then
+	  sync -f "$dir"
+	  rm -f -- "$dir/candidate" "$dir/previous-takod" "$dir/previous-platform-worker" "$dir/previous-version-manifest" "$dir/had-platform-worker" "$dir/had-version-manifest" "$dir/rolled-back"
+    sync -f "$dir"
+  else
+    rm -f -- "$dir/candidate"
+  fi
+  exit 0
+fi
+test -f "$dir/previous-takod"
+install -m 0755 "$dir/previous-takod" /usr/local/bin/.tako-rollback-next
+mv -f /usr/local/bin/.tako-rollback-next /usr/local/bin/tako
+sync -f /usr/local/bin
+if test -f "$dir/had-platform-worker"; then
+  test -f "$dir/previous-platform-worker"
+  install -m 0755 "$dir/previous-platform-worker" /usr/local/lib/tako/.tako-rollback-next
+  mv -f /usr/local/lib/tako/.tako-rollback-next /usr/local/lib/tako/tako
+  sync -f /usr/local/lib/tako
+fi
+if test -f "$dir/had-version-manifest"; then
+  test -f "$dir/previous-version-manifest"
+  install -m 0644 "$dir/previous-version-manifest" /etc/tako/version.json
+fi
+systemctl restart takod
+if test -f "$dir/had-platform-worker"; then
+  systemctl restart tako-platform-worker
+fi
+mv "$dir/pending" "$dir/rolled-back"
+sync -f "$dir"
+set +e
+rm -f -- "$dir/candidate" "$dir/previous-takod" "$dir/previous-platform-worker" "$dir/previous-version-manifest" "$dir/had-platform-worker" "$dir/had-version-manifest" "$dir/rolled-back"
+sync -f "$dir" >/dev/null 2>&1
+exit 0`
+}
+
+func bootRecoverTakodUpgradeScript() string {
+	return `#!/bin/sh
+set -eu
+dir=/var/lib/tako/node-upgrade
+clear_locks() {
+  if test -d "$dir/locks" && test ! -L "$dir/locks"; then
+	 rm -rf -- "$dir/locks/node"
+    sync -f "$dir/locks" >/dev/null 2>&1 || true
+  fi
+}
+trap clear_locks EXIT
+if ! test -f "$dir/pending"; then
+	 exit 0
+fi
+test -f "$dir/previous-takod"
+install -m 0755 "$dir/previous-takod" /usr/local/bin/.tako-rollback-next
+mv -f /usr/local/bin/.tako-rollback-next /usr/local/bin/tako
+sync -f /usr/local/bin
+if test -f "$dir/had-platform-worker"; then
+  test -f "$dir/previous-platform-worker"
+  install -m 0755 "$dir/previous-platform-worker" /usr/local/lib/tako/.tako-rollback-next
+  mv -f /usr/local/lib/tako/.tako-rollback-next /usr/local/lib/tako/tako
+  sync -f /usr/local/lib/tako
+fi
+if test -f "$dir/had-version-manifest"; then
+  test -f "$dir/previous-version-manifest"
+  install -m 0644 "$dir/previous-version-manifest" /etc/tako/version.json
+fi
+mv "$dir/pending" "$dir/rolled-back"
+sync -f "$dir"
+set +e
+rm -f -- "$dir/candidate" "$dir/previous-takod" "$dir/previous-platform-worker" "$dir/previous-version-manifest" "$dir/had-platform-worker" "$dir/had-version-manifest" "$dir/rolled-back"
+sync -f "$dir" >/dev/null 2>&1
+exit 0
+`
+}
+
+func takodUpgradeRecoveryUnit() string {
+	return `[Unit]
+Description=Recover an interrupted Tako node upgrade
+After=local-fs.target
+Before=takod.service tako-platform-worker.service
+
+[Service]
+Type=oneshot
+ExecStart=/var/lib/tako/node-upgrade/recover-on-boot
+
+[Install]
+WantedBy=multi-user.target
+`
+}
+
+func installTakodUpgradeRecoveryScript() string {
+	recovery := base64.StdEncoding.EncodeToString([]byte(bootRecoverTakodUpgradeScript()))
+	unit := base64.StdEncoding.EncodeToString([]byte(takodUpgradeRecoveryUnit()))
+	return fmt.Sprintf(`set -eu
+dir=/var/lib/tako/node-upgrade
+if test -e "$dir" || test -L "$dir"; then
+  test ! -L "$dir"
+else
+  install -d -m 0700 -o root -g root "$dir"
+fi
+test "$(stat -c '%%u:%%g:%%a' "$dir")" = "0:0:700"
+printf %%s %s | base64 -d > "$dir/recover-on-boot.tmp"
+chmod 0700 "$dir/recover-on-boot.tmp"
+chown root:root "$dir/recover-on-boot.tmp"
+mv -f "$dir/recover-on-boot.tmp" "$dir/recover-on-boot"
+printf %%s %s | base64 -d > /etc/systemd/system/.tako-node-upgrade-recovery.service.tmp
+chmod 0644 /etc/systemd/system/.tako-node-upgrade-recovery.service.tmp
+chown root:root /etc/systemd/system/.tako-node-upgrade-recovery.service.tmp
+mv -f /etc/systemd/system/.tako-node-upgrade-recovery.service.tmp /etc/systemd/system/tako-node-upgrade-recovery.service
+sync -f "$dir"
+sync -f /etc/systemd/system
+systemctl daemon-reload
+systemctl enable tako-node-upgrade-recovery.service
+`, shellQuote(recovery), shellQuote(unit))
+}
+
+func indentRootScript(script string, prefix string) string {
+	return prefix + strings.ReplaceAll(script, "\n", "\n"+prefix)
+}
+
+func takodBinaryDownloadScript(version string, binaryName string, destination string) string {
+	downloadURL := fmt.Sprintf("https://github.com/redentordev/tako-cli/releases/download/%s/%s", version, binaryName)
+	checksumsURL := fmt.Sprintf("https://github.com/redentordev/tako-cli/releases/download/%s/checksums.txt", version)
+	return fmt.Sprintf(`set -eu
+tmp="$(mktemp)"
+checksums="$(mktemp)"
+cleanup() { rm -f "$tmp" "$checksums"; }
+trap cleanup EXIT
+if command -v curl >/dev/null 2>&1; then
+  curl -fL --retry 3 --connect-timeout 15 -o "$tmp" %s
+  curl -fL --retry 3 --connect-timeout 15 -o "$checksums" %s
+elif command -v wget >/dev/null 2>&1; then
+  wget --tries=3 --timeout=15 -O "$tmp" %s
+  wget --tries=3 --timeout=15 -O "$checksums" %s
+else
+  echo "curl or wget is required" >&2
+  exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "$tmp" | awk '{print $1}')"
+else
+  actual="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+fi
+expected="$(awk -v name=%s '$2 == name { print $1; found = 1; exit } END { if (!found) exit 1 }' "$checksums")"
+test "$actual" = "$expected"
+install -m 0755 "$tmp" %s
+`, shellQuote(downloadURL), shellQuote(checksumsURL), shellQuote(downloadURL), shellQuote(checksumsURL), shellQuote(binaryName), shellQuote(destination))
 }
 
 func takodBinaryInstallScript(version string, binaryName string) string {

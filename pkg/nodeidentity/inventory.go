@@ -423,6 +423,11 @@ func (i ClusterInventory) Allocation(nodeID, key string, generation uint64) (Act
 }
 
 func CreateInventory(path string, inventory ClusterInventory) error {
+	unlock, err := AcquireInventoryMutationLock(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	data, err := marshalInventory(inventory)
 	if err != nil {
 		return err
@@ -437,6 +442,11 @@ func CreateInventory(path string, inventory ClusterInventory) error {
 // already protected inventory directory. It validates the complete snapshot
 // before replacing the previous inode.
 func ReplaceInventory(path string, inventory ClusterInventory) error {
+	unlock, err := AcquireInventoryMutationLock(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	data, err := marshalInventory(inventory)
 	if err != nil {
 		return err

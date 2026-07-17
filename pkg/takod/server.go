@@ -21,6 +21,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/platform"
 	"github.com/redentordev/tako-cli/pkg/recovery"
 	"github.com/redentordev/tako-cli/pkg/takoapi/ptystream"
+	"github.com/redentordev/tako-cli/pkg/upgradeprotocol"
 )
 
 type Server struct {
@@ -88,15 +89,19 @@ func decodeJSONRequestWithLimit(w http.ResponseWriter, r *http.Request, dst any,
 }
 
 type Status struct {
-	Runtime      string                 `json:"runtime"`
-	Version      string                 `json:"version"`
-	Capabilities []string               `json:"capabilities,omitempty"`
-	Hostname     string                 `json:"hostname"`
-	Socket       string                 `json:"socket"`
-	DataDir      string                 `json:"dataDir"`
-	StartedAt    time.Time              `json:"startedAt"`
-	Now          time.Time              `json:"now"`
-	Identity     *nodeidentity.Identity `json:"identity,omitempty"`
+	Runtime string `json:"runtime"`
+	Version string `json:"version"`
+	// UpgradeProtocol is independent from the application API. Minimum and
+	// maximum report the stable lifecycle range accepted during rolling upgrades.
+	UpgradeProtocol        int                    `json:"upgradeProtocol"`
+	MinimumUpgradeProtocol int                    `json:"minimumUpgradeProtocol"`
+	Capabilities           []string               `json:"capabilities,omitempty"`
+	Hostname               string                 `json:"hostname"`
+	Socket                 string                 `json:"socket"`
+	DataDir                string                 `json:"dataDir"`
+	StartedAt              time.Time              `json:"startedAt"`
+	Now                    time.Time              `json:"now"`
+	Identity               *nodeidentity.Identity `json:"identity,omitempty"`
 	// EnrollmentRoles are immutable bootstrap facts. Current control-plane
 	// roles are separate mutable state and must not be inferred from this list.
 	EnrollmentRoles      []string                    `json:"enrollmentRoles,omitempty"`
@@ -109,6 +114,14 @@ type Status struct {
 // CapabilityContainerArgvV1 means reconcile and job payloads preserve the
 // container command/entrypoint argv fields introduced with config exec form.
 const CapabilityContainerArgvV1 = "container.argv-v1"
+
+// CapabilityNodeUpgradeV1 means the agent reports the N/N-1 lifecycle
+// protocol and was installed through the rollback-capable node upgrade path.
+const CapabilityNodeUpgradeV1 = "node.upgrade-v1"
+
+// CapabilityPlatformWorkerHandoffV1 means an enrolled node's protected
+// platform-worker binary is handed off in the same atomic transaction.
+const CapabilityPlatformWorkerHandoffV1 = "platform.worker-handoff-v1"
 
 // CapabilityContainerRuntimeControlsV1 covers user/workdir/stop/init/hosts,
 // ulimits, and shm-size fields on service and job payloads.
@@ -245,19 +258,33 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	if s.installation != nil {
 		var deactivatePolicy func()
+		unlockLifecycle, lifecycleErr := recovery.AcquireNodeUpgradeLifecycleExclusionForDataDir(s.dataDir)
+		upgradeInProgress := errors.Is(lifecycleErr, recovery.ErrNodeUpgradeLeaseActive)
+		if lifecycleErr != nil && !upgradeInProgress {
+			return fmt.Errorf("acquire node lifecycle exclusion for startup reconciliation: %w", lifecycleErr)
+		}
 		unlockSnapshot, err := recovery.AcquireMutationLock(s.dataDir)
 		if err != nil {
 			return fmt.Errorf("acquire recovery mutation lock for startup reconciliation: %w", err)
 		}
 		startupErr := func() error {
+			if unlockLifecycle != nil {
+				defer unlockLifecycle()
+			}
 			defer unlockSnapshot()
 			if _, err := os.Stat(s.membershipFile); err == nil {
-				store, storeErr := platform.NewMembershipStore(s.membershipFile, s.inventoryFile)
-				if storeErr != nil {
-					return fmt.Errorf("open controller membership at startup: %w", storeErr)
-				}
-				if _, storeErr = store.Read(); storeErr != nil {
-					return fmt.Errorf("reconcile controller membership at startup: %w", storeErr)
+				if upgradeInProgress {
+					if validateErr := platform.ValidateControllerRecoverySnapshot(s.membershipFile, s.inventoryFile, s.installation); validateErr != nil {
+						return fmt.Errorf("validate controller membership during active node upgrade: %w", validateErr)
+					}
+				} else {
+					store, storeErr := platform.NewMembershipStoreWithinMutationBarrier(s.membershipFile, s.inventoryFile)
+					if storeErr != nil {
+						return fmt.Errorf("open controller membership at startup: %w", storeErr)
+					}
+					if _, storeErr = store.Read(); storeErr != nil {
+						return fmt.Errorf("reconcile controller membership at startup: %w", storeErr)
+					}
 				}
 			} else if !os.IsNotExist(err) {
 				return fmt.Errorf("inspect controller membership at startup: %w", err)
@@ -2167,18 +2194,21 @@ func (s *Server) handleDiscoveryExports(w http.ResponseWriter, r *http.Request) 
 func (s *Server) Status() Status {
 	hostname, _ := os.Hostname()
 	status := Status{
-		Runtime:         "takod",
-		Version:         s.version,
-		Capabilities:    []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityNodeIdentityV1},
-		Hostname:        hostname,
-		Socket:          s.socket,
-		DataDir:         s.dataDir,
-		StartedAt:       s.startedAt,
-		Now:             time.Now().UTC(),
-		Identity:        cloneNodeIdentity(s.installation),
-		EnrollmentRoles: cloneEnrollmentRoles(s.installation),
+		Runtime:                "takod",
+		Version:                s.version,
+		UpgradeProtocol:        upgradeprotocol.Current,
+		MinimumUpgradeProtocol: upgradeprotocol.Current,
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1},
+		Hostname:               hostname,
+		Socket:                 s.socket,
+		DataDir:                s.dataDir,
+		StartedAt:              s.startedAt,
+		Now:                    time.Now().UTC(),
+		Identity:               cloneNodeIdentity(s.installation),
+		EnrollmentRoles:        cloneEnrollmentRoles(s.installation),
 	}
 	if s.installation != nil {
+		status.Capabilities = append(status.Capabilities, CapabilityPlatformWorkerHandoffV1)
 		if inventory, err := nodeidentity.ReadInventory(s.inventoryFile); err == nil && inventory.ClusterID == s.installation.ClusterID {
 			if node, ok := inventory.Node(s.installation.NodeID); ok {
 				membership := node

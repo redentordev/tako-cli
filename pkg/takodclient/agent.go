@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/upgradeprotocol"
 )
 
 const (
@@ -28,14 +29,16 @@ const (
 // local transport decision. Mutable project/environment metadata is
 // intentionally not part of this trust decision.
 type AgentStatus struct {
-	Runtime              string                      `json:"runtime"`
-	Version              string                      `json:"version"`
-	Capabilities         []string                    `json:"capabilities,omitempty"`
-	Hostname             string                      `json:"hostname"`
-	Identity             *nodeidentity.Identity      `json:"identity,omitempty"`
-	EnrollmentRoles      []string                    `json:"enrollmentRoles,omitempty"`
-	Membership           *nodeidentity.InventoryNode `json:"membership,omitempty"`
-	MembershipGeneration uint64                      `json:"membershipGeneration,omitempty"`
+	Runtime                string                      `json:"runtime"`
+	Version                string                      `json:"version"`
+	UpgradeProtocol        int                         `json:"upgradeProtocol"`
+	MinimumUpgradeProtocol int                         `json:"minimumUpgradeProtocol"`
+	Capabilities           []string                    `json:"capabilities,omitempty"`
+	Hostname               string                      `json:"hostname"`
+	Identity               *nodeidentity.Identity      `json:"identity,omitempty"`
+	EnrollmentRoles        []string                    `json:"enrollmentRoles,omitempty"`
+	Membership             *nodeidentity.InventoryNode `json:"membership,omitempty"`
+	MembershipGeneration   uint64                      `json:"membershipGeneration,omitempty"`
 }
 
 // AgentClient sends structured HTTP directly to a takod Unix socket. Dialer
@@ -291,14 +294,16 @@ func (c *AgentClient) Status(ctx context.Context) (*AgentStatus, error) {
 		return nil, &HTTPError{Method: http.MethodGet, Endpoint: "/v1/status", Status: response.StatusCode, Body: output}
 	}
 	var envelope struct {
-		Runtime              string          `json:"runtime"`
-		Version              string          `json:"version"`
-		Capabilities         []string        `json:"capabilities"`
-		Hostname             string          `json:"hostname"`
-		Identity             json.RawMessage `json:"identity"`
-		EnrollmentRoles      []string        `json:"enrollmentRoles"`
-		Membership           json.RawMessage `json:"membership"`
-		MembershipGeneration uint64          `json:"membershipGeneration"`
+		Runtime                string          `json:"runtime"`
+		Version                string          `json:"version"`
+		UpgradeProtocol        int             `json:"upgradeProtocol"`
+		MinimumUpgradeProtocol int             `json:"minimumUpgradeProtocol"`
+		Capabilities           []string        `json:"capabilities"`
+		Hostname               string          `json:"hostname"`
+		Identity               json.RawMessage `json:"identity"`
+		EnrollmentRoles        []string        `json:"enrollmentRoles"`
+		Membership             json.RawMessage `json:"membership"`
+		MembershipGeneration   uint64          `json:"membershipGeneration"`
 	}
 	decoder := json.NewDecoder(strings.NewReader(output))
 	if err := decoder.Decode(&envelope); err != nil {
@@ -312,12 +317,14 @@ func (c *AgentClient) Status(ctx context.Context) (*AgentStatus, error) {
 		return nil, fmt.Errorf("decode takod status: %w", err)
 	}
 	status := AgentStatus{
-		Runtime:              envelope.Runtime,
-		Version:              envelope.Version,
-		Capabilities:         envelope.Capabilities,
-		Hostname:             envelope.Hostname,
-		EnrollmentRoles:      envelope.EnrollmentRoles,
-		MembershipGeneration: envelope.MembershipGeneration,
+		Runtime:                envelope.Runtime,
+		Version:                envelope.Version,
+		UpgradeProtocol:        envelope.UpgradeProtocol,
+		MinimumUpgradeProtocol: envelope.MinimumUpgradeProtocol,
+		Capabilities:           envelope.Capabilities,
+		Hostname:               envelope.Hostname,
+		EnrollmentRoles:        envelope.EnrollmentRoles,
+		MembershipGeneration:   envelope.MembershipGeneration,
 	}
 	if len(envelope.Identity) > 0 && string(envelope.Identity) != "null" {
 		identityDecoder := json.NewDecoder(bytes.NewReader(envelope.Identity))
@@ -360,6 +367,11 @@ func (c *AgentClient) Status(ctx context.Context) (*AgentStatus, error) {
 func (s AgentStatus) Validate() error {
 	if s.Runtime != "takod" {
 		return fmt.Errorf("unexpected runtime %q from takod status", s.Runtime)
+	}
+	if s.UpgradeProtocol != 0 || s.MinimumUpgradeProtocol != 0 {
+		if err := upgradeprotocol.ValidateStatus(s.Version, s.UpgradeProtocol, s.MinimumUpgradeProtocol); err != nil {
+			return fmt.Errorf("invalid node upgrade protocol from takod status: %w", err)
+		}
 	}
 	if s.Identity == nil {
 		return nil

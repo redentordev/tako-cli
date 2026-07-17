@@ -1,8 +1,9 @@
 # Goal: Local-First PaaS Foundation
 
 Date: 2026-07-16
-Status: in progress — Phases 1 through 5 are complete and adversarially
-reviewed; Phase 6 is next.
+Status: complete — all seven phases are implemented, adversarially reviewed,
+and verified by the repository quality, race, manual-generation, Linux test
+compile, and Windows build gates.
 
 ## Objective
 
@@ -225,6 +226,17 @@ fails closed.
   certificate state, and persistent workload data outside node 1.
 
 ### Phase 7 — Upgrades and HA evolution
+
+Progress: complete. Both mandatory reviewers closed their architecture,
+correctness, security, operations, and failure-mode findings after stable
+N/N-1 protocol negotiation, authoritative inventory targeting, pinned SSH,
+deterministic worker-first canaries, controller-last publication, downgrade
+refusal, token-bound cluster and node leases, atomic binary/worker handoff,
+durable commit/rollback recovery, node-lifecycle exclusion, shared inventory
+and snapshot barriers, long-publication lease renewal, and passive controller
+promotion proof were added. Failure-injection coverage includes interrupted
+publication, expired leases without reboot, lost commit responses, concurrent
+takeover, rollback, and production lock-root contention.
 
 - Separate application and node lifecycle commands.
 - Support N/N-1 capability compatibility and worker-first canary upgrades.

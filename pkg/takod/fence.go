@@ -472,7 +472,11 @@ func (s *Server) handleInventoryAuthority(w http.ResponseWriter, r *http.Request
 			http.Error(w, "signed inventory is available only from the controller", http.StatusForbidden)
 			return
 		}
-		store, storeErr := platform.NewMembershipStore(s.membershipFile, s.inventoryFile)
+		newStore := platform.NewMembershipStore
+		if lifecycleMutationBarrierHeld(r.Context()) {
+			newStore = platform.NewMembershipStoreWithinMutationBarrier
+		}
+		store, storeErr := newStore(s.membershipFile, s.inventoryFile)
 		if storeErr != nil {
 			err = storeErr
 			break

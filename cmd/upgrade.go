@@ -4,11 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/platform"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/setup"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -17,6 +21,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/redentordev/tako-cli/pkg/updater"
 	"github.com/spf13/cobra"
+	"golang.org/x/mod/semver"
 )
 
 var (
@@ -28,6 +33,7 @@ var (
 	upgradeServersStatusWait  = 30 * time.Second
 	upgradeServersStatusPoll  = 1 * time.Second
 	upgradeServersStatusProbe = 3 * time.Second
+	upgradeCoordinatorLockTTL = 4 * time.Hour
 )
 
 var upgradeCmd = &cobra.Command{
@@ -59,11 +65,14 @@ var upgradeServersCmd = &cobra.Command{
 	Use:          "servers",
 	Short:        "Upgrade server-side takod agents to this CLI version",
 	SilenceUsage: true,
-	Long: `Upgrade server-side takod agents for the selected environment.
+	Long: `Upgrade server-side takod agents in the authoritative enrolled cluster inventory.
 
 This command patches stale or missing takod agents without changing application
 services. It installs the matching Tako release binary, restarts the takod
-systemd service, refreshes /etc/tako/version.json, and verifies /v1/status.
+systemd service, refreshes /etc/tako/version.json, and verifies /v1/status. An
+enrolled cluster is upgraded worker-first and controller-last, independent of
+application environment subsets. Legacy configurations retain environment
+selection behavior.
 
 Use --dry-run first to see current agent versions. Development builds must pass
 --takod-binary with a Linux tako binary because there is no release asset for
@@ -71,7 +80,7 @@ version "dev".`,
 	Example: `  # Show current server agent versions
   tako upgrade servers --dry-run
 
-  # Patch every server in the active environment
+  # Patch every node in the authoritative enrolled cluster
   tako upgrade servers
 
   # Patch one server
@@ -87,7 +96,7 @@ func init() {
 	upgradeCmd.Flags().BoolVarP(&upgradeCheck, "check", "c", false, "Only check for updates, don't upgrade")
 	upgradeCmd.Flags().BoolVarP(&upgradeForce, "force", "f", false, "Force upgrade even if already on latest version")
 	upgradeCmd.AddCommand(upgradeServersCmd)
-	upgradeServersCmd.Flags().StringVarP(&upgradeServersServer, "server", "s", "", "Server to upgrade (default: all servers in environment)")
+	upgradeServersCmd.Flags().StringVarP(&upgradeServersServer, "server", "s", "", "Server to upgrade (default: authoritative enrolled cluster inventory; legacy: active environment)")
 	upgradeServersCmd.Flags().BoolVar(&upgradeServersDryRun, "dry-run", false, "Report server agent versions without changing remote state")
 	upgradeServersCmd.Flags().StringVar(&upgradeServersTakodBinary, "takod-binary", "", "Path to a Linux tako binary to install as takod (required for development builds)")
 }
@@ -156,7 +165,7 @@ func runUpgradeServers(cmd *cobra.Command, args []string) error {
 	}
 
 	envName := getEnvironmentName(cfg)
-	targetServerNames, servers, err := setupTargetServers(cfg, envName, upgradeServersServer)
+	targetServerNames, servers, err := upgradeTargetServers(cfg, envName, upgradeServersServer)
 	if err != nil {
 		return err
 	}
@@ -184,13 +193,68 @@ func runUpgradeServers(cmd *cobra.Command, args []string) error {
 		DryRun:        upgradeServersDryRun,
 		Nodes:         []engine.UpgradeServersNodeOutcome{},
 	}
+	upgradeNodes := make([]engine.UpgradeNode, 0, len(targetServerNames))
 	for _, name := range targetServerNames {
-		result.Nodes = append(result.Nodes, upgradeServerNode(cfg, sshPool, out, name, servers[name]))
+		upgradeNodes = append(upgradeNodes, engine.UpgradeNode{Name: name, Roles: append([]string(nil), servers[name].Roles...)})
+	}
+	plan, err := engine.PlanNodeUpgrade(upgradeNodes)
+	if err != nil {
+		return err
+	}
+	if !upgradeServersDryRun {
+		if err := preflightStagedUpgrade(cfg, sshPool, plan, servers, upgradeServersServer); err != nil {
+			return emitUpgradePreflightFailure(result, plan, servers, err)
+		}
+	}
+	var coordinator *provisioner.Provisioner
+	if !upgradeServersDryRun && plan[0].Stage != engine.UpgradeStageLegacy {
+		coordinator, err = acquireUpgradeCoordinator(cfg, sshPool)
+		if err != nil {
+			return emitUpgradePreflightFailure(result, plan, servers, err)
+		}
+		defer func() { _ = coordinator.ReleaseTakodUpgradeCoordinatorLock() }()
+	}
+	blocked := false
+	for _, planned := range plan {
+		if blocked {
+			result.Nodes = append(result.Nodes, engine.UpgradeServersNodeOutcome{
+				Server: planned.Name, Host: servers[planned.Name].Host, ToVersion: Version,
+				Stage: planned.Stage, Outcome: engine.UpgradeOutcomeBlocked,
+				Error: "blocked because an earlier staged upgrade did not verify",
+			})
+			continue
+		}
+		if coordinator != nil {
+			if err := coordinator.RefreshTakodUpgradeCoordinatorLock(upgradeCoordinatorLockTTL); err != nil {
+				result.Nodes = append(result.Nodes, engine.UpgradeServersNodeOutcome{
+					Server: planned.Name, Host: servers[planned.Name].Host, ToVersion: Version,
+					Stage: planned.Stage, Outcome: engine.UpgradeOutcomeBlocked,
+					Error: fmt.Sprintf("lost authoritative cluster upgrade lock: %v", err),
+				})
+				blocked = true
+				continue
+			}
+		}
+		if !upgradeServersDryRun && planned.Stage == engine.UpgradeStageController {
+			if err := validateControllerLastWorkers(cfg, sshPool, planned.Name); err != nil {
+				result.Nodes = append(result.Nodes, engine.UpgradeServersNodeOutcome{
+					Server: planned.Name, Host: servers[planned.Name].Host, ToVersion: Version,
+					Stage: planned.Stage, Outcome: engine.UpgradeOutcomeBlocked, Error: err.Error(),
+				})
+				blocked = true
+				continue
+			}
+		}
+		outcome := upgradeServerNode(cfg, sshPool, out, planned.Name, servers[planned.Name], planned.Stage)
+		result.Nodes = append(result.Nodes, outcome)
+		if planned.Stage != engine.UpgradeStageLegacy && (outcome.Outcome == engine.UpgradeOutcomeFailed || outcome.Outcome == engine.UpgradeOutcomeRolledBack) {
+			blocked = true
+		}
 	}
 
 	failed := 0
 	for _, node := range result.Nodes {
-		if node.Outcome == engine.UpgradeOutcomeFailed {
+		if node.Outcome == engine.UpgradeOutcomeFailed || node.Outcome == engine.UpgradeOutcomeRolledBack || node.Outcome == engine.UpgradeOutcomeBlocked || node.Outcome == engine.UpgradeOutcomeDowngradeBlocked {
 			failed++
 		}
 	}
@@ -220,10 +284,166 @@ func runUpgradeServers(cmd *cobra.Command, args []string) error {
 	return opErr
 }
 
+func upgradeTargetServers(cfg *config.Config, envName string, requested string) ([]string, map[string]config.ServerConfig, error) {
+	enrolled := false
+	for _, server := range cfg.Servers {
+		if len(server.Roles) > 0 {
+			enrolled = true
+			break
+		}
+	}
+	if !enrolled {
+		return setupTargetServers(cfg, envName, requested)
+	}
+	if strings.TrimSpace(requested) != "" {
+		server, ok := cfg.Servers[requested]
+		if !ok {
+			return nil, nil, fmt.Errorf("server %s not found in authoritative cluster inventory", requested)
+		}
+		if len(server.Roles) == 0 {
+			return nil, nil, fmt.Errorf("server %s is not an enrolled cluster member", requested)
+		}
+		return []string{requested}, map[string]config.ServerConfig{requested: server}, nil
+	}
+	names := make([]string, 0, len(cfg.Servers))
+	servers := make(map[string]config.ServerConfig, len(cfg.Servers))
+	for name, server := range cfg.Servers {
+		if len(server.Roles) == 0 {
+			return nil, nil, fmt.Errorf("cannot mix legacy server %s into an enrolled cluster node upgrade", name)
+		}
+		names = append(names, name)
+		servers[name] = server
+	}
+	sort.Strings(names)
+	return names, servers, nil
+}
+
+func emitUpgradePreflightFailure(result engine.UpgradeServersResult, plan []engine.UpgradePlanNode, servers map[string]config.ServerConfig, cause error) error {
+	result.Error = cause.Error()
+	for _, planned := range plan {
+		result.Nodes = append(result.Nodes, engine.UpgradeServersNodeOutcome{
+			Server: planned.Name, Host: servers[planned.Name].Host, ToVersion: Version,
+			Stage: planned.Stage, Outcome: engine.UpgradeOutcomeBlocked, Error: cause.Error(),
+		})
+	}
+	if err := emitResultDocument(result); err != nil {
+		return err
+	}
+	return cause
+}
+
+func upgradeSSHClient(pool *ssh.Pool, name string, server config.ServerConfig) (*ssh.Client, error) {
+	if len(server.Roles) == 0 {
+		return pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	}
+	if server.ClusterID == "" || server.NodeID == "" || server.SSHHostKeyType == "" || server.SSHHostKey == "" || server.SSHHostKeyFingerprint == "" {
+		return nil, fmt.Errorf("enrolled server %s lacks a complete controller-owned SSH identity pin", name)
+	}
+	return pool.GetOrCreateWithAuthPinned(server.Host, server.Port, server.User, server.SSHKey, server.Password, ssh.RecordedHostKey{
+		Type: server.SSHHostKeyType, Key: server.SSHHostKey, Fingerprint: server.SSHHostKeyFingerprint,
+	})
+}
+
+func acquireUpgradeCoordinator(cfg *config.Config, sshPool *ssh.Pool) (*provisioner.Provisioner, error) {
+	controllerName := ""
+	var controller config.ServerConfig
+	for name, server := range cfg.Servers {
+		if len(server.Roles) == 0 || !server.HasPlatformRole(nodeidentity.RoleControlPlane) {
+			continue
+		}
+		if controllerName != "" {
+			return nil, fmt.Errorf("authoritative cluster upgrade requires exactly one controller; found %s and %s", controllerName, name)
+		}
+		controllerName, controller = name, server
+	}
+	if controllerName == "" {
+		return nil, fmt.Errorf("authoritative cluster upgrade requires exactly one enrolled controller")
+	}
+	client, err := upgradeSSHClient(sshPool, controllerName, controller)
+	if err != nil {
+		return nil, fmt.Errorf("connect to authoritative upgrade coordinator %s: %w", controllerName, err)
+	}
+	coordinator := provisioner.NewProvisioner(client, verbose)
+	coordinator.SetOutput(humanOut())
+	if err := coordinator.AcquireTakodUpgradeCoordinatorLock(upgradeCoordinatorLockTTL); err != nil {
+		return nil, fmt.Errorf("acquire authoritative cluster upgrade lock on %s: %w", controllerName, err)
+	}
+	return coordinator, nil
+}
+
+func preflightStagedUpgrade(cfg *config.Config, sshPool *ssh.Pool, plan []engine.UpgradePlanNode, selected map[string]config.ServerConfig, requested string) error {
+	enrolled := false
+	for _, planned := range plan {
+		if len(selected[planned.Name].Roles) > 0 {
+			enrolled = true
+			break
+		}
+	}
+	if !enrolled {
+		return nil
+	}
+	for _, planned := range plan {
+		server := selected[planned.Name]
+		client, err := upgradeSSHClient(sshPool, planned.Name, server)
+		if err != nil {
+			return fmt.Errorf("preflight staged upgrade connection to %s: %w", planned.Name, err)
+		}
+		status, err := probeTakodAgentStatus(client, cfg, upgradeServersStatusProbe)
+		if err != nil {
+			return fmt.Errorf("preflight staged upgrade status for %s: %w", planned.Name, err)
+		}
+		if err := engine.ValidateUpgradeCompatibility(status.Version, status.UpgradeProtocol, status.MinimumUpgradeProtocol); err != nil {
+			return fmt.Errorf("preflight staged upgrade compatibility for %s: %w", planned.Name, err)
+		}
+		if err := validateUpgradeStatusIdentity(planned.Name, server, status); err != nil {
+			return fmt.Errorf("preflight staged upgrade identity for %s: %w", planned.Name, err)
+		}
+		if err := validateUpgradeDoesNotDowngrade(Version, status.Version); err != nil {
+			return fmt.Errorf("preflight staged upgrade version for %s: %w", planned.Name, err)
+		}
+	}
+
+	// An explicitly targeted controller may be upgraded only after every other
+	// enrolled worker already reports the target protocol and release.
+	if len(plan) == 1 && plan[0].Stage == engine.UpgradeStageController && strings.TrimSpace(requested) != "" {
+		return validateControllerLastWorkers(cfg, sshPool, plan[0].Name)
+	}
+	return nil
+}
+
+func validateControllerLastWorkers(cfg *config.Config, sshPool *ssh.Pool, controller string) error {
+	names := make([]string, 0, len(cfg.Servers))
+	for name := range cfg.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		server := cfg.Servers[name]
+		if name == controller || len(server.Roles) == 0 || !server.HasPlatformRole(nodeidentity.RoleWorker) || server.HasPlatformRole(nodeidentity.RoleControlPlane) {
+			continue
+		}
+		client, err := upgradeSSHClient(sshPool, name, server)
+		if err != nil {
+			return fmt.Errorf("controller-last recheck connection to worker %s: %w", name, err)
+		}
+		status, err := probeTakodAgentStatus(client, cfg, upgradeServersStatusProbe)
+		if err != nil {
+			return fmt.Errorf("controller-last recheck requires live worker %s: %w", name, err)
+		}
+		if err := validateUpgradeStatusIdentity(name, server, status); err != nil {
+			return fmt.Errorf("controller-last recheck identity mismatch for worker %s: %w", name, err)
+		}
+		if status.Version != Version || status.UpgradeProtocol != engine.UpgradeProtocolCurrent || status.MinimumUpgradeProtocol != engine.UpgradeProtocolCurrent || !slices.Contains(status.Capabilities, takod.CapabilityNodeUpgradeV1) {
+			return fmt.Errorf("controller-last recheck requires worker %s at release %s and protocol %d", name, Version, engine.UpgradeProtocolCurrent)
+		}
+	}
+	return nil
+}
+
 // upgradeServerNode upgrades (or, in dry-run, assesses) one node's takod
 // agent. Failures are recorded in the outcome so remaining nodes still run.
-func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, name string, server config.ServerConfig) engine.UpgradeServersNodeOutcome {
-	node := engine.UpgradeServersNodeOutcome{Server: name, Host: server.Host, ToVersion: Version}
+func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, name string, server config.ServerConfig, stage string) engine.UpgradeServersNodeOutcome {
+	node := engine.UpgradeServersNodeOutcome{Server: name, Host: server.Host, ToVersion: Version, Stage: stage}
 	fail := func(err error) engine.UpgradeServersNodeOutcome {
 		node.Outcome = engine.UpgradeOutcomeFailed
 		node.Error = err.Error()
@@ -232,16 +452,32 @@ func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, nam
 	}
 
 	fmt.Fprintf(out, "\n=== Server: %s (%s) ===\n", name, server.Host)
-	client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	client, err := upgradeSSHClient(sshPool, name, server)
 	if err != nil {
 		return fail(fmt.Errorf("failed to connect to server %s: %w", name, err))
 	}
 
 	status, statusErr := probeTakodAgentStatus(client, cfg, upgradeServersStatusProbe)
 	current := "unavailable"
+	var downgradeErr error
 	if statusErr == nil {
 		current = status.Version
 		node.FromVersion = status.Version
+		node.Protocol = status.UpgradeProtocol
+		if err := engine.ValidateUpgradeCompatibility(status.Version, status.UpgradeProtocol, status.MinimumUpgradeProtocol); err != nil {
+			return fail(fmt.Errorf("server %s is not rolling-upgrade compatible: %w", name, err))
+		}
+		if len(server.Roles) > 0 {
+			if err := validateUpgradeStatusIdentity(name, server, status); err != nil {
+				return fail(fmt.Errorf("server %s mutation-time identity revalidation failed: %w", name, err))
+			}
+		}
+		downgradeErr = validateUpgradeDoesNotDowngrade(Version, status.Version)
+		if downgradeErr != nil && !upgradeServersDryRun {
+			return fail(fmt.Errorf("server %s: %w", name, downgradeErr))
+		}
+	} else if len(server.Roles) > 0 {
+		return fail(fmt.Errorf("server %s mutation-time identity revalidation requires live status: %w", name, statusErr))
 	}
 	fmt.Fprintf(out, "Current takod: %s\n", current)
 	if statusErr != nil {
@@ -261,6 +497,10 @@ func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, nam
 		if statusErr != nil {
 			action = "status unavailable"
 			node.Outcome = engine.UpgradeOutcomeStatusUnavailable
+		} else if downgradeErr != nil {
+			action = "downgrade blocked"
+			node.Outcome = engine.UpgradeOutcomeDowngradeBlocked
+			node.Error = downgradeErr.Error()
 		} else if current != Version || serverVersion.TakoCLIVersion != Version {
 			action = "upgrade needed"
 			node.Outcome = engine.UpgradeOutcomeUpgradeNeeded
@@ -272,21 +512,86 @@ func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, nam
 	if versionErr != nil {
 		return fail(fmt.Errorf("server %s is not set up; run 'tako setup --server %s' first: %w", name, name, versionErr))
 	}
-
 	prov := provisioner.NewProvisioner(client, verbose)
 	prov.SetOutput(humanOut())
-	if err := ensureTakodRuntimeWithBinary(prov, cfg, name, upgradeServersTakodBinary); err != nil {
-		return fail(fmt.Errorf("failed to upgrade takod on server %s: %w", name, err))
+	var revalidate func() (*nodeidentity.UpgradeContract, error)
+	if len(server.Roles) > 0 {
+		revalidate = func() (*nodeidentity.UpgradeContract, error) {
+			mutationStatus, err := probeTakodAgentStatus(client, cfg, upgradeServersStatusProbe)
+			if err != nil {
+				return nil, fmt.Errorf("immediate pre-publication status probe: %w", err)
+			}
+			if err := engine.ValidateUpgradeCompatibility(mutationStatus.Version, mutationStatus.UpgradeProtocol, mutationStatus.MinimumUpgradeProtocol); err != nil {
+				return nil, fmt.Errorf("immediate pre-publication compatibility changed: %w", err)
+			}
+			if err := validateUpgradeStatusIdentity(name, server, mutationStatus); err != nil {
+				return nil, fmt.Errorf("immediate pre-publication identity changed: %w", err)
+			}
+			if err := validateUpgradeDoesNotDowngrade(Version, mutationStatus.Version); err != nil {
+				return nil, fmt.Errorf("immediate pre-publication version changed: %w", err)
+			}
+			return &nodeidentity.UpgradeContract{
+				ClusterID: server.ClusterID, NodeID: server.NodeID,
+				MembershipGeneration: mutationStatus.MembershipGeneration,
+				Lifecycle:            mutationStatus.Membership.Lifecycle,
+				Roles:                append([]string(nil), mutationStatus.Membership.Roles...),
+			}, nil
+		}
 	}
-	if err := setup.WriteVersionFile(client, setupVersionManifest(serverVersion)); err != nil {
-		return fail(setupVersionWriteError(name, err))
+	if err := prov.BeginTakodUpgrade(Version, upgradeServersTakodBinary, revalidate); err != nil {
+		return fail(fmt.Errorf("failed to stage takod upgrade on server %s: %w", name, err))
+	}
+	rollback := func(cause error) engine.UpgradeServersNodeOutcome {
+		rollbackErr := prov.RollbackTakodUpgrade()
+		if manifestErr := setup.WriteVersionFile(client, serverVersion); rollbackErr == nil && manifestErr != nil {
+			rollbackErr = fmt.Errorf("restore setup version manifest: %w", manifestErr)
+		}
+		if rollbackErr == nil && node.FromVersion != "" && node.FromVersion != "unavailable" {
+			_, rollbackErr = waitForTakodAgentVersion(client, cfg, node.FromVersion, upgradeServersStatusWait, upgradeServersStatusPoll, upgradeServersStatusProbe)
+		}
+		if rollbackErr != nil {
+			return fail(fmt.Errorf("%v; automatic rollback also failed: %w", cause, rollbackErr))
+		}
+		node.Outcome = engine.UpgradeOutcomeRolledBack
+		node.RolledBack = true
+		node.Error = cause.Error()
+		fmt.Fprintf(out, "↩ %v; restored takod %s\n", cause, node.FromVersion)
+		return node
+	}
+	if err := prov.ActivateTakodUpgrade(); err != nil {
+		return rollback(fmt.Errorf("failed to activate takod upgrade on server %s: %w", name, err))
 	}
 	verified, err := waitForTakodAgentVersion(client, cfg, Version, upgradeServersStatusWait, upgradeServersStatusPoll, upgradeServersStatusProbe)
 	if err != nil {
-		return fail(fmt.Errorf("server %s takod upgrade did not verify: %w", name, err))
+		return rollback(fmt.Errorf("server %s takod upgrade did not verify: %w", name, err))
+	}
+	if verified.UpgradeProtocol != engine.UpgradeProtocolCurrent || verified.MinimumUpgradeProtocol != engine.UpgradeProtocolCurrent || !slices.Contains(verified.Capabilities, takod.CapabilityNodeUpgradeV1) {
+		return rollback(fmt.Errorf("server %s reported an incomplete node-upgrade capability contract", name))
+	}
+	if len(server.Roles) > 0 && !slices.Contains(verified.Capabilities, takod.CapabilityPlatformWorkerHandoffV1) {
+		return rollback(fmt.Errorf("server %s did not attest protected platform-worker handoff support", name))
+	}
+	if err := prov.VerifyTakodUpgradeServices(stage == engine.UpgradeStageController); err != nil {
+		return rollback(fmt.Errorf("server %s protected service handoff did not verify: %w", name, err))
+	}
+	if stage == engine.UpgradeStageController {
+		workerStatus, err := waitForTakodAgentVersionAtSocket(client, platform.DefaultWorkerSocket, Version, upgradeServersStatusWait, upgradeServersStatusPoll, upgradeServersStatusProbe)
+		if err != nil || workerStatus.Version != Version || workerStatus.Identity == nil || workerStatus.Identity.ClusterID != server.ClusterID || workerStatus.Identity.NodeID != server.NodeID {
+			if err == nil {
+				err = fmt.Errorf("protected worker ingress returned the wrong version or immutable identity")
+			}
+			return rollback(fmt.Errorf("server %s protected worker ingress did not verify: %w", name, err))
+		}
+	}
+	if err := setup.WriteVersionFile(client, setupVersionManifest(serverVersion)); err != nil {
+		return rollback(setupVersionWriteError(name, err))
+	}
+	if err := prov.CommitTakodUpgrade(); err != nil {
+		return rollback(fmt.Errorf("server %s node-upgrade commit failed: %w", name, err))
 	}
 	node.Outcome = engine.UpgradeOutcomeUpgraded
 	node.ToVersion = verified.Version
+	node.Protocol = verified.UpgradeProtocol
 	fmt.Fprintf(out, "✓ Upgraded takod: %s -> %s\n", current, verified.Version)
 	return node
 }
@@ -300,6 +605,76 @@ func validateUpgradeServersOptions(cliVersion string, takodBinary string, dryRun
 		return fmt.Errorf("server upgrades from a development or non-release CLI build require --takod-binary with a Linux tako binary")
 	}
 	return nil
+}
+
+func validateUpgradeDoesNotDowngrade(targetVersion string, runningVersion string) error {
+	target := canonicalUpgradeSemver(targetVersion)
+	running := canonicalUpgradeSemver(runningVersion)
+	if target == "" || running == "" {
+		return nil
+	}
+	if semver.Compare(target, running) < 0 {
+		return fmt.Errorf("refusing protected node downgrade from %s to %s; restore an older release only through the disaster-recovery workflow", runningVersion, targetVersion)
+	}
+	return nil
+}
+
+func canonicalUpgradeSemver(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return ""
+	}
+	if !strings.HasPrefix(version, "v") {
+		version = "v" + version
+	}
+	version = strings.TrimSuffix(version, "-dirty")
+	parts := strings.Split(version, "-")
+	for index := 1; index+1 < len(parts); index++ {
+		if allASCIIBytes(parts[index], isASCIIDigit) && len(parts[index+1]) > 1 && parts[index+1][0] == 'g' && allASCIIBytes(parts[index+1][1:], isASCIIHex) {
+			version = strings.Join(parts[:index], "-")
+			break
+		}
+	}
+	if !semver.IsValid(version) {
+		return ""
+	}
+	return version
+}
+
+func validateUpgradeStatusIdentity(name string, server config.ServerConfig, status *takod.Status) error {
+	if len(server.Roles) == 0 {
+		return nil
+	}
+	if status == nil || status.Identity == nil || status.Identity.ClusterID != server.ClusterID || status.Identity.NodeID != server.NodeID {
+		return fmt.Errorf("immutable identity does not match enrolled node %s", name)
+	}
+	if err := status.Identity.Validate(); err != nil || !slices.Contains(status.Capabilities, nodeidentity.Capability) {
+		return fmt.Errorf("immutable identity for enrolled node %s is not a valid takod attestation", name)
+	}
+	if status.Membership == nil || status.MembershipGeneration == 0 || status.Membership.NodeID != server.NodeID {
+		return fmt.Errorf("current membership attestation does not match enrolled node %s", name)
+	}
+	if err := nodeidentity.ValidateAllocationPublicKey(status.Membership.AllocationPublicKey); err != nil || status.Membership.AllocationPublicKey != status.Identity.AllocationPublicKey {
+		return fmt.Errorf("current membership allocation identity does not match enrolled node %s", name)
+	}
+	if !equalUpgradeRoles(status.Membership.Roles, server.Roles) {
+		return fmt.Errorf("current membership roles for %s are %v, expected %v", name, status.Membership.Roles, server.Roles)
+	}
+	if server.Lifecycle != "" && status.Membership.Lifecycle != server.Lifecycle {
+		return fmt.Errorf("current membership lifecycle for %s is %s, expected %s", name, status.Membership.Lifecycle, server.Lifecycle)
+	}
+	return nil
+}
+
+func equalUpgradeRoles(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftCopy := append([]string(nil), left...)
+	rightCopy := append([]string(nil), right...)
+	sort.Strings(leftCopy)
+	sort.Strings(rightCopy)
+	return slices.Equal(leftCopy, rightCopy)
 }
 
 func cliVersionRequiresTakodBinary(version string) bool {
@@ -351,7 +726,11 @@ func isASCIIHex(b byte) bool {
 }
 
 func probeTakodAgentStatus(client takodclient.RequestExecutor, cfg *config.Config, timeout time.Duration) (*takod.Status, error) {
-	output, err := takodclient.RequestJSONWithTimeout(client, takodSocketFromConfig(cfg), "GET", "/v1/status", nil, timeout)
+	return probeTakodAgentStatusAtSocket(client, takodSocketFromConfig(cfg), timeout)
+}
+
+func probeTakodAgentStatusAtSocket(client takodclient.RequestExecutor, socket string, timeout time.Duration) (*takod.Status, error) {
+	output, err := takodclient.RequestJSONWithTimeout(client, socket, "GET", "/v1/status", nil, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -363,6 +742,10 @@ func probeTakodAgentStatus(client takodclient.RequestExecutor, cfg *config.Confi
 }
 
 func waitForTakodAgentVersion(client takodclient.RequestExecutor, cfg *config.Config, wantVersion string, wait time.Duration, poll time.Duration, probe time.Duration) (*takod.Status, error) {
+	return waitForTakodAgentVersionAtSocket(client, takodSocketFromConfig(cfg), wantVersion, wait, poll, probe)
+}
+
+func waitForTakodAgentVersionAtSocket(client takodclient.RequestExecutor, socket string, wantVersion string, wait time.Duration, poll time.Duration, probe time.Duration) (*takod.Status, error) {
 	if wait <= 0 {
 		wait = 30 * time.Second
 	}
@@ -373,7 +756,7 @@ func waitForTakodAgentVersion(client takodclient.RequestExecutor, cfg *config.Co
 	var lastErr error
 	var lastVersion string
 	for {
-		status, err := probeTakodAgentStatus(client, cfg, probe)
+		status, err := probeTakodAgentStatusAtSocket(client, socket, probe)
 		if err == nil {
 			lastVersion = status.Version
 			if status.Version == wantVersion {

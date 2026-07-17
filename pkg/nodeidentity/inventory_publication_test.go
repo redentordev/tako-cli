@@ -55,3 +55,18 @@ func TestDefaultPublishedTrustFilesRequireRootOwnership(t *testing.T) {
 		t.Fatal("isolated test fixture unexpectedly required root ownership")
 	}
 }
+
+func TestInventoryMutationLockRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "attacker-lock")
+	if err := os.WriteFile(target, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "inventory.json")
+	if err := os.Symlink(target, path+".lock"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireInventoryMutationLock(path); err == nil {
+		t.Fatal("symlinked protected inventory mutation lock was accepted")
+	}
+}

@@ -160,16 +160,12 @@ stable node key under `/etc/tako/wireguard`, writes `/etc/wireguard/tako.conf`,
 and brings up `wg-quick@tako`. One-node deployments still get the same
 interface, just without peer blocks.
 
-The node-local `takod` process listens on `/run/tako/takod.sock`. On released
-CLI builds, `tako setup`, `tako deploy`, `tako scale`, and `tako rollback`
-download the matching Linux release binary for the server architecture when the
-node agent is missing or running a different version, install it at
-`/usr/local/bin/tako`, and restart the systemd service. Development builds reuse
-an existing server binary when one is already installed. For local agent smoke
-tests, set `TAKO_TAKOD_BINARY` to a Linux tako binary to upload that binary
-before runtime preparation. Operators can also run `tako upgrade servers` to
-explicitly patch stale server-side agents, refresh the setup manifest, and
-verify `/v1/status` before reconciling application services.
+The node-local `takod` process listens on `/run/tako/takod.sock`. Node software
+changes belong only to explicit `tako setup` and `tako upgrade servers`
+lifecycle commands. Deploy, scale, rollback, and other application commands do
+not install or restart agents. They capability-check the running agent and fail
+before application mutation when a node upgrade is required. Development
+upgrades pass a Linux binary with `--takod-binary`.
 
 `takod` exposes health, status, actual container discovery, service container
 reconcile, proxy file updates, proxy container reconcile, logs, stats, metrics,
@@ -816,6 +812,38 @@ CI runner
        v
   acquire controller authority + activate target fences
 ```
+
+`upgrade servers` is a separate privileged node-lifecycle transaction, not a
+deployment phase. On enrolled clusters it validates the lifecycle protocol
+range and pinned host identities across the authoritative cluster inventory,
+upgrades a worker canary and remaining workers, then rechecks every worker and upgrades the sole
+controller last. Each node retains a durable rollback binary until the new
+agent and protected platform worker report the target contract. Explicitly
+targeting the controller is rejected unless all other enrolled workers already
+run the target release and protocol. The authoritative controller holds one
+renewable cluster upgrade lease for the full plan, while each target holds a
+separate short renewable transaction lease. Candidate transfer occurs before
+that node lease. Contending coordinators and per-node transactions are
+rejected. Node enrollment, removal, and authoritative inventory publication
+take the same node guard and reject an active upgrade lease, so a lifecycle
+change cannot interleave between upgrade phases. Under the acquired node lease,
+Tako revalidates immutable identity,
+membership generation, lifecycle, and roles. The checksum-verified candidate
+then checks the same contract against protected identity and inventory files
+immediately before publishing itself. It also
+refuses a target release older than the running agent; protected downgrades use
+the cold disaster-recovery workflow instead.
+
+Interrupted node transactions are recovered before `takod.service` or
+`tako-platform-worker.service` starts on boot. Commit and rollback publish a
+durable terminal marker before cleaning evidence, so power loss can never turn
+a committed upgrade into a rollback or destroy the only rollback copy. The
+commit marker remains until the next transaction acknowledges it, which also
+resolves a lost SSH success response without rolling back a completed upgrade.
+If a CLI dies after publication, the short node lease expires and the next
+coordinator restores pending rollback evidence without requiring a reboot.
+Boot recovery removes only the local node lease; a controller-global lease
+owned by an external coordinator is retained until release or expiry.
 
 Enrolled clusters use the control node as a cluster-global single-writer
 operation-ID and lease authority. Payloads remain strictly bound to one

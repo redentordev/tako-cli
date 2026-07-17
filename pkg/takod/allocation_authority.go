@@ -103,7 +103,11 @@ func (s *Server) handleAllocationAuthorization(w http.ResponseWriter, r *http.Re
 			}
 		}
 	}
-	store, err := platform.NewMembershipStore(s.membershipFile, s.inventoryFile)
+	newStore := platform.NewMembershipStore
+	if lifecycleMutationBarrierHeld(r.Context()) {
+		newStore = platform.NewMembershipStoreWithinMutationBarrier
+	}
+	store, err := newStore(s.membershipFile, s.inventoryFile)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
