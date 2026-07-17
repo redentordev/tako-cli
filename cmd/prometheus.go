@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
@@ -47,8 +49,13 @@ func runPrometheus(cmd *cobra.Command, args []string) error {
 	// Create SSH pool
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	factory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return err
+	}
+	defer factory.CloseIdleConnections()
 
-	for _, result := range collectPrometheusNodes(cfg, envName, servers, sshPool) {
+	for _, result := range collectPrometheusNodes(cfg, envName, servers, factory) {
 		if result.err != nil || result.metrics == nil {
 			continue
 		}
@@ -72,9 +79,9 @@ type prometheusNodeResult struct {
 
 type prometheusReadFunc func(serverName string, server config.ServerConfig) (*MetricsData, []takod.ContainerStat, error)
 
-func collectPrometheusNodes(cfg *config.Config, envName string, serverNames []string, sshPool *ssh.Pool) []prometheusNodeResult {
+func collectPrometheusNodes(cfg *config.Config, envName string, serverNames []string, factory *nodeclient.Factory) []prometheusNodeResult {
 	return collectPrometheusNodesWith(cfg.Servers, serverNames, func(serverName string, server config.ServerConfig) (*MetricsData, []takod.ContainerStat, error) {
-		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, _, err := factory.Client(context.Background(), serverName)
 		if err != nil {
 			return nil, nil, err
 		}

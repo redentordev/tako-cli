@@ -12,6 +12,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -105,6 +106,12 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 			return nil, invalidRequestf("service %s is kind: %s and cannot be scaled", serviceName, service.Kind)
 		}
 	}
+	desiredServices := CloneServiceMap(services)
+	for serviceName, replicas := range scaleTargets {
+		service := desiredServices[serviceName]
+		service.Replicas = replicas
+		desiredServices[serviceName] = service
+	}
 
 	serverNames, err := ScaleTargetServers(cfg, envName)
 	if err != nil {
@@ -144,27 +151,44 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	ctx = leaseCtx
 	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("→ Acquired remote scale leases: %s\n", leaseSet.Summary()))
 
-	sourceServerName := serverNames[0]
+	sourceServerName, err := AuthoritativeStateServer(cfg, serverNames)
+	if err != nil {
+		return nil, err
+	}
 	sourceServer, exists := cfg.Servers[sourceServerName]
 	if !exists {
 		return nil, invalidRequestf("server %s not found in configuration", sourceServerName)
 	}
-	sourceClient, err := sshPool.GetOrCreateWithAuth(sourceServer.Host, sourceServer.Port, sourceServer.User, sourceServer.SSHKey, sourceServer.Password)
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	defer runtimeFactory.CloseIdleConnections()
+	sourceClient, _, err := runtimeFactory.Client(ctx, sourceServerName)
 	if err != nil {
 		return nil, &ConnectivityError{Server: sourceServerName, Err: fmt.Errorf("failed to connect to node %s: %w", sourceServerName, err)}
 	}
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, req.Verbose)
+	priorDesired, priorAssignments, err := LoadPriorPlacementState(sourceClient, cfg, envName)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidatePriorDesiredServices(priorDesired, desiredServices); err != nil {
+		return nil, err
+	}
+	deploy.SetPriorAssignments(priorAssignments)
+	if err := deploy.ResolveAllAssignments(desiredServices); err != nil {
+		return nil, err
+	}
+	deploy.SetRuntimeFactory(runtimeFactory)
 	deploy.SetBaseContext(ctx)
 	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
 	}
-	if err := deploy.SetupTakodRuntime(); err != nil {
-		return nil, fmt.Errorf("failed to setup takod runtime: %w", err)
-	}
-	if err := deploy.PreflightTakodProxyCapabilities(services); err != nil {
+	if err := preflightAndSetupTakodRuntime(deploy, services); err != nil {
 		return nil, err
 	}
 	startTime := time.Now()
@@ -185,6 +209,17 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to gather current replica state: %w", err)
 	}
+	mutationServices := make(map[string]config.ServiceConfig, len(scaleTargets))
+	for serviceName := range scaleTargets {
+		mutationServices[serviceName] = desiredServices[serviceName]
+	}
+	if err := deploy.PreflightAssignmentMutations(mutationServices); err != nil {
+		return nil, err
+	}
+	intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredServices, nil, actualState)
+	if err := PersistTakodDesiredIntentWithPlacementBaseline(sshPool, cfg, envName, serverNames, "scale", desiredServices, intentImageRefs, deploy.ResolvedAssignments(), nil, priorDesired, takodstate.GitInfo{}, "recorded stable placement before scale mutation", req.Verbose); err != nil {
+		return nil, err
+	}
 	for serviceName, desiredReplicas := range scaleTargets {
 		service := services[serviceName]
 		service.Replicas = desiredReplicas
@@ -201,7 +236,6 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	}
 
 	notifier := scaleNotifier(cfg, req.Verbose)
-	desiredServices := CloneServiceMap(services)
 	scaledImageRefs := make(map[string]string, len(scaleTargets))
 	totalErrors := 0
 	for serviceName, desiredReplicas := range scaleTargets {
@@ -284,7 +318,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	}
 	postScaleActualState := reconcile.AggregateActualStateByServer(postScaleNodeActualState)
 	runtimeImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredServices, scaledImageRefs, postScaleActualState)
-	if err := PersistTakodRuntimeState(
+	if err := PersistTakodRuntimeStateWithPlacementBaseline(
 		sshPool,
 		cfg,
 		envName,
@@ -294,6 +328,8 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 		runtimeImageRefs,
 		postScaleActualState,
 		postScaleNodeActualState,
+		deploy.ResolvedAssignments(),
+		priorDesired,
 		takodstate.GitInfo{},
 		"scale.succeeded",
 		fmt.Sprintf("scaled %d service(s)", len(scaleTargets)),
@@ -375,7 +411,7 @@ func BuildScaleDeploymentState(
 func (e *Engine) recordScaleDeploymentState(
 	ctx context.Context,
 	sshPool *ssh.Pool,
-	sourceClient *ssh.Client,
+	sourceClient any,
 	cfg *config.Config,
 	envName string,
 	serverNames []string,
@@ -387,7 +423,7 @@ func (e *Engine) recordScaleDeploymentState(
 		return fmt.Errorf("failed to save remote scale history: %w", err)
 	}
 
-	if len(serverNames) > 1 {
+	if len(serverNames) > 1 && ShouldReplicateDeploymentHistory(cfg) {
 		replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
 		history, err := stateManager.LoadHistoryContext(ctx)
 		if err != nil {
@@ -443,6 +479,10 @@ func sortedScaleTargetNames(targets map[string]int) []string {
 // ScaleTargetServers lists the environment's takod nodes in sorted order.
 func ScaleTargetServers(cfg *config.Config, envName string) ([]string, error) {
 	serverNames, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return nil, err
+	}
+	serverNames, err = config.ResolveSchedulableEnvironmentTargets(cfg.Servers, serverNames, envName)
 	if err != nil {
 		return nil, err
 	}

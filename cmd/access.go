@@ -14,6 +14,8 @@ import (
 	"github.com/redentordev/tako-cli/pkg/accesslog"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"github.com/spf13/cobra"
@@ -138,8 +140,15 @@ func runAccess(cmd *cobra.Command, args []string) error {
 		ctx = context.Background()
 	}
 	startedAt := time.Now()
+	pool := ssh.NewPool()
+	defer pool.CloseAll()
+	factory, err := nodeclient.NewFactory(cfg, pool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return err
+	}
+	defer factory.CloseIdleConnections()
 	results := streamAccessNodesWith(ctx, servers, func(serverName string, server config.ServerConfig, prefix bool) error {
-		return streamAccessFromNode(ctx, cfg, serverName, server, formatter, accessService, accessTail, accessFollow, prefix, sink)
+		return streamAccessFromNode(ctx, factory, cfg, serverName, server, formatter, accessService, accessTail, accessFollow, prefix, sink)
 	})
 	summaryErr := summarizeAccessStreamResults(results)
 	result := engine.NewAccessResult(cfg.Project.Name, envName, accessService, accessTail, accessFollow, startedAt, accessNodeResultDocuments(results), summaryErr)
@@ -175,6 +184,17 @@ type accessNodeResult struct {
 	serverName string
 	host       string
 	err        error
+}
+
+type lockedLogWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+}
+
+func (w *lockedLogWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writer.Write(data)
 }
 
 func streamAccessNodesWith(ctx context.Context, servers map[string]config.ServerConfig, stream accessNodeStreamFunc) []accessNodeResult {
@@ -216,6 +236,7 @@ func streamAccessNodesWith(ctx context.Context, servers map[string]config.Server
 
 func streamAccessFromNode(
 	ctx context.Context,
+	factory *nodeclient.Factory,
 	cfg *config.Config,
 	serverName string,
 	server config.ServerConfig,
@@ -229,12 +250,10 @@ func streamAccessFromNode(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	client, err := connectTakodStreamNodeContext(ctx, server)
+	client, _, err := factory.Client(ctx, serverName)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node %s: %w", serverName, err)
 	}
-	defer client.Close()
-
 	if verbose {
 		fmt.Printf("→ Fetching access logs from %s (service: %s)\n", serverName, service)
 	}

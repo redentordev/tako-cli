@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-const DefaultSocket = "/run/tako/takod.sock"
+const (
+	DefaultSocket       = "/run/tako/takod.sock"
+	DefaultWorkerSocket = "/run/tako-platform/worker.sock"
+)
 
 const (
 	JSONRequestTimeout   = 2 * time.Minute
@@ -28,6 +31,16 @@ type RequestExecutor interface {
 type StreamExecutor interface {
 	RequestExecutor
 	ExecuteStream(cmd string, stdout io.Writer, stderr io.Writer) error
+}
+
+type structuredJSONClient interface {
+	RequestJSON(context.Context, string, string, any) (string, error)
+	RequestJSONWithTimeout(context.Context, string, string, any, time.Duration) (string, error)
+}
+
+type structuredStreamClient interface {
+	StreamRequest(context.Context, string, string, io.Reader, string) (string, error)
+	StreamOutput(context.Context, string, string, io.Reader, string, io.Writer, io.Writer) error
 }
 
 type contextStreamExecutor interface {
@@ -47,19 +60,23 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("takod request %s %s returned HTTP %d: %s", e.Method, e.Endpoint, e.Status, strings.TrimSpace(e.Body))
 }
 
-func RequestJSON(client RequestExecutor, socket string, method string, endpoint string, value any) (string, error) {
+// HTTPStatus allows durable operation adapters to distinguish a known
+// upstream HTTP rejection from an uncertain transport failure.
+func (e *HTTPError) HTTPStatus() int { return e.Status }
+
+func RequestJSON(client any, socket string, method string, endpoint string, value any) (string, error) {
 	return RequestJSONWithContext(context.Background(), client, socket, method, endpoint, value)
 }
 
-func RequestJSONWithContext(ctx context.Context, client RequestExecutor, socket string, method string, endpoint string, value any) (string, error) {
+func RequestJSONWithContext(ctx context.Context, client any, socket string, method string, endpoint string, value any) (string, error) {
 	return RequestJSONWithTimeoutContext(ctx, client, socket, method, endpoint, value, JSONRequestTimeout)
 }
 
-func RequestJSONWithTimeout(client RequestExecutor, socket string, method string, endpoint string, value any, timeout time.Duration) (string, error) {
+func RequestJSONWithTimeout(client any, socket string, method string, endpoint string, value any, timeout time.Duration) (string, error) {
 	return RequestJSONWithTimeoutContext(context.Background(), client, socket, method, endpoint, value, timeout)
 }
 
-func RequestJSONWithTimeoutContext(ctx context.Context, client RequestExecutor, socket string, method string, endpoint string, value any, timeout time.Duration) (string, error) {
+func RequestJSONWithTimeoutContext(ctx context.Context, client any, socket string, method string, endpoint string, value any, timeout time.Duration) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -71,6 +88,24 @@ func RequestJSONWithTimeoutContext(ctx context.Context, client RequestExecutor, 
 	}
 	if method == "" {
 		method = "GET"
+	}
+	if timeout <= 0 {
+		timeout = JSONRequestTimeout
+	}
+	if structured, ok := client.(structuredJSONClient); ok {
+		return structured.RequestJSONWithTimeout(ctx, method, endpoint, value, timeout)
+	}
+	if dialer, ok := client.(UnixSocketDialer); ok {
+		structured, err := NewAgentClient(dialer, socket)
+		if err != nil {
+			return "", err
+		}
+		defer structured.CloseIdleConnections()
+		return structured.RequestJSONWithTimeout(ctx, method, endpoint, value, timeout)
+	}
+	executor, ok := client.(RequestExecutor)
+	if !ok {
+		return "", fmt.Errorf("takod client does not support structured JSON requests")
 	}
 
 	var body io.Reader
@@ -85,18 +120,15 @@ func RequestJSONWithTimeoutContext(ctx context.Context, client RequestExecutor, 
 	}
 
 	curlCmd := buildRequestCommand(socket, method, endpoint, hasBody)
-	if timeout <= 0 {
-		timeout = JSONRequestTimeout
-	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var output string
 	var err error
 	if hasBody {
-		output, err = client.ExecuteWithInput(ctx, curlCmd, body)
+		output, err = executor.ExecuteWithInput(ctx, curlCmd, body)
 	} else {
-		output, err = client.ExecuteWithContext(ctx, curlCmd)
+		output, err = executor.ExecuteWithContext(ctx, curlCmd)
 	}
 	bodyOutput, status, hasStatus := splitHTTPStatus(output)
 	if err != nil {
@@ -142,11 +174,11 @@ func splitHTTPStatus(output string) (string, int, bool) {
 	return output[:idx], status, true
 }
 
-func StreamRequest(client RequestExecutor, socket string, method string, endpoint string, reader io.Reader) (string, error) {
+func StreamRequest(client any, socket string, method string, endpoint string, reader io.Reader) (string, error) {
 	return StreamRequestWithContext(context.Background(), client, socket, method, endpoint, reader)
 }
 
-func StreamRequestWithContext(ctx context.Context, client RequestExecutor, socket string, method string, endpoint string, reader io.Reader) (string, error) {
+func StreamRequestWithContext(ctx context.Context, client any, socket string, method string, endpoint string, reader io.Reader) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -159,12 +191,27 @@ func StreamRequestWithContext(ctx context.Context, client RequestExecutor, socke
 	if method == "" {
 		method = "POST"
 	}
+	if structured, ok := client.(structuredStreamClient); ok {
+		return structured.StreamRequest(ctx, method, endpoint, reader, "application/octet-stream")
+	}
+	if dialer, ok := client.(UnixSocketDialer); ok {
+		structured, err := NewAgentClient(dialer, socket)
+		if err != nil {
+			return "", err
+		}
+		defer structured.CloseIdleConnections()
+		return structured.StreamRequest(ctx, method, endpoint, reader, "application/octet-stream")
+	}
+	executor, ok := client.(RequestExecutor)
+	if !ok {
+		return "", fmt.Errorf("takod client does not support streamed requests")
+	}
 
 	curlCmd := buildStreamRequestCommand(socket, method, endpoint)
 	ctx, cancel := context.WithTimeout(ctx, StreamRequestTimeout)
 	defer cancel()
 
-	output, err := client.ExecuteWithInput(ctx, curlCmd, reader)
+	output, err := executor.ExecuteWithInput(ctx, curlCmd, reader)
 	bodyOutput, status, hasStatus := splitHTTPStatus(output)
 	if err != nil {
 		return bodyOutput, fmt.Errorf("takod stream request %s %s failed: %w, output: %s", method, endpoint, err, strings.TrimSpace(bodyOutput))
@@ -190,11 +237,11 @@ func buildStreamRequestCommand(socket string, method string, endpoint string) st
 	return strings.Join(args, " ")
 }
 
-func StreamOutput(client StreamExecutor, socket string, endpoint string, stdout io.Writer, stderr io.Writer) error {
+func StreamOutput(client any, socket string, endpoint string, stdout io.Writer, stderr io.Writer) error {
 	return StreamOutputWithContext(context.Background(), client, socket, endpoint, stdout, stderr)
 }
 
-func StreamOutputWithContext(ctx context.Context, client StreamExecutor, socket string, endpoint string, stdout io.Writer, stderr io.Writer) error {
+func StreamOutputWithContext(ctx context.Context, client any, socket string, endpoint string, stdout io.Writer, stderr io.Writer) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -204,16 +251,31 @@ func StreamOutputWithContext(ctx context.Context, client StreamExecutor, socket 
 	if !strings.HasPrefix(endpoint, "/") {
 		return fmt.Errorf("takod endpoint must start with /")
 	}
+	if structured, ok := client.(structuredStreamClient); ok {
+		return structured.StreamOutput(ctx, "GET", endpoint, nil, "", stdout, stderr)
+	}
+	if dialer, ok := client.(UnixSocketDialer); ok {
+		structured, err := NewAgentClient(dialer, socket)
+		if err != nil {
+			return err
+		}
+		defer structured.CloseIdleConnections()
+		return structured.StreamOutput(ctx, "GET", endpoint, nil, "", stdout, stderr)
+	}
+	executor, ok := client.(StreamExecutor)
+	if !ok {
+		return fmt.Errorf("takod client does not support streamed output")
+	}
 
 	curlCmd := buildStreamOutputCommand(socket, endpoint)
 	var err error
-	if contextClient, ok := client.(contextStreamExecutor); ok {
+	if contextClient, ok := any(executor).(contextStreamExecutor); ok {
 		err = contextClient.ExecuteStreamWithContext(ctx, curlCmd, stdout, stderr)
 	} else {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		err = client.ExecuteStream(curlCmd, stdout, stderr)
+		err = executor.ExecuteStream(curlCmd, stdout, stderr)
 	}
 	if err != nil {
 		return fmt.Errorf("takod stream request %s failed: %w", endpoint, err)
@@ -242,7 +304,7 @@ type inputStreamExecutor interface {
 // chunked response live to stdout/stderr (no buffering, no status marker) —
 // the POST counterpart of StreamOutputWithContext. Clients without stdin
 // streaming get the body embedded base64-encoded in the remote command.
-func StreamRequestOutputWithContext(ctx context.Context, client StreamExecutor, socket string, method string, endpoint string, body io.Reader, stdout io.Writer, stderr io.Writer) error {
+func StreamRequestOutputWithContext(ctx context.Context, client any, socket string, method string, endpoint string, body io.Reader, stdout io.Writer, stderr io.Writer) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -255,10 +317,25 @@ func StreamRequestOutputWithContext(ctx context.Context, client StreamExecutor, 
 	if method == "" {
 		method = "POST"
 	}
+	if structured, ok := client.(structuredStreamClient); ok {
+		return structured.StreamOutput(ctx, method, endpoint, body, "application/json", stdout, stderr)
+	}
+	if dialer, ok := client.(UnixSocketDialer); ok {
+		structured, err := NewAgentClient(dialer, socket)
+		if err != nil {
+			return err
+		}
+		defer structured.CloseIdleConnections()
+		return structured.StreamOutput(ctx, method, endpoint, body, "application/json", stdout, stderr)
+	}
+	executor, ok := client.(StreamExecutor)
+	if !ok {
+		return fmt.Errorf("takod client does not support streamed request output")
+	}
 
 	curlCmd := buildStreamRequestOutputCommand(socket, method, endpoint)
 	var err error
-	if inputClient, ok := client.(inputStreamExecutor); ok {
+	if inputClient, ok := any(executor).(inputStreamExecutor); ok {
 		err = inputClient.ExecuteStreamWithInput(ctx, curlCmd, body, stdout, stderr)
 	} else {
 		payload, readErr := io.ReadAll(body)
@@ -266,13 +343,13 @@ func StreamRequestOutputWithContext(ctx context.Context, client StreamExecutor, 
 			return fmt.Errorf("failed to read request body: %w", readErr)
 		}
 		embedded := "printf '%s' " + shellQuote(base64.StdEncoding.EncodeToString(payload)) + " | base64 -d | " + curlCmd
-		if contextClient, ok := client.(contextStreamExecutor); ok {
+		if contextClient, ok := any(executor).(contextStreamExecutor); ok {
 			err = contextClient.ExecuteStreamWithContext(ctx, embedded, stdout, stderr)
 		} else {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
-			err = client.ExecuteStream(embedded, stdout, stderr)
+			err = executor.ExecuteStream(embedded, stdout, stderr)
 		}
 	}
 	if err != nil {
@@ -313,6 +390,10 @@ func CertificatesEndpoint(domain string) string {
 		return "/v1/certs"
 	}
 	return "/v1/certs?domain=" + url.QueryEscape(domain)
+}
+
+func ScopedCertificatesEndpoint(project, environment, domain string) string {
+	return addEndpointScope(CertificatesEndpoint(domain), project, environment)
 }
 
 func StateEndpoint(project string, environment string, document string) string {
@@ -386,11 +467,19 @@ func ImageBuildEndpoint(image string, dockerfile ...string) string {
 	return "/v1/images/build?" + query.Encode()
 }
 
+func ScopedImageBuildEndpoint(project, environment, image string, dockerfile ...string) string {
+	return addEndpointScope(ImageBuildEndpoint(image, dockerfile...), project, environment)
+}
+
 // ImageBuildEndpointWithAuth marks the build request body as carrying a
 // registry-auth JSON preamble line ahead of the tar stream. The flag is the
 // only auth-related value in the URL; credentials ride the body.
 func ImageBuildEndpointWithAuth(image string, dockerfile ...string) string {
 	return ImageBuildEndpoint(image, dockerfile...) + "&auth=preamble"
+}
+
+func ScopedImageBuildEndpointWithAuth(project, environment, image string, dockerfile ...string) string {
+	return addEndpointScope(ImageBuildEndpointWithAuth(image, dockerfile...), project, environment)
 }
 
 // ImageBuildEndpointWithOptions marks the body as carrying a JSON options
@@ -403,10 +492,57 @@ func ImageBuildEndpointWithOptions(image string, dockerfile string, withAuth boo
 	return endpoint
 }
 
+func ScopedImageBuildEndpointWithOptions(project, environment, image, dockerfile string, withAuth bool) string {
+	return addEndpointScope(ImageBuildEndpointWithOptions(image, dockerfile, withAuth), project, environment)
+}
+
 func ImageExistsEndpoint(image string) string {
 	query := url.Values{}
 	query.Set("image", image)
 	return "/v1/images/exists?" + query.Encode()
+}
+
+func ImageInspectEndpoint(image string) string {
+	query := url.Values{}
+	query.Set("image", image)
+	return "/v1/images/inspect?" + query.Encode()
+}
+
+func ImageExportEndpoint(image string, expectedImageID ...string) string {
+	query := url.Values{}
+	query.Set("image", image)
+	if len(expectedImageID) > 0 && strings.TrimSpace(expectedImageID[0]) != "" {
+		query.Set("expectedImageId", strings.TrimSpace(expectedImageID[0]))
+	}
+	return "/v1/images/export?" + query.Encode()
+}
+
+func ImageImportEndpoint(image string, expectedImageID ...string) string {
+	query := url.Values{}
+	query.Set("image", image)
+	if len(expectedImageID) > 0 && strings.TrimSpace(expectedImageID[0]) != "" {
+		query.Set("expectedImageId", strings.TrimSpace(expectedImageID[0]))
+	}
+	return "/v1/images/import?" + query.Encode()
+}
+
+func ScopedImageImportEndpoint(project, environment, image string, expectedImageID ...string) string {
+	return addEndpointScope(ImageImportEndpoint(image, expectedImageID...), project, environment)
+}
+
+func ScopedProxyFileEndpoint(project, environment, name string) string {
+	return addEndpointScope(ProxyFileEndpoint(name), project, environment)
+}
+
+func addEndpointScope(endpoint, project, environment string) string {
+	separator := "?"
+	if strings.Contains(endpoint, "?") {
+		separator = "&"
+	}
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	return endpoint + separator + query.Encode()
 }
 
 func LogsEndpoint(project string, environment string, service string, tail int, follow bool) string {

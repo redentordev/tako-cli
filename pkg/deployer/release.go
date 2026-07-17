@@ -90,7 +90,7 @@ func (d *Deployer) runReleaseCommand(serviceName string, service *config.Service
 		timeout = parsed
 	}
 
-	client, err := d.getEnvironmentClient(serverName)
+	client, err := d.getRuntimeClient(serverName)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node %s for release command: %w", serverName, err)
 	}
@@ -198,11 +198,11 @@ func (d *Deployer) runReleaseCommand(serviceName string, service *config.Service
 
 // streamReleaseExec streams the exec response, forwarding output lines as
 // deploy.release.output events and parsing the marker frames.
-func (d *Deployer) streamReleaseExec(ctx context.Context, client takodclient.StreamExecutor, serviceName string, serverName string, payload []byte) (int, bool, error) {
+func (d *Deployer) streamReleaseExec(ctx context.Context, client any, serviceName string, serverName string, payload []byte) (int, bool, error) {
 	return d.streamDeployExec(ctx, client, serviceName, serverName, payload, events.TypeDeployReleaseOutput)
 }
 
-func (d *Deployer) streamDeployExec(ctx context.Context, client takodclient.StreamExecutor, serviceName string, serverName string, payload []byte, outputEventType string) (int, bool, error) {
+func (d *Deployer) streamDeployExec(ctx context.Context, client any, serviceName string, serverName string, payload []byte, outputEventType string) (int, bool, error) {
 	reader, writer := io.Pipe()
 	streamDone := make(chan error, 1)
 	go func() {

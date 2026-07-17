@@ -2,15 +2,21 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/ssh"
+	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
 // RemoteLeaseManager releases remote operation leases.
@@ -42,14 +48,22 @@ type RemoteLeaseSet struct {
 	leases    []RemoteLease
 	mu        sync.RWMutex
 	// warn receives non-fatal release failures; nil discards them.
-	warn        func(message string)
-	renewCancel context.CancelFunc
-	renewDone   chan struct{}
-	releaseOnce sync.Once
-	lostOnce    sync.Once
-	lostErr     error
-	lost        chan struct{}
-	released    chan struct{}
+	warn             func(message string)
+	renewCancel      context.CancelFunc
+	renewDone        chan struct{}
+	releaseOnce      sync.Once
+	lostOnce         sync.Once
+	lostErr          error
+	lost             chan struct{}
+	released         chan struct{}
+	fence            *nodeidentity.OperationFence
+	fenceTargets     []operationFenceTarget
+	controllerClient *takodclient.AgentClient
+}
+
+type operationFenceTarget struct {
+	ServerName string
+	Client     *takodclient.AgentClient
 }
 
 // SetWarnFunc routes non-fatal lease release failures to a warning consumer.
@@ -92,6 +106,15 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 	if len(serverNames) == 0 {
 		return nil, invalidRequestf("no target nodes configured for %s", operation)
 	}
+	factory, err := nodeclient.NewFactory(cfg, pool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	if controllerName, enrolled, controllerErr := controllerAuthorityServer(cfg, serverNames); controllerErr != nil {
+		return nil, controllerErr
+	} else if enrolled {
+		return acquireControllerOperationLeaseSet(ctx, pool, factory, cfg, envName, controllerName, serverNames, operation)
+	}
 
 	acquireCtx, cancelAcquire := context.WithTimeout(ctx, remotestate.DefaultLeaseTTL/4)
 	defer cancelAcquire()
@@ -99,7 +122,7 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 		if err := ctx.Err(); err != nil {
 			return RemoteLease{}, err
 		}
-		client, err := pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, _, err := factory.Client(ctx, serverName)
 		if err != nil {
 			return RemoteLease{}, &ConnectivityError{Server: serverName, Err: fmt.Errorf("failed to connect to lease node %s: %w", serverName, err)}
 		}
@@ -138,6 +161,284 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 		return nil, renewErr
 	}
 	return set, nil
+}
+
+func controllerAuthorityServer(cfg *config.Config, targetNames []string) (string, bool, error) {
+	if cfg == nil {
+		return "", false, invalidRequestf("controller authority requires a loaded config")
+	}
+	enrolled := false
+	controller := ""
+	clusterID := ""
+	for name, server := range cfg.Servers {
+		if server.ClusterID == "" && server.NodeID == "" {
+			continue
+		}
+		enrolled = true
+		if clusterID == "" {
+			clusterID = server.ClusterID
+		} else if server.ClusterID != clusterID {
+			return "", true, invalidRequestf("enrolled servers span multiple cluster identities")
+		}
+		if server.HasPlatformRole(nodeidentity.RoleControlPlane) {
+			if controller != "" && controller != name {
+				return "", true, invalidRequestf("enrolled configuration has multiple control-plane authorities")
+			}
+			controller = name
+		}
+	}
+	if !enrolled {
+		return "", false, nil
+	}
+	if controller == "" {
+		return "", true, invalidRequestf("enrolled configuration has no controller authority")
+	}
+	for _, name := range targetNames {
+		server, ok := cfg.Servers[name]
+		if !ok || server.ClusterID == "" || server.NodeID == "" || server.ClusterID != clusterID {
+			return "", true, invalidRequestf("operation target %s is not a member of the authoritative cluster", name)
+		}
+	}
+	return controller, true, nil
+}
+
+func acquireControllerOperationLeaseSet(ctx context.Context, pool *ssh.Pool, factory *nodeclient.Factory, cfg *config.Config, envName, controllerName string, targetNames []string, operation string) (*RemoteLeaseSet, error) {
+	controllerServer := cfg.Servers[controllerName]
+	controllerClient, _, err := factory.Client(ctx, controllerName)
+	if err != nil {
+		return nil, &ConnectivityError{Server: controllerName, Err: fmt.Errorf("connect controller operation authority: %w", err)}
+	}
+	status, err := controllerClient.Status(ctx)
+	if err != nil {
+		return nil, &ConnectivityError{Server: controllerName, Err: fmt.Errorf("read controller operation authority: %w", err)}
+	}
+	if !agentHasCapability(status, takod.CapabilityOperationFence) || !agentHasCapability(status, takod.CapabilityNodeMembershipV1) {
+		return nil, invalidRequestf("controller %s does not support authoritative operation fencing; upgrade it before mutating enrolled nodes", controllerName)
+	}
+	authorityTargets := append([]string(nil), targetNames...)
+	if !containsString(authorityTargets, controllerName) {
+		authorityTargets = append(authorityTargets, controllerName)
+	}
+	sort.Strings(authorityTargets)
+	targetNodeIDs := make([]string, 0, len(authorityTargets))
+	for _, name := range authorityTargets {
+		targetNodeIDs = append(targetNodeIDs, cfg.Servers[name].NodeID)
+	}
+	sort.Strings(targetNodeIDs)
+	manager := remotestate.NewStateManagerWithSocket(controllerClient, cfg.Project.Name, envName, controllerServer.Host, TakodSocketFromConfig(cfg))
+	lease, err := manager.AcquireControllerLeaseContext(ctx, operation, envName, remotestate.DefaultLeaseTTL, targetNodeIDs)
+	if err != nil {
+		return nil, &LockedError{Operation: operation, Err: fmt.Errorf("cannot acquire controller %s authority on %s: %w", operation, controllerName, err)}
+	}
+	set := NewRemoteLeaseSet(operation, []RemoteLease{{ServerName: controllerName, Manager: manager, Lease: lease}})
+	factory.SetOperationFenceSource(set)
+	if pool != nil {
+		pool.SetOperationFenceSource(set)
+	}
+	set.controllerClient = controllerClient
+	if lease.Fence == nil {
+		set.Release()
+		return nil, fmt.Errorf("controller %s acquired a lease without signed fencing authority", controllerName)
+	}
+	set.fence = cloneOperationFence(lease.Fence)
+	// Activate the controller copy first so it can authenticate recovery of an
+	// abandoned allocation proposal before any lower ordinary inventory is
+	// published to an edge that may already hold the proposal generation.
+	if _, err := controllerClient.RequestJSON(ctx, "POST", "/v1/fence", takod.FenceRequest{Fence: *lease.Fence, HolderToken: lease.HolderToken}); err != nil {
+		set.Release()
+		return nil, &ConnectivityError{Server: controllerName, Err: fmt.Errorf("activate controller recovery fence: %w", err)}
+	}
+	set.fenceTargets = append(set.fenceTargets, operationFenceTarget{ServerName: controllerName, Client: controllerClient})
+	if err := recoverPendingAllocationAuthority(ctx, factory, cfg, envName, controllerName, controllerClient); err != nil {
+		set.Release()
+		return nil, err
+	}
+	output, err := controllerClient.RequestJSON(ctx, "GET", "/v1/platform/inventory", nil)
+	if err != nil {
+		set.Release()
+		return nil, &ConnectivityError{Server: controllerName, Err: fmt.Errorf("read signed controller inventory: %w", err)}
+	}
+	var snapshot nodeidentity.SignedInventorySnapshot
+	if err := json.Unmarshal([]byte(output), &snapshot); err != nil {
+		set.Release()
+		return nil, fmt.Errorf("decode signed controller inventory: %w", err)
+	}
+	for _, name := range authorityTargets {
+		client, _, clientErr := factory.Client(ctx, name)
+		if clientErr != nil {
+			set.Release()
+			return nil, &ConnectivityError{Server: name, Err: fmt.Errorf("connect operation fence target: %w", clientErr)}
+		}
+		if _, publishErr := client.RequestJSON(ctx, "POST", "/v1/platform/inventory", snapshot); publishErr != nil {
+			set.Release()
+			return nil, &ConnectivityError{Server: name, Err: fmt.Errorf("publish signed controller inventory: %w", publishErr)}
+		}
+		if !containsFenceTarget(set.fenceTargets, name) {
+			set.fenceTargets = append(set.fenceTargets, operationFenceTarget{ServerName: name, Client: client})
+		}
+	}
+	if err := set.publishFence(ctx, lease.Fence); err != nil {
+		set.Release()
+		return nil, err
+	}
+	if err := set.updateControllerPhase(ctx, "targets-fenced"); err != nil {
+		set.Release()
+		return nil, err
+	}
+	if err := set.updateControllerPhase(ctx, "mutating"); err != nil {
+		set.Release()
+		return nil, err
+	}
+	set.startRenewal(remotestate.DefaultLeaseTTL, remotestate.DefaultLeaseTTL/4)
+	if err := set.Err(); err != nil {
+		set.Release()
+		return nil, err
+	}
+	return set, nil
+}
+
+func recoverPendingAllocationAuthority(ctx context.Context, factory *nodeclient.Factory, cfg *config.Config, environment, controllerName string, controller *takodclient.AgentClient) error {
+	output, err := controller.RequestJSON(ctx, "POST", "/v1/platform/allocations/authorize", takod.AllocationAuthorizationRequest{
+		Project: cfg.Project.Name, Environment: environment, Phase: "recover",
+	})
+	if err != nil {
+		return &ConnectivityError{Server: controllerName, Err: fmt.Errorf("recover pending allocation authority: %w", err)}
+	}
+	var recovery takod.AllocationAuthorizationResponse
+	if err := json.Unmarshal([]byte(output), &recovery); err != nil {
+		return fmt.Errorf("decode pending allocation recovery: %w", err)
+	}
+	if !recovery.Recovered {
+		return nil
+	}
+	for _, nodeID := range recovery.RecoveryTargetNodeIDs {
+		serverName := ""
+		for name, server := range cfg.Servers {
+			if strings.EqualFold(strings.TrimSpace(server.NodeID), strings.TrimSpace(nodeID)) {
+				serverName = name
+				break
+			}
+		}
+		if serverName == "" {
+			return fmt.Errorf("allocation recovery target node %s is absent from configured cluster membership", nodeID)
+		}
+		client, _, err := factory.Client(ctx, serverName)
+		if err != nil {
+			return &ConnectivityError{Server: serverName, Err: fmt.Errorf("connect allocation recovery target: %w", err)}
+		}
+		if _, err := client.RequestJSON(ctx, "POST", "/v1/platform/inventory", recovery.Snapshot); err != nil {
+			return &ConnectivityError{Server: serverName, Err: fmt.Errorf("publish monotonic allocation recovery: %w", err)}
+		}
+		if _, err := controller.RequestJSON(ctx, "POST", "/v1/platform/allocations/authorize", takod.AllocationAuthorizationRequest{
+			Project: cfg.Project.Name, Environment: environment, Phase: "recovery-ack", ProposalID: recovery.ProposalID, TargetNodeID: nodeID,
+		}); err != nil {
+			return &ConnectivityError{Server: controllerName, Err: fmt.Errorf("persist allocation recovery acknowledgement for %s: %w", serverName, err)}
+		}
+	}
+	if _, err := controller.RequestJSON(ctx, "POST", "/v1/platform/allocations/authorize", takod.AllocationAuthorizationRequest{
+		Project: cfg.Project.Name, Environment: environment, Phase: "finalize-recovery", ProposalID: recovery.ProposalID,
+	}); err != nil {
+		return &ConnectivityError{Server: controllerName, Err: fmt.Errorf("finalize allocation recovery: %w", err)}
+	}
+	return nil
+}
+
+func containsFenceTarget(targets []operationFenceTarget, name string) bool {
+	for _, target := range targets {
+		if target.ServerName == name {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(values []string, candidate string) bool {
+	for _, value := range values {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func agentHasCapability(status *takodclient.AgentStatus, capability string) bool {
+	if status == nil {
+		return false
+	}
+	for _, candidate := range status.Capabilities {
+		if candidate == capability {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneOperationFence(fence *nodeidentity.OperationFence) *nodeidentity.OperationFence {
+	if fence == nil {
+		return nil
+	}
+	copy := *fence
+	copy.TargetNodeIDs = append([]string(nil), fence.TargetNodeIDs...)
+	return &copy
+}
+
+func (s *RemoteLeaseSet) publishFence(ctx context.Context, fence *nodeidentity.OperationFence) error {
+	if fence == nil {
+		return fmt.Errorf("controller operation fence is missing")
+	}
+	s.mu.RLock()
+	targets := append([]operationFenceTarget(nil), s.fenceTargets...)
+	holderToken := s.operationHolderTokenLocked()
+	s.mu.RUnlock()
+	for _, target := range targets {
+		if target.Client == nil {
+			return fmt.Errorf("operation fence target %s has no runtime client", target.ServerName)
+		}
+		if _, err := target.Client.RequestJSON(ctx, "POST", "/v1/fence", takod.FenceRequest{Fence: *fence, HolderToken: holderToken}); err != nil {
+			return &ConnectivityError{Server: target.ServerName, Err: fmt.Errorf("activate controller operation fence: %w", err)}
+		}
+	}
+	return nil
+}
+
+func (s *RemoteLeaseSet) updateControllerPhase(ctx context.Context, phase string) error {
+	s.mu.RLock()
+	client := s.controllerClient
+	fence := cloneOperationFence(s.fence)
+	holderToken := s.operationHolderTokenLocked()
+	s.mu.RUnlock()
+	if client == nil || fence == nil {
+		return nil
+	}
+	_, err := client.RequestJSON(ctx, "POST", "/v1/fence", takod.FenceRequest{Fence: *fence, Phase: phase, HolderToken: holderToken})
+	if err != nil {
+		return fmt.Errorf("persist controller operation phase %s: %w", phase, err)
+	}
+	return nil
+}
+
+func (s *RemoteLeaseSet) revokeFenceTargets(fence *nodeidentity.OperationFence) error {
+	if fence == nil {
+		return nil
+	}
+	s.mu.RLock()
+	targets := append([]operationFenceTarget(nil), s.fenceTargets...)
+	holderToken := s.operationHolderTokenLocked()
+	s.mu.RUnlock()
+	var failures []string
+	for _, target := range targets {
+		ctx, cancel := context.WithTimeout(context.Background(), remoteLeaseRenewRequestTimeout)
+		_, err := target.Client.RequestJSON(ctx, "DELETE", "/v1/fence", takod.FenceRequest{Fence: *fence, HolderToken: holderToken})
+		cancel()
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", target.ServerName, err))
+		}
+	}
+	if len(failures) > 0 {
+		sort.Strings(failures)
+		return fmt.Errorf("revoke controller operation fence: %s", strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 // RemoteLeaseAcquireFunc acquires one node's lease.
@@ -407,9 +708,19 @@ func (s *RemoteLeaseSet) renewAll(ctx context.Context, ttl time.Duration, interv
 				s.markLost(fmt.Errorf("remote %s lease on %s was lost: %w", s.operation, lease.ServerName, err))
 				return
 			}
+			if renewed.Fence != nil {
+				if err := s.publishFence(renewCtx, renewed.Fence); err != nil {
+					s.warnf("Warning: failed to renew controller %s fence on targets: %v\n", s.operation, err)
+					s.markLost(fmt.Errorf("controller %s target fence renewal failed: %w", s.operation, err))
+					return
+				}
+			}
 			s.mu.Lock()
 			if index < len(s.leases) && s.leases[index].Lease != nil && s.leases[index].Lease.ID == renewed.ID {
 				s.leases[index].Lease = renewed
+				if renewed.Fence != nil {
+					s.fence = cloneOperationFence(renewed.Fence)
+				}
 			}
 			s.mu.Unlock()
 		}(index, lease, renewer)
@@ -451,6 +762,7 @@ func (s *RemoteLeaseSet) BindContext(parent context.Context) (context.Context, c
 	if s == nil {
 		return ctx, func() { cancelCause(context.Canceled) }
 	}
+	ctx = takodclient.WithOperationFenceSource(ctx, s)
 	s.mu.RLock()
 	lost := s.lost
 	released := s.released
@@ -470,6 +782,35 @@ func (s *RemoteLeaseSet) BindContext(parent context.Context) (context.Context, c
 		}
 	}()
 	return ctx, func() { cancelCause(context.Canceled) }
+}
+
+// OperationFence returns the latest controller-renewed fence for request
+// headers. It satisfies takodclient.OperationFenceSource.
+func (s *RemoteLeaseSet) OperationFence() *nodeidentity.OperationFence {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneOperationFence(s.fence)
+}
+
+func (s *RemoteLeaseSet) OperationHolderToken() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.operationHolderTokenLocked()
+}
+
+func (s *RemoteLeaseSet) operationHolderTokenLocked() string {
+	for _, lease := range s.leases {
+		if lease.Lease != nil && lease.Lease.HolderToken != "" {
+			return lease.Lease.HolderToken
+		}
+	}
+	return ""
 }
 
 func (s *RemoteLeaseSet) warnf(format string, args ...any) {
@@ -507,7 +848,12 @@ func (s *RemoteLeaseSet) Release() {
 		close(s.released)
 		s.mu.RLock()
 		leases := append([]RemoteLease(nil), s.leases...)
+		fence := cloneOperationFence(s.fence)
 		s.mu.RUnlock()
+		if err := s.revokeFenceTargets(fence); err != nil {
+			s.warnf("Warning: %v; controller lease retained until expiry to prevent overlapping writers\n", err)
+			return
+		}
 		for i := len(leases) - 1; i >= 0; i-- {
 			lease := leases[i]
 			if lease.Manager == nil || lease.Lease == nil {

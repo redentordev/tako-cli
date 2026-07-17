@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 )
 
 const (
@@ -22,32 +24,38 @@ const (
 var leaseMu sync.Mutex
 
 type LeaseInfo struct {
-	ID          string    `json:"id"`
-	ProjectName string    `json:"projectName"`
-	Environment string    `json:"environment"`
-	Operation   string    `json:"operation"`
-	Who         string    `json:"who"`
-	PID         int       `json:"pid"`
-	CreatedAt   time.Time `json:"createdAt"`
-	ExpiresAt   time.Time `json:"expiresAt"`
+	ID          string                       `json:"id"`
+	ProjectName string                       `json:"projectName"`
+	Environment string                       `json:"environment"`
+	Operation   string                       `json:"operation"`
+	Who         string                       `json:"who"`
+	PID         int                          `json:"pid"`
+	CreatedAt   time.Time                    `json:"createdAt"`
+	ExpiresAt   time.Time                    `json:"expiresAt"`
+	Fence       *nodeidentity.OperationFence `json:"fence,omitempty"`
 }
 
 type LeaseRequest struct {
-	Project     string `json:"project"`
-	Environment string `json:"environment"`
-	ID          string `json:"id,omitempty"`
-	Operation   string `json:"operation,omitempty"`
-	Who         string `json:"who,omitempty"`
-	PID         int    `json:"pid,omitempty"`
-	TTLSeconds  int64  `json:"ttlSeconds,omitempty"`
-	Renew       bool   `json:"renew,omitempty"`
+	Project       string                       `json:"project"`
+	Environment   string                       `json:"environment"`
+	ID            string                       `json:"id,omitempty"`
+	Operation     string                       `json:"operation,omitempty"`
+	Who           string                       `json:"who,omitempty"`
+	PID           int                          `json:"pid,omitempty"`
+	TTLSeconds    int64                        `json:"ttlSeconds,omitempty"`
+	Renew         bool                         `json:"renew,omitempty"`
+	RequestID     string                       `json:"requestId,omitempty"`
+	HolderToken   string                       `json:"holderToken,omitempty"`
+	TargetNodeIDs []string                     `json:"targetNodeIds,omitempty"`
+	Fence         *nodeidentity.OperationFence `json:"fence,omitempty"`
 }
 
 type LeaseResponse struct {
-	Acquired bool       `json:"acquired"`
-	Found    bool       `json:"found"`
-	Lease    *LeaseInfo `json:"lease,omitempty"`
-	Message  string     `json:"message,omitempty"`
+	Acquired    bool       `json:"acquired"`
+	Found       bool       `json:"found"`
+	Lease       *LeaseInfo `json:"lease,omitempty"`
+	Message     string     `json:"message,omitempty"`
+	HolderToken string     `json:"holderToken,omitempty"`
 }
 
 func AcquireLease(ctx context.Context, dataDir string, req LeaseRequest) (*LeaseResponse, error) {
@@ -181,6 +189,43 @@ func renewLease(path string, id string, ttl time.Duration, now time.Time) (*Leas
 	content = append(content, '\n')
 	if err := writeFileAtomic(path, content, 0600); err != nil {
 		return nil, fmt.Errorf("failed to renew lease: %w", err)
+	}
+	return &LeaseResponse{Acquired: true, Found: true, Lease: &renewed, Message: "lease renewed"}, nil
+}
+
+// renewLeaseTo updates the compatibility lease only after the enrolled
+// controller journal has durably committed the exact signed expiry. This
+// ordering prevents a crash from extending hidden lease authority beyond the
+// durable controller fence.
+func renewLeaseTo(ctx context.Context, dataDir string, req LeaseRequest, expiresAt time.Time) (*LeaseResponse, error) {
+	if err := validateLeaseRequest(req, false); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	path, err := leasePath(dataDir, req.Project, req.Environment)
+	if err != nil {
+		return nil, err
+	}
+	leaseMu.Lock()
+	defer leaseMu.Unlock()
+	current, err := readLeaseFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read controller backing lease for renewal: %w", err)
+	}
+	if current == nil || current.ID != req.ID {
+		return &LeaseResponse{Acquired: false, Found: current != nil, Lease: current, Message: "controller backing lease was lost"}, nil
+	}
+	renewed := *current
+	renewed.ExpiresAt = expiresAt.UTC()
+	content, err := json.MarshalIndent(&renewed, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	content = append(content, '\n')
+	if err := writeFileAtomic(path, content, 0600); err != nil {
+		return nil, fmt.Errorf("failed to renew controller backing lease: %w", err)
 	}
 	return &LeaseResponse{Acquired: true, Found: true, Lease: &renewed, Message: "lease renewed"}, nil
 }

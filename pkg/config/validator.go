@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/utils"
 	"github.com/robfig/cron/v3"
 	"golang.org/x/crypto/bcrypt"
@@ -485,6 +486,13 @@ func validateEnvironmentPersistentPlacement(envName string, env *EnvironmentConf
 }
 
 func validateEnvironmentProxyACMESafety(envName string, env *EnvironmentConfig, cfg *Config) error {
+	requiresProxy := env.Proxy != nil
+	for _, service := range env.Services {
+		requiresProxy = requiresProxy || service.Proxy != nil
+	}
+	if !requiresProxy {
+		return nil
+	}
 	environmentServers, err := environmentServerTargets(envName, env, cfg)
 	if err != nil {
 		return err
@@ -558,6 +566,38 @@ func environmentServerTargets(envName string, env *EnvironmentConfig, cfg *Confi
 }
 
 func validateServer(name string, server *ServerConfig) error {
+	server.Transport = strings.ToLower(strings.TrimSpace(server.Transport))
+	server.ClusterID = strings.ToLower(strings.TrimSpace(server.ClusterID))
+	server.NodeID = strings.ToLower(strings.TrimSpace(server.NodeID))
+	switch server.Transport {
+	case "", "ssh":
+	case "auto", "local":
+		if err := (nodeidentity.Reference{ClusterID: server.ClusterID, NodeID: server.NodeID}).Validate(); err != nil {
+			return fmt.Errorf("server %s: transport %s requires valid clusterId and nodeId: %w", name, server.Transport, err)
+		}
+		if server.WorkerUID <= 0 {
+			return fmt.Errorf("server %s: transport %s requires the enrolled non-root workerUid", name, server.Transport)
+		}
+	default:
+		return fmt.Errorf("server %s: unsupported transport %q (must be ssh, auto, or local)", name, server.Transport)
+	}
+	if (server.ClusterID == "") != (server.NodeID == "") {
+		return fmt.Errorf("server %s: clusterId and nodeId must be configured together", name)
+	}
+	if server.ClusterID != "" {
+		if err := (nodeidentity.Reference{ClusterID: server.ClusterID, NodeID: server.NodeID}).Validate(); err != nil {
+			return fmt.Errorf("server %s: invalid immutable node identity: %w", name, err)
+		}
+	}
+	if server.WorkerUID < 0 {
+		return fmt.Errorf("server %s: workerUid must be positive", name)
+	}
+	// Local transport is authenticated by the immutable installation identity,
+	// peer credentials on the protected Unix socket, and the enrolled worker
+	// UID. It must not depend on an unrelated SSH host, account, or private key.
+	if server.Transport == "local" {
+		return nil
+	}
 	if server.Host == "" {
 		return fmt.Errorf("server %s: host is required", name)
 	}

@@ -181,11 +181,11 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error)
 		return nil, fmt.Errorf("failed to encode exec request: %w", err)
 	}
 
-	client, err := connectTakodStreamNodeContext(ctx, serverCfg)
+	client, cleanup, err := connectRuntimeNode(ctx, cfg, serverName)
 	if err != nil {
 		return nil, &ConnectivityError{Err: fmt.Errorf("failed to connect to node %s: %w", serverName, err)}
 	}
-	defer client.Close()
+	defer cleanup()
 	if req.OneOff && len(service.Files) > 0 {
 		if err := ensureServiceFilesCapability(ctx, client, TakodSocketFromConfig(cfg)); err != nil {
 			return nil, err
@@ -290,13 +290,13 @@ func (e *Engine) resolveExecServer(ctx context.Context, cfg *config.Config, envN
 	var lastErr error
 	for _, name := range serverNames {
 		server := cfg.Servers[name]
-		client, err := connectTakodStreamNodeContext(ctx, server)
+		client, cleanup, err := connectRuntimeNode(ctx, cfg, name)
 		if err != nil {
 			lastErr = fmt.Errorf("failed to connect to node %s: %w", name, err)
 			continue
 		}
 		response, err := ActualStateViaTakod(client, cfg, envName)
-		_ = client.Close()
+		cleanup()
 		if err != nil {
 			lastErr = fmt.Errorf("failed to query takod on node %s: %w", name, err)
 			continue

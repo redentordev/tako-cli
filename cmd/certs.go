@@ -11,6 +11,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
@@ -148,7 +149,30 @@ func executeCertificateOperation(ctx context.Context, cfg *config.Config, envNam
 	}
 	pool := ssh.NewPool()
 	defer pool.CloseAll()
-	clients := make(map[string]takodclient.RequestExecutor, len(targets))
+	var err error
+	var leaseSet *engine.RemoteLeaseSet
+	if action != "list" {
+		leaseSet, err = engine.AcquireRemoteOperationLeasesContext(ctx, pool, cfg, envName, targets, "certs-"+action)
+		if err != nil {
+			return result, err
+		}
+		defer leaseSet.Release()
+		leaseCtx, cancel := leaseSet.BindContext(ctx)
+		defer cancel()
+		ctx = leaseCtx
+	}
+	factory, err := nodeclient.NewFactory(cfg, pool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return result, err
+	}
+	defer factory.CloseIdleConnections()
+	if leaseSet != nil {
+		factory.SetOperationFenceSource(leaseSet)
+	}
+	if push != nil {
+		push.Project, push.Environment = cfg.Project.Name, envName
+	}
+	clients := make(map[string]*takodclient.AgentClient, len(targets))
 	var connectionErr error
 	for _, serverName := range targets {
 		server, ok := cfg.Servers[serverName]
@@ -164,7 +188,7 @@ func executeCertificateOperation(ctx context.Context, cfg *config.Config, envNam
 			result.Nodes = append(result.Nodes, node)
 			continue
 		}
-		client, err := pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, _, err := factory.Client(ctx, serverName)
 		if err != nil {
 			node.Error = "connect: " + err.Error()
 			if connectionErr == nil {
@@ -180,11 +204,11 @@ func executeCertificateOperation(ctx context.Context, cfg *config.Config, envNam
 		return result, connectionErr
 	}
 	var operationErr error
-	result.Nodes, operationErr = executeCertificateNodeRequests(ctx, takodSocketFromConfig(cfg), result.Nodes, clients, action, domain, push)
+	result.Nodes, operationErr = executeCertificateNodeRequests(ctx, takodSocketFromConfig(cfg), result.Nodes, clients, cfg.Project.Name, envName, action, domain, push)
 	return result, operationErr
 }
 
-func executeCertificateNodeRequests(ctx context.Context, socket string, nodes []engine.CertsNodeResult, clients map[string]takodclient.RequestExecutor, action string, domain string, push *takod.ProxyCertificatePushRequest) ([]engine.CertsNodeResult, error) {
+func executeCertificateNodeRequests[T any](ctx context.Context, socket string, nodes []engine.CertsNodeResult, clients map[string]T, project, environment, action string, domain string, push *takod.ProxyCertificatePushRequest) ([]engine.CertsNodeResult, error) {
 	var preflightErr error
 	for i := range nodes {
 		node := &nodes[i]
@@ -194,8 +218,8 @@ func executeCertificateNodeRequests(ctx context.Context, socket string, nodes []
 			}
 			continue
 		}
-		client := clients[node.Server]
-		if client == nil {
+		client, found := clients[node.Server]
+		if !found || any(client) == nil {
 			node.Error = "connection is unavailable"
 			if preflightErr == nil {
 				preflightErr = fmt.Errorf("connection to %s is unavailable", node.Server)
@@ -220,9 +244,9 @@ func executeCertificateNodeRequests(ctx context.Context, socket string, nodes []
 		var err error
 		switch action {
 		case "push":
-			output, err = takodclient.RequestJSONWithContext(ctx, clients[node.Server], socket, "PUT", takodclient.CertificatesEndpoint(""), push)
+			output, err = takodclient.RequestJSONWithContext(ctx, clients[node.Server], socket, "PUT", takodclient.ScopedCertificatesEndpoint(project, environment, ""), push)
 		case "remove":
-			output, err = takodclient.RequestJSONWithContext(ctx, clients[node.Server], socket, "DELETE", takodclient.CertificatesEndpoint(domain), nil)
+			output, err = takodclient.RequestJSONWithContext(ctx, clients[node.Server], socket, "DELETE", takodclient.ScopedCertificatesEndpoint(project, environment, domain), nil)
 		case "list":
 			output, err = takodclient.RequestJSONWithContext(ctx, clients[node.Server], socket, "GET", takodclient.CertificatesEndpoint(""), nil)
 		default:

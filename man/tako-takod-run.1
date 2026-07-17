@@ -30,8 +30,28 @@ Run the takod Unix-socket server
 	takod data directory
 
 .PP
+\fB--docker-data-root\fP=""
+	Docker data-root filesystem used for image and volume admission
+
+.PP
 \fB-h\fP, \fB--help\fP[=false]
 	help for run
+
+.PP
+\fB--identity-file\fP="/etc/tako/identity.json"
+	Root-owned Tako installation identity file
+
+.PP
+\fB--max-concurrent-builds\fP=0
+	Maximum concurrent image builds (0 keeps legacy unlimited behavior)
+
+.PP
+\fB--membership-file\fP=""
+	Protected controller membership state (derived from data-dir when omitted)
+
+.PP
+\fB--minimum-free-disk-bytes\fP=0
+	Reject disk-growing operations below this free-disk floor (0 disables)
 
 .PP
 \fB--node\fP=""

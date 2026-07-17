@@ -12,6 +12,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/git"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
@@ -96,6 +97,10 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	if len(serverNames) == 0 {
 		return nil, invalidRequestf("no servers configured for environment %s", envName)
 	}
+	serverNames, err = config.ResolveSchedulableEnvironmentTargets(cfg.Servers, serverNames, envName)
+	if err != nil {
+		return nil, err
+	}
 
 	// Register sensitive values with the redactor before emitting anything
 	// that could contain them.
@@ -136,27 +141,44 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	})
 	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("→ Acquired remote promote leases: %s\n", leaseSet.Summary()))
 
-	sourceServerName := serverNames[0]
+	sourceServerName, err := AuthoritativeStateServer(cfg, serverNames)
+	if err != nil {
+		return nil, err
+	}
 	sourceServer, ok := cfg.Servers[sourceServerName]
 	if !ok {
 		return nil, invalidRequestf("server %s not found in configuration", sourceServerName)
 	}
-	sourceClient, err := sshPool.GetOrCreateWithAuth(sourceServer.Host, sourceServer.Port, sourceServer.User, sourceServer.SSHKey, sourceServer.Password)
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	defer runtimeFactory.CloseIdleConnections()
+	sourceClient, _, err := runtimeFactory.Client(ctx, sourceServerName)
 	if err != nil {
 		return nil, &ConnectivityError{Server: sourceServerName, Err: fmt.Errorf("failed to connect to node %s: %w", sourceServerName, err)}
 	}
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, req.Verbose)
+	priorDesired, priorAssignments, err := LoadPriorPlacementState(sourceClient, cfg, envName)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidatePriorDesiredServices(priorDesired, services); err != nil {
+		return nil, err
+	}
+	deploy.SetPriorAssignments(priorAssignments)
+	if err := deploy.ResolveAllAssignments(services); err != nil {
+		return nil, err
+	}
+	deploy.SetRuntimeFactory(runtimeFactory)
 	deploy.SetBaseContext(ctx)
 	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
 	}
-	if err := deploy.SetupTakodRuntime(); err != nil {
-		return nil, fmt.Errorf("failed to setup takod runtime: %w", err)
-	}
-	if err := deploy.PreflightTakodProxyCapabilities(services); err != nil {
+	if err := preflightAndSetupTakodRuntime(deploy, services); err != nil {
 		return nil, err
 	}
 
@@ -184,6 +206,14 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	targetImage, err := promotionTargetImage(cfg, envName, serviceName, service, actual, targetRevision)
 	if err != nil {
 		return nil, fmt.Errorf("cannot promote %s: %w", serviceName, err)
+	}
+	if err := deploy.PreflightAssignmentMutations(map[string]config.ServiceConfig{serviceName: service}); err != nil {
+		return nil, err
+	}
+	intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, services, nil, actualState)
+	intentImageRefs[serviceName] = targetImage
+	if err := PersistTakodDesiredIntentWithPlacementBaseline(sshPool, cfg, envName, serverNames, "promote", services, intentImageRefs, deploy.ResolvedAssignments(), nil, priorDesired, optionalPromoteGitInfo(), "recorded stable placement before promotion mutation", req.Verbose); err != nil {
+		return nil, err
 	}
 
 	activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
@@ -234,7 +264,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	}
 	postActualState := reconcile.AggregateActualStateByServer(postNodeActualState)
 	runtimeImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, services, nil, postActualState)
-	if err := PersistTakodRuntimeState(
+	if err := PersistTakodRuntimeStateWithPlacementBaseline(
 		sshPool,
 		cfg,
 		envName,
@@ -244,6 +274,8 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 		runtimeImageRefs,
 		postActualState,
 		postNodeActualState,
+		deploy.ResolvedAssignments(),
+		priorDesired,
 		optionalPromoteGitInfo(),
 		"promote.succeeded",
 		fmt.Sprintf("promoted %s to revision %s", serviceName, targetRevision),
@@ -262,7 +294,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	if err := stateManager.SaveDeploymentContext(ctx, promoteDeployment); err != nil {
 		return nil, fmt.Errorf("promotion succeeded but failed to save deployment history: %w", err)
 	}
-	if cfg.IsMultiServer() {
+	if cfg.IsMultiServer() && ShouldReplicateDeploymentHistory(cfg) {
 		replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
 		history, err := stateManager.LoadHistoryContext(ctx)
 		if err != nil {

@@ -45,6 +45,150 @@ environments:
 tako setup && tako deploy
 ```
 
+## First PaaS Node With Local Deployments
+
+Install Tako on the server that will host the control plane and most initial
+workloads, then initialize the protected single-node foundation:
+
+```bash
+sudo tako platform init --node node-1
+```
+
+The command prints the immutable `clusterId`, `nodeId`, and numeric
+`workerUid`. On an enrolled platform node, Tako materializes server targets,
+mesh addresses, lifecycle, roles, and pinned SSH identities from a root-owned,
+read-only cluster inventory plus a public local-node binding; it never needs to
+read the root-only installation identity or platform configuration. Application
+configuration cannot override them. The production inventory and local binding
+must remain root-owned, singly linked, regular `0644` files inside a root-owned
+non-group/other-writable `/etc/tako`; directory or file ownership drift and
+group/other writability are rejected before materialization. An
+environment may still select a member by canonical node name or an old server
+alias carrying the immutable `nodeId`. The explicit form below remains the
+legacy/off-node compatibility form:
+
+```yaml
+servers:
+  node-1:
+    host: ${TAKO_NODE_1_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+    transport: auto
+    clusterId: 11111111-1111-4111-8111-111111111111
+    nodeId: 22222222-2222-4222-8222-222222222222
+    workerUid: 997
+```
+
+`transport: auto` makes one safe decision before connecting: when Tako is
+running on the exact enrolled node, it verifies the local Unix-socket peer and
+immutable installation identity and uses the protected platform-worker
+ingress. Everywhere else it uses SSH and verifies the remote node identity.
+An SSH failure never causes a retry against the local machine. Omit
+`transport` to preserve legacy SSH behavior; use `transport: local` only when
+the command must fail instead of falling back to SSH.
+
+Routine deploy, status, monitor, logs, exec, scale, rollback, state,
+environment-bundle, backup, and cleanup traffic uses the structured node-agent
+surface. Privileged setup, join, repair, and server upgrades remain explicit
+SSH operations. Local image builds and reuse are accepted only after exact
+image digest, Docker platform, and freshly attested daemon identity checks; a
+matching mutable tag alone is not trusted.
+
+All active workers remain connectivity targets so read-only status and logs,
+plus controller-owned lifecycle recovery, can still reach ready, cordoned, or
+draining members. Application cleanup and other all-node mutations fail before
+fanout when the selected set contains an unschedulable member; reschedule it or
+use the explicit controller lifecycle workflow first. Only schedulable workers
+may receive new assignments. Proxy reconciliation is limited to nodes
+with the `edge` role, and node-side image builds are limited to schedulable
+`builder` nodes; a worker-only join cannot acquire either responsibility from
+application placement. A controller builder may build once and transfer the
+exact image digest to worker targets.
+
+Platform initialization also creates protected controller membership and a
+root-owned inventory snapshot. Membership is generationed control-plane state;
+application route manifests cannot add nodes or change roles.
+
+To add a worker, first run normal `tako setup` with the current binary and
+verify its SSH key is present in `~/.tako/known_hosts` or
+`~/.ssh/known_hosts`. Choose a new UUID, create a short-lived token on node 1,
+then enroll from node 1:
+
+```bash
+sudo tako platform join-token create --node-id 33333333-3333-4333-8333-333333333333 --ttl 15m
+sudo env TAKO_JOIN_TOKEN='tako_join_v1....' tako platform node enroll \
+  --node-id 33333333-3333-4333-8333-333333333333 \
+  --node worker-2 --mesh-ip 10.210.0.2 \
+  --host 203.0.113.20 --controller-mesh-host node-1.example.com \
+  --controller-host 203.0.113.10 \
+  --user root --ssh-key /root/.ssh/tako
+```
+
+Enrollment pins the exact in-memory SSH host key, creates the worker-only
+immutable identity and WireGuard key remotely, binds the actual mesh public
+key in controller membership, consumes the cluster/node-bound token once (the
+plaintext token is never placed in the Tako process arguments),
+publishes the trusted inventory, reconciles the membership-owned mesh on every
+member, restarts and attests takod, and leaves the
+node `ready` but unschedulable. Admit it only after review:
+
+```bash
+sudo tako platform node schedulable \
+  --node-id 33333333-3333-4333-8333-333333333333 \
+  --ssh-key /root/.ssh/tako
+```
+
+The lifecycle is `joining -> ready -> schedulable -> cordoned -> draining ->
+removed`. Lifecycle updates are published to every active worker over the
+immutable SSH key captured during enrollment; later `known_hosts` edits cannot
+silently repin it. If password authentication is unavoidable, place the secret
+in `TAKO_SSH_PASSWORD` (or name another variable with `--password-env`) so it
+never appears in process arguments. For controller-initiated routine access to
+remote members, set the platform-wide private-key path in
+`TAKO_PLATFORM_SSH_KEY`; an application server entry cannot replace it.
+
+`--controller-mesh-host` is the host or IP that workers use as node 1's
+WireGuard endpoint. Worker endpoints default to their enrolled SSH host.
+`--controller-host` is node 1's worker-reachable SSH provisioning address;
+its exact key must already be verified in Tako or OpenSSH `known_hosts`.
+Enrollment publishes that pin with the controller membership record so a CLI
+on a joined worker never falls back to an empty or unpinned controller
+transport.
+Enrolled takod instances reject application-owned `/v1/mesh/apply` requests;
+an application deployment therefore cannot restore a tombstoned peer.
+
+Removal is a durable, retryable revoke-first operation. Tako rewrites and
+attests the persistent WireGuard configuration on the controller and every
+remaining peer without the target's bound public key before it commits the
+membership tombstone. Target-local shutdown and private-key deletion happen
+afterward and can be resumed by rerunning the same remove command.
+
+Cordon, drain, and removal set and attest a durable deployment-deny latch on
+the target before committing controller membership, so a crash cannot leave a
+stale target accepting direct workload mutations. The target then receives the
+changed inventory before unrelated workers. `schedulable` also recovers a
+cordoned node and clears the latch only after its schedulable inventory is
+attested. Tako refuses to drain or remove the final controller.
+
+Remote mesh proxy routes require an operation-bound worker allocation and a
+controller-committed generation. Worker signatures alone are insufficient:
+the controller keeps replay high-water tombstones, publishes a signed proposal
+to every edge before commit, and durably records each publication target before
+contacting it. If the client dies, the next cluster-global operation commits a
+strictly newer copy of the last controller authority and converges every
+recorded target before publishing ordinary inventory. Omission remains
+revocation, and edge nodes stop and quarantine routes that no longer match.
+One-node local runtime-alias routes remain enabled without host-port allocation.
+
+Platform recovery requires `TAKO_RECOVERY_KEY` to be standard base64 for 32
+random bytes. Keep it outside node 1 and outside the recovery bucket. Recovery
+storage endpoints must use HTTPS. Creation verifies persistent-volume coverage
+from controller desired state, reads back and hashes every referenced workload
+object, refuses an active controller operation, streams the archive directly
+through encryption without a plaintext temporary, then uploads and reads back
+the exact size- and digest-matched authenticated controller bundle. Offline
+verify and restore require `--cluster-id`.
+
 ## Full-Stack Application
 
 ```yaml
@@ -209,6 +353,46 @@ shared across nodes, use an external storage service or an application-level
 replication system such as a managed database, object storage, or
 purpose-built clustered datastore. Tako does not provision shared filesystem
 storage.
+
+### Sticky assignments and movement review
+
+Successful deploy, scale, promote, rollback, and direct-image operations save
+each replica slot's logical node plus immutable node ID in desired state. A new
+node does not trigger rebalance, and scale-out preserves every healthy existing
+slot. If a saved node ID disappears or changes, Tako stops before mutation.
+Tako replicates the resolved desired assignments before workload mutation; an
+interrupted or partially failed operation leaves visible desired/actual drift
+and retries reuse the same slots.
+Before removing a stateless service or job, Tako persists its prior safe
+configuration, image, and assignment with `removalPending: true`. The marker
+and binding survive an interrupted cleanup; the service disappears from
+desired state only after cleanup succeeds. A removal whose prior configuration
+cannot be recovered fails closed instead of discarding placement authority.
+Targeted deploy, scale, promote, rollback, and direct-image workflows preserve
+every unrelated prior desired-service record, including a removal marker, in
+both their pre-mutation intent and final state write. Only a full deploy that
+owns cleanup may clear the marker. An actual-only workload with no proven
+assignment must be explicitly adopted before it can be removed.
+On the first upgrade from assignment-less desired state, deterministic
+container identities and per-node actual snapshots are used to adopt the
+existing slot locations. Missing or ambiguous evidence fails closed. Placement
+planning reads only from a schedulable state source and prefers the enrolled
+control-plane node, so a cordoned caller's stale local copy is never treated as
+authoritative.
+
+Use `tako placement plan cordon --node NAME --file plan.json` to review the
+replicas that will remain in place, `tako placement plan drain --node NAME
+--file plan.json` to review work needed before draining a node, or `tako
+placement plan rebalance --file plan.json` to review a conservative stateless
+rebalance. Record the printed
+digest and verify the reviewed file with `tako placement verify plan.json
+--plan-id sha256:...`. The plan is tied to the exact desired revision and is
+read-only; it does not weaken the durable deployment-deny latch used by cordon
+and drain. Persistent or volume-backed moves are blockers with no automatic
+destination and require a separate backup/restore/cutover plan.
+Do not delete a running `persistent: true` service from the configuration:
+Tako rejects that deploy so its placement is not forgotten. Keep it declared
+until a separately explicit persistent-workload removal has completed.
 
 ## Secrets Management
 
@@ -644,14 +828,15 @@ For stronger developer or CI machines, use local build mode:
 ```yaml
 deployment:
   build:
-    strategy: auto # try local buildx/unregistry, fall back to remote takod build
+    strategy: auto # try local buildx, fall back to remote takod build
 ```
 
 `local` builds once per target architecture with `docker buildx build
---platform linux/amd64|linux/arm64 --load` and pushes the image to each
-assigned server with psviderski/unregistry's `docker pussh`. `auto` uses the
-same path when available and falls back to `remote` when Docker, buildx,
-docker-pussh, SSH key/agent auth, or remote Docker permissions are not ready.
+--platform linux/amd64|linux/arm64 --load`, selects the resulting immutable
+image ID, and streams that archive to each assigned node through the same
+structured local-or-SSH agent transport used by deployment. It does not open
+a separate shell or require `docker pussh`. `auto` uses the same path when
+local Docker and buildx are available and otherwise falls back to `remote`.
 
 Use `remote` when the server is intentionally the build host, `local` when CI
 or a developer workstation should build and push images to the VPS, and `auto`
@@ -861,14 +1046,9 @@ tako deploy --build-strategy local
 tako deploy --build-strategy auto
 ```
 
-Install docker-pussh on the client machine:
-
-```bash
-brew install psviderski/tap/docker-pussh
-mkdir -p ~/.docker/cli-plugins
-ln -sf "$(brew --prefix)/bin/docker-pussh" ~/.docker/cli-plugins/docker-pussh
-docker pussh --help
-```
+Local build mode needs only Docker with buildx on the client. Image handoff uses
+Tako's structured node transport and does not require an additional Docker CLI
+plugin.
 
 ## Container Resource Limits
 

@@ -153,6 +153,15 @@ Tako infers the meshed `takod` runtime, replicated state, and WireGuard mesh
 settings; run `tako config explain -e production` to see the effective
 defaults.
 
+For a PaaS installed on its first workload node, run `sudo tako platform init`
+on that server and add the printed `clusterId`, `nodeId`, and `workerUid` to
+the server entry with `transport: auto`. The same configuration then uses the
+protected local worker ingress when Tako runs on that exact enrolled node and
+identity-verified SSH from other machines. See
+[First PaaS Node With Local Deployments](docs/CONFIGURATION.md#first-paas-node-with-local-deployments).
+That guide also covers expiring single-use worker enrollment, pinned SSH host
+keys, and the explicit ready/schedulable/cordon/drain/remove lifecycle.
+
 3. **Commit, set up the server (one-time), and deploy:**
 
 ```bash
@@ -257,6 +266,7 @@ The most-used commands. Every command has a man page (`man tako-deploy`) and
 | `tako metrics` / `tako monitor` | System metrics and continuous service monitoring |
 | `tako history` | View deployment history |
 | `tako start` / `tako stop` / `tako scale` | Service control |
+| `tako placement plan cordon\|drain\|rebalance` | Create digest-bound, reviewable replica placement plans |
 | `tako backup` | Volume backup, list, restore, and retention cleanup |
 | `tako drift` | Detect config drift between desired state and running services |
 | `tako secrets` | Init, set, list, delete, and validate secrets |

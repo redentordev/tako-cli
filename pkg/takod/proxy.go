@@ -16,9 +16,11 @@ const (
 )
 
 type ReconcileProxyRequest struct {
-	Network string `json:"network"`
-	Email   string `json:"email,omitempty"`
-	Image   string `json:"image,omitempty"`
+	Project     string `json:"project,omitempty"`
+	Environment string `json:"environment,omitempty"`
+	Network     string `json:"network"`
+	Email       string `json:"email,omitempty"`
+	Image       string `json:"image,omitempty"`
 }
 
 type ReconcileProxyResponse struct {

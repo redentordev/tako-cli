@@ -131,11 +131,11 @@ func (e *Engine) ExecInteractive(ctx context.Context, req ExecRequest, terminal 
 		}
 	}
 
-	client, err := connectTakodStreamNodeContext(ctx, serverCfg)
+	client, cleanup, err := connectRuntimeNode(ctx, cfg, serverName)
 	if err != nil {
 		return nil, &ConnectivityError{Err: fmt.Errorf("failed to connect to node %s: %w", serverName, err)}
 	}
-	defer client.Close()
+	defer cleanup()
 	if req.OneOff && len(service.Files) > 0 {
 		if err := ensureServiceFilesCapability(ctx, client, TakodSocketFromConfig(cfg)); err != nil {
 			return nil, err

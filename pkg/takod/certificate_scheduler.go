@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/recovery"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 )
 
@@ -22,6 +23,7 @@ var (
 // only component allowed to renew managed certificates.
 type CertificateScheduler struct {
 	dataDir string
+	admit   func(...string) error
 }
 
 type certificateStateEventDocument struct {
@@ -60,6 +62,28 @@ func (s *CertificateScheduler) Run(ctx context.Context) {
 }
 
 func (s *CertificateScheduler) Check(ctx context.Context) error {
+	maintenanceUnlock, err := recovery.AcquireMaintenanceBarrier(s.dataDir)
+	if err != nil {
+		return fmt.Errorf("certificate scheduler maintenance barrier: %w", err)
+	}
+	defer maintenanceUnlock()
+	active, err := activeWorkerOperation(s.dataDir, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("verify active operation before certificate renewal: %w", err)
+	}
+	if active {
+		return nil
+	}
+	unlock, err := recovery.AcquireMutationLock(s.dataDir)
+	if err != nil {
+		return fmt.Errorf("certificate scheduler snapshot lock: %w", err)
+	}
+	defer unlock()
+	if s.admit != nil {
+		if err := s.admit(proxyDynamicDir, proxyCertStoreDir, s.dataDir); err != nil {
+			return fmt.Errorf("certificate scheduler denied by resource admission: %w", err)
+		}
+	}
 	manifests, err := readProxyRouteManifests(proxyRoutesDir)
 	if err != nil {
 		return err

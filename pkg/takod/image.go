@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,18 +13,43 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
+
+var imageTransferMu sync.Mutex
 
 type ImageExistsResponse struct {
 	Image  string `json:"image"`
 	Exists bool   `json:"exists"`
 }
 
+// ImageDescriptor is the immutable evidence used for reuse and transfer.
+// ImageID is Docker's config digest; a mutable tag alone is never sufficient.
+// DaemonID distinguishes two Docker stores even when they expose equal tags.
+type ImageDescriptor struct {
+	Image        string   `json:"image"`
+	Exists       bool     `json:"exists"`
+	ImageID      string   `json:"imageId,omitempty"`
+	RepoDigests  []string `json:"repoDigests,omitempty"`
+	OS           string   `json:"os,omitempty"`
+	Architecture string   `json:"architecture,omitempty"`
+	Variant      string   `json:"variant,omitempty"`
+	DaemonID     string   `json:"daemonId,omitempty"`
+}
+
+type PlatformResponse struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
+	Variant      string `json:"variant,omitempty"`
+	DaemonID     string `json:"daemonId"`
+}
+
 type ImageImportResponse struct {
-	Image  string `json:"image"`
-	Output string `json:"output,omitempty"`
+	Image      string           `json:"image"`
+	Output     string           `json:"output,omitempty"`
+	Descriptor *ImageDescriptor `json:"descriptor,omitempty"`
 }
 
 type ImageBuildResponse struct {
@@ -51,6 +78,15 @@ const (
 	maxImageRefLength                     = 512
 )
 
+func validSHA256Digest(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+64 {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+	return err == nil
+}
+
 type buildContextLimits struct {
 	MaxBytes     int64
 	MaxFileBytes int64
@@ -63,6 +99,96 @@ func ImageExists(ctx context.Context, image string) (*ImageExistsResponse, error
 	}
 	_, err := runDocker(ctx, "image", "inspect", image)
 	return &ImageExistsResponse{Image: image, Exists: err == nil}, nil
+}
+
+// InspectImage returns exact image, platform, and daemon identity. A missing
+// image is a successful Exists=false result; malformed daemon output fails
+// closed so callers cannot fall back to tag-only reuse.
+func InspectImage(ctx context.Context, image string) (*ImageDescriptor, error) {
+	if err := validateImageName(image); err != nil {
+		return nil, err
+	}
+	output, err := runDocker(ctx, "image", "inspect", image)
+	if err != nil {
+		if _, infoErr := dockerDaemonID(ctx); infoErr != nil {
+			return nil, fmt.Errorf("inspect Docker image %s: %w", image, infoErr)
+		}
+		return &ImageDescriptor{Image: image, Exists: false}, nil
+	}
+	var inspected []struct {
+		ID           string   `json:"Id"`
+		RepoDigests  []string `json:"RepoDigests"`
+		OS           string   `json:"Os"`
+		Architecture string   `json:"Architecture"`
+		Variant      string   `json:"Variant"`
+	}
+	if err := json.Unmarshal([]byte(output), &inspected); err != nil {
+		return nil, fmt.Errorf("decode Docker image inspection for %s: %w", image, err)
+	}
+	if len(inspected) != 1 {
+		return nil, fmt.Errorf("Docker image inspection for %s returned %d records", image, len(inspected))
+	}
+	entry := inspected[0]
+	entry.ID = strings.ToLower(strings.TrimSpace(entry.ID))
+	entry.OS = strings.ToLower(strings.TrimSpace(entry.OS))
+	entry.Architecture = strings.ToLower(strings.TrimSpace(entry.Architecture))
+	entry.Variant = strings.ToLower(strings.TrimSpace(entry.Variant))
+	if !validSHA256Digest(entry.ID) || entry.OS == "" || entry.Architecture == "" {
+		return nil, fmt.Errorf("Docker image inspection for %s omitted immutable digest or platform", image)
+	}
+	daemonID, err := dockerDaemonID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	repoDigests := append([]string(nil), entry.RepoDigests...)
+	for index := range repoDigests {
+		repoDigests[index] = strings.TrimSpace(repoDigests[index])
+	}
+	sort.Strings(repoDigests)
+	return &ImageDescriptor{
+		Image: image, Exists: true, ImageID: entry.ID, RepoDigests: repoDigests,
+		OS: entry.OS, Architecture: entry.Architecture, Variant: entry.Variant, DaemonID: daemonID,
+	}, nil
+}
+
+func dockerDaemonID(ctx context.Context) (string, error) {
+	dockerInfo, err := runDocker(ctx, "info", "--format", "{{json .ID}}")
+	if err != nil {
+		return "", fmt.Errorf("read Docker daemon identity: %w", err)
+	}
+	var daemonID string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(dockerInfo)), &daemonID); err != nil {
+		return "", fmt.Errorf("decode Docker daemon identity: %w", err)
+	}
+	daemonID = strings.TrimSpace(daemonID)
+	if daemonID == "" || len(daemonID) > 256 || strings.ContainsAny(daemonID, "\x00\r\n") {
+		return "", fmt.Errorf("Docker daemon identity is empty or invalid")
+	}
+	return daemonID, nil
+}
+
+// ReadPlatform reports the Docker server platform rather than the CLI
+// process architecture, which may differ when DOCKER_HOST is configured.
+func ReadPlatform(ctx context.Context) (*PlatformResponse, error) {
+	output, err := runDocker(ctx, "info", "--format", "{{json .}}")
+	if err != nil {
+		return nil, fmt.Errorf("read Docker platform: %w", err)
+	}
+	var info struct {
+		ID           string `json:"ID"`
+		OSType       string `json:"OSType"`
+		Architecture string `json:"Architecture"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &info); err != nil {
+		return nil, fmt.Errorf("decode Docker platform: %w", err)
+	}
+	info.ID = strings.TrimSpace(info.ID)
+	info.OSType = strings.ToLower(strings.TrimSpace(info.OSType))
+	info.Architecture = strings.ToLower(strings.TrimSpace(info.Architecture))
+	if info.ID == "" || info.OSType == "" || info.Architecture == "" {
+		return nil, fmt.Errorf("Docker platform response omitted daemon identity, OS, or architecture")
+	}
+	return &PlatformResponse{OS: info.OSType, Architecture: info.Architecture, DaemonID: info.ID}, nil
 }
 
 func ExportImage(ctx context.Context, image string, w io.Writer) error {
@@ -79,9 +205,34 @@ func ExportImage(ctx context.Context, image string, w io.Writer) error {
 	return nil
 }
 
-func ImportImage(ctx context.Context, image string, r io.Reader) (*ImageImportResponse, error) {
+func ImportImage(ctx context.Context, image string, r io.Reader, expectedImageIDs ...string) (*ImageImportResponse, error) {
 	if err := validateImageName(image); err != nil {
 		return nil, err
+	}
+	expectedImageID := ""
+	if len(expectedImageIDs) > 0 {
+		expectedImageID = strings.ToLower(strings.TrimSpace(expectedImageIDs[0]))
+		if expectedImageID != "" && !validSHA256Digest(expectedImageID) {
+			return nil, fmt.Errorf("expected image ID must be a sha256 digest")
+		}
+	}
+	imageTransferMu.Lock()
+	defer imageTransferMu.Unlock()
+	previousImageID := ""
+	previous, err := InspectImage(ctx, image)
+	if err != nil {
+		return nil, fmt.Errorf("inspect existing image %s before import: %w", image, err)
+	}
+	if previous.Exists {
+		previousImageID = previous.ImageID
+	}
+	fail := func(primary error) (*ImageImportResponse, error) {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if rollbackErr := restoreImportedImageTag(rollbackCtx, image, previousImageID); rollbackErr != nil {
+			return nil, fmt.Errorf("%v; image tag rollback failed: %w", primary, rollbackErr)
+		}
+		return nil, primary
 	}
 	r = newMaxBytesReader(r, defaultImageImportMaxBytes, "image import")
 	cmd := dockerCommandContext(ctx, "docker", "load")
@@ -90,12 +241,81 @@ func ImportImage(ctx context.Context, image string, r io.Reader) (*ImageImportRe
 	cmd.Stdout = output
 	cmd.Stderr = output
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to import image %s: %w, output: %s", image, err, output.String())
+		return fail(fmt.Errorf("failed to import image %s: %w, output: %s", image, err, output.String()))
+	}
+	var loaded *ImageDescriptor
+	if expectedImageID != "" {
+		loaded, err = InspectImage(ctx, expectedImageID)
+		if err != nil || !loaded.Exists || loaded.ImageID != expectedImageID {
+			if err != nil {
+				return fail(fmt.Errorf("inspect expected imported image %s: %w", expectedImageID, err))
+			}
+			return fail(fmt.Errorf("imported archive did not contain expected image %s", expectedImageID))
+		}
+		if _, err := runDocker(ctx, "tag", expectedImageID, image); err != nil {
+			return fail(fmt.Errorf("publish imported image %s as %s: %w", expectedImageID, image, err))
+		}
 	}
 	if _, err := runDocker(ctx, "image", "inspect", image); err != nil {
-		return nil, fmt.Errorf("imported image %s is not inspectable: %w", image, err)
+		return fail(fmt.Errorf("imported image %s is not inspectable: %w", image, err))
 	}
-	return &ImageImportResponse{Image: image, Output: strings.TrimSpace(output.String())}, nil
+	descriptor, err := InspectImage(ctx, image)
+	if err != nil {
+		return fail(fmt.Errorf("inspect imported image %s: %w", image, err))
+	}
+	if err := validateImportedPublication(image, expectedImageID, loaded, descriptor); err != nil {
+		return fail(err)
+	}
+	return &ImageImportResponse{Image: image, Output: strings.TrimSpace(output.String()), Descriptor: descriptor}, nil
+}
+
+func validateImportedPublication(image string, expectedImageID string, loaded *ImageDescriptor, published *ImageDescriptor) error {
+	if published == nil || !published.Exists {
+		return fmt.Errorf("imported image %s disappeared before publication completed", image)
+	}
+	if expectedImageID == "" {
+		return nil
+	}
+	if loaded == nil {
+		return fmt.Errorf("expected imported image %s has no verified descriptor", expectedImageID)
+	}
+	if published.ImageID != expectedImageID || published.OS != loaded.OS || published.Architecture != loaded.Architecture || published.Variant != loaded.Variant {
+		return fmt.Errorf("published image %s changed during import: got %s %s/%s/%s, expected %s %s/%s/%s", image,
+			published.ImageID, published.OS, published.Architecture, published.Variant,
+			expectedImageID, loaded.OS, loaded.Architecture, loaded.Variant)
+	}
+	return nil
+}
+
+func restoreImportedImageTag(ctx context.Context, image string, previousImageID string) error {
+	if previousImageID != "" {
+		if _, err := runDocker(ctx, "tag", previousImageID, image); err != nil {
+			return err
+		}
+		restored, err := InspectImage(ctx, image)
+		if err != nil {
+			return err
+		}
+		if !restored.Exists || restored.ImageID != previousImageID {
+			return fmt.Errorf("restored tag points to %s instead of %s", restored.ImageID, previousImageID)
+		}
+		return nil
+	}
+	removeErr := error(nil)
+	if _, err := runDocker(ctx, "image", "rm", image); err != nil {
+		removeErr = err
+	}
+	restored, inspectErr := InspectImage(ctx, image)
+	if inspectErr != nil {
+		return inspectErr
+	}
+	if restored.Exists {
+		if removeErr != nil {
+			return fmt.Errorf("remove imported tag: %w", removeErr)
+		}
+		return fmt.Errorf("imported tag still exists after rollback")
+	}
+	return nil
 }
 
 type maxBytesReader struct {
@@ -182,6 +402,11 @@ func BuildImageWithOptions(ctx context.Context, image string, r io.Reader, auths
 		return nil, err
 	}
 	extractDuration := time.Since(extractStart)
+	// Mutable image tags are published by builds and imports. Serialize the
+	// Docker build through final inspection with image transfers so a transfer
+	// cannot attest one ID and publish another under the same tag.
+	imageTransferMu.Lock()
+	defer imageTransferMu.Unlock()
 
 	args := []string{"build", "-t", image}
 	if dockerfilePath != "" {

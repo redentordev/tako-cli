@@ -1,0 +1,59 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-platform-node-list - List controller-owned node membership
+
+
+.SH SYNOPSIS
+\fBtako platform node list [flags]\fP
+
+
+.SH DESCRIPTION
+List controller-owned node membership
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for list
+
+.PP
+\fB--identity-file\fP="/etc/tako/identity.json"
+	Local immutable controller identity
+
+.PP
+\fB--inventory-file\fP="/etc/tako/cluster-inventory.json"
+	Trusted cluster inventory snapshot
+
+.PP
+\fB--state-dir\fP="/var/lib/tako/platform"
+	Protected controller platform state directory
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-platform-node(1)\fP

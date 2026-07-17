@@ -20,7 +20,7 @@ func (e *CapabilityRequiredError) Error() string {
 
 // RequireCapability reads /v1/status and fails closed before a caller sends a
 // payload or invokes an endpoint an older node would silently ignore.
-func RequireCapability(ctx context.Context, client RequestExecutor, socket string, server string, required string, feature string) error {
+func RequireCapability(ctx context.Context, client any, socket string, server string, required string, feature string) error {
 	output, err := RequestJSONWithContext(ctx, client, socket, "GET", "/v1/status", nil)
 	if err != nil {
 		return fmt.Errorf("failed to verify takod capabilities on %s: %w", server, err)

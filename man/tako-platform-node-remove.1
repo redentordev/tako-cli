@@ -1,0 +1,75 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-platform-node-remove - Revoke and remove a drained node while retaining its tombstone
+
+
+.SH SYNOPSIS
+\fBtako platform node remove [flags]\fP
+
+
+.SH DESCRIPTION
+Revoke and remove a drained node while retaining its tombstone
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for remove
+
+.PP
+\fB--identity-file\fP="/etc/tako/identity.json"
+	Local immutable controller identity
+
+.PP
+\fB--inventory-file\fP="/etc/tako/cluster-inventory.json"
+	Trusted cluster inventory snapshot
+
+.PP
+\fB--node-id\fP=""
+	Immutable node UUID (required)
+
+.PP
+\fB--password-env\fP="TAKO_SSH_PASSWORD"
+	Environment variable containing the SSH password
+
+.PP
+\fB--socket\fP="/run/tako/takod.sock"
+	Local controller takod Unix socket
+
+.PP
+\fB--ssh-key\fP=""
+	SSH private key used to publish the lifecycle snapshot
+
+.PP
+\fB--state-dir\fP="/var/lib/tako/platform"
+	Protected controller platform state directory
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-platform-node(1)\fP

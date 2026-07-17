@@ -3,6 +3,8 @@ package ssh
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,31 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
+
+func TestPinnedClientCallbackRejectsReconnectKeyChange(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ssh.NewPublicKey(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := RecordedHostKey{Type: key.Type(), Key: base64.StdEncoding.EncodeToString(key.Marshal()), Fingerprint: ssh.FingerprintSHA256(key)}
+	client, err := NewClientFromConfigPinned(ServerConfig{Host: "node.example", User: "root", Password: "test"}, recorded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback := client.config.HostKeyCallback
+	if err := callback("node.example:22", &net.TCPAddr{}, key); err != nil {
+		t.Fatalf("pinned key rejected: %v", err)
+	}
+	otherPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	other, _ := ssh.NewPublicKey(otherPublic)
+	if err := callback("node.example:22", &net.TCPAddr{}, other); err == nil {
+		t.Fatal("changed reconnect key was accepted")
+	}
+}
 
 func writeKnownHostsFixture(t *testing.T, lines ...string) string {
 	t.Helper()
@@ -105,5 +132,25 @@ func TestLookupRecordedHostKeyMissingFilesAndHosts(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatal("lookup found a key with no known_hosts files")
+	}
+}
+
+func TestLookupRecordedHostKeyTreatsRevokedMatchAsFatal(t *testing.T) {
+	revoked := generateHostKeyFixture(t)
+	stale := generateHostKeyFixture(t)
+	path := writeKnownHostsFixture(t,
+		knownhosts.Line([]string{"203.0.113.7"}, stale),
+		"@revoked "+knownhosts.Line([]string{"203.0.113.7"}, revoked),
+	)
+	if got, err := lookupRecordedHostKeyIn("203.0.113.7", 22, []string{path}); err == nil || got != nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("revoked host lookup = %#v, err=%v", got, err)
+	}
+}
+
+func TestPinnedClientRejectsInconsistentStoredFields(t *testing.T) {
+	key := generateHostKeyFixture(t)
+	recorded := RecordedHostKey{Type: key.Type(), Key: base64.StdEncoding.EncodeToString(key.Marshal()), Fingerprint: "SHA256:not-the-key"}
+	if _, err := NewClientFromConfigPinned(ServerConfig{Host: "node.example", User: "root", Password: "test"}, recorded); err == nil {
+		t.Fatal("inconsistent pinned key fields were accepted")
 	}
 }

@@ -24,7 +24,7 @@ func TestRenderMaintenanceProxyConfigUsesRouteManifest(t *testing.T) {
 			Domain:       "example.com",
 			RedirectFrom: []string{"www.example.com"},
 		},
-		"demo_web_maintenance",
+		runtimeid.ContainerAlias("demo", "production", "web-maintenance", 1),
 	)
 	if err != nil {
 		t.Fatalf("renderMaintenanceProxyConfig returned error: %v", err)
@@ -47,8 +47,15 @@ func TestRenderMaintenanceProxyConfigUsesRouteManifest(t *testing.T) {
 	if !slices.Equal(route.Domains, []string{"example.com", "www.example.com"}) {
 		t.Fatalf("domains = %#v, want example.com/www.example.com", route.Domains)
 	}
-	if !slices.Equal(route.Upstreams, []string{"http://demo_web_maintenance:80"}) {
+	wantUpstream := "http://" + runtimeid.ContainerAlias("demo", "production", "web-maintenance", 1) + ":80"
+	if !slices.Equal(route.Upstreams, []string{wantUpstream}) {
 		t.Fatalf("upstreams = %#v, want maintenance upstream", route.Upstreams)
+	}
+	if manifest.Version != 2 || len(route.Destinations) != 1 || route.Destinations[0].URL != wantUpstream {
+		t.Fatalf("maintenance route lacks v2 destination proof: %#v", manifest)
+	}
+	if _, err := takod.ParseProxyRouteManifest(string(data)); err != nil {
+		t.Fatalf("maintenance route manifest does not validate: %v", err)
 	}
 	if route.Priority != 100 {
 		t.Fatalf("priority = %d, want 100", route.Priority)

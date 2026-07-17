@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/git"
 	"github.com/redentordev/tako-cli/pkg/health"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -23,6 +25,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
 // StateAutoSyncFunc refreshes local deployment state from the remote mesh
@@ -52,17 +55,21 @@ type DeploySession struct {
 	dirtyStatus string
 	buildTag    string
 
-	allServices  map[string]config.ServiceConfig
-	services     map[string]config.ServiceConfig
-	serverNames  []string
-	servers      map[string]config.ServerConfig
-	actualState  map[string]*reconcile.ActualService
-	actualByNode map[string]map[string]*reconcile.ActualService
+	allServices             map[string]config.ServiceConfig
+	services                map[string]config.ServiceConfig
+	serverNames             []string
+	mutationServerNames     []string
+	connectivityServerNames []string
+	servers                 map[string]config.ServerConfig
+	actualState             map[string]*reconcile.ActualService
+	actualByNode            map[string]map[string]*reconcile.ActualService
+	priorDesired            *takodstate.DesiredRevision
 
 	archiveDir    string
 	stateLock     *localstate.StateLock
 	lockInfo      *localstate.LockInfo
 	sshPool       *ssh.Pool
+	runtime       *nodeclient.Factory
 	leases        *RemoteLeaseSet
 	deployer      *deployer.Deployer
 	stateManager  *remotestate.StateManager
@@ -94,6 +101,9 @@ func (s *DeploySession) Close() {
 	s.closed = true
 	if s.leases != nil {
 		s.leases.Release()
+	}
+	if s.runtime != nil {
+		s.runtime.CloseIdleConnections()
 	}
 	if s.sshPool != nil {
 		s.sshPool.CloseAll()
@@ -249,7 +259,11 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		return nil, fmt.Errorf("failed to get environment servers: %w", err)
 	}
 	servers := make(map[string]config.ServerConfig, len(envServerNames))
-	serverNames := append([]string(nil), envServerNames...)
+	connectivityServerNames := append([]string(nil), envServerNames...)
+	serverNames, err := config.ResolveSchedulableEnvironmentTargets(cfg.Servers, connectivityServerNames, session.envName)
+	if err != nil {
+		return nil, err
+	}
 	for _, serverName := range serverNames {
 		server, exists := cfg.Servers[serverName]
 		if !exists {
@@ -258,6 +272,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		servers[serverName] = server
 	}
 	session.serverNames = serverNames
+	session.connectivityServerNames = connectivityServerNames
 	session.servers = servers
 
 	// Determine which services to deploy.
@@ -295,32 +310,49 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		return nil, err
 	}
 
-	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, session.sshPool, cfg, session.envName, serverNames, "deploy")
+	sourceServerName, err := PreferredRuntimeServer(cfg, serverNames)
 	if err != nil {
 		return nil, err
 	}
-	session.leases = leaseSet
-	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
-	defer cancelLeaseContext()
-	ctx = leaseCtx
-	leaseSet.SetWarnFunc(func(message string) {
-		e.debug(events.TypeWarning, events.PhaseDeploy, message)
-	})
-	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired remote deploy leases: %s\n", leaseSet.Summary()))
-
-	sourceServerName := serverNames[0]
 	session.sourceServer = servers[sourceServerName]
 
-	// Use one reachable target as the build/source node; runtime state is
-	// still persisted and reconciled across the selected mesh.
-	sourceClient, err := session.sshPool.GetOrCreateWithAuth(session.sourceServer.Host, session.sourceServer.Port, session.sourceServer.User, session.sourceServer.SSHKey, session.sourceServer.Password)
+	// Use one reachable target as the build/source node through the structured
+	// runtime transport. Enrolled node 1 can therefore deploy without an SSH
+	// round trip or shell while legacy configurations remain SSH-backed.
+	runtimeFactory, err := nodeclient.NewFactory(cfg, session.sshPool, TakodSocketFromConfig(cfg))
 	if err != nil {
-		return nil, &ConnectivityError{Server: sourceServerName, Err: fmt.Errorf("failed to connect to server %s: %w", sourceServerName, err)}
+		return nil, err
 	}
-	session.stateManager = remotestate.NewStateManagerWithSocket(sourceClient, cfg.Project.Name, session.envName, session.sourceServer.Host, TakodSocketFromConfig(cfg))
+	session.runtime = runtimeFactory
+	sourceRuntime, sourceDecision, err := runtimeFactory.Client(ctx, sourceServerName)
+	if err != nil {
+		return nil, &ConnectivityError{Server: sourceServerName, Err: fmt.Errorf("failed to connect to runtime on server %s: %w", sourceServerName, err)}
+	}
+	stateRuntime, stateHost := any(sourceRuntime), session.sourceServer.Host
+	if controllerName, enrolled, authorityErr := controllerAuthorityServer(cfg, serverNames); authorityErr != nil {
+		return nil, authorityErr
+	} else if enrolled {
+		controllerRuntime, _, clientErr := runtimeFactory.Client(ctx, controllerName)
+		if clientErr != nil {
+			return nil, &ConnectivityError{Server: controllerName, Err: fmt.Errorf("connect to authoritative state controller: %w", clientErr)}
+		}
+		stateRuntime = controllerRuntime
+		stateHost = cfg.Servers[controllerName].Host
+	}
+	session.stateManager = remotestate.NewStateManagerWithSocket(stateRuntime, cfg.Project.Name, session.envName, stateHost, TakodSocketFromConfig(cfg))
 
 	// Create deployer with pool for takod support.
-	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, session.envName, session.sshPool, req.Verbose)
+	deploy := deployer.NewDeployerWithPool(nil, cfg, session.envName, session.sshPool, req.Verbose)
+	priorDesired, priorAssignments, err := LoadPriorPlacementState(stateRuntime, cfg, session.envName)
+	if err != nil {
+		return nil, err
+	}
+	session.priorDesired = priorDesired
+	if err := ValidatePriorDesiredServices(priorDesired, allServices); err != nil {
+		return nil, err
+	}
+	deploy.SetPriorAssignments(priorAssignments)
+	deploy.SetRuntimeFactory(runtimeFactory)
 	deploy.SetCLIVersion(e.cliVersion)
 	deploy.SetSkipBuild(req.SkipBuild)
 	if output := e.buildOutputWriter(); output != nil {
@@ -347,21 +379,58 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 	session.services = services
 	session.allServices = allServices
-	deploy.SetEventSink(e.stream)
-	if err := deploy.SetTargetServers(serverNames); err != nil {
+	if err := deploy.ResolveAllAssignments(allServices); err != nil {
 		return nil, err
 	}
+	deploy.SetEventSink(e.stream)
 	session.deployer = deploy
+	mutationServerNames := DeployMutationTargets(cfg, allServices, deploy.ResolvedAssignments())
+	mutationServerNames = AddPriorDesiredMutationTargets(cfg, mutationServerNames, priorDesired)
+	if len(mutationServerNames) == 0 {
+		mutationServerNames = []string{sourceServerName}
+	}
+	environmentTarget := make(map[string]struct{}, len(serverNames))
+	for _, name := range serverNames {
+		environmentTarget[name] = struct{}{}
+	}
+	setupTargets := make([]string, 0, len(mutationServerNames))
+	for _, name := range mutationServerNames {
+		if _, ok := environmentTarget[name]; ok {
+			setupTargets = append(setupTargets, name)
+		}
+	}
+	if len(setupTargets) == 0 {
+		setupTargets = []string{sourceServerName}
+	}
+	if err := deploy.SetTargetServers(setupTargets); err != nil {
+		return nil, err
+	}
+	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, session.sshPool, cfg, session.envName, mutationServerNames, "deploy")
+	if err != nil {
+		return nil, err
+	}
+	session.leases = leaseSet
+	session.mutationServerNames = mutationServerNames
+	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
+	leaseSet.SetWarnFunc(func(message string) {
+		e.debug(events.TypeWarning, events.PhaseDeploy, message)
+	})
+	deploy.SetBaseContext(ctx)
+	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired remote deploy authority: %s\n", leaseSet.Summary()))
 
-	if err := deploy.SetupTakodRuntime(); err != nil {
-		return nil, fmt.Errorf("failed to setup takod runtime: %w", err)
+	if err := preflightAndSetupTakodRuntime(deploy, allServices); err != nil {
+		return nil, err
 	}
 
 	// Auto-sync local state from remote when available (best-effort).
-	if e.stateAutoSync != nil {
+	if e.stateAutoSync != nil && sourceDecision.Transport != nodeclient.TransportLocal {
 		if err := e.stateAutoSync(session.sshPool, cfg, session.envName); err != nil {
 			e.debug(events.TypeWarning, events.PhasePlan, fmt.Sprintf("Warning: auto-sync failed: %v\n", err))
 		}
+	} else if e.stateAutoSync != nil {
+		e.debug(events.TypeLogLine, events.PhasePlan, "→ Local runtime transport selected; remote state is read directly from the local worker ingress\n")
 	}
 
 	// Compare desired state (config) with actual state (running services).
@@ -373,14 +442,14 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		localStateMgr = nil // Continue without state management.
 	}
 	session.localStateMgr = localStateMgr
-	e.warnRetiredDeploymentServers(localStateMgr, serverNames)
+	e.warnRetiredDeploymentServers(localStateMgr, connectivityServerNames)
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	// Gather actual state from running containers across the selected mesh nodes.
-	actualByNode, err := reconcile.GatherActualStateByServer(session.sshPool, cfg, session.envName, serverNames)
+	actualByNode, err := reconcile.GatherActualStateByServer(session.sshPool, cfg, session.envName, mutationServerNames)
 	if err != nil {
 		return nil, ActualStateError(err)
 	}
@@ -451,6 +520,12 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 
 	// Compute reconciliation plan.
 	plan := reconcile.ComputePlan(cfg.Project.Name, session.envName, planServices, planActualState)
+	if err := rejectPersistentConfigRemovals(plan); err != nil {
+		return nil, err
+	}
+	if _, err := removalServiceConfigs(plan); err != nil {
+		return nil, err
+	}
 	session.plan = plan
 
 	planDoc := newDeployPlanDocument(cfg.Project.Name, session.envName, plan, services)
@@ -545,6 +620,10 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	envName := s.envName
 	plan := s.plan
 	services := s.services
+	if err := rejectPersistentConfigRemovals(plan); err != nil {
+		return nil, err
+	}
+	desiredStateServices := s.allServices
 	actualState := s.actualState
 	serverNames := s.serverNames
 
@@ -560,6 +639,14 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	}
 
 	if plan.IsEmpty() && !deployplan.HasBuildServices(services) && !req.Force {
+		intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredStateServices, nil, actualState)
+		var baseline *takodstate.DesiredRevision
+		if req.Service != "" {
+			baseline = s.priorDesired
+		}
+		if err := PersistTakodDesiredIntentWithPlacementBaseline(s.sshPool, cfg, envName, serverNames, s.sourceInfo.StateSource, desiredStateServices, intentImageRefs, s.deployer.ResolvedAssignments(), nil, baseline, GitInfoFromCommit(s.sourceInfo.CommitInfo), "recorded stable placement before proxy reconciliation", req.Verbose); err != nil {
+			return nil, err
+		}
 		activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
 		if err := s.reconcileProxy(services, activeRevisions); err != nil {
 			return nil, fmt.Errorf("failed to reconcile proxy routes: %w", err)
@@ -583,6 +670,16 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		}
 	}
 	servicesToDeploy := deployplan.ServicesToDeployForPlan(plan, services, req.Force, req.Service != "")
+	if err := s.deployer.PreflightAssignmentMutations(servicesToDeploy); err != nil {
+		return nil, err
+	}
+	if err := s.deployer.PreflightAssignmentRemovals(removalServiceNames(plan)); err != nil {
+		return nil, err
+	}
+	pendingRemovals, err := removalServiceConfigs(plan)
+	if err != nil {
+		return nil, err
+	}
 	if skipped := deployplan.PersistentServicesSkippedByForce(services, servicesToDeploy, req.Force, req.Service != ""); len(skipped) > 0 {
 		e.info(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("\n-> Skipping persistent service(s) during broad --force: %s\n   Use --service <name> --force when you intentionally need to recreate one.\n", strings.Join(skipped, ", ")))
 	}
@@ -677,6 +774,26 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		}
 		imageRefs[name] = resolved
 		allImageRefs[name] = resolved
+	}
+	intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredStateServices, nil, actualState)
+	for name, service := range pendingRemovals {
+		if actual := actualState[name]; actual != nil && actual.Image != "" {
+			intentImageRefs[name] = actual.Image
+		} else if service.Image != "" {
+			intentImageRefs[name] = service.Image
+		}
+	}
+	for name, imageRef := range allImageRefs {
+		if _, desired := desiredStateServices[name]; desired && (req.Service == "" || name == req.Service) {
+			intentImageRefs[name] = imageRef
+		}
+	}
+	var baseline *takodstate.DesiredRevision
+	if req.Service != "" {
+		baseline = s.priorDesired
+	}
+	if err := PersistTakodDesiredIntentWithPlacementBaseline(s.sshPool, cfg, envName, serverNames, s.sourceInfo.StateSource, desiredStateServices, intentImageRefs, s.deployer.ResolvedAssignments(), pendingRemovals, baseline, GitInfoFromCommit(s.sourceInfo.CommitInfo), "recorded stable placement before deploy mutation", req.Verbose); err != nil {
+		return nil, err
 	}
 
 	// Resolve service deployment order based on dependencies.
@@ -887,18 +1004,18 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			return nil, RemoteHistoryError(err)
 		}
 
-		finalNodeActualState, err := reconcile.GatherActualStateByServer(s.sshPool, cfg, envName, serverNames)
+		finalNodeActualState, err := reconcile.GatherActualStateByServer(s.sshPool, cfg, envName, s.mutationServerNames)
 		if err != nil {
 			return nil, fmt.Errorf("deployment succeeded but failed to gather final actual state: %w", err)
 		}
 		finalActualState := reconcile.AggregateActualStateByServer(finalNodeActualState)
-		runtimeServices := services
-		runtimeImageRefs := imageRefs
+		runtimeServices := desiredStateServices
+		runtimeImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, runtimeServices, imageRefs, finalActualState)
+		var baseline *takodstate.DesiredRevision
 		if req.Service != "" {
-			runtimeServices = CloneServiceMap(s.allServices)
-			runtimeImageRefs = deployplan.MergeRuntimeImageRefs(cfg, envName, runtimeServices, imageRefs, finalActualState)
+			baseline = s.priorDesired
 		}
-		if err := PersistTakodRuntimeState(
+		if err := PersistTakodRuntimeStateWithPlacementBaseline(
 			s.sshPool,
 			cfg,
 			envName,
@@ -908,6 +1025,8 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			runtimeImageRefs,
 			finalActualState,
 			finalNodeActualState,
+			s.deployer.ResolvedAssignments(),
+			baseline,
 			GitInfoFromCommit(s.sourceInfo.CommitInfo),
 			"deploy.succeeded",
 			fmt.Sprintf("deployed %d service(s)", len(servicesToDeploy)),
@@ -924,7 +1043,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		e.debug(events.TypeStatePersisted, events.PhaseState, "")
 
 		// Replicate state to the rest of the mesh.
-		if len(s.servers) > 1 {
+		if len(s.servers) > 1 && ShouldReplicateDeploymentHistory(cfg) {
 			replicator := remotestate.NewStateReplicator(s.sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
 			history, err := s.stateManager.LoadHistoryContext(ctx)
 			if err != nil {
@@ -962,7 +1081,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	if deploymentFailed {
 		recordCtx, recordCancel := failedDeploymentRecordContext(ctx)
 		recordErr := RecordFailedDeploymentStateContext(recordCtx, s.stateManager, localSaverOrNil(s.localStateMgr), deployment, cfg, envName, serverNames, s.sourceInfo.CommitInfo, startTime, deploymentError)
-		if recordErr == nil && len(s.servers) > 1 {
+		if recordErr == nil && len(s.servers) > 1 && ShouldReplicateDeploymentHistory(cfg) {
 			replicator := remotestate.NewStateReplicator(s.sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
 			history, err := s.stateManager.LoadHistoryContext(recordCtx)
 			if err != nil {
@@ -1017,8 +1136,13 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	e.debug(events.TypeLogLine, events.PhaseCleanup, "\n→ Running automatic cleanup...\n")
 	imageRepositories := CleanupImageRepositories(cfg, envName, services)
 	externalVolumes := ExternalVolumeNamesForEnvironment(cfg, envName)
-	for serverName, server := range s.servers {
-		client, err := s.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	cleanupFactory, factoryErr := nodeclient.NewFactory(cfg, s.sshPool, TakodSocketFromConfig(cfg))
+	for serverName := range s.servers {
+		if factoryErr != nil {
+			e.debug(events.TypeWarning, events.PhaseCleanup, fmt.Sprintf("  Warning: failed to initialize runtime cleanup: %v\n", factoryErr))
+			break
+		}
+		client, _, err := cleanupFactory.Client(ctx, serverName)
 		if err == nil {
 			response, cleanupErr := CleanupViaTakod(client, cfg, takod.CleanupRequest{
 				Project:                cfg.Project.Name,
@@ -1188,6 +1312,49 @@ func (e *Engine) ApplyRemovals(remover ServiceRemover, plan *reconcile.Reconcili
 			Service: change.ServiceName,
 			Message: fmt.Sprintf("  ✓ Service %s removed\n", change.ServiceName),
 		})
+	}
+	return nil
+}
+
+func removalServiceNames(plan *reconcile.ReconciliationPlan) []string {
+	if plan == nil {
+		return nil
+	}
+	var names []string
+	for _, change := range plan.Changes {
+		if change.Type == reconcile.ChangeRemove {
+			names = append(names, change.ServiceName)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func removalServiceConfigs(plan *reconcile.ReconciliationPlan) (map[string]config.ServiceConfig, error) {
+	pending := make(map[string]config.ServiceConfig)
+	if plan == nil {
+		return pending, nil
+	}
+	for _, change := range plan.Changes {
+		if change.Type != reconcile.ChangeRemove {
+			continue
+		}
+		if change.OldConfig == nil {
+			return nil, invalidRequestf("service %s cannot be removed because its prior configuration is unavailable; restore or explicitly adopt the workload before retrying", change.ServiceName)
+		}
+		pending[change.ServiceName] = *change.OldConfig
+	}
+	return pending, nil
+}
+
+func rejectPersistentConfigRemovals(plan *reconcile.ReconciliationPlan) error {
+	if plan == nil {
+		return nil
+	}
+	for _, change := range plan.Changes {
+		if change.Type == reconcile.ChangeNone && change.NewConfig == nil && change.OldConfig != nil && change.OldConfig.Persistent {
+			return invalidRequestf("persistent service %s is still running but was removed from config; restore it to tako.yaml so its placement remains authoritative, then use an explicit persistent-workload removal workflow", change.ServiceName)
+		}
 	}
 	return nil
 }

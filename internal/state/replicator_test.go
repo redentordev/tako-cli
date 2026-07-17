@@ -17,10 +17,11 @@ func TestStateReplicatorTargetsAllEnvironmentMeshNodes(t *testing.T) {
 		Servers: map[string]config.ServerConfig{
 			"node-a": {Host: "10.0.0.1"},
 			"node-b": {Host: "10.0.0.2"},
+			"ready":  {Host: "10.0.0.3", Lifecycle: "ready"},
 		},
 		Environments: map[string]config.EnvironmentConfig{
 			"production": {
-				Servers: []string{"node-a", "node-b"},
+				Servers: []string{"node-a", "node-b", "ready"},
 			},
 		},
 	}
@@ -36,6 +37,9 @@ func TestStateReplicatorTargetsAllEnvironmentMeshNodes(t *testing.T) {
 	}
 	if _, ok := got["node-b"]; !ok {
 		t.Fatal("node-b should be included")
+	}
+	if _, ok := got["ready"]; ok {
+		t.Fatal("ready connectivity-only node received state replication mutation")
 	}
 }
 

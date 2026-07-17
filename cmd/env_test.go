@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,9 +19,59 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/crypto"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
+
+func TestUploadEnvBundleUsesAuthenticatedLocalRuntimeWithoutSSH(t *testing.T) {
+	if os.Geteuid() <= 0 {
+		t.Skip("test requires a non-root peer UID")
+	}
+	dir, err := os.MkdirTemp("/tmp", "tako-env-local-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "worker.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation, err := nodeidentity.New("", "", "node-a", []string{nodeidentity.RoleWorker}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := false
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/status":
+			_ = json.NewEncoder(w).Encode(takodclient.AgentStatus{Runtime: "takod", Capabilities: []string{nodeidentity.Capability}, Identity: &installation.Identity})
+		case "/v1/env-bundle":
+			written = r.Method == http.MethodPut
+			_ = json.NewEncoder(w).Encode(takod.EnvBundleResponse{Found: true})
+		default:
+			http.NotFound(w, r)
+		}
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
+	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo"}, Servers: map[string]config.ServerConfig{"node-a": {
+		Transport: "local", ClusterID: installation.ClusterID, NodeID: installation.NodeID, WorkerUID: os.Geteuid(),
+	}}}
+	factory, err := nodeclient.NewFactoryWithLocalSocket(cfg, nil, takodclient.DefaultSocket, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := uploadEnvBundleToServer(factory, cfg, "node-a", config.ServerConfig{}, takod.EnvBundleRequest{Project: "demo", Environment: "production", Content: "encrypted"}); err != nil {
+		t.Fatal(err)
+	}
+	if !written {
+		t.Fatal("environment bundle did not use local structured runtime")
+	}
+}
 
 func TestPassphraseFromEnv(t *testing.T) {
 	t.Setenv(envPassphraseVar, "correct horse battery staple")
@@ -442,9 +495,9 @@ environments:
 	originalUpload := uploadEnvBundleToServerFunc
 	var uploaded []string
 	var uploadedMu sync.Mutex
-	uploadEnvBundleToServerFunc = func(pool *ssh.Pool, _ *config.Config, serverName string, _ config.ServerConfig, request takod.EnvBundleRequest) error {
-		if pool == nil {
-			return fmt.Errorf("missing ssh pool")
+	uploadEnvBundleToServerFunc = func(factory *nodeclient.Factory, _ *config.Config, serverName string, _ config.ServerConfig, request takod.EnvBundleRequest) error {
+		if factory == nil {
+			return fmt.Errorf("missing runtime factory")
 		}
 		if !leaseAcquired {
 			return fmt.Errorf("upload started before lease acquisition")
@@ -495,7 +548,7 @@ func TestDownloadEnvBundleFromMeshUsesFirstFoundBundle(t *testing.T) {
 	calls := []string{}
 	var callsMu sync.Mutex
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *nodeclient.Factory, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		callsMu.Lock()
 		calls = append(calls, serverName)
 		callsMu.Unlock()
@@ -543,7 +596,7 @@ func TestDownloadEnvBundleFromMeshUsesNewestBundle(t *testing.T) {
 	newer := older.Add(time.Hour)
 
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *nodeclient.Factory, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		switch serverName {
 		case "node-a":
 			return &takod.EnvBundleResponse{Found: false}, nil
@@ -585,7 +638,7 @@ func TestSelectFreshestEnvBundleCandidateFallsBackToServerOrderForEqualTimestamp
 func TestDownloadEnvBundleFromMeshRejectsMissingUpdatedAtMetadata(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, _ string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *nodeclient.Factory, _ *config.Config, _ string, _ string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		return &takod.EnvBundleResponse{Found: true, Content: "bundle"}, nil
 	}
 	t.Cleanup(func() {
@@ -604,7 +657,7 @@ func TestDownloadEnvBundleFromMeshRejectsMissingUpdatedAtMetadata(t *testing.T) 
 func TestDownloadEnvBundleFromMeshReturnsNotFoundWhenReachableNodesAreEmpty(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, _ string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *nodeclient.Factory, _ *config.Config, _ string, _ string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		return &takod.EnvBundleResponse{Found: false}, nil
 	}
 	t.Cleanup(func() {
@@ -626,7 +679,7 @@ func TestDownloadEnvBundleFromMeshReturnsNotFoundWhenReachableNodesAreEmpty(t *t
 func TestDownloadEnvBundleFromMeshErrorsWhenAllNodesFail(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *nodeclient.Factory, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		return nil, fmt.Errorf("%s down", serverName)
 	}
 	t.Cleanup(func() {
@@ -646,7 +699,7 @@ func TestDownloadEnvBundleFromMeshRunsConcurrently(t *testing.T) {
 	release := make(chan struct{})
 
 	original := downloadEnvBundleFromServerFunc
-	downloadEnvBundleFromServerFunc = func(_ *ssh.Pool, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	downloadEnvBundleFromServerFunc = func(_ *nodeclient.Factory, _ *config.Config, _ string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
 		started <- serverName
 		<-release
 		if serverName == "node-b" {
@@ -691,7 +744,7 @@ func TestUploadEnvBundleToMeshRunsConcurrently(t *testing.T) {
 	release := make(chan struct{})
 
 	original := uploadEnvBundleToServerFunc
-	uploadEnvBundleToServerFunc = func(_ *ssh.Pool, _ *config.Config, serverName string, _ config.ServerConfig, _ takod.EnvBundleRequest) error {
+	uploadEnvBundleToServerFunc = func(_ *nodeclient.Factory, _ *config.Config, serverName string, _ config.ServerConfig, _ takod.EnvBundleRequest) error {
 		started <- serverName
 		<-release
 		return nil
@@ -723,7 +776,7 @@ func TestUploadEnvBundleToMeshReportsErrorsInServerOrder(t *testing.T) {
 	cfg := envBundleMeshTestConfig()
 	serverNames := []string{"node-a", "node-b", "node-c"}
 	original := uploadEnvBundleToServerFunc
-	uploadEnvBundleToServerFunc = func(_ *ssh.Pool, _ *config.Config, serverName string, _ config.ServerConfig, _ takod.EnvBundleRequest) error {
+	uploadEnvBundleToServerFunc = func(_ *nodeclient.Factory, _ *config.Config, serverName string, _ config.ServerConfig, _ takod.EnvBundleRequest) error {
 		if serverName == "node-b" {
 			return fmt.Errorf("down")
 		}

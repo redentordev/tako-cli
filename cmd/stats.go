@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
@@ -73,27 +75,32 @@ func runStats(cmd *cobra.Command, args []string) error {
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	factory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return err
+	}
+	defer factory.CloseIdleConnections()
 
 	if statsLive {
 		if machineOutputEnabled() {
 			return &engine.InvalidRequestError{Err: fmt.Errorf("--live is interactive-only; use --follow --events ndjson to stream stats in machine output modes")}
 		}
-		return showLiveStats(cfg, servers, sshPool, envName)
+		return showLiveStats(cfg, servers, factory, envName)
 	}
 
 	if statsFollow {
 		if eventsFormatFlag != eventsFormatNDJSON {
 			return &engine.InvalidRequestError{Err: fmt.Errorf("--follow streams stats.sample events and requires --events ndjson")}
 		}
-		return followStats(cmd, cfg, servers, sshPool, envName)
+		return followStats(cmd, cfg, servers, factory, envName)
 	}
 
-	return showStatsOnce(cfg, servers, sshPool, envName)
+	return showStatsOnce(cfg, servers, factory, envName)
 }
 
 // followStats streams one stats.sample event per node per interval until the
 // command context is cancelled (Ctrl+C / SIGTERM), mirroring `logs --follow`.
-func followStats(cmd *cobra.Command, cfg *config.Config, servers []string, sshPool *ssh.Pool, envName string) error {
+func followStats(cmd *cobra.Command, cfg *config.Config, servers []string, factory *nodeclient.Factory, envName string) error {
 	interval := statsInterval
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -102,7 +109,7 @@ func followStats(cmd *cobra.Command, cfg *config.Config, servers []string, sshPo
 	defer ticker.Stop()
 
 	for {
-		for _, nodeResult := range collectStatsOnce(cfg, servers, sshPool, envName) {
+		for _, nodeResult := range collectStatsOnce(cfg, servers, factory, envName) {
 			sample := statsNodeSampleDocument(nodeResult)
 			data := map[string]any{
 				"server":     sample.Server,
@@ -140,7 +147,7 @@ func statsNodeSampleDocument(nodeResult statsNodeResult) engine.StatsNodeSample 
 	return sample
 }
 
-func showStatsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, envName string) error {
+func showStatsOnce(cfg *config.Config, servers []string, factory *nodeclient.Factory, envName string) error {
 	// Machine modes reserve stdout for parseable output.
 	var out io.Writer = os.Stdout
 	if machineOutputEnabled() {
@@ -160,7 +167,7 @@ func showStatsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, envN
 		Nodes:       []engine.StatsNodeSample{},
 	}
 	failures := 0
-	for _, nodeResult := range collectStatsOnce(cfg, servers, sshPool, envName) {
+	for _, nodeResult := range collectStatsOnce(cfg, servers, factory, envName) {
 		if nodeResult.connectErr != nil {
 			fmt.Fprintf(out, "❌ %s (%s): Failed to connect - %v\n\n", nodeResult.serverName, nodeResult.host, nodeResult.connectErr)
 			failures++
@@ -199,9 +206,9 @@ type statsNodeResult struct {
 
 type statsReadFunc func(serverName string, server config.ServerConfig) (*takod.StatsResponse, error)
 
-func collectStatsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, envName string) []statsNodeResult {
+func collectStatsOnce(cfg *config.Config, servers []string, factory *nodeclient.Factory, envName string) []statsNodeResult {
 	return collectStatsOnceWith(cfg.Servers, servers, func(serverName string, server config.ServerConfig) (*takod.StatsResponse, error) {
-		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, _, err := factory.Client(context.Background(), serverName)
 		if err != nil {
 			return nil, fmt.Errorf("connect: %w", err)
 		}
@@ -261,7 +268,7 @@ func collectStatsOnceWith(configuredServers map[string]config.ServerConfig, serv
 	return results
 }
 
-func showLiveStats(cfg *config.Config, servers []string, sshPool *ssh.Pool, envName string) error {
+func showLiveStats(cfg *config.Config, servers []string, factory *nodeclient.Factory, envName string) error {
 	fmt.Printf("=== Live Container Stats (Press Ctrl+C to exit) ===\n\n")
 
 	ticker := time.NewTicker(2 * time.Second)
@@ -279,7 +286,7 @@ func showLiveStats(cfg *config.Config, servers []string, sshPool *ssh.Pool, envN
 				return err
 			}
 
-			client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+			client, _, err := factory.Client(context.Background(), serverName)
 			if err != nil {
 				fmt.Printf("❌ %s: Connection failed\n\n", serverName)
 				continue
@@ -298,11 +305,11 @@ func showLiveStats(cfg *config.Config, servers []string, sshPool *ssh.Pool, envN
 	}
 }
 
-func readStatsViaTakod(client *ssh.Client, cfg *config.Config, envName string) (*takod.StatsResponse, error) {
+func readStatsViaTakod(client any, cfg *config.Config, envName string) (*takod.StatsResponse, error) {
 	return readStatsViaTakodWithOptions(client, cfg, envName, statsService, statsAll)
 }
 
-func readStatsViaTakodWithOptions(client *ssh.Client, cfg *config.Config, envName string, service string, all bool) (*takod.StatsResponse, error) {
+func readStatsViaTakodWithOptions(client any, cfg *config.Config, envName string, service string, all bool) (*takod.StatsResponse, error) {
 	endpoint := takodclient.StatsEndpoint(cfg.Project.Name, envName, service, all)
 	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "GET", endpoint, nil)
 	if err != nil {

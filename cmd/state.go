@@ -18,6 +18,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/mesh"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -316,6 +317,11 @@ func collectStateDeploymentHistoriesWithPool(pool *ssh.Pool, cfg *config.Config,
 	if err != nil {
 		return nil, err
 	}
+	factory, closeRuntime, err := newStateRuntimeFactory(pool, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer closeRuntime()
 
 	results := make([]stateHistoryReadResult, len(serverNames))
 	resultCh := make(chan stateHistoryReadResult, len(serverNames))
@@ -333,14 +339,12 @@ func collectStateDeploymentHistoriesWithPool(pool *ssh.Pool, cfg *config.Config,
 				serverName: serverName,
 				host:       server.Host,
 			}
-			client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
+			client, _, err := factory.Client(context.Background(), serverName)
 			if err != nil {
 				result.err = err
 				resultCh <- result
 				return
 			}
-			defer cleanup()
-
 			manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg))
 			result.readAttempted = true
 			result.history, result.err = manager.LoadHistory()
@@ -456,6 +460,28 @@ func connectAndVerifyStateServerWithPool(pool *ssh.Pool, serverName string, serv
 	return client, cleanup, nil
 }
 
+func newStateRuntimeFactory(pool *ssh.Pool, cfg *config.Config) (*nodeclient.Factory, func(), error) {
+	ownedPool := false
+	if pool == nil {
+		pool = ssh.NewPool()
+		ownedPool = true
+	}
+	factory, err := nodeclient.NewFactory(cfg, pool, takodSocketFromConfig(cfg))
+	if err != nil {
+		if ownedPool {
+			pool.CloseAll()
+		}
+		return nil, func() {}, err
+	}
+	cleanup := func() {
+		factory.CloseIdleConnections()
+		if ownedPool {
+			pool.CloseAll()
+		}
+	}
+	return factory, cleanup, nil
+}
+
 func statePullServerNames(cfg *config.Config, envName string, requestedServer string) ([]string, error) {
 	envServers, err := cfg.GetEnvironmentServers(envName)
 	if err != nil {
@@ -463,6 +489,13 @@ func statePullServerNames(cfg *config.Config, envName string, requestedServer st
 	}
 	if len(envServers) == 0 {
 		return nil, fmt.Errorf("no servers configured for environment %s", envName)
+	}
+	if requestedServer == "" {
+		if authority, authorityErr := engine.AuthoritativeStateServer(cfg, envServers); authorityErr == nil {
+			if server := cfg.Servers[authority]; server.ClusterID != "" && server.NodeID != "" {
+				return []string{authority}, nil
+			}
+		}
 	}
 	if requestedServer == "" {
 		return envServers, nil
@@ -1293,7 +1326,7 @@ type takodRemoteStatus struct {
 	Now       time.Time `json:"now"`
 }
 
-func printTakodAgentStatus(client *ssh.Client, cfg *config.Config) {
+func printTakodAgentStatus(client any, cfg *config.Config) {
 	output, err := takodclient.RequestJSON(
 		client,
 		takodSocketFromConfig(cfg),
@@ -1316,7 +1349,7 @@ func printTakodAgentStatus(client *ssh.Client, cfg *config.Config) {
 	fmt.Printf("  Started: %s (%s ago)\n", status.StartedAt.Format(time.RFC3339), formatStateDuration(status.Now.Sub(status.StartedAt)))
 }
 
-func printMeshRuntimeStatus(client *ssh.Client, cfg *config.Config) {
+func printMeshRuntimeStatus(client any, cfg *config.Config) {
 	if cfg.Mesh == nil {
 		return
 	}
@@ -1383,6 +1416,11 @@ func collectStateStatusNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 	if err != nil {
 		return nil, err
 	}
+	factory, closeRuntime, err := newStateRuntimeFactory(pool, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer closeRuntime()
 	envServerNames, err := statePullServerNames(cfg, envName, "")
 	if err != nil {
 		return nil, err
@@ -1407,7 +1445,7 @@ func collectStateStatusNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 				node  stateStatusNode
 			}{
 				index: index,
-				node:  collectStateStatusNode(pool, cfg, envName, serverName, server, envServerNames),
+				node:  collectStateStatusNode(factory, cfg, envName, serverName, server, envServerNames),
 			}
 		}(index, serverName, server)
 	}
@@ -1419,19 +1457,18 @@ func collectStateStatusNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 	return nodes, nil
 }
 
-func collectStateStatusNode(pool *ssh.Pool, cfg *config.Config, envName string, serverName string, server config.ServerConfig, envServerNames []string) stateStatusNode {
+func collectStateStatusNode(factory *nodeclient.Factory, cfg *config.Config, envName string, serverName string, server config.ServerConfig, envServerNames []string) stateStatusNode {
 	node := stateStatusNode{
 		name:     serverName,
 		host:     server.Host,
 		envNodes: append([]string(nil), envServerNames...),
 	}
 
-	client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
+	client, _, err := factory.Client(context.Background(), serverName)
 	if err != nil {
 		node.connectErr = err
 		return node
 	}
-	defer cleanup()
 
 	manager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, takodSocketFromConfig(cfg)).
 		WithRequestTimeout(stateStatusRequestTimeout)
@@ -1784,7 +1821,7 @@ func printBestKnownState(history stateHistoryCandidate, hasHistory bool, desired
 	}
 }
 
-func readTakodAgentStatus(client *ssh.Client, cfg *config.Config) (*takodRemoteStatus, error) {
+func readTakodAgentStatus(client any, cfg *config.Config) (*takodRemoteStatus, error) {
 	output, err := takodclient.RequestJSONWithTimeout(
 		client,
 		takodSocketFromConfig(cfg),
@@ -1807,7 +1844,7 @@ func readTakodAgentStatus(client *ssh.Client, cfg *config.Config) (*takodRemoteS
 	return &status, nil
 }
 
-func readMeshRuntimeStatus(client *ssh.Client, cfg *config.Config) (*mesh.Status, error) {
+func readMeshRuntimeStatus(client any, cfg *config.Config) (*mesh.Status, error) {
 	if cfg.Mesh == nil {
 		return nil, nil
 	}
@@ -1954,7 +1991,7 @@ func sortedServiceNames[T any](services map[string]T) []string {
 
 type stateRepairNode struct {
 	name    string
-	client  *ssh.Client
+	client  any
 	cleanup func()
 	manager stateRepairStateManager
 	runtime stateRepairRuntimeManager
@@ -2038,6 +2075,18 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 	if err != nil {
 		return nil, err
 	}
+	factory, closeRuntime, err := newStateRuntimeFactory(pool, cfg)
+	if err != nil {
+		return nil, err
+	}
+	var cleanupOnce sync.Once
+	sharedCleanup := func() { cleanupOnce.Do(closeRuntime) }
+	keepRuntime := false
+	defer func() {
+		if !keepRuntime {
+			sharedCleanup()
+		}
+	}()
 
 	repair := &stateRepairInventory{
 		nodes:      make([]stateRepairNode, 0, len(serverNames)),
@@ -2058,7 +2107,7 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 		if !quiet {
 			fmt.Printf("Checking %s (%s)...\n", serverName, server.Host)
 		}
-		client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
+		client, _, err := factory.Client(context.Background(), serverName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: cannot connect to %s: %v\n", serverName, err)
 			continue
@@ -2069,7 +2118,7 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 		repair.nodes = append(repair.nodes, stateRepairNode{
 			name:    serverName,
 			client:  client,
-			cleanup: cleanup,
+			cleanup: sharedCleanup,
 			manager: manager,
 			runtime: runtime,
 		})
@@ -2157,6 +2206,7 @@ func collectStateRepairNodesWithPool(pool *ssh.Pool, cfg *config.Config, envName
 		}
 	}
 
+	keepRuntime = len(repair.nodes) > 0
 	return repair, nil
 }
 
@@ -2164,8 +2214,8 @@ func closeStateRepairNodes(nodes []stateRepairNode) {
 	for _, node := range nodes {
 		if node.cleanup != nil {
 			node.cleanup()
-		} else if node.client != nil {
-			_ = node.client.Close()
+		} else if client, ok := node.client.(*ssh.Client); ok && client != nil {
+			_ = client.Close()
 		}
 	}
 }
@@ -3204,6 +3254,11 @@ func collectRunningActualNodeSnapshotsWithPool(pool *ssh.Pool, cfg *config.Confi
 	if err != nil {
 		return nil, err
 	}
+	factory, closeRuntime, err := newStateRuntimeFactory(pool, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer closeRuntime()
 
 	results := make([]runningActualNodeResult, len(serverNames))
 	resultCh := make(chan runningActualNodeResult, len(serverNames))
@@ -3222,14 +3277,12 @@ func collectRunningActualNodeSnapshotsWithPool(pool *ssh.Pool, cfg *config.Confi
 				host:       server.Host,
 			}
 
-			client, cleanup, err := connectAndVerifyStateServerWithPool(pool, serverName, server)
+			client, _, err := factory.Client(context.Background(), serverName)
 			if err != nil {
 				result.err = err
 				resultCh <- result
 				return
 			}
-			defer cleanup()
-
 			actual, err := actualStateViaTakod(client, cfg, envName)
 			if err != nil {
 				result.err = err

@@ -1332,8 +1332,23 @@ func TestTakodCommandHelper(t *testing.T) {
 		}
 		os.Exit(0)
 	case "ps":
+		if marker := os.Getenv("TAKO_FAKE_PROXY_RUNNING_MARKER"); marker != "" {
+			if _, err := os.Stat(marker); err == nil {
+				_, _ = os.Stdout.WriteString("tako-proxy\n")
+			}
+			os.Exit(0)
+		}
 		if output := os.Getenv("TAKO_FAKE_PS_OUTPUT"); output != "" {
 			_, _ = os.Stdout.WriteString(output)
+		}
+		os.Exit(0)
+	case "rm":
+		if output := os.Getenv("TAKO_FAKE_DOCKER_RM_ERROR"); output != "" {
+			_, _ = os.Stderr.WriteString(output)
+			os.Exit(1)
+		}
+		if marker := os.Getenv("TAKO_FAKE_PROXY_RUNNING_MARKER"); marker != "" {
+			_ = os.Remove(marker)
 		}
 		os.Exit(0)
 	case "network":

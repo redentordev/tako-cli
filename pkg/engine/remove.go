@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
@@ -123,6 +124,10 @@ func (e *Engine) PlanRemove(ctx context.Context, req RemoveRequest) (*RemoveSess
 	if err != nil {
 		return nil, err
 	}
+	serverNames, err = config.ResolveSchedulableMutationTargets(cfg.Servers, serverNames, envName, true)
+	if err != nil {
+		return nil, err
+	}
 	if len(serverNames) == 0 {
 		return nil, invalidRequestf("no servers configured for environment %s", envName)
 	}
@@ -226,6 +231,13 @@ func (s *RemoveSession) Apply(ctx context.Context) (*RemoveResult, error) {
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		result.Error = err.Error()
+		result.Duration = time.Since(startTime).Seconds()
+		return result, err
+	}
+	defer runtimeFactory.CloseIdleConnections()
 	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, sshPool, cfg, envName, s.serverNames, "remove")
 	if err != nil {
 		result.Error = err.Error()
@@ -243,8 +255,8 @@ func (s *RemoveSession) Apply(ctx context.Context) (*RemoveResult, error) {
 
 	e.info(events.TypeLogLine, events.PhaseCleanup, fmt.Sprintf("→ Reconciling cleanup through takod on %d node(s)...\n", len(s.serverNames)))
 	request := RemoveCleanupRequest(cfg, envName, s.services)
-	outcomes := collectCleanupNodeOutcomes(s.servers, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
-		return cleanupNodeViaTakod(ctx, cfg, sshPool, serverCfg, request)
+	outcomes := collectCleanupNodeOutcomes(s.servers, func(serverName string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
+		return cleanupNodeViaTakod(ctx, cfg, runtimeFactory, serverName, serverCfg, request)
 	})
 
 	var failures []string
@@ -412,8 +424,8 @@ func collectCleanupNodeOutcomes(servers map[string]config.ServerConfig, action f
 
 // cleanupNodeViaTakod connects to one node and runs the cleanup request
 // through takod.
-func cleanupNodeViaTakod(ctx context.Context, cfg *config.Config, pool *ssh.Pool, serverCfg config.ServerConfig, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
-	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
+func cleanupNodeViaTakod(ctx context.Context, cfg *config.Config, factory *nodeclient.Factory, serverName string, serverCfg config.ServerConfig, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
+	client, _, err := factory.Client(ctx, serverName)
 	if err != nil {
 		return nil, &ConnectivityError{Server: serverCfg.Host, Err: fmt.Errorf("failed to connect: %w", err)}
 	}

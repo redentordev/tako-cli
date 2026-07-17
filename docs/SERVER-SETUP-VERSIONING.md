@@ -61,12 +61,11 @@ takod deploy path, or for manually pre-building images referenced with
 proof.
 
 Released CLI builds download the matching Linux release asset for the server
-architecture and install it as `/usr/local/bin/tako`. The takod runtime is also
-refreshed during deploy, scale, and rollback when the node agent is missing or
-running a different CLI version. Development builds reuse an existing
-server-side binary when present; for local integration testing, set
-`TAKO_TAKOD_BINARY` to a Linux tako binary to upload that binary before the
-systemd service is restarted.
+architecture during explicit setup or node upgrade commands. Application
+commands such as deploy, scale, and rollback never install, restart, or upgrade
+node software; they fail with upgrade guidance when the agent contract is not
+compatible. Development node upgrades pass a Linux binary explicitly with
+`tako upgrade servers --takod-binary`.
 
 ## Upgrade Behavior
 
@@ -87,11 +86,34 @@ tako state status
 tako deploy --yes
 ```
 
-The command installs the matching release binary, restarts the `takod` systemd
-service, refreshes the setup manifest, preserves `installed_at` and component
-metadata, updates `last_upgrade`, and waits for `/v1/status` to report the
-expected CLI version. Development builds must pass `--takod-binary` with a
-Linux binary.
+For enrolled clusters the command targets the authoritative cluster inventory,
+independent of application environment server subsets. It preflights the
+stable N/N-1 lifecycle protocol range and controller-owned SSH pins,
+upgrades a deterministic worker canary, then the remaining workers, and the
+single controller last. A failed canary blocks later stages. Each node keeps a
+durable previous binary, atomically publishes the candidate, restarts and
+verifies `/v1/status`, and commits only after the target version and capability
+contract are reported. Verification failure automatically restores and
+restarts the previous binary. If the protected PaaS deployment worker is
+installed, its binary, systemd health, and protected ingress are verified as
+part of the same transaction. A boot recovery unit restores pending rollback
+evidence before either service starts after an interrupted host reboot. A
+renewable cluster lease on the authoritative controller rejects overlapping
+upgrade coordinators. Candidate transfer happens before a short renewable,
+token-bound node transaction lease is acquired. Under that lease, a fresh
+status probe captures immutable identity, membership generation, lifecycle,
+and roles; the verified candidate reopens the protected identity and inventory
+and checks that exact contract immediately before publication. An expired node
+lease permits no-reboot recovery of pending rollback evidence. Boot recovery
+clears only the node-local lease; the external controller lease survives until
+its owner releases it or it expires.
+Node enrollment, removal, and inventory publication acquire the same node
+guard and fail while an upgrade lease is active, preventing lifecycle changes
+from interleaving with activation, verification, or commit.
+The normal upgrade path refuses to replace a newer agent with an older CLI
+release; intentional downgrades belong to the disaster-recovery workflow.
+The setup manifest is refreshed only after runtime verification. Development
+builds must pass `--takod-binary` with a Linux binary.
 
 For a rebuilt server that should keep the same logical node name, keep the node
 in `tako.yaml` and run the targeted repair path:

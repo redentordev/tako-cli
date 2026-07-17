@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -16,7 +17,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/platform"
+	"github.com/redentordev/tako-cli/pkg/recovery"
 	"github.com/redentordev/tako-cli/pkg/takoapi/ptystream"
+	"github.com/redentordev/tako-cli/pkg/upgradeprotocol"
 )
 
 type Server struct {
@@ -24,6 +29,15 @@ type Server struct {
 	dataDir                 string
 	version                 string
 	nodeName                string
+	identityFile            string
+	inventoryFile           string
+	membershipFile          string
+	installation            *nodeidentity.Installation
+	minimumFreeDiskBytes    int64
+	dockerDataRoot          string
+	buildSlots              chan struct{}
+	diskAvailable           func(string) (int64, error)
+	diskIdentity            func(string) (string, error)
 	actualRefreshInterval   time.Duration
 	buildCachePruneInterval time.Duration
 	buildCacheKeepStorage   string
@@ -32,6 +46,14 @@ type Server struct {
 	backupScheduler         *BackupScheduler
 	jobScheduler            *JobScheduler
 	certificateScheduler    *CertificateScheduler
+	uploadReadTimeout       time.Duration
+	diskReservationMu       sync.Mutex
+	diskReservations        map[string]int64
+	proxyAuthorityMu        sync.Mutex
+	operationBarrierMu      sync.Mutex
+	operationBarrierUnlock  func()
+	operationBarrierID      string
+	operationBarrierExpires time.Time
 	mu                      sync.Mutex
 }
 
@@ -42,6 +64,7 @@ const (
 	DefaultBuildCachePruneInterval = 24 * time.Hour
 	buildCachePruneCommandTimeout  = 30 * time.Minute
 	buildCachePruneMaxInitialDelay = 5 * time.Minute
+	takodUploadReadTimeout         = 30 * time.Minute
 )
 
 func decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst any) error {
@@ -62,25 +85,43 @@ func decodeJSONRequestWithLimit(w http.ResponseWriter, r *http.Request, dst any,
 		}
 		return err
 	}
-	return nil
+	return validateFencedPayloadScope(r.Context(), dst)
 }
 
 type Status struct {
-	Runtime      string         `json:"runtime"`
-	Version      string         `json:"version"`
-	Capabilities []string       `json:"capabilities,omitempty"`
-	Hostname     string         `json:"hostname"`
-	Socket       string         `json:"socket"`
-	DataDir      string         `json:"dataDir"`
-	StartedAt    time.Time      `json:"startedAt"`
-	Now          time.Time      `json:"now"`
-	Node         map[string]any `json:"node,omitempty"`
-	Peers        map[string]any `json:"peers,omitempty"`
+	Runtime string `json:"runtime"`
+	Version string `json:"version"`
+	// UpgradeProtocol is independent from the application API. Minimum and
+	// maximum report the stable lifecycle range accepted during rolling upgrades.
+	UpgradeProtocol        int                    `json:"upgradeProtocol"`
+	MinimumUpgradeProtocol int                    `json:"minimumUpgradeProtocol"`
+	Capabilities           []string               `json:"capabilities,omitempty"`
+	Hostname               string                 `json:"hostname"`
+	Socket                 string                 `json:"socket"`
+	DataDir                string                 `json:"dataDir"`
+	StartedAt              time.Time              `json:"startedAt"`
+	Now                    time.Time              `json:"now"`
+	Identity               *nodeidentity.Identity `json:"identity,omitempty"`
+	// EnrollmentRoles are immutable bootstrap facts. Current control-plane
+	// roles are separate mutable state and must not be inferred from this list.
+	EnrollmentRoles      []string                    `json:"enrollmentRoles,omitempty"`
+	Membership           *nodeidentity.InventoryNode `json:"membership,omitempty"`
+	MembershipGeneration uint64                      `json:"membershipGeneration,omitempty"`
+	Node                 map[string]any              `json:"node,omitempty"`
+	Peers                map[string]any              `json:"peers,omitempty"`
 }
 
 // CapabilityContainerArgvV1 means reconcile and job payloads preserve the
 // container command/entrypoint argv fields introduced with config exec form.
 const CapabilityContainerArgvV1 = "container.argv-v1"
+
+// CapabilityNodeUpgradeV1 means the agent reports the N/N-1 lifecycle
+// protocol and was installed through the rollback-capable node upgrade path.
+const CapabilityNodeUpgradeV1 = "node.upgrade-v1"
+
+// CapabilityPlatformWorkerHandoffV1 means an enrolled node's protected
+// platform-worker binary is handed off in the same atomic transaction.
+const CapabilityPlatformWorkerHandoffV1 = "platform.worker-handoff-v1"
 
 // CapabilityContainerRuntimeControlsV1 covers user/workdir/stop/init/hosts,
 // ulimits, and shm-size fields on service and job payloads.
@@ -89,6 +130,15 @@ const CapabilityContainerRuntimeControlsV1 = "container.runtime-controls-v1"
 // CapabilityImageBuildOptionsV1 means the streamed image builder consumes
 // buildArgs and target from the request preamble.
 const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
+
+// CapabilityImageDescriptorV1 means image reuse can be proven with config
+// digest, platform, and Docker daemon identity instead of a mutable tag.
+const CapabilityImageDescriptorV1 = "image.descriptor-v1"
+
+const CapabilityNodePlatformV1 = "node.platform-v1"
+
+const CapabilityNodeLifecycleV1 = "node.lifecycle-v1"
+const CapabilityNodeMembershipV1 = "node.membership-controller-v1"
 
 // CapabilityExecOneOffControlsV1 covers pull auth, entrypoint, labels, and
 // runtime controls on deploy-time one-off exec requests.
@@ -102,9 +152,18 @@ const CapabilityServiceFilesV1 = "service.files-v1"
 // trusted proxy CIDRs and render Caddy's trusted client IP handling.
 const CapabilityProxyTrustedProxiesV1 = "proxy.trusted-proxies-v1"
 
+// CapabilityProxyRemoteMeshRoutesV1 will be advertised only when the node can
+// validate authoritative active allocation generations and revocations. Phase
+// 3 intentionally omits it so unsupported multi-node routes fail preflight.
+const CapabilityProxyRemoteMeshRoutesV1 = "proxy.remote-mesh-routes-v1"
+
 // CapabilityProxyCertsV1 means the node exposes the validated certificate
 // store API and can render store-backed TLS directives safely.
 const CapabilityProxyCertsV1 = "proxy.certs-v1"
+
+// CapabilityNodeIdentityV1 means status exposes an immutable installation
+// identity separately from mutable project/environment node metadata.
+const CapabilityNodeIdentityV1 = nodeidentity.Capability
 
 func NewServer(socket string, dataDir string, version string) *Server {
 	return NewServerWithOptions(socket, dataDir, version, ServerOptions{})
@@ -112,33 +171,135 @@ func NewServer(socket string, dataDir string, version string) *Server {
 
 type ServerOptions struct {
 	NodeName                string
+	IdentityFile            string
+	InventoryFile           string
+	MembershipFile          string
 	ActualRefreshInterval   time.Duration
 	BuildCachePruneInterval time.Duration
 	BuildCacheKeepStorage   string
+	MinimumFreeDiskBytes    int64
+	DockerDataRoot          string
+	MaximumConcurrentBuilds int
+	DiskAvailable           func(string) (int64, error)
+	DiskIdentity            func(string) (string, error)
+	UploadReadTimeout       time.Duration
 }
 
 func NewServerWithOptions(socket string, dataDir string, version string, opts ServerOptions) *Server {
-	return &Server{
+	server := &Server{
 		socket:                  socket,
 		dataDir:                 dataDir,
 		version:                 version,
 		nodeName:                opts.NodeName,
+		identityFile:            opts.IdentityFile,
+		inventoryFile:           opts.InventoryFile,
+		membershipFile:          opts.MembershipFile,
 		actualRefreshInterval:   opts.ActualRefreshInterval,
 		buildCachePruneInterval: opts.BuildCachePruneInterval,
 		buildCacheKeepStorage:   opts.BuildCacheKeepStorage,
+		minimumFreeDiskBytes:    opts.MinimumFreeDiskBytes,
+		dockerDataRoot:          opts.DockerDataRoot,
+		diskAvailable:           opts.DiskAvailable,
+		diskIdentity:            opts.DiskIdentity,
 		startedAt:               time.Now().UTC(),
 		backupScheduler:         NewBackupScheduler(dataDir),
 		jobScheduler:            NewJobScheduler(dataDir),
 		certificateScheduler:    NewCertificateScheduler(dataDir),
+		uploadReadTimeout:       opts.UploadReadTimeout,
+		diskReservations:        make(map[string]int64),
 	}
+	if server.diskAvailable == nil {
+		server.diskAvailable = availableDiskBytes
+	}
+	if server.diskIdentity == nil {
+		server.diskIdentity = diskFilesystemIdentity
+	}
+	if server.uploadReadTimeout <= 0 {
+		server.uploadReadTimeout = takodUploadReadTimeout
+	}
+	if strings.TrimSpace(server.dockerDataRoot) == "" {
+		server.dockerDataRoot = server.dataDir
+	}
+	if strings.TrimSpace(server.inventoryFile) == "" {
+		server.inventoryFile = nodeidentity.DefaultInventoryPath
+	}
+	if strings.TrimSpace(server.membershipFile) == "" {
+		server.membershipFile = platform.DefaultMembershipPath(filepath.Join(server.dataDir, "platform"))
+	}
+	if opts.MaximumConcurrentBuilds > 0 {
+		server.buildSlots = make(chan struct{}, opts.MaximumConcurrentBuilds)
+	}
+	server.backupScheduler.admit = func(...string) error { return server.checkFreeDisk(0, backupRootDir) }
+	server.jobScheduler.admit = func(...string) error { return server.checkFreeDisk(0, server.dataDir, server.dockerDataRoot) }
+	server.certificateScheduler.admit = func(paths ...string) error { return server.checkFreeDisk(0, paths...) }
+	return server
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	defer s.releaseAnyOperationBarrier()
 	if s.socket == "" {
 		return fmt.Errorf("socket path is required")
 	}
 	if s.dataDir == "" {
 		return fmt.Errorf("data directory is required")
+	}
+	if s.identityFile != "" {
+		installation, err := nodeidentity.ReadOptional(s.identityFile)
+		if err != nil {
+			return fmt.Errorf("failed to load installation identity: %w", err)
+		}
+		if installation != nil {
+			if s.nodeName != "" && s.nodeName != installation.NodeName {
+				return fmt.Errorf("configured node name %q does not match installation identity node name %q", s.nodeName, installation.NodeName)
+			}
+			s.installation = installation
+			s.nodeName = installation.NodeName
+		}
+	}
+	if s.installation != nil {
+		var deactivatePolicy func()
+		unlockLifecycle, lifecycleErr := recovery.AcquireNodeUpgradeLifecycleExclusionForDataDir(s.dataDir)
+		upgradeInProgress := errors.Is(lifecycleErr, recovery.ErrNodeUpgradeLeaseActive)
+		if lifecycleErr != nil && !upgradeInProgress {
+			return fmt.Errorf("acquire node lifecycle exclusion for startup reconciliation: %w", lifecycleErr)
+		}
+		unlockSnapshot, err := recovery.AcquireMutationLock(s.dataDir)
+		if err != nil {
+			return fmt.Errorf("acquire recovery mutation lock for startup reconciliation: %w", err)
+		}
+		startupErr := func() error {
+			if unlockLifecycle != nil {
+				defer unlockLifecycle()
+			}
+			defer unlockSnapshot()
+			if _, err := os.Stat(s.membershipFile); err == nil {
+				if upgradeInProgress {
+					if validateErr := platform.ValidateControllerRecoverySnapshot(s.membershipFile, s.inventoryFile, s.installation); validateErr != nil {
+						return fmt.Errorf("validate controller membership during active node upgrade: %w", validateErr)
+					}
+				} else {
+					store, storeErr := platform.NewMembershipStoreWithinMutationBarrier(s.membershipFile, s.inventoryFile)
+					if storeErr != nil {
+						return fmt.Errorf("open controller membership at startup: %w", storeErr)
+					}
+					if _, storeErr = store.Read(); storeErr != nil {
+						return fmt.Errorf("reconcile controller membership at startup: %w", storeErr)
+					}
+				}
+			} else if !os.IsNotExist(err) {
+				return fmt.Errorf("inspect controller membership at startup: %w", err)
+			}
+			var policyErr error
+			deactivatePolicy, policyErr = s.enforceEnrolledProxyPolicy(ctx)
+			if policyErr != nil {
+				return policyErr
+			}
+			return nil
+		}()
+		if startupErr != nil {
+			return startupErr
+		}
+		defer deactivatePolicy()
 	}
 
 	if err := os.MkdirAll(filepath.Dir(s.socket), 0755); err != nil {
@@ -158,46 +319,11 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", s.handleHealthz)
-	mux.HandleFunc("/v1/status", s.handleStatus)
-	mux.HandleFunc("/v1/actual", s.handleActual)
-	mux.HandleFunc("/v1/reconcile-service", s.handleReconcileService)
-	mux.HandleFunc("/v1/service-files", s.handleServiceFiles)
-	mux.HandleFunc("/v1/service-files/check", s.handleServiceFilesCheck)
-	mux.HandleFunc("/v1/remove-service", s.handleRemoveService)
-	mux.HandleFunc("/v1/proxy-file", s.handleProxyFile)
-	mux.HandleFunc("/v1/proxy", s.handleProxy)
-	mux.HandleFunc("/v1/certs", s.handleProxyCertificates)
-	mux.HandleFunc("/v1/acme-dns", s.handleProxyACMEDNS)
-	mux.HandleFunc("/v1/ports/allocate", s.handlePortAllocate)
-	mux.HandleFunc("/v1/cleanup", s.handleCleanup)
-	mux.HandleFunc("/v1/state", s.handleState)
-	mux.HandleFunc("/v1/lease", s.handleLease)
-	mux.HandleFunc("/v1/env-bundle", s.handleEnvBundle)
-	mux.HandleFunc("/v1/backups", s.handleBackups)
-	mux.HandleFunc("/v1/backups/restore", s.handleBackupRestore)
-	mux.HandleFunc("/v1/backups/cleanup", s.handleBackupCleanup)
-	mux.HandleFunc("/v1/backup-schedule", s.handleBackupSchedule)
-	mux.HandleFunc("/v1/metadata", s.handleMetadata)
-	mux.HandleFunc("/v1/mesh/key", s.handleMeshKey)
-	mux.HandleFunc("/v1/mesh/apply", s.handleMeshApply)
-	mux.HandleFunc("/v1/mesh/status", s.handleMeshStatus)
-	mux.HandleFunc("/v1/images/exists", s.handleImageExists)
-	mux.HandleFunc("/v1/images/export", s.handleImageExport)
-	mux.HandleFunc("/v1/images/import", s.handleImageImport)
-	mux.HandleFunc("/v1/images/build", s.handleImageBuild)
-	mux.HandleFunc("/v1/logs", s.handleLogs)
-	mux.HandleFunc("/v1/exec", s.handleExec)
-	mux.HandleFunc("/v1/jobs", s.handleJobs)
-	mux.HandleFunc("/v1/jobs/apply", s.handleJobsApply)
-	mux.HandleFunc("/v1/jobs/runs", s.handleJobRuns)
-	mux.HandleFunc("/v1/jobs/trigger", s.handleJobsTrigger)
-	mux.HandleFunc("/v1/stats", s.handleStats)
-	mux.HandleFunc("/v1/metrics", s.handleMetrics)
-	mux.HandleFunc("/v1/access-logs", s.handleAccessLogs)
-	mux.HandleFunc("/v1/discovery/exports", s.handleDiscoveryExports)
+	for _, route := range s.registeredRoutes() {
+		mux.HandleFunc(route.path, route.handler)
+	}
 
-	httpServer := newTakodHTTPServer(mux)
+	httpServer := newTakodHTTPServer(s.enrolledLifecycleHandler(mux))
 	s.mu.Lock()
 	s.server = httpServer
 	s.mu.Unlock()
@@ -234,6 +360,151 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
+func (s *Server) enforceEnrolledProxyPolicy(ctx context.Context) (func(), error) {
+	deactivate := activateEnrolledProxyPolicy(s.installation.ClusterID, s.inventoryFile)
+	fail := func(err error) (func(), error) {
+		deactivate()
+		return func() {}, err
+	}
+	s.proxyAuthorityMu.Lock()
+	if err := s.reconcileAllStoredProxyAuthority(); err != nil {
+		s.proxyAuthorityMu.Unlock()
+		if stopErr := stopProxyAndVerifyAbsent(ctx); stopErr != nil {
+			return fail(fmt.Errorf("reconcile stored allocation authority before startup: %v; fail-closed proxy stop also failed: %w", err, stopErr))
+		}
+		return fail(fmt.Errorf("reconcile stored allocation authority before startup; proxy verified stopped: %w", err))
+	}
+	s.proxyAuthorityMu.Unlock()
+	entries, err := os.ReadDir(proxyRoutesDir)
+	if os.IsNotExist(err) {
+		if _, caddyErr := os.Stat(proxyCaddyfilePath); os.IsNotExist(caddyErr) {
+			if stopErr := stopProxyAndVerifyAbsent(ctx); stopErr != nil {
+				return fail(fmt.Errorf("verify no in-memory proxy survives clean enrolled startup: %w", stopErr))
+			}
+			return deactivate, nil
+		} else if caddyErr != nil {
+			return fail(fmt.Errorf("inspect stored proxy configuration before enrolled startup: %w", caddyErr))
+		}
+		entries = nil
+		err = nil
+	}
+	if err != nil {
+		return fail(fmt.Errorf("inspect stored proxy routes before enrolled startup: %w", err))
+	}
+	type invalidManifest struct {
+		name string
+		data []byte
+	}
+	invalid := make([]invalidManifest, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(proxyRoutesDir, entry.Name()))
+		if readErr != nil {
+			return fail(fmt.Errorf("read stored proxy route %s before enrolled startup: %w", entry.Name(), readErr))
+		}
+		if policyErr := validateEnrolledProxyRouteManifest(string(data), s.installation.ClusterID, s.inventoryFile); policyErr != nil {
+			invalid = append(invalid, invalidManifest{name: entry.Name(), data: data})
+		}
+	}
+	if len(invalid) == 0 {
+		if err := ensureProxyDirectories(); err != nil {
+			return fail(err)
+		}
+		if err := renderAndWriteCaddyfile(ctx); err != nil {
+			if stopErr := stopProxyAndVerifyAbsent(ctx); stopErr != nil {
+				return fail(fmt.Errorf("publish authoritative enrolled proxy configuration: %v; fail-closed proxy stop also failed: %w", err, stopErr))
+			}
+			return fail(fmt.Errorf("publish authoritative enrolled proxy configuration: %w", err))
+		}
+		if err := reloadEnrolledProxyIfRunning(ctx); err != nil {
+			return fail(err)
+		}
+		return deactivate, nil
+	}
+
+	// The current Caddyfile may already contain one of the rejected routes.
+	// Stop a running proxy before touching manifests so enrollment cannot
+	// report ready while historical remote traffic is still being served.
+	if err := stopProxyAndVerifyAbsent(ctx); err != nil {
+		return fail(fmt.Errorf("stop proxy before withdrawing unsafe enrolled routes: %w", err))
+	}
+	if err := ensureProxyDirectories(); err != nil {
+		return fail(err)
+	}
+	if err := writeFileAtomic(proxyCaddyfilePath, []byte(emptyProxyCaddyfile()), 0644); err != nil {
+		return fail(fmt.Errorf("publish fail-closed proxy configuration: %w", err))
+	}
+	if err := syncDirectory(filepath.Dir(proxyCaddyfilePath)); err != nil {
+		return fail(err)
+	}
+	quarantineDir := filepath.Join(s.dataDir, "proxy", "quarantine")
+	if err := os.MkdirAll(quarantineDir, 0700); err != nil {
+		return fail(fmt.Errorf("create proxy route quarantine: %w", err))
+	}
+	stamp := time.Now().UTC().UnixNano()
+	for index, manifest := range invalid {
+		quarantinePath := filepath.Join(quarantineDir, fmt.Sprintf("%s.%d.%d.quarantined", manifest.name, stamp, index))
+		if err := writeFileAtomic(quarantinePath, manifest.data, 0600); err != nil {
+			return fail(fmt.Errorf("quarantine proxy route %s: %w", manifest.name, err))
+		}
+		if err := os.Remove(filepath.Join(proxyRoutesDir, manifest.name)); err != nil {
+			return fail(fmt.Errorf("withdraw proxy route %s: %w", manifest.name, err))
+		}
+	}
+	if err := syncDirectory(proxyRoutesDir); err != nil {
+		return fail(err)
+	}
+	if err := syncDirectory(quarantineDir); err != nil {
+		return fail(err)
+	}
+	if err := renderAndWriteCaddyfile(ctx); err != nil {
+		return fail(fmt.Errorf("render safe enrolled proxy configuration: %w", err))
+	}
+	log.Printf("takod enrolled proxy policy: quarantined=%d remote-or-legacy route manifests; proxy stopped fail-closed", len(invalid))
+	return deactivate, nil
+}
+
+func reloadEnrolledProxyIfRunning(ctx context.Context) error {
+	running, err := runDocker(ctx, "ps", "--filter", "name=^tako-proxy$", "--format", "{{.Names}}")
+	if err != nil {
+		return fmt.Errorf("inspect proxy before enrolled policy reload: %w", err)
+	}
+	if strings.TrimSpace(running) != "tako-proxy" {
+		return nil
+	}
+	output, err := runDocker(ctx, "exec", "tako-proxy", "caddy", "reload", "--adapter", "caddyfile", "--config", "/etc/caddy/Caddyfile")
+	if err == nil {
+		return nil
+	}
+	if stopErr := stopProxyAndVerifyAbsent(ctx); stopErr != nil {
+		return fmt.Errorf("reload authoritative enrolled proxy configuration: %v, output: %s; fail-closed proxy stop also failed: %w", err, output, stopErr)
+	}
+	return fmt.Errorf("reload authoritative enrolled proxy configuration; proxy verified stopped fail-closed: %w, output: %s", err, output)
+}
+
+func stopProxyAndVerifyAbsent(ctx context.Context) error {
+	running, err := runDocker(ctx, "ps", "--filter", "name=^tako-proxy$", "--format", "{{.Names}}")
+	if err != nil {
+		return fmt.Errorf("inspect tako-proxy state: %w", err)
+	}
+	if strings.TrimSpace(running) == "tako-proxy" {
+		output, removeErr := runDocker(ctx, "rm", "-f", "tako-proxy")
+		if removeErr != nil {
+			return fmt.Errorf("remove running tako-proxy: %w, output: %s", removeErr, output)
+		}
+	}
+	running, err = runDocker(ctx, "ps", "--filter", "name=^tako-proxy$", "--format", "{{.Names}}")
+	if err != nil {
+		return fmt.Errorf("verify tako-proxy stopped: %w", err)
+	}
+	if strings.TrimSpace(running) == "tako-proxy" {
+		return fmt.Errorf("tako-proxy is still running after removal")
+	}
+	return nil
+}
+
 func newTakodHTTPServer(handler http.Handler) *http.Server {
 	return &http.Server{
 		Handler:           handler,
@@ -248,6 +519,12 @@ func (s *Server) runActualRefreshLoop(ctx context.Context) {
 	}
 
 	refresh := func() {
+		unlock, lockErr := recovery.AcquireMutationLock(s.dataDir)
+		if lockErr != nil {
+			fmt.Fprintf(os.Stderr, "takod actual refresh snapshot lock failed: %v\n", lockErr)
+			return
+		}
+		defer unlock()
 		if _, err := RefreshActualStateDocuments(ctx, s.dataDir, s.nodeName); err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Fprintf(os.Stderr, "takod actual refresh failed: %v\n", err)
 		}
@@ -288,8 +565,32 @@ func (s *Server) runBuildCachePruneLoop(ctx context.Context) {
 			return
 		case <-timer.C:
 			pruneCtx, cancel := context.WithTimeout(ctx, buildCachePruneCommandTimeout)
-			if _, err := cleanupBuildCache(pruneCtx, keepStorage); err != nil && !errors.Is(err, context.Canceled) {
-				fmt.Fprintf(os.Stderr, "takod build cache prune failed: %v\n", err)
+			maintenanceUnlock, maintenanceErr := recovery.AcquireMaintenanceBarrier(s.dataDir)
+			if maintenanceErr != nil {
+				fmt.Fprintf(os.Stderr, "takod build cache prune maintenance barrier failed: %v\n", maintenanceErr)
+				cancel()
+				timer.Reset(interval)
+				continue
+			}
+			active, activeErr := activeWorkerOperation(s.dataDir, time.Now().UTC())
+			if activeErr != nil || active {
+				if activeErr != nil {
+					fmt.Fprintf(os.Stderr, "takod build cache prune could not verify operation fence: %v\n", activeErr)
+				}
+				maintenanceUnlock()
+				cancel()
+				timer.Reset(interval)
+				continue
+			}
+			unlock, lockErr := recovery.AcquireMutationLock(s.dataDir)
+			if lockErr == nil {
+				_, err := cleanupBuildCache(pruneCtx, keepStorage)
+				unlock()
+				lockErr = err
+			}
+			maintenanceUnlock()
+			if lockErr != nil && !errors.Is(lockErr, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "takod build cache prune failed: %v\n", lockErr)
 			}
 			cancel()
 			timer.Reset(interval)
@@ -377,9 +678,25 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if placementCleanupOnly(r.Context()) && len(request.Containers) != 0 {
+		http.Error(w, "placement cleanup authority cannot create containers on a cordoned or draining node", http.StatusConflict)
+		return
+	}
 	if err := validateReconcileServiceRequest(request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	paths := make([]string, 0, 2)
+	if len(request.Containers) > 0 {
+		paths = append(paths, s.dockerDataRoot)
+	}
+	if len(request.Files) > 0 {
+		paths = append(paths, serviceFilesRoot)
+	}
+	if len(paths) > 0 {
+		if !s.requireFreeDisk(w, paths...) {
+			return
+		}
 	}
 
 	response, err := ReconcileService(r.Context(), request)
@@ -403,6 +720,13 @@ func (s *Server) handleServiceFiles(w http.ResponseWriter, r *http.Request) {
 	var request ServiceFilesRequest
 	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxServiceJSONBodyBytes); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateServiceFilesRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !s.requireFreeDisk(w, serviceFilesRoot) {
 		return
 	}
 	if err := PublishServiceFiles(r.Context(), request); err != nil {
@@ -477,10 +801,44 @@ func (s *Server) handlePortAllocate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if request.Kind == "" {
+		request.Kind = PortAllocationKindMeshUpstream
+	}
+	if err := validatePortAllocationRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if s.installation != nil {
+		inventory, err := nodeidentity.ReadInventory(s.inventoryFile)
+		if err != nil {
+			http.Error(w, "trusted cluster inventory is unavailable: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		node, ok := inventory.Node(s.installation.NodeID)
+		if inventory.ClusterID != s.installation.ClusterID || !ok || node.MeshIP == "" || node.MeshIP != request.HostIP {
+			http.Error(w, "mesh allocation host IP is not assigned to this enrolled node", http.StatusBadRequest)
+			return
+		}
+	}
+	if !s.requireFreeDisk(w, s.dataDir) {
+		return
+	}
 	response, err := AllocatePort(r.Context(), s.dataDir, request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if s.installation != nil {
+		response.ClusterID = s.installation.ClusterID
+		response.NodeID = s.installation.NodeID
+		if fence, ok := operationFenceFromContext(r.Context()); ok {
+			response.OperationID = fence.OperationID
+			response.FenceToken = fence.Token
+		}
+		if err := SignPortAllocation(response, s.installation); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -490,6 +848,8 @@ func (s *Server) handlePortAllocate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleProxyFile(w http.ResponseWriter, r *http.Request) {
+	s.proxyAuthorityMu.Lock()
+	defer s.proxyAuthorityMu.Unlock()
 	var (
 		response *ProxyFileResponse
 		err      error
@@ -503,9 +863,43 @@ func (s *Server) handleProxyFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if !s.requireFreeDisk(w, proxyRoutesDir, proxyDynamicDir) {
+			return
+		}
+		if s.installation != nil {
+			if err := validateEnrolledProxyRouteManifest(request.Content, s.installation.ClusterID, s.inventoryFile); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := s.authorizeProxyFileCandidate(request.Name, request.Content); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
 		response, err = WriteProxyFile(r.Context(), request)
+		if err != nil && s.installation != nil {
+			if manifest, parseErr := ParseProxyRouteManifest(request.Content); parseErr == nil {
+				_ = s.reconcileStoredProxyScope(manifest.Project, manifest.Environment, manifest.ClusterID)
+			}
+		}
 	case http.MethodDelete:
-		response, err = RemoveProxyFile(r.Context(), r.URL.Query().Get("name"))
+		name := r.URL.Query().Get("name")
+		var removedManifest *ProxyRouteManifest
+		if validated, validateErr := validateProxyFileName(name); validateErr == nil {
+			if data, exists, readErr := readFileIfExists(filepath.Join(proxyRoutesDir, validated)); readErr == nil && exists {
+				removedManifest, _ = ParseProxyRouteManifest(string(data))
+			}
+		}
+		if fence, fenced := operationFenceFromContext(r.Context()); fenced {
+			if removedManifest == nil || removedManifest.Project != fence.Project || removedManifest.Environment != fence.Environment {
+				http.Error(w, "proxy route manifest is outside the controller operation fence", http.StatusConflict)
+				return
+			}
+		}
+		response, err = RemoveProxyFile(r.Context(), name)
+		if err == nil && s.installation != nil && removedManifest != nil {
+			err = s.reconcileStoredProxyScope(removedManifest.Project, removedManifest.Environment, removedManifest.ClusterID)
+		}
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -538,6 +932,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !s.requireFreeDisk(w, proxyDynamicDir, proxyLogDir, proxyCertStoreDir, s.dockerDataRoot) {
+		return
+	}
 
 	response, err := ReconcileProxy(r.Context(), request)
 	if err != nil {
@@ -566,9 +963,26 @@ func (s *Server) handleProxyCertificates(w http.ResponseWriter, r *http.Request)
 			http.Error(w, "invalid JSON body: "+decodeErr.Error(), http.StatusBadRequest)
 			return
 		}
+		if !s.requireFreeDisk(w, proxyCertStoreDir) {
+			return
+		}
 		response, err = PushProxyCertificate(r.Context(), request)
 	case http.MethodDelete:
-		response, err = RemoveProxyCertificate(r.Context(), r.URL.Query().Get("domain"))
+		domain := r.URL.Query().Get("domain")
+		if fence, fenced := operationFenceFromContext(r.Context()); fenced {
+			entry, loadErr := loadExactProxyCertificate(domain, false)
+			if loadErr != nil {
+				err = loadErr
+				break
+			}
+			if entry.Metadata.OwnerProject == "" || entry.Metadata.OwnerEnvironment == "" || entry.Metadata.OwnerProject != fence.Project || entry.Metadata.OwnerEnvironment != fence.Environment {
+				err = fmt.Errorf("certificate is outside the controller operation fence")
+				break
+			}
+		}
+		if err == nil {
+			response, err = RemoveProxyCertificate(r.Context(), domain)
+		}
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -597,9 +1011,15 @@ func (s *Server) handleProxyACMEDNS(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+decodeErr.Error(), http.StatusBadRequest)
 			return
 		}
+		if !s.requireFreeDisk(w, proxyDynamicDir, proxyCertStoreDir) {
+			return
+		}
 		secrets = request.Credentials
 		response, err = PrepareACMEDNS(r.Context(), request)
 	case http.MethodPost:
+		if !s.requireFreeDisk(w, proxyDynamicDir, proxyCertStoreDir) {
+			return
+		}
 		response, err = FinalizeACMEDNS(r.Context(), r.URL.Query().Get("project"), r.URL.Query().Get("environment"))
 	case http.MethodDelete:
 		response, err = RemoveACMEDNSConfiguration(r.Context(), r.URL.Query().Get("project"), r.URL.Query().Get("environment"))
@@ -646,7 +1066,6 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
 	response, err := CleanupProject(r.Context(), request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -691,12 +1110,18 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if !s.requireFreeDisk(w, s.dataDir) {
+			return
+		}
 		response, err = WriteStateDocument(r.Context(), s.dataDir, request)
 	case http.MethodPost:
 		defer r.Body.Close()
 		var request StateDocumentRequest
 		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !s.requireFreeDisk(w, s.dataDir) {
 			return
 		}
 		response, err = AppendStateEvent(r.Context(), s.dataDir, request)
@@ -742,7 +1167,10 @@ func (s *Server) handleLease(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		response, err = AcquireLease(r.Context(), s.dataDir, request)
+		if !s.requireFreeDisk(w, s.dataDir) {
+			return
+		}
+		response, err = s.acquireControllerOperationLease(r.Context(), request)
 	case http.MethodDelete:
 		defer r.Body.Close()
 		var request LeaseRequest
@@ -750,7 +1178,7 @@ func (s *Server) handleLease(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		response, err = ReleaseLease(r.Context(), s.dataDir, request)
+		response, err = s.releaseControllerOperationLease(r.Context(), request)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -783,6 +1211,9 @@ func (s *Server) handleEnvBundle(w http.ResponseWriter, r *http.Request) {
 		var request EnvBundleRequest
 		if err := decodeJSONRequest(w, r, &request); err != nil {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !s.requireFreeDisk(w, s.dataDir) {
 			return
 		}
 		response, err = WriteEnvBundle(r.Context(), s.dataDir, request)
@@ -821,6 +1252,13 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if err := validateBackupRequest(request, true, false); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !s.requireFreeDisk(w, backupRootDir) {
+			return
+		}
 		response, err = CreateVolumeBackup(r.Context(), request)
 	case http.MethodDelete:
 		err = DeleteVolumeBackup(r.Context(), BackupRequest{
@@ -855,6 +1293,13 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	var request BackupRequest
 	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateBackupRequest(request, true, true); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !s.requireFreeDisk(w, s.dockerDataRoot) {
 		return
 	}
 	if err := RestoreVolumeBackup(r.Context(), request); err != nil {
@@ -905,6 +1350,13 @@ func (s *Server) handleBackupSchedule(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if err := validateBackupScheduleRequest(request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !s.requireFreeDisk(w, s.dataDir) {
+			return
+		}
 		response, err = s.backupScheduler.Upsert(r.Context(), request)
 	case http.MethodDelete:
 		response, err = s.backupScheduler.Delete(
@@ -940,6 +1392,9 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !s.requireFreeDisk(w, s.dataDir) {
+		return
+	}
 	response, err := WriteMetadata(r.Context(), s.dataDir, request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -957,11 +1412,26 @@ func (s *Server) handleMeshKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.requireFreeDisk(w, "/etc/wireguard") {
+		return
+	}
 
 	response, err := EnsureMeshKey(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
+	}
+	if s.installation != nil {
+		inventory, inventoryErr := nodeidentity.ReadInventory(s.inventoryFile)
+		if inventoryErr != nil || inventory == nil || inventory.ClusterID != s.installation.ClusterID {
+			http.Error(w, "local WireGuard key does not match platform membership", http.StatusForbidden)
+			return
+		}
+		node, ok := inventory.Node(s.installation.NodeID)
+		if !ok || node.MeshPublicKey != strings.TrimSpace(response.PublicKey) {
+			http.Error(w, "local WireGuard key does not match platform membership", http.StatusForbidden)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -975,6 +1445,10 @@ func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.installation != nil {
+		http.Error(w, "enrolled-node mesh topology is owned by platform membership", http.StatusForbidden)
+		return
+	}
 	defer r.Body.Close()
 
 	var request MeshApplyRequest
@@ -984,6 +1458,9 @@ func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateMeshApplyRequest(request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !s.requireFreeDisk(w, "/etc/wireguard") {
 		return
 	}
 	response, err := ReconcileMesh(r.Context(), request)
@@ -1042,6 +1519,38 @@ func (s *Server) handleImageExists(w http.ResponseWriter, r *http.Request) {
 	_ = encoder.Encode(response)
 }
 
+func (s *Server) handleImageInspect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	response, err := InspectImage(r.Context(), r.URL.Query().Get("image"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handlePlatform(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	response, err := ReadPlatform(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
 func (s *Server) handleImageExport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1052,8 +1561,28 @@ func (s *Server) handleImageExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	imageTransferMu.Lock()
+	defer imageTransferMu.Unlock()
+	expectedImageID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("expectedImageId")))
+	exportReference := image
+	if expectedImageID != "" {
+		if !validSHA256Digest(expectedImageID) {
+			http.Error(w, "expectedImageId must be a sha256 digest", http.StatusBadRequest)
+			return
+		}
+		descriptor, err := InspectImage(r.Context(), image)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if !descriptor.Exists || descriptor.ImageID != expectedImageID {
+			http.Error(w, "image changed since it was selected for transfer", http.StatusConflict)
+			return
+		}
+		exportReference = expectedImageID
+	}
 	writeImageTarHeaders(w, image)
-	if err := ExportImage(r.Context(), image, w); err != nil {
+	if err := ExportImage(r.Context(), exportReference, w); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -1069,13 +1598,25 @@ func (s *Server) handleImageImport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	expectedImageID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("expectedImageId")))
+	if expectedImageID != "" && !validSHA256Digest(expectedImageID) {
+		http.Error(w, "expectedImageId must be a sha256 digest", http.StatusBadRequest)
+		return
+	}
 	if r.ContentLength > defaultImageImportMaxBytes {
 		http.Error(w, fmt.Sprintf("image import exceeds maximum size %d bytes", defaultImageImportMaxBytes), http.StatusRequestEntityTooLarge)
 		return
 	}
+	releaseDisk, ok := s.reserveFreeDisk(w, uploadReservation(r.ContentLength, defaultImageImportMaxBytes), s.dockerDataRoot)
+	if !ok {
+		return
+	}
+	defer releaseDisk()
+	clearReadDeadline := setUploadReadDeadline(w, s.uploadReadTimeout)
+	defer clearReadDeadline()
 	defer r.Body.Close()
 
-	response, err := ImportImage(r.Context(), image, http.MaxBytesReader(w, r.Body, defaultImageImportMaxBytes))
+	response, err := ImportImage(r.Context(), image, http.MaxBytesReader(w, r.Body, defaultImageImportMaxBytes), expectedImageID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1108,6 +1649,19 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	releaseDisk, ok := s.reserveFreeDisk(w, uploadReservation(r.ContentLength, defaultBuildContextMaxBytes), s.dockerDataRoot)
+	if !ok {
+		return
+	}
+	defer releaseDisk()
+	releaseBuild, ok := s.acquireBuildSlot()
+	if !ok {
+		http.Error(w, "maximum concurrent image builds are already running", http.StatusTooManyRequests)
+		return
+	}
+	defer releaseBuild()
+	clearReadDeadline := setUploadReadDeadline(w, s.uploadReadTimeout)
+	defer clearReadDeadline()
 	defer r.Body.Close()
 
 	body := io.Reader(http.MaxBytesReader(w, r.Body, defaultBuildContextMaxBytes))
@@ -1152,6 +1706,148 @@ func (s *Server) handleImageBuild(w http.ResponseWriter, r *http.Request) {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(response)
+}
+
+func setUploadReadDeadline(w http.ResponseWriter, timeout time.Duration) func() {
+	if timeout <= 0 {
+		return func() {}
+	}
+	controller := http.NewResponseController(w)
+	if err := controller.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return func() {}
+	}
+	return func() { _ = controller.SetReadDeadline(time.Time{}) }
+}
+
+func (s *Server) requireFreeDisk(w http.ResponseWriter, paths ...string) bool {
+	return s.requireFreeDiskFor(w, 0, paths...)
+}
+
+func uploadReservation(contentLength int64, maximum int64) int64 {
+	if contentLength >= 0 {
+		return contentLength
+	}
+	return maximum
+}
+
+func (s *Server) checkFreeDisk(requiredBytes int64, paths ...string) error {
+	if s.minimumFreeDiskBytes <= 0 {
+		return nil
+	}
+	if len(paths) == 0 {
+		paths = []string{s.dataDir}
+	}
+	s.diskReservationMu.Lock()
+	defer s.diskReservationMu.Unlock()
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		path = filepath.Clean(path)
+		filesystem, err := s.diskIdentity(path)
+		if err != nil {
+			return fmt.Errorf("failed to identify filesystem for %s: %w", path, err)
+		}
+		if _, exists := seen[filesystem]; exists {
+			continue
+		}
+		seen[filesystem] = struct{}{}
+		available, err := s.diskAvailable(path)
+		if err != nil {
+			return fmt.Errorf("failed to verify free disk on %s: %w", path, err)
+		}
+		reserved := s.diskReservations[filesystem]
+		if available < s.minimumFreeDiskBytes {
+			return fmt.Errorf("operation denied on %s: %d free bytes is below %d-byte platform minimum", path, available, s.minimumFreeDiskBytes)
+		}
+		if requiredBytes == 0 && reserved > 0 {
+			return fmt.Errorf("operation denied on %s while %d bytes are reserved by active uploads on the same filesystem", path, reserved)
+		}
+		if requiredBytes > available-s.minimumFreeDiskBytes-reserved {
+			return fmt.Errorf("operation denied on %s: %d free bytes cannot preserve %d-byte platform minimum plus %d already-reserved and %d requested bytes", path, available, s.minimumFreeDiskBytes, reserved, requiredBytes)
+		}
+	}
+	return nil
+}
+
+func (s *Server) requireFreeDiskFor(w http.ResponseWriter, requiredBytes int64, paths ...string) bool {
+	err := s.checkFreeDisk(requiredBytes, paths...)
+	if err == nil {
+		return true
+	}
+	status := http.StatusInsufficientStorage
+	if strings.HasPrefix(err.Error(), "failed to verify free disk") || strings.HasPrefix(err.Error(), "failed to identify filesystem") {
+		status = http.StatusServiceUnavailable
+	}
+	http.Error(w, err.Error(), status)
+	return false
+}
+
+func (s *Server) reserveFreeDisk(w http.ResponseWriter, requiredBytes int64, paths ...string) (func(), bool) {
+	if s.minimumFreeDiskBytes <= 0 || requiredBytes <= 0 {
+		if !s.requireFreeDiskFor(w, requiredBytes, paths...) {
+			return nil, false
+		}
+		return func() {}, true
+	}
+	if len(paths) == 0 {
+		paths = []string{s.dataDir}
+	}
+	s.diskReservationMu.Lock()
+	defer s.diskReservationMu.Unlock()
+	type diskTarget struct{ path, filesystem string }
+	unique := make([]diskTarget, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		path = filepath.Clean(path)
+		filesystem, err := s.diskIdentity(path)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to identify filesystem for %s: %v", path, err), http.StatusServiceUnavailable)
+			return nil, false
+		}
+		if _, exists := seen[filesystem]; exists {
+			continue
+		}
+		seen[filesystem] = struct{}{}
+		available, err := s.diskAvailable(path)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to verify free disk on %s: %v", path, err), http.StatusServiceUnavailable)
+			return nil, false
+		}
+		reserved := s.diskReservations[filesystem]
+		if available < s.minimumFreeDiskBytes || requiredBytes > available-s.minimumFreeDiskBytes-reserved {
+			http.Error(w, fmt.Sprintf("operation denied on %s: %d free bytes cannot preserve %d-byte platform minimum plus %d already-reserved and %d requested bytes", path, available, s.minimumFreeDiskBytes, reserved, requiredBytes), http.StatusInsufficientStorage)
+			return nil, false
+		}
+		unique = append(unique, diskTarget{path: path, filesystem: filesystem})
+	}
+	for _, target := range unique {
+		s.diskReservations[target.filesystem] += requiredBytes
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.diskReservationMu.Lock()
+			defer s.diskReservationMu.Unlock()
+			for _, target := range unique {
+				s.diskReservations[target.filesystem] -= requiredBytes
+				if s.diskReservations[target.filesystem] == 0 {
+					delete(s.diskReservations, target.filesystem)
+				}
+			}
+		})
+	}, true
+}
+
+func (s *Server) acquireBuildSlot() (func(), bool) {
+	if s.buildSlots == nil {
+		return func() {}, true
+	}
+	select {
+	case s.buildSlots <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-s.buildSlots }) }, true
+	default:
+		return nil, false
+	}
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -1215,6 +1911,9 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateExecRequest(&request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if request.Mode == ExecModeOneOff && !s.requireFreeDisk(w, s.dockerDataRoot) {
 		return
 	}
 	if request.Interactive || request.PTY {
@@ -1295,6 +1994,9 @@ func (s *Server) handleJobsApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !s.requireFreeDisk(w, s.dataDir, serviceFilesRoot) {
+		return
+	}
 	response, err := s.jobScheduler.Apply(r.Context(), request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1339,6 +2041,13 @@ func (s *Server) handleJobsTrigger(w http.ResponseWriter, r *http.Request) {
 	var request JobTriggerRequest
 	if err := decodeJSONRequest(w, r, &request); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !isSafeProjectName(request.Project) || !isSafeRuntimeName(request.Environment) || !isSafeServiceName(request.Job) {
+		http.Error(w, "invalid job trigger identity", http.StatusBadRequest)
+		return
+	}
+	if !s.requireFreeDisk(w, s.dataDir, s.dockerDataRoot) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -1485,19 +2194,59 @@ func (s *Server) handleDiscoveryExports(w http.ResponseWriter, r *http.Request) 
 func (s *Server) Status() Status {
 	hostname, _ := os.Hostname()
 	status := Status{
-		Runtime:      "takod",
-		Version:      s.version,
-		Capabilities: []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
-		Hostname:     hostname,
-		Socket:       s.socket,
-		DataDir:      s.dataDir,
-		StartedAt:    s.startedAt,
-		Now:          time.Now().UTC(),
+		Runtime:                "takod",
+		Version:                s.version,
+		UpgradeProtocol:        upgradeprotocol.Current,
+		MinimumUpgradeProtocol: upgradeprotocol.Current,
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1},
+		Hostname:               hostname,
+		Socket:                 s.socket,
+		DataDir:                s.dataDir,
+		StartedAt:              s.startedAt,
+		Now:                    time.Now().UTC(),
+		Identity:               cloneNodeIdentity(s.installation),
+		EnrollmentRoles:        cloneEnrollmentRoles(s.installation),
+	}
+	if s.installation != nil {
+		status.Capabilities = append(status.Capabilities, CapabilityPlatformWorkerHandoffV1)
+		if inventory, err := nodeidentity.ReadInventory(s.inventoryFile); err == nil && inventory.ClusterID == s.installation.ClusterID {
+			if node, ok := inventory.Node(s.installation.NodeID); ok {
+				membership := node
+				membership.Roles = append([]string(nil), node.Roles...)
+				status.Membership = &membership
+				status.MembershipGeneration = inventory.Generation
+				if inventory.ControllerNodeID != "" && inventory.Generation > 0 {
+					status.Capabilities = append(status.Capabilities, CapabilityNodeLifecycleV1)
+					status.Capabilities = append(status.Capabilities, CapabilityOperationFence)
+				}
+			}
+		}
+	}
+	if s.supportsMembershipController() {
+		status.Capabilities = append(status.Capabilities, CapabilityNodeMembershipV1)
+	}
+	if s.supportsAuthoritativeRemoteMeshRoutes() {
+		status.Capabilities = append(status.Capabilities, CapabilityProxyRemoteMeshRoutesV1)
 	}
 
 	status.Node = readJSONMap(filepath.Join(s.dataDir, "node.json"))
 	status.Peers = readJSONMap(filepath.Join(s.dataDir, "mesh", "peers.json"))
 	return status
+}
+
+func cloneNodeIdentity(installation *nodeidentity.Installation) *nodeidentity.Identity {
+	if installation == nil {
+		return nil
+	}
+	clone := installation.Identity
+	return &clone
+}
+
+func cloneEnrollmentRoles(installation *nodeidentity.Installation) []string {
+	if installation == nil {
+		return nil
+	}
+	return append([]string(nil), installation.EnrollmentRoles...)
 }
 
 func readJSONMap(path string) map[string]any {

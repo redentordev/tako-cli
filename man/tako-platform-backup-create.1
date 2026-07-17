@@ -1,0 +1,91 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-platform-backup-create - Create, verify, and upload a complete controller recovery bundle
+
+
+.SH SYNOPSIS
+\fBtako platform backup create [flags]\fP
+
+
+.SH DESCRIPTION
+Create, verify, and upload a complete controller recovery bundle
+
+
+.SH OPTIONS
+\fB--bucket\fP=""
+	External recovery bucket
+
+.PP
+\fB--config-dir\fP="/etc/tako"
+	Protected Tako configuration and identity directory
+
+.PP
+\fB--data-dir\fP="/var/lib/tako"
+	Tako PaaS, operation journal, environment, and certificate data directory
+
+.PP
+\fB--endpoint\fP=""
+	S3-compatible HTTPS endpoint
+
+.PP
+\fB--force-path-style\fP[=false]
+	Use path-style S3 requests
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for create
+
+.PP
+\fB--keep-local\fP[=false]
+	Keep the verified local bundle after external upload
+
+.PP
+\fB--no-persistent-workloads\fP[=false]
+	Attest that this cluster has no persistent workload data
+
+.PP
+\fB--prefix\fP="platform-recovery"
+	Object key prefix
+
+.PP
+\fB--provider\fP="s3"
+	External storage provider: s3, r2, or s3-compatible
+
+.PP
+\fB--region\fP=""
+	Storage region (R2 defaults to auto)
+
+.PP
+\fB--workload-backup-manifest\fP=""
+	JSON evidence for externally stored persistent workload snapshots
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-platform-backup(1)\fP

@@ -13,7 +13,133 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"github.com/redentordev/tako-cli/pkg/scheduler"
 )
+
+func TestBuildDesiredRevisionPersistsAssignmentsInRevisionIdentity(t *testing.T) {
+	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo"}}
+	services := map[string]config.ServiceConfig{"web": {Image: "nginx:1.27", Replicas: 1}}
+	first, err := BuildDesiredRevisionWithAssignments(cfg, "production", "deploy", services, nil, []string{"node-a", "node-b"}, map[string][]scheduler.Assignment{
+		"web": {{Slot: 1, Node: "node-a", NodeID: "id-a"}},
+	}, GitInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := first.Services["web"].Assignments
+	if len(assignment) != 1 || assignment[0].Node != "node-a" || assignment[0].NodeID != "id-a" {
+		t.Fatalf("assignments were not persisted: %#v", assignment)
+	}
+	second, err := BuildDesiredRevisionWithAssignments(cfg, "production", "deploy", services, nil, []string{"node-a", "node-b"}, map[string][]scheduler.Assignment{
+		"web": {{Slot: 1, Node: "node-b", NodeID: "id-b"}},
+	}, GitInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.CreatedAt = first.CreatedAt
+	second.RevisionID = revisionID(second)
+	if first.RevisionID == second.RevisionID {
+		t.Fatalf("assignment movement did not change desired revision ID %s", first.RevisionID)
+	}
+}
+
+func TestBuildDesiredRevisionRetainsRemovalPendingAssignmentUntilCleanup(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+		Servers: map[string]config.ServerConfig{
+			"node-a": {NodeID: "id-a"},
+		},
+	}
+	removed := config.ServiceConfig{Image: "nginx:1.27", Replicas: 1}
+	assignments := map[string][]scheduler.Assignment{
+		"old-web": {{Slot: 1, Node: "node-a", NodeID: "id-a"}},
+	}
+	intent, err := BuildDesiredRevisionWithPlacementIntent(
+		cfg,
+		"production",
+		"deploy",
+		nil,
+		map[string]string{"old-web": "nginx@sha256:deadbeef"},
+		[]string{"node-a"},
+		assignments,
+		map[string]config.ServiceConfig{"old-web": removed},
+		GitInfo{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, ok := intent.Services["old-web"]
+	if !ok || !pending.RemovalPending || pending.Image != "nginx@sha256:deadbeef" {
+		t.Fatalf("removal-pending service = %#v, present=%t", pending, ok)
+	}
+	if len(pending.Assignments) != 1 || pending.Assignments[0] != assignments["old-web"][0] {
+		t.Fatalf("removal-pending assignments = %#v", pending.Assignments)
+	}
+
+	completed, err := BuildDesiredRevisionWithAssignments(cfg, "production", "deploy", nil, nil, []string{"node-a"}, assignments, GitInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := completed.Services["old-web"]; ok {
+		t.Fatalf("completed desired state retained removed service: %#v", completed.Services)
+	}
+}
+
+func TestBuildDesiredRevisionRejectsRemovalPendingIdentityMismatch(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+		Servers: map[string]config.ServerConfig{"node-a": {NodeID: "id-a"}},
+	}
+	_, err := BuildDesiredRevisionWithPlacementIntent(
+		cfg,
+		"production",
+		"deploy",
+		nil,
+		nil,
+		[]string{"node-a"},
+		map[string][]scheduler.Assignment{"old-web": {{Slot: 1, Node: "node-a", NodeID: "stale-id"}}},
+		map[string]config.ServiceConfig{"old-web": {Image: "nginx:1.27", Replicas: 1}},
+		GitInfo{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match immutable node identity") {
+		t.Fatalf("identity mismatch error = %v", err)
+	}
+}
+
+func TestBuildDesiredRevisionPreservesOutOfScopeRemovalPendingRecord(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+		Servers: map[string]config.ServerConfig{"node-a": {NodeID: "id-a"}},
+	}
+	preserved := DesiredService{
+		Name:           "old-worker",
+		Image:          "worker@sha256:deadbeef",
+		Replicas:       1,
+		RemovalPending: true,
+		Assignments:    []scheduler.Assignment{{Slot: 1, Node: "node-a", NodeID: "id-a"}},
+	}
+	revision, err := BuildDesiredRevisionWithPlacementSnapshot(
+		cfg,
+		"production",
+		"scale",
+		map[string]config.ServiceConfig{"api": {Image: "api:2", Replicas: 1}},
+		map[string]string{"api": "api@sha256:cafe"},
+		[]string{"node-a"},
+		map[string][]scheduler.Assignment{
+			"api":        {{Slot: 1, Node: "node-a", NodeID: "id-a"}},
+			"old-worker": preserved.Assignments,
+		},
+		nil,
+		map[string]DesiredService{"old-worker": preserved},
+		GitInfo{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := revision.Services["old-worker"]
+	if !got.RemovalPending || got.Image != preserved.Image || len(got.Assignments) != 1 || got.Assignments[0] != preserved.Assignments[0] {
+		t.Fatalf("preserved removal-pending record = %#v", got)
+	}
+}
 
 func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	cfg := &config.Config{

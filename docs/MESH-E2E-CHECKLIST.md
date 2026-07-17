@@ -16,6 +16,8 @@ New computer         A clean checkout can pull state/env and deploy.
 CI runner            Automation uses the same takod path and remote leases.
 State repair         Divergent reachable nodes can be repaired from freshest state.
 Agent upgrade        Stale takod agents can be patched and verified explicitly.
+Interrupted upgrade  A bad candidate rolls back takod and the platform worker.
+Passive promotion    Recovery state proves one cold single-writer controller.
 Proxy protocols      HTTP/1.1, HTTP/2, HTTP/3, WebSocket, and sticky routes work.
 Invalid config       Invalid YAML and strict config errors fail at deploy preflight.
 ```
@@ -177,12 +179,56 @@ Expected result:
   `takod` agent before state repair and deploy.
 - WireGuard mesh status lists both peers.
 - Deployment history and desired state are available from both reachable nodes.
+- Desired state records stable `{slot,node,nodeId}` assignments for every
+  deployed service; adding/reordering nodes does not move existing slots and
+  scale-out assigns only new slots.
+- An interrupted stateless/job removal leaves a `removalPending: true` desired
+  entry with its prior assignment, and retrying cleanup removes that entry only
+  after the assigned nodes acknowledge cleanup.
 - Actual state is reported per node and as an aggregate.
 - Proxy upstreams include healthy local and mesh-reachable service instances.
 - Host firewall rules allow the WireGuard listen UDP port and routed traffic to
   peer mesh /32 addresses on the Tako interface.
 - IPv4 forwarding is enabled live and persisted so mesh-to-Docker routing
   survives host reboot.
+
+## Interrupted Upgrade and Passive Promotion Flow
+
+Run failure injection only against a disposable enrolled cluster with at least
+one worker plus its controller. The executable harness sends the deliberately
+non-running candidate through the full plan, verifies canary rollback and stage
+blocking, verifies the previous versions remain healthy, then retries with the
+valid Linux binary:
+
+```bash
+scripts/upgrade-failure-e2e.sh \
+  --app-dir /path/to/app --env production \
+  --tako ./tako --valid-binary ./dist/tako-linux-amd64
+```
+
+The failed command must be non-zero, later upgrade stages must be `blocked`,
+and both `takod.service` and `tako-platform-worker.service` (when installed)
+must run their previous binary. Rerunning a valid upgrade proves an interrupted
+transaction is recovered before a new candidate is published.
+
+After authenticating and staging a complete controller recovery bundle into a
+root-owned, non-group/world-writable tree whose ancestors are likewise
+protected, prove that it contains exactly one internally consistent cold
+controller:
+
+```bash
+tako platform backup restore --archive <bundle> --cluster-id <cluster-id> \
+  --destination <empty-staging-dir>
+tako platform controller promotion verify \
+  --staged-root <empty-staging-dir> --cluster-id <cluster-id> \
+  --controller-key-sha256 <externally-recorded-fingerprint>
+```
+
+The proof must print `Mode: passive-recovery` and `Active-active: false`. Stop
+the old controller before any operator-controlled activation of the recovered
+copy; this workflow does not provide consensus or concurrent writers. Record
+the controller key fingerprint printed by `platform backup create` in a
+separate trusted system, never only beside the recovery bundle.
 
 ## Proxy Protocol Flow
 
@@ -359,6 +405,9 @@ Expected result:
 
 - The runner has no dependency on a persisted `.tako/` workspace.
 - Stale takod agents are patched before app deployment.
+- Concurrent `upgrade servers` coordinators are rejected by the controller
+  lease, concurrent transactions against one node are rejected by its node
+  lease, and an older CLI reports `downgrade-blocked` without mutation.
 - `TAKO_HOST_KEY_MODE=strict` works after known hosts are installed.
 - Remote leases reject overlapping deploy, rollback, scale, maintenance, live,
   remove, cleanup, destroy, and repair operations.

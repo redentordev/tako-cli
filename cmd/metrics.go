@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -123,18 +125,23 @@ func runMetrics(cmd *cobra.Command, args []string) error {
 	// Create SSH pool
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	factory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return err
+	}
+	defer factory.CloseIdleConnections()
 
 	if metricsLive {
 		if machineOutputEnabled() {
 			return &engine.InvalidRequestError{Err: fmt.Errorf("--live is interactive-only; run single-shot metrics reads in machine output modes")}
 		}
-		return showLiveMetrics(cfg, servers, sshPool)
+		return showLiveMetrics(cfg, servers, factory)
 	}
 
-	return showMetricsOnce(cfg, envName, servers, sshPool, metricsOnce)
+	return showMetricsOnce(cfg, envName, servers, factory, metricsOnce)
 }
 
-func showMetricsOnce(cfg *config.Config, envName string, servers []string, sshPool *ssh.Pool, collectNew bool) error {
+func showMetricsOnce(cfg *config.Config, envName string, servers []string, factory *nodeclient.Factory, collectNew bool) error {
 	// Machine modes reserve stdout for parseable output.
 	var out io.Writer = os.Stdout
 	if machineOutputEnabled() {
@@ -153,7 +160,7 @@ func showMetricsOnce(cfg *config.Config, envName string, servers []string, sshPo
 		Nodes:       []engine.MetricsNodeSample{},
 	}
 	failures := 0
-	for _, nodeResult := range collectMetricsOnce(cfg, servers, sshPool, collectNew) {
+	for _, nodeResult := range collectMetricsOnce(cfg, servers, factory, collectNew) {
 		sample := engine.MetricsNodeSample{Server: nodeResult.serverName, Host: nodeResult.host}
 		switch {
 		case nodeResult.connectErr != nil:
@@ -200,9 +207,9 @@ type metricsNodeResult struct {
 
 type metricsReadFunc func(serverName string, server config.ServerConfig) (*MetricsData, error)
 
-func collectMetricsOnce(cfg *config.Config, servers []string, sshPool *ssh.Pool, collectNew bool) []metricsNodeResult {
+func collectMetricsOnce(cfg *config.Config, servers []string, factory *nodeclient.Factory, collectNew bool) []metricsNodeResult {
 	return collectMetricsOnceWith(cfg.Servers, servers, func(serverName string, server config.ServerConfig) (*MetricsData, error) {
-		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, _, err := factory.Client(context.Background(), serverName)
 		if err != nil {
 			return nil, fmt.Errorf("connect: %w", err)
 		}
@@ -260,7 +267,7 @@ func collectMetricsOnceWith(configuredServers map[string]config.ServerConfig, se
 	return results
 }
 
-func showLiveMetrics(cfg *config.Config, servers []string, sshPool *ssh.Pool) error {
+func showLiveMetrics(cfg *config.Config, servers []string, factory *nodeclient.Factory) error {
 	fmt.Printf("=== Live System Metrics (Press Ctrl+C to exit) ===\n\n")
 
 	ticker := time.NewTicker(5 * time.Second)
@@ -278,7 +285,7 @@ func showLiveMetrics(cfg *config.Config, servers []string, sshPool *ssh.Pool) er
 				return err
 			}
 
-			client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+			client, _, err := factory.Client(context.Background(), serverName)
 			if err != nil {
 				fmt.Printf("❌ %s: Connection failed\n\n", serverName)
 				continue
@@ -297,7 +304,7 @@ func showLiveMetrics(cfg *config.Config, servers []string, sshPool *ssh.Pool) er
 	}
 }
 
-func readMetricsViaTakod(client *ssh.Client, cfg *config.Config, collect bool) (*MetricsData, error) {
+func readMetricsViaTakod(client any, cfg *config.Config, collect bool) (*MetricsData, error) {
 	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "GET", takodclient.MetricsEndpoint(collect), nil)
 	if err != nil {
 		return nil, err

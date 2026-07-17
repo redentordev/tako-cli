@@ -12,11 +12,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 )
 
 const (
 	PortAllocationKindMeshUpstream = "mesh-upstream"
-	portAllocationSchemaVersion    = 1
+	portAllocationSchemaVersion    = 2
 )
 
 var portAllocationMu sync.Mutex
@@ -36,22 +38,61 @@ type PortAllocationRequest struct {
 }
 
 type PortAllocationResponse struct {
-	Kind          string `json:"kind"`
-	Project       string `json:"project"`
-	Environment   string `json:"environment"`
-	Service       string `json:"service"`
-	Revision      string `json:"revision,omitempty"`
-	Slot          int    `json:"slot"`
-	HostIP        string `json:"hostIp"`
-	HostPort      int    `json:"hostPort"`
-	ContainerPort int    `json:"containerPort"`
-	Key           string `json:"key"`
+	Kind          string    `json:"kind"`
+	Project       string    `json:"project"`
+	Environment   string    `json:"environment"`
+	Service       string    `json:"service"`
+	Revision      string    `json:"revision,omitempty"`
+	Slot          int       `json:"slot"`
+	HostIP        string    `json:"hostIp"`
+	HostPort      int       `json:"hostPort"`
+	ContainerPort int       `json:"containerPort"`
+	Key           string    `json:"key"`
+	ClusterID     string    `json:"clusterId,omitempty"`
+	NodeID        string    `json:"nodeId,omitempty"`
+	Generation    uint64    `json:"generation,omitempty"`
+	IssuedAt      time.Time `json:"issuedAt,omitempty"`
+	OperationID   string    `json:"operationId,omitempty"`
+	FenceToken    uint64    `json:"fenceToken,omitempty"`
+	Signature     string    `json:"signature,omitempty"`
+}
+
+func portAllocationEvidence(response PortAllocationResponse) ([]byte, error) {
+	response.Signature = ""
+	return json.Marshal(response)
+}
+
+func SignPortAllocation(response *PortAllocationResponse, installation *nodeidentity.Installation) error {
+	if response == nil || installation == nil || response.ClusterID != installation.ClusterID || response.NodeID != installation.NodeID {
+		return fmt.Errorf("allocation response does not match the signing node identity")
+	}
+	if response.Generation == 0 || response.IssuedAt.IsZero() {
+		return fmt.Errorf("allocation response is missing its durable generation")
+	}
+	message, err := portAllocationEvidence(*response)
+	if err != nil {
+		return err
+	}
+	response.Signature, err = installation.SignAllocation(message)
+	return err
+}
+
+func VerifyPortAllocation(response PortAllocationResponse, publicKey string) error {
+	if response.Generation == 0 || response.IssuedAt.IsZero() {
+		return fmt.Errorf("allocation proof is missing its durable generation")
+	}
+	message, err := portAllocationEvidence(response)
+	if err != nil {
+		return err
+	}
+	return nodeidentity.VerifyAllocationSignature(publicKey, message, response.Signature)
 }
 
 type portAllocationRegistry struct {
-	SchemaVersion int                            `json:"schemaVersion"`
-	Allocations   map[string]portAllocationEntry `json:"allocations"`
-	UpdatedAt     time.Time                      `json:"updatedAt"`
+	SchemaVersion  int                            `json:"schemaVersion"`
+	Allocations    map[string]portAllocationEntry `json:"allocations"`
+	NextGeneration uint64                         `json:"nextGeneration"`
+	UpdatedAt      time.Time                      `json:"updatedAt"`
 }
 
 type portAllocationEntry struct {
@@ -64,6 +105,8 @@ type portAllocationEntry struct {
 	HostIP        string    `json:"hostIp"`
 	HostPort      int       `json:"hostPort"`
 	ContainerPort int       `json:"containerPort"`
+	Generation    uint64    `json:"generation"`
+	IssuedAt      time.Time `json:"issuedAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
@@ -106,6 +149,15 @@ func AllocatePort(ctx context.Context, dataDir string, req PortAllocationRequest
 	}
 	if existing, ok := registry.Allocations[key]; ok && existing.ContainerPort == req.ContainerPort && existing.HostIP == req.HostIP {
 		if !hostPortUsedByOtherService(usedPorts[existing.HostPort], req) {
+			registry.NextGeneration++
+			existing.Generation = registry.NextGeneration
+			existing.IssuedAt = time.Now().UTC()
+			existing.UpdatedAt = existing.IssuedAt
+			registry.Allocations[key] = existing
+			registry.UpdatedAt = existing.UpdatedAt
+			if err := writePortAllocationRegistry(path, registry); err != nil {
+				return nil, err
+			}
 			return portAllocationResponse(key, existing), nil
 		}
 	}
@@ -124,11 +176,12 @@ func AllocatePort(ctx context.Context, dataDir string, req PortAllocationRequest
 			reserved[allocation.HostPort] = true
 		}
 	}
-
 	hostPort, err := chooseAllocatedPort(req, reserved)
 	if err != nil {
 		return nil, err
 	}
+	registry.NextGeneration++
+	issuedAt := time.Now().UTC()
 	allocation := portAllocationEntry{
 		Kind:          req.Kind,
 		Project:       req.Project,
@@ -139,7 +192,9 @@ func AllocatePort(ctx context.Context, dataDir string, req PortAllocationRequest
 		HostIP:        req.HostIP,
 		HostPort:      hostPort,
 		ContainerPort: req.ContainerPort,
-		UpdatedAt:     time.Now().UTC(),
+		Generation:    registry.NextGeneration,
+		IssuedAt:      issuedAt,
+		UpdatedAt:     issuedAt,
 	}
 	registry.SchemaVersion = portAllocationSchemaVersion
 	registry.Allocations[key] = allocation
@@ -388,6 +443,27 @@ func readPortAllocationRegistry(path string) (portAllocationRegistry, error) {
 	if registry.Allocations == nil {
 		registry.Allocations = make(map[string]portAllocationEntry)
 	}
+	// Upgrade pre-generation registries deterministically before they can be
+	// signed. New generations remain monotonic for the lifetime of the node.
+	keys := make([]string, 0, len(registry.Allocations))
+	for key := range registry.Allocations {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		entry := registry.Allocations[key]
+		if entry.Generation == 0 {
+			registry.NextGeneration++
+			entry.Generation = registry.NextGeneration
+			entry.IssuedAt = entry.UpdatedAt
+			if entry.IssuedAt.IsZero() {
+				entry.IssuedAt = time.Now().UTC()
+			}
+			registry.Allocations[key] = entry
+		} else if entry.Generation > registry.NextGeneration {
+			registry.NextGeneration = entry.Generation
+		}
+	}
 	return registry, nil
 }
 
@@ -428,6 +504,8 @@ func portAllocationResponse(key string, allocation portAllocationEntry) *PortAll
 		HostIP:        allocation.HostIP,
 		HostPort:      allocation.HostPort,
 		ContainerPort: allocation.ContainerPort,
+		Generation:    allocation.Generation,
+		IssuedAt:      allocation.IssuedAt,
 		Key:           key,
 	}
 }

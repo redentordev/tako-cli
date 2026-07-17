@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/mesh"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/upgradeprotocol"
 )
 
 func TestServerStatusOverUnixSocket(t *testing.T) {
@@ -67,7 +69,10 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 			if status.Version != "test" {
 				t.Fatalf("unexpected version %q", status.Version)
 			}
-			if len(status.Capabilities) != 8 || status.Capabilities[0] != CapabilityContainerArgvV1 || status.Capabilities[1] != CapabilityContainerRuntimeControlsV1 || status.Capabilities[2] != CapabilityImageBuildOptionsV1 || status.Capabilities[3] != CapabilityExecOneOffControlsV1 || status.Capabilities[4] != CapabilityServiceFilesV1 || status.Capabilities[5] != CapabilityProxyTrustedProxiesV1 || status.Capabilities[6] != CapabilityProxyCertsV1 || status.Capabilities[7] != CapabilityAcmeDNSV1 {
+			if status.UpgradeProtocol != upgradeprotocol.Current || status.MinimumUpgradeProtocol != upgradeprotocol.Current {
+				t.Fatalf("unexpected upgrade protocol window %d/%d", status.UpgradeProtocol, status.MinimumUpgradeProtocol)
+			}
+			if len(status.Capabilities) != 12 || status.Capabilities[0] != CapabilityContainerArgvV1 || status.Capabilities[1] != CapabilityContainerRuntimeControlsV1 || status.Capabilities[2] != CapabilityImageBuildOptionsV1 || status.Capabilities[3] != CapabilityImageDescriptorV1 || status.Capabilities[4] != CapabilityNodePlatformV1 || status.Capabilities[5] != CapabilityExecOneOffControlsV1 || status.Capabilities[6] != CapabilityServiceFilesV1 || status.Capabilities[7] != CapabilityProxyTrustedProxiesV1 || status.Capabilities[8] != CapabilityProxyCertsV1 || status.Capabilities[9] != CapabilityAcmeDNSV1 || status.Capabilities[10] != CapabilityNodeIdentityV1 || status.Capabilities[11] != CapabilityNodeUpgradeV1 {
 				t.Fatalf("unexpected capabilities %#v", status.Capabilities)
 			}
 			return
@@ -77,6 +82,112 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 	}
 
 	t.Fatalf("takod status was not reachable: %v", lastErr)
+}
+
+func TestServerStatusExposesImmutableInstallationIdentity(t *testing.T) {
+	useTempProxyPaths(t)
+	dir, err := os.MkdirTemp("/tmp", "takod-identity-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	restoreCommands := useFakeCommands(t, filepath.Join(dir, "commands.log"))
+	defer restoreCommands()
+	identityPath := filepath.Join(dir, "identity.json")
+	identity, err := nodeidentity.New(
+		"11111111-1111-4111-8111-111111111111",
+		"22222222-2222-4222-8222-222222222222",
+		"node-1",
+		[]string{nodeidentity.RoleWorker, nodeidentity.RoleControlPlane},
+		time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := nodeidentity.Create(identityPath, *identity); err != nil {
+		t.Fatal(err)
+	}
+
+	socket := filepath.Join(dir, "takod.sock")
+	server := NewServerWithOptions(socket, filepath.Join(dir, "data"), "test", ServerOptions{
+		NodeName:     "node-1",
+		IdentityFile: identityPath,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-errCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("takod server did not stop")
+		}
+	})
+
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, "unix", socket)
+	}}}
+	var lastErr error
+	for index := 0; index < 200; index++ {
+		response, requestErr := client.Get("http://takod/v1/status")
+		if requestErr == nil {
+			defer response.Body.Close()
+			var status Status
+			if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+				t.Fatal(err)
+			}
+			if status.Identity == nil || !status.Identity.Matches(identity.ClusterID, identity.NodeID) {
+				t.Fatalf("status identity = %#v, want %#v", status.Identity, identity)
+			}
+			if got := strings.Join(status.EnrollmentRoles, ","); got != "control-plane,worker" {
+				t.Fatalf("enrollment roles = %q, want immutable bootstrap facts", got)
+			}
+			if status.Node != nil {
+				t.Fatalf("mutable node metadata unexpectedly populated: %#v", status.Node)
+			}
+			return
+		}
+		lastErr = requestErr
+		select {
+		case runErr := <-errCh:
+			t.Fatalf("takod stopped before status was reachable: %v", runErr)
+		default:
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("takod status was not reachable: %v", lastErr)
+}
+
+func TestServerRejectsNodeNameIdentityMismatchBeforeListening(t *testing.T) {
+	dir := t.TempDir()
+	identityPath := filepath.Join(dir, "identity.json")
+	identity, err := nodeidentity.New(
+		"11111111-1111-4111-8111-111111111111",
+		"22222222-2222-4222-8222-222222222222",
+		"node-1",
+		[]string{nodeidentity.RoleWorker},
+		time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := nodeidentity.Create(identityPath, *identity); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(dir, "takod.sock")
+	server := NewServerWithOptions(socket, filepath.Join(dir, "data"), "test", ServerOptions{
+		NodeName:     "node-2",
+		IdentityFile: identityPath,
+	})
+	err = server.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "does not match installation identity") {
+		t.Fatalf("Run error = %v, want identity mismatch", err)
+	}
+	if _, statErr := os.Lstat(socket); !os.IsNotExist(statErr) {
+		t.Fatalf("socket should not be created after identity mismatch: %v", statErr)
+	}
 }
 
 func TestNewTakodHTTPServerSetsHeaderTimeout(t *testing.T) {
@@ -296,6 +407,22 @@ func TestHandleProxyFileRejectsInvalidJSON(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleProxyFileRejectsV1ManifestOnEnrolledNode(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	installation, err := nodeidentity.New("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "node-1", []string{nodeidentity.RoleWorker}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.installation = installation
+	request := ProxyFileRequest{Name: "demo.json", Content: `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["app.example.com"],"upstreams":["http://web:3000"]}]}`}
+	body, _ := json.Marshal(request)
+	recorder := httptest.NewRecorder()
+	server.handleProxyFile(recorder, httptest.NewRequest(http.MethodPut, "/v1/proxy-file", bytes.NewReader(body)))
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "version 2 destination proofs") {
+		t.Fatalf("enrolled v1 proxy response = %d %q", recorder.Code, recorder.Body.String())
 	}
 }
 

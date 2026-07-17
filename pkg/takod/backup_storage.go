@@ -2,7 +2,10 @@ package takod
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path"
@@ -38,10 +41,98 @@ type BackupObjectRetention struct {
 	RetentionDays int
 }
 
+type BackupObjectInfo struct {
+	Size         int64
+	LastModified time.Time
+}
+
 var (
 	uploadBackupObjectS3With = uploadBackupObjectS3
 	cleanupBackupObjectsWith = cleanupBackupObjectsS3
+	downloadBackupObjectWith = downloadBackupObjectS3
 )
+
+// DownloadBackupObjectExact refuses an object whose declared or streamed size
+// differs from expectedSize. This bounds disk use and makes upload readback
+// prove the exact newly uploaded object rather than merely any valid bundle.
+func DownloadBackupObjectExact(ctx context.Context, storage BackupStorageConfig, key, destination string, expectedSize int64) error {
+	storage = normalizeBackupStorage(storage)
+	if err := ValidateBackupStorage(storage); err != nil {
+		return err
+	}
+	key = strings.TrimSpace(key)
+	if key == "" || strings.HasPrefix(key, "/") || strings.Contains(key, "..") || hasControlChars(key) {
+		return fmt.Errorf("backup object key is invalid")
+	}
+	if strings.TrimSpace(destination) == "" {
+		return fmt.Errorf("backup download destination is required")
+	}
+	if expectedSize <= 0 {
+		return fmt.Errorf("backup download expected size is invalid")
+	}
+	return downloadBackupObjectWith(ctx, storage, key, destination, expectedSize)
+}
+
+func InspectBackupObject(ctx context.Context, storage BackupStorageConfig, key string) (*BackupObjectInfo, error) {
+	storage = normalizeBackupStorage(storage)
+	if err := ValidateBackupStorage(storage); err != nil {
+		return nil, err
+	}
+	key = strings.TrimSpace(key)
+	if key == "" || strings.HasPrefix(key, "/") || strings.Contains(key, "..") || hasControlChars(key) {
+		return nil, fmt.Errorf("backup object key is invalid")
+	}
+	client, err := backupS3Client(ctx, storage)
+	if err != nil {
+		return nil, err
+	}
+	response, err := client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(storage.Bucket), Key: aws.String(key)})
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect backup object: %w", err)
+	}
+	info := &BackupObjectInfo{}
+	if response.ContentLength != nil {
+		info.Size = *response.ContentLength
+	}
+	if response.LastModified != nil {
+		info.LastModified = response.LastModified.UTC()
+	}
+	return info, nil
+}
+
+// HashBackupObjectExact verifies the remote length and hashes it as a bounded
+// stream, avoiding a controller-disk copy of persistent workload backups.
+func HashBackupObjectExact(ctx context.Context, storage BackupStorageConfig, key string, expectedSize int64) (string, error) {
+	storage = normalizeBackupStorage(storage)
+	if err := ValidateBackupStorage(storage); err != nil {
+		return "", err
+	}
+	key = strings.TrimSpace(key)
+	if key == "" || strings.HasPrefix(key, "/") || strings.Contains(key, "..") || hasControlChars(key) || expectedSize <= 0 {
+		return "", fmt.Errorf("backup object key or expected size is invalid")
+	}
+	client, err := backupS3Client(ctx, storage)
+	if err != nil {
+		return "", err
+	}
+	response, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(storage.Bucket), Key: aws.String(key)})
+	if err != nil {
+		return "", fmt.Errorf("failed to download backup object for hashing: %w", err)
+	}
+	defer response.Body.Close()
+	if response.ContentLength == nil || *response.ContentLength != expectedSize {
+		return "", fmt.Errorf("backup object size does not match evidence")
+	}
+	hash := sha256.New()
+	written, err := io.Copy(hash, io.LimitReader(response.Body, expectedSize+1))
+	if err != nil {
+		return "", err
+	}
+	if written != expectedSize {
+		return "", fmt.Errorf("backup object body size does not match evidence")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
 
 func UploadBackupObject(ctx context.Context, storage BackupStorageConfig, object BackupObject) (*BackupRemoteInfo, error) {
 	storage = normalizeBackupStorage(storage)
@@ -176,11 +267,15 @@ func uploadBackupObjectS3(ctx context.Context, storage BackupStorageConfig, obje
 	defer file.Close()
 
 	key := backupObjectKey(storage.Prefix, object)
+	contentType := "application/gzip"
+	if strings.HasSuffix(object.Path, ".tako-recovery") {
+		contentType = "application/octet-stream"
+	}
 	_, err = client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(storage.Bucket),
 		Key:         aws.String(key),
 		Body:        file,
-		ContentType: aws.String("application/gzip"),
+		ContentType: aws.String(contentType),
 		Metadata: map[string]string{
 			"tako-project":     object.Project,
 			"tako-environment": object.Environment,
@@ -197,6 +292,51 @@ func uploadBackupObjectS3(ctx context.Context, storage BackupStorageConfig, obje
 		Key:      key,
 		Endpoint: storage.Endpoint,
 	}, nil
+}
+
+func downloadBackupObjectS3(ctx context.Context, storage BackupStorageConfig, key, destination string, expectedSize int64) error {
+	client, err := backupS3Client(ctx, storage)
+	if err != nil {
+		return err
+	}
+	response, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(storage.Bucket), Key: aws.String(key)})
+	if err != nil {
+		return fmt.Errorf("failed to download backup object: %w", err)
+	}
+	defer response.Body.Close()
+	if expectedSize > 0 && (response.ContentLength == nil || *response.ContentLength != expectedSize) {
+		return fmt.Errorf("downloaded backup object size does not match expected upload")
+	}
+	file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	failed := true
+	defer func() {
+		_ = file.Close()
+		if failed {
+			_ = os.Remove(destination)
+		}
+	}()
+	reader := io.Reader(response.Body)
+	if expectedSize > 0 {
+		reader = io.LimitReader(response.Body, expectedSize+1)
+	}
+	written, err := io.Copy(file, reader)
+	if err != nil {
+		return fmt.Errorf("download backup object body: %w", err)
+	}
+	if expectedSize > 0 && written != expectedSize {
+		return fmt.Errorf("downloaded backup object body size does not match expected upload")
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	failed = false
+	return nil
 }
 
 func cleanupBackupObjectsS3(ctx context.Context, storage BackupStorageConfig, retention BackupObjectRetention) error {

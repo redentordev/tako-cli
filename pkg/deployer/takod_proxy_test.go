@@ -373,7 +373,7 @@ func TestRenderTakodProxyDynamicConfigSupportsDynamicDomainOnlyRoute(t *testing.
 	if route.DynamicDomain == nil {
 		t.Fatalf("dynamicDomain missing in route: %#v", route)
 	}
-	wantAsk := "http://api:4000/api/domains/authorize"
+	wantAsk := "http://" + runtimeid.ContainerAlias("demo", "production", "api", 1) + ":4000/api/domains/authorize"
 	if route.DynamicDomain.AskURL != wantAsk {
 		t.Fatalf("askUrl = %q, want %q", route.DynamicDomain.AskURL, wantAsk)
 	}
@@ -805,6 +805,51 @@ func TestACMEDNSCapabilityPreflightFailsBeforeMutation(t *testing.T) {
 	}
 	if mutations != 0 {
 		t.Fatalf("mutations = %d, want zero", mutations)
+	}
+}
+
+func TestRemoteMeshCapabilityPreflightFailsBeforeMutation(t *testing.T) {
+	assignments := map[string][]takodAssignment{
+		"web": {{ServerName: "node-b", Slot: 1}},
+	}
+	if !proxyAssignmentsRequireRemote([]string{"node-a"}, assignments) {
+		t.Fatal("remote assignment was not detected during proxy preflight")
+	}
+	if proxyAssignmentsRequireRemote([]string{"node-b"}, assignments) {
+		t.Fatal("local assignment was incorrectly classified as remote")
+	}
+	requirement := takodProxyCapabilityRequirement{
+		Capability: takod.CapabilityProxyRemoteMeshRoutesV1,
+		Feature:    "authoritative remote mesh proxy routes",
+	}
+	mutations := 0
+	err := runTakodProxyReconcile(func() error {
+		return preflightTakodProxyRequirements([]string{"node-a"}, []takodProxyCapabilityRequirement{requirement}, func(server string, requirement takodProxyCapabilityRequirement) error {
+			return &takodclient.CapabilityRequiredError{Server: server, Capability: requirement.Capability, Feature: requirement.Feature}
+		})
+	}, func() error {
+		mutations++
+		return nil
+	})
+	var capabilityErr *takodclient.CapabilityRequiredError
+	if !errors.As(err, &capabilityErr) || capabilityErr.Capability != takod.CapabilityProxyRemoteMeshRoutesV1 {
+		t.Fatalf("remote mesh preflight error = %v", err)
+	}
+	if mutations != 0 {
+		t.Fatalf("remote mesh preflight allowed %d mutations", mutations)
+	}
+}
+
+func TestDynamicAskPreflightMatchesRenderedFirstAssignment(t *testing.T) {
+	assignments := []takodAssignment{{ServerName: "node-b", Slot: 1}, {ServerName: "node-a", Slot: 1}}
+	if dynamicAskAssignmentRequiresRemote("node-a", assignments) {
+		t.Fatal("unused remote dynamic-ask replica forced remote capability")
+	}
+	if !dynamicAskAssignmentRequiresRemote("node-b", assignments) {
+		t.Fatal("sorted first dynamic-ask assignment is remote from node-b")
+	}
+	if assignments[0].ServerName != "node-b" {
+		t.Fatal("dynamic-ask preflight mutated caller assignment order")
 	}
 }
 

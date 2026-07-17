@@ -46,10 +46,10 @@ app and included first-time create work.
   --build-cache-prune-interval 0` disables that loop for custom installs.
 - Build-backed services can opt into `deployment.build.strategy: local` to build
   on the developer or CI machine with `docker buildx build --platform
-  linux/$arch --load` and push directly to each assigned server with
-  psviderski/unregistry's `docker pussh` plugin. `auto` tries the same local
-  path and falls back to the remote takod builder if local Docker, buildx,
-  docker-pussh, SSH auth, or remote Docker prerequisites are not available.
+  linux/$arch --load` and import the exact immutable image through each
+  assigned server's structured takod transport. `auto` tries the same local
+  path and falls back to the remote takod builder if local Docker or buildx is
+  not available.
 - Docker can still list a dangling image when a running container references an
   untagged image. Tako leaves those alone because Docker does not consider them
   reclaimable.
@@ -65,9 +65,6 @@ app and included first-time create work.
 - Local Docker build handoff from Docker Desktop, Colima, or rootless Docker.
 - CI runner timing against a remote node.
 - Cache behavior after a remote node is destroyed and replaced.
-- Containerd image-store cleanup behavior on remote hosts that use Docker's
-  classic image store. Upstream unregistry can leave an extra containerd copy
-  when Docker must pull back from the temporary registry.
 
 ## Next Optimization Work
 

@@ -82,42 +82,51 @@ type DesiredBuildDocument struct {
 // nested fields that belong to deployment configuration, not state identity, are
 // represented without importing pkg/config.
 type DesiredServiceDocument struct {
-	APIVersion      string                    `json:"apiVersion,omitempty"`
-	Kind            string                    `json:"kind,omitempty"`
-	WorkloadKind    string                    `json:"workloadKind,omitempty"`
-	Name            string                    `json:"name"`
-	Type            string                    `json:"type,omitempty"`
-	Image           string                    `json:"image,omitempty"`
-	ImageFrom       string                    `json:"imageFrom,omitempty"`
-	Build           string                    `json:"build,omitempty"`
-	BuildArgKeys    []string                  `json:"buildArgKeys,omitempty"`
-	BuildTarget     string                    `json:"buildTarget,omitempty"`
-	Command         string                    `json:"command,omitempty"`
-	CommandArgs     []string                  `json:"commandArgs,omitempty"`
-	Entrypoint      string                    `json:"entrypoint,omitempty"`
-	EntrypointArgs  []string                  `json:"entrypointArgs,omitempty"`
-	Labels          map[string]string         `json:"labels,omitempty"`
-	Port            int                       `json:"port,omitempty"`
-	Replicas        int                       `json:"replicas"`
-	Restart         string                    `json:"restart,omitempty"`
-	Persistent      bool                      `json:"persistent,omitempty"`
-	Placement       json.RawMessage           `json:"placement,omitempty"`
-	Domains         []string                  `json:"domains,omitempty"`
-	Volumes         []string                  `json:"volumes,omitempty"`
-	Files           []ServiceFileDocument     `json:"files,omitempty"`
-	EnvKeys         []string                  `json:"envKeys,omitempty"`
-	EnvFile         bool                      `json:"envFile,omitempty"`
-	User            string                    `json:"user,omitempty"`
-	WorkingDir      string                    `json:"workingDir,omitempty"`
-	StopGracePeriod string                    `json:"stopGracePeriod,omitempty"`
-	Init            bool                      `json:"init,omitempty"`
-	ExtraHosts      []string                  `json:"extraHosts,omitempty"`
-	Ulimits         map[string]UlimitDocument `json:"ulimits,omitempty"`
-	ShmSize         string                    `json:"shmSize,omitempty"`
-	SecretRefs      []string                  `json:"secretRefs,omitempty"`
-	DependsOn       []string                  `json:"dependsOn,omitempty"`
-	HealthCheck     json.RawMessage           `json:"healthCheck,omitempty"`
-	DeployStrategy  string                    `json:"deployStrategy,omitempty"`
+	APIVersion      string                      `json:"apiVersion,omitempty"`
+	Kind            string                      `json:"kind,omitempty"`
+	WorkloadKind    string                      `json:"workloadKind,omitempty"`
+	Name            string                      `json:"name"`
+	Type            string                      `json:"type,omitempty"`
+	Image           string                      `json:"image,omitempty"`
+	ImageFrom       string                      `json:"imageFrom,omitempty"`
+	Build           string                      `json:"build,omitempty"`
+	BuildArgKeys    []string                    `json:"buildArgKeys,omitempty"`
+	BuildTarget     string                      `json:"buildTarget,omitempty"`
+	Command         string                      `json:"command,omitempty"`
+	CommandArgs     []string                    `json:"commandArgs,omitempty"`
+	Entrypoint      string                      `json:"entrypoint,omitempty"`
+	EntrypointArgs  []string                    `json:"entrypointArgs,omitempty"`
+	Labels          map[string]string           `json:"labels,omitempty"`
+	Port            int                         `json:"port,omitempty"`
+	Replicas        int                         `json:"replicas"`
+	Assignments     []ReplicaAssignmentDocument `json:"assignments,omitempty"`
+	Restart         string                      `json:"restart,omitempty"`
+	Persistent      bool                        `json:"persistent,omitempty"`
+	Placement       json.RawMessage             `json:"placement,omitempty"`
+	Domains         []string                    `json:"domains,omitempty"`
+	Volumes         []string                    `json:"volumes,omitempty"`
+	Files           []ServiceFileDocument       `json:"files,omitempty"`
+	EnvKeys         []string                    `json:"envKeys,omitempty"`
+	EnvFile         bool                        `json:"envFile,omitempty"`
+	User            string                      `json:"user,omitempty"`
+	WorkingDir      string                      `json:"workingDir,omitempty"`
+	StopGracePeriod string                      `json:"stopGracePeriod,omitempty"`
+	Init            bool                        `json:"init,omitempty"`
+	ExtraHosts      []string                    `json:"extraHosts,omitempty"`
+	Ulimits         map[string]UlimitDocument   `json:"ulimits,omitempty"`
+	ShmSize         string                      `json:"shmSize,omitempty"`
+	SecretRefs      []string                    `json:"secretRefs,omitempty"`
+	DependsOn       []string                    `json:"dependsOn,omitempty"`
+	HealthCheck     json.RawMessage             `json:"healthCheck,omitempty"`
+	DeployStrategy  string                      `json:"deployStrategy,omitempty"`
+	RemovalPending  bool                        `json:"removalPending,omitempty"`
+}
+
+// ReplicaAssignmentDocument is the persisted sticky replica-to-node binding.
+type ReplicaAssignmentDocument struct {
+	Slot   int    `json:"slot"`
+	NodeID string `json:"nodeId"`
+	Node   string `json:"node"`
 }
 
 type ServiceFileDocument struct {

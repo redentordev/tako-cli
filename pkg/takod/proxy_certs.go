@@ -37,9 +37,11 @@ var (
 )
 
 type ProxyCertificatePushRequest struct {
-	Domain  string `json:"domain"`
-	CertPEM string `json:"certPem"`
-	KeyPEM  string `json:"keyPem"`
+	Project     string `json:"project,omitempty"`
+	Environment string `json:"environment,omitempty"`
+	Domain      string `json:"domain"`
+	CertPEM     string `json:"certPem"`
+	KeyPEM      string `json:"keyPem"`
 }
 
 type ProxyCertificateMetadata struct {
@@ -85,12 +87,23 @@ func PushProxyCertificate(ctx context.Context, req ProxyCertificatePushRequest) 
 	if err != nil {
 		return nil, err
 	}
+	entry.Metadata.OwnerProject = strings.TrimSpace(req.Project)
+	entry.Metadata.OwnerEnvironment = strings.TrimSpace(req.Environment)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	proxyCertificateMu.Lock()
 	defer proxyCertificateMu.Unlock()
+	if existing, loadErr := loadExactProxyCertificate(domain, false); loadErr == nil {
+		if req.Project != "" || req.Environment != "" {
+			if existing.Metadata.OwnerProject != req.Project || existing.Metadata.OwnerEnvironment != req.Environment {
+				return nil, fmt.Errorf("certificate domain is already owned by another project/environment")
+			}
+		}
+	} else if !os.IsNotExist(loadErr) {
+		return nil, loadErr
+	}
 	if err := publishProxyCertificate(ctx, entry, []byte(req.CertPEM), []byte(req.KeyPEM)); err != nil {
 		return nil, err
 	}

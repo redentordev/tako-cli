@@ -2,9 +2,14 @@ package deployer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -12,8 +17,11 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	takounregistry "github.com/redentordev/tako-cli/pkg/unregistry"
@@ -182,63 +190,63 @@ func TestNormalizeLinuxBuildPlatform(t *testing.T) {
 	}
 }
 
-func TestUnregistryPushTarget(t *testing.T) {
-	target, key, err := unregistryPushTarget("node-a", config.ServerConfig{
-		Host:   "203.0.113.10",
-		User:   "deploy",
-		Port:   2222,
-		SSHKey: "/keys/id_ed25519",
-	})
-	if err != nil {
-		t.Fatalf("unregistryPushTarget returned error: %v", err)
-	}
-	if target != "deploy@203.0.113.10:2222" {
-		t.Fatalf("target = %q, want deploy@203.0.113.10:2222", target)
-	}
-	if key != "/keys/id_ed25519" {
-		t.Fatalf("key = %q, want /keys/id_ed25519", key)
-	}
-}
-
-func TestUnregistryPushTargetRejectsPasswordOnlyAuth(t *testing.T) {
-	_, _, err := unregistryPushTarget("node-a", config.ServerConfig{
-		Host:     "203.0.113.10",
-		User:     "deploy",
-		Password: "${SSH_PASSWORD}",
-	})
-	if err == nil {
-		t.Fatal("unregistryPushTarget should reject password-only auth")
-	}
-	if !strings.Contains(err.Error(), "password-only SSH auth") {
-		t.Fatalf("error = %q, want password-only guidance", err)
-	}
-}
-
-func TestLocalBuildPushesSelectedPlatform(t *testing.T) {
-	client := &recordingLocalImageClient{}
-	deployer := &Deployer{
-		config: &config.Config{
-			Project: config.ProjectConfig{Name: "demo", Version: "1.0.0"},
-			Servers: map[string]config.ServerConfig{
-				"node-a": {Host: "203.0.113.10", User: "deploy", SSHKey: "/keys/id_ed25519"},
-			},
-		},
-		localImageClient: client,
-		verbose:          false,
-	}
-	if err := deployer.pushLocalImageToTakodNode(context.Background(), client, "demo/web:abc123", "linux/arm64", "node-a"); err != nil {
-		t.Fatalf("pushLocalImageToTakodNode returned error: %v", err)
-	}
-	if len(client.pushes) != 1 {
-		t.Fatalf("pushes = %#v, want 1", client.pushes)
-	}
-	if got := client.pushes[0].Platform; got != "linux/arm64" {
-		t.Fatalf("push platform = %q, want linux/arm64", got)
-	}
-}
-
 type recordingLocalImageClient struct {
-	pushes []takounregistry.PushRequest
+	exported []string
+}
+
+func TestLocalImageImportUsesAuthenticatedLocalRuntimeWithoutSSH(t *testing.T) {
+	if os.Geteuid() <= 0 {
+		t.Skip("test requires a non-root peer UID")
+	}
+	dir, err := os.MkdirTemp("/tmp", "tako-local-image-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "worker.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation, err := nodeidentity.New("", "", "node-a", []string{nodeidentity.RoleWorker}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedID := "sha256:" + strings.Repeat("a", 64)
+	imported := false
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/status":
+			_ = json.NewEncoder(w).Encode(takodclient.AgentStatus{Runtime: "takod", Capabilities: []string{nodeidentity.Capability}, Identity: &installation.Identity})
+		case "/v1/images/inspect":
+			_ = json.NewEncoder(w).Encode(takod.ImageDescriptor{Image: "demo/web:revision", Exists: false})
+		case "/v1/images/import":
+			_, _ = io.Copy(io.Discard, r.Body)
+			imported = r.URL.Query().Get("expectedImageId") == expectedID
+			_ = json.NewEncoder(w).Encode(takod.ImageImportResponse{Image: "demo/web:revision"})
+		default:
+			http.NotFound(w, r)
+		}
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	cfg := &config.Config{Servers: map[string]config.ServerConfig{"node-a": {
+		Transport: "local", ClusterID: installation.ClusterID, NodeID: installation.NodeID, WorkerUID: os.Geteuid(),
+	}}}
+	factory, err := nodeclient.NewFactoryWithLocalSocket(cfg, nil, takodclient.DefaultSocket, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployer := &Deployer{config: cfg, runtimeFactory: factory}
+	local := &recordingLocalImageClient{}
+	if err := deployer.importLocalImageToTakodNode(context.Background(), local, takounregistry.ImageDescriptor{
+		ImageID: expectedID, OS: "linux", Architecture: "arm64", DaemonID: "local-daemon",
+	}, "demo/web:revision", "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	if !imported || len(local.exported) != 1 || local.exported[0] != expectedID {
+		t.Fatalf("structured local import imported=%v exports=%v", imported, local.exported)
+	}
 }
 
 func (c *recordingLocalImageClient) CheckAvailable(context.Context) error {
@@ -249,9 +257,14 @@ func (c *recordingLocalImageClient) Build(context.Context, takounregistry.BuildR
 	return nil
 }
 
-func (c *recordingLocalImageClient) Push(_ context.Context, req takounregistry.PushRequest) error {
-	c.pushes = append(c.pushes, req)
-	return nil
+func (c *recordingLocalImageClient) Inspect(context.Context, string) (takounregistry.ImageDescriptor, error) {
+	return takounregistry.ImageDescriptor{ImageID: "sha256:" + strings.Repeat("a", 64), OS: "linux", Architecture: "arm64", DaemonID: "local-daemon"}, nil
+}
+
+func (c *recordingLocalImageClient) Export(_ context.Context, imageID string, output io.Writer) error {
+	c.exported = append(c.exported, imageID)
+	_, err := io.WriteString(output, "image archive")
+	return err
 }
 
 func TestBaseContextDefaultsToBackgroundAndThreadsCancellation(t *testing.T) {
@@ -303,53 +316,50 @@ func TestTakodRevisionPruneRequestsAreSortedAndKeepActiveRevision(t *testing.T) 
 	}
 }
 
-func TestShouldInstallTakodRelease(t *testing.T) {
+func TestValidateTakodAgentForAppOperationNeverRequestsImplicitUpgrade(t *testing.T) {
 	tests := []struct {
-		name       string
-		version    string
-		statusJSON string
-		statusErr  error
-		want       bool
+		name      string
+		version   string
+		status    takod.Status
+		wantError string
 	}{
 		{
-			name:       "matching release",
-			version:    "v1.2.3",
-			statusJSON: `{"version":"v1.2.3"}`,
-			want:       false,
+			name:    "matching release",
+			version: "v1.2.3",
+			status:  takod.Status{Runtime: "takod", Version: "v1.2.3"},
 		},
 		{
-			name:       "different release",
-			version:    "v1.2.4",
-			statusJSON: `{"version":"v1.2.3"}`,
-			want:       true,
-		},
-		{
-			name:      "missing agent",
+			name:      "different release requires explicit upgrade",
 			version:   "v1.2.4",
-			statusErr: fmt.Errorf("takod unavailable"),
-			want:      true,
+			status:    takod.Status{Runtime: "takod", Version: "v1.2.3"},
+			wantError: "tako upgrade servers --server node-a",
 		},
 		{
-			name:    "dev build does not download release",
+			name:      "wrong runtime",
+			version:   "v1.2.4",
+			status:    takod.Status{Runtime: "other", Version: "v1.2.4"},
+			wantError: "unexpected node runtime",
+		},
+		{
+			name:    "dev build accepts runtime without mutating it",
 			version: "dev",
-			want:    false,
+			status:  takod.Status{Runtime: "takod", Version: "older"},
 		},
 		{
-			name:    "empty version does not download release",
+			name:    "empty version accepts runtime without mutating it",
 			version: "",
-			want:    false,
+			status:  takod.Status{Runtime: "takod", Version: "older"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			deploy := &Deployer{cliVersion: tt.version, config: &config.Config{}}
-			got := deploy.shouldInstallTakodRelease(fakeTakodStatusExecutor{
-				output: tt.statusJSON,
-				err:    tt.statusErr,
-			})
-			if got != tt.want {
-				t.Fatalf("shouldInstallTakodRelease() = %v, want %v", got, tt.want)
+			err := validateTakodAgentForAppOperation("node-a", tt.version, tt.status)
+			if tt.wantError == "" && err != nil {
+				t.Fatalf("validate returned error: %v", err)
+			}
+			if tt.wantError != "" && (err == nil || !strings.Contains(err.Error(), tt.wantError)) {
+				t.Fatalf("validate error = %v, want %q", err, tt.wantError)
 			}
 		})
 	}
@@ -502,6 +512,54 @@ func TestRunTakodBuildStrategyPreflightsEveryRemoteBuild(t *testing.T) {
 				t.Fatalf("phases = %q, want %q", got, tt.wantPhases)
 			}
 		})
+	}
+}
+
+func TestRemoteBuilderServersExcludeWorkerOnlyNodesEvenWhenTargeted(t *testing.T) {
+	cfg := &config.Config{
+		Servers: map[string]config.ServerConfig{
+			"controller": {Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleBuilder, nodeidentity.RoleControlPlane, nodeidentity.RoleWorker}},
+			"worker":     {Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleWorker}},
+		},
+		Environments: map[string]config.EnvironmentConfig{"production": {Servers: []string{"controller", "worker"}}},
+	}
+	deploy := &Deployer{config: cfg, environment: "production", targetServers: []string{"worker"}}
+	builders, err := deploy.remoteBuilderServers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(builders) != 1 || builders[0] != "controller" {
+		t.Fatalf("remote builders = %v", builders)
+	}
+	delete(cfg.Servers, "controller")
+	cfg.Environments["production"] = config.EnvironmentConfig{Servers: []string{"worker"}}
+	if _, err := deploy.remoteBuilderServers(); err == nil || !strings.Contains(err.Error(), "builder-role") {
+		t.Fatalf("worker-only remote builder error = %v", err)
+	}
+}
+
+func TestTakodMutationTargetsExcludeReadyConnectivityMembers(t *testing.T) {
+	cfg := &config.Config{
+		Servers: map[string]config.ServerConfig{
+			"local": {Lifecycle: nodeidentity.NodeLifecycleSchedulable},
+			"ready": {Lifecycle: nodeidentity.NodeLifecycleReady},
+		},
+		Environments: map[string]config.EnvironmentConfig{"production": {Servers: []string{"local", "ready"}}},
+	}
+	deploy := &Deployer{config: cfg, environment: "production", targetServers: []string{"local", "ready"}}
+	targets, err := deploy.getTakodTargetServers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0] != "local" {
+		t.Fatalf("takod mutation targets = %v", targets)
+	}
+}
+
+func TestExactImageSourcesIncludeDedicatedBuilderOutsidePlacement(t *testing.T) {
+	got := mergeTakodImageSourceNames([]string{"worker"}, []string{"builder", "worker"})
+	if strings.Join(got, ",") != "worker,builder" {
+		t.Fatalf("exact image sources = %v", got)
 	}
 }
 
@@ -1058,35 +1116,6 @@ func TestReconcileServiceRequestTimeoutCoversHealthWindowPerReplica(t *testing.T
 	}
 }
 
-func TestConvergeRemoteImageBuildsOncePerPlatformAndTransfersExactImage(t *testing.T) {
-	groups := map[string][]string{"linux/arm64": {"arm-b", "arm-a"}, "linux/amd64": {"amd-b", "amd-a"}}
-	available := map[string]bool{"amd-b": true}
-	var builds []string
-	var transfers []string
-	err := convergeRemoteImageByPlatform(groups,
-		func(server string) bool { return available[server] },
-		func(platform string, source string) error {
-			builds = append(builds, platform+":"+source)
-			available[source] = true
-			return nil
-		},
-		func(source string, target string) error {
-			transfers = append(transfers, source+"->"+target)
-			available[target] = true
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(builds, []string{"linux/arm64:arm-a"}) {
-		t.Fatalf("builds = %#v", builds)
-	}
-	if !slices.Equal(transfers, []string{"amd-b->amd-a", "arm-a->arm-b"}) {
-		t.Fatalf("transfers = %#v", transfers)
-	}
-}
-
 func TestStreamExactImageTransferCancelsExporterWhenImporterFails(t *testing.T) {
 	importErr := errors.New("import failed")
 	started := make(chan struct{})
@@ -1365,7 +1394,7 @@ func TestPlanTakodAssignmentsHonorsPlacementConstraints(t *testing.T) {
 	cfg.Servers["node-c"] = config.ServerConfig{Host: "node-c.example.test", User: "root", Labels: map[string]string{"role": "web"}}
 	deploy := &Deployer{config: cfg, environment: "production"}
 
-	assignments, err := deploy.planTakodAssignments(&config.ServiceConfig{
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{
 		Replicas: 3,
 		Placement: &config.PlacementConfig{
 			Strategy:    "spread",
@@ -1393,7 +1422,7 @@ func TestPlanTakodAssignmentsGlobalUsesConstrainedTargets(t *testing.T) {
 	cfg.Servers["node-c"] = config.ServerConfig{Host: "node-c.example.test", User: "root", Labels: map[string]string{"role": "web"}}
 	deploy := &Deployer{config: cfg, environment: "production"}
 
-	assignments, err := deploy.planTakodAssignments(&config.ServiceConfig{
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{
 		Placement: &config.PlacementConfig{
 			Strategy:    "global",
 			Constraints: []string{"node.labels.role==web"},
@@ -1404,6 +1433,140 @@ func TestPlanTakodAssignmentsGlobalUsesConstrainedTargets(t *testing.T) {
 	}
 	if len(assignments) != 2 {
 		t.Fatalf("assignments = %#v, want two constrained global assignments", assignments)
+	}
+}
+
+func TestPlanTakodAssignmentsKeepsPriorSlotsAcrossJoinAndReorder(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-c", "node-a", "node-b"})
+	cfg.Servers["node-a"] = config.ServerConfig{Host: "a", User: "root", NodeID: "id-a"}
+	cfg.Servers["node-b"] = config.ServerConfig{Host: "b", User: "root", NodeID: "id-b"}
+	cfg.Servers["node-c"] = config.ServerConfig{Host: "c", User: "root", NodeID: "id-c"}
+	deploy := &Deployer{config: cfg, environment: "production"}
+	deploy.SetPriorAssignments(map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-b", NodeID: "id-b"}}})
+
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignments[0].ServerName != "node-b" || assignments[0].Slot != 1 {
+		t.Fatalf("prior singleton moved after join/reorder: %#v", assignments)
+	}
+	if assignments[1].Slot != 2 || assignments[1].ServerName == "node-b" {
+		t.Fatalf("scale-out did not add a stable new slot: %#v", assignments)
+	}
+}
+
+func TestPlanTakodAssignmentsInitialSingletonPrefersLocalControllerWorker(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"remote", "controller"})
+	cfg.Servers["remote"] = config.ServerConfig{Host: "remote", User: "root", NodeID: "id-r", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleWorker}}
+	cfg.Servers["controller"] = config.ServerConfig{Host: "127.0.0.1", User: "root", Transport: "local", NodeID: "id-c", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleControlPlane, nodeidentity.RoleWorker}}
+	deploy := &Deployer{config: cfg, environment: "production"}
+
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assignments) != 1 || assignments[0].ServerName != "controller" {
+		t.Fatalf("initial singleton assignments = %#v, want controller", assignments)
+	}
+}
+
+func TestPlanTakodAssignmentsDoesNotUseCallerLocalityAsPlacementPreference(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"local-worker", "controller"})
+	cfg.Servers["local-worker"] = config.ServerConfig{Host: "127.0.0.1", User: "root", Transport: "local", NodeID: "id-l", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleWorker}}
+	cfg.Servers["controller"] = config.ServerConfig{Host: "controller", User: "root", NodeID: "id-c", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleControlPlane, nodeidentity.RoleWorker}}
+	deploy := &Deployer{config: cfg, environment: "production"}
+
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignments[0].ServerName != "controller" {
+		t.Fatalf("caller-local worker influenced placement: %#v", assignments)
+	}
+}
+
+func TestPlanTakodAssignmentsFailsClosedOnNodeIdentityLoss(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a"})
+	deploy := &Deployer{config: cfg, environment: "production"}
+	deploy.SetPriorAssignments(map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-a", NodeID: "immutable-id"}}})
+
+	_, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 1})
+	if err == nil || !strings.Contains(err.Error(), "node identity") {
+		t.Fatalf("identity loss error = %v", err)
+	}
+}
+
+func TestPlanTakodAssignmentsScaleToZeroClearsPersistedSlots(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a"})
+	deploy := &Deployer{config: cfg, environment: "production"}
+	deploy.SetPriorAssignments(map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-a"}}})
+
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assignments) != 0 || len(deploy.ResolvedAssignments()["web"]) != 0 {
+		t.Fatalf("scale-to-zero retained assignments: %#v / %#v", assignments, deploy.ResolvedAssignments())
+	}
+}
+
+func TestCordonedStickyAssignmentIsRetainedButCannotBeMutated(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a", "node-b"})
+	cfg.Servers["node-a"] = config.ServerConfig{Host: "a", User: "root", NodeID: "id-a", Lifecycle: nodeidentity.NodeLifecycleCordoned, Roles: []string{nodeidentity.RoleWorker}}
+	cfg.Servers["node-b"] = config.ServerConfig{Host: "b", User: "root", NodeID: "id-b", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleWorker}}
+	deploy := &Deployer{config: cfg, environment: "production"}
+	deploy.SetPriorAssignments(map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-a", NodeID: "id-a"}}})
+
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignments[0].ServerName != "node-a" || assignments[1].ServerName != "node-b" {
+		t.Fatalf("cordoned retention/scale-out assignments = %#v", assignments)
+	}
+	if err := deploy.validateAssignmentMutationTargets("web", assignments); err == nil || !strings.Contains(err.Error(), "approve a drain or rebalance plan") {
+		t.Fatalf("cordoned mutation validation error = %v", err)
+	}
+}
+
+func TestScaleDownCannotEraseAssignmentOnCordonedNode(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a", "node-b"})
+	cfg.Servers["node-a"] = config.ServerConfig{Host: "a", User: "root", NodeID: "id-a", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleWorker}}
+	cfg.Servers["node-b"] = config.ServerConfig{Host: "b", User: "root", NodeID: "id-b", Lifecycle: nodeidentity.NodeLifecycleCordoned, Roles: []string{nodeidentity.RoleWorker}}
+	deploy := &Deployer{config: cfg, environment: "production"}
+	deploy.SetPriorAssignments(map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-a", NodeID: "id-a"}, {Slot: 2, Node: "node-b", NodeID: "id-b"}}})
+
+	_, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 1})
+	if err == nil || !strings.Contains(err.Error(), "cannot remove replica slot 2") {
+		t.Fatalf("cordoned scale-down error = %v", err)
+	}
+	_, err = deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 0})
+	if err == nil || !strings.Contains(err.Error(), "cannot remove replica slot 2") {
+		t.Fatalf("cordoned scale-to-zero error = %v", err)
+	}
+}
+
+func TestServiceOrJobRemovalCannotEraseCordonedAssignment(t *testing.T) {
+	for _, serviceName := range []string{"web", "nightly-job"} {
+		t.Run(serviceName, func(t *testing.T) {
+			cfg := testTakodDeployConfig([]string{"node-a"})
+			cfg.Servers["node-a"] = config.ServerConfig{Host: "a", User: "root", NodeID: "id-a", Lifecycle: nodeidentity.NodeLifecycleCordoned, Roles: []string{nodeidentity.RoleWorker}}
+			deploy := &Deployer{config: cfg, environment: "production"}
+			deploy.SetPriorAssignments(map[string][]scheduler.Assignment{serviceName: {{Slot: 1, Node: "node-a", NodeID: "id-a"}}})
+			if err := deploy.PreflightAssignmentRemovals([]string{serviceName}); err == nil || !strings.Contains(err.Error(), "cannot remove replica slot 1") {
+				t.Fatalf("removal preflight error = %v", err)
+			}
+		})
+	}
+}
+
+func TestServiceRemovalRequiresAuthoritativeAssignment(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a"})
+	deploy := &Deployer{config: cfg, environment: "production"}
+	err := deploy.PreflightAssignmentRemovals([]string{"orphan"})
+	if err == nil || !strings.Contains(err.Error(), "no authoritative replica assignment") {
+		t.Fatalf("removal without assignment error = %v", err)
 	}
 }
 

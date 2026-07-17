@@ -118,14 +118,17 @@ func TestTakodSystemdUnitGrantsTakoGroupSocketAccess(t *testing.T) {
 		"User=root",
 		"Group=tako",
 		"RuntimeDirectory=tako",
-		"RuntimeDirectoryMode=0770",
+		"RuntimeDirectoryMode=0750",
 		"UMask=0007",
 		"Requires=docker.service",
-		"ExecStart=/usr/local/bin/tako takod run --socket /run/tako/takod.sock --data-dir /var/lib/tako --node node-a --actual-refresh-interval 30s --build-cache-prune-interval 24h0m0s --build-cache-keep-storage 20GB",
+		"ExecStart=/usr/local/bin/tako takod run --socket /run/tako/takod.sock --data-dir /var/lib/tako --node node-a --identity-file /etc/tako/identity.json --actual-refresh-interval 30s --build-cache-prune-interval 24h0m0s --build-cache-keep-storage 20GB",
 	} {
 		if !strings.Contains(unit, required) {
 			t.Fatalf("systemd unit is missing %q:\n%s", required, unit)
 		}
+	}
+	if strings.Contains(unit, "RuntimeDirectoryMode=0770") {
+		t.Fatal("takod access group must not be able to replace socket directory entries")
 	}
 }
 

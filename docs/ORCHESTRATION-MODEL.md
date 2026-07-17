@@ -160,16 +160,12 @@ stable node key under `/etc/tako/wireguard`, writes `/etc/wireguard/tako.conf`,
 and brings up `wg-quick@tako`. One-node deployments still get the same
 interface, just without peer blocks.
 
-The node-local `takod` process listens on `/run/tako/takod.sock`. On released
-CLI builds, `tako setup`, `tako deploy`, `tako scale`, and `tako rollback`
-download the matching Linux release binary for the server architecture when the
-node agent is missing or running a different version, install it at
-`/usr/local/bin/tako`, and restart the systemd service. Development builds reuse
-an existing server binary when one is already installed. For local agent smoke
-tests, set `TAKO_TAKOD_BINARY` to a Linux tako binary to upload that binary
-before runtime preparation. Operators can also run `tako upgrade servers` to
-explicitly patch stale server-side agents, refresh the setup manifest, and
-verify `/v1/status` before reconciling application services.
+The node-local `takod` process listens on `/run/tako/takod.sock`. Node software
+changes belong only to explicit `tako setup` and `tako upgrade servers`
+lifecycle commands. Deploy, scale, rollback, and other application commands do
+not install or restart agents. They capability-check the running agent and fail
+before application mutation when a node upgrade is required. Development
+upgrades pass a Linux binary with `--takod-binary`.
 
 `takod` exposes health, status, actual container discovery, service container
 reconcile, proxy file updates, proxy container reconcile, logs, stats, metrics,
@@ -225,16 +221,11 @@ servers.
 `deployment.build.strategy: local` uses the developer or CI machine as the
 builder. Tako detects each assigned node's architecture, groups targets by
 `linux/amd64` or `linux/arm64`, runs `docker buildx build --platform ... --load`
-once per architecture, and transfers the loaded image to every assigned target
-with psviderski/unregistry's `docker pussh` plugin. `auto` tries this local path
-first and falls back to the remote takod builder if local Docker, buildx,
-docker-pussh, SSH key/agent auth, or remote Docker prerequisites are not ready.
-
-Local build mode requires Docker CLI plugin support and `docker pussh` on the
-client machine. The remote SSH user must be able to run Docker directly or with
-passwordless `sudo docker`, matching upstream docker-pussh requirements. Password
-only SSH auth from `tako.yaml` is not usable by docker-pussh because it uses the
-system OpenSSH client.
+once per architecture, selects the loaded immutable image ID, and imports that
+archive into every assigned target through the authenticated structured node
+transport. `auto` tries this local path first and falls back to the remote takod
+builder if local Docker or buildx is not ready. Local build mode requires no
+Docker SSH plugin and does not grant the client a remote Docker shell.
 
 Docker Desktop, Colima, and rootless Docker can be used as the local builder
 when buildx can produce the target platform and load it into local Docker. In
@@ -270,11 +261,9 @@ For build-based services in a multi-node environment, remote build mode builds
 once on one assigned node per target architecture, then streams that exact
 Docker image to same-architecture peers, skipping nodes where the exact image
 already exists. Local build mode builds once per target architecture on the
-client and pushes directly to every assigned node through docker-pussh. The
-docker-pussh path starts a temporary unregistry container on the target over SSH
-and transfers only missing layers; when the target Docker daemon does not use
-the containerd image store, upstream docker-pussh pulls the temporary registry
-image back into Docker's classic image store so takod can run it.
+client and streams the exact image ID to every assigned node through takod's
+image import API. Each target verifies digest, platform, and current Docker
+daemon identity before the deployment can reuse the result.
 
 Top-level `builds:` are scheduled before their selected consumers. Tako groups
 all selected services by build key and computes the union of their placement
@@ -491,12 +480,76 @@ Placement can also be filtered by supported node-label constraints such as
 `node.labels.role==web`. Stateful services should use `pinned` placement unless
 they are designed for multi-writer operation and external persistence.
 
+Replica placement is durable desired state, not a fresh calculation on every
+command. Each one-based replica slot is bound to the logical node and its
+immutable node ID. The first singleton prefers the local control-plane worker;
+scaling out assigns only new slots, while joining nodes or reordering the
+environment server list leaves healthy assignments untouched. A normal deploy
+fails closed if an existing assignment is outside the current placement or is
+on a cordoned/draining node, so configuration drift cannot become an implicit
+rebalance.
+
+The resolved assignment intent is replicated before the first image,
+container, schedule, or route mutation. If a process crashes, a later service
+fails, or final actual-state capture cannot complete, the chosen slots remain
+durable and desired/actual drift exposes the incomplete operation. A retry
+therefore reuses the same nodes instead of rescheduling from membership order.
+When upgrading desired state that predates assignments, Tako adopts only slots
+that can be matched to deterministic live container identities in the per-node
+actual snapshot. It fails closed instead of inventing a location when that
+evidence is missing or ambiguous.
+
+Service deletion uses the same write-ahead rule. Before stateless or job
+cleanup, desired state retains the prior sanitized configuration, image, and
+slot bindings with `removalPending: true`. Cleanup success is followed by a
+normal desired-state write that removes the entry. A crash or partial cleanup
+therefore leaves enough authority for an exact retry; missing prior
+configuration or an unreachable assigned node fails closed before the marker
+is written.
+Narrow workflows carry the complete prior desired record for services outside
+their scope through both intent and completion writes. Consequently scale,
+promotion, rollback, direct-image deployment, and targeted deploy cannot erase
+an unrelated in-progress removal. Only a full deploy owns the transition from
+`removalPending` to absent, and an actual-only workload without a proven slot
+binding requires explicit adoption before removal.
+
+Movement starts with a review artifact:
+
+```bash
+tako placement plan cordon --node node-2 --file cordon.json
+tako placement plan drain --node node-2 --file drain.json
+tako placement plan rebalance --file rebalance.json
+tako placement verify drain.json --plan-id sha256:...
+tako placement apply drain.json --plan-id sha256:...
+```
+
+Plans bind current/proposed slot assignments to the exact input desired
+revision and produce a stable content digest for review. Drain excludes the
+target from destinations; cordon reports replicas that remain in place while
+the node becomes ineligible for new slots; rebalance makes only the minimum deterministic
+stateless moves needed to reduce skew. Plan generation is read-only. Apply
+rechecks the digest and exact desired revision before and after acquiring a
+controller fence, copies the exact image, starts destinations before cleaning
+sources, and persists a resumable placement intent. On cordoned or draining
+sources, the signed placement fence authorizes only a reconcile with no desired
+containers. Ordinary deploy/scale paths never consume a plan or bypass node
+lifecycle latches.
+
 For persistent services, placement is part of the lifecycle contract. In a
 multi-node environment, `persistent: true` requires `placement.strategy:
 pinned` or `global`. `pinned` is the singleton accessory/database shape; `global`
 means one independent stateful instance per selected node. Persistent services
 do not support `replicas > 1`; scale stateless clients, or use external/clustered
 storage when the stateful system itself needs high availability.
+Any proposed movement of a persistent service or a service with volume mounts
+is left in place and emitted as a blocking `requiresVolumeMigration` step. Tako
+does not automatically move node-local data; backup, restore, validation, and
+cutover must be designed and reviewed separately.
+Removing a still-running persistent service from `tako.yaml` is rejected: keep
+the declaration so its node binding remains authoritative until an explicit
+persistent-workload removal workflow has completed. Stateless and job removal
+also fails before desired intent changes if any assigned node is cordoned or
+otherwise unable to receive cleanup.
 
 ## Mesh + Ingress
 
@@ -615,15 +668,16 @@ checks validity and hostname/wildcard coverage, and rejects expired material.
 Caddyfiles reference only entries revalidated from disk. The store is mounted
 read-only into stock Caddy, and proxy recreation regenerates and validates the
 Caddyfile before starting the container, guarding the reboot/startup path that
-`caddy adapt` alone cannot validate. Push/remove operations are lease-free and
-serialized locally; atomic replacement plus graceful reload makes a concurrent
-deploy benign, with the last valid Caddyfile winning.
+`caddy adapt` alone cannot validate. On enrolled nodes, push/remove operations
+carry controller fencing for the owning project/environment and persisted
+certificate ownership must match before removal. Local serialization and
+atomic replacement keep reloads coherent with route rendering.
 
-Certificate files and keys are intentionally excluded from replicated state,
-drift, and backups. They are lost with the node and must be re-pushed; CLI-only
-operators must keep their own secure copies. `tako certs ls` exposes source and
-expiry so an external control plane can track replacement without ever reading
-private keys back from the node.
+Certificate files and keys are intentionally excluded from application state,
+drift, and volume backups. The root-only `tako platform backup create` recovery
+bundle includes their protected node-local store together with PaaS state and
+uploads it outside node 1. `tako certs ls` exposes source and expiry without
+reading private keys back through an application API.
 
 Embedded DNS-01 is the second writer into this same store. Its environment
 provider credentials deliberately persist in a 0600 node-local file so takod's
@@ -649,7 +703,21 @@ app/stage/service/slot preferred port, but `takod` checks existing Docker port
 bindings and its allocation registry before accepting it, then returns the
 actual assigned port for container publish and proxy rendering. This lets
 unrelated apps with common service names such as `web` share the same server
-without taking each other's mesh upstream port.
+without taking each other's mesh upstream port. Each signed allocation has a
+monotonic node-local generation and is bound to the exact active controller
+operation ID/token. The controller verifies worker identity, mesh address,
+operation binding, and schedulability, while durable per-node/key high-water
+tombstones prevent an omitted proof from being replayed. Authorization is
+publish-before-commit: node 1 signs a durable proposal, every non-controller
+edge must acknowledge it, and only then does the controller commit that exact
+state. An unavailable edge therefore prevents a withdrawal from committing.
+Omission revokes prior generations. A separately monotonic allocation-authority
+generation is distributed in the signed snapshot, so route churn does not
+invalidate an in-flight membership fence. Edge nodes stop and quarantine
+invalid stored routes before committing a revocation locally.
+This boundary is checked before mutation and across the complete stored route
+set on every render. Enrollment quarantines legacy remote manifests and stops
+an already-running proxy before readiness.
 
 The built-in load balancer strategies are intentionally narrow:
 `round_robin` uses Caddy's default load balancing, and `sticky` enables
@@ -739,17 +807,80 @@ CI runner
   tako deploy --yes
        |
        v
-  connect to every target environment node
+  connect to the controller and explicit mutation targets
        |
        v
-  acquire remote leases + reconcile selected nodes
+  acquire controller authority + activate target fences
 ```
 
-Deploy, rollback, scale, maintenance, live, remove, cleanup, destroy, and state
-repair acquire remote leases through `takod` on the target nodes before
-mutating runtime or state. CI and local machines compete for the same per-node
-leases, so concurrent operations fail fast instead of racing. The local `.tako`
-lock remains as a same-machine guard.
+`upgrade servers` is a separate privileged node-lifecycle transaction, not a
+deployment phase. On enrolled clusters it validates the lifecycle protocol
+range and pinned host identities across the authoritative cluster inventory,
+upgrades a worker canary and remaining workers, then rechecks every worker and upgrades the sole
+controller last. Each node retains a durable rollback binary until the new
+agent and protected platform worker report the target contract. Explicitly
+targeting the controller is rejected unless all other enrolled workers already
+run the target release and protocol. The authoritative controller holds one
+renewable cluster upgrade lease for the full plan, while each target holds a
+separate short renewable transaction lease. Candidate transfer occurs before
+that node lease. Contending coordinators and per-node transactions are
+rejected. Node enrollment, removal, and authoritative inventory publication
+take the same node guard and reject an active upgrade lease, so a lifecycle
+change cannot interleave between upgrade phases. Under the acquired node lease,
+Tako revalidates immutable identity,
+membership generation, lifecycle, and roles. The checksum-verified candidate
+then checks the same contract against protected identity and inventory files
+immediately before publishing itself. It also
+refuses a target release older than the running agent; protected downgrades use
+the cold disaster-recovery workflow instead.
+
+Interrupted node transactions are recovered before `takod.service` or
+`tako-platform-worker.service` starts on boot. Commit and rollback publish a
+durable terminal marker before cleaning evidence, so power loss can never turn
+a committed upgrade into a rollback or destroy the only rollback copy. The
+commit marker remains until the next transaction acknowledges it, which also
+resolves a lost SSH success response without rolling back a completed upgrade.
+If a CLI dies after publication, the short node lease expires and the next
+coordinator restores pending rollback evidence without requiring a reboot.
+Boot recovery removes only the local node lease; a controller-global lease
+owned by an external coordinator is retained until release or expiry.
+
+Enrolled clusters use the control node as a cluster-global single-writer
+operation-ID and lease authority. Payloads remain strictly bound to one
+project/environment, but shared Docker tags, pruning, proxy state, and
+allocation generations cannot be mutated concurrently by another project. It
+issues a monotonic signed fence bound to the current membership generation and
+an explicit target set; only those nodes are contacted and every structured
+mutation carries both the renewable fence and its private random holder
+credential. The credential hash is part of the signed fence, while status and
+contender responses redact bearer authority. Renewal keeps the immediately
+previous signed grant valid only during target fan-out, then revocation clears
+both grants.
+Unrelated unavailable workers do not block local-only work, while an
+unavailable target fails closed. Worker high-water marks and controller phases
+are durable, expired operations reconcile into history, and partitioned
+writers cannot obtain a second token. Legacy unenrolled configurations retain
+their per-node lease behavior. The local `.tako` lock remains a same-machine
+guard.
+
+`tako platform backup create` requires a 256-bit out-of-band
+`TAKO_RECOVERY_KEY` plus either externally verified persistent-workload object
+evidence or a no-persistent-workloads attestation. It takes an exclusive
+control-plane snapshot lock, proves that the local controller key owns the
+authoritative membership and exact published inventory, refuses an active
+controller operation, quiesces
+HTTP and background state writers, derives required volumes from authoritative
+desired state, downloads and hashes every fresh workload backup, and archives
+identity, membership, operation journals, environment bundles, PaaS data, and
+certificate state. The bounded traversal-safe tar/gzip stream is fed directly
+into chunked AES-256-GCM, so no plaintext controller archive is written to
+disk. The exact encrypted size and SHA-256 are authenticated locally, uploaded
+only over HTTPS, downloaded with a strict size bound, and compared again before
+success. `tako platform backup verify` requires the expected cluster ID and
+performs offline authenticated verification. `tako platform backup restore`
+decrypts, verifies, and extracts the same single input stream into a private
+sibling directory, then atomically publishes the requested staging directory
+only after final authentication; it never overwrites live controller paths.
 
 On shared nodes, destructive commands are app/stage scoped. `remove`,
 `destroy`, and default `cleanup` target resources identified by the current

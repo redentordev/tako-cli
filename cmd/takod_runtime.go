@@ -26,7 +26,7 @@ func cleanupViaTakod(client *ssh.Client, cfg *config.Config, request takod.Clean
 	return engine.CleanupViaTakod(client, cfg, request)
 }
 
-func actualStateViaTakod(client *ssh.Client, cfg *config.Config, environment string) (*takod.ActualStateResponse, error) {
+func actualStateViaTakod(client any, cfg *config.Config, environment string) (*takod.ActualStateResponse, error) {
 	var response takod.ActualStateResponse
 	output, err := takodclient.RequestJSON(
 		client,

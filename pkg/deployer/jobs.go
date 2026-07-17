@@ -34,8 +34,8 @@ func (d *Deployer) jobImageFor(serviceName string) string {
 
 // JobOwnerServer resolves the single node that runs a job's cron schedule:
 // the job's first placement target, deterministic for a stable config.
-func (d *Deployer) JobOwnerServer(service *config.ServiceConfig) (string, error) {
-	assignments, err := d.planTakodAssignments(service)
+func (d *Deployer) JobOwnerServer(serviceName string, service *config.ServiceConfig) (string, error) {
+	assignments, err := d.planTakodAssignments(serviceName, service)
 	if err != nil {
 		return "", err
 	}
@@ -129,9 +129,6 @@ func copyJobLabels(labels map[string]string) map[string]string {
 // absent from every other node's, so stale schedules (moved or removed
 // jobs) are unscheduled in the same pass.
 func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) error {
-	if d.sshPool == nil {
-		return fmt.Errorf("ssh pool not initialized")
-	}
 	targetServers, err := d.getTakodTargetServers()
 	if err != nil {
 		return fmt.Errorf("failed to get takod target servers: %w", err)
@@ -151,7 +148,7 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 	jobsByNode := make(map[string][]takod.JobSpec)
 	for _, name := range names {
 		service := services[name]
-		owner, err := d.JobOwnerServer(&service)
+		owner, err := d.JobOwnerServer(name, &service)
 		if err != nil {
 			return fmt.Errorf("job %s: %w", name, err)
 		}
@@ -202,7 +199,7 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 		}
 		return nil
 	}, func(serverName string) error {
-		client, err := d.getEnvironmentClient(serverName)
+		client, err := d.getRuntimeClient(serverName)
 		if err != nil {
 			return err
 		}

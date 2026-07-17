@@ -20,7 +20,7 @@ func TestExecuteCertificateNodeRequestsPreflightsAllNodesBeforeMutation(t *testi
 	current := &fakeCertificateExecutor{status: `{"capabilities":["proxy.certs-v1"]}`, response: `{"certificate":{"domain":"example.com","source":"pushed"}}`}
 	nodes := []engine.CertsNodeResult{{Server: "node-a"}, {Server: "node-b"}}
 	clients := map[string]takodclient.RequestExecutor{"node-a": stale, "node-b": current}
-	_, err := executeCertificateNodeRequests(context.Background(), takodclient.DefaultSocket, nodes, clients, "push", "example.com", &takod.ProxyCertificatePushRequest{Domain: "example.com", CertPEM: "cert", KeyPEM: "private-key"})
+	_, err := executeCertificateNodeRequests(context.Background(), takodclient.DefaultSocket, nodes, clients, "demo", "production", "push", "example.com", &takod.ProxyCertificatePushRequest{Domain: "example.com", CertPEM: "cert", KeyPEM: "private-key"})
 	var capabilityErr *takodclient.CapabilityRequiredError
 	if !errors.As(err, &capabilityErr) || capabilityErr.Server != "node-a" {
 		t.Fatalf("error = %v, want node-a CapabilityRequiredError", err)
@@ -35,7 +35,7 @@ func TestExecuteCertificateNodeRequestsPreflightsAllNodesBeforeMutation(t *testi
 
 func TestExecuteCertificateNodeRequestsSendsPrivateKeyOnlyInRequestBody(t *testing.T) {
 	executor := &fakeCertificateExecutor{status: `{"capabilities":["proxy.certs-v1"]}`, response: `{"certificate":{"domain":"example.com","source":"pushed"}}`}
-	nodes, err := executeCertificateNodeRequests(context.Background(), takodclient.DefaultSocket, []engine.CertsNodeResult{{Server: "node-a"}}, map[string]takodclient.RequestExecutor{"node-a": executor}, "push", "example.com", &takod.ProxyCertificatePushRequest{Domain: "example.com", CertPEM: "certificate", KeyPEM: "PRIVATE-KEY-MATERIAL"})
+	nodes, err := executeCertificateNodeRequests(context.Background(), takodclient.DefaultSocket, []engine.CertsNodeResult{{Server: "node-a"}}, map[string]takodclient.RequestExecutor{"node-a": executor}, "demo", "production", "push", "example.com", &takod.ProxyCertificatePushRequest{Domain: "example.com", CertPEM: "certificate", KeyPEM: "PRIVATE-KEY-MATERIAL"})
 	if err != nil {
 		t.Fatalf("executeCertificateNodeRequests returned error: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestCertificateRejectedInputIsTypedAndEchoedKeyIsRedacted(t *testing.T) {
 		status:   `{"capabilities":["proxy.certs-v1"]}`,
 		response: `{"error":"invalid keyPem: PRIVATE-KEY-MATERIAL"}` + "\n__TAKO_HTTP_STATUS__:400",
 	}
-	nodes, err := executeCertificateNodeRequests(context.Background(), takodclient.DefaultSocket, []engine.CertsNodeResult{{Server: "node-a"}}, map[string]takodclient.RequestExecutor{"node-a": executor}, "push", "example.com", &takod.ProxyCertificatePushRequest{Domain: "example.com", CertPEM: "certificate", KeyPEM: privateKey})
+	nodes, err := executeCertificateNodeRequests(context.Background(), takodclient.DefaultSocket, []engine.CertsNodeResult{{Server: "node-a"}}, map[string]takodclient.RequestExecutor{"node-a": executor}, "demo", "production", "push", "example.com", &takod.ProxyCertificatePushRequest{Domain: "example.com", CertPEM: "certificate", KeyPEM: privateKey})
 	if engine.Classify(err) != engine.ClassInvalid {
 		t.Fatalf("Classify(%v) = %d, want ClassInvalid", err, engine.Classify(err))
 	}

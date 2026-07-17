@@ -10,12 +10,15 @@ tako-upgrade-servers - Upgrade server-side takod agents to this CLI version
 
 
 .SH DESCRIPTION
-Upgrade server-side takod agents for the selected environment.
+Upgrade server-side takod agents in the authoritative enrolled cluster inventory.
 
 .PP
 This command patches stale or missing takod agents without changing application
 services. It installs the matching Tako release binary, restarts the takod
-systemd service, refreshes /etc/tako/version.json, and verifies /v1/status.
+systemd service, refreshes /etc/tako/version.json, and verifies /v1/status. An
+enrolled cluster is upgraded worker-first and controller-last, independent of
+application environment subsets. Legacy configurations retain environment
+selection behavior.
 
 .PP
 Use --dry-run first to see current agent versions. Development builds must pass
@@ -33,7 +36,7 @@ version "dev".
 
 .PP
 \fB-s\fP, \fB--server\fP=""
-	Server to upgrade (default: all servers in environment)
+	Server to upgrade (default: authoritative enrolled cluster inventory; legacy: active environment)
 
 .PP
 \fB--takod-binary\fP=""
@@ -70,7 +73,7 @@ version "dev".
   # Show current server agent versions
   tako upgrade servers --dry-run
 
-  # Patch every server in the active environment
+  # Patch every node in the authoritative enrolled cluster
   tako upgrade servers
 
   # Patch one server

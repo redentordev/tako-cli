@@ -109,10 +109,11 @@ deploy path.
 
 If the runner should build images instead of the VPS, set
 `deployment.build.strategy: auto` or pass `tako deploy --build-strategy local`.
-That path requires the runner to have Docker, buildx, and psviderski/unregistry's
-`docker pussh` plugin installed, plus SSH key or agent auth to the remote Docker
-host. `auto` falls back to the remote takod builder when those prerequisites are
-not available.
+That path requires the runner to have Docker and buildx. Tako exports the exact
+local image ID and imports it through the authenticated structured node
+transport, so it does not require a Docker SSH plugin or separate remote-Docker
+permissions. `auto` falls back to the remote takod builder when local Docker or
+buildx is unavailable.
 
 ```yaml
 name: Deploy

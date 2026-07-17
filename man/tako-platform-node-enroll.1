@@ -1,0 +1,119 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-platform-node-enroll - Enroll a prepared server as an unschedulable worker
+
+
+.SH SYNOPSIS
+\fBtako platform node enroll [flags]\fP
+
+
+.SH DESCRIPTION
+Enroll a prepared server as an unschedulable worker
+
+
+.SH OPTIONS
+\fB--controller-host\fP=""
+	Worker-reachable node 1 SSH host already pinned in known_hosts (required)
+
+.PP
+\fB--controller-host-key-fingerprint\fP=""
+	Expected SHA256 node 1 SSH host-key fingerprint
+
+.PP
+\fB--controller-mesh-host\fP=""
+	Worker-reachable node 1 WireGuard endpoint host (required)
+
+.PP
+\fB--controller-port\fP=22
+	Node 1 SSH port
+
+.PP
+\fB--controller-user\fP="root"
+	Node 1 SSH user
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for enroll
+
+.PP
+\fB--host\fP=""
+	SSH host already pinned in known_hosts (required)
+
+.PP
+\fB--host-key-fingerprint\fP=""
+	Expected SHA256 SSH host-key fingerprint
+
+.PP
+\fB--identity-file\fP="/etc/tako/identity.json"
+	Local immutable controller identity
+
+.PP
+\fB--inventory-file\fP="/etc/tako/cluster-inventory.json"
+	Trusted cluster inventory snapshot
+
+.PP
+\fB--mesh-ip\fP=""
+	Worker address inside the platform mesh CIDR (required)
+
+.PP
+\fB--node\fP=""
+	Logical worker name (required)
+
+.PP
+\fB--node-id\fP=""
+	Expected immutable worker node UUID (required)
+
+.PP
+\fB--password-env\fP="TAKO_SSH_PASSWORD"
+	Environment variable containing the SSH password
+
+.PP
+\fB--port\fP=22
+	SSH port
+
+.PP
+\fB--ssh-key\fP=""
+	SSH private key path
+
+.PP
+\fB--state-dir\fP="/var/lib/tako/platform"
+	Protected controller platform state directory
+
+.PP
+\fB--token-env\fP="TAKO_JOIN_TOKEN"
+	Environment variable containing the single-use join token
+
+.PP
+\fB--user\fP="root"
+	SSH user
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-platform-node(1)\fP

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/recovery"
 	"github.com/robfig/cron/v3"
 )
 
@@ -153,6 +154,7 @@ type JobScheduler struct {
 	cron    *cron.Cron
 	// runJob is the container-execution seam; tests stub it.
 	runJob func(ctx context.Context, spec JobSpec, container string, output io.Writer) (int, error)
+	admit  func(...string) error
 
 	mu      sync.Mutex
 	entries map[string]cron.EntryID
@@ -539,6 +541,14 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 		}
 		_ = cleanupServiceFileVersions(spec.Project, spec.Environment, spec.Name, keep)
 	}()
+	if s.admit != nil {
+		if err := s.admit(s.dataDir); err != nil {
+			finished := time.Now().UTC()
+			record := JobRunRecord{Project: spec.Project, Environment: spec.Environment, Job: spec.Name, Trigger: trigger, StartedAt: started, FinishedAt: finished, DurationMs: finished.Sub(started).Milliseconds(), ExitCode: -1, Status: JobRunStatusFailed, Output: "job denied by resource admission: " + err.Error()}
+			s.appendRunRecord(record)
+			return record
+		}
+	}
 
 	timeoutSeconds := spec.TimeoutSeconds
 	if timeoutSeconds == 0 {
@@ -606,6 +616,12 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 // runScheduledJob is the cron entry point: it resolves the current spec so
 // a re-applied job fires with its latest definition.
 func (s *JobScheduler) runScheduledJob(key string) {
+	unlock, err := recovery.AcquireMutationLock(s.dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "takod scheduled job %s snapshot lock failed: %v\n", key, err)
+		return
+	}
+	defer unlock()
 	s.mu.Lock()
 	spec, ok := s.specs[key]
 	reserved := ok && !s.running[key]
