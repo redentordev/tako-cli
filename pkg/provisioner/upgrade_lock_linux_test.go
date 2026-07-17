@@ -170,7 +170,14 @@ func runUpgradeLeaseScript(root string, script string) ([]byte, error) {
 }
 
 func rewriteUpgradeScriptRoot(root string, script string) string {
-	script = strings.ReplaceAll(script, "/var/lib/tako", filepath.Join(root, "var", "lib", "tako"))
+	for production, fixture := range map[string]string{
+		"/var/lib/tako":       filepath.Join(root, "var", "lib", "tako"),
+		"/usr/local/bin":      filepath.Join(root, "usr", "local", "bin"),
+		"/usr/local/lib/tako": filepath.Join(root, "usr", "local", "lib", "tako"),
+		"/etc/tako":           filepath.Join(root, "etc", "tako"),
+	} {
+		script = strings.ReplaceAll(script, production, fixture)
+	}
 	// The production scripts deliberately require root ownership. These
 	// integration fixtures run as the CI account, so preserve every lock and
 	// mode assertion while substituting only the fixture owner.
