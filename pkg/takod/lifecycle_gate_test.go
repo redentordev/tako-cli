@@ -1,10 +1,14 @@
 package takod
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +26,32 @@ func TestEnrolledLifecycleGateHonorsDurableDeploymentDenyLatch(t *testing.T) {
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/reconcile-service", nil))
 	if recorder.Code != http.StatusConflict || calls != 0 {
 		t.Fatalf("durable deny latch was bypassed: status=%d calls=%d", recorder.Code, calls)
+	}
+}
+
+func TestPlacementFenceOnDrainingNodeAllowsCleanupButNotCreation(t *testing.T) {
+	server := lifecycleTestServer(t, nodeidentity.NodeLifecycleDraining, false)
+	inventory, err := nodeidentity.ReadInventory(server.inventoryFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fence := nodeidentity.OperationFence{Kind: nodeidentity.OperationFenceKind, ClusterID: inventory.ClusterID, ControllerNodeID: inventory.ControllerNodeID, MembershipGeneration: inventory.Generation, Project: "demo", Environment: "production", OperationID: "op-move", Operation: "placement-apply", Token: 1, TargetNodeIDs: []string{server.installation.NodeID}, IssuedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	bindTestOperationHolder(t, &fence)
+	if err := nodeidentity.SignOperationFence(&fence, server.installation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.activateWorkerFence(fence, testOperationHolderToken); err != nil {
+		t.Fatal(err)
+	}
+	fenceJSON, _ := json.Marshal(fence)
+	body := `{"project":"demo","environment":"production","service":"web","image":"demo/web:1","network":"tako-demo-production","containers":[{"name":"new-container"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/reconcile-service", bytes.NewBufferString(body))
+	request.Header.Set(OperationFenceHeader, base64.RawURLEncoding.EncodeToString(fenceJSON))
+	request.Header.Set(OperationHolderHeader, testOperationHolderToken)
+	recorder := httptest.NewRecorder()
+	server.enrolledLifecycleHandler(http.HandlerFunc(server.handleReconcileService)).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "cannot create containers") {
+		t.Fatalf("draining placement creation status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -47,7 +77,7 @@ func TestEnrolledLifecycleGateBlocksWorkloadMutationUntilSchedulable(t *testing.
 	if err := nodeidentity.CreateInventory(path, inventory); err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{installation: installation, inventoryFile: path}
+	server := &Server{installation: installation, inventoryFile: path, dataDir: t.TempDir()}
 	calls := 0
 	handler := server.enrolledLifecycleHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
 	recorder := httptest.NewRecorder()
@@ -63,8 +93,24 @@ func TestEnrolledLifecycleGateBlocksWorkloadMutationUntilSchedulable(t *testing.
 	if err := nodeidentity.ReplaceInventory(path, inventory); err != nil {
 		t.Fatal(err)
 	}
+	fence := nodeidentity.OperationFence{
+		Kind: nodeidentity.OperationFenceKind, ClusterID: installation.ClusterID, ControllerNodeID: installation.NodeID,
+		MembershipGeneration: inventory.Generation, Project: "demo", Environment: "production", OperationID: "op-test", Operation: "deploy", Token: 1,
+		TargetNodeIDs: []string{installation.NodeID}, IssuedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	bindTestOperationHolder(t, &fence)
+	if err := nodeidentity.SignOperationFence(&fence, installation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.activateWorkerFence(fence, testOperationHolderToken); err != nil {
+		t.Fatal(err)
+	}
+	fenceJSON, _ := json.Marshal(fence)
 	recorder = httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/reconcile-service", nil))
+	request := httptest.NewRequest(http.MethodPost, "/v1/reconcile-service", nil)
+	request.Header.Set(OperationFenceHeader, base64.RawURLEncoding.EncodeToString(fenceJSON))
+	request.Header.Set(OperationHolderHeader, testOperationHolderToken)
+	handler.ServeHTTP(recorder, request)
 	if calls != 1 {
 		t.Fatalf("schedulable mutation calls=%d, want 1", calls)
 	}
@@ -124,5 +170,7 @@ func lifecycleTestServer(t *testing.T, lifecycle string, schedulable bool) *Serv
 	if err := nodeidentity.CreateInventory(path, inventory); err != nil {
 		t.Fatal(err)
 	}
-	return &Server{installation: installation, inventoryFile: path}
+	server := &Server{installation: installation, inventoryFile: path, dataDir: t.TempDir()}
+	t.Cleanup(server.releaseAnyOperationBarrier)
+	return server
 }

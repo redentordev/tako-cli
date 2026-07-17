@@ -151,7 +151,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	ctx = leaseCtx
 	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("→ Acquired remote scale leases: %s\n", leaseSet.Summary()))
 
-	sourceServerName, err := PreferredRuntimeServer(cfg, serverNames)
+	sourceServerName, err := AuthoritativeStateServer(cfg, serverNames)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +423,7 @@ func (e *Engine) recordScaleDeploymentState(
 		return fmt.Errorf("failed to save remote scale history: %w", err)
 	}
 
-	if len(serverNames) > 1 {
+	if len(serverNames) > 1 && ShouldReplicateDeploymentHistory(cfg) {
 		replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, verbose)
 		history, err := stateManager.LoadHistoryContext(ctx)
 		if err != nil {

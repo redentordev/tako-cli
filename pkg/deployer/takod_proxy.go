@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -178,6 +179,21 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 	return runTakodProxyReconcile(
 		func() error { return d.PreflightTakodProxyCapabilities(services) },
 		func() error {
+			configs := make(map[string][]byte, len(proxyServers))
+			hasPublic := make(map[string]bool, len(proxyServers))
+			// Render first so every worker allocation proof is collected before
+			// the controller atomically replaces this scope's authority set.
+			for _, serverName := range proxyServers {
+				dynamicConfig, hasPublicServices, renderErr := d.renderTakodProxyDynamicConfigForNodeWithOptions(services, serverName, options)
+				if renderErr != nil {
+					return renderErr
+				}
+				configs[serverName] = dynamicConfig
+				hasPublic[serverName] = hasPublicServices
+			}
+			if err := d.authorizeTakodMeshAllocations(configs, proxyServers); err != nil {
+				return err
+			}
 			return runTakodNodeActions(targetNames, func(serverName string) error {
 				target := targetByName[serverName]
 				client, err := d.getRuntimeClient(serverName)
@@ -194,10 +210,7 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 					return nil
 				}
 
-				dynamicConfig, hasPublicServices, err := d.renderTakodProxyDynamicConfigForNodeWithOptions(services, serverName, options)
-				if err != nil {
-					return err
-				}
+				dynamicConfig, hasPublicServices := configs[serverName], hasPublic[serverName]
 				if !hasPublicServices {
 					if err := d.removeTakodProxyConfig(client); err != nil {
 						return fmt.Errorf("failed to remove proxy config: %w", err)
@@ -229,6 +242,113 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 			})
 		},
 	)
+}
+
+func (d *Deployer) authorizeTakodMeshAllocations(configs map[string][]byte, proxyServers []string) error {
+	controllerName := ""
+	for name, server := range d.config.Servers {
+		if server.ClusterID == "" {
+			continue
+		}
+		if server.HasPlatformRole(nodeidentity.RoleControlPlane) {
+			if controllerName != "" && controllerName != name {
+				return fmt.Errorf("multiple controller authorities are configured")
+			}
+			controllerName = name
+		}
+	}
+	if controllerName == "" {
+		return nil
+	}
+	allocations := make([]nodeidentity.ActiveAllocation, 0)
+	seen := map[string]struct{}{}
+	for _, data := range configs {
+		if len(data) == 0 {
+			continue
+		}
+		manifest, err := takod.ParseProxyRouteManifest(string(data))
+		if err != nil {
+			return err
+		}
+		for _, route := range manifest.Routes {
+			destinations := append([]takod.ProxyDestination(nil), route.Destinations...)
+			if route.DynamicDomain != nil && route.DynamicDomain.Destination != nil {
+				destinations = append(destinations, *route.DynamicDomain.Destination)
+			}
+			for _, proof := range destinations {
+				if proof.Kind != takod.ProxyDestinationMesh {
+					continue
+				}
+				key := proof.NodeID + "\x00" + proof.AllocationKey + "\x00" + strconv.FormatUint(proof.Generation, 10)
+				if _, duplicate := seen[key]; duplicate {
+					continue
+				}
+				seen[key] = struct{}{}
+				allocations = append(allocations, nodeidentity.ActiveAllocation{
+					Kind: takod.PortAllocationKindMeshUpstream, Project: proof.Project, Environment: proof.Environment,
+					Service: proof.Service, Revision: proof.Revision, Slot: proof.Slot, HostIP: proof.HostIP,
+					HostPort: proof.HostPort, ContainerPort: proof.ContainerPort, Key: proof.AllocationKey,
+					ClusterID: proof.ClusterID, NodeID: proof.NodeID, Generation: proof.Generation,
+					IssuedAt: proof.IssuedAt, OperationID: proof.OperationID, FenceToken: proof.FenceToken, Signature: proof.Signature,
+				})
+			}
+		}
+	}
+	sort.Slice(allocations, func(i, j int) bool {
+		if allocations[i].NodeID != allocations[j].NodeID {
+			return allocations[i].NodeID < allocations[j].NodeID
+		}
+		return allocations[i].Key < allocations[j].Key
+	})
+	controller, err := d.getRuntimeClient(controllerName)
+	if err != nil {
+		return fmt.Errorf("connect controller allocation authority: %w", err)
+	}
+	output, err := takodclient.RequestJSONWithContext(d.baseContext(), controller, d.takodSocket(), "POST", "/v1/platform/allocations/authorize", takod.AllocationAuthorizationRequest{
+		Project: d.config.Project.Name, Environment: d.environment, Allocations: allocations, Phase: "prepare",
+	})
+	if err != nil {
+		return fmt.Errorf("authorize remote mesh allocations: %w", err)
+	}
+	var prepared takod.AllocationAuthorizationResponse
+	if err := json.Unmarshal([]byte(output), &prepared); err != nil {
+		return fmt.Errorf("decode controller allocation inventory: %w", err)
+	}
+	if prepared.ProposalID == "" {
+		return nil
+	}
+	for _, serverName := range proxyServers {
+		if serverName == controllerName {
+			continue
+		}
+		client, err := d.getRuntimeClient(serverName)
+		if err != nil {
+			return err
+		}
+		nodeID := strings.ToLower(strings.TrimSpace(d.config.Servers[serverName].NodeID))
+		if nodeID == "" {
+			return fmt.Errorf("proxy node %s has no immutable node ID for allocation acknowledgement", serverName)
+		}
+		if _, err := takodclient.RequestJSONWithContext(d.baseContext(), controller, d.takodSocket(), "POST", "/v1/platform/allocations/authorize", takod.AllocationAuthorizationRequest{
+			Project: d.config.Project.Name, Environment: d.environment, Phase: "track", ProposalID: prepared.ProposalID, TargetNodeID: nodeID,
+		}); err != nil {
+			return fmt.Errorf("persist allocation publication intent for proxy node %s: %w", serverName, err)
+		}
+		if _, err := takodclient.RequestJSONWithContext(d.baseContext(), client, d.takodSocket(), "POST", "/v1/platform/inventory", prepared.Snapshot); err != nil {
+			return fmt.Errorf("publish allocation authority to proxy node %s: %w", serverName, err)
+		}
+		if _, err := takodclient.RequestJSONWithContext(d.baseContext(), controller, d.takodSocket(), "POST", "/v1/platform/allocations/authorize", takod.AllocationAuthorizationRequest{
+			Project: d.config.Project.Name, Environment: d.environment, Phase: "ack", ProposalID: prepared.ProposalID, TargetNodeID: nodeID,
+		}); err != nil {
+			return fmt.Errorf("persist allocation authority acknowledgement for proxy node %s: %w", serverName, err)
+		}
+	}
+	if _, err := takodclient.RequestJSONWithContext(d.baseContext(), controller, d.takodSocket(), "POST", "/v1/platform/allocations/authorize", takod.AllocationAuthorizationRequest{
+		Project: d.config.Project.Name, Environment: d.environment, Phase: "commit", ProposalID: prepared.ProposalID,
+	}); err != nil {
+		return fmt.Errorf("commit edge-acknowledged remote mesh allocations: %w", err)
+	}
+	return nil
 }
 
 func (d *Deployer) syncTakodProxyACMEForServices(client any, serverName string, services map[string]config.ServiceConfig) (*takod.ACMEDNSReconcileRequest, error) {
@@ -829,6 +949,8 @@ func (d *Deployer) proxyDestinationProof(proxyServerName string, assignment tako
 	proof.AllocationKey = evidence.Key
 	proof.Generation = evidence.Generation
 	proof.IssuedAt = evidence.IssuedAt
+	proof.OperationID = evidence.OperationID
+	proof.FenceToken = evidence.FenceToken
 	proof.Signature = evidence.Signature
 	proof.HostPort = evidence.HostPort
 	proof.HostIP = evidence.HostIP
@@ -844,7 +966,7 @@ func (d *Deployer) writeTakodProxyConfig(client any, data []byte) error {
 }
 
 func (d *Deployer) removeTakodProxyConfig(client any) error {
-	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "DELETE", takodclient.ProxyFileEndpoint(d.takodProxyConfigFileName()), nil); err != nil {
+	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "DELETE", takodclient.ScopedProxyFileEndpoint(d.config.Project.Name, d.environment, d.takodProxyConfigFileName()), nil); err != nil {
 		return err
 	}
 	return nil

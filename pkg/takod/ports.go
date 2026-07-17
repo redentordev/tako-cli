@@ -52,6 +52,8 @@ type PortAllocationResponse struct {
 	NodeID        string    `json:"nodeId,omitempty"`
 	Generation    uint64    `json:"generation,omitempty"`
 	IssuedAt      time.Time `json:"issuedAt,omitempty"`
+	OperationID   string    `json:"operationId,omitempty"`
+	FenceToken    uint64    `json:"fenceToken,omitempty"`
 	Signature     string    `json:"signature,omitempty"`
 }
 
@@ -147,6 +149,15 @@ func AllocatePort(ctx context.Context, dataDir string, req PortAllocationRequest
 	}
 	if existing, ok := registry.Allocations[key]; ok && existing.ContainerPort == req.ContainerPort && existing.HostIP == req.HostIP {
 		if !hostPortUsedByOtherService(usedPorts[existing.HostPort], req) {
+			registry.NextGeneration++
+			existing.Generation = registry.NextGeneration
+			existing.IssuedAt = time.Now().UTC()
+			existing.UpdatedAt = existing.IssuedAt
+			registry.Allocations[key] = existing
+			registry.UpdatedAt = existing.UpdatedAt
+			if err := writePortAllocationRegistry(path, registry); err != nil {
+				return nil, err
+			}
 			return portAllocationResponse(key, existing), nil
 		}
 	}

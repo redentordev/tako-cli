@@ -1,0 +1,12 @@
+//go:build windows
+
+package recovery
+
+import "fmt"
+
+func AcquireMutationLock(string) (func(), error)       { return func() {}, nil }
+func AcquireOperationBarrier(string) (func(), error)   { return func() {}, nil }
+func AcquireMaintenanceBarrier(string) (func(), error) { return func() {}, nil }
+func AcquireSnapshotLock(string) (func(), error) {
+	return nil, fmt.Errorf("platform recovery snapshots require a Unix controller host")
+}

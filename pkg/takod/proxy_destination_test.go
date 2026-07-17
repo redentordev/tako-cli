@@ -50,7 +50,7 @@ func TestProxyManifestV2BindsLocalAliasToWorkloadIdentity(t *testing.T) {
 	}
 }
 
-func TestControllerKeepsSignedRemoteAllocationFailClosedUntilFenced(t *testing.T) {
+func TestControllerAuthorizesObservedSignedRemoteAllocation(t *testing.T) {
 	root := t.TempDir()
 	controlDir := filepath.Join(root, "control")
 	configDir := filepath.Join(root, "etc")
@@ -118,14 +118,28 @@ func TestControllerKeepsSignedRemoteAllocationFailClosedUntilFenced(t *testing.T
 	}}}
 	content, _ := json.Marshal(manifest)
 	server := &Server{installation: controller, inventoryFile: inventoryPath, membershipFile: membershipPath}
-	if server.supportsAuthoritativeRemoteMeshRoutes() {
-		t.Fatal("controller advertised remote routes before observed-allocation fencing exists")
+	if !server.supportsAuthoritativeRemoteMeshRoutes() {
+		t.Fatal("controller did not advertise controller-observed remote routes")
 	}
-	if err := server.authorizeProxyManifestAllocations(string(content)); err == nil || !strings.Contains(err.Error(), "disabled until controller-observed") {
+	if err := server.authorizeProxyManifestAllocations(string(content)); err == nil || !strings.Contains(err.Error(), "not controller-authorized") {
 		t.Fatalf("self-presented remote allocation was accepted: %v", err)
 	}
-	if err := validateEnrolledProxyRouteManifest(string(content), controller.ClusterID, inventoryPath); err == nil || !strings.Contains(err.Error(), "disabled until controller-observed") {
+	if err := validateEnrolledProxyRouteManifest(string(content), controller.ClusterID, inventoryPath); err == nil || !strings.Contains(err.Error(), "not controller-authorized") {
 		t.Fatalf("enrolled route validator accepted remote allocation: %v", err)
+	}
+	if _, err := store.AuthorizeAllocations(allocation.Project, allocation.Environment, []nodeidentity.ActiveAllocation{{
+		Kind: allocation.Kind, Project: allocation.Project, Environment: allocation.Environment, Service: allocation.Service,
+		Revision: allocation.Revision, Slot: allocation.Slot, HostIP: allocation.HostIP, HostPort: allocation.HostPort,
+		ContainerPort: allocation.ContainerPort, Key: allocation.Key, ClusterID: allocation.ClusterID, NodeID: allocation.NodeID,
+		Generation: allocation.Generation, IssuedAt: allocation.IssuedAt, Signature: allocation.Signature,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.authorizeProxyManifestAllocations(string(content)); err != nil {
+		t.Fatalf("controller-authorized allocation was rejected: %v", err)
+	}
+	if err := validateEnrolledProxyRouteManifest(string(content), controller.ClusterID, inventoryPath); err != nil {
+		t.Fatalf("published allocation authority was rejected: %v", err)
 	}
 }
 
@@ -184,10 +198,11 @@ func TestEnrolledProxyManifestRequiresCurrentControllerAuthorization(t *testing.
 	if err := nodeidentity.CreateInventory(inventoryPath, inventory); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateEnrolledProxyRouteManifest(string(content), installation.ClusterID, inventoryPath); err == nil || !strings.Contains(err.Error(), "disabled until controller-observed") {
+	if err := validateEnrolledProxyRouteManifest(string(content), installation.ClusterID, inventoryPath); err == nil || !strings.Contains(err.Error(), "not controller-authorized") {
 		t.Fatalf("remote allocation was not rejected fail-closed: %v", err)
 	}
 	inventory.Generation++
+	inventory.AllocationGeneration++
 	inventory.UpdatedAt = now.Add(time.Second)
 	inventory.ActiveAllocations = []nodeidentity.ActiveAllocation{{
 		Kind: allocation.Kind, Project: allocation.Project, Environment: allocation.Environment, Service: allocation.Service,
@@ -198,8 +213,8 @@ func TestEnrolledProxyManifestRequiresCurrentControllerAuthorization(t *testing.
 	if err := nodeidentity.ReplaceInventory(inventoryPath, inventory); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateEnrolledProxyRouteManifest(string(content), installation.ClusterID, inventoryPath); err == nil || !strings.Contains(err.Error(), "disabled until controller-observed") {
-		t.Fatalf("inventory injection bypassed deferred remote-route fencing: %v", err)
+	if err := validateEnrolledProxyRouteManifest(string(content), installation.ClusterID, inventoryPath); err != nil {
+		t.Fatalf("exact controller inventory authorization was rejected: %v", err)
 	}
 	if err := VerifyPortAllocation(allocation, installation.AllocationPublicKey); err != nil {
 		t.Fatalf("allocation generation signature did not verify independently: %v", err)

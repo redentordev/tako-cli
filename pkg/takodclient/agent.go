@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
@@ -46,6 +47,26 @@ type AgentClient struct {
 	transport   *http.Transport
 	httpClient  *http.Client
 	statusSlots chan struct{}
+	fenceMu     sync.RWMutex
+	fenceSource OperationFenceSource
+}
+
+// SetOperationFenceSource supplies a request-time fallback for helpers that
+// predate context-aware takod calls. An explicit context fence takes priority.
+func (c *AgentClient) SetOperationFenceSource(source OperationFenceSource) {
+	if c == nil {
+		return
+	}
+	c.fenceMu.Lock()
+	c.fenceSource = source
+	c.fenceMu.Unlock()
+}
+
+func (c *AgentClient) withFenceSource(ctx context.Context) context.Context {
+	c.fenceMu.RLock()
+	source := c.fenceSource
+	c.fenceMu.RUnlock()
+	return withFallbackOperationFenceSource(ctx, source)
 }
 
 // NewAgentClient constructs a reusable structured takod client.
@@ -377,7 +398,7 @@ func (c *AgentClient) UpgradeStream(ctx context.Context, endpoint string, value 
 	if c == nil || c.dialer == nil {
 		return nil, fmt.Errorf("takod agent client is not initialized")
 	}
-	return UpgradeStream(ctx, c.dialer, c.socket, endpoint, value)
+	return UpgradeStream(c.withFenceSource(ctx), c.dialer, c.socket, endpoint, value)
 }
 
 func (c *AgentClient) do(ctx context.Context, method string, endpoint string, body io.Reader, contentType string) (*http.Response, error) {
@@ -387,6 +408,7 @@ func (c *AgentClient) do(ctx context.Context, method string, endpoint string, bo
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = c.withFenceSource(ctx)
 	if !strings.HasPrefix(endpoint, "/") || strings.HasPrefix(endpoint, "//") {
 		return nil, fmt.Errorf("takod endpoint must start with exactly one slash")
 	}
@@ -397,6 +419,9 @@ func (c *AgentClient) do(ctx context.Context, method string, endpoint string, bo
 	}
 	if body != nil && strings.TrimSpace(contentType) != "" {
 		request.Header.Set("Content-Type", contentType)
+	}
+	if err := attachOperationFenceHeader(request); err != nil {
+		return nil, err
 	}
 	response, err := c.httpClient.Do(request)
 	if err != nil {

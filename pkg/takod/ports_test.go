@@ -33,8 +33,8 @@ func TestAllocatePortPersistsAndReusesAllocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second AllocatePort returned error: %v", err)
 	}
-	if second.HostPort != first.HostPort || second.Key != first.Key || second.Generation != first.Generation {
-		t.Fatalf("allocation was not reused: first=%#v second=%#v", first, second)
+	if second.HostPort != first.HostPort || second.Key != first.Key || second.Generation <= first.Generation || !second.IssuedAt.After(first.IssuedAt) {
+		t.Fatalf("allocation coordinates were not reused with fresh operation evidence: first=%#v second=%#v", first, second)
 	}
 
 	if _, err := os.Stat(portAllocationRegistryPath(dataDir)); err != nil {

@@ -80,6 +80,20 @@ func testMembershipHostKey(t *testing.T) (string, string) {
 	return base64.StdEncoding.EncodeToString(key.Marshal()), cryptossh.FingerprintSHA256(key)
 }
 
+func TestValidateControllerRecoverySnapshotBindsIdentityMembershipAndInventory(t *testing.T) {
+	store, controller, now := newTestMembershipStore(t)
+	if err := ValidateControllerRecoverySnapshot(store.path, store.inventoryPath, controller); err != nil {
+		t.Fatalf("valid controller snapshot rejected: %v", err)
+	}
+	worker, err := nodeidentity.New(controller.ClusterID, membershipWorkerID, "worker-2", []string{nodeidentity.RoleWorker}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateControllerRecoverySnapshot(store.path, store.inventoryPath, worker); err == nil || !strings.Contains(err.Error(), "controller identity") {
+		t.Fatalf("worker snapshot authority accepted: %v", err)
+	}
+}
+
 func TestMembershipJoinTokenIsBoundSingleUseAndWorkerStartsJoining(t *testing.T) {
 	store, _, now := newTestMembershipStore(t)
 	issued, err := store.CreateJoinToken(membershipWorkerID, 10*time.Minute)

@@ -491,6 +491,13 @@ func statePullServerNames(cfg *config.Config, envName string, requestedServer st
 		return nil, fmt.Errorf("no servers configured for environment %s", envName)
 	}
 	if requestedServer == "" {
+		if authority, authorityErr := engine.AuthoritativeStateServer(cfg, envServers); authorityErr == nil {
+			if server := cfg.Servers[authority]; server.ClusterID != "" && server.NodeID != "" {
+				return []string{authority}, nil
+			}
+		}
+	}
+	if requestedServer == "" {
 		return envServers, nil
 	}
 	if _, ok := cfg.Servers[requestedServer]; !ok {

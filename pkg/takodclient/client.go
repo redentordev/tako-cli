@@ -392,6 +392,10 @@ func CertificatesEndpoint(domain string) string {
 	return "/v1/certs?domain=" + url.QueryEscape(domain)
 }
 
+func ScopedCertificatesEndpoint(project, environment, domain string) string {
+	return addEndpointScope(CertificatesEndpoint(domain), project, environment)
+}
+
 func StateEndpoint(project string, environment string, document string) string {
 	query := url.Values{}
 	query.Set("project", project)
@@ -463,11 +467,19 @@ func ImageBuildEndpoint(image string, dockerfile ...string) string {
 	return "/v1/images/build?" + query.Encode()
 }
 
+func ScopedImageBuildEndpoint(project, environment, image string, dockerfile ...string) string {
+	return addEndpointScope(ImageBuildEndpoint(image, dockerfile...), project, environment)
+}
+
 // ImageBuildEndpointWithAuth marks the build request body as carrying a
 // registry-auth JSON preamble line ahead of the tar stream. The flag is the
 // only auth-related value in the URL; credentials ride the body.
 func ImageBuildEndpointWithAuth(image string, dockerfile ...string) string {
 	return ImageBuildEndpoint(image, dockerfile...) + "&auth=preamble"
+}
+
+func ScopedImageBuildEndpointWithAuth(project, environment, image string, dockerfile ...string) string {
+	return addEndpointScope(ImageBuildEndpointWithAuth(image, dockerfile...), project, environment)
 }
 
 // ImageBuildEndpointWithOptions marks the body as carrying a JSON options
@@ -478,6 +490,10 @@ func ImageBuildEndpointWithOptions(image string, dockerfile string, withAuth boo
 		endpoint += "&auth=preamble"
 	}
 	return endpoint
+}
+
+func ScopedImageBuildEndpointWithOptions(project, environment, image, dockerfile string, withAuth bool) string {
+	return addEndpointScope(ImageBuildEndpointWithOptions(image, dockerfile, withAuth), project, environment)
 }
 
 func ImageExistsEndpoint(image string) string {
@@ -508,6 +524,25 @@ func ImageImportEndpoint(image string, expectedImageID ...string) string {
 		query.Set("expectedImageId", strings.TrimSpace(expectedImageID[0]))
 	}
 	return "/v1/images/import?" + query.Encode()
+}
+
+func ScopedImageImportEndpoint(project, environment, image string, expectedImageID ...string) string {
+	return addEndpointScope(ImageImportEndpoint(image, expectedImageID...), project, environment)
+}
+
+func ScopedProxyFileEndpoint(project, environment, name string) string {
+	return addEndpointScope(ProxyFileEndpoint(name), project, environment)
+}
+
+func addEndpointScope(endpoint, project, environment string) string {
+	separator := "?"
+	if strings.Contains(endpoint, "?") {
+		separator = "&"
+	}
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	return endpoint + separator + query.Encode()
 }
 
 func LogsEndpoint(project string, environment string, service string, tail int, follow bool) string {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/recovery"
 	"github.com/robfig/cron/v3"
 )
 
@@ -615,6 +616,12 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 // runScheduledJob is the cron entry point: it resolves the current spec so
 // a re-applied job fires with its latest definition.
 func (s *JobScheduler) runScheduledJob(key string) {
+	unlock, err := recovery.AcquireMutationLock(s.dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "takod scheduled job %s snapshot lock failed: %v\n", key, err)
+		return
+	}
+	defer unlock()
 	s.mu.Lock()
 	spec, ok := s.specs[key]
 	reserved := ok && !s.running[key]

@@ -23,6 +23,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/recovery"
 )
 
 const (
@@ -43,18 +44,30 @@ var (
 )
 
 type MembershipState struct {
-	APIVersion        string                          `json:"apiVersion"`
-	Kind              string                          `json:"kind"`
-	ClusterID         string                          `json:"clusterId"`
-	Generation        uint64                          `json:"generation"`
-	ControllerNodeID  string                          `json:"controllerNodeId"`
-	MeshCIDR          string                          `json:"meshCidr,omitempty"`
-	Nodes             []MembershipNode                `json:"nodes"`
-	Tombstones        []nodeidentity.NodeTombstone    `json:"tombstones,omitempty"`
-	JoinTokens        []JoinTokenRecord               `json:"joinTokens,omitempty"`
-	ActiveAllocations []nodeidentity.ActiveAllocation `json:"activeAllocations,omitempty"`
-	RemovalOperations []NodeRemovalOperation          `json:"removalOperations,omitempty"`
-	UpdatedAt         time.Time                       `json:"updatedAt"`
+	APIVersion           string                          `json:"apiVersion"`
+	Kind                 string                          `json:"kind"`
+	ClusterID            string                          `json:"clusterId"`
+	Generation           uint64                          `json:"generation"`
+	AllocationGeneration uint64                          `json:"allocationGeneration,omitempty"`
+	ControllerNodeID     string                          `json:"controllerNodeId"`
+	MeshCIDR             string                          `json:"meshCidr,omitempty"`
+	Nodes                []MembershipNode                `json:"nodes"`
+	Tombstones           []nodeidentity.NodeTombstone    `json:"tombstones,omitempty"`
+	JoinTokens           []JoinTokenRecord               `json:"joinTokens,omitempty"`
+	ActiveAllocations    []nodeidentity.ActiveAllocation `json:"activeAllocations,omitempty"`
+	AllocationHighWater  []AllocationHighWater           `json:"allocationHighWater,omitempty"`
+	RemovalOperations    []NodeRemovalOperation          `json:"removalOperations,omitempty"`
+	UpdatedAt            time.Time                       `json:"updatedAt"`
+}
+
+// AllocationHighWater is a durable replay tombstone. It survives omission
+// from ActiveAllocations so a withdrawn worker proof cannot later be replayed.
+type AllocationHighWater struct {
+	NodeID      string `json:"nodeId"`
+	Key         string `json:"key"`
+	Generation  uint64 `json:"generation"`
+	Fingerprint string `json:"fingerprint"`
+	Revoked     bool   `json:"revoked,omitempty"`
 }
 
 type MembershipNode struct {
@@ -194,6 +207,48 @@ func OpenControllerMembership(stateDir, identityPath, inventoryPath string) (*Me
 	return store, state, nil
 }
 
+// ValidateControllerRecoverySnapshot proves that the protected membership and
+// published inventory are the exact authority owned by this controller key.
+// The caller must hold the node-wide exclusive recovery snapshot lock.
+func ValidateControllerRecoverySnapshot(membershipPath, inventoryPath string, installation *nodeidentity.Installation) error {
+	if installation == nil || !installation.HasEnrollmentRole(nodeidentity.RoleControlPlane) {
+		return fmt.Errorf("platform recovery backup requires the enrolled controller identity")
+	}
+	if err := installation.Validate(); err != nil {
+		return err
+	}
+	state, err := readMembershipState(membershipPath)
+	if err != nil {
+		return fmt.Errorf("read authoritative controller membership: %w", err)
+	}
+	if err := state.Validate(time.Now().UTC()); err != nil {
+		return err
+	}
+	if state.ClusterID != installation.ClusterID || state.ControllerNodeID != installation.NodeID {
+		return fmt.Errorf("membership is owned by a different controller identity")
+	}
+	controller := state.node(state.ControllerNodeID)
+	if controller == nil || !containsRole(controller.Roles, nodeidentity.RoleControlPlane) || controller.AllocationPublicKey != installation.AllocationPublicKey {
+		return fmt.Errorf("membership controller key or role does not match the local installation")
+	}
+	inventory, err := nodeidentity.ReadInventory(inventoryPath)
+	if err != nil {
+		return fmt.Errorf("read published controller inventory: %w", err)
+	}
+	expected := state.Inventory()
+	if !reflect.DeepEqual(expected, *inventory) {
+		return fmt.Errorf("published inventory does not exactly match authoritative membership")
+	}
+	snapshot := nodeidentity.SignedInventorySnapshot{Kind: nodeidentity.SignedInventoryKind, Inventory: *inventory, IssuedAt: time.Now().UTC()}
+	if err := nodeidentity.SignInventorySnapshot(&snapshot, installation); err != nil {
+		return fmt.Errorf("sign controller inventory proof: %w", err)
+	}
+	if err := nodeidentity.VerifyInventorySnapshot(snapshot, controller.AllocationPublicKey, time.Now().UTC()); err != nil {
+		return fmt.Errorf("verify controller inventory proof: %w", err)
+	}
+	return nil
+}
+
 func RunningAsRoot() bool { return runningAsRoot() }
 
 func (s *MembershipStore) InitializeFirstNode(installation nodeidentity.Installation, meshCIDR, meshPublicKey, meshEndpoint string) (*MembershipState, error) {
@@ -257,6 +312,11 @@ func firstPlatformMeshIP(cidr string) (string, error) {
 func (s *MembershipStore) Read() (*MembershipState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	releaseSnapshot, err := s.acquireSnapshotMutation()
+	if err != nil {
+		return nil, err
+	}
+	defer releaseSnapshot()
 	lock, unlock, err := s.lock()
 	if err != nil {
 		return nil, err
@@ -623,6 +683,11 @@ func (s *MembershipStore) mutate(allowMissing bool, mutation func(*MembershipSta
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	releaseSnapshot, err := s.acquireSnapshotMutation()
+	if err != nil {
+		return nil, err
+	}
+	defer releaseSnapshot()
 	lock, unlock, err := s.lock()
 	if err != nil {
 		return nil, err
@@ -644,6 +709,7 @@ func (s *MembershipStore) mutate(allowMissing bool, mutation func(*MembershipSta
 	before.Tombstones = append([]nodeidentity.NodeTombstone(nil), state.Tombstones...)
 	before.JoinTokens = append([]JoinTokenRecord(nil), state.JoinTokens...)
 	before.ActiveAllocations = append([]nodeidentity.ActiveAllocation(nil), state.ActiveAllocations...)
+	before.AllocationHighWater = append([]AllocationHighWater(nil), state.AllocationHighWater...)
 	before.RemovalOperations = cloneRemovalOperations(state.RemovalOperations)
 	initializing := state.ClusterID == ""
 	if err := mutation(state); errors.Is(err, errMembershipNoChange) {
@@ -661,7 +727,24 @@ func (s *MembershipStore) mutate(allowMissing bool, mutation func(*MembershipSta
 		return nil, fmt.Errorf("membership mutation did not initialize generation")
 	}
 	if !initializing {
-		state.Generation++
+		allocationsChanged := !reflect.DeepEqual(before.ActiveAllocations, state.ActiveAllocations) || !reflect.DeepEqual(before.AllocationHighWater, state.AllocationHighWater)
+		beforeWithoutAllocations := before
+		afterWithoutAllocations := *state
+		beforeWithoutAllocations.ActiveAllocations = nil
+		afterWithoutAllocations.ActiveAllocations = nil
+		beforeWithoutAllocations.AllocationHighWater = nil
+		afterWithoutAllocations.AllocationHighWater = nil
+		beforeWithoutAllocations.AllocationGeneration = 0
+		afterWithoutAllocations.AllocationGeneration = 0
+		if !reflect.DeepEqual(beforeWithoutAllocations, afterWithoutAllocations) {
+			state.Generation++
+		}
+		if allocationsChanged {
+			state.AllocationGeneration++
+			if state.AllocationGeneration == 0 {
+				return nil, fmt.Errorf("allocation authority generation exhausted")
+			}
+		}
 		state.UpdatedAt = s.now().UTC()
 	}
 	state.pruneTokens(s.now().UTC())
@@ -676,6 +759,213 @@ func (s *MembershipStore) mutate(allowMissing bool, mutation func(*MembershipSta
 	}
 	copy := *state
 	return &copy, nil
+}
+
+// AuthorizeAllocations replaces the complete controller-authorized allocation
+// set for one project/environment. Omission is intentional revocation, so a
+// stale node proof cannot remain routable after the desired scope changes.
+func (s *MembershipStore) AuthorizeAllocations(project, environment string, allocations []nodeidentity.ActiveAllocation) (*MembershipState, error) {
+	project = strings.TrimSpace(project)
+	environment = strings.TrimSpace(environment)
+	if !safeAllocationScopeName(project) || !safeAllocationScopeName(environment) {
+		return nil, fmt.Errorf("allocation project/environment is invalid")
+	}
+	return s.mutate(false, func(state *MembershipState) error {
+		return applyAllocationAuthorization(state, project, environment, allocations, s.now().UTC())
+	})
+}
+
+// PreviewAllocations produces the exact next membership state without
+// committing it. The controller uses this for publish-before-commit routing
+// transitions: every edge must acknowledge the signed candidate first.
+func (s *MembershipStore) PreviewAllocations(project, environment string, allocations []nodeidentity.ActiveAllocation) (*MembershipState, error) {
+	project, environment = strings.TrimSpace(project), strings.TrimSpace(environment)
+	if !safeAllocationScopeName(project) || !safeAllocationScopeName(environment) {
+		return nil, fmt.Errorf("allocation project/environment is invalid")
+	}
+	current, err := s.Read()
+	if err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(current)
+	if err != nil {
+		return nil, err
+	}
+	var candidate MembershipState
+	if err := json.Unmarshal(data, &candidate); err != nil {
+		return nil, err
+	}
+	beforeAllocations := append([]nodeidentity.ActiveAllocation(nil), candidate.ActiveAllocations...)
+	beforeHighWater := append([]AllocationHighWater(nil), candidate.AllocationHighWater...)
+	now := s.now().UTC()
+	if err := applyAllocationAuthorization(&candidate, project, environment, allocations, now); err != nil {
+		return nil, err
+	}
+	if !reflect.DeepEqual(beforeAllocations, candidate.ActiveAllocations) || !reflect.DeepEqual(beforeHighWater, candidate.AllocationHighWater) {
+		candidate.AllocationGeneration++
+		if candidate.AllocationGeneration == 0 {
+			return nil, fmt.Errorf("allocation authority generation exhausted")
+		}
+		candidate.UpdatedAt = now
+	}
+	if err := candidate.Validate(now); err != nil {
+		return nil, err
+	}
+	return &candidate, nil
+}
+
+// CommitPreparedAllocations atomically persists the exact state previously
+// signed and acknowledged by edge nodes. The base generations provide the
+// compare-and-swap boundary against unrelated controller changes.
+func (s *MembershipStore) CommitPreparedAllocations(candidate *MembershipState, baseGeneration, baseAllocationGeneration uint64) (*MembershipState, error) {
+	if candidate == nil {
+		return nil, fmt.Errorf("prepared allocation state is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	releaseSnapshot, err := s.acquireSnapshotMutation()
+	if err != nil {
+		return nil, err
+	}
+	defer releaseSnapshot()
+	file, unlock, err := s.lock()
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	defer unlock()
+	current, err := readMembershipState(s.path)
+	if err != nil {
+		return nil, err
+	}
+	if current.Generation != baseGeneration || current.AllocationGeneration != baseAllocationGeneration {
+		return nil, fmt.Errorf("prepared allocation base generation changed")
+	}
+	if err := candidate.Validate(s.now().UTC()); err != nil {
+		return nil, err
+	}
+	if err := writeMembershipState(s.path, candidate); err != nil {
+		return nil, err
+	}
+	if err := s.reconcileInventory(candidate); err != nil {
+		return nil, fmt.Errorf("prepared allocations committed but inventory publication failed: %w", err)
+	}
+	copy := *candidate
+	return &copy, nil
+}
+
+func applyAllocationAuthorization(state *MembershipState, project, environment string, allocations []nodeidentity.ActiveAllocation, now time.Time) error {
+	inventory := state.Inventory()
+	next := make([]nodeidentity.ActiveAllocation, 0, len(state.ActiveAllocations)+len(allocations))
+	for _, existing := range state.ActiveAllocations {
+		if existing.Project != project || existing.Environment != environment {
+			next = append(next, existing)
+		}
+	}
+	seen := make(map[string]struct{}, len(allocations))
+	incoming := make(map[string]struct{}, len(allocations))
+	for _, candidate := range allocations {
+		incoming[candidate.NodeID+"\x00"+candidate.Key] = struct{}{}
+	}
+	for index := range state.AllocationHighWater {
+		high := &state.AllocationHighWater[index]
+		for _, existing := range state.ActiveAllocations {
+			if existing.NodeID != high.NodeID || existing.Key != high.Key || existing.Project != project || existing.Environment != environment {
+				continue
+			}
+			if _, retained := incoming[high.NodeID+"\x00"+high.Key]; !retained {
+				high.Revoked = true
+			}
+		}
+	}
+	for _, candidate := range allocations {
+		if candidate.Project != project || candidate.Environment != environment || candidate.ClusterID != state.ClusterID || candidate.Kind != "mesh-upstream" {
+			return fmt.Errorf("allocation %s is outside the controller authorization scope", candidate.Key)
+		}
+		if !safeAllocationScopeName(candidate.Service) || (candidate.Revision != "" && !safeAllocationScopeName(candidate.Revision)) {
+			return fmt.Errorf("allocation %s has invalid service/revision identity", candidate.Key)
+		}
+		expectedKey := fmt.Sprintf("%s/%s/%s/%s/%d", candidate.Kind, project, environment, candidate.Service, candidate.Slot)
+		if candidate.Revision != "" {
+			expectedKey = fmt.Sprintf("%s/%s/%s/%s/%s/%d", candidate.Kind, project, environment, candidate.Service, candidate.Revision, candidate.Slot)
+		}
+		if candidate.Key != expectedKey {
+			return fmt.Errorf("allocation %s has an invalid durable key", candidate.Key)
+		}
+		node, ok := inventory.Node(candidate.NodeID)
+		if !ok || !node.Schedulable || node.Lifecycle != nodeidentity.NodeLifecycleSchedulable || node.MeshCredentialStatus != nodeidentity.MeshCredentialActive || candidate.HostIP != node.MeshIP {
+			return fmt.Errorf("allocation %s belongs to a non-schedulable destination", candidate.Key)
+		}
+		if err := nodeidentity.VerifyActiveAllocationOrigin(candidate, node.AllocationPublicKey); err != nil {
+			return fmt.Errorf("verify worker allocation %s: %w", candidate.Key, err)
+		}
+		compound := candidate.NodeID + "\x00" + candidate.Key
+		if _, duplicate := seen[compound]; duplicate {
+			return fmt.Errorf("allocation %s is duplicated", candidate.Key)
+		}
+		seen[compound] = struct{}{}
+		fingerprint, err := allocationEvidenceFingerprint(candidate)
+		if err != nil {
+			return err
+		}
+		index := allocationHighWaterIndex(state.AllocationHighWater, candidate.NodeID, candidate.Key)
+		if index >= 0 {
+			high := state.AllocationHighWater[index]
+			if candidate.Generation < high.Generation {
+				return fmt.Errorf("allocation %s generation %d is behind durable high-water %d", candidate.Key, candidate.Generation, high.Generation)
+			}
+			if candidate.Generation == high.Generation && (high.Revoked || fingerprint != high.Fingerprint) {
+				return fmt.Errorf("allocation %s generation %d was revoked or conflicts with its durable proof", candidate.Key, candidate.Generation)
+			}
+			if candidate.Generation > high.Generation {
+				state.AllocationHighWater[index] = AllocationHighWater{NodeID: candidate.NodeID, Key: candidate.Key, Generation: candidate.Generation, Fingerprint: fingerprint}
+			}
+		} else {
+			state.AllocationHighWater = append(state.AllocationHighWater, AllocationHighWater{NodeID: candidate.NodeID, Key: candidate.Key, Generation: candidate.Generation, Fingerprint: fingerprint})
+		}
+		candidate.AuthorizedAt = now
+		next = append(next, candidate)
+	}
+	state.ActiveAllocations = next
+	sort.Slice(state.AllocationHighWater, func(i, j int) bool {
+		if state.AllocationHighWater[i].NodeID != state.AllocationHighWater[j].NodeID {
+			return state.AllocationHighWater[i].NodeID < state.AllocationHighWater[j].NodeID
+		}
+		return state.AllocationHighWater[i].Key < state.AllocationHighWater[j].Key
+	})
+	return nil
+}
+
+func allocationEvidenceFingerprint(allocation nodeidentity.ActiveAllocation) (string, error) {
+	allocation.AuthorizedAt = time.Time{}
+	data, err := json.Marshal(allocation)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func allocationHighWaterIndex(values []AllocationHighWater, nodeID, key string) int {
+	for index := range values {
+		if values[index].NodeID == nodeID && values[index].Key == key {
+			return index
+		}
+	}
+	return -1
+}
+
+func safeAllocationScopeName(value string) bool {
+	if value == "" || len(value) > 128 || value == "." || value == ".." {
+		return false
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '-' || char == '_' || char == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (s *MembershipStore) lock() (*os.File, func(), error) {
@@ -701,19 +991,30 @@ func (s *MembershipStore) lock() (*os.File, func(), error) {
 	return lock, unlock, nil
 }
 
+// acquireSnapshotMutation joins the node-wide recovery barrier when this store
+// uses the production <data-dir>/control layout. Tests and explicitly custom
+// stores remain independent because their parent directory is not "control".
+func (s *MembershipStore) acquireSnapshotMutation() (func(), error) {
+	controlDir := filepath.Dir(s.path)
+	if filepath.Base(controlDir) != DefaultMembershipDirName {
+		return func() {}, nil
+	}
+	return recovery.AcquireMutationLock(filepath.Dir(controlDir))
+}
+
 func (s *MembershipStore) reconcileInventory(state *MembershipState) error {
 	inventory := state.Inventory()
 	existing, err := nodeidentity.ReadInventoryOptional(s.inventoryPath)
 	if err != nil {
 		return fmt.Errorf("read trusted inventory: %w", err)
 	}
-	if existing != nil && existing.Generation > inventory.Generation {
+	if existing != nil && (existing.Generation > inventory.Generation || existing.AllocationGeneration > inventory.AllocationGeneration) {
 		return fmt.Errorf("trusted inventory generation %d is ahead of controller membership %d", existing.Generation, inventory.Generation)
 	}
 	if existing == nil {
 		return nodeidentity.CreateInventory(s.inventoryPath, inventory)
 	}
-	if existing.Generation == inventory.Generation {
+	if existing.Generation == inventory.Generation && existing.AllocationGeneration == inventory.AllocationGeneration {
 		return nil
 	}
 	return nodeidentity.ReplaceInventory(s.inventoryPath, inventory)
@@ -723,7 +1024,8 @@ func (s MembershipState) Inventory() nodeidentity.ClusterInventory {
 	inventory := nodeidentity.ClusterInventory{
 		APIVersion: nodeidentity.InventoryAPIVersion, Kind: nodeidentity.InventoryKind,
 		ClusterID: s.ClusterID, Generation: s.Generation, ControllerNodeID: s.ControllerNodeID,
-		MeshCIDR: s.MeshCIDR, UpdatedAt: s.UpdatedAt,
+		AllocationGeneration: s.AllocationGeneration,
+		MeshCIDR:             s.MeshCIDR, UpdatedAt: s.UpdatedAt,
 		Tombstones:        append([]nodeidentity.NodeTombstone(nil), s.Tombstones...),
 		ActiveAllocations: append([]nodeidentity.ActiveAllocation(nil), s.ActiveAllocations...),
 	}
@@ -753,6 +1055,17 @@ func (s MembershipState) Validate(now time.Time) error {
 	}
 	if err := s.Inventory().Validate(); err != nil {
 		return err
+	}
+	seenAllocationHighWater := map[string]struct{}{}
+	for _, high := range s.AllocationHighWater {
+		if err := nodeidentity.ValidateNodeID(high.NodeID); err != nil || high.Key == "" || high.Generation == 0 || len(high.Fingerprint) != sha256.Size*2 {
+			return fmt.Errorf("allocation high-water record is invalid")
+		}
+		compound := high.NodeID + "\x00" + high.Key
+		if _, duplicate := seenAllocationHighWater[compound]; duplicate {
+			return fmt.Errorf("allocation high-water record is duplicated")
+		}
+		seenAllocationHighWater[compound] = struct{}{}
 	}
 	seenTokens := map[string]struct{}{}
 	for _, token := range s.JoinTokens {

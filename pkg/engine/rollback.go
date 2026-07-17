@@ -171,7 +171,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	if _, exists := cfg.Servers[sourceName]; !exists {
 		return nil, invalidRequestf("history source server %s not found in configuration", sourceName)
 	}
-	stateSourceName, err := PreferredRuntimeServer(cfg, mutationServers)
+	stateSourceName, err := AuthoritativeStateServer(cfg, mutationServers)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +382,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	e.debug(events.TypeStatePersisted, events.PhaseState, "")
 
 	// Replicate updated state to mesh nodes.
-	if cfg.IsMultiServer() {
+	if cfg.IsMultiServer() && ShouldReplicateDeploymentHistory(cfg) {
 		replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
 		history, err := stateManager.LoadHistoryContext(ctx)
 		if err != nil {

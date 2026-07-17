@@ -374,7 +374,7 @@ func backupInfoFromPath(root string, path string) (BackupInfo, error) {
 	if err != nil {
 		return BackupInfo{}, fmt.Errorf("failed to stat backup: %w", err)
 	}
-	createdAt, _ := time.Parse("20060102-150405", backupID)
+	createdAt, _ := backupIDTimestamp(backupID)
 	return BackupInfo{
 		ID:          backupID,
 		Volume:      volume,
@@ -402,8 +402,22 @@ func isSafeBackupVolume(value string) bool {
 }
 
 func isSafeBackupID(value string) bool {
-	if _, err := time.Parse("20060102-150405", value); err != nil {
-		return false
+	_, err := backupIDTimestamp(value)
+	return err == nil
+}
+
+func backupIDTimestamp(value string) (time.Time, error) {
+	const layout = "20060102-150405"
+	if len(value) != len(layout) {
+		const randomSuffixLength = 32
+		if len(value) != len(layout)+1+randomSuffixLength || value[len(layout)] != '-' {
+			return time.Time{}, fmt.Errorf("invalid backup ID")
+		}
+		for _, char := range value[len(layout)+1:] {
+			if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+				return time.Time{}, fmt.Errorf("invalid backup ID")
+			}
+		}
 	}
-	return len(value) == len("20060102-150405")
+	return time.Parse(layout, value[:len(layout)])
 }

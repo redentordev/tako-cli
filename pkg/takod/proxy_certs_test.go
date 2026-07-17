@@ -55,6 +55,18 @@ func TestCertificateRollbackFailureKeepsActiveVersionIntact(t *testing.T) {
 	}
 }
 
+func TestPushedCertificateCannotCrossProjectOwnership(t *testing.T) {
+	useTempProxyPaths(t)
+	certOne, keyOne := testProxyCertificatePair(t, []string{"example.com"})
+	if _, err := PushProxyCertificate(context.Background(), ProxyCertificatePushRequest{Project: "alpha", Environment: "production", Domain: "example.com", CertPEM: certOne, KeyPEM: keyOne}); err != nil {
+		t.Fatal(err)
+	}
+	certTwo, keyTwo := testProxyCertificatePair(t, []string{"example.com"})
+	if _, err := PushProxyCertificate(context.Background(), ProxyCertificatePushRequest{Project: "beta", Environment: "production", Domain: "example.com", CertPEM: certTwo, KeyPEM: keyTwo}); err == nil || !strings.Contains(err.Error(), "already owned") {
+		t.Fatalf("cross-project certificate replacement error = %v", err)
+	}
+}
+
 func TestCertificateStoreRejectsSymlinkedDirectoriesAndSecuresModes(t *testing.T) {
 	t.Run("store symlink", func(t *testing.T) {
 		useTempProxyPaths(t)

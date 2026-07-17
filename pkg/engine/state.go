@@ -11,6 +11,7 @@ import (
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/git"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/scheduler"
@@ -172,7 +173,7 @@ func PersistTakodRuntimeStateWithPlacementBaseline(
 	details["revisionId"] = desired.RevisionID
 
 	event := takodstate.NewEvent(cfg.Project.Name, envName, eventType, desired.RevisionID, message, details)
-	return takodstate.PersistToServers(sshPool, cfg, envName, serverNames, desired, actual, nodeActual, event, verbose)
+	return takodstate.PersistToServers(sshPool, cfg, envName, StateAuthorityTargets(cfg, serverNames), desired, actual, nodeActual, event, verbose)
 }
 
 // PersistTakodDesiredIntent writes the exact sticky placement decision before
@@ -241,10 +242,36 @@ func PersistTakodDesiredIntentWithPlacementBaseline(
 	event := takodstate.NewEvent(cfg.Project.Name, envName, "placement.intent", desired.RevisionID, message, map[string]string{
 		"revisionId": desired.RevisionID,
 	})
-	if err := takodstate.PersistDesiredToServers(sshPool, cfg, envName, serverNames, desired, event, verbose); err != nil {
+	if err := takodstate.PersistDesiredToServers(sshPool, cfg, envName, StateAuthorityTargets(cfg, serverNames), desired, event, verbose); err != nil {
 		return fmt.Errorf("failed to persist desired placement intent before mutation: %w", err)
 	}
 	return nil
+}
+
+// StateAuthorityTargets keeps legacy replicated state unchanged while making
+// enrolled clusters explicitly single-writer on the control-plane node.
+func StateAuthorityTargets(cfg *config.Config, fallback []string) []string {
+	if cfg == nil {
+		return append([]string(nil), fallback...)
+	}
+	controller := ""
+	enrolled := false
+	for name, server := range cfg.Servers {
+		if server.ClusterID == "" && server.NodeID == "" {
+			continue
+		}
+		enrolled = true
+		if server.HasPlatformRole(nodeidentity.RoleControlPlane) {
+			if controller != "" && controller != name {
+				return append([]string(nil), fallback...)
+			}
+			controller = name
+		}
+	}
+	if enrolled && controller != "" {
+		return []string{controller}
+	}
+	return append([]string(nil), fallback...)
 }
 
 // LoadPriorAssignments reads the last authoritative desired revision from the

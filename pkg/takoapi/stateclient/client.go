@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
@@ -202,32 +204,35 @@ func (c *Client) AppendEventContext(ctx context.Context, document takoapi.StateE
 // internal/state types. Both Project and ProjectName are supported because the
 // request body uses project while existing lease metadata uses projectName.
 type LeaseInfo struct {
-	ID          string    `json:"id"`
-	Project     string    `json:"project,omitempty"`
-	ProjectName string    `json:"projectName,omitempty"`
-	Environment string    `json:"environment"`
-	Operation   string    `json:"operation,omitempty"`
-	Who         string    `json:"who,omitempty"`
-	Holder      string    `json:"holder,omitempty"`
-	User        string    `json:"user,omitempty"`
-	Host        string    `json:"host,omitempty"`
-	PID         int       `json:"pid,omitempty"`
-	AcquiredAt  time.Time `json:"acquiredAt,omitempty"`
-	CreatedAt   time.Time `json:"createdAt,omitempty"`
-	ExpiresAt   time.Time `json:"expiresAt,omitempty"`
-	TTLSeconds  int64     `json:"ttlSeconds,omitempty"`
+	ID          string                       `json:"id"`
+	Project     string                       `json:"project,omitempty"`
+	ProjectName string                       `json:"projectName,omitempty"`
+	Environment string                       `json:"environment"`
+	Operation   string                       `json:"operation,omitempty"`
+	Who         string                       `json:"who,omitempty"`
+	Holder      string                       `json:"holder,omitempty"`
+	User        string                       `json:"user,omitempty"`
+	Host        string                       `json:"host,omitempty"`
+	PID         int                          `json:"pid,omitempty"`
+	AcquiredAt  time.Time                    `json:"acquiredAt,omitempty"`
+	CreatedAt   time.Time                    `json:"createdAt,omitempty"`
+	ExpiresAt   time.Time                    `json:"expiresAt,omitempty"`
+	TTLSeconds  int64                        `json:"ttlSeconds,omitempty"`
+	Fence       *nodeidentity.OperationFence `json:"fence,omitempty"`
 }
 
 // LeaseRequest is the JSON body sent to takod /v1/lease for acquire/release.
 type LeaseRequest struct {
-	Project     string `json:"project"`
-	Environment string `json:"environment"`
-	ID          string `json:"id,omitempty"`
-	Operation   string `json:"operation,omitempty"`
-	Who         string `json:"who,omitempty"`
-	PID         int    `json:"pid,omitempty"`
-	TTLSeconds  int64  `json:"ttlSeconds,omitempty"`
-	Renew       bool   `json:"renew,omitempty"`
+	Project       string   `json:"project"`
+	Environment   string   `json:"environment"`
+	ID            string   `json:"id,omitempty"`
+	Operation     string   `json:"operation,omitempty"`
+	Who           string   `json:"who,omitempty"`
+	PID           int      `json:"pid,omitempty"`
+	TTLSeconds    int64    `json:"ttlSeconds,omitempty"`
+	Renew         bool     `json:"renew,omitempty"`
+	RequestID     string   `json:"requestId,omitempty"`
+	TargetNodeIDs []string `json:"targetNodeIds,omitempty"`
 }
 
 // LeaseResponse is the public response shape returned by takod /v1/lease.

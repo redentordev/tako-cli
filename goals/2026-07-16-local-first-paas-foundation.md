@@ -205,6 +205,16 @@ idempotent operation authority introduced in Phase 6.
 
 ### Phase 6 — Control authority, fencing, and recovery
 
+Progress: complete. Both mandatory reviewers closed their architecture,
+correctness, security, operations, retry, partition, and crash-recovery
+findings after cluster-global controller authority, cryptographically bound
+private holder credentials, monotonic worker fencing with retry-safe renewal,
+publish-before-commit allocation recovery, exact inventory/proxy ownership,
+snapshot/maintenance writer barriers, and authenticated streaming external
+controller recovery were added. Unavailable non-target workers remain outside
+the operation target set, while every selected target and shared node resource
+fails closed.
+
 - Make the control node authoritative for project/environment operation IDs,
   membership generations, and mutation leases.
 - Require target-node fencing for every mutated node.

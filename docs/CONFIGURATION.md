@@ -170,13 +170,24 @@ changed inventory before unrelated workers. `schedulable` also recovers a
 cordoned node and clears the latch only after its schedulable inventory is
 attested. Tako refuses to drain or remove the final controller.
 
-Remote mesh proxy routes remain fail-closed in Phase 4, even when a destination
-presents a valid node signature. A signature does not prove that an unseen
-historical allocation is still current. The capability will be enabled only
-after Phase 6 adds controller-observed allocation challenges and fencing.
-One-node local runtime-alias routes remain enabled. On startup, unauthorized or
-legacy remote route manifests are quarantined and the proxy is stopped
-fail-closed.
+Remote mesh proxy routes require an operation-bound worker allocation and a
+controller-committed generation. Worker signatures alone are insufficient:
+the controller keeps replay high-water tombstones, publishes a signed proposal
+to every edge before commit, and durably records each publication target before
+contacting it. If the client dies, the next cluster-global operation commits a
+strictly newer copy of the last controller authority and converges every
+recorded target before publishing ordinary inventory. Omission remains
+revocation, and edge nodes stop and quarantine routes that no longer match.
+One-node local runtime-alias routes remain enabled without host-port allocation.
+
+Platform recovery requires `TAKO_RECOVERY_KEY` to be standard base64 for 32
+random bytes. Keep it outside node 1 and outside the recovery bucket. Recovery
+storage endpoints must use HTTPS. Creation verifies persistent-volume coverage
+from controller desired state, reads back and hashes every referenced workload
+object, refuses an active controller operation, streams the archive directly
+through encryption without a plaintext temporary, then uploads and reads back
+the exact size- and digest-matched authenticated controller bundle. Offline
+verify and restore require `--cluster-id`.
 
 ## Full-Stack Application
 

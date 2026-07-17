@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -492,7 +493,7 @@ func TestAcquireLeaseContextSendsRequestAndDecodesResponse(t *testing.T) {
 	if err := json.Unmarshal([]byte(call.body), &body); err != nil {
 		t.Fatalf("failed to decode lease acquire body: %v", err)
 	}
-	if body != request {
+	if !reflect.DeepEqual(body, request) {
 		t.Fatalf("lease acquire body = %#v, want %#v", body, request)
 	}
 }

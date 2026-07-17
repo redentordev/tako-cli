@@ -11,6 +11,8 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/scheduler"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
 func TestAcquireRemoteOperationLeasesWithRunsConcurrently(t *testing.T) {
@@ -90,6 +92,34 @@ func TestDeployLeaseTargetsIncludeBuilderButExcludeReadyWorker(t *testing.T) {
 	sharedTargets := DeployLeaseTargets(cfg, []string{"local"}, map[string]config.ServiceConfig{"web": {ImageFrom: "frontend", SharedBuildHash: "sha256:shared"}})
 	if got := strings.Join(sharedTargets, ","); got != "builder,local" {
 		t.Fatalf("shared-build deploy lease targets = %q", got)
+	}
+}
+
+func TestDeployMutationTargetsExcludeUnassignedWorker(t *testing.T) {
+	cfg := &config.Config{Servers: map[string]config.ServerConfig{
+		"node-1": {ClusterID: "11111111-1111-4111-8111-111111111111", NodeID: "22222222-2222-4222-8222-222222222222", Lifecycle: "schedulable", Roles: []string{"control-plane", "worker"}},
+		"idle":   {ClusterID: "11111111-1111-4111-8111-111111111111", NodeID: "33333333-3333-4333-8333-333333333333", Lifecycle: "schedulable", Roles: []string{"worker"}},
+	}}
+	targets := DeployMutationTargets(cfg, map[string]config.ServiceConfig{"web": {Image: "demo/web:1", Replicas: 1}}, map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-1", NodeID: cfg.Servers["node-1"].NodeID}}})
+	if got := strings.Join(targets, ","); got != "node-1" {
+		t.Fatalf("local-only mutation targeted unrelated worker: %s", got)
+	}
+	if got := strings.Join(StateAuthorityTargets(cfg, []string{"node-1", "idle"}), ","); got != "node-1" {
+		t.Fatalf("enrolled state writes were not controller-only: %s", got)
+	}
+}
+
+func TestPriorDesiredAssignmentKeepsRemovedLastServiceWorkerTargeted(t *testing.T) {
+	cfg := &config.Config{Servers: map[string]config.ServerConfig{
+		"node-1": {ClusterID: "11111111-1111-4111-8111-111111111111", NodeID: "22222222-2222-4222-8222-222222222222", Lifecycle: "schedulable", Roles: []string{"control-plane", "worker"}},
+		"idle":   {ClusterID: "11111111-1111-4111-8111-111111111111", NodeID: "33333333-3333-4333-8333-333333333333", Lifecycle: "schedulable", Roles: []string{"worker"}},
+	}}
+	prior := &takodstate.DesiredRevision{Services: map[string]takodstate.DesiredService{
+		"removed": {Name: "removed", Assignments: []scheduler.Assignment{{Slot: 1, Node: "idle", NodeID: cfg.Servers["idle"].NodeID}}},
+	}}
+	got := AddPriorDesiredMutationTargets(cfg, []string{"node-1"}, prior)
+	if strings.Join(got, ",") != "idle,node-1" {
+		t.Fatalf("targets = %v", got)
 	}
 }
 

@@ -2,11 +2,14 @@ package state
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 )
 
 func TestDecodeStateDocumentContentReturnsNotFoundSentinel(t *testing.T) {
@@ -169,6 +172,49 @@ func TestStateManagerLeaseRequestsDistinguishAcquireFromRenew(t *testing.T) {
 	}
 }
 
+func TestControllerLeaseAcquireRetriesUncertainResponseWithSameRequestID(t *testing.T) {
+	client := &fakeStateManagerExecutor{
+		output:   `{"acquired":true,"found":true,"holderToken":"private","lease":{"id":"op-1","projectName":"demo","environment":"production","operation":"deploy","expiresAt":"2099-01-01T00:00:00Z"}}`,
+		failures: []error{errors.New("connection reset after request commit")},
+	}
+	manager := &StateManager{client: client, socket: "/run/tako/takod.sock", projectName: "demo", environment: "production", server: "node-a"}
+	lease, err := manager.AcquireControllerLeaseContext(context.Background(), "deploy", "production", time.Minute, []string{"node-id"})
+	if err != nil || lease == nil || lease.HolderToken != "private" {
+		t.Fatalf("acquire after uncertain response = %#v, %v", lease, err)
+	}
+	if len(client.inputs) != 2 {
+		t.Fatalf("request attempts = %d, want 2", len(client.inputs))
+	}
+	var first, second struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal([]byte(client.inputs[0]), &first); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(client.inputs[1]), &second); err != nil {
+		t.Fatal(err)
+	}
+	if first.RequestID == "" || first.RequestID != second.RequestID {
+		t.Fatalf("retry request IDs differ: %q vs %q", first.RequestID, second.RequestID)
+	}
+}
+
+func TestControllerLeaseRenewRetriesUncertainCommittedResponse(t *testing.T) {
+	client := &fakeStateManagerExecutor{
+		output:   `{"acquired":true,"found":true,"holderToken":"private","lease":{"id":"op-1","projectName":"demo","environment":"production","operation":"deploy","expiresAt":"2099-01-01T00:00:00Z"}}`,
+		failures: []error{errors.New("connection reset after renewal commit")},
+	}
+	manager := &StateManager{client: client, socket: "/run/tako/takod.sock", projectName: "demo", environment: "production", server: "node-a"}
+	original := &LeaseInfo{ID: "op-1", Environment: "production", Operation: "deploy", Who: "tester", HolderToken: "private", Fence: &nodeidentity.OperationFence{OperationID: "op-1"}}
+	renewed, err := manager.RenewLeaseContext(context.Background(), original, time.Minute)
+	if err != nil || renewed == nil || renewed.HolderToken != "private" {
+		t.Fatalf("renew after uncertain response = %#v, %v", renewed, err)
+	}
+	if len(client.inputs) != 2 || client.inputs[0] != client.inputs[1] {
+		t.Fatalf("renew retry did not reuse exact request: %#v", client.inputs)
+	}
+}
+
 func TestReleaseLeaseUsesShortCleanupDeadline(t *testing.T) {
 	client := &fakeStateManagerExecutor{
 		output: `{"released":true}`,
@@ -217,10 +263,17 @@ type fakeStateManagerExecutor struct {
 	deadline         time.Time
 	contextErr       error
 	returnContextErr bool
+	failures         []error
+	inputs           []string
+	calls            int
 }
 
 func (f *fakeStateManagerExecutor) ExecuteWithContext(ctx context.Context, cmd string) (string, error) {
 	f.captureContext(ctx)
+	f.calls++
+	if f.calls <= len(f.failures) {
+		return "", f.failures[f.calls-1]
+	}
 	if f.returnContextErr && f.contextErr != nil {
 		return "", f.contextErr
 	}
@@ -231,6 +284,11 @@ func (f *fakeStateManagerExecutor) ExecuteWithInput(ctx context.Context, cmd str
 	f.captureContext(ctx)
 	if data, err := io.ReadAll(input); err == nil {
 		f.input = string(data)
+		f.inputs = append(f.inputs, f.input)
+	}
+	f.calls++
+	if f.calls <= len(f.failures) {
+		return "", f.failures[f.calls-1]
 	}
 	if f.returnContextErr && f.contextErr != nil {
 		return "", f.contextErr

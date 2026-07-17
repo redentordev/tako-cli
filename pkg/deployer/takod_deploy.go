@@ -200,6 +200,65 @@ func (d *Deployer) DeployPreparedServiceTakod(serviceName string, service *confi
 	return d.deployServiceTakod(serviceName, service, imageRef, takodServiceDeployOptions{WarmOnly: warmOnly})
 }
 
+// MovePreparedServiceTakod applies a reviewed stateless movement in safe
+// order: copy the exact image, reconcile every destination, then remove or
+// reduce replicas on sources. It does not rebuild or run release commands.
+func (d *Deployer) MovePreparedServiceTakod(serviceName string, service *config.ServiceConfig, imageRef string, destinationNodes, sourceNodes []string) error {
+	assignments, err := d.planTakodAssignments(serviceName, service)
+	if err != nil {
+		return err
+	}
+	if err := d.validateAssignmentMutationTargets(serviceName, assignments); err != nil {
+		return err
+	}
+	grouped := groupTakodAssignments(assignments)
+	destinations := uniqueStringsSorted(destinationNodes)
+	sources := uniqueStringsSorted(sourceNodes)
+	if err := d.transferExistingImageToNodes(imageRef, destinations); err != nil {
+		return fmt.Errorf("transfer exact movement image for %s: %w", serviceName, err)
+	}
+	reconcileNodes := func(nodes []string) error {
+		return runTakodNodeActions(nodes, func(serverName string) error {
+			client, err := d.getRuntimeClient(serverName)
+			if err != nil {
+				return err
+			}
+			return d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, grouped[serverName], false, false)
+		})
+	}
+	if err := reconcileNodes(destinations); err != nil {
+		return fmt.Errorf("reconcile movement destinations for %s: %w", serviceName, err)
+	}
+	destinationSet := make(map[string]struct{}, len(destinations))
+	for _, node := range destinations {
+		destinationSet[node] = struct{}{}
+	}
+	cleanup := sources[:0]
+	for _, node := range sources {
+		if _, alreadyReconciled := destinationSet[node]; !alreadyReconciled {
+			cleanup = append(cleanup, node)
+		}
+	}
+	if err := reconcileNodes(cleanup); err != nil {
+		return fmt.Errorf("reconcile movement sources for %s: %w", serviceName, err)
+	}
+	return nil
+}
+
+func uniqueStringsSorted(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok || value == "" {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // EnsurePreparedServiceImage transfers an existing exact shared image to newly
 // selected nodes before scale/rollback reconciliation. It never rebuilds.
 func (d *Deployer) EnsurePreparedServiceImage(serviceName string, service *config.ServiceConfig, imageRef string) error {
@@ -760,7 +819,7 @@ func (d *Deployer) transferImageBetweenNodes(sourceName string, targetName strin
 		},
 		func(ctx context.Context, input io.Reader) error {
 			var importErr error
-			importOutput, importErr = target.StreamRequest(ctx, "POST", takodclient.ImageImportEndpoint(imageRef, expected.ImageID), input, "application/x-tar")
+			importOutput, importErr = target.StreamRequest(ctx, "POST", takodclient.ScopedImageImportEndpoint(d.config.Project.Name, d.environment, imageRef, expected.ImageID), input, "application/x-tar")
 			return importErr
 		},
 	)
@@ -911,7 +970,7 @@ func (d *Deployer) importLocalImageToTakodNode(ctx context.Context, localClient 
 		},
 		func(ctx context.Context, input io.Reader) error {
 			var importErr error
-			output, importErr = target.StreamRequest(ctx, "POST", takodclient.ImageImportEndpoint(imageRef, local.ImageID), input, "application/x-tar")
+			output, importErr = target.StreamRequest(ctx, "POST", takodclient.ScopedImageImportEndpoint(d.config.Project.Name, d.environment, imageRef, local.ImageID), input, "application/x-tar")
 			return importErr
 		},
 	)
@@ -1224,8 +1283,10 @@ func (d *Deployer) prepareTakodNode(client any, serverName string, server config
 	enrolled := strings.TrimSpace(server.ClusterID) != "" && strings.TrimSpace(server.NodeID) != ""
 	if enrolled {
 		// Cluster topology and peer credentials come from protected platform
-		// membership, never from one application's desired-state document.
-		metadata.Peers = nil
+		// membership, never from one application's desired-state document. Node
+		// metadata is also cluster-owned and is changed only by platform lifecycle
+		// commands, not an application deploy operation.
+		return nil
 	}
 	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/metadata", metadata); err != nil {
 		return fmt.Errorf("failed to write takod metadata: %w", err)
@@ -1819,8 +1880,8 @@ func (d *Deployer) ensureTakodProxy(client any, networkName string, email string
 		email = "tako@redentor.dev"
 	}
 	_, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/proxy", takod.ReconcileProxyRequest{
-		Network: networkName,
-		Email:   email,
+		Project: d.config.Project.Name, Environment: d.environment,
+		Network: networkName, Email: email,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to reconcile takod proxy: %w", err)
@@ -2219,6 +2280,9 @@ func (d *Deployer) getTakodTargetServers() ([]string, error) {
 	var targets []string
 	if len(d.targetServers) > 0 {
 		targets = append([]string(nil), d.targetServers...)
+		if d.placementMovementTargets {
+			return targets, nil
+		}
 	} else {
 		var err error
 		targets, err = d.config.GetEnvironmentServers(d.environment)

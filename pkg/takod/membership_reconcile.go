@@ -26,8 +26,15 @@ func (s *Server) handleMembershipReconcile(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "platform membership is unavailable on an unenrolled node", http.StatusConflict)
 		return
 	}
+	workerFenceAdmissionMu.Lock()
+	defer workerFenceAdmissionMu.Unlock()
 	s.proxyAuthorityMu.Lock()
 	defer s.proxyAuthorityMu.Unlock()
+	invalidBefore, err := s.invalidStoredProxyRoutes()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	store, err := platform.NewMembershipStore(s.membershipFile, s.inventoryFile)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -60,18 +67,17 @@ func (s *Server) handleMembershipReconcile(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	stopped := false
+	stopped := invalidBefore > 0
 	if invalid > 0 {
 		if err := stopProxyAndVerifyAbsent(r.Context()); err != nil {
 			http.Error(w, "stop proxy after membership revocation: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		stopped = true
 	}
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
-	_ = encoder.Encode(MembershipReconcileResponse{Generation: state.Generation, ProxyStopped: stopped, InvalidRoutes: invalid})
+	_ = encoder.Encode(MembershipReconcileResponse{Generation: state.Generation, ProxyStopped: stopped, InvalidRoutes: invalidBefore})
 }
 
 func (s *Server) invalidStoredProxyRoutes() (int, error) {

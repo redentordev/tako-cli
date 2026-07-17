@@ -20,6 +20,7 @@ var (
 	placementPlanNode string
 	placementPlanFile string
 	placementVerifyID string
+	placementApplyID  string
 )
 
 var placementCmd = &cobra.Command{Use: "placement", Short: "Plan explicit workload placement changes"}
@@ -51,9 +52,14 @@ var placementVerifyCmd = &cobra.Command{
 	RunE: runPlacementVerify,
 }
 
+var placementApplyCmd = &cobra.Command{
+	Use: "apply PLAN", Short: "Apply an intact reviewed stateless movement plan under controller fencing", Args: cobra.ExactArgs(1), SilenceUsage: true,
+	RunE: runPlacementApply,
+}
+
 func init() {
 	rootCmd.AddCommand(placementCmd)
-	placementCmd.AddCommand(placementPlanCmd, placementVerifyCmd)
+	placementCmd.AddCommand(placementPlanCmd, placementVerifyCmd, placementApplyCmd)
 	placementPlanCmd.AddCommand(placementPlanCordonCmd, placementPlanDrainCmd, placementPlanRebalanceCmd)
 	placementPlanCordonCmd.Flags().StringVar(&placementPlanNode, "node", "", "Logical node name or immutable node UUID (required)")
 	placementPlanCordonCmd.Flags().StringVar(&placementPlanFile, "file", "", "Write the reviewable plan JSON atomically")
@@ -61,9 +67,32 @@ func init() {
 	placementPlanDrainCmd.Flags().StringVar(&placementPlanFile, "file", "", "Write the reviewable plan JSON atomically")
 	placementPlanRebalanceCmd.Flags().StringVar(&placementPlanFile, "file", "", "Write the reviewable plan JSON atomically")
 	placementVerifyCmd.Flags().StringVar(&placementVerifyID, "plan-id", "", "Exact plan digest recorded during review (required)")
+	placementApplyCmd.Flags().StringVar(&placementApplyID, "plan-id", "", "Exact plan digest recorded during review (required)")
 	_ = placementPlanDrainCmd.MarkFlagRequired("node")
 	_ = placementPlanCordonCmd.MarkFlagRequired("node")
 	_ = placementVerifyCmd.MarkFlagRequired("plan-id")
+	_ = placementApplyCmd.MarkFlagRequired("plan-id")
+}
+
+func runPlacementApply(cmd *cobra.Command, args []string) error {
+	plan, err := readPlacementPlan(args[0])
+	if err != nil {
+		return &engine.InvalidRequestError{Err: err}
+	}
+	cfg, err := config.LoadConfig(cfgFile)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	result, err := cliEngine().ApplyPlacementMovement(cmd.Context(), engine.PlacementApplyRequest{
+		Config: cfg, Environment: getEnvironmentName(cfg), Plan: *plan, PlanID: placementApplyID,
+	})
+	if err != nil {
+		return err
+	}
+	if !machineOutputEnabled() {
+		fmt.Fprintf(cmd.OutOrStdout(), "Applied placement plan %s (%d stateless move(s)).\n", result.PlanID, result.Moves)
+	}
+	return emitResultDocument(result)
 }
 
 func runPlacementPlan(cmd *cobra.Command, mode string) error {

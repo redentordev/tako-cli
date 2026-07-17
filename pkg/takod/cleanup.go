@@ -132,6 +132,20 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 		}
 	}
 	for _, name := range req.ProxyFiles {
+		if fence, fenced := operationFenceFromContext(ctx); fenced {
+			validated, validateErr := validateProxyFileName(name)
+			if validateErr != nil {
+				return nil, validateErr
+			}
+			if data, exists, readErr := readFileIfExists(filepath.Join(proxyRoutesDir, validated)); readErr != nil {
+				return nil, readErr
+			} else if exists {
+				manifest, parseErr := ParseProxyRouteManifest(string(data))
+				if parseErr != nil || manifest.Project != fence.Project || manifest.Environment != fence.Environment {
+					return nil, fmt.Errorf("cleanup proxy manifest is outside the controller operation fence")
+				}
+			}
+		}
 		if _, err := RemoveProxyFile(ctx, name); err != nil {
 			warn("failed to remove proxy file %s: %v", name, err)
 			continue

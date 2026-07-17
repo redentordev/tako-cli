@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/recovery"
 	"github.com/robfig/cron/v3"
 )
 
@@ -207,6 +208,12 @@ func (s *BackupScheduler) scheduleLocked(request BackupScheduleRequest) error {
 
 func (s *BackupScheduler) runScheduledBackup(request BackupScheduleRequest) {
 	key := backupScheduleKey(request)
+	unlock, err := recovery.AcquireMutationLock(s.dataDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "takod backup schedule snapshot lock failed for %s: %v\n", key, err)
+		return
+	}
+	defer unlock()
 	s.mu.Lock()
 	if s.running[key] {
 		s.mu.Unlock()

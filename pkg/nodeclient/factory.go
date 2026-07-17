@@ -23,6 +23,10 @@ type pinnedSSHPool interface {
 	GetOrCreateWithAuthPinned(host string, port int, user string, keyPath string, password string, expected ssh.RecordedHostKey) (*ssh.Client, error)
 }
 
+type operationFencePool interface {
+	OperationFenceSource() takodclient.OperationFenceSource
+}
+
 // Factory resolves and caches structured runtime clients independently from
 // workload placement. Legacy server entries never probe the local socket.
 type Factory struct {
@@ -31,10 +35,11 @@ type Factory struct {
 	remoteSocket string
 	localSocket  string
 
-	mu        sync.Mutex
-	clients   map[string]*takodclient.AgentClient
-	decisions map[string]Decision
-	newLocal  func(string, uint32) (*takodclient.AgentClient, error)
+	mu          sync.Mutex
+	clients     map[string]*takodclient.AgentClient
+	decisions   map[string]Decision
+	fenceSource takodclient.OperationFenceSource
+	newLocal    func(string, uint32) (*takodclient.AgentClient, error)
 }
 
 // NewFactory constructs a runtime client factory. pool may be nil only when
@@ -78,9 +83,13 @@ func (f *Factory) Client(ctx context.Context, serverName string) (*takodclient.A
 	if !ok {
 		return nil, Decision{}, fmt.Errorf("server %s not found", serverName)
 	}
+	if sourcePool, ok := f.pool.(operationFencePool); ok {
+		f.SetOperationFenceSource(sourcePool.OperationFenceSource())
+	}
 
 	f.mu.Lock()
 	if client := f.clients[serverName]; client != nil {
+		client.SetOperationFenceSource(f.fenceSource)
 		decision := f.decisions[serverName]
 		f.mu.Unlock()
 		return client, decision, nil
@@ -159,9 +168,24 @@ func (f *Factory) Client(ctx context.Context, serverName string) (*takodclient.A
 		return existing, cachedDecision, nil
 	}
 	f.clients[serverName] = client
+	client.SetOperationFenceSource(f.fenceSource)
 	f.decisions[serverName] = decision
 	f.mu.Unlock()
 	return client, decision, nil
+}
+
+// SetOperationFenceSource binds renewable mutation authority to cached and
+// future clients owned by this operation-scoped factory.
+func (f *Factory) SetOperationFenceSource(source takodclient.OperationFenceSource) {
+	if f == nil {
+		return
+	}
+	f.mu.Lock()
+	f.fenceSource = source
+	for _, client := range f.clients {
+		client.SetOperationFenceSource(source)
+	}
+	f.mu.Unlock()
 }
 
 // Decision returns a previously resolved decision without causing a probe or

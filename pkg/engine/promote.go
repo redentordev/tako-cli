@@ -141,7 +141,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	})
 	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("→ Acquired remote promote leases: %s\n", leaseSet.Summary()))
 
-	sourceServerName, err := PreferredRuntimeServer(cfg, serverNames)
+	sourceServerName, err := AuthoritativeStateServer(cfg, serverNames)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +294,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	if err := stateManager.SaveDeploymentContext(ctx, promoteDeployment); err != nil {
 		return nil, fmt.Errorf("promotion succeeded but failed to save deployment history: %w", err)
 	}
-	if cfg.IsMultiServer() {
+	if cfg.IsMultiServer() && ShouldReplicateDeploymentHistory(cfg) {
 		replicator := remotestate.NewStateReplicator(sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
 		history, err := stateManager.LoadHistoryContext(ctx)
 		if err != nil {

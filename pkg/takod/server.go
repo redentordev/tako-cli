@@ -19,6 +19,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/platform"
+	"github.com/redentordev/tako-cli/pkg/recovery"
 	"github.com/redentordev/tako-cli/pkg/takoapi/ptystream"
 )
 
@@ -48,6 +49,10 @@ type Server struct {
 	diskReservationMu       sync.Mutex
 	diskReservations        map[string]int64
 	proxyAuthorityMu        sync.Mutex
+	operationBarrierMu      sync.Mutex
+	operationBarrierUnlock  func()
+	operationBarrierID      string
+	operationBarrierExpires time.Time
 	mu                      sync.Mutex
 }
 
@@ -79,7 +84,7 @@ func decodeJSONRequestWithLimit(w http.ResponseWriter, r *http.Request, dst any,
 		}
 		return err
 	}
-	return nil
+	return validateFencedPayloadScope(r.Context(), dst)
 }
 
 type Status struct {
@@ -218,6 +223,7 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	defer s.releaseAnyOperationBarrier()
 	if s.socket == "" {
 		return fmt.Errorf("socket path is required")
 	}
@@ -238,20 +244,33 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 	if s.installation != nil {
-		if _, err := os.Stat(s.membershipFile); err == nil {
-			store, storeErr := platform.NewMembershipStore(s.membershipFile, s.inventoryFile)
-			if storeErr != nil {
-				return fmt.Errorf("open controller membership at startup: %w", storeErr)
-			}
-			if _, storeErr = store.Read(); storeErr != nil {
-				return fmt.Errorf("reconcile controller membership at startup: %w", storeErr)
-			}
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("inspect controller membership at startup: %w", err)
-		}
-		deactivatePolicy, err := s.enforceEnrolledProxyPolicy(ctx)
+		var deactivatePolicy func()
+		unlockSnapshot, err := recovery.AcquireMutationLock(s.dataDir)
 		if err != nil {
-			return err
+			return fmt.Errorf("acquire recovery mutation lock for startup reconciliation: %w", err)
+		}
+		startupErr := func() error {
+			defer unlockSnapshot()
+			if _, err := os.Stat(s.membershipFile); err == nil {
+				store, storeErr := platform.NewMembershipStore(s.membershipFile, s.inventoryFile)
+				if storeErr != nil {
+					return fmt.Errorf("open controller membership at startup: %w", storeErr)
+				}
+				if _, storeErr = store.Read(); storeErr != nil {
+					return fmt.Errorf("reconcile controller membership at startup: %w", storeErr)
+				}
+			} else if !os.IsNotExist(err) {
+				return fmt.Errorf("inspect controller membership at startup: %w", err)
+			}
+			var policyErr error
+			deactivatePolicy, policyErr = s.enforceEnrolledProxyPolicy(ctx)
+			if policyErr != nil {
+				return policyErr
+			}
+			return nil
+		}()
+		if startupErr != nil {
+			return startupErr
 		}
 		defer deactivatePolicy()
 	}
@@ -473,6 +492,12 @@ func (s *Server) runActualRefreshLoop(ctx context.Context) {
 	}
 
 	refresh := func() {
+		unlock, lockErr := recovery.AcquireMutationLock(s.dataDir)
+		if lockErr != nil {
+			fmt.Fprintf(os.Stderr, "takod actual refresh snapshot lock failed: %v\n", lockErr)
+			return
+		}
+		defer unlock()
 		if _, err := RefreshActualStateDocuments(ctx, s.dataDir, s.nodeName); err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Fprintf(os.Stderr, "takod actual refresh failed: %v\n", err)
 		}
@@ -513,8 +538,32 @@ func (s *Server) runBuildCachePruneLoop(ctx context.Context) {
 			return
 		case <-timer.C:
 			pruneCtx, cancel := context.WithTimeout(ctx, buildCachePruneCommandTimeout)
-			if _, err := cleanupBuildCache(pruneCtx, keepStorage); err != nil && !errors.Is(err, context.Canceled) {
-				fmt.Fprintf(os.Stderr, "takod build cache prune failed: %v\n", err)
+			maintenanceUnlock, maintenanceErr := recovery.AcquireMaintenanceBarrier(s.dataDir)
+			if maintenanceErr != nil {
+				fmt.Fprintf(os.Stderr, "takod build cache prune maintenance barrier failed: %v\n", maintenanceErr)
+				cancel()
+				timer.Reset(interval)
+				continue
+			}
+			active, activeErr := activeWorkerOperation(s.dataDir, time.Now().UTC())
+			if activeErr != nil || active {
+				if activeErr != nil {
+					fmt.Fprintf(os.Stderr, "takod build cache prune could not verify operation fence: %v\n", activeErr)
+				}
+				maintenanceUnlock()
+				cancel()
+				timer.Reset(interval)
+				continue
+			}
+			unlock, lockErr := recovery.AcquireMutationLock(s.dataDir)
+			if lockErr == nil {
+				_, err := cleanupBuildCache(pruneCtx, keepStorage)
+				unlock()
+				lockErr = err
+			}
+			maintenanceUnlock()
+			if lockErr != nil && !errors.Is(lockErr, context.Canceled) {
+				fmt.Fprintf(os.Stderr, "takod build cache prune failed: %v\n", lockErr)
 			}
 			cancel()
 			timer.Reset(interval)
@@ -600,6 +649,10 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 	var request ReconcileServiceRequest
 	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxServiceJSONBodyBytes); err != nil {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if placementCleanupOnly(r.Context()) && len(request.Containers) != 0 {
+		http.Error(w, "placement cleanup authority cannot create containers on a cordoned or draining node", http.StatusConflict)
 		return
 	}
 	if err := validateReconcileServiceRequest(request); err != nil {
@@ -751,6 +804,10 @@ func (s *Server) handlePortAllocate(w http.ResponseWriter, r *http.Request) {
 	if s.installation != nil {
 		response.ClusterID = s.installation.ClusterID
 		response.NodeID = s.installation.NodeID
+		if fence, ok := operationFenceFromContext(r.Context()); ok {
+			response.OperationID = fence.OperationID
+			response.FenceToken = fence.Token
+		}
 		if err := SignPortAllocation(response, s.installation); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -783,11 +840,11 @@ func (s *Server) handleProxyFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.installation != nil {
-			if err := s.authorizeProxyFileCandidate(request.Name, request.Content); err != nil {
+			if err := validateEnrolledProxyRouteManifest(request.Content, s.installation.ClusterID, s.inventoryFile); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if err := validateEnrolledProxyRouteManifest(request.Content, s.installation.ClusterID, s.inventoryFile); err != nil {
+			if err := s.authorizeProxyFileCandidate(request.Name, request.Content); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -804,6 +861,12 @@ func (s *Server) handleProxyFile(w http.ResponseWriter, r *http.Request) {
 		if validated, validateErr := validateProxyFileName(name); validateErr == nil {
 			if data, exists, readErr := readFileIfExists(filepath.Join(proxyRoutesDir, validated)); readErr == nil && exists {
 				removedManifest, _ = ParseProxyRouteManifest(string(data))
+			}
+		}
+		if fence, fenced := operationFenceFromContext(r.Context()); fenced {
+			if removedManifest == nil || removedManifest.Project != fence.Project || removedManifest.Environment != fence.Environment {
+				http.Error(w, "proxy route manifest is outside the controller operation fence", http.StatusConflict)
+				return
 			}
 		}
 		response, err = RemoveProxyFile(r.Context(), name)
@@ -878,7 +941,21 @@ func (s *Server) handleProxyCertificates(w http.ResponseWriter, r *http.Request)
 		}
 		response, err = PushProxyCertificate(r.Context(), request)
 	case http.MethodDelete:
-		response, err = RemoveProxyCertificate(r.Context(), r.URL.Query().Get("domain"))
+		domain := r.URL.Query().Get("domain")
+		if fence, fenced := operationFenceFromContext(r.Context()); fenced {
+			entry, loadErr := loadExactProxyCertificate(domain, false)
+			if loadErr != nil {
+				err = loadErr
+				break
+			}
+			if entry.Metadata.OwnerProject == "" || entry.Metadata.OwnerEnvironment == "" || entry.Metadata.OwnerProject != fence.Project || entry.Metadata.OwnerEnvironment != fence.Environment {
+				err = fmt.Errorf("certificate is outside the controller operation fence")
+				break
+			}
+		}
+		if err == nil {
+			response, err = RemoveProxyCertificate(r.Context(), domain)
+		}
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -962,7 +1039,6 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-
 	response, err := CleanupProject(r.Context(), request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1067,7 +1143,7 @@ func (s *Server) handleLease(w http.ResponseWriter, r *http.Request) {
 		if !s.requireFreeDisk(w, s.dataDir) {
 			return
 		}
-		response, err = AcquireLease(r.Context(), s.dataDir, request)
+		response, err = s.acquireControllerOperationLease(r.Context(), request)
 	case http.MethodDelete:
 		defer r.Body.Close()
 		var request LeaseRequest
@@ -1075,7 +1151,7 @@ func (s *Server) handleLease(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		response, err = ReleaseLease(r.Context(), s.dataDir, request)
+		response, err = s.releaseControllerOperationLease(r.Context(), request)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -2111,12 +2187,16 @@ func (s *Server) Status() Status {
 				status.MembershipGeneration = inventory.Generation
 				if inventory.ControllerNodeID != "" && inventory.Generation > 0 {
 					status.Capabilities = append(status.Capabilities, CapabilityNodeLifecycleV1)
+					status.Capabilities = append(status.Capabilities, CapabilityOperationFence)
 				}
 			}
 		}
 	}
 	if s.supportsMembershipController() {
 		status.Capabilities = append(status.Capabilities, CapabilityNodeMembershipV1)
+	}
+	if s.supportsAuthoritativeRemoteMeshRoutes() {
+		status.Capabilities = append(status.Capabilities, CapabilityProxyRemoteMeshRoutesV1)
 	}
 
 	status.Node = readJSONMap(filepath.Join(s.dataDir, "node.json"))

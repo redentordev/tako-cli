@@ -84,6 +84,9 @@ func UpgradeStream(ctx context.Context, dialer UnixSocketDialer, socket string, 
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Connection", "Upgrade")
 	request.Header.Set("Upgrade", ptystream.Protocol)
+	if err := attachOperationFenceHeader(request); err != nil {
+		return nil, err
+	}
 	if err := request.Write(conn); err != nil {
 		return nil, fmt.Errorf("takod upgrade request %s failed: %w", endpoint, err)
 	}

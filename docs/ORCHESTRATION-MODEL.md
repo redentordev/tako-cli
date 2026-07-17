@@ -524,16 +524,20 @@ tako placement plan cordon --node node-2 --file cordon.json
 tako placement plan drain --node node-2 --file drain.json
 tako placement plan rebalance --file rebalance.json
 tako placement verify drain.json --plan-id sha256:...
+tako placement apply drain.json --plan-id sha256:...
 ```
 
 Plans bind current/proposed slot assignments to the exact input desired
 revision and produce a stable content digest for review. Drain excludes the
 target from destinations; cordon reports replicas that remain in place while
 the node becomes ineligible for new slots; rebalance makes only the minimum deterministic
-stateless moves needed to reduce skew. Plan generation is read-only. Applying
-movement requires the separately fenced controller operation introduced by
-the control-authority lifecycle; ordinary deploy/scale paths never consume a
-plan or bypass node lifecycle latches.
+stateless moves needed to reduce skew. Plan generation is read-only. Apply
+rechecks the digest and exact desired revision before and after acquiring a
+controller fence, copies the exact image, starts destinations before cleaning
+sources, and persists a resumable placement intent. On cordoned or draining
+sources, the signed placement fence authorizes only a reconcile with no desired
+containers. Ordinary deploy/scale paths never consume a plan or bypass node
+lifecycle latches.
 
 For persistent services, placement is part of the lifecycle contract. In a
 multi-node environment, `persistent: true` requires `placement.strategy:
@@ -668,15 +672,16 @@ checks validity and hostname/wildcard coverage, and rejects expired material.
 Caddyfiles reference only entries revalidated from disk. The store is mounted
 read-only into stock Caddy, and proxy recreation regenerates and validates the
 Caddyfile before starting the container, guarding the reboot/startup path that
-`caddy adapt` alone cannot validate. Push/remove operations are lease-free and
-serialized locally; atomic replacement plus graceful reload makes a concurrent
-deploy benign, with the last valid Caddyfile winning.
+`caddy adapt` alone cannot validate. On enrolled nodes, push/remove operations
+carry controller fencing for the owning project/environment and persisted
+certificate ownership must match before removal. Local serialization and
+atomic replacement keep reloads coherent with route rendering.
 
-Certificate files and keys are intentionally excluded from replicated state,
-drift, and backups. They are lost with the node and must be re-pushed; CLI-only
-operators must keep their own secure copies. `tako certs ls` exposes source and
-expiry so an external control plane can track replacement without ever reading
-private keys back from the node.
+Certificate files and keys are intentionally excluded from application state,
+drift, and volume backups. The root-only `tako platform backup create` recovery
+bundle includes their protected node-local store together with PaaS state and
+uploads it outside node 1. `tako certs ls` exposes source and expiry without
+reading private keys back through an application API.
 
 Embedded DNS-01 is the second writer into this same store. Its environment
 provider credentials deliberately persist in a 0600 node-local file so takod's
@@ -703,12 +708,17 @@ bindings and its allocation registry before accepting it, then returns the
 actual assigned port for container publish and proxy rendering. This lets
 unrelated apps with common service names such as `web` share the same server
 without taking each other's mesh upstream port. Each signed allocation has a
-monotonic node-local generation. Enrolled nodes keep remote mesh route
-admission disabled through Phase 4: a node signature alone cannot prove that
-an unseen historical allocation is still current. Phase 6 must add a fresh
-controller challenge, node-side current-state attestation, bounded consumption,
-and fencing before the capability is advertised. Local runtime-alias routes
-remain enabled.
+monotonic node-local generation and is bound to the exact active controller
+operation ID/token. The controller verifies worker identity, mesh address,
+operation binding, and schedulability, while durable per-node/key high-water
+tombstones prevent an omitted proof from being replayed. Authorization is
+publish-before-commit: node 1 signs a durable proposal, every non-controller
+edge must acknowledge it, and only then does the controller commit that exact
+state. An unavailable edge therefore prevents a withdrawal from committing.
+Omission revokes prior generations. A separately monotonic allocation-authority
+generation is distributed in the signed snapshot, so route churn does not
+invalidate an in-flight membership fence. Edge nodes stop and quarantine
+invalid stored routes before committing a revocation locally.
 This boundary is checked before mutation and across the complete stored route
 set on every render. Enrollment quarantines legacy remote manifests and stops
 an already-running proxy before readiness.
@@ -801,17 +811,48 @@ CI runner
   tako deploy --yes
        |
        v
-  connect to every target environment node
+  connect to the controller and explicit mutation targets
        |
        v
-  acquire remote leases + reconcile selected nodes
+  acquire controller authority + activate target fences
 ```
 
-Deploy, rollback, scale, maintenance, live, remove, cleanup, destroy, and state
-repair acquire remote leases through `takod` on the target nodes before
-mutating runtime or state. CI and local machines compete for the same per-node
-leases, so concurrent operations fail fast instead of racing. The local `.tako`
-lock remains as a same-machine guard.
+Enrolled clusters use the control node as a cluster-global single-writer
+operation-ID and lease authority. Payloads remain strictly bound to one
+project/environment, but shared Docker tags, pruning, proxy state, and
+allocation generations cannot be mutated concurrently by another project. It
+issues a monotonic signed fence bound to the current membership generation and
+an explicit target set; only those nodes are contacted and every structured
+mutation carries both the renewable fence and its private random holder
+credential. The credential hash is part of the signed fence, while status and
+contender responses redact bearer authority. Renewal keeps the immediately
+previous signed grant valid only during target fan-out, then revocation clears
+both grants.
+Unrelated unavailable workers do not block local-only work, while an
+unavailable target fails closed. Worker high-water marks and controller phases
+are durable, expired operations reconcile into history, and partitioned
+writers cannot obtain a second token. Legacy unenrolled configurations retain
+their per-node lease behavior. The local `.tako` lock remains a same-machine
+guard.
+
+`tako platform backup create` requires a 256-bit out-of-band
+`TAKO_RECOVERY_KEY` plus either externally verified persistent-workload object
+evidence or a no-persistent-workloads attestation. It takes an exclusive
+control-plane snapshot lock, proves that the local controller key owns the
+authoritative membership and exact published inventory, refuses an active
+controller operation, quiesces
+HTTP and background state writers, derives required volumes from authoritative
+desired state, downloads and hashes every fresh workload backup, and archives
+identity, membership, operation journals, environment bundles, PaaS data, and
+certificate state. The bounded traversal-safe tar/gzip stream is fed directly
+into chunked AES-256-GCM, so no plaintext controller archive is written to
+disk. The exact encrypted size and SHA-256 are authenticated locally, uploaded
+only over HTTPS, downloaded with a strict size bound, and compared again before
+success. `tako platform backup verify` requires the expected cluster ID and
+performs offline authenticated verification. `tako platform backup restore`
+decrypts, verifies, and extracts the same single input stream into a private
+sibling directory, then atomically publishes the requested staging directory
+only after final authentication; it never overwrites live controller paths.
 
 On shared nodes, destructive commands are app/stage scoped. `remove`,
 `destroy`, and default `cleanup` target resources identified by the current

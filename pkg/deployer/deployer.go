@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/nodeclient"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
@@ -60,31 +62,32 @@ func (sw *streamWriter) Write(p []byte) (n int, err error) {
 
 // Deployer handles deployment operations
 type Deployer struct {
-	client            any
-	config            *config.Config
-	environment       string
-	verbose           bool
-	sshPool           *ssh.Pool
-	targetServers     []string
-	cliVersion        string
-	skipBuild         bool
-	meshPortCache     map[meshUpstreamPortKey]int
-	meshPortEvidence  map[meshUpstreamPortKey]takod.PortAllocationResponse
-	meshPortCacheMu   sync.Mutex
-	meshPortAllocator func(serverName string, serviceName string, revision string, slot int, containerPort int) (int, error)
-	localImageClient  localImageClient
-	output            io.Writer
-	outputMu          sync.Mutex
-	events            events.Sink
-	releaseRuns       map[string]*ReleaseRun
-	releaseMu         sync.Mutex
-	jobImages         map[string]string
-	jobMu             sync.Mutex
-	baseCtx           context.Context
-	runtimeFactory    *nodeclient.Factory
-	runtimeFactoryMu  sync.Mutex
-	assignmentMu      sync.Mutex
-	assignments       map[string][]scheduler.Assignment
+	client                   any
+	config                   *config.Config
+	environment              string
+	verbose                  bool
+	sshPool                  *ssh.Pool
+	targetServers            []string
+	placementMovementTargets bool
+	cliVersion               string
+	skipBuild                bool
+	meshPortCache            map[meshUpstreamPortKey]int
+	meshPortEvidence         map[meshUpstreamPortKey]takod.PortAllocationResponse
+	meshPortCacheMu          sync.Mutex
+	meshPortAllocator        func(serverName string, serviceName string, revision string, slot int, containerPort int) (int, error)
+	localImageClient         localImageClient
+	output                   io.Writer
+	outputMu                 sync.Mutex
+	events                   events.Sink
+	releaseRuns              map[string]*ReleaseRun
+	releaseMu                sync.Mutex
+	jobImages                map[string]string
+	jobMu                    sync.Mutex
+	baseCtx                  context.Context
+	runtimeFactory           *nodeclient.Factory
+	runtimeFactoryMu         sync.Mutex
+	assignmentMu             sync.Mutex
+	assignments              map[string][]scheduler.Assignment
 }
 
 const (
@@ -206,6 +209,7 @@ func (d *Deployer) printf(format string, args ...any) {
 // SetTargetServers restricts takod reconciliation to a validated subset of the
 // environment nodes. Passing an empty slice restores the full environment.
 func (d *Deployer) SetTargetServers(serverNames []string) error {
+	d.placementMovementTargets = false
 	if len(serverNames) == 0 {
 		d.targetServers = nil
 		return nil
@@ -242,6 +246,35 @@ func (d *Deployer) SetTargetServers(serverNames []string) error {
 	}
 
 	d.targetServers = targets
+	return nil
+}
+
+// SetPlacementMovementTargets is reserved for a controller-fenced reviewed
+// movement plan. It may include a cordoned/draining source solely so the
+// reconcile request can remove its old replica.
+func (d *Deployer) SetPlacementMovementTargets(serverNames []string) error {
+	if len(serverNames) == 0 {
+		return fmt.Errorf("placement movement targets are required")
+	}
+	seen := map[string]struct{}{}
+	var targets []string
+	for _, name := range serverNames {
+		server, ok := d.config.Servers[name]
+		if !ok {
+			return fmt.Errorf("placement movement target %s is not configured", name)
+		}
+		if !server.Schedulable() && server.Lifecycle != nodeidentity.NodeLifecycleCordoned && server.Lifecycle != nodeidentity.NodeLifecycleDraining {
+			return fmt.Errorf("placement movement target %s has unsupported lifecycle %s", name, server.Lifecycle)
+		}
+		if _, duplicate := seen[name]; duplicate {
+			continue
+		}
+		seen[name] = struct{}{}
+		targets = append(targets, name)
+	}
+	sort.Strings(targets)
+	d.targetServers = targets
+	d.placementMovementTargets = true
 	return nil
 }
 
@@ -539,7 +572,7 @@ func (d *Deployer) buildImageWithClient(client any, serviceName string, service 
 		}
 		defer archive.Close()
 
-		endpoint := takodclient.ImageBuildEndpoint(fullImageName, service.Dockerfile)
+		endpoint := takodclient.ScopedImageBuildEndpoint(d.config.Project.Name, d.environment, fullImageName, service.Dockerfile)
 		body := io.Reader(archive)
 		auths := d.registryAuths()
 		if len(auths) > 0 || len(service.BuildArgs) > 0 || service.BuildTarget != "" {
@@ -554,9 +587,9 @@ func (d *Deployer) buildImageWithClient(client any, serviceName string, service 
 				return "", fmt.Errorf("failed to encode build options preamble: %w", err)
 			}
 			if len(service.BuildArgs) > 0 || service.BuildTarget != "" {
-				endpoint = takodclient.ImageBuildEndpointWithOptions(fullImageName, service.Dockerfile, len(auths) > 0)
+				endpoint = takodclient.ScopedImageBuildEndpointWithOptions(d.config.Project.Name, d.environment, fullImageName, service.Dockerfile, len(auths) > 0)
 			} else {
-				endpoint = takodclient.ImageBuildEndpointWithAuth(fullImageName, service.Dockerfile)
+				endpoint = takodclient.ScopedImageBuildEndpointWithAuth(d.config.Project.Name, d.environment, fullImageName, service.Dockerfile)
 			}
 			body = io.MultiReader(bytes.NewReader(append(preamble, '\n')), archive)
 		}

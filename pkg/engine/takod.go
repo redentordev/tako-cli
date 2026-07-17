@@ -10,8 +10,10 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
 // TakodSocketFromConfig resolves the takod unix socket path for a config.
@@ -34,6 +36,19 @@ func PreferredRuntimeServer(cfg *config.Config, serverNames []string) (string, e
 		return "", fmt.Errorf("no mutation-eligible runtime server")
 	}
 	return serverNames[0], nil
+}
+
+// AuthoritativeStateServer resolves controller-only state in enrolled mode and
+// retains the legacy local/first preference for unenrolled configurations.
+func AuthoritativeStateServer(cfg *config.Config, fallback []string) (string, error) {
+	controller, enrolled, err := controllerAuthorityServer(cfg, fallback)
+	if err != nil {
+		return "", err
+	}
+	if enrolled {
+		return controller, nil
+	}
+	return PreferredRuntimeServer(cfg, fallback)
 }
 
 // DeployLeaseTargets includes every schedulable environment worker plus any
@@ -68,6 +83,77 @@ func DeployLeaseTargets(cfg *config.Config, environmentServers []string, service
 	}
 	sort.Strings(targets)
 	return targets
+}
+
+// DeployMutationTargets returns only nodes the resolved deploy can mutate:
+// assigned workers, edge nodes, a required builder, and the authoritative
+// state/controller node. An unrelated unavailable worker therefore cannot
+// block an otherwise local operation.
+func DeployMutationTargets(cfg *config.Config, services map[string]config.ServiceConfig, assignments map[string][]scheduler.Assignment) []string {
+	seen := make(map[string]struct{})
+	for serviceName := range services {
+		for _, assignment := range assignments[serviceName] {
+			if _, ok := cfg.Servers[assignment.Node]; ok {
+				seen[assignment.Node] = struct{}{}
+			}
+		}
+	}
+	hasProxy := false
+	for _, service := range services {
+		hasProxy = hasProxy || service.IsProxied()
+	}
+	if hasProxy {
+		for name, server := range cfg.Servers {
+			if server.Schedulable() && server.HasPlatformRole(nodeidentity.RoleEdge) {
+				seen[name] = struct{}{}
+			}
+		}
+	}
+	for _, name := range DeployLeaseTargets(cfg, nil, services) {
+		seen[name] = struct{}{}
+	}
+	if controller, enrolled, err := controllerAuthorityServer(cfg, nil); err == nil && enrolled {
+		seen[controller] = struct{}{}
+	}
+	targets := make([]string, 0, len(seen))
+	for name := range seen {
+		targets = append(targets, name)
+	}
+	sort.Strings(targets)
+	return targets
+}
+
+// AddPriorDesiredMutationTargets keeps workers that still own authoritative
+// desired assignments in the fenced observation/cleanup set. This is what
+// lets a full deploy remove the last service from a worker instead of
+// forgetting the worker before its old containers are observed and stopped.
+func AddPriorDesiredMutationTargets(cfg *config.Config, current []string, prior *takodstate.DesiredRevision) []string {
+	seen := make(map[string]struct{}, len(current))
+	for _, name := range current {
+		seen[name] = struct{}{}
+	}
+	if prior != nil {
+		for _, service := range prior.Services {
+			for _, assignment := range service.Assignments {
+				if _, configured := cfg.Servers[assignment.Node]; configured {
+					seen[assignment.Node] = struct{}{}
+				}
+			}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for name := range seen {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// ShouldReplicateDeploymentHistory preserves legacy mesh replication while
+// keeping enrolled platform state single-writer on the controller.
+func ShouldReplicateDeploymentHistory(cfg *config.Config) bool {
+	_, enrolled, err := controllerAuthorityServer(cfg, nil)
+	return err != nil || !enrolled
 }
 
 // RequireTakodRuntime rejects configs that do not use the takod runtime.

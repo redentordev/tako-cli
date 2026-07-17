@@ -62,16 +62,17 @@ var activeNodeLifecycles = map[string]struct{}{
 // ClusterInventory is a controller-published, read-only trust snapshot. Join
 // token material and private credentials never appear here.
 type ClusterInventory struct {
-	APIVersion        string             `json:"apiVersion"`
-	Kind              string             `json:"kind"`
-	ClusterID         string             `json:"clusterId"`
-	Generation        uint64             `json:"generation,omitempty"`
-	ControllerNodeID  string             `json:"controllerNodeId,omitempty"`
-	MeshCIDR          string             `json:"meshCidr,omitempty"`
-	UpdatedAt         time.Time          `json:"updatedAt,omitempty"`
-	Nodes             []InventoryNode    `json:"nodes"`
-	Tombstones        []NodeTombstone    `json:"tombstones,omitempty"`
-	ActiveAllocations []ActiveAllocation `json:"activeAllocations,omitempty"`
+	APIVersion           string             `json:"apiVersion"`
+	Kind                 string             `json:"kind"`
+	ClusterID            string             `json:"clusterId"`
+	Generation           uint64             `json:"generation,omitempty"`
+	AllocationGeneration uint64             `json:"allocationGeneration,omitempty"`
+	ControllerNodeID     string             `json:"controllerNodeId,omitempty"`
+	MeshCIDR             string             `json:"meshCidr,omitempty"`
+	UpdatedAt            time.Time          `json:"updatedAt,omitempty"`
+	Nodes                []InventoryNode    `json:"nodes"`
+	Tombstones           []NodeTombstone    `json:"tombstones,omitempty"`
+	ActiveAllocations    []ActiveAllocation `json:"activeAllocations,omitempty"`
 }
 
 type InventoryNode struct {
@@ -123,8 +124,46 @@ type ActiveAllocation struct {
 	NodeID        string    `json:"nodeId"`
 	Generation    uint64    `json:"generation"`
 	IssuedAt      time.Time `json:"issuedAt"`
+	OperationID   string    `json:"operationId,omitempty"`
+	FenceToken    uint64    `json:"fenceToken,omitempty"`
 	Signature     string    `json:"signature"`
 	AuthorizedAt  time.Time `json:"authorizedAt"`
+}
+
+// VerifyActiveAllocationOrigin proves that the exact durable allocation was
+// emitted by the enrolled worker. Controller authorization is a separate
+// step represented by AuthorizedAt and inventory publication.
+func VerifyActiveAllocationOrigin(allocation ActiveAllocation, publicKey string) error {
+	evidence := struct {
+		Kind          string    `json:"kind"`
+		Project       string    `json:"project"`
+		Environment   string    `json:"environment"`
+		Service       string    `json:"service"`
+		Revision      string    `json:"revision,omitempty"`
+		Slot          int       `json:"slot"`
+		HostIP        string    `json:"hostIp"`
+		HostPort      int       `json:"hostPort"`
+		ContainerPort int       `json:"containerPort"`
+		Key           string    `json:"key"`
+		ClusterID     string    `json:"clusterId,omitempty"`
+		NodeID        string    `json:"nodeId,omitempty"`
+		Generation    uint64    `json:"generation,omitempty"`
+		IssuedAt      time.Time `json:"issuedAt,omitempty"`
+		OperationID   string    `json:"operationId,omitempty"`
+		FenceToken    uint64    `json:"fenceToken,omitempty"`
+		Signature     string    `json:"signature,omitempty"`
+	}{
+		Kind: allocation.Kind, Project: allocation.Project, Environment: allocation.Environment,
+		Service: allocation.Service, Revision: allocation.Revision, Slot: allocation.Slot,
+		HostIP: allocation.HostIP, HostPort: allocation.HostPort, ContainerPort: allocation.ContainerPort,
+		Key: allocation.Key, ClusterID: allocation.ClusterID, NodeID: allocation.NodeID,
+		Generation: allocation.Generation, IssuedAt: allocation.IssuedAt, OperationID: allocation.OperationID, FenceToken: allocation.FenceToken,
+	}
+	message, err := json.Marshal(evidence)
+	if err != nil {
+		return err
+	}
+	return VerifyAllocationSignature(publicKey, message, allocation.Signature)
 }
 
 func (i ClusterInventory) Validate() error {
@@ -221,6 +260,9 @@ func (i ClusterInventory) Validate() error {
 		seen[tombstone.NodeID] = struct{}{}
 	}
 	allocationKeys := make(map[string]struct{}, len(i.ActiveAllocations))
+	if len(i.ActiveAllocations) > 0 && i.AllocationGeneration == 0 {
+		return fmt.Errorf("active allocations require an allocation authority generation")
+	}
 	allocationPorts := make(map[string]struct{}, len(i.ActiveAllocations))
 	for _, allocation := range i.ActiveAllocations {
 		if err := validateActiveAllocation(i, allocation); err != nil {

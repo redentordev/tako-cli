@@ -126,6 +126,8 @@ type ProxyDestination struct {
 	AllocationKey string    `json:"allocationKey,omitempty"`
 	Generation    uint64    `json:"generation,omitempty"`
 	IssuedAt      time.Time `json:"issuedAt,omitempty"`
+	OperationID   string    `json:"operationId,omitempty"`
+	FenceToken    uint64    `json:"fenceToken,omitempty"`
 	Signature     string    `json:"signature,omitempty"`
 	ContainerPort int       `json:"containerPort"`
 	HostPort      int       `json:"hostPort"`
@@ -160,6 +162,16 @@ func validateEnrolledProxyRouteManifest(content string, clusterID string, invent
 	}
 	if inventory.ClusterID != clusterID {
 		return fmt.Errorf("authoritative allocation inventory belongs to another cluster")
+	}
+	return validateEnrolledProxyRouteManifestWithInventory(manifest, clusterID, inventory)
+}
+
+func validateEnrolledProxyRouteManifestWithInventory(manifest *ProxyRouteManifest, clusterID string, inventory *nodeidentity.ClusterInventory) error {
+	if manifest == nil || inventory == nil {
+		return fmt.Errorf("authoritative allocation inventory is unavailable")
+	}
+	if manifest.Version != proxyRouteManifestVersion || manifest.ClusterID != clusterID || inventory.ClusterID != clusterID {
+		return fmt.Errorf("proxy route manifest does not match enrolled allocation authority")
 	}
 	for _, route := range manifest.Routes {
 		destinations := append([]ProxyDestination(nil), route.Destinations...)

@@ -214,6 +214,20 @@ func TestBackupIDForRequestFallsBackToNow(t *testing.T) {
 	}
 }
 
+func TestBackupIDAcceptsUniqueRecoverySuffix(t *testing.T) {
+	value := "20260717-120000-0123456789abcdef0123456789abcdef"
+	if !isSafeBackupID(value) {
+		t.Fatal("unique recovery backup ID was rejected")
+	}
+	createdAt, err := backupIDTimestamp(value)
+	if err != nil || createdAt.UTC().Format("20060102-150405") != "20260717-120000" {
+		t.Fatalf("unique recovery backup timestamp = %v, %v", createdAt, err)
+	}
+	if isSafeBackupID("20260717-120000-0123456789ABCDEF0123456789ABCDEF") {
+		t.Fatal("non-canonical recovery suffix was accepted")
+	}
+}
+
 func TestFullBackupVolumeNameUsesRuntimeVolumeIdentity(t *testing.T) {
 	request := BackupRequest{Project: "demo", Environment: "production", Volume: "db_data"}
 	got := fullBackupVolumeName(request)

@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/redentordev/tako-cli/pkg/takodclient"
 	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
 )
@@ -112,8 +114,27 @@ func getSSHAgentAuth() *agentAuthResult {
 
 // Pool manages a pool of SSH connections
 type Pool struct {
-	clients map[string]*Client
-	mu      sync.RWMutex
+	clients     map[string]*Client
+	mu          sync.RWMutex
+	fenceSource takodclient.OperationFenceSource
+}
+
+func (p *Pool) SetOperationFenceSource(source takodclient.OperationFenceSource) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.fenceSource = source
+	p.mu.Unlock()
+}
+
+func (p *Pool) OperationFenceSource() takodclient.OperationFenceSource {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.fenceSource
 }
 
 // NewPool creates a new SSH connection pool

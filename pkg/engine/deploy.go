@@ -58,6 +58,7 @@ type DeploySession struct {
 	allServices             map[string]config.ServiceConfig
 	services                map[string]config.ServiceConfig
 	serverNames             []string
+	mutationServerNames     []string
 	connectivityServerNames []string
 	servers                 map[string]config.ServerConfig
 	actualState             map[string]*reconcile.ActualService
@@ -309,20 +310,6 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		return nil, err
 	}
 
-	leaseServerNames := DeployLeaseTargets(cfg, serverNames, allServices)
-	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, session.sshPool, cfg, session.envName, leaseServerNames, "deploy")
-	if err != nil {
-		return nil, err
-	}
-	session.leases = leaseSet
-	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
-	defer cancelLeaseContext()
-	ctx = leaseCtx
-	leaseSet.SetWarnFunc(func(message string) {
-		e.debug(events.TypeWarning, events.PhaseDeploy, message)
-	})
-	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired remote deploy leases: %s\n", leaseSet.Summary()))
-
 	sourceServerName, err := PreferredRuntimeServer(cfg, serverNames)
 	if err != nil {
 		return nil, err
@@ -341,11 +328,22 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	if err != nil {
 		return nil, &ConnectivityError{Server: sourceServerName, Err: fmt.Errorf("failed to connect to runtime on server %s: %w", sourceServerName, err)}
 	}
-	session.stateManager = remotestate.NewStateManagerWithSocket(sourceRuntime, cfg.Project.Name, session.envName, session.sourceServer.Host, TakodSocketFromConfig(cfg))
+	stateRuntime, stateHost := any(sourceRuntime), session.sourceServer.Host
+	if controllerName, enrolled, authorityErr := controllerAuthorityServer(cfg, serverNames); authorityErr != nil {
+		return nil, authorityErr
+	} else if enrolled {
+		controllerRuntime, _, clientErr := runtimeFactory.Client(ctx, controllerName)
+		if clientErr != nil {
+			return nil, &ConnectivityError{Server: controllerName, Err: fmt.Errorf("connect to authoritative state controller: %w", clientErr)}
+		}
+		stateRuntime = controllerRuntime
+		stateHost = cfg.Servers[controllerName].Host
+	}
+	session.stateManager = remotestate.NewStateManagerWithSocket(stateRuntime, cfg.Project.Name, session.envName, stateHost, TakodSocketFromConfig(cfg))
 
 	// Create deployer with pool for takod support.
 	deploy := deployer.NewDeployerWithPool(nil, cfg, session.envName, session.sshPool, req.Verbose)
-	priorDesired, priorAssignments, err := LoadPriorPlacementState(sourceRuntime, cfg, session.envName)
+	priorDesired, priorAssignments, err := LoadPriorPlacementState(stateRuntime, cfg, session.envName)
 	if err != nil {
 		return nil, err
 	}
@@ -385,10 +383,42 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		return nil, err
 	}
 	deploy.SetEventSink(e.stream)
-	if err := deploy.SetTargetServers(serverNames); err != nil {
+	session.deployer = deploy
+	mutationServerNames := DeployMutationTargets(cfg, allServices, deploy.ResolvedAssignments())
+	mutationServerNames = AddPriorDesiredMutationTargets(cfg, mutationServerNames, priorDesired)
+	if len(mutationServerNames) == 0 {
+		mutationServerNames = []string{sourceServerName}
+	}
+	environmentTarget := make(map[string]struct{}, len(serverNames))
+	for _, name := range serverNames {
+		environmentTarget[name] = struct{}{}
+	}
+	setupTargets := make([]string, 0, len(mutationServerNames))
+	for _, name := range mutationServerNames {
+		if _, ok := environmentTarget[name]; ok {
+			setupTargets = append(setupTargets, name)
+		}
+	}
+	if len(setupTargets) == 0 {
+		setupTargets = []string{sourceServerName}
+	}
+	if err := deploy.SetTargetServers(setupTargets); err != nil {
 		return nil, err
 	}
-	session.deployer = deploy
+	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, session.sshPool, cfg, session.envName, mutationServerNames, "deploy")
+	if err != nil {
+		return nil, err
+	}
+	session.leases = leaseSet
+	session.mutationServerNames = mutationServerNames
+	leaseCtx, cancelLeaseContext := leaseSet.BindContext(ctx)
+	defer cancelLeaseContext()
+	ctx = leaseCtx
+	leaseSet.SetWarnFunc(func(message string) {
+		e.debug(events.TypeWarning, events.PhaseDeploy, message)
+	})
+	deploy.SetBaseContext(ctx)
+	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired remote deploy authority: %s\n", leaseSet.Summary()))
 
 	if err := preflightAndSetupTakodRuntime(deploy, allServices); err != nil {
 		return nil, err
@@ -419,7 +449,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 
 	// Gather actual state from running containers across the selected mesh nodes.
-	actualByNode, err := reconcile.GatherActualStateByServer(session.sshPool, cfg, session.envName, connectivityServerNames)
+	actualByNode, err := reconcile.GatherActualStateByServer(session.sshPool, cfg, session.envName, mutationServerNames)
 	if err != nil {
 		return nil, ActualStateError(err)
 	}
@@ -974,7 +1004,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			return nil, RemoteHistoryError(err)
 		}
 
-		finalNodeActualState, err := reconcile.GatherActualStateByServer(s.sshPool, cfg, envName, serverNames)
+		finalNodeActualState, err := reconcile.GatherActualStateByServer(s.sshPool, cfg, envName, s.mutationServerNames)
 		if err != nil {
 			return nil, fmt.Errorf("deployment succeeded but failed to gather final actual state: %w", err)
 		}
@@ -1013,7 +1043,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		e.debug(events.TypeStatePersisted, events.PhaseState, "")
 
 		// Replicate state to the rest of the mesh.
-		if len(s.servers) > 1 {
+		if len(s.servers) > 1 && ShouldReplicateDeploymentHistory(cfg) {
 			replicator := remotestate.NewStateReplicator(s.sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
 			history, err := s.stateManager.LoadHistoryContext(ctx)
 			if err != nil {
@@ -1051,7 +1081,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	if deploymentFailed {
 		recordCtx, recordCancel := failedDeploymentRecordContext(ctx)
 		recordErr := RecordFailedDeploymentStateContext(recordCtx, s.stateManager, localSaverOrNil(s.localStateMgr), deployment, cfg, envName, serverNames, s.sourceInfo.CommitInfo, startTime, deploymentError)
-		if recordErr == nil && len(s.servers) > 1 {
+		if recordErr == nil && len(s.servers) > 1 && ShouldReplicateDeploymentHistory(cfg) {
 			replicator := remotestate.NewStateReplicator(s.sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
 			history, err := s.stateManager.LoadHistoryContext(recordCtx)
 			if err != nil {

@@ -2,12 +2,15 @@ package state
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
@@ -26,14 +29,16 @@ var ErrLeaseRenewalUnsupported = errors.New("takod does not support explicit lea
 
 // LeaseInfo describes a remote takod deployment lease.
 type LeaseInfo struct {
-	ID          string    `json:"id"`
-	ProjectName string    `json:"projectName"`
-	Environment string    `json:"environment"`
-	Operation   string    `json:"operation"`
-	Who         string    `json:"who"`
-	PID         int       `json:"pid"`
-	CreatedAt   time.Time `json:"createdAt"`
-	ExpiresAt   time.Time `json:"expiresAt"`
+	ID          string                       `json:"id"`
+	ProjectName string                       `json:"projectName"`
+	Environment string                       `json:"environment"`
+	Operation   string                       `json:"operation"`
+	Who         string                       `json:"who"`
+	PID         int                          `json:"pid"`
+	CreatedAt   time.Time                    `json:"createdAt"`
+	ExpiresAt   time.Time                    `json:"expiresAt"`
+	Fence       *nodeidentity.OperationFence `json:"fence,omitempty"`
+	HolderToken string                       `json:"-"`
 }
 
 // AcquireLease acquires the remote deployment lease for this project.
@@ -43,6 +48,13 @@ func (s *StateManager) AcquireLease(operation, environment string, ttl time.Dura
 
 // AcquireLeaseContext acquires the remote deployment lease bounded by ctx.
 func (s *StateManager) AcquireLeaseContext(ctx context.Context, operation, environment string, ttl time.Duration) (*LeaseInfo, error) {
+	return s.AcquireControllerLeaseContext(ctx, operation, environment, ttl, nil)
+}
+
+// AcquireControllerLeaseContext requests controller-authoritative operation
+// identity and target fencing. Legacy takod ignores the additive fields and
+// continues to use the client-generated ID.
+func (s *StateManager) AcquireControllerLeaseContext(ctx context.Context, operation, environment string, ttl time.Duration, targetNodeIDs []string) (*LeaseInfo, error) {
 	if environment == "" {
 		environment = s.environment
 	}
@@ -50,16 +62,28 @@ func (s *StateManager) AcquireLeaseContext(ctx context.Context, operation, envir
 		ttl = DefaultLeaseTTL
 	}
 
+	requestID, err := newLeaseRequestID()
+	if err != nil {
+		return nil, fmt.Errorf("create remote lease request identity: %w", err)
+	}
 	request := takod.LeaseRequest{
-		Project:     s.projectName,
-		Environment: environment,
-		ID:          fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()),
-		Operation:   operation,
-		Who:         currentPrincipal(),
-		PID:         os.Getpid(),
-		TTLSeconds:  int64(ttl.Seconds()),
+		Project:       s.projectName,
+		Environment:   environment,
+		ID:            requestID,
+		RequestID:     requestID,
+		TargetNodeIDs: append([]string(nil), targetNodeIDs...),
+		Operation:     operation,
+		Who:           currentPrincipal(),
+		PID:           os.Getpid(),
+		TTLSeconds:    int64(ttl.Seconds()),
 	}
 	output, err := s.requestJSONContext(ctx, "POST", "/v1/lease", request)
+	if err != nil && retryUncertainLeaseAcquire(ctx, err) {
+		// Reuse the exact cryptographically random RequestID once. If the first
+		// response was lost after commit, takod returns the original signed fence
+		// and private holder credential instead of creating a competing writer.
+		output, err = s.requestJSONContext(ctx, "POST", "/v1/lease", request)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +105,23 @@ func (s *StateManager) AcquireLeaseContext(ctx context.Context, operation, envir
 	if response.Lease == nil {
 		return nil, fmt.Errorf("remote lease was acquired but metadata is missing")
 	}
-	return leaseFromTakod(response.Lease), nil
+	return leaseFromTakod(response.Lease, response.HolderToken), nil
+}
+
+func retryUncertainLeaseAcquire(ctx context.Context, err error) bool {
+	if err == nil || ctx == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var httpErr *takodclient.HTTPError
+	return !errors.As(err, &httpErr)
+}
+
+func newLeaseRequestID() (string, error) {
+	value := make([]byte, 32)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return "req-" + hex.EncodeToString(value), nil
 }
 
 // RenewLease extends a lease still held by the same ID token.
@@ -111,8 +151,15 @@ func (s *StateManager) RenewLeaseContext(ctx context.Context, lease *LeaseInfo, 
 		PID:         lease.PID,
 		TTLSeconds:  int64(ttl.Seconds()),
 		Renew:       true,
+		Fence:       lease.Fence,
+		HolderToken: lease.HolderToken,
 	}
 	output, err := s.requestJSONContext(ctx, "POST", "/v1/lease", request)
+	if err != nil && retryUncertainLeaseAcquire(ctx, err) {
+		// The controller accepts the immediate predecessor fence from this
+		// authenticated holder and returns any already-committed renewal exactly.
+		output, err = s.requestJSONContext(ctx, "POST", "/v1/lease", request)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +176,7 @@ func (s *StateManager) RenewLeaseContext(ctx context.Context, lease *LeaseInfo, 
 		}
 		return nil, fmt.Errorf("%w: %s", ErrLeaseLost, response.Message)
 	}
-	return leaseFromTakod(response.Lease), nil
+	return leaseFromTakod(response.Lease, response.HolderToken), nil
 }
 
 // ReadLease returns the currently held remote lease, or nil if none exists.
@@ -150,7 +197,7 @@ func (s *StateManager) ReadLeaseContext(ctx context.Context) (*LeaseInfo, error)
 	if !response.Found || response.Lease == nil {
 		return nil, nil
 	}
-	return leaseFromTakod(response.Lease), nil
+	return leaseFromTakod(response.Lease, ""), nil
 }
 
 // ReleaseLease releases the remote lease if it is still owned by this process.
@@ -167,6 +214,8 @@ func (s *StateManager) ReleaseLeaseContext(ctx context.Context, lease *LeaseInfo
 		Project:     s.projectName,
 		Environment: lease.Environment,
 		ID:          lease.ID,
+		Fence:       lease.Fence,
+		HolderToken: lease.HolderToken,
 	}
 	_, err := s.requestJSONWithTimeoutContext(ctx, "DELETE", "/v1/lease", request, leaseReleaseTimeout)
 	return err
@@ -180,7 +229,7 @@ func decodeLeaseResponse(output string) (*takod.LeaseResponse, error) {
 	return &response, nil
 }
 
-func leaseFromTakod(lease *takod.LeaseInfo) *LeaseInfo {
+func leaseFromTakod(lease *takod.LeaseInfo, holderToken string) *LeaseInfo {
 	if lease == nil {
 		return nil
 	}
@@ -193,6 +242,8 @@ func leaseFromTakod(lease *takod.LeaseInfo) *LeaseInfo {
 		PID:         lease.PID,
 		CreatedAt:   lease.CreatedAt,
 		ExpiresAt:   lease.ExpiresAt,
+		Fence:       lease.Fence,
+		HolderToken: holderToken,
 	}
 }
 

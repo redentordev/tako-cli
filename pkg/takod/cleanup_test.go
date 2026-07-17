@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
@@ -37,6 +38,26 @@ func TestValidateCleanupRequest(t *testing.T) {
 	invalid.ProxyFiles = []string{"../demo.json"}
 	if err := validateCleanupRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe proxy file to be rejected")
+	}
+}
+
+func TestCleanupFenceCannotDeleteAnotherProjectsProxyManifest(t *testing.T) {
+	useTempProxyPaths(t)
+	if err := os.MkdirAll(proxyRoutesDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	name := runtimeid.ProxyConfigFileName("beta", "production")
+	content := `{"version":1,"project":"beta","environment":"production","routes":[{"service":"web","domains":["beta.example.com"],"upstreams":["http://web:3000"]}]}`
+	path := filepath.Join(proxyRoutesDir, name)
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := withOperationFence(context.Background(), nodeidentity.OperationFence{Project: "alpha", Environment: "production"})
+	if _, err := CleanupProject(ctx, CleanupRequest{Project: "alpha", Environment: "production", ProxyFiles: []string{name}}); err == nil || !strings.Contains(err.Error(), "outside") {
+		t.Fatalf("cross-project cleanup error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("cross-project proxy manifest was removed: %v", err)
 	}
 }
 

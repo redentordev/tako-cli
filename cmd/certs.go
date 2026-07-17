@@ -149,11 +149,29 @@ func executeCertificateOperation(ctx context.Context, cfg *config.Config, envNam
 	}
 	pool := ssh.NewPool()
 	defer pool.CloseAll()
+	var err error
+	var leaseSet *engine.RemoteLeaseSet
+	if action != "list" {
+		leaseSet, err = engine.AcquireRemoteOperationLeasesContext(ctx, pool, cfg, envName, targets, "certs-"+action)
+		if err != nil {
+			return result, err
+		}
+		defer leaseSet.Release()
+		leaseCtx, cancel := leaseSet.BindContext(ctx)
+		defer cancel()
+		ctx = leaseCtx
+	}
 	factory, err := nodeclient.NewFactory(cfg, pool, takodSocketFromConfig(cfg))
 	if err != nil {
 		return result, err
 	}
 	defer factory.CloseIdleConnections()
+	if leaseSet != nil {
+		factory.SetOperationFenceSource(leaseSet)
+	}
+	if push != nil {
+		push.Project, push.Environment = cfg.Project.Name, envName
+	}
 	clients := make(map[string]*takodclient.AgentClient, len(targets))
 	var connectionErr error
 	for _, serverName := range targets {
@@ -186,11 +204,11 @@ func executeCertificateOperation(ctx context.Context, cfg *config.Config, envNam
 		return result, connectionErr
 	}
 	var operationErr error
-	result.Nodes, operationErr = executeCertificateNodeRequests(ctx, takodSocketFromConfig(cfg), result.Nodes, clients, action, domain, push)
+	result.Nodes, operationErr = executeCertificateNodeRequests(ctx, takodSocketFromConfig(cfg), result.Nodes, clients, cfg.Project.Name, envName, action, domain, push)
 	return result, operationErr
 }
 
-func executeCertificateNodeRequests[T any](ctx context.Context, socket string, nodes []engine.CertsNodeResult, clients map[string]T, action string, domain string, push *takod.ProxyCertificatePushRequest) ([]engine.CertsNodeResult, error) {
+func executeCertificateNodeRequests[T any](ctx context.Context, socket string, nodes []engine.CertsNodeResult, clients map[string]T, project, environment, action string, domain string, push *takod.ProxyCertificatePushRequest) ([]engine.CertsNodeResult, error) {
 	var preflightErr error
 	for i := range nodes {
 		node := &nodes[i]
@@ -226,9 +244,9 @@ func executeCertificateNodeRequests[T any](ctx context.Context, socket string, n
 		var err error
 		switch action {
 		case "push":
-			output, err = takodclient.RequestJSONWithContext(ctx, clients[node.Server], socket, "PUT", takodclient.CertificatesEndpoint(""), push)
+			output, err = takodclient.RequestJSONWithContext(ctx, clients[node.Server], socket, "PUT", takodclient.ScopedCertificatesEndpoint(project, environment, ""), push)
 		case "remove":
-			output, err = takodclient.RequestJSONWithContext(ctx, clients[node.Server], socket, "DELETE", takodclient.CertificatesEndpoint(domain), nil)
+			output, err = takodclient.RequestJSONWithContext(ctx, clients[node.Server], socket, "DELETE", takodclient.ScopedCertificatesEndpoint(project, environment, domain), nil)
 		case "list":
 			output, err = takodclient.RequestJSONWithContext(ctx, clients[node.Server], socket, "GET", takodclient.CertificatesEndpoint(""), nil)
 		default:
