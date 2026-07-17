@@ -143,9 +143,10 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, config BootstrapConfig) (*
 	configDir := config.hostPath(config.ConfigDir)
 	auditDir := config.hostPath(config.AuditDir)
 	protectedWriteDirs := map[string]os.FileMode{
-		filepath.Dir(identityPath):             0755,
-		configDir:                              0755,
-		stateDir:                               0750,
+		filepath.Dir(identityPath): 0755,
+		configDir:                  0755,
+		stateDir:                   0750,
+		filepath.Dir(DefaultMembershipPath(stateDir)): 0700,
 		auditDir:                               0750,
 		config.hostPath("/etc/tako/proxy"):     0750,
 		config.hostPath("/var/log/tako/proxy"): 0750,
@@ -222,6 +223,24 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, config BootstrapConfig) (*
 	} else if existing.ClusterID != installation.ClusterID {
 		return nil, fmt.Errorf("trusted cluster inventory belongs to another cluster")
 	}
+	membershipPath := DefaultMembershipPath(stateDir)
+	meshPublicKey, err := EnsureMeshPublicKey(config.hostPath(DefaultPlatformMeshKeyDir))
+	if err != nil {
+		return nil, fmt.Errorf("initialize first-node mesh identity: %w", err)
+	}
+	membership, err := NewMembershipStore(membershipPath, inventoryPath)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := membership.InitializeFirstNode(*installation, DefaultPlatformMeshCIDR, meshPublicKey, installation.NodeName); err != nil {
+		return nil, fmt.Errorf("initialize controller membership: %w", err)
+	}
+	if err := nodeidentity.WriteLocalBinding(config.hostPath(nodeidentity.DefaultLocalBindingPath), nodeidentity.LocalBinding{
+		APIVersion: nodeidentity.InventoryAPIVersion, Kind: nodeidentity.LocalBindingKind,
+		ClusterID: installation.ClusterID, NodeID: installation.NodeID, NodeName: installation.NodeName, WorkerUID: accountIDs.WorkerUID,
+	}); err != nil {
+		return nil, fmt.Errorf("publish local node binding: %w", err)
+	}
 
 	state := BootstrapState{
 		APIVersion:        APIVersion,
@@ -233,6 +252,7 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, config BootstrapConfig) (*
 		EnrollmentRoles:   append([]string(nil), installation.EnrollmentRoles...),
 		IdentityPath:      config.IdentityPath,
 		InventoryPath:     nodeidentity.DefaultInventoryPath,
+		MembershipPath:    DefaultMembershipPath(config.StateDir),
 		StateDir:          config.StateDir,
 		AuditDir:          config.AuditDir,
 		SocketPath:        config.SocketPath,
@@ -374,6 +394,9 @@ func readConfigDocument(path string) (*ConfigDocument, error) {
 	}
 	if strings.TrimSpace(document.State.WorkerSocketPath) == "" {
 		document.State.WorkerSocketPath = DefaultWorkerSocket
+	}
+	if strings.TrimSpace(document.State.MembershipPath) == "" {
+		document.State.MembershipPath = DefaultMembershipPath(document.State.StateDir)
 	}
 	if err := document.State.Validate(); err != nil {
 		return nil, err

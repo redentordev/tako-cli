@@ -19,6 +19,10 @@ type SSHPool interface {
 	GetOrCreateWithAuth(host string, port int, user string, keyPath string, password string) (*ssh.Client, error)
 }
 
+type pinnedSSHPool interface {
+	GetOrCreateWithAuthPinned(host string, port int, user string, keyPath string, password string, expected ssh.RecordedHostKey) (*ssh.Client, error)
+}
+
 // Factory resolves and caches structured runtime clients independently from
 // workload placement. Legacy server entries never probe the local socket.
 type Factory struct {
@@ -112,7 +116,17 @@ func (f *Factory) Client(ctx context.Context, serverName string) (*takodclient.A
 		if f.pool == nil {
 			return nil, decision, fmt.Errorf("runtime transport for %s resolved to SSH but no SSH pool is available", serverName)
 		}
-		sshClient, connectErr := f.pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		var sshClient *ssh.Client
+		var connectErr error
+		if server.SSHHostKey != "" {
+			pinned, ok := f.pool.(pinnedSSHPool)
+			if !ok {
+				return nil, decision, fmt.Errorf("runtime transport for %s requires a membership-pinned SSH pool", serverName)
+			}
+			sshClient, connectErr = pinned.GetOrCreateWithAuthPinned(server.Host, server.Port, server.User, server.SSHKey, server.Password, ssh.RecordedHostKey{Type: server.SSHHostKeyType, Key: server.SSHHostKey, Fingerprint: server.SSHHostKeyFingerprint})
+		} else {
+			sshClient, connectErr = f.pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		}
 		if connectErr != nil {
 			return nil, decision, fmt.Errorf("connect runtime transport for %s over SSH: %w", serverName, connectErr)
 		}

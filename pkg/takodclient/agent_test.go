@@ -157,6 +157,27 @@ func TestAgentClientStatusValidatesInstallationIdentity(t *testing.T) {
 	}
 }
 
+func TestAgentClientStatusPreservesMembershipAttestation(t *testing.T) {
+	identity, err := nodeidentity.New("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "node-1", []string{nodeidentity.RoleWorker}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	membership := nodeidentity.InventoryNode{NodeID: identity.NodeID, NodeName: identity.NodeName, Lifecycle: nodeidentity.NodeLifecycleCordoned, Schedulable: false, AllocationPublicKey: identity.AllocationPublicKey}
+	statusBody, _ := json.Marshal(AgentStatus{Runtime: "takod", Capabilities: []string{nodeidentity.Capability}, Identity: &identity.Identity, Membership: &membership, MembershipGeneration: 17})
+	dialer := &pipeUnixDialer{handler: func(*http.Request) (int, http.Header, string) { return http.StatusOK, nil, string(statusBody) }}
+	client, err := NewAgentClient(dialer, DefaultSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Membership == nil || status.Membership.NodeID != identity.NodeID || status.Membership.Lifecycle != nodeidentity.NodeLifecycleCordoned || status.MembershipGeneration != 17 {
+		t.Fatalf("membership attestation was lost: %#v", status)
+	}
+}
+
 func TestAgentClientStatusRejectsMalformedIdentity(t *testing.T) {
 	dialer := &pipeUnixDialer{handler: func(*http.Request) (int, http.Header, string) {
 		return http.StatusOK, nil, `{"runtime":"takod","capabilities":["node.identity-v1"],"identity":{"apiVersion":"tako.io/v1","kind":"InstallationIdentity","clusterId":"not-a-uuid","nodeId":"also-bad","nodeName":"node-1","createdAt":"2026-07-16T12:00:00Z"}}`

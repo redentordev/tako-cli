@@ -959,6 +959,12 @@ func (d *Deployer) storeMeshUpstreamPort(key meshUpstreamPortKey, port int) {
 }
 
 func (d *Deployer) meshHostIPForServer(serverName string) (string, error) {
+	if server, ok := d.config.Servers[serverName]; ok && strings.TrimSpace(server.MeshIP) != "" {
+		if net.ParseIP(strings.TrimSpace(server.MeshIP)) == nil {
+			return "", fmt.Errorf("invalid platform mesh IP for %s", serverName)
+		}
+		return strings.TrimSpace(server.MeshIP), nil
+	}
 	servers, err := d.getTakodTargetServers()
 	if err != nil {
 		return "", err

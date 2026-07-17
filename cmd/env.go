@@ -143,6 +143,10 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	serverNames, err = config.ResolveSchedulableMutationTargets(cfg.Servers, serverNames, envName, true)
+	if err != nil {
+		return err
+	}
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))

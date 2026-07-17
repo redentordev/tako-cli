@@ -13,6 +13,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/envexpand"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"gopkg.in/yaml.v3"
 )
@@ -215,6 +216,32 @@ type ServerConfig struct {
 	ClusterID string `yaml:"clusterId,omitempty" json:"clusterId,omitempty"`
 	NodeID    string `yaml:"nodeId,omitempty" json:"nodeId,omitempty"`
 	WorkerUID int    `yaml:"workerUid,omitempty" json:"workerUid,omitempty"`
+	// Platform-owned fields are materialized from the protected cluster
+	// inventory and can never be supplied by application YAML/JSON.
+	MeshIP                string   `yaml:"-" json:"-"`
+	Lifecycle             string   `yaml:"-" json:"-"`
+	Roles                 []string `yaml:"-" json:"-"`
+	SSHHostKeyType        string   `yaml:"-" json:"-"`
+	SSHHostKey            string   `yaml:"-" json:"-"`
+	SSHHostKeyFingerprint string   `yaml:"-" json:"-"`
+}
+
+func (s ServerConfig) Schedulable() bool {
+	return s.Lifecycle == "" || s.Lifecycle == nodeidentity.NodeLifecycleSchedulable
+}
+
+// HasPlatformRole preserves legacy configs (which have no controller-owned
+// roles) while enforcing roles on enrolled inventory members.
+func (s ServerConfig) HasPlatformRole(role string) bool {
+	if len(s.Roles) == 0 {
+		return true
+	}
+	for _, candidate := range s.Roles {
+		if candidate == role {
+			return true
+		}
+	}
+	return false
 }
 
 // Service kinds.
@@ -822,10 +849,35 @@ func (c *Config) GetEnvironmentProxyServers(envName string) ([]string, error) {
 // ResolveEnvironmentProxyTargets applies environment proxy placement to the
 // selected environment node set.
 func ResolveEnvironmentProxyTargets(proxy *EnvironmentProxyConfig, servers map[string]ServerConfig, environmentServers []string, environment string) ([]string, error) {
-	if proxy == nil || proxy.Placement == nil {
-		return append([]string(nil), environmentServers...), nil
+	var placement *PlacementConfig
+	if proxy != nil {
+		placement = proxy.Placement
 	}
-	return ResolvePlacementTargets(proxy.Placement, servers, environmentServers, environment)
+	targets, err := ResolvePlacementTargets(placement, servers, environmentServers, environment)
+	if err != nil {
+		return nil, err
+	}
+	edges := make([]string, 0, len(targets))
+	for _, target := range targets {
+		server := servers[target]
+		if !server.Schedulable() {
+			if placement != nil && strings.TrimSpace(placement.Strategy) == "pinned" {
+				return nil, fmt.Errorf("proxy placement target %s is %s and cannot receive proxy mutations", target, server.Lifecycle)
+			}
+			continue
+		}
+		if server.HasPlatformRole(nodeidentity.RoleEdge) {
+			edges = append(edges, target)
+			continue
+		}
+		if placement != nil && strings.TrimSpace(placement.Strategy) == "pinned" {
+			return nil, fmt.Errorf("proxy placement target %s does not have the edge role", target)
+		}
+	}
+	if len(edges) == 0 {
+		return nil, fmt.Errorf("environment %s has no edge-role proxy nodes", environment)
+	}
+	return edges, nil
 }
 
 // matchesLabels checks if server labels match all selector labels
@@ -1132,6 +1184,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	normalizeConfigRelativePaths(&config, configDir)
+	if err := materializeDefaultPlatformInventory(&config); err != nil {
+		return nil, fmt.Errorf("materialize platform inventory: %w", err)
+	}
 
 	// Validate config
 	if err := ValidateConfig(&config); err != nil {

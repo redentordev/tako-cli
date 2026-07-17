@@ -9,6 +9,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
@@ -19,6 +20,54 @@ func TakodSocketFromConfig(cfg *config.Config) string {
 		return cfg.Runtime.Agent.Socket
 	}
 	return takodclient.DefaultSocket
+}
+
+// PreferredRuntimeServer keeps controller-side operations on the protected
+// local ingress whenever the local enrolled node is mutation-eligible.
+func PreferredRuntimeServer(cfg *config.Config, serverNames []string) (string, error) {
+	for _, name := range serverNames {
+		if server, ok := cfg.Servers[name]; ok && server.Transport == "local" {
+			return name, nil
+		}
+	}
+	if len(serverNames) == 0 {
+		return "", fmt.Errorf("no mutation-eligible runtime server")
+	}
+	return serverNames[0], nil
+}
+
+// DeployLeaseTargets includes every schedulable environment worker plus any
+// schedulable builder that an auto/remote build may mutate. Setup remains
+// scoped to environment workers; the builder lease protects the later exact
+// image build/transfer operation.
+func DeployLeaseTargets(cfg *config.Config, environmentServers []string, services map[string]config.ServiceConfig) []string {
+	seen := make(map[string]struct{}, len(environmentServers))
+	for _, name := range environmentServers {
+		seen[name] = struct{}{}
+	}
+	needsRemoteBuilder := cfg.GetBuildStrategy() != config.BuildStrategyLocal
+	if needsRemoteBuilder {
+		needsRemoteBuilder = false
+		for _, service := range services {
+			if service.Build != "" || service.SharedBuildHash != "" {
+				needsRemoteBuilder = true
+				break
+			}
+		}
+	}
+	if needsRemoteBuilder {
+		for name, server := range cfg.Servers {
+			if server.Schedulable() && server.HasPlatformRole(nodeidentity.RoleBuilder) {
+				seen[name] = struct{}{}
+			}
+		}
+	}
+	targets := make([]string, 0, len(seen))
+	for name := range seen {
+		targets = append(targets, name)
+	}
+	sort.Strings(targets)
+	return targets
 }
 
 // RequireTakodRuntime rejects configs that do not use the takod runtime.

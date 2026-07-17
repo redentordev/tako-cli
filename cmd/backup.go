@@ -98,6 +98,10 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	if backupList {
 		return listBackupsAcrossNodes(cfg, runtimeFactory, envName, servers, backupVolume)
 	}
+	servers, targetServerNames, err = schedulableMutationServerSet(cfg, envName, servers, true)
+	if err != nil {
+		return err
+	}
 
 	if backupRestore != "" {
 		if backupVolume == "" {

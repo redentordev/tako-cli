@@ -41,6 +41,27 @@ func TestResolveEnvironmentServerSetRequiresRequestedServerInEnvironment(t *test
 	}
 }
 
+func TestSchedulableMutationServerSetRejectsReadySelectionBeforeFanout(t *testing.T) {
+	cfg := resolverConfig()
+	ready := cfg.Servers["node-b"]
+	ready.Lifecycle = "ready"
+	cfg.Servers["node-b"] = ready
+	servers, err := resolveEnvironmentServerSet(cfg, "production", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := schedulableMutationServerSet(cfg, "production", servers, true); err == nil {
+		t.Fatal("all-node mutation accepted a ready connectivity-only member")
+	}
+	explicit, err := resolveEnvironmentServerSet(cfg, "production", "node-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := schedulableMutationServerSet(cfg, "production", explicit, true); err == nil {
+		t.Fatal("explicit ready mutation target was accepted")
+	}
+}
+
 func resolverConfig() *config.Config {
 	return &config.Config{
 		Servers: map[string]config.ServerConfig{

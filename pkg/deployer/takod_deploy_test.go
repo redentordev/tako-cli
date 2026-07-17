@@ -514,6 +514,54 @@ func TestRunTakodBuildStrategyPreflightsEveryRemoteBuild(t *testing.T) {
 	}
 }
 
+func TestRemoteBuilderServersExcludeWorkerOnlyNodesEvenWhenTargeted(t *testing.T) {
+	cfg := &config.Config{
+		Servers: map[string]config.ServerConfig{
+			"controller": {Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleBuilder, nodeidentity.RoleControlPlane, nodeidentity.RoleWorker}},
+			"worker":     {Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleWorker}},
+		},
+		Environments: map[string]config.EnvironmentConfig{"production": {Servers: []string{"controller", "worker"}}},
+	}
+	deploy := &Deployer{config: cfg, environment: "production", targetServers: []string{"worker"}}
+	builders, err := deploy.remoteBuilderServers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(builders) != 1 || builders[0] != "controller" {
+		t.Fatalf("remote builders = %v", builders)
+	}
+	delete(cfg.Servers, "controller")
+	cfg.Environments["production"] = config.EnvironmentConfig{Servers: []string{"worker"}}
+	if _, err := deploy.remoteBuilderServers(); err == nil || !strings.Contains(err.Error(), "builder-role") {
+		t.Fatalf("worker-only remote builder error = %v", err)
+	}
+}
+
+func TestTakodMutationTargetsExcludeReadyConnectivityMembers(t *testing.T) {
+	cfg := &config.Config{
+		Servers: map[string]config.ServerConfig{
+			"local": {Lifecycle: nodeidentity.NodeLifecycleSchedulable},
+			"ready": {Lifecycle: nodeidentity.NodeLifecycleReady},
+		},
+		Environments: map[string]config.EnvironmentConfig{"production": {Servers: []string{"local", "ready"}}},
+	}
+	deploy := &Deployer{config: cfg, environment: "production", targetServers: []string{"local", "ready"}}
+	targets, err := deploy.getTakodTargetServers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0] != "local" {
+		t.Fatalf("takod mutation targets = %v", targets)
+	}
+}
+
+func TestExactImageSourcesIncludeDedicatedBuilderOutsidePlacement(t *testing.T) {
+	got := mergeTakodImageSourceNames([]string{"worker"}, []string{"builder", "worker"})
+	if strings.Join(got, ",") != "worker,builder" {
+		t.Fatalf("exact image sources = %v", got)
+	}
+}
+
 func TestEnsureTakodBuildOptionsCapabilityFailsClosed(t *testing.T) {
 	deploy := &Deployer{config: &config.Config{}}
 	err := deploy.ensureTakodCapability(fakeTakodStatusExecutor{

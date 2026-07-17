@@ -154,6 +154,13 @@ func validateEnrolledProxyRouteManifest(content string, clusterID string, invent
 	if manifest.ClusterID != clusterID {
 		return fmt.Errorf("proxy route manifest cluster identity does not match this enrolled node")
 	}
+	inventory, err := nodeidentity.ReadInventory(inventoryPath)
+	if err != nil {
+		return fmt.Errorf("authoritative allocation inventory is unavailable: %w", err)
+	}
+	if inventory.ClusterID != clusterID {
+		return fmt.Errorf("authoritative allocation inventory belongs to another cluster")
+	}
 	for _, route := range manifest.Routes {
 		destinations := append([]ProxyDestination(nil), route.Destinations...)
 		if route.DynamicDomain != nil && route.DynamicDomain.Destination != nil {
@@ -163,14 +170,11 @@ func validateEnrolledProxyRouteManifest(content string, clusterID string, invent
 			if proof.Kind != ProxyDestinationMesh {
 				continue
 			}
-			// Phase 3 establishes the local-first runtime. A signed allocation is
-			// historical evidence and cannot prove current remote port ownership.
-			// Remote routes stay fail-closed until the Phase 4 inventory lifecycle
-			// distributes authoritative active generations and revocations.
-			return fmt.Errorf("remote mesh destination %s is disabled until authoritative allocation inventory is available", proof.NodeID)
+			if err := validateAuthorizedRemoteAllocation(inventory, proof); err != nil {
+				return err
+			}
 		}
 	}
-	_ = inventoryPath
 	return nil
 }
 

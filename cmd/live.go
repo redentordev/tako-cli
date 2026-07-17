@@ -65,6 +65,10 @@ func runLive(cmd *cobra.Command, args []string) error {
 	if len(targetServers) == 0 {
 		return fmt.Errorf("no servers configured for environment %s", envName)
 	}
+	targetServers, err = config.ResolveSchedulableMutationTargets(cfg.Servers, targetServers, envName, true)
+	if err != nil {
+		return err
+	}
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))

@@ -97,6 +97,10 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	if len(serverNames) == 0 {
 		return nil, invalidRequestf("no servers configured for environment %s", envName)
 	}
+	serverNames, err = config.ResolveSchedulableEnvironmentTargets(cfg.Servers, serverNames, envName)
+	if err != nil {
+		return nil, err
+	}
 
 	// Register sensitive values with the redactor before emitting anything
 	// that could contain them.
@@ -137,7 +141,10 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	})
 	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("→ Acquired remote promote leases: %s\n", leaseSet.Summary()))
 
-	sourceServerName := serverNames[0]
+	sourceServerName, err := PreferredRuntimeServer(cfg, serverNames)
+	if err != nil {
+		return nil, err
+	}
 	sourceServer, ok := cfg.Servers[sourceServerName]
 	if !ok {
 		return nil, invalidRequestf("server %s not found in configuration", sourceServerName)

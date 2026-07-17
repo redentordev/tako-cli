@@ -1,8 +1,8 @@
 # Goal: Local-First PaaS Foundation
 
 Date: 2026-07-16
-Status: in progress — Phases 1 through 3 are complete and adversarially
-reviewed; Phase 4 is next.
+Status: in progress — Phases 1 through 4 are complete and adversarially
+reviewed; Phase 5 is next.
 
 ## Objective
 
@@ -138,8 +138,9 @@ structured runtime migration, protected worker ingress, durable streamed
 operations, immutable image attestation/transfer, fail-closed enrolled proxy
 policy, and pre-mutation remote-route capability boundary were added. Local
 runtime-alias proxy routes are enabled. Remote mesh routes remain explicitly
-disabled on enrolled nodes until Phase 4 provides authoritative active
-allocation generations and revocations.
+disabled on enrolled nodes until Phase 6 provides controller-observed current
+allocation challenges and fencing; generation signatures alone are replayable
+before the controller has observed them.
 
 - Migrate deploy, status, logs, exec, scale, rollback, jobs, state, backup,
   removal, leases, and reconciliation to `AgentClient`.
@@ -150,12 +151,30 @@ allocation generations and revocations.
 - Bind every proxy upstream and dynamic-domain authorization destination to a
   project/environment service identity. Local destinations must match a Tako
   runtime alias. Enrolled nodes reject all remote IP/port destinations until
-  Phase 4 can prove current allocation and inventory state; legacy un-enrolled
+  Phase 6 can prove controller-observed current allocation and fenced inventory
+  state; legacy un-enrolled
   SSH configurations retain version-1 compatibility. Reject loopback,
   link-local, metadata, userinfo, unrelated-service, and unproven raw-IP
   destinations.
 
 ### Phase 4 — Cluster inventory and node lifecycle
+
+Progress: complete. Both mandatory reviewers closed their architecture,
+correctness, security, operations, and failure-mode findings after protected
+generationed membership, root-owned public trust snapshots, fixed-path worker
+attestation, pinned bidirectional provisioning identities, lifecycle mutation
+gates, schedulability-aware application fanout and state replication,
+platform-wide builder leasing/reuse, durable lifecycle latches, and
+revoke-first removal and WireGuard reconciliation were added. Application-wide
+mutations
+that cannot safely omit a connectivity-only member now fail before leases or
+fanout instead of partially succeeding. Remote mesh proxy routing remains
+fail-closed pending Phase 6 controller-observed fencing.
+
+Remote mesh routing is intentionally not an acceptance criterion for this
+phase. Phase 4 establishes membership, transport identity, durable revocation,
+and lifecycle safety. Phase 6 owns the challenge/fencing protocol required to
+make remote allocation proofs current rather than merely authentic.
 
 - Move node membership and credentials out of individual application intent.
 - Add expiring single-use join tokens bound to cluster and expected node IDs.

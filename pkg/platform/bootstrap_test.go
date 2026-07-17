@@ -130,6 +130,17 @@ func TestBootstrapCreatesAndResumesProtectedFirstNode(t *testing.T) {
 			t.Fatalf("protected file %s = %#v, %v", path, info, err)
 		}
 	}
+	bindingPath := filepath.Join(root, "etc", "tako", "local-node.json")
+	binding, err := nodeidentity.ReadLocalBinding(bindingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.NodeID != result.State.NodeID || binding.WorkerUID != result.State.WorkerUID {
+		t.Fatalf("public local binding = %#v", binding)
+	}
+	if info, err := os.Stat(bindingPath); err != nil || info.Mode().Perm() != 0644 {
+		t.Fatalf("public local binding mode = %#v, %v", info, err)
+	}
 
 	second, err := bootstrapper.Bootstrap(context.Background(), config)
 	if err != nil {
@@ -164,6 +175,31 @@ func TestBootstrapRejectsConflictingExistingIdentity(t *testing.T) {
 	}
 	if host.accountCalls != 0 {
 		t.Fatal("host accounts were mutated before identity conflict was rejected")
+	}
+}
+
+func TestReadConfigDocumentMigratesMissingMembershipPath(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "platform")
+	document := ConfigDocument{State: BootstrapState{
+		APIVersion: APIVersion, Kind: BootstrapKind, ClusterID: "11111111-1111-4111-8111-111111111111", NodeID: "22222222-2222-4222-8222-222222222222", NodeName: "node-1",
+		ControllerMode: "single-writer", EnrollmentRoles: append([]string(nil), firstNodeRoles...), IdentityPath: "/etc/tako/identity.json", InventoryPath: "/etc/tako/cluster-inventory.json",
+		StateDir: stateDir, AuditDir: "/var/log/tako", SocketPath: DefaultSocket, WorkerSocketPath: DefaultWorkerSocket, DockerDataRoot: "/var/lib/docker", SocketGroup: DefaultSocketGroup,
+		ServiceBinaryPath: DefaultBinaryPath, WorkerUser: DefaultWorkerUser, WorkerGroup: DefaultWorkerGroup, WorkerUID: 1001, WorkerGID: 1001, SocketGroupGID: 1002, InitializedAt: time.Now().UTC(),
+	}, Policy: DefaultResourcePolicy()}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "platform.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := readConfigDocument(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.State.MembershipPath != DefaultMembershipPath(stateDir) {
+		t.Fatalf("migrated membership path = %q", loaded.State.MembershipPath)
 	}
 }
 

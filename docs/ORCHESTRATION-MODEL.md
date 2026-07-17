@@ -644,8 +644,11 @@ actual assigned port for container publish and proxy rendering. This lets
 unrelated apps with common service names such as `web` share the same server
 without taking each other's mesh upstream port. Each signed allocation has a
 monotonic node-local generation. Enrolled nodes keep remote mesh route
-admission disabled until the inventory lifecycle distributes authoritative
-active generations and revocations; local runtime-alias routes remain enabled.
+admission disabled through Phase 4: a node signature alone cannot prove that
+an unseen historical allocation is still current. Phase 6 must add a fresh
+controller challenge, node-side current-state attestation, bounded consumption,
+and fencing before the capability is advertised. Local runtime-alias routes
+remain enabled.
 This boundary is checked before mutation and across the complete stored route
 set on every render. Enrollment quarantines legacy remote manifests and stops
 an already-running proxy before readiness.

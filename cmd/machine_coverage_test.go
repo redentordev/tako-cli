@@ -71,18 +71,26 @@ var machineNativeCommands = map[string]bool{
 // humanOnlyCommands must carry the human-only annotation so machine modes
 // are rejected with exit code 2 instead of corrupting stdout.
 var humanOnlyCommands = map[string]bool{
-	"tako config explain": true,
-	"tako env pull":       true,
-	"tako env push":       true,
-	"tako init":           true,
-	"tako monitor":        true,
-	"tako platform init":  true,
-	"tako secrets delete": true,
-	"tako secrets fetch":  true,
-	"tako secrets import": true,
-	"tako secrets init":   true,
-	"tako secrets set":    true,
-	"tako upgrade":        true,
+	"tako config explain":             true,
+	"tako env pull":                   true,
+	"tako env push":                   true,
+	"tako init":                       true,
+	"tako monitor":                    true,
+	"tako platform init":              true,
+	"tako platform join-token create": true,
+	"tako platform node cordon":       true,
+	"tako platform node drain":        true,
+	"tako platform node enroll":       true,
+	"tako platform node list":         true,
+	"tako platform node ready":        true,
+	"tako platform node remove":       true,
+	"tako platform node schedulable":  true,
+	"tako secrets delete":             true,
+	"tako secrets fetch":              true,
+	"tako secrets import":             true,
+	"tako secrets init":               true,
+	"tako secrets set":                true,
+	"tako upgrade":                    true,
 }
 
 // infrastructureCommands are not part of the CLI's operator surface: the
@@ -90,9 +98,12 @@ var humanOnlyCommands = map[string]bool{
 // completion commands are registered lazily at execution time and are
 // likewise out of scope.
 var infrastructureCommands = map[string]bool{
-	"tako internal e2e-server-ssh": true,
-	"tako platform worker run":     true,
-	"tako takod run":               true,
+	"tako internal e2e-server-ssh":            true,
+	"tako platform worker run":                true,
+	"tako platform worker prepare-enrollment": true,
+	"tako platform worker reconcile-mesh":     true,
+	"tako platform worker verify-enrollment":  true,
+	"tako takod run":                          true,
 }
 
 func runnableCommandPaths(t *testing.T) []string {

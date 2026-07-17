@@ -53,12 +53,13 @@ type DeploySession struct {
 	dirtyStatus string
 	buildTag    string
 
-	allServices  map[string]config.ServiceConfig
-	services     map[string]config.ServiceConfig
-	serverNames  []string
-	servers      map[string]config.ServerConfig
-	actualState  map[string]*reconcile.ActualService
-	actualByNode map[string]map[string]*reconcile.ActualService
+	allServices             map[string]config.ServiceConfig
+	services                map[string]config.ServiceConfig
+	serverNames             []string
+	connectivityServerNames []string
+	servers                 map[string]config.ServerConfig
+	actualState             map[string]*reconcile.ActualService
+	actualByNode            map[string]map[string]*reconcile.ActualService
 
 	archiveDir    string
 	stateLock     *localstate.StateLock
@@ -254,7 +255,11 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		return nil, fmt.Errorf("failed to get environment servers: %w", err)
 	}
 	servers := make(map[string]config.ServerConfig, len(envServerNames))
-	serverNames := append([]string(nil), envServerNames...)
+	connectivityServerNames := append([]string(nil), envServerNames...)
+	serverNames, err := config.ResolveSchedulableEnvironmentTargets(cfg.Servers, connectivityServerNames, session.envName)
+	if err != nil {
+		return nil, err
+	}
 	for _, serverName := range serverNames {
 		server, exists := cfg.Servers[serverName]
 		if !exists {
@@ -263,6 +268,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		servers[serverName] = server
 	}
 	session.serverNames = serverNames
+	session.connectivityServerNames = connectivityServerNames
 	session.servers = servers
 
 	// Determine which services to deploy.
@@ -300,7 +306,8 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		return nil, err
 	}
 
-	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, session.sshPool, cfg, session.envName, serverNames, "deploy")
+	leaseServerNames := DeployLeaseTargets(cfg, serverNames, allServices)
+	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, session.sshPool, cfg, session.envName, leaseServerNames, "deploy")
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +320,10 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	})
 	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired remote deploy leases: %s\n", leaseSet.Summary()))
 
-	sourceServerName := serverNames[0]
+	sourceServerName, err := PreferredRuntimeServer(cfg, serverNames)
+	if err != nil {
+		return nil, err
+	}
 	session.sourceServer = servers[sourceServerName]
 
 	// Use one reachable target as the build/source node through the structured
@@ -387,14 +397,14 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		localStateMgr = nil // Continue without state management.
 	}
 	session.localStateMgr = localStateMgr
-	e.warnRetiredDeploymentServers(localStateMgr, serverNames)
+	e.warnRetiredDeploymentServers(localStateMgr, connectivityServerNames)
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	// Gather actual state from running containers across the selected mesh nodes.
-	actualByNode, err := reconcile.GatherActualStateByServer(session.sshPool, cfg, session.envName, serverNames)
+	actualByNode, err := reconcile.GatherActualStateByServer(session.sshPool, cfg, session.envName, connectivityServerNames)
 	if err != nil {
 		return nil, ActualStateError(err)
 	}

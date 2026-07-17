@@ -7,13 +7,41 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
+
+type unpinnedOnlyPool struct{ called bool }
+
+func (p *unpinnedOnlyPool) GetOrCreateWithAuth(string, int, string, string, string) (*ssh.Client, error) {
+	p.called = true
+	return nil, nil
+}
+
+func TestFactoryRefusesMembershipNodeWithoutPinnedSSHPool(t *testing.T) {
+	pool := &unpinnedOnlyPool{}
+	cfg := &config.Config{Servers: map[string]config.ServerConfig{"node-2": {
+		Host: "node-2.example", User: "root", Transport: "ssh", ClusterID: "11111111-1111-4111-8111-111111111111", NodeID: "22222222-2222-4222-8222-222222222222",
+		SSHHostKeyType: "ssh-ed25519", SSHHostKey: "bound-key", SSHHostKeyFingerprint: "SHA256:bound",
+	}}}
+	factory, err := NewFactory(cfg, pool, takodclient.DefaultSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = factory.Client(context.Background(), "node-2")
+	if err == nil || !strings.Contains(err.Error(), "membership-pinned SSH pool") {
+		t.Fatalf("unpinned membership transport error = %v", err)
+	}
+	if pool.called {
+		t.Fatal("factory fell back to mutable known_hosts transport")
+	}
+}
 
 func TestFactoryUsesPeerAuthenticatedWorkerIngressForEnrolledLocalNode(t *testing.T) {
 	if os.Geteuid() <= 0 {

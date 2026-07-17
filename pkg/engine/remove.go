@@ -124,6 +124,10 @@ func (e *Engine) PlanRemove(ctx context.Context, req RemoveRequest) (*RemoveSess
 	if err != nil {
 		return nil, err
 	}
+	serverNames, err = config.ResolveSchedulableMutationTargets(cfg.Servers, serverNames, envName, true)
+	if err != nil {
+		return nil, err
+	}
 	if len(serverNames) == 0 {
 		return nil, invalidRequestf("no servers configured for environment %s", envName)
 	}

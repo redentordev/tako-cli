@@ -94,7 +94,10 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	targetServerNames := sortedCleanupServerNames(serversToClean)
+	serversToClean, targetServerNames, err := schedulableMutationServerSet(cfg, envName, serversToClean, true)
+	if err != nil {
+		return err
+	}
 	services, err := cfg.GetServices(envName)
 	if err != nil {
 		return fmt.Errorf("failed to get services for environment %s: %w", envName, err)

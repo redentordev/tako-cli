@@ -145,7 +145,10 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	ctx = leaseCtx
 	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("→ Acquired remote scale leases: %s\n", leaseSet.Summary()))
 
-	sourceServerName := serverNames[0]
+	sourceServerName, err := PreferredRuntimeServer(cfg, serverNames)
+	if err != nil {
+		return nil, err
+	}
 	sourceServer, exists := cfg.Servers[sourceServerName]
 	if !exists {
 		return nil, invalidRequestf("server %s not found in configuration", sourceServerName)
@@ -447,6 +450,10 @@ func sortedScaleTargetNames(targets map[string]int) []string {
 // ScaleTargetServers lists the environment's takod nodes in sorted order.
 func ScaleTargetServers(cfg *config.Config, envName string) ([]string, error) {
 	serverNames, err := cfg.GetEnvironmentServers(envName)
+	if err != nil {
+		return nil, err
+	}
+	serverNames, err = config.ResolveSchedulableEnvironmentTargets(cfg.Servers, serverNames, envName)
 	if err != nil {
 		return nil, err
 	}

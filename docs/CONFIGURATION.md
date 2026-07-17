@@ -55,7 +55,17 @@ sudo tako platform init --node node-1
 ```
 
 The command prints the immutable `clusterId`, `nodeId`, and numeric
-`workerUid` to place in the server entry:
+`workerUid`. On an enrolled platform node, Tako materializes server targets,
+mesh addresses, lifecycle, roles, and pinned SSH identities from a root-owned,
+read-only cluster inventory plus a public local-node binding; it never needs to
+read the root-only installation identity or platform configuration. Application
+configuration cannot override them. The production inventory and local binding
+must remain root-owned, singly linked, regular `0644` files inside a root-owned
+non-group/other-writable `/etc/tako`; directory or file ownership drift and
+group/other writability are rejected before materialization. An
+environment may still select a member by canonical node name or an old server
+alias carrying the immutable `nodeId`. The explicit form below remains the
+legacy/off-node compatibility form:
 
 ```yaml
 servers:
@@ -84,18 +94,89 @@ SSH operations. Local image builds and reuse are accepted only after exact
 image digest, Docker platform, and freshly attested daemon identity checks; a
 matching mutable tag alone is not trusted.
 
-Platform initialization also creates a root-only cluster inventory and an
-allocation-signing key for node 1. Enrolled proxy nodes reject remote raw-IP
-upstreams unless the destination node and mesh IP are in that inventory and
-the exact service/revision/slot/port allocation carries the destination
-node's valid signature and monotonic allocation generation. Phase 3 enrolled
-nodes accept local runtime-alias destinations only; remote mesh destinations
-remain fail-closed until the inventory lifecycle can distribute authoritative
-active generations and revocations in Phase 4. Preflight rejects such a plan
-before workload mutation. On enrollment/startup, legacy or remote route
-manifests are quarantined and a running proxy is stopped before the node is
-reported ready. Additional inventory members are added through the
-node-enrollment lifecycle, never by an application route manifest.
+All active workers remain connectivity targets so read-only status and logs,
+plus controller-owned lifecycle recovery, can still reach ready, cordoned, or
+draining members. Application cleanup and other all-node mutations fail before
+fanout when the selected set contains an unschedulable member; reschedule it or
+use the explicit controller lifecycle workflow first. Only schedulable workers
+may receive new assignments. Proxy reconciliation is limited to nodes
+with the `edge` role, and node-side image builds are limited to schedulable
+`builder` nodes; a worker-only join cannot acquire either responsibility from
+application placement. A controller builder may build once and transfer the
+exact image digest to worker targets.
+
+Platform initialization also creates protected controller membership and a
+root-owned inventory snapshot. Membership is generationed control-plane state;
+application route manifests cannot add nodes or change roles.
+
+To add a worker, first run normal `tako setup` with the current binary and
+verify its SSH key is present in `~/.tako/known_hosts` or
+`~/.ssh/known_hosts`. Choose a new UUID, create a short-lived token on node 1,
+then enroll from node 1:
+
+```bash
+sudo tako platform join-token create --node-id 33333333-3333-4333-8333-333333333333 --ttl 15m
+sudo env TAKO_JOIN_TOKEN='tako_join_v1....' tako platform node enroll \
+  --node-id 33333333-3333-4333-8333-333333333333 \
+  --node worker-2 --mesh-ip 10.210.0.2 \
+  --host 203.0.113.20 --controller-mesh-host node-1.example.com \
+  --controller-host 203.0.113.10 \
+  --user root --ssh-key /root/.ssh/tako
+```
+
+Enrollment pins the exact in-memory SSH host key, creates the worker-only
+immutable identity and WireGuard key remotely, binds the actual mesh public
+key in controller membership, consumes the cluster/node-bound token once (the
+plaintext token is never placed in the Tako process arguments),
+publishes the trusted inventory, reconciles the membership-owned mesh on every
+member, restarts and attests takod, and leaves the
+node `ready` but unschedulable. Admit it only after review:
+
+```bash
+sudo tako platform node schedulable \
+  --node-id 33333333-3333-4333-8333-333333333333 \
+  --ssh-key /root/.ssh/tako
+```
+
+The lifecycle is `joining -> ready -> schedulable -> cordoned -> draining ->
+removed`. Lifecycle updates are published to every active worker over the
+immutable SSH key captured during enrollment; later `known_hosts` edits cannot
+silently repin it. If password authentication is unavoidable, place the secret
+in `TAKO_SSH_PASSWORD` (or name another variable with `--password-env`) so it
+never appears in process arguments. For controller-initiated routine access to
+remote members, set the platform-wide private-key path in
+`TAKO_PLATFORM_SSH_KEY`; an application server entry cannot replace it.
+
+`--controller-mesh-host` is the host or IP that workers use as node 1's
+WireGuard endpoint. Worker endpoints default to their enrolled SSH host.
+`--controller-host` is node 1's worker-reachable SSH provisioning address;
+its exact key must already be verified in Tako or OpenSSH `known_hosts`.
+Enrollment publishes that pin with the controller membership record so a CLI
+on a joined worker never falls back to an empty or unpinned controller
+transport.
+Enrolled takod instances reject application-owned `/v1/mesh/apply` requests;
+an application deployment therefore cannot restore a tombstoned peer.
+
+Removal is a durable, retryable revoke-first operation. Tako rewrites and
+attests the persistent WireGuard configuration on the controller and every
+remaining peer without the target's bound public key before it commits the
+membership tombstone. Target-local shutdown and private-key deletion happen
+afterward and can be resumed by rerunning the same remove command.
+
+Cordon, drain, and removal set and attest a durable deployment-deny latch on
+the target before committing controller membership, so a crash cannot leave a
+stale target accepting direct workload mutations. The target then receives the
+changed inventory before unrelated workers. `schedulable` also recovers a
+cordoned node and clears the latch only after its schedulable inventory is
+attested. Tako refuses to drain or remove the final controller.
+
+Remote mesh proxy routes remain fail-closed in Phase 4, even when a destination
+presents a valid node signature. A signature does not prove that an unseen
+historical allocation is still current. The capability will be enabled only
+after Phase 6 adds controller-observed allocation challenges and fencing.
+One-node local runtime-alias routes remain enabled. On startup, unauthorized or
+legacy remote route manifests are quarantined and the proxy is stopped
+fail-closed.
 
 ## Full-Stack Application
 

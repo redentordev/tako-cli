@@ -47,6 +47,52 @@ func TestAcquireRemoteOperationLeasesWithRunsConcurrently(t *testing.T) {
 	}
 }
 
+func TestReadyConnectivityMemberDoesNotReceiveDeployLease(t *testing.T) {
+	servers := map[string]config.ServerConfig{
+		"local": {Lifecycle: "schedulable"},
+		"ready": {Lifecycle: "ready"},
+	}
+	targets, err := config.ResolveSchedulableEnvironmentTargets(servers, []string{"local", "ready"}, "production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var acquired []string
+	set, err := AcquireRemoteOperationLeasesWith(servers, targets, "deploy", func(serverName string, _ config.ServerConfig) (RemoteLease, error) {
+		acquired = append(acquired, serverName)
+		return RemoteLease{ServerName: serverName, Manager: &recordingLeaseManager{}, Lease: &remotestate.LeaseInfo{ID: "lease-" + serverName}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer set.Release()
+	if len(acquired) != 1 || acquired[0] != "local" {
+		t.Fatalf("deploy lease acquisition reached connectivity-only members: %v", acquired)
+	}
+}
+
+func TestDeployLeaseTargetsIncludeBuilderButExcludeReadyWorker(t *testing.T) {
+	cfg := &config.Config{
+		Deployment: &config.DeploymentConfig{Build: &config.BuildConfig{Strategy: config.BuildStrategyRemote}},
+		Servers: map[string]config.ServerConfig{
+			"local":   {Transport: "local", Lifecycle: "schedulable", Roles: []string{"worker"}},
+			"ready":   {Lifecycle: "ready", Roles: []string{"worker"}},
+			"builder": {Lifecycle: "schedulable", Roles: []string{"builder"}},
+		},
+	}
+	targets := DeployLeaseTargets(cfg, []string{"local"}, map[string]config.ServiceConfig{"web": {Build: "."}})
+	if got := strings.Join(targets, ","); got != "builder,local" {
+		t.Fatalf("deploy lease targets = %q", got)
+	}
+	preferred, err := PreferredRuntimeServer(cfg, []string{"builder", "local"})
+	if err != nil || preferred != "local" {
+		t.Fatalf("preferred runtime server = %q, %v", preferred, err)
+	}
+	sharedTargets := DeployLeaseTargets(cfg, []string{"local"}, map[string]config.ServiceConfig{"web": {ImageFrom: "frontend", SharedBuildHash: "sha256:shared"}})
+	if got := strings.Join(sharedTargets, ","); got != "builder,local" {
+		t.Fatalf("shared-build deploy lease targets = %q", got)
+	}
+}
+
 func TestAcquireRemoteOperationLeasesWithReleasesOnFailure(t *testing.T) {
 	serverNames := []string{"node-a", "node-b", "node-c"}
 	servers := testLeaseServers(serverNames)

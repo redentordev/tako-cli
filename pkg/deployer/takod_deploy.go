@@ -18,6 +18,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/nodeclient"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/secrets"
@@ -475,18 +476,53 @@ func (d *Deployer) buildImageOnTakodNodes(serviceName string, service *config.Se
 	if d.config != nil {
 		strategy = d.config.GetBuildStrategy()
 	}
+	var builders []string
+	resolveBuilders := func() ([]string, error) {
+		if builders != nil {
+			return builders, nil
+		}
+		var err error
+		builders, err = d.remoteBuilderServers()
+		return builders, err
+	}
 	fallbackCause, err := runTakodBuildStrategy(
 		strategy,
 		func() error {
 			return d.buildImageLocallyAndPushToTakodNodes(serviceName, service, imageRef, serverNames)
 		},
-		func() error { return d.preflightTakodBuildOptions(service, serverNames) },
-		func() error { return d.buildImageRemotelyOnTakodNodes(serviceName, service, imageRef, serverNames) },
+		func() error {
+			resolved, err := resolveBuilders()
+			if err != nil {
+				return err
+			}
+			return d.preflightTakodBuildOptions(service, resolved)
+		},
+		func() error {
+			resolved, err := resolveBuilders()
+			if err != nil {
+				return err
+			}
+			return d.buildImageRemotelyOnTakodNodes(serviceName, service, imageRef, serverNames, resolved)
+		},
 	)
 	if fallbackCause != nil && d.verbose {
 		d.printf("  Local build unavailable, falling back to remote takod build: %v\n", fallbackCause)
 	}
 	return err
+}
+
+func (d *Deployer) remoteBuilderServers() ([]string, error) {
+	builders := make([]string, 0, len(d.config.Servers))
+	for serverName, server := range d.config.Servers {
+		if server.Schedulable() && server.HasPlatformRole(nodeidentity.RoleBuilder) {
+			builders = append(builders, serverName)
+		}
+	}
+	if len(builders) == 0 {
+		return nil, fmt.Errorf("environment %s has no schedulable builder-role nodes for remote image builds", d.environment)
+	}
+	sort.Strings(builders)
+	return builders, nil
 }
 
 func runTakodBuildStrategy(strategy string, local func() error, preflightRemote func() error, remote func() error) (error, error) {
@@ -519,7 +555,7 @@ func (d *Deployer) preflightTakodBuildOptions(service *config.ServiceConfig, ser
 	return nil
 }
 
-func (d *Deployer) buildImageRemotelyOnTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames []string) error {
+func (d *Deployer) buildImageRemotelyOnTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames, builderNames []string) error {
 	if len(serverNames) == 0 {
 		return fmt.Errorf("service %s has no assigned takod nodes for build", serviceName)
 	}
@@ -528,9 +564,27 @@ func (d *Deployer) buildImageRemotelyOnTakodNodes(serviceName string, service *c
 		d.printf("  Building image on %d assigned node(s) with remote takod builder...\n", len(serverNames))
 	}
 
-	platformGroups, err := d.groupTakodNodesByPlatform(serverNames)
+	allNames := append(append([]string(nil), serverNames...), builderNames...)
+	seenNames := make(map[string]struct{}, len(allNames))
+	uniqueNames := allNames[:0]
+	for _, name := range allNames {
+		if _, seen := seenNames[name]; seen {
+			continue
+		}
+		seenNames[name] = struct{}{}
+		uniqueNames = append(uniqueNames, name)
+	}
+	platformGroups, err := d.groupTakodNodesByPlatform(uniqueNames)
 	if err != nil {
 		return err
+	}
+	targetSet := make(map[string]struct{}, len(serverNames))
+	for _, name := range serverNames {
+		targetSet[name] = struct{}{}
+	}
+	builderSet := make(map[string]struct{}, len(builderNames))
+	for _, name := range builderNames {
+		builderSet[name] = struct{}{}
 	}
 	platforms := make([]string, 0, len(platformGroups))
 	for platform := range platformGroups {
@@ -538,12 +592,24 @@ func (d *Deployer) buildImageRemotelyOnTakodNodes(serviceName string, service *c
 	}
 	sort.Strings(platforms)
 	for _, platform := range platforms {
-		targets := append([]string(nil), platformGroups[platform]...)
+		var targets, sources []string
+		for _, name := range platformGroups[platform] {
+			if _, ok := targetSet[name]; ok {
+				targets = append(targets, name)
+			}
+			if _, ok := builderSet[name]; ok {
+				sources = append(sources, name)
+			}
+		}
 		sort.Strings(targets)
 		if len(targets) == 0 {
 			continue
 		}
-		source := targets[0]
+		sort.Strings(sources)
+		if len(sources) == 0 {
+			return fmt.Errorf("no schedulable builder-role node supports target platform %s", platform)
+		}
+		source := sources[0]
 		if d.verbose {
 			d.printf("  [%s] Building %s for %s\n", source, imageRef, platform)
 		}
@@ -561,7 +627,10 @@ func (d *Deployer) buildImageRemotelyOnTakodNodes(serviceName string, service *c
 		if d.verbose {
 			d.printf("  [%s] Image ready: %s (%s, %s)\n", source, imageRef, expected.ImageID, formatBuildDuration(time.Since(buildStart)))
 		}
-		for _, target := range targets[1:] {
+		for _, target := range targets {
+			if target == source {
+				continue
+			}
 			actual, inspectErr := d.inspectImageOnTakodNode(target, imageRef)
 			if inspectErr == nil && sameImageContent(expected, actual) {
 				continue
@@ -578,6 +647,12 @@ func (d *Deployer) transferExistingImageToNodes(imageRef string, requiredServers
 	allServers, err := d.getTakodTargetServers()
 	if err != nil {
 		return err
+	}
+	// A dedicated builder remains a valid exact-image source even when it is
+	// not a workload placement target for this environment. Export is
+	// read-only; imports remain restricted to required schedulable workers.
+	if builders, builderErr := d.remoteBuilderServers(); builderErr == nil {
+		allServers = mergeTakodImageSourceNames(allServers, builders)
 	}
 	allGroups, err := d.groupTakodNodesByPlatform(allServers)
 	if err != nil {
@@ -626,6 +701,22 @@ func (d *Deployer) transferExistingImageToNodes(imageRef string, requiredServers
 		}
 	}
 	return nil
+}
+
+func mergeTakodImageSourceNames(targets, builders []string) []string {
+	merged := append([]string(nil), targets...)
+	seen := make(map[string]struct{}, len(targets)+len(builders))
+	for _, name := range targets {
+		seen[name] = struct{}{}
+	}
+	for _, name := range builders {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		merged = append(merged, name)
+		seen[name] = struct{}{}
+	}
+	return merged
 }
 
 func (d *Deployer) transferImageBetweenNodes(sourceName string, targetName string, imageRef string) error {
@@ -1083,7 +1174,7 @@ func (e *takodNodeActionsError) Unwrap() []error {
 }
 
 func (d *Deployer) prepareTakodNode(client any, serverName string, server config.ServerConfig, index int, peers []takodMeshPeer, publicKey string) error {
-	meshAddress, err := d.meshAddress(index)
+	meshAddress, err := d.meshAddressForServer(server, index)
 	if err != nil {
 		return err
 	}
@@ -1119,10 +1210,14 @@ func (d *Deployer) prepareTakodNode(client any, serverName string, server config
 		Peers:       peers,
 		UpdatedAt:   time.Now().UTC(),
 	}
-	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/metadata", takod.MetadataRequest{
-		Node:  nodeState,
-		Peers: meshState,
-	}); err != nil {
+	metadata := takod.MetadataRequest{Node: nodeState, Peers: meshState}
+	enrolled := strings.TrimSpace(server.ClusterID) != "" && strings.TrimSpace(server.NodeID) != ""
+	if enrolled {
+		// Cluster topology and peer credentials come from protected platform
+		// membership, never from one application's desired-state document.
+		metadata.Peers = nil
+	}
+	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/metadata", metadata); err != nil {
 		return fmt.Errorf("failed to write takod metadata: %w", err)
 	}
 
@@ -1132,6 +1227,9 @@ func (d *Deployer) prepareTakodNode(client any, serverName string, server config
 		Address:   meshAddress,
 		PublicKey: publicKey,
 		Labels:    server.Labels,
+	}
+	if enrolled {
+		return nil
 	}
 	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/mesh/apply", takod.MeshApplyRequest{
 		Config: d.wireGuardConfig(),
@@ -1776,7 +1874,7 @@ func (d *Deployer) planTakodAssignments(service *config.ServiceConfig) ([]takodA
 		replicas = 1
 	}
 
-	targets, err := config.ResolvePlacementTargets(service.Placement, d.config.Servers, servers, d.environment)
+	targets, err := config.ResolveSchedulablePlacementTargets(service.Placement, d.config.Servers, servers, d.environment)
 	if err != nil {
 		return nil, err
 	}
@@ -1933,11 +2031,32 @@ func (d *Deployer) meshAddress(index int) (string, error) {
 	return fmt.Sprintf("%s/%d", nodeIP.String(), d.config.Mesh.SubnetBits), nil
 }
 
-func (d *Deployer) getTakodTargetServers() ([]string, error) {
-	if len(d.targetServers) > 0 {
-		return append([]string(nil), d.targetServers...), nil
+func (d *Deployer) meshAddressForServer(server config.ServerConfig, index int) (string, error) {
+	if strings.TrimSpace(server.MeshIP) != "" {
+		if net.ParseIP(strings.TrimSpace(server.MeshIP)) == nil {
+			return "", fmt.Errorf("invalid platform mesh IP %q", server.MeshIP)
+		}
+		bits := 32
+		if d.config.Mesh != nil && d.config.Mesh.SubnetBits > 0 {
+			bits = d.config.Mesh.SubnetBits
+		}
+		return fmt.Sprintf("%s/%d", strings.TrimSpace(server.MeshIP), bits), nil
 	}
-	return d.config.GetEnvironmentServers(d.environment)
+	return d.meshAddress(index)
+}
+
+func (d *Deployer) getTakodTargetServers() ([]string, error) {
+	var targets []string
+	if len(d.targetServers) > 0 {
+		targets = append([]string(nil), d.targetServers...)
+	} else {
+		var err error
+		targets, err = d.config.GetEnvironmentServers(d.environment)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return config.ResolveSchedulableEnvironmentTargets(d.config.Servers, targets, d.environment)
 }
 
 type directSSHClientPool struct {

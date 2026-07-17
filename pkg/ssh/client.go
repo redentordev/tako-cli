@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -1011,7 +1012,20 @@ func (p *Pool) GetOrCreate(host string, port int, user string, keyPath string) (
 // Supports both key-based and password-based authentication
 // Automatically removes and replaces unhealthy connections
 func (p *Pool) GetOrCreateWithAuth(host string, port int, user string, keyPath string, password string) (*Client, error) {
+	return p.getOrCreateWithAuth(host, port, user, keyPath, password, nil)
+}
+
+// GetOrCreateWithAuthPinned is the platform-membership runtime path. It never
+// consults mutable known_hosts after enrollment and caches by exact pin.
+func (p *Pool) GetOrCreateWithAuthPinned(host string, port int, user string, keyPath string, password string, expected RecordedHostKey) (*Client, error) {
+	return p.getOrCreateWithAuth(host, port, user, keyPath, password, &expected)
+}
+
+func (p *Pool) getOrCreateWithAuth(host string, port int, user string, keyPath string, password string, expected *RecordedHostKey) (*Client, error) {
 	key := fmt.Sprintf("%s@%s:%d", user, host, port)
+	if expected != nil {
+		key += "#" + expected.Fingerprint
+	}
 
 	// First, try with read lock
 	p.mu.RLock()
@@ -1045,7 +1059,7 @@ func (p *Pool) GetOrCreateWithAuth(host string, port int, user string, keyPath s
 	}
 	p.mu.Unlock()
 
-	client, err := newPooledClient(host, port, user, keyPath, password)
+	client, err := newPooledClient(host, port, user, keyPath, password, expected)
 	if err != nil {
 		return nil, err
 	}
@@ -1070,7 +1084,10 @@ func (p *Pool) GetOrCreateWithAuth(host string, port int, user string, keyPath s
 	return client, nil
 }
 
-func newPooledClient(host string, port int, user string, keyPath string, password string) (*Client, error) {
+func newPooledClient(host string, port int, user string, keyPath string, password string, expected *RecordedHostKey) (*Client, error) {
+	if expected != nil {
+		return NewClientFromConfigPinned(ServerConfig{Host: host, Port: port, User: user, SSHKey: keyPath, Password: password}, *expected)
+	}
 	if password != "" && keyPath == "" {
 		return NewClientWithPassword(host, port, user, password)
 	}
@@ -1141,6 +1158,30 @@ func (c *Client) UploadReader(reader io.Reader, remotePath string, mode os.FileM
 
 	// Upload using existing CopyFile method
 	return c.CopyFileWithMode(tmpFile.Name(), remotePath, mode)
+}
+
+// UploadReaderPrivateTemp uploads into a fresh 0700 remote directory created
+// by mktemp. The unguessable directory prevents another local account from
+// pre-placing a symlink at the destination before a privileged install.
+func (c *Client) UploadReaderPrivateTemp(ctx context.Context, reader io.Reader, mode os.FileMode) (string, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	output, err := c.ExecuteWithContext(ctx, "umask 077 && mktemp -d \"${TMPDIR:-/tmp}/tako-upload.XXXXXXXXXX\"")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create private remote upload directory: %w", err)
+	}
+	directory := strings.TrimSpace(output)
+	if directory == "" || strings.ContainsAny(directory, "\r\n") || !strings.HasPrefix(directory, "/") {
+		return "", func() {}, fmt.Errorf("remote mktemp returned an invalid path")
+	}
+	remotePath := path.Join(directory, "payload")
+	cleanup := func() { _, _ = c.Execute("rm -rf -- " + shellQuote(directory)) }
+	if err := c.UploadReader(reader, remotePath, mode); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return remotePath, cleanup, nil
 }
 
 // CopyFileWithMode uploads a file to the remote server with specific permissions

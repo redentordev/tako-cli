@@ -57,6 +57,66 @@ func ResolvePlacementTargets(placement *PlacementConfig, servers map[string]Serv
 	return filtered, nil
 }
 
+// ResolveSchedulablePlacementTargets applies the placement contract and then
+// filters controller-owned lifecycle state for new assignments. Connectivity
+// callers continue to use ResolvePlacementTargets so cordoned/draining nodes
+// remain reachable for status, logs, cleanup, and recovery.
+func ResolveSchedulablePlacementTargets(placement *PlacementConfig, servers map[string]ServerConfig, environmentServers []string, environment string) ([]string, error) {
+	targets, err := ResolvePlacementTargets(placement, servers, environmentServers, environment)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]string, 0, len(targets))
+	for _, target := range targets {
+		server := servers[target]
+		if server.Schedulable() {
+			filtered = append(filtered, target)
+			continue
+		}
+		if placement != nil && strings.TrimSpace(placement.Strategy) == "pinned" {
+			return nil, fmt.Errorf("placement target %s is %s and cannot receive new assignments", target, server.Lifecycle)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("environment %s has no schedulable worker nodes", environment)
+	}
+	return filtered, nil
+}
+
+// ResolveSchedulableEnvironmentTargets returns the environment members that
+// may receive application-owned mutations. The full environment membership is
+// still retained separately for read-only status and lifecycle operations.
+func ResolveSchedulableEnvironmentTargets(servers map[string]ServerConfig, environmentServers []string, environment string) ([]string, error) {
+	return ResolveSchedulableMutationTargets(servers, environmentServers, environment, false)
+}
+
+// ResolveSchedulableMutationTargets filters application-owned mutation
+// fanout. An explicit operator selection fails instead of silently dropping an
+// unschedulable target.
+func ResolveSchedulableMutationTargets(servers map[string]ServerConfig, targets []string, environment string, explicit bool) ([]string, error) {
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("environment %s has no target servers", environment)
+	}
+	filtered := make([]string, 0, len(targets))
+	for _, target := range targets {
+		server, ok := servers[target]
+		if !ok {
+			return nil, fmt.Errorf("target server %s is not defined", target)
+		}
+		if server.Schedulable() {
+			filtered = append(filtered, target)
+			continue
+		}
+		if explicit {
+			return nil, fmt.Errorf("mutation target %s is %s and cannot receive application mutations", target, server.Lifecycle)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("environment %s has no schedulable worker nodes", environment)
+	}
+	return filtered, nil
+}
+
 func validatePlacementTargets(targets []string, servers map[string]ServerConfig, environmentServers []string, environment string) error {
 	allowed := make(map[string]bool, len(environmentServers))
 	for _, serverName := range environmentServers {

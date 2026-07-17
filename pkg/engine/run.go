@@ -104,6 +104,9 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	if !exists {
 		return nil, invalidRequestf("server %s not found in configuration", req.ServerName)
 	}
+	if !server.Schedulable() {
+		return nil, invalidRequestf("server %s is %s and cannot receive new assignments", req.ServerName, server.Lifecycle)
+	}
 
 	for _, value := range req.EnvVars {
 		e.RegisterSecret(value)

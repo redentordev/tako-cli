@@ -346,6 +346,10 @@ func DestroyEnvironmentTargets(cfg *config.Config, envName string) (map[string]c
 	if len(envServerNames) == 0 {
 		return nil, nil, invalidRequestf("no servers configured for environment %s", envName)
 	}
+	envServerNames, err = config.ResolveSchedulableMutationTargets(cfg.Servers, envServerNames, envName, true)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	servers := make(map[string]config.ServerConfig, len(envServerNames))
 	for _, serverName := range envServerNames {

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/platform"
 	"github.com/redentordev/tako-cli/pkg/takoapi/ptystream"
 )
 
@@ -28,6 +29,7 @@ type Server struct {
 	nodeName                string
 	identityFile            string
 	inventoryFile           string
+	membershipFile          string
 	installation            *nodeidentity.Installation
 	minimumFreeDiskBytes    int64
 	dockerDataRoot          string
@@ -45,6 +47,7 @@ type Server struct {
 	uploadReadTimeout       time.Duration
 	diskReservationMu       sync.Mutex
 	diskReservations        map[string]int64
+	proxyAuthorityMu        sync.Mutex
 	mu                      sync.Mutex
 }
 
@@ -91,9 +94,11 @@ type Status struct {
 	Identity     *nodeidentity.Identity `json:"identity,omitempty"`
 	// EnrollmentRoles are immutable bootstrap facts. Current control-plane
 	// roles are separate mutable state and must not be inferred from this list.
-	EnrollmentRoles []string       `json:"enrollmentRoles,omitempty"`
-	Node            map[string]any `json:"node,omitempty"`
-	Peers           map[string]any `json:"peers,omitempty"`
+	EnrollmentRoles      []string                    `json:"enrollmentRoles,omitempty"`
+	Membership           *nodeidentity.InventoryNode `json:"membership,omitempty"`
+	MembershipGeneration uint64                      `json:"membershipGeneration,omitempty"`
+	Node                 map[string]any              `json:"node,omitempty"`
+	Peers                map[string]any              `json:"peers,omitempty"`
 }
 
 // CapabilityContainerArgvV1 means reconcile and job payloads preserve the
@@ -113,6 +118,9 @@ const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
 const CapabilityImageDescriptorV1 = "image.descriptor-v1"
 
 const CapabilityNodePlatformV1 = "node.platform-v1"
+
+const CapabilityNodeLifecycleV1 = "node.lifecycle-v1"
+const CapabilityNodeMembershipV1 = "node.membership-controller-v1"
 
 // CapabilityExecOneOffControlsV1 covers pull auth, entrypoint, labels, and
 // runtime controls on deploy-time one-off exec requests.
@@ -147,6 +155,7 @@ type ServerOptions struct {
 	NodeName                string
 	IdentityFile            string
 	InventoryFile           string
+	MembershipFile          string
 	ActualRefreshInterval   time.Duration
 	BuildCachePruneInterval time.Duration
 	BuildCacheKeepStorage   string
@@ -166,6 +175,7 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 		nodeName:                opts.NodeName,
 		identityFile:            opts.IdentityFile,
 		inventoryFile:           opts.InventoryFile,
+		membershipFile:          opts.MembershipFile,
 		actualRefreshInterval:   opts.ActualRefreshInterval,
 		buildCachePruneInterval: opts.BuildCachePruneInterval,
 		buildCacheKeepStorage:   opts.BuildCacheKeepStorage,
@@ -194,6 +204,9 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 	}
 	if strings.TrimSpace(server.inventoryFile) == "" {
 		server.inventoryFile = nodeidentity.DefaultInventoryPath
+	}
+	if strings.TrimSpace(server.membershipFile) == "" {
+		server.membershipFile = platform.DefaultMembershipPath(filepath.Join(server.dataDir, "platform"))
 	}
 	if opts.MaximumConcurrentBuilds > 0 {
 		server.buildSlots = make(chan struct{}, opts.MaximumConcurrentBuilds)
@@ -225,6 +238,17 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 	if s.installation != nil {
+		if _, err := os.Stat(s.membershipFile); err == nil {
+			store, storeErr := platform.NewMembershipStore(s.membershipFile, s.inventoryFile)
+			if storeErr != nil {
+				return fmt.Errorf("open controller membership at startup: %w", storeErr)
+			}
+			if _, storeErr = store.Read(); storeErr != nil {
+				return fmt.Errorf("reconcile controller membership at startup: %w", storeErr)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect controller membership at startup: %w", err)
+		}
 		deactivatePolicy, err := s.enforceEnrolledProxyPolicy(ctx)
 		if err != nil {
 			return err
@@ -249,48 +273,11 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", s.handleHealthz)
-	mux.HandleFunc("/v1/status", s.handleStatus)
-	mux.HandleFunc("/v1/actual", s.handleActual)
-	mux.HandleFunc("/v1/reconcile-service", s.handleReconcileService)
-	mux.HandleFunc("/v1/service-files", s.handleServiceFiles)
-	mux.HandleFunc("/v1/service-files/check", s.handleServiceFilesCheck)
-	mux.HandleFunc("/v1/remove-service", s.handleRemoveService)
-	mux.HandleFunc("/v1/proxy-file", s.handleProxyFile)
-	mux.HandleFunc("/v1/proxy", s.handleProxy)
-	mux.HandleFunc("/v1/certs", s.handleProxyCertificates)
-	mux.HandleFunc("/v1/acme-dns", s.handleProxyACMEDNS)
-	mux.HandleFunc("/v1/ports/allocate", s.handlePortAllocate)
-	mux.HandleFunc("/v1/cleanup", s.handleCleanup)
-	mux.HandleFunc("/v1/state", s.handleState)
-	mux.HandleFunc("/v1/lease", s.handleLease)
-	mux.HandleFunc("/v1/env-bundle", s.handleEnvBundle)
-	mux.HandleFunc("/v1/backups", s.handleBackups)
-	mux.HandleFunc("/v1/backups/restore", s.handleBackupRestore)
-	mux.HandleFunc("/v1/backups/cleanup", s.handleBackupCleanup)
-	mux.HandleFunc("/v1/backup-schedule", s.handleBackupSchedule)
-	mux.HandleFunc("/v1/metadata", s.handleMetadata)
-	mux.HandleFunc("/v1/mesh/key", s.handleMeshKey)
-	mux.HandleFunc("/v1/mesh/apply", s.handleMeshApply)
-	mux.HandleFunc("/v1/mesh/status", s.handleMeshStatus)
-	mux.HandleFunc("/v1/images/exists", s.handleImageExists)
-	mux.HandleFunc("/v1/images/inspect", s.handleImageInspect)
-	mux.HandleFunc("/v1/images/export", s.handleImageExport)
-	mux.HandleFunc("/v1/images/import", s.handleImageImport)
-	mux.HandleFunc("/v1/images/build", s.handleImageBuild)
-	mux.HandleFunc("/v1/platform", s.handlePlatform)
-	mux.HandleFunc("/v1/logs", s.handleLogs)
-	mux.HandleFunc("/v1/exec", s.handleExec)
-	mux.HandleFunc("/v1/jobs", s.handleJobs)
-	mux.HandleFunc("/v1/jobs/apply", s.handleJobsApply)
-	mux.HandleFunc("/v1/jobs/runs", s.handleJobRuns)
-	mux.HandleFunc("/v1/jobs/trigger", s.handleJobsTrigger)
-	mux.HandleFunc("/v1/stats", s.handleStats)
-	mux.HandleFunc("/v1/metrics", s.handleMetrics)
-	mux.HandleFunc("/v1/access-logs", s.handleAccessLogs)
-	mux.HandleFunc("/v1/discovery/exports", s.handleDiscoveryExports)
+	for _, route := range s.registeredRoutes() {
+		mux.HandleFunc(route.path, route.handler)
+	}
 
-	httpServer := newTakodHTTPServer(mux)
+	httpServer := newTakodHTTPServer(s.enrolledLifecycleHandler(mux))
 	s.mu.Lock()
 	s.server = httpServer
 	s.mu.Unlock()
@@ -333,6 +320,15 @@ func (s *Server) enforceEnrolledProxyPolicy(ctx context.Context) (func(), error)
 		deactivate()
 		return func() {}, err
 	}
+	s.proxyAuthorityMu.Lock()
+	if err := s.reconcileAllStoredProxyAuthority(); err != nil {
+		s.proxyAuthorityMu.Unlock()
+		if stopErr := stopProxyAndVerifyAbsent(ctx); stopErr != nil {
+			return fail(fmt.Errorf("reconcile stored allocation authority before startup: %v; fail-closed proxy stop also failed: %w", err, stopErr))
+		}
+		return fail(fmt.Errorf("reconcile stored allocation authority before startup; proxy verified stopped: %w", err))
+	}
+	s.proxyAuthorityMu.Unlock()
 	entries, err := os.ReadDir(proxyRoutesDir)
 	if os.IsNotExist(err) {
 		if _, caddyErr := os.Stat(proxyCaddyfilePath); os.IsNotExist(caddyErr) {
@@ -768,6 +764,8 @@ func (s *Server) handlePortAllocate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleProxyFile(w http.ResponseWriter, r *http.Request) {
+	s.proxyAuthorityMu.Lock()
+	defer s.proxyAuthorityMu.Unlock()
 	var (
 		response *ProxyFileResponse
 		err      error
@@ -785,14 +783,33 @@ func (s *Server) handleProxyFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.installation != nil {
+			if err := s.authorizeProxyFileCandidate(request.Name, request.Content); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			if err := validateEnrolledProxyRouteManifest(request.Content, s.installation.ClusterID, s.inventoryFile); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 		}
 		response, err = WriteProxyFile(r.Context(), request)
+		if err != nil && s.installation != nil {
+			if manifest, parseErr := ParseProxyRouteManifest(request.Content); parseErr == nil {
+				_ = s.reconcileStoredProxyScope(manifest.Project, manifest.Environment, manifest.ClusterID)
+			}
+		}
 	case http.MethodDelete:
-		response, err = RemoveProxyFile(r.Context(), r.URL.Query().Get("name"))
+		name := r.URL.Query().Get("name")
+		var removedManifest *ProxyRouteManifest
+		if validated, validateErr := validateProxyFileName(name); validateErr == nil {
+			if data, exists, readErr := readFileIfExists(filepath.Join(proxyRoutesDir, validated)); readErr == nil && exists {
+				removedManifest, _ = ParseProxyRouteManifest(string(data))
+			}
+		}
+		response, err = RemoveProxyFile(r.Context(), name)
+		if err == nil && s.installation != nil && removedManifest != nil {
+			err = s.reconcileStoredProxyScope(removedManifest.Project, removedManifest.Environment, removedManifest.ClusterID)
+		}
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1301,6 +1318,18 @@ func (s *Server) handleMeshKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	if s.installation != nil {
+		inventory, inventoryErr := nodeidentity.ReadInventory(s.inventoryFile)
+		if inventoryErr != nil || inventory == nil || inventory.ClusterID != s.installation.ClusterID {
+			http.Error(w, "local WireGuard key does not match platform membership", http.StatusForbidden)
+			return
+		}
+		node, ok := inventory.Node(s.installation.NodeID)
+		if !ok || node.MeshPublicKey != strings.TrimSpace(response.PublicKey) {
+			http.Error(w, "local WireGuard key does not match platform membership", http.StatusForbidden)
+			return
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
@@ -1311,6 +1340,10 @@ func (s *Server) handleMeshKey(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.installation != nil {
+		http.Error(w, "enrolled-node mesh topology is owned by platform membership", http.StatusForbidden)
 		return
 	}
 	defer r.Body.Close()
@@ -2068,6 +2101,22 @@ func (s *Server) Status() Status {
 		Now:             time.Now().UTC(),
 		Identity:        cloneNodeIdentity(s.installation),
 		EnrollmentRoles: cloneEnrollmentRoles(s.installation),
+	}
+	if s.installation != nil {
+		if inventory, err := nodeidentity.ReadInventory(s.inventoryFile); err == nil && inventory.ClusterID == s.installation.ClusterID {
+			if node, ok := inventory.Node(s.installation.NodeID); ok {
+				membership := node
+				membership.Roles = append([]string(nil), node.Roles...)
+				status.Membership = &membership
+				status.MembershipGeneration = inventory.Generation
+				if inventory.ControllerNodeID != "" && inventory.Generation > 0 {
+					status.Capabilities = append(status.Capabilities, CapabilityNodeLifecycleV1)
+				}
+			}
+		}
+	}
+	if s.supportsMembershipController() {
+		status.Capabilities = append(status.Capabilities, CapabilityNodeMembershipV1)
 	}
 
 	status.Node = readJSONMap(filepath.Join(s.dataDir, "node.json"))

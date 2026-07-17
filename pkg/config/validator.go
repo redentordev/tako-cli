@@ -486,6 +486,13 @@ func validateEnvironmentPersistentPlacement(envName string, env *EnvironmentConf
 }
 
 func validateEnvironmentProxyACMESafety(envName string, env *EnvironmentConfig, cfg *Config) error {
+	requiresProxy := env.Proxy != nil
+	for _, service := range env.Services {
+		requiresProxy = requiresProxy || service.Proxy != nil
+	}
+	if !requiresProxy {
+		return nil
+	}
 	environmentServers, err := environmentServerTargets(envName, env, cfg)
 	if err != nil {
 		return err
@@ -584,6 +591,12 @@ func validateServer(name string, server *ServerConfig) error {
 	}
 	if server.WorkerUID < 0 {
 		return fmt.Errorf("server %s: workerUid must be positive", name)
+	}
+	// Local transport is authenticated by the immutable installation identity,
+	// peer credentials on the protected Unix socket, and the enrolled worker
+	// UID. It must not depend on an unrelated SSH host, account, or private key.
+	if server.Transport == "local" {
+		return nil
 	}
 	if server.Host == "" {
 		return fmt.Errorf("server %s: host is required", name)

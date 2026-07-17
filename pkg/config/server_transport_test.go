@@ -49,3 +49,10 @@ func TestValidateServerPreservesOmittedTransportAsLegacySSH(t *testing.T) {
 		t.Fatalf("legacy transport = %q, want omitted", server.Transport)
 	}
 }
+
+func TestValidateServerLocalTransportDoesNotRequireSSHCredentials(t *testing.T) {
+	server := ServerConfig{Transport: "local", ClusterID: testTransportClusterID, NodeID: testTransportNodeID, WorkerUID: 997}
+	if err := validateServer("node", &server); err != nil {
+		t.Fatalf("local transport required unrelated SSH configuration: %v", err)
+	}
+}

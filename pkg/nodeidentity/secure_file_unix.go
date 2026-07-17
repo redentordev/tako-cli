@@ -19,6 +19,71 @@ func createSecureFile(path string, data []byte) error {
 	return createSecureFileWithHook(path, data, nil)
 }
 
+func replaceSecureFile(path string, data []byte) error {
+	dir, base, err := splitIdentityPath(path)
+	if err != nil {
+		return err
+	}
+	dirFD, err := openProtectedDirectory(dir)
+	if err != nil {
+		return fmt.Errorf("protect identity directory: %w", err)
+	}
+	defer unix.Close(dirFD)
+	existingFD, err := unix.Openat(dirFD, base, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("open existing secure file: %w", err)
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(existingFD, &stat); err != nil {
+		_ = unix.Close(existingFD)
+		return fmt.Errorf("inspect existing secure file: %w", err)
+	}
+	_ = unix.Close(existingFD)
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0022 != 0 || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+		return fmt.Errorf("existing secure file must be a singly-linked non-writable-by-group-or-other regular file owned by uid %d", os.Geteuid())
+	}
+	tmpName, tmpFD, err := createStagingFileAt(dirFD)
+	if err != nil {
+		return fmt.Errorf("create secure staging file: %w", err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = unix.Unlinkat(dirFD, tmpName, 0)
+		}
+	}()
+	tmp := os.NewFile(uintptr(tmpFD), tmpName)
+	if tmp == nil {
+		_ = unix.Close(tmpFD)
+		return fmt.Errorf("create secure staging file handle")
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write secure staging file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync secure staging file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close secure staging file: %w", err)
+	}
+	if err := verifyDirectoryPathStillMatches(dir, dirFD); err != nil {
+		return fmt.Errorf("identity directory changed before replacement: %w", err)
+	}
+	if err := unix.Renameat(dirFD, tmpName, dirFD, base); err != nil {
+		return fmt.Errorf("publish secure replacement: %w", err)
+	}
+	cleanup = false
+	if err := verifyDirectoryPathStillMatches(dir, dirFD); err != nil {
+		return fmt.Errorf("identity directory changed during replacement: %w", err)
+	}
+	if err := unix.Fsync(dirFD); err != nil {
+		return fmt.Errorf("sync identity directory: %w", err)
+	}
+	return nil
+}
+
 // createSecureFileWithHook exists so tests can deterministically replace the
 // pathname after the protected directory descriptor is open. Publication
 // must remain relative to that descriptor, never the substituted path.
@@ -143,6 +208,84 @@ func readSecureFile(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// Inventories contain public membership and transport identity, never private
+// credentials. They are root-published but world-readable so an unprivileged
+// local Tako operator can resolve application intent without gaining write
+// authority. Integrity still requires a protected directory, no symlinks,
+// one link, and no group/other write bits.
+func readPublishedInventoryFile(path string, limit int64) ([]byte, error) {
+	dir, base, err := splitIdentityPath(path)
+	if err != nil {
+		return nil, err
+	}
+	dirFD, err := openPublishedInventoryDirectory(dir, requiresRootPublishedOwner(path))
+	if err != nil {
+		return nil, fmt.Errorf("protect inventory directory: %w", err)
+	}
+	defer unix.Close(dirFD)
+	fd, err := unix.Openat(dirFD, base, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), base)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("open cluster inventory %s", path)
+	}
+	defer file.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return nil, err
+	}
+	uid := uint32(os.Geteuid())
+	ownerOK := publishedOwnerAllowed(path, stat.Uid, uid)
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0022 != 0 || stat.Nlink != 1 || !ownerOK {
+		if requiresRootPublishedOwner(path) {
+			return nil, fmt.Errorf("published platform trust file %s must be a singly-linked regular file owned by root and not writable by group or other", path)
+		}
+		return nil, fmt.Errorf("cluster inventory must be a singly-linked regular file owned by root or uid %d and not writable by group or other", uid)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("cluster inventory exceeds %d bytes", limit)
+	}
+	return data, nil
+}
+
+func publishInventoryPermissions(path string) error {
+	dir, base, err := splitIdentityPath(path)
+	if err != nil {
+		return err
+	}
+	dirFD, err := openProtectedDirectory(dir)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(dirFD)
+	fd, err := unix.Openat(dirFD, base, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+		return fmt.Errorf("refusing to publish unsafe cluster inventory")
+	}
+	if err := unix.Fchmod(fd, 0644); err != nil {
+		return err
+	}
+	if err := unix.Fsync(fd); err != nil {
+		return err
+	}
+	return unix.Fsync(dirFD)
+}
+
 func splitIdentityPath(path string) (string, string, error) {
 	clean := filepath.Clean(strings.TrimSpace(path))
 	base := filepath.Base(clean)
@@ -177,6 +320,14 @@ func openProtectedDirectory(path string) (int, error) {
 }
 
 func openProtectedDirectoryWithHook(path string, beforeComponent func(string)) (int, error) {
+	return openProtectedDirectoryWithPolicy(path, beforeComponent, false, false)
+}
+
+func openPublishedInventoryDirectory(path string, requireRootFinal bool) (int, error) {
+	return openProtectedDirectoryWithPolicy(path, nil, true, requireRootFinal)
+}
+
+func openProtectedDirectoryWithPolicy(path string, beforeComponent func(string), allowRootOwnedFinal, requireRootFinal bool) (int, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return -1, err
@@ -190,7 +341,7 @@ func openProtectedDirectoryWithHook(path string, beforeComponent func(string)) (
 		_ = unix.Close(fd)
 		return -1, err
 	}
-	if err := validateOpenDirectory(fd, string(filepath.Separator), len(components) == 0); err != nil {
+	if err := validateOpenDirectoryPolicy(fd, string(filepath.Separator), len(components) == 0, allowRootOwnedFinal, requireRootFinal); err != nil {
 		_ = unix.Close(fd)
 		return -1, err
 	}
@@ -224,7 +375,7 @@ func openProtectedDirectoryWithHook(path string, beforeComponent func(string)) (
 				if err != nil {
 					return -1, err
 				}
-				if err := validateOpenDirectory(fd, string(filepath.Separator), false); err != nil {
+				if err := validateOpenDirectoryPolicy(fd, string(filepath.Separator), false, allowRootOwnedFinal, requireRootFinal); err != nil {
 					_ = unix.Close(fd)
 					return -1, err
 				}
@@ -234,7 +385,7 @@ func openProtectedDirectoryWithHook(path string, beforeComponent func(string)) (
 		}
 		_ = unix.Close(fd)
 		fd = nextFD
-		if err := validateOpenDirectory(fd, component, len(components) == 0); err != nil {
+		if err := validateOpenDirectoryPolicy(fd, component, len(components) == 0, allowRootOwnedFinal, requireRootFinal); err != nil {
 			_ = unix.Close(fd)
 			return -1, err
 		}
@@ -243,9 +394,26 @@ func openProtectedDirectoryWithHook(path string, beforeComponent func(string)) (
 }
 
 func validateOpenDirectory(fd int, component string, final bool) error {
+	return validateOpenDirectoryPolicy(fd, component, final, false, false)
+}
+
+func validateOpenDirectoryPolicy(fd int, component string, final bool, allowRootOwnedFinal, requireRootFinal bool) error {
 	var stat unix.Stat_t
 	if err := unix.Fstat(fd, &stat); err != nil {
 		return err
+	}
+	if final && allowRootOwnedFinal {
+		euid := uint32(os.Geteuid())
+		if requireRootFinal && stat.Uid != 0 {
+			return fmt.Errorf("published platform trust directory component %q must be owned by root, got uid %d", component, stat.Uid)
+		}
+		if stat.Uid != 0 && stat.Uid != euid {
+			return fmt.Errorf("inventory directory component %q must be owned by root or uid %d, got uid %d", component, euid, stat.Uid)
+		}
+		if stat.Mode&0022 != 0 {
+			return fmt.Errorf("inventory directory component %q must not be writable by group or other users", component)
+		}
+		return nil
 	}
 	return validateDirectoryStat(component, stat, final)
 }

@@ -198,6 +198,7 @@ type BootstrapState struct {
 	EnrollmentRoles   []string  `json:"enrollmentRoles"`
 	IdentityPath      string    `json:"identityPath"`
 	InventoryPath     string    `json:"inventoryPath"`
+	MembershipPath    string    `json:"membershipPath"`
 	StateDir          string    `json:"stateDir"`
 	AuditDir          string    `json:"auditDir"`
 	SocketPath        string    `json:"socketPath"`
@@ -226,7 +227,7 @@ func (s BootstrapState) Validate() error {
 	if !slices.Equal(s.EnrollmentRoles, firstNodeRoles) {
 		return fmt.Errorf("first-node enrollment roles are invalid")
 	}
-	for _, path := range []string{s.IdentityPath, s.InventoryPath, s.StateDir, s.AuditDir, s.SocketPath, s.WorkerSocketPath, s.DockerDataRoot, s.ServiceBinaryPath} {
+	for _, path := range []string{s.IdentityPath, s.InventoryPath, s.MembershipPath, s.StateDir, s.AuditDir, s.SocketPath, s.WorkerSocketPath, s.DockerDataRoot, s.ServiceBinaryPath} {
 		if !filepath.IsAbs(path) {
 			return fmt.Errorf("platform bootstrap paths must be absolute")
 		}

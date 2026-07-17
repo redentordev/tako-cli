@@ -159,6 +159,8 @@ the server entry with `transport: auto`. The same configuration then uses the
 protected local worker ingress when Tako runs on that exact enrolled node and
 identity-verified SSH from other machines. See
 [First PaaS Node With Local Deployments](docs/CONFIGURATION.md#first-paas-node-with-local-deployments).
+That guide also covers expiring single-use worker enrollment, pinned SSH host
+keys, and the explicit ready/schedulable/cordon/drain/remove lifecycle.
 
 3. **Commit, set up the server (one-time), and deploy:**
 

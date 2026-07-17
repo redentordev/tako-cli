@@ -131,6 +131,10 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	if len(envServers) == 0 {
 		return nil, invalidRequestf("no servers configured for environment %s", envName)
 	}
+	mutationServers, err := config.ResolveSchedulableEnvironmentTargets(cfg.Servers, envServers, envName)
+	if err != nil {
+		return nil, err
+	}
 
 	// Register sensitive values with the redactor before emitting anything
 	// that could contain them.
@@ -147,7 +151,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
 
-	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, sshPool, cfg, envName, envServers, "rollback")
+	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, sshPool, cfg, envName, mutationServers, "rollback")
 	if err != nil {
 		return nil, err
 	}
@@ -164,20 +168,27 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	if err != nil {
 		return nil, err
 	}
-	server, exists := cfg.Servers[sourceName]
-	if !exists {
-		return nil, invalidRequestf("server %s not found in configuration", sourceName)
+	if _, exists := cfg.Servers[sourceName]; !exists {
+		return nil, invalidRequestf("history source server %s not found in configuration", sourceName)
 	}
-	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("Reading rollback state from node: %s (%s)\n", sourceName, server.Host))
+	stateSourceName, err := PreferredRuntimeServer(cfg, mutationServers)
+	if err != nil {
+		return nil, err
+	}
+	server, exists := cfg.Servers[stateSourceName]
+	if !exists {
+		return nil, invalidRequestf("server %s not found in configuration", stateSourceName)
+	}
+	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("Using mutation-eligible rollback state node: %s (%s)\n", stateSourceName, server.Host))
 
 	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, TakodSocketFromConfig(cfg))
 	if err != nil {
 		return nil, err
 	}
 	defer runtimeFactory.CloseIdleConnections()
-	client, _, err := runtimeFactory.Client(ctx, sourceName)
+	client, _, err := runtimeFactory.Client(ctx, stateSourceName)
 	if err != nil {
-		return nil, &ConnectivityError{Server: sourceName, Err: fmt.Errorf("failed to connect to node %s: %w", sourceName, err)}
+		return nil, &ConnectivityError{Server: stateSourceName, Err: fmt.Errorf("failed to connect to node %s: %w", stateSourceName, err)}
 	}
 
 	// Create state manager.
@@ -256,7 +267,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	deploy.SetBaseContext(ctx)
 	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
-	if err := deploy.SetTargetServers(envServers); err != nil {
+	if err := deploy.SetTargetServers(mutationServers); err != nil {
 		return nil, err
 	}
 	if err := preflightAndSetupTakodRuntime(deploy, services); err != nil {
@@ -314,7 +325,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 		sshPool,
 		cfg,
 		envName,
-		envServers,
+		mutationServers,
 		"rollback",
 		desiredServices,
 		runtimeImageRefs,

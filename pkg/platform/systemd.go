@@ -36,7 +36,7 @@ Group=%s
 RuntimeDirectory=tako
 RuntimeDirectoryMode=0750
 UMask=0007
-ExecStart=%s takod run --socket %s --data-dir %s --node %s --identity-file %s --minimum-free-disk-bytes %d --max-concurrent-builds %d --docker-data-root %s
+ExecStart=%s takod run --socket %s --data-dir %s --node %s --identity-file %s --membership-file %s --minimum-free-disk-bytes %d --max-concurrent-builds %d --docker-data-root %s
 Restart=always
 RestartSec=5
 OOMScoreAdjust=-500
@@ -52,7 +52,7 @@ ReadWritePaths=%s /run/tako /etc/wireguard /etc/tako/proxy /var/log/tako/proxy
 
 [Install]
 WantedBy=multi-user.target
-	`, socketGroup, binaryPath, socketPath, filepath.Dir(stateDir), nodeName, identityPath,
+	`, socketGroup, binaryPath, socketPath, filepath.Dir(stateDir), nodeName, identityPath, DefaultMembershipPath(stateDir),
 		policy.MinimumFreeDiskBytes, policy.MaximumConcurrentBuilds,
 		dockerDataRoot, policy.ReservedMemoryBytes, policy.ReservedMemoryBytes, filepath.Dir(stateDir)), nil
 }

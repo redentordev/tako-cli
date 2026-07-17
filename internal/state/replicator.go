@@ -230,7 +230,7 @@ func (r *StateReplicator) getReplicaServers() map[string]config.ServerConfig {
 
 	replicas := make(map[string]config.ServerConfig)
 	for _, name := range servers {
-		if srv, exists := r.config.Servers[name]; exists {
+		if srv, exists := r.config.Servers[name]; exists && srv.Schedulable() {
 			replicas[name] = srv
 		}
 	}

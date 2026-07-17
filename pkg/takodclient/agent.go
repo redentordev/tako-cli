@@ -27,12 +27,14 @@ const (
 // local transport decision. Mutable project/environment metadata is
 // intentionally not part of this trust decision.
 type AgentStatus struct {
-	Runtime         string                 `json:"runtime"`
-	Version         string                 `json:"version"`
-	Capabilities    []string               `json:"capabilities,omitempty"`
-	Hostname        string                 `json:"hostname"`
-	Identity        *nodeidentity.Identity `json:"identity,omitempty"`
-	EnrollmentRoles []string               `json:"enrollmentRoles,omitempty"`
+	Runtime              string                      `json:"runtime"`
+	Version              string                      `json:"version"`
+	Capabilities         []string                    `json:"capabilities,omitempty"`
+	Hostname             string                      `json:"hostname"`
+	Identity             *nodeidentity.Identity      `json:"identity,omitempty"`
+	EnrollmentRoles      []string                    `json:"enrollmentRoles,omitempty"`
+	Membership           *nodeidentity.InventoryNode `json:"membership,omitempty"`
+	MembershipGeneration uint64                      `json:"membershipGeneration,omitempty"`
 }
 
 // AgentClient sends structured HTTP directly to a takod Unix socket. Dialer
@@ -268,12 +270,14 @@ func (c *AgentClient) Status(ctx context.Context) (*AgentStatus, error) {
 		return nil, &HTTPError{Method: http.MethodGet, Endpoint: "/v1/status", Status: response.StatusCode, Body: output}
 	}
 	var envelope struct {
-		Runtime         string          `json:"runtime"`
-		Version         string          `json:"version"`
-		Capabilities    []string        `json:"capabilities"`
-		Hostname        string          `json:"hostname"`
-		Identity        json.RawMessage `json:"identity"`
-		EnrollmentRoles []string        `json:"enrollmentRoles"`
+		Runtime              string          `json:"runtime"`
+		Version              string          `json:"version"`
+		Capabilities         []string        `json:"capabilities"`
+		Hostname             string          `json:"hostname"`
+		Identity             json.RawMessage `json:"identity"`
+		EnrollmentRoles      []string        `json:"enrollmentRoles"`
+		Membership           json.RawMessage `json:"membership"`
+		MembershipGeneration uint64          `json:"membershipGeneration"`
 	}
 	decoder := json.NewDecoder(strings.NewReader(output))
 	if err := decoder.Decode(&envelope); err != nil {
@@ -287,11 +291,12 @@ func (c *AgentClient) Status(ctx context.Context) (*AgentStatus, error) {
 		return nil, fmt.Errorf("decode takod status: %w", err)
 	}
 	status := AgentStatus{
-		Runtime:         envelope.Runtime,
-		Version:         envelope.Version,
-		Capabilities:    envelope.Capabilities,
-		Hostname:        envelope.Hostname,
-		EnrollmentRoles: envelope.EnrollmentRoles,
+		Runtime:              envelope.Runtime,
+		Version:              envelope.Version,
+		Capabilities:         envelope.Capabilities,
+		Hostname:             envelope.Hostname,
+		EnrollmentRoles:      envelope.EnrollmentRoles,
+		MembershipGeneration: envelope.MembershipGeneration,
 	}
 	if len(envelope.Identity) > 0 && string(envelope.Identity) != "null" {
 		identityDecoder := json.NewDecoder(bytes.NewReader(envelope.Identity))
@@ -308,6 +313,19 @@ func (c *AgentClient) Status(ctx context.Context) (*AgentStatus, error) {
 			return nil, fmt.Errorf("decode takod installation identity: %w", err)
 		}
 		status.Identity = &identity
+	}
+	if len(envelope.Membership) > 0 && string(envelope.Membership) != "null" {
+		membershipDecoder := json.NewDecoder(bytes.NewReader(envelope.Membership))
+		membershipDecoder.DisallowUnknownFields()
+		var membership nodeidentity.InventoryNode
+		if err := membershipDecoder.Decode(&membership); err != nil {
+			return nil, fmt.Errorf("decode takod membership: %w", err)
+		}
+		var membershipExtra any
+		if err := membershipDecoder.Decode(&membershipExtra); err != io.EOF {
+			return nil, fmt.Errorf("decode takod membership: multiple JSON values are not allowed")
+		}
+		status.Membership = &membership
 	}
 	if err := status.Validate(); err != nil {
 		return nil, err
@@ -330,6 +348,16 @@ func (s AgentStatus) Validate() error {
 	}
 	if err := s.Identity.Validate(); err != nil {
 		return fmt.Errorf("invalid installation identity from takod status: %w", err)
+	}
+	if s.Membership != nil {
+		if s.MembershipGeneration == 0 || s.Membership.NodeID != s.Identity.NodeID {
+			return fmt.Errorf("takod membership attestation does not match installation identity")
+		}
+		if err := nodeidentity.ValidateAllocationPublicKey(s.Membership.AllocationPublicKey); err != nil {
+			return fmt.Errorf("takod membership attestation has invalid allocation identity")
+		}
+	} else if s.MembershipGeneration != 0 {
+		return fmt.Errorf("takod membership generation is present without membership")
 	}
 	return nil
 }

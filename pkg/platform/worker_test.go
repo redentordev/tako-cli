@@ -38,8 +38,9 @@ func TestWorkerAttestsControllerAndWritesReadyJournal(t *testing.T) {
 	}
 	document := ConfigDocument{
 		State: BootstrapState{
-			InventoryPath: DefaultConfigDir + "/cluster-inventory.json",
-			APIVersion:    APIVersion, Kind: BootstrapKind, ClusterID: installation.ClusterID,
+			InventoryPath:  DefaultConfigDir + "/cluster-inventory.json",
+			MembershipPath: DefaultMembershipPath(dir),
+			APIVersion:     APIVersion, Kind: BootstrapKind, ClusterID: installation.ClusterID,
 			NodeID: installation.NodeID, NodeName: installation.NodeName, ControllerMode: "single-writer",
 			EnrollmentRoles: installation.EnrollmentRoles, IdentityPath: "/etc/tako/identity.json",
 			StateDir: dir, AuditDir: dir, SocketPath: DefaultSocket, WorkerSocketPath: filepath.Join(dir, "worker.sock"),
@@ -89,8 +90,9 @@ func TestWorkerRejectsWrongLocalIdentity(t *testing.T) {
 	wrong, _ := nodeidentity.New("", "", "node-2", []string{nodeidentity.RoleWorker}, time.Now())
 	document := ConfigDocument{
 		State: BootstrapState{
-			InventoryPath: DefaultConfigDir + "/cluster-inventory.json",
-			APIVersion:    APIVersion, Kind: BootstrapKind, ClusterID: expected.ClusterID, NodeID: expected.NodeID,
+			InventoryPath:  DefaultConfigDir + "/cluster-inventory.json",
+			MembershipPath: DefaultMembershipPath(dir),
+			APIVersion:     APIVersion, Kind: BootstrapKind, ClusterID: expected.ClusterID, NodeID: expected.NodeID,
 			NodeName: expected.NodeName, ControllerMode: "single-writer", EnrollmentRoles: expected.EnrollmentRoles,
 			IdentityPath: "/etc/tako/identity.json", StateDir: dir, AuditDir: dir, SocketPath: DefaultSocket, WorkerSocketPath: filepath.Join(dir, "worker.sock"),
 			DockerDataRoot: "/var/lib/docker",
@@ -114,8 +116,9 @@ func TestWorkerRejectsRuntimePathMismatch(t *testing.T) {
 	dir := t.TempDir()
 	installation, _ := nodeidentity.New("", "", "node-1", firstNodeRoles, time.Now())
 	document := ConfigDocument{State: BootstrapState{
-		InventoryPath: DefaultConfigDir + "/cluster-inventory.json",
-		APIVersion:    APIVersion, Kind: BootstrapKind, ClusterID: installation.ClusterID, NodeID: installation.NodeID,
+		InventoryPath:  DefaultConfigDir + "/cluster-inventory.json",
+		MembershipPath: DefaultMembershipPath(dir),
+		APIVersion:     APIVersion, Kind: BootstrapKind, ClusterID: installation.ClusterID, NodeID: installation.NodeID,
 		NodeName: installation.NodeName, ControllerMode: "single-writer", EnrollmentRoles: installation.EnrollmentRoles,
 		IdentityPath: "/etc/tako/identity.json", StateDir: dir, AuditDir: dir, SocketPath: DefaultSocket, WorkerSocketPath: filepath.Join(dir, "worker.sock"),
 		DockerDataRoot: "/var/lib/docker",
