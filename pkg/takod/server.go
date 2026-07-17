@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -26,6 +27,7 @@ type Server struct {
 	version                 string
 	nodeName                string
 	identityFile            string
+	inventoryFile           string
 	installation            *nodeidentity.Installation
 	minimumFreeDiskBytes    int64
 	dockerDataRoot          string
@@ -106,6 +108,12 @@ const CapabilityContainerRuntimeControlsV1 = "container.runtime-controls-v1"
 // buildArgs and target from the request preamble.
 const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
 
+// CapabilityImageDescriptorV1 means image reuse can be proven with config
+// digest, platform, and Docker daemon identity instead of a mutable tag.
+const CapabilityImageDescriptorV1 = "image.descriptor-v1"
+
+const CapabilityNodePlatformV1 = "node.platform-v1"
+
 // CapabilityExecOneOffControlsV1 covers pull auth, entrypoint, labels, and
 // runtime controls on deploy-time one-off exec requests.
 const CapabilityExecOneOffControlsV1 = "exec.oneoff-controls-v1"
@@ -117,6 +125,11 @@ const CapabilityServiceFilesV1 = "service.files-v1"
 // CapabilityProxyTrustedProxiesV1 means proxy route manifests accept explicit
 // trusted proxy CIDRs and render Caddy's trusted client IP handling.
 const CapabilityProxyTrustedProxiesV1 = "proxy.trusted-proxies-v1"
+
+// CapabilityProxyRemoteMeshRoutesV1 will be advertised only when the node can
+// validate authoritative active allocation generations and revocations. Phase
+// 3 intentionally omits it so unsupported multi-node routes fail preflight.
+const CapabilityProxyRemoteMeshRoutesV1 = "proxy.remote-mesh-routes-v1"
 
 // CapabilityProxyCertsV1 means the node exposes the validated certificate
 // store API and can render store-backed TLS directives safely.
@@ -133,6 +146,7 @@ func NewServer(socket string, dataDir string, version string) *Server {
 type ServerOptions struct {
 	NodeName                string
 	IdentityFile            string
+	InventoryFile           string
 	ActualRefreshInterval   time.Duration
 	BuildCachePruneInterval time.Duration
 	BuildCacheKeepStorage   string
@@ -151,6 +165,7 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 		version:                 version,
 		nodeName:                opts.NodeName,
 		identityFile:            opts.IdentityFile,
+		inventoryFile:           opts.InventoryFile,
 		actualRefreshInterval:   opts.ActualRefreshInterval,
 		buildCachePruneInterval: opts.BuildCachePruneInterval,
 		buildCacheKeepStorage:   opts.BuildCacheKeepStorage,
@@ -176,6 +191,9 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 	}
 	if strings.TrimSpace(server.dockerDataRoot) == "" {
 		server.dockerDataRoot = server.dataDir
+	}
+	if strings.TrimSpace(server.inventoryFile) == "" {
+		server.inventoryFile = nodeidentity.DefaultInventoryPath
 	}
 	if opts.MaximumConcurrentBuilds > 0 {
 		server.buildSlots = make(chan struct{}, opts.MaximumConcurrentBuilds)
@@ -205,6 +223,13 @@ func (s *Server) Run(ctx context.Context) error {
 			s.installation = installation
 			s.nodeName = installation.NodeName
 		}
+	}
+	if s.installation != nil {
+		deactivatePolicy, err := s.enforceEnrolledProxyPolicy(ctx)
+		if err != nil {
+			return err
+		}
+		defer deactivatePolicy()
 	}
 
 	if err := os.MkdirAll(filepath.Dir(s.socket), 0755); err != nil {
@@ -249,9 +274,11 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/mesh/apply", s.handleMeshApply)
 	mux.HandleFunc("/v1/mesh/status", s.handleMeshStatus)
 	mux.HandleFunc("/v1/images/exists", s.handleImageExists)
+	mux.HandleFunc("/v1/images/inspect", s.handleImageInspect)
 	mux.HandleFunc("/v1/images/export", s.handleImageExport)
 	mux.HandleFunc("/v1/images/import", s.handleImageImport)
 	mux.HandleFunc("/v1/images/build", s.handleImageBuild)
+	mux.HandleFunc("/v1/platform", s.handlePlatform)
 	mux.HandleFunc("/v1/logs", s.handleLogs)
 	mux.HandleFunc("/v1/exec", s.handleExec)
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
@@ -298,6 +325,142 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = os.Remove(s.socket)
 		return err
 	}
+}
+
+func (s *Server) enforceEnrolledProxyPolicy(ctx context.Context) (func(), error) {
+	deactivate := activateEnrolledProxyPolicy(s.installation.ClusterID, s.inventoryFile)
+	fail := func(err error) (func(), error) {
+		deactivate()
+		return func() {}, err
+	}
+	entries, err := os.ReadDir(proxyRoutesDir)
+	if os.IsNotExist(err) {
+		if _, caddyErr := os.Stat(proxyCaddyfilePath); os.IsNotExist(caddyErr) {
+			if stopErr := stopProxyAndVerifyAbsent(ctx); stopErr != nil {
+				return fail(fmt.Errorf("verify no in-memory proxy survives clean enrolled startup: %w", stopErr))
+			}
+			return deactivate, nil
+		} else if caddyErr != nil {
+			return fail(fmt.Errorf("inspect stored proxy configuration before enrolled startup: %w", caddyErr))
+		}
+		entries = nil
+		err = nil
+	}
+	if err != nil {
+		return fail(fmt.Errorf("inspect stored proxy routes before enrolled startup: %w", err))
+	}
+	type invalidManifest struct {
+		name string
+		data []byte
+	}
+	invalid := make([]invalidManifest, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(proxyRoutesDir, entry.Name()))
+		if readErr != nil {
+			return fail(fmt.Errorf("read stored proxy route %s before enrolled startup: %w", entry.Name(), readErr))
+		}
+		if policyErr := validateEnrolledProxyRouteManifest(string(data), s.installation.ClusterID, s.inventoryFile); policyErr != nil {
+			invalid = append(invalid, invalidManifest{name: entry.Name(), data: data})
+		}
+	}
+	if len(invalid) == 0 {
+		if err := ensureProxyDirectories(); err != nil {
+			return fail(err)
+		}
+		if err := renderAndWriteCaddyfile(ctx); err != nil {
+			if stopErr := stopProxyAndVerifyAbsent(ctx); stopErr != nil {
+				return fail(fmt.Errorf("publish authoritative enrolled proxy configuration: %v; fail-closed proxy stop also failed: %w", err, stopErr))
+			}
+			return fail(fmt.Errorf("publish authoritative enrolled proxy configuration: %w", err))
+		}
+		if err := reloadEnrolledProxyIfRunning(ctx); err != nil {
+			return fail(err)
+		}
+		return deactivate, nil
+	}
+
+	// The current Caddyfile may already contain one of the rejected routes.
+	// Stop a running proxy before touching manifests so enrollment cannot
+	// report ready while historical remote traffic is still being served.
+	if err := stopProxyAndVerifyAbsent(ctx); err != nil {
+		return fail(fmt.Errorf("stop proxy before withdrawing unsafe enrolled routes: %w", err))
+	}
+	if err := ensureProxyDirectories(); err != nil {
+		return fail(err)
+	}
+	if err := writeFileAtomic(proxyCaddyfilePath, []byte(emptyProxyCaddyfile()), 0644); err != nil {
+		return fail(fmt.Errorf("publish fail-closed proxy configuration: %w", err))
+	}
+	if err := syncDirectory(filepath.Dir(proxyCaddyfilePath)); err != nil {
+		return fail(err)
+	}
+	quarantineDir := filepath.Join(s.dataDir, "proxy", "quarantine")
+	if err := os.MkdirAll(quarantineDir, 0700); err != nil {
+		return fail(fmt.Errorf("create proxy route quarantine: %w", err))
+	}
+	stamp := time.Now().UTC().UnixNano()
+	for index, manifest := range invalid {
+		quarantinePath := filepath.Join(quarantineDir, fmt.Sprintf("%s.%d.%d.quarantined", manifest.name, stamp, index))
+		if err := writeFileAtomic(quarantinePath, manifest.data, 0600); err != nil {
+			return fail(fmt.Errorf("quarantine proxy route %s: %w", manifest.name, err))
+		}
+		if err := os.Remove(filepath.Join(proxyRoutesDir, manifest.name)); err != nil {
+			return fail(fmt.Errorf("withdraw proxy route %s: %w", manifest.name, err))
+		}
+	}
+	if err := syncDirectory(proxyRoutesDir); err != nil {
+		return fail(err)
+	}
+	if err := syncDirectory(quarantineDir); err != nil {
+		return fail(err)
+	}
+	if err := renderAndWriteCaddyfile(ctx); err != nil {
+		return fail(fmt.Errorf("render safe enrolled proxy configuration: %w", err))
+	}
+	log.Printf("takod enrolled proxy policy: quarantined=%d remote-or-legacy route manifests; proxy stopped fail-closed", len(invalid))
+	return deactivate, nil
+}
+
+func reloadEnrolledProxyIfRunning(ctx context.Context) error {
+	running, err := runDocker(ctx, "ps", "--filter", "name=^tako-proxy$", "--format", "{{.Names}}")
+	if err != nil {
+		return fmt.Errorf("inspect proxy before enrolled policy reload: %w", err)
+	}
+	if strings.TrimSpace(running) != "tako-proxy" {
+		return nil
+	}
+	output, err := runDocker(ctx, "exec", "tako-proxy", "caddy", "reload", "--adapter", "caddyfile", "--config", "/etc/caddy/Caddyfile")
+	if err == nil {
+		return nil
+	}
+	if stopErr := stopProxyAndVerifyAbsent(ctx); stopErr != nil {
+		return fmt.Errorf("reload authoritative enrolled proxy configuration: %v, output: %s; fail-closed proxy stop also failed: %w", err, output, stopErr)
+	}
+	return fmt.Errorf("reload authoritative enrolled proxy configuration; proxy verified stopped fail-closed: %w, output: %s", err, output)
+}
+
+func stopProxyAndVerifyAbsent(ctx context.Context) error {
+	running, err := runDocker(ctx, "ps", "--filter", "name=^tako-proxy$", "--format", "{{.Names}}")
+	if err != nil {
+		return fmt.Errorf("inspect tako-proxy state: %w", err)
+	}
+	if strings.TrimSpace(running) == "tako-proxy" {
+		output, removeErr := runDocker(ctx, "rm", "-f", "tako-proxy")
+		if removeErr != nil {
+			return fmt.Errorf("remove running tako-proxy: %w, output: %s", removeErr, output)
+		}
+	}
+	running, err = runDocker(ctx, "ps", "--filter", "name=^tako-proxy$", "--format", "{{.Names}}")
+	if err != nil {
+		return fmt.Errorf("verify tako-proxy stopped: %w", err)
+	}
+	if strings.TrimSpace(running) == "tako-proxy" {
+		return fmt.Errorf("tako-proxy is still running after removal")
+	}
+	return nil
 }
 
 func newTakodHTTPServer(handler http.Handler) *http.Server {
@@ -569,6 +732,18 @@ func (s *Server) handlePortAllocate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if s.installation != nil {
+		inventory, err := nodeidentity.ReadInventory(s.inventoryFile)
+		if err != nil {
+			http.Error(w, "trusted cluster inventory is unavailable: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		node, ok := inventory.Node(s.installation.NodeID)
+		if inventory.ClusterID != s.installation.ClusterID || !ok || node.MeshIP == "" || node.MeshIP != request.HostIP {
+			http.Error(w, "mesh allocation host IP is not assigned to this enrolled node", http.StatusBadRequest)
+			return
+		}
+	}
 	if !s.requireFreeDisk(w, s.dataDir) {
 		return
 	}
@@ -576,6 +751,14 @@ func (s *Server) handlePortAllocate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if s.installation != nil {
+		response.ClusterID = s.installation.ClusterID
+		response.NodeID = s.installation.NodeID
+		if err := SignPortAllocation(response, s.installation); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -600,6 +783,12 @@ func (s *Server) handleProxyFile(w http.ResponseWriter, r *http.Request) {
 		}
 		if !s.requireFreeDisk(w, proxyRoutesDir, proxyDynamicDir) {
 			return
+		}
+		if s.installation != nil {
+			if err := validateEnrolledProxyRouteManifest(request.Content, s.installation.ClusterID, s.inventoryFile); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 		response, err = WriteProxyFile(r.Context(), request)
 	case http.MethodDelete:
@@ -1194,6 +1383,38 @@ func (s *Server) handleImageExists(w http.ResponseWriter, r *http.Request) {
 	_ = encoder.Encode(response)
 }
 
+func (s *Server) handleImageInspect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	response, err := InspectImage(r.Context(), r.URL.Query().Get("image"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+func (s *Server) handlePlatform(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	response, err := ReadPlatform(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
 func (s *Server) handleImageExport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1204,8 +1425,28 @@ func (s *Server) handleImageExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	imageTransferMu.Lock()
+	defer imageTransferMu.Unlock()
+	expectedImageID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("expectedImageId")))
+	exportReference := image
+	if expectedImageID != "" {
+		if !validSHA256Digest(expectedImageID) {
+			http.Error(w, "expectedImageId must be a sha256 digest", http.StatusBadRequest)
+			return
+		}
+		descriptor, err := InspectImage(r.Context(), image)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if !descriptor.Exists || descriptor.ImageID != expectedImageID {
+			http.Error(w, "image changed since it was selected for transfer", http.StatusConflict)
+			return
+		}
+		exportReference = expectedImageID
+	}
 	writeImageTarHeaders(w, image)
-	if err := ExportImage(r.Context(), image, w); err != nil {
+	if err := ExportImage(r.Context(), exportReference, w); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -1221,6 +1462,11 @@ func (s *Server) handleImageImport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	expectedImageID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("expectedImageId")))
+	if expectedImageID != "" && !validSHA256Digest(expectedImageID) {
+		http.Error(w, "expectedImageId must be a sha256 digest", http.StatusBadRequest)
+		return
+	}
 	if r.ContentLength > defaultImageImportMaxBytes {
 		http.Error(w, fmt.Sprintf("image import exceeds maximum size %d bytes", defaultImageImportMaxBytes), http.StatusRequestEntityTooLarge)
 		return
@@ -1234,7 +1480,7 @@ func (s *Server) handleImageImport(w http.ResponseWriter, r *http.Request) {
 	defer clearReadDeadline()
 	defer r.Body.Close()
 
-	response, err := ImportImage(r.Context(), image, http.MaxBytesReader(w, r.Body, defaultImageImportMaxBytes))
+	response, err := ImportImage(r.Context(), image, http.MaxBytesReader(w, r.Body, defaultImageImportMaxBytes), expectedImageID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1814,7 +2060,7 @@ func (s *Server) Status() Status {
 	status := Status{
 		Runtime:         "takod",
 		Version:         s.version,
-		Capabilities:    []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityNodeIdentityV1},
+		Capabilities:    []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityNodeIdentityV1},
 		Hostname:        hostname,
 		Socket:          s.socket,
 		DataDir:         s.dataDir,

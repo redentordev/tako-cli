@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -227,12 +228,17 @@ func GatherStatusActualStateByNode(ctx context.Context, cfg *config.Config, envN
 	}
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	factory, err := nodeclient.NewFactory(cfg, sshPool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	defer factory.CloseIdleConnections()
 
 	return GatherStatusActualStateByNodeWith(ctx, cfg.Servers, serverNames, func(serverName string, server config.ServerConfig) (map[string]*takod.ActualService, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, _, err := factory.Client(ctx, serverName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to node %s: %w", serverName, err)
 		}
@@ -623,7 +629,7 @@ func ShortStatusRevision(revision string) string {
 }
 
 // ActualStateViaTakod reads the aggregate actual-state endpoint through takod.
-func ActualStateViaTakod(client takodclient.RequestExecutor, cfg *config.Config, environment string) (*takod.ActualStateResponse, error) {
+func ActualStateViaTakod(client any, cfg *config.Config, environment string) (*takod.ActualStateResponse, error) {
 	var response takod.ActualStateResponse
 	output, err := takodclient.RequestJSON(
 		client,

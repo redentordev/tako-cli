@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -16,12 +18,13 @@ import (
 
 // Monitor handles continuous service monitoring
 type Monitor struct {
-	config   *config.Config
-	sshPool  *ssh.Pool
-	verbose  bool
-	envName  string
-	services map[string]config.ServiceConfig
-	filter   string
+	config         *config.Config
+	sshPool        *ssh.Pool
+	verbose        bool
+	envName        string
+	services       map[string]config.ServiceConfig
+	filter         string
+	runtimeFactory *nodeclient.Factory
 }
 
 // WebhookPayload represents the structure sent to webhook endpoints
@@ -201,8 +204,7 @@ func (m *Monitor) checkInternalService(serviceName string, service *config.Servi
 	}
 
 	for _, serverName := range serverNames {
-		serverCfg := m.config.Servers[serverName]
-		client, err := m.sshPool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
+		client, err := m.runtimeClient(context.Background(), serverName)
 		if err != nil {
 			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 		}
@@ -230,6 +232,24 @@ func (m *Monitor) checkInternalService(serviceName string, service *config.Servi
 		return fmt.Errorf("%d/%d replicas running", actual, expected)
 	}
 	return nil
+}
+
+func (m *Monitor) runtimeClient(ctx context.Context, serverName string) (*takodclient.AgentClient, error) {
+	if m.runtimeFactory == nil {
+		factory, err := nodeclient.NewFactory(m.config, m.sshPool, m.takodSocket())
+		if err != nil {
+			return nil, err
+		}
+		m.runtimeFactory = factory
+	}
+	client, _, err := m.runtimeFactory.Client(ctx, serverName)
+	return client, err
+}
+
+func (m *Monitor) Close() {
+	if m != nil && m.runtimeFactory != nil {
+		m.runtimeFactory.CloseIdleConnections()
+	}
 }
 
 func expectedReplicas(service *config.ServiceConfig, cfg *config.Config, envName string) int {

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -87,9 +89,14 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	}
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return err
+	}
+	defer runtimeFactory.CloseIdleConnections()
 
 	if backupList {
-		return listBackupsAcrossNodes(cfg, sshPool, envName, servers, backupVolume)
+		return listBackupsAcrossNodes(cfg, runtimeFactory, envName, servers, backupVolume)
 	}
 
 	if backupRestore != "" {
@@ -119,19 +126,19 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	switch {
 	case backupRestore != "":
 		serverName := targetServerNames[0]
-		return restoreBackupOnNode(cfg, sshPool, envName, serverName, servers[serverName], backupVolume, backupRestore)
+		return restoreBackupOnNode(cfg, runtimeFactory, envName, serverName, servers[serverName], backupVolume, backupRestore)
 
 	case backupDelete != "":
-		return deleteBackupAcrossNodes(cfg, sshPool, envName, servers, backupVolume, backupDelete)
+		return deleteBackupAcrossNodes(cfg, runtimeFactory, envName, servers, backupVolume, backupDelete)
 
 	case backupCleanup > 0:
-		return cleanupBackupsAcrossNodes(cfg, sshPool, envName, servers, backupCleanup)
+		return cleanupBackupsAcrossNodes(cfg, runtimeFactory, envName, servers, backupCleanup)
 
 	case backupAll:
-		return backupAllVolumesAcrossNodes(cfg, sshPool, envName, servers, newBackupID())
+		return backupAllVolumesAcrossNodes(cfg, runtimeFactory, envName, servers, newBackupID())
 
 	case backupVolume != "":
-		return createBackupAcrossNodes(cfg, sshPool, envName, servers, backupVolume, newBackupID())
+		return createBackupAcrossNodes(cfg, runtimeFactory, envName, servers, backupVolume, newBackupID())
 
 	default:
 		return fmt.Errorf("specify --volume, --all, --list, --restore, --delete, or --cleanup")
@@ -148,11 +155,11 @@ func ensureSingleBackupRestoreTarget(targetServerNames []string, requestedServer
 	return nil
 }
 
-func listBackupsAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, volumeName string) error {
+func listBackupsAcrossNodes(cfg *config.Config, factory *nodeclient.Factory, envName string, servers map[string]config.ServerConfig, volumeName string) error {
 	fmt.Fprintf(humanOut(), "=== Volume Backups ===\n\n")
 
-	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
-		backups, err := readBackupsFromNode(cfg, pool, serverCfg, envName, volumeName)
+	results := collectBackupNodes(servers, func(serverName string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
+		backups, err := readBackupsFromNode(cfg, factory, serverName, serverCfg, envName, volumeName)
 		return backupNodeActionResult{backups: backups}, err
 	})
 
@@ -184,7 +191,7 @@ func listBackupsAcrossNodes(cfg *config.Config, pool sshClientProvider, envName 
 	return emitBackupResult(cfg, envName, engine.BackupActionList, volumeName, "", results, err)
 }
 
-func createBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, volumeName string, backupID string) error {
+func createBackupAcrossNodes(cfg *config.Config, factory *nodeclient.Factory, envName string, servers map[string]config.ServerConfig, volumeName string, backupID string) error {
 	fmt.Fprintf(humanOut(), "=== Backing up volume: %s ===\n", volumeName)
 	fmt.Fprintf(humanOut(), "Backup ID: %s\n\n", backupID)
 
@@ -193,8 +200,8 @@ func createBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName
 		return fmt.Errorf("backup failed: %w", err)
 	}
 
-	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
-		info, err := createBackupOnNode(cfg, pool, serverCfg, envName, spec, backupID)
+	results := collectBackupNodes(servers, func(serverName string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
+		info, err := createBackupOnNode(cfg, factory, serverName, serverCfg, envName, spec, backupID)
 		if backupVolumeMissing(err) {
 			return backupNodeActionResult{skipped: []string{fmt.Sprintf("%s: volume not present on node", volumeName)}}, nil
 		}
@@ -208,7 +215,7 @@ func createBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName
 	return emitBackupResult(cfg, envName, engine.BackupActionCreate, volumeName, backupID, results, err)
 }
 
-func restoreBackup(client *ssh.Client, cfg *config.Config, envName string, volumeName string, backupID string) error {
+func restoreBackup(client any, cfg *config.Config, envName string, volumeName string, backupID string) error {
 	fmt.Fprintf(humanOut(), "=== Restoring volume: %s from backup %s ===\n\n", volumeName, backupID)
 	fmt.Fprintf(humanOut(), "⚠️  WARNING: This will overwrite all data in the volume!\n\n")
 
@@ -229,8 +236,8 @@ func restoreBackup(client *ssh.Client, cfg *config.Config, envName string, volum
 	return nil
 }
 
-func restoreBackupOnNode(cfg *config.Config, pool sshClientProvider, envName string, serverName string, serverCfg config.ServerConfig, volumeName string, backupID string) error {
-	client, err := connectBackupNode(pool, serverCfg)
+func restoreBackupOnNode(cfg *config.Config, factory *nodeclient.Factory, envName string, serverName string, serverCfg config.ServerConfig, volumeName string, backupID string) error {
+	client, _, err := factory.Client(context.Background(), serverName)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node %s: %w", serverName, err)
 	}
@@ -242,11 +249,11 @@ func restoreBackupOnNode(cfg *config.Config, pool sshClientProvider, envName str
 	return emitBackupResult(cfg, envName, engine.BackupActionRestore, volumeName, backupID, results, err)
 }
 
-func deleteBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, volumeName string, backupID string) error {
+func deleteBackupAcrossNodes(cfg *config.Config, factory *nodeclient.Factory, envName string, servers map[string]config.ServerConfig, volumeName string, backupID string) error {
 	fmt.Fprintf(humanOut(), "=== Deleting backup: %s_%s ===\n\n", volumeName, backupID)
 
-	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
-		err := deleteBackupOnNode(cfg, pool, serverCfg, envName, volumeName, backupID)
+	results := collectBackupNodes(servers, func(serverName string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
+		err := deleteBackupOnNode(cfg, factory, serverName, serverCfg, envName, volumeName, backupID)
 		if err != nil {
 			return backupNodeActionResult{}, err
 		}
@@ -257,11 +264,11 @@ func deleteBackupAcrossNodes(cfg *config.Config, pool sshClientProvider, envName
 	return emitBackupResult(cfg, envName, engine.BackupActionDelete, volumeName, backupID, results, err)
 }
 
-func cleanupBackupsAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, days int) error {
+func cleanupBackupsAcrossNodes(cfg *config.Config, factory *nodeclient.Factory, envName string, servers map[string]config.ServerConfig, days int) error {
 	fmt.Fprintf(humanOut(), "=== Cleaning up backups older than %d days ===\n\n", days)
 
-	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
-		response, err := cleanupBackupsOnNode(cfg, pool, serverCfg, envName, days)
+	results := collectBackupNodes(servers, func(serverName string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
+		response, err := cleanupBackupsOnNode(cfg, factory, serverName, serverCfg, envName, days)
 		if err != nil {
 			return backupNodeActionResult{}, err
 		}
@@ -272,7 +279,7 @@ func cleanupBackupsAcrossNodes(cfg *config.Config, pool sshClientProvider, envNa
 	return emitBackupResult(cfg, envName, engine.BackupActionCleanup, "", "", results, err)
 }
 
-func backupAllVolumesAcrossNodes(cfg *config.Config, pool sshClientProvider, envName string, servers map[string]config.ServerConfig, backupID string) error {
+func backupAllVolumesAcrossNodes(cfg *config.Config, factory *nodeclient.Factory, envName string, servers map[string]config.ServerConfig, backupID string) error {
 	volumes, err := backupVolumesFromConfig(cfg, envName)
 	if err != nil {
 		return fmt.Errorf("backup failed: %w", err)
@@ -284,11 +291,11 @@ func backupAllVolumesAcrossNodes(cfg *config.Config, pool sshClientProvider, env
 	fmt.Fprintf(humanOut(), "=== Backing up all configured volumes ===\n")
 	fmt.Fprintf(humanOut(), "Backup ID: %s\n\n", backupID)
 
-	results := collectBackupNodes(servers, func(_ string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
+	results := collectBackupNodes(servers, func(serverName string, serverCfg config.ServerConfig) (backupNodeActionResult, error) {
 		var payload backupNodeActionResult
 		var failures []string
 		for _, volume := range volumes {
-			info, err := createBackupOnNode(cfg, pool, serverCfg, envName, volume, backupID)
+			info, err := createBackupOnNode(cfg, factory, serverName, serverCfg, envName, volume, backupID)
 			if backupVolumeMissing(err) {
 				payload.skipped = append(payload.skipped, fmt.Sprintf("%s: volume not present on node", volume.name))
 				continue
@@ -620,8 +627,8 @@ func backupRequestForSpec(cfg *config.Config, envName string, volume backupVolum
 	return request
 }
 
-func readBackupsFromNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, envName string, volumeName string) ([]takod.BackupInfo, error) {
-	client, err := connectBackupNode(pool, serverCfg)
+func readBackupsFromNode(cfg *config.Config, factory *nodeclient.Factory, serverName string, serverCfg config.ServerConfig, envName string, volumeName string) ([]takod.BackupInfo, error) {
+	client, _, err := factory.Client(context.Background(), serverName)
 	if err != nil {
 		return nil, err
 	}
@@ -641,8 +648,8 @@ func readBackupsFromNode(cfg *config.Config, pool sshClientProvider, serverCfg c
 	return response.Backups, nil
 }
 
-func createBackupOnNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, envName string, volume backupVolumeSpec, backupID string) (takod.BackupInfo, error) {
-	client, err := connectBackupNode(pool, serverCfg)
+func createBackupOnNode(cfg *config.Config, factory *nodeclient.Factory, serverName string, serverCfg config.ServerConfig, envName string, volume backupVolumeSpec, backupID string) (takod.BackupInfo, error) {
+	client, _, err := factory.Client(context.Background(), serverName)
 	if err != nil {
 		return takod.BackupInfo{}, err
 	}
@@ -662,8 +669,8 @@ func createBackupOnNode(cfg *config.Config, pool sshClientProvider, serverCfg co
 	return info, nil
 }
 
-func deleteBackupOnNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, envName string, volumeName string, backupID string) error {
-	client, err := connectBackupNode(pool, serverCfg)
+func deleteBackupOnNode(cfg *config.Config, factory *nodeclient.Factory, serverName string, serverCfg config.ServerConfig, envName string, volumeName string, backupID string) error {
+	client, _, err := factory.Client(context.Background(), serverName)
 	if err != nil {
 		return err
 	}
@@ -679,8 +686,8 @@ func deleteBackupOnNode(cfg *config.Config, pool sshClientProvider, serverCfg co
 	)
 }
 
-func cleanupBackupsOnNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, envName string, days int) (takod.BackupCleanupResponse, error) {
-	client, err := connectBackupNode(pool, serverCfg)
+func cleanupBackupsOnNode(cfg *config.Config, factory *nodeclient.Factory, serverName string, serverCfg config.ServerConfig, envName string, days int) (takod.BackupCleanupResponse, error) {
+	client, _, err := factory.Client(context.Background(), serverName)
 	if err != nil {
 		return takod.BackupCleanupResponse{}, err
 	}
@@ -796,7 +803,7 @@ func backupOperationTitle(operation string) string {
 	return strings.ToUpper(operation[:1]) + operation[1:]
 }
 
-func takodBackupRequestJSON(client *ssh.Client, cfg *config.Config, method string, endpoint string, request any, response any) error {
+func takodBackupRequestJSON(client any, cfg *config.Config, method string, endpoint string, request any, response any) error {
 	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), method, endpoint, request)
 	if err != nil {
 		return err

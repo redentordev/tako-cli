@@ -75,7 +75,7 @@ func (d *Deployer) RunDeployStepOnNodes(serviceName string, service *config.Serv
 			return nil, fmt.Errorf("run %s uses files: %w", serviceName, err)
 		}
 	}
-	client, err := d.getEnvironmentClient(serverName)
+	client, err := d.getRuntimeClient(serverName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to node %s for run %s: %w", serverName, serviceName, err)
 	}

@@ -22,11 +22,12 @@ const (
 	DefaultAuditDir    = "/var/log/tako"
 	DefaultWorkerUser  = "tako-platform"
 	DefaultWorkerGroup = "tako-platform"
-	// Keep the established deployer group during the bootstrap milestone so
-	// existing SSH deployments remain available until the durable ingress is
-	// introduced and migrated in the next milestone.
+	// DefaultSocketGroup is the legacy operator group granted access only to
+	// the protected worker ingress. The root takod socket belongs to the
+	// dedicated worker group and is never exposed directly to operators.
 	DefaultSocketGroup  = "tako"
 	DefaultSocket       = "/run/tako/takod.sock"
+	DefaultWorkerSocket = "/run/tako-platform/worker.sock"
 	DefaultBinaryPath   = "/usr/local/lib/tako/tako"
 	DefaultJournalName  = "operations.jsonl"
 	DefaultAuditLogName = "platform-audit.jsonl"
@@ -88,6 +89,7 @@ type BootstrapConfig struct {
 	ConfigDir           string
 	AuditDir            string
 	SocketPath          string
+	WorkerSocketPath    string
 	DockerDataRoot      string
 	BinaryPath          string
 	ServiceBinaryPath   string
@@ -117,6 +119,9 @@ func (c BootstrapConfig) withDefaults() BootstrapConfig {
 	}
 	if strings.TrimSpace(c.SocketPath) == "" {
 		c.SocketPath = DefaultSocket
+	}
+	if strings.TrimSpace(c.WorkerSocketPath) == "" {
+		c.WorkerSocketPath = DefaultWorkerSocket
 	}
 	if strings.TrimSpace(c.WorkerUser) == "" {
 		c.WorkerUser = DefaultWorkerUser
@@ -167,6 +172,7 @@ func (c BootstrapConfig) Validate() error {
 		"config directory": c.ConfigDir,
 		"audit directory":  c.AuditDir,
 		"socket path":      c.SocketPath,
+		"worker socket":    c.WorkerSocketPath,
 	} {
 		if !filepath.IsAbs(value) {
 			return fmt.Errorf("%s must be absolute", label)
@@ -191,9 +197,11 @@ type BootstrapState struct {
 	ControllerMode    string    `json:"controllerMode"`
 	EnrollmentRoles   []string  `json:"enrollmentRoles"`
 	IdentityPath      string    `json:"identityPath"`
+	InventoryPath     string    `json:"inventoryPath"`
 	StateDir          string    `json:"stateDir"`
 	AuditDir          string    `json:"auditDir"`
 	SocketPath        string    `json:"socketPath"`
+	WorkerSocketPath  string    `json:"workerSocketPath"`
 	DockerDataRoot    string    `json:"dockerDataRoot"`
 	SocketGroup       string    `json:"socketGroup"`
 	ServiceBinaryPath string    `json:"serviceBinaryPath"`
@@ -218,7 +226,7 @@ func (s BootstrapState) Validate() error {
 	if !slices.Equal(s.EnrollmentRoles, firstNodeRoles) {
 		return fmt.Errorf("first-node enrollment roles are invalid")
 	}
-	for _, path := range []string{s.IdentityPath, s.StateDir, s.AuditDir, s.SocketPath, s.DockerDataRoot, s.ServiceBinaryPath} {
+	for _, path := range []string{s.IdentityPath, s.InventoryPath, s.StateDir, s.AuditDir, s.SocketPath, s.WorkerSocketPath, s.DockerDataRoot, s.ServiceBinaryPath} {
 		if !filepath.IsAbs(path) {
 			return fmt.Errorf("platform bootstrap paths must be absolute")
 		}

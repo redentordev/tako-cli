@@ -10,6 +10,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 )
 
@@ -92,6 +93,10 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 	if len(serverNames) == 0 {
 		return nil, invalidRequestf("no target nodes configured for %s", operation)
 	}
+	factory, err := nodeclient.NewFactory(cfg, pool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
 
 	acquireCtx, cancelAcquire := context.WithTimeout(ctx, remotestate.DefaultLeaseTTL/4)
 	defer cancelAcquire()
@@ -99,7 +104,7 @@ func AcquireRemoteOperationLeasesContext(ctx context.Context, pool *ssh.Pool, cf
 		if err := ctx.Err(); err != nil {
 			return RemoteLease{}, err
 		}
-		client, err := pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, _, err := factory.Client(ctx, serverName)
 		if err != nil {
 			return RemoteLease{}, &ConnectivityError{Server: serverName, Err: fmt.Errorf("failed to connect to lease node %s: %w", serverName, err)}
 		}

@@ -17,6 +17,7 @@ import (
 	"github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -58,7 +59,7 @@ func (sw *streamWriter) Write(p []byte) (n int, err error) {
 
 // Deployer handles deployment operations
 type Deployer struct {
-	client            *ssh.Client
+	client            any
 	config            *config.Config
 	environment       string
 	verbose           bool
@@ -67,6 +68,7 @@ type Deployer struct {
 	cliVersion        string
 	skipBuild         bool
 	meshPortCache     map[meshUpstreamPortKey]int
+	meshPortEvidence  map[meshUpstreamPortKey]takod.PortAllocationResponse
 	meshPortCacheMu   sync.Mutex
 	meshPortAllocator func(serverName string, serviceName string, revision string, slot int, containerPort int) (int, error)
 	localImageClient  localImageClient
@@ -78,6 +80,8 @@ type Deployer struct {
 	jobImages         map[string]string
 	jobMu             sync.Mutex
 	baseCtx           context.Context
+	runtimeFactory    *nodeclient.Factory
+	runtimeFactoryMu  sync.Mutex
 }
 
 const (
@@ -93,7 +97,7 @@ type buildContextArchiveLimits struct {
 }
 
 // NewDeployer creates a new deployer
-func NewDeployer(client *ssh.Client, cfg *config.Config, environment string, verbose bool) *Deployer {
+func NewDeployer(client any, cfg *config.Config, environment string, verbose bool) *Deployer {
 	return &Deployer{
 		client:      client,
 		config:      cfg,
@@ -103,7 +107,7 @@ func NewDeployer(client *ssh.Client, cfg *config.Config, environment string, ver
 }
 
 // NewDeployerWithPool creates a deployer with SSH pool for multi-server support
-func NewDeployerWithPool(client *ssh.Client, cfg *config.Config, environment string, sshPool *ssh.Pool, verbose bool) *Deployer {
+func NewDeployerWithPool(client any, cfg *config.Config, environment string, sshPool *ssh.Pool, verbose bool) *Deployer {
 	return &Deployer{
 		client:      client,
 		config:      cfg,
@@ -119,6 +123,15 @@ func NewDeployerWithPool(client *ssh.Client, cfg *config.Config, environment str
 // waiting for it to finish.
 func (d *Deployer) SetBaseContext(ctx context.Context) {
 	d.baseCtx = ctx
+}
+
+// SetRuntimeFactory shares the caller-owned identity-aware runtime transport
+// across state, deploy, and image operations. The caller remains responsible
+// for closing its idle connections after the operation.
+func (d *Deployer) SetRuntimeFactory(factory *nodeclient.Factory) {
+	d.runtimeFactoryMu.Lock()
+	d.runtimeFactory = factory
+	d.runtimeFactoryMu.Unlock()
 }
 
 func (d *Deployer) baseContext() context.Context {
@@ -303,9 +316,6 @@ func createCrossPlatformTarGzWithLimits(sourceDir, archivePath string, limits bu
 
 // RollbackToState converges a service back to a saved takod deployment state.
 func (d *Deployer) RollbackToState(serviceName string, serviceState *state.ServiceState) error {
-	if d.sshPool == nil {
-		return fmt.Errorf("ssh pool not initialized")
-	}
 	if strings.TrimSpace(serviceState.Image) == "" {
 		return fmt.Errorf("deployment state for %s does not include an image", serviceName)
 	}
@@ -377,7 +387,7 @@ func (d *Deployer) BuildImage(serviceName string, service *config.ServiceConfig,
 }
 
 func (d *Deployer) buildImageOnNode(serverName string, serviceName string, service *config.ServiceConfig, imageRef ...string) (string, error) {
-	client, err := d.getEnvironmentClient(serverName)
+	client, err := d.getRuntimeClient(serverName)
 	if err != nil {
 		return "", err
 	}
@@ -456,9 +466,9 @@ func (d *Deployer) prepareBuildContext(service *config.ServiceConfig) (*prepared
 	}, nil
 }
 
-func (d *Deployer) buildImageWithClient(client *ssh.Client, serviceName string, service *config.ServiceConfig, imageRef ...string) (string, error) {
+func (d *Deployer) buildImageWithClient(client any, serviceName string, service *config.ServiceConfig, imageRef ...string) (string, error) {
 	if client == nil {
-		return "", fmt.Errorf("ssh client is required")
+		return "", fmt.Errorf("runtime client is required")
 	}
 
 	fullImageName := d.config.GetFullImageName(serviceName, d.environment)

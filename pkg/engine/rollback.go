@@ -13,6 +13,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -169,7 +170,12 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	}
 	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("Reading rollback state from node: %s (%s)\n", sourceName, server.Host))
 
-	client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	defer runtimeFactory.CloseIdleConnections()
+	client, _, err := runtimeFactory.Client(ctx, sourceName)
 	if err != nil {
 		return nil, &ConnectivityError{Server: sourceName, Err: fmt.Errorf("failed to connect to node %s: %w", sourceName, err)}
 	}
@@ -246,16 +252,14 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	}
 
 	deploy := deployer.NewDeployerWithPool(client, cfg, envName, sshPool, req.Verbose)
+	deploy.SetRuntimeFactory(runtimeFactory)
 	deploy.SetBaseContext(ctx)
 	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(envServers); err != nil {
 		return nil, err
 	}
-	if err := deploy.SetupTakodRuntime(); err != nil {
-		return nil, fmt.Errorf("failed to setup takod runtime: %w", err)
-	}
-	if err := deploy.PreflightTakodProxyCapabilities(services); err != nil {
+	if err := preflightAndSetupTakodRuntime(deploy, services); err != nil {
 		return nil, err
 	}
 

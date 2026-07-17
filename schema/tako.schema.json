@@ -225,8 +225,38 @@
             "additionalProperties": {
               "type": "string"
             }
+          },
+          "transport": {
+            "type": "string",
+            "enum": ["ssh", "auto", "local"],
+            "description": "Transport for routine takod operations. Omitted preserves legacy SSH behavior; auto/local require immutable clusterId and nodeId."
+          },
+          "clusterId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Immutable enrolled cluster identity used to authenticate local transport."
+          },
+          "nodeId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Immutable enrolled node identity used to authenticate local transport."
+          },
+          "workerUid": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Persisted UID of the protected local platform worker, used for Unix peer authentication."
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {"transport": {"enum": ["auto", "local"]}},
+              "required": ["transport"]
+            },
+            "then": {"required": ["clusterId", "nodeId", "workerUid"]}
+          }
+        ],
+        "additionalProperties": false
       }
     },
     "deployment": {

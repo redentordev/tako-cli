@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/resilience"
-	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
@@ -22,7 +21,7 @@ var ErrNotFound = errors.New("takod state document not found")
 
 // StateManager manages deployment history through the node-local takod state API.
 type StateManager struct {
-	client         takodclient.RequestExecutor
+	client         any
 	socket         string
 	projectName    string
 	environment    string
@@ -31,12 +30,12 @@ type StateManager struct {
 }
 
 // NewStateManager creates a state manager that uses the default takod socket.
-func NewStateManager(client *ssh.Client, projectName, environment, server string) *StateManager {
+func NewStateManager(client any, projectName, environment, server string) *StateManager {
 	return NewStateManagerWithSocket(client, projectName, environment, server, takodclient.DefaultSocket)
 }
 
 // NewStateManagerWithSocket creates a state manager using a configured takod socket.
-func NewStateManagerWithSocket(client *ssh.Client, projectName, environment, server, socket string) *StateManager {
+func NewStateManagerWithSocket(client any, projectName, environment, server, socket string) *StateManager {
 	if socket == "" {
 		socket = takodclient.DefaultSocket
 	}

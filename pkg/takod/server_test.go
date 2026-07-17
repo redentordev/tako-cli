@@ -68,7 +68,7 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 			if status.Version != "test" {
 				t.Fatalf("unexpected version %q", status.Version)
 			}
-			if len(status.Capabilities) != 9 || status.Capabilities[0] != CapabilityContainerArgvV1 || status.Capabilities[1] != CapabilityContainerRuntimeControlsV1 || status.Capabilities[2] != CapabilityImageBuildOptionsV1 || status.Capabilities[3] != CapabilityExecOneOffControlsV1 || status.Capabilities[4] != CapabilityServiceFilesV1 || status.Capabilities[5] != CapabilityProxyTrustedProxiesV1 || status.Capabilities[6] != CapabilityProxyCertsV1 || status.Capabilities[7] != CapabilityAcmeDNSV1 || status.Capabilities[8] != CapabilityNodeIdentityV1 {
+			if len(status.Capabilities) != 11 || status.Capabilities[0] != CapabilityContainerArgvV1 || status.Capabilities[1] != CapabilityContainerRuntimeControlsV1 || status.Capabilities[2] != CapabilityImageBuildOptionsV1 || status.Capabilities[3] != CapabilityImageDescriptorV1 || status.Capabilities[4] != CapabilityNodePlatformV1 || status.Capabilities[5] != CapabilityExecOneOffControlsV1 || status.Capabilities[6] != CapabilityServiceFilesV1 || status.Capabilities[7] != CapabilityProxyTrustedProxiesV1 || status.Capabilities[8] != CapabilityProxyCertsV1 || status.Capabilities[9] != CapabilityAcmeDNSV1 || status.Capabilities[10] != CapabilityNodeIdentityV1 {
 				t.Fatalf("unexpected capabilities %#v", status.Capabilities)
 			}
 			return
@@ -81,11 +81,14 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 }
 
 func TestServerStatusExposesImmutableInstallationIdentity(t *testing.T) {
+	useTempProxyPaths(t)
 	dir, err := os.MkdirTemp("/tmp", "takod-identity-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	restoreCommands := useFakeCommands(t, filepath.Join(dir, "commands.log"))
+	defer restoreCommands()
 	identityPath := filepath.Join(dir, "identity.json")
 	identity, err := nodeidentity.New(
 		"11111111-1111-4111-8111-111111111111",
@@ -123,7 +126,7 @@ func TestServerStatusExposesImmutableInstallationIdentity(t *testing.T) {
 		return dialer.DialContext(ctx, "unix", socket)
 	}}}
 	var lastErr error
-	for index := 0; index < 20; index++ {
+	for index := 0; index < 200; index++ {
 		response, requestErr := client.Get("http://takod/v1/status")
 		if requestErr == nil {
 			defer response.Body.Close()
@@ -400,6 +403,22 @@ func TestHandleProxyFileRejectsInvalidJSON(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandleProxyFileRejectsV1ManifestOnEnrolledNode(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	installation, err := nodeidentity.New("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "node-1", []string{nodeidentity.RoleWorker}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.installation = installation
+	request := ProxyFileRequest{Name: "demo.json", Content: `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["app.example.com"],"upstreams":["http://web:3000"]}]}`}
+	body, _ := json.Marshal(request)
+	recorder := httptest.NewRecorder()
+	server.handleProxyFile(recorder, httptest.NewRequest(http.MethodPut, "/v1/proxy-file", bytes.NewReader(body)))
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "version 2 destination proofs") {
+		t.Fatalf("enrolled v1 proxy response = %d %q", recorder.Code, recorder.Body.String())
 	}
 }
 

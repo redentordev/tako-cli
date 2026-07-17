@@ -153,6 +153,13 @@ Tako infers the meshed `takod` runtime, replicated state, and WireGuard mesh
 settings; run `tako config explain -e production` to see the effective
 defaults.
 
+For a PaaS installed on its first workload node, run `sudo tako platform init`
+on that server and add the printed `clusterId`, `nodeId`, and `workerUid` to
+the server entry with `transport: auto`. The same configuration then uses the
+protected local worker ingress when Tako runs on that exact enrolled node and
+identity-verified SSH from other machines. See
+[First PaaS Node With Local Deployments](docs/CONFIGURATION.md#first-paas-node-with-local-deployments).
+
 3. **Commit, set up the server (one-time), and deploy:**
 
 ```bash

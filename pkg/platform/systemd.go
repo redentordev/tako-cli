@@ -11,10 +11,10 @@ const (
 	WorkerUnitName = "tako-platform-worker.service"
 )
 
-func RenderTakodUnit(binaryPath string, socketPath string, stateDir string, nodeName string, identityPath string, dockerDataRoot string, policy ResourcePolicy) (string, error) {
+func RenderTakodUnit(binaryPath string, socketPath string, stateDir string, nodeName string, identityPath string, dockerDataRoot string, socketGroup string, policy ResourcePolicy) (string, error) {
 	for label, value := range map[string]string{
 		"binary path": binaryPath, "socket path": socketPath, "state directory": stateDir,
-		"node name": nodeName, "identity path": identityPath, "Docker data root": dockerDataRoot,
+		"node name": nodeName, "identity path": identityPath, "Docker data root": dockerDataRoot, "socket group": socketGroup,
 	} {
 		if err := validateSystemdArgument(label, value); err != nil {
 			return "", err
@@ -52,7 +52,7 @@ ReadWritePaths=%s /run/tako /etc/wireguard /etc/tako/proxy /var/log/tako/proxy
 
 [Install]
 WantedBy=multi-user.target
-	`, DefaultSocketGroup, binaryPath, socketPath, filepath.Dir(stateDir), nodeName, identityPath,
+	`, socketGroup, binaryPath, socketPath, filepath.Dir(stateDir), nodeName, identityPath,
 		policy.MinimumFreeDiskBytes, policy.MaximumConcurrentBuilds,
 		dockerDataRoot, policy.ReservedMemoryBytes, policy.ReservedMemoryBytes, filepath.Dir(stateDir)), nil
 }
@@ -64,6 +64,7 @@ func RenderWorkerUnit(config BootstrapConfig) (string, error) {
 	}
 	for label, value := range map[string]string{
 		"binary path": config.ServiceBinaryPath, "socket path": config.SocketPath,
+		"worker socket":   config.WorkerSocketPath,
 		"state directory": config.StateDir, "config directory": config.ConfigDir,
 		"audit directory": config.AuditDir, "identity path": config.IdentityPath,
 	} {
@@ -104,8 +105,10 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
+RuntimeDirectory=tako-platform
+RuntimeDirectoryMode=0750
 ReadOnlyPaths=%s %s/platform.json %s
-ReadWritePaths=%s
+ReadWritePaths=%s /run/tako-platform
 
 [Install]
 WantedBy=multi-user.target

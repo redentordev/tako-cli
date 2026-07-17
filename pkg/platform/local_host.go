@@ -241,7 +241,17 @@ func (LocalHost) WaitReady(ctx context.Context, check ReadinessCheck) error {
 				status, statusErr := agent.Status(ctx)
 				agent.CloseIdleConnections()
 				if statusErr == nil && status != nil && status.Identity != nil && status.Identity.Matches(check.ClusterID, check.NodeID) {
-					if ready, readyErr := hasWorkerReadyRecord(journalPath, check.NodeID, check.Since); readyErr == nil && ready {
+					worker, workerErr := takodclient.NewLocalAgentClientForUID(check.WorkerSocketPath, uint32(check.WorkerUID))
+					if workerErr == nil {
+						workerStatus, probeErr := worker.Status(ctx)
+						worker.CloseIdleConnections()
+						if probeErr != nil || workerStatus == nil || workerStatus.Identity == nil || !workerStatus.Identity.Matches(check.ClusterID, check.NodeID) {
+							workerErr = fmt.Errorf("protected worker ingress identity probe failed: %v", probeErr)
+						}
+					}
+					if workerErr != nil {
+						lastErr = workerErr
+					} else if ready, readyErr := hasWorkerReadyRecord(journalPath, check.NodeID, check.Since); readyErr == nil && ready {
 						return nil
 					} else if readyErr != nil {
 						lastErr = readyErr

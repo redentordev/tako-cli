@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -101,6 +103,11 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	externalVolumes := externalVolumeNamesForEnvironment(cfg, envName)
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return err
+	}
+	defer runtimeFactory.CloseIdleConnections()
 	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServerNames, "cleanup")
 	if err != nil {
 		return err
@@ -126,8 +133,8 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintln(out)
 
-	results := collectCleanupNodes(serversToClean, func(_ string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
-		return cleanupSingleNode(cfg, sshPool, serverCfg, cleanupRequestForEnvironment(cfg, envName, imageRepositories, externalVolumes, keepImages, cleanupDockerCache, cleanupCacheKeep, cleanupSecure))
+	results := collectCleanupNodes(serversToClean, func(serverName string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
+		return cleanupSingleRuntimeNode(cmd.Context(), cfg, runtimeFactory, serverName, serverCfg, cleanupRequestForEnvironment(cfg, envName, imageRepositories, externalVolumes, keepImages, cleanupDockerCache, cleanupCacheKeep, cleanupSecure))
 	})
 
 	totalErrors := 0
@@ -280,6 +287,14 @@ func sortedCleanupServerNames(servers map[string]config.ServerConfig) []string {
 
 func cleanupSingleNode(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
 	return cleanupSingleNodeWithExecutor(cfg, pool, serverCfg, request, cleanupViaTakod)
+}
+
+func cleanupSingleRuntimeNode(ctx context.Context, cfg *config.Config, factory *nodeclient.Factory, serverName string, serverCfg config.ServerConfig, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
+	client, _, err := factory.Client(ctx, serverName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to %s: %w", serverCfg.Host, err)
+	}
+	return engine.CleanupViaTakodContext(ctx, client, cfg, request)
 }
 
 func cleanupSingleNodeWithExecutor(cfg *config.Config, pool sshClientProvider, serverCfg config.ServerConfig, request takod.CleanupRequest, execute func(*ssh.Client, *config.Config, takod.CleanupRequest) (*takod.CleanupResponse, error)) (*takod.CleanupResponse, error) {

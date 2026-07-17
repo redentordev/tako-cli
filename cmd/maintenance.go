@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
@@ -98,6 +100,11 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	}
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return err
+	}
+	defer runtimeFactory.CloseIdleConnections()
 	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServers, "maintenance")
 	if err != nil {
 		return err
@@ -447,13 +454,9 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "→ Deploying maintenance container...\n")
 
 	containerName := maintenanceContainerName(cfg.Project.Name, envName, maintenanceService)
+	containerAlias := runtimeid.ContainerAlias(cfg.Project.Name, envName, maintenanceTakodServiceName(maintenanceService), 1)
 	networkName := maintenanceNetworkName(cfg.Project.Name, envName)
 	socket := takodSocketFromConfig(cfg)
-
-	dynamicConfig, err := renderMaintenanceProxyConfig(cfg.Project.Name, envName, maintenanceService, service.Proxy, containerName)
-	if err != nil {
-		return err
-	}
 	command := fmt.Sprintf("printf %%s %s | base64 -d > /usr/share/nginx/html/index.html && nginx -g 'daemon off;'", encodedHTML)
 	request := takod.ReconcileServiceRequest{
 		Project:      cfg.Project.Name,
@@ -463,15 +466,19 @@ func runMaintenance(cmd *cobra.Command, args []string) error {
 		PullImage:    true,
 		Restart:      "unless-stopped",
 		Network:      networkName,
-		NetworkAlias: containerName,
+		NetworkAlias: containerAlias,
 		Command:      config.StringValue(command),
 		Containers: []takod.ContainerSpec{
 			{Name: containerName},
 		},
 	}
 
-	results := runMaintenanceNodeActions(cfg.Servers, targetServers, func(_ string, server config.ServerConfig) error {
-		return enableMaintenanceOnNode(cfg, sshPool, server, socket, envName, maintenanceService, dynamicConfig, request)
+	results := runMaintenanceNodeActions(cfg.Servers, targetServers, func(serverName string, server config.ServerConfig) error {
+		dynamicConfig, renderErr := renderMaintenanceProxyConfig(cfg.Project.Name, envName, maintenanceService, service.Proxy, containerAlias, server.ClusterID)
+		if renderErr != nil {
+			return renderErr
+		}
+		return enableMaintenanceOnRuntimeNode(cmd.Context(), cfg, runtimeFactory, serverName, socket, envName, maintenanceService, dynamicConfig, request)
 	})
 	nodeErrors := printMaintenanceNodeResults(out, "Enabling", "enabled", results)
 	ack := maintenanceActionResult(cfg, envName, engine.ActionMaintenanceEnable, maintenanceService, results)
@@ -607,7 +614,21 @@ func enableMaintenanceOnNode(cfg *config.Config, pool sshClientProvider, server 
 	})
 }
 
-func renderMaintenanceProxyConfig(project string, environment string, serviceName string, proxy *config.ProxyConfig, containerName string) ([]byte, error) {
+func enableMaintenanceOnRuntimeNode(ctx context.Context, cfg *config.Config, factory *nodeclient.Factory, serverName string, socket string, envName string, serviceName string, dynamicConfig []byte, request takod.ReconcileServiceRequest) error {
+	client, _, err := factory.Client(ctx, serverName)
+	if err != nil {
+		return fmt.Errorf("failed to connect to server: %w", err)
+	}
+	if err := writeMaintenanceProxyConfig(client, socket, cfg.Project.Name, envName, serviceName, dynamicConfig); err != nil {
+		return fmt.Errorf("failed to write maintenance proxy config: %w", err)
+	}
+	if _, err := takodclient.RequestJSONWithContext(ctx, client, socket, "POST", "/v1/reconcile-service", request); err != nil {
+		return fmt.Errorf("failed to reconcile maintenance container: %w", err)
+	}
+	return nil
+}
+
+func renderMaintenanceProxyConfig(project string, environment string, serviceName string, proxy *config.ProxyConfig, containerAlias string, clusterID ...string) ([]byte, error) {
 	hosts, err := maintenanceHosts(proxy)
 	if err != nil {
 		return nil, err
@@ -616,17 +637,29 @@ func renderMaintenanceProxyConfig(project string, environment string, serviceNam
 		return nil, fmt.Errorf("maintenance proxy requires at least one host")
 	}
 
+	maintenanceService := maintenanceTakodServiceName(serviceName)
+	upstream := "http://" + containerAlias + ":80"
+	manifestClusterID := ""
+	if len(clusterID) > 0 {
+		manifestClusterID = strings.TrimSpace(clusterID[0])
+	}
 	manifest := takod.ProxyRouteManifest{
-		Version:     1,
+		Version:     2,
 		Project:     project,
 		Environment: environment,
+		ClusterID:   manifestClusterID,
 		Routes: []takod.ProxyRoute{
 			{
-				Service:    maintenanceTakodServiceName(serviceName),
+				Service:    maintenanceService,
 				Domains:    hosts,
-				Upstreams:  []string{"http://" + containerName + ":80"},
+				Upstreams:  []string{upstream},
 				Priority:   100,
 				Visibility: proxy.EffectiveVisibility(),
+				Destinations: []takod.ProxyDestination{{
+					Kind: takod.ProxyDestinationRuntimeAlias, URL: upstream, Project: project,
+					Environment: environment, Service: maintenanceService, Slot: 1,
+					ContainerPort: 80, HostPort: 80,
+				}},
 			},
 		},
 	}
@@ -654,7 +687,7 @@ func maintenanceHosts(proxy *config.ProxyConfig) ([]string, error) {
 	return hosts, nil
 }
 
-func writeMaintenanceProxyConfig(client *ssh.Client, socket string, project string, environment string, serviceName string, data []byte) error {
+func writeMaintenanceProxyConfig(client any, socket string, project string, environment string, serviceName string, data []byte) error {
 	_, err := takodclient.RequestJSON(client, socket, "PUT", "/v1/proxy-file", takod.ProxyFileRequest{
 		Name:    maintenanceProxyConfigFileName(project, environment, serviceName),
 		Content: string(data),

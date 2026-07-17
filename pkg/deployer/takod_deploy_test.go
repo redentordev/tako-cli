@@ -2,9 +2,14 @@ package deployer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -12,6 +17,8 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -182,63 +189,63 @@ func TestNormalizeLinuxBuildPlatform(t *testing.T) {
 	}
 }
 
-func TestUnregistryPushTarget(t *testing.T) {
-	target, key, err := unregistryPushTarget("node-a", config.ServerConfig{
-		Host:   "203.0.113.10",
-		User:   "deploy",
-		Port:   2222,
-		SSHKey: "/keys/id_ed25519",
-	})
-	if err != nil {
-		t.Fatalf("unregistryPushTarget returned error: %v", err)
-	}
-	if target != "deploy@203.0.113.10:2222" {
-		t.Fatalf("target = %q, want deploy@203.0.113.10:2222", target)
-	}
-	if key != "/keys/id_ed25519" {
-		t.Fatalf("key = %q, want /keys/id_ed25519", key)
-	}
-}
-
-func TestUnregistryPushTargetRejectsPasswordOnlyAuth(t *testing.T) {
-	_, _, err := unregistryPushTarget("node-a", config.ServerConfig{
-		Host:     "203.0.113.10",
-		User:     "deploy",
-		Password: "${SSH_PASSWORD}",
-	})
-	if err == nil {
-		t.Fatal("unregistryPushTarget should reject password-only auth")
-	}
-	if !strings.Contains(err.Error(), "password-only SSH auth") {
-		t.Fatalf("error = %q, want password-only guidance", err)
-	}
-}
-
-func TestLocalBuildPushesSelectedPlatform(t *testing.T) {
-	client := &recordingLocalImageClient{}
-	deployer := &Deployer{
-		config: &config.Config{
-			Project: config.ProjectConfig{Name: "demo", Version: "1.0.0"},
-			Servers: map[string]config.ServerConfig{
-				"node-a": {Host: "203.0.113.10", User: "deploy", SSHKey: "/keys/id_ed25519"},
-			},
-		},
-		localImageClient: client,
-		verbose:          false,
-	}
-	if err := deployer.pushLocalImageToTakodNode(context.Background(), client, "demo/web:abc123", "linux/arm64", "node-a"); err != nil {
-		t.Fatalf("pushLocalImageToTakodNode returned error: %v", err)
-	}
-	if len(client.pushes) != 1 {
-		t.Fatalf("pushes = %#v, want 1", client.pushes)
-	}
-	if got := client.pushes[0].Platform; got != "linux/arm64" {
-		t.Fatalf("push platform = %q, want linux/arm64", got)
-	}
-}
-
 type recordingLocalImageClient struct {
-	pushes []takounregistry.PushRequest
+	exported []string
+}
+
+func TestLocalImageImportUsesAuthenticatedLocalRuntimeWithoutSSH(t *testing.T) {
+	if os.Geteuid() <= 0 {
+		t.Skip("test requires a non-root peer UID")
+	}
+	dir, err := os.MkdirTemp("/tmp", "tako-local-image-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "worker.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation, err := nodeidentity.New("", "", "node-a", []string{nodeidentity.RoleWorker}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedID := "sha256:" + strings.Repeat("a", 64)
+	imported := false
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/status":
+			_ = json.NewEncoder(w).Encode(takodclient.AgentStatus{Runtime: "takod", Capabilities: []string{nodeidentity.Capability}, Identity: &installation.Identity})
+		case "/v1/images/inspect":
+			_ = json.NewEncoder(w).Encode(takod.ImageDescriptor{Image: "demo/web:revision", Exists: false})
+		case "/v1/images/import":
+			_, _ = io.Copy(io.Discard, r.Body)
+			imported = r.URL.Query().Get("expectedImageId") == expectedID
+			_ = json.NewEncoder(w).Encode(takod.ImageImportResponse{Image: "demo/web:revision"})
+		default:
+			http.NotFound(w, r)
+		}
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	cfg := &config.Config{Servers: map[string]config.ServerConfig{"node-a": {
+		Transport: "local", ClusterID: installation.ClusterID, NodeID: installation.NodeID, WorkerUID: os.Geteuid(),
+	}}}
+	factory, err := nodeclient.NewFactoryWithLocalSocket(cfg, nil, takodclient.DefaultSocket, socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployer := &Deployer{config: cfg, runtimeFactory: factory}
+	local := &recordingLocalImageClient{}
+	if err := deployer.importLocalImageToTakodNode(context.Background(), local, takounregistry.ImageDescriptor{
+		ImageID: expectedID, OS: "linux", Architecture: "arm64", DaemonID: "local-daemon",
+	}, "demo/web:revision", "node-a"); err != nil {
+		t.Fatal(err)
+	}
+	if !imported || len(local.exported) != 1 || local.exported[0] != expectedID {
+		t.Fatalf("structured local import imported=%v exports=%v", imported, local.exported)
+	}
 }
 
 func (c *recordingLocalImageClient) CheckAvailable(context.Context) error {
@@ -249,9 +256,14 @@ func (c *recordingLocalImageClient) Build(context.Context, takounregistry.BuildR
 	return nil
 }
 
-func (c *recordingLocalImageClient) Push(_ context.Context, req takounregistry.PushRequest) error {
-	c.pushes = append(c.pushes, req)
-	return nil
+func (c *recordingLocalImageClient) Inspect(context.Context, string) (takounregistry.ImageDescriptor, error) {
+	return takounregistry.ImageDescriptor{ImageID: "sha256:" + strings.Repeat("a", 64), OS: "linux", Architecture: "arm64", DaemonID: "local-daemon"}, nil
+}
+
+func (c *recordingLocalImageClient) Export(_ context.Context, imageID string, output io.Writer) error {
+	c.exported = append(c.exported, imageID)
+	_, err := io.WriteString(output, "image archive")
+	return err
 }
 
 func TestBaseContextDefaultsToBackgroundAndThreadsCancellation(t *testing.T) {
@@ -1052,35 +1064,6 @@ func TestReconcileServiceRequestTimeoutCoversHealthWindowPerReplica(t *testing.T
 	})
 	if got != takodclient.StreamRequestTimeout {
 		t.Fatalf("file payload timeout = %s, want %s", got, takodclient.StreamRequestTimeout)
-	}
-}
-
-func TestConvergeRemoteImageBuildsOncePerPlatformAndTransfersExactImage(t *testing.T) {
-	groups := map[string][]string{"linux/arm64": {"arm-b", "arm-a"}, "linux/amd64": {"amd-b", "amd-a"}}
-	available := map[string]bool{"amd-b": true}
-	var builds []string
-	var transfers []string
-	err := convergeRemoteImageByPlatform(groups,
-		func(server string) bool { return available[server] },
-		func(platform string, source string) error {
-			builds = append(builds, platform+":"+source)
-			available[source] = true
-			return nil
-		},
-		func(source string, target string) error {
-			transfers = append(transfers, source+"->"+target)
-			available[target] = true
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(builds, []string{"linux/arm64:arm-a"}) {
-		t.Fatalf("builds = %#v", builds)
-	}
-	if !slices.Equal(transfers, []string{"amd-b->amd-a", "arm-a->arm-b"}) {
-		t.Fatalf("transfers = %#v", transfers)
 	}
 }
 

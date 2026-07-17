@@ -10,6 +10,7 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 )
@@ -225,6 +226,11 @@ func CollectStateLeaseNodes(ctx context.Context, pool *ssh.Pool, cfg *config.Con
 	if ownPool {
 		defer pool.CloseAll()
 	}
+	factory, err := nodeclient.NewFactory(cfg, pool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	defer factory.CloseIdleConnections()
 
 	nodes := make([]StateLeaseNodeResult, len(serverNames))
 	resultCh := make(chan struct {
@@ -251,7 +257,7 @@ func CollectStateLeaseNodes(ctx context.Context, pool *ssh.Pool, cfg *config.Con
 				return
 			}
 
-			client, cleanup, err := connectAndVerifyStateLeaseServer(pool, serverName, server)
+			client, _, err := factory.Client(ctx, serverName)
 			if err != nil {
 				node.Err = err
 				node.Error = err.Error()
@@ -261,7 +267,6 @@ func CollectStateLeaseNodes(ctx context.Context, pool *ssh.Pool, cfg *config.Con
 				}{index: index, node: node}
 				return
 			}
-			defer cleanup()
 			if err := ctx.Err(); err != nil {
 				node.Err = err
 				node.Error = err.Error()
@@ -360,19 +365,4 @@ func ReleaseStateLeaseByIDContext(ctx context.Context, nodes []StateLeaseNodeRes
 		return nil, fmt.Errorf("lease %s was found but not released", leaseID)
 	}
 	return released, nil
-}
-
-func connectAndVerifyStateLeaseServer(pool *ssh.Pool, serverName string, server config.ServerConfig) (*ssh.Client, func(), error) {
-	client, err := pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
-	if err != nil {
-		return nil, func() {}, fmt.Errorf("failed to connect to %s: %w", serverName, err)
-	}
-	verifyOutput, verifyErr := client.Execute("echo 'tako-ok'")
-	if verifyErr != nil {
-		return nil, func() {}, fmt.Errorf("SSH command verification failed: %v", verifyErr)
-	}
-	if strings.TrimSpace(verifyOutput) != "tako-ok" {
-		return nil, func() {}, fmt.Errorf("SSH command verification returned %q", strings.TrimSpace(verifyOutput))
-	}
-	return client, func() {}, nil
 }

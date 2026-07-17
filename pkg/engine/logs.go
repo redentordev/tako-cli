@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
@@ -171,8 +172,15 @@ func (e *Engine) StreamLogs(ctx context.Context, req LogsRequest) (*LogsResult, 
 		return result, err
 	}
 
+	pool := ssh.NewPool()
+	defer pool.CloseAll()
+	factory, err := nodeclient.NewFactory(cfg, pool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	defer factory.CloseIdleConnections()
 	nodeResults := StreamLogNodesWith(ctx, servers, func(serverName string, server config.ServerConfig, prefix bool) error {
-		return e.streamLogsFromNode(ctx, cfg, envName, serverName, server, req.Service, req.Tail, req.Follow, prefix)
+		return e.streamLogsFromNode(ctx, factory, cfg, envName, serverName, server, req.Service, req.Tail, req.Follow, prefix)
 	})
 	for _, nodeResult := range nodeResults {
 		result.Nodes = append(result.Nodes, logsNodeResultDocument(nodeResult))
@@ -294,6 +302,7 @@ func formatLogLineMessage(serverName string, line string, prefix bool) string {
 
 func (e *Engine) streamLogsFromNode(
 	ctx context.Context,
+	factory *nodeclient.Factory,
 	cfg *config.Config,
 	envName string,
 	serverName string,
@@ -306,11 +315,10 @@ func (e *Engine) streamLogsFromNode(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	client, err := connectTakodStreamNodeContext(ctx, server)
+	client, _, err := factory.Client(ctx, serverName)
 	if err != nil {
 		return fmt.Errorf("failed to connect to node %s: %w", serverName, err)
 	}
-	defer client.Close()
 
 	e.emit(events.Event{
 		Type:    events.TypeLogLine,
@@ -352,28 +360,6 @@ func (e *Engine) streamLogsFromNode(
 		return scanErr
 	}
 	return ctx.Err()
-}
-
-func connectTakodStreamNode(server config.ServerConfig) (*ssh.Client, error) {
-	return connectTakodStreamNodeContext(context.Background(), server)
-}
-
-func connectTakodStreamNodeContext(ctx context.Context, server config.ServerConfig) (*ssh.Client, error) {
-	client, err := ssh.NewClientFromConfig(ssh.ServerConfig{
-		Host:     server.Host,
-		Port:     server.Port,
-		User:     server.User,
-		SSHKey:   server.SSHKey,
-		Password: server.Password,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := client.ConnectContext(ctx); err != nil {
-		_ = client.Close()
-		return nil, err
-	}
-	return client, nil
 }
 
 // StreamLogNodesWith fans log streaming out to the selected nodes concurrently

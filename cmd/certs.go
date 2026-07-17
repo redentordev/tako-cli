@@ -11,6 +11,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
@@ -148,7 +149,12 @@ func executeCertificateOperation(ctx context.Context, cfg *config.Config, envNam
 	}
 	pool := ssh.NewPool()
 	defer pool.CloseAll()
-	clients := make(map[string]takodclient.RequestExecutor, len(targets))
+	factory, err := nodeclient.NewFactory(cfg, pool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return result, err
+	}
+	defer factory.CloseIdleConnections()
+	clients := make(map[string]*takodclient.AgentClient, len(targets))
 	var connectionErr error
 	for _, serverName := range targets {
 		server, ok := cfg.Servers[serverName]
@@ -164,7 +170,7 @@ func executeCertificateOperation(ctx context.Context, cfg *config.Config, envNam
 			result.Nodes = append(result.Nodes, node)
 			continue
 		}
-		client, err := pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, _, err := factory.Client(ctx, serverName)
 		if err != nil {
 			node.Error = "connect: " + err.Error()
 			if connectionErr == nil {
@@ -184,7 +190,7 @@ func executeCertificateOperation(ctx context.Context, cfg *config.Config, envNam
 	return result, operationErr
 }
 
-func executeCertificateNodeRequests(ctx context.Context, socket string, nodes []engine.CertsNodeResult, clients map[string]takodclient.RequestExecutor, action string, domain string, push *takod.ProxyCertificatePushRequest) ([]engine.CertsNodeResult, error) {
+func executeCertificateNodeRequests[T any](ctx context.Context, socket string, nodes []engine.CertsNodeResult, clients map[string]T, action string, domain string, push *takod.ProxyCertificatePushRequest) ([]engine.CertsNodeResult, error) {
 	var preflightErr error
 	for i := range nodes {
 		node := &nodes[i]
@@ -194,8 +200,8 @@ func executeCertificateNodeRequests(ctx context.Context, socket string, nodes []
 			}
 			continue
 		}
-		client := clients[node.Server]
-		if client == nil {
+		client, found := clients[node.Server]
+		if !found || any(client) == nil {
 			node.Error = "connection is unavailable"
 			if preflightErr == nil {
 				preflightErr = fmt.Errorf("connection to %s is unavailable", node.Server)

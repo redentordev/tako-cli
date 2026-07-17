@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -8,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -36,8 +38,12 @@ func GatherActualStateByServer(
 	environment string,
 	serverNames []string,
 ) (map[string]map[string]*ActualService, error) {
+	factory, err := nodeclient.NewFactory(cfg, sshPool, actualStateTakodSocket(cfg))
+	if err != nil {
+		return nil, err
+	}
 	return gatherActualStateByServerWith(cfg.Servers, serverNames, func(serverName string, server config.ServerConfig) (map[string]*ActualService, error) {
-		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, _, err := factory.Client(context.Background(), serverName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to %s: %w", serverName, err)
 		}
@@ -154,16 +160,21 @@ func cloneActualService(service *ActualService) *ActualService {
 	return &clone
 }
 
-func gatherActualStateFromTakod(client *ssh.Client, cfg *config.Config, environment string) (map[string]*ActualService, error) {
-	socket := "/run/tako/takod.sock"
-	if cfg.Runtime != nil && cfg.Runtime.Agent != nil && cfg.Runtime.Agent.Socket != "" {
-		socket = cfg.Runtime.Agent.Socket
-	}
+func gatherActualStateFromTakod(client any, cfg *config.Config, environment string) (map[string]*ActualService, error) {
+	socket := actualStateTakodSocket(cfg)
 
 	return gatherActualStateFromTakodWith(client, socket, cfg.Project.Name, environment)
 }
 
-func gatherActualStateFromTakodWith(client takodclient.RequestExecutor, socket string, project string, environment string) (map[string]*ActualService, error) {
+func actualStateTakodSocket(cfg *config.Config) string {
+	socket := takodclient.DefaultSocket
+	if cfg != nil && cfg.Runtime != nil && cfg.Runtime.Agent != nil && cfg.Runtime.Agent.Socket != "" {
+		socket = cfg.Runtime.Agent.Socket
+	}
+	return socket
+}
+
+func gatherActualStateFromTakodWith(client any, socket string, project string, environment string) (map[string]*ActualService, error) {
 	output, err := takodclient.RequestJSON(client, socket, "GET", takodclient.ActualStateEndpoint(project, environment), nil)
 	if err != nil {
 		return nil, err

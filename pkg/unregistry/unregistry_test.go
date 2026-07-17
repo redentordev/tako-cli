@@ -36,7 +36,7 @@ func (r *recordingRunner) Run(_ context.Context, spec CommandSpec) (string, erro
 	return "ok", nil
 }
 
-func TestCheckAvailableChecksDockerBuildxAndPussh(t *testing.T) {
+func TestCheckAvailableChecksDockerAndBuildxWithoutSSHPlugin(t *testing.T) {
 	runner := &recordingRunner{}
 	client := Client{Runner: runner}
 
@@ -47,7 +47,6 @@ func TestCheckAvailableChecksDockerBuildxAndPussh(t *testing.T) {
 	want := [][]string{
 		{"version"},
 		{"buildx", "version"},
-		{"pussh", "--help"},
 	}
 	if len(runner.calls) != len(want) {
 		t.Fatalf("calls = %#v, want %d", runner.calls, len(want))
@@ -85,48 +84,5 @@ func TestBuildUsesBuildxLoadForSinglePlatform(t *testing.T) {
 	}
 	if want := []int{10, 12}; !slices.Equal(got.SensitiveArgIndexes, want) {
 		t.Fatalf("sensitive arg indexes = %v, want %v", got.SensitiveArgIndexes, want)
-	}
-}
-
-func TestPushUsesDockerPusshTargetAndKey(t *testing.T) {
-	runner := &recordingRunner{}
-	client := Client{Runner: runner}
-
-	err := client.Push(context.Background(), PushRequest{
-		Image:  "demo/web:abc123",
-		Target: "deploy@example.test:2222",
-		SSHKey: "/keys/id_ed25519",
-	})
-	if err != nil {
-		t.Fatalf("Push returned error: %v", err)
-	}
-
-	if len(runner.calls) != 1 {
-		t.Fatalf("calls = %#v, want 1", runner.calls)
-	}
-	got := runner.calls[0]
-	wantArgs := []string{"pussh", "demo/web:abc123", "deploy@example.test:2222", "-i", "/keys/id_ed25519"}
-	if got.Name != "docker" || !slices.Equal(got.Args, wantArgs) {
-		t.Fatalf("push command = %#v, want docker %v", got, wantArgs)
-	}
-}
-
-func TestPushCanSpecifyPlatformAndNoHostKeyCheck(t *testing.T) {
-	runner := &recordingRunner{}
-	client := Client{Runner: runner}
-
-	err := client.Push(context.Background(), PushRequest{
-		Image:      "demo/web:abc123",
-		Target:     "deploy@example.test",
-		Platform:   "linux/amd64",
-		NoHostKeys: true,
-	})
-	if err != nil {
-		t.Fatalf("Push returned error: %v", err)
-	}
-
-	wantArgs := []string{"pussh", "--platform", "linux/amd64", "--no-host-key-check", "demo/web:abc123", "deploy@example.test"}
-	if !slices.Equal(runner.calls[0].Args, wantArgs) {
-		t.Fatalf("push args = %#v, want %#v", runner.calls[0].Args, wantArgs)
 	}
 }

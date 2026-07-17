@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -79,8 +81,13 @@ func runDiscoveryExports(cmd *cobra.Command, args []string) error {
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	factory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return err
+	}
+	defer factory.CloseIdleConnections()
 
-	results := collectDiscoveryExports(cfg, serverNames, envName, sshPool)
+	results := collectDiscoveryExports(cfg, serverNames, envName, factory)
 	if machineOutputEnabled() {
 		// Human table renders to stderr; stdout carries the result document.
 		_ = printDiscoveryExportsText(os.Stderr, envName, discoveryAllEnvironments, results)
@@ -166,9 +173,9 @@ type discoveryNodeResult struct {
 
 type discoveryReadFunc func(serverName string, server config.ServerConfig, environment string) (*takod.ExportDiscoveryResponse, error)
 
-func collectDiscoveryExports(cfg *config.Config, serverNames []string, envName string, sshPool *ssh.Pool) []discoveryNodeResult {
+func collectDiscoveryExports(cfg *config.Config, serverNames []string, envName string, factory *nodeclient.Factory) []discoveryNodeResult {
 	return collectDiscoveryExportsWith(cfg.Servers, serverNames, envName, func(serverName string, server config.ServerConfig, environment string) (*takod.ExportDiscoveryResponse, error) {
-		client, err := sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, _, err := factory.Client(context.Background(), serverName)
 		if err != nil {
 			return nil, fmt.Errorf("connect: %w", err)
 		}
@@ -230,7 +237,7 @@ func collectDiscoveryExportsWith(servers map[string]config.ServerConfig, serverN
 	return results
 }
 
-func readDiscoveryExportsViaTakod(client takodclient.RequestExecutor, cfg *config.Config, environment string) (*takod.ExportDiscoveryResponse, error) {
+func readDiscoveryExportsViaTakod(client any, cfg *config.Config, environment string) (*takod.ExportDiscoveryResponse, error) {
 	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "GET", takodclient.DiscoveryExportsEndpoint(environment), nil)
 	if err != nil {
 		return nil, err

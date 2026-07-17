@@ -119,6 +119,7 @@ func runMonitor(cmd *cobra.Command, args []string) error {
 
 	// Create monitor
 	monitor := monitoring.NewMonitor(cfg, sshPool, verbose)
+	defer monitor.Close()
 	if monitorService != "" {
 		monitor.SetServiceFilter(monitorService)
 	}

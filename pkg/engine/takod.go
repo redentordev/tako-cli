@@ -9,7 +9,6 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
-	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
@@ -48,13 +47,31 @@ func EnsureDeployRuntimeSupported(cfg *config.Config) error {
 	return nil
 }
 
+type takodRuntimeSetup interface {
+	PreflightTakodProxyCapabilities(map[string]config.ServiceConfig) error
+	SetupTakodRuntime() error
+}
+
+// preflightAndSetupTakodRuntime preserves the no-mutation boundary for
+// unsupported proxy topology. Setup applies mesh and node runtime state, so it
+// must never run before route capability admission succeeds.
+func preflightAndSetupTakodRuntime(runtime takodRuntimeSetup, services map[string]config.ServiceConfig) error {
+	if err := runtime.PreflightTakodProxyCapabilities(services); err != nil {
+		return err
+	}
+	if err := runtime.SetupTakodRuntime(); err != nil {
+		return fmt.Errorf("failed to setup takod runtime: %w", err)
+	}
+	return nil
+}
+
 // CleanupViaTakod runs post-deploy cleanup on one node through takod.
-func CleanupViaTakod(client *ssh.Client, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
+func CleanupViaTakod(client any, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
 	return CleanupViaTakodContext(context.Background(), client, cfg, request)
 }
 
 // CleanupViaTakodContext runs cleanup through takod bounded by ctx.
-func CleanupViaTakodContext(ctx context.Context, client *ssh.Client, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
+func CleanupViaTakodContext(ctx context.Context, client any, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
 	var response takod.CleanupResponse
 	output, err := takodclient.RequestJSONWithContext(ctx, client, TakodSocketFromConfig(cfg), "POST", "/v1/cleanup", request)
 	if err != nil {

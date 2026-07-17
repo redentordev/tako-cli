@@ -46,7 +46,7 @@ func prepareServiceFileHashes(d *deployer.Deployer, services map[string]config.S
 	return out, nil
 }
 
-func ensureServiceFilesCapability(ctx context.Context, client takodclient.RequestExecutor, socket string) error {
+func ensureServiceFilesCapability(ctx context.Context, client any, socket string) error {
 	output, err := takodclient.RequestJSONWithContext(ctx, client, socket, "GET", "/v1/status", nil)
 	if err != nil {
 		return fmt.Errorf("failed to verify operator file support: %w", err)

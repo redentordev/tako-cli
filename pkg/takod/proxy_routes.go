@@ -11,11 +11,14 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 )
 
-const proxyRouteManifestVersion = 1
+const proxyRouteManifestVersion = 2
 
 const (
 	proxyRouteVisibilityPublic   = "public"
@@ -27,13 +30,44 @@ var (
 	proxyCaddyDataDir   = "/etc/tako/proxy/caddy-data"
 	proxyCaddyConfigDir = "/etc/tako/proxy/caddy-config"
 	proxyLogDir         = "/var/log/tako/proxy"
+	activeProxyPolicy   struct {
+		sync.RWMutex
+		clusterID     string
+		inventoryPath string
+	}
 )
+
+func activateEnrolledProxyPolicy(clusterID string, inventoryPath string) func() {
+	activeProxyPolicy.Lock()
+	activeProxyPolicy.clusterID = clusterID
+	activeProxyPolicy.inventoryPath = inventoryPath
+	activeProxyPolicy.Unlock()
+	return func() {
+		activeProxyPolicy.Lock()
+		if activeProxyPolicy.clusterID == clusterID && activeProxyPolicy.inventoryPath == inventoryPath {
+			activeProxyPolicy.clusterID = ""
+			activeProxyPolicy.inventoryPath = ""
+		}
+		activeProxyPolicy.Unlock()
+	}
+}
+
+func validateActiveProxyPolicy(content string) error {
+	activeProxyPolicy.RLock()
+	clusterID, inventoryPath := activeProxyPolicy.clusterID, activeProxyPolicy.inventoryPath
+	activeProxyPolicy.RUnlock()
+	if clusterID == "" {
+		return nil
+	}
+	return validateEnrolledProxyRouteManifest(content, clusterID, inventoryPath)
+}
 
 type ProxyRouteManifest struct {
 	Version     int          `json:"version"`
 	Project     string       `json:"project"`
 	Environment string       `json:"environment"`
 	Network     string       `json:"network,omitempty"`
+	ClusterID   string       `json:"clusterId,omitempty"`
 	Routes      []ProxyRoute `json:"routes"`
 }
 
@@ -51,6 +85,7 @@ type ProxyRoute struct {
 	BasicAuth      *ProxyRouteBasicAuth `json:"basicAuth,omitempty"`
 	AllowIPs       []string             `json:"allowIps,omitempty"`
 	TrustedProxies []string             `json:"trustedProxies,omitempty"`
+	Destinations   []ProxyDestination   `json:"destinations,omitempty"`
 }
 
 // ProxyRouteBasicAuth protects a route's serving domains with HTTP basic
@@ -66,7 +101,35 @@ type ProxyRouteHealth struct {
 }
 
 type ProxyDynamicDomain struct {
-	AskURL string `json:"askUrl"`
+	AskURL      string            `json:"askUrl"`
+	Destination *ProxyDestination `json:"destination,omitempty"`
+}
+
+const (
+	ProxyDestinationRuntimeAlias = "runtime-alias"
+	ProxyDestinationMesh         = "mesh-allocation"
+)
+
+// ProxyDestination binds one rendered URL to the workload identity that was
+// authorized by the controller. Raw URLs without this evidence are rejected
+// by enrolled nodes.
+type ProxyDestination struct {
+	Kind          string    `json:"kind"`
+	URL           string    `json:"url"`
+	Project       string    `json:"project"`
+	Environment   string    `json:"environment"`
+	Service       string    `json:"service"`
+	Revision      string    `json:"revision,omitempty"`
+	Slot          int       `json:"slot"`
+	ClusterID     string    `json:"clusterId,omitempty"`
+	NodeID        string    `json:"nodeId,omitempty"`
+	AllocationKey string    `json:"allocationKey,omitempty"`
+	Generation    uint64    `json:"generation,omitempty"`
+	IssuedAt      time.Time `json:"issuedAt,omitempty"`
+	Signature     string    `json:"signature,omitempty"`
+	ContainerPort int       `json:"containerPort"`
+	HostPort      int       `json:"hostPort"`
+	HostIP        string    `json:"hostIp,omitempty"`
 }
 
 func ParseProxyRouteManifest(content string) (*ProxyRouteManifest, error) {
@@ -80,11 +143,42 @@ func ParseProxyRouteManifest(content string) (*ProxyRouteManifest, error) {
 	return &manifest, nil
 }
 
+func validateEnrolledProxyRouteManifest(content string, clusterID string, inventoryPath string) error {
+	manifest, err := ParseProxyRouteManifest(content)
+	if err != nil {
+		return err
+	}
+	if manifest.Version != proxyRouteManifestVersion {
+		return fmt.Errorf("enrolled nodes require proxy route manifest version %d destination proofs", proxyRouteManifestVersion)
+	}
+	if manifest.ClusterID != clusterID {
+		return fmt.Errorf("proxy route manifest cluster identity does not match this enrolled node")
+	}
+	for _, route := range manifest.Routes {
+		destinations := append([]ProxyDestination(nil), route.Destinations...)
+		if route.DynamicDomain != nil && route.DynamicDomain.Destination != nil {
+			destinations = append(destinations, *route.DynamicDomain.Destination)
+		}
+		for _, proof := range destinations {
+			if proof.Kind != ProxyDestinationMesh {
+				continue
+			}
+			// Phase 3 establishes the local-first runtime. A signed allocation is
+			// historical evidence and cannot prove current remote port ownership.
+			// Remote routes stay fail-closed until the Phase 4 inventory lifecycle
+			// distributes authoritative active generations and revocations.
+			return fmt.Errorf("remote mesh destination %s is disabled until authoritative allocation inventory is available", proof.NodeID)
+		}
+	}
+	_ = inventoryPath
+	return nil
+}
+
 func validateProxyRouteManifest(manifest *ProxyRouteManifest) error {
 	if manifest.Version == 0 {
 		manifest.Version = proxyRouteManifestVersion
 	}
-	if manifest.Version != proxyRouteManifestVersion {
+	if manifest.Version != 1 && manifest.Version != proxyRouteManifestVersion {
 		return fmt.Errorf("unsupported route manifest version %d", manifest.Version)
 	}
 	if !isSafeProjectName(manifest.Project) {
@@ -146,12 +240,33 @@ func validateProxyRouteManifest(manifest *ProxyRouteManifest) error {
 				return fmt.Errorf("route %s: invalid upstream %q: %w", route.Service, upstream, err)
 			}
 		}
+		if manifest.Version >= 2 {
+			if len(route.Destinations) != len(route.Upstreams) {
+				return fmt.Errorf("route %s: every upstream requires destination identity proof", route.Service)
+			}
+			for index := range route.Destinations {
+				if route.Destinations[index].URL != route.Upstreams[index] {
+					return fmt.Errorf("route %s: destination proof order does not match upstreams", route.Service)
+				}
+				if err := validateProxyDestination(*manifest, *route, route.Destinations[index], false); err != nil {
+					return fmt.Errorf("route %s: invalid destination proof: %w", route.Service, err)
+				}
+			}
+		}
 		if route.HealthCheck != nil && route.HealthCheck.Path != "" && !isSafeHTTPPath(route.HealthCheck.Path) {
 			return fmt.Errorf("route %s: invalid health check path", route.Service)
 		}
 		if route.DynamicDomain != nil {
 			if err := validateProxyUpstreamURL(route.DynamicDomain.AskURL); err != nil {
 				return fmt.Errorf("route %s: invalid dynamic ask URL: %w", route.Service, err)
+			}
+			if manifest.Version >= 2 {
+				if route.DynamicDomain.Destination == nil || route.DynamicDomain.Destination.URL != route.DynamicDomain.AskURL {
+					return fmt.Errorf("route %s: dynamic ask URL requires destination identity proof", route.Service)
+				}
+				if err := validateProxyDestination(*manifest, *route, *route.DynamicDomain.Destination, true); err != nil {
+					return fmt.Errorf("route %s: invalid dynamic ask destination: %w", route.Service, err)
+				}
 			}
 		}
 		if route.BasicAuth != nil {
@@ -174,6 +289,88 @@ func validateProxyRouteManifest(manifest *ProxyRouteManifest) error {
 		}
 	}
 	return nil
+}
+
+func validateProxyDestination(manifest ProxyRouteManifest, route ProxyRoute, proof ProxyDestination, allowPath bool) error {
+	parsed, err := url.Parse(proof.URL)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Hostname() == "" || parsed.Fragment != "" || parsed.RawQuery != "" {
+		return fmt.Errorf("destination URL must be plain HTTP without userinfo, query, or fragment")
+	}
+	if (!allowPath && parsed.Path != "") || (allowPath && !isSafeHTTPPath(parsed.Path)) {
+		return fmt.Errorf("destination URL path is invalid")
+	}
+	if proof.Project != manifest.Project || proof.Environment != manifest.Environment || !isSafeServiceName(proof.Service) || proof.Slot < 1 || proof.Slot > 10000 || proof.ContainerPort < 1 || proof.ContainerPort > 65535 {
+		return fmt.Errorf("destination workload identity does not match the manifest")
+	}
+	if proof.Revision != "" && !isSafeRuntimeName(proof.Revision) {
+		return fmt.Errorf("destination revision is invalid")
+	}
+	if !allowPath && (proof.Service != route.Service || proof.Revision != route.Revision) {
+		return fmt.Errorf("destination service/revision does not match its route")
+	}
+	port := parsed.Port()
+	if proof.HostPort < 1 || proof.HostPort > 65535 || port == "" || port != fmt.Sprint(proof.HostPort) {
+		return fmt.Errorf("destination port does not match its workload proof")
+	}
+	host := parsed.Hostname()
+	switch proof.Kind {
+	case ProxyDestinationRuntimeAlias:
+		if proof.HostPort != proof.ContainerPort {
+			return fmt.Errorf("runtime alias proof must use the container port directly")
+		}
+		if net.ParseIP(host) != nil || proof.Service != route.Service && !allowPath {
+			return fmt.Errorf("runtime alias proof cannot authorize this host")
+		}
+		expected := runtimeid.ContainerAlias(manifest.Project, manifest.Environment, proof.Service, proof.Slot)
+		if proof.Revision != "" {
+			expected = runtimeid.RevisionContainerAlias(manifest.Project, manifest.Environment, proof.Service, proof.Revision, proof.Slot)
+		}
+		if host != expected {
+			return fmt.Errorf("runtime alias %q does not match workload identity", host)
+		}
+		if proof.AllocationKey != "" || proof.ClusterID != "" || proof.NodeID != "" || proof.HostIP != "" || proof.Generation != 0 || !proof.IssuedAt.IsZero() || proof.Signature != "" {
+			return fmt.Errorf("runtime alias proof carries unexpected mesh evidence")
+		}
+	case ProxyDestinationMesh:
+		ip, err := netip.ParseAddr(host)
+		if err != nil || !safeProxyMeshAddress(ip) {
+			return fmt.Errorf("mesh destination must use a non-special IP address")
+		}
+		if proof.HostIP != host {
+			return fmt.Errorf("mesh destination IP does not match its allocation proof")
+		}
+		if err := nodeidentity.ValidateClusterID(proof.ClusterID); err != nil || proof.ClusterID != manifest.ClusterID {
+			return fmt.Errorf("mesh destination cluster identity is invalid")
+		}
+		if err := nodeidentity.ValidateNodeID(proof.NodeID); err != nil {
+			return fmt.Errorf("mesh destination node identity is invalid")
+		}
+		key := portAllocationKey(PortAllocationKindMeshUpstream, proof.Project, proof.Environment, proof.Service, proof.Revision, proof.Slot)
+		if proof.AllocationKey != key {
+			return fmt.Errorf("mesh destination allocation identity is invalid")
+		}
+		if strings.TrimSpace(proof.Signature) == "" {
+			return fmt.Errorf("mesh destination allocation signature is required")
+		}
+		if proof.Generation == 0 || proof.IssuedAt.IsZero() {
+			return fmt.Errorf("mesh destination allocation generation is required")
+		}
+	default:
+		return fmt.Errorf("destination proof kind %q is unsupported", proof.Kind)
+	}
+	return nil
+}
+
+func safeProxyMeshAddress(address netip.Addr) bool {
+	if !address.IsValid() || address.IsUnspecified() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address.IsMulticast() {
+		return false
+	}
+	for _, blocked := range []string{"169.254.169.254", "100.100.100.200", "fd00:ec2::254"} {
+		if address == netip.MustParseAddr(blocked) {
+			return false
+		}
+	}
+	return true
 }
 
 func renderCaddyfileFromRouteManifests(dir string) (string, error) {
@@ -214,6 +411,9 @@ func readProxyRouteManifests(dir string) ([]ProxyRouteManifest, error) {
 		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if err != nil {
 			return nil, fmt.Errorf("failed to read proxy route manifest %s: %w", entry.Name(), err)
+		}
+		if err := validateActiveProxyPolicy(string(data)); err != nil {
+			return nil, fmt.Errorf("proxy route manifest %s violates enrolled-node policy: %w", entry.Name(), err)
 		}
 		manifest, err := ParseProxyRouteManifest(string(data))
 		if err != nil {

@@ -13,7 +13,6 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
-	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -58,20 +57,103 @@ func (d *Deployer) ReconcileTakodProxyWithActiveRevisions(services map[string]co
 // route-manifest fields before an applying workflow mutates service state.
 func (d *Deployer) PreflightTakodProxyCapabilities(services map[string]config.ServiceConfig) error {
 	requirements := takodProxyCapabilityRequirements(services)
-	if len(requirements) == 0 {
+	hasRoutes := false
+	for _, service := range services {
+		hasRoutes = hasRoutes || service.IsProxied()
+	}
+	if !hasRoutes && len(requirements) == 0 {
 		return nil
 	}
 	proxyServers, err := d.getTakodProxyTargetServers()
 	if err != nil {
 		return fmt.Errorf("failed to get takod proxy targets: %w", err)
 	}
+	requiresRemote, err := d.takodProxyRequiresRemoteMeshRoutes(services, proxyServers)
+	if err != nil {
+		return err
+	}
+	if requiresRemote {
+		requirements = append(requirements, takodProxyCapabilityRequirement{
+			Capability: takod.CapabilityProxyRemoteMeshRoutesV1,
+			Feature:    "authoritative remote mesh proxy routes",
+		})
+	}
+	if len(requirements) == 0 {
+		return nil
+	}
 	return preflightTakodProxyRequirements(proxyServers, requirements, func(serverName string, requirement takodProxyCapabilityRequirement) error {
-		client, err := d.getEnvironmentClient(serverName)
+		client, err := d.getRuntimeClient(serverName)
 		if err != nil {
 			return err
 		}
 		return d.ensureTakodCapability(client, serverName, requirement.Capability, requirement.Feature)
 	})
+}
+
+func (d *Deployer) takodProxyRequiresRemoteMeshRoutes(services map[string]config.ServiceConfig, proxyServers []string) (bool, error) {
+	for serviceName, service := range services {
+		if !service.IsProxied() {
+			continue
+		}
+		assignments, err := d.planTakodAssignments(&service)
+		if err != nil {
+			return false, fmt.Errorf("plan proxy preflight assignments for %s: %w", serviceName, err)
+		}
+		for _, proxyServer := range proxyServers {
+			if assignmentsRequireRemote(proxyServer, assignments) {
+				return true, nil
+			}
+		}
+		if service.Proxy.DynamicDomains != nil && service.Proxy.DynamicDomains.IsEnabled() {
+			askService, _, err := config.ParseDynamicDomainAsk(service.Proxy.DynamicDomains.Ask)
+			if err != nil {
+				return false, fmt.Errorf("parse dynamic-domain proxy preflight for %s: %w", serviceName, err)
+			}
+			askConfig, ok := services[askService]
+			if !ok {
+				return false, fmt.Errorf("dynamic-domain ask service %s is not configured", askService)
+			}
+			askAssignments, planErr := d.planTakodAssignments(&askConfig)
+			if planErr != nil {
+				return false, fmt.Errorf("plan dynamic-domain proxy preflight assignments for %s: %w", askService, planErr)
+			}
+			for _, proxyServer := range proxyServers {
+				if dynamicAskAssignmentRequiresRemote(proxyServer, askAssignments) {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
+func proxyAssignmentsRequireRemote(proxyServers []string, assignmentsByService map[string][]takodAssignment) bool {
+	for _, proxyServer := range proxyServers {
+		for _, assignments := range assignmentsByService {
+			if assignmentsRequireRemote(proxyServer, assignments) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func assignmentsRequireRemote(proxyServer string, assignments []takodAssignment) bool {
+	for _, assignment := range assignments {
+		if assignment.ServerName != proxyServer {
+			return true
+		}
+	}
+	return false
+}
+
+func dynamicAskAssignmentRequiresRemote(proxyServer string, assignments []takodAssignment) bool {
+	if len(assignments) == 0 {
+		return false
+	}
+	ordered := append([]takodAssignment(nil), assignments...)
+	sortTakodAssignments(ordered)
+	return ordered[0].ServerName != proxyServer
 }
 
 func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.ServiceConfig, options takodProxyRenderOptions) error {
@@ -98,7 +180,7 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 		func() error {
 			return runTakodNodeActions(targetNames, func(serverName string) error {
 				target := targetByName[serverName]
-				client, err := d.getEnvironmentClient(serverName)
+				client, err := d.getRuntimeClient(serverName)
 				if err != nil {
 					return err
 				}
@@ -149,7 +231,7 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 	)
 }
 
-func (d *Deployer) syncTakodProxyACMEForServices(client takodclient.RequestExecutor, serverName string, services map[string]config.ServiceConfig) (*takod.ACMEDNSReconcileRequest, error) {
+func (d *Deployer) syncTakodProxyACMEForServices(client any, serverName string, services map[string]config.ServiceConfig) (*takod.ACMEDNSReconcileRequest, error) {
 	request, err := d.takodProxyACMEDNSRequest(services)
 	if err != nil {
 		return nil, err
@@ -250,11 +332,20 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 	if strings.TrimSpace(proxyServerName) == "" {
 		return nil, false, fmt.Errorf("proxy server name is required")
 	}
+	proxyServer, ok := d.config.Servers[proxyServerName]
+	if !ok {
+		return nil, false, fmt.Errorf("proxy server %s is not configured", proxyServerName)
+	}
+	manifestVersion := 1
+	if proxyServer.ClusterID != "" && proxyServer.NodeID != "" && proxyServer.WorkerUID > 0 {
+		manifestVersion = 2
+	}
 	manifest := takod.ProxyRouteManifest{
-		Version:     1,
+		Version:     manifestVersion,
 		Project:     d.config.Project.Name,
 		Environment: d.environment,
 		Network:     takodNetworkName(d.config.Project.Name, d.environment),
+		ClusterID:   proxyServer.ClusterID,
 	}
 
 	serviceNames := make([]string, 0, len(services))
@@ -296,6 +387,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 
 		revision := proxyActiveRevisionForService(options.ActiveRevisions, serviceName)
 		var upstreams []string
+		var destinations []takod.ProxyDestination
 		seenUpstreams := make(map[string]bool)
 		for _, assignment := range assignments {
 			url, err := d.takodProxyUpstreamURLForRevision(proxyServerName, assignment.ServerName, serviceName, revision, assignment.Slot, service.Port)
@@ -307,6 +399,13 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 			}
 			seenUpstreams[url] = true
 			upstreams = append(upstreams, url)
+			if manifestVersion >= 2 {
+				proof, err := d.proxyDestinationProof(proxyServerName, assignment, serviceName, revision, service.Port, url)
+				if err != nil {
+					return nil, false, err
+				}
+				destinations = append(destinations, proof)
+			}
 		}
 
 		route := takod.ProxyRoute{
@@ -320,6 +419,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 			Visibility:     service.Proxy.EffectiveVisibility(),
 			AllowIPs:       append([]string(nil), service.Proxy.AllowIps...),
 			TrustedProxies: append([]string(nil), service.Proxy.TrustedProxies...),
+			Destinations:   destinations,
 		}
 		if auth := service.Proxy.BasicAuth; auth != nil {
 			route.BasicAuth = &takod.ProxyRouteBasicAuth{
@@ -333,6 +433,23 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 				return nil, false, fmt.Errorf("service %s dynamic domain ask: %w", serviceName, err)
 			}
 			route.DynamicDomain = &takod.ProxyDynamicDomain{AskURL: askURL}
+			if manifestVersion >= 2 {
+				askService, _, _ := config.ParseDynamicDomainAsk(service.Proxy.DynamicDomains.Ask)
+				askConfig := services[askService]
+				assignments, assignmentErr := d.planTakodAssignments(&askConfig)
+				if assignmentErr != nil {
+					return nil, false, fmt.Errorf("plan dynamic ask destination for %s: %w", askService, assignmentErr)
+				}
+				if len(assignments) == 0 {
+					return nil, false, fmt.Errorf("dynamic ask service %s has no provable destination", askService)
+				}
+				sortTakodAssignments(assignments)
+				proof, proofErr := d.proxyDestinationProof(proxyServerName, assignments[0], askService, proxyActiveRevisionForService(options.ActiveRevisions, askService), askConfig.Port, askURL)
+				if proofErr != nil {
+					return nil, false, proofErr
+				}
+				route.DynamicDomain.Destination = &proof
+			}
 		}
 		manifest.Routes = append(manifest.Routes, route)
 	}
@@ -449,7 +566,7 @@ func (d *Deployer) takodProxyACMEDNSRequest(services map[string]config.ServiceCo
 	return request, nil
 }
 
-func (d *Deployer) syncTakodProxyACME(client takodclient.RequestExecutor, serverName string, request takod.ACMEDNSReconcileRequest) error {
+func (d *Deployer) syncTakodProxyACME(client any, serverName string, request takod.ACMEDNSReconcileRequest) error {
 	for _, certificate := range request.Certificates {
 		d.emitEvent(events.Event{
 			Type: events.TypeCertIssueStarted, Phase: events.PhaseDomains, Level: events.LevelInfo, Node: serverName,
@@ -509,7 +626,7 @@ func (d *Deployer) emitACMEDNSCompletedEvent(serverName, dnsProvider, domain, ac
 	d.emitEvent(events.Event{Type: eventType, Phase: events.PhaseDomains, Level: events.LevelInfo, Node: serverName, Message: message, Data: data})
 }
 
-func (d *Deployer) removeTakodProxyACME(client takodclient.RequestExecutor) error {
+func (d *Deployer) removeTakodProxyACME(client any) error {
 	_, err := takodclient.RequestJSONWithContext(d.baseContext(), client, d.takodSocket(), "DELETE", takodclient.ACMEDNSEndpoint(d.config.Project.Name, d.environment), nil)
 	if err != nil {
 		var httpErr *takodclient.HTTPError
@@ -520,7 +637,7 @@ func (d *Deployer) removeTakodProxyACME(client takodclient.RequestExecutor) erro
 	return err
 }
 
-func (d *Deployer) finalizeTakodProxyACME(client takodclient.RequestExecutor, request takod.ACMEDNSReconcileRequest) error {
+func (d *Deployer) finalizeTakodProxyACME(client any, request takod.ACMEDNSReconcileRequest) error {
 	_, err := takodclient.RequestJSONWithContext(d.baseContext(), client, d.takodSocket(), "POST", takodclient.ACMEDNSEndpoint(request.Project, request.Environment), nil)
 	return err
 }
@@ -670,7 +787,7 @@ func (d *Deployer) takodDynamicAskBaseURLForRevision(proxyServerName string, ass
 		if servicePort <= 0 {
 			return "", fmt.Errorf("service %s has invalid local proxy port %d", serviceName, servicePort)
 		}
-		host := serviceName
+		host := d.takodContainerAlias(serviceName, assignment.Slot)
 		if revision != "" {
 			host = runtimeid.RevisionContainerAlias(d.config.Project.Name, d.environment, serviceName, revision, assignment.Slot)
 		}
@@ -679,7 +796,46 @@ func (d *Deployer) takodDynamicAskBaseURLForRevision(proxyServerName string, ass
 	return d.meshUpstreamURLForRevision(assignment.ServerName, serviceName, revision, assignment.Slot, servicePort)
 }
 
-func (d *Deployer) writeTakodProxyConfig(client *ssh.Client, data []byte) error {
+func (d *Deployer) proxyDestinationProof(proxyServerName string, assignment takodAssignment, serviceName string, revision string, containerPort int, destinationURL string) (takod.ProxyDestination, error) {
+	proof := takod.ProxyDestination{
+		URL: destinationURL, Project: d.config.Project.Name, Environment: d.environment,
+		Service: serviceName, Revision: revision, Slot: assignment.Slot,
+		ContainerPort: containerPort, HostPort: containerPort,
+	}
+	if assignment.ServerName == proxyServerName {
+		proof.Kind = takod.ProxyDestinationRuntimeAlias
+		return proof, nil
+	}
+	server, ok := d.config.Servers[assignment.ServerName]
+	if !ok {
+		return takod.ProxyDestination{}, fmt.Errorf("destination node %s is not configured", assignment.ServerName)
+	}
+	if server.ClusterID == "" || server.NodeID == "" || server.ClusterID != d.config.Servers[proxyServerName].ClusterID {
+		return takod.ProxyDestination{}, fmt.Errorf("remote proxy destination %s must be an authenticated member of cluster %s", assignment.ServerName, d.config.Servers[proxyServerName].ClusterID)
+	}
+	key := meshUpstreamPortKey{ServerName: assignment.ServerName, ServiceName: serviceName, Revision: revision, Slot: assignment.Slot, ContainerPort: containerPort}
+	d.meshPortCacheMu.Lock()
+	evidence, found := d.meshPortEvidence[key]
+	d.meshPortCacheMu.Unlock()
+	if !found {
+		return takod.ProxyDestination{}, fmt.Errorf("remote proxy destination %s has no authenticated mesh allocation evidence", assignment.ServerName)
+	}
+	if evidence.ClusterID != server.ClusterID || evidence.NodeID != server.NodeID || evidence.Project != proof.Project || evidence.Environment != proof.Environment || evidence.Service != proof.Service || evidence.Revision != proof.Revision || evidence.Slot != proof.Slot || evidence.ContainerPort != containerPort || evidence.Generation == 0 || evidence.IssuedAt.IsZero() || strings.TrimSpace(evidence.Signature) == "" {
+		return takod.ProxyDestination{}, fmt.Errorf("remote proxy destination %s returned mismatched mesh allocation identity", assignment.ServerName)
+	}
+	proof.Kind = takod.ProxyDestinationMesh
+	proof.ClusterID = evidence.ClusterID
+	proof.NodeID = evidence.NodeID
+	proof.AllocationKey = evidence.Key
+	proof.Generation = evidence.Generation
+	proof.IssuedAt = evidence.IssuedAt
+	proof.Signature = evidence.Signature
+	proof.HostPort = evidence.HostPort
+	proof.HostIP = evidence.HostIP
+	return proof, nil
+}
+
+func (d *Deployer) writeTakodProxyConfig(client any, data []byte) error {
 	_, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/proxy-file", takod.ProxyFileRequest{
 		Name:    d.takodProxyConfigFileName(),
 		Content: string(data),
@@ -687,7 +843,7 @@ func (d *Deployer) writeTakodProxyConfig(client *ssh.Client, data []byte) error 
 	return err
 }
 
-func (d *Deployer) removeTakodProxyConfig(client *ssh.Client) error {
+func (d *Deployer) removeTakodProxyConfig(client any) error {
 	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "DELETE", takodclient.ProxyFileEndpoint(d.takodProxyConfigFileName()), nil); err != nil {
 		return err
 	}
@@ -722,14 +878,14 @@ func (d *Deployer) meshUpstreamPortForServerRevision(serverName string, serviceN
 	if d.meshPortAllocator != nil {
 		return d.meshPortAllocator(serverName, serviceName, revision, slot, containerPort)
 	}
-	client, err := d.getEnvironmentClient(serverName)
+	client, err := d.getRuntimeClient(serverName)
 	if err != nil {
 		return 0, err
 	}
 	return d.allocateMeshUpstreamPort(client, serverName, serviceName, revision, slot, containerPort)
 }
 
-func (d *Deployer) allocateMeshUpstreamPort(client takodclient.RequestExecutor, serverName string, serviceName string, revision string, slot int, containerPort int) (int, error) {
+func (d *Deployer) allocateMeshUpstreamPort(client any, serverName string, serviceName string, revision string, slot int, containerPort int) (int, error) {
 	key := meshUpstreamPortKey{ServerName: serverName, ServiceName: serviceName, Revision: revision, Slot: slot, ContainerPort: containerPort}
 	if port, ok := d.cachedMeshUpstreamPort(key); ok {
 		return port, nil
@@ -767,6 +923,12 @@ func (d *Deployer) allocateMeshUpstreamPort(client takodclient.RequestExecutor, 
 		return 0, fmt.Errorf("takod allocated invalid mesh upstream port %d for %s slot %d", response.HostPort, serviceName, slot)
 	}
 	d.storeMeshUpstreamPort(key, response.HostPort)
+	d.meshPortCacheMu.Lock()
+	if d.meshPortEvidence == nil {
+		d.meshPortEvidence = make(map[meshUpstreamPortKey]takod.PortAllocationResponse)
+	}
+	d.meshPortEvidence[key] = response
+	d.meshPortCacheMu.Unlock()
 	return response.HostPort, nil
 }
 

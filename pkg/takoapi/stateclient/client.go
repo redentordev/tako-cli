@@ -19,13 +19,13 @@ var ErrNotFound = errors.New("takod state not found")
 // Client reads and writes canonical takoapi state documents through takod's
 // private Unix-socket control plane.
 type Client struct {
-	executor takodclient.RequestExecutor
+	executor any
 	socket   string
 	timeout  time.Duration
 }
 
 // New returns a state client using the provided private takod request executor.
-func New(executor takodclient.RequestExecutor) *Client {
+func New(executor any) *Client {
 	return &Client{executor: executor}
 }
 

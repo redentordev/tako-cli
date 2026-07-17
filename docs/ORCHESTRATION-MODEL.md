@@ -225,16 +225,11 @@ servers.
 `deployment.build.strategy: local` uses the developer or CI machine as the
 builder. Tako detects each assigned node's architecture, groups targets by
 `linux/amd64` or `linux/arm64`, runs `docker buildx build --platform ... --load`
-once per architecture, and transfers the loaded image to every assigned target
-with psviderski/unregistry's `docker pussh` plugin. `auto` tries this local path
-first and falls back to the remote takod builder if local Docker, buildx,
-docker-pussh, SSH key/agent auth, or remote Docker prerequisites are not ready.
-
-Local build mode requires Docker CLI plugin support and `docker pussh` on the
-client machine. The remote SSH user must be able to run Docker directly or with
-passwordless `sudo docker`, matching upstream docker-pussh requirements. Password
-only SSH auth from `tako.yaml` is not usable by docker-pussh because it uses the
-system OpenSSH client.
+once per architecture, selects the loaded immutable image ID, and imports that
+archive into every assigned target through the authenticated structured node
+transport. `auto` tries this local path first and falls back to the remote takod
+builder if local Docker or buildx is not ready. Local build mode requires no
+Docker SSH plugin and does not grant the client a remote Docker shell.
 
 Docker Desktop, Colima, and rootless Docker can be used as the local builder
 when buildx can produce the target platform and load it into local Docker. In
@@ -270,11 +265,9 @@ For build-based services in a multi-node environment, remote build mode builds
 once on one assigned node per target architecture, then streams that exact
 Docker image to same-architecture peers, skipping nodes where the exact image
 already exists. Local build mode builds once per target architecture on the
-client and pushes directly to every assigned node through docker-pussh. The
-docker-pussh path starts a temporary unregistry container on the target over SSH
-and transfers only missing layers; when the target Docker daemon does not use
-the containerd image store, upstream docker-pussh pulls the temporary registry
-image back into Docker's classic image store so takod can run it.
+client and streams the exact image ID to every assigned node through takod's
+image import API. Each target verifies digest, platform, and current Docker
+daemon identity before the deployment can reuse the result.
 
 Top-level `builds:` are scheduled before their selected consumers. Tako groups
 all selected services by build key and computes the union of their placement
@@ -649,7 +642,13 @@ app/stage/service/slot preferred port, but `takod` checks existing Docker port
 bindings and its allocation registry before accepting it, then returns the
 actual assigned port for container publish and proxy rendering. This lets
 unrelated apps with common service names such as `web` share the same server
-without taking each other's mesh upstream port.
+without taking each other's mesh upstream port. Each signed allocation has a
+monotonic node-local generation. Enrolled nodes keep remote mesh route
+admission disabled until the inventory lifecycle distributes authoritative
+active generations and revocations; local runtime-alias routes remain enabled.
+This boundary is checked before mutation and across the complete stored route
+set on every render. Enrollment quarantines legacy remote manifests and stops
+an already-running proxy before readiness.
 
 The built-in load balancer strategies are intentionally narrow:
 `round_robin` uses Caddy's default load balancing, and `sticky` enables

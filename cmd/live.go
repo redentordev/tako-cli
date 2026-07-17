@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -65,6 +67,11 @@ func runLive(cmd *cobra.Command, args []string) error {
 	}
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return err
+	}
+	defer runtimeFactory.CloseIdleConnections()
 	leaseSet, err := acquireRemoteOperationLeases(sshPool, cfg, envName, targetServers, "live")
 	if err != nil {
 		return err
@@ -86,8 +93,8 @@ func runLive(cmd *cobra.Command, args []string) error {
 		Network:     networkName,
 	}
 
-	results := runMaintenanceNodeActions(cfg.Servers, targetServers, func(_ string, server config.ServerConfig) error {
-		return disableMaintenanceOnNode(cfg, sshPool, server, socket, envName, liveService, request)
+	results := runMaintenanceNodeActions(cfg.Servers, targetServers, func(serverName string, server config.ServerConfig) error {
+		return disableMaintenanceOnRuntimeNode(cmd.Context(), cfg, runtimeFactory, serverName, socket, envName, liveService, request)
 	})
 	nodeErrors := printMaintenanceNodeResults(out, "Disabling", "disabled", results)
 	ack := maintenanceActionResult(cfg, envName, engine.ActionMaintenanceDisable, liveService, results)
@@ -118,4 +125,19 @@ func disableMaintenanceOnNode(cfg *config.Config, pool sshClientProvider, server
 		}
 		return nil
 	})
+}
+
+func disableMaintenanceOnRuntimeNode(ctx context.Context, cfg *config.Config, factory *nodeclient.Factory, serverName string, socket string, envName string, serviceName string, request takod.ReconcileServiceRequest) error {
+	client, _, err := factory.Client(ctx, serverName)
+	if err != nil {
+		return fmt.Errorf("failed to connect to server: %w", err)
+	}
+	if _, err := takodclient.RequestJSONWithContext(ctx, client, socket, "POST", "/v1/reconcile-service", request); err != nil {
+		return fmt.Errorf("failed to remove maintenance container: %w", err)
+	}
+	name := maintenanceProxyConfigFileName(cfg.Project.Name, envName, serviceName)
+	if _, err := takodclient.RequestJSONWithContext(ctx, client, socket, "DELETE", takodclient.ProxyFileEndpoint(name), nil); err != nil {
+		return fmt.Errorf("failed to remove maintenance proxy config: %w", err)
+	}
+	return nil
 }

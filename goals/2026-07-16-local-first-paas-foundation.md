@@ -1,8 +1,8 @@
 # Goal: Local-First PaaS Foundation
 
 Date: 2026-07-16
-Status: in progress — Phases 1 and 2 are complete and adversarially reviewed;
-Phase 3 is next.
+Status: in progress — Phases 1 through 3 are complete and adversarially
+reviewed; Phase 4 is next.
 
 ## Objective
 
@@ -132,6 +132,15 @@ ingress and only then revoke direct legacy socket access.
 
 ### Phase 3 — Local runtime and image path
 
+Progress: complete. Both mandatory reviewers closed their architecture,
+correctness, security, operations, and failure-ordering findings after the
+structured runtime migration, protected worker ingress, durable streamed
+operations, immutable image attestation/transfer, fail-closed enrolled proxy
+policy, and pre-mutation remote-route capability boundary were added. Local
+runtime-alias proxy routes are enabled. Remote mesh routes remain explicitly
+disabled on enrolled nodes until Phase 4 provides authoritative active
+allocation generations and revocations.
+
 - Migrate deploy, status, logs, exec, scale, rollback, jobs, state, backup,
   removal, leases, and reconciliation to `AgentClient`.
 - Keep setup, join, repair, and upgrade behind the provisioning boundary.
@@ -140,9 +149,11 @@ ingress and only then revoke direct legacy socket access.
 - Transfer images only to remote targets that lack the exact digest.
 - Bind every proxy upstream and dynamic-domain authorization destination to a
   project/environment service identity. Local destinations must match a Tako
-  runtime alias; remote IP/port destinations must match an authenticated mesh
-  allocation and cluster inventory record. Reject loopback, link-local,
-  metadata, userinfo, unrelated-service, and unproven raw-IP destinations.
+  runtime alias. Enrolled nodes reject all remote IP/port destinations until
+  Phase 4 can prove current allocation and inventory state; legacy un-enrolled
+  SSH configurations retain version-1 compatibility. Reject loopback,
+  link-local, metadata, userinfo, unrelated-service, and unproven raw-IP
+  destinations.
 
 ### Phase 4 — Cluster inventory and node lifecycle
 

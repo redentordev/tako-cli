@@ -1,6 +1,7 @@
 package takodstate
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
@@ -143,14 +145,14 @@ type Event struct {
 }
 
 type Manager struct {
-	client         takodclient.RequestExecutor
+	client         any
 	socket         string
 	project        string
 	environment    string
 	requestTimeout time.Duration
 }
 
-func NewManager(client *ssh.Client, cfg *config.Config, environment string) *Manager {
+func NewManager(client any, cfg *config.Config, environment string) *Manager {
 	socket := takodclient.DefaultSocket
 	if cfg.Runtime != nil && cfg.Runtime.Agent != nil && cfg.Runtime.Agent.Socket != "" {
 		socket = cfg.Runtime.Agent.Socket
@@ -315,6 +317,10 @@ func PersistToServers(pool *ssh.Pool, cfg *config.Config, environment string, se
 	if pool == nil {
 		return fmt.Errorf("ssh pool not initialized")
 	}
+	factory, err := nodeclient.NewFactory(cfg, pool, takodSocket(cfg))
+	if err != nil {
+		return err
+	}
 
 	targets := make([]statePersistTarget, len(serverNames))
 	for index, serverName := range serverNames {
@@ -336,7 +342,7 @@ func PersistToServers(pool *ssh.Pool, cfg *config.Config, environment string, se
 			resultCh <- statePersistResult{
 				index:      target.index,
 				serverName: target.serverName,
-				err:        persistToServer(pool, cfg, environment, target.serverName, target.server, desired, actual, nodeActual, event),
+				err:        persistToServer(factory, cfg, environment, target.serverName, target.server, desired, actual, nodeActual, event),
 			}
 		}(target)
 	}
@@ -370,8 +376,8 @@ type statePersistResult struct {
 	err        error
 }
 
-func persistToServer(pool *ssh.Pool, cfg *config.Config, environment string, serverName string, server config.ServerConfig, desired *DesiredRevision, actual *ActualSnapshot, nodeActual map[string]*ActualSnapshot, event Event) error {
-	client, err := pool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+func persistToServer(factory *nodeclient.Factory, cfg *config.Config, environment string, serverName string, _ config.ServerConfig, desired *DesiredRevision, actual *ActualSnapshot, nodeActual map[string]*ActualSnapshot, event Event) error {
+	client, _, err := factory.Client(context.Background(), serverName)
 	if err != nil {
 		return fmt.Errorf("failed to connect to %s for takod state persistence: %w", serverName, err)
 	}
@@ -400,6 +406,13 @@ func persistToServer(pool *ssh.Pool, cfg *config.Config, environment string, ser
 		return fmt.Errorf("%s: failed to append event: %w", serverName, err)
 	}
 	return nil
+}
+
+func takodSocket(cfg *config.Config) string {
+	if cfg != nil && cfg.Runtime != nil && cfg.Runtime.Agent != nil && cfg.Runtime.Agent.Socket != "" {
+		return cfg.Runtime.Agent.Socket
+	}
+	return takodclient.DefaultSocket
 }
 
 func statePersistError(results []statePersistResult) error {

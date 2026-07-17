@@ -208,6 +208,13 @@ type ServerConfig struct {
 	SSHKey      string            `yaml:"sshKey,omitempty" json:"sshKey,omitempty"`     // Path to SSH private key (mutually exclusive with password)
 	Password    string            `yaml:"password,omitempty" json:"password,omitempty"` // SSH password (mutually exclusive with sshKey, use env var for security)
 	Labels      map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`     // Custom labels for server selection
+	// Transport controls routine takod traffic only. The empty value preserves
+	// the historical SSH-first behavior. auto/local require the immutable IDs
+	// below; privileged setup, join, repair, and upgrade remain SSH operations.
+	Transport string `yaml:"transport,omitempty" json:"transport,omitempty"`
+	ClusterID string `yaml:"clusterId,omitempty" json:"clusterId,omitempty"`
+	NodeID    string `yaml:"nodeId,omitempty" json:"nodeId,omitempty"`
+	WorkerUID int    `yaml:"workerUid,omitempty" json:"workerUid,omitempty"`
 }
 
 // Service kinds.

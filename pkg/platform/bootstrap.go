@@ -39,11 +39,13 @@ type PlatformAccountIDs struct {
 }
 
 type ReadinessCheck struct {
-	SocketPath string
-	ClusterID  string
-	NodeID     string
-	StateDir   string
-	Since      time.Time
+	SocketPath       string
+	WorkerSocketPath string
+	WorkerUID        int
+	ClusterID        string
+	NodeID           string
+	StateDir         string
+	Since            time.Time
 }
 
 type Bootstrapper struct {
@@ -203,6 +205,23 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, config BootstrapConfig) (*
 	if err := record("identity", "completed", "first-node identity verified"); err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(installation.AllocationPublicKey) == "" {
+		return nil, fmt.Errorf("first-node identity predates allocation signing; explicit re-enrollment is required")
+	}
+	inventoryPath := config.hostPath(nodeidentity.DefaultInventoryPath)
+	inventory := nodeidentity.ClusterInventory{
+		APIVersion: nodeidentity.InventoryAPIVersion, Kind: nodeidentity.InventoryKind, ClusterID: installation.ClusterID,
+		Nodes: []nodeidentity.InventoryNode{{NodeID: installation.NodeID, AllocationPublicKey: installation.AllocationPublicKey}},
+	}
+	if existing, readErr := nodeidentity.ReadInventoryOptional(inventoryPath); readErr != nil {
+		return nil, fmt.Errorf("read trusted cluster inventory: %w", readErr)
+	} else if existing == nil {
+		if err := nodeidentity.CreateInventory(inventoryPath, inventory); err != nil {
+			return nil, fmt.Errorf("create trusted cluster inventory: %w", err)
+		}
+	} else if existing.ClusterID != installation.ClusterID {
+		return nil, fmt.Errorf("trusted cluster inventory belongs to another cluster")
+	}
 
 	state := BootstrapState{
 		APIVersion:        APIVersion,
@@ -213,9 +232,11 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, config BootstrapConfig) (*
 		ControllerMode:    "single-writer",
 		EnrollmentRoles:   append([]string(nil), installation.EnrollmentRoles...),
 		IdentityPath:      config.IdentityPath,
+		InventoryPath:     nodeidentity.DefaultInventoryPath,
 		StateDir:          config.StateDir,
 		AuditDir:          config.AuditDir,
 		SocketPath:        config.SocketPath,
+		WorkerSocketPath:  config.WorkerSocketPath,
 		DockerDataRoot:    config.DockerDataRoot,
 		SocketGroup:       config.SocketGroup,
 		ServiceBinaryPath: config.ServiceBinaryPath,
@@ -265,7 +286,7 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, config BootstrapConfig) (*
 		return nil, err
 	}
 
-	takodUnit, err := RenderTakodUnit(config.ServiceBinaryPath, config.SocketPath, config.StateDir, config.NodeName, config.IdentityPath, config.DockerDataRoot, config.Policy)
+	takodUnit, err := RenderTakodUnit(config.ServiceBinaryPath, config.SocketPath, config.StateDir, config.NodeName, config.IdentityPath, config.DockerDataRoot, config.WorkerGroup, config.Policy)
 	if err != nil {
 		return nil, err
 	}
@@ -287,7 +308,7 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, config BootstrapConfig) (*
 	}
 	if err := b.host.WaitReady(ctx, ReadinessCheck{
 		SocketPath: config.SocketPath, ClusterID: installation.ClusterID, NodeID: installation.NodeID,
-		StateDir: config.StateDir, Since: now,
+		WorkerSocketPath: config.WorkerSocketPath, WorkerUID: accountIDs.WorkerUID, StateDir: config.StateDir, Since: now,
 	}); err != nil {
 		_ = record("services", "failed", err.Error())
 		return nil, fmt.Errorf("verify platform service readiness: %w", err)
@@ -350,6 +371,9 @@ func readConfigDocument(path string) (*ConfigDocument, error) {
 			return nil, fmt.Errorf("platform config must contain one JSON value")
 		}
 		return nil, err
+	}
+	if strings.TrimSpace(document.State.WorkerSocketPath) == "" {
+		document.State.WorkerSocketPath = DefaultWorkerSocket
 	}
 	if err := document.State.Validate(); err != nil {
 		return nil, err

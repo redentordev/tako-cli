@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,6 +193,43 @@ func TestOperationEngineDoesNotReplayAmbiguousRunningOperation(t *testing.T) {
 	}
 	if len(executor.executed) != 0 {
 		t.Fatalf("unsafe operation was replayed: %#v", executor.executed)
+	}
+}
+
+func TestOperationRecoveryRetiresQueuedStreamsAndTerminalQueueRecords(t *testing.T) {
+	dir := t.TempDir()
+	store, _ := NewOperationStore(dir, "22222222-2222-4222-8222-222222222222", time.Now)
+	payload, _ := json.Marshal(AgentRequestPayload{Method: "POST", Endpoint: "/v1/jobs/trigger"})
+	if err := store.Enqueue(OperationSpec{ID: "queued-stream", Kind: "agent.stream", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Enqueue(OperationSpec{ID: "terminal-in-queue", Kind: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	terminal, _ := store.readLocked("terminal-in-queue")
+	terminal.Status, terminal.Phase = "succeeded", "completed"
+	if err := store.writeLocked(*terminal); err != nil {
+		store.mu.Unlock()
+		t.Fatal(err)
+	}
+	store.mu.Unlock()
+	policy := DefaultResourcePolicy()
+	admission, _ := NewAdmissionController(policy, fixedDiskProbe{available: policy.MinimumFreeDiskBytes + 1}, dir)
+	if _, err := NewOperationEngine(store, &blockingOperationExecutor{replaySafe: true}, admission, 1); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := store.Read("queued-stream")
+	if err != nil || stream.Status != "failed" || stream.Phase != "not-dispatched" {
+		t.Fatalf("queued stream recovery = %#v, %v", stream, err)
+	}
+	terminal, err = store.Read("terminal-in-queue")
+	if err != nil || terminal.Status != "succeeded" {
+		t.Fatalf("terminal recovery = %#v, %v", terminal, err)
+	}
+	queued, _ := os.ReadDir(filepath.Join(dir, operationQueueDir))
+	if len(queued) != 0 {
+		t.Fatalf("recovery left %d records in live queue", len(queued))
 	}
 }
 
@@ -394,5 +432,21 @@ func TestAgentOperationExecutorAllowsOnlyStructuredV1Mutations(t *testing.T) {
 		if err := executor.Execute(context.Background(), OperationSpec{ID: "op", Kind: "agent.request", Payload: data}); err == nil {
 			t.Fatalf("unsafe operation accepted: %#v", payload)
 		}
+	}
+}
+
+func TestOperationStoreRejectsPendingQueueOverflow(t *testing.T) {
+	store, err := NewOperationStore(t.TempDir(), "node-test", time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < maxPendingOperations; index++ {
+		spec := OperationSpec{ID: fmt.Sprintf("op-%03d", index), Kind: "test", CreatedAt: time.Now()}
+		if err := store.Enqueue(spec); err != nil {
+			t.Fatalf("enqueue %d: %v", index, err)
+		}
+	}
+	if err := store.Enqueue(OperationSpec{ID: "overflow", Kind: "test", CreatedAt: time.Now()}); err == nil || !strings.Contains(err.Error(), "queue is full") {
+		t.Fatalf("overflow error = %v", err)
 	}
 }

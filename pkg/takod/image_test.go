@@ -134,6 +134,20 @@ func TestBuildImageWithOptionsUsesSortedBuildArgsAndTarget(t *testing.T) {
 	}
 }
 
+func TestValidateImportedPublicationRejectsFinalTagRace(t *testing.T) {
+	expected := "sha256:" + strings.Repeat("a", 64)
+	replaced := "sha256:" + strings.Repeat("b", 64)
+	loaded := &ImageDescriptor{Exists: true, ImageID: expected, OS: "linux", Architecture: "amd64"}
+	if err := validateImportedPublication("demo/web:latest", expected, loaded, &ImageDescriptor{
+		Exists: true, ImageID: replaced, OS: "linux", Architecture: "amd64",
+	}); err == nil || !strings.Contains(err.Error(), "changed during import") {
+		t.Fatalf("final tag race validation error = %v", err)
+	}
+	if err := validateImportedPublication("demo/web:latest", expected, loaded, loaded); err != nil {
+		t.Fatalf("matching publication rejected: %v", err)
+	}
+}
+
 func TestValidateImageBuildOptionsRejectsUnsafeDirectPayloads(t *testing.T) {
 	for _, options := range []ImageBuildOptions{
 		{BuildArgs: map[string]string{"--secret": "value"}},

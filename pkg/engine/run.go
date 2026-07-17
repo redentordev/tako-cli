@@ -9,6 +9,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
@@ -42,9 +43,10 @@ type RunSession struct {
 	plan    *reconcile.ReconciliationPlan
 
 	sshPool      *ssh.Pool
+	runtime      *nodeclient.Factory
 	leases       *RemoteLeaseSet
 	deployer     *deployer.Deployer
-	sourceClient *ssh.Client
+	sourceClient any
 	server       config.ServerConfig
 	actualState  map[string]*reconcile.ActualService
 	services     map[string]config.ServiceConfig
@@ -71,6 +73,9 @@ func (s *RunSession) Close() {
 	s.closed = true
 	if s.leases != nil {
 		s.leases.Release()
+	}
+	if s.runtime != nil {
+		s.runtime.CloseIdleConnections()
 	}
 	if s.sshPool != nil {
 		s.sshPool.CloseAll()
@@ -134,7 +139,12 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 		e.debug(events.TypeWarning, events.PhaseDeploy, message)
 	})
 
-	sourceClient, err := session.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	runtimeFactory, err := nodeclient.NewFactory(cfg, session.sshPool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	session.runtime = runtimeFactory
+	sourceClient, _, err := runtimeFactory.Client(ctx, req.ServerName)
 	if err != nil {
 		display := req.ServerDisplay
 		if display == "" {
@@ -145,6 +155,7 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	session.sourceClient = sourceClient
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, req.Environment, session.sshPool, req.Verbose)
+	deploy.SetRuntimeFactory(runtimeFactory)
 	deploy.SetBaseContext(ctx)
 	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
@@ -155,8 +166,8 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
 	}
-	if err := deploy.SetupTakodRuntime(); err != nil {
-		return nil, fmt.Errorf("failed to setup takod runtime: %w", err)
+	if err := preflightAndSetupTakodRuntime(deploy, map[string]config.ServiceConfig{req.ServiceName: req.Service}); err != nil {
+		return nil, err
 	}
 	session.deployer = deploy
 

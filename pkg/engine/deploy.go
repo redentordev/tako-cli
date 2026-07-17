@@ -16,6 +16,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/git"
 	"github.com/redentordev/tako-cli/pkg/health"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -63,6 +64,7 @@ type DeploySession struct {
 	stateLock     *localstate.StateLock
 	lockInfo      *localstate.LockInfo
 	sshPool       *ssh.Pool
+	runtime       *nodeclient.Factory
 	leases        *RemoteLeaseSet
 	deployer      *deployer.Deployer
 	stateManager  *remotestate.StateManager
@@ -94,6 +96,9 @@ func (s *DeploySession) Close() {
 	s.closed = true
 	if s.leases != nil {
 		s.leases.Release()
+	}
+	if s.runtime != nil {
+		s.runtime.CloseIdleConnections()
 	}
 	if s.sshPool != nil {
 		s.sshPool.CloseAll()
@@ -311,16 +316,23 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	sourceServerName := serverNames[0]
 	session.sourceServer = servers[sourceServerName]
 
-	// Use one reachable target as the build/source node; runtime state is
-	// still persisted and reconciled across the selected mesh.
-	sourceClient, err := session.sshPool.GetOrCreateWithAuth(session.sourceServer.Host, session.sourceServer.Port, session.sourceServer.User, session.sourceServer.SSHKey, session.sourceServer.Password)
+	// Use one reachable target as the build/source node through the structured
+	// runtime transport. Enrolled node 1 can therefore deploy without an SSH
+	// round trip or shell while legacy configurations remain SSH-backed.
+	runtimeFactory, err := nodeclient.NewFactory(cfg, session.sshPool, TakodSocketFromConfig(cfg))
 	if err != nil {
-		return nil, &ConnectivityError{Server: sourceServerName, Err: fmt.Errorf("failed to connect to server %s: %w", sourceServerName, err)}
+		return nil, err
 	}
-	session.stateManager = remotestate.NewStateManagerWithSocket(sourceClient, cfg.Project.Name, session.envName, session.sourceServer.Host, TakodSocketFromConfig(cfg))
+	session.runtime = runtimeFactory
+	sourceRuntime, sourceDecision, err := runtimeFactory.Client(ctx, sourceServerName)
+	if err != nil {
+		return nil, &ConnectivityError{Server: sourceServerName, Err: fmt.Errorf("failed to connect to runtime on server %s: %w", sourceServerName, err)}
+	}
+	session.stateManager = remotestate.NewStateManagerWithSocket(sourceRuntime, cfg.Project.Name, session.envName, session.sourceServer.Host, TakodSocketFromConfig(cfg))
 
 	// Create deployer with pool for takod support.
-	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, session.envName, session.sshPool, req.Verbose)
+	deploy := deployer.NewDeployerWithPool(nil, cfg, session.envName, session.sshPool, req.Verbose)
+	deploy.SetRuntimeFactory(runtimeFactory)
 	deploy.SetCLIVersion(e.cliVersion)
 	deploy.SetSkipBuild(req.SkipBuild)
 	if output := e.buildOutputWriter(); output != nil {
@@ -353,15 +365,17 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 	session.deployer = deploy
 
-	if err := deploy.SetupTakodRuntime(); err != nil {
-		return nil, fmt.Errorf("failed to setup takod runtime: %w", err)
+	if err := preflightAndSetupTakodRuntime(deploy, allServices); err != nil {
+		return nil, err
 	}
 
 	// Auto-sync local state from remote when available (best-effort).
-	if e.stateAutoSync != nil {
+	if e.stateAutoSync != nil && sourceDecision.Transport != nodeclient.TransportLocal {
 		if err := e.stateAutoSync(session.sshPool, cfg, session.envName); err != nil {
 			e.debug(events.TypeWarning, events.PhasePlan, fmt.Sprintf("Warning: auto-sync failed: %v\n", err))
 		}
+	} else if e.stateAutoSync != nil {
+		e.debug(events.TypeLogLine, events.PhasePlan, "→ Local runtime transport selected; remote state is read directly from the local worker ingress\n")
 	}
 
 	// Compare desired state (config) with actual state (running services).
@@ -1017,8 +1031,13 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	e.debug(events.TypeLogLine, events.PhaseCleanup, "\n→ Running automatic cleanup...\n")
 	imageRepositories := CleanupImageRepositories(cfg, envName, services)
 	externalVolumes := ExternalVolumeNamesForEnvironment(cfg, envName)
-	for serverName, server := range s.servers {
-		client, err := s.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	cleanupFactory, factoryErr := nodeclient.NewFactory(cfg, s.sshPool, TakodSocketFromConfig(cfg))
+	for serverName := range s.servers {
+		if factoryErr != nil {
+			e.debug(events.TypeWarning, events.PhaseCleanup, fmt.Sprintf("  Warning: failed to initialize runtime cleanup: %v\n", factoryErr))
+			break
+		}
+		client, _, err := cleanupFactory.Client(ctx, serverName)
 		if err == nil {
 			response, cleanupErr := CleanupViaTakod(client, cfg, takod.CleanupRequest{
 				Project:                cfg.Project.Name,

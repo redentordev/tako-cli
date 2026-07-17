@@ -115,7 +115,7 @@ commands in `cmd/` are thin adapters over this package.
 - Mutation contexts are cancellation-aware for local checks, takod JSON
   state/lease requests, remote lease fan-out, deployment-history
   replication, and the long deployer streams: build-context archive
-  uploads, local buildx/unregistry pushes, reconcile-service requests, and
+  uploads, local buildx structured image imports, reconcile-service requests, and
   release exec streams all derive from the caller's context
   (`Deployer.SetBaseContext`, wired by deploy/run/scale). Leases acquired
   after cancellation are best-effort released and cancellation classifies

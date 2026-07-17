@@ -7,7 +7,10 @@
 package nodeidentity
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -48,12 +51,13 @@ var (
 // role assignments deliberately live outside this value so roles can move
 // without changing node identity.
 type Identity struct {
-	APIVersion string    `json:"apiVersion"`
-	Kind       string    `json:"kind"`
-	ClusterID  string    `json:"clusterId"`
-	NodeID     string    `json:"nodeId"`
-	NodeName   string    `json:"nodeName"`
-	CreatedAt  time.Time `json:"createdAt"`
+	APIVersion          string    `json:"apiVersion"`
+	Kind                string    `json:"kind"`
+	ClusterID           string    `json:"clusterId"`
+	NodeID              string    `json:"nodeId"`
+	NodeName            string    `json:"nodeName"`
+	CreatedAt           time.Time `json:"createdAt"`
+	AllocationPublicKey string    `json:"allocationPublicKey,omitempty"`
 }
 
 // Installation is the create-once identity document. EnrollmentRoles record
@@ -61,7 +65,8 @@ type Identity struct {
 // not the mutable current-role assignment introduced by the control plane.
 type Installation struct {
 	Identity
-	EnrollmentRoles []string `json:"roles"`
+	EnrollmentRoles      []string `json:"roles"`
+	AllocationPrivateKey string   `json:"allocationPrivateKey,omitempty"`
 }
 
 // Reference identifies an enrolled cluster member without carrying mutable
@@ -128,6 +133,12 @@ func New(clusterID string, nodeID string, nodeName string, roles []string, now t
 		},
 		EnrollmentRoles: canonicalRoles(roles),
 	}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate allocation signing key: %w", err)
+	}
+	installation.AllocationPublicKey = base64.RawStdEncoding.EncodeToString(publicKey)
+	installation.AllocationPrivateKey = base64.RawStdEncoding.EncodeToString(privateKey)
 	if err := installation.Validate(); err != nil {
 		return nil, err
 	}
@@ -165,6 +176,23 @@ func (i Installation) Validate() error {
 	if len(i.EnrollmentRoles) == 0 {
 		return fmt.Errorf("identity must declare at least one node role")
 	}
+	if (i.AllocationPublicKey == "") != (i.AllocationPrivateKey == "") {
+		return fmt.Errorf("allocation signing public and private keys must both be present")
+	}
+	if i.AllocationPublicKey != "" {
+		publicKey, err := base64.RawStdEncoding.DecodeString(i.AllocationPublicKey)
+		if err != nil || len(publicKey) != ed25519.PublicKeySize {
+			return fmt.Errorf("allocation public key is invalid")
+		}
+		privateKey, err := base64.RawStdEncoding.DecodeString(i.AllocationPrivateKey)
+		if err != nil || len(privateKey) != ed25519.PrivateKeySize {
+			return fmt.Errorf("allocation private key is invalid")
+		}
+		derived := privateKey[ed25519.PrivateKeySize-ed25519.PublicKeySize:]
+		if subtle.ConstantTimeCompare(publicKey, derived) != 1 {
+			return fmt.Errorf("allocation signing key pair does not match")
+		}
+	}
 	seen := make(map[string]struct{}, len(i.EnrollmentRoles))
 	for index, role := range i.EnrollmentRoles {
 		if role != strings.TrimSpace(role) {
@@ -182,6 +210,42 @@ func (i Installation) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (i Installation) SignAllocation(message []byte) (string, error) {
+	privateKey, err := base64.RawStdEncoding.DecodeString(i.AllocationPrivateKey)
+	if err != nil || len(privateKey) != ed25519.PrivateKeySize {
+		return "", fmt.Errorf("allocation signing key is unavailable")
+	}
+	return base64.RawStdEncoding.EncodeToString(ed25519.Sign(ed25519.PrivateKey(privateKey), message)), nil
+}
+
+func VerifyAllocationSignature(publicKeyEncoded string, message []byte, signatureEncoded string) error {
+	publicKey, err := decodeAllocationPublicKey(publicKeyEncoded)
+	if err != nil {
+		return err
+	}
+	signature, err := base64.RawStdEncoding.DecodeString(strings.TrimSpace(signatureEncoded))
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return fmt.Errorf("allocation signature is invalid")
+	}
+	if !ed25519.Verify(ed25519.PublicKey(publicKey), message, signature) {
+		return fmt.Errorf("allocation signature verification failed")
+	}
+	return nil
+}
+
+func ValidateAllocationPublicKey(publicKeyEncoded string) error {
+	_, err := decodeAllocationPublicKey(publicKeyEncoded)
+	return err
+}
+
+func decodeAllocationPublicKey(publicKeyEncoded string) (ed25519.PublicKey, error) {
+	publicKey, err := base64.RawStdEncoding.DecodeString(strings.TrimSpace(publicKeyEncoded))
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("allocation public key is invalid")
+	}
+	return ed25519.PublicKey(publicKey), nil
 }
 
 // HasEnrollmentRole reports whether bootstrap/enrollment declared role.

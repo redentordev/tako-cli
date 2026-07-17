@@ -17,6 +17,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/mesh"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"github.com/redentordev/tako-cli/pkg/secrets"
@@ -89,15 +90,12 @@ type takodServiceRolloutOperations struct {
 type localImageClient interface {
 	CheckAvailable(context.Context) error
 	Build(context.Context, takounregistry.BuildRequest) error
-	Push(context.Context, takounregistry.PushRequest) error
+	Inspect(context.Context, string) (takounregistry.ImageDescriptor, error)
+	Export(context.Context, string, io.Writer) error
 }
 
 // SetupTakodRuntime prepares every selected environment server for the takod runtime.
 func (d *Deployer) SetupTakodRuntime() error {
-	if d.sshPool == nil {
-		return fmt.Errorf("ssh pool not initialized")
-	}
-
 	servers, err := d.getTakodTargetServers()
 	if err != nil {
 		return fmt.Errorf("failed to get takod target servers: %w", err)
@@ -140,11 +138,10 @@ func (d *Deployer) SetupTakodRuntime() error {
 // commands own that privileged boundary.
 func (d *Deployer) verifyTakodAgents(servers []string) error {
 	return runTakodNodeActions(servers, func(serverName string) error {
-		server, ok := d.config.Servers[serverName]
-		if !ok {
+		if _, ok := d.config.Servers[serverName]; !ok {
 			return fmt.Errorf("server %s not found", serverName)
 		}
-		client, err := d.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, err := d.getRuntimeClient(serverName)
 		if err != nil {
 			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 		}
@@ -291,9 +288,6 @@ func takodRollbackDeployOptionsForService(service *config.ServiceConfig) takodSe
 }
 
 func (d *Deployer) deployServiceTakod(serviceName string, service *config.ServiceConfig, imageRef string, options takodServiceDeployOptions) error {
-	if d.sshPool == nil {
-		return fmt.Errorf("ssh pool not initialized")
-	}
 	if len(service.Files) > 0 {
 		_, _, filesHash, err := d.PrepareServiceFiles(serviceName, service)
 		if err != nil {
@@ -382,7 +376,7 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		Reconcile: func() error {
 			return runTakodNodeActions(targetServers, func(serverName string) error {
 				slots := grouped[serverName]
-				client, err := d.getEnvironmentClient(serverName)
+				client, err := d.getRuntimeClient(serverName)
 				if err != nil {
 					return err
 				}
@@ -436,7 +430,7 @@ func (d *Deployer) preflightTakodContainerArgv(serverNames []string) error {
 
 func (d *Deployer) preflightTakodCapability(serverNames []string, capability string, feature string) error {
 	return preflightTakodContainerArgvWithCheck(serverNames, func(serverName string) error {
-		client, err := d.getEnvironmentClient(serverName)
+		client, err := d.getRuntimeClient(serverName)
 		if err != nil {
 			return err
 		}
@@ -450,7 +444,7 @@ func (d *Deployer) preflightTakodServiceFileSet(serverNames []string, serviceNam
 		return err
 	}
 	return runTakodNodeActions(serverNames, func(serverName string) error {
-		client, err := d.getEnvironmentClient(serverName)
+		client, err := d.getRuntimeClient(serverName)
 		if err != nil {
 			return err
 		}
@@ -468,11 +462,11 @@ func preflightTakodContainerArgvWithCheck(serverNames []string, check func(strin
 	return runTakodNodeActions(serverNames, check)
 }
 
-func (d *Deployer) ensureTakodContainerArgvCapability(client takodclient.RequestExecutor, serverName string) error {
+func (d *Deployer) ensureTakodContainerArgvCapability(client any, serverName string) error {
 	return d.ensureTakodCapability(client, serverName, takod.CapabilityContainerArgvV1, "container argv payloads")
 }
 
-func (d *Deployer) ensureTakodCapability(client takodclient.RequestExecutor, serverName string, required string, feature string) error {
+func (d *Deployer) ensureTakodCapability(client any, serverName string, required string, feature string) error {
 	return takodclient.RequireCapability(d.baseContext(), client, d.takodSocket(), serverName, required, feature)
 }
 
@@ -538,29 +532,6 @@ func (d *Deployer) buildImageRemotelyOnTakodNodes(serviceName string, service *c
 	if err != nil {
 		return err
 	}
-	return convergeRemoteImageByPlatform(platformGroups,
-		func(serverName string) bool {
-			exists, err := d.imageExistsOnTakodNode(serverName, imageRef)
-			return err == nil && exists
-		},
-		func(platform string, source string) error {
-			if d.verbose {
-				d.printf("  [%s] Building %s for %s\n", source, imageRef, platform)
-			}
-			buildStart := time.Now()
-			if _, err := d.buildImageOnNode(source, serviceName, service, imageRef); err != nil {
-				return fmt.Errorf("failed to build image on %s: %w", source, err)
-			}
-			if d.verbose {
-				d.printf("  [%s] Image ready: %s (%s)\n", source, imageRef, formatBuildDuration(time.Since(buildStart)))
-			}
-			return nil
-		},
-		func(source string, target string) error { return d.transferImageBetweenNodes(source, target, imageRef) },
-	)
-}
-
-func convergeRemoteImageByPlatform(platformGroups map[string][]string, exists func(string) bool, build func(string, string) error, transfer func(string, string) error) error {
 	platforms := make([]string, 0, len(platformGroups))
 	for platform := range platformGroups {
 		platforms = append(platforms, platform)
@@ -572,24 +543,30 @@ func convergeRemoteImageByPlatform(platformGroups map[string][]string, exists fu
 		if len(targets) == 0 {
 			continue
 		}
-		source := ""
-		for _, target := range targets {
-			if exists(target) {
-				source = target
-				break
-			}
+		source := targets[0]
+		if d.verbose {
+			d.printf("  [%s] Building %s for %s\n", source, imageRef, platform)
 		}
-		if source == "" {
-			source = targets[0]
-			if err := build(platform, source); err != nil {
-				return err
-			}
+		buildStart := time.Now()
+		if _, err := d.buildImageOnNode(source, serviceName, service, imageRef); err != nil {
+			return fmt.Errorf("failed to build image on %s: %w", source, err)
 		}
-		for _, target := range targets {
-			if target == source || exists(target) {
+		expected, err := d.inspectImageOnTakodNode(source, imageRef)
+		if err != nil {
+			return fmt.Errorf("inspect newly built image on %s: %w", source, err)
+		}
+		if !expected.Exists {
+			return fmt.Errorf("inspect newly built image on %s: image is absent after build", source)
+		}
+		if d.verbose {
+			d.printf("  [%s] Image ready: %s (%s, %s)\n", source, imageRef, expected.ImageID, formatBuildDuration(time.Since(buildStart)))
+		}
+		for _, target := range targets[1:] {
+			actual, inspectErr := d.inspectImageOnTakodNode(target, imageRef)
+			if inspectErr == nil && sameImageContent(expected, actual) {
 				continue
 			}
-			if err := transfer(source, target); err != nil {
+			if err := d.transferImageBetweenNodes(source, target, imageRef); err != nil {
 				return err
 			}
 		}
@@ -598,10 +575,6 @@ func convergeRemoteImageByPlatform(platformGroups map[string][]string, exists fu
 }
 
 func (d *Deployer) transferExistingImageToNodes(imageRef string, requiredServers []string) error {
-	missing := d.takodNodesMissingImage(requiredServers, imageRef)
-	if len(missing) == 0 {
-		return nil
-	}
 	allServers, err := d.getTakodTargetServers()
 	if err != nil {
 		return err
@@ -610,12 +583,12 @@ func (d *Deployer) transferExistingImageToNodes(imageRef string, requiredServers
 	if err != nil {
 		return err
 	}
-	missingGroups, err := d.groupTakodNodesByPlatform(missing)
+	requiredGroups, err := d.groupTakodNodesByPlatform(requiredServers)
 	if err != nil {
 		return err
 	}
-	platforms := make([]string, 0, len(missingGroups))
-	for platform := range missingGroups {
+	platforms := make([]string, 0, len(requiredGroups))
+	for platform := range requiredGroups {
 		platforms = append(platforms, platform)
 	}
 	sort.Strings(platforms)
@@ -623,18 +596,30 @@ func (d *Deployer) transferExistingImageToNodes(imageRef string, requiredServers
 		sources := append([]string(nil), allGroups[platform]...)
 		sort.Strings(sources)
 		source := ""
+		var expected *takod.ImageDescriptor
 		for _, candidate := range sources {
-			if exists, err := d.imageExistsOnTakodNode(candidate, imageRef); err == nil && exists {
-				source = candidate
-				break
+			descriptor, inspectErr := d.inspectImageOnTakodNode(candidate, imageRef)
+			if inspectErr != nil || !descriptor.Exists {
+				continue
+			}
+			if expected == nil {
+				source, expected = candidate, descriptor
+				continue
+			}
+			if !sameImageContent(expected, descriptor) {
+				return fmt.Errorf("image tag %s resolves to conflicting digests on %s (%s) and %s (%s); refusing ambiguous reuse", imageRef, source, expected.ImageID, candidate, descriptor.ImageID)
 			}
 		}
 		if source == "" {
 			return fmt.Errorf("no %s node retains the exact image", platform)
 		}
-		targets := missingGroups[platform]
+		targets := requiredGroups[platform]
 		sort.Strings(targets)
 		for _, target := range targets {
+			actual, inspectErr := d.inspectImageOnTakodNode(target, imageRef)
+			if inspectErr == nil && sameImageContent(expected, actual) {
+				continue
+			}
 			if err := d.transferImageBetweenNodes(source, target, imageRef); err != nil {
 				return err
 			}
@@ -644,26 +629,38 @@ func (d *Deployer) transferExistingImageToNodes(imageRef string, requiredServers
 }
 
 func (d *Deployer) transferImageBetweenNodes(sourceName string, targetName string, imageRef string) error {
-	source, err := d.getEnvironmentClient(sourceName)
+	source, err := d.getRuntimeClient(sourceName)
 	if err != nil {
 		return err
 	}
-	target, err := d.getEnvironmentClient(targetName)
+	target, err := d.getRuntimeClient(targetName)
 	if err != nil {
 		return err
 	}
 	if d.verbose {
 		d.printf("  [%s -> %s] Transferring exact image %s\n", sourceName, targetName, imageRef)
 	}
+	expected, err := d.inspectImageOnTakodNode(sourceName, imageRef)
+	if err != nil {
+		return fmt.Errorf("inspect source image %s on %s: %w", imageRef, sourceName, err)
+	}
+	if !expected.Exists {
+		return fmt.Errorf("source image %s is absent on %s", imageRef, sourceName)
+	}
+	if actual, inspectErr := d.inspectImageOnTakodNode(targetName, imageRef); inspectErr == nil && sameImageContent(expected, actual) {
+		return nil
+	}
 	var sourceStderr strings.Builder
-	var targetStdout strings.Builder
 	var targetStderr strings.Builder
+	var importOutput string
 	sourceErr, targetErr := streamExactImageTransfer(d.baseContext(),
 		func(ctx context.Context, output io.Writer) error {
-			return source.ExecuteStreamWithContext(ctx, dockerImageSaveCommand(imageRef), output, &sourceStderr)
+			return source.StreamOutput(ctx, "GET", takodclient.ImageExportEndpoint(imageRef, expected.ImageID), nil, "", output, &sourceStderr)
 		},
 		func(ctx context.Context, input io.Reader) error {
-			return target.ExecuteStreamWithInput(ctx, dockerImageLoadCommand(), input, &targetStdout, &targetStderr)
+			var importErr error
+			importOutput, importErr = target.StreamRequest(ctx, "POST", takodclient.ImageImportEndpoint(imageRef, expected.ImageID), input, "application/x-tar")
+			return importErr
 		},
 	)
 	if targetErr != nil {
@@ -672,8 +669,16 @@ func (d *Deployer) transferImageBetweenNodes(sourceName string, targetName strin
 	if sourceErr != nil {
 		return fmt.Errorf("failed to export image %s from %s: %w: %s", imageRef, sourceName, sourceErr, strings.TrimSpace(sourceStderr.String()))
 	}
-	if exists, err := d.imageExistsOnTakodNode(targetName, imageRef); err != nil || !exists {
-		return fmt.Errorf("image %s was not available on %s after transfer", imageRef, targetName)
+	var imported takod.ImageImportResponse
+	if err := json.Unmarshal([]byte(importOutput), &imported); err != nil {
+		return fmt.Errorf("decode image import response from %s: %w", targetName, err)
+	}
+	actual, err := d.inspectImageOnTakodNode(targetName, imageRef)
+	if err != nil {
+		return fmt.Errorf("inspect image %s on %s after transfer: %w", imageRef, targetName, err)
+	}
+	if !sameImageContent(expected, actual) {
+		return fmt.Errorf("image %s on %s has digest/platform %s/%s/%s, want %s/%s/%s from %s", imageRef, targetName, actual.ImageID, actual.OS, actual.Architecture, expected.ImageID, expected.OS, expected.Architecture, sourceName)
 	}
 	return nil
 }
@@ -698,34 +703,18 @@ func streamExactImageTransfer(ctx context.Context, save func(context.Context, io
 	return <-sourceErrCh, targetErr
 }
 
-func dockerImageSaveCommand(imageRef string) string {
-	quoted := quoteShellWord(imageRef)
-	return fmt.Sprintf("if docker info >/dev/null 2>&1; then exec docker image save %s; else exec sudo -n docker image save %s; fi", quoted, quoted)
-}
-
-func dockerImageLoadCommand() string {
-	return "if docker info >/dev/null 2>&1; then exec docker image load; else exec sudo -n docker image load; fi"
-}
-
-func quoteShellWord(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-}
-
 func (d *Deployer) buildImageLocallyAndPushToTakodNodes(serviceName string, service *config.ServiceConfig, imageRef string, serverNames []string) error {
 	if len(serverNames) == 0 {
 		return fmt.Errorf("service %s has no assigned takod nodes for build", serviceName)
 	}
 
-	missingServers := d.takodNodesMissingImage(serverNames, imageRef)
-	if len(missingServers) == 0 {
-		if d.verbose {
-			d.printf("  Image already exists on all assigned node(s): %s\n", imageRef)
-		}
-		return nil
-	}
+	// A local build is authoritative for this deploy. Without a descriptor
+	// from the local daemon, a matching remote tag is not reuse evidence, so
+	// push to every assigned node and verify the resulting node descriptors.
+	missingServers := append([]string(nil), serverNames...)
 
 	if d.verbose {
-		d.printf("  Building image locally with docker buildx and pushing via unregistry to %d node(s)...\n", len(missingServers))
+		d.printf("  Building image locally with docker buildx and importing through structured transport to %d node(s)...\n", len(missingServers))
 	}
 
 	ctx := d.baseContext()
@@ -769,13 +758,33 @@ func (d *Deployer) buildImageLocallyAndPushToTakodNodes(serviceName string, serv
 		if d.verbose {
 			d.printf("  Local build ready for %s (%s)\n", platform, formatBuildDuration(time.Since(buildStart)))
 		}
+		localDescriptor, err := localClient.Inspect(ctx, imageRef)
+		if err != nil {
+			return fmt.Errorf("inspect locally built image %s: %w", imageRef, err)
+		}
+		if got := localDescriptor.OS + "/" + localDescriptor.Architecture; !strings.HasPrefix(platform, got) {
+			return fmt.Errorf("locally built image platform %s/%s does not match requested %s", localDescriptor.OS, localDescriptor.Architecture, platform)
+		}
 
+		var expected *takod.ImageDescriptor
 		for _, serverName := range targets {
-			if err := d.pushLocalImageToTakodNode(ctx, localClient, imageRef, platform, serverName); err != nil {
+			if err := d.importLocalImageToTakodNode(ctx, localClient, localDescriptor, imageRef, serverName); err != nil {
 				return err
 			}
+			descriptor, err := d.inspectImageOnTakodNode(serverName, imageRef)
+			if err != nil {
+				return fmt.Errorf("verify locally built image %s on %s: %w", imageRef, serverName, err)
+			}
+			if !descriptor.Exists {
+				return fmt.Errorf("verify locally built image %s on %s: image is absent after push", imageRef, serverName)
+			}
+			if expected == nil {
+				expected = descriptor
+			} else if !sameImageContent(expected, descriptor) {
+				return fmt.Errorf("local image push produced conflicting digests for %s/%s: %s on first target, %s on %s", imageRef, platform, expected.ImageID, descriptor.ImageID, serverName)
+			}
 			if d.verbose {
-				d.printf("  [%s] Image ready: %s\n", serverName, imageRef)
+				d.printf("  [%s] Image ready: %s (%s)\n", serverName, imageRef, descriptor.ImageID)
 			}
 		}
 	}
@@ -783,29 +792,40 @@ func (d *Deployer) buildImageLocallyAndPushToTakodNodes(serviceName string, serv
 	return nil
 }
 
-func (d *Deployer) pushLocalImageToTakodNode(ctx context.Context, localClient localImageClient, imageRef string, platform string, serverName string) error {
-	server, ok := d.config.Servers[serverName]
-	if !ok {
-		return fmt.Errorf("server %s not found", serverName)
-	}
-	target, sshKey, err := unregistryPushTarget(serverName, server)
+func (d *Deployer) importLocalImageToTakodNode(ctx context.Context, localClient localImageClient, local takounregistry.ImageDescriptor, imageRef string, serverName string) error {
+	target, err := d.getRuntimeClient(serverName)
 	if err != nil {
 		return err
 	}
 	if d.verbose {
-		d.printf("  [%s] Pushing %s with docker pussh\n", serverName, imageRef)
+		d.printf("  [%s] Importing exact local image %s through structured runtime transport\n", serverName, imageRef)
 	}
-	pushStart := time.Now()
-	if err := localClient.Push(ctx, takounregistry.PushRequest{
-		Image:    imageRef,
-		Target:   target,
-		SSHKey:   sshKey,
-		Platform: platform,
-	}); err != nil {
-		return fmt.Errorf("failed to push image to %s: %w", serverName, err)
+	if actual, inspectErr := d.inspectImageOnTakodNode(serverName, imageRef); inspectErr == nil && actual.Exists && actual.ImageID == local.ImageID && actual.OS == local.OS && actual.Architecture == local.Architecture && actual.Variant == local.Variant {
+		return nil
+	}
+	var output string
+	sourceErr, targetErr := streamExactImageTransfer(ctx,
+		func(ctx context.Context, output io.Writer) error {
+			return localClient.Export(ctx, local.ImageID, output)
+		},
+		func(ctx context.Context, input io.Reader) error {
+			var importErr error
+			output, importErr = target.StreamRequest(ctx, "POST", takodclient.ImageImportEndpoint(imageRef, local.ImageID), input, "application/x-tar")
+			return importErr
+		},
+	)
+	if targetErr != nil {
+		return fmt.Errorf("failed to import local image %s on %s: %w", imageRef, serverName, targetErr)
+	}
+	if sourceErr != nil {
+		return fmt.Errorf("failed to export local image %s: %w", imageRef, sourceErr)
+	}
+	var imported takod.ImageImportResponse
+	if err := json.Unmarshal([]byte(output), &imported); err != nil {
+		return fmt.Errorf("decode local image import response from %s: %w", serverName, err)
 	}
 	if d.verbose {
-		d.printf("  [%s] Push complete: %s\n", serverName, formatBuildDuration(time.Since(pushStart)))
+		d.printf("  [%s] Structured image import complete\n", serverName)
 	}
 	return nil
 }
@@ -822,25 +842,6 @@ func (d *Deployer) localImageTransferClient() localImageClient {
 	return client
 }
 
-func (d *Deployer) takodNodesMissingImage(serverNames []string, imageRef string) []string {
-	missing := make([]string, 0, len(serverNames))
-	for _, serverName := range serverNames {
-		existsStart := time.Now()
-		exists, existsErr := d.imageExistsOnTakodNode(serverName, imageRef)
-		if existsErr == nil && exists {
-			if d.verbose {
-				d.printf("  [%s] Image already exists: %s (checked in %s)\n", serverName, imageRef, formatBuildDuration(time.Since(existsStart)))
-			}
-			continue
-		}
-		if existsErr != nil && d.verbose {
-			d.printf("  [%s] Could not check existing image, will push local image: %v\n", serverName, existsErr)
-		}
-		missing = append(missing, serverName)
-	}
-	return missing
-}
-
 func (d *Deployer) groupTakodNodesByPlatform(serverNames []string) (map[string][]string, error) {
 	groups := make(map[string][]string)
 	for _, serverName := range serverNames {
@@ -854,19 +855,44 @@ func (d *Deployer) groupTakodNodesByPlatform(serverNames []string) (map[string][
 }
 
 func (d *Deployer) detectTakodNodePlatform(serverName string) (string, error) {
-	client, err := d.getEnvironmentClient(serverName)
+	response, err := d.readTakodNodePlatform(serverName)
 	if err != nil {
 		return "", err
 	}
-	output, err := client.Execute("uname -m")
-	if err != nil {
-		return "", fmt.Errorf("failed to detect architecture on %s: %w", serverName, err)
+	if response.OS != "linux" {
+		return "", fmt.Errorf("unsupported node OS %q on %s", response.OS, serverName)
 	}
-	platform, err := normalizeLinuxBuildPlatform(output)
+	platform, err := normalizeLinuxBuildPlatform(response.Architecture)
 	if err != nil {
-		return "", fmt.Errorf("failed to detect architecture on %s: %w", serverName, err)
+		return "", fmt.Errorf("failed to normalize platform on %s: %w", serverName, err)
+	}
+	if strings.TrimSpace(response.Variant) != "" {
+		platform += "/" + strings.TrimSpace(response.Variant)
 	}
 	return platform, nil
+}
+
+func (d *Deployer) readTakodNodePlatform(serverName string) (*takod.PlatformResponse, error) {
+	client, err := d.getRuntimeClient(serverName)
+	if err != nil {
+		return nil, err
+	}
+	output, err := takodclient.RequestJSONWithContext(d.baseContext(), client, d.takodSocket(), "GET", "/v1/platform", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to detect platform on %s: %w", serverName, err)
+	}
+	var response takod.PlatformResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return nil, fmt.Errorf("failed to decode platform on %s: %w", serverName, err)
+	}
+	response.OS = strings.ToLower(strings.TrimSpace(response.OS))
+	response.Architecture = strings.ToLower(strings.TrimSpace(response.Architecture))
+	response.Variant = strings.ToLower(strings.TrimSpace(response.Variant))
+	response.DaemonID = strings.TrimSpace(response.DaemonID)
+	if response.OS == "" || response.Architecture == "" || response.DaemonID == "" {
+		return nil, fmt.Errorf("Docker platform response on %s omitted OS, architecture, or daemon identity", serverName)
+	}
+	return &response, nil
 }
 
 func normalizeLinuxBuildPlatform(machine string) (string, error) {
@@ -880,50 +906,52 @@ func normalizeLinuxBuildPlatform(machine string) (string, error) {
 	}
 }
 
-func unregistryPushTarget(serverName string, server config.ServerConfig) (string, string, error) {
-	host := strings.TrimSpace(server.Host)
-	user := strings.TrimSpace(server.User)
-	if host == "" {
-		return "", "", fmt.Errorf("server %s host is required for local unregistry push", serverName)
+func (d *Deployer) inspectImageOnTakodNode(serverName string, imageRef string) (*takod.ImageDescriptor, error) {
+	client, err := d.getRuntimeClient(serverName)
+	if err != nil {
+		return nil, err
 	}
-	if user == "" {
-		return "", "", fmt.Errorf("server %s user is required for local unregistry push", serverName)
+	output, err := takodclient.RequestJSON(client, d.takodSocket(), "GET", takodclient.ImageInspectEndpoint(imageRef), nil)
+	if err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(server.Password) != "" && strings.TrimSpace(server.SSHKey) == "" {
-		return "", "", fmt.Errorf("server %s uses password-only SSH auth; deployment.build.strategy=local requires SSH key or agent auth because docker pussh uses the system ssh client", serverName)
+	var response takod.ImageDescriptor
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return nil, fmt.Errorf("failed to parse image descriptor response: %w", err)
 	}
-	if strings.Contains(host, ":") && net.ParseIP(host) != nil {
-		return "", "", fmt.Errorf("server %s uses IPv6 host %s; docker pussh currently expects [user@]host[:port] without IPv6 literals", serverName, host)
+	if response.Image != imageRef {
+		return nil, fmt.Errorf("image descriptor returned identity %q, want %q", response.Image, imageRef)
 	}
-
-	target := user + "@" + host
-	if server.Port != 0 && server.Port != 22 {
-		target += ":" + strconv.Itoa(server.Port)
+	if response.Exists && (response.ImageID == "" || response.OS == "" || response.Architecture == "" || response.DaemonID == "") {
+		return nil, fmt.Errorf("image descriptor for %s on %s omitted immutable evidence", imageRef, serverName)
 	}
-	return target, strings.TrimSpace(server.SSHKey), nil
+	if response.Exists {
+		platform, err := d.readTakodNodePlatform(serverName)
+		if err != nil {
+			return nil, fmt.Errorf("re-attest Docker daemon for image %s on %s: %w", imageRef, serverName, err)
+		}
+		nodeArch, err := normalizeLinuxBuildPlatform(platform.Architecture)
+		if err != nil {
+			return nil, fmt.Errorf("normalize Docker daemon platform on %s: %w", serverName, err)
+		}
+		imageArch, err := normalizeLinuxBuildPlatform(response.Architecture)
+		if err != nil {
+			return nil, fmt.Errorf("normalize image platform on %s: %w", serverName, err)
+		}
+		if response.DaemonID != platform.DaemonID || response.OS != platform.OS || imageArch != nodeArch || (platform.Variant != "" && strings.TrimSpace(response.Variant) != strings.TrimSpace(platform.Variant)) {
+			return nil, fmt.Errorf("image descriptor for %s on %s does not match the currently attested Docker daemon/platform", imageRef, serverName)
+		}
+	}
+	return &response, nil
 }
 
-func (d *Deployer) imageExistsOnTakodNode(serverName string, imageRef string) (bool, error) {
-	client, err := d.getEnvironmentClient(serverName)
-	if err != nil {
-		return false, err
-	}
-	output, err := takodclient.RequestJSON(client, d.takodSocket(), "GET", takodclient.ImageExistsEndpoint(imageRef), nil)
-	if err != nil {
-		return false, err
-	}
-	var response takod.ImageExistsResponse
-	if err := json.Unmarshal([]byte(output), &response); err != nil {
-		return false, fmt.Errorf("failed to parse image exists response: %w", err)
-	}
-	return response.Exists, nil
+func sameImageContent(expected *takod.ImageDescriptor, actual *takod.ImageDescriptor) bool {
+	return expected != nil && actual != nil && expected.Exists && actual.Exists &&
+		expected.ImageID == actual.ImageID && expected.OS == actual.OS &&
+		expected.Architecture == actual.Architecture && expected.Variant == actual.Variant
 }
 
 func (d *Deployer) RemoveServiceTakod(serviceName string) error {
-	if d.sshPool == nil {
-		return fmt.Errorf("ssh pool not initialized")
-	}
-
 	targetServers, err := d.getTakodTargetServers()
 	if err != nil {
 		return fmt.Errorf("failed to get takod target servers: %w", err)
@@ -933,7 +961,7 @@ func (d *Deployer) RemoveServiceTakod(serviceName string) error {
 	}
 
 	return runTakodNodeActions(targetServers, func(serverName string) error {
-		client, err := d.getEnvironmentClient(serverName)
+		client, err := d.getRuntimeClient(serverName)
 		if err != nil {
 			return err
 		}
@@ -956,10 +984,6 @@ func (d *Deployer) PruneTakodServiceRevisions(services map[string]config.Service
 	if len(normalizedRevisions) == 0 {
 		return nil
 	}
-	if d.sshPool == nil {
-		return fmt.Errorf("ssh pool not initialized")
-	}
-
 	requests := takodRevisionPruneRequests(d.config.Project.Name, d.environment, normalizedRevisions)
 	targetServers, err := d.getTakodTargetServers()
 	if err != nil {
@@ -970,7 +994,7 @@ func (d *Deployer) PruneTakodServiceRevisions(services map[string]config.Service
 	}
 
 	return runTakodNodeActions(targetServers, func(serverName string) error {
-		client, err := d.getEnvironmentClient(serverName)
+		client, err := d.getRuntimeClient(serverName)
 		if err != nil {
 			return err
 		}
@@ -1058,7 +1082,7 @@ func (e *takodNodeActionsError) Unwrap() []error {
 	return errs
 }
 
-func (d *Deployer) prepareTakodNode(client *ssh.Client, serverName string, server config.ServerConfig, index int, peers []takodMeshPeer, publicKey string) error {
+func (d *Deployer) prepareTakodNode(client any, serverName string, server config.ServerConfig, index int, peers []takodMeshPeer, publicKey string) error {
 	meshAddress, err := d.meshAddress(index)
 	if err != nil {
 		return err
@@ -1129,7 +1153,7 @@ type prepareTakodNodeResult struct {
 
 func (d *Deployer) prepareTakodNodes(servers []string, peers []takodMeshPeer, publicKeys map[string]string) error {
 	return d.prepareTakodNodesWith(servers, func(index int, serverName string, server config.ServerConfig) error {
-		client, err := d.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+		client, err := d.getRuntimeClient(serverName)
 		if err != nil {
 			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 		}
@@ -1181,7 +1205,7 @@ func (d *Deployer) prepareTakodNodesWith(servers []string, prepare prepareTakodN
 	return nil
 }
 
-func (d *Deployer) deployServiceToTakodNode(client *ssh.Client, serverName string, serviceName string, service *config.ServiceConfig, imageRef string, slots []int, pullImage bool, warmOnly bool) error {
+func (d *Deployer) deployServiceToTakodNode(client any, serverName string, serviceName string, service *config.ServiceConfig, imageRef string, slots []int, pullImage bool, warmOnly bool) error {
 	sort.Ints(slots)
 	if d.verbose {
 		d.printf("  -> %s slots %v\n", serverName, slots)
@@ -1582,7 +1606,7 @@ func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.Serv
 	return mounts, externalVolumes, nil
 }
 
-func (d *Deployer) reconcileBackupScheduleViaTakod(client *ssh.Client, serviceName string, service *config.ServiceConfig, serviceAssignedToNode bool) error {
+func (d *Deployer) reconcileBackupScheduleViaTakod(client any, serviceName string, service *config.ServiceConfig, serviceAssignedToNode bool) error {
 	if service.Backup == nil || !serviceAssignedToNode {
 		return d.deleteBackupScheduleViaTakod(client, serviceName)
 	}
@@ -1596,7 +1620,7 @@ func (d *Deployer) reconcileBackupScheduleViaTakod(client *ssh.Client, serviceNa
 	return nil
 }
 
-func (d *Deployer) deleteBackupScheduleViaTakod(client *ssh.Client, serviceName string) error {
+func (d *Deployer) deleteBackupScheduleViaTakod(client any, serviceName string) error {
 	endpoint := fmt.Sprintf(
 		"/v1/backup-schedule?project=%s&environment=%s&service=%s",
 		url.QueryEscape(d.config.Project.Name),
@@ -1682,7 +1706,7 @@ func takodBackupStorageConfig(storage *config.BackupStorageConfig) *takod.Backup
 	}
 }
 
-func (d *Deployer) ensureTakodProxy(client *ssh.Client, networkName string, email string) error {
+func (d *Deployer) ensureTakodProxy(client any, networkName string, email string) error {
 	if email == "" {
 		email = "tako@redentor.dev"
 	}
@@ -1774,7 +1798,7 @@ func (d *Deployer) planTakodAssignments(service *config.ServiceConfig) ([]takodA
 
 func (d *Deployer) ensureTakodMeshKeys(servers []string) (map[string]string, error) {
 	return d.ensureTakodMeshKeysWith(servers, func(serverName string) (string, error) {
-		client, err := d.getEnvironmentClient(serverName)
+		client, err := d.getRuntimeClient(serverName)
 		if err != nil {
 			return "", err
 		}
@@ -1916,14 +1940,44 @@ func (d *Deployer) getTakodTargetServers() ([]string, error) {
 	return d.config.GetEnvironmentServers(d.environment)
 }
 
-func (d *Deployer) getEnvironmentClient(serverName string) (*ssh.Client, error) {
-	server, ok := d.config.Servers[serverName]
-	if !ok {
-		return nil, fmt.Errorf("server %s not found", serverName)
+type directSSHClientPool struct {
+	client *ssh.Client
+}
+
+func (p directSSHClientPool) GetOrCreateWithAuth(_ string, _ int, _ string, _ string, _ string) (*ssh.Client, error) {
+	if p.client == nil {
+		return nil, fmt.Errorf("SSH client is not initialized")
 	}
-	client, err := d.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	return p.client, nil
+}
+
+// getRuntimeClient returns only the structured takod surface. Transport is
+// resolved once from immutable identity before any SSH attempt; callers cannot
+// gain a shell through this client.
+func (d *Deployer) getRuntimeClient(serverName string) (*takodclient.AgentClient, error) {
+	d.runtimeFactoryMu.Lock()
+	if d.runtimeFactory == nil {
+		var pool nodeclient.SSHPool = d.sshPool
+		if pool == nil {
+			if client, ok := d.client.(*ssh.Client); ok && client != nil {
+				pool = directSSHClientPool{client: client}
+			}
+		}
+		factory, err := nodeclient.NewFactory(d.config, pool, d.takodSocket())
+		if err != nil {
+			d.runtimeFactoryMu.Unlock()
+			return nil, err
+		}
+		d.runtimeFactory = factory
+	}
+	factory := d.runtimeFactory
+	d.runtimeFactoryMu.Unlock()
+	client, decision, err := factory.Client(d.baseContext(), serverName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to %s: %w", serverName, err)
+		return nil, err
+	}
+	if d.verbose {
+		d.printf("  [%s] Runtime transport: %s (%s)\n", serverName, decision.Transport, decision.Evidence)
 	}
 	return client, nil
 }
@@ -2031,7 +2085,7 @@ func copyServiceUlimits(source map[string]config.UlimitConfig) map[string]config
 	return copy
 }
 
-func (d *Deployer) reconcileServiceViaTakod(client *ssh.Client, request takod.ReconcileServiceRequest) error {
+func (d *Deployer) reconcileServiceViaTakod(client any, request takod.ReconcileServiceRequest) error {
 	timeout := reconcileServiceRequestTimeout(request)
 	if _, err := takodclient.RequestJSONWithTimeoutContext(d.baseContext(), client, d.takodSocket(), "POST", "/v1/reconcile-service", request, timeout); err != nil {
 		return fmt.Errorf("takod service reconciliation failed: %w", err)
@@ -2059,7 +2113,7 @@ func reconcileServiceRequestTimeout(request takod.ReconcileServiceRequest) time.
 	return calculated
 }
 
-func (d *Deployer) removeServiceViaTakod(client *ssh.Client, request takod.RemoveServiceRequest) error {
+func (d *Deployer) removeServiceViaTakod(client any, request takod.RemoveServiceRequest) error {
 	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/remove-service", request); err != nil {
 		return fmt.Errorf("takod service removal failed: %w", err)
 	}

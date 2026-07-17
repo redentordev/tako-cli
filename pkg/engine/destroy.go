@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
@@ -261,6 +262,13 @@ func (s *DestroySession) Apply(ctx context.Context) (*DestroyResult, error) {
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		result.Error = err.Error()
+		result.Duration = time.Since(startTime).Seconds()
+		return result, err
+	}
+	defer runtimeFactory.CloseIdleConnections()
 	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, sshPool, cfg, envName, s.serverNames, "destroy")
 	if err != nil {
 		result.Error = err.Error()
@@ -288,9 +296,16 @@ func (s *DestroySession) Apply(ctx context.Context) (*DestroyResult, error) {
 		serverCfg := s.servers[serverName]
 		e.info(events.TypeLogLine, events.PhaseCleanup, fmt.Sprintf("=== Removing app runtime on node: %s (%s) ===\n", serverName, serverCfg.Host))
 		outcome := DestroyServerOutcome{Name: serverName, Host: serverCfg.Host}
-		if err := DestroySingleServerWithHooksContext(ctx, sshPool, serverName, serverCfg, cfg, envName, s.req.Verbose, s.req.PurgeAll, s.decommissionApp, s.purgeProjectRuntime); err != nil {
-			e.warn(events.PhaseCleanup, fmt.Sprintf("⚠️  Errors removing app runtime on %s: %v\n", serverName, err))
-			outcome.Error = err.Error()
+		client, _, connectErr := runtimeFactory.Client(ctx, serverName)
+		var destroyErr error
+		if connectErr != nil {
+			destroyErr = &ConnectivityError{Server: serverName, Err: fmt.Errorf("failed to connect to %s: %w", serverName, connectErr)}
+		} else if destroyErr = s.decommissionApp(ctx, client, cfg, envName, s.req.Verbose); destroyErr == nil && s.req.PurgeAll {
+			destroyErr = s.purgeProjectRuntime(ctx, client, cfg, envName, s.req.Verbose)
+		}
+		if destroyErr != nil {
+			e.warn(events.PhaseCleanup, fmt.Sprintf("⚠️  Errors removing app runtime on %s: %v\n", serverName, destroyErr))
+			outcome.Error = destroyErr.Error()
 			totalErrors++
 		} else {
 			e.info(events.TypeCleanupCompleted, events.PhaseCleanup, fmt.Sprintf("✓ App runtime removed on %s\n\n", serverName))
@@ -399,7 +414,7 @@ func DestroySingleServerWithHooksContext(ctx context.Context, pool SSHClientProv
 // decommissionApp stops and removes the deployed application. Progress that
 // the CLI printed only with --verbose is emitted as debug events; renderers
 // filter by level.
-func (s *DestroySession) decommissionApp(ctx context.Context, client *ssh.Client, cfg *config.Config, envName string, _ bool) error {
+func (s *DestroySession) decommissionApp(ctx context.Context, client any, cfg *config.Config, envName string, _ bool) error {
 	e := s.engine
 	e.debug(events.TypeLogLine, events.PhaseCleanup, "  → Removing takod-managed services...\n")
 	services, err := cfg.GetServices(envName)
@@ -419,7 +434,7 @@ func (s *DestroySession) decommissionApp(ctx context.Context, client *ssh.Client
 
 // purgeProjectRuntime removes app-owned leftovers without touching shared
 // takod or tako-proxy runtime used by other projects on the same node.
-func (s *DestroySession) purgeProjectRuntime(ctx context.Context, client *ssh.Client, cfg *config.Config, envName string, _ bool) error {
+func (s *DestroySession) purgeProjectRuntime(ctx context.Context, client any, cfg *config.Config, envName string, _ bool) error {
 	e := s.engine
 	e.debug(events.TypeLogLine, events.PhaseCleanup, "  → Pruning app-owned leftovers...\n")
 	response, err := CleanupViaTakodContext(ctx, client, cfg, takod.CleanupRequest{

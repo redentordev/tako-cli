@@ -157,14 +157,13 @@ func (e *Engine) JobRuns(ctx context.Context, req JobRunsRequest) (*JobRunsResul
 
 	var runs []JobRunInfo
 	for _, serverName := range serverNames {
-		server := cfg.Servers[serverName]
-		client, err := connectTakodStreamNodeContext(ctx, server)
+		client, cleanup, err := connectRuntimeNode(ctx, cfg, serverName)
 		if err != nil {
 			return nil, &ConnectivityError{Err: fmt.Errorf("failed to connect to node %s: %w", serverName, err)}
 		}
 		endpoint := fmt.Sprintf("/v1/jobs/runs?project=%s&environment=%s&job=%s", cfg.Project.Name, envName, job)
 		output, err := takodclient.RequestJSON(client, TakodSocketFromConfig(cfg), "GET", endpoint, nil)
-		_ = client.Close()
+		cleanup()
 		if err != nil {
 			return nil, fmt.Errorf("failed to query job runs on node %s: %w", serverName, err)
 		}
@@ -209,7 +208,6 @@ func (e *Engine) TriggerJob(ctx context.Context, req JobTriggerRequest) (*JobTri
 	if err != nil {
 		return nil, err
 	}
-	serverCfg := cfg.Servers[serverName]
 
 	timeoutSeconds := status.TimeoutSeconds
 	if timeoutSeconds <= 0 {
@@ -236,11 +234,11 @@ func (e *Engine) TriggerJob(ctx context.Context, req JobTriggerRequest) (*JobTri
 		return nil, fmt.Errorf("failed to encode trigger request: %w", err)
 	}
 
-	client, err := connectTakodStreamNodeContext(ctx, serverCfg)
+	client, cleanup, err := connectRuntimeNode(ctx, cfg, serverName)
 	if err != nil {
 		return nil, &ConnectivityError{Err: fmt.Errorf("failed to connect to node %s: %w", serverName, err)}
 	}
-	defer client.Close()
+	defer cleanup()
 
 	e.emit(events.Event{
 		Type:    events.TypeJobTriggerStarted,
@@ -372,12 +370,11 @@ func (e *Engine) requireJobService(cfg *config.Config, envName string, job strin
 
 // queryNodeJobs reads one node's scheduled jobs through takod.
 func (e *Engine) queryNodeJobs(ctx context.Context, cfg *config.Config, envName string, serverName string) ([]takod.JobStatus, error) {
-	server := cfg.Servers[serverName]
-	client, err := connectTakodStreamNodeContext(ctx, server)
+	client, cleanup, err := connectRuntimeNode(ctx, cfg, serverName)
 	if err != nil {
 		return nil, &ConnectivityError{Err: fmt.Errorf("failed to connect to node %s: %w", serverName, err)}
 	}
-	defer client.Close()
+	defer cleanup()
 	endpoint := fmt.Sprintf("/v1/jobs?project=%s&environment=%s", cfg.Project.Name, envName)
 	output, err := takodclient.RequestJSON(client, TakodSocketFromConfig(cfg), "GET", endpoint, nil)
 	if err != nil {

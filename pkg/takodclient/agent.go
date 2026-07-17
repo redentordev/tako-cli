@@ -108,11 +108,32 @@ func NewLocalAgentClient(socket string) (*AgentClient, error) {
 	return NewAgentClient(LocalUnixSocketDialer{}, socket)
 }
 
+// NewLocalAgentClientForUID authenticates a non-root protected worker ingress
+// by its persisted operating-system UID.
+func NewLocalAgentClientForUID(socket string, expectedUID uint32) (*AgentClient, error) {
+	if expectedUID == 0 {
+		return nil, fmt.Errorf("protected worker UID must be non-root")
+	}
+	return NewAgentClient(LocalUnixSocketDialer{ExpectedUID: expectedUID}, socket)
+}
+
 // CloseIdleConnections releases reusable local or SSH streamlocal channels.
 func (c *AgentClient) CloseIdleConnections() {
 	if c != nil && c.transport != nil {
 		c.transport.CloseIdleConnections()
 	}
+}
+
+// DialUnixSocket exposes the client's already-authorized transport for
+// protocol upgrades. The requested path is intentionally ignored: transport
+// selection has already bound this client to either the protected worker
+// ingress or the legacy takod socket, and a caller must not be able to bypass
+// that decision by supplying a different path.
+func (c *AgentClient) DialUnixSocket(ctx context.Context, _ string) (net.Conn, error) {
+	if c == nil || c.dialer == nil || strings.TrimSpace(c.socket) == "" {
+		return nil, fmt.Errorf("takod agent client is not initialized")
+	}
+	return c.dialer.DialUnixSocket(ctx, c.socket)
 }
 
 // RequestJSON performs a structured takod request and returns its response

@@ -45,6 +45,58 @@ environments:
 tako setup && tako deploy
 ```
 
+## First PaaS Node With Local Deployments
+
+Install Tako on the server that will host the control plane and most initial
+workloads, then initialize the protected single-node foundation:
+
+```bash
+sudo tako platform init --node node-1
+```
+
+The command prints the immutable `clusterId`, `nodeId`, and numeric
+`workerUid` to place in the server entry:
+
+```yaml
+servers:
+  node-1:
+    host: ${TAKO_NODE_1_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+    transport: auto
+    clusterId: 11111111-1111-4111-8111-111111111111
+    nodeId: 22222222-2222-4222-8222-222222222222
+    workerUid: 997
+```
+
+`transport: auto` makes one safe decision before connecting: when Tako is
+running on the exact enrolled node, it verifies the local Unix-socket peer and
+immutable installation identity and uses the protected platform-worker
+ingress. Everywhere else it uses SSH and verifies the remote node identity.
+An SSH failure never causes a retry against the local machine. Omit
+`transport` to preserve legacy SSH behavior; use `transport: local` only when
+the command must fail instead of falling back to SSH.
+
+Routine deploy, status, monitor, logs, exec, scale, rollback, state,
+environment-bundle, backup, and cleanup traffic uses the structured node-agent
+surface. Privileged setup, join, repair, and server upgrades remain explicit
+SSH operations. Local image builds and reuse are accepted only after exact
+image digest, Docker platform, and freshly attested daemon identity checks; a
+matching mutable tag alone is not trusted.
+
+Platform initialization also creates a root-only cluster inventory and an
+allocation-signing key for node 1. Enrolled proxy nodes reject remote raw-IP
+upstreams unless the destination node and mesh IP are in that inventory and
+the exact service/revision/slot/port allocation carries the destination
+node's valid signature and monotonic allocation generation. Phase 3 enrolled
+nodes accept local runtime-alias destinations only; remote mesh destinations
+remain fail-closed until the inventory lifecycle can distribute authoritative
+active generations and revocations in Phase 4. Preflight rejects such a plan
+before workload mutation. On enrollment/startup, legacy or remote route
+manifests are quarantined and a running proxy is stopped before the node is
+reported ready. Additional inventory members are added through the
+node-enrollment lifecycle, never by an application route manifest.
+
 ## Full-Stack Application
 
 ```yaml
@@ -644,14 +696,15 @@ For stronger developer or CI machines, use local build mode:
 ```yaml
 deployment:
   build:
-    strategy: auto # try local buildx/unregistry, fall back to remote takod build
+    strategy: auto # try local buildx, fall back to remote takod build
 ```
 
 `local` builds once per target architecture with `docker buildx build
---platform linux/amd64|linux/arm64 --load` and pushes the image to each
-assigned server with psviderski/unregistry's `docker pussh`. `auto` uses the
-same path when available and falls back to `remote` when Docker, buildx,
-docker-pussh, SSH key/agent auth, or remote Docker permissions are not ready.
+--platform linux/amd64|linux/arm64 --load`, selects the resulting immutable
+image ID, and streams that archive to each assigned node through the same
+structured local-or-SSH agent transport used by deployment. It does not open
+a separate shell or require `docker pussh`. `auto` uses the same path when
+local Docker and buildx are available and otherwise falls back to `remote`.
 
 Use `remote` when the server is intentionally the build host, `local` when CI
 or a developer workstation should build and push images to the VPS, and `auto`
@@ -861,14 +914,9 @@ tako deploy --build-strategy local
 tako deploy --build-strategy auto
 ```
 
-Install docker-pussh on the client machine:
-
-```bash
-brew install psviderski/tap/docker-pussh
-mkdir -p ~/.docker/cli-plugins
-ln -sf "$(brew --prefix)/bin/docker-pussh" ~/.docker/cli-plugins/docker-pussh
-docker pussh --help
-```
+Local build mode needs only Docker with buildx on the client. Image handoff uses
+Tako's structured node transport and does not require an additional Docker CLI
+plugin.
 
 ## Container Resource Limits
 

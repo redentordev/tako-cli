@@ -25,17 +25,41 @@ func TestAllocatePortPersistsAndReusesAllocation(t *testing.T) {
 	if first.Key != "mesh-upstream/demo/production/web/1" {
 		t.Fatalf("allocation key = %q, want legacy no-revision key", first.Key)
 	}
+	if first.Generation == 0 || first.IssuedAt.IsZero() {
+		t.Fatalf("allocation omitted generation evidence: %#v", first)
+	}
 
 	second, err := AllocatePort(context.Background(), dataDir, req)
 	if err != nil {
 		t.Fatalf("second AllocatePort returned error: %v", err)
 	}
-	if second.HostPort != first.HostPort || second.Key != first.Key {
+	if second.HostPort != first.HostPort || second.Key != first.Key || second.Generation != first.Generation {
 		t.Fatalf("allocation was not reused: first=%#v second=%#v", first, second)
 	}
 
 	if _, err := os.Stat(portAllocationRegistryPath(dataDir)); err != nil {
 		t.Fatalf("expected registry file to exist: %v", err)
+	}
+}
+
+func TestReplacedAllocationAdvancesGeneration(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	dataDir := t.TempDir()
+	req := testPortAllocationRequest()
+	first, err := AllocatePort(context.Background(), dataDir, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContainerPort++
+	second, err := AllocatePort(context.Background(), dataDir, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Generation <= first.Generation {
+		t.Fatalf("replaced allocation did not advance generation: first=%#v second=%#v", first, second)
 	}
 }
 

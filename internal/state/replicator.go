@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/stateclient"
@@ -25,6 +26,9 @@ type StateReplicator struct {
 	projectName string
 	socket      string
 	verbose     bool
+	runtime     *nodeclient.Factory
+	runtimeOnce sync.Once
+	runtimeErr  error
 
 	replicateNode func(context.Context, string, config.ServerConfig, *DeploymentState, *DeploymentHistory) error
 }
@@ -67,6 +71,11 @@ func (r *StateReplicator) ReplicateDeploymentContext(ctx context.Context, deploy
 	parentCtx := ctx
 	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer cancel()
+	defer func() {
+		if r.runtime != nil {
+			r.runtime.CloseIdleConnections()
+		}
+	}()
 
 	replicateNode := r.replicateToNode
 	if r.replicateNode != nil {
@@ -127,11 +136,11 @@ func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string
 		return ctx.Err()
 	default:
 	}
-	if r.sshPool == nil {
-		return fmt.Errorf("ssh pool is nil")
+	factory, err := r.runtimeClientFactory()
+	if err != nil {
+		return err
 	}
-
-	client, err := r.sshPool.GetOrCreateWithAuth(server.Host, server.Port, server.User, server.SSHKey, server.Password)
+	client, _, err := factory.Client(ctx, serverName)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
@@ -154,6 +163,16 @@ func (r *StateReplicator) replicateToNode(ctx context.Context, serverName string
 		fmt.Printf("  ✓ State replicated to node %s\n", serverName)
 	}
 	return nil
+}
+
+func (r *StateReplicator) runtimeClientFactory() (*nodeclient.Factory, error) {
+	r.runtimeOnce.Do(func() {
+		r.runtime, r.runtimeErr = nodeclient.NewFactory(r.config, r.sshPool, r.socket)
+	})
+	if r.runtimeErr != nil {
+		return nil, r.runtimeErr
+	}
+	return r.runtime, nil
 }
 
 func (r *StateReplicator) prepareReplicaDocuments(serverHost string, deployment *takoapi.DeploymentStateDocument, history *takoapi.DeploymentHistoryDocument) {

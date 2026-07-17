@@ -1,14 +1,16 @@
-// Package unregistry builds local images and transfers them to remote Docker
-// hosts through psviderski/unregistry's docker-pussh plugin.
+// Package unregistry builds and inspects local images before the deployer
+// transfers their immutable archives through Tako's structured runtime API.
 package unregistry
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -112,12 +114,22 @@ func redactedCommandArgs(args []string, sensitiveIndexes []int) []string {
 	return out
 }
 
-// Client wraps Docker buildx and docker-pussh.
+// Client wraps local Docker buildx, inspection, and immutable export.
 type Client struct {
 	Runner Runner
 	Stdout io.Writer
 	Stderr io.Writer
 }
+
+type ImageDescriptor struct {
+	ImageID      string
+	OS           string
+	Architecture string
+	Variant      string
+	DaemonID     string
+}
+
+var sha256ImageIDPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func (c Client) runner() Runner {
 	if c.Runner != nil {
@@ -126,17 +138,64 @@ func (c Client) runner() Runner {
 	return ExecRunner{Stdout: c.Stdout, Stderr: c.Stderr}
 }
 
-// CheckAvailable verifies local Docker, buildx, and docker-pussh are usable.
+// CheckAvailable verifies local Docker and buildx are usable.
 func (c Client) CheckAvailable(ctx context.Context) error {
 	checks := []CommandSpec{
 		{Name: "docker", Args: []string{"version"}},
 		{Name: "docker", Args: []string{"buildx", "version"}},
-		{Name: "docker", Args: []string{"pussh", "--help"}},
 	}
 	for _, check := range checks {
 		if _, err := c.runner().Run(ctx, check); err != nil {
-			return fmt.Errorf("local unregistry build prerequisites are not ready: %w", err)
+			return fmt.Errorf("local image build prerequisites are not ready: %w", err)
 		}
+	}
+	return nil
+}
+
+func (c Client) Inspect(ctx context.Context, image string) (ImageDescriptor, error) {
+	output, err := c.runner().Run(ctx, CommandSpec{Name: "docker", Args: []string{"image", "inspect", "--format", `{{json .}}`, image}})
+	if err != nil {
+		return ImageDescriptor{}, fmt.Errorf("inspect local image: %w", err)
+	}
+	var inspected struct {
+		ID           string `json:"Id"`
+		OS           string `json:"Os"`
+		Architecture string `json:"Architecture"`
+		Variant      string `json:"Variant"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &inspected); err != nil {
+		return ImageDescriptor{}, fmt.Errorf("decode local image descriptor: %w", err)
+	}
+	daemonOutput, err := c.runner().Run(ctx, CommandSpec{Name: "docker", Args: []string{"info", "--format", `{{json .ID}}`}})
+	if err != nil {
+		return ImageDescriptor{}, fmt.Errorf("read local Docker daemon identity: %w", err)
+	}
+	var daemonID string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(daemonOutput)), &daemonID); err != nil {
+		return ImageDescriptor{}, fmt.Errorf("decode local Docker daemon identity: %w", err)
+	}
+	descriptor := ImageDescriptor{
+		ImageID: strings.ToLower(strings.TrimSpace(inspected.ID)), OS: strings.ToLower(strings.TrimSpace(inspected.OS)),
+		Architecture: strings.ToLower(strings.TrimSpace(inspected.Architecture)), Variant: strings.ToLower(strings.TrimSpace(inspected.Variant)), DaemonID: strings.TrimSpace(daemonID),
+	}
+	if !sha256ImageIDPattern.MatchString(descriptor.ImageID) || descriptor.OS == "" || descriptor.Architecture == "" || descriptor.DaemonID == "" {
+		return ImageDescriptor{}, fmt.Errorf("local image descriptor omitted immutable digest, platform, or daemon identity")
+	}
+	return descriptor, nil
+}
+
+// Export writes an immutable image ID to a Docker archive. Saving by ID keeps
+// a concurrent tag change from selecting different bytes.
+func (c Client) Export(ctx context.Context, imageID string, output io.Writer) error {
+	if !sha256ImageIDPattern.MatchString(strings.ToLower(strings.TrimSpace(imageID))) {
+		return fmt.Errorf("immutable image ID is required for export")
+	}
+	cmd := exec.CommandContext(ctx, "docker", "save", imageID)
+	cmd.Stdout = output
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("export local image %s: %w: %s", imageID, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
@@ -194,42 +253,6 @@ func (c Client) Build(ctx context.Context, req BuildRequest) error {
 		SensitiveArgIndexes: sensitiveArgIndexes,
 	}); err != nil {
 		return fmt.Errorf("failed to build local image with buildx: %w", err)
-	}
-	return nil
-}
-
-// PushRequest describes a docker-pussh transfer to one remote Docker host.
-type PushRequest struct {
-	Image      string
-	Target     string
-	SSHKey     string
-	Platform   string
-	NoHostKeys bool
-}
-
-// Push transfers an image to a remote Docker host using docker-pussh.
-func (c Client) Push(ctx context.Context, req PushRequest) error {
-	if strings.TrimSpace(req.Image) == "" {
-		return fmt.Errorf("image is required")
-	}
-	if strings.TrimSpace(req.Target) == "" {
-		return fmt.Errorf("target is required")
-	}
-
-	args := []string{"pussh"}
-	if strings.TrimSpace(req.Platform) != "" {
-		args = append(args, "--platform", req.Platform)
-	}
-	if req.NoHostKeys {
-		args = append(args, "--no-host-key-check")
-	}
-	args = append(args, req.Image, req.Target)
-	if strings.TrimSpace(req.SSHKey) != "" {
-		args = append(args, "-i", req.SSHKey)
-	}
-
-	if _, err := c.runner().Run(ctx, CommandSpec{Name: "docker", Args: args}); err != nil {
-		return fmt.Errorf("failed to push image with docker-pussh: %w", err)
 	}
 	return nil
 }

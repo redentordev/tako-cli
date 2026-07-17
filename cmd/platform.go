@@ -117,6 +117,9 @@ func runPlatformInit(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(humanOut(), "Tako platform %s on %s\n", verb, result.State.NodeName)
 	fmt.Fprintf(humanOut(), "Cluster: %s\nNode: %s\nRoles: %v\nController: %s\n", result.State.ClusterID, result.State.NodeID, result.State.EnrollmentRoles, result.State.ControllerMode)
+	fmt.Fprintf(humanOut(), "\nAdd this enrolled node to tako.yaml (replace host/user as needed):\n")
+	fmt.Fprintf(humanOut(), "servers:\n  %s:\n    host: <NODE_IP_OR_HOSTNAME>\n    user: root\n    transport: auto\n    clusterId: %s\n    nodeId: %s\n    workerUid: %d\n", result.State.NodeName, result.State.ClusterID, result.State.NodeID, result.State.WorkerUID)
+	fmt.Fprintf(humanOut(), "\ntransport: auto uses the protected local worker ingress only when this process is running on that exact enrolled node; otherwise it uses identity-verified SSH.\n")
 	return nil
 }
 

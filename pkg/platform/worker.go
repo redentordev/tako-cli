@@ -75,6 +75,17 @@ func (w *Worker) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	ingress, err := newWorkerIngress(document.State.WorkerSocketPath, document.State.SocketGroupGID, store, w.agent, admission, w.stateDir, document.State.NodeID, w.now)
+	if err != nil {
+		return err
+	}
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = ingress.Shutdown(shutdownCtx)
+	}()
 	journal, _ := NewJournal(filepath.Join(w.stateDir, DefaultJournalName))
 	operationID := fmt.Sprintf("worker-start-%d", w.now().UnixNano())
 	if err := journal.Append(OperationRecord{
@@ -84,5 +95,16 @@ func (w *Worker) Run(ctx context.Context) error {
 		return err
 	}
 	log.Printf("platform audit: operation=%s phase=identity-attestation status=completed node=%s", operationID, document.State.NodeID)
-	return engine.Run(ctx)
+	errCh := make(chan error, 2)
+	go func() { errCh <- ingress.Serve() }()
+	go func() { errCh <- engine.Run(runCtx) }()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case runErr := <-errCh:
+		if runErr == nil || runErr == context.Canceled {
+			return runErr
+		}
+		return runErr
+	}
 }

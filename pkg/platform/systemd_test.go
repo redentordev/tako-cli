@@ -8,7 +8,7 @@ import (
 func TestPlatformUnitsCarryAdmissionAndResourcePolicy(t *testing.T) {
 	policy := DefaultResourcePolicy()
 	takodUnit, err := RenderTakodUnit(
-		"/usr/local/bin/tako", DefaultSocket, DefaultStateDir, "node-1", "/etc/tako/identity.json", "/srv/docker", policy,
+		"/usr/local/bin/tako", DefaultSocket, DefaultStateDir, "node-1", "/etc/tako/identity.json", "/srv/docker", DefaultWorkerGroup, policy,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -19,7 +19,7 @@ func TestPlatformUnitsCarryAdmissionAndResourcePolicy(t *testing.T) {
 		"MemoryMin=536870912",
 		"OOMScoreAdjust=-500",
 		"RuntimeDirectoryMode=0750",
-		"Group=tako",
+		"Group=tako-platform",
 		"/etc/tako/proxy",
 		"/var/log/tako/proxy",
 		"--docker-data-root /srv/docker",
@@ -28,12 +28,15 @@ func TestPlatformUnitsCarryAdmissionAndResourcePolicy(t *testing.T) {
 			t.Fatalf("takod unit missing %q:\n%s", required, takodUnit)
 		}
 	}
+	if strings.Contains(takodUnit, "\nGroup=tako\n") {
+		t.Fatal("takod unit grants the legacy operator group direct socket access")
+	}
 
 	workerUnit, err := RenderWorkerUnit(BootstrapConfig{NodeName: "node-1", BinaryPath: "/usr/local/bin/tako", Policy: policy})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"MemoryLow=536870912", "TasksMax=256", "SupplementaryGroups=tako"} {
+	for _, required := range []string{"MemoryLow=536870912", "TasksMax=256", "SupplementaryGroups=tako", "RuntimeDirectory=tako-platform", "ReadWritePaths=/var/lib/tako/platform /run/tako-platform"} {
 		if !strings.Contains(workerUnit, required) {
 			t.Fatalf("worker unit missing %q:\n%s", required, workerUnit)
 		}
@@ -43,7 +46,7 @@ func TestPlatformUnitsCarryAdmissionAndResourcePolicy(t *testing.T) {
 func TestRenderTakodUnitRejectsSystemdArgumentInjection(t *testing.T) {
 	for _, nodeName := range []string{"node one", "node%h", "node\nExecStart=/bin/false"} {
 		if _, err := RenderTakodUnit(
-			"/usr/local/bin/tako", DefaultSocket, DefaultStateDir, nodeName, "/etc/tako/identity.json", "/var/lib/docker", DefaultResourcePolicy(),
+			"/usr/local/bin/tako", DefaultSocket, DefaultStateDir, nodeName, "/etc/tako/identity.json", "/var/lib/docker", DefaultWorkerGroup, DefaultResourcePolicy(),
 		); err == nil {
 			t.Fatalf("node name %q was accepted", nodeName)
 		}

@@ -12,6 +12,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/notification"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -149,22 +150,25 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	if !exists {
 		return nil, invalidRequestf("server %s not found in configuration", sourceServerName)
 	}
-	sourceClient, err := sshPool.GetOrCreateWithAuth(sourceServer.Host, sourceServer.Port, sourceServer.User, sourceServer.SSHKey, sourceServer.Password)
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, TakodSocketFromConfig(cfg))
+	if err != nil {
+		return nil, err
+	}
+	defer runtimeFactory.CloseIdleConnections()
+	sourceClient, _, err := runtimeFactory.Client(ctx, sourceServerName)
 	if err != nil {
 		return nil, &ConnectivityError{Server: sourceServerName, Err: fmt.Errorf("failed to connect to node %s: %w", sourceServerName, err)}
 	}
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, req.Verbose)
+	deploy.SetRuntimeFactory(runtimeFactory)
 	deploy.SetBaseContext(ctx)
 	deploy.SetEventSink(e.stream)
 	deploy.SetCLIVersion(e.cliVersion)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
 	}
-	if err := deploy.SetupTakodRuntime(); err != nil {
-		return nil, fmt.Errorf("failed to setup takod runtime: %w", err)
-	}
-	if err := deploy.PreflightTakodProxyCapabilities(services); err != nil {
+	if err := preflightAndSetupTakodRuntime(deploy, services); err != nil {
 		return nil, err
 	}
 	startTime := time.Now()
@@ -375,7 +379,7 @@ func BuildScaleDeploymentState(
 func (e *Engine) recordScaleDeploymentState(
 	ctx context.Context,
 	sshPool *ssh.Pool,
-	sourceClient *ssh.Client,
+	sourceClient any,
 	cfg *config.Config,
 	envName string,
 	serverNames []string,

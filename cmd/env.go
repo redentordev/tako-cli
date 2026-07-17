@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/crypto"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
@@ -143,6 +145,11 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 	}
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return err
+	}
+	defer runtimeFactory.CloseIdleConnections()
 	leaseSet, err := acquireRemoteOperationLeasesFunc(sshPool, cfg, envName, serverNames, "env-push")
 	if err != nil {
 		return err
@@ -158,7 +165,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 		Content:     base64.StdEncoding.EncodeToString(encrypted),
 	}
 
-	uploaded, nodeErrors := uploadEnvBundleToMesh(sshPool, cfg, serverNames, request)
+	uploaded, nodeErrors := uploadEnvBundleToMesh(runtimeFactory, cfg, serverNames, request)
 	if uploaded == 0 {
 		return fmt.Errorf("failed to upload environment bundle to any node: %s", strings.Join(nodeErrors, "; "))
 	}
@@ -185,8 +192,13 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
+	runtimeFactory, err := nodeclient.NewFactory(cfg, sshPool, takodSocketFromConfig(cfg))
+	if err != nil {
+		return err
+	}
+	defer runtimeFactory.CloseIdleConnections()
 
-	response, source, err := downloadEnvBundleFromMesh(sshPool, cfg, envName)
+	response, source, err := downloadEnvBundleFromMesh(runtimeFactory, cfg, envName)
 	if err != nil {
 		return err
 	}
@@ -478,11 +490,11 @@ func supportedEnvBundleFiles(bundle map[string]string, extraAllowedPaths ...map[
 	return allowed, allowedPaths, skippedPaths
 }
 
-func uploadEnvBundleToServer(pool *ssh.Pool, cfg *config.Config, serverName string, serverCfg config.ServerConfig, request takod.EnvBundleRequest) error {
-	if pool == nil {
-		return fmt.Errorf("ssh pool is not initialized")
+func uploadEnvBundleToServer(factory *nodeclient.Factory, cfg *config.Config, serverName string, _ config.ServerConfig, request takod.EnvBundleRequest) error {
+	if factory == nil {
+		return fmt.Errorf("runtime client factory is not initialized")
 	}
-	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
+	client, _, err := factory.Client(context.Background(), serverName)
 	if err != nil {
 		return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 	}
@@ -507,7 +519,7 @@ type envBundleUploadResult struct {
 	err        error
 }
 
-func uploadEnvBundleToMesh(pool *ssh.Pool, cfg *config.Config, serverNames []string, request takod.EnvBundleRequest) (int, []string) {
+func uploadEnvBundleToMesh(factory *nodeclient.Factory, cfg *config.Config, serverNames []string, request takod.EnvBundleRequest) (int, []string) {
 	resultCh := make(chan envBundleUploadResult, len(serverNames))
 	var wg sync.WaitGroup
 
@@ -528,7 +540,7 @@ func uploadEnvBundleToMesh(pool *ssh.Pool, cfg *config.Config, serverNames []str
 			resultCh <- envBundleUploadResult{
 				index:      index,
 				serverName: serverName,
-				err:        uploadEnvBundleToServerFunc(pool, cfg, serverName, serverCfg, request),
+				err:        uploadEnvBundleToServerFunc(factory, cfg, serverName, serverCfg, request),
 			}
 		}(index, serverName, serverCfg)
 	}
@@ -566,7 +578,7 @@ type envBundleDownloadResult struct {
 	err        error
 }
 
-func downloadEnvBundleFromMesh(pool *ssh.Pool, cfg *config.Config, envName string) (*takod.EnvBundleResponse, string, error) {
+func downloadEnvBundleFromMesh(factory *nodeclient.Factory, cfg *config.Config, envName string) (*takod.EnvBundleResponse, string, error) {
 	serverNames, err := statePullServerNames(cfg, envName, "")
 	if err != nil {
 		return nil, "", err
@@ -589,7 +601,7 @@ func downloadEnvBundleFromMesh(pool *ssh.Pool, cfg *config.Config, envName strin
 		wg.Add(1)
 		go func(index int, serverName string, serverCfg config.ServerConfig) {
 			defer wg.Done()
-			response, err := downloadEnvBundleFromServerFunc(pool, cfg, envName, serverName, serverCfg)
+			response, err := downloadEnvBundleFromServerFunc(factory, cfg, envName, serverName, serverCfg)
 			resultCh <- envBundleDownloadResult{
 				index:      index,
 				serverName: serverName,
@@ -657,11 +669,11 @@ func selectFreshestEnvBundleCandidate(candidates []envBundleDownloadCandidate) e
 	return candidates[0]
 }
 
-func downloadEnvBundleFromServer(pool *ssh.Pool, cfg *config.Config, envName string, serverName string, serverCfg config.ServerConfig) (*takod.EnvBundleResponse, error) {
-	if pool == nil {
-		return nil, fmt.Errorf("ssh pool is not initialized")
+func downloadEnvBundleFromServer(factory *nodeclient.Factory, cfg *config.Config, envName string, serverName string, _ config.ServerConfig) (*takod.EnvBundleResponse, error) {
+	if factory == nil {
+		return nil, fmt.Errorf("runtime client factory is not initialized")
 	}
-	client, err := pool.GetOrCreateWithAuth(serverCfg.Host, serverCfg.Port, serverCfg.User, serverCfg.SSHKey, serverCfg.Password)
+	client, _, err := factory.Client(context.Background(), serverName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to %s: %w", serverName, err)
 	}

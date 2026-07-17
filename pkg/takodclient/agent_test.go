@@ -91,6 +91,24 @@ func TestAgentClientRequestJSONUsesStructuredUnixSocketHTTP(t *testing.T) {
 	}
 }
 
+func TestAgentClientUpgradeDialCannotBypassBoundIngressSocket(t *testing.T) {
+	dialer := &pipeUnixDialer{handler: func(*http.Request) (int, http.Header, string) {
+		return http.StatusOK, nil, `{}`
+	}}
+	client, err := NewAgentClient(dialer, DefaultWorkerSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := client.DialUnixSocket(context.Background(), DefaultSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = connection.Close()
+	if got := dialer.Paths(); len(got) != 1 || got[0] != DefaultWorkerSocket {
+		t.Fatalf("upgrade dial paths = %v, want only protected worker ingress", got)
+	}
+}
+
 func TestAgentClientDoesNotGloballyCapResponseHeaderWait(t *testing.T) {
 	dialer := &pipeUnixDialer{handler: func(*http.Request) (int, http.Header, string) {
 		time.Sleep(25 * time.Millisecond)

@@ -27,20 +27,25 @@ func (p fakeStatusProbe) RequestJSON(context.Context, string, string, any) (stri
 }
 
 func TestWorkerAttestsControllerAndWritesReadyJournal(t *testing.T) {
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("/tmp", "tako-worker-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	installation, err := nodeidentity.New("", "", "node-1", firstNodeRoles, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	document := ConfigDocument{
 		State: BootstrapState{
-			APIVersion: APIVersion, Kind: BootstrapKind, ClusterID: installation.ClusterID,
+			InventoryPath: DefaultConfigDir + "/cluster-inventory.json",
+			APIVersion:    APIVersion, Kind: BootstrapKind, ClusterID: installation.ClusterID,
 			NodeID: installation.NodeID, NodeName: installation.NodeName, ControllerMode: "single-writer",
 			EnrollmentRoles: installation.EnrollmentRoles, IdentityPath: "/etc/tako/identity.json",
-			StateDir: dir, AuditDir: dir, SocketPath: DefaultSocket,
+			StateDir: dir, AuditDir: dir, SocketPath: DefaultSocket, WorkerSocketPath: filepath.Join(dir, "worker.sock"),
 			DockerDataRoot: "/var/lib/docker",
 			SocketGroup:    DefaultSocketGroup, ServiceBinaryPath: DefaultBinaryPath,
-			WorkerUID: 997, WorkerGID: 998, SocketGroupGID: 996,
+			WorkerUID: os.Geteuid(), WorkerGID: os.Getegid(), SocketGroupGID: os.Getegid(),
 			WorkerUser: DefaultWorkerUser, WorkerGroup: DefaultWorkerGroup, InitializedAt: time.Now(),
 		},
 		Policy: DefaultResourcePolicy(),
@@ -84,12 +89,13 @@ func TestWorkerRejectsWrongLocalIdentity(t *testing.T) {
 	wrong, _ := nodeidentity.New("", "", "node-2", []string{nodeidentity.RoleWorker}, time.Now())
 	document := ConfigDocument{
 		State: BootstrapState{
-			APIVersion: APIVersion, Kind: BootstrapKind, ClusterID: expected.ClusterID, NodeID: expected.NodeID,
+			InventoryPath: DefaultConfigDir + "/cluster-inventory.json",
+			APIVersion:    APIVersion, Kind: BootstrapKind, ClusterID: expected.ClusterID, NodeID: expected.NodeID,
 			NodeName: expected.NodeName, ControllerMode: "single-writer", EnrollmentRoles: expected.EnrollmentRoles,
-			IdentityPath: "/etc/tako/identity.json", StateDir: dir, AuditDir: dir, SocketPath: DefaultSocket,
+			IdentityPath: "/etc/tako/identity.json", StateDir: dir, AuditDir: dir, SocketPath: DefaultSocket, WorkerSocketPath: filepath.Join(dir, "worker.sock"),
 			DockerDataRoot: "/var/lib/docker",
 			SocketGroup:    DefaultSocketGroup, ServiceBinaryPath: DefaultBinaryPath,
-			WorkerUID: 997, WorkerGID: 998, SocketGroupGID: 996,
+			WorkerUID: os.Geteuid(), WorkerGID: os.Getegid(), SocketGroupGID: os.Getegid(),
 			WorkerUser: DefaultWorkerUser, WorkerGroup: DefaultWorkerGroup, InitializedAt: time.Now(),
 		}, Policy: DefaultResourcePolicy(),
 	}
@@ -108,12 +114,13 @@ func TestWorkerRejectsRuntimePathMismatch(t *testing.T) {
 	dir := t.TempDir()
 	installation, _ := nodeidentity.New("", "", "node-1", firstNodeRoles, time.Now())
 	document := ConfigDocument{State: BootstrapState{
-		APIVersion: APIVersion, Kind: BootstrapKind, ClusterID: installation.ClusterID, NodeID: installation.NodeID,
+		InventoryPath: DefaultConfigDir + "/cluster-inventory.json",
+		APIVersion:    APIVersion, Kind: BootstrapKind, ClusterID: installation.ClusterID, NodeID: installation.NodeID,
 		NodeName: installation.NodeName, ControllerMode: "single-writer", EnrollmentRoles: installation.EnrollmentRoles,
-		IdentityPath: "/etc/tako/identity.json", StateDir: dir, AuditDir: dir, SocketPath: DefaultSocket,
+		IdentityPath: "/etc/tako/identity.json", StateDir: dir, AuditDir: dir, SocketPath: DefaultSocket, WorkerSocketPath: filepath.Join(dir, "worker.sock"),
 		DockerDataRoot: "/var/lib/docker",
 		SocketGroup:    DefaultSocketGroup, ServiceBinaryPath: DefaultBinaryPath,
-		WorkerUID: 997, WorkerGID: 998, SocketGroupGID: 996,
+		WorkerUID: os.Geteuid(), WorkerGID: os.Getegid(), SocketGroupGID: os.Getegid(),
 		WorkerUser: DefaultWorkerUser, WorkerGroup: DefaultWorkerGroup, InitializedAt: time.Now(),
 	}, Policy: DefaultResourcePolicy()}
 	data, _ := json.Marshal(document)
