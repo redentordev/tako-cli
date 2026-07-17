@@ -1,8 +1,8 @@
 # Goal: Local-First PaaS Foundation
 
 Date: 2026-07-16
-Status: in progress — Phases 1 through 4 are complete and adversarially
-reviewed; Phase 5 is next.
+Status: in progress — Phases 1 through 5 are complete and adversarially
+reviewed; Phase 6 is next.
 
 ## Objective
 
@@ -185,6 +185,17 @@ make remote allocation proofs current rather than merely authentic.
 - Refuse removal of the final controller.
 
 ### Phase 5 — Sticky scheduling and explicit movement
+
+Progress: complete. Both mandatory reviewers closed their architecture,
+correctness, security, operations, retry, and failure-mode findings after
+durable slot-to-node assignments, caller-neutral stable default placement,
+legacy actual-state adoption, schedulable controller state-source selection,
+write-ahead placement intent, lifecycle-aware all-service preflight, and
+crash-safe `removalPending` retention across targeted and non-removal workflows
+were added. Cordon, drain, and rebalance produce digest-bound review artifacts;
+global drain and every persistent or volume-backed move fail closed. Applying
+a movement plan remains intentionally gated on the controller fencing and
+idempotent operation authority introduced in Phase 6.
 
 - Persist replica-to-node assignments in desired state.
 - Keep the initial singleton on the configured default worker.

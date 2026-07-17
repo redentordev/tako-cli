@@ -266,6 +266,7 @@ The most-used commands. Every command has a man page (`man tako-deploy`) and
 | `tako metrics` / `tako monitor` | System metrics and continuous service monitoring |
 | `tako history` | View deployment history |
 | `tako start` / `tako stop` / `tako scale` | Service control |
+| `tako placement plan cordon\|drain\|rebalance` | Create digest-bound, reviewable replica placement plans |
 | `tako backup` | Volume backup, list, restore, and retention cleanup |
 | `tako drift` | Detect config drift between desired state and running services |
 | `tako secrets` | Init, set, list, delete, and validate secrets |

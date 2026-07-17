@@ -300,6 +300,16 @@ same-holder response is surfaced as `state.ErrLeaseRenewalUnsupported`; the
 engine permits a bounded in-place agent-upgrade window but still fails closed
 before the last confirmed expiry.
 
+### `pkg/scheduler`
+
+`pkg/scheduler` contains the transport-independent sticky placement contract.
+`PlanSticky` preserves one-based replica slots and assigns only new scale-out
+slots; `PlanGlobal` preserves existing per-node slots across membership order
+changes. `PlanMovement` produces digest-bound drain/rebalance proposals tied to
+an input desired revision, and `ValidateMovementPlan` verifies the reviewed
+artifact. Persistent or volume-backed moves are represented as blockers and
+never receive an automatic destination.
+
 ### `pkg/deployplan`
 
 `pkg/deployplan` contains CLI-independent deploy planning helpers, including:

@@ -61,9 +61,11 @@ func TestDesiredStateDocumentJSONIdentityShape(t *testing.T) {
 		Type:           "web",
 		Image:          "ghcr.io/acme/web:1",
 		Replicas:       2,
+		Assignments:    []ReplicaAssignmentDocument{{Slot: 1, Node: "node-a", NodeID: "id-a"}},
 		Placement:      json.RawMessage(`{"node":"node-a"}`),
 		HealthCheck:    json.RawMessage(`{"path":"/health"}`),
 		DeployStrategy: "rolling",
+		RemovalPending: true,
 	}
 
 	got := mustMarshalMap(t, doc)
@@ -87,6 +89,17 @@ func TestDesiredStateDocumentJSONIdentityShape(t *testing.T) {
 	}
 	if web["workloadKind"] != "run" {
 		t.Fatalf("web workload kind mismatch: %#v", web)
+	}
+	if web["removalPending"] != true {
+		t.Fatalf("web removal-pending marker mismatch: %#v", web)
+	}
+	assignments, ok := web["assignments"].([]any)
+	if !ok || len(assignments) != 1 {
+		t.Fatalf("web assignments shape = %#v", web["assignments"])
+	}
+	assignment, ok := assignments[0].(map[string]any)
+	if !ok || assignment["node"] != "node-a" || assignment["nodeId"] != "id-a" {
+		t.Fatalf("web assignment identity mismatch: %#v", assignments[0])
 	}
 	files, ok := web["files"].([]any)
 	if !ok || len(files) != 1 || files[0].(map[string]any)["target"] != "/etc/demo" {

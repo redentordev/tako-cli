@@ -343,6 +343,46 @@ replication system such as a managed database, object storage, or
 purpose-built clustered datastore. Tako does not provision shared filesystem
 storage.
 
+### Sticky assignments and movement review
+
+Successful deploy, scale, promote, rollback, and direct-image operations save
+each replica slot's logical node plus immutable node ID in desired state. A new
+node does not trigger rebalance, and scale-out preserves every healthy existing
+slot. If a saved node ID disappears or changes, Tako stops before mutation.
+Tako replicates the resolved desired assignments before workload mutation; an
+interrupted or partially failed operation leaves visible desired/actual drift
+and retries reuse the same slots.
+Before removing a stateless service or job, Tako persists its prior safe
+configuration, image, and assignment with `removalPending: true`. The marker
+and binding survive an interrupted cleanup; the service disappears from
+desired state only after cleanup succeeds. A removal whose prior configuration
+cannot be recovered fails closed instead of discarding placement authority.
+Targeted deploy, scale, promote, rollback, and direct-image workflows preserve
+every unrelated prior desired-service record, including a removal marker, in
+both their pre-mutation intent and final state write. Only a full deploy that
+owns cleanup may clear the marker. An actual-only workload with no proven
+assignment must be explicitly adopted before it can be removed.
+On the first upgrade from assignment-less desired state, deterministic
+container identities and per-node actual snapshots are used to adopt the
+existing slot locations. Missing or ambiguous evidence fails closed. Placement
+planning reads only from a schedulable state source and prefers the enrolled
+control-plane node, so a cordoned caller's stale local copy is never treated as
+authoritative.
+
+Use `tako placement plan cordon --node NAME --file plan.json` to review the
+replicas that will remain in place, `tako placement plan drain --node NAME
+--file plan.json` to review work needed before draining a node, or `tako
+placement plan rebalance --file plan.json` to review a conservative stateless
+rebalance. Record the printed
+digest and verify the reviewed file with `tako placement verify plan.json
+--plan-id sha256:...`. The plan is tied to the exact desired revision and is
+read-only; it does not weaken the durable deployment-deny latch used by cordon
+and drain. Persistent or volume-backed moves are blockers with no automatic
+destination and require a separate backup/restore/cutover plan.
+Do not delete a running `persistent: true` service from the configuration:
+Tako rejects that deploy so its placement is not forgotten. Keep it declared
+until a separately explicit persistent-workload removal has completed.
+
 ## Secrets Management
 
 ```yaml

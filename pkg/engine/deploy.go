@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
 // StateAutoSyncFunc refreshes local deployment state from the remote mesh
@@ -60,6 +62,7 @@ type DeploySession struct {
 	servers                 map[string]config.ServerConfig
 	actualState             map[string]*reconcile.ActualService
 	actualByNode            map[string]map[string]*reconcile.ActualService
+	priorDesired            *takodstate.DesiredRevision
 
 	archiveDir    string
 	stateLock     *localstate.StateLock
@@ -342,6 +345,15 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 
 	// Create deployer with pool for takod support.
 	deploy := deployer.NewDeployerWithPool(nil, cfg, session.envName, session.sshPool, req.Verbose)
+	priorDesired, priorAssignments, err := LoadPriorPlacementState(sourceRuntime, cfg, session.envName)
+	if err != nil {
+		return nil, err
+	}
+	session.priorDesired = priorDesired
+	if err := ValidatePriorDesiredServices(priorDesired, allServices); err != nil {
+		return nil, err
+	}
+	deploy.SetPriorAssignments(priorAssignments)
 	deploy.SetRuntimeFactory(runtimeFactory)
 	deploy.SetCLIVersion(e.cliVersion)
 	deploy.SetSkipBuild(req.SkipBuild)
@@ -369,6 +381,9 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 	session.services = services
 	session.allServices = allServices
+	if err := deploy.ResolveAllAssignments(allServices); err != nil {
+		return nil, err
+	}
 	deploy.SetEventSink(e.stream)
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
@@ -475,6 +490,12 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 
 	// Compute reconciliation plan.
 	plan := reconcile.ComputePlan(cfg.Project.Name, session.envName, planServices, planActualState)
+	if err := rejectPersistentConfigRemovals(plan); err != nil {
+		return nil, err
+	}
+	if _, err := removalServiceConfigs(plan); err != nil {
+		return nil, err
+	}
 	session.plan = plan
 
 	planDoc := newDeployPlanDocument(cfg.Project.Name, session.envName, plan, services)
@@ -569,6 +590,10 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	envName := s.envName
 	plan := s.plan
 	services := s.services
+	if err := rejectPersistentConfigRemovals(plan); err != nil {
+		return nil, err
+	}
+	desiredStateServices := s.allServices
 	actualState := s.actualState
 	serverNames := s.serverNames
 
@@ -584,6 +609,14 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	}
 
 	if plan.IsEmpty() && !deployplan.HasBuildServices(services) && !req.Force {
+		intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredStateServices, nil, actualState)
+		var baseline *takodstate.DesiredRevision
+		if req.Service != "" {
+			baseline = s.priorDesired
+		}
+		if err := PersistTakodDesiredIntentWithPlacementBaseline(s.sshPool, cfg, envName, serverNames, s.sourceInfo.StateSource, desiredStateServices, intentImageRefs, s.deployer.ResolvedAssignments(), nil, baseline, GitInfoFromCommit(s.sourceInfo.CommitInfo), "recorded stable placement before proxy reconciliation", req.Verbose); err != nil {
+			return nil, err
+		}
 		activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
 		if err := s.reconcileProxy(services, activeRevisions); err != nil {
 			return nil, fmt.Errorf("failed to reconcile proxy routes: %w", err)
@@ -607,6 +640,16 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		}
 	}
 	servicesToDeploy := deployplan.ServicesToDeployForPlan(plan, services, req.Force, req.Service != "")
+	if err := s.deployer.PreflightAssignmentMutations(servicesToDeploy); err != nil {
+		return nil, err
+	}
+	if err := s.deployer.PreflightAssignmentRemovals(removalServiceNames(plan)); err != nil {
+		return nil, err
+	}
+	pendingRemovals, err := removalServiceConfigs(plan)
+	if err != nil {
+		return nil, err
+	}
 	if skipped := deployplan.PersistentServicesSkippedByForce(services, servicesToDeploy, req.Force, req.Service != ""); len(skipped) > 0 {
 		e.info(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("\n-> Skipping persistent service(s) during broad --force: %s\n   Use --service <name> --force when you intentionally need to recreate one.\n", strings.Join(skipped, ", ")))
 	}
@@ -701,6 +744,26 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		}
 		imageRefs[name] = resolved
 		allImageRefs[name] = resolved
+	}
+	intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredStateServices, nil, actualState)
+	for name, service := range pendingRemovals {
+		if actual := actualState[name]; actual != nil && actual.Image != "" {
+			intentImageRefs[name] = actual.Image
+		} else if service.Image != "" {
+			intentImageRefs[name] = service.Image
+		}
+	}
+	for name, imageRef := range allImageRefs {
+		if _, desired := desiredStateServices[name]; desired && (req.Service == "" || name == req.Service) {
+			intentImageRefs[name] = imageRef
+		}
+	}
+	var baseline *takodstate.DesiredRevision
+	if req.Service != "" {
+		baseline = s.priorDesired
+	}
+	if err := PersistTakodDesiredIntentWithPlacementBaseline(s.sshPool, cfg, envName, serverNames, s.sourceInfo.StateSource, desiredStateServices, intentImageRefs, s.deployer.ResolvedAssignments(), pendingRemovals, baseline, GitInfoFromCommit(s.sourceInfo.CommitInfo), "recorded stable placement before deploy mutation", req.Verbose); err != nil {
+		return nil, err
 	}
 
 	// Resolve service deployment order based on dependencies.
@@ -916,13 +979,13 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			return nil, fmt.Errorf("deployment succeeded but failed to gather final actual state: %w", err)
 		}
 		finalActualState := reconcile.AggregateActualStateByServer(finalNodeActualState)
-		runtimeServices := services
-		runtimeImageRefs := imageRefs
+		runtimeServices := desiredStateServices
+		runtimeImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, runtimeServices, imageRefs, finalActualState)
+		var baseline *takodstate.DesiredRevision
 		if req.Service != "" {
-			runtimeServices = CloneServiceMap(s.allServices)
-			runtimeImageRefs = deployplan.MergeRuntimeImageRefs(cfg, envName, runtimeServices, imageRefs, finalActualState)
+			baseline = s.priorDesired
 		}
-		if err := PersistTakodRuntimeState(
+		if err := PersistTakodRuntimeStateWithPlacementBaseline(
 			s.sshPool,
 			cfg,
 			envName,
@@ -932,6 +995,8 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			runtimeImageRefs,
 			finalActualState,
 			finalNodeActualState,
+			s.deployer.ResolvedAssignments(),
+			baseline,
 			GitInfoFromCommit(s.sourceInfo.CommitInfo),
 			"deploy.succeeded",
 			fmt.Sprintf("deployed %d service(s)", len(servicesToDeploy)),
@@ -1217,6 +1282,49 @@ func (e *Engine) ApplyRemovals(remover ServiceRemover, plan *reconcile.Reconcili
 			Service: change.ServiceName,
 			Message: fmt.Sprintf("  ✓ Service %s removed\n", change.ServiceName),
 		})
+	}
+	return nil
+}
+
+func removalServiceNames(plan *reconcile.ReconciliationPlan) []string {
+	if plan == nil {
+		return nil
+	}
+	var names []string
+	for _, change := range plan.Changes {
+		if change.Type == reconcile.ChangeRemove {
+			names = append(names, change.ServiceName)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func removalServiceConfigs(plan *reconcile.ReconciliationPlan) (map[string]config.ServiceConfig, error) {
+	pending := make(map[string]config.ServiceConfig)
+	if plan == nil {
+		return pending, nil
+	}
+	for _, change := range plan.Changes {
+		if change.Type != reconcile.ChangeRemove {
+			continue
+		}
+		if change.OldConfig == nil {
+			return nil, invalidRequestf("service %s cannot be removed because its prior configuration is unavailable; restore or explicitly adopt the workload before retrying", change.ServiceName)
+		}
+		pending[change.ServiceName] = *change.OldConfig
+	}
+	return pending, nil
+}
+
+func rejectPersistentConfigRemovals(plan *reconcile.ReconciliationPlan) error {
+	if plan == nil {
+		return nil
+	}
+	for _, change := range plan.Changes {
+		if change.Type == reconcile.ChangeNone && change.NewConfig == nil && change.OldConfig != nil && change.OldConfig.Persistent {
+			return invalidRequestf("persistent service %s is still running but was removed from config; restore it to tako.yaml so its placement remains authoritative, then use an explicit persistent-workload removal workflow", change.ServiceName)
+		}
 	}
 	return nil
 }

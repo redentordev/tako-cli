@@ -21,6 +21,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 	takounregistry "github.com/redentordev/tako-cli/pkg/unregistry"
@@ -1393,7 +1394,7 @@ func TestPlanTakodAssignmentsHonorsPlacementConstraints(t *testing.T) {
 	cfg.Servers["node-c"] = config.ServerConfig{Host: "node-c.example.test", User: "root", Labels: map[string]string{"role": "web"}}
 	deploy := &Deployer{config: cfg, environment: "production"}
 
-	assignments, err := deploy.planTakodAssignments(&config.ServiceConfig{
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{
 		Replicas: 3,
 		Placement: &config.PlacementConfig{
 			Strategy:    "spread",
@@ -1421,7 +1422,7 @@ func TestPlanTakodAssignmentsGlobalUsesConstrainedTargets(t *testing.T) {
 	cfg.Servers["node-c"] = config.ServerConfig{Host: "node-c.example.test", User: "root", Labels: map[string]string{"role": "web"}}
 	deploy := &Deployer{config: cfg, environment: "production"}
 
-	assignments, err := deploy.planTakodAssignments(&config.ServiceConfig{
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{
 		Placement: &config.PlacementConfig{
 			Strategy:    "global",
 			Constraints: []string{"node.labels.role==web"},
@@ -1432,6 +1433,140 @@ func TestPlanTakodAssignmentsGlobalUsesConstrainedTargets(t *testing.T) {
 	}
 	if len(assignments) != 2 {
 		t.Fatalf("assignments = %#v, want two constrained global assignments", assignments)
+	}
+}
+
+func TestPlanTakodAssignmentsKeepsPriorSlotsAcrossJoinAndReorder(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-c", "node-a", "node-b"})
+	cfg.Servers["node-a"] = config.ServerConfig{Host: "a", User: "root", NodeID: "id-a"}
+	cfg.Servers["node-b"] = config.ServerConfig{Host: "b", User: "root", NodeID: "id-b"}
+	cfg.Servers["node-c"] = config.ServerConfig{Host: "c", User: "root", NodeID: "id-c"}
+	deploy := &Deployer{config: cfg, environment: "production"}
+	deploy.SetPriorAssignments(map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-b", NodeID: "id-b"}}})
+
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignments[0].ServerName != "node-b" || assignments[0].Slot != 1 {
+		t.Fatalf("prior singleton moved after join/reorder: %#v", assignments)
+	}
+	if assignments[1].Slot != 2 || assignments[1].ServerName == "node-b" {
+		t.Fatalf("scale-out did not add a stable new slot: %#v", assignments)
+	}
+}
+
+func TestPlanTakodAssignmentsInitialSingletonPrefersLocalControllerWorker(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"remote", "controller"})
+	cfg.Servers["remote"] = config.ServerConfig{Host: "remote", User: "root", NodeID: "id-r", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleWorker}}
+	cfg.Servers["controller"] = config.ServerConfig{Host: "127.0.0.1", User: "root", Transport: "local", NodeID: "id-c", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleControlPlane, nodeidentity.RoleWorker}}
+	deploy := &Deployer{config: cfg, environment: "production"}
+
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assignments) != 1 || assignments[0].ServerName != "controller" {
+		t.Fatalf("initial singleton assignments = %#v, want controller", assignments)
+	}
+}
+
+func TestPlanTakodAssignmentsDoesNotUseCallerLocalityAsPlacementPreference(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"local-worker", "controller"})
+	cfg.Servers["local-worker"] = config.ServerConfig{Host: "127.0.0.1", User: "root", Transport: "local", NodeID: "id-l", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleWorker}}
+	cfg.Servers["controller"] = config.ServerConfig{Host: "controller", User: "root", NodeID: "id-c", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleControlPlane, nodeidentity.RoleWorker}}
+	deploy := &Deployer{config: cfg, environment: "production"}
+
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignments[0].ServerName != "controller" {
+		t.Fatalf("caller-local worker influenced placement: %#v", assignments)
+	}
+}
+
+func TestPlanTakodAssignmentsFailsClosedOnNodeIdentityLoss(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a"})
+	deploy := &Deployer{config: cfg, environment: "production"}
+	deploy.SetPriorAssignments(map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-a", NodeID: "immutable-id"}}})
+
+	_, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 1})
+	if err == nil || !strings.Contains(err.Error(), "node identity") {
+		t.Fatalf("identity loss error = %v", err)
+	}
+}
+
+func TestPlanTakodAssignmentsScaleToZeroClearsPersistedSlots(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a"})
+	deploy := &Deployer{config: cfg, environment: "production"}
+	deploy.SetPriorAssignments(map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-a"}}})
+
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assignments) != 0 || len(deploy.ResolvedAssignments()["web"]) != 0 {
+		t.Fatalf("scale-to-zero retained assignments: %#v / %#v", assignments, deploy.ResolvedAssignments())
+	}
+}
+
+func TestCordonedStickyAssignmentIsRetainedButCannotBeMutated(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a", "node-b"})
+	cfg.Servers["node-a"] = config.ServerConfig{Host: "a", User: "root", NodeID: "id-a", Lifecycle: nodeidentity.NodeLifecycleCordoned, Roles: []string{nodeidentity.RoleWorker}}
+	cfg.Servers["node-b"] = config.ServerConfig{Host: "b", User: "root", NodeID: "id-b", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleWorker}}
+	deploy := &Deployer{config: cfg, environment: "production"}
+	deploy.SetPriorAssignments(map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-a", NodeID: "id-a"}}})
+
+	assignments, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignments[0].ServerName != "node-a" || assignments[1].ServerName != "node-b" {
+		t.Fatalf("cordoned retention/scale-out assignments = %#v", assignments)
+	}
+	if err := deploy.validateAssignmentMutationTargets("web", assignments); err == nil || !strings.Contains(err.Error(), "approve a drain or rebalance plan") {
+		t.Fatalf("cordoned mutation validation error = %v", err)
+	}
+}
+
+func TestScaleDownCannotEraseAssignmentOnCordonedNode(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a", "node-b"})
+	cfg.Servers["node-a"] = config.ServerConfig{Host: "a", User: "root", NodeID: "id-a", Lifecycle: nodeidentity.NodeLifecycleSchedulable, Roles: []string{nodeidentity.RoleWorker}}
+	cfg.Servers["node-b"] = config.ServerConfig{Host: "b", User: "root", NodeID: "id-b", Lifecycle: nodeidentity.NodeLifecycleCordoned, Roles: []string{nodeidentity.RoleWorker}}
+	deploy := &Deployer{config: cfg, environment: "production"}
+	deploy.SetPriorAssignments(map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-a", NodeID: "id-a"}, {Slot: 2, Node: "node-b", NodeID: "id-b"}}})
+
+	_, err := deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 1})
+	if err == nil || !strings.Contains(err.Error(), "cannot remove replica slot 2") {
+		t.Fatalf("cordoned scale-down error = %v", err)
+	}
+	_, err = deploy.planTakodAssignments("web", &config.ServiceConfig{Replicas: 0})
+	if err == nil || !strings.Contains(err.Error(), "cannot remove replica slot 2") {
+		t.Fatalf("cordoned scale-to-zero error = %v", err)
+	}
+}
+
+func TestServiceOrJobRemovalCannotEraseCordonedAssignment(t *testing.T) {
+	for _, serviceName := range []string{"web", "nightly-job"} {
+		t.Run(serviceName, func(t *testing.T) {
+			cfg := testTakodDeployConfig([]string{"node-a"})
+			cfg.Servers["node-a"] = config.ServerConfig{Host: "a", User: "root", NodeID: "id-a", Lifecycle: nodeidentity.NodeLifecycleCordoned, Roles: []string{nodeidentity.RoleWorker}}
+			deploy := &Deployer{config: cfg, environment: "production"}
+			deploy.SetPriorAssignments(map[string][]scheduler.Assignment{serviceName: {{Slot: 1, Node: "node-a", NodeID: "id-a"}}})
+			if err := deploy.PreflightAssignmentRemovals([]string{serviceName}); err == nil || !strings.Contains(err.Error(), "cannot remove replica slot 1") {
+				t.Fatalf("removal preflight error = %v", err)
+			}
+		})
+	}
+}
+
+func TestServiceRemovalRequiresAuthoritativeAssignment(t *testing.T) {
+	cfg := testTakodDeployConfig([]string{"node-a"})
+	deploy := &Deployer{config: cfg, environment: "production"}
+	err := deploy.PreflightAssignmentRemovals([]string{"orphan"})
+	if err == nil || !strings.Contains(err.Error(), "no authoritative replica assignment") {
+		t.Fatalf("removal without assignment error = %v", err)
 	}
 }
 

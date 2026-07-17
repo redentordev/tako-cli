@@ -263,6 +263,22 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	}
 
 	deploy := deployer.NewDeployerWithPool(client, cfg, envName, sshPool, req.Verbose)
+	priorDesired, priorAssignments, err := LoadPriorPlacementState(client, cfg, envName)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidatePriorDesiredServices(priorDesired, services); err != nil {
+		return nil, err
+	}
+	deploy.SetPriorAssignments(priorAssignments)
+	placementServices := CloneServiceMap(services)
+	placementService := placementServices[req.Service]
+	placementService.Replicas = targetDeployment.Services[req.Service].Replicas
+	placementServices[req.Service] = placementService
+	serviceState := targetDeployment.Services[req.Service]
+	if err := deploy.ResolveAllAssignments(placementServices); err != nil {
+		return nil, err
+	}
 	deploy.SetRuntimeFactory(runtimeFactory)
 	deploy.SetBaseContext(ctx)
 	deploy.SetEventSink(e.stream)
@@ -273,13 +289,26 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	if err := preflightAndSetupTakodRuntime(deploy, services); err != nil {
 		return nil, err
 	}
+	if err := deploy.PreflightAssignmentMutations(map[string]config.ServiceConfig{req.Service: placementService}); err != nil {
+		return nil, err
+	}
+	intentActualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, mutationServers, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to gather actual state before rollback placement intent: %w", err)
+	}
+	intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, placementServices, nil, intentActualState)
+	intentImageRefs[req.Service] = serviceState.Image
+	if err := PersistTakodDesiredIntentWithPlacementBaseline(sshPool, cfg, envName, mutationServers, "rollback", placementServices, intentImageRefs, deploy.ResolvedAssignments(), nil, priorDesired, takodstate.GitInfo{
+		Commit: targetDeployment.GitCommit, CommitShort: targetDeployment.GitCommitShort, Branch: targetDeployment.GitBranch, Message: targetDeployment.GitCommitMsg, Author: targetDeployment.GitAuthor,
+	}, "recorded stable placement before rollback mutation", req.Verbose); err != nil {
+		return nil, err
+	}
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	// Perform rollback using state.
-	serviceState := targetDeployment.Services[req.Service]
 	if err := e.rollbackToTargetState(deploy, req.Service, services[req.Service], targetDeployment, serviceState); err != nil {
 		// Send failure notification.
 		if notifier != nil {
@@ -321,7 +350,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	}
 	postRollbackActualState := reconcile.AggregateActualStateByServer(postRollbackNodeActualState)
 	runtimeImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredServices, rollbackImageRefs, postRollbackActualState)
-	if err := PersistTakodRuntimeState(
+	if err := PersistTakodRuntimeStateWithPlacementBaseline(
 		sshPool,
 		cfg,
 		envName,
@@ -331,6 +360,8 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 		runtimeImageRefs,
 		postRollbackActualState,
 		postRollbackNodeActualState,
+		deploy.ResolvedAssignments(),
+		priorDesired,
 		takodstate.GitInfo{
 			Commit:      targetDeployment.GitCommit,
 			CommitShort: targetDeployment.GitCommitShort,

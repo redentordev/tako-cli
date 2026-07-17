@@ -10,7 +10,54 @@ import (
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"github.com/redentordev/tako-cli/pkg/scheduler"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
+
+func TestValidateAssignmentMembershipFailsClosedOnMissingOrReusedNode(t *testing.T) {
+	cfg := &config.Config{Servers: map[string]config.ServerConfig{"node-a": {NodeID: "id-current"}}}
+	if err := validateAssignmentMembership(cfg, "web", []scheduler.Assignment{{Slot: 1, Node: "missing", NodeID: "id-missing"}}); err == nil || !strings.Contains(err.Error(), "missing node") {
+		t.Fatalf("missing membership error = %v", err)
+	}
+	if err := validateAssignmentMembership(cfg, "web", []scheduler.Assignment{{Slot: 1, Node: "node-a", NodeID: "id-stale"}}); err == nil || !strings.Contains(err.Error(), "immutable identity") {
+		t.Fatalf("reused node identity error = %v", err)
+	}
+	if err := validateAssignmentMembership(cfg, "web", []scheduler.Assignment{{Slot: 1, Node: "node-a", NodeID: "id-current"}}); err != nil {
+		t.Fatalf("valid membership rejected: %v", err)
+	}
+}
+
+func TestAdoptLegacyAssignmentsUsesActualSlotNodeInsteadOfCurrentOrder(t *testing.T) {
+	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo"}, Servers: map[string]config.ServerConfig{
+		"controller": {NodeID: "id-controller"},
+		"worker":     {NodeID: "id-worker"},
+	}}
+	actual := &takodstate.ActualSnapshot{
+		Services: map[string]takodstate.ActualService{"web": {Replicas: 1}},
+		Nodes: map[string]takodstate.ActualNodeSnapshot{
+			"worker": {Node: "worker", Services: map[string]takodstate.ActualService{"web": {Replicas: 1, Containers: []string{runtimeid.ContainerName("demo", "production", "web", 1)}}}},
+		},
+	}
+	assignments, needed, err := adoptLegacyAssignments(cfg, "production", "web", takodstate.DesiredService{Replicas: 1}, actual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !needed || len(assignments) != 1 || assignments[0].Node != "worker" || assignments[0].NodeID != "id-worker" {
+		t.Fatalf("legacy adoption = %#v, needed=%t", assignments, needed)
+	}
+}
+
+func TestAdoptLegacyAssignmentsFailsWhenActualSlotCannotBeProven(t *testing.T) {
+	cfg := &config.Config{Project: config.ProjectConfig{Name: "demo"}, Servers: map[string]config.ServerConfig{"worker": {NodeID: "id-worker"}}}
+	actual := &takodstate.ActualSnapshot{
+		Services: map[string]takodstate.ActualService{"web": {Replicas: 2}},
+		Nodes:    map[string]takodstate.ActualNodeSnapshot{"worker": {Node: "worker", Services: map[string]takodstate.ActualService{"web": {Replicas: 2, Containers: []string{"unrecognized"}}}}},
+	}
+	if _, _, err := adoptLegacyAssignments(cfg, "production", "web", takodstate.DesiredService{Replicas: 2}, actual); err == nil || !strings.Contains(err.Error(), "refuse implicit movement") {
+		t.Fatalf("unprovable adoption error = %v", err)
+	}
+}
 
 func TestRecordStartedDeploymentStateSavesInProgressAndAssignedID(t *testing.T) {
 	saver := newHistoryDeploymentSaver()

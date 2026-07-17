@@ -160,6 +160,17 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	}
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, envName, sshPool, req.Verbose)
+	priorDesired, priorAssignments, err := LoadPriorPlacementState(sourceClient, cfg, envName)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidatePriorDesiredServices(priorDesired, services); err != nil {
+		return nil, err
+	}
+	deploy.SetPriorAssignments(priorAssignments)
+	if err := deploy.ResolveAllAssignments(services); err != nil {
+		return nil, err
+	}
 	deploy.SetRuntimeFactory(runtimeFactory)
 	deploy.SetBaseContext(ctx)
 	deploy.SetEventSink(e.stream)
@@ -195,6 +206,14 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	targetImage, err := promotionTargetImage(cfg, envName, serviceName, service, actual, targetRevision)
 	if err != nil {
 		return nil, fmt.Errorf("cannot promote %s: %w", serviceName, err)
+	}
+	if err := deploy.PreflightAssignmentMutations(map[string]config.ServiceConfig{serviceName: service}); err != nil {
+		return nil, err
+	}
+	intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, services, nil, actualState)
+	intentImageRefs[serviceName] = targetImage
+	if err := PersistTakodDesiredIntentWithPlacementBaseline(sshPool, cfg, envName, serverNames, "promote", services, intentImageRefs, deploy.ResolvedAssignments(), nil, priorDesired, optionalPromoteGitInfo(), "recorded stable placement before promotion mutation", req.Verbose); err != nil {
+		return nil, err
 	}
 
 	activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, services, nil, nil, actualState)
@@ -245,7 +264,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	}
 	postActualState := reconcile.AggregateActualStateByServer(postNodeActualState)
 	runtimeImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, services, nil, postActualState)
-	if err := PersistTakodRuntimeState(
+	if err := PersistTakodRuntimeStateWithPlacementBaseline(
 		sshPool,
 		cfg,
 		envName,
@@ -255,6 +274,8 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 		runtimeImageRefs,
 		postActualState,
 		postNodeActualState,
+		deploy.ResolvedAssignments(),
+		priorDesired,
 		optionalPromoteGitInfo(),
 		"promote.succeeded",
 		fmt.Sprintf("promoted %s to revision %s", serviceName, targetRevision),

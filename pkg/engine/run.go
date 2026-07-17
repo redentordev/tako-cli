@@ -50,6 +50,7 @@ type RunSession struct {
 	server       config.ServerConfig
 	actualState  map[string]*reconcile.ActualService
 	services     map[string]config.ServiceConfig
+	priorDesired *takodstate.DesiredRevision
 
 	closed  bool
 	applied bool
@@ -158,6 +159,18 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	session.sourceClient = sourceClient
 
 	deploy := deployer.NewDeployerWithPool(sourceClient, cfg, req.Environment, session.sshPool, req.Verbose)
+	priorDesired, priorAssignments, err := LoadPriorPlacementState(sourceClient, cfg, req.Environment)
+	if err != nil {
+		return nil, err
+	}
+	session.priorDesired = priorDesired
+	if err := ValidatePriorDesiredServices(priorDesired, map[string]config.ServiceConfig{req.ServiceName: req.Service}); err != nil {
+		return nil, err
+	}
+	deploy.SetPriorAssignments(priorAssignments)
+	if err := deploy.ResolveAllAssignments(map[string]config.ServiceConfig{req.ServiceName: req.Service}); err != nil {
+		return nil, err
+	}
 	deploy.SetRuntimeFactory(runtimeFactory)
 	deploy.SetBaseContext(ctx)
 	deploy.SetEventSink(e.stream)
@@ -289,6 +302,14 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 		PlanHash:    s.planDoc.Hash(),
 		StartedAt:   startTime,
 	}
+	if !plan.IsEmpty() {
+		if err := s.deployer.PreflightAssignmentMutations(services); err != nil {
+			return nil, err
+		}
+	}
+	if err := PersistTakodDesiredIntentWithPlacementBaseline(s.sshPool, cfg, envName, serverNames, "image", services, imageRefs, s.deployer.ResolvedAssignments(), nil, s.priorDesired, takodstate.GitInfo{}, "recorded stable placement before direct image mutation", req.Verbose); err != nil {
+		return nil, err
+	}
 
 	if err := RecordStartedDeploymentStateContext(ctx, stateManager, deployment); err != nil {
 		return nil, fmt.Errorf("failed to record started deployment state before applying mutations: %w", err)
@@ -344,7 +365,7 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 	}
 	postActualState := reconcile.AggregateActualStateByServer(postNodeActualState)
 
-	if err := PersistTakodRuntimeState(
+	if err := PersistTakodRuntimeStateWithPlacementBaseline(
 		s.sshPool,
 		cfg,
 		envName,
@@ -354,6 +375,8 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 		imageRefs,
 		postActualState,
 		postNodeActualState,
+		s.deployer.ResolvedAssignments(),
+		s.priorDesired,
 		takodstate.GitInfo{},
 		"run.succeeded",
 		fmt.Sprintf("deployed image %s", req.ImageRef),

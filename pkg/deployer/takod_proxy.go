@@ -95,7 +95,7 @@ func (d *Deployer) takodProxyRequiresRemoteMeshRoutes(services map[string]config
 		if !service.IsProxied() {
 			continue
 		}
-		assignments, err := d.planTakodAssignments(&service)
+		assignments, err := d.planTakodAssignments(serviceName, &service)
 		if err != nil {
 			return false, fmt.Errorf("plan proxy preflight assignments for %s: %w", serviceName, err)
 		}
@@ -113,7 +113,7 @@ func (d *Deployer) takodProxyRequiresRemoteMeshRoutes(services map[string]config
 			if !ok {
 				return false, fmt.Errorf("dynamic-domain ask service %s is not configured", askService)
 			}
-			askAssignments, planErr := d.planTakodAssignments(&askConfig)
+			askAssignments, planErr := d.planTakodAssignments(askService, &askConfig)
 			if planErr != nil {
 				return false, fmt.Errorf("plan dynamic-domain proxy preflight assignments for %s: %w", askService, planErr)
 			}
@@ -363,7 +363,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 			return nil, false, fmt.Errorf("service %s has proxy config but no port", serviceName)
 		}
 
-		assignments, err := d.planTakodAssignments(&service)
+		assignments, err := d.planTakodAssignments(serviceName, &service)
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to plan proxy upstreams for %s: %w", serviceName, err)
 		}
@@ -436,7 +436,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 			if manifestVersion >= 2 {
 				askService, _, _ := config.ParseDynamicDomainAsk(service.Proxy.DynamicDomains.Ask)
 				askConfig := services[askService]
-				assignments, assignmentErr := d.planTakodAssignments(&askConfig)
+				assignments, assignmentErr := d.planTakodAssignments(askService, &askConfig)
 				if assignmentErr != nil {
 					return nil, false, fmt.Errorf("plan dynamic ask destination for %s: %w", askService, assignmentErr)
 				}
@@ -763,7 +763,7 @@ func (d *Deployer) dynamicDomainAskURL(services map[string]config.ServiceConfig,
 	if service.Port <= 0 {
 		return "", fmt.Errorf("service %q must expose a port", askService)
 	}
-	assignments, err := d.planTakodAssignments(&service)
+	assignments, err := d.planTakodAssignments(askService, &service)
 	if err != nil {
 		return "", err
 	}

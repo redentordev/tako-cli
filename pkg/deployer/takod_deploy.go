@@ -21,6 +21,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -202,8 +203,11 @@ func (d *Deployer) DeployPreparedServiceTakod(serviceName string, service *confi
 // EnsurePreparedServiceImage transfers an existing exact shared image to newly
 // selected nodes before scale/rollback reconciliation. It never rebuilds.
 func (d *Deployer) EnsurePreparedServiceImage(serviceName string, service *config.ServiceConfig, imageRef string) error {
-	assignments, err := d.planTakodAssignments(service)
+	assignments, err := d.planTakodAssignments(serviceName, service)
 	if err != nil {
+		return err
+	}
+	if err := d.validateAssignmentMutationTargets(serviceName, assignments); err != nil {
 		return err
 	}
 	servers := uniqueAssignmentServers(assignments)
@@ -242,9 +246,12 @@ func (d *Deployer) EnsureSharedTakodImage(buildName string, imageRef string, con
 
 func (d *Deployer) sharedBuildConsumerServers(buildName string, consumers map[string]config.ServiceConfig) ([]string, error) {
 	serverSet := make(map[string]bool)
-	for _, service := range consumers {
-		assignments, err := d.planTakodAssignments(&service)
+	for serviceName, service := range consumers {
+		assignments, err := d.planTakodAssignments(serviceName, &service)
 		if err != nil {
+			return nil, fmt.Errorf("shared build %s placement: %w", buildName, err)
+		}
+		if err := d.validateAssignmentMutationTargets(serviceName, assignments); err != nil {
 			return nil, fmt.Errorf("shared build %s placement: %w", buildName, err)
 		}
 		for _, assignment := range assignments {
@@ -297,8 +304,11 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		service.FilesContentHash = filesHash
 	}
 
-	assignments, err := d.planTakodAssignments(service)
+	assignments, err := d.planTakodAssignments(serviceName, service)
 	if err != nil {
+		return err
+	}
+	if err := d.validateAssignmentMutationTargets(serviceName, assignments); err != nil {
 		return err
 	}
 
@@ -1850,8 +1860,8 @@ func (d *Deployer) buildTakodEnvFileContentAndHash(service *config.ServiceConfig
 	return string(data), runInputValuesHash(envFile.GetAll()), nil
 }
 
-func (d *Deployer) planTakodAssignments(service *config.ServiceConfig) ([]takodAssignment, error) {
-	servers, err := d.getTakodTargetServers()
+func (d *Deployer) planTakodAssignments(serviceName string, service *config.ServiceConfig) ([]takodAssignment, error) {
+	servers, err := d.config.GetEnvironmentServers(d.environment)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get takod target servers: %w", err)
 	}
@@ -1873,25 +1883,185 @@ func (d *Deployer) planTakodAssignments(service *config.ServiceConfig) ([]takodA
 	if replicas <= 0 {
 		replicas = 1
 	}
+	d.assignmentMu.Lock()
+	prior := append([]scheduler.Assignment(nil), d.assignments[serviceName]...)
+	d.assignmentMu.Unlock()
+	for _, assignment := range prior {
+		if server, ok := d.config.Servers[assignment.Node]; !ok {
+			return nil, fmt.Errorf("persisted assignment for %s slot %d references missing node %s", serviceName, assignment.Slot, assignment.Node)
+		} else if assignment.NodeID != server.NodeID && (assignment.NodeID != "" || server.NodeID != "") {
+			return nil, fmt.Errorf("persisted assignment for %s slot %d has node identity %s, but %s is now %s", serviceName, assignment.Slot, assignment.NodeID, assignment.Node, server.NodeID)
+		}
+	}
 
-	targets, err := config.ResolveSchedulablePlacementTargets(service.Placement, d.config.Servers, servers, d.environment)
+	permitted, err := config.ResolvePlacementTargets(service.Placement, d.config.Servers, servers, d.environment)
 	if err != nil {
 		return nil, err
 	}
-	if service.Placement != nil && strings.TrimSpace(service.Placement.Strategy) == "global" {
-		replicas = len(targets)
+	targets := make([]string, 0, len(permitted))
+	for _, target := range permitted {
+		if d.config.Servers[target].Schedulable() {
+			targets = append(targets, target)
+		}
+	}
+	targets = d.preferDefaultWorker(targets, service.Placement)
+	global := service.Placement != nil && strings.TrimSpace(service.Placement.Strategy) == "global"
+	if global {
 		scaleToZero = false
 	}
 	if scaleToZero {
+		if err := d.validateRemovedAssignmentMutationTargets(serviceName, prior, nil); err != nil {
+			return nil, err
+		}
+		d.assignmentMu.Lock()
+		if d.assignments == nil {
+			d.assignments = make(map[string][]scheduler.Assignment)
+		}
+		d.assignments[serviceName] = nil
+		d.assignmentMu.Unlock()
 		return []takodAssignment{}, nil
 	}
 
-	assignments := make([]takodAssignment, 0, replicas)
-	for slot := 1; slot <= replicas; slot++ {
-		serverName := targets[(slot-1)%len(targets)]
-		assignments = append(assignments, takodAssignment{ServerName: serverName, Slot: slot})
+	var planned []scheduler.Assignment
+	if global {
+		planned, err = scheduler.PlanGlobal(permitted, targets, prior)
+		if err != nil {
+			return nil, fmt.Errorf("plan global assignments for %s: %w", serviceName, err)
+		}
+	} else {
+		planned, err = scheduler.PlanSticky(replicas, permitted, targets, prior)
+		if err != nil {
+			return nil, fmt.Errorf("plan sticky assignments for %s: %w", serviceName, err)
+		}
 	}
+	if err := d.validateRemovedAssignmentMutationTargets(serviceName, prior, planned); err != nil {
+		return nil, err
+	}
+	assignments := make([]takodAssignment, 0, len(planned))
+	for index := range planned {
+		if planned[index].NodeID == "" {
+			planned[index].NodeID = d.config.Servers[planned[index].Node].NodeID
+		}
+		assignments = append(assignments, takodAssignment{ServerName: planned[index].Node, Slot: planned[index].Slot})
+	}
+	d.assignmentMu.Lock()
+	if d.assignments == nil {
+		d.assignments = make(map[string][]scheduler.Assignment)
+	}
+	d.assignments[serviceName] = scheduler.Stable(planned)
+	d.assignmentMu.Unlock()
 	return assignments, nil
+}
+
+// ResolveAllAssignments plans every desired service without mutating nodes.
+// This ensures a successful state write never omits bindings merely because a
+// service happened to be up to date or had no proxy route in this operation.
+func (d *Deployer) ResolveAllAssignments(services map[string]config.ServiceConfig) error {
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		service := services[name]
+		if _, err := d.planTakodAssignments(name, &service); err != nil {
+			return fmt.Errorf("service %s placement: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// PreflightAssignmentMutations rejects deterministic lifecycle failures for
+// the complete mutation set before the first image, container, schedule, or
+// proxy mutation begins.
+func (d *Deployer) PreflightAssignmentMutations(services map[string]config.ServiceConfig) error {
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		service := services[name]
+		assignments, err := d.planTakodAssignments(name, &service)
+		if err != nil {
+			return fmt.Errorf("service %s placement mutation preflight: %w", name, err)
+		}
+		if err := d.validateAssignmentMutationTargets(name, assignments); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PreflightAssignmentRemovals proves every previously assigned node can
+// receive cleanup before desired state drops the service binding.
+func (d *Deployer) PreflightAssignmentRemovals(serviceNames []string) error {
+	for _, serviceName := range serviceNames {
+		d.assignmentMu.Lock()
+		prior := append([]scheduler.Assignment(nil), d.assignments[serviceName]...)
+		d.assignmentMu.Unlock()
+		if len(prior) == 0 {
+			return fmt.Errorf("service %s removal preflight: no authoritative replica assignment is available; explicitly adopt the workload before removal", serviceName)
+		}
+		if err := d.validateRemovedAssignmentMutationTargets(serviceName, prior, nil); err != nil {
+			return fmt.Errorf("service %s removal preflight: %w", serviceName, err)
+		}
+	}
+	return nil
+}
+
+func (d *Deployer) validateRemovedAssignmentMutationTargets(serviceName string, prior, planned []scheduler.Assignment) error {
+	retained := make(map[string]struct{}, len(planned))
+	for _, assignment := range planned {
+		retained[fmt.Sprintf("%d/%s/%s", assignment.Slot, assignment.Node, assignment.NodeID)] = struct{}{}
+	}
+	for _, assignment := range prior {
+		if _, ok := retained[fmt.Sprintf("%d/%s/%s", assignment.Slot, assignment.Node, assignment.NodeID)]; ok {
+			continue
+		}
+		server, ok := d.config.Servers[assignment.Node]
+		if !ok {
+			return fmt.Errorf("service %s removed replica slot %d references missing node %s", serviceName, assignment.Slot, assignment.Node)
+		}
+		if !server.Schedulable() {
+			return fmt.Errorf("service %s cannot remove replica slot %d from node %s (%s); the node cannot receive cleanup mutations, so approve and apply a drain plan first", serviceName, assignment.Slot, assignment.Node, server.Lifecycle)
+		}
+	}
+	return nil
+}
+
+// validateAssignmentMutationTargets prevents an ordinary deploy, scale, or
+// build from silently acting as a drain. Sticky assignments remain visible on
+// cordoned/draining nodes for routing and planning, but moving or mutating
+// them requires an explicit reviewed placement plan.
+func (d *Deployer) validateAssignmentMutationTargets(serviceName string, assignments []takodAssignment) error {
+	for _, assignment := range assignments {
+		server, ok := d.config.Servers[assignment.ServerName]
+		if !ok {
+			return fmt.Errorf("service %s replica slot %d references missing node %s", serviceName, assignment.Slot, assignment.ServerName)
+		}
+		if server.Schedulable() {
+			continue
+		}
+		return fmt.Errorf("service %s replica slot %d remains assigned to node %s (%s); approve a drain or rebalance plan before mutating this service", serviceName, assignment.Slot, assignment.ServerName, server.Lifecycle)
+	}
+	return nil
+}
+
+func (d *Deployer) preferDefaultWorker(targets []string, placement *config.PlacementConfig) []string {
+	out := append([]string(nil), targets...)
+	if placement != nil && strings.TrimSpace(placement.Strategy) == "pinned" {
+		return out
+	}
+	for index, name := range out {
+		server := d.config.Servers[name]
+		if server.HasPlatformRole(nodeidentity.RoleControlPlane) {
+			copy(out[1:index+1], out[0:index])
+			out[0] = name
+			break
+		}
+	}
+	return out
 }
 
 func (d *Deployer) ensureTakodMeshKeys(servers []string) (map[string]string, error) {

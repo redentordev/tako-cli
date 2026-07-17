@@ -177,6 +177,12 @@ Expected result:
   `takod` agent before state repair and deploy.
 - WireGuard mesh status lists both peers.
 - Deployment history and desired state are available from both reachable nodes.
+- Desired state records stable `{slot,node,nodeId}` assignments for every
+  deployed service; adding/reordering nodes does not move existing slots and
+  scale-out assigns only new slots.
+- An interrupted stateless/job removal leaves a `removalPending: true` desired
+  entry with its prior assignment, and retrying cleanup removes that entry only
+  after the assigned nodes acknowledge cleanup.
 - Actual state is reported per node and as an aggregate.
 - Proxy upstreams include healthy local and mesh-reachable service instances.
 - Host firewall rules allow the WireGuard listen UDP port and routed traffic to

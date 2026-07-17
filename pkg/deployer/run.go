@@ -56,8 +56,11 @@ func (d *Deployer) RunDeployStepOnNodes(serviceName string, service *config.Serv
 	if service == nil || !service.IsRun() {
 		return nil, fmt.Errorf("service %s is not kind: run", serviceName)
 	}
-	assignments, err := d.planTakodAssignments(service)
+	assignments, err := d.planTakodAssignments(serviceName, service)
 	if err != nil {
+		return nil, err
+	}
+	if err := d.validateAssignmentMutationTargets(serviceName, assignments); err != nil {
 		return nil, err
 	}
 	if len(assignments) == 0 {
@@ -207,7 +210,7 @@ func (d *Deployer) runStepServer(service *config.ServiceConfig, assignments []ta
 	if !ok || source.Build == "" {
 		return assignments[0].ServerName, nil
 	}
-	sourceAssignments, err := d.planTakodAssignments(&source)
+	sourceAssignments, err := d.planTakodAssignments(service.ImageFrom, &source)
 	if err != nil {
 		return "", err
 	}

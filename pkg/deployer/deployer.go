@@ -18,6 +18,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/nodeclient"
+	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -82,6 +83,8 @@ type Deployer struct {
 	baseCtx           context.Context
 	runtimeFactory    *nodeclient.Factory
 	runtimeFactoryMu  sync.Mutex
+	assignmentMu      sync.Mutex
+	assignments       map[string][]scheduler.Assignment
 }
 
 const (
@@ -147,6 +150,33 @@ func (d *Deployer) SetCLIVersion(version string) {
 
 func (d *Deployer) SetSkipBuild(skip bool) {
 	d.skipBuild = skip
+}
+
+// SetPriorAssignments seeds the scheduler with the last persisted desired
+// replica bindings. The map is copied because planning mutates its own view.
+func (d *Deployer) SetPriorAssignments(assignments map[string][]scheduler.Assignment) {
+	d.assignmentMu.Lock()
+	defer d.assignmentMu.Unlock()
+	d.assignments = cloneAssignments(assignments)
+}
+
+// ResolvedAssignments returns every prior or newly planned binding known to
+// this deployer, suitable for the next desired-state revision.
+func (d *Deployer) ResolvedAssignments() map[string][]scheduler.Assignment {
+	d.assignmentMu.Lock()
+	defer d.assignmentMu.Unlock()
+	return cloneAssignments(d.assignments)
+}
+
+func cloneAssignments(source map[string][]scheduler.Assignment) map[string][]scheduler.Assignment {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string][]scheduler.Assignment, len(source))
+	for service, assignments := range source {
+		out[service] = append([]scheduler.Assignment(nil), assignments...)
+	}
+	return out
 }
 
 // SetOutput redirects deployer progress output. Passing nil resets output to os.Stdout.

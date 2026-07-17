@@ -14,6 +14,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
+	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takod"
@@ -77,6 +78,7 @@ type DesiredService struct {
 	Labels          map[string]string              `json:"labels,omitempty"`
 	Port            int                            `json:"port,omitempty"`
 	Replicas        int                            `json:"replicas"`
+	Assignments     []scheduler.Assignment         `json:"assignments,omitempty"`
 	Restart         string                         `json:"restart,omitempty"`
 	Persistent      bool                           `json:"persistent,omitempty"`
 	Placement       *config.PlacementConfig        `json:"placement,omitempty"`
@@ -96,6 +98,7 @@ type DesiredService struct {
 	DependsOn       []string                       `json:"dependsOn,omitempty"`
 	HealthCheck     config.HealthCheckConfig       `json:"healthCheck,omitempty"`
 	DeployStrategy  string                         `json:"deployStrategy,omitempty"`
+	RemovalPending  bool                           `json:"removalPending,omitempty"`
 }
 
 type ActualSnapshot struct {
@@ -174,6 +177,25 @@ func (m *Manager) WithRequestTimeout(timeout time.Duration) *Manager {
 }
 
 func BuildDesiredRevision(cfg *config.Config, environment string, source string, services map[string]config.ServiceConfig, imageRefs map[string]string, targetNodes []string, git GitInfo) (*DesiredRevision, error) {
+	return BuildDesiredRevisionWithAssignments(cfg, environment, source, services, imageRefs, targetNodes, nil, git)
+}
+
+func BuildDesiredRevisionWithAssignments(cfg *config.Config, environment string, source string, services map[string]config.ServiceConfig, imageRefs map[string]string, targetNodes []string, assignments map[string][]scheduler.Assignment, git GitInfo) (*DesiredRevision, error) {
+	return BuildDesiredRevisionWithPlacementIntent(cfg, environment, source, services, imageRefs, targetNodes, assignments, nil, git)
+}
+
+// BuildDesiredRevisionWithPlacementIntent retains removal-pending service
+// bindings until cleanup succeeds, making interrupted removals retryable.
+func BuildDesiredRevisionWithPlacementIntent(cfg *config.Config, environment string, source string, services map[string]config.ServiceConfig, imageRefs map[string]string, targetNodes []string, assignments map[string][]scheduler.Assignment, pendingRemovals map[string]config.ServiceConfig, git GitInfo) (*DesiredRevision, error) {
+	return BuildDesiredRevisionWithPlacementSnapshot(cfg, environment, source, services, imageRefs, targetNodes, assignments, pendingRemovals, nil, git)
+}
+
+// BuildDesiredRevisionWithPlacementSnapshot carries prior desired-service
+// records that are outside the current workflow's scope. This is necessary for
+// targeted and non-removal operations: rewriting desired state must not clear
+// an unrelated removalPending marker or forget a workload removed from the
+// operator's current config before a full deploy reconciles it.
+func BuildDesiredRevisionWithPlacementSnapshot(cfg *config.Config, environment string, source string, services map[string]config.ServiceConfig, imageRefs map[string]string, targetNodes []string, assignments map[string][]scheduler.Assignment, pendingRemovals map[string]config.ServiceConfig, preservedServices map[string]DesiredService, git GitInfo) (*DesiredRevision, error) {
 	now := time.Now().UTC()
 	revision := &DesiredRevision{
 		SchemaVersion: SchemaVersion,
@@ -182,12 +204,32 @@ func BuildDesiredRevision(cfg *config.Config, environment string, source string,
 		Source:        source,
 		TargetNodes:   sortedCopy(targetNodes),
 		Builds:        make(map[string]DesiredBuild, len(cfg.Builds)),
-		Services:      make(map[string]DesiredService, len(services)),
+		Services:      make(map[string]DesiredService, len(services)+len(pendingRemovals)+len(preservedServices)),
 		Git:           git,
 		CreatedAt:     now,
 	}
 	for name, build := range cfg.Builds {
 		revision.Builds[name] = DesiredBuild{Context: build.DeclaredContext(), ArgKeys: sortedKeys(build.Args), Target: build.Target, Dockerfile: build.Dockerfile}
+	}
+	for serviceName, preserved := range preservedServices {
+		if _, desired := services[serviceName]; desired {
+			return nil, fmt.Errorf("service %s cannot be both current and preserved desired state", serviceName)
+		}
+		if _, pending := pendingRemovals[serviceName]; pending {
+			return nil, fmt.Errorf("service %s cannot be both removal-pending and preserved desired state", serviceName)
+		}
+		if preserved.Name != "" && preserved.Name != serviceName {
+			return nil, fmt.Errorf("preserved desired service %s has mismatched name %s", serviceName, preserved.Name)
+		}
+		if adopted := scheduler.Stable(assignments[serviceName]); len(adopted) > 0 {
+			preserved.Assignments = adopted
+		} else {
+			preserved.Assignments = scheduler.Stable(preserved.Assignments)
+		}
+		if err := validateDesiredAssignments(cfg, serviceName, preserved.Assignments, "preserved desired"); err != nil {
+			return nil, err
+		}
+		revision.Services[serviceName] = preserved
 	}
 
 	for serviceName, service := range services {
@@ -202,11 +244,53 @@ func BuildDesiredRevision(cfg *config.Config, environment string, source string,
 			}
 		}
 
-		revision.Services[serviceName] = sanitizeDesiredService(serviceName, service, imageRef)
+		desired := sanitizeDesiredService(serviceName, service, imageRef)
+		serviceAssignments := scheduler.Stable(assignments[serviceName])
+		if err := validateDesiredAssignments(cfg, serviceName, serviceAssignments, "service"); err != nil {
+			return nil, err
+		}
+		desired.Assignments = serviceAssignments
+		revision.Services[serviceName] = desired
+	}
+	for serviceName, service := range pendingRemovals {
+		if _, stillDesired := revision.Services[serviceName]; stillDesired {
+			return nil, fmt.Errorf("service %s cannot be desired and removal-pending", serviceName)
+		}
+		imageRef := imageRefs[serviceName]
+		if imageRef == "" {
+			imageRef = service.Image
+		}
+		desired := sanitizeDesiredService(serviceName, service, imageRef)
+		desired.RemovalPending = true
+		serviceAssignments := scheduler.Stable(assignments[serviceName])
+		if len(serviceAssignments) == 0 {
+			return nil, fmt.Errorf("removal-pending service %s has no authoritative assignment", serviceName)
+		}
+		if err := validateDesiredAssignments(cfg, serviceName, serviceAssignments, "removal-pending service"); err != nil {
+			return nil, err
+		}
+		desired.Assignments = serviceAssignments
+		revision.Services[serviceName] = desired
 	}
 
 	revision.RevisionID = revisionID(revision)
 	return revision, nil
+}
+
+func validateDesiredAssignments(cfg *config.Config, serviceName string, assignments []scheduler.Assignment, label string) error {
+	if err := scheduler.ValidateAssignments(assignments); err != nil {
+		return fmt.Errorf("%s %s assignments are invalid: %w", label, serviceName, err)
+	}
+	for _, assignment := range assignments {
+		server, ok := cfg.Servers[assignment.Node]
+		if len(cfg.Servers) > 0 && !ok {
+			return fmt.Errorf("%s %s assignment references unknown node %s", label, serviceName, assignment.Node)
+		}
+		if ok && assignment.NodeID != server.NodeID && (assignment.NodeID != "" || server.NodeID != "") {
+			return fmt.Errorf("%s %s assignment for node %s does not match immutable node identity", label, serviceName, assignment.Node)
+		}
+	}
+	return nil
 }
 
 func BuildActualSnapshot(project string, environment string, targetNodes []string, actual map[string]*reconcile.ActualService) *ActualSnapshot {
@@ -361,6 +445,62 @@ func PersistToServers(pool *ssh.Pool, cfg *config.Config, environment string, se
 		}
 	}
 
+	return nil
+}
+
+// PersistDesiredToServers durably records placement/config intent before any
+// workload mutation. Actual snapshots remain untouched until reconciliation
+// finishes, so an interrupted operation is visible as desired/actual drift.
+func PersistDesiredToServers(pool *ssh.Pool, cfg *config.Config, environment string, serverNames []string, desired *DesiredRevision, event Event, verbose bool) error {
+	if pool == nil {
+		return fmt.Errorf("ssh pool not initialized")
+	}
+	if desired == nil {
+		return fmt.Errorf("desired revision is required")
+	}
+	factory, err := nodeclient.NewFactory(cfg, pool, takodSocket(cfg))
+	if err != nil {
+		return err
+	}
+	targets := make([]statePersistTarget, len(serverNames))
+	for index, serverName := range serverNames {
+		server, ok := cfg.Servers[serverName]
+		if !ok {
+			return fmt.Errorf("server %s not found", serverName)
+		}
+		targets[index] = statePersistTarget{index: index, serverName: serverName, server: server}
+	}
+	results := make([]statePersistResult, len(targets))
+	resultCh := make(chan statePersistResult, len(targets))
+	for _, target := range targets {
+		go func(target statePersistTarget) {
+			result := statePersistResult{index: target.index, serverName: target.serverName}
+			client, _, err := factory.Client(context.Background(), target.serverName)
+			if err != nil {
+				result.err = fmt.Errorf("failed to connect to %s for desired-state persistence: %w", target.serverName, err)
+			} else {
+				manager := NewManager(client, cfg, environment)
+				if err := manager.WriteDesired(desired); err != nil {
+					result.err = fmt.Errorf("%s: failed to write desired placement intent: %w", target.serverName, err)
+				} else if err := manager.AppendEvent(event); err != nil {
+					result.err = fmt.Errorf("%s: desired placement intent persisted but event append failed: %w", target.serverName, err)
+				}
+			}
+			resultCh <- result
+		}(target)
+	}
+	for range targets {
+		result := <-resultCh
+		results[result.index] = result
+	}
+	if err := statePersistError(results); err != nil {
+		return err
+	}
+	if verbose {
+		for _, result := range results {
+			fmt.Printf("  ✓ desired placement intent persisted on %s\n", result.serverName)
+		}
+	}
 	return nil
 }
 

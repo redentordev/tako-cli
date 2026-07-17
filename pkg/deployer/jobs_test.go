@@ -201,12 +201,12 @@ func TestBuildJobSpecRejectsInvalidTimeout(t *testing.T) {
 
 func TestJobOwnerServerIsDeterministic(t *testing.T) {
 	d, service := jobDeployerFixture()
-	first, err := d.JobOwnerServer(service)
+	first, err := d.JobOwnerServer("job", service)
 	if err != nil {
 		t.Fatalf("owner: %v", err)
 	}
 	for i := 0; i < 5; i++ {
-		owner, err := d.JobOwnerServer(service)
+		owner, err := d.JobOwnerServer("job", service)
 		if err != nil || owner != first {
 			t.Fatalf("owner flapped: %q vs %q (err %v)", owner, first, err)
 		}

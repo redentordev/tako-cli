@@ -484,12 +484,72 @@ Placement can also be filtered by supported node-label constraints such as
 `node.labels.role==web`. Stateful services should use `pinned` placement unless
 they are designed for multi-writer operation and external persistence.
 
+Replica placement is durable desired state, not a fresh calculation on every
+command. Each one-based replica slot is bound to the logical node and its
+immutable node ID. The first singleton prefers the local control-plane worker;
+scaling out assigns only new slots, while joining nodes or reordering the
+environment server list leaves healthy assignments untouched. A normal deploy
+fails closed if an existing assignment is outside the current placement or is
+on a cordoned/draining node, so configuration drift cannot become an implicit
+rebalance.
+
+The resolved assignment intent is replicated before the first image,
+container, schedule, or route mutation. If a process crashes, a later service
+fails, or final actual-state capture cannot complete, the chosen slots remain
+durable and desired/actual drift exposes the incomplete operation. A retry
+therefore reuses the same nodes instead of rescheduling from membership order.
+When upgrading desired state that predates assignments, Tako adopts only slots
+that can be matched to deterministic live container identities in the per-node
+actual snapshot. It fails closed instead of inventing a location when that
+evidence is missing or ambiguous.
+
+Service deletion uses the same write-ahead rule. Before stateless or job
+cleanup, desired state retains the prior sanitized configuration, image, and
+slot bindings with `removalPending: true`. Cleanup success is followed by a
+normal desired-state write that removes the entry. A crash or partial cleanup
+therefore leaves enough authority for an exact retry; missing prior
+configuration or an unreachable assigned node fails closed before the marker
+is written.
+Narrow workflows carry the complete prior desired record for services outside
+their scope through both intent and completion writes. Consequently scale,
+promotion, rollback, direct-image deployment, and targeted deploy cannot erase
+an unrelated in-progress removal. Only a full deploy owns the transition from
+`removalPending` to absent, and an actual-only workload without a proven slot
+binding requires explicit adoption before removal.
+
+Movement starts with a review artifact:
+
+```bash
+tako placement plan cordon --node node-2 --file cordon.json
+tako placement plan drain --node node-2 --file drain.json
+tako placement plan rebalance --file rebalance.json
+tako placement verify drain.json --plan-id sha256:...
+```
+
+Plans bind current/proposed slot assignments to the exact input desired
+revision and produce a stable content digest for review. Drain excludes the
+target from destinations; cordon reports replicas that remain in place while
+the node becomes ineligible for new slots; rebalance makes only the minimum deterministic
+stateless moves needed to reduce skew. Plan generation is read-only. Applying
+movement requires the separately fenced controller operation introduced by
+the control-authority lifecycle; ordinary deploy/scale paths never consume a
+plan or bypass node lifecycle latches.
+
 For persistent services, placement is part of the lifecycle contract. In a
 multi-node environment, `persistent: true` requires `placement.strategy:
 pinned` or `global`. `pinned` is the singleton accessory/database shape; `global`
 means one independent stateful instance per selected node. Persistent services
 do not support `replicas > 1`; scale stateless clients, or use external/clustered
 storage when the stateful system itself needs high availability.
+Any proposed movement of a persistent service or a service with volume mounts
+is left in place and emitted as a blocking `requiresVolumeMigration` step. Tako
+does not automatically move node-local data; backup, restore, validation, and
+cutover must be designed and reviewed separately.
+Removing a still-running persistent service from `tako.yaml` is rejected: keep
+the declaration so its node binding remains authoritative until an explicit
+persistent-workload removal workflow has completed. Stateless and job removal
+also fails before desired intent changes if any assigned node is cordoned or
+otherwise unable to receive cleanup.
 
 ## Mesh + Ingress
 
