@@ -153,12 +153,20 @@ Tako infers the meshed `takod` runtime, replicated state, and WireGuard mesh
 settings; run `tako config explain -e production` to see the effective
 defaults.
 
-For a PaaS installed on its first workload node, run `sudo tako platform init`
-on that server and add the printed `clusterId`, `nodeId`, and `workerUid` to
-the server entry with `transport: auto`. The same configuration then uses the
-protected local worker ingress when Tako runs on that exact enrolled node and
-identity-verified SSH from other machines. See
+For a PaaS installed on its first workload node, run `sudo tako platform inspect`
+first when the server's enrollment history is uncertain, then run
+`sudo tako platform init`
+on that server. The trusted platform inventory automatically replaces
+application-supplied infrastructure details: Tako uses the protected local
+worker ingress on the exact enrolled node and identity-verified SSH for other
+members. Before any project mutation, attach the workspace explicitly with
+`tako project attach --cluster CLUSTER_ID`; the create-once
+`.tako/platform-cluster.json` records that immutable choice. A first deploy can
+also prompt or use `--accept-cluster CLUSTER_ID`, but persists the attachment
+only after planning succeeds and immediately before apply. See
 [First PaaS Node With Local Deployments](docs/CONFIGURATION.md#first-paas-node-with-local-deployments).
+`tako platform inspect --output json` exposes the same read-only preflight to
+automation and exits 6 for incomplete or residual enrollment state.
 That guide also covers expiring single-use worker enrollment, pinned SSH host
 keys, and the explicit ready/schedulable/cordon/drain/remove lifecycle.
 

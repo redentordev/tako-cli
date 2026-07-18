@@ -98,7 +98,10 @@ reconciliation, proxy config, remote leases, and replicated deployment state.`,
 		if err := validateMachineOutputFlags(); err != nil {
 			return err
 		}
-		return rejectMachineOutputForHumanOnly(cmd)
+		if err := rejectMachineOutputForHumanOnly(cmd); err != nil {
+			return err
+		}
+		return requireProjectMutationAttachment(cmd)
 	},
 }
 
@@ -254,6 +257,12 @@ func init() {
 		secretsFetchCmd,
 		secretsImportCmd,
 		upgradeCmd,
+	)
+	markProjectMutating(
+		setupCmd, cloneSetupCmd, removeCmd, destroyCmd, rollbackCmd, promoteCmd,
+		scaleCmd, startCmd, stopCmd, placementApplyCmd, cleanupCmd, backupCmd,
+		certsPushCmd, certsRemoveCmd, maintenanceCmd, upgradeServersCmd, execCmd,
+		jobsTriggerCmd, envPushCmd, stateLeaseReleaseCmd, stateForgetNodeCmd, stateRepairCmd, liveCmd,
 	)
 
 	// Set custom version template

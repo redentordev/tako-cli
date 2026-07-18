@@ -38,7 +38,7 @@ func newTestMembershipStore(t *testing.T) (*MembershipStore, *nodeidentity.Insta
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.InitializeFirstNode(*installation, DefaultPlatformMeshCIDR, "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=", "node-1.example"); err != nil {
+	if _, err := store.InitializeFirstNode(*installation, DefaultPlatformMeshCIDR, testMeshPublicKey(t, 1), "node-1.example"); err != nil {
 		t.Fatal(err)
 	}
 	return store, installation, now
@@ -63,8 +63,21 @@ func testEnrollment(t *testing.T, store *MembershipStore, token string, nodeID s
 		ControllerSSHHost:     "203.0.113.10", ControllerSSHPort: 22, ControllerSSHUser: "root", ControllerSSHHostKeyType: "ssh-ed25519",
 		ControllerSSHHostKey: hostKey, ControllerSSHHostKeyFingerprint: fingerprint,
 		AllocationPublicKey: worker.AllocationPublicKey,
-		MeshPublicKey:       "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+		MeshPublicKey:       testMeshPublicKey(t, 2),
 	}
+}
+
+func testMeshPublicKey(t *testing.T, seed byte) string {
+	t.Helper()
+	private := make([]byte, 32)
+	for index := range private {
+		private[index] = seed
+	}
+	public, err := meshPublicKeyFromPrivate(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return public
 }
 
 func testMembershipHostKey(t *testing.T) (string, string) {

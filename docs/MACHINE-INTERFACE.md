@@ -22,6 +22,18 @@ Go programs should prefer importing `pkg/engine` directly (see
 - Set `TAKO_NONINTERACTIVE=1` (or `CI=1`) in the environment. Any code path
   that would prompt then fails fast with a typed error instead of blocking
   on stdin.
+- On an enrolled platform node, every project mutation requires a create-once
+  `.tako/platform-cluster.json` binding. Create it explicitly with
+  `tako project attach --cluster CLUSTER_ID`, or let `deploy
+  --accept-cluster CLUSTER_ID` publish it after planning and confirmation,
+  immediately before apply. `--plan-only`, failed planning, plan mismatch, and
+  cancelled confirmation do not write it. `--yes` does not grant this separate
+  authority. Missing attachment emits a versioned
+  `ClusterAttachmentRequired` result (and terminal NDJSON `result` event) with
+  project, cluster, local node, published controller, and the exact
+  acknowledgement command, then exits 2. Existing binding mismatches fail
+  before a runtime connection. Off-node explicit SSH configurations remain
+  valid when every immutable server identity names the bound cluster.
 - Set `TAKO_SKIP_UPDATE_CHECK=1` to suppress the background update check.
 - SSH host key policy: pass `--host-key-mode strict` with a pre-provisioned
   `known_hosts`, or accept trust-on-first-use with `tofu` (default). The
@@ -338,7 +350,7 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `history`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
 | Human-only by design | `init`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
@@ -349,6 +361,23 @@ typed invalid-request error (exit code 2) instead of printing human text to
 a stdout the caller expected to parse. The categorization is test-enforced:
 `cmd/machine_coverage_test.go` walks the registered command tree and fails
 when a runnable command is missing from this table or listed twice.
+
+`platform inspect` emits a `PlatformEnrollmentInspection` result with status
+`not-enrolled`, `enrolled`, or `incomplete`. The first two statuses exit 0.
+`incomplete` still emits its result, including `nextAction` and any safe resume
+command, then exits 6 for operator attention. Inventory-derived roles,
+lifecycle, and controller fields are explicitly named `published*` and include
+the snapshot generation and `inventoryUpdatedAt`; they do not assert
+controller reachability.
+
+`project attach` emits the persisted `ProjectClusterBinding` document. When a
+mutation is attempted without that document, the CLI emits
+`ClusterAttachmentRequired` instead, with `status: required`, `project`,
+`clusterId`, optional `localNodeId`/`localNodeName`, optional published
+controller ID/name, and an `acknowledgement` command containing the exact
+cluster ID. Node/controller fields are absent for an off-node workspace whose
+explicit SSH entries identify one cluster. That result is a preflight
+rejection, not evidence that planning or mutation started.
 
 Interactive-only flags (`drift --watch`, `metrics --live`, `stats --live`)
 are rejected with exit code 2 when a machine mode is enabled.

@@ -68,9 +68,51 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, config BootstrapConfig) (*
 	config = config.withDefaults()
 	identityPath := config.hostPath(config.IdentityPath)
 	configPath := filepath.Join(config.hostPath(config.ConfigDir), "platform.json")
+	inspection, err := InspectEnrollment(EnrollmentInspectionPaths{
+		IdentityPath:     identityPath,
+		LocalBindingPath: config.hostPath(nodeidentity.DefaultLocalBindingPath),
+		InventoryPath:    config.hostPath(nodeidentity.DefaultInventoryPath),
+		ConfigPath:       configPath,
+		MembershipPath:   config.hostPath(DefaultMembershipPath(config.StateDir)),
+		WorkerUnitPath:   config.hostPath(DefaultWorkerUnitPath),
+		MeshKeyDir:       config.hostPath(DefaultPlatformMeshKeyDir),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("platform init refused before host mutation: inspect existing enrollment: %w", err)
+	}
 	existingIdentity, err := nodeidentity.ReadOptional(identityPath)
 	if err != nil {
 		return nil, fmt.Errorf("read installation identity: %w", err)
+	}
+	switch inspection.NextAction {
+	case EnrollmentActionInitialize, EnrollmentActionResumeInit, EnrollmentActionUseExisting:
+		// These are the only inspection decisions that permit initialization or
+		// an idempotent resume. Recovery and worker-repair states require their
+		// dedicated workflows and must never be rebuilt by platform init.
+	case EnrollmentActionRepairWorker:
+		return nil, existingEnrollmentErrorWithInventory(existingIdentity, config.hostPath(nodeidentity.DefaultInventoryPath), inspection.Detail)
+	default:
+		detail := inspection.Detail
+		if len(inspection.ResidualArtifacts) > 0 {
+			detail += "; residual platform artifacts: " + strings.Join(inspection.ResidualArtifacts, ", ")
+		}
+		return nil, fmt.Errorf("platform init refused before host mutation: inspection requires %s: %s; run 'sudo tako platform inspect' and recover the existing state instead of initializing over it", inspection.NextAction, detail)
+	}
+	if existingIdentity == nil {
+		artifacts, inspectErr := existingArtifactPaths(map[string]string{
+			"platform config":       configPath,
+			"local node binding":    config.hostPath(nodeidentity.DefaultLocalBindingPath),
+			"cluster inventory":     config.hostPath(nodeidentity.DefaultInventoryPath),
+			"controller membership": config.hostPath(DefaultMembershipPath(config.StateDir)),
+			"platform worker unit":  config.hostPath(DefaultWorkerUnitPath),
+			"platform mesh key":     config.hostPath(DefaultPlatformMeshKeyDir),
+		})
+		if inspectErr != nil {
+			return nil, fmt.Errorf("inspect existing platform state before initialization: %w", inspectErr)
+		}
+		if len(artifacts) > 0 {
+			return nil, fmt.Errorf("platform init refused before host mutation: protected platform artifacts exist without an installation identity: %s; run 'tako platform inspect' and recover the existing state instead of initializing over it", strings.Join(artifacts, ", "))
+		}
 	}
 	existingConfig, configErr := readConfigDocument(configPath)
 	if configErr != nil && !errors.Is(configErr, os.ErrNotExist) {
@@ -114,13 +156,13 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, config BootstrapConfig) (*
 	}
 	if existingIdentity != nil {
 		if existingIdentity.NodeName != config.NodeName || !slices.Equal(existingIdentity.EnrollmentRoles, firstNodeRoles) {
-			return nil, fmt.Errorf("existing installation identity is not the requested first-node enrollment")
+			return nil, existingEnrollmentErrorWithInventory(existingIdentity, config.hostPath(nodeidentity.DefaultInventoryPath), "the existing installation identity is not the requested first-node enrollment")
 		}
 		if strings.TrimSpace(config.ClusterID) != "" && !strings.EqualFold(existingIdentity.ClusterID, config.ClusterID) {
-			return nil, fmt.Errorf("existing cluster ID does not match requested cluster ID")
+			return nil, existingEnrollmentErrorWithInventory(existingIdentity, config.hostPath(nodeidentity.DefaultInventoryPath), "the requested cluster ID does not match the existing enrollment")
 		}
 		if strings.TrimSpace(config.NodeID) != "" && !strings.EqualFold(existingIdentity.NodeID, config.NodeID) {
-			return nil, fmt.Errorf("existing node ID does not match requested node ID")
+			return nil, existingEnrollmentErrorWithInventory(existingIdentity, config.hostPath(nodeidentity.DefaultInventoryPath), "the requested node ID does not match the existing enrollment")
 		}
 	}
 	dockerDataRoot, err := b.host.ResolveDockerDataRoot(ctx, config.DockerDataRoot)
@@ -354,13 +396,13 @@ func ensureFirstNodeIdentity(path string, config BootstrapConfig) (*nodeidentity
 	}
 	if existing != nil {
 		if existing.NodeName != config.NodeName || !slices.Equal(existing.EnrollmentRoles, firstNodeRoles) {
-			return nil, false, fmt.Errorf("existing installation identity is not the requested first-node enrollment")
+			return nil, false, existingEnrollmentError(existing, "the existing installation identity is not the requested first-node enrollment")
 		}
 		if strings.TrimSpace(config.ClusterID) != "" && !strings.EqualFold(existing.ClusterID, config.ClusterID) {
-			return nil, false, fmt.Errorf("existing cluster ID does not match requested cluster ID")
+			return nil, false, existingEnrollmentError(existing, "the requested cluster ID does not match the existing enrollment")
 		}
 		if strings.TrimSpace(config.NodeID) != "" && !strings.EqualFold(existing.NodeID, config.NodeID) {
-			return nil, false, fmt.Errorf("existing node ID does not match requested node ID")
+			return nil, false, existingEnrollmentError(existing, "the requested node ID does not match the existing enrollment")
 		}
 		return existing, true, nil
 	}

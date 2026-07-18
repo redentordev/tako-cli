@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"unicode"
 
@@ -68,6 +70,9 @@ for remote state and later config export; pass --server-name to choose it.`,
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := rejectConfiglessRunOnEnrolledPlatform(config.DefaultLocalPlatformArtifactPaths()); err != nil {
+				return err
+			}
 			imageRef := strings.TrimSpace(args[0])
 			if err := readRunRegistryPassword(cmd, &opts); err != nil {
 				return err
@@ -98,6 +103,17 @@ for remote state and later config export; pass --server-name to choose it.`,
 	flags.StringVar(&opts.RegistryUser, "registry-user", opts.RegistryUser, "Username for the image's registry (pair with --registry-password-stdin)")
 	flags.BoolVar(&opts.RegistryPasswordStdin, "registry-password-stdin", opts.RegistryPasswordStdin, "Read the registry password from stdin")
 	return cmd
+}
+
+func rejectConfiglessRunOnEnrolledPlatform(paths []string) error {
+	for _, path := range paths {
+		if _, err := os.Lstat(path); err == nil {
+			return &engine.InvalidRequestError{Err: fmt.Errorf("configless 'tako run' is disabled on a host with platform enrollment artifacts; create a tako.yaml project, inspect with 'tako platform inspect', attach it with 'tako project attach --cluster CLUSTER_ID', then deploy through the existing cluster")}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return &engine.InvalidRequestError{Err: fmt.Errorf("inspect local platform enrollment before configless run: %w", err)}
+		}
+	}
+	return nil
 }
 
 // readRunRegistryPassword consumes the registry password from stdin when

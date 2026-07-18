@@ -14,6 +14,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/envexpand"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/projectbinding"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
 	"gopkg.in/yaml.v3"
 )
@@ -38,7 +39,20 @@ type Config struct {
 
 	Servers      map[string]ServerConfig      `yaml:"servers" json:"servers"`
 	Environments map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
+
+	// Platform is trusted runtime context materialized from the node-local
+	// platform inventory. It is never accepted from application config or
+	// serialized back into tako.yaml/tako.json.
+	Platform *PlatformContext `yaml:"-" json:"-"`
+	// PlatformArtifacts records trusted node-local platform markers even when
+	// enrollment is incomplete and no authoritative inventory can be
+	// materialized. Project mutations fail closed while this is non-empty.
+	PlatformArtifacts []string `yaml:"-" json:"-"`
 }
+
+// PlatformContext identifies the enrolled cluster that owns the runtime
+// targets materialized for this invocation.
+type PlatformContext = projectbinding.Context
 
 const (
 	RuntimeModeTakod = "takod"
@@ -1187,10 +1201,12 @@ func LoadConfig(configPath string) (*Config, error) {
 	if err := materializeDefaultPlatformInventory(&config); err != nil {
 		return nil, fmt.Errorf("materialize platform inventory: %w", err)
 	}
-
 	// Validate config
 	if err := ValidateConfig(&config); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+	if err := validateExistingProjectClusterBinding(&config, configPath); err != nil {
+		return nil, err
 	}
 
 	return &config, nil

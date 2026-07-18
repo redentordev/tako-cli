@@ -51,8 +51,88 @@ Install Tako on the server that will host the control plane and most initial
 workloads, then initialize the protected single-node foundation:
 
 ```bash
+sudo tako platform inspect
 sudo tako platform init --node node-1
 ```
+
+`platform inspect` is read-only and should be run before initialization when a
+server's history is uncertain. It reports the immutable cluster and node IDs,
+last published roles, lifecycle, and controller from the root-published local
+binding and trusted inventory, including the snapshot generation and update
+time. It does not claim that the published controller is currently reachable.
+When run with `sudo`, it also validates and cross-checks the protected identity
+and, on the controller, compares protected membership with the published
+generation. On an enrolled worker it explains that running Tako or another
+project locally does not promote that worker. `platform init` refuses an
+existing worker, conflicting identity, or orphaned platform artifacts before
+creating accounts, staging binaries, or changing services, and prints the
+existing enrollment plus safe next steps. An identity-only interrupted
+first-controller bootstrap requires recovery because custom account and policy
+choices may predate the identity without having been persisted. A runtime-only
+interruption receives an exact `platform init` resume command only when the
+protected configuration is present and membership exactly matches the
+published inventory. Tako never automatically detaches a node or replaces its
+create-once identity; use another server or VM for an independent cluster.
+
+Running the CLI from an enrolled worker is only an operator location; it never
+makes that worker a project-specific controller. Before the first deployment
+from a workspace on any enrolled node, Tako shows the detected cluster, local
+node, published controller, and project name, then requires an explicit
+attachment. The clearest workflow is:
+
+```bash
+tako project attach --cluster 11111111-1111-4111-8111-111111111111
+tako deploy
+```
+
+The acknowledgement creates the workspace-local, create-once
+`.tako/platform-cluster.json` binding. All project-mutating commands require
+the binding; read-only inspection remains available without it. Later config
+loads refuse if the project name or detected cluster changes. This also makes
+the namespace consequence clear:
+an existing identical `project.name` is the same project inside that cluster,
+not an isolated second PaaS.
+
+Interactive deploys can approve an attachment prompt. Non-interactive deploys
+can supply the exact immutable ID from the structured
+`ClusterAttachmentRequired` result:
+
+```bash
+tako deploy --accept-cluster 11111111-1111-4111-8111-111111111111
+```
+
+`--yes` does not imply cluster attachment. The exact-ID acknowledgement is
+separate because a deployment confirmation and choosing which PaaS owns a
+workspace are different decisions. Deploy only publishes the binding after a
+valid plan and any destructive confirmation, immediately before apply;
+`--plan-only`, plan mismatch, failed planning, and cancelled confirmation never
+attach the workspace. The explicit `project attach` command is itself the
+requested workspace mutation and can be used before any other mutating command.
+
+The binding stores the inventory generation and timestamp for audit context,
+but only `clusterId` and `project` are stable matching authorities; moving the
+same workspace between nodes of that cluster does not require rebinding. An
+attached workspace also remains usable from an off-node operator/CI host when
+its explicit SSH server entries all carry the same matching immutable
+`clusterId`/`nodeId`. `tako project attach --cluster CLUSTER_ID` works from
+that off-node host too; its binding records only the cluster and project because
+there is no local enrolled node or locally published controller to claim. Mixed,
+partially identified, or unidentifiable clusters fail closed. Any local platform
+artifact without a complete trusted inventory—including a residual protected
+WireGuard identity—also fails closed and directs the operator to
+`sudo tako platform inspect` before mutation.
+
+Automation can consume the same diagnosis without parsing prose:
+
+```bash
+sudo tako platform inspect --output json
+```
+
+The `PlatformEnrollmentInspection` result has status `not-enrolled`,
+`enrolled`, or `incomplete`, plus a stable `nextAction`. The first two statuses
+exit 0. Incomplete or residual state emits the result and exits 6 so automation
+cannot mistake it for permission to initialize. Malformed or contradictory
+trusted files fail the command.
 
 The command prints the immutable `clusterId`, `nodeId`, and numeric
 `workerUid`. On an enrolled platform node, Tako materializes server targets,

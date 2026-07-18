@@ -12,6 +12,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/git"
+	"github.com/redentordev/tako-cli/pkg/projectbinding"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -34,6 +35,7 @@ var (
 	deployArchive         string
 	deployPlanOnly        bool
 	deployPlanFile        string
+	deployAcceptCluster   string
 )
 
 var blueGreenGraceSleep = time.Sleep
@@ -76,6 +78,7 @@ func init() {
 	deployCmd.Flags().StringVar(&deployArchive, "archive", "", "Deploy target service from a local source archive (.tar, .tar.gz, .tgz, .zip)")
 	deployCmd.Flags().BoolVar(&deployPlanOnly, "plan-only", false, "Compute and show the deployment plan without applying it")
 	deployCmd.Flags().StringVar(&deployPlanFile, "plan", "", "Path to a reviewed plan document; apply fails if the computed plan drifted from it")
+	deployCmd.Flags().StringVar(&deployAcceptCluster, "accept-cluster", "", "Attach this workspace to the exact detected platform cluster ID")
 }
 
 func loadDeployConfig(configPath string) (*config.Config, error) {
@@ -100,7 +103,12 @@ func resolveDeployConfigPath(configPath string) string {
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
+	configPath := resolveDeployConfigPath(cfgFile)
 	cfg, err := loadDeployConfig(cfgFile)
+	if err != nil {
+		return err
+	}
+	pendingAttachment, err := prepareDeployClusterAttachment(cmd, cfg, configPath, deployAcceptCluster)
 	if err != nil {
 		return err
 	}
@@ -159,6 +167,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 	}
+	if err := commitDeployClusterAttachment(cmd, pendingAttachment); err != nil {
+		return err
+	}
 
 	result, err := session.Apply(cmd.Context())
 	if result != nil {
@@ -167,6 +178,102 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return err
+}
+
+type pendingDeployClusterAttachment struct {
+	path    string
+	binding projectbinding.Binding
+}
+
+func prepareDeployClusterAttachment(cmd *cobra.Command, cfg *config.Config, configPath, acceptedClusterID string) (*pendingDeployClusterAttachment, error) {
+	acceptedClusterID = strings.ToLower(strings.TrimSpace(acceptedClusterID))
+	platformContext, contextErr := config.ResolveProjectClusterContext(cfg)
+	if contextErr != nil {
+		return nil, &engine.InvalidRequestError{Err: contextErr}
+	}
+	if platformContext == nil {
+		if acceptedClusterID != "" {
+			return nil, &engine.InvalidRequestError{Err: fmt.Errorf("--accept-cluster was provided, but no platform cluster was detected")}
+		}
+		return nil, nil
+	}
+	bindingPath, err := projectbinding.PathForConfig(configPath)
+	if err != nil {
+		return nil, &engine.InvalidRequestError{Err: err}
+	}
+	binding, err := projectbinding.ReadOptional(bindingPath)
+	if err != nil {
+		return nil, &engine.InvalidRequestError{Err: fmt.Errorf("read workspace platform attachment: %w", err)}
+	}
+	if binding != nil {
+		if err := binding.Matches(cfg.Project.Name, *platformContext); err != nil {
+			return nil, &engine.InvalidRequestError{Err: fmt.Errorf("refusing deployment with conflicting workspace platform attachment: %w", err)}
+		}
+		if acceptedClusterID != "" && !strings.EqualFold(acceptedClusterID, platformContext.ClusterID) {
+			return nil, &engine.InvalidRequestError{Err: fmt.Errorf("--accept-cluster %s does not match attached cluster %s", acceptedClusterID, platformContext.ClusterID)}
+		}
+		return nil, nil
+	}
+
+	guidance := fmt.Sprintf("rerun this deployment with --accept-cluster %s to attach this workspace explicitly", platformContext.ClusterID)
+	if acceptedClusterID == "" {
+		if machineOutputEnabled() || isNonInteractive() || !term.IsTerminal(int(os.Stdin.Fd())) {
+			if machineOutputEnabled() {
+				if emitErr := emitResultDocument(newClusterAttachmentRequiredDocument(cfg.Project.Name, *platformContext)); emitErr != nil {
+					return nil, emitErr
+				}
+			}
+			details := ""
+			if platformContext.LocalNodeID != "" {
+				details += fmt.Sprintf("; local node %s (%s)", platformContext.LocalNodeName, platformContext.LocalNodeID)
+			}
+			if platformContext.ControllerNodeID != "" {
+				details += fmt.Sprintf("; published controller %s (%s)", platformContext.ControllerNodeName, platformContext.ControllerNodeID)
+			}
+			return nil, &engine.InvalidRequestError{Err: fmt.Errorf("workspace is not attached to detected platform cluster %s%s; %s", platformContext.ClusterID, details, guidance)}
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "\nExisting Tako platform detected\n  Cluster:    %s\n", platformContext.ClusterID)
+		if platformContext.LocalNodeID != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "  Local node: %s (%s)\n", platformContext.LocalNodeName, platformContext.LocalNodeID)
+		}
+		if platformContext.ControllerNodeID != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "  Controller: %s (%s, published inventory)\n", platformContext.ControllerNodeName, platformContext.ControllerNodeID)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "  Project:    %s\n\nAttaching means this workspace will deploy and update project %s inside that existing cluster. It does not create or promote a control plane.\n", cfg.Project.Name, cfg.Project.Name)
+		confirmed, confirmErr := confirmDeployAction("\nAttach this workspace to the existing cluster? (y/N): ", "workspace platform attachment is required")
+		if confirmErr != nil {
+			return nil, confirmErr
+		}
+		if !confirmed {
+			return nil, &engine.InvalidRequestError{Err: fmt.Errorf("workspace attachment declined; no deployment changes were made; %s", guidance)}
+		}
+	} else if !strings.EqualFold(acceptedClusterID, platformContext.ClusterID) {
+		return nil, &engine.InvalidRequestError{Err: fmt.Errorf("--accept-cluster %s does not match detected platform cluster %s", acceptedClusterID, platformContext.ClusterID)}
+	}
+
+	newBinding, err := projectbinding.New(cfg.Project.Name, *platformContext, time.Now())
+	if err != nil {
+		return nil, &engine.InvalidRequestError{Err: fmt.Errorf("prepare workspace platform attachment: %w", err)}
+	}
+	return &pendingDeployClusterAttachment{path: bindingPath, binding: *newBinding}, nil
+}
+
+func commitDeployClusterAttachment(cmd *cobra.Command, pending *pendingDeployClusterAttachment) error {
+	if pending == nil {
+		return nil
+	}
+	winner, err := projectbinding.Create(pending.path, pending.binding)
+	if err != nil {
+		return &engine.InvalidRequestError{Err: fmt.Errorf("create workspace platform attachment: %w", err)}
+	}
+	platformContext := projectbinding.Context{ClusterID: pending.binding.ClusterID}
+	if err := winner.Matches(pending.binding.Project, platformContext); err != nil {
+		return &engine.InvalidRequestError{Err: fmt.Errorf("a conflicting workspace platform attachment won the create race: %w", err)}
+	}
+	if !machineOutputEnabled() {
+		fmt.Fprintf(cmd.OutOrStdout(), "Attached project %s to platform cluster %s.\n", pending.binding.Project, pending.binding.ClusterID)
+	}
+	return nil
 }
 
 // isNonInteractive checks if running in non-interactive mode

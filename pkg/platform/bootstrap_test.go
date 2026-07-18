@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,9 +28,11 @@ type fakeHost struct {
 	accountCalls      int
 	accessGroup       string
 	readyErr          error
+	resolveCalls      int
 }
 
 func (h *fakeHost) ResolveDockerDataRoot(_ context.Context, requested string) (string, error) {
+	h.resolveCalls++
 	if h.err != nil {
 		return "", h.err
 	}
@@ -167,14 +170,144 @@ func TestBootstrapRejectsConflictingExistingIdentity(t *testing.T) {
 	host := &fakeHost{uid: os.Geteuid(), gid: os.Getegid()}
 	bootstrapper, _ := NewBootstrapper(host)
 	_, err = bootstrapper.Bootstrap(context.Background(), BootstrapConfig{RootDir: root, NodeName: "node-1", BinaryPath: "/usr/local/bin/tako", RequireRoot: false})
-	if err == nil || !strings.Contains(err.Error(), "not the requested first-node") {
+	var conflict *ExistingEnrollmentError
+	if err == nil || !errors.As(err, &conflict) || !strings.Contains(err.Error(), "already enrolled as other-node") || !strings.Contains(err.Error(), identity.ClusterID) || !strings.Contains(err.Error(), "tako platform inspect") {
 		t.Fatalf("Bootstrap error = %v", err)
+	}
+	if conflict.NodeID != identity.NodeID || strings.Join(conflict.EnrollmentRoles, ",") != nodeidentity.RoleWorker {
+		t.Fatalf("conflict details = %#v", conflict)
 	}
 	if len(host.units) != 0 {
 		t.Fatal("services were mutated after identity conflict")
 	}
 	if host.accountCalls != 0 {
 		t.Fatal("host accounts were mutated before identity conflict was rejected")
+	}
+}
+
+func TestBootstrapRejectsOrphanMembershipBeforeHostMutation(t *testing.T) {
+	root := t.TempDir()
+	membershipPath := filepath.Join(root, strings.TrimPrefix(DefaultMembershipPath(DefaultStateDir), "/"))
+	if err := os.MkdirAll(filepath.Dir(membershipPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(membershipPath, []byte("orphan"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	host := &fakeHost{uid: os.Geteuid(), gid: os.Getegid()}
+	bootstrapper, _ := NewBootstrapper(host)
+	_, err := bootstrapper.Bootstrap(context.Background(), BootstrapConfig{RootDir: root, NodeName: "node-1", BinaryPath: "/usr/local/bin/tako", RequireRoot: false})
+	if err == nil || !strings.Contains(err.Error(), "refused before host mutation") || !strings.Contains(err.Error(), membershipPath) {
+		t.Fatalf("orphan membership error = %v", err)
+	}
+	if host.accountCalls != 0 || host.stagedDestination != "" || len(host.units) != 0 {
+		t.Fatalf("host mutated before orphan membership rejection: %#v", host)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "etc", "tako", "identity.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("identity created before orphan membership rejection: %v", statErr)
+	}
+}
+
+func TestBootstrapRefusesIdentityOnlyControllerBeforeHostMutation(t *testing.T) {
+	root := t.TempDir()
+	identityPath := filepath.Join(root, "etc", "tako", "identity.json")
+	if err := os.MkdirAll(filepath.Dir(identityPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := nodeidentity.New("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "node-1", firstNodeRoles, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := nodeidentity.Create(identityPath, *identity); err != nil {
+		t.Fatal(err)
+	}
+	host := &fakeHost{uid: os.Geteuid(), gid: os.Getegid()}
+	bootstrapper, _ := NewBootstrapper(host)
+	_, err = bootstrapper.Bootstrap(context.Background(), BootstrapConfig{RootDir: root, NodeName: "node-1", ClusterID: identity.ClusterID, NodeID: identity.NodeID, BinaryPath: "/usr/local/bin/tako", RequireRoot: false})
+	if err == nil || !strings.Contains(err.Error(), EnrollmentActionRecoverState) || !strings.Contains(err.Error(), "policy choices") {
+		t.Fatalf("identity-only bootstrap error = %v", err)
+	}
+	if host.resolveCalls != 0 || host.accountCalls != 0 || host.stagedDestination != "" || len(host.units) != 0 || len(host.activated) != 0 {
+		t.Fatalf("host mutated before identity-only recovery rejection: %#v", host)
+	}
+}
+
+func TestBootstrapRefusesInspectionRecoveryStatesBeforeHostMutation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		removePath func(string) string
+		removeAll  bool
+	}{
+		{name: "missing-local-binding", removePath: func(root string) string {
+			return filepath.Join(root, strings.TrimPrefix(nodeidentity.DefaultLocalBindingPath, "/"))
+		}},
+		{name: "missing-controller-membership", removePath: func(root string) string {
+			return filepath.Join(root, strings.TrimPrefix(DefaultMembershipPath(DefaultStateDir), "/"))
+		}},
+		{name: "missing-mesh-key-directory", removeAll: true, removePath: func(root string) string {
+			return filepath.Join(root, strings.TrimPrefix(DefaultPlatformMeshKeyDir, "/"))
+		}},
+		{name: "missing-mesh-private-key", removePath: func(root string) string {
+			return filepath.Join(root, strings.TrimPrefix(DefaultPlatformMeshKeyDir, "/"), "privatekey")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			initialHost := &fakeHost{uid: os.Geteuid(), gid: os.Getegid()}
+			bootstrapper, _ := NewBootstrapper(initialHost)
+			config := BootstrapConfig{RootDir: root, NodeName: "node-1", BinaryPath: "/tmp/tako-source", RequireRoot: false}
+			if _, err := bootstrapper.Bootstrap(context.Background(), config); err != nil {
+				t.Fatal(err)
+			}
+			remove := os.Remove
+			if test.removeAll {
+				remove = os.RemoveAll
+			}
+			if err := remove(test.removePath(root)); err != nil {
+				t.Fatal(err)
+			}
+
+			retryHost := &fakeHost{uid: os.Geteuid(), gid: os.Getegid()}
+			bootstrapper, _ = NewBootstrapper(retryHost)
+			_, err := bootstrapper.Bootstrap(context.Background(), config)
+			if err == nil || !strings.Contains(err.Error(), "refused before host mutation") || !strings.Contains(err.Error(), EnrollmentActionRecoverState) {
+				t.Fatalf("recovery-state bootstrap error = %v", err)
+			}
+			if retryHost.resolveCalls != 0 || retryHost.accountCalls != 0 || retryHost.stagedDestination != "" || len(retryHost.units) != 0 || len(retryHost.activated) != 0 {
+				t.Fatalf("host mutated before recovery-state rejection: %#v", retryHost)
+			}
+		})
+	}
+}
+
+func TestBootstrapDoesNotReplaceMissingCustomPlatformConfigWithDefaults(t *testing.T) {
+	root := t.TempDir()
+	initialHost := &fakeHost{uid: os.Geteuid(), gid: os.Getegid()}
+	bootstrapper, _ := NewBootstrapper(initialHost)
+	policy := DefaultResourcePolicy()
+	policy.MaximumConcurrentBuilds = 7
+	initial := BootstrapConfig{
+		RootDir: root, NodeName: "node-1", BinaryPath: "/tmp/tako-source", RequireRoot: false,
+		WorkerUser: "custom-worker", WorkerGroup: "custom-worker", Policy: policy,
+	}
+	if _, err := bootstrapper.Bootstrap(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, strings.TrimPrefix(DefaultPlatformConfigPath, "/"))
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+
+	retryHost := &fakeHost{uid: os.Geteuid(), gid: os.Getegid()}
+	bootstrapper, _ = NewBootstrapper(retryHost)
+	_, err := bootstrapper.Bootstrap(context.Background(), BootstrapConfig{
+		RootDir: root, NodeName: "node-1", BinaryPath: "/tmp/tako-source", RequireRoot: false,
+	})
+	if err == nil || !strings.Contains(err.Error(), EnrollmentActionRecoverState) || !strings.Contains(err.Error(), "configuration is missing") {
+		t.Fatalf("missing custom config bootstrap error = %v", err)
+	}
+	if retryHost.resolveCalls != 0 || retryHost.accountCalls != 0 || retryHost.stagedDestination != "" || len(retryHost.units) != 0 || len(retryHost.activated) != 0 {
+		t.Fatalf("host mutated before missing custom config rejection: %#v", retryHost)
 	}
 }
 
