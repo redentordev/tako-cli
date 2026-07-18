@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/projectbinding"
 	cryptossh "golang.org/x/crypto/ssh"
 )
 
@@ -102,6 +104,9 @@ func TestMaterializePlatformInventoryOwnsTargetsPlacementAndCredentials(t *testi
 	if fromPublicFiles.Servers[controller.NodeName].Transport != "local" {
 		t.Fatalf("public binding did not resolve local transport: %#v", fromPublicFiles.Servers)
 	}
+	if fromPublicFiles.Platform == nil || fromPublicFiles.Platform.ClusterID != controller.ClusterID || fromPublicFiles.Platform.LocalNodeID != controller.NodeID || fromPublicFiles.Platform.ControllerNodeID != controller.NodeID || fromPublicFiles.Platform.InventoryGeneration != inventory.Generation {
+		t.Fatalf("platform context = %#v", fromPublicFiles.Platform)
+	}
 
 	localOnly := minimalValidConfigWithService(ServiceConfig{Image: "nginx"})
 	localOnly.Environments["production"] = EnvironmentConfig{Services: map[string]ServiceConfig{"web": {Image: "nginx"}}}
@@ -130,5 +135,111 @@ func TestMaterializePlatformInventoryOwnsTargetsPlacementAndCredentials(t *testi
 		if server.Transport == "ssh" && (server.Host == "" || server.User == "" || server.SSHHostKey == "" || server.SSHHostKeyFingerprint == "") {
 			t.Fatalf("worker-side SSH server %s is not completely pinned: %#v", name, server)
 		}
+	}
+}
+
+func TestValidateExistingProjectClusterBindingPinsProjectAndCluster(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "tako.yaml")
+	context := PlatformContext{
+		ClusterID:   "11111111-1111-4111-8111-111111111111",
+		LocalNodeID: "22222222-2222-4222-8222-222222222222", LocalNodeName: "node-2",
+		ControllerNodeID: "33333333-3333-4333-8333-333333333333", ControllerNodeName: "node-1",
+		InventoryGeneration: 4, InventoryUpdatedAt: time.Now().UTC(),
+	}
+	binding, err := projectbinding.New("demo", context, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, _ := projectbinding.PathForConfig(configPath)
+	if _, err := projectbinding.Create(path, *binding); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{Project: ProjectConfig{Name: "demo"}, Platform: &context}
+	if err := validateExistingProjectClusterBinding(cfg, configPath); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Project.Name = "other"
+	if err := validateExistingProjectClusterBinding(cfg, configPath); err == nil || !strings.Contains(err.Error(), "attached for project") {
+		t.Fatalf("project mismatch = %v", err)
+	}
+	if err := validateExistingProjectClusterBinding(&Config{Project: ProjectConfig{Name: "demo"}}, configPath); err == nil || !strings.Contains(err.Error(), "no immutable cluster identities") {
+		t.Fatalf("missing platform mismatch = %v", err)
+	}
+	offNode := &Config{Project: ProjectConfig{Name: "demo"}, Servers: map[string]ServerConfig{
+		"node-1": {ClusterID: context.ClusterID, NodeID: context.ControllerNodeID}, "node-2": {ClusterID: context.ClusterID, NodeID: context.LocalNodeID},
+	}}
+	if err := validateExistingProjectClusterBinding(offNode, configPath); err != nil {
+		t.Fatalf("off-node explicit identities: %v", err)
+	}
+	offNode.Servers["node-2"] = ServerConfig{ClusterID: "44444444-4444-4444-8444-444444444444", NodeID: context.LocalNodeID}
+	if err := validateExistingProjectClusterBinding(offNode, configPath); err == nil || !strings.Contains(err.Error(), "identifies 2 clusters") {
+		t.Fatalf("mixed off-node clusters = %v", err)
+	}
+	offNode.Servers["node-2"] = ServerConfig{}
+	if err := validateExistingProjectClusterBinding(offNode, configPath); err == nil || !strings.Contains(err.Error(), "mixes identified and unidentified servers") {
+		t.Fatalf("unidentified off-node server = %v", err)
+	}
+}
+
+func TestLoadConfigAllowsAttachedWorkspaceFromOffNodeSSHConfig(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "tako.yaml")
+	cfg := minimalValidConfigWithService(ServiceConfig{Image: "nginx:alpine"})
+	server := cfg.Servers["node"]
+	server.Transport = "ssh"
+	server.ClusterID = "11111111-1111-4111-8111-111111111111"
+	server.NodeID = "22222222-2222-4222-8222-222222222222"
+	cfg.Servers["node"] = server
+	if err := SaveConfig(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	context := PlatformContext{
+		ClusterID: server.ClusterID, LocalNodeID: server.NodeID, LocalNodeName: "node-2",
+		ControllerNodeID: "33333333-3333-4333-8333-333333333333", ControllerNodeName: "node-1",
+		InventoryGeneration: 5, InventoryUpdatedAt: time.Now().UTC(),
+	}
+	binding, _ := projectbinding.New("demo", context, time.Now())
+	path, _ := projectbinding.PathForConfig(configPath)
+	if _, err := projectbinding.Create(path, *binding); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("off-node attached workspace failed to load: %v", err)
+	}
+	if loaded.Platform != nil || loaded.Servers["node"].ClusterID != server.ClusterID {
+		t.Fatalf("off-node config was unexpectedly materialized: %#v", loaded)
+	}
+}
+
+func TestResolveProjectClusterContextRejectsGenerationZeroLocalInventory(t *testing.T) {
+	root := t.TempDir()
+	identity, err := nodeidentity.New("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "node-1", []string{nodeidentity.RoleControlPlane, nodeidentity.RoleWorker}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventoryPath := filepath.Join(root, "cluster-inventory.json")
+	inventory := nodeidentity.ClusterInventory{
+		APIVersion: nodeidentity.InventoryAPIVersion, Kind: nodeidentity.InventoryKind, ClusterID: identity.ClusterID,
+		Nodes: []nodeidentity.InventoryNode{{NodeID: identity.NodeID, AllocationPublicKey: identity.AllocationPublicKey}},
+	}
+	if err := nodeidentity.CreateInventory(inventoryPath, inventory); err != nil {
+		t.Fatal(err)
+	}
+	cfg := minimalValidConfigWithService(ServiceConfig{Image: "nginx"})
+	if err := materializePlatformInventoryFromFiles(cfg, inventoryPath, filepath.Join(root, "missing-binding.json"), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := ExistingLocalPlatformArtifacts([]string{inventoryPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.PlatformArtifacts = artifacts
+	if cfg.Platform != nil {
+		t.Fatalf("generation-zero inventory materialized authority: %#v", cfg.Platform)
+	}
+	if _, err := ResolveProjectClusterContext(cfg); err == nil || !strings.Contains(err.Error(), "incomplete local platform") {
+		t.Fatalf("generation-zero context = %v", err)
 	}
 }

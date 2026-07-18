@@ -2,20 +2,24 @@
 .TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
 
 .SH NAME
-tako-platform - Manage the local-first Tako platform foundation
+tako-project-attach - Attach this workspace to an existing enrolled platform cluster
 
 
 .SH SYNOPSIS
-\fBtako platform [flags]\fP
+\fBtako project attach [flags]\fP
 
 
 .SH DESCRIPTION
-Manage the local-first Tako platform foundation
+Attach this workspace to an existing enrolled platform cluster
 
 
 .SH OPTIONS
+\fB--cluster\fP=""
+	Exact immutable platform cluster ID (required)
+
+.PP
 \fB-h\fP, \fB--help\fP[=false]
-	help for platform
+	help for attach
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
@@ -44,4 +48,4 @@ Manage the local-first Tako platform foundation
 
 
 .SH SEE ALSO
-\fBtako(1)\fP, \fBtako-platform-backup(1)\fP, \fBtako-platform-controller(1)\fP, \fBtako-platform-init(1)\fP, \fBtako-platform-inspect(1)\fP, \fBtako-platform-join-token(1)\fP, \fBtako-platform-node(1)\fP
+\fBtako-project(1)\fP

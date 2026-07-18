@@ -52,18 +52,29 @@ func EnsureMeshPublicKey(keyDir string) (string, error) {
 	} else if err != nil {
 		return "", err
 	}
-	public, err := curve25519.X25519(private, curve25519.Basepoint)
+	encodedPublic, err := meshPublicKeyFromPrivate(private)
 	if err != nil {
-		return "", fmt.Errorf("derive mesh public key: %w", err)
-	}
-	encodedPublic := base64.StdEncoding.EncodeToString(public)
-	if err := nodeidentity.ValidateMeshPublicKey(encodedPublic); err != nil {
 		return "", err
 	}
 	if err := fileutil.WriteFileAtomic(filepath.Join(keyDir, "publickey"), []byte(encodedPublic+"\n"), 0644); err != nil {
 		return "", fmt.Errorf("write mesh public key: %w", err)
 	}
 	return encodedPublic, nil
+}
+
+func meshPublicKeyFromPrivate(private []byte) (string, error) {
+	if len(private) != curve25519.ScalarSize {
+		return "", fmt.Errorf("mesh private key must be %d bytes", curve25519.ScalarSize)
+	}
+	public, err := curve25519.X25519(private, curve25519.Basepoint)
+	if err != nil {
+		return "", fmt.Errorf("derive mesh public key: %w", err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(public)
+	if err := nodeidentity.ValidateMeshPublicKey(encoded); err != nil {
+		return "", err
+	}
+	return encoded, nil
 }
 
 func createPrivateMeshKey(path string, data []byte) error {

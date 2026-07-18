@@ -40,6 +40,7 @@ var machineFullContractCommands = map[string]bool{
 	"tako maintenance":              true,
 	"tako metrics":                  true,
 	"tako promote":                  true,
+	"tako project attach":           true,
 	"tako proxy hash-password":      true,
 	"tako ps":                       true,
 	"tako remove":                   true,
@@ -63,6 +64,7 @@ var machineFullContractCommands = map[string]bool{
 	"tako placement plan rebalance": true,
 	"tako placement apply":          true,
 	"tako placement verify":         true,
+	"tako platform inspect":         true,
 	"tako upgrade servers":          true,
 	"tako validate":                 true,
 }

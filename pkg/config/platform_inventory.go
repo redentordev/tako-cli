@@ -8,10 +8,114 @@ import (
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/platform"
+	"github.com/redentordev/tako-cli/pkg/projectbinding"
 )
 
 func materializeDefaultPlatformInventory(cfg *Config) error {
+	artifacts, err := ExistingLocalPlatformArtifacts(DefaultLocalPlatformArtifactPaths())
+	if err != nil {
+		return err
+	}
+	cfg.PlatformArtifacts = artifacts
 	return materializePlatformInventoryFromFiles(cfg, nodeidentity.DefaultInventoryPath, nodeidentity.DefaultLocalBindingPath, os.Getenv("TAKO_PLATFORM_SSH_KEY"), os.Getenv("TAKO_SSH_PASSWORD"))
+}
+
+func DefaultLocalPlatformArtifactPaths() []string {
+	return []string{
+		nodeidentity.DefaultPath,
+		nodeidentity.DefaultLocalBindingPath,
+		nodeidentity.DefaultInventoryPath,
+		platform.DefaultPlatformConfigPath,
+		platform.DefaultMembershipPath(platform.DefaultStateDir),
+		platform.DefaultWorkerUnitPath,
+		platform.DefaultPlatformMeshKeyDir,
+	}
+}
+
+func ExistingLocalPlatformArtifacts(paths []string) ([]string, error) {
+	var found []string
+	for _, path := range paths {
+		if _, err := os.Lstat(path); err == nil {
+			found = append(found, path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect local platform artifact %s: %w", path, err)
+		}
+	}
+	sort.Strings(found)
+	return found, nil
+}
+
+// ResolveProjectClusterContext returns the immutable cluster authority for a
+// node-local materialized platform or a fully identified off-node SSH config.
+// Legacy configs with no immutable identities return nil. Partial, mixed, or
+// locally incomplete platform state fails closed.
+func ResolveProjectClusterContext(cfg *Config) (*PlatformContext, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("workspace configuration is required")
+	}
+	if cfg.Platform != nil {
+		context := *cfg.Platform
+		return &context, nil
+	}
+	if len(cfg.PlatformArtifacts) > 0 {
+		return nil, fmt.Errorf("incomplete local platform state detected at %s; run 'sudo tako platform inspect' and recover it before project mutations", strings.Join(cfg.PlatformArtifacts, ", "))
+	}
+	clusterIDs := map[string]struct{}{}
+	identified := 0
+	for name, server := range cfg.Servers {
+		clusterID := strings.ToLower(strings.TrimSpace(server.ClusterID))
+		nodeID := strings.ToLower(strings.TrimSpace(server.NodeID))
+		if clusterID == "" && nodeID == "" {
+			continue
+		}
+		if clusterID == "" || nodeID == "" {
+			return nil, fmt.Errorf("explicit server %s has a partial immutable clusterId/nodeId", name)
+		}
+		identified++
+		clusterIDs[clusterID] = struct{}{}
+	}
+	if identified == 0 {
+		return nil, nil
+	}
+	if identified != len(cfg.Servers) {
+		return nil, fmt.Errorf("off-node platform config mixes identified and unidentified servers")
+	}
+	if len(clusterIDs) != 1 {
+		return nil, fmt.Errorf("off-node platform config identifies %d clusters", len(clusterIDs))
+	}
+	for clusterID := range clusterIDs {
+		return &PlatformContext{ClusterID: clusterID}, nil
+	}
+	return nil, nil
+}
+
+func validateExistingProjectClusterBinding(cfg *Config, configPath string) error {
+	path, err := projectbinding.PathForConfig(configPath)
+	if err != nil {
+		return err
+	}
+	binding, err := projectbinding.ReadOptional(path)
+	if err != nil {
+		return fmt.Errorf("read workspace platform attachment: %w", err)
+	}
+	if binding == nil {
+		return nil
+	}
+	if cfg == nil {
+		return fmt.Errorf("workspace configuration is required to validate platform attachment")
+	}
+	context, err := ResolveProjectClusterContext(cfg)
+	if err != nil {
+		return err
+	}
+	if context == nil {
+		return fmt.Errorf("workspace is attached to platform cluster %s, but no immutable cluster identities are available", binding.ClusterID)
+	}
+	if err := binding.Matches(cfg.Project.Name, *context); err != nil {
+		return fmt.Errorf("workspace platform attachment conflicts with loaded configuration: %w", err)
+	}
+	return nil
 }
 
 func materializePlatformInventoryFromFiles(cfg *Config, inventoryPath, bindingPath, sshKey, password string) error {
@@ -46,6 +150,19 @@ func MaterializePlatformInventory(cfg *Config, inventory *nodeidentity.ClusterIn
 	}
 	if err := inventory.Validate(); err != nil {
 		return err
+	}
+	localNode, found := inventory.Node(localNodeID)
+	if !found {
+		return fmt.Errorf("public local node binding identifies node %s absent from active platform membership", localNodeID)
+	}
+	controller, found := inventory.Node(inventory.ControllerNodeID)
+	if !found {
+		return fmt.Errorf("platform inventory controller %s is absent from active membership", inventory.ControllerNodeID)
+	}
+	cfg.Platform = &PlatformContext{
+		ClusterID: inventory.ClusterID, LocalNodeID: localNode.NodeID, LocalNodeName: localNode.NodeName,
+		ControllerNodeID: controller.NodeID, ControllerNodeName: controller.NodeName,
+		InventoryGeneration: inventory.Generation, InventoryUpdatedAt: inventory.UpdatedAt,
 	}
 	byName := make(map[string]nodeidentity.InventoryNode)
 	byID := make(map[string]nodeidentity.InventoryNode)
