@@ -104,6 +104,7 @@ type DesiredServiceDocument struct {
 	Persistent      bool                        `json:"persistent,omitempty"`
 	Placement       json.RawMessage             `json:"placement,omitempty"`
 	Domains         []string                    `json:"domains,omitempty"`
+	Proxy           json.RawMessage             `json:"proxy,omitempty"`
 	Volumes         []string                    `json:"volumes,omitempty"`
 	Files           []ServiceFileDocument       `json:"files,omitempty"`
 	EnvKeys         []string                    `json:"envKeys,omitempty"`

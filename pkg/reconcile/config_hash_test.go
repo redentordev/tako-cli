@@ -32,6 +32,26 @@ func TestSafeServiceConfigHashStableAcrossOrderOnlyFields(t *testing.T) {
 	}
 }
 
+func TestSafeServiceConfigHashTracksProxyRoutePolicy(t *testing.T) {
+	base := config.ServiceConfig{Image: "nginx:1.27", Port: 8080, Proxy: &config.ProxyConfig{Domain: "example.com"}}
+	changed := base
+	changed.Proxy = &config.ProxyConfig{
+		Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, MaxRequestBody: "10MB",
+		ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
+	}
+	baseHash, ok := SafeServiceConfigHash(base)
+	if !ok {
+		t.Fatal("expected base hash")
+	}
+	changedHash, ok := SafeServiceConfigHash(changed)
+	if !ok {
+		t.Fatal("expected changed hash")
+	}
+	if baseHash == changedHash {
+		t.Fatal("proxy route policy did not affect config hash")
+	}
+}
+
 func TestSafeServiceConfigHashTracksPublishedPorts(t *testing.T) {
 	base := config.ServiceConfig{Image: "itzg/minecraft-server", Port: 0}
 	baseHash, ok := SafeServiceConfigHash(base)

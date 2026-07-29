@@ -44,16 +44,36 @@ func TestCaddyfileConformanceMatrix(t *testing.T) {
 		{
 			name:      "auth allowlist redirects and multiple domains",
 			route:     ProxyRoute{Service: "web", Domains: []string{"example.com", "app.example.com"}, RedirectFrom: []string{"www.example.com"}, Upstreams: []string{"http://web:3000"}, BasicAuth: &ProxyRouteBasicAuth{Username: "admin", PasswordBcrypt: hash}, AllowIPs: []string{"198.51.100.0/24"}},
-			wantHash:  "4809415a93d6e12e97eff76f3d31cf9d099a295ddecf037bd58fa98f5a60659c",
+			wantHash:  "cf0cde3f9331ff69fac3720e1bd270277ddc64b59f64ea8771dd9c204c6d3fdc",
 			contains:  []string{"basic_auth {", "@tako_allowed remote_ip 198.51.100.0/24", "redir https://example.com{uri} 308"},
 			forbidden: []string{"trusted_proxies", "client_ip"},
 		},
 		{
 			name:      "trusted proxies with auth allowlist redirects and multiple domains",
 			route:     ProxyRoute{Service: "web", Domains: []string{"example.com", "app.example.com"}, RedirectFrom: []string{"www.example.com"}, Upstreams: []string{"http://web:3000"}, BasicAuth: &ProxyRouteBasicAuth{Username: "admin", PasswordBcrypt: hash}, AllowIPs: []string{"198.51.100.0/24"}, TrustedProxies: []string{"10.0.0.0/8", "203.0.113.0/24"}},
-			wantHash:  "6acd3bc8534bf8b222764737e8aaadb3ef66f4d8eef542577e50a8a1f42658bb",
+			wantHash:  "8f5d6f231eec60c39a73a1200f4be6dbc6b7200deb46d831f4dfb2c8f476502c",
 			contains:  []string{"trusted_proxies static 10.0.0.0/8 203.0.113.0/24", "trusted_proxies_strict", "@tako_allowed client_ip 198.51.100.0/24", "basic_auth {", "redir https://example.com{uri} 308"},
 			forbidden: []string{"@tako_allowed remote_ip"},
+		},
+		{
+			name: "denied paths body limit and response headers",
+			route: ProxyRoute{
+				Service: "web", Domains: []string{"example.com"}, Upstreams: []string{"http://web:3000"},
+				DenyPathPrefixes: []string{"/.well-known/workflow", "/api/internal"}, MaxRequestBody: "10MB",
+				ResponseHeaders: map[string]string{"Content-Security-Policy": "default-src 'self'", "X-Content-Type-Options": "nosniff"},
+			},
+			wantHash: "bfb605a6c6a6875ae00c7d142f1cbfecec000f19fad60c8534e647d504d54cfd",
+			contains: []string{
+				"@tako_http_headers_0 host example.com", "header @tako_http_headers_0 {", "header {",
+				">Content-Security-Policy \"default-src 'self'\"", ">X-Content-Type-Options \"nosniff\"",
+				"@tako_denied_path path /.well-known/workflow /.well-known/workflow/* /api/internal /api/internal/*",
+				"handle @tako_denied_path {\n\t\t\theader Connection close\n\t\t\trespond 404", "header({'Content-Length':'*'}) && int({http.request.header.Content-Length}) > 10000000",
+				"handle @tako_body_too_large {\n\t\t\theader Connection close\n\t\t\trespond 413", "request_body @tako_body_unsized {\n\t\t\tmax_size 1B",
+				"handle @tako_body_length_required {\n\t\t\theader Connection close\n\t\t\trespond 411", "!header({'Content-Length':'*'}) && size({http.request.body}) > 0",
+				"handle @tako_safe_body_not_allowed {\n\t\t\theader Connection close\n\t\t\trespond 411",
+				"request_body {\n\t\t\tmax_size 10MB", "reverse_proxy http://web:3000",
+			},
+			forbidden: []string{"/api/internalized"},
 		},
 		{
 			name:  "BYO certificates with dynamic authority redirects and multiple domains",

@@ -118,6 +118,20 @@ func (e *Engine) ApplyPlacementMovement(ctx context.Context, req PlacementApplyR
 	for name, service := range desired.Services {
 		imageRefs[name] = service.Image
 	}
+	deploy := deployer.NewDeployerWithPool(controllerClient, cfg, environment, pool, req.Verbose)
+	deploy.SetRuntimeFactory(factory)
+	deploy.SetBaseContext(ctx)
+	deploy.SetPriorAssignments(assignments)
+	deploy.SetSkipBuild(true)
+	if err := deploy.SetPlacementMovementTargets(targets); err != nil {
+		return nil, err
+	}
+	if err := deploy.PreflightTakodProxyCapabilities(services); err != nil {
+		return nil, err
+	}
+	if err := deploy.PreflightGracefulStopCapabilities(); err != nil {
+		return nil, err
+	}
 	if !alreadyIntent {
 		preserved := preservedDesiredServices(desired, services, nil)
 		next, err := takodstate.BuildDesiredRevisionWithPlacementSnapshot(cfg, environment, "placement:"+req.Plan.PlanID, services, imageRefs, desired.TargetNodes, assignments, nil, preserved, desired.Git)
@@ -128,14 +142,6 @@ func (e *Engine) ApplyPlacementMovement(ctx context.Context, req PlacementApplyR
 			return nil, fmt.Errorf("persist reviewed placement intent: %w", err)
 		}
 		desired = next
-	}
-	deploy := deployer.NewDeployerWithPool(controllerClient, cfg, environment, pool, req.Verbose)
-	deploy.SetRuntimeFactory(factory)
-	deploy.SetBaseContext(ctx)
-	deploy.SetPriorAssignments(assignments)
-	deploy.SetSkipBuild(true)
-	if err := deploy.SetPlacementMovementTargets(targets); err != nil {
-		return nil, err
 	}
 	movesByService := make(map[string][]scheduler.Movement)
 	for _, move := range req.Plan.Moves {

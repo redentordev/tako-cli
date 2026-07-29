@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -72,20 +75,23 @@ type ProxyRouteManifest struct {
 }
 
 type ProxyRoute struct {
-	Service        string               `json:"service"`
-	Revision       string               `json:"revision,omitempty"`
-	Domains        []string             `json:"domains,omitempty"`
-	RedirectFrom   []string             `json:"redirectFrom,omitempty"`
-	Upstreams      []string             `json:"upstreams"`
-	HealthCheck    *ProxyRouteHealth    `json:"healthCheck,omitempty"`
-	Sticky         bool                 `json:"sticky,omitempty"`
-	Priority       int                  `json:"priority,omitempty"`
-	Visibility     string               `json:"visibility,omitempty"`
-	DynamicDomain  *ProxyDynamicDomain  `json:"dynamicDomain,omitempty"`
-	BasicAuth      *ProxyRouteBasicAuth `json:"basicAuth,omitempty"`
-	AllowIPs       []string             `json:"allowIps,omitempty"`
-	TrustedProxies []string             `json:"trustedProxies,omitempty"`
-	Destinations   []ProxyDestination   `json:"destinations,omitempty"`
+	Service          string               `json:"service"`
+	Revision         string               `json:"revision,omitempty"`
+	Domains          []string             `json:"domains,omitempty"`
+	RedirectFrom     []string             `json:"redirectFrom,omitempty"`
+	Upstreams        []string             `json:"upstreams"`
+	HealthCheck      *ProxyRouteHealth    `json:"healthCheck,omitempty"`
+	Sticky           bool                 `json:"sticky,omitempty"`
+	Priority         int                  `json:"priority,omitempty"`
+	Visibility       string               `json:"visibility,omitempty"`
+	DynamicDomain    *ProxyDynamicDomain  `json:"dynamicDomain,omitempty"`
+	BasicAuth        *ProxyRouteBasicAuth `json:"basicAuth,omitempty"`
+	AllowIPs         []string             `json:"allowIps,omitempty"`
+	TrustedProxies   []string             `json:"trustedProxies,omitempty"`
+	DenyPathPrefixes []string             `json:"denyPathPrefixes,omitempty"`
+	MaxRequestBody   string               `json:"maxRequestBody,omitempty"`
+	ResponseHeaders  map[string]string    `json:"responseHeaders,omitempty"`
+	Destinations     []ProxyDestination   `json:"destinations,omitempty"`
 }
 
 // ProxyRouteBasicAuth protects a route's serving domains with HTTP basic
@@ -303,6 +309,9 @@ func validateProxyRouteManifest(manifest *ProxyRouteManifest) error {
 				return fmt.Errorf("route %s: invalid trusted proxy CIDR %q", route.Service, entry)
 			}
 		}
+		if err := validateProxyRoutePolicy(route); err != nil {
+			return fmt.Errorf("route %s: %w", route.Service, err)
+		}
 	}
 	return nil
 }
@@ -501,6 +510,7 @@ func renderCaddyfileWithCertificatesAndOwners(manifests []ProxyRouteManifest, ce
 	b.WriteString("}\n\n")
 	b.WriteString(":80 {\n")
 	writeCaddyAccessLog(&b, "tako_proxy")
+	writeCaddyHTTPRedirectHeaders(&b, effectiveRoutes)
 	b.WriteString("\tredir https://{host}{uri} 308\n}\n")
 
 	for _, route := range effectiveRoutes {
@@ -531,6 +541,7 @@ func renderCaddyfileWithCertificatesAndOwners(manifests []ProxyRouteManifest, ce
 				return "", fmt.Errorf("redirect domain %s is covered by ACME DNS certificate %s owned by %s/%s, but no valid certificate is stored; deploy the owning configuration first", redirect, owner.Domain, owner.Project, owner.Environment)
 			}
 			writeCaddyAccessLog(&b, caddyAccessLogName(route.Service))
+			writeCaddyResponseHeaders(&b, "\t", route.ResponseHeaders)
 			b.WriteString("\tredir https://" + primary + "{uri} 308\n")
 			b.WriteString("}\n")
 		}
@@ -676,6 +687,56 @@ func writeCaddyRoute(b *strings.Builder, address string, route ProxyRoute, certi
 	}
 	writeCaddyAccessLog(b, caddyAccessLogName(route.Service))
 	b.WriteString("\tencode zstd gzip\n")
+	writeCaddyResponseHeaders(b, "\t", route.ResponseHeaders)
+	indent := "\t"
+	if route.MaxRequestBody != "" {
+		b.WriteString("\troute {\n")
+		indent = "\t\t"
+	}
+	writeCaddyRouteHandlers(b, indent, address, route)
+	if route.MaxRequestBody != "" {
+		b.WriteString("\t}\n")
+	}
+	if route.BasicAuth != nil {
+		b.WriteString("\thandle_errors {\n")
+		b.WriteString("\t\theader Connection close\n")
+		b.WriteString("\t\trespond \"\" {http.error.status_code}\n")
+		b.WriteString("\t}\n")
+	}
+	b.WriteString("}\n")
+}
+
+func writeCaddyRouteHandlers(b *strings.Builder, indent string, address string, route ProxyRoute) {
+	if len(route.DenyPathPrefixes) > 0 {
+		b.WriteString(indent + "@tako_denied_path path")
+		for _, prefix := range route.DenyPathPrefixes {
+			b.WriteString(" " + prefix)
+			if prefix != "/" {
+				b.WriteString(" " + prefix + "/*")
+			} else {
+				b.WriteString(" /*")
+			}
+		}
+		b.WriteString("\n" + indent + "handle @tako_denied_path {\n" + indent + "\theader Connection close\n" + indent + "\trespond 404\n" + indent + "}\n")
+	}
+	if route.MaxRequestBody != "" {
+		limit, _ := proxyRouteBodyLimitBytes(route.MaxRequestBody)
+		b.WriteString(indent + "@tako_body_too_large expression header({'Content-Length':'*'}) && int({http.request.header.Content-Length}) > " + strconv.FormatUint(limit, 10) + "\n")
+		b.WriteString(indent + "handle @tako_body_too_large {\n" + indent + "\theader Connection close\n" + indent + "\trespond 413\n" + indent + "}\n")
+		b.WriteString(indent + "@tako_body_length_required {\n")
+		b.WriteString(indent + "\tnot method GET HEAD OPTIONS TRACE\n")
+		b.WriteString(indent + "\tnot header Content-Length *\n")
+		b.WriteString(indent + "}\n")
+		b.WriteString(indent + "handle @tako_body_length_required {\n" + indent + "\theader Connection close\n" + indent + "\trespond 411\n" + indent + "}\n")
+		b.WriteString(indent + "@tako_body_unsized {\n")
+		b.WriteString(indent + "\tmethod GET HEAD OPTIONS TRACE\n")
+		b.WriteString(indent + "\tnot header Content-Length *\n")
+		b.WriteString(indent + "}\n")
+		b.WriteString(indent + "request_body @tako_body_unsized {\n" + indent + "\tmax_size 1B\n" + indent + "}\n")
+		b.WriteString(indent + "@tako_safe_body_not_allowed expression !header({'Content-Length':'*'}) && size({http.request.body}) > 0\n")
+		b.WriteString(indent + "handle @tako_safe_body_not_allowed {\n" + indent + "\theader Connection close\n" + indent + "\trespond 411\n" + indent + "}\n")
+		b.WriteString(indent + "request_body {\n" + indent + "\tmax_size " + route.MaxRequestBody + "\n" + indent + "}\n")
+	}
 	if len(route.AllowIPs) > 0 {
 		// handle blocks force the allowlist to win before basic_auth:
 		// Caddy's default directive order would otherwise run basic_auth
@@ -684,17 +745,93 @@ func writeCaddyRoute(b *strings.Builder, address string, route ProxyRoute, certi
 		if len(route.TrustedProxies) > 0 {
 			matcher = "client_ip"
 		}
-		b.WriteString("\t@tako_allowed " + matcher + " " + strings.Join(route.AllowIPs, " ") + "\n")
-		b.WriteString("\thandle @tako_allowed {\n")
-		writeCaddyBasicAuth(b, "\t\t", route)
-		writeCaddyReverseProxy(b, "\t\t", address, route)
-		b.WriteString("\t}\n")
-		b.WriteString("\thandle {\n\t\trespond 403\n\t}\n")
+		b.WriteString(indent + "@tako_allowed " + matcher + " " + strings.Join(route.AllowIPs, " ") + "\n")
+		b.WriteString(indent + "handle @tako_allowed {\n")
+		writeCaddyRequestHandlers(b, indent+"\t", address, route)
+		b.WriteString(indent + "}\n")
+		b.WriteString(indent + "handle {\n" + indent + "\theader Connection close\n" + indent + "\trespond 403\n" + indent + "}\n")
+	} else if len(route.DenyPathPrefixes) > 0 || route.MaxRequestBody != "" {
+		b.WriteString(indent + "handle {\n")
+		writeCaddyRequestHandlers(b, indent+"\t", address, route)
+		b.WriteString(indent + "}\n")
 	} else {
-		writeCaddyBasicAuth(b, "\t", route)
-		writeCaddyReverseProxy(b, "\t", address, route)
+		writeCaddyRequestHandlers(b, indent, address, route)
 	}
-	b.WriteString("}\n")
+}
+
+func writeCaddyRequestHandlers(b *strings.Builder, indent string, address string, route ProxyRoute) {
+	writeCaddyBasicAuth(b, indent, route)
+	writeCaddyReverseProxy(b, indent, address, route)
+}
+
+func writeCaddyResponseHeaders(b *strings.Builder, indent string, headers map[string]string) {
+	writeCaddyResponseHeadersWithMatcher(b, indent, "", headers)
+}
+
+func writeCaddyResponseHeadersWithMatcher(b *strings.Builder, indent string, matcher string, headers map[string]string) {
+	if len(headers) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	writeCaddyResponseHeaderBlock(b, indent, matcher, headers, false, keys)
+	writeCaddyResponseHeaderBlock(b, indent, matcher, headers, true, keys)
+}
+
+func writeCaddyResponseHeaderBlock(b *strings.Builder, indent string, matcher string, headers map[string]string, deferred bool, keys []string) {
+	b.WriteString(indent + "header")
+	if matcher != "" {
+		b.WriteString(" " + matcher)
+	}
+	b.WriteString(" {\n")
+	for _, key := range keys {
+		prefix := ""
+		if deferred {
+			prefix = ">"
+		}
+		b.WriteString(indent + "\t" + prefix + key + " " + strconv.Quote(headers[key]) + "\n")
+	}
+	b.WriteString(indent + "}\n")
+}
+
+func writeCaddyHTTPRedirectHeaders(b *strings.Builder, routes []ProxyRoute) {
+	allExplicitHosts := make(map[string]bool)
+	var dynamicRoute *ProxyRoute
+	for index := range routes {
+		route := &routes[index]
+		if route.Visibility == proxyRouteVisibilityInternal {
+			continue
+		}
+		hosts := append(append([]string(nil), route.Domains...), route.RedirectFrom...)
+		for _, host := range hosts {
+			allExplicitHosts[host] = true
+		}
+		if len(hosts) > 0 && len(route.ResponseHeaders) > 0 {
+			matcher := fmt.Sprintf("@tako_http_headers_%d", index)
+			b.WriteString("\t" + matcher + " host " + strings.Join(hosts, " ") + "\n")
+			writeCaddyResponseHeadersWithMatcher(b, "\t", matcher, route.ResponseHeaders)
+		}
+		if route.DynamicDomain != nil {
+			dynamicRoute = route
+		}
+	}
+	if dynamicRoute == nil || len(dynamicRoute.ResponseHeaders) == 0 {
+		return
+	}
+	hosts := make([]string, 0, len(allExplicitHosts))
+	for host := range allExplicitHosts {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	if len(hosts) == 0 {
+		writeCaddyResponseHeaders(b, "\t", dynamicRoute.ResponseHeaders)
+		return
+	}
+	b.WriteString("\t@tako_http_headers_dynamic {\n\t\tnot host " + strings.Join(hosts, " ") + "\n\t}\n")
+	writeCaddyResponseHeadersWithMatcher(b, "\t", "@tako_http_headers_dynamic", dynamicRoute.ResponseHeaders)
 }
 
 func writeCaddyCertificate(b *strings.Builder, indent string, certificate *proxyCertificateEntry) {
@@ -762,6 +899,95 @@ func caddyAccessLogName(service string) string {
 }
 
 var proxyBcryptHashPattern = regexp.MustCompile(`^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$`)
+
+var (
+	proxyRouteHeaderNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
+	proxyRoutePathPrefixPattern = regexp.MustCompile(`^/[A-Za-z0-9._~!$&'()+,;=:@/-]*$`)
+	proxyRouteBodySizePattern   = regexp.MustCompile(`^([1-9][0-9]*)(B|KB|MB|GB)$`)
+)
+
+func validateProxyRoutePolicy(route *ProxyRoute) error {
+	if len(route.DenyPathPrefixes) > 64 {
+		return fmt.Errorf("too many denied path prefixes")
+	}
+	seenPaths := make(map[string]bool, len(route.DenyPathPrefixes))
+	for index, value := range route.DenyPathPrefixes {
+		if value == "" || len(value) > 256 || !proxyRoutePathPrefixPattern.MatchString(value) || pathHasControlChars(value) {
+			return fmt.Errorf("invalid denied path prefix %q", value)
+		}
+		value = path.Clean(value)
+		if seenPaths[value] {
+			return fmt.Errorf("duplicate denied path prefix %q", value)
+		}
+		seenPaths[value] = true
+		route.DenyPathPrefixes[index] = value
+	}
+	sort.Strings(route.DenyPathPrefixes)
+
+	if route.MaxRequestBody != "" {
+		limit, valid := proxyRouteBodyLimitBytes(route.MaxRequestBody)
+		if !valid {
+			return fmt.Errorf("invalid maximum request body size")
+		}
+		if limit > 1_000_000_000_000 {
+			return fmt.Errorf("maximum request body size exceeds 1TB")
+		}
+	}
+	if len(route.ResponseHeaders) > 64 {
+		return fmt.Errorf("too many response headers")
+	}
+	forbidden := map[string]bool{
+		"connection": true, "content-length": true, "host": true, "http2-settings": true,
+		"keep-alive": true, "proxy-authenticate": true, "proxy-authorization": true,
+		"proxy-connection": true, "te": true, "trailer": true, "transfer-encoding": true, "upgrade": true,
+	}
+	headers := make(map[string]string, len(route.ResponseHeaders))
+	for name, value := range route.ResponseHeaders {
+		if name == "" || len(name) > 128 || !proxyRouteHeaderNamePattern.MatchString(name) || value == "" || len(value) > 4096 || pathHasControlChars(value) {
+			return fmt.Errorf("invalid response header %q", name)
+		}
+		name = http.CanonicalHeaderKey(name)
+		if forbidden[strings.ToLower(name)] {
+			return fmt.Errorf("response header %q cannot control HTTP framing", name)
+		}
+		if _, exists := headers[name]; exists {
+			return fmt.Errorf("duplicate response header %q", name)
+		}
+		headers[name] = value
+	}
+	if len(headers) == 0 {
+		route.ResponseHeaders = nil
+	} else {
+		route.ResponseHeaders = headers
+	}
+	return nil
+}
+
+func proxyRouteBodyLimitBytes(value string) (uint64, bool) {
+	matches := proxyRouteBodySizePattern.FindStringSubmatch(value)
+	if matches == nil {
+		return 0, false
+	}
+	amount, err := strconv.ParseUint(matches[1], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	multipliers := map[string]uint64{"B": 1, "KB": 1000, "MB": 1000 * 1000, "GB": 1000 * 1000 * 1000}
+	multiplier := multipliers[matches[2]]
+	if amount > ^uint64(0)/multiplier {
+		return 0, false
+	}
+	return amount * multiplier, true
+}
+
+func pathHasControlChars(value string) bool {
+	for _, r := range value {
+		if r < 32 || r == 127 {
+			return true
+		}
+	}
+	return false
+}
 
 func isSafeProxyBasicAuthUser(value string) bool {
 	if value == "" || len(value) > 64 {

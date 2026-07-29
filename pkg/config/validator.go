@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
@@ -2020,6 +2021,9 @@ func validateProxy(projectName string, envName string, serviceName string, proxy
 var (
 	dockerCPULimitPattern     = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
 	proxyBasicAuthUserPattern = regexp.MustCompile(`^[A-Za-z0-9._@-]+$`)
+	proxyHeaderNamePattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
+	proxyPathPrefixPattern    = regexp.MustCompile(`^/[A-Za-z0-9._~!$&'()+,;=:@/-]*$`)
+	proxyBodySizePattern      = regexp.MustCompile(`^([1-9][0-9]*)(B|KB|MB|GB)$`)
 )
 
 func validateProxyAccessControls(serviceName string, proxy *ProxyConfig) error {
@@ -2071,6 +2075,86 @@ func validateProxyAccessControls(serviceName string, proxy *ProxyConfig) error {
 		proxy.TrustedProxies = append(proxy.TrustedProxies, prefix)
 	}
 	sort.Strings(proxy.TrustedProxies)
+	if err := validateProxyRoutePolicy(serviceName, proxy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateProxyRoutePolicy(serviceName string, proxy *ProxyConfig) error {
+	if len(proxy.DenyPathPrefixes) > 64 {
+		return fmt.Errorf("service %s: proxy.denyPathPrefixes supports at most 64 entries", serviceName)
+	}
+	paths := make(map[string]struct{}, len(proxy.DenyPathPrefixes))
+	for _, value := range proxy.DenyPathPrefixes {
+		if value != strings.TrimSpace(value) {
+			return fmt.Errorf("service %s: proxy.denyPathPrefixes entries cannot have surrounding whitespace", serviceName)
+		}
+		if value == "" || len(value) > 256 || !proxyPathPrefixPattern.MatchString(value) || hasControlChars(value) {
+			return fmt.Errorf("service %s: invalid proxy.denyPathPrefixes entry %q (use an absolute literal URL path without wildcards, query, fragment, or encoding)", serviceName, value)
+		}
+		value = path.Clean(value)
+		paths[value] = struct{}{}
+	}
+	proxy.DenyPathPrefixes = proxy.DenyPathPrefixes[:0]
+	for value := range paths {
+		proxy.DenyPathPrefixes = append(proxy.DenyPathPrefixes, value)
+	}
+	sort.Strings(proxy.DenyPathPrefixes)
+
+	if proxy.MaxRequestBody != strings.TrimSpace(proxy.MaxRequestBody) {
+		return fmt.Errorf("service %s: proxy.maxRequestBody cannot have surrounding whitespace", serviceName)
+	}
+	proxy.MaxRequestBody = strings.ToUpper(proxy.MaxRequestBody)
+	if proxy.MaxRequestBody != "" {
+		matches := proxyBodySizePattern.FindStringSubmatch(proxy.MaxRequestBody)
+		if matches == nil {
+			return fmt.Errorf("service %s: proxy.maxRequestBody must be a positive size using B, KB, MB, or GB (for example 10MB)", serviceName)
+		}
+		amount, err := strconv.ParseUint(matches[1], 10, 64)
+		if err != nil {
+			return fmt.Errorf("service %s: proxy.maxRequestBody is too large", serviceName)
+		}
+		multipliers := map[string]uint64{"B": 1, "KB": 1000, "MB": 1000 * 1000, "GB": 1000 * 1000 * 1000}
+		multiplier := multipliers[matches[2]]
+		if amount > uint64(1_000_000_000_000)/multiplier {
+			return fmt.Errorf("service %s: proxy.maxRequestBody cannot exceed 1TB", serviceName)
+		}
+	}
+
+	if len(proxy.ResponseHeaders) > 64 {
+		return fmt.Errorf("service %s: proxy.responseHeaders supports at most 64 entries", serviceName)
+	}
+	forbidden := map[string]bool{
+		"connection": true, "content-length": true, "host": true, "http2-settings": true,
+		"keep-alive": true, "proxy-authenticate": true, "proxy-authorization": true,
+		"proxy-connection": true, "te": true, "trailer": true, "transfer-encoding": true, "upgrade": true,
+	}
+	headers := make(map[string]string, len(proxy.ResponseHeaders))
+	for name, value := range proxy.ResponseHeaders {
+		if name != strings.TrimSpace(name) || value != strings.TrimSpace(value) {
+			return fmt.Errorf("service %s: proxy.responseHeaders names and values cannot have surrounding whitespace", serviceName)
+		}
+		if name == "" || len(name) > 128 || !proxyHeaderNamePattern.MatchString(name) {
+			return fmt.Errorf("service %s: invalid proxy.responseHeaders name %q", serviceName, name)
+		}
+		name = http.CanonicalHeaderKey(name)
+		if forbidden[strings.ToLower(name)] {
+			return fmt.Errorf("service %s: proxy.responseHeaders cannot set hop-by-hop or framing header %q", serviceName, name)
+		}
+		if value == "" || len(value) > 4096 || hasControlChars(value) {
+			return fmt.Errorf("service %s: invalid proxy.responseHeaders value for %q", serviceName, name)
+		}
+		if _, exists := headers[name]; exists {
+			return fmt.Errorf("service %s: duplicate proxy.responseHeaders name %q", serviceName, name)
+		}
+		headers[name] = value
+	}
+	if len(headers) == 0 {
+		proxy.ResponseHeaders = nil
+	} else {
+		proxy.ResponseHeaders = headers
+	}
 	return nil
 }
 

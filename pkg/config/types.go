@@ -500,6 +500,17 @@ type ProxyConfig struct {
 	// TrustedProxies declares the explicit proxy/CDN CIDRs whose forwarded
 	// client IP headers Caddy may trust for this route. CIDRs only.
 	TrustedProxies []string `yaml:"trustedProxies,omitempty" json:"trustedProxies,omitempty"`
+
+	// DenyPathPrefixes returns 404 for an exact path prefix or any child path
+	// before authentication, body reads, or proxying.
+	DenyPathPrefixes []string `yaml:"denyPathPrefixes,omitempty" json:"denyPathPrefixes,omitempty"`
+
+	// MaxRequestBody limits request bodies accepted by this route, for example
+	// 10MB. Oversized declared bodies receive 413 before proxying.
+	MaxRequestBody string `yaml:"maxRequestBody,omitempty" json:"maxRequestBody,omitempty"`
+
+	// ResponseHeaders adds or replaces response headers for this route.
+	ResponseHeaders map[string]string `yaml:"responseHeaders,omitempty" json:"responseHeaders,omitempty"`
 }
 
 // ProxyBasicAuthConfig protects a proxy route with HTTP basic auth.

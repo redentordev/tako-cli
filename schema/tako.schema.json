@@ -843,6 +843,40 @@
                       },
                       "description": "Explicit proxy/CDN CIDRs whose forwarded client IP headers may be trusted. IPv4 prefixes broader than /8 and IPv6 prefixes broader than /24 are rejected. All routes sharing a proxy node must use the same nonempty set."
                     },
+                    "denyPathPrefixes": {
+                      "type": "array",
+                      "maxItems": 64,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^/[A-Za-z0-9._~!$&'()+,;=:@/-]*$",
+                        "maxLength": 256
+                      },
+                      "description": "Absolute literal path prefixes denied with 404 before authentication, request-body reads, or proxying. Each entry matches the exact path and segment children; for example /api/internal matches /api/internal and /api/internal/* without matching /api/internalized."
+                    },
+                    "maxRequestBody": {
+                      "type": "string",
+                      "pattern": "^(?:[1-9][0-9]{0,11}|1000000000000)[Bb]$|^(?:[1-9][0-9]{0,8}|1000000000)[Kk][Bb]$|^(?:[1-9][0-9]{0,5}|1000000)[Mm][Bb]$|^(?:[1-9][0-9]{0,2}|1000)[Gg][Bb]$",
+                      "description": "Maximum request body accepted by this route, for example 10MB. Oversized requests receive 413."
+                    },
+                    "responseHeaders": {
+                      "type": "object",
+                      "maxProperties": 64,
+                      "propertyNames": {
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*$",
+                        "maxLength": 128,
+                        "not": {
+                          "pattern": "^(?:[Cc][Oo][Nn][Nn][Ee][Cc][Tt][Ii][Oo][Nn]|[Cc][Oo][Nn][Tt][Ee][Nn][Tt]-[Ll][Ee][Nn][Gg][Tt][Hh]|[Hh][Oo][Ss][Tt]|[Hh][Tt][Tt][Pp]2-[Ss][Ee][Tt][Tt][Ii][Nn][Gg][Ss]|[Kk][Ee][Ee][Pp]-[Aa][Ll][Ii][Vv][Ee]|[Pp][Rr][Oo][Xx][Yy]-[Aa][Uu][Tt][Hh][Ee][Nn][Tt][Ii][Cc][Aa][Tt][Ee]|[Pp][Rr][Oo][Xx][Yy]-[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Pp][Rr][Oo][Xx][Yy]-[Cc][Oo][Nn][Nn][Ee][Cc][Tt][Ii][Oo][Nn]|[Tt][Ee]|[Tt][Rr][Aa][Ii][Ll][Ee][Rr]|[Tt][Rr][Aa][Nn][Ss][Ff][Ee][Rr]-[Ee][Nn][Cc][Oo][Dd][Ii][Nn][Gg]|[Uu][Pp][Gg][Rr][Aa][Dd][Ee])$"
+                        }
+                      },
+                      "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "pattern": "^[^\\s\\x00-\\x1F\\x7F](?:[^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F])?$"
+                      },
+                      "description": "Response headers added or replaced for this route. Hop-by-hop and message-framing headers are rejected."
+                    },
                     "cdn": {
                       "type": "string",
                       "enum": ["cloudflare", "generic"],

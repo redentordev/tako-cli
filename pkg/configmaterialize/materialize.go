@@ -311,7 +311,13 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 		})
 	}
 
-	if len(service.Domains) > 0 {
+	if len(service.Proxy) > 0 && strings.TrimSpace(string(service.Proxy)) != "null" {
+		proxy, err := decodeRaw[config.ProxyConfig](service.Proxy, "proxy", name)
+		if err != nil {
+			return config.ServiceConfig{}, warnings, err
+		}
+		out.Proxy = &proxy
+	} else if len(service.Domains) > 0 {
 		domains := cleanStrings(service.Domains)
 		if len(domains) > 0 {
 			out.Proxy = &config.ProxyConfig{Domain: domains[0]}

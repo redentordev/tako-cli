@@ -10,6 +10,8 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
+	"gopkg.in/yaml.v3"
 )
 
 func TestDesiredServiceToConfigPreservesCommandEntrypointAndLabels(t *testing.T) {
@@ -180,6 +182,80 @@ func TestBuildConfigDomainProxyReconstruction(t *testing.T) {
 	}
 	if !hasWarning(warnings, "extra_domains_as_redirects", "web") {
 		t.Fatalf("warnings = %#v, want extra_domains_as_redirects", warnings)
+	}
+}
+
+func TestBuildConfigNullProxyUsesLegacyDomainsFallback(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["web"] = takoapi.DesiredServiceDocument{
+		Image: "nginx:latest", Port: 80, Proxy: json.RawMessage("null"), Domains: []string{"example.com"},
+	}
+	cfg, _, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := cfg.Environments["production"].Services["web"].Proxy
+	if proxy == nil || proxy.Domain != "example.com" {
+		t.Fatalf("legacy domains fallback was suppressed by null proxy: %#v", proxy)
+	}
+}
+
+func TestBuildConfigPreservesDesiredProxyPolicy(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["web"] = takoapi.DesiredServiceDocument{
+		Image: "nginx:latest", Port: 80,
+		Proxy: mustRaw(t, config.ProxyConfig{
+			Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, MaxRequestBody: "10MB",
+			ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
+		}),
+	}
+	cfg, _, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := cfg.Environments["production"].Services["web"].Proxy
+	if proxy == nil || proxy.Domain != "example.com" || proxy.MaxRequestBody != "10MB" || len(proxy.DenyPathPrefixes) != 1 || proxy.ResponseHeaders["X-Content-Type-Options"] != "nosniff" {
+		t.Fatalf("proxy policy was not materialized: %#v", proxy)
+	}
+}
+
+func TestProxyPolicyDesiredStateToExportedYAMLRoundTrip(t *testing.T) {
+	serviceConfig := config.ServiceConfig{
+		Image: "nginx:latest", Port: 80, Replicas: 1,
+		Proxy: &config.ProxyConfig{
+			Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, MaxRequestBody: "10MB",
+			ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
+		},
+	}
+	revision, err := takodstate.BuildDesiredRevision(
+		&config.Config{Project: config.ProjectConfig{Name: "demo"}}, "production", "deploy",
+		map[string]config.ServiceConfig{"web": serviceConfig}, map[string]string{"web": "nginx:latest"}, nil, takodstate.GitInfo{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(revision.Services["web"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document takoapi.DesiredServiceDocument
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	desired := baseDesired()
+	desired.Services["web"] = document
+	cfg, _, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"denyPathPrefixes:", "- /api/internal", "maxRequestBody: 10MB", "X-Content-Type-Options: nosniff"} {
+		if !strings.Contains(string(exported), fragment) {
+			t.Fatalf("exported YAML missing %q:\n%s", fragment, exported)
+		}
 	}
 }
 

@@ -169,9 +169,12 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 			ShmSize:         "256m",
 			Secrets:         []string{"TOKEN:prod/token", "DATABASE_URL"},
 			Volumes:         []string{"data:/data"},
-			Proxy:           &config.ProxyConfig{Domain: "example.com"},
-			Deploy:          config.DeployConfig{Strategy: "recreate"},
-			DependsOn:       []string{"db"},
+			Proxy: &config.ProxyConfig{
+				Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, MaxRequestBody: "10MB",
+				ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
+			},
+			Deploy:    config.DeployConfig{Strategy: "recreate"},
+			DependsOn: []string{"db"},
 		},
 	}
 
@@ -206,6 +209,9 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	}
 	if service.User != "1000:1000" || service.WorkingDir != "/work" || !service.Init || service.ShmSize != "256m" {
 		t.Fatalf("runtime controls not persisted: %#v", service)
+	}
+	if service.Proxy == nil || service.Proxy.MaxRequestBody != "10MB" || !slices.Equal(service.Proxy.DenyPathPrefixes, []string{"/api/internal"}) || service.Proxy.ResponseHeaders["X-Content-Type-Options"] != "nosniff" {
+		t.Fatalf("proxy policy not persisted: %#v", service.Proxy)
 	}
 	if !slices.Equal(revision.TargetNodes, []string{"node-a", "node-b"}) {
 		t.Fatalf("target nodes were not sorted: %#v", revision.TargetNodes)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"regexp"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -68,6 +69,33 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	}
 	schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "proxy", "properties", "dynamicDomains", "properties", "ask")
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "proxy", "properties", "cdn"), []string{config.ProxyCDNCloudflare, config.ProxyCDNGeneric})
+	proxyProperties := schemaPath(t, serviceProperties, "proxy", "properties")
+	denyPaths := schemaPath(t, proxyProperties, "denyPathPrefixes")
+	if denyPaths["maxItems"] != float64(64) || denyPaths["uniqueItems"] != true {
+		t.Fatalf("denyPathPrefixes schema = %#v", denyPaths)
+	}
+	bodySize := schemaPath(t, proxyProperties, "maxRequestBody")
+	bodyPattern := regexp.MustCompile(bodySize["pattern"].(string))
+	for _, value := range []string{"1B", "10mb", "1000GB", "1000000000000B"} {
+		if !bodyPattern.MatchString(value) {
+			t.Fatalf("maxRequestBody schema rejects %q", value)
+		}
+	}
+	for _, value := range []string{"0B", "1025GB", "1000001MB", "1000000000001B"} {
+		if bodyPattern.MatchString(value) {
+			t.Fatalf("maxRequestBody schema accepts %q", value)
+		}
+	}
+	responseHeaders := schemaPath(t, proxyProperties, "responseHeaders")
+	if responseHeaders["maxProperties"] != float64(64) {
+		t.Fatalf("responseHeaders schema = %#v", responseHeaders)
+	}
+	forbiddenPattern := regexp.MustCompile(schemaPath(t, responseHeaders, "propertyNames", "not")["pattern"].(string))
+	for _, value := range []string{"Connection", "connection", "Keep-Alive", "kEeP-aLiVe", "TE"} {
+		if !forbiddenPattern.MatchString(value) {
+			t.Fatalf("responseHeaders forbidden-name schema misses %q", value)
+		}
+	}
 	acme := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "proxy", "properties", "acme")
 	conditions, ok := acme["allOf"].([]any)
 	if !ok || len(conditions) != 1 {

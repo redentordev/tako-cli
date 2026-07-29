@@ -538,17 +538,20 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 		}
 
 		route := takod.ProxyRoute{
-			Service:        serviceName,
-			Revision:       revision,
-			Domains:        domains,
-			RedirectFrom:   redirects,
-			Upstreams:      upstreams,
-			HealthCheck:    proxyRouteHealthCheckForService(service),
-			Sticky:         service.LoadBalancer.Strategy == "sticky",
-			Visibility:     service.Proxy.EffectiveVisibility(),
-			AllowIPs:       append([]string(nil), service.Proxy.AllowIps...),
-			TrustedProxies: append([]string(nil), service.Proxy.TrustedProxies...),
-			Destinations:   destinations,
+			Service:          serviceName,
+			Revision:         revision,
+			Domains:          domains,
+			RedirectFrom:     redirects,
+			Upstreams:        upstreams,
+			HealthCheck:      proxyRouteHealthCheckForService(service),
+			Sticky:           service.LoadBalancer.Strategy == "sticky",
+			Visibility:       service.Proxy.EffectiveVisibility(),
+			AllowIPs:         append([]string(nil), service.Proxy.AllowIps...),
+			TrustedProxies:   append([]string(nil), service.Proxy.TrustedProxies...),
+			DenyPathPrefixes: append([]string(nil), service.Proxy.DenyPathPrefixes...),
+			MaxRequestBody:   service.Proxy.MaxRequestBody,
+			ResponseHeaders:  cloneProxyResponseHeaders(service.Proxy.ResponseHeaders),
+			Destinations:     destinations,
 		}
 		if auth := service.Proxy.BasicAuth; auth != nil {
 			route.BasicAuth = &takod.ProxyRouteBasicAuth{
@@ -603,6 +606,26 @@ func proxyServicesUseTrustedProxies(services map[string]config.ServiceConfig) bo
 	return false
 }
 
+func proxyServicesUseRoutePolicy(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.IsProxied() && service.Proxy != nil && (len(service.Proxy.DenyPathPrefixes) > 0 || service.Proxy.MaxRequestBody != "" || len(service.Proxy.ResponseHeaders) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneProxyResponseHeaders(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
+}
+
 func proxyServicesUseACMEDNS(services map[string]config.ServiceConfig) bool {
 	for _, service := range services {
 		if service.Proxy == nil || !service.IsPublic() {
@@ -629,6 +652,9 @@ func takodProxyCapabilityRequirements(services map[string]config.ServiceConfig) 
 	var requirements []takodProxyCapabilityRequirement
 	if proxyServicesUseTrustedProxies(services) {
 		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyTrustedProxiesV1, Feature: "proxy trusted proxies"})
+	}
+	if proxyServicesUseRoutePolicy(services) {
+		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyRoutePolicyV1, Feature: "proxy route policy"})
 	}
 	if proxyServicesUseACMEDNS(services) {
 		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityAcmeDNSV1, Feature: "embedded ACME DNS-01 issuance"})

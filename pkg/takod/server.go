@@ -135,6 +135,10 @@ const CapabilityContainerGracefulStopV1 = "container.graceful-stop-v1"
 // return only after a running Caddy process accepts the managed configuration.
 const CapabilityProxyActivationV1 = "proxy.activation-v1"
 
+// CapabilityProxyRoutePolicyV1 means route manifests enforce denied path
+// prefixes, request-body limits, and response headers before proxying.
+const CapabilityProxyRoutePolicyV1 = "proxy.route-policy-v1"
+
 // CapabilityImageBuildOptionsV1 means the streamed image builder consumes
 // buildArgs and target from the request preamble.
 const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
@@ -2278,7 +2282,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyActivationV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,

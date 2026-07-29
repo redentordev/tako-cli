@@ -83,6 +83,7 @@ type DesiredService struct {
 	Persistent      bool                           `json:"persistent,omitempty"`
 	Placement       *config.PlacementConfig        `json:"placement,omitempty"`
 	Domains         []string                       `json:"domains,omitempty"`
+	Proxy           *config.ProxyConfig            `json:"proxy,omitempty"`
 	Volumes         []string                       `json:"volumes,omitempty"`
 	Files           []config.ServiceFileConfig     `json:"files,omitempty"`
 	EnvKeys         []string                       `json:"envKeys,omitempty"`
@@ -809,6 +810,7 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 		Persistent:      service.Persistent,
 		Placement:       service.Placement,
 		Domains:         domains,
+		Proxy:           cloneProxyConfig(service.Proxy),
 		Volumes:         sortedCopy(service.Volumes),
 		Files:           append([]config.ServiceFileConfig(nil), service.Files...),
 		EnvKeys:         sortedKeys(service.Env),
@@ -825,6 +827,37 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 		HealthCheck:     service.HealthCheck,
 		DeployStrategy:  service.Deploy.Strategy,
 	}
+}
+
+func cloneProxyConfig(source *config.ProxyConfig) *config.ProxyConfig {
+	if source == nil {
+		return nil
+	}
+	clone := *source
+	clone.Domains = append([]string(nil), source.Domains...)
+	clone.RedirectFrom = append([]string(nil), source.RedirectFrom...)
+	clone.AllowIps = append([]string(nil), source.AllowIps...)
+	clone.TrustedProxies = append([]string(nil), source.TrustedProxies...)
+	clone.DenyPathPrefixes = append([]string(nil), source.DenyPathPrefixes...)
+	if source.ResponseHeaders != nil {
+		clone.ResponseHeaders = make(map[string]string, len(source.ResponseHeaders))
+		for key, value := range source.ResponseHeaders {
+			clone.ResponseHeaders[key] = value
+		}
+	}
+	if source.BasicAuth != nil {
+		auth := *source.BasicAuth
+		clone.BasicAuth = &auth
+	}
+	if source.DynamicDomains != nil {
+		dynamic := *source.DynamicDomains
+		if source.DynamicDomains.Enabled != nil {
+			enabled := *source.DynamicDomains.Enabled
+			dynamic.Enabled = &enabled
+		}
+		clone.DynamicDomains = &dynamic
+	}
+	return &clone
 }
 
 func stateStringOrList(value config.StringOrList) (string, []string) {

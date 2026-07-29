@@ -627,6 +627,43 @@ All routes sharing one proxy node that set `trustedProxies` must use the same
 CIDR set because Caddy's client-IP trust policy is server-global; conflicting
 sets are rejected rather than merged.
 
+Per-service route policy can hide private endpoints, cap request bodies, and
+set security response headers without adding another proxy container:
+
+```yaml
+services:
+  web:
+    port: 3000
+    proxy:
+      domain: example.com
+      denyPathPrefixes:
+        - /api/internal
+        - /.well-known/workflow
+      maxRequestBody: 10MB
+      responseHeaders:
+        X-Content-Type-Options: nosniff
+        Content-Security-Policy: "default-src 'self'"
+```
+
+Each `denyPathPrefixes` entry is a literal, segment-aware prefix. For example,
+`/api/internal` denies both `/api/internal` and `/api/internal/users` with 404,
+but does not deny `/api/internalized`. Do not add `*`; encoded paths, query
+strings, and fragments are rejected in config. Denials run before basic auth,
+request-body reads, and upstream proxying.
+
+`maxRequestBody` accepts positive `B`, `KB`, `MB`, or `GB` sizes up to 1TB.
+Declared bodies over the limit return 413 before proxying. Mutation and custom
+methods without `Content-Length` return 411 without reading the body. A body on
+`GET`, `HEAD`, `OPTIONS`, or `TRACE` is rejected after a one-byte presence
+check, while ordinary bodyless requests remain unchanged. Rejected unknown-length
+requests close the client connection instead of draining an untrusted stream.
+Denied paths, oversized declarations, and allowlist rejections use the same
+close-on-reject behavior. Caddy also enforces the configured limit while reading
+as defense in depth. `responseHeaders` names and values are validated, safely quoted, and
+deferred so they replace upstream values. HTTP hop-by-hop and
+message-framing headers such as `Connection`, `Content-Length`, and
+`Transfer-Encoding` cannot be overridden.
+
 ### Bring-your-own TLS certificates
 
 Push a pre-issued public or origin certificate to every proxy node in the

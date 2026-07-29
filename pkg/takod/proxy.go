@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	defaultProxyImage = "caddy:2.9-alpine"
+	defaultProxyImage = "caddy:2.10-alpine"
 	defaultProxyEmail = "tako@redentor.dev"
 )
 

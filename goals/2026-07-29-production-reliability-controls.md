@@ -43,6 +43,9 @@ Acceptance: tests prove stop precedes remove, no normal reconciliation emits
 `rm -f`, long grace periods extend request deadlines, route reload is
 synchronous, and deploy ordering is route withdrawal then service removal.
 
+Evidence: completed in `f780a3e`; full build/tests, affected-package race
+tests, Docker lifecycle proof, and two independent reviews passed.
+
 ## Milestone 2: Proxy Route Policy
 
 - Add deny/allow path-prefix rules with deny precedence and segment-aware
@@ -56,6 +59,10 @@ synchronous, and deploy ordering is route withdrawal then service removal.
 Acceptance: generated Caddy configuration blocks internal paths, rejects
 oversized bodies before proxying, applies configured headers, and passes route
 policy conformance and state round-trip tests.
+
+Evidence: implementation complete. Full build/tests, affected-package race
+tests, live Caddy 2.10 path/body/header/error-path proofs, and two independent
+reviews passed.
 
 ## Milestone 3: PostgreSQL Remote Restore Verification
 
