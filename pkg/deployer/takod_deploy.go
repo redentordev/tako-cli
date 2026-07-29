@@ -430,6 +430,11 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 					return fmt.Errorf("service %s uses container runtime controls: %w", serviceName, err)
 				}
 			}
+			if strings.TrimSpace(service.StopGracePeriod) != "" {
+				if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerGracefulStopV1, "graceful container stop"); err != nil {
+					return fmt.Errorf("service %s uses stopGracePeriod: %w", serviceName, err)
+				}
+			}
 			return nil
 		},
 		Build: func() error {
@@ -1119,6 +1124,9 @@ func (d *Deployer) RemoveServiceTakod(serviceName string) error {
 	if len(targetServers) == 0 {
 		return fmt.Errorf("environment %s has no target servers", d.environment)
 	}
+	if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerGracefulStopV1, "graceful container stop"); err != nil {
+		return fmt.Errorf("remove service %s: %w", serviceName, err)
+	}
 
 	return runTakodNodeActions(targetServers, func(serverName string) error {
 		client, err := d.getRuntimeClient(serverName)
@@ -1151,6 +1159,9 @@ func (d *Deployer) PruneTakodServiceRevisions(services map[string]config.Service
 	}
 	if len(targetServers) == 0 {
 		return fmt.Errorf("environment %s has no target servers", d.environment)
+	}
+	if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerGracefulStopV1, "graceful container stop"); err != nil {
+		return fmt.Errorf("prune stale service revisions: %w", err)
 	}
 
 	return runTakodNodeActions(targetServers, func(serverName string) error {
@@ -2071,6 +2082,16 @@ func (d *Deployer) PreflightAssignmentRemovals(serviceNames []string) error {
 	return nil
 }
 
+// PreflightGracefulStopCapabilities admits every target before any workflow
+// can persist intent, publish routes, or replace/remove containers.
+func (d *Deployer) PreflightGracefulStopCapabilities() error {
+	targetServers, err := d.getTakodTargetServers()
+	if err != nil {
+		return err
+	}
+	return d.preflightTakodCapability(targetServers, takod.CapabilityContainerGracefulStopV1, "graceful container stop")
+}
+
 func (d *Deployer) validateRemovedAssignmentMutationTargets(serviceName string, prior, planned []scheduler.Assignment) error {
 	retained := make(map[string]struct{}, len(planned))
 	for _, assignment := range planned {
@@ -2451,15 +2472,17 @@ func reconcileServiceRequestTimeout(request takod.ReconcileServiceRequest) time.
 	if len(request.Files) > 0 {
 		timeout = takodclient.StreamRequestTimeout
 	}
-	if request.Health == nil || request.Health.WaitAttempts <= 0 {
-		return timeout
+	// The old container owns the effective Docker StopTimeout, so the incoming
+	// config cannot provide a safe upper bound when a grace period is reduced or
+	// removed. Reserve the validated maximum, then add sequential health work.
+	calculated := timeout + 24*time.Hour
+	if request.Health != nil && request.Health.WaitAttempts > 0 {
+		containers := len(request.Containers)
+		if containers < 1 {
+			containers = 1
+		}
+		calculated += time.Duration(request.Health.WaitAttempts*containers) * time.Second
 	}
-	containers := len(request.Containers)
-	if containers < 1 {
-		containers = 1
-	}
-	healthWindow := time.Duration(request.Health.WaitAttempts*containers) * time.Second
-	calculated := healthWindow + 2*time.Minute
 	if calculated < timeout {
 		return timeout
 	}
@@ -2467,7 +2490,8 @@ func reconcileServiceRequestTimeout(request takod.ReconcileServiceRequest) time.
 }
 
 func (d *Deployer) removeServiceViaTakod(client any, request takod.RemoveServiceRequest) error {
-	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/remove-service", request); err != nil {
+	const maximumGracefulRemovalTimeout = 24*time.Hour + 2*time.Minute
+	if _, err := takodclient.RequestJSONWithTimeoutContext(d.baseContext(), client, d.takodSocket(), "POST", "/v1/remove-service", request, maximumGracefulRemovalTimeout); err != nil {
 		return fmt.Errorf("takod service removal failed: %w", err)
 	}
 	return nil

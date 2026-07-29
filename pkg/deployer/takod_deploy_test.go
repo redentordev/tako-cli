@@ -1096,7 +1096,7 @@ func TestReconcileServiceRequestTimeoutCoversHealthWindowPerReplica(t *testing.T
 		Containers: []takod.ContainerSpec{{Name: "web-1"}, {Name: "web-2"}},
 		Health:     &takod.HealthSpec{WaitAttempts: 350},
 	})
-	want := 820 * time.Second
+	want := 24*time.Hour + 820*time.Second
 	if got != want {
 		t.Fatalf("timeout = %s, want %s", got, want)
 	}
@@ -1104,15 +1104,20 @@ func TestReconcileServiceRequestTimeoutCoversHealthWindowPerReplica(t *testing.T
 	got = reconcileServiceRequestTimeout(takod.ReconcileServiceRequest{
 		Containers: []takod.ContainerSpec{{Name: "web-1"}},
 	})
-	if got != takodclient.JSONRequestTimeout {
-		t.Fatalf("default timeout = %s, want %s", got, takodclient.JSONRequestTimeout)
+	if want := 24*time.Hour + 2*time.Minute; got != want {
+		t.Fatalf("default timeout = %s, want %s", got, want)
 	}
 
 	got = reconcileServiceRequestTimeout(takod.ReconcileServiceRequest{
 		Files: []takod.ServiceFileBundle{{Name: "file-000"}},
 	})
-	if got != takodclient.StreamRequestTimeout {
-		t.Fatalf("file payload timeout = %s, want %s", got, takodclient.StreamRequestTimeout)
+	if want := 24*time.Hour + takodclient.StreamRequestTimeout; got != want {
+		t.Fatalf("file payload timeout = %s, want %s", got, want)
+	}
+
+	got = reconcileServiceRequestTimeout(takod.ReconcileServiceRequest{StopTimeoutSeconds: 600})
+	if want := 24*time.Hour + 2*time.Minute; got != want {
+		t.Fatalf("graceful stop timeout = %s, want %s", got, want)
 	}
 }
 

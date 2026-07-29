@@ -253,6 +253,29 @@ func (s *RemoveSession) Apply(ctx context.Context) (*RemoveResult, error) {
 	ctx = leaseCtx
 	e.debug(events.TypeLogLine, events.PhaseCleanup, fmt.Sprintf("→ Acquired remote remove leases: %s\n", leaseSet.Summary()))
 
+	preflightOutcomes := collectCleanupNodeOutcomes(s.servers, func(serverName string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {
+		client, _, err := runtimeFactory.Client(ctx, serverName)
+		if err != nil {
+			return nil, &ConnectivityError{Server: serverCfg.Host, Err: fmt.Errorf("failed to connect: %w", err)}
+		}
+		if err := RequireTakodCapabilityContext(ctx, client, cfg, takod.CapabilityContainerGracefulStopV1, "graceful container stop"); err != nil {
+			return nil, err
+		}
+		return nil, RequireTakodCapabilityContext(ctx, client, cfg, takod.CapabilityProxyActivationV1, "acknowledged proxy activation")
+	})
+	var preflightFailures []string
+	for _, outcome := range preflightOutcomes {
+		if outcome.err != nil {
+			preflightFailures = append(preflightFailures, fmt.Sprintf("%s: %v", outcome.serverName, outcome.err))
+		}
+	}
+	if len(preflightFailures) > 0 {
+		err := fmt.Errorf("remove preflight failed: %s", strings.Join(preflightFailures, "; "))
+		result.Error = err.Error()
+		result.Duration = time.Since(startTime).Seconds()
+		return result, err
+	}
+
 	e.info(events.TypeLogLine, events.PhaseCleanup, fmt.Sprintf("→ Reconciling cleanup through takod on %d node(s)...\n", len(s.serverNames)))
 	request := RemoveCleanupRequest(cfg, envName, s.services)
 	outcomes := collectCleanupNodeOutcomes(s.servers, func(serverName string, serverCfg config.ServerConfig) (*takod.CleanupResponse, error) {

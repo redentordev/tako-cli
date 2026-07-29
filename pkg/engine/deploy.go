@@ -612,6 +612,9 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	if err := s.deployer.PreflightTakodProxyCapabilities(s.allServices); err != nil {
 		return nil, err
 	}
+	if err := s.deployer.PreflightGracefulStopCapabilities(); err != nil {
+		return nil, err
+	}
 
 	e := s.engine
 	defer e.flushBuildOutput()
@@ -958,6 +961,27 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		}
 	}
 
+	var manualPending []string
+	var proxyServices map[string]config.ServiceConfig
+	var activeRevisions map[string]string
+	if !deploymentFailed {
+		proxyServices = services
+		if req.Service != "" {
+			proxyServices = CloneServiceMap(s.allServices)
+		}
+		manualPending = deployplan.ManualPromotionPendingServices(servicesToDeploy, actualState)
+		activeRevisions = deployplan.ProxyActiveRevisions(cfg, envName, proxyServices, servicesToDeploy, imageRefs, actualState)
+		if err := s.reconcileProxy(proxyServices, activeRevisions); err != nil {
+			e.emit(events.Event{Type: events.TypeDeployFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ proxy reconciliation failed: %v\n", err)})
+			deploymentFailed = true
+			deploymentError = fmt.Errorf("proxy reconciliation failed: %w", err)
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
+		}
+	}
+
+	// Route withdrawal is acknowledged before removed containers begin their
+	// graceful stop, so public traffic cannot target a service being drained.
 	if !deploymentFailed {
 		if err := s.applyRemovals(plan); err != nil {
 			e.emit(events.Event{Type: events.TypeDeployServiceFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ service removal failed: %v\n", err)})
@@ -968,21 +992,8 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		}
 	}
 
-	var manualPending []string
 	if !deploymentFailed {
-		proxyServices := services
-		if req.Service != "" {
-			proxyServices = CloneServiceMap(s.allServices)
-		}
-		manualPending = deployplan.ManualPromotionPendingServices(servicesToDeploy, actualState)
-		activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, proxyServices, servicesToDeploy, imageRefs, actualState)
-		if err := s.reconcileProxy(proxyServices, activeRevisions); err != nil {
-			e.emit(events.Event{Type: events.TypeDeployFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ proxy reconciliation failed: %v\n", err)})
-			deploymentFailed = true
-			deploymentError = fmt.Errorf("proxy reconciliation failed: %w", err)
-			deployment.Status = remotestate.StatusFailed
-			deployment.Error = err.Error()
-		} else if err := s.pruneRevisionsAfterGrace(proxyServices, deployplan.DeployedProxyActiveRevisions(servicesToDeploy, activeRevisions)); err != nil {
+		if err := s.pruneRevisionsAfterGrace(proxyServices, deployplan.DeployedProxyActiveRevisions(servicesToDeploy, activeRevisions)); err != nil {
 			e.emit(events.Event{Type: events.TypeDeployFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ stale revision cleanup failed: %v\n", err)})
 			deploymentFailed = true
 			deploymentError = fmt.Errorf("stale revision cleanup failed: %w", err)

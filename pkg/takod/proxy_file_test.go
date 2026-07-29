@@ -216,6 +216,9 @@ func TestWriteProxyFileValidatesStagedCaddyfileWhenProxyRunsCaddy(t *testing.T) 
 	if !strings.Contains(commands, "docker exec tako-proxy caddy adapt --adapter caddyfile --config /etc/caddy/Caddyfile.next") {
 		t.Fatalf("expected staged Caddyfile validation command, got:\n%s", commands)
 	}
+	if !strings.Contains(commands, "docker exec tako-proxy caddy reload --adapter caddyfile --config /etc/caddy/Caddyfile") {
+		t.Fatalf("expected synchronous Caddyfile reload command, got:\n%s", commands)
+	}
 }
 
 func TestWriteProxyFileRollsBackRouteManifestWhenCaddyValidationFails(t *testing.T) {
@@ -277,6 +280,125 @@ func TestWriteProxyFileRollsBackRouteManifestWhenCaddyValidationFails(t *testing
 	}
 	if string(caddyfile) != string(oldCaddyfile) {
 		t.Fatalf("Caddyfile changed despite validation failure:\n%s", string(caddyfile))
+	}
+}
+
+func TestWriteProxyFileReactivatesPreviousRoutesWhenCaddyReloadFails(t *testing.T) {
+	useTempProxyPaths(t)
+	oldContent := `{
+  "version": 1,
+  "project": "demo",
+  "environment": "production",
+  "routes": [{"service":"web","domains":["old.example.com"],"upstreams":["http://demo-web:3000"]}]
+}`
+	newContent := strings.ReplaceAll(oldContent, "old.example.com", "new.example.com")
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: "demo-production.json", Content: oldContent}); err != nil {
+		t.Fatalf("initial WriteProxyFile returned error: %v", err)
+	}
+	oldCaddyfile, err := os.ReadFile(proxyCaddyfilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "tako-proxy\n")
+	t.Setenv("TAKO_FAKE_INSPECT_ARGS", currentProxyArgsJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_DOCKER_EXEC_FAIL_CONTAINS", "caddy reload")
+	t.Setenv("TAKO_FAKE_DOCKER_EXEC_FAIL_ONCE_FILE", filepath.Join(t.TempDir(), "reload-failed"))
+
+	_, err = WriteProxyFile(context.Background(), ProxyFileRequest{Name: "demo-production.json", Content: newContent})
+	if err == nil || !strings.Contains(err.Error(), "failed to activate generated Caddyfile") {
+		t.Fatalf("WriteProxyFile error = %v, want activation failure", err)
+	}
+	route, readErr := os.ReadFile(filepath.Join(proxyRoutesDir, "demo-production.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(route) != oldContent {
+		t.Fatalf("route manifest was not restored:\n%s", route)
+	}
+	caddyfile, readErr := os.ReadFile(proxyCaddyfilePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(caddyfile) != string(oldCaddyfile) {
+		t.Fatalf("previous Caddyfile was not restored:\n%s", caddyfile)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if strings.Count(commands, "caddy reload --adapter caddyfile --config /etc/caddy/Caddyfile") < 2 {
+		t.Fatalf("expected failed activation and successful rollback reload, got:\n%s", commands)
+	}
+}
+
+func TestWriteProxyFileFailsClosedWhenProxyStateCannotBeInspected(t *testing.T) {
+	useTempProxyPaths(t)
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_DOCKER_PS_ERROR", "docker unavailable")
+
+	content := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["example.com"],"upstreams":["http://web:3000"]}]}`
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: "demo.json", Content: content}); err == nil || !strings.Contains(err.Error(), "inspect proxy") {
+		t.Fatalf("WriteProxyFile error = %v, want proxy inspection failure", err)
+	}
+	if _, err := os.Stat(filepath.Join(proxyRoutesDir, "demo.json")); !os.IsNotExist(err) {
+		t.Fatalf("failed publication left route manifest behind: %v", err)
+	}
+}
+
+func TestWriteProxyFileCanRequireRunningProxyAcknowledgement(t *testing.T) {
+	useTempProxyPaths(t)
+	content := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["example.com"],"upstreams":["http://web:3000"]}]}`
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: "demo.json", Content: content, RequireActivation: true}); err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Fatalf("WriteProxyFile error = %v, want missing activation acknowledgement", err)
+	}
+	if _, err := os.Stat(filepath.Join(proxyRoutesDir, "demo.json")); !os.IsNotExist(err) {
+		t.Fatalf("unacknowledged route manifest remains: %v", err)
+	}
+}
+
+func TestRemoveProxyFilesRollsBackEntireRouteSetOnReloadFailure(t *testing.T) {
+	useTempProxyPaths(t)
+	first := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["web.example.com"],"upstreams":["http://web:3000"]}]}`
+	second := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"api","domains":["api.example.com"],"upstreams":["http://api:3000"]}]}`
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: "first.json", Content: first}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: "second.json", Content: second}); err != nil {
+		t.Fatal(err)
+	}
+	oldCaddyfile, err := os.ReadFile(proxyCaddyfilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "tako-proxy\n")
+	t.Setenv("TAKO_FAKE_INSPECT_ARGS", currentProxyArgsJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_DOCKER_EXEC_FAIL_CONTAINS", "caddy reload")
+	t.Setenv("TAKO_FAKE_DOCKER_EXEC_FAIL_ONCE_FILE", filepath.Join(t.TempDir(), "reload-failed"))
+
+	if err := RemoveProxyFiles(context.Background(), []string{"first.json", "second.json"}); err == nil {
+		t.Fatal("expected route-set activation failure")
+	}
+	for name, want := range map[string]string{"first.json": first, "second.json": second} {
+		data, err := os.ReadFile(filepath.Join(proxyRoutesDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != want {
+			t.Fatalf("%s was not restored:\n%s", name, data)
+		}
+	}
+	caddyfile, err := os.ReadFile(proxyCaddyfilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(caddyfile) != string(oldCaddyfile) {
+		t.Fatalf("Caddyfile was not restored:\n%s", caddyfile)
 	}
 }
 

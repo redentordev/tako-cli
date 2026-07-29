@@ -284,6 +284,25 @@ func (s *DestroySession) Apply(ctx context.Context) (*DestroyResult, error) {
 	ctx = leaseCtx
 	e.debug(events.TypeLogLine, events.PhaseCleanup, fmt.Sprintf("→ Acquired remote destroy leases: %s\n", leaseSet.Summary()))
 
+	for _, serverName := range s.serverNames {
+		client, _, err := runtimeFactory.Client(ctx, serverName)
+		if err != nil {
+			result.Error = err.Error()
+			result.Duration = time.Since(startTime).Seconds()
+			return result, err
+		}
+		if err := RequireTakodCapabilityContext(ctx, client, cfg, takod.CapabilityContainerGracefulStopV1, "graceful container stop"); err != nil {
+			result.Error = err.Error()
+			result.Duration = time.Since(startTime).Seconds()
+			return result, fmt.Errorf("destroy preflight failed on %s: %w", serverName, err)
+		}
+		if err := RequireTakodCapabilityContext(ctx, client, cfg, takod.CapabilityProxyActivationV1, "acknowledged proxy activation"); err != nil {
+			result.Error = err.Error()
+			result.Duration = time.Since(startTime).Seconds()
+			return result, fmt.Errorf("destroy preflight failed on %s: %w", serverName, err)
+		}
+	}
+
 	e.info(events.TypePhaseStarted, events.PhaseCleanup, fmt.Sprintf("\n🗑️  Removing app runtime on %d node(s)...\n\n", len(s.servers)))
 
 	totalErrors := 0

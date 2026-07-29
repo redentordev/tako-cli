@@ -314,7 +314,11 @@ func StreamExec(ctx context.Context, req ExecRequest, writer io.Writer) error {
 	defer cancel()
 	exitCode, runErr := runExecDocker(runCtx, out, args)
 	if req.Mode == ExecModeOneOff && runCtx.Err() != nil {
-		removeExecContainer(container)
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			removeExecContainer(container)
+		} else {
+			removeExecContainerGracefully(container)
+		}
 	}
 	if run.cleanup != nil {
 		if cleanupErr := run.cleanup(); cleanupErr != nil {
@@ -478,6 +482,12 @@ func removeExecContainer(container string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_, _ = runDocker(ctx, "rm", "-f", container)
+}
+
+func removeExecContainerGracefully(container string) {
+	ctx, cancel := context.WithTimeout(context.Background(), maxHealthDuration+2*time.Minute)
+	defer cancel()
+	_, _ = removeContainerIDs(ctx, []string{container})
 }
 
 // lineStartWriter tracks whether the stream sits at a line boundary so

@@ -3,11 +3,13 @@ package takod
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -39,12 +41,17 @@ func ReconcileProxy(ctx context.Context, req ReconcileProxyRequest) (*ReconcileP
 	if err := ensureProxyDirectories(); err != nil {
 		return nil, err
 	}
+	proxyRenderMu.Lock()
+	defer proxyRenderMu.Unlock()
 	networks, err := proxyNetworksForCurrentRoutes(req.Network)
 	if err != nil {
 		return nil, err
 	}
 
-	running, _ := runDocker(ctx, "ps", "--filter", "name=^tako-proxy$", "--format", "{{.Names}}")
+	running, err := runDocker(ctx, "ps", "--filter", "name=^tako-proxy$", "--format", "{{.Names}}")
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect running tako-proxy: %w", err)
+	}
 	if strings.TrimSpace(running) == "tako-proxy" {
 		args, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .Args}}")
 		ports, _ := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{json .NetworkSettings.Ports}}")
@@ -59,17 +66,168 @@ func ReconcileProxy(ctx context.Context, req ReconcileProxyRequest) (*ReconcileP
 		}
 	}
 
-	if err := renderAndWriteCaddyfile(ctx); err != nil {
+	candidatePath, previousCaddyfile, hadPreviousCaddyfile, err := stageProxyReplacementCaddyfile(ctx, req)
+	if err != nil {
 		return nil, err
 	}
-	_, _ = runDocker(ctx, "rm", "-f", "tako-proxy")
+	defer func() { _ = os.Remove(candidatePath) }()
+	existing, err := runDocker(ctx, "ps", "-aq", "--filter", "name=^tako-proxy$")
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect existing tako-proxy container: %w", err)
+	}
+	ids := strings.Fields(existing)
+	if len(ids) > 1 {
+		return nil, fmt.Errorf("multiple containers match the managed tako-proxy name")
+	}
+	rollbackName := ""
+	if strings.TrimSpace(running) == "tako-proxy" {
+		rollbackName = fmt.Sprintf("tako-proxy-rollback-%d", time.Now().UnixNano())
+		if output, err := runDocker(ctx, "rename", "tako-proxy", rollbackName); err != nil {
+			return nil, fmt.Errorf("failed to preserve existing tako-proxy: %w, output: %s", err, output)
+		}
+		if output, err := runDocker(ctx, "stop", rollbackName); err != nil {
+			rollbackErr := rollbackProxyReplacement(ctx, rollbackName, previousCaddyfile, hadPreviousCaddyfile)
+			return nil, errors.Join(fmt.Errorf("failed to gracefully stop existing tako-proxy: %w, output: %s", err, output), rollbackErr)
+		}
+	} else if len(ids) == 1 {
+		if _, err := removeContainerIDs(ctx, ids); err != nil {
+			return nil, fmt.Errorf("failed to remove stopped tako-proxy: %w", err)
+		}
+	}
+	if err := os.Rename(candidatePath, proxyCaddyfilePath); err != nil {
+		publishErr := fmt.Errorf("failed to publish replacement Caddyfile: %w", err)
+		return nil, errors.Join(publishErr, rollbackProxyReplacement(ctx, rollbackName, previousCaddyfile, hadPreviousCaddyfile))
+	}
 	if output, err := runDocker(ctx, buildProxyContainerArgs(req)...); err != nil {
-		return nil, fmt.Errorf("failed to start tako-proxy: %w, output: %s", err, output)
+		startErr := fmt.Errorf("failed to start tako-proxy: %w, output: %s", err, output)
+		return nil, errors.Join(startErr, rollbackProxyReplacement(ctx, rollbackName, previousCaddyfile, hadPreviousCaddyfile))
+	}
+	if err := verifyProxyRunning(ctx); err != nil {
+		return nil, errors.Join(err, rollbackProxyReplacement(ctx, rollbackName, previousCaddyfile, hadPreviousCaddyfile))
+	}
+	if err := reloadProxyCaddyfile(ctx); err != nil {
+		return nil, errors.Join(err, rollbackProxyReplacement(ctx, rollbackName, previousCaddyfile, hadPreviousCaddyfile))
 	}
 	if err := ensureProxyNetworkAttachments(ctx, networks); err != nil {
-		return nil, err
+		return nil, errors.Join(err, rollbackProxyReplacement(ctx, rollbackName, previousCaddyfile, hadPreviousCaddyfile))
+	}
+	if rollbackName != "" {
+		if output, err := runDocker(ctx, "rm", rollbackName); err != nil {
+			return nil, fmt.Errorf("new tako-proxy is active but the replaced container could not be removed: %w, output: %s", err, output)
+		}
 	}
 	return &ReconcileProxyResponse{Container: "tako-proxy", Image: req.Image}, nil
+}
+
+func stageProxyReplacementCaddyfile(ctx context.Context, req ReconcileProxyRequest) (string, []byte, bool, error) {
+	caddyfile, err := renderCaddyfileFromRouteManifests(proxyRoutesDir)
+	if err != nil {
+		return "", nil, false, err
+	}
+	if strings.TrimSpace(caddyfile) == "" {
+		caddyfile = emptyProxyCaddyfile()
+	}
+	previous, hadPrevious, err := readFileIfExists(proxyCaddyfilePath)
+	if err != nil {
+		return "", nil, false, err
+	}
+	candidatePath := proxyCaddyfilePath + ".replacement"
+	if err := writeFileAtomic(candidatePath, []byte(caddyfile), 0644); err != nil {
+		return "", nil, false, fmt.Errorf("failed to stage replacement Caddyfile: %w", err)
+	}
+	if err := validateCaddyfileWithProxyImage(ctx, req.Image, req.Email, candidatePath); err != nil {
+		_ = os.Remove(candidatePath)
+		return "", nil, false, err
+	}
+	return candidatePath, previous, hadPrevious, nil
+}
+
+func validateCaddyfileWithProxyImage(ctx context.Context, image string, email string, candidatePath string) error {
+	args := []string{
+		"run", "--rm", "--network", "none",
+		"--env", "TAKO_PROXY_EMAIL=" + email,
+		"--volume", candidatePath + ":/etc/caddy/Caddyfile:ro",
+		"--volume", proxyCertStoreDir + ":" + proxyCertContainerDir + ":ro",
+		"--entrypoint", "caddy", image,
+		"adapt", "--adapter", "caddyfile", "--config", "/etc/caddy/Caddyfile",
+	}
+	if output, err := runDocker(ctx, args...); err != nil {
+		return fmt.Errorf("target proxy image rejected generated Caddyfile: %w, output: %s", err, output)
+	}
+	return nil
+}
+
+func verifyProxyRunning(ctx context.Context) error {
+	running, err := runDocker(ctx, "inspect", "tako-proxy", "--format", "{{.State.Running}}")
+	if err != nil {
+		return fmt.Errorf("failed to inspect started tako-proxy: %w", err)
+	}
+	if strings.TrimSpace(running) != "true" {
+		return fmt.Errorf("started tako-proxy did not remain running")
+	}
+	return nil
+}
+
+func rollbackProxyReplacement(ctx context.Context, rollbackName string, previousCaddyfile []byte, hadPreviousCaddyfile bool) error {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	var rollbackErr error
+	safeToRestore := true
+	if err := restoreProxyRouteManifest(proxyCaddyfilePath, previousCaddyfile, hadPreviousCaddyfile); err != nil {
+		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore previous Caddyfile: %w", err))
+		safeToRestore = false
+	}
+	existing, err := runDocker(rollbackCtx, "ps", "-aq", "--filter", "name=^tako-proxy$")
+	if err != nil {
+		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("inspect failed proxy replacement: %w", err))
+		if cleanupErr := forceRemoveCanonicalProxy(rollbackCtx); cleanupErr != nil {
+			return errors.Join(rollbackErr, cleanupErr)
+		}
+		existing = ""
+	}
+	if ids := strings.Fields(existing); err == nil && len(ids) > 0 {
+		if _, err := removeContainerIDs(rollbackCtx, ids); err != nil {
+			if forceErr := forceRemoveCanonicalProxy(rollbackCtx); forceErr != nil {
+				return errors.Join(rollbackErr, fmt.Errorf("graceful removal of failed proxy replacement failed: %v", err), forceErr)
+			}
+		}
+	}
+	if rollbackName == "" {
+		return rollbackErr
+	}
+	if !safeToRestore {
+		return rollbackErr
+	}
+	if output, err := runDocker(rollbackCtx, "rename", rollbackName, "tako-proxy"); err != nil {
+		return errors.Join(rollbackErr, fmt.Errorf("restore previous proxy name: %w, output: %s", err, output))
+	}
+	if output, err := runDocker(rollbackCtx, "start", "tako-proxy"); err != nil {
+		return errors.Join(rollbackErr, fmt.Errorf("restart previous proxy: %w, output: %s", err, output), forceRemoveCanonicalProxy(rollbackCtx))
+	}
+	if err := verifyProxyRunning(rollbackCtx); err != nil {
+		return errors.Join(rollbackErr, fmt.Errorf("verify restored proxy: %w", err), forceRemoveCanonicalProxy(rollbackCtx))
+	}
+	if err := reloadProxyCaddyfile(rollbackCtx); err != nil {
+		return errors.Join(rollbackErr, fmt.Errorf("reactivate restored proxy: %w", err), forceRemoveCanonicalProxy(rollbackCtx))
+	}
+	return rollbackErr
+}
+
+func forceRemoveCanonicalProxy(ctx context.Context) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	output, err := runDocker(cleanupCtx, "rm", "-f", "tako-proxy")
+	if err != nil && !dockerContainerNotFound(output) {
+		return fmt.Errorf("fail-closed proxy removal failed: %w, output: %s", err, output)
+	}
+	remaining, verifyErr := runDocker(cleanupCtx, "ps", "-aq", "--filter", "name=^tako-proxy$")
+	if verifyErr != nil {
+		return fmt.Errorf("verify fail-closed proxy removal: %w", verifyErr)
+	}
+	if strings.TrimSpace(remaining) != "" {
+		return fmt.Errorf("proxy remains after fail-closed removal")
+	}
+	return nil
 }
 
 func normalizeReconcileProxyRequest(req *ReconcileProxyRequest) {

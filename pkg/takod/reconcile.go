@@ -204,20 +204,20 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	started := make([]string, 0, len(req.Containers))
 	for _, container := range req.Containers {
 		if err := runServiceContainer(ctx, req, container); err != nil {
-			if cleanupErr := cleanupStartedContainers(started); cleanupErr != nil {
+			if cleanupErr := cleanupStartedContainers(ctx, started); cleanupErr != nil {
 				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
 			}
 			return nil, err
 		}
 		started = append(started, container.Name)
 		if err := connectContainerNetworks(ctx, container.Name, req.NetworkAttachments); err != nil {
-			if cleanupErr := cleanupStartedContainers(started); cleanupErr != nil {
+			if cleanupErr := cleanupStartedContainers(ctx, started); cleanupErr != nil {
 				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
 			}
 			return nil, err
 		}
 		if err := waitForContainerHealthy(ctx, req.Network, container.Name, req.Health); err != nil {
-			if cleanupErr := cleanupStartedContainers(started); cleanupErr != nil {
+			if cleanupErr := cleanupStartedContainers(ctx, started); cleanupErr != nil {
 				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
 			}
 			return nil, err
@@ -1093,11 +1093,42 @@ func removeContainerIDs(ctx context.Context, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	args := append([]string{"rm", "-f"}, ids...)
-	if _, err := runDocker(ctx, args...); err != nil {
-		return 0, fmt.Errorf("failed to remove old service containers: %w", err)
+	stopArgs := append([]string{"stop"}, ids...)
+	if output, err := runDocker(ctx, stopArgs...); err != nil && !dockerStopOnlyReportedNotFound(output, ids) {
+		return 0, fmt.Errorf("failed to gracefully stop service containers: %w", err)
+	}
+	for _, id := range ids {
+		output, err := runDocker(ctx, "rm", id)
+		if err != nil && !dockerContainerNotFound(output) {
+			return 0, fmt.Errorf("failed to remove stopped service container %s: %w", id, err)
+		}
 	}
 	return len(ids), nil
+}
+
+func dockerStopOnlyReportedNotFound(output string, ids []string) bool {
+	known := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		known[id] = true
+	}
+	sawNotFound := false
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || known[line] {
+			continue
+		}
+		if dockerContainerNotFound(line) {
+			sawNotFound = true
+			continue
+		}
+		return false
+	}
+	return sawNotFound
+}
+
+func dockerContainerNotFound(output string) bool {
+	output = strings.ToLower(output)
+	return strings.Contains(output, "no such container") || strings.Contains(output, "no such object")
 }
 
 func runServiceContainer(ctx context.Context, req ReconcileServiceRequest, container ContainerSpec) error {
@@ -1108,15 +1139,14 @@ func runServiceContainer(ctx context.Context, req ReconcileServiceRequest, conta
 	return nil
 }
 
-func cleanupStartedContainers(containerNames []string) error {
+func cleanupStartedContainers(ctx context.Context, containerNames []string) error {
 	if len(containerNames) == 0 {
 		return nil
 	}
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), maxHealthDuration+2*time.Minute)
 	defer cancel()
-	args := append([]string{"rm", "-f"}, containerNames...)
-	if _, err := runDocker(cleanupCtx, args...); err != nil {
-		return fmt.Errorf("failed to remove started containers: %w", err)
+	if _, err := removeContainerIDs(cleanupCtx, containerNames); err != nil {
+		return fmt.Errorf("failed to clean up started containers: %w", err)
 	}
 	return nil
 }

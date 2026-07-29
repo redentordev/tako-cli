@@ -36,6 +36,213 @@ func newTestJobScheduler(t *testing.T) *JobScheduler {
 	return scheduler
 }
 
+func TestJobSchedulerProjectDrainWaitsForReservedRunAndBlocksNewRuns(t *testing.T) {
+	scheduler := newTestJobScheduler(t)
+	spec := validJobSpecFixture()
+	key := jobKey(spec.Project, spec.Environment, spec.Name)
+	scheduler.specs[key] = spec
+	started := make(chan struct{})
+	releaseRun := make(chan struct{})
+	var runs atomic.Int32
+	scheduler.runJob = func(context.Context, JobSpec, string, io.Writer) (int, error) {
+		if runs.Add(1) == 1 {
+			close(started)
+		}
+		<-releaseRun
+		return 0, nil
+	}
+	go scheduler.runScheduledJob(key)
+	<-started
+	drainReady := make(chan func(), 1)
+	go func() {
+		release, err := scheduler.BeginProjectDrain(context.Background(), spec.Project, spec.Environment)
+		if err != nil {
+			drainReady <- nil
+			return
+		}
+		drainReady <- release
+	}()
+	select {
+	case <-drainReady:
+		t.Fatal("project drain returned before reserved run completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseRun)
+	releaseDrain := <-drainReady
+	if releaseDrain == nil {
+		t.Fatal("BeginProjectDrain returned error")
+	}
+	scheduler.runScheduledJob(key)
+	if runs.Load() != 1 {
+		t.Fatalf("runs during drain = %d, want 1 completed run only", runs.Load())
+	}
+	releaseDrain()
+}
+
+func TestJobSchedulerProjectWideDrainIsExclusiveAndBlocksApply(t *testing.T) {
+	scheduler := newTestJobScheduler(t)
+	wait, release, err := scheduler.StartProjectDrain("demo", "")
+	if err != nil {
+		t.Fatalf("StartProjectDrain returned error: %v", err)
+	}
+	defer release()
+	if err := wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := scheduler.StartProjectDrain("demo", "production"); err == nil {
+		t.Fatal("overlapping project drain was accepted")
+	}
+	spec := validJobSpecFixture()
+	if _, err := scheduler.Apply(context.Background(), JobsApplyRequest{Project: "demo", Environment: "production", Jobs: []JobSpec{spec}}); err == nil || !strings.Contains(err.Error(), "cleanup is draining") {
+		t.Fatalf("Apply error = %v, want draining rejection", err)
+	}
+}
+
+func TestJobSchedulerIgnoresQueuedCallbackAfterRemoval(t *testing.T) {
+	scheduler := newTestJobScheduler(t)
+	spec := validJobSpecFixture()
+	if _, err := scheduler.Apply(context.Background(), JobsApplyRequest{Project: spec.Project, Environment: spec.Environment, Jobs: []JobSpec{spec}}); err != nil {
+		t.Fatal(err)
+	}
+	key := jobKey(spec.Project, spec.Environment, spec.Name)
+	generation := scheduler.generations[key]
+	var runs atomic.Int32
+	scheduler.runJob = func(context.Context, JobSpec, string, io.Writer) (int, error) {
+		runs.Add(1)
+		return 0, nil
+	}
+	if _, err := scheduler.RemoveProject(spec.Project, spec.Environment); err != nil {
+		t.Fatal(err)
+	}
+	scheduler.runScheduledJob(key, generation)
+	if runs.Load() != 0 {
+		t.Fatal("removed job's queued callback executed")
+	}
+}
+
+func TestJobSchedulerLoaderHonorsDurableDrainMarker(t *testing.T) {
+	dataDir := t.TempDir()
+	scheduler := NewJobScheduler(dataDir)
+	spec := validJobSpecFixture()
+	if err := scheduler.persistSpec(spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSchedulerDrainMarker(dataDir, "jobs", spec.Project, spec.Environment); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := NewJobScheduler(dataDir)
+	if err := reloaded.loadSpecs(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.entries) != 0 {
+		t.Fatal("loader resurrected job protected by durable drain marker")
+	}
+	if _, err := reloaded.Apply(context.Background(), JobsApplyRequest{Project: spec.Project, Environment: spec.Environment, Jobs: []JobSpec{spec}}); err == nil || !strings.Contains(err.Error(), "durable project cleanup") {
+		t.Fatalf("durable drain admitted job mutation: %v", err)
+	}
+}
+
+func TestJobSchedulerLoaderRetriesTransientMutationContention(t *testing.T) {
+	dataDir := t.TempDir()
+	scheduler := NewJobScheduler(dataDir)
+	spec := validJobSpecFixture()
+	if err := scheduler.persistSpec(spec); err != nil {
+		t.Fatal(err)
+	}
+	endMutation, err := scheduler.beginProjectMutation(spec.Project, spec.Environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := make(chan error, 1)
+	go func() { loaded <- scheduler.loadSpecs(context.Background()) }()
+	select {
+	case <-loaded:
+		endMutation()
+		t.Fatal("loader skipped schedule during temporary mutation contention")
+	case <-time.After(30 * time.Millisecond):
+	}
+	endMutation()
+	if err := <-loaded; err != nil {
+		t.Fatal(err)
+	}
+	if len(scheduler.entries) != 1 {
+		t.Fatalf("loaded entries = %d, want 1", len(scheduler.entries))
+	}
+}
+
+func TestJobSchedulerLoaderRetriesFreshCleanupDrain(t *testing.T) {
+	dataDir := t.TempDir()
+	scheduler := NewJobScheduler(dataDir)
+	spec := validJobSpecFixture()
+	if err := scheduler.persistSpec(spec); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := scheduler.StartProjectDrain(spec.Project, spec.Environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := make(chan error, 1)
+	go func() { loaded <- scheduler.loadSpecs(context.Background()) }()
+	select {
+	case <-loaded:
+		release()
+		t.Fatal("loader skipped persisted job during a fresh cleanup drain")
+	case <-time.After(30 * time.Millisecond):
+	}
+	release()
+	if err := <-loaded; err != nil {
+		t.Fatal(err)
+	}
+	if len(scheduler.entries) != 1 {
+		t.Fatalf("loaded entries = %d, want 1", len(scheduler.entries))
+	}
+}
+
+func TestJobSchedulerRetainedDrainCanBeRetried(t *testing.T) {
+	scheduler := newTestJobScheduler(t)
+	_, _, err := scheduler.StartProjectDrain("demo", "production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler.MarkProjectDrainRecoverable("demo", "production")
+	wait, release, err := scheduler.StartProjectDrain("demo", "production")
+	if err != nil {
+		t.Fatalf("recoverable drain retry failed: %v", err)
+	}
+	if err := wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := scheduler.StartProjectDrain("demo", "production"); err == nil {
+		t.Fatal("retained drain recovery token was claimed more than once")
+	}
+	release()
+	if _, ok := scheduler.draining[schedulerDrainScope("demo", "production")]; ok {
+		t.Fatal("successful retry did not clear retained drain")
+	}
+}
+
+func TestJobSchedulerMarkerRemovalFailureRetainsInMemoryBarrier(t *testing.T) {
+	scheduler := newTestJobScheduler(t)
+	_, release, err := scheduler.StartProjectDrain("demo", "production")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := schedulerDrainMarkerPath(scheduler.dataDir, "jobs", "demo", "production")
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(marker, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(marker, "block"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if !scheduler.draining[schedulerDrainScope("demo", "production")] || !scheduler.recoverable[schedulerDrainScope("demo", "production")] {
+		t.Fatal("marker removal failure cleared fail-closed scheduler barrier")
+	}
+}
+
 func TestValidateJobSpecAcceptsFullSpec(t *testing.T) {
 	spec := validJobSpecFixture()
 	spec.Timezone = "America/New_York"

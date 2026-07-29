@@ -127,6 +127,14 @@ const CapabilityPlatformWorkerHandoffV1 = "platform.worker-handoff-v1"
 // ulimits, and shm-size fields on service and job payloads.
 const CapabilityContainerRuntimeControlsV1 = "container.runtime-controls-v1"
 
+// CapabilityContainerGracefulStopV1 means normal service reconciliation stops
+// containers with Docker's configured signal and timeout before removing them.
+const CapabilityContainerGracefulStopV1 = "container.graceful-stop-v1"
+
+// CapabilityProxyActivationV1 means route publication and proxy replacement
+// return only after a running Caddy process accepts the managed configuration.
+const CapabilityProxyActivationV1 = "proxy.activation-v1"
+
 // CapabilityImageBuildOptionsV1 means the streamed image builder consumes
 // buildArgs and target from the request preamble.
 const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
@@ -920,6 +928,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	s.proxyAuthorityMu.Lock()
+	defer s.proxyAuthorityMu.Unlock()
 	defer r.Body.Close()
 
 	var request ReconcileProxyRequest
@@ -1066,20 +1076,90 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := validateCleanupRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var releaseJobDrain func()
+	var releaseBackupDrain func()
+	releaseSchedulerDrains := true
+	recoveredSchedulerDrain := false
+	if request.RemoveContainers || request.RemoveTakodState {
+		var err error
+		var waitJobs func(context.Context) error
+		var recoveredJobs bool
+		waitJobs, releaseJobDrain, recoveredJobs, err = s.jobScheduler.startProjectDrain(request.Project, request.Environment)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to quiesce jobs before cleanup: %v", err), http.StatusConflict)
+			return
+		}
+		var waitBackups func(context.Context) error
+		var recoveredBackups bool
+		waitBackups, releaseBackupDrain, recoveredBackups, err = s.backupScheduler.startProjectDrain(request.Project, request.Environment)
+		if err != nil {
+			if recoveredJobs {
+				s.jobScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+			} else {
+				releaseJobDrain()
+			}
+			http.Error(w, fmt.Sprintf("failed to quiesce backups before cleanup: %v", err), http.StatusConflict)
+			return
+		}
+		recoveredSchedulerDrain = recoveredJobs || recoveredBackups
+		if recoveredSchedulerDrain {
+			releaseSchedulerDrains = false
+		}
+		defer func() {
+			if releaseSchedulerDrains {
+				releaseJobDrain()
+				releaseBackupDrain()
+			}
+		}()
+		waitErrors := make(chan error, 2)
+		go func() { waitErrors <- waitJobs(r.Context()) }()
+		go func() { waitErrors <- waitBackups(r.Context()) }()
+		for range 2 {
+			if err := <-waitErrors; err != nil {
+				if recoveredSchedulerDrain {
+					s.jobScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+					s.backupScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+				}
+				http.Error(w, fmt.Sprintf("failed to wait for scheduled work before cleanup: %v", err), http.StatusConflict)
+				return
+			}
+		}
+	}
 	response, err := CleanupProject(r.Context(), request)
 	if err != nil {
+		if recoveredSchedulerDrain {
+			s.jobScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+			s.backupScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if request.RemoveContainers || request.RemoveTakodState {
-		if err := ReleaseProjectPortAllocations(r.Context(), s.dataDir, request.Project, request.Environment); err != nil {
-			response.Warnings = append(response.Warnings, fmt.Sprintf("failed to release port allocations: %v", err))
+		// Runtime is gone. Keep the in-memory and durable drain barriers if
+		// schedule deletion fails so deleted work cannot restart fail-open.
+		releaseSchedulerDrains = false
+		if _, err := s.backupScheduler.RemoveProject(request.Project, request.Environment); err != nil {
+			s.jobScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+			s.backupScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+			http.Error(w, fmt.Sprintf("failed to remove backup schedules after cleanup: %v", err), http.StatusInternalServerError)
+			return
 		}
 		removedJobs, err := s.jobScheduler.RemoveProject(request.Project, request.Environment)
 		if err != nil {
-			response.Warnings = append(response.Warnings, fmt.Sprintf("failed to unschedule jobs: %v", err))
+			s.jobScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+			s.backupScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+			http.Error(w, fmt.Sprintf("failed to remove job schedules after cleanup: %v", err), http.StatusInternalServerError)
+			return
 		}
 		response.JobsRemoved = len(removedJobs)
+		releaseSchedulerDrains = true
+		if err := ReleaseProjectPortAllocations(r.Context(), s.dataDir, request.Project, request.Environment); err != nil {
+			response.Warnings = append(response.Warnings, fmt.Sprintf("failed to release port allocations: %v", err))
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -2198,7 +2278,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyActivationV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,

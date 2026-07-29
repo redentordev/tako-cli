@@ -58,12 +58,19 @@ func (d *Deployer) ReconcileTakodProxyWithActiveRevisions(services map[string]co
 // route-manifest fields before an applying workflow mutates service state.
 func (d *Deployer) PreflightTakodProxyCapabilities(services map[string]config.ServiceConfig) error {
 	requirements := takodProxyCapabilityRequirements(services)
-	hasRoutes := false
-	for _, service := range services {
-		hasRoutes = hasRoutes || service.IsProxied()
+	allServers, err := d.getTakodTargetServers()
+	if err != nil {
+		return fmt.Errorf("failed to get takod proxy reconciliation targets: %w", err)
 	}
-	if !hasRoutes && len(requirements) == 0 {
-		return nil
+	activation := takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyActivationV1, Feature: "acknowledged proxy activation"}
+	if err := preflightTakodProxyRequirements(allServers, []takodProxyCapabilityRequirement{activation}, func(serverName string, requirement takodProxyCapabilityRequirement) error {
+		client, err := d.getRuntimeClient(serverName)
+		if err != nil {
+			return err
+		}
+		return d.ensureTakodCapability(client, serverName, requirement.Capability, requirement.Feature)
+	}); err != nil {
+		return err
 	}
 	proxyServers, err := d.getTakodProxyTargetServers()
 	if err != nil {
@@ -225,6 +232,11 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 				if err != nil {
 					return fmt.Errorf("failed to issue proxy DNS certificate: %w", err)
 				}
+				// Ensure a managed Caddy process exists before publishing routes so
+				// WriteProxyFile can synchronously validate and activate the change.
+				if err := d.ensureTakodProxy(client, takodNetworkName(d.config.Project.Name, d.environment), firstProxyEmail(services)); err != nil {
+					return fmt.Errorf("failed to reconcile proxy: %w", err)
+				}
 				if err := d.writeTakodProxyConfig(client, dynamicConfig); err != nil {
 					return fmt.Errorf("failed to write proxy config: %w", err)
 				}
@@ -234,9 +246,6 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 					}
 				} else if err := d.finalizeTakodProxyACME(client, *acmeRequest); err != nil {
 					return fmt.Errorf("failed to finalize proxy ACME ownership: %w", err)
-				}
-				if err := d.ensureTakodProxy(client, takodNetworkName(d.config.Project.Name, d.environment), firstProxyEmail(services)); err != nil {
-					return fmt.Errorf("failed to reconcile proxy: %w", err)
 				}
 				return nil
 			})
@@ -959,8 +968,9 @@ func (d *Deployer) proxyDestinationProof(proxyServerName string, assignment tako
 
 func (d *Deployer) writeTakodProxyConfig(client any, data []byte) error {
 	_, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/proxy-file", takod.ProxyFileRequest{
-		Name:    d.takodProxyConfigFileName(),
-		Content: string(data),
+		Name:              d.takodProxyConfigFileName(),
+		Content:           string(data),
+		RequireActivation: true,
 	})
 	return err
 }

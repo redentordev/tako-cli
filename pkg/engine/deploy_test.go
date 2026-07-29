@@ -253,10 +253,11 @@ func TestDeployRemovalIntentPrecedesCleanupAndFinalStateDropsPendingMarker(t *te
 	}
 	body := string(source)
 	intent := strings.Index(body, "PersistTakodDesiredIntentWithPlacementBaseline")
+	proxy := strings.Index(body, "s.reconcileProxy(proxyServices, activeRevisions)")
 	cleanup := strings.Index(body, "s.applyRemovals(plan)")
 	finalState := strings.Index(body, "PersistTakodRuntimeStateWithPlacementBaseline(")
-	if intent < 0 || cleanup < 0 || finalState < 0 || !(intent < cleanup && cleanup < finalState) {
-		t.Fatalf("removal state ordering invalid: intent=%d cleanup=%d final=%d", intent, cleanup, finalState)
+	if intent < 0 || proxy < 0 || cleanup < 0 || finalState < 0 || !(intent < proxy && proxy < cleanup && cleanup < finalState) {
+		t.Fatalf("removal state ordering invalid: intent=%d proxy=%d cleanup=%d final=%d", intent, proxy, cleanup, finalState)
 	}
 }
 

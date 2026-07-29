@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
@@ -617,7 +618,7 @@ func TestReconcileServiceFailsMissingExternalVolumeBeforeRemovingContainers(t *t
 
 	entries := readCommandLog(t, logPath)
 	for _, entry := range entries {
-		if strings.HasPrefix(entry, "docker ps -aq --filter label=tako.project=demo") || strings.HasPrefix(entry, "docker rm -f") {
+		if strings.HasPrefix(entry, "docker ps -aq --filter label=tako.project=demo") || strings.HasPrefix(entry, "docker stop ") || strings.HasPrefix(entry, "docker rm ") {
 			t.Fatalf("missing external volume should fail before removing old containers; log %#v", entries)
 		}
 	}
@@ -694,7 +695,7 @@ func TestReconcileServiceFailsMissingImportNetworkBeforeRemovingContainers(t *te
 
 	entries := readCommandLog(t, logPath)
 	for _, entry := range entries {
-		if strings.HasPrefix(entry, "docker ps -aq --filter label=tako.project=frontend") || strings.HasPrefix(entry, "docker rm -f") {
+		if strings.HasPrefix(entry, "docker ps -aq --filter label=tako.project=frontend") || strings.HasPrefix(entry, "docker stop ") || strings.HasPrefix(entry, "docker rm ") {
 			t.Fatalf("missing import network should fail before removing old containers; log %#v", entries)
 		}
 	}
@@ -788,8 +789,8 @@ func TestReconcileServiceCleansStartedContainersOnHealthFailure(t *testing.T) {
 	}
 
 	entries := readCommandLog(t, logPath)
-	if !slices.Contains(entries, "docker rm -f demo_production_web_1") {
-		t.Fatalf("docker log missing cleanup of started container in %#v", entries)
+	if !slices.Contains(entries, "docker stop demo_production_web_1") || !slices.Contains(entries, "docker rm demo_production_web_1") {
+		t.Fatalf("docker log missing graceful cleanup of started container in %#v", entries)
 	}
 }
 
@@ -988,8 +989,8 @@ func TestReconcileServiceCleansStartedContainersOnSmokeFailure(t *testing.T) {
 	}
 
 	entries := readCommandLog(t, logPath)
-	if !slices.Contains(entries, "docker rm -f demo_production_web_1") {
-		t.Fatalf("docker log missing cleanup of started container in %#v", entries)
+	if !slices.Contains(entries, "docker stop demo_production_web_1") || !slices.Contains(entries, "docker rm demo_production_web_1") {
+		t.Fatalf("docker log missing graceful cleanup of started container in %#v", entries)
 	}
 }
 
@@ -1094,8 +1095,8 @@ func TestReconcileServiceNoDowntimeStrategyReplacesOnlyTargetRevision(t *testing
 	}
 
 	entries := readCommandLog(t, logPath)
-	if !slices.Contains(entries, "docker rm -f green456") {
-		t.Fatalf("docker log missing target revision removal in %#v", entries)
+	if !slices.Contains(entries, "docker stop green456") || !slices.Contains(entries, "docker rm green456") {
+		t.Fatalf("docker log missing graceful target revision removal in %#v", entries)
 	}
 	for _, entry := range entries {
 		if strings.Contains(entry, "docker rm") && (strings.Contains(entry, "blue123") || strings.Contains(entry, "legacy789")) {
@@ -1148,8 +1149,8 @@ func TestReconcileServiceNoDowntimeEmptyRequestRemovesOnlyTargetRevision(t *test
 	}
 
 	entries := readCommandLog(t, logPath)
-	if !slices.Contains(entries, "docker rm -f green456") {
-		t.Fatalf("docker log missing target revision removal in %#v", entries)
+	if !slices.Contains(entries, "docker stop green456") || !slices.Contains(entries, "docker rm green456") {
+		t.Fatalf("docker log missing graceful target revision removal in %#v", entries)
 	}
 	for _, entry := range entries {
 		if strings.Contains(entry, "docker rm") && (strings.Contains(entry, "blue123") || strings.Contains(entry, "legacy789")) {
@@ -1186,12 +1187,14 @@ func TestRemoveServiceRemovesMatchingContainers(t *testing.T) {
 	}
 
 	entries := readCommandLog(t, logPath)
-	if len(entries) != 2 {
-		t.Fatalf("docker entries = %#v, want ps and rm", entries)
+	if len(entries) != 4 {
+		t.Fatalf("docker entries = %#v, want ps, one concurrent stop request, and per-container rm", entries)
 	}
 	for _, want := range []string{
 		"docker ps -aq --filter label=tako.project=demo --filter label=tako.environment=production --filter label=tako.service=old-api",
-		"docker rm -f abc123 def456",
+		"docker stop abc123 def456",
+		"docker rm abc123",
+		"docker rm def456",
 	} {
 		found := false
 		for _, entry := range entries {
@@ -1203,6 +1206,11 @@ func TestRemoveServiceRemovesMatchingContainers(t *testing.T) {
 		if !found {
 			t.Fatalf("docker log missing %q in %#v", want, entries)
 		}
+	}
+	stopIndex := slices.Index(entries, "docker stop abc123 def456")
+	firstRemoveIndex := slices.Index(entries, "docker rm abc123")
+	if stopIndex < 0 || firstRemoveIndex <= stopIndex {
+		t.Fatalf("graceful stop must precede removal: %#v", entries)
 	}
 }
 
@@ -1231,13 +1239,81 @@ func TestRemoveServiceKeepsRequestedRevisionContainers(t *testing.T) {
 	}
 
 	entries := readCommandLog(t, logPath)
-	if !slices.Contains(entries, "docker rm -f blue123 legacy789") {
-		t.Fatalf("docker log missing stale revision removal in %#v", entries)
+	if !slices.Contains(entries, "docker stop blue123 legacy789") || !slices.Contains(entries, "docker rm blue123") || !slices.Contains(entries, "docker rm legacy789") {
+		t.Fatalf("docker log missing graceful stale revision removal in %#v", entries)
 	}
 	for _, entry := range entries {
 		if strings.Contains(entry, "docker rm") && strings.Contains(entry, "green456") {
 			t.Fatalf("kept revision container was removed: %#v", entries)
 		}
+	}
+}
+
+func TestRemoveContainerIDsDoesNotRemoveContainersWhenGracefulStopFails(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_DOCKER_STOP_ERROR", "stop failed")
+
+	removed, err := removeContainerIDs(context.Background(), []string{"worker123"})
+	if err == nil || !strings.Contains(err.Error(), "gracefully stop") {
+		t.Fatalf("removeContainerIDs error = %v, want graceful stop failure", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed containers = %d, want 0", removed)
+	}
+	entries := readCommandLog(t, logPath)
+	if !slices.Equal(entries, []string{"docker stop worker123"}) {
+		t.Fatalf("docker entries = %#v, want stop only", entries)
+	}
+}
+
+func TestRemoveContainerIDsAcceptsDockerAutoRemovalAfterStop(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_DOCKER_RM_NOT_FOUND", "job123")
+
+	removed, err := removeContainerIDs(context.Background(), []string{"job123"})
+	if err != nil {
+		t.Fatalf("removeContainerIDs returned error for auto-removed container: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed containers = %d, want 1", removed)
+	}
+}
+
+func TestRemoveContainerIDsStopsMoreThanSixteenContainersInOneDrainWave(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	ids := make([]string, 17)
+	for index := range ids {
+		ids[index] = fmt.Sprintf("worker%02d", index+1)
+	}
+	if _, err := removeContainerIDs(context.Background(), ids); err != nil {
+		t.Fatalf("removeContainerIDs returned error: %v", err)
+	}
+	entries := readCommandLog(t, logPath)
+	wantStop := "docker stop " + strings.Join(ids, " ")
+	if len(entries) != 1+len(ids) || entries[0] != wantStop {
+		t.Fatalf("containers were not stopped in one daemon drain wave: %#v", entries)
+	}
+}
+
+func TestCleanupStartedContainersSurvivesCanceledRequestContext(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := cleanupStartedContainers(ctx, []string{"worker123"}); err != nil {
+		t.Fatalf("cleanupStartedContainers returned error: %v", err)
+	}
+	entries := readCommandLog(t, logPath)
+	if !slices.Equal(entries, []string{"docker stop worker123", "docker rm worker123"}) {
+		t.Fatalf("docker entries = %#v, want detached graceful cleanup", entries)
 	}
 }
 
@@ -1332,23 +1408,47 @@ func TestTakodCommandHelper(t *testing.T) {
 		}
 		os.Exit(0)
 	case "ps":
+		if output := os.Getenv("TAKO_FAKE_DOCKER_PS_ERROR"); output != "" {
+			_, _ = os.Stderr.WriteString(output)
+			os.Exit(1)
+		}
 		if marker := os.Getenv("TAKO_FAKE_PROXY_RUNNING_MARKER"); marker != "" {
 			if _, err := os.Stat(marker); err == nil {
 				_, _ = os.Stdout.WriteString("tako-proxy\n")
 			}
 			os.Exit(0)
 		}
+		if strings.Contains(strings.Join(commandArgs, " "), "label=tako.project=") {
+			if output := os.Getenv("TAKO_FAKE_PROJECT_PS_OUTPUT"); output != "" {
+				_, _ = os.Stdout.WriteString(output)
+				os.Exit(0)
+			}
+		}
 		if output := os.Getenv("TAKO_FAKE_PS_OUTPUT"); output != "" {
 			_, _ = os.Stdout.WriteString(output)
 		}
 		os.Exit(0)
 	case "rm":
+		if missing := os.Getenv("TAKO_FAKE_DOCKER_RM_NOT_FOUND"); missing != "" && slices.Contains(commandArgs[1:], missing) {
+			_, _ = os.Stderr.WriteString("Error: No such container: " + missing)
+			os.Exit(1)
+		}
 		if output := os.Getenv("TAKO_FAKE_DOCKER_RM_ERROR"); output != "" {
 			_, _ = os.Stderr.WriteString(output)
 			os.Exit(1)
 		}
-		if marker := os.Getenv("TAKO_FAKE_PROXY_RUNNING_MARKER"); marker != "" {
+		if marker := os.Getenv("TAKO_FAKE_PROXY_RUNNING_MARKER"); marker != "" && slices.Contains(commandArgs[1:], "tako-proxy") {
 			_ = os.Remove(marker)
+		}
+		os.Exit(0)
+	case "stop":
+		if exact := os.Getenv("TAKO_FAKE_DOCKER_STOP_FAIL_EXACT"); exact != "" && len(commandArgs) == 2 && commandArgs[1] == exact {
+			_, _ = os.Stderr.WriteString("selective stop failure")
+			os.Exit(1)
+		}
+		if output := os.Getenv("TAKO_FAKE_DOCKER_STOP_ERROR"); output != "" {
+			_, _ = os.Stderr.WriteString(output)
+			os.Exit(1)
 		}
 		os.Exit(0)
 	case "network":
@@ -1414,10 +1514,53 @@ func TestTakodCommandHelper(t *testing.T) {
 		_, _ = os.Stdout.WriteString("pulled\n")
 		os.Exit(0)
 	case "run":
+		if fragment := os.Getenv("TAKO_FAKE_DOCKER_RUN_FAIL_CONTAINS"); fragment != "" && strings.Contains(strings.Join(commandArgs, " "), fragment) {
+			_, _ = os.Stderr.WriteString("selective docker run failure")
+			os.Exit(1)
+		}
+		if os.Getenv("TAKO_FAKE_DOCKER_RUN_BLOCK_UNTIL_CANCEL") == "1" {
+			if marker := os.Getenv("TAKO_FAKE_DOCKER_RUN_STARTED_FILE"); marker != "" {
+				_ = os.WriteFile(marker, []byte("started"), 0600)
+			}
+			time.Sleep(time.Hour)
+		}
+		if marker := os.Getenv("TAKO_FAKE_PROXY_RUNNING_MARKER"); marker != "" {
+			for index, arg := range commandArgs {
+				if arg == "--name" && index+1 < len(commandArgs) && commandArgs[index+1] == "tako-proxy" {
+					_ = os.WriteFile(marker, []byte("running"), 0600)
+				}
+			}
+		}
 		createFakeBackupArchive(commandArgs)
 		_, _ = os.Stdout.WriteString("container-id\n")
 		os.Exit(0)
+	case "rename":
+		if marker := os.Getenv("TAKO_FAKE_PROXY_RUNNING_MARKER"); marker != "" && len(commandArgs) >= 3 {
+			if commandArgs[1] == "tako-proxy" {
+				_ = os.Remove(marker)
+			}
+			if commandArgs[2] == "tako-proxy" {
+				_ = os.WriteFile(marker, []byte("running"), 0600)
+			}
+		}
+		os.Exit(0)
+	case "start":
+		if marker := os.Getenv("TAKO_FAKE_PROXY_RUNNING_MARKER"); marker != "" && slices.Contains(commandArgs[1:], "tako-proxy") {
+			_ = os.WriteFile(marker, []byte("running"), 0600)
+		}
+		os.Exit(0)
 	case "exec":
+		joined := strings.Join(commandArgs, " ")
+		if fragment := os.Getenv("TAKO_FAKE_DOCKER_EXEC_FAIL_CONTAINS"); fragment != "" && strings.Contains(joined, fragment) {
+			if marker := os.Getenv("TAKO_FAKE_DOCKER_EXEC_FAIL_ONCE_FILE"); marker == "" {
+				_, _ = os.Stderr.WriteString("selective exec failure")
+				os.Exit(1)
+			} else if _, err := os.Stat(marker); os.IsNotExist(err) {
+				_ = os.WriteFile(marker, []byte("failed"), 0600)
+				_, _ = os.Stderr.WriteString("selective exec failure")
+				os.Exit(1)
+			}
+		}
 		if output := os.Getenv("TAKO_FAKE_DOCKER_EXEC_ERROR"); output != "" {
 			_, _ = os.Stderr.WriteString(output)
 			os.Exit(1)
@@ -1505,6 +1648,13 @@ func TestTakodCommandHelper(t *testing.T) {
 			os.Exit(0)
 		}
 		if strings.Contains(joined, ".State.Running") {
+			if marker := os.Getenv("TAKO_FAKE_PROXY_RUNNING_FALSE_ONCE_FILE"); marker != "" {
+				if _, err := os.Stat(marker); os.IsNotExist(err) {
+					_ = os.WriteFile(marker, []byte("failed"), 0600)
+					_, _ = os.Stdout.WriteString("false\n")
+					os.Exit(0)
+				}
+			}
 			_, _ = os.Stdout.WriteString("true\n")
 		}
 		os.Exit(0)

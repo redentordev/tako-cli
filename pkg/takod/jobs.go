@@ -156,10 +156,16 @@ type JobScheduler struct {
 	runJob func(ctx context.Context, spec JobSpec, container string, output io.Writer) (int, error)
 	admit  func(...string) error
 
-	mu      sync.Mutex
-	entries map[string]cron.EntryID
-	specs   map[string]JobSpec
-	running map[string]bool
+	mu             sync.Mutex
+	entries        map[string]cron.EntryID
+	specs          map[string]JobSpec
+	generations    map[string]uint64
+	nextGeneration uint64
+	running        map[string]bool
+	draining       map[string]bool
+	recoverable    map[string]bool
+	mutating       map[string]int
+	runningChanged chan struct{}
 
 	// runsMu serializes run-history read-modify-write cycles: a skipped-run
 	// record can land while the blocking run still owns the running flag.
@@ -169,14 +175,294 @@ type JobScheduler struct {
 func NewJobScheduler(dataDir string) *JobScheduler {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	return &JobScheduler{
-		dataDir: dataDir,
-		parser:  parser,
-		cron:    cron.New(cron.WithParser(parser), cron.WithChain(cron.Recover(cron.DefaultLogger))),
-		runJob:  runJobDocker,
-		entries: map[string]cron.EntryID{},
-		specs:   map[string]JobSpec{},
-		running: map[string]bool{},
+		dataDir:        dataDir,
+		parser:         parser,
+		cron:           cron.New(cron.WithParser(parser), cron.WithChain(cron.Recover(cron.DefaultLogger))),
+		runJob:         runJobDocker,
+		entries:        map[string]cron.EntryID{},
+		specs:          map[string]JobSpec{},
+		generations:    map[string]uint64{},
+		running:        map[string]bool{},
+		draining:       map[string]bool{},
+		recoverable:    map[string]bool{},
+		mutating:       map[string]int{},
+		runningChanged: make(chan struct{}),
 	}
+}
+
+func (s *JobScheduler) BeginProjectDrain(ctx context.Context, project string, environment string) (func(), error) {
+	wait, release, err := s.StartProjectDrain(project, environment)
+	if err != nil {
+		return nil, err
+	}
+	if err := wait(ctx); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
+func (s *JobScheduler) StartProjectDrain(project string, environment string) (func(context.Context) error, func(), error) {
+	wait, release, _, err := s.startProjectDrain(project, environment)
+	return wait, release, err
+}
+
+func (s *JobScheduler) startProjectDrain(project string, environment string) (func(context.Context) error, func(), bool, error) {
+	if s == nil {
+		return func(context.Context) error { return nil }, func() {}, false, nil
+	}
+	if !isSafeProjectName(project) || (environment != "" && !isSafeRuntimeName(environment)) {
+		return nil, nil, false, fmt.Errorf("invalid job drain scope")
+	}
+	scope := schedulerDrainScope(project, environment)
+	s.mu.Lock()
+	for existing := range s.draining {
+		if strings.HasPrefix(existing, scope) || strings.HasPrefix(scope, existing) {
+			if existing == scope && s.recoverable[scope] {
+				s.recoverable[scope] = false
+				s.mu.Unlock()
+				wait, release := s.projectDrainHandles(scope, project, environment)
+				return wait, release, true, nil
+			}
+			s.mu.Unlock()
+			return nil, nil, false, fmt.Errorf("job drain already active for overlapping scope")
+		}
+	}
+	markerExists, err := schedulerDrainMarkerExists(s.dataDir, "jobs", project, environment)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, nil, false, err
+	}
+	if !markerExists {
+		err = writeSchedulerDrainMarker(s.dataDir, "jobs", project, environment)
+	}
+	if err != nil {
+		s.mu.Unlock()
+		return nil, nil, false, err
+	}
+	recovered := markerExists
+	if markerExists {
+		s.recoverable[scope] = false
+	}
+	s.draining[scope] = true
+	s.mu.Unlock()
+	wait, release := s.projectDrainHandles(scope, project, environment)
+	return wait, release, recovered, nil
+}
+
+func (s *JobScheduler) projectDrainHandles(scope string, project string, environment string) (func(context.Context) error, func()) {
+	wait := func(ctx context.Context) error {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for s.hasActivityScopeLocked(scope) {
+			changed := s.runningChanged
+			s.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				s.mu.Lock()
+				return ctx.Err()
+			case <-changed:
+			}
+			s.mu.Lock()
+		}
+		return nil
+	}
+	release := func() {
+		if err := removeSchedulerDrainMarker(s.dataDir, "jobs", project, environment); err != nil {
+			s.mu.Lock()
+			s.recoverable[scope] = true
+			s.mu.Unlock()
+			fmt.Fprintf(os.Stderr, "takod failed to clear job drain marker: %v\n", err)
+			return
+		}
+		s.mu.Lock()
+		delete(s.draining, scope)
+		delete(s.recoverable, scope)
+		s.mu.Unlock()
+	}
+	return wait, release
+}
+
+func (s *JobScheduler) MarkProjectDrainRecoverable(project string, environment string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.recoverable[schedulerDrainScope(project, environment)] = true
+	s.mu.Unlock()
+}
+
+func (s *JobScheduler) ProjectDrainRecoverable(project string, environment string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recoverable[schedulerDrainScope(project, environment)]
+}
+
+func (s *JobScheduler) hasActivityScopeLocked(scope string) bool {
+	for key, running := range s.running {
+		if running && strings.HasPrefix(key, scope) {
+			return true
+		}
+	}
+	for key, count := range s.mutating {
+		if count > 0 && strings.HasPrefix(key, scope) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *JobScheduler) beginProjectMutation(project string, environment string) (func(), error) {
+	scope := schedulerDrainScope(project, environment)
+	markerExists, err := schedulerDrainMarkerExists(s.dataDir, "jobs", project, environment)
+	if err != nil {
+		return nil, fmt.Errorf("inspect job drain marker: %w", err)
+	}
+	if markerExists {
+		return nil, fmt.Errorf("%w: job schedules cannot change while durable project cleanup is draining", errSchedulerDraining)
+	}
+	s.mu.Lock()
+	if s.scopeDrainingLocked(scope) {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: job schedules cannot change while project cleanup is draining", errSchedulerDraining)
+	}
+	for active, count := range s.mutating {
+		if count > 0 && (strings.HasPrefix(active, scope) || strings.HasPrefix(scope, active)) {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("%w: job schedule mutation already in progress for overlapping scope", errSchedulerMutationInProgress)
+		}
+	}
+	s.mutating[scope] = 1
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		s.mutating[scope]--
+		if s.mutating[scope] == 0 {
+			delete(s.mutating, scope)
+		}
+		s.notifyRunningChangedLocked()
+		s.mu.Unlock()
+	}, nil
+}
+
+func (s *JobScheduler) beginLoaderMutation(ctx context.Context, project string, environment string) (func(), bool, error) {
+	for {
+		endMutation, err := s.beginProjectMutation(project, environment)
+		if err == nil {
+			return endMutation, true, nil
+		}
+		if errors.Is(err, errSchedulerDraining) {
+			if s.loaderShouldSuppressForDrain(project, environment) {
+				return nil, false, nil
+			}
+			select {
+			case <-ctx.Done():
+				return nil, false, ctx.Err()
+			case <-time.After(10 * time.Millisecond):
+			}
+			continue
+		}
+		if !errors.Is(err, errSchedulerMutationInProgress) {
+			return nil, false, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func (s *JobScheduler) loaderShouldSuppressForDrain(project string, environment string) bool {
+	scope := schedulerDrainScope(project, environment)
+	s.mu.Lock()
+	hasLiveDrain := false
+	for drain := range s.draining {
+		if strings.HasPrefix(scope, drain) {
+			hasLiveDrain = true
+			if s.recoverable[drain] {
+				s.mu.Unlock()
+				return true
+			}
+		}
+	}
+	s.mu.Unlock()
+	if hasLiveDrain {
+		return false
+	}
+	markerExists, err := schedulerDrainMarkerExists(s.dataDir, "jobs", project, environment)
+	return err == nil && markerExists
+}
+
+func (s *JobScheduler) scopeDrainingLocked(scope string) bool {
+	for drain := range s.draining {
+		if strings.HasPrefix(scope, drain) {
+			return true
+		}
+	}
+	return false
+}
+
+func schedulerDrainScope(project string, environment string) string {
+	if environment == "" {
+		return project + "/"
+	}
+	return project + "/" + environment + "/"
+}
+
+var (
+	errSchedulerDraining           = errors.New("scheduler scope is draining")
+	errSchedulerMutationInProgress = errors.New("scheduler mutation is in progress")
+)
+
+func schedulerDrainMarkerPath(dataDir string, kind string, project string, environment string) string {
+	name := environment
+	if name == "" {
+		name = "_all"
+	}
+	return filepath.Join(dataDir, "scheduler-drains", kind, project, name+".draining")
+}
+
+func writeSchedulerDrainMarker(dataDir string, kind string, project string, environment string) error {
+	path := schedulerDrainMarkerPath(dataDir, kind, project, environment)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create scheduler drain marker directory: %w", err)
+	}
+	if err := writeFileAtomic(path, []byte("draining\n"), 0600); err != nil {
+		return fmt.Errorf("write scheduler drain marker: %w", err)
+	}
+	return nil
+}
+
+func removeSchedulerDrainMarker(dataDir string, kind string, project string, environment string) error {
+	if err := os.Remove(schedulerDrainMarkerPath(dataDir, kind, project, environment)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func schedulerDrainMarkerExists(dataDir string, kind string, project string, environment string) (bool, error) {
+	for _, candidate := range []string{environment, ""} {
+		_, err := os.Stat(schedulerDrainMarkerPath(dataDir, kind, project, candidate))
+		if err == nil {
+			return true, nil
+		}
+		if !os.IsNotExist(err) {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+func (s *JobScheduler) notifyRunningChangedLocked() {
+	close(s.runningChanged)
+	s.runningChanged = make(chan struct{})
 }
 
 // Run loads persisted specs, starts the cron, and blocks until ctx ends.
@@ -207,6 +493,14 @@ func (s *JobScheduler) Apply(ctx context.Context, request JobsApplyRequest) (*Jo
 	if !isSafeRuntimeName(request.Environment) {
 		return nil, fmt.Errorf("invalid environment name")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	endMutation, err := s.beginProjectMutation(request.Project, request.Environment)
+	if err != nil {
+		return nil, err
+	}
+	defer endMutation()
 	desired := map[string]JobSpec{}
 	var warnings []string
 	for i := range request.Jobs {
@@ -235,10 +529,6 @@ func (s *JobScheduler) Apply(ctx context.Context, request JobsApplyRequest) (*Jo
 		}
 		desired[spec.Name] = spec
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
 	existing, err := s.persistedJobNames(request.Project, request.Environment)
 	if err != nil {
 		return nil, err
@@ -317,7 +607,7 @@ func (s *JobScheduler) RemoveProject(project string, environment string) ([]stri
 
 	s.mu.Lock()
 	var targets []JobSpec
-	for _, spec := range s.specs {
+	for key, spec := range s.specs {
 		if spec.Project != project {
 			continue
 		}
@@ -325,25 +615,29 @@ func (s *JobScheduler) RemoveProject(project string, environment string) ([]stri
 			continue
 		}
 		targets = append(targets, spec)
+		if entryID, ok := s.entries[key]; ok {
+			s.cron.Remove(entryID)
+			delete(s.entries, key)
+		}
+		delete(s.specs, key)
+		delete(s.generations, key)
 	}
 	s.mu.Unlock()
 
 	var removed []string
 	for _, spec := range targets {
-		if err := s.removeJob(spec.Project, spec.Environment, spec.Name); err != nil {
-			return removed, err
-		}
 		removed = append(removed, spec.Environment+"/"+spec.Name)
 	}
 	sort.Strings(removed)
 
+	var cleanupErr error
 	for _, dir := range []string{jobSpecDirName, jobRunsDirName} {
 		path := filepath.Join(s.dataDir, dir, project)
 		if environment != "" {
 			path = filepath.Join(path, environment)
 		}
 		if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
-			return removed, fmt.Errorf("failed to remove job state: %w", err)
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("failed to remove job state: %w", err))
 		}
 		if environment != "" {
 			// Prune the project dir when this was its last environment;
@@ -351,7 +645,12 @@ func (s *JobScheduler) RemoveProject(project string, environment string) ([]stri
 			_ = os.Remove(filepath.Join(s.dataDir, dir, project))
 		}
 	}
-	return removed, nil
+	for _, spec := range targets {
+		if err := removeServiceFiles(spec.Project, spec.Environment, spec.Name); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("failed to remove job files for %s: %w", spec.Name, err))
+		}
+	}
+	return removed, cleanupErr
 }
 
 // List reports scheduled jobs, optionally filtered by project/environment.
@@ -472,11 +771,15 @@ func (s *JobScheduler) Trigger(ctx context.Context, project string, environment 
 	s.mu.Lock()
 	key := jobKey(project, environment, job)
 	spec, ok := s.specs[key]
-	reserved := ok && !s.running[key]
+	draining := s.scopeDrainingLocked(schedulerDrainScope(project, environment))
+	reserved := ok && !draining && !s.running[key]
 	if reserved {
 		s.running[key] = true
 	}
 	s.mu.Unlock()
+	if draining {
+		return fmt.Errorf("job %s cannot start while project cleanup is draining", job)
+	}
 	if !ok {
 		return fmt.Errorf("job %s is not scheduled for %s/%s on this node", job, project, environment)
 	}
@@ -499,7 +802,7 @@ func (s *JobScheduler) Trigger(ctx context.Context, project string, environment 
 func (s *JobScheduler) executeJob(ctx context.Context, spec JobSpec, trigger string, stream io.Writer) JobRunRecord {
 	key := jobKey(spec.Project, spec.Environment, spec.Name)
 	s.mu.Lock()
-	if s.running[key] {
+	if s.running[key] || s.scopeDrainingLocked(schedulerDrainScope(spec.Project, spec.Environment)) {
 		s.mu.Unlock()
 		return s.recordSkippedJob(spec, trigger)
 	}
@@ -540,6 +843,9 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 			keep = current.FileSetID
 		}
 		_ = cleanupServiceFileVersions(spec.Project, spec.Environment, spec.Name, keep)
+		s.mu.Lock()
+		s.notifyRunningChangedLocked()
+		s.mu.Unlock()
 	}()
 	if s.admit != nil {
 		if err := s.admit(s.dataDir); err != nil {
@@ -615,7 +921,7 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 
 // runScheduledJob is the cron entry point: it resolves the current spec so
 // a re-applied job fires with its latest definition.
-func (s *JobScheduler) runScheduledJob(key string) {
+func (s *JobScheduler) runScheduledJob(key string, expectedGeneration ...uint64) {
 	unlock, err := recovery.AcquireMutationLock(s.dataDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "takod scheduled job %s snapshot lock failed: %v\n", key, err)
@@ -624,12 +930,19 @@ func (s *JobScheduler) runScheduledJob(key string) {
 	defer unlock()
 	s.mu.Lock()
 	spec, ok := s.specs[key]
-	reserved := ok && !s.running[key]
+	if ok && len(expectedGeneration) > 0 && s.generations[key] != expectedGeneration[0] {
+		ok = false
+	}
+	draining := false
+	if ok {
+		draining = s.scopeDrainingLocked(schedulerDrainScope(spec.Project, spec.Environment))
+	}
+	reserved := ok && !draining && !s.running[key]
 	if reserved {
 		s.running[key] = true
 	}
 	s.mu.Unlock()
-	if !ok {
+	if !ok || draining {
 		return
 	}
 	var record JobRunRecord
@@ -832,9 +1145,34 @@ func (s *JobScheduler) loadSpecs(ctx context.Context) error {
 		if err := validateJobSpec(&spec); err != nil {
 			return fmt.Errorf("invalid job spec %s: %w", path, err)
 		}
+		endMutation, admitted, err := s.beginLoaderMutation(ctx, spec.Project, spec.Environment)
+		if err != nil {
+			return err
+		}
+		if !admitted {
+			return nil
+		}
+		freshData, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			endMutation()
+			return nil
+		}
+		if err != nil {
+			endMutation()
+			return err
+		}
+		if err := json.Unmarshal(freshData, &spec); err != nil {
+			endMutation()
+			return fmt.Errorf("failed to reparse job spec %s: %w", path, err)
+		}
+		if err := validateJobSpec(&spec); err != nil {
+			endMutation()
+			return fmt.Errorf("invalid refreshed job spec %s: %w", path, err)
+		}
 		s.mu.Lock()
 		err = s.scheduleLocked(spec)
 		s.mu.Unlock()
+		endMutation()
 		return err
 	})
 }
@@ -861,14 +1199,17 @@ func (s *JobScheduler) scheduleLocked(spec JobSpec) error {
 		s.cron.Remove(entryID)
 		delete(s.entries, key)
 	}
+	s.nextGeneration++
+	generation := s.nextGeneration
 	entryID, err := s.cron.AddFunc(jobCronSpec(spec), func() {
-		s.runScheduledJob(key)
+		s.runScheduledJob(key, generation)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to schedule job: %w", err)
 	}
 	s.entries[key] = entryID
 	s.specs[key] = spec
+	s.generations[key] = generation
 	return nil
 }
 
@@ -880,6 +1221,7 @@ func (s *JobScheduler) removeJob(project string, environment string, name string
 		delete(s.entries, key)
 	}
 	delete(s.specs, key)
+	delete(s.generations, key)
 	running := s.running[key]
 	s.mu.Unlock()
 	if err := os.Remove(jobSpecPath(s.dataDir, project, environment, name)); err != nil && !os.IsNotExist(err) {

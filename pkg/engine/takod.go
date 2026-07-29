@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
@@ -184,6 +185,7 @@ func EnsureDeployRuntimeSupported(cfg *config.Config) error {
 
 type takodRuntimeSetup interface {
 	PreflightTakodProxyCapabilities(map[string]config.ServiceConfig) error
+	PreflightGracefulStopCapabilities() error
 	SetupTakodRuntime() error
 }
 
@@ -192,6 +194,9 @@ type takodRuntimeSetup interface {
 // must never run before route capability admission succeeds.
 func preflightAndSetupTakodRuntime(runtime takodRuntimeSetup, services map[string]config.ServiceConfig) error {
 	if err := runtime.PreflightTakodProxyCapabilities(services); err != nil {
+		return err
+	}
+	if err := runtime.PreflightGracefulStopCapabilities(); err != nil {
 		return err
 	}
 	if err := runtime.SetupTakodRuntime(); err != nil {
@@ -208,7 +213,15 @@ func CleanupViaTakod(client any, cfg *config.Config, request takod.CleanupReques
 // CleanupViaTakodContext runs cleanup through takod bounded by ctx.
 func CleanupViaTakodContext(ctx context.Context, client any, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
 	var response takod.CleanupResponse
-	output, err := takodclient.RequestJSONWithContext(ctx, client, TakodSocketFromConfig(cfg), "POST", "/v1/cleanup", request)
+	timeout := takodclient.JSONRequestTimeout
+	if request.RemoveContainers {
+		// Scheduled work can consume its 24-hour maximum before service
+		// containers begin their own maximum 24-hour graceful drain.
+		timeout = 48*time.Hour + 10*time.Minute
+	} else if request.RemoveTakodState {
+		timeout = 24*time.Hour + 5*time.Minute
+	}
+	output, err := takodclient.RequestJSONWithTimeoutContext(ctx, client, TakodSocketFromConfig(cfg), "POST", "/v1/cleanup", request, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -216,6 +229,23 @@ func CleanupViaTakodContext(ctx context.Context, client any, cfg *config.Config,
 		return nil, fmt.Errorf("failed to parse takod response: %w", err)
 	}
 	return &response, nil
+}
+
+func RequireTakodCapabilityContext(ctx context.Context, client any, cfg *config.Config, capability string, feature string) error {
+	output, err := takodclient.RequestJSONWithContext(ctx, client, TakodSocketFromConfig(cfg), "GET", "/v1/status", nil)
+	if err != nil {
+		return fmt.Errorf("read takod capabilities: %w", err)
+	}
+	var status takod.Status
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		return fmt.Errorf("parse takod capabilities: %w", err)
+	}
+	for _, advertised := range status.Capabilities {
+		if advertised == capability {
+			return nil
+		}
+	}
+	return fmt.Errorf("takod does not support %s (missing capability %s); upgrade the node agent", feature, capability)
 }
 
 // CleanupImageRepositories lists the image repositories automatic cleanup
