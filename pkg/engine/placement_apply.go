@@ -134,7 +134,7 @@ func (e *Engine) ApplyPlacementMovement(ctx context.Context, req PlacementApplyR
 	}
 	if !alreadyIntent {
 		preserved := preservedDesiredServices(desired, services, nil)
-		next, err := takodstate.BuildDesiredRevisionWithPlacementSnapshot(cfg, environment, "placement:"+req.Plan.PlanID, services, imageRefs, desired.TargetNodes, assignments, nil, preserved, desired.Git)
+		next, err := takodstate.BuildDesiredRevisionWithPlacementSnapshot(cfg, environment, "placement:"+req.Plan.PlanID, services, imageRefs, desired.TargetNodes, assignments, nil, preserved, desired.Volumes, desired.Git)
 		if err != nil {
 			return nil, err
 		}

@@ -387,6 +387,42 @@ func TestValidateConfigRejectsVersionedR2Retention(t *testing.T) {
 	}
 }
 
+func TestValidateConfigAcceptsCreationOnlyLocalVolumeOwner(t *testing.T) {
+	cfg := validValidationConfig()
+	cfg.Volumes = map[string]VolumeConfig{"data": {Driver: "local", Owner: "1000:1001"}}
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Volumes = []string{"data:/data"}
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Environments["production"].Services["web"].VolumeOwnershipHash == "" {
+		t.Fatal("volume ownership did not contribute to service fingerprint")
+	}
+}
+
+func TestValidateConfigRejectsUnsafeVolumeOwnershipTargets(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		volume VolumeConfig
+	}{
+		{name: "named owner", volume: VolumeConfig{Owner: "postgres"}},
+		{name: "external", volume: VolumeConfig{External: true, Owner: "1000"}},
+		{name: "custom driver", volume: VolumeConfig{Driver: "zfs", Owner: "1000"}},
+		{name: "driver options", volume: VolumeConfig{Driver: "local", DriverOpts: map[string]string{"type": "none"}, Owner: "1000"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validValidationConfig()
+			cfg.Volumes = map[string]VolumeConfig{"data": test.volume}
+			if err := ValidateConfig(cfg); err == nil {
+				t.Fatal("unsafe volume ownership was accepted")
+			}
+		})
+	}
+}
+
 func TestValidateConfigAcceptsPersistentServiceWithPinnedPlacement(t *testing.T) {
 	cfg := validValidationConfig()
 	production := cfg.Environments["production"]

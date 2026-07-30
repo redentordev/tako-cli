@@ -136,6 +136,7 @@ type VolumeConfig struct {
 	Labels     map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`           // Volume labels
 	External   bool              `yaml:"external,omitempty" json:"external,omitempty"`       // If true, volume must already exist
 	Name       string            `yaml:"name,omitempty" json:"name,omitempty"`               // Override the auto-generated name (opt-out of prefix)
+	Owner      string            `yaml:"owner,omitempty" json:"owner,omitempty"`             // Creation-only numeric uid or uid:gid
 }
 
 // NotificationsConfig defines notification settings
@@ -318,9 +319,10 @@ type ServiceConfig struct {
 	ShmSize         string                  `yaml:"shmSize,omitempty" json:"shmSize,omitempty"`
 
 	// Secrets: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"].
-	Secrets []string            `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
-	Volumes []string            `yaml:"volumes,omitempty" json:"volumes,omitempty"`
-	Files   []ServiceFileConfig `yaml:"files,omitempty" json:"files,omitempty"`
+	Secrets             []string            `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
+	Volumes             []string            `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	VolumeOwnershipHash string              `yaml:"-" json:"-"`
+	Files               []ServiceFileConfig `yaml:"files,omitempty" json:"files,omitempty"`
 	// FilesContentHash is an internal digest of fully resolved operator file
 	// metadata and bytes; file contents never enter desired state or labels.
 	FilesContentHash string `yaml:"-" json:"-"`
@@ -362,6 +364,39 @@ type ServiceConfig struct {
 	// ReuseFiles tells rollback paths to mount an already-published immutable
 	// FilesContentHash instead of reading today's local sources.
 	ReuseFiles bool `yaml:"-" json:"-"`
+}
+
+func (c *Config) ServiceVolumeOwnershipFingerprint(environment string, service *ServiceConfig) string {
+	if c == nil || service == nil {
+		return ""
+	}
+	type entry struct {
+		LogicalName string `json:"logicalName"`
+		DockerName  string `json:"dockerName"`
+		Owner       string `json:"owner"`
+	}
+	entries := make([]entry, 0)
+	seen := make(map[string]bool)
+	for _, mount := range service.Volumes {
+		parts := strings.SplitN(mount, ":", 2)
+		logicalName := parts[0]
+		if strings.HasPrefix(logicalName, "/") || seen[logicalName] {
+			continue
+		}
+		volume, ok := c.GetVolume(logicalName)
+		if !ok || volume.Owner == "" {
+			continue
+		}
+		seen[logicalName] = true
+		entries = append(entries, entry{LogicalName: logicalName, DockerName: c.GetVolumeName(logicalName, environment), Owner: volume.Owner})
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].LogicalName < entries[j].LogicalName })
+	data, _ := json.Marshal(entries)
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 
 // ServiceFileConfig distributes one local regular file or directory into a

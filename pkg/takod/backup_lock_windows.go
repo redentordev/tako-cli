@@ -18,7 +18,7 @@ func acquireBackupDirectoryLock(dir string) (func(), error) {
 	overlapped := &windows.Overlapped{}
 	if err := windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, overlapped); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("another backup operation is active for this environment: %w", err)
+		return nil, fmt.Errorf("%w: %v", errBackupDirectoryLocked, err)
 	}
 	return func() {
 		_ = windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, overlapped)

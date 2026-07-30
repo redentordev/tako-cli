@@ -93,6 +93,20 @@ func TestBackupRestoreRequiresExplicitApproval(t *testing.T) {
 	}
 }
 
+func TestBackupRecoverRequiresApprovalForMutatingAction(t *testing.T) {
+	oldJournal, oldAction, oldYes := backupRecoverJournal, backupRecoverAction, backupRecoverYes
+	t.Cleanup(func() {
+		backupRecoverJournal, backupRecoverAction, backupRecoverYes = oldJournal, oldAction, oldYes
+	})
+	backupRecoverJournal = "/var/lib/tako/backups/demo/production/.restore-transaction-test.json"
+	backupRecoverAction = "rollback"
+	backupRecoverYes = false
+	err := runBackupRecover(backupRecoverCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("offline recovery approval error = %v", err)
+	}
+}
+
 func TestNewBackupIDFormat(t *testing.T) {
 	id := newBackupID()
 	if len(id) != len("20060102-150405")+1+32 {

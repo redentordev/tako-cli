@@ -72,6 +72,8 @@ type JobSpec struct {
 	// Network attaches run containers; default tako_<project>_<env>.
 	Network            string                         `json:"network,omitempty"`
 	Mounts             []string                       `json:"mounts,omitempty"`
+	ExternalVolumes    []string                       `json:"externalVolumes,omitempty"`
+	VolumeOwnership    []ManagedVolumeOwnership       `json:"volumeOwnership,omitempty"`
 	Files              []ServiceFileBundle            `json:"files,omitempty"`
 	FileSetID          string                         `json:"fileSetId,omitempty"`
 	MemoryLimit        string                         `json:"memoryLimit,omitempty"`
@@ -441,10 +443,18 @@ func writeSchedulerDrainMarker(dataDir string, kind string, project string, envi
 }
 
 func removeSchedulerDrainMarker(dataDir string, kind string, project string, environment string) error {
-	if err := os.Remove(schedulerDrainMarkerPath(dataDir, kind, project, environment)); err != nil && !os.IsNotExist(err) {
-		return err
+	path := schedulerDrainMarkerPath(dataDir, kind, project, environment)
+	if err := os.Remove(path); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if _, statErr := os.Stat(filepath.Dir(path)); os.IsNotExist(statErr) {
+			return nil
+		} else if statErr != nil {
+			return statErr
+		}
 	}
-	return nil
+	return syncDirectory(filepath.Dir(path))
 }
 
 func schedulerDrainMarkerExists(dataDir string, kind string, project string, environment string) (bool, error) {
@@ -899,7 +909,14 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 		ctx = context.Background()
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	exitCode, runErr := s.runJob(runCtx, spec, container, out)
+	exitCode := -1
+	runErr := ensureServiceVolumes(runCtx, ReconcileServiceRequest{
+		Project: spec.Project, Environment: spec.Environment, Service: spec.Name,
+		Mounts: spec.Mounts, ExternalVolumes: spec.ExternalVolumes, VolumeOwnership: spec.VolumeOwnership, DataDir: s.dataDir,
+	})
+	if runErr == nil {
+		exitCode, runErr = s.runJob(runCtx, spec, container, out)
+	}
 	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 	cancel()
 	if timedOut {
@@ -1109,6 +1126,9 @@ func validateJobSpec(spec *JobSpec) error {
 		if strings.TrimSpace(mount) == "" || hasControlChars(mount) {
 			return fmt.Errorf("invalid mount value")
 		}
+	}
+	if err := validateManagedVolumeOwnershipPolicies(spec.Mounts, spec.ExternalVolumes, spec.VolumeOwnership); err != nil {
+		return err
 	}
 	if err := validateServiceFileBundles(spec.Files); err != nil {
 		return err

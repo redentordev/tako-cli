@@ -87,6 +87,13 @@ func ValidateConfig(cfg *Config) error {
 		cfg.Servers[name] = server
 	}
 
+	// Validate top-level volumes before resolving per-service ownership policy.
+	if len(cfg.Volumes) > 0 {
+		if err := validateVolumes(cfg.Volumes); err != nil {
+			return err
+		}
+	}
+
 	// Validate environments
 	if len(cfg.Environments) == 0 {
 		return fmt.Errorf("at least one environment must be configured")
@@ -100,13 +107,6 @@ func ValidateConfig(cfg *Config) error {
 		}
 		// Update the environment in the map with defaults applied
 		cfg.Environments[envName] = env
-	}
-
-	// Validate top-level volumes section
-	if len(cfg.Volumes) > 0 {
-		if err := validateVolumes(cfg.Volumes); err != nil {
-			return err
-		}
 	}
 
 	return nil
@@ -710,6 +710,7 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	if err := validateContainerRuntimeControls(name, service); err != nil {
 		return err
 	}
+	service.VolumeOwnershipHash = cfg.ServiceVolumeOwnershipFingerprint(envName, service)
 
 	sharedBuild, usesSharedBuild := cfg.Builds[service.ImageFrom]
 	if service.ImageFrom != "" && usesSharedBuild {
@@ -2431,6 +2432,20 @@ func validateVolumes(volumes map[string]VolumeConfig) error {
 		// Validate volume name format
 		if !isValidVolumeName(name) {
 			return fmt.Errorf("volume '%s': invalid name - must contain only lowercase letters, numbers, hyphens, and underscores", name)
+		}
+		if vol.Owner != "" {
+			if _, _, _, err := ParseServiceFileOwner(vol.Owner); err != nil {
+				return fmt.Errorf("volume '%s': invalid owner: %w", name, err)
+			}
+			if vol.External {
+				return fmt.Errorf("volume '%s': owner is not allowed on external volumes", name)
+			}
+			if vol.Driver != "" && vol.Driver != "local" {
+				return fmt.Errorf("volume '%s': owner requires the local volume driver", name)
+			}
+			if len(vol.DriverOpts) > 0 {
+				return fmt.Errorf("volume '%s': owner is not allowed with driver_opts", name)
+			}
 		}
 
 		// External volumes should not have driver or driver_opts

@@ -149,6 +149,13 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 	}
 
 	invalid = valid
+	invalid.Mounts = []string{"type=volume,source=bad:name,target=/data"}
+	invalid.VolumeOwnership = []ManagedVolumeOwnership{{Name: "bad:name", UID: 1000, GID: 1000}}
+	if err := validateReconcileServiceRequest(invalid); err == nil {
+		t.Fatalf("expected unsafe ownership volume name to be rejected")
+	}
+
+	invalid = valid
 	invalid.Labels = map[string]string{"tako.configHash": "abc\n--privileged"}
 	if err := validateReconcileServiceRequest(invalid); err == nil {
 		t.Fatalf("expected unsafe label value to be rejected")
@@ -1443,6 +1450,20 @@ func TestTakodCommandHelper(t *testing.T) {
 			_ = os.Remove(marker)
 		}
 		os.Exit(0)
+	case "create":
+		helperStateFile := os.Getenv("TAKO_COMMAND_LOG") + ".helper"
+		if stateFile := os.Getenv("TAKO_FAKE_VOLUME_OWNERSHIP_STATE_FILE"); stateFile != "" {
+			if replacement := os.Getenv("TAKO_FAKE_VOLUME_REPLACE_ON_HELPER_CREATE"); replacement != "" {
+				_ = os.WriteFile(stateFile, []byte("local|"+replacement+"\n"), 0600)
+			}
+		}
+		for index, arg := range commandArgs {
+			if arg == "-v" && index+1 < len(commandArgs) && (strings.HasSuffix(commandArgs[index+1], ":/volume") || strings.HasSuffix(commandArgs[index+1], ":/target")) {
+				volume := strings.TrimSuffix(strings.TrimSuffix(commandArgs[index+1], ":/volume"), ":/target")
+				_ = os.WriteFile(helperStateFile, []byte(volume), 0600)
+			}
+		}
+		os.Exit(0)
 	case "stop":
 		if exact := os.Getenv("TAKO_FAKE_DOCKER_STOP_FAIL_EXACT"); exact != "" && len(commandArgs) == 2 && commandArgs[1] == exact {
 			_, _ = os.Stderr.WriteString("selective stop failure")
@@ -1493,11 +1514,78 @@ func TestTakodCommandHelper(t *testing.T) {
 	case "volume":
 		if len(commandArgs) > 2 && commandArgs[1] == "inspect" {
 			missing := os.Getenv("TAKO_FAKE_MISSING_VOLUME_INSPECT")
-			if missing != "" && commandArgs[2] == missing {
-				_, _ = os.Stderr.WriteString("No such volume")
-				os.Exit(1)
+			if missing != "" && commandArgs[len(commandArgs)-1] == missing {
+				if _, err := os.Stat(os.Getenv("TAKO_COMMAND_LOG") + ".restore-target"); os.IsNotExist(err) {
+					_, _ = os.Stderr.WriteString("No such volume")
+					os.Exit(1)
+				}
+			}
+			if strings.Contains(strings.Join(commandArgs, " "), ".CreatedAt") {
+				identity := os.Getenv("TAKO_FAKE_VOLUME_IDENTITY")
+				if identity == "" {
+					identity = "local|2026-01-01T00:00:00Z|{}|{}|local"
+				}
+				_, _ = os.Stdout.WriteString(identity + "\n")
+				os.Exit(0)
+			}
+			if strings.Contains(strings.Join(commandArgs, " "), "tako.restore-target-operation") {
+				if data, err := os.ReadFile(os.Getenv("TAKO_COMMAND_LOG") + ".restore-target"); err == nil {
+					_, _ = os.Stdout.Write(data)
+					os.Exit(0)
+				}
+				_, _ = os.Stdout.WriteString("local|<no value>\n")
+				os.Exit(0)
+			}
+			if strings.Contains(strings.Join(commandArgs, " "), "tako.runtime") && strings.Contains(strings.Join(commandArgs, " "), ".Options") {
+				evidence := os.Getenv("TAKO_FAKE_VOLUME_CLEANUP_EVIDENCE")
+				if evidence == "" {
+					evidence = "local|demo|production|takod|<no value>|null"
+				}
+				_, _ = os.Stdout.WriteString(evidence + "\n")
+				os.Exit(0)
+			}
+			if strings.Contains(strings.Join(commandArgs, " "), "tako.volume-ownership-operation") {
+				if stateFile := os.Getenv("TAKO_FAKE_VOLUME_OWNERSHIP_STATE_FILE"); stateFile != "" {
+					data, err := os.ReadFile(stateFile)
+					if os.IsNotExist(err) {
+						_, _ = os.Stderr.WriteString("No such volume")
+						os.Exit(1)
+					}
+					_, _ = os.Stdout.Write(data)
+					os.Exit(0)
+				}
+				if output := os.Getenv("TAKO_FAKE_VOLUME_OWNERSHIP_INSPECT"); output != "" {
+					_, _ = os.Stdout.WriteString(output)
+					os.Exit(0)
+				}
 			}
 			os.Exit(0)
+		}
+		if len(commandArgs) > 1 && commandArgs[1] == "create" {
+			restoreToken := ""
+			for _, arg := range commandArgs {
+				if strings.HasPrefix(arg, "tako.restore-target-operation=") {
+					restoreToken = strings.TrimPrefix(arg, "tako.restore-target-operation=")
+				}
+			}
+			if restoreToken != "" {
+				if replacement := os.Getenv("TAKO_FAKE_RESTORE_TARGET_REPLACEMENT_TOKEN"); replacement != "" {
+					restoreToken = replacement
+				}
+				_ = os.WriteFile(os.Getenv("TAKO_COMMAND_LOG")+".restore-target", []byte("local|"+restoreToken+"\n"), 0600)
+				_ = os.WriteFile(os.Getenv("TAKO_COMMAND_LOG")+".restore-target-name", []byte(commandArgs[len(commandArgs)-1]), 0600)
+			}
+			if stateFile := os.Getenv("TAKO_FAKE_VOLUME_OWNERSHIP_STATE_FILE"); stateFile != "" {
+				token := ""
+				for _, arg := range commandArgs {
+					if strings.HasPrefix(arg, "tako.volume-ownership-operation=") {
+						token = strings.TrimPrefix(arg, "tako.volume-ownership-operation=")
+					}
+				}
+				if token != "" {
+					_ = os.WriteFile(stateFile, []byte("local|"+token+"\n"), 0600)
+				}
+			}
 		}
 		if len(commandArgs) > 1 && commandArgs[1] == "ls" {
 			if output := os.Getenv("TAKO_FAKE_VOLUME_LS_OUTPUT"); output != "" {
@@ -1505,10 +1593,27 @@ func TestTakodCommandHelper(t *testing.T) {
 			}
 		}
 		if len(commandArgs) > 1 && commandArgs[1] == "rm" {
+			if target, err := os.ReadFile(os.Getenv("TAKO_COMMAND_LOG") + ".restore-target-name"); err == nil && len(commandArgs) > 2 && commandArgs[2] == string(target) {
+				_ = os.Remove(os.Getenv("TAKO_COMMAND_LOG") + ".restore-target")
+				_ = os.Remove(os.Getenv("TAKO_COMMAND_LOG") + ".restore-target-name")
+			}
+			if ambiguous := os.Getenv("TAKO_FAKE_VOLUME_RM_AMBIGUOUS"); ambiguous != "" && strings.Contains(strings.Join(commandArgs, " "), ambiguous) {
+				if stateFile := os.Getenv("TAKO_FAKE_VOLUME_OWNERSHIP_STATE_FILE"); stateFile != "" {
+					_ = os.Remove(stateFile)
+				}
+				_, _ = os.Stderr.WriteString("daemon disconnected after volume removal")
+				os.Exit(1)
+			}
 			failVolume := os.Getenv("TAKO_FAKE_FAIL_VOLUME_RM")
 			if failVolume != "" && strings.Contains(strings.Join(commandArgs, " "), failVolume) {
 				_, _ = os.Stderr.WriteString("volume is in use")
 				os.Exit(1)
+			}
+			if stateFile := os.Getenv("TAKO_FAKE_VOLUME_OWNERSHIP_STATE_FILE"); stateFile != "" {
+				_ = os.Remove(stateFile)
+			}
+			if markerFile := os.Getenv("TAKO_FAKE_VOLUME_OWNERSHIP_MARKER_FILE"); markerFile != "" {
+				_ = os.Remove(markerFile)
 			}
 		}
 		os.Exit(0)
@@ -1531,6 +1636,27 @@ func TestTakodCommandHelper(t *testing.T) {
 		if strings.Contains(strings.Join(commandArgs, " "), "/quota-probe") {
 			_, _ = os.Stdout.WriteString("dd: writing '/quota-probe': No space left on device\n")
 			os.Exit(0)
+		}
+		joined := strings.Join(commandArgs, " ")
+		if strings.Contains(joined, "stat -c %u:%g /volume") {
+			owner := os.Getenv("TAKO_FAKE_VOLUME_ROOT_OWNER")
+			if owner == "" {
+				owner = "0:0"
+			}
+			_, _ = os.Stdout.WriteString(owner + "\n")
+			os.Exit(0)
+		}
+		if strings.Contains(joined, "cat /volume/.tako-volume-ownership-v1") {
+			if marker := os.Getenv("TAKO_FAKE_VOLUME_OWNERSHIP_MARKER_FILE"); marker != "" {
+				if _, err := os.Stat(marker); os.IsNotExist(err) {
+					os.Exit(1)
+				}
+			}
+		}
+		if strings.Contains(joined, "printf") && strings.Contains(joined, ".tako-volume-ownership-v1") {
+			if marker := os.Getenv("TAKO_FAKE_VOLUME_OWNERSHIP_MARKER_FILE"); marker != "" {
+				_ = os.WriteFile(marker, []byte("initialized"), 0600)
+			}
 		}
 		if strings.Contains(strings.Join(commandArgs, " "), "du -sk /source") {
 			_, _ = os.Stdout.WriteString("7\t/source\n")
@@ -1612,6 +1738,12 @@ func TestTakodCommandHelper(t *testing.T) {
 		os.Exit(0)
 	case "inspect":
 		joined := strings.Join(commandArgs, " ")
+		if strings.Contains(joined, `eq .Destination "/volume"`) || strings.Contains(joined, `eq .Destination "/target"`) {
+			if volume, err := os.ReadFile(os.Getenv("TAKO_COMMAND_LOG") + ".helper"); err == nil {
+				_, _ = os.Stdout.WriteString("volume|" + string(volume) + "\n")
+			}
+			os.Exit(0)
+		}
 		if strings.Contains(joined, ".Args") {
 			if output := os.Getenv("TAKO_FAKE_INSPECT_ARGS"); output != "" {
 				_, _ = os.Stdout.WriteString(output)
@@ -1745,6 +1877,9 @@ func createFakeBackupArchive(commandArgs []string) {
 func readCommandLog(t *testing.T, path string) []string {
 	t.Helper()
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
 	if err != nil {
 		t.Fatalf("failed to read command log: %v", err)
 	}

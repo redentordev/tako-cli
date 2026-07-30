@@ -147,6 +147,10 @@ const CapabilityProxyRoutePolicyV1 = "proxy.route-policy-v1"
 // pg_dump artifact by restoring it into isolated, disposable Docker resources.
 const CapabilityBackupPostgresVerifyV1 = "backup.postgres-verify-v1"
 
+// CapabilityVolumeCreationOwnershipV1 means the agent initializes explicit
+// numeric ownership only for token-proven, newly created local volumes.
+const CapabilityVolumeCreationOwnershipV1 = "volume.creation-ownership-v1"
+
 // CapabilityImageBuildOptionsV1 means the streamed image builder consumes
 // buildArgs and target from the request preamble.
 const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
@@ -344,6 +348,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	if err := CleanupAllBackupPublicationResources(); err != nil {
 		return fmt.Errorf("clean stale backup publication resources: %w", err)
+	}
+	if err := RecoverManagedVolumeOwnership(ctx, s.dataDir); err != nil {
+		return fmt.Errorf("recover managed volume ownership: %w", err)
 	}
 	probeCtx, cancelProbe := context.WithTimeout(ctx, 2*time.Minute)
 	s.postgresVerificationQuotaSupported = s.postgresVerificationQuotaProbe(probeCtx)
@@ -733,6 +740,7 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	request.DataDir = s.dataDir
 	paths := make([]string, 0, 2)
 	if len(request.Containers) > 0 {
 		paths = append(paths, s.dockerDataRoot)
@@ -1443,6 +1451,7 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	defer releaseDocker()
 	request.MinimumFreeBytes = s.minimumFreeDiskBytes
 	request.DockerDataRoot = s.dockerDataRoot
+	request.DataDir = s.dataDir
 	if err := RestoreVolumeBackup(r.Context(), request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -2121,6 +2130,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	request.DataDir = s.dataDir
 	if request.Mode == ExecModeOneOff && !s.requireFreeDisk(w, s.dockerDataRoot) {
 		return
 	}
@@ -2406,7 +2416,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,

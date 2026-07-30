@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -9,6 +10,18 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
+
+func TestRemoveCleanupRequestProtectsOwnerPolicyBeforeFirstReconcile(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+		Volumes: map[string]config.VolumeConfig{"data": {Owner: "1000:1000"}},
+	}
+	request := RemoveCleanupRequest(cfg, "production", nil)
+	want := cfg.GetVolumeName("data", "production")
+	if !slices.Contains(request.ExternalVolumes, want) {
+		t.Fatalf("owner-policy volume %q is not protected before reconciliation: %#v", want, request.ExternalVolumes)
+	}
+}
 
 type cleanupTimeoutClient struct {
 	timeout time.Duration

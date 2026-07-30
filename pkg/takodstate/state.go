@@ -48,9 +48,19 @@ type DesiredRevision struct {
 	Source        string                    `json:"source"`
 	TargetNodes   []string                  `json:"targetNodes"`
 	Builds        map[string]DesiredBuild   `json:"builds,omitempty"`
+	Volumes       map[string]DesiredVolume  `json:"volumes,omitempty"`
 	Services      map[string]DesiredService `json:"services"`
 	Git           GitInfo                   `json:"git,omitempty"`
 	CreatedAt     time.Time                 `json:"createdAt"`
+}
+
+type DesiredVolume struct {
+	Driver             string `json:"driver,omitempty"`
+	DriverOptsRedacted bool   `json:"driverOptsRedacted,omitempty"`
+	LabelsRedacted     bool   `json:"labelsRedacted,omitempty"`
+	External           bool   `json:"external,omitempty"`
+	Name               string `json:"name,omitempty"`
+	Owner              string `json:"owner,omitempty"`
 }
 
 type DesiredBuild struct {
@@ -61,45 +71,48 @@ type DesiredBuild struct {
 }
 
 type DesiredService struct {
-	APIVersion      string                         `json:"apiVersion,omitempty"`
-	Kind            string                         `json:"kind,omitempty"`
-	Name            string                         `json:"name"`
-	WorkloadKind    string                         `json:"workloadKind,omitempty"`
-	Type            string                         `json:"type"`
-	Image           string                         `json:"image,omitempty"`
-	ImageFrom       string                         `json:"imageFrom,omitempty"`
-	Build           string                         `json:"build,omitempty"`
-	BuildArgKeys    []string                       `json:"buildArgKeys,omitempty"`
-	BuildTarget     string                         `json:"buildTarget,omitempty"`
-	Command         string                         `json:"command,omitempty"`
-	CommandArgs     []string                       `json:"commandArgs,omitempty"`
-	Entrypoint      string                         `json:"entrypoint,omitempty"`
-	EntrypointArgs  []string                       `json:"entrypointArgs,omitempty"`
-	Labels          map[string]string              `json:"labels,omitempty"`
-	Port            int                            `json:"port,omitempty"`
-	Replicas        int                            `json:"replicas"`
-	Assignments     []scheduler.Assignment         `json:"assignments,omitempty"`
-	Restart         string                         `json:"restart,omitempty"`
-	Persistent      bool                           `json:"persistent,omitempty"`
-	Placement       *config.PlacementConfig        `json:"placement,omitempty"`
-	Domains         []string                       `json:"domains,omitempty"`
-	Proxy           *config.ProxyConfig            `json:"proxy,omitempty"`
-	Volumes         []string                       `json:"volumes,omitempty"`
-	Files           []config.ServiceFileConfig     `json:"files,omitempty"`
-	EnvKeys         []string                       `json:"envKeys,omitempty"`
-	EnvFile         bool                           `json:"envFile,omitempty"`
-	User            string                         `json:"user,omitempty"`
-	WorkingDir      string                         `json:"workingDir,omitempty"`
-	StopGracePeriod string                         `json:"stopGracePeriod,omitempty"`
-	Init            bool                           `json:"init,omitempty"`
-	ExtraHosts      []string                       `json:"extraHosts,omitempty"`
-	Ulimits         map[string]config.UlimitConfig `json:"ulimits,omitempty"`
-	ShmSize         string                         `json:"shmSize,omitempty"`
-	SecretRefs      []string                       `json:"secretRefs,omitempty"`
-	DependsOn       []string                       `json:"dependsOn,omitempty"`
-	HealthCheck     config.HealthCheckConfig       `json:"healthCheck,omitempty"`
-	DeployStrategy  string                         `json:"deployStrategy,omitempty"`
-	RemovalPending  bool                           `json:"removalPending,omitempty"`
+	APIVersion               string                         `json:"apiVersion,omitempty"`
+	Kind                     string                         `json:"kind,omitempty"`
+	Name                     string                         `json:"name"`
+	WorkloadKind             string                         `json:"workloadKind,omitempty"`
+	Type                     string                         `json:"type"`
+	Image                    string                         `json:"image,omitempty"`
+	ImageFrom                string                         `json:"imageFrom,omitempty"`
+	Build                    string                         `json:"build,omitempty"`
+	BuildArgKeys             []string                       `json:"buildArgKeys,omitempty"`
+	BuildTarget              string                         `json:"buildTarget,omitempty"`
+	Command                  string                         `json:"command,omitempty"`
+	CommandArgs              []string                       `json:"commandArgs,omitempty"`
+	Entrypoint               string                         `json:"entrypoint,omitempty"`
+	EntrypointArgs           []string                       `json:"entrypointArgs,omitempty"`
+	Labels                   map[string]string              `json:"labels,omitempty"`
+	Port                     int                            `json:"port,omitempty"`
+	Replicas                 int                            `json:"replicas"`
+	Assignments              []scheduler.Assignment         `json:"assignments,omitempty"`
+	Restart                  string                         `json:"restart,omitempty"`
+	Persistent               bool                           `json:"persistent,omitempty"`
+	Placement                *config.PlacementConfig        `json:"placement,omitempty"`
+	Domains                  []string                       `json:"domains,omitempty"`
+	Proxy                    *config.ProxyConfig            `json:"proxy,omitempty"`
+	ProxyBasicAuthConfigured bool                           `json:"proxyBasicAuthConfigured,omitempty"`
+	ProxyBasicAuthUsername   string                         `json:"proxyBasicAuthUsername,omitempty"`
+	ProxyResponseHeaderNames []string                       `json:"proxyResponseHeaderNames,omitempty"`
+	Volumes                  []string                       `json:"volumes,omitempty"`
+	Files                    []config.ServiceFileConfig     `json:"files,omitempty"`
+	EnvKeys                  []string                       `json:"envKeys,omitempty"`
+	EnvFile                  bool                           `json:"envFile,omitempty"`
+	User                     string                         `json:"user,omitempty"`
+	WorkingDir               string                         `json:"workingDir,omitempty"`
+	StopGracePeriod          string                         `json:"stopGracePeriod,omitempty"`
+	Init                     bool                           `json:"init,omitempty"`
+	ExtraHosts               []string                       `json:"extraHosts,omitempty"`
+	Ulimits                  map[string]config.UlimitConfig `json:"ulimits,omitempty"`
+	ShmSize                  string                         `json:"shmSize,omitempty"`
+	SecretRefs               []string                       `json:"secretRefs,omitempty"`
+	DependsOn                []string                       `json:"dependsOn,omitempty"`
+	HealthCheck              config.HealthCheckConfig       `json:"healthCheck,omitempty"`
+	DeployStrategy           string                         `json:"deployStrategy,omitempty"`
+	RemovalPending           bool                           `json:"removalPending,omitempty"`
 }
 
 type ActualSnapshot struct {
@@ -188,7 +201,7 @@ func BuildDesiredRevisionWithAssignments(cfg *config.Config, environment string,
 // BuildDesiredRevisionWithPlacementIntent retains removal-pending service
 // bindings until cleanup succeeds, making interrupted removals retryable.
 func BuildDesiredRevisionWithPlacementIntent(cfg *config.Config, environment string, source string, services map[string]config.ServiceConfig, imageRefs map[string]string, targetNodes []string, assignments map[string][]scheduler.Assignment, pendingRemovals map[string]config.ServiceConfig, git GitInfo) (*DesiredRevision, error) {
-	return BuildDesiredRevisionWithPlacementSnapshot(cfg, environment, source, services, imageRefs, targetNodes, assignments, pendingRemovals, nil, git)
+	return BuildDesiredRevisionWithPlacementSnapshot(cfg, environment, source, services, imageRefs, targetNodes, assignments, pendingRemovals, nil, nil, git)
 }
 
 // BuildDesiredRevisionWithPlacementSnapshot carries prior desired-service
@@ -196,7 +209,7 @@ func BuildDesiredRevisionWithPlacementIntent(cfg *config.Config, environment str
 // targeted and non-removal operations: rewriting desired state must not clear
 // an unrelated removalPending marker or forget a workload removed from the
 // operator's current config before a full deploy reconciles it.
-func BuildDesiredRevisionWithPlacementSnapshot(cfg *config.Config, environment string, source string, services map[string]config.ServiceConfig, imageRefs map[string]string, targetNodes []string, assignments map[string][]scheduler.Assignment, pendingRemovals map[string]config.ServiceConfig, preservedServices map[string]DesiredService, git GitInfo) (*DesiredRevision, error) {
+func BuildDesiredRevisionWithPlacementSnapshot(cfg *config.Config, environment string, source string, services map[string]config.ServiceConfig, imageRefs map[string]string, targetNodes []string, assignments map[string][]scheduler.Assignment, pendingRemovals map[string]config.ServiceConfig, preservedServices map[string]DesiredService, preservedVolumes map[string]DesiredVolume, git GitInfo) (*DesiredRevision, error) {
 	now := time.Now().UTC()
 	revision := &DesiredRevision{
 		SchemaVersion: SchemaVersion,
@@ -205,9 +218,19 @@ func BuildDesiredRevisionWithPlacementSnapshot(cfg *config.Config, environment s
 		Source:        source,
 		TargetNodes:   sortedCopy(targetNodes),
 		Builds:        make(map[string]DesiredBuild, len(cfg.Builds)),
+		Volumes:       make(map[string]DesiredVolume, len(cfg.Volumes)+len(preservedVolumes)),
 		Services:      make(map[string]DesiredService, len(services)+len(pendingRemovals)+len(preservedServices)),
 		Git:           git,
 		CreatedAt:     now,
+	}
+	for name, volume := range preservedVolumes {
+		revision.Volumes[name] = cloneDesiredVolume(volume)
+	}
+	for name, volume := range cfg.Volumes {
+		revision.Volumes[name] = DesiredVolume{
+			Driver: volume.Driver, DriverOptsRedacted: len(volume.DriverOpts) > 0, LabelsRedacted: len(volume.Labels) > 0,
+			External: volume.External, Name: volume.Name, Owner: volume.Owner,
+		}
 	}
 	for name, build := range cfg.Builds {
 		revision.Builds[name] = DesiredBuild{Context: build.DeclaredContext(), ArgKeys: sortedKeys(build.Args), Target: build.Target, Dockerfile: build.Dockerfile}
@@ -276,6 +299,10 @@ func BuildDesiredRevisionWithPlacementSnapshot(cfg *config.Config, environment s
 
 	revision.RevisionID = revisionID(revision)
 	return revision, nil
+}
+
+func cloneDesiredVolume(volume DesiredVolume) DesiredVolume {
+	return volume
 }
 
 func validateDesiredAssignments(cfg *config.Config, serviceName string, assignments []scheduler.Assignment, label string) error {
@@ -789,43 +816,46 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 	command, commandArgs := stateStringOrList(service.Command)
 	entrypoint, entrypointArgs := stateStringOrList(service.Entrypoint)
 	return DesiredService{
-		APIVersion:      takoapi.APIVersionCurrent,
-		Kind:            takoapi.KindDesiredServiceDocument,
-		Name:            serviceName,
-		WorkloadKind:    service.Kind,
-		Type:            service.GetServiceType(),
-		Image:           imageRef,
-		ImageFrom:       service.ImageFrom,
-		Build:           service.Build,
-		BuildArgKeys:    sortedKeys(service.BuildArgs),
-		BuildTarget:     service.BuildTarget,
-		Command:         command,
-		CommandArgs:     commandArgs,
-		Entrypoint:      entrypoint,
-		EntrypointArgs:  entrypointArgs,
-		Labels:          cloneStringMap(service.Labels),
-		Port:            service.Port,
-		Replicas:        replicas,
-		Restart:         service.Restart,
-		Persistent:      service.Persistent,
-		Placement:       service.Placement,
-		Domains:         domains,
-		Proxy:           cloneProxyConfig(service.Proxy),
-		Volumes:         sortedCopy(service.Volumes),
-		Files:           append([]config.ServiceFileConfig(nil), service.Files...),
-		EnvKeys:         sortedKeys(service.Env),
-		EnvFile:         service.EnvFile != "" || len(service.EnvFiles) > 0,
-		User:            service.User,
-		WorkingDir:      service.WorkingDir,
-		StopGracePeriod: service.StopGracePeriod,
-		Init:            service.Init,
-		ExtraHosts:      sortedCopy(service.ExtraHosts),
-		Ulimits:         cloneUlimits(service.Ulimits),
-		ShmSize:         service.ShmSize,
-		SecretRefs:      sortedCopy(service.Secrets),
-		DependsOn:       sortedCopy(service.DependsOn),
-		HealthCheck:     service.HealthCheck,
-		DeployStrategy:  service.Deploy.Strategy,
+		APIVersion:               takoapi.APIVersionCurrent,
+		Kind:                     takoapi.KindDesiredServiceDocument,
+		Name:                     serviceName,
+		WorkloadKind:             service.Kind,
+		Type:                     service.GetServiceType(),
+		Image:                    imageRef,
+		ImageFrom:                service.ImageFrom,
+		Build:                    service.Build,
+		BuildArgKeys:             sortedKeys(service.BuildArgs),
+		BuildTarget:              service.BuildTarget,
+		Command:                  command,
+		CommandArgs:              commandArgs,
+		Entrypoint:               entrypoint,
+		EntrypointArgs:           entrypointArgs,
+		Labels:                   cloneStringMap(service.Labels),
+		Port:                     service.Port,
+		Replicas:                 replicas,
+		Restart:                  service.Restart,
+		Persistent:               service.Persistent,
+		Placement:                service.Placement,
+		Domains:                  domains,
+		Proxy:                    cloneProxyConfig(service.Proxy),
+		ProxyBasicAuthConfigured: service.Proxy != nil && service.Proxy.BasicAuth != nil,
+		ProxyBasicAuthUsername:   proxyBasicAuthUsername(service.Proxy),
+		ProxyResponseHeaderNames: proxyResponseHeaderNames(service.Proxy),
+		Volumes:                  sortedCopy(service.Volumes),
+		Files:                    append([]config.ServiceFileConfig(nil), service.Files...),
+		EnvKeys:                  sortedKeys(service.Env),
+		EnvFile:                  service.EnvFile != "" || len(service.EnvFiles) > 0,
+		User:                     service.User,
+		WorkingDir:               service.WorkingDir,
+		StopGracePeriod:          service.StopGracePeriod,
+		Init:                     service.Init,
+		ExtraHosts:               sortedCopy(service.ExtraHosts),
+		Ulimits:                  cloneUlimits(service.Ulimits),
+		ShmSize:                  service.ShmSize,
+		SecretRefs:               sortedCopy(service.Secrets),
+		DependsOn:                sortedCopy(service.DependsOn),
+		HealthCheck:              service.HealthCheck,
+		DeployStrategy:           service.Deploy.Strategy,
 	}
 }
 
@@ -839,15 +869,9 @@ func cloneProxyConfig(source *config.ProxyConfig) *config.ProxyConfig {
 	clone.AllowIps = append([]string(nil), source.AllowIps...)
 	clone.TrustedProxies = append([]string(nil), source.TrustedProxies...)
 	clone.DenyPathPrefixes = append([]string(nil), source.DenyPathPrefixes...)
-	if source.ResponseHeaders != nil {
-		clone.ResponseHeaders = make(map[string]string, len(source.ResponseHeaders))
-		for key, value := range source.ResponseHeaders {
-			clone.ResponseHeaders[key] = value
-		}
-	}
+	clone.ResponseHeaders = nil
 	if source.BasicAuth != nil {
-		auth := *source.BasicAuth
-		clone.BasicAuth = &auth
+		clone.BasicAuth = nil
 	}
 	if source.DynamicDomains != nil {
 		dynamic := *source.DynamicDomains
@@ -858,6 +882,20 @@ func cloneProxyConfig(source *config.ProxyConfig) *config.ProxyConfig {
 		clone.DynamicDomains = &dynamic
 	}
 	return &clone
+}
+
+func proxyBasicAuthUsername(proxy *config.ProxyConfig) string {
+	if proxy == nil || proxy.BasicAuth == nil {
+		return ""
+	}
+	return proxy.BasicAuth.Username
+}
+
+func proxyResponseHeaderNames(proxy *config.ProxyConfig) []string {
+	if proxy == nil {
+		return nil
+	}
+	return sortedKeys(proxy.ResponseHeaders)
 }
 
 func stateStringOrList(value config.StringOrList) (string, []string) {

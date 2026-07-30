@@ -355,6 +355,10 @@ func takodRollbackDeployOptionsForService(service *config.ServiceConfig) takodSe
 }
 
 func (d *Deployer) deployServiceTakod(serviceName string, service *config.ServiceConfig, imageRef string, options takodServiceDeployOptions) error {
+	volumeOwnership, err := d.buildTakodVolumeOwnershipSpecs(service)
+	if err != nil {
+		return err
+	}
 	if len(service.Files) > 0 {
 		_, _, filesHash, err := d.PrepareServiceFiles(serviceName, service)
 		if err != nil {
@@ -377,6 +381,11 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		// and record it; the post-deploy ApplyJobSchedules pass registers
 		// the cron schedule declaratively on every node.
 		return runTakodJobBuildPhases(func() error {
+			if len(volumeOwnership) > 0 {
+				if err := d.preflightTakodCapability(assignmentServers, takod.CapabilityVolumeCreationOwnershipV1, "creation-only managed volume ownership"); err != nil {
+					return fmt.Errorf("job %s uses volume ownership: %w", serviceName, err)
+				}
+			}
 			if len(service.Files) > 0 {
 				if err := d.preflightTakodCapability(assignmentServers, takod.CapabilityServiceFilesV1, "operator file distribution"); err != nil {
 					return fmt.Errorf("job %s uses files: %w", serviceName, err)
@@ -407,9 +416,14 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		return fmt.Errorf("failed to get takod target servers: %w", err)
 	}
 	grouped := groupTakodAssignments(assignments)
-	needsCapabilities := serviceNeedsTakodCapabilityPreflight(service)
+	needsCapabilities := serviceNeedsTakodCapabilityPreflight(service) || len(volumeOwnership) > 0
 	return runTakodServiceRollout(needsCapabilities, takodServiceRolloutOperations{
 		Preflight: func() error {
+			if len(volumeOwnership) > 0 {
+				if err := d.preflightTakodCapability(assignmentServers, takod.CapabilityVolumeCreationOwnershipV1, "creation-only managed volume ownership"); err != nil {
+					return fmt.Errorf("service %s uses volume ownership: %w", serviceName, err)
+				}
+			}
 			if len(service.Files) > 0 {
 				if err := d.preflightTakodCapability(targetServers, takod.CapabilityServiceFilesV1, "operator file distribution"); err != nil {
 					return fmt.Errorf("service %s uses files: %w", serviceName, err)
@@ -1412,6 +1426,10 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 	if err != nil {
 		return err
 	}
+	volumeOwnership, err := d.buildTakodVolumeOwnershipSpecs(service)
+	if err != nil {
+		return err
+	}
 	var fileBundles []takod.ServiceFileBundle
 	fileSetID := ""
 	if len(service.Files) > 0 && (!service.ReuseFiles || len(slots) > 0) {
@@ -1446,6 +1464,7 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 		Entrypoint:         service.Entrypoint,
 		Labels:             serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
 		ExternalVolumes:    externalVolumes,
+		VolumeOwnership:    volumeOwnership,
 		Files:              fileBundles,
 		FileSetID:          fileSetID,
 		MemoryLimit:        serviceMemoryLimit(service),
@@ -1784,6 +1803,41 @@ func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.Serv
 	}
 	sort.Strings(externalVolumes)
 	return mounts, externalVolumes, nil
+}
+
+func (d *Deployer) buildTakodVolumeOwnershipSpecs(service *config.ServiceConfig) ([]takod.ManagedVolumeOwnership, error) {
+	if service == nil {
+		return nil, nil
+	}
+	byName := make(map[string]takod.ManagedVolumeOwnership)
+	for _, mount := range service.Volumes {
+		source, target := parseVolumeSpec(mount)
+		logicalName := source
+		if target == "" {
+			logicalName = source
+		} else if strings.HasPrefix(source, "/") {
+			continue
+		}
+		volume, declared := d.config.GetVolume(logicalName)
+		if !declared || volume.Owner == "" || volume.External || (volume.Driver != "" && volume.Driver != "local") || len(volume.DriverOpts) > 0 {
+			continue
+		}
+		uid, gid, configured, err := config.ParseServiceFileOwner(volume.Owner)
+		if err != nil {
+			return nil, err
+		}
+		if !configured {
+			continue
+		}
+		dockerName := d.config.GetVolumeName(logicalName, d.environment)
+		byName[dockerName] = takod.ManagedVolumeOwnership{Name: dockerName, UID: uid, GID: gid}
+	}
+	result := make([]takod.ManagedVolumeOwnership, 0, len(byName))
+	for _, policy := range byName {
+		result = append(result, policy)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
 }
 
 func (d *Deployer) reconcileBackupScheduleViaTakod(client any, serviceName string, service *config.ServiceConfig, serviceAssignedToNode bool) error {

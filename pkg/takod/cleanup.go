@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"unicode"
 
@@ -429,54 +428,11 @@ func isSafeBuildCacheKeepStorage(value string) bool {
 	return hasDigit
 }
 
-func cleanupUnusedProjectVolumes(ctx context.Context, project string, environment string, protectedVolumes []string) (int, error) {
-	output, err := runDocker(ctx, "volume", "ls", "--format", "{{.Name}}")
-	if err != nil {
-		return 0, fmt.Errorf("failed to list docker volumes: %w", err)
+func cleanupUnusedProjectVolumes(ctx context.Context, _ string, _ string, _ []string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
-	protected := make(map[string]bool, len(protectedVolumes))
-	for _, volume := range protectedVolumes {
-		protected[volume] = true
-	}
-	var names []string
-	for _, line := range strings.Split(output, "\n") {
-		name := strings.TrimSpace(line)
-		if name == "" || !volumeNameMatchesProjectEnvironment(name, project, environment) {
-			continue
-		}
-		if protected[name] {
-			continue
-		}
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	removed := 0
-	for _, name := range names {
-		output, err := runDocker(ctx, "volume", "rm", name)
-		if err != nil {
-			if dockerVolumeInUse(output) {
-				continue
-			}
-			return removed, fmt.Errorf("failed to remove docker volume %s: %w", name, err)
-		}
-		removed++
-	}
-	return removed, nil
-}
-
-func volumeNameMatchesProjectEnvironment(name string, project string, environment string) bool {
-	if environment != "" {
-		return strings.HasPrefix(name, runtimeid.VolumeEnvironmentPrefix(project, environment))
-	}
-	return strings.HasPrefix(name, runtimeid.VolumeProjectPrefix(project))
-}
-
-func dockerVolumeInUse(output string) bool {
-	lower := strings.ToLower(output)
-	return strings.Contains(lower, "volume is in use") ||
-		strings.Contains(lower, "volume is still in use") ||
-		strings.Contains(lower, "is in use")
+	return 0, fmt.Errorf("automatic named-volume deletion is disabled because Docker provides no atomic identity-checked delete; remove verified volumes explicitly")
 }
 
 func runScopedProjectPrune(ctx context.Context, project string, environment string, protectedVolumes []string, warn func(string, ...any), response *CleanupResponse) {

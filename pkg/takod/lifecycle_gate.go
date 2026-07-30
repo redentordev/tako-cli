@@ -77,8 +77,13 @@ func (s *Server) enrolledLifecycleHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if _, safe := lifecycleSafeMutationPaths[r.URL.Path]; !safe {
-				backupRestoreBarrierMu.Lock()
-				defer backupRestoreBarrierMu.Unlock()
+				if r.URL.Path == "/v1/backups/restore" {
+					backupRestoreBarrierMu.Lock()
+					defer backupRestoreBarrierMu.Unlock()
+				} else {
+					backupRestoreBarrierMu.RLock()
+					defer backupRestoreBarrierMu.RUnlock()
+				}
 				if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
 					http.Error(w, err.Error(), http.StatusConflict)
 					return

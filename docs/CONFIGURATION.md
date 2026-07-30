@@ -410,7 +410,24 @@ services:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: app
+
+volumes:
+  postgres_data:
+    driver: local
+    owner: "999:999"
 ```
+
+`volumes.<name>.owner` is an optional numeric `uid` or `uid:gid` policy for a
+fresh, explicitly declared Tako-managed local volume. Takod records a durable
+creation token before `docker volume create`, verifies that token and the local
+driver, then changes only the new volume root ownership. Existing volumes,
+external volumes, binds, custom drivers, and local volumes with `driver_opts`
+are never modified. The policy is immutable for a Docker volume identity:
+changing `owner` later is rejected. Use an explicit `kind: run` migration and a
+new volume identity when ownership must change. Automatic named-volume deletion
+is disabled because Docker has no atomic compare-and-delete operation; cleanup
+reports a warning instead. Remove a volume explicitly only after verifying its
+identity and backups.
 
 Tako validates that persistent services declare a volume before deploy. Normal
 commit deploys do not recreate unchanged image-only services, so a source
@@ -1276,7 +1293,52 @@ Leave it false for R2 and unversioned S3-compatible stores so retention uses the
 widely supported object-list API.
 Legacy node-local archives remain listable and restorable, while new manifests
 are checked before destructive extraction. Production volume restore requires
-explicit approval with `tako backup ... --restore <id> --yes`.
+explicit approval with `tako backup ... --restore <id> --yes`. If restore had
+to create the target and then fails or is interrupted, Tako preserves both the
+token-labelled target and transaction journal for explicit recovery; it never
+deletes the named volume automatically.
+
+When that fail-closed state prevents takod from starting, recover locally on
+the affected node. Do not move or edit the journal. The command verifies the
+recorded Docker volume fingerprint and ownership/creation token before acting:
+
+```bash
+sudo tako backup recover \
+  --journal /var/lib/tako/backups/PROJECT/ENVIRONMENT/.restore-transaction-ID.json \
+  --action inspect
+
+# Pre-existing target only: restore the durable rollback archive.
+sudo tako backup recover --journal /var/lib/tako/backups/PROJECT/ENVIRONMENT/.restore-transaction-ID.json --action rollback --yes
+
+# Keep the current restored contents.
+sudo tako backup recover --journal /var/lib/tako/backups/PROJECT/ENVIRONMENT/.restore-transaction-ID.json --action accept --yes
+
+# Transaction-created target only: keep the volume for explicit inspection or removal.
+sudo tako backup recover --journal /var/lib/tako/backups/PROJECT/ENVIRONMENT/.restore-transaction-ID.json --action abandon --yes
+```
+
+Successful recovery removes the guard container, staging volume, rollback
+archive, and transaction marker durably. It never deletes the target volume.
+After `abandon`, inspect and remove that preserved volume explicitly if it is
+not needed.
+
+Schema-v1 transaction journals predate target fingerprints and creation tokens,
+so the recovery command deliberately refuses them. Keep takod stopped and:
+
+1. Copy the entire `/var/lib/tako/backups/PROJECT/ENVIRONMENT` directory to
+   separate storage before changing anything.
+2. Read the journal and use `docker volume inspect TARGET` plus deployment
+   inventory to independently confirm the intended target. If identity is
+   ambiguous, preserve all evidence and stop.
+3. For a pre-existing target in `mutating`, validate the rollback tar with
+   `tar -tzf ROLLBACK` and restore it only after independent operator approval.
+   Never restore into a target whose identity is uncertain.
+4. For a transaction-created target, preserve it for inspection or explicit
+   removal; never infer safety from its name alone.
+5. After the target outcome is resolved, remove only the journal's uniquely
+   named guard container and staging volume, retain or archive the rollback tar,
+   remove the journal, and durably sync its parent directory. Restart takod only
+   after a second operator verifies the retained evidence and chosen outcome.
 
 Use the exact key, byte count, and lowercase SHA-256 emitted by your custom dump
 job to perform a non-destructive remote restore proof:

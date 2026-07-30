@@ -79,6 +79,7 @@ var machineNativeCommands = map[string]bool{
 // humanOnlyCommands must carry the human-only annotation so machine modes
 // are rejected with exit code 2 instead of corrupting stdout.
 var humanOnlyCommands = map[string]bool{
+	"tako backup recover": true,
 	"tako config explain": true,
 	"tako env pull":       true,
 	"tako env push":       true,

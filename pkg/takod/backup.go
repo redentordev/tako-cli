@@ -32,12 +32,22 @@ const (
 	backupArtifactFormatVolumeTarGzip = "volume-tar-gzip"
 )
 
+var errBackupDirectoryLocked = errors.New("another backup operation is active for this environment")
+
 var backupRootDir = BackupDir
-var backupRestoreBarrierMu sync.Mutex
+var backupRestoreBarrierMu sync.RWMutex
 
 type backupRestoreBarrierContextKey struct{}
 
 func acquireBackupRestoreMutationBarrier(ctx context.Context) (context.Context, func()) {
+	if held, _ := ctx.Value(backupRestoreBarrierContextKey{}).(bool); held {
+		return ctx, func() {}
+	}
+	backupRestoreBarrierMu.RLock()
+	return context.WithValue(ctx, backupRestoreBarrierContextKey{}, true), backupRestoreBarrierMu.RUnlock
+}
+
+func acquireExclusiveBackupRestoreMutationBarrier(ctx context.Context) (context.Context, func()) {
 	if held, _ := ctx.Value(backupRestoreBarrierContextKey{}).(bool); held {
 		return ctx, func() {}
 	}
@@ -57,6 +67,7 @@ type BackupRequest struct {
 	Approved         bool                 `json:"approved,omitempty"`
 	MinimumFreeBytes int64                `json:"-"`
 	DockerDataRoot   string               `json:"-"`
+	DataDir          string               `json:"-"`
 }
 
 type BackupInfo struct {
@@ -98,13 +109,26 @@ type backupArtifactManifest struct {
 }
 
 type backupRestoreJournal struct {
-	SchemaVersion int    `json:"schemaVersion"`
+	SchemaVersion            int    `json:"schemaVersion"`
+	Phase                    string `json:"phase"`
+	TargetVolume             string `json:"targetVolume"`
+	TargetIdentity           string `json:"targetIdentity"`
+	TargetOwnershipOperation string `json:"targetOwnershipOperation,omitempty"`
+	TargetCreationOperation  string `json:"targetCreationOperation,omitempty"`
+	GuardContainer           string `json:"guardContainer"`
+	StageVolume              string `json:"stageVolume"`
+	BackupFile               string `json:"backupFile"`
+	RollbackFile             string `json:"rollbackFile,omitempty"`
+	CreatedTarget            bool   `json:"createdTarget"`
+}
+
+type RestoreRecoveryResult struct {
+	Action        string `json:"action"`
+	Journal       string `json:"journal"`
 	Phase         string `json:"phase"`
 	TargetVolume  string `json:"targetVolume"`
-	StageVolume   string `json:"stageVolume"`
-	BackupFile    string `json:"backupFile"`
-	RollbackFile  string `json:"rollbackFile,omitempty"`
 	CreatedTarget bool   `json:"createdTarget"`
+	Recovered     bool   `json:"recovered"`
 }
 
 type BackupStorageConfig struct {
@@ -372,7 +396,7 @@ func CleanupAllBackupPublicationResources() error {
 }
 
 func RestoreVolumeBackup(ctx context.Context, req BackupRequest) (retErr error) {
-	ctx, releaseBarrier := acquireBackupRestoreMutationBarrier(ctx)
+	ctx, releaseBarrier := acquireExclusiveBackupRestoreMutationBarrier(ctx)
 	defer releaseBarrier()
 	if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
 		return err
@@ -385,6 +409,18 @@ func RestoreVolumeBackup(ctx context.Context, req BackupRequest) (retErr error) 
 	}
 	if !req.Approved {
 		return fmt.Errorf("destructive volume restore requires explicit approval")
+	}
+	var ownershipRoot string
+	if strings.TrimSpace(req.DataDir) != "" {
+		ownershipRoot = filepath.Join(req.DataDir, volumeOwnershipDirName)
+		if err := os.MkdirAll(ownershipRoot, 0700); err != nil {
+			return fmt.Errorf("create volume ownership state directory: %w", err)
+		}
+		releaseOwnership, err := acquireVolumeOwnershipStateLock(ctx, ownershipRoot)
+		if err != nil {
+			return fmt.Errorf("lock managed volume ownership during restore: %w", err)
+		}
+		defer releaseOwnership()
 	}
 	backupPath := backupDirectory(req)
 	releaseLock, err := acquireBackupDirectoryLock(backupPath)
@@ -433,12 +469,30 @@ func RestoreVolumeBackup(ctx context.Context, req BackupRequest) (retErr error) 
 	if strings.TrimSpace(mounted) != "" {
 		return fmt.Errorf("volume %s is mounted by a running container; stop its services before restore", fullVolumeName)
 	}
+	var ownershipJournal *volumeOwnershipJournal
+	if ownershipRoot != "" {
+		ownershipJournal, err = readVolumeOwnershipJournal(volumeOwnershipJournalPath(ownershipRoot, fullVolumeName))
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("inspect managed volume ownership evidence before restore: %w", err)
+		}
+		if os.IsNotExist(err) {
+			ownershipJournal = nil
+		}
+	}
 	createdTarget := false
 	if _, err := runDocker(ctx, "volume", "inspect", fullVolumeName); err != nil {
 		if req.ExternalVolume {
 			return fmt.Errorf("external volume %s does not exist", fullVolumeName)
 		}
+		if ownershipJournal != nil {
+			return fmt.Errorf("ownership-managed volume %s is missing; restore requires an explicitly recreated volume with matching durable ownership evidence", fullVolumeName)
+		}
 		createdTarget = true
+	} else if ownershipJournal != nil && ownershipJournal.Phase != "preexisting" {
+		inspect, inspectErr := inspectVolumeOwnership(ctx, fullVolumeName)
+		if inspectErr != nil || inspect.Driver != "local" || inspect.OperationID != ownershipJournal.OperationID {
+			return fmt.Errorf("ownership-managed volume %s does not match its durable creation identity", fullVolumeName)
+		}
 	}
 	targetSize := int64(0)
 	if !createdTarget {
@@ -475,20 +529,39 @@ func RestoreVolumeBackup(ctx context.Context, req BackupRequest) (retErr error) 
 		return fmt.Errorf("create restore transaction identity: %w", err)
 	}
 	stageVolume := "tako-restore-stage-" + strings.TrimPrefix(identity, "artifact-")
+	guardContainer := "tako-restore-guard-" + strings.TrimPrefix(identity, "artifact-")
 	rollbackFile := ".restore-rollback-" + strings.TrimPrefix(identity, "artifact-") + ".tar.gz"
 	rollbackPath := filepath.Join(backupPath, rollbackFile)
 	journalPath := filepath.Join(backupPath, ".restore-transaction-"+strings.TrimPrefix(identity, "artifact-")+".json")
+	targetIdentity := ""
+	if !createdTarget {
+		targetIdentity, err = inspectDockerVolumeIdentity(ctx, fullVolumeName)
+		if err != nil {
+			return err
+		}
+	}
+	targetOwnershipOperation := ""
+	if ownershipJournal != nil && ownershipJournal.Phase != "preexisting" {
+		targetOwnershipOperation = ownershipJournal.OperationID
+	}
 	journal := backupRestoreJournal{
-		SchemaVersion: 1, Phase: "preparing", TargetVolume: fullVolumeName, StageVolume: stageVolume,
+		SchemaVersion: 2, Phase: "preparing", TargetVolume: fullVolumeName, TargetIdentity: targetIdentity,
+		TargetOwnershipOperation: targetOwnershipOperation, GuardContainer: guardContainer, StageVolume: stageVolume,
 		BackupFile: backupFile, RollbackFile: rollbackFile, CreatedTarget: createdTarget,
+	}
+	if createdTarget {
+		journal.TargetCreationOperation = strings.TrimPrefix(identity, "artifact-")
 	}
 	if err := writeBackupRestoreJournal(journalPath, journal); err != nil {
 		return err
 	}
 	defer func() {
-		cleanupErr := cleanupVerificationDockerResource("volume", stageVolume)
+		cleanupErr := cleanupVerificationDockerResource("container", guardContainer)
+		if err := cleanupVerificationDockerResource("volume", stageVolume); err != nil && cleanupErr == nil {
+			cleanupErr = err
+		}
 		if journal.Phase == "preparing" && createdTarget {
-			if err := cleanupVerificationDockerResource("volume", fullVolumeName); err != nil && cleanupErr == nil {
+			if err := removePreparingCreatedRestoreTarget(journal); err != nil && cleanupErr == nil {
 				cleanupErr = err
 			}
 		}
@@ -509,9 +582,29 @@ func RestoreVolumeBackup(ctx context.Context, req BackupRequest) (retErr error) 
 		}
 	}()
 	if createdTarget {
-		if err := ensureDockerVolume(ctx, req.Project, req.Environment, "", fullVolumeName); err != nil {
-			return fmt.Errorf("failed to ensure volume exists: %w", err)
+		if output, err := runDocker(ctx,
+			"volume", "create",
+			"--label", "tako.project="+req.Project,
+			"--label", "tako.environment="+req.Environment,
+			"--label", "tako.runtime=takod",
+			"--label", "tako.restore-target-operation="+journal.TargetCreationOperation,
+			fullVolumeName,
+		); err != nil {
+			return fmt.Errorf("create restore target volume: %s: %w", strings.TrimSpace(output), err)
 		}
+		if err := verifyRestoreTargetCreation(ctx, journal); err != nil {
+			return err
+		}
+		journal.TargetIdentity, err = inspectDockerVolumeIdentity(ctx, fullVolumeName)
+		if err != nil {
+			return err
+		}
+		if err := writeBackupRestoreJournal(journalPath, journal); err != nil {
+			return err
+		}
+	}
+	if err := pinRestoreTarget(ctx, journal); err != nil {
+		return err
 	}
 	if _, err := runDocker(ctx, "volume", "create", "--label", "tako.managed=true", "--label", "tako.role=backup-restore-stage", stageVolume); err != nil {
 		return fmt.Errorf("create restore staging volume: %w", err)
@@ -524,9 +617,6 @@ func RestoreVolumeBackup(ctx context.Context, req BackupRequest) (retErr error) 
 		backupImage,
 		"sh", "-c", restoreVolumeScript(backupFile),
 	); err != nil {
-		if createdTarget {
-			_ = cleanupVerificationDockerResource("volume", fullVolumeName)
-		}
 		return fmt.Errorf("failed to validate backup in staging volume: %w", err)
 	}
 
@@ -567,7 +657,7 @@ func RestoreVolumeBackup(ctx context.Context, req BackupRequest) (retErr error) 
 		"sh", "-c", restoreVolumeScript(backupFile),
 	); err != nil {
 		if createdTarget {
-			if removeErr := cleanupVerificationDockerResource("volume", fullVolumeName); removeErr != nil {
+			if removeErr := removeCreatedRestoreTarget(journal); removeErr != nil {
 				return errors.Join(fmt.Errorf("failed to restore backup: %w", err), fmt.Errorf("failed to remove partial target volume: %w", removeErr))
 			}
 			candidateJournal = journal
@@ -603,6 +693,40 @@ func RestoreVolumeBackup(ctx context.Context, req BackupRequest) (retErr error) 
 	return nil
 }
 
+func removeCreatedRestoreTarget(journal backupRestoreJournal) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := cleanupVerificationDockerResource("container", journal.GuardContainer); err != nil {
+		return fmt.Errorf("remove restore target guard: %w", err)
+	}
+	if err := verifyRestoreTargetIdentity(ctx, journal); err != nil {
+		return err
+	}
+	return fmt.Errorf("restore-created target %s was preserved for explicit recovery because automatic named-volume deletion is disabled", journal.TargetVolume)
+}
+
+func removePreparingCreatedRestoreTarget(journal backupRestoreJournal) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := cleanupVerificationDockerResource("container", journal.GuardContainer); err != nil {
+		return fmt.Errorf("remove restore target guard: %w", err)
+	}
+	if journal.TargetIdentity != "" {
+		if err := verifyRestoreTargetIdentity(ctx, journal); err != nil {
+			return err
+		}
+	} else {
+		exists, err := restoreTargetCreationExists(ctx, journal)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return nil
+		}
+	}
+	return fmt.Errorf("restore-created target %s was preserved for explicit recovery because automatic named-volume deletion is disabled", journal.TargetVolume)
+}
+
 func CleanupBackupRestoreResources(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -625,10 +749,40 @@ func CleanupBackupRestoreResources(ctx context.Context) error {
 			releaseLock()
 			return fmt.Errorf("invalid stale backup restore marker %s", marker)
 		}
+		if journal.SchemaVersion == 1 && (journal.Phase == "mutating" || (journal.Phase == "preparing" && journal.CreatedTarget)) {
+			releaseLock()
+			return fmt.Errorf("legacy restore transaction for %s lacks identity evidence and requires manual recovery", journal.TargetVolume)
+		}
+		if journal.CreatedTarget && (journal.Phase == "preparing" || journal.Phase == "mutating") {
+			releaseLock()
+			return fmt.Errorf("restore-created target %s is preserved and requires explicit recovery; automatic named-volume deletion is disabled", journal.TargetVolume)
+		}
 		if journal.Phase == "preparing" && journal.CreatedTarget {
-			if err := cleanupVerificationDockerResource("volume", journal.TargetVolume); err != nil {
-				releaseLock()
-				return fmt.Errorf("remove uncommitted restore target during recovery: %w", err)
+			removeCreatedTarget := true
+			if journal.SchemaVersion == 2 {
+				if err := cleanupVerificationDockerResource("container", journal.GuardContainer); err != nil {
+					releaseLock()
+					return fmt.Errorf("remove restore target guard during recovery: %w", err)
+				}
+				if journal.TargetIdentity == "" {
+					exists, err := restoreTargetCreationExists(ctx, journal)
+					if err != nil {
+						releaseLock()
+						return err
+					}
+					if !exists {
+						removeCreatedTarget = false
+					}
+				} else if err := verifyRestoreTargetIdentity(ctx, journal); err != nil {
+					releaseLock()
+					return err
+				}
+			}
+			if removeCreatedTarget {
+				if err := cleanupVerificationDockerResource("volume", journal.TargetVolume); err != nil {
+					releaseLock()
+					return fmt.Errorf("remove uncommitted restore target during recovery: %w", err)
+				}
 			}
 		}
 		if journal.Phase == "mutating" {
@@ -638,11 +792,27 @@ func CleanupBackupRestoreResources(ctx context.Context) error {
 				return fmt.Errorf("restore transaction for %s requires recovery while its target is unmounted", journal.TargetVolume)
 			}
 			if journal.CreatedTarget {
+				if journal.SchemaVersion == 2 {
+					if err := cleanupVerificationDockerResource("container", journal.GuardContainer); err != nil {
+						releaseLock()
+						return fmt.Errorf("remove restore target guard during recovery: %w", err)
+					}
+					if err := verifyRestoreTargetIdentity(ctx, journal); err != nil {
+						releaseLock()
+						return err
+					}
+				}
 				if err := cleanupVerificationDockerResource("volume", journal.TargetVolume); err != nil {
 					releaseLock()
 					return fmt.Errorf("remove partial restore target during recovery: %w", err)
 				}
 			} else {
+				if journal.SchemaVersion == 2 {
+					if err := pinRestoreTarget(ctx, journal); err != nil {
+						releaseLock()
+						return fmt.Errorf("pin interrupted restore target during recovery: %w", err)
+					}
+				}
 				rollbackPath := filepath.Join(filepath.Dir(marker), journal.RollbackFile)
 				if _, err := os.Stat(rollbackPath); err != nil {
 					releaseLock()
@@ -658,6 +828,12 @@ func CleanupBackupRestoreResources(ctx context.Context) error {
 					releaseLock()
 					return fmt.Errorf("recover interrupted volume restore: %w", restoreErr)
 				}
+			}
+		}
+		if journal.SchemaVersion == 2 {
+			if err := cleanupVerificationDockerResource("container", journal.GuardContainer); err != nil {
+				releaseLock()
+				return fmt.Errorf("clean stale restore target guard: %w", err)
 			}
 		}
 		if err := cleanupVerificationDockerResource("volume", journal.StageVolume); err != nil {
@@ -683,6 +859,148 @@ func CleanupBackupRestoreResources(ctx context.Context) error {
 	return nil
 }
 
+func RecoverPendingVolumeRestore(ctx context.Context, marker, action string) (RestoreRecoveryResult, error) {
+	result := RestoreRecoveryResult{Action: strings.TrimSpace(action)}
+	marker, err := validateOfflineRestoreMarkerPath(marker)
+	if err != nil {
+		return result, err
+	}
+	result.Journal = marker
+	releaseLock, err := acquireBackupDirectoryLock(filepath.Dir(marker))
+	if err != nil {
+		return result, err
+	}
+	defer releaseLock()
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		return result, fmt.Errorf("read restore transaction journal: %w", err)
+	}
+	var journal backupRestoreJournal
+	if err := json.Unmarshal(data, &journal); err != nil || validateBackupRestoreJournal(journal) != nil {
+		return result, fmt.Errorf("restore transaction journal is invalid")
+	}
+	result.Phase = journal.Phase
+	result.TargetVolume = journal.TargetVolume
+	result.CreatedTarget = journal.CreatedTarget
+	if journal.SchemaVersion != 2 {
+		return result, fmt.Errorf("legacy restore journal lacks identity evidence; use the documented manual recovery procedure")
+	}
+	existingAction := map[string]string{"committed": "accept", "rolled-back": "rollback", "abandoned": "abandon"}[journal.Phase]
+	resumeCleanup := result.Action != "inspect" && existingAction != ""
+	if resumeCleanup && existingAction != result.Action {
+		return result, fmt.Errorf("restore recovery decision is already %s and cannot be changed to %s", existingAction, result.Action)
+	}
+	if !resumeCleanup {
+		if journal.TargetIdentity == "" {
+			if err := verifyRestoreTargetCreation(ctx, journal); err != nil {
+				return result, err
+			}
+		} else if err := verifyRestoreTargetIdentity(ctx, journal); err != nil {
+			return result, err
+		}
+	}
+	if result.Action == "inspect" {
+		return result, nil
+	}
+	terminalPhase := ""
+	switch result.Action {
+	case "accept":
+		terminalPhase = "committed"
+	case "rollback":
+		terminalPhase = "rolled-back"
+	case "abandon":
+		terminalPhase = "abandoned"
+	default:
+		return result, fmt.Errorf("recovery action must be inspect, accept, rollback, or abandon")
+	}
+	if !resumeCleanup {
+		mounted, err := runDocker(ctx, "ps", "-q", "--filter", "volume="+journal.TargetVolume)
+		if err != nil {
+			return result, fmt.Errorf("inspect restore target consumers: %w", err)
+		}
+		if strings.TrimSpace(mounted) != "" {
+			return result, fmt.Errorf("restore target %s is mounted by a running container", journal.TargetVolume)
+		}
+		switch result.Action {
+		case "accept":
+			// The operator explicitly accepts current target contents.
+		case "abandon":
+			if !journal.CreatedTarget {
+				return result, fmt.Errorf("abandon is only valid for a transaction-created target")
+			}
+		case "rollback":
+			if journal.CreatedTarget {
+				return result, fmt.Errorf("rollback is unavailable for a transaction-created target; use accept or abandon")
+			}
+			rollbackPath := filepath.Join(filepath.Dir(marker), journal.RollbackFile)
+			if _, err := os.Stat(rollbackPath); err != nil {
+				return result, fmt.Errorf("restore rollback artifact is unavailable: %w", err)
+			}
+			if err := pinRestoreTarget(ctx, journal); err != nil {
+				return result, err
+			}
+			if _, err := runDocker(ctx,
+				"run", "--rm", "-v", journal.TargetVolume+":/target", "-v", filepath.Dir(marker)+":/backup:ro",
+				backupImage, "sh", "-c", restoreVolumeScript(journal.RollbackFile),
+			); err != nil {
+				return result, fmt.Errorf("roll back interrupted volume restore: %w", err)
+			}
+		}
+		journal.Phase = terminalPhase
+		if err := writeBackupRestoreJournal(marker, journal); err != nil {
+			return result, fmt.Errorf("persist restore recovery decision: %w", err)
+		}
+		result.Phase = terminalPhase
+	}
+	if err := cleanupVerificationDockerResource("container", journal.GuardContainer); err != nil {
+		return result, fmt.Errorf("remove restore target guard: %w", err)
+	}
+	if err := cleanupVerificationDockerResource("volume", journal.StageVolume); err != nil {
+		return result, fmt.Errorf("remove restore staging volume: %w", err)
+	}
+	if journal.RollbackFile != "" {
+		if err := os.Remove(filepath.Join(filepath.Dir(marker), journal.RollbackFile)); err != nil && !os.IsNotExist(err) {
+			return result, fmt.Errorf("remove restore rollback artifact: %w", err)
+		}
+	}
+	if err := os.Remove(marker); err != nil {
+		return result, fmt.Errorf("remove restore transaction journal: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(marker)); err != nil {
+		return result, fmt.Errorf("sync recovered restore transaction: %w", err)
+	}
+	result.Recovered = true
+	return result, nil
+}
+
+func validateOfflineRestoreMarkerPath(marker string) (string, error) {
+	marker = filepath.Clean(strings.TrimSpace(marker))
+	if marker == "." || !strings.HasPrefix(filepath.Base(marker), ".restore-transaction-") || !strings.HasSuffix(marker, ".json") {
+		return "", fmt.Errorf("invalid restore transaction journal path")
+	}
+	absMarker, err := filepath.Abs(marker)
+	if err != nil {
+		return "", err
+	}
+	absRoot, err := filepath.Abs(backupRootDir)
+	if err != nil {
+		return "", err
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve backup root: %w", err)
+	}
+	resolvedMarker, err := filepath.EvalSymlinks(absMarker)
+	if err != nil {
+		return "", fmt.Errorf("resolve restore transaction journal: %w", err)
+	}
+	relative, err := filepath.Rel(resolvedRoot, resolvedMarker)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("restore transaction journal must be under %s", resolvedRoot)
+	}
+	return resolvedMarker, nil
+}
+
 func writeBackupRestoreJournal(path string, journal backupRestoreJournal) error {
 	if err := validateBackupRestoreJournal(journal); err != nil {
 		return err
@@ -702,12 +1020,118 @@ func writeBackupRestoreJournal(path string, journal backupRestoreJournal) error 
 }
 
 func validateBackupRestoreJournal(journal backupRestoreJournal) error {
-	validPhase := journal.Phase == "preparing" || journal.Phase == "mutating" || journal.Phase == "rolled-back" || journal.Phase == "committed"
-	if journal.SchemaVersion != 1 || !validPhase || !isSafeBackupVolume(journal.TargetVolume) ||
-		!strings.HasPrefix(journal.StageVolume, "tako-restore-stage-") || !isSafeBackupVolume(journal.StageVolume) ||
-		filepath.Base(journal.BackupFile) != journal.BackupFile || !strings.HasSuffix(journal.BackupFile, ".tar.gz") ||
-		filepath.Base(journal.RollbackFile) != journal.RollbackFile || !strings.HasPrefix(journal.RollbackFile, ".restore-rollback-") || !strings.HasSuffix(journal.RollbackFile, ".tar.gz") {
+	validPhase := journal.Phase == "preparing" || journal.Phase == "mutating" || journal.Phase == "rolled-back" || journal.Phase == "committed" || journal.Phase == "abandoned"
+	baseValid := (journal.SchemaVersion == 1 || journal.SchemaVersion == 2) && validPhase && isSafeBackupVolume(journal.TargetVolume) &&
+		strings.HasPrefix(journal.StageVolume, "tako-restore-stage-") && isSafeBackupVolume(journal.StageVolume) &&
+		filepath.Base(journal.BackupFile) == journal.BackupFile && strings.HasSuffix(journal.BackupFile, ".tar.gz") &&
+		filepath.Base(journal.RollbackFile) == journal.RollbackFile && strings.HasPrefix(journal.RollbackFile, ".restore-rollback-") && strings.HasSuffix(journal.RollbackFile, ".tar.gz")
+	if !baseValid {
 		return fmt.Errorf("restore transaction journal is invalid")
+	}
+	if journal.SchemaVersion == 1 {
+		return nil
+	}
+	validIdentity := len(journal.TargetIdentity) == sha256.Size*2
+	if journal.CreatedTarget && journal.Phase == "preparing" && journal.TargetIdentity == "" {
+		validIdentity = true
+	}
+	if !validIdentity || (journal.TargetIdentity != "" && !isLowerHex(journal.TargetIdentity)) ||
+		(journal.TargetOwnershipOperation != "" && !isSafeVolumeOwnershipOperationID(journal.TargetOwnershipOperation)) ||
+		(journal.CreatedTarget != (journal.TargetCreationOperation != "")) ||
+		(journal.TargetCreationOperation != "" && !isSafeVolumeOwnershipOperationID(journal.TargetCreationOperation)) ||
+		!strings.HasPrefix(journal.GuardContainer, "tako-restore-guard-") || !isSafeContainerName(journal.GuardContainer) {
+		return fmt.Errorf("restore transaction journal is invalid")
+	}
+	return nil
+}
+
+func isLowerHex(value string) bool {
+	_, err := hex.DecodeString(value)
+	return err == nil && value == strings.ToLower(value)
+}
+
+func inspectDockerVolumeIdentity(ctx context.Context, volume string) (string, error) {
+	output, err := runDocker(ctx, "volume", "inspect", "--format", `{{.Driver}}|{{.CreatedAt}}|{{json .Labels}}|{{json .Options}}|{{.Scope}}`, volume)
+	if err != nil {
+		return "", fmt.Errorf("inspect Docker volume %s identity: %w", volume, err)
+	}
+	digest := sha256.Sum256([]byte(strings.TrimSpace(output)))
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func pinRestoreTarget(ctx context.Context, journal backupRestoreJournal) error {
+	if err := cleanupVerificationDockerResource("container", journal.GuardContainer); err != nil {
+		return fmt.Errorf("clean stale restore target guard: %w", err)
+	}
+	if output, err := runDocker(ctx,
+		"create", "--pull", "missing", "--name", journal.GuardContainer, "--network", "none",
+		"--label", "tako.restore-target-identity="+journal.TargetIdentity,
+		"-v", journal.TargetVolume+":/target", backupImage, "true",
+	); err != nil {
+		return fmt.Errorf("pin restore target volume: %s: %w", strings.TrimSpace(output), err)
+	}
+	identity, err := inspectDockerVolumeIdentity(ctx, journal.TargetVolume)
+	if err != nil || identity != journal.TargetIdentity {
+		return fmt.Errorf("restore target volume %s changed before it was pinned", journal.TargetVolume)
+	}
+	if journal.TargetOwnershipOperation != "" {
+		inspect, inspectErr := inspectVolumeOwnership(ctx, journal.TargetVolume)
+		if inspectErr != nil || inspect.Driver != "local" || inspect.OperationID != journal.TargetOwnershipOperation {
+			return fmt.Errorf("ownership-managed restore target %s changed before it was pinned", journal.TargetVolume)
+		}
+	}
+	if journal.TargetCreationOperation != "" {
+		if err := verifyRestoreTargetCreation(ctx, journal); err != nil {
+			return err
+		}
+	}
+	mount, err := runDocker(ctx, "inspect", journal.GuardContainer, "--format", `{{range .Mounts}}{{if eq .Destination "/target"}}{{.Type}}|{{.Name}}{{end}}{{end}}`)
+	if err != nil || strings.TrimSpace(mount) != "volume|"+journal.TargetVolume {
+		return fmt.Errorf("restore guard did not pin expected target volume %s", journal.TargetVolume)
+	}
+	return nil
+}
+
+func restoreTargetCreationExists(ctx context.Context, journal backupRestoreJournal) (bool, error) {
+	output, err := runDocker(ctx, "volume", "inspect", "--format", `{{.Driver}}|{{index .Labels "tako.restore-target-operation"}}`, journal.TargetVolume)
+	if err != nil {
+		if isMissingDockerObject(output) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect restore target creation evidence: %w", err)
+	}
+	if strings.TrimSpace(output) != "local|"+journal.TargetCreationOperation {
+		return false, fmt.Errorf("restore target volume %s does not match its token-bound creation intent", journal.TargetVolume)
+	}
+	return true, nil
+}
+
+func verifyRestoreTargetCreation(ctx context.Context, journal backupRestoreJournal) error {
+	exists, err := restoreTargetCreationExists(ctx, journal)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("restore target volume %s is missing after token-bound creation", journal.TargetVolume)
+	}
+	return nil
+}
+
+func verifyRestoreTargetIdentity(ctx context.Context, journal backupRestoreJournal) error {
+	identity, err := inspectDockerVolumeIdentity(ctx, journal.TargetVolume)
+	if err != nil || identity != journal.TargetIdentity {
+		return fmt.Errorf("restore target volume %s no longer matches its durable transaction identity", journal.TargetVolume)
+	}
+	if journal.TargetOwnershipOperation != "" {
+		inspect, inspectErr := inspectVolumeOwnership(ctx, journal.TargetVolume)
+		if inspectErr != nil || inspect.Driver != "local" || inspect.OperationID != journal.TargetOwnershipOperation {
+			return fmt.Errorf("ownership-managed restore target %s no longer matches its durable creation identity", journal.TargetVolume)
+		}
+	}
+	if journal.TargetCreationOperation != "" {
+		if err := verifyRestoreTargetCreation(ctx, journal); err != nil {
+			return err
+		}
 	}
 	return nil
 }

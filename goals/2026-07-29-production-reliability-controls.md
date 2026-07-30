@@ -95,6 +95,13 @@ tests, crash-recovery tests, and two independent reviews passed.
 Acceptance: fresh volume roots receive the configured owner exactly once while
 existing, external, bind, and unsupported-driver volumes remain untouched.
 
+Evidence: implementation complete. Full build/tests, focused race suites,
+Linux/Windows builds, generated manuals, crash/replacement/restore recovery
+tests, desired-state secret-redaction tests, and two independent final reviews
+passed. The opt-in live Docker empty-volume proof was attempted but the local
+Colima VM was full; the same invariant is covered by the helper-command and
+fresh-volume tests without writing recovery files into application data.
+
 ## Milestone 5: Scheduler And Backup Alerts
 
 - Persist scheduled job and backup attempt facts needed to detect consecutive

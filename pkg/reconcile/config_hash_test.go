@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -29,6 +30,16 @@ func TestSafeServiceConfigHashStableAcrossOrderOnlyFields(t *testing.T) {
 	}
 	if hashA != hashB {
 		t.Fatalf("hashes differ for order-only changes: %q != %q", hashA, hashB)
+	}
+}
+
+func TestSafeServiceConfigHashIncludesResolvedVolumeOwnership(t *testing.T) {
+	service := config.ServiceConfig{Image: "nginx", Volumes: []string{"data:/data"}}
+	before, _ := SafeServiceConfigHash(service)
+	service.VolumeOwnershipHash = strings.Repeat("a", 64)
+	after, _ := SafeServiceConfigHash(service)
+	if before == after {
+		t.Fatal("resolved volume ownership did not change service hash")
 	}
 }
 

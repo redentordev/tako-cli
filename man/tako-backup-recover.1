@@ -1,0 +1,80 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-backup-recover - Recover an interrupted local volume restore
+
+
+.SH SYNOPSIS
+\fBtako backup recover [flags]\fP
+
+
+.SH DESCRIPTION
+Recover an interrupted volume restore directly on the affected node.
+
+.PP
+This command does not contact takod, so it remains available when fail-closed
+restore recovery prevents the daemon from starting. Run inspect first. Accept
+keeps current target contents, rollback restores the recorded pre-restore
+archive for a pre-existing target, and abandon keeps a transaction-created
+target while removing the blocking transaction evidence.
+
+.PP
+Schema-v1 journals are refused because they lack target identity evidence. Keep
+takod stopped, copy the complete environment backup directory, independently
+match the target with docker volume inspect and deployment inventory, then
+follow the legacy manual procedure in the configuration documentation. Never
+delete the target automatically.
+
+
+.SH OPTIONS
+\fB--action\fP="inspect"
+	Recovery action: inspect, accept, rollback, or abandon
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for recover
+
+.PP
+\fB--journal\fP=""
+	Absolute restore transaction journal path
+
+.PP
+\fB-y\fP, \fB--yes\fP[=false]
+	Approve the selected recovery action
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH EXAMPLE
+.EX
+  sudo tako backup recover --journal /var/lib/tako/backups/myapp/production/.restore-transaction-ID.json --action inspect
+  sudo tako backup recover --journal /var/lib/tako/backups/myapp/production/.restore-transaction-ID.json --action rollback --yes
+.EE
+
+
+.SH SEE ALSO
+\fBtako-backup(1)\fP

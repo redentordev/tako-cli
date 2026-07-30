@@ -279,8 +279,9 @@ func CleanupImageRepositories(cfg *config.Config, environment string, services m
 	return repositories
 }
 
-// ExternalVolumeNamesForEnvironment lists external volume names cleanup must
-// never remove.
+// ExternalVolumeNamesForEnvironment lists volume names cleanup must never
+// remove automatically. Besides external volumes, this includes every volume
+// whose creation semantics cannot be proven by takod.
 func ExternalVolumeNamesForEnvironment(cfg *config.Config, environment string) []string {
 	if cfg == nil || cfg.Volumes == nil {
 		return nil
@@ -288,7 +289,7 @@ func ExternalVolumeNamesForEnvironment(cfg *config.Config, environment string) [
 	seen := make(map[string]bool)
 	names := make([]string, 0)
 	for key, volume := range cfg.Volumes {
-		if !volume.External {
+		if !volume.External && volume.Owner == "" && (volume.Driver == "" || volume.Driver == "local") && len(volume.DriverOpts) == 0 {
 			continue
 		}
 		name := cfg.GetVolumeName(key, environment)

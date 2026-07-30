@@ -130,6 +130,7 @@ func TestBuildDesiredRevisionPreservesOutOfScopeRemovalPendingRecord(t *testing.
 		},
 		nil,
 		map[string]DesiredService{"old-worker": preserved},
+		nil,
 		GitInfo{},
 	)
 	if err != nil {
@@ -171,7 +172,8 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 			Volumes:         []string{"data:/data"},
 			Proxy: &config.ProxyConfig{
 				Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, MaxRequestBody: "10MB",
-				ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
+				ResponseHeaders: map[string]string{"Set-Cookie": "session=secret", "X-Content-Type-Options": "nosniff"},
+				BasicAuth:       &config.ProxyBasicAuthConfig{Username: "admin", PasswordBcrypt: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"},
 			},
 			Deploy:    config.DeployConfig{Strategy: "recreate"},
 			DependsOn: []string{"db"},
@@ -210,8 +212,21 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	if service.User != "1000:1000" || service.WorkingDir != "/work" || !service.Init || service.ShmSize != "256m" {
 		t.Fatalf("runtime controls not persisted: %#v", service)
 	}
-	if service.Proxy == nil || service.Proxy.MaxRequestBody != "10MB" || !slices.Equal(service.Proxy.DenyPathPrefixes, []string{"/api/internal"}) || service.Proxy.ResponseHeaders["X-Content-Type-Options"] != "nosniff" {
+	if service.Proxy == nil || service.Proxy.MaxRequestBody != "10MB" || !slices.Equal(service.Proxy.DenyPathPrefixes, []string{"/api/internal"}) || len(service.Proxy.ResponseHeaders) != 0 {
 		t.Fatalf("proxy policy not persisted: %#v", service.Proxy)
+	}
+	if !slices.Equal(service.ProxyResponseHeaderNames, []string{"Set-Cookie", "X-Content-Type-Options"}) {
+		t.Fatalf("proxy response-header redaction state = %#v", service.ProxyResponseHeaderNames)
+	}
+	if service.Proxy.BasicAuth != nil || !service.ProxyBasicAuthConfigured || service.ProxyBasicAuthUsername != "admin" {
+		t.Fatalf("proxy basic-auth redaction state = %#v", service)
+	}
+	encoded, err := json.Marshal(revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "N9qo8uLO") || strings.Contains(string(encoded), "session=secret") || strings.Contains(string(encoded), "nosniff") {
+		t.Fatalf("proxy secret value entered desired state: %s", encoded)
 	}
 	if !slices.Equal(revision.TargetNodes, []string{"node-a", "node-b"}) {
 		t.Fatalf("target nodes were not sorted: %#v", revision.TargetNodes)
@@ -271,6 +286,49 @@ func TestBuildDesiredRevisionNormalizesNegativeReplicaCount(t *testing.T) {
 
 	if got := revision.Services["worker"].Replicas; got != 1 {
 		t.Fatalf("expected negative replicas to normalize to 1, got %d", got)
+	}
+}
+
+func TestBuildDesiredRevisionPreservesVolumeOwnershipPolicy(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+		Volumes: map[string]config.VolumeConfig{"data": {Driver: "local", DriverOpts: map[string]string{"password": "secret"}, Labels: map[string]string{"credential": "secret"}, Owner: "1000:1001"}},
+	}
+	revision, err := BuildDesiredRevision(cfg, "production", "deploy", map[string]config.ServiceConfig{"web": {Image: "nginx"}}, nil, nil, GitInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	volume := revision.Volumes["data"]
+	if volume.Owner != "1000:1001" || volume.Driver != "local" || !volume.DriverOptsRedacted || !volume.LabelsRedacted {
+		t.Fatalf("desired volume = %#v", volume)
+	}
+	encoded, err := json.Marshal(revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "secret") || strings.Contains(string(encoded), "password") || strings.Contains(string(encoded), "credential") {
+		t.Fatalf("sensitive volume metadata entered desired state: %s", encoded)
+	}
+}
+
+func TestBuildDesiredRevisionPreservesBaselineVolumes(t *testing.T) {
+	cfg := &config.Config{
+		Project: config.ProjectConfig{Name: "demo"},
+		Volumes: map[string]config.VolumeConfig{"current": {Owner: "2000"}},
+	}
+	preservedVolumes := map[string]DesiredVolume{
+		"legacy":  {Driver: "local", Owner: "1000:1001", LabelsRedacted: true},
+		"current": {Owner: "999"},
+	}
+	revision, err := BuildDesiredRevisionWithPlacementSnapshot(cfg, "production", "scale", nil, nil, nil, nil, nil, nil, preservedVolumes, GitInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revision.Volumes["legacy"].Owner != "1000:1001" || !revision.Volumes["legacy"].LabelsRedacted {
+		t.Fatalf("preserved volume = %#v", revision.Volumes["legacy"])
+	}
+	if revision.Volumes["current"].Owner != "2000" {
+		t.Fatalf("current config did not override baseline: %#v", revision.Volumes["current"])
 	}
 }
 

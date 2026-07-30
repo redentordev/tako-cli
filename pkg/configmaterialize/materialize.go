@@ -59,9 +59,21 @@ func BuildConfig(opts Options) (*config.Config, []Warning, error) {
 		},
 		Servers:      cloneServers(opts.Servers),
 		Builds:       map[string]config.SharedBuildConfig{},
+		Volumes:      map[string]config.VolumeConfig{},
 		Environments: map[string]config.EnvironmentConfig{},
 	}
 	if opts.Desired != nil {
+		for name, volume := range opts.Desired.Volumes {
+			cfg.Volumes[name] = config.VolumeConfig{
+				Driver: volume.Driver, External: volume.External, Name: volume.Name, Owner: volume.Owner,
+			}
+			if volume.DriverOptsRedacted {
+				warnings = append(warnings, Warning{Code: "volume_driver_options_redacted", Message: fmt.Sprintf("volume %q driver option values were redacted; restore them before deploying", name)})
+			}
+			if volume.LabelsRedacted {
+				warnings = append(warnings, Warning{Code: "volume_labels_redacted", Message: fmt.Sprintf("volume %q label values were redacted; restore them before deploying", name)})
+			}
+		}
 		for name, build := range opts.Desired.Builds {
 			args := make(map[string]string, len(build.ArgKeys))
 			for _, key := range build.ArgKeys {
@@ -330,6 +342,31 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 				})
 			}
 		}
+	}
+	if service.ProxyBasicAuthConfigured {
+		if out.Proxy == nil {
+			out.Proxy = &config.ProxyConfig{}
+		}
+		out.Proxy.BasicAuth = &config.ProxyBasicAuthConfig{Username: service.ProxyBasicAuthUsername, PasswordBcrypt: "REDACTED"}
+		warnings = append(warnings, Warning{
+			Code:    "proxy_basic_auth_verifier_redacted",
+			Service: name,
+			Message: fmt.Sprintf("service %q proxy basic-auth verifier was redacted; restore passwordBcrypt before deploying", name),
+		})
+	}
+	if len(service.ProxyResponseHeaderNames) > 0 {
+		if out.Proxy == nil {
+			out.Proxy = &config.ProxyConfig{}
+		}
+		out.Proxy.ResponseHeaders = make(map[string]string, len(service.ProxyResponseHeaderNames))
+		for _, header := range service.ProxyResponseHeaderNames {
+			out.Proxy.ResponseHeaders[header] = "REDACTED"
+		}
+		warnings = append(warnings, Warning{
+			Code:    "proxy_response_header_values_redacted",
+			Service: name,
+			Message: fmt.Sprintf("service %q proxy response-header values were redacted; restore them before deploying", name),
+		})
 	}
 
 	if strings.TrimSpace(service.DeployStrategy) != "" {

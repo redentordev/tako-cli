@@ -5,6 +5,8 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -460,6 +462,113 @@ func TestRestoreExternalVolumeDoesNotCreateMissingVolume(t *testing.T) {
 	}
 }
 
+func TestRestoreVolumeBackupRejectsMissingOwnershipManagedTarget(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	request := BackupRequest{
+		Project: "demo", Environment: "production", Volume: "data", BackupID: "20240101-120000",
+		Approved: true, DataDir: t.TempDir(),
+	}
+	fullVolume := fullBackupVolumeName(request)
+	t.Setenv("TAKO_FAKE_MISSING_VOLUME_INSPECT", fullVolume)
+	dir := backupDirectory(request)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	writeTestBackupArchive(t, filepath.Join(dir, backupFileName(request.Volume, request.BackupID)))
+	ownershipRoot := filepath.Join(request.DataDir, volumeOwnershipDirName)
+	if err := os.MkdirAll(ownershipRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVolumeOwnershipJournal(volumeOwnershipJournalPath(ownershipRoot, fullVolume), volumeOwnershipJournal{
+		SchemaVersion: 1, Project: request.Project, Environment: request.Environment, Volume: fullVolume,
+		UID: 1000, GID: 1000, OperationID: "creation-token", Phase: "initialized",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := RestoreVolumeBackup(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "ownership-managed volume") {
+		t.Fatalf("missing managed restore error = %v", err)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if strings.Contains(commands, "volume create") {
+		t.Fatalf("restore recreated managed target without ownership evidence:\n%s", commands)
+	}
+}
+
+func TestRestoreVolumeBackupRejectsReplacedOwnershipManagedTarget(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	stateFile := filepath.Join(t.TempDir(), "volume-state")
+	if err := os.WriteFile(stateFile, []byte("local|replacement-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TAKO_FAKE_VOLUME_OWNERSHIP_STATE_FILE", stateFile)
+	request := BackupRequest{
+		Project: "demo", Environment: "production", Volume: "data", BackupID: "20240101-120000",
+		Approved: true, DataDir: t.TempDir(),
+	}
+	fullVolume := fullBackupVolumeName(request)
+	dir := backupDirectory(request)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	writeTestBackupArchive(t, filepath.Join(dir, backupFileName(request.Volume, request.BackupID)))
+	ownershipRoot := filepath.Join(request.DataDir, volumeOwnershipDirName)
+	if err := os.MkdirAll(ownershipRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeVolumeOwnershipJournal(volumeOwnershipJournalPath(ownershipRoot, fullVolume), volumeOwnershipJournal{
+		SchemaVersion: 1, Project: request.Project, Environment: request.Environment, Volume: fullVolume,
+		UID: 1000, GID: 1000, OperationID: "original-token", Phase: "initialized",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := RestoreVolumeBackup(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "durable creation identity") {
+		t.Fatalf("replaced managed restore error = %v", err)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if strings.Contains(commands, "restore-transaction") || strings.Contains(commands, "volume create") {
+		t.Fatalf("restore mutated replaced managed target:\n%s", commands)
+	}
+}
+
+func TestRestoreVolumeBackupRejectsReplacementDuringMissingTargetCreation(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	request := BackupRequest{Project: "demo", Environment: "production", Volume: "data", BackupID: "20240101-120000", Approved: true}
+	fullVolume := fullBackupVolumeName(request)
+	t.Setenv("TAKO_FAKE_MISSING_VOLUME_INSPECT", fullVolume)
+	t.Setenv("TAKO_FAKE_RESTORE_TARGET_REPLACEMENT_TOKEN", "foreign-token")
+	dir := backupDirectory(request)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	writeTestBackupArchive(t, filepath.Join(dir, backupFileName(request.Volume, request.BackupID)))
+	err := RestoreVolumeBackup(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "token-bound creation intent") {
+		t.Fatalf("creation replacement error = %v", err)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if strings.Contains(commands, "docker volume rm "+fullVolume) || strings.Contains(commands, fullVolume+":/target") {
+		t.Fatalf("foreign replacement was mounted or removed:\n%s", commands)
+	}
+	markers, globErr := filepath.Glob(filepath.Join(dir, ".restore-transaction-*.json"))
+	if globErr != nil || len(markers) != 1 {
+		t.Fatalf("foreign replacement did not preserve recovery evidence: %#v, err=%v", markers, globErr)
+	}
+}
+
 func TestRestoreVolumeBackupRequiresAPIApproval(t *testing.T) {
 	err := RestoreVolumeBackup(context.Background(), BackupRequest{
 		Project: "demo", Environment: "production", Volume: "data", BackupID: "20240101-120000",
@@ -524,6 +633,45 @@ func TestRestoreVolumeBackupRollsBackOriginalContentsAfterTargetFailure(t *testi
 	}
 }
 
+func TestRestoreVolumeBackupFailurePreservesCreatedTargetForExplicitRecovery(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	request := BackupRequest{Project: "demo", Environment: "production", Volume: "data", BackupID: "20240101-120000", Approved: true}
+	fullVolume := fullBackupVolumeName(request)
+	t.Setenv("TAKO_FAKE_MISSING_VOLUME_INSPECT", fullVolume)
+	t.Setenv("TAKO_FAKE_DOCKER_RUN_FAIL_CONTAINS", fullVolume+":/target")
+	dir := backupDirectory(request)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	writeTestBackupArchive(t, filepath.Join(dir, backupFileName(request.Volume, request.BackupID)))
+	err := RestoreVolumeBackup(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "failed to restore backup") {
+		t.Fatalf("created-target restore error = %v", err)
+	}
+	entries := readCommandLog(t, logPath)
+	guardRemoval := -1
+	targetRemoval := -1
+	for index, entry := range entries {
+		if guardRemoval < 0 && strings.Contains(entry, "docker rm -f -v tako-restore-guard-") {
+			guardRemoval = index
+		}
+		if entry == "docker volume rm "+fullVolume {
+			targetRemoval = index
+		}
+	}
+	if guardRemoval < 0 || targetRemoval >= 0 {
+		t.Fatalf("restore cleanup order guard=%d target=%d:\n%s", guardRemoval, targetRemoval, strings.Join(entries, "\n"))
+	}
+	markers, err := filepath.Glob(filepath.Join(dir, ".restore-transaction-*.json"))
+	if err != nil || len(markers) != 1 {
+		t.Fatalf("restore failure did not preserve explicit-recovery evidence %#v, err=%v", markers, err)
+	}
+}
+
 func TestBackupDirectoryLockExcludesConcurrentPublisherAndCleansPartials(t *testing.T) {
 	dir := t.TempDir()
 	release, err := acquireBackupDirectoryLock(dir)
@@ -561,7 +709,8 @@ func TestCleanupBackupRestoreResourcesRemovesCrashLeftovers(t *testing.T) {
 	rollbackFile := ".restore-rollback-0123456789abcdef.tar.gz"
 	writeTestBackupArchive(t, filepath.Join(dir, rollbackFile))
 	journal := backupRestoreJournal{
-		SchemaVersion: 1, Phase: "mutating", TargetVolume: "demo-production-data", StageVolume: "tako-restore-stage-0123456789abcdef",
+		SchemaVersion: 2, Phase: "mutating", TargetVolume: "demo-production-data", TargetIdentity: fakeDockerVolumeIdentity(),
+		GuardContainer: "tako-restore-guard-0123456789abcdef", StageVolume: "tako-restore-stage-0123456789abcdef",
 		BackupFile: "data_20240101-120000.tar.gz", RollbackFile: rollbackFile,
 	}
 	if err := writeBackupRestoreJournal(marker, journal); err != nil {
@@ -575,6 +724,309 @@ func TestCleanupBackupRestoreResourcesRemovesCrashLeftovers(t *testing.T) {
 	}
 	if commands := strings.Join(readCommandLog(t, logPath), "\n"); !strings.Contains(commands, "volume rm tako-restore-stage-0123456789abcdef") || !strings.Contains(commands, "demo-production-data:/target") {
 		t.Fatalf("interrupted restore was not rolled back and cleaned:\n%s", commands)
+	}
+}
+
+func TestCleanupBackupRestoreResourcesRequiresManualRecoveryForLegacyMutation(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	dir := filepath.Join(backupRootDir, "demo", "production")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, ".restore-transaction-legacy.json")
+	journal := backupRestoreJournal{
+		SchemaVersion: 1, Phase: "mutating", TargetVolume: "demo-production-data", StageVolume: "tako-restore-stage-0123456789abcdef",
+		BackupFile: "data_20240101-120000.tar.gz", RollbackFile: ".restore-rollback-0123456789abcdef.tar.gz",
+	}
+	if err := writeBackupRestoreJournal(marker, journal); err != nil {
+		t.Fatal(err)
+	}
+	err := CleanupBackupRestoreResources(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "requires manual recovery") {
+		t.Fatalf("legacy recovery error = %v", err)
+	}
+	if commands := strings.Join(readCommandLog(t, logPath), "\n"); strings.Contains(commands, "demo-production-data:/target") || strings.Contains(commands, "volume rm demo-production-data") {
+		t.Fatalf("legacy recovery mutated unverified target:\n%s", commands)
+	}
+}
+
+func TestCleanupBackupRestoreResourcesCleansLegacyTerminalEvidence(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	dir := filepath.Join(backupRootDir, "demo", "production")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, ".restore-transaction-legacy-terminal.json")
+	journal := backupRestoreJournal{
+		SchemaVersion: 1, Phase: "committed", TargetVolume: "demo-production-data", StageVolume: "tako-restore-stage-0123456789abcdef",
+		BackupFile: "data_20240101-120000.tar.gz", RollbackFile: ".restore-rollback-0123456789abcdef.tar.gz", CreatedTarget: true,
+	}
+	if err := writeBackupRestoreJournal(marker, journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := CleanupBackupRestoreResources(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("legacy terminal marker remains: %v", err)
+	}
+	if commands := strings.Join(readCommandLog(t, logPath), "\n"); strings.Contains(commands, "volume rm "+journal.TargetVolume) {
+		t.Fatalf("legacy terminal cleanup removed target:\n%s", commands)
+	}
+}
+
+func fakeDockerVolumeIdentity() string {
+	digest := sha256.Sum256([]byte("local|2026-01-01T00:00:00Z|{}|{}|local"))
+	return hex.EncodeToString(digest[:])
+}
+
+func TestCleanupBackupRestoreResourcesRejectsReplacementTarget(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	dir := filepath.Join(backupRootDir, "demo", "production")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, ".restore-transaction-replaced.json")
+	rollbackFile := ".restore-rollback-0123456789abcdef.tar.gz"
+	writeTestBackupArchive(t, filepath.Join(dir, rollbackFile))
+	journal := backupRestoreJournal{
+		SchemaVersion: 2, Phase: "mutating", TargetVolume: "demo-production-data", TargetIdentity: strings.Repeat("a", 64),
+		GuardContainer: "tako-restore-guard-0123456789abcdef", StageVolume: "tako-restore-stage-0123456789abcdef",
+		BackupFile: "data_20240101-120000.tar.gz", RollbackFile: rollbackFile,
+	}
+	if err := writeBackupRestoreJournal(marker, journal); err != nil {
+		t.Fatal(err)
+	}
+	err := CleanupBackupRestoreResources(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "changed before it was pinned") {
+		t.Fatalf("replacement recovery error = %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("failed recovery removed durable marker: %v", err)
+	}
+	if commands := strings.Join(readCommandLog(t, logPath), "\n"); strings.Contains(commands, "demo-production-data:/target -v") {
+		t.Fatalf("replacement target was overwritten during recovery:\n%s", commands)
+	}
+}
+
+func TestCleanupBackupRestoreResourcesPreservesCrashBeforeTargetIdentityWrite(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	dir := filepath.Join(backupRootDir, "demo", "production")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, ".restore-transaction-created.json")
+	token := "0123456789abcdef"
+	if err := os.WriteFile(logPath+".restore-target", []byte("local|"+token+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	journal := backupRestoreJournal{
+		SchemaVersion: 2, Phase: "preparing", TargetVolume: "demo-production-data", TargetCreationOperation: token,
+		GuardContainer: "tako-restore-guard-0123456789abcdef", StageVolume: "tako-restore-stage-0123456789abcdef",
+		BackupFile: "data_20240101-120000.tar.gz", RollbackFile: ".restore-rollback-0123456789abcdef.tar.gz", CreatedTarget: true,
+	}
+	if err := writeBackupRestoreJournal(marker, journal); err != nil {
+		t.Fatal(err)
+	}
+	err := CleanupBackupRestoreResources(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "requires explicit recovery") {
+		t.Fatalf("pre-identity recovery error = %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("pre-identity recovery marker was removed: %v", err)
+	}
+	entries := strings.Join(readCommandLog(t, logPath), "\n")
+	if strings.Contains(entries, "docker volume rm "+journal.TargetVolume) {
+		t.Fatalf("restore-created target was removed by name:\n%s", entries)
+	}
+}
+
+func TestRecoverPendingVolumeRestoreInspectAndAcceptCreatedTarget(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	dir := filepath.Join(backupRootDir, "demo", "production")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, ".restore-transaction-offline.json")
+	token := "0123456789abcdef"
+	if err := os.WriteFile(logPath+".restore-target", []byte("local|"+token+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	journal := backupRestoreJournal{
+		SchemaVersion: 2, Phase: "mutating", TargetVolume: "demo-production-data", TargetIdentity: fakeDockerVolumeIdentity(),
+		TargetCreationOperation: token, GuardContainer: "tako-restore-guard-0123456789abcdef", StageVolume: "tako-restore-stage-0123456789abcdef",
+		BackupFile: "data_20240101-120000.tar.gz", RollbackFile: ".restore-rollback-0123456789abcdef.tar.gz", CreatedTarget: true,
+	}
+	if err := writeBackupRestoreJournal(marker, journal); err != nil {
+		t.Fatal(err)
+	}
+	result, err := RecoverPendingVolumeRestore(context.Background(), marker, "inspect")
+	if err != nil || result.Recovered || result.TargetVolume != journal.TargetVolume {
+		t.Fatalf("inspect result=%#v, err=%v", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("inspect removed journal: %v", err)
+	}
+	result, err = RecoverPendingVolumeRestore(context.Background(), marker, "accept")
+	if err != nil || !result.Recovered {
+		t.Fatalf("accept result=%#v, err=%v", result, err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("accepted journal remains: %v", err)
+	}
+	if commands := strings.Join(readCommandLog(t, logPath), "\n"); strings.Contains(commands, "volume rm "+journal.TargetVolume) {
+		t.Fatalf("offline acceptance removed target:\n%s", commands)
+	}
+}
+
+func TestRecoverPendingVolumeRestoreRollsBackExistingTarget(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	dir := filepath.Join(backupRootDir, "demo", "production")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, ".restore-transaction-rollback.json")
+	rollbackFile := ".restore-rollback-0123456789abcdef.tar.gz"
+	writeTestBackupArchive(t, filepath.Join(dir, rollbackFile))
+	journal := backupRestoreJournal{
+		SchemaVersion: 2, Phase: "mutating", TargetVolume: "demo-production-data", TargetIdentity: fakeDockerVolumeIdentity(),
+		GuardContainer: "tako-restore-guard-0123456789abcdef", StageVolume: "tako-restore-stage-0123456789abcdef",
+		BackupFile: "data_20240101-120000.tar.gz", RollbackFile: rollbackFile,
+	}
+	if err := writeBackupRestoreJournal(marker, journal); err != nil {
+		t.Fatal(err)
+	}
+	result, err := RecoverPendingVolumeRestore(context.Background(), marker, "rollback")
+	if err != nil || !result.Recovered {
+		t.Fatalf("rollback result=%#v, err=%v", result, err)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if !strings.Contains(commands, journal.TargetVolume+":/target") || !strings.Contains(commands, rollbackFile) {
+		t.Fatalf("offline rollback did not restore recorded archive:\n%s", commands)
+	}
+}
+
+func TestRecoverPendingVolumeRestorePersistsAcceptanceBeforeCleanup(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	dir := filepath.Join(backupRootDir, "demo", "production")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, ".restore-transaction-accept-crash.json")
+	stage := "tako-restore-stage-0123456789abcdef"
+	journal := backupRestoreJournal{
+		SchemaVersion: 2, Phase: "mutating", TargetVolume: "demo-production-data", TargetIdentity: fakeDockerVolumeIdentity(),
+		GuardContainer: "tako-restore-guard-0123456789abcdef", StageVolume: stage,
+		BackupFile: "data_20240101-120000.tar.gz", RollbackFile: ".restore-rollback-0123456789abcdef.tar.gz",
+	}
+	if err := writeBackupRestoreJournal(marker, journal); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TAKO_FAKE_FAIL_VOLUME_RM", stage)
+	if _, err := RecoverPendingVolumeRestore(context.Background(), marker, "accept"); err == nil || !strings.Contains(err.Error(), "staging volume") {
+		t.Fatalf("accept cleanup interruption error = %v", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted backupRestoreJournal
+	if err := json.Unmarshal(data, &persisted); err != nil || persisted.Phase != "committed" {
+		t.Fatalf("persisted recovery decision = %#v, err=%v", persisted, err)
+	}
+	if _, err := RecoverPendingVolumeRestore(context.Background(), marker, "rollback"); err == nil || !strings.Contains(err.Error(), "cannot be changed") {
+		t.Fatalf("conflicting terminal recovery error = %v", err)
+	}
+	t.Setenv("TAKO_FAKE_FAIL_VOLUME_RM", "")
+	result, err := RecoverPendingVolumeRestore(context.Background(), marker, "accept")
+	if err != nil || !result.Recovered {
+		t.Fatalf("accept cleanup retry result=%#v, err=%v", result, err)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if strings.Contains(commands, journal.TargetVolume+":/target") {
+		t.Fatalf("accepted target was rolled back after cleanup interruption:\n%s", commands)
+	}
+}
+
+func TestRecoverPendingVolumeRestoreResumesTerminalCleanupWithoutTargetMutation(t *testing.T) {
+	for _, test := range []struct {
+		phase, action string
+		created       bool
+	}{
+		{phase: "rolled-back", action: "rollback"},
+		{phase: "abandoned", action: "abandon", created: true},
+	} {
+		t.Run(test.phase, func(t *testing.T) {
+			restore := useTempBackupRoot(t)
+			defer restore()
+			logPath := filepath.Join(t.TempDir(), "commands.log")
+			restoreCommands := useFakeCommands(t, logPath)
+			defer restoreCommands()
+			dir := filepath.Join(backupRootDir, "demo", "production")
+			if err := os.MkdirAll(dir, 0750); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(dir, ".restore-transaction-"+test.phase+".json")
+			journal := backupRestoreJournal{
+				SchemaVersion: 2, Phase: test.phase, TargetVolume: "demo-production-data", TargetIdentity: strings.Repeat("a", 64),
+				GuardContainer: "tako-restore-guard-0123456789abcdef", StageVolume: "tako-restore-stage-0123456789abcdef",
+				BackupFile: "data_20240101-120000.tar.gz", RollbackFile: ".restore-rollback-0123456789abcdef.tar.gz", CreatedTarget: test.created,
+			}
+			if test.created {
+				journal.TargetCreationOperation = "0123456789abcdef"
+			}
+			if err := writeBackupRestoreJournal(marker, journal); err != nil {
+				t.Fatal(err)
+			}
+			result, err := RecoverPendingVolumeRestore(context.Background(), marker, test.action)
+			if err != nil || !result.Recovered {
+				t.Fatalf("terminal retry result=%#v, err=%v", result, err)
+			}
+			commands := strings.Join(readCommandLog(t, logPath), "\n")
+			if strings.Contains(commands, journal.TargetVolume+":/target") || strings.Contains(commands, "docker ps ") {
+				t.Fatalf("terminal cleanup retried target mutation:\n%s", commands)
+			}
+		})
+	}
+}
+
+func TestRecoverPendingVolumeRestoreRejectsJournalOutsideBackupRoot(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	path := filepath.Join(t.TempDir(), ".restore-transaction-outside.json")
+	if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecoverPendingVolumeRestore(context.Background(), path, "inspect"); err == nil || !strings.Contains(err.Error(), "must be under") {
+		t.Fatalf("outside journal error = %v", err)
 	}
 }
 
@@ -624,6 +1076,43 @@ func TestBarrierMarkedSchedulerContextDoesNotReacquireRestoreLock(t *testing.T) 
 		release()
 		<-result
 		t.Fatal("barrier-marked scheduler context deadlocked on restore lock")
+	}
+}
+
+func TestBackupRestoreBarrierAllowsConcurrentOrdinaryMutationsButExcludesRestore(t *testing.T) {
+	_, releaseFirst := acquireBackupRestoreMutationBarrier(context.Background())
+	sharedAcquired := make(chan func(), 1)
+	go func() {
+		_, release := acquireBackupRestoreMutationBarrier(context.Background())
+		sharedAcquired <- release
+	}()
+	var releaseSecond func()
+	select {
+	case releaseSecond = <-sharedAcquired:
+	case <-time.After(time.Second):
+		releaseFirst()
+		t.Fatal("ordinary mutation admission was serialized")
+	}
+	exclusiveAcquired := make(chan func(), 1)
+	go func() {
+		_, release := acquireExclusiveBackupRestoreMutationBarrier(context.Background())
+		exclusiveAcquired <- release
+	}()
+	select {
+	case release := <-exclusiveAcquired:
+		release()
+		releaseSecond()
+		releaseFirst()
+		t.Fatal("restore acquired exclusive admission while ordinary mutations were active")
+	case <-time.After(50 * time.Millisecond):
+	}
+	releaseSecond()
+	releaseFirst()
+	select {
+	case release := <-exclusiveAcquired:
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("restore did not acquire exclusive admission after ordinary mutations completed")
 	}
 }
 

@@ -287,6 +287,31 @@ func TestPrepareExecRunEnsuresNetworkAndLabeledVolumes(t *testing.T) {
 	}
 }
 
+func TestPrepareExecRunInitializesManagedVolumeOwnership(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_VOLUME_OWNERSHIP_STATE_FILE", filepath.Join(t.TempDir(), "volume-state"))
+	t.Setenv("TAKO_FAKE_VOLUME_OWNERSHIP_MARKER_FILE", filepath.Join(t.TempDir(), "marker"))
+	req := ExecRequest{
+		Project: "demo", Environment: "production", Service: "migrate", Mode: ExecModeOneOff,
+		Image: "busybox:1.36", Command: []string{"true"}, DataDir: t.TempDir(),
+		Mounts:          []string{"type=volume,source=tako_demo_production_data,target=/data"},
+		VolumeOwnership: []ManagedVolumeOwnership{{Name: "tako_demo_production_data", UID: 1000, GID: 1001}},
+	}
+	run, err := prepareExecRun(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.cleanup != nil {
+		run.cleanup()
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if strings.Count(commands, "volume create") != 1 || strings.Count(commands, "chown 1000:1001 /volume") != 1 {
+		t.Fatalf("one-off ownership initialization commands:\n%s", commands)
+	}
+}
+
 func TestLineStartWriterKeepsMarkersOnOwnLine(t *testing.T) {
 	var buf bytes.Buffer
 	w := &lineStartWriter{writer: &buf}

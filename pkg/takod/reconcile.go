@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -49,6 +50,7 @@ type ReconcileServiceRequest struct {
 	Labels             map[string]string              `json:"labels,omitempty"`
 	Mounts             []string                       `json:"mounts,omitempty"`
 	ExternalVolumes    []string                       `json:"externalVolumes,omitempty"`
+	VolumeOwnership    []ManagedVolumeOwnership       `json:"volumeOwnership,omitempty"`
 	Files              []ServiceFileBundle            `json:"files,omitempty"`
 	FileSetID          string                         `json:"fileSetId,omitempty"`
 	Containers         []ContainerSpec                `json:"containers"`
@@ -68,6 +70,7 @@ type ReconcileServiceRequest struct {
 	// ephemeral DOCKER_CONFIG for this reconcile only and are never
 	// persisted (ADR 10).
 	RegistryAuths []RegistryAuth `json:"registryAuths,omitempty"`
+	DataDir       string         `json:"-"`
 }
 
 // ServiceFileBundle is one operator-managed file or directory mounted into a
@@ -354,6 +357,9 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 			return fmt.Errorf("invalid external volume name")
 		}
 	}
+	if err := validateManagedVolumeOwnershipPolicies(req.Mounts, req.ExternalVolumes, req.VolumeOwnership); err != nil {
+		return err
+	}
 	if err := validateServiceFileBundles(req.Files); err != nil {
 		return err
 	}
@@ -387,6 +393,28 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	}
 	if err := validateHealthSpec(req.Health); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateManagedVolumeOwnershipPolicies(mounts, external []string, policies []ManagedVolumeOwnership) error {
+	seen := make(map[string]bool, len(policies))
+	named := make(map[string]bool)
+	for _, name := range namedVolumeSourcesFromMounts(mounts) {
+		named[name] = true
+	}
+	externalNames := make(map[string]bool, len(external))
+	for _, name := range external {
+		if !isSafeDockerVolumeName(name) {
+			return fmt.Errorf("invalid external volume name")
+		}
+		externalNames[name] = true
+	}
+	for _, policy := range policies {
+		if !isSafeVolumeOwnershipName(policy.Name) || policy.UID < 0 || policy.UID > math.MaxInt32 || policy.GID < 0 || policy.GID > math.MaxInt32 || seen[policy.Name] || !named[policy.Name] || externalNames[policy.Name] {
+			return fmt.Errorf("invalid managed volume ownership policy")
+		}
+		seen[policy.Name] = true
 	}
 	return nil
 }
@@ -918,10 +946,20 @@ func ensureServiceVolumes(ctx context.Context, req ReconcileServiceRequest) erro
 	for _, volume := range req.ExternalVolumes {
 		external[volume] = true
 	}
+	ownership := make(map[string]ManagedVolumeOwnership, len(req.VolumeOwnership))
+	for _, policy := range req.VolumeOwnership {
+		ownership[policy.Name] = policy
+	}
 	for _, volume := range namedVolumeSourcesFromMounts(req.Mounts) {
 		if external[volume] {
 			if _, err := runDocker(ctx, "volume", "inspect", volume); err != nil {
 				return fmt.Errorf("external docker volume %s does not exist", volume)
+			}
+			continue
+		}
+		if policy, ok := ownership[volume]; ok {
+			if err := ensureManagedVolumeOwnership(ctx, req.DataDir, req.Project, req.Environment, req.Service, policy); err != nil {
+				return err
 			}
 			continue
 		}

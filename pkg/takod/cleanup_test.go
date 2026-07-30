@@ -505,21 +505,14 @@ func TestCleanupUnusedProjectVolumesScopesToProjectEnvironment(t *testing.T) {
 	t.Setenv("TAKO_FAKE_VOLUME_LS_OUTPUT", strings.Join([]string{target, otherStage, otherProject}, "\n")+"\n")
 
 	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production", nil)
-	if err != nil {
-		t.Fatalf("cleanupUnusedProjectVolumes returned error: %v", err)
-	}
-	if removed != 1 {
-		t.Fatalf("removed = %d, want 1", removed)
+	if err == nil || !strings.Contains(err.Error(), "automatic named-volume deletion is disabled") || removed != 0 {
+		t.Fatalf("cleanup removed=%d, err=%v", removed, err)
 	}
 
 	entries := readCommandLog(t, logPath)
-	want := "docker volume rm " + target
-	if !slices.Contains(entries, want) {
-		t.Fatalf("docker log missing %q in %#v", want, entries)
-	}
 	for _, entry := range entries {
-		if strings.Contains(entry, "volume rm "+otherStage) || strings.Contains(entry, "volume rm "+otherProject) {
-			t.Fatalf("cleanup removed unrelated volume via %q; all entries %#v", entry, entries)
+		if strings.Contains(entry, "volume rm ") {
+			t.Fatalf("disabled cleanup removed volume via %q; all entries %#v", entry, entries)
 		}
 	}
 }
@@ -534,11 +527,8 @@ func TestCleanupUnusedProjectVolumesSkipsInUseVolumes(t *testing.T) {
 	t.Setenv("TAKO_FAKE_FAIL_VOLUME_RM", target)
 
 	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production", nil)
-	if err != nil {
-		t.Fatalf("cleanupUnusedProjectVolumes should skip in-use volumes, got error: %v", err)
-	}
-	if removed != 0 {
-		t.Fatalf("removed = %d, want 0", removed)
+	if err == nil || removed != 0 {
+		t.Fatalf("cleanup removed=%d, err=%v", removed, err)
 	}
 }
 
@@ -552,21 +542,42 @@ func TestCleanupUnusedProjectVolumesSkipsProtectedExternalVolumes(t *testing.T) 
 	t.Setenv("TAKO_FAKE_VOLUME_LS_OUTPUT", strings.Join([]string{protected, owned}, "\n")+"\n")
 
 	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production", []string{protected})
-	if err != nil {
-		t.Fatalf("cleanupUnusedProjectVolumes returned error: %v", err)
-	}
-	if removed != 1 {
-		t.Fatalf("removed = %d, want 1", removed)
+	if err == nil || removed != 0 {
+		t.Fatalf("cleanup removed=%d, err=%v", removed, err)
 	}
 
 	entries := readCommandLog(t, logPath)
-	if !slices.Contains(entries, "docker volume rm "+owned) {
-		t.Fatalf("docker log missing owned volume removal in %#v", entries)
-	}
 	for _, entry := range entries {
-		if strings.Contains(entry, "volume rm "+protected) {
-			t.Fatalf("cleanup removed protected external volume via %q; all entries %#v", entry, entries)
+		if strings.Contains(entry, "volume rm ") {
+			t.Fatalf("disabled cleanup removed volume via %q; all entries %#v", entry, entries)
 		}
+	}
+}
+
+func TestCleanupUnusedProjectVolumesRequiresTakodLocalCreationEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		evidence string
+	}{
+		{name: "unlabelled", evidence: "local|<no value>|<no value>|<no value>|<no value>|null"},
+		{name: "custom driver", evidence: "nfs|demo|production|takod|<no value>|null"},
+		{name: "driver options", evidence: `local|demo|production|takod|<no value>|{"type":"none"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "commands.log")
+			restore := useFakeCommands(t, logPath)
+			defer restore()
+			volume := runtimeid.VolumeName("demo", "production", "data")
+			t.Setenv("TAKO_FAKE_VOLUME_LS_OUTPUT", volume+"\n")
+			t.Setenv("TAKO_FAKE_VOLUME_CLEANUP_EVIDENCE", test.evidence)
+			removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production", nil)
+			if err == nil || removed != 0 {
+				t.Fatalf("cleanup removed=%d, err=%v", removed, err)
+			}
+			if commands := strings.Join(readCommandLog(t, logPath), "\n"); strings.Contains(commands, "volume rm "+volume) {
+				t.Fatalf("unproven volume was removed:\n%s", commands)
+			}
+		})
 	}
 }
 
@@ -583,8 +594,11 @@ func TestScopedProjectPruneDoesNotRunGlobalDockerSystemPrune(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CleanupProject returned error: %v", err)
 	}
-	if len(response.Warnings) > 0 {
+	if len(response.Warnings) != 1 || !strings.Contains(response.Warnings[0], "automatic named-volume deletion is disabled") {
 		t.Fatalf("CleanupProject warnings = %#v", response.Warnings)
+	}
+	if response.UnusedVolumesCleaned {
+		t.Fatal("disabled named-volume cleanup was reported as completed")
 	}
 	if response.BuildCacheCleaned {
 		t.Fatal("scoped prune should not report shared Docker build cache cleanup")

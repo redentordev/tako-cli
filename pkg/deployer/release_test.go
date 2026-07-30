@@ -137,3 +137,22 @@ func TestRunReleaseCommandRejectsInvalidTimeout(t *testing.T) {
 		t.Fatalf("err = %v, want timeout validation error", err)
 	}
 }
+
+func TestBuildReleaseVolumeSpecsCarriesOwnershipAndExternalVolumes(t *testing.T) {
+	d := releaseTestDeployer(nil)
+	d.config.Volumes = map[string]config.VolumeConfig{
+		"data":   {Driver: "local", Owner: "1000:1001"},
+		"shared": {External: true, Name: "shared-production"},
+	}
+	service := &config.ServiceConfig{Volumes: []string{"data:/data", "shared:/shared"}}
+	mounts, external, ownership, err := d.buildReleaseVolumeSpecs("web", service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 2 || len(external) != 1 || external[0] != "shared-production" {
+		t.Fatalf("release mounts=%#v external=%#v", mounts, external)
+	}
+	if len(ownership) != 1 || ownership[0].Name != d.config.GetVolumeName("data", "production") || ownership[0].UID != 1000 || ownership[0].GID != 1001 {
+		t.Fatalf("release ownership = %#v", ownership)
+	}
+}

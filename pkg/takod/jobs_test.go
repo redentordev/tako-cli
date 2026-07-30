@@ -551,6 +551,31 @@ func TestScheduledReservedJobIsBlockedByPendingRestore(t *testing.T) {
 	}
 }
 
+func TestExecuteReservedJobInitializesManagedVolumeBeforeRun(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	t.Setenv("TAKO_FAKE_VOLUME_OWNERSHIP_STATE_FILE", filepath.Join(t.TempDir(), "volume-state"))
+	t.Setenv("TAKO_FAKE_VOLUME_OWNERSHIP_MARKER_FILE", filepath.Join(t.TempDir(), "marker"))
+	scheduler := NewJobScheduler(t.TempDir())
+	runCalled := false
+	scheduler.runJob = func(context.Context, JobSpec, string, io.Writer) (int, error) {
+		runCalled = true
+		return 0, nil
+	}
+	spec := validJobSpecFixture()
+	spec.Mounts = []string{"type=volume,source=managed-reports,target=/reports"}
+	spec.VolumeOwnership = []ManagedVolumeOwnership{{Name: "managed-reports", UID: 1000, GID: 1001}}
+	record := scheduler.executeReservedJob(context.Background(), spec, JobTriggerSchedule, nil)
+	if record.Status != JobRunStatusSucceeded || !runCalled {
+		t.Fatalf("job record = %#v, runCalled=%v", record, runCalled)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if strings.Count(commands, "volume create") != 1 || strings.Count(commands, "chown 1000:1001 /volume") != 1 {
+		t.Fatalf("job ownership initialization commands:\n%s", commands)
+	}
+}
+
 func TestJobRunHistoryIsBounded(t *testing.T) {
 	scheduler := newTestJobScheduler(t)
 	spec := validJobSpecFixture()

@@ -1701,6 +1701,24 @@ func TestBuildTakodMountSpecsHonorsExternalVolumeNames(t *testing.T) {
 	}
 }
 
+func TestBuildTakodVolumeOwnershipSpecsUsesOnlyExplicitManagedLocalVolumes(t *testing.T) {
+	deploy := &Deployer{
+		config: &config.Config{Project: config.ProjectConfig{Name: "demo"}, Volumes: map[string]config.VolumeConfig{
+			"data": {Driver: "local", Owner: "1000:1001"},
+		}},
+		environment: "production",
+	}
+	policies, err := deploy.buildTakodVolumeOwnershipSpecs(&config.ServiceConfig{Volumes: []string{
+		"data:/data", "undeclared:/other", "/host/uploads:/uploads",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policies) != 1 || policies[0].Name != deploy.config.GetVolumeName("data", "production") || policies[0].UID != 1000 || policies[0].GID != 1001 {
+		t.Fatalf("volume ownership policies = %#v", policies)
+	}
+}
+
 func TestBuildTakodBackupScheduleRequestUsesConfiguredVolumesAndStorage(t *testing.T) {
 	deploy := &Deployer{
 		config: &config.Config{

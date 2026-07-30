@@ -17,7 +17,7 @@ func acquireBackupDirectoryLock(dir string) (func(), error) {
 	}
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("another backup operation is active for this environment: %w", err)
+		return nil, fmt.Errorf("%w: %v", errBackupDirectoryLocked, err)
 	}
 	return func() {
 		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
