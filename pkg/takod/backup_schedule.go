@@ -517,6 +517,12 @@ func (s *BackupScheduler) scheduleLocked(request BackupScheduleRequest) error {
 
 func (s *BackupScheduler) runScheduledBackup(request BackupScheduleRequest, expectedGeneration ...uint64) {
 	key := backupScheduleKey(request)
+	barrierCtx, releaseBarrier := acquireBackupRestoreMutationBarrier(context.Background())
+	defer releaseBarrier()
+	if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
+		fmt.Fprintf(os.Stderr, "takod backup schedule blocked by restore recovery for %s: %v\n", key, err)
+		return
+	}
 	unlock, err := recovery.AcquireMutationLock(s.dataDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "takod backup schedule snapshot lock failed for %s: %v\n", key, err)
@@ -553,7 +559,7 @@ func (s *BackupScheduler) runScheduledBackup(request BackupScheduleRequest, expe
 		s.notifyRunningChangedLocked()
 		s.mu.Unlock()
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
+	ctx, cancel := context.WithTimeout(barrierCtx, 6*time.Hour)
 	defer cancel()
 	backupID := backupIDForRequest(BackupRequest{}, time.Now())
 	for _, volume := range request.Volumes {

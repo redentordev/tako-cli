@@ -41,6 +41,8 @@ func validateEndpointPayloadScope(value any, fence nodeidentity.OperationFence) 
 		return check(req.Project, req.Environment)
 	case *BackupRequest:
 		return check(req.Project, req.Environment)
+	case *PostgresVerificationRequest:
+		return check(req.Project, req.Environment)
 	case *BackupScheduleRequest:
 		return check(req.Project, req.Environment)
 	case *ACMEDNSReconcileRequest:

@@ -800,6 +800,18 @@ func (s *JobScheduler) Trigger(ctx context.Context, project string, environment 
 // framed by ExecContainerMarker/ExecExitMarker lines. Overlapping runs are
 // skipped and recorded as such without touching the stream.
 func (s *JobScheduler) executeJob(ctx context.Context, spec JobSpec, trigger string, stream io.Writer) JobRunRecord {
+	ctx, releaseBarrier := acquireBackupRestoreMutationBarrier(ctx)
+	defer releaseBarrier()
+	if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
+		started := time.Now().UTC()
+		record := JobRunRecord{
+			Project: spec.Project, Environment: spec.Environment, Job: spec.Name, Trigger: trigger,
+			StartedAt: started, FinishedAt: started, ExitCode: -1, Status: JobRunStatusFailed,
+			Output: "job blocked by pending volume restore recovery: " + err.Error(),
+		}
+		s.appendRunRecord(record)
+		return record
+	}
 	key := jobKey(spec.Project, spec.Environment, spec.Name)
 	s.mu.Lock()
 	if s.running[key] || s.scopeDrainingLocked(schedulerDrainScope(spec.Project, spec.Environment)) {
@@ -847,6 +859,18 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 		s.notifyRunningChangedLocked()
 		s.mu.Unlock()
 	}()
+	ctx, releaseBarrier := acquireBackupRestoreMutationBarrier(ctx)
+	defer releaseBarrier()
+	if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
+		finished := time.Now().UTC()
+		record := JobRunRecord{
+			Project: spec.Project, Environment: spec.Environment, Job: spec.Name, Trigger: trigger,
+			StartedAt: started, FinishedAt: finished, DurationMs: finished.Sub(started).Milliseconds(),
+			ExitCode: -1, Status: JobRunStatusFailed, Output: "job blocked by pending volume restore recovery: " + err.Error(),
+		}
+		s.appendRunRecord(record)
+		return record
+	}
 	if s.admit != nil {
 		if err := s.admit(s.dataDir); err != nil {
 			finished := time.Now().UTC()
@@ -922,6 +946,12 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 // runScheduledJob is the cron entry point: it resolves the current spec so
 // a re-applied job fires with its latest definition.
 func (s *JobScheduler) runScheduledJob(key string, expectedGeneration ...uint64) {
+	barrierCtx, releaseBarrier := acquireBackupRestoreMutationBarrier(context.Background())
+	defer releaseBarrier()
+	if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
+		fmt.Fprintf(os.Stderr, "takod scheduled job %s blocked by restore recovery: %v\n", key, err)
+		return
+	}
 	unlock, err := recovery.AcquireMutationLock(s.dataDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "takod scheduled job %s snapshot lock failed: %v\n", key, err)
@@ -947,7 +977,7 @@ func (s *JobScheduler) runScheduledJob(key string, expectedGeneration ...uint64)
 	}
 	var record JobRunRecord
 	if reserved {
-		record = s.executeReservedJob(context.Background(), spec, JobTriggerSchedule, nil)
+		record = s.executeReservedJob(barrierCtx, spec, JobTriggerSchedule, nil)
 	} else {
 		record = s.recordSkippedJob(spec, JobTriggerSchedule)
 	}

@@ -640,10 +640,10 @@ type TLSConfig struct {
 
 // BackupConfig defines per-service backup settings.
 type BackupConfig struct {
-	Schedule string               `yaml:"schedule" json:"schedule"`                   // cron format (e.g., "0 2 * * *")
-	Retain   int                  `yaml:"retain" json:"retain"`                       // days to retain backups
-	Volumes  []string             `yaml:"volumes,omitempty" json:"volumes,omitempty"` // optional logical service volumes to back up
-	Storage  *BackupStorageConfig `yaml:"storage,omitempty" json:"storage,omitempty"` // optional object storage target
+	Schedule string               `yaml:"schedule,omitempty" json:"schedule,omitempty"` // cron format (e.g., "0 2 * * *")
+	Retain   int                  `yaml:"retain,omitempty" json:"retain,omitempty"`     // days to retain backups
+	Volumes  []string             `yaml:"volumes,omitempty" json:"volumes,omitempty"`   // optional logical service volumes to back up
+	Storage  *BackupStorageConfig `yaml:"storage,omitempty" json:"storage,omitempty"`   // optional object storage target
 }
 
 // BackupStorageConfig defines an S3-compatible object storage target for
@@ -658,6 +658,7 @@ type BackupStorageConfig struct {
 	SecretAccessKey string `yaml:"secretAccessKey,omitempty" json:"secretAccessKey,omitempty"` // Use ${ENV_VAR}
 	SessionToken    string `yaml:"sessionToken,omitempty" json:"sessionToken,omitempty"`       // Optional temporary credential token
 	ForcePathStyle  bool   `yaml:"forcePathStyle,omitempty" json:"forcePathStyle,omitempty"`   // Needed by some S3-compatible stores
+	Versioned       bool   `yaml:"versioned,omitempty" json:"versioned,omitempty"`             // Bucket uses object versioning APIs
 }
 
 // ResourceLimitsConfig defines container runtime resource limits.

@@ -28,7 +28,7 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 	socket := filepath.Join(dir, "takod.sock")
 	dataDir := filepath.Join(dir, "data")
 
-	server := NewServer(socket, dataDir, "test")
+	server := NewServerWithOptions(socket, dataDir, "test", ServerOptions{MinimumFreeDiskBytes: 1, PostgresVerificationQuotaProbe: func(context.Context) bool { return true }})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -72,7 +72,7 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 			if status.UpgradeProtocol != upgradeprotocol.Current || status.MinimumUpgradeProtocol != upgradeprotocol.Current {
 				t.Fatalf("unexpected upgrade protocol window %d/%d", status.UpgradeProtocol, status.MinimumUpgradeProtocol)
 			}
-			if len(status.Capabilities) != 15 || status.Capabilities[0] != CapabilityContainerArgvV1 || status.Capabilities[1] != CapabilityContainerRuntimeControlsV1 || status.Capabilities[2] != CapabilityContainerGracefulStopV1 || status.Capabilities[3] != CapabilityImageBuildOptionsV1 || status.Capabilities[4] != CapabilityImageDescriptorV1 || status.Capabilities[5] != CapabilityNodePlatformV1 || status.Capabilities[6] != CapabilityExecOneOffControlsV1 || status.Capabilities[7] != CapabilityServiceFilesV1 || status.Capabilities[8] != CapabilityProxyActivationV1 || status.Capabilities[9] != CapabilityProxyRoutePolicyV1 || status.Capabilities[10] != CapabilityProxyTrustedProxiesV1 || status.Capabilities[11] != CapabilityProxyCertsV1 || status.Capabilities[12] != CapabilityAcmeDNSV1 || status.Capabilities[13] != CapabilityNodeIdentityV1 || status.Capabilities[14] != CapabilityNodeUpgradeV1 {
+			if len(status.Capabilities) != 16 || status.Capabilities[0] != CapabilityContainerArgvV1 || status.Capabilities[1] != CapabilityContainerRuntimeControlsV1 || status.Capabilities[2] != CapabilityContainerGracefulStopV1 || status.Capabilities[3] != CapabilityImageBuildOptionsV1 || status.Capabilities[4] != CapabilityImageDescriptorV1 || status.Capabilities[5] != CapabilityNodePlatformV1 || status.Capabilities[6] != CapabilityExecOneOffControlsV1 || status.Capabilities[7] != CapabilityServiceFilesV1 || status.Capabilities[8] != CapabilityProxyActivationV1 || status.Capabilities[9] != CapabilityProxyRoutePolicyV1 || status.Capabilities[10] != CapabilityProxyTrustedProxiesV1 || status.Capabilities[11] != CapabilityProxyCertsV1 || status.Capabilities[12] != CapabilityAcmeDNSV1 || status.Capabilities[13] != CapabilityBackupPostgresVerifyV1 || status.Capabilities[14] != CapabilityNodeIdentityV1 || status.Capabilities[15] != CapabilityNodeUpgradeV1 {
 				t.Fatalf("unexpected capabilities %#v", status.Capabilities)
 			}
 			return
@@ -82,6 +82,13 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 	}
 
 	t.Fatalf("takod status was not reachable: %v", lastErr)
+}
+
+func TestStatusOmitsPostgresVerificationWithoutQuotaAndDiskPolicy(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	if slices.Contains(server.Status().Capabilities, CapabilityBackupPostgresVerifyV1) {
+		t.Fatal("PostgreSQL verification was advertised without quota and disk policy")
+	}
 }
 
 func TestServerStatusExposesImmutableInstallationIdentity(t *testing.T) {
@@ -739,6 +746,90 @@ func TestHandleBackupRestoreRejectsInvalidJSON(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", recorder.Code)
+	}
+}
+
+func TestHandlePostgresBackupVerificationRejectsInvalidRequests(t *testing.T) {
+	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	methodRecorder := httptest.NewRecorder()
+	server.handlePostgresBackupVerification(methodRecorder, httptest.NewRequest(http.MethodDelete, "/v1/backups/postgres/verify", nil))
+	if methodRecorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", methodRecorder.Code)
+	}
+	jsonRecorder := httptest.NewRecorder()
+	server.handlePostgresBackupVerification(jsonRecorder, httptest.NewRequest(http.MethodPost, "/v1/backups/postgres/verify", bytes.NewBufferString("{")))
+	if jsonRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", jsonRecorder.Code)
+	}
+}
+
+func TestHandlePostgresBackupVerificationRequiresDiskFloor(t *testing.T) {
+	server := &Server{dataDir: t.TempDir()}
+	request := validPostgresVerificationRequest(4, strings.Repeat("a", 64))
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.handlePostgresBackupVerification(recorder, httptest.NewRequest(http.MethodPost, "/v1/backups/postgres/verify", bytes.NewReader(body)))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "minimum free-disk floor") {
+		t.Fatalf("disk-floor response = %d %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandlePostgresBackupVerificationRejectsInsufficientMemory(t *testing.T) {
+	server := NewServerWithOptions("/tmp/takod-test.sock", t.TempDir(), "test", ServerOptions{
+		MinimumFreeDiskBytes: 1, ReservedMemoryBytes: 512 << 20,
+		MemoryAvailable: func() (int64, error) { return 700 << 20, nil },
+	})
+	request := validPostgresVerificationRequest(4, strings.Repeat("a", 64))
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.handlePostgresBackupVerification(recorder, httptest.NewRequest(http.MethodPost, "/v1/backups/postgres/verify", bytes.NewReader(body)))
+	if recorder.Code != http.StatusInsufficientStorage || !strings.Contains(recorder.Body.String(), "insufficient available memory") {
+		t.Fatalf("memory admission response = %d %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHandleBackupRemovesCrashPartialBeforeDiskAdmission(t *testing.T) {
+	restoreRoot := useTempBackupRoot(t)
+	defer restoreRoot()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	request := BackupRequest{Project: "demo", Environment: "production", Volume: "data"}
+	dir := backupDirectory(request)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	partial := filepath.Join(dir, ".data.crash.partial")
+	if err := os.WriteFile(partial, []byte("fills-disk"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServerWithOptions("/tmp/takod-test.sock", t.TempDir(), "test", ServerOptions{
+		MinimumFreeDiskBytes: 10,
+		DiskAvailable: func(string) (int64, error) {
+			if _, err := os.Stat(partial); err == nil {
+				return 0, nil
+			}
+			return 1 << 30, nil
+		},
+		DiskIdentity: func(string) (string, error) { return "backup-fs", nil },
+	})
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.handleBackups(recorder, httptest.NewRequest(http.MethodPost, "/v1/backups", bytes.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("backup response = %d %q", recorder.Code, recorder.Body.String())
+	}
+	if _, err := os.Stat(partial); !os.IsNotExist(err) {
+		t.Fatalf("crash partial survived pre-admission cleanup: %v", err)
 	}
 }
 

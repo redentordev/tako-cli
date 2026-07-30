@@ -26,6 +26,12 @@ type ingressAgent struct {
 	requests []string
 }
 
+func TestPostgresVerificationStreamsWithoutPersistingCredentialBody(t *testing.T) {
+	if !isDirectStreamMutation("/v1/backups/postgres/verify") {
+		t.Fatal("PostgreSQL verification body would enter durable operation history")
+	}
+}
+
 type partialIngressAgent struct{ ingressAgent }
 
 type rejectingIngressAgent struct{ ingressAgent }

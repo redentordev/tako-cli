@@ -529,6 +529,28 @@ func TestExecuteJobSkipsOverlappingRun(t *testing.T) {
 	}
 }
 
+func TestScheduledReservedJobIsBlockedByPendingRestore(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	dir := filepath.Join(backupRootDir, "demo", "production")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	journal := backupRestoreJournal{
+		SchemaVersion: 1, Phase: "mutating", TargetVolume: "demo-production-data", StageVolume: "tako-restore-stage-0123456789abcdef",
+		BackupFile: "data_20240101-120000.tar.gz", RollbackFile: ".restore-rollback-0123456789abcdef.tar.gz",
+	}
+	if err := writeBackupRestoreJournal(filepath.Join(dir, ".restore-transaction-pending.json"), journal); err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewJobScheduler(t.TempDir())
+	spec := validJobSpecFixture()
+	record := scheduler.executeReservedJob(context.Background(), spec, JobTriggerSchedule, nil)
+	if record.Status != JobRunStatusFailed || !strings.Contains(record.Output, "pending volume restore") {
+		t.Fatalf("scheduled restore barrier record = %#v", record)
+	}
+}
+
 func TestJobRunHistoryIsBounded(t *testing.T) {
 	scheduler := newTestJobScheduler(t)
 	spec := validJobSpecFixture()

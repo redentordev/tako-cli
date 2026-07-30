@@ -1787,7 +1787,7 @@ func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.Serv
 }
 
 func (d *Deployer) reconcileBackupScheduleViaTakod(client any, serviceName string, service *config.ServiceConfig, serviceAssignedToNode bool) error {
-	if service.Backup == nil || !serviceAssignedToNode {
+	if service.Backup == nil || service.Backup.Schedule == "" || !serviceAssignedToNode {
 		return d.deleteBackupScheduleViaTakod(client, serviceName)
 	}
 	request, err := d.buildTakodBackupScheduleRequest(serviceName, service)
@@ -1883,6 +1883,7 @@ func takodBackupStorageConfig(storage *config.BackupStorageConfig) *takod.Backup
 		SecretAccessKey: storage.SecretAccessKey,
 		SessionToken:    storage.SessionToken,
 		ForcePathStyle:  storage.ForcePathStyle,
+		Versioned:       storage.Versioned,
 	}
 }
 

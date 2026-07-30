@@ -243,7 +243,10 @@ still emit the document. `tako start`/`tako stop` return the same
 `create` — single volume or `--all`, `restore`, `delete`, `cleanup`)
 returns a `BackupResult` with the action, volume/backupId when relevant,
 and per-node outcomes whose `backups` reuse the takod backup schema plus
-`deleted` counts, `skipped` volumes, and per-node `error`. `tako setup`
+`deleted` counts, `skipped` volumes, and per-node `error`. `tako backup
+verify-postgres` returns `PostgresBackupVerificationResult` with the selected
+node and credential-free artifact, digest, query-hash, cleanup, and verification
+evidence. `tako setup`
 returns a `SetupResult` with per-node provisioning outcomes: `mode`
 (`fresh`, `reapply`, or `converge` — converge re-runs only firewall,
 deploy access, and the takod runtime and reports the untouched steps as
@@ -350,7 +353,7 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
 | Human-only by design | `init`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |

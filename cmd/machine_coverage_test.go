@@ -16,6 +16,7 @@ import (
 var machineFullContractCommands = map[string]bool{
 	"tako access":                   true,
 	"tako backup":                   true,
+	"tako backup verify-postgres":   true,
 	"tako cleanup":                  true,
 	"tako certs ls":                 true,
 	"tako certs push":               true,

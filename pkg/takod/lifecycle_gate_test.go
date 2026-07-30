@@ -29,6 +29,29 @@ func TestEnrolledLifecycleGateHonorsDurableDeploymentDenyLatch(t *testing.T) {
 	}
 }
 
+func TestPendingRestoreJournalBlocksNodeWideWorkloadMutations(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	dir := filepath.Join(backupRootDir, "demo", "production")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	journal := backupRestoreJournal{
+		SchemaVersion: 1, Phase: "mutating", TargetVolume: "demo-production-data", StageVolume: "tako-restore-stage-0123456789abcdef",
+		BackupFile: "data_20240101-120000.tar.gz", RollbackFile: ".restore-rollback-0123456789abcdef.tar.gz",
+	}
+	if err := writeBackupRestoreJournal(filepath.Join(dir, ".restore-transaction-pending.json"), journal); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	handler := (&Server{}).enrolledLifecycleHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/reconcile-service", nil))
+	if recorder.Code != http.StatusConflict || called || !strings.Contains(recorder.Body.String(), "pending volume restore") {
+		t.Fatalf("pending restore gate = status %d called=%t body=%q", recorder.Code, called, recorder.Body.String())
+	}
+}
+
 func TestPlacementFenceOnDrainingNodeAllowsCleanupButNotCreation(t *testing.T) {
 	server := lifecycleTestServer(t, nodeidentity.NodeLifecycleDraining, false)
 	inventory, err := nodeidentity.ReadInventory(server.inventoryFile)

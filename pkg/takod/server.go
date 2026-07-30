@@ -25,36 +25,40 @@ import (
 )
 
 type Server struct {
-	socket                  string
-	dataDir                 string
-	version                 string
-	nodeName                string
-	identityFile            string
-	inventoryFile           string
-	membershipFile          string
-	installation            *nodeidentity.Installation
-	minimumFreeDiskBytes    int64
-	dockerDataRoot          string
-	buildSlots              chan struct{}
-	diskAvailable           func(string) (int64, error)
-	diskIdentity            func(string) (string, error)
-	actualRefreshInterval   time.Duration
-	buildCachePruneInterval time.Duration
-	buildCacheKeepStorage   string
-	startedAt               time.Time
-	server                  *http.Server
-	backupScheduler         *BackupScheduler
-	jobScheduler            *JobScheduler
-	certificateScheduler    *CertificateScheduler
-	uploadReadTimeout       time.Duration
-	diskReservationMu       sync.Mutex
-	diskReservations        map[string]int64
-	proxyAuthorityMu        sync.Mutex
-	operationBarrierMu      sync.Mutex
-	operationBarrierUnlock  func()
-	operationBarrierID      string
-	operationBarrierExpires time.Time
-	mu                      sync.Mutex
+	socket                             string
+	dataDir                            string
+	version                            string
+	nodeName                           string
+	identityFile                       string
+	inventoryFile                      string
+	membershipFile                     string
+	installation                       *nodeidentity.Installation
+	minimumFreeDiskBytes               int64
+	reservedMemoryBytes                int64
+	dockerDataRoot                     string
+	buildSlots                         chan struct{}
+	diskAvailable                      func(string) (int64, error)
+	diskIdentity                       func(string) (string, error)
+	memoryAvailable                    func() (int64, error)
+	postgresVerificationQuotaSupported bool
+	postgresVerificationQuotaProbe     func(context.Context) bool
+	actualRefreshInterval              time.Duration
+	buildCachePruneInterval            time.Duration
+	buildCacheKeepStorage              string
+	startedAt                          time.Time
+	server                             *http.Server
+	backupScheduler                    *BackupScheduler
+	jobScheduler                       *JobScheduler
+	certificateScheduler               *CertificateScheduler
+	uploadReadTimeout                  time.Duration
+	diskReservationMu                  sync.Mutex
+	diskReservations                   map[string]int64
+	proxyAuthorityMu                   sync.Mutex
+	operationBarrierMu                 sync.Mutex
+	operationBarrierUnlock             func()
+	operationBarrierID                 string
+	operationBarrierExpires            time.Time
+	mu                                 sync.Mutex
 }
 
 const (
@@ -139,6 +143,10 @@ const CapabilityProxyActivationV1 = "proxy.activation-v1"
 // prefixes, request-body limits, and response headers before proxying.
 const CapabilityProxyRoutePolicyV1 = "proxy.route-policy-v1"
 
+// CapabilityBackupPostgresVerifyV1 means the agent can verify an exact remote
+// pg_dump artifact by restoring it into isolated, disposable Docker resources.
+const CapabilityBackupPostgresVerifyV1 = "backup.postgres-verify-v1"
+
 // CapabilityImageBuildOptionsV1 means the streamed image builder consumes
 // buildArgs and target from the request preamble.
 const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
@@ -182,49 +190,64 @@ func NewServer(socket string, dataDir string, version string) *Server {
 }
 
 type ServerOptions struct {
-	NodeName                string
-	IdentityFile            string
-	InventoryFile           string
-	MembershipFile          string
-	ActualRefreshInterval   time.Duration
-	BuildCachePruneInterval time.Duration
-	BuildCacheKeepStorage   string
-	MinimumFreeDiskBytes    int64
-	DockerDataRoot          string
-	MaximumConcurrentBuilds int
-	DiskAvailable           func(string) (int64, error)
-	DiskIdentity            func(string) (string, error)
-	UploadReadTimeout       time.Duration
+	NodeName                       string
+	IdentityFile                   string
+	InventoryFile                  string
+	MembershipFile                 string
+	ActualRefreshInterval          time.Duration
+	BuildCachePruneInterval        time.Duration
+	BuildCacheKeepStorage          string
+	MinimumFreeDiskBytes           int64
+	ReservedMemoryBytes            int64
+	DockerDataRoot                 string
+	MaximumConcurrentBuilds        int
+	DiskAvailable                  func(string) (int64, error)
+	DiskIdentity                   func(string) (string, error)
+	MemoryAvailable                func() (int64, error)
+	PostgresVerificationQuotaProbe func(context.Context) bool
+	UploadReadTimeout              time.Duration
 }
 
 func NewServerWithOptions(socket string, dataDir string, version string, opts ServerOptions) *Server {
 	server := &Server{
-		socket:                  socket,
-		dataDir:                 dataDir,
-		version:                 version,
-		nodeName:                opts.NodeName,
-		identityFile:            opts.IdentityFile,
-		inventoryFile:           opts.InventoryFile,
-		membershipFile:          opts.MembershipFile,
-		actualRefreshInterval:   opts.ActualRefreshInterval,
-		buildCachePruneInterval: opts.BuildCachePruneInterval,
-		buildCacheKeepStorage:   opts.BuildCacheKeepStorage,
-		minimumFreeDiskBytes:    opts.MinimumFreeDiskBytes,
-		dockerDataRoot:          opts.DockerDataRoot,
-		diskAvailable:           opts.DiskAvailable,
-		diskIdentity:            opts.DiskIdentity,
-		startedAt:               time.Now().UTC(),
-		backupScheduler:         NewBackupScheduler(dataDir),
-		jobScheduler:            NewJobScheduler(dataDir),
-		certificateScheduler:    NewCertificateScheduler(dataDir),
-		uploadReadTimeout:       opts.UploadReadTimeout,
-		diskReservations:        make(map[string]int64),
+		socket:                         socket,
+		dataDir:                        dataDir,
+		version:                        version,
+		nodeName:                       opts.NodeName,
+		identityFile:                   opts.IdentityFile,
+		inventoryFile:                  opts.InventoryFile,
+		membershipFile:                 opts.MembershipFile,
+		actualRefreshInterval:          opts.ActualRefreshInterval,
+		buildCachePruneInterval:        opts.BuildCachePruneInterval,
+		buildCacheKeepStorage:          opts.BuildCacheKeepStorage,
+		minimumFreeDiskBytes:           opts.MinimumFreeDiskBytes,
+		reservedMemoryBytes:            opts.ReservedMemoryBytes,
+		dockerDataRoot:                 opts.DockerDataRoot,
+		diskAvailable:                  opts.DiskAvailable,
+		diskIdentity:                   opts.DiskIdentity,
+		memoryAvailable:                opts.MemoryAvailable,
+		postgresVerificationQuotaProbe: opts.PostgresVerificationQuotaProbe,
+		startedAt:                      time.Now().UTC(),
+		backupScheduler:                NewBackupScheduler(dataDir),
+		jobScheduler:                   NewJobScheduler(dataDir),
+		certificateScheduler:           NewCertificateScheduler(dataDir),
+		uploadReadTimeout:              opts.UploadReadTimeout,
+		diskReservations:               make(map[string]int64),
 	}
 	if server.diskAvailable == nil {
 		server.diskAvailable = availableDiskBytes
 	}
 	if server.diskIdentity == nil {
 		server.diskIdentity = diskFilesystemIdentity
+	}
+	if server.memoryAvailable == nil {
+		server.memoryAvailable = availableHostMemoryBytes
+	}
+	if server.postgresVerificationQuotaProbe == nil {
+		server.postgresVerificationQuotaProbe = probePostgresVerificationQuota
+	}
+	if server.reservedMemoryBytes <= 0 {
+		server.reservedMemoryBytes = platform.DefaultResourcePolicy().ReservedMemoryBytes
 	}
 	if server.uploadReadTimeout <= 0 {
 		server.uploadReadTimeout = takodUploadReadTimeout
@@ -313,6 +336,18 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		defer deactivatePolicy()
 	}
+	if err := CleanupPostgresVerificationResources(ctx, s.dataDir); err != nil {
+		return fmt.Errorf("clean stale PostgreSQL verification resources: %w", err)
+	}
+	if err := CleanupBackupRestoreResources(ctx); err != nil {
+		return fmt.Errorf("clean stale backup restore resources: %w", err)
+	}
+	if err := CleanupAllBackupPublicationResources(); err != nil {
+		return fmt.Errorf("clean stale backup publication resources: %w", err)
+	}
+	probeCtx, cancelProbe := context.WithTimeout(ctx, 2*time.Minute)
+	s.postgresVerificationQuotaSupported = s.postgresVerificationQuotaProbe(probeCtx)
+	cancelProbe()
 
 	if err := os.MkdirAll(filepath.Dir(s.socket), 0755); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
@@ -1340,6 +1375,10 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if err := CleanupBackupPublicationResources(request); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		if !s.requireFreeDisk(w, backupRootDir) {
 			return
 		}
@@ -1383,9 +1422,27 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !s.requireFreeDisk(w, s.dockerDataRoot) {
+	if s.minimumFreeDiskBytes <= 0 {
+		http.Error(w, "volume restore requires a configured minimum free-disk floor", http.StatusServiceUnavailable)
 		return
 	}
+	backupBytes, dockerBytes, err := EstimateVolumeRestoreCapacity(r.Context(), request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	releaseBackup, ok := s.reserveFreeDisk(w, backupBytes, backupDirectory(request))
+	if !ok {
+		return
+	}
+	defer releaseBackup()
+	releaseDocker, ok := s.reserveFreeDisk(w, dockerBytes, s.dockerDataRoot)
+	if !ok {
+		return
+	}
+	defer releaseDocker()
+	request.MinimumFreeBytes = s.minimumFreeDiskBytes
+	request.DockerDataRoot = s.dockerDataRoot
 	if err := RestoreVolumeBackup(r.Context(), request); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1395,6 +1452,73 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(map[string]bool{"restored": true})
+}
+
+func (s *Server) handlePostgresBackupVerification(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		response, err := ReadPostgresVerificationResult(
+			s.dataDir,
+			r.URL.Query().Get("project"), r.URL.Query().Get("environment"),
+			r.URL.Query().Get("service"), r.URL.Query().Get("artifactId"),
+		)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(response)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	var request PostgresVerificationRequest
+	if err := decodeJSONRequest(w, r, &request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := ValidatePostgresVerificationRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if s.minimumFreeDiskBytes <= 0 {
+		http.Error(w, "PostgreSQL verification requires a configured minimum free-disk floor", http.StatusServiceUnavailable)
+		return
+	}
+	availableMemory, err := s.memoryAvailable()
+	if err != nil {
+		http.Error(w, "failed to inspect available host memory: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	memoryBudget := request.ScratchBytes + (512 << 20)
+	if availableMemory-s.reservedMemoryBytes < memoryBudget {
+		http.Error(w, "insufficient available memory for isolated PostgreSQL verification", http.StatusInsufficientStorage)
+		return
+	}
+	request.MemoryBytes = memoryBudget
+	requiredDisk := request.Artifact.Size + (512 << 20)
+	releaseReservation, ok := s.reserveFreeDisk(w, requiredDisk, s.dataDir, s.dockerDataRoot)
+	if !ok {
+		return
+	}
+	defer releaseReservation()
+	response, err := VerifyPostgresBackup(r.Context(), s.dataDir, request)
+	if err != nil {
+		if response == nil {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(response)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
 }
 
 func (s *Server) handleBackupCleanup(w http.ResponseWriter, r *http.Request) {
@@ -2282,7 +2406,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,
@@ -2291,6 +2415,10 @@ func (s *Server) Status() Status {
 		Identity:               cloneNodeIdentity(s.installation),
 		EnrollmentRoles:        cloneEnrollmentRoles(s.installation),
 	}
+	if s.postgresVerificationQuotaSupported && s.minimumFreeDiskBytes > 0 && s.reservedMemoryBytes > 0 {
+		status.Capabilities = append(status.Capabilities, CapabilityBackupPostgresVerifyV1)
+	}
+	status.Capabilities = append(status.Capabilities, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1)
 	if s.installation != nil {
 		status.Capabilities = append(status.Capabilities, CapabilityPlatformWorkerHandoffV1)
 		if inventory, err := nodeidentity.ReadInventory(s.inventoryFile); err == nil && inventory.ClusterID == s.installation.ClusterID {

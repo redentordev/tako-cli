@@ -1,7 +1,9 @@
 package takod
 
 import (
+	"archive/tar"
 	"bufio"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1515,8 +1517,24 @@ func TestTakodCommandHelper(t *testing.T) {
 		os.Exit(0)
 	case "run":
 		if fragment := os.Getenv("TAKO_FAKE_DOCKER_RUN_FAIL_CONTAINS"); fragment != "" && strings.Contains(strings.Join(commandArgs, " "), fragment) {
-			_, _ = os.Stderr.WriteString("selective docker run failure")
-			os.Exit(1)
+			marker := os.Getenv("TAKO_FAKE_DOCKER_RUN_FAIL_ONCE_FILE")
+			if marker == "" {
+				_, _ = os.Stderr.WriteString("selective docker run failure")
+				os.Exit(1)
+			}
+			if _, err := os.Stat(marker); os.IsNotExist(err) {
+				_ = os.WriteFile(marker, []byte("failed"), 0600)
+				_, _ = os.Stderr.WriteString("selective docker run failure")
+				os.Exit(1)
+			}
+		}
+		if strings.Contains(strings.Join(commandArgs, " "), "/quota-probe") {
+			_, _ = os.Stdout.WriteString("dd: writing '/quota-probe': No space left on device\n")
+			os.Exit(0)
+		}
+		if strings.Contains(strings.Join(commandArgs, " "), "du -sk /source") {
+			_, _ = os.Stdout.WriteString("7\t/source\n")
+			os.Exit(0)
 		}
 		if os.Getenv("TAKO_FAKE_DOCKER_RUN_BLOCK_UNTIL_CANCEL") == "1" {
 			if marker := os.Getenv("TAKO_FAKE_DOCKER_RUN_STARTED_FILE"); marker != "" {
@@ -1579,6 +1597,17 @@ func TestTakodCommandHelper(t *testing.T) {
 				code, _ = strconv.Atoi(v)
 			}
 			os.Exit(code)
+		}
+		if strings.Contains(joined, " psql ") {
+			if strings.Contains(joined, "SHOW server_version_num") {
+				version := os.Getenv("TAKO_FAKE_POSTGRES_VERSION")
+				if version == "" {
+					version = "160000"
+				}
+				_, _ = os.Stdout.WriteString(version + "\n")
+			} else {
+				_, _ = os.Stdout.WriteString(os.Getenv("TAKO_FAKE_PSQL_OUTPUT"))
+			}
 		}
 		os.Exit(0)
 	case "inspect":
@@ -1658,6 +1687,11 @@ func TestTakodCommandHelper(t *testing.T) {
 			_, _ = os.Stdout.WriteString("true\n")
 		}
 		os.Exit(0)
+	case "info":
+		if output := os.Getenv("TAKO_FAKE_DOCKER_INFO_OUTPUT"); output != "" {
+			_, _ = os.Stdout.WriteString(output)
+		}
+		os.Exit(0)
 	case "logs":
 		_, _ = os.Stdout.WriteString("logs\n")
 		os.Exit(0)
@@ -1692,7 +1726,18 @@ func createFakeBackupArchive(commandArgs []string) {
 		}
 		name := strings.TrimPrefix(commandArgs[i+1], "/backup/")
 		_ = os.MkdirAll(backupPath, 0750)
-		_ = os.WriteFile(filepath.Join(backupPath, name), []byte("backup"), 0600)
+		file, err := os.OpenFile(filepath.Join(backupPath, name), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+		if err != nil {
+			return
+		}
+		compressed := gzip.NewWriter(file)
+		archive := tar.NewWriter(compressed)
+		content := []byte("backup")
+		_ = archive.WriteHeader(&tar.Header{Name: "data", Mode: 0600, Size: int64(len(content))})
+		_, _ = archive.Write(content)
+		_ = archive.Close()
+		_ = compressed.Close()
+		_ = file.Close()
 		return
 	}
 }

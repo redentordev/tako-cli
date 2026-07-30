@@ -10,6 +10,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/platform"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/spf13/cobra"
 )
@@ -23,9 +24,10 @@ var (
 	takodActualRefreshInterval   time.Duration
 	takodBuildCachePruneInterval time.Duration = takod.DefaultBuildCachePruneInterval
 	takodBuildCacheKeepStorage   string        = takod.DefaultBuildCacheKeepStorage
-	takodMinimumFreeDiskBytes    int64
+	takodMinimumFreeDiskBytes    int64         = platform.DefaultResourcePolicy().MinimumFreeDiskBytes
+	takodReservedMemoryBytes     int64         = platform.DefaultResourcePolicy().ReservedMemoryBytes
 	takodMaximumConcurrentBuilds int
-	takodDockerDataRoot          string
+	takodDockerDataRoot          string = "/var/lib/docker"
 )
 
 var takodCmd = &cobra.Command{
@@ -56,9 +58,10 @@ func init() {
 	takodRunCmd.Flags().DurationVar(&takodActualRefreshInterval, "actual-refresh-interval", 0, "Refresh node-local actual state at this interval (0 disables)")
 	takodRunCmd.Flags().DurationVar(&takodBuildCachePruneInterval, "build-cache-prune-interval", takod.DefaultBuildCachePruneInterval, "Prune Docker build cache at this interval (0 disables)")
 	takodRunCmd.Flags().StringVar(&takodBuildCacheKeepStorage, "build-cache-keep-storage", takod.DefaultBuildCacheKeepStorage, "Docker builder cache storage budget to keep during scheduled pruning")
-	takodRunCmd.Flags().Int64Var(&takodMinimumFreeDiskBytes, "minimum-free-disk-bytes", 0, "Reject disk-growing operations below this free-disk floor (0 disables)")
+	takodRunCmd.Flags().Int64Var(&takodMinimumFreeDiskBytes, "minimum-free-disk-bytes", platform.DefaultResourcePolicy().MinimumFreeDiskBytes, "Reject disk-growing operations below this free-disk floor (0 disables)")
+	takodRunCmd.Flags().Int64Var(&takodReservedMemoryBytes, "reserved-memory-bytes", platform.DefaultResourcePolicy().ReservedMemoryBytes, "Host memory kept unavailable to isolated verification work")
 	takodRunCmd.Flags().IntVar(&takodMaximumConcurrentBuilds, "max-concurrent-builds", 0, "Maximum concurrent image builds (0 keeps legacy unlimited behavior)")
-	takodRunCmd.Flags().StringVar(&takodDockerDataRoot, "docker-data-root", "", "Docker data-root filesystem used for image and volume admission")
+	takodRunCmd.Flags().StringVar(&takodDockerDataRoot, "docker-data-root", "/var/lib/docker", "Docker data-root filesystem used for image and volume admission")
 }
 
 func runTakod(cmd *cobra.Command, args []string) error {
@@ -97,6 +100,7 @@ func runTakod(cmd *cobra.Command, args []string) error {
 		BuildCachePruneInterval: takodBuildCachePruneInterval,
 		BuildCacheKeepStorage:   takodBuildCacheKeepStorage,
 		MinimumFreeDiskBytes:    takodMinimumFreeDiskBytes,
+		ReservedMemoryBytes:     takodReservedMemoryBytes,
 		MaximumConcurrentBuilds: takodMaximumConcurrentBuilds,
 		DockerDataRoot:          takodDockerDataRoot,
 	}).Run(ctx)

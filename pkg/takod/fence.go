@@ -858,9 +858,23 @@ func (s *Server) validateMutationFence(r *http.Request) (context.Context, error)
 	if err := validateFencedRequestQuery(r, *accepted); err != nil {
 		return r.Context(), err
 	}
+	if err := validateFenceOperationForRequest(r, *accepted); err != nil {
+		return r.Context(), err
+	}
 	// Downstream authorization consumes only the durable, cryptographically
 	// verified record. Caller-controlled header fields never enter context.
 	return withOperationFence(r.Context(), *accepted), nil
+}
+
+func validateFenceOperationForRequest(r *http.Request, fence nodeidentity.OperationFence) error {
+	required := ""
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/backups/postgres/verify" {
+		required = "backup-postgres-verify"
+	}
+	if required != "" && fence.Operation != required {
+		return fmt.Errorf("controller operation fence does not authorize %s", required)
+	}
+	return nil
 }
 
 func validateFencedPayloadScope(ctx context.Context, value any) error {
@@ -944,7 +958,7 @@ func validateFencedRequestQuery(r *http.Request, fence nodeidentity.OperationFen
 		return fmt.Errorf("request environment is outside the controller operation fence")
 	}
 	switch r.URL.Path {
-	case "/v1/images/build", "/v1/images/import", "/v1/proxy-file", "/v1/certs", "/v1/acme-dns", "/v1/backups", "/v1/backups/restore", "/v1/backups/cleanup", "/v1/backup-schedule":
+	case "/v1/images/build", "/v1/images/import", "/v1/proxy-file", "/v1/certs", "/v1/acme-dns", "/v1/backups", "/v1/backups/restore", "/v1/backups/postgres/verify", "/v1/backups/cleanup", "/v1/backup-schedule":
 		// Body-scoped forms are validated after decoding. Query-scoped forms
 		// must carry both dimensions so opaque identifiers cannot cross fences.
 		if (r.Method == http.MethodDelete || r.URL.Path == "/v1/images/build" || r.URL.Path == "/v1/images/import") && (project == "" || environment == "") {

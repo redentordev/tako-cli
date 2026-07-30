@@ -1471,3 +1471,13 @@ func runDocker(ctx context.Context, args ...string) (string, error) {
 	err := cmd.Run()
 	return output.String(), err
 }
+
+func runDockerWithStdin(ctx context.Context, stdin io.Reader, args ...string) (string, error) {
+	cmd := dockerCommandContext(ctx, "docker", args...)
+	output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
+	cmd.Stdin = stdin
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err := cmd.Run()
+	return output.String(), err
+}

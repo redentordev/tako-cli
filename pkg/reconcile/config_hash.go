@@ -98,6 +98,7 @@ type backupStorageFingerprint struct {
 	SecretAccessKeyConfigured bool   `json:"secretAccessKeyConfigured,omitempty"`
 	SessionTokenConfigured    bool   `json:"sessionTokenConfigured,omitempty"`
 	ForcePathStyle            bool   `json:"forcePathStyle,omitempty"`
+	Versioned                 bool   `json:"versioned,omitempty"`
 }
 
 func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
@@ -214,6 +215,7 @@ func cloneBackupStorageFingerprint(storage *config.BackupStorageConfig) *backupS
 		SecretAccessKeyConfigured: strings.TrimSpace(storage.SecretAccessKey) != "",
 		SessionTokenConfigured:    strings.TrimSpace(storage.SessionToken) != "",
 		ForcePathStyle:            storage.ForcePathStyle,
+		Versioned:                 storage.Versioned,
 	}
 }
 

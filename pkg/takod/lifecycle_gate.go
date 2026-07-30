@@ -25,7 +25,7 @@ func (s *Server) registeredRoutes() []takodRoute {
 		{"/v1/remove-service", s.handleRemoveService}, {"/v1/proxy-file", s.handleProxyFile}, {"/v1/proxy", s.handleProxy},
 		{"/v1/certs", s.handleProxyCertificates}, {"/v1/acme-dns", s.handleProxyACMEDNS}, {"/v1/ports/allocate", s.handlePortAllocate},
 		{"/v1/cleanup", s.handleCleanup}, {"/v1/state", s.handleState}, {"/v1/lease", s.handleLease}, {"/v1/fence", s.handleFence}, {"/v1/env-bundle", s.handleEnvBundle},
-		{"/v1/backups", s.handleBackups}, {"/v1/backups/restore", s.handleBackupRestore}, {"/v1/backups/cleanup", s.handleBackupCleanup},
+		{"/v1/backups", s.handleBackups}, {"/v1/backups/restore", s.handleBackupRestore}, {"/v1/backups/postgres/verify", s.handlePostgresBackupVerification}, {"/v1/backups/cleanup", s.handleBackupCleanup},
 		{"/v1/backup-schedule", s.handleBackupSchedule}, {"/v1/metadata", s.handleMetadata}, {"/v1/mesh/key", s.handleMeshKey},
 		{"/v1/mesh/apply", s.handleMeshApply}, {"/v1/mesh/status", s.handleMeshStatus}, {"/v1/images/exists", s.handleImageExists},
 		{"/v1/images/inspect", s.handleImageInspect}, {"/v1/images/export", s.handleImageExport}, {"/v1/images/import", s.handleImageImport},
@@ -75,6 +75,17 @@ func requestRequiresNodeLifecycleExclusion(r *http.Request) bool {
 // cordoned, draining, removed, or revoked node merely because SSH still works.
 func (s *Server) enrolledLifecycleHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if _, safe := lifecycleSafeMutationPaths[r.URL.Path]; !safe {
+				backupRestoreBarrierMu.Lock()
+				defer backupRestoreBarrierMu.Unlock()
+				if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
+					http.Error(w, err.Error(), http.StatusConflict)
+					return
+				}
+				r = r.WithContext(context.WithValue(r.Context(), backupRestoreBarrierContextKey{}, true))
+			}
+		}
 		if s == nil || s.installation == nil {
 			next.ServeHTTP(w, r)
 			return

@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -27,6 +30,7 @@ var (
 	backupDelete  string
 	backupCleanup int
 	backupServer  string
+	backupYes     bool
 )
 
 var backupCmd = &cobra.Command{
@@ -49,7 +53,7 @@ Examples:
   tako backup --list
 
   # Restore a node-local volume from a backup
-  tako backup --server node-a --volume data --restore 20240101-120000
+  tako backup --server node-a --volume data --restore 20240101-120000 --yes
 
   # Delete old backups across the environment mesh
   tako backup --cleanup 7  # Delete backups older than 7 days
@@ -66,6 +70,7 @@ func init() {
 	backupCmd.Flags().StringVar(&backupDelete, "delete", "", "Backup ID to delete")
 	backupCmd.Flags().IntVar(&backupCleanup, "cleanup", 0, "Delete backups older than N days")
 	backupCmd.Flags().StringVarP(&backupServer, "server", "s", "", "Node to run the backup operation on")
+	backupCmd.Flags().BoolVarP(&backupYes, "yes", "y", false, "Approve destructive volume restore without prompting")
 }
 
 func runBackup(cmd *cobra.Command, args []string) error {
@@ -110,6 +115,15 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		if err := ensureSingleBackupRestoreTarget(targetServerNames, backupServer); err != nil {
 			return err
 		}
+		if err := requireBackupRestoreApproval(backupRestore, backupYes); err != nil {
+			if machineOutputEnabled() {
+				reason := "volume restore overwrites all existing data; verify the backup and stop dependent services first"
+				if emitErr := emitResultDocument(newOperationConfirmationRequiredDocument(reason, "backup.restore", cfg.Project.Name, envName, targetServerNames)); emitErr != nil {
+					return emitErr
+				}
+			}
+			return err
+		}
 	}
 	if backupDelete != "" && backupVolume == "" {
 		return fmt.Errorf("--volume is required for delete")
@@ -147,6 +161,13 @@ func runBackup(cmd *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("specify --volume, --all, --list, --restore, --delete, or --cleanup")
 	}
+}
+
+func requireBackupRestoreApproval(backupID string, approved bool) error {
+	if strings.TrimSpace(backupID) == "" || approved {
+		return nil
+	}
+	return &engine.ConfirmationRequiredError{Reason: "volume restore overwrites all existing data; verify the backup and stop dependent services first"}
 }
 
 func ensureSingleBackupRestoreTarget(targetServerNames []string, requestedServer string) error {
@@ -224,12 +245,14 @@ func restoreBackup(client any, cfg *config.Config, envName string, volumeName st
 	fmt.Fprintf(humanOut(), "⚠️  WARNING: This will overwrite all data in the volume!\n\n")
 
 	var response map[string]bool
+	request := backupRequest(cfg, envName, volumeName, backupID, 0)
+	request.Approved = true
 	err := takodBackupRequestJSON(
 		client,
 		cfg,
 		"POST",
 		"/v1/backups/restore",
-		backupRequest(cfg, envName, volumeName, backupID, 0),
+		request,
 		&response,
 	)
 	if err != nil {
@@ -777,6 +800,7 @@ func takodBackupStorageFromConfig(storage *config.BackupStorageConfig) *takod.Ba
 		SecretAccessKey: storage.SecretAccessKey,
 		SessionToken:    storage.SessionToken,
 		ForcePathStyle:  storage.ForcePathStyle,
+		Versioned:       storage.Versioned,
 	}
 }
 
@@ -797,7 +821,13 @@ func isBackupArchiveVolumeName(value string) bool {
 }
 
 func newBackupID() string {
-	return time.Now().UTC().Format("20060102-150405")
+	now := time.Now().UTC()
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err == nil {
+		return now.Format("20060102-150405") + "-" + hex.EncodeToString(random)
+	}
+	fallback := sha256.Sum256([]byte(fmt.Sprintf("%d", now.UnixNano())))
+	return now.Format("20060102-150405") + "-" + hex.EncodeToString(fallback[:16])
 }
 
 func backupOperationTitle(operation string) string {

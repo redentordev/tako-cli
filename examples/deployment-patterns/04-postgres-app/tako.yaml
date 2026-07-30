@@ -35,6 +35,8 @@ environments:
         volumes:
           - postgres_data:/var/lib/postgresql/data
         backup:
+          # This archives the live volume. Keep a separate pg_dump job for a
+          # transactionally consistent PostgreSQL recovery artifact.
           schedule: "0 2 * * *"
           retain: 14
         env:

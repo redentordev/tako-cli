@@ -29,6 +29,32 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "loadBalancer", "properties", "strategy"), []string{"round_robin", "sticky"})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "backup", "properties", "storage", "properties", "provider"), []string{config.BackupStorageProviderS3, config.BackupStorageProviderR2, config.BackupStorageProviderS3Compatible})
 	serviceProperties := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties")
+	backupSchema := schemaPath(t, serviceProperties, "backup")
+	backupBranches, ok := backupSchema["oneOf"].([]any)
+	if !ok || len(backupBranches) != 2 {
+		t.Fatalf("backup schema must distinguish scheduled and storage-only configurations: %#v", backupSchema)
+	}
+	storageOnlyExclusions, ok := schemaPath(t, backupBranches[1], "not")["anyOf"].([]any)
+	if !ok || len(storageOnlyExclusions) != 3 {
+		t.Fatalf("storage-only backup schema must exclude schedule, retain, and volumes: %#v", backupBranches[1])
+	}
+	storageSchema := schemaPath(t, backupSchema, "properties", "storage")
+	assertRequiredContains(t, storageSchema, []string{"bucket", "accessKeyId", "secretAccessKey"})
+	if branches, ok := storageSchema["oneOf"].([]any); !ok || len(branches) != 4 {
+		t.Fatalf("backup storage schema must encode provider-specific endpoint and region requirements: %#v", storageSchema)
+	}
+	storageProperties := schemaPath(t, storageSchema, "properties")
+	endpointPattern := regexp.MustCompile(schemaPath(t, storageProperties, "endpoint")["pattern"].(string))
+	for _, endpoint := range []string{"https://s3.example.test", "http://localhost:9000/path", "${BACKUP_ENDPOINT}"} {
+		if !endpointPattern.MatchString(endpoint) {
+			t.Fatalf("backup endpoint schema rejects %q", endpoint)
+		}
+	}
+	for _, endpoint := range []string{"", "https://:", "ftp://store.example", "https://user:secret@store.example", "https://store.example?token=x", "https://store.example/#fragment"} {
+		if endpointPattern.MatchString(endpoint) {
+			t.Fatalf("backup endpoint schema accepts %q", endpoint)
+		}
+	}
 	sharedBuildProperties := schemaPath(t, schema, "properties", "builds", "additionalProperties", "properties")
 	for _, field := range []string{"context", "args", "target", "dockerfile"} {
 		schemaPath(t, sharedBuildProperties, field)
@@ -200,6 +226,24 @@ func assertRequiredDoesNotContain(t *testing.T, schema map[string]any, names []s
 	for _, name := range names {
 		if required[name] {
 			t.Fatalf("schema required contains %q, but runtime internals must be optional", name)
+		}
+	}
+}
+
+func assertRequiredContains(t *testing.T, schema map[string]any, names []string) {
+	t.Helper()
+	requiredRaw, ok := schema["required"].([]any)
+	if !ok {
+		t.Fatalf("schema missing required list: %#v", schema["required"])
+	}
+	required := make(map[string]bool, len(requiredRaw))
+	for _, value := range requiredRaw {
+		name, _ := value.(string)
+		required[name] = true
+	}
+	for _, name := range names {
+		if !required[name] {
+			t.Fatalf("schema required does not contain %q", name)
 		}
 	}
 }

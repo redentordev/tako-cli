@@ -1,0 +1,95 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-backup-verify-postgres - Verify a remote pg_dump artifact in an isolated PostgreSQL instance
+
+
+.SH SYNOPSIS
+\fBtako backup verify-postgres [flags]\fP
+
+
+.SH DESCRIPTION
+Verify a remote pg_dump artifact in an isolated PostgreSQL instance
+
+
+.SH OPTIONS
+\fB--artifact-id\fP=""
+	Immutable artifact identifier
+
+.PP
+\fB--database\fP="postgres"
+	Scratch database name
+
+.PP
+\fB--expected\fP=""
+	Exact trimmed scalar query result
+
+.PP
+\fB-h\fP, \fB--help\fP[=false]
+	help for verify-postgres
+
+.PP
+\fB--object-key\fP=""
+	Exact S3-compatible object key
+
+.PP
+\fB--postgres-image\fP=""
+	Digest-pinned PostgreSQL image used for isolated restore
+
+.PP
+\fB--query\fP=""
+	Read-only scalar verification query
+
+.PP
+\fB--scratch-size\fP=0
+	Reserved scratch storage budget in bytes
+
+.PP
+\fB-s\fP, \fB--server\fP=""
+	Node that will run the isolated verification
+
+.PP
+\fB--service\fP=""
+	Service whose backup storage configuration should be used
+
+.PP
+\fB--sha256\fP=""
+	Expected lowercase SHA-256 digest
+
+.PP
+\fB--size\fP=0
+	Exact artifact size in bytes
+
+.PP
+\fB--username\fP="postgres"
+	Scratch database username
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-backup(1)\fP

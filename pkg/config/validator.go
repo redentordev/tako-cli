@@ -1166,7 +1166,10 @@ func validateContainerLabels(serviceName string, labels map[string]string) error
 
 func validateBackupConfig(name string, service *ServiceConfig) error {
 	if service.Backup.Schedule == "" {
-		return fmt.Errorf("service %s: backup schedule is required", name)
+		if service.Backup.Storage == nil || service.Backup.Retain != 0 || len(service.Backup.Volumes) > 0 {
+			return fmt.Errorf("service %s: backup schedule is required unless backup contains only storage for external artifact verification", name)
+		}
+		return validateBackupStorageConfig(name, service.Backup.Storage)
 	}
 	if err := validateBackupSchedule(service.Backup.Schedule); err != nil {
 		return fmt.Errorf("service %s: invalid backup schedule: %w", name, err)
@@ -1396,6 +1399,9 @@ func validateBackupStorageConfig(name string, storage *BackupStorageConfig) erro
 	if storage.Provider != BackupStorageProviderS3 && storage.Endpoint == "" {
 		return fmt.Errorf("service %s: backup.storage.endpoint is required for %s", name, storage.Provider)
 	}
+	if storage.Provider == BackupStorageProviderR2 && storage.Versioned {
+		return fmt.Errorf("service %s: backup.storage.versioned is not supported by R2", name)
+	}
 	if storage.Endpoint != "" {
 		parsed, err := url.Parse(storage.Endpoint)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -1403,6 +1409,12 @@ func validateBackupStorageConfig(name string, storage *BackupStorageConfig) erro
 		}
 		if parsed.Scheme != "https" && parsed.Scheme != "http" {
 			return fmt.Errorf("service %s: backup.storage.endpoint must use http or https", name)
+		}
+		if parsed.User != nil {
+			return fmt.Errorf("service %s: backup.storage.endpoint must not include credentials", name)
+		}
+		if parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("service %s: backup.storage.endpoint must not include query or fragment", name)
 		}
 	}
 	storage.Prefix = cleanBackupStoragePrefix(storage.Prefix)

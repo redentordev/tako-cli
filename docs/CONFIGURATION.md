@@ -1254,9 +1254,65 @@ environments:
             region: auto
             endpoint: ${TAKO_BACKUP_ENDPOINT}
             prefix: postgres
+            versioned: false # true only when bucket version APIs are enabled
             accessKeyId: ${TAKO_BACKUP_ACCESS_KEY_ID}
             secretAccessKey: ${TAKO_BACKUP_SECRET_ACCESS_KEY}
 ```
+
+Native volume backups are live filesystem archives. They are useful for files
+and application-managed snapshots, but they are not a transactionally
+consistent PostgreSQL backup. Keep PostgreSQL backups as an explicit generic
+job that runs `pg_dump --format=custom` and uploads the resulting object. Tako
+does not inspect that job's command or reserve a job name.
+
+Each new native archive is published atomically with a collision-resistant
+artifact ID, exact size, and SHA-256 manifest. A remote copy is marked verified
+only after Tako reads the uploaded object back and matches its size and digest.
+For versioned buckets, set `backup.storage.versioned: true`. Tako then records
+and deletes exact object version IDs, and storage credentials need version-list
+and version-delete permissions plus bucket-versioning status access in addition
+to object read/write permissions.
+Leave it false for R2 and unversioned S3-compatible stores so retention uses the
+widely supported object-list API.
+Legacy node-local archives remain listable and restorable, while new manifests
+are checked before destructive extraction. Production volume restore requires
+explicit approval with `tako backup ... --restore <id> --yes`.
+
+Use the exact key, byte count, and lowercase SHA-256 emitted by your custom dump
+job to perform a non-destructive remote restore proof:
+
+```bash
+tako backup verify-postgres \
+  --server production \
+  --service postgres \
+  --artifact-id pgdump-20260729T020000Z \
+  --object-key postgres/dumps/pgdump-20260729T020000Z.dump \
+  --size 184320 \
+  --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --scratch-size 1073741824 \
+  --postgres-image postgres:16-alpine@sha256:<64-lowercase-hex-digest> \
+  --database app \
+  --query "SELECT count(*) FROM schema_migrations" \
+  --expected 42
+```
+
+The selected service supplies `backup.storage`; credentials should continue to
+use `${ENV_VAR}` references. The target agent downloads exactly the named
+object, verifies size and SHA-256 before Docker mutation, starts a hardened
+PostgreSQL container with quota-bounded scratch storage and `--network none`, restores with
+`pg_restore --exit-on-error --no-tablespaces`, and runs the query as a temporary
+read-only role. The digest-pinned verifier image must provide PostgreSQL 14 or
+newer. Only one verification runs at a time, and takod reserves the requested
+scratch bytes against its disk-admission budget before downloading. It stores
+only artifact and query hashes in the durable verification record, then removes
+the container, volume, and downloaded dump on success or failure. The verifier
+never accepts a production volume name.
+
+The target takod must run with a non-zero `--minimum-free-disk-bytes`. The
+agent reserves disk for the artifact and applies `--scratch-size` as the hard
+size of a dedicated tmpfs mounted directly at `PGDATA`. The scratch request plus
+512MiB of PostgreSQL overhead must fit in currently available host memory after
+preserving takod's `--reserved-memory-bytes` budget (512MiB by default).
 
 ## Docker Build Cache Pruning
 

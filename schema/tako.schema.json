@@ -651,9 +651,19 @@
                 },
                 "backup": {
                   "type": "object",
-                  "description": "Optional takod-managed periodic backups for named service volumes. Backups are created node-locally and can also be uploaded to S3-compatible object storage.",
-                  "required": [
-                    "schedule"
+                  "description": "Optional takod-managed periodic backups for named service volumes, or storage-only configuration for verifying external database-native artifacts.",
+                  "oneOf": [
+                    { "required": ["schedule"] },
+                    {
+                      "required": ["storage"],
+                      "not": {
+                        "anyOf": [
+                          { "required": ["schedule"] },
+                          { "required": ["retain"] },
+                          { "required": ["volumes"] }
+                        ]
+                      }
+                    }
                   ],
                   "properties": {
                     "schedule": {
@@ -677,6 +687,14 @@
                     "storage": {
                       "type": "object",
                       "description": "Optional S3-compatible object storage target for off-node backup copies",
+                      "additionalProperties": false,
+                      "required": ["bucket", "accessKeyId", "secretAccessKey"],
+                      "oneOf": [
+                        { "required": ["region"], "not": { "required": ["provider"] } },
+                        { "properties": { "provider": { "const": "s3" } }, "required": ["provider", "region"] },
+                        { "properties": { "provider": { "const": "r2" } }, "required": ["provider", "endpoint"] },
+                        { "properties": { "provider": { "const": "s3-compatible" } }, "required": ["provider", "region", "endpoint"] }
+                      ],
                       "properties": {
                         "provider": {
                           "type": "string",
@@ -688,14 +706,20 @@
                           "default": "s3"
                         },
                         "bucket": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[^/\\s\\u0000-\\u001F\\u007F]+$"
                         },
                         "region": {
                           "type": "string",
+                          "minLength": 1,
+                          "pattern": "\\S",
                           "description": "AWS region or auto for Cloudflare R2"
                         },
                         "endpoint": {
                           "type": "string",
+                          "minLength": 1,
+                          "pattern": "^(https?://(?:\\[[0-9A-Fa-f:]+\\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::[0-9]{1,5})?(?:/[^?#\\s]*)?|\\$\\{[A-Z_][A-Z0-9_]*\\})$",
                           "description": "Required for r2 and s3-compatible providers"
                         },
                         "prefix": {
@@ -704,10 +728,14 @@
                         },
                         "accessKeyId": {
                           "type": "string",
+                          "minLength": 1,
+                          "pattern": "\\S",
                           "description": "Use an environment variable such as ${TAKO_BACKUP_ACCESS_KEY_ID}"
                         },
                         "secretAccessKey": {
                           "type": "string",
+                          "minLength": 1,
+                          "pattern": "\\S",
                           "description": "Use an environment variable such as ${TAKO_BACKUP_SECRET_ACCESS_KEY}"
                         },
                         "sessionToken": {
@@ -716,6 +744,10 @@
                         "forcePathStyle": {
                           "type": "boolean",
                           "description": "Enable for MinIO and some S3-compatible stores"
+                        },
+                        "versioned": {
+                          "type": "boolean",
+                          "description": "Use object-version listing and exact version deletion for retention"
                         }
                       }
                     }

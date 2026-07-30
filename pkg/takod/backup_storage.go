@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 )
 
 const (
@@ -30,7 +32,10 @@ type BackupObject struct {
 	Environment string
 	Volume      string
 	BackupID    string
+	ArtifactID  string
 	Path        string
+	Size        int64
+	SHA256      string
 	CreatedAt   time.Time
 }
 
@@ -47,9 +52,13 @@ type BackupObjectInfo struct {
 }
 
 var (
-	uploadBackupObjectS3With = uploadBackupObjectS3
-	cleanupBackupObjectsWith = cleanupBackupObjectsS3
-	downloadBackupObjectWith = downloadBackupObjectS3
+	uploadBackupObjectS3With         = uploadBackupObjectS3
+	cleanupBackupObjectsWith         = cleanupBackupObjectsS3
+	downloadBackupObjectWith         = downloadBackupObjectS3
+	downloadBackupObjectVerifiedWith = downloadBackupObjectVerifiedS3
+	hashBackupObjectExactWith        = HashBackupObjectExact
+	deleteBackupObjectWith           = deleteBackupObjectS3
+	deleteBackupObjectVersionWith    = deleteBackupObjectVersionS3
 )
 
 // DownloadBackupObjectExact refuses an object whose declared or streamed size
@@ -71,6 +80,31 @@ func DownloadBackupObjectExact(ctx context.Context, storage BackupStorageConfig,
 		return fmt.Errorf("backup download expected size is invalid")
 	}
 	return downloadBackupObjectWith(ctx, storage, key, destination, expectedSize)
+}
+
+// DownloadBackupObjectVerified writes only an exact-size object whose SHA-256
+// matches independently supplied artifact evidence. A failed download or
+// digest check leaves no destination file behind.
+func DownloadBackupObjectVerified(ctx context.Context, storage BackupStorageConfig, key, destination string, expectedSize int64, expectedSHA256 string) error {
+	storage = normalizeBackupStorage(storage)
+	if err := ValidateBackupStorage(storage); err != nil {
+		return err
+	}
+	key = strings.TrimSpace(key)
+	expectedSHA256 = strings.TrimSpace(expectedSHA256)
+	if key == "" || strings.HasPrefix(key, "/") || strings.Contains(key, "..") || hasControlChars(key) {
+		return fmt.Errorf("backup object key is invalid")
+	}
+	if strings.TrimSpace(destination) == "" || expectedSize <= 0 {
+		return fmt.Errorf("backup download destination or expected size is invalid")
+	}
+	if len(expectedSHA256) != sha256.Size*2 {
+		return fmt.Errorf("backup artifact SHA-256 is invalid")
+	}
+	if _, err := hex.DecodeString(expectedSHA256); err != nil || expectedSHA256 != strings.ToLower(expectedSHA256) {
+		return fmt.Errorf("backup artifact SHA-256 is invalid")
+	}
+	return downloadBackupObjectVerifiedWith(ctx, storage, key, destination, expectedSize, expectedSHA256)
 }
 
 func InspectBackupObject(ctx context.Context, storage BackupStorageConfig, key string) (*BackupObjectInfo, error) {
@@ -139,6 +173,9 @@ func UploadBackupObject(ctx context.Context, storage BackupStorageConfig, object
 	if err := ValidateBackupStorage(storage); err != nil {
 		return nil, err
 	}
+	if object.ArtifactID == "" {
+		object.ArtifactID = object.BackupID
+	}
 	if err := validateBackupObject(object); err != nil {
 		return nil, err
 	}
@@ -165,6 +202,28 @@ func CleanupBackupObjects(ctx context.Context, storage BackupStorageConfig, rete
 	return cleanupBackupObjectsWith(ctx, storage, retention)
 }
 
+func DeleteBackupObject(ctx context.Context, storage BackupStorageConfig, key string) error {
+	return DeleteBackupObjectVersion(ctx, storage, key, "")
+}
+
+func DeleteBackupObjectVersion(ctx context.Context, storage BackupStorageConfig, key, versionID string) error {
+	storage = normalizeBackupStorage(storage)
+	if err := ValidateBackupStorage(storage); err != nil {
+		return err
+	}
+	if err := validateBackupObjectKey(key); err != nil {
+		return err
+	}
+	versionID = strings.TrimSpace(versionID)
+	if hasControlChars(versionID) {
+		return fmt.Errorf("backup object version ID is invalid")
+	}
+	if versionID == "" {
+		return deleteBackupObjectWith(ctx, storage, key)
+	}
+	return deleteBackupObjectVersionWith(ctx, storage, key, versionID)
+}
+
 func ValidateBackupStorage(storage BackupStorageConfig) error {
 	storage = normalizeBackupStorage(storage)
 	switch storage.Provider {
@@ -184,6 +243,9 @@ func ValidateBackupStorage(storage BackupStorageConfig) error {
 	if storage.Provider != BackupStorageProviderS3 && storage.Endpoint == "" {
 		return fmt.Errorf("backup storage endpoint is required for %s", storage.Provider)
 	}
+	if storage.Provider == BackupStorageProviderR2 && storage.Versioned {
+		return fmt.Errorf("R2 backup storage does not support versioned retention")
+	}
 	if storage.Endpoint != "" {
 		parsed, err := url.Parse(storage.Endpoint)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -191,6 +253,9 @@ func ValidateBackupStorage(storage BackupStorageConfig) error {
 		}
 		if parsed.Scheme != "https" && parsed.Scheme != "http" {
 			return fmt.Errorf("backup storage endpoint must use http or https")
+		}
+		if parsed.User != nil {
+			return fmt.Errorf("backup storage endpoint must not include credentials")
 		}
 		if parsed.RawQuery != "" || parsed.Fragment != "" {
 			return fmt.Errorf("backup storage endpoint must not include query or fragment")
@@ -214,6 +279,14 @@ func ValidateBackupStorage(storage BackupStorageConfig) error {
 	}
 	if strings.Contains(storage.Prefix, "..") {
 		return fmt.Errorf("backup storage prefix must not contain '..'")
+	}
+	return nil
+}
+
+func validateBackupObjectKey(key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" || strings.HasPrefix(key, "/") || strings.Contains(key, "..") || hasControlChars(key) {
+		return fmt.Errorf("backup object key is invalid")
 	}
 	return nil
 }
@@ -252,6 +325,13 @@ func validateBackupObject(object BackupObject) error {
 	if strings.TrimSpace(object.Path) == "" {
 		return fmt.Errorf("backup object path is required")
 	}
+	validArtifactID := isSafeBackupID(object.ArtifactID) || isSafeBackupArtifactID(object.ArtifactID)
+	if !validArtifactID || object.Size <= 0 || len(object.SHA256) != sha256.Size*2 {
+		return fmt.Errorf("backup object artifact evidence is invalid")
+	}
+	if _, err := hex.DecodeString(object.SHA256); err != nil || object.SHA256 != strings.ToLower(object.SHA256) {
+		return fmt.Errorf("backup object artifact evidence is invalid")
+	}
 	return nil
 }
 
@@ -271,30 +351,43 @@ func uploadBackupObjectS3(ctx context.Context, storage BackupStorageConfig, obje
 	if strings.HasSuffix(object.Path, ".tako-recovery") {
 		contentType = "application/octet-stream"
 	}
-	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+	output, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(storage.Bucket),
 		Key:         aws.String(key),
 		Body:        file,
+		IfNoneMatch: aws.String("*"),
 		ContentType: aws.String(contentType),
 		Metadata: map[string]string{
 			"tako-project":     object.Project,
 			"tako-environment": object.Environment,
 			"tako-volume":      object.Volume,
 			"tako-backup-id":   object.BackupID,
+			"tako-artifact-id": object.ArtifactID,
+			"tako-size":        fmt.Sprintf("%d", object.Size),
+			"tako-sha256":      object.SHA256,
 		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload backup to object storage: %w", err)
 	}
 	return &BackupRemoteInfo{
-		Provider: storage.Provider,
-		Bucket:   storage.Bucket,
-		Key:      key,
-		Endpoint: storage.Endpoint,
+		Provider:  storage.Provider,
+		Bucket:    storage.Bucket,
+		Key:       key,
+		VersionID: aws.ToString(output.VersionId),
+		Endpoint:  storage.Endpoint,
 	}, nil
 }
 
 func downloadBackupObjectS3(ctx context.Context, storage BackupStorageConfig, key, destination string, expectedSize int64) error {
+	return downloadBackupObjectS3ToFile(ctx, storage, key, destination, expectedSize, "")
+}
+
+func downloadBackupObjectVerifiedS3(ctx context.Context, storage BackupStorageConfig, key, destination string, expectedSize int64, expectedSHA256 string) error {
+	return downloadBackupObjectS3ToFile(ctx, storage, key, destination, expectedSize, expectedSHA256)
+}
+
+func downloadBackupObjectS3ToFile(ctx context.Context, storage BackupStorageConfig, key, destination string, expectedSize int64, expectedSHA256 string) error {
 	client, err := backupS3Client(ctx, storage)
 	if err != nil {
 		return err
@@ -318,16 +411,20 @@ func downloadBackupObjectS3(ctx context.Context, storage BackupStorageConfig, ke
 			_ = os.Remove(destination)
 		}
 	}()
+	hash := sha256.New()
 	reader := io.Reader(response.Body)
 	if expectedSize > 0 {
 		reader = io.LimitReader(response.Body, expectedSize+1)
 	}
-	written, err := io.Copy(file, reader)
+	written, err := io.Copy(io.MultiWriter(file, hash), reader)
 	if err != nil {
 		return fmt.Errorf("download backup object body: %w", err)
 	}
 	if expectedSize > 0 && written != expectedSize {
 		return fmt.Errorf("downloaded backup object body size does not match expected upload")
+	}
+	if expectedSHA256 != "" && hex.EncodeToString(hash.Sum(nil)) != expectedSHA256 {
+		return fmt.Errorf("downloaded backup object SHA-256 does not match artifact evidence")
 	}
 	if err := file.Sync(); err != nil {
 		return err
@@ -346,26 +443,65 @@ func cleanupBackupObjectsS3(ctx context.Context, storage BackupStorageConfig, re
 	}
 	prefix := backupObjectRetentionPrefix(storage.Prefix, retention)
 	cutoff := time.Now().UTC().AddDate(0, 0, -retention.RetentionDays)
-	var continuation *string
+	if storage.Provider == BackupStorageProviderS3 || storage.Provider == BackupStorageProviderS3Compatible {
+		versioning, err := client.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: aws.String(storage.Bucket)})
+		if err != nil {
+			if storage.Provider == BackupStorageProviderS3 || storage.Versioned || !isVersioningAPIUnsupported(err) {
+				return fmt.Errorf("verify backup bucket versioning mode: %w", err)
+			}
+		} else {
+			actualVersioned := bucketVersioningHasHistory(versioning.Status)
+			if actualVersioned != storage.Versioned {
+				return fmt.Errorf("backup storage versioned setting does not match bucket versioning mode")
+			}
+		}
+	}
+	if !storage.Versioned {
+		var continuation *string
+		for {
+			response, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+				Bucket: aws.String(storage.Bucket), Prefix: aws.String(prefix), ContinuationToken: continuation,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to list object backups: %w", err)
+			}
+			var expired []types.ObjectIdentifier
+			for _, object := range response.Contents {
+				if object.Key != nil && object.LastModified != nil && !object.LastModified.UTC().After(cutoff) {
+					expired = append(expired, types.ObjectIdentifier{Key: object.Key})
+				}
+			}
+			if err := deleteBackupObjectBatch(ctx, client, storage.Bucket, expired); err != nil {
+				return err
+			}
+			if response.IsTruncated == nil || !*response.IsTruncated {
+				return nil
+			}
+			continuation = response.NextContinuationToken
+		}
+	}
+	var keyMarker, versionMarker *string
 	for {
-		response, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-			Bucket:            aws.String(storage.Bucket),
-			Prefix:            aws.String(prefix),
-			ContinuationToken: continuation,
+		response, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+			Bucket: aws.String(storage.Bucket), Prefix: aws.String(prefix),
+			KeyMarker: keyMarker, VersionIdMarker: versionMarker,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to list object backups: %w", err)
 		}
 
 		var expired []types.ObjectIdentifier
-		for _, object := range response.Contents {
-			if object.Key == nil || object.LastModified == nil {
+		for _, object := range response.Versions {
+			if object.Key == nil || object.LastModified == nil || object.LastModified.UTC().After(cutoff) {
 				continue
 			}
-			if object.LastModified.UTC().After(cutoff) {
+			expired = append(expired, types.ObjectIdentifier{Key: object.Key, VersionId: object.VersionId})
+		}
+		for _, marker := range response.DeleteMarkers {
+			if marker.Key == nil || marker.LastModified == nil || marker.LastModified.UTC().After(cutoff) {
 				continue
 			}
-			expired = append(expired, types.ObjectIdentifier{Key: object.Key})
+			expired = append(expired, types.ObjectIdentifier{Key: marker.Key, VersionId: marker.VersionId})
 		}
 		if err := deleteBackupObjectBatch(ctx, client, storage.Bucket, expired); err != nil {
 			return err
@@ -373,8 +509,44 @@ func cleanupBackupObjectsS3(ctx context.Context, storage BackupStorageConfig, re
 		if response.IsTruncated == nil || !*response.IsTruncated {
 			return nil
 		}
-		continuation = response.NextContinuationToken
+		keyMarker, versionMarker = response.NextKeyMarker, response.NextVersionIdMarker
 	}
+}
+
+func bucketVersioningHasHistory(status types.BucketVersioningStatus) bool {
+	return status == types.BucketVersioningStatusEnabled || status == types.BucketVersioningStatusSuspended
+}
+
+func isVersioningAPIUnsupported(err error) bool {
+	var apiError smithy.APIError
+	if !errors.As(err, &apiError) {
+		return false
+	}
+	switch strings.ToLower(apiError.ErrorCode()) {
+	case "notimplemented", "not_implemented", "unsupported", "unsupportedoperation", "methodnotallowed":
+		return true
+	default:
+		return false
+	}
+}
+
+func deleteBackupObjectS3(ctx context.Context, storage BackupStorageConfig, key string) error {
+	return deleteBackupObjectVersionS3(ctx, storage, key, "")
+}
+
+func deleteBackupObjectVersionS3(ctx context.Context, storage BackupStorageConfig, key, versionID string) error {
+	client, err := backupS3Client(ctx, storage)
+	if err != nil {
+		return err
+	}
+	input := &s3.DeleteObjectInput{Bucket: aws.String(storage.Bucket), Key: aws.String(key)}
+	if versionID != "" {
+		input.VersionId = aws.String(versionID)
+	}
+	if _, err := client.DeleteObject(ctx, input); err != nil {
+		return fmt.Errorf("failed to delete backup object: %w", err)
+	}
+	return nil
 }
 
 func deleteBackupObjectBatch(ctx context.Context, client *s3.Client, bucket string, objects []types.ObjectIdentifier) error {
@@ -385,7 +557,7 @@ func deleteBackupObjectBatch(ctx context.Context, client *s3.Client, bucket stri
 		}
 		batch := objects[:batchSize]
 		objects = objects[batchSize:]
-		_, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		response, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 			Bucket: aws.String(bucket),
 			Delete: &types.Delete{
 				Objects: batch,
@@ -394,6 +566,13 @@ func deleteBackupObjectBatch(ctx context.Context, client *s3.Client, bucket stri
 		})
 		if err != nil {
 			return fmt.Errorf("failed to delete old object backups: %w", err)
+		}
+		if response == nil {
+			return fmt.Errorf("failed to delete old object backups: empty object-store response")
+		}
+		if len(response.Errors) > 0 {
+			first := response.Errors[0]
+			return fmt.Errorf("failed to delete %d old object backup(s): %s", len(response.Errors), aws.ToString(first.Code))
 		}
 	}
 	return nil
@@ -417,12 +596,16 @@ func backupS3Client(ctx context.Context, storage BackupStorageConfig) (*s3.Clien
 }
 
 func backupObjectKey(prefix string, object BackupObject) string {
+	filename := backupFileName(object.Volume, object.BackupID)
+	if object.ArtifactID != "" && object.ArtifactID != object.BackupID {
+		filename = object.Volume + "_" + object.BackupID + "_" + object.ArtifactID + ".tar.gz"
+	}
 	parts := []string{
 		cleanObjectKeyPrefix(prefix),
 		object.Project,
 		object.Environment,
 		object.Volume,
-		backupFileName(object.Volume, object.BackupID),
+		filename,
 	}
 	return joinObjectKey(parts...)
 }

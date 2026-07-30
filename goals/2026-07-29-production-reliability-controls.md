@@ -78,6 +78,11 @@ Acceptance: a custom dump job remains valid, corrupt/missing remote artifacts
 fail closed, and an isolated PostgreSQL dump/restore round trip proves row-level
 data without touching the production volume.
 
+Evidence: implementation complete. Full build/tests, affected-package race
+tests, Linux/Windows builds, generated manuals, real digest-pinned PostgreSQL
+row-level restore plus hard scratch-quota overflow proof, exact S3 HTTP boundary
+tests, crash-recovery tests, and two independent reviews passed.
+
 ## Milestone 4: Managed Volume Ownership
 
 - Add creation-only UID/GID initialization for explicitly declared,
