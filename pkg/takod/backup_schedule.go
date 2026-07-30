@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +16,12 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
-const backupScheduleDirName = "backup-schedules"
+const (
+	backupScheduleDirName    = "backup-schedules"
+	backupRunsDirName        = "backup-runs"
+	maxBackupRunRecords      = 50
+	maxBackupScheduleVolumes = 256
+)
 
 type BackupScheduleRequest struct {
 	Project       string                 `json:"project"`
@@ -41,14 +47,31 @@ type BackupScheduleResponse struct {
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
+type BackupRunRecord struct {
+	ID          string    `json:"id"`
+	Project     string    `json:"project"`
+	Environment string    `json:"environment"`
+	Service     string    `json:"service"`
+	BackupID    string    `json:"backupId,omitempty"`
+	Containers  []string  `json:"containers,omitempty"`
+	StartedAt   time.Time `json:"startedAt"`
+	FinishedAt  time.Time `json:"finishedAt"`
+	Status      string    `json:"status"`
+}
+
 type BackupScheduler struct {
-	dataDir string
-	parser  cron.Parser
-	cron    *cron.Cron
-	admit   func(...string) error
+	dataDir            string
+	parser             cron.Parser
+	cron               *cron.Cron
+	admit              func(...string) error
+	alerts             *AlertManager
+	createBackup       func(context.Context, BackupRequest) (*BackupInfo, error)
+	cleanupBackups     func(context.Context, BackupRequest) (*BackupCleanupResponse, error)
+	recoverInterrupted func(context.Context, BackupRunRecord) error
 
 	mu             sync.Mutex
 	entries        map[string]cron.EntryID
+	schedules      map[string]BackupScheduleRequest
 	generations    map[string]uint64
 	nextGeneration uint64
 	running        map[string]bool
@@ -56,21 +79,31 @@ type BackupScheduler struct {
 	recoverable    map[string]bool
 	mutating       map[string]int
 	runningChanged chan struct{}
+	runContext     context.Context
+	runsMu         sync.Mutex
+	ready          chan struct{}
+	readyOnce      sync.Once
+	startupErr     error
 }
 
 func NewBackupScheduler(dataDir string) *BackupScheduler {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	return &BackupScheduler{
-		dataDir:        dataDir,
-		parser:         parser,
-		cron:           cron.New(cron.WithParser(parser), cron.WithChain(cron.Recover(cron.DefaultLogger))),
-		entries:        map[string]cron.EntryID{},
-		generations:    map[string]uint64{},
-		running:        map[string]bool{},
-		draining:       map[string]bool{},
-		recoverable:    map[string]bool{},
-		mutating:       map[string]int{},
-		runningChanged: make(chan struct{}),
+		dataDir:            dataDir,
+		parser:             parser,
+		cron:               cron.New(cron.WithParser(parser), cron.WithChain(cron.Recover(cron.DefaultLogger))),
+		createBackup:       CreateVolumeBackup,
+		cleanupBackups:     CleanupOldBackups,
+		recoverInterrupted: recoverInterruptedBackupContainers,
+		entries:            map[string]cron.EntryID{},
+		schedules:          map[string]BackupScheduleRequest{},
+		generations:        map[string]uint64{},
+		running:            map[string]bool{},
+		draining:           map[string]bool{},
+		recoverable:        map[string]bool{},
+		mutating:           map[string]int{},
+		runningChanged:     make(chan struct{}),
+		ready:              make(chan struct{}),
 	}
 }
 
@@ -295,16 +328,55 @@ func (s *BackupScheduler) Run(ctx context.Context) {
 	if s == nil {
 		return
 	}
-	if err := s.loadSchedules(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "takod backup scheduler failed to load schedules: %v\n", err)
+	startupCtx, releaseBarrier, err := acquireBackupRestoreMutationBarrierContext(ctx)
+	if err != nil {
+		s.startupErr = fmt.Errorf("acquire startup restore barrier: %w", err)
+		s.readyOnce.Do(func() { close(s.ready) })
+		return
 	}
+	unlockMutation, err := recovery.AcquireMutationLockContext(startupCtx, s.dataDir)
+	if err != nil {
+		releaseBarrier()
+		s.startupErr = fmt.Errorf("acquire startup snapshot lock: %w", err)
+		s.readyOnce.Do(func() { close(s.ready) })
+		return
+	}
+	if err := s.recoverInterruptedRuns(startupCtx); err != nil {
+		unlockMutation()
+		releaseBarrier()
+		s.startupErr = fmt.Errorf("recover interrupted backups: %w", err)
+		s.readyOnce.Do(func() { close(s.ready) })
+		return
+	}
+	if err := s.loadSchedules(startupCtx); err != nil {
+		unlockMutation()
+		releaseBarrier()
+		s.startupErr = fmt.Errorf("load backup schedules: %w", err)
+		s.readyOnce.Do(func() { close(s.ready) })
+		return
+	}
+	unlockMutation()
+	releaseBarrier()
+	runContext, cancelRuns := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.runContext = runContext
+	s.mu.Unlock()
+	s.readyOnce.Do(func() { close(s.ready) })
 	s.cron.Start()
 	<-ctx.Done()
+	cancelRuns()
 	stopCtx := s.cron.Stop()
-	select {
-	case <-stopCtx.Done():
-	case <-time.After(30 * time.Second):
+	<-stopCtx.Done()
+	s.mu.Lock()
+	s.runContext = nil
+	s.mu.Unlock()
+}
+
+func (s *BackupScheduler) StartupError() error {
+	if s == nil {
+		return nil
 	}
+	return s.startupErr
 }
 
 func (s *BackupScheduler) Upsert(ctx context.Context, request BackupScheduleRequest) (*BackupScheduleResponse, error) {
@@ -330,6 +402,9 @@ func (s *BackupScheduler) Upsert(ctx context.Context, request BackupScheduleRequ
 	defer s.mu.Unlock()
 	if err := s.scheduleLocked(request); err != nil {
 		return nil, err
+	}
+	if err := s.syncAlertSubject(request); err != nil {
+		return nil, fmt.Errorf("backup alerts: %w", err)
 	}
 	return &BackupScheduleResponse{
 		Project:     request.Project,
@@ -363,14 +438,35 @@ func (s *BackupScheduler) Delete(ctx context.Context, project string, environmen
 	}
 	defer endMutation()
 	s.mu.Lock()
+	if s.running[backupScheduleKey(request)] {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("backup schedule %s cannot be removed while a backup is in progress", service)
+	}
 	if entryID, ok := s.entries[backupScheduleKey(request)]; ok {
 		s.cron.Remove(entryID)
 		delete(s.entries, backupScheduleKey(request))
 	}
 	delete(s.generations, backupScheduleKey(request))
+	delete(s.schedules, backupScheduleKey(request))
 	s.mu.Unlock()
-	if err := os.Remove(backupSchedulePath(s.dataDir, request)); err != nil && !os.IsNotExist(err) {
+	schedulePath := backupSchedulePath(s.dataDir, request)
+	runsPath := backupRunsPath(s.dataDir, project, environment, service)
+	if err := validatePathParentsNoSymlink(s.dataDir, schedulePath, "backup schedule path"); err != nil {
+		return nil, err
+	}
+	if err := validatePathParentsNoSymlink(s.dataDir, runsPath, "backup run path"); err != nil {
+		return nil, err
+	}
+	if err := os.Remove(schedulePath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to remove backup schedule: %w", err)
+	}
+	if err := os.Remove(runsPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to remove backup run history: %w", err)
+	}
+	if s.alerts != nil {
+		if err := s.alerts.RemoveSubject(project, environment, "backup", service); err != nil {
+			return nil, fmt.Errorf("failed to remove backup alert state: %w", err)
+		}
 	}
 	return &BackupScheduleResponse{
 		Project:     request.Project,
@@ -398,14 +494,25 @@ func (s *BackupScheduler) RemoveProject(project string, environment string) (int
 		prefix += environment + "/"
 	}
 	removed := 0
+	var removedSchedules []BackupScheduleRequest
 	s.mu.Lock()
+	for key, running := range s.running {
+		if running && strings.HasPrefix(key, prefix) {
+			s.mu.Unlock()
+			return 0, fmt.Errorf("cannot remove backup schedules while a backup is in progress")
+		}
+	}
 	for key, entryID := range s.entries {
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
 		s.cron.Remove(entryID)
+		if request, ok := s.schedules[key]; ok {
+			removedSchedules = append(removedSchedules, request)
+		}
 		delete(s.entries, key)
 		delete(s.generations, key)
+		delete(s.schedules, key)
 		removed++
 	}
 	s.mu.Unlock()
@@ -414,14 +521,53 @@ func (s *BackupScheduler) RemoveProject(project string, environment string) (int
 	if environment != "" {
 		path = filepath.Join(path, environment)
 	}
+	if err := validatePathParentsNoSymlink(s.dataDir, filepath.Join(path, "schedule.json"), "backup schedule path"); err != nil {
+		return removed, err
+	}
 	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
 		return removed, fmt.Errorf("failed to remove backup schedules: %w", err)
+	}
+	runsPath := filepath.Join(s.dataDir, backupRunsDirName, project)
+	if environment != "" {
+		runsPath = filepath.Join(runsPath, environment)
+	}
+	if err := validatePathParentsNoSymlink(s.dataDir, filepath.Join(runsPath, "runs.json"), "backup run path"); err != nil {
+		return removed, err
+	}
+	if err := os.RemoveAll(runsPath); err != nil && !os.IsNotExist(err) {
+		return removed, fmt.Errorf("failed to remove backup run history: %w", err)
+	}
+	if s.alerts != nil {
+		for _, request := range removedSchedules {
+			if err := s.alerts.RemoveSubject(request.Project, request.Environment, "backup", request.Service); err != nil {
+				return removed, fmt.Errorf("failed to remove backup alert state: %w", err)
+			}
+		}
 	}
 	return removed, nil
 }
 
+func (s *BackupScheduler) alertSchedules(project, environment string) []BackupScheduleRequest {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var requests []BackupScheduleRequest
+	for _, request := range s.schedules {
+		if request.Project == project && request.Environment == environment {
+			requests = append(requests, request)
+		}
+	}
+	sort.Slice(requests, func(i, j int) bool { return requests[i].Service < requests[j].Service })
+	return requests
+}
+
 func (s *BackupScheduler) loadSchedules(ctx context.Context) error {
 	root := filepath.Join(s.dataDir, backupScheduleDirName)
+	if err := validateStorageTreeNoSymlink(root, "backup schedule storage"); err != nil {
+		return err
+	}
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return nil
 	}
@@ -431,6 +577,9 @@ func (s *BackupScheduler) loadSchedules(ctx context.Context) error {
 		}
 		if entry.IsDir() || filepath.Ext(path) != ".json" {
 			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("backup schedule %s must be a regular file", path)
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -446,6 +595,9 @@ func (s *BackupScheduler) loadSchedules(ctx context.Context) error {
 		request = normalizeBackupScheduleRequest(request)
 		if err := validateBackupScheduleRequest(request); err != nil {
 			return fmt.Errorf("invalid backup schedule %s: %w", path, err)
+		}
+		if filepath.Clean(path) != filepath.Clean(backupSchedulePath(s.dataDir, request)) {
+			return fmt.Errorf("backup schedule identity does not match path %s", path)
 		}
 		endMutation, admitted, err := s.beginLoaderMutation(ctx, request.Project, request.Environment)
 		if err != nil {
@@ -472,16 +624,26 @@ func (s *BackupScheduler) loadSchedules(ctx context.Context) error {
 			endMutation()
 			return fmt.Errorf("invalid refreshed backup schedule %s: %w", path, err)
 		}
+		if filepath.Clean(path) != filepath.Clean(backupSchedulePath(s.dataDir, request)) {
+			endMutation()
+			return fmt.Errorf("refreshed backup schedule identity does not match path %s", path)
+		}
 		s.mu.Lock()
 		err = s.scheduleLocked(request)
 		s.mu.Unlock()
 		endMutation()
-		return err
+		if err != nil {
+			return err
+		}
+		return s.syncAlertSubject(request)
 	})
 }
 
 func (s *BackupScheduler) persistSchedule(request BackupScheduleRequest) error {
 	path := backupSchedulePath(s.dataDir, request)
+	if err := validatePathParentsNoSymlink(s.dataDir, path, "backup schedule path"); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("failed to create backup schedule directory: %w", err)
 	}
@@ -512,23 +674,22 @@ func (s *BackupScheduler) scheduleLocked(request BackupScheduleRequest) error {
 	}
 	s.entries[key] = entryID
 	s.generations[key] = generation
+	s.schedules[key] = request
 	return nil
 }
 
 func (s *BackupScheduler) runScheduledBackup(request BackupScheduleRequest, expectedGeneration ...uint64) {
 	key := backupScheduleKey(request)
-	barrierCtx, releaseBarrier := acquireBackupRestoreMutationBarrier(context.Background())
-	defer releaseBarrier()
-	if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
-		fmt.Fprintf(os.Stderr, "takod backup schedule blocked by restore recovery for %s: %v\n", key, err)
-		return
+	started := time.Now().UTC()
+	record := func(status, backupID string) {
+		finished := time.Now().UTC()
+		if err := s.appendBackupRunRecord(BackupRunRecord{
+			ID: newAlertID(), Project: request.Project, Environment: request.Environment, Service: request.Service,
+			BackupID: backupID, StartedAt: started, FinishedAt: finished, Status: status,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "takod backup scheduler failed to persist run fact for %s: %v\n", key, err)
+		}
 	}
-	unlock, err := recovery.AcquireMutationLock(s.dataDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "takod backup schedule snapshot lock failed for %s: %v\n", key, err)
-		return
-	}
-	defer unlock()
 	s.mu.Lock()
 	if len(expectedGeneration) > 0 && s.generations[key] != expectedGeneration[0] {
 		s.mu.Unlock()
@@ -546,30 +707,88 @@ func (s *BackupScheduler) runScheduledBackup(request BackupScheduleRequest, expe
 		fmt.Fprintf(os.Stderr, "takod backup schedule skipped while project cleanup is draining: %s\n", key)
 		return
 	}
-	if s.running[key] {
-		s.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "takod backup schedule skipped overlapping run: %s\n", key)
+	overlap := s.running[key]
+	if overlap {
+		s.mutating[schedulerDrainScope(request.Project, request.Environment)]++
+	}
+	runContext := s.runContext
+	if runContext == nil {
+		runContext = context.Background()
+	}
+	if !overlap {
+		s.running[key] = true
+	}
+	s.mu.Unlock()
+	if overlap {
+		defer func() {
+			s.mu.Lock()
+			scope := schedulerDrainScope(request.Project, request.Environment)
+			s.mutating[scope]--
+			if s.mutating[scope] == 0 {
+				delete(s.mutating, scope)
+			}
+			s.notifyRunningChangedLocked()
+			s.mu.Unlock()
+		}()
+	} else {
+		defer func() {
+			s.mu.Lock()
+			delete(s.running, key)
+			s.notifyRunningChangedLocked()
+			s.mu.Unlock()
+		}()
+	}
+	barrierCtx, releaseBarrier, barrierErr := acquireBackupRestoreMutationBarrierContext(runContext)
+	if barrierErr != nil {
 		return
 	}
-	s.running[key] = true
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.running, key)
-		s.notifyRunningChangedLocked()
-		s.mu.Unlock()
-	}()
+	defer releaseBarrier()
+	unlock, err := recovery.AcquireMutationLockContext(barrierCtx, s.dataDir)
+	if err != nil {
+		if barrierCtx.Err() != nil {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "takod backup schedule snapshot lock failed for %s: %v\n", key, err)
+		return
+	}
+	defer unlock()
+	if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
+		fmt.Fprintf(os.Stderr, "takod backup schedule blocked by restore recovery for %s: %v\n", key, err)
+		if !overlap {
+			record(JobRunStatusFailed, "")
+		}
+		return
+	}
+	if overlap {
+		fmt.Fprintf(os.Stderr, "takod backup schedule skipped overlapping run: %s\n", key)
+		record(JobRunStatusSkipped, "")
+		return
+	}
 	ctx, cancel := context.WithTimeout(barrierCtx, 6*time.Hour)
 	defer cancel()
 	backupID := backupIDForRequest(BackupRequest{}, time.Now())
-	for _, volume := range request.Volumes {
+	attempt := BackupRunRecord{
+		ID: newAlertID(), Project: request.Project, Environment: request.Environment, Service: request.Service,
+		BackupID: backupID, StartedAt: started, Status: JobRunStatusRunning,
+	}
+	for index := range request.Volumes {
+		attempt.Containers = append(attempt.Containers, scheduledBackupContainerName(request, attempt.ID, index))
+	}
+	if err := s.beginBackupRunRecord(attempt); err != nil {
+		fmt.Fprintf(os.Stderr, "takod backup scheduler refused to start untracked backup %s: %v\n", key, err)
+		return
+	}
+	failed := false
+	uncertainHelper := false
+	for index, volume := range request.Volumes {
 		if s.admit != nil {
 			if err := s.admit(backupRootDir); err != nil {
 				fmt.Fprintf(os.Stderr, "takod backup schedule denied by resource admission for %s volume %s: %v\n", key, volume.Volume, err)
+				failed = true
 				continue
 			}
 		}
-		info, err := CreateVolumeBackup(ctx, BackupRequest{
+		info, err := s.createBackup(ctx, BackupRequest{
 			Project:        request.Project,
 			Environment:    request.Environment,
 			Volume:         volume.Volume,
@@ -578,19 +797,27 @@ func (s *BackupScheduler) runScheduledBackup(request BackupScheduleRequest, expe
 			BackupID:       backupID,
 			RetentionDays:  request.RetentionDays,
 			Storage:        request.Storage,
+			ContainerName:  attempt.Containers[index],
+			Service:        request.Service,
+			AttemptID:      attempt.ID,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "takod scheduled backup failed for %s/%s/%s volume %s: %v\n", request.Project, request.Environment, request.Service, volume.Volume, err)
+			failed = true
+			uncertainHelper = true
 		}
 		if info != nil {
 			for _, warning := range info.Warnings {
 				fmt.Fprintf(os.Stderr, "takod scheduled backup warning for %s/%s/%s volume %s: %s\n", request.Project, request.Environment, request.Service, volume.Volume, warning)
 			}
 		}
+		if request.Storage != nil && (info == nil || info.Remote == nil || info.Remote.VerifiedAt.IsZero()) {
+			failed = true
+		}
 		if request.RetentionDays <= 0 {
 			continue
 		}
-		if _, err := CleanupOldBackups(ctx, BackupRequest{
+		if _, err := s.cleanupBackups(ctx, BackupRequest{
 			Project:       request.Project,
 			Environment:   request.Environment,
 			Volume:        volume.Volume,
@@ -598,6 +825,30 @@ func (s *BackupScheduler) runScheduledBackup(request BackupScheduleRequest, expe
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "takod scheduled backup cleanup failed for %s/%s/%s volume %s: %v\n", request.Project, request.Environment, request.Service, volume.Volume, err)
 		}
+	}
+	if ctx.Err() != nil {
+		uncertainHelper = true
+	}
+	if uncertainHelper {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cleanupErr := s.recoverInterrupted(cleanupCtx, attempt)
+		cleanupCancel()
+		if cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "takod scheduled backup helper cleanup deferred to restart for %s: %v\n", key, cleanupErr)
+			return
+		}
+	}
+	status := JobRunStatusSucceeded
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		status = JobRunStatusTimeout
+	} else if ctx.Err() != nil || failed {
+		status = JobRunStatusFailed
+	}
+	attempt.Status = status
+	attempt.FinishedAt = time.Now().UTC()
+	attempt.Containers = nil
+	if err := s.completeBackupRunRecord(attempt); err != nil {
+		fmt.Fprintf(os.Stderr, "takod backup scheduler failed to complete durable run history for %s: %v\n", key, err)
 	}
 }
 
@@ -630,8 +881,8 @@ func validateBackupScheduleRequest(request BackupScheduleRequest) error {
 	if request.RetentionDays < 0 {
 		return fmt.Errorf("retentionDays cannot be negative")
 	}
-	if len(request.Volumes) == 0 {
-		return fmt.Errorf("at least one backup volume is required")
+	if len(request.Volumes) == 0 || len(request.Volumes) > maxBackupScheduleVolumes {
+		return fmt.Errorf("backup volumes must contain between 1 and %d entries", maxBackupScheduleVolumes)
 	}
 	for _, volume := range request.Volumes {
 		if !isSafeBackupVolume(volume.Volume) {
@@ -649,6 +900,264 @@ func validateBackupScheduleRequest(request BackupScheduleRequest) error {
 	return nil
 }
 
+func (s *BackupScheduler) appendBackupRunRecord(record BackupRunRecord) error {
+	return s.persistBackupRunRecord(record, false)
+}
+
+func (s *BackupScheduler) beginBackupRunRecord(record BackupRunRecord) error {
+	if record.ID == "" || record.Status != JobRunStatusRunning || !record.FinishedAt.IsZero() {
+		return fmt.Errorf("invalid running backup record")
+	}
+	if err := validateBackupRunRecord(record, record.Project, record.Environment, record.Service); err != nil {
+		return err
+	}
+	return s.persistBackupRunRecord(record, false)
+}
+
+func (s *BackupScheduler) completeBackupRunRecord(record BackupRunRecord) error {
+	if record.ID == "" || !validAlertAttemptStatus(record.Status) || record.FinishedAt.IsZero() {
+		return fmt.Errorf("invalid completed backup record")
+	}
+	return s.persistBackupRunRecord(record, true)
+}
+
+func (s *BackupScheduler) persistBackupRunRecord(record BackupRunRecord, replace bool) error {
+	s.runsMu.Lock()
+	records, err := s.readBackupRunRecords(record.Project, record.Environment, record.Service)
+	if err != nil {
+		s.runsMu.Unlock()
+		return err
+	}
+	replaced := false
+	if record.Status == JobRunStatusRunning {
+		for _, existing := range records {
+			if existing.Status == JobRunStatusRunning && existing.ID != record.ID {
+				s.runsMu.Unlock()
+				return fmt.Errorf("backup schedule already has a durable running attempt")
+			}
+		}
+	}
+	if replace {
+		for index := range records {
+			if records[index].ID == record.ID {
+				records[index] = record
+				replaced = true
+				break
+			}
+		}
+	}
+	if !replaced {
+		records = append([]BackupRunRecord{record}, records...)
+	}
+	records = boundBackupRunRecords(records)
+	path := backupRunsPath(s.dataDir, record.Project, record.Environment, record.Service)
+	if err := validatePathParentsNoSymlink(s.dataDir, path, "backup run path"); err != nil {
+		s.runsMu.Unlock()
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		s.runsMu.Unlock()
+		return fmt.Errorf("create backup run history directory: %w", err)
+	}
+	data, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		s.runsMu.Unlock()
+		return fmt.Errorf("encode backup run history: %w", err)
+	}
+	data = append(data, '\n')
+	if err := writeFileAtomic(path, data, 0600); err != nil {
+		s.runsMu.Unlock()
+		return fmt.Errorf("write backup run history: %w", err)
+	}
+	s.runsMu.Unlock()
+	if s.alerts != nil && record.Status != JobRunStatusRunning {
+		if err := s.alerts.Observe(backupRunAlertFact(record)); err != nil {
+			return fmt.Errorf("persist backup alert fact: %w", err)
+		}
+	}
+	return nil
+}
+
+func boundBackupRunRecords(records []BackupRunRecord) []BackupRunRecord {
+	running := 0
+	for _, record := range records {
+		if record.Status == JobRunStatusRunning {
+			running++
+		}
+	}
+	terminalBudget := maxBackupRunRecords - running
+	if terminalBudget < 0 {
+		terminalBudget = 0
+	}
+	bounded := make([]BackupRunRecord, 0, min(len(records), maxBackupRunRecords))
+	for _, record := range records {
+		if record.Status == JobRunStatusRunning {
+			bounded = append(bounded, record)
+		} else if terminalBudget > 0 {
+			record.Containers = nil
+			bounded = append(bounded, record)
+			terminalBudget--
+		}
+	}
+	return bounded
+}
+
+func (s *BackupScheduler) recoverInterruptedRuns(ctx context.Context) error {
+	root := filepath.Join(s.dataDir, backupRunsDirName)
+	if err := validateStorageTreeNoSymlink(root, "backup run storage"); err != nil {
+		return err
+	}
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if os.IsNotExist(walkErr) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".json" {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("backup run history %s must be a regular file", path)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var records []BackupRunRecord
+		if err := json.Unmarshal(data, &records); err != nil {
+			return fmt.Errorf("parse backup run history %s: %w", path, err)
+		}
+		for index := range records {
+			record := records[index]
+			if err := validateBackupRunRecord(record, record.Project, record.Environment, record.Service); err != nil || filepath.Clean(path) != filepath.Clean(backupRunsPath(s.dataDir, record.Project, record.Environment, record.Service)) {
+				return fmt.Errorf("invalid backup run history %s", path)
+			}
+			if record.Status != JobRunStatusRunning {
+				continue
+			}
+			if s.recoverInterrupted != nil {
+				if err := s.recoverInterrupted(ctx, record); err != nil {
+					return fmt.Errorf("recover interrupted backup %s/%s/%s: %w", record.Project, record.Environment, record.Service, err)
+				}
+			}
+			record.Status = JobRunStatusFailed
+			record.FinishedAt = time.Now().UTC()
+			if err := s.completeBackupRunRecord(record); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *BackupScheduler) readBackupRunRecords(project, environment, service string) ([]BackupRunRecord, error) {
+	path := backupRunsPath(s.dataDir, project, environment, service)
+	if err := validatePathParentsNoSymlink(s.dataDir, path, "backup run path"); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read backup run history: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("backup run history must be a regular file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read backup run history: %w", err)
+	}
+	var records []BackupRunRecord
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil, fmt.Errorf("parse backup run history: %w", err)
+	}
+	for _, record := range records {
+		if err := validateBackupRunRecord(record, project, environment, service); err != nil {
+			return nil, fmt.Errorf("invalid backup run history")
+		}
+	}
+	return records, nil
+}
+
+func validateBackupRunRecord(record BackupRunRecord, project, environment, service string) error {
+	running := record.Status == JobRunStatusRunning && record.FinishedAt.IsZero()
+	completed := validAlertAttemptStatus(record.Status) && !record.FinishedAt.IsZero() && !record.StartedAt.After(record.FinishedAt)
+	if record.ID == "" || len(record.ID) > 128 || hasControlChars(record.ID) || record.Project != project || record.Environment != environment || record.Service != service || !isSafeProjectName(project) || !isSafeRuntimeName(environment) || !isSafeServiceName(service) || record.StartedAt.IsZero() || (!running && !completed) {
+		return fmt.Errorf("invalid backup run record")
+	}
+	seen := make(map[string]bool, len(record.Containers))
+	request := BackupScheduleRequest{Project: project, Environment: environment, Service: service}
+	for index, container := range record.Containers {
+		if !isSafeContainerName(container) || container != scheduledBackupContainerName(request, record.ID, index) || seen[container] {
+			return fmt.Errorf("invalid backup run container")
+		}
+		seen[container] = true
+	}
+	if running && len(record.Containers) == 0 {
+		return fmt.Errorf("running backup has no container identity")
+	}
+	return nil
+}
+
+func scheduledBackupContainerName(request BackupScheduleRequest, attemptID string, index int) string {
+	return fmt.Sprintf("%s_%d", schedulerContainerName("backup", request.Project, request.Environment, request.Service, attemptID), index+1)
+}
+
+func recoverInterruptedBackupContainers(ctx context.Context, record BackupRunRecord) error {
+	for _, container := range record.Containers {
+		output, err := runDocker(ctx, "ps", "-a", "--filter", "name=^"+container+"$", "--format", "{{.Names}}")
+		if err != nil {
+			return fmt.Errorf("inspect interrupted backup container: %w, output: %s", err, output)
+		}
+		if strings.TrimSpace(output) != container {
+			continue
+		}
+		if err := verifyRecoveryContainerLabels(ctx, container, map[string]string{
+			"tako.project": record.Project, "tako.environment": record.Environment, "tako.service": record.Service,
+			"tako.runtime": "takod", "tako.role": "scheduled-backup", "tako.attempt": record.ID,
+		}); err != nil {
+			return err
+		}
+		output, err = runDocker(ctx, "rm", "-f", container)
+		if err != nil {
+			return fmt.Errorf("remove interrupted backup container: %w, output: %s", err, output)
+		}
+	}
+	return nil
+}
+
+func (s *BackupScheduler) syncAlertSubject(request BackupScheduleRequest) error {
+	if s.alerts == nil {
+		return nil
+	}
+	if err := s.alerts.RegisterSubject(request.Project, request.Environment, "backup", request.Service); err != nil {
+		return err
+	}
+	records, err := s.readBackupRunRecords(request.Project, request.Environment, request.Service)
+	if err != nil {
+		return err
+	}
+	for index := len(records) - 1; index >= 0; index-- {
+		if records[index].Status == JobRunStatusRunning {
+			continue
+		}
+		if err := s.alerts.Observe(backupRunAlertFact(records[index])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func backupRunAlertFact(record BackupRunRecord) AlertAttemptFact {
+	return AlertAttemptFact{ID: record.ID, Project: record.Project, Environment: record.Environment, Kind: "backup", Service: record.Service, Status: record.Status, StartedAt: record.StartedAt, FinishedAt: record.FinishedAt}
+}
+
 func normalizeRetentionDays(retentionDays int) int {
 	if retentionDays <= 0 {
 		return DefaultRetention
@@ -658,6 +1167,10 @@ func normalizeRetentionDays(retentionDays int) int {
 
 func backupSchedulePath(dataDir string, request BackupScheduleRequest) string {
 	return filepath.Join(dataDir, backupScheduleDirName, request.Project, request.Environment, request.Service+".json")
+}
+
+func backupRunsPath(dataDir, project, environment, service string) string {
+	return filepath.Join(dataDir, backupRunsDirName, project, environment, service+".json")
 }
 
 func backupScheduleKey(request BackupScheduleRequest) string {

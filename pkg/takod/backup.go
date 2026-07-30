@@ -19,10 +19,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
+	"golang.org/x/sync/semaphore"
 )
 
 const (
@@ -35,7 +35,25 @@ const (
 var errBackupDirectoryLocked = errors.New("another backup operation is active for this environment")
 
 var backupRootDir = BackupDir
-var backupRestoreBarrierMu sync.RWMutex
+
+const backupRestoreBarrierCapacity int64 = 1 << 30
+
+type backupRestoreBarrier struct {
+	gate *semaphore.Weighted
+}
+
+func newBackupRestoreBarrier() *backupRestoreBarrier {
+	return &backupRestoreBarrier{gate: semaphore.NewWeighted(backupRestoreBarrierCapacity)}
+}
+
+func (b *backupRestoreBarrier) RLock()   { _ = b.gate.Acquire(context.Background(), 1) }
+func (b *backupRestoreBarrier) RUnlock() { b.gate.Release(1) }
+func (b *backupRestoreBarrier) Lock() {
+	_ = b.gate.Acquire(context.Background(), backupRestoreBarrierCapacity)
+}
+func (b *backupRestoreBarrier) Unlock() { b.gate.Release(backupRestoreBarrierCapacity) }
+
+var backupRestoreBarrierMu = newBackupRestoreBarrier()
 
 type backupRestoreBarrierContextKey struct{}
 
@@ -45,6 +63,16 @@ func acquireBackupRestoreMutationBarrier(ctx context.Context) (context.Context, 
 	}
 	backupRestoreBarrierMu.RLock()
 	return context.WithValue(ctx, backupRestoreBarrierContextKey{}, true), backupRestoreBarrierMu.RUnlock
+}
+
+func acquireBackupRestoreMutationBarrierContext(ctx context.Context) (context.Context, func(), error) {
+	if held, _ := ctx.Value(backupRestoreBarrierContextKey{}).(bool); held {
+		return ctx, func() {}, nil
+	}
+	if err := backupRestoreBarrierMu.gate.Acquire(ctx, 1); err != nil {
+		return ctx, func() {}, err
+	}
+	return context.WithValue(ctx, backupRestoreBarrierContextKey{}, true), backupRestoreBarrierMu.RUnlock, nil
 }
 
 func acquireExclusiveBackupRestoreMutationBarrier(ctx context.Context) (context.Context, func()) {
@@ -68,6 +96,9 @@ type BackupRequest struct {
 	MinimumFreeBytes int64                `json:"-"`
 	DockerDataRoot   string               `json:"-"`
 	DataDir          string               `json:"-"`
+	ContainerName    string               `json:"-"`
+	Service          string               `json:"-"`
+	AttemptID        string               `json:"-"`
 }
 
 type BackupInfo struct {
@@ -187,13 +218,30 @@ func CreateVolumeBackup(ctx context.Context, req BackupRequest) (*BackupInfo, er
 	path := filepath.Join(backupPath, backupFile)
 	tempPath := filepath.Join(backupPath, tempFile)
 	defer os.Remove(tempPath)
-	if _, err := runDocker(
-		ctx,
-		"run", "--rm",
+	dockerArgs := []string{"run", "--rm"}
+	if req.ContainerName != "" {
+		if !isSafeContainerName(req.ContainerName) || !strings.HasPrefix(req.ContainerName, "tako_") || !isSafeServiceName(req.Service) || req.AttemptID == "" || len(req.AttemptID) > 128 || hasControlChars(req.AttemptID) {
+			return nil, fmt.Errorf("invalid backup container name")
+		}
+		dockerArgs = append(dockerArgs,
+			"--name", req.ContainerName,
+			"--label", "tako.project="+req.Project,
+			"--label", "tako.environment="+req.Environment,
+			"--label", "tako.service="+req.Service,
+			"--label", "tako.runtime=takod",
+			"--label", "tako.role=scheduled-backup",
+			"--label", "tako.attempt="+req.AttemptID,
+		)
+	}
+	dockerArgs = append(dockerArgs,
 		"-v", fullVolumeName+":/source:ro",
 		"-v", backupPath+":/backup",
 		backupImage,
 		"tar", "-czf", "/backup/"+tempFile, "-C", "/source", ".",
+	)
+	if _, err := runDocker(
+		ctx,
+		dockerArgs...,
 	); err != nil {
 		return nil, fmt.Errorf("failed to create backup: %w", err)
 	}

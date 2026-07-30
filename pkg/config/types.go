@@ -141,9 +141,26 @@ type VolumeConfig struct {
 
 // NotificationsConfig defines notification settings
 type NotificationsConfig struct {
-	Slack   string `yaml:"slack,omitempty" json:"slack,omitempty"`     // Slack webhook URL
-	Discord string `yaml:"discord,omitempty" json:"discord,omitempty"` // Discord webhook URL
-	Webhook string `yaml:"webhook,omitempty" json:"webhook,omitempty"` // Generic webhook URL
+	Slack   string                 `yaml:"slack,omitempty" json:"slack,omitempty"`     // Slack webhook URL
+	Discord string                 `yaml:"discord,omitempty" json:"discord,omitempty"` // Discord webhook URL
+	Webhook string                 `yaml:"webhook,omitempty" json:"webhook,omitempty"` // Generic webhook URL
+	Alerts  *SchedulerAlertsConfig `yaml:"alerts,omitempty" json:"alerts,omitempty"`
+}
+
+type SchedulerAlertsConfig struct {
+	Jobs    JobAlertsConfig    `yaml:"jobs,omitempty" json:"jobs,omitempty"`
+	Backups BackupAlertsConfig `yaml:"backups,omitempty" json:"backups,omitempty"`
+}
+
+type JobAlertsConfig struct {
+	ConsecutiveFailures int    `yaml:"consecutiveFailures,omitempty" json:"consecutiveFailures,omitempty"`
+	ConsecutiveTimeouts int    `yaml:"consecutiveTimeouts,omitempty" json:"consecutiveTimeouts,omitempty"`
+	ConsecutiveSkipped  int    `yaml:"consecutiveSkipped,omitempty" json:"consecutiveSkipped,omitempty"`
+	NoSuccessFor        string `yaml:"noSuccessFor,omitempty" json:"noSuccessFor,omitempty"`
+}
+
+type BackupAlertsConfig struct {
+	MaxAge string `yaml:"maxAge,omitempty" json:"maxAge,omitempty"`
 }
 
 // ProjectConfig defines project metadata

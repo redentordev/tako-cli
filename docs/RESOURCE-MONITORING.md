@@ -146,6 +146,22 @@ tako_container_cpu_usage_percent{server="prod",host="203.0.113.10",container="ta
 - `tako_container_memory_limit_bytes`
 - `tako_container_memory_usage_percent`
 
+**Scheduler Alert Metrics (when `notifications.alerts` is enabled):**
+- `tako_scheduler_alert_owner_present`
+- `tako_scheduler_alert_owner_reachable`
+- `tako_scheduler_alert_policy_loaded`
+- `tako_scheduler_alert_active_episodes`
+- `tako_scheduler_alert_pending_deliveries`
+- `tako_scheduler_alert_exhausted_deliveries`
+- `tako_scheduler_alert_last_evaluation_timestamp_seconds`
+- `tako_scheduler_alert_subject_active`
+- `tako_scheduler_alert_subject_last_success_timestamp_seconds`
+
+Generate these metrics from an independent observer. The owner node cannot
+report its own outage; the CLI emits `owner_reachable 0` when that observer
+cannot query the node's alert endpoint. During a full cordon or drain, ordinary
+node metrics remain available and `owner_present` is `0` for the environment.
+
 ---
 
 ## Integration with Prometheus
@@ -189,8 +205,9 @@ done
 ## Monitoring Agent
 
 The monitoring agent runs on each server and collects host metrics every 60
-seconds. `takod` exposes those metrics through `/v1/metrics`, and exposes
-container stats through `/v1/stats`.
+seconds. `takod` exposes those metrics plus credential-free scheduler alert
+status through `/v1/metrics`, exposes alert status independently through
+`/v1/alerts`, and exposes container stats through `/v1/stats`.
 
 ### Agent Installation
 

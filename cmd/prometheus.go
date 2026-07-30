@@ -3,6 +3,9 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -55,7 +58,23 @@ func runPrometheus(cmd *cobra.Command, args []string) error {
 	}
 	defer factory.CloseIdleConnections()
 
+	alertOwners := map[string]bool{}
+	if schedulerAlertsConfigured(cfg) {
+		owners, err := schedulerAlertOwners(cfg.Servers, servers)
+		if err != nil {
+			return err
+		}
+		for _, owner := range owners {
+			alertOwners[owner] = true
+		}
+		exportAlertOwnerPresence(os.Stdout, cfg.Project.Name, envName, len(owners) > 0)
+	}
+	alertMetadata := true
 	for _, result := range collectPrometheusNodes(cfg, envName, servers, factory) {
+		if alertOwners[result.serverName] {
+			exportAlertMetrics(os.Stdout, result.serverName, result.host, cfg.Project.Name, envName, result.alertStatus, result.alertsRead, alertMetadata)
+			alertMetadata = false
+		}
 		if result.err != nil || result.metrics == nil {
 			continue
 		}
@@ -68,34 +87,50 @@ func runPrometheus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-type prometheusNodeResult struct {
-	index      int
-	serverName string
-	host       string
-	metrics    *MetricsData
-	stats      []takod.ContainerStat
-	err        error
+func schedulerAlertOwners(configured map[string]config.ServerConfig, environmentServers []string) ([]string, error) {
+	owners := make([]string, 0, len(environmentServers))
+	for _, serverName := range environmentServers {
+		server, ok := configured[serverName]
+		if !ok {
+			return nil, fmt.Errorf("target server %s is not defined", serverName)
+		}
+		if server.Schedulable() {
+			owners = append(owners, serverName)
+		}
+	}
+	return owners, nil
 }
 
-type prometheusReadFunc func(serverName string, server config.ServerConfig) (*MetricsData, []takod.ContainerStat, error)
+type prometheusNodeResult struct {
+	index       int
+	serverName  string
+	host        string
+	metrics     *MetricsData
+	stats       []takod.ContainerStat
+	alertStatus *takod.AlertStatusResponse
+	alertsRead  bool
+	err         error
+}
+
+type prometheusReadFunc func(serverName string, server config.ServerConfig) (*MetricsData, []takod.ContainerStat, *takod.AlertStatusResponse, bool, error)
 
 func collectPrometheusNodes(cfg *config.Config, envName string, serverNames []string, factory *nodeclient.Factory) []prometheusNodeResult {
-	return collectPrometheusNodesWith(cfg.Servers, serverNames, func(serverName string, server config.ServerConfig) (*MetricsData, []takod.ContainerStat, error) {
+	return collectPrometheusNodesWith(cfg.Servers, serverNames, func(serverName string, server config.ServerConfig) (*MetricsData, []takod.ContainerStat, *takod.AlertStatusResponse, bool, error) {
 		client, _, err := factory.Client(context.Background(), serverName)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, false, err
 		}
-
+		alertStatus, alertErr := readAlertStatusViaTakod(client, cfg, envName)
 		metrics, err := readMetricsViaTakod(client, cfg, true)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, alertStatus, alertErr == nil, err
 		}
 
 		statsResponse, err := readStatsViaTakodWithOptions(client, cfg, envName, "", false)
 		if err != nil {
-			return metrics, nil, nil
+			return metrics, nil, alertStatus, alertErr == nil, nil
 		}
-		return metrics, statsResponse.Stats, nil
+		return metrics, statsResponse.Stats, alertStatus, alertErr == nil, nil
 	})
 }
 
@@ -117,14 +152,10 @@ func collectPrometheusNodesWith(configuredServers map[string]config.ServerConfig
 		wg.Add(1)
 		go func(index int, serverName string, server config.ServerConfig) {
 			defer wg.Done()
-			metrics, stats, err := read(serverName, server)
+			metrics, stats, alertStatus, alertsRead, err := read(serverName, server)
 			resultCh <- prometheusNodeResult{
-				index:      index,
-				serverName: serverName,
-				host:       server.Host,
-				metrics:    metrics,
-				stats:      stats,
-				err:        err,
+				index: index, serverName: serverName, host: server.Host, metrics: metrics, stats: stats,
+				alertStatus: alertStatus, alertsRead: alertsRead, err: err,
 			}
 		}(index, serverName, server)
 	}
@@ -240,6 +271,73 @@ func exportSystemMetrics(serverName, serverHost string, metrics *MetricsData) {
 	fmt.Printf("# TYPE tako_uptime_seconds counter\n")
 	fmt.Printf("tako_uptime_seconds%s %d\n", labels, metrics.UptimeSeconds)
 	fmt.Println()
+}
+
+func schedulerAlertsConfigured(cfg *config.Config) bool {
+	if cfg == nil || cfg.Notifications == nil || cfg.Notifications.Alerts == nil {
+		return false
+	}
+	alerts := cfg.Notifications.Alerts
+	return alerts.Jobs.ConsecutiveFailures > 0 || alerts.Jobs.ConsecutiveTimeouts > 0 || alerts.Jobs.ConsecutiveSkipped > 0 || strings.TrimSpace(alerts.Jobs.NoSuccessFor) != "" || strings.TrimSpace(alerts.Backups.MaxAge) != ""
+}
+
+func exportAlertOwnerPresence(out io.Writer, project, environment string, present bool) {
+	value := 0
+	if present {
+		value = 1
+	}
+	labels := fmt.Sprintf(`{project=%s,environment=%s}`, strconv.Quote(project), strconv.Quote(environment))
+	fmt.Fprintln(out, "# HELP tako_scheduler_alert_owner_present Whether this environment has at least one schedulable alert owner")
+	fmt.Fprintln(out, "# TYPE tako_scheduler_alert_owner_present gauge")
+	fmt.Fprintf(out, "tako_scheduler_alert_owner_present%s %d\n\n", labels, value)
+}
+
+func exportAlertMetrics(out io.Writer, serverName, serverHost, project, environment string, status *takod.AlertStatusResponse, reachable, includeMetadata bool) {
+	labels := fmt.Sprintf(`{server=%s,host=%s,project=%s,environment=%s}`, strconv.Quote(serverName), strconv.Quote(serverHost), strconv.Quote(project), strconv.Quote(environment))
+	if includeMetadata {
+		for _, metric := range []struct{ name, help string }{
+			{"tako_scheduler_alert_owner_reachable", "Whether the external observer reached the scheduler owner node"},
+			{"tako_scheduler_alert_policy_loaded", "Whether the scheduler alert policy is loaded on the node"},
+			{"tako_scheduler_alert_active_episodes", "Active scheduler alert episodes"},
+			{"tako_scheduler_alert_pending_deliveries", "Pending scheduler alert deliveries"},
+			{"tako_scheduler_alert_exhausted_deliveries", "Exhausted scheduler alert deliveries"},
+			{"tako_scheduler_alert_last_evaluation_timestamp_seconds", "Last scheduler alert evaluation time"},
+			{"tako_scheduler_alert_subject_active", "Whether a scheduler alert subject has an active episode"},
+			{"tako_scheduler_alert_subject_last_success_timestamp_seconds", "Last successful attempt time for a scheduler alert subject"},
+		} {
+			fmt.Fprintf(out, "# HELP %s %s\n# TYPE %s gauge\n", metric.name, metric.help, metric.name)
+		}
+	}
+	reachableValue := 0
+	if reachable {
+		reachableValue = 1
+	}
+	fmt.Fprintf(out, "tako_scheduler_alert_owner_reachable%s %d\n\n", labels, reachableValue)
+	if !reachable || status == nil {
+		return
+	}
+	configured := 0
+	if status.Configured {
+		configured = 1
+	}
+	fmt.Fprintf(out, "tako_scheduler_alert_policy_loaded%s %d\n\n", labels, configured)
+	fmt.Fprintf(out, "tako_scheduler_alert_active_episodes%s %d\n\n", labels, status.ActiveEpisodes)
+	fmt.Fprintf(out, "tako_scheduler_alert_pending_deliveries%s %d\n\n", labels, status.PendingDelivery)
+	fmt.Fprintf(out, "tako_scheduler_alert_exhausted_deliveries%s %d\n\n", labels, status.Exhausted)
+	if !status.EvaluatedAt.IsZero() {
+		fmt.Fprintf(out, "tako_scheduler_alert_last_evaluation_timestamp_seconds%s %d\n\n", labels, status.EvaluatedAt.Unix())
+	}
+	for _, subject := range status.Subjects {
+		subjectLabels := fmt.Sprintf(`{server=%s,host=%s,project=%s,environment=%s,kind=%s,service=%s}`, strconv.Quote(serverName), strconv.Quote(serverHost), strconv.Quote(project), strconv.Quote(environment), strconv.Quote(subject.Kind), strconv.Quote(subject.Service))
+		active := 0
+		if subject.Active {
+			active = 1
+		}
+		fmt.Fprintf(out, "tako_scheduler_alert_subject_active%s %d\n", subjectLabels, active)
+		if !subject.LastSuccessAt.IsZero() {
+			fmt.Fprintf(out, "tako_scheduler_alert_subject_last_success_timestamp_seconds%s %d\n", subjectLabels, subject.LastSuccessAt.Unix())
+		}
+	}
 }
 
 func exportContainerMetrics(serverName, serverHost string, stats []takod.ContainerStat) {

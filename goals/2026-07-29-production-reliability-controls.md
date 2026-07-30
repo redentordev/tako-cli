@@ -115,6 +115,15 @@ fresh-volume tests without writing recovery files into application data.
 Acceptance: failure, stale, deduplication, retry, restart, and single recovery
 notifications are test-covered, with no secrets in persisted or emitted data.
 
+Evidence: implementation complete. Full tests, native/Linux/Windows builds,
+`go vet`, focused changed-path race suites, schema/config tests, durable
+dispatch/rotation/retirement and crash-recovery tests, snapshot-concurrency and
+cancellable-shutdown tests, enrolled fence/lifecycle tests, credential-redaction
+tests, Prometheus owner-presence/reachability tests, and two independent final
+reviews passed. Full-package `pkg/takod` race execution remains blocked by the
+pre-existing live Docker ownership test on the full local Colima VM; all
+Milestone 5 race subsets pass.
+
 ## Milestone 6: Service Log Rotation
 
 - Add opt-in per-service Docker logging configuration for the `local` and

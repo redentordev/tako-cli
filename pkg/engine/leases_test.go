@@ -109,6 +109,14 @@ func TestDeployMutationTargetsExcludeUnassignedWorker(t *testing.T) {
 	}
 }
 
+func TestAlertReconciliationTargetsExpandFenceWithoutExpandingWorkloadTargets(t *testing.T) {
+	workload := []string{"node-1"}
+	connectivity := []string{"node-1", "idle", "drain"}
+	if strings.Join(deployMutationAuthorityTargets(workload, connectivity), ",") != "drain,idle,node-1" || strings.Join(workload, ",") != "node-1" {
+		t.Fatalf("workload=%v connectivity=%v fence=%v", workload, connectivity, deployMutationAuthorityTargets(workload, connectivity))
+	}
+}
+
 func TestPriorDesiredAssignmentKeepsRemovedLastServiceWorkerTargeted(t *testing.T) {
 	cfg := &config.Config{Servers: map[string]config.ServerConfig{
 		"node-1": {ClusterID: "11111111-1111-4111-8111-111111111111", NodeID: "22222222-2222-4222-8222-222222222222", Lifecycle: "schedulable", Roles: []string{"control-plane", "worker"}},

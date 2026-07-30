@@ -344,6 +344,27 @@
         "webhook": {
           "type": "string",
           "description": "Generic webhook URL"
+        },
+        "alerts": {
+          "type": "object",
+          "description": "Durable scheduled-job and backup alert policy",
+          "properties": {
+            "jobs": {
+              "type": "object",
+              "properties": {
+                "consecutiveFailures": { "type": "integer", "minimum": 0, "maximum": 1000 },
+                "consecutiveTimeouts": { "type": "integer", "minimum": 0, "maximum": 1000 },
+                "consecutiveSkipped": { "type": "integer", "minimum": 0, "maximum": 1000 },
+                "noSuccessFor": { "type": "string", "description": "Alert when a scheduled job has no successful run for this Go duration (1m to 8760h)" }
+              }
+            },
+            "backups": {
+              "type": "object",
+              "properties": {
+                "maxAge": { "type": "string", "description": "Alert when the latest successful scheduled backup exceeds this Go duration (1m to 8760h)" }
+              }
+            }
+          }
         }
       }
     },

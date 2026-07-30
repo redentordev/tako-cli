@@ -185,9 +185,26 @@ still emits the document. `tako metrics --output json` (single-shot;
 `--live` is rejected in machine modes) returns a `MetricsResult` with
 project/environment, the `--server` filter when set, `collectedAt`, and
 per-node samples where `metrics` carries the takod `/v1/metrics` document
-verbatim (monitoring-agent schema) or `error` says why the read failed;
-all nodes failing exits 1, a partial read exits 6, both still emit the
-document. `tako stats --output json` (point-in-time; `--live` is rejected
+verbatim (monitoring-agent schema) or `error` says why the read failed. The
+takod response also has an additive `alerts` array. Each credential-free alert
+scope contains `project`, `environment`, `configured`, `evaluatedAt`, aggregate
+active/pending/exhausted counts, subject counters and timestamps, and bounded
+delivery status. `/v1/alerts?project=...&environment=...` returns the same
+single-scope status independently of the host monitoring agent. `PUT
+/v1/alerts` applies a node-local policy; a policy with all zero values removes
+the scope and its credentials. Alert targets are accepted only in PUT input and
+never returned. On an enrolled node, a zero-policy disable still requires the
+active controller operation fence and matching payload scope, but may proceed
+while the node is cordoned or draining. Enablement additionally requires a
+schedulable node. `tako prometheus` adds externally observed
+`tako_scheduler_alert_owner_present`, `tako_scheduler_alert_owner_reachable`, policy-loaded, episode, delivery,
+evaluation, and per-subject metrics. Absence of a node-local heartbeat is not
+represented as a node-down event; only the external observer emits reachability
+`0` when it cannot read that owner. `owner_present` is `0` when no environment
+member is currently schedulable; system and container metrics are still
+collected from the configured nodes. All nodes failing exits 1, a partial read
+exits 6, both still emit the document. `tako stats --output json`
+(point-in-time; `--live` is rejected
 in machine modes) returns a `StatsResult` with project/environment, the
 `--service`/`--all` filters, `collectedAt`, and per-node samples whose
 `containers` reuse the takod stats schema (`name`, `cpuPercent`,
@@ -287,8 +304,10 @@ connection. `tako jobs` returns a `JobsResult` listing each
 scheduled `kind: job` service with its owning `server`, `schedule`,
 optional `timezone` (UTC when omitted), `image`, `command`,
 `timeoutSeconds`, the owning node's `nextRun`, and the most recent run
-(`lastRun`: trigger, container, timestamps, `exitCode`, `status` —
-`succeeded`/`failed`/`timeout`/`skipped`). `tako jobs runs [JOB]` returns a
+(`lastRun`: trigger, container, timestamps, `exitCode`, `status` — `running`,
+`succeeded`, `failed`, `timeout`, or `skipped`). `running` is durably published
+before container execution; an unfinished attempt becomes `failed` during
+agent restart recovery. `tako jobs runs [JOB]` returns a
 `JobRunsResult` with the bounded run history (newest first, last 50 per
 job) including each run's redacted `output` tail. `tako jobs trigger JOB`
 returns a `JobTriggerResult` with the run's `server`, `container`,

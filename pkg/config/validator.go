@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/alerttarget"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/utils"
 	"github.com/robfig/cron/v3"
@@ -93,6 +94,9 @@ func ValidateConfig(cfg *Config) error {
 			return err
 		}
 	}
+	if err := ValidateNotificationsConfig(cfg.Notifications); err != nil {
+		return err
+	}
 
 	// Validate environments
 	if len(cfg.Environments) == 0 {
@@ -110,6 +114,65 @@ func ValidateConfig(cfg *Config) error {
 	}
 
 	return nil
+}
+
+func ValidateNotificationsConfig(notifications *NotificationsConfig) error {
+	if notifications == nil {
+		return nil
+	}
+	alertsEnabled := notifications.Alerts != nil && schedulerAlertsEnabled(*notifications.Alerts)
+	if alertsEnabled && strings.TrimSpace(notifications.Slack) == "" && strings.TrimSpace(notifications.Discord) == "" && strings.TrimSpace(notifications.Webhook) == "" {
+		return fmt.Errorf("notifications.alerts requires at least one Slack, Discord, or webhook target")
+	}
+	if alertsEnabled {
+		for _, target := range []struct {
+			name  string
+			value *string
+		}{{"slack", &notifications.Slack}, {"discord", &notifications.Discord}, {"webhook", &notifications.Webhook}} {
+			if strings.TrimSpace(*target.value) == "" {
+				continue
+			}
+			normalized, err := alerttarget.NormalizeAndValidate(target.name, *target.value)
+			if err != nil {
+				return fmt.Errorf("notifications.%s: %w", target.name, err)
+			}
+			*target.value = normalized
+		}
+	}
+	if notifications.Alerts == nil {
+		return nil
+	}
+	jobs := notifications.Alerts.Jobs
+	for name, value := range map[string]int{
+		"consecutiveFailures": jobs.ConsecutiveFailures,
+		"consecutiveTimeouts": jobs.ConsecutiveTimeouts,
+		"consecutiveSkipped":  jobs.ConsecutiveSkipped,
+	} {
+		if value < 0 || value > 1000 {
+			return fmt.Errorf("notifications.alerts.jobs.%s must be between 0 and 1000", name)
+		}
+	}
+	for name, value := range map[string]string{
+		"notifications.alerts.jobs.noSuccessFor": notifications.Alerts.Jobs.NoSuccessFor,
+		"notifications.alerts.backups.maxAge":    notifications.Alerts.Backups.MaxAge,
+	} {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration < time.Minute || duration > 365*24*time.Hour {
+			return fmt.Errorf("%s must be a duration between 1m and 8760h", name)
+		}
+		if duration%time.Second != 0 {
+			return fmt.Errorf("%s must use whole seconds", name)
+		}
+	}
+	return nil
+}
+
+func schedulerAlertsEnabled(alerts SchedulerAlertsConfig) bool {
+	return alerts.Jobs.ConsecutiveFailures > 0 || alerts.Jobs.ConsecutiveTimeouts > 0 || alerts.Jobs.ConsecutiveSkipped > 0 ||
+		strings.TrimSpace(alerts.Jobs.NoSuccessFor) != "" || strings.TrimSpace(alerts.Backups.MaxAge) != ""
 }
 
 // ValidationWarning is a non-fatal, structured config diagnostic.

@@ -72,7 +72,7 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 			if status.UpgradeProtocol != upgradeprotocol.Current || status.MinimumUpgradeProtocol != upgradeprotocol.Current {
 				t.Fatalf("unexpected upgrade protocol window %d/%d", status.UpgradeProtocol, status.MinimumUpgradeProtocol)
 			}
-			if len(status.Capabilities) != 17 || status.Capabilities[0] != CapabilityContainerArgvV1 || status.Capabilities[1] != CapabilityContainerRuntimeControlsV1 || status.Capabilities[2] != CapabilityContainerGracefulStopV1 || status.Capabilities[3] != CapabilityImageBuildOptionsV1 || status.Capabilities[4] != CapabilityImageDescriptorV1 || status.Capabilities[5] != CapabilityNodePlatformV1 || status.Capabilities[6] != CapabilityExecOneOffControlsV1 || status.Capabilities[7] != CapabilityServiceFilesV1 || status.Capabilities[8] != CapabilityVolumeCreationOwnershipV1 || status.Capabilities[9] != CapabilityProxyActivationV1 || status.Capabilities[10] != CapabilityProxyRoutePolicyV1 || status.Capabilities[11] != CapabilityProxyTrustedProxiesV1 || status.Capabilities[12] != CapabilityProxyCertsV1 || status.Capabilities[13] != CapabilityAcmeDNSV1 || status.Capabilities[14] != CapabilityBackupPostgresVerifyV1 || status.Capabilities[15] != CapabilityNodeIdentityV1 || status.Capabilities[16] != CapabilityNodeUpgradeV1 {
+			if len(status.Capabilities) != 18 || status.Capabilities[0] != CapabilityContainerArgvV1 || status.Capabilities[1] != CapabilityContainerRuntimeControlsV1 || status.Capabilities[2] != CapabilityContainerGracefulStopV1 || status.Capabilities[3] != CapabilityImageBuildOptionsV1 || status.Capabilities[4] != CapabilityImageDescriptorV1 || status.Capabilities[5] != CapabilityNodePlatformV1 || status.Capabilities[6] != CapabilityExecOneOffControlsV1 || status.Capabilities[7] != CapabilityServiceFilesV1 || status.Capabilities[8] != CapabilityVolumeCreationOwnershipV1 || status.Capabilities[9] != CapabilitySchedulerAlertsV1 || status.Capabilities[10] != CapabilityProxyActivationV1 || status.Capabilities[11] != CapabilityProxyRoutePolicyV1 || status.Capabilities[12] != CapabilityProxyTrustedProxiesV1 || status.Capabilities[13] != CapabilityProxyCertsV1 || status.Capabilities[14] != CapabilityAcmeDNSV1 || status.Capabilities[15] != CapabilityBackupPostgresVerifyV1 || status.Capabilities[16] != CapabilityNodeIdentityV1 || status.Capabilities[17] != CapabilityNodeUpgradeV1 {
 				t.Fatalf("unexpected capabilities %#v", status.Capabilities)
 			}
 			return
@@ -1291,6 +1291,9 @@ func TestHandleMetricsReturnsNodeMetrics(t *testing.T) {
 	defer restore()
 
 	server := NewServer("/tmp/takod-test.sock", t.TempDir(), "test")
+	if err := server.alertManager.ApplyConfig(testAlertConfig(AlertPolicy{JobConsecutiveFailures: 1})); err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest(http.MethodGet, "/v1/metrics", nil)
 	recorder := httptest.NewRecorder()
 
@@ -1306,6 +1309,9 @@ func TestHandleMetricsReturnsNodeMetrics(t *testing.T) {
 	var metrics map[string]any
 	if err := json.Unmarshal(response.Metrics, &metrics); err != nil {
 		t.Fatalf("failed to decode nested metrics: %v", err)
+	}
+	if len(response.Alerts) != 1 || !response.Alerts[0].Configured || response.Alerts[0].Project != "demo" {
+		t.Fatalf("unexpected alert metrics status: %#v", response.Alerts)
 	}
 	if metrics["cpu_percent"] != "12.5" {
 		t.Fatalf("unexpected metrics response: %#v", metrics)

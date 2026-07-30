@@ -15,8 +15,9 @@ var (
 )
 
 type MetricsResponse struct {
-	Collected bool            `json:"collected"`
-	Metrics   json.RawMessage `json:"metrics"`
+	Collected bool                  `json:"collected"`
+	Metrics   json.RawMessage       `json:"metrics"`
+	Alerts    []AlertStatusResponse `json:"alerts,omitempty"`
 }
 
 func ReadNodeMetrics(ctx context.Context, collect bool) (*MetricsResponse, error) {

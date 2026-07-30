@@ -2,6 +2,8 @@ package takod
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +46,7 @@ const (
 	JobRunStatusFailed    = "failed"
 	JobRunStatusTimeout   = "timeout"
 	JobRunStatusSkipped   = "skipped"
+	JobRunStatusRunning   = "running"
 )
 
 // Job run triggers.
@@ -89,6 +92,7 @@ type JobSpec struct {
 	// ConfigHash is the deployer's fingerprint of the job's service config,
 	// reported back through actual state for drift/plan comparison.
 	ConfigHash string `json:"configHash,omitempty"`
+	AttemptID  string `json:"-"`
 }
 
 // JobsApplyRequest declaratively replaces this node's job set for one
@@ -134,6 +138,7 @@ type JobStatus struct {
 
 // JobRunRecord is one completed (or skipped) run in a job's history.
 type JobRunRecord struct {
+	ID          string    `json:"id,omitempty"`
 	Project     string    `json:"project"`
 	Environment string    `json:"environment"`
 	Job         string    `json:"job"`
@@ -155,8 +160,10 @@ type JobScheduler struct {
 	parser  cron.Parser
 	cron    *cron.Cron
 	// runJob is the container-execution seam; tests stub it.
-	runJob func(ctx context.Context, spec JobSpec, container string, output io.Writer) (int, error)
-	admit  func(...string) error
+	runJob             func(ctx context.Context, spec JobSpec, container string, output io.Writer) (int, error)
+	admit              func(...string) error
+	alerts             *AlertManager
+	recoverInterrupted func(context.Context, JobRunRecord) error
 
 	mu             sync.Mutex
 	entries        map[string]cron.EntryID
@@ -168,6 +175,10 @@ type JobScheduler struct {
 	recoverable    map[string]bool
 	mutating       map[string]int
 	runningChanged chan struct{}
+	runContext     context.Context
+	ready          chan struct{}
+	readyOnce      sync.Once
+	startupErr     error
 
 	// runsMu serializes run-history read-modify-write cycles: a skipped-run
 	// record can land while the blocking run still owns the running flag.
@@ -177,18 +188,20 @@ type JobScheduler struct {
 func NewJobScheduler(dataDir string) *JobScheduler {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 	return &JobScheduler{
-		dataDir:        dataDir,
-		parser:         parser,
-		cron:           cron.New(cron.WithParser(parser), cron.WithChain(cron.Recover(cron.DefaultLogger))),
-		runJob:         runJobDocker,
-		entries:        map[string]cron.EntryID{},
-		specs:          map[string]JobSpec{},
-		generations:    map[string]uint64{},
-		running:        map[string]bool{},
-		draining:       map[string]bool{},
-		recoverable:    map[string]bool{},
-		mutating:       map[string]int{},
-		runningChanged: make(chan struct{}),
+		dataDir:            dataDir,
+		parser:             parser,
+		cron:               cron.New(cron.WithParser(parser), cron.WithChain(cron.Recover(cron.DefaultLogger))),
+		runJob:             runJobDocker,
+		recoverInterrupted: recoverInterruptedJobContainer,
+		entries:            map[string]cron.EntryID{},
+		specs:              map[string]JobSpec{},
+		generations:        map[string]uint64{},
+		running:            map[string]bool{},
+		draining:           map[string]bool{},
+		recoverable:        map[string]bool{},
+		mutating:           map[string]int{},
+		runningChanged:     make(chan struct{}),
+		ready:              make(chan struct{}),
 	}
 }
 
@@ -433,6 +446,9 @@ func schedulerDrainMarkerPath(dataDir string, kind string, project string, envir
 
 func writeSchedulerDrainMarker(dataDir string, kind string, project string, environment string) error {
 	path := schedulerDrainMarkerPath(dataDir, kind, project, environment)
+	if err := validatePathParentsNoSymlink(dataDir, path, "scheduler drain path"); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("create scheduler drain marker directory: %w", err)
 	}
@@ -444,6 +460,9 @@ func writeSchedulerDrainMarker(dataDir string, kind string, project string, envi
 
 func removeSchedulerDrainMarker(dataDir string, kind string, project string, environment string) error {
 	path := schedulerDrainMarkerPath(dataDir, kind, project, environment)
+	if err := validatePathParentsNoSymlink(dataDir, path, "scheduler drain path"); err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -459,7 +478,11 @@ func removeSchedulerDrainMarker(dataDir string, kind string, project string, env
 
 func schedulerDrainMarkerExists(dataDir string, kind string, project string, environment string) (bool, error) {
 	for _, candidate := range []string{environment, ""} {
-		_, err := os.Stat(schedulerDrainMarkerPath(dataDir, kind, project, candidate))
+		path := schedulerDrainMarkerPath(dataDir, kind, project, candidate)
+		if err := validatePathParentsNoSymlink(dataDir, path, "scheduler drain path"); err != nil {
+			return false, err
+		}
+		_, err := os.Stat(path)
 		if err == nil {
 			return true, nil
 		}
@@ -480,16 +503,55 @@ func (s *JobScheduler) Run(ctx context.Context) {
 	if s == nil {
 		return
 	}
-	if err := s.loadSpecs(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "takod job scheduler failed to load jobs: %v\n", err)
+	startupCtx, releaseBarrier, err := acquireBackupRestoreMutationBarrierContext(ctx)
+	if err != nil {
+		s.startupErr = fmt.Errorf("acquire startup restore barrier: %w", err)
+		s.readyOnce.Do(func() { close(s.ready) })
+		return
 	}
+	unlockMutation, err := recovery.AcquireMutationLockContext(startupCtx, s.dataDir)
+	if err != nil {
+		releaseBarrier()
+		s.startupErr = fmt.Errorf("acquire startup snapshot lock: %w", err)
+		s.readyOnce.Do(func() { close(s.ready) })
+		return
+	}
+	if err := s.recoverInterruptedRuns(startupCtx); err != nil {
+		unlockMutation()
+		releaseBarrier()
+		s.startupErr = fmt.Errorf("recover interrupted jobs: %w", err)
+		s.readyOnce.Do(func() { close(s.ready) })
+		return
+	}
+	if err := s.loadSpecs(startupCtx); err != nil {
+		unlockMutation()
+		releaseBarrier()
+		s.startupErr = fmt.Errorf("load jobs: %w", err)
+		s.readyOnce.Do(func() { close(s.ready) })
+		return
+	}
+	unlockMutation()
+	releaseBarrier()
+	runContext, cancelRuns := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.runContext = runContext
+	s.mu.Unlock()
+	s.readyOnce.Do(func() { close(s.ready) })
 	s.cron.Start()
 	<-ctx.Done()
+	cancelRuns()
 	stopCtx := s.cron.Stop()
-	select {
-	case <-stopCtx.Done():
-	case <-time.After(30 * time.Second):
+	<-stopCtx.Done()
+	s.mu.Lock()
+	s.runContext = nil
+	s.mu.Unlock()
+}
+
+func (s *JobScheduler) StartupError() error {
+	if s == nil {
+		return nil
 	}
+	return s.startupErr
 }
 
 // Apply reconciles this node's job set for one project/environment.
@@ -578,6 +640,9 @@ func (s *JobScheduler) Apply(ctx context.Context, request JobsApplyRequest) (*Jo
 				return nil, fmt.Errorf("failed to clean old job files: %w", err)
 			}
 		}
+		if err := s.syncAlertSubject(spec); err != nil {
+			return nil, fmt.Errorf("job %s alerts: %w", name, err)
+		}
 	}
 
 	var removed []string
@@ -616,6 +681,13 @@ func (s *JobScheduler) RemoveProject(project string, environment string) ([]stri
 	}
 
 	s.mu.Lock()
+	scope := schedulerDrainScope(project, environment)
+	for key, running := range s.running {
+		if running && strings.HasPrefix(key, scope) {
+			s.mu.Unlock()
+			return nil, fmt.Errorf("cannot remove job schedules while a run is in progress")
+		}
+	}
 	var targets []JobSpec
 	for key, spec := range s.specs {
 		if spec.Project != project {
@@ -646,6 +718,10 @@ func (s *JobScheduler) RemoveProject(project string, environment string) ([]stri
 		if environment != "" {
 			path = filepath.Join(path, environment)
 		}
+		if err := validatePathParentsNoSymlink(s.dataDir, filepath.Join(path, "state.json"), "job state path"); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+			continue
+		}
 		if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("failed to remove job state: %w", err))
 		}
@@ -658,6 +734,11 @@ func (s *JobScheduler) RemoveProject(project string, environment string) ([]stri
 	for _, spec := range targets {
 		if err := removeServiceFiles(spec.Project, spec.Environment, spec.Name); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("failed to remove job files for %s: %w", spec.Name, err))
+		}
+		if s.alerts != nil {
+			if err := s.alerts.RemoveSubject(spec.Project, spec.Environment, "job", spec.Name); err != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("failed to remove job alert state for %s: %w", spec.Name, err))
+			}
 		}
 	}
 	return removed, cleanupErr
@@ -725,6 +806,22 @@ func (s *JobScheduler) List(project string, environment string) []JobStatus {
 	return statuses
 }
 
+func (s *JobScheduler) alertSpecs(project, environment string) []JobSpec {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var specs []JobSpec
+	for _, spec := range s.specs {
+		if spec.Project == project && spec.Environment == environment {
+			specs = append(specs, spec)
+		}
+	}
+	sort.Slice(specs, func(i, j int) bool { return specs[i].Name < specs[j].Name })
+	return specs
+}
+
 // Runs returns run history for one job, or every job in the environment
 // when job is empty, newest first.
 func (s *JobScheduler) Runs(project string, environment string, job string) ([]JobRunRecord, error) {
@@ -785,6 +882,8 @@ func (s *JobScheduler) Trigger(ctx context.Context, project string, environment 
 	reserved := ok && !draining && !s.running[key]
 	if reserved {
 		s.running[key] = true
+	} else if ok && !draining {
+		s.mutating[schedulerDrainScope(spec.Project, spec.Environment)]++
 	}
 	s.mu.Unlock()
 	if draining {
@@ -797,6 +896,7 @@ func (s *JobScheduler) Trigger(ctx context.Context, project string, environment 
 	if reserved {
 		record = s.executeReservedJob(ctx, spec, JobTriggerManual, stream)
 	} else {
+		defer s.endScopeMutation(schedulerDrainScope(spec.Project, spec.Environment))
 		record = s.recordSkippedJob(spec, JobTriggerManual)
 	}
 	if record.Status == JobRunStatusSkipped {
@@ -815,6 +915,7 @@ func (s *JobScheduler) executeJob(ctx context.Context, spec JobSpec, trigger str
 	if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
 		started := time.Now().UTC()
 		record := JobRunRecord{
+			ID:      newAlertID(),
 			Project: spec.Project, Environment: spec.Environment, Job: spec.Name, Trigger: trigger,
 			StartedAt: started, FinishedAt: started, ExitCode: -1, Status: JobRunStatusFailed,
 			Output: "job blocked by pending volume restore recovery: " + err.Error(),
@@ -836,6 +937,7 @@ func (s *JobScheduler) executeJob(ctx context.Context, spec JobSpec, trigger str
 func (s *JobScheduler) recordSkippedJob(spec JobSpec, trigger string) JobRunRecord {
 	started := time.Now().UTC()
 	record := JobRunRecord{
+		ID:          newAlertID(),
 		Project:     spec.Project,
 		Environment: spec.Environment,
 		Job:         spec.Name,
@@ -874,6 +976,7 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 	if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
 		finished := time.Now().UTC()
 		record := JobRunRecord{
+			ID:      newAlertID(),
 			Project: spec.Project, Environment: spec.Environment, Job: spec.Name, Trigger: trigger,
 			StartedAt: started, FinishedAt: finished, DurationMs: finished.Sub(started).Milliseconds(),
 			ExitCode: -1, Status: JobRunStatusFailed, Output: "job blocked by pending volume restore recovery: " + err.Error(),
@@ -885,6 +988,7 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 		if err := s.admit(s.dataDir); err != nil {
 			finished := time.Now().UTC()
 			record := JobRunRecord{Project: spec.Project, Environment: spec.Environment, Job: spec.Name, Trigger: trigger, StartedAt: started, FinishedAt: finished, DurationMs: finished.Sub(started).Milliseconds(), ExitCode: -1, Status: JobRunStatusFailed, Output: "job denied by resource admission: " + err.Error()}
+			record.ID = newAlertID()
 			s.appendRunRecord(record)
 			return record
 		}
@@ -895,7 +999,21 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 		timeoutSeconds = defaultJobTimeoutSeconds
 	}
 	timeout := time.Duration(timeoutSeconds) * time.Second
-	container := fmt.Sprintf("tako_%s_%s_%s_job_%d", spec.Project, spec.Environment, spec.Name, time.Now().UnixNano())
+	attemptID := newAlertID()
+	container := scheduledJobContainerName(spec.Project, spec.Environment, spec.Name, attemptID)
+	attempt := JobRunRecord{
+		ID: attemptID, Project: spec.Project, Environment: spec.Environment, Job: spec.Name, Trigger: trigger,
+		Container: container, StartedAt: started, ExitCode: -1, Status: JobRunStatusRunning,
+	}
+	if err := s.beginRunRecord(attempt); err != nil {
+		finished := time.Now().UTC()
+		fmt.Fprintf(os.Stderr, "takod job scheduler refused to start untracked job %s: %v\n", key, err)
+		return JobRunRecord{
+			ID: attemptID, Project: spec.Project, Environment: spec.Environment, Job: spec.Name, Trigger: trigger,
+			Container: container, StartedAt: started, FinishedAt: finished, DurationMs: finished.Sub(started).Milliseconds(),
+			ExitCode: -1, Status: JobRunStatusFailed, Output: "job did not start because its durable attempt record could not be written",
+		}
+	}
 
 	capped := newCappedOutputBuffer(jobRunOutputMaxBytes)
 	target := io.Writer(capped)
@@ -910,17 +1028,33 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	exitCode := -1
+	dockerAttempted := false
 	runErr := ensureServiceVolumes(runCtx, ReconcileServiceRequest{
 		Project: spec.Project, Environment: spec.Environment, Service: spec.Name,
 		Mounts: spec.Mounts, ExternalVolumes: spec.ExternalVolumes, VolumeOwnership: spec.VolumeOwnership, DataDir: s.dataDir,
 	})
 	if runErr == nil {
-		exitCode, runErr = s.runJob(runCtx, spec, container, out)
+		dockerAttempted = true
+		runSpec := spec
+		runSpec.AttemptID = attemptID
+		exitCode, runErr = s.runJob(runCtx, runSpec, container, out)
 	}
 	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
+	interrupted := runCtx.Err() != nil
 	cancel()
-	if timedOut {
-		removeExecContainer(container)
+	if dockerAttempted && (runErr != nil || interrupted) {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cleanupErr := s.recoverInterrupted(cleanupCtx, attempt)
+		cleanupCancel()
+		if cleanupErr != nil {
+			out.ensureLineStart()
+			fmt.Fprintf(out, "job helper cleanup deferred to takod restart: %v\n", cleanupErr)
+			if stream != nil {
+				fmt.Fprintf(stream, "%s%d\n", ExecExitMarker, -1)
+			}
+			attempt.Output = capped.String()
+			return attempt
+		}
 	}
 
 	if runErr != nil {
@@ -939,11 +1073,14 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 	switch {
 	case timedOut:
 		status = JobRunStatusTimeout
+	case interrupted:
+		status = JobRunStatusFailed
 	case runErr != nil || exitCode != 0:
 		status = JobRunStatusFailed
 	}
 	finished := time.Now().UTC()
 	record := JobRunRecord{
+		ID:          attemptID,
 		Project:     spec.Project,
 		Environment: spec.Environment,
 		Job:         spec.Name,
@@ -956,25 +1093,15 @@ func (s *JobScheduler) executeReservedJob(ctx context.Context, spec JobSpec, tri
 		Status:      status,
 		Output:      capped.String(),
 	}
-	s.appendRunRecord(record)
+	if err := s.completeRunRecord(record); err != nil {
+		fmt.Fprintf(os.Stderr, "takod job scheduler failed to complete durable run history: %v\n", err)
+	}
 	return record
 }
 
 // runScheduledJob is the cron entry point: it resolves the current spec so
 // a re-applied job fires with its latest definition.
 func (s *JobScheduler) runScheduledJob(key string, expectedGeneration ...uint64) {
-	barrierCtx, releaseBarrier := acquireBackupRestoreMutationBarrier(context.Background())
-	defer releaseBarrier()
-	if err := ensureNoPendingRestoreTransactionsOnNode(); err != nil {
-		fmt.Fprintf(os.Stderr, "takod scheduled job %s blocked by restore recovery: %v\n", key, err)
-		return
-	}
-	unlock, err := recovery.AcquireMutationLock(s.dataDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "takod scheduled job %s snapshot lock failed: %v\n", key, err)
-		return
-	}
-	defer unlock()
 	s.mu.Lock()
 	spec, ok := s.specs[key]
 	if ok && len(expectedGeneration) > 0 && s.generations[key] != expectedGeneration[0] {
@@ -985,22 +1112,73 @@ func (s *JobScheduler) runScheduledJob(key string, expectedGeneration ...uint64)
 		draining = s.scopeDrainingLocked(schedulerDrainScope(spec.Project, spec.Environment))
 	}
 	reserved := ok && !draining && !s.running[key]
+	runContext := s.runContext
+	if runContext == nil {
+		runContext = context.Background()
+	}
 	if reserved {
 		s.running[key] = true
+	} else if ok && !draining {
+		s.mutating[schedulerDrainScope(spec.Project, spec.Environment)]++
 	}
 	s.mu.Unlock()
 	if !ok || draining {
 		return
 	}
-	var record JobRunRecord
-	if reserved {
-		record = s.executeReservedJob(barrierCtx, spec, JobTriggerSchedule, nil)
-	} else {
-		record = s.recordSkippedJob(spec, JobTriggerSchedule)
+	if !reserved {
+		defer s.endScopeMutation(schedulerDrainScope(spec.Project, spec.Environment))
 	}
+	barrierCtx, releaseBarrier, barrierErr := acquireBackupRestoreMutationBarrierContext(runContext)
+	if barrierErr != nil {
+		if reserved {
+			s.mu.Lock()
+			delete(s.running, key)
+			s.notifyRunningChangedLocked()
+			s.mu.Unlock()
+		}
+		return
+	}
+	defer releaseBarrier()
+	unlock, err := recovery.AcquireMutationLockContext(barrierCtx, s.dataDir)
+	if err != nil {
+		if !reserved {
+			return
+		}
+		if barrierCtx.Err() != nil {
+			s.mu.Lock()
+			delete(s.running, key)
+			s.notifyRunningChangedLocked()
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Lock()
+		delete(s.running, key)
+		s.notifyRunningChangedLocked()
+		s.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "takod scheduled job %s snapshot lock failed: %v\n", key, err)
+		return
+	}
+	defer unlock()
+	if !reserved {
+		record := s.recordSkippedJob(spec, JobTriggerSchedule)
+		fmt.Fprintf(os.Stderr, "takod scheduled job %s finished %s (exit %d)\n", key, record.Status, record.ExitCode)
+		return
+	}
+	record := s.executeReservedJob(barrierCtx, spec, JobTriggerSchedule, nil)
 	if record.Status != JobRunStatusSucceeded {
 		fmt.Fprintf(os.Stderr, "takod scheduled job %s finished %s (exit %d)\n", key, record.Status, record.ExitCode)
 	}
+}
+
+func (s *JobScheduler) endScopeMutation(scope string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mutating[scope] <= 1 {
+		delete(s.mutating, scope)
+	} else {
+		s.mutating[scope]--
+	}
+	s.notifyRunningChangedLocked()
 }
 
 // runJobDocker is the production execution seam: a one-off --rm container
@@ -1030,6 +1208,9 @@ func buildJobRunArgs(spec JobSpec, container string, envFile string) []string {
 		"--label", "tako.service=" + spec.Name,
 		"--label", "tako.runtime=takod",
 		"--label", jobRoleLabel,
+	}
+	if spec.AttemptID != "" {
+		args = append(args, "--label", "tako.attempt="+spec.AttemptID)
 	}
 	labelKeys := make([]string, 0, len(spec.Labels))
 	for key := range spec.Labels {
@@ -1171,6 +1352,9 @@ func jobCronSpec(spec JobSpec) string {
 
 func (s *JobScheduler) loadSpecs(ctx context.Context) error {
 	root := filepath.Join(s.dataDir, jobSpecDirName)
+	if err := validateStorageTreeNoSymlink(root, "job spec storage"); err != nil {
+		return err
+	}
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return nil
 	}
@@ -1180,6 +1364,9 @@ func (s *JobScheduler) loadSpecs(ctx context.Context) error {
 		}
 		if entry.IsDir() || filepath.Ext(path) != ".json" {
 			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("job spec %s must be a regular file", path)
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1194,6 +1381,9 @@ func (s *JobScheduler) loadSpecs(ctx context.Context) error {
 		}
 		if err := validateJobSpec(&spec); err != nil {
 			return fmt.Errorf("invalid job spec %s: %w", path, err)
+		}
+		if filepath.Clean(path) != filepath.Clean(jobSpecPath(s.dataDir, spec.Project, spec.Environment, spec.Name)) {
+			return fmt.Errorf("job spec identity does not match path %s", path)
 		}
 		endMutation, admitted, err := s.beginLoaderMutation(ctx, spec.Project, spec.Environment)
 		if err != nil {
@@ -1219,16 +1409,26 @@ func (s *JobScheduler) loadSpecs(ctx context.Context) error {
 			endMutation()
 			return fmt.Errorf("invalid refreshed job spec %s: %w", path, err)
 		}
+		if filepath.Clean(path) != filepath.Clean(jobSpecPath(s.dataDir, spec.Project, spec.Environment, spec.Name)) {
+			endMutation()
+			return fmt.Errorf("refreshed job spec identity does not match path %s", path)
+		}
 		s.mu.Lock()
 		err = s.scheduleLocked(spec)
 		s.mu.Unlock()
 		endMutation()
-		return err
+		if err != nil {
+			return err
+		}
+		return s.syncAlertSubject(spec)
 	})
 }
 
 func (s *JobScheduler) persistSpec(spec JobSpec) error {
 	path := jobSpecPath(s.dataDir, spec.Project, spec.Environment, spec.Name)
+	if err := validatePathParentsNoSymlink(s.dataDir, path, "job spec path"); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("failed to create job spec directory: %w", err)
 	}
@@ -1266,23 +1466,37 @@ func (s *JobScheduler) scheduleLocked(spec JobSpec) error {
 func (s *JobScheduler) removeJob(project string, environment string, name string) error {
 	key := jobKey(project, environment, name)
 	s.mu.Lock()
+	if s.running[key] {
+		s.mu.Unlock()
+		return fmt.Errorf("job %s cannot be removed while a run is in progress", name)
+	}
 	if entryID, ok := s.entries[key]; ok {
 		s.cron.Remove(entryID)
 		delete(s.entries, key)
 	}
 	delete(s.specs, key)
 	delete(s.generations, key)
-	running := s.running[key]
 	s.mu.Unlock()
-	if err := os.Remove(jobSpecPath(s.dataDir, project, environment, name)); err != nil && !os.IsNotExist(err) {
+	specPath := jobSpecPath(s.dataDir, project, environment, name)
+	runsPath := jobRunsPath(s.dataDir, project, environment, name)
+	if err := validatePathParentsNoSymlink(s.dataDir, specPath, "job spec path"); err != nil {
+		return err
+	}
+	if err := validatePathParentsNoSymlink(s.dataDir, runsPath, "job run path"); err != nil {
+		return err
+	}
+	if err := os.Remove(specPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove job spec: %w", err)
 	}
-	if err := os.Remove(jobRunsPath(s.dataDir, project, environment, name)); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(runsPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove job run history: %w", err)
 	}
-	if !running {
-		if err := removeServiceFiles(project, environment, name); err != nil {
-			return fmt.Errorf("failed to remove job files: %w", err)
+	if err := removeServiceFiles(project, environment, name); err != nil {
+		return fmt.Errorf("failed to remove job files: %w", err)
+	}
+	if s.alerts != nil {
+		if err := s.alerts.RemoveSubject(project, environment, "job", name); err != nil {
+			return fmt.Errorf("failed to remove job alert state: %w", err)
 		}
 	}
 	return nil
@@ -1318,38 +1532,262 @@ func jobJSONNames(dir string) ([]string, error) {
 }
 
 func (s *JobScheduler) appendRunRecord(record JobRunRecord) {
-	s.runsMu.Lock()
-	defer s.runsMu.Unlock()
-	records, err := s.readRunRecords(record.Project, record.Environment, record.Job)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "takod job scheduler failed to read run history: %v\n", err)
-		records = nil
+	if record.ID == "" {
+		record.ID = jobRunAlertID(record)
 	}
-	records = append([]JobRunRecord{record}, records...)
-	if len(records) > maxJobRunRecords {
-		records = records[:maxJobRunRecords]
-	}
-	path := jobRunsPath(s.dataDir, record.Project, record.Environment, record.Job)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "takod job scheduler failed to create run history directory: %v\n", err)
-		return
-	}
-	data, err := json.MarshalIndent(records, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "takod job scheduler failed to encode run history: %v\n", err)
-		return
-	}
-	data = append(data, '\n')
-	if err := writeFileAtomic(path, data, 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "takod job scheduler failed to write run history: %v\n", err)
+	if err := s.persistRunRecord(record, false); err != nil {
+		fmt.Fprintf(os.Stderr, "takod job scheduler failed to persist run history: %v\n", err)
 	}
 }
 
+func (s *JobScheduler) beginRunRecord(record JobRunRecord) error {
+	if record.ID == "" {
+		return fmt.Errorf("job run ID is required")
+	}
+	if record.Status != JobRunStatusRunning || record.FinishedAt.IsZero() == false {
+		return fmt.Errorf("invalid running job record")
+	}
+	if err := validateJobRunRecord(&record); err != nil {
+		return err
+	}
+	return s.persistRunRecord(record, false)
+}
+
+func (s *JobScheduler) completeRunRecord(record JobRunRecord) error {
+	if record.ID == "" || record.Status == JobRunStatusRunning || !validAlertAttemptStatus(record.Status) || record.FinishedAt.IsZero() {
+		return fmt.Errorf("invalid completed job record")
+	}
+	return s.persistRunRecord(record, true)
+}
+
+func (s *JobScheduler) persistRunRecord(record JobRunRecord, replace bool) error {
+	s.runsMu.Lock()
+	records, err := s.readRunRecords(record.Project, record.Environment, record.Job)
+	if err != nil {
+		s.runsMu.Unlock()
+		return err
+	}
+	replaced := false
+	if record.Status == JobRunStatusRunning {
+		for _, existing := range records {
+			if existing.Status == JobRunStatusRunning && existing.ID != record.ID {
+				s.runsMu.Unlock()
+				return fmt.Errorf("job already has a durable running attempt")
+			}
+		}
+	}
+	if replace {
+		for index := range records {
+			if records[index].ID == record.ID {
+				records[index] = record
+				replaced = true
+				break
+			}
+		}
+	}
+	if !replaced {
+		records = append([]JobRunRecord{record}, records...)
+	}
+	records = boundJobRunRecords(records)
+	path := jobRunsPath(s.dataDir, record.Project, record.Environment, record.Job)
+	if err := validatePathParentsNoSymlink(s.dataDir, path, "job run path"); err != nil {
+		s.runsMu.Unlock()
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		s.runsMu.Unlock()
+		return err
+	}
+	data, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		s.runsMu.Unlock()
+		return err
+	}
+	data = append(data, '\n')
+	if err := writeFileAtomic(path, data, 0600); err != nil {
+		s.runsMu.Unlock()
+		return err
+	}
+	s.runsMu.Unlock()
+	if s.alerts != nil && record.Trigger == JobTriggerSchedule && record.Status != JobRunStatusRunning {
+		if err := s.alerts.Observe(jobRunAlertFact(record)); err != nil {
+			return fmt.Errorf("persist job alert fact: %w", err)
+		}
+	}
+	return nil
+}
+
+func boundJobRunRecords(records []JobRunRecord) []JobRunRecord {
+	running := 0
+	for _, record := range records {
+		if record.Status == JobRunStatusRunning {
+			running++
+		}
+	}
+	terminalBudget := maxJobRunRecords - running
+	if terminalBudget < 0 {
+		terminalBudget = 0
+	}
+	bounded := make([]JobRunRecord, 0, min(len(records), maxJobRunRecords))
+	for _, record := range records {
+		if record.Status == JobRunStatusRunning {
+			bounded = append(bounded, record)
+		} else if terminalBudget > 0 {
+			bounded = append(bounded, record)
+			terminalBudget--
+		}
+	}
+	return bounded
+}
+
+func (s *JobScheduler) recoverInterruptedRuns(ctx context.Context) error {
+	root := filepath.Join(s.dataDir, jobRunsDirName)
+	if err := validateStorageTreeNoSymlink(root, "job run storage"); err != nil {
+		return err
+	}
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if os.IsNotExist(walkErr) {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".json" {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("job run history %s must be a regular file", path)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var records []JobRunRecord
+		if err := json.Unmarshal(data, &records); err != nil {
+			return fmt.Errorf("parse job run history %s: %w", path, err)
+		}
+		for index := range records {
+			record := records[index]
+			if err := validateJobRunRecord(&record); err != nil || filepath.Clean(path) != filepath.Clean(jobRunsPath(s.dataDir, record.Project, record.Environment, record.Job)) {
+				return fmt.Errorf("invalid job run history %s", path)
+			}
+			if record.Status != JobRunStatusRunning {
+				continue
+			}
+			if s.recoverInterrupted != nil {
+				if err := s.recoverInterrupted(ctx, record); err != nil {
+					return fmt.Errorf("recover interrupted job %s/%s/%s: %w", record.Project, record.Environment, record.Job, err)
+				}
+			}
+			record.Status = JobRunStatusFailed
+			record.FinishedAt = time.Now().UTC()
+			record.DurationMs = record.FinishedAt.Sub(record.StartedAt).Milliseconds()
+			record.ExitCode = -1
+			record.Output = "job interrupted by takod restart"
+			if err := s.completeRunRecord(record); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func recoverInterruptedJobContainer(ctx context.Context, record JobRunRecord) error {
+	if record.Container == "" {
+		return nil
+	}
+	if !isSafeContainerName(record.Container) {
+		return fmt.Errorf("invalid interrupted job container name")
+	}
+	output, err := runDocker(ctx, "ps", "-a", "--filter", "name=^"+record.Container+"$", "--format", "{{.Names}}")
+	if err != nil {
+		return fmt.Errorf("inspect interrupted job container: %w, output: %s", err, output)
+	}
+	if strings.TrimSpace(output) != record.Container {
+		return nil
+	}
+	if err := verifyRecoveryContainerLabels(ctx, record.Container, map[string]string{
+		"tako.project": record.Project, "tako.environment": record.Environment, "tako.service": record.Job,
+		"tako.runtime": "takod", "tako.role": "job", "tako.attempt": record.ID,
+	}); err != nil {
+		return err
+	}
+	output, err = runDocker(ctx, "rm", "-f", record.Container)
+	if err != nil {
+		return fmt.Errorf("remove interrupted job container: %w, output: %s", err, output)
+	}
+	return nil
+}
+
+func verifyRecoveryContainerLabels(ctx context.Context, container string, expected map[string]string) error {
+	output, err := runDocker(ctx, "inspect", container, "--format", "{{json .Config.Labels}}")
+	if err != nil {
+		return fmt.Errorf("inspect interrupted container identity: %w, output: %s", err, output)
+	}
+	labels := map[string]string{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &labels); err != nil {
+		return fmt.Errorf("inspect interrupted container identity: invalid labels")
+	}
+	for key, value := range expected {
+		if labels[key] != value {
+			return fmt.Errorf("interrupted container %s identity mismatch", container)
+		}
+	}
+	return nil
+}
+
+func (s *JobScheduler) syncAlertSubject(spec JobSpec) error {
+	if s.alerts == nil {
+		return nil
+	}
+	if err := s.alerts.RegisterSubject(spec.Project, spec.Environment, "job", spec.Name); err != nil {
+		return err
+	}
+	records, err := s.readRunRecords(spec.Project, spec.Environment, spec.Name)
+	if err != nil {
+		return err
+	}
+	for index := len(records) - 1; index >= 0; index-- {
+		if records[index].Trigger != JobTriggerSchedule || records[index].Status == JobRunStatusRunning {
+			continue
+		}
+		if records[index].ID == "" {
+			records[index].ID = jobRunAlertID(records[index])
+		}
+		if err := s.alerts.Observe(jobRunAlertFact(records[index])); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func jobRunAlertFact(record JobRunRecord) AlertAttemptFact {
+	return AlertAttemptFact{ID: record.ID, Project: record.Project, Environment: record.Environment, Kind: "job", Service: record.Job, Status: record.Status, StartedAt: record.StartedAt, FinishedAt: record.FinishedAt}
+}
+
+func jobRunAlertID(record JobRunRecord) string {
+	return fmt.Sprintf("job-%d-%d-%s", record.StartedAt.UnixNano(), record.FinishedAt.UnixNano(), record.Status)
+}
+
 func (s *JobScheduler) readRunRecords(project string, environment string, name string) ([]JobRunRecord, error) {
-	data, err := os.ReadFile(jobRunsPath(s.dataDir, project, environment, name))
+	path := jobRunsPath(s.dataDir, project, environment, name)
+	if err := validatePathParentsNoSymlink(s.dataDir, path, "job run path"); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to read job run history: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("job run history must be a regular file")
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read job run history: %w", err)
 	}
@@ -1357,7 +1795,56 @@ func (s *JobScheduler) readRunRecords(project string, environment string, name s
 	if err := json.Unmarshal(data, &records); err != nil {
 		return nil, fmt.Errorf("failed to parse job run history: %w", err)
 	}
+	for index := range records {
+		if err := validateJobRunRecord(&records[index]); err != nil || records[index].Project != project || records[index].Environment != environment || records[index].Job != name {
+			return nil, fmt.Errorf("invalid job run history")
+		}
+	}
 	return records, nil
+}
+
+func validateJobRunRecord(record *JobRunRecord) error {
+	if record == nil || !isSafeProjectName(record.Project) || !isSafeRuntimeName(record.Environment) || !isSafeServiceName(record.Job) || (record.Trigger != JobTriggerSchedule && record.Trigger != JobTriggerManual) || record.StartedAt.IsZero() {
+		return fmt.Errorf("invalid job run identity")
+	}
+	if len(record.ID) > 128 || hasControlChars(record.ID) {
+		return fmt.Errorf("invalid job run ID")
+	}
+	if record.Container != "" && !isSafeContainerName(record.Container) {
+		return fmt.Errorf("invalid job run container")
+	}
+	if record.Status == JobRunStatusRunning {
+		if record.ID == "" || !record.FinishedAt.IsZero() || record.Container != scheduledJobContainerName(record.Project, record.Environment, record.Job, record.ID) {
+			return fmt.Errorf("invalid running job record")
+		}
+		return nil
+	}
+	if !validAlertAttemptStatus(record.Status) || record.FinishedAt.IsZero() || record.StartedAt.After(record.FinishedAt) {
+		return fmt.Errorf("invalid completed job record")
+	}
+	if record.ID == "" {
+		record.ID = jobRunAlertID(*record)
+	}
+	return nil
+}
+
+func scheduledJobContainerName(project, environment, job, attemptID string) string {
+	return schedulerContainerName("job", project, environment, job, attemptID)
+}
+
+func schedulerContainerName(role, project, environment, service, attemptID string) string {
+	component := func(value string) string {
+		if len(value) > 20 {
+			return value[:20]
+		}
+		return value
+	}
+	identity := attemptID
+	if len(identity) > 12 {
+		identity = identity[:12]
+	}
+	sum := sha256.Sum256([]byte(project + "\x00" + environment + "\x00" + service + "\x00" + role + "\x00" + attemptID))
+	return fmt.Sprintf("tako_%s_%s_%s_%s_%s_%s", component(project), component(environment), component(service), role, identity, hex.EncodeToString(sum[:8]))
 }
 
 func (s *JobScheduler) lastRunRecord(project string, environment string, name string) *JobRunRecord {

@@ -3,6 +3,7 @@
 package recovery
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -164,13 +165,29 @@ func upgradeOwnerAllowed(uid uint32) bool {
 }
 
 func AcquireMutationLock(dataDir string) (func(), error) {
+	return AcquireMutationLockContext(context.Background(), dataDir)
+}
+
+func AcquireMutationLockContext(ctx context.Context, dataDir string) (func(), error) {
 	file, err := openPlatformLock(dataDir)
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_SH); err != nil {
-		_ = file.Close()
-		return nil, err
+	for {
+		err = unix.Flock(int(file.Fd()), unix.LOCK_SH|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			_ = file.Close()
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 	return func() { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN); _ = file.Close() }, nil
 }

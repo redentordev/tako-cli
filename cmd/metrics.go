@@ -321,6 +321,18 @@ func readMetricsViaTakod(client any, cfg *config.Config, collect bool) (*Metrics
 	return &metrics, nil
 }
 
+func readAlertStatusViaTakod(client any, cfg *config.Config, environment string) (*takod.AlertStatusResponse, error) {
+	output, err := takodclient.RequestJSON(client, takodSocketFromConfig(cfg), "GET", takodclient.AlertsEndpoint(cfg.Project.Name, environment), nil)
+	if err != nil {
+		return nil, err
+	}
+	var response takod.AlertStatusResponse
+	if err := decodeTakodJSON(output, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
 func displayServerMetrics(out io.Writer, serverName, serverHost string, metrics *MetricsData) {
 	fmt.Fprintf(out, "📊 %s (%s)\n", serverName, serverHost)
 	fmt.Fprintf(out, "─────────────────────────────────────────────────\n")

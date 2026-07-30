@@ -272,6 +272,22 @@ func TestFullBackupVolumeNameUsesExplicitDockerVolume(t *testing.T) {
 	}
 }
 
+func TestCreateVolumeBackupUsesRecoverableContainerName(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restoreCommands := useFakeCommands(t, logPath)
+	defer restoreCommands()
+	container := "tako_demo_production_postgres_backup_attempt_1"
+	if _, err := CreateVolumeBackup(context.Background(), BackupRequest{Project: "demo", Environment: "production", Volume: "data", ContainerName: container, Service: "database", AttemptID: "attempt-1"}); err != nil {
+		t.Fatal(err)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if !strings.Contains(commands, "run --rm --name "+container) {
+		t.Fatalf("backup command omitted recoverable name:\n%s", commands)
+	}
+}
+
 func TestCreateVolumeBackupReturnsWarningWhenRemoteUploadFails(t *testing.T) {
 	restore := useTempBackupRoot(t)
 	defer restore()

@@ -491,6 +491,7 @@ func TestExecuteJobRecordsFailureExitCode(t *testing.T) {
 
 func TestExecuteJobRecordsTimeout(t *testing.T) {
 	scheduler := newTestJobScheduler(t)
+	scheduler.recoverInterrupted = func(context.Context, JobRunRecord) error { return nil }
 	scheduler.runJob = func(ctx context.Context, spec JobSpec, container string, output io.Writer) (int, error) {
 		<-ctx.Done()
 		return -1, nil
@@ -580,12 +581,14 @@ func TestJobRunHistoryIsBounded(t *testing.T) {
 	scheduler := newTestJobScheduler(t)
 	spec := validJobSpecFixture()
 	for i := 0; i < maxJobRunRecords+5; i++ {
+		finished := time.Now().UTC()
 		scheduler.appendRunRecord(JobRunRecord{
 			Project:     spec.Project,
 			Environment: spec.Environment,
 			Job:         spec.Name,
 			Trigger:     JobTriggerSchedule,
-			StartedAt:   time.Now().UTC(),
+			StartedAt:   finished,
+			FinishedAt:  finished,
 			Status:      JobRunStatusSucceeded,
 		})
 	}
@@ -738,7 +741,8 @@ func TestRemoveProjectUnschedulesAndDeletesState(t *testing.T) {
 	if _, err := scheduler.Apply(context.Background(), JobsApplyRequest{Project: "demo", Environment: "production", Jobs: []JobSpec{validJobSpecFixture()}}); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	scheduler.appendRunRecord(JobRunRecord{Project: "demo", Environment: "production", Job: "report", Status: JobRunStatusSucceeded, StartedAt: time.Now().UTC()})
+	finished := time.Now().UTC()
+	scheduler.appendRunRecord(JobRunRecord{Project: "demo", Environment: "production", Job: "report", Trigger: JobTriggerSchedule, Status: JobRunStatusSucceeded, StartedAt: finished, FinishedAt: finished})
 
 	removed, err := scheduler.RemoveProject("demo", "production")
 	if err != nil {

@@ -49,6 +49,7 @@ type Server struct {
 	server                             *http.Server
 	backupScheduler                    *BackupScheduler
 	jobScheduler                       *JobScheduler
+	alertManager                       *AlertManager
 	certificateScheduler               *CertificateScheduler
 	uploadReadTimeout                  time.Duration
 	diskReservationMu                  sync.Mutex
@@ -151,6 +152,10 @@ const CapabilityBackupPostgresVerifyV1 = "backup.postgres-verify-v1"
 // numeric ownership only for token-proven, newly created local volumes.
 const CapabilityVolumeCreationOwnershipV1 = "volume.creation-ownership-v1"
 
+// CapabilitySchedulerAlertsV1 means the agent persists scheduler facts,
+// deduplicated alert episodes, and a bounded delivery outbox.
+const CapabilitySchedulerAlertsV1 = "scheduler.alerts-v1"
+
 // CapabilityImageBuildOptionsV1 means the streamed image builder consumes
 // buildArgs and target from the request preamble.
 const CapabilityImageBuildOptionsV1 = "image.build-options-v1"
@@ -213,6 +218,7 @@ type ServerOptions struct {
 }
 
 func NewServerWithOptions(socket string, dataDir string, version string, opts ServerOptions) *Server {
+	alertManager := NewAlertManager(dataDir)
 	server := &Server{
 		socket:                         socket,
 		dataDir:                        dataDir,
@@ -234,10 +240,13 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 		startedAt:                      time.Now().UTC(),
 		backupScheduler:                NewBackupScheduler(dataDir),
 		jobScheduler:                   NewJobScheduler(dataDir),
+		alertManager:                   alertManager,
 		certificateScheduler:           NewCertificateScheduler(dataDir),
 		uploadReadTimeout:              opts.UploadReadTimeout,
 		diskReservations:               make(map[string]int64),
 	}
+	server.backupScheduler.alerts = alertManager
+	server.jobScheduler.alerts = alertManager
 	if server.diskAvailable == nil {
 		server.diskAvailable = availableDiskBytes
 	}
@@ -355,6 +364,9 @@ func (s *Server) Run(ctx context.Context) error {
 	probeCtx, cancelProbe := context.WithTimeout(ctx, 2*time.Minute)
 	s.postgresVerificationQuotaSupported = s.postgresVerificationQuotaProbe(probeCtx)
 	cancelProbe()
+	if err := s.alertManager.LoadContext(ctx); err != nil {
+		return fmt.Errorf("load scheduler alerts: %w", err)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(s.socket), 0755); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
@@ -367,6 +379,7 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", s.socket, err)
 	}
+	defer listener.Close()
 	if err := os.Chmod(s.socket, 0660); err != nil {
 		listener.Close()
 		return fmt.Errorf("failed to chmod socket: %w", err)
@@ -381,16 +394,33 @@ func (s *Server) Run(ctx context.Context) error {
 	s.mu.Lock()
 	s.server = httpServer
 	s.mu.Unlock()
+	runCtx, cancelRun := context.WithCancel(ctx)
+	var runWG sync.WaitGroup
+	start := func(run func()) {
+		runWG.Add(1)
+		go func() {
+			defer runWG.Done()
+			run()
+		}()
+	}
+	defer func() {
+		cancelRun()
+		runWG.Wait()
+	}()
 
 	if s.actualRefreshInterval > 0 {
-		go s.runActualRefreshLoop(ctx)
+		start(func() { s.runActualRefreshLoop(runCtx) })
 	}
 	if s.buildCachePruneInterval > 0 {
-		go s.runBuildCachePruneLoop(ctx)
+		start(func() { s.runBuildCachePruneLoop(runCtx) })
 	}
-	go s.backupScheduler.Run(ctx)
-	go s.jobScheduler.Run(ctx)
-	go s.certificateScheduler.Run(ctx)
+	start(func() { s.backupScheduler.Run(runCtx) })
+	start(func() { s.jobScheduler.Run(runCtx) })
+	if err := s.waitForSchedulerStartup(); err != nil {
+		return err
+	}
+	start(func() { s.alertManager.Run(runCtx) })
+	start(func() { s.certificateScheduler.Run(runCtx) })
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -403,15 +433,31 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
+		cancelRun()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = httpServer.Shutdown(shutdownCtx)
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			_ = httpServer.Close()
+		}
+		<-errCh
 		_ = os.Remove(s.socket)
 		return ctx.Err()
 	case err := <-errCh:
 		_ = os.Remove(s.socket)
 		return err
 	}
+}
+
+func (s *Server) waitForSchedulerStartup() error {
+	<-s.backupScheduler.ready
+	<-s.jobScheduler.ready
+	if err := s.backupScheduler.StartupError(); err != nil {
+		return fmt.Errorf("backup scheduler startup failed: %w", err)
+	}
+	if err := s.jobScheduler.StartupError(); err != nil {
+		return fmt.Errorf("job scheduler startup failed: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) enforceEnrolledProxyPolicy(ctx context.Context) (func(), error) {
@@ -1203,6 +1249,12 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response.JobsRemoved = len(removedJobs)
+		if err := s.alertManager.RemoveConfig(request.Project, request.Environment); err != nil {
+			s.jobScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+			s.backupScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+			http.Error(w, fmt.Sprintf("failed to remove scheduler alert state after cleanup: %v", err), http.StatusInternalServerError)
+			return
+		}
 		releaseSchedulerDrains = true
 		if err := ReleaseProjectPortAllocations(r.Context(), s.dataDir, request.Project, request.Environment); err != nil {
 			response.Warnings = append(response.Warnings, fmt.Sprintf("failed to release port allocations: %v", err))
@@ -2342,6 +2394,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	response.Alerts = s.alertManager.StatusAll()
 
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
@@ -2416,7 +2469,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,

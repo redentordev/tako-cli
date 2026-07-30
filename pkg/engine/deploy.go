@@ -249,6 +249,11 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 	e.RegisterRegistrySecrets(cfg)
 	e.RegisterACMEDNSSecrets(cfg)
+	if cfg.Notifications != nil {
+		e.RegisterSecret(cfg.Notifications.Slack)
+		e.RegisterSecret(cfg.Notifications.Discord)
+		e.RegisterSecret(cfg.Notifications.Webhook)
+	}
 
 	// Create SSH pool.
 	session.sshPool = ssh.NewPool()
@@ -384,17 +389,17 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 	deploy.SetEventSink(e.stream)
 	session.deployer = deploy
-	mutationServerNames := DeployMutationTargets(cfg, allServices, deploy.ResolvedAssignments())
-	mutationServerNames = AddPriorDesiredMutationTargets(cfg, mutationServerNames, priorDesired)
-	if len(mutationServerNames) == 0 {
-		mutationServerNames = []string{sourceServerName}
+	workloadMutationServerNames := DeployMutationTargets(cfg, allServices, deploy.ResolvedAssignments())
+	workloadMutationServerNames = AddPriorDesiredMutationTargets(cfg, workloadMutationServerNames, priorDesired)
+	if len(workloadMutationServerNames) == 0 {
+		workloadMutationServerNames = []string{sourceServerName}
 	}
 	environmentTarget := make(map[string]struct{}, len(serverNames))
 	for _, name := range serverNames {
 		environmentTarget[name] = struct{}{}
 	}
-	setupTargets := make([]string, 0, len(mutationServerNames))
-	for _, name := range mutationServerNames {
+	setupTargets := make([]string, 0, len(workloadMutationServerNames))
+	for _, name := range workloadMutationServerNames {
 		if _, ok := environmentTarget[name]; ok {
 			setupTargets = append(setupTargets, name)
 		}
@@ -405,6 +410,11 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	if err := deploy.SetTargetServers(setupTargets); err != nil {
 		return nil, err
 	}
+	mutationServerNames := append([]string(nil), workloadMutationServerNames...)
+	// Alert reconciliation enables schedulable owners and explicitly disables
+	// every other environment member. Include that control-plane fanout in the
+	// operation fence without widening deploy.SetTargetServers workload scope.
+	mutationServerNames = deployMutationAuthorityTargets(mutationServerNames, connectivityServerNames)
 	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, session.sshPool, cfg, session.envName, mutationServerNames, "deploy")
 	if err != nil {
 		return nil, err
@@ -566,6 +576,25 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	return session, nil
 }
 
+func unionServerNames(groups ...[]string) []string {
+	seen := map[string]bool{}
+	for _, group := range groups {
+		for _, name := range group {
+			seen[name] = true
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for name := range seen {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func deployMutationAuthorityTargets(workloadTargets, alertReconciliationTargets []string) []string {
+	return unionServerNames(workloadTargets, alertReconciliationTargets)
+}
+
 func (s *DeploySession) takoDir() string {
 	if s.workDir == "." {
 		return ".tako"
@@ -615,6 +644,9 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	if err := s.deployer.PreflightGracefulStopCapabilities(); err != nil {
 		return nil, err
 	}
+	if err := s.deployer.PreflightAlertPolicy(); err != nil {
+		return nil, err
+	}
 
 	e := s.engine
 	defer e.flushBuildOutput()
@@ -642,6 +674,9 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	}
 
 	if plan.IsEmpty() && !deployplan.HasBuildServices(services) && !req.Force {
+		if err := s.deployer.ApplyAlertPolicy(); err != nil {
+			return nil, fmt.Errorf("failed to apply scheduler alert policy: %w", err)
+		}
 		intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredStateServices, nil, actualState)
 		var baseline *takodstate.DesiredRevision
 		if req.Service != "" {
@@ -958,6 +993,15 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 				deployment.Status = remotestate.StatusFailed
 				deployment.Error = err.Error()
 			}
+		}
+	}
+	if !deploymentFailed {
+		if err := s.deployer.ApplyAlertPolicy(); err != nil {
+			e.emit(events.Event{Type: events.TypeDeployFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ scheduler alert policy reconciliation failed: %v\n", err)})
+			deploymentFailed = true
+			deploymentError = fmt.Errorf("scheduler alert policy reconciliation failed: %w", err)
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
 		}
 	}
 

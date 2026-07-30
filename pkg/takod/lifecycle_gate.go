@@ -1,8 +1,12 @@
 package takod
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 
@@ -32,7 +36,7 @@ func (s *Server) registeredRoutes() []takodRoute {
 		{"/v1/images/build", s.handleImageBuild}, {"/v1/platform", s.handlePlatform}, {"/v1/platform/inventory", s.handleInventoryAuthority}, {"/v1/platform/allocations/authorize", s.handleAllocationAuthorization}, {"/v1/platform/membership/reconcile", s.handleMembershipReconcile},
 		{"/v1/logs", s.handleLogs}, {"/v1/exec", s.handleExec}, {"/v1/jobs", s.handleJobs}, {"/v1/jobs/apply", s.handleJobsApply},
 		{"/v1/jobs/runs", s.handleJobRuns}, {"/v1/jobs/trigger", s.handleJobsTrigger}, {"/v1/stats", s.handleStats},
-		{"/v1/metrics", s.handleMetrics}, {"/v1/access-logs", s.handleAccessLogs}, {"/v1/discovery/exports", s.handleDiscoveryExports},
+		{"/v1/alerts", s.handleAlerts}, {"/v1/metrics", s.handleMetrics}, {"/v1/access-logs", s.handleAccessLogs}, {"/v1/discovery/exports", s.handleDiscoveryExports},
 	}
 }
 
@@ -48,6 +52,9 @@ var lifecycleSafeMutationPaths = map[string]struct{}{
 	"/v1/platform":           {},
 	"/v1/mesh/key":           {},
 	"/v1/mesh/apply":         {},
+	// Alert policy is node-local control-plane state, not a workload mutation.
+	// Keep authenticated disable available on cordoned/draining nodes.
+	"/v1/alerts": {},
 }
 
 type lifecycleMutationBarrierContextKey struct{}
@@ -122,9 +129,27 @@ func (s *Server) enrolledLifecycleHandler(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if _, safe := lifecycleSafeMutationPaths[r.URL.Path]; safe {
+		if _, safe := lifecycleSafeMutationPaths[r.URL.Path]; safe && r.URL.Path != "/v1/alerts" {
 			next.ServeHTTP(w, r)
 			return
+		}
+		if r.Method == http.MethodPut && r.URL.Path == "/v1/alerts" {
+			disabled, err := alertDisableRequest(r)
+			if err != nil {
+				http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if disabled {
+				workerFenceAdmissionMu.RLock()
+				defer workerFenceAdmissionMu.RUnlock()
+				fencedContext, fenceErr := s.validateMutationFence(r)
+				if fenceErr != nil {
+					http.Error(w, fenceErr.Error(), http.StatusConflict)
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(fencedContext))
+				return
+			}
 		}
 		if _, err := os.Lstat(nodeidentity.DeploymentDenyPath(s.inventoryFile)); err == nil {
 			http.Error(w, "node has a durable lifecycle deployment deny latch", http.StatusConflict)
@@ -173,4 +198,24 @@ func (s *Server) enrolledLifecycleHandler(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(fencedContext))
 	})
+}
+
+func alertDisableRequest(r *http.Request) (bool, error) {
+	data, err := io.ReadAll(io.LimitReader(r.Body, takodMaxJSONBodyBytes+1))
+	if err != nil {
+		return false, err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(data))
+	if int64(len(data)) > takodMaxJSONBodyBytes {
+		return false, fmt.Errorf("request body too large")
+	}
+	var request AlertConfigRequest
+	if err := json.Unmarshal(data, &request); err != nil {
+		return false, err
+	}
+	request = normalizeAlertConfigRequest(request)
+	if err := validateAlertConfigRequest(request); err != nil {
+		return false, err
+	}
+	return !alertPolicyEnabled(request.Policy), nil
 }

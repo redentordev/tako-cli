@@ -1077,6 +1077,90 @@ accepts either a positive scalar (same soft/hard value) or explicit positive
 reconciliation and fails with upgrade guidance when a development node is
 stale.
 
+## Scheduler Alerts
+
+`notifications.alerts` enables durable alerts for cron-fired jobs and native
+scheduled volume backups. The existing Slack, Discord, and generic webhook
+targets are reused:
+
+```yaml
+notifications:
+  slack: ${SLACK_WEBHOOK_URL}
+  webhook: ${OPERATIONS_WEBHOOK_URL}
+  alerts:
+    jobs:
+      consecutiveFailures: 2
+      consecutiveTimeouts: 1
+      consecutiveSkipped: 2
+      noSuccessFor: 30m
+    backups:
+      maxAge: 25h
+```
+
+Thresholds set to `0` and omitted durations are disabled. Durations must use
+whole seconds between `1m` and `8760h`. Job counters cover scheduled firings only; manually
+triggered runs remain in job history but cannot open or recover a scheduler
+episode. A status change resets the other consecutive-status counters, and a
+successful scheduled run resets all three. `noSuccessFor` starts when alerting
+is configured, or from the latest successful scheduled run when one exists.
+
+`backups.maxAge` tracks successful backups made by Tako's native
+`backup.schedule`. A custom PostgreSQL `pg_dump` S3 service declared as
+`kind: job` is intentionally governed by the job policy instead. This avoids
+claiming that a generic Docker volume archive is a PostgreSQL-consistent dump.
+
+Each owning node persists secret-free attempt facts, one deduplicated episode,
+and a bounded delivery outbox. A `running` fact is committed before scheduled
+work starts. After a takod restart, an interrupted job container is removed and
+the attempt is closed as failed; an interrupted native backup is likewise
+closed as failed before schedules restart. Scheduler shutdown cancels active
+callbacks and waits for them to publish terminal state. Recovery verifies the
+helper's persisted name and immutable project/environment/service/attempt labels
+before removing it. Cancellation uses a fresh bounded cleanup context; if helper
+absence cannot be confirmed, the durable attempt remains `running` for startup
+recovery instead of being falsely terminalized. Delivery is attempted at most three times; daemon shutdown leaves
+an interrupted HTTP attempt pending instead of exhausting it. A
+recovery is sent once, and only to providers that successfully received the
+opening event. Generic webhook events carry a stable `eventId` and `episodeId`
+so receivers can make at-least-once delivery idempotent. Alert status and
+delivery errors never include run output, webhook URLs, or credentials; target
+credentials are kept in a separate root-only (`0600`) node-local config file.
+Removing a subject or disabling the policy first retires any externally opened
+episode; credentials remain until matching recoveries are delivered or
+exhausted.
+Dispatch intent is persisted before the HTTP request. A restart retries the
+same event ID, including an opening that raced policy removal. Target rotation
+closes the old generation and retains its credential file until that recovery
+finishes, while new openings use the new generation.
+
+Alert targets must use HTTPS. Slack and Discord URLs must use their official
+webhook hosts; generic webhooks may use another public host. takod resolves and
+dials the validated public address directly, rejects local/private/special-use
+addresses, and does not follow redirects.
+
+Deploys apply the policy, including explicit removal when `alerts` is absent,
+before an otherwise no-op deploy returns. Enabled policies reach every
+schedulable node in the environment, not only this deploy's workload targets.
+Every other environment node receives a disable request so a newly cordoned or
+draining node cannot retain an old policy or credentials. A valid controller
+operation fence can disable alerts on a cordoned or draining node; enable
+requests additionally require an active schedulable node. The deploy operation fence includes every node that
+receives alert reconciliation while workload reconciliation remains
+placement-scoped. Stale owners are disabled only after every replacement owner
+accepts the policy, so a failed deploy preserves the last working alert path.
+Enabling
+alerts requires every target agent to advertise
+`scheduler.alerts-v1`; an older node fails preflight with upgrade guidance
+instead of silently ignoring the policy. When alerts are absent, incapable
+legacy agents are skipped because they cannot retain alert state, while capable
+agents receive the disable request and delete their credentials.
+
+Node-local alert delivery cannot detect that its own node is down. Run
+`tako prometheus` from an independent observer and alert on
+`tako_scheduler_alert_owner_present == 0`,
+`tako_scheduler_alert_owner_reachable == 0`, active episodes, or exhausted
+deliveries.
+
 ## Operator Files
 
 `files:` distributes local regular files or whole directories to the node and
