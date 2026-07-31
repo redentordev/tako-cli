@@ -31,7 +31,7 @@ Examples:
 
 .PP
 # Restore a node-local volume from a backup
-  tako backup --server node-a --volume data --restore 20240101-120000
+  tako backup --server node-a --volume data --restore 20240101-120000 --yes
 
 .PP
 # Delete old backups across the environment mesh
@@ -70,6 +70,10 @@ Examples:
 \fB--volume\fP=""
 	Volume name to backup/restore
 
+.PP
+\fB-y\fP, \fB--yes\fP[=false]
+	Approve destructive volume restore without prompting
+
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
 \fB--config\fP=""
@@ -97,4 +101,4 @@ Examples:
 
 
 .SH SEE ALSO
-\fBtako(1)\fP
+\fBtako(1)\fP, \fBtako-backup-recover(1)\fP, \fBtako-backup-verify-postgres(1)\fP

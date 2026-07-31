@@ -41,7 +41,9 @@ func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
 		return fmt.Errorf("failed to publish temp file: %w", err)
 	}
 	cleanup = false
-	_ = SyncDirectory(dir)
+	if err := SyncDirectory(dir); err != nil {
+		return fmt.Errorf("failed to sync publication directory: %w", err)
+	}
 	return nil
 }
 

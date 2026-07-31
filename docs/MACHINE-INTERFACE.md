@@ -185,9 +185,26 @@ still emits the document. `tako metrics --output json` (single-shot;
 `--live` is rejected in machine modes) returns a `MetricsResult` with
 project/environment, the `--server` filter when set, `collectedAt`, and
 per-node samples where `metrics` carries the takod `/v1/metrics` document
-verbatim (monitoring-agent schema) or `error` says why the read failed;
-all nodes failing exits 1, a partial read exits 6, both still emit the
-document. `tako stats --output json` (point-in-time; `--live` is rejected
+verbatim (monitoring-agent schema) or `error` says why the read failed. The
+takod response also has an additive `alerts` array. Each credential-free alert
+scope contains `project`, `environment`, `configured`, `evaluatedAt`, aggregate
+active/pending/exhausted counts, subject counters and timestamps, and bounded
+delivery status. `/v1/alerts?project=...&environment=...` returns the same
+single-scope status independently of the host monitoring agent. `PUT
+/v1/alerts` applies a node-local policy; a policy with all zero values removes
+the scope and its credentials. Alert targets are accepted only in PUT input and
+never returned. On an enrolled node, a zero-policy disable still requires the
+active controller operation fence and matching payload scope, but may proceed
+while the node is cordoned or draining. Enablement additionally requires a
+schedulable node. `tako prometheus` adds externally observed
+`tako_scheduler_alert_owner_present`, `tako_scheduler_alert_owner_reachable`, policy-loaded, episode, delivery,
+evaluation, and per-subject metrics. Absence of a node-local heartbeat is not
+represented as a node-down event; only the external observer emits reachability
+`0` when it cannot read that owner. `owner_present` is `0` when no environment
+member is currently schedulable; system and container metrics are still
+collected from the configured nodes. All nodes failing exits 1, a partial read
+exits 6, both still emit the document. `tako stats --output json`
+(point-in-time; `--live` is rejected
 in machine modes) returns a `StatsResult` with project/environment, the
 `--service`/`--all` filters, `collectedAt`, and per-node samples whose
 `containers` reuse the takod stats schema (`name`, `cpuPercent`,
@@ -243,7 +260,10 @@ still emit the document. `tako start`/`tako stop` return the same
 `create` — single volume or `--all`, `restore`, `delete`, `cleanup`)
 returns a `BackupResult` with the action, volume/backupId when relevant,
 and per-node outcomes whose `backups` reuse the takod backup schema plus
-`deleted` counts, `skipped` volumes, and per-node `error`. `tako setup`
+`deleted` counts, `skipped` volumes, and per-node `error`. `tako backup
+verify-postgres` returns `PostgresBackupVerificationResult` with the selected
+node and credential-free artifact, digest, query-hash, cleanup, and verification
+evidence. `tako setup`
 returns a `SetupResult` with per-node provisioning outcomes: `mode`
 (`fresh`, `reapply`, or `converge` — converge re-runs only firewall,
 deploy access, and the takod runtime and reports the untouched steps as
@@ -284,8 +304,10 @@ connection. `tako jobs` returns a `JobsResult` listing each
 scheduled `kind: job` service with its owning `server`, `schedule`,
 optional `timezone` (UTC when omitted), `image`, `command`,
 `timeoutSeconds`, the owning node's `nextRun`, and the most recent run
-(`lastRun`: trigger, container, timestamps, `exitCode`, `status` —
-`succeeded`/`failed`/`timeout`/`skipped`). `tako jobs runs [JOB]` returns a
+(`lastRun`: trigger, container, timestamps, `exitCode`, `status` — `running`,
+`succeeded`, `failed`, `timeout`, or `skipped`). `running` is durably published
+before container execution; an unfinished attempt becomes `failed` during
+agent restart recovery. `tako jobs runs [JOB]` returns a
 `JobRunsResult` with the bounded run history (newest first, last 50 per
 job) including each run's redacted `output` tail. `tako jobs trigger JOB`
 returns a `JobTriggerResult` with the run's `server`, `container`,
@@ -303,6 +325,14 @@ from stdin (machine modes require piped stdin) and never appears in any
 output. The
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
+
+Deploy clients capability-check each selected node before mutations when a
+service uses opt-in agent behavior. A service `logging` block requires
+`container.logging-v1`; a node that does not advertise it fails the deploy
+instead of silently falling back to daemon logging defaults. The private
+reconcile request carries the normalized `driver`, `maxSize`, and `maxFiles`
+values. These fields and capability names are additive, but clients must not
+send a configured feature to an agent that lacks its capability.
 
 ### Terminal stream contract (ptystream)
 
@@ -350,10 +380,10 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
-| Human-only by design | `init`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
+| Human-only by design | `init`, `backup recover`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
 | Infrastructure-only | `takod run`, hidden `platform worker run\|prepare-enrollment\|verify-enrollment\|reconcile-mesh`, hidden `platform node upgrade-publication-guard`, and hidden internal E2E helpers |
 
 Human-only commands reject `--output json` and `--events ndjson` with a
@@ -464,8 +494,10 @@ The mapping is derived from typed engine error classes
   `image.pull.auth_failed` event and a failed result (exit 1); the
   credential values themselves never appear in events or result documents.
 - Deployment records store env **keys** only (`<redacted>` values).
-- Generated configs (`tako config export`) redact SSH passwords and
-  placeholder env values.
+- Generated configs (`tako config export`) redact SSH passwords, environment
+  values, volume driver options and labels, proxy basic-auth verifiers, and
+  custom response-header values. Warnings identify every value that must be
+  restored before deploying the export.
 
 Do not log stderr blindly: build logs may echo application output that
 Tako cannot classify.

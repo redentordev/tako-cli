@@ -59,9 +59,21 @@ func BuildConfig(opts Options) (*config.Config, []Warning, error) {
 		},
 		Servers:      cloneServers(opts.Servers),
 		Builds:       map[string]config.SharedBuildConfig{},
+		Volumes:      map[string]config.VolumeConfig{},
 		Environments: map[string]config.EnvironmentConfig{},
 	}
 	if opts.Desired != nil {
+		for name, volume := range opts.Desired.Volumes {
+			cfg.Volumes[name] = config.VolumeConfig{
+				Driver: volume.Driver, External: volume.External, Name: volume.Name, Owner: volume.Owner,
+			}
+			if volume.DriverOptsRedacted {
+				warnings = append(warnings, Warning{Code: "volume_driver_options_redacted", Message: fmt.Sprintf("volume %q driver option values were redacted; restore them before deploying", name)})
+			}
+			if volume.LabelsRedacted {
+				warnings = append(warnings, Warning{Code: "volume_labels_redacted", Message: fmt.Sprintf("volume %q label values were redacted; restore them before deploying", name)})
+			}
+		}
 		for name, build := range opts.Desired.Builds {
 			args := make(map[string]string, len(build.ArgKeys))
 			for _, key := range build.ArgKeys {
@@ -255,6 +267,7 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 		ExtraHosts:      cleanStrings(service.ExtraHosts),
 		Ulimits:         materializeUlimits(service.Ulimits),
 		ShmSize:         strings.TrimSpace(service.ShmSize),
+		Logging:         materializeServiceLogging(service.Logging),
 	}
 	serviceType := strings.TrimSpace(service.Type)
 	if out.Kind == "" && (serviceType == config.ServiceKindRun || serviceType == config.ServiceKindJob) {
@@ -311,7 +324,13 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 		})
 	}
 
-	if len(service.Domains) > 0 {
+	if len(service.Proxy) > 0 && strings.TrimSpace(string(service.Proxy)) != "null" {
+		proxy, err := decodeRaw[config.ProxyConfig](service.Proxy, "proxy", name)
+		if err != nil {
+			return config.ServiceConfig{}, warnings, err
+		}
+		out.Proxy = &proxy
+	} else if len(service.Domains) > 0 {
 		domains := cleanStrings(service.Domains)
 		if len(domains) > 0 {
 			out.Proxy = &config.ProxyConfig{Domain: domains[0]}
@@ -324,6 +343,31 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 				})
 			}
 		}
+	}
+	if service.ProxyBasicAuthConfigured {
+		if out.Proxy == nil {
+			out.Proxy = &config.ProxyConfig{}
+		}
+		out.Proxy.BasicAuth = &config.ProxyBasicAuthConfig{Username: service.ProxyBasicAuthUsername, PasswordBcrypt: "REDACTED"}
+		warnings = append(warnings, Warning{
+			Code:    "proxy_basic_auth_verifier_redacted",
+			Service: name,
+			Message: fmt.Sprintf("service %q proxy basic-auth verifier was redacted; restore passwordBcrypt before deploying", name),
+		})
+	}
+	if len(service.ProxyResponseHeaderNames) > 0 {
+		if out.Proxy == nil {
+			out.Proxy = &config.ProxyConfig{}
+		}
+		out.Proxy.ResponseHeaders = make(map[string]string, len(service.ProxyResponseHeaderNames))
+		for _, header := range service.ProxyResponseHeaderNames {
+			out.Proxy.ResponseHeaders[header] = "REDACTED"
+		}
+		warnings = append(warnings, Warning{
+			Code:    "proxy_response_header_values_redacted",
+			Service: name,
+			Message: fmt.Sprintf("service %q proxy response-header values were redacted; restore them before deploying", name),
+		})
 	}
 
 	if strings.TrimSpace(service.DeployStrategy) != "" {
@@ -351,6 +395,13 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 	}
 
 	return out, warnings, nil
+}
+
+func materializeServiceLogging(logging *takoapi.ServiceLoggingDocument) *config.ServiceLoggingConfig {
+	if logging == nil {
+		return nil
+	}
+	return &config.ServiceLoggingConfig{Driver: strings.TrimSpace(logging.Driver), MaxSize: strings.TrimSpace(logging.MaxSize), MaxFiles: logging.MaxFiles}
 }
 
 func materializeServiceFiles(files []takoapi.ServiceFileDocument) []config.ServiceFileConfig {

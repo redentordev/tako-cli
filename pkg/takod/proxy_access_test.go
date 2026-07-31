@@ -18,8 +18,12 @@ func accessControlManifest(route ProxyRoute) []ProxyRouteManifest {
 	if len(route.Upstreams) == 0 {
 		route.Upstreams = []string{"http://demo-web:3000"}
 	}
+	version := 1
+	if len(route.AllowPathPrefixes) > 0 {
+		version = proxyRouteAllowPathManifestVersion
+	}
 	return []ProxyRouteManifest{{
-		Version:     1,
+		Version:     version,
 		Project:     "demo",
 		Environment: "production",
 		Routes:      []ProxyRoute{route},
@@ -55,8 +59,11 @@ func TestRenderCaddyfileEmitsAllowIPGuards(t *testing.T) {
 	if !strings.Contains(caddyfile, "\thandle @tako_allowed {\n") {
 		t.Fatalf("missing allowed handle block:\n%s", caddyfile)
 	}
-	if !strings.Contains(caddyfile, "\thandle {\n\t\trespond 403\n\t}\n") {
+	if !strings.Contains(caddyfile, "\thandle {\n\t\theader Connection close\n\t\trespond 403\n\t}\n") {
 		t.Fatalf("missing deny handle block:\n%s", caddyfile)
+	}
+	if !strings.Contains(caddyfile, "\thandle_errors {\n\t\theader Connection close\n\t\trespond \"\" {http.error.status_code}\n\t}\n") {
+		t.Fatalf("missing authentication error close handler:\n%s", caddyfile)
 	}
 	// Both directives must live inside the allowed handle block so the
 	// allowlist is decided before basic_auth challenges the client.
@@ -152,5 +159,96 @@ func TestValidateProxyRouteManifestRejectsUnsafeAccessControls(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateProxyRoutePolicyCanonicalizesManifest(t *testing.T) {
+	manifest := accessControlManifest(ProxyRoute{
+		DenyPathPrefixes:  []string{"/api/internal", "/.well-known/workflow"},
+		AllowPathPrefixes: []string{"/health", "/api"},
+		MaxRequestBody:    "10MB",
+		ResponseHeaders:   map[string]string{"x-content-type-options": "nosniff"},
+	})[0]
+	if err := validateProxyRouteManifest(&manifest); err != nil {
+		t.Fatal(err)
+	}
+	route := manifest.Routes[0]
+	if strings.Join(route.DenyPathPrefixes, ",") != "/.well-known/workflow,/api/internal" || route.ResponseHeaders["X-Content-Type-Options"] != "nosniff" {
+		t.Fatalf("route policy was not canonicalized: %+v", route)
+	}
+	if strings.Join(route.AllowPathPrefixes, ",") != "/api,/health" {
+		t.Fatalf("allowed paths were not canonicalized: %+v", route)
+	}
+}
+
+func TestValidateProxyRoutePolicyRejectsUnsafeManifest(t *testing.T) {
+	tests := []struct {
+		name   string
+		route  ProxyRoute
+		needle string
+	}{
+		{"path wildcard", ProxyRoute{DenyPathPrefixes: []string{"/api/*"}}, "denied path"},
+		{"path encoding", ProxyRoute{DenyPathPrefixes: []string{"/api/%69nternal"}}, "denied path"},
+		{"allowed path wildcard", ProxyRoute{AllowPathPrefixes: []string{"/api/*"}}, "allowed path"},
+		{"allowed path encoding", ProxyRoute{AllowPathPrefixes: []string{"/api/%2fadmin"}}, "allowed path"},
+		{"allowed dot segment", ProxyRoute{AllowPathPrefixes: []string{"/api/.."}}, "allowed path"},
+		{"allowed noncanonical path", ProxyRoute{AllowPathPrefixes: []string{"/api/"}}, "invalid allowed path"},
+		{"bad body limit", ProxyRoute{MaxRequestBody: "10MiB"}, "request body"},
+		{"header injection", ProxyRoute{ResponseHeaders: map[string]string{"X-Test": "ok\r\nInjected: yes"}}, "response header"},
+		{"framing header", ProxyRoute{ResponseHeaders: map[string]string{"Content-Length": "1"}}, "framing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manifest := accessControlManifest(tt.route)[0]
+			err := validateProxyRouteManifest(&manifest)
+			if err == nil || !strings.Contains(err.Error(), tt.needle) {
+				t.Fatalf("error = %v, want %q", err, tt.needle)
+			}
+		})
+	}
+}
+
+func TestAllowPathPrefixesRequireNewManifestVersion(t *testing.T) {
+	manifest := accessControlManifest(ProxyRoute{AllowPathPrefixes: []string{"/api"}})[0]
+	manifest.Version = 1
+	err := validateProxyRouteManifest(&manifest)
+	if err == nil || !strings.Contains(err.Error(), "manifest version 3") {
+		t.Fatalf("legacy manifest allow-path error = %v", err)
+	}
+}
+
+func TestCaddyRoutePolicyRunsBeforeAccessAndUpstreamHandlers(t *testing.T) {
+	caddyfile, err := renderCaddyfile(accessControlManifest(ProxyRoute{
+		BasicAuth: &ProxyRouteBasicAuth{Username: "admin", PasswordBcrypt: takodTestBcryptHash},
+		AllowIPs:  []string{"198.51.100.0/24"}, DenyPathPrefixes: []string{"/api/internal"}, MaxRequestBody: "10MB",
+		AllowPathPrefixes: []string{"/api", "/health"},
+		ResponseHeaders:   map[string]string{"X-Content-Type-Options": "nosniff"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if siteIndex := strings.LastIndex(caddyfile, "\nexample.com {"); siteIndex >= 0 {
+		caddyfile = caddyfile[siteIndex:]
+	}
+	fragments := []string{
+		">X-Content-Type-Options \"nosniff\"",
+		"handle @tako_denied_path",
+		"handle @tako_allowed_path",
+		"handle @tako_body_too_large",
+		"handle @tako_body_length_required",
+		"request_body @tako_body_unsized {",
+		"handle @tako_safe_body_not_allowed",
+		"request_body {",
+		"handle @tako_allowed {",
+		"basic_auth {",
+		"reverse_proxy http://demo-web:3000",
+	}
+	previous := -1
+	for _, fragment := range fragments {
+		index := strings.Index(caddyfile, fragment)
+		if index < 0 || index <= previous {
+			t.Fatalf("route policy ordering failed at %q (index %d after %d):\n%s", fragment, index, previous, caddyfile)
+		}
+		previous = index
 	}
 }

@@ -136,13 +136,31 @@ type VolumeConfig struct {
 	Labels     map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`           // Volume labels
 	External   bool              `yaml:"external,omitempty" json:"external,omitempty"`       // If true, volume must already exist
 	Name       string            `yaml:"name,omitempty" json:"name,omitempty"`               // Override the auto-generated name (opt-out of prefix)
+	Owner      string            `yaml:"owner,omitempty" json:"owner,omitempty"`             // Creation-only numeric uid or uid:gid
 }
 
 // NotificationsConfig defines notification settings
 type NotificationsConfig struct {
-	Slack   string `yaml:"slack,omitempty" json:"slack,omitempty"`     // Slack webhook URL
-	Discord string `yaml:"discord,omitempty" json:"discord,omitempty"` // Discord webhook URL
-	Webhook string `yaml:"webhook,omitempty" json:"webhook,omitempty"` // Generic webhook URL
+	Slack   string                 `yaml:"slack,omitempty" json:"slack,omitempty"`     // Slack webhook URL
+	Discord string                 `yaml:"discord,omitempty" json:"discord,omitempty"` // Discord webhook URL
+	Webhook string                 `yaml:"webhook,omitempty" json:"webhook,omitempty"` // Generic webhook URL
+	Alerts  *SchedulerAlertsConfig `yaml:"alerts,omitempty" json:"alerts,omitempty"`
+}
+
+type SchedulerAlertsConfig struct {
+	Jobs    JobAlertsConfig    `yaml:"jobs,omitempty" json:"jobs,omitempty"`
+	Backups BackupAlertsConfig `yaml:"backups,omitempty" json:"backups,omitempty"`
+}
+
+type JobAlertsConfig struct {
+	ConsecutiveFailures int    `yaml:"consecutiveFailures,omitempty" json:"consecutiveFailures,omitempty"`
+	ConsecutiveTimeouts int    `yaml:"consecutiveTimeouts,omitempty" json:"consecutiveTimeouts,omitempty"`
+	ConsecutiveSkipped  int    `yaml:"consecutiveSkipped,omitempty" json:"consecutiveSkipped,omitempty"`
+	NoSuccessFor        string `yaml:"noSuccessFor,omitempty" json:"noSuccessFor,omitempty"`
+}
+
+type BackupAlertsConfig struct {
+	MaxAge string `yaml:"maxAge,omitempty" json:"maxAge,omitempty"`
 }
 
 // ProjectConfig defines project metadata
@@ -316,11 +334,13 @@ type ServiceConfig struct {
 	ExtraHosts      []string                `yaml:"extraHosts,omitempty" json:"extraHosts,omitempty"`
 	Ulimits         map[string]UlimitConfig `yaml:"ulimits,omitempty" json:"ulimits,omitempty"`
 	ShmSize         string                  `yaml:"shmSize,omitempty" json:"shmSize,omitempty"`
+	Logging         *ServiceLoggingConfig   `yaml:"logging,omitempty" json:"logging,omitempty"`
 
 	// Secrets: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"].
-	Secrets []string            `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
-	Volumes []string            `yaml:"volumes,omitempty" json:"volumes,omitempty"`
-	Files   []ServiceFileConfig `yaml:"files,omitempty" json:"files,omitempty"`
+	Secrets             []string            `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
+	Volumes             []string            `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+	VolumeOwnershipHash string              `yaml:"-" json:"-"`
+	Files               []ServiceFileConfig `yaml:"files,omitempty" json:"files,omitempty"`
 	// FilesContentHash is an internal digest of fully resolved operator file
 	// metadata and bytes; file contents never enter desired state or labels.
 	FilesContentHash string `yaml:"-" json:"-"`
@@ -362,6 +382,47 @@ type ServiceConfig struct {
 	// ReuseFiles tells rollback paths to mount an already-published immutable
 	// FilesContentHash instead of reading today's local sources.
 	ReuseFiles bool `yaml:"-" json:"-"`
+}
+
+// ServiceLoggingConfig bounds Docker's per-container application logs while
+// preserving `docker logs` support.
+type ServiceLoggingConfig struct {
+	Driver   string `yaml:"driver" json:"driver"`
+	MaxSize  string `yaml:"maxSize" json:"maxSize"`
+	MaxFiles int    `yaml:"maxFiles" json:"maxFiles"`
+}
+
+func (c *Config) ServiceVolumeOwnershipFingerprint(environment string, service *ServiceConfig) string {
+	if c == nil || service == nil {
+		return ""
+	}
+	type entry struct {
+		LogicalName string `json:"logicalName"`
+		DockerName  string `json:"dockerName"`
+		Owner       string `json:"owner"`
+	}
+	entries := make([]entry, 0)
+	seen := make(map[string]bool)
+	for _, mount := range service.Volumes {
+		parts := strings.SplitN(mount, ":", 2)
+		logicalName := parts[0]
+		if strings.HasPrefix(logicalName, "/") || seen[logicalName] {
+			continue
+		}
+		volume, ok := c.GetVolume(logicalName)
+		if !ok || volume.Owner == "" {
+			continue
+		}
+		seen[logicalName] = true
+		entries = append(entries, entry{LogicalName: logicalName, DockerName: c.GetVolumeName(logicalName, environment), Owner: volume.Owner})
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].LogicalName < entries[j].LogicalName })
+	data, _ := json.Marshal(entries)
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 
 // ServiceFileConfig distributes one local regular file or directory into a
@@ -500,6 +561,21 @@ type ProxyConfig struct {
 	// TrustedProxies declares the explicit proxy/CDN CIDRs whose forwarded
 	// client IP headers Caddy may trust for this route. CIDRs only.
 	TrustedProxies []string `yaml:"trustedProxies,omitempty" json:"trustedProxies,omitempty"`
+
+	// DenyPathPrefixes returns 404 for an exact path prefix or any child path
+	// before authentication, body reads, or proxying.
+	DenyPathPrefixes []string `yaml:"denyPathPrefixes,omitempty" json:"denyPathPrefixes,omitempty"`
+
+	// AllowPathPrefixes restricts the route to exact prefixes and child paths;
+	// other paths receive 404. DenyPathPrefixes always takes precedence.
+	AllowPathPrefixes []string `yaml:"allowPathPrefixes,omitempty" json:"allowPathPrefixes,omitempty"`
+
+	// MaxRequestBody limits request bodies accepted by this route, for example
+	// 10MB. Oversized declared bodies receive 413 before proxying.
+	MaxRequestBody string `yaml:"maxRequestBody,omitempty" json:"maxRequestBody,omitempty"`
+
+	// ResponseHeaders adds or replaces response headers for this route.
+	ResponseHeaders map[string]string `yaml:"responseHeaders,omitempty" json:"responseHeaders,omitempty"`
 }
 
 // ProxyBasicAuthConfig protects a proxy route with HTTP basic auth.
@@ -629,10 +705,10 @@ type TLSConfig struct {
 
 // BackupConfig defines per-service backup settings.
 type BackupConfig struct {
-	Schedule string               `yaml:"schedule" json:"schedule"`                   // cron format (e.g., "0 2 * * *")
-	Retain   int                  `yaml:"retain" json:"retain"`                       // days to retain backups
-	Volumes  []string             `yaml:"volumes,omitempty" json:"volumes,omitempty"` // optional logical service volumes to back up
-	Storage  *BackupStorageConfig `yaml:"storage,omitempty" json:"storage,omitempty"` // optional object storage target
+	Schedule string               `yaml:"schedule,omitempty" json:"schedule,omitempty"` // cron format (e.g., "0 2 * * *")
+	Retain   int                  `yaml:"retain,omitempty" json:"retain,omitempty"`     // days to retain backups
+	Volumes  []string             `yaml:"volumes,omitempty" json:"volumes,omitempty"`   // optional logical service volumes to back up
+	Storage  *BackupStorageConfig `yaml:"storage,omitempty" json:"storage,omitempty"`   // optional object storage target
 }
 
 // BackupStorageConfig defines an S3-compatible object storage target for
@@ -647,6 +723,7 @@ type BackupStorageConfig struct {
 	SecretAccessKey string `yaml:"secretAccessKey,omitempty" json:"secretAccessKey,omitempty"` // Use ${ENV_VAR}
 	SessionToken    string `yaml:"sessionToken,omitempty" json:"sessionToken,omitempty"`       // Optional temporary credential token
 	ForcePathStyle  bool   `yaml:"forcePathStyle,omitempty" json:"forcePathStyle,omitempty"`   // Needed by some S3-compatible stores
+	Versioned       bool   `yaml:"versioned,omitempty" json:"versioned,omitempty"`             // Bucket uses object versioning APIs
 }
 
 // ResourceLimitsConfig defines container runtime resource limits.

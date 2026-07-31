@@ -395,6 +395,15 @@ func TestMetricsEndpointWithCollect(t *testing.T) {
 	}
 }
 
+func TestAlertsEndpoint(t *testing.T) {
+	if got := AlertsEndpoint("", ""); got != "/v1/alerts" {
+		t.Fatalf("AlertsEndpoint() = %q", got)
+	}
+	if got := AlertsEndpoint("demo", "production"); got != "/v1/alerts?environment=production&project=demo" {
+		t.Fatalf("AlertsEndpoint() = %q", got)
+	}
+}
+
 func TestAccessLogsEndpointWithFollow(t *testing.T) {
 	got := AccessLogsEndpoint(75, true)
 	want := "/v1/access-logs?follow=true&tail=75"

@@ -72,6 +72,10 @@ ulimits:
     hard: 262144
   nproc: 4096
 shmSize: 256m
+logging:
+  driver: local
+  maxSize: 25m
+  maxFiles: 5
 `
 	var service ServiceConfig
 	if err := yaml.Unmarshal([]byte(input), &service); err != nil {
@@ -83,11 +87,14 @@ shmSize: 256m
 	if service.Ulimits["nproc"] != (UlimitConfig{Soft: 4096, Hard: 4096}) {
 		t.Fatalf("scalar ulimit = %#v", service.Ulimits["nproc"])
 	}
+	if service.Logging == nil || service.Logging.Driver != "local" || service.Logging.MaxSize != "25m" || service.Logging.MaxFiles != 5 {
+		t.Fatalf("logging = %#v", service.Logging)
+	}
 	encoded, err := yaml.Marshal(service)
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	for _, want := range []string{"context: ./sentry", "SENTRY_IMAGE: getsentry/sentry:26.6.0", "target: runtime", "envFiles:", "shmSize: 256m"} {
+	for _, want := range []string{"context: ./sentry", "SENTRY_IMAGE: getsentry/sentry:26.6.0", "target: runtime", "envFiles:", "shmSize: 256m", "driver: local", "maxSize: 25m", "maxFiles: 5"} {
 		if !strings.Contains(string(encoded), want) {
 			t.Fatalf("marshaled service missing %q:\n%s", want, encoded)
 		}

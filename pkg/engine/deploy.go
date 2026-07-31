@@ -249,6 +249,11 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 	e.RegisterRegistrySecrets(cfg)
 	e.RegisterACMEDNSSecrets(cfg)
+	if cfg.Notifications != nil {
+		e.RegisterSecret(cfg.Notifications.Slack)
+		e.RegisterSecret(cfg.Notifications.Discord)
+		e.RegisterSecret(cfg.Notifications.Webhook)
+	}
 
 	// Create SSH pool.
 	session.sshPool = ssh.NewPool()
@@ -384,17 +389,17 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	}
 	deploy.SetEventSink(e.stream)
 	session.deployer = deploy
-	mutationServerNames := DeployMutationTargets(cfg, allServices, deploy.ResolvedAssignments())
-	mutationServerNames = AddPriorDesiredMutationTargets(cfg, mutationServerNames, priorDesired)
-	if len(mutationServerNames) == 0 {
-		mutationServerNames = []string{sourceServerName}
+	workloadMutationServerNames := DeployMutationTargets(cfg, allServices, deploy.ResolvedAssignments())
+	workloadMutationServerNames = AddPriorDesiredMutationTargets(cfg, workloadMutationServerNames, priorDesired)
+	if len(workloadMutationServerNames) == 0 {
+		workloadMutationServerNames = []string{sourceServerName}
 	}
 	environmentTarget := make(map[string]struct{}, len(serverNames))
 	for _, name := range serverNames {
 		environmentTarget[name] = struct{}{}
 	}
-	setupTargets := make([]string, 0, len(mutationServerNames))
-	for _, name := range mutationServerNames {
+	setupTargets := make([]string, 0, len(workloadMutationServerNames))
+	for _, name := range workloadMutationServerNames {
 		if _, ok := environmentTarget[name]; ok {
 			setupTargets = append(setupTargets, name)
 		}
@@ -405,6 +410,11 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	if err := deploy.SetTargetServers(setupTargets); err != nil {
 		return nil, err
 	}
+	mutationServerNames := append([]string(nil), workloadMutationServerNames...)
+	// Alert reconciliation enables schedulable owners and explicitly disables
+	// every other environment member. Include that control-plane fanout in the
+	// operation fence without widening deploy.SetTargetServers workload scope.
+	mutationServerNames = deployMutationAuthorityTargets(mutationServerNames, connectivityServerNames)
 	leaseSet, err := AcquireRemoteOperationLeasesContext(ctx, session.sshPool, cfg, session.envName, mutationServerNames, "deploy")
 	if err != nil {
 		return nil, err
@@ -420,7 +430,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	deploy.SetBaseContext(ctx)
 	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired remote deploy authority: %s\n", leaseSet.Summary()))
 
-	if err := preflightAndSetupTakodRuntime(deploy, allServices); err != nil {
+	if err := preflightAndSetupTakodRuntime(deploy, allServices, services); err != nil {
 		return nil, err
 	}
 
@@ -566,6 +576,25 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	return session, nil
 }
 
+func unionServerNames(groups ...[]string) []string {
+	seen := map[string]bool{}
+	for _, group := range groups {
+		for _, name := range group {
+			seen[name] = true
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for name := range seen {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func deployMutationAuthorityTargets(workloadTargets, alertReconciliationTargets []string) []string {
+	return unionServerNames(workloadTargets, alertReconciliationTargets)
+}
+
 func (s *DeploySession) takoDir() string {
 	if s.workDir == "." {
 		return ".tako"
@@ -612,6 +641,15 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	if err := s.deployer.PreflightTakodProxyCapabilities(s.allServices); err != nil {
 		return nil, err
 	}
+	if err := s.deployer.PreflightGracefulStopCapabilities(); err != nil {
+		return nil, err
+	}
+	if err := s.deployer.PreflightServiceMutationCapabilities(s.services); err != nil {
+		return nil, err
+	}
+	if err := s.deployer.PreflightAlertPolicy(); err != nil {
+		return nil, err
+	}
 
 	e := s.engine
 	defer e.flushBuildOutput()
@@ -639,6 +677,9 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	}
 
 	if plan.IsEmpty() && !deployplan.HasBuildServices(services) && !req.Force {
+		if err := s.deployer.ApplyAlertPolicy(); err != nil {
+			return nil, fmt.Errorf("failed to apply scheduler alert policy: %w", err)
+		}
 		intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredStateServices, nil, actualState)
 		var baseline *takodstate.DesiredRevision
 		if req.Service != "" {
@@ -957,7 +998,37 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			}
 		}
 	}
+	if !deploymentFailed {
+		if err := s.deployer.ApplyAlertPolicy(); err != nil {
+			e.emit(events.Event{Type: events.TypeDeployFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ scheduler alert policy reconciliation failed: %v\n", err)})
+			deploymentFailed = true
+			deploymentError = fmt.Errorf("scheduler alert policy reconciliation failed: %w", err)
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
+		}
+	}
 
+	var manualPending []string
+	var proxyServices map[string]config.ServiceConfig
+	var activeRevisions map[string]string
+	if !deploymentFailed {
+		proxyServices = services
+		if req.Service != "" {
+			proxyServices = CloneServiceMap(s.allServices)
+		}
+		manualPending = deployplan.ManualPromotionPendingServices(servicesToDeploy, actualState)
+		activeRevisions = deployplan.ProxyActiveRevisions(cfg, envName, proxyServices, servicesToDeploy, imageRefs, actualState)
+		if err := s.reconcileProxy(proxyServices, activeRevisions); err != nil {
+			e.emit(events.Event{Type: events.TypeDeployFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ proxy reconciliation failed: %v\n", err)})
+			deploymentFailed = true
+			deploymentError = fmt.Errorf("proxy reconciliation failed: %w", err)
+			deployment.Status = remotestate.StatusFailed
+			deployment.Error = err.Error()
+		}
+	}
+
+	// Route withdrawal is acknowledged before removed containers begin their
+	// graceful stop, so public traffic cannot target a service being drained.
 	if !deploymentFailed {
 		if err := s.applyRemovals(plan); err != nil {
 			e.emit(events.Event{Type: events.TypeDeployServiceFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ service removal failed: %v\n", err)})
@@ -968,21 +1039,8 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		}
 	}
 
-	var manualPending []string
 	if !deploymentFailed {
-		proxyServices := services
-		if req.Service != "" {
-			proxyServices = CloneServiceMap(s.allServices)
-		}
-		manualPending = deployplan.ManualPromotionPendingServices(servicesToDeploy, actualState)
-		activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, proxyServices, servicesToDeploy, imageRefs, actualState)
-		if err := s.reconcileProxy(proxyServices, activeRevisions); err != nil {
-			e.emit(events.Event{Type: events.TypeDeployFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ proxy reconciliation failed: %v\n", err)})
-			deploymentFailed = true
-			deploymentError = fmt.Errorf("proxy reconciliation failed: %w", err)
-			deployment.Status = remotestate.StatusFailed
-			deployment.Error = err.Error()
-		} else if err := s.pruneRevisionsAfterGrace(proxyServices, deployplan.DeployedProxyActiveRevisions(servicesToDeploy, activeRevisions)); err != nil {
+		if err := s.pruneRevisionsAfterGrace(proxyServices, deployplan.DeployedProxyActiveRevisions(servicesToDeploy, activeRevisions)); err != nil {
 			e.emit(events.Event{Type: events.TypeDeployFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ stale revision cleanup failed: %v\n", err)})
 			deploymentFailed = true
 			deploymentError = fmt.Errorf("stale revision cleanup failed: %w", err)

@@ -1,7 +1,10 @@
 package takod
 
 import (
+	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -58,6 +61,138 @@ func TestCleanupFenceCannotDeleteAnotherProjectsProxyManifest(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("cross-project proxy manifest was removed: %v", err)
+	}
+}
+
+func TestCleanupWithdrawsProxyRoutesBeforeStoppingContainers(t *testing.T) {
+	useTempProxyPaths(t)
+	name := runtimeid.ProxyConfigFileName("demo", "production")
+	content := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["example.com"],"upstreams":["http://web:3000"]}]}`
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: name, Content: content}); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PROJECT_PS_OUTPUT", "worker123\n")
+
+	response, err := CleanupProject(context.Background(), CleanupRequest{
+		Project: "demo", Environment: "production", ProxyFiles: []string{name}, RemoveContainers: true,
+	})
+	if err != nil {
+		t.Fatalf("CleanupProject returned error: %v", err)
+	}
+	if response.ProxyFilesRemoved != 1 || response.ContainersRemoved != 1 {
+		t.Fatalf("cleanup response = %#v", response)
+	}
+	entries := readCommandLog(t, logPath)
+	proxyProbe := slices.Index(entries, "docker ps --filter name=^tako-proxy$ --format {{.Names}}")
+	containerList := slices.Index(entries, "docker ps -aq --filter label=tako.project=demo --filter label=tako.environment=production")
+	stop := slices.Index(entries, "docker stop worker123")
+	if proxyProbe < 0 || containerList <= proxyProbe || stop <= containerList {
+		t.Fatalf("route withdrawal must precede container stop: %#v", entries)
+	}
+}
+
+func TestCleanupStopsBeforeDeletingStateWhenContainerDrainFails(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PROJECT_PS_OUTPUT", "worker123\n")
+	t.Setenv("TAKO_FAKE_DOCKER_STOP_ERROR", "worker refused stop")
+
+	response, err := CleanupProject(context.Background(), CleanupRequest{
+		Project: "demo", Environment: "production", RemoveContainers: true, RemoveNetworks: true, RemoveTakodState: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "gracefully stop") {
+		t.Fatalf("CleanupProject error = %v, want graceful stop failure", err)
+	}
+	if response == nil {
+		t.Fatal("CleanupProject should return partial response with the error")
+	}
+	entries := readCommandLog(t, logPath)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry, "docker network ls") {
+			t.Fatalf("cleanup continued after failed container drain: %#v", entries)
+		}
+	}
+}
+
+func TestCleanupDoesNotStopContainersWhenRouteWithdrawalFails(t *testing.T) {
+	useTempProxyPaths(t)
+	name := runtimeid.ProxyConfigFileName("demo", "production")
+	content := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["example.com"],"upstreams":["http://web:3000"]}]}`
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: name, Content: content}); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "tako-proxy\n")
+	t.Setenv("TAKO_FAKE_INSPECT_ARGS", currentProxyArgsJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_DOCKER_EXEC_ERROR", "invalid caddy config")
+	t.Setenv("TAKO_FAKE_PROJECT_PS_OUTPUT", "worker123\n")
+
+	if _, err := CleanupProject(context.Background(), CleanupRequest{
+		Project: "demo", Environment: "production", ProxyFiles: []string{name}, RemoveContainers: true,
+	}); err == nil || !strings.Contains(err.Error(), "withdraw proxy") {
+		t.Fatalf("CleanupProject error = %v, want route withdrawal failure", err)
+	}
+	for _, entry := range readCommandLog(t, logPath) {
+		if strings.HasPrefix(entry, "docker stop worker123") {
+			t.Fatalf("container stopped despite failed route withdrawal")
+		}
+	}
+}
+
+func TestHandleCleanupValidatesBeforeDeletingSchedules(t *testing.T) {
+	dataDir := t.TempDir()
+	server := NewServer(filepath.Join(t.TempDir(), "takod.sock"), dataDir, "test")
+	schedule := testBackupScheduleRequest()
+	if _, err := server.backupScheduler.Upsert(context.Background(), schedule); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/cleanup", bytes.NewBufferString(`{"project":"demo","environment":"production","removeContainers":true,"proxyFiles":["../unsafe.json"]}`))
+	recorder := httptest.NewRecorder()
+	server.handleCleanup(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("cleanup status = %d, want 400", recorder.Code)
+	}
+	if _, err := os.Stat(backupSchedulePath(dataDir, schedule)); err != nil {
+		t.Fatalf("invalid cleanup deleted backup schedule: %v", err)
+	}
+}
+
+func TestHandleCleanupKeepsSchedulesWhenRouteWithdrawalFails(t *testing.T) {
+	useTempProxyPaths(t)
+	dataDir := t.TempDir()
+	server := NewServer(filepath.Join(t.TempDir(), "takod.sock"), dataDir, "test")
+	schedule := testBackupScheduleRequest()
+	if _, err := server.backupScheduler.Upsert(context.Background(), schedule); err != nil {
+		t.Fatal(err)
+	}
+	name := runtimeid.ProxyConfigFileName("demo", "production")
+	content := `{"version":1,"project":"demo","environment":"production","routes":[{"service":"web","domains":["example.com"],"upstreams":["http://web:3000"]}]}`
+	if _, err := WriteProxyFile(context.Background(), ProxyFileRequest{Name: name, Content: content}); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "tako-proxy\n")
+	t.Setenv("TAKO_FAKE_INSPECT_ARGS", currentProxyArgsJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_DOCKER_EXEC_ERROR", "reload failed")
+	req := httptest.NewRequest(http.MethodPost, "/v1/cleanup", bytes.NewBufferString(`{"project":"demo","environment":"production","removeContainers":true,"proxyFiles":["`+name+`"]}`))
+	recorder := httptest.NewRecorder()
+	server.handleCleanup(recorder, req)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("cleanup status = %d, want 400: %s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := os.Stat(backupSchedulePath(dataDir, schedule)); err != nil {
+		t.Fatalf("failed cleanup deleted backup schedule: %v", err)
+	}
+	if _, ok := server.backupScheduler.entries[backupScheduleKey(schedule)]; !ok {
+		t.Fatal("failed cleanup unscheduled backup")
 	}
 }
 
@@ -370,21 +505,14 @@ func TestCleanupUnusedProjectVolumesScopesToProjectEnvironment(t *testing.T) {
 	t.Setenv("TAKO_FAKE_VOLUME_LS_OUTPUT", strings.Join([]string{target, otherStage, otherProject}, "\n")+"\n")
 
 	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production", nil)
-	if err != nil {
-		t.Fatalf("cleanupUnusedProjectVolumes returned error: %v", err)
-	}
-	if removed != 1 {
-		t.Fatalf("removed = %d, want 1", removed)
+	if err == nil || !strings.Contains(err.Error(), "automatic named-volume deletion is disabled") || removed != 0 {
+		t.Fatalf("cleanup removed=%d, err=%v", removed, err)
 	}
 
 	entries := readCommandLog(t, logPath)
-	want := "docker volume rm " + target
-	if !slices.Contains(entries, want) {
-		t.Fatalf("docker log missing %q in %#v", want, entries)
-	}
 	for _, entry := range entries {
-		if strings.Contains(entry, "volume rm "+otherStage) || strings.Contains(entry, "volume rm "+otherProject) {
-			t.Fatalf("cleanup removed unrelated volume via %q; all entries %#v", entry, entries)
+		if strings.Contains(entry, "volume rm ") {
+			t.Fatalf("disabled cleanup removed volume via %q; all entries %#v", entry, entries)
 		}
 	}
 }
@@ -399,11 +527,8 @@ func TestCleanupUnusedProjectVolumesSkipsInUseVolumes(t *testing.T) {
 	t.Setenv("TAKO_FAKE_FAIL_VOLUME_RM", target)
 
 	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production", nil)
-	if err != nil {
-		t.Fatalf("cleanupUnusedProjectVolumes should skip in-use volumes, got error: %v", err)
-	}
-	if removed != 0 {
-		t.Fatalf("removed = %d, want 0", removed)
+	if err == nil || removed != 0 {
+		t.Fatalf("cleanup removed=%d, err=%v", removed, err)
 	}
 }
 
@@ -417,21 +542,42 @@ func TestCleanupUnusedProjectVolumesSkipsProtectedExternalVolumes(t *testing.T) 
 	t.Setenv("TAKO_FAKE_VOLUME_LS_OUTPUT", strings.Join([]string{protected, owned}, "\n")+"\n")
 
 	removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production", []string{protected})
-	if err != nil {
-		t.Fatalf("cleanupUnusedProjectVolumes returned error: %v", err)
-	}
-	if removed != 1 {
-		t.Fatalf("removed = %d, want 1", removed)
+	if err == nil || removed != 0 {
+		t.Fatalf("cleanup removed=%d, err=%v", removed, err)
 	}
 
 	entries := readCommandLog(t, logPath)
-	if !slices.Contains(entries, "docker volume rm "+owned) {
-		t.Fatalf("docker log missing owned volume removal in %#v", entries)
-	}
 	for _, entry := range entries {
-		if strings.Contains(entry, "volume rm "+protected) {
-			t.Fatalf("cleanup removed protected external volume via %q; all entries %#v", entry, entries)
+		if strings.Contains(entry, "volume rm ") {
+			t.Fatalf("disabled cleanup removed volume via %q; all entries %#v", entry, entries)
 		}
+	}
+}
+
+func TestCleanupUnusedProjectVolumesRequiresTakodLocalCreationEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		evidence string
+	}{
+		{name: "unlabelled", evidence: "local|<no value>|<no value>|<no value>|<no value>|null"},
+		{name: "custom driver", evidence: "nfs|demo|production|takod|<no value>|null"},
+		{name: "driver options", evidence: `local|demo|production|takod|<no value>|{"type":"none"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "commands.log")
+			restore := useFakeCommands(t, logPath)
+			defer restore()
+			volume := runtimeid.VolumeName("demo", "production", "data")
+			t.Setenv("TAKO_FAKE_VOLUME_LS_OUTPUT", volume+"\n")
+			t.Setenv("TAKO_FAKE_VOLUME_CLEANUP_EVIDENCE", test.evidence)
+			removed, err := cleanupUnusedProjectVolumes(context.Background(), "demo", "production", nil)
+			if err == nil || removed != 0 {
+				t.Fatalf("cleanup removed=%d, err=%v", removed, err)
+			}
+			if commands := strings.Join(readCommandLog(t, logPath), "\n"); strings.Contains(commands, "volume rm "+volume) {
+				t.Fatalf("unproven volume was removed:\n%s", commands)
+			}
+		})
 	}
 }
 
@@ -448,8 +594,11 @@ func TestScopedProjectPruneDoesNotRunGlobalDockerSystemPrune(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CleanupProject returned error: %v", err)
 	}
-	if len(response.Warnings) > 0 {
+	if len(response.Warnings) != 1 || !strings.Contains(response.Warnings[0], "automatic named-volume deletion is disabled") {
 		t.Fatalf("CleanupProject warnings = %#v", response.Warnings)
+	}
+	if response.UnusedVolumesCleaned {
+		t.Fatal("disabled named-volume cleanup was reported as completed")
 	}
 	if response.BuildCacheCleaned {
 		t.Fatal("scoped prune should not report shared Docker build cache cleanup")

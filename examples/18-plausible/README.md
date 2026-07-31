@@ -260,6 +260,11 @@ env:
 
 ### Data Backup
 
+These commands create live filesystem snapshots. They are not guaranteed to be
+transactionally consistent for PostgreSQL or ClickHouse. Use database-native
+dump jobs for production recovery and run `tako backup verify-postgres` against
+each PostgreSQL dump before relying on it.
+
 ```bash
 tako backup --volume postgres_data
 tako backup --volume clickhouse_data
@@ -269,9 +274,12 @@ tako backup --list
 ## Restore
 
 ```bash
-tako backup --volume postgres_data --restore <backup-id>
-tako backup --volume clickhouse_data --restore <backup-id>
+tako backup --volume postgres_data --restore <backup-id> --yes
+tako backup --volume clickhouse_data --restore <backup-id> --yes
 ```
+
+Stop dependent services first. Prefer a verified logical PostgreSQL restore
+over the live-volume archive shown above.
 
 ## Email Configuration (Optional)
 

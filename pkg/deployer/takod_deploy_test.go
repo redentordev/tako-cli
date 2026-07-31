@@ -460,6 +460,54 @@ func TestServiceNeedsRuntimeControlsCapability(t *testing.T) {
 	}
 }
 
+func TestServiceNeedsLoggingCapability(t *testing.T) {
+	if serviceNeedsLoggingCapability(nil) || serviceNeedsLoggingCapability(&config.ServiceConfig{}) {
+		t.Fatal("unset logging requested capability")
+	}
+	service := &config.ServiceConfig{Logging: &config.ServiceLoggingConfig{Driver: "local", MaxSize: "25m", MaxFiles: 5}}
+	if !serviceNeedsLoggingCapability(service) || !serviceNeedsTakodCapabilityPreflight(service) {
+		t.Fatal("configured logging did not request capability preflight")
+	}
+	copy := copyServiceLogging(service.Logging)
+	if copy == service.Logging || *copy != *service.Logging {
+		t.Fatalf("logging copy = %#v", copy)
+	}
+}
+
+func TestEnsureTakodLoggingCapabilityFailsClosed(t *testing.T) {
+	deploy := &Deployer{config: &config.Config{}}
+	err := deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+		output: `{"capabilities":["container.runtime-controls-v1"]}`,
+	}, "node-a", takod.CapabilityContainerLoggingV1, "per-service container log rotation")
+	if err == nil || !strings.Contains(err.Error(), "does not support per-service container log rotation") {
+		t.Fatalf("ensureTakodCapability() error = %v", err)
+	}
+}
+
+func TestPreflightServiceMutationCapabilitiesChecksOnlyConfiguredLogging(t *testing.T) {
+	checks := 0
+	check := func() error {
+		checks++
+		return errors.New("stale agent")
+	}
+	if err := preflightServiceMutationCapabilitiesWithCheck(map[string]config.ServiceConfig{"web": {}}, check); err != nil {
+		t.Fatalf("unset logging preflight error = %v", err)
+	}
+	if checks != 0 {
+		t.Fatalf("unset logging performed %d checks", checks)
+	}
+	services := map[string]config.ServiceConfig{
+		"web":    {},
+		"worker": {Logging: &config.ServiceLoggingConfig{Driver: "local", MaxSize: "25m", MaxFiles: 5}},
+	}
+	if err := preflightServiceMutationCapabilitiesWithCheck(services, check); err == nil || err.Error() != "stale agent" {
+		t.Fatalf("configured logging preflight error = %v", err)
+	}
+	if checks != 1 {
+		t.Fatalf("configured logging performed %d checks, want 1", checks)
+	}
+}
+
 func TestEnsureTakodRuntimeControlsCapabilityFailsClosed(t *testing.T) {
 	deploy := &Deployer{config: &config.Config{}}
 	err := deploy.ensureTakodCapability(fakeTakodStatusExecutor{
@@ -602,6 +650,57 @@ func TestTakodServiceRolloutRuntimeControlsPreflightBeforeMutations(t *testing.T
 	}
 	if got := strings.Join(phases, ","); got != "preflight" {
 		t.Fatalf("phases = %q, want preflight only", got)
+	}
+}
+
+func TestTakodServiceRolloutLoggingPreflightBeforeMutations(t *testing.T) {
+	service := &config.ServiceConfig{Logging: &config.ServiceLoggingConfig{Driver: "local", MaxSize: "25m", MaxFiles: 5}}
+	var phases []string
+	err := runTakodServiceRollout(serviceNeedsTakodCapabilityPreflight(service), takodServiceRolloutOperations{
+		Preflight: func() error {
+			phases = append(phases, "preflight")
+			deploy := &Deployer{config: &config.Config{}}
+			return deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+				output: `{"capabilities":["container.argv-v1","container.runtime-controls-v1"]}`,
+			}, "node-a", takod.CapabilityContainerLoggingV1, "per-service container log rotation")
+		},
+		Build: func() error {
+			phases = append(phases, "build")
+			return nil
+		},
+		Release: func() error {
+			phases = append(phases, "release")
+			return nil
+		},
+		Reconcile: func() error {
+			phases = append(phases, "reconcile")
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("logging rollout succeeded with stale agent")
+	}
+	if got := strings.Join(phases, ","); got != "preflight" {
+		t.Fatalf("phases = %q, want preflight only", got)
+	}
+}
+
+func TestTakodMovementLoggingPreflightBeforeImageOrContainerMutations(t *testing.T) {
+	var phases []string
+	err := runTakodMovementPhases(
+		func() error {
+			phases = append(phases, "preflight")
+			return errors.New("stale agent")
+		},
+		func() error { phases = append(phases, "transfer"); return nil },
+		func() error { phases = append(phases, "destination"); return nil },
+		func() error { phases = append(phases, "source"); return nil },
+	)
+	if err == nil || err.Error() != "stale agent" {
+		t.Fatalf("movement error = %v", err)
+	}
+	if got := strings.Join(phases, ","); got != "preflight" {
+		t.Fatalf("movement phases = %q, want preflight only", got)
 	}
 }
 
@@ -1096,7 +1195,7 @@ func TestReconcileServiceRequestTimeoutCoversHealthWindowPerReplica(t *testing.T
 		Containers: []takod.ContainerSpec{{Name: "web-1"}, {Name: "web-2"}},
 		Health:     &takod.HealthSpec{WaitAttempts: 350},
 	})
-	want := 820 * time.Second
+	want := 24*time.Hour + 820*time.Second
 	if got != want {
 		t.Fatalf("timeout = %s, want %s", got, want)
 	}
@@ -1104,15 +1203,20 @@ func TestReconcileServiceRequestTimeoutCoversHealthWindowPerReplica(t *testing.T
 	got = reconcileServiceRequestTimeout(takod.ReconcileServiceRequest{
 		Containers: []takod.ContainerSpec{{Name: "web-1"}},
 	})
-	if got != takodclient.JSONRequestTimeout {
-		t.Fatalf("default timeout = %s, want %s", got, takodclient.JSONRequestTimeout)
+	if want := 24*time.Hour + 2*time.Minute; got != want {
+		t.Fatalf("default timeout = %s, want %s", got, want)
 	}
 
 	got = reconcileServiceRequestTimeout(takod.ReconcileServiceRequest{
 		Files: []takod.ServiceFileBundle{{Name: "file-000"}},
 	})
-	if got != takodclient.StreamRequestTimeout {
-		t.Fatalf("file payload timeout = %s, want %s", got, takodclient.StreamRequestTimeout)
+	if want := 24*time.Hour + takodclient.StreamRequestTimeout; got != want {
+		t.Fatalf("file payload timeout = %s, want %s", got, want)
+	}
+
+	got = reconcileServiceRequestTimeout(takod.ReconcileServiceRequest{StopTimeoutSeconds: 600})
+	if want := 24*time.Hour + 2*time.Minute; got != want {
+		t.Fatalf("graceful stop timeout = %s, want %s", got, want)
 	}
 }
 
@@ -1693,6 +1797,24 @@ func TestBuildTakodMountSpecsHonorsExternalVolumeNames(t *testing.T) {
 	wantExternal := []string{"captain--n8n-data"}
 	if !slices.Equal(externalVolumes, wantExternal) {
 		t.Fatalf("external volumes = %#v, want %#v", externalVolumes, wantExternal)
+	}
+}
+
+func TestBuildTakodVolumeOwnershipSpecsUsesOnlyExplicitManagedLocalVolumes(t *testing.T) {
+	deploy := &Deployer{
+		config: &config.Config{Project: config.ProjectConfig{Name: "demo"}, Volumes: map[string]config.VolumeConfig{
+			"data": {Driver: "local", Owner: "1000:1001"},
+		}},
+		environment: "production",
+	}
+	policies, err := deploy.buildTakodVolumeOwnershipSpecs(&config.ServiceConfig{Volumes: []string{
+		"data:/data", "undeclared:/other", "/host/uploads:/uploads",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policies) != 1 || policies[0].Name != deploy.config.GetVolumeName("data", "production") || policies[0].UID != 1000 || policies[0].GID != 1001 {
+		t.Fatalf("volume ownership policies = %#v", policies)
 	}
 }
 

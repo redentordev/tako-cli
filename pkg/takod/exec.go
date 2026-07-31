@@ -70,6 +70,7 @@ type ExecRequest struct {
 	// Mounts adds --mount specs to oneoff containers (volumes opt-in).
 	Mounts             []string                       `json:"mounts,omitempty"`
 	ExternalVolumes    []string                       `json:"externalVolumes,omitempty"`
+	VolumeOwnership    []ManagedVolumeOwnership       `json:"volumeOwnership,omitempty"`
 	Files              []ServiceFileBundle            `json:"files,omitempty"`
 	FileSetID          string                         `json:"fileSetId,omitempty"`
 	CleanupFiles       bool                           `json:"cleanupFiles,omitempty"`
@@ -85,6 +86,7 @@ type ExecRequest struct {
 	MemoryLimit        string                         `json:"memoryLimit,omitempty"`
 	CPULimit           string                         `json:"cpuLimit,omitempty"`
 	TimeoutSeconds     int                            `json:"timeoutSeconds,omitempty"`
+	DataDir            string                         `json:"-"`
 	// Interactive attaches the caller's stdin over the hijacked frame
 	// stream (docker exec/run -i). Requires the Upgrade handshake.
 	Interactive bool `json:"interactive,omitempty"`
@@ -164,6 +166,9 @@ func validateExecRequest(req *ExecRequest) error {
 			return fmt.Errorf("invalid external volume")
 		}
 	}
+	if err := validateManagedVolumeOwnershipPolicies(req.Mounts, req.ExternalVolumes, req.VolumeOwnership); err != nil {
+		return err
+	}
 	if err := validateServiceFileBundles(req.Files); err != nil {
 		return err
 	}
@@ -195,7 +200,7 @@ func validateExecRequest(req *ExecRequest) error {
 	if req.IdleTimeoutSeconds != 0 && !req.Interactive {
 		return fmt.Errorf("idleTimeoutSeconds requires an interactive session")
 	}
-	if req.Mode != ExecModeOneOff && (req.PullImage || len(req.RegistryAuths) > 0 || len(req.Entrypoint) > 0 || len(req.Labels) > 0 || req.User != "" || req.WorkingDir != "" || req.StopTimeoutSeconds != 0 || req.Init || len(req.ExtraHosts) > 0 || len(req.Ulimits) > 0 || req.ShmSize != "" || req.MemoryLimit != "" || req.CPULimit != "" || len(req.ExternalVolumes) > 0 || len(req.Files) > 0 || req.FileSetID != "" || req.CleanupFiles) {
+	if req.Mode != ExecModeOneOff && (req.PullImage || len(req.RegistryAuths) > 0 || len(req.Entrypoint) > 0 || len(req.Labels) > 0 || req.User != "" || req.WorkingDir != "" || req.StopTimeoutSeconds != 0 || req.Init || len(req.ExtraHosts) > 0 || len(req.Ulimits) > 0 || req.ShmSize != "" || req.MemoryLimit != "" || req.CPULimit != "" || len(req.ExternalVolumes) > 0 || len(req.VolumeOwnership) > 0 || len(req.Files) > 0 || req.FileSetID != "" || req.CleanupFiles) {
 		return fmt.Errorf("container run controls require oneoff mode")
 	}
 	return nil
@@ -229,7 +234,7 @@ func prepareExecRun(ctx context.Context, req ExecRequest) (*execRun, error) {
 		}
 		if err := ensureServiceVolumes(ctx, ReconcileServiceRequest{
 			Project: req.Project, Environment: req.Environment, Service: req.Service,
-			Mounts: req.Mounts, ExternalVolumes: req.ExternalVolumes,
+			Mounts: req.Mounts, ExternalVolumes: req.ExternalVolumes, VolumeOwnership: req.VolumeOwnership, DataDir: req.DataDir,
 		}); err != nil {
 			return nil, err
 		}
@@ -314,7 +319,11 @@ func StreamExec(ctx context.Context, req ExecRequest, writer io.Writer) error {
 	defer cancel()
 	exitCode, runErr := runExecDocker(runCtx, out, args)
 	if req.Mode == ExecModeOneOff && runCtx.Err() != nil {
-		removeExecContainer(container)
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			removeExecContainer(container)
+		} else {
+			removeExecContainerGracefully(container)
+		}
 	}
 	if run.cleanup != nil {
 		if cleanupErr := run.cleanup(); cleanupErr != nil {
@@ -478,6 +487,12 @@ func removeExecContainer(container string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_, _ = runDocker(ctx, "rm", "-f", container)
+}
+
+func removeExecContainerGracefully(container string) {
+	ctx, cancel := context.WithTimeout(context.Background(), maxHealthDuration+2*time.Minute)
+	defer cancel()
+	_, _ = removeContainerIDs(ctx, []string{container})
 }
 
 // lineStartWriter tracks whether the stream sits at a line boundary so

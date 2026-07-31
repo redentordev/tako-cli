@@ -182,7 +182,8 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
 	}
-	if err := preflightAndSetupTakodRuntime(deploy, map[string]config.ServiceConfig{req.ServiceName: req.Service}); err != nil {
+	runServices := map[string]config.ServiceConfig{req.ServiceName: req.Service}
+	if err := preflightAndSetupTakodRuntime(deploy, runServices, runServices); err != nil {
 		return nil, err
 	}
 	session.deployer = deploy
@@ -245,6 +246,9 @@ func (s *RunSession) Apply(ctx context.Context) (*DeployResult, error) {
 	}
 	s.deployer.SetBaseContext(ctx)
 	if err := s.deployer.PreflightTakodProxyCapabilities(s.services); err != nil {
+		return nil, err
+	}
+	if err := s.deployer.PreflightServiceMutationCapabilities(s.services); err != nil {
 		return nil, err
 	}
 

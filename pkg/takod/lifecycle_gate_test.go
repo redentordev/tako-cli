@@ -29,6 +29,29 @@ func TestEnrolledLifecycleGateHonorsDurableDeploymentDenyLatch(t *testing.T) {
 	}
 }
 
+func TestPendingRestoreJournalBlocksNodeWideWorkloadMutations(t *testing.T) {
+	restore := useTempBackupRoot(t)
+	defer restore()
+	dir := filepath.Join(backupRootDir, "demo", "production")
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	journal := backupRestoreJournal{
+		SchemaVersion: 1, Phase: "mutating", TargetVolume: "demo-production-data", StageVolume: "tako-restore-stage-0123456789abcdef",
+		BackupFile: "data_20240101-120000.tar.gz", RollbackFile: ".restore-rollback-0123456789abcdef.tar.gz",
+	}
+	if err := writeBackupRestoreJournal(filepath.Join(dir, ".restore-transaction-pending.json"), journal); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	handler := (&Server{}).enrolledLifecycleHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/reconcile-service", nil))
+	if recorder.Code != http.StatusConflict || called || !strings.Contains(recorder.Body.String(), "pending volume restore") {
+		t.Fatalf("pending restore gate = status %d called=%t body=%q", recorder.Code, called, recorder.Body.String())
+	}
+}
+
 func TestPlacementFenceOnDrainingNodeAllowsCleanupButNotCreation(t *testing.T) {
 	server := lifecycleTestServer(t, nodeidentity.NodeLifecycleDraining, false)
 	inventory, err := nodeidentity.ReadInventory(server.inventoryFile)
@@ -123,8 +146,17 @@ func TestEnrolledLifecycleGateFailsClosedForEveryRegisteredMutation(t *testing.T
 			calls := 0
 			handler := server.enrolledLifecycleHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
 			recorder := httptest.NewRecorder()
-			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, route.path, nil))
+			method := http.MethodPost
+			var body *bytes.Reader
+			if route.path == "/v1/alerts" {
+				method = http.MethodPut
+				body = bytes.NewReader([]byte(`{"project":"demo","environment":"production","policy":{}}`))
+			} else {
+				body = bytes.NewReader(nil)
+			}
+			handler.ServeHTTP(recorder, httptest.NewRequest(method, route.path, body))
 			_, safe := lifecycleSafeMutationPaths[route.path]
+			safe = safe && route.path != "/v1/alerts"
 			if safe && calls != 1 {
 				t.Fatalf("lifecycle-safe mutation was blocked: status=%d", recorder.Code)
 			}
@@ -144,6 +176,120 @@ func TestEnrolledLifecycleGateAllowsEveryRegisteredRead(t *testing.T) {
 		if calls != 1 {
 			t.Fatalf("read %s was unexpectedly blocked", route.path)
 		}
+	}
+}
+
+func TestEnrolledLifecycleGateAllowsAlertDisableButBlocksEnableWhenDraining(t *testing.T) {
+	server := lifecycleTestServer(t, nodeidentity.NodeLifecycleDraining, false)
+	calls := 0
+	handler := server.enrolledLifecycleHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
+	disable := httptest.NewRequest(http.MethodPut, "/v1/alerts", bytes.NewReader([]byte(`{"project":"demo","environment":"production","policy":{}}`)))
+	disableRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(disableRecorder, disable)
+	if calls != 0 || disableRecorder.Code != http.StatusConflict {
+		t.Fatalf("unfenced disable passed: calls=%d status=%d", calls, disableRecorder.Code)
+	}
+	fence := activateLifecycleTestFence(t, server, "demo", "production")
+	fenceJSON, _ := json.Marshal(fence)
+	disable = httptest.NewRequest(http.MethodPut, "/v1/alerts", bytes.NewReader([]byte(`{"project":"demo","environment":"production","policy":{}}`)))
+	disable.Header.Set(OperationFenceHeader, base64.RawURLEncoding.EncodeToString(fenceJSON))
+	disable.Header.Set(OperationHolderHeader, testOperationHolderToken)
+	disableRecorder = httptest.NewRecorder()
+	handler.ServeHTTP(disableRecorder, disable)
+	if calls != 1 {
+		t.Fatalf("fenced disable blocked: status=%d", disableRecorder.Code)
+	}
+	enable := httptest.NewRequest(http.MethodPut, "/v1/alerts", bytes.NewReader([]byte(`{"project":"demo","environment":"production","policy":{"jobConsecutiveFailures":1},"targets":{"webhook":"https://alerts.example/token"}}`)))
+	enable.Header.Set(OperationFenceHeader, base64.RawURLEncoding.EncodeToString(fenceJSON))
+	enable.Header.Set(OperationHolderHeader, testOperationHolderToken)
+	enableRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(enableRecorder, enable)
+	if calls != 1 || enableRecorder.Code != http.StatusConflict {
+		t.Fatalf("enable bypassed lifecycle gate: calls=%d status=%d", calls, enableRecorder.Code)
+	}
+	negative := httptest.NewRequest(http.MethodPut, "/v1/alerts", bytes.NewReader([]byte(`{"project":"demo","environment":"production","policy":{"jobConsecutiveFailures":-1}}`)))
+	negativeRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(negativeRecorder, negative)
+	if calls != 1 || negativeRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid disable bypassed lifecycle gate: calls=%d status=%d", calls, negativeRecorder.Code)
+	}
+}
+
+func activateLifecycleTestFence(t *testing.T, server *Server, project, environment string) nodeidentity.OperationFence {
+	t.Helper()
+	inventory, err := nodeidentity.ReadInventory(server.inventoryFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fence := nodeidentity.OperationFence{
+		Kind: nodeidentity.OperationFenceKind, ClusterID: server.installation.ClusterID, ControllerNodeID: inventory.ControllerNodeID,
+		MembershipGeneration: inventory.Generation, Project: project, Environment: environment, OperationID: "op-alert-test", Operation: "deploy", Token: 1,
+		TargetNodeIDs: []string{server.installation.NodeID}, IssuedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	bindTestOperationHolder(t, &fence)
+	if err := nodeidentity.SignOperationFence(&fence, server.installation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.activateWorkerFence(fence, testOperationHolderToken); err != nil {
+		t.Fatal(err)
+	}
+	return fence
+}
+
+func TestEnrolledAlertDisableEnforcesFencePayloadScope(t *testing.T) {
+	server := lifecycleTestServer(t, nodeidentity.NodeLifecycleDraining, false)
+	server.alertManager = NewAlertManager(server.dataDir)
+	server.jobScheduler = NewJobScheduler(server.dataDir)
+	server.backupScheduler = NewBackupScheduler(server.dataDir)
+	fence := activateLifecycleTestFence(t, server, "demo", "production")
+	fenceJSON, _ := json.Marshal(fence)
+	request := httptest.NewRequest(http.MethodPut, "/v1/alerts", bytes.NewReader([]byte(`{"project":"demo","environment":"staging","policy":{}}`)))
+	request.Header.Set(OperationFenceHeader, base64.RawURLEncoding.EncodeToString(fenceJSON))
+	request.Header.Set(OperationHolderHeader, testOperationHolderToken)
+	recorder := httptest.NewRecorder()
+	server.enrolledLifecycleHandler(http.HandlerFunc(server.handleAlerts)).ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "outside the controller operation fence") {
+		t.Fatalf("scope mismatch status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestEnrolledAlertDisableHoldsFenceAdmissionThroughMutation(t *testing.T) {
+	server := lifecycleTestServer(t, nodeidentity.NodeLifecycleDraining, false)
+	fence := activateLifecycleTestFence(t, server, "demo", "production")
+	fenceJSON, _ := json.Marshal(fence)
+	entered := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	requestDone := make(chan struct{})
+	handler := server.enrolledLifecycleHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(entered)
+		<-releaseHandler
+	}))
+	request := httptest.NewRequest(http.MethodPut, "/v1/alerts", bytes.NewReader([]byte(`{"project":"demo","environment":"production","policy":{}}`)))
+	request.Header.Set(OperationFenceHeader, base64.RawURLEncoding.EncodeToString(fenceJSON))
+	request.Header.Set(OperationHolderHeader, testOperationHolderToken)
+	go func() {
+		handler.ServeHTTP(httptest.NewRecorder(), request)
+		close(requestDone)
+	}()
+	<-entered
+	writerAcquired := make(chan struct{})
+	go func() {
+		workerFenceAdmissionMu.Lock()
+		close(writerAcquired)
+		workerFenceAdmissionMu.Unlock()
+	}()
+	select {
+	case <-writerAcquired:
+		close(releaseHandler)
+		t.Fatal("fence revocation lock crossed active alert disable")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseHandler)
+	<-requestDone
+	select {
+	case <-writerAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("fence revocation lock remained blocked after alert disable")
 	}
 }
 

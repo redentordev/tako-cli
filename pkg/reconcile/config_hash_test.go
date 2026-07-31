@@ -1,6 +1,7 @@
 package reconcile
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -29,6 +30,36 @@ func TestSafeServiceConfigHashStableAcrossOrderOnlyFields(t *testing.T) {
 	}
 	if hashA != hashB {
 		t.Fatalf("hashes differ for order-only changes: %q != %q", hashA, hashB)
+	}
+}
+
+func TestSafeServiceConfigHashIncludesResolvedVolumeOwnership(t *testing.T) {
+	service := config.ServiceConfig{Image: "nginx", Volumes: []string{"data:/data"}}
+	before, _ := SafeServiceConfigHash(service)
+	service.VolumeOwnershipHash = strings.Repeat("a", 64)
+	after, _ := SafeServiceConfigHash(service)
+	if before == after {
+		t.Fatal("resolved volume ownership did not change service hash")
+	}
+}
+
+func TestSafeServiceConfigHashTracksProxyRoutePolicy(t *testing.T) {
+	base := config.ServiceConfig{Image: "nginx:1.27", Port: 8080, Proxy: &config.ProxyConfig{Domain: "example.com"}}
+	changed := base
+	changed.Proxy = &config.ProxyConfig{
+		Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, AllowPathPrefixes: []string{"/api"}, MaxRequestBody: "10MB",
+		ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
+	}
+	baseHash, ok := SafeServiceConfigHash(base)
+	if !ok {
+		t.Fatal("expected base hash")
+	}
+	changedHash, ok := SafeServiceConfigHash(changed)
+	if !ok {
+		t.Fatal("expected changed hash")
+	}
+	if baseHash == changedHash {
+		t.Fatal("proxy route policy did not affect config hash")
 	}
 }
 
@@ -140,6 +171,29 @@ func TestSafeServiceConfigHashTracksResourceLimits(t *testing.T) {
 	}
 	if changedHash == limitedHash {
 		t.Fatal("cpu limit change should change the hash")
+	}
+}
+
+func TestSafeServiceConfigHashTracksLoggingControls(t *testing.T) {
+	base := config.ServiceConfig{Image: "nginx:1.27", Port: 8080}
+	baseHash, _ := SafeServiceConfigHash(base)
+	empty := base
+	empty.Logging = &config.ServiceLoggingConfig{}
+	emptyHash, _ := SafeServiceConfigHash(empty)
+	if emptyHash != baseHash {
+		t.Fatal("empty logging block changed legacy hash")
+	}
+	bounded := base
+	bounded.Logging = &config.ServiceLoggingConfig{Driver: "local", MaxSize: "25m", MaxFiles: 5}
+	boundedHash, _ := SafeServiceConfigHash(bounded)
+	if boundedHash == baseHash {
+		t.Fatal("logging controls did not change config hash")
+	}
+	changed := bounded
+	changed.Logging = &config.ServiceLoggingConfig{Driver: "local", MaxSize: "50m", MaxFiles: 5}
+	changedHash, _ := SafeServiceConfigHash(changed)
+	if changedHash == boundedHash {
+		t.Fatal("logging maxSize change did not change config hash")
 	}
 }
 

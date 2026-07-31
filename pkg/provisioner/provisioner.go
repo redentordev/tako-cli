@@ -16,6 +16,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/platform"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/utils"
@@ -1029,6 +1030,7 @@ func takodBinaryPathCommand() string {
 }
 
 func buildTakodSystemdUnit(binaryPath string, socket string, dataDir string, nodeName string, actualRefreshInterval string) string {
+	policy := platform.DefaultResourcePolicy()
 	return fmt.Sprintf(`[Unit]
 Description=Tako node agent
 After=network-online.target docker.service
@@ -1042,13 +1044,13 @@ Group=%s
 RuntimeDirectory=tako
 RuntimeDirectoryMode=0750
 UMask=0007
-ExecStart=%s takod run --socket %s --data-dir %s --node %s --identity-file %s --actual-refresh-interval %s --build-cache-prune-interval %s --build-cache-keep-storage %s
+ExecStart=%s takod run --socket %s --data-dir %s --node %s --identity-file %s --actual-refresh-interval %s --build-cache-prune-interval %s --build-cache-keep-storage %s --minimum-free-disk-bytes %d --reserved-memory-bytes %d --max-concurrent-builds %d --docker-data-root /var/lib/docker
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, takodAccessGroup, binaryPath, socket, dataDir, nodeName, nodeidentity.DefaultPath, actualRefreshInterval, takod.DefaultBuildCachePruneInterval, takod.DefaultBuildCacheKeepStorage)
+`, takodAccessGroup, binaryPath, socket, dataDir, nodeName, nodeidentity.DefaultPath, actualRefreshInterval, takod.DefaultBuildCachePruneInterval, takod.DefaultBuildCacheKeepStorage, policy.MinimumFreeDiskBytes, policy.ReservedMemoryBytes, policy.MaximumConcurrentBuilds)
 }
 
 func (p *Provisioner) ensureTakodAccessGroup() error {

@@ -410,7 +410,24 @@ services:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: app
+
+volumes:
+  postgres_data:
+    driver: local
+    owner: "999:999"
 ```
+
+`volumes.<name>.owner` is an optional numeric `uid` or `uid:gid` policy for a
+fresh, explicitly declared Tako-managed local volume. Takod records a durable
+creation token before `docker volume create`, verifies that token and the local
+driver, then changes only the new volume root ownership. Existing volumes,
+external volumes, binds, custom drivers, and local volumes with `driver_opts`
+are never modified. The policy is immutable for a Docker volume identity:
+changing `owner` later is rejected. Use an explicit `kind: run` migration and a
+new volume identity when ownership must change. Automatic named-volume deletion
+is disabled because Docker has no atomic compare-and-delete operation; cleanup
+reports a warning instead. Remove a volume explicitly only after verifying its
+identity and backups.
 
 Tako validates that persistent services declare a volume before deploy. Normal
 commit deploys do not recreate unchanged image-only services, so a source
@@ -626,6 +643,59 @@ appear to sit behind an external proxy/CDN without trusted proxies configured.
 All routes sharing one proxy node that set `trustedProxies` must use the same
 CIDR set because Caddy's client-IP trust policy is server-global; conflicting
 sets are rejected rather than merged.
+
+Per-service route policy can hide private endpoints, cap request bodies, and
+set security response headers without adding another proxy container:
+
+```yaml
+services:
+  web:
+    port: 3000
+    proxy:
+      domain: example.com
+      denyPathPrefixes:
+        - /api/internal
+        - /.well-known/workflow
+      allowPathPrefixes:
+        - /api
+        - /health
+      maxRequestBody: 10MB
+      responseHeaders:
+        X-Content-Type-Options: nosniff
+        Content-Security-Policy: "default-src 'self'"
+```
+
+Each `denyPathPrefixes` entry is a literal, segment-aware prefix. For example,
+`/api/internal` denies both `/api/internal` and `/api/internal/users` with 404,
+but does not deny `/api/internalized`. Do not add `*`; encoded paths, query
+strings, and fragments are rejected in config. Denials run before basic auth,
+request-body reads, and upstream proxying.
+
+When `allowPathPrefixes` is nonempty, every other path receives 404. Allowed
+prefixes use the same case-sensitive exact-or-segment-child matching, so `/api`
+allows `/api` and `/api/users` but not `/API` or `/apiized`. Literal `.` and
+`..` path segments, trailing slashes, and repeated slashes are rejected in
+allow rules so canonicalization cannot broaden them. Deny rules always win on overlap, including
+when a broader allowed prefix contains a denied internal subtree. `/` allows
+all paths except explicit denials. An omitted or empty allow list leaves paths
+unrestricted. The policy applies on public HTTP, the serving hostname, redirect
+aliases, and internal HTTP routes. Allow-list rejections also run before
+redirects, authentication, body reads, and proxying. This setting requires agents advertising
+`proxy.allow-path-prefixes-v1`; deployment fails before mutation on older
+agents rather than silently exposing unmatched paths.
+
+`maxRequestBody` accepts positive `B`, `KB`, `MB`, or `GB` sizes up to 1TB.
+Declared bodies over the limit return 413 before proxying. Mutation and custom
+methods without `Content-Length` return 411 without reading the body. A body on
+`GET`, `HEAD`, `OPTIONS`, or `TRACE` is rejected after a one-byte presence
+check, while ordinary bodyless requests remain unchanged. Rejected unknown-length
+requests close the client connection instead of draining an untrusted stream.
+Denied paths, oversized declarations, and allowlist rejections use the same
+close-on-reject behavior. Caddy also enforces the configured limit while reading
+as defense in depth. `responseHeaders` names and values are validated, safely quoted, and
+deferred so they replace upstream values. HTTP hop-by-hop and
+message-framing headers such as `Connection`, `Content-Length`, and
+`Transfer-Encoding` cannot be overridden.
 
 ### Bring-your-own TLS certificates
 
@@ -1023,6 +1093,114 @@ accepts either a positive scalar (same soft/hard value) or explicit positive
 reconciliation and fails with upgrade guidance when a development node is
 stale.
 
+Long-running services can opt into bounded Docker log rotation independently
+of the Docker daemon defaults:
+
+```yaml
+services:
+  worker:
+    image: example/worker:latest
+    logging:
+      driver: local
+      maxSize: 25m
+      maxFiles: 5
+```
+
+`driver`, `maxSize`, and `maxFiles` are all required when `logging` is set.
+The supported drivers are Docker's `local` and `json-file` drivers, both of
+which remain readable through `tako logs`. `maxSize` is a positive integer
+followed by `k`, `m`, or `g`, is normalized to lowercase, and cannot exceed
+`10g`; `maxFiles` is from 1 through 100. The setting applies only to
+long-running services: deploy-time runs and scheduled jobs reject it. Omit
+`logging` to preserve the node's Docker daemon logging configuration exactly.
+Configured logging requires an agent advertising `container.logging-v1`, and
+Tako fails capability preflight before any deployment mutation on a stale
+agent.
+
+## Scheduler Alerts
+
+`notifications.alerts` enables durable alerts for cron-fired jobs and native
+scheduled volume backups. The existing Slack, Discord, and generic webhook
+targets are reused:
+
+```yaml
+notifications:
+  slack: ${SLACK_WEBHOOK_URL}
+  webhook: ${OPERATIONS_WEBHOOK_URL}
+  alerts:
+    jobs:
+      consecutiveFailures: 2
+      consecutiveTimeouts: 1
+      consecutiveSkipped: 2
+      noSuccessFor: 30m
+    backups:
+      maxAge: 25h
+```
+
+Thresholds set to `0` and omitted durations are disabled. Durations must use
+whole seconds between `1m` and `8760h`. Job counters cover scheduled firings only; manually
+triggered runs remain in job history but cannot open or recover a scheduler
+episode. A status change resets the other consecutive-status counters, and a
+successful scheduled run resets all three. `noSuccessFor` starts when alerting
+is configured, or from the latest successful scheduled run when one exists.
+
+`backups.maxAge` tracks successful backups made by Tako's native
+`backup.schedule`. A custom PostgreSQL `pg_dump` S3 service declared as
+`kind: job` is intentionally governed by the job policy instead. This avoids
+claiming that a generic Docker volume archive is a PostgreSQL-consistent dump.
+
+Each owning node persists secret-free attempt facts, one deduplicated episode,
+and a bounded delivery outbox. A `running` fact is committed before scheduled
+work starts. After a takod restart, an interrupted job container is removed and
+the attempt is closed as failed; an interrupted native backup is likewise
+closed as failed before schedules restart. Scheduler shutdown cancels active
+callbacks and waits for them to publish terminal state. Recovery verifies the
+helper's persisted name and immutable project/environment/service/attempt labels
+before removing it. Cancellation uses a fresh bounded cleanup context; if helper
+absence cannot be confirmed, the durable attempt remains `running` for startup
+recovery instead of being falsely terminalized. Delivery is attempted at most three times; daemon shutdown leaves
+an interrupted HTTP attempt pending instead of exhausting it. A
+recovery is sent once, and only to providers that successfully received the
+opening event. Generic webhook events carry a stable `eventId` and `episodeId`
+so receivers can make at-least-once delivery idempotent. Alert status and
+delivery errors never include run output, webhook URLs, or credentials; target
+credentials are kept in a separate root-only (`0600`) node-local config file.
+Removing a subject or disabling the policy first retires any externally opened
+episode; credentials remain until matching recoveries are delivered or
+exhausted.
+Dispatch intent is persisted before the HTTP request. A restart retries the
+same event ID, including an opening that raced policy removal. Target rotation
+closes the old generation and retains its credential file until that recovery
+finishes, while new openings use the new generation.
+
+Alert targets must use HTTPS. Slack and Discord URLs must use their official
+webhook hosts; generic webhooks may use another public host. takod resolves and
+dials the validated public address directly, rejects local/private/special-use
+addresses, and does not follow redirects.
+
+Deploys apply the policy, including explicit removal when `alerts` is absent,
+before an otherwise no-op deploy returns. Enabled policies reach every
+schedulable node in the environment, not only this deploy's workload targets.
+Every other environment node receives a disable request so a newly cordoned or
+draining node cannot retain an old policy or credentials. A valid controller
+operation fence can disable alerts on a cordoned or draining node; enable
+requests additionally require an active schedulable node. The deploy operation fence includes every node that
+receives alert reconciliation while workload reconciliation remains
+placement-scoped. Stale owners are disabled only after every replacement owner
+accepts the policy, so a failed deploy preserves the last working alert path.
+Enabling
+alerts requires every target agent to advertise
+`scheduler.alerts-v1`; an older node fails preflight with upgrade guidance
+instead of silently ignoring the policy. When alerts are absent, incapable
+legacy agents are skipped because they cannot retain alert state, while capable
+agents receive the disable request and delete their credentials.
+
+Node-local alert delivery cannot detect that its own node is down. Run
+`tako prometheus` from an independent observer and alert on
+`tako_scheduler_alert_owner_present == 0`,
+`tako_scheduler_alert_owner_reachable == 0`, active episodes, or exhausted
+deliveries.
+
 ## Operator Files
 
 `files:` distributes local regular files or whole directories to the node and
@@ -1217,9 +1395,110 @@ environments:
             region: auto
             endpoint: ${TAKO_BACKUP_ENDPOINT}
             prefix: postgres
+            versioned: false # true only when bucket version APIs are enabled
             accessKeyId: ${TAKO_BACKUP_ACCESS_KEY_ID}
             secretAccessKey: ${TAKO_BACKUP_SECRET_ACCESS_KEY}
 ```
+
+Native volume backups are live filesystem archives. They are useful for files
+and application-managed snapshots, but they are not a transactionally
+consistent PostgreSQL backup. Keep PostgreSQL backups as an explicit generic
+job that runs `pg_dump --format=custom` and uploads the resulting object. Tako
+does not inspect that job's command or reserve a job name.
+
+Each new native archive is published atomically with a collision-resistant
+artifact ID, exact size, and SHA-256 manifest. A remote copy is marked verified
+only after Tako reads the uploaded object back and matches its size and digest.
+For versioned buckets, set `backup.storage.versioned: true`. Tako then records
+and deletes exact object version IDs, and storage credentials need version-list
+and version-delete permissions plus bucket-versioning status access in addition
+to object read/write permissions.
+Leave it false for R2 and unversioned S3-compatible stores so retention uses the
+widely supported object-list API.
+Legacy node-local archives remain listable and restorable, while new manifests
+are checked before destructive extraction. Production volume restore requires
+explicit approval with `tako backup ... --restore <id> --yes`. If restore had
+to create the target and then fails or is interrupted, Tako preserves both the
+token-labelled target and transaction journal for explicit recovery; it never
+deletes the named volume automatically.
+
+When that fail-closed state prevents takod from starting, recover locally on
+the affected node. Do not move or edit the journal. The command verifies the
+recorded Docker volume fingerprint and ownership/creation token before acting:
+
+```bash
+sudo tako backup recover \
+  --journal /var/lib/tako/backups/PROJECT/ENVIRONMENT/.restore-transaction-ID.json \
+  --action inspect
+
+# Pre-existing target only: restore the durable rollback archive.
+sudo tako backup recover --journal /var/lib/tako/backups/PROJECT/ENVIRONMENT/.restore-transaction-ID.json --action rollback --yes
+
+# Keep the current restored contents.
+sudo tako backup recover --journal /var/lib/tako/backups/PROJECT/ENVIRONMENT/.restore-transaction-ID.json --action accept --yes
+
+# Transaction-created target only: keep the volume for explicit inspection or removal.
+sudo tako backup recover --journal /var/lib/tako/backups/PROJECT/ENVIRONMENT/.restore-transaction-ID.json --action abandon --yes
+```
+
+Successful recovery removes the guard container, staging volume, rollback
+archive, and transaction marker durably. It never deletes the target volume.
+After `abandon`, inspect and remove that preserved volume explicitly if it is
+not needed.
+
+Schema-v1 transaction journals predate target fingerprints and creation tokens,
+so the recovery command deliberately refuses them. Keep takod stopped and:
+
+1. Copy the entire `/var/lib/tako/backups/PROJECT/ENVIRONMENT` directory to
+   separate storage before changing anything.
+2. Read the journal and use `docker volume inspect TARGET` plus deployment
+   inventory to independently confirm the intended target. If identity is
+   ambiguous, preserve all evidence and stop.
+3. For a pre-existing target in `mutating`, validate the rollback tar with
+   `tar -tzf ROLLBACK` and restore it only after independent operator approval.
+   Never restore into a target whose identity is uncertain.
+4. For a transaction-created target, preserve it for inspection or explicit
+   removal; never infer safety from its name alone.
+5. After the target outcome is resolved, remove only the journal's uniquely
+   named guard container and staging volume, retain or archive the rollback tar,
+   remove the journal, and durably sync its parent directory. Restart takod only
+   after a second operator verifies the retained evidence and chosen outcome.
+
+Use the exact key, byte count, and lowercase SHA-256 emitted by your custom dump
+job to perform a non-destructive remote restore proof:
+
+```bash
+tako backup verify-postgres \
+  --server production \
+  --service postgres \
+  --artifact-id pgdump-20260729T020000Z \
+  --object-key postgres/dumps/pgdump-20260729T020000Z.dump \
+  --size 184320 \
+  --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --scratch-size 1073741824 \
+  --postgres-image postgres:16-alpine@sha256:<64-lowercase-hex-digest> \
+  --database app \
+  --query "SELECT count(*) FROM schema_migrations" \
+  --expected 42
+```
+
+The selected service supplies `backup.storage`; credentials should continue to
+use `${ENV_VAR}` references. The target agent downloads exactly the named
+object, verifies size and SHA-256 before Docker mutation, starts a hardened
+PostgreSQL container with quota-bounded scratch storage and `--network none`, restores with
+`pg_restore --exit-on-error --no-tablespaces`, and runs the query as a temporary
+read-only role. The digest-pinned verifier image must provide PostgreSQL 14 or
+newer. Only one verification runs at a time, and takod reserves the requested
+scratch bytes against its disk-admission budget before downloading. It stores
+only artifact and query hashes in the durable verification record, then removes
+the container, volume, and downloaded dump on success or failure. The verifier
+never accepts a production volume name.
+
+The target takod must run with a non-zero `--minimum-free-disk-bytes`. The
+agent reserves disk for the artifact and applies `--scratch-size` as the hard
+size of a dedicated tmpfs mounted directly at `PGDATA`. The scratch request plus
+512MiB of PostgreSQL overhead must fit in currently available host memory after
+preserving takod's `--reserved-memory-bytes` budget (512MiB by default).
 
 ## Docker Build Cache Pruning
 

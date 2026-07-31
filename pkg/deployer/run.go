@@ -70,6 +70,15 @@ func (d *Deployer) RunDeployStepOnNodes(serviceName string, service *config.Serv
 	if err != nil {
 		return nil, fmt.Errorf("run %s: %w", serviceName, err)
 	}
+	volumeOwnership, err := d.buildTakodVolumeOwnershipSpecs(service)
+	if err != nil {
+		return nil, fmt.Errorf("run %s: resolve volume ownership: %w", serviceName, err)
+	}
+	if len(volumeOwnership) > 0 {
+		if err := d.preflightTakodCapability([]string{serverName}, takod.CapabilityVolumeCreationOwnershipV1, "creation-only managed volume ownership"); err != nil {
+			return nil, fmt.Errorf("run %s uses volume ownership: %w", serviceName, err)
+		}
+	}
 	if err := d.preflightTakodCapability([]string{serverName}, takod.CapabilityExecOneOffControlsV1, "deploy-time one-off controls"); err != nil {
 		return nil, fmt.Errorf("run %s: %w", serviceName, err)
 	}
@@ -129,6 +138,7 @@ func (d *Deployer) RunDeployStepOnNodes(serviceName string, service *config.Serv
 		Network:            runtimeid.NetworkName(d.config.Project.Name, d.environment),
 		Mounts:             mounts,
 		ExternalVolumes:    externalVolumes,
+		VolumeOwnership:    volumeOwnership,
 		Files:              fileBundles,
 		FileSetID:          fileSetID,
 		CleanupFiles:       len(fileBundles) > 0,

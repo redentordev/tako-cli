@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/alerttarget"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
 	"github.com/redentordev/tako-cli/pkg/utils"
 	"github.com/robfig/cron/v3"
@@ -31,6 +33,8 @@ const (
 	maxServiceFiles          = 128
 	maxServiceFileEntries    = 16384
 	maxServiceBuildArgs      = 128
+	maxServiceLogSizeBytes   = 10 * 1024 * 1024 * 1024
+	maxServiceLogFiles       = 100
 	maxServiceExtraHosts     = 128
 	maxServiceUlimits        = 64
 )
@@ -86,6 +90,16 @@ func ValidateConfig(cfg *Config) error {
 		cfg.Servers[name] = server
 	}
 
+	// Validate top-level volumes before resolving per-service ownership policy.
+	if len(cfg.Volumes) > 0 {
+		if err := validateVolumes(cfg.Volumes); err != nil {
+			return err
+		}
+	}
+	if err := ValidateNotificationsConfig(cfg.Notifications); err != nil {
+		return err
+	}
+
 	// Validate environments
 	if len(cfg.Environments) == 0 {
 		return fmt.Errorf("at least one environment must be configured")
@@ -101,14 +115,66 @@ func ValidateConfig(cfg *Config) error {
 		cfg.Environments[envName] = env
 	}
 
-	// Validate top-level volumes section
-	if len(cfg.Volumes) > 0 {
-		if err := validateVolumes(cfg.Volumes); err != nil {
-			return err
+	return nil
+}
+
+func ValidateNotificationsConfig(notifications *NotificationsConfig) error {
+	if notifications == nil {
+		return nil
+	}
+	alertsEnabled := notifications.Alerts != nil && schedulerAlertsEnabled(*notifications.Alerts)
+	if alertsEnabled && strings.TrimSpace(notifications.Slack) == "" && strings.TrimSpace(notifications.Discord) == "" && strings.TrimSpace(notifications.Webhook) == "" {
+		return fmt.Errorf("notifications.alerts requires at least one Slack, Discord, or webhook target")
+	}
+	if alertsEnabled {
+		for _, target := range []struct {
+			name  string
+			value *string
+		}{{"slack", &notifications.Slack}, {"discord", &notifications.Discord}, {"webhook", &notifications.Webhook}} {
+			if strings.TrimSpace(*target.value) == "" {
+				continue
+			}
+			normalized, err := alerttarget.NormalizeAndValidate(target.name, *target.value)
+			if err != nil {
+				return fmt.Errorf("notifications.%s: %w", target.name, err)
+			}
+			*target.value = normalized
 		}
 	}
-
+	if notifications.Alerts == nil {
+		return nil
+	}
+	jobs := notifications.Alerts.Jobs
+	for name, value := range map[string]int{
+		"consecutiveFailures": jobs.ConsecutiveFailures,
+		"consecutiveTimeouts": jobs.ConsecutiveTimeouts,
+		"consecutiveSkipped":  jobs.ConsecutiveSkipped,
+	} {
+		if value < 0 || value > 1000 {
+			return fmt.Errorf("notifications.alerts.jobs.%s must be between 0 and 1000", name)
+		}
+	}
+	for name, value := range map[string]string{
+		"notifications.alerts.jobs.noSuccessFor": notifications.Alerts.Jobs.NoSuccessFor,
+		"notifications.alerts.backups.maxAge":    notifications.Alerts.Backups.MaxAge,
+	} {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration < time.Minute || duration > 365*24*time.Hour {
+			return fmt.Errorf("%s must be a duration between 1m and 8760h", name)
+		}
+		if duration%time.Second != 0 {
+			return fmt.Errorf("%s must use whole seconds", name)
+		}
+	}
 	return nil
+}
+
+func schedulerAlertsEnabled(alerts SchedulerAlertsConfig) bool {
+	return alerts.Jobs.ConsecutiveFailures > 0 || alerts.Jobs.ConsecutiveTimeouts > 0 || alerts.Jobs.ConsecutiveSkipped > 0 ||
+		strings.TrimSpace(alerts.Jobs.NoSuccessFor) != "" || strings.TrimSpace(alerts.Backups.MaxAge) != ""
 }
 
 // ValidationWarning is a non-fatal, structured config diagnostic.
@@ -709,6 +775,10 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	if err := validateContainerRuntimeControls(name, service); err != nil {
 		return err
 	}
+	if err := validateServiceLogging(name, service.Logging); err != nil {
+		return err
+	}
+	service.VolumeOwnershipHash = cfg.ServiceVolumeOwnershipFingerprint(envName, service)
 
 	sharedBuild, usesSharedBuild := cfg.Builds[service.ImageFrom]
 	if service.ImageFrom != "" && usesSharedBuild {
@@ -1165,7 +1235,10 @@ func validateContainerLabels(serviceName string, labels map[string]string) error
 
 func validateBackupConfig(name string, service *ServiceConfig) error {
 	if service.Backup.Schedule == "" {
-		return fmt.Errorf("service %s: backup schedule is required", name)
+		if service.Backup.Storage == nil || service.Backup.Retain != 0 || len(service.Backup.Volumes) > 0 {
+			return fmt.Errorf("service %s: backup schedule is required unless backup contains only storage for external artifact verification", name)
+		}
+		return validateBackupStorageConfig(name, service.Backup.Storage)
 	}
 	if err := validateBackupSchedule(service.Backup.Schedule); err != nil {
 		return fmt.Errorf("service %s: invalid backup schedule: %w", name, err)
@@ -1395,6 +1468,9 @@ func validateBackupStorageConfig(name string, storage *BackupStorageConfig) erro
 	if storage.Provider != BackupStorageProviderS3 && storage.Endpoint == "" {
 		return fmt.Errorf("service %s: backup.storage.endpoint is required for %s", name, storage.Provider)
 	}
+	if storage.Provider == BackupStorageProviderR2 && storage.Versioned {
+		return fmt.Errorf("service %s: backup.storage.versioned is not supported by R2", name)
+	}
 	if storage.Endpoint != "" {
 		parsed, err := url.Parse(storage.Endpoint)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -1402,6 +1478,12 @@ func validateBackupStorageConfig(name string, storage *BackupStorageConfig) erro
 		}
 		if parsed.Scheme != "https" && parsed.Scheme != "http" {
 			return fmt.Errorf("service %s: backup.storage.endpoint must use http or https", name)
+		}
+		if parsed.User != nil {
+			return fmt.Errorf("service %s: backup.storage.endpoint must not include credentials", name)
+		}
+		if parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("service %s: backup.storage.endpoint must not include query or fragment", name)
 		}
 	}
 	storage.Prefix = cleanBackupStoragePrefix(storage.Prefix)
@@ -1577,6 +1659,9 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 		}
 		return nil
 	case ServiceKindJob:
+		if service.Logging != nil {
+			return fmt.Errorf("service %s: kind: job cannot set logging; job output is retained in run history", name)
+		}
 		// fallthrough to job validation below
 	case ServiceKindRun:
 		return validateRunServiceKind(name, service)
@@ -1659,6 +1744,9 @@ func validateSharedBuilds(builds map[string]SharedBuildConfig) error {
 }
 
 func validateRunServiceKind(name string, service *ServiceConfig) error {
+	if service.Logging != nil {
+		return fmt.Errorf("service %s: kind: run cannot set logging; deploy-time runs have no persistent Docker logs", name)
+	}
 	if service.Schedule != "" || service.Timezone != "" {
 		return fmt.Errorf("service %s: kind: run cannot set schedule or timezone", name)
 	}
@@ -1708,6 +1796,38 @@ func validateRunServiceKind(name string, service *ServiceConfig) error {
 		deploy.Readiness != (DeployReadinessConfig{}) || deploy.SmokeTest != (DeploySmokeTestConfig{}) ||
 		deploy.Promotion != "" || deploy.GracePeriod != "" || deploy.Release != nil {
 		return fmt.Errorf("service %s: kind: run cannot set deploy rollout controls", name)
+	}
+	return nil
+}
+
+func validateServiceLogging(name string, logging *ServiceLoggingConfig) error {
+	if logging == nil {
+		return nil
+	}
+	logging.Driver = strings.ToLower(strings.Trim(logging.Driver, " \t\r\n"))
+	logging.MaxSize = strings.ToLower(strings.Trim(logging.MaxSize, " \t\r\n"))
+	if logging.Driver != "local" && logging.Driver != "json-file" {
+		return fmt.Errorf("service %s: logging.driver must be local or json-file", name)
+	}
+	match := regexp.MustCompile(`^([1-9][0-9]*)([kmg])$`).FindStringSubmatch(logging.MaxSize)
+	if match == nil {
+		return fmt.Errorf("service %s: logging.maxSize must be a positive integer followed by k, m, or g", name)
+	}
+	value, err := strconv.ParseInt(match[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("service %s: logging.maxSize is too large", name)
+	}
+	multiplier := int64(1024)
+	if match[2] == "m" {
+		multiplier *= 1024
+	} else if match[2] == "g" {
+		multiplier *= 1024 * 1024
+	}
+	if value > maxServiceLogSizeBytes/multiplier {
+		return fmt.Errorf("service %s: logging.maxSize must not exceed 10g", name)
+	}
+	if logging.MaxFiles < 1 || logging.MaxFiles > maxServiceLogFiles {
+		return fmt.Errorf("service %s: logging.maxFiles must be between 1 and %d", name, maxServiceLogFiles)
 	}
 	return nil
 }
@@ -2020,6 +2140,9 @@ func validateProxy(projectName string, envName string, serviceName string, proxy
 var (
 	dockerCPULimitPattern     = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
 	proxyBasicAuthUserPattern = regexp.MustCompile(`^[A-Za-z0-9._@-]+$`)
+	proxyHeaderNamePattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
+	proxyPathPrefixPattern    = regexp.MustCompile(`^/[A-Za-z0-9._~!$&'()+,;=:@/-]*$`)
+	proxyBodySizePattern      = regexp.MustCompile(`^([1-9][0-9]*)(B|KB|MB|GB)$`)
 )
 
 func validateProxyAccessControls(serviceName string, proxy *ProxyConfig) error {
@@ -2071,7 +2194,115 @@ func validateProxyAccessControls(serviceName string, proxy *ProxyConfig) error {
 		proxy.TrustedProxies = append(proxy.TrustedProxies, prefix)
 	}
 	sort.Strings(proxy.TrustedProxies)
+	if err := validateProxyRoutePolicy(serviceName, proxy); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateProxyRoutePolicy(serviceName string, proxy *ProxyConfig) error {
+	var err error
+	proxy.DenyPathPrefixes, err = validateProxyPathPrefixes(serviceName, "denyPathPrefixes", proxy.DenyPathPrefixes)
+	if err != nil {
+		return err
+	}
+	proxy.AllowPathPrefixes, err = validateProxyPathPrefixes(serviceName, "allowPathPrefixes", proxy.AllowPathPrefixes)
+	if err != nil {
+		return err
+	}
+
+	if proxy.MaxRequestBody != strings.TrimSpace(proxy.MaxRequestBody) {
+		return fmt.Errorf("service %s: proxy.maxRequestBody cannot have surrounding whitespace", serviceName)
+	}
+	proxy.MaxRequestBody = strings.ToUpper(proxy.MaxRequestBody)
+	if proxy.MaxRequestBody != "" {
+		matches := proxyBodySizePattern.FindStringSubmatch(proxy.MaxRequestBody)
+		if matches == nil {
+			return fmt.Errorf("service %s: proxy.maxRequestBody must be a positive size using B, KB, MB, or GB (for example 10MB)", serviceName)
+		}
+		amount, err := strconv.ParseUint(matches[1], 10, 64)
+		if err != nil {
+			return fmt.Errorf("service %s: proxy.maxRequestBody is too large", serviceName)
+		}
+		multipliers := map[string]uint64{"B": 1, "KB": 1000, "MB": 1000 * 1000, "GB": 1000 * 1000 * 1000}
+		multiplier := multipliers[matches[2]]
+		if amount > uint64(1_000_000_000_000)/multiplier {
+			return fmt.Errorf("service %s: proxy.maxRequestBody cannot exceed 1TB", serviceName)
+		}
+	}
+
+	if len(proxy.ResponseHeaders) > 64 {
+		return fmt.Errorf("service %s: proxy.responseHeaders supports at most 64 entries", serviceName)
+	}
+	forbidden := map[string]bool{
+		"connection": true, "content-length": true, "host": true, "http2-settings": true,
+		"keep-alive": true, "proxy-authenticate": true, "proxy-authorization": true,
+		"proxy-connection": true, "te": true, "trailer": true, "transfer-encoding": true, "upgrade": true,
+	}
+	headers := make(map[string]string, len(proxy.ResponseHeaders))
+	for name, value := range proxy.ResponseHeaders {
+		if name != strings.TrimSpace(name) || value != strings.TrimSpace(value) {
+			return fmt.Errorf("service %s: proxy.responseHeaders names and values cannot have surrounding whitespace", serviceName)
+		}
+		if name == "" || len(name) > 128 || !proxyHeaderNamePattern.MatchString(name) {
+			return fmt.Errorf("service %s: invalid proxy.responseHeaders name %q", serviceName, name)
+		}
+		name = http.CanonicalHeaderKey(name)
+		if forbidden[strings.ToLower(name)] {
+			return fmt.Errorf("service %s: proxy.responseHeaders cannot set hop-by-hop or framing header %q", serviceName, name)
+		}
+		if value == "" || len(value) > 4096 || hasControlChars(value) {
+			return fmt.Errorf("service %s: invalid proxy.responseHeaders value for %q", serviceName, name)
+		}
+		if _, exists := headers[name]; exists {
+			return fmt.Errorf("service %s: duplicate proxy.responseHeaders name %q", serviceName, name)
+		}
+		headers[name] = value
+	}
+	if len(headers) == 0 {
+		proxy.ResponseHeaders = nil
+	} else {
+		proxy.ResponseHeaders = headers
+	}
+	return nil
+}
+
+func validateProxyPathPrefixes(serviceName, field string, values []string) ([]string, error) {
+	if len(values) > 64 {
+		return nil, fmt.Errorf("service %s: proxy.%s supports at most 64 entries", serviceName, field)
+	}
+	paths := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value != strings.TrimSpace(value) {
+			return nil, fmt.Errorf("service %s: proxy.%s entries cannot have surrounding whitespace", serviceName, field)
+		}
+		if value == "" || len(value) > 256 || !proxyPathPrefixPattern.MatchString(value) || hasControlChars(value) || proxyPathHasDotSegments(value) {
+			return nil, fmt.Errorf("service %s: invalid proxy.%s entry %q (use an absolute literal URL path without wildcards, query, fragment, or encoding)", serviceName, field, value)
+		}
+		if field == "allowPathPrefixes" && path.Clean(value) != value {
+			return nil, fmt.Errorf("service %s: invalid proxy.%s entry %q (use its canonical path without trailing or repeated slashes)", serviceName, field, value)
+		}
+		value = path.Clean(value)
+		if _, exists := paths[value]; exists {
+			return nil, fmt.Errorf("service %s: duplicate proxy.%s entry %q", serviceName, field, value)
+		}
+		paths[value] = struct{}{}
+	}
+	canonical := make([]string, 0, len(paths))
+	for value := range paths {
+		canonical = append(canonical, value)
+	}
+	sort.Strings(canonical)
+	return canonical, nil
+}
+
+func proxyPathHasDotSegments(value string) bool {
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func trustedProxyPrefixTooBroad(prefix netip.Prefix) bool {
@@ -2335,6 +2566,20 @@ func validateVolumes(volumes map[string]VolumeConfig) error {
 		// Validate volume name format
 		if !isValidVolumeName(name) {
 			return fmt.Errorf("volume '%s': invalid name - must contain only lowercase letters, numbers, hyphens, and underscores", name)
+		}
+		if vol.Owner != "" {
+			if _, _, _, err := ParseServiceFileOwner(vol.Owner); err != nil {
+				return fmt.Errorf("volume '%s': invalid owner: %w", name, err)
+			}
+			if vol.External {
+				return fmt.Errorf("volume '%s': owner is not allowed on external volumes", name)
+			}
+			if vol.Driver != "" && vol.Driver != "local" {
+				return fmt.Errorf("volume '%s': owner requires the local volume driver", name)
+			}
+			if len(vol.DriverOpts) > 0 {
+				return fmt.Errorf("volume '%s': owner is not allowed with driver_opts", name)
+			}
 		}
 
 		// External volumes should not have driver or driver_opts

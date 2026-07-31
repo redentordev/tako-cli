@@ -58,12 +58,19 @@ func (d *Deployer) ReconcileTakodProxyWithActiveRevisions(services map[string]co
 // route-manifest fields before an applying workflow mutates service state.
 func (d *Deployer) PreflightTakodProxyCapabilities(services map[string]config.ServiceConfig) error {
 	requirements := takodProxyCapabilityRequirements(services)
-	hasRoutes := false
-	for _, service := range services {
-		hasRoutes = hasRoutes || service.IsProxied()
+	allServers, err := d.getTakodTargetServers()
+	if err != nil {
+		return fmt.Errorf("failed to get takod proxy reconciliation targets: %w", err)
 	}
-	if !hasRoutes && len(requirements) == 0 {
-		return nil
+	activation := takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyActivationV1, Feature: "acknowledged proxy activation"}
+	if err := preflightTakodProxyRequirements(allServers, []takodProxyCapabilityRequirement{activation}, func(serverName string, requirement takodProxyCapabilityRequirement) error {
+		client, err := d.getRuntimeClient(serverName)
+		if err != nil {
+			return err
+		}
+		return d.ensureTakodCapability(client, serverName, requirement.Capability, requirement.Feature)
+	}); err != nil {
+		return err
 	}
 	proxyServers, err := d.getTakodProxyTargetServers()
 	if err != nil {
@@ -225,6 +232,11 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 				if err != nil {
 					return fmt.Errorf("failed to issue proxy DNS certificate: %w", err)
 				}
+				// Ensure a managed Caddy process exists before publishing routes so
+				// WriteProxyFile can synchronously validate and activate the change.
+				if err := d.ensureTakodProxy(client, takodNetworkName(d.config.Project.Name, d.environment), firstProxyEmail(services)); err != nil {
+					return fmt.Errorf("failed to reconcile proxy: %w", err)
+				}
 				if err := d.writeTakodProxyConfig(client, dynamicConfig); err != nil {
 					return fmt.Errorf("failed to write proxy config: %w", err)
 				}
@@ -234,9 +246,6 @@ func (d *Deployer) reconcileTakodProxyWithOptions(services map[string]config.Ser
 					}
 				} else if err := d.finalizeTakodProxyACME(client, *acmeRequest); err != nil {
 					return fmt.Errorf("failed to finalize proxy ACME ownership: %w", err)
-				}
-				if err := d.ensureTakodProxy(client, takodNetworkName(d.config.Project.Name, d.environment), firstProxyEmail(services)); err != nil {
-					return fmt.Errorf("failed to reconcile proxy: %w", err)
 				}
 				return nil
 			})
@@ -456,10 +465,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 	if !ok {
 		return nil, false, fmt.Errorf("proxy server %s is not configured", proxyServerName)
 	}
-	manifestVersion := 1
-	if proxyServer.ClusterID != "" && proxyServer.NodeID != "" && proxyServer.WorkerUID > 0 {
-		manifestVersion = 2
-	}
+	manifestVersion := proxyManifestVersionForFeatures(proxyServer.ClusterID != "" && proxyServer.NodeID != "" && proxyServer.WorkerUID > 0, proxyServicesUseAllowPathPrefixes(services))
 	manifest := takod.ProxyRouteManifest{
 		Version:     manifestVersion,
 		Project:     d.config.Project.Name,
@@ -519,7 +525,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 			}
 			seenUpstreams[url] = true
 			upstreams = append(upstreams, url)
-			if manifestVersion >= 2 {
+			if manifestVersion == 2 || manifestVersion == 4 {
 				proof, err := d.proxyDestinationProof(proxyServerName, assignment, serviceName, revision, service.Port, url)
 				if err != nil {
 					return nil, false, err
@@ -529,17 +535,21 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 		}
 
 		route := takod.ProxyRoute{
-			Service:        serviceName,
-			Revision:       revision,
-			Domains:        domains,
-			RedirectFrom:   redirects,
-			Upstreams:      upstreams,
-			HealthCheck:    proxyRouteHealthCheckForService(service),
-			Sticky:         service.LoadBalancer.Strategy == "sticky",
-			Visibility:     service.Proxy.EffectiveVisibility(),
-			AllowIPs:       append([]string(nil), service.Proxy.AllowIps...),
-			TrustedProxies: append([]string(nil), service.Proxy.TrustedProxies...),
-			Destinations:   destinations,
+			Service:           serviceName,
+			Revision:          revision,
+			Domains:           domains,
+			RedirectFrom:      redirects,
+			Upstreams:         upstreams,
+			HealthCheck:       proxyRouteHealthCheckForService(service),
+			Sticky:            service.LoadBalancer.Strategy == "sticky",
+			Visibility:        service.Proxy.EffectiveVisibility(),
+			AllowIPs:          append([]string(nil), service.Proxy.AllowIps...),
+			TrustedProxies:    append([]string(nil), service.Proxy.TrustedProxies...),
+			DenyPathPrefixes:  append([]string(nil), service.Proxy.DenyPathPrefixes...),
+			AllowPathPrefixes: append([]string(nil), service.Proxy.AllowPathPrefixes...),
+			MaxRequestBody:    service.Proxy.MaxRequestBody,
+			ResponseHeaders:   cloneProxyResponseHeaders(service.Proxy.ResponseHeaders),
+			Destinations:      destinations,
 		}
 		if auth := service.Proxy.BasicAuth; auth != nil {
 			route.BasicAuth = &takod.ProxyRouteBasicAuth{
@@ -553,7 +563,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 				return nil, false, fmt.Errorf("service %s dynamic domain ask: %w", serviceName, err)
 			}
 			route.DynamicDomain = &takod.ProxyDynamicDomain{AskURL: askURL}
-			if manifestVersion >= 2 {
+			if manifestVersion == 2 || manifestVersion == 4 {
 				askService, _, _ := config.ParseDynamicDomainAsk(service.Proxy.DynamicDomains.Ask)
 				askConfig := services[askService]
 				assignments, assignmentErr := d.planTakodAssignments(askService, &askConfig)
@@ -585,6 +595,17 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 	return data, true, nil
 }
 
+func proxyManifestVersionForFeatures(enrolled, allowPathPrefixes bool) int {
+	version := 1
+	if enrolled {
+		version = 2
+	}
+	if allowPathPrefixes {
+		version += 2
+	}
+	return version
+}
+
 func proxyServicesUseTrustedProxies(services map[string]config.ServiceConfig) bool {
 	for _, service := range services {
 		if service.IsProxied() && service.Proxy != nil && len(service.Proxy.TrustedProxies) > 0 {
@@ -592,6 +613,35 @@ func proxyServicesUseTrustedProxies(services map[string]config.ServiceConfig) bo
 		}
 	}
 	return false
+}
+
+func proxyServicesUseRoutePolicy(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.IsProxied() && service.Proxy != nil && (len(service.Proxy.DenyPathPrefixes) > 0 || len(service.Proxy.AllowPathPrefixes) > 0 || service.Proxy.MaxRequestBody != "" || len(service.Proxy.ResponseHeaders) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
+func proxyServicesUseAllowPathPrefixes(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.IsProxied() && service.Proxy != nil && len(service.Proxy.AllowPathPrefixes) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneProxyResponseHeaders(source map[string]string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
 }
 
 func proxyServicesUseACMEDNS(services map[string]config.ServiceConfig) bool {
@@ -620,6 +670,12 @@ func takodProxyCapabilityRequirements(services map[string]config.ServiceConfig) 
 	var requirements []takodProxyCapabilityRequirement
 	if proxyServicesUseTrustedProxies(services) {
 		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyTrustedProxiesV1, Feature: "proxy trusted proxies"})
+	}
+	if proxyServicesUseRoutePolicy(services) {
+		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyRoutePolicyV1, Feature: "proxy route policy"})
+	}
+	if proxyServicesUseAllowPathPrefixes(services) {
+		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyAllowPathPrefixesV1, Feature: "proxy allow path prefixes"})
 	}
 	if proxyServicesUseACMEDNS(services) {
 		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityAcmeDNSV1, Feature: "embedded ACME DNS-01 issuance"})
@@ -959,8 +1015,9 @@ func (d *Deployer) proxyDestinationProof(proxyServerName string, assignment tako
 
 func (d *Deployer) writeTakodProxyConfig(client any, data []byte) error {
 	_, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/proxy-file", takod.ProxyFileRequest{
-		Name:    d.takodProxyConfigFileName(),
-		Content: string(data),
+		Name:              d.takodProxyConfigFileName(),
+		Content:           string(data),
+		RequireActivation: true,
 	})
 	return err
 }

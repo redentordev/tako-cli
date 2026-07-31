@@ -27,6 +27,16 @@ func bindTestOperationHolder(t *testing.T, fence *nodeidentity.OperationFence) s
 	return testOperationHolderToken
 }
 
+func TestPostgresVerificationRequiresMatchingFenceOperation(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/backups/postgres/verify", nil)
+	if err := validateFenceOperationForRequest(request, nodeidentity.OperationFence{Operation: "deploy"}); err == nil {
+		t.Fatal("deploy fence authorized PostgreSQL verification")
+	}
+	if err := validateFenceOperationForRequest(request, nodeidentity.OperationFence{Operation: "backup-postgres-verify"}); err != nil {
+		t.Fatalf("matching verifier fence rejected: %v", err)
+	}
+}
+
 func TestControllerOperationAuthorityIsIdempotentExclusiveAndMonotonic(t *testing.T) {
 	server := lifecycleTestServer(t, nodeidentity.NodeLifecycleSchedulable, true)
 	nodeID := server.installation.NodeID

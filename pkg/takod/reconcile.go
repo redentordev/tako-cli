@@ -5,11 +5,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,6 +51,7 @@ type ReconcileServiceRequest struct {
 	Labels             map[string]string              `json:"labels,omitempty"`
 	Mounts             []string                       `json:"mounts,omitempty"`
 	ExternalVolumes    []string                       `json:"externalVolumes,omitempty"`
+	VolumeOwnership    []ManagedVolumeOwnership       `json:"volumeOwnership,omitempty"`
 	Files              []ServiceFileBundle            `json:"files,omitempty"`
 	FileSetID          string                         `json:"fileSetId,omitempty"`
 	Containers         []ContainerSpec                `json:"containers"`
@@ -64,10 +67,12 @@ type ReconcileServiceRequest struct {
 	ExtraHosts         []string                       `json:"extraHosts,omitempty"`
 	Ulimits            map[string]config.UlimitConfig `json:"ulimits,omitempty"`
 	ShmSize            string                         `json:"shmSize,omitempty"`
+	Logging            *config.ServiceLoggingConfig   `json:"logging,omitempty"`
 	// RegistryAuths carries request-scoped pull credentials; they feed an
 	// ephemeral DOCKER_CONFIG for this reconcile only and are never
 	// persisted (ADR 10).
 	RegistryAuths []RegistryAuth `json:"registryAuths,omitempty"`
+	DataDir       string         `json:"-"`
 }
 
 // ServiceFileBundle is one operator-managed file or directory mounted into a
@@ -204,20 +209,20 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	started := make([]string, 0, len(req.Containers))
 	for _, container := range req.Containers {
 		if err := runServiceContainer(ctx, req, container); err != nil {
-			if cleanupErr := cleanupStartedContainers(started); cleanupErr != nil {
+			if cleanupErr := cleanupStartedContainers(ctx, started); cleanupErr != nil {
 				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
 			}
 			return nil, err
 		}
 		started = append(started, container.Name)
 		if err := connectContainerNetworks(ctx, container.Name, req.NetworkAttachments); err != nil {
-			if cleanupErr := cleanupStartedContainers(started); cleanupErr != nil {
+			if cleanupErr := cleanupStartedContainers(ctx, started); cleanupErr != nil {
 				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
 			}
 			return nil, err
 		}
 		if err := waitForContainerHealthy(ctx, req.Network, container.Name, req.Health); err != nil {
-			if cleanupErr := cleanupStartedContainers(started); cleanupErr != nil {
+			if cleanupErr := cleanupStartedContainers(ctx, started); cleanupErr != nil {
 				return nil, fmt.Errorf("%w; additionally failed to clean up started containers: %v", err, cleanupErr)
 			}
 			return nil, err
@@ -354,6 +359,9 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 			return fmt.Errorf("invalid external volume name")
 		}
 	}
+	if err := validateManagedVolumeOwnershipPolicies(req.Mounts, req.ExternalVolumes, req.VolumeOwnership); err != nil {
+		return err
+	}
 	if err := validateServiceFileBundles(req.Files); err != nil {
 		return err
 	}
@@ -385,8 +393,33 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 	if err := validateContainerRuntimeControls(req.User, req.WorkingDir, req.StopTimeoutSeconds, req.ExtraHosts, req.Ulimits, req.ShmSize); err != nil {
 		return err
 	}
+	if err := validateDockerLogging(req.Logging); err != nil {
+		return err
+	}
 	if err := validateHealthSpec(req.Health); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateManagedVolumeOwnershipPolicies(mounts, external []string, policies []ManagedVolumeOwnership) error {
+	seen := make(map[string]bool, len(policies))
+	named := make(map[string]bool)
+	for _, name := range namedVolumeSourcesFromMounts(mounts) {
+		named[name] = true
+	}
+	externalNames := make(map[string]bool, len(external))
+	for _, name := range external {
+		if !isSafeDockerVolumeName(name) {
+			return fmt.Errorf("invalid external volume name")
+		}
+		externalNames[name] = true
+	}
+	for _, policy := range policies {
+		if !isSafeVolumeOwnershipName(policy.Name) || policy.UID < 0 || policy.UID > math.MaxInt32 || policy.GID < 0 || policy.GID > math.MaxInt32 || seen[policy.Name] || !named[policy.Name] || externalNames[policy.Name] {
+			return fmt.Errorf("invalid managed volume ownership policy")
+		}
+		seen[policy.Name] = true
 	}
 	return nil
 }
@@ -918,10 +951,20 @@ func ensureServiceVolumes(ctx context.Context, req ReconcileServiceRequest) erro
 	for _, volume := range req.ExternalVolumes {
 		external[volume] = true
 	}
+	ownership := make(map[string]ManagedVolumeOwnership, len(req.VolumeOwnership))
+	for _, policy := range req.VolumeOwnership {
+		ownership[policy.Name] = policy
+	}
 	for _, volume := range namedVolumeSourcesFromMounts(req.Mounts) {
 		if external[volume] {
 			if _, err := runDocker(ctx, "volume", "inspect", volume); err != nil {
 				return fmt.Errorf("external docker volume %s does not exist", volume)
+			}
+			continue
+		}
+		if policy, ok := ownership[volume]; ok {
+			if err := ensureManagedVolumeOwnership(ctx, req.DataDir, req.Project, req.Environment, req.Service, policy); err != nil {
+				return err
 			}
 			continue
 		}
@@ -1093,11 +1136,42 @@ func removeContainerIDs(ctx context.Context, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	args := append([]string{"rm", "-f"}, ids...)
-	if _, err := runDocker(ctx, args...); err != nil {
-		return 0, fmt.Errorf("failed to remove old service containers: %w", err)
+	stopArgs := append([]string{"stop"}, ids...)
+	if output, err := runDocker(ctx, stopArgs...); err != nil && !dockerStopOnlyReportedNotFound(output, ids) {
+		return 0, fmt.Errorf("failed to gracefully stop service containers: %w", err)
+	}
+	for _, id := range ids {
+		output, err := runDocker(ctx, "rm", id)
+		if err != nil && !dockerContainerNotFound(output) {
+			return 0, fmt.Errorf("failed to remove stopped service container %s: %w", id, err)
+		}
 	}
 	return len(ids), nil
+}
+
+func dockerStopOnlyReportedNotFound(output string, ids []string) bool {
+	known := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		known[id] = true
+	}
+	sawNotFound := false
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || known[line] {
+			continue
+		}
+		if dockerContainerNotFound(line) {
+			sawNotFound = true
+			continue
+		}
+		return false
+	}
+	return sawNotFound
+}
+
+func dockerContainerNotFound(output string) bool {
+	output = strings.ToLower(output)
+	return strings.Contains(output, "no such container") || strings.Contains(output, "no such object")
 }
 
 func runServiceContainer(ctx context.Context, req ReconcileServiceRequest, container ContainerSpec) error {
@@ -1108,15 +1182,14 @@ func runServiceContainer(ctx context.Context, req ReconcileServiceRequest, conta
 	return nil
 }
 
-func cleanupStartedContainers(containerNames []string) error {
+func cleanupStartedContainers(ctx context.Context, containerNames []string) error {
 	if len(containerNames) == 0 {
 		return nil
 	}
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), maxHealthDuration+2*time.Minute)
 	defer cancel()
-	args := append([]string{"rm", "-f"}, containerNames...)
-	if _, err := runDocker(cleanupCtx, args...); err != nil {
-		return fmt.Errorf("failed to remove started containers: %w", err)
+	if _, err := removeContainerIDs(cleanupCtx, containerNames); err != nil {
+		return fmt.Errorf("failed to clean up started containers: %w", err)
 	}
 	return nil
 }
@@ -1186,6 +1259,7 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 		args = append(args, "--cpus", req.CPULimit)
 	}
 	args = appendContainerRuntimeArgs(args, req.User, req.WorkingDir, req.StopTimeoutSeconds, req.Init, req.ExtraHosts, req.Ulimits, req.ShmSize)
+	args = appendDockerLoggingArgs(args, req.Logging)
 	if req.Health != nil && req.Health.Command != "" {
 		args = append(args, "--health-cmd", req.Health.Command)
 		if req.Health.Interval != "" {
@@ -1212,6 +1286,44 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 	}
 	args = append(args, req.Command.ContainerCommand()...)
 	return args
+}
+
+func validateDockerLogging(logging *config.ServiceLoggingConfig) error {
+	if logging == nil {
+		return nil
+	}
+	if logging.Driver != "local" && logging.Driver != "json-file" {
+		return fmt.Errorf("invalid logging driver")
+	}
+	match := regexp.MustCompile(`^([1-9][0-9]*)([kmg])$`).FindStringSubmatch(logging.MaxSize)
+	if match == nil {
+		return fmt.Errorf("invalid logging max size")
+	}
+	value, err := strconv.ParseInt(match[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid logging max size")
+	}
+	multiplier := int64(1024)
+	if match[2] == "m" {
+		multiplier *= 1024
+	} else if match[2] == "g" {
+		multiplier *= 1024 * 1024
+	}
+	if value > (10*1024*1024*1024)/multiplier || logging.MaxFiles < 1 || logging.MaxFiles > 100 {
+		return fmt.Errorf("invalid logging rotation bounds")
+	}
+	return nil
+}
+
+func appendDockerLoggingArgs(args []string, logging *config.ServiceLoggingConfig) []string {
+	if logging == nil {
+		return args
+	}
+	return append(args,
+		"--log-driver", logging.Driver,
+		"--log-opt", "max-size="+logging.MaxSize,
+		"--log-opt", fmt.Sprintf("max-file=%d", logging.MaxFiles),
+	)
 }
 
 func appendContainerRuntimeArgs(args []string, user string, workingDir string, stopTimeoutSeconds int, init bool, extraHosts []string, ulimits map[string]config.UlimitConfig, shmSize string) []string {
@@ -1436,6 +1548,16 @@ func healthCheckTimeout(health *HealthSpec) time.Duration {
 func runDocker(ctx context.Context, args ...string) (string, error) {
 	cmd := dockerCommandContext(ctx, "docker", args...)
 	output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err := cmd.Run()
+	return output.String(), err
+}
+
+func runDockerWithStdin(ctx context.Context, stdin io.Reader, args ...string) (string, error) {
+	cmd := dockerCommandContext(ctx, "docker", args...)
+	output := newCappedOutputBuffer(defaultCommandOutputMaxBytes)
+	cmd.Stdin = stdin
 	cmd.Stdout = output
 	cmd.Stderr = output
 	err := cmd.Run()

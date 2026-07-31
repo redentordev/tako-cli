@@ -152,11 +152,37 @@ func TestReconcileProxyConnectsRecreatedProxyToAllRouteManifestNetworks(t *testi
 	}
 
 	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if !strings.Contains(commands, "--env TAKO_PROXY_EMAIL="+defaultProxyEmail+" --volume") || !strings.Contains(commands, "--entrypoint caddy "+defaultProxyImage+" adapt") {
+		t.Fatalf("target-image validation did not use proxy runtime environment:\n%s", commands)
+	}
 	for _, network := range []string{demoNetwork, otherNetwork} {
 		want := "docker network connect " + network + " tako-proxy"
 		if !strings.Contains(commands, want) {
 			t.Fatalf("expected proxy to connect to %s after recreate, got:\n%s", network, commands)
 		}
+	}
+}
+
+func TestReconcileProxyReplacesStaleProxyWithoutManagedCaddyArguments(t *testing.T) {
+	useTempProxyPaths(t)
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	demoNetwork := runtimeid.NetworkName("demo", "production")
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "tako-proxy\n")
+	t.Setenv("TAKO_FAKE_INSPECT_ARGS", `["legacy-proxy"]`)
+	t.Setenv("TAKO_FAKE_INSPECT_PORTS", "{}")
+	t.Setenv("TAKO_FAKE_INSPECT_PORT_BINDINGS", currentProxyHostPortBindingsJSON())
+	t.Setenv("TAKO_FAKE_INSPECT_IMAGE", "legacy-proxy:1")
+	t.Setenv("TAKO_FAKE_INSPECT_MOUNTS", `[]`)
+	t.Setenv("TAKO_FAKE_INSPECT_ENV", `[]`)
+
+	if _, err := ReconcileProxy(context.Background(), ReconcileProxyRequest{Network: demoNetwork}); err != nil {
+		t.Fatalf("ReconcileProxy returned error for stale proxy: %v", err)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if !strings.Contains(commands, "docker rename tako-proxy tako-proxy-rollback-") || !strings.Contains(commands, "docker run -d --name tako-proxy") {
+		t.Fatalf("stale proxy was not replaced:\n%s", commands)
 	}
 }
 
@@ -217,13 +243,105 @@ func TestReconcileProxyRecreatesCurrentProxyWhenNetworkAttachFails(t *testing.T)
 
 	commands := strings.Join(readCommandLog(t, logPath), "\n")
 	for _, want := range []string{
-		"docker rm -f tako-proxy",
+		"docker rename tako-proxy tako-proxy-rollback-",
+		"docker stop tako-proxy-rollback-",
 		"docker run -d --name tako-proxy",
 		"docker network connect " + demoNetwork + " tako-proxy",
 	} {
 		if !strings.Contains(commands, want) {
 			t.Fatalf("expected command %q after failed attach, got:\n%s", want, commands)
 		}
+	}
+}
+
+func TestReconcileProxyRestoresPreviousProxyWhenReplacementExits(t *testing.T) {
+	useTempProxyPaths(t)
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	demoNetwork := runtimeid.NetworkName("demo", "production")
+	writeRouteManifestForNetworkTest(t, "demo.json", "demo", "production", "demo.example.com", "http://demo-web:3000")
+	t.Setenv("TAKO_FAKE_PS_OUTPUT", "tako-proxy\n")
+	t.Setenv("TAKO_FAKE_INSPECT_ARGS", currentProxyArgsJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_INSPECT_PORTS", "{}")
+	t.Setenv("TAKO_FAKE_INSPECT_PORT_BINDINGS", currentProxyHostPortBindingsJSON())
+	t.Setenv("TAKO_FAKE_INSPECT_IMAGE", "stale-caddy:2")
+	t.Setenv("TAKO_FAKE_INSPECT_MOUNTS", currentProxyMountsJSON())
+	t.Setenv("TAKO_FAKE_INSPECT_ENV", currentProxyEnvJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_PROXY_RUNNING_FALSE_ONCE_FILE", filepath.Join(t.TempDir(), "exited-once"))
+
+	if _, err := ReconcileProxy(context.Background(), ReconcileProxyRequest{Network: demoNetwork}); err == nil || !strings.Contains(err.Error(), "did not remain running") {
+		t.Fatalf("ReconcileProxy error = %v, want replacement startup failure", err)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	for _, want := range []string{"docker rename tako-proxy tako-proxy-rollback-", "docker rename tako-proxy-rollback-", "tako-proxy", "docker start tako-proxy", "docker exec tako-proxy caddy reload"} {
+		if !strings.Contains(commands, want) {
+			t.Fatalf("expected rollback command %q, got:\n%s", want, commands)
+		}
+	}
+}
+
+func TestReconcileProxyForceClearsFailedCandidateBeforeRestoringPreviousProxy(t *testing.T) {
+	useTempProxyPaths(t)
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	demoNetwork := runtimeid.NetworkName("demo", "production")
+	marker := filepath.Join(t.TempDir(), "proxy-running")
+	if err := os.WriteFile(marker, []byte("running"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TAKO_FAKE_PROXY_RUNNING_MARKER", marker)
+	t.Setenv("TAKO_FAKE_INSPECT_ARGS", currentProxyArgsJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_INSPECT_PORTS", "{}")
+	t.Setenv("TAKO_FAKE_INSPECT_PORT_BINDINGS", currentProxyHostPortBindingsJSON())
+	t.Setenv("TAKO_FAKE_INSPECT_IMAGE", "stale-caddy:2")
+	t.Setenv("TAKO_FAKE_INSPECT_MOUNTS", currentProxyMountsJSON())
+	t.Setenv("TAKO_FAKE_INSPECT_ENV", currentProxyEnvJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_PROXY_RUNNING_FALSE_ONCE_FILE", filepath.Join(t.TempDir(), "exited-once"))
+	t.Setenv("TAKO_FAKE_DOCKER_STOP_FAIL_EXACT", "tako-proxy")
+
+	if _, err := ReconcileProxy(context.Background(), ReconcileProxyRequest{Network: demoNetwork}); err == nil || !strings.Contains(err.Error(), "did not remain running") {
+		t.Fatalf("ReconcileProxy error = %v, want replacement startup failure", err)
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	for _, want := range []string{"docker rm -f tako-proxy", "docker rename tako-proxy-rollback-", "docker start tako-proxy"} {
+		if !strings.Contains(commands, want) {
+			t.Fatalf("expected fail-closed rollback command %q, got:\n%s", want, commands)
+		}
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("previous proxy was not restored: %v", err)
+	}
+}
+
+func TestReconcileProxyStopsRestoredProxyWhenRollbackReloadFails(t *testing.T) {
+	useTempProxyPaths(t)
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	demoNetwork := runtimeid.NetworkName("demo", "production")
+	marker := filepath.Join(t.TempDir(), "proxy-running")
+	if err := os.WriteFile(marker, []byte("running"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TAKO_FAKE_PROXY_RUNNING_MARKER", marker)
+	t.Setenv("TAKO_FAKE_INSPECT_ARGS", currentProxyArgsJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_INSPECT_PORTS", "{}")
+	t.Setenv("TAKO_FAKE_INSPECT_PORT_BINDINGS", currentProxyHostPortBindingsJSON())
+	t.Setenv("TAKO_FAKE_INSPECT_IMAGE", "stale-caddy:2")
+	t.Setenv("TAKO_FAKE_INSPECT_MOUNTS", currentProxyMountsJSON())
+	t.Setenv("TAKO_FAKE_INSPECT_ENV", currentProxyEnvJSON(defaultProxyEmail))
+	t.Setenv("TAKO_FAKE_DOCKER_EXEC_FAIL_CONTAINS", "caddy reload")
+
+	if _, err := ReconcileProxy(context.Background(), ReconcileProxyRequest{Network: demoNetwork}); err == nil || !strings.Contains(err.Error(), "reactivate restored proxy") {
+		t.Fatalf("ReconcileProxy error = %v, want rollback activation failure", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("unverified restored proxy was left running: %v", err)
+	}
+	if !strings.Contains(strings.Join(readCommandLog(t, logPath), "\n"), "docker rm -f tako-proxy") {
+		t.Fatal("rollback activation failure did not stop proxy fail-closed")
 	}
 }
 

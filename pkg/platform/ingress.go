@@ -296,7 +296,7 @@ func benignRelayError(err error) bool {
 
 func isDirectStreamMutation(path string) bool {
 	switch path {
-	case "/v1/images/build", "/v1/images/import", "/v1/exec", "/v1/jobs/trigger":
+	case "/v1/images/build", "/v1/images/import", "/v1/exec", "/v1/jobs/trigger", "/v1/backups/postgres/verify":
 		return true
 	default:
 		return false

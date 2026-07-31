@@ -214,9 +214,6 @@ func (d *Deployer) MovePreparedServiceTakod(serviceName string, service *config.
 	grouped := groupTakodAssignments(assignments)
 	destinations := uniqueStringsSorted(destinationNodes)
 	sources := uniqueStringsSorted(sourceNodes)
-	if err := d.transferExistingImageToNodes(imageRef, destinations); err != nil {
-		return fmt.Errorf("transfer exact movement image for %s: %w", serviceName, err)
-	}
 	reconcileNodes := func(nodes []string) error {
 		return runTakodNodeActions(nodes, func(serverName string) error {
 			client, err := d.getRuntimeClient(serverName)
@@ -225,9 +222,6 @@ func (d *Deployer) MovePreparedServiceTakod(serviceName string, service *config.
 			}
 			return d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, grouped[serverName], false, false)
 		})
-	}
-	if err := reconcileNodes(destinations); err != nil {
-		return fmt.Errorf("reconcile movement destinations for %s: %w", serviceName, err)
 	}
 	destinationSet := make(map[string]struct{}, len(destinations))
 	for _, node := range destinations {
@@ -239,8 +233,43 @@ func (d *Deployer) MovePreparedServiceTakod(serviceName string, service *config.
 			cleanup = append(cleanup, node)
 		}
 	}
-	if err := reconcileNodes(cleanup); err != nil {
-		return fmt.Errorf("reconcile movement sources for %s: %w", serviceName, err)
+	return runTakodMovementPhases(
+		func() error {
+			if !serviceNeedsLoggingCapability(service) {
+				return nil
+			}
+			movementNodes := uniqueStringsSorted(append(append([]string(nil), destinations...), sources...))
+			if err := d.preflightTakodCapability(movementNodes, takod.CapabilityContainerLoggingV1, "per-service container log rotation"); err != nil {
+				return fmt.Errorf("service %s uses logging: %w", serviceName, err)
+			}
+			return nil
+		},
+		func() error {
+			if err := d.transferExistingImageToNodes(imageRef, destinations); err != nil {
+				return fmt.Errorf("transfer exact movement image for %s: %w", serviceName, err)
+			}
+			return nil
+		},
+		func() error {
+			if err := reconcileNodes(destinations); err != nil {
+				return fmt.Errorf("reconcile movement destinations for %s: %w", serviceName, err)
+			}
+			return nil
+		},
+		func() error {
+			if err := reconcileNodes(cleanup); err != nil {
+				return fmt.Errorf("reconcile movement sources for %s: %w", serviceName, err)
+			}
+			return nil
+		},
+	)
+}
+
+func runTakodMovementPhases(preflight, transfer, reconcileDestinations, reconcileSources func() error) error {
+	for _, phase := range []func() error{preflight, transfer, reconcileDestinations, reconcileSources} {
+		if err := phase(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -355,6 +384,10 @@ func takodRollbackDeployOptionsForService(service *config.ServiceConfig) takodSe
 }
 
 func (d *Deployer) deployServiceTakod(serviceName string, service *config.ServiceConfig, imageRef string, options takodServiceDeployOptions) error {
+	volumeOwnership, err := d.buildTakodVolumeOwnershipSpecs(service)
+	if err != nil {
+		return err
+	}
 	if len(service.Files) > 0 {
 		_, _, filesHash, err := d.PrepareServiceFiles(serviceName, service)
 		if err != nil {
@@ -377,6 +410,11 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		// and record it; the post-deploy ApplyJobSchedules pass registers
 		// the cron schedule declaratively on every node.
 		return runTakodJobBuildPhases(func() error {
+			if len(volumeOwnership) > 0 {
+				if err := d.preflightTakodCapability(assignmentServers, takod.CapabilityVolumeCreationOwnershipV1, "creation-only managed volume ownership"); err != nil {
+					return fmt.Errorf("job %s uses volume ownership: %w", serviceName, err)
+				}
+			}
 			if len(service.Files) > 0 {
 				if err := d.preflightTakodCapability(assignmentServers, takod.CapabilityServiceFilesV1, "operator file distribution"); err != nil {
 					return fmt.Errorf("job %s uses files: %w", serviceName, err)
@@ -407,9 +445,14 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		return fmt.Errorf("failed to get takod target servers: %w", err)
 	}
 	grouped := groupTakodAssignments(assignments)
-	needsCapabilities := serviceNeedsTakodCapabilityPreflight(service)
+	needsCapabilities := serviceNeedsTakodCapabilityPreflight(service) || len(volumeOwnership) > 0
 	return runTakodServiceRollout(needsCapabilities, takodServiceRolloutOperations{
 		Preflight: func() error {
+			if len(volumeOwnership) > 0 {
+				if err := d.preflightTakodCapability(assignmentServers, takod.CapabilityVolumeCreationOwnershipV1, "creation-only managed volume ownership"); err != nil {
+					return fmt.Errorf("service %s uses volume ownership: %w", serviceName, err)
+				}
+			}
 			if len(service.Files) > 0 {
 				if err := d.preflightTakodCapability(targetServers, takod.CapabilityServiceFilesV1, "operator file distribution"); err != nil {
 					return fmt.Errorf("service %s uses files: %w", serviceName, err)
@@ -428,6 +471,16 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 			if serviceNeedsRuntimeControlsCapability(service) {
 				if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerRuntimeControlsV1, "container runtime controls"); err != nil {
 					return fmt.Errorf("service %s uses container runtime controls: %w", serviceName, err)
+				}
+			}
+			if serviceNeedsLoggingCapability(service) {
+				if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerLoggingV1, "per-service container log rotation"); err != nil {
+					return fmt.Errorf("service %s uses logging: %w", serviceName, err)
+				}
+			}
+			if strings.TrimSpace(service.StopGracePeriod) != "" {
+				if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerGracefulStopV1, "graceful container stop"); err != nil {
+					return fmt.Errorf("service %s uses stopGracePeriod: %w", serviceName, err)
 				}
 			}
 			return nil
@@ -490,8 +543,12 @@ func serviceNeedsRuntimeControlsCapability(service *config.ServiceConfig) bool {
 	return service != nil && (service.User != "" || service.WorkingDir != "" || service.StopGracePeriod != "" || service.Init || len(service.ExtraHosts) > 0 || len(service.Ulimits) > 0 || service.ShmSize != "")
 }
 
+func serviceNeedsLoggingCapability(service *config.ServiceConfig) bool {
+	return service != nil && service.Logging != nil
+}
+
 func serviceNeedsTakodCapabilityPreflight(service *config.ServiceConfig) bool {
-	return serviceNeedsContainerArgvCapability(service) || serviceNeedsRuntimeControlsCapability(service) || (service != nil && len(service.Files) > 0)
+	return serviceNeedsContainerArgvCapability(service) || serviceNeedsRuntimeControlsCapability(service) || serviceNeedsLoggingCapability(service) || (service != nil && len(service.Files) > 0)
 }
 
 func (d *Deployer) preflightTakodContainerArgv(serverNames []string) error {
@@ -1119,6 +1176,9 @@ func (d *Deployer) RemoveServiceTakod(serviceName string) error {
 	if len(targetServers) == 0 {
 		return fmt.Errorf("environment %s has no target servers", d.environment)
 	}
+	if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerGracefulStopV1, "graceful container stop"); err != nil {
+		return fmt.Errorf("remove service %s: %w", serviceName, err)
+	}
 
 	return runTakodNodeActions(targetServers, func(serverName string) error {
 		client, err := d.getRuntimeClient(serverName)
@@ -1151,6 +1211,9 @@ func (d *Deployer) PruneTakodServiceRevisions(services map[string]config.Service
 	}
 	if len(targetServers) == 0 {
 		return fmt.Errorf("environment %s has no target servers", d.environment)
+	}
+	if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerGracefulStopV1, "graceful container stop"); err != nil {
+		return fmt.Errorf("prune stale service revisions: %w", err)
 	}
 
 	return runTakodNodeActions(targetServers, func(serverName string) error {
@@ -1401,6 +1464,10 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 	if err != nil {
 		return err
 	}
+	volumeOwnership, err := d.buildTakodVolumeOwnershipSpecs(service)
+	if err != nil {
+		return err
+	}
 	var fileBundles []takod.ServiceFileBundle
 	fileSetID := ""
 	if len(service.Files) > 0 && (!service.ReuseFiles || len(slots) > 0) {
@@ -1435,6 +1502,7 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 		Entrypoint:         service.Entrypoint,
 		Labels:             serviceRuntimeLabels(d.config.Project.Name, d.environment, serviceName, *service),
 		ExternalVolumes:    externalVolumes,
+		VolumeOwnership:    volumeOwnership,
 		Files:              fileBundles,
 		FileSetID:          fileSetID,
 		MemoryLimit:        serviceMemoryLimit(service),
@@ -1446,6 +1514,7 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 		ExtraHosts:         append([]string(nil), service.ExtraHosts...),
 		Ulimits:            copyServiceUlimits(service.Ulimits),
 		ShmSize:            service.ShmSize,
+		Logging:            copyServiceLogging(service.Logging),
 	}
 	if pullImage {
 		request.RegistryAuths = d.registryAuths()
@@ -1477,6 +1546,14 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 		return nil
 	}
 	return d.reconcileBackupScheduleViaTakod(client, serviceName, service, len(slots) > 0)
+}
+
+func copyServiceLogging(logging *config.ServiceLoggingConfig) *config.ServiceLoggingConfig {
+	if logging == nil {
+		return nil
+	}
+	clone := *logging
+	return &clone
 }
 
 func (d *Deployer) buildTakodNetworkAttachments(serviceName string, service *config.ServiceConfig) []takod.NetworkAttachmentSpec {
@@ -1775,8 +1852,43 @@ func (d *Deployer) buildTakodMountSpecs(serviceName string, service *config.Serv
 	return mounts, externalVolumes, nil
 }
 
+func (d *Deployer) buildTakodVolumeOwnershipSpecs(service *config.ServiceConfig) ([]takod.ManagedVolumeOwnership, error) {
+	if service == nil {
+		return nil, nil
+	}
+	byName := make(map[string]takod.ManagedVolumeOwnership)
+	for _, mount := range service.Volumes {
+		source, target := parseVolumeSpec(mount)
+		logicalName := source
+		if target == "" {
+			logicalName = source
+		} else if strings.HasPrefix(source, "/") {
+			continue
+		}
+		volume, declared := d.config.GetVolume(logicalName)
+		if !declared || volume.Owner == "" || volume.External || (volume.Driver != "" && volume.Driver != "local") || len(volume.DriverOpts) > 0 {
+			continue
+		}
+		uid, gid, configured, err := config.ParseServiceFileOwner(volume.Owner)
+		if err != nil {
+			return nil, err
+		}
+		if !configured {
+			continue
+		}
+		dockerName := d.config.GetVolumeName(logicalName, d.environment)
+		byName[dockerName] = takod.ManagedVolumeOwnership{Name: dockerName, UID: uid, GID: gid}
+	}
+	result := make([]takod.ManagedVolumeOwnership, 0, len(byName))
+	for _, policy := range byName {
+		result = append(result, policy)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
+}
+
 func (d *Deployer) reconcileBackupScheduleViaTakod(client any, serviceName string, service *config.ServiceConfig, serviceAssignedToNode bool) error {
-	if service.Backup == nil || !serviceAssignedToNode {
+	if service.Backup == nil || service.Backup.Schedule == "" || !serviceAssignedToNode {
 		return d.deleteBackupScheduleViaTakod(client, serviceName)
 	}
 	request, err := d.buildTakodBackupScheduleRequest(serviceName, service)
@@ -1872,6 +1984,7 @@ func takodBackupStorageConfig(storage *config.BackupStorageConfig) *takod.Backup
 		SecretAccessKey: storage.SecretAccessKey,
 		SessionToken:    storage.SessionToken,
 		ForcePathStyle:  storage.ForcePathStyle,
+		Versioned:       storage.Versioned,
 	}
 }
 
@@ -2067,6 +2180,38 @@ func (d *Deployer) PreflightAssignmentRemovals(serviceNames []string) error {
 		if err := d.validateRemovedAssignmentMutationTargets(serviceName, prior, nil); err != nil {
 			return fmt.Errorf("service %s removal preflight: %w", serviceName, err)
 		}
+	}
+	return nil
+}
+
+// PreflightGracefulStopCapabilities admits every target before any workflow
+// can persist intent, publish routes, or replace/remove containers.
+func (d *Deployer) PreflightGracefulStopCapabilities() error {
+	targetServers, err := d.getTakodTargetServers()
+	if err != nil {
+		return err
+	}
+	return d.preflightTakodCapability(targetServers, takod.CapabilityContainerGracefulStopV1, "graceful container stop")
+}
+
+// PreflightServiceMutationCapabilities admits opt-in service behavior across
+// the complete workflow target set before runtime or desired-state mutations.
+func (d *Deployer) PreflightServiceMutationCapabilities(services map[string]config.ServiceConfig) error {
+	return preflightServiceMutationCapabilitiesWithCheck(services, func() error {
+		targetServers, err := d.getTakodTargetServers()
+		if err != nil {
+			return err
+		}
+		return d.preflightTakodCapability(targetServers, takod.CapabilityContainerLoggingV1, "per-service container log rotation")
+	})
+}
+
+func preflightServiceMutationCapabilitiesWithCheck(services map[string]config.ServiceConfig, check func() error) error {
+	for _, service := range services {
+		if !serviceNeedsLoggingCapability(&service) {
+			continue
+		}
+		return check()
 	}
 	return nil
 }
@@ -2451,15 +2596,17 @@ func reconcileServiceRequestTimeout(request takod.ReconcileServiceRequest) time.
 	if len(request.Files) > 0 {
 		timeout = takodclient.StreamRequestTimeout
 	}
-	if request.Health == nil || request.Health.WaitAttempts <= 0 {
-		return timeout
+	// The old container owns the effective Docker StopTimeout, so the incoming
+	// config cannot provide a safe upper bound when a grace period is reduced or
+	// removed. Reserve the validated maximum, then add sequential health work.
+	calculated := timeout + 24*time.Hour
+	if request.Health != nil && request.Health.WaitAttempts > 0 {
+		containers := len(request.Containers)
+		if containers < 1 {
+			containers = 1
+		}
+		calculated += time.Duration(request.Health.WaitAttempts*containers) * time.Second
 	}
-	containers := len(request.Containers)
-	if containers < 1 {
-		containers = 1
-	}
-	healthWindow := time.Duration(request.Health.WaitAttempts*containers) * time.Second
-	calculated := healthWindow + 2*time.Minute
 	if calculated < timeout {
 		return timeout
 	}
@@ -2467,7 +2614,8 @@ func reconcileServiceRequestTimeout(request takod.ReconcileServiceRequest) time.
 }
 
 func (d *Deployer) removeServiceViaTakod(client any, request takod.RemoveServiceRequest) error {
-	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/remove-service", request); err != nil {
+	const maximumGracefulRemovalTimeout = 24*time.Hour + 2*time.Minute
+	if _, err := takodclient.RequestJSONWithTimeoutContext(d.baseContext(), client, d.takodSocket(), "POST", "/v1/remove-service", request, maximumGracefulRemovalTimeout); err != nil {
 		return fmt.Errorf("takod service removal failed: %w", err)
 	}
 	return nil

@@ -348,6 +348,10 @@ revision. New deployments obey `state.onUnreachableNode`.
 
 `recreate` is the conservative default. Tako replaces the service containers
 that match the app, stage, and service identity, then reconciles proxy routes.
+Normal replacement stops each old container with its configured Docker stop
+timeout before non-force removal, allowing PID 1 to receive `SIGTERM` and
+drain. Force removal is reserved for explicit hard-timeout and fail-closed
+paths.
 
 `rolling` is supported for stateless services as a full-revision rollout. Tako
 starts the replacement revision side-by-side, waits for `deploy.readiness` when
@@ -450,7 +454,8 @@ deploy builds the job's image exactly like a service's, distributes it to
 the **owning node** — the job's first placement target, so multi-node
 meshes never double-fire — and registers the schedule with that node's
 agent. The agent fires each run as a one-off `--rm` container with the
-job's env/secrets and the project network, records a bounded history (last
+job's env/secrets and the project network, commits a durable `running` record
+before launch, and records a bounded history (last
 50 runs with an output tail), skips a firing whose previous run is still in
 progress (recorded as `skipped`), and kills runs that exceed `timeout`
 (recorded as `timeout`). Deploys reconcile schedules declaratively: a job
@@ -462,6 +467,42 @@ shows history, `tako jobs trigger JOB` fires a run immediately and streams
 its output, and `tako logs JOB` prints the latest run's recorded output.
 In plans and `tako ps`, a job's actual state is its registered schedule —
 not container presence — so an idle job is "up-to-date", never drift.
+
+When `notifications.alerts` is enabled, each owner records scheduled attempt
+facts after run history is durably published. Facts replay after restart, so a
+crash between history publication and alert-state update cannot erase a
+failure. An unfinished scheduled job is cleaned up and terminalized as failed
+before cron restarts; native backups use the same fail-closed recovery rule.
+Helper names are length-bounded and identity-hashed, and cleanup also requires
+immutable scope/attempt labels. Scheduler shutdown cancels and waits for active
+cron callbacks instead of detaching them. A callback is terminalized only after
+its named helper is absent or removed; failed cleanup leaves the durable running
+record for startup recovery. Pre-execution backup/restore and snapshot-lock
+waits are context-aware, so shutdown can cancel a callback before helper launch.
+Manual triggers do not affect scheduler episodes. Native backup owners
+persist equivalent bounded, output-free attempt history and evaluate backup age
+from the last successful complete scheduled backup. Alert episodes, successful
+opening providers, and the bounded outbox are node-local durable state. Recovery
+is queued exactly once per episode for providers that received the opening;
+delivery itself is at-least-once and carries stable event identifiers. A daemon
+shutdown does not consume a delivery attempt, and an opening that completes
+concurrently with episode closure is retained long enough to queue its matching
+recovery.
+Dispatch intent and credential generation are persisted before network I/O.
+Restarts retry the same event ID; target rotation retains the old generation
+until its matching recovery is delivered or exhausted.
+Alert evaluation, dispatch state transitions, credential cleanup, and scheduler
+overlap facts all take shared platform snapshot authority. A platform snapshot
+therefore cannot capture a policy, state document, and credential generation
+from different durable transitions.
+Subject removal and whole-policy disable use durable retiring tombstones: new
+facts are ignored, successful opening providers receive recovery, and target
+credentials are removed only after those deliveries finish or exhaust.
+
+takod exports credential-free status but deliberately does not invent a
+`node_down` episode: a dead process cannot publish one. An independent
+`tako prometheus` invocation queries every expected owner and emits an explicit
+owner-reachability gauge plus an environment-level owner-presence gauge.
 
 ## Placement
 
@@ -740,6 +781,11 @@ stay reserved for the proxy in proxied environments, and multi-node
 environments require pinned or global placement so the endpoint is
 deterministic. These constraints are enforced at config validation, and port
 changes participate in the service config hash so redeploys rebind cleanly.
+Per-service Docker logging settings also participate in the config hash and
+desired-state export, so changing the driver or rotation bounds replaces the
+affected service containers. An omitted logging block remains omitted through
+state round trips and emits no Docker logging arguments, preserving daemon
+defaults.
 
 Stateful image services should be declared with `persistent: true` and at least
 one named or external Docker volume. The validator rejects persistent services

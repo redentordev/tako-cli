@@ -41,11 +41,20 @@ func TestExternalVolumeNamesForEnvironmentReturnsConfiguredDockerNames(t *testin
 				External: true,
 				Name:     "captain--n8n-data",
 			},
+			"owned":  {Owner: "1000:1000"},
+			"remote": {Driver: "nfs"},
+			"bind":   {Driver: "local", DriverOpts: map[string]string{"type": "none"}},
 		},
 	}
 
 	got := externalVolumeNamesForEnvironment(cfg, "production")
-	want := []string{"captain--n8n-data", "data"}
+	want := []string{
+		"captain--n8n-data",
+		"data",
+		cfg.GetVolumeName("bind", "production"),
+		cfg.GetVolumeName("owned", "production"),
+		cfg.GetVolumeName("remote", "production"),
+	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("external volumes = %#v, want %#v", got, want)
 	}

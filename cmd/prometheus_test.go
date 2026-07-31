@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,10 +19,10 @@ func TestCollectPrometheusNodesWithRunsConcurrentlyAndKeepsOrder(t *testing.T) {
 
 	resultsDone := make(chan []prometheusNodeResult, 1)
 	go func() {
-		resultsDone <- collectPrometheusNodesWith(servers, serverNames, func(serverName string, _ config.ServerConfig) (*MetricsData, []takod.ContainerStat, error) {
+		resultsDone <- collectPrometheusNodesWith(servers, serverNames, func(serverName string, _ config.ServerConfig) (*MetricsData, []takod.ContainerStat, *takod.AlertStatusResponse, bool, error) {
 			started <- serverName
 			<-release
-			return &MetricsData{CPUPercent: serverName}, []takod.ContainerStat{{Name: serverName + "-web"}}, nil
+			return &MetricsData{CPUPercent: serverName}, []takod.ContainerStat{{Name: serverName + "-web"}}, &takod.AlertStatusResponse{Configured: true}, true, nil
 		})
 	}()
 
@@ -41,6 +43,9 @@ func TestCollectPrometheusNodesWithRunsConcurrentlyAndKeepsOrder(t *testing.T) {
 		if len(results[i].stats) != 1 || results[i].stats[0].Name != serverName+"-web" {
 			t.Fatalf("result %d stats = %#v", i, results[i].stats)
 		}
+		if !results[i].alertsRead || results[i].alertStatus == nil || !results[i].alertStatus.Configured {
+			t.Fatalf("result %d alert status = %#v", i, results[i])
+		}
 	}
 }
 
@@ -48,11 +53,11 @@ func TestCollectPrometheusNodesWithRecordsErrors(t *testing.T) {
 	serverNames := []string{"node-a", "node-b", "missing"}
 	servers := testPrometheusServers(serverNames[:2])
 
-	results := collectPrometheusNodesWith(servers, serverNames, func(serverName string, _ config.ServerConfig) (*MetricsData, []takod.ContainerStat, error) {
+	results := collectPrometheusNodesWith(servers, serverNames, func(serverName string, _ config.ServerConfig) (*MetricsData, []takod.ContainerStat, *takod.AlertStatusResponse, bool, error) {
 		if serverName == "node-a" {
-			return nil, nil, fmt.Errorf("connect refused")
+			return nil, nil, nil, false, fmt.Errorf("connect refused")
 		}
-		return &MetricsData{CPUPercent: "1"}, nil, nil
+		return &MetricsData{CPUPercent: "1"}, nil, &takod.AlertStatusResponse{}, true, nil
 	})
 
 	if results[0].err == nil {
@@ -63,6 +68,54 @@ func TestCollectPrometheusNodesWithRecordsErrors(t *testing.T) {
 	}
 	if results[2].err == nil {
 		t.Fatalf("missing node should record configuration error")
+	}
+}
+
+func TestExportAlertMetricsIncludesExternalReachabilityAndNoCredentials(t *testing.T) {
+	status := &takod.AlertStatusResponse{
+		Project: "demo", Environment: "production", Configured: true,
+		EvaluatedAt: time.Unix(100, 0), ActiveEpisodes: 1, PendingDelivery: 2, Exhausted: 3,
+		Subjects: []takod.AlertSubjectStatus{{Kind: "job", Service: "worker", Active: true, LastSuccessAt: time.Unix(50, 0)}},
+	}
+	var output bytes.Buffer
+	exportAlertMetrics(&output, "node-a", "node-a.example", "demo", "production", status, true, true)
+	text := output.String()
+	for _, expected := range []string{
+		`tako_scheduler_alert_owner_reachable{server="node-a",host="node-a.example",project="demo",environment="production"} 1`,
+		`tako_scheduler_alert_active_episodes{server="node-a",host="node-a.example",project="demo",environment="production"} 1`,
+		`tako_scheduler_alert_subject_active{server="node-a",host="node-a.example",project="demo",environment="production",kind="job",service="worker"} 1`,
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("output missing %q:\n%s", expected, text)
+		}
+	}
+	if strings.Contains(text, "webhook") || strings.Contains(text, "token") {
+		t.Fatalf("output disclosed credentials: %s", text)
+	}
+
+	output.Reset()
+	exportAlertMetrics(&output, "node-a", "node-a.example", "demo", "production", nil, false, true)
+	if !strings.Contains(output.String(), `tako_scheduler_alert_owner_reachable{server="node-a",host="node-a.example",project="demo",environment="production"} 0`) || strings.Contains(output.String(), "tako_scheduler_alert_active_episodes{") {
+		t.Fatalf("unreachable output = %s", output.String())
+	}
+}
+
+func TestSchedulerAlertOwnersAllowsFullyCordonedEnvironment(t *testing.T) {
+	servers := map[string]config.ServerConfig{
+		"node-a": {Lifecycle: "cordoned"},
+		"node-b": {Lifecycle: "draining"},
+	}
+	owners, err := schedulerAlertOwners(servers, []string{"node-a", "node-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(owners) != 0 {
+		t.Fatalf("owners = %#v", owners)
+	}
+	var output bytes.Buffer
+	exportAlertOwnerPresence(&output, "demo", "production", false)
+	if !strings.Contains(output.String(), `tako_scheduler_alert_owner_present{project="demo",environment="production"} 0`) {
+		t.Fatalf("owner presence output = %s", output.String())
 	}
 }
 

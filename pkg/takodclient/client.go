@@ -377,6 +377,16 @@ func JobsApplyEndpoint() string {
 	return "/v1/jobs/apply"
 }
 
+func AlertsEndpoint(project, environment string) string {
+	if project == "" && environment == "" {
+		return "/v1/alerts"
+	}
+	query := url.Values{}
+	query.Set("project", project)
+	query.Set("environment", environment)
+	return "/v1/alerts?" + query.Encode()
+}
+
 func ExecEndpoint() string {
 	return "/v1/exec"
 }

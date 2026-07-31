@@ -344,6 +344,27 @@
         "webhook": {
           "type": "string",
           "description": "Generic webhook URL"
+        },
+        "alerts": {
+          "type": "object",
+          "description": "Durable scheduled-job and backup alert policy",
+          "properties": {
+            "jobs": {
+              "type": "object",
+              "properties": {
+                "consecutiveFailures": { "type": "integer", "minimum": 0, "maximum": 1000 },
+                "consecutiveTimeouts": { "type": "integer", "minimum": 0, "maximum": 1000 },
+                "consecutiveSkipped": { "type": "integer", "minimum": 0, "maximum": 1000 },
+                "noSuccessFor": { "type": "string", "description": "Alert when a scheduled job has no successful run for this Go duration (1m to 8760h)" }
+              }
+            },
+            "backups": {
+              "type": "object",
+              "properties": {
+                "maxAge": { "type": "string", "description": "Alert when the latest successful scheduled backup exceeds this Go duration (1m to 8760h)" }
+              }
+            }
+          }
         }
       }
     },
@@ -374,6 +395,11 @@
           },
           "name": {
             "type": "string"
+          },
+          "owner": {
+            "type": "string",
+            "pattern": "^[0-9]+(:[0-9]+)?$",
+            "description": "Creation-only numeric uid or uid:gid for a fresh Tako-managed local volume"
           }
         }
       }
@@ -619,6 +645,16 @@
                   "type": "string",
                   "pattern": "^[1-9][0-9]*([bBkKmMgG]|[kKmMgG][bB]|[kKmMgG][iI][bB])?$"
                 },
+                "logging": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["driver", "maxSize", "maxFiles"],
+                  "properties": {
+                    "driver": { "type": "string", "pattern": "^[\\t\\n\\r ]*(?:[Ll][Oo][Cc][Aa][Ll]|[Jj][Ss][Oo][Nn]-[Ff][Ii][Ll][Ee])[\\t\\n\\r ]*$" },
+                    "maxSize": { "type": "string", "pattern": "^[\\t\\n\\r ]*(?:(?:[1-9][0-9]{0,6}|10(?:[0-3][0-9]{5}|4(?:[0-7][0-9]{4}|8(?:[0-4][0-9]{3}|5(?:[0-6][0-9]{2}|7(?:[0-5][0-9]|60))))))[kK]|(?:[1-9][0-9]{0,3}|10(?:[01][0-9]{2}|2(?:[0-3][0-9]|40)))[mM]|(?:[1-9]|10)[gG])[\\t\\n\\r ]*$" },
+                    "maxFiles": { "type": "integer", "minimum": 1, "maximum": 100 }
+                  }
+                },
                 "secrets": {
                   "type": "array",
                   "items": {
@@ -651,9 +687,19 @@
                 },
                 "backup": {
                   "type": "object",
-                  "description": "Optional takod-managed periodic backups for named service volumes. Backups are created node-locally and can also be uploaded to S3-compatible object storage.",
-                  "required": [
-                    "schedule"
+                  "description": "Optional takod-managed periodic backups for named service volumes, or storage-only configuration for verifying external database-native artifacts.",
+                  "oneOf": [
+                    { "required": ["schedule"] },
+                    {
+                      "required": ["storage"],
+                      "not": {
+                        "anyOf": [
+                          { "required": ["schedule"] },
+                          { "required": ["retain"] },
+                          { "required": ["volumes"] }
+                        ]
+                      }
+                    }
                   ],
                   "properties": {
                     "schedule": {
@@ -677,6 +723,14 @@
                     "storage": {
                       "type": "object",
                       "description": "Optional S3-compatible object storage target for off-node backup copies",
+                      "additionalProperties": false,
+                      "required": ["bucket", "accessKeyId", "secretAccessKey"],
+                      "oneOf": [
+                        { "required": ["region"], "not": { "required": ["provider"] } },
+                        { "properties": { "provider": { "const": "s3" } }, "required": ["provider", "region"] },
+                        { "properties": { "provider": { "const": "r2" } }, "required": ["provider", "endpoint"] },
+                        { "properties": { "provider": { "const": "s3-compatible" } }, "required": ["provider", "region", "endpoint"] }
+                      ],
                       "properties": {
                         "provider": {
                           "type": "string",
@@ -688,14 +742,20 @@
                           "default": "s3"
                         },
                         "bucket": {
-                          "type": "string"
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "^[^/\\s\\u0000-\\u001F\\u007F]+$"
                         },
                         "region": {
                           "type": "string",
+                          "minLength": 1,
+                          "pattern": "\\S",
                           "description": "AWS region or auto for Cloudflare R2"
                         },
                         "endpoint": {
                           "type": "string",
+                          "minLength": 1,
+                          "pattern": "^(https?://(?:\\[[0-9A-Fa-f:]+\\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::[0-9]{1,5})?(?:/[^?#\\s]*)?|\\$\\{[A-Z_][A-Z0-9_]*\\})$",
                           "description": "Required for r2 and s3-compatible providers"
                         },
                         "prefix": {
@@ -704,10 +764,14 @@
                         },
                         "accessKeyId": {
                           "type": "string",
+                          "minLength": 1,
+                          "pattern": "\\S",
                           "description": "Use an environment variable such as ${TAKO_BACKUP_ACCESS_KEY_ID}"
                         },
                         "secretAccessKey": {
                           "type": "string",
+                          "minLength": 1,
+                          "pattern": "\\S",
                           "description": "Use an environment variable such as ${TAKO_BACKUP_SECRET_ACCESS_KEY}"
                         },
                         "sessionToken": {
@@ -716,6 +780,10 @@
                         "forcePathStyle": {
                           "type": "boolean",
                           "description": "Enable for MinIO and some S3-compatible stores"
+                        },
+                        "versioned": {
+                          "type": "boolean",
+                          "description": "Use object-version listing and exact version deletion for retention"
                         }
                       }
                     }
@@ -842,6 +910,59 @@
                         "pattern": "^[^/]+/[0-9]+$"
                       },
                       "description": "Explicit proxy/CDN CIDRs whose forwarded client IP headers may be trusted. IPv4 prefixes broader than /8 and IPv6 prefixes broader than /24 are rejected. All routes sharing a proxy node must use the same nonempty set."
+                    },
+                    "denyPathPrefixes": {
+                      "type": "array",
+                      "maxItems": 64,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^/[A-Za-z0-9._~!$&'()+,;=:@/-]*$",
+                        "not": { "pattern": "(?:^|/)\\.{1,2}(?:/|$)" },
+                        "maxLength": 256
+                      },
+                      "description": "Absolute literal path prefixes denied with 404 before authentication, request-body reads, or proxying. Each entry matches the exact path and segment children; for example /api/internal matches /api/internal and /api/internal/* without matching /api/internalized."
+                    },
+                    "allowPathPrefixes": {
+                      "type": "array",
+                      "maxItems": 64,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^/[A-Za-z0-9._~!$&'()+,;=:@/-]*$",
+                        "not": {
+                          "anyOf": [
+                            { "pattern": "(?:^|/)\\.{1,2}(?:/|$)" },
+                            { "pattern": "^/.+/$" },
+                            { "pattern": "//" }
+                          ]
+                        },
+                        "maxLength": 256
+                      },
+                      "description": "When nonempty, only exact literal path prefixes and segment children are served; all other paths receive 404 before authentication, request-body reads, or proxying. denyPathPrefixes takes precedence."
+                    },
+                    "maxRequestBody": {
+                      "type": "string",
+                      "pattern": "^(?:[1-9][0-9]{0,11}|1000000000000)[Bb]$|^(?:[1-9][0-9]{0,8}|1000000000)[Kk][Bb]$|^(?:[1-9][0-9]{0,5}|1000000)[Mm][Bb]$|^(?:[1-9][0-9]{0,2}|1000)[Gg][Bb]$",
+                      "description": "Maximum request body accepted by this route, for example 10MB. Oversized requests receive 413."
+                    },
+                    "responseHeaders": {
+                      "type": "object",
+                      "maxProperties": 64,
+                      "propertyNames": {
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*$",
+                        "maxLength": 128,
+                        "not": {
+                          "pattern": "^(?:[Cc][Oo][Nn][Nn][Ee][Cc][Tt][Ii][Oo][Nn]|[Cc][Oo][Nn][Tt][Ee][Nn][Tt]-[Ll][Ee][Nn][Gg][Tt][Hh]|[Hh][Oo][Ss][Tt]|[Hh][Tt][Tt][Pp]2-[Ss][Ee][Tt][Tt][Ii][Nn][Gg][Ss]|[Kk][Ee][Ee][Pp]-[Aa][Ll][Ii][Vv][Ee]|[Pp][Rr][Oo][Xx][Yy]-[Aa][Uu][Tt][Hh][Ee][Nn][Tt][Ii][Cc][Aa][Tt][Ee]|[Pp][Rr][Oo][Xx][Yy]-[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Pp][Rr][Oo][Xx][Yy]-[Cc][Oo][Nn][Nn][Ee][Cc][Tt][Ii][Oo][Nn]|[Tt][Ee]|[Tt][Rr][Aa][Ii][Ll][Ee][Rr]|[Tt][Rr][Aa][Nn][Ss][Ff][Ee][Rr]-[Ee][Nn][Cc][Oo][Dd][Ii][Nn][Gg]|[Uu][Pp][Gg][Rr][Aa][Dd][Ee])$"
+                        }
+                      },
+                      "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "pattern": "^[^\\s\\x00-\\x1F\\x7F](?:[^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F])?$"
+                      },
+                      "description": "Response headers added or replaced for this route. Hop-by-hop and message-framing headers are rejected."
                     },
                     "cdn": {
                       "type": "string",
@@ -1079,7 +1200,14 @@
                 }
               },
               "allOf": [
-                { "not": { "required": ["envFile", "envFiles"] } }
+                { "not": { "required": ["envFile", "envFiles"] } },
+                {
+                  "if": {
+                    "required": ["kind"],
+                    "properties": { "kind": { "enum": ["job", "run"] } }
+                  },
+                  "then": { "not": { "required": ["logging"] } }
+                }
               ]
             }
           }

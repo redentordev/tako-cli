@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,9 +83,36 @@ func TestEnsureSingleBackupRestoreTargetRequiresServerForMultiNode(t *testing.T)
 	}
 }
 
+func TestBackupRestoreRequiresExplicitApproval(t *testing.T) {
+	err := requireBackupRestoreApproval("20240101-120000", false)
+	if err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("error = %v, want --yes confirmation", err)
+	}
+	if err := requireBackupRestoreApproval("20240101-120000", true); err != nil {
+		t.Fatalf("approved restore rejected: %v", err)
+	}
+}
+
+func TestBackupRecoverRequiresApprovalForMutatingAction(t *testing.T) {
+	oldJournal, oldAction, oldYes := backupRecoverJournal, backupRecoverAction, backupRecoverYes
+	t.Cleanup(func() {
+		backupRecoverJournal, backupRecoverAction, backupRecoverYes = oldJournal, oldAction, oldYes
+	})
+	backupRecoverJournal = "/var/lib/tako/backups/demo/production/.restore-transaction-test.json"
+	backupRecoverAction = "rollback"
+	backupRecoverYes = false
+	err := runBackupRecover(backupRecoverCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("offline recovery approval error = %v", err)
+	}
+}
+
 func TestNewBackupIDFormat(t *testing.T) {
 	id := newBackupID()
-	if _, err := time.Parse("20060102-150405", id); err != nil {
+	if len(id) != len("20060102-150405")+1+32 {
+		t.Fatalf("backup ID %q does not include a unique suffix", id)
+	}
+	if _, err := time.Parse("20060102-150405", id[:len("20060102-150405")]); err != nil {
 		t.Fatalf("backup ID %q is not parseable: %v", id, err)
 	}
 }

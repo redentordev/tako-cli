@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"regexp"
 	"testing"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -28,6 +29,32 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "loadBalancer", "properties", "strategy"), []string{"round_robin", "sticky"})
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "backup", "properties", "storage", "properties", "provider"), []string{config.BackupStorageProviderS3, config.BackupStorageProviderR2, config.BackupStorageProviderS3Compatible})
 	serviceProperties := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties")
+	backupSchema := schemaPath(t, serviceProperties, "backup")
+	backupBranches, ok := backupSchema["oneOf"].([]any)
+	if !ok || len(backupBranches) != 2 {
+		t.Fatalf("backup schema must distinguish scheduled and storage-only configurations: %#v", backupSchema)
+	}
+	storageOnlyExclusions, ok := schemaPath(t, backupBranches[1], "not")["anyOf"].([]any)
+	if !ok || len(storageOnlyExclusions) != 3 {
+		t.Fatalf("storage-only backup schema must exclude schedule, retain, and volumes: %#v", backupBranches[1])
+	}
+	storageSchema := schemaPath(t, backupSchema, "properties", "storage")
+	assertRequiredContains(t, storageSchema, []string{"bucket", "accessKeyId", "secretAccessKey"})
+	if branches, ok := storageSchema["oneOf"].([]any); !ok || len(branches) != 4 {
+		t.Fatalf("backup storage schema must encode provider-specific endpoint and region requirements: %#v", storageSchema)
+	}
+	storageProperties := schemaPath(t, storageSchema, "properties")
+	endpointPattern := regexp.MustCompile(schemaPath(t, storageProperties, "endpoint")["pattern"].(string))
+	for _, endpoint := range []string{"https://s3.example.test", "http://localhost:9000/path", "${BACKUP_ENDPOINT}"} {
+		if !endpointPattern.MatchString(endpoint) {
+			t.Fatalf("backup endpoint schema rejects %q", endpoint)
+		}
+	}
+	for _, endpoint := range []string{"", "https://:", "ftp://store.example", "https://user:secret@store.example", "https://store.example?token=x", "https://store.example/#fragment"} {
+		if endpointPattern.MatchString(endpoint) {
+			t.Fatalf("backup endpoint schema accepts %q", endpoint)
+		}
+	}
 	sharedBuildProperties := schemaPath(t, schema, "properties", "builds", "additionalProperties", "properties")
 	for _, field := range []string{"context", "args", "target", "dockerfile"} {
 		schemaPath(t, sharedBuildProperties, field)
@@ -55,8 +82,35 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	schemaPath(t, fileItem, "target")
 	schemaPath(t, fileItem, "secret")
 	schemaPath(t, fileItem, "owner")
-	for _, field := range []string{"user", "workingDir", "stopGracePeriod", "init", "extraHosts", "ulimits", "shmSize"} {
+	for _, field := range []string{"user", "workingDir", "stopGracePeriod", "init", "extraHosts", "ulimits", "shmSize", "logging"} {
 		schemaPath(t, serviceProperties, field)
+	}
+	logging := schemaPath(t, serviceProperties, "logging", "properties")
+	driverPattern := regexp.MustCompile(schemaPath(t, logging, "driver")["pattern"].(string))
+	for _, value := range []string{"local", " JSON-FILE ", "\tLocal\n"} {
+		if !driverPattern.MatchString(value) {
+			t.Fatalf("logging driver schema rejects %q", value)
+		}
+	}
+	for _, value := range []string{"journald", "local extra", ""} {
+		if driverPattern.MatchString(value) {
+			t.Fatalf("logging driver schema accepts %q", value)
+		}
+	}
+	maxSizePattern := regexp.MustCompile(schemaPath(t, logging, "maxSize")["pattern"].(string))
+	for _, value := range []string{"1k", "10485760K", "10240m", "10G", " 25M "} {
+		if !maxSizePattern.MatchString(value) {
+			t.Fatalf("logging maxSize schema rejects %q", value)
+		}
+	}
+	for _, value := range []string{"0k", "10485761k", "10241m", "11g", "10gb"} {
+		if maxSizePattern.MatchString(value) {
+			t.Fatalf("logging maxSize schema accepts %q", value)
+		}
+	}
+	serviceRules, ok := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties")["allOf"].([]any)
+	if !ok || len(serviceRules) != 2 || !reflect.DeepEqual(schemaPath(t, serviceRules[1], "if", "properties", "kind")["enum"], []any{config.ServiceKindJob, config.ServiceKindRun}) || !reflect.DeepEqual(schemaPath(t, serviceRules[1], "then", "not")["required"], []any{"logging"}) {
+		t.Fatalf("logging workload-kind exclusion is missing: %#v", serviceRules)
 	}
 	labels := schemaPath(t, serviceProperties, "labels")
 	if labels["maxProperties"] != float64(256) {
@@ -68,6 +122,49 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	}
 	schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "proxy", "properties", "dynamicDomains", "properties", "ask")
 	assertStringEnum(t, schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties", "properties", "proxy", "properties", "cdn"), []string{config.ProxyCDNCloudflare, config.ProxyCDNGeneric})
+	proxyProperties := schemaPath(t, serviceProperties, "proxy", "properties")
+	denyPaths := schemaPath(t, proxyProperties, "denyPathPrefixes")
+	if denyPaths["maxItems"] != float64(64) || denyPaths["uniqueItems"] != true {
+		t.Fatalf("denyPathPrefixes schema = %#v", denyPaths)
+	}
+	allowPaths := schemaPath(t, proxyProperties, "allowPathPrefixes")
+	if allowPaths["maxItems"] != float64(64) || allowPaths["uniqueItems"] != true {
+		t.Fatalf("allowPathPrefixes schema = %#v", allowPaths)
+	}
+	allowItem := schemaPath(t, allowPaths, "items")
+	exclusions, ok := schemaPath(t, allowItem, "not")["anyOf"].([]any)
+	if !ok || len(exclusions) != 3 {
+		t.Fatalf("allowPathPrefixes canonical exclusions = %#v", schemaPath(t, allowItem, "not"))
+	}
+	dotSegmentPattern := regexp.MustCompile(exclusions[0].(map[string]any)["pattern"].(string))
+	if !dotSegmentPattern.MatchString("/api/..") || dotSegmentPattern.MatchString("/api/.well-known") {
+		t.Fatalf("allowPathPrefixes dot-segment exclusion is incorrect")
+	}
+	if !regexp.MustCompile(exclusions[1].(map[string]any)["pattern"].(string)).MatchString("/api/") || !regexp.MustCompile(exclusions[2].(map[string]any)["pattern"].(string)).MatchString("/api//users") {
+		t.Fatalf("allowPathPrefixes canonical-path exclusions are incorrect")
+	}
+	bodySize := schemaPath(t, proxyProperties, "maxRequestBody")
+	bodyPattern := regexp.MustCompile(bodySize["pattern"].(string))
+	for _, value := range []string{"1B", "10mb", "1000GB", "1000000000000B"} {
+		if !bodyPattern.MatchString(value) {
+			t.Fatalf("maxRequestBody schema rejects %q", value)
+		}
+	}
+	for _, value := range []string{"0B", "1025GB", "1000001MB", "1000000000001B"} {
+		if bodyPattern.MatchString(value) {
+			t.Fatalf("maxRequestBody schema accepts %q", value)
+		}
+	}
+	responseHeaders := schemaPath(t, proxyProperties, "responseHeaders")
+	if responseHeaders["maxProperties"] != float64(64) {
+		t.Fatalf("responseHeaders schema = %#v", responseHeaders)
+	}
+	forbiddenPattern := regexp.MustCompile(schemaPath(t, responseHeaders, "propertyNames", "not")["pattern"].(string))
+	for _, value := range []string{"Connection", "connection", "Keep-Alive", "kEeP-aLiVe", "TE"} {
+		if !forbiddenPattern.MatchString(value) {
+			t.Fatalf("responseHeaders forbidden-name schema misses %q", value)
+		}
+	}
 	acme := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "proxy", "properties", "acme")
 	conditions, ok := acme["allOf"].([]any)
 	if !ok || len(conditions) != 1 {
@@ -172,6 +269,24 @@ func assertRequiredDoesNotContain(t *testing.T, schema map[string]any, names []s
 	for _, name := range names {
 		if required[name] {
 			t.Fatalf("schema required contains %q, but runtime internals must be optional", name)
+		}
+	}
+}
+
+func assertRequiredContains(t *testing.T, schema map[string]any, names []string) {
+	t.Helper()
+	requiredRaw, ok := schema["required"].([]any)
+	if !ok {
+		t.Fatalf("schema missing required list: %#v", schema["required"])
+	}
+	required := make(map[string]bool, len(requiredRaw))
+	for _, value := range requiredRaw {
+		name, _ := value.(string)
+		required[name] = true
+	}
+	for _, name := range names {
+		if !required[name] {
+			t.Fatalf("schema required does not contain %q", name)
 		}
 	}
 }

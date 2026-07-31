@@ -96,6 +96,19 @@ func TestBuildJobSpecPreservesExecCommandEntrypointAndLabels(t *testing.T) {
 	}
 }
 
+func TestBuildJobSpecIncludesManagedVolumeOwnership(t *testing.T) {
+	d, service := jobDeployerFixture()
+	d.config.Volumes = map[string]config.VolumeConfig{"reports": {Driver: "local", Owner: "1000:1001"}}
+	service.Volumes = []string{"reports:/reports"}
+	spec, err := d.buildJobSpec("report", service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.VolumeOwnership) != 1 || spec.VolumeOwnership[0].Name != d.config.GetVolumeName("reports", "production") || spec.VolumeOwnership[0].UID != 1000 || spec.VolumeOwnership[0].GID != 1001 {
+		t.Fatalf("job volume ownership = %#v", spec.VolumeOwnership)
+	}
+}
+
 func TestBuildJobSpecWithoutBuiltImageLeavesImageEmpty(t *testing.T) {
 	d, service := jobDeployerFixture()
 	spec, err := d.buildJobSpec("report", service)

@@ -54,9 +54,13 @@ func (d *Deployer) buildJobSpec(serviceName string, service *config.ServiceConfi
 	if err != nil {
 		return takod.JobSpec{}, fmt.Errorf("failed to build env for job %s: %w", serviceName, err)
 	}
-	mounts, _, err := d.buildTakodMountSpecs(serviceName, service)
+	mounts, externalVolumes, err := d.buildTakodMountSpecs(serviceName, service)
 	if err != nil {
 		return takod.JobSpec{}, fmt.Errorf("failed to resolve mounts for job %s: %w", serviceName, err)
+	}
+	volumeOwnership, err := d.buildTakodVolumeOwnershipSpecs(service)
+	if err != nil {
+		return takod.JobSpec{}, fmt.Errorf("failed to resolve volume ownership for job %s: %w", serviceName, err)
 	}
 	fileBundles, fileMounts, filesHash, err := d.PrepareServiceFiles(serviceName, service)
 	if err != nil {
@@ -97,6 +101,8 @@ func (d *Deployer) buildJobSpec(serviceName string, service *config.ServiceConfi
 		EnvFileContent:     envContent,
 		Network:            runtimeid.NetworkName(d.config.Project.Name, d.environment),
 		Mounts:             mounts,
+		ExternalVolumes:    externalVolumes,
+		VolumeOwnership:    volumeOwnership,
 		Files:              fileBundles,
 		FileSetID:          fileSetID,
 		MemoryLimit:        serviceMemoryLimit(service),
@@ -162,10 +168,12 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 	var argvServers []string
 	var runtimeControlServers []string
 	var fileServers []string
+	var volumeOwnershipServers []string
 	for _, serverName := range targetServers {
 		needsArgv := false
 		needsRuntimeControls := false
 		needsFiles := false
+		needsVolumeOwnership := false
 		for _, job := range jobsByNode[serverName] {
 			if len(job.Entrypoint) > 0 {
 				needsArgv = true
@@ -175,6 +183,9 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 			}
 			if len(job.Files) > 0 {
 				needsFiles = true
+			}
+			if len(job.VolumeOwnership) > 0 {
+				needsVolumeOwnership = true
 			}
 		}
 		if needsArgv {
@@ -186,6 +197,9 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 		if needsFiles {
 			fileServers = append(fileServers, serverName)
 		}
+		if needsVolumeOwnership {
+			volumeOwnershipServers = append(volumeOwnershipServers, serverName)
+		}
 	}
 	return runTakodJobApplyPhases(targetServers, func() error {
 		if err := d.preflightTakodCapability(argvServers, takod.CapabilityContainerArgvV1, "container argv payloads"); err != nil {
@@ -196,6 +210,9 @@ func (d *Deployer) ApplyJobSchedules(services map[string]config.ServiceConfig) e
 		}
 		if err := d.preflightTakodCapability(fileServers, takod.CapabilityServiceFilesV1, "operator file distribution"); err != nil {
 			return fmt.Errorf("job files require operator file support: %w", err)
+		}
+		if err := d.preflightTakodCapability(volumeOwnershipServers, takod.CapabilityVolumeCreationOwnershipV1, "creation-only managed volume ownership"); err != nil {
+			return fmt.Errorf("job volume ownership requires managed volume ownership support: %w", err)
 		}
 		return nil
 	}, func(serverName string) error {

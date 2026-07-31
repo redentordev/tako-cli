@@ -161,7 +161,7 @@ func PersistTakodRuntimeStateWithPlacementBaseline(
 	verbose bool,
 ) error {
 	preserved := preservedDesiredServices(priorDesired, services, nil)
-	desired, err := takodstate.BuildDesiredRevisionWithPlacementSnapshot(cfg, envName, source, services, imageRefs, serverNames, assignments, nil, preserved, gitInfo)
+	desired, err := takodstate.BuildDesiredRevisionWithPlacementSnapshot(cfg, envName, source, services, imageRefs, serverNames, assignments, nil, preserved, priorDesiredVolumes(priorDesired), gitInfo)
 	if err != nil {
 		return fmt.Errorf("failed to build desired revision: %w", err)
 	}
@@ -235,7 +235,7 @@ func PersistTakodDesiredIntentWithPlacementBaseline(
 	verbose bool,
 ) error {
 	preserved := preservedDesiredServices(priorDesired, services, pendingRemovals)
-	desired, err := takodstate.BuildDesiredRevisionWithPlacementSnapshot(cfg, envName, source, services, imageRefs, serverNames, assignments, pendingRemovals, preserved, gitInfo)
+	desired, err := takodstate.BuildDesiredRevisionWithPlacementSnapshot(cfg, envName, source, services, imageRefs, serverNames, assignments, pendingRemovals, preserved, priorDesiredVolumes(priorDesired), gitInfo)
 	if err != nil {
 		return fmt.Errorf("failed to build desired placement intent: %w", err)
 	}
@@ -246,6 +246,13 @@ func PersistTakodDesiredIntentWithPlacementBaseline(
 		return fmt.Errorf("failed to persist desired placement intent before mutation: %w", err)
 	}
 	return nil
+}
+
+func priorDesiredVolumes(prior *takodstate.DesiredRevision) map[string]takodstate.DesiredVolume {
+	if prior == nil {
+		return nil
+	}
+	return prior.Volumes
 }
 
 // StateAuthorityTargets keeps legacy replicated state unchanged while making

@@ -184,7 +184,7 @@ ifeq ($(OS),Windows_NT)
 	@exit 1
 else
 	@echo "Running race tests..."
-	@go test -race $(RACE_PACKAGES)
+	@go test -race -timeout 20m $(RACE_PACKAGES)
 endif
 
 ## ci-check: Run all CI-equivalent local gates

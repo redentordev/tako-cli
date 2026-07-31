@@ -160,6 +160,11 @@ proxy:
 
 ## Backup
 
+The native command below archives a live volume and is not a guaranteed
+consistent PostgreSQL backup. Use a custom `pg_dump --format=custom` job for
+production recovery, then validate its exact remote object with `tako backup
+verify-postgres`.
+
 ```bash
 tako backup --volume postgres_data
 tako backup --list
@@ -168,8 +173,11 @@ tako backup --list
 ## Restore
 
 ```bash
-tako backup --volume postgres_data --restore <backup-id>
+tako backup --volume postgres_data --restore <backup-id> --yes
 ```
+
+Stop Umami and PostgreSQL before a destructive volume restore. Prefer the
+verified logical dump for database recovery.
 
 ## Scaling
 

@@ -99,10 +99,12 @@ func (d *Deployer) runReleaseCommand(serviceName string, service *config.Service
 		return fmt.Errorf("failed to build release env for %s: %w", serviceName, err)
 	}
 	var mounts []string
+	var externalVolumes []string
+	var volumeOwnership []takod.ManagedVolumeOwnership
 	if release.Volumes {
-		mounts, _, err = d.buildTakodMountSpecs(serviceName, service)
+		mounts, externalVolumes, volumeOwnership, err = d.buildReleaseVolumeSpecs(serviceName, service)
 		if err != nil {
-			return fmt.Errorf("failed to resolve release mounts for %s: %w", serviceName, err)
+			return err
 		}
 	}
 	fileBundles, fileMounts, _, err := d.PrepareServiceFiles(serviceName, service)
@@ -119,18 +121,20 @@ func (d *Deployer) runReleaseCommand(serviceName string, service *config.Service
 	}
 
 	request := takod.ExecRequest{
-		Project:        d.config.Project.Name,
-		Environment:    d.environment,
-		Service:        serviceName,
-		Mode:           takod.ExecModeOneOff,
-		Command:        append([]string(nil), release.Command...),
-		Image:          imageRef,
-		EnvFileContent: envContent,
-		Network:        runtimeid.NetworkName(d.config.Project.Name, d.environment),
-		Mounts:         mounts,
-		Files:          fileBundles,
-		FileSetID:      fileSetID,
-		TimeoutSeconds: int(timeout / time.Second),
+		Project:         d.config.Project.Name,
+		Environment:     d.environment,
+		Service:         serviceName,
+		Mode:            takod.ExecModeOneOff,
+		Command:         append([]string(nil), release.Command...),
+		Image:           imageRef,
+		EnvFileContent:  envContent,
+		Network:         runtimeid.NetworkName(d.config.Project.Name, d.environment),
+		Mounts:          mounts,
+		ExternalVolumes: externalVolumes,
+		VolumeOwnership: volumeOwnership,
+		Files:           fileBundles,
+		FileSetID:       fileSetID,
+		TimeoutSeconds:  int(timeout / time.Second),
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
@@ -194,6 +198,18 @@ func (d *Deployer) runReleaseCommand(serviceName string, service *config.Service
 		Data:    map[string]any{"exitCode": exitCode, "durationMs": run.DurationMs},
 	})
 	return nil
+}
+
+func (d *Deployer) buildReleaseVolumeSpecs(serviceName string, service *config.ServiceConfig) ([]string, []string, []takod.ManagedVolumeOwnership, error) {
+	mounts, externalVolumes, err := d.buildTakodMountSpecs(serviceName, service)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to resolve release mounts for %s: %w", serviceName, err)
+	}
+	volumeOwnership, err := d.buildTakodVolumeOwnershipSpecs(service)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to resolve release volume ownership for %s: %w", serviceName, err)
+	}
+	return mounts, externalVolumes, volumeOwnership, nil
 }
 
 // streamReleaseExec streams the exec response, forwarding output lines as

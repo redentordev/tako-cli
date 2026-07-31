@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 )
@@ -19,6 +20,49 @@ func validExecRequestFixture() ExecRequest {
 		Service:     "web",
 		Mode:        ExecModeAttach,
 		Command:     []string{"env"},
+	}
+}
+
+func TestStreamExecUsesGracefulCleanupOnCallerCancellation(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_DOCKER_RUN_BLOCK_UNTIL_CANCEL", "1")
+	startedFile := filepath.Join(t.TempDir(), "run-started")
+	t.Setenv("TAKO_FAKE_DOCKER_RUN_STARTED_FILE", startedFile)
+	req := validExecRequestFixture()
+	req.Mode = ExecModeOneOff
+	req.Image = "alpine:3.20"
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- StreamExec(ctx, req, &bytes.Buffer{}) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(startedFile); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("one-off docker run did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-result; err != nil {
+		t.Fatalf("StreamExec returned error: %v", err)
+	}
+	entries := readCommandLog(t, logPath)
+	hasStop := false
+	hasRemove := false
+	for _, entry := range entries {
+		hasStop = hasStop || strings.HasPrefix(entry, "docker stop tako_demo_production_web_exec_")
+		hasRemove = hasRemove || strings.HasPrefix(entry, "docker rm tako_demo_production_web_exec_")
+		if strings.HasPrefix(entry, "docker rm -f") {
+			t.Fatalf("caller cancellation force-removed one-off container: %#v", entries)
+		}
+	}
+	if !hasStop || !hasRemove {
+		t.Fatalf("caller cancellation did not gracefully clean one-off container: %#v", entries)
 	}
 }
 
@@ -240,6 +284,31 @@ func TestPrepareExecRunEnsuresNetworkAndLabeledVolumes(t *testing.T) {
 		if !strings.Contains(log, want) {
 			t.Fatalf("command log missing %q: %s", want, log)
 		}
+	}
+}
+
+func TestPrepareExecRunInitializesManagedVolumeOwnership(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+	t.Setenv("TAKO_FAKE_VOLUME_OWNERSHIP_STATE_FILE", filepath.Join(t.TempDir(), "volume-state"))
+	t.Setenv("TAKO_FAKE_VOLUME_OWNERSHIP_MARKER_FILE", filepath.Join(t.TempDir(), "marker"))
+	req := ExecRequest{
+		Project: "demo", Environment: "production", Service: "migrate", Mode: ExecModeOneOff,
+		Image: "busybox:1.36", Command: []string{"true"}, DataDir: t.TempDir(),
+		Mounts:          []string{"type=volume,source=tako_demo_production_data,target=/data"},
+		VolumeOwnership: []ManagedVolumeOwnership{{Name: "tako_demo_production_data", UID: 1000, GID: 1001}},
+	}
+	run, err := prepareExecRun(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.cleanup != nil {
+		run.cleanup()
+	}
+	commands := strings.Join(readCommandLog(t, logPath), "\n")
+	if strings.Count(commands, "volume create") != 1 || strings.Count(commands, "chown 1000:1001 /volume") != 1 {
+		t.Fatalf("one-off ownership initialization commands:\n%s", commands)
 	}
 }
 

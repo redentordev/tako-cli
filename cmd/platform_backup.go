@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -29,6 +30,7 @@ var (
 	platformBackupEndpoint           string
 	platformBackupPrefix             string
 	platformBackupForcePathStyle     bool
+	platformBackupVersioned          bool
 	platformBackupConfigDir          string
 	platformBackupDataDir            string
 	platformBackupWorkloads          string
@@ -72,6 +74,7 @@ func init() {
 	platformBackupCreateCmd.Flags().StringVar(&platformBackupEndpoint, "endpoint", "", "S3-compatible HTTPS endpoint")
 	platformBackupCreateCmd.Flags().StringVar(&platformBackupPrefix, "prefix", "platform-recovery", "Object key prefix")
 	platformBackupCreateCmd.Flags().BoolVar(&platformBackupForcePathStyle, "force-path-style", false, "Use path-style S3 requests")
+	platformBackupCreateCmd.Flags().BoolVar(&platformBackupVersioned, "versioned", false, "Use exact object-version retention and cleanup semantics")
 	platformBackupCreateCmd.Flags().StringVar(&platformBackupConfigDir, "config-dir", "/etc/tako", "Protected Tako configuration and identity directory")
 	platformBackupCreateCmd.Flags().StringVar(&platformBackupDataDir, "data-dir", "/var/lib/tako", "Tako PaaS, operation journal, environment, and certificate data directory")
 	platformBackupCreateCmd.Flags().StringVar(&platformBackupWorkloads, "workload-backup-manifest", "", "JSON evidence for externally stored persistent workload snapshots")
@@ -110,7 +113,7 @@ type workloadBackupReference struct {
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
-func runPlatformBackupCreate(cmd *cobra.Command, _ []string) error {
+func runPlatformBackupCreate(cmd *cobra.Command, _ []string) (retErr error) {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("platform recovery backup must run as root")
 	}
@@ -129,7 +132,7 @@ func runPlatformBackupCreate(cmd *cobra.Command, _ []string) error {
 		Provider: platformBackupProvider, Bucket: platformBackupBucket, Region: platformBackupRegion,
 		Endpoint: platformBackupEndpoint, Prefix: platformBackupPrefix,
 		AccessKeyID: os.Getenv("TAKO_BACKUP_ACCESS_KEY_ID"), SecretAccessKey: os.Getenv("TAKO_BACKUP_SECRET_ACCESS_KEY"),
-		SessionToken: os.Getenv("TAKO_BACKUP_SESSION_TOKEN"), ForcePathStyle: platformBackupForcePathStyle,
+		SessionToken: os.Getenv("TAKO_BACKUP_SESSION_TOKEN"), ForcePathStyle: platformBackupForcePathStyle, Versioned: platformBackupVersioned,
 	}
 	if err := validateRecoveryStorageTLS(storage); err != nil {
 		return err
@@ -183,17 +186,39 @@ func runPlatformBackupCreate(cmd *cobra.Command, _ []string) error {
 	if _, err := recovery.VerifyEncrypted(encryptedArchive, installation.ClusterID, recoveryKey); err != nil {
 		return fmt.Errorf("authenticate encrypted recovery bundle before upload: %w", err)
 	}
-	remote, err := takod.UploadBackupObject(cmd.Context(), storage, takod.BackupObject{
-		Project: "platform", Environment: "recovery", Volume: "control-plane", BackupID: backupID,
-		Path: encryptedArchive, CreatedAt: result.Manifest.CreatedAt,
-	})
-	if err != nil {
-		return fmt.Errorf("upload recovery bundle outside node 1: %w", err)
-	}
 	encryptedInfo, err := os.Stat(encryptedArchive)
 	if err != nil {
 		return err
 	}
+	localPath := "removed after authenticated upload readback"
+	if platformBackupKeepLocal {
+		destination := filepath.Join(".", filepath.Base(encryptedArchive))
+		if err := copyRecoveryBundle(encryptedArchive, destination); err != nil {
+			return err
+		}
+		localPath = destination
+	}
+	authorityFingerprint, err := platform.ControllerRecoveryKeyFingerprint(installation.AllocationPublicKey)
+	if err != nil {
+		return err
+	}
+	remote, err := takod.UploadBackupObject(cmd.Context(), storage, takod.BackupObject{
+		Project: "platform", Environment: "recovery", Volume: "control-plane", BackupID: backupID,
+		ArtifactID: backupID, Path: encryptedArchive, Size: encryptedInfo.Size(), SHA256: encryptedSHA, CreatedAt: result.Manifest.CreatedAt,
+	})
+	if err != nil {
+		return fmt.Errorf("upload recovery bundle outside node 1: %w", err)
+	}
+	remoteCommitted := false
+	defer func() {
+		if !remoteCommitted {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := takod.DeleteBackupObjectVersion(cleanupCtx, storage, remote.Key, remote.VersionID); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("delete uncommitted recovery object %s: %w", remote.Key, err))
+			}
+		}
+	}()
 	remoteInfo, err := takod.InspectBackupObject(cmd.Context(), storage, remote.Key)
 	if err != nil || remoteInfo.Size != encryptedInfo.Size() {
 		return fmt.Errorf("uploaded recovery object size does not match local encrypted bundle")
@@ -209,18 +234,7 @@ func runPlatformBackupCreate(cmd *cobra.Command, _ []string) error {
 	if _, err := recovery.VerifyEncrypted(readback, installation.ClusterID, recoveryKey); err != nil {
 		return fmt.Errorf("uploaded recovery object failed authenticated readback: %w", err)
 	}
-	localPath := "removed after authenticated upload readback"
-	if platformBackupKeepLocal {
-		destination := filepath.Join(".", filepath.Base(encryptedArchive))
-		if err := copyRecoveryBundle(encryptedArchive, destination); err != nil {
-			return err
-		}
-		localPath = destination
-	}
-	authorityFingerprint, err := platform.ControllerRecoveryKeyFingerprint(installation.AllocationPublicKey)
-	if err != nil {
-		return err
-	}
+	remoteCommitted = true
 	fmt.Fprintf(humanOut(), "Platform recovery uploaded and read back\nCluster: %s\nController key SHA256: %s\nObject: %s/%s\nEncrypted SHA256: %s\nLocal: %s\n", installation.ClusterID, authorityFingerprint, remote.Bucket, remote.Key, encryptedSHA, localPath)
 	return nil
 }

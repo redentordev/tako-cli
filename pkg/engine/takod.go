@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployplan"
@@ -184,14 +185,22 @@ func EnsureDeployRuntimeSupported(cfg *config.Config) error {
 
 type takodRuntimeSetup interface {
 	PreflightTakodProxyCapabilities(map[string]config.ServiceConfig) error
+	PreflightGracefulStopCapabilities() error
+	PreflightServiceMutationCapabilities(map[string]config.ServiceConfig) error
 	SetupTakodRuntime() error
 }
 
 // preflightAndSetupTakodRuntime preserves the no-mutation boundary for
 // unsupported proxy topology. Setup applies mesh and node runtime state, so it
 // must never run before route capability admission succeeds.
-func preflightAndSetupTakodRuntime(runtime takodRuntimeSetup, services map[string]config.ServiceConfig) error {
-	if err := runtime.PreflightTakodProxyCapabilities(services); err != nil {
+func preflightAndSetupTakodRuntime(runtime takodRuntimeSetup, routeServices, mutationServices map[string]config.ServiceConfig) error {
+	if err := runtime.PreflightTakodProxyCapabilities(routeServices); err != nil {
+		return err
+	}
+	if err := runtime.PreflightGracefulStopCapabilities(); err != nil {
+		return err
+	}
+	if err := runtime.PreflightServiceMutationCapabilities(mutationServices); err != nil {
 		return err
 	}
 	if err := runtime.SetupTakodRuntime(); err != nil {
@@ -208,7 +217,15 @@ func CleanupViaTakod(client any, cfg *config.Config, request takod.CleanupReques
 // CleanupViaTakodContext runs cleanup through takod bounded by ctx.
 func CleanupViaTakodContext(ctx context.Context, client any, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
 	var response takod.CleanupResponse
-	output, err := takodclient.RequestJSONWithContext(ctx, client, TakodSocketFromConfig(cfg), "POST", "/v1/cleanup", request)
+	timeout := takodclient.JSONRequestTimeout
+	if request.RemoveContainers {
+		// Scheduled work can consume its 24-hour maximum before service
+		// containers begin their own maximum 24-hour graceful drain.
+		timeout = 48*time.Hour + 10*time.Minute
+	} else if request.RemoveTakodState {
+		timeout = 24*time.Hour + 5*time.Minute
+	}
+	output, err := takodclient.RequestJSONWithTimeoutContext(ctx, client, TakodSocketFromConfig(cfg), "POST", "/v1/cleanup", request, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -216,6 +233,23 @@ func CleanupViaTakodContext(ctx context.Context, client any, cfg *config.Config,
 		return nil, fmt.Errorf("failed to parse takod response: %w", err)
 	}
 	return &response, nil
+}
+
+func RequireTakodCapabilityContext(ctx context.Context, client any, cfg *config.Config, capability string, feature string) error {
+	output, err := takodclient.RequestJSONWithContext(ctx, client, TakodSocketFromConfig(cfg), "GET", "/v1/status", nil)
+	if err != nil {
+		return fmt.Errorf("read takod capabilities: %w", err)
+	}
+	var status takod.Status
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		return fmt.Errorf("parse takod capabilities: %w", err)
+	}
+	for _, advertised := range status.Capabilities {
+		if advertised == capability {
+			return nil
+		}
+	}
+	return fmt.Errorf("takod does not support %s (missing capability %s); upgrade the node agent", feature, capability)
 }
 
 // CleanupImageRepositories lists the image repositories automatic cleanup
@@ -249,8 +283,9 @@ func CleanupImageRepositories(cfg *config.Config, environment string, services m
 	return repositories
 }
 
-// ExternalVolumeNamesForEnvironment lists external volume names cleanup must
-// never remove.
+// ExternalVolumeNamesForEnvironment lists volume names cleanup must never
+// remove automatically. Besides external volumes, this includes every volume
+// whose creation semantics cannot be proven by takod.
 func ExternalVolumeNamesForEnvironment(cfg *config.Config, environment string) []string {
 	if cfg == nil || cfg.Volumes == nil {
 		return nil
@@ -258,7 +293,7 @@ func ExternalVolumeNamesForEnvironment(cfg *config.Config, environment string) [
 	seen := make(map[string]bool)
 	names := make([]string, 0)
 	for key, volume := range cfg.Volumes {
-		if !volume.External {
+		if !volume.External && volume.Owner == "" && (volume.Driver == "" || volume.Driver == "local") && len(volume.DriverOpts) == 0 {
 			continue
 		}
 		name := cfg.GetVolumeName(key, environment)

@@ -10,6 +10,8 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
+	"gopkg.in/yaml.v3"
 )
 
 func TestDesiredServiceToConfigPreservesCommandEntrypointAndLabels(t *testing.T) {
@@ -49,6 +51,7 @@ func TestDesiredServiceToConfigPreservesRuntimeControlsAndRedactsBuildArgs(t *te
 		ExtraHosts:      []string{"database:10.0.0.2"},
 		Ulimits:         map[string]takoapi.UlimitDocument{"nofile": {Soft: 262144, Hard: 262144}},
 		ShmSize:         "256m",
+		Logging:         &takoapi.ServiceLoggingDocument{Driver: "local", MaxSize: "25m", MaxFiles: 5},
 	})
 	if err != nil {
 		t.Fatalf("desiredServiceToConfig: %v", err)
@@ -58,6 +61,9 @@ func TestDesiredServiceToConfigPreservesRuntimeControlsAndRedactsBuildArgs(t *te
 	}
 	if service.Ulimits["nofile"].Hard != 262144 || len(service.BuildArgs) != 0 {
 		t.Fatalf("materialized ulimits/build args = %#v / %#v", service.Ulimits, service.BuildArgs)
+	}
+	if service.Logging == nil || service.Logging.Driver != "local" || service.Logging.MaxSize != "25m" || service.Logging.MaxFiles != 5 {
+		t.Fatalf("materialized logging = %#v", service.Logging)
 	}
 	if len(warnings) != 1 || warnings[0].Code != "build_arg_values_redacted" {
 		t.Fatalf("warnings = %#v", warnings)
@@ -180,6 +186,104 @@ func TestBuildConfigDomainProxyReconstruction(t *testing.T) {
 	}
 	if !hasWarning(warnings, "extra_domains_as_redirects", "web") {
 		t.Fatalf("warnings = %#v, want extra_domains_as_redirects", warnings)
+	}
+}
+
+func TestBuildConfigNullProxyUsesLegacyDomainsFallback(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["web"] = takoapi.DesiredServiceDocument{
+		Image: "nginx:latest", Port: 80, Proxy: json.RawMessage("null"), Domains: []string{"example.com"},
+	}
+	cfg, _, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := cfg.Environments["production"].Services["web"].Proxy
+	if proxy == nil || proxy.Domain != "example.com" {
+		t.Fatalf("legacy domains fallback was suppressed by null proxy: %#v", proxy)
+	}
+}
+
+func TestBuildConfigPreservesDesiredProxyPolicy(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["web"] = takoapi.DesiredServiceDocument{
+		Image: "nginx:latest", Port: 80,
+		Proxy: mustRaw(t, config.ProxyConfig{
+			Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, AllowPathPrefixes: []string{"/api"}, MaxRequestBody: "10MB",
+			ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
+		}),
+	}
+	cfg, _, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := cfg.Environments["production"].Services["web"].Proxy
+	if proxy == nil || proxy.Domain != "example.com" || proxy.MaxRequestBody != "10MB" || len(proxy.DenyPathPrefixes) != 1 || len(proxy.AllowPathPrefixes) != 1 || proxy.ResponseHeaders["X-Content-Type-Options"] != "nosniff" {
+		t.Fatalf("proxy policy was not materialized: %#v", proxy)
+	}
+}
+
+func TestBuildConfigRedactsProxyBasicAuthVerifier(t *testing.T) {
+	desired := baseDesired()
+	desired.Services["web"] = takoapi.DesiredServiceDocument{
+		Image: "nginx:latest", Port: 80,
+		Proxy:                    mustRaw(t, config.ProxyConfig{Domain: "example.com"}),
+		ProxyBasicAuthConfigured: true,
+		ProxyBasicAuthUsername:   "admin",
+	}
+	cfg, warnings, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := cfg.Environments["production"].Services["web"].Proxy.BasicAuth
+	if auth == nil || auth.Username != "admin" || auth.PasswordBcrypt != "REDACTED" {
+		t.Fatalf("materialized basic auth = %#v", auth)
+	}
+	if !hasWarning(warnings, "proxy_basic_auth_verifier_redacted", "web") {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+}
+
+func TestProxyPolicyDesiredStateToExportedYAMLRoundTrip(t *testing.T) {
+	serviceConfig := config.ServiceConfig{
+		Image: "nginx:latest", Port: 80, Replicas: 1,
+		Proxy: &config.ProxyConfig{
+			Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, AllowPathPrefixes: []string{"/api"}, MaxRequestBody: "10MB",
+			ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
+		},
+	}
+	revision, err := takodstate.BuildDesiredRevision(
+		&config.Config{Project: config.ProjectConfig{Name: "demo"}}, "production", "deploy",
+		map[string]config.ServiceConfig{"web": serviceConfig}, map[string]string{"web": "nginx:latest"}, nil, takodstate.GitInfo{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(revision.Services["web"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document takoapi.DesiredServiceDocument
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	desired := baseDesired()
+	desired.Services["web"] = document
+	cfg, warnings, err := BuildConfig(Options{Desired: desired, Servers: baseServers(t), Validate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exported, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{"denyPathPrefixes:", "- /api/internal", "allowPathPrefixes:", "- /api", "maxRequestBody: 10MB", "X-Content-Type-Options: REDACTED"} {
+		if !strings.Contains(string(exported), fragment) {
+			t.Fatalf("exported YAML missing %q:\n%s", fragment, exported)
+		}
+	}
+	if !hasWarning(warnings, "proxy_response_header_values_redacted", "web") {
+		t.Fatalf("warnings = %#v", warnings)
 	}
 }
 
@@ -395,6 +499,24 @@ func TestBuildConfigRestoresSharedBuildDefinitions(t *testing.T) {
 	}
 	if !hasWarning(warnings, "shared_build_arg_values_redacted", "") {
 		t.Fatalf("warnings = %#v", warnings)
+	}
+}
+
+func TestBuildConfigRestoresTopLevelVolumeOwnership(t *testing.T) {
+	desired := takoapi.NewDesiredStateDocument("demo", "production", "rev-1")
+	desired.Volumes = map[string]takoapi.DesiredVolumeDocument{
+		"data": {Driver: "local", DriverOptsRedacted: true, LabelsRedacted: true, Owner: "1000:1001"},
+	}
+	cfg, warnings, err := BuildConfig(Options{Desired: &desired})
+	if err != nil {
+		t.Fatal(err)
+	}
+	volume := cfg.Volumes["data"]
+	if volume.Owner != "1000:1001" || volume.Driver != "local" || len(volume.DriverOpts) != 0 || len(volume.Labels) != 0 {
+		t.Fatalf("materialized volume = %#v", volume)
+	}
+	if !hasWarning(warnings, "volume_driver_options_redacted", "") || !hasWarning(warnings, "volume_labels_redacted", "") {
+		t.Fatalf("redaction warnings = %#v", warnings)
 	}
 }
 

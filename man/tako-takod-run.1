@@ -30,7 +30,7 @@ Run the takod Unix-socket server
 	takod data directory
 
 .PP
-\fB--docker-data-root\fP=""
+\fB--docker-data-root\fP="/var/lib/docker"
 	Docker data-root filesystem used for image and volume admission
 
 .PP
@@ -50,12 +50,16 @@ Run the takod Unix-socket server
 	Protected controller membership state (derived from data-dir when omitted)
 
 .PP
-\fB--minimum-free-disk-bytes\fP=0
+\fB--minimum-free-disk-bytes\fP=10737418240
 	Reject disk-growing operations below this free-disk floor (0 disables)
 
 .PP
 \fB--node\fP=""
 	Configured Tako node name
+
+.PP
+\fB--reserved-memory-bytes\fP=536870912
+	Host memory kept unavailable to isolated verification work
 
 .PP
 \fB--socket\fP=""

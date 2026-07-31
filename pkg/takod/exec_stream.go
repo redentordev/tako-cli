@@ -67,9 +67,14 @@ func RunExecStream(ctx context.Context, req ExecRequest, reader io.Reader, write
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSeconds)*time.Second)
 	defer cancel()
 
-	exitCode, runErr := runExecStreamProcess(runCtx, req, run, stream, time.Duration(idleSeconds)*time.Second, cancel)
+	var idleExpired atomic.Bool
+	exitCode, runErr := runExecStreamProcess(runCtx, req, run, stream, time.Duration(idleSeconds)*time.Second, cancel, &idleExpired)
 	if req.Mode == ExecModeOneOff && runCtx.Err() != nil {
-		removeExecContainer(run.container)
+		if idleExpired.Load() || (errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil) {
+			removeExecContainer(run.container)
+		} else {
+			removeExecContainerGracefully(run.container)
+		}
 	}
 	if runErr != nil {
 		_ = stream.writer.WriteFrame(ptystream.FrameError, []byte(runErr.Error()))
@@ -83,7 +88,7 @@ func RunExecStream(ctx context.Context, req ExecRequest, reader io.Reader, write
 // requested), pumps frames both ways, and returns the process exit code.
 // A non-exit failure (docker missing, pty allocation) reports -1 with the
 // error.
-func runExecStreamProcess(ctx context.Context, req ExecRequest, run *execRun, stream *execStreamIO, idleTimeout time.Duration, cancel context.CancelFunc) (int, error) {
+func runExecStreamProcess(ctx context.Context, req ExecRequest, run *execRun, stream *execStreamIO, idleTimeout time.Duration, cancel context.CancelFunc, idleExpired *atomic.Bool) (int, error) {
 	cmd := dockerCommandContext(ctx, "docker", run.args...)
 
 	var processIn io.WriteCloser
@@ -175,6 +180,7 @@ func runExecStreamProcess(ctx context.Context, req ExecRequest, run *execRun, st
 				idleFor := time.Since(time.Unix(0, lastActivity.Load()))
 				if idleFor >= idleTimeout {
 					_ = stream.writer.WriteFrame(ptystream.FrameError, []byte(fmt.Sprintf("exec session idle for %s; closing", idleFor.Truncate(time.Second))))
+					idleExpired.Store(true)
 					cancel()
 					return
 				}

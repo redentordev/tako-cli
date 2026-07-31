@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"unicode"
 
@@ -67,18 +66,27 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 	warn := func(format string, args ...any) {
 		response.Warnings = append(response.Warnings, fmt.Sprintf(format, args...))
 	}
-	if req.KeepImages < 0 {
-		return nil, fmt.Errorf("keepImages cannot be negative")
-	}
-
 	if req.includesMaintenanceCleanup() {
 		response.InitialDiskUsage = diskUsage(ctx)
+	}
+
+	// Public routes must be withdrawn and activated before service processes
+	// begin draining. A failed withdrawal aborts cleanup with runtime state
+	// intact so the operation can be retried safely.
+	if err := RemoveProxyFiles(ctx, req.ProxyFiles); err != nil {
+		return response, fmt.Errorf("failed to withdraw proxy files: %w", err)
+	}
+	response.ProxyFilesRemoved = len(req.ProxyFiles)
+	if req.Environment != "" && slices.Contains(req.ProxyFiles, runtimeid.ProxyConfigFileName(req.Project, req.Environment)) {
+		if _, err := RemoveACMEDNSConfiguration(ctx, req.Project, req.Environment); err != nil {
+			warn("failed to remove proxy ACME ownership: %v", err)
+		}
 	}
 
 	if req.RemoveContainers {
 		count, err := cleanupContainers(ctx, req.Project, req.Environment)
 		if err != nil {
-			warn("%v", err)
+			return response, err
 		}
 		response.ContainersRemoved = count
 	}
@@ -129,32 +137,6 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 			warn("failed to clean unused project volumes: %v", err)
 		} else {
 			response.UnusedVolumesCleaned = true
-		}
-	}
-	for _, name := range req.ProxyFiles {
-		if fence, fenced := operationFenceFromContext(ctx); fenced {
-			validated, validateErr := validateProxyFileName(name)
-			if validateErr != nil {
-				return nil, validateErr
-			}
-			if data, exists, readErr := readFileIfExists(filepath.Join(proxyRoutesDir, validated)); readErr != nil {
-				return nil, readErr
-			} else if exists {
-				manifest, parseErr := ParseProxyRouteManifest(string(data))
-				if parseErr != nil || manifest.Project != fence.Project || manifest.Environment != fence.Environment {
-					return nil, fmt.Errorf("cleanup proxy manifest is outside the controller operation fence")
-				}
-			}
-		}
-		if _, err := RemoveProxyFile(ctx, name); err != nil {
-			warn("failed to remove proxy file %s: %v", name, err)
-			continue
-		}
-		response.ProxyFilesRemoved++
-	}
-	if req.Environment != "" && slices.Contains(req.ProxyFiles, runtimeid.ProxyConfigFileName(req.Project, req.Environment)) {
-		if _, err := RemoveACMEDNSConfiguration(ctx, req.Project, req.Environment); err != nil {
-			warn("failed to remove proxy ACME ownership: %v", err)
 		}
 	}
 	if req.RemoveDeployFiles {
@@ -211,6 +193,9 @@ func validateCleanupRequest(req CleanupRequest) error {
 	if req.BuildCacheKeepStorage != "" && !isSafeBuildCacheKeepStorage(req.BuildCacheKeepStorage) {
 		return fmt.Errorf("invalid build cache keep storage")
 	}
+	if req.KeepImages < 0 {
+		return fmt.Errorf("keepImages cannot be negative")
+	}
 	return nil
 }
 
@@ -240,11 +225,7 @@ func cleanupContainers(ctx context.Context, project string, environment string) 
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	removeArgs := append([]string{"rm", "-f"}, ids...)
-	if _, err := runDocker(ctx, removeArgs...); err != nil {
-		return 0, fmt.Errorf("failed to remove project containers: %w", err)
-	}
-	return len(ids), nil
+	return removeContainerIDs(ctx, ids)
 }
 
 func cleanupStoppedContainers(ctx context.Context, project string, environment string) (int, error) {
@@ -447,54 +428,11 @@ func isSafeBuildCacheKeepStorage(value string) bool {
 	return hasDigit
 }
 
-func cleanupUnusedProjectVolumes(ctx context.Context, project string, environment string, protectedVolumes []string) (int, error) {
-	output, err := runDocker(ctx, "volume", "ls", "--format", "{{.Name}}")
-	if err != nil {
-		return 0, fmt.Errorf("failed to list docker volumes: %w", err)
+func cleanupUnusedProjectVolumes(ctx context.Context, _ string, _ string, _ []string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
-	protected := make(map[string]bool, len(protectedVolumes))
-	for _, volume := range protectedVolumes {
-		protected[volume] = true
-	}
-	var names []string
-	for _, line := range strings.Split(output, "\n") {
-		name := strings.TrimSpace(line)
-		if name == "" || !volumeNameMatchesProjectEnvironment(name, project, environment) {
-			continue
-		}
-		if protected[name] {
-			continue
-		}
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	removed := 0
-	for _, name := range names {
-		output, err := runDocker(ctx, "volume", "rm", name)
-		if err != nil {
-			if dockerVolumeInUse(output) {
-				continue
-			}
-			return removed, fmt.Errorf("failed to remove docker volume %s: %w", name, err)
-		}
-		removed++
-	}
-	return removed, nil
-}
-
-func volumeNameMatchesProjectEnvironment(name string, project string, environment string) bool {
-	if environment != "" {
-		return strings.HasPrefix(name, runtimeid.VolumeEnvironmentPrefix(project, environment))
-	}
-	return strings.HasPrefix(name, runtimeid.VolumeProjectPrefix(project))
-}
-
-func dockerVolumeInUse(output string) bool {
-	lower := strings.ToLower(output)
-	return strings.Contains(lower, "volume is in use") ||
-		strings.Contains(lower, "volume is still in use") ||
-		strings.Contains(lower, "is in use")
+	return 0, fmt.Errorf("automatic named-volume deletion is disabled because Docker provides no atomic identity-checked delete; remove verified volumes explicitly")
 }
 
 func runScopedProjectPrune(ctx context.Context, project string, environment string, protectedVolumes []string, warn func(string, ...any), response *CleanupResponse) {

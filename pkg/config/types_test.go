@@ -1,12 +1,24 @@
 package config
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestStorageOnlyBackupJSONOmitsScheduledRetentionFields(t *testing.T) {
+	backup := BackupConfig{Storage: &BackupStorageConfig{Provider: BackupStorageProviderS3, Bucket: "backups", Region: "us-east-1", AccessKeyID: "access", SecretAccessKey: "secret"}}
+	data, err := json.Marshal(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"retain"`) || strings.Contains(string(data), `"schedule"`) || strings.Contains(string(data), `"volumes"`) {
+		t.Fatalf("storage-only backup emitted scheduled fields: %s", data)
+	}
+}
 
 func TestLoadConfigRejectsUnknownJSONStorageField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tako.json")
@@ -342,6 +354,72 @@ func TestValidateConfigRejectsR2BackupStorageWithoutEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "backup.storage.endpoint") {
 		t.Fatalf("error = %q, want endpoint guidance", err)
+	}
+}
+
+func TestValidateConfigRejectsBackupStorageEndpointCredentials(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Backup = &BackupConfig{Storage: &BackupStorageConfig{
+		Provider: BackupStorageProviderS3Compatible, Bucket: "backups", Region: "us-east-1",
+		Endpoint: "https://user:secret@store.example", AccessKeyID: "access", SecretAccessKey: "secret",
+	}}
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+	if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "must not include credentials") {
+		t.Fatalf("endpoint userinfo error = %v", err)
+	}
+}
+
+func TestValidateConfigRejectsVersionedR2Retention(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Backup = &BackupConfig{Storage: &BackupStorageConfig{
+		Provider: BackupStorageProviderR2, Bucket: "backups", Endpoint: "https://account.r2.cloudflarestorage.com",
+		AccessKeyID: "access", SecretAccessKey: "secret", Versioned: true,
+	}}
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+	if err := ValidateConfig(cfg); err == nil || !strings.Contains(err.Error(), "not supported by R2") {
+		t.Fatalf("versioned R2 error = %v", err)
+	}
+}
+
+func TestValidateConfigAcceptsCreationOnlyLocalVolumeOwner(t *testing.T) {
+	cfg := validValidationConfig()
+	cfg.Volumes = map[string]VolumeConfig{"data": {Driver: "local", Owner: "1000:1001"}}
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Volumes = []string{"data:/data"}
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Environments["production"].Services["web"].VolumeOwnershipHash == "" {
+		t.Fatal("volume ownership did not contribute to service fingerprint")
+	}
+}
+
+func TestValidateConfigRejectsUnsafeVolumeOwnershipTargets(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		volume VolumeConfig
+	}{
+		{name: "named owner", volume: VolumeConfig{Owner: "postgres"}},
+		{name: "external", volume: VolumeConfig{External: true, Owner: "1000"}},
+		{name: "custom driver", volume: VolumeConfig{Driver: "zfs", Owner: "1000"}},
+		{name: "driver options", volume: VolumeConfig{Driver: "local", DriverOpts: map[string]string{"type": "none"}, Owner: "1000"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validValidationConfig()
+			cfg.Volumes = map[string]VolumeConfig{"data": test.volume}
+			if err := ValidateConfig(cfg); err == nil {
+				t.Fatal("unsafe volume ownership was accepted")
+			}
+		})
 	}
 }
 
@@ -1556,6 +1634,26 @@ func TestValidateConfigAcceptsJobService(t *testing.T) {
 
 	if err := ValidateConfig(cfg); err != nil {
 		t.Fatalf("ValidateConfig rejected a valid job: %v", err)
+	}
+}
+
+func TestValidateConfigKeepsCustomPostgresDumpJobOpaque(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	command := "pg_dump --format=custom --file=/tmp/app.dump app && aws s3 cp /tmp/app.dump s3://${BACKUP_BUCKET}/app.dump"
+	production.Services["database-snapshot"] = ServiceConfig{
+		Kind: ServiceKindJob, Image: "example/pg-backup:1.0", Schedule: "@daily", Command: StringValue(command),
+		Backup: &BackupConfig{Storage: &BackupStorageConfig{
+			Provider: BackupStorageProviderS3, Bucket: "backups", Region: "us-east-1",
+			AccessKeyID: "access", SecretAccessKey: "secret",
+		}},
+	}
+	cfg.Environments["production"] = production
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("custom pg_dump job was rejected: %v", err)
+	}
+	if got, scalar := cfg.Environments["production"].Services["database-snapshot"].Command.Scalar(); !scalar || got != command {
+		t.Fatalf("custom pg_dump command changed from %q to %q", command, got)
 	}
 }
 
