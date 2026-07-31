@@ -186,17 +186,21 @@ func EnsureDeployRuntimeSupported(cfg *config.Config) error {
 type takodRuntimeSetup interface {
 	PreflightTakodProxyCapabilities(map[string]config.ServiceConfig) error
 	PreflightGracefulStopCapabilities() error
+	PreflightServiceMutationCapabilities(map[string]config.ServiceConfig) error
 	SetupTakodRuntime() error
 }
 
 // preflightAndSetupTakodRuntime preserves the no-mutation boundary for
 // unsupported proxy topology. Setup applies mesh and node runtime state, so it
 // must never run before route capability admission succeeds.
-func preflightAndSetupTakodRuntime(runtime takodRuntimeSetup, services map[string]config.ServiceConfig) error {
-	if err := runtime.PreflightTakodProxyCapabilities(services); err != nil {
+func preflightAndSetupTakodRuntime(runtime takodRuntimeSetup, routeServices, mutationServices map[string]config.ServiceConfig) error {
+	if err := runtime.PreflightTakodProxyCapabilities(routeServices); err != nil {
 		return err
 	}
 	if err := runtime.PreflightGracefulStopCapabilities(); err != nil {
+		return err
+	}
+	if err := runtime.PreflightServiceMutationCapabilities(mutationServices); err != nil {
 		return err
 	}
 	if err := runtime.SetupTakodRuntime(); err != nil {

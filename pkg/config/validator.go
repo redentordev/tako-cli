@@ -33,6 +33,8 @@ const (
 	maxServiceFiles          = 128
 	maxServiceFileEntries    = 16384
 	maxServiceBuildArgs      = 128
+	maxServiceLogSizeBytes   = 10 * 1024 * 1024 * 1024
+	maxServiceLogFiles       = 100
 	maxServiceExtraHosts     = 128
 	maxServiceUlimits        = 64
 )
@@ -771,6 +773,9 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		return err
 	}
 	if err := validateContainerRuntimeControls(name, service); err != nil {
+		return err
+	}
+	if err := validateServiceLogging(name, service.Logging); err != nil {
 		return err
 	}
 	service.VolumeOwnershipHash = cfg.ServiceVolumeOwnershipFingerprint(envName, service)
@@ -1654,6 +1659,9 @@ func validateServiceKind(name string, service *ServiceConfig) error {
 		}
 		return nil
 	case ServiceKindJob:
+		if service.Logging != nil {
+			return fmt.Errorf("service %s: kind: job cannot set logging; job output is retained in run history", name)
+		}
 		// fallthrough to job validation below
 	case ServiceKindRun:
 		return validateRunServiceKind(name, service)
@@ -1736,6 +1744,9 @@ func validateSharedBuilds(builds map[string]SharedBuildConfig) error {
 }
 
 func validateRunServiceKind(name string, service *ServiceConfig) error {
+	if service.Logging != nil {
+		return fmt.Errorf("service %s: kind: run cannot set logging; deploy-time runs have no persistent Docker logs", name)
+	}
 	if service.Schedule != "" || service.Timezone != "" {
 		return fmt.Errorf("service %s: kind: run cannot set schedule or timezone", name)
 	}
@@ -1785,6 +1796,38 @@ func validateRunServiceKind(name string, service *ServiceConfig) error {
 		deploy.Readiness != (DeployReadinessConfig{}) || deploy.SmokeTest != (DeploySmokeTestConfig{}) ||
 		deploy.Promotion != "" || deploy.GracePeriod != "" || deploy.Release != nil {
 		return fmt.Errorf("service %s: kind: run cannot set deploy rollout controls", name)
+	}
+	return nil
+}
+
+func validateServiceLogging(name string, logging *ServiceLoggingConfig) error {
+	if logging == nil {
+		return nil
+	}
+	logging.Driver = strings.ToLower(strings.Trim(logging.Driver, " \t\r\n"))
+	logging.MaxSize = strings.ToLower(strings.Trim(logging.MaxSize, " \t\r\n"))
+	if logging.Driver != "local" && logging.Driver != "json-file" {
+		return fmt.Errorf("service %s: logging.driver must be local or json-file", name)
+	}
+	match := regexp.MustCompile(`^([1-9][0-9]*)([kmg])$`).FindStringSubmatch(logging.MaxSize)
+	if match == nil {
+		return fmt.Errorf("service %s: logging.maxSize must be a positive integer followed by k, m, or g", name)
+	}
+	value, err := strconv.ParseInt(match[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("service %s: logging.maxSize is too large", name)
+	}
+	multiplier := int64(1024)
+	if match[2] == "m" {
+		multiplier *= 1024
+	} else if match[2] == "g" {
+		multiplier *= 1024 * 1024
+	}
+	if value > maxServiceLogSizeBytes/multiplier {
+		return fmt.Errorf("service %s: logging.maxSize must not exceed 10g", name)
+	}
+	if logging.MaxFiles < 1 || logging.MaxFiles > maxServiceLogFiles {
+		return fmt.Errorf("service %s: logging.maxFiles must be between 1 and %d", name, maxServiceLogFiles)
 	}
 	return nil
 }

@@ -132,6 +132,10 @@ const CapabilityPlatformWorkerHandoffV1 = "platform.worker-handoff-v1"
 // ulimits, and shm-size fields on service and job payloads.
 const CapabilityContainerRuntimeControlsV1 = "container.runtime-controls-v1"
 
+// CapabilityContainerLoggingV1 means service payloads can set bounded local or
+// json-file Docker logging options without breaking `docker logs`.
+const CapabilityContainerLoggingV1 = "container.logging-v1"
+
 // CapabilityContainerGracefulStopV1 means normal service reconciliation stops
 // containers with Docker's configured signal and timeout before removing them.
 const CapabilityContainerGracefulStopV1 = "container.graceful-stop-v1"
@@ -2469,7 +2473,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,

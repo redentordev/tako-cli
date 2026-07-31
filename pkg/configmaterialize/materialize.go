@@ -267,6 +267,7 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 		ExtraHosts:      cleanStrings(service.ExtraHosts),
 		Ulimits:         materializeUlimits(service.Ulimits),
 		ShmSize:         strings.TrimSpace(service.ShmSize),
+		Logging:         materializeServiceLogging(service.Logging),
 	}
 	serviceType := strings.TrimSpace(service.Type)
 	if out.Kind == "" && (serviceType == config.ServiceKindRun || serviceType == config.ServiceKindJob) {
@@ -394,6 +395,13 @@ func desiredServiceToConfig(name string, service takoapi.DesiredServiceDocument)
 	}
 
 	return out, warnings, nil
+}
+
+func materializeServiceLogging(logging *takoapi.ServiceLoggingDocument) *config.ServiceLoggingConfig {
+	if logging == nil {
+		return nil
+	}
+	return &config.ServiceLoggingConfig{Driver: strings.TrimSpace(logging.Driver), MaxSize: strings.TrimSpace(logging.MaxSize), MaxFiles: logging.MaxFiles}
 }
 
 func materializeServiceFiles(files []takoapi.ServiceFileDocument) []config.ServiceFileConfig {

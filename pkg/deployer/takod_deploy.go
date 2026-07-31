@@ -214,9 +214,6 @@ func (d *Deployer) MovePreparedServiceTakod(serviceName string, service *config.
 	grouped := groupTakodAssignments(assignments)
 	destinations := uniqueStringsSorted(destinationNodes)
 	sources := uniqueStringsSorted(sourceNodes)
-	if err := d.transferExistingImageToNodes(imageRef, destinations); err != nil {
-		return fmt.Errorf("transfer exact movement image for %s: %w", serviceName, err)
-	}
 	reconcileNodes := func(nodes []string) error {
 		return runTakodNodeActions(nodes, func(serverName string) error {
 			client, err := d.getRuntimeClient(serverName)
@@ -225,9 +222,6 @@ func (d *Deployer) MovePreparedServiceTakod(serviceName string, service *config.
 			}
 			return d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, grouped[serverName], false, false)
 		})
-	}
-	if err := reconcileNodes(destinations); err != nil {
-		return fmt.Errorf("reconcile movement destinations for %s: %w", serviceName, err)
 	}
 	destinationSet := make(map[string]struct{}, len(destinations))
 	for _, node := range destinations {
@@ -239,8 +233,43 @@ func (d *Deployer) MovePreparedServiceTakod(serviceName string, service *config.
 			cleanup = append(cleanup, node)
 		}
 	}
-	if err := reconcileNodes(cleanup); err != nil {
-		return fmt.Errorf("reconcile movement sources for %s: %w", serviceName, err)
+	return runTakodMovementPhases(
+		func() error {
+			if !serviceNeedsLoggingCapability(service) {
+				return nil
+			}
+			movementNodes := uniqueStringsSorted(append(append([]string(nil), destinations...), sources...))
+			if err := d.preflightTakodCapability(movementNodes, takod.CapabilityContainerLoggingV1, "per-service container log rotation"); err != nil {
+				return fmt.Errorf("service %s uses logging: %w", serviceName, err)
+			}
+			return nil
+		},
+		func() error {
+			if err := d.transferExistingImageToNodes(imageRef, destinations); err != nil {
+				return fmt.Errorf("transfer exact movement image for %s: %w", serviceName, err)
+			}
+			return nil
+		},
+		func() error {
+			if err := reconcileNodes(destinations); err != nil {
+				return fmt.Errorf("reconcile movement destinations for %s: %w", serviceName, err)
+			}
+			return nil
+		},
+		func() error {
+			if err := reconcileNodes(cleanup); err != nil {
+				return fmt.Errorf("reconcile movement sources for %s: %w", serviceName, err)
+			}
+			return nil
+		},
+	)
+}
+
+func runTakodMovementPhases(preflight, transfer, reconcileDestinations, reconcileSources func() error) error {
+	for _, phase := range []func() error{preflight, transfer, reconcileDestinations, reconcileSources} {
+		if err := phase(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -444,6 +473,11 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 					return fmt.Errorf("service %s uses container runtime controls: %w", serviceName, err)
 				}
 			}
+			if serviceNeedsLoggingCapability(service) {
+				if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerLoggingV1, "per-service container log rotation"); err != nil {
+					return fmt.Errorf("service %s uses logging: %w", serviceName, err)
+				}
+			}
 			if strings.TrimSpace(service.StopGracePeriod) != "" {
 				if err := d.preflightTakodCapability(targetServers, takod.CapabilityContainerGracefulStopV1, "graceful container stop"); err != nil {
 					return fmt.Errorf("service %s uses stopGracePeriod: %w", serviceName, err)
@@ -509,8 +543,12 @@ func serviceNeedsRuntimeControlsCapability(service *config.ServiceConfig) bool {
 	return service != nil && (service.User != "" || service.WorkingDir != "" || service.StopGracePeriod != "" || service.Init || len(service.ExtraHosts) > 0 || len(service.Ulimits) > 0 || service.ShmSize != "")
 }
 
+func serviceNeedsLoggingCapability(service *config.ServiceConfig) bool {
+	return service != nil && service.Logging != nil
+}
+
 func serviceNeedsTakodCapabilityPreflight(service *config.ServiceConfig) bool {
-	return serviceNeedsContainerArgvCapability(service) || serviceNeedsRuntimeControlsCapability(service) || (service != nil && len(service.Files) > 0)
+	return serviceNeedsContainerArgvCapability(service) || serviceNeedsRuntimeControlsCapability(service) || serviceNeedsLoggingCapability(service) || (service != nil && len(service.Files) > 0)
 }
 
 func (d *Deployer) preflightTakodContainerArgv(serverNames []string) error {
@@ -1476,6 +1514,7 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 		ExtraHosts:         append([]string(nil), service.ExtraHosts...),
 		Ulimits:            copyServiceUlimits(service.Ulimits),
 		ShmSize:            service.ShmSize,
+		Logging:            copyServiceLogging(service.Logging),
 	}
 	if pullImage {
 		request.RegistryAuths = d.registryAuths()
@@ -1507,6 +1546,14 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 		return nil
 	}
 	return d.reconcileBackupScheduleViaTakod(client, serviceName, service, len(slots) > 0)
+}
+
+func copyServiceLogging(logging *config.ServiceLoggingConfig) *config.ServiceLoggingConfig {
+	if logging == nil {
+		return nil
+	}
+	clone := *logging
+	return &clone
 }
 
 func (d *Deployer) buildTakodNetworkAttachments(serviceName string, service *config.ServiceConfig) []takod.NetworkAttachmentSpec {
@@ -2145,6 +2192,28 @@ func (d *Deployer) PreflightGracefulStopCapabilities() error {
 		return err
 	}
 	return d.preflightTakodCapability(targetServers, takod.CapabilityContainerGracefulStopV1, "graceful container stop")
+}
+
+// PreflightServiceMutationCapabilities admits opt-in service behavior across
+// the complete workflow target set before runtime or desired-state mutations.
+func (d *Deployer) PreflightServiceMutationCapabilities(services map[string]config.ServiceConfig) error {
+	return preflightServiceMutationCapabilitiesWithCheck(services, func() error {
+		targetServers, err := d.getTakodTargetServers()
+		if err != nil {
+			return err
+		}
+		return d.preflightTakodCapability(targetServers, takod.CapabilityContainerLoggingV1, "per-service container log rotation")
+	})
+}
+
+func preflightServiceMutationCapabilitiesWithCheck(services map[string]config.ServiceConfig, check func() error) error {
+	for _, service := range services {
+		if !serviceNeedsLoggingCapability(&service) {
+			continue
+		}
+		return check()
+	}
+	return nil
 }
 
 func (d *Deployer) validateRemovedAssignmentMutationTargets(serviceName string, prior, planned []scheduler.Assignment) error {

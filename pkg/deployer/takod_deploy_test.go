@@ -460,6 +460,54 @@ func TestServiceNeedsRuntimeControlsCapability(t *testing.T) {
 	}
 }
 
+func TestServiceNeedsLoggingCapability(t *testing.T) {
+	if serviceNeedsLoggingCapability(nil) || serviceNeedsLoggingCapability(&config.ServiceConfig{}) {
+		t.Fatal("unset logging requested capability")
+	}
+	service := &config.ServiceConfig{Logging: &config.ServiceLoggingConfig{Driver: "local", MaxSize: "25m", MaxFiles: 5}}
+	if !serviceNeedsLoggingCapability(service) || !serviceNeedsTakodCapabilityPreflight(service) {
+		t.Fatal("configured logging did not request capability preflight")
+	}
+	copy := copyServiceLogging(service.Logging)
+	if copy == service.Logging || *copy != *service.Logging {
+		t.Fatalf("logging copy = %#v", copy)
+	}
+}
+
+func TestEnsureTakodLoggingCapabilityFailsClosed(t *testing.T) {
+	deploy := &Deployer{config: &config.Config{}}
+	err := deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+		output: `{"capabilities":["container.runtime-controls-v1"]}`,
+	}, "node-a", takod.CapabilityContainerLoggingV1, "per-service container log rotation")
+	if err == nil || !strings.Contains(err.Error(), "does not support per-service container log rotation") {
+		t.Fatalf("ensureTakodCapability() error = %v", err)
+	}
+}
+
+func TestPreflightServiceMutationCapabilitiesChecksOnlyConfiguredLogging(t *testing.T) {
+	checks := 0
+	check := func() error {
+		checks++
+		return errors.New("stale agent")
+	}
+	if err := preflightServiceMutationCapabilitiesWithCheck(map[string]config.ServiceConfig{"web": {}}, check); err != nil {
+		t.Fatalf("unset logging preflight error = %v", err)
+	}
+	if checks != 0 {
+		t.Fatalf("unset logging performed %d checks", checks)
+	}
+	services := map[string]config.ServiceConfig{
+		"web":    {},
+		"worker": {Logging: &config.ServiceLoggingConfig{Driver: "local", MaxSize: "25m", MaxFiles: 5}},
+	}
+	if err := preflightServiceMutationCapabilitiesWithCheck(services, check); err == nil || err.Error() != "stale agent" {
+		t.Fatalf("configured logging preflight error = %v", err)
+	}
+	if checks != 1 {
+		t.Fatalf("configured logging performed %d checks, want 1", checks)
+	}
+}
+
 func TestEnsureTakodRuntimeControlsCapabilityFailsClosed(t *testing.T) {
 	deploy := &Deployer{config: &config.Config{}}
 	err := deploy.ensureTakodCapability(fakeTakodStatusExecutor{
@@ -602,6 +650,57 @@ func TestTakodServiceRolloutRuntimeControlsPreflightBeforeMutations(t *testing.T
 	}
 	if got := strings.Join(phases, ","); got != "preflight" {
 		t.Fatalf("phases = %q, want preflight only", got)
+	}
+}
+
+func TestTakodServiceRolloutLoggingPreflightBeforeMutations(t *testing.T) {
+	service := &config.ServiceConfig{Logging: &config.ServiceLoggingConfig{Driver: "local", MaxSize: "25m", MaxFiles: 5}}
+	var phases []string
+	err := runTakodServiceRollout(serviceNeedsTakodCapabilityPreflight(service), takodServiceRolloutOperations{
+		Preflight: func() error {
+			phases = append(phases, "preflight")
+			deploy := &Deployer{config: &config.Config{}}
+			return deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+				output: `{"capabilities":["container.argv-v1","container.runtime-controls-v1"]}`,
+			}, "node-a", takod.CapabilityContainerLoggingV1, "per-service container log rotation")
+		},
+		Build: func() error {
+			phases = append(phases, "build")
+			return nil
+		},
+		Release: func() error {
+			phases = append(phases, "release")
+			return nil
+		},
+		Reconcile: func() error {
+			phases = append(phases, "reconcile")
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("logging rollout succeeded with stale agent")
+	}
+	if got := strings.Join(phases, ","); got != "preflight" {
+		t.Fatalf("phases = %q, want preflight only", got)
+	}
+}
+
+func TestTakodMovementLoggingPreflightBeforeImageOrContainerMutations(t *testing.T) {
+	var phases []string
+	err := runTakodMovementPhases(
+		func() error {
+			phases = append(phases, "preflight")
+			return errors.New("stale agent")
+		},
+		func() error { phases = append(phases, "transfer"); return nil },
+		func() error { phases = append(phases, "destination"); return nil },
+		func() error { phases = append(phases, "source"); return nil },
+	)
+	if err == nil || err.Error() != "stale agent" {
+		t.Fatalf("movement error = %v", err)
+	}
+	if got := strings.Join(phases, ","); got != "preflight" {
+		t.Fatalf("movement phases = %q, want preflight only", got)
 	}
 }
 

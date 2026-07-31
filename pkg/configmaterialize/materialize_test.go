@@ -51,6 +51,7 @@ func TestDesiredServiceToConfigPreservesRuntimeControlsAndRedactsBuildArgs(t *te
 		ExtraHosts:      []string{"database:10.0.0.2"},
 		Ulimits:         map[string]takoapi.UlimitDocument{"nofile": {Soft: 262144, Hard: 262144}},
 		ShmSize:         "256m",
+		Logging:         &takoapi.ServiceLoggingDocument{Driver: "local", MaxSize: "25m", MaxFiles: 5},
 	})
 	if err != nil {
 		t.Fatalf("desiredServiceToConfig: %v", err)
@@ -60,6 +61,9 @@ func TestDesiredServiceToConfigPreservesRuntimeControlsAndRedactsBuildArgs(t *te
 	}
 	if service.Ulimits["nofile"].Hard != 262144 || len(service.BuildArgs) != 0 {
 		t.Fatalf("materialized ulimits/build args = %#v / %#v", service.Ulimits, service.BuildArgs)
+	}
+	if service.Logging == nil || service.Logging.Driver != "local" || service.Logging.MaxSize != "25m" || service.Logging.MaxFiles != 5 {
+		t.Fatalf("materialized logging = %#v", service.Logging)
 	}
 	if len(warnings) != 1 || warnings[0].Code != "build_arg_values_redacted" {
 		t.Fatalf("warnings = %#v", warnings)

@@ -137,6 +137,13 @@ Acceptance: schema/validation, state round trip, drift detection, capability
 failure, and Docker argument tests pass while existing service behavior stays
 unchanged when logging is omitted.
 
+Evidence: implementation complete. Full tests, native/Linux/Windows builds,
+`go vet`, module tidiness, focused changed-package and takod race suites,
+schema/normalization boundary tests, state/config-export and hash tests,
+pre-mutation capability checks across deploy/scale/promote/rollback/run and
+placement movement, deterministic Docker argument tests, and two independent
+final reviews passed.
+
 ## Completion Gate
 
 - `go build ./...`

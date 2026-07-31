@@ -430,7 +430,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	deploy.SetBaseContext(ctx)
 	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired remote deploy authority: %s\n", leaseSet.Summary()))
 
-	if err := preflightAndSetupTakodRuntime(deploy, allServices); err != nil {
+	if err := preflightAndSetupTakodRuntime(deploy, allServices, services); err != nil {
 		return nil, err
 	}
 
@@ -642,6 +642,9 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		return nil, err
 	}
 	if err := s.deployer.PreflightGracefulStopCapabilities(); err != nil {
+		return nil, err
+	}
+	if err := s.deployer.PreflightServiceMutationCapabilities(s.services); err != nil {
 		return nil, err
 	}
 	if err := s.deployer.PreflightAlertPolicy(); err != nil {

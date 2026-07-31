@@ -82,8 +82,35 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	schemaPath(t, fileItem, "target")
 	schemaPath(t, fileItem, "secret")
 	schemaPath(t, fileItem, "owner")
-	for _, field := range []string{"user", "workingDir", "stopGracePeriod", "init", "extraHosts", "ulimits", "shmSize"} {
+	for _, field := range []string{"user", "workingDir", "stopGracePeriod", "init", "extraHosts", "ulimits", "shmSize", "logging"} {
 		schemaPath(t, serviceProperties, field)
+	}
+	logging := schemaPath(t, serviceProperties, "logging", "properties")
+	driverPattern := regexp.MustCompile(schemaPath(t, logging, "driver")["pattern"].(string))
+	for _, value := range []string{"local", " JSON-FILE ", "\tLocal\n"} {
+		if !driverPattern.MatchString(value) {
+			t.Fatalf("logging driver schema rejects %q", value)
+		}
+	}
+	for _, value := range []string{"journald", "local extra", ""} {
+		if driverPattern.MatchString(value) {
+			t.Fatalf("logging driver schema accepts %q", value)
+		}
+	}
+	maxSizePattern := regexp.MustCompile(schemaPath(t, logging, "maxSize")["pattern"].(string))
+	for _, value := range []string{"1k", "10485760K", "10240m", "10G", " 25M "} {
+		if !maxSizePattern.MatchString(value) {
+			t.Fatalf("logging maxSize schema rejects %q", value)
+		}
+	}
+	for _, value := range []string{"0k", "10485761k", "10241m", "11g", "10gb"} {
+		if maxSizePattern.MatchString(value) {
+			t.Fatalf("logging maxSize schema accepts %q", value)
+		}
+	}
+	serviceRules, ok := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties", "services", "additionalProperties")["allOf"].([]any)
+	if !ok || len(serviceRules) != 2 || !reflect.DeepEqual(schemaPath(t, serviceRules[1], "if", "properties", "kind")["enum"], []any{config.ServiceKindJob, config.ServiceKindRun}) || !reflect.DeepEqual(schemaPath(t, serviceRules[1], "then", "not")["required"], []any{"logging"}) {
+		t.Fatalf("logging workload-kind exclusion is missing: %#v", serviceRules)
 	}
 	labels := schemaPath(t, serviceProperties, "labels")
 	if labels["maxProperties"] != float64(256) {

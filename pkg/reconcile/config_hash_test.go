@@ -174,6 +174,29 @@ func TestSafeServiceConfigHashTracksResourceLimits(t *testing.T) {
 	}
 }
 
+func TestSafeServiceConfigHashTracksLoggingControls(t *testing.T) {
+	base := config.ServiceConfig{Image: "nginx:1.27", Port: 8080}
+	baseHash, _ := SafeServiceConfigHash(base)
+	empty := base
+	empty.Logging = &config.ServiceLoggingConfig{}
+	emptyHash, _ := SafeServiceConfigHash(empty)
+	if emptyHash != baseHash {
+		t.Fatal("empty logging block changed legacy hash")
+	}
+	bounded := base
+	bounded.Logging = &config.ServiceLoggingConfig{Driver: "local", MaxSize: "25m", MaxFiles: 5}
+	boundedHash, _ := SafeServiceConfigHash(bounded)
+	if boundedHash == baseHash {
+		t.Fatal("logging controls did not change config hash")
+	}
+	changed := bounded
+	changed.Logging = &config.ServiceLoggingConfig{Driver: "local", MaxSize: "50m", MaxFiles: 5}
+	changedHash, _ := SafeServiceConfigHash(changed)
+	if changedHash == boundedHash {
+		t.Fatal("logging maxSize change did not change config hash")
+	}
+}
+
 func TestSafeServiceConfigHashRedactsEnvAndSecretValues(t *testing.T) {
 	a := config.ServiceConfig{
 		Image:      "nginx",

@@ -326,6 +326,14 @@ output. The
 Go definitions in `pkg/engine` (`types.go` and per-command files) are the
 source of truth.
 
+Deploy clients capability-check each selected node before mutations when a
+service uses opt-in agent behavior. A service `logging` block requires
+`container.logging-v1`; a node that does not advertise it fails the deploy
+instead of silently falling back to daemon logging defaults. The private
+reconcile request carries the normalized `driver`, `maxSize`, and `maxFiles`
+values. These fields and capability names are additive, but clients must not
+send a configured feature to an agent that lacks its capability.
+
 ### Terminal stream contract (ptystream)
 
 Interactive exec speaks a versioned framed byte protocol instead of events.

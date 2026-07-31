@@ -1077,6 +1077,30 @@ accepts either a positive scalar (same soft/hard value) or explicit positive
 reconciliation and fails with upgrade guidance when a development node is
 stale.
 
+Long-running services can opt into bounded Docker log rotation independently
+of the Docker daemon defaults:
+
+```yaml
+services:
+  worker:
+    image: example/worker:latest
+    logging:
+      driver: local
+      maxSize: 25m
+      maxFiles: 5
+```
+
+`driver`, `maxSize`, and `maxFiles` are all required when `logging` is set.
+The supported drivers are Docker's `local` and `json-file` drivers, both of
+which remain readable through `tako logs`. `maxSize` is a positive integer
+followed by `k`, `m`, or `g`, is normalized to lowercase, and cannot exceed
+`10g`; `maxFiles` is from 1 through 100. The setting applies only to
+long-running services: deploy-time runs and scheduled jobs reject it. Omit
+`logging` to preserve the node's Docker daemon logging configuration exactly.
+Configured logging requires an agent advertising `container.logging-v1`, and
+Tako fails capability preflight before any deployment mutation on a stale
+agent.
+
 ## Scheduler Alerts
 
 `notifications.alerts` enables durable alerts for cron-fired jobs and native

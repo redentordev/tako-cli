@@ -129,11 +129,18 @@ type DesiredServiceDocument struct {
 	ExtraHosts               []string                    `json:"extraHosts,omitempty"`
 	Ulimits                  map[string]UlimitDocument   `json:"ulimits,omitempty"`
 	ShmSize                  string                      `json:"shmSize,omitempty"`
+	Logging                  *ServiceLoggingDocument     `json:"logging,omitempty"`
 	SecretRefs               []string                    `json:"secretRefs,omitempty"`
 	DependsOn                []string                    `json:"dependsOn,omitempty"`
 	HealthCheck              json.RawMessage             `json:"healthCheck,omitempty"`
 	DeployStrategy           string                      `json:"deployStrategy,omitempty"`
 	RemovalPending           bool                        `json:"removalPending,omitempty"`
+}
+
+type ServiceLoggingDocument struct {
+	Driver   string `json:"driver"`
+	MaxSize  string `json:"maxSize"`
+	MaxFiles int    `json:"maxFiles"`
 }
 
 // ReplicaAssignmentDocument is the persisted sticky replica-to-node binding.

@@ -108,6 +108,7 @@ type DesiredService struct {
 	ExtraHosts               []string                       `json:"extraHosts,omitempty"`
 	Ulimits                  map[string]config.UlimitConfig `json:"ulimits,omitempty"`
 	ShmSize                  string                         `json:"shmSize,omitempty"`
+	Logging                  *config.ServiceLoggingConfig   `json:"logging,omitempty"`
 	SecretRefs               []string                       `json:"secretRefs,omitempty"`
 	DependsOn                []string                       `json:"dependsOn,omitempty"`
 	HealthCheck              config.HealthCheckConfig       `json:"healthCheck,omitempty"`
@@ -852,11 +853,20 @@ func sanitizeDesiredService(serviceName string, service config.ServiceConfig, im
 		ExtraHosts:               sortedCopy(service.ExtraHosts),
 		Ulimits:                  cloneUlimits(service.Ulimits),
 		ShmSize:                  service.ShmSize,
+		Logging:                  cloneServiceLogging(service.Logging),
 		SecretRefs:               sortedCopy(service.Secrets),
 		DependsOn:                sortedCopy(service.DependsOn),
 		HealthCheck:              service.HealthCheck,
 		DeployStrategy:           service.Deploy.Strategy,
 	}
+}
+
+func cloneServiceLogging(logging *config.ServiceLoggingConfig) *config.ServiceLoggingConfig {
+	if logging == nil {
+		return nil
+	}
+	clone := *logging
+	return &clone
 }
 
 func cloneProxyConfig(source *config.ProxyConfig) *config.ProxyConfig {

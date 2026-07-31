@@ -168,6 +168,7 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 			ExtraHosts:      []string{"database:10.0.0.2"},
 			Ulimits:         map[string]config.UlimitConfig{"nofile": {Soft: 262144, Hard: 262144}},
 			ShmSize:         "256m",
+			Logging:         &config.ServiceLoggingConfig{Driver: "local", MaxSize: "25m", MaxFiles: 5},
 			Secrets:         []string{"TOKEN:prod/token", "DATABASE_URL"},
 			Volumes:         []string{"data:/data"},
 			Proxy: &config.ProxyConfig{
@@ -211,6 +212,9 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	}
 	if service.User != "1000:1000" || service.WorkingDir != "/work" || !service.Init || service.ShmSize != "256m" {
 		t.Fatalf("runtime controls not persisted: %#v", service)
+	}
+	if service.Logging == nil || service.Logging.Driver != "local" || service.Logging.MaxSize != "25m" || service.Logging.MaxFiles != 5 {
+		t.Fatalf("logging controls not persisted: %#v", service.Logging)
 	}
 	if service.Proxy == nil || service.Proxy.MaxRequestBody != "10MB" || !slices.Equal(service.Proxy.DenyPathPrefixes, []string{"/api/internal"}) || len(service.Proxy.ResponseHeaders) != 0 {
 		t.Fatalf("proxy policy not persisted: %#v", service.Proxy)

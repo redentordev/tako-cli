@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,6 +67,7 @@ type ReconcileServiceRequest struct {
 	ExtraHosts         []string                       `json:"extraHosts,omitempty"`
 	Ulimits            map[string]config.UlimitConfig `json:"ulimits,omitempty"`
 	ShmSize            string                         `json:"shmSize,omitempty"`
+	Logging            *config.ServiceLoggingConfig   `json:"logging,omitempty"`
 	// RegistryAuths carries request-scoped pull credentials; they feed an
 	// ephemeral DOCKER_CONFIG for this reconcile only and are never
 	// persisted (ADR 10).
@@ -389,6 +391,9 @@ func validateReconcileServiceRequest(req ReconcileServiceRequest) error {
 		return fmt.Errorf("invalid cpu limit")
 	}
 	if err := validateContainerRuntimeControls(req.User, req.WorkingDir, req.StopTimeoutSeconds, req.ExtraHosts, req.Ulimits, req.ShmSize); err != nil {
+		return err
+	}
+	if err := validateDockerLogging(req.Logging); err != nil {
 		return err
 	}
 	if err := validateHealthSpec(req.Health); err != nil {
@@ -1254,6 +1259,7 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 		args = append(args, "--cpus", req.CPULimit)
 	}
 	args = appendContainerRuntimeArgs(args, req.User, req.WorkingDir, req.StopTimeoutSeconds, req.Init, req.ExtraHosts, req.Ulimits, req.ShmSize)
+	args = appendDockerLoggingArgs(args, req.Logging)
 	if req.Health != nil && req.Health.Command != "" {
 		args = append(args, "--health-cmd", req.Health.Command)
 		if req.Health.Interval != "" {
@@ -1280,6 +1286,44 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 	}
 	args = append(args, req.Command.ContainerCommand()...)
 	return args
+}
+
+func validateDockerLogging(logging *config.ServiceLoggingConfig) error {
+	if logging == nil {
+		return nil
+	}
+	if logging.Driver != "local" && logging.Driver != "json-file" {
+		return fmt.Errorf("invalid logging driver")
+	}
+	match := regexp.MustCompile(`^([1-9][0-9]*)([kmg])$`).FindStringSubmatch(logging.MaxSize)
+	if match == nil {
+		return fmt.Errorf("invalid logging max size")
+	}
+	value, err := strconv.ParseInt(match[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid logging max size")
+	}
+	multiplier := int64(1024)
+	if match[2] == "m" {
+		multiplier *= 1024
+	} else if match[2] == "g" {
+		multiplier *= 1024 * 1024
+	}
+	if value > (10*1024*1024*1024)/multiplier || logging.MaxFiles < 1 || logging.MaxFiles > 100 {
+		return fmt.Errorf("invalid logging rotation bounds")
+	}
+	return nil
+}
+
+func appendDockerLoggingArgs(args []string, logging *config.ServiceLoggingConfig) []string {
+	if logging == nil {
+		return args
+	}
+	return append(args,
+		"--log-driver", logging.Driver,
+		"--log-opt", "max-size="+logging.MaxSize,
+		"--log-opt", fmt.Sprintf("max-file=%d", logging.MaxFiles),
+	)
 }
 
 func appendContainerRuntimeArgs(args []string, user string, workingDir string, stopTimeoutSeconds int, init bool, extraHosts []string, ulimits map[string]config.UlimitConfig, shmSize string) []string {

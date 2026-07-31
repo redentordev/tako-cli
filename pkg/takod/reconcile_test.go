@@ -459,6 +459,37 @@ func TestBuildServiceContainerArgsUsesRuntimeControls(t *testing.T) {
 	}
 }
 
+func TestBuildServiceContainerArgsUsesBoundedLogging(t *testing.T) {
+	req := ReconcileServiceRequest{
+		Project: "demo", Environment: "production", Service: "web", Image: "demo/web:1",
+		Restart: "unless-stopped", Network: "tako_demo_production", NetworkAlias: "web",
+		Logging: &config.ServiceLoggingConfig{Driver: "local", MaxSize: "25m", MaxFiles: 5},
+	}
+	args := strings.Join(buildServiceContainerArgs(req, ContainerSpec{Name: "tako_demo_production_web_1"}), " ")
+	for _, expected := range []string{"--log-driver local", "--log-opt max-size=25m", "--log-opt max-file=5"} {
+		if !strings.Contains(args, expected) {
+			t.Fatalf("args missing %q: %s", expected, args)
+		}
+	}
+	plain := req
+	plain.Logging = nil
+	if args := strings.Join(buildServiceContainerArgs(plain, ContainerSpec{Name: "tako_demo_production_web_1"}), " "); strings.Contains(args, "--log-") {
+		t.Fatalf("omitted logging emitted args: %s", args)
+	}
+}
+
+func TestValidateReconcileServiceRejectsUnsafeLogging(t *testing.T) {
+	for _, logging := range []*config.ServiceLoggingConfig{
+		{Driver: "journald", MaxSize: "10m", MaxFiles: 3},
+		{Driver: "local", MaxSize: "10m --label=x", MaxFiles: 3},
+		{Driver: "json-file", MaxSize: "10m", MaxFiles: 0},
+	} {
+		if err := validateDockerLogging(logging); err == nil {
+			t.Fatalf("logging accepted: %#v", logging)
+		}
+	}
+}
+
 func TestValidateContainerRuntimeControlsRejectsUnsafeDirectPayloads(t *testing.T) {
 	tests := []struct {
 		name       string

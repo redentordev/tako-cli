@@ -348,6 +348,10 @@ revision. New deployments obey `state.onUnreachableNode`.
 
 `recreate` is the conservative default. Tako replaces the service containers
 that match the app, stage, and service identity, then reconciles proxy routes.
+Normal replacement stops each old container with its configured Docker stop
+timeout before non-force removal, allowing PID 1 to receive `SIGTERM` and
+drain. Force removal is reserved for explicit hard-timeout and fail-closed
+paths.
 
 `rolling` is supported for stateless services as a full-revision rollout. Tako
 starts the replacement revision side-by-side, waits for `deploy.readiness` when
@@ -777,6 +781,11 @@ stay reserved for the proxy in proxied environments, and multi-node
 environments require pinned or global placement so the endpoint is
 deterministic. These constraints are enforced at config validation, and port
 changes participate in the service config hash so redeploys rebind cleanly.
+Per-service Docker logging settings also participate in the config hash and
+desired-state export, so changing the driver or rotation bounds replaces the
+affected service containers. An omitted logging block remains omitted through
+state round trips and emits no Docker logging arguments, preserving daemon
+defaults.
 
 Stateful image services should be declared with `persistent: true` and at least
 one named or external Docker volume. The validator rejects persistent services

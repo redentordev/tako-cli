@@ -126,10 +126,23 @@ func (e *Engine) ApplyPlacementMovement(ctx context.Context, req PlacementApplyR
 	if err := deploy.SetPlacementMovementTargets(targets); err != nil {
 		return nil, err
 	}
+	movesByService := make(map[string][]scheduler.Movement)
+	movementServices := make(map[string]config.ServiceConfig)
+	for _, move := range req.Plan.Moves {
+		service, ok := services[move.Service]
+		if !ok {
+			return nil, invalidRequestf("placement service %s is absent from current config", move.Service)
+		}
+		movesByService[move.Service] = append(movesByService[move.Service], move)
+		movementServices[move.Service] = service
+	}
 	if err := deploy.PreflightTakodProxyCapabilities(services); err != nil {
 		return nil, err
 	}
 	if err := deploy.PreflightGracefulStopCapabilities(); err != nil {
+		return nil, err
+	}
+	if err := deploy.PreflightServiceMutationCapabilities(movementServices); err != nil {
 		return nil, err
 	}
 	if !alreadyIntent {
@@ -143,20 +156,13 @@ func (e *Engine) ApplyPlacementMovement(ctx context.Context, req PlacementApplyR
 		}
 		desired = next
 	}
-	movesByService := make(map[string][]scheduler.Movement)
-	for _, move := range req.Plan.Moves {
-		movesByService[move.Service] = append(movesByService[move.Service], move)
-	}
 	names := make([]string, 0, len(movesByService))
 	for name := range movesByService {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		service, ok := services[name]
-		if !ok {
-			return nil, invalidRequestf("placement service %s is absent from current config", name)
-		}
+		service := movementServices[name]
 		image := imageRefs[name]
 		if image == "" {
 			return nil, invalidRequestf("placement service %s has no exact deployed image", name)

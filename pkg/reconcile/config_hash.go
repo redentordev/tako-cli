@@ -50,6 +50,7 @@ type safeServiceConfigFingerprint struct {
 	ExtraHosts          []string                       `json:"extraHosts,omitempty"`
 	Ulimits             map[string]config.UlimitConfig `json:"ulimits,omitempty"`
 	ShmSize             string                         `json:"shmSize,omitempty"`
+	Logging             *config.ServiceLoggingConfig   `json:"logging,omitempty"`
 	Secrets             []string                       `json:"secrets,omitempty"`
 	Volumes             []string                       `json:"volumes,omitempty"`
 	VolumeOwnershipHash string                         `json:"volumeOwnershipHash,omitempty"`
@@ -133,6 +134,7 @@ func SafeServiceConfigHash(service config.ServiceConfig) (string, bool) {
 		ExtraHosts:          sortedStrings(service.ExtraHosts),
 		Ulimits:             cloneUlimits(service.Ulimits),
 		ShmSize:             service.ShmSize,
+		Logging:             cloneLoggingFingerprint(service.Logging),
 		Secrets:             sortedStrings(service.Secrets),
 		Volumes:             sortedStrings(service.Volumes),
 		VolumeOwnershipHash: service.VolumeOwnershipHash,
@@ -259,6 +261,14 @@ func cloneResourcesFingerprint(resources *config.ResourceLimitsConfig) *config.R
 		return nil
 	}
 	clone := *resources
+	return &clone
+}
+
+func cloneLoggingFingerprint(logging *config.ServiceLoggingConfig) *config.ServiceLoggingConfig {
+	if logging == nil || (logging.Driver == "" && logging.MaxSize == "" && logging.MaxFiles == 0) {
+		return nil
+	}
+	clone := *logging
 	return &clone
 }
 

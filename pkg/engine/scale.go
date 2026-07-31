@@ -107,10 +107,12 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 		}
 	}
 	desiredServices := CloneServiceMap(services)
+	mutationServices := make(map[string]config.ServiceConfig, len(scaleTargets))
 	for serviceName, replicas := range scaleTargets {
 		service := desiredServices[serviceName]
 		service.Replicas = replicas
 		desiredServices[serviceName] = service
+		mutationServices[serviceName] = service
 	}
 
 	serverNames, err := ScaleTargetServers(cfg, envName)
@@ -188,7 +190,7 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
 	}
-	if err := preflightAndSetupTakodRuntime(deploy, services); err != nil {
+	if err := preflightAndSetupTakodRuntime(deploy, services, mutationServices); err != nil {
 		return nil, err
 	}
 	startTime := time.Now()
@@ -208,10 +210,6 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 	actualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, serverNames, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to gather current replica state: %w", err)
-	}
-	mutationServices := make(map[string]config.ServiceConfig, len(scaleTargets))
-	for serviceName := range scaleTargets {
-		mutationServices[serviceName] = desiredServices[serviceName]
 	}
 	if err := deploy.PreflightAssignmentMutations(mutationServices); err != nil {
 		return nil, err

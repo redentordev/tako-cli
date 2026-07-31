@@ -355,3 +355,31 @@ func TestNarrowWorkflowsPreservePlacementBaselineBeforeAndAfterMutation(t *testi
 		})
 	}
 }
+
+func TestWorkloadMutationWorkflowsUseGlobalServiceCapabilityPreflight(t *testing.T) {
+	for _, file := range []string{"deploy.go", "scale.go", "promote.go", "rollback.go", "run.go"} {
+		t.Run(file, func(t *testing.T) {
+			source, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(source), "preflightAndSetupTakodRuntime(") {
+				t.Fatalf("%s does not globally preflight service capabilities before runtime setup", file)
+			}
+		})
+	}
+}
+
+func TestRunApplyRechecksServiceCapabilitiesBeforeIntent(t *testing.T) {
+	source, err := os.ReadFile("run.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(source)
+	apply := strings.Index(body, "func (s *RunSession) Apply")
+	preflight := strings.LastIndex(body, "s.deployer.PreflightServiceMutationCapabilities(s.services)")
+	intent := strings.Index(body, "PersistTakodDesiredIntentWithPlacementBaseline")
+	if apply < 0 || preflight < 0 || intent < 0 || !(apply < preflight && preflight < intent) {
+		t.Fatalf("run apply service preflight ordering invalid: apply=%d preflight=%d intent=%d", apply, preflight, intent)
+	}
+}

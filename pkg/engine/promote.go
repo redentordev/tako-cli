@@ -178,7 +178,7 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	if err := deploy.SetTargetServers(serverNames); err != nil {
 		return nil, err
 	}
-	if err := preflightAndSetupTakodRuntime(deploy, services); err != nil {
+	if err := preflightAndSetupTakodRuntime(deploy, services, map[string]config.ServiceConfig{serviceName: services[serviceName]}); err != nil {
 		return nil, err
 	}
 

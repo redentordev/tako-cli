@@ -286,7 +286,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	if err := deploy.SetTargetServers(mutationServers); err != nil {
 		return nil, err
 	}
-	if err := preflightAndSetupTakodRuntime(deploy, services); err != nil {
+	if err := preflightAndSetupTakodRuntime(deploy, services, map[string]config.ServiceConfig{req.Service: rollbackService}); err != nil {
 		return nil, err
 	}
 	if err := deploy.PreflightAssignmentMutations(map[string]config.ServiceConfig{req.Service: placementService}); err != nil {

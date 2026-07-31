@@ -334,6 +334,7 @@ type ServiceConfig struct {
 	ExtraHosts      []string                `yaml:"extraHosts,omitempty" json:"extraHosts,omitempty"`
 	Ulimits         map[string]UlimitConfig `yaml:"ulimits,omitempty" json:"ulimits,omitempty"`
 	ShmSize         string                  `yaml:"shmSize,omitempty" json:"shmSize,omitempty"`
+	Logging         *ServiceLoggingConfig   `yaml:"logging,omitempty" json:"logging,omitempty"`
 
 	// Secrets: ["DATABASE_URL", "JWT_SECRET"] or ["VAR_NAME:SECRET_KEY"].
 	Secrets             []string            `yaml:"secrets,omitempty" json:"secrets,omitempty"` // Tako secrets from .tako/secrets files
@@ -381,6 +382,14 @@ type ServiceConfig struct {
 	// ReuseFiles tells rollback paths to mount an already-published immutable
 	// FilesContentHash instead of reading today's local sources.
 	ReuseFiles bool `yaml:"-" json:"-"`
+}
+
+// ServiceLoggingConfig bounds Docker's per-container application logs while
+// preserving `docker logs` support.
+type ServiceLoggingConfig struct {
+	Driver   string `yaml:"driver" json:"driver"`
+	MaxSize  string `yaml:"maxSize" json:"maxSize"`
+	MaxFiles int    `yaml:"maxFiles" json:"maxFiles"`
 }
 
 func (c *Config) ServiceVolumeOwnershipFingerprint(environment string, service *ServiceConfig) string {
