@@ -44,6 +44,8 @@ func TestPebbleACMEDNSIssueStoreRenderRenew(t *testing.T) {
 	resolver = startPebbleResolver(t, resolver, "example.org.")
 
 	useTempProxyPaths(t)
+	restoreCommands := useFakeCommands(t, filepath.Join(t.TempDir(), "commands.log"))
+	defer restoreCommands()
 	oldFactory := acmeDNSProviderFactory
 	oldRuntime := acmeDNSIssuerRuntime
 	oldManageSync := acmeDNSManageSync
