@@ -1,7 +1,7 @@
 # Goal: Production Reliability Controls
 
 Date: 2026-07-29
-Status: active
+Status: completed
 Branch: `goal/production-reliability-controls`
 
 ## Objective
@@ -62,7 +62,8 @@ policy conformance and state round-trip tests.
 
 Evidence: implementation complete. Full build/tests, affected-package race
 tests, live Caddy 2.10 path/body/header/error-path proofs, and two independent
-reviews passed.
+reviews passed. The final objective audit added allow-prefix rules and a
+separate fail-closed capability in the audit-correction commit described below.
 
 ## Milestone 3: PostgreSQL Remote Restore Verification
 
@@ -144,6 +145,26 @@ pre-mutation capability checks across deploy/scale/promote/rollback/run and
 placement movement, deterministic Docker argument tests, and two independent
 final reviews passed.
 
+## Audit Correction: Allow Path Prefixes
+
+- Added optional, case-sensitive `allowPathPrefixes` with exact-or-segment-child
+  matching, unmatched-path 404 responses, and deny precedence.
+- Applied policy before redirects, authentication, body reads, and proxying on
+  public HTTP, serving hosts, redirect aliases, internal routes, and dynamic
+  customer hosts.
+- Added manifest versions 3/4 and `proxy.allow-path-prefixes-v1` so old agents
+  reject rather than ignore the security field; enrolled version 4 retains
+  destination identity proofs.
+- Rejected encoded, wildcard, dot-segment, trailing-slash, repeated-slash, and
+  other noncanonical authoring forms at schema, CLI, and daemon boundaries.
+
+Evidence: full tests, native/Linux/Windows builds, `go vet`, module tidiness,
+affected race suites, host-Caddy behavior, production-pinned
+`caddy:2.10-alpine` runtime/adaptation behavior, and two independent final
+no-finding reviews passed. Runtime coverage includes explicit public HTTP,
+serving, alias, internal, dynamic HTTP, and dynamic serving surfaces plus case,
+encoded-separator, repeated-separator, segment-boundary, and overlap attacks.
+
 ## Completion Gate
 
 - `go build ./...`
@@ -152,3 +173,22 @@ final reviews passed.
   are resolved before its conventional commit.
 - Final audit maps each requested capability to code, tests, documentation, and
   commit evidence.
+
+## Final Artifact Audit
+
+| Requested capability | Primary implementation and verification | Commit evidence |
+| --- | --- | --- |
+| True graceful replacement | `pkg/takod/reconcile.go`, `pkg/takod/cleanup.go`, lifecycle/order tests, `docs/ORCHESTRATION-MODEL.md` | `f780a3e` |
+| Proxy path/body/header policy | `pkg/config/validator.go`, `pkg/deployer/takod_proxy.go`, `pkg/takod/proxy_routes.go`, schema/state/export tests, real Caddy conformance, `docs/CONFIGURATION.md` | `771125b` plus audit correction |
+| PostgreSQL remote restore verification | `pkg/takod/postgres_verify.go`, exact remote artifact/digest and isolated row-level restore tests, backup docs/manual | `7be8a02` |
+| Fresh managed-volume ownership | `pkg/takod/volume_ownership.go`, creation/recovery/replacement/restore tests, configuration docs | `ab1b9b4` |
+| Scheduler and backup-age alerts | `pkg/takod/alerts.go`, job/backup scheduler integration, durable dispatch/recovery/metrics tests and machine docs | `21a8c86` |
+| Per-service log rotation | config/schema, state/export/hash, global capability admission, takod request/argument tests, logging docs | `3685edb` |
+
+The branch was created from the then-current `origin/master`. Every milestone
+and the audit correction had two independent agent reviews before commit; all
+actionable findings were fixed and re-reviewed to explicit no-finding sign-off.
+The active goal lifecycle history preserves the review/fix checkpoints. Final
+verification passed `go test ./...`, `go build ./...`, Linux and Windows amd64
+builds, `go vet ./...`, `go mod tidy -diff`, focused affected race suites,
+production-pinned Caddy runtime conformance, and `git diff --check`.

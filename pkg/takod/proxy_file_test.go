@@ -62,11 +62,11 @@ func TestCaddyfileConformanceMatrix(t *testing.T) {
 				DenyPathPrefixes: []string{"/.well-known/workflow", "/api/internal"}, MaxRequestBody: "10MB",
 				ResponseHeaders: map[string]string{"Content-Security-Policy": "default-src 'self'", "X-Content-Type-Options": "nosniff"},
 			},
-			wantHash: "bfb605a6c6a6875ae00c7d142f1cbfecec000f19fad60c8534e647d504d54cfd",
+			wantHash: "b19208206d20990de2501a516d63859df5443b43d70fa56c39477af1a87ad117",
 			contains: []string{
 				"@tako_http_headers_0 host example.com", "header @tako_http_headers_0 {", "header {",
 				">Content-Security-Policy \"default-src 'self'\"", ">X-Content-Type-Options \"nosniff\"",
-				"@tako_denied_path path /.well-known/workflow /.well-known/workflow/* /api/internal /api/internal/*",
+				"@tako_denied_path path_regexp ^(/\\.well-known/workflow(/.*)?|/api/internal(/.*)?)$",
 				"handle @tako_denied_path {\n\t\t\theader Connection close\n\t\t\trespond 404", "header({'Content-Length':'*'}) && int({http.request.header.Content-Length}) > 10000000",
 				"handle @tako_body_too_large {\n\t\t\theader Connection close\n\t\t\trespond 413", "request_body @tako_body_unsized {\n\t\t\tmax_size 1B",
 				"handle @tako_body_length_required {\n\t\t\theader Connection close\n\t\t\trespond 411", "!header({'Content-Length':'*'}) && size({http.request.body}) > 0",
@@ -74,6 +74,20 @@ func TestCaddyfileConformanceMatrix(t *testing.T) {
 				"request_body {\n\t\t\tmax_size 10MB", "reverse_proxy http://web:3000",
 			},
 			forbidden: []string{"/api/internalized"},
+		},
+		{
+			name: "allowed paths with deny precedence",
+			route: ProxyRoute{
+				Service: "web", Domains: []string{"example.com"}, Upstreams: []string{"http://web:3000"},
+				DenyPathPrefixes: []string{"/api/internal"}, AllowPathPrefixes: []string{"/api", "/health"},
+			},
+			wantHash: "91ae2708493f7b0ed6cb09a26d86078cf4928dc1029474eef1b812ec37dfcbbd",
+			contains: []string{
+				"route {", "@tako_denied_path path_regexp ^(/api/internal(/.*)?)$", "handle @tako_denied_path {",
+				"@tako_allowed_path path_regexp ^(/api(/.*)?|/health(/.*)?)$", "handle @tako_allowed_path {",
+				"reverse_proxy http://web:3000", "handle {\n\t\t\theader Connection close\n\t\t\trespond 404",
+			},
+			forbidden: []string{"/apiized"},
 		},
 		{
 			name:  "BYO certificates with dynamic authority redirects and multiple domains",

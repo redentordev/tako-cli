@@ -172,7 +172,7 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 			Secrets:         []string{"TOKEN:prod/token", "DATABASE_URL"},
 			Volumes:         []string{"data:/data"},
 			Proxy: &config.ProxyConfig{
-				Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, MaxRequestBody: "10MB",
+				Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, AllowPathPrefixes: []string{"/api", "/health"}, MaxRequestBody: "10MB",
 				ResponseHeaders: map[string]string{"Set-Cookie": "session=secret", "X-Content-Type-Options": "nosniff"},
 				BasicAuth:       &config.ProxyBasicAuthConfig{Username: "admin", PasswordBcrypt: "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"},
 			},
@@ -216,7 +216,7 @@ func TestBuildDesiredRevisionSanitizesServiceState(t *testing.T) {
 	if service.Logging == nil || service.Logging.Driver != "local" || service.Logging.MaxSize != "25m" || service.Logging.MaxFiles != 5 {
 		t.Fatalf("logging controls not persisted: %#v", service.Logging)
 	}
-	if service.Proxy == nil || service.Proxy.MaxRequestBody != "10MB" || !slices.Equal(service.Proxy.DenyPathPrefixes, []string{"/api/internal"}) || len(service.Proxy.ResponseHeaders) != 0 {
+	if service.Proxy == nil || service.Proxy.MaxRequestBody != "10MB" || !slices.Equal(service.Proxy.DenyPathPrefixes, []string{"/api/internal"}) || !slices.Equal(service.Proxy.AllowPathPrefixes, []string{"/api", "/health"}) || len(service.Proxy.ResponseHeaders) != 0 {
 		t.Fatalf("proxy policy not persisted: %#v", service.Proxy)
 	}
 	if !slices.Equal(service.ProxyResponseHeaderNames, []string{"Set-Cookie", "X-Content-Type-Options"}) {

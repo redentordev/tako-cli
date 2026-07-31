@@ -209,7 +209,7 @@ func TestBuildConfigPreservesDesiredProxyPolicy(t *testing.T) {
 	desired.Services["web"] = takoapi.DesiredServiceDocument{
 		Image: "nginx:latest", Port: 80,
 		Proxy: mustRaw(t, config.ProxyConfig{
-			Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, MaxRequestBody: "10MB",
+			Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, AllowPathPrefixes: []string{"/api"}, MaxRequestBody: "10MB",
 			ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
 		}),
 	}
@@ -218,7 +218,7 @@ func TestBuildConfigPreservesDesiredProxyPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	proxy := cfg.Environments["production"].Services["web"].Proxy
-	if proxy == nil || proxy.Domain != "example.com" || proxy.MaxRequestBody != "10MB" || len(proxy.DenyPathPrefixes) != 1 || proxy.ResponseHeaders["X-Content-Type-Options"] != "nosniff" {
+	if proxy == nil || proxy.Domain != "example.com" || proxy.MaxRequestBody != "10MB" || len(proxy.DenyPathPrefixes) != 1 || len(proxy.AllowPathPrefixes) != 1 || proxy.ResponseHeaders["X-Content-Type-Options"] != "nosniff" {
 		t.Fatalf("proxy policy was not materialized: %#v", proxy)
 	}
 }
@@ -248,7 +248,7 @@ func TestProxyPolicyDesiredStateToExportedYAMLRoundTrip(t *testing.T) {
 	serviceConfig := config.ServiceConfig{
 		Image: "nginx:latest", Port: 80, Replicas: 1,
 		Proxy: &config.ProxyConfig{
-			Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, MaxRequestBody: "10MB",
+			Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, AllowPathPrefixes: []string{"/api"}, MaxRequestBody: "10MB",
 			ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
 		},
 	}
@@ -277,7 +277,7 @@ func TestProxyPolicyDesiredStateToExportedYAMLRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, fragment := range []string{"denyPathPrefixes:", "- /api/internal", "maxRequestBody: 10MB", "X-Content-Type-Options: REDACTED"} {
+	for _, fragment := range []string{"denyPathPrefixes:", "- /api/internal", "allowPathPrefixes:", "- /api", "maxRequestBody: 10MB", "X-Content-Type-Options: REDACTED"} {
 		if !strings.Contains(string(exported), fragment) {
 			t.Fatalf("exported YAML missing %q:\n%s", fragment, exported)
 		}

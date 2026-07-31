@@ -918,9 +918,28 @@
                       "items": {
                         "type": "string",
                         "pattern": "^/[A-Za-z0-9._~!$&'()+,;=:@/-]*$",
+                        "not": { "pattern": "(?:^|/)\\.{1,2}(?:/|$)" },
                         "maxLength": 256
                       },
                       "description": "Absolute literal path prefixes denied with 404 before authentication, request-body reads, or proxying. Each entry matches the exact path and segment children; for example /api/internal matches /api/internal and /api/internal/* without matching /api/internalized."
+                    },
+                    "allowPathPrefixes": {
+                      "type": "array",
+                      "maxItems": 64,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^/[A-Za-z0-9._~!$&'()+,;=:@/-]*$",
+                        "not": {
+                          "anyOf": [
+                            { "pattern": "(?:^|/)\\.{1,2}(?:/|$)" },
+                            { "pattern": "^/.+/$" },
+                            { "pattern": "//" }
+                          ]
+                        },
+                        "maxLength": 256
+                      },
+                      "description": "When nonempty, only exact literal path prefixes and segment children are served; all other paths receive 404 before authentication, request-body reads, or proxying. denyPathPrefixes takes precedence."
                     },
                     "maxRequestBody": {
                       "type": "string",

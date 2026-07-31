@@ -879,6 +879,7 @@ func cloneProxyConfig(source *config.ProxyConfig) *config.ProxyConfig {
 	clone.AllowIps = append([]string(nil), source.AllowIps...)
 	clone.TrustedProxies = append([]string(nil), source.TrustedProxies...)
 	clone.DenyPathPrefixes = append([]string(nil), source.DenyPathPrefixes...)
+	clone.AllowPathPrefixes = append([]string(nil), source.AllowPathPrefixes...)
 	clone.ResponseHeaders = nil
 	if source.BasicAuth != nil {
 		clone.BasicAuth = nil

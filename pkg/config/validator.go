@@ -2201,25 +2201,15 @@ func validateProxyAccessControls(serviceName string, proxy *ProxyConfig) error {
 }
 
 func validateProxyRoutePolicy(serviceName string, proxy *ProxyConfig) error {
-	if len(proxy.DenyPathPrefixes) > 64 {
-		return fmt.Errorf("service %s: proxy.denyPathPrefixes supports at most 64 entries", serviceName)
+	var err error
+	proxy.DenyPathPrefixes, err = validateProxyPathPrefixes(serviceName, "denyPathPrefixes", proxy.DenyPathPrefixes)
+	if err != nil {
+		return err
 	}
-	paths := make(map[string]struct{}, len(proxy.DenyPathPrefixes))
-	for _, value := range proxy.DenyPathPrefixes {
-		if value != strings.TrimSpace(value) {
-			return fmt.Errorf("service %s: proxy.denyPathPrefixes entries cannot have surrounding whitespace", serviceName)
-		}
-		if value == "" || len(value) > 256 || !proxyPathPrefixPattern.MatchString(value) || hasControlChars(value) {
-			return fmt.Errorf("service %s: invalid proxy.denyPathPrefixes entry %q (use an absolute literal URL path without wildcards, query, fragment, or encoding)", serviceName, value)
-		}
-		value = path.Clean(value)
-		paths[value] = struct{}{}
+	proxy.AllowPathPrefixes, err = validateProxyPathPrefixes(serviceName, "allowPathPrefixes", proxy.AllowPathPrefixes)
+	if err != nil {
+		return err
 	}
-	proxy.DenyPathPrefixes = proxy.DenyPathPrefixes[:0]
-	for value := range paths {
-		proxy.DenyPathPrefixes = append(proxy.DenyPathPrefixes, value)
-	}
-	sort.Strings(proxy.DenyPathPrefixes)
 
 	if proxy.MaxRequestBody != strings.TrimSpace(proxy.MaxRequestBody) {
 		return fmt.Errorf("service %s: proxy.maxRequestBody cannot have surrounding whitespace", serviceName)
@@ -2275,6 +2265,44 @@ func validateProxyRoutePolicy(serviceName string, proxy *ProxyConfig) error {
 		proxy.ResponseHeaders = headers
 	}
 	return nil
+}
+
+func validateProxyPathPrefixes(serviceName, field string, values []string) ([]string, error) {
+	if len(values) > 64 {
+		return nil, fmt.Errorf("service %s: proxy.%s supports at most 64 entries", serviceName, field)
+	}
+	paths := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value != strings.TrimSpace(value) {
+			return nil, fmt.Errorf("service %s: proxy.%s entries cannot have surrounding whitespace", serviceName, field)
+		}
+		if value == "" || len(value) > 256 || !proxyPathPrefixPattern.MatchString(value) || hasControlChars(value) || proxyPathHasDotSegments(value) {
+			return nil, fmt.Errorf("service %s: invalid proxy.%s entry %q (use an absolute literal URL path without wildcards, query, fragment, or encoding)", serviceName, field, value)
+		}
+		if field == "allowPathPrefixes" && path.Clean(value) != value {
+			return nil, fmt.Errorf("service %s: invalid proxy.%s entry %q (use its canonical path without trailing or repeated slashes)", serviceName, field, value)
+		}
+		value = path.Clean(value)
+		if _, exists := paths[value]; exists {
+			return nil, fmt.Errorf("service %s: duplicate proxy.%s entry %q", serviceName, field, value)
+		}
+		paths[value] = struct{}{}
+	}
+	canonical := make([]string, 0, len(paths))
+	for value := range paths {
+		canonical = append(canonical, value)
+	}
+	sort.Strings(canonical)
+	return canonical, nil
+}
+
+func proxyPathHasDotSegments(value string) bool {
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "." || segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func trustedProxyPrefixTooBroad(prefix netip.Prefix) bool {

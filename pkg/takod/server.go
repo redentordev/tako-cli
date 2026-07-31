@@ -148,6 +148,10 @@ const CapabilityProxyActivationV1 = "proxy.activation-v1"
 // prefixes, request-body limits, and response headers before proxying.
 const CapabilityProxyRoutePolicyV1 = "proxy.route-policy-v1"
 
+// CapabilityProxyAllowPathPrefixesV1 means route manifests can restrict
+// serving to explicit path prefixes without older agents ignoring the field.
+const CapabilityProxyAllowPathPrefixesV1 = "proxy.allow-path-prefixes-v1"
+
 // CapabilityBackupPostgresVerifyV1 means the agent can verify an exact remote
 // pg_dump artifact by restoring it into isolated, disposable Docker resources.
 const CapabilityBackupPostgresVerifyV1 = "backup.postgres-verify-v1"
@@ -2473,7 +2477,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,

@@ -72,7 +72,7 @@ func TestServerStatusOverUnixSocket(t *testing.T) {
 			if status.UpgradeProtocol != upgradeprotocol.Current || status.MinimumUpgradeProtocol != upgradeprotocol.Current {
 				t.Fatalf("unexpected upgrade protocol window %d/%d", status.UpgradeProtocol, status.MinimumUpgradeProtocol)
 			}
-			expectedCapabilities := []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityBackupPostgresVerifyV1, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1}
+			expectedCapabilities := []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityBackupPostgresVerifyV1, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1}
 			if !slices.Equal(status.Capabilities, expectedCapabilities) {
 				t.Fatalf("unexpected capabilities %#v", status.Capabilities)
 			}
@@ -429,7 +429,7 @@ func TestHandleProxyFileRejectsV1ManifestOnEnrolledNode(t *testing.T) {
 	body, _ := json.Marshal(request)
 	recorder := httptest.NewRecorder()
 	server.handleProxyFile(recorder, httptest.NewRequest(http.MethodPut, "/v1/proxy-file", bytes.NewReader(body)))
-	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "version 2 destination proofs") {
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "version 2 or 4 destination proofs") {
 		t.Fatalf("enrolled v1 proxy response = %d %q", recorder.Code, recorder.Body.String())
 	}
 }

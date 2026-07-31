@@ -127,6 +127,22 @@ func TestTakoSchemaAlignsWithSupportedTakodModel(t *testing.T) {
 	if denyPaths["maxItems"] != float64(64) || denyPaths["uniqueItems"] != true {
 		t.Fatalf("denyPathPrefixes schema = %#v", denyPaths)
 	}
+	allowPaths := schemaPath(t, proxyProperties, "allowPathPrefixes")
+	if allowPaths["maxItems"] != float64(64) || allowPaths["uniqueItems"] != true {
+		t.Fatalf("allowPathPrefixes schema = %#v", allowPaths)
+	}
+	allowItem := schemaPath(t, allowPaths, "items")
+	exclusions, ok := schemaPath(t, allowItem, "not")["anyOf"].([]any)
+	if !ok || len(exclusions) != 3 {
+		t.Fatalf("allowPathPrefixes canonical exclusions = %#v", schemaPath(t, allowItem, "not"))
+	}
+	dotSegmentPattern := regexp.MustCompile(exclusions[0].(map[string]any)["pattern"].(string))
+	if !dotSegmentPattern.MatchString("/api/..") || dotSegmentPattern.MatchString("/api/.well-known") {
+		t.Fatalf("allowPathPrefixes dot-segment exclusion is incorrect")
+	}
+	if !regexp.MustCompile(exclusions[1].(map[string]any)["pattern"].(string)).MatchString("/api/") || !regexp.MustCompile(exclusions[2].(map[string]any)["pattern"].(string)).MatchString("/api//users") {
+		t.Fatalf("allowPathPrefixes canonical-path exclusions are incorrect")
+	}
 	bodySize := schemaPath(t, proxyProperties, "maxRequestBody")
 	bodyPattern := regexp.MustCompile(bodySize["pattern"].(string))
 	for _, value := range []string{"1B", "10mb", "1000GB", "1000000000000B"} {

@@ -465,10 +465,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 	if !ok {
 		return nil, false, fmt.Errorf("proxy server %s is not configured", proxyServerName)
 	}
-	manifestVersion := 1
-	if proxyServer.ClusterID != "" && proxyServer.NodeID != "" && proxyServer.WorkerUID > 0 {
-		manifestVersion = 2
-	}
+	manifestVersion := proxyManifestVersionForFeatures(proxyServer.ClusterID != "" && proxyServer.NodeID != "" && proxyServer.WorkerUID > 0, proxyServicesUseAllowPathPrefixes(services))
 	manifest := takod.ProxyRouteManifest{
 		Version:     manifestVersion,
 		Project:     d.config.Project.Name,
@@ -528,7 +525,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 			}
 			seenUpstreams[url] = true
 			upstreams = append(upstreams, url)
-			if manifestVersion >= 2 {
+			if manifestVersion == 2 || manifestVersion == 4 {
 				proof, err := d.proxyDestinationProof(proxyServerName, assignment, serviceName, revision, service.Port, url)
 				if err != nil {
 					return nil, false, err
@@ -538,20 +535,21 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 		}
 
 		route := takod.ProxyRoute{
-			Service:          serviceName,
-			Revision:         revision,
-			Domains:          domains,
-			RedirectFrom:     redirects,
-			Upstreams:        upstreams,
-			HealthCheck:      proxyRouteHealthCheckForService(service),
-			Sticky:           service.LoadBalancer.Strategy == "sticky",
-			Visibility:       service.Proxy.EffectiveVisibility(),
-			AllowIPs:         append([]string(nil), service.Proxy.AllowIps...),
-			TrustedProxies:   append([]string(nil), service.Proxy.TrustedProxies...),
-			DenyPathPrefixes: append([]string(nil), service.Proxy.DenyPathPrefixes...),
-			MaxRequestBody:   service.Proxy.MaxRequestBody,
-			ResponseHeaders:  cloneProxyResponseHeaders(service.Proxy.ResponseHeaders),
-			Destinations:     destinations,
+			Service:           serviceName,
+			Revision:          revision,
+			Domains:           domains,
+			RedirectFrom:      redirects,
+			Upstreams:         upstreams,
+			HealthCheck:       proxyRouteHealthCheckForService(service),
+			Sticky:            service.LoadBalancer.Strategy == "sticky",
+			Visibility:        service.Proxy.EffectiveVisibility(),
+			AllowIPs:          append([]string(nil), service.Proxy.AllowIps...),
+			TrustedProxies:    append([]string(nil), service.Proxy.TrustedProxies...),
+			DenyPathPrefixes:  append([]string(nil), service.Proxy.DenyPathPrefixes...),
+			AllowPathPrefixes: append([]string(nil), service.Proxy.AllowPathPrefixes...),
+			MaxRequestBody:    service.Proxy.MaxRequestBody,
+			ResponseHeaders:   cloneProxyResponseHeaders(service.Proxy.ResponseHeaders),
+			Destinations:      destinations,
 		}
 		if auth := service.Proxy.BasicAuth; auth != nil {
 			route.BasicAuth = &takod.ProxyRouteBasicAuth{
@@ -565,7 +563,7 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 				return nil, false, fmt.Errorf("service %s dynamic domain ask: %w", serviceName, err)
 			}
 			route.DynamicDomain = &takod.ProxyDynamicDomain{AskURL: askURL}
-			if manifestVersion >= 2 {
+			if manifestVersion == 2 || manifestVersion == 4 {
 				askService, _, _ := config.ParseDynamicDomainAsk(service.Proxy.DynamicDomains.Ask)
 				askConfig := services[askService]
 				assignments, assignmentErr := d.planTakodAssignments(askService, &askConfig)
@@ -597,6 +595,17 @@ func (d *Deployer) renderTakodProxyDynamicConfigForNodeWithOptions(services map[
 	return data, true, nil
 }
 
+func proxyManifestVersionForFeatures(enrolled, allowPathPrefixes bool) int {
+	version := 1
+	if enrolled {
+		version = 2
+	}
+	if allowPathPrefixes {
+		version += 2
+	}
+	return version
+}
+
 func proxyServicesUseTrustedProxies(services map[string]config.ServiceConfig) bool {
 	for _, service := range services {
 		if service.IsProxied() && service.Proxy != nil && len(service.Proxy.TrustedProxies) > 0 {
@@ -608,7 +617,16 @@ func proxyServicesUseTrustedProxies(services map[string]config.ServiceConfig) bo
 
 func proxyServicesUseRoutePolicy(services map[string]config.ServiceConfig) bool {
 	for _, service := range services {
-		if service.IsProxied() && service.Proxy != nil && (len(service.Proxy.DenyPathPrefixes) > 0 || service.Proxy.MaxRequestBody != "" || len(service.Proxy.ResponseHeaders) > 0) {
+		if service.IsProxied() && service.Proxy != nil && (len(service.Proxy.DenyPathPrefixes) > 0 || len(service.Proxy.AllowPathPrefixes) > 0 || service.Proxy.MaxRequestBody != "" || len(service.Proxy.ResponseHeaders) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
+func proxyServicesUseAllowPathPrefixes(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.IsProxied() && service.Proxy != nil && len(service.Proxy.AllowPathPrefixes) > 0 {
 			return true
 		}
 	}
@@ -655,6 +673,9 @@ func takodProxyCapabilityRequirements(services map[string]config.ServiceConfig) 
 	}
 	if proxyServicesUseRoutePolicy(services) {
 		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyRoutePolicyV1, Feature: "proxy route policy"})
+	}
+	if proxyServicesUseAllowPathPrefixes(services) {
+		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityProxyAllowPathPrefixesV1, Feature: "proxy allow path prefixes"})
 	}
 	if proxyServicesUseACMEDNS(services) {
 		requirements = append(requirements, takodProxyCapabilityRequirement{Capability: takod.CapabilityAcmeDNSV1, Feature: "embedded ACME DNS-01 issuance"})

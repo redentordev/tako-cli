@@ -47,7 +47,7 @@ func TestSafeServiceConfigHashTracksProxyRoutePolicy(t *testing.T) {
 	base := config.ServiceConfig{Image: "nginx:1.27", Port: 8080, Proxy: &config.ProxyConfig{Domain: "example.com"}}
 	changed := base
 	changed.Proxy = &config.ProxyConfig{
-		Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, MaxRequestBody: "10MB",
+		Domain: "example.com", DenyPathPrefixes: []string{"/api/internal"}, AllowPathPrefixes: []string{"/api"}, MaxRequestBody: "10MB",
 		ResponseHeaders: map[string]string{"X-Content-Type-Options": "nosniff"},
 	}
 	baseHash, ok := SafeServiceConfigHash(base)

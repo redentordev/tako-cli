@@ -656,6 +656,9 @@ services:
       denyPathPrefixes:
         - /api/internal
         - /.well-known/workflow
+      allowPathPrefixes:
+        - /api
+        - /health
       maxRequestBody: 10MB
       responseHeaders:
         X-Content-Type-Options: nosniff
@@ -667,6 +670,19 @@ Each `denyPathPrefixes` entry is a literal, segment-aware prefix. For example,
 but does not deny `/api/internalized`. Do not add `*`; encoded paths, query
 strings, and fragments are rejected in config. Denials run before basic auth,
 request-body reads, and upstream proxying.
+
+When `allowPathPrefixes` is nonempty, every other path receives 404. Allowed
+prefixes use the same case-sensitive exact-or-segment-child matching, so `/api`
+allows `/api` and `/api/users` but not `/API` or `/apiized`. Literal `.` and
+`..` path segments, trailing slashes, and repeated slashes are rejected in
+allow rules so canonicalization cannot broaden them. Deny rules always win on overlap, including
+when a broader allowed prefix contains a denied internal subtree. `/` allows
+all paths except explicit denials. An omitted or empty allow list leaves paths
+unrestricted. The policy applies on public HTTP, the serving hostname, redirect
+aliases, and internal HTTP routes. Allow-list rejections also run before
+redirects, authentication, body reads, and proxying. This setting requires agents advertising
+`proxy.allow-path-prefixes-v1`; deployment fails before mutation on older
+agents rather than silently exposing unmatched paths.
 
 `maxRequestBody` accepts positive `B`, `KB`, `MB`, or `GB` sizes up to 1TB.
 Declared bodies over the limit return 413 before proxying. Mutation and custom

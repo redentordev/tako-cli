@@ -51,6 +51,7 @@ func TestRenderTakodProxyDynamicConfigPreservesRoutePolicy(t *testing.T) {
 	environment := deploy.config.Environments["production"]
 	service := environment.Services["web"]
 	service.Proxy.DenyPathPrefixes = []string{"/.well-known/workflow", "/api/internal"}
+	service.Proxy.AllowPathPrefixes = []string{"/api", "/health"}
 	service.Proxy.MaxRequestBody = "10MB"
 	service.Proxy.ResponseHeaders = map[string]string{"X-Content-Type-Options": "nosniff"}
 	environment.Services["web"] = service
@@ -60,8 +61,13 @@ func TestRenderTakodProxyDynamicConfigPreservesRoutePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	route := onlyProxyRoute(t, parseProxyManifest(t, data))
+	manifest := parseProxyManifest(t, data)
+	if manifest.Version != 3 {
+		t.Fatalf("allow-path manifest version = %d, want 3", manifest.Version)
+	}
+	route := onlyProxyRoute(t, manifest)
 	assertStringsEqual(t, route.DenyPathPrefixes, []string{"/.well-known/workflow", "/api/internal"})
+	assertStringsEqual(t, route.AllowPathPrefixes, []string{"/api", "/health"})
 	if route.MaxRequestBody != "10MB" || route.ResponseHeaders["X-Content-Type-Options"] != "nosniff" {
 		t.Fatalf("route policy = %+v", route)
 	}
@@ -814,6 +820,48 @@ func TestProxyRoutePolicyRequiresCapability(t *testing.T) {
 	requirements := takodProxyCapabilityRequirements(services)
 	if len(requirements) != 1 || requirements[0].Capability != takod.CapabilityProxyRoutePolicyV1 {
 		t.Fatalf("requirements = %+v", requirements)
+	}
+}
+
+func TestProxyAllowPathPrefixesRequireDedicatedCapability(t *testing.T) {
+	services := map[string]config.ServiceConfig{
+		"web": {Port: 3000, Proxy: &config.ProxyConfig{Domain: "example.com", AllowPathPrefixes: []string{"/api"}}},
+	}
+	requirements := takodProxyCapabilityRequirements(services)
+	if len(requirements) != 2 || requirements[0].Capability != takod.CapabilityProxyRoutePolicyV1 || requirements[1].Capability != takod.CapabilityProxyAllowPathPrefixesV1 {
+		t.Fatalf("requirements = %+v", requirements)
+	}
+	mutations := 0
+	err := runTakodProxyReconcile(func() error {
+		return preflightTakodProxyRequirements([]string{"node-a"}, requirements, func(server string, requirement takodProxyCapabilityRequirement) error {
+			if requirement.Capability == takod.CapabilityProxyAllowPathPrefixesV1 {
+				return &takodclient.CapabilityRequiredError{Server: server, Capability: requirement.Capability, Feature: requirement.Feature}
+			}
+			return nil
+		})
+	}, func() error {
+		mutations++
+		return nil
+	})
+	if err == nil || mutations != 0 {
+		t.Fatalf("allow-path preflight error = %v, mutations = %d", err, mutations)
+	}
+}
+
+func TestProxyAllowPathManifestVersionsFailClosedAcrossEnrollment(t *testing.T) {
+	for _, test := range []struct {
+		enrolled bool
+		allow    bool
+		want     int
+	}{
+		{want: 1},
+		{enrolled: true, want: 2},
+		{allow: true, want: 3},
+		{enrolled: true, allow: true, want: 4},
+	} {
+		if got := proxyManifestVersionForFeatures(test.enrolled, test.allow); got != test.want {
+			t.Fatalf("version(enrolled=%v, allow=%v) = %d, want %d", test.enrolled, test.allow, got, test.want)
+		}
 	}
 }
 

@@ -566,6 +566,10 @@ type ProxyConfig struct {
 	// before authentication, body reads, or proxying.
 	DenyPathPrefixes []string `yaml:"denyPathPrefixes,omitempty" json:"denyPathPrefixes,omitempty"`
 
+	// AllowPathPrefixes restricts the route to exact prefixes and child paths;
+	// other paths receive 404. DenyPathPrefixes always takes precedence.
+	AllowPathPrefixes []string `yaml:"allowPathPrefixes,omitempty" json:"allowPathPrefixes,omitempty"`
+
 	// MaxRequestBody limits request bodies accepted by this route, for example
 	// 10MB. Oversized declared bodies receive 413 before proxying.
 	MaxRequestBody string `yaml:"maxRequestBody,omitempty" json:"maxRequestBody,omitempty"`
