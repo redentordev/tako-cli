@@ -1400,6 +1400,14 @@ environments:
             secretAccessKey: ${TAKO_BACKUP_SECRET_ACCESS_KEY}
 ```
 
+`accessKeyId` and `secretAccessKey` are optional and must be set together.
+When both are omitted, takod uses the AWS default credential chain on the node
+that runs the backup: environment variables, shared config, then the EC2
+instance profile. On EC2, prefer an instance role scoped to the backup bucket
+over long-lived keys. The node needs `s3:PutObject`, `s3:GetObject`,
+`s3:DeleteObject` and `s3:ListBucket`, plus `s3:GetBucketVersioning` for the
+`s3` provider. Keyless storage requires takod v0.12.2 or newer.
+
 `retain` is a number of days. It applies to scheduled backups and to on-demand
 `tako backup --all` / `--volume` runs alike: after each backup, takod deletes
 node-local archives for that volume older than `retain` days and, when

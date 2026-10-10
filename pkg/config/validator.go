@@ -1488,14 +1488,16 @@ func validateBackupStorageConfig(name string, storage *BackupStorageConfig) erro
 	}
 	storage.Prefix = cleanBackupStoragePrefix(storage.Prefix)
 	storage.AccessKeyID = strings.TrimSpace(storage.AccessKeyID)
-	if storage.AccessKeyID == "" {
-		return fmt.Errorf("service %s: backup.storage.accessKeyId is required", name)
-	}
 	storage.SecretAccessKey = strings.TrimSpace(storage.SecretAccessKey)
-	if storage.SecretAccessKey == "" {
-		return fmt.Errorf("service %s: backup.storage.secretAccessKey is required", name)
-	}
 	storage.SessionToken = strings.TrimSpace(storage.SessionToken)
+	// Static keys are optional. Without them takod uses the node's AWS default
+	// credential chain (EC2 instance profile, environment, shared config).
+	if (storage.AccessKeyID == "") != (storage.SecretAccessKey == "") {
+		return fmt.Errorf("service %s: backup.storage.accessKeyId and secretAccessKey must be set together; omit both to use the node's AWS credential chain (for example an EC2 instance profile)", name)
+	}
+	if storage.SessionToken != "" && storage.AccessKeyID == "" {
+		return fmt.Errorf("service %s: backup.storage.sessionToken requires accessKeyId and secretAccessKey", name)
+	}
 	return nil
 }
 

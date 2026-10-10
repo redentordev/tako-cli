@@ -261,11 +261,11 @@ func ValidateBackupStorage(storage BackupStorageConfig) error {
 			return fmt.Errorf("backup storage endpoint must not include query or fragment")
 		}
 	}
-	if storage.AccessKeyID == "" {
-		return fmt.Errorf("backup storage accessKeyId is required")
+	if (storage.AccessKeyID == "") != (storage.SecretAccessKey == "") {
+		return fmt.Errorf("backup storage accessKeyId and secretAccessKey must be set together; omit both to use the node's AWS credential chain")
 	}
-	if storage.SecretAccessKey == "" {
-		return fmt.Errorf("backup storage secretAccessKey is required")
+	if storage.SessionToken != "" && storage.AccessKeyID == "" {
+		return fmt.Errorf("backup storage sessionToken requires accessKeyId and secretAccessKey")
 	}
 	for label, value := range map[string]string{
 		"backup storage accessKeyId":     storage.AccessKeyID,
@@ -579,10 +579,13 @@ func deleteBackupObjectBatch(ctx context.Context, client *s3.Client, bucket stri
 }
 
 func backupS3Client(ctx context.Context, storage BackupStorageConfig) (*s3.Client, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithRegion(storage.Region),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(storage.AccessKeyID, storage.SecretAccessKey, storage.SessionToken)),
-	)
+	options := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(storage.Region)}
+	// Without static keys, LoadDefaultConfig resolves the node's credential
+	// chain: environment, shared config, then the EC2 instance profile.
+	if storage.AccessKeyID != "" {
+		options = append(options, awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(storage.AccessKeyID, storage.SecretAccessKey, storage.SessionToken)))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, options...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure object storage client: %w", err)
 	}
