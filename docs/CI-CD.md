@@ -66,7 +66,9 @@ but it does not depend on the runner's old `.tako/` directory to know what is
 currently running.
 
 `tako env pull` selects the newest bundle from reachable mesh nodes, so a fresh
-runner is not tied to whichever node answers first.
+runner is not tied to whichever node answers first. It fails when no bundle has
+been pushed, so CI never deploys with an empty environment by accident; pass
+`--allow-missing` when the bundle is optional.
 
 `tako state repair` is the recovery path for stale or divergent node state. It
 is not required on every CI deploy; run it before deploy when a node was
@@ -155,7 +157,7 @@ jobs:
           tako config explain -e production
           tako doctor -e production --skip-remote
           tako upgrade servers --dry-run
-          tako upgrade servers
+          tako upgrade servers  # no-op when takod already runs this version
           tako env pull --force
           tako state pull
           tako state status
@@ -172,6 +174,11 @@ known hosts before switching CI to `strict`.
 In CI and non-interactive shells, Tako defaults to six SSH TCP attempts because
 fresh firewall/security-group changes can take a short time to become usable.
 Set `TAKO_SSH_CONNECT_ATTEMPTS` explicitly when you want a different budget.
+The first retry follows after one second; later retries wait about 31-35
+seconds so an SSH rate limiter such as `ufw limit 22/tcp` (six new connections
+per 30 seconds, re-armed by every blocked attempt) can clear. `tako setup`
+allows SSH with `ufw allow` and relies on fail2ban instead; re-run setup, or
+run `ufw allow 22/tcp`, on hosts provisioned with the older limit rule.
 
 When a node is destroyed or firewalled, state and deploy commands still fail
 closed, but SSH should not hang for minutes. Use `TAKO_SSH_CONNECT_TIMEOUT` and
