@@ -6,40 +6,45 @@
 
 **Tako** (タコ) is Japanese for "octopus" - pronounced "tah-koh".
 
-Tako has one job: reconcile a Git-backed app config onto one or more owned
-servers. A single server is a one-node mesh; adding more nodes keeps the same
+Tako has one job: reconcile a Git-backed app config onto one or more servers
+you own. A single server is a one-node mesh; adding more nodes keeps the same
 commands, config shape, proxy model, and state workflow.
 
 The CLI uses SSH for bootstrap and talks to a node-local `takod` agent.
-`takod` owns the runtime reconciliation loop: Docker service state, proxy
-routes, WireGuard mesh state, remote leases, and replicated deployment state.
+`takod` owns the runtime reconciliation loop: Docker service state, tako-proxy
+routes and certificates, WireGuard mesh state, remote operation leases, and
+replicated deployment state.
 
 ## Why Tako?
 
 - Use your own servers (DigitalOcean, Hetzner, AWS EC2, any VPS)
-- Health-checked deployments with recorded rollback state
-- Automatic HTTPS certificates through tako-proxy
+- Health-checked deployments (recreate, rolling, blue-green) with rollback
+- Automatic HTTPS through tako-proxy, including DNS-01 and on-demand customer domains
 - Git-clean deployments with full version history
 - Meshed takod orchestration from one server to many
 - App/stage isolation so unrelated projects can share a node
-- Remote leases for laptop and CI safety
-- State pull/repair workflows for switching computers
+- Replicated state and remote leases so laptops and CI can deploy safely
+- Encrypted env bundles and state pull/repair for switching computers
+- Volume backups with schedules, retention, and S3-compatible off-node storage
 - Machine interface (`--output json`, `--events ndjson`, stable exit codes)
   for control planes and automation
 
 Docs: [Orchestration model](./docs/ORCHESTRATION-MODEL.md) ·
 [Configuration guide](./docs/CONFIGURATION.md) ·
 [Machine interface](./docs/MACHINE-INTERFACE.md) ·
-[CI/CD](./docs/CI-CD.md) · [API/SDK](./docs/API-SDK.md)
+[CI/CD](./docs/CI-CD.md) · [API/SDK](./docs/API-SDK.md) ·
+[Server setup contract](./docs/SERVER-SETUP-VERSIONING.md) ·
+[Resource monitoring](./docs/RESOURCE-MONITORING.md)
 
 ---
 
 ## Install
 
-**Homebrew (macOS & Linux):**
+**Install script (Linux & macOS)** — downloads the latest release, verifies
+its checksum, and installs man pages:
 
 ```bash
-brew install redentordev/tako/tako
+curl -fsSL https://raw.githubusercontent.com/redentordev/tako-cli/master/install.sh | bash
 ```
 
 **Direct binary:**
@@ -50,8 +55,18 @@ sudo install -m 0755 /tmp/tako /usr/local/bin/tako
 rm /tmp/tako
 ```
 
-Release assets also cover `linux-arm64`, `darwin-amd64`, `darwin-arm64`, and
-`windows-amd64.exe`.
+Release assets: `tako-linux-amd64`, `tako-linux-arm64`, `tako-darwin-amd64`,
+`tako-darwin-arm64`, `tako-windows-amd64.exe`, plus `checksums.txt` and
+`tako-manpages.tar.gz`.
+
+**Homebrew (macOS & Linux):**
+
+```bash
+brew install redentordev/tako/tako
+```
+
+The Homebrew tap can lag behind GitHub releases; check `tako --version`
+against the [latest release](https://github.com/redentordev/tako-cli/releases/latest).
 
 **Container image (multi-arch, AMD64/ARM64):**
 
@@ -82,7 +97,7 @@ your shell's completion directory; see
 direct binary installs:
 
 ```bash
-gh release download vX.Y.Z --pattern tako-manpages.tar.gz
+gh release download --repo redentordev/tako-cli --pattern tako-manpages.tar.gz
 sudo mkdir -p /usr/local/share/man/man1
 sudo tar -xzf tako-manpages.tar.gz -C /usr/local/share/man/man1
 ```
@@ -90,12 +105,17 @@ sudo tar -xzf tako-manpages.tar.gz -C /usr/local/share/man/man1
 **Upgrading:**
 
 ```bash
-brew upgrade redentordev/tako/tako   # Homebrew installs
-tako upgrade --check                 # direct binary installs
+tako upgrade --check                 # direct binary / install.sh installs
 tako upgrade
+tako upgrade servers -e production   # bring takod on your servers to this CLI version
+brew upgrade redentordev/tako/tako   # Homebrew installs
 ```
 
-**Uninstalling:** `sudo rm -f /usr/local/bin/tako`
+`tako upgrade servers` is a no-op on nodes already running the target
+version; pass `--force` to reinstall and restart takod anyway.
+
+**Uninstalling:** `sudo rm -f /usr/local/bin/tako` (or run
+[`uninstall.sh`](./uninstall.sh)).
 
 </details>
 
@@ -116,7 +136,7 @@ Edit `.env`:
 ```bash
 TAKO_PRODUCTION_HOST=203.0.113.10     # Your VPS IP
 TAKO_SSH_KEY=~/.ssh/id_ed25519        # SSH key path
-LETSENCRYPT_EMAIL=admin@example.com   # For SSL certificates
+LETSENCRYPT_EMAIL=admin@example.com   # For TLS certificates
 ```
 
 2. **Review `tako.yaml`** — the generated template includes a working web
@@ -150,31 +170,14 @@ environments:
 ```
 
 Tako infers the meshed `takod` runtime, replicated state, and WireGuard mesh
-settings; run `tako config explain -e production` to see the effective
-defaults.
-
-For a PaaS installed on its first workload node, run `sudo tako platform inspect`
-first when the server's enrollment history is uncertain, then run
-`sudo tako platform init`
-on that server. The trusted platform inventory automatically replaces
-application-supplied infrastructure details: Tako uses the protected local
-worker ingress on the exact enrolled node and identity-verified SSH for other
-members. Before any project mutation, attach the workspace explicitly with
-`tako project attach --cluster CLUSTER_ID`; the create-once
-`.tako/platform-cluster.json` records that immutable choice. A first deploy can
-also prompt or use `--accept-cluster CLUSTER_ID`, but persists the attachment
-only after planning succeeds and immediately before apply. See
-[First PaaS Node With Local Deployments](docs/CONFIGURATION.md#first-paas-node-with-local-deployments).
-`tako platform inspect --output json` exposes the same read-only preflight to
-automation and exits 6 for incomplete or residual enrollment state.
-That guide also covers expiring single-use worker enrollment, pinned SSH host
-keys, and the explicit ready/schedulable/cordon/drain/remove lifecycle.
+settings; run `tako validate` to check the file offline and
+`tako config explain -e production` to see the effective defaults.
 
 3. **Commit, set up the server (one-time), and deploy:**
 
 ```bash
 git add . && git commit -m "Initial Tako deployment config"
-tako setup -e production     # installs Docker, WireGuard, takod, firewall, hardening
+tako setup -e production     # Docker, WireGuard, takod, tako-proxy, ufw, fail2ban, hardening
 tako deploy -e production
 ```
 
@@ -187,6 +190,16 @@ deploy inputs let automation update one configured service without a full
 rebuild: `--service web` with `--image <ref>`, `--source .`, or
 `--archive app.tar.gz`. Use `--force` to intentionally reconcile unchanged
 services (broad force skips `persistent: true` services unless targeted).
+
+**Moving to another machine or CI:** push your `.env` and `.tako/secrets*`
+files as a passphrase-encrypted bundle (Argon2id + AES-256-GCM) stored in takod
+state, then pull them elsewhere. Set `TAKO_ENV_PASSPHRASE` for non-interactive
+use; `--allow-missing` lets CI succeed when no bundle has been pushed yet.
+
+```bash
+tako env push -e production
+tako env pull -e production --allow-missing
+```
 
 ### Configless Deploys (`tako run`)
 
@@ -217,73 +230,99 @@ tako config pull --project web --server 203.0.113.10 --user root -o tako.yaml
 
 Both read Tako-managed desired/actual/history state; they do not discover
 arbitrary Docker containers. Generated config is best-effort: env values are
-redacted placeholders, and `--password` is never written to the output. For
-multi-node state, `--server-name` must match a remote target node key.
+redacted placeholders, and `--password` is never written to the output.
+
+### Platform Mode (first PaaS node)
+
+For a PaaS installed on its first workload node, run `sudo tako platform inspect`
+to check existing enrollment state, then `sudo tako platform init` on that
+server, and attach workspaces with `tako project attach --cluster CLUSTER_ID`.
+Worker enrollment uses expiring single-use join tokens and pinned SSH host
+keys. See
+[First PaaS Node With Local Deployments](docs/CONFIGURATION.md#first-paas-node-with-local-deployments).
 
 ---
 
 ## Features
 
 **Deployment & operations** — reconciled deploys (recreate, rolling,
-blue-green with manual or automatic promotion), parallel deployment,
-instant rollback, Git-based versioning, replicated deployment state with
-remote operation leases, release hooks (`release:` commands gate traffic),
-scheduled jobs (`kind: job` with cron, run history, and manual trigger),
-remote exec in service containers, health checks, drift detection, volume
-backup/restore with optional S3-compatible off-node storage.
+blue-green with manual or automatic promotion), graceful container
+replacement, parallel deployment, instant rollback, Git-based versioning,
+replicated deployment state with remote operation leases, release hooks
+(`release:` commands gate traffic), scheduled jobs (`kind: job` with cron, run
+history, and manual trigger), remote exec in service containers, health checks,
+drift detection, maintenance mode, service log rotation.
 
-**Proxy & domains** — automatic HTTPS via Let's Encrypt, HTTP/1.1–HTTP/3 and
-WebSockets through the Caddy-backed shared tako-proxy, multiple domains per
-service, www → non-www redirects with path preservation, dynamic customer
-domains via an ask endpoint, internal HTTP-only routes without public DNS.
+**Backups** — volume backup/restore across the mesh, per-service `backup:`
+schedules with `retain` days, off-node copies to S3, R2, or any S3-compatible
+store (static keys via `${ENV_VAR}`, or keyless instance-role/default AWS
+credentials with takod v0.12.2+), PostgreSQL backup verification
+(`tako backup verify-postgres`), and interrupted-restore recovery.
 
-**Servers & scaling** — multi-server takod mesh, placement strategies
-(spread, pinned, global, label constraints), commit-tagged image reuse,
-one-command server setup and agent upgrades (`tako setup`,
-`tako upgrade servers`), shared nodes with app/stage isolation, cross-project
-service exports/imports.
+**Proxy & domains** — automatic HTTPS via Let's Encrypt or ZeroSSL,
+HTTP/1.1–HTTP/3 and WebSockets through the Caddy-backed shared tako-proxy,
+DNS-01 issuance (Cloudflare, Hetzner, DigitalOcean) for wildcard and
+CDN-fronted domains, dynamic customer domains via an ask endpoint, multiple
+domains per service, www → non-www redirects with path preservation, route
+policies (basic auth, IP allowlists), uploaded certificates (`tako certs`),
+internal HTTP-only routes without public DNS.
 
-**Automation** — every command supports `--output json` (versioned result
-documents), `--events ndjson` (typed progress events), and stable exit codes
-([machine interface](./docs/MACHINE-INTERFACE.md)); private registry auth via
-a `registries:` block with `${ENV_VAR}` credentials; secrets management with
-automatic redaction; single static binary for Linux/macOS/Windows.
+**Servers & scaling** — multi-server takod mesh over WireGuard, placement
+strategies (spread, pinned, global, label constraints), reviewable placement
+plans, commit-tagged image reuse, one-command server setup (Docker, takod,
+ufw firewall, fail2ban, SSH hardening) and agent upgrades, shared nodes with
+app/stage isolation, cross-project service exports/imports, raw TCP/UDP port
+publishing.
+
+**Security & automation** — SSH host-key verification (`tofu`, `strict`,
+`ask`), secrets with automatic redaction and AWS SSM / Secrets Manager import,
+encrypted env bundles, private registry auth via a `registries:` block with
+`${ENV_VAR}` credentials, every command supports `--output json` (versioned
+result documents) and `--events ndjson` (typed progress events) with stable
+exit codes ([machine interface](./docs/MACHINE-INTERFACE.md)); single static
+binary for Linux/macOS/Windows.
 
 ---
 
 ## Commands
 
-The most-used commands. Every command has a man page (`man tako-deploy`) and
-`--help`; regenerate man pages with `make man` after flag changes.
+Every command has `--help` and a man page (`man tako-deploy`); regenerate man
+pages with `make man` after flag changes.
 
 | Command | Description |
 |---------|-------------|
 | `tako init` | Initialize new project with template config |
-| `tako validate` | Validate config locally before Git, SSH, build, or deploy work |
+| `tako validate` | Validate `tako.yaml` without contacting servers |
 | `tako config explain` | Show inferred runtime, state, mesh, server, and service defaults |
-| `tako setup` | Set up or refresh a server: Docker, WireGuard, takod, firewall, hardening |
+| `tako config export` / `tako config pull` | Materialize remote takod state into a local `tako.yaml` |
+| `tako setup` | Set up or refresh a server: Docker, WireGuard, takod, proxy, firewall, hardening |
 | `tako deploy` | Deploy configured application to environment |
 | `tako run <image> --name <app> --port <p> --server <host-or-ip>` | Configless deploy of a public image to an existing node |
-| `tako config export` / `tako config pull` | Materialize remote takod state into a local `tako.yaml` |
-| `tako promote <service>` | Promote a warmed manual blue-green revision |
-| `tako rollback [id]` | Rollback to previous/specific deployment |
+| `tako promote <service>` | Promote a warmed blue-green revision |
+| `tako rollback [id]` | Roll back to previous/specific deployment |
+| `tako history` | View deployment history |
 | `tako ps` / `tako logs` / `tako access` | Service status, container logs, proxy access logs |
 | `tako exec <service> -- <cmd>` | Run a command in a running service container |
-| `tako jobs runs` / `tako jobs trigger` | Inspect and trigger scheduled jobs |
-| `tako doctor` | Diagnose config, SSH, agents, Docker, proxy, state, services, volumes |
-| `tako metrics` / `tako monitor` | System metrics and continuous service monitoring |
-| `tako history` | View deployment history |
 | `tako start` / `tako stop` / `tako scale` | Service control |
-| `tako placement plan cordon\|drain\|rebalance` | Create digest-bound, reviewable replica placement plans |
-| `tako backup` | Volume backup, list, restore, and retention cleanup |
-| `tako drift` | Detect config drift between desired state and running services |
-| `tako secrets` | Init, set, list, delete, and validate secrets |
-| `tako state pull/status/repair/lease` | Sync, compare, repair state; manage remote leases |
+| `tako maintenance` / `tako live` | Enable / disable maintenance mode for a service |
+| `tako remove` / `tako destroy` | Remove services / the whole app stage (shared server setup is kept) |
+| `tako jobs runs` / `tako jobs trigger` | Inspect and trigger scheduled jobs |
+| `tako backup` | Volume backup, list, restore, delete, and retention cleanup; `verify-postgres`, `recover` |
+| `tako env push` / `tako env pull` | Encrypted `.env` + secrets bundles stored in the takod mesh |
+| `tako secrets` | Init, set, list, delete, validate, fetch, and import secrets |
+| `tako certs push\|ls\|rm` | Manage uploaded TLS certificates on proxy nodes |
+| `tako proxy hash-password` | Mint a bcrypt hash for `proxy.basicAuth` |
 | `tako domains status` / `tako domains hosts` | Domain DNS/TLS readiness; hosts-file entries for internal routes |
+| `tako doctor` | Diagnose config, SSH, agents, Docker, proxy, state, services, volumes |
+| `tako drift` | Detect config drift between desired state and running services |
+| `tako metrics` / `tako stats` / `tako monitor` / `tako prometheus` | System metrics, container stats, continuous monitoring, Prometheus export |
+| `tako state pull\|status\|repair\|forget-node\|lease` | Sync, compare, repair state; manage remote leases |
+| `tako placement plan cordon\|drain\|rebalance` | Create digest-bound, reviewable replica placement plans (`verify`, `apply`) |
 | `tako discovery exports` | List exported cross-project services on reachable nodes |
+| `tako clone-setup` | Set up a cloned project on a new machine |
+| `tako platform` / `tako project attach` | Platform-mode node enrollment, backups, and workspace attachment |
 | `tako upgrade` / `tako upgrade servers` | Upgrade the CLI / server-side takod agents |
-| `tako cleanup` | Clean app/stage node resources; `--docker-cache` prunes builder cache |
-| `tako destroy` | Remove this app/stage services while preserving shared server setup |
+| `tako cleanup` | Clean app/stage runtime resources and logs; `--docker-cache` prunes builder cache |
 
 Common flags: `-v/--verbose`, `-e/--env <name>`, `--service <name>`,
 `--config <path>`, `--host-key-mode <tofu|strict|ask>`.
@@ -336,16 +375,23 @@ environments:
         placement:
           strategy: pinned
           servers: [node1]
+        backup:
+          schedule: "0 2 * * *"   # nightly
+          retain: 7               # days
+          storage:
+            provider: s3
+            bucket: my-app-backups
+            region: us-east-1     # omit keys to use the instance role
         env:
           POSTGRES_PASSWORD: ${DB_PASSWORD}
 ```
 
 The [Configuration guide](./docs/CONFIGURATION.md) covers the full recipe set:
 multi-server placement, background workers, stateful services and volumes,
-secrets, domain redirects and readiness checks, dynamic customer domains,
-internal proxy routes, shared nodes and cross-project exports, parallel
-deployment, build strategies, resource limits, volume backups, and build
-cache pruning.
+secrets, domain redirects and readiness checks, DNS-01 and dynamic customer
+domains, internal proxy routes, shared nodes and cross-project exports,
+parallel deployment, build strategies, resource limits, volume backups, and
+build cache pruning.
 
 ---
 
@@ -354,7 +400,7 @@ cache pruning.
 ```
 ┌─────────────────┐                    Tako CLI
 │   Tako CLI      │                        |
-│  (Local)        │                  connect to any
+│  (Local / CI)   │                  connect to any
 └────────┬────────┘                        |
          │ SSH                   +---------+---------+
          ▼                       |         |         |
@@ -362,10 +408,10 @@ cache pruning.
 │   VPS Server    │              |         |         |
 ├─────────────────┤           Runtime   Runtime   Runtime
 │ takod           │           Proxy     Proxy     Proxy
-│ Local Proxy     │              +---- private mesh ----+
-│ Container Runtime │
-│ Your Containers │
-│ State Cache     │
+│ tako-proxy      │              +-- WireGuard mesh --+
+│ Docker runtime  │
+│ Your containers │
+│ Replicated state│
 └─────────────────┘
   Single server              Multi-server mesh
 ```
@@ -381,7 +427,7 @@ The [examples/](./examples) directory has ready-to-deploy projects: web
 frameworks (Node.js, Next.js, Hono, SvelteKit, SolidStart, Astro, PHP,
 Laravel, Rails), full-stack and monorepo setups, background workers, scaling
 and placement, scheduled jobs, private registries, and third-party apps
-(n8n, Plausible, Umami, Ghost). Each example includes complete documentation.
+(n8n, Plausible, Umami, Ghost, Sentry).
 
 ---
 
@@ -403,10 +449,10 @@ takod, ssh, provisioner, ...) · `internal/state/` deployment state ·
 
 ---
 
-## Support & Community
+## Support
 
 - **Issues**: [GitHub Issues](https://github.com/redentordev/tako-cli/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/redentordev/tako-cli/discussions)
+- **Releases**: [GitHub Releases](https://github.com/redentordev/tako-cli/releases)
 
 ## License
 
