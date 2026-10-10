@@ -1400,6 +1400,15 @@ environments:
             secretAccessKey: ${TAKO_BACKUP_SECRET_ACCESS_KEY}
 ```
 
+`retain` is a number of days. It applies to scheduled backups and to on-demand
+`tako backup --all` / `--volume` runs alike: after each backup, takod deletes
+node-local archives for that volume older than `retain` days and, when
+`storage` is configured, the matching remote objects. Volumes without a
+`backup` block are never pruned automatically — if CI runs `tako backup --all`
+before every deploy, give each persistent service a `backup.retain` (or run
+`tako backup --cleanup <days>`) so node-local archives cannot fill the data
+volume.
+
 Native volume backups are live filesystem archives. They are useful for files
 and application-managed snapshots, but they are not a transactionally
 consistent PostgreSQL backup. Keep PostgreSQL backups as an explicit generic
@@ -1499,6 +1508,22 @@ agent reserves disk for the artifact and applies `--scratch-size` as the hard
 size of a dedicated tmpfs mounted directly at `PGDATA`. The scratch request plus
 512MiB of PostgreSQL overhead must fit in currently available host memory after
 preserving takod's `--reserved-memory-bytes` budget (512MiB by default).
+
+## Disk Admission
+
+takod refuses disk-growing operations — deploy leases, service reconciles that
+add containers, image imports and builds, backups, restores, and jobs — when the
+affected filesystem has less free space than `--minimum-free-disk-bytes`
+(10GiB by default; `0` disables admission). Refusals return HTTP 507 with the
+path, free bytes, and the floor that was crossed.
+
+Small control-plane writes — deployment state documents and events, proxy route
+manifests, and proxy reconciliation — are admitted against a reduced floor of
+`min(256MiB, --minimum-free-disk-bytes)`. A rollout that drops below the
+platform minimum partway through (typically while pulling new images) can then
+still publish its proxy routes and record its outcome, instead of leaving
+services half-applied and the deployment record stuck in progress. New deploys
+still need the full minimum because the deploy lease uses the platform floor.
 
 ## Docker Build Cache Pruning
 

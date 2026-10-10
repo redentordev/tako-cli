@@ -270,6 +270,88 @@ func TestRequireFreeDiskFailsClosed(t *testing.T) {
 	}
 }
 
+func TestControlPlaneWritesUseReducedFloor(t *testing.T) {
+	available := int64(1 << 30)
+	server := NewServerWithOptions("/tmp/takod-test.sock", "/state", "test", ServerOptions{
+		MinimumFreeDiskBytes: 10 << 30,
+		DiskIdentity:         func(path string) (string, error) { return path, nil },
+		DiskAvailable:        func(string) (int64, error) { return available, nil },
+	})
+	if server.requireFreeDisk(httptest.NewRecorder(), "/state") {
+		t.Fatal("disk-growing admission accepted 1 GiB free under a 10 GiB platform minimum")
+	}
+	if !server.requireControlPlaneDisk(httptest.NewRecorder(), "/state", proxyRoutesDir, proxyDynamicDir) {
+		t.Fatal("control-plane write rejected with 1 GiB free")
+	}
+
+	available = 128 << 20
+	recorder := httptest.NewRecorder()
+	if server.requireControlPlaneDisk(recorder, "/state") {
+		t.Fatal("control-plane write accepted below the control-plane floor")
+	}
+	if recorder.Code != http.StatusInsufficientStorage || !strings.Contains(recorder.Body.String(), "control-plane minimum") {
+		t.Fatalf("control-plane denial = %d %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestControlPlaneFloorNeverExceedsPlatformMinimum(t *testing.T) {
+	available := int64(150)
+	server := NewServerWithOptions("/tmp/takod-test.sock", "/state", "test", ServerOptions{
+		MinimumFreeDiskBytes: 100,
+		DiskAvailable:        func(string) (int64, error) { return available, nil },
+	})
+	if got := server.controlPlaneDiskFloor(); got != 100 {
+		t.Fatalf("control-plane floor = %d, want platform minimum 100", got)
+	}
+	if !server.requireControlPlaneDisk(httptest.NewRecorder()) {
+		t.Fatal("control-plane write rejected above a small platform minimum")
+	}
+	available = 99
+	if server.requireControlPlaneDisk(httptest.NewRecorder()) {
+		t.Fatal("control-plane write accepted below a small platform minimum")
+	}
+
+	disabled := NewServerWithOptions("/tmp/takod-test.sock", "/state", "test", ServerOptions{
+		DiskAvailable: func(string) (int64, error) { return 0, errors.New("must not be called") },
+	})
+	if !disabled.requireControlPlaneDisk(httptest.NewRecorder()) {
+		t.Fatal("disabled disk admission rejected a control-plane write")
+	}
+}
+
+func TestStateWritesSucceedBelowPlatformMinimum(t *testing.T) {
+	dataDir := t.TempDir()
+	server := NewServerWithOptions("/tmp/takod-test.sock", dataDir, "test", ServerOptions{
+		MinimumFreeDiskBytes: 10 << 30,
+		DiskAvailable:        func(string) (int64, error) { return 1 << 30, nil },
+	})
+	body, _ := json.Marshal(StateDocumentRequest{
+		Project:     "demo",
+		Environment: "production",
+		Document:    stateDocumentDesired,
+		RevisionID:  "rev-1",
+		Content:     "{\"project\":\"demo\",\"environment\":\"production\",\"revisionId\":\"rev-1\"}\n",
+	})
+	recorder := httptest.NewRecorder()
+	server.handleState(recorder, httptest.NewRequest(http.MethodPut, "/v1/state", bytes.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("state write below platform minimum = %d %q, want 200 so failed deploys can still be recorded", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestDeployLeaseKeepsPlatformMinimum(t *testing.T) {
+	server := NewServerWithOptions("/tmp/takod-test.sock", t.TempDir(), "test", ServerOptions{
+		MinimumFreeDiskBytes: 10 << 30,
+		DiskAvailable:        func(string) (int64, error) { return 1 << 30, nil },
+	})
+	body, _ := json.Marshal(LeaseRequest{Project: "demo", Environment: "production"})
+	recorder := httptest.NewRecorder()
+	server.handleLease(recorder, httptest.NewRequest(http.MethodPost, "/v1/lease", bytes.NewReader(body)))
+	if recorder.Code != http.StatusInsufficientStorage {
+		t.Fatalf("lease below platform minimum = %d %q, want 507 so new deploys are refused up front", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestAcquireBuildSlotEnforcesAndReleasesLimit(t *testing.T) {
 	server := NewServerWithOptions("/tmp/takod-test.sock", t.TempDir(), "test", ServerOptions{MaximumConcurrentBuilds: 1})
 	release, ok := server.acquireBuildSlot()
