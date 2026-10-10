@@ -32,7 +32,7 @@ func init() {
 func runStart(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 
 	envName := getEnvironmentName(cfg)

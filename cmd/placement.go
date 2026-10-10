@@ -81,7 +81,7 @@ func runPlacementApply(cmd *cobra.Command, args []string) error {
 	}
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 	result, err := cliEngine().ApplyPlacementMovement(cmd.Context(), engine.PlacementApplyRequest{
 		Config: cfg, Environment: getEnvironmentName(cfg), Plan: *plan, PlanID: placementApplyID,
@@ -98,7 +98,7 @@ func runPlacementApply(cmd *cobra.Command, args []string) error {
 func runPlacementPlan(cmd *cobra.Command, mode string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 	plan, err := cliEngine().PlanPlacementMovement(cmd.Context(), engine.PlacementPlanRequest{
 		Config: cfg, Environment: getEnvironmentName(cfg), Mode: mode, TargetNode: placementPlanNode,

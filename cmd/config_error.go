@@ -39,6 +39,12 @@ func formatDeployConfigError(configPath string, err error) error {
 	}
 }
 
+// formatConfigLoadError gives every command the located config errors that
+// deploy and validate report, instead of a bare "failed to load config".
+func formatConfigLoadError(configPath string, err error) error {
+	return formatDeployConfigError(resolveDeployConfigPath(configPath), err)
+}
+
 func formatConfigParseError(title string, configPath string, detail string, line int, column int) error {
 	var out strings.Builder
 	fmt.Fprintf(&out, "%s in %s:\n  %s", title, filepath.Clean(configPath), detail)

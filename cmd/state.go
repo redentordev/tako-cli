@@ -167,7 +167,7 @@ func init() {
 func runStatePull(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 	envName := getEnvironmentName(cfg)
 
@@ -527,7 +527,7 @@ func latestDeploymentByTimestamp(deployments []*remotestate.DeploymentState) *re
 func runStateStatus(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 	envName := getEnvironmentName(cfg)
 
@@ -919,7 +919,7 @@ type stateLeaseNode struct {
 func runStateLease(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 	envName := getEnvironmentName(cfg)
 
@@ -937,7 +937,7 @@ func runStateLease(cmd *cobra.Command, args []string) error {
 func runStateLeaseRelease(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 	envName := getEnvironmentName(cfg)
 
@@ -1045,7 +1045,7 @@ func releaseStateLeaseByID(nodes []stateLeaseNode, leaseID string, force bool, n
 func runStateRepair(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 
 	envName := getEnvironmentName(cfg)
@@ -1137,7 +1137,7 @@ func runStateForgetNode(cmd *cobra.Command, args []string) error {
 
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 
 	envName := getEnvironmentName(cfg)
@@ -3462,7 +3462,7 @@ func saveRecoveredDeploymentResult(cfg *config.Config, envName string, deploymen
 func ExportState(outputPath string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 
 	envName := getEnvironmentName(cfg)
@@ -3505,7 +3505,7 @@ func ExportState(outputPath string) error {
 func ImportState(inputPath string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 
 	envName := getEnvironmentName(cfg)

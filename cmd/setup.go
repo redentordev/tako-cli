@@ -49,7 +49,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// Load deployment configuration
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 
 	// Create SSH pool
