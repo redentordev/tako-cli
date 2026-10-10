@@ -19,6 +19,17 @@ func TestFirewallAllowCommandsUseConfiguredMeshPort(t *testing.T) {
 	}
 }
 
+func TestFirewallAllowCommandsDoNotRateLimitSSH(t *testing.T) {
+	commands := strings.Join(firewallAllowCommands(51820), "\n")
+
+	if strings.Contains(commands, "ufw limit") {
+		t.Fatalf("ufw limit locks Tako out during connection bursts:\n%s", commands)
+	}
+	if !strings.Contains(commands, "sudo ufw allow 22/tcp") {
+		t.Fatalf("firewall commands must allow SSH:\n%s", commands)
+	}
+}
+
 func TestConfigureFirewallRejectsInvalidMeshPort(t *testing.T) {
 	provisioner := NewProvisioner(nil, false)
 

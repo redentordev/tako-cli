@@ -1262,7 +1262,7 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 		}
 	}
 
-	// Allow essential services with rate limiting for SSH (use || true to ignore "Skipping adding existing rule" errors)
+	// Allow essential services (use || true to ignore "Skipping adding existing rule" errors)
 	for _, cmd := range firewallAllowCommands(meshListenPort) {
 		p.logf("  Running: %s\n", cmd)
 		// Execute but don't fail on "rule already exists" errors
@@ -1305,8 +1305,11 @@ func FirewallAllowedPorts(meshListenPort int) []string {
 
 func firewallAllowCommands(meshListenPort int) []string {
 	return []string{
-		// SSH with rate limiting (max 10 connections per 30 seconds per IP).
-		"sudo ufw limit 22/tcp comment 'SSH with rate limiting' || true",
+		// SSH is allowed without `ufw limit`: its 6-connections-per-30s cap is
+		// tripped by Tako's own connection bursts and retries, locking out
+		// deploys and backups. fail2ban bans brute-force sources instead. On
+		// hosts set up with the old limit rule, ufw updates it in place.
+		"sudo ufw allow 22/tcp comment 'SSH (fail2ban protected)' || true",
 
 		// HTTP/HTTPS.
 		"sudo ufw allow 80/tcp comment 'HTTP' || true",
