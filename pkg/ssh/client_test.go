@@ -3,6 +3,7 @@ package ssh
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -111,6 +112,29 @@ func TestConnectBackoffCapsDelay(t *testing.T) {
 		if got := connectBackoff(attempt); got != want {
 			t.Fatalf("connectBackoff(%d) = %s, want %s", attempt, got, want)
 		}
+	}
+}
+
+func TestDialRetryBackoffWaitsOutRateLimitWindow(t *testing.T) {
+	if got := dialRetryBackoff(1); got != time.Second {
+		t.Fatalf("first retry backoff = %s, want 1s", got)
+	}
+	for attempt := 2; attempt <= 6; attempt++ {
+		got := dialRetryBackoff(attempt)
+		if got < connectRateLimitCooldown || got >= connectRateLimitCooldown+connectRateLimitJitter {
+			t.Fatalf("dialRetryBackoff(%d) = %s, want [%s, %s)", attempt, got, connectRateLimitCooldown, connectRateLimitCooldown+connectRateLimitJitter)
+		}
+	}
+}
+
+func TestDialFailureErrorHintsAtRateLimitOnlyForTransientDials(t *testing.T) {
+	refused := fmt.Errorf("TCP dial failed: %w", syscall.ECONNREFUSED)
+	err := dialFailureError(3, refused)
+	if !errors.Is(err, syscall.ECONNREFUSED) || !strings.Contains(err.Error(), "ufw allow 22/tcp") {
+		t.Fatalf("refused dial error = %v", err)
+	}
+	if err := dialFailureError(1, os.ErrNotExist); strings.Contains(err.Error(), "ufw") {
+		t.Fatalf("non-transient error got rate-limit hint: %v", err)
 	}
 }
 
