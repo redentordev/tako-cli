@@ -12,7 +12,7 @@ import (
 
 func TestCertificateSchedulerRenewsReferencedCertificateAndEmitsEvent(t *testing.T) {
 	useTempProxyPaths(t)
-	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	oldNow := acmeDNSNow
 	acmeDNSNow = func() time.Time { return now }
 	t.Cleanup(func() { acmeDNSNow = oldNow })
@@ -47,7 +47,7 @@ func TestCertificateSchedulerRenewsReferencedCertificateAndEmitsEvent(t *testing
 
 func TestCertificateSchedulerChecksHealthyForARIAndSkipsOrphanedCertificates(t *testing.T) {
 	useTempProxyPaths(t)
-	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	oldNow := acmeDNSNow
 	acmeDNSNow = func() time.Time { return now }
 	t.Cleanup(func() { acmeDNSNow = oldNow })
@@ -84,7 +84,7 @@ func TestCertificateSchedulerChecksHealthyForARIAndSkipsOrphanedCertificates(t *
 
 func TestCertificateSchedulerFailureIsPollableAndRedacted(t *testing.T) {
 	useTempProxyPaths(t)
-	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	oldNow := acmeDNSNow
 	acmeDNSNow = func() time.Time { return now }
 	t.Cleanup(func() { acmeDNSNow = oldNow })
@@ -116,7 +116,7 @@ func TestCertificateSchedulerFailureIsPollableAndRedacted(t *testing.T) {
 
 func TestCertificateSchedulerMarksOwnerWithoutCurrentRouteOrphaned(t *testing.T) {
 	useTempProxyPaths(t)
-	now := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	oldNow := acmeDNSNow
 	acmeDNSNow = func() time.Time { return now }
 	t.Cleanup(func() { acmeDNSNow = oldNow })
