@@ -64,7 +64,7 @@ func runDiscoveryExports(cmd *cobra.Command, args []string) error {
 
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 	if err := requireTakodRuntime(cfg); err != nil {
 		return err

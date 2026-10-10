@@ -824,3 +824,13 @@ func envBundleMeshTestConfig() *config.Config {
 		},
 	}
 }
+
+func TestMissingEnvBundleFailsUnlessAllowed(t *testing.T) {
+	err := missingEnvBundleResult("production", false)
+	if err == nil || !strings.Contains(err.Error(), "tako env push") || !strings.Contains(err.Error(), "--allow-missing") {
+		t.Fatalf("missing bundle error = %v", err)
+	}
+	if err := missingEnvBundleResult("production", true); err != nil {
+		t.Fatalf("allowed missing bundle returned %v", err)
+	}
+}

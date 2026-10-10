@@ -30,6 +30,7 @@ var (
 	upgradeServersServer      string
 	upgradeServersDryRun      bool
 	upgradeServersTakodBinary string
+	upgradeServersForce       bool
 	upgradeServersStatusWait  = 30 * time.Second
 	upgradeServersStatusPoll  = 1 * time.Second
 	upgradeServersStatusProbe = 3 * time.Second
@@ -99,6 +100,7 @@ func init() {
 	upgradeServersCmd.Flags().StringVarP(&upgradeServersServer, "server", "s", "", "Server to upgrade (default: authoritative enrolled cluster inventory; legacy: active environment)")
 	upgradeServersCmd.Flags().BoolVar(&upgradeServersDryRun, "dry-run", false, "Report server agent versions without changing remote state")
 	upgradeServersCmd.Flags().StringVar(&upgradeServersTakodBinary, "takod-binary", "", "Path to a Linux tako binary to install as takod (required for development builds)")
+	upgradeServersCmd.Flags().BoolVar(&upgradeServersForce, "force", false, "Reinstall and restart takod even when it already runs the target version")
 }
 
 func runUpgrade(cmd *cobra.Command, args []string) error {
@@ -512,6 +514,13 @@ func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, nam
 	if versionErr != nil {
 		return fail(fmt.Errorf("server %s is not set up; run 'tako setup --server %s' first: %w", name, name, versionErr))
 	}
+	if skipCurrentTakodUpgrade(statusErr, current, serverVersion.TakoCLIVersion, upgradeServersTakodBinary, upgradeServersForce) {
+		// Reinstalling the running version restarts takod for nothing and
+		// interrupts its schedulers; CI runs this before every deploy.
+		node.Outcome = engine.UpgradeOutcomeCurrent
+		fmt.Fprintf(out, "✓ takod already at %s; nothing to do (use --force to reinstall)\n", Version)
+		return node
+	}
 	prov := provisioner.NewProvisioner(client, verbose)
 	prov.SetOutput(humanOut())
 	var revalidate func() (*nodeidentity.UpgradeContract, error)
@@ -594,6 +603,17 @@ func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, nam
 	node.Protocol = verified.UpgradeProtocol
 	fmt.Fprintf(out, "✓ Upgraded takod: %s -> %s\n", current, verified.Version)
 	return node
+}
+
+// skipCurrentTakodUpgrade reports whether a node already runs the target
+// version with a matching setup manifest, so an upgrade would only restart
+// takod. A custom --takod-binary may carry new code under the same version
+// string, so it always installs.
+func skipCurrentTakodUpgrade(statusErr error, runningVersion string, manifestCLIVersion string, takodBinary string, force bool) bool {
+	if force || takodBinary != "" || statusErr != nil {
+		return false
+	}
+	return runningVersion == Version && manifestCLIVersion == Version
 }
 
 func validateUpgradeServersOptions(cliVersion string, takodBinary string, dryRun bool) error {

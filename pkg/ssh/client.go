@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"os"
 	"path"
@@ -32,6 +33,12 @@ const (
 	connectDefaultTimeout        = 10 * time.Second
 	connectMaxTimeout            = 5 * time.Minute
 	connectBackoffMax            = 10 * time.Second
+	// SSH rate limiters such as `ufw limit 22/tcp` (6 new connections per 30s)
+	// re-arm their window on every blocked SYN, so short backoffs keep the
+	// client locked out for the whole retry budget. After one quick retry,
+	// failed dials wait out the window before trying again.
+	connectRateLimitCooldown = 31 * time.Second
+	connectRateLimitJitter   = 4 * time.Second
 )
 
 // Client wraps an SSH connection with additional functionality
@@ -42,6 +49,12 @@ type Client struct {
 	conn      *ssh.Client
 	agentConn net.Conn // Track SSH agent connection for cleanup
 	mu        sync.Mutex
+
+	// verifiesKnownHosts is set when the host key callback checks known_hosts,
+	// so dials offer only the key types recorded there.
+	verifiesKnownHosts bool
+	// pinnedHostKeyAlgorithms, when set, replaces the known_hosts lookup.
+	pinnedHostKeyAlgorithms []string
 }
 
 // parsePrivateKey parses an SSH private key, handling various formats
@@ -200,10 +213,11 @@ func NewClient(host string, port int, user string, keyPath string) (*Client, err
 	}
 
 	return &Client{
-		config:    config,
-		host:      host,
-		port:      port,
-		agentConn: agentConn,
+		config:             config,
+		host:               host,
+		port:               port,
+		agentConn:          agentConn,
+		verifiesKnownHosts: true,
 	}, nil
 }
 
@@ -228,9 +242,10 @@ func NewClientWithPassword(host string, port int, user string, password string) 
 	}
 
 	return &Client{
-		config: config,
-		host:   host,
-		port:   port,
+		config:             config,
+		host:               host,
+		port:               port,
+		verifiesKnownHosts: true,
 	}, nil
 }
 
@@ -300,10 +315,11 @@ func NewClientWithAuth(host string, port int, user string, keyPath string, passw
 	}
 
 	return &Client{
-		config:    config,
-		host:      host,
-		port:      port,
-		agentConn: agentConn,
+		config:             config,
+		host:               host,
+		port:               port,
+		agentConn:          agentConn,
+		verifiesKnownHosts: true,
 	}, nil
 }
 
@@ -384,17 +400,27 @@ func (c *Client) ConnectContext(ctx context.Context) error {
 			}
 			lastErr = fmt.Errorf("TCP dial failed: %w", err)
 			if attempt < tcpAttempts && isTransientDialError(err) {
-				if err := sleepWithContext(ctx, connectBackoff(attempt)); err != nil {
+				if err := sleepWithContext(ctx, dialRetryBackoff(attempt)); err != nil {
 					return err
 				}
 				continue
 			}
-			return fmt.Errorf("failed to connect after %d attempt(s): %w", attempt, lastErr)
+			return dialFailureError(attempt, lastErr)
+		}
+
+		// Restrict host key algorithms to the key types already trusted for this
+		// host, as OpenSSH does. Otherwise the server may pick a key type that is
+		// not in known_hosts and trip a false "host identification changed".
+		config := c.config
+		if algorithms := c.hostKeyAlgorithms(addr); len(algorithms) > 0 {
+			pinned := *c.config
+			pinned.HostKeyAlgorithms = algorithms
+			config = &pinned
 		}
 
 		// Now establish SSH connection over TCP. Close the TCP connection on
 		// cancellation so the SSH handshake unblocks promptly.
-		sshConn, chans, reqs, err := newClientConnContext(ctx, tcpConn, addr, c.config)
+		sshConn, chans, reqs, err := newClientConnContext(ctx, tcpConn, addr, config)
 		if err != nil {
 			tcpConn.Close()
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -420,7 +446,29 @@ func (c *Client) ConnectContext(ctx context.Context) error {
 		return nil
 	}
 
-	return fmt.Errorf("failed to connect after %d attempt(s): %w", tcpAttempts, lastErr)
+	return dialFailureError(tcpAttempts, lastErr)
+}
+
+// hostKeyAlgorithms returns the host key algorithms to offer when dialing
+// addr, or nil to let the server choose.
+func (c *Client) hostKeyAlgorithms(addr string) []string {
+	if len(c.pinnedHostKeyAlgorithms) > 0 {
+		return c.pinnedHostKeyAlgorithms
+	}
+	if c.verifiesKnownHosts {
+		return knownHostKeyAlgorithms(addr)
+	}
+	return nil
+}
+
+// dialFailureError reports an exhausted dial budget. Refused and timed-out
+// dials are also what an SSH rate limiter produces, so name that cause too.
+func dialFailureError(attempts int, lastErr error) error {
+	err := fmt.Errorf("failed to connect after %d attempt(s): %w", attempts, lastErr)
+	if lastErr == nil || !isTransientDialError(lastErr) {
+		return err
+	}
+	return fmt.Errorf("%w\nIf the host rate-limits SSH (for example `ufw limit 22/tcp`), allow it instead with `ufw allow 22/tcp` and restrict access with a cloud firewall or fail2ban", err)
 }
 
 func newClientConnContext(ctx context.Context, tcpConn net.Conn, addr string, config *ssh.ClientConfig) (ssh.Conn, <-chan ssh.NewChannel, <-chan *ssh.Request, error) {
@@ -508,6 +556,16 @@ func connectBackoff(attempt int) time.Duration {
 		return connectBackoffMax
 	}
 	return backoff
+}
+
+// dialRetryBackoff returns the wait before the next TCP dial. The first retry
+// stays fast for transient blips such as an sshd restart; later retries wait
+// out SSH rate-limit windows, with jitter so concurrent clients spread out.
+func dialRetryBackoff(attempt int) time.Duration {
+	if attempt <= 1 {
+		return connectBackoff(attempt)
+	}
+	return connectRateLimitCooldown + rand.N(connectRateLimitJitter)
 }
 
 func isTransientDialError(err error) bool {

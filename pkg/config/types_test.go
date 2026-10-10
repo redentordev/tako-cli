@@ -313,6 +313,36 @@ func TestValidateConfigAcceptsBackupStorageConfig(t *testing.T) {
 	}
 }
 
+func TestValidateConfigBackupStorageCredentialsAreAllOrNothing(t *testing.T) {
+	for name, tt := range map[string]struct {
+		storage BackupStorageConfig
+		wantErr string
+	}{
+		"credential chain": {storage: BackupStorageConfig{}},
+		"static keys":      {storage: BackupStorageConfig{AccessKeyID: "access", SecretAccessKey: "secret"}},
+		"secret only":      {storage: BackupStorageConfig{SecretAccessKey: "secret"}, wantErr: "must be set together"},
+		"token only":       {storage: BackupStorageConfig{SessionToken: "token"}, wantErr: "sessionToken requires"},
+	} {
+		cfg := validValidationConfig()
+		production := cfg.Environments["production"]
+		web := production.Services["web"]
+		web.Volumes = []string{"data:/data"}
+		storage := tt.storage
+		storage.Provider, storage.Bucket, storage.Region = BackupStorageProviderS3, "backups", "ap-southeast-1"
+		web.Backup = &BackupConfig{Schedule: "@daily", Retain: 7, Storage: &storage}
+		production.Services["web"] = web
+		cfg.Environments["production"] = production
+
+		err := ValidateConfig(cfg)
+		if tt.wantErr == "" && err != nil {
+			t.Fatalf("%s: ValidateConfig returned error: %v", name, err)
+		}
+		if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+			t.Fatalf("%s: error = %v, want %q", name, err, tt.wantErr)
+		}
+	}
+}
+
 func TestValidateConfigRejectsBackupVolumeOutsideService(t *testing.T) {
 	cfg := validValidationConfig()
 	production := cfg.Environments["production"]

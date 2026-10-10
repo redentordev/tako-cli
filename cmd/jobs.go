@@ -70,7 +70,7 @@ func init() {
 func loadJobsConfig() (*config.Config, error) {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load config: %w", err)
+		return nil, formatConfigLoadError(cfgFile, err)
 	}
 	if err := requireTakodRuntime(cfg); err != nil {
 		return nil, err

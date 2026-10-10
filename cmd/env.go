@@ -24,7 +24,10 @@ import (
 	"golang.org/x/term"
 )
 
-var envForce bool
+var (
+	envForce            bool
+	envPullAllowMissing bool
+)
 
 const envPassphraseVar = "TAKO_ENV_PASSPHRASE"
 
@@ -75,12 +78,13 @@ func init() {
 	envCmd.AddCommand(envPullCmd)
 
 	envPullCmd.Flags().BoolVar(&envForce, "force", false, "Overwrite existing local files")
+	envPullCmd.Flags().BoolVar(&envPullAllowMissing, "allow-missing", false, "Exit successfully when no bundle has been pushed")
 }
 
 func runEnvPush(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 	if err := requireTakodRuntime(cfg); err != nil {
 		return err
@@ -186,7 +190,7 @@ func runEnvPush(cmd *cobra.Command, args []string) error {
 func runEnvPull(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 	if err := requireTakodRuntime(cfg); err != nil {
 		return err
@@ -207,9 +211,7 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if response == nil || !response.Found {
-		fmt.Println("No environment bundle found on reachable nodes.")
-		fmt.Println("Run 'tako env push' to upload environment files first.")
-		return nil
+		return missingEnvBundleResult(envName, envPullAllowMissing)
 	}
 
 	restored, skipped, err := restoreDownloadedEnvBundle(response, envForce, cfg)
@@ -222,6 +224,17 @@ func runEnvPull(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("\nRestored %d file(s) from %s\n", restored, source)
 	return nil
+}
+
+// missingEnvBundleResult fails a pull that found no bundle, so CI does not
+// continue with an empty environment, unless the caller opted in to a missing
+// bundle.
+func missingEnvBundleResult(envName string, allowMissing bool) error {
+	if allowMissing {
+		fmt.Println("No environment bundle found on reachable nodes; continuing (--allow-missing).")
+		return nil
+	}
+	return fmt.Errorf("no environment bundle found on reachable nodes for environment %s; run 'tako env push' first, or pass --allow-missing when the bundle is optional", envName)
 }
 
 func restoreDownloadedEnvBundle(response *takod.EnvBundleResponse, force bool, cfgs ...*config.Config) (int, bool, error) {

@@ -218,6 +218,54 @@ func TestValidateBackupStorageRejectsEndpointCredentials(t *testing.T) {
 	}
 }
 
+func TestValidateBackupStorageAllowsCredentialChainWithoutKeys(t *testing.T) {
+	base := BackupStorageConfig{Provider: BackupStorageProviderS3, Bucket: "backups", Region: "ap-southeast-1"}
+	if err := ValidateBackupStorage(base); err != nil {
+		t.Fatalf("keyless storage rejected: %v", err)
+	}
+
+	halfSet := base
+	halfSet.AccessKeyID = "access"
+	if err := ValidateBackupStorage(halfSet); err == nil || !strings.Contains(err.Error(), "set together") {
+		t.Fatalf("access key without secret error = %v", err)
+	}
+
+	tokenOnly := base
+	tokenOnly.SessionToken = "token"
+	if err := ValidateBackupStorage(tokenOnly); err == nil || !strings.Contains(err.Error(), "sessionToken requires") {
+		t.Fatalf("session token without keys error = %v", err)
+	}
+}
+
+func TestBackupS3ClientCredentialSource(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "env-access")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "env-secret")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "absent-config"))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "absent-credentials"))
+
+	storage := BackupStorageConfig{Provider: BackupStorageProviderS3, Bucket: "backups", Region: "ap-southeast-1"}
+	for name, tt := range map[string]struct {
+		access, secret, want string
+	}{
+		"default chain": {want: "env-access"},
+		"static keys":   {access: "static-access", secret: "static-secret", want: "static-access"},
+	} {
+		storage.AccessKeyID, storage.SecretAccessKey = tt.access, tt.secret
+		client, err := backupS3Client(context.Background(), storage)
+		if err != nil {
+			t.Fatalf("%s: backupS3Client: %v", name, err)
+		}
+		creds, err := client.Options().Credentials.Retrieve(context.Background())
+		if err != nil {
+			t.Fatalf("%s: retrieve credentials: %v", name, err)
+		}
+		if creds.AccessKeyID != tt.want {
+			t.Fatalf("%s: access key = %q, want %q", name, creds.AccessKeyID, tt.want)
+		}
+	}
+}
+
 func TestBackupObjectKeyUsesStableLayout(t *testing.T) {
 	key := backupObjectKey("apps", BackupObject{
 		Project:     "demo",

@@ -9,6 +9,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -37,7 +39,110 @@ func NewClientFromConfigPinned(config ServerConfig, expected RecordedHostKey) (*
 		}
 		return nil
 	}
+	// Offer only the pinned key type so a server holding several host keys
+	// presents the pinned one instead of failing the pin.
+	client.verifiesKnownHosts = false
+	client.pinnedHostKeyAlgorithms = hostKeyAlgorithmsForTypes(map[string]bool{expected.Type: true})
 	return client, nil
+}
+
+// hostKeyAlgorithmPreference orders known key types strongest first.
+var hostKeyAlgorithmPreference = []string{
+	ssh.KeyAlgoED25519,
+	ssh.KeyAlgoECDSA521,
+	ssh.KeyAlgoECDSA384,
+	ssh.KeyAlgoECDSA256,
+	ssh.KeyAlgoRSA,
+}
+
+// hostKeyAlgorithmsForTypes maps recorded host key types to the algorithms a
+// client may negotiate for them. RSA keys sign with SHA-2 when the server
+// supports it, falling back to ssh-rsa for old servers.
+func hostKeyAlgorithmsForTypes(types map[string]bool) []string {
+	var algorithms []string
+	add := func(keyType string) {
+		if keyType == ssh.KeyAlgoRSA {
+			algorithms = append(algorithms, ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256, ssh.KeyAlgoRSA)
+			return
+		}
+		algorithms = append(algorithms, keyType)
+	}
+	remaining := make(map[string]bool, len(types))
+	for keyType, ok := range types {
+		if ok && keyType != "" {
+			remaining[keyType] = true
+		}
+	}
+	for _, keyType := range hostKeyAlgorithmPreference {
+		if remaining[keyType] {
+			add(keyType)
+			delete(remaining, keyType)
+		}
+	}
+	rest := make([]string, 0, len(remaining))
+	for keyType := range remaining {
+		rest = append(rest, keyType)
+	}
+	sort.Strings(rest)
+	for _, keyType := range rest {
+		add(keyType)
+	}
+	return algorithms
+}
+
+// knownHostKeyAlgorithms returns the host key algorithms to offer when dialing
+// addr (host:port): those for key types already recorded in Tako's or the
+// user's known_hosts. It returns nil when nothing is recorded, so first-use
+// connections negotiate normally and TOFU records whatever the server offers.
+func knownHostKeyAlgorithms(addr string) []string {
+	host, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return nil
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return hostKeyAlgorithmsForTypes(knownHostKeyTypesIn(host, port, []string{
+		filepath.Join(homeDir, ".tako", "known_hosts"),
+		filepath.Join(homeDir, ".ssh", "known_hosts"),
+	}))
+}
+
+// knownHostKeyTypesIn returns the key types recorded for host:port across
+// files. Revoked and @cert-authority lines are not trusted host keys and are
+// skipped; host key verification still rejects revoked keys.
+func knownHostKeyTypesIn(host string, port int, files []string) map[string]bool {
+	addresses := knownHostsAddresses(host, port)
+	types := map[string]bool{}
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			marker, hosts, pubKey, _, _, err := ssh.ParseKnownHosts([]byte(line))
+			if err != nil || marker != "" {
+				continue
+			}
+			for _, pattern := range hosts {
+				for _, candidate := range addresses {
+					if knownHostsPatternMatches(pattern, candidate) {
+						types[pubKey.Type()] = true
+					}
+				}
+			}
+		}
+	}
+	return types
 }
 
 // RecordedHostKey is the SSH host key recorded for a host in a known_hosts

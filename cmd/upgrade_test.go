@@ -270,3 +270,31 @@ func (u *upgradeStatusExecutor) next() (string, error) {
 	}
 	return output, nil
 }
+
+func TestSkipCurrentTakodUpgradeOnlyWhenNothingWouldChange(t *testing.T) {
+	previous := Version
+	Version = "v9.9.9"
+	t.Cleanup(func() { Version = previous })
+
+	tests := []struct {
+		name        string
+		statusErr   error
+		running     string
+		manifestCLI string
+		binary      string
+		force       bool
+		want        bool
+	}{
+		{name: "current", running: "v9.9.9", manifestCLI: "v9.9.9", want: true},
+		{name: "older agent", running: "v9.9.8", manifestCLI: "v9.9.9"},
+		{name: "stale setup manifest", running: "v9.9.9", manifestCLI: "v9.9.8"},
+		{name: "status unavailable", statusErr: errors.New("timeout"), running: "unavailable", manifestCLI: "v9.9.9"},
+		{name: "custom binary", running: "v9.9.9", manifestCLI: "v9.9.9", binary: "/tmp/tako"},
+		{name: "forced", running: "v9.9.9", manifestCLI: "v9.9.9", force: true},
+	}
+	for _, tt := range tests {
+		if got := skipCurrentTakodUpgrade(tt.statusErr, tt.running, tt.manifestCLI, tt.binary, tt.force); got != tt.want {
+			t.Errorf("%s: skipCurrentTakodUpgrade = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}

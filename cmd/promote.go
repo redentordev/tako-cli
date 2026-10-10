@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
@@ -34,7 +33,7 @@ func runPromote(cmd *cobra.Command, args []string) error {
 	serviceName := strings.TrimSpace(args[0])
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return formatConfigLoadError(cfgFile, err)
 	}
 
 	request := engine.PromoteRequest{
