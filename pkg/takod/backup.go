@@ -1327,6 +1327,27 @@ func DeleteVolumeBackup(ctx context.Context, req BackupRequest) error {
 	return nil
 }
 
+// applyOnDemandBackupRetention prunes node-local archives for the backed-up
+// volume after an on-demand backup, matching what scheduled backups already
+// do. Without it, `tako backup --all` (commonly run before every deploy) only
+// enforces retention on remote storage and node-local archives accumulate
+// until the data volume falls below the platform free-disk minimum. Cleanup
+// failure never fails the backup that was just created; it is reported as a
+// warning on the backup result instead.
+func applyOnDemandBackupRetention(ctx context.Context, req BackupRequest, info *BackupInfo, cleanup func(context.Context, BackupRequest) (*BackupCleanupResponse, error)) {
+	if info == nil || req.RetentionDays <= 0 {
+		return
+	}
+	if _, err := cleanup(ctx, BackupRequest{
+		Project:       req.Project,
+		Environment:   req.Environment,
+		Volume:        req.Volume,
+		RetentionDays: req.RetentionDays,
+	}); err != nil {
+		info.Warnings = append(info.Warnings, fmt.Sprintf("local backup retention cleanup failed: %v", err))
+	}
+}
+
 func CleanupOldBackups(ctx context.Context, req BackupRequest) (*BackupCleanupResponse, error) {
 	ctx, releaseBarrier := acquireBackupRestoreMutationBarrier(ctx)
 	defer releaseBarrier()

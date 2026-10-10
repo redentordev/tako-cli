@@ -972,7 +972,7 @@ func (s *Server) handleProxyFile(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if !s.requireFreeDisk(w, proxyRoutesDir, proxyDynamicDir) {
+		if !s.requireControlPlaneDisk(w, proxyRoutesDir, proxyDynamicDir) {
 			return
 		}
 		if s.installation != nil {
@@ -1043,7 +1043,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if !s.requireFreeDisk(w, proxyDynamicDir, proxyLogDir, proxyCertStoreDir, s.dockerDataRoot) {
+	if !s.requireControlPlaneDisk(w, proxyDynamicDir, proxyLogDir, proxyCertStoreDir, s.dockerDataRoot) {
 		return
 	}
 
@@ -1297,7 +1297,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if !s.requireFreeDisk(w, s.dataDir) {
+		if !s.requireControlPlaneDisk(w, s.dataDir) {
 			return
 		}
 		response, err = WriteStateDocument(r.Context(), s.dataDir, request)
@@ -1308,7 +1308,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if !s.requireFreeDisk(w, s.dataDir) {
+		if !s.requireControlPlaneDisk(w, s.dataDir) {
 			return
 		}
 		response, err = AppendStateEvent(r.Context(), s.dataDir, request)
@@ -1450,7 +1450,12 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 		if !s.requireFreeDisk(w, backupRootDir) {
 			return
 		}
-		response, err = CreateVolumeBackup(r.Context(), request)
+		var info *BackupInfo
+		info, err = CreateVolumeBackup(r.Context(), request)
+		if err == nil {
+			applyOnDemandBackupRetention(r.Context(), request, info, CleanupOldBackups)
+		}
+		response = info
 	case http.MethodDelete:
 		err = DeleteVolumeBackup(r.Context(), BackupRequest{
 			Project:     r.URL.Query().Get("project"),
@@ -2045,8 +2050,67 @@ func (s *Server) checkFreeDisk(requiredBytes int64, paths ...string) error {
 	return nil
 }
 
+// controlPlaneMinimumFreeDiskBytes caps the free-disk floor for small
+// control-plane writes: deployment state documents/events and proxy route
+// reconciliation. These writes are a few kilobytes, and refusing them in the
+// middle of a rollout strands it half-applied — services already reconciled,
+// proxy routes stale, and the deployment record stuck in progress because the
+// failure itself cannot be recorded. Disk-growing operations (image pulls,
+// builds, backups, restores) and new deploy leases keep the full platform
+// minimum, so a node below it still refuses to start new work.
+const controlPlaneMinimumFreeDiskBytes int64 = 256 << 20
+
+func (s *Server) controlPlaneDiskFloor() int64 {
+	if s.minimumFreeDiskBytes < controlPlaneMinimumFreeDiskBytes {
+		return s.minimumFreeDiskBytes
+	}
+	return controlPlaneMinimumFreeDiskBytes
+}
+
+func (s *Server) checkControlPlaneDisk(paths ...string) error {
+	floor := s.controlPlaneDiskFloor()
+	if floor <= 0 {
+		return nil
+	}
+	if len(paths) == 0 {
+		paths = []string{s.dataDir}
+	}
+	s.diskReservationMu.Lock()
+	defer s.diskReservationMu.Unlock()
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		path = filepath.Clean(path)
+		filesystem, err := s.diskIdentity(path)
+		if err != nil {
+			return fmt.Errorf("failed to identify filesystem for %s: %w", path, err)
+		}
+		if _, exists := seen[filesystem]; exists {
+			continue
+		}
+		seen[filesystem] = struct{}{}
+		available, err := s.diskAvailable(path)
+		if err != nil {
+			return fmt.Errorf("failed to verify free disk on %s: %w", path, err)
+		}
+		reserved := s.diskReservations[filesystem]
+		if available-reserved < floor {
+			return fmt.Errorf("operation denied on %s: %d free bytes (%d reserved by active uploads) is below %d-byte control-plane minimum", path, available, reserved, floor)
+		}
+	}
+	return nil
+}
+
+// requireControlPlaneDisk admits small control-plane writes against the
+// reduced control-plane floor instead of the full platform minimum.
+func (s *Server) requireControlPlaneDisk(w http.ResponseWriter, paths ...string) bool {
+	return writeDiskAdmissionError(w, s.checkControlPlaneDisk(paths...))
+}
+
 func (s *Server) requireFreeDiskFor(w http.ResponseWriter, requiredBytes int64, paths ...string) bool {
-	err := s.checkFreeDisk(requiredBytes, paths...)
+	return writeDiskAdmissionError(w, s.checkFreeDisk(requiredBytes, paths...))
+}
+
+func writeDiskAdmissionError(w http.ResponseWriter, err error) bool {
 	if err == nil {
 		return true
 	}
