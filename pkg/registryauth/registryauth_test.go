@@ -113,7 +113,7 @@ func TestECRMintArgvAndUsername(t *testing.T) {
 	cli := useFakeCLI(t)
 	t.Setenv("FAKE_OUT_aws_ecr", fakeToken+"\n")
 	var registered []string
-	minter := NewMinter(Options{Getenv: noEnv, Register: func(v string) { registered = append(registered, v) }})
+	minter := NewMinter(Options{Getenv: noEnv, Register: func(_ string, v string) { registered = append(registered, v) }})
 	credential, err := minter.Auth(context.Background(), ecrHost, config.RegistryConfig{Provider: "ecr", Profile: "prod"})
 	if err != nil {
 		t.Fatalf("Auth: %v", err)
@@ -198,7 +198,7 @@ func TestRejectedOutputsNeverEchoed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			useFakeCLI(t)
 			t.Setenv("FAKE_OUT_aws_ecr", output)
-			minter := NewMinter(Options{Getenv: noEnv, Register: func(string) { t.Fatal("rejected token registered") }})
+			minter := NewMinter(Options{Getenv: noEnv, Register: func(string, string) { t.Fatal("rejected token registered") }})
 			_, err := minter.Auth(context.Background(), ecrHost, config.RegistryConfig{Provider: "ecr"})
 			if err == nil {
 				t.Fatal("expected rejection")

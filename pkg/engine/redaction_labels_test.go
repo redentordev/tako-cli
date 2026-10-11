@@ -182,7 +182,7 @@ func TestClassifierParityWithEngineRegistration(t *testing.T) {
 	writeEnvFile(t, envPath, "SMTP_PASSWORD=pa55w0rd-smtp\nLOG_LEVEL=debug\n")
 	cfg := &config.Config{
 		Project:       config.ProjectConfig{Name: "demo"},
-		Registries:    map[string]config.RegistryConfig{"ghcr.io": {Password: "gh-registry-token"}},
+		Registries:    map[string]config.RegistryConfig{"ghcr.io": {Password: "gh-registry-token"}, "gcr.io": {Provider: "gcr"}},
 		Servers:       map[string]config.ServerConfig{"app": {Password: "ssh-pass-word"}, "db": {}},
 		Notifications: &config.NotificationsConfig{Discord: "https://discord.example/api/webhooks/123/discord-hook-token"},
 		Environments: map[string]config.EnvironmentConfig{
@@ -228,8 +228,14 @@ func TestClassifierParityWithEngineRegistration(t *testing.T) {
 	entries = append(entries, fileEntries...)
 	var classified []string
 	for _, entry := range entries {
-		if entry.Masked {
+		if entry.Masked && entry.Value != "" {
 			classified = append(classified, entry.Label)
+		}
+		// A provider registry is reported as masked without a value: its
+		// token is minted (and registered) only by an operation that pulls
+		// or builds, never by registration or classification.
+		if entry.Reason == secrets.ReasonRegistryProviderToken && (entry.Value != "" || entry.Label != secrets.RegistryTokenLabel("gcr.io")) {
+			t.Fatalf("provider registry entry = %+v", entry)
 		}
 	}
 	for key := range secretValues {

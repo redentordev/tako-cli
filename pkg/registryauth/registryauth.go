@@ -66,9 +66,10 @@ func (e *MintError) Unwrap() error { return e.Err }
 
 // Options configures a Minter.
 type Options struct {
-	// Register adds a minted token to the output redactor. It is called
+	// Register adds a minted token for the registry host to the output
+	// redactor, which labels it `registries.<host>.token`. It is called
 	// before Auth returns the token.
-	Register func(string)
+	Register func(host string, token string)
 	// Redact masks known secrets in provider stderr placed in errors.
 	Redact func(string) string
 	// Now overrides the clock in tests.
@@ -123,7 +124,7 @@ func (m *Minter) Auth(ctx context.Context, host string, entry config.RegistryCon
 			return Credential{}, &MintError{Host: host, Provider: entry.Provider, Err: err}
 		}
 		if m.opts.Register != nil {
-			m.opts.Register(credential.Password)
+			m.opts.Register(host, credential.Password)
 		}
 		m.mu.Lock()
 		m.cache[key] = cachedCredential{credential: credential, mintedAt: m.opts.Now(), refreshAge: refreshAge}

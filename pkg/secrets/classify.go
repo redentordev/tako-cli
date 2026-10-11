@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 )
@@ -55,13 +56,20 @@ func ClassifyServerPasswords(servers map[string]config.ServerConfig) []Redaction
 	return entries
 }
 
-// ClassifyRegistryCredentials returns an entry for every registry password.
+// ClassifyRegistryCredentials returns an entry for every registry password,
+// and a value-less entry for every provider-backed registry: its token is
+// minted only by an operation that pulls or builds (and registered then as
+// `registries.<host>.token`), never by classification.
 func ClassifyRegistryCredentials(cfg *config.Config) []RedactionEntry {
 	if cfg == nil {
 		return nil
 	}
 	var entries []RedactionEntry
 	for host, registry := range cfg.Registries {
+		if strings.TrimSpace(registry.Provider) != "" {
+			entries = append(entries, RedactionEntry{Label: RegistryTokenLabel(host), Reason: ReasonRegistryProviderToken, Masked: true})
+			continue
+		}
 		if registry.Password != "" {
 			entries = append(entries, maskedEntry(RegistryPasswordLabel(host), ReasonRegistryCredential, registry.Password))
 		}

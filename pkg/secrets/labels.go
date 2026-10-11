@@ -156,6 +156,12 @@ func RegistryPasswordLabel(host string) string {
 	return buildLabel(LabelKindRegistries, host, "password")
 }
 
+// RegistryTokenLabel labels a registry token minted by a
+// `registries.<host>.provider`: `registries.<host>.token`.
+func RegistryTokenLabel(host string) string {
+	return buildLabel(LabelKindRegistries, host, "token")
+}
+
 // ACMECredentialLabel labels an ACME DNS provider credential:
 // `environments.<env>.proxy.acme.<NAME>`.
 func ACMECredentialLabel(environment, name string) string {
@@ -209,6 +215,7 @@ const (
 	ReasonTokenShapedValue
 	ReasonSSHPassword
 	ReasonRegistryCredential
+	ReasonRegistryProviderToken
 	ReasonDNSProviderCredential
 	ReasonBackupStorageCredential
 	ReasonBuildArg
@@ -235,6 +242,8 @@ func (r RedactionReason) String() string {
 		return "ssh password"
 	case ReasonRegistryCredential:
 		return "registry credential"
+	case ReasonRegistryProviderToken:
+		return "registry token (provider)"
 	case ReasonDNSProviderCredential:
 		return "DNS provider credential"
 	case ReasonBackupStorageCredential:

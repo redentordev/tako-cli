@@ -16,6 +16,7 @@ func TestLabelConstructors(t *testing.T) {
 		{EnvFileLabel("SMTP_PASSWORD"), "envFile.SMTP_PASSWORD"},
 		{ServerPasswordLabel("app"), "servers.app.password"},
 		{RegistryPasswordLabel("ghcr.io"), "registries.ghcr.io.password"},
+		{RegistryTokenLabel("ghcr.io"), "registries.ghcr.io.token"},
 		{ACMECredentialLabel("production", "CF_DNS_API_TOKEN"), "environments.production.proxy.acme.CF_DNS_API_TOKEN"},
 		{BackupCredentialLabel("mongo", "secretAccessKey"), "services.mongo.backup.secretAccessKey"},
 		{BuildArgLabel("web", "NPM_TOKEN"), "builds.web.args.NPM_TOKEN"},

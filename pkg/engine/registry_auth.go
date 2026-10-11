@@ -7,6 +7,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/registryauth"
+	"github.com/redentordev/tako-cli/pkg/secrets"
 )
 
 // registryAuthPreflighter is the deployer surface used to mint provider
@@ -17,12 +18,15 @@ type registryAuthPreflighter interface {
 }
 
 // newRegistryMinter creates the per-operation provider credential minter.
-// Every minted token is registered with the engine redactor before it is
-// returned, and provider stderr placed in errors is redacted.
+// Every minted token is registered with the engine's labeled redactor as
+// `registries.<host>.token` before it is returned, and provider stderr placed
+// in errors passes through the same labeled redactor.
 func (e *Engine) newRegistryMinter() *registryauth.Minter {
 	return registryauth.NewMinter(registryauth.Options{
-		Register: e.RegisterSecret,
-		Redact:   e.RedactSensitive,
+		Register: func(host string, token string) {
+			e.RegisterSecretAs(token, secrets.RegistryTokenLabel(host))
+		},
+		Redact: e.RedactSensitive,
 	})
 }
 
