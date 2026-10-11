@@ -9,9 +9,9 @@
 
 ## 2. Example configs using dead keys
 
-- [ ] 2.1 Remove `examples/{01-simple-web,09-nextjs-todos,12-hono,16-php}/tako-parallel.yaml`. Drop the `tako-parallel.yaml` glob from `examples/validate.sh` and from the expectation at `examples/examples_test.go:119`. Verify with `go test ./examples`.
-- [ ] 2.2 Remove the `deployment:` block from `examples/test-parallel/tako.yaml`, and rewrite `examples/test-parallel/README.md` (the sections at :57-63 and :195-196) to describe sequential dependency-ordered deploys with concurrent per-node rollout. Verify that `tako --config examples/test-parallel/tako.yaml validate` prints no warnings.
-- [ ] 2.3 Rename `examples/test-parallel/` to `examples/dependency-order/` with `git mv`. Change its `project.name` from `test-parallel` to `dependency-order`, update any self-references in its README, and update the catalog row at `examples/README.md:52` (link `./dependency-order/`, title "Dependency order", description of sequential dependency-ordered deploys instead of "Parallel deployment" / "concurrent service deployment"). Verify with `rg -n test-parallel --glob '!openspec/**'` returning nothing, `tako --config examples/dependency-order/tako.yaml validate` printing no warnings, and `go test ./examples` passing.
+- [x] 2.1 Remove `examples/{01-simple-web,09-nextjs-todos,12-hono,16-php}/tako-parallel.yaml`. Drop the `tako-parallel.yaml` glob from `examples/validate.sh` and from the expectation at `examples/examples_test.go:119`. Verify with `go test ./examples`.
+- [x] 2.2 Remove the `deployment:` block from `examples/test-parallel/tako.yaml`, and rewrite `examples/test-parallel/README.md` (the sections at :57-63 and :195-196) to describe sequential dependency-ordered deploys with concurrent per-node rollout. Verify that `tako --config examples/test-parallel/tako.yaml validate` prints no warnings.
+- [x] 2.3 Rename `examples/test-parallel/` to `examples/dependency-order/` with `git mv`. Change its `project.name` from `test-parallel` to `dependency-order`, update any self-references in its README, and update the catalog row at `examples/README.md:52` (link `./dependency-order/`, title "Dependency order", description of sequential dependency-ordered deploys instead of "Parallel deployment" / "concurrent service deployment"). Verify with `rg -n test-parallel --glob '!openspec/**'` returning nothing, `tako --config examples/dependency-order/tako.yaml validate` printing no warnings, and `go test ./examples` passing.
 
 ## 3. Shared snippet/config test helper
 

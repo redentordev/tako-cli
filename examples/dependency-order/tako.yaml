@@ -1,18 +1,9 @@
 project:
-  name: test-parallel
+  name: dependency-order
   version: 1.0.0
 
-# Enable parallel deployment
-deployment:
-  strategy: parallel
-  parallel:
-    maxConcurrentBuilds: 4
-    maxConcurrentDeploys: 4
-    strategy: dependency-aware
-  cache:
-    enabled: true
-    type: local
-    retention: 7d
+# Services deploy one at a time in dependency order (see dependsOn below).
+# Resolved order: postgres, redis, api, worker, web.
 
 servers:
   production:

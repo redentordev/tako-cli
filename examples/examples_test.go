@@ -116,7 +116,7 @@ func TestAllExamplesValidatorCoversTopLevelAndPatternConfigs(t *testing.T) {
 	validateScript := readExampleFile(t, "validate.sh")
 	for _, expected := range []string{
 		"find \"$ROOT/examples\" -mindepth 2 -maxdepth 2",
-		"-name 'tako-parallel.yaml'",
+		"-mindepth 2 -maxdepth 2 -name 'tako.yaml' -print",
 		"find \"$ROOT/examples/deployment-patterns\" -mindepth 2 -maxdepth 2",
 		"VALIDATION_HOME=\"$TMP_DIR/home\"",
 		"HOME=\"$VALIDATION_HOME\"",
@@ -126,6 +126,9 @@ func TestAllExamplesValidatorCoversTopLevelAndPatternConfigs(t *testing.T) {
 		if !strings.Contains(validateScript, expected) {
 			t.Fatalf("all examples validator missing %q", expected)
 		}
+	}
+	if strings.Contains(validateScript, "tako-parallel.yaml") {
+		t.Fatal("validator still references removed tako-parallel.yaml configs")
 	}
 }
 
