@@ -10,6 +10,8 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/health"
+	"github.com/redentordev/tako-cli/pkg/nodeclient"
+	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/spf13/cobra"
 )
@@ -112,32 +114,32 @@ func runDomainsStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	result.ExpectedTargets = targets
-	statuses, err := monitorDomainStatuses(cmd.Context(), health.NewHealthChecker(), specs, domainStatusOptions{
+	options := domainStatusOptions{
 		Timeout:         domainsWait,
 		Strict:          domainsStrict,
 		ExpectedTargets: targets,
-	})
+	}
+	if domainSpecsDeclareCDN(specs) {
+		// CDN-fronted origins may refuse the public TLS probe, so ask the
+		// proxy nodes for their certificate state. Without node access the
+		// public-probe result stands unchanged.
+		pool := ssh.NewPool()
+		defer pool.CloseAll()
+		if factory, factoryErr := nodeclient.NewFactory(cfg, pool, takodSocketFromConfig(cfg)); factoryErr == nil {
+			defer factory.CloseIdleConnections()
+			options.NodeCertificates = engine.DomainNodeCertificateChecker(cfg, envName, factory, specs)
+		}
+	}
+	statuses, err := monitorDomainStatuses(cmd.Context(), health.NewHealthChecker(), specs, options)
 
 	// MonitorDomainStatuses returns statuses in spec order.
 	result.AllActive = true
 	for index, status := range statuses {
-		entry := engine.DomainStatusEntry{
-			Service:     status.Service,
-			Domain:      status.Domain,
-			State:       string(status.State),
-			DNS:         string(status.DNS),
-			TLS:         string(status.TLS),
-			ResolvedIPs: status.ResolvedIPs,
-			CNAME:       status.CNAME,
-			CDN:         status.CDN,
-			Message:     status.Message,
-			Warning:     status.Warning,
-			DNSError:    status.DNSError,
-			TLSError:    status.TLSError,
-		}
+		role := ""
 		if index < len(specs) {
-			entry.Role = specs[index].Role
+			role = specs[index].Role
 		}
+		entry := engine.NewDomainStatusEntry(status, role)
 		if status.Pending() {
 			result.AllActive = false
 		}
@@ -170,6 +172,16 @@ func collectAdHocDomainSpecs(domains []string, configured []domainStatusSpec, se
 		specs = append(specs, domainStatusSpec{Service: serviceName, Domain: domain, Role: "ad-hoc", CDN: cdn})
 	}
 	return specs
+}
+
+func domainSpecsDeclareCDN(specs []domainStatusSpec) bool {
+	for _, spec := range specs {
+		switch strings.ToLower(strings.TrimSpace(spec.CDN)) {
+		case config.ProxyCDNCloudflare, config.ProxyCDNGeneric:
+			return true
+		}
+	}
+	return false
 }
 
 func domainStatusKey(domain string) string {

@@ -402,6 +402,12 @@ func CertificatesEndpoint(domain string) string {
 	return "/v1/certs?domain=" + url.QueryEscape(domain)
 }
 
+// CertificateStatusEndpoint is the read-only node-local certificate status
+// for one hostname (capability proxy.cert-status-v1).
+func CertificateStatusEndpoint(domain string) string {
+	return "/v1/certs/status?domain=" + url.QueryEscape(strings.TrimSpace(domain))
+}
+
 func ScopedCertificatesEndpoint(project, environment, domain string) string {
 	return addEndpointScope(CertificatesEndpoint(domain), project, environment)
 }
