@@ -206,6 +206,56 @@ func TestSourceSeparateDockerFilesystem(t *testing.T) {
 	}
 }
 
+func TestSourceSameFilesystemMatchesOnEitherIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		root, docker FilesystemUsage
+		separate     bool
+	}{
+		{"same fsid, other device", FilesystemUsage{ID: "fsid:1:2", Device: "dev:10"}, FilesystemUsage{ID: "fsid:1:2", Device: "dev:11"}, false},
+		{"btrfs subvolumes share the mount source", FilesystemUsage{ID: "fsid:1:2", Device: "btrfs:/dev/sda2"}, FilesystemUsage{ID: "fsid:1:7", Device: "btrfs:/dev/sda2"}, false},
+		{"different filesystems", FilesystemUsage{ID: "fsid:1:2", Device: "dev:10"}, FilesystemUsage{ID: "fsid:3:4", Device: "dev:11"}, true},
+		{"no identity", FilesystemUsage{}, FilesystemUsage{}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source, _ := fixtureSource(t)
+			source.Statfs = func(path string) (FilesystemUsage, error) {
+				if path == "/var/lib/docker" {
+					return tc.docker, nil
+				}
+				return tc.root, nil
+			}
+			snapshot, err := source.Read(time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (snapshot.Docker != nil) != tc.separate {
+				t.Fatalf("docker reported separately = %v, want %v", snapshot.Docker != nil, tc.separate)
+			}
+		})
+	}
+}
+
+func TestMountSourceFor(t *testing.T) {
+	mountinfo := []byte(`22 1 0:21 / / rw,relatime shared:1 - btrfs /dev/sda2 rw,subvol=/@
+23 22 0:22 / /proc rw - proc proc rw
+30 22 0:35 /@docker /var/lib/docker rw,relatime shared:5 - btrfs /dev/sda2 rw,subvol=/@docker
+31 22 0:40 / /mnt/my\040data rw - ext4 /dev/sdb1 rw
+`)
+	for path, want := range map[string]string{
+		"/":                        "/dev/sda2",
+		"/var/lib/docker":          "/dev/sda2",
+		"/var/lib/docker/overlay2": "/dev/sda2",
+		"/var/lib/dockerish":       "/dev/sda2",
+		"/mnt/my data/x":           "/dev/sdb1",
+		"/proc/self":               "proc",
+	} {
+		if got := mountSourceFor(mountinfo, path); got != want {
+			t.Fatalf("mountSourceFor(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
 func TestSourceMissingOptionalFilesWarn(t *testing.T) {
 	source, proc := fixtureSource(t)
 	_ = os.Remove(filepath.Join(proc, "diskstats"))

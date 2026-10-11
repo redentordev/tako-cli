@@ -70,7 +70,7 @@ See proposal.md for motivation and `specs/node-status/spec.md` for the behavior 
   |---|---|
   | CPU | Busy share from `/proc/stat` deltas, using the same formula as the script: busy = total − idle − iowait. |
   | Memory | `MemTotal − MemAvailable`, plus swap. |
-  | Filesystems | `/` and the Docker data root: bytes and inodes, reported once when both are on the same device (same `statfs` `Fsid`, or the same `st_dev`). |
+  | Filesystems | `/` and the Docker data root: bytes and inodes, reported once when both are on the same device (same non-zero `statfs` `Fsid`, or the same `st_dev`; on btrfs, where every subvolume has its own `Fsid` and `st_dev`, the same mount source from `/proc/self/mountinfo`). |
   | Network | Sum of interfaces excluding `lo`, `veth*`, `docker*`, `br-*` and the Tako mesh interface, as a delta and a rate per second. |
   | Disk I/O | Devices listed in `/sys/block` excluding `loop*`, `ram*`, `zram*` and `dm-*`, with sectors × 512 as a delta and a rate per second. |
 

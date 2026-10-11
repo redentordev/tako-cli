@@ -13,9 +13,11 @@ import (
 // FilesystemUsage is one statfs result.
 type FilesystemUsage struct {
 	Path string
-	// ID identifies the filesystem (statfs Fsid plus st_dev); two paths
-	// with the same ID are reported once.
+	// ID is the statfs filesystem ID and Device the device identity (st_dev,
+	// or the mount source on btrfs). Two paths matching on either are the
+	// same filesystem and reported once.
 	ID            string
+	Device        string
 	TotalBytes    uint64
 	FreeBytes     uint64
 	AvailBytes    uint64
@@ -123,7 +125,7 @@ func (s *Source) Read(now time.Time) (Snapshot, error) {
 				if !errors.Is(statErr, os.ErrNotExist) {
 					warn("statfs "+s.DockerRoot, statErr)
 				}
-			} else if snapshot.Root == nil || usage.ID == "" || usage.ID != snapshot.Root.ID {
+			} else if snapshot.Root == nil || !usage.SameFilesystem(*snapshot.Root) {
 				usage.Path = s.DockerRoot
 				snapshot.Docker = &usage
 			}
