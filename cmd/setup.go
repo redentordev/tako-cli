@@ -300,7 +300,7 @@ type setupNodeProvisioner interface {
 	InstallWireGuard() error
 	HardenSecurity(opts provisioner.HardeningOptions) error
 	VerifyAutoRecovery() error
-	InstallMonitoringAgent() error
+	RemoveLegacyMonitoringAgent(opts provisioner.LegacyMonitoringOptions) error
 }
 
 // setupNodeSteps returns the full provisioning sequence. Converge re-runs
@@ -328,6 +328,9 @@ func setupNodeSteps(prov setupNodeProvisioner, cfg *config.Config, nodeName stri
 			Warn:         access.warn,
 		})
 	}
+	removeLegacyMonitoringAgent := func() error {
+		return prov.RemoveLegacyMonitoringAgent(provisioner.LegacyMonitoringOptions{Socket: takodSocketFromConfig(cfg), Warn: access.warn})
+	}
 	return []setupProvisionStep{
 		{engine.SetupStepOSCheck, "Checking system requirements", prov.CheckRequirements, converge},
 		{engine.SetupStepPackages, "Updating system packages", prov.UpdateSystem, converge},
@@ -337,9 +340,11 @@ func setupNodeSteps(prov setupNodeProvisioner, cfg *config.Config, nodeName stri
 		{engine.SetupStepHardening, "Hardening security", hardenSecurity, converge},
 		{engine.SetupStepAutoRecovery, "Verifying auto-recovery", prov.VerifyAutoRecovery, converge},
 		{engine.SetupStepDeployUser, "Setting up deploy user", func() error { return prov.SetupDeployUser(username) }, false},
-		{engine.SetupStepMonitorAgent, "Installing monitoring agent", prov.InstallMonitoringAgent, converge},
 		{engine.SetupStepTakodInstall, "Installing takod binary", func() error { return installTakodBinary(prov, takodBinary) }, false},
 		{engine.SetupStepTakodService, "Configuring takod service", func() error { return installTakodService(prov, cfg, nodeName) }, false},
+		// takod collects host metrics natively; remove the legacy agent in every
+		// mode once takod confirms it (node.metrics-history-v1).
+		{engine.SetupStepMonitorAgent, "Removing legacy monitoring agent", removeLegacyMonitoringAgent, false},
 	}
 }
 

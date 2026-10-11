@@ -160,6 +160,7 @@ func TestConvergeSetupStepsRegrantDeployUserAccessBeforeTakodRestart(t *testing.
 		"deploy-user:deploy",
 		"install-release:" + Version,
 		"service:/run/custom/takod.sock:/var/lib/custom-tako:node-a",
+		"remove-legacy-monitoring-agent:/run/custom/takod.sock",
 	}
 	if !slices.Equal(prov.calls, want) {
 		t.Fatalf("calls = %#v, want %#v", prov.calls, want)
@@ -434,7 +435,7 @@ func (r *recordingSetupRefresher) VerifyAutoRecovery() error {
 	return nil
 }
 
-func (r *recordingSetupRefresher) InstallMonitoringAgent() error {
-	r.calls = append(r.calls, "install-monitoring-agent")
+func (r *recordingSetupRefresher) RemoveLegacyMonitoringAgent(opts provisioner.LegacyMonitoringOptions) error {
+	r.calls = append(r.calls, "remove-legacy-monitoring-agent:"+opts.Socket)
 	return nil
 }
