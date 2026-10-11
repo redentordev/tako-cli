@@ -32,6 +32,7 @@ const (
 
 const (
 	retainedStateDirName      = "deploy-restore"
+	retainedFailedDirName     = "retain-failed"
 	maxRestoreTokenLength     = 128
 	retainedOperationTimeout  = maxHealthDuration + 2*time.Minute
 	retainedStateMaxFileBytes = 1 << 20
@@ -215,6 +216,79 @@ func writeRetainedState(dataDir string, state *retainedServiceState) error {
 		return err
 	}
 	return os.Rename(tempName, path)
+}
+
+// retainedFailedRecord lists the failed containers a retain-failed rollout
+// kept stopped for debugging. Hygiene never reclaims containers listed in a
+// record; the next reconcile of the service, which removes them, clears it.
+type retainedFailedRecord struct {
+	Project     string    `json:"project"`
+	Environment string    `json:"environment"`
+	Service     string    `json:"service"`
+	Containers  []string  `json:"containers"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+func retainedFailedPath(dataDir, project, environment, service string) string {
+	return filepath.Join(dataDir, retainedFailedDirName, project, environment, service+".json")
+}
+
+func writeRetainedFailedRecord(dataDir, project, environment, service string, containers []string) error {
+	if dataDir == "" || len(containers) == 0 {
+		return nil
+	}
+	path := retainedFailedPath(dataDir, project, environment, service)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(retainedFailedRecord{
+		Project: project, Environment: environment, Service: service,
+		Containers: containers, CreatedAt: time.Now().UTC(),
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path, append(data, '\n'), 0600)
+}
+
+func removeRetainedFailedRecord(dataDir, project, environment, service string) error {
+	if dataDir == "" {
+		return nil
+	}
+	err := os.Remove(retainedFailedPath(dataDir, project, environment, service))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// readRetainedFailedContainers returns the container names kept by
+// retain-failed rollouts of a scope.
+func readRetainedFailedContainers(dataDir, project, environment string) (map[string]bool, error) {
+	names := map[string]bool{}
+	dir := filepath.Join(dataDir, retainedFailedDirName, project, environment)
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return names, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		var record retainedFailedRecord
+		if err := readImageStateJSON(filepath.Join(dir, entry.Name()), &record); err != nil {
+			return nil, err
+		}
+		for _, name := range record.Containers {
+			if name = strings.TrimPrefix(strings.TrimSpace(name), "/"); name != "" {
+				names[name] = true
+			}
+		}
+	}
+	return names, nil
 }
 
 func removeRetainedState(dataDir string, project string, environment string, service string) error {
@@ -498,8 +572,13 @@ func failReconcile(ctx context.Context, req ReconcileServiceRequest, policy stri
 			kept = append(kept, failedContainer)
 		}
 		failure := &ReconcileFailure{Err: cause, Policy: policy, KeptContainers: kept}
+		// Record the kept containers so disk hygiene never reclaims them.
+		recordErr := writeRetainedFailedRecord(req.DataDir, req.Project, req.Environment, req.Service, kept)
 		if err := stopFailedContainers(ctx, started); err != nil {
 			failure.Err = fmt.Errorf("%w; additionally %v", cause, err)
+		}
+		if recordErr != nil {
+			failure.Err = fmt.Errorf("%w; additionally failed to record kept containers: %v", failure.Err, recordErr)
 		}
 		return failure
 	case retained != nil:

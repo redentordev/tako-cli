@@ -719,6 +719,11 @@ func TestReclaimExitedContainerSelection(t *testing.T) {
 		{ID: "c-running", Name: "running", Status: "running", FinishedAt: now.Add(-25 * time.Hour), Image: "shop/web:previous", Labels: labels("shop", "production", "")},
 		{ID: "c-foreign", Name: "foreign", Status: "exited", FinishedAt: now.Add(-25 * time.Hour), Image: "nginx:1", Labels: map[string]string{"com.example": "x"}},
 		{ID: "c-nodesired", Name: "nodesired", Status: "exited", FinishedAt: now.Add(-25 * time.Hour), Image: "x/web:1", Labels: labels("other", "production", "")},
+		// Kept stopped by a retain-failed rollout for debugging.
+		{ID: "c-kept-failed", Name: "/shop_production_web_2", Status: "exited", FinishedAt: now.Add(-5 * time.Hour), Image: "shop/web:broken", Labels: labels("shop", "production", "")},
+	}
+	if err := writeRetainedFailedRecord(dataDir, "shop", "production", "web", []string{"shop_production_web_2"}); err != nil {
+		t.Fatal(err)
 	}
 	manager.ops.listExitedContainers = func(context.Context) ([]hygieneContainer, error) { return containers, nil }
 	run, err := manager.Reclaim(context.Background(), false)

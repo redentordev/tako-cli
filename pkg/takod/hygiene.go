@@ -723,7 +723,10 @@ type hygieneScopeState struct {
 	desiredErr    error
 	converged     map[string]bool
 	convergedErr  error
-	loaded        bool
+	// retainedFailed are containers kept by retain-failed rollouts.
+	retainedFailed    map[string]bool
+	retainedFailedErr error
+	loaded            bool
 }
 
 func (h *hygieneManager) newRun(trigger, level string, dryRun bool) *hygieneRunState {
@@ -1008,7 +1011,12 @@ func (h *hygieneManager) containerEligible(state *hygieneRunState, container hyg
 		return false
 	}
 	scope := h.loadScopeState(state, project, environment)
-	if scope.blocked != "" || scope.convergedErr != nil {
+	if scope.blocked != "" || scope.convergedErr != nil || scope.retainedFailedErr != nil {
+		return false
+	}
+	// Failed containers kept stopped by a retain-failed rollout stay for
+	// debugging until the next reconcile of their service removes them.
+	if scope.retainedFailed[strings.TrimPrefix(container.Name, "/")] {
 		return false
 	}
 	if scope.converged[container.ID] || scope.converged[container.Name] {
@@ -1052,6 +1060,7 @@ func (h *hygieneManager) loadScopeState(state *hygieneRunState, project, environ
 		}
 	}
 	scope.converged, scope.convergedErr = readConvergedContainers(h.dataDir, project, environment)
+	scope.retainedFailed, scope.retainedFailedErr = readRetainedFailedContainers(h.dataDir, project, environment)
 	return scope
 }
 

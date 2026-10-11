@@ -191,6 +191,9 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		if err != nil {
 			return nil, err
 		}
+		if err := clearRetainedFailedRecordAfterRemoval(req, deployStrategy); err != nil {
+			return nil, err
+		}
 		return &ReconcileServiceResponse{
 			Project:           req.Project,
 			Environment:       req.Environment,
@@ -218,6 +221,9 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		removedContainers, err = removeServiceContainersForReconcile(ctx, req, deployStrategy)
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := clearRetainedFailedRecordAfterRemoval(req, deployStrategy); err != nil {
 		return nil, err
 	}
 	// Failures after retention must restore the previous containers.
@@ -1102,6 +1108,20 @@ func validateDockerLabels(labels map[string]string) error {
 
 func removeServiceContainers(ctx context.Context, project string, environment string, service string) (int, error) {
 	return removeServiceContainersKeepingRevision(ctx, project, environment, service, "")
+}
+
+// clearRetainedFailedRecordAfterRemoval drops the service's retain-failed
+// record once every container of the service was removed (or retained
+// under a restore record). Revision-scoped strategies leave older
+// revisions' containers in place, so their record is kept.
+func clearRetainedFailedRecordAfterRemoval(req ReconcileServiceRequest, strategy string) error {
+	if takodDeployStrategyUsesRevisionScope(strategy) {
+		return nil
+	}
+	if err := removeRetainedFailedRecord(req.DataDir, req.Project, req.Environment, req.Service); err != nil {
+		return fmt.Errorf("failed to clear retain-failed record: %w", err)
+	}
+	return nil
 }
 
 func removeServiceContainersForReconcile(ctx context.Context, req ReconcileServiceRequest, strategy string) (int, error) {

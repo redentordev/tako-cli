@@ -480,7 +480,9 @@ func TestReconcileServiceRetainFailedRecreateRemovesOldThenKeepsFailed(t *testin
 	defer restore()
 	t.Setenv("TAKO_FAKE_PS_OUTPUT", "old1\n")
 	liveName := runtimeid.ContainerName("demo", "production", "web", 1)
-	_, err := ReconcileService(context.Background(), ReconcileServiceRequest{
+	dataDir := t.TempDir()
+	request := ReconcileServiceRequest{
+		DataDir:        dataDir,
 		Project:        "demo",
 		Environment:    "production",
 		Service:        "web",
@@ -490,11 +492,30 @@ func TestReconcileServiceRetainFailedRecreateRemovesOldThenKeepsFailed(t *testin
 		Network:        "tako_demo_production",
 		Containers:     []ContainerSpec{{Name: liveName}},
 		Health:         unhealthyCommandHealth(t),
-	})
+	}
+	_, err := ReconcileService(context.Background(), request)
 	var failure *ReconcileFailure
 	if !errors.As(err, &failure) || failure.Restored || failure.Policy != FailurePolicyRetainFailed {
 		t.Fatalf("ReconcileService error = %v, want retain-failed failure", err)
 	}
+	// The kept container is recorded so disk hygiene never reclaims it.
+	kept, err := readRetainedFailedContainers(dataDir, "demo", "production")
+	if err != nil || !kept[liveName] {
+		t.Fatalf("retain-failed record = %v err = %v, want %s", kept, err, liveName)
+	}
+	defer func() {
+		// The next recreate reconcile removes the kept container and clears
+		// the record.
+		t.Setenv("TAKO_FAKE_HEALTH_STATUS", "healthy")
+		request.FailurePolicy = ""
+		request.Health = nil
+		if _, err := ReconcileService(context.Background(), request); err != nil {
+			t.Fatalf("follow-up ReconcileService returned error: %v", err)
+		}
+		if kept, err := readRetainedFailedContainers(dataDir, "demo", "production"); err != nil || len(kept) != 0 {
+			t.Fatalf("retain-failed record after redeploy = %v err = %v", kept, err)
+		}
+	}()
 	entries := readCommandLog(t, logPath)
 	assertEntryOrder(t, entries, "docker stop old1", "docker rm old1", "docker stop "+liveName)
 	if slices.Contains(entries, "docker rm "+liveName) {
