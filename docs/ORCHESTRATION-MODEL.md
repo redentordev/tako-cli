@@ -207,6 +207,15 @@ classified distinctly from missing images and surface as an
 credentials instead of retrying. One-off runs pass credentials with
 `tako run --registry-user <user> --registry-password-stdin`.
 
+An entry may instead set `provider: ecr|gcr|artifact-registry|ghcr`. The CLI
+then mints a short-lived token on the deploying machine with the provider's
+own CLI (`aws`, `gcloud`, `gh` or `GH_TOKEN`/`GITHUB_TOKEN`), registers it
+with the redactor, keeps it in memory only, and sends it to `takod` through
+the same request-scoped path; `takod` is unchanged. A pull carries only the
+provider entry for the image's registry, a takod build carries every
+provider entry, and every operation mints before its first node mutation.
+See [CONFIGURATION.md](./CONFIGURATION.md#private-registries).
+
 Local `.tako` files are cache and UX acceleration. The durable truth lives in
 Git plus the last accepted desired revision and event log replicated by takod.
 

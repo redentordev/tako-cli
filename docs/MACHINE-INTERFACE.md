@@ -774,6 +774,12 @@ source, an apply failure, or a partial rollback exits 1; a held lock or lease
 exits 3. A `post-rollback` hook failure after a successful rollback exits 6.
 See [Rollback](#rollback).
 
+Registry provider credentials: when a `registries.<host>.provider` token
+cannot be minted (CLI not on PATH, failed login, rejected output), deploy,
+rollback, scale, promote, `run` and placement apply exit 1 before mutating
+any node. The config is valid; the remedy is installing or logging in to the
+provider CLI on the deploying machine.
+
 ## Redaction Guarantees
 
 - SSH passwords and credential-like service `env:` values are registered
@@ -809,6 +815,16 @@ See [Rollback](#rollback).
   before the response returns. An authentication failure surfaces as an
   `image.pull.auth_failed` event and a failed result (exit 1); the
   credential values themselves never appear in events or result documents.
+- Registry tokens minted by a `registries.<host>.provider` (`ecr`, `gcr`,
+  `artifact-registry`, `ghcr`) are registered with the redactor before they
+  are used or returned to any caller, so they are masked in human output,
+  NDJSON events, result documents and errors that embed docker output.
+  A failing provider command never puts its standard output (the token) in
+  an error, event or log line; its standard error appears only after
+  redaction, truncated to 2 KiB. Tokens shorter than 16 characters or longer
+  than 4096 bytes are rejected. Minted tokens live only in memory for one
+  Tako process and are never written to `.tako/`, local or replicated state,
+  deployment history, or events.
 - Deployment records store env **keys** only (`<redacted>` values).
 - Generated configs (`tako config export`) redact SSH passwords, environment
   values, volume driver options and labels, proxy basic-auth verifiers, and

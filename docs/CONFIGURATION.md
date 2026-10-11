@@ -824,6 +824,79 @@ Do not delete a running `persistent: true` service from the configuration:
 Tako rejects that deploy so its placement is not forgotten. Keep it declared
 until a separately explicit persistent-workload removal has completed.
 
+## Private Registries
+
+`registries:` holds image registry credentials keyed by registry host. Each
+entry declares either a static `username`/`password` pair or a `provider`
+that mints a short-lived token on the deploying machine:
+
+<!-- tako:snippet partial -->
+```yaml
+registries:
+  # Static credentials: the password must be a whole ${ENV_VAR} reference.
+  registry.example.com:
+    username: deploy
+    password: ${REGISTRY_TOKEN}
+  # Amazon ECR: aws ecr get-login-password --region us-west-1
+  123456789012.dkr.ecr.us-west-1.amazonaws.com:
+    provider: ecr
+    profile: prod            # optional AWS CLI profile
+  # Google Artifact Registry / GCR: gcloud auth print-access-token
+  us-docker.pkg.dev:
+    provider: artifact-registry
+  # GitHub Container Registry: GH_TOKEN, then GITHUB_TOKEN, then gh auth token
+  ghcr.io:
+    provider: ghcr
+```
+
+| `provider` | Command | Username | Hosts | Options |
+| ---------- | ------- | -------- | ----- | ------- |
+| `ecr` | `aws ecr get-login-password --region <region> [--profile <profile>]` | `AWS` | `<account>.dkr.ecr[-fips].<region>.amazonaws.com[.cn]` | `region` (defaults to the host's region and must agree with it), `profile` |
+| `gcr` / `artifact-registry` | `gcloud auth print-access-token [--account <account>]` | `oauth2accesstoken` | `gcr.io`, `*.gcr.io`, `*-docker.pkg.dev` | `account` |
+| `ghcr` | `GH_TOKEN`, else `GITHUB_TOKEN`, else `gh auth token` | `username`, else `GITHUB_ACTOR`, else `gh api user --jq .login` | `ghcr.io` | `username` |
+
+Rules checked by `tako config validate`:
+
+- `provider` and `password` are mutually exclusive; `username` is accepted
+  with a provider only for `ghcr`; `region`/`profile` only for `ecr` and
+  `account` only for `gcr`/`artifact-registry`.
+- The provider must match the host, so `provider: ecr` on `ghcr.io` is a
+  config error.
+- For `ghcr`, `GH_TOKEN` takes precedence over `GITHUB_TOKEN`, the order `gh`
+  itself uses. In GitHub Actions the workflow `GITHUB_TOKEN` is used unless you
+  set `GH_TOKEN` (for example a token with `read:packages` on another
+  repository's package). A token from `gh auth token` may lack
+  `read:packages`; an auth failure then suggests
+  `gh auth refresh -s read:packages`.
+
+Which requests carry credentials:
+
+- Static entries ride every pull and build request, as before.
+- An image pull carries only the provider entry whose host is the image's
+  registry. Pulling `nginx:1.27` never runs `aws`, even with an ECR entry.
+- A takod image build carries **every** provider entry, because `FROM` lines
+  (possibly through build args) can name any registry. A project with an ECR
+  entry used only for pulls therefore still needs `aws` when it builds on
+  takod. Local builds (`deployment.build.strategy: local`) use your local
+  Docker login and mint nothing; `auto` mints only if it falls back to a
+  takod build.
+
+Deploy, rollback (single-service and project), scale, promote, `run` and
+placement apply mint the provider credentials they will attach before their
+first node mutation. A missing CLI or a failed login exits 1 before anything
+changes, with the install URL or a hint such as `aws sso login`,
+`gcloud auth login` or `gh auth login`. Operations that attach no provider
+credential run no provider CLI.
+
+Minted tokens stay in memory for one Tako process. They are cached per host
+and re-minted after 6 hours for ECR (tokens last 12 hours) and 45 minutes
+for gcloud (tokens last about an hour); concurrent pulls share one mint.
+Every token is registered with the output redactor before use, provider CLI
+stdout never appears in errors, and tokens shorter than 16 characters or
+longer than 4096 bytes are rejected. Nothing is written to `.tako/`,
+deployment history or takod state; on the node the token exists only in the
+ephemeral Docker config takod creates for one docker call.
+
 ## Secrets Management
 
 <!-- tako:snippet partial -->
