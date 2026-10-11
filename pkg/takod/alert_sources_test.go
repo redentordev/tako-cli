@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/recovery"
 )
 
 const (
@@ -496,6 +498,67 @@ func TestSourceStatePersistsAndSurvivesUnknownKinds(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, schedulerAlertsDirName)); !os.IsNotExist(err) {
 		t.Fatalf("source manager must not touch scheduler-alerts storage")
+	}
+}
+
+func TestSnapshotLockDoesNotBlockAlertReporters(t *testing.T) {
+	dataDir := t.TempDir()
+	h := newSourceTestHarness(t, dataDir)
+	if err := h.manager.ApplyConfig(testMonitorRequest("shop", "production")); err != nil {
+		t.Fatal(err)
+	}
+	h.level("shop", "production", AlertKindService, "web", "unreachable")
+	statePath := filepath.Join(dataDir, "alerts", "state", "shop", "production.json")
+	_ = os.Remove(statePath)
+	// A platform backup or upgrade holds the snapshot lock.
+	unlockSnapshot, err := recovery.AcquireSnapshotLock(dataDir)
+	if err != nil {
+		t.Fatalf("snapshot lock: %v", err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			unlockSnapshot()
+		}
+	}
+	defer release()
+	flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	flushed := make(chan struct{})
+	go func() {
+		h.manager.flush(flushCtx)
+		close(flushed)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	reported := make(chan error, 1)
+	go func() {
+		err := h.manager.ReportLevel(LevelObservation{
+			Project: "shop", Environment: "production", Kind: AlertKindService, Subject: "web", Failing: []string{"unreachable"},
+			Damping: Damping{OpenAfter: 1, RecoverAfter: 1}, ObservedAt: h.now,
+		})
+		if err == nil {
+			_, err = h.manager.Status("shop", "production")
+		}
+		reported <- err
+	}()
+	select {
+	case err := <-reported:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReportLevel/Status blocked behind a flush waiting on the snapshot lock")
+	}
+	<-flushed
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("flush wrote state while the snapshot lock was held: %v", err)
+	}
+	// Once the snapshot lock is released the deferred state is persisted.
+	release()
+	h.manager.flush(context.Background())
+	if _, err := os.Stat(statePath); err != nil {
+		t.Fatalf("state not persisted after the snapshot lock was released: %v", err)
 	}
 }
 

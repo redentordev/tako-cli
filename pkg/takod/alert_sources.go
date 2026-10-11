@@ -116,6 +116,9 @@ const (
 	defaultSourceReportInterval = 60 * time.Second
 	sourceStaleIntervals        = 3
 	serviceWebhookProvider      = "service-webhook"
+	// sourceAlertFlushLockWait bounds how long a flush waits for the
+	// snapshot mutation lock before deferring to the next flush.
+	sourceAlertFlushLockWait = 500 * time.Millisecond
 )
 
 var (
@@ -1328,6 +1331,14 @@ func (m *SourceAlertManager) ApplyConfig(request AlertConfigRequest) error {
 	if !sourcesEnabled(request) {
 		return m.RemoveScope(request.Project, request.Environment)
 	}
+	// Lock order: the snapshot mutation lock before m.mu, so a platform
+	// backup or upgrade holding the snapshot lock never blocks readers and
+	// reporters waiting on m.mu.
+	unlock, err := recovery.AcquireMutationLockContext(context.Background(), m.dataDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := alertScopeKey(request.Project, request.Environment)
@@ -1395,7 +1406,7 @@ func (m *SourceAlertManager) ApplyConfig(request AlertConfigRequest) error {
 	}
 	m.pruneTargetsLocked(scope)
 	scope.dirty = true
-	return m.persistScopeLocked(context.Background(), scope, true)
+	return m.persistScopeLocked(scope, true)
 }
 
 func scopeMonitorsService(policy SourceAlertPolicy, service string) bool {
@@ -1450,6 +1461,11 @@ func (m *SourceAlertManager) RemoveScope(project, environment string) error {
 	if !isSafeProjectName(project) || !isSafeRuntimeName(environment) {
 		return fmt.Errorf("invalid alert scope")
 	}
+	unlock, err := recovery.AcquireMutationLockContext(context.Background(), m.dataDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := alertScopeKey(project, environment)
@@ -1462,10 +1478,12 @@ func (m *SourceAlertManager) RemoveScope(project, environment string) error {
 	for subjectKey := range scope.state.Subjects {
 		m.retireSubjectLocked(scope, subjectKey)
 	}
-	return m.finalizeScopeLocked(context.Background(), scope)
+	return m.finalizeScopeLocked(scope)
 }
 
-func (m *SourceAlertManager) finalizeScopeLocked(ctx context.Context, scope *sourceAlertScope) error {
+// finalizeScopeLocked removes a retiring scope once its deliveries are
+// finished, else persists it. The caller holds the mutation lock and m.mu.
+func (m *SourceAlertManager) finalizeScopeLocked(scope *sourceAlertScope) error {
 	if !scope.retiring {
 		return nil
 	}
@@ -1488,11 +1506,11 @@ func (m *SourceAlertManager) finalizeScopeLocked(ctx context.Context, scope *sou
 		if err := m.removeScopeFilesLocked(scope.project, scope.environment); err != nil {
 			return err
 		}
-		return m.persistLedgerLocked(ctx)
+		return m.writeLedgerUnlocked()
 	}
 	m.pruneTargetsLocked(scope)
 	scope.dirty = true
-	return m.persistScopeLocked(ctx, scope, true)
+	return m.persistScopeLocked(scope, true)
 }
 
 // Run evaluates staleness and flap release every 30s and dispatches due
@@ -1532,20 +1550,47 @@ func (m *SourceAlertManager) Evaluate() {
 	}
 }
 
+// flush persists dirty scopes and finalizes retiring ones. It takes the
+// snapshot mutation lock before m.mu and gives up after a short wait while
+// a platform backup or upgrade holds the snapshot lock, so m.mu is never
+// held while waiting on it; the next flush retries.
 func (m *SourceAlertManager) flush(ctx context.Context) {
+	m.mu.Lock()
+	pending := m.ledgerDirty
+	for _, scope := range m.scopes {
+		pending = pending || scope.dirty || scope.retiring
+	}
+	m.mu.Unlock()
+	if !pending {
+		return
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, sourceAlertFlushLockWait)
+	unlock, lockErr := recovery.AcquireMutationLockContext(lockCtx, m.dataDir)
+	cancel()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var firstErr error
-	for _, scope := range m.scopes {
-		if scope.dirty {
-			if err := m.persistScopeLocked(ctx, scope, false); err != nil && firstErr == nil {
-				firstErr = err
+	if lockErr != nil {
+		firstErr = fmt.Errorf("mutation lock: %w", lockErr)
+	} else {
+		defer unlock()
+		for _, scope := range m.scopes {
+			if scope.retiring {
+				if err := m.finalizeScopeLocked(scope); err != nil && firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if scope.dirty {
+				if err := m.persistScopeLocked(scope, false); err != nil && firstErr == nil {
+					firstErr = err
+				}
 			}
 		}
-	}
-	if m.ledgerDirty {
-		if err := m.persistLedgerLocked(ctx); err != nil && firstErr == nil {
-			firstErr = err
+		if m.ledgerDirty {
+			if err := m.writeLedgerUnlocked(); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	if firstErr != nil && (m.lastPersist == nil || m.lastPersist.Error() != firstErr.Error()) {
@@ -1656,12 +1701,13 @@ func (m *SourceAlertManager) DispatchDue(ctx context.Context) {
 			current.NextAttemptAt = m.now().Add(delays[current.Attempts-1])
 		}
 		scope.dirty = true
-		if scope.retiring {
-			if err := m.finalizeScopeLocked(ctx, scope); err != nil {
-				fmt.Fprintf(os.Stderr, "takod alert source retirement cleanup failed: %v\n", err)
-			}
-		}
+		retiring := scope.retiring
 		m.mu.Unlock()
+		if retiring {
+			// flush finalizes the retiring scope, taking the mutation lock
+			// before m.mu.
+			m.flush(ctx)
+		}
 	}
 }
 
@@ -1730,14 +1776,9 @@ func (m *SourceAlertManager) writeDocument(path string, value any) error {
 
 // persistScopeLocked writes a scope's documents. withConfig also rewrites
 // its policy and credentials. A failure (for example low disk) keeps the
-// in-memory state authoritative and dirty so a later flush retries.
-func (m *SourceAlertManager) persistScopeLocked(ctx context.Context, scope *sourceAlertScope, withConfig bool) error {
-	unlock, err := recovery.AcquireMutationLockContext(ctx, m.dataDir)
-	if err != nil {
-		scope.dirty = true
-		return err
-	}
-	defer unlock()
+// in-memory state authoritative and dirty so a later flush retries. The
+// caller holds the snapshot mutation lock (taken before m.mu) and m.mu.
+func (m *SourceAlertManager) persistScopeLocked(scope *sourceAlertScope, withConfig bool) error {
 	if withConfig {
 		credentials := sourceAlertCredentialsDocument{SchemaVersion: sourceAlertSchemaVersion, Project: scope.project, Environment: scope.environment, Targets: map[string]sourceAlertTarget{}}
 		for id, target := range scope.targets {
@@ -1765,15 +1806,6 @@ func (m *SourceAlertManager) persistScopeLocked(ctx context.Context, scope *sour
 		return m.writeLedgerUnlocked()
 	}
 	return nil
-}
-
-func (m *SourceAlertManager) persistLedgerLocked(ctx context.Context) error {
-	unlock, err := recovery.AcquireMutationLockContext(ctx, m.dataDir)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	return m.writeLedgerUnlocked()
 }
 
 func (m *SourceAlertManager) writeLedgerUnlocked() error {
