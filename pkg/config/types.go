@@ -178,22 +178,32 @@ type ProjectConfig struct {
 	Version string `yaml:"version" json:"version"`
 }
 
-// DeploymentConfig defines deployment optimization settings
+// DeploymentConfig defines deployment settings.
 type DeploymentConfig struct {
-	Strategy string          `yaml:"strategy,omitempty" json:"strategy,omitempty"` // "parallel" or "sequential" (default: sequential)
+	// Deprecated: deployment.strategy has no effect. Services deploy
+	// sequentially in dependency order. It is kept so existing configs decode
+	// and is reported by ValidationWarnings until DeprecatedKeysRemovalRelease.
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	// Deprecated: deployment.parallel has no effect; see Strategy.
 	Parallel *ParallelConfig `yaml:"parallel,omitempty" json:"parallel,omitempty"`
-	Cache    *CacheConfig    `yaml:"cache,omitempty" json:"cache,omitempty"`
-	Build    *BuildConfig    `yaml:"build,omitempty" json:"build,omitempty"`
+	// Deprecated: deployment.cache has no effect. Build cache is managed by
+	// Docker (tako cleanup --docker-cache, takod --build-cache-keep-storage).
+	Cache *CacheConfig `yaml:"cache,omitempty" json:"cache,omitempty"`
+	Build *BuildConfig `yaml:"build,omitempty" json:"build,omitempty"`
 }
 
-// ParallelConfig defines parallel deployment settings
+// ParallelConfig is the shape of the deprecated deployment.parallel key.
+//
+// Deprecated: no code reads these settings.
 type ParallelConfig struct {
 	MaxConcurrentBuilds  int    `yaml:"maxConcurrentBuilds,omitempty" json:"maxConcurrentBuilds,omitempty"`   // Default: 4
 	MaxConcurrentDeploys int    `yaml:"maxConcurrentDeploys,omitempty" json:"maxConcurrentDeploys,omitempty"` // Default: 4
 	Strategy             string `yaml:"strategy,omitempty" json:"strategy,omitempty"`                         // "dependency-aware" (default), "resource-aware", "round-robin"
 }
 
-// CacheConfig defines build caching settings
+// CacheConfig is the shape of the deprecated deployment.cache key.
+//
+// Deprecated: no code reads these settings.
 type CacheConfig struct {
 	Enabled   bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`     // Enable build caching (default: true)
 	Type      string `yaml:"type,omitempty" json:"type,omitempty"`           // "local" (default), "registry"
@@ -542,7 +552,8 @@ type ProxyConfig struct {
 	CDN string `yaml:"cdn,omitempty" json:"cdn,omitempty"`
 
 	// RedirectFrom specifies domains that should redirect to the primary Domain
-	// These domains will get their own TLS certificates and 301 redirect to Domain
+	// These domains will get their own TLS certificates and a 308 permanent redirect
+	// to Domain that preserves the request path and method.
 	// Example: ["www.example.com", "old.example.com"] -> redirects to "example.com"
 	RedirectFrom []string `yaml:"redirectFrom,omitempty" json:"redirectFrom,omitempty"`
 
@@ -745,12 +756,16 @@ type MonitoringConfig struct {
 
 // EnvironmentConfig defines an environment (production, staging, etc.)
 type EnvironmentConfig struct {
-	Servers        []string                 `yaml:"servers" json:"servers"`                                   // List of server names to use
-	ServerSelector *ServerSelector          `yaml:"serverSelector,omitempty" json:"serverSelector,omitempty"` // Label-based server selection
-	Proxy          *EnvironmentProxyConfig  `yaml:"proxy,omitempty" json:"proxy,omitempty"`                   // Environment-level proxy placement
-	Labels         map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`                 // Environment labels for nodes
-	Services       map[string]ServiceConfig `yaml:"services" json:"services"`                                 // Services to deploy in this environment
-	SecretSources  []SecretSource           `yaml:"secretSources,omitempty" json:"secretSources,omitempty"`   // Environment-specific external secret stores
+	Servers        []string                `yaml:"servers" json:"servers"`                                   // List of server names to use
+	ServerSelector *ServerSelector         `yaml:"serverSelector,omitempty" json:"serverSelector,omitempty"` // Label-based server selection
+	Proxy          *EnvironmentProxyConfig `yaml:"proxy,omitempty" json:"proxy,omitempty"`                   // Environment-level proxy placement
+	// Deprecated: environments.<env>.labels has no effect. Set
+	// servers.<name>.labels and select them with serverSelector.labels or
+	// placement constraints. Reported by ValidationWarnings until
+	// DeprecatedKeysRemovalRelease.
+	Labels        map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Services      map[string]ServiceConfig `yaml:"services" json:"services"`                               // Services to deploy in this environment
+	SecretSources []SecretSource           `yaml:"secretSources,omitempty" json:"secretSources,omitempty"` // Environment-specific external secret stores
 }
 
 // EnvironmentProxyConfig controls where environment-level proxy routes are
@@ -1375,43 +1390,6 @@ func SaveConfig(configPath string, cfg *Config) error {
 	}
 
 	return nil
-}
-
-// GetDeploymentStrategy returns the deployment strategy (parallel or sequential)
-func (c *Config) GetDeploymentStrategy() string {
-	if c.Deployment != nil && c.Deployment.Strategy != "" {
-		return c.Deployment.Strategy
-	}
-	return "parallel" // Default to parallel deployment
-}
-
-// IsParallelDeployment returns true if parallel deployment is enabled
-func (c *Config) IsParallelDeployment() bool {
-	return c.GetDeploymentStrategy() == "parallel"
-}
-
-// GetMaxConcurrentBuilds returns the max concurrent builds configuration
-func (c *Config) GetMaxConcurrentBuilds() int {
-	if c.Deployment != nil && c.Deployment.Parallel != nil && c.Deployment.Parallel.MaxConcurrentBuilds > 0 {
-		return c.Deployment.Parallel.MaxConcurrentBuilds
-	}
-	return 4 // Default
-}
-
-// GetMaxConcurrentDeploys returns the max concurrent deploys configuration
-func (c *Config) GetMaxConcurrentDeploys() int {
-	if c.Deployment != nil && c.Deployment.Parallel != nil && c.Deployment.Parallel.MaxConcurrentDeploys > 0 {
-		return c.Deployment.Parallel.MaxConcurrentDeploys
-	}
-	return 4 // Default
-}
-
-// IsCacheEnabled returns true if build caching is enabled
-func (c *Config) IsCacheEnabled() bool {
-	if c.Deployment != nil && c.Deployment.Cache != nil {
-		return c.Deployment.Cache.Enabled
-	}
-	return true // Default to enabled
 }
 
 // IsNFSVolume checks if a volume spec uses the removed nfs: prefix.

@@ -218,6 +218,70 @@ environments:
 	}
 }
 
+func TestRunValidateMachineOutputDeprecatedKeyWarning(t *testing.T) {
+	root := switchToTempDir(t)
+	sshKey := filepath.Join(root, "id_ed25519")
+	if err := os.WriteFile(sshKey, []byte("test-key"), 0600); err != nil {
+		t.Fatalf("failed to write ssh key fixture: %v", err)
+	}
+	configData := []byte(`project:
+  name: demo
+  version: 1.0.0
+deployment:
+  cache:
+    enabled: true
+servers:
+  node-a:
+    host: 203.0.113.10
+    user: deploy
+    sshKey: ` + sshKey + `
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+`)
+	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), configData, 0600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	resetValidateGlobals(t)
+	restoreOutput := outputFormatFlag
+	outputFormatFlag = outputFormatJSON
+	t.Cleanup(func() { outputFormatFlag = restoreOutput })
+
+	cmd := &cobra.Command{}
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = runValidate(cmd, nil)
+	})
+	if runErr != nil {
+		t.Fatalf("runValidate returned error (exit code must stay 0): %v", runErr)
+	}
+	var result engine.ValidateResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\n%s", err, stdout)
+	}
+	if !result.Valid {
+		t.Fatalf("result should be valid: %+v", result)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("findings = %+v, want one deprecation warning", result.Findings)
+	}
+	finding := result.Findings[0]
+	if finding.Severity != engine.ValidateSeverityWarn || finding.Field != "deployment.cache" {
+		t.Fatalf("finding = %+v, want warn on deployment.cache", finding)
+	}
+	if !strings.Contains(finding.Message, "deployment.cache is deprecated") {
+		t.Fatalf("finding message = %q", finding.Message)
+	}
+	if !strings.Contains(stderr.String(), "Warning: deployment.cache is deprecated") {
+		t.Fatalf("stderr = %q, want deprecation warning", stderr.String())
+	}
+}
+
 func resetValidateGlobals(t *testing.T) {
 	t.Helper()
 	oldCfgFile := cfgFile

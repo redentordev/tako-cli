@@ -172,7 +172,9 @@ returns a `ValidateResult` with the resolved `configPath`,
 project/environment, `valid`, `findings` (`severity`, `path`, `field`,
 `message`) for errors and non-fatal validation warnings, and the resolved environment summary (runtime,
 state backend, consistency, mesh, server/service counts) when valid;
-invalid configs exit with code 2 and still emit the document. `tako doctor
+invalid configs exit with code 2 and still emit the document. Deprecated
+config keys appear as `warn` findings with `field` set to the key path
+(for example `deployment.cache`) and do not change the exit code. `tako doctor
 --output json` returns a `DoctorResult` with project/environment,
 `skipRemote`, overall `status` (`ok` or `attention`), pass/warn/fail
 counts, and `checks` (`name`, `status` `pass|warn|fail|skip`, `detail`,
