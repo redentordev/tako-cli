@@ -210,7 +210,7 @@ func TestSecurityHardeningScriptsAreNonInteractive(t *testing.T) {
 }
 
 func TestFail2BanJailConfigIgnoresActiveSSHClientIP(t *testing.T) {
-	config := fail2banSSHDJailConfig("203.0.113.42")
+	config := fail2banSSHDJailConfig("203.0.113.42", nil)
 	for _, required := range []string{
 		"[sshd]",
 		"maxretry = 5",
@@ -224,7 +224,7 @@ func TestFail2BanJailConfigIgnoresActiveSSHClientIP(t *testing.T) {
 }
 
 func TestFail2BanJailConfigRejectsInvalidIgnoreIP(t *testing.T) {
-	config := fail2banSSHDJailConfig("203.0.113.42; bad")
+	config := fail2banSSHDJailConfig("203.0.113.42; bad", nil)
 	if strings.Contains(config, "ignoreip") || strings.Contains(config, "bad") {
 		t.Fatalf("fail2ban config should not include unsafe client IP:\n%s", config)
 	}
