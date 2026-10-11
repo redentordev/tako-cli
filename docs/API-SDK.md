@@ -48,7 +48,11 @@ commands in `cmd/` are thin adapters over this package.
   wraps it into a `DomainsResult`. `DomainStatusSpec.CDN` carries the explicit
   config declaration separately from heuristic `dns: proxied` detection, and
   strict mode returns the typed attention/exit-6 class when that declaration
-  is absent.
+  is absent. Set `DomainStatusOptions.NodeCertificates` (for example
+  `DomainNodeCertificateChecker(cfg, env, factory, specs)`) to let declared-CDN
+  origins that refuse the public TLS probe resolve as active and
+  `OriginRestricted` from the proxy nodes' certificate state; leave it nil to
+  keep the public-probe-only behaviour.
 - Certificate command adapters use the additive `CertsResult` contract. Node
   entries expose certificate domain, source, validity timestamps, and, for
   managed DNS-01 certificates, ownership/DNS-provider/CA-provider/orphan/attempt/cooldown

@@ -1332,9 +1332,10 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			}
 			e.debug(events.TypeWarning, events.PhaseDomains, fmt.Sprintf("\n⚠️  Skipping public domain DNS/TLS checks: %v\n", err))
 		} else if _, err := e.MonitorDomainStatuses(ctx, health.NewHealthChecker(), domainSpecs, DomainStatusOptions{
-			Timeout:         req.DomainTimeout,
-			Strict:          req.StrictDomains,
-			ExpectedTargets: targets,
+			Timeout:          req.DomainTimeout,
+			Strict:           req.StrictDomains,
+			ExpectedTargets:  targets,
+			NodeCertificates: DomainNodeCertificateChecker(cfg, envName, s.runtime, domainSpecs),
 		}); err != nil {
 			return result, err
 		}

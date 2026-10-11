@@ -1057,6 +1057,21 @@ only a suspected-CDN human diagnostic; machine state remains `wrong_dns` /
 `wrong_target` and exits 6. Genuinely unpointed or TLS-pending domains also exit
 6 even with a CDN declaration.
 
+A CDN-fronted origin often accepts port 443 only from the CDN's address ranges
+(for example CloudFront's origin-facing prefix list), so the public TLS probe
+from the deploying machine can never connect. For a `proxy.cdn` domain whose
+DNS routes to the origin but whose public TLS probe fails, Tako asks every
+proxy node's takod for its own certificate state (Tako-pushed, DNS-01, or
+Caddy-managed HTTP-01). When every proxy node holds a currently valid
+certificate covering the hostname, the domain is reported as
+`active (origin-restricted)` on the first check, without waiting for
+`--domain-timeout`, and passes `--strict` and `--strict-domains`. If a node has
+no valid certificate yet the domain stays `pending_tls` and the message names
+the node. Nodes whose takod predates the `proxy.cert-status-v1` capability keep
+the previous behaviour (`pending_tls` until the timeout, with a message that
+explains the CDN restriction and suggests `tako upgrade servers`). Domains
+without `proxy.cdn` never contact the nodes and are unchanged.
+
 #### Cloudflare encryption modes
 
 | Cloudflare mode | Tako support | Certificate at the Tako origin |

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 )
 
 type DomainState string
@@ -52,6 +53,20 @@ type DomainStatus struct {
 	DNSError        string
 	TLSError        string
 	SSL             *SSLInfo
+	// OriginRestricted is set when the public TLS probe could not reach a
+	// CDN-fronted origin but every proxy node holds a valid certificate for
+	// the domain. State is then active.
+	OriginRestricted bool
+	NodeCertificate  *NodeCertificateInfo
+}
+
+// NodeCertificateInfo summarizes the proxy-node certificate evidence used for
+// an origin-restricted domain. It never carries PEM material.
+type NodeCertificateInfo struct {
+	Servers  []string
+	Source   string
+	Issuer   string
+	NotAfter time.Time
 }
 
 func (s DomainStatus) Ready() bool {

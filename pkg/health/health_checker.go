@@ -32,6 +32,19 @@ func NewHealthChecker() *HealthChecker {
 	return checker
 }
 
+// NewHealthCheckerWithProbes builds a checker with injected DNS and TLS
+// probes, for callers that test domain readiness without network access.
+func NewHealthCheckerWithProbes(resolver DNSResolver, sslChecker func(ctx context.Context, domain string) *SSLInfo) *HealthChecker {
+	checker := NewHealthChecker()
+	if resolver != nil {
+		checker.resolver = resolver
+	}
+	if sslChecker != nil {
+		checker.sslChecker = sslChecker
+	}
+	return checker
+}
+
 // MonitorSSLProvisioning monitors SSL certificate provisioning with periodic checks.
 func (h *HealthChecker) MonitorSSLProvisioning(ctx context.Context, serviceName, domain string, maxWait time.Duration) error {
 	fmt.Printf("\n🔐 Monitoring SSL certificate provisioning for %s (%s)...\n", serviceName, domain)
