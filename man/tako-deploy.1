@@ -89,6 +89,10 @@ Use 'tako deploy --service web --archive app.tar.gz' to deploy one service from 
 	Skip post-deploy DNS/TLS checks for public domains
 
 .PP
+\fB--skip-hooks\fP[=false]
+	Skip local lifecycle hooks (including on-failure) for this invocation
+
+.PP
 \fB--source\fP=""
 	Deploy configured project from a non-git source label/path; with --service, override that service build context
 

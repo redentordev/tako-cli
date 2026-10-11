@@ -254,6 +254,14 @@ replicated deployment state with remote operation leases, release hooks
 history, and manual trigger), remote exec in service containers, health checks,
 drift detection, maintenance mode, service log rotation.
 
+**Lifecycle hooks** — committable local scripts in `.tako-hooks/` (or argv
+commands in `hooks.commands`) that run on the operator's machine or CI runner
+before and after `deploy`, `rollback`, `promote`, and `setup`, plus
+`on-failure`. A failing `pre-*` hook aborts before anything changes, hooks get
+a minimal environment with `TAKO_*` context and opt-in `passEnv`, output is
+redacted and streamed as `hook.*` events, and `.ps1`/`.cmd` variants run
+natively on Windows ([hooks guide](./docs/HOOKS.md)).
+
 **Backups** — volume backup/restore across the mesh, per-service `backup:`
 schedules with `retain` days, off-node copies to S3, R2, or any S3-compatible
 store (static keys via `${ENV_VAR}`, or keyless instance-role/default AWS
