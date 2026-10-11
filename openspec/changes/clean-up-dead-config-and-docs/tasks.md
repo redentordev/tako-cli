@@ -45,7 +45,7 @@
 
 ## 8. Integration check
 
-- [ ] 8.1 Run `go build ./...`, `go test ./pkg/config ./cmd ./schema ./docs ./examples ./internal/...` and `bash examples/validate.sh` (on Linux/CI). Verify that all pass, apart from the known Windows-only failures noted in project context.
+- [x] 8.1 Run `go build ./...`, `go test ./pkg/config ./cmd ./schema ./docs ./examples ./internal/...` and `bash examples/validate.sh` (on Linux/CI). Verify that all pass, apart from the known Windows-only failures noted in project context.
 
 ## Workflow follow-up
 
