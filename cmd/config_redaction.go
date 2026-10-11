@@ -72,7 +72,7 @@ func runConfigRedactionReport(out io.Writer, cfg *takoconfig.Config, configPath 
 	fmt.Fprintln(out)
 
 	// Service-scoped entries.
-	localKeys, localFiles := secrets.LocalSecretKeys(".tako", envName)
+	localKeys, localFiles := secrets.LocalSecretKeys(".tako", cfg.SecretsEnvironment(envName))
 	sources := cfg.SecretSourcesFor(envName)
 	envEntries := secrets.ClassifyServiceEnv(services)
 	fileEntries, fileFailures := secrets.ClassifyServiceEnvFiles(services)

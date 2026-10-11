@@ -540,6 +540,60 @@
             "type": "boolean",
             "description": "Template-only environment: usable as an extends target but never validated, deployed, or chosen as the default. Not inherited."
           },
+          "preview": {
+            "type": "object",
+            "description": "Makes this environment a preview base for `tako deploy --preview <name>`. Not inherited. See docs/PREVIEW-ENVIRONMENTS.md.",
+            "additionalProperties": false,
+            "properties": {
+              "domain": {
+                "type": "string",
+                "description": "Host template of every proxied preview service. Placeholders: {name}, {service}, {domain}. Default {name}.{domain}."
+              },
+              "ttl": {
+                "type": "string",
+                "pattern": "^(none|([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+)$",
+                "description": "Preview lifetime after each successful deploy, as a duration such as 72h, or none. Default 168h."
+              },
+              "max": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum number of previews of this base. Default 5."
+              },
+              "maxReplicas": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Replica cap of every non-global preview service. Default 1."
+              },
+              "keepJobs": {
+                "type": "boolean",
+                "description": "Keep kind: job services in previews. Default false."
+              },
+              "env": {
+                "type": "object",
+                "description": "Environment variables merged into every preview service. Placeholders: {name}, {host:<service>}, {url:<service>}.",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "services": {
+                "type": "object",
+                "description": "Per-service preview settings.",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "env": {
+                      "type": "object",
+                      "description": "Environment variables merged into this preview service, with the same placeholders as preview.env.",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
           "servers": {
             "type": "array",
             "description": "Server names for this environment",
