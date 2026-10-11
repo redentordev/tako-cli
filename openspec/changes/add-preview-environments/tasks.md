@@ -51,4 +51,4 @@
 - [x] 5.3 `docs/CI-CD.md`: GitHub Actions example for `pull_request` opened/synchronize (`deploy --preview pr-${{ github.event.number }}`), closed (`preview destroy --yes`), and a nightly `preview prune --yes`
 - [x] 5.4 Add `examples/23-preview-environments` (`tako.yaml`, `.env.example` with placeholders only) and load it in the example-config test
 - [x] 5.5 Regenerate `man/` (`make man`) and `completions/`; verify CI's generated-files check passes
-- [ ] 5.6 Full verification: `go build ./...`, `go vet ./...`, gofmt on Linux, `go test ./...` on Linux (WSL) compared against master with no new failures; `openspec validate add-preview-environments --strict`
+- [x] 5.6 Full verification: `go build ./...`, `go vet ./...`, gofmt on Linux, `go test ./...` on Linux (WSL) compared against master with no new failures; `openspec validate add-preview-environments --strict`
