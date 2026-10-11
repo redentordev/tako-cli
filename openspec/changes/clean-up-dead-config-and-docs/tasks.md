@@ -15,7 +15,7 @@
 
 ## 3. Shared snippet/config test helper
 
-- [ ] 3.1 Create `internal/configtest` with `MergeYAML(base, fragment []byte) ([]byte, error)` following the merge rules in design §3, `SetupEnv(t)` (temp HOME with `.ssh/id_ed25519` plus the placeholder env map and an auto-fill for any other `${VAR}`), and `LoadAndValidate(t, dir, name, content) (*config.Config, []config.ValidationWarning, error)`. Verify with unit tests covering map merge, sequence replacement, the server-replacement rule, and auto-filled vars.
+- [x] 3.1 Create `internal/configtest` with `MergeYAML(base, fragment []byte) ([]byte, error)` following the merge rules in design §3, `SetupEnv(t)` (temp HOME with `.ssh/id_ed25519` plus the placeholder env map and an auto-fill for any other `${VAR}`), and `LoadAndValidate(t, dir, name, content) (*config.Config, []config.ValidationWarning, error)`. Verify with unit tests covering map merge, sequence replacement, the server-replacement rule, and auto-filled vars.
 
 ## 4. `tako init` template and validation
 
