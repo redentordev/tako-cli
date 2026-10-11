@@ -55,6 +55,8 @@ func (n *fakePreviewNode) RequestJSONWithTimeout(_ context.Context, method strin
 	case strings.HasPrefix(endpoint, "/v1/state/previews"):
 		payload, _ := json.Marshal(takod.PreviewListResponse{Project: "demo", Previews: n.records})
 		return string(payload), nil
+	case method == "DELETE" && strings.HasPrefix(endpoint, "/v1/mesh/peer-sets/"):
+		return `{}`, nil
 	case endpoint == "/v1/cleanup":
 		if n.failCleanup != nil {
 			return "", n.failCleanup
@@ -338,6 +340,37 @@ func TestDestroyPreviewSendsOneGuardedTeardownPerServer(t *testing.T) {
 	}
 	if got := len(fleet.nodes["a"].cleanupRequests()); got != 1 {
 		t.Fatalf("not_found destroy sent a teardown (%d requests)", got)
+	}
+}
+
+func TestDestroyPreviewRemovesPreviewMeshPeerSet(t *testing.T) {
+	record := previewRecord("pr-42", "preview", []string{"a", "legacy"}, time.Now(), nil)
+	meshCapabilities := []string{takod.CapabilityPreviewLifecycleV1, takod.CapabilityMeshPeerSetsV1}
+	fleet := &fakePreviewFleet{nodes: map[string]*fakePreviewNode{
+		"a":      {capabilities: meshCapabilities, records: []takod.PreviewRecord{record}},
+		"legacy": {capabilities: previewCapabilities},
+	}}
+	e, _ := newPreviewTestEngine(t)
+	fleet.install(e)
+	if _, err := e.DestroyPreview(context.Background(), PreviewDestroyRequest{Config: previewTestConfig("a", "legacy"), Name: "pr-42"}); err != nil {
+		t.Fatalf("DestroyPreview: %v", err)
+	}
+	deletes := func(node *fakePreviewNode) []string {
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		var out []string
+		for _, request := range node.requests {
+			if request.method == "DELETE" {
+				out = append(out, request.endpoint)
+			}
+		}
+		return out
+	}
+	if got := deletes(fleet.nodes["a"]); len(got) != 1 || got[0] != "/v1/mesh/peer-sets/demo/preview-pr-42" {
+		t.Fatalf("a: peer set deletes = %v, want the preview's own set", got)
+	}
+	if got := deletes(fleet.nodes["legacy"]); len(got) != 0 {
+		t.Fatalf("legacy node without peer sets got deletes %v", got)
 	}
 }
 

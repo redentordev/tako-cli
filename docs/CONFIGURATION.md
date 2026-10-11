@@ -404,6 +404,35 @@ environments:
           email: admin@example.com
 ```
 
+### Environments on separate servers
+
+Several environments can live in one `tako.yaml` with their own servers. An
+operation on one environment leases, builds on, and contacts only that
+environment's servers, so an unreachable production host never blocks
+`tako deploy -e preview`. Builds and retained-image reuse also stay inside the
+environment: a staging build never runs on a production server.
+
+### Troubleshooting: `failed to acquire remote deploy leases: failed to connect to lease node`
+
+A deploy leases every server of the selected environment, plus any configured
+server that still runs the environment's previous assignments (for example a
+server you just removed from `environments.<env>.servers`). The error names the
+node and, for such a former member, says why it is in scope:
+
+```text
+failed to connect to lease node old-1 (node old-1 holds prior desired assignments for environment preview)
+```
+
+- If the node is a member of the environment, make it reachable and retry;
+  deploys never skip unreachable environment members.
+- If it is a former member that still runs the environment's containers,
+  make it reachable so the deploy can stop them. If the server was destroyed,
+  run `tako state forget-node old-1 --yes -e preview` to drop it from the
+  environment's replicated state.
+- If its host comes from a variable that is not exported, environment scoping
+  omits the server and the deploy exits with code 2 before taking any lease,
+  naming the server and the variable. Export the variable and retry.
+
 ## Environment Inheritance And Shared Fragments
 
 Environments that differ only in a domain, a replica count, or a server list
@@ -1422,7 +1451,12 @@ tako domains hosts -e production --address mesh
 ```
 
 `--address auto` is the default: it uses `servers.<name>.privateHost` when set
-and falls back to the deterministic Tako mesh IP for the proxy node.
+and otherwise the proxy node's recorded Tako mesh address. Mesh addresses are
+read from each proxy node's takod over SSH (`GET /v1/status`), so `--address
+mesh` (and `auto` without `privateHost`) needs SSH access to the proxy nodes
+and fails when a node is unreachable or has never been deployed. Use
+`--address private` or `--address ssh` to print entries without contacting
+nodes.
 
 ## Shared Nodes
 
@@ -1452,6 +1486,24 @@ wiping the whole cache; takod also prunes Docker builder cache on a daily
 background interval using that same budget. Override explicit cleanup with
 `--docker-cache-keep-storage <size>`. Dangling image cleanup only runs during
 deploy cleanup or when `tako cleanup --docker-cache` is explicitly requested.
+
+Mesh on shared nodes: a shared node has one WireGuard interface, and its
+takod (capability `mesh.peer-sets-v1`) keeps one peer set per app/stage and
+configures the interface from the union of all sets. Deploying one app/stage
+never removes the peers another app/stage contributed, and `tako destroy`
+removes only the destroyed app/stage's set. Nodes of different environments
+that only share a server do not peer with each other. After removing a server
+from an environment's `servers` list, run `tako mesh prune -e <env>` to
+delete the set that environment left on it.
+
+Multi-node environments that share a server must use compatible `mesh:`
+blocks: the same `networkCIDR`, `subnetBits`, and `listenPort`, and the same
+address for the shared server. A conflicting deploy fails before anything on
+the node changes and names both app/stages. Single-node environments add no
+peers, so their `mesh:` blocks may differ. An older takod without peer sets
+still keeps one peer list that the last deploy replaces; deploys warn about
+such nodes (`server X is shared with app/stage`) and
+`tako upgrade servers --server X` upgrades them.
 
 By default every selected environment node with proxy routes reconciles the
 shared proxy for that app/stage. Built-in ACME TLS for public routes currently

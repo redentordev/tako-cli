@@ -363,7 +363,16 @@ func TestWorkloadMutationWorkflowsUseGlobalServiceCapabilityPreflight(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(source), "preflightAndSetupTakodRuntime(") {
+			// run is verify-only: it preflights the same capabilities but
+			// never prepares the mesh.
+			want := "preflightAndSetupTakodRuntime("
+			if file == "run.go" {
+				want = "preflightAndVerifyTakodRuntime("
+				if strings.Contains(string(source), "preflightAndSetupTakodRuntime(") || strings.Contains(string(source), "SetupTakodRuntime()") {
+					t.Fatal("run.go must not prepare node metadata or mesh config")
+				}
+			}
+			if !strings.Contains(string(source), want) {
 				t.Fatalf("%s does not globally preflight service capabilities before runtime setup", file)
 			}
 		})
