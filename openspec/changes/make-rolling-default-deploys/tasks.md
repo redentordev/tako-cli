@@ -2,12 +2,12 @@
 
 ## 1. Config: default selection and rollbackOnFailure
 
-- [ ] 1.1 Add `DeployConfig.StrategyDefaulted bool` (`yaml:"-" json:"-"`) and change `RollbackOnFailure` to `*bool` in `pkg/config/types.go`. Fix the compile fallout (`validator.go:1805` → `!= nil`). Verify with `go build ./...`.
-- [ ] 1.2 Implement `config.DefaultDeployStrategy(*ServiceConfig)` per design D1, including the trial rolling validation on a copy, and call it at `validator.go:997`. Verify with a table test in `pkg/config/types_test.go` covering: stateless proxied, internal port-only, persistent, `ports`, `volumes`, portless, `maxSurge` < and ≥ replicas, `maxUnavailable`, `gracePeriod`, `promotion`, `smokeTest`, invalid `readiness` (expect recreate and no error), kind job/run.
-- [ ] 1.3 Add a regression test that loads every `examples/**/tako.yaml` and the existing config fixtures and asserts that validation still succeeds. This is the "validates today" guarantee. Verify with `go test ./pkg/config/...`.
-- [ ] 1.4 Update the existing expectations that assume a recreate default (`pkg/config/types_test.go:913`, `cmd/config_test.go:79`) and confirm that `tako config` prints `deploy.strategy: rolling (default)` for an eligible service. Verify with `go test ./cmd/ -run Config`.
-- [ ] 1.5 Make `deployplan.EffectiveDeployStrategy` delegate to `DefaultDeployStrategy` for empty strategies. Update `pkg/deployplan/revision_identity_test.go:25-32`. Verify with `go test ./pkg/deployplan/...`.
-- [ ] 1.6 Update `schema/tako.schema.json`: the deploy description (line 1096) states the new default rules, `rollbackOnFailure` gets a description and `"default": true`, and the `ports` description (line 585) mentions the implicit recreate. Verify with `go test ./schema/...`.
+- [x] 1.1 Add `DeployConfig.StrategyDefaulted bool` (`yaml:"-" json:"-"`) and change `RollbackOnFailure` to `*bool` in `pkg/config/types.go`. Fix the compile fallout (`validator.go:1805` → `!= nil`). Verify with `go build ./...`.
+- [x] 1.2 Implement `config.DefaultDeployStrategy(*ServiceConfig)` per design D1, including the trial rolling validation on a copy, and call it at `validator.go:997`. Verify with a table test in `pkg/config/types_test.go` covering: stateless proxied, internal port-only, persistent, `ports`, `volumes`, portless, `maxSurge` < and ≥ replicas, `maxUnavailable`, `gracePeriod`, `promotion`, `smokeTest`, invalid `readiness` (expect recreate and no error), kind job/run.
+- [x] 1.3 Add a regression test that loads every `examples/**/tako.yaml` and the existing config fixtures and asserts that validation still succeeds. This is the "validates today" guarantee. Verify with `go test ./pkg/config/...`.
+- [x] 1.4 Update the existing expectations that assume a recreate default (`pkg/config/types_test.go:913`, `cmd/config_test.go:79`) and confirm that `tako config` prints `deploy.strategy: rolling (default)` for an eligible service. Verify with `go test ./cmd/ -run Config`.
+- [x] 1.5 Make `deployplan.EffectiveDeployStrategy` delegate to `DefaultDeployStrategy` for empty strategies. Update `pkg/deployplan/revision_identity_test.go:25-32`. Verify with `go test ./pkg/deployplan/...`.
+- [x] 1.6 Update `schema/tako.schema.json`: the deploy description (line 1096) states the new default rules, `rollbackOnFailure` gets a description and `"default": true`, and the `ports` description (line 585) mentions the implicit recreate. Verify with `go test ./schema/...`.
 
 ## 2. Readiness gate for defaulted rolling
 

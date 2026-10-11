@@ -76,7 +76,7 @@ environments:
 		"web:",
 		"source: image \"nginx:alpine\" (config)",
 		"replicas: 1 (default)",
-		"deploy.strategy: recreate (default)",
+		"deploy.strategy: rolling (default)",
 		"proxy.domain: app.example.com (config)",
 		"proxy.cdn: cloudflare (config)",
 	} {
