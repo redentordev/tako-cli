@@ -802,8 +802,9 @@ State events of type `heal.restarted`, `heal.started`, `heal.failed`,
 `heal.circuit_open` and `heal.circuit_closed` are appended to the
 environment event log with names and reason codes only.
 
-A lease held with operation `self-heal` makes CLI lease acquisition wait up
-to 60s before failing with exit code 3.
+A lease held with operation `self-heal` makes CLI lease acquisition wait
+until that lease expires (at most 5m) before failing with exit code 3. CLIs
+released before self-healing do not wait and fail with exit code 3 at once.
 
 `tako stats --output json`
 (point-in-time; `--live` is rejected

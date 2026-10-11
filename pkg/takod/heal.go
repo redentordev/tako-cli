@@ -39,6 +39,11 @@ const (
 	healLeaseOperation   = "self-heal"
 	healDockerTimeout    = 3 * time.Minute
 	healJournalStatus    = 20
+	// healRestartStopMax caps docker restart -t (the stop phase): the
+	// service's stopGracePeriod, at most 30s, so a restart ends well inside
+	// healDockerTimeout. healRestartStopDefault is Docker's own default.
+	healRestartStopMax     = 30 * time.Second
+	healRestartStopDefault = 10 * time.Second
 
 	healReasonGaveUp       = "gave_up"
 	healReasonCircuitOpen  = "circuit_open"
@@ -55,6 +60,15 @@ const (
 	healReasonReplicasUnhealthy = "replicas_unhealthy"
 	healEventReplicasUnhealthy  = "heal_replicas_unhealthy"
 	healEventReplicasRecovered  = "heal_replicas_recovered"
+)
+
+// healSettleTimeout bounds how long the executor keeps polling a container
+// after a docker call that timed out; healSettlePoll is the poll interval.
+// Together with healDockerTimeout they stay inside healLeaseTTL. Tests
+// shorten them.
+var (
+	healSettleTimeout = 60 * time.Second
+	healSettlePoll    = 2 * time.Second
 )
 
 // healAlertSourceSpec registers kind selfheal (monitoring design D13).
@@ -95,7 +109,10 @@ type healDesiredService struct {
 	Replicas     int    `json:"replicas"`
 	Port         int    `json:"port"`
 	Persistent   bool   `json:"persistent"`
-	Assignments  []struct {
+	// StopGracePeriod bounds docker restart -t (capped, see
+	// healRestartStopTimeout).
+	StopGracePeriod string `json:"stopGracePeriod"`
+	Assignments     []struct {
 		Slot   int    `json:"slot"`
 		NodeID string `json:"nodeId"`
 		Node   string `json:"node"`

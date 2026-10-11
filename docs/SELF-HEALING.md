@@ -129,14 +129,25 @@ containers, a backup runs in the environment, a `<service>-maintenance`
 container runs, its record is missing, converging or stale, or it gave up.
 
 Every check is repeated right before acting, under the environment lease
-(operation `self-heal`, held only for the one docker call), the node's
-maintenance barrier and mutation lock, and, on enrolled nodes, the worker
-fence admission lock. A fresh `docker inspect` must confirm the container's
-ID, name, revision, restart policy and condition. A path or TCP restart
-re-probes once more.
+(operation `self-heal`, TTL 5m, held only for the one docker call), the
+node's maintenance barrier and mutation lock, and, on enrolled nodes, the
+worker fence admission lock. A fresh `docker inspect` must confirm the
+container's ID, name, revision, restart policy and condition. A path or TCP
+restart re-probes once more.
 
-A CLI operation that finds a `self-heal` lease waits up to 60s for it
-before reporting the lock (exit 3).
+`docker restart` runs with `-t` set to the service's `stopGracePeriod`
+(Docker's 10s when unset), capped at 30s, so the stop phase stays short.
+The docker call itself is bounded by 3m; if it times out, takod keeps the
+lease until a fresh inspect shows the container running again (up to 60s
+more), and otherwise leaves the lease to expire at its TTL rather than
+letting a deploy race a daemon that is still working.
+
+A CLI operation that finds a `self-heal` lease waits for it until the lease
+expires (at most 5m) before reporting the lock (exit 3).
+
+**Upgrading.** CLIs older than this release do not wait on `self-heal`
+leases: a deploy that meets one fails at once with the lock (exit 3) and can
+simply be retried. Upgrade the CLI together with `tako upgrade servers`.
 
 ## Limits
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,8 +47,10 @@ type healExecutor struct {
 	// returns a skip reason when a worker fence is active.
 	fence func() (func(), string)
 	// inspect, act and backupRunning call docker; tests replace them.
-	inspect       func(ctx context.Context, id string) (*healInspection, error)
-	act           func(ctx context.Context, action, id string) error
+	inspect func(ctx context.Context, id string) (*healInspection, error)
+	// act runs docker restart/start; stopTimeout bounds the stop phase of a
+	// restart (docker restart -t).
+	act           func(ctx context.Context, action, id string, stopTimeout time.Duration) error
 	backupRunning func(ctx context.Context, project, environment string) (bool, error)
 	leaseID       func() string
 }
@@ -162,7 +165,8 @@ func (e *healExecutor) Execute(ctx context.Context, candidate selfheal.Candidate
 	scopeLock.Lock()
 	defer scopeLock.Unlock()
 
-	if !e.stillEligible(ctx, candidate) {
+	service, eligible := e.stillEligible(ctx, candidate)
+	if !eligible {
 		return
 	}
 	inspection, err := e.inspect(ctx, candidate.Container.ID)
@@ -176,19 +180,60 @@ func (e *healExecutor) Execute(ctx context.Context, candidate selfheal.Candidate
 	}
 
 	actionCtx, cancel := context.WithTimeout(ctx, healDockerTimeout)
-	actErr := e.act(actionCtx, candidate.Action, candidate.Container.ID)
+	actErr := e.act(actionCtx, candidate.Action, candidate.Container.ID, healRestartStopTimeout(service.Desired.StopGracePeriod))
+	timedOut := actionCtx.Err() != nil || errors.Is(actErr, context.DeadlineExceeded)
 	cancel()
+	if timedOut && !e.waitSettled(ctx, candidate.Container.ID) {
+		// The docker CLI gave up but the daemon may still be stopping or
+		// starting the container. Keep the lease: it expires at its TTL, and
+		// a deploy waits for it until then.
+		leaseHeld = false
+	}
 	releaseLease()
 	e.record(candidate, actErr)
 }
 
+// healRestartStopTimeout is the docker restart -t value: the service's
+// stopGracePeriod (Docker's 10s default when unset), capped at
+// healRestartStopMax so a restart always finishes well inside
+// healDockerTimeout and the self-heal lease a deploy waits for stays short.
+func healRestartStopTimeout(stopGracePeriod string) time.Duration {
+	timeout := parseHealDuration(stopGracePeriod, healRestartStopDefault)
+	if timeout <= 0 {
+		timeout = healRestartStopDefault
+	}
+	if timeout > healRestartStopMax {
+		timeout = healRestartStopMax
+	}
+	return timeout.Truncate(time.Second)
+}
+
+// waitSettled polls a fresh inspect until the container runs again (Docker
+// finished the action) or healSettleTimeout passes. It reports whether the
+// container settled.
+func (e *healExecutor) waitSettled(ctx context.Context, id string) bool {
+	settleCtx, cancel := context.WithTimeout(ctx, healSettleTimeout)
+	defer cancel()
+	for {
+		inspection, err := e.inspect(settleCtx, id)
+		if err == nil && inspection != nil && inspection.Status == "running" && !inspection.Restarting {
+			return true
+		}
+		select {
+		case <-settleCtx.Done():
+			return false
+		case <-time.After(healSettlePoll):
+		}
+	}
+}
+
 // stillEligible re-reads desired state, the record, the control state and
-// the gates under the locks.
-func (e *healExecutor) stillEligible(ctx context.Context, candidate selfheal.Candidate) bool {
+// the gates under the locks. It returns the service as desired now.
+func (e *healExecutor) stillEligible(ctx context.Context, candidate selfheal.Candidate) (*healService, bool) {
 	h := e.h
 	now := h.now()
 	if h.nodeGate(now) != "" || h.scopeSkipExcept(candidate.Project, candidate.Environment, now) != "" {
-		return false
+		return nil, false
 	}
 	scopes := h.loadScopes()
 	var service *healService
@@ -204,15 +249,15 @@ func (e *healExecutor) stillEligible(ctx context.Context, candidate selfheal.Can
 		}
 	}
 	if service == nil {
-		return false
+		return nil, false
 	}
 	samples, _ := h.samples()
 	if h.serviceSkip(candidate.Project, candidate.Environment, *service, samples) != "" {
-		return false
+		return nil, false
 	}
 	record, err := selfheal.ReadRecord(h.dataDir, candidate.Project, candidate.Environment, candidate.Service)
 	if err != nil || !record.Valid(service.Spec.Image) || record.Revision != candidate.Revision || len(record.Containers) != service.Spec.LocalReplicas {
-		return false
+		return nil, false
 	}
 	found := false
 	for _, container := range record.Containers {
@@ -221,30 +266,30 @@ func (e *healExecutor) stillEligible(ctx context.Context, candidate selfheal.Can
 		}
 	}
 	if !found {
-		return false
+		return nil, false
 	}
 	h.controlMu.Lock()
 	control, controlErr := selfheal.ReadControl(h.dataDir, candidate.Project, candidate.Environment)
 	node, nodeErr := selfheal.ReadNodeState(h.dataDir)
 	h.controlMu.Unlock()
 	if controlErr != nil || nodeErr != nil || node.BreakerOpen(now) {
-		return false
+		return nil, false
 	}
 	if _, paused := control.PauseActive(candidate.Service, now); paused {
-		return false
+		return nil, false
 	}
 	if entry := control.Lookup(candidate.Service); entry != nil {
 		if entry.GaveUp {
-			return false
+			return nil, false
 		}
 		if container := entry.Containers[candidate.Container.ID]; container != nil && now.Before(container.CooldownUntil) {
-			return false
+			return nil, false
 		}
 	}
 	if busy, err := e.backupRunning(ctx, candidate.Project, candidate.Environment); err != nil || busy {
-		return false
+		return nil, false
 	}
-	return true
+	return service, true
 }
 
 // confirm checks one fresh inspect against the candidate: same container
@@ -418,16 +463,26 @@ func inspectHealContainer(ctx context.Context, id string) (*healInspection, erro
 	return inspection, nil
 }
 
-func dockerHealAction(ctx context.Context, action, id string) error {
+func dockerHealAction(ctx context.Context, action, id string, stopTimeout time.Duration) error {
 	switch action {
 	case selfheal.ActionRestart:
-		_, err := runDocker(ctx, "restart", id)
+		_, err := runDocker(ctx, dockerHealRestartArgs(id, stopTimeout)...)
 		return err
 	case selfheal.ActionStart:
 		_, err := runDocker(ctx, "start", id)
 		return err
 	}
 	return fmt.Errorf("unknown self-healing action")
+}
+
+// dockerHealRestartArgs passes an explicit -t, so the stop phase never
+// waits longer than healRestartStopMax whatever the container's own stop
+// timeout is.
+func dockerHealRestartArgs(id string, stopTimeout time.Duration) []string {
+	if stopTimeout <= 0 || stopTimeout > healRestartStopMax {
+		stopTimeout = healRestartStopMax
+	}
+	return []string{"restart", "-t", strconv.Itoa(int(stopTimeout / time.Second)), id}
 }
 
 func dockerBackupRunning(ctx context.Context, project, environment string) (bool, error) {

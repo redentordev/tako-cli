@@ -317,6 +317,38 @@ func TestLeaseAcquireGivesUpOnLongSelfHealHolder(t *testing.T) {
 	}
 }
 
+// TestSelfHealWaitFollowsHolderExpiry: the wait lasts until the self-heal
+// lease expires (a docker restart that outlived its call keeps the lease),
+// capped at selfHealLeaseWait, instead of a fixed 60s.
+func TestSelfHealWaitFollowsHolderExpiry(t *testing.T) {
+	started := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	if selfHealLeaseWait < 5*time.Minute {
+		t.Fatalf("self-heal wait cap = %s, want at least takod's 5m self-heal lease TTL", selfHealLeaseWait)
+	}
+	expires := started.Add(4 * time.Minute)
+	if got := selfHealWaitDeadline(started, expires); !got.Equal(expires.Add(selfHealLeaseRetry)) {
+		t.Fatalf("deadline = %s, want the holder expiry plus one retry", got.Sub(started))
+	}
+	if got := selfHealWaitDeadline(started, started.Add(time.Hour)); !got.Equal(started.Add(selfHealLeaseWait)) {
+		t.Fatalf("deadline = %s, want the cap", got.Sub(started))
+	}
+	if got := selfHealWaitDeadline(started, time.Time{}); !got.Equal(started.Add(selfHealLeaseWait)) {
+		t.Fatalf("deadline without expiry = %s, want the cap", got.Sub(started))
+	}
+}
+
+func TestLeaseAcquireStopsWaitingWhenSelfHealHolderExpires(t *testing.T) {
+	shortenSelfHealLeaseWait(t, time.Minute)
+	expiring := strings.Replace(selfHealHeldOutput, "2099-01-01T00:00:00Z", time.Now().Add(50*time.Millisecond).UTC().Format(time.RFC3339Nano), 1)
+	client := &fakeStateManagerExecutor{outputs: []string{expiring}}
+	manager := &StateManager{client: client, socket: "/run/tako/takod.sock", projectName: "demo", environment: "production", server: "node-a"}
+	started := time.Now()
+	_, err := manager.AcquireControllerLeaseContext(context.Background(), "deploy", "production", time.Minute, nil)
+	if err == nil || time.Since(started) > 10*time.Second {
+		t.Fatalf("error = %v after %s, want a lock error soon after the holder expired", err, time.Since(started))
+	}
+}
+
 func TestLeaseAcquireDoesNotWaitForOtherHolders(t *testing.T) {
 	shortenSelfHealLeaseWait(t, time.Second)
 	client := &fakeStateManagerExecutor{outputs: []string{deployHeldOutput, acquiredOutput}}

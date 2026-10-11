@@ -27,8 +27,10 @@ type healFixture struct {
 	samples map[string]ContainerSample
 	acts    []string
 	actErr  error
-	onAct   func()
-	probe   selfheal.ProbeResult
+	// stopTimeouts are the docker restart -t values passed to act.
+	stopTimeouts []time.Duration
+	onAct        func()
+	probe        selfheal.ProbeResult
 }
 
 var (
@@ -70,13 +72,14 @@ func newHealFixture(t *testing.T) *healFixture {
 			OOMKilled: sample.OOMKilled, ExitCode: sample.ExitCode, Health: sample.Health, RestartPolicy: sample.RestartPolicy,
 			Revision: sample.Revision, Active: sample.Active, Image: sample.Image}, nil
 	}
-	m.executor.act = func(_ context.Context, action, id string) error {
+	m.executor.act = func(_ context.Context, action, id string, stopTimeout time.Duration) error {
 		if f.onAct != nil {
 			f.onAct()
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.acts = append(f.acts, action+" "+id)
+		f.stopTimeouts = append(f.stopTimeouts, stopTimeout)
 		return f.actErr
 	}
 	m.executor.backupRunning = func(context.Context, string, string) (bool, error) { return false, nil }
@@ -230,6 +233,83 @@ func TestHealHoldsSelfHealLeaseOnlyDuringAction(t *testing.T) {
 	after, err := AcquireLease(context.Background(), f.dataDir, LeaseRequest{Project: "demo", Environment: "production", ID: "deploy-1", Operation: "deploy", Who: "cli", TTLSeconds: 600})
 	if err != nil || !after.Acquired {
 		t.Fatalf("self-heal lease not released after the action: %+v %v", after, err)
+	}
+}
+
+func TestHealRestartStopTimeoutIsBounded(t *testing.T) {
+	for value, want := range map[string]time.Duration{"": 10 * time.Second, "15s": 15 * time.Second, "60s": 30 * time.Second, "10m": 30 * time.Second, "bogus": 10 * time.Second} {
+		if got := healRestartStopTimeout(value); got != want {
+			t.Fatalf("healRestartStopTimeout(%q) = %s, want %s", value, got, want)
+		}
+	}
+	if healRestartStopMax >= healDockerTimeout || healDockerTimeout+healSettleTimeout >= healLeaseTTL {
+		t.Fatalf("restart bound %s, docker timeout %s and settle %s must fit the %s lease", healRestartStopMax, healDockerTimeout, healSettleTimeout, healLeaseTTL)
+	}
+	args := dockerHealRestartArgs(healWebID, 15*time.Second)
+	if strings.Join(args, " ") != "restart -t 15 "+healWebID {
+		t.Fatalf("restart args = %v", args)
+	}
+	if args := dockerHealRestartArgs(healWebID, 0); strings.Join(args, " ") != "restart -t 30 "+healWebID {
+		t.Fatalf("unbounded restart args = %v", args)
+	}
+}
+
+func TestHealActionPassesCappedStopGracePeriod(t *testing.T) {
+	f := newHealFixture(t)
+	f.writeDesired(map[string]map[string]any{"web": healTestService("demo/web:1", map[string]any{"stopGracePeriod": "2m"})})
+	f.record("web", healWebID, "demo/web:1", time.Hour)
+	f.sample("web", healWebID, "exited", 1)
+	f.manager.Tick(context.Background())
+	if len(f.stopTimeouts) != 1 || f.stopTimeouts[0] != healRestartStopMax {
+		t.Fatalf("stop timeouts = %v, want the 30s cap", f.stopTimeouts)
+	}
+}
+
+// TestHealTimedOutActionKeepsLeaseUntilSettled: when the docker call times
+// out, the daemon may still be working; the self-heal lease is released
+// only once a fresh inspect shows the container running again, otherwise
+// it is left to expire at its TTL.
+func TestHealTimedOutActionKeepsLeaseUntilSettled(t *testing.T) {
+	oldTimeout, oldPoll := healSettleTimeout, healSettlePoll
+	healSettleTimeout, healSettlePoll = 50*time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() { healSettleTimeout, healSettlePoll = oldTimeout, oldPoll })
+	candidate := selfheal.Candidate{Project: "demo", Environment: "production", Service: "web", Revision: "r1", Action: selfheal.ActionStart,
+		Container: selfheal.RecordContainer{Name: "demo_production_web_1", ID: healWebID}, Reason: selfheal.ReasonExitedNonzero}
+	deployLease := func(f *healFixture) *LeaseResponse {
+		response, err := AcquireLease(context.Background(), f.dataDir, LeaseRequest{Project: "demo", Environment: "production", ID: "deploy-1", Operation: "deploy", Who: "cli", TTLSeconds: 600})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	// Never settles: the lease stays with self-heal.
+	f := newHealFixture(t)
+	f.crashedWeb()
+	f.actErr = context.DeadlineExceeded
+	f.manager.executor.Execute(context.Background(), candidate)
+	if response := deployLease(f); response.Acquired || response.Lease == nil || response.Lease.Operation != healLeaseOperation {
+		t.Fatalf("unsettled action released its lease: %+v", response)
+	}
+	journal, _ := selfheal.ReadJournal(f.dataDir, "demo", "production", 0)
+	if len(journal) != 1 || journal[0].Result != "timeout" {
+		t.Fatalf("journal = %+v", journal)
+	}
+
+	// Settles (Docker finished starting it): the lease is released.
+	f = newHealFixture(t)
+	f.crashedWeb()
+	f.actErr = context.DeadlineExceeded
+	f.onAct = func() {
+		f.mu.Lock()
+		sample := f.samples[healWebID]
+		sample.Status, sample.ExitCode = "running", 0
+		f.samples[healWebID] = sample
+		f.mu.Unlock()
+	}
+	f.manager.executor.Execute(context.Background(), candidate)
+	if response := deployLease(f); !response.Acquired {
+		t.Fatalf("settled action kept its lease: %+v", response)
 	}
 }
 

@@ -61,15 +61,19 @@ func (s *StateManager) AcquireControllerLeaseContext(ctx context.Context, operat
 	if ttl <= 0 {
 		ttl = DefaultLeaseTTL
 	}
-	deadline := time.Now().Add(selfHealLeaseWait)
+	started := time.Now()
 	for {
 		lease, holder, err := s.acquireControllerLeaseOnce(ctx, operation, environment, ttl, targetNodeIDs)
-		if holder == nil || holder.Operation != selfHealLeaseOperation || !time.Now().Add(selfHealLeaseRetry).Before(deadline) {
+		if holder == nil || holder.Operation != selfHealLeaseOperation {
+			return lease, err
+		}
+		if !time.Now().Add(selfHealLeaseRetry).Before(selfHealWaitDeadline(started, holder.ExpiresAt)) {
 			return lease, err
 		}
 		// A node is restarting or starting one container under a short
-		// self-heal lease (released right after the docker call): wait for it
-		// rather than failing the deploy.
+		// self-heal lease (released right after the docker call, or left to
+		// expire when Docker did not settle in time): wait for it rather
+		// than failing the deploy.
 		timer := time.NewTimer(selfHealLeaseRetry)
 		select {
 		case <-ctx.Done():
@@ -84,12 +88,29 @@ func (s *StateManager) AcquireControllerLeaseContext(ctx context.Context, operat
 // holds while it restarts or starts one container.
 const selfHealLeaseOperation = "self-heal"
 
-// selfHealLeaseWait bounds how long a lease acquisition waits for a
-// self-heal holder before reporting the lock; tests shorten it.
+// selfHealLeaseWait caps how long a lease acquisition waits for self-heal
+// holders before reporting the lock; tests shorten it. It equals takod's
+// self-heal lease TTL, so a holder whose node died mid-action has expired
+// by then.
 var (
-	selfHealLeaseWait  = 60 * time.Second
+	selfHealLeaseWait  = 5 * time.Minute
 	selfHealLeaseRetry = 2 * time.Second
 )
+
+// selfHealWaitDeadline is when waiting for a self-heal holder stops: the
+// holder's expiry (plus one retry, so the expired lease is seen gone) but
+// never later than selfHealLeaseWait after the first attempt.
+func selfHealWaitDeadline(started, expiresAt time.Time) time.Time {
+	limit := started.Add(selfHealLeaseWait)
+	if expiresAt.IsZero() {
+		return limit
+	}
+	deadline := expiresAt.Add(selfHealLeaseRetry)
+	if deadline.After(limit) {
+		return limit
+	}
+	return deadline
+}
 
 // acquireControllerLeaseOnce makes one acquisition attempt with a fresh
 // request identity. On a held lease it also returns the holder.
