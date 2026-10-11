@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
@@ -32,23 +33,45 @@ type CleanupRequest struct {
 	BuildCacheKeepStorage  string   `json:"buildCacheKeepStorage,omitempty"`
 	CleanUnusedVolumes     bool     `json:"cleanUnusedVolumes,omitempty"`
 	SecureLogPermissions   bool     `json:"secureLogPermissions,omitempty"`
+	// RemovePreviewData tears down one preview environment in a fixed order
+	// behind the preview guard; see cleanupPreviewEnvironment. It requires
+	// RemoveContainers, RemoveNetworks and RemoveTakodState and rejects image,
+	// deploy-file and maintenance cleanup.
+	RemovePreviewData bool `json:"removePreviewData,omitempty"`
+	// PreviewUpdatedAt, with RemovePreviewData, is the updatedAt of the
+	// preview record the caller read under the preview's lease. The guard
+	// refuses the teardown when the node's record differs.
+	PreviewUpdatedAt *time.Time `json:"previewUpdatedAt,omitempty"`
+	// DataDir is the takod data directory. The server sets it; it is never
+	// read from the request body.
+	DataDir string `json:"-"`
+	// BeforeRecordRemoval, with RemovePreviewData, runs after the preview's
+	// runtime, data and state are gone and before its record is deleted.
+	// The server sets it to remove scheduler, alert and port state; it is
+	// never read from the request body.
+	BeforeRecordRemoval func(ctx context.Context, response *CleanupResponse) error `json:"-"`
 }
 
 type CleanupResponse struct {
-	Project               string   `json:"project"`
-	Environment           string   `json:"environment,omitempty"`
-	ContainersRemoved     int      `json:"containersRemoved,omitempty"`
-	ImagesRemoved         int      `json:"imagesRemoved,omitempty"`
-	NetworksRemoved       int      `json:"networksRemoved,omitempty"`
-	JobsRemoved           int      `json:"jobsRemoved,omitempty"`
-	ProxyFilesRemoved     int      `json:"proxyFilesRemoved,omitempty"`
-	BuildCacheCleaned     bool     `json:"buildCacheCleaned,omitempty"`
-	UnusedVolumesCleaned  bool     `json:"unusedVolumesCleaned,omitempty"`
-	LogPermissionsSecured bool     `json:"logPermissionsSecured,omitempty"`
-	InitialDiskUsage      string   `json:"initialDiskUsage,omitempty"`
-	FinalDiskUsage        string   `json:"finalDiskUsage,omitempty"`
-	DockerDiskUsage       string   `json:"dockerDiskUsage,omitempty"`
-	Warnings              []string `json:"warnings,omitempty"`
+	Project               string `json:"project"`
+	Environment           string `json:"environment,omitempty"`
+	ContainersRemoved     int    `json:"containersRemoved,omitempty"`
+	ImagesRemoved         int    `json:"imagesRemoved,omitempty"`
+	NetworksRemoved       int    `json:"networksRemoved,omitempty"`
+	JobsRemoved           int    `json:"jobsRemoved,omitempty"`
+	ProxyFilesRemoved     int    `json:"proxyFilesRemoved,omitempty"`
+	BuildCacheCleaned     bool   `json:"buildCacheCleaned,omitempty"`
+	UnusedVolumesCleaned  bool   `json:"unusedVolumesCleaned,omitempty"`
+	LogPermissionsSecured bool   `json:"logPermissionsSecured,omitempty"`
+	InitialDiskUsage      string `json:"initialDiskUsage,omitempty"`
+	FinalDiskUsage        string `json:"finalDiskUsage,omitempty"`
+	DockerDiskUsage       string `json:"dockerDiskUsage,omitempty"`
+	VolumesRemoved        int    `json:"volumesRemoved,omitempty"`
+	PreviewRecordRemoved  bool   `json:"previewRecordRemoved,omitempty"`
+	// PreviewNotFound reports a preview teardown that found neither a
+	// preview record nor labeled volumes and changed nothing.
+	PreviewNotFound bool     `json:"previewNotFound,omitempty"`
+	Warnings        []string `json:"warnings,omitempty"`
 }
 
 const DefaultBuildCacheKeepStorage = "20GB"
@@ -64,9 +87,20 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 
 // CleanupProjectWithDataDir runs cleanup using dataDir as the source of
 // replicated deployment state for image ownership and protection.
+// The server-set req.DataDir is used when dataDir is empty; otherwise
+// dataDir wins, so a preview teardown and image cleanup read the same
+// directory.
 func CleanupProjectWithDataDir(ctx context.Context, dataDir string, req CleanupRequest) (*CleanupResponse, error) {
+	if dataDir == "" {
+		dataDir = req.DataDir
+	} else {
+		req.DataDir = dataDir
+	}
 	if err := validateCleanupRequest(req); err != nil {
 		return nil, err
+	}
+	if req.RemovePreviewData {
+		return cleanupPreviewEnvironment(ctx, req)
 	}
 	response := &CleanupResponse{
 		Project:     req.Project,
@@ -207,7 +241,7 @@ func validateCleanupRequest(req CleanupRequest) error {
 	if req.KeepImages < 0 {
 		return fmt.Errorf("keepImages cannot be negative")
 	}
-	return nil
+	return validatePreviewTeardownRequest(req)
 }
 
 func (req CleanupRequest) includesMaintenanceCleanup() bool {
@@ -264,24 +298,23 @@ func cleanupStoppedContainers(ctx context.Context, project string, environment s
 }
 
 func cleanupNetworks(ctx context.Context, project string, environment string) (int, error) {
-	output, err := runDocker(ctx, "network", "ls", "--format", "{{.Name}}")
-	if err != nil {
-		return 0, fmt.Errorf("failed to list docker networks: %w", err)
-	}
 	var names []string
-	for _, line := range strings.Split(output, "\n") {
-		name := strings.TrimSpace(line)
-		if name == "" {
-			continue
+	if environment != "" {
+		scoped, err := environmentNetworkNames(ctx, project, environment)
+		if err != nil {
+			return 0, err
 		}
-		if environment != "" {
-			if strings.HasPrefix(name, runtimeid.NetworkEnvironmentPrefix(project, environment)) {
+		names = scoped
+	} else {
+		output, err := runDocker(ctx, "network", "ls", "--format", "{{.Name}}")
+		if err != nil {
+			return 0, fmt.Errorf("failed to list docker networks: %w", err)
+		}
+		for _, line := range strings.Split(output, "\n") {
+			name := strings.TrimSpace(line)
+			if name != "" && strings.HasPrefix(name, runtimeid.NetworkProjectPrefix(project)) {
 				names = append(names, name)
 			}
-			continue
-		}
-		if strings.HasPrefix(name, runtimeid.NetworkProjectPrefix(project)) {
-			names = append(names, name)
 		}
 	}
 	removed := 0
@@ -293,6 +326,49 @@ func cleanupNetworks(ctx context.Context, project string, environment string) (i
 		removed++
 	}
 	return removed, nil
+}
+
+// environmentNetworkNames returns the networks owned by exactly one
+// environment. A name prefix is not enough: the prefix of environment
+// "preview" is also a prefix of "preview-pr-42". The main network matches
+// its exact name; an export network must carry the environment's project
+// and environment labels and have exactly the name derived from its
+// service label. Unlabeled legacy export networks are left alone.
+func environmentNetworkNames(ctx context.Context, project string, environment string) ([]string, error) {
+	output, err := runDocker(ctx, "network", "ls", "--format",
+		"{{.Name}}\t{{.Label \"tako.project\"}}\t{{.Label \"tako.environment\"}}\t{{.Label \"tako.service\"}}")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list docker networks: %w", err)
+	}
+	main := runtimeid.NetworkName(project, environment)
+	var names []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Split(strings.TrimRight(line, "\r"), "\t")
+		name := strings.TrimSpace(fields[0])
+		if name == "" || seen[name] {
+			continue
+		}
+		label := func(index int) string {
+			if index >= len(fields) {
+				return ""
+			}
+			value := strings.TrimSpace(fields[index])
+			if value == "<no value>" {
+				return ""
+			}
+			return value
+		}
+		matched := name == main
+		if !matched && label(1) == project && label(2) == environment && label(3) != "" {
+			matched = name == runtimeid.ExportNetworkName(project, environment, label(3))
+		}
+		if matched {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 func disconnectProxyFromNetwork(ctx context.Context, network string) {

@@ -12,6 +12,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/nodeclient"
+	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
@@ -79,7 +80,7 @@ func runCertsPush(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return &engine.InvalidRequestError{Err: fmt.Errorf("failed to read private key file: %w", err)}
 	}
-	cliEngine().RegisterSecret(string(keyPEM))
+	cliEngine().RegisterSecretAs(string(keyPEM), secrets.CertsPrivateKeyLabel())
 	return runCertsCommand(cmd, "push", args[0], &takod.ProxyCertificatePushRequest{Domain: args[0], CertPEM: string(certPEM), KeyPEM: string(keyPEM)})
 }
 

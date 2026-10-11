@@ -88,13 +88,15 @@ func TestBuildStrategyHeaderLineOnlyWhenSomethingIsBuilt(t *testing.T) {
 func TestDeployLeaseTargetsIncludeBuilderButExcludeReadyWorker(t *testing.T) {
 	cfg := &config.Config{
 		Deployment: &config.DeploymentConfig{Build: &config.BuildConfig{Strategy: config.BuildStrategyRemote}},
+		// Roles only exist on enrolled inventory, which keeps cluster-wide
+		// builder candidates.
 		Servers: map[string]config.ServerConfig{
-			"local":   {Transport: "local", Lifecycle: "schedulable", Roles: []string{"worker"}},
-			"ready":   {Lifecycle: "ready", Roles: []string{"worker"}},
-			"builder": {Lifecycle: "schedulable", Roles: []string{"builder"}},
+			"local":   {ClusterID: testClusterID, NodeID: "22222222-2222-4222-8222-222222222222", Transport: "local", Lifecycle: "schedulable", Roles: []string{"worker"}},
+			"ready":   {ClusterID: testClusterID, NodeID: "33333333-3333-4333-8333-333333333333", Lifecycle: "ready", Roles: []string{"worker"}},
+			"builder": {ClusterID: testClusterID, NodeID: "44444444-4444-4444-8444-444444444444", Lifecycle: "schedulable", Roles: []string{"builder"}},
 		},
 	}
-	targets := DeployLeaseTargets(cfg, []string{"local"}, map[string]config.ServiceConfig{"web": {Build: "."}})
+	targets := DeployLeaseTargets(cfg, "production", []string{"local"}, map[string]config.ServiceConfig{"web": {Build: "."}})
 	if got := strings.Join(targets, ","); got != "builder,local" {
 		t.Fatalf("deploy lease targets = %q", got)
 	}
@@ -102,7 +104,7 @@ func TestDeployLeaseTargetsIncludeBuilderButExcludeReadyWorker(t *testing.T) {
 	if err != nil || preferred != "local" {
 		t.Fatalf("preferred runtime server = %q, %v", preferred, err)
 	}
-	sharedTargets := DeployLeaseTargets(cfg, []string{"local"}, map[string]config.ServiceConfig{"web": {ImageFrom: "frontend", SharedBuildHash: "sha256:shared"}})
+	sharedTargets := DeployLeaseTargets(cfg, "production", []string{"local"}, map[string]config.ServiceConfig{"web": {ImageFrom: "frontend", SharedBuildHash: "sha256:shared"}})
 	if got := strings.Join(sharedTargets, ","); got != "builder,local" {
 		t.Fatalf("shared-build deploy lease targets = %q", got)
 	}
@@ -113,7 +115,7 @@ func TestDeployMutationTargetsExcludeUnassignedWorker(t *testing.T) {
 		"node-1": {ClusterID: "11111111-1111-4111-8111-111111111111", NodeID: "22222222-2222-4222-8222-222222222222", Lifecycle: "schedulable", Roles: []string{"control-plane", "worker"}},
 		"idle":   {ClusterID: "11111111-1111-4111-8111-111111111111", NodeID: "33333333-3333-4333-8333-333333333333", Lifecycle: "schedulable", Roles: []string{"worker"}},
 	}}
-	targets := DeployMutationTargets(cfg, map[string]config.ServiceConfig{"web": {Image: "demo/web:1", Replicas: 1}}, map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-1", NodeID: cfg.Servers["node-1"].NodeID}}})
+	targets := DeployMutationTargets(cfg, "production", map[string]config.ServiceConfig{"web": {Image: "demo/web:1", Replicas: 1}}, map[string][]scheduler.Assignment{"web": {{Slot: 1, Node: "node-1", NodeID: cfg.Servers["node-1"].NodeID}}})
 	if got := strings.Join(targets, ","); got != "node-1" {
 		t.Fatalf("local-only mutation targeted unrelated worker: %s", got)
 	}
@@ -138,7 +140,10 @@ func TestPriorDesiredAssignmentKeepsRemovedLastServiceWorkerTargeted(t *testing.
 	prior := &takodstate.DesiredRevision{Services: map[string]takodstate.DesiredService{
 		"removed": {Name: "removed", Assignments: []scheduler.Assignment{{Slot: 1, Node: "idle", NodeID: cfg.Servers["idle"].NodeID}}},
 	}}
-	got := AddPriorDesiredMutationTargets(cfg, []string{"node-1"}, prior)
+	got, err := AddPriorDesiredMutationTargets(cfg, "production", []string{"node-1"}, prior)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Join(got, ",") != "idle,node-1" {
 		t.Fatalf("targets = %v", got)
 	}

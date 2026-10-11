@@ -65,6 +65,10 @@ Use 'tako deploy --service web --archive app.tar.gz' to deploy one service from 
 	Override target service image for this deploy
 
 .PP
+\fB--no-prune\fP[=false]
+	With --preview: skip the opportunistic prune of expired previews
+
+.PP
 \fB--plan\fP=""
 	Path to a reviewed plan document; apply fails if the computed plan drifted from it
 
@@ -101,6 +105,10 @@ Use 'tako deploy --service web --archive app.tar.gz' to deploy one service from 
 	Fail deploy if public domains are not DNS/TLS active after waiting
 
 .PP
+\fB--ttl\fP=""
+	With --preview: expiry for this deploy only (for example 72h, or none); defaults to the template ttl
+
+.PP
 \fB-y\fP, \fB--yes\fP[=false]
 	Skip confirmation prompts (non-interactive mode)
 
@@ -124,6 +132,10 @@ Use 'tako deploy --service web --archive app.tar.gz' to deploy one service from 
 .PP
 \fB--output\fP="text"
 	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB--preview\fP=""
+	preview environment to use (deploy, ps, logs, exec, history, rollback, config explain); -e then names its base
 
 .PP
 \fB-v\fP, \fB--verbose\fP[=false]

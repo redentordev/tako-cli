@@ -132,6 +132,9 @@ func ValidateConfig(cfg *Config) error {
 		// Update the environment in the map with defaults applied
 		cfg.Environments[envName] = env
 	}
+	if err := validatePreviewBlocks(cfg); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -228,6 +231,7 @@ func ValidationWarnings(cfg *Config) []ValidationWarning {
 				Message:     fmt.Sprintf("environment %s is abstract and no environment extends it; it has no effect", name),
 			})
 		}
+		warnings = append(warnings, previewIsolationWarnings(cfg)...)
 	}
 	environmentNames := make([]string, 0, len(cfg.Environments))
 	for name := range cfg.Environments {

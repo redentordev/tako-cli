@@ -404,6 +404,35 @@ environments:
           email: admin@example.com
 ```
 
+### Environments on separate servers
+
+Several environments can live in one `tako.yaml` with their own servers. An
+operation on one environment leases, builds on, and contacts only that
+environment's servers, so an unreachable production host never blocks
+`tako deploy -e preview`. Builds and retained-image reuse also stay inside the
+environment: a staging build never runs on a production server.
+
+### Troubleshooting: `failed to acquire remote deploy leases: failed to connect to lease node`
+
+A deploy leases every server of the selected environment, plus any configured
+server that still runs the environment's previous assignments (for example a
+server you just removed from `environments.<env>.servers`). The error names the
+node and, for such a former member, says why it is in scope:
+
+```text
+failed to connect to lease node old-1 (node old-1 holds prior desired assignments for environment preview)
+```
+
+- If the node is a member of the environment, make it reachable and retry;
+  deploys never skip unreachable environment members.
+- If it is a former member that still runs the environment's containers,
+  make it reachable so the deploy can stop them. If the server was destroyed,
+  run `tako state forget-node old-1 --yes -e preview` to drop it from the
+  environment's replicated state.
+- If its host comes from a variable that is not exported, environment scoping
+  omits the server and the deploy exits with code 2 before taking any lease,
+  naming the server and the variable. Export the variable and retry.
+
 ## Environment Inheritance And Shared Fragments
 
 Environments that differ only in a domain, a replica count, or a server list
@@ -593,9 +622,10 @@ environments:
 - Chains are allowed (`staging -> production -> base`) up to 8 `extends`
   hops. A cycle (including `extends` naming itself), an unknown parent, or a
   chain deeper than 8 hops fails validation with the full chain in the error.
-- `extends` and `abstract` are not inherited. Abstract environments do not
-  need `servers` or `serverSelector`. An abstract environment that nothing
-  extends produces a `tako validate` warning.
+- `extends`, `abstract` and `preview` are not inherited. Abstract
+  environments do not need `servers` or `serverSelector`. An abstract
+  environment that nothing extends produces a `tako validate` warning, unless
+  it declares `preview:` (see [Preview Environments](#preview-environments)).
 - An unknown or mistyped field is reported against the environment that
   declared it, and validation errors in an inheriting environment end with
   the chain, for example `(environment staging extends production)`.
@@ -612,6 +642,58 @@ Without `-e`, Tako uses the only deployable (non-abstract) environment, else
 `production`, else the first environment name in alphabetical order. In that
 last case it prints `no -e and no 'production'; using '<name>'; pass -e` to
 stderr, so pass `-e` in scripts and CI.
+
+### Preview environments
+
+A `preview:` block makes an environment the base of short-lived preview
+environments. `tako deploy --preview pr-42` synthesizes `preview-pr-42`, which
+extends the base, and deploys it. The usual base is an abstract template:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      web:
+        image: ghcr.io/example/app:1.4.2
+        port: 3000
+        replicas: 2
+        proxy:
+          domain: app.example.com
+  preview:
+    abstract: true
+    extends: production
+    preview:
+      domain: "{name}.preview.example.com"
+      ttl: 72h
+      max: 5
+      maxReplicas: 1
+      keepJobs: false
+      env:
+        PUBLIC_URL: "{url:web}"
+      services:
+        web:
+          env:
+            PREVIEW_HOST: "{host:web}"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `domain` | `{name}.{domain}` | Host template for proxied services. Placeholders: `{name}` (preview name), `{service}` (service name), `{domain}` (the service's own domain, or internal `host`). |
+| `ttl` | `168h` | Go duration or `none`; the preview expires this long after its last successful deploy. |
+| `max` | `5` | Previews this base may have at once. |
+| `maxReplicas` | `1` | Replica cap for every service except global placement. |
+| `keepJobs` | `false` | Keep `kind: job` services, which are dropped by default. |
+| `env` | | Merged into every service. Placeholders: `{name}`, `{host:<service>}`, `{url:<service>}`. |
+| `services.<name>.env` | | Merged into one service, with the same placeholders. |
+
+`preview` is not inherited: an environment that extends a base is not itself
+a base. Preview services must not publish host ports, use `imports`,
+bind-mount host paths, or mount `name`/`external`/driver volumes; `tako
+validate` warns about these and a preview deploy rejects them. A preview reads
+the secrets files of its base (`.tako/secrets.preview` above). See
+[PREVIEW-ENVIRONMENTS.md](./PREVIEW-ENVIRONMENTS.md) for DNS, certificates,
+TTL and pruning.
 
 ### Environment variables and `-e`
 
@@ -646,6 +728,11 @@ depends on whether the command was given `-e`:
   command (for example `tako setup`, `tako upgrade servers`, and `tako doctor`),
   every variable in the file is required. Run `tako validate` without `-e` to
   check all environments at once.
+- With `--preview` (`tako deploy`, `tako config explain`, `ps`, `logs`,
+  `exec`, `history`, `rollback`), `-e` names the preview's base and the
+  scope is that base and its `extends` chain: the base is never left out and
+  its variables are required, even when it is abstract. Without `-e` every
+  variable is required.
 
 A CI job for one environment therefore only needs that environment's
 variables:
@@ -1495,7 +1582,12 @@ tako domains hosts -e production --address mesh
 ```
 
 `--address auto` is the default: it uses `servers.<name>.privateHost` when set
-and falls back to the deterministic Tako mesh IP for the proxy node.
+and otherwise the proxy node's recorded Tako mesh address. Mesh addresses are
+read from each proxy node's takod over SSH (`GET /v1/status`), so `--address
+mesh` (and `auto` without `privateHost`) needs SSH access to the proxy nodes
+and fails when a node is unreachable or has never been deployed. Use
+`--address private` or `--address ssh` to print entries without contacting
+nodes.
 
 ## Shared Nodes
 
@@ -1525,6 +1617,24 @@ wiping the whole cache; takod also prunes Docker builder cache on a daily
 background interval using that same budget. Override explicit cleanup with
 `--docker-cache-keep-storage <size>`. Dangling image cleanup only runs during
 deploy cleanup or when `tako cleanup --docker-cache` is explicitly requested.
+
+Mesh on shared nodes: a shared node has one WireGuard interface, and its
+takod (capability `mesh.peer-sets-v1`) keeps one peer set per app/stage and
+configures the interface from the union of all sets. Deploying one app/stage
+never removes the peers another app/stage contributed, and `tako destroy`
+removes only the destroyed app/stage's set. Nodes of different environments
+that only share a server do not peer with each other. After removing a server
+from an environment's `servers` list, run `tako mesh prune -e <env>` to
+delete the set that environment left on it.
+
+Multi-node environments that share a server must use compatible `mesh:`
+blocks: the same `networkCIDR`, `subnetBits`, and `listenPort`, and the same
+address for the shared server. A conflicting deploy fails before anything on
+the node changes and names both app/stages. Single-node environments add no
+peers, so their `mesh:` blocks may differ. An older takod without peer sets
+still keeps one peer list that the last deploy replaces; deploys warn about
+such nodes (`server X is shared with app/stage`) and
+`tako upgrade servers --server X` upgrades them.
 
 By default every selected environment node with proxy routes reconciles the
 shared proxy for that app/stage. Built-in ACME TLS for public routes currently
@@ -1931,6 +2041,44 @@ environments:
         image: example/worker:latest
         envFiles: [.env.base, .env.production]
 ```
+
+Credential-like values loaded from `envFile`/`envFiles` are masked in
+command output by the same rule as inline `env:` values (a credential-like
+name, a URL with credentials or a token-like part, or a long token mixing
+letters and digits) and show as `[REDACTED:envFile.<NAME>]`. Commands that
+only read logs or state (`logs`, `rollback`, `promote`, `scale`, `remove`,
+`destroy`) warn once when an envFile cannot be read on the operator machine,
+because its values will not be masked.
+
+Every mask names its source: `[REDACTED:secrets.STRIPE_KEY]`,
+`[REDACTED:env.DATABASE_URL]`, `[REDACTED:servers.app.password]`, or
+`[REDACTED:pattern.jwt]` for a heuristic match. Set
+`TAKO_REDACTION_LABELS=off` to print plain `[REDACTED]` markers instead. To
+see, before deploying, what Tako will mask and why, run:
+
+```bash
+tako config explain --redaction -e production
+```
+
+```text
+Redaction: production (config tako.yaml)
+Labels: on (TAKO_REDACTION_LABELS)
+
+Masked
+  servers.app.password                   ssh password
+  services.mongo.backup.secretAccessKey  backup storage credential
+
+Services
+  admin:
+    masked   secrets.STRIPE_KEY      secrets list (from .tako/secrets.production)
+    masked   envFile.SMTP_PASSWORD   credential-like name (.env.production)
+    visible  env.CMS_RUNTIME_MODE    plain setting
+```
+
+The report never prints a value, never contacts servers and never runs
+secret provider CLIs; keys that would come from `secretSources` are listed
+as `from secretSources[i] <provider>; not resolved here`, and `secrets:`
+references that nothing can resolve are listed under "Not resolvable".
 
 Container runtime controls map directly to Docker run options and work for
 long-running services and scheduled jobs:

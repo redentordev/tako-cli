@@ -187,6 +187,224 @@ service's rollout fails, its outcome carries a `recovery` object:
 `DeployResult` also carries `deploymentId` once the deployment history entry
 is recorded (omitted for plan-only runs and for failures before recording).
 
+`DeployResult.urls` and `internalUrls` are sorted by service, then URL, so
+the same configuration yields the same order on every deploy. When a deploy's
+rollout succeeds but persisting state afterwards fails, a `DeployResult` with
+`status: failed` and `error` is now emitted (previously no result document);
+the exit code is unchanged.
+
+### Operation summary
+
+`DeployResult`, `RollbackResult` (both scopes), `PromoteResult` and
+`ScaleResult` carry an additive `summary` object (`OperationSummary`)
+whenever the command produces a result document, including on failure. It
+is the same object in the result document, the `operation.summary` event,
+the human summary block, and the GitHub Actions step summary. New
+integrations should read `summary` instead of re-deriving it from the
+per-command fields.
+
+```json
+{
+  "operation": "deploy",
+  "project": "shop",
+  "environment": { "name": "production", "kind": "standard" },
+  "outcome": "succeeded",
+  "deploymentId": "1767225600123456789",
+  "displayId": "1767225600",
+  "revision": "ab12cd3",
+  "commit": "ab12cd3",
+  "startedAt": "2026-01-01T00:00:00Z",
+  "durationSeconds": 102.4,
+  "services": [
+    {
+      "name": "web",
+      "change": "updated",
+      "strategy": "rolling",
+      "fromImage": "ghcr.io/acme/web:ab12cd3",
+      "toImage": "ghcr.io/acme/web:ef45ab6",
+      "fromRevision": "rev-a",
+      "toRevision": "rev-b",
+      "replicas": { "desired": 3, "running": 3 },
+      "health": "healthy",
+      "nodes": ["node-a"]
+    }
+  ],
+  "urls": [
+    { "service": "web", "url": "https://shop.example.com", "kind": "public", "status": "ready" }
+  ],
+  "undo": {
+    "command": "tako rollback -e production 1767225000",
+    "argv": ["tako", "rollback", "-e", "production", "1767225000"],
+    "targetDeploymentId": "1767225000123456789"
+  },
+  "nextSteps": [{ "reason": "...", "command": "tako ps -e production" }],
+  "notes": ["..."]
+}
+```
+
+- `operation` is `deploy`, `rollback`, `promote` or `scale` (`start`/`stop`
+  report `scale`). `environment.kind` is `standard` for declared
+  environments and `preview` for preview environments (`tako deploy
+  --preview NAME`), which also carry `environment.preview` (`name`, `base`,
+  and `expiresAt`, absent when the preview never expires). Treat unknown kinds
+  as opaque.
+- `outcome`: `succeeded` (a service changed, nothing failed), `up_to_date`
+  (nothing changed), `warmed` (only revisions warmed for manual promotion),
+  `partial` (failed, and at least one service is not at its pre-operation
+  state: it kept a new state, or it failed and its recovery status is not
+  `restored`), `failed` (failed, and every service is back at its
+  pre-operation state). Exit codes are unchanged: both failure outcomes exit
+  1; an attention-class result (for example a failed post-hook or strict
+  domain checks) keeps outcome `succeeded` and records a note.
+- `services[]` has one row per service in scope, sorted by name. `change` is
+  one of `added`, `updated`, `unchanged`, `warmed`, `restored`, `failed`,
+  `not_attempted`, `ran`, `removed`, `rolled_back`, `skipped`, `promoted`,
+  `scaled`. `not_attempted` rows appear only in the summary (a deploy's
+  `DeployResult.services` still lists attempted services only).
+- `health` is `healthy`, `unhealthy`, `starting`, `degraded` (fewer running
+  than desired replicas), `stopped` (zero desired), `unknown`, or `n/a` (run
+  steps, jobs, removed and not-attempted rows). After an operation that
+  changed something, Tako reads actual state once (per node in parallel,
+  bounded at 10s). A failed or timed-out read yields `unknown` plus a
+  `health not read: ...` note and never changes the exit code.
+- `urls[]` lists `https://` + every proxy domain (`kind: public`) and
+  internal route hosts (`kind: internal`), sorted by service, public before
+  internal, then URL. A public URL's `status` is `ready`, `pending` or
+  `failed` when the deploy checked DNS/TLS, else `not_checked`; `detail`
+  explains a non-ready state.
+- `undo` is pinned to an explicit target: `argv` plus a POSIX shell-quoted
+  `command`. It always selects the environment (`-e <env>`), includes
+  `--config <path>` when a non-default config was used, and never includes
+  `-y` (the undone operation still asks for or requires approval). Deploy
+  undo is a project rollback to the newest stable deployment before the
+  deploy (`targetDeploymentId`); project/service rollback undo rolls forward
+  to the newest stable deployment before the rollback; promote undo
+  re-promotes the previous revision while it is retained, else rolls the
+  service back to the newest stable deployment before the promotion; scale
+  undo restores the previous replica counts. When no safe undo exists,
+  `undo.unavailable` says why (`nothing changed`, `nothing was changed`,
+  `first deployment; nothing to roll back to`, `deployment history
+  unreadable`, ...) and `command`/`argv` are absent. `undo.notes` carries
+  caveats such as persistent services being skipped by project rollback.
+  For a preview, every derived command (undo and next steps) selects it with
+  `--preview NAME` instead of `-e`; the undo of a preview's first deploy is
+  `tako preview destroy NAME`, and a redeploy's undo is `tako rollback
+  --preview NAME <displayId>`.
+- `nextSteps[]` (at most 5) each carry a `reason` and a `command`: `tako
+  promote` for warmed services, `tako logs --service NAME --since 10m` for
+  failed or restored services, `tako domains status` for pending or failed
+  domains, `tako ps` for unhealthy or degraded services, `tako history` after
+  a partial failure. Preview summaries omit `tako promote` and `tako domains
+  status` steps (those commands do not accept `--preview`; previews always
+  use automatic promotion) and the `tako domains hosts` note.
+- `notes[]` carries free-text notes: bookkeeping failures after a successful
+  rollout, failed lifecycle hooks (`post-deploy hook failed (exit 1)`), the
+  `tako domains hosts` hint for internal routes, health-read failures.
+
+With `--events ndjson`, the summary is also emitted as one
+`operation.summary` event (phase `summary`) immediately before the terminal
+`result` event: `data.summary` equals the result document's `summary` and
+`data.operation` names the command. Its `message` is the plain-text human
+block. In text mode that block is the last output of the command (after
+post-operation hooks); in machine modes it goes to stderr, so `--output
+json` stdout still holds exactly one document.
+
+Every free-text summary field (errors, reasons, notes, next-step commands,
+URL details, undo notes, the commit) passes through the secret redactor
+before the summary is emitted in any form. Image references, service,
+environment and project names, URLs and deployment IDs are public values and
+appear unmasked.
+
+### Preview environments
+
+`tako deploy --preview NAME` deploys a short-lived preview environment
+(identity `preview-<name>`, see docs/PREVIEW-ENVIRONMENTS.md). Its
+`DeployResult` carries an additive `preview` object:
+
+```json
+{
+  "preview": {
+    "name": "pr-42",
+    "environment": "preview-pr-42",
+    "base": "preview",
+    "created": true,
+    "expiresAt": "2026-10-18T14:02:00Z",
+    "ttl": "168h",
+    "hosts": { "web": "pr-42.preview.example.com" }
+  }
+}
+```
+
+`created` is true when the deploy created the preview record; `expiresAt` is
+absent for `ttl: none`. `ps`, `logs`, `exec`, `history`, `rollback` and
+`config explain` accept `--preview NAME`; every other command rejects it with
+exit 2. Except for `config explain` (offline), they read the preview record
+first and exit 2 when no record exists or when `-e` names a different base.
+
+`tako preview list` returns a `PreviewList`:
+
+```json
+{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "PreviewList",
+  "project": "shop",
+  "items": [
+    {
+      "apiVersion": "tako.redentor.dev/v1alpha1",
+      "kind": "PreviewRecord",
+      "project": "shop",
+      "environment": "preview-pr-42",
+      "name": "pr-42",
+      "base": "preview",
+      "servers": ["node-a"],
+      "hosts": { "web": "pr-42.preview.example.com" },
+      "createdAt": "2026-10-11T14:02:00Z",
+      "updatedAt": "2026-10-11T14:02:00Z",
+      "expiresAt": "2026-10-18T14:02:00Z",
+      "ttl": "168h",
+      "source": { "branch": "feature/x", "commit": "ab12cd3" },
+      "createdBy": "ci",
+      "status": "active",
+      "nodes": ["node-a"]
+    }
+  ],
+  "nodes": [{ "name": "node-a", "status": "ok" }]
+}
+```
+
+Records are merged across every server in top-level `servers:` by newest
+`updatedAt`; `nodes` on an item lists the servers holding that record.
+`status` is `active` or `expired`. Node `status` is `ok`, `skipped` (the
+node lacks the `preview.lifecycle-v1` takod capability; a warning names it)
+or `failed` (with `error`). Unparseable records are listed in `invalid`.
+
+`tako preview destroy NAME` returns a `PreviewDestroyResult` with `project`,
+`name`, `environment`, `base`, `status` (`destroyed`, `not_found`, `failed`),
+per-server rows `servers[]` (`name`, `status`, `containersRemoved`,
+`networksRemoved`, `volumesRemoved`, `error`), the total `volumesRemoved`,
+`startedAt`, `durationSeconds` and `error`. Each server receives one ordered
+teardown request (proxy files, containers, the preview's exact network,
+volumes labeled with the preview identity, takod state, and the record last).
+Shared images and `/opt/<project>` are never removed. Destroying a preview
+that no server records is `not_found` and exits 0, so the command is
+idempotent; a failed teardown keeps the record, and rerunning retries.
+
+`tako preview prune [--dry-run]` returns a `PreviewPruneResult` with
+`project`, `dryRun`, `destroyed[]`, `skipped[]`, `failed[]` (each `name`,
+`environment`, `base`, `expiresAt`, `reason`), `nodes`, `startedAt`,
+`durationSeconds` and `error`. Only expired previews are touched. A preview
+whose lease is held by another operation is `skipped` and does not change the
+exit code. With `--dry-run`, `destroyed` lists what would be removed and
+nothing is mutated.
+
+`preview destroy` and `preview prune` require `--yes` in machine modes and
+non-interactive runs; without it they emit a `ConfirmationRequired` document
+(`operation`: `preview destroy` or `preview prune`) and exit 2.
+
+Events: `preview.destroyed` (phase `cleanup`) after a successful destroy, and
+`preview.pruned` once per pruned preview. Both carry `data.name`,
+`data.environment` and `data.base`.
+
 ### Rollback
 
 `tako rollback` has two scopes, reported in `RollbackResult.scope`:
@@ -524,7 +742,12 @@ the nodes attempted. `tako upgrade servers` returns an
 on apply; `current`/`upgrade-needed`/`downgrade-blocked`/`setup-required`/`status-unavailable`
 on `--dry-run`). Enrolled nodes are ordered as worker canary, remaining
 workers, and controller last; a failed stage blocks later stages. Partial
-failure exits 6, total failure exits 1, and both still emit the document. `tako clone-setup`
+failure exits 6, total failure exits 1, and both still emit the document.
+On non-enrolled nodes each node is upgraded under the node maintenance lease;
+when any project or environment holds a live lease on a node, that node is
+reported `blocked` with the holders in `error`, the remaining nodes still run,
+and the command exits 3. `tako setup` takes the same lease on a node whose
+takod answers and exits 3 under the same condition. `tako clone-setup`
 returns a `CloneSetupResult` (doctor-style `checks` with pass/warn/fail
 counts covering config, .env, SSH connectivity, env bundle, state, and
 secrets); machine modes skip its interactive fix-up prompts and any failed
@@ -635,7 +858,7 @@ machine behavior:
 | Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), project `rollback` (`deploy.service.*`, including `deploy.service.skipped`), lifecycle hooks in `deploy\|rollback\|promote\|setup` (`hook.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
-| Human-only by design | `init`, `backup recover`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
+| Human-only by design | `init`, `backup recover`, `mesh prune`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
 | Infrastructure-only | `takod run`, hidden `platform worker run\|prepare-enrollment\|verify-enrollment\|reconcile-mesh`, hidden `platform node upgrade-publication-guard`, and hidden internal E2E helpers |
 
 Human-only commands reject `--output json` and `--events ndjson` with a
@@ -792,10 +1015,25 @@ See [Rollback](#rollback).
   16+ character token mixing letters and digits. Plain settings such as
   `NODE_ENV: production` are not masked; put sensitive values under
   `secrets:` or a credential-like name.
+- Credential-like values from a service's `envFile`/`envFiles` are
+  registered by the same rule as inline `env:` values, labeled
+  `envFile.<NAME>`. `deploy` and `exec` ignore an unreadable envFile here
+  (building the container env file fails on it). `logs`, `rollback`,
+  `promote`, `scale`, `remove`, `destroy` and hooks emit one `warning`
+  event per service with `data.reason: "envfile-unreadable"` (and
+  `data.service`) stating that the file's values will not be redacted, and
+  continue.
+- Service backup storage credentials (`backup.storage.accessKeyId`,
+  `secretAccessKey`, `sessionToken`) are registered wherever registry
+  credentials are, and by `logs`, `rollback`, `promote`, `scale`, `remove`,
+  `destroy` and hooks.
 - Project, environment, server and service names, service image
   references, and hex image tags or digests (`repo:<commit-sha>`,
   `@sha256:<digest>`) stay readable even when a registered secret is a
-  substring of them.
+  substring of them. A registered secret stays visible only when it lies
+  entirely inside a longer public value; a public name inside or
+  overlapping a secret (a project name used as a token prefix) never
+  shields it.
 - Secret values referenced by a service's `secrets:` list are registered
   too, whether they come from `.tako/secrets*` files or from
   `secretSources` providers, and including aliased references
@@ -816,6 +1054,13 @@ See [Rollback](#rollback).
   before the response returns. An authentication failure surfaces as an
   `image.pull.auth_failed` event and a failed result (exit 1); the
   credential values themselves never appear in events or result documents.
+- `DeployResult.error`, `ScaleResult.error` and every per-service `error`
+  pass through the redactor before the result document is emitted, in every
+  output mode (health-failure errors can embed container log lines).
+- The operation `summary` (see [Operation summary](#operation-summary)) is
+  redacted field by field before it is emitted, so its JSON, the
+  `operation.summary` event, the human block and the GitHub step summary
+  never contain a registered secret value.
 - Deployment records store env **keys** only (`<redacted>` values).
 - Generated configs (`tako config export`) redact SSH passwords, environment
   values, volume driver options and labels, proxy basic-auth verifiers, and
@@ -823,6 +1068,65 @@ See [Rollback](#rollback).
   (`proxy_response_header_values_redacted`,
   `proxy_request_header_values_redacted`) identify every value that must be
   restored before deploying the export.
+
+### Redaction markers
+
+Every mask in event `message` and `data` strings, result documents and
+human output is a marker that names the source of the hidden value:
+
+```
+marker  = "[REDACTED" [ ":" label ] "]"
+label   = segment *( "." segment )        ; 1..96 bytes
+segment = 1*( ALPHA / DIGIT / "_" / "-" / "@" / "/" / ":" )
+```
+
+Detect masks with the regular expression `\[REDACTED(:[^\]]*)?\]`. A
+registered value is always replaced in full; no characters of it, and
+not its length, are revealed (the earlier `ab***yz` partial reveal is
+gone). Key/value pattern matches keep the key:
+`password=[REDACTED:pattern.assignment]`.
+
+Labels are config-path-like and start with a fixed kind:
+
+| Label | Source |
+|---|---|
+| `secrets.<KEY>` | a `secrets:` reference (local `.tako/secrets*` or `secretSources`); an aliased `API_KEY:STRIPE_KEY` reports `secrets.STRIPE_KEY` |
+| `env.<NAME>` | a credential-like inline `env:` value |
+| `envFile.<NAME>` | a credential-like `envFile`/`envFiles` value |
+| `servers.<server>.password` | an SSH password |
+| `registries.<host>.password` | a registry password |
+| `environments.<env>.proxy.acme.<NAME>` | an ACME DNS provider credential |
+| `services.<service>.backup.<field>` | a backup storage credential |
+| `builds.<build>.args.<ARG>` | a shared build arg value (deploy) |
+| `notifications.slack\|discord\|webhook` | a notification URL |
+| `hooks.passEnv.<NAME>` | a credential-like hook `passEnv` variable |
+| `run.env.<NAME>` | a `tako run` env value |
+| `export.password`, `certs.privateKey`, `proxy.password` | command inputs |
+| `pattern.<id>` | a heuristic match: `assignment`, `connection-string`, `stripe-key`, `github-token`, `npm-token`, `digitalocean-token`, `aws-access-key`, `google-api-key`, `hex64`, `jwt`, `base64`, `hex` |
+
+When one value is registered under several labels, the label is chosen by
+kind precedence (`secrets.`, `envFile.`, `env.`, `registries.`,
+`servers.`, `environments.`, `services.`, `builds.`, `notifications.`,
+`hooks.`, `run.`, `export.`, `certs.`, `proxy.`), then lexicographically, so the
+output does not depend on registration order. Labels are built only from
+names in the committed config and fixed vocabulary; they never contain a
+value, part of one, or a `secretSources` locator (path, names, vault,
+project, profile or map source name).
+
+Label kinds are stable. New kinds and pattern IDs may be added; consumers
+should match the marker regex rather than an exact label list.
+
+Redaction is deterministic (longest registered value first) and
+idempotent: redacting already-redacted text with the same redactor leaves
+markers intact. Only markers the redactor could have produced (the bare
+`[REDACTED]`, registered labels and known `pattern.<id>` labels) are
+protected; other marker-shaped text is redacted like any other text.
+
+Set `TAKO_REDACTION_LABELS=off` (also `0`, `false`, `no`) to render every
+mask as the plain `[REDACTED]`, in human and machine output alike, for
+environments where even secret names must not appear. Masking itself
+cannot be turned off. `tako config explain --redaction` (human-only) lists
+what will be masked for an environment and why, without printing values.
 
 Do not log stderr blindly: build logs may echo application output that
 Tako cannot classify.

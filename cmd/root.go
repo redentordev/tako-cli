@@ -103,6 +103,9 @@ reconciliation, proxy config, remote leases, and replicated deployment state.`,
 		if err := rejectMachineOutputForHumanOnly(cmd); err != nil {
 			return err
 		}
+		if err := rejectUnsupportedPreview(cmd); err != nil {
+			return err
+		}
 		return requireProjectMutationAttachment(cmd)
 	},
 }
@@ -269,6 +272,7 @@ func init() {
 		certsPushCmd, certsRemoveCmd, maintenanceCmd, upgradeServersCmd, execCmd,
 		jobsTriggerCmd, envPushCmd, stateLeaseReleaseCmd, stateForgetNodeCmd, stateRepairCmd, liveCmd,
 	)
+	markPreviewSupported(deployCmd, psCmd, logsCmd, execCmd, historyCmd, rollbackCmd, configExplainCmd)
 
 	// Set custom version template
 	rootCmd.SetVersionTemplate(fmt.Sprintf(`Tako CLI {{.Version}}
@@ -283,6 +287,7 @@ Built:   %s
 	rootCmd.PersistentFlags().StringVar(&hostKeyModeFlag, "host-key-mode", "", "SSH host key verification mode: tofu, strict, ask (default: tofu)")
 	rootCmd.PersistentFlags().StringVar(&outputFormatFlag, "output", outputFormatText, "output format: text or json (json reserves stdout for the final result document)")
 	rootCmd.PersistentFlags().StringVar(&eventsFormatFlag, "events", "", "stream progress events to stdout: ndjson (human output moves to stderr)")
+	rootCmd.PersistentFlags().StringVar(&previewFlag, "preview", "", "preview environment to use (deploy, ps, logs, exec, history, rollback, config explain); -e then names its base")
 
 	// Bind flags to viper
 	viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
@@ -351,6 +356,13 @@ func initConfig() {
 // getEnvironmentName returns the environment name from flag or uses default
 // This is a helper for all commands that need environment
 func getEnvironmentName(cfg interface{}) string {
+	// A config loaded for a preview instance targets the preview identity;
+	// -e then names its base.
+	if c, ok := cfg.(*config.Config); ok && c != nil {
+		if instance := c.PreviewInstance(); instance != nil {
+			return instance.Identity
+		}
+	}
 	if envFlag != "" {
 		return envFlag
 	}

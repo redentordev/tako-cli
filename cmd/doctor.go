@@ -211,9 +211,18 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		for _, c := range clients {
 			c.Close()
 		}
+
+		if len(cfg.PreviewBases()) > 0 {
+			heading("Previews")
+			checkExpiredPreviews(cmd.Context(), record, cfg, doctorListPreviews)
+		}
 	} else {
 		for _, name := range remoteSections {
 			heading(name)
+			record(checkResult{"SKIP", "Skipped (--skip-remote)", ""})
+		}
+		if len(cfg.PreviewBases()) > 0 {
+			heading("Previews")
 			record(checkResult{"SKIP", "Skipped (--skip-remote)", ""})
 		}
 	}
@@ -284,6 +293,35 @@ func checkTrustedProxyPresetCacheWith(record func(checkResult), cfg *config.Conf
 		}
 		record(checkResult{"PASS", message, ""})
 	}
+}
+
+// doctorListPreviews lists previews for the doctor check; a seam for tests.
+var doctorListPreviews = func(ctx context.Context, cfg *config.Config) (*engine.PreviewListResult, error) {
+	return cliEngine().ListPreviews(ctx, cfg)
+}
+
+// checkExpiredPreviews warns about previews past their expiry, which still
+// hold containers and volumes until a prune or destroy removes them.
+func checkExpiredPreviews(ctx context.Context, record func(checkResult), cfg *config.Config, list func(context.Context, *config.Config) (*engine.PreviewListResult, error)) {
+	result, err := list(ctx, cfg)
+	if result == nil {
+		record(checkResult{"WARN", fmt.Sprintf("Cannot list previews: %v", err), "Check server connectivity and run 'tako preview list'"})
+		return
+	}
+	if err != nil {
+		record(checkResult{"WARN", fmt.Sprintf("Preview listing is incomplete: %v", err), "Check server connectivity and run 'tako preview list'"})
+	}
+	var expired []string
+	for _, item := range result.Items {
+		if item.Status == engine.PreviewStatusExpired {
+			expired = append(expired, item.Name)
+		}
+	}
+	if len(expired) > 0 {
+		record(checkResult{"WARN", fmt.Sprintf("%d expired preview(s) still hold containers and volumes: %s", len(expired), strings.Join(expired, ", ")), "Run 'tako preview prune --yes'"})
+		return
+	}
+	record(checkResult{"PASS", fmt.Sprintf("%d preview(s), none expired", len(result.Items)), ""})
 }
 
 func checkProxyClientIPTopology(ctx context.Context, record func(checkResult), cfg *config.Config, envName string) {

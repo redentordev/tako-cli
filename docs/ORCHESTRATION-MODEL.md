@@ -346,6 +346,64 @@ Each node stores enough state to stand alone:
 If a node loses contact with the CLI or peers, it keeps serving its last accepted
 revision. New deployments obey `state.onUnreachableNode`.
 
+## Lease Scope
+
+Remote operation leases are keyed per app/stage, so two environments that share
+a server can deploy concurrently. Without enrolled servers, an operation on
+environment `ENV` leases and contacts only:
+
+- the servers of `ENV`;
+- configured servers that still hold `ENV`'s prior desired assignments, so a
+  deploy can stop containers on a server that just left the environment.
+
+Edge, builder, and retained-image source candidates are members of `ENV`
+(`config.EnvironmentBuilderCandidates`). The deploy lease set and the deployer's
+build and image-export sources come from that same helper, so a build or export
+never runs on an unleased node, and an unreachable server of another
+environment never blocks `ENV`. With `state.onUnreachableNode: block`, every
+node in the scoped set is still mandatory: one failure releases every acquired
+lease before mutation. Lease and connectivity errors for a former member say
+that it holds prior desired assignments for `ENV`.
+
+When environment scoping omits a server because its `${VAR}` references are
+unset, and that server holds `ENV`'s prior desired assignments, the deploy
+fails with exit code 2 before taking any lease and names the server and the
+variables. A prior owner that is absent from `servers:` keeps the retired-node
+warning. Enrolled clusters keep their single controller lease, inventory roles,
+and cluster-wide builder and edge candidates.
+
+### Node Maintenance Lease
+
+Node software changes affect every app/stage on a server, so they take a
+node-wide lease instead of an environment lease. `tako upgrade servers` (for
+non-enrolled nodes; enrolled clusters keep the cluster upgrade coordinator) and
+`tako setup` (on a node whose takod answers) acquire the node maintenance lease
+on each node just before mutating it and release it after the restarted agent
+verified:
+
+- takod stores it at `<dataDir>/node-leases/maintenance.json` in a frozen,
+  versioned format, so the upgraded agent honors a lease its predecessor wrote.
+- While it is live, every environment lease on the node fails with a locked
+  error naming the maintenance operation. While any environment lease of any
+  project is live, the maintenance lease is refused immediately and the
+  command exits 3 listing the holders. takod checks and writes both kinds under
+  one mutex.
+- It lasts 15 minutes. The holder renews it under the same ID every five
+  minutes in the background and before each setup step and the upgrade
+  activation (the lease file survives the agent restart, so the restarted agent
+  accepts the renewal). If a renewal finds the lease lost, setup stops before
+  its next step and the upgrade rolls back before activating. A lease whose
+  release failed expires on its own.
+- An agent without `lease.node-maintenance-v1` cannot grant it. The command
+  then holds the selected environment's lease on that node for the same window
+  and warns that other environments and projects on the node are not fenced.
+  The first `tako upgrade servers` after updating the CLI takes this path.
+- A node whose takod does not answer is upgraded or set up without a lease:
+  no agent is running that could grant environment leases.
+
+`tako cleanup`, `tako backup`, `tako state forget-node` and `tako state repair`
+act on one app/stage and keep using environment leases.
+
 ## Deployment Strategies
 
 ### Default selection
@@ -731,6 +789,94 @@ routes to local containers through Docker DNS and remote containers through
 node-local mesh-only upstream ports. Health is enforced by the generated Caddy
 reverse-proxy health checks when configured.
 
+### Mesh Addressing
+
+Mesh membership is environment-wide. Every mesh apply lists all schedulable
+servers of the environment as peers and is sent to every member, whatever
+subset of nodes the operation's workloads touch, so a scale or a pinned deploy
+can never drop peers. Only operations that lease every member apply the mesh:
+deploy, rollback, project rollback, scale, and promote. `tako run` only
+verifies the takod agents it uses and never rewrites mesh addresses, peers, or
+node metadata.
+
+Addresses come from recorded state, not from list positions. One resolver
+serves mesh apply, proxy upstreams, and `tako domains hosts`:
+
+1. An enrolled node uses its platform mesh address.
+2. A node keeps the address its takod recorded (`node.json` `mesh.address`)
+   when it lies inside `mesh.networkCIDR`. If two members record the same
+   address, the member whose name sorts first keeps it, the other gets a new
+   one, and the deploy prints a warning. A recorded address that a member lists
+   for a peer outside the environment (another app/stage on a shared node) is
+   taken as well: two environments numbered by an earlier Tako both recorded
+   `.1` for their first node, and the shared node could not carry both. On a
+   shared node whose stored peer sets peer with other nodes, the node's own
+   address is the one those sets agree on, not `node.json`, which every
+   metadata write replaces.
+3. Every other node gets the lowest free host address of `mesh.networkCIDR`,
+   in sorted name order. Addresses that a member lists for peers outside the
+   environment (another app/stage on a shared node) are not free.
+
+A fresh environment therefore gets `.1`, `.2`, ... in sorted name order, and
+nodes upgraded from an earlier Tako keep the addresses they already have.
+The result never depends on the operation's target list, server declaration
+order, or which environment variables are exported.
+
+Operations that do not apply the mesh (placement apply, proxy-only
+reconciles) resolve addresses read-only. When a member they need has no
+applied address yet (a fresh member, or a record the resolver had to replace),
+they stop with an invalid-request error (exit 2) asking for a deploy instead
+of routing to an address the member's interface does not carry.
+
+### Shared-Node Peer Sets
+
+A server listed by several environments (or projects) has one WireGuard
+interface. A takod that advertises `mesh.peer-sets-v1` stores one peer set per
+`(project, environment)` under `mesh/peer-sets/<project>/<env>.json` and
+renders the interface from the union of all sets. Deploys send
+`PUT /v1/mesh/peer-sets` to such members (the choice is made per member; older
+agents keep the legacy `POST /v1/mesh/apply`), and `tako destroy` sends
+`DELETE /v1/mesh/peer-sets/<project>/<env>`, after which the union of the
+remaining sets is rendered. Removing the last set leaves the interface as it
+is. `GET /v1/status` reports the sets as `meshPeerSets`, and address
+resolution treats their peer addresses as in use.
+
+Union rules:
+
+- Peers are deduplicated by public key.
+- One address held by two keys, one key holding two addresses, or a peer using
+  the node's own address is a conflict.
+- Sets with peers other than the node itself must agree on `networkCIDR`,
+  `subnetBits`, interface, `listenPort`, and the node's own address.
+- Sets without other peers (single-node environments) add no peers and impose
+  no interface settings. When no set has peers, the most recent set's
+  settings apply.
+- Peers whose names collide across sets are named
+  `<project>.<env>.<server>` on the interface.
+
+A conflicting request stores nothing and leaves the interface unchanged; takod
+answers `409 Conflict` with a message naming both `(project, env, server)`
+entries, and the deploy fails with it. Redeploy (or destroy) the environment
+that owns the stale entry, or align the `mesh:` blocks. Deploys write node
+metadata only after the node accepted the peer set, so a rejected attempt does
+not change the node's recorded address.
+
+A deploy only contacts the environment's members, so when a server is removed
+from an environment's `servers` list, the set that environment stored there
+stays behind. `tako mesh prune -e <env>` removes it: for every declared,
+non-enrolled server outside the environment (or those named with `--server`)
+that still stores the set, it takes the environment's lease on that server,
+deletes the set, and releases the lease. Unreachable servers are reported and
+skipped; a refused lease exits 3.
+
+On first use takod converts an existing `mesh/peers.json` into the set named
+by its `project`/`environment` tags; an untagged file becomes `_legacy`, which
+the next peer-set write drops. A legacy `POST /v1/mesh/apply` from an older CLI
+is stored as the set named by the tags of the metadata that CLI wrote with the
+same peer list (takod records them under the peer-set mutex, so another
+environment's metadata write in between does not change the key), so it no
+longer erases other environments' peers.
+
 Deploy success is intentionally separate from public DNS readiness. A deploy
 can reconcile containers, routes, state, and proxy config before a domain points
 at the edge. After successful reconciliation, the CLI checks public domains for
@@ -752,7 +898,8 @@ re-check domains without redeploying.
 Internal routes are intentionally excluded from public DNS/TLS readiness checks.
 Run `tako domains hosts` to print host-file entries for internal proxy hosts.
 The command maps each internal host to `servers.<name>.privateHost` when present
-and otherwise to the deterministic mesh IP for that proxy node; `--address
+and otherwise to the mesh address that proxy node's takod recorded (read over
+SSH, so the node must be reachable and already deployed); `--address
 private`, `--address mesh`, and `--address ssh` make the target selection
 explicit.
 

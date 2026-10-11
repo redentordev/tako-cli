@@ -355,6 +355,20 @@ func TestTakoSchemaDescribesEnvironmentInheritanceAndExtensionKeys(t *testing.T)
 	if got := schemaPath(t, environment, "abstract")["type"]; got != "boolean" {
 		t.Fatalf("environments.*.abstract type = %#v, want boolean", got)
 	}
+	preview := schemaPath(t, environment, "preview")
+	if preview["type"] != "object" || preview["additionalProperties"] != false {
+		t.Fatalf("environments.*.preview = %#v, want closed object", preview)
+	}
+	previewProperties := schemaPath(t, preview, "properties")
+	for key, wantType := range map[string]string{"domain": "string", "ttl": "string", "max": "integer", "maxReplicas": "integer", "keepJobs": "boolean", "env": "object", "services": "object"} {
+		if got := schemaPath(t, previewProperties, key)["type"]; got != wantType {
+			t.Fatalf("environments.*.preview.%s type = %#v, want %s", key, got, wantType)
+		}
+	}
+	previewService := schemaPath(t, previewProperties, "services", "additionalProperties")
+	if previewService["additionalProperties"] != false || schemaPath(t, previewService, "properties", "env")["type"] != "object" {
+		t.Fatalf("environments.*.preview.services.* = %#v", previewService)
+	}
 }
 
 func assertStringOrListSchema(t *testing.T, field map[string]any) {

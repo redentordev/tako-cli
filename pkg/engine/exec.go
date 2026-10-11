@@ -117,9 +117,10 @@ func (e *Engine) Exec(ctx context.Context, req ExecRequest) (*ExecResult, error)
 	if !ok {
 		return nil, invalidRequestf("service '%s' not found in environment %s", req.Service, envName)
 	}
-	for _, server := range cfg.Servers {
-		e.RegisterSecret(server.Password)
-	}
+	e.RegisterServerPasswords(cfg.Servers)
+	// An unreadable envFile fails the one-off env file build, which is
+	// authoritative; attach mode does not read it.
+	_ = e.RegisterServiceEnvFileValues(singleService(req.Service, service))
 
 	timeout := req.Timeout
 	if timeout <= 0 {
@@ -326,8 +327,9 @@ func buildExecEnvFileContent(e *Engine, cfg *config.Config, envName string, serv
 		return "", fmt.Errorf("failed to create secrets manager: %w", err)
 	}
 	for _, ref := range service.Secrets {
-		if value, err := mgr.Get(secrets.SecretRefKey(ref)); err == nil {
-			e.RegisterSecret(value)
+		key := secrets.SecretRefKey(ref)
+		if value, err := mgr.Get(key); err == nil {
+			e.RegisterSecretAs(value, secrets.SecretLabel(key))
 		}
 	}
 	envFile, err := mgr.CreateEnvFile(service)
@@ -369,7 +371,7 @@ func (e *Engine) registerServiceSecretValues(cfg *config.Config, envName string,
 				missing = append(missing, key)
 				continue
 			}
-			e.RegisterSecret(value)
+			e.RegisterSecretAs(value, secrets.SecretLabel(key))
 		}
 	}
 	if len(missing) > 0 {

@@ -291,9 +291,9 @@ func (e *Engine) PlanRollback(ctx context.Context, req RollbackRequest) (_ *Roll
 	// that could contain them.
 	e.RegisterPublicConfigNames(cfg, services)
 	e.RegisterServiceEnvValues(services)
-	for _, server := range cfg.Servers {
-		e.RegisterSecret(server.Password)
-	}
+	e.registerServiceEnvFileValuesOrWarn(services, envName, events.PhaseDeploy)
+	e.RegisterBackupSecrets(services)
+	e.RegisterServerPasswords(cfg.Servers)
 	e.RegisterACMEDNSSecrets(cfg)
 	e.RegisterRegistrySecrets(cfg)
 	e.registerServiceSecretValuesOrWarn(cfg, envName, services, events.PhaseDeploy)
@@ -626,6 +626,7 @@ func (s *RollbackSession) unavailableResult(err error) *RollbackResult {
 			result.Services[index].Action = RollbackActionNotAttempted
 		}
 	}
+	s.attachSummary(context.Background(), result, "", nil)
 	return result
 }
 
@@ -799,6 +800,7 @@ func (s *RollbackSession) Apply(ctx context.Context) (*RollbackResult, error) {
 		result.Message = fmt.Sprintf("every service already matches deployment %s", target.ID)
 		result.Duration = time.Since(startTime).Seconds()
 		e.info(events.TypeDeploySucceeded, events.PhaseDeploy, fmt.Sprintf("\n✓ Nothing to roll back: every service already matches deployment %s\n", target.ID))
+		s.attachSummary(ctx, result, "", nil)
 		return result, nil
 	}
 
@@ -835,6 +837,7 @@ func (s *RollbackSession) Apply(ctx context.Context) (*RollbackResult, error) {
 				Error:       result.Error,
 			})
 		}
+		s.attachSummary(ctx, result, "", nil)
 		return result, err
 	}
 	worktrees := &rollbackWorktrees{}
@@ -871,14 +874,16 @@ func (s *RollbackSession) Apply(ctx context.Context) (*RollbackResult, error) {
 		rolledStates[name] = s.targets[name]
 	}
 	duration := time.Since(startTime)
-	bookkeepingErr := s.converge(ctx, startTime, duration, rolledStates, applyErr, gitInfo)
+	recordID, bookkeepingErr := s.converge(ctx, startTime, duration, rolledStates, applyErr, gitInfo)
 
 	result.Duration = time.Since(startTime).Seconds()
 	if applyErr != nil {
 		result.Status = takoapi.StatusFailed
 		result.Error = e.RedactSensitive(applyErr.Error())
+		var notes []string
 		if bookkeepingErr != nil {
 			e.warn(events.PhaseState, fmt.Sprintf("Warning: %v\n", bookkeepingErr))
+			notes = append(notes, bookkeepingErr.Error())
 		}
 		if notifier != nil {
 			failedName, failedRecovery := failedRollbackService(result.Services)
@@ -898,11 +903,13 @@ func (s *RollbackSession) Apply(ctx context.Context) (*RollbackResult, error) {
 			Level:   events.LevelError,
 			Message: fmt.Sprintf("\n✗ Rollback to deployment %s failed: %d of %d service(s) rolled back\n", target.ID, len(rolled), len(rolledNames)),
 		})
+		s.attachSummary(ctx, result, recordID, notes)
 		return result, applyErr
 	}
 	if bookkeepingErr != nil {
 		result.Status = takoapi.StatusFailed
 		result.Error = e.RedactSensitive(bookkeepingErr.Error())
+		s.attachSummary(ctx, result, recordID, []string{"rollback succeeded; state bookkeeping failed: " + result.Error})
 		return result, bookkeepingErr
 	}
 
@@ -923,7 +930,40 @@ func (s *RollbackSession) Apply(ctx context.Context) (*RollbackResult, error) {
 	e.info(events.TypeDeploySucceeded, events.PhaseDeploy, fmt.Sprintf("\n✓ Successfully rolled back %d service(s) to deployment %s!\n", len(rolled), target.ID))
 	result.Status = takoapi.DeploymentStatus(remotestate.StatusRolledBack)
 	result.Message = projectRollbackMessage(target.ID, len(rolled))
+	s.attachSummary(ctx, result, recordID, nil)
 	return result, nil
+}
+
+// attachSummary builds the project rollback summary onto result. recordID
+// is the history record the rollback wrote, when written.
+func (s *RollbackSession) attachSummary(ctx context.Context, result *RollbackResult, recordID string, notes []string) {
+	if result == nil {
+		return
+	}
+	e := s.engine
+	in := rollbackSummaryInput{
+		Environment:  s.envName,
+		StartedAt:    result.StartedAt,
+		Duration:     result.Duration,
+		DeploymentID: recordID,
+		Services:     s.services,
+		Outcomes:     result.Services,
+		Failed:       result.Status == takoapi.StatusFailed,
+		Error:        result.Error,
+		Notes:        notes,
+		Target:       s.target,
+		RollForward:  newestStableRecord(s.history, "", time.Time{}, ""),
+	}
+	if s.cfg != nil {
+		in.Project = s.cfg.Project.Name
+	}
+	if s.target != nil {
+		in.Commit = firstNonEmpty(s.target.GitCommitShort, s.target.GitCommit)
+	}
+	if s.runtime != nil {
+		in.Health = e.healthProbe(ctx, s.runtime, s.cfg, s.envName, s.mutationServers, rollbackPlacementServices(s.services, s.targets))
+	}
+	result.Summary = buildRollbackSummary(e.RedactSensitive, in)
 }
 
 // prepareApply sets up the takod runtime, persists the placement intent for
@@ -993,7 +1033,13 @@ func rollbackNotifier(cfg *config.Config, verbose bool) *notification.Notifier {
 // succeeded: one history record (rolled_back, or failed with Error), then
 // proxy, revision pruning and takod runtime state for the services that
 // changed, replication and the local state entry.
-func (s *RollbackSession) converge(ctx context.Context, startTime time.Time, duration time.Duration, rolled map[string]remotestate.ServiceState, applyErr error, gitInfo takodstate.GitInfo) error {
+func (s *RollbackSession) converge(ctx context.Context, startTime time.Time, duration time.Duration, rolled map[string]remotestate.ServiceState, applyErr error, gitInfo takodstate.GitInfo) (string, error) {
+	recordID := ""
+	err := s.convergeRecord(ctx, startTime, duration, rolled, applyErr, gitInfo, &recordID)
+	return recordID, err
+}
+
+func (s *RollbackSession) convergeRecord(ctx context.Context, startTime time.Time, duration time.Duration, rolled map[string]remotestate.ServiceState, applyErr error, gitInfo takodstate.GitInfo, recordID *string) error {
 	e := s.engine
 	cfg := s.cfg
 	envName := s.envName
@@ -1020,6 +1066,7 @@ func (s *RollbackSession) converge(ctx context.Context, startTime time.Time, dur
 		}
 		return wrap("failed to update remote deployment history: %w", err)
 	}
+	*recordID = record.ID
 
 	if len(rolled) > 0 {
 		actualStateForProxy, err := reconcile.GatherActualStateFromServers(s.sshPool, cfg, envName, s.envServers, nil)

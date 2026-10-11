@@ -81,8 +81,12 @@ func resetSecretSourceCache() {
 // config's secretSources over the local .tako/secrets files. Provider
 // values win: the external store is the source of truth, so a stale local
 // copy can never shadow a rotated secret.
+//
+// Local files are looked up for cfg.SecretsEnvironment(environment), so a
+// preview reads the files of its base while secretSources come from the
+// resolved preview environment.
 func NewManagerForConfig(cfg *config.Config, environment string) (*Manager, error) {
-	m, err := NewManager(environment)
+	m, err := NewManager(cfg.SecretsEnvironment(environment))
 	if err != nil {
 		return nil, err
 	}

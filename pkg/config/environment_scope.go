@@ -58,10 +58,26 @@ type scopeDocument struct {
 	jsonEntries []jsonObjectEntry
 }
 
-func parseEnvironmentScopedDocument(data string, isJSON bool, environment string) (*Config, error) {
+// scopeEnvironment returns the environment whose scope bounds ${VAR}
+// expansion, or "" when every reference is required. A preview is scoped to
+// its base, from which the preview environment is synthesized.
+func (o LoadOptions) scopeEnvironment() string {
+	environment := strings.TrimSpace(o.Environment)
+	if environment == "" {
+		return ""
+	}
+	if o.Preview != nil {
+		if base := strings.TrimSpace(o.Preview.Base); base != "" {
+			return base
+		}
+	}
+	return environment
+}
+
+func parseEnvironmentScopedDocument(data string, isJSON bool, environment string, opts LoadOptions) (*Config, error) {
 	expanded, missing := expandConfigText(data, !isJSON, true)
 	if len(missing) == 0 {
-		return ParseConfigDocument([]byte(expanded), isJSON)
+		return ParseConfigDocumentWithOptions([]byte(expanded), isJSON, opts)
 	}
 	missingErr := func(names []string) error {
 		return fmt.Errorf("failed to expand config environment variables: %w", missingEnvironmentVariablesError(names))
@@ -75,6 +91,16 @@ func parseEnvironmentScopedDocument(data string, isJSON bool, environment string
 	if !ok {
 		return nil, missingErr(missing)
 	}
+	if opts.Preview != nil {
+		// Keep a declared environment that collides with the preview
+		// identity so the resolver reports the conflict instead of the
+		// collision being pruned away silently.
+		if name, err := NormalizePreviewName(opts.Preview.Name); err == nil {
+			if _, declared := doc.environments()[PreviewIdentity(name)]; declared {
+				scope.environments[PreviewIdentity(name)] = true
+			}
+		}
+	}
 	wanted := make(map[string]bool, len(missing))
 	for _, name := range missing {
 		wanted[name] = true
@@ -87,7 +113,7 @@ func parseEnvironmentScopedDocument(data string, isJSON bool, environment string
 	if err != nil {
 		return nil, missingErr(missing)
 	}
-	cfg, err := ParseConfigDocument(pruned, isJSON)
+	cfg, err := ParseConfigDocumentWithOptions(pruned, isJSON, opts)
 	if err != nil {
 		if lines != nil {
 			return nil, errors.New(remapYAMLLineReferences(err.Error(), lines))
@@ -95,7 +121,25 @@ func parseEnvironmentScopedDocument(data string, isJSON bool, environment string
 		return nil, err
 	}
 	cfg.deferredVariables = missing
+	if dropped := doc.prunedServers(scope, wanted); len(dropped) > 0 {
+		cfg.scopedOutServers = dropped
+	}
 	return cfg, nil
+}
+
+// ScopedOutServers returns the servers LoadConfigForEnvironment removed
+// because they referenced unset ${VAR} names, mapped to those sorted names.
+// Callers that need such a server (for example a prior desired owner of the
+// selected environment) must fail closed instead of skipping it.
+func (c *Config) ScopedOutServers() map[string][]string {
+	if c == nil || len(c.scopedOutServers) == 0 {
+		return nil
+	}
+	result := make(map[string][]string, len(c.scopedOutServers))
+	for name, vars := range c.scopedOutServers {
+		result[name] = append([]string(nil), vars...)
+	}
+	return result
 }
 
 // DeferredEnvironmentVariables returns the sorted unset ${VAR} names that
@@ -165,7 +209,9 @@ func (d *scopeDocument) servers() map[string]any {
 	return servers
 }
 
-// scopeFor computes the scope of a declared, non-abstract environment.
+// scopeFor computes the scope of a declared environment that is concrete or
+// is a preview base (an abstract environment with a preview: block, whose
+// synthesized preview environment is the concrete one).
 func (d *scopeDocument) scopeFor(environment string) (environmentScope, bool) {
 	scope := environmentScope{environments: map[string]bool{}, servers: map[string]bool{}}
 	envs := d.environments()
@@ -173,7 +219,7 @@ func (d *scopeDocument) scopeFor(environment string) (environmentScope, bool) {
 	if !ok {
 		return scope, false
 	}
-	if body, _ := selected.(map[string]any); body != nil {
+	if body, _ := selected.(map[string]any); body != nil && body[environmentPreviewKey] == nil {
 		if abstract, _ := body[environmentAbstractKey].(bool); abstract {
 			return scope, false
 		}
@@ -335,9 +381,10 @@ func collectReferences(value any, wanted map[string]bool, found map[string]bool)
 }
 
 // prunedServers returns the out-of-scope servers that reference a wanted
-// (unset) name; they cannot be expanded and are removed.
-func (d *scopeDocument) prunedServers(scope environmentScope, wanted map[string]bool) map[string]bool {
-	pruned := map[string]bool{}
+// (unset) name, mapped to the sorted unset names; they cannot be expanded
+// and are removed.
+func (d *scopeDocument) prunedServers(scope environmentScope, wanted map[string]bool) map[string][]string {
+	pruned := map[string][]string{}
 	for name, server := range d.servers() {
 		if scope.hasServer(name) {
 			continue
@@ -346,7 +393,12 @@ func (d *scopeDocument) prunedServers(scope environmentScope, wanted map[string]
 		collectReferences(name, wanted, found)
 		collectReferences(server, wanted, found)
 		if len(found) > 0 {
-			pruned[name] = true
+			vars := make([]string, 0, len(found))
+			for ref := range found {
+				vars = append(vars, ref)
+			}
+			sort.Strings(vars)
+			pruned[name] = vars
 		}
 	}
 	return pruned
@@ -358,7 +410,7 @@ func (d *scopeDocument) prunedServers(scope environmentScope, wanted map[string]
 func (d *scopeDocument) prune(scope environmentScope, wanted map[string]bool) ([]byte, map[int]int, error) {
 	droppedServers := d.prunedServers(scope, wanted)
 	keepEnvironment := func(name string) bool { return scope.environments[name] }
-	keepServer := func(name string) bool { return !droppedServers[name] }
+	keepServer := func(name string) bool { _, dropped := droppedServers[name]; return !dropped }
 
 	if d.isJSON {
 		var buf bytes.Buffer

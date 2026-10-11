@@ -298,16 +298,16 @@ func (e *Engine) StreamLogs(ctx context.Context, req LogsRequest) (*LogsResult, 
 	// Register sensitive values before emitting anything that could contain
 	// them: SSH passwords, literal env values, and every secret the selected
 	// services reference (local .tako/secrets* and secretSources).
-	for _, server := range cfg.Servers {
-		e.RegisterSecret(server.Password)
-	}
+	e.RegisterServerPasswords(cfg.Servers)
 	e.RegisterPublicConfigNames(cfg, services)
 	e.RegisterServiceEnvValues(services)
+	e.RegisterBackupSecrets(services)
 	selectedServices := make(map[string]config.ServiceConfig, len(plan.selected))
 	for _, name := range plan.selected {
 		selectedServices[name] = services[name]
 	}
 	e.registerServiceSecretValuesOrWarn(cfg, envName, selectedServices, events.PhaseLogs)
+	e.registerServiceEnvFileValuesOrWarn(selectedServices, envName, events.PhaseLogs)
 
 	startedAt := time.Now()
 	result := &LogsResult{

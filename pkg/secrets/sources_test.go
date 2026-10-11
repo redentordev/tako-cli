@@ -87,4 +87,7 @@ func TestManagerLayersSourcedValuesOverLocalSecrets(t *testing.T) {
 	if redacted := m.GetRedactor().Redact("dsn=from-provider"); strings.Contains(redacted, "from-provider") {
 		t.Fatalf("sourced value not registered with redactor: %q", redacted)
 	}
+	if redacted := m.GetRedactor().Redact("dsn from-provider"); redacted != "dsn [REDACTED:secrets.DATABASE_URL]" {
+		t.Fatalf("sourced value not labeled by key: %q", redacted)
+	}
 }

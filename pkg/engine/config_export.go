@@ -126,7 +126,7 @@ func (e *Engine) ExportConfig(ctx context.Context, req ConfigExportRequest) (*Co
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	e.RegisterSecret(req.Password)
+	e.RegisterSecretAs(req.Password, exportPasswordLabel)
 
 	client, err := ssh.NewClientWithAuth(req.Server, req.SSHPort, req.User, req.SSHKey, req.Password)
 	if err != nil {
@@ -149,7 +149,7 @@ func (e *Engine) exportConfigFromState(ctx context.Context, req ConfigExportRequ
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	e.RegisterSecret(req.Password)
+	e.RegisterSecretAs(req.Password, exportPasswordLabel)
 
 	docs, err := ReadConfigExportState(reader, req.Project, req.Environment)
 	if err != nil {

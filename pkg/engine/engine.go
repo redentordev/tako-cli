@@ -8,6 +8,9 @@ package engine
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -28,6 +31,15 @@ type Engine struct {
 	buildWriter   *redactingWriter
 	// logsHooks substitutes node access for StreamLogs in tests.
 	logsHooks *logsHooks
+	// summaryHealthRead substitutes the post-operation health read in tests.
+	summaryHealthRead func(ctx context.Context, cfg *config.Config, envName string, selected []string, services map[string]config.ServiceConfig) (map[string]serviceHealth, error)
+	// previewRuntimeOverride substitutes node access for preview operations
+	// in tests.
+	previewRuntimeOverride func(cfg *config.Config) (*previewRuntime, error)
+	// summaryPreviews maps a preview identity to its summary description, so
+	// every summary of that environment selects it with --preview.
+	summaryPreviewsMu sync.Mutex
+	summaryPreviews   map[string]SummaryPreview
 }
 
 type redactingWriter struct {
@@ -102,11 +114,140 @@ func New(opts Options) *Engine {
 	}
 }
 
-// RegisterSecret adds a value to the event redactor.
+// RegisterSecret adds a value to the event redactor without a label, so it
+// renders as `[REDACTED]`. In-tree callers use RegisterSecretAs.
 func (e *Engine) RegisterSecret(value string) {
+	e.RegisterSecretAs(value, "")
+}
+
+// RegisterSecretAs adds a value to the event redactor under a source label
+// (see the label constructors in pkg/secrets), rendered as
+// `[REDACTED:<label>]`. Labels are built from config names, never values.
+func (e *Engine) RegisterSecretAs(value, label string) {
 	if value != "" {
-		e.redactor.Register(value)
+		e.redactor.RegisterLabeled(value, label)
 	}
+}
+
+func (e *Engine) registerEntries(entries []secrets.RedactionEntry) {
+	for _, entry := range entries {
+		if entry.Masked {
+			e.RegisterSecretAs(entry.Value, entry.Label)
+		}
+	}
+}
+
+// RegisterServerPasswords registers the SSH password of each server as
+// `servers.<name>.password`.
+func (e *Engine) RegisterServerPasswords(servers map[string]config.ServerConfig) {
+	e.registerEntries(secrets.ClassifyServerPasswords(servers))
+}
+
+// RegisterNotificationSecrets registers notification URLs as
+// `notifications.<kind>`.
+func (e *Engine) RegisterNotificationSecrets(cfg *config.Config) {
+	e.registerEntries(secrets.ClassifyNotificationURLs(cfg))
+}
+
+// RegisterBuildArgs registers every shared build arg value as
+// `builds.<build>.args.<ARG>`.
+func (e *Engine) RegisterBuildArgs(cfg *config.Config) {
+	e.registerEntries(secrets.ClassifyBuildArgs(cfg))
+}
+
+// RegisterBackupSecrets registers each service's backup storage credentials
+// as `services.<service>.backup.<field>`.
+func (e *Engine) RegisterBackupSecrets(services map[string]config.ServiceConfig) {
+	e.registerEntries(secrets.ClassifyBackupCredentials(services))
+}
+
+// RegisterServiceEnvFileValues registers the envFile/envFiles values of
+// services that look like credentials (the same rule as inline `env:`
+// values) as `envFile.<NAME>`. Services whose files cannot be read register
+// nothing; the returned error joins one error per such service.
+func (e *Engine) RegisterServiceEnvFileValues(services map[string]config.ServiceConfig) error {
+	entries, failures := secrets.ClassifyServiceEnvFiles(services)
+	e.registerEntries(entries)
+	if len(failures) == 0 {
+		return nil
+	}
+	errs := make([]error, 0, len(failures))
+	for _, failure := range failures {
+		errs = append(errs, &EnvFileUnreadableError{Service: failure.Service, Err: failure.Err})
+	}
+	return errors.Join(errs...)
+}
+
+// exportPasswordLabel labels the `config export` SSH password.
+var exportPasswordLabel = secrets.ExportPasswordLabel()
+
+func singleService(name string, service config.ServiceConfig) map[string]config.ServiceConfig {
+	return map[string]config.ServiceConfig{name: service}
+}
+
+// EnvFileUnreadableError reports a service envFile that could not be read
+// while registering redaction values.
+type EnvFileUnreadableError struct {
+	Service string
+	Err     error
+}
+
+func (e *EnvFileUnreadableError) Error() string {
+	return fmt.Sprintf("could not read envFile for %s: %v", e.Service, e.Err)
+}
+
+func (e *EnvFileUnreadableError) Unwrap() error { return e.Err }
+
+// registerServiceEnvFileValuesOrWarn registers envFile values and, for each
+// service whose files cannot be read, emits one warning with
+// `data.reason: "envfile-unreadable"` and continues. Read-only commands do
+// not otherwise need the files.
+func (e *Engine) registerServiceEnvFileValuesOrWarn(services map[string]config.ServiceConfig, envName string, phase string) {
+	for _, failure := range EnvFileUnreadableErrors(e.RegisterServiceEnvFileValues(services)) {
+		e.emit(events.Event{
+			Type:    events.TypeWarning,
+			Phase:   phase,
+			Level:   events.LevelWarn,
+			Message: e.RedactSensitive(EnvFileUnreadableWarning(failure)),
+			Data:    map[string]any{"environment": envName, "service": failure.Service, "reason": EnvFileUnreadableReason, "stream": "stderr"},
+		})
+	}
+}
+
+// EnvFileUnreadableReason is the `data.reason` of the warning emitted when a
+// service envFile cannot be read for redaction registration.
+const EnvFileUnreadableReason = "envfile-unreadable"
+
+// EnvFileUnreadableWarning renders the warning message for an unreadable
+// envFile. Callers redact it before emitting.
+func EnvFileUnreadableWarning(failure *EnvFileUnreadableError) string {
+	cause := ""
+	if failure.Err != nil {
+		cause = failure.Err.Error()
+	}
+	return fmt.Sprintf("Warning: could not read envFile for %s; its values will not be redacted: %s\n", failure.Service, cause)
+}
+
+// EnvFileUnreadableErrors splits an error returned by
+// RegisterServiceEnvFileValues into its per-service failures.
+func EnvFileUnreadableErrors(err error) []*EnvFileUnreadableError {
+	if err == nil {
+		return nil
+	}
+	parts := []error{err}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		parts = joined.Unwrap()
+	}
+	failures := make([]*EnvFileUnreadableError, 0, len(parts))
+	for _, part := range parts {
+		var unreadable *EnvFileUnreadableError
+		if errors.As(part, &unreadable) {
+			failures = append(failures, unreadable)
+		} else {
+			failures = append(failures, &EnvFileUnreadableError{Err: part})
+		}
+	}
+	return failures
 }
 
 // RegisterPublic marks a value that output must keep readable, such as a
@@ -122,13 +263,7 @@ func (e *Engine) RegisterPublic(value string) {
 // look like credentials (see secrets.ShouldRedactEnvValue). Ordinary settings
 // stay readable so they don't mask unrelated output.
 func (e *Engine) RegisterServiceEnvValues(services map[string]config.ServiceConfig) {
-	for _, service := range services {
-		for name, value := range service.Env {
-			if secrets.ShouldRedactEnvValue(name, value) {
-				e.RegisterSecret(value)
-			}
-		}
-	}
+	e.registerEntries(secrets.ClassifyServiceEnv(services))
 }
 
 // RegisterPublicConfigNames keeps the identifiers that appear throughout
@@ -177,28 +312,13 @@ func (e *Engine) flushBuildOutput() {
 // RegisterRegistrySecrets adds every configured registry credential to the
 // event redactor so pull/build output and result docs never carry them.
 func (e *Engine) RegisterRegistrySecrets(cfg *config.Config) {
-	if cfg == nil {
-		return
-	}
-	for _, registry := range cfg.Registries {
-		e.RegisterSecret(registry.Password)
-	}
+	e.registerEntries(secrets.ClassifyRegistryCredentials(cfg))
 }
 
 // RegisterACMEDNSSecrets adds environment-scoped DNS provider credentials to
 // the same redactor used for event streams, progress output, and result docs.
 func (e *Engine) RegisterACMEDNSSecrets(cfg *config.Config) {
-	if cfg == nil {
-		return
-	}
-	for _, environment := range cfg.Environments {
-		if environment.Proxy == nil || environment.Proxy.ACME == nil {
-			continue
-		}
-		for _, credential := range environment.Proxy.ACME.Credentials {
-			e.RegisterSecret(credential)
-		}
-	}
+	e.registerEntries(secrets.ClassifyACMEDNSCredentials(cfg))
 }
 
 // EventStream exposes the engine's stamped, redacting event stream so

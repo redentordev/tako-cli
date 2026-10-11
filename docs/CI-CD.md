@@ -222,6 +222,109 @@ verify `/v1/status` before deploying again. Development CLI builds must pass
 `--takod-binary` with a Linux binary because there is no release asset for
 `dev`.
 
+## Preview Environments per Pull Request
+
+With a `preview:` template in `tako.yaml` (see
+[PREVIEW-ENVIRONMENTS.md](./PREVIEW-ENVIRONMENTS.md)), one workflow deploys a
+preview when a pull request is opened or updated and destroys it when the pull
+request closes. A second, scheduled workflow prunes expired previews.
+
+```yaml
+name: Preview
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+
+concurrency:
+  group: preview-${{ github.event.number }}
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+      TAKO_NONINTERACTIVE: "1"
+      TAKO_HOST_KEY_MODE: strict
+      TAKO_ENV_PASSPHRASE: ${{ secrets.TAKO_ENV_PASSPHRASE }}
+      TAKO_SSH_KEY: ~/.ssh/tako_deploy
+      TAKO_SERVER_HOST: ${{ secrets.TAKO_SERVER_HOST }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Tako
+        run: |
+          curl -fL https://github.com/redentordev/tako-cli/releases/latest/download/tako-linux-amd64 -o /usr/local/bin/tako
+          chmod +x /usr/local/bin/tako
+
+      - name: Restore SSH key and environment
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.TAKO_SSH_PRIVATE_KEY }}" > "$TAKO_SSH_KEY"
+          chmod 600 "$TAKO_SSH_KEY"
+          tako env pull --force
+
+      - name: Deploy preview
+        if: github.event.action != 'closed'
+        run: tako deploy --preview pr-${{ github.event.number }} --yes
+
+      - name: Destroy preview
+        if: github.event.action == 'closed'
+        run: tako preview destroy pr-${{ github.event.number }} --yes
+```
+
+```yaml
+name: Prune previews
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+      TAKO_NONINTERACTIVE: "1"
+      TAKO_HOST_KEY_MODE: strict
+      TAKO_ENV_PASSPHRASE: ${{ secrets.TAKO_ENV_PASSPHRASE }}
+      TAKO_SSH_KEY: ~/.ssh/tako_deploy
+      TAKO_SERVER_HOST: ${{ secrets.TAKO_SERVER_HOST }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Tako
+        run: |
+          curl -fL https://github.com/redentordev/tako-cli/releases/latest/download/tako-linux-amd64 -o /usr/local/bin/tako
+          chmod +x /usr/local/bin/tako
+      - name: Restore SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.TAKO_SSH_PRIVATE_KEY }}" > "$TAKO_SSH_KEY"
+          chmod 600 "$TAKO_SSH_KEY"
+      - name: Prune expired previews
+        run: tako preview prune --yes
+```
+
+- The preview name `pr-<number>` is stable for the life of the pull request,
+  so each push redeploys the same preview, keeps its host and certificate, and
+  extends its expiry. The deploy's job summary shows the preview line, its
+  URLs, and an undo command that uses `--preview`.
+- The `concurrency` group serializes jobs for one pull request. Without it,
+  a job that starts while another still holds the preview's lease exits 3.
+- `tako preview destroy` exits 0 when the preview is already gone, so the
+  closed job is safe to rerun.
+- `tako preview prune` exits 6 when an expired preview could not be removed,
+  which fails the scheduled job so someone looks at it. Previews that another
+  job is deploying are skipped, not failed.
+- GitHub does not pass repository secrets to `pull_request` workflows from
+  forks. Only run previews for branches of the repository itself, and never
+  switch to `pull_request_target` to work around that: it would run untrusted
+  code with your deploy key.
+
 ## Lifecycle Hooks in CI
 
 [Hooks](./HOOKS.md) in `.tako-hooks/` run on the CI runner, exactly as they
@@ -267,6 +370,37 @@ applies to every deploy path.
   `rollback`, `promote`, and `setup`) runs no hook, not even `on-failure`, and
   ignores broken hook files. Each skipped hook still appears in the result as
   `skipped`.
+
+## Job Step Summary
+
+When `GITHUB_STEP_SUMMARY` is set, `tako deploy`, `rollback`, `promote` and
+`scale` append a Markdown summary of the operation to that file, so it shows
+on the workflow run page. It contains a status heading (succeeded, partial or
+failed), the duration and deployment ID, a table of services with their
+change, strategy, image, replicas and health, the URLs with their DNS/TLS
+readiness, the undo command, next steps, and the error. It is written in
+every output mode (`--output json` and `--events ndjson` keep stdout
+machine-readable) and is capped at 64 KiB per operation.
+
+- Gitea and Forgejo Actions runners set `GITHUB_STEP_SUMMARY` too, so the
+  summary works there unchanged.
+- Set `TAKO_STEP_SUMMARY=off` (or `0`, `false`, `no`) to disable it.
+- A failure to write the file is a warning and never changes the exit code.
+- Free text is redacted the same way as every other Tako output.
+
+The same summary is the `summary` object of the result document. A pipeline
+can read the undo command without parsing prose:
+
+```bash
+tako deploy --yes --output json > deploy.json || status=$?
+jq -r '.summary.outcome' deploy.json
+# argv form, safe to exec without a shell; null when no safe undo exists
+jq -c '.summary.undo.argv // empty' deploy.json
+jq -r '.summary.undo.unavailable // empty' deploy.json
+```
+
+The undo command never includes `--yes`; add it explicitly when a pipeline
+runs it unattended.
 
 ## Proving the Workflow
 
