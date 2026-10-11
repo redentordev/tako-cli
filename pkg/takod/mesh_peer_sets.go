@@ -69,6 +69,11 @@ type MeshPeerSetConflictError struct {
 
 func (e *MeshPeerSetConflictError) Error() string { return e.Message }
 
+// staleSetHint names the remedy for a set left behind by an environment that
+// no longer uses this server: deploys only contact members, so only an
+// explicit prune removes it.
+const staleSetHint = ", or, if that environment no longer lists this server, run 'tako mesh prune -e <environment>' in its project"
+
 func meshPeerSetsDir(dataDir string) string {
 	return filepath.Join(dataDir, "mesh", "peer-sets")
 }
@@ -315,7 +320,7 @@ func renderMeshUnion(sets map[string]MeshPeerSet, latest string) (*meshUnion, er
 				return nil, &MeshPeerSetConflictError{Message: fmt.Sprintf("mesh settings of %s (%s/%d, %s:%d) differ from %s (%s/%d, %s:%d) on this shared node; multi-node environments that share a server need the same mesh: block", describeSet(set), set.NetworkCIDR, set.SubnetBits, set.Config.Interface, set.Config.ListenPort, describeSet(base), base.NetworkCIDR, base.SubnetBits, base.Config.Interface, base.Config.ListenPort)}
 			}
 			if meshIP(set.Node.Address) != meshIP(base.Node.Address) {
-				return nil, &MeshPeerSetConflictError{Message: fmt.Sprintf("%s addresses this node (%s) as %s but %s addresses it as %s; redeploy the environment that owns the stale address", describeSet(set), set.Node.Name, meshIP(set.Node.Address), describeSet(base), meshIP(base.Node.Address))}
+				return nil, &MeshPeerSetConflictError{Message: fmt.Sprintf("%s addresses this node (%s) as %s but %s addresses it as %s; redeploy the environment that owns the stale address"+staleSetHint, describeSet(set), set.Node.Name, meshIP(set.Node.Address), describeSet(base), meshIP(base.Node.Address))}
 			}
 		}
 	} else if !ok {
@@ -338,16 +343,16 @@ func renderMeshUnion(sets map[string]MeshPeerSet, latest string) (*meshUnion, er
 			}
 			address := meshIP(peer.Address)
 			if address == selfAddress {
-				return nil, &MeshPeerSetConflictError{Message: fmt.Sprintf("mesh address %s of peer %s (%s) is this node's own address (%s); redeploy the environment that owns the stale address", address, peer.Name, describeSet(set), base.Node.Name)}
+				return nil, &MeshPeerSetConflictError{Message: fmt.Sprintf("mesh address %s of peer %s (%s) is this node's own address (%s); redeploy the environment that owns the stale address"+staleSetHint, address, peer.Name, describeSet(set), base.Node.Name)}
 			}
 			if existing, seen := byKey[key]; seen {
 				if meshIP(existing.peer.Address) != address {
-					return nil, &MeshPeerSetConflictError{Message: fmt.Sprintf("WireGuard key of %s (%s) is at %s, but %s (%s) lists it at %s; redeploy the environment that owns the stale address", existing.peer.Name, describeSet(existing.owner), meshIP(existing.peer.Address), peer.Name, describeSet(set), address)}
+					return nil, &MeshPeerSetConflictError{Message: fmt.Sprintf("WireGuard key of %s (%s) is at %s, but %s (%s) lists it at %s; redeploy the environment that owns the stale address"+staleSetHint, existing.peer.Name, describeSet(existing.owner), meshIP(existing.peer.Address), peer.Name, describeSet(set), address)}
 				}
 				continue
 			}
 			if existing, taken := byAddress[address]; taken {
-				return nil, &MeshPeerSetConflictError{Message: fmt.Sprintf("mesh address %s is held by %s (%s) and %s (%s) with different keys; redeploy the environment that owns the stale address", address, existing.peer.Name, describeSet(existing.owner), peer.Name, describeSet(set))}
+				return nil, &MeshPeerSetConflictError{Message: fmt.Sprintf("mesh address %s is held by %s (%s) and %s (%s) with different keys; redeploy the environment that owns the stale address"+staleSetHint, address, existing.peer.Name, describeSet(existing.owner), peer.Name, describeSet(set))}
 			}
 			entry := unionPeer{peer: peer, owner: set}
 			byKey[key] = entry

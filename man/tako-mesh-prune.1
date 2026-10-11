@@ -1,0 +1,72 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-mesh-prune - Remove the environment's mesh peer set from servers that left it
+
+
+.SH SYNOPSIS
+\fBtako mesh prune [flags]\fP
+
+
+.SH DESCRIPTION
+Remove the selected environment's mesh peer set from declared servers
+that are no longer members of it.
+
+.PP
+Each server keeps one mesh peer set per project and environment and renders
+their union. A deploy only contacts the environment's members, so when a
+server is removed from an environment's servers list, the set that
+environment stored there stays behind. It can later conflict with another
+environment's set on that server (409 "mesh address ... is held by ...").
+
+.PP
+mesh prune reads every declared, non-enrolled server outside the environment
+(or the servers named with --server), takes the environment's lease on each
+server that still stores the set, deletes the set, and releases the lease.
+An unreachable server is reported and skipped; run the command again once it
+is reachable. A server that is no longer declared in servers cannot be
+reached; declare it again to prune it.
+
+.PP
+Examples:
+  tako mesh prune -e preview
+  tako mesh prune -e preview --server old-1
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for prune
+
+.PP
+\fB--server\fP=[]
+	Prune only these servers (repeatable)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to use (default: the only environment, else production, else the first alphabetically)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH SEE ALSO
+\fBtako-mesh(1)\fP
