@@ -5,12 +5,20 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/redentordev/tako-cli/pkg/takoapi"
 )
 
-// Policy is a service's resolved self-healing policy from desired state.
-type Policy = takoapi.SelfHealingPolicyDocument
+// Policy is a service's resolved self-healing policy as takod reads it from
+// desired state. Its JSON shape is takoapi.SelfHealingPolicyDocument; it is
+// a separate type because takod must not import takoapi (takoapi's tests
+// import takod).
+type Policy struct {
+	Enabled            bool `json:"enabled"`
+	RestartUnhealthy   bool `json:"restartUnhealthy"`
+	StartExited        bool `json:"startExited"`
+	UnhealthyThreshold int  `json:"unhealthyThreshold"`
+	MaxRestarts        int  `json:"maxRestarts"`
+	WindowSeconds      int  `json:"windowSeconds"`
+}
 
 // Service states (D9).
 const (

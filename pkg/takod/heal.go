@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/selfheal"
-	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 )
 
@@ -103,8 +102,8 @@ type healDesiredService struct {
 		Timeout     string `json:"timeout"`
 		StartPeriod string `json:"startPeriod"`
 	} `json:"healthCheck"`
-	RemovalPending bool                               `json:"removalPending"`
-	SelfHealing    *takoapi.SelfHealingPolicyDocument `json:"selfHealing"`
+	RemovalPending bool             `json:"removalPending"`
+	SelfHealing    *selfheal.Policy `json:"selfHealing"`
 }
 
 // healScope is one environment with desired state on this node.

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/selfheal"
-	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 )
 
@@ -46,19 +45,19 @@ type HealBreakerStatus struct {
 
 // HealServiceStatus is one service with a policy on this node.
 type HealServiceStatus struct {
-	Service       string                             `json:"service"`
-	State         string                             `json:"state"`
-	Skip          string                             `json:"skip,omitempty"`
-	Revision      string                             `json:"revision,omitempty"`
-	Policy        *takoapi.SelfHealingPolicyDocument `json:"policy,omitempty"`
-	PausedUntil   *time.Time                         `json:"pausedUntil,omitempty"`
-	GaveUpAt      *time.Time                         `json:"gaveUpAt,omitempty"`
-	GaveUpReason  string                             `json:"gaveUpReason,omitempty"`
-	RecentActions int                                `json:"recentActions"`
-	LastAction    string                             `json:"lastAction,omitempty"`
-	LastActionAt  *time.Time                         `json:"lastActionAt,omitempty"`
-	LastReason    string                             `json:"lastReason,omitempty"`
-	Containers    []selfheal.ContainerStatus         `json:"containers,omitempty"`
+	Service       string                     `json:"service"`
+	State         string                     `json:"state"`
+	Skip          string                     `json:"skip,omitempty"`
+	Revision      string                     `json:"revision,omitempty"`
+	Policy        *selfheal.Policy           `json:"policy,omitempty"`
+	PausedUntil   *time.Time                 `json:"pausedUntil,omitempty"`
+	GaveUpAt      *time.Time                 `json:"gaveUpAt,omitempty"`
+	GaveUpReason  string                     `json:"gaveUpReason,omitempty"`
+	RecentActions int                        `json:"recentActions"`
+	LastAction    string                     `json:"lastAction,omitempty"`
+	LastActionAt  *time.Time                 `json:"lastActionAt,omitempty"`
+	LastReason    string                     `json:"lastReason,omitempty"`
+	Containers    []selfheal.ContainerStatus `json:"containers,omitempty"`
 }
 
 // HealChangeRequest is PUT /v1/heal.

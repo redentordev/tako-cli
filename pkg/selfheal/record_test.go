@@ -1,11 +1,15 @@
 package selfheal
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 )
 
 func TestRecordRoundTripAndConverging(t *testing.T) {
@@ -268,5 +272,23 @@ func TestPauseTargets(t *testing.T) {
 	}
 	if _, ok := control.PauseActive("web", now); ok {
 		t.Fatal("pause survived resume")
+	}
+}
+
+func TestPolicyMatchesDesiredStateDocument(t *testing.T) {
+	document := takoapi.SelfHealingPolicyDocument{Enabled: true, RestartUnhealthy: true, StartExited: true, UnhealthyThreshold: 4, MaxRestarts: 5, WindowSeconds: 600}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy Policy
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&policy); err != nil {
+		t.Fatalf("takoapi document does not decode strictly into Policy: %v", err)
+	}
+	back, _ := json.Marshal(policy)
+	if string(back) != string(data) {
+		t.Fatalf("Policy JSON %s differs from takoapi %s", back, data)
 	}
 }

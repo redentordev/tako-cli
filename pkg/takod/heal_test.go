@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/selfheal"
-	"github.com/redentordev/tako-cli/pkg/takoapi"
 )
 
 type healFixture struct {
@@ -83,8 +82,8 @@ func newHealFixture(t *testing.T) *healFixture {
 	return f
 }
 
-func healTestPolicy() *takoapi.SelfHealingPolicyDocument {
-	return &takoapi.SelfHealingPolicyDocument{Enabled: true, RestartUnhealthy: true, StartExited: true, UnhealthyThreshold: 3, MaxRestarts: 3, WindowSeconds: 1800}
+func healTestPolicy() *selfheal.Policy {
+	return &selfheal.Policy{Enabled: true, RestartUnhealthy: true, StartExited: true, UnhealthyThreshold: 3, MaxRestarts: 3, WindowSeconds: 1800}
 }
 
 // writeDesired writes desired state for demo/production; each service maps
