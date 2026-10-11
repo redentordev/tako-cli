@@ -33,6 +33,13 @@ type CleanupRequest struct {
 	BuildCacheKeepStorage  string   `json:"buildCacheKeepStorage,omitempty"`
 	CleanUnusedVolumes     bool     `json:"cleanUnusedVolumes,omitempty"`
 	SecureLogPermissions   bool     `json:"secureLogPermissions,omitempty"`
+	// DryRun (node.disk-hygiene-v1) reports what old-image cleanup would
+	// remove and why the rest is kept, and changes nothing. It accepts only
+	// old-image cleanup.
+	DryRun bool `json:"dryRun,omitempty"`
+	// Trigger names the caller of an old-image cleanup in the hygiene
+	// journal: "deploy" or "cleanup" (the default).
+	Trigger string `json:"trigger,omitempty"`
 	// RemovePreviewData tears down one preview environment in a fixed order
 	// behind the preview guard; see cleanupPreviewEnvironment. It requires
 	// RemoveContainers, RemoveNetworks and RemoveTakodState and rejects image,
@@ -72,6 +79,9 @@ type CleanupResponse struct {
 	// preview record nor labeled volumes and changed nothing.
 	PreviewNotFound bool     `json:"previewNotFound,omitempty"`
 	Warnings        []string `json:"warnings,omitempty"`
+	// Hygiene is the old-image report (node.disk-hygiene-v1): removed or,
+	// with DryRun, removable images, kept counts by reason and bytes freed.
+	Hygiene *CleanupHygiene `json:"hygiene,omitempty"`
 }
 
 const DefaultBuildCacheKeepStorage = "20GB"
@@ -108,6 +118,21 @@ func CleanupProjectWithDataDir(ctx context.Context, dataDir string, req CleanupR
 	}
 	warn := func(format string, args ...any) {
 		response.Warnings = append(response.Warnings, fmt.Sprintf(format, args...))
+	}
+	if req.DryRun {
+		report, err := cleanupOldProjectImagesWithOptions(ctx, dataDir, req.Project, req.Environment, req.KeepImages, req.ImageRepositories, imageCleanupOptions{DryRun: true})
+		if err != nil {
+			warn("%v", err)
+		}
+		response.Hygiene = &report
+		return response, nil
+	}
+	// The repositories of every accepted scoped old-image cleanup are what
+	// the autonomous image GC may later select from (hygiene_scopes.go).
+	if req.CleanOldImages && req.Environment != "" && dataDir != "" {
+		if err := recordHygieneScope(dataDir, req.Project, req.Environment, req.ImageRepositories, time.Now().UTC()); err != nil {
+			warn("failed to record image hygiene scope: %v", err)
+		}
 	}
 	if req.includesMaintenanceCleanup() {
 		response.InitialDiskUsage = diskUsage(ctx)
@@ -157,11 +182,12 @@ func CleanupProjectWithDataDir(ctx context.Context, dataDir string, req CleanupR
 		response.ContainersRemoved += count
 	}
 	if req.CleanOldImages {
-		count, err := cleanupOldProjectImages(ctx, dataDir, req.Project, req.Environment, req.KeepImages, req.ImageRepositories)
+		report, err := cleanupOldProjectImagesWithOptions(ctx, dataDir, req.Project, req.Environment, req.KeepImages, req.ImageRepositories, imageCleanupOptions{})
 		if err != nil {
 			warn("%v", err)
 		}
-		response.ImagesRemoved += count
+		response.ImagesRemoved += len(report.Removed)
+		response.Hygiene = &report
 	}
 	if req.CleanDanglingImages {
 		count, err := cleanupDanglingImages(ctx)
@@ -194,6 +220,11 @@ func CleanupProjectWithDataDir(ctx context.Context, dataDir string, req CleanupR
 	}
 	if req.RemoveTakodState {
 		cleanupTakodState(req.Project, req.Environment, warn)
+		if dataDir != "" {
+			if err := removeHygieneScope(dataDir, req.Project, req.Environment); err != nil {
+				warn("failed to remove image hygiene scope: %v", err)
+			}
+		}
 	}
 	if req.SecureLogPermissions {
 		if err := secureProxyLogPermissions(proxyLogDir); err != nil {
@@ -240,6 +271,21 @@ func validateCleanupRequest(req CleanupRequest) error {
 	}
 	if req.KeepImages < 0 {
 		return fmt.Errorf("keepImages cannot be negative")
+	}
+	switch req.Trigger {
+	case "", HygieneTriggerDeploy, HygieneTriggerCleanup:
+	default:
+		return fmt.Errorf("invalid cleanup trigger")
+	}
+	if req.DryRun {
+		if req.Environment == "" {
+			return fmt.Errorf("dryRun requires an environment")
+		}
+		if req.RemoveContainers || req.RemoveImages || req.RemoveNetworks || req.RemoveDeployFiles || req.RemoveTakodState ||
+			len(req.ProxyFiles) > 0 || req.PruneDocker || req.CleanStoppedContainers || req.CleanDanglingImages ||
+			req.CleanBuildCache || req.CleanUnusedVolumes || req.SecureLogPermissions || req.RemovePreviewData {
+			return fmt.Errorf("dryRun supports only old-image cleanup")
+		}
 	}
 	return validatePreviewTeardownRequest(req)
 }

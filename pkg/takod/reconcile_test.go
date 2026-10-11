@@ -1445,6 +1445,14 @@ func TestTakodCommandHelper(t *testing.T) {
 			}
 			os.Exit(0)
 		}
+		if len(commandArgs) > 1 && commandArgs[1] == "inspect" {
+			if os.Getenv("TAKO_FAKE_IMAGE_INSPECT_ERROR") != "" {
+				_, _ = os.Stderr.WriteString("inspect failed")
+				os.Exit(1)
+			}
+			_, _ = os.Stdout.WriteString(os.Getenv("TAKO_FAKE_IMAGE_INSPECT_OUTPUT"))
+			os.Exit(0)
+		}
 		os.Exit(0)
 	case "images":
 		joined := strings.Join(commandArgs, " ")

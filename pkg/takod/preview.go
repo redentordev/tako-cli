@@ -426,6 +426,7 @@ func removePreviewState(dataDir string, project string, environment string) erro
 	for _, path := range []string{
 		filepath.Join(dataDir, "actual", project, environment),
 		filepath.Join(dataDir, "events", project, environment+".jsonl"),
+		hygieneScopePath(dataDir, project, environment),
 	} {
 		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("failed to remove preview state at %s: %w", path, err)

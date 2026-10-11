@@ -3,11 +3,14 @@ package takod
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Old-image cleanup keeps the newest N images per (repository, environment).
@@ -23,9 +26,69 @@ type dockerImageEntry struct {
 	ID         string
 	Repository string
 	Tag        string
+	// Created and Size come from `docker image inspect` of the selected
+	// candidates only; they are zero when unknown.
+	Created time.Time
+	Size    int64
 }
 
 func (e dockerImageEntry) ref() string { return e.Repository + ":" + e.Tag }
+
+// Kept-image reasons. They explain a decision; they never change one.
+const (
+	ImageKeptInUse            = "in use"
+	ImageKeptCurrent          = "current"
+	ImageKeptOtherEnvironment = "other environment"
+	ImageKeptRetention        = "retention"
+	ImageKeptRecent           = "recent"
+)
+
+// CleanupHygiene is the additive image report of a scoped cleanup, a dry run
+// or an image GC pass: what was (or would be) removed, why the rest of the
+// target environment's images were kept, and the bytes freed.
+type CleanupHygiene struct {
+	Removed    []HygieneImage `json:"removed,omitempty"`
+	Kept       map[string]int `json:"kept,omitempty"`
+	BytesFreed int64          `json:"bytesFreed"`
+	DryRun     bool           `json:"dryRun,omitempty"`
+	// Failed lists removals Docker refused; those images were kept.
+	Failed []string `json:"failed,omitempty"`
+}
+
+// HygieneImage is one removed (or, in a dry run, removable) image.
+type HygieneImage struct {
+	ID        string   `json:"id"`
+	Refs      []string `json:"refs"`
+	SizeBytes int64    `json:"sizeBytes,omitempty"`
+}
+
+// imageCleanupOptions are the additions unattended callers need. The zero
+// value is exactly v0.14.2's scoped cleanup.
+type imageCleanupOptions struct {
+	// CreatedAfter keeps images created after this instant (reason
+	// "recent"); an image whose creation time is unknown is kept too.
+	CreatedAfter time.Time
+	// DryRun selects and reports without removing anything.
+	DryRun bool
+}
+
+type imageCleanupPlan struct {
+	Removals []imageRemoval
+	// Kept maps an image ID owned by the target environment, in an allowed
+	// repository, to the reason it is kept.
+	Kept map[string]string
+}
+
+func (p imageCleanupPlan) keptCounts() map[string]int {
+	if len(p.Kept) == 0 {
+		return nil
+	}
+	counts := make(map[string]int)
+	for _, reason := range p.Kept {
+		counts[reason]++
+	}
+	return counts
+}
 
 type imageCleanupEvidence struct {
 	// owners maps an image ref to the project environments whose desired
@@ -45,36 +108,75 @@ type imageCleanupEvidence struct {
 type imageRemoval struct {
 	ID   string
 	Refs []string
+	Size int64
 }
 
+// errImageCleanupStateUnreadable marks a selection that removed nothing
+// because node state or the Docker inventory could not be read.
+var errImageCleanupStateUnreadable = errors.New("image cleanup state unreadable")
+
 func cleanupOldProjectImages(ctx context.Context, dataDir string, project string, environment string, keepLatest int, imageRepositories []string) (int, error) {
+	report, err := cleanupOldProjectImagesWithOptions(ctx, dataDir, project, environment, keepLatest, imageRepositories, imageCleanupOptions{})
+	return len(report.Removed), err
+}
+
+// cleanupOldProjectImagesWithOptions is the single image removal path for
+// scoped cleanup, dry runs and the autonomous image GC. Selection is
+// planOldImageRemovalsDetailed; anything that cannot be read removes nothing.
+func cleanupOldProjectImagesWithOptions(ctx context.Context, dataDir string, project string, environment string, keepLatest int, imageRepositories []string, options imageCleanupOptions) (CleanupHygiene, error) {
+	report := CleanupHygiene{DryRun: options.DryRun}
 	if len(imageRepositories) == 0 {
-		return 0, nil
+		return report, nil
 	}
 	if environment == "" {
-		return 0, fmt.Errorf("old image cleanup requires an environment; no images removed")
+		return report, fmt.Errorf("old image cleanup requires an environment; no images removed")
 	}
 	output, err := runDocker(ctx, "images", "--filter", "label!="+composeProjectImageLabel, "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}")
 	if err != nil {
-		return 0, fmt.Errorf("failed to list docker images: %w", err)
+		return report, fmt.Errorf("%w: failed to list docker images: %w", errImageCleanupStateUnreadable, err)
 	}
 	images := parseDockerImageList(output)
 
 	evidence, err := readImageCleanupState(dataDir, project)
 	if err != nil {
-		return 0, fmt.Errorf("old image cleanup skipped, deployment state unreadable: %w", err)
+		return report, fmt.Errorf("%w: old image cleanup skipped, deployment state unreadable: %w", errImageCleanupStateUnreadable, err)
 	}
 	inUseIDs, inUseRefs, err := containerImageUsage(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("old image cleanup skipped, container image usage unreadable: %w", err)
+		return report, fmt.Errorf("%w: old image cleanup skipped, container image usage unreadable: %w", errImageCleanupStateUnreadable, err)
 	}
 	evidence.inUseIDs = inUseIDs
 	evidence.inUseRefs = inUseRefs
 
-	removals := planOldImageRemovals(images, evidence, environment, keepLatest, imageRepositories)
-	removed := 0
+	// The first pass is v0.14.2's selection. Creation times and sizes are
+	// read for its candidates only; the grace can only keep more.
+	plan := planOldImageRemovalsDetailed(images, evidence, environment, keepLatest, imageRepositories, time.Time{})
+	if len(plan.Removals) > 0 {
+		ids := make([]string, 0, len(plan.Removals))
+		for _, removal := range plan.Removals {
+			ids = append(ids, removal.ID)
+		}
+		metadata, metaErr := inspectImageMetadata(ctx, ids)
+		if metaErr != nil && !options.CreatedAfter.IsZero() {
+			return report, fmt.Errorf("%w: old image cleanup skipped, image creation times unreadable: %w", errImageCleanupStateUnreadable, metaErr)
+		}
+		for index := range images {
+			if meta, ok := lookupImageMetadata(metadata, images[index].ID); ok {
+				images[index].Created = meta.Created
+				images[index].Size = meta.Size
+			}
+		}
+		plan = planOldImageRemovalsDetailed(images, evidence, environment, keepLatest, imageRepositories, options.CreatedAfter)
+	}
+
+	kept := plan.Kept
 	var failures []string
-	for _, removal := range removals {
+	for _, removal := range plan.Removals {
+		if options.DryRun {
+			report.Removed = append(report.Removed, HygieneImage{ID: removal.ID, Refs: removal.Refs, SizeBytes: removal.Size})
+			report.BytesFreed += removal.Size
+			continue
+		}
 		// Never force: Docker refuses to delete an image a container still
 		// uses, which backs up the in-use check above.
 		args := []string{"rmi"}
@@ -85,14 +187,63 @@ func cleanupOldProjectImages(ctx context.Context, dataDir string, project string
 		}
 		if out, err := runDocker(ctx, args...); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v %s", strings.Join(removal.Refs, ","), err, strings.TrimSpace(out)))
+			kept[removal.ID] = ImageKeptInUse
 			continue
 		}
-		removed++
+		report.Removed = append(report.Removed, HygieneImage{ID: removal.ID, Refs: removal.Refs, SizeBytes: removal.Size})
+		report.BytesFreed += removal.Size
 	}
+	report.Kept = imageCleanupPlan{Kept: kept}.keptCounts()
+	report.Failed = failures
 	if len(failures) > 0 {
-		return removed, fmt.Errorf("failed to remove %d old project image(s): %s", len(failures), strings.Join(failures, "; "))
+		return report, fmt.Errorf("failed to remove %d old project image(s): %s", len(failures), strings.Join(failures, "; "))
 	}
-	return removed, nil
+	return report, nil
+}
+
+type imageMetadata struct {
+	Created time.Time
+	Size    int64
+}
+
+// inspectImageMetadata reads creation time and size of the given image IDs.
+func inspectImageMetadata(ctx context.Context, ids []string) (map[string]imageMetadata, error) {
+	metadata := make(map[string]imageMetadata, len(ids))
+	if len(ids) == 0 {
+		return metadata, nil
+	}
+	args := append([]string{"image", "inspect", "--format", "{{.Id}}\t{{.Created}}\t{{.Size}}"}, ids...)
+	output, err := runDocker(ctx, args...)
+	if err != nil {
+		return metadata, fmt.Errorf("failed to inspect images: %w", err)
+	}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Split(strings.TrimSpace(line), "\t")
+		if len(fields) != 3 || fields[0] == "" {
+			continue
+		}
+		id := strings.TrimPrefix(fields[0], "sha256:")
+		created, err := time.Parse(time.RFC3339Nano, fields[1])
+		if err != nil {
+			continue
+		}
+		size, _ := strconv.ParseInt(fields[2], 10, 64)
+		metadata[id] = imageMetadata{Created: created.UTC(), Size: size}
+	}
+	return metadata, nil
+}
+
+func lookupImageMetadata(metadata map[string]imageMetadata, id string) (imageMetadata, bool) {
+	if meta, ok := metadata[id]; ok {
+		return meta, true
+	}
+	// docker images prints short IDs; inspect prints full IDs.
+	for full, meta := range metadata {
+		if id != "" && strings.HasPrefix(full, id) {
+			return meta, true
+		}
+	}
+	return imageMetadata{}, false
 }
 
 func parseDockerImageList(output string) []dockerImageEntry {
@@ -114,6 +265,16 @@ func parseDockerImageList(output string) []dockerImageEntry {
 // planOldImageRemovals selects images to remove. images must be in Docker's
 // listing order (newest first).
 func planOldImageRemovals(images []dockerImageEntry, evidence imageCleanupEvidence, environment string, keepLatest int, imageRepositories []string) []imageRemoval {
+	return planOldImageRemovalsDetailed(images, evidence, environment, keepLatest, imageRepositories, time.Time{}).Removals
+}
+
+// planOldImageRemovalsDetailed is planOldImageRemovals plus the kept reason
+// of every other image the target environment owns in the allowed
+// repositories. A non-zero createdAfter additionally keeps images created
+// after it (or of unknown age) as "recent"; the zero value selects exactly
+// what planOldImageRemovals selects.
+func planOldImageRemovalsDetailed(images []dockerImageEntry, evidence imageCleanupEvidence, environment string, keepLatest int, imageRepositories []string, createdAfter time.Time) imageCleanupPlan {
+	plan := imageCleanupPlan{Kept: make(map[string]string)}
 	if keepLatest < 0 {
 		keepLatest = 0
 	}
@@ -166,30 +327,72 @@ func planOldImageRemovals(images []dockerImageEntry, evidence imageCleanupEviden
 		seen[image.ID] = true
 		if kept[image.Repository] < keepLatest {
 			kept[image.Repository]++
+			plan.Kept[image.ID] = ImageKeptRetention
 			continue
 		}
 		candidate[image.ID] = true
 	}
 
-	var removals []imageRemoval
 	for _, id := range ids {
-		if !candidate[id] || imageIDInUse(id, evidence.inUseIDs) {
+		if !candidate[id] {
+			continue
+		}
+		// v0.14.2 semantics: an image beyond N in any allowed repository is
+		// a candidate; the reasons below replace "retention".
+		delete(plan.Kept, id)
+		if imageIDInUse(id, evidence.inUseIDs) {
+			plan.Kept[id] = ImageKeptInUse
 			continue
 		}
 		// Every ref on the image must be safe to remove; a ref outside the
 		// target environment or repositories keeps the whole image.
 		ok := true
+		var created time.Time
+		var size int64
 		for _, image := range images {
-			if image.ID == id && !removable(image) {
+			if image.ID != id {
+				continue
+			}
+			if !image.Created.IsZero() {
+				created = image.Created
+			}
+			if image.Size > 0 {
+				size = image.Size
+			}
+			if !removable(image) {
 				ok = false
+				plan.Kept[id] = imageKeptReason(image, environment, evidence, ownedByTarget(image))
 				break
 			}
 		}
-		if ok {
-			removals = append(removals, imageRemoval{ID: id, Refs: refsByID[id]})
+		if !ok {
+			continue
+		}
+		if !createdAfter.IsZero() && (created.IsZero() || created.After(createdAfter)) {
+			plan.Kept[id] = ImageKeptRecent
+			continue
+		}
+		plan.Removals = append(plan.Removals, imageRemoval{ID: id, Refs: refsByID[id], Size: size})
+	}
+	return plan
+}
+
+// imageKeptReason explains why a non-removable ref keeps its image.
+func imageKeptReason(image dockerImageEntry, environment string, evidence imageCleanupEvidence, ownedByTarget bool) string {
+	switch {
+	case evidence.inUseRefs[image.ref()]:
+		return ImageKeptInUse
+	case evidence.protectedRefs[image.ref()]:
+		return ImageKeptCurrent
+	case !ownedByTarget:
+		return ImageKeptOtherEnvironment
+	}
+	for env := range imageOwners(image, evidence) {
+		if env != environment {
+			return ImageKeptOtherEnvironment
 		}
 	}
-	return removals
+	return ImageKeptCurrent
 }
 
 func imageOwners(image dockerImageEntry, evidence imageCleanupEvidence) map[string]bool {

@@ -756,7 +756,7 @@ func (e AgentOperationExecutor) Plan(spec OperationSpec) (OperationPlan, error) 
 		plan.ReplaySafe = true
 	}
 	switch parsed.Path {
-	case "/v1/remove-service", "/v1/cleanup", "/v1/backups/cleanup":
+	case "/v1/remove-service", "/v1/cleanup", "/v1/backups/cleanup", "/v1/hygiene/reclaim":
 		plan.DiskGrowth = false
 		plan.ReplaySafe = true
 	case "/v1/reconcile-service":
