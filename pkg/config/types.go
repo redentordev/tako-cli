@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -55,6 +57,10 @@ type Config struct {
 	// enrollment is incomplete and no authoritative inventory can be
 	// materialized. Project mutations fail closed while this is non-empty.
 	PlatformArtifacts []string `yaml:"-" json:"-"`
+
+	// resolution records environment inheritance (extends/abstract) and
+	// value provenance when the document used it; nil otherwise.
+	resolution *environmentResolution
 }
 
 // PlatformContext identifies the enrolled cluster that owns the runtime
@@ -760,6 +766,13 @@ type MonitoringConfig struct {
 
 // EnvironmentConfig defines an environment (production, staging, etc.)
 type EnvironmentConfig struct {
+	// Extends names the environment this one inherits from and Abstract
+	// marks a template-only environment. Both are consumed while the config
+	// document is resolved, so they are always empty on a loaded config and
+	// are never written back out.
+	Extends  string `yaml:"extends,omitempty" json:"extends,omitempty"`
+	Abstract bool   `yaml:"abstract,omitempty" json:"abstract,omitempty"`
+
 	Servers        []string                `yaml:"servers" json:"servers"`                                   // List of server names to use
 	ServerSelector *ServerSelector         `yaml:"serverSelector,omitempty" json:"serverSelector,omitempty"` // Label-based server selection
 	Proxy          *EnvironmentProxyConfig `yaml:"proxy,omitempty" json:"proxy,omitempty"`                   // Environment-level proxy placement
@@ -842,27 +855,34 @@ func (s *ServiceConfig) IsWorker() bool {
 	return s.Port == 0
 }
 
-// GetDefaultEnvironment returns the default environment name
-// Returns "production" if it exists, otherwise the first environment
+// GetDefaultEnvironment returns the environment used when none is selected;
+// see ResolveDefaultEnvironment.
 func (c *Config) GetDefaultEnvironment() string {
-	// If only one environment, return it
-	if len(c.Environments) == 1 {
-		for name := range c.Environments {
-			return name
-		}
-	}
+	name, _ := c.ResolveDefaultEnvironment()
+	return name
+}
 
-	// Check if "production" exists
+// ResolveDefaultEnvironment deterministically picks the environment used when
+// none is selected, from the deployable (non-abstract) environments: the only
+// one, else "production", else the first name in ascending order. implicit is
+// true only in that last case, so callers can tell the user to pass -e. It
+// returns "" when no environments are configured.
+func (c *Config) ResolveDefaultEnvironment() (name string, implicit bool) {
+	if c == nil || len(c.Environments) == 0 {
+		return "", false
+	}
+	names := make([]string, 0, len(c.Environments))
+	for envName := range c.Environments {
+		names = append(names, envName)
+	}
+	if len(names) == 1 {
+		return names[0], false
+	}
 	if _, exists := c.Environments["production"]; exists {
-		return "production"
+		return "production", false
 	}
-
-	// Return first environment (alphabetically)
-	for name := range c.Environments {
-		return name
-	}
-
-	return ""
+	sort.Strings(names)
+	return names[0], true
 }
 
 // GetEnvironment retrieves a specific environment configuration
@@ -877,6 +897,12 @@ func (c *Config) GetEnvironment(name string) (*EnvironmentConfig, error) {
 
 	env, exists := c.Environments[name]
 	if !exists {
+		if c.IsAbstractEnvironment(name) {
+			if children := c.resolution.concreteDescendants(name); len(children) > 0 {
+				return nil, fmt.Errorf("environment '%s' is abstract and cannot be deployed; use one of: %s", name, strings.Join(children, ", "))
+			}
+			return nil, fmt.Errorf("environment '%s' is abstract and cannot be deployed; no environment extends it", name)
+		}
 		return nil, fmt.Errorf("environment '%s' not found", name)
 	}
 	return &env, nil
@@ -1276,10 +1302,52 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to expand config environment variables: %w", err)
 	}
 
-	// Parse config into Config struct
+	// Resolve environment inheritance and decode into the Config struct
+	parsed, err := ParseConfigDocument([]byte(expandedData), isJSON)
+	if err != nil {
+		return nil, err
+	}
+	config := *parsed
+
+	normalizeConfigRelativePaths(&config, configDir)
+	if err := materializeDefaultPlatformInventory(&config); err != nil {
+		return nil, fmt.Errorf("materialize platform inventory: %w", err)
+	}
+	// Validate config
+	if err := ValidateConfig(&config); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", config.annotateEnvironmentChain(err))
+	}
+	if err := validateExistingProjectClusterBinding(&config, configPath); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+// ParseConfigDocument strictly decodes a tako.yaml (isJSON false) or
+// tako.json document without validating it. Top-level x- keys are dropped
+// and environments are resolved through extends/abstract first, so every
+// environment in the result is flattened and deployable. A document that
+// uses none of these features is decoded exactly as written. Errors carry
+// the "failed to parse YAML config:"/"failed to parse JSON config:" prefix
+// for decode failures and "invalid config:" for inheritance failures.
+func ParseConfigDocument(data []byte, isJSON bool) (*Config, error) {
+	format := "YAML"
+	if isJSON {
+		format = "JSON"
+	}
+	resolved, resolution, err := resolveConfigDocument(data, isJSON)
+	if err != nil {
+		var decodeErr *configDecodeError
+		if errors.As(err, &decodeErr) {
+			return nil, fmt.Errorf("failed to parse %s config: %w", format, decodeErr.err)
+		}
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
 	var config Config
 	if isJSON {
-		decoder := json.NewDecoder(strings.NewReader(expandedData))
+		decoder := json.NewDecoder(bytes.NewReader(resolved))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to parse JSON config: %w", err)
@@ -1292,26 +1360,21 @@ func LoadConfig(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("failed to parse JSON config: %w", err)
 		}
 	} else {
-		// Parse YAML
-		decoder := yaml.NewDecoder(strings.NewReader(expandedData))
+		decoder := yaml.NewDecoder(bytes.NewReader(resolved))
 		decoder.KnownFields(true) // Strict mode - error on unknown fields
 		if err := decoder.Decode(&config); err != nil {
+			if resolution != nil {
+				err = remapYAMLErrorLines(err, resolution.encodedLines)
+			}
 			return nil, fmt.Errorf("failed to parse YAML config: %w", err)
 		}
 	}
-
-	normalizeConfigRelativePaths(&config, configDir)
-	if err := materializeDefaultPlatformInventory(&config); err != nil {
-		return nil, fmt.Errorf("materialize platform inventory: %w", err)
+	for name, env := range config.Environments {
+		if env.Extends != "" || env.Abstract {
+			return nil, fmt.Errorf("invalid config: environment %s: extends/abstract could not be resolved", name)
+		}
 	}
-	// Validate config
-	if err := ValidateConfig(&config); err != nil {
-		return nil, fmt.Errorf("invalid config: %w", err)
-	}
-	if err := validateExistingProjectClusterBinding(&config, configPath); err != nil {
-		return nil, err
-	}
-
+	config.resolution = resolution
 	return &config, nil
 }
 

@@ -1,9 +1,7 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,7 +9,6 @@ import (
 
 	takoconfig "github.com/redentordev/tako-cli/pkg/config"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 var configCmd = &cobra.Command{
@@ -24,8 +21,10 @@ var configExplainCmd = &cobra.Command{
 	Short:        "Show inferred runtime defaults and config sources",
 	SilenceUsage: true,
 	Long: `Show the effective configuration that Tako will use after environment
-expansion, default resolution, and validation. This command does not contact
-servers or write files.`,
+expansion, environment inheritance (extends), default resolution, and
+validation. When the selected environment extends another, the header shows
+the extends chain and each environment-scoped value names the environment
+that supplied it. This command does not contact servers or write files.`,
 	RunE: runConfigExplain,
 }
 
@@ -59,10 +58,26 @@ func runConfigExplain(cmd *cobra.Command, args []string) error {
 		return formatDeployConfigError(configPath, fmt.Errorf("invalid config: %w", err))
 	}
 	envRaw := rawCfg.Environments[envName]
+	chain := cfg.EnvironmentExtendsChain(envName)
+	// from appends the declaring environment to a source label when the
+	// selected environment inherits; defaults have no declaring environment.
+	from := func(label, path string) string {
+		if len(chain) == 0 || label == "default" {
+			return label
+		}
+		if source := cfg.EnvironmentValueSource(envName, path); source != "" {
+			return label + ", from " + source
+		}
+		return label
+	}
 
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Effective config: %s\n", filepath.Clean(configPath))
-	fmt.Fprintf(out, "Environment: %s\n\n", envName)
+	if len(chain) > 0 {
+		fmt.Fprintf(out, "Environment: %s (extends %s)\n\n", envName, strings.Join(chain, " -> "))
+	} else {
+		fmt.Fprintf(out, "Environment: %s\n\n", envName)
+	}
 
 	fmt.Fprintln(out, "Runtime")
 	fmt.Fprintf(out, "  mode: %s (%s)\n", cfg.GetRuntimeMode(), runtimeStringSource(rawCfg, rawCfg.Runtime != nil, rawCfgRuntimeMode(rawCfg)))
@@ -85,7 +100,11 @@ func runConfigExplain(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "  subnetBits: %d (%s)\n", cfg.Mesh.SubnetBits, runtimeIntSource(rawCfg.Mesh != nil && rawCfg.Mesh.SubnetBits != 0))
 	fmt.Fprintf(out, "  natTraversal: %t (%s)\n\n", cfg.Mesh.NATTraversal, runtimeBoolSource(rawCfg.Mesh != nil && rawCfg.Mesh.NATTraversal))
 
-	fmt.Fprintln(out, "Servers")
+	if serversSource := explainServersSource(cfg, envName, chain); serversSource != "" {
+		fmt.Fprintf(out, "Servers (from %s)\n", serversSource)
+	} else {
+		fmt.Fprintln(out, "Servers")
+	}
 	for _, serverName := range servers {
 		server := cfg.Servers[serverName]
 		rawServer := rawCfg.Servers[serverName]
@@ -113,24 +132,25 @@ func runConfigExplain(cmd *cobra.Command, args []string) error {
 	for _, serviceName := range serviceNames {
 		service := services[serviceName]
 		rawService := envRaw.Services[serviceName]
+		path := "services." + serviceName + "."
 		fmt.Fprintf(out, "  %s:\n", serviceName)
 		fmt.Fprintf(out, "    type: %s\n", service.GetServiceType())
-		fmt.Fprintf(out, "    source: %s\n", explainServiceSource(service, rawService))
-		fmt.Fprintf(out, "    replicas: %d (%s)\n", effectiveReplicas(service), runtimeIntSource(rawService.Replicas != 0))
-		fmt.Fprintf(out, "    deploy.strategy: %s (%s)\n", service.Deploy.Strategy, runtimeStringSource(rawCfg, rawService.Deploy.Strategy != "", rawService.Deploy.Strategy))
+		fmt.Fprintf(out, "    source: %s\n", explainServiceSource(service, rawService, func(label, field string) string { return from(label, path+field) }))
+		fmt.Fprintf(out, "    replicas: %d (%s)\n", effectiveReplicas(service), from(runtimeIntSource(rawService.Replicas != 0), path+"replicas"))
+		fmt.Fprintf(out, "    deploy.strategy: %s (%s)\n", service.Deploy.Strategy, from(runtimeStringSource(rawCfg, rawService.Deploy.Strategy != "", rawService.Deploy.Strategy), path+"deploy.strategy"))
 		if service.Proxy != nil {
-			fmt.Fprintf(out, "    proxy.visibility: %s (%s)\n", service.Proxy.EffectiveVisibility(), runtimeStringSource(rawCfg, rawService.Proxy != nil && rawService.Proxy.Visibility != "", rawServiceProxyVisibility(rawService)))
+			fmt.Fprintf(out, "    proxy.visibility: %s (%s)\n", service.Proxy.EffectiveVisibility(), from(runtimeStringSource(rawCfg, rawService.Proxy != nil && rawService.Proxy.Visibility != "", rawServiceProxyVisibility(rawService)), path+"proxy.visibility"))
 			if service.Proxy.Domain != "" {
-				fmt.Fprintf(out, "    proxy.domain: %s (%s)\n", service.Proxy.Domain, explainStringSource(rawServiceProxyDomain(rawService)))
+				fmt.Fprintf(out, "    proxy.domain: %s (%s)\n", service.Proxy.Domain, from(explainStringSource(rawServiceProxyDomain(rawService)), path+"proxy.domain"))
 			}
 			if service.Proxy.CDN != "" {
-				fmt.Fprintf(out, "    proxy.cdn: %s (%s)\n", service.Proxy.CDN, explainStringSource(rawServiceProxyCDN(rawService)))
+				fmt.Fprintf(out, "    proxy.cdn: %s (%s)\n", service.Proxy.CDN, from(explainStringSource(rawServiceProxyCDN(rawService)), path+"proxy.cdn"))
 			}
 			if service.Proxy.Host != "" {
-				fmt.Fprintf(out, "    proxy.host: %s (%s)\n", service.Proxy.Host, runtimeStringSource(rawCfg, rawService.Proxy != nil && rawService.Proxy.Host != "", rawServiceProxyHost(rawService)))
+				fmt.Fprintf(out, "    proxy.host: %s (%s)\n", service.Proxy.Host, from(runtimeStringSource(rawCfg, rawService.Proxy != nil && rawService.Proxy.Host != "", rawServiceProxyHost(rawService)), path+"proxy.host"))
 			}
 			if service.Proxy.DynamicDomains != nil && service.Proxy.DynamicDomains.IsEnabled() {
-				fmt.Fprintf(out, "    proxy.dynamicDomains.ask: %s (%s)\n", service.Proxy.DynamicDomains.Ask, explainStringSource(rawServiceProxyDynamicAsk(rawService)))
+				fmt.Fprintf(out, "    proxy.dynamicDomains.ask: %s (%s)\n", service.Proxy.DynamicDomains.Ask, from(explainStringSource(rawServiceProxyDynamicAsk(rawService)), path+"proxy.dynamicDomains.ask"))
 			}
 		}
 	}
@@ -144,29 +164,22 @@ func loadRawConfigForExplain(configPath string) (*takoconfig.Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	var cfg takoconfig.Config
-	if strings.EqualFold(filepath.Ext(configPath), ".json") {
-		decoder := json.NewDecoder(strings.NewReader(string(data)))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("failed to parse JSON config for explanation: %w", err)
-		}
-		var extra any
-		if err := decoder.Decode(&extra); err != io.EOF {
-			if err == nil {
-				return nil, fmt.Errorf("failed to parse JSON config for explanation: multiple JSON values")
-			}
-			return nil, fmt.Errorf("failed to parse JSON config for explanation: %w", err)
-		}
-		return &cfg, nil
-	}
+	// The raw (unexpanded) document goes through the same resolver as
+	// LoadConfig, so explain sees the same flattened environments while
+	// still telling ${VAR} values apart from literal config.
+	return takoconfig.ParseConfigDocument(data, strings.EqualFold(filepath.Ext(configPath), ".json"))
+}
 
-	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse YAML config for explanation: %w", err)
+// explainServersSource names the environment that chose the server list
+// (servers or serverSelector) when the selected environment inherits.
+func explainServersSource(cfg *takoconfig.Config, envName string, chain []string) string {
+	if len(chain) == 0 {
+		return ""
 	}
-	return &cfg, nil
+	if source := cfg.EnvironmentValueSource(envName, "servers"); source != "" {
+		return source
+	}
+	return cfg.EnvironmentValueSource(envName, "serverSelector")
 }
 
 func runtimeStringSource(_ *takoconfig.Config, present bool, value string) string {
@@ -207,14 +220,14 @@ func effectiveReplicas(service takoconfig.ServiceConfig) int {
 	return service.Replicas
 }
 
-func explainServiceSource(service, raw takoconfig.ServiceConfig) string {
+func explainServiceSource(service, raw takoconfig.ServiceConfig, from func(label, field string) string) string {
 	switch {
 	case service.ImageFrom != "":
-		return fmt.Sprintf("imageFrom %q (%s)", service.ImageFrom, explainStringSource(raw.ImageFrom))
+		return fmt.Sprintf("imageFrom %q (%s)", service.ImageFrom, from(explainStringSource(raw.ImageFrom), "imageFrom"))
 	case service.Build != "":
-		return fmt.Sprintf("build %q (%s)", service.Build, explainStringSource(raw.Build))
+		return fmt.Sprintf("build %q (%s)", service.Build, from(explainStringSource(raw.Build), "build"))
 	case service.Image != "":
-		return fmt.Sprintf("image %q (%s)", service.Image, explainStringSource(raw.Image))
+		return fmt.Sprintf("image %q (%s)", service.Image, from(explainStringSource(raw.Image), "image"))
 	default:
 		return "worker"
 	}

@@ -75,3 +75,63 @@ func TestValidateSecretSourcesRequiresProvider(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+const secretSourcesExtendsTestConfig = `project:
+  name: demo
+  version: 1.0.0
+secretSources:
+  - provider: doppler
+    project: api
+    providerEnv: prd
+servers:
+  node-a:
+    host: 10.0.0.1
+    user: deploy
+    password: sshpass
+environments:
+  production:
+    servers: [node-a]
+    secretSources:
+      - provider: aws-ssm
+        path: /app/prod
+        region: us-east-1
+    services:
+      web:
+        image: nginx:alpine
+  staging:
+    extends: production
+%s`
+
+func TestSecretSourcesInheritedThroughExtends(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tako.yaml")
+	if err := os.WriteFile(path, []byte(strings.Replace(secretSourcesExtendsTestConfig, "%s", "", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	sources := cfg.SecretSourcesFor("staging")
+	if len(sources) != 2 || sources[0].Provider != "doppler" || sources[1].Provider != "aws-ssm" || sources[1].Path != "/app/prod" {
+		t.Fatalf("staging sources = %+v, want top-level doppler then inherited aws-ssm", sources)
+	}
+}
+
+func TestSecretSourcesReplacedByChildEnvironment(t *testing.T) {
+	child := "    secretSources:\n      - provider: aws-ssm\n        path: /app/staging\n        region: eu-west-1\n"
+	path := filepath.Join(t.TempDir(), "tako.yaml")
+	if err := os.WriteFile(path, []byte(strings.Replace(secretSourcesExtendsTestConfig, "%s", child, 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	sources := cfg.SecretSourcesFor("staging")
+	if len(sources) != 2 || sources[0].Provider != "doppler" || sources[1].Path != "/app/staging" || sources[1].Region != "eu-west-1" {
+		t.Fatalf("staging sources = %+v, want top-level doppler then only the child list", sources)
+	}
+	if production := cfg.SecretSourcesFor("production"); len(production) != 2 || production[1].Path != "/app/prod" {
+		t.Fatalf("production sources = %+v", production)
+	}
+}

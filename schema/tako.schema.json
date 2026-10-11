@@ -9,6 +9,11 @@
     "servers",
     "environments"
   ],
+  "patternProperties": {
+    "^x-": {
+      "description": "Extension key: accepted and ignored. Use it to hold shared fragments and YAML anchors."
+    }
+  },
   "definitions": {
     "secretSources": {
       "type": "array",
@@ -480,6 +485,14 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
+          "extends": {
+            "type": "string",
+            "description": "Inherit from another environment: this environment's keys are deep-merged over the resolved parent. Mappings merge by key, scalars and lists replace, and null removes an inherited key. At most 8 extends hops."
+          },
+          "abstract": {
+            "type": "boolean",
+            "description": "Template-only environment: usable as an extends target but never validated, deployed, or chosen as the default. Not inherited."
+          },
           "servers": {
             "type": "array",
             "description": "Server names for this environment",
