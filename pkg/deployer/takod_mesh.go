@@ -129,10 +129,20 @@ func (d *Deployer) ensureMeshAddresses() (map[string]string, error) {
 // memberRecordFromStatus converts one GET /v1/status response into the
 // resolver's view of the member. On a node that keeps per-environment peer
 // sets, peers.json holds only the last writer's peers, so the peers of every
-// stored set are added: their addresses are in use on the interface. A node
-// without node metadata keeps the address its peer sets agree on.
+// stored set are added: their addresses are in use on the interface.
+//
+// The node's own address comes from its peer sets when one of them peers
+// with other nodes: takod renders the interface from those sets and requires
+// them to agree on it, while node.json is rewritten by every metadata write
+// (a co-located single-node project with a different mesh block, an older
+// CLI, or an attempt the union rejected). Reading node.json there would make
+// every environment on the node send an address the union rejects. A node
+// without such a set keeps node.json, or else any set's address.
 func memberRecordFromStatus(status takod.Status, publicKey string) mesh.MemberRecord {
 	record := mesh.MemberRecordFromStatus(status.Node, status.Peers, publicKey)
+	if address := unionNodeAddress(status.MeshPeerSets); address != "" {
+		record.Recorded = address
+	}
 	for _, set := range status.MeshPeerSets {
 		if record.Recorded == "" && strings.TrimSpace(set.Node.Address) != "" {
 			record.Recorded = strings.TrimSpace(set.Node.Address)
@@ -142,6 +152,44 @@ func memberRecordFromStatus(status takod.Status, publicKey string) mesh.MemberRe
 		}
 	}
 	return record
+}
+
+// unionNodeAddress returns the node address of the first stored peer set (in
+// takod's sorted order) that has peers other than the node itself, which is
+// the address takod's union render uses; "" when no set has other peers.
+func unionNodeAddress(sets []takod.MeshPeerSetSummary) string {
+	sorted := append([]takod.MeshPeerSetSummary(nil), sets...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].Project+"/"+sorted[i].Environment < sorted[j].Project+"/"+sorted[j].Environment
+	})
+	for _, set := range sorted {
+		address := strings.TrimSpace(set.Node.Address)
+		if address == "" {
+			continue
+		}
+		for _, peer := range set.Peers {
+			if !isOwnPeerEntry(set.Node, peer) {
+				return address
+			}
+		}
+	}
+	return ""
+}
+
+// isOwnPeerEntry mirrors takod's self filter for a stored set.
+func isOwnPeerEntry(node, peer mesh.Node) bool {
+	if key := strings.TrimSpace(node.PublicKey); key != "" && strings.TrimSpace(peer.PublicKey) == key {
+		return true
+	}
+	return peer.Name == node.Name && meshAddressIP(peer.Address) == meshAddressIP(node.Address)
+}
+
+func meshAddressIP(address string) string {
+	address = strings.TrimSpace(address)
+	if index := strings.Index(address, "/"); index >= 0 {
+		return address[:index]
+	}
+	return address
 }
 
 // meshPeerSetRequest is the PUT /v1/mesh/peer-sets body for one member.

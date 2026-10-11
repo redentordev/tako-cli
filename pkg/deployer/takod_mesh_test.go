@@ -55,6 +55,8 @@ type meshRequest struct {
 type meshRecorder struct {
 	mu       sync.Mutex
 	requests []meshRequest
+	// fail maps an endpoint to the error every request to it returns.
+	fail map[string]error
 }
 
 func (r *meshRecorder) client(serverName string) (any, error) {
@@ -117,7 +119,11 @@ func (c *meshRecorderClient) RequestJSONWithTimeout(_ context.Context, method, e
 	}
 	c.recorder.mu.Lock()
 	c.recorder.requests = append(c.recorder.requests, meshRequest{server: c.server, method: method, endpoint: endpoint, body: body})
+	failure := c.recorder.fail[endpoint]
 	c.recorder.mu.Unlock()
+	if failure != nil {
+		return "", failure
+	}
 	switch endpoint {
 	case "/v1/mesh/key":
 		data, _ := json.Marshal(takod.MeshKeyResponse{PublicKey: testMeshKey(c.server)})
@@ -379,5 +385,76 @@ func TestMeshAddressesAvoidOtherPeerSets(t *testing.T) {
 	want := map[string]string{"a": "10.210.0.5/24", "b": "10.210.0.2/24"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("addresses = %v, want %v", got, want)
+	}
+}
+
+// Review finding 2: a shared node's node.json was last written by a
+// co-located single-node project (or an attempt the union rejected) with
+// another address, while both multi-node environments' stored peer sets
+// agree on .2. The deploy must send the union's address; sending node.json's
+// would make the union reject every environment on the node.
+func TestSharedNodeAddressComesFromAgreeingPeerSets(t *testing.T) {
+	reader := func(serverName string) (takod.Status, error) {
+		status := takod.Status{Runtime: "takod", Capabilities: []string{takod.CapabilityMeshPeerSetsV1}}
+		switch serverName {
+		case "s":
+			status.Node = map[string]any{"project": "solo", "environment": "prod", "mesh": map[string]any{"address": "10.210.0.9/24", "publicKey": testMeshKey("s")}}
+			self := mesh.Node{Name: "s", Address: "10.210.0.2/24", PublicKey: testMeshKey("s")}
+			status.MeshPeerSets = []takod.MeshPeerSetSummary{
+				{Project: "demo", Environment: "production", Node: self, Peers: []mesh.Node{self, {Name: "b", Address: "10.210.0.3/24", PublicKey: testMeshKey("b")}}},
+				{Project: "demo", Environment: "preview", Node: self, Peers: []mesh.Node{self, {Name: "a", Address: "10.210.0.1/24", PublicKey: testMeshKey("a")}}},
+				{Project: "solo", Environment: "prod", Node: mesh.Node{Name: "s", Address: "10.210.0.9/24", PublicKey: testMeshKey("s")}},
+			}
+		case "b":
+			status.Node = map[string]any{"project": "demo", "environment": "production", "mesh": map[string]any{"address": "10.210.0.3/24", "publicKey": testMeshKey("b")}}
+		}
+		return status, nil
+	}
+	d, recorder := meshTestDeployer(t, []string{"b", "s"}, nil, reader)
+	if err := d.SetupTakodRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for server, set := range recorder.peerSets() {
+		got[server] = set.Node.Address
+	}
+	if want := map[string]string{"b": "10.210.0.3/24", "s": "10.210.0.2/24"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("addresses = %v, want %v", got, want)
+	}
+}
+
+// Review finding 2: node metadata is written only after the node accepted
+// the peer set, so a rejected attempt never rewrites node.json.
+func TestRejectedPeerSetDoesNotRewriteNodeMetadata(t *testing.T) {
+	capable := func(string) (takod.Status, error) {
+		return takod.Status{Runtime: "takod", Capabilities: []string{takod.CapabilityMeshPeerSetsV1}}, nil
+	}
+	d, recorder := meshTestDeployer(t, []string{"a", "b"}, nil, capable)
+	recorder.fail = map[string]error{"/v1/mesh/peer-sets": fmt.Errorf("409 Conflict: mesh address held by another key")}
+	if err := d.SetupTakodRuntime(); err == nil {
+		t.Fatal("rejected peer set did not fail the deploy")
+	}
+	for _, request := range recorder.requests {
+		if request.endpoint == "/v1/metadata" {
+			t.Fatalf("metadata written to %s after the union rejected its peer set", request.server)
+		}
+	}
+
+	recorder.fail = nil
+	recorder.requests = nil
+	d, recorder = meshTestDeployer(t, []string{"a", "b"}, nil, capable)
+	if err := d.SetupTakodRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	order := map[string][]string{}
+	for _, request := range recorder.requests {
+		if request.endpoint == "/v1/metadata" || request.endpoint == "/v1/mesh/peer-sets" {
+			order[request.server] = append(order[request.server], request.endpoint)
+		}
+	}
+	for server, endpoints := range order {
+		if !reflect.DeepEqual(endpoints, []string{"/v1/mesh/peer-sets", "/v1/metadata"}) {
+			t.Fatalf("%s request order = %v", server, endpoints)
+		}
 	}
 }

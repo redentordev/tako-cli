@@ -1562,10 +1562,6 @@ func (d *Deployer) prepareTakodNode(client any, serverName string, server config
 		// commands, not an application deploy operation.
 		return nil
 	}
-	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/metadata", metadata); err != nil {
-		return fmt.Errorf("failed to write takod metadata: %w", err)
-	}
-
 	meshNode := mesh.Node{
 		Name:      serverName,
 		Host:      server.Host,
@@ -1573,16 +1569,21 @@ func (d *Deployer) prepareTakodNode(client any, serverName string, server config
 		PublicKey: publicKey,
 		Labels:    server.Labels,
 	}
-	if enrolled {
-		return nil
-	}
 	if d.memberSupportsMeshPeerSets(serverName) {
 		// The node renders the union of every environment's peer set, so a
-		// shared node keeps the peers of the other environments.
+		// shared node keeps the peers of the other environments. Node
+		// metadata is written only after the union accepted the set: a
+		// rejected address must not become the node's recorded address.
 		if _, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/mesh/peer-sets", d.meshPeerSetRequest(meshNode, peers)); err != nil {
 			return fmt.Errorf("failed to reconcile WireGuard mesh peer set: %w", err)
 		}
+		if _, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/metadata", metadata); err != nil {
+			return fmt.Errorf("failed to write takod metadata: %w", err)
+		}
 		return nil
+	}
+	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/metadata", metadata); err != nil {
+		return fmt.Errorf("failed to write takod metadata: %w", err)
 	}
 	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/mesh/apply", takod.MeshApplyRequest{
 		Config: d.wireGuardConfig(),
