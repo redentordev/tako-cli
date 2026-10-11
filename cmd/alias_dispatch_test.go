@@ -531,6 +531,42 @@ func TestExecuteRootCompletionOffersAliases(t *testing.T) {
 	}
 }
 
+func TestExecuteRootCompletionOffersNoTargetFlagsAfterAlias(t *testing.T) {
+	writeAliasConfig(t, "aliases:\n  logsw: [logs, web]\n")
+	root, _, stdout, _ := newAliasTestRoot(t)
+	if err := executeRoot(context.Background(), root, []string{"__complete", "logsw", "--"}, config.LoadAliases); err != nil {
+		t.Fatalf("__complete logsw --: %v", err)
+	}
+	if strings.Contains(stdout.String(), "--follow") {
+		t.Fatalf("completion after an alias offered target flags: %q", stdout)
+	}
+}
+
+func TestExecuteRootAliasEventsHaveNoAliasEvent(t *testing.T) {
+	writeAliasConfig(t, "aliases:\n  status: [ps]\n")
+
+	runEvents := func(args []string) string {
+		root, _, _, _ := newAliasTestRoot(t)
+		var runErr error
+		stdout := captureStdout(t, func() {
+			runErr = executeRoot(context.Background(), root, args, config.LoadAliases)
+		})
+		if runErr != nil {
+			t.Fatalf("executeRoot(%v): %v", args, runErr)
+		}
+		return stdout
+	}
+
+	viaAlias := runEvents([]string{"status", "--events", "ndjson"})
+	direct := runEvents([]string{"ps", "--events", "ndjson"})
+	if strings.Contains(viaAlias, "alias") {
+		t.Fatalf("alias invocation emitted an alias-specific event: %q", viaAlias)
+	}
+	if strings.Count(viaAlias, "\n") != strings.Count(direct, "\n") {
+		t.Fatalf("alias stream differs from target stream:\nalias:  %q\ndirect: %q", viaAlias, direct)
+	}
+}
+
 // Man page generation runs in a directory whose tako.yaml defines aliases in
 // TestTrackedManPagesMatchGeneratedOutput; this pins that the static tree
 // never carries placeholders.
