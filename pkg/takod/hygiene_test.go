@@ -1065,7 +1065,7 @@ func TestHygieneAlerts(t *testing.T) {
 		t.Fatal(err)
 	}
 	sent := h.dispatch()
-	if len(sent) != 1 || sent[0].Payload["event"] != hygieneEventInsufficient || sent[0].Payload["severity"] != "critical" {
+	if len(sent) != 1 || sent[0].Payload["event"] != hygieneEventInsufficient || sent[0].Payload["severity"] != "warning" {
 		t.Fatalf("insufficient opening = %+v", sent)
 	}
 	for _, delivery := range sent {

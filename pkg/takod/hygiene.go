@@ -361,7 +361,7 @@ func hygieneAlertSourceSpec() AlertSourceSpec {
 		Kind:       AlertKindHygiene,
 		NodeScoped: true,
 		Reasons: map[string]Severity{
-			hygieneReasonInsufficient: SeverityCritical,
+			hygieneReasonInsufficient: SeverityWarning, // high_disk (monitoring) is the critical page
 			hygieneReasonUnreadable:   SeverityWarning,
 		},
 		DetailKeys: []string{"freeBytes", "softBytes", "hardBytes", "unreadableScopes"},

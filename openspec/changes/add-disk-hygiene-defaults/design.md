@@ -157,7 +157,7 @@ The reclaim never touches:
     - **fail:** free space below the floor after a reclaim.
   - With `--output json`: `ActionResult` for `cleanup` gains an additive `hygiene` object per server (`removed`, `kept`, `bytesFreed`, `dryRun`). `DoctorResult` gets a new check id, `disk-hygiene`. Both are additive under the MACHINE-INTERFACE compatibility rules.
 - **Alerts** go through the alert-source API of `add-takod-health-monitoring` as kind `hygiene` (node-scoped, subscribed by scopes with `notifications.alerts.host`; see D13 there):
-  - `reclaim_insufficient` (critical, level, subject `root` or `docker`): free space is still below the hard threshold after a full hard reclaim; recovers once free space is above the soft threshold;
+  - `reclaim_insufficient` (warning, level, subject `root` or `docker`): free space is still below the hard threshold after a full hard reclaim; recovers once free space is above the soft threshold;
   - `state_unreadable` (warning, level, subject `image-gc`): image GC was skipped because node state could not be read; recovers after the next successful selection.
 
   A reclaim that freed space is informational and goes to the journal only. `high_disk` and `high_inodes` threshold alerts belong to `add-takod-health-monitoring`.

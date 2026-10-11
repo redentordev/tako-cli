@@ -204,7 +204,7 @@ takod SHALL report hygiene alerts as the node-scoped kind `hygiene` of the `add-
 - **THEN** no alert is delivered and the run is in the journal
 
 ### Requirement: Insufficient reclaim alert
-takod SHALL open a critical `reclaim_insufficient` level of kind `hygiene` on subject `root` or `docker` when free space stays below the hard threshold after a full hard reclaim, and SHALL recover it once free space is above the soft threshold.
+takod SHALL open a warning `reclaim_insufficient` level of kind `hygiene` on subject `root` or `docker` when free space stays below the hard threshold after a full hard reclaim, and SHALL recover it once free space is above the soft threshold.
 
 #### Scenario: Reclaim cannot free enough
 - **WHEN** a hard reclaim ends with the Docker data root still below the hard threshold

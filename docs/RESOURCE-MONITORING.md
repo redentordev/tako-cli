@@ -566,7 +566,7 @@ unless the Docker default driver is not `json-file`, or `daemon.json` sets
   - the last runs;
   - containers that run without log rotation.
 - Alerts use kind `hygiene` (node-wide):
-  - `reclaim_insufficient` (critical, subject `root` or `docker`): a
+  - `reclaim_insufficient` (warning, subject `root` or `docker`): a
     reclaim left free space below the hard threshold. Recovers with
     `resource_normal` above the soft threshold.
   - `state_unreadable` (warning, subject `image-gc`): image GC skipped a
