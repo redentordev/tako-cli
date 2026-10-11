@@ -67,6 +67,7 @@ tako setup && tako deploy
 
 Set `port` on a server when sshd does not listen on 22 (the default):
 
+<!-- tako:snippet partial -->
 ```yaml
 servers:
   production:
@@ -1584,6 +1585,7 @@ plugin.
 `aliases:` records project shortcuts for long Tako invocations next to
 `tako.yaml`. `tako <alias> [args...]` runs `tako <alias args...> [args...]`.
 
+<!-- tako:snippet partial -->
 ```yaml
 aliases:
   # List form (preferred): each item is one Tako argument, used verbatim.
