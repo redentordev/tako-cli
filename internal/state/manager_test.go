@@ -266,6 +266,79 @@ type fakeStateManagerExecutor struct {
 	failures         []error
 	inputs           []string
 	calls            int
+	// outputs, when set, are returned in order (the last one repeats).
+	outputs []string
+}
+
+const (
+	selfHealHeldOutput = `{"acquired":false,"found":true,"lease":{"id":"self-heal-1","projectName":"demo","environment":"production","operation":"self-heal","who":"takod/app-1","expiresAt":"2099-01-01T00:00:00Z"}}`
+	deployHeldOutput   = `{"acquired":false,"found":true,"lease":{"id":"op-9","projectName":"demo","environment":"production","operation":"deploy","who":"other","expiresAt":"2099-01-01T00:00:00Z"}}`
+	acquiredOutput     = `{"acquired":true,"found":true,"holderToken":"private","lease":{"id":"op-1","projectName":"demo","environment":"production","operation":"deploy","expiresAt":"2099-01-01T00:00:00Z"}}`
+)
+
+func shortenSelfHealLeaseWait(t *testing.T, wait time.Duration) {
+	t.Helper()
+	oldWait, oldRetry := selfHealLeaseWait, selfHealLeaseRetry
+	selfHealLeaseWait, selfHealLeaseRetry = wait, time.Millisecond
+	t.Cleanup(func() { selfHealLeaseWait, selfHealLeaseRetry = oldWait, oldRetry })
+}
+
+func TestLeaseAcquireWaitsForSelfHealHolder(t *testing.T) {
+	shortenSelfHealLeaseWait(t, time.Second)
+	client := &fakeStateManagerExecutor{outputs: []string{selfHealHeldOutput, selfHealHeldOutput, acquiredOutput}}
+	manager := &StateManager{client: client, socket: "/run/tako/takod.sock", projectName: "demo", environment: "production", server: "node-a"}
+	lease, err := manager.AcquireControllerLeaseContext(context.Background(), "deploy", "production", time.Minute, nil)
+	if err != nil || lease == nil || lease.HolderToken != "private" {
+		t.Fatalf("acquire after self-heal released = %#v, %v", lease, err)
+	}
+	if len(client.inputs) != 3 {
+		t.Fatalf("attempts = %d, want 3", len(client.inputs))
+	}
+	var first, last struct {
+		RequestID string `json:"requestId"`
+	}
+	_ = json.Unmarshal([]byte(client.inputs[0]), &first)
+	_ = json.Unmarshal([]byte(client.inputs[2]), &last)
+	if first.RequestID == "" || first.RequestID == last.RequestID {
+		t.Fatalf("retries must use fresh request IDs: %q %q", first.RequestID, last.RequestID)
+	}
+}
+
+func TestLeaseAcquireGivesUpOnLongSelfHealHolder(t *testing.T) {
+	shortenSelfHealLeaseWait(t, 20*time.Millisecond)
+	client := &fakeStateManagerExecutor{outputs: []string{selfHealHeldOutput}}
+	manager := &StateManager{client: client, socket: "/run/tako/takod.sock", projectName: "demo", environment: "production", server: "node-a"}
+	_, err := manager.AcquireControllerLeaseContext(context.Background(), "deploy", "production", time.Minute, nil)
+	if err == nil || !strings.Contains(err.Error(), "operation: self-heal") {
+		t.Fatalf("error = %v, want the self-heal holder", err)
+	}
+	if len(client.inputs) < 2 {
+		t.Fatalf("attempts = %d, want retries", len(client.inputs))
+	}
+}
+
+func TestLeaseAcquireDoesNotWaitForOtherHolders(t *testing.T) {
+	shortenSelfHealLeaseWait(t, time.Second)
+	client := &fakeStateManagerExecutor{outputs: []string{deployHeldOutput, acquiredOutput}}
+	manager := &StateManager{client: client, socket: "/run/tako/takod.sock", projectName: "demo", environment: "production", server: "node-a"}
+	_, err := manager.AcquireControllerLeaseContext(context.Background(), "deploy", "production", time.Minute, nil)
+	if err == nil || !strings.Contains(err.Error(), "operation: deploy") || len(client.inputs) != 1 {
+		t.Fatalf("error = %v after %d attempts, want an immediate lock error", err, len(client.inputs))
+	}
+}
+
+func TestLeaseAcquireSelfHealWaitHonoursContext(t *testing.T) {
+	shortenSelfHealLeaseWait(t, time.Minute)
+	selfHealLeaseRetry = 10 * time.Second
+	client := &fakeStateManagerExecutor{outputs: []string{selfHealHeldOutput}}
+	manager := &StateManager{client: client, socket: "/run/tako/takod.sock", projectName: "demo", environment: "production", server: "node-a"}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := manager.AcquireControllerLeaseContext(ctx, "deploy", "production", time.Minute, nil)
+	if err == nil || time.Since(started) > 5*time.Second {
+		t.Fatalf("error = %v after %s, want a prompt lock error", err, time.Since(started))
+	}
 }
 
 func (f *fakeStateManagerExecutor) ExecuteWithContext(ctx context.Context, cmd string) (string, error) {
@@ -292,6 +365,13 @@ func (f *fakeStateManagerExecutor) ExecuteWithInput(ctx context.Context, cmd str
 	}
 	if f.returnContextErr && f.contextErr != nil {
 		return "", f.contextErr
+	}
+	if len(f.outputs) > 0 {
+		index := f.calls - 1 - len(f.failures)
+		if index >= len(f.outputs) {
+			index = len(f.outputs) - 1
+		}
+		return f.outputs[index], nil
 	}
 	return f.output, nil
 }

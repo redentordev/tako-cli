@@ -486,11 +486,11 @@ func TestEnsureTakodLoggingCapabilityFailsClosed(t *testing.T) {
 
 func TestPreflightServiceMutationCapabilitiesChecksOnlyConfiguredLogging(t *testing.T) {
 	checks := 0
-	check := func() error {
+	check := func(string, string) error {
 		checks++
 		return errors.New("stale agent")
 	}
-	if err := preflightServiceMutationCapabilitiesWithCheck(map[string]config.ServiceConfig{"web": {}}, check); err != nil {
+	if err := preflightServiceMutationCapabilitiesWithCheck(map[string]config.ServiceConfig{"web": {}}, nil, check); err != nil {
 		t.Fatalf("unset logging preflight error = %v", err)
 	}
 	if checks != 0 {
@@ -500,11 +500,46 @@ func TestPreflightServiceMutationCapabilitiesChecksOnlyConfiguredLogging(t *test
 		"web":    {},
 		"worker": {Logging: &config.ServiceLoggingConfig{Driver: "local", MaxSize: "25m", MaxFiles: 5}},
 	}
-	if err := preflightServiceMutationCapabilitiesWithCheck(services, check); err == nil || err.Error() != "stale agent" {
+	if err := preflightServiceMutationCapabilitiesWithCheck(services, nil, check); err == nil || err.Error() != "stale agent" {
 		t.Fatalf("configured logging preflight error = %v", err)
 	}
 	if checks != 1 {
 		t.Fatalf("configured logging performed %d checks, want 1", checks)
+	}
+}
+
+func TestPreflightServiceMutationCapabilitiesRequiresSelfHealingCapability(t *testing.T) {
+	enabled := true
+	var checked []string
+	check := func(capability, _ string) error {
+		checked = append(checked, capability)
+		return nil
+	}
+	// Disabled (the default): no check.
+	if err := preflightServiceMutationCapabilitiesWithCheck(map[string]config.ServiceConfig{"web": {}}, &config.EnvironmentConfig{}, check); err != nil || len(checked) != 0 {
+		t.Fatalf("default policy checked %v (err %v)", checked, err)
+	}
+	// Environment opt-in covers stateless services.
+	env := &config.EnvironmentConfig{SelfHealing: &config.SelfHealingConfig{Enabled: &enabled}}
+	if err := preflightServiceMutationCapabilitiesWithCheck(map[string]config.ServiceConfig{"web": {}}, env, check); err != nil {
+		t.Fatal(err)
+	}
+	if len(checked) != 1 || checked[0] != takod.CapabilityNodeSelfHealingV1 {
+		t.Fatalf("checked = %v", checked)
+	}
+	// A persistent service needs its own opt-in.
+	checked = nil
+	if err := preflightServiceMutationCapabilitiesWithCheck(map[string]config.ServiceConfig{"db": {Persistent: true}}, env, check); err != nil || len(checked) != 0 {
+		t.Fatalf("persistent service without opt-in checked %v (err %v)", checked, err)
+	}
+	// An old agent fails before mutation with an error naming the capability.
+	deploy := &Deployer{config: &config.Config{}}
+	err := deploy.ensureTakodCapability(fakeTakodStatusExecutor{
+		output: `{"capabilities":["container.runtime-controls-v1"]}`,
+	}, "node-a", takod.CapabilityNodeSelfHealingV1, selfHealingCapabilityFeature)
+	var capabilityErr *takodclient.CapabilityRequiredError
+	if !errors.As(err, &capabilityErr) || !strings.Contains(err.Error(), "node.self-healing-v1") {
+		t.Fatalf("old agent error = %v", err)
 	}
 }
 

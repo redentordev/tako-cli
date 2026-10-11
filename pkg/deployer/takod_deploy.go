@@ -2397,21 +2397,46 @@ func (d *Deployer) PreflightGracefulStopCapabilities() error {
 // PreflightServiceMutationCapabilities admits opt-in service behavior across
 // the complete workflow target set before runtime or desired-state mutations.
 func (d *Deployer) PreflightServiceMutationCapabilities(services map[string]config.ServiceConfig) error {
-	return preflightServiceMutationCapabilitiesWithCheck(services, func() error {
-		targetServers, err := d.getTakodTargetServers()
-		if err != nil {
-			return err
+	var env *config.EnvironmentConfig
+	if d.config != nil {
+		if value, ok := d.config.Environments[d.environment]; ok {
+			env = &value
 		}
-		return d.preflightTakodCapability(targetServers, takod.CapabilityContainerLoggingV1, "per-service container log rotation")
+	}
+	var targetServers []string
+	return preflightServiceMutationCapabilitiesWithCheck(services, env, func(capability, feature string) error {
+		if targetServers == nil {
+			targets, err := d.getTakodTargetServers()
+			if err != nil {
+				return err
+			}
+			targetServers = targets
+		}
+		return d.preflightTakodCapability(targetServers, capability, feature)
 	})
 }
 
-func preflightServiceMutationCapabilitiesWithCheck(services map[string]config.ServiceConfig, check func() error) error {
+// selfHealingCapabilityFeature names the capability in the exit-2 error of
+// a deploy whose services enable self-healing against an older agent.
+const selfHealingCapabilityFeature = "self-healing (missing capability " + takod.CapabilityNodeSelfHealingV1 + ")"
+
+func preflightServiceMutationCapabilitiesWithCheck(services map[string]config.ServiceConfig, env *config.EnvironmentConfig, check func(capability, feature string) error) error {
+	logging, healing := false, false
 	for _, service := range services {
-		if !serviceNeedsLoggingCapability(&service) {
-			continue
+		if serviceNeedsLoggingCapability(&service) {
+			logging = true
 		}
-		return check()
+		if config.EffectiveSelfHealing(env, service).Enabled {
+			healing = true
+		}
+	}
+	if logging {
+		if err := check(takod.CapabilityContainerLoggingV1, "per-service container log rotation"); err != nil {
+			return err
+		}
+	}
+	if healing {
+		return check(takod.CapabilityNodeSelfHealingV1, selfHealingCapabilityFeature)
 	}
 	return nil
 }

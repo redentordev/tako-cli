@@ -61,10 +61,42 @@ func (s *StateManager) AcquireControllerLeaseContext(ctx context.Context, operat
 	if ttl <= 0 {
 		ttl = DefaultLeaseTTL
 	}
+	deadline := time.Now().Add(selfHealLeaseWait)
+	for {
+		lease, holder, err := s.acquireControllerLeaseOnce(ctx, operation, environment, ttl, targetNodeIDs)
+		if holder == nil || holder.Operation != selfHealLeaseOperation || !time.Now().Add(selfHealLeaseRetry).Before(deadline) {
+			return lease, err
+		}
+		// A node is restarting or starting one container under a short
+		// self-heal lease (released right after the docker call): wait for it
+		// rather than failing the deploy.
+		timer := time.NewTimer(selfHealLeaseRetry)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, err
+		case <-timer.C:
+		}
+	}
+}
 
+// selfHealLeaseOperation is the lease operation takod's local self-healing
+// holds while it restarts or starts one container.
+const selfHealLeaseOperation = "self-heal"
+
+// selfHealLeaseWait bounds how long a lease acquisition waits for a
+// self-heal holder before reporting the lock; tests shorten it.
+var (
+	selfHealLeaseWait  = 60 * time.Second
+	selfHealLeaseRetry = 2 * time.Second
+)
+
+// acquireControllerLeaseOnce makes one acquisition attempt with a fresh
+// request identity. On a held lease it also returns the holder.
+func (s *StateManager) acquireControllerLeaseOnce(ctx context.Context, operation, environment string, ttl time.Duration, targetNodeIDs []string) (*LeaseInfo, *takod.LeaseInfo, error) {
 	requestID, err := newLeaseRequestID()
 	if err != nil {
-		return nil, fmt.Errorf("create remote lease request identity: %w", err)
+		return nil, nil, fmt.Errorf("create remote lease request identity: %w", err)
 	}
 	request := takod.LeaseRequest{
 		Project:       s.projectName,
@@ -85,27 +117,27 @@ func (s *StateManager) AcquireControllerLeaseContext(ctx context.Context, operat
 		output, err = s.requestJSONContext(ctx, "POST", "/v1/lease", request)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	response, err := decodeLeaseResponse(output)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !response.Acquired {
 		if response.Lease == nil {
-			return nil, fmt.Errorf("remote state is locked but lease metadata is missing")
+			return nil, nil, fmt.Errorf("remote state is locked but lease metadata is missing")
 		}
-		return nil, fmt.Errorf("remote state is locked by %s (operation: %s, expires in %s)",
+		return nil, response.Lease, fmt.Errorf("remote state is locked by %s (operation: %s, expires in %s)",
 			response.Lease.Who,
 			response.Lease.Operation,
 			time.Until(response.Lease.ExpiresAt).Round(time.Second),
 		)
 	}
 	if response.Lease == nil {
-		return nil, fmt.Errorf("remote lease was acquired but metadata is missing")
+		return nil, nil, fmt.Errorf("remote lease was acquired but metadata is missing")
 	}
-	return leaseFromTakod(response.Lease, response.HolderToken), nil
+	return leaseFromTakod(response.Lease, response.HolderToken), nil, nil
 }
 
 func retryUncertainLeaseAcquire(ctx context.Context, err error) bool {
