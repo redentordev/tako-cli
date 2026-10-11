@@ -76,22 +76,22 @@ func (c Context) Vars() map[string]string {
 	}
 	vars["TAKO_RECORDED_AT"] = recordedAt.UTC().Format(time.RFC3339)
 	optional := map[string]string{
-		"TAKO_REVISION":          c.Revision,
-		"TAKO_IMAGE":             c.Image,
-		"TAKO_GIT_COMMIT":        c.GitCommit,
-		"TAKO_GIT_COMMIT_SHORT":  c.GitCommitShort,
-		"TAKO_GIT_BRANCH":        c.GitBranch,
-		"TAKO_PLAN_HASH":         c.PlanHash,
-		"TAKO_DEPLOYMENT_ID":     c.DeploymentID,
-		"TAKO_ROLLBACK_TARGET":   c.RollbackTarget,
-		"TAKO_RESULT":            c.Result,
-		"TAKO_ERROR_CLASS":       c.ErrorClass,
-		"TAKO_ERROR":             truncateUTF8(c.Error, MaxErrorBytes),
-		"TAKO_FAILED_HOOK":       string(c.FailedHook),
-		"TAKO_GIT_DIRTY":         formatBool(c.GitDirty),
-		"TAKO_PLAN_EMPTY":        formatBool(c.PlanEmpty),
-		"TAKO_PLAN_DESTRUCTIVE":  formatBool(c.PlanDestructive),
-		"TAKO_DURATION_SECONDS":  formatSeconds(c.DurationSeconds),
+		"TAKO_REVISION":         c.Revision,
+		"TAKO_IMAGE":            c.Image,
+		"TAKO_GIT_COMMIT":       c.GitCommit,
+		"TAKO_GIT_COMMIT_SHORT": c.GitCommitShort,
+		"TAKO_GIT_BRANCH":       c.GitBranch,
+		"TAKO_PLAN_HASH":        c.PlanHash,
+		"TAKO_DEPLOYMENT_ID":    c.DeploymentID,
+		"TAKO_ROLLBACK_TARGET":  c.RollbackTarget,
+		"TAKO_RESULT":           c.Result,
+		"TAKO_ERROR_CLASS":      c.ErrorClass,
+		"TAKO_ERROR":            truncateUTF8(c.Error, MaxErrorBytes),
+		"TAKO_FAILED_HOOK":      string(c.FailedHook),
+		"TAKO_GIT_DIRTY":        formatBool(c.GitDirty),
+		"TAKO_PLAN_EMPTY":       formatBool(c.PlanEmpty),
+		"TAKO_PLAN_DESTRUCTIVE": formatBool(c.PlanDestructive),
+		"TAKO_DURATION_SECONDS": formatSeconds(c.DurationSeconds),
 	}
 	for key, value := range optional {
 		if value != "" {

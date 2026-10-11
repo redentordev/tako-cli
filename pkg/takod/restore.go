@@ -67,11 +67,11 @@ type ServiceRecoveryResponse struct {
 // ReconcileFailureBody is the typed error document takod returns when a
 // reconcile with a non-legacy failure policy fails.
 type ReconcileFailureBody struct {
-	Error         string   `json:"error"`
-	FailurePolicy string   `json:"failurePolicy"`
-	Restored      bool     `json:"restored"`
-	RestoreError  string   `json:"restoreError,omitempty"`
-	Restorable    bool     `json:"restorable,omitempty"`
+	Error          string   `json:"error"`
+	FailurePolicy  string   `json:"failurePolicy"`
+	Restored       bool     `json:"restored"`
+	RestoreError   string   `json:"restoreError,omitempty"`
+	Restorable     bool     `json:"restorable,omitempty"`
 	KeptContainers []string `json:"keptContainers,omitempty"`
 }
 

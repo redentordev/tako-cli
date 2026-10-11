@@ -153,7 +153,7 @@ type fakeDeploySession struct {
 	trace        *[]string
 }
 
-func (f *fakeDeploySession) Plan() engine.DeployPlan  { return f.plan }
+func (f *fakeDeploySession) Plan() engine.DeployPlan { return f.plan }
 func (f *fakeDeploySession) NeedsConfirmation() bool { return f.needsConfirm }
 func (f *fakeDeploySession) Close()                  { f.closed++ }
 func (f *fakeDeploySession) Apply(context.Context) (*engine.DeployResult, error) {

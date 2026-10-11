@@ -174,9 +174,9 @@ type lineWriter struct {
 	stream string
 	level  events.Level
 
-	mu         sync.Mutex
-	buf        []byte
-	unsetHint  bool
+	mu        sync.Mutex
+	buf       []byte
+	unsetHint bool
 }
 
 func (w *lineWriter) Write(p []byte) (int, error) {
