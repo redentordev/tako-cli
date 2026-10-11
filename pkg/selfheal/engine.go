@@ -312,6 +312,19 @@ func (e *Engine) trackerLocked(key string) *tracker {
 	return t
 }
 
+// healthInterval is the interval of the service's health observations:
+// the probe interval for HTTP/TCP, the sampler interval otherwise.
+func healthInterval(spec ServiceSpec) time.Duration {
+	switch spec.Health {
+	case HealthHTTP, HealthTCP:
+		if spec.ProbeInterval > 0 {
+			return spec.ProbeInterval
+		}
+		return DefaultProbeInterval
+	}
+	return SamplerInterval
+}
+
 func fresh(at, now time.Time, interval time.Duration) bool {
 	if at.IsZero() {
 		return false
@@ -503,7 +516,7 @@ func (e *Engine) evaluateService(scope ScopeInput, in ServiceInput, now time.Tim
 			if status.State == ContainerReplaced {
 				notConverged = true
 			} else {
-				e.journalOnce(&eval, key, container, record.Revision, DecisionMissing, "", 0)
+				e.journalOnce(&eval, key, container, record.Revision, DecisionMissing, "", 0, now)
 			}
 			eval.Containers = append(eval.Containers, status)
 			continue
@@ -519,12 +532,12 @@ func (e *Engine) evaluateService(scope ScopeInput, in ServiceInput, now time.Tim
 			eval.Containers = append(eval.Containers, status)
 			continue
 		}
-		action, reason, code := classify(&status, observation, spec, t)
+		action, reason, code := classify(&status, observation, spec, t, now)
 		switch status.State {
 		case ContainerCompleted:
-			e.journalOnce(&eval, key, container, record.Revision, DecisionCompleted, "", observation.ExitCode)
+			e.journalOnce(&eval, key, container, record.Revision, DecisionCompleted, "", observation.ExitCode, now)
 		case ContainerStopped:
-			e.journalOnce(&eval, key, container, record.Revision, DecisionSkippedStopped, "", 0)
+			e.journalOnce(&eval, key, container, record.Revision, DecisionSkippedStopped, "", 0, now)
 		default:
 			if t.journaled != "" && e.trackers[key] != nil {
 				e.trackers[key].journaled = ""
@@ -599,8 +612,13 @@ func firstReason(containers []ContainerStatus) string {
 	return ""
 }
 
-func (e *Engine) journalOnce(eval *ServiceEval, key string, container RecordContainer, revision, decision, reason string, code int) {
+// journalOnce journals decision the first time it holds for key. The
+// tracker is marked seen, so Forget keeps the journaled-once state while the
+// condition lasts (a missing container has no observation that would
+// otherwise refresh it, and would be re-journaled every tick).
+func (e *Engine) journalOnce(eval *ServiceEval, key string, container RecordContainer, revision, decision, reason string, code int, now time.Time) {
 	t := e.trackerLocked(key)
+	t.seen = now
 	if t.journaled == decision {
 		return
 	}
@@ -641,7 +659,7 @@ func normalizeRestartPolicy(value string) string {
 
 // classify fills status from one observation and returns the action its
 // condition calls for (D3 table).
-func classify(status *ContainerStatus, observation Observation, spec ServiceSpec, t *tracker) (string, string, int) {
+func classify(status *ContainerStatus, observation Observation, spec ServiceSpec, t *tracker, now time.Time) (string, string, int) {
 	policy := spec.Policy
 	if observation.Restarting {
 		status.State = ContainerDockerRestarting
@@ -649,6 +667,15 @@ func classify(status *ContainerStatus, observation Observation, spec ServiceSpec
 	}
 	switch observation.Status {
 	case "running":
+		if t.failures > 0 && !fresh(t.lastAt, now, healthInterval(spec)) {
+			// The failures are old news: the health source went quiet
+			// (probe stopped, sampler lost the health status). Unknown never
+			// triggers an action.
+			status.State = ContainerUnknown
+			status.Failures, status.Threshold = t.failures, threshold(policy)
+			status.Reason, status.Code = t.reason, t.code
+			return "", "", 0
+		}
 		if t.failures > 0 {
 			status.State = ContainerUnhealthy
 			status.Failures, status.Threshold = t.failures, threshold(policy)

@@ -240,6 +240,53 @@ func TestMissingContainerIsReportedNotRecreated(t *testing.T) {
 	}
 }
 
+// TestMissingJournaledOnceAcrossForget runs the loop's Forget between ticks:
+// a missing container has no observation to refresh its tracker, so the
+// journaled-once state must survive Forget or the journal is rewritten with
+// a `missing` line every tick.
+func TestMissingJournaledOnceAcrossForget(t *testing.T) {
+	f := newFixture(HealthNone)
+	delete(f.service.Observations, "id1")
+	journaled := 0
+	for i := 0; i < 80; i++ { // 20 minutes of 15s ticks
+		eval := f.tick(15 * time.Second)
+		journaled += len(eval.Journal)
+		f.engine.Forget(f.now.Add(-10 * time.Minute))
+	}
+	if journaled != 1 {
+		t.Fatalf("missing container journaled %d times, want once", journaled)
+	}
+}
+
+// TestOldFailuresWithoutFreshObservationNeverAct: failures counted earlier
+// must not keep a container "unhealthy" (and restartable) once its health
+// source stops producing observations.
+func TestOldFailuresWithoutFreshObservationNeverAct(t *testing.T) {
+	f := newFixture(HealthDocker)
+	f.setObservation("id1", func(o *Observation) { o.Health = "unhealthy" })
+	f.setObservation("id2", func(o *Observation) { o.Health = "healthy" })
+	var eval ServiceEval
+	for i := 0; i < 3; i++ {
+		eval = f.tick(30 * time.Second)
+	}
+	if eval.Candidate == nil {
+		t.Fatalf("fresh failures did not act: %+v", eval)
+	}
+	// Docker stops reporting health (e.g. status cleared); the sampler is
+	// still fresh, so the service is evaluated, but the last unhealthy
+	// observation grows old (more than 3 sampler intervals).
+	f.setObservation("id1", func(o *Observation) { o.Health = "" })
+	for i := 0; i < 4; i++ {
+		eval = f.tick(30 * time.Second)
+	}
+	if eval.Candidate != nil || eval.NeedsAction {
+		t.Fatalf("stale failures acted: %+v", eval.Candidate)
+	}
+	if eval.Containers[0].State != ContainerUnknown {
+		t.Fatalf("container state = %q, want unknown", eval.Containers[0].State)
+	}
+}
+
 func TestCompletedJournaledOnce(t *testing.T) {
 	f := newFixture(HealthNone)
 	f.setObservation("id1", func(o *Observation) { o.Status, o.ExitCode, o.RestartPolicy = "exited", 0, "no" })
