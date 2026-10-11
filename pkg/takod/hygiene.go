@@ -46,27 +46,30 @@ const (
 	HygieneLevelSoft = "soft"
 	HygieneLevelHard = "hard"
 
-	hygieneImageGrace          = 24 * time.Hour
-	hygieneProactiveBackoff    = 6 * time.Hour
-	hygieneReclaimTimeout      = 5 * time.Minute
-	hygieneRunTimeout          = 30 * time.Minute
-	hygieneSoftCapBytes        = int64(50) << 30
-	hygieneExitedContainerAge  = time.Hour
-	hygieneOneOffContainerAge  = 24 * time.Hour
-	hygieneStatusRuns          = 10
-	hygieneUnrotatedLimit      = 50
-	hygieneJournalImageLimit   = 100
-	hygieneJournalSkipLimit    = 100
-	hygieneSubjectRoot         = "root"
-	hygieneSubjectDocker       = "docker"
-	hygieneSubjectImageGC      = "image-gc"
-	hygieneReasonInsufficient  = "reclaim_insufficient"
-	hygieneReasonUnreadable    = "state_unreadable"
-	hygieneEventInsufficient   = "disk_reclaim_insufficient"
-	hygieneEventImageGCBlocked = "image_gc_blocked"
-	hygieneEventImageGCResumed = "image_gc_resumed"
-	hygieneEventResourceNormal = "resource_normal"
-	hygieneConvergedDirName    = "heal"
+	hygieneImageGrace       = 24 * time.Hour
+	hygieneProactiveBackoff = 6 * time.Hour
+	// hygieneSchedulerReclaimInterval is the minimum spacing of reclaims
+	// signalled by scheduler free-disk denials.
+	hygieneSchedulerReclaimInterval = 15 * time.Minute
+	hygieneReclaimTimeout           = 5 * time.Minute
+	hygieneRunTimeout               = 30 * time.Minute
+	hygieneSoftCapBytes             = int64(50) << 30
+	hygieneExitedContainerAge       = time.Hour
+	hygieneOneOffContainerAge       = 24 * time.Hour
+	hygieneStatusRuns               = 10
+	hygieneUnrotatedLimit           = 50
+	hygieneJournalImageLimit        = 100
+	hygieneJournalSkipLimit         = 100
+	hygieneSubjectRoot              = "root"
+	hygieneSubjectDocker            = "docker"
+	hygieneSubjectImageGC           = "image-gc"
+	hygieneReasonInsufficient       = "reclaim_insufficient"
+	hygieneReasonUnreadable         = "state_unreadable"
+	hygieneEventInsufficient        = "disk_reclaim_insufficient"
+	hygieneEventImageGCBlocked      = "image_gc_blocked"
+	hygieneEventImageGCResumed      = "image_gc_resumed"
+	hygieneEventResourceNormal      = "resource_normal"
+	hygieneConvergedDirName         = "heal"
 )
 
 // HygienePolicy is the effective hygiene configuration of the node.
@@ -199,8 +202,10 @@ type hygieneManager struct {
 	mu           sync.Mutex
 	backoff      map[string]time.Time
 	insufficient map[string]bool
-	inflight     map[bool]*hygieneCall
-	sequence     int
+	// schedulerLast is when the last scheduler-denied reclaim started.
+	schedulerLast time.Time
+	inflight      map[bool]*hygieneCall
+	sequence      int
 }
 
 // hygieneSettings are the takod flags of the hygiene loop.
@@ -424,9 +429,7 @@ func (h *hygieneManager) Run(ctx context.Context) {
 			timer.Reset(h.maintenance)
 		case <-h.signal:
 			if h.maintenance > 0 {
-				h.runAutonomous(ctx, HygieneTriggerSchedulerDenied, func(runCtx context.Context) HygieneRun {
-					return h.reclaim(runCtx, HygieneTriggerSchedulerDenied, HygieneLevelHard, false)
-				})
+				h.SchedulerDeniedReclaim(ctx)
 			}
 		}
 	}
@@ -627,6 +630,31 @@ func (h *hygieneManager) PressureCheck(ctx context.Context) (HygieneRun, bool) {
 	if ran && run.Insufficient {
 		h.mu.Lock()
 		h.backoff[level] = h.now().Add(hygieneProactiveBackoff)
+		h.mu.Unlock()
+	}
+	return run, ran
+}
+
+// SchedulerDeniedReclaim runs the hard reclaim signalled by a scheduler
+// free-disk denial. Scheduled jobs can be denied every minute, so these
+// signals honour the hard-level backoff set by an insufficient hard run and
+// are spaced by hygieneSchedulerReclaimInterval; suppressed signals are not
+// journaled. POST /v1/hygiene/reclaim is never throttled.
+func (h *hygieneManager) SchedulerDeniedReclaim(ctx context.Context) (HygieneRun, bool) {
+	now := h.now()
+	h.mu.Lock()
+	if now.Before(h.backoff[HygieneLevelHard]) || (!h.schedulerLast.IsZero() && now.Sub(h.schedulerLast) < hygieneSchedulerReclaimInterval) {
+		h.mu.Unlock()
+		return HygieneRun{}, false
+	}
+	h.schedulerLast = now
+	h.mu.Unlock()
+	run, ran := h.runAutonomous(ctx, HygieneTriggerSchedulerDenied, func(runCtx context.Context) HygieneRun {
+		return h.reclaim(runCtx, HygieneTriggerSchedulerDenied, HygieneLevelHard, false)
+	})
+	if ran && run.Insufficient {
+		h.mu.Lock()
+		h.backoff[HygieneLevelHard] = h.now().Add(hygieneProactiveBackoff)
 		h.mu.Unlock()
 	}
 	return run, ran

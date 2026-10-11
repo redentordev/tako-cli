@@ -609,7 +609,7 @@ func TestHygieneScopeSkipsLeaseAndRetention(t *testing.T) {
 
 func TestPressureBackoffAndDenials(t *testing.T) {
 	dataDir := t.TempDir()
-	manager, _, calls := newTestHygieneManager(t, dataDir, 18*gib)
+	manager, disk, calls := newTestHygieneManager(t, dataDir, 18*gib)
 	run, ran := manager.PressureCheck(context.Background())
 	if !ran || run.Trigger != HygieneTriggerPressureSoft || !run.Insufficient {
 		t.Fatalf("first proactive run = %+v ran=%t", run, ran)
@@ -623,15 +623,49 @@ func TestPressureBackoffAndDenials(t *testing.T) {
 	if _, ran := manager.PressureCheck(context.Background()); !ran {
 		t.Fatalf("backoff must expire after 6h")
 	}
-	// Denials and requests are never backed off.
-	denied, ran := manager.runAutonomous(context.Background(), HygieneTriggerSchedulerDenied, func(ctx context.Context) HygieneRun {
-		return manager.reclaim(ctx, HygieneTriggerSchedulerDenied, HygieneLevelHard, false)
-	})
-	if !ran || denied.Level != HygieneLevelHard {
-		t.Fatalf("denial reclaim = %+v", denied)
+	// A scheduler denial runs a hard reclaim; when it is insufficient,
+	// further denials back off (a per-minute cron job must not cause a hard
+	// reclaim and a journal entry every minute). Requests never back off.
+	disk.free[dataDir] = 12 * gib
+	denied, ran := manager.SchedulerDeniedReclaim(context.Background())
+	if !ran || denied.Level != HygieneLevelHard || !denied.Insufficient {
+		t.Fatalf("denial reclaim = %+v ran=%t", denied, ran)
+	}
+	journaled := len(manager.journal.Recent(1000))
+	before = len(calls.list())
+	for minute := 1; minute <= 30; minute++ {
+		at := later.Add(time.Duration(minute) * time.Minute)
+		manager.now = func() time.Time { return at }
+		if _, ran := manager.SchedulerDeniedReclaim(context.Background()); ran {
+			t.Fatalf("denial reclaim at +%dm must back off after an insufficient run", minute)
+		}
+	}
+	if len(calls.list()) != before || len(manager.journal.Recent(1000)) != journaled {
+		t.Fatalf("suppressed denials must not reclaim or journal")
 	}
 	if _, err := manager.Reclaim(context.Background(), false); err != nil {
 		t.Fatal(err)
+	}
+	if len(manager.journal.Recent(1000)) != journaled+1 {
+		t.Fatalf("explicit reclaim must run while denials back off")
+	}
+}
+
+func TestSchedulerDeniedReclaimMinimumInterval(t *testing.T) {
+	manager, _, _ := newTestHygieneManager(t, t.TempDir(), 100*gib)
+	start := manager.now()
+	if _, ran := manager.SchedulerDeniedReclaim(context.Background()); !ran {
+		t.Fatalf("first denial reclaim must run")
+	}
+	soon := start.Add(time.Minute)
+	manager.now = func() time.Time { return soon }
+	if _, ran := manager.SchedulerDeniedReclaim(context.Background()); ran {
+		t.Fatalf("denial reclaim within the minimum interval must be suppressed")
+	}
+	later := start.Add(hygieneSchedulerReclaimInterval + time.Second)
+	manager.now = func() time.Time { return later }
+	if _, ran := manager.SchedulerDeniedReclaim(context.Background()); !ran {
+		t.Fatalf("denial reclaim after the minimum interval must run")
 	}
 }
 
