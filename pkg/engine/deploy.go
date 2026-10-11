@@ -858,6 +858,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	if err := RecordStartedDeploymentStateContext(ctx, s.stateManager, deployment); err != nil {
 		return nil, fmt.Errorf("failed to record started deployment state before applying mutations: %w", err)
 	}
+	result.DeploymentID = deployment.ID
 	e.debug(events.TypeLogLine, events.PhaseState, fmt.Sprintf("→ Recorded in-progress deployment state (%s)\n", deployment.ID))
 	if err := buildSharedImages(s.deployer, cfg, envName, s.buildTag, servicesToDeploy, req.SkipBuild); err != nil {
 		err = fmt.Errorf("%s", e.redactor.Redact(err.Error()))

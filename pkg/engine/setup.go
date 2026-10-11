@@ -106,4 +106,6 @@ type SetupResult struct {
 	Environment string            `json:"environment"`
 	Nodes       []SetupNodeResult `json:"nodes"`
 	Error       string            `json:"error,omitempty"`
+	// Hooks lists the local lifecycle hooks considered, in run order.
+	Hooks []HookOutcome `json:"hooks,omitempty"`
 }
