@@ -24,7 +24,6 @@ import (
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
-	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
@@ -1254,41 +1253,14 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 
 	// Automatic cleanup after successful deployment.
 	e.debug(events.TypeLogLine, events.PhaseCleanup, "\n→ Running automatic cleanup...\n")
-	imageRepositories := CleanupImageRepositories(cfg, envName, services)
-	externalVolumes := ExternalVolumeNamesForEnvironment(cfg, envName)
 	cleanupFactory, factoryErr := nodeclient.NewFactory(cfg, s.sshPool, TakodSocketFromConfig(cfg))
-	for serverName := range s.servers {
-		if factoryErr != nil {
-			e.debug(events.TypeWarning, events.PhaseCleanup, fmt.Sprintf("  Warning: failed to initialize runtime cleanup: %v\n", factoryErr))
-			break
-		}
-		client, _, err := cleanupFactory.Client(ctx, serverName)
-		if err == nil {
-			response, cleanupErr := CleanupViaTakod(client, cfg, takod.CleanupRequest{
-				Project:           cfg.Project.Name,
-				Environment:       envName,
-				ImageRepositories: imageRepositories,
-				ExternalVolumes:   externalVolumes,
-				KeepImages:        3,
-				// Preview image repositories are shared with the base; a
-				// preview never prunes them where a declared env runs.
-				CleanOldImages:         s.cleanOldImagesOn(serverName),
-				CleanStoppedContainers: true,
-				CleanDanglingImages:    true,
-				CleanBuildCache:        true,
-				BuildCacheKeepStorage:  takod.DefaultBuildCacheKeepStorage,
-			})
-			if cleanupErr != nil {
-				e.debug(events.TypeWarning, events.PhaseCleanup, fmt.Sprintf("  Warning: failed to clean %s: %v\n", serverName, cleanupErr))
-				continue
-			}
-			if response != nil {
-				for _, warning := range response.Warnings {
-					e.debug(events.TypeWarning, events.PhaseCleanup, fmt.Sprintf("  Warning: %s\n", warning))
-				}
-			}
-			e.debug(events.TypeCleanupCompleted, events.PhaseCleanup, fmt.Sprintf("  ✓ Cleaned up %s\n", serverName))
-		}
+	if factoryErr != nil {
+		e.debug(events.TypeWarning, events.PhaseCleanup, fmt.Sprintf("  Warning: failed to initialize runtime cleanup: %v\n", factoryErr))
+	} else {
+		s.runPostDeployCleanup(ctx, func(ctx context.Context, serverName string) (any, error) {
+			client, _, err := cleanupFactory.Client(ctx, serverName)
+			return client, err
+		})
 	}
 
 	e.info(events.TypeDeploySucceeded, events.PhaseCleanup, "\n✓ Deployment completed successfully!\n\n")

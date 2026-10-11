@@ -33,6 +33,16 @@ Shared-node safety:
     cannot be read, no images are removed
   - Docker builder cache and dangling image cleanup are global Docker operations;
     use --docker-cache only when you intentionally want to reclaim shared cache
+  - --keep counts images per image repository in the target environment only;
+    other environments' images are never counted or removed
+  - Old-image removal needs a node agent with disk hygiene; older nodes skip it
+    with a warning (run 'tako upgrade servers') and run the other steps
+
+.PP
+Dry run:
+  --dry-run asks each node which old images it would remove and why the rest
+  are kept, and changes nothing. Nodes without disk hygiene report that a dry
+  run is not supported.
 
 .PP
 Security:
@@ -44,6 +54,7 @@ Security:
 Examples:
   tako cleanup                  # Clean all servers, keep 3 latest images
   tako cleanup --keep 5         # Keep 5 latest images
+  tako cleanup --dry-run        # Show which old images would be removed
   tako cleanup --server prod    # Clean specific server
   tako cleanup --full           # More aggressive app/stage cleanup
   tako cleanup --docker-cache   # Also prune shared Docker build cache/dangling images
@@ -60,6 +71,10 @@ Examples:
 	Docker builder cache storage budget to keep when --docker-cache is used
 
 .PP
+\fB--dry-run\fP[=false]
+	Report which old images would be removed and why the rest are kept; change nothing
+
+.PP
 \fB-f\fP, \fB--full\fP[=false]
 	Perform more aggressive app/stage cleanup
 
@@ -69,7 +84,7 @@ Examples:
 
 .PP
 \fB-k\fP, \fB--keep\fP=3
-	Number of latest images to keep per service and environment
+	Number of latest images to keep per image repository, counted in the target environment only
 
 .PP
 \fB--secure\fP[=false]

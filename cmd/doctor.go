@@ -57,6 +57,7 @@ Checks performed:
   - Proxy/CDN client-IP topology (skip with --skip-remote)
   - Replicated deployment/runtime state (skip with --skip-remote)
   - Running services (skip with --skip-remote)
+  - Disk hygiene: recent runs, pressure, unrotated logs (skip with --skip-remote)
 
 Examples:
   tako doctor                  # Run all checks
@@ -109,6 +110,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			failed++
 		}
 		result.Checks = append(result.Checks, engine.DoctorCheck{
+			ID:          doctorSectionIDs[section],
 			Name:        section,
 			Status:      strings.ToLower(r.status),
 			Detail:      r.message,
@@ -173,6 +175,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		"Running Services",
 		"Replicated State",
 		"External Volumes",
+		doctorDiskHygieneSection,
 	}
 	if !doctorSkipRemote {
 		heading(remoteSections[0])
@@ -204,6 +207,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 		heading(remoteSections[9])
 		checkExternalVolumes(record, cfg, envName, clients)
+
+		heading(remoteSections[10])
+		checkDiskHygiene(record, cfg, clients)
 
 		// Clean up clients
 		for _, c := range clients {

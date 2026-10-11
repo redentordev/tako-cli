@@ -55,6 +55,7 @@ type Server struct {
 	statusHistory                      *statusHistory
 	containerSampler                   *containerAlertSampler
 	certificateScheduler               *CertificateScheduler
+	hygiene                            *hygieneManager
 	uploadReadTimeout                  time.Duration
 	diskReservationMu                  sync.Mutex
 	diskReservations                   map[string]int64
@@ -239,6 +240,15 @@ type ServerOptions struct {
 	// Metrics configures native host metrics collection and history
 	// (add-server-status-history); a zero Interval keeps the legacy path.
 	Metrics MetricsOptions
+	// Disk hygiene (hygiene.go). HygieneInterval nil means "use
+	// BuildCachePruneInterval"; zero values elsewhere mean the defaults.
+	HygieneInterval               *time.Duration
+	HygieneCheckInterval          time.Duration
+	ImageRetention                int
+	BuildCachePressureKeepStorage string
+	DefaultContainerLoggingOff    bool
+	DefaultContainerLogMaxSize    string
+	DefaultContainerLogMaxFile    int
 }
 
 func NewServerWithOptions(socket string, dataDir string, version string, opts ServerOptions) *Server {
@@ -314,6 +324,7 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 	server.jobScheduler.admit = func(...string) error { return server.checkFreeDisk(0, server.dataDir, server.dockerDataRoot) }
 	server.certificateScheduler.admit = func(paths ...string) error { return server.checkFreeDisk(0, paths...) }
 	server.initStatusHistory(opts.Metrics, opts.HostSampleSource == nil)
+	server.initHygiene(opts)
 	return server
 }
 
@@ -452,8 +463,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.actualRefreshInterval > 0 {
 		start(func() { s.runActualRefreshLoop(runCtx) })
 	}
-	if s.buildCachePruneInterval > 0 {
-		start(func() { s.runBuildCachePruneLoop(runCtx) })
+	if s.hygiene != nil {
+		// The hygiene loop replaces runBuildCachePruneLoop (hygiene.go).
+		start(func() { s.hygiene.Run(runCtx) })
 	}
 	start(func() { s.backupScheduler.Run(runCtx) })
 	start(func() { s.jobScheduler.Run(runCtx) })
@@ -686,61 +698,6 @@ func (s *Server) runActualRefreshLoop(ctx context.Context) {
 	}
 }
 
-func (s *Server) runBuildCachePruneLoop(ctx context.Context) {
-	interval := s.buildCachePruneInterval
-	if interval <= 0 {
-		return
-	}
-	keepStorage := s.buildCacheKeepStorage
-	if keepStorage == "" {
-		keepStorage = DefaultBuildCacheKeepStorage
-	}
-	if !isSafeBuildCacheKeepStorage(keepStorage) {
-		fmt.Fprintf(os.Stderr, "takod build cache pruning disabled: invalid keep-storage value %q\n", keepStorage)
-		return
-	}
-
-	timer := time.NewTimer(buildCachePruneInitialDelay(interval))
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			pruneCtx, cancel := context.WithTimeout(ctx, buildCachePruneCommandTimeout)
-			maintenanceUnlock, maintenanceErr := recovery.AcquireMaintenanceBarrier(s.dataDir)
-			if maintenanceErr != nil {
-				fmt.Fprintf(os.Stderr, "takod build cache prune maintenance barrier failed: %v\n", maintenanceErr)
-				cancel()
-				timer.Reset(interval)
-				continue
-			}
-			active, activeErr := activeWorkerOperation(s.dataDir, time.Now().UTC())
-			if activeErr != nil || active {
-				if activeErr != nil {
-					fmt.Fprintf(os.Stderr, "takod build cache prune could not verify operation fence: %v\n", activeErr)
-				}
-				maintenanceUnlock()
-				cancel()
-				timer.Reset(interval)
-				continue
-			}
-			unlock, lockErr := recovery.AcquireMutationLock(s.dataDir)
-			if lockErr == nil {
-				_, err := cleanupBuildCache(pruneCtx, keepStorage)
-				unlock()
-				lockErr = err
-			}
-			maintenanceUnlock()
-			if lockErr != nil && !errors.Is(lockErr, context.Canceled) {
-				fmt.Fprintf(os.Stderr, "takod build cache prune failed: %v\n", lockErr)
-			}
-			cancel()
-			timer.Reset(interval)
-		}
-	}
-}
-
 func buildCachePruneInitialDelay(interval time.Duration) time.Duration {
 	if interval < buildCachePruneMaxInitialDelay {
 		return interval
@@ -830,6 +787,7 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	request.DataDir = s.dataDir
+	request.DefaultLogging = s.hygiene.defaultContainerLogging()
 	paths := make([]string, 0, 2)
 	if len(request.Containers) > 0 {
 		paths = append(paths, s.dockerDataRoot)
@@ -1368,6 +1326,7 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
+	s.hygiene.journalCleanup(request, response)
 	if !request.RemovePreviewData && (request.RemoveContainers || request.RemoveTakodState) {
 		// Runtime is gone. Keep the in-memory and durable drain barriers if
 		// schedule deletion fails so deleted work cannot restart fail-open.
@@ -2762,6 +2721,9 @@ func (s *Server) Status() Status {
 	}
 	status.Capabilities = append(status.Capabilities, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1)
 	status.Capabilities = append(status.Capabilities, s.statusHistoryCapabilities()...)
+	if s.hygiene != nil {
+		status.Capabilities = append(status.Capabilities, CapabilityNodeDiskHygieneV1)
+	}
 	if s.installation != nil {
 		status.Capabilities = append(status.Capabilities, CapabilityPlatformWorkerHandoffV1)
 		if inventory, err := nodeidentity.ReadInventory(s.inventoryFile); err == nil && inventory.ClusterID == s.installation.ClusterID {

@@ -68,6 +68,10 @@ type ReconcileServiceRequest struct {
 	Ulimits            map[string]config.UlimitConfig `json:"ulimits,omitempty"`
 	ShmSize            string                         `json:"shmSize,omitempty"`
 	Logging            *config.ServiceLoggingConfig   `json:"logging,omitempty"`
+	// DefaultLogging is the node default log rotation for services without
+	// Logging (hygiene_logging.go). The server sets it; it is never read
+	// from the request body and never part of the config hash.
+	DefaultLogging *config.ServiceLoggingConfig `json:"-"`
 	// FailurePolicy selects rollout failure handling: "" or remove (legacy:
 	// old containers removed first, failed new ones removed), restore
 	// (recreate keeps the previous containers until finalize/restore), or
@@ -1296,7 +1300,9 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 		args = append(args, "--cpus", req.CPULimit)
 	}
 	args = appendContainerRuntimeArgs(args, req.User, req.WorkingDir, req.StopTimeoutSeconds, req.Init, req.ExtraHosts, req.Ulimits, req.ShmSize)
-	args = appendDockerLoggingArgs(args, req.Logging)
+	// A service without `logging:` gets the node default (hygiene_logging.go).
+	// It is applied to the run arguments only, never to the config hash.
+	args = appendDockerLoggingArgs(args, effectiveContainerLogging(req.Logging, req.DefaultLogging))
 	if req.Health != nil && req.Health.Command != "" {
 		args = append(args, "--health-cmd", req.Health.Command)
 		if req.Health.Interval != "" {

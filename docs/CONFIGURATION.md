@@ -1947,8 +1947,21 @@ The supported drivers are Docker's `local` and `json-file` drivers, both of
 which remain readable through `tako logs`. `maxSize` is a positive integer
 followed by `k`, `m`, or `g`, is normalized to lowercase, and cannot exceed
 `10g`; `maxFiles` is from 1 through 100. The setting applies only to
-long-running services: deploy-time runs and scheduled jobs reject it. Omit
-`logging` to preserve the node's Docker daemon logging configuration exactly.
+long-running services: deploy-time runs and scheduled jobs reject it.
+
+When a service omits `logging`, a takod with `node.disk-hygiene-v1` bounds
+its new containers with `json-file` rotation (`max-size=20m`, `max-file=5`),
+so one chatty container cannot fill the disk. The default is node policy: it
+is not part of the desired document or the config hash, so it never causes a
+redeploy, and existing containers keep their log options until they are next
+replaced. takod leaves the daemon's logging untouched (and adds nothing) when
+the Docker default driver is not `json-file`, when `/etc/docker/daemon.json`
+sets `log-driver` or any `log-opts` key, or when `daemon.json` is unreadable.
+To opt out on a node, run takod with `--default-container-logging=off` (see
+the systemd drop-in in [Resource Monitoring](RESOURCE-MONITORING.md#disk-hygiene));
+`--default-container-log-max-size` and `--default-container-log-max-file`
+change the bounds. An explicit `logging` block always wins.
+
 Configured logging requires an agent advertising `container.logging-v1`, and
 Tako fails capability preflight before any deployment mutation on a stale
 agent.
@@ -2629,6 +2642,13 @@ tako takod run --build-cache-prune-interval 24h --build-cache-keep-storage 20GB
 
 Set `--build-cache-prune-interval 0` to disable the scheduled prune, or lower
 `--build-cache-keep-storage` on small VPS disks.
+
+On agents with `node.disk-hygiene-v1`, this prune is part of the daily disk
+hygiene run, which also removes old Tako-built images beyond the newest 3 per
+service and environment (`--image-retention`). `--hygiene-interval` sets the
+run interval; when only `--build-cache-prune-interval` is set it keeps
+controlling the interval. See
+[Resource Monitoring](RESOURCE-MONITORING.md#disk-hygiene).
 
 ## Host Metrics Collection
 
