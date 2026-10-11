@@ -61,11 +61,20 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		return &engine.InvalidRequestError{Err: err}
 	}
 
-	cfg, err := loadDeployConfig(cfgFile)
+	// With -e only the selected environment's variables are required;
+	// without -e every environment is checked.
+	cfg, err := loadSelectedEnvironmentConfig(cfgFile)
 	if err != nil {
 		return fail(err)
 	}
 	result.Project = cfg.Project.Name
+	if deferred := cfg.DeferredEnvironmentVariables(); len(deferred) > 0 {
+		result.Findings = append(result.Findings, engine.ValidateFinding{
+			Severity: engine.ValidateSeverityWarn,
+			Path:     configPath,
+			Message:  fmt.Sprintf("skipped other environments and servers that use unset environment variable(s): %s; run 'tako validate' without -e to check every environment", strings.Join(deferred, ", ")),
+		})
+	}
 	for _, warning := range config.ValidationWarnings(cfg) {
 		result.Findings = append(result.Findings, engine.ValidateFinding{
 			Severity: engine.ValidateSeverityWarn,

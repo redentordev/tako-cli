@@ -78,7 +78,24 @@ const DefaultBuildCacheKeepStorage = "20GB"
 
 const composeProjectImageLabel = "com.docker.compose.project"
 
+// CleanupProject runs cleanup without a takod data directory. Old-image
+// cleanup needs the node's deployment state and is skipped with a warning;
+// takod's API handler uses CleanupProjectWithDataDir.
 func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, error) {
+	return CleanupProjectWithDataDir(ctx, "", req)
+}
+
+// CleanupProjectWithDataDir runs cleanup using dataDir as the source of
+// replicated deployment state for image ownership and protection.
+// The server-set req.DataDir is used when dataDir is empty; otherwise
+// dataDir wins, so a preview teardown and image cleanup read the same
+// directory.
+func CleanupProjectWithDataDir(ctx context.Context, dataDir string, req CleanupRequest) (*CleanupResponse, error) {
+	if dataDir == "" {
+		dataDir = req.DataDir
+	} else {
+		req.DataDir = dataDir
+	}
 	if err := validateCleanupRequest(req); err != nil {
 		return nil, err
 	}
@@ -130,19 +147,21 @@ func CleanupProject(ctx context.Context, req CleanupRequest) (*CleanupResponse, 
 		}
 		response.ImagesRemoved = count
 	}
-	if req.CleanOldImages {
-		count, err := cleanupOldProjectImages(ctx, req.Project, req.KeepImages, req.ImageRepositories)
-		if err != nil {
-			warn("%v", err)
-		}
-		response.ImagesRemoved += count
-	}
+	// Stopped containers go first so their images are no longer in use when
+	// old-image cleanup checks container usage.
 	if req.CleanStoppedContainers {
 		count, err := cleanupStoppedContainers(ctx, req.Project, req.Environment)
 		if err != nil {
 			warn("%v", err)
 		}
 		response.ContainersRemoved += count
+	}
+	if req.CleanOldImages {
+		count, err := cleanupOldProjectImages(ctx, dataDir, req.Project, req.Environment, req.KeepImages, req.ImageRepositories)
+		if err != nil {
+			warn("%v", err)
+		}
+		response.ImagesRemoved += count
 	}
 	if req.CleanDanglingImages {
 		count, err := cleanupDanglingImages(ctx)
@@ -393,47 +412,6 @@ func cleanupImages(ctx context.Context, project string, imageRepositories []stri
 	return len(refs), nil
 }
 
-func cleanupOldProjectImages(ctx context.Context, project string, keepLatest int, imageRepositories []string) (int, error) {
-	if len(imageRepositories) == 0 {
-		return 0, nil
-	}
-	output, err := runDocker(ctx, "images", "--filter", "label!="+composeProjectImageLabel, "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}")
-	if err != nil {
-		return 0, fmt.Errorf("failed to list docker images: %w", err)
-	}
-
-	var ids []string
-	refsByID := make(map[string][]string)
-	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Split(strings.TrimSpace(line), "\t")
-		if len(fields) != 3 {
-			continue
-		}
-		id, repo, tag := fields[0], fields[1], fields[2]
-		if id == "" || repo == "<none>" || tag == "<none>" || !imageRepositoryMatchesProject(repo, project, imageRepositories) {
-			continue
-		}
-		if _, exists := refsByID[id]; !exists {
-			ids = append(ids, id)
-		}
-		refsByID[id] = append(refsByID[id], repo+":"+tag)
-	}
-	if len(ids) <= keepLatest {
-		return 0, nil
-	}
-
-	removeIDs := ids[keepLatest:]
-	var removeRefs []string
-	for _, id := range removeIDs {
-		removeRefs = append(removeRefs, refsByID[id]...)
-	}
-	removeArgs := append([]string{"rmi", "-f"}, removeRefs...)
-	if _, err := runDocker(ctx, removeArgs...); err != nil {
-		return 0, fmt.Errorf("failed to remove old project images: %w", err)
-	}
-	return len(removeIDs), nil
-}
-
 func cleanupDanglingImages(ctx context.Context) (int, error) {
 	// Docker's negative label filter keeps Compose-built images out of both
 	// the preflight list and the global dangling-image prune. Compose images
@@ -508,13 +486,6 @@ func runScopedProjectPrune(ctx context.Context, project string, environment stri
 		warn("failed to remove stopped project containers during scoped prune: %v", err)
 	} else {
 		response.ContainersRemoved += count
-	}
-	if environment == "" {
-		if count, err := cleanupOldProjectImages(ctx, project, 0, nil); err != nil {
-			warn("failed to remove project images during scoped prune: %v", err)
-		} else {
-			response.ImagesRemoved += count
-		}
 	}
 	if _, err := cleanupUnusedProjectVolumes(ctx, project, environment, protectedVolumes); err != nil {
 		warn("failed to remove unused project volumes during scoped prune: %v", err)

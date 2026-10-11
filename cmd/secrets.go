@@ -80,19 +80,31 @@ var secretsInitCmd = &cobra.Command{
 }
 
 var secretsSetCmd = &cobra.Command{
-	Use:   "set KEY=value",
+	Use:   "set KEY=value | KEY --stdin | KEY --from-file PATH",
 	Short: "Set a secret value",
-	Long:  `Set a secret value in the .tako/secrets files.`,
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		// Parse KEY=value
-		parts := strings.SplitN(args[0], "=", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid format, use: KEY=value")
-		}
+	Long: `Set a secret value in the .tako/secrets files.
 
-		key := parts[0]
-		value := parts[1]
+A value passed as KEY=value is visible to other local users (ps,
+/proc/<pid>/cmdline) while the command runs and may be saved in shell
+history. Prefer one of the forms that keep the value off the command line:
+
+  KEY --stdin             read the value from standard input
+  KEY --from-file PATH    read the value from PATH
+
+--stdin and --from-file are mutually exclusive and take a bare KEY. One
+trailing newline is stripped from values read from stdin or a file.
+To import many secrets at once, use 'tako secrets import --format env'.`,
+	Example: `  printf '%s' "$DB_PASSWORD" | tako secrets set DB_PASSWORD --stdin --env production
+  tako secrets set TLS_KEY --from-file ./certs/server.key
+  op read op://Prod/api/token | tako secrets set API_TOKEN --stdin`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		useStdin, _ := cmd.Flags().GetBool("stdin")
+		fromFile, _ := cmd.Flags().GetString("from-file")
+		key, value, err := resolveSecretSetArg(args[0], useStdin, fromFile, cmd.InOrStdin())
+		if err != nil {
+			return err
+		}
 
 		// Get environment flag
 		env, _ := cmd.Flags().GetString("env")
@@ -114,7 +126,7 @@ var secretsSetCmd = &cobra.Command{
 			file = env
 		}
 
-		fmt.Printf("✓ Secret '%s' saved to %s secrets\n", key, file)
+		fmt.Fprintf(cmd.OutOrStdout(), "✓ Secret '%s' saved to %s secrets\n", key, file)
 
 		return nil
 	},
@@ -315,7 +327,7 @@ authenticated. Run 'tako secrets providers' for details.
 }
 
 var secretsImportCmd = &cobra.Command{
-	Use:   "import PROVIDER [NAME...]",
+	Use:   "import PROVIDER [NAME...] | import --format env [--file FILE]",
 	Short: "Import provider secrets into encrypted Tako secrets",
 	Long: `Import external provider secrets into encrypted .tako/secrets files.
 
@@ -323,25 +335,61 @@ By default this command performs a redacted dry run. Pass --write to persist
 the imported values. Existing local secrets are skipped unless --overwrite is
 provided.
 
+With --format env no provider is used: a dotenv stream (KEY=value lines) is
+read from standard input, or from --file, so values never appear on the
+command line:
+
+  vault-export | tako secrets import --format env --env production --write
+  tako secrets import --format env --file prod.env --write
+
 ` + secretsProviderHelp(),
-	Args: cobra.MinimumNArgs(1),
+	Args: func(cmd *cobra.Command, args []string) error {
+		if secretsImportFormat != "" {
+			return cobra.NoArgs(cmd, args)
+		}
+		return cobra.MinimumNArgs(1)(cmd, args)
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if secretsProviderFlags.write && secretsProviderFlags.dryRun {
 			return fmt.Errorf("--write and --dry-run cannot be used together")
 		}
 
-		provider := args[0]
-		names := args[1:]
-		values, err := secrets.FetchProviderSecrets(context.Background(), provider, names, providerOptionsFromFlags())
-		if err != nil {
-			return err
+		var provider string
+		var values map[string]string
+		var err error
+		switch {
+		case secretsImportFormat != "":
+			if secretsImportFormat != "env" {
+				return fmt.Errorf("unsupported --format %q (supported: env)", secretsImportFormat)
+			}
+			if secretsProviderFlags.prefixStrip != "" {
+				return fmt.Errorf("--prefix-strip is not supported with --format env; use --map SOURCE=DEST")
+			}
+			provider = "dotenv"
+			if values, err = readDotenvSecrets(secretsImportFile, cmd.InOrStdin()); err != nil {
+				return err
+			}
+		case secretsImportFile != "":
+			return fmt.Errorf("--file requires --format env")
+		default:
+			provider = args[0]
+			values, err = secrets.FetchProviderSecrets(context.Background(), provider, args[1:], providerOptionsFromFlags())
+			if err != nil {
+				return err
+			}
 		}
 
 		mappings, err := parseSecretMappings(secretsProviderFlags.maps)
 		if err != nil {
 			return err
 		}
-		planned, err := secrets.MapProviderSecrets(values, secretsProviderFlags.prefixStrip, mappings)
+		var planned map[string]string
+		if secretsImportFormat != "" {
+			// Dotenv keys are already env names; keep them verbatim.
+			planned, err = mapDotenvSecrets(values, mappings)
+		} else {
+			planned, err = secrets.MapProviderSecrets(values, secretsProviderFlags.prefixStrip, mappings)
+		}
 		if err != nil {
 			return err
 		}
@@ -519,4 +567,14 @@ func init() {
 	}
 	secretsImportCmd.Flags().BoolVar(&secretsProviderFlags.write, "write", false, "Write imported secrets to encrypted .tako/secrets files")
 	secretsImportCmd.Flags().BoolVar(&secretsProviderFlags.overwrite, "overwrite", false, "Overwrite existing local secrets")
+	secretsImportCmd.Flags().StringVar(&secretsImportFormat, "format", "", "Import a local stream instead of a provider (supported: env)")
+	secretsImportCmd.Flags().StringVar(&secretsImportFile, "file", "", "Read the --format env stream from FILE instead of stdin ('-' = stdin)")
+	secretsSetCmd.Flags().Bool("stdin", false, "Read the secret value from stdin (one trailing newline is stripped)")
+	secretsSetCmd.Flags().String("from-file", "", "Read the secret value from PATH (one trailing newline is stripped)")
+	secretsSetCmd.MarkFlagsMutuallyExclusive("stdin", "from-file")
 }
+
+var (
+	secretsImportFormat string
+	secretsImportFile   string
+)

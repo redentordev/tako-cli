@@ -685,22 +685,7 @@ func remapYAMLErrorLines(err error, lines map[int]int) error {
 	if err == nil {
 		return nil
 	}
-	remap := func(message string) string {
-		return yamlErrorLinePattern.ReplaceAllStringFunc(message, func(match string) string {
-			number, convErr := strconv.Atoi(strings.TrimPrefix(match, "line "))
-			if convErr == nil {
-				if original, ok := lines[number]; ok {
-					return fmt.Sprintf("line %d", original)
-				}
-			}
-			return "line ?"
-		})
-	}
-	clean := func(message string) string {
-		message = remap(message)
-		message = strings.ReplaceAll(message, "line ?: ", "")
-		return strings.ReplaceAll(message, "line ?", "")
-	}
+	clean := func(message string) string { return remapYAMLLineReferences(message, lines) }
 	var typeErr *yaml.TypeError
 	if errors.As(err, &typeErr) {
 		remapped := make([]string, len(typeErr.Errors))
@@ -710,6 +695,22 @@ func remapYAMLErrorLines(err error, lines map[int]int) error {
 		return &yaml.TypeError{Errors: remapped}
 	}
 	return errors.New(clean(err.Error()))
+}
+
+// remapYAMLLineReferences rewrites every "line N" in message through lines,
+// dropping references that cannot be mapped.
+func remapYAMLLineReferences(message string, lines map[int]int) string {
+	message = yamlErrorLinePattern.ReplaceAllStringFunc(message, func(match string) string {
+		number, convErr := strconv.Atoi(strings.TrimPrefix(match, "line "))
+		if convErr == nil {
+			if original, ok := lines[number]; ok {
+				return fmt.Sprintf("line %d", original)
+			}
+		}
+		return "line ?"
+	})
+	message = strings.ReplaceAll(message, "line ?: ", "")
+	return strings.ReplaceAll(message, "line ?", "")
 }
 
 // yamlLineMap pairs the nodes of built with the nodes parsed back from its

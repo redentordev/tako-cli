@@ -685,6 +685,12 @@ func TestDeploySummaryURLsSortedAndMapped(t *testing.T) {
 	if status, _ := summaryURLStatus(health.DomainStatus{State: health.DomainStatePendingDNS}, false); status != SummaryURLPending {
 		t.Fatalf("non-strict pending = %q", status)
 	}
+	restricted := health.DomainStatus{State: health.DomainStateActive, OriginRestricted: true, Message: "certificate is issued and valid on the proxy node(s); the public TLS probe from this machine did not succeed"}
+	for _, strict := range []bool{false, true} {
+		if status, detail := summaryURLStatus(restricted, strict); status != SummaryURLReady || !strings.Contains(detail, "origin-restricted") {
+			t.Fatalf("origin-restricted strict=%v = %q %q, want ready", strict, status, detail)
+		}
+	}
 }
 
 func TestNewestStableRecord(t *testing.T) {

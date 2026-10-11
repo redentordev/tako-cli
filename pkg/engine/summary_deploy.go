@@ -304,6 +304,10 @@ func summaryURLStatus(status health.DomainStatus, strict bool) (string, string) 
 		detail = status.Warning
 	}
 	switch {
+	case status.Ready() && status.OriginRestricted:
+		// A proxy.cdn origin that only the CDN can reach: the public probe
+		// failed by design, but the certificate is valid on the node(s).
+		return SummaryURLReady, "origin-restricted: certificate valid on the proxy node(s)"
 	case status.Ready():
 		return SummaryURLReady, detail
 	case strict, status.State == health.DomainStateWrongDNS:

@@ -33,6 +33,49 @@ type DomainStatusEntry struct {
 	Warning     string   `json:"warning,omitempty"`
 	DNSError    string   `json:"dnsError,omitempty"`
 	TLSError    string   `json:"tlsError,omitempty"`
+	// OriginRestricted marks a proxy.cdn domain reported active from the
+	// proxy nodes' certificate state because the public TLS probe could not
+	// reach the CDN-restricted origin.
+	OriginRestricted bool                   `json:"originRestricted,omitempty"`
+	NodeCertificate  *DomainNodeCertificate `json:"nodeCertificate,omitempty"`
+}
+
+// DomainNodeCertificate is the key-free proxy-node certificate evidence for
+// an origin-restricted domain.
+type DomainNodeCertificate struct {
+	Servers  []string  `json:"servers,omitempty"`
+	Source   string    `json:"source,omitempty"`
+	Issuer   string    `json:"issuer,omitempty"`
+	NotAfter time.Time `json:"notAfter,omitempty"`
+}
+
+// NewDomainStatusEntry converts a checked domain status into its result row.
+func NewDomainStatusEntry(status health.DomainStatus, role string) DomainStatusEntry {
+	entry := DomainStatusEntry{
+		Service:          status.Service,
+		Domain:           status.Domain,
+		Role:             role,
+		State:            string(status.State),
+		DNS:              string(status.DNS),
+		TLS:              string(status.TLS),
+		ResolvedIPs:      status.ResolvedIPs,
+		CNAME:            status.CNAME,
+		CDN:              status.CDN,
+		Message:          status.Message,
+		Warning:          status.Warning,
+		DNSError:         status.DNSError,
+		TLSError:         status.TLSError,
+		OriginRestricted: status.OriginRestricted,
+	}
+	if certificate := status.NodeCertificate; certificate != nil {
+		entry.NodeCertificate = &DomainNodeCertificate{
+			Servers:  append([]string(nil), certificate.Servers...),
+			Source:   certificate.Source,
+			Issuer:   certificate.Issuer,
+			NotAfter: certificate.NotAfter,
+		}
+	}
+	return entry
 }
 
 // DomainsResult is the serializable outcome of `tako domains status`.
@@ -84,6 +127,9 @@ type DomainStatusOptions struct {
 	Timeout         time.Duration
 	Strict          bool
 	ExpectedTargets []string
+	// NodeCertificates, when set, lets CDN-fronted domains whose public TLS
+	// probe fails be confirmed from the proxy nodes' own certificate state.
+	NodeCertificates NodeCertificateChecker
 }
 
 // CollectConfiguredDomainSpecs lists the public domains configured on
@@ -152,6 +198,7 @@ func (e *Engine) MonitorDomainStatuses(ctx context.Context, checker *health.Heal
 		for _, spec := range specs {
 			status := checker.CheckDomain(ctx, spec.Service, spec.Domain, options.ExpectedTargets)
 			applyDomainCDNPolicy(&status, spec)
+			applyDomainOriginCertificate(ctx, &status, spec, options.NodeCertificates)
 			applyDomainAccessControlWarning(&status, spec)
 			results = append(results, status)
 			if status.Pending() {
@@ -232,7 +279,7 @@ func appendDomainWarning(status *health.DomainStatus, warning string) {
 
 func (e *Engine) emitDomainStatusAttempt(attempt int, statuses []health.DomainStatus) {
 	for _, status := range statuses {
-		message := fmt.Sprintf("   [%d] %s (%s): %s", attempt, status.Domain, status.Service, status.State)
+		message := fmt.Sprintf("   [%d] %s (%s): %s", attempt, status.Domain, status.Service, DomainStateLabel(status))
 		if status.Message != "" {
 			message += fmt.Sprintf(" - %s", status.Message)
 		}
@@ -250,7 +297,7 @@ func (e *Engine) emitDomainStatusAttempt(attempt int, statuses []health.DomainSt
 		if status.Warning != "" {
 			level = events.LevelWarn
 		}
-		e.emit(events.Event{
+		event := events.Event{
 			Type:    events.TypeDomainStatus,
 			Phase:   events.PhaseDomains,
 			Level:   level,
@@ -261,7 +308,11 @@ func (e *Engine) emitDomainStatusAttempt(attempt int, statuses []health.DomainSt
 				"state":   string(status.State),
 				"attempt": attempt,
 			},
-		})
+		}
+		if status.OriginRestricted {
+			event.Data["originRestricted"] = true
+		}
+		e.emit(event)
 	}
 }
 

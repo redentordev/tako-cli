@@ -49,16 +49,23 @@ func rejectUnsupportedPreview(cmd *cobra.Command) error {
 }
 
 // loadPreviewInstanceConfig loads configPath for preview name created from
-// base (empty base selects the only preview base, D3).
-func loadPreviewInstanceConfig(configPath string, base string, name string) (*config.Config, error) {
-	return config.LoadConfigWithOptions(configPath, config.LoadOptions{Preview: &config.PreviewInstance{Base: base, Name: name}})
+// base (empty base selects the only preview base, D3). A non-empty
+// environment turns on environment-scoped ${VAR} expansion bounded by the
+// preview's base: unset references used only by other environments, or by
+// servers the base cannot use, do not fail the load. An empty environment
+// requires every reference.
+func loadPreviewInstanceConfig(configPath string, base string, name string, environment string) (*config.Config, error) {
+	return config.LoadConfigWithOptions(configPath, config.LoadOptions{
+		Preview:     &config.PreviewInstance{Base: base, Name: name},
+		Environment: environment,
+	})
 }
 
 // previewInstanceLoader is the engine loader for previews other than the
-// one this command targets.
+// one this command targets. Each instance is scoped to its own base.
 func previewInstanceLoader(configPath string) engine.PreviewInstanceLoader {
 	return func(base string, name string) (*config.Config, error) {
-		return loadPreviewInstanceConfig(configPath, base, name)
+		return loadPreviewInstanceConfig(configPath, base, name, base)
 	}
 }
 
@@ -70,7 +77,8 @@ var findPreviewRecord = func(ctx context.Context, cfg *config.Config, name strin
 // loadCommandConfig loads the config for a command that accepts --preview.
 // Without --preview it is config.LoadConfig. With --preview it reads the
 // preview record first (exit 2 when none exists or -e differs from the
-// record's base) and loads the instance from the record's base (D10).
+// record's base) and loads the instance from the record's base (D10). With
+// -e both loads are scoped to that environment, the preview's base.
 func loadCommandConfig(ctx context.Context, configPath string) (*config.Config, error) {
 	if !previewRequested() {
 		return config.LoadConfig(configPath)
@@ -79,7 +87,7 @@ func loadCommandConfig(ctx context.Context, configPath string) (*config.Config, 
 	if err != nil {
 		return nil, &engine.InvalidRequestError{Err: err}
 	}
-	plain, err := config.LoadConfig(configPath)
+	plain, err := config.LoadConfigForEnvironment(configPath, envFlag)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +101,7 @@ func loadCommandConfig(ctx context.Context, configPath string) (*config.Config, 
 	if envFlag != "" && envFlag != record.Base {
 		return nil, &engine.InvalidRequestError{Err: fmt.Errorf("preview %s was created from %s, not %s", name, record.Base, envFlag)}
 	}
-	cfg, err := loadPreviewInstanceConfig(configPath, record.Base, name)
+	cfg, err := loadPreviewInstanceConfig(configPath, record.Base, name, envFlag)
 	if err != nil {
 		return nil, &engine.InvalidRequestError{Err: err}
 	}
@@ -120,13 +128,21 @@ func loadCommandConfigOrError(ctx context.Context, configPath string) (*config.C
 }
 
 // loadOfflinePreviewConfig loads the instance --preview names without
-// reading any record: the base is -e or the only preview base (D3). Used by
-// deploy (which checks the record in the engine) and config explain.
+// reading any record: the base is -e or the only preview base (D3). Every
+// ${VAR} reference is required.
 func loadOfflinePreviewConfig(configPath string) (*config.Config, error) {
+	return loadOfflinePreviewConfigForEnvironment(configPath, "")
+}
+
+// loadOfflinePreviewConfigForEnvironment is loadOfflinePreviewConfig with
+// environment-scoped ${VAR} expansion when environment (-e) is set; with
+// --preview the scope is the preview's base, which -e names. Used by deploy
+// (which checks the record in the engine), validate and config explain.
+func loadOfflinePreviewConfigForEnvironment(configPath string, environment string) (*config.Config, error) {
 	if !previewRequested() {
-		return config.LoadConfig(configPath)
+		return config.LoadConfigForEnvironment(configPath, environment)
 	}
-	cfg, err := loadPreviewInstanceConfig(configPath, envFlag, previewFlag)
+	cfg, err := loadPreviewInstanceConfig(configPath, envFlag, previewFlag, environment)
 	if err != nil {
 		return nil, &engine.InvalidRequestError{Err: err}
 	}

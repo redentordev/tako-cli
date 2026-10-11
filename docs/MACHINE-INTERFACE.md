@@ -678,7 +678,14 @@ entries (`service`, `domain`, `role` `serving|redirect|ad-hoc`, `state`,
 `dns`, `tls`, resolved IPs, cname, the additive explicit `cdn` declaration,
 message, optional `warning`, and errors). `state: active,dns: proxied` is
 reported only when `cdn` is explicitly `cloudflare` or `generic`; an
-undeclared suspected CDN stays wrong/unready. Pending domains also exit 6,
+undeclared suspected CDN stays wrong/unready. A declared-CDN origin that the
+public TLS probe cannot reach is reported `state: active`, `tls: active` with
+the additive `originRestricted: true` and `nodeCertificate` (`servers`,
+`source` `pushed|acme-dns|caddy`, `issuer`, `notAfter`) when every proxy
+node advertising `proxy.cert-status-v1` holds a valid certificate for it; the
+state enum is unchanged, and `domain.status` events add
+`data.originRestricted: true`. If any proxy node lacks that capability the
+public-probe state (`pending_tls`) is kept. Pending domains also exit 6,
 and every strict failure still emits the document. Serving entries cover the
 primary `proxy.domain` plus every additional `proxy.domains` hostname. `tako domains hosts --output
 json` returns a `DomainsHostsResult` with the `--address` mode and

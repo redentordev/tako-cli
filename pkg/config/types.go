@@ -67,6 +67,10 @@ type Config struct {
 
 	// preview is the preview instance this config was loaded for, or nil.
 	preview *PreviewInstanceInfo
+
+	// deferredVariables lists unset ${VAR} names that were referenced only
+	// by environments or servers removed by environment-scoped loading.
+	deferredVariables []string
 }
 
 // PlatformContext identifies the enrolled cluster that owns the runtime
@@ -1202,9 +1206,40 @@ func (c *Config) GetFullImageName(serviceName string, envName string) string {
 // It intentionally does not expand bare $VAR so keys like $schema remain intact.
 // For YAML, comment text is ignored so commented examples do not require env vars.
 func expandEnvWithTrim(s string, ignoreYAMLComments bool) (string, error) {
+	expanded, missing := expandConfigText(s, ignoreYAMLComments, false)
+	if len(missing) > 0 {
+		return "", missingEnvironmentVariablesError(missing)
+	}
+	return expanded, nil
+}
+
+func missingEnvironmentVariablesError(missing []string) error {
+	return fmt.Errorf("missing environment variable(s): %s", strings.Join(missing, ", "))
+}
+
+// expandConfigText expands ${VAR} references from the process environment,
+// trimming values and skipping YAML comment text when ignoreYAMLComments is
+// set. It returns the sorted, unique names that are not set. With
+// keepMissing, an unset reference stays in the output as the literal
+// ${VAR} text so callers can tell where it was used; otherwise it expands
+// to the empty string.
+func expandConfigText(s string, ignoreYAMLComments bool, keepMissing bool) (string, []string) {
 	var result strings.Builder
 	missing := make([]string, 0)
 	seenMissing := map[string]bool{}
+	lookup := func(key string) (string, bool) {
+		if value, ok := os.LookupEnv(key); ok {
+			return strings.TrimSpace(value), true
+		}
+		if !seenMissing[key] {
+			seenMissing[key] = true
+			missing = append(missing, key)
+		}
+		if keepMissing {
+			return "${" + key + "}", true
+		}
+		return "", false
+	}
 
 	for _, line := range strings.SplitAfter(s, "\n") {
 		content := line
@@ -1213,22 +1248,13 @@ func expandEnvWithTrim(s string, ignoreYAMLComments bool) (string, error) {
 			content, comment = splitYAMLComment(line)
 		}
 
-		expanded, lineMissing := envexpand.BracedFromOS(content)
-		for _, key := range lineMissing {
-			if !seenMissing[key] {
-				seenMissing[key] = true
-				missing = append(missing, key)
-			}
-		}
+		expanded, _ := envexpand.Braced(content, lookup)
 		result.WriteString(expanded)
 		result.WriteString(comment)
 	}
 
-	if len(missing) > 0 {
-		sort.Strings(missing)
-		return "", fmt.Errorf("missing environment variable(s): %s", strings.Join(missing, ", "))
-	}
-	return result.String(), nil
+	sort.Strings(missing)
+	return result.String(), missing
 }
 
 func splitYAMLComment(line string) (string, string) {
@@ -1259,11 +1285,33 @@ type LoadOptions struct {
 	// Preview synthesizes the preview environment preview-<name> from its
 	// base before validation; see PreviewInstance.
 	Preview *PreviewInstance
+	// Environment selects the one environment the command works on and
+	// turns on environment-scoped ${VAR} expansion (see
+	// LoadConfigForEnvironment). With Preview set, the scope is the
+	// preview's base (Preview.Base, or Environment when Base is empty) and
+	// its extends chain: the preview environment is synthesized from it, so
+	// the base is never pruned and its references are always required.
+	// Empty requires every reference in the file.
+	Environment string
 }
 
-// LoadConfig loads the configuration from a YAML or JSON file
+// LoadConfig loads the configuration from a YAML or JSON file. Every
+// ${VAR} reference in the file must be set.
 func LoadConfig(configPath string) (*Config, error) {
 	return LoadConfigWithOptions(configPath, LoadOptions{})
+}
+
+// LoadConfigForEnvironment loads the configuration for a command that works
+// on one explicitly selected environment. Top-level sections, the selected
+// environment, the environments it extends, and the servers it can use must
+// have every ${VAR} set. A reference that is unset and appears only in other
+// environments, or in servers the selected environment cannot use, does not
+// fail the load: those environments and servers are removed from the
+// returned config so their unexpanded values can never be used, and the
+// skipped names are reported by DeferredEnvironmentVariables. With an empty
+// environment this is LoadConfig.
+func LoadConfigForEnvironment(configPath string, environment string) (*Config, error) {
+	return LoadConfigWithOptions(configPath, LoadOptions{Environment: environment})
 }
 
 // LoadConfigWithOptions is LoadConfig with options. With zero options it
@@ -1329,17 +1377,23 @@ func LoadConfigWithOptions(configPath string, opts LoadOptions) (*Config, error)
 		return nil, err
 	}
 
-	// Expand environment variables in the content with trimming
-	// This handles cases where environment variables have trailing spaces
-	expandedData, err := expandEnvWithTrim(string(data), !isJSON)
-	if err != nil {
-		return nil, fmt.Errorf("failed to expand config environment variables: %w", err)
-	}
-
-	// Resolve environment inheritance and decode into the Config struct
-	parsed, err := ParseConfigDocumentWithOptions([]byte(expandedData), isJSON, opts)
-	if err != nil {
-		return nil, err
+	// Expand environment variables in the content with trimming, then
+	// resolve environment inheritance and decode into the Config struct.
+	var parsed *Config
+	if scope := opts.scopeEnvironment(); scope == "" {
+		expandedData, err := expandEnvWithTrim(string(data), !isJSON)
+		if err != nil {
+			return nil, fmt.Errorf("failed to expand config environment variables: %w", err)
+		}
+		parsed, err = ParseConfigDocumentWithOptions([]byte(expandedData), isJSON, opts)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		parsed, err = parseEnvironmentScopedDocument(string(data), isJSON, scope, opts)
+		if err != nil {
+			return nil, err
+		}
 	}
 	config := *parsed
 

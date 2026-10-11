@@ -741,7 +741,11 @@ with `tako deploy --strict-domains`. The check infers expected DNS targets from
 `dns: proxied` only when the service explicitly declares
 `proxy.cdn: cloudflare|generic`. Without that declaration, suspected-CDN detail
 is human diagnostics while machine state remains wrong/unready. Thus a CDN
-heuristic cannot silently change an exit code. Use
+heuristic cannot silently change an exit code. A declared-CDN origin whose
+public TLS probe cannot connect (port 443 restricted to CDN ranges) is reported
+`active` with `originRestricted: true` once every proxy node's takod
+(`proxy.cert-status-v1`, `GET /v1/certs/status`) reports a valid node-local
+certificate for the hostname; older nodes keep the public-probe result. Use
 `--domain-target` for custom CNAME or edge targets and `tako domains status` to
 re-check domains without redeploying.
 

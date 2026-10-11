@@ -666,6 +666,52 @@ the secrets files of its base (`.tako/secrets.preview` above). See
 [PREVIEW-ENVIRONMENTS.md](./PREVIEW-ENVIRONMENTS.md) for DNS, certificates,
 TTL and pruning.
 
+### Environment variables and `-e`
+
+`${VAR}` references are expanded from the process environment and the `.env`
+file next to the config. Unset variables are an error, but which ones count
+depends on whether the command was given `-e`:
+
+- `tako validate`, `tako deploy`, and `tako config explain` with `-e <env>`
+  require only the variables used by the parts of the config that environment
+  can reach:
+  - every top-level section (`project`, `registries`, `secretSources`,
+    `notifications`, `volumes`, `builds`, `hooks`, `runtime`, `state`, `mesh`,
+    ...)
+  - the selected environment and every environment it `extends`, including
+    concrete parents, all of whose values are required
+  - the servers it can use: the servers listed in its (or an inherited)
+    `servers`, `proxy.placement.servers`, and service `placement.servers`
+  - any `x-` fragment or anchor it uses through a YAML alias, even one
+    declared inside another environment
+- When the selected environment uses `serverSelector`, has no `servers` list,
+  or any server is an enrolled platform node (`clusterId`/`nodeId`), every
+  server is in scope and every server's variables are required.
+- A variable used only by other environments, unused `x-` fragments, or
+  servers outside that scope may be unset. The command then leaves every
+  other environment, and each out-of-scope server it could not expand, out of
+  the loaded config, so their unexpanded values are never used and those
+  servers are never contacted. `tako validate -e <env>`
+  names the skipped variables in a warning; `tako deploy -v` prints them.
+- When every variable is set, nothing is left out: `-e` only changes the
+  outcome for a config that would otherwise fail to expand.
+- Without `-e` (including the default-environment pick), and for every other
+  command (for example `tako setup`, `tako upgrade servers`, and `tako doctor`),
+  every variable in the file is required. Run `tako validate` without `-e` to
+  check all environments at once.
+- With `--preview` (`tako deploy`, `tako config explain`, `ps`, `logs`,
+  `exec`, `history`, `rollback`), `-e` names the preview's base and the
+  scope is that base and its `extends` chain: the base is never left out and
+  its variables are required, even when it is abstract. Without `-e` every
+  variable is required.
+
+A CI job for one environment therefore only needs that environment's
+variables:
+
+```bash
+TAKO_PREVIEW_HOST=203.0.113.10 tako validate -e preview
+```
+
 ## Background Workers
 
 <!-- tako:snippet partial -->
@@ -869,6 +915,29 @@ tako secrets list --env production
 tako deploy --env production
 ```
 
+A value passed as `KEY=value` is visible to other local users (`ps`,
+`/proc/<pid>/cmdline`) while the command runs and can end up in shell history.
+In scripts and CI, keep values off the command line:
+
+```bash
+# Read one value from stdin (one trailing newline is stripped)
+printf '%s' "$DB_PASSWORD" | tako secrets set DB_PASSWORD --stdin --env production
+op read op://Prod/api/token | tako secrets set API_TOKEN --stdin --env production
+
+# Read one value from a file (one trailing newline is stripped)
+tako secrets set TLS_KEY --from-file ./certs/server.key --env production
+
+# Import many KEY=value lines from a dotenv stream (dry run until --write)
+vault-export-script | tako secrets import --format env --env production --write
+tako secrets import --format env --file prod.env --env production --write
+```
+
+`--stdin` and `--from-file` are mutually exclusive and take a bare `KEY` (no
+`=value`); values are capped at 1 MiB. `KEY=value` stores the value verbatim,
+including a leading `@`. `import --format env` keeps dotenv keys as
+written (rename with `--map SOURCE=DEST`), skips existing keys unless
+`--overwrite` is set, and never prints values.
+
 ### Resolving secrets from external stores at deploy time
 
 Like Kamal's `.kamal/secrets` + `kamal secrets fetch`, `secretSources` keep the
@@ -1045,6 +1114,21 @@ Tako origin reports the additive `dns: proxied` state and passes `--strict` and
 only a suspected-CDN human diagnostic; machine state remains `wrong_dns` /
 `wrong_target` and exits 6. Genuinely unpointed or TLS-pending domains also exit
 6 even with a CDN declaration.
+
+A CDN-fronted origin often accepts port 443 only from the CDN's address ranges
+(for example CloudFront's origin-facing prefix list), so the public TLS probe
+from the deploying machine can never connect. For a `proxy.cdn` domain whose
+DNS routes to the origin but whose public TLS probe fails, Tako asks every
+proxy node's takod for its own certificate state (Tako-pushed, DNS-01, or
+Caddy-managed HTTP-01). When every proxy node holds a currently valid
+certificate covering the hostname, the domain is reported as
+`active (origin-restricted)` on the first check, without waiting for
+`--domain-timeout`, and passes `--strict` and `--strict-domains`. If a node has
+no valid certificate yet the domain stays `pending_tls` and the message names
+the node. Nodes whose takod predates the `proxy.cert-status-v1` capability keep
+the previous behaviour (`pending_tls` until the timeout, with a message that
+explains the CDN restriction and suggests `tako upgrade servers`). Domains
+without `proxy.cdn` never contact the nodes and are unchanged.
 
 #### Cloudflare encryption modes
 
@@ -1657,9 +1741,14 @@ status `rolled_back` (or `failed` after a partial rollback), so running
 Before changing anything, Tako checks that every image it needs is available:
 the exact image still retained on the environment's nodes (reused without a
 build), the target commit in the local git repository (rebuilt), or a registry
-image (pulled). `tako cleanup` keeps the newest images per service (`--keep`,
-default 3), so older targets of build-backed services usually need the
-commit to rebuild; shared-build images must still be retained. If any image is
+image (pulled). `tako cleanup` keeps the newest images per service and
+environment (`--keep`, default 3), so older targets of build-backed services
+usually need the commit to rebuild; shared-build images must still be retained.
+Cleanup only removes images the node's deployment history attributes to the
+cleaned environment alone. It never removes an image another environment's
+history references, an image in any current desired or actual state on the
+node, or an image a container still uses. If that state cannot be read, it
+removes no images. If any image is
 unavailable, the plan fails with exit 1 and nothing is changed. Finding
 retained images needs a node agent with the `image.descriptor-v1` capability;
 run `tako upgrade servers` if the plan asks for it.

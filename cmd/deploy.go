@@ -90,8 +90,27 @@ func init() {
 	deployCmd.Flags().BoolVar(&deployNoPrune, "no-prune", false, "With --preview: skip the opportunistic prune of expired previews")
 }
 
+// loadDeployConfig loads the config requiring every ${VAR} it references.
+// Commands that span servers or environments beyond the one selected (for
+// example `tako upgrade servers`) use it.
 func loadDeployConfig(configPath string) (*config.Config, error) {
 	cfg, err := loadOfflinePreviewConfig(configPath)
+	if err != nil {
+		return nil, &engine.InvalidRequestError{Err: formatDeployConfigError(resolveDeployConfigPath(configPath), err)}
+	}
+	return cfg, nil
+}
+
+// loadSelectedEnvironmentConfig loads the config for a command that works
+// only on the environment selected with -e. Unset ${VAR} references used
+// only by other environments, or by servers the selected environment cannot
+// use, do not fail the load; those environments and servers are left out of
+// the returned config. With --preview, -e names the preview's base: the
+// scope is that base and its extends chain, which are never pruned and whose
+// references are required. Without -e every reference is required, exactly
+// as loadDeployConfig.
+func loadSelectedEnvironmentConfig(configPath string) (*config.Config, error) {
+	cfg, err := loadOfflinePreviewConfigForEnvironment(configPath, envFlag)
 	if err != nil {
 		return nil, &engine.InvalidRequestError{Err: formatDeployConfigError(resolveDeployConfigPath(configPath), err)}
 	}
@@ -116,7 +135,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return &engine.InvalidRequestError{Err: fmt.Errorf("--ttl and --no-prune require --preview")}
 	}
 	configPath := resolveDeployConfigPath(cfgFile)
-	cfg, err := loadDeployConfig(cfgFile)
+	cfg, err := loadSelectedEnvironmentConfig(cfgFile)
 	if err != nil {
 		return err
 	}
@@ -126,6 +145,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 	for _, warning := range config.ValidationWarnings(cfg) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning.Message)
+	}
+	if deferred := cfg.DeferredEnvironmentVariables(); len(deferred) > 0 && verbose {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: skipped other environments and servers that use unset environment variable(s): %s\n", strings.Join(deferred, ", "))
 	}
 
 	request := engine.DeployRequest{

@@ -72,6 +72,19 @@ func TestReadyConnectivityMemberDoesNotReceiveDeployLease(t *testing.T) {
 	}
 }
 
+func TestBuildStrategyHeaderLineOnlyWhenSomethingIsBuilt(t *testing.T) {
+	cfg := &config.Config{Deployment: &config.DeploymentConfig{Build: &config.BuildConfig{Strategy: config.BuildStrategyRemote}}}
+	if got := buildStrategyHeaderLine(cfg, map[string]config.ServiceConfig{"db": {Image: "postgres:16"}}); got != "" {
+		t.Fatalf("prebuilt-only header line = %q, want empty", got)
+	}
+	if got := buildStrategyHeaderLine(cfg, map[string]config.ServiceConfig{"db": {Image: "postgres:16"}, "web": {Build: "."}}); got != "Build strategy: remote\n" {
+		t.Fatalf("build header line = %q", got)
+	}
+	if got := buildStrategyHeaderLine(cfg, map[string]config.ServiceConfig{"worker": {ImageFrom: "web", SharedBuildHash: "sha256:shared"}}); got == "" {
+		t.Fatal("shared-build service should print the build strategy")
+	}
+}
+
 func TestDeployLeaseTargetsIncludeBuilderButExcludeReadyWorker(t *testing.T) {
 	cfg := &config.Config{
 		Deployment: &config.DeploymentConfig{Build: &config.BuildConfig{Strategy: config.BuildStrategyRemote}},
