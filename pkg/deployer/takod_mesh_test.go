@@ -3,6 +3,7 @@ package deployer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -456,5 +457,31 @@ func TestRejectedPeerSetDoesNotRewriteNodeMetadata(t *testing.T) {
 		if !reflect.DeepEqual(endpoints, []string{"/v1/mesh/peer-sets", "/v1/metadata"}) {
 			t.Fatalf("%s request order = %v", server, endpoints)
 		}
+	}
+}
+
+// Review finding 5: an operation that does not apply the mesh fails closed
+// when a member it needs has no applied address, instead of pointing proxy
+// upstreams at an address the member's interface does not carry.
+func TestLazyMeshAddressFailsClosedForUnappliedMember(t *testing.T) {
+	d, recorder := meshTestDeployer(t, []string{"a", "b"}, nil, recordedMeshStatuses(map[string]string{"a": "10.210.0.1/24"}))
+	if ip, err := d.meshHostIPForServer("a"); err != nil || ip != "10.210.0.1" {
+		t.Fatalf("recorded member: ip = %q, err = %v", ip, err)
+	}
+	_, err := d.meshHostIPForServer("b")
+	var unapplied *MeshAddressUnappliedError
+	if !errors.As(err, &unapplied) || unapplied.Server != "b" || !strings.Contains(err.Error(), "tako deploy -e production") {
+		t.Fatalf("unapplied member err = %v", err)
+	}
+	if recorder.count() != 0 {
+		t.Fatalf("read-only resolution wrote to nodes: %d requests", recorder.count())
+	}
+
+	// After the operation applied the mesh, every member is usable.
+	if err := d.SetupTakodRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	if ip, err := d.meshHostIPForServer("b"); err != nil || ip != "10.210.0.2" {
+		t.Fatalf("applied member: ip = %q, err = %v", ip, err)
 	}
 }

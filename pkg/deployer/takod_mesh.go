@@ -74,6 +74,18 @@ func (d *Deployer) meshNetwork() (string, int) {
 // documents captured by verifyTakodAgents and records the result for proxy
 // upstreams. publicKeys holds the members' current WireGuard keys.
 func (d *Deployer) resolveTakodMeshAddresses(members []string, publicKeys map[string]string) (map[string]string, error) {
+	resolution, err := d.resolveMeshResolution(members, publicKeys)
+	if err != nil {
+		return nil, err
+	}
+	d.meshMu.Lock()
+	d.meshAddresses = resolution.Addresses
+	d.meshUnapplied = nil
+	d.meshMu.Unlock()
+	return resolution.Addresses, nil
+}
+
+func (d *Deployer) resolveMeshResolution(members []string, publicKeys map[string]string) (mesh.Resolution, error) {
 	records := make(map[string]mesh.MemberRecord, len(members))
 	for _, name := range members {
 		status, _ := d.meshStatus(name)
@@ -84,15 +96,12 @@ func (d *Deployer) resolveTakodMeshAddresses(members []string, publicKeys map[st
 	cidr, bits := d.meshNetwork()
 	resolution, err := mesh.ResolveAddresses(cidr, bits, members, records)
 	if err != nil {
-		return nil, err
+		return mesh.Resolution{}, err
 	}
 	for _, warning := range resolution.Warnings {
 		d.emitEvent(events.Event{Type: events.TypeWarning, Phase: events.PhaseDeploy, Level: events.LevelWarn, Message: fmt.Sprintf("  ⚠ %s\n", warning)})
 	}
-	d.meshMu.Lock()
-	d.meshAddresses = resolution.Addresses
-	d.meshMu.Unlock()
-	return resolution.Addresses, nil
+	return resolution, nil
 }
 
 // ensureMeshAddresses returns the operation's resolved member addresses. An
@@ -123,7 +132,43 @@ func (d *Deployer) ensureMeshAddresses() (map[string]string, error) {
 	}); err != nil {
 		return nil, err
 	}
-	return d.resolveTakodMeshAddresses(members, nil)
+	resolution, err := d.resolveMeshResolution(members, nil)
+	if err != nil {
+		return nil, err
+	}
+	// Nothing applies these addresses here, so a member whose resolved
+	// address differs from its record would get upstreams at an address its
+	// interface does not carry.
+	unapplied := make(map[string]bool, len(resolution.Changed))
+	for _, name := range resolution.Changed {
+		unapplied[name] = true
+	}
+	d.meshMu.Lock()
+	d.meshAddresses = resolution.Addresses
+	d.meshUnapplied = unapplied
+	d.meshMu.Unlock()
+	return resolution.Addresses, nil
+}
+
+// MeshAddressUnappliedError means an operation that does not apply the mesh
+// needs a member's address that the mesh has not applied yet (a fresh
+// member, or a recorded address the resolver had to replace). It is an
+// invalid request (exit 2): a deploy applies the mesh first.
+type MeshAddressUnappliedError struct {
+	Server      string
+	Environment string
+}
+
+func (e *MeshAddressUnappliedError) Error() string {
+	return fmt.Sprintf("server %s has no applied mesh address for environment %s; run 'tako deploy -e %s' to apply the mesh before this operation", e.Server, e.Environment, e.Environment)
+}
+
+// meshAddressApplied reports whether the member's resolved address is the
+// one its interface carries.
+func (d *Deployer) meshAddressApplied(serverName string) bool {
+	d.meshMu.Lock()
+	defer d.meshMu.Unlock()
+	return !d.meshUnapplied[serverName]
 }
 
 // memberRecordFromStatus converts one GET /v1/status response into the

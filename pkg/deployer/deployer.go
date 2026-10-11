@@ -96,6 +96,9 @@ type Deployer struct {
 	meshMu        sync.Mutex
 	meshStatuses  map[string]takod.Status
 	meshAddresses map[string]string
+	// meshUnapplied lists members whose read-only resolved address differs
+	// from their record (set only when this operation did not apply the mesh).
+	meshUnapplied map[string]bool
 	// meshStatusReader overrides how member status is read (tests).
 	meshStatusReader func(serverName string) (takod.Status, error)
 	// meshClient overrides the takod client used for mesh key, metadata and

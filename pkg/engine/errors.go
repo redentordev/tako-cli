@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
@@ -111,6 +112,10 @@ func Classify(err error) Class {
 	}
 	var capability *takodclient.CapabilityRequiredError
 	if errors.As(err, &capability) {
+		return ClassInvalid
+	}
+	var unappliedMesh *deployer.MeshAddressUnappliedError
+	if errors.As(err, &unappliedMesh) {
 		return ClassInvalid
 	}
 	var locked *LockedError

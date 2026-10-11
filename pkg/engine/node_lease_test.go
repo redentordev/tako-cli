@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redentordev/tako-cli/pkg/deployer"
 	"github.com/redentordev/tako-cli/pkg/takod"
 )
 
@@ -289,5 +290,12 @@ func TestNodeMaintenanceLeaseFallbackRenews(t *testing.T) {
 	node.mu.Unlock()
 	if time.Until(expires) < NodeMaintenanceLeaseTTL-time.Minute {
 		t.Fatalf("fallback lease expires in %s after renewal", time.Until(expires))
+	}
+}
+
+func TestUnappliedMeshAddressIsInvalidRequest(t *testing.T) {
+	err := fmt.Errorf("reconcile proxy: %w", &deployer.MeshAddressUnappliedError{Server: "b", Environment: "production"})
+	if Classify(err) != ClassInvalid {
+		t.Fatalf("class = %v, want invalid (exit 2)", Classify(err))
 	}
 }

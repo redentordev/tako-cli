@@ -1412,7 +1412,7 @@ func TestBuildTakodNetworkAttachmentsUsesServiceScopedExportNetworks(t *testing.
 }
 
 func TestBuildTakodContainerSpecPublishesPublicMultiNodeServiceOnMeshIP(t *testing.T) {
-	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production", meshStatusReader: freshMeshStatus}
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production", meshStatusReader: recordedMeshStatuses(map[string]string{"node-a": "10.210.0.1/24", "node-b": "10.210.0.2/24"})}
 	env := deploy.config.Environments["production"]
 	env.Services = map[string]config.ServiceConfig{
 		"web": {
@@ -1449,7 +1449,7 @@ func TestBuildTakodContainerSpecDoesNotPublishInternalServicePort(t *testing.T) 
 }
 
 func TestAllocateMeshUpstreamPortUsesTakodAndCachesResult(t *testing.T) {
-	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production", meshStatusReader: freshMeshStatus}
+	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a", "node-b"}), environment: "production", meshStatusReader: recordedMeshStatuses(map[string]string{"node-a": "10.210.0.1/24", "node-b": "10.210.0.2/24"})}
 	env := deploy.config.Environments["production"]
 	env.Services = map[string]config.ServiceConfig{
 		"web": {

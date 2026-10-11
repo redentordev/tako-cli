@@ -1154,6 +1154,9 @@ func (d *Deployer) meshHostIPForServer(serverName string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("server %s is not a mesh member of environment %s", serverName, d.environment)
 	}
+	if !d.meshAddressApplied(serverName) {
+		return "", &MeshAddressUnappliedError{Server: serverName, Environment: d.environment}
+	}
 	ip, _, err := net.ParseCIDR(address)
 	if err != nil {
 		return "", fmt.Errorf("invalid mesh address for %s: %w", serverName, err)
