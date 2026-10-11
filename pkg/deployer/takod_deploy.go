@@ -1576,6 +1576,14 @@ func (d *Deployer) prepareTakodNode(client any, serverName string, server config
 	if enrolled {
 		return nil
 	}
+	if d.memberSupportsMeshPeerSets(serverName) {
+		// The node renders the union of every environment's peer set, so a
+		// shared node keeps the peers of the other environments.
+		if _, err := takodclient.RequestJSON(client, d.takodSocket(), "PUT", "/v1/mesh/peer-sets", d.meshPeerSetRequest(meshNode, peers)); err != nil {
+			return fmt.Errorf("failed to reconcile WireGuard mesh peer set: %w", err)
+		}
+		return nil
+	}
 	if _, err := takodclient.RequestJSON(client, d.takodSocket(), "POST", "/v1/mesh/apply", takod.MeshApplyRequest{
 		Config: d.wireGuardConfig(),
 		Node:   meshNode,

@@ -114,6 +114,9 @@ type Status struct {
 	MembershipGeneration uint64                      `json:"membershipGeneration,omitempty"`
 	Node                 map[string]any              `json:"node,omitempty"`
 	Peers                map[string]any              `json:"peers,omitempty"`
+	// MeshPeerSets lists the stored per-environment peer sets once this node
+	// has rendered its mesh from them (mesh.peer-sets-v1).
+	MeshPeerSets []MeshPeerSetSummary `json:"meshPeerSets,omitempty"`
 }
 
 // CapabilityContainerArgvV1 means reconcile and job payloads preserve the
@@ -1800,9 +1803,17 @@ func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
 	if !s.requireFreeDisk(w, "/etc/wireguard") {
 		return
 	}
-	response, err := ReconcileMesh(r.Context(), request)
+	// A CLI without peer sets still sends one environment's whole mesh.
+	// Fold it into that environment's set so other environments sharing
+	// this node keep their peers.
+	response, err := reconcileLegacyMeshApply(r.Context(), s.dataDir, request)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		status := http.StatusBadGateway
+		var conflict *MeshPeerSetConflictError
+		if errors.As(err, &conflict) {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 
@@ -2646,6 +2657,10 @@ func (s *Server) Status() Status {
 		status.Capabilities = append(status.Capabilities, CapabilityBackupPostgresVerifyV1)
 	}
 	status.Capabilities = append(status.Capabilities, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1, CapabilityNodeMaintenanceLeaseV1)
+	if s.installation == nil {
+		// Enrolled nodes take their mesh from platform membership.
+		status.Capabilities = append(status.Capabilities, CapabilityMeshPeerSetsV1)
+	}
 	if s.installation != nil {
 		status.Capabilities = append(status.Capabilities, CapabilityPlatformWorkerHandoffV1)
 		if inventory, err := nodeidentity.ReadInventory(s.inventoryFile); err == nil && inventory.ClusterID == s.installation.ClusterID {
@@ -2670,6 +2685,9 @@ func (s *Server) Status() Status {
 
 	status.Node = readJSONMap(filepath.Join(s.dataDir, "node.json"))
 	status.Peers = readJSONMap(filepath.Join(s.dataDir, "mesh", "peers.json"))
+	if s.installation == nil {
+		status.MeshPeerSets = meshPeerSetSummaries(s.dataDir)
+	}
 	return status
 }
 

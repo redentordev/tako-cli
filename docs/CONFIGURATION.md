@@ -1429,13 +1429,21 @@ background interval using that same budget. Override explicit cleanup with
 `--docker-cache-keep-storage <size>`. Dangling image cleanup only runs during
 deploy cleanup or when `tako cleanup --docker-cache` is explicitly requested.
 
-Mesh caveat for shared nodes: a node's takod keeps one WireGuard peer list.
-Until every shared node runs a takod that supports per-environment peer sets
-(capability `mesh.peer-sets-v1`), each deploy replaces that list with its own
-environment's members, so the last app/stage to deploy wins and another
-app/stage's cross-node mesh traffic through that node can break until it
-deploys again. Deploys warn when they detect this (`server X is shared with
-app/stage`); run `tako upgrade servers --server X` to remove the caveat.
+Mesh on shared nodes: a shared node has one WireGuard interface, and its
+takod (capability `mesh.peer-sets-v1`) keeps one peer set per app/stage and
+configures the interface from the union of all sets. Deploying one app/stage
+never removes the peers another app/stage contributed, and `tako destroy`
+removes only the destroyed app/stage's set. Nodes of different environments
+that only share a server do not peer with each other.
+
+Multi-node environments that share a server must use compatible `mesh:`
+blocks: the same `networkCIDR`, `subnetBits`, and `listenPort`, and the same
+address for the shared server. A conflicting deploy fails before anything on
+the node changes and names both app/stages. Single-node environments add no
+peers, so their `mesh:` blocks may differ. An older takod without peer sets
+still keeps one peer list that the last deploy replaces; deploys warn about
+such nodes (`server X is shared with app/stage`) and
+`tako upgrade servers --server X` upgrades them.
 
 By default every selected environment node with proxy routes reconciles the
 shared proxy for that app/stage. Built-in ACME TLS for public routes currently

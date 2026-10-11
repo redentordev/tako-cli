@@ -127,9 +127,43 @@ func (d *Deployer) ensureMeshAddresses() (map[string]string, error) {
 }
 
 // memberRecordFromStatus converts one GET /v1/status response into the
-// resolver's view of the member.
+// resolver's view of the member. On a node that keeps per-environment peer
+// sets, peers.json holds only the last writer's peers, so the peers of every
+// stored set are added: their addresses are in use on the interface. A node
+// without node metadata keeps the address its peer sets agree on.
 func memberRecordFromStatus(status takod.Status, publicKey string) mesh.MemberRecord {
-	return mesh.MemberRecordFromStatus(status.Node, status.Peers, publicKey)
+	record := mesh.MemberRecordFromStatus(status.Node, status.Peers, publicKey)
+	for _, set := range status.MeshPeerSets {
+		if record.Recorded == "" && strings.TrimSpace(set.Node.Address) != "" {
+			record.Recorded = strings.TrimSpace(set.Node.Address)
+		}
+		for _, peer := range set.Peers {
+			record.PeerAddresses = append(record.PeerAddresses, mesh.RecordedPeer{Name: peer.Name, Address: peer.Address, PublicKey: peer.PublicKey})
+		}
+	}
+	return record
+}
+
+// meshPeerSetRequest is the PUT /v1/mesh/peer-sets body for one member.
+func (d *Deployer) meshPeerSetRequest(node mesh.Node, peers []takodMeshPeer) takod.MeshPeerSetRequest {
+	cidr, bits := d.meshNetwork()
+	return takod.MeshPeerSetRequest{
+		Project:     d.config.Project.Name,
+		Environment: d.environment,
+		NetworkCIDR: cidr,
+		SubnetBits:  bits,
+		Config:      d.wireGuardConfig(),
+		Node:        node,
+		Peers:       takodPeersToWireGuardNodes(peers),
+	}
+}
+
+// memberSupportsMeshPeerSets reports whether the member's takod keeps one
+// peer set per (project, environment). The choice is made per member, so a
+// partially upgraded environment keeps working.
+func (d *Deployer) memberSupportsMeshPeerSets(serverName string) bool {
+	status, ok := d.meshStatus(serverName)
+	return ok && statusHasCapability(status, takod.CapabilityMeshPeerSetsV1)
 }
 
 // warnLegacySharedMeshNodes warns once per member whose recorded node

@@ -64,27 +64,27 @@
 
 ## 4. PR4: Shared-node mesh peer sets (takod and CLI)
 
-- [ ] 4.1 Write a regression test first: `preview: [a, s]` and `production: [b, s]` are deployed in both orders. Assert:
+- [x] 4.1 Write a regression test first: `preview: [a, s]` and `production: [b, s]` are deployed in both orders. Assert:
   - `s` peers with `a` and `b`;
   - `a` and `b` never peer;
   - redeploying `preview` keeps `b` on `s`.
 
   Confirm the test fails against today's takod.
-- [ ] 4.2 takod: add `PUT /v1/mesh/peer-sets` and `DELETE /v1/mesh/peer-sets/<project>/<env>`. Store the sets, render the union under the D7 rules, add `meshPeerSets` to `GET /v1/status`, and advertise `mesh.peer-sets-v1` (`pkg/takod/metadata.go`, `mesh.go`, `server.go`, `pkg/mesh`). Verify with takod tests:
+- [x] 4.2 takod: add `PUT /v1/mesh/peer-sets` and `DELETE /v1/mesh/peer-sets/<project>/<env>`. Store the sets, render the union under the D7 rules, add `meshPeerSets` to `GET /v1/status`, and advertise `mesh.peer-sets-v1` (`pkg/takod/metadata.go`, `mesh.go`, `server.go`, `pkg/mesh`). Verify with takod tests:
   - union deduplication;
   - an address held by two keys is rejected and nothing is stored or applied;
   - a key holding two addresses is rejected;
   - a CIDR or port mismatch between multi-node sets is rejected;
   - single-node sets with a different `mesh:` block are accepted without changing the interface;
   - delete re-renders the union.
-- [ ] 4.3 takod: migrate a legacy `peers.json` (tagged becomes that set; untagged becomes `_legacy`, dropped on the next write). Key a legacy `POST /v1/mesh/apply` by the tags of the just-written `peers.json`. Verify with tests: an old-CLI request sequence against a new takod preserves the other environment's peers.
-- [ ] 4.4 CLI:
+- [x] 4.3 takod: migrate a legacy `peers.json` (tagged becomes that set; untagged becomes `_legacy`, dropped on the next write). Key a legacy `POST /v1/mesh/apply` by the tags of the just-written `peers.json`. Verify with tests: an old-CLI request sequence against a new takod preserves the other environment's peers.
+- [x] 4.4 CLI:
   - use the peer-set endpoint when every member advertises `mesh.peer-sets-v1`, and use the legacy path per member otherwise;
   - have the D5 used set read `meshPeerSets` when present;
   - have `tako destroy` delete the environment's set on capable members (`pkg/engine/destroy.go`).
 
   Verify with deployer and engine tests.
-- [ ] 4.5 Docs: in `docs/ORCHESTRATION-MODEL.md`, describe peer sets, union rules and conflict errors. In `docs/CONFIGURATION.md` "Shared Nodes", replace the PR2 caveat with the union behavior and the `mesh:` compatibility rule for multi-node environments on a shared server.
+- [x] 4.5 Docs: in `docs/ORCHESTRATION-MODEL.md`, describe peer sets, union rules and conflict errors. In `docs/CONFIGURATION.md` "Shared Nodes", replace the PR2 caveat with the union behavior and the `mesh:` compatibility rule for multi-node environments on a shared server.
 
 ## 5. Verification
 

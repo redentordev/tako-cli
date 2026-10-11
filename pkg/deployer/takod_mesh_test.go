@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
+	"github.com/redentordev/tako-cli/pkg/mesh"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/redentordev/tako-cli/pkg/takod"
 )
@@ -77,6 +78,23 @@ func (r *meshRecorder) applies() map[string]takod.MeshApplyRequest {
 	return out
 }
 
+func (r *meshRecorder) peerSets() map[string]takod.MeshPeerSetRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := map[string]takod.MeshPeerSetRequest{}
+	for _, request := range r.requests {
+		if request.endpoint != "/v1/mesh/peer-sets" {
+			continue
+		}
+		var set takod.MeshPeerSetRequest
+		if err := json.Unmarshal(request.body, &set); err != nil {
+			panic(err)
+		}
+		out[request.server] = set
+	}
+	return out
+}
+
 func (r *meshRecorder) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -104,7 +122,7 @@ func (c *meshRecorderClient) RequestJSONWithTimeout(_ context.Context, method, e
 	case "/v1/mesh/key":
 		data, _ := json.Marshal(takod.MeshKeyResponse{PublicKey: testMeshKey(c.server)})
 		return string(data), nil
-	case "/v1/metadata", "/v1/mesh/apply":
+	case "/v1/metadata", "/v1/mesh/apply", "/v1/mesh/peer-sets":
 		return "{}", nil
 	}
 	return "", fmt.Errorf("unexpected request %s %s", method, endpoint)
@@ -290,5 +308,76 @@ func TestMeshMembersIgnoreOtherEnvironments(t *testing.T) {
 	}
 	if !reflect.DeepEqual(members, []string{"a", "b"}) {
 		t.Fatalf("members = %v", members)
+	}
+}
+
+// 4.4: each member is reconciled through peer sets when its own takod has
+// them and through the legacy mesh apply otherwise.
+func TestMeshPeerSetsChosenPerMember(t *testing.T) {
+	reader := func(serverName string) (takod.Status, error) {
+		status := takod.Status{Runtime: "takod"}
+		if serverName == "a" {
+			status.Capabilities = []string{takod.CapabilityMeshPeerSetsV1}
+		}
+		return status, nil
+	}
+	d, recorder := meshTestDeployer(t, []string{"a", "b"}, nil, reader)
+	if err := d.SetupTakodRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	sets := recorder.peerSets()
+	applies := recorder.applies()
+	if _, ok := sets["a"]; !ok || len(sets) != 1 {
+		t.Fatalf("peer sets sent to %v, want only a", sets)
+	}
+	if _, ok := applies["b"]; !ok || len(applies) != 1 {
+		t.Fatalf("legacy mesh apply sent to %v, want only b", applies)
+	}
+	set := sets["a"]
+	if set.Project != "demo" || set.Environment != "production" || set.NetworkCIDR != "10.210.0.0/16" || set.SubnetBits != 24 {
+		t.Fatalf("peer set identity = %+v", set)
+	}
+	if set.Node.Address != "10.210.0.1/24" || set.Node.Name != "a" {
+		t.Fatalf("peer set node = %+v", set.Node)
+	}
+	var peers []string
+	for _, peer := range set.Peers {
+		peers = append(peers, peer.Name+"="+peer.Address)
+	}
+	sort.Strings(peers)
+	if want := []string{"a=10.210.0.1/24", "b=10.210.0.2/24"}; !reflect.DeepEqual(peers, want) {
+		t.Fatalf("peer set peers = %v, want %v", peers, want)
+	}
+}
+
+// 4.4: addresses used by another environment's peer set on a shared node are
+// never handed out, and the node keeps the address its sets agree on.
+func TestMeshAddressesAvoidOtherPeerSets(t *testing.T) {
+	reader := func(serverName string) (takod.Status, error) {
+		status := takod.Status{Runtime: "takod", Capabilities: []string{takod.CapabilityMeshPeerSetsV1}}
+		if serverName == "a" {
+			status.MeshPeerSets = []takod.MeshPeerSetSummary{{
+				Project:     "other",
+				Environment: "staging",
+				Node:        mesh.Node{Name: "a", Address: "10.210.0.5/24", PublicKey: testMeshKey("a")},
+				Peers: []mesh.Node{
+					mesh.Node{Name: "a", Address: "10.210.0.5/24", PublicKey: testMeshKey("a")},
+					mesh.Node{Name: "z", Address: "10.210.0.1/24", PublicKey: "test-wg-key-other-z"},
+				},
+			}}
+		}
+		return status, nil
+	}
+	d, recorder := meshTestDeployer(t, []string{"a", "b"}, nil, reader)
+	if err := d.SetupTakodRuntime(); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for server, set := range recorder.peerSets() {
+		got[server] = set.Node.Address
+	}
+	want := map[string]string{"a": "10.210.0.5/24", "b": "10.210.0.2/24"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("addresses = %v, want %v", got, want)
 	}
 }

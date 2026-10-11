@@ -812,6 +812,43 @@ nodes upgraded from an earlier Tako keep the addresses they already have.
 The result never depends on the operation's target list, server declaration
 order, or which environment variables are exported.
 
+### Shared-Node Peer Sets
+
+A server listed by several environments (or projects) has one WireGuard
+interface. A takod that advertises `mesh.peer-sets-v1` stores one peer set per
+`(project, environment)` under `mesh/peer-sets/<project>/<env>.json` and
+renders the interface from the union of all sets. Deploys send
+`PUT /v1/mesh/peer-sets` to such members (the choice is made per member; older
+agents keep the legacy `POST /v1/mesh/apply`), and `tako destroy` sends
+`DELETE /v1/mesh/peer-sets/<project>/<env>`, after which the union of the
+remaining sets is rendered. Removing the last set leaves the interface as it
+is. `GET /v1/status` reports the sets as `meshPeerSets`, and address
+resolution treats their peer addresses as in use.
+
+Union rules:
+
+- Peers are deduplicated by public key.
+- One address held by two keys, one key holding two addresses, or a peer using
+  the node's own address is a conflict.
+- Sets with peers other than the node itself must agree on `networkCIDR`,
+  `subnetBits`, interface, `listenPort`, and the node's own address.
+- Sets without other peers (single-node environments) add no peers and impose
+  no interface settings. When no set has peers, the most recent set's
+  settings apply.
+- Peers whose names collide across sets are named
+  `<project>.<env>.<server>` on the interface.
+
+A conflicting request stores nothing and leaves the interface unchanged; takod
+answers `409 Conflict` with a message naming both `(project, env, server)`
+entries, and the deploy fails with it. Redeploy (or destroy) the environment
+that owns the stale entry, or align the `mesh:` blocks.
+
+On first use takod converts an existing `mesh/peers.json` into the set named
+by its `project`/`environment` tags; an untagged file becomes `_legacy`, which
+the next peer-set write drops. A legacy `POST /v1/mesh/apply` from an older CLI
+is stored as the set named by the tags of the `peers.json` it just wrote, so
+it no longer erases other environments' peers.
+
 Deploy success is intentionally separate from public DNS readiness. A deploy
 can reconcile containers, routes, state, and proxy config before a domain points
 at the edge. After successful reconciliation, the CLI checks public domains for

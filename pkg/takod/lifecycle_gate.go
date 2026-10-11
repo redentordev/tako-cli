@@ -32,7 +32,7 @@ func (s *Server) registeredRoutes() []takodRoute {
 		{"/v1/cleanup", s.handleCleanup}, {"/v1/state", s.handleState}, {"/v1/lease", s.handleLease}, {"/v1/node-lease/maintenance", s.handleNodeMaintenanceLease}, {"/v1/fence", s.handleFence}, {"/v1/env-bundle", s.handleEnvBundle},
 		{"/v1/backups", s.handleBackups}, {"/v1/backups/restore", s.handleBackupRestore}, {"/v1/backups/postgres/verify", s.handlePostgresBackupVerification}, {"/v1/backups/cleanup", s.handleBackupCleanup},
 		{"/v1/backup-schedule", s.handleBackupSchedule}, {"/v1/metadata", s.handleMetadata}, {"/v1/mesh/key", s.handleMeshKey},
-		{"/v1/mesh/apply", s.handleMeshApply}, {"/v1/mesh/status", s.handleMeshStatus}, {"/v1/images/exists", s.handleImageExists},
+		{"/v1/mesh/apply", s.handleMeshApply}, {"/v1/mesh/peer-sets", s.handleMeshPeerSets}, {"/v1/mesh/peer-sets/", s.handleMeshPeerSets}, {"/v1/mesh/status", s.handleMeshStatus}, {"/v1/images/exists", s.handleImageExists},
 		{"/v1/images/inspect", s.handleImageInspect}, {"/v1/images/export", s.handleImageExport}, {"/v1/images/import", s.handleImageImport},
 		{"/v1/images/build", s.handleImageBuild}, {"/v1/platform", s.handlePlatform}, {"/v1/platform/inventory", s.handleInventoryAuthority}, {"/v1/platform/allocations/authorize", s.handleAllocationAuthorization}, {"/v1/platform/membership/reconcile", s.handleMembershipReconcile},
 		{"/v1/logs", s.handleLogs}, {"/v1/logs/stream", s.handleLogsStream}, {"/v1/exec", s.handleExec}, {"/v1/jobs", s.handleJobs}, {"/v1/jobs/apply", s.handleJobsApply},
@@ -56,6 +56,7 @@ var lifecycleSafeMutationPaths = map[string]struct{}{
 	"/v1/platform":               {},
 	"/v1/mesh/key":               {},
 	"/v1/mesh/apply":             {},
+	"/v1/mesh/peer-sets":         {},
 	// Alert policy is node-local control-plane state, not a workload mutation.
 	// Keep authenticated disable available on cordoned/draining nodes.
 	"/v1/alerts": {},
