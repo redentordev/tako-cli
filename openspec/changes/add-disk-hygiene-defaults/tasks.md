@@ -64,7 +64,7 @@ Prerequisite: v0.14.2's `pkg/takod/image_cleanup.go` and `CleanupProjectWithData
   - `docs/CONFIGURATION.md`: the logging default and how to opt out.
   - `docs/RESOURCE-MONITORING.md`: a disk hygiene section (journal, reclaim, `hygiene` alerts).
   - `tako cleanup` help and man page; regenerate the man pages.
-- [ ] 5.3 Run `go build ./...`, `go vet ./...` and the full `go test ./...` on Linux, compared with the master baseline, and check that `gofmt` is clean. Run `openspec validate add-disk-hygiene-defaults --strict`.
+- [x] 5.3 Run `go build ./...`, `go vet ./...` and the full `go test ./...` on Linux, compared with the master baseline, and check that `gofmt` is clean. Run `openspec validate add-disk-hygiene-defaults --strict`.
 - [ ] 5.4 Manual check on a test server (not run in this change; see design Implementation notes):
   - a staging deploy next to production removes none of production's history images;
   - `tako cleanup --dry-run` output;
