@@ -11,8 +11,10 @@ tako-config-explain - Show inferred runtime defaults and config sources
 
 .SH DESCRIPTION
 Show the effective configuration that Tako will use after environment
-expansion, default resolution, and validation. This command does not contact
-servers or write files.
+expansion, environment inheritance (extends), default resolution, and
+validation. When the selected environment extends another, the header shows
+the extends chain and each environment-scoped value names the environment
+that supplied it. This command does not contact servers or write files.
 
 
 .SH OPTIONS
@@ -26,7 +28,7 @@ servers or write files.
 
 .PP
 \fB-e\fP, \fB--env\fP=""
-	environment to deploy (default: production or only environment)
+	environment to use (default: the only environment, else production, else the first alphabetically)
 
 .PP
 \fB--events\fP=""
