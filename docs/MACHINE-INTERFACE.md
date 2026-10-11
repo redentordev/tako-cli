@@ -172,7 +172,9 @@ returns a `ValidateResult` with the resolved `configPath`,
 project/environment, `valid`, `findings` (`severity`, `path`, `field`,
 `message`) for errors and non-fatal validation warnings, and the resolved environment summary (runtime,
 state backend, consistency, mesh, server/service counts) when valid;
-invalid configs exit with code 2 and still emit the document. `tako aliases
+invalid configs exit with code 2 and still emit the document. Deprecated
+config keys appear as `warn` findings with `field` set to the key path
+(for example `deployment.cache`) and do not change the exit code. `tako aliases
 --output json` returns an `AliasList` with the resolved `configPath` and
 `aliases` sorted by name (`name`, `args` after string splitting, `form`
 `list|string`, `target`, `shadowed`, optional `shadowedBy`; an empty array

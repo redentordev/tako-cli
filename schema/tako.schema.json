@@ -326,7 +326,7 @@
     },
     "deployment": {
       "type": "object",
-      "description": "Deployment optimization settings",
+      "description": "Deployment settings",
       "properties": {
         "strategy": {
           "type": "string",
@@ -334,10 +334,13 @@
             "parallel",
             "sequential"
           ],
-          "description": "Deployment strategy"
+          "deprecated": true,
+          "description": "Deprecated and has no effect; rejected starting in v0.15.0. Services deploy sequentially in dependency order: use services.<name>.dependsOn for ordering and services.<name>.deploy.strategy for rollout, then remove this key."
         },
         "parallel": {
           "type": "object",
+          "deprecated": true,
+          "description": "Deprecated and has no effect; rejected starting in v0.15.0. Services deploy sequentially in dependency order: use services.<name>.dependsOn for ordering and services.<name>.deploy.strategy for rollout, then remove this key.",
           "properties": {
             "maxConcurrentBuilds": {
               "type": "integer",
@@ -359,6 +362,8 @@
         },
         "cache": {
           "type": "object",
+          "deprecated": true,
+          "description": "Deprecated and has no effect; rejected starting in v0.15.0. Build cache is managed by Docker: use `tako cleanup --docker-cache` or the takod --build-cache-keep-storage setting, then remove this key.",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -485,6 +490,32 @@
           "secretSources": {
             "$ref": "#/definitions/secretSources"
           },
+          "serverSelector": {
+            "type": "object",
+            "description": "Label-based server selection, used instead of an explicit servers list. Selects every server whose servers.<name>.labels match all labels, or every server when any is true.",
+            "additionalProperties": false,
+            "properties": {
+              "labels": {
+                "type": "object",
+                "description": "Match servers that carry all of these labels",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "any": {
+                "type": "boolean",
+                "description": "Select every configured server"
+              }
+            }
+          },
+          "labels": {
+            "type": "object",
+            "deprecated": true,
+            "description": "Deprecated and has no effect; rejected starting in v0.15.0. Set servers.<name>.labels and select them with serverSelector.labels or placement constraints.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
           "proxy": {
             "type": "object",
             "description": "Environment-level proxy placement. Built-in public ACME TLS requires placement to resolve to one proxy node until distributed certificate handling is implemented.",
@@ -510,6 +541,14 @@
                   },
                   "constraints": {
                     "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "preferences": {
+                    "type": "array",
+                    "maxItems": 0,
+                    "description": "Reserved; placement preferences are not supported yet and validation rejects any entry.",
                     "items": {
                       "type": "string"
                     }
@@ -593,6 +632,11 @@
                       }
                     }
                   ]
+                },
+                "dockerfile": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Dockerfile path relative to the build context"
                 },
                 "image": {
                   "type": "string",
@@ -1239,6 +1283,14 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "preferences": {
+                      "type": "array",
+                      "maxItems": 0,
+                      "description": "Reserved; placement preferences are not supported yet and validation rejects any entry.",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   }
                 },
@@ -1252,6 +1304,47 @@
                         "round_robin",
                         "sticky"
                       ]
+                    },
+                    "healthCheck": {
+                      "type": "object",
+                      "description": "Proxy-side upstream health checks. When enabled, path defaults to healthCheck.path or /health and interval defaults to 10s.",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "interval": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "monitoring": {
+                  "type": "object",
+                  "description": "Per-service monitoring used by tako monitor",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Enable monitoring for this service"
+                    },
+                    "interval": {
+                      "type": "string",
+                      "description": "Check interval, for example 60s"
+                    },
+                    "webhook": {
+                      "type": "string",
+                      "description": "Webhook URL for alerts"
+                    },
+                    "checkType": {
+                      "type": "string",
+                      "enum": [
+                        "http",
+                        "container"
+                      ],
+                      "description": "Check type; auto-detected when omitted"
                     }
                   }
                 },

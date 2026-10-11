@@ -52,9 +52,8 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Project.Name == "" {
 		return fmt.Errorf("project name is required")
 	}
-	// Validate project name format (alphanumeric + hyphen, must start with letter)
-	if !isValidProjectName(cfg.Project.Name) {
-		return fmt.Errorf("project name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, and hyphens, and be 1-63 characters long", cfg.Project.Name)
+	if err := ValidateProjectName(cfg.Project.Name); err != nil {
+		return err
 	}
 	if cfg.Project.Version == "" {
 		return fmt.Errorf("project version is required")
@@ -126,6 +125,16 @@ func ValidateConfig(cfg *Config) error {
 		cfg.Environments[envName] = env
 	}
 
+	return nil
+}
+
+// ValidateProjectName reports whether name satisfies the project-name rule:
+// it must start with a lowercase letter, contain only lowercase letters,
+// numbers and hyphens, and be 1-63 characters long.
+func ValidateProjectName(name string) error {
+	if !isValidProjectName(name) {
+		return fmt.Errorf("project name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, and hyphens, and be 1-63 characters long", name)
+	}
 	return nil
 }
 
@@ -202,6 +211,7 @@ func ValidationWarnings(cfg *Config) []ValidationWarning {
 	if cfg == nil {
 		return warnings
 	}
+	warnings = append(warnings, deprecatedConfigWarnings(cfg)...)
 	environmentNames := make([]string, 0, len(cfg.Environments))
 	for name := range cfg.Environments {
 		environmentNames = append(environmentNames, name)
@@ -225,6 +235,57 @@ func ValidationWarnings(cfg *Config) []ValidationWarning {
 				})
 			}
 		}
+	}
+	return warnings
+}
+
+// DeprecatedKeysRemovalRelease is the release in which deprecated no-op config
+// keys stop validating. The warnings ship in the minor release before it.
+const DeprecatedKeysRemovalRelease = "v0.15.0"
+
+const (
+	deprecatedDeployOrderGuidance = "services deploy sequentially in dependency order; use dependsOn for ordering and services.<name>.deploy.strategy for rollout; remove this key"
+	deprecatedCacheGuidance       = "build cache is managed by Docker; use `tako cleanup --docker-cache` or the takod --build-cache-keep-storage setting; remove this key"
+	deprecatedEnvLabelsGuidance   = "set servers.<name>.labels and select them with serverSelector.labels or placement constraints"
+)
+
+// deprecatedKeyMessage renders the shared deprecation message template.
+func deprecatedKeyMessage(path, guidance string) string {
+	return fmt.Sprintf("%s is deprecated and has no effect; %s. It will be rejected starting in %s.", path, guidance, DeprecatedKeysRemovalRelease)
+}
+
+// deprecatedConfigWarnings reports accepted-but-ignored config keys in a
+// deterministic order: deployment.strategy, deployment.parallel,
+// deployment.cache, then environments.<env>.labels by environment name.
+func deprecatedConfigWarnings(cfg *Config) []ValidationWarning {
+	var warnings []ValidationWarning
+	add := func(environment, path, guidance string) {
+		warnings = append(warnings, ValidationWarning{
+			Environment: environment,
+			Field:       path,
+			Message:     deprecatedKeyMessage(path, guidance),
+		})
+	}
+	if cfg.Deployment != nil {
+		if strings.TrimSpace(cfg.Deployment.Strategy) != "" {
+			add("", "deployment.strategy", deprecatedDeployOrderGuidance)
+		}
+		if cfg.Deployment.Parallel != nil {
+			add("", "deployment.parallel", deprecatedDeployOrderGuidance)
+		}
+		if cfg.Deployment.Cache != nil {
+			add("", "deployment.cache", deprecatedCacheGuidance)
+		}
+	}
+	environmentNames := make([]string, 0, len(cfg.Environments))
+	for name, env := range cfg.Environments {
+		if len(env.Labels) > 0 {
+			environmentNames = append(environmentNames, name)
+		}
+	}
+	sort.Strings(environmentNames)
+	for _, name := range environmentNames {
+		add(name, fmt.Sprintf("environments.%s.labels", name), deprecatedEnvLabelsGuidance)
 	}
 	return warnings
 }

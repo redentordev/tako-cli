@@ -168,37 +168,45 @@ node metrics remain available and `owner_present` is `0` for the environment.
 
 ### Setup Prometheus Scraping
 
-1. **Create a cron job or systemd timer** on a machine that can reach the Tako
-   environment:
+Prometheus cannot read a metrics file directly. Publish `tako prometheus`
+output through the
+[node_exporter textfile collector](https://github.com/prometheus/node_exporter#textfile-collector)
+on an observer machine that can reach the Tako environment, then scrape
+node_exporter.
+
+1. **Run node_exporter with the textfile collector** pointed at a directory
+   the export job can write to:
 
 ```bash
-# Export metrics every minute and save to a textfile collector directory
-*/1 * * * * /usr/local/bin/tako prometheus > /var/lib/tako/metrics/prometheus.txt
+sudo mkdir -p /var/lib/node_exporter/textfile
+node_exporter --collector.textfile.directory=/var/lib/node_exporter/textfile
 ```
 
-2. **Configure Prometheus** to scrape the file:
+2. **Export metrics every minute with a cron job or systemd timer.** Write to a
+   temporary file in the same directory and `mv` it into place, so
+   node_exporter never reads a partially written file:
 
+```bash
+*/1 * * * * /usr/local/bin/tako prometheus > /var/lib/node_exporter/textfile/tako.prom.$$ && mv /var/lib/node_exporter/textfile/tako.prom.$$ /var/lib/node_exporter/textfile/tako.prom
+```
+
+   node_exporter only reads files ending in `.prom`, so the temporary
+   `tako.prom.<pid>` name is ignored until the rename.
+
+3. **Configure Prometheus** to scrape node_exporter (port 9100 by default):
+
+<!-- tako:snippet skip: prometheus config -->
 ```yaml
 scrape_configs:
   - job_name: 'tako'
     scrape_interval: 60s
     static_configs:
-      - targets: ['localhost:9090']
-    file_sd_configs:
-      - files:
-        - '/var/lib/tako/metrics/prometheus.txt'
+      - targets: ['observer.internal:9100']
 ```
 
-3. **Or expose via a small internal HTTP endpoint** if your monitoring stack
-   needs pull-based scraping:
-
-```bash
-# Simple HTTP server to serve metrics
-while true; do
-  tako prometheus > /tmp/metrics.txt
-  nc -l -p 9100 < /tmp/metrics.txt
-done
-```
+If you prefer a dedicated endpoint instead of node_exporter, serve the exported
+file with a real HTTP server (any static file server works). A bare `nc` loop
+does not send HTTP response headers, so Prometheus cannot scrape it.
 
 ---
 

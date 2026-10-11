@@ -100,6 +100,7 @@ containers.
 App repos should describe app intent first. A normal one-node or multi-node
 project does not need to declare `runtime`, `state`, or `mesh`:
 
+<!-- tako:snippet complete -->
 ```yaml
 project:
   name: web-app
@@ -184,6 +185,7 @@ the lease is clear.
 Private registry images declare credentials in a top-level `registries:`
 block keyed by registry host:
 
+<!-- tako:snippet partial -->
 ```yaml
 registries:
   ghcr.io:
@@ -378,16 +380,23 @@ per applied deploy — after the image exists on the assigned nodes and before
 any rollout activation (before warm/activate for `blue_green`, before the
 first replica replacement for `rolling`, before stop-old for `recreate`):
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  web:
-    build: .
-    deploy:
-      strategy: blue_green
-      release:
-        command: ["php", "artisan", "migrate", "--force"]
-        timeout: 5m        # default 5m
-        volumes: false     # opt-in to the service's volume mounts
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: app.example.com
+          email: admin@example.com
+        deploy:
+          strategy: blue_green
+          release:
+            command: ["php", "artisan", "migrate", "--force"]
+            timeout: 5m        # default 5m
+            volumes: false     # opt-in to the service's volume mounts
 ```
 
 The command runs in a one-off container with the service's env, secrets, and
@@ -435,15 +444,18 @@ environment and secret values without persisting those values in state.
 `kind: job` declares a service that runs on a cron schedule instead of as
 long-running replicas:
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  report:
-    kind: job
-    schedule: "*/5 * * * *"   # robfig/cron, @every/@daily also accepted
-    timezone: Europe/Berlin    # optional; default UTC
-    timeout: 30m               # optional; kill + record failed (default 1h)
-    build: ./report            # or image:
-    command: generate-report
+environments:
+  production:
+    services:
+      report:
+        kind: job
+        schedule: "*/5 * * * *"   # robfig/cron, @every/@daily also accepted
+        timezone: Europe/Berlin    # optional; default UTC
+        timeout: 30m               # optional; kill + record failed (default 1h)
+        build: ./report            # or image:
+        command: generate-report
 ```
 
 Jobs require `schedule` and `command`; they accept `image`/`build`/`imageFrom`, `env`,

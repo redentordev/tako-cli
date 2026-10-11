@@ -234,6 +234,69 @@ environments:
 	}
 }
 
+func TestRunDeployPrintsDeprecationWarningsBeforeContactingServers(t *testing.T) {
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get cwd: %v", err)
+	}
+	root := t.TempDir()
+	t.Cleanup(func() {
+		_ = os.Chdir(oldDir)
+	})
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("failed to switch cwd: %v", err)
+	}
+	t.Setenv("SSH_PASSWORD", "test-password")
+	// The host is unroutable (TEST-NET-3); the run must stop at the
+	// --image/--service preflight check, so it never dials it.
+	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), []byte(`
+project:
+  name: demo
+  version: 1.0.0
+deployment:
+  cache:
+    enabled: true
+servers:
+  node-a:
+    host: 203.0.113.10
+    user: deploy
+    password: ${SSH_PASSWORD}
+environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        image: nginx:alpine
+`), 0600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	oldCfgFile := cfgFile
+	oldDeployImage := deployImage
+	oldDeployService := deployService
+	oldDeploySource := deploySource
+	cfgFile = ""
+	deployImage = "registry.example.com/web:sha"
+	deployService = ""
+	deploySource = ""
+	var stderr strings.Builder
+	deployCmd.SetErr(&stderr)
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+		deployImage = oldDeployImage
+		deployService = oldDeployService
+		deploySource = oldDeploySource
+		deployCmd.SetErr(nil)
+	})
+
+	err = runDeploy(deployCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "--image requires --service") {
+		t.Fatalf("runDeploy error = %v, want preflight --service error", err)
+	}
+	if !strings.Contains(stderr.String(), "Warning: deployment.cache is deprecated") {
+		t.Fatalf("stderr = %q, want deployment.cache deprecation warning", stderr.String())
+	}
+}
+
 func TestFormatDeployConfigErrorReportsValidationFailures(t *testing.T) {
 	err := formatDeployConfigError("tako.yaml", errors.New(`invalid config: service web: invalid load balancer strategy "ip_hash"; supported strategies are round_robin and sticky`))
 	for _, want := range []string{"config validation failed in tako.yaml", "invalid load balancer strategy", "round_robin and sticky"} {
