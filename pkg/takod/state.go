@@ -18,6 +18,8 @@ const (
 	stateDocumentEvent      = "event"
 	stateDocumentHistory    = "history"
 	stateDocumentDeployment = "deployment"
+	// stateDocumentPreview is the preview record of a preview environment.
+	stateDocumentPreview = "preview"
 )
 
 type StateDocumentRequest struct {
@@ -154,9 +156,12 @@ func validateStateDocumentRequest(req StateDocumentRequest, requireContent bool)
 		return fmt.Errorf("invalid environment name")
 	}
 	switch req.Document {
-	case stateDocumentDesired, stateDocumentActual, stateDocumentActualNode, stateDocumentEvent, stateDocumentHistory, stateDocumentDeployment:
+	case stateDocumentDesired, stateDocumentActual, stateDocumentActualNode, stateDocumentEvent, stateDocumentHistory, stateDocumentDeployment, stateDocumentPreview:
 	default:
 		return fmt.Errorf("invalid state document")
+	}
+	if req.Document == stateDocumentPreview && !IsPreviewEnvironment(req.Environment) {
+		return fmt.Errorf("preview state documents are only accepted for %s* environments", PreviewEnvironmentPrefix)
 	}
 	if req.Document == stateDocumentActualNode && !isSafeRuntimeName(req.Node) {
 		return fmt.Errorf("invalid node name")
@@ -230,6 +235,8 @@ func validateStateDocumentIdentity(req StateDocumentRequest, raw json.RawMessage
 		return validateProjectEnvRevisionIdentity(req, identity.ProjectName, identity.Environment, identity.ID, "id")
 	case stateDocumentEvent:
 		return validateProjectEnvIdentity(req, identity.Project, identity.Environment)
+	case stateDocumentPreview:
+		return validatePreviewRecordContent(req, raw)
 	}
 	return nil
 }
@@ -277,6 +284,8 @@ func stateDocumentPath(dataDir string, req StateDocumentRequest, archive bool) (
 		return filepath.Join(dataDir, "history", req.Project, req.Environment, "history.json"), nil
 	case stateDocumentDeployment:
 		return filepath.Join(dataDir, "history", req.Project, req.Environment, "deployments", req.RevisionID+".json"), nil
+	case stateDocumentPreview:
+		return previewRecordPath(dataDir, req.Project, req.Environment), nil
 	default:
 		return "", fmt.Errorf("invalid state document")
 	}

@@ -2,16 +2,16 @@
 
 ## 1. takod: network fix, records, listing, volume removal, capability
 
-- [ ] 1.1 Make `cleanupNetworks` (`pkg/takod/cleanup.go:255-285`) remove, for an environment-scoped request, exactly `runtimeid.NetworkName(project, env)` plus export networks labeled `tako.project=<project>`, `tako.environment=<env>` whose name equals `ExportNetworkName(project, env, <tako.service label>)`; leave unlabeled and prefix-sharing networks alone (no proxy disconnect for them); keep the project-wide prefix path for environment-less requests. Verify with tests that destroying `prod` keeps `prod-eu` networks, that `preview` keeps `preview-pr-42` networks and their proxy connection, and that an unlabeled legacy export network is left in place (`go test ./pkg/takod -run CleanupNetworks`)
-- [ ] 1.2 Add state document kind `preview` (`stateDocumentPreview`, `pkg/takod/state.go:15-20`) stored at `desired/<project>/<environment>/preview.json` with project/environment identity validation (`validateProjectEnvIdentity`, `state.go:237`); verify write/read/delete round trip and identity mismatch rejection
-- [ ] 1.3 Add `GET /v1/state/previews?project=<p>` returning every `preview.json` under `desired/<project>/*/`; register it in `registeredRoutes` (`pkg/takod/lifecycle_gate.go:25-41`) as read-only; verify listing across two environments, empty project, and the lifecycle-gate route test
-- [ ] 1.4 Add `CleanupRequest.RemovePreviewData` (`cleanup.go:15-35`), design D8:
+- [x] 1.1 Make `cleanupNetworks` (`pkg/takod/cleanup.go:255-285`) remove, for an environment-scoped request, exactly `runtimeid.NetworkName(project, env)` plus export networks labeled `tako.project=<project>`, `tako.environment=<env>` whose name equals `ExportNetworkName(project, env, <tako.service label>)`; leave unlabeled and prefix-sharing networks alone (no proxy disconnect for them); keep the project-wide prefix path for environment-less requests. Verify with tests that destroying `prod` keeps `prod-eu` networks, that `preview` keeps `preview-pr-42` networks and their proxy connection, and that an unlabeled legacy export network is left in place (`go test ./pkg/takod -run CleanupNetworks`)
+- [x] 1.2 Add state document kind `preview` (`stateDocumentPreview`, `pkg/takod/state.go:15-20`) stored at `desired/<project>/<environment>/preview.json` with project/environment identity validation (`validateProjectEnvIdentity`, `state.go:237`); verify write/read/delete round trip and identity mismatch rejection
+- [x] 1.3 Add `GET /v1/state/previews?project=<p>` returning every `preview.json` under `desired/<project>/*/`; register it in `registeredRoutes` (`pkg/takod/lifecycle_gate.go:25-41`) as read-only; verify listing across two environments, empty project, and the lifecycle-gate route test
+- [x] 1.4 Add `CleanupRequest.RemovePreviewData` (`cleanup.go:15-35`), design D8:
   - Guard before any step: `env` starts with `preview-` and its `preview.json` exists; with no record, succeed as a no-op when no volume carries the exact labels, otherwise reject. A rejected request removes nothing.
   - Fixed order inside `CleanupProject`: proxy files → containers → networks → preview data (volumes labeled exactly `tako.project=<p>`, `tako.environment=<env>`, their ownership journals, `history/<p>/<env>`, `<serviceFilesRoot>/<p>/<env>`) → takod state → `preview.json` last. A proxy, container or preview-data failure returns before state removal.
   - Reject `RemovePreviewData` combined with `RemoveImages`, `ImageRepositories` or `RemoveDeployFiles` in `validateCleanupRequest`.
 
   Verify with a fake docker runner: `staging` rejected with nothing removed, missing record with volumes rejected, missing record without volumes is a no-op success, full order with the record deleted last, a volume-removal failure keeps the record, and `/opt/<project>` and image tags untouched
-- [ ] 1.5 Add `CapabilityPreviewLifecycleV1 = "preview.lifecycle-v1"` with doc comment and advertise it (`pkg/takod/server.go:2636`); update the capability-list tests in `server_test.go`
+- [x] 1.5 Add `CapabilityPreviewLifecycleV1 = "preview.lifecycle-v1"` with doc comment and advertise it (`pkg/takod/server.go:2636`); update the capability-list tests in `server_test.go`
 
 ## 2. Config: preview block, synthesis, policy
 
