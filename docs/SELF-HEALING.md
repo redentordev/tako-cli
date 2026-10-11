@@ -99,14 +99,20 @@ restarts crashes. A container that is exited under `always` or
 leaves it alone. The restart action is what self-healing adds for these
 policies.
 
-**Health sources.**
+**Health sources.** Self-healing observes exactly the check the rollout
+gates on. When `deploy.readiness` sets a `path` or `tcpPort`, it replaces
+`healthCheck`'s path and port (its `interval` and `timeout` apply), just as
+in the rollout. The order is the rollout's: an HTTP path first, then
+`healthCheck.command`, then a TCP port.
 
-- `healthCheck.command`: Docker's health status.
-- `healthCheck.path` or a TCP check: takod probes each recorded replica
-  directly, every `healthCheck.interval` (default 30s, at least 10s), with
-  the same checks the rollout uses (no smoke check), at most 4 at a time.
-  One hung replica is restarted while its healthy siblings are left alone.
-- No health check: crashes only; running containers are never restarted.
+- An HTTP path or a TCP check: takod probes each recorded replica directly,
+  every check interval (default 30s, at least 10s), with the same checks the
+  rollout uses (no smoke check), at most 4 at a time. One hung replica is
+  restarted while its healthy siblings are left alone.
+- `healthCheck.command` (without an HTTP path): Docker's health status.
+- No explicit check: crashes only; running containers are never restarted.
+  The implicit TCP readiness of a defaulted rolling service is a rollout
+  gate only.
 
 A probe that cannot judge the container (its address is unknown, or a result
 is older than three intervals) counts as unknown. Unknown never triggers an

@@ -128,6 +128,14 @@ type healDesiredService struct {
 		Timeout     string `json:"timeout"`
 		StartPeriod string `json:"startPeriod"`
 	} `json:"healthCheck"`
+	// Readiness is deploy.readiness when it defines a check; the rollout
+	// gates on it instead of healthCheck's path or port.
+	Readiness *struct {
+		Path     string `json:"path"`
+		TCPPort  int    `json:"tcpPort"`
+		Interval string `json:"interval"`
+		Timeout  string `json:"timeout"`
+	} `json:"readiness"`
 	RemovalPending bool             `json:"removalPending"`
 	SelfHealing    *selfheal.Policy `json:"selfHealing"`
 }
@@ -353,16 +361,10 @@ func (h *healManager) healServices(scope healScope) []healService {
 func healServiceSpec(name string, desired healDesiredService, node, nodeID string, singleNode bool) selfheal.ServiceSpec {
 	spec := selfheal.ServiceSpec{Name: name, Policy: desired.SelfHealing, Image: desired.Image}
 	spec.LocalReplicas = healLocalReplicas(desired, node, nodeID, singleNode)
-	switch {
-	case desired.HealthCheck.Path != "" && healHTTPPort(desired) > 0:
-		spec.Health = selfheal.HealthHTTP
-	case desired.HealthCheck.TCPPort > 0:
-		spec.Health = selfheal.HealthTCP
-	case desired.HealthCheck.Command != "":
-		spec.Health = selfheal.HealthDocker
-	}
+	check := healRolloutCheck(desired)
+	spec.Health = check.source
 	spec.StartPeriod = parseHealDuration(desired.HealthCheck.StartPeriod, 0)
-	interval := parseHealDuration(desired.HealthCheck.Interval, selfheal.DefaultProbeInterval)
+	interval := parseHealDuration(check.interval, selfheal.DefaultProbeInterval)
 	if interval < selfheal.MinProbeInterval {
 		interval = selfheal.MinProbeInterval
 	}
@@ -370,25 +372,59 @@ func healServiceSpec(name string, desired healDesiredService, node, nodeID strin
 	return spec
 }
 
-func healHTTPPort(desired healDesiredService) int {
-	if desired.HealthCheck.TCPPort > 0 {
-		return desired.HealthCheck.TCPPort
-	}
-	return desired.Port
+// healCheck is the health check self-healing observes for a service.
+type healCheck struct {
+	source   selfheal.HealthSource
+	path     string
+	port     int
+	interval string
+	timeout  string
 }
 
-// healHealthSpec builds the per-container probe spec the way the CLI builds
-// the reconcile request's health spec (no smoke check).
-func healHealthSpec(desired healDesiredService) *HealthSpec {
-	timeout := desired.HealthCheck.Timeout
+// healRolloutCheck selects exactly the check the rollout gates on
+// (Deployer.buildTakodHealthSpec, then checkContainerReadiness): an explicit
+// deploy.readiness path or TCP port replaces healthCheck's path and port
+// (healthCheck.command still applies), and the check order is HTTP path,
+// then Docker health (command), then TCP port. The smoke check and the
+// implicit TCP readiness of a defaulted rolling service are rollout-only
+// gates, so they are not observed: a service without an explicit check has
+// no health source.
+func healRolloutCheck(desired healDesiredService) healCheck {
+	hc := desired.HealthCheck
+	path, tcpPort, interval, timeout := hc.Path, hc.TCPPort, hc.Interval, hc.Timeout
+	if readiness := desired.Readiness; readiness != nil && (readiness.Path != "" || readiness.TCPPort > 0) {
+		path, tcpPort, interval, timeout = readiness.Path, readiness.TCPPort, readiness.Interval, readiness.Timeout
+	}
+	port := desired.Port
+	if tcpPort > 0 {
+		port = tcpPort
+	}
 	if timeout == "" {
 		timeout = "5s"
 	}
+	check := healCheck{interval: interval, timeout: timeout}
 	switch {
-	case desired.HealthCheck.Path != "" && healHTTPPort(desired) > 0:
-		return &HealthSpec{Path: desired.HealthCheck.Path, Port: healHTTPPort(desired), Scheme: "http", Timeout: timeout}
-	case desired.HealthCheck.TCPPort > 0:
-		return &HealthSpec{Port: desired.HealthCheck.TCPPort, Timeout: timeout}
+	case path != "":
+		if port > 0 {
+			check.source, check.path, check.port = selfheal.HealthHTTP, path, port
+		}
+	case hc.Command != "":
+		check.source = selfheal.HealthDocker
+	case tcpPort > 0:
+		check.source, check.port = selfheal.HealthTCP, port
+	}
+	return check
+}
+
+// healHealthSpec builds the per-container probe spec of an HTTP or TCP
+// check the way the CLI builds the reconcile request's (no smoke check).
+func healHealthSpec(desired healDesiredService) *HealthSpec {
+	check := healRolloutCheck(desired)
+	switch check.source {
+	case selfheal.HealthHTTP:
+		return &HealthSpec{Path: check.path, Port: check.port, Scheme: "http", Timeout: check.timeout}
+	case selfheal.HealthTCP:
+		return &HealthSpec{Port: check.port, Timeout: check.timeout}
 	}
 	return nil
 }

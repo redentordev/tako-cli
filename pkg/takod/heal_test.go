@@ -382,6 +382,53 @@ func TestHealScopeLockStillExcludes(t *testing.T) {
 	}
 }
 
+// TestHealProbesTheRolloutCheck: self-healing observes exactly the check
+// the rollout gates on, including a deploy.readiness override and the
+// rollout's path > command > TCP order.
+func TestHealProbesTheRolloutCheck(t *testing.T) {
+	cases := []struct {
+		name     string
+		desired  string
+		source   selfheal.HealthSource
+		path     string
+		port     int
+		interval time.Duration
+	}{
+		{"healthCheck path", `{"port":8080,"healthCheck":{"path":"/health","interval":"20s"}}`, selfheal.HealthHTTP, "/health", 8080, 20 * time.Second},
+		{"readiness path overrides healthCheck path", `{"port":8080,"healthCheck":{"path":"/health"},"readiness":{"path":"/ready","interval":"15s"}}`, selfheal.HealthHTTP, "/ready", 8080, 15 * time.Second},
+		{"readiness TCP overrides healthCheck path", `{"port":8080,"healthCheck":{"path":"/health"},"readiness":{"tcpPort":9000}}`, selfheal.HealthTCP, "", 9000, selfheal.DefaultProbeInterval},
+		{"readiness TCP with command uses docker health", `{"port":8080,"healthCheck":{"command":"true"},"readiness":{"tcpPort":9000}}`, selfheal.HealthDocker, "", 0, selfheal.DefaultProbeInterval},
+		{"command before TCP", `{"port":8080,"healthCheck":{"command":"true","tcpPort":9000}}`, selfheal.HealthDocker, "", 0, selfheal.DefaultProbeInterval},
+		{"healthCheck TCP", `{"port":8080,"healthCheck":{"tcpPort":9000}}`, selfheal.HealthTCP, "", 9000, selfheal.DefaultProbeInterval},
+		{"healthCheck path on tcpPort", `{"port":8080,"healthCheck":{"path":"/health","tcpPort":9000}}`, selfheal.HealthHTTP, "/health", 9000, selfheal.DefaultProbeInterval},
+		{"no explicit check", `{"port":8080}`, selfheal.HealthNone, "", 0, selfheal.DefaultProbeInterval},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var desired healDesiredService
+			if err := json.Unmarshal([]byte(tc.desired), &desired); err != nil {
+				t.Fatal(err)
+			}
+			desired.Replicas = 1
+			spec := healServiceSpec("web", desired, "app-1", "", true)
+			if spec.Health != tc.source || spec.ProbeInterval != tc.interval {
+				t.Fatalf("source/interval = %q/%s, want %q/%s", spec.Health, spec.ProbeInterval, tc.source, tc.interval)
+			}
+			probe := healHealthSpec(desired)
+			switch tc.source {
+			case selfheal.HealthHTTP, selfheal.HealthTCP:
+				if probe == nil || probe.Path != tc.path || probe.Port != tc.port {
+					t.Fatalf("probe = %+v, want path %q port %d", probe, tc.path, tc.port)
+				}
+			default:
+				if probe != nil {
+					t.Fatalf("probe = %+v, want none", probe)
+				}
+			}
+		})
+	}
+}
+
 func TestHealRestartStopTimeoutIsBounded(t *testing.T) {
 	for value, want := range map[string]time.Duration{"": 10 * time.Second, "15s": 15 * time.Second, "60s": 30 * time.Second, "10m": 30 * time.Second, "bogus": 10 * time.Second} {
 		if got := healRestartStopTimeout(value); got != want {

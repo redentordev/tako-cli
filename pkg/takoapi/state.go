@@ -133,9 +133,11 @@ type DesiredServiceDocument struct {
 	SecretRefs               []string                    `json:"secretRefs,omitempty"`
 	DependsOn                []string                    `json:"dependsOn,omitempty"`
 	HealthCheck              json.RawMessage             `json:"healthCheck,omitempty"`
-	DeployStrategy           string                      `json:"deployStrategy,omitempty"`
-	RemovalPending           bool                        `json:"removalPending,omitempty"`
-	SelfHealing              *SelfHealingPolicyDocument  `json:"selfHealing,omitempty"`
+	// Readiness is deploy.readiness when it sets a path or TCP port.
+	Readiness      json.RawMessage            `json:"readiness,omitempty"`
+	DeployStrategy string                     `json:"deployStrategy,omitempty"`
+	RemovalPending bool                       `json:"removalPending,omitempty"`
+	SelfHealing    *SelfHealingPolicyDocument `json:"selfHealing,omitempty"`
 }
 
 // SelfHealingPolicyDocument is a service's resolved self-healing policy in
