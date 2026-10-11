@@ -112,10 +112,13 @@ func readLocalDesiredRevision(dataDir, project, environment string) (*localDesir
 }
 
 // expectedLocalReplicas is the number of replicas desired on node: its
-// assignments, 1 for global placement, or the replica count when the
-// revision has no assignments (single-node deploys).
+// assignments, 1 for global placement without assignments, or the replica
+// count when the revision has no assignments (single-node deploys). Global
+// services with assignments count this node's assignments, so nodes the
+// scheduler excluded (placement constraints, cordoned, draining) expect 0.
 func expectedLocalReplicas(service localDesiredService, node string, singleNode bool) int {
-	if service.Placement != nil && service.Placement.Strategy == "global" {
+	global := service.Placement != nil && service.Placement.Strategy == "global"
+	if global && len(service.Assignments) == 0 {
 		return 1
 	}
 	if len(service.Assignments) == 0 {

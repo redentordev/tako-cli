@@ -364,3 +364,26 @@ func TestContainerMonitorCountsLocalAssignments(t *testing.T) {
 		t.Fatalf("container state = %+v", state)
 	}
 }
+
+func TestExpectedLocalReplicasGlobalPlacement(t *testing.T) {
+	global := localDesiredService{Replicas: 2}
+	global.Placement = &struct {
+		Strategy string `json:"strategy"`
+	}{Strategy: "global"}
+	if got := expectedLocalReplicas(global, "app-1", false); got != 1 {
+		t.Fatalf("global without assignments = %d, want 1", got)
+	}
+	global.Assignments = []struct {
+		Slot   int    `json:"slot"`
+		NodeID string `json:"nodeId"`
+		Node   string `json:"node"`
+	}{{Slot: 1, Node: "app-1"}, {Slot: 2, Node: "app-2"}}
+	if got := expectedLocalReplicas(global, "app-1", false); got != 1 {
+		t.Fatalf("global assigned node = %d, want 1", got)
+	}
+	// A node excluded by placement, cordon or drain has no assignment and
+	// must not expect a replica (it would alert replicas_missing forever).
+	if got := expectedLocalReplicas(global, "app-3", false); got != 0 {
+		t.Fatalf("global excluded node = %d, want 0", got)
+	}
+}
