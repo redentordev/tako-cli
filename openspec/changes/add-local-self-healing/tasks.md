@@ -45,6 +45,6 @@ Prerequisite: `add-takod-health-monitoring` has landed (shared container sampler
 
 ## 6. Verification
 
-- [ ] 6.1 `go build ./...`, `go vet ./...`, full `go test ./...` on Linux with no new failures against master; gofmt clean
+- [x] 6.1 `go build ./...`, `go vet ./...`, full `go test ./...` on Linux with no new failures against master; gofmt clean
 - [x] 6.2 `openspec validate add-local-self-healing --strict`
 - [ ] 6.3 Manual on a test server: hung HTTP replica restarted once while its sibling is untouched; crash-looping service gives up and alerts; deploy during a restart waits and succeeds; `docker stop` on an `unless-stopped` container is reported, not undone; an exit-0 `restart: no` worker stays `completed`; `tako heal pause` stops all actions
