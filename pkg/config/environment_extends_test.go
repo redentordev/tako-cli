@@ -879,3 +879,126 @@ func TestResolveDefaultEnvironment(t *testing.T) {
 		}
 	}
 }
+
+func TestEnvironmentExtendsPartialBuildOverrideInheritsContext(t *testing.T) {
+	path := writeExtendsTestConfig(t, "tako.yaml", extendsTestHeader+`environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        build:
+          context: .
+          target: dev
+          args:
+            NODE_ENV: production
+  staging:
+    extends: production
+    servers: [node-b]
+    services:
+      web:
+        build:
+          target: prod
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	staging := cfg.Environments["staging"].Services["web"]
+	production := cfg.Environments["production"].Services["web"]
+	if staging.Build == "" || staging.Build != production.Build {
+		t.Fatalf("staging build context = %q, want inherited %q", staging.Build, production.Build)
+	}
+	if staging.BuildTarget != "prod" || production.BuildTarget != "dev" || staging.BuildArgs["NODE_ENV"] != "production" {
+		t.Fatalf("staging build = %q target %q args %v; production target %q", staging.Build, staging.BuildTarget, staging.BuildArgs, production.BuildTarget)
+	}
+	if got := cfg.EnvironmentValueSource("staging", "services.web.build.context"); got != "production" {
+		t.Fatalf("build.context source = %q, want production", got)
+	}
+
+	// The same override through an abstract base, in JSON.
+	jsonCfg, err := LoadConfig(writeExtendsTestConfig(t, "tako.json", `{
+  "project": {"name": "demo", "version": "1.0.0"},
+  "servers": {"node-a": {"host": "192.0.2.10", "user": "root", "password": "test-password"}},
+  "environments": {
+    "base": {"abstract": true, "services": {"web": {"build": {"target": "dev"}}}},
+    "production": {"extends": "base", "servers": ["node-a"], "services": {"web": {"build": {"context": "."}}}}
+  }
+}`))
+	if err != nil {
+		t.Fatalf("LoadConfig JSON: %v", err)
+	}
+	if web := jsonCfg.Environments["production"].Services["web"]; web.Build == "" || web.BuildTarget != "dev" {
+		t.Fatalf("JSON production web build = %q target %q", web.Build, web.BuildTarget)
+	}
+}
+
+func TestEnvironmentExtendsMissingBuildContextNamesChain(t *testing.T) {
+	_, err := loadExtendsTestConfig(t, `environments:
+  base:
+    abstract: true
+    services:
+      web:
+        build:
+          target: dev
+  production:
+    extends: base
+    servers: [node-a]
+  staging:
+    extends: production
+    servers: [node-b]
+    services:
+      web:
+        build:
+          target: prod
+`)
+	want := "invalid config: environment production: service web: invalid structured build: context is required (environment production extends base)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+
+	_, err = loadExtendsTestConfig(t, `environments:
+  base:
+    abstract: true
+    servers: [node-a]
+    services:
+      web:
+        build:
+          context: .
+  production:
+    extends: base
+  staging:
+    extends: production
+    services:
+      web:
+        build:
+          context: null
+          target: prod
+`)
+	want = "invalid config: environment staging: service web: invalid structured build: context is required (environment staging extends production -> base)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("removed context err = %v, want %q", err, want)
+	}
+}
+
+func TestNonExtendingEnvironmentStillRequiresBuildContext(t *testing.T) {
+	environments := `environments:
+  production:
+    servers: [node-a]
+    services:
+      web:
+        build:
+          target: x
+`
+	_, err := loadExtendsTestConfig(t, environments)
+	if want := "failed to parse YAML config: invalid structured build: context is required"; err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+
+	// Next to an inheriting environment the declaring environment is named.
+	_, err = loadExtendsTestConfig(t, environments+`  staging:
+    extends: production
+`)
+	if want := "failed to parse YAML config: environment production: invalid structured build: context is required"; err == nil || err.Error() != want {
+		t.Fatalf("mixed err = %v, want %q", err, want)
+	}
+}

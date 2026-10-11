@@ -26,6 +26,7 @@
 - [x] 3.9 Document `extends`, merge rules table, `null` removal, list replacement (with `secretSources` example), chains/limits, and `abstract` in the `docs/CONFIGURATION.md` section from 1.4; convert `examples/deployment-patterns/10-stages-shared-node/tako.yaml` to `abstract` base + `extends`, and verify it with an example-loading test (or `tako validate` against it with placeholder env vars)
 - [x] 3.10 Add an unused-abstract warning to `config.ValidationWarnings` (`pkg/config/validator.go:188-227`): one `ValidationWarning{Environment, Field: "abstract"}` per abstract environment with no children; verify a `pkg/config` test and a `cmd/validate_test.go` case asserting a `warn` finding and exit 0, and no warning when the abstract environment is extended
 - [x] 3.11 Add a test that an `x-` key inside a service or environment is still rejected as an unknown field; verify `go test ./pkg/config -run XKeys`
+- [x] 3.12 Let an inheriting or abstract environment declare a partial structured `build` (for example only `target`): relax the "context is required" check in the per-environment pre-decode (D5) for those environments only, then require a non-empty `context` on every resolved deployable inheriting environment after the merge, with the error ending in `(environment <name> extends <chain>)`; verify tests for an inherited context, a chain with no context naming the chain, and an unchanged error for a non-extending `build: {target: x}`
 
 ## 4. config explain provenance
 

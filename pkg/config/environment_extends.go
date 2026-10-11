@@ -260,7 +260,27 @@ func resolveEnvironmentInheritance(envs []declaredEnvironment) (map[string]*envN
 			return nil, nil, err
 		}
 	}
+	if err := checkResolvedBuildContexts(names, byName, resolved, meta); err != nil {
+		return nil, nil, err
+	}
 	return resolved, meta, nil
+}
+
+// checkResolvedBuildContexts requires a structured build context in every
+// deployable inheriting environment once the merge is done. The declared
+// environments were decoded with that check relaxed so a child can override
+// only part of an inherited build.
+func checkResolvedBuildContexts(names []string, byName map[string]*declaredEnvironment, resolved map[string]*envNode, meta *environmentResolution) error {
+	for _, name := range names {
+		env := byName[name]
+		if env.abstract || !env.hasExtends {
+			continue
+		}
+		if missing := missingBuildContexts(resolved[name]); len(missing) > 0 {
+			return fmt.Errorf("environment %s: service %s: invalid structured build: context is required (environment %s extends %s)", name, missing[0], name, strings.Join(meta.chains[name], " -> "))
+		}
+	}
+	return nil
 }
 
 // resolveConfigDocument applies top-level x- key stripping and environment
@@ -379,19 +399,143 @@ func declareYAMLEnvironment(name string, node *yaml.Node) (declaredEnvironment, 
 		body = &copyNode
 	}
 
-	// Strictly decode the declared environment on its own so unknown or
-	// mistyped fields are reported against the environment that declared
-	// them, not one that inherited them.
-	var decoded EnvironmentConfig
-	if err := decodeYAMLNodeStrict(body, &decoded); err != nil {
-		return env, &configDecodeError{err: fmt.Errorf("environment %s: %w", name, err)}
-	}
 	if body.Kind == yaml.MappingNode {
 		env.body = yamlToEnvNode(body)
 	} else {
 		env.body = newEnvMapping()
 	}
+
+	// Strictly decode the declared environment on its own so unknown or
+	// mistyped fields are reported against the environment that declared
+	// them, not one that inherited them. A partial structured build in an
+	// inheriting or abstract environment may get its context from the
+	// parent; checkResolvedBuildContexts requires it after the merge.
+	decodeNode := body
+	if env.relaxesBuildContext() && body.Kind == yaml.MappingNode {
+		decodeNode = envNodeToYAML(withPlaceholderBuildContexts(env.body, false))
+	}
+	var decoded EnvironmentConfig
+	if err := decodeYAMLNodeStrict(decodeNode, &decoded); err != nil {
+		return env, &configDecodeError{err: fmt.Errorf("environment %s: %w", name, err)}
+	}
 	return env, nil
+}
+
+// relaxesBuildContext reports whether a declared environment may leave a
+// structured build's context to an inherited value.
+func (e declaredEnvironment) relaxesBuildContext() bool {
+	return e.hasExtends || e.abstract
+}
+
+// withPlaceholderBuildContexts returns a copy of an environment body in which
+// every structured services.<name>.build mapping without a context gets a
+// placeholder context, so the strict per-environment decode accepts a partial
+// build override. The copy is only decoded, never merged or deployed.
+func withPlaceholderBuildContexts(body *envNode, isJSON bool) *envNode {
+	servicesIndex := envNodeIndex(body, "services")
+	if servicesIndex < 0 || body.values[servicesIndex].kind != envNodeMapping {
+		return body
+	}
+	services := body.values[servicesIndex]
+	patchedServices := *services
+	patchedServices.values = append([]*envNode{}, services.values...)
+	changed := false
+	for i, service := range services.values {
+		buildIndex := envNodeIndex(service, "build")
+		if buildIndex < 0 || service.values[buildIndex].kind != envNodeMapping {
+			continue
+		}
+		build := service.values[buildIndex]
+		// A null context removes the inherited one, so it is checked
+		// after the merge like an absent context.
+		contextIndex := envNodeIndex(build, "context")
+		if contextIndex >= 0 && build.values[contextIndex].kind != envNodeNull {
+			continue
+		}
+		placeholder := &envNode{kind: envNodeScalar, raw: json.RawMessage(`"."`)}
+		if !isJSON {
+			placeholder.yaml = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "."}
+		}
+		patchedBuild := *build
+		patchedBuild.keys = append([]string{}, build.keys...)
+		patchedBuild.keyNodes = append([]*yaml.Node{}, build.keyNodes...)
+		patchedBuild.values = append([]*envNode{}, build.values...)
+		if contextIndex >= 0 {
+			patchedBuild.values[contextIndex] = placeholder
+		} else {
+			patchedBuild.keys = append(patchedBuild.keys, "context")
+			patchedBuild.keyNodes = append(patchedBuild.keyNodes, nil)
+			patchedBuild.values = append(patchedBuild.values, placeholder)
+		}
+		patchedService := *service
+		patchedService.values = append([]*envNode{}, service.values...)
+		patchedService.values[buildIndex] = &patchedBuild
+		patchedServices.values[i] = &patchedService
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	patched := *body
+	patched.values = append([]*envNode{}, body.values...)
+	patched.values[servicesIndex] = &patchedServices
+	return &patched
+}
+
+func envNodeIndex(node *envNode, key string) int {
+	if node == nil || node.kind != envNodeMapping {
+		return -1
+	}
+	for i, candidate := range node.keys {
+		if candidate == key {
+			return i
+		}
+	}
+	return -1
+}
+
+// envNodeString returns a scalar leaf as a string, or ok false when it is not
+// a string scalar.
+func envNodeString(node *envNode) (string, bool) {
+	if node == nil || node.kind != envNodeScalar {
+		return "", false
+	}
+	if node.yaml != nil {
+		return node.yaml.Value, node.yaml.ShortTag() == "!!str"
+	}
+	var value string
+	if err := json.Unmarshal(node.raw, &value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+// missingBuildContexts returns, sorted, the services of a resolved
+// environment whose structured build has no non-empty context.
+func missingBuildContexts(body *envNode) []string {
+	servicesIndex := envNodeIndex(body, "services")
+	if servicesIndex < 0 {
+		return nil
+	}
+	services := body.values[servicesIndex]
+	var missing []string
+	for i, service := range services.values {
+		buildIndex := envNodeIndex(service, "build")
+		if buildIndex < 0 || service.values[buildIndex].kind != envNodeMapping {
+			continue
+		}
+		build := service.values[buildIndex]
+		contextIndex := envNodeIndex(build, "context")
+		if contextIndex >= 0 && build.values[contextIndex].kind != envNodeNull {
+			if value, ok := envNodeString(build.values[contextIndex]); !ok || strings.TrimSpace(value) != "" {
+				// Non-string contexts are reported by the strict decoder.
+				continue
+			}
+		}
+		missing = append(missing, services.keys[i])
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 // decodeYAMLNodeStrict decodes node with unknown-field rejection. yaml.v3
@@ -882,14 +1026,20 @@ func declareJSONEnvironment(name string, raw json.RawMessage) (declaredEnvironme
 		}
 	}
 
+	if jsonValueKind(body) == '{' {
+		env.body = jsonToEnvNode(body)
+	}
+	decodeBody := body
+	if env.relaxesBuildContext() && jsonValueKind(body) == '{' {
+		var buf bytes.Buffer
+		writeEnvNodeJSON(&buf, withPlaceholderBuildContexts(env.body, true))
+		decodeBody = buf.Bytes()
+	}
 	var decoded EnvironmentConfig
-	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder := json.NewDecoder(bytes.NewReader(decodeBody))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decoded); err != nil {
 		return env, &configDecodeError{err: fmt.Errorf("environment %s: %w", name, err)}
-	}
-	if jsonValueKind(body) == '{' {
-		env.body = jsonToEnvNode(body)
 	}
 	return env, nil
 }

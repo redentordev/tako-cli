@@ -585,6 +585,11 @@ environments:
         region: us-east-1
 ```
 
+- A structured `build` is a mapping, so it merges key by key: a child can
+  set only `build: {target: prod}` (or new `args`) and inherit `context` from
+  its parent. The resolved environment must still have a `context`; if no
+  environment in the chain supplies one, validation fails with the chain in
+  the error.
 - Chains are allowed (`staging -> production -> base`) up to 8 `extends`
   hops. A cycle (including `extends` naming itself), an unknown parent, or a
   chain deeper than 8 hops fails validation with the full chain in the error.
