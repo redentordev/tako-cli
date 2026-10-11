@@ -490,10 +490,17 @@ type HealthCheckConfig struct {
 
 // DeployConfig defines deployment strategy
 type DeployConfig struct {
-	Strategy          string                `yaml:"strategy,omitempty" json:"strategy,omitempty"` // recreate, rolling, blue_green
-	MaxUnavailable    int                   `yaml:"maxUnavailable,omitempty" json:"maxUnavailable,omitempty"`
-	MaxSurge          int                   `yaml:"maxSurge,omitempty" json:"maxSurge,omitempty"`
-	RollbackOnFailure bool                  `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"` // recreate, rolling, blue_green
+	// StrategyDefaulted records that validation selected Strategy because the
+	// config omitted it. It is never serialized, so it stays out of the config
+	// hash and the schema; a JSON/YAML round trip degrades it to explicit.
+	StrategyDefaulted bool `yaml:"-" json:"-"`
+	MaxUnavailable    int  `yaml:"maxUnavailable,omitempty" json:"maxUnavailable,omitempty"`
+	MaxSurge          int  `yaml:"maxSurge,omitempty" json:"maxSurge,omitempty"`
+	// RollbackOnFailure is tri-state: nil means the default (true). True keeps
+	// the previous revision serving when a rollout fails; false disables
+	// recreate restore and keeps failed new containers stopped for debugging.
+	RollbackOnFailure *bool                 `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
 	Readiness         DeployReadinessConfig `yaml:"readiness,omitempty" json:"readiness,omitempty"`
 	SmokeTest         DeploySmokeTestConfig `yaml:"smokeTest,omitempty" json:"smokeTest,omitempty"`
 	Promotion         string                `yaml:"promotion,omitempty" json:"promotion,omitempty"` // automatic, manual

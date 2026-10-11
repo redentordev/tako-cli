@@ -220,7 +220,10 @@ func (d *Deployer) MovePreparedServiceTakod(serviceName string, service *config.
 			if err != nil {
 				return err
 			}
-			return d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, grouped[serverName], false, false)
+			// Placement movement keeps legacy replacement: it sends no
+			// failure policy, so nodes never retain containers here.
+			_, err = d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, grouped[serverName], false, false, "")
+			return err
 		})
 	}
 	destinationSet := make(map[string]struct{}, len(destinations))
@@ -445,9 +448,29 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 		return fmt.Errorf("failed to get takod target servers: %w", err)
 	}
 	grouped := groupTakodAssignments(assignments)
-	needsCapabilities := serviceNeedsTakodCapabilityPreflight(service) || len(volumeOwnership) > 0
-	return runTakodServiceRollout(needsCapabilities, takodServiceRolloutOperations{
+	failurePlan := deriveTakodFailurePlan(service)
+	needsCapabilities := serviceNeedsTakodCapabilityPreflight(service) || len(volumeOwnership) > 0 || failurePlan.NeedsCapability
+	d.recordRecoveryReport(serviceName, nil)
+	reconcileStarted := false
+	rolloutErr := runTakodServiceRollout(needsCapabilities, takodServiceRolloutOperations{
 		Preflight: func() error {
+			resolved, missing, err := resolveTakodFailurePlan(serviceName, failurePlan, targetServers, func(serverName string) error {
+				client, err := d.getRuntimeClient(serverName)
+				if err != nil {
+					return err
+				}
+				return d.ensureTakodCapability(client, serverName, takod.CapabilityDeployRestoreOnFailureV1, restoreOnFailureFeature)
+			})
+			if err != nil {
+				return err
+			}
+			if len(missing) > 0 {
+				d.warnService(serviceName, restoreOnFailureDowngradeWarning(serviceName, missing), map[string]any{
+					"capability": takod.CapabilityDeployRestoreOnFailureV1,
+					"nodes":      missing,
+				})
+			}
+			failurePlan = resolved
 			if len(volumeOwnership) > 0 {
 				if err := d.preflightTakodCapability(assignmentServers, takod.CapabilityVolumeCreationOwnershipV1, "creation-only managed volume ownership"); err != nil {
 					return fmt.Errorf("service %s uses volume ownership: %w", serviceName, err)
@@ -497,16 +520,61 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 			return d.runReleaseCommand(serviceName, service, imageRef, assignmentServers)
 		},
 		Reconcile: func() error {
-			return runTakodNodeActions(targetServers, func(serverName string) error {
-				slots := grouped[serverName]
-				client, err := d.getRuntimeClient(serverName)
-				if err != nil {
-					return err
+			reconcileStarted = true
+			revision := takodServiceRevisionID(d.config.Project.Name, d.environment, serviceName, imageRef, *service)
+			recoveryRequest := func(response *takod.ReconcileServiceResponse) takod.ServiceRecoveryRequest {
+				return takod.ServiceRecoveryRequest{
+					Project:     d.config.Project.Name,
+					Environment: d.environment,
+					Service:     serviceName,
+					Revision:    revision,
+					Token:       response.RestoreToken,
 				}
-				return d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, slots, options.PullImage, options.WarmOnly)
+			}
+			report, err := coordinateTakodServiceReconcile(targetServers, failurePlan, takodRecoveryOperations{
+				Reconcile: func(serverName string) (*takod.ReconcileServiceResponse, error) {
+					client, err := d.getRuntimeClient(serverName)
+					if err != nil {
+						return nil, err
+					}
+					return d.deployServiceToTakodNode(client, serverName, serviceName, service, imageRef, grouped[serverName], options.PullImage, options.WarmOnly, failurePlan.Policy)
+				},
+				Finalize: func(serverName string, response *takod.ReconcileServiceResponse) error {
+					client, err := d.getRuntimeClient(serverName)
+					if err != nil {
+						return err
+					}
+					return d.finalizeRetainedServiceViaTakod(client, recoveryRequest(response))
+				},
+				Restore: func(serverName string, response *takod.ReconcileServiceResponse) error {
+					client, err := d.getRuntimeClient(serverName)
+					if err != nil {
+						return err
+					}
+					return d.restoreRetainedServiceViaTakod(client, recoveryRequest(response))
+				},
+				Warn: func(message string) {
+					d.warnService(serviceName, message, nil)
+				},
 			})
+			if report != nil {
+				report.Revision = revision
+			}
+			d.recordRecoveryReport(serviceName, report)
+			return err
 		},
 	})
+	if rolloutErr != nil && !reconcileStarted {
+		// Preflight, build or release failed: no node replaced containers,
+		// so the previous revision keeps serving.
+		d.recordRecoveryReport(serviceName, &RecoveryReport{
+			Status:   RecoveryRestored,
+			Mode:     RecoveryModeNotStarted,
+			Strategy: failurePlan.Strategy,
+			Revision: takodServiceRevisionID(d.config.Project.Name, d.environment, serviceName, imageRef, *service),
+		})
+	}
+	return rolloutErr
 }
 
 func runTakodJobBuildPhases(preflight func() error, build func() error, record func()) error {
@@ -1437,7 +1505,11 @@ func (d *Deployer) prepareTakodNodesWith(servers []string, prepare prepareTakodN
 	return nil
 }
 
-func (d *Deployer) deployServiceToTakodNode(client any, serverName string, serviceName string, service *config.ServiceConfig, imageRef string, slots []int, pullImage bool, warmOnly bool) error {
+// deployServiceToTakodNode reconciles one service on one node. failurePolicy
+// is sent as ReconcileServiceRequest.FailurePolicy; empty keeps the legacy
+// request. The response carries retained-container details when the node
+// retained the previous containers.
+func (d *Deployer) deployServiceToTakodNode(client any, serverName string, serviceName string, service *config.ServiceConfig, imageRef string, slots []int, pullImage bool, warmOnly bool, failurePolicy string) (*takod.ReconcileServiceResponse, error) {
 	sort.Ints(slots)
 	if d.verbose {
 		d.printf("  -> %s slots %v\n", serverName, slots)
@@ -1447,26 +1519,26 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 
 	if service.IsProxied() {
 		if service.Port <= 0 {
-			return fmt.Errorf("service %s has proxy config but no port", serviceName)
+			return nil, fmt.Errorf("service %s has proxy config but no port", serviceName)
 		}
 	}
 	publishMeshUpstreams, err := d.shouldPublishMeshUpstreams()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	envFileContent, err := d.buildTakodEnvFileContent(service)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	mounts, externalVolumes, err := d.buildTakodMountSpecs(serviceName, service)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	volumeOwnership, err := d.buildTakodVolumeOwnershipSpecs(service)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var fileBundles []takod.ServiceFileBundle
 	fileSetID := ""
@@ -1474,14 +1546,14 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 		var fileMounts []string
 		fileBundles, fileMounts, _, err = d.PrepareServiceFiles(serviceName, service)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if len(slots) > 0 {
 			mounts = append(mounts, fileMounts...)
 		}
 		fileSetID, err = serviceFileSetID(service.FilesContentHash)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -1529,23 +1601,28 @@ func (d *Deployer) deployServiceToTakodNode(client any, serverName string, servi
 		if service.IsProxied() && publishMeshUpstreams {
 			meshPort, err = d.allocateMeshUpstreamPort(client, serverName, serviceName, meshRevision, slot, service.Port)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 		container, err := d.buildTakodContainerSpec(serverName, serviceName, service, slot, serviceRevision, publishMeshUpstreams, meshPort, warmOnly)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		request.Containers = append(request.Containers, container)
 	}
 
-	if err := d.wrapRegistryAuthError(serverName, d.reconcileServiceViaTakod(client, request)); err != nil {
-		return err
+	request.FailurePolicy = failurePolicy
+	response, err := d.reconcileServiceViaTakod(client, request)
+	if err := d.wrapRegistryAuthError(serverName, err); err != nil {
+		return nil, err
 	}
 	if warmOnly {
-		return nil
+		return response, nil
 	}
-	return d.reconcileBackupScheduleViaTakod(client, serviceName, service, len(slots) > 0)
+	// The response is returned with a backup-schedule error too: the
+	// containers were already replaced and any retained previous containers
+	// still need to be restored or finalized by the caller.
+	return response, d.reconcileBackupScheduleViaTakod(client, serviceName, service, len(slots) > 0)
 }
 
 func copyServiceLogging(logging *config.ServiceLoggingConfig) *config.ServiceLoggingConfig {
@@ -1681,7 +1758,7 @@ func (d *Deployer) buildTakodHealthSpec(service *config.ServiceConfig) *takod.He
 		if smokeSpec := buildTakodSmokeOnlyHealthSpec(service); smokeSpec != nil {
 			return smokeSpec
 		}
-		return nil
+		return buildTakodImplicitReadinessHealthSpec(service)
 	}
 
 	interval := service.HealthCheck.Interval
@@ -1760,6 +1837,35 @@ func (d *Deployer) buildTakodReadinessHealthSpec(service *config.ServiceConfig) 
 		Retries:      retries,
 		WaitAttempts: deploymentHealthWaitAttempts(interval, "0s", retries),
 	}, service)
+}
+
+// implicitTCPReadinessAttempts bounds the implicit TCP readiness probe of a
+// defaulted rolling service. It is deliberately a fixed constant, not derived
+// from deploymentHealthWaitAttempts or the healthCheck defaults, so tuning
+// those never silently changes the implicit probe. Each attempt is a one
+// second pause plus one dial (2s timeout): roughly one to three minutes.
+const implicitTCPReadinessAttempts = 60
+
+// buildTakodImplicitReadinessHealthSpec gates a defaulted rolling service
+// that declares neither healthCheck nor deploy.readiness on a host-side TCP
+// connect to its port, so traffic never shifts to a container that is not
+// listening yet. Explicit rolling keeps its running-only gate, and every
+// other strategy returns nil.
+func buildTakodImplicitReadinessHealthSpec(service *config.ServiceConfig) *takod.HealthSpec {
+	if service == nil || !service.Deploy.StrategyDefaulted || service.Port <= 0 {
+		return nil
+	}
+	if effectiveDeployStrategy(service) != config.DeployStrategyRolling {
+		return nil
+	}
+	return &takod.HealthSpec{
+		Port:         service.Port,
+		Interval:     "2s",
+		Timeout:      "2s",
+		Retries:      1,
+		WaitAttempts: implicitTCPReadinessAttempts,
+		Implicit:     true,
+	}
 }
 
 func buildTakodSmokeOnlyHealthSpec(service *config.ServiceConfig) *takod.HealthSpec {
@@ -2583,12 +2689,30 @@ func copyServiceUlimits(source map[string]config.UlimitConfig) map[string]config
 	return copy
 }
 
-func (d *Deployer) reconcileServiceViaTakod(client any, request takod.ReconcileServiceRequest) error {
+func (d *Deployer) reconcileServiceViaTakod(client any, request takod.ReconcileServiceRequest) (*takod.ReconcileServiceResponse, error) {
 	timeout := reconcileServiceRequestTimeout(request)
-	if _, err := takodclient.RequestJSONWithTimeoutContext(d.baseContext(), client, d.takodSocket(), "POST", "/v1/reconcile-service", request, timeout); err != nil {
-		return fmt.Errorf("takod service reconciliation failed: %w", err)
+	body, err := takodclient.RequestJSONWithTimeoutContext(d.baseContext(), client, d.takodSocket(), "POST", "/v1/reconcile-service", request, timeout)
+	if err != nil {
+		if failure := parseTakodReconcileFailure(err); failure != err {
+			return nil, failure
+		}
+		return nil, fmt.Errorf("takod service reconciliation failed: %w", err)
 	}
-	return nil
+	return decodeReconcileServiceResponse(body), nil
+}
+
+// decodeReconcileServiceResponse reads the retained-container fields of a
+// reconcile response. Older agents return a body without them, and a body
+// that does not decode is treated the same way: nothing was retained.
+func decodeReconcileServiceResponse(body string) *takod.ReconcileServiceResponse {
+	var response takod.ReconcileServiceResponse
+	if strings.TrimSpace(body) == "" {
+		return &response
+	}
+	if err := json.Unmarshal([]byte(body), &response); err != nil {
+		return &takod.ReconcileServiceResponse{}
+	}
+	return &response
 }
 
 func reconcileServiceRequestTimeout(request takod.ReconcileServiceRequest) time.Duration {

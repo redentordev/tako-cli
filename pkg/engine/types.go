@@ -70,6 +70,12 @@ type PlanChange struct {
 	// will run before cutover when this change applies.
 	ReleaseCommand []string `json:"releaseCommand,omitempty"`
 	RunCommand     []string `json:"runCommand,omitempty"`
+	// Strategy is the effective deploy strategy (recreate, rolling,
+	// blue_green) and StrategySource says whether tako.yaml set it
+	// ("explicit") or Tako selected it ("default"). Both are empty for runs,
+	// jobs and removed services.
+	Strategy       string `json:"strategy,omitempty"`
+	StrategySource string `json:"strategySource,omitempty"`
 }
 
 type PlanSharedBuild struct {
@@ -146,6 +152,10 @@ type ServiceOutcome struct {
 	Release  *ReleaseOutcome `json:"release,omitempty"`
 	Run      *RunOutcome     `json:"run,omitempty"`
 	Error    string          `json:"error,omitempty"`
+	// Strategy is the effective deploy strategy of a long-running service.
+	Strategy string `json:"strategy,omitempty"`
+	// Recovery reports how a failed rollout was recovered.
+	Recovery *RecoveryOutcome `json:"recovery,omitempty"`
 }
 
 type RunOutcome struct {
@@ -194,6 +204,9 @@ const (
 	OutcomeUpToDate = "up_to_date"
 	OutcomeFailed   = "failed"
 	OutcomeRan      = "ran"
+	// OutcomeRestored marks a service whose rollout failed but whose
+	// previous revision serves again; the deploy still fails (exit 1).
+	OutcomeRestored = "restored"
 )
 
 // DeployResult is the serializable outcome of ApplyDeploy.
@@ -240,6 +253,9 @@ func newDeployPlanDocument(project string, environment string, plan *reconcile.R
 		if service, ok := services[change.ServiceName]; ok && service.IsRun() {
 			planChange.RunCommand = service.Command.Arguments()
 		}
+		if service, ok := services[change.ServiceName]; ok && change.Type != reconcile.ChangeRemove {
+			planChange.Strategy, planChange.StrategySource = serviceStrategyReport(&service)
+		}
 		doc.Changes = append(doc.Changes, planChange)
 	}
 	sort.Slice(doc.Changes, func(i, j int) bool {
@@ -249,6 +265,16 @@ func newDeployPlanDocument(project string, environment string, plan *reconcile.R
 		return doc.Changes[i].Type < doc.Changes[j].Type
 	})
 	return doc
+}
+
+// serviceStrategyReport returns the effective deploy strategy and its source
+// for plan and result documents; both are empty for runs and jobs, which
+// have no rollout strategy.
+func serviceStrategyReport(service *config.ServiceConfig) (string, string) {
+	if service == nil || service.IsRun() || service.IsJob() {
+		return "", ""
+	}
+	return deployplan.EffectiveDeployStrategy(service), service.DeployStrategySource()
 }
 
 func sortedServiceNames(services map[string]config.ServiceConfig) []string {

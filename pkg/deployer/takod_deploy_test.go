@@ -1266,8 +1266,9 @@ func TestShouldPublishMeshUpstreamsOnlyForMultiNodeEnvironments(t *testing.T) {
 func TestBuildTakodContainerSpecDoesNotPublishPublicOneNodeService(t *testing.T) {
 	deploy := &Deployer{config: testTakodDeployConfig([]string{"node-a"}), environment: "production"}
 	container, err := deploy.buildTakodContainerSpec("node-a", "web", &config.ServiceConfig{
-		Port:  80,
-		Proxy: &config.ProxyConfig{Domain: "example.com"},
+		Port:   80,
+		Proxy:  &config.ProxyConfig{Domain: "example.com"},
+		Deploy: config.DeployConfig{Strategy: config.DeployStrategyRecreate},
 	}, 1, "rev-web", false, 0, false)
 	if err != nil {
 		t.Fatalf("buildTakodContainerSpec returned error: %v", err)

@@ -306,8 +306,14 @@ func detectChanges(projectName string, environment string, serviceName string, d
 			if actual.ConfigHash == desiredHash {
 				return nil
 			}
+			if reason := strategyDefaultChangeReason(desired, actual); reason != "" {
+				return []string{reason, "Service configuration changed"}
+			}
 			return []string{"Service configuration changed"}
 		}
+	}
+	if reason := strategyDefaultChangeReason(desired, actual); reason != "" {
+		reasons = append(reasons, reason)
 	}
 
 	// Compare port (only if both are set)
@@ -336,6 +342,34 @@ func detectChanges(projectName string, environment string, serviceName string, d
 	}
 
 	return reasons
+}
+
+// strategyDefaultChangeReason explains the one-time redeploy of a service
+// that ran with the old recreate default and now defaults to rolling.
+func strategyDefaultChangeReason(desired config.ServiceConfig, actual *ActualService) string {
+	if actual == nil || !desired.Deploy.StrategyDefaulted {
+		return ""
+	}
+	if strings.TrimSpace(actual.DeployStrategy) != config.DeployStrategyRecreate || desired.Deploy.Strategy != config.DeployStrategyRolling {
+		return ""
+	}
+	return "Deploy strategy default changed: recreate → rolling"
+}
+
+// planStrategyLabel renders the strategy column of the plan table, e.g.
+// "rolling (default)". Removed services, runs and jobs show "-".
+func planStrategyLabel(change ServiceChange) string {
+	if change.Type == ChangeRemove || change.NewConfig == nil || change.NewConfig.IsRun() || change.NewConfig.IsJob() {
+		return "-"
+	}
+	strategy := change.NewConfig.Deploy.Strategy
+	if strategy == "" {
+		strategy = config.DefaultDeployStrategy(change.NewConfig)
+	}
+	if change.NewConfig.DeployStrategySource() == config.DeployStrategySourceDefault {
+		return strategy + " (default)"
+	}
+	return strategy
 }
 
 // Helper functions for comparing configurations
@@ -428,9 +462,9 @@ func (p *ReconciliationPlan) FormatPlanVerbose(showUnchanged bool) string {
 	sb.WriteString(fmt.Sprintf("  %d change(s) to apply:\n\n", changeCount))
 
 	// Table header
-	sb.WriteString("  ┌────────────────┬────────────┬─────────────────────────────────────┐\n")
-	sb.WriteString("  │ Service        │ Action     │ Details                             │\n")
-	sb.WriteString("  ├────────────────┼────────────┼─────────────────────────────────────┤\n")
+	sb.WriteString("  ┌────────────────┬────────────┬─────────────────────┬─────────────────────────────────────┐\n")
+	sb.WriteString("  │ Service        │ Action     │ Strategy            │ Details                             │\n")
+	sb.WriteString("  ├────────────────┼────────────┼─────────────────────┼─────────────────────────────────────┤\n")
 
 	// Table rows
 	for _, change := range p.Changes {
@@ -465,10 +499,10 @@ func (p *ReconciliationPlan) FormatPlanVerbose(showUnchanged bool) string {
 			details = "No changes"
 		}
 
-		sb.WriteString(fmt.Sprintf("  │ %-14s │ %-10s │ %-35s │\n", serviceName, action, details))
+		sb.WriteString(fmt.Sprintf("  │ %-14s │ %-10s │ %-19s │ %-35s │\n", serviceName, action, planStrategyLabel(change), details))
 	}
 
-	sb.WriteString("  └────────────────┴────────────┴─────────────────────────────────────┘\n\n")
+	sb.WriteString("  └────────────────┴────────────┴─────────────────────┴─────────────────────────────────────┘\n\n")
 
 	// Detailed changes
 	hasDetails := false

@@ -26,7 +26,8 @@ func (s *Server) registeredRoutes() []takodRoute {
 	return []takodRoute{
 		{"/healthz", s.handleHealthz}, {"/v1/status", s.handleStatus}, {"/v1/actual", s.handleActual},
 		{"/v1/reconcile-service", s.handleReconcileService}, {"/v1/service-files", s.handleServiceFiles}, {"/v1/service-files/check", s.handleServiceFilesCheck},
-		{"/v1/remove-service", s.handleRemoveService}, {"/v1/proxy-file", s.handleProxyFile}, {"/v1/proxy", s.handleProxy},
+		{"/v1/remove-service", s.handleRemoveService}, {"/v1/services/finalize", s.handleServiceFinalize}, {"/v1/services/restore", s.handleServiceRestore},
+		{"/v1/proxy-file", s.handleProxyFile}, {"/v1/proxy", s.handleProxy},
 		{"/v1/certs", s.handleProxyCertificates}, {"/v1/acme-dns", s.handleProxyACMEDNS}, {"/v1/ports/allocate", s.handlePortAllocate},
 		{"/v1/cleanup", s.handleCleanup}, {"/v1/state", s.handleState}, {"/v1/lease", s.handleLease}, {"/v1/fence", s.handleFence}, {"/v1/env-bundle", s.handleEnvBundle},
 		{"/v1/backups", s.handleBackups}, {"/v1/backups/restore", s.handleBackupRestore}, {"/v1/backups/postgres/verify", s.handlePostgresBackupVerification}, {"/v1/backups/cleanup", s.handleBackupCleanup},

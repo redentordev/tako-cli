@@ -1377,7 +1377,8 @@ deployed.
 Within one service, the rollout to each assigned node runs concurrently, so a
 service with replicas on several nodes updates those nodes in parallel.
 Per-service rollout behavior (recreate, rolling, or blue/green) is set with
-`services.<name>.deploy.strategy`.
+`services.<name>.deploy.strategy`; see [Deploy Strategies](#deploy-strategies)
+for the default.
 
 <!-- tako:snippet partial -->
 ```yaml
@@ -1414,6 +1415,136 @@ Build location is configured separately under `deployment.build` (see
 deployment:
   build:
     strategy: remote  # remote, local, or auto
+```
+
+## Deploy Strategies
+
+`services.<name>.deploy.strategy` controls how one service replaces its
+containers:
+
+- **`rolling`** starts the new revision next to the old one, waits for it to
+  become ready, moves proxy traffic, then stops the old revision. No downtime.
+- **`blue_green`** warms a full new revision and cuts traffic over at once
+  (optionally after `promotion: manual` or a `gracePeriod`).
+- **`recreate`** stops the old containers, then starts the new ones. There is
+  a short gap while the new container starts.
+
+### The default
+
+When `deploy.strategy` is not set, Tako picks `rolling` for a service that can
+run two revisions side by side, and `recreate` otherwise. A service defaults to
+`rolling` only when all of these hold:
+
+- it is a long-running service (not `kind: job` or `kind: run`) and not
+  `persistent`;
+- it has a `port` and no raw `ports` or `volumes`;
+- `deploy.maxUnavailable` is not set, and `deploy.maxSurge` is unset or at
+  least `replicas`;
+- it does not set `deploy.gracePeriod`, `deploy.promotion` or
+  `deploy.smokeTest`, which belong to `blue_green`;
+- its other `deploy` settings are valid for `rolling`.
+
+Everything else (databases, services with volumes or host ports, workers
+without a port) defaults to `recreate`. A defaulted service never fails
+validation because of the default; `tako config` prints
+`deploy.strategy: rolling (default)` so you can see which one Tako picked, and
+`tako deploy --plan-only` shows the strategy for every changed service.
+
+With the default `rolling`, `maxSurge` is the replica count: the whole new
+revision runs next to the old one before traffic moves. That briefly doubles
+the service's memory and CPU on its nodes, so leave headroom on small hosts.
+
+The first deploy after upgrading to a CLI with this default redeploys every
+service that ran with the old `recreate` default. The plan lists those
+services with the reason `Deploy strategy default changed: recreate → rolling`,
+and the redeploy itself is rolling, so it has no downtime.
+
+### Readiness for defaulted rolling services
+
+Traffic only moves to a new revision once it is ready. If a defaulted
+`rolling` service has no `healthCheck` and no `deploy.readiness`, Tako waits
+for the container to accept TCP connections on its `port`, for about a minute.
+If it never does, the rollout fails, the old revision keeps serving, and the
+error names the implicit probe. Fix it by making the app listen on `0.0.0.0`,
+adding a `healthCheck` that matches your app, or opting out with
+`deploy.strategy: recreate`.
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        healthCheck:
+          path: /health        # replaces the implicit TCP probe
+        proxy:
+          domain: app.example.com
+          email: admin@example.com
+```
+
+### Recovering from a failed rollout
+
+`deploy.rollbackOnFailure` defaults to `true`. When a rollout fails:
+
+- **`rolling` and `blue_green`**: the old revision never stopped and traffic
+  never moved, so it keeps serving. The failed containers are removed.
+- **`recreate`**: Tako stops the old containers and keeps them (renamed and
+  stopped) instead of removing them. If the new revision fails to start,
+  connect, or pass its health check on any node, Tako removes the new
+  containers and restarts the old ones under their original names on every
+  node of that service. The old containers are removed once the rollout
+  succeeds everywhere.
+
+The deploy still fails (exit code 1) and reports the service as `restored`.
+Restore applies only to the service that failed: services deployed earlier in
+the same run keep their new revision, and later services are not deployed.
+
+Restore restarts the previous containers; it does not undo changes the new
+revision made to data. If a new image migrated a database or wrote to a volume
+before failing, the restored container sees that data. Use a `deploy.release`
+command for migrations so they run before any container is replaced, and keep
+migrations backward compatible.
+
+Set `rollbackOnFailure: false` to keep failed containers stopped for
+debugging instead. The old revision of a `rolling` service still serves; a
+`recreate` service is left down until you fix it and deploy again.
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      worker:
+        build: .
+        deploy:
+          strategy: recreate
+          rollbackOnFailure: false   # keep failed containers for `docker logs`
+```
+
+Restoring `recreate` services and keeping failed containers
+(`rollbackOnFailure: false`) need the `deploy.restore-on-failure-v1` takod
+capability, which `tako upgrade servers` installs. Defaulted `rolling` services
+do not need it. If a node lacks it and `rollbackOnFailure` is not set, Tako
+warns and deploys that service with the old remove-then-start behavior on all
+of its nodes. If `rollbackOnFailure` is set explicitly, the deploy stops before
+touching any container and asks you to run `tako upgrade servers`.
+
+### Opting out
+
+To keep the previous behavior for a service, set the strategy explicitly:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      api:
+        build: .
+        port: 4000
+        deploy:
+          strategy: recreate
 ```
 
 ### Deprecated keys
@@ -1924,7 +2055,8 @@ Entries use docker-compose publish syntax (`PORT`, `HOST:CONTAINER`,
 `--publish`. Traffic reaches the container directly — no TLS termination,
 health-gated routing, or basic auth from tako-proxy applies. Constraints:
 
-- **`deploy.strategy` must be `recreate`** (the default). Rolling and
+- **`deploy.strategy` must be `recreate`**, which is the default for services
+  with `ports` (see [Deploy Strategies](#deploy-strategies)). Rolling and
   blue-green keep the old and new revision running at once, and the second
   container cannot bind an already-bound host port, so raw port services
   take a brief listener gap on deploy.

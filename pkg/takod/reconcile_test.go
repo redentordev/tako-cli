@@ -58,6 +58,21 @@ func TestValidateReconcileServiceRequest(t *testing.T) {
 		t.Fatalf("valid no-downtime request returned error: %v", err)
 	}
 
+	for _, policy := range []string{"", FailurePolicyRemove, FailurePolicyRestore, FailurePolicyRetainFailed} {
+		withPolicy := valid
+		withPolicy.FailurePolicy = policy
+		if err := validateReconcileServiceRequest(withPolicy); err != nil {
+			t.Fatalf("failure policy %q returned error: %v", policy, err)
+		}
+	}
+	for _, policy := range []string{"rollback", "Restore", "retain"} {
+		withPolicy := valid
+		withPolicy.FailurePolicy = policy
+		if err := validateReconcileServiceRequest(withPolicy); err == nil || !strings.Contains(err.Error(), "invalid failure policy") {
+			t.Fatalf("failure policy %q error = %v, want invalid failure policy", policy, err)
+		}
+	}
+
 	invalid := valid
 	invalid.EnvFile = "/tmp/demo.env"
 	if err := validateReconcileServiceRequest(invalid); err == nil {
@@ -1710,6 +1725,10 @@ func TestTakodCommandHelper(t *testing.T) {
 		_, _ = os.Stdout.WriteString("container-id\n")
 		os.Exit(0)
 	case "rename":
+		if fragment := os.Getenv("TAKO_FAKE_DOCKER_RENAME_FAIL_CONTAINS"); fragment != "" && strings.Contains(strings.Join(commandArgs, " "), fragment) {
+			_, _ = os.Stderr.WriteString("selective rename failure")
+			os.Exit(1)
+		}
 		if marker := os.Getenv("TAKO_FAKE_PROXY_RUNNING_MARKER"); marker != "" && len(commandArgs) >= 3 {
 			if commandArgs[1] == "tako-proxy" {
 				_ = os.Remove(marker)
@@ -1720,6 +1739,10 @@ func TestTakodCommandHelper(t *testing.T) {
 		}
 		os.Exit(0)
 	case "start":
+		if output := os.Getenv("TAKO_FAKE_DOCKER_START_ERROR"); output != "" {
+			_, _ = os.Stderr.WriteString(output)
+			os.Exit(1)
+		}
 		if marker := os.Getenv("TAKO_FAKE_PROXY_RUNNING_MARKER"); marker != "" && slices.Contains(commandArgs[1:], "tako-proxy") {
 			_ = os.WriteFile(marker, []byte("running"), 0600)
 		}
@@ -1769,6 +1792,18 @@ func TestTakodCommandHelper(t *testing.T) {
 		os.Exit(0)
 	case "inspect":
 		joined := strings.Join(commandArgs, " ")
+		if strings.Contains(joined, ".HostConfig.RestartPolicy.Name") {
+			// Retention inspect: TAKO_FAKE_RETAIN_INSPECT_BY_ID maps a container
+			// ID to its "/name|running|restartPolicy|labelsJSON" line.
+			if byIDRaw := os.Getenv("TAKO_FAKE_RETAIN_INSPECT_BY_ID"); byIDRaw != "" && len(commandArgs) > 1 {
+				byID := make(map[string]string)
+				if err := json.Unmarshal([]byte(byIDRaw), &byID); err != nil {
+					os.Exit(2)
+				}
+				_, _ = os.Stdout.WriteString(byID[commandArgs[1]] + "\n")
+			}
+			os.Exit(0)
+		}
 		if strings.Contains(joined, `eq .Destination "/volume"`) || strings.Contains(joined, `eq .Destination "/target"`) {
 			if volume, err := os.ReadFile(os.Getenv("TAKO_COMMAND_LOG") + ".helper"); err == nil {
 				_, _ = os.Stdout.WriteString("volume|" + string(volume) + "\n")

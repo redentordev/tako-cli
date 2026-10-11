@@ -1071,7 +1071,8 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	// Deploy-time runs do not have a rollout strategy or restart policy.
 	if !service.IsRun() {
 		if service.Deploy.Strategy == "" {
-			service.Deploy.Strategy = DeployStrategyRecreate
+			service.Deploy.Strategy = DefaultDeployStrategy(service)
+			service.Deploy.StrategyDefaulted = true
 		}
 		if err := validateDeployStrategy(name, service); err != nil {
 			return err
@@ -1878,7 +1879,7 @@ func validateRunServiceKind(name string, service *ServiceConfig) error {
 		return fmt.Errorf("service %s: kind: run cannot use placement.strategy global because deploy-time runs execute exactly once", name)
 	}
 	deploy := service.Deploy
-	if deploy.Strategy != "" || deploy.MaxUnavailable != 0 || deploy.MaxSurge != 0 || deploy.RollbackOnFailure ||
+	if deploy.Strategy != "" || deploy.MaxUnavailable != 0 || deploy.MaxSurge != 0 || deploy.RollbackOnFailure != nil ||
 		deploy.Readiness != (DeployReadinessConfig{}) || deploy.SmokeTest != (DeploySmokeTestConfig{}) ||
 		deploy.Promotion != "" || deploy.GracePeriod != "" || deploy.Release != nil {
 		return fmt.Errorf("service %s: kind: run cannot set deploy rollout controls", name)

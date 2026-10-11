@@ -65,10 +65,15 @@ const (
 	TypeDeployServiceReconciled = "deploy.service.reconciled"
 	TypeDeployServiceWarmed     = "deploy.service.warmed"
 	TypeDeployServiceFailed     = "deploy.service.failed"
-	TypeDeployServiceRemoved    = "deploy.service.removed"
-	TypeDeploySucceeded         = "deploy.succeeded"
-	TypeDeployFailed            = "deploy.failed"
-	TypeDeployCancelled         = "deploy.cancelled"
+	// Restore events follow deploy.service.failed when the previous
+	// revision is restored (or was never cut over) after a failed rollout.
+	TypeDeployServiceRestoreStarted = "deploy.service.restore.started"
+	TypeDeployServiceRestored       = "deploy.service.restored"
+	TypeDeployServiceRestoreFailed  = "deploy.service.restore_failed"
+	TypeDeployServiceRemoved        = "deploy.service.removed"
+	TypeDeploySucceeded             = "deploy.succeeded"
+	TypeDeployFailed                = "deploy.failed"
+	TypeDeployCancelled             = "deploy.cancelled"
 
 	TypeProxyReconciled    = "proxy.reconciled"
 	TypeRevisionsPruned    = "revisions.pruned"

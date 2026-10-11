@@ -665,7 +665,7 @@
                 },
                 "ports": {
                   "type": "array",
-                  "description": "Raw TCP/UDP host ports published directly on the node, bypassing tako-proxy (\"PORT\", \"HOST:CONTAINER\", \"IP:HOST:CONTAINER\", optional /tcp or /udp). Requires deploy.strategy recreate and at most one replica.",
+                  "description": "Raw TCP/UDP host ports published directly on the node, bypassing tako-proxy (\"PORT\", \"HOST:CONTAINER\", \"IP:HOST:CONTAINER\", optional /tcp or /udp). Requires deploy.strategy recreate and at most one replica; when deploy.strategy is omitted, a service with ports defaults to recreate.",
                   "items": {
                     "type": "string"
                   }
@@ -1176,7 +1176,7 @@
                 },
                 "deploy": {
                   "type": "object",
-                  "description": "Deployment strategy for takod reconciliation. recreate is the conservative default. rolling warms a full replacement revision, waits for readiness, switches proxy routes, then prunes stale revisions. blue_green warms a full green revision for stateless public services, waits for readiness and optional smoke tests, and switches proxy routes only after checks pass. Default automatic promotion switches during deploy; promotion: manual warms green for a later tako promote <service>. deploy.gracePeriod can retain the previous blue-green revision after promotion before stale revision cleanup.",
+                  "description": "Deployment strategy for takod reconciliation. When strategy is omitted, Tako selects rolling for a stateless long-running service that declares port and no raw ports or volumes, is not persistent, sets no maxUnavailable, a maxSurge of 0 or at least replicas, and no gracePeriod, promotion, or smokeTest, and would pass rolling validation; every other service (persistent, raw ports, volumes, portless workers) defaults to recreate. A defaulted rolling service without healthCheck or deploy.readiness waits for a TCP connect to port before traffic shifts. recreate stops the previous containers, keeps them restorable until the new revision passes health checks on every node, and restores them when the rollout fails (rollbackOnFailure). rolling warms a full replacement revision, waits for readiness, switches proxy routes, then prunes stale revisions. blue_green warms a full green revision for stateless public services, waits for readiness and optional smoke tests, and switches proxy routes only after checks pass. Default automatic promotion switches during deploy; promotion: manual warms green for a later tako promote <service>. deploy.gracePeriod can retain the previous blue-green revision after promotion before stale revision cleanup.",
                   "properties": {
                     "strategy": {
                       "type": "string",
@@ -1195,7 +1195,9 @@
                       "minimum": 0
                     },
                     "rollbackOnFailure": {
-                      "type": "boolean"
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Defaults to true: a failed rollout leaves the previous revision serving. recreate keeps the stopped previous containers and restarts them on every node of the service when any node fails; rolling never cuts traffic over. false disables recreate restore and keeps failed new containers stopped but not removed for debugging. Needs takod capability deploy.restore-on-failure-v1 when set explicitly; when omitted, older nodes fall back to legacy remove-then-start with a warning."
                     },
                     "readiness": {
                       "type": "object",

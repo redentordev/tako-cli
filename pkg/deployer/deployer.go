@@ -81,6 +81,8 @@ type Deployer struct {
 	events                   events.Sink
 	releaseRuns              map[string]*ReleaseRun
 	releaseMu                sync.Mutex
+	recoveryReports          map[string]*RecoveryReport
+	recoveryMu               sync.Mutex
 	jobImages                map[string]string
 	jobMu                    sync.Mutex
 	baseCtx                  context.Context

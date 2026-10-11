@@ -271,6 +271,27 @@ type ServiceStateDocument struct {
 	Replicas         int                        `json:"replicas"`
 	Env              map[string]string          `json:"env"`
 	HealthCheck      HealthCheckStateDocument   `json:"healthCheck"`
+	// DeployStrategy and Recovery are recorded for a service whose rollout
+	// failed: the effective strategy and how the previous revision was
+	// recovered.
+	DeployStrategy string                 `json:"deployStrategy,omitempty"`
+	Recovery       *RecoveryStateDocument `json:"recovery,omitempty"`
+}
+
+// RecoveryStateDocument records how a failed service rollout was recovered.
+// Status is restored, failed, disabled or unsupported.
+type RecoveryStateDocument struct {
+	Status   string                      `json:"status"`
+	Mode     string                      `json:"mode,omitempty"`
+	Revision string                      `json:"revision,omitempty"`
+	Nodes    []RecoveryNodeStateDocument `json:"nodes,omitempty"`
+}
+
+type RecoveryNodeStateDocument struct {
+	Server     string   `json:"server"`
+	Status     string   `json:"status"`
+	Error      string   `json:"error,omitempty"`
+	Containers []string `json:"containers,omitempty"`
 }
 
 type ServiceFileStateDocument struct {

@@ -104,6 +104,15 @@ Events follow `pkg/takoapi/events.Event` (apiVersion
 - `seq` is monotonic per process. `message` is the human rendering (may
   contain newlines); parse `type`, `phase`, `level`, `service`, and `data`
   instead of `message`.
+- A failed service rollout emits `deploy.service.failed`, then, when a
+  restore applies, `deploy.service.restore.started` followed by
+  `deploy.service.restored` or `deploy.service.restore_failed`. Their `data`
+  carries the recovery `status`, `mode`, `revision`, `failedRevision` and
+  `nodes` (see Result documents). Recoveries with status `disabled` or
+  `unsupported` emit no restore events. When a node lacks
+  `deploy.restore-on-failure-v1` and `rollbackOnFailure` is not set, one
+  `warning` event per service names the nodes (`data.nodes`) and the
+  capability (`data.capability`).
 - Consumers MUST ignore unknown event types, fields, and `data` keys —
   the schema grows additively.
 - `level` is one of `debug`, `info`, `warn`, `error`. Debug events are
@@ -116,8 +125,51 @@ Mutation commands return versioned result documents (for example
 `DeployResult`, kind `DeployResult`, apiVersion
 `tako.redentor.dev/v1alpha1`) containing: project, environment, `status`
 (`success`, `warmed`, `failed`, ...), revision, per-service outcomes
-(`deployed`, `warmed`, `removed`, `up_to_date`, `failed`), URLs, timings,
-`planHash`, and `error` when failed. `tako ps --output json` returns a
+(`deployed`, `warmed`, `removed`, `up_to_date`, `failed`, `restored`, `ran`),
+URLs, timings, `planHash`, and `error` when failed. Long-running service
+outcomes carry `strategy` (`recreate`, `rolling`, `blue_green`). When a
+service's rollout fails, its outcome carries a `recovery` object:
+
+```json
+{
+  "name": "web",
+  "action": "restored",
+  "strategy": "recreate",
+  "error": "...",
+  "recovery": {
+    "status": "restored",
+    "mode": "restore",
+    "revision": "rev-previous",
+    "failedRevision": "rev-new",
+    "nodes": [{ "server": "node-a", "status": "restored" }]
+  }
+}
+```
+
+- `recovery.status` is `restored` (the previous revision serves again, or
+  was never taken out of service), `failed` (restoring failed on at least one
+  node; containers are left in place and the node `error` says why),
+  `disabled` (`deploy.rollbackOnFailure: false`; failed containers are kept
+  stopped and listed in the node's `containers`), or `unsupported` (a node
+  lacks the `deploy.restore-on-failure-v1` takod capability, so legacy
+  remove-then-start replacement ran).
+- `recovery.mode` is `restore` (recreate containers were retained and
+  restarted), `not-cut-over` (rolling or blue/green: traffic never moved),
+  `not-started` (preflight, build or release failed before any container
+  changed), `retain-failed`, or `legacy`.
+- `recovery.revision` is the revision serving after recovery;
+  `failedRevision` is the one whose rollout failed. Node `status` values are
+  `restored`, `unchanged`, `not-cut-over`, `kept-failed`, `failed`, or
+  `unknown`.
+- The action is `restored` only when `recovery.status` is `restored`. The
+  `DeployResult` `status` stays `failed` and the process exits 1 in every
+  case: restore is per service, so services deployed earlier in the same run
+  keep their new revision and services after the failed one are not deployed.
+- Recovery data holds revision IDs, node names, container names and error
+  text only. The failed deployment's history record stores the same object
+  as `services.<name>.recovery` along with `deployStrategy`.
+
+`tako ps --output json` returns a
 `StatusResult` document with project/environment, selected server(s), optional
 service filter, and service rows (`name`, `running`, `desired`, `status`,
 `ports`, `revision`, `warming`, `internal`, `image`, `strategy`, `health`,
@@ -504,7 +556,14 @@ flow mirrors the interactive confirmation:
    servers, services, typed changes with reasons, redacted `sharedBuilds`
    artifact identities (`key`, resolved `image`, and `consumers`),
    `destructive`, `empty`, the human plan text, and a content hash (via
-   `planHash` on results).
+   `planHash` on results). Changes to long-running services carry
+   `strategy` and `strategySource` (`explicit` when tako.yaml sets
+   `deploy.strategy`, `default` when Tako selected it); runs, jobs and
+   removals omit both. Both fields are part of the plan hash, so plans saved
+   by an older CLI no longer match and must be recomputed. The first deploy
+   after the rolling default shipped lists services that ran with the old
+   recreate default with the reason "Deploy strategy default changed:
+   recreate → rolling".
    `tako run ... --plan-only` behaves the same.
 2. **Review**: present `changes`/`humanText` to the approver; persist the
    plan document.

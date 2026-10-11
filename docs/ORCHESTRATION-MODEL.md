@@ -348,19 +348,45 @@ revision. New deployments obey `state.onUnreachableNode`.
 
 ## Deployment Strategies
 
-`recreate` is the conservative default. Tako replaces the service containers
-that match the app, stage, and service identity, then reconciles proxy routes.
-Normal replacement stops each old container with its configured Docker stop
-timeout before non-force removal, allowing PID 1 to receive `SIGTERM` and
-drain. Force removal is reserved for explicit hard-timeout and fail-closed
-paths.
+### Default selection
+
+When `deploy.strategy` is not set, the validator selects one per service
+(`config.DefaultDeployStrategy`). A long-running, non-persistent service with a
+`port`, no raw `ports`, no `volumes`, no `maxUnavailable`, a `maxSurge` that is
+unset or at least `replicas`, no blue/green-only settings (`gracePeriod`,
+`promotion`, `smokeTest`), and otherwise rolling-valid `deploy` settings gets
+`rolling`. Every other service gets `recreate`. The selection never turns a
+config that validated before into one that fails. The effective strategy is
+part of the service config hash and revision ID, so the first deploy after the
+default changed redeploys affected services once, through `rolling`, and the
+plan shows the reason `Deploy strategy default changed: recreate → rolling`.
+Plans and results report `strategy` and `strategySource` (`explicit` or
+`default`).
+
+A defaulted `rolling` service with no `healthCheck` and no `deploy.readiness`
+gets an implicit TCP readiness probe on its `port` (60 attempts, about a
+minute). takod moves proxy routes only after the probe passes; if it never
+does, the rollout fails with an error that names the probe and suggests a
+`healthCheck` or `deploy.strategy: recreate`. Explicit `rolling` keeps its
+previous behavior.
+
+### Strategies
+
+`recreate` replaces the service containers that match the app, stage, and
+service identity, then reconciles proxy routes. Normal replacement stops each
+old container with its configured Docker stop timeout, allowing PID 1 to
+receive `SIGTERM` and drain. Force removal is reserved for explicit
+hard-timeout and fail-closed paths. With restore on failure (below), the old
+containers are stopped and kept instead of removed until the rollout
+succeeds.
 
 `rolling` is supported for stateless services as a full-revision rollout. Tako
-starts the replacement revision side-by-side, waits for `deploy.readiness` when
-configured, points proxy routes at the new revision, then prunes stale revision
-containers and mesh port leases. Persistent services cannot use `rolling`.
-`maxUnavailable` is not accepted yet, and a configured `maxSurge` must be large
-enough to warm the full replacement revision.
+starts the replacement revision side-by-side, waits for `deploy.readiness` (or
+the implicit TCP probe), points proxy routes at the new revision, then prunes
+stale revision containers and mesh port leases. Persistent services cannot use
+`rolling`. `maxUnavailable` is not accepted yet, and a configured `maxSurge`
+must be large enough to warm the full replacement revision; when unset it
+equals `replicas`.
 
 `blue_green` is supported for stateless public services. With the default
 automatic promotion, Tako starts the green revision side-by-side, waits for
@@ -372,6 +398,57 @@ revision running after the proxy switch before stale revision cleanup. With
 `promotion: manual`, deploy warms green without moving public traffic, and
 `tako promote <service>` switches the route to the warmed revision. Persistent
 services cannot use `blue_green`.
+
+### Restore on failure
+
+`deploy.rollbackOnFailure` (default `true`) decides what happens when a
+service's rollout fails. The CLI sends takod a per-request failure policy:
+
+| Strategy | `rollbackOnFailure` | Policy | On failure |
+| --- | --- | --- | --- |
+| `recreate` | unset or `true` | `restore` | Old containers restarted |
+| `rolling`, `blue_green` | unset or `true` | none (legacy request) | Old revision never stopped; traffic never moved |
+| any | `false` | `retain-failed` | Failed new containers kept stopped |
+
+For `recreate` with `restore`, takod's reconcile (1) removes leftover retained
+containers of the service, recognised by recomputing
+`runtimeid.RetainedContainerName` from each container's project, environment,
+service and slot labels (never by name suffix); (2) records the retained set in
+a state file under its data directory; (3) stops each old slot container
+gracefully, disables its restart policy, and renames it to the retained name;
+then (4) starts the new containers. If start, network connect or health fails,
+takod removes the new containers, renames the retained ones back, restores their
+restart policy, restarts those that were running, and answers with a typed
+failure `{error, failurePolicy, restored, restoreError}`. On success the
+response carries the retained names and a restore token.
+
+Because one service can span several nodes, the CLI coordinates the outcome
+across them. When every node succeeded it calls the idempotent
+`POST /v1/services/finalize` on each node to remove the retained containers
+(a finalize error is only a warning; the next reconcile removes them). When
+any node failed it calls `POST /v1/services/restore` on the nodes that
+succeeded, so the whole service returns to its previous revision. Both
+endpoints are scoped by project, environment, service, revision and token, and
+an unknown or already-used token is a no-op. If the CLI dies between reconcile
+and finalize, the retained containers stay stopped and invisible to actual
+state until the next reconcile of that service or `tako cleanup` removes them.
+
+Restore is per service: services that finished earlier in the same deploy keep
+their new revision and later services are not deployed. The deploy still exits
+1, reports the service with action `restored` and a `recovery` object, and
+emits `deploy.service.restore.started` and `deploy.service.restored` (or
+`deploy.service.restore_failed`). Restore restarts containers; it does not
+undo data changes the failed revision made to volumes or databases.
+
+The `restore` and `retain-failed` policies require every node assigned to the
+service to advertise the `deploy.restore-on-failure-v1` capability. An
+explicit `rollbackOnFailure` fails closed before any container changes when a
+node lacks it. A defaulted one downgrades that service to the legacy
+remove-then-start request on all of its nodes (no node receives a failure
+policy, so older agents see exactly the request they understand), emits one
+warning naming the nodes and `tako upgrade servers`, and reports recovery
+status `unsupported` if the rollout fails. Placement movement
+(`MovePreparedServiceTakod`) keeps legacy replacement.
 
 ### Release commands
 

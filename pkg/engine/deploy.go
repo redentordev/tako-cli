@@ -797,6 +797,10 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 
 	deploymentFailed := false
 	var deploymentError error
+	// failedRecovery is the recovery of the service whose rollout failed,
+	// reported in the failure notification.
+	var failedRecovery *RecoveryOutcome
+	failedRecoveryService := ""
 	imageRefs := deployplan.DefaultDeployImageRefs(cfg, envName, services, s.buildTag)
 	allImageRefs := deployplan.DefaultDeployImageRefs(cfg, envName, s.allServices, s.buildTag)
 	if req.Service != "" {
@@ -948,7 +952,25 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 				Service: serviceName,
 				Message: fmt.Sprintf("  ✗ takod deployment failed: %v\n", deployErr),
 			})
-			result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: fullImageName, Action: OutcomeFailed, Replicas: service.Replicas, Error: deployErr.Error(), Release: releaseOutcomeFor(s.deployer, serviceName)})
+			strategy, _ := serviceStrategyReport(&service)
+			previousRevision := ""
+			if actual := actualState[serviceName]; actual != nil {
+				previousRevision = actual.CurrentRevision
+			}
+			recovery := recoveryOutcomeFor(s.deployer, serviceName, previousRevision)
+			e.emitRecoveryEvents(serviceName, recovery)
+			failedRecovery = recovery
+			failedRecoveryService = serviceName
+			result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: fullImageName, Action: failedServiceOutcomeAction(recovery), Replicas: service.Replicas, Error: deployErr.Error(), Release: releaseOutcomeFor(s.deployer, serviceName), Strategy: strategy, Recovery: recovery})
+			deployment.Services[serviceName] = remotestate.ServiceState{
+				Name:           serviceName,
+				Image:          fullImageName,
+				Port:           service.Port,
+				Replicas:       service.Replicas,
+				Env:            RedactedEnvKeys(service.Env),
+				DeployStrategy: strategy,
+				Recovery:       recoveryHistoryState(recovery),
+			}
 			deploymentFailed = true
 			deploymentError = fmt.Errorf("takod deployment failed for %s: %w", serviceName, deployErr)
 			deployment.Status = remotestate.StatusFailed
@@ -968,7 +990,8 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		if warmed {
 			outcomeAction = OutcomeWarmed
 		}
-		result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: fullImageName, Action: outcomeAction, Replicas: service.Replicas, Release: releaseOutcomeFor(s.deployer, serviceName)})
+		strategy, _ := serviceStrategyReport(&service)
+		result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: fullImageName, Action: outcomeAction, Replicas: service.Replicas, Release: releaseOutcomeFor(s.deployer, serviceName), Strategy: strategy})
 
 		// Save service state.
 		deployment.Services[serviceName] = remotestate.ServiceState{
@@ -1156,19 +1179,20 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 
 		// Send failure notification.
 		if notifier != nil {
+			message, details := failureNotificationContent(fmt.Sprintf("Deployment of `%s` to `%s` failed after %s", cfg.Project.Name, envName, deploymentDuration.Round(time.Second)), map[string]string{
+				"version":  cfg.Project.Version,
+				"commit":   s.gitStrings.ShortHash,
+				"revision": s.buildTag,
+				"user":     remotestate.GetCurrentUser(),
+			}, failedRecoveryService, failedRecovery)
 			notifier.Notify(notification.Event{
 				Type:        notification.EventDeployFailed,
 				Project:     cfg.Project.Name,
 				Environment: envName,
-				Message:     fmt.Sprintf("Deployment of `%s` to `%s` failed after %s", cfg.Project.Name, envName, deploymentDuration.Round(time.Second)),
+				Message:     message,
 				Error:       deploymentError.Error(),
 				Duration:    deploymentDuration,
-				Details: map[string]string{
-					"version":  cfg.Project.Version,
-					"commit":   s.gitStrings.ShortHash,
-					"revision": s.buildTag,
-					"user":     remotestate.GetCurrentUser(),
-				},
+				Details:     details,
 			})
 		}
 		result.Status = takoapi.DeploymentStatus(remotestate.StatusFailed)
