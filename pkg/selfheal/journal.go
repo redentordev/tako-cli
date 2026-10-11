@@ -26,12 +26,16 @@ const (
 	DecisionSkippedStopped = "skipped_stopped"
 	DecisionCompleted      = "completed"
 	DecisionMissing        = "missing"
+	// DecisionAllReplicasUnhealthy: every local replica needed an action
+	// at once; the service is held instead of restarted.
+	DecisionAllReplicasUnhealthy = "all_replicas_unhealthy"
 )
 
 var knownDecisions = map[string]bool{
 	DecisionRestarted: true, DecisionStarted: true, DecisionFailed: true, DecisionGaveUp: true,
 	DecisionReset: true, DecisionPaused: true, DecisionResumed: true, DecisionCircuitOpen: true,
 	DecisionCircuitClosed: true, DecisionSkippedStopped: true, DecisionCompleted: true, DecisionMissing: true,
+	DecisionAllReplicasUnhealthy: true,
 }
 
 var (

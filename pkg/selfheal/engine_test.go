@@ -501,14 +501,27 @@ func TestHealthyWindowResetsBackoff(t *testing.T) {
 	}
 }
 
+// addReplica adds a third running replica id3 to the fixture.
+func (f *fixture) addReplica() {
+	f.service.Record.Containers = append(f.service.Record.Containers, RecordContainer{Name: "demo-web-3", ID: "id3"})
+	f.service.Spec.LocalReplicas = len(f.service.Record.Containers)
+	f.service.Observations["id3"] = Observation{
+		ID: "id3", Name: "demo-web-3", Image: "web:1", Status: "running",
+		StartedAt: t0.Add(-time.Hour), RestartPolicy: "unless-stopped", Revision: "rev1", Active: "true",
+	}
+}
+
 func TestSerialReplicaActions(t *testing.T) {
 	f := newFixture(HealthHTTP)
+	f.addReplica()
+	f.probe("id3", true)
 	f.failingTicks("id1", 3)
-	// Both replicas hang.
+	// Two of three replicas hang.
 	for i := 0; i < 3; i++ {
 		f.now = f.now.Add(30 * time.Second)
 		f.probe("id1", false)
 		f.probe("id2", false)
+		f.probe("id3", true)
 		f.tick(0)
 	}
 	eval := f.tick(0)
@@ -530,6 +543,101 @@ func TestSerialReplicaActions(t *testing.T) {
 	eval = f.tick(0)
 	if eval.Candidate == nil || eval.Candidate.Container.ID != "id2" {
 		t.Fatalf("second replica blocked after first recovered: %+v", eval.Candidate)
+	}
+}
+
+// TestAllLocalReplicasUnhealthyHoldsService: when every local replica of a
+// multi-replica service needs an action, the cause is shared, so nothing is
+// restarted; the service is held, journaled once and reported.
+func TestAllLocalReplicasUnhealthyHoldsService(t *testing.T) {
+	f := newFixture(HealthHTTP)
+	var eval ServiceEval
+	journaled := 0
+	for i := 0; i < 6; i++ {
+		f.now = f.now.Add(30 * time.Second)
+		f.probe("id1", false)
+		f.probe("id2", false)
+		eval = f.tick(0)
+		journaled += len(eval.Journal)
+		if eval.Candidate != nil {
+			t.Fatalf("tick %d restarted a replica while all were unhealthy: %+v", i, eval.Candidate)
+		}
+	}
+	if eval.State != StateBlocked || eval.Skip != SkipAllReplicasUnhealthy || !eval.NeedsAction || !eval.Eligible || eval.GiveUp {
+		t.Fatalf("eval = %+v", eval)
+	}
+	if journaled != 1 {
+		t.Fatalf("all_replicas_unhealthy journaled %d times, want once", journaled)
+	}
+	// One replica recovers: the other is healed normally.
+	f.now = f.now.Add(30 * time.Second)
+	f.probe("id1", false)
+	f.probe("id2", true)
+	if eval = f.tick(0); eval.Candidate == nil || eval.Candidate.Container.ID != "id1" {
+		t.Fatalf("partial failure not healed: %+v", eval)
+	}
+}
+
+// TestSingleReplicaStillHealed: with one local replica there is nothing to
+// compare against, so the all-replicas rule does not apply.
+func TestSingleReplicaStillHealed(t *testing.T) {
+	f := newFixture(HealthHTTP)
+	f.service.Spec.LocalReplicas = 1
+	f.service.Record.Containers = f.service.Record.Containers[:1]
+	var eval ServiceEval
+	for i := 0; i < 3; i++ {
+		f.now = f.now.Add(30 * time.Second)
+		f.probe("id1", false)
+		eval = f.tick(0)
+	}
+	if eval.Candidate == nil || eval.Skip != "" {
+		t.Fatalf("single replica not healed: %+v", eval)
+	}
+}
+
+// TestJitterDelaysAction: an action waits for the service's jitter after
+// its condition first holds past grace.
+func TestJitterDelaysAction(t *testing.T) {
+	f := newFixture(HealthNone)
+	f.service.Spec.Jitter = 45 * time.Second
+	f.setObservation("id1", func(o *Observation) { o.Status, o.ExitCode, o.RestartPolicy = "exited", 1, "no" })
+	if eval := f.tick(15 * time.Second); eval.Candidate != nil || !eval.Containers[0].Grace || eval.NeedsAction {
+		t.Fatalf("acted before jitter: %+v", eval)
+	}
+	if eval := f.tick(30 * time.Second); eval.Candidate != nil {
+		t.Fatalf("acted 30s into a 45s jitter: %+v", eval.Candidate)
+	}
+	if eval := f.tick(15 * time.Second); eval.Candidate == nil {
+		t.Fatalf("no action after jitter: %+v", eval)
+	}
+	// The condition clearing resets the clock.
+	f.setObservation("id1", func(o *Observation) { o.Status, o.ExitCode = "running", 0 })
+	f.tick(15 * time.Second)
+	f.setObservation("id1", func(o *Observation) { o.Status, o.ExitCode = "exited", 1 })
+	if eval := f.tick(15 * time.Second); eval.Candidate != nil {
+		t.Fatalf("jitter clock not reset: %+v", eval.Candidate)
+	}
+}
+
+func TestServiceJitterSpreadsNodes(t *testing.T) {
+	spec := ServiceSpec{Name: "web", Policy: testPolicy(), Health: HealthHTTP, ProbeInterval: 30 * time.Second}
+	seen := map[time.Duration]bool{}
+	for _, node := range []string{"node-a", "node-b", "node-c", "node-d", "node-e", "node-f"} {
+		jitter := ServiceJitter(node, "demo", "production", spec)
+		if jitter < 0 || jitter >= 90*time.Second {
+			t.Fatalf("jitter %v outside [0, 90s)", jitter)
+		}
+		if again := ServiceJitter(node, "demo", "production", spec); again != jitter {
+			t.Fatalf("jitter not deterministic: %v vs %v", jitter, again)
+		}
+		seen[jitter] = true
+	}
+	if len(seen) < 3 {
+		t.Fatalf("jitter does not spread nodes: %v", seen)
+	}
+	spec.ProbeInterval = time.Hour
+	if jitter := ServiceJitter("node-a", "demo", "production", spec); jitter >= MaxJitter {
+		t.Fatalf("jitter %v not capped", jitter)
 	}
 }
 

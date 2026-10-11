@@ -1,6 +1,7 @@
 package selfheal
 
 import (
+	"hash/fnv"
 	"sort"
 	"strings"
 	"sync"
@@ -81,6 +82,10 @@ const (
 	SkipStaleObservation = "observations_stale"
 	SkipCircuitOpen      = "circuit_open"
 	SkipStateUnreadable  = "state_unreadable"
+	// SkipAllReplicasUnhealthy: every local replica of a multi-replica
+	// service needs an action at once. That points at a shared dependency,
+	// not a broken container, so the service is held (journal + alert).
+	SkipAllReplicasUnhealthy = "all_replicas_unhealthy"
 )
 
 // Breaker reasons.
@@ -104,7 +109,30 @@ const (
 	DefaultProbeInterval = 30 * time.Second
 	MinProbeInterval     = 10 * time.Second
 	DefaultWindow        = 30 * time.Minute
+	// MaxJitter caps the per-service action delay that spreads actions of
+	// different nodes apart.
+	MaxJitter = 2 * time.Minute
 )
+
+// ServiceJitter is the deterministic delay before this node acts on a
+// service whose condition holds past grace. It spreads the nodes of a
+// cluster over the service's detection window (threshold × health
+// interval, capped at MaxJitter), so a shared dependency going down does
+// not make every node restart its replica in the same tick. nodeKey
+// identifies the node (its ID, else its name).
+func ServiceJitter(nodeKey, project, environment string, spec ServiceSpec) time.Duration {
+	spread := time.Duration(threshold(spec.Policy)) * healthInterval(spec)
+	if spread > MaxJitter {
+		spread = MaxJitter
+	}
+	seconds := uint64(spread / time.Second)
+	if seconds == 0 {
+		return 0
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(nodeKey + "\x00" + project + "\x00" + environment + "\x00" + spec.Name))
+	return time.Duration(hash.Sum64()%seconds) * time.Second
+}
 
 // HealthSource selects where unhealthy observations come from.
 type HealthSource string
@@ -166,6 +194,9 @@ type ServiceSpec struct {
 	Health        HealthSource
 	StartPeriod   time.Duration
 	ProbeInterval time.Duration
+	// Jitter delays an action after its condition first holds past grace
+	// (ServiceJitter); zero acts at once.
+	Jitter time.Duration
 }
 
 // Observation is one container as sampled from Docker.
@@ -285,6 +316,9 @@ type tracker struct {
 	okSince    time.Time
 	seen       time.Time
 	journaled  string
+	// pendingSince is when the container's action condition was first seen
+	// past grace; the action waits for the service's jitter from there.
+	pendingSince time.Time
 }
 
 // Engine keeps in-memory health trackers between ticks. Persistent state
@@ -498,6 +532,8 @@ func (e *Engine) evaluateService(scope ScopeInput, in ServiceInput, now time.Tim
 	notConverged := false
 	unhealthy := false
 	cooling := false
+	// pending counts containers whose action condition holds past grace.
+	pending := 0
 	for _, container := range record.Containers {
 		status := ContainerStatus{ID: container.ID, Name: container.Name}
 		key := trackerKey(scope.Project, scope.Environment, spec.Name, container.ID)
@@ -563,10 +599,20 @@ func (e *Engine) evaluateService(scope ScopeInput, in ServiceInput, now time.Tim
 				eval.ResetContainers = append(eval.ResetContainers, container.ID)
 			}
 		}
+		if action == "" || !pastGrace(observation, spec, record, now) {
+			if tt := e.trackers[key]; tt != nil {
+				tt.pendingSince = time.Time{}
+			}
+		}
 		if action != "" {
 			if !pastGrace(observation, spec, record, now) {
 				status.Grace = true
+			} else if !e.jitterElapsedLocked(key, spec, now) {
+				// Past grace, waiting for this node's share of the jitter.
+				status.Grace = true
+				pending++
 			} else {
+				pending++
 				eval.NeedsAction = true
 				if !inCooldown && !e.serialBlockedLocked(scope, spec.Name, serviceControl, container.ID, now) && eval.Candidate == nil {
 					eval.Candidate = &Candidate{
@@ -585,6 +631,23 @@ func (e *Engine) evaluateService(scope ScopeInput, in ServiceInput, now time.Tim
 		return eval
 	}
 	eval.Eligible = true
+	serviceKey := trackerKey(scope.Project, scope.Environment, spec.Name, "")
+	if len(record.Containers) >= 2 && pending == len(record.Containers) {
+		// Every local replica needs an action at once: a shared dependency
+		// (database, network, upstream) is the likely cause, and restarting
+		// them all would only drop the remaining capacity. Hold the service
+		// and report it; it still counts toward the node's mass-failure
+		// breaker. A single-replica service has no sibling to compare with
+		// and is healed normally (spread across nodes by the jitter).
+		eval.Candidate = nil
+		eval.NeedsAction = true
+		eval.State, eval.Skip = StateBlocked, SkipAllReplicasUnhealthy
+		e.journalOnce(&eval, serviceKey, RecordContainer{}, record.Revision, DecisionAllReplicasUnhealthy, firstReason(eval.Containers), 0, now)
+		return eval
+	}
+	if t := e.trackers[serviceKey]; t != nil {
+		t.journaled = ""
+	}
 	if eval.NeedsAction && serviceControl.ActionsWithin(window, now) >= maxRestarts(spec.Policy) {
 		eval.GiveUp = true
 		eval.Candidate = nil
@@ -627,6 +690,17 @@ func (e *Engine) journalOnce(eval *ServiceEval, key string, container RecordCont
 		Service: eval.Service, Container: container.Name, Revision: revision,
 		Decision: decision, Reason: reason, Code: code,
 	})
+}
+
+// jitterElapsedLocked starts the container's pending clock on its first
+// call and reports whether the service's jitter has passed since.
+func (e *Engine) jitterElapsedLocked(key string, spec ServiceSpec, now time.Time) bool {
+	t := e.trackerLocked(key)
+	t.seen = now
+	if t.pendingSince.IsZero() {
+		t.pendingSince = now
+	}
+	return now.Sub(t.pendingSince) >= spec.Jitter
 }
 
 // serialBlockedLocked keeps the next replica of a service waiting until the

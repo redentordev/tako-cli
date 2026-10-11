@@ -152,6 +152,19 @@ before reporting the lock (exit 3).
   10m, healing on the node stops for 30m. Mass failure points to the host,
   the network or a shared dependency, where restarts make things worse.
   `tako heal reset` (without `--service`) closes the breaker.
+- **All local replicas down:** when every local replica of a service with
+  two or more replicas on the node needs an action at once, the cause is
+  most likely shared (a database, the network, an upstream). Nothing is
+  restarted: the service shows `blocked` with skip
+  `all_replicas_unhealthy`, the decision is journaled once and a
+  `replicas_unhealthy` alert opens until a replica is healthy again. A
+  service with a single replica on the node has no sibling to compare with
+  and is healed normally.
+- **Jitter across nodes:** once a condition holds past grace, each node
+  waits a fixed per-service delay derived from its node identity and the
+  service (spread over `unhealthyThreshold` × the check interval, at most
+  2m) before acting, so a shared dependency going down does not make every
+  node restart its replica in the same tick.
 
 ## Pausing during incidents
 
@@ -211,6 +224,7 @@ With any notification target configured, self-healing reports alert kind
 | `gave_up` | the service | critical | `heal_gave_up` / `heal_resumed` |
 | `circuit_open` | `@node` | critical | `heal_circuit_open` / `heal_circuit_closed` |
 | `action_failed` | the service | warning | `heal_action_failed` |
+| `replicas_unhealthy` | the service | warning | `heal_replicas_unhealthy` / `heal_replicas_recovered` |
 
 Successful restarts and starts are never alerted. They are journal entries
 and `heal.*` state events (`heal.restarted`, `heal.started`, `heal.failed`,

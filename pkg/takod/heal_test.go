@@ -56,6 +56,8 @@ func newHealFixture(t *testing.T) *healFixture {
 		result.At = f.now
 		return result
 	}
+	// Act as soon as the condition holds; the jitter has its own tests.
+	m.jitter = func(string, string, selfheal.ServiceSpec) time.Duration { return 0 }
 	m.executor.nodeLocks = func(context.Context) (func(), string) { return func() {}, "" }
 	m.executor.inspect = func(_ context.Context, id string) (*healInspection, error) {
 		f.mu.Lock()
@@ -536,6 +538,77 @@ func TestHealActionFailureAlerts(t *testing.T) {
 	sent := h.dispatch()
 	if len(sent) != 1 || sent[0].Payload["event"] != healEventActionFailed {
 		t.Fatalf("action failure deliveries = %+v", sent)
+	}
+}
+
+// TestHealHoldsServiceWhenAllLocalReplicasFail: two local replicas crash
+// together (a shared dependency); neither is started, the decision is
+// journaled once and a replicas_unhealthy alert opens.
+func TestHealHoldsServiceWhenAllLocalReplicasFail(t *testing.T) {
+	h := newSourceTestHarness(t, t.TempDir())
+	if err := h.manager.RegisterSource(healAlertSourceSpec()); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.manager.ApplyConfig(testMonitorRequest("demo", "production")); err != nil {
+		t.Fatal(err)
+	}
+	f := newHealFixture(t)
+	f.manager.alerts = h.manager
+	f.now = h.now
+	f.manager.now = func() time.Time { return h.now }
+	f.writeDesired(map[string]map[string]any{"web": healTestService("demo/web:1", map[string]any{"replicas": 2})})
+	second := strings.Repeat("c", 64)
+	if err := selfheal.WriteRecord(f.dataDir, "demo", "production", "web", selfheal.Record{
+		Image: "demo/web:1", Revision: "r1", RecordedAt: f.now.Add(-time.Hour),
+		Containers: []selfheal.RecordContainer{{Name: "demo_production_web_1", ID: healWebID}, {Name: "demo_production_web_2", ID: second}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.sample("web", healWebID, "exited", 1)
+	f.mu.Lock()
+	sibling := f.samples[healWebID]
+	sibling.ID, sibling.Name = second, "demo_production_web_2"
+	f.samples[second] = sibling
+	f.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		f.manager.Tick(context.Background())
+		h.advance(healEvaluateInterval)
+		f.now = h.now
+	}
+	if got := f.actions(); len(got) != 0 {
+		t.Fatalf("started replicas while all were down: %v", got)
+	}
+	journal, _ := selfheal.ReadJournal(f.dataDir, "demo", "production", 0)
+	if len(journal) != 1 || journal[0].Decision != selfheal.DecisionAllReplicasUnhealthy || journal[0].Service != "web" {
+		t.Fatalf("journal = %+v", journal)
+	}
+	if status := f.manager.Status("demo", "production", 0); status.Services[0].Skip != selfheal.SkipAllReplicasUnhealthy {
+		t.Fatalf("status = %+v", status.Services)
+	}
+	found := false
+	for _, delivery := range h.dispatch() {
+		if delivery.Payload["event"] == healEventReplicasUnhealthy {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("replicas_unhealthy alert not delivered")
+	}
+}
+
+// TestHealDefaultJitterIsPerNode: the default jitter is derived from the
+// node identity, so two nodes do not act in the same tick.
+func TestHealDefaultJitterIsPerNode(t *testing.T) {
+	spec := selfheal.ServiceSpec{Name: "web", Policy: healTestPolicy(), Health: selfheal.HealthHTTP, ProbeInterval: 30 * time.Second}
+	seen := map[time.Duration]bool{}
+	for _, node := range []string{"app-1", "app-2", "app-3", "app-4", "app-5"} {
+		manager := newHealManager(t.TempDir(), nil)
+		name := node
+		manager.node = func() string { return name }
+		seen[manager.jitter("demo", "production", spec)] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("every node got the same jitter: %v", seen)
 	}
 }
 

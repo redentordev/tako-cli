@@ -751,7 +751,7 @@ are not service names start with `@`. Slack and Discord receive only
 | `certificate` | scope | domain | `cert_expiring`, `cert_expired` | `ssl_expiring_soon`, `ssl_expired` / `ssl_renewed` |
 | `node` | node | `reboot-required`, `os-updates`, `clock-sync`, `docker-daemon` | `reboot_required`, `security_updates_pending`, `clock_unsynchronized`, `docker_unreachable` | `node_reboot_required`, `node_security_updates`, `node_clock_unsynchronized`, `node_docker_unreachable` / `node_condition_cleared` |
 | `hygiene` | node | `root`, `docker`, `image-gc` | `reclaim_insufficient`, `state_unreadable` | `disk_reclaim_insufficient`, `image_gc_blocked` / `resource_normal`, `image_gc_resumed` |
-| `selfheal` | scope | service, `@node` | `gave_up` (level), `circuit_open` (level, `@node`), `action_failed` (event) | `heal_gave_up`, `heal_circuit_open` / `heal_resumed`, `heal_circuit_closed`; `heal_action_failed` |
+| `selfheal` | scope | service, `@node` | `gave_up` (level), `circuit_open` (level, `@node`), `replicas_unhealthy` (level), `action_failed` (event) | `heal_gave_up`, `heal_circuit_open`, `heal_replicas_unhealthy` / `heal_resumed`, `heal_circuit_closed`, `heal_replicas_recovered`; `heal_action_failed` |
 
 Per-service webhooks receive only `service`, `container` and `selfheal`
 subjects of their own service. `selfheal` details are `container`, `action`,

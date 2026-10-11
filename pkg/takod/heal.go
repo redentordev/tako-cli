@@ -49,6 +49,12 @@ const (
 	healEventCircuitClosed = "heal_circuit_closed"
 	healEventActionFailed  = "heal_action_failed"
 	healBreakerSubject     = "@node"
+
+	// healReasonReplicasUnhealthy: every local replica of a service needs
+	// an action at once; the service is held, not restarted.
+	healReasonReplicasUnhealthy = "replicas_unhealthy"
+	healEventReplicasUnhealthy  = "heal_replicas_unhealthy"
+	healEventReplicasRecovered  = "heal_replicas_recovered"
 )
 
 // healAlertSourceSpec registers kind selfheal (monitoring design D13).
@@ -57,19 +63,22 @@ func healAlertSourceSpec() AlertSourceSpec {
 	return AlertSourceSpec{
 		Kind: AlertKindSelfHeal,
 		Reasons: map[string]Severity{
-			healReasonGaveUp:       SeverityCritical,
-			healReasonCircuitOpen:  SeverityCritical,
-			healReasonActionFailed: SeverityWarning,
+			healReasonGaveUp:            SeverityCritical,
+			healReasonCircuitOpen:       SeverityCritical,
+			healReasonActionFailed:      SeverityWarning,
+			healReasonReplicasUnhealthy: SeverityWarning,
 		},
 		DetailKeys: []string{"container", "action", "reason", "code", "actions", "breaker"},
 		Events: map[string]string{
-			healReasonGaveUp:       healEventGaveUp,
-			healReasonCircuitOpen:  healEventCircuitOpen,
-			healReasonActionFailed: healEventActionFailed,
+			healReasonGaveUp:            healEventGaveUp,
+			healReasonCircuitOpen:       healEventCircuitOpen,
+			healReasonActionFailed:      healEventActionFailed,
+			healReasonReplicasUnhealthy: healEventReplicasUnhealthy,
 		},
 		Recoveries: map[string]string{
-			healReasonGaveUp:      healEventResumed,
-			healReasonCircuitOpen: healEventCircuitClosed,
+			healReasonGaveUp:            healEventResumed,
+			healReasonCircuitOpen:       healEventCircuitClosed,
+			healReasonReplicasUnhealthy: healEventReplicasRecovered,
 		},
 	}
 }
@@ -139,6 +148,9 @@ type healManager struct {
 	probe func(ctx context.Context, network, container string, spec *HealthSpec) selfheal.ProbeResult
 	// executor runs one action under the locks (heal_action.go).
 	executor *healExecutor
+	// jitter is the per-service action delay (selfheal.ServiceJitter);
+	// tests replace it.
+	jitter func(project, environment string, spec selfheal.ServiceSpec) time.Duration
 
 	// active is true while any desired service on the node has a policy;
 	// the container sampler samples only while it (or an alert) is wanted.
@@ -176,6 +188,13 @@ func newHealManager(dataDir string, alerts *SourceAlertManager) *healManager {
 		probeNext: map[string]time.Time{},
 		probing:   map[string]bool{},
 		slots:     make(chan struct{}, healMaxProbes),
+	}
+	manager.jitter = func(project, environment string, spec selfheal.ServiceSpec) time.Duration {
+		key := manager.nodeID()
+		if key == "" {
+			key = manager.node()
+		}
+		return selfheal.ServiceJitter(key, project, environment, spec)
 	}
 	manager.executor = newHealExecutor(manager)
 	return manager
@@ -300,9 +319,13 @@ func (h *healManager) healServices(scope healScope) []healService {
 	services := make([]healService, 0, len(names))
 	for _, name := range names {
 		desired := scope.Desired.Services[name]
+		spec := healServiceSpec(name, desired, h.node(), h.nodeID(), singleNode)
+		if h.jitter != nil {
+			spec.Jitter = h.jitter(scope.Project, scope.Environment, spec)
+		}
 		services = append(services, healService{
 			Name: name, Desired: desired,
-			Spec:   healServiceSpec(name, desired, h.node(), h.nodeID(), singleNode),
+			Spec:   spec,
 			Health: healHealthSpec(desired),
 		})
 	}
@@ -531,7 +554,7 @@ func (h *healManager) Tick(ctx context.Context) {
 		if controlErr == nil {
 			h.applyEvals(scope, control, evals, now)
 		}
-		h.reportGaveUp(scope, control, services, now)
+		h.reportServiceLevels(scope, control, services, evals, now)
 		allEvals = append(allEvals, evals...)
 	}
 	decision := selfheal.DecideNode(allEvals, node, now)
@@ -617,11 +640,18 @@ func (h *healManager) journal(project, environment string, entry selfheal.Journa
 	logHealRecordError("journal", selfheal.AppendJournal(h.dataDir, project, environment, entry))
 }
 
-// reportGaveUp reports one gave_up level per service with a policy, so a
-// reset or a new revision recovers the alert.
-func (h *healManager) reportGaveUp(scope healScope, control *selfheal.Control, services []healService, now time.Time) {
+// reportServiceLevels reports one level per service with a policy: gave_up
+// (so a reset or a new revision recovers the alert) and replicas_unhealthy
+// (every local replica needs an action; recovers when one is healthy).
+func (h *healManager) reportServiceLevels(scope healScope, control *selfheal.Control, services []healService, evals []selfheal.ServiceEval, now time.Time) {
 	if h.alerts == nil {
 		return
+	}
+	held := map[string]bool{}
+	for _, eval := range evals {
+		if eval.Skip == selfheal.SkipAllReplicasUnhealthy {
+			held[eval.Service] = true
+		}
 	}
 	for _, service := range services {
 		observation := LevelObservation{
@@ -634,6 +664,8 @@ func (h *healManager) reportGaveUp(scope healScope, control *selfheal.Control, s
 			if reason := selfheal.SafeToken(entry.GaveUpReason); reason != "" && reason != "unknown" {
 				observation.Details["reason"] = reason
 			}
+		} else if held[service.Name] {
+			observation.Failing = []string{healReasonReplicasUnhealthy}
 		}
 		_ = h.alerts.ReportLevel(observation)
 	}
