@@ -26,8 +26,8 @@
 
 ## 5. Schema parity
 
-- [ ] 5.1 Add service `dockerfile` and `monitoring` (`enabled`, `interval`, `webhook`, `checkType` enum `http|container`) and environment `serverSelector` (`labels` map, `any` bool) to `schema/tako.schema.json`. Mark `deployment.strategy`, `deployment.parallel`, `deployment.cache` and environment `labels` with `"deprecated": true` and replacement descriptions. Verify with `go test ./schema`.
-- [ ] 5.2 Add `schema/tako_schema_parity_test.go` implementing the bidirectional reflect walk, `$ref`/`oneOf`/`anyOf`/`allOf` resolution, and the yaml/json tag-equality check from design §6, with a reasoned allowlist. Fix or allowlist each gap it reports. Verify with `go test ./schema`, and confirm that temporarily removing `dockerfile` from the schema makes the test fail with the path `environments.*.services.*.dockerfile`.
+- [x] 5.1 Add service `dockerfile` and `monitoring` (`enabled`, `interval`, `webhook`, `checkType` enum `http|container`) and environment `serverSelector` (`labels` map, `any` bool) to `schema/tako.schema.json`. Mark `deployment.strategy`, `deployment.parallel`, `deployment.cache` and environment `labels` with `"deprecated": true` and replacement descriptions. Verify with `go test ./schema`.
+- [x] 5.2 Add `schema/tako_schema_parity_test.go` implementing the bidirectional reflect walk, `$ref`/`oneOf`/`anyOf`/`allOf` resolution, and the yaml/json tag-equality check from design §6, with a reasoned allowlist. Fix or allowlist each gap it reports. Verify with `go test ./schema`, and confirm that temporarily removing `dockerfile` from the schema makes the test fail with the path `environments.*.services.*.dockerfile`.
 
 ## 6. Docs snippet harness and CONFIGURATION.md rewrite
 
