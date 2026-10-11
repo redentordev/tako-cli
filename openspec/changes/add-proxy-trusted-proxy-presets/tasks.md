@@ -57,5 +57,5 @@
 
 ## 5. Verification
 
-- [ ] 5.1 For each PR, run `go build ./...` and `go test ./...`. Compare failures against master, because the Windows/WSL baseline has known failures.
+- [x] 5.1 For each PR, run `go build ./...` and `go test ./...`. Compare failures against master, because the Windows/WSL baseline has known failures.
 - [ ] 5.2 Manual check after PR1: behind a CloudFront distribution, confirm the app receives the pinned `X-Forwarded-Host` and that a same-origin POST succeeds.
