@@ -23,6 +23,10 @@ const (
 	containerReasonCrashLoop    = "crash_loop"
 	containerReasonOOM          = "oom"
 	containerQuietWindowsToHeal = 2
+	// containerDockerTimeout bounds each docker call of a sample so a
+	// wedged dockerd cannot block the sampler; the container subjects then
+	// go stale, which tako monitor reports as needing attention.
+	containerDockerTimeout = 20 * time.Second
 )
 
 // ContainerSample is one container's inspected state.
@@ -74,6 +78,8 @@ type containerAlertSampler struct {
 	now    func() time.Time
 	// docker runs a docker CLI command and returns stdout; tests replace it.
 	docker func(ctx context.Context, args ...string) ([]byte, error)
+	// dockerTimeout bounds each docker call (containerDockerTimeout).
+	dockerTimeout time.Duration
 	// wanted reports whether anything else (self-healing) needs samples.
 	wanted func() bool
 
@@ -90,9 +96,20 @@ func newContainerAlertSampler(alerts *SourceAlertManager) *containerAlertSampler
 		docker: func(ctx context.Context, args ...string) ([]byte, error) {
 			return actualDockerCommandContext(ctx, "docker", args...).Output()
 		},
-		samples: map[string]ContainerSample{},
-		history: map[string]*containerHistory{},
+		dockerTimeout: containerDockerTimeout,
+		samples:       map[string]ContainerSample{},
+		history:       map[string]*containerHistory{},
 	}
+}
+
+// dockerCall runs one docker command bounded by dockerTimeout.
+func (s *containerAlertSampler) dockerCall(ctx context.Context, args ...string) ([]byte, error) {
+	if s.dockerTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.dockerTimeout)
+		defer cancel()
+	}
+	return s.docker(ctx, args...)
 }
 
 // ContainerObservations returns a copy of the latest samples keyed by
@@ -150,7 +167,7 @@ type dockerInspectDocument struct {
 
 // SampleOnce takes one sample and reports alerts for subscribed scopes.
 func (s *containerAlertSampler) SampleOnce(ctx context.Context) {
-	output, err := s.docker(ctx, "ps", "-a", "--no-trunc", "--filter", "label=tako.project", "--format", "{{.ID}}")
+	output, err := s.dockerCall(ctx, "ps", "-a", "--no-trunc", "--filter", "label=tako.project", "--format", "{{.ID}}")
 	if err != nil {
 		return
 	}
@@ -166,7 +183,7 @@ func (s *containerAlertSampler) SampleOnce(ctx context.Context) {
 		if end > len(ids) {
 			end = len(ids)
 		}
-		data, inspectErr := s.docker(ctx, append([]string{"inspect"}, ids[start:end]...)...)
+		data, inspectErr := s.dockerCall(ctx, append([]string{"inspect"}, ids[start:end]...)...)
 		if inspectErr != nil && len(data) == 0 {
 			continue
 		}

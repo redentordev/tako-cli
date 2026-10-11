@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -46,9 +47,11 @@ Node-side monitoring runs inside takod (monitoring.health-v1) and is
 configured by deploy from tako.yaml (services.*.monitoring and
 notifications.alerts). This command only reads it.
 
-Exit codes: 0 all ok; 6 any subject alerting, flapping or not deployed, or a
-node could not be read; 4 every node unreachable; 2 no node supports
-monitoring.health-v1 (run tako upgrade servers, or use --local).
+Exit codes: 0 all ok; 6 any subject alerting, flapping, stale (no fresh
+observation for 3 check intervals, e.g. a wedged Docker daemon), unable to
+reach Docker or not deployed, or a node could not be read; 4 every node
+unreachable; 2 no node supports monitoring.health-v1 (run tako upgrade
+servers, or use --local).
 
 --local runs the legacy foreground checker on this machine instead. It probes
 public URLs from outside (node "external"), honors per-service intervals,
@@ -369,7 +372,7 @@ func classifyMonitorResult(result engine.MonitorResult, reads []monitorNodeRead,
 	attention := firstFailure != nil || len(result.NotDeployed) > 0
 	for _, node := range result.Nodes {
 		for _, subject := range node.Subjects {
-			if subject.State == takod.SubjectStateAlerting || subject.State == takod.SubjectStateFlapping {
+			if monitorSubjectNeedsAttention(subject) {
 				attention = true
 			}
 		}
@@ -381,6 +384,21 @@ func classifyMonitorResult(result engine.MonitorResult, reads []monitorNodeRead,
 	result.Status = engine.MonitorStatusOK
 	return result, nil
 }
+
+// monitorSubjectNeedsAttention reports subjects that make tako monitor exit
+// 6: alerting or flapping subjects, stale subjects (takod stopped observing
+// them, so they can no longer alert) and checks that could not reach Docker.
+func monitorSubjectNeedsAttention(subject engine.MonitorSubject) bool {
+	switch subject.State {
+	case takod.SubjectStateAlerting, takod.SubjectStateFlapping, takod.SubjectStateStale:
+		return true
+	}
+	return slices.Contains(subject.Reasons, monitorReasonDockerUnavailable)
+}
+
+// monitorReasonDockerUnavailable is the hold reason of a container check
+// whose docker read failed or timed out.
+const monitorReasonDockerUnavailable = "docker_unavailable"
 
 func countMonitorState(counts *engine.MonitorCounts, state string) {
 	switch state {

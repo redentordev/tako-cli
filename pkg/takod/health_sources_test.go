@@ -2,6 +2,7 @@ package takod
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -362,6 +363,70 @@ func TestContainerMonitorCountsLocalAssignments(t *testing.T) {
 	state := subjectStatus(t, h.manager, "shop", "production", AlertKindService, "worker")
 	if strings.Join(state.Reasons, ",") != "replicas_missing,unhealthy" || state.Details["expected"] != "2" || state.Details["running"] != "1" {
 		t.Fatalf("container state = %+v", state)
+	}
+}
+
+func TestMonitorDockerCallsAreBounded(t *testing.T) {
+	// A wedged dockerd blocks until the context ends: both the container
+	// check and the container sampler must give up on their own deadline.
+	wedged := func(ctx context.Context) error {
+		if _, ok := ctx.Deadline(); !ok {
+			return fmt.Errorf("docker call without a deadline")
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	dataDir := t.TempDir()
+	h := newSourceTestHarness(t, t.TempDir())
+	request := testMonitorRequest("shop", "production")
+	request.Monitors[0] = MonitorSpec{Service: "worker", CheckType: MonitorCheckContainer, IntervalSeconds: 60, TimeoutSeconds: 10, AlertAfter: 1, RecoverAfter: 1}
+	if err := h.manager.ApplyConfig(request); err != nil {
+		t.Fatal(err)
+	}
+	writeTestDesiredRevision(t, dataDir, "shop", "production", `{"services":{"worker":{"replicas":1}}}`, h.now.Add(-time.Hour))
+	runner := newTestMonitorRunner(t, h, dataDir, t.TempDir(), nil)
+	runner.actualTimeout = 50 * time.Millisecond
+	var actualErr error
+	runner.actual = func(ctx context.Context, _, _ string) (*ActualStateResponse, error) {
+		actualErr = wedged(ctx)
+		return nil, actualErr
+	}
+	done := make(chan struct{})
+	go func() {
+		runner.CheckOnce(context.Background(), "shop", "production", request.Monitors[0])
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("container check blocked on a wedged docker read")
+	}
+	if !errors.Is(actualErr, context.DeadlineExceeded) {
+		t.Fatalf("actual read err = %v", actualErr)
+	}
+	if state := subjectStatus(t, h.manager, "shop", "production", AlertKindService, "worker"); strings.Join(state.Reasons, ",") != "docker_unavailable" {
+		t.Fatalf("wedged docker state = %+v", state)
+	}
+
+	sampler := newContainerAlertSampler(h.manager)
+	sampler.dockerTimeout = 50 * time.Millisecond
+	var samplerErr error
+	sampler.docker = func(ctx context.Context, _ ...string) ([]byte, error) {
+		samplerErr = wedged(ctx)
+		return nil, samplerErr
+	}
+	done = make(chan struct{})
+	go func() {
+		sampler.SampleOnce(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("container sampler blocked on a wedged docker call")
+	}
+	if !errors.Is(samplerErr, context.DeadlineExceeded) {
+		t.Fatalf("sampler docker err = %v", samplerErr)
 	}
 }
 

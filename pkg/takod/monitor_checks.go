@@ -30,6 +30,8 @@ const (
 	monitorBodyReadLimit       = 64 << 10
 	minimumPostLeaseGrace      = 30 * time.Second
 	localProxyAddress          = "127.0.0.1:443"
+	// monitorDockerTimeout bounds the docker read of a container check.
+	monitorDockerTimeout = 20 * time.Second
 )
 
 // Service subject hold reasons shown in status.
@@ -150,6 +152,9 @@ type serviceMonitorRunner struct {
 	leaseHeld func(ctx context.Context, dataDir, project, environment string) (bool, error)
 	actual    func(ctx context.Context, project, environment string) (*ActualStateResponse, error)
 	routesDir func() string
+	// actualTimeout bounds the docker read of a container check so a
+	// wedged dockerd cannot hold one of the check slots indefinitely.
+	actualTimeout time.Duration
 
 	mu        sync.Mutex
 	next      map[string]time.Time
@@ -163,15 +168,16 @@ func newServiceMonitorRunner(alerts *SourceAlertManager, dataDir string, node fu
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	return &serviceMonitorRunner{
 		alerts: alerts, dataDir: dataDir, node: node,
-		now:       func() time.Time { return time.Now().UTC() },
-		dial:      dialer.DialContext,
-		leaseHeld: stateOperationLeaseHeld,
-		actual:    GatherActualState,
-		routesDir: func() string { return proxyRoutesDir },
-		next:      map[string]time.Time{},
-		running:   map[string]bool{},
-		leaseSeen: map[string]time.Time{},
-		slots:     make(chan struct{}, maxConcurrentMonitorChecks),
+		now:           func() time.Time { return time.Now().UTC() },
+		dial:          dialer.DialContext,
+		leaseHeld:     stateOperationLeaseHeld,
+		actual:        GatherActualState,
+		routesDir:     func() string { return proxyRoutesDir },
+		actualTimeout: monitorDockerTimeout,
+		next:          map[string]time.Time{},
+		running:       map[string]bool{},
+		leaseSeen:     map[string]time.Time{},
+		slots:         make(chan struct{}, maxConcurrentMonitorChecks),
 	}
 }
 
@@ -336,7 +342,12 @@ func (r *serviceMonitorRunner) CheckOnce(ctx context.Context, project, environme
 		}
 	case MonitorCheckContainer:
 		expected := expectedLocalReplicas(desired, node, allUnassigned(revision))
-		actual, actualErr := r.actual(ctx, project, environment)
+		actualCtx, cancelActual := ctx, context.CancelFunc(func() {})
+		if r.actualTimeout > 0 {
+			actualCtx, cancelActual = context.WithTimeout(ctx, r.actualTimeout)
+		}
+		actual, actualErr := r.actual(actualCtx, project, environment)
+		cancelActual()
 		if actualErr != nil {
 			if ctx.Err() != nil {
 				return

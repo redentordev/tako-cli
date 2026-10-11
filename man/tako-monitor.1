@@ -20,9 +20,11 @@ configured by deploy from tako.yaml (services.*.monitoring and
 notifications.alerts). This command only reads it.
 
 .PP
-Exit codes: 0 all ok; 6 any subject alerting, flapping or not deployed, or a
-node could not be read; 4 every node unreachable; 2 no node supports
-monitoring.health-v1 (run tako upgrade servers, or use --local).
+Exit codes: 0 all ok; 6 any subject alerting, flapping, stale (no fresh
+observation for 3 check intervals, e.g. a wedged Docker daemon), unable to
+reach Docker or not deployed, or a node could not be read; 4 every node
+unreachable; 2 no node supports monitoring.health-v1 (run tako upgrade
+servers, or use --local).
 
 .PP
 --local runs the legacy foreground checker on this machine instead. It probes

@@ -285,7 +285,7 @@ environments:
 
   It also prints a footer with pending and exhausted deliveries. `--service` filters to one service.
 - **Configured but not deployed:** a service with `monitoring.enabled` in the local config for which no node reports a monitor is shown as `unknown` with reason `not_deployed` (deploy with this CLI to push the policy). It counts toward exit 6, so a cron job never reads "nothing configured" as "all ok".
-- **Exit codes:** 0 when everything is ok; 6 when any subject is alerting, flapping or `not_deployed`, or any node read failed (the document is still emitted); 4 when every node is unreachable; 2 when no target node has `monitoring.health-v1`. In that last case it prints a hint to run `tako upgrade servers`, or to use `--local`.
+- **Exit codes:** 0 when everything is ok; 6 when any subject is alerting, flapping, `stale` (takod stopped observing it, e.g. a wedged Docker daemon; a stale subject can never alert, so it must not read as ok), held with reason `docker_unavailable`, or `not_deployed`, or any node read failed (the document is still emitted); 4 when every node is unreachable; 2 when no target node has `monitoring.health-v1`. In that last case it prints a hint to run `tako upgrade servers`, or to use `--local`.
 - **`--watch [duration]`:** default 5s. Human mode only; rejected in machine modes, as `drift --watch` is.
 - **`--once`:** keeps its old meaning, one local check pass that delivers alerts, and is now an alias of `--local --once`. It is hidden and deprecated with a stderr notice. Cron jobs that run `tako monitor --once` as an outside checker therefore keep alerting instead of silently turning into a status read.
 - **`--local [--once]`:** the legacy foreground checker (looping, or a single pass with `--once`), fixed:

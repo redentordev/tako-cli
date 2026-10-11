@@ -40,6 +40,8 @@ func TestClassifyMonitorResultExitCodes(t *testing.T) {
 		{"all ok", []monitorNodeRead{supportedRead("a", okSubject)}, []string{"web"}, engine.MonitorStatusOK, 0},
 		{"alerting", []monitorNodeRead{supportedRead("a", okSubject, alerting)}, []string{"web"}, engine.MonitorStatusAttention, 6},
 		{"not deployed", []monitorNodeRead{supportedRead("a")}, []string{"web"}, engine.MonitorStatusAttention, 6},
+		{"stale", []monitorNodeRead{supportedRead("a", takod.SourceSubjectStatus{Kind: takod.AlertKindService, Subject: "web", State: takod.SubjectStateStale})}, []string{"web"}, engine.MonitorStatusAttention, 6},
+		{"docker unavailable", []monitorNodeRead{supportedRead("a", takod.SourceSubjectStatus{Kind: takod.AlertKindService, Subject: "web", State: takod.SubjectStateUnknown, Reasons: []string{"docker_unavailable"}})}, []string{"web"}, engine.MonitorStatusAttention, 6},
 		{"one node failed", []monitorNodeRead{supportedRead("a", okSubject), unreachable}, []string{"web"}, engine.MonitorStatusAttention, 6},
 		{"all unreachable", []monitorNodeRead{unreachable}, []string{"web"}, engine.MonitorStatusUnreachable, 4},
 		{"no capable node", []monitorNodeRead{unsupported}, []string{"web"}, engine.MonitorStatusUnsupported, 2},
