@@ -177,7 +177,7 @@ settings; run `tako validate` to check the file offline and
 
 ```bash
 git add . && git commit -m "Initial Tako deployment config"
-tako setup -e production     # Docker, WireGuard, takod, tako-proxy, ufw, fail2ban, hardening
+tako setup -e production     # Docker, WireGuard, takod, tako-proxy, ufw (keeps your SSH port open), fail2ban, hardening
 tako deploy -e production
 ```
 
@@ -270,7 +270,8 @@ internal HTTP-only routes without public DNS.
 **Servers & scaling** — multi-server takod mesh over WireGuard, placement
 strategies (spread, pinned, global, label constraints), reviewable placement
 plans, commit-tagged image reuse, one-command server setup (Docker, takod,
-ufw firewall, fail2ban, SSH hardening) and agent upgrades, shared nodes with
+ufw firewall that keeps the configured SSH port open, fail2ban, validated SSH
+hardening) and agent upgrades, shared nodes with
 app/stage isolation, cross-project service exports/imports, raw TCP/UDP port
 publishing.
 

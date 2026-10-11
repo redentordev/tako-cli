@@ -45,6 +45,39 @@ environments:
 tako setup && tako deploy
 ```
 
+### SSH port
+
+Set `port` on a server when sshd does not listen on 22 (the default):
+
+```yaml
+servers:
+  production:
+    host: ${TAKO_PRODUCTION_HOST}
+    port: 2222
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+```
+
+When `tako setup` configures UFW it allows the SSH port set before enabling
+the firewall: `22/tcp`, the configured `port`, and the server-side port of the
+SSH session it is running over (these differ behind provider port forwarding).
+It then opens a fresh SSH connection to `host:port`; if that fails, it disables
+UFW again and fails the firewall step instead of locking you out. The fail2ban
+SSH jail bans on the same ports.
+
+Setup never closes an SSH port on its own. After you move SSH to a new `port`
+and re-run `tako setup`, the old port stays open and setup prints a warning
+(and reports `firewall.staleSshPorts` in `--output json`). Once you have
+confirmed the new port works, remove the old rule manually:
+
+```bash
+sudo ufw delete allow 2200/tcp
+```
+
+On hosts without UFW outside the Debian family (for example RHEL, Rocky, Alma,
+SUSE, Alpine), setup does not manage the firewall. It warns and lists the ports
+to open in your provider or native firewall, including the SSH port.
+
 ## First PaaS Node With Local Deployments
 
 Install Tako on the server that will host the control plane and most initial

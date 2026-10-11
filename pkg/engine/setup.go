@@ -53,9 +53,35 @@ type SetupHostKey struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
+// Setup firewall report values.
+const (
+	SetupFirewallBackendUFW  = "ufw"
+	SetupFirewallBackendNone = "none"
+
+	SetupFirewallConfigured = "configured"
+	SetupFirewallSkipped    = "skipped"
+)
+
+// SetupFirewall reports the firewall step's outcome. Backend is "ufw" or
+// "none"; Status is "configured" or "skipped" (with Reason). SSHPorts are
+// the SSH port/protocol pairs allowed (or, when skipped, that must be
+// opened). StaleSSHPorts are Tako SSH allowances no longer in use; setup
+// reports them and never removes them. NativeFirewall names an active host
+// firewall (for example "firewalld") that Tako did not modify.
+type SetupFirewall struct {
+	Backend        string   `json:"backend"`
+	Status         string   `json:"status"`
+	Reason         string   `json:"reason,omitempty"`
+	SSHPorts       []string `json:"sshPorts,omitempty"`
+	StaleSSHPorts  []string `json:"staleSshPorts,omitempty"`
+	NativeFirewall string   `json:"nativeFirewall,omitempty"`
+}
+
 // SetupNodeResult reports one node's provisioning outcome, including the
 // facts a control plane needs to adopt the node: detected OS, installed
 // docker/takod versions, firewall allowances, and the recorded host key.
+// FirewallPorts lists only ports actually applied to the host firewall and
+// is omitted when the firewall step was skipped.
 type SetupNodeResult struct {
 	Server        string             `json:"server"`
 	Host          string             `json:"host,omitempty"`
@@ -65,6 +91,7 @@ type SetupNodeResult struct {
 	TakodVersion  string             `json:"takodVersion,omitempty"`
 	SetupVersion  string             `json:"setupVersion,omitempty"`
 	FirewallPorts []string           `json:"firewallPorts,omitempty"`
+	Firewall      *SetupFirewall     `json:"firewall,omitempty"`
 	HostKey       *SetupHostKey      `json:"hostKey,omitempty"`
 	Steps         []SetupStepOutcome `json:"steps,omitempty"`
 	Error         string             `json:"error,omitempty"`

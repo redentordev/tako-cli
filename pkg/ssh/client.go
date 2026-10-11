@@ -55,6 +55,12 @@ type Client struct {
 	verifiesKnownHosts bool
 	// pinnedHostKeyAlgorithms, when set, replaces the known_hosts lookup.
 	pinnedHostKeyAlgorithms []string
+
+	// dialAttempts, dialTimeout, and dialHandshakeAttempts override the
+	// environment-derived connect budget when set (see ProbeAuth).
+	dialAttempts          int
+	dialTimeout           time.Duration
+	dialHandshakeAttempts int
 }
 
 // parsePrivateKey parses an SSH private key, handling various formats
@@ -378,8 +384,9 @@ func (c *Client) ConnectContext(ctx context.Context) error {
 
 	var lastErr error
 	handshakeAttempts := 0
-	tcpAttempts := connectTCPAttempts()
-	timeout := connectTimeout()
+	tcpAttempts := c.tcpAttempts()
+	timeout := c.effectiveConnectTimeout()
+	maxHandshakeAttempts := c.handshakeAttempts()
 
 	for attempt := 1; attempt <= tcpAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -428,7 +435,7 @@ func (c *Client) ConnectContext(ctx context.Context) error {
 			}
 			lastErr = fmt.Errorf("SSH handshake failed: %w", err)
 			handshakeAttempts++
-			if handshakeAttempts < connectMaxHandshakeAttempts {
+			if handshakeAttempts < maxHandshakeAttempts {
 				if err := sleepWithContext(ctx, connectBackoff(handshakeAttempts)); err != nil {
 					return err
 				}

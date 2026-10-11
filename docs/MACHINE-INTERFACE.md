@@ -271,9 +271,17 @@ deploy access, and the takod runtime and reports the untouched steps as
 `packages`, `docker`, `wireguard`, `firewall`, `hardening`,
 `auto-recovery`, `deploy-user`, `monitor-agent`, `takod-install`,
 `takod-service`), the detected `os`, installed `dockerVersion` and
-`takodVersion`, the applied `firewallPorts`, and the node's recorded SSH
-`hostKey` (`type`, base64 `key`, SHA256 `fingerprint`) so callers can pin
-it for `--host-key-mode strict`; with `--events ndjson` each step also
+`takodVersion`, the applied `firewallPorts`, a `firewall` report, and the
+node's recorded SSH `hostKey` (`type`, base64 `key`, SHA256 `fingerprint`)
+so callers can pin it for `--host-key-mode strict`. `firewall` carries
+`backend` (`ufw` or `none`), `status` (`configured` or `skipped`), the skip
+`reason`, `sshPorts` (the SSH port set: 22, the configured `port`, and the
+live session's server-side port, as `<port>/tcp`), `staleSshPorts` (Tako SSH
+allowances no longer in that set, reported and never removed), and
+`nativeFirewall` (for example `firewalld` when it is active and Tako left it
+untouched). `firewallPorts` lists only ports actually applied to UFW and is
+omitted when the firewall step was skipped; it includes every SSH port in
+the set. With `--events ndjson` each step also
 emits `setup.step.started/.completed/.failed/.skipped` events carrying
 `data.step`. Setup aborts on the first failing node and the document lists
 the nodes attempted. `tako upgrade servers` returns an

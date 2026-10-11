@@ -1124,7 +1124,13 @@ func TestSetupResultDocumentGolden(t *testing.T) {
 				DockerVersion: "27.0.3",
 				TakodVersion:  "1.2.3",
 				SetupVersion:  "3",
-				FirewallPorts: []string{"22/tcp", "80/tcp", "443/tcp", "443/udp", "51820/udp"},
+				FirewallPorts: []string{"22/tcp", "2222/tcp", "80/tcp", "443/tcp", "443/udp", "51820/udp"},
+				Firewall: &engine.SetupFirewall{
+					Backend:       engine.SetupFirewallBackendUFW,
+					Status:        engine.SetupFirewallConfigured,
+					SSHPorts:      []string{"22/tcp", "2222/tcp"},
+					StaleSSHPorts: []string{"2200/tcp"},
+				},
 				HostKey: &engine.SetupHostKey{
 					Type:        "ssh-ed25519",
 					Key:         "AAAAC3NzaC1lZDI1NTE5AAAAIP//////////////////////////////////////////",
@@ -1139,14 +1145,22 @@ func TestSetupResultDocumentGolden(t *testing.T) {
 				Server: "node-b",
 				Host:   "10.0.0.2",
 				Mode:   engine.SetupModeConverge,
+				Firewall: &engine.SetupFirewall{
+					Backend:        engine.SetupFirewallBackendNone,
+					Status:         engine.SetupFirewallSkipped,
+					Reason:         "UFW is not available on Rocky Linux 9.4",
+					SSHPorts:       []string{"22/tcp"},
+					NativeFirewall: "firewalld",
+				},
 				Steps: []engine.SetupStepOutcome{
 					{Step: engine.SetupStepOSCheck, Title: "Checking system requirements", Status: engine.SetupStepSkipped},
-					{Step: engine.SetupStepFirewall, Title: "Configuring firewall (UFW)", Status: engine.SetupStepFailed, Error: "ufw not available"},
+					{Step: engine.SetupStepFirewall, Title: "Configuring firewall", Status: engine.SetupStepCompleted},
+					{Step: engine.SetupStepDeployUser, Title: "Setting up deploy user", Status: engine.SetupStepFailed, Error: "usermod failed"},
 				},
-				Error: "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available",
+				Error: "failed at step 'Setting up deploy user' on server node-b: usermod failed",
 			},
 		},
-		Error: "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available",
+		Error: "failed at step 'Setting up deploy user' on server node-b: usermod failed",
 	}
 	payload, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
@@ -1168,11 +1182,23 @@ func TestSetupResultDocumentGolden(t *testing.T) {
       "setupVersion": "3",
       "firewallPorts": [
         "22/tcp",
+        "2222/tcp",
         "80/tcp",
         "443/tcp",
         "443/udp",
         "51820/udp"
       ],
+      "firewall": {
+        "backend": "ufw",
+        "status": "configured",
+        "sshPorts": [
+          "22/tcp",
+          "2222/tcp"
+        ],
+        "staleSshPorts": [
+          "2200/tcp"
+        ]
+      },
       "hostKey": {
         "type": "ssh-ed25519",
         "key": "AAAAC3NzaC1lZDI1NTE5AAAAIP//////////////////////////////////////////",
@@ -1195,6 +1221,15 @@ func TestSetupResultDocumentGolden(t *testing.T) {
       "server": "node-b",
       "host": "10.0.0.2",
       "mode": "converge",
+      "firewall": {
+        "backend": "none",
+        "status": "skipped",
+        "reason": "UFW is not available on Rocky Linux 9.4",
+        "sshPorts": [
+          "22/tcp"
+        ],
+        "nativeFirewall": "firewalld"
+      },
       "steps": [
         {
           "step": "os-check",
@@ -1203,15 +1238,20 @@ func TestSetupResultDocumentGolden(t *testing.T) {
         },
         {
           "step": "firewall",
-          "title": "Configuring firewall (UFW)",
+          "title": "Configuring firewall",
+          "status": "completed"
+        },
+        {
+          "step": "deploy-user",
+          "title": "Setting up deploy user",
           "status": "failed",
-          "error": "ufw not available"
+          "error": "usermod failed"
         }
       ],
-      "error": "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available"
+      "error": "failed at step 'Setting up deploy user' on server node-b: usermod failed"
     }
   ],
-  "error": "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available"
+  "error": "failed at step 'Setting up deploy user' on server node-b: usermod failed"
 }`
 	if string(payload) != want {
 		t.Fatalf("setup result document drifted:\n%s", payload)

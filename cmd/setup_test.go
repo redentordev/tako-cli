@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/setup"
 )
 
@@ -144,7 +146,7 @@ func TestConvergeSetupStepsRegrantDeployUserAccessBeforeTakodRestart(t *testing.
 	}
 	prov := &recordingSetupRefresher{}
 
-	for _, step := range setupNodeSteps(prov, cfg, "node-a", "deploy", 42420, takodBinaryForSetup(), true) {
+	for _, step := range setupNodeSteps(prov, cfg, "node-a", "deploy", 42420, takodBinaryForSetup(), true, setupAccessOptions{sshPorts: []int{22}}) {
 		if step.skip {
 			continue
 		}
@@ -154,7 +156,7 @@ func TestConvergeSetupStepsRegrantDeployUserAccessBeforeTakodRestart(t *testing.
 	}
 
 	want := []string{
-		"firewall:42420",
+		"firewall:42420:[22]",
 		"deploy-user:deploy",
 		"install-release:" + Version,
 		"service:/run/custom/takod.sock:/var/lib/custom-tako:node-a",
@@ -213,7 +215,7 @@ func TestConvergeSetupStepsSurfaceDeployUserAccessError(t *testing.T) {
 
 	var stepErr error
 	failedStep := ""
-	for _, step := range setupNodeSteps(prov, &config.Config{}, "node-a", "deploy", 51820, "", true) {
+	for _, step := range setupNodeSteps(prov, &config.Config{}, "node-a", "deploy", 51820, "", true, setupAccessOptions{}) {
 		if step.skip {
 			continue
 		}
@@ -234,18 +236,151 @@ func TestConvergeSetupStepsSurfaceDeployUserAccessError(t *testing.T) {
 	}
 }
 
-type recordingSetupRefresher struct {
-	calls         []string
-	firewallErr   error
-	deployUserErr error
-	releaseErr    error
-	fileErr       error
-	serviceErr    error
+func TestSetupStepsPassSSHAccessOptionsAndCaptureFirewallReport(t *testing.T) {
+	report := &provisioner.FirewallReport{
+		Backend:       provisioner.FirewallBackendUFW,
+		Status:        provisioner.FirewallStatusConfigured,
+		SSHPorts:      []int{22, 2222},
+		AllowedPorts:  []string{"22/tcp", "2222/tcp", "80/tcp", "443/tcp", "443/udp", "51820/udp"},
+		StaleSSHPorts: []int{2200},
+	}
+	prov := &recordingSetupRefresher{firewallReport: report}
+	probed := ""
+	var captured *provisioner.FirewallReport
+	access := setupAccessOptions{
+		sshPorts:         []int{22, 2222},
+		firewallProbe:    func() error { probed += "firewall;"; return nil },
+		keyOnlyProbe:     func() error { probed += "key-only;"; return nil },
+		onFirewallReport: func(r *provisioner.FirewallReport) { captured = r },
+	}
+
+	for _, step := range setupNodeSteps(prov, &config.Config{}, "node-a", "deploy", 51820, "", false, access) {
+		if step.key == engine.SetupStepFirewall && step.title != "Configuring firewall" {
+			t.Fatalf("firewall step title = %q, want %q", step.title, "Configuring firewall")
+		}
+		if step.key != engine.SetupStepFirewall && step.key != engine.SetupStepHardening {
+			continue
+		}
+		if err := step.fn(); err != nil {
+			t.Fatalf("step %s returned error: %v", step.key, err)
+		}
+	}
+
+	if captured != report {
+		t.Fatal("firewall report was not passed to onFirewallReport")
+	}
+	if !slices.Equal(prov.firewallOpts.SSHPorts, []int{22, 2222}) || prov.firewallOpts.MeshListenPort != 51820 {
+		t.Fatalf("firewall options = %+v", prov.firewallOpts)
+	}
+	if !slices.Equal(prov.hardeningOpts.SSHPorts, []int{22, 2222}) {
+		t.Fatalf("hardening SSH ports = %v", prov.hardeningOpts.SSHPorts)
+	}
+	if err := prov.firewallOpts.Probe(); err != nil || prov.hardeningOpts.KeyOnlyProbe() != nil {
+		t.Fatal("probes were not wired through")
+	}
+	if probed != "firewall;key-only;" {
+		t.Fatalf("probes called = %q", probed)
+	}
 }
 
-func (r *recordingSetupRefresher) ConfigureFirewall(meshListenPort int) error {
-	r.calls = append(r.calls, fmt.Sprintf("firewall:%d", meshListenPort))
-	return r.firewallErr
+func TestSetupFirewallStepFailureSkipsReport(t *testing.T) {
+	prov := &recordingSetupRefresher{firewallErr: errors.New("firewall disabled to avert SSH lockout: probe failed")}
+	called := false
+	access := setupAccessOptions{onFirewallReport: func(*provisioner.FirewallReport) { called = true }}
+	for _, step := range setupNodeSteps(prov, &config.Config{}, "node-a", "deploy", 51820, "", true, access) {
+		if step.key != engine.SetupStepFirewall {
+			continue
+		}
+		err := step.fn()
+		if err == nil || !strings.Contains(err.Error(), "avert SSH lockout") {
+			t.Fatalf("firewall step error = %v, want lockout-averted error", err)
+		}
+	}
+	if called {
+		t.Fatal("a failed firewall step must not record a report")
+	}
+}
+
+func TestApplySetupFirewallReportSkippedOmitsFirewallPorts(t *testing.T) {
+	node := engine.SetupNodeResult{Server: "node-a"}
+	applySetupFirewallReport(&node, &provisioner.FirewallReport{
+		Backend:        provisioner.FirewallBackendNone,
+		Status:         provisioner.FirewallStatusSkipped,
+		Reason:         "UFW is not available on Rocky Linux 9",
+		SSHPorts:       []int{22, 2222},
+		RequiredPorts:  []string{"22/tcp", "2222/tcp", "80/tcp"},
+		NativeFirewall: "firewalld",
+	})
+
+	if node.FirewallPorts != nil {
+		t.Fatalf("firewallPorts = %v, want omitted on skip", node.FirewallPorts)
+	}
+	if node.Firewall == nil || node.Firewall.Status != engine.SetupFirewallSkipped || node.Firewall.Backend != engine.SetupFirewallBackendNone {
+		t.Fatalf("firewall = %+v, want skipped/none", node.Firewall)
+	}
+	if !slices.Equal(node.Firewall.SSHPorts, []string{"22/tcp", "2222/tcp"}) || node.Firewall.NativeFirewall != "firewalld" {
+		t.Fatalf("firewall = %+v", node.Firewall)
+	}
+	data, err := json.Marshal(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "firewallPorts") {
+		t.Fatalf("skipped node JSON should omit firewallPorts: %s", data)
+	}
+}
+
+func TestApplySetupFirewallReportConfigured(t *testing.T) {
+	node := engine.SetupNodeResult{Server: "node-a"}
+	applySetupFirewallReport(&node, &provisioner.FirewallReport{
+		Backend:       provisioner.FirewallBackendUFW,
+		Status:        provisioner.FirewallStatusConfigured,
+		SSHPorts:      []int{22, 2222},
+		AllowedPorts:  []string{"22/tcp", "2222/tcp", "80/tcp", "443/tcp", "443/udp", "51820/udp"},
+		StaleSSHPorts: []int{2200},
+	})
+	if !slices.Equal(node.FirewallPorts, []string{"22/tcp", "2222/tcp", "80/tcp", "443/tcp", "443/udp", "51820/udp"}) {
+		t.Fatalf("firewallPorts = %v", node.FirewallPorts)
+	}
+	if !slices.Equal(node.Firewall.StaleSSHPorts, []string{"2200/tcp"}) || node.Firewall.Status != engine.SetupFirewallConfigured {
+		t.Fatalf("firewall = %+v", node.Firewall)
+	}
+}
+
+func TestSetupHelpDescribesActualRootLoginPolicy(t *testing.T) {
+	help := setupCmd.Long
+	if strings.Contains(help, "disable root login") {
+		t.Fatalf("setup help must not claim it disables root login:\n%s", help)
+	}
+	for _, want := range []string{"root password", "key-based root login stays allowed", "where UFW is available", "configured SSH port"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("setup help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+type recordingSetupRefresher struct {
+	calls          []string
+	firewallErr    error
+	firewallReport *provisioner.FirewallReport
+	firewallOpts   provisioner.FirewallOptions
+	hardeningOpts  provisioner.HardeningOptions
+	deployUserErr  error
+	releaseErr     error
+	fileErr        error
+	serviceErr     error
+}
+
+func (r *recordingSetupRefresher) ConfigureFirewall(opts provisioner.FirewallOptions) (*provisioner.FirewallReport, error) {
+	r.calls = append(r.calls, fmt.Sprintf("firewall:%d:%v", opts.MeshListenPort, opts.SSHPorts))
+	r.firewallOpts = opts
+	if r.firewallErr != nil {
+		return nil, r.firewallErr
+	}
+	if r.firewallReport != nil {
+		return r.firewallReport, nil
+	}
+	return &provisioner.FirewallReport{Backend: provisioner.FirewallBackendUFW, Status: provisioner.FirewallStatusConfigured}, nil
 }
 
 func (r *recordingSetupRefresher) SetupDeployUser(username string) error {
@@ -288,8 +423,9 @@ func (r *recordingSetupRefresher) InstallWireGuard() error {
 	return nil
 }
 
-func (r *recordingSetupRefresher) HardenSecurity() error {
-	r.calls = append(r.calls, "harden-security")
+func (r *recordingSetupRefresher) HardenSecurity(opts provisioner.HardeningOptions) error {
+	r.calls = append(r.calls, fmt.Sprintf("harden-security:%v", opts.SSHPorts))
+	r.hardeningOpts = opts
 	return nil
 }
 
