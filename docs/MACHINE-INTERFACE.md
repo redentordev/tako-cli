@@ -172,7 +172,13 @@ returns a `ValidateResult` with the resolved `configPath`,
 project/environment, `valid`, `findings` (`severity`, `path`, `field`,
 `message`) for errors and non-fatal validation warnings, and the resolved environment summary (runtime,
 state backend, consistency, mesh, server/service counts) when valid;
-invalid configs exit with code 2 and still emit the document. `tako doctor
+invalid configs exit with code 2 and still emit the document. `tako aliases
+--output json` returns an `AliasList` with the resolved `configPath` and
+`aliases` sorted by name (`name`, `args` after string splitting, `form`
+`list|string`, `target`, `shadowed`, optional `shadowedBy`; an empty array
+when none are defined) plus `findings` in the validate finding shape
+(shadowed aliases are warnings; unknown or forbidden targets are errors that
+exit 2 and still emit the document). A missing config exits 2. `tako doctor
 --output json` returns a `DoctorResult` with project/environment,
 `skipRemote`, overall `status` (`ok` or `attention`), pass/warn/fail
 counts, and `checks` (`name`, `status` `pass|warn|fail|skip`, `detail`,
@@ -388,7 +394,7 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
 | Human-only by design | `init`, `backup recover`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
@@ -399,6 +405,16 @@ typed invalid-request error (exit code 2) instead of printing human text to
 a stdout the caller expected to parse. The categorization is test-enforced:
 `cmd/machine_coverage_test.go` walks the registered command tree and fails
 when a runnable command is missing from this table or listed twice.
+
+Project command aliases (`aliases:` in tako.yaml, see
+docs/CONFIGURATION.md) are not commands of their own: `tako <alias>` is
+rewritten to the expanded Tako command line before dispatch, so an invoked
+alias inherits the target command's category, flags, result document, events,
+and exit codes. Expansion adds nothing to stdout and emits no extra NDJSON
+event; `-v` prints the expansion to stderr only. Alias resolution errors
+(invalid aliases, an unknown or forbidden target, an `-e` that conflicts with
+an alias's pinned environment) exit 2 before the target runs and emit no
+result document.
 
 `platform inspect` emits a `PlatformEnrollmentInspection` result with status
 `not-enrolled`, `enrolled`, or `incomplete`. The first two statuses exit 0.

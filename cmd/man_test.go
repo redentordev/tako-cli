@@ -7,12 +7,22 @@ import (
 )
 
 func TestTrackedManPagesMatchGeneratedOutput(t *testing.T) {
+	trackedDir, err := filepath.Abs(filepath.Join("..", "man"))
+	if err != nil {
+		t.Fatalf("failed to resolve tracked man directory: %v", err)
+	}
+	// Generate from a project whose tako.yaml defines aliases: man pages
+	// must stay project-independent, so no alias page may appear.
+	writeAliasConfig(t, "aliases:\n  console: [exec, -it, web, --, sh]\n")
+
 	tempDir := t.TempDir()
 	if err := GenerateManPages(tempDir); err != nil {
 		t.Fatalf("failed to generate man pages: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(tempDir, "tako-console.1")); !os.IsNotExist(err) {
+		t.Fatalf("man page generated for a project alias: %v", err)
+	}
 
-	trackedDir := filepath.Join("..", "man")
 	entries, err := os.ReadDir(trackedDir)
 	if err != nil {
 		t.Fatalf("failed to read tracked man pages: %v", err)

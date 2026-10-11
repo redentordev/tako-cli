@@ -1,0 +1,62 @@
+.nh
+.TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
+
+.SH NAME
+tako-aliases - List project command aliases from tako.yaml
+
+
+.SH SYNOPSIS
+\fBtako aliases [flags]\fP
+
+
+.SH DESCRIPTION
+List the project command aliases defined under "aliases:" in tako.yaml or
+tako.json, with the Tako command each one runs.
+
+.PP
+Only the aliases section is read: no servers are contacted and environment
+variables referenced elsewhere in the config are not required. Aliases whose
+name matches a built-in command are reported as shadowed, because built-in
+commands always take precedence.
+
+
+.SH OPTIONS
+\fB-h\fP, \fB--help\fP[=false]
+	help for aliases
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+\fB--config\fP=""
+	config file (default is ./tako.yaml or ./tako.json)
+
+.PP
+\fB-e\fP, \fB--env\fP=""
+	environment to deploy (default: production or only environment)
+
+.PP
+\fB--events\fP=""
+	stream progress events to stdout: ndjson (human output moves to stderr)
+
+.PP
+\fB--host-key-mode\fP=""
+	SSH host key verification mode: tofu, strict, ask (default: tofu)
+
+.PP
+\fB--output\fP="text"
+	output format: text or json (json reserves stdout for the final result document)
+
+.PP
+\fB-v\fP, \fB--verbose\fP[=false]
+	verbose output
+
+
+.SH EXAMPLE
+.EX
+  tako aliases
+  tako aliases --output json
+  tako --config ./deploy/tako.yaml aliases
+.EE
+
+
+.SH SEE ALSO
+\fBtako(1)\fP

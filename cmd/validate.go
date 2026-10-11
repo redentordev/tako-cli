@@ -71,6 +71,23 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			Message:  warning.Message,
 		})
 	}
+	// Alias targets and built-in shadowing need the command tree, so they
+	// are checked here rather than in pkg/config.
+	var aliasErrors []string
+	for _, finding := range checkAliasTargets(rootCmd, cfg.Aliases) {
+		finding.Path = configPath
+		result.Findings = append(result.Findings, finding)
+		if finding.Severity == engine.ValidateSeverityError {
+			aliasErrors = append(aliasErrors, finding.Message)
+		}
+	}
+	if len(aliasErrors) > 0 {
+		result.Valid = false
+		if err := emitResultDocument(result); err != nil {
+			return err
+		}
+		return &engine.InvalidRequestError{Err: fmt.Errorf("invalid config %s: %s", configPath, strings.Join(aliasErrors, "; "))}
+	}
 	if err := ensureDeployRuntimeSupported(cfg); err != nil {
 		return fail(formatDeployConfigError(configPath, fmt.Errorf("invalid config: %w", err)))
 	}

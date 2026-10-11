@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -125,7 +126,9 @@ func Execute() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	err := rootCmd.ExecuteContext(ctx)
+	// Project aliases (tako.yaml `aliases:`) are expanded before cobra
+	// dispatch; built-in invocations pass through unchanged.
+	err := executeRoot(ctx, rootCmd, os.Args[1:], config.LoadAliases)
 	if err != nil {
 		os.Exit(exitCodeForError(err))
 	}

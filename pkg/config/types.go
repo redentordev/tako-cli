@@ -39,6 +39,10 @@ type Config struct {
 	// SecretSources are external secret stores read at deploy time for every
 	// environment; see SecretSource.
 	SecretSources []SecretSource `yaml:"secretSources,omitempty" json:"secretSources,omitempty"`
+	// Aliases are project-defined command shortcuts: `tako <alias>` expands
+	// to the listed Tako arguments before command dispatch. Values are
+	// literal (no ${...} expansion); see AliasMap and ValidateAliases.
+	Aliases AliasMap `yaml:"aliases,omitempty" json:"aliases,omitempty"`
 
 	Servers      map[string]ServerConfig      `yaml:"servers" json:"servers"`
 	Environments map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
@@ -1244,6 +1248,9 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, err
 	}
 	if err := validateRawACMEDNSCredentials(data, isJSON); err != nil {
+		return nil, err
+	}
+	if err := validateRawAliases(data, isJSON); err != nil {
 		return nil, err
 	}
 

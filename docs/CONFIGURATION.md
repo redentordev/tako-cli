@@ -1424,6 +1424,91 @@ Local build mode needs only Docker with buildx on the client. Image handoff uses
 Tako's structured node transport and does not require an additional Docker CLI
 plugin.
 
+## Command Aliases
+
+`aliases:` records project shortcuts for long Tako invocations next to
+`tako.yaml`. `tako <alias> [args...]` runs `tako <alias args...> [args...]`.
+
+```yaml
+aliases:
+  # List form (preferred): each item is one Tako argument, used verbatim.
+  console: [exec, -it, web, --, bin/rails, console]
+  migrate: [exec, web, --oneoff, --, php, artisan, migrate]
+  stg-console: [exec, -it, web, -e, staging, --, bin/rails, console]
+  # String form: split into arguments without a shell.
+  logsw: logs --service web --follow
+  shell: exec -it web -- sh -c "cd /app && exec bash"
+```
+
+```bash
+tako console                       # tako exec -it web -- bin/rails console
+tako logsw --tail 50              # tako logs --service web --follow --tail 50
+tako -e staging logsw              # tako -e staging logs --service web --follow
+tako --config deploy/tako.yaml -v migrate
+tako aliases                       # list aliases and what they run
+```
+
+Rules:
+
+- **Names** match `^[a-z0-9][a-z0-9_-]*$` (at most 63 characters). `help`,
+  `completion`, `__complete`, `__completeNoDesc`, and `aliases` are reserved
+  and rejected.
+- **Values** are Tako arguments, not shell commands. The first argument must
+  be a visible top-level Tako command (`exec`, `logs`, `deploy`, ...); it
+  cannot be a flag, `tako` itself, another alias, `help`, `completion`,
+  `takod`, or a hidden command. Expansion is single-level, so aliases never
+  reference each other.
+- **String form** splits on unquoted whitespace. `'...'` is literal, `"..."`
+  honors `\"` and `\\`, and `\x` outside quotes yields `x`. There is no
+  variable expansion, globbing, `~`, command substitution, or operator
+  handling: `;`, `|`, `&&`, `$(...)`, and `*` are passed to Tako as ordinary
+  text. To run a shell pipeline on the server, pass it to a remote shell as in
+  the `shell` example above. An unterminated quote or an empty value is a
+  validation error.
+- **Extra arguments** typed after the alias name are appended unchanged. When
+  the alias already contains `--`, they land after it and reach the remote
+  command: with `rails: [exec, -it, web, --, bin/rails]`, `tako rails
+  db:migrate:status` runs `bin/rails db:migrate:status`.
+- **Global flags** that affect alias lookup (`--config`) go before the alias
+  name. Aliases are read from that config file.
+- **Environments**: an alias may pin one with `-e`/`--env` before any `--`.
+  Passing a different `-e` on the command line fails with exit code 2
+  (`alias stg-console pins environment staging; ...`); the same value is
+  accepted. Unpinned aliases follow `-e` and the default environment as usual.
+- **Forbidden flags**: `--config` and `--host-key-mode` (either spelling)
+  are rejected before `--`, so a committed alias cannot redirect the config
+  or weaken SSH host key checks. After `--` they are remote command data.
+- **Literal values**: `${...}` inside an alias is a validation error, reported
+  before environment expansion. Aliases are never env-expanded.
+- **Built-ins win.** A name that matches a built-in command or built-in
+  command alias always runs the built-in, without reading the config. Such an
+  alias is not a load error (a future Tako release adding a command must not
+  break an existing `tako.yaml`), but `tako validate` and `tako aliases` warn
+  that it is shadowed and can never run.
+
+An invoked alias behaves exactly like the expanded command: same flags, exit
+codes, `--output json`/`--events ndjson` support or human-only rejection, and
+project-mutation preflight. `-v` prints the expansion to stderr
+(`alias logsw -> tako -v logs --service web --follow`); nothing extra is
+written to stdout, and no extra NDJSON event is emitted.
+
+`tako --help` lists aliases under "Project Aliases", `tako help <alias>` shows
+the expansion, and shell completion offers alias names, all when a valid
+config is present. Completion does not offer the target command's flags after
+an alias name. Generated man pages and the tracked completion scripts never
+include project aliases.
+
+`tako aliases` lists every alias with its expansion and shadowing status
+without contacting servers or requiring env vars referenced elsewhere in the
+config. `--output json` returns an `AliasList` document. Invoking an alias
+also reads only the `aliases` section, so an invalid alias fails with exit
+code 2 while built-in commands are unaffected. Commands that load the whole
+config (`deploy`, `validate`, ...) reject invalid aliases like any other
+invalid section.
+
+`aliases:` requires a Tako release with alias support; older releases reject
+the key as `unknown field "aliases"`.
+
 ## Container Resource Limits
 
 Set a Docker memory limit per service with `resources.memory`:
