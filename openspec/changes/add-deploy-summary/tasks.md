@@ -36,7 +36,7 @@
   - Call it from `deploy`, `rollback`, `promote` and `scale` after hook outcomes are attached (adding hook-failure notes), immediately before `emitResultDocument`.
 
   Verify with `cmd/machine_output_test.go`: in NDJSON, `operation.summary` is second to last and `data.summary` deep-equals `result.summary`; `--output json` stdout is one document; in text mode the block is the last stdout output.
-- [x] 5.3 Add `renderSummaryText(summary, color)`: header, table, URLs, error, next steps, undo; compact `repo:tagA → tagB`; no ANSI when NO_COLOR or not a TTY. Verify with golden text tests for success, partial, up-to-date, warmed and first deploy.
+- [x] 5.3 Add `renderSummaryText(summary, color)`: header, table, URLs, error, next steps, undo; compact `repo:tagA → :tagB`; no ANSI when NO_COLOR or not a TTY. Verify with golden text tests for success, partial, up-to-date, warmed and first deploy.
 
 ## 6. GitHub Actions step summary
 

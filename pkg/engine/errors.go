@@ -93,6 +93,31 @@ type HookFailedError struct {
 func (e *HookFailedError) Error() string { return e.Err.Error() }
 func (e *HookFailedError) Unwrap() error { return e.Err }
 
+// BeforeMutationError marks an apply error raised before anything was
+// changed (preflight and validation failures), so a caller that has no result
+// can report the operation as failed with nothing attempted instead of an
+// unknown partial state. It does not change the error's Class.
+type BeforeMutationError struct {
+	Err error
+}
+
+func (e *BeforeMutationError) Error() string { return e.Err.Error() }
+func (e *BeforeMutationError) Unwrap() error { return e.Err }
+
+// beforeMutation wraps err as a BeforeMutationError; nil stays nil.
+func beforeMutation(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &BeforeMutationError{Err: err}
+}
+
+// IsBeforeMutation reports whether err was raised before any change.
+func IsBeforeMutation(err error) bool {
+	var target *BeforeMutationError
+	return errors.As(err, &target)
+}
+
 // Classify maps an error to its Class for exit-code selection.
 func Classify(err error) Class {
 	if err == nil {

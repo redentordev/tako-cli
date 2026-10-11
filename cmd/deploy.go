@@ -206,8 +206,10 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		err = commitDeployClusterAttachment(cmd, pendingAttachment)
 	}
 	if err == nil {
-		applied = true
 		result, err = session.Apply(cmd.Context())
+		// An Apply that failed before its first change reports nothing
+		// attempted, like a failing pre-deploy hook.
+		applied = !engine.IsBeforeMutation(err)
 	}
 	// Post hooks run after the lock and leases are released so a slow smoke
 	// test does not block other operators.
@@ -269,8 +271,9 @@ var planDeploy = func(ctx context.Context, request engine.DeployRequest) (deploy
 }
 
 // failedDeployResult is the result document for a deploy that stopped
-// before Apply produced one (for example a failing pre-deploy hook). Its
-// summary marks every planned service not_attempted, or, when Apply ran and
+// before Apply produced one (for example a failing pre-deploy hook or an
+// Apply preflight failure, engine.IsBeforeMutation). Its summary marks every
+// planned service not_attempted, or, when Apply ran past its first change and
 // failed without a result, failed with an unknown state.
 func failedDeployResult(cfg *config.Config, envName string, plan engine.DeployPlan, err error, applied bool) *engine.DeployResult {
 	result := &engine.DeployResult{

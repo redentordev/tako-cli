@@ -15,6 +15,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/health"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
 	"github.com/redentordev/tako-cli/pkg/takod"
+	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
 var summaryTestStart = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -825,6 +826,47 @@ func TestBuildScaleSummary(t *testing.T) {
 	payload, _ := json.Marshal(summary)
 	if strings.Contains(string(payload), "hunter2-super-secret") {
 		t.Fatalf("scale summary leaked secret: %s", payload)
+	}
+}
+
+// The previous count comes from the prior desired revision, not from the
+// running containers (which include an inactive blue-green set), and an
+// unknown previous count never yields an undo like `web=0`.
+func TestScaleSummaryUsesPriorDesiredReplicas(t *testing.T) {
+	prior := &takodstate.DesiredRevision{Services: map[string]takodstate.DesiredService{
+		"web": {Name: "web", Replicas: 2},
+		"api": {Name: "api", Replicas: 0},
+	}}
+	targets := map[string]int{"web": 5, "api": 1, "worker": 3}
+	previous := priorReplicaCounts(prior, targets)
+	if len(previous) != 2 || previous["web"] != 2 || previous["api"] != 0 {
+		t.Fatalf("previous = %v, want web=2 api=0 and worker unknown", previous)
+	}
+	if got := priorReplicaCounts(nil, targets); len(got) != 0 {
+		t.Fatalf("no prior revision: previous = %v, want empty", got)
+	}
+
+	eng := New(Options{})
+	services := map[string]config.ServiceConfig{"web": {Image: "web", Port: 80}, "worker": {Image: "worker"}}
+	in := scaleSummaryInput{
+		Project: "shop", Environment: "production", StartedAt: summaryTestStart, DeploymentID: "1767225600123456789",
+		Services: services,
+		Outcomes: []ServiceOutcome{{Name: "web", Image: "web", Action: OutcomeDeployed, Replicas: 5}},
+		Previous: previous,
+	}
+	summary := buildScaleSummary(eng.RedactSensitive, in)
+	if row := summaryRowsByName(summary)["web"]; row.Reason != "2 → 5 replicas" || summary.Undo.Command != "tako scale -e production web=2" {
+		t.Fatalf("web row = %+v undo = %+v", row, summary.Undo)
+	}
+
+	in.Outcomes = append(in.Outcomes, ServiceOutcome{Name: "worker", Image: "worker", Action: OutcomeDeployed, Replicas: 3})
+	summary = buildScaleSummary(eng.RedactSensitive, in)
+	row := summaryRowsByName(summary)["worker"]
+	if row.Change != SummaryChangeScaled || strings.Contains(row.Reason, "0 →") || !strings.Contains(row.Reason, "unknown") {
+		t.Fatalf("worker row = %+v", row)
+	}
+	if summary.Undo == nil || summary.Undo.Command != "" || summary.Undo.Unavailable != UndoUnavailableUnknownReplicas {
+		t.Fatalf("undo with unknown previous count = %+v", summary.Undo)
 	}
 }
 

@@ -383,3 +383,20 @@ func TestRunApplyRechecksServiceCapabilitiesBeforeIntent(t *testing.T) {
 		t.Fatalf("run apply service preflight ordering invalid: apply=%d preflight=%d intent=%d", apply, preflight, intent)
 	}
 }
+
+func TestDeploySessionApplyMarksPreMutationErrors(t *testing.T) {
+	_, err := (&DeploySession{closed: true}).Apply(t.Context())
+	if err == nil || !IsBeforeMutation(err) {
+		t.Fatalf("closed session Apply err = %v, want a before-mutation error", err)
+	}
+	if Classify(err) != ClassFailed {
+		t.Fatalf("class = %d, want the wrapped error's class", Classify(err))
+	}
+	if IsBeforeMutation(fmt.Errorf("reconcile web: boom")) || IsBeforeMutation(nil) {
+		t.Fatal("plain errors are not before-mutation errors")
+	}
+	invalid := beforeMutation(invalidRequestf("bad request"))
+	if Classify(invalid) != ClassInvalid {
+		t.Fatalf("wrapped invalid class = %d", Classify(invalid))
+	}
+}

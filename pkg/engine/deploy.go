@@ -641,31 +641,33 @@ func (e *Engine) warnRetiredDeploymentServers(localStateMgr *localstate.Manager,
 // Apply executes a planned deployment. The caller is responsible for
 // confirmation gating; Apply runs the plan unconditionally.
 func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
+	// Errors returned before the first mutation are wrapped with
+	// beforeMutation so callers without a result report nothing attempted.
 	if s.closed {
-		return nil, fmt.Errorf("deploy session is closed")
+		return nil, beforeMutation(fmt.Errorf("deploy session is closed"))
 	}
 	if s.applied {
-		return nil, fmt.Errorf("deploy session was already applied")
+		return nil, beforeMutation(fmt.Errorf("deploy session was already applied"))
 	}
 	s.applied = true
 	leaseCtx, cancelLeaseContext := s.leases.BindContext(ctx)
 	defer cancelLeaseContext()
 	ctx = leaseCtx
 	if err := s.leases.Err(); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	s.deployer.SetBaseContext(ctx)
 	if err := s.deployer.PreflightTakodProxyCapabilities(s.allServices); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	if err := s.deployer.PreflightGracefulStopCapabilities(); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	if err := s.deployer.PreflightServiceMutationCapabilities(s.services); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	if err := s.deployer.PreflightAlertPolicy(); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	// A preview's expired siblings are pruned and its record exists on
 	// every target before the first mutation, so a failed first deploy
@@ -682,7 +684,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	plan := s.plan
 	services := s.services
 	if err := rejectPersistentConfigRemovals(plan); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	desiredStateServices := s.allServices
 	actualState := s.actualState
@@ -738,14 +740,14 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	servicesToDeploy := deployplan.ServicesToDeployForPlan(plan, services, req.Force, req.Service != "")
 	applyState := &deployApplyState{servicesToDeploy: servicesToDeploy}
 	if err := s.deployer.PreflightAssignmentMutations(servicesToDeploy); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	if err := s.deployer.PreflightAssignmentRemovals(removalServiceNames(plan)); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	pendingRemovals, err := removalServiceConfigs(plan)
 	if err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	if skipped := deployplan.PersistentServicesSkippedByForce(services, servicesToDeploy, req.Force, req.Service != ""); len(skipped) > 0 {
 		e.info(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("\n-> Skipping persistent service(s) during broad --force: %s\n   Use --service <name> --force when you intentionally need to recreate one.\n", strings.Join(skipped, ", ")))

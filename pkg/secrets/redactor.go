@@ -4,7 +4,6 @@ import (
 	"os"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -230,6 +229,18 @@ func (r *Redactor) RegisterLabeled(value, label string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// NUL bytes are protected input during Redact, so a value containing one
+	// is registered as its NUL-free parts; each part is still masked.
+	if strings.Contains(value, "\x00") {
+		for _, part := range strings.Split(value, "\x00") {
+			r.registerLocked(part, label)
+		}
+		return
+	}
+	r.registerLocked(value, label)
+}
+
+func (r *Redactor) registerLocked(value, label string) {
 	// Skip very short values
 	if len(value) < r.minLength {
 		return
@@ -271,7 +282,8 @@ func (r *Redactor) RegisterPublic(value string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if len(value) < r.minLength {
+	// A value with a NUL byte can never match protected input.
+	if len(value) < r.minLength || strings.Contains(value, "\x00") {
 		return
 	}
 	r.public[value] = struct{}{}
@@ -290,36 +302,82 @@ func (r *Redactor) marker(label string) string {
 // redactor could have produced are protected (see protectMarkers).
 var markerPattern = regexp.MustCompile(`\[REDACTED(?::([A-Za-z0-9_\-@/:.]{1,96}))?\]`)
 
-// placeholderPattern matches the placeholders used while redaction runs.
-// NUL bytes never occur in registered secrets or pattern matches.
-var placeholderPattern = regexp.MustCompile("\x00([0-9]+)\x00")
-
-func placeholder(index int) string {
-	return "\x00" + strconv.Itoa(index) + "\x00"
+// slot is one protected span swapped out while redaction runs.
+type slot struct {
+	text   string
+	marker bool // a marker, as opposed to a public value or an input NUL
 }
 
-// placeholders holds protected text (markers and public values) swapped out
-// while redaction runs.
-type placeholders struct {
-	values []string
+// workText is the text being redacted. Each protected span (a marker, a
+// public value, or a NUL byte from the input) is a single NUL byte in text,
+// and slots holds the spans in the order of their NUL bytes. Every NUL in
+// text is a slot, so input can never forge a placeholder, and restore only
+// emits text this call protected.
+type workText struct {
+	text  string
+	slots []slot
 }
 
-func (p *placeholders) add(value string) string {
-	p.values = append(p.values, value)
-	return placeholder(len(p.values) - 1)
-}
-
-func (p *placeholders) restore(input string) string {
-	if len(p.values) == 0 {
-		return input
-	}
-	return placeholderPattern.ReplaceAllStringFunc(input, func(match string) string {
-		index, err := strconv.Atoi(match[1 : len(match)-1])
-		if err != nil || index < 0 || index >= len(p.values) {
-			return match
+// newWorkText protects every NUL byte of the input as itself.
+func newWorkText(input string) *workText {
+	w := &workText{text: input}
+	if count := strings.Count(input, "\x00"); count > 0 {
+		w.slots = make([]slot, count)
+		for i := range w.slots {
+			w.slots[i] = slot{text: "\x00"}
 		}
-		return p.values[index]
-	})
+	}
+	return w
+}
+
+// edit replaces text[start:end] with one protected slot.
+type edit struct {
+	start, end int
+	slot       slot
+}
+
+// apply performs edits, sorted by start and non-overlapping, in one sweep.
+// Slots of NUL bytes inside a replaced span are dropped with it.
+func (w *workText) apply(edits []edit) {
+	if len(edits) == 0 {
+		return
+	}
+	var b strings.Builder
+	b.Grow(len(w.text))
+	slots := make([]slot, 0, len(w.slots)+len(edits))
+	next, last := 0, 0
+	for _, e := range edits {
+		kept := strings.Count(w.text[last:e.start], "\x00")
+		slots = append(slots, w.slots[next:next+kept]...)
+		next += kept + strings.Count(w.text[e.start:e.end], "\x00")
+		b.WriteString(w.text[last:e.start])
+		b.WriteByte(0)
+		slots = append(slots, e.slot)
+		last = e.end
+	}
+	slots = append(slots, w.slots[next:]...)
+	b.WriteString(w.text[last:])
+	w.text, w.slots = b.String(), slots
+}
+
+// restore swaps every slot back in.
+func (w *workText) restore() string {
+	if len(w.slots) == 0 {
+		return w.text
+	}
+	var b strings.Builder
+	text := w.text
+	for _, s := range w.slots {
+		index := strings.IndexByte(text, 0)
+		if index < 0 {
+			break
+		}
+		b.WriteString(text[:index])
+		b.WriteString(s.text)
+		text = text[index+1:]
+	}
+	b.WriteString(text)
+	return b.String()
 }
 
 // rebuild refreshes the sorted views. Callers hold the write lock.
@@ -352,6 +410,8 @@ func sortLongestFirst(values []string) {
 // Redact removes sensitive information from text.
 //
 // It runs in order:
+//  0. NUL bytes in the input are protected as themselves, so input text can
+//     never be mistaken for an internal placeholder.
 //  1. Markers this redactor could have produced are swapped for placeholders.
 //  2. One pass over registered secrets and public values: a secret occurrence
 //     stays readable only inside a longer public occurrence; every other
@@ -361,6 +421,9 @@ func sortLongestFirst(values []string) {
 //  3. Heuristic patterns run on the result; markers and protected public
 //     values are placeholders and are never matched.
 //  4. Placeholders are restored.
+//
+// Every step is a single sweep over sorted occurrences, so the cost is
+// near-linear in the input size and the number of occurrences.
 func (r *Redactor) Redact(input string) string {
 	r.mu.RLock()
 	if r.dirty {
@@ -374,29 +437,31 @@ func (r *Redactor) Redact(input string) string {
 	}
 	defer r.mu.RUnlock()
 
-	protected := &placeholders{}
-	output := r.protectMarkers(input, protected)
-	output = r.redactRegistered(output, protected)
+	work := newWorkText(input)
+	r.protectMarkers(work)
+	r.redactRegistered(work)
 	for _, pattern := range r.patterns {
-		output = r.redactPatternMatches(pattern, output, protected)
+		r.redactPatternMatches(pattern, work)
 	}
-	return protected.restore(output)
+	return work.restore()
 }
 
 // protectMarkers swaps markers this redactor could have produced for
 // placeholders: the bare `[REDACTED]`, markers with a registered label, and
 // `[REDACTED:pattern.<id>]` for a known pattern ID. Other marker-shaped text
 // is ordinary input, so it can never shield a secret.
-func (r *Redactor) protectMarkers(input string, protected *placeholders) string {
-	if !strings.Contains(input, "[REDACTED") {
-		return input
+func (r *Redactor) protectMarkers(work *workText) {
+	if !strings.Contains(work.text, "[REDACTED") {
+		return
 	}
-	return markerPattern.ReplaceAllStringFunc(input, func(match string) string {
-		if match == "[REDACTED]" || r.ownsLabel(match[len("[REDACTED:"):len(match)-1]) {
-			return protected.add(match)
+	var edits []edit
+	for _, match := range markerPattern.FindAllStringIndex(work.text, -1) {
+		marker := work.text[match[0]:match[1]]
+		if marker == "[REDACTED]" || r.ownsLabel(marker[len("[REDACTED:"):len(marker)-1]) {
+			edits = append(edits, edit{start: match[0], end: match[1], slot: slot{text: marker, marker: true}})
 		}
-		return match
-	})
+	}
+	work.apply(edits)
 }
 
 func (r *Redactor) ownsLabel(label string) bool {
@@ -446,53 +511,17 @@ func overlaps(a, b occurrence) bool {
 
 // redactRegistered masks registered secrets and protects public values in
 // one deterministic pass (see Redact).
-func (r *Redactor) redactRegistered(input string, protected *placeholders) string {
+func (r *Redactor) redactRegistered(work *workText) {
 	if len(r.secretOrder) == 0 && len(r.publicOrder) == 0 {
-		return input
+		return
 	}
+	input := work.text
 	secretOcc := findOccurrences(input, r.secretOrder, r.secrets)
 	publicOcc := findOccurrences(input, r.publicOrder, nil)
 	if len(secretOcc) == 0 && len(publicOcc) == 0 {
-		return input
+		return
 	}
-
-	masked := make([]bool, len(secretOcc))
-	validPublic := make([]bool, len(publicOcc))
-	for i := range validPublic {
-		validPublic[i] = true
-	}
-	for changed := true; changed; {
-		changed = false
-		for i, secret := range secretOcc {
-			if masked[i] {
-				continue
-			}
-			shielded := false
-			for j, public := range publicOcc {
-				if validPublic[j] && public.end-public.start > secret.end-secret.start &&
-					public.start <= secret.start && secret.end <= public.end {
-					shielded = true
-					break
-				}
-			}
-			if !shielded {
-				masked[i] = true
-				changed = true
-			}
-		}
-		for j, public := range publicOcc {
-			if !validPublic[j] {
-				continue
-			}
-			for i, secret := range secretOcc {
-				if masked[i] && overlaps(public, secret) {
-					validPublic[j] = false
-					changed = true
-					break
-				}
-			}
-		}
-	}
+	masked, validPublic := resolveShields(secretOcc, publicOcc)
 
 	// Merge overlapping masked occurrences; each merged span takes the label
 	// of its highest-priority (longest) secret.
@@ -525,92 +554,183 @@ func (r *Redactor) redactRegistered(input string, protected *placeholders) strin
 	}
 
 	// Protect valid public occurrences, longest first, without overlaps.
-	var publics []occurrence
-	for j, public := range publicOcc {
-		if validPublic[j] {
-			publics = append(publics, public)
-		}
-	}
-	sort.SliceStable(publics, func(i, j int) bool { return publics[i].priority < publics[j].priority })
+	// publicOcc is already in priority order (findOccurrences walks values
+	// longest first), and chosen spans never overlap, so marking covered
+	// bytes keeps the overlap check linear overall.
 	var chosen []occurrence
-	for _, public := range publics {
+	var covered []bool
+	for j, public := range publicOcc {
+		if !validPublic[j] {
+			continue
+		}
+		if covered == nil {
+			covered = make([]bool, len(input))
+		}
 		free := true
-		for _, other := range chosen {
-			if overlaps(public, other) {
+		for k := public.start; k < public.end; k++ {
+			if covered[k] {
 				free = false
 				break
 			}
 		}
-		if free {
-			chosen = append(chosen, public)
+		if !free {
+			continue
 		}
+		for k := public.start; k < public.end; k++ {
+			covered[k] = true
+		}
+		chosen = append(chosen, public)
 	}
 
-	type replacement struct {
-		occurrence
-		text string
-	}
-	replacements := make([]replacement, 0, len(merged)+len(chosen))
+	edits := make([]edit, 0, len(merged)+len(chosen))
 	for _, span := range merged {
-		replacements = append(replacements, replacement{span, r.marker(span.label)})
+		edits = append(edits, edit{start: span.start, end: span.end, slot: slot{text: r.marker(span.label), marker: true}})
 	}
 	for _, public := range chosen {
-		replacements = append(replacements, replacement{public, input[public.start:public.end]})
+		edits = append(edits, edit{start: public.start, end: public.end, slot: slot{text: input[public.start:public.end]}})
 	}
-	sort.Slice(replacements, func(i, j int) bool { return replacements[i].start < replacements[j].start })
+	sort.Slice(edits, func(i, j int) bool { return edits[i].start < edits[j].start })
+	work.apply(edits)
+}
 
-	var b strings.Builder
-	last := 0
-	for _, rep := range replacements {
-		b.WriteString(input[last:rep.start])
-		b.WriteString(protected.add(rep.text))
-		last = rep.end
+// resolveShields decides which secret occurrences are masked and which public
+// occurrences stay valid. A secret occurrence is masked unless a valid public
+// occurrence strictly longer than it contains it; a public occurrence is
+// invalid once it overlaps a masked secret. Starting from every public valid,
+// a worklist propagates both rules to their fixpoint. Each secret is masked
+// and each public invalidated at most once, and every lookup scans only the
+// occurrences whose start lies within one value length of the span, so the
+// cost is near-linear rather than quadratic in the occurrence counts.
+func resolveShields(secrets, publics []occurrence) (masked, validPublic []bool) {
+	masked = make([]bool, len(secrets))
+	validPublic = make([]bool, len(publics))
+	for i := range validPublic {
+		validPublic[i] = true
 	}
-	b.WriteString(input[last:])
-	return b.String()
+	if len(publics) == 0 {
+		for i := range masked {
+			masked[i] = true
+		}
+		return masked, validPublic
+	}
+
+	secretByStart := occurrencesByStart(secrets)
+	publicByStart := occurrencesByStart(publics)
+	maxPublic := 0
+	for _, public := range publics {
+		maxPublic = max(maxPublic, public.end-public.start)
+	}
+	shields := func(public, secret occurrence) bool {
+		return public.end-public.start > secret.end-secret.start &&
+			public.start <= secret.start && secret.end <= public.end
+	}
+
+	// shieldCount[i] is the number of valid publics shielding secret i.
+	shieldCount := make([]int, len(secrets))
+	for i, secret := range secrets {
+		forEachStartIn(publics, publicByStart, secret.end-maxPublic, secret.start+1, func(j int) {
+			if shields(publics[j], secret) {
+				shieldCount[i]++
+			}
+		})
+	}
+	var queue []int
+	for i := range secrets {
+		if shieldCount[i] == 0 {
+			masked[i] = true
+			queue = append(queue, i)
+		}
+	}
+	for len(queue) > 0 {
+		secret := secrets[queue[len(queue)-1]]
+		queue = queue[:len(queue)-1]
+		forEachStartIn(publics, publicByStart, secret.start-maxPublic+1, secret.end, func(j int) {
+			public := publics[j]
+			if !validPublic[j] || !overlaps(public, secret) {
+				return
+			}
+			validPublic[j] = false
+			forEachStartIn(secrets, secretByStart, public.start, public.end, func(k int) {
+				if masked[k] || !shields(public, secrets[k]) {
+					return
+				}
+				shieldCount[k]--
+				if shieldCount[k] == 0 {
+					masked[k] = true
+					queue = append(queue, k)
+				}
+			})
+		})
+	}
+	return masked, validPublic
+}
+
+// occurrencesByStart returns the indexes of occs sorted by start.
+func occurrencesByStart(occs []occurrence) []int {
+	order := make([]int, len(occs))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return occs[order[a]].start < occs[order[b]].start })
+	return order
+}
+
+// forEachStartIn calls fn with the index of every occurrence whose start is
+// in [lo, hi).
+func forEachStartIn(occs []occurrence, byStart []int, lo, hi int, fn func(int)) {
+	first := sort.Search(len(byStart), func(i int) bool { return occs[byStart[i]].start >= lo })
+	for i := first; i < len(byStart) && occs[byStart[i]].start < hi; i++ {
+		fn(byStart[i])
+	}
 }
 
 // redactPatternMatches applies one pattern, leaving hex image tags and
 // digests (`repo:<hex>`, `sha256:<hex>`) alone: those are commit SHAs and
 // content hashes, not credentials. Key/value patterns run first, so a hex
 // secret written as `token: <hex>` is still redacted. A matched value that is
-// only placeholders (already masked or protected) plus closing punctuation
-// is left as is, which keeps markers intact and redaction idempotent.
-func (r *Redactor) redactPatternMatches(pattern redactPattern, input string, protected *placeholders) string {
+// only marker placeholders plus closing punctuation is left as is, which
+// keeps markers intact and redaction idempotent. A protected public value is
+// not a marker: `POSTGRES_PASSWORD=postgres` is masked even when `postgres`
+// names a service.
+func (r *Redactor) redactPatternMatches(pattern redactPattern, work *workText) {
+	input := work.text
 	matches := pattern.re.FindAllStringSubmatchIndex(input, -1)
 	if len(matches) == 0 {
-		return input
+		return
 	}
-	var b strings.Builder
-	last := 0
+	var edits []edit
+	slotIndex, counted := 0, 0 // slotIndex is the number of NULs in input[:counted]
 	for _, match := range matches {
 		start, end := match[0], match[1]
 		valueStart, valueEnd := start, end
 		if pattern.group > 0 && 2*pattern.group+1 < len(match) && match[2*pattern.group] >= 0 {
 			valueStart, valueEnd = match[2*pattern.group], match[2*pattern.group+1]
 		}
-		b.WriteString(input[last:start])
+		slotIndex += strings.Count(input[counted:valueStart], "\x00")
+		counted = valueStart
 		value := input[valueStart:valueEnd]
-		if isHexReference(input, start, input[start:end]) || onlyPlaceholders(value) {
-			b.WriteString(input[start:end])
-		} else {
-			b.WriteString(input[start:valueStart])
-			b.WriteString(protected.add(r.marker(PatternLabel(pattern.id))))
-			b.WriteString(input[valueEnd:end])
+		if isHexReference(input, start, input[start:end]) || onlyMarkers(value, work.slots[slotIndex:]) {
+			continue
 		}
-		last = end
+		edits = append(edits, edit{start: valueStart, end: valueEnd, slot: slot{text: r.marker(PatternLabel(pattern.id)), marker: true}})
 	}
-	b.WriteString(input[last:])
-	return b.String()
+	work.apply(edits)
 }
 
-// onlyPlaceholders reports whether value holds at least one placeholder and
-// nothing else but closing punctuation.
-func onlyPlaceholders(value string) bool {
-	if !strings.Contains(value, "\x00") {
+// onlyMarkers reports whether value holds at least one placeholder, every
+// placeholder in it is a marker (slots starts at value's first placeholder),
+// and nothing else but closing punctuation.
+func onlyMarkers(value string, slots []slot) bool {
+	count := strings.Count(value, "\x00")
+	if count == 0 || count > len(slots) {
 		return false
 	}
-	rest := placeholderPattern.ReplaceAllString(value, "")
+	for _, s := range slots[:count] {
+		if !s.marker {
+			return false
+		}
+	}
+	rest := strings.ReplaceAll(value, "\x00", "")
 	return strings.Trim(rest, "\"'`,;.)]}>") == ""
 }
 

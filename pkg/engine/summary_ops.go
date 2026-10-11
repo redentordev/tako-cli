@@ -135,7 +135,9 @@ func buildPromoteSummary(redact func(string) string, in promoteSummaryInput) *Op
 	return builder.build()
 }
 
-// scaleSummaryInput carries a scale's summary inputs.
+// scaleSummaryInput carries a scale's summary inputs. Previous holds each
+// target's replica count in the prior desired revision; a target missing
+// from it has an unknown previous count.
 type scaleSummaryInput struct {
 	Project      string
 	Environment  string
@@ -159,18 +161,26 @@ func buildScaleSummary(redact func(string) string, in scaleSummaryInput) *Operat
 		service := in.Services[outcome.Name]
 		row := SummaryService{Name: outcome.Name, FromImage: outcome.Image, ToImage: outcome.Image, Error: outcome.Error}
 		row.Strategy, _ = serviceStrategyReport(&service)
-		previous := in.Previous[outcome.Name]
+		previous, known := in.Previous[outcome.Name]
 		if outcome.Action == OutcomeFailed {
 			changed = append(changed, outcome.Name)
-			row.Reason = fmt.Sprintf("scaling %d → %d replicas failed", previous, outcome.Replicas)
+			row.Reason = fmt.Sprintf("scaling to %d replicas failed", outcome.Replicas)
+			if known {
+				row.Reason = fmt.Sprintf("scaling %d → %d replicas failed", previous, outcome.Replicas)
+			}
 			builder.addFailedService(row, true)
 			continue
 		}
-		if previous == outcome.Replicas {
+		switch {
+		case known && previous == outcome.Replicas:
 			row.Change = SummaryChangeUnchanged
-		} else {
+		case known:
 			row.Change = SummaryChangeScaled
 			row.Reason = fmt.Sprintf("%d → %d replicas", previous, outcome.Replicas)
+			changed = append(changed, outcome.Name)
+		default:
+			row.Change = SummaryChangeScaled
+			row.Reason = fmt.Sprintf("scaled to %d replicas (previous count unknown)", outcome.Replicas)
 			changed = append(changed, outcome.Name)
 		}
 		builder.addService(row)

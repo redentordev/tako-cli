@@ -157,7 +157,7 @@ The service scope:
 - **Promote:** `fromRevision` is the old `CurrentRevision`, `toRevision` the promoted one.
 - **Scale:** images are equal. Replicas are shown as old→new in `replicas.desired` plus `notes`.
 
-Human rendering compacts `repo:tagA → repo:tagB` to `repo:tagA → tagB` when the repositories match. JSON always keeps full refs.
+Human rendering compacts `repo:tagA → repo:tagB` to `repo:tagA → :tagB` (digests: `repo@sha256:a → @sha256:b`) when the repositories match. The separator stays on the new tag so a full commit SHA or digest keeps the `:<hex>` form that output redaction exempts; a bare 40-hex tag would be masked as a pattern match. JSON always keeps full refs.
 
 ### D4. Health and replicas: one bounded best-effort read
 
@@ -208,7 +208,7 @@ The builder produces `argv` and `command`. `command` is a POSIX-shell-quoted joi
 | project rollback `rolled_back`/`failed` | `tako rollback -e ENV <displayId of the newest record before the rollback ran>`, which rolls forward to what was rolled away from |
 | single-service rollback | `tako rollback -e ENV --service NAME <displayId of the record before the rollback>` |
 | promote | `tako promote NAME -e ENV --revision <fromRevision>` when the post-promote actual state (already gathered by promote, `promote.go:275`) still lists `fromRevision` as retained; otherwise `tako rollback -e ENV --service NAME <displayId of R>` where R is the newest stable record older than the promote's own record that contains NAME. R comes from one best-effort history read after the promote record is saved; on failure the undo is unavailable with `deployment history unreadable` and next step `tako history -e ENV` |
-| scale | `tako scale -e ENV NAME=<old> [NAME2=<old2>]` |
+| scale | `tako scale -e ENV NAME=<old> [NAME2=<old2>]`. `<old>` is the service's replica count in the prior desired revision, never the running-container count (which includes inactive blue-green containers and skips exited ones). When a changed service has no prior desired count, the undo is unavailable: `"previous replica count unknown"` |
 
 How P is found:
 - `PlanDeploy` already holds the lease. It loads history once, which today it does only for run services (`deploy.go:507-516`), and records `previousStableDeploymentID`.
@@ -246,7 +246,7 @@ There are at most 5 entries.
   - success;
   - strict-domain error.
 - The bookkeeping-failure returns at `deploy.go:1083-1136` change from `return nil, err` to setting `result.Status = failed` and `result.Error = redacted`, building the summary with `outcome: partial` (the rollout is live, so rows keep `added`/`updated` and the undo is derived as usual) and the note "rollout succeeded; state bookkeeping failed: …", and returning `result, err`. The error, and therefore the exit class, is unchanged. Today those paths emit no result document, so this is additive.
-- `failedDeployResult` (pre-hook failure) builds a summary with `outcome: failed`, every planned service `not_attempted`, and no undo (`unavailable: "nothing was changed"`).
+- `failedDeployResult` (pre-hook failure, or an `Apply` that returned no result with an error raised before its first change: preflight, lease and validation errors are wrapped in `engine.BeforeMutationError`) builds a summary with `outcome: failed`, every planned service `not_attempted`, and no undo (`unavailable: "nothing was changed"`). Only an `Apply` error without that marker yields `partial` with an unknown state. The error and exit class are unchanged.
 - The cmd layer attaches hook outcomes, then calls `emitOperationSummary(result.Summary)`, then `emitResultDocument(result)`. This lets the summary mention a failed post-deploy hook in `notes`, e.g. "post-deploy hook smoke failed (exit 1)".
 
 Rollback, promote and scale build the summary at the end of their engine method, on every path that returns a result. The cmd layer adds hook notes the same way.
@@ -285,11 +285,11 @@ The text layout (width-aware, no color when NO_COLOR or not a TTY):
 ──────────────────────────────────────────────────────────────
  ✓ Deployed shop → production in 1m42s · deployment 1767225600 · ab12cd3
 ──────────────────────────────────────────────────────────────
- SERVICE  CHANGE     STRATEGY  IMAGE                            REPLICAS  HEALTH
- api      updated    rolling   ghcr.io/acme/api:ab12cd3 → ef45  2/2       healthy
- web      updated    rolling   ghcr.io/acme/web:ab12cd3 → ef45  3/3       healthy
- postgres unchanged  recreate  postgres:16                      1/1       healthy
- migrate  ran        -         exit 0 in 4s                     -         n/a
+ SERVICE  CHANGE     STRATEGY  IMAGE                             REPLICAS  HEALTH
+ api      updated    rolling   ghcr.io/acme/api:ab12cd3 → :ef45  2/2       healthy
+ web      updated    rolling   ghcr.io/acme/web:ab12cd3 → :ef45  3/3       healthy
+ postgres unchanged  recreate  postgres:16                       1/1       healthy
+ migrate  ran        -         exit 0 in 4s                      -         n/a
 
  URLs
    web  https://shop.example.com      ready
