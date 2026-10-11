@@ -635,14 +635,69 @@ func readImageCleanupState(dataDir string, project string) (imageCleanupEvidence
 	return evidence, nil
 }
 
+// globState expands a state path pattern under dataDir one segment at a
+// time with os.ReadDir. Unlike filepath.Glob it fails closed: any directory
+// read or stat error other than "does not exist" is returned, so ownership
+// evidence can never silently vanish and make an image look removable.
 func globState(dataDir string, parts ...string) ([]string, error) {
 	pattern := filepath.Join(append([]string{dataDir}, parts...)...)
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, fmt.Errorf("failed to scan state %s: %w", pattern, err)
+	scanErr := func(err error) error {
+		return fmt.Errorf("failed to scan state %s: %w", pattern, err)
 	}
-	sort.Strings(matches)
-	return matches, nil
+	current := []string{dataDir}
+	for index, part := range parts {
+		last := index == len(parts)-1
+		var next []string
+		for _, dir := range current {
+			if !strings.ContainsAny(part, "*?[") {
+				path := filepath.Join(dir, part)
+				info, err := os.Stat(path)
+				if os.IsNotExist(err) {
+					continue
+				}
+				if err != nil {
+					return nil, scanErr(err)
+				}
+				if last || info.IsDir() {
+					next = append(next, path)
+				}
+				continue
+			}
+			entries, err := os.ReadDir(dir)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return nil, scanErr(err)
+			}
+			for _, entry := range entries {
+				matched, err := filepath.Match(part, entry.Name())
+				if err != nil {
+					return nil, scanErr(err)
+				}
+				if !matched {
+					continue
+				}
+				path := filepath.Join(dir, entry.Name())
+				if !last {
+					info, err := os.Stat(path)
+					if os.IsNotExist(err) {
+						continue
+					}
+					if err != nil {
+						return nil, scanErr(err)
+					}
+					if !info.IsDir() {
+						continue
+					}
+				}
+				next = append(next, path)
+			}
+		}
+		current = next
+	}
+	sort.Strings(current)
+	return current, nil
 }
 
 func readImageStateJSON(path string, target any) error {

@@ -183,6 +183,31 @@ func TestCleanupOldProjectImagesRemovesNothingWhenStateUnreadable(t *testing.T) 
 			}
 			return dataDir
 		},
+		"unreadable deployments directory": func(t *testing.T, dataDir string) string {
+			if os.Geteuid() == 0 {
+				t.Skip("root ignores directory permissions")
+			}
+			writeSharedServerState(t, dataDir)
+			dir := filepath.Join(dataDir, "history", "demo", "production", "deployments")
+			if err := os.Chmod(dir, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+			return dataDir
+		},
+		"unreadable desired directory of another project": func(t *testing.T, dataDir string) string {
+			if os.Geteuid() == 0 {
+				t.Skip("root ignores directory permissions")
+			}
+			writeSharedServerState(t, dataDir)
+			writeImageCleanupDesired(t, dataDir, "other", "production", map[string]string{"web": "demo/web:sha-prd1"})
+			dir := filepath.Join(dataDir, "desired", "other")
+			if err := os.Chmod(dir, 0); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+			return dataDir
+		},
 		"missing data directory": func(t *testing.T, dataDir string) string {
 			return filepath.Join(dataDir, "missing")
 		},
