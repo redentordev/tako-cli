@@ -78,6 +78,24 @@ func ParseScaleTargets(args []string) (map[string]int, error) {
 	return scaleTargets, nil
 }
 
+// priorReplicaCounts returns each scale target's replica count in the prior
+// desired revision. Running-container counts are not used: they include
+// inactive blue-green containers and skip exited ones, so they are not the
+// count an undo should restore. A target the revision does not list (or a
+// missing revision) is absent from the map: its previous count is unknown.
+func priorReplicaCounts(prior *takodstate.DesiredRevision, targets map[string]int) map[string]int {
+	counts := make(map[string]int, len(targets))
+	if prior == nil {
+		return counts
+	}
+	for name := range targets {
+		if service, ok := prior.Services[name]; ok {
+			counts[name] = service.Replicas
+		}
+	}
+	return counts
+}
+
 // Scale reconciles running takod services to the requested replica counts
 // without rebuilding images, then persists runtime state and deployment
 // history. Scale has no confirmation step, so it runs as a single call.
@@ -235,22 +253,23 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 
 	notifier := scaleNotifier(cfg, req.Verbose)
 	scaledImageRefs := make(map[string]string, len(scaleTargets))
-	previousReplicas := make(map[string]int, len(scaleTargets))
+	previousReplicas := priorReplicaCounts(priorDesired, scaleTargets)
 	totalErrors := 0
 	for serviceName, desiredReplicas := range scaleTargets {
-		currentReplicas := 0
-		if actual, ok := actualState[serviceName]; ok {
-			currentReplicas = actual.Replicas
+		previous, previousKnown := previousReplicas[serviceName]
+		message := fmt.Sprintf("-> Scaling %s to %d replicas (previous count unknown)\n", serviceName, desiredReplicas)
+		data := map[string]any{"toReplicas": desiredReplicas}
+		if previousKnown {
+			message = fmt.Sprintf("-> Scaling %s: %d -> %d replicas\n", serviceName, previous, desiredReplicas)
+			data["fromReplicas"] = previous
 		}
-		previousReplicas[serviceName] = currentReplicas
-
 		e.emit(events.Event{
 			Type:    events.TypeDeployServiceStarted,
 			Phase:   events.PhaseDeploy,
 			Level:   events.LevelInfo,
 			Service: serviceName,
-			Message: fmt.Sprintf("-> Scaling %s: %d -> %d replicas\n", serviceName, currentReplicas, desiredReplicas),
-			Data:    map[string]any{"fromReplicas": currentReplicas, "toReplicas": desiredReplicas},
+			Message: message,
+			Data:    data,
 		})
 
 		service := services[serviceName]
@@ -295,8 +314,8 @@ func (e *Engine) Scale(ctx context.Context, req ScaleRequest) (*ScaleResult, err
 			Data:    map[string]any{"image": imageRef, "replicas": desiredReplicas},
 		})
 		result.Services = append(result.Services, ServiceOutcome{Name: serviceName, Image: imageRef, Action: OutcomeDeployed, Replicas: desiredReplicas})
-		if notifier != nil && currentReplicas != desiredReplicas {
-			notifier.Notify(notification.ScaleEvent(cfg.Project.Name, envName, serviceName, currentReplicas, desiredReplicas))
+		if notifier != nil && previousKnown && previous != desiredReplicas {
+			notifier.Notify(notification.ScaleEvent(cfg.Project.Name, envName, serviceName, previous, desiredReplicas))
 		}
 	}
 

@@ -176,8 +176,11 @@ func formatSummaryDuration(seconds float64) string {
 }
 
 // summaryImageCell is the IMAGE column: the image once when unchanged, else
-// `repo:tagA → tagB` when both refs share the repository. Run rows show
-// their reason (exit code and duration).
+// `repo:tagA → :tagB` (or `→ @sha256:…`) when both refs share the
+// repository. The separator stays on the new tag so a full commit SHA or
+// digest keeps its `:<hex>` form, which output redaction exempts; a bare
+// 40-hex tag would be masked as a pattern match. Run rows show their reason
+// (exit code and duration).
 func summaryImageCell(row engine.SummaryService) string {
 	if row.Change == engine.SummaryChangeRan {
 		if row.Reason != "" {
@@ -197,7 +200,7 @@ func summaryImageCell(row engine.SummaryService) string {
 	fromRepo, _ := splitImageTag(from)
 	toRepo, toTag := splitImageTag(to)
 	if fromRepo == toRepo && toTag != "" {
-		return from + " → " + toTag
+		return from + " → " + to[len(toRepo):]
 	}
 	return from + " → " + to
 }

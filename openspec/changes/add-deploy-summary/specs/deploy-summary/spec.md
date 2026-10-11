@@ -23,6 +23,11 @@ When a mutating operation finishes, the operator (or CI) gets one trustworthy an
 - **WHEN** the `pre-deploy` hook exits non-zero before any mutation
 - **THEN** the summary has outcome `failed`, every planned service `not_attempted`, and no undo command, with undo unavailable reason `nothing was changed`
 
+#### Scenario: Apply fails before its first change
+- **WHEN** hooks are configured and the deploy apply fails a preflight check before changing anything, without producing a result
+- **THEN** the summary has outcome `failed`, every planned service `not_attempted`, and undo unavailable reason `nothing was changed`
+- **AND** the exit code is the same as without hooks
+
 ### Requirement: Summary header
 The summary SHALL contain the operation, project, environment (`name` and `kind`), outcome, start time and duration. When a history record was written, it SHALL also contain the deployment ID and display ID.
 
@@ -141,6 +146,15 @@ The summary SHALL include an undo command pinned to an explicit target, both as 
 #### Scenario: Scale undo restores the previous counts
 - **WHEN** `tako scale web=5` changes `web` from 2 to 5 replicas
 - **THEN** the undo is `tako scale -e production web=2`
+
+#### Scenario: Scale undo uses the previous desired count
+- **WHEN** the prior desired revision has `web` at 2 replicas while 4 `web` containers are running (an inactive blue-green set is still up)
+- **AND** `tako scale web=5` succeeds
+- **THEN** the row reads `2 → 5 replicas` and the undo is `tako scale -e production web=2`
+
+#### Scenario: Scale undo with an unknown previous count
+- **WHEN** a scaled service has no replica count in the prior desired revision
+- **THEN** the undo has no command, and `unavailable` is `previous replica count unknown`
 
 #### Scenario: Promote undo
 - **WHEN** `tako promote web` switches from revision `r1` to `r2`, and `r1` is still retained

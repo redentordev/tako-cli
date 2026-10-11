@@ -14,6 +14,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/engine"
 	"github.com/redentordev/tako-cli/pkg/hooks"
+	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
 	"github.com/spf13/cobra"
 )
@@ -54,10 +55,10 @@ func TestRenderSummaryTextGolden(t *testing.T) {
 	want := "\n" + rule + "\n" +
 		" ✓ Deployed shop → production in 1m42s · deployment 1767225600 · ab12cd3\n" +
 		rule + "\n" +
-		" SERVICE   CHANGE     STRATEGY  IMAGE                               REPLICAS  HEALTH\n" +
-		" api       updated    rolling   ghcr.io/acme/api:ab12cd3 → ef45ab6  2/2       healthy\n" +
-		" migrate   ran        -         exit 0 in 4s                        -         n/a\n" +
-		" postgres  unchanged  recreate  postgres:16                         1/1       healthy\n" +
+		" SERVICE   CHANGE     STRATEGY  IMAGE                                REPLICAS  HEALTH\n" +
+		" api       updated    rolling   ghcr.io/acme/api:ab12cd3 → :ef45ab6  2/2       healthy\n" +
+		" migrate   ran        -         exit 0 in 4s                         -         n/a\n" +
+		" postgres  unchanged  recreate  postgres:16                          1/1       healthy\n" +
 		"\n URLs\n" +
 		"   web  https://shop.example.com      ready\n" +
 		"   web  https://www.shop.example.com  pending (TLS not issued yet)\n" +
@@ -117,17 +118,35 @@ func TestRenderSummaryTextVariants(t *testing.T) {
 
 func TestSummaryImageCellCompactsSameRepository(t *testing.T) {
 	cases := map[[2]string]string{
-		{"ghcr.io/acme/web:aa", "ghcr.io/acme/web:bb"}:           "ghcr.io/acme/web:aa → bb",
-		{"registry:5000/web:aa", "registry:5000/web:bb"}:         "registry:5000/web:aa → bb",
+		{"ghcr.io/acme/web:aa", "ghcr.io/acme/web:bb"}:           "ghcr.io/acme/web:aa → :bb",
+		{"registry:5000/web:aa", "registry:5000/web:bb"}:         "registry:5000/web:aa → :bb",
 		{"web:aa", "other:bb"}:                                   "web:aa → other:bb",
 		{"web:aa", "web:aa"}:                                     "web:aa",
 		{"", "web:aa"}:                                           "web:aa",
-		{"web@sha256:111", "web@sha256:222"}:                     "web@sha256:111 → sha256:222",
-		{"registry:5000/web", "registry:5000/web:latest-branch"}: "registry:5000/web → latest-branch",
+		{"web@sha256:111", "web@sha256:222"}:                     "web@sha256:111 → @sha256:222",
+		{"registry:5000/web", "registry:5000/web:latest-branch"}: "registry:5000/web → :latest-branch",
 	}
 	for refs, want := range cases {
 		if got := summaryImageCell(engine.SummaryService{FromImage: refs[0], ToImage: refs[1]}); got != want {
 			t.Fatalf("summaryImageCell(%q, %q) = %q, want %q", refs[0], refs[1], got, want)
+		}
+	}
+}
+
+// A full commit SHA tag must survive output redaction after compaction: the
+// bare 40-hex new tag used to be masked as a base64 pattern match.
+func TestSummaryImageCellKeepsFullSHATagsReadable(t *testing.T) {
+	const fromSHA = "0123456789abcdef0123456789abcdef01234567"
+	const toSHA = "89abcdef0123456789abcdef0123456789abcdef"
+	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	redactor := secrets.NewRedactor()
+	for refs, want := range map[[2]string]string{
+		{"ghcr.io/acme/web:" + fromSHA, "ghcr.io/acme/web:" + toSHA}:  toSHA,
+		{"ghcr.io/acme/web@sha256:111", "ghcr.io/acme/web@" + digest}: digest,
+	} {
+		cell := summaryImageCell(engine.SummaryService{FromImage: refs[0], ToImage: refs[1]})
+		if got := redactor.Redact(cell); got != cell || !strings.Contains(got, want) {
+			t.Fatalf("redacted image cell = %q, want %q unchanged (contains %q)", got, cell, want)
 		}
 	}
 }
@@ -193,7 +212,7 @@ func TestWriteGitHubStepSummary(t *testing.T) {
 	for _, want := range []string{
 		"existing\n### ✅ Tako deploy · shop → production",
 		"| Service | Change | Strategy | Image | Replicas | Health |",
-		"| api | updated | rolling | `ghcr.io/acme/api:ab12cd3 → ef45ab6` | 2/2 | healthy |",
+		"| api | updated | rolling | `ghcr.io/acme/api:ab12cd3 → :ef45ab6` | 2/2 | healthy |",
 		"- web: https://www.shop.example.com (pending: TLS not issued yet)",
 		"```sh\ntako rollback -e production 1767225000\n```",
 		"Deployment: `1767225600`",

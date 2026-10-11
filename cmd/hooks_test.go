@@ -376,6 +376,54 @@ func TestDeployFailureRunsOnFailureWithRedactedError(t *testing.T) {
 	}
 }
 
+func TestDeployFailingBeforeMutationWithoutResultIsNotAttempted(t *testing.T) {
+	cases := map[string]struct {
+		err         error
+		wantOutcome string
+		wantChange  string
+		wantUndo    string
+	}{
+		"before first change": {
+			err:         &engine.BeforeMutationError{Err: errors.New("node node-a lacks capability deploy.graceful-stop-v1")},
+			wantOutcome: engine.SummaryOutcomeFailed, wantChange: engine.SummaryChangeNotAttempted, wantUndo: engine.UndoUnavailableNotMutated,
+		},
+		"after first change": {
+			err:         errors.New("reconcile web: connection reset"),
+			wantOutcome: engine.SummaryOutcomePartial, wantChange: engine.SummaryChangeFailed, wantUndo: engine.UndoUnavailableUnknownState,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			setupHookTest(t, allDeployHooks)
+			session := installFakeDeploy(t, false)
+			session.result, session.err = nil, tc.err
+			outputFormatFlag = outputFormatJSON
+
+			var runErr error
+			stdout := captureStdout(t, func() { runErr = runDeploy(&cobra.Command{}, nil) })
+			if runErr == nil || exitCodeForError(runErr) != exitCodeForError(tc.err) {
+				t.Fatalf("err = %v (exit %d), want exit %d", runErr, exitCodeForError(runErr), exitCodeForError(tc.err))
+			}
+			var result engine.DeployResult
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatalf("stdout: %v\n%s", err, stdout)
+			}
+			summary := result.Summary
+			if summary == nil || summary.Outcome != tc.wantOutcome || len(summary.Services) == 0 {
+				t.Fatalf("summary = %+v", summary)
+			}
+			for _, row := range summary.Services {
+				if row.Change != tc.wantChange {
+					t.Fatalf("row = %+v, want change %q", row, tc.wantChange)
+				}
+			}
+			if summary.Undo == nil || summary.Undo.Command != "" || summary.Undo.Unavailable != tc.wantUndo {
+				t.Fatalf("undo = %+v", summary.Undo)
+			}
+		})
+	}
+}
+
 func TestDeploySkipHooksSkipsBrokenHooks(t *testing.T) {
 	root, runner := setupHookTest(t, "hooks:\n  commands:\n    pre-deploy: [@self]\n")
 	// A file hook for the same name makes the definition ambiguous.

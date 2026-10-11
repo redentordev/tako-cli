@@ -183,12 +183,13 @@ const SummaryEnvironmentKindPreview = "preview"
 
 // Undo unavailability reasons.
 const (
-	UndoUnavailableNothingChanged = "nothing changed"
-	UndoUnavailableNotMutated     = "nothing was changed"
-	UndoUnavailableWarmed         = "warmed revision is not serving; nothing to undo"
-	UndoUnavailableFirstDeploy    = "first deployment; nothing to roll back to"
-	UndoUnavailableHistory        = "deployment history unreadable"
-	UndoUnavailableRestored       = "every service is back at its previous state; nothing to undo"
+	UndoUnavailableNothingChanged  = "nothing changed"
+	UndoUnavailableNotMutated      = "nothing was changed"
+	UndoUnavailableWarmed          = "warmed revision is not serving; nothing to undo"
+	UndoUnavailableFirstDeploy     = "first deployment; nothing to roll back to"
+	UndoUnavailableHistory         = "deployment history unreadable"
+	UndoUnavailableRestored        = "every service is back at its previous state; nothing to undo"
+	UndoUnavailableUnknownReplicas = "previous replica count unknown"
 )
 
 // summaryNextStepLimit caps NextSteps.
@@ -651,7 +652,11 @@ func undoForScale(env SummaryEnvironment, previous map[string]int, changed []str
 	sort.Strings(names)
 	argv := append([]string{"tako", "scale"}, summaryEnvironmentArgs(env)...)
 	for _, name := range names {
-		argv = append(argv, fmt.Sprintf("%s=%d", name, previous[name]))
+		count, known := previous[name]
+		if !known {
+			return unavailableUndo(UndoUnavailableUnknownReplicas)
+		}
+		argv = append(argv, fmt.Sprintf("%s=%d", name, count))
 	}
 	return newUndo(argv, "")
 }
