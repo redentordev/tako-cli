@@ -102,6 +102,7 @@ var humanOnlyCommands = map[string]bool{
 	"tako secrets fetch":                        true,
 	"tako secrets import":                       true,
 	"tako secrets init":                         true,
+	"tako secrets providers":                    true,
 	"tako secrets set":                          true,
 	"tako upgrade":                              true,
 }

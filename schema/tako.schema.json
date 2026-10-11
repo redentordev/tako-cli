@@ -9,7 +9,46 @@
     "servers",
     "environments"
   ],
+  "definitions": {
+    "secretSources": {
+      "type": "array",
+      "description": "External secret stores read live whenever Tako resolves secrets (deploy, exec, validate). Sources hold provider selectors only, never values. Later sources override earlier ones, and provider values override .tako/secrets files.",
+      "items": {
+        "type": "object",
+        "required": ["provider"],
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "Provider name or alias (see `tako secrets providers`)",
+            "examples": ["aws-ssm", "aws-secrets-manager", "vault", "openbao", "1password", "doppler", "infisical", "gcp-secret-manager", "azure-key-vault", "bitwarden"]
+          },
+          "names": {
+            "type": "array",
+            "description": "Explicit provider secret names; omit to use the provider's listing mode",
+            "items": { "type": "string" }
+          },
+          "path": { "type": "string", "description": "Provider path or name prefix to read recursively (Infisical: secret folder)" },
+          "from": { "type": "string", "description": "Folder/name prefix prepended to names" },
+          "profile": { "type": "string", "description": "AWS CLI profile" },
+          "region": { "type": "string", "description": "AWS region" },
+          "vault": { "type": "string", "description": "1Password vault or Azure Key Vault name" },
+          "project": { "type": "string", "description": "GCP project, Doppler project, Infisical project ID, or Bitwarden project ID" },
+          "providerEnv": { "type": "string", "description": "Doppler config or Infisical environment slug" },
+          "prefixStrip": { "type": "string", "description": "Prefix removed from provider names before deriving secret keys" },
+          "map": {
+            "type": "object",
+            "description": "Provider secret name to Tako secret key",
+            "additionalProperties": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+          }
+        }
+      }
+    }
+  },
   "properties": {
+    "secretSources": {
+      "$ref": "#/definitions/secretSources"
+    },
     "$schema": {
       "type": "string",
       "description": "JSON Schema reference for IDE support"
@@ -416,6 +455,9 @@
             "items": {
               "type": "string"
             }
+          },
+          "secretSources": {
+            "$ref": "#/definitions/secretSources"
           },
           "proxy": {
             "type": "object",

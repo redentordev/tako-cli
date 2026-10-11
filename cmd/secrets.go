@@ -8,7 +8,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"unicode"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
@@ -29,6 +28,9 @@ var secretsProviderFlags struct {
 	region          string
 	path            string
 	from            string
+	vault           string
+	project         string
+	providerEnv     string
 	env             string
 	prefixStrip     string
 	maps            []string
@@ -209,8 +211,9 @@ func runSecretsValidate(cmd *cobra.Command, args []string) error {
 		return formatConfigLoadError(cfgFile, err)
 	}
 
-	// Create manager
-	mgr, err := secrets.NewManager(env)
+	// Create manager; configured secretSources are resolved live so
+	// validation proves the provider is reachable, not just configured.
+	mgr, err := secrets.NewManagerForConfig(cfg, env)
 	if err != nil {
 		return err
 	}
@@ -271,9 +274,10 @@ var secretsFetchCmd = &cobra.Command{
 	Short: "Fetch secrets from an external provider",
 	Long: `Fetch secrets from an external provider and print only redacted values by default.
 
-Supported providers:
-  aws-ssm
-  aws-secrets-manager`,
+Each provider shells out to its official CLI, which must be installed and
+authenticated. Run 'tako secrets providers' for details.
+
+` + secretsProviderHelp(),
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		provider := args[0]
@@ -317,7 +321,9 @@ var secretsImportCmd = &cobra.Command{
 
 By default this command performs a redacted dry run. Pass --write to persist
 the imported values. Existing local secrets are skipped unless --overwrite is
-provided.`,
+provided.
+
+` + secretsProviderHelp(),
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if secretsProviderFlags.write && secretsProviderFlags.dryRun {
@@ -335,7 +341,7 @@ provided.`,
 		if err != nil {
 			return err
 		}
-		planned, err := mapImportedSecrets(values, secretsProviderFlags.prefixStrip, mappings)
+		planned, err := secrets.MapProviderSecrets(values, secretsProviderFlags.prefixStrip, mappings)
 		if err != nil {
 			return err
 		}
@@ -380,6 +386,52 @@ provided.`,
 	},
 }
 
+var secretsProvidersCmd = &cobra.Command{
+	Use:   "providers",
+	Short: "List supported external secrets providers",
+	Long:  `List the external secrets providers usable with 'tako secrets fetch' and 'tako secrets import', and whether each provider's CLI is installed.`,
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		for _, info := range secrets.Providers() {
+			status := "installed"
+			if !secrets.ProviderCommandAvailable(info) {
+				status = "not found"
+			}
+			fmt.Printf("%s\n", info.Name)
+			fmt.Printf("  %s\n", info.Description)
+			fmt.Printf("  CLI: %s (%s)\n", info.Command, status)
+			if len(info.Aliases) > 0 {
+				fmt.Printf("  Aliases: %s\n", strings.Join(info.Aliases, ", "))
+			}
+			if status != "installed" {
+				fmt.Printf("  Install: %s\n", info.Install)
+			}
+			fmt.Println()
+		}
+		return nil
+	},
+}
+
+func secretsProviderHelp() string {
+	var b strings.Builder
+	b.WriteString("Supported providers:\n")
+	for _, info := range secrets.Providers() {
+		fmt.Fprintf(&b, "  %-20s %s\n", info.Name, info.Description)
+	}
+	b.WriteString(`
+Examples:
+  tako secrets import aws-ssm --path /myapp/prod --prefix-strip /myapp/prod
+  tako secrets import aws-secrets-manager myapp/prod --prefix-strip myapp/prod
+  tako secrets import vault --path secret/myapp/prod --prefix-strip secret/myapp/prod
+  tako secrets import 1password Postgres Stripe --vault Production
+  tako secrets import doppler --project api --provider-env prd
+  tako secrets import infisical --project <id> --provider-env prod
+  tako secrets import gcp-secret-manager --project acme --path myapp-
+  tako secrets import azure-key-vault --vault acme-kv --path myapp-
+  tako secrets import bitwarden --project <id>`)
+	return b.String()
+}
+
 func getEnvDisplay(env string) string {
 	if env == "" {
 		return "all environments"
@@ -389,10 +441,13 @@ func getEnvDisplay(env string) string {
 
 func providerOptionsFromFlags() secrets.ProviderOptions {
 	return secrets.ProviderOptions{
-		Profile: secretsProviderFlags.profile,
-		Region:  secretsProviderFlags.region,
-		Path:    secretsProviderFlags.path,
-		From:    secretsProviderFlags.from,
+		Profile:     secretsProviderFlags.profile,
+		Region:      secretsProviderFlags.region,
+		Path:        secretsProviderFlags.path,
+		From:        secretsProviderFlags.from,
+		Vault:       secretsProviderFlags.vault,
+		Project:     secretsProviderFlags.project,
+		ProviderEnv: secretsProviderFlags.providerEnv,
 	}
 }
 
@@ -405,80 +460,12 @@ func parseSecretMappings(values []string) (map[string]string, error) {
 		if !ok || source == "" || target == "" {
 			return nil, fmt.Errorf("invalid --map value %q, use SOURCE=DEST", value)
 		}
-		if !isValidImportedSecretKey(target) {
+		if !secrets.IsValidSecretKey(target) {
 			return nil, fmt.Errorf("invalid mapped secret key %q", target)
 		}
 		mappings[source] = target
 	}
 	return mappings, nil
-}
-
-func mapImportedSecrets(values map[string]string, prefixStrip string, mappings map[string]string) (map[string]string, error) {
-	out := make(map[string]string, len(values))
-	for source, value := range values {
-		key, ok := mappings[source]
-		if !ok {
-			key = importedSecretKey(source, prefixStrip)
-		}
-		if !isValidImportedSecretKey(key) {
-			return nil, fmt.Errorf("provider secret %q maps to invalid env key %q", source, key)
-		}
-		if _, exists := out[key]; exists {
-			return nil, fmt.Errorf("multiple provider secrets map to %s; use --map to disambiguate", key)
-		}
-		out[key] = value
-	}
-	return out, nil
-}
-
-func importedSecretKey(source string, prefixStrip string) string {
-	key := strings.TrimSpace(source)
-	if prefixStrip != "" {
-		prefix := strings.TrimSpace(prefixStrip)
-		if strings.HasPrefix(key, prefix) {
-			key = strings.TrimPrefix(key, prefix)
-		}
-		key = strings.TrimLeft(key, "/")
-	}
-	key = strings.Trim(key, "/")
-	var out strings.Builder
-	lastWasSeparator := false
-	for _, r := range key {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			out.WriteRune(unicode.ToUpper(r))
-			lastWasSeparator = false
-			continue
-		}
-		if !lastWasSeparator {
-			out.WriteRune('_')
-			lastWasSeparator = true
-		}
-	}
-	result := strings.Trim(out.String(), "_")
-	if result == "" {
-		return "SECRET"
-	}
-	if result[0] >= '0' && result[0] <= '9' {
-		result = "SECRET_" + result
-	}
-	return result
-}
-
-func isValidImportedSecretKey(key string) bool {
-	if key == "" {
-		return false
-	}
-	first := rune(key[0])
-	if !((first >= 'A' && first <= 'Z') || (first >= 'a' && first <= 'z') || first == '_') {
-		return false
-	}
-	for _, r := range key {
-		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 func sortedSecretMapKeys(values map[string]string) []string {
@@ -501,6 +488,7 @@ func init() {
 	secretsCmd.AddCommand(secretsValidateCmd)
 	secretsCmd.AddCommand(secretsFetchCmd)
 	secretsCmd.AddCommand(secretsImportCmd)
+	secretsCmd.AddCommand(secretsProvidersCmd)
 
 	// Add environment flag to relevant commands
 	for _, cmd := range []*cobra.Command{
@@ -516,10 +504,13 @@ func init() {
 		secretsFetchCmd,
 		secretsImportCmd,
 	} {
-		cmd.Flags().StringVar(&secretsProviderFlags.profile, "profile", "", "AWS CLI profile")
-		cmd.Flags().StringVar(&secretsProviderFlags.region, "region", "", "AWS region")
-		cmd.Flags().StringVar(&secretsProviderFlags.path, "path", "", "Provider path/prefix to import recursively")
+		cmd.Flags().StringVar(&secretsProviderFlags.profile, "profile", "", "AWS CLI profile (aws-ssm, aws-secrets-manager)")
+		cmd.Flags().StringVar(&secretsProviderFlags.region, "region", "", "AWS region (aws-ssm, aws-secrets-manager)")
+		cmd.Flags().StringVar(&secretsProviderFlags.path, "path", "", "Provider path/prefix to import recursively (Infisical: secret folder)")
 		cmd.Flags().StringVar(&secretsProviderFlags.from, "from", "", "Provider folder/name prefix for explicit names")
+		cmd.Flags().StringVar(&secretsProviderFlags.vault, "vault", "", "1Password vault or Azure Key Vault name")
+		cmd.Flags().StringVar(&secretsProviderFlags.project, "project", "", "GCP project, Doppler project, Infisical project ID, or Bitwarden project ID")
+		cmd.Flags().StringVar(&secretsProviderFlags.providerEnv, "provider-env", "", "Provider-side environment: Doppler config or Infisical environment slug")
 		cmd.Flags().StringVarP(&secretsProviderFlags.env, "env", "e", "", "Environment (e.g., production, staging)")
 		cmd.Flags().StringVar(&secretsProviderFlags.prefixStrip, "prefix-strip", "", "Strip this provider prefix before deriving local secret keys")
 		cmd.Flags().StringArrayVar(&secretsProviderFlags.maps, "map", nil, "Map provider source to local secret key (SOURCE=DEST)")

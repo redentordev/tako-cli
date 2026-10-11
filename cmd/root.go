@@ -256,6 +256,7 @@ func init() {
 		secretsDeleteCmd,
 		secretsFetchCmd,
 		secretsImportCmd,
+		secretsProvidersCmd,
 		upgradeCmd,
 	)
 	markProjectMutating(

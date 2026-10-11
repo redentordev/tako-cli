@@ -1209,7 +1209,12 @@ func checkSecrets(record func(checkResult), cfg *config.Config, envName string) 
 		envExists = true
 	}
 
-	if !baseExists && !envExists {
+	hasSources := len(cfg.SecretSourcesFor(envName)) > 0
+	if hasSources {
+		record(checkResult{"PASS", fmt.Sprintf("Secret sources: %d configured", len(cfg.SecretSourcesFor(envName))), ""})
+	}
+
+	if !baseExists && !envExists && !hasSources {
 		// Check if any services use secrets
 		services, err := cfg.GetServices(envName)
 		if err == nil {
@@ -1237,7 +1242,7 @@ func checkSecrets(record func(checkResult), cfg *config.Config, envName string) 
 	}
 
 	// Validate required secrets
-	mgr, err := secrets.NewManager(envName)
+	mgr, err := secrets.NewManagerForConfig(cfg, envName)
 	if err != nil {
 		record(checkResult{"WARN", fmt.Sprintf("Secrets manager: %v", err), ""})
 		return
@@ -1255,7 +1260,7 @@ func checkSecrets(record func(checkResult), cfg *config.Config, envName string) 
 
 	if len(required) > 0 {
 		if err := mgr.ValidateRequired(required); err != nil {
-			record(checkResult{"WARN", fmt.Sprintf("Required secrets: %v", err), "Run 'tako secrets set' for missing secrets"})
+			record(checkResult{"WARN", fmt.Sprintf("Required secrets: %v", err), "Run 'tako secrets set' or add them to secretSources"})
 		} else {
 			record(checkResult{"PASS", fmt.Sprintf("Required secrets: All %d present", len(required)), ""})
 		}

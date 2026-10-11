@@ -521,6 +521,89 @@ tako secrets list --env production
 tako deploy --env production
 ```
 
+### Resolving secrets from external stores at deploy time
+
+Like Kamal's `.kamal/secrets` + `kamal secrets fetch`, `secretSources` keep the
+secret store as the source of truth: Tako reads the values live every time it
+resolves secrets (`deploy`, `exec`, `jobs`, `secrets validate`, `doctor`), and
+nothing is written to disk. Sources hold only provider selectors, so they are
+safe to commit.
+
+```yaml
+# Applies to every environment
+secretSources:
+  - provider: doppler
+    project: api
+    providerEnv: prd
+
+environments:
+  production:
+    servers: [web-1]
+    # Environment sources apply after the top-level ones
+    secretSources:
+      - provider: aws-ssm
+        path: /myapp/prod          # /myapp/prod/db/url -> DB_URL
+        prefixStrip: /myapp/prod
+        region: us-east-1
+        map:
+          /myapp/prod/db/url: DATABASE_URL
+      - provider: 1password
+        vault: Production
+        names: [Stripe]            # Stripe/api-key -> STRIPE_API_KEY
+    services:
+      api:
+        build: .
+        secrets: [DATABASE_URL, STRIPE_API_KEY, SENTRY_DSN]
+```
+
+Precedence, lowest to highest: `.tako/secrets`, `.tako/secrets.<env>`,
+top-level `secretSources`, then environment `secretSources` (later sources
+override earlier ones). Each source is fetched once per command and its values
+are registered with the output redactor. Source fields mirror the
+`tako secrets fetch` flags below (`names`, `path`, `from`, `profile`,
+`region`, `vault`, `project`, `providerEnv`, `prefixStrip`, `map`). Provider
+credentials come from each CLI's own login or environment variables (for
+example `AWS_PROFILE`, `VAULT_TOKEN`, `OP_SERVICE_ACCOUNT_TOKEN`,
+`DOPPLER_TOKEN`, `BWS_ACCESS_TOKEN`), so CI only needs those set.
+
+### Importing from external secret stores
+
+`tako secrets fetch` (redacted preview) and `tako secrets import` copy secrets
+from an external store into the encrypted `.tako/secrets` files. Each adapter
+shells out to the provider's official CLI, so authentication, SSO, and
+credential chains work exactly as they do for that CLI. `import` is a redacted
+dry run until `--write` is passed, and existing keys are kept unless
+`--overwrite` is set.
+
+| Provider | CLI | Selectors |
+| -------- | --- | --------- |
+| `aws-ssm` | `aws` | names (`--from` prefix) or `--path` recursive; `--profile`, `--region` |
+| `aws-secrets-manager` | `aws` | names or `--path` name prefix; JSON secrets flatten to `NAME/field` |
+| `vault` / `openbao` | `vault` / `bao` | KV v1/v2 paths or `--path` recursive; fields flatten to `PATH/field` |
+| `1password` | `op` | item names (`--vault`), `op://` references, or every item in `--vault` |
+| `doppler` | `doppler` | `--project`, `--provider-env` (config); optional names |
+| `infisical` | `infisical` | `--project` ID, `--provider-env` slug, `--path` folder; optional names |
+| `gcp-secret-manager` | `gcloud` | names or `--path` name prefix; `--project` |
+| `azure-key-vault` | `az` | `--vault` with names or `--path` name prefix |
+| `bitwarden` | `bws` | optional `--project` ID; optional names (`BWS_ACCESS_TOKEN`) |
+
+Provider names are turned into env keys by uppercasing and replacing
+separators with `_`; strip a shared prefix with `--prefix-strip` or rename
+individual keys with `--map SOURCE=DEST`.
+
+```bash
+# See which provider CLIs are installed
+tako secrets providers
+
+# Preview, then write, an SSM path into production secrets
+tako secrets import aws-ssm --path /myapp/prod --prefix-strip /myapp/prod --env production
+tako secrets import aws-ssm --path /myapp/prod --prefix-strip /myapp/prod --env production --write
+
+# Doppler config and Vault KV
+tako secrets import doppler --project api --provider-env prd --env production --write
+tako secrets import vault --path secret/myapp/prod --prefix-strip secret/myapp/prod --env production --write
+```
+
 ## Domain Redirects (www → non-www)
 
 Automatically redirect traffic from one domain to another with proper SSL and

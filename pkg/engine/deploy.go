@@ -243,7 +243,7 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 			e.RegisterSecret(value)
 		}
 	}
-	e.registerServiceSecretValues(session.envName, allServices)
+	e.registerServiceSecretValues(cfg, session.envName, allServices)
 	for _, server := range cfg.Servers {
 		e.RegisterSecret(server.Password)
 	}

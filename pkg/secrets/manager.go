@@ -41,7 +41,10 @@ type Manager struct {
 	environment string
 	basePath    string
 	secrets     map[string]string
-	redactor    *Redactor
+	// sourced holds values resolved from config secretSources; they are
+	// layered over the local files on every load.
+	sourced  map[string]string
+	redactor *Redactor
 }
 
 // NewManager creates a new secrets manager for the given environment
@@ -96,6 +99,11 @@ func (m *Manager) loadSecrets() error {
 		if err := m.loadFile(envPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("failed to load %s secrets: %w", m.environment, err)
 		}
+	}
+
+	// External secretSources override local files.
+	for key, value := range m.sourced {
+		m.secrets[key] = value
 	}
 
 	// Register all secret values with the redactor

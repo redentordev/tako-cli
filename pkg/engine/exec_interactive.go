@@ -113,7 +113,7 @@ func (e *Engine) ExecInteractive(ctx context.Context, req ExecRequest, terminal 
 		Rows:           int(terminal.InitialSize.Rows),
 	}
 	if req.OneOff {
-		envContent, err := buildExecEnvFileContent(e, envName, &service)
+		envContent, err := buildExecEnvFileContent(e, cfg, envName, &service)
 		if err != nil {
 			return nil, err
 		}

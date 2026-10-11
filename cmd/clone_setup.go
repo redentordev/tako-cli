@@ -295,7 +295,7 @@ func runCloneSetup(cmd *cobra.Command, args []string) error {
 		if len(required) == 0 {
 			pass("No secrets required by services")
 		} else {
-			mgr, err := secrets.NewManager(envName)
+			mgr, err := secrets.NewManagerForConfig(cfg, envName)
 			if err != nil {
 				warn(fmt.Sprintf("Cannot initialize secrets manager: %v", err))
 			} else {

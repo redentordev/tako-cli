@@ -74,6 +74,14 @@ func ValidateConfig(cfg *Config) error {
 	if err := validateRegistries(cfg.Registries); err != nil {
 		return err
 	}
+	if err := validateSecretSources("secretSources", cfg.SecretSources); err != nil {
+		return err
+	}
+	for envName, env := range cfg.Environments {
+		if err := validateSecretSources(fmt.Sprintf("environments.%s.secretSources", envName), env.SecretSources); err != nil {
+			return err
+		}
+	}
 
 	// Validate servers
 	if len(cfg.Servers) == 0 {
