@@ -25,18 +25,18 @@ type OperationSummary struct {
 	Outcome string `json:"outcome"`
 	// DeploymentID and DisplayID identify the history record the operation
 	// wrote, when it wrote one.
-	DeploymentID    string             `json:"deploymentId,omitempty"`
-	DisplayID       string             `json:"displayId,omitempty"`
-	Revision        string             `json:"revision,omitempty"`
-	Commit          string             `json:"commit,omitempty"`
-	StartedAt       time.Time          `json:"startedAt"`
-	DurationSeconds float64            `json:"durationSeconds"`
-	Services        []SummaryService   `json:"services"`
-	URLs            []SummaryURL       `json:"urls,omitempty"`
-	Undo            *SummaryUndo       `json:"undo,omitempty"`
-	NextSteps       []SummaryNextStep  `json:"nextSteps,omitempty"`
-	Error           string             `json:"error,omitempty"`
-	Notes           []string           `json:"notes,omitempty"`
+	DeploymentID    string            `json:"deploymentId,omitempty"`
+	DisplayID       string            `json:"displayId,omitempty"`
+	Revision        string            `json:"revision,omitempty"`
+	Commit          string            `json:"commit,omitempty"`
+	StartedAt       time.Time         `json:"startedAt"`
+	DurationSeconds float64           `json:"durationSeconds"`
+	Services        []SummaryService  `json:"services"`
+	URLs            []SummaryURL      `json:"urls,omitempty"`
+	Undo            *SummaryUndo      `json:"undo,omitempty"`
+	NextSteps       []SummaryNextStep `json:"nextSteps,omitempty"`
+	Error           string            `json:"error,omitempty"`
+	Notes           []string          `json:"notes,omitempty"`
 }
 
 // SummaryEnvironment names the environment an operation ran against. Kind
@@ -658,7 +658,7 @@ func (e *Engine) FailedWithoutResultSummary(operation string, project string, en
 	return builder.build()
 }
 
-var shellSafeArgument =regexp.MustCompile(`^[A-Za-z0-9@%+=:,./_-]+$`)
+var shellSafeArgument = regexp.MustCompile(`^[A-Za-z0-9@%+=:,./_-]+$`)
 
 // ShellJoin joins argv with POSIX shell quoting: arguments made only of safe
 // characters are left bare, others are single-quoted.
