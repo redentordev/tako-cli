@@ -311,7 +311,8 @@ pages with `make man` after flag changes.
 | `tako deploy` | Deploy configured application to environment |
 | `tako run <image> --name <app> --port <p> --server <host-or-ip>` | Configless deploy of a public image to an existing node |
 | `tako promote <service>` | Promote a warmed blue-green revision |
-| `tako rollback [id]` | Roll back to previous/specific deployment |
+| `tako rollback [id]` | Roll the environment back to the previous or a specific deployment (shows a plan, `-y` to approve) |
+| `tako rollback --service <name> [id]` | Roll back one service only |
 | `tako history` | View deployment history |
 | `tako ps` / `tako logs` / `tako access` | Service status, container logs, proxy access logs |
 | `tako exec <service> -- <cmd>` | Run a command in a running service container |

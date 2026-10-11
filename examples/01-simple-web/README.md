@@ -105,8 +105,12 @@ tako logs --service web
 # View HTTP access logs
 tako access
 
-# Rollback to previous version
-tako rollback
+# Review, then roll back to the previous deployment
+tako rollback --plan-only
+tako rollback -y
+
+# Roll back only the web service
+tako rollback --service web
 
 # Stop the service
 tako stop
