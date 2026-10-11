@@ -6,20 +6,41 @@ tako-logs - View logs from deployed services
 
 
 .SH SYNOPSIS
-\fBtako logs [flags]\fP
+\fBtako logs [SERVICE...] [flags]\fP
 
 
 .SH DESCRIPTION
 View logs from deployed services across the environment mesh.
 
 .PP
-If --server is not specified, streams logs from every configured environment node.
+Services are named as arguments or with --service (repeatable, or
+comma-separated). With no service, logs from every long-running service in
+the environment are shown. Name a job to see the output of its most recent
+recorded run, or follow it with -f to stream its runs as they happen.
+Deploy-time run services are not available through tako logs.
+
+.PP
+If --server is not specified, streams logs from every configured environment
+node. When more than one source is shown, each line is prefixed with
+service.slot@node; prefixes are colored when stdout is a terminal and
+NO_COLOR is unset.
+
+.PP
+--since and --until accept a duration (10m, 2h; relative to each node's
+clock), an RFC3339 timestamp, or Unix seconds. With --since and no --tail,
+the whole window is shown (up to 10000 lines per container). --grep keeps
+only lines matching an RE2 regular expression; --tail then counts matching
+lines.
 
 .PP
 Examples:
-  tako logs --service web               # View logs from the environment mesh
-  tako logs --service web --server prod # View logs from a specific node
-  tako logs --service web -f            # Follow logs in real-time
+  tako logs                              # All services, last 100 lines each
+  tako logs web                          # One service
+  tako logs web worker -f                # Follow two services
+  tako logs --service web --server prod  # One node only
+  tako logs web --since 10m -g 'error|panic' --ignore-case
+  tako logs web --since 2026-10-11T09:00:00Z --until 2026-10-11T10:00:00Z -t
+  tako logs nightly-report -f            # Follow runs of a job
 
 
 .SH OPTIONS
@@ -27,20 +48,40 @@ Examples:
 	Follow log output
 
 .PP
+\fB-g\fP, \fB--grep\fP=""
+	Only show lines matching an RE2 regular expression
+
+.PP
 \fB-h\fP, \fB--help\fP[=false]
 	help for logs
+
+.PP
+\fB--ignore-case\fP[=false]
+	Match --grep case-insensitively
 
 .PP
 \fB-s\fP, \fB--server\fP=""
 	Node to view logs from (default: all environment nodes)
 
 .PP
-\fB--service\fP=""
-	Service to view logs from (required)
+\fB--service\fP=[]
+	Service or job to view logs from (repeatable or comma-separated; default: all services)
+
+.PP
+\fB--since\fP=""
+	Show logs since a duration (10m), RFC3339 timestamp, or Unix seconds
 
 .PP
 \fB-n\fP, \fB--tail\fP=100
-	Number of lines to show
+	Number of lines to show per container (matching lines with --grep; max 10000)
+
+.PP
+\fB-t\fP, \fB--timestamps\fP[=false]
+	Prefix each line with its timestamp
+
+.PP
+\fB--until\fP=""
+	Show logs before a duration, RFC3339 timestamp, or Unix seconds (not with --follow)
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS

@@ -34,7 +34,7 @@ func (s *Server) registeredRoutes() []takodRoute {
 		{"/v1/mesh/apply", s.handleMeshApply}, {"/v1/mesh/status", s.handleMeshStatus}, {"/v1/images/exists", s.handleImageExists},
 		{"/v1/images/inspect", s.handleImageInspect}, {"/v1/images/export", s.handleImageExport}, {"/v1/images/import", s.handleImageImport},
 		{"/v1/images/build", s.handleImageBuild}, {"/v1/platform", s.handlePlatform}, {"/v1/platform/inventory", s.handleInventoryAuthority}, {"/v1/platform/allocations/authorize", s.handleAllocationAuthorization}, {"/v1/platform/membership/reconcile", s.handleMembershipReconcile},
-		{"/v1/logs", s.handleLogs}, {"/v1/exec", s.handleExec}, {"/v1/jobs", s.handleJobs}, {"/v1/jobs/apply", s.handleJobsApply},
+		{"/v1/logs", s.handleLogs}, {"/v1/logs/stream", s.handleLogsStream}, {"/v1/exec", s.handleExec}, {"/v1/jobs", s.handleJobs}, {"/v1/jobs/apply", s.handleJobsApply},
 		{"/v1/jobs/runs", s.handleJobRuns}, {"/v1/jobs/trigger", s.handleJobsTrigger}, {"/v1/stats", s.handleStats},
 		{"/v1/alerts", s.handleAlerts}, {"/v1/metrics", s.handleMetrics}, {"/v1/access-logs", s.handleAccessLogs}, {"/v1/discovery/exports", s.handleDiscoveryExports},
 	}
@@ -55,6 +55,22 @@ var lifecycleSafeMutationPaths = map[string]struct{}{
 	// Alert policy is node-local control-plane state, not a workload mutation.
 	// Keep authenticated disable available on cordoned/draining nodes.
 	"/v1/alerts": {},
+}
+
+// lifecycleReadOnlyPostPaths are POST endpoints that only read node state;
+// they take a JSON body instead of query parameters and are admitted like
+// GET requests (no restore barrier, mutation fence, or schedulable check).
+var lifecycleReadOnlyPostPaths = map[string]struct{}{
+	"/v1/logs/stream": {},
+}
+
+// lifecycleReadOnlyRequest reports whether r cannot mutate the node.
+func lifecycleReadOnlyRequest(r *http.Request) bool {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return true
+	}
+	_, ok := lifecycleReadOnlyPostPaths[r.URL.Path]
+	return ok && r.Method == http.MethodPost
 }
 
 type lifecycleMutationBarrierContextKey struct{}
@@ -82,7 +98,7 @@ func requestRequiresNodeLifecycleExclusion(r *http.Request) bool {
 // cordoned, draining, removed, or revoked node merely because SSH still works.
 func (s *Server) enrolledLifecycleHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		if !lifecycleReadOnlyRequest(r) {
 			if _, safe := lifecycleSafeMutationPaths[r.URL.Path]; !safe {
 				if r.URL.Path == "/v1/backups/restore" {
 					backupRestoreBarrierMu.Lock()
@@ -125,7 +141,7 @@ func (s *Server) enrolledLifecycleHandler(next http.Handler) http.Handler {
 		if unlockLifecycle != nil {
 			r = r.WithContext(context.WithValue(r.Context(), lifecycleMutationBarrierContextKey{}, true))
 		}
-		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		if lifecycleReadOnlyRequest(r) {
 			next.ServeHTTP(w, r)
 			return
 		}

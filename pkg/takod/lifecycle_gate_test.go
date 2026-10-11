@@ -157,6 +157,9 @@ func TestEnrolledLifecycleGateFailsClosedForEveryRegisteredMutation(t *testing.T
 			handler.ServeHTTP(recorder, httptest.NewRequest(method, route.path, body))
 			_, safe := lifecycleSafeMutationPaths[route.path]
 			safe = safe && route.path != "/v1/alerts"
+			if _, readOnly := lifecycleReadOnlyPostPaths[route.path]; readOnly {
+				safe = true
+			}
 			if safe && calls != 1 {
 				t.Fatalf("lifecycle-safe mutation was blocked: status=%d", recorder.Code)
 			}

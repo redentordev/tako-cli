@@ -32,7 +32,7 @@ func cliEngine() *engine.Engine {
 			sink = humanEventSink{writer: os.Stderr}
 			buildOutput = os.Stderr
 		default:
-			sink = humanEventSink{writer: os.Stdout}
+			sink = humanEventSink{writer: os.Stdout, color: logsColorEnabled(os.Stdout)}
 		}
 		cliEngineInstance = engine.New(engine.Options{
 			CLIVersion:  Version,
@@ -172,6 +172,10 @@ func verifyPlanFileMatches(planPath string, current engine.DeployPlan) error {
 // sink writes them verbatim; debug-level events render only with --verbose.
 type humanEventSink struct {
 	writer io.Writer
+	// color enables ANSI source-prefix colors on log.line events; it is set
+	// only when stdout is a terminal, NO_COLOR is unset, and no machine
+	// output mode is active.
+	color bool
 }
 
 func (s humanEventSink) Emit(event events.Event) {
@@ -179,6 +183,20 @@ func (s humanEventSink) Emit(event events.Event) {
 		return
 	}
 	if event.Message == "" {
+		return
+	}
+	if event.Type == events.TypeLogLine {
+		// Container output keeps its terminal destination regardless of the
+		// container stream it came from (data.stream is attribution only).
+		writer := s.writer
+		if writer == nil {
+			writer = os.Stdout
+		}
+		message := event.Message
+		if s.color {
+			message = colorizeLogLinePrefix(event, message)
+		}
+		fmt.Fprint(writer, message)
 		return
 	}
 	if stream, ok := event.Data["stream"].(string); ok && stream == "stderr" {

@@ -147,6 +147,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 		e.RegisterSecret(server.Password)
 	}
 	e.RegisterACMEDNSSecrets(cfg)
+	e.registerServiceSecretValuesOrWarn(cfg, envName, services, events.PhaseDeploy)
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()

@@ -48,7 +48,13 @@ const (
 const (
 	TypePhaseStarted   = "phase.started"
 	TypePhaseCompleted = "phase.completed"
-	TypeLogLine        = "log.line"
+	// TypeLogLine carries one line of operation or container output. For
+	// `tako logs` the raw line is in data.data alongside data.service and
+	// data.node, plus data.replica, data.container, data.revision,
+	// data.stream ("stdout"/"stderr"), and data.time (RFC3339Nano) when the
+	// node agent supplies them. Message is the human rendering and never
+	// contains ANSI escapes.
+	TypeLogLine = "log.line"
 
 	TypePlanComputed             = "plan.computed"
 	TypePlanConfirmationRequired = "plan.confirmation_required"
