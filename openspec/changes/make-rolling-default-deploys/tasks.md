@@ -43,9 +43,9 @@
 
 ## 6. User documentation
 
-- [ ] 6.1 Add a "Deploy strategies" section to `docs/CONFIGURATION.md` covering the default-selection rules, implicit TCP readiness (described as "about a minute"), `maxSurge` default (= replicas), `rollbackOnFailure` semantics, the restore limitations (data migrations), the overlap memory cost, and the opt-out. Fix the "(the default)" wording at line 1433. Verify that the doc renders and that its YAML snippets validate with `tako validate`.
-- [ ] 6.2 Rewrite `docs/ORCHESTRATION-MODEL.md` "Deployment Strategies" (lines 347-372) for the new default, the retain/restore protocol, the capability gate and the per-service restore scope. Verify by review against spec scenarios.
-- [ ] 6.3 Update the README feature lines (21, 248) to mention the rolling default and restore-on-failure. Run `make man` and confirm that `man/` and `completions/` have no diff, since no flags or help text change.
+- [x] 6.1 Add a "Deploy strategies" section to `docs/CONFIGURATION.md` covering the default-selection rules, implicit TCP readiness (described as "about a minute"), `maxSurge` default (= replicas), `rollbackOnFailure` semantics, the restore limitations (data migrations), the overlap memory cost, and the opt-out. Fix the "(the default)" wording at line 1433. Verify that the doc renders and that its YAML snippets validate with `tako validate`.
+- [x] 6.2 Rewrite `docs/ORCHESTRATION-MODEL.md` "Deployment Strategies" (lines 347-372) for the new default, the retain/restore protocol, the capability gate and the per-service restore scope. Verify by review against spec scenarios.
+- [x] 6.3 Update the README feature lines (21, 248) to mention the rolling default and restore-on-failure. Run `make man` and confirm that `man/` and `completions/` have no diff, since no flags or help text change.
 
 ## 7. Integration checks
 

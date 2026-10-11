@@ -18,7 +18,7 @@ replicated deployment state.
 ## Why Tako?
 
 - Use your own servers (DigitalOcean, Hetzner, AWS EC2, any VPS)
-- Health-checked deployments (recreate, rolling, blue-green) with rollback
+- Health-checked deployments (rolling by default for stateless services, recreate, blue-green) that restore the previous revision when a rollout fails
 - Automatic HTTPS through tako-proxy, including DNS-01 and on-demand customer domains
 - Git-clean deployments with full version history
 - Meshed takod orchestration from one server to many
@@ -245,8 +245,9 @@ keys. See
 
 ## Features
 
-**Deployment & operations** — reconciled deploys (recreate, rolling,
-blue-green with manual or automatic promotion), graceful container
+**Deployment & operations** — reconciled deploys (zero-downtime rolling by
+default for stateless services, recreate, blue-green with manual or automatic
+promotion), restore-on-failure of the previous revision, graceful container
 replacement, concurrent per-node rollout in dependency order, instant rollback, Git-based versioning,
 replicated deployment state with remote operation leases, release hooks
 (`release:` commands gate traffic), scheduled jobs (`kind: job` with cron, run
