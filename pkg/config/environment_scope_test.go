@@ -499,3 +499,163 @@ func sortedKeys[V any](values map[string]V) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// scopedPreviewYAML has an abstract preview base (review) that extends the
+// concrete staging environment, plus a production environment that no
+// preview can reach.
+const scopedPreviewYAML = scopedServersYAML + `environments:
+  production:
+    servers: [production]
+    services:
+      web:
+        image: nginx:alpine
+        env:
+          API_URL: ${SCOPE_PRODUCTION_URL}
+  staging:
+    servers: [preview]
+    services:
+      web:
+        image: nginx:alpine
+        port: 3000
+        proxy:
+          domain: app.example.com
+        env:
+          SHARED_TOKEN: ${SCOPE_BASE_TOKEN}
+  review:
+    abstract: true
+    extends: staging
+    preview:
+      domain: "{name}.preview.example.com"
+    services:
+      web:
+        env:
+          API_URL: ${SCOPE_PREVIEW_URL}
+`
+
+func TestLoadConfigWithOptionsScopesPreviewToItsBase(t *testing.T) {
+	dir := t.TempDir()
+	sshKey := filepath.Join(dir, "id_ed25519")
+	if err := os.WriteFile(sshKey, []byte("test-key"), 0600); err != nil {
+		t.Fatalf("write ssh key fixture: %v", err)
+	}
+	path := filepath.Join(dir, "tako.yaml")
+	if err := os.WriteFile(path, []byte(scopedPreviewYAML), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	set := func(t *testing.T, unset ...string) {
+		t.Helper()
+		values := map[string]string{
+			"SCOPE_SSH_KEY":         filepath.ToSlash(sshKey),
+			"SCOPE_PREVIEW_HOST":    "203.0.113.10",
+			"SCOPE_PREVIEW_URL":     "https://preview.example.com",
+			"SCOPE_BASE_TOKEN":      "test-only-value",
+			"SCOPE_PRODUCTION_HOST": "203.0.113.20",
+			"SCOPE_PRODUCTION_URL":  "https://example.com",
+		}
+		for name, value := range values {
+			t.Setenv(name, value)
+		}
+		for _, name := range unset {
+			os.Unsetenv(name)
+		}
+	}
+	preview := func(base string) *PreviewInstance { return &PreviewInstance{Base: base, Name: "PR-42"} }
+
+	for _, tc := range []struct {
+		name string
+		opts LoadOptions
+	}{
+		{name: "explicit base", opts: LoadOptions{Preview: preview("review"), Environment: "review"}},
+		{name: "environment names the base", opts: LoadOptions{Preview: preview(""), Environment: "review"}},
+	} {
+		t.Run(tc.name+": unrelated environment with unset variables is pruned", func(t *testing.T) {
+			set(t, "SCOPE_PRODUCTION_HOST", "SCOPE_PRODUCTION_URL")
+			cfg, err := LoadConfigWithOptions(path, tc.opts)
+			if err != nil {
+				t.Fatalf("LoadConfigWithOptions: %v", err)
+			}
+			instance := cfg.PreviewInstance()
+			if instance == nil || instance.Identity != "preview-pr-42" || instance.Base != "review" {
+				t.Fatalf("preview instance = %+v", instance)
+			}
+			services, err := cfg.GetServices("preview-pr-42")
+			if err != nil {
+				t.Fatalf("preview environment was pruned: %v", err)
+			}
+			env := services["web"].Env
+			if env["SHARED_TOKEN"] != "test-only-value" || env["API_URL"] != "https://preview.example.com" {
+				t.Fatalf("preview web env = %v", env)
+			}
+			if _, err := cfg.GetEnvironment("production"); err == nil {
+				t.Fatal("pruned production environment is still selectable")
+			}
+			if _, ok := cfg.Servers["production"]; ok {
+				t.Fatal("out-of-scope server with unset variables was kept")
+			}
+			if got := cfg.DeferredEnvironmentVariables(); !reflect.DeepEqual(got, []string{"SCOPE_PRODUCTION_HOST", "SCOPE_PRODUCTION_URL"}) {
+				t.Fatalf("deferred = %v", got)
+			}
+		})
+	}
+
+	for _, variable := range []string{"SCOPE_PREVIEW_URL", "SCOPE_BASE_TOKEN", "SCOPE_PREVIEW_HOST"} {
+		t.Run("base requires "+variable, func(t *testing.T) {
+			set(t, variable, "SCOPE_PRODUCTION_URL")
+			_, err := LoadConfigWithOptions(path, LoadOptions{Preview: preview("review"), Environment: "review"})
+			if err == nil || !strings.Contains(err.Error(), variable) {
+				t.Fatalf("err = %v, want %s required", err, variable)
+			}
+			if strings.Contains(err.Error(), "SCOPE_PRODUCTION_URL") {
+				t.Fatalf("err = %v names an out-of-scope variable", err)
+			}
+		})
+	}
+
+	t.Run("without an environment every variable is required", func(t *testing.T) {
+		set(t, "SCOPE_PRODUCTION_URL")
+		_, err := LoadConfigWithOptions(path, LoadOptions{Preview: preview("review")})
+		if err == nil || !strings.Contains(err.Error(), "SCOPE_PRODUCTION_URL") {
+			t.Fatalf("err = %v, want SCOPE_PRODUCTION_URL required", err)
+		}
+	})
+
+	t.Run("all variables set prunes nothing", func(t *testing.T) {
+		set(t)
+		cfg, err := LoadConfigWithOptions(path, LoadOptions{Preview: preview("review"), Environment: "review"})
+		if err != nil {
+			t.Fatalf("LoadConfigWithOptions: %v", err)
+		}
+		if _, err := cfg.GetEnvironment("production"); err != nil {
+			t.Fatalf("production: %v", err)
+		}
+		if got := cfg.DeferredEnvironmentVariables(); got != nil {
+			t.Fatalf("deferred = %v", got)
+		}
+	})
+}
+
+func TestLoadConfigWithOptionsPreviewIdentityCollisionIsNotPruned(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SCOPE_SSH_KEY", "unused")
+	t.Setenv("SCOPE_PREVIEW_HOST", "203.0.113.10")
+	t.Setenv("SCOPE_PREVIEW_URL", "https://preview.example.com")
+	t.Setenv("SCOPE_BASE_TOKEN", "test-only-value")
+	for _, name := range []string{"SCOPE_PRODUCTION_HOST", "SCOPE_PRODUCTION_URL"} {
+		t.Setenv(name, "")
+		os.Unsetenv(name)
+	}
+	config := scopedPreviewYAML + `  preview-pr-42:
+    servers: [preview]
+    services:
+      web:
+        image: nginx:alpine
+`
+	path := filepath.Join(dir, "tako.yaml")
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := LoadConfigWithOptions(path, LoadOptions{Preview: &PreviewInstance{Base: "review", Name: "pr-42"}, Environment: "review"})
+	if err == nil || !strings.Contains(err.Error(), "conflicts with the identity of preview") {
+		t.Fatalf("err = %v, want the identity conflict", err)
+	}
+}

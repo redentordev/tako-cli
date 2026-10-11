@@ -36,6 +36,7 @@ We have ready-to-deploy examples covering common use cases:
 | [08-frontend-consumer](./08-frontend-consumer/) | Frontend consumer | Import and use services from other projects |
 | [21-scheduled-jobs](./21-scheduled-jobs/) | Scheduled jobs | `kind: job` cron services, run history, manual trigger |
 | [22-private-registry](./22-private-registry/) | Private registry | `registries:` block, request-scoped credentials, `tako run` flags |
+| [23-preview-environments](./23-preview-environments/) | Preview environments | `preview:` template, `tako deploy --preview`, `tako preview list\|destroy\|prune` |
 
 ### Third-Party Applications
 | Example | Description | Features |

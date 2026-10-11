@@ -21,6 +21,7 @@ const maxEnvironmentExtendsDepth = 8
 const (
 	environmentExtendsKey  = "extends"
 	environmentAbstractKey = "abstract"
+	environmentPreviewKey  = "preview"
 	extensionKeyPrefix     = "x-"
 )
 
@@ -41,6 +42,23 @@ type environmentResolution struct {
 	// encodedLines maps a line of the re-encoded YAML document to the line
 	// in the original file it came from, for error messages.
 	encodedLines map[int]int
+	// previews maps every environment that declares a preview: block to
+	// that block. The block is not inherited, so only these are bases.
+	previews map[string]*PreviewConfig
+	// previewBases holds the resolved, decoded body of every abstract
+	// preview base, which does not survive into Config.Environments, for
+	// static validation of its preview: block.
+	previewBases map[string]*EnvironmentConfig
+	// instance is the preview synthesized for this load, or nil.
+	instance *previewRequest
+}
+
+// previewRequest is a preview instance requested from the resolver. base is
+// empty when the caller lets the resolver select it (D3).
+type previewRequest struct {
+	name     string
+	identity string
+	base     string
 }
 
 // configDecodeError marks a resolver failure that is a strict decode error
@@ -91,6 +109,8 @@ type declaredEnvironment struct {
 	extends    string
 	hasExtends bool
 	abstract   bool
+	// preview is the environment's own preview: block, nil when absent.
+	preview *PreviewConfig
 }
 
 // mergeEnvironmentNodes merges child over parent following the inheritance
@@ -179,16 +199,14 @@ func dropValueProvenance(prov map[string]string, path string) {
 // returns the resolved bodies keyed by name together with the metadata.
 func resolveEnvironmentInheritance(envs []declaredEnvironment) (map[string]*envNode, *environmentResolution, error) {
 	byName := make(map[string]*declaredEnvironment, len(envs))
-	meta := &environmentResolution{
-		abstract:   map[string]bool{},
-		parents:    map[string]string{},
-		chains:     map[string][]string{},
-		provenance: map[string]map[string]string{},
-	}
+	meta := newEnvironmentResolution()
 	for i := range envs {
 		env := &envs[i]
 		byName[env.name] = env
 		meta.declared = append(meta.declared, env.name)
+		if env.preview != nil {
+			meta.previews[env.name] = env.preview
+		}
 		if env.abstract {
 			meta.abstract[env.name] = true
 			if !isValidRuntimeIdentifier(env.name) {
@@ -283,28 +301,107 @@ func checkResolvedBuildContexts(names []string, byName map[string]*declaredEnvir
 	return nil
 }
 
+func newEnvironmentResolution() *environmentResolution {
+	return &environmentResolution{
+		abstract:     map[string]bool{},
+		parents:      map[string]string{},
+		chains:       map[string][]string{},
+		provenance:   map[string]map[string]string{},
+		previews:     map[string]*PreviewConfig{},
+		previewBases: map[string]*EnvironmentConfig{},
+	}
+}
+
 // resolveConfigDocument applies top-level x- key stripping and environment
 // inheritance to an expanded config document. A document that uses none of
 // these features is returned unchanged (same bytes, nil metadata) so the
 // strict decoder reports exactly what it reported before inheritance existed.
 func resolveConfigDocument(data []byte, isJSON bool) ([]byte, *environmentResolution, error) {
+	return resolveConfigDocumentWithPreview(data, isJSON, nil)
+}
+
+// resolveConfigDocumentWithPreview is resolveConfigDocument that also
+// synthesizes the requested preview environment as `<identity>: {extends:
+// <base>}` before chain resolution. A preview request always takes the
+// full resolution path.
+func resolveConfigDocumentWithPreview(data []byte, isJSON bool, instance *previewRequest) ([]byte, *environmentResolution, error) {
 	if isJSON {
-		return resolveJSONConfigDocument(data)
+		return resolveJSONConfigDocument(data, instance)
 	}
-	return resolveYAMLConfigDocument(data)
+	return resolveYAMLConfigDocument(data, instance)
+}
+
+// injectPreviewEnvironment selects the preview base (D3) and appends the
+// synthesized preview environment to the declared environments.
+func injectPreviewEnvironment(declared []declaredEnvironment, instance *previewRequest) ([]declaredEnvironment, error) {
+	if instance == nil {
+		return declared, nil
+	}
+	var bases, names []string
+	for _, env := range declared {
+		names = append(names, env.name)
+		if env.preview != nil {
+			bases = append(bases, env.name)
+		}
+	}
+	base, err := ResolvePreviewBase(bases, names, instance.base)
+	if err != nil {
+		return nil, err
+	}
+	for _, env := range declared {
+		if env.name == instance.identity {
+			return nil, fmt.Errorf("environment %s is declared in the config and conflicts with the identity of preview %s; rename the environment or choose another preview name", instance.identity, instance.name)
+		}
+	}
+	instance.base = base
+	return append(declared, declaredEnvironment{
+		name:       instance.identity,
+		body:       newEnvMapping(),
+		extends:    base,
+		hasExtends: true,
+	}), nil
+}
+
+// decodePreviewBases decodes the resolved body of every abstract preview
+// base so its preview: block can be validated against its services.
+// Decode failures are left to the concrete environments that use the base.
+func decodePreviewBases(declared []declaredEnvironment, resolved map[string]*envNode, meta *environmentResolution, isJSON bool) {
+	for _, env := range declared {
+		if env.preview == nil || !env.abstract {
+			continue
+		}
+		body := withPlaceholderBuildContexts(resolved[env.name], isJSON)
+		var decoded EnvironmentConfig
+		if isJSON {
+			var buf bytes.Buffer
+			writeEnvNodeJSON(&buf, body)
+			if json.Unmarshal(buf.Bytes(), &decoded) != nil {
+				continue
+			}
+		} else if decodeYAMLNodeStrict(envNodeToYAML(body), &decoded) != nil {
+			continue
+		}
+		meta.previewBases[env.name] = &decoded
+	}
 }
 
 // ---- YAML adapter ----
 
-func resolveYAMLConfigDocument(data []byte) ([]byte, *environmentResolution, error) {
+func resolveYAMLConfigDocument(data []byte, instance *previewRequest) ([]byte, *environmentResolution, error) {
 	var document yaml.Node
 	if err := yaml.Unmarshal(data, &document); err != nil {
+		if instance != nil {
+			return nil, nil, &configDecodeError{err: err}
+		}
 		return data, nil, nil // the strict decoder reports syntax errors
 	}
 	if document.Kind != yaml.DocumentNode || len(document.Content) == 0 || document.Content[0].Kind != yaml.MappingNode {
+		if instance != nil {
+			return nil, nil, fmt.Errorf("%s", noPreviewBaseMessage)
+		}
 		return data, nil, nil
 	}
-	if !yamlDocumentNeedsResolution(document.Content[0]) {
+	if instance == nil && !yamlDocumentNeedsResolution(document.Content[0]) {
 		return data, nil, nil
 	}
 
@@ -343,10 +440,18 @@ func resolveYAMLConfigDocument(data []byte) ([]byte, *environmentResolution, err
 			keyNodes[env.name] = nameNode
 			declared = append(declared, env)
 		}
+		declared, err = injectPreviewEnvironment(declared, instance)
+		if err != nil {
+			return nil, nil, err
+		}
+		if instance != nil {
+			keyNodes[instance.identity] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: instance.identity}
+		}
 		resolved, resolution, err := resolveEnvironmentInheritance(declared)
 		if err != nil {
 			return nil, nil, err
 		}
+		decodePreviewBases(declared, resolved, resolution, false)
 		meta = resolution
 		rebuilt := *environments
 		rebuilt.Content = nil
@@ -359,8 +464,12 @@ func resolveYAMLConfigDocument(data []byte) ([]byte, *environmentResolution, err
 		stripped.Content[environmentsIndex] = &rebuilt
 	}
 	if meta == nil {
-		meta = &environmentResolution{abstract: map[string]bool{}, parents: map[string]string{}, chains: map[string][]string{}, provenance: map[string]map[string]string{}}
+		if instance != nil {
+			return nil, nil, fmt.Errorf("%s", noPreviewBaseMessage)
+		}
+		meta = newEnvironmentResolution()
 	}
+	meta.instance = instance
 
 	encoded, err := yaml.Marshal(&stripped)
 	if err != nil {
@@ -392,6 +501,16 @@ func declareYAMLEnvironment(name string, node *yaml.Node) (declaredEnvironment, 
 					return env, fmt.Errorf("environment %s: line %d: abstract must be true or false", name, value.Line)
 				}
 				env.abstract = abstract
+				continue
+			case environmentPreviewKey:
+				if value.Kind == yaml.ScalarNode && value.ShortTag() == "!!null" {
+					continue
+				}
+				var policy PreviewConfig
+				if err := decodeYAMLNodeStrict(value, &policy); err != nil {
+					return env, &configDecodeError{err: fmt.Errorf("environment %s: preview: %w", name, err)}
+				}
+				env.preview = &policy
 				continue
 			}
 			copyNode.Content = append(copyNode.Content, key, value)
@@ -760,7 +879,7 @@ func yamlDocumentNeedsResolution(root *yaml.Node) bool {
 		}
 	}
 	for _, env := range yamlEnvironmentValues(environments, 0) {
-		if yamlHasKey(env, environmentExtendsKey, 0) || yamlHasKey(env, environmentAbstractKey, 0) {
+		if yamlHasKey(env, environmentExtendsKey, 0) || yamlHasKey(env, environmentAbstractKey, 0) || yamlHasKey(env, environmentPreviewKey, 0) {
 			return true
 		}
 	}
@@ -908,12 +1027,15 @@ func writeJSONObject(buf *bytes.Buffer, count int, entry func(i int) (string, fu
 	buf.WriteByte('}')
 }
 
-func resolveJSONConfigDocument(data []byte) ([]byte, *environmentResolution, error) {
+func resolveJSONConfigDocument(data []byte, instance *previewRequest) ([]byte, *environmentResolution, error) {
 	root, ok := parseJSONObject(data)
 	if !ok {
+		if instance != nil {
+			return nil, nil, &configDecodeError{err: fmt.Errorf("invalid JSON document")}
+		}
 		return data, nil, nil
 	}
-	needs := false
+	needs := instance != nil
 	environmentsIndex := -1
 	for i, entry := range root {
 		if strings.HasPrefix(entry.key, extensionKeyPrefix) {
@@ -932,7 +1054,7 @@ func resolveJSONConfigDocument(data []byte) ([]byte, *environmentResolution, err
 			}
 			fields, _ := parseJSONObject(env.value)
 			for _, field := range fields {
-				if field.key == environmentExtendsKey || field.key == environmentAbstractKey {
+				if field.key == environmentExtendsKey || field.key == environmentAbstractKey || field.key == environmentPreviewKey {
 					needs = true
 				}
 			}
@@ -953,10 +1075,15 @@ func resolveJSONConfigDocument(data []byte) ([]byte, *environmentResolution, err
 			}
 			declared = append(declared, env)
 		}
+		declared, err := injectPreviewEnvironment(declared, instance)
+		if err != nil {
+			return nil, nil, err
+		}
 		resolved, resolution, err := resolveEnvironmentInheritance(declared)
 		if err != nil {
 			return nil, nil, err
 		}
+		decodePreviewBases(declared, resolved, resolution, true)
 		meta = resolution
 		var concrete []declaredEnvironment
 		for _, env := range declared {
@@ -971,8 +1098,12 @@ func resolveJSONConfigDocument(data []byte) ([]byte, *environmentResolution, err
 		environmentsJSON = buf.Bytes()
 	}
 	if meta == nil {
-		meta = &environmentResolution{abstract: map[string]bool{}, parents: map[string]string{}, chains: map[string][]string{}, provenance: map[string]map[string]string{}}
+		if instance != nil {
+			return nil, nil, fmt.Errorf("%s", noPreviewBaseMessage)
+		}
+		meta = newEnvironmentResolution()
 	}
+	meta.instance = instance
 
 	var kept []jsonObjectEntry
 	for i, entry := range root {
@@ -1015,6 +1146,18 @@ func declareJSONEnvironment(name string, raw json.RawMessage) (declaredEnvironme
 						return env, fmt.Errorf("environment %s: abstract must be true or false", name)
 					}
 					env.abstract = abstract
+					continue
+				case environmentPreviewKey:
+					if jsonValueKind(field.value) == 'n' {
+						continue
+					}
+					var policy PreviewConfig
+					decoder := json.NewDecoder(bytes.NewReader(field.value))
+					decoder.DisallowUnknownFields()
+					if err := decoder.Decode(&policy); err != nil {
+						return env, &configDecodeError{err: fmt.Errorf("environment %s: preview: %w", name, err)}
+					}
+					env.preview = &policy
 					continue
 				}
 				kept = append(kept, field)
@@ -1124,7 +1267,8 @@ func (r *environmentResolution) unusedAbstractEnvironments() []string {
 	}
 	var out []string
 	for name := range r.abstract {
-		if !extended[name] {
+		// A preview template is used by preview deploys, not by extends.
+		if !extended[name] && r.previews[name] == nil {
 			out = append(out, name)
 		}
 	}

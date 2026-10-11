@@ -29,7 +29,7 @@ func (s *Server) registeredRoutes() []takodRoute {
 		{"/v1/remove-service", s.handleRemoveService}, {"/v1/services/finalize", s.handleServiceFinalize}, {"/v1/services/restore", s.handleServiceRestore},
 		{"/v1/proxy-file", s.handleProxyFile}, {"/v1/proxy", s.handleProxy},
 		{"/v1/certs", s.handleProxyCertificates}, {"/v1/certs/status", s.handleProxyCertificateStatus}, {"/v1/acme-dns", s.handleProxyACMEDNS}, {"/v1/ports/allocate", s.handlePortAllocate},
-		{"/v1/cleanup", s.handleCleanup}, {"/v1/state", s.handleState}, {"/v1/lease", s.handleLease}, {"/v1/node-lease/maintenance", s.handleNodeMaintenanceLease}, {"/v1/fence", s.handleFence}, {"/v1/env-bundle", s.handleEnvBundle},
+		{"/v1/cleanup", s.handleCleanup}, {"/v1/state", s.handleState}, {"/v1/state/previews", s.handleStatePreviews}, {"/v1/lease", s.handleLease}, {"/v1/node-lease/maintenance", s.handleNodeMaintenanceLease}, {"/v1/fence", s.handleFence}, {"/v1/env-bundle", s.handleEnvBundle},
 		{"/v1/backups", s.handleBackups}, {"/v1/backups/restore", s.handleBackupRestore}, {"/v1/backups/postgres/verify", s.handlePostgresBackupVerification}, {"/v1/backups/cleanup", s.handleBackupCleanup},
 		{"/v1/backup-schedule", s.handleBackupSchedule}, {"/v1/metadata", s.handleMetadata}, {"/v1/mesh/key", s.handleMeshKey},
 		{"/v1/mesh/apply", s.handleMeshApply}, {"/v1/mesh/peer-sets", s.handleMeshPeerSets}, {"/v1/mesh/peer-sets/", s.handleMeshPeerSets}, {"/v1/mesh/status", s.handleMeshStatus}, {"/v1/images/exists", s.handleImageExists},

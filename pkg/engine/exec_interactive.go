@@ -72,9 +72,10 @@ func (e *Engine) ExecInteractive(ctx context.Context, req ExecRequest, terminal 
 	if !ok {
 		return nil, invalidRequestf("service '%s' not found in environment %s", req.Service, envName)
 	}
-	for _, server := range cfg.Servers {
-		e.RegisterSecret(server.Password)
-	}
+	e.RegisterServerPasswords(cfg.Servers)
+	// An unreadable envFile fails the one-off env file build, which is
+	// authoritative; attach mode does not read it.
+	_ = e.RegisterServiceEnvFileValues(singleService(req.Service, service))
 
 	mode := takod.ExecModeAttach
 	if req.OneOff {

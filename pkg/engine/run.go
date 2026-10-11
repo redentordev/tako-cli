@@ -11,6 +11,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/deployplan"
 	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
+	"github.com/redentordev/tako-cli/pkg/secrets"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
@@ -109,11 +110,14 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 		return nil, invalidRequestf("server %s is %s and cannot receive new assignments", req.ServerName, server.Lifecycle)
 	}
 
-	for _, value := range req.EnvVars {
-		e.RegisterSecret(value)
+	for name, value := range req.EnvVars {
+		e.RegisterSecretAs(value, secrets.RunEnvLabel(name))
 	}
-	e.RegisterSecret(server.Password)
+	e.RegisterSecretAs(server.Password, secrets.ServerPasswordLabel(req.ServerName))
 	e.RegisterRegistrySecrets(req.Config)
+	if services, err := cfg.GetServices(req.Environment); err == nil {
+		e.RegisterBackupSecrets(services)
+	}
 	e.RegisterACMEDNSSecrets(req.Config)
 
 	session := &RunSession{

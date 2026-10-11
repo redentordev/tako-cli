@@ -24,13 +24,21 @@ var configExplainCmd = &cobra.Command{
 expansion, environment inheritance (extends), default resolution, and
 validation. When the selected environment extends another, the header shows
 the extends chain and each environment-scoped value names the environment
-that supplied it. This command does not contact servers or write files.`,
+that supplied it. This command does not contact servers or write files.
+
+With --redaction, print only the redaction report: every config value Tako
+masks in output and its marker label, each service's secrets, env and
+envFile keys marked masked or visible with the reason, secrets that cannot
+be resolved, the names kept public, and the heuristic pattern IDs. The
+report never prints a value, never contacts servers and never runs secret
+provider CLIs.`,
 	RunE: runConfigExplain,
 }
 
 func init() {
 	rootCmd.AddCommand(configCmd)
 	configCmd.AddCommand(configExplainCmd)
+	configExplainCmd.Flags().BoolVar(&configExplainRedaction, "redaction", false, "Report what Tako masks in output for the environment, and why (no values, offline)")
 }
 
 func runConfigExplain(cmd *cobra.Command, args []string) error {
@@ -41,6 +49,9 @@ func runConfigExplain(cmd *cobra.Command, args []string) error {
 	}
 	if err := ensureDeployRuntimeSupported(cfg); err != nil {
 		return formatDeployConfigError(configPath, fmt.Errorf("invalid config: %w", err))
+	}
+	if configExplainRedaction {
+		return runConfigRedactionReport(cmd.OutOrStdout(), cfg, configPath, getEnvironmentName(cfg))
 	}
 
 	rawCfg, err := loadRawConfigForExplain(configPath)
@@ -73,6 +84,9 @@ func runConfigExplain(cmd *cobra.Command, args []string) error {
 
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Effective config: %s\n", filepath.Clean(configPath))
+	if instance := cfg.PreviewInstance(); instance != nil {
+		fmt.Fprintf(out, "Preview: %s (from %s, ttl %s, max %d)\n", instance.Name, instance.Base, instance.Policy.EffectiveTTL(), instance.Policy.EffectiveMax())
+	}
 	if len(chain) > 0 {
 		fmt.Fprintf(out, "Environment: %s (extends %s)\n\n", envName, strings.Join(chain, " -> "))
 	} else {
@@ -167,7 +181,17 @@ func loadRawConfigForExplain(configPath string) (*takoconfig.Config, error) {
 	// The raw (unexpanded) document goes through the same resolver as
 	// LoadConfig, so explain sees the same flattened environments while
 	// still telling ${VAR} values apart from literal config.
-	return takoconfig.ParseConfigDocument(data, strings.EqualFold(filepath.Ext(configPath), ".json"))
+	isJSON := strings.EqualFold(filepath.Ext(configPath), ".json")
+	if previewRequested() {
+		// --preview explains the instance the next deploy --preview would
+		// produce, offline: the base is -e or the only preview base.
+		// Unexpanded ${VAR} values may not render as preview hosts; the raw
+		// document then only lacks source labels for the instance.
+		if raw, err := takoconfig.ParseConfigDocumentWithOptions(data, isJSON, takoconfig.LoadOptions{Preview: &takoconfig.PreviewInstance{Base: envFlag, Name: previewFlag}}); err == nil {
+			return raw, nil
+		}
+	}
+	return takoconfig.ParseConfigDocument(data, isJSON)
 }
 
 // explainServersSource names the environment that chose the server list

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,5 +162,68 @@ func TestConfigExplainWithEnvironmentSkipsOtherEnvironmentVariables(t *testing.T
 	}
 	if !strings.Contains(out.String(), "Environment: preview") || !strings.Contains(out.String(), "host: 203.0.113.10 (env)") {
 		t.Fatalf("explain output = %s", out.String())
+	}
+}
+
+// scopedPreviewCommandConfig adds an abstract preview base (review) that
+// extends the preview environment; production stays out of its scope.
+const scopedPreviewCommandConfig = scopedCommandConfig + `  review:
+    abstract: true
+    extends: preview
+    preview:
+      ttl: 72h
+`
+
+func TestPreviewConfigLoadIsScopedToPreviewBase(t *testing.T) {
+	writeScopedCommandConfig(t)
+	if err := os.WriteFile("tako.yaml", []byte(scopedPreviewCommandConfig), 0600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	resetValidateGlobals(t)
+	setPreviewFlag(t, "pr-42")
+
+	// deploy --preview -e review and config explain --preview -e review.
+	envFlag = "review"
+	cfg, err := loadSelectedEnvironmentConfig("")
+	if err != nil {
+		t.Fatalf("loadSelectedEnvironmentConfig --preview -e review: %v", err)
+	}
+	if instance := cfg.PreviewInstance(); instance == nil || instance.Identity != "preview-pr-42" || instance.Base != "review" {
+		t.Fatalf("preview instance = %+v", instance)
+	}
+	if getEnvironmentName(cfg) != "preview-pr-42" {
+		t.Fatalf("environment = %q", getEnvironmentName(cfg))
+	}
+	if _, ok := cfg.Environments["production"]; ok {
+		t.Fatal("production environment is still in the preview config")
+	}
+	if _, ok := cfg.Servers["production"]; ok {
+		t.Fatal("production server with unset host is still in the preview config")
+	}
+
+	// ps/logs/exec/history/rollback --preview -e review.
+	stubPreviewRecord(t, previewListItem("pr-42", "review"), nil)
+	cfg, err = loadCommandConfigOrError(context.Background(), "")
+	if err != nil {
+		t.Fatalf("loadCommandConfigOrError --preview -e review: %v", err)
+	}
+	if getEnvironmentName(cfg) != "preview-pr-42" {
+		t.Fatalf("environment = %q", getEnvironmentName(cfg))
+	}
+	if _, ok := cfg.Servers["production"]; ok {
+		t.Fatal("production server is still in the preview command config")
+	}
+
+	// The base chain's variables are required.
+	os.Unsetenv("CMD_SCOPE_PREVIEW_URL")
+	if _, err := loadSelectedEnvironmentConfig(""); err == nil || !strings.Contains(err.Error(), "CMD_SCOPE_PREVIEW_URL") || strings.Contains(err.Error(), "PRODUCTION") {
+		t.Fatalf("err = %v, want only the base variable", err)
+	}
+	t.Setenv("CMD_SCOPE_PREVIEW_URL", "https://preview.example.com")
+
+	// Without -e every variable is required.
+	envFlag = ""
+	if _, err := loadSelectedEnvironmentConfig(""); err == nil || !strings.Contains(err.Error(), "CMD_SCOPE_PRODUCTION") {
+		t.Fatalf("err = %v, want the production variables without -e", err)
 	}
 }

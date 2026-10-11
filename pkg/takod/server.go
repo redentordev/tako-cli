@@ -1239,6 +1239,22 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if request.RemovePreviewData {
+		// The preview guard runs before anything is drained or removed.
+		request.DataDir = s.dataDir
+		noop, err := checkPreviewTeardownGuard(r.Context(), request.DataDir, request.Project, request.Environment, request.PreviewUpdatedAt)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		if noop {
+			w.Header().Set("Content-Type", "application/json")
+			encoder := json.NewEncoder(w)
+			encoder.SetIndent("", "  ")
+			_ = encoder.Encode(&CleanupResponse{Project: request.Project, Environment: request.Environment, PreviewNotFound: true})
+			return
+		}
+	}
 	var releaseJobDrain func()
 	var releaseBackupDrain func()
 	releaseSchedulerDrains := true
@@ -1288,16 +1304,44 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	finalizeFailed := false
+	if request.RemovePreviewData {
+		// A preview's record is deleted last: its scheduler, alert and port
+		// state go first so a failure leaves the record for the retry.
+		request.BeforeRecordRemoval = func(ctx context.Context, response *CleanupResponse) error {
+			releaseSchedulerDrains = false
+			jobs, err := s.removeEnvironmentSchedulerState(ctx, request.Project, request.Environment)
+			if err == nil {
+				err = ReleaseProjectPortAllocations(ctx, s.dataDir, request.Project, request.Environment)
+				if err != nil {
+					err = fmt.Errorf("failed to release port allocations: %w", err)
+				}
+			}
+			if err != nil {
+				finalizeFailed = true
+				s.jobScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+				s.backupScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
+				return err
+			}
+			response.JobsRemoved = jobs
+			releaseSchedulerDrains = true
+			return nil
+		}
+	}
 	response, err := CleanupProjectWithDataDir(r.Context(), s.dataDir, request)
 	if err != nil {
-		if recoveredSchedulerDrain {
+		if recoveredSchedulerDrain && !finalizeFailed {
 			s.jobScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
 			s.backupScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		status := http.StatusBadRequest
+		if finalizeFailed {
+			status = http.StatusInternalServerError
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
-	if request.RemoveContainers || request.RemoveTakodState {
+	if !request.RemovePreviewData && (request.RemoveContainers || request.RemoveTakodState) {
 		// Runtime is gone. Keep the in-memory and durable drain barriers if
 		// schedule deletion fails so deleted work cannot restart fail-open.
 		releaseSchedulerDrains = false
@@ -1327,6 +1371,40 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
+}
+
+// removeEnvironmentSchedulerState removes the backup and job schedules and
+// the scheduler alert state of one environment and returns the number of
+// removed jobs.
+func (s *Server) removeEnvironmentSchedulerState(_ context.Context, project string, environment string) (int, error) {
+	if _, err := s.backupScheduler.RemoveProject(project, environment); err != nil {
+		return 0, fmt.Errorf("failed to remove backup schedules after cleanup: %w", err)
+	}
+	removedJobs, err := s.jobScheduler.RemoveProject(project, environment)
+	if err != nil {
+		return 0, fmt.Errorf("failed to remove job schedules after cleanup: %w", err)
+	}
+	if err := s.alertManager.RemoveConfig(project, environment); err != nil {
+		return 0, fmt.Errorf("failed to remove scheduler alert state after cleanup: %w", err)
+	}
+	return len(removedJobs), nil
+}
+
+// handleStatePreviews lists the preview records of one project on this node.
+func (s *Server) handleStatePreviews(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	response, err := ListPreviewRecords(r.Context(), s.dataDir, r.URL.Query().Get("project"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
@@ -2644,7 +2722,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityLogsStreamV1, CapabilityDeployRestoreOnFailureV1, CapabilityProxyCertStatusV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityLogsStreamV1, CapabilityDeployRestoreOnFailureV1, CapabilityPreviewLifecycleV1, CapabilityProxyCertStatusV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,

@@ -65,8 +65,11 @@ type Config struct {
 	// value provenance when the document used it; nil otherwise.
 	resolution *environmentResolution
 
+	// preview is the preview instance this config was loaded for, or nil.
+	preview *PreviewInstanceInfo
+
 	// deferredVariables lists unset ${VAR} names that were referenced only
-	// by environments or servers removed by LoadConfigForEnvironment.
+	// by environments or servers removed by environment-scoped loading.
 	deferredVariables []string
 	// scopedOutServers maps each server removed by LoadConfigForEnvironment
 	// to the sorted unset ${VAR} names it referenced.
@@ -800,6 +803,11 @@ type EnvironmentConfig struct {
 	Labels        map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`
 	Services      map[string]ServiceConfig `yaml:"services" json:"services"`                               // Services to deploy in this environment
 	SecretSources []SecretSource           `yaml:"secretSources,omitempty" json:"secretSources,omitempty"` // Environment-specific external secret stores
+
+	// Preview makes this environment a preview base (see PreviewConfig).
+	// Like Extends and Abstract it is consumed while the document is
+	// resolved: it is not inherited and is always nil on a loaded config.
+	Preview *PreviewConfig `yaml:"preview,omitempty" json:"preview,omitempty"`
 }
 
 // EnvironmentProxyConfig controls where environment-level proxy routes are
@@ -1355,10 +1363,25 @@ func splitYAMLComment(line string) (string, string) {
 	return line, ""
 }
 
+// LoadOptions changes how LoadConfigWithOptions builds the config.
+type LoadOptions struct {
+	// Preview synthesizes the preview environment preview-<name> from its
+	// base before validation; see PreviewInstance.
+	Preview *PreviewInstance
+	// Environment selects the one environment the command works on and
+	// turns on environment-scoped ${VAR} expansion (see
+	// LoadConfigForEnvironment). With Preview set, the scope is the
+	// preview's base (Preview.Base, or Environment when Base is empty) and
+	// its extends chain: the preview environment is synthesized from it, so
+	// the base is never pruned and its references are always required.
+	// Empty requires every reference in the file.
+	Environment string
+}
+
 // LoadConfig loads the configuration from a YAML or JSON file. Every
 // ${VAR} reference in the file must be set.
 func LoadConfig(configPath string) (*Config, error) {
-	return loadConfig(configPath, "")
+	return LoadConfigWithOptions(configPath, LoadOptions{})
 }
 
 // LoadConfigForEnvironment loads the configuration for a command that works
@@ -1371,10 +1394,12 @@ func LoadConfig(configPath string) (*Config, error) {
 // skipped names are reported by DeferredEnvironmentVariables. With an empty
 // environment this is LoadConfig.
 func LoadConfigForEnvironment(configPath string, environment string) (*Config, error) {
-	return loadConfig(configPath, environment)
+	return LoadConfigWithOptions(configPath, LoadOptions{Environment: environment})
 }
 
-func loadConfig(configPath string, environment string) (*Config, error) {
+// LoadConfigWithOptions is LoadConfig with options. With zero options it
+// behaves exactly like LoadConfig.
+func LoadConfigWithOptions(configPath string, opts LoadOptions) (*Config, error) {
 	// Default to tako.yaml in current directory if not specified
 	// Also check for tako.json if tako.yaml doesn't exist
 	if configPath == "" {
@@ -1438,17 +1463,17 @@ func loadConfig(configPath string, environment string) (*Config, error) {
 	// Expand environment variables in the content with trimming, then
 	// resolve environment inheritance and decode into the Config struct.
 	var parsed *Config
-	if environment == "" {
+	if scope := opts.scopeEnvironment(); scope == "" {
 		expandedData, err := expandEnvWithTrim(string(data), !isJSON)
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand config environment variables: %w", err)
 		}
-		parsed, err = ParseConfigDocument([]byte(expandedData), isJSON)
+		parsed, err = ParseConfigDocumentWithOptions([]byte(expandedData), isJSON, opts)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		parsed, err = parseEnvironmentScopedDocument(string(data), isJSON, environment)
+		parsed, err = parseEnvironmentScopedDocument(string(data), isJSON, scope, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -1478,11 +1503,27 @@ func loadConfig(configPath string, environment string) (*Config, error) {
 // the "failed to parse YAML config:"/"failed to parse JSON config:" prefix
 // for decode failures and "invalid config:" for inheritance failures.
 func ParseConfigDocument(data []byte, isJSON bool) (*Config, error) {
+	return ParseConfigDocumentWithOptions(data, isJSON, LoadOptions{})
+}
+
+// ParseConfigDocumentWithOptions is ParseConfigDocument with load options.
+// With opts.Preview set, the preview environment is synthesized from its
+// base and the preview policy is applied to it before the config is
+// returned; validation is still the caller's job.
+func ParseConfigDocumentWithOptions(data []byte, isJSON bool, opts LoadOptions) (*Config, error) {
 	format := "YAML"
 	if isJSON {
 		format = "JSON"
 	}
-	resolved, resolution, err := resolveConfigDocument(data, isJSON)
+	var instance *previewRequest
+	if opts.Preview != nil {
+		name, err := NormalizePreviewName(opts.Preview.Name)
+		if err != nil {
+			return nil, fmt.Errorf("invalid config: %w", err)
+		}
+		instance = &previewRequest{name: name, identity: PreviewIdentity(name), base: strings.TrimSpace(opts.Preview.Base)}
+	}
+	resolved, resolution, err := resolveConfigDocumentWithPreview(data, isJSON, instance)
 	if err != nil {
 		var decodeErr *configDecodeError
 		if errors.As(err, &decodeErr) {
@@ -1516,11 +1557,16 @@ func ParseConfigDocument(data []byte, isJSON bool) (*Config, error) {
 		}
 	}
 	for name, env := range config.Environments {
-		if env.Extends != "" || env.Abstract {
-			return nil, fmt.Errorf("invalid config: environment %s: extends/abstract could not be resolved", name)
+		if env.Extends != "" || env.Abstract || env.Preview != nil {
+			return nil, fmt.Errorf("invalid config: environment %s: extends/abstract/preview could not be resolved", name)
 		}
 	}
 	config.resolution = resolution
+	if instance != nil {
+		if err := applyPreviewPolicy(&config); err != nil {
+			return nil, fmt.Errorf("invalid config: %w", err)
+		}
+	}
 	return &config, nil
 }
 
