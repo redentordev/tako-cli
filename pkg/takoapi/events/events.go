@@ -46,6 +46,9 @@ const (
 	PhaseHooks = "hooks"
 	// PhaseSummary carries the end-of-operation summary (operation.summary).
 	PhaseSummary = "summary"
+	// PhasePreflight carries checks and recoveries before an operation's
+	// request is admitted (hygiene.reclaimed).
+	PhasePreflight = "preflight"
 )
 
 // Event types. Consumers must tolerate unknown types (additive schema).
@@ -170,6 +173,12 @@ const (
 	// `data.environment` and `data.base`.
 	TypePreviewDestroyed = "preview.destroyed"
 	TypePreviewPruned    = "preview.pruned"
+
+	// TypeHygieneReclaimed (phase "preflight") reports a disk reclaim the
+	// CLI requested after a node denied work for low disk. It carries
+	// `data.server`, `data.endpoint`, `data.bytesFreed` and `data.retrying`
+	// (false when the request body could not be replayed).
+	TypeHygieneReclaimed = "hygiene.reclaimed"
 
 	TypeWarning = "warning"
 

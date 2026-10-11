@@ -76,6 +76,9 @@ func RequestJSONWithTimeout(client any, socket string, method string, endpoint s
 	return RequestJSONWithTimeoutContext(context.Background(), client, socket, method, endpoint, value, timeout)
 }
 
+// RequestJSONWithTimeoutContext sends one JSON request. A free-disk denial
+// from a node with node.disk-hygiene-v1 triggers one reclaim and one retry
+// (hygiene.go).
 func RequestJSONWithTimeoutContext(ctx context.Context, client any, socket string, method string, endpoint string, value any, timeout time.Duration) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -92,6 +95,10 @@ func RequestJSONWithTimeoutContext(ctx context.Context, client any, socket strin
 	if timeout <= 0 {
 		timeout = JSONRequestTimeout
 	}
+	return requestJSONWithReclaim(ctx, client, socket, method, endpoint, value, timeout)
+}
+
+func requestJSONOnce(ctx context.Context, client any, socket string, method string, endpoint string, value any, timeout time.Duration) (string, error) {
 	if structured, ok := client.(structuredJSONClient); ok {
 		return structured.RequestJSONWithTimeout(ctx, method, endpoint, value, timeout)
 	}
@@ -192,7 +199,8 @@ func StreamRequestWithContext(ctx context.Context, client any, socket string, me
 		method = "POST"
 	}
 	if structured, ok := client.(structuredStreamClient); ok {
-		return structured.StreamRequest(ctx, method, endpoint, reader, "application/octet-stream")
+		output, err := structured.StreamRequest(ctx, method, endpoint, reader, "application/octet-stream")
+		return output, reclaimAfterStreamDenial(ctx, client, socket, endpoint, err)
 	}
 	if dialer, ok := client.(UnixSocketDialer); ok {
 		structured, err := NewAgentClient(dialer, socket)
@@ -200,7 +208,8 @@ func StreamRequestWithContext(ctx context.Context, client any, socket string, me
 			return "", err
 		}
 		defer structured.CloseIdleConnections()
-		return structured.StreamRequest(ctx, method, endpoint, reader, "application/octet-stream")
+		output, err := structured.StreamRequest(ctx, method, endpoint, reader, "application/octet-stream")
+		return output, reclaimAfterStreamDenial(ctx, client, socket, endpoint, err)
 	}
 	executor, ok := client.(RequestExecutor)
 	if !ok {
@@ -218,6 +227,9 @@ func StreamRequestWithContext(ctx context.Context, client any, socket string, me
 	}
 	bodyOutput = sanitizeJSONOutput(bodyOutput)
 	if hasStatus && status >= 400 {
+		if isDiskAdmissionDenialResponse(status, bodyOutput) {
+			return bodyOutput, reclaimAfterStreamDenial(ctx, client, socket, endpoint, &HTTPError{Method: method, Endpoint: endpoint, Status: status, Body: bodyOutput})
+		}
 		return bodyOutput, fmt.Errorf("takod stream request %s %s returned HTTP %d: %s", method, endpoint, status, strings.TrimSpace(bodyOutput))
 	}
 	return bodyOutput, nil
