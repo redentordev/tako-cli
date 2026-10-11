@@ -355,6 +355,15 @@ Each node stores enough state to stand alone:
 If a node loses contact with the CLI or peers, it keeps serving its last accepted
 revision. New deployments obey `state.onUnreachableNode`.
 
+With opt-in [self-healing](SELF-HEALING.md), takod restarts an unhealthy
+container or starts a crashed one, but only on its own node and only the
+containers it recorded after the last successful reconcile. It never
+recreates a missing container, moves a replica to another node or changes
+desired state. There is no failover: replicas on a lost node stay down until
+the node returns or an operator applies a placement plan, and
+`state.onUnreachableNode` stays `block`. Self-healing keeps its records,
+counters and journal under `/var/lib/tako/heal/<project>/<env>/`.
+
 ## Lease Scope
 
 Remote operation leases are keyed per app/stage, so two environments that share
@@ -407,6 +416,10 @@ verified:
   then holds the selected environment's lease on that node for the same window
   and warns that other environments and projects on the node are not fenced.
   The first `tako upgrade servers` after updating the CLI takes this path.
+- [Self-healing](SELF-HEALING.md) does not act while the maintenance lease is
+  live (`tako heal status` reports `lease_held`). When the only environment
+  leases on the node are short `self-heal` leases, the command waits for them
+  (at most their expiry, capped at five minutes) instead of exiting 3.
 - A node whose takod does not answer is upgraded or set up without a lease:
   no agent is running that could grant environment leases.
 

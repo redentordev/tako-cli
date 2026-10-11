@@ -37,7 +37,9 @@ func (s *Server) registeredRoutes() []takodRoute {
 		{"/v1/images/build", s.handleImageBuild}, {"/v1/platform", s.handlePlatform}, {"/v1/platform/inventory", s.handleInventoryAuthority}, {"/v1/platform/allocations/authorize", s.handleAllocationAuthorization}, {"/v1/platform/membership/reconcile", s.handleMembershipReconcile},
 		{"/v1/logs", s.handleLogs}, {"/v1/logs/stream", s.handleLogsStream}, {"/v1/exec", s.handleExec}, {"/v1/jobs", s.handleJobs}, {"/v1/jobs/apply", s.handleJobsApply},
 		{"/v1/jobs/runs", s.handleJobRuns}, {"/v1/jobs/trigger", s.handleJobsTrigger}, {"/v1/stats", s.handleStats},
-		{"/v1/alerts", s.handleAlerts}, {"/v1/metrics", s.handleMetrics}, {"/v1/access-logs", s.handleAccessLogs}, {"/v1/discovery/exports", s.handleDiscoveryExports},
+		{"/v1/alerts", s.handleAlerts}, {"/v1/metrics", s.handleMetrics}, {"/v1/metrics/history", s.handleMetricsHistory}, {"/v1/node/status", s.handleNodeStatus}, {"/v1/access-logs", s.handleAccessLogs}, {"/v1/discovery/exports", s.handleDiscoveryExports},
+		{"/v1/hygiene", s.handleHygiene}, {"/v1/hygiene/reclaim", s.handleHygieneReclaim},
+		{"/v1/heal", s.handleHeal},
 	}
 }
 
@@ -60,6 +62,10 @@ var lifecycleSafeMutationPaths = map[string]struct{}{
 	// Alert policy is node-local control-plane state, not a workload mutation.
 	// Keep authenticated disable available on cordoned/draining nodes.
 	"/v1/alerts": {},
+	// Self-healing pause/resume/reset is node-local control state that only
+	// ever stops or re-arms local actions; it must stay available on
+	// cordoned and draining nodes (fence-validated below).
+	"/v1/heal": {},
 }
 
 // lifecycleReadOnlyPostPaths are POST endpoints that only read node state;
@@ -150,8 +156,19 @@ func (s *Server) enrolledLifecycleHandler(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if _, safe := lifecycleSafeMutationPaths[r.URL.Path]; safe && r.URL.Path != "/v1/alerts" {
+		if _, safe := lifecycleSafeMutationPaths[r.URL.Path]; safe && r.URL.Path != "/v1/alerts" && r.URL.Path != "/v1/heal" {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if r.URL.Path == "/v1/heal" {
+			workerFenceAdmissionMu.RLock()
+			defer workerFenceAdmissionMu.RUnlock()
+			fencedContext, fenceErr := s.validateMutationFence(r)
+			if fenceErr != nil {
+				http.Error(w, fenceErr.Error(), http.StatusConflict)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(fencedContext))
 			return
 		}
 		if r.Method == http.MethodPut && r.URL.Path == "/v1/alerts" {
@@ -238,5 +255,5 @@ func alertDisableRequest(r *http.Request) (bool, error) {
 	if err := validateAlertConfigRequest(request); err != nil {
 		return false, err
 	}
-	return !alertPolicyEnabled(request.Policy), nil
+	return !alertConfigEnabled(request), nil
 }

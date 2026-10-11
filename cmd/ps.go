@@ -182,6 +182,9 @@ func displayServices(services []ServiceInfo) {
 		if svc.Health != "" {
 			statusStr = fmt.Sprintf("%s (%s)", statusStr, svc.Health)
 		}
+		if note := engine.HealStatusNote(svc.Heal); note != "" {
+			statusStr = fmt.Sprintf("%s %s", statusStr, note)
+		}
 
 		revision := svc.Revision
 		if revision == "" {

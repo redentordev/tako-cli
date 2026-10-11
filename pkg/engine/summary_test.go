@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -622,6 +623,35 @@ func TestBuildDeploySummaryBookkeepingFailureAndRunRows(t *testing.T) {
 	}
 	if rows["web"].Health != SummaryHealthUnknown {
 		t.Fatalf("web health = %q, want unknown after read error", rows["web"].Health)
+	}
+}
+
+func TestDeploySummaryAlertPushFailureIsAWarning(t *testing.T) {
+	lowDisk := errors.New("apply scheduler alert policy on app-1: 507 Insufficient Storage")
+	defaultOnly := &deployer.AlertPolicyApplyError{DefaultOnly: true, Err: lowDisk}
+	explicit := &deployer.AlertPolicyApplyError{Err: lowDisk}
+	if !isDefaultOnlyAlertPolicyError(fmt.Errorf("wrapped: %w", defaultOnly)) || isDefaultOnlyAlertPolicyError(explicit) || isDefaultOnlyAlertPolicyError(lowDisk) {
+		t.Fatal("default-only classification")
+	}
+	if warning := alertPolicyWarning(defaultOnly); !strings.Contains(warning, "default node-side monitoring was not configured") || !strings.Contains(warning, "507") {
+		t.Fatalf("default-only warning = %q", warning)
+	}
+	warning := alertPolicyWarning(explicit)
+	if !strings.Contains(warning, "the rollout succeeded") {
+		t.Fatalf("explicit warning = %q", warning)
+	}
+	services := map[string]config.ServiceConfig{"web": {Image: "web:new", Port: 80}}
+	summary := buildDeploySummary(identityRedact, deploySummaryInput{
+		Project: "shop", Environment: "production", StartedAt: summaryTestStart,
+		Services: services, ServicesToDeploy: services,
+		Outcomes: []ServiceOutcome{{Name: "web", Image: "web:new", Action: OutcomeDeployed}},
+		Warnings: []string{warning},
+	})
+	if summary.Outcome == SummaryOutcomeFailed || summary.Outcome == SummaryOutcomePartial {
+		t.Fatalf("alert push failure changed the outcome to %q", summary.Outcome)
+	}
+	if !slices.Contains(summary.Notes, warning) {
+		t.Fatalf("notes = %v, want the alert warning", summary.Notes)
 	}
 }
 

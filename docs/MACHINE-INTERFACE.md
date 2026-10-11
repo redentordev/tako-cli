@@ -121,6 +121,13 @@ Events follow `pkg/takoapi/events.Event` (apiVersion
   `kind: job`, `persistent`, or `not present at target`) for each service
   it leaves alone. Including a persistent service with
   `--include-persistent` emits a `warning` event.
+- `hygiene.reclaimed` (phase `preflight`) reports a disk reclaim the CLI
+  requested after a node with `node.disk-hygiene-v1` denied a request for
+  low disk (HTTP 507 `operation denied`). `data` carries `server`,
+  `endpoint`, `bytesFreed` and `retrying`. With `retrying: true` the
+  original request is retried exactly once; a second denial returns the
+  original error. With `retrying: false` (a streamed body that cannot be
+  replayed) the command fails with the original error and asks to re-run.
 - Commands that write proxy routes (`deploy`, `rollback`, `run`, `scale`,
   placement apply) resolve `proxy.trustedProxies` presets during proxy
   preflight. Using a cached range list after a failed fetch, or failing to
@@ -621,8 +628,14 @@ exit 2 and still emit the document). A missing config exits 2. `tako doctor
 --output json` returns a `DoctorResult` with project/environment,
 `skipRemote`, overall `status` (`ok` or `attention`), pass/warn/fail
 counts, and `checks` (`name`, `status` `pass|warn|fail|skip`, `detail`,
-`remediation`); any failed check exits with code 6 and still emits the
-document. `tako drift --output json` (single-shot; `--watch` is rejected in
+`remediation`, and an optional stable `id`); any failed check exits with
+code 6 and still emits the document. The per-server "Disk Hygiene" checks
+carry `id: "disk-hygiene"` (read from takod `GET /v1/hygiene`): `pass` for a
+run in the last 48h and no disk pressure; `warn` for unrotated container
+logs over 1 GiB, a default log rotation skipped by operator policy, a last
+run that skipped images for unreadable state, no recorded scope, pressure,
+no recent run, or a node without `node.disk-hygiene-v1` ("upgrade for disk
+hygiene"); `fail` when a reclaim left a filesystem below its floor. `tako drift --output json` (single-shot; `--watch` is rejected in
 machine modes) returns a `DriftResult` with project/environment, `drifted`,
 per-drift entries (`service`, `type`, `severity`, `expected`, `actual`,
 `details`), `servicesOk`, and timings; detected drift exits with code 6 and
@@ -630,7 +643,10 @@ still emits the document. `tako metrics --output json` (single-shot;
 `--live` is rejected in machine modes) returns a `MetricsResult` with
 project/environment, the `--server` filter when set, `collectedAt`, and
 per-node samples where `metrics` carries the takod `/v1/metrics` document
-verbatim (monitoring-agent schema) or `error` says why the read failed. The
+verbatim (legacy agent schema; native nodes add `source: "takod"`,
+`interval_seconds`, `cpu_count`, `docker_disk`, `disk.inodes_percent`, and
+`network`/`disk_io` rates and totals), an additive `status` with the node
+status document when the node provides one, or `error` says why the read failed. The
 takod response also has an additive `alerts` array. Each credential-free alert
 scope contains `project`, `environment`, `configured`, `evaluatedAt`, aggregate
 active/pending/exhausted counts, subject counters and timestamps, and bounded
@@ -648,7 +664,157 @@ represented as a node-down event; only the external observer emits reachability
 `0` when it cannot read that owner. `owner_present` is `0` when no environment
 member is currently schedulable; system and container metrics are still
 collected from the configured nodes. All nodes failing exits 1, a partial read
-exits 6, both still emit the document. `tako stats --output json`
+exits 6, both still emit the document.
+
+`tako metrics --since <duration|RFC3339> [--step <duration>] --output json`
+returns a `MetricsHistoryResult` with `apiVersion`, `kind`, `project`,
+`environment`, the `server` filter when set, the requested `since` and `step`
+(`7d` is normalized to `168h`; `step` is omitted when takod picks it), `nodes`
+(`server`, `host`, and either `history` or `error`) and `error`. `history` is the
+takod `GET /v1/metrics/history?since=&until=&step=` document verbatim:
+`node`, `intervalSeconds`, `retentionSeconds`, `from`, `to`, `step`,
+`stepSeconds`, `truncated` (window clamped to retention), `buckets`
+(`t`, `n`, `cpu`/`mem`/`disk`/`dockerDisk`/`load1` as `{min, avg, max}`,
+`rxRate`/`txRate`/`readRate`/`writeRate` in bytes per second as `{avg, max}`),
+`last` (newest sample), `gaps` (`from`, `to`; more than three intervals
+without samples) and `boots`. takod picks at most 360 buckets by default and
+rejects (HTTP 400) a step below the sampling interval or more than 1440
+buckets. History requires the `node.metrics-history-v1` capability, which
+takod advertises only while native collection is on (`--metrics-interval` >
+0); a node without it gets an `error` naming `tako upgrade servers`.
+`--since` with `--live` or `--once` exits 2; all nodes failing exits 1 and a
+partial read exits 6, both still emitting the document.
+
+`GET /v1/node/status` (capability `node.status-v1`) returns `node`,
+`evaluatedAt`, `os` (`packageManager`, `pendingUpdates`, `securityUpdates`,
+`securityPackages`, `listsAgeSeconds`, `rebootRequired`,
+`rebootRequiredSince`, `rebootPackages`, `checkedAt`, `stale`) and
+`conditions` (`type` of `os-updates`, `reboot-required`, `clock-sync`,
+`docker-daemon` or `metrics-collector`; `status` of `ok`, `warn`, `fail` or
+`unknown`; `reason`, `detail`, `since`, `checkedAt`, `stale`). The same
+document is the additive `status` of `GET /v1/metrics`. Conditions are reported
+only; Tako never installs updates or reboots a node. Node-scoped alerts of kind
+`node` (`reboot_required`, `security_updates_pending`, `clock_unsynchronized`,
+`docker_unreachable`) are published through the monitoring alert sources.
+`DoctorResult` adds node-status checks under `Node Agent Health`; nodes without
+`node.status-v1` report them as `skip` with remediation `tako upgrade servers`.
+
+On nodes advertising `monitoring.health-v1`, the `/v1/alerts` response has
+an additive `sources` object. It contains `evaluatedAt`, `subjects` (`kind`,
+`subject`, `node`, `state`, `severity`, `reasons`, `since`,
+`lastObservedAt`, `details`, `paused`, `flapping`), bounded `deliveries`,
+`pendingDeliveries` and `exhaustedDeliveries`. `PUT /v1/alerts` additively
+accepts `monitors`, `host`, `containers`, `certificates` and
+`serviceTargets` (per-service webhook targets, never returned).
+
+`tako monitor --output json` reads that status from every environment node
+in parallel (10s per node) and returns a `MonitorResult`. The document has
+`project`, `environment`, the optional `service` filter, and `status`
+(`ok`, `attention`, `unreachable` or `unsupported`). `counts` gives `ok`,
+`alerting`, `paused` and `unknown`. `nodes` has per-node `node`,
+`reachable`, `supported`, optional `error`, `subjects` (`kind`, `subject`,
+`state`, `severity`, `reasons`, `since`, `lastCheckedAt`, `details`),
+`pendingDeliveries` and `exhaustedDeliveries`. `notDeployed` lists
+monitored services that no node reports.
+
+Exit codes for `tako monitor --output json`:
+
+- 0: everything is ok.
+- 6: any subject is alerting or flapping, a service is not deployed, or a
+  node could not be read.
+- 4: every node is unreachable.
+- 2: no node advertises `monitoring.health-v1`.
+
+In every case the document is still emitted. `--watch` and `--local` are
+human-only and rejected in machine modes. `tako prometheus` adds:
+
+- `tako_monitor_subject_active{project,environment,node,kind,subject,severity}`
+- `tako_monitor_subject_last_observed_timestamp_seconds`
+- `tako_monitor_pending_deliveries{project,environment,node}`
+- `tako_monitor_exhausted_deliveries{project,environment,node}`
+- `tako_host_metrics_stale{node}`
+
+Alert webhooks use payload schema v1 (`schemaVersion: 1`) for every kind,
+including jobs and backups. The payload contains:
+
+- `eventId` and `episodeId` (stable across retries).
+- `transition`: `opening`, `recovery`, `escalation`, `event` or
+  `suppressed`.
+- `event`, `project`, `environment`, `node` (`external` for
+  `tako monitor --local`), `kind`, `subject` (`service` is an alias),
+  `severity` (`warning` or `critical`).
+- `reasons`, `details` (string values only), `openedAt`, `message` and
+  `timestamp`.
+
+Values are closed-vocabulary codes, public names and numbers. Subjects that
+are not service names start with `@`. Slack and Discord receive only
+`message`. The kinds are:
+
+| Kind | Scope | Subjects | Reasons | Opening / recovery events |
+|---|---|---|---|---|
+| `service` | scope | service | `unreachable`, `unhealthy_status`, `tls_invalid`, `replicas_missing`, `unhealthy` | `service_down`, `health_check_failed` / `service_up`, `health_check_recovered` |
+| `host` | node | `root`, `docker` | `disk_high`, `inodes_high`, `memory_high`, `cpu_high`, `load_high`, `metrics_stale` | `high_disk`, `high_inodes`, `high_memory`, `high_cpu`, `high_load`, `metrics_stale` / `resource_normal` |
+| `container` | scope | service | `crash_loop` (level), `oom` (event) | `container_crash_loop` / `container_recovered`; `container_oom` |
+| `certificate` | scope | domain | `cert_expiring`, `cert_expired` | `ssl_expiring_soon`, `ssl_expired` / `ssl_renewed` |
+| `node` | node | `reboot-required`, `os-updates`, `clock-sync`, `docker-daemon` | `reboot_required`, `security_updates_pending`, `clock_unsynchronized`, `docker_unreachable` | `node_reboot_required`, `node_security_updates`, `node_clock_unsynchronized`, `node_docker_unreachable` / `node_condition_cleared` |
+| `hygiene` | node | `root`, `docker`, `image-gc` | `reclaim_insufficient`, `state_unreadable` | `disk_reclaim_insufficient`, `image_gc_blocked` / `resource_normal`, `image_gc_resumed` |
+| `selfheal` | scope | service, `@node` | `gave_up` (level), `circuit_open` (level, `@node`), `replicas_unhealthy` (level), `action_failed` (event) | `heal_gave_up`, `heal_circuit_open`, `heal_replicas_unhealthy` / `heal_resumed`, `heal_circuit_closed`, `heal_replicas_recovered`; `heal_action_failed` |
+
+Per-service webhooks receive only `service`, `container` and `selfheal`
+subjects of their own service. `selfheal` details are `container`, `action`,
+`reason`, `code`, `actions` and `breaker`; successful restarts and starts are
+never delivered.
+
+#### Self-healing
+
+Nodes advertising `node.self-healing-v1` serve `GET /v1/heal?project=&environment=&journal=N`
+and `PUT /v1/heal` (`project`, `environment`, `action` `pause|resume|reset`,
+optional `service`, `forSeconds` (pause duration; the node computes the end
+time on its own clock), `indefinite`). See [Self-Healing](SELF-HEALING.md).
+
+`tako heal status --output json` reads every environment node (or
+`--server`) in parallel and returns a `HealStatus` document: `project`,
+`environment`, optional `service`, `status` (`ok`, `disabled`, `attention`,
+`unreachable` or `unsupported`) and `nodes`. Each node has `node`,
+`reachable`, `supported`, optional `error`, `enabled`, `evaluatedAt`,
+`pauses` (`service`, `until`, `createdAt`), `breaker` (`open`, `reason`,
+`openedAt`, `until`, `recentActions`), `services` and `journal`. A service
+has `service`, `state` (`ok`, `watching`, `cooldown`, `gave_up`, `paused`,
+`blocked`, `not-converged`, `disabled`), `skip` (a reason code such as
+`lease_held`, `retention`, `maintenance`, `circuit_open`), `revision`,
+`policy`, `pausedUntil`, `gaveUpAt`, `gaveUpReason`, `recentActions`,
+`lastAction`, `lastActionAt`, `lastReason` and `containers` (`id`, `name`,
+`state`, `failures`, `threshold`, `reason`, `code`, `grace`, `actions`,
+`cooldownUntil`). Journal entries have `time`, `node`, `service`,
+`container`, `revision`, `decision`, `reason`, `code` and `result`. Every
+value is a closed-vocabulary code, a public name, a timestamp or a number.
+
+Exit codes: 0 ok or disabled; 6 a service gave up, a breaker is open, or a
+node could not be read; 4 every node unreachable; 2 no node advertises
+`node.self-healing-v1`.
+
+`tako heal pause|resume|reset --output json` returns a `HealChangeResult`:
+`project`, `environment`, `action`, optional `service`, `pausedUntil`,
+`indefinite`, and per-node `nodes` (`node`, `changed`, `pausedUntil`,
+`indefinite`, `error`). It takes the environment's operation leases. Every
+node is checked for `node.self-healing-v1` before any node changes (exit 2
+otherwise); a failure on some nodes exits 6.
+
+`tako ps --output json` service rows have an additive `heal` object (`state`,
+`skip`, `pausedUntil`, `recentActions`, `lastAction`, `lastActionAt`,
+`lastReason`) when a node reports a policy for the service. The state is the
+worst across the selected nodes. It is absent on older agents.
+
+State events of type `heal.restarted`, `heal.started`, `heal.failed`,
+`heal.gave_up`, `heal.reset`, `heal.paused`, `heal.resumed`,
+`heal.circuit_open` and `heal.circuit_closed` are appended to the
+environment event log with names and reason codes only.
+
+A lease held with operation `self-heal` makes CLI lease acquisition wait
+until that lease expires (at most 5m) before failing with exit code 3. CLIs
+released before self-healing do not wait and fail with exit code 3 at once.
+
+`tako stats --output json`
 (point-in-time; `--live` is rejected
 in machine modes) returns a `StatsResult` with project/environment, the
 `--service`/`--all` filters, `collectedAt`, and per-node samples whose
@@ -707,7 +873,15 @@ this contract and is rejected together with the global machine modes.
 `maintenance.disable`, `cleanup`), optional `service`, overall `outcome`
 (`ok`, `partial`, `failed`), and per-server outcomes (`done`, `error`,
 cleanup `warnings`); cleanup errors/warnings exit 6 (previously 0) and
-still emit the document. `tako start`/`tako stop` return the same
+still emit the document. On nodes with `node.disk-hygiene-v1`, each cleanup
+server outcome has an additive `hygiene` object: `removed` (`id`, `refs`,
+`sizeBytes`), `kept` (counts by reason: `in use`, `current`,
+`other environment`, `retention`, `recent`), `bytesFreed`, `dryRun` and
+`failed`. With `tako cleanup --dry-run`, `removed` lists what would be
+removed and nothing changes; a node without the capability reports
+`error` "dry run not supported". Without `--dry-run`, such a node skips
+old-image removal and its outcome carries the warning "old-image removal
+skipped on <server>: node agent needs `tako upgrade servers`". `tako start`/`tako stop` return the same
 `ScaleResult` as `tako scale`. Every `tako backup` action (`list`,
 `create` — single volume or `--all`, `restore`, `delete`, `cleanup`)
 returns a `BackupResult` with the action, volume/backupId when relevant,
@@ -718,12 +892,14 @@ node and credential-free artifact, digest, query-hash, cleanup, and verification
 evidence. `tako setup`
 returns a `SetupResult` with per-node provisioning outcomes: `mode`
 (`fresh`, `reapply`, or `converge` — converge re-runs only firewall,
-deploy access, and the takod runtime and reports the untouched steps as
+deploy access, the takod runtime, and legacy-agent removal and reports the
+untouched steps as
 `skipped`), per-step outcomes keyed by stable step names (`os-check`,
 `packages`, `docker`, `wireguard`, `firewall`, `hardening`,
-`auto-recovery`, `deploy-user`, `monitor-agent`, `takod-install`,
-`takod-service`), the detected `os`, installed `dockerVersion` and
-`takodVersion`, the applied `firewallPorts`, a `firewall` report, and the
+`auto-recovery`, `deploy-user`, `takod-install`, `takod-service`,
+`monitor-agent`; `monitor-agent` removes the legacy bash agent once takod
+advertises `node.metrics-history-v1` and runs in every mode, including
+converge), the detected `os`, installed `dockerVersion` and `takodVersion`, the applied `firewallPorts`, a `firewall` report, and the
 node's recorded SSH `hostKey` (`type`, base64 `key`, SHA256 `fingerprint`)
 so callers can pin it for `--host-key-mode strict`. `firewall` carries
 `backend` (`ufw` or `none`), `status` (`configured` or `skipped`), the skip
@@ -855,10 +1031,10 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `monitor` (`--watch`/`--local` human-only), `heal status\|pause\|resume\|reset`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
 | Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), project `rollback` (`deploy.service.*`, including `deploy.service.skipped`), lifecycle hooks in `deploy\|rollback\|promote\|setup` (`hook.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
-| Human-only by design | `init`, `backup recover`, `mesh prune`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
+| Human-only by design | `init`, `backup recover`, `mesh prune`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
 | Infrastructure-only | `takod run`, hidden `platform worker run\|prepare-enrollment\|verify-enrollment\|reconcile-mesh`, hidden `platform node upgrade-publication-guard`, and hidden internal E2E helpers |
 
 Human-only commands reject `--output json` and `--events ndjson` with a

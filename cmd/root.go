@@ -255,7 +255,6 @@ func init() {
 	markHumanOnly(
 		initCmd,
 		configExplainCmd,
-		monitorCmd,
 		envPushCmd,
 		envPullCmd,
 		secretsInitCmd,

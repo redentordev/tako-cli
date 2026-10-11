@@ -68,6 +68,10 @@ type ReconcileServiceRequest struct {
 	Ulimits            map[string]config.UlimitConfig `json:"ulimits,omitempty"`
 	ShmSize            string                         `json:"shmSize,omitempty"`
 	Logging            *config.ServiceLoggingConfig   `json:"logging,omitempty"`
+	// DefaultLogging is the node default log rotation for services without
+	// Logging (hygiene_logging.go). The server sets it; it is never read
+	// from the request body and never part of the config hash.
+	DefaultLogging *config.ServiceLoggingConfig `json:"-"`
 	// FailurePolicy selects rollout failure handling: "" or remove (legacy:
 	// old containers removed first, failed new ones removed), restore
 	// (recreate keeps the previous containers until finalize/restore), or
@@ -105,6 +109,9 @@ type RemoveServiceRequest struct {
 	Environment  string `json:"environment"`
 	Service      string `json:"service"`
 	KeepRevision string `json:"keepRevision,omitempty"`
+	// DataDir is set by the server (never read from the body) so removal
+	// clears the service's self-healing converged record.
+	DataDir string `json:"-"`
 }
 
 type ContainerSpec struct {
@@ -183,8 +190,13 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	}
 
 	if len(req.Containers) == 0 {
+		// Scale to zero: self-healing must forget the service first.
+		healClearRecord(req.DataDir, req.Project, req.Environment, req.Service)
 		removedContainers, err := removeServiceContainersForReconcile(ctx, req, deployStrategy)
 		if err != nil {
+			return nil, err
+		}
+		if err := clearRetainedFailedRecordAfterRemoval(req, deployStrategy); err != nil {
 			return nil, err
 		}
 		return &ReconcileServiceResponse{
@@ -204,6 +216,9 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		return nil, err
 	}
 
+	// The converged record is converging (ignored by self-healing) from here
+	// until every new container passed its readiness wait.
+	healMarkConverging(req)
 	failurePolicy := normalizeFailurePolicy(req.FailurePolicy)
 	var retained *retainedServiceState
 	var removedContainers int
@@ -214,6 +229,9 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		removedContainers, err = removeServiceContainersForReconcile(ctx, req, deployStrategy)
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := clearRetainedFailedRecordAfterRemoval(req, deployStrategy); err != nil {
 		return nil, err
 	}
 	// Failures after retention must restore the previous containers.
@@ -241,11 +259,14 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 	}
 
 	started := make([]string, 0, len(req.Containers))
+	startedIDs := make(map[string]string, len(req.Containers))
 	for _, container := range req.Containers {
-		if err := runServiceContainer(ctx, req, container); err != nil {
+		id, err := runServiceContainer(ctx, req, container)
+		if err != nil {
 			return nil, fail(container.Name, started, err)
 		}
 		started = append(started, container.Name)
+		startedIDs[container.Name] = id
 		if err := connectContainerNetworks(ctx, container.Name, req.NetworkAttachments); err != nil {
 			return nil, fail("", started, err)
 		}
@@ -268,6 +289,7 @@ func ReconcileService(ctx context.Context, req ReconcileServiceRequest) (*Reconc
 		response.RetainedContainers = retained.retainedNames()
 		response.RestoreToken = retained.Token
 	}
+	healRecordConverged(req, started, startedIDs)
 	return response, nil
 }
 
@@ -275,6 +297,7 @@ func RemoveService(ctx context.Context, req RemoveServiceRequest) (*RemoveServic
 	if err := validateRemoveServiceRequest(req); err != nil {
 		return nil, err
 	}
+	healClearRecordUnlessRevision(req.DataDir, req.Project, req.Environment, req.Service, req.KeepRevision)
 	removedContainers, err := removeServiceContainersKeepingRevision(ctx, req.Project, req.Environment, req.Service, req.KeepRevision)
 	if err != nil {
 		return nil, err
@@ -1100,6 +1123,20 @@ func removeServiceContainers(ctx context.Context, project string, environment st
 	return removeServiceContainersKeepingRevision(ctx, project, environment, service, "")
 }
 
+// clearRetainedFailedRecordAfterRemoval drops the service's retain-failed
+// record once every container of the service was removed (or retained
+// under a restore record). Revision-scoped strategies leave older
+// revisions' containers in place, so their record is kept.
+func clearRetainedFailedRecordAfterRemoval(req ReconcileServiceRequest, strategy string) error {
+	if takodDeployStrategyUsesRevisionScope(strategy) {
+		return nil
+	}
+	if err := removeRetainedFailedRecord(req.DataDir, req.Project, req.Environment, req.Service); err != nil {
+		return fmt.Errorf("failed to clear retain-failed record: %w", err)
+	}
+	return nil
+}
+
 func removeServiceContainersForReconcile(ctx context.Context, req ReconcileServiceRequest, strategy string) (int, error) {
 	if takodDeployStrategyUsesRevisionScope(strategy) {
 		return removeServiceContainersMatchingRevision(ctx, req.Project, req.Environment, req.Service, req.Revision)
@@ -1211,12 +1248,28 @@ func dockerContainerNotFound(output string) bool {
 	return strings.Contains(output, "no such container") || strings.Contains(output, "no such object")
 }
 
-func runServiceContainer(ctx context.Context, req ReconcileServiceRequest, container ContainerSpec) error {
+func runServiceContainer(ctx context.Context, req ReconcileServiceRequest, container ContainerSpec) (string, error) {
 	args := buildServiceContainerArgs(req, container)
-	if output, err := runDocker(ctx, args...); err != nil {
-		return fmt.Errorf("failed to start container %s: %w, output: %s", container.Name, err, output)
+	output, err := runDocker(ctx, args...)
+	if err != nil {
+		return "", fmt.Errorf("failed to start container %s: %w, output: %s", container.Name, err, output)
 	}
-	return nil
+	return dockerRunContainerID(output), nil
+}
+
+// dockerRunContainerID returns the container ID `docker run -d` prints as
+// its last output line, or "" when that line is not a container ID (pull
+// progress is interleaved on the combined output).
+func dockerRunContainerID(output string) string {
+	lines := strings.Fields(strings.TrimSpace(output))
+	if len(lines) == 0 {
+		return ""
+	}
+	id := lines[len(lines)-1]
+	if len(id) != 64 || !isHexIdentifier(id) {
+		return ""
+	}
+	return id
 }
 
 func cleanupStartedContainers(ctx context.Context, containerNames []string) error {
@@ -1296,7 +1349,9 @@ func buildServiceContainerArgs(req ReconcileServiceRequest, container ContainerS
 		args = append(args, "--cpus", req.CPULimit)
 	}
 	args = appendContainerRuntimeArgs(args, req.User, req.WorkingDir, req.StopTimeoutSeconds, req.Init, req.ExtraHosts, req.Ulimits, req.ShmSize)
-	args = appendDockerLoggingArgs(args, req.Logging)
+	// A service without `logging:` gets the node default (hygiene_logging.go).
+	// It is applied to the run arguments only, never to the config hash.
+	args = appendDockerLoggingArgs(args, effectiveContainerLogging(req.Logging, req.DefaultLogging))
 	if req.Health != nil && req.Health.Command != "" {
 		args = append(args, "--health-cmd", req.Health.Command)
 		if req.Health.Interval != "" {
@@ -1504,10 +1559,30 @@ func checkContainerSmoke(ctx context.Context, networkName string, containerName 
 	return checkContainerHTTPPath(ctx, networkName, containerName, health, health.SmokePath, port, expectedStatus, "smoke")
 }
 
+// containerNetworkIPFunc resolves a container's IP; tests replace it.
+var containerNetworkIPFunc = containerNetworkIP
+
+// healthTargetError marks a probe that could not reach the point of judging
+// the container (its address could not be resolved). The message is the
+// wrapped error's, unchanged.
+type healthTargetError struct{ err error }
+
+func (e *healthTargetError) Error() string { return e.err.Error() }
+func (e *healthTargetError) Unwrap() error { return e.err }
+
+// healthStatusError is an HTTP health response outside the accepted range.
+// The message is unchanged from the plain error it replaces.
+type healthStatusError struct {
+	status  int
+	message string
+}
+
+func (e *healthStatusError) Error() string { return e.message }
+
 func checkContainerHTTPPath(ctx context.Context, networkName string, containerName string, health *HealthSpec, path string, port int, expectedStatus int, label string) error {
-	ip, err := containerNetworkIP(ctx, networkName, containerName)
+	ip, err := containerNetworkIPFunc(ctx, networkName, containerName)
 	if err != nil {
-		return err
+		return &healthTargetError{err: err}
 	}
 	if port <= 0 {
 		return fmt.Errorf("HTTP %s port is required", label)
@@ -1533,20 +1608,20 @@ func checkContainerHTTPPath(ctx context.Context, networkName string, containerNa
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if expectedStatus != 0 {
 		if response.StatusCode != expectedStatus {
-			return fmt.Errorf("HTTP %s returned status %d, expected %d", label, response.StatusCode, expectedStatus)
+			return &healthStatusError{status: response.StatusCode, message: fmt.Sprintf("HTTP %s returned status %d, expected %d", label, response.StatusCode, expectedStatus)}
 		}
 		return nil
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 400 {
-		return fmt.Errorf("HTTP %s returned status %d", label, response.StatusCode)
+		return &healthStatusError{status: response.StatusCode, message: fmt.Sprintf("HTTP %s returned status %d", label, response.StatusCode)}
 	}
 	return nil
 }
 
 func checkContainerTCPHealth(ctx context.Context, networkName string, containerName string, health *HealthSpec) error {
-	ip, err := containerNetworkIP(ctx, networkName, containerName)
+	ip, err := containerNetworkIPFunc(ctx, networkName, containerName)
 	if err != nil {
-		return err
+		return &healthTargetError{err: err}
 	}
 	timeout := healthCheckTimeout(health)
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)

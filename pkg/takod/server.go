@@ -50,7 +50,13 @@ type Server struct {
 	backupScheduler                    *BackupScheduler
 	jobScheduler                       *JobScheduler
 	alertManager                       *AlertManager
+	sourceAlerts                       *SourceAlertManager
+	hostSamples                        HostSampleSource
+	statusHistory                      *statusHistory
+	containerSampler                   *containerAlertSampler
 	certificateScheduler               *CertificateScheduler
+	hygiene                            *hygieneManager
+	heal                               *healManager
 	uploadReadTimeout                  time.Duration
 	diskReservationMu                  sync.Mutex
 	diskReservations                   map[string]int64
@@ -239,6 +245,22 @@ type ServerOptions struct {
 	MemoryAvailable                func() (int64, error)
 	PostgresVerificationQuotaProbe func(context.Context) bool
 	UploadReadTimeout              time.Duration
+	// HostSampleSource supplies host metrics to host alerts. When nil the
+	// legacy current.json adapter is used; the native collector of
+	// add-server-status-history plugs in here.
+	HostSampleSource HostSampleSource
+	// Metrics configures native host metrics collection and history
+	// (add-server-status-history); a zero Interval keeps the legacy path.
+	Metrics MetricsOptions
+	// Disk hygiene (hygiene.go). HygieneInterval nil means "use
+	// BuildCachePruneInterval"; zero values elsewhere mean the defaults.
+	HygieneInterval               *time.Duration
+	HygieneCheckInterval          time.Duration
+	ImageRetention                int
+	BuildCachePressureKeepStorage string
+	DefaultContainerLoggingOff    bool
+	DefaultContainerLogMaxSize    string
+	DefaultContainerLogMaxFile    int
 }
 
 func NewServerWithOptions(socket string, dataDir string, version string, opts ServerOptions) *Server {
@@ -271,6 +293,15 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 	}
 	server.backupScheduler.alerts = alertManager
 	server.jobScheduler.alerts = alertManager
+	server.sourceAlerts = NewSourceAlertManager(dataDir)
+	if err := registerBuiltinAlertSources(server.sourceAlerts); err != nil {
+		panic(err)
+	}
+	server.hostSamples = opts.HostSampleSource
+	if server.hostSamples == nil {
+		server.hostSamples = newLegacyHostSampleSource()
+	}
+	server.containerSampler = newContainerAlertSampler(server.sourceAlerts)
 	if server.diskAvailable == nil {
 		server.diskAvailable = availableDiskBytes
 	}
@@ -304,6 +335,9 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 	server.backupScheduler.admit = func(...string) error { return server.checkFreeDisk(0, backupRootDir) }
 	server.jobScheduler.admit = func(...string) error { return server.checkFreeDisk(0, server.dataDir, server.dockerDataRoot) }
 	server.certificateScheduler.admit = func(paths ...string) error { return server.checkFreeDisk(0, paths...) }
+	server.initStatusHistory(opts.Metrics, opts.HostSampleSource == nil)
+	server.initHygiene(opts)
+	server.initSelfHealing()
 	return server
 }
 
@@ -391,6 +425,13 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.alertManager.LoadContext(ctx); err != nil {
 		return fmt.Errorf("load scheduler alerts: %w", err)
 	}
+	s.alertManager.SetNodeName(s.nodeName)
+	s.sourceAlerts.SetNodeName(s.nodeName)
+	if err := s.sourceAlerts.Load(ctx); err != nil {
+		// Node-side monitoring state never blocks startup; the next deploy
+		// rewrites it.
+		fmt.Fprintf(os.Stderr, "takod: node-side monitoring state not loaded: %v\n", err)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(s.socket), 0755); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
@@ -435,8 +476,12 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.actualRefreshInterval > 0 {
 		start(func() { s.runActualRefreshLoop(runCtx) })
 	}
-	if s.buildCachePruneInterval > 0 {
-		start(func() { s.runBuildCachePruneLoop(runCtx) })
+	if s.hygiene != nil {
+		// The hygiene loop replaces runBuildCachePruneLoop (hygiene.go).
+		start(func() { s.hygiene.Run(runCtx) })
+	}
+	if s.heal != nil {
+		start(func() { s.heal.Run(runCtx) })
 	}
 	start(func() { s.backupScheduler.Run(runCtx) })
 	start(func() { s.jobScheduler.Run(runCtx) })
@@ -445,6 +490,8 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	start(func() { s.alertManager.Run(runCtx) })
 	start(func() { s.certificateScheduler.Run(runCtx) })
+	s.startHealthMonitoring(runCtx, start)
+	s.startStatusHistory(runCtx, start)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -667,61 +714,6 @@ func (s *Server) runActualRefreshLoop(ctx context.Context) {
 	}
 }
 
-func (s *Server) runBuildCachePruneLoop(ctx context.Context) {
-	interval := s.buildCachePruneInterval
-	if interval <= 0 {
-		return
-	}
-	keepStorage := s.buildCacheKeepStorage
-	if keepStorage == "" {
-		keepStorage = DefaultBuildCacheKeepStorage
-	}
-	if !isSafeBuildCacheKeepStorage(keepStorage) {
-		fmt.Fprintf(os.Stderr, "takod build cache pruning disabled: invalid keep-storage value %q\n", keepStorage)
-		return
-	}
-
-	timer := time.NewTimer(buildCachePruneInitialDelay(interval))
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			pruneCtx, cancel := context.WithTimeout(ctx, buildCachePruneCommandTimeout)
-			maintenanceUnlock, maintenanceErr := recovery.AcquireMaintenanceBarrier(s.dataDir)
-			if maintenanceErr != nil {
-				fmt.Fprintf(os.Stderr, "takod build cache prune maintenance barrier failed: %v\n", maintenanceErr)
-				cancel()
-				timer.Reset(interval)
-				continue
-			}
-			active, activeErr := activeWorkerOperation(s.dataDir, time.Now().UTC())
-			if activeErr != nil || active {
-				if activeErr != nil {
-					fmt.Fprintf(os.Stderr, "takod build cache prune could not verify operation fence: %v\n", activeErr)
-				}
-				maintenanceUnlock()
-				cancel()
-				timer.Reset(interval)
-				continue
-			}
-			unlock, lockErr := recovery.AcquireMutationLock(s.dataDir)
-			if lockErr == nil {
-				_, err := cleanupBuildCache(pruneCtx, keepStorage)
-				unlock()
-				lockErr = err
-			}
-			maintenanceUnlock()
-			if lockErr != nil && !errors.Is(lockErr, context.Canceled) {
-				fmt.Fprintf(os.Stderr, "takod build cache prune failed: %v\n", lockErr)
-			}
-			cancel()
-			timer.Reset(interval)
-		}
-	}
-}
-
 func buildCachePruneInitialDelay(interval time.Duration) time.Duration {
 	if interval < buildCachePruneMaxInitialDelay {
 		return interval
@@ -811,6 +803,7 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	request.DataDir = s.dataDir
+	request.DefaultLogging = s.hygiene.defaultContainerLogging()
 	paths := make([]string, 0, 2)
 	if len(request.Containers) > 0 {
 		paths = append(paths, s.dockerDataRoot)
@@ -948,6 +941,7 @@ func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	request.DataDir = s.dataDir
 	response, err := RemoveService(r.Context(), request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -1349,6 +1343,7 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
+	s.hygiene.journalCleanup(request, response)
 	if !request.RemovePreviewData && (request.RemoveContainers || request.RemoveTakodState) {
 		// Runtime is gone. Keep the in-memory and durable drain barriers if
 		// schedule deletion fails so deleted work cannot restart fail-open.
@@ -1371,6 +1366,10 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 			s.jobScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
 			s.backupScheduler.MarkProjectDrainRecoverable(request.Project, request.Environment)
 			http.Error(w, fmt.Sprintf("failed to remove scheduler alert state after cleanup: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if err := s.sourceAlerts.RemoveScope(request.Project, request.Environment); err != nil {
+			http.Error(w, fmt.Sprintf("failed to remove monitoring alert state after cleanup: %v", err), http.StatusInternalServerError)
 			return
 		}
 		releaseSchedulerDrains = true
@@ -1398,6 +1397,9 @@ func (s *Server) removeEnvironmentSchedulerState(_ context.Context, project stri
 	}
 	if err := s.alertManager.RemoveConfig(project, environment); err != nil {
 		return 0, fmt.Errorf("failed to remove scheduler alert state after cleanup: %w", err)
+	}
+	if err := s.sourceAlerts.RemoveScope(project, environment); err != nil {
+		return 0, fmt.Errorf("failed to remove monitoring alert state after cleanup: %w", err)
 	}
 	return len(removedJobs), nil
 }
@@ -2650,12 +2652,12 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		collect = parsed
 	}
 
-	response, err := ReadNodeMetrics(r.Context(), collect)
+	response, err := s.readMetricsResponse(r.Context(), collect)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	response.Alerts = s.alertManager.StatusAll()
+	response.Alerts = s.alertStatusWithSources()
 
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
@@ -2730,7 +2732,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyRequestHeadersV1, CapabilityProxyTrustedProxyPresetsV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityLogsStreamV1, CapabilityDeployRestoreOnFailureV1, CapabilityPreviewLifecycleV1, CapabilityProxyCertStatusV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityMonitoringHealthV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyRequestHeadersV1, CapabilityProxyTrustedProxyPresetsV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityLogsStreamV1, CapabilityDeployRestoreOnFailureV1, CapabilityPreviewLifecycleV1, CapabilityProxyCertStatusV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,
@@ -2746,6 +2748,13 @@ func (s *Server) Status() Status {
 	if s.installation == nil {
 		// Enrolled nodes take their mesh from platform membership.
 		status.Capabilities = append(status.Capabilities, CapabilityMeshPeerSetsV1)
+	}
+	status.Capabilities = append(status.Capabilities, s.statusHistoryCapabilities()...)
+	if s.hygiene != nil {
+		status.Capabilities = append(status.Capabilities, CapabilityNodeDiskHygieneV1)
+	}
+	if s.heal != nil {
+		status.Capabilities = append(status.Capabilities, CapabilityNodeSelfHealingV1)
 	}
 	if s.installation != nil {
 		status.Capabilities = append(status.Capabilities, CapabilityPlatformWorkerHandoffV1)

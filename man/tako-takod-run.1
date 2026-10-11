@@ -22,12 +22,28 @@ Run the takod Unix-socket server
 	Docker builder cache storage budget to keep during scheduled pruning
 
 .PP
+\fB--build-cache-pressure-keep-storage\fP="2GB"
+	Docker builder cache storage budget kept by a hard disk-pressure reclaim
+
+.PP
 \fB--build-cache-prune-interval\fP=24h0m0s
 	Prune Docker build cache at this interval (0 disables)
 
 .PP
 \fB--data-dir\fP=""
 	takod data directory
+
+.PP
+\fB--default-container-log-max-file\fP=5
+	Default container log max-file
+
+.PP
+\fB--default-container-log-max-size\fP="20m"
+	Default container log max-size (e.g. 20m)
+
+.PP
+\fB--default-container-logging\fP="on"
+	Bound logs of services without a logging block with json-file rotation (on or off)
 
 .PP
 \fB--docker-data-root\fP="/var/lib/docker"
@@ -38,8 +54,20 @@ Run the takod Unix-socket server
 	help for run
 
 .PP
+\fB--hygiene-check-interval\fP=1h0m0s
+	Check free disk for soft or hard pressure at this interval
+
+.PP
+\fB--hygiene-interval\fP=0s
+	Run disk hygiene maintenance (image GC, then build-cache prune) at this interval; defaults to --build-cache-prune-interval (0 disables autonomous hygiene)
+
+.PP
 \fB--identity-file\fP="/etc/tako/identity.json"
 	Root-owned Tako installation identity file
+
+.PP
+\fB--image-retention\fP=3
+	Built images kept per repository and environment by the scheduled image GC (minimum 1)
 
 .PP
 \fB--max-concurrent-builds\fP=0
@@ -48,6 +76,22 @@ Run the takod Unix-socket server
 .PP
 \fB--membership-file\fP=""
 	Protected controller membership state (derived from data-dir when omitted)
+
+.PP
+\fB--metrics-history-max-bytes\fP=67108864
+	Cap on-node metrics history at this many bytes (oldest files are deleted first)
+
+.PP
+\fB--metrics-interval\fP=1m0s
+	Collect host metrics natively at this interval (0 disables and reads the legacy agent file)
+
+.PP
+\fB--metrics-retention\fP=168h0m0s
+	Keep on-node metrics history this long (1h to 744h)
+
+.PP
+\fB--metrics-textfile-dir\fP=""
+	Write tako_node.prom here after each sample for node_exporter's textfile collector (off by default)
 
 .PP
 \fB--minimum-free-disk-bytes\fP=10737418240

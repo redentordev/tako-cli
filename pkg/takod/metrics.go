@@ -18,6 +18,9 @@ type MetricsResponse struct {
 	Collected bool                  `json:"collected"`
 	Metrics   json.RawMessage       `json:"metrics"`
 	Alerts    []AlertStatusResponse `json:"alerts,omitempty"`
+	// Status is the node status document (node.status-v1), omitted until
+	// node conditions have been evaluated.
+	Status *NodeStatusResponse `json:"status,omitempty"`
 }
 
 func ReadNodeMetrics(ctx context.Context, collect bool) (*MetricsResponse, error) {

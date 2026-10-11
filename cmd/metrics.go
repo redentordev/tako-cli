@@ -24,19 +24,38 @@ var (
 	metricsLive   bool
 	metricsOnce   bool
 	metricsServer string
+	metricsSince  string
+	metricsStep   string
 )
 
-// MetricsData represents the JSON structure returned by the monitoring agent
+// MetricsData is the takod /v1/metrics document. The legacy fields keep the
+// bash agent's schema; Source, IntervalSeconds, CPUCount, DockerDisk and the
+// rate and total fields are filled by takod's native collector.
 type MetricsData struct {
-	Timestamp     string         `json:"timestamp"`
-	CPUPercent    string         `json:"cpu_percent"`
-	Memory        MemoryMetrics  `json:"memory"`
-	Disk          DiskMetrics    `json:"disk"`
-	Network       NetworkMetrics `json:"network"`
-	DiskIO        DiskIOMetrics  `json:"disk_io"`
-	UptimeSeconds int            `json:"uptime_seconds"`
-	LoadAverage   LoadAvgMetrics `json:"load_average"`
+	Timestamp       string         `json:"timestamp"`
+	CPUPercent      string         `json:"cpu_percent"`
+	Memory          MemoryMetrics  `json:"memory"`
+	Disk            DiskMetrics    `json:"disk"`
+	Network         NetworkMetrics `json:"network"`
+	DiskIO          DiskIOMetrics  `json:"disk_io"`
+	UptimeSeconds   int            `json:"uptime_seconds"`
+	LoadAverage     LoadAvgMetrics `json:"load_average"`
+	Source          string         `json:"source,omitempty"`
+	IntervalSeconds int64          `json:"interval_seconds,omitempty"`
+	CPUCount        int            `json:"cpu_count,omitempty"`
+	DockerDisk      *DiskMetrics   `json:"docker_disk,omitempty"`
+	Warnings        []string       `json:"warnings,omitempty"`
+
+	// Status is takod's node status (node.status-v1), carried next to the
+	// metrics document rather than inside it.
+	Status *takod.NodeStatusResponse `json:"-"`
+	// nativeDocument is the same document decoded with takod's native type
+	// (nil for legacy-agent documents); it feeds the Prometheus node series.
+	nativeDocument *takod.NodeMetricsDocument
 }
+
+// native reports whether the document came from takod's native collector.
+func (m *MetricsData) native() bool { return m != nil && m.Source == takod.NodeMetricsSource }
 
 type MemoryMetrics struct {
 	TotalMB     int    `json:"total_mb"`
@@ -48,10 +67,12 @@ type MemoryMetrics struct {
 }
 
 type DiskMetrics struct {
-	TotalMB     int    `json:"total_mb"`
-	UsedMB      int    `json:"used_mb"`
-	AvailableMB int    `json:"available_mb"`
-	Percent     string `json:"percent"`
+	Path          string `json:"path,omitempty"`
+	TotalMB       int    `json:"total_mb"`
+	UsedMB        int    `json:"used_mb"`
+	AvailableMB   int    `json:"available_mb"`
+	Percent       string `json:"percent"`
+	InodesPercent string `json:"inodes_percent,omitempty"`
 }
 
 type LoadAvgMetrics struct {
@@ -61,26 +82,38 @@ type LoadAvgMetrics struct {
 }
 
 type NetworkMetrics struct {
-	RxMB    string `json:"rx_mb"`
-	TxMB    string `json:"tx_mb"`
-	RxBytes int64  `json:"rx_bytes"`
-	TxBytes int64  `json:"tx_bytes"`
+	RxMB          string  `json:"rx_mb"`
+	TxMB          string  `json:"tx_mb"`
+	RxBytes       int64   `json:"rx_bytes"`
+	TxBytes       int64   `json:"tx_bytes"`
+	RxBytesPerSec float64 `json:"rx_bytes_per_sec,omitempty"`
+	TxBytesPerSec float64 `json:"tx_bytes_per_sec,omitempty"`
+	RxBytesTotal  int64   `json:"rx_bytes_total,omitempty"`
+	TxBytesTotal  int64   `json:"tx_bytes_total,omitempty"`
 }
 
 type DiskIOMetrics struct {
-	ReadMB       string `json:"read_mb"`
-	WriteMB      string `json:"write_mb"`
-	ReadSectors  int64  `json:"read_sectors"`
-	WriteSectors int64  `json:"write_sectors"`
+	ReadMB            string  `json:"read_mb"`
+	WriteMB           string  `json:"write_mb"`
+	ReadSectors       int64   `json:"read_sectors"`
+	WriteSectors      int64   `json:"write_sectors"`
+	ReadBytesPerSec   float64 `json:"read_bytes_per_sec,omitempty"`
+	WriteBytesPerSec  float64 `json:"write_bytes_per_sec,omitempty"`
+	ReadBytesTotal    int64   `json:"read_bytes_total,omitempty"`
+	WrittenBytesTotal int64   `json:"written_bytes_total,omitempty"`
 }
 
 var metricsCmd = &cobra.Command{
 	Use:   "metrics",
 	Short: "View system metrics from servers",
-	Long: `Display real-time system metrics (CPU, RAM, Disk) collected from deployed servers.
+	Long: `Display system metrics (CPU, memory, disk, load, network and disk I/O)
+collected by takod on each server, plus OS update and reboot status.
 
-The monitoring agent runs continuously on each server, collecting metrics every 60 seconds.
-This command fetches and displays the latest metrics.`,
+takod samples host metrics natively every 60 seconds and keeps a bounded
+on-node history (7 days by default). Without --since this command shows the
+latest sample; --since shows min/avg/max/last and a sparkline per metric for
+that window (for example --since 24h or --since 2026-10-11T00:00:00Z), with
+--step choosing the bucket size.`,
 	RunE: runMetrics,
 }
 
@@ -89,9 +122,15 @@ func init() {
 	metricsCmd.Flags().BoolVar(&metricsLive, "live", false, "Continuous live updates")
 	metricsCmd.Flags().BoolVar(&metricsOnce, "once", false, "Collect metrics once immediately")
 	metricsCmd.Flags().StringVarP(&metricsServer, "server", "s", "", "Specific server to monitor")
+	metricsCmd.Flags().StringVar(&metricsSince, "since", "", "Show history for this window: a duration (24h, 7d) or an RFC3339 timestamp")
+	metricsCmd.Flags().StringVar(&metricsStep, "step", "", "History bucket size with --since (e.g. 5m; default picks at most 360 buckets)")
 }
 
 func runMetrics(cmd *cobra.Command, args []string) error {
+	historyRequest, err := parseMetricsHistoryFlags(metricsSince, metricsStep, metricsLive, metricsOnce)
+	if err != nil {
+		return err
+	}
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return formatConfigLoadError(cfgFile, err)
@@ -131,6 +170,9 @@ func runMetrics(cmd *cobra.Command, args []string) error {
 	}
 	defer factory.CloseIdleConnections()
 
+	if historyRequest != nil {
+		return showMetricsHistory(cfg, envName, servers, factory, *historyRequest)
+	}
 	if metricsLive {
 		if machineOutputEnabled() {
 			return &engine.InvalidRequestError{Err: fmt.Errorf("--live is interactive-only; run single-shot metrics reads in machine output modes")}
@@ -168,14 +210,19 @@ func showMetricsOnce(cfg *config.Config, envName string, servers []string, facto
 			sample.Error = nodeResult.connectErr.Error()
 			failures++
 		case nodeResult.metricsErr != nil:
-			fmt.Fprintf(out, "❌ %s (%s): Monitoring agent not installed or not running\n", nodeResult.serverName, nodeResult.host)
-			fmt.Fprintf(out, "   Run: tako setup --server %s\n\n", nodeResult.serverName)
+			fmt.Fprintf(out, "❌ %s (%s): Metrics unavailable - %v\n", nodeResult.serverName, nodeResult.host, nodeResult.metricsErr)
+			fmt.Fprintf(out, "   takod collects host metrics natively; run 'tako upgrade servers' if this node runs an older takod\n\n")
 			sample.Error = nodeResult.metricsErr.Error()
 			failures++
 		default:
 			displayServerMetrics(out, nodeResult.serverName, nodeResult.host, nodeResult.metrics)
 			if payload, err := json.Marshal(nodeResult.metrics); err == nil {
 				sample.Metrics = payload
+			}
+			if nodeResult.metrics.Status != nil {
+				if payload, err := json.Marshal(nodeResult.metrics.Status); err == nil {
+					sample.Status = payload
+				}
 			}
 		}
 		result.Nodes = append(result.Nodes, sample)
@@ -293,7 +340,7 @@ func showLiveMetrics(cfg *config.Config, servers []string, factory *nodeclient.F
 
 			metrics, err := readMetricsViaTakod(client, cfg, false)
 			if err != nil {
-				fmt.Printf("❌ %s: Monitoring not available\n\n", serverName)
+				fmt.Printf("❌ %s: Metrics unavailable\n\n", serverName)
 				continue
 			}
 
@@ -314,9 +361,20 @@ func readMetricsViaTakod(client any, cfg *config.Config, collect bool) (*Metrics
 	if err := decodeTakodJSON(output, &response); err != nil {
 		return nil, err
 	}
+	return decodeMetricsResponse(&response)
+}
+
+func decodeMetricsResponse(response *takod.MetricsResponse) (*MetricsData, error) {
 	var metrics MetricsData
 	if err := json.Unmarshal(response.Metrics, &metrics); err != nil {
 		return nil, fmt.Errorf("failed to parse metrics: %w", err)
+	}
+	metrics.Status = response.Status
+	if metrics.native() {
+		var document takod.NodeMetricsDocument
+		if err := json.Unmarshal(response.Metrics, &document); err == nil {
+			metrics.nativeDocument = &document
+		}
 	}
 	return &metrics, nil
 }
@@ -358,14 +416,22 @@ func displayServerMetrics(out io.Writer, serverName, serverHost string, metrics 
 	diskBar := createProgressBar(metrics.Disk.Percent, 20)
 	fmt.Fprintf(out, " %s\n", diskBar)
 
-	// Network I/O (if available)
-	if metrics.Network.RxMB != "" && metrics.Network.TxMB != "" {
-		fmt.Fprintf(out, "Net I/O: ↓ %s MB  ↑ %s MB (since last check)\n", metrics.Network.RxMB, metrics.Network.TxMB)
+	if docker := metrics.DockerDisk; docker != nil {
+		fmt.Fprintf(out, "Docker: %s%% (%d MB / %d MB)", docker.Percent, docker.UsedMB, docker.TotalMB)
+		fmt.Fprintf(out, " %s\n", createProgressBar(docker.Percent, 20))
 	}
 
-	// Disk I/O (if available)
-	if metrics.DiskIO.ReadMB != "" && metrics.DiskIO.WriteMB != "" {
-		fmt.Fprintf(out, "Disk I/O: ⬇ %s MB  ⬆ %s MB (since last check)\n", metrics.DiskIO.ReadMB, metrics.DiskIO.WriteMB)
+	if metrics.native() {
+		fmt.Fprintf(out, "Net I/O: ↓ %s  ↑ %s\n", formatByteRate(metrics.Network.RxBytesPerSec), formatByteRate(metrics.Network.TxBytesPerSec))
+		fmt.Fprintf(out, "Disk I/O: read %s  write %s\n", formatByteRate(metrics.DiskIO.ReadBytesPerSec), formatByteRate(metrics.DiskIO.WriteBytesPerSec))
+	} else {
+		// Legacy agent documents carry per-interval deltas only.
+		if metrics.Network.RxMB != "" && metrics.Network.TxMB != "" {
+			fmt.Fprintf(out, "Net I/O: ↓ %s MB  ↑ %s MB (since last check)\n", metrics.Network.RxMB, metrics.Network.TxMB)
+		}
+		if metrics.DiskIO.ReadMB != "" && metrics.DiskIO.WriteMB != "" {
+			fmt.Fprintf(out, "Disk I/O: ⬇ %s MB  ⬆ %s MB (since last check)\n", metrics.DiskIO.ReadMB, metrics.DiskIO.WriteMB)
+		}
 	}
 
 	// Load Average
@@ -375,6 +441,10 @@ func displayServerMetrics(out io.Writer, serverName, serverHost string, metrics 
 	// Uptime
 	uptime := formatUptime(metrics.UptimeSeconds)
 	fmt.Fprintf(out, "Uptime: %s\n", uptime)
+
+	if line := formatOSStatusLine(metrics.Status); line != "" {
+		fmt.Fprintf(out, "%s\n", line)
+	}
 
 	// Last updated
 	fmt.Fprintf(out, "Updated: %s\n", metrics.Timestamp)

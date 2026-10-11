@@ -25,7 +25,6 @@ import (
 	localstate "github.com/redentordev/tako-cli/pkg/state"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
-	"github.com/redentordev/tako-cli/pkg/takod"
 	"github.com/redentordev/tako-cli/pkg/takodstate"
 )
 
@@ -727,7 +726,11 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 
 	if plan.IsEmpty() && !deployplan.HasBuildServices(services) && !req.Force {
 		if err := s.deployer.ApplyAlertPolicy(); err != nil {
-			return nil, fmt.Errorf("failed to apply scheduler alert policy: %w", err)
+			if !isDefaultOnlyAlertPolicyError(err) {
+				return nil, fmt.Errorf("failed to apply scheduler alert policy: %w", err)
+			}
+			// Default-derived monitoring never fails a deploy.
+			e.warn(events.PhaseDeploy, fmt.Sprintf("  ⚠ %s\n", alertPolicyWarning(err)))
 		}
 		intentImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, desiredStateServices, nil, actualState)
 		var baseline *takodstate.DesiredRevision
@@ -1075,12 +1078,13 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		}
 	}
 	if !deploymentFailed {
+		// The rollout already succeeded: an alert configuration push failure
+		// (for example a node rejecting it on low disk) is a warning in the
+		// summary, never a failed deploy.
 		if err := s.deployer.ApplyAlertPolicy(); err != nil {
-			e.emit(events.Event{Type: events.TypeDeployFailed, Phase: events.PhaseDeploy, Level: events.LevelError, Message: fmt.Sprintf("  ✗ scheduler alert policy reconciliation failed: %v\n", err)})
-			deploymentFailed = true
-			deploymentError = fmt.Errorf("scheduler alert policy reconciliation failed: %w", err)
-			deployment.Status = remotestate.StatusFailed
-			deployment.Error = err.Error()
+			warning := alertPolicyWarning(err)
+			e.warn(events.PhaseDeploy, fmt.Sprintf("  ⚠ %s\n", warning))
+			applyState.warnings = append(applyState.warnings, warning)
 		}
 	}
 
@@ -1278,41 +1282,14 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 
 	// Automatic cleanup after successful deployment.
 	e.debug(events.TypeLogLine, events.PhaseCleanup, "\n→ Running automatic cleanup...\n")
-	imageRepositories := CleanupImageRepositories(cfg, envName, services)
-	externalVolumes := ExternalVolumeNamesForEnvironment(cfg, envName)
 	cleanupFactory, factoryErr := nodeclient.NewFactory(cfg, s.sshPool, TakodSocketFromConfig(cfg))
-	for serverName := range s.servers {
-		if factoryErr != nil {
-			e.debug(events.TypeWarning, events.PhaseCleanup, fmt.Sprintf("  Warning: failed to initialize runtime cleanup: %v\n", factoryErr))
-			break
-		}
-		client, _, err := cleanupFactory.Client(ctx, serverName)
-		if err == nil {
-			response, cleanupErr := CleanupViaTakod(client, cfg, takod.CleanupRequest{
-				Project:           cfg.Project.Name,
-				Environment:       envName,
-				ImageRepositories: imageRepositories,
-				ExternalVolumes:   externalVolumes,
-				KeepImages:        3,
-				// Preview image repositories are shared with the base; a
-				// preview never prunes them where a declared env runs.
-				CleanOldImages:         s.cleanOldImagesOn(serverName),
-				CleanStoppedContainers: true,
-				CleanDanglingImages:    true,
-				CleanBuildCache:        true,
-				BuildCacheKeepStorage:  takod.DefaultBuildCacheKeepStorage,
-			})
-			if cleanupErr != nil {
-				e.debug(events.TypeWarning, events.PhaseCleanup, fmt.Sprintf("  Warning: failed to clean %s: %v\n", serverName, cleanupErr))
-				continue
-			}
-			if response != nil {
-				for _, warning := range response.Warnings {
-					e.debug(events.TypeWarning, events.PhaseCleanup, fmt.Sprintf("  Warning: %s\n", warning))
-				}
-			}
-			e.debug(events.TypeCleanupCompleted, events.PhaseCleanup, fmt.Sprintf("  ✓ Cleaned up %s\n", serverName))
-		}
+	if factoryErr != nil {
+		e.debug(events.TypeWarning, events.PhaseCleanup, fmt.Sprintf("  Warning: failed to initialize runtime cleanup: %v\n", factoryErr))
+	} else {
+		s.runPostDeployCleanup(ctx, func(ctx context.Context, serverName string) (any, error) {
+			client, _, err := cleanupFactory.Client(ctx, serverName)
+			return client, err
+		})
 	}
 
 	e.info(events.TypeDeploySucceeded, events.PhaseCleanup, "\n✓ Deployment completed successfully!\n\n")

@@ -10,11 +10,15 @@ tako-metrics - View system metrics from servers
 
 
 .SH DESCRIPTION
-Display real-time system metrics (CPU, RAM, Disk) collected from deployed servers.
+Display system metrics (CPU, memory, disk, load, network and disk I/O)
+collected by takod on each server, plus OS update and reboot status.
 
 .PP
-The monitoring agent runs continuously on each server, collecting metrics every 60 seconds.
-This command fetches and displays the latest metrics.
+takod samples host metrics natively every 60 seconds and keeps a bounded
+on-node history (7 days by default). Without --since this command shows the
+latest sample; --since shows min/avg/max/last and a sparkline per metric for
+that window (for example --since 24h or --since 2026-10-11T00:00:00Z), with
+--step choosing the bucket size.
 
 
 .SH OPTIONS
@@ -32,6 +36,14 @@ This command fetches and displays the latest metrics.
 .PP
 \fB-s\fP, \fB--server\fP=""
 	Specific server to monitor
+
+.PP
+\fB--since\fP=""
+	Show history for this window: a duration (24h, 7d) or an RFC3339 timestamp
+
+.PP
+\fB--step\fP=""
+	History bucket size with --since (e.g. 5m; default picks at most 360 buckets)
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS

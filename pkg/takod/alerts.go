@@ -1,7 +1,6 @@
 package takod
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -43,6 +42,21 @@ type AlertConfigRequest struct {
 	Environment string       `json:"environment"`
 	Policy      AlertPolicy  `json:"policy"`
 	Targets     AlertTargets `json:"targets"`
+
+	// Additive node-side health monitoring fields (monitoring.health-v1).
+	// They are handled by SourceAlertManager and never stored in the
+	// scheduler-alerts documents.
+	Monitors     []MonitorSpec           `json:"monitors,omitempty"`
+	Host         *HostAlertPolicy        `json:"host,omitempty"`
+	Containers   *ContainerAlertPolicy   `json:"containers,omitempty"`
+	Certificates *CertificateAlertPolicy `json:"certificates,omitempty"`
+	// ServiceTargets maps a monitored service to its monitoring.webhook.
+	ServiceTargets map[string]string `json:"serviceTargets,omitempty"`
+}
+
+// legacyPart returns the job and backup part of a request.
+func (request AlertConfigRequest) legacyPart() AlertConfigRequest {
+	return AlertConfigRequest{Project: request.Project, Environment: request.Environment, Policy: request.Policy, Targets: request.Targets}
 }
 
 type AlertAttemptFact struct {
@@ -103,6 +117,9 @@ type AlertStatusResponse struct {
 	ActiveEpisodes  int                   `json:"activeEpisodes"`
 	PendingDelivery int                   `json:"pendingDelivery"`
 	Exhausted       int                   `json:"exhausted"`
+	// Sources is the additive node-side monitoring status
+	// (monitoring.health-v1). Targets are never included.
+	Sources *SourceAlertStatus `json:"sources,omitempty"`
 }
 
 type alertScopeState struct {
@@ -138,6 +155,7 @@ type AlertManager struct {
 	now                func() time.Time
 	deliver            func(context.Context, string, string, any) alertDeliveryResult
 	cleanupCredentials func(string, string, string) error
+	node               string
 
 	mu                   sync.Mutex
 	configs              map[string]AlertConfigRequest
@@ -226,6 +244,7 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		response.Sources = s.sourceStatusFor(project, environment)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(response)
 	case http.MethodPut:
@@ -240,8 +259,12 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if !alertPolicyEnabled(request.Policy) {
+		if !alertConfigEnabled(request) {
 			if err := s.alertManager.RemoveConfig(request.Project, request.Environment); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := s.sourceAlerts.RemoveScope(request.Project, request.Environment); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -250,6 +273,24 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !s.requireFreeDisk(w, s.dataDir) {
+			return
+		}
+		// Node-side monitoring sections go to the source manager; an
+		// absent section set clears the scope's source tree (last deploy
+		// wins, also for older CLIs).
+		if err := s.sourceAlerts.ApplyConfig(request); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !alertPolicyEnabled(request.Policy) {
+			if err := s.alertManager.RemoveConfig(request.Project, request.Environment); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			response, _ := s.alertManager.Status(request.Project, request.Environment)
+			response.Sources = s.sourceStatusFor(request.Project, request.Environment)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(response)
 			return
 		}
 		jobSpecs := s.jobScheduler.alertSpecs(request.Project, request.Environment)
@@ -279,6 +320,7 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		response, _ := s.alertManager.Status(request.Project, request.Environment)
+		response.Sources = s.sourceStatusFor(request.Project, request.Environment)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(response)
 	default:
@@ -292,7 +334,7 @@ func (m *AlertManager) ApplyConfig(request AlertConfigRequest) error {
 		return err
 	}
 	defer unlock()
-	request = normalizeAlertConfigRequest(request)
+	request = normalizeAlertConfigRequest(request).legacyPart()
 	if err := validateAlertConfigRequest(request); err != nil {
 		return err
 	}
@@ -426,7 +468,7 @@ func (m *AlertManager) ApplyConfigForSubjects(request AlertConfigRequest, jobs, 
 		return lockErr
 	}
 	defer unlock()
-	request = normalizeAlertConfigRequest(request)
+	request = normalizeAlertConfigRequest(request).legacyPart()
 	if err := validateAlertConfigRequest(request); err != nil {
 		return err
 	}
@@ -1019,16 +1061,34 @@ func alertReasons(policy AlertPolicy, subject *AlertSubjectStatus, now time.Time
 	return reasons
 }
 
+// deliveryPayloadLocked builds the schema v1 payload for a job or backup
+// delivery. The message text is unchanged from earlier releases; the v1 keys
+// (schemaVersion, event, node, severity, subject, details, openedAt) are
+// additive.
 func (m *AlertManager) deliveryPayloadLocked(config AlertConfigRequest, delivery AlertDeliveryStatus) any {
 	message := fmt.Sprintf("Tako alert %s for %s/%s %s %s", delivery.Transition, config.Project, config.Environment, delivery.Kind, delivery.Service)
 	if len(delivery.Reasons) > 0 {
 		message += ": " + strings.Join(delivery.Reasons, ", ")
 	}
-	return map[string]any{
-		"eventId": delivery.ID, "episodeId": delivery.EpisodeID, "transition": delivery.Transition,
-		"project": config.Project, "environment": config.Environment, "kind": delivery.Kind,
-		"service": delivery.Service, "message": message, "reasons": append([]string(nil), delivery.Reasons...), "timestamp": m.now(),
+	var openedAt time.Time
+	if state := m.states[alertScopeKey(config.Project, config.Environment)]; state != nil {
+		if subject := state.Subjects[alertSubjectKey(delivery.Kind, delivery.Service)]; subject != nil && subject.EpisodeID == delivery.EpisodeID {
+			openedAt = subject.OpenedAt
+		}
 	}
+	return alertPayloadV1{
+		EventID: delivery.ID, EpisodeID: delivery.EpisodeID, Transition: delivery.Transition,
+		Event: schedulerAlertEvent(delivery.Kind), Project: config.Project, Environment: config.Environment,
+		Node: m.node, Kind: delivery.Kind, Subject: delivery.Service, Severity: string(SeverityCritical),
+		Reasons: append([]string(nil), delivery.Reasons...), OpenedAt: openedAt, Message: message, Timestamp: m.now(),
+	}.Map()
+}
+
+// SetNodeName sets the node name carried in alert payloads.
+func (m *AlertManager) SetNodeName(node string) {
+	m.mu.Lock()
+	m.node = node
+	m.mu.Unlock()
 }
 
 type alertDeliveryResult struct {
@@ -1039,39 +1099,11 @@ type alertDeliveryResult struct {
 }
 
 func (m *AlertManager) deliverHTTP(ctx context.Context, provider, endpoint string, payload any) alertDeliveryResult {
-	if endpoint == "" {
-		return alertDeliveryResult{Error: "disabled"}
-	}
-	body := payload
-	if provider == "slack" {
-		message := payload.(map[string]any)["message"]
-		body = map[string]any{"text": message}
-	} else if provider == "discord" {
-		message := payload.(map[string]any)["message"]
-		body = map[string]any{"content": message}
-	}
-	data, err := json.Marshal(body)
-	if err != nil {
+	body, ok := payload.(map[string]any)
+	if !ok {
 		return alertDeliveryResult{Error: "encode"}
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
-	if err != nil {
-		return alertDeliveryResult{Error: "request"}
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := m.client.Do(request)
-	if err != nil {
-		if ctx.Err() != nil {
-			return alertDeliveryResult{Interrupted: true, Error: "interrupted"}
-		}
-		return alertDeliveryResult{Retryable: true, Error: "network"}
-	}
-	response.Body.Close()
-	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		return alertDeliveryResult{Delivered: true}
-	}
-	retryable := response.StatusCode == 408 || response.StatusCode == 425 || response.StatusCode == 429 || response.StatusCode >= 500
-	return alertDeliveryResult{Retryable: retryable, Error: fmt.Sprintf("http_%d", response.StatusCode)}
+	return deliverAlertHTTP(ctx, m.client, provider, endpoint, body)
 }
 
 func newAlertHTTPClient() *http.Client {
@@ -1147,13 +1179,14 @@ func validateAlertConfigRequest(request AlertConfigRequest) error {
 			return fmt.Errorf("invalid %s alert target", provider)
 		}
 	}
-	return nil
+	return validateSourceAlertRequest(request)
 }
 
 func normalizeAlertConfigRequest(request AlertConfigRequest) AlertConfigRequest {
 	request.Targets.Slack = strings.TrimSpace(request.Targets.Slack)
 	request.Targets.Discord = strings.TrimSpace(request.Targets.Discord)
 	request.Targets.Webhook = strings.TrimSpace(request.Targets.Webhook)
+	request.ServiceTargets = normalizeServiceTargets(request.ServiceTargets)
 	return request
 }
 

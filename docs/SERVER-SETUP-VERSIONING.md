@@ -8,7 +8,7 @@ as a Tako setup manifest.
 
 ```json
 {
-  "version": "1.2.2",
+  "version": "1.2.3",
   "installed_at": "2026-06-13T00:00:00Z",
   "last_upgrade": "2026-06-13T00:00:00Z",
   "components": {
@@ -99,6 +99,12 @@ Setup version `1.2.2` makes servers at `1.2.1` or older reapply the full setup
 path on the next `tako setup`, which installs the fail2ban jail for custom SSH
 ports and the validated sshd reload. `tako upgrade servers` does not touch the
 firewall or sshd.
+
+Setup version `1.2.3` removes the legacy `tako-monitor` bash agent. takod now
+collects host metrics natively, so the `monitor-agent` step runs after
+`takod-service` in every mode, including converge, and removes the agent once
+takod reports `node.metrics-history-v1`. If takod does not confirm native
+collection, setup leaves the agent in place and warns.
 
 Use `tako doctor` to surface stale or unavailable server-side takod agents in
 the normal health report. Use `tako upgrade servers` when you only need to patch

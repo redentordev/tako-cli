@@ -2,6 +2,7 @@ package deployer
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -136,8 +137,10 @@ func TestAlertPolicyPreflightPrecedesApplyOnLocalRuntime(t *testing.T) {
 		t.Fatalf("nonschedulable node was not disabled: %#v", staleDisable)
 	}
 	failEnabled.Store(true)
-	if err := deploy.ApplyAlertPolicy(); err == nil {
-		t.Fatal("enabled owner failure was not reported")
+	err = deploy.ApplyAlertPolicy()
+	var applyErr *AlertPolicyApplyError
+	if !errors.As(err, &applyErr) || applyErr.DefaultOnly {
+		t.Fatalf("enabled owner failure = %#v, want an explicit AlertPolicyApplyError", err)
 	}
 	select {
 	case disableAfterFailure := <-applied:

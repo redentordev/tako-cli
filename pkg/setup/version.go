@@ -12,7 +12,7 @@ import (
 )
 
 // CurrentVersion is the latest setup version
-const CurrentVersion = "1.2.2"
+const CurrentVersion = "1.2.3"
 
 // ServerVersion represents the installed setup version on a server
 type ServerVersion struct {

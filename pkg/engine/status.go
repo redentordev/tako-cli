@@ -68,6 +68,10 @@ type StatusService struct {
 	Schedule string     `json:"schedule,omitempty"`
 	LastRun  string     `json:"lastRun,omitempty"`
 	NextRun  *time.Time `json:"nextRun,omitempty"`
+	// Heal is the service's local self-healing state merged across the
+	// selected nodes (worst wins). Absent when no node reports a policy for
+	// the service or the agents predate node.self-healing-v1.
+	Heal *StatusServiceHeal `json:"heal,omitempty"`
 }
 
 // StatusServiceNode is one node's share of a service row.
@@ -168,6 +172,12 @@ func (e *Engine) Status(ctx context.Context, req StatusRequest) (*StatusResult, 
 		return nil, err
 	}
 	AttachStatusServiceNodes(serviceInfos, nodeStates)
+	if cfg.SelfHealingEnabled(envName) {
+		// Best effort: an unreachable or older node leaves the heal field
+		// out rather than failing ps.
+		heal, _ := ReadHealStatus(ctx, cfg, envName, serverNames, "", 0)
+		AttachStatusHeal(serviceInfos, heal.Nodes)
+	}
 
 	return &StatusResult{
 		APIVersion:  takoapi.APIVersionCurrent,

@@ -153,9 +153,15 @@ func ValidateNotificationsConfig(notifications *NotificationsConfig) error {
 	if notifications == nil {
 		return nil
 	}
-	alertsEnabled := notifications.Alerts != nil && schedulerAlertsEnabled(*notifications.Alerts)
+	alertsEnabled := notifications.Alerts != nil && (schedulerAlertsEnabled(*notifications.Alerts) || notifications.Alerts.ExplicitHealthSections())
 	if alertsEnabled && strings.TrimSpace(notifications.Slack) == "" && strings.TrimSpace(notifications.Discord) == "" && strings.TrimSpace(notifications.Webhook) == "" {
-		return fmt.Errorf("notifications.alerts requires at least one Slack, Discord, or webhook target")
+		// Service damping defaults alone can be delivered through
+		// per-service monitoring webhooks; every other section needs a
+		// project-wide target.
+		alerts := notifications.Alerts
+		if schedulerAlertsEnabled(*alerts) || alerts.Host != nil || alerts.Containers != nil || alerts.Certificates != nil {
+			return fmt.Errorf("notifications.alerts requires at least one Slack, Discord, or webhook target")
+		}
 	}
 	if alertsEnabled {
 		for _, target := range []struct {
@@ -200,7 +206,7 @@ func ValidateNotificationsConfig(notifications *NotificationsConfig) error {
 			return fmt.Errorf("%s must use whole seconds", name)
 		}
 	}
-	return nil
+	return validateHealthAlertSections(notifications.Alerts)
 }
 
 func schedulerAlertsEnabled(alerts SchedulerAlertsConfig) bool {
@@ -223,6 +229,7 @@ func ValidationWarnings(cfg *Config) []ValidationWarning {
 		return warnings
 	}
 	warnings = append(warnings, deprecatedConfigWarnings(cfg)...)
+	warnings = append(warnings, monitoringWarnings(cfg)...)
 	if cfg.resolution != nil {
 		for _, name := range cfg.resolution.unusedAbstractEnvironments() {
 			warnings = append(warnings, ValidationWarning{
@@ -460,6 +467,10 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		return fmt.Errorf("environment %s: must specify either 'servers' or 'serverSelector'", envName)
 	}
 
+	if err := validateSelfHealingConfig("environment "+envName, env.SelfHealing); err != nil {
+		return err
+	}
+
 	// Validate server names exist in config
 	if len(env.Servers) > 0 {
 		for _, serverName := range env.Servers {
@@ -508,6 +519,9 @@ func validateEnvironment(envName string, env *EnvironmentConfig, cfg *Config) er
 		env.Services[serviceName] = service
 	}
 	if err := validateRunImageSources(envName, env, cfg.Builds); err != nil {
+		return err
+	}
+	if err := validateMonitoredServiceCount(envName, env); err != nil {
 		return err
 	}
 
@@ -870,6 +884,14 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	if err := validateServiceKind(name, service); err != nil {
 		return err
 	}
+	if service.SelfHealing != nil {
+		if service.IsJob() || service.IsRun() {
+			return fmt.Errorf("service %s: kind: %s cannot set selfHealing", name, service.Kind)
+		}
+		if err := validateSelfHealingConfig("service "+name, service.SelfHealing); err != nil {
+			return err
+		}
+	}
 	if err := validateStringOrList(name, "command", service.Command); err != nil {
 		return err
 	}
@@ -1137,29 +1159,9 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 		}
 	}
 
-	// Validate monitoring if configured
-	if service.Monitoring != nil && service.Monitoring.Enabled {
-		if service.Monitoring.Interval == "" {
-			service.Monitoring.Interval = "60s" // Default 60 second check interval
-		}
-		if service.Monitoring.Webhook == "" {
-			return fmt.Errorf("service %s: monitoring enabled but no webhook configured", name)
-		}
-		// Auto-detect check type if not specified
-		if service.Monitoring.CheckType == "" {
-			if service.IsPublic() && service.HealthCheck.Path != "" {
-				service.Monitoring.CheckType = "http" // Check domain health endpoint
-			} else {
-				service.Monitoring.CheckType = "container" // Check if container running
-			}
-		}
-		validCheckTypes := map[string]bool{
-			"http":      true,
-			"container": true,
-		}
-		if !validCheckTypes[service.Monitoring.CheckType] {
-			return fmt.Errorf("service %s: invalid monitoring checkType: %s (must be: http or container)", name, service.Monitoring.CheckType)
-		}
+	// Validate monitoring if configured (auto-detects checkType).
+	if err := validateServiceMonitoring(name, service, cfg); err != nil {
+		return err
 	}
 
 	// Validate cross-project imports

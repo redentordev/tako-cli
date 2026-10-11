@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -47,6 +48,8 @@ type deploySummaryInput struct {
 	// AttentionError is set when the deploy succeeded but needs attention
 	// (for example strict domain checks).
 	AttentionError string
+	// Warnings are non-fatal post-rollout problems, shown as notes.
+	Warnings []string
 
 	PreviousStable *remotestate.DeploymentState
 	HistoryErr     error
@@ -237,6 +240,9 @@ func buildDeploySummary(redact func(string) string, in deploySummaryInput) *Oper
 	if in.AttentionError != "" {
 		builder.addNote(in.AttentionError)
 	}
+	for _, warning := range in.Warnings {
+		builder.addNote(warning)
+	}
 	for _, note := range urlNotes {
 		builder.addNote(note)
 	}
@@ -354,6 +360,24 @@ type deployApplyState struct {
 	domainChecked    bool
 	domainStatuses   []health.DomainStatus
 	bookkeepingErr   string
+	// warnings are non-fatal post-rollout problems (alert configuration).
+	warnings []string
+}
+
+// alertPolicyWarning describes an alert configuration push failure that
+// does not fail the deploy.
+func alertPolicyWarning(err error) string {
+	if isDefaultOnlyAlertPolicyError(err) {
+		return "warning: default node-side monitoring was not configured: " + err.Error() + " (retried on the next deploy)"
+	}
+	return "warning: alert configuration was not applied; the rollout succeeded: " + err.Error() + " (fix the cause, for example low free disk on the node, and re-run tako deploy)"
+}
+
+// isDefaultOnlyAlertPolicyError reports an alert push failure of a request
+// that carried only default-derived node-side monitoring.
+func isDefaultOnlyAlertPolicyError(err error) bool {
+	var applyErr *deployer.AlertPolicyApplyError
+	return errors.As(err, &applyErr) && applyErr.DefaultOnly
 }
 
 // finishSummary redacts the result's error fields in place and attaches the
@@ -397,6 +421,9 @@ func (s *DeploySession) finishSummary(ctx context.Context, result *DeployResult,
 		StrictDomains:    s.req.StrictDomains,
 		DomainStatuses:   state.domainStatuses,
 		Preview:          s.summaryPreview(),
+	}
+	for _, warning := range state.warnings {
+		in.Warnings = append(in.Warnings, e.RedactSensitive(warning))
 	}
 	if failed {
 		in.Error = result.Error

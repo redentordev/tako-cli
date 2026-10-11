@@ -51,11 +51,14 @@ Checks performed:
   - Local build inputs
   - Server connectivity (skip with --skip-remote)
   - Server agent version (skip with --skip-remote)
-  - Node agent health: takod /healthz, mesh status, disk pressure (skip with --skip-remote)
+  - Node agent health: takod /healthz, mesh status, disk pressure, and node status
+    (OS security updates, reboot required, clock sync, metrics collector,
+    legacy monitoring agent) (skip with --skip-remote)
   - Docker runtime and proxy runtime (skip with --skip-remote)
   - Proxy/CDN client-IP topology (skip with --skip-remote)
   - Replicated deployment/runtime state (skip with --skip-remote)
   - Running services (skip with --skip-remote)
+  - Disk hygiene: recent runs, pressure, unrotated logs (skip with --skip-remote)
 
 Examples:
   tako doctor                  # Run all checks
@@ -108,6 +111,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			failed++
 		}
 		result.Checks = append(result.Checks, engine.DoctorCheck{
+			ID:          doctorSectionIDs[section],
 			Name:        section,
 			Status:      strings.ToLower(r.status),
 			Detail:      r.message,
@@ -175,6 +179,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		"Running Services",
 		"Replicated State",
 		"External Volumes",
+		doctorDiskHygieneSection,
 	}
 	if !doctorSkipRemote {
 		heading(remoteSections[0])
@@ -206,6 +211,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 		heading(remoteSections[9])
 		checkExternalVolumes(record, cfg, envName, clients)
+
+		heading(remoteSections[10])
+		checkDiskHygiene(record, cfg, clients)
 
 		// Clean up clients
 		for _, c := range clients {
@@ -492,6 +500,7 @@ func checkNodeAgentHealth(record func(checkResult), cfg *config.Config, clients 
 	checkNodeAgentHealthWith(record, clientNames, cfg.Mesh != nil, func(clientName string) (*doctorNodeHealthInfo, error) {
 		return detectDoctorNodeHealth(clients[clientName], cfg)
 	})
+	checkNodeStatus(record, cfg, clients)
 }
 
 func checkNodeAgentHealthWith(record func(checkResult), clientNames []string, meshConfigured bool, probe func(string) (*doctorNodeHealthInfo, error)) {

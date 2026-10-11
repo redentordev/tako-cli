@@ -215,6 +215,11 @@ func TestPreflightRollbackImagesReportsUnavailableImages(t *testing.T) {
 	if len(unavailable) != 2 || !strings.Contains(joined, "api (demo/api:D1") || !strings.Contains(joined, "not in the local repository") || !strings.Contains(joined, "shared (demo/shared/app:D1") {
 		t.Fatalf("unavailable = %q", unavailable)
 	}
+	for _, entry := range unavailable {
+		if !strings.Contains(entry, "removed by node retention") || !strings.Contains(entry, "--image-retention") {
+			t.Fatalf("a missing node-built image must name node retention: %q", entry)
+		}
+	}
 
 	// A node without image descriptor support fails closed (exit 2).
 	capabilityErr := &takodclient.CapabilityRequiredError{Server: "node-a", Capability: "image.descriptor-v1", Feature: "exact image reuse"}

@@ -2208,8 +2208,21 @@ The supported drivers are Docker's `local` and `json-file` drivers, both of
 which remain readable through `tako logs`. `maxSize` is a positive integer
 followed by `k`, `m`, or `g`, is normalized to lowercase, and cannot exceed
 `10g`; `maxFiles` is from 1 through 100. The setting applies only to
-long-running services: deploy-time runs and scheduled jobs reject it. Omit
-`logging` to preserve the node's Docker daemon logging configuration exactly.
+long-running services: deploy-time runs and scheduled jobs reject it.
+
+When a service omits `logging`, a takod with `node.disk-hygiene-v1` bounds
+its new containers with `json-file` rotation (`max-size=20m`, `max-file=5`),
+so one chatty container cannot fill the disk. The default is node policy: it
+is not part of the desired document or the config hash, so it never causes a
+redeploy, and existing containers keep their log options until they are next
+replaced. takod leaves the daemon's logging untouched (and adds nothing) when
+the Docker default driver is not `json-file`, when `/etc/docker/daemon.json`
+sets `log-driver` or any `log-opts` key, or when `daemon.json` is unreadable.
+To opt out on a node, run takod with `--default-container-logging=off` (see
+the systemd drop-in in [Resource Monitoring](RESOURCE-MONITORING.md#disk-hygiene));
+`--default-container-log-max-size` and `--default-container-log-max-file`
+change the bounds. An explicit `logging` block always wins.
+
 Configured logging requires an agent advertising `container.logging-v1`, and
 Tako fails capability preflight before any deployment mutation on a stale
 agent.
@@ -2298,6 +2311,149 @@ Node-local alert delivery cannot detect that its own node is down. Run
 `tako_scheduler_alert_owner_present == 0`,
 `tako_scheduler_alert_owner_reachable == 0`, active episodes, or exhausted
 deliveries.
+
+## Health Monitoring Alerts
+
+takod also checks service health and node, container and certificate
+conditions (`monitoring.health-v1`). It sends alerts to the same targets:
+
+<!-- tako:snippet partial -->
+```yaml
+notifications:
+  slack: ${SLACK_WEBHOOK_URL}
+  alerts:
+    services:
+      alertAfter: 3
+      recoverAfter: 2
+    host:
+      disk: 90
+      inodes: 90
+      memory: 90
+      cpu: 95
+      cpuFor: 10m
+      load: 4
+      conditions: true
+    containers:
+      oom: true
+      crashLoop: 3
+      crashLoopWindow: 10m
+    certificates:
+      warnBefore: 336h
+      criticalBefore: 72h
+environments:
+  production:
+    services:
+      web:
+        image: nginx:1.27
+        port: 80
+        proxy:
+          domain: www.example.com
+        monitoring:
+          enabled: true
+          interval: 30s
+          timeout: 5s
+          alertAfter: 2
+          checkType: http
+          webhook: https://hooks.example.com/tako/web
+```
+
+Defaults apply whenever an `alerts` block exists, even when these sections
+are omitted:
+
+| Setting | Default |
+|---|---|
+| `services.alertAfter` / `recoverAfter` | 3 / 2 |
+| `host.disk` / `host.inodes` | 90% (critical at 95%) |
+| `host.memory`, `host.cpu`, `host.load` | off |
+| `host.conditions` | on |
+| `containers.oom` | on |
+| `containers.crashLoop` | 3 restarts in 10m |
+| `certificates.warnBefore` / `criticalBefore` | 336h / 72h |
+
+To disable a threshold, set it to `0`. Percentages range from 1 to 99.
+
+`host` and `certificates` subjects belong to the whole node. They require a
+shared target (`slack`, `discord` or `webhook`), and each target is alerted
+once per node, even when several projects share it.
+
+Per-service settings:
+
+- `monitoring.interval`: 10s to 1h, default 60s. An out-of-range value from
+  an older config produces a warning and is clamped.
+- `monitoring.timeout`: 1s to 60s, shorter than the interval, default 10s.
+- `monitoring.alertAfter` / `recoverAfter`: override the service defaults.
+- `monitoring.webhook`: an extra public HTTPS target that receives only that
+  service's alerts. A value that fails alert target validation was accepted
+  by earlier releases. It now produces a deprecation warning and is never
+  sent.
+- `monitoring` on job and run services is ignored.
+
+`http` checks run on the node that serves the proxy route (the first
+schedulable proxy server). takod dials its local proxy using the service
+domain and checks the health check path, the status code, and the
+certificate's hostname and validity. A service with no routable domain falls
+back to a `container` check, with a warning. Container checks compare
+running replicas on each node that has assignments.
+
+Checks report `unknown` until the service is deployed. They are paused
+while a deploy holds the lease, for `max(startPeriod, 30s)` after a deploy,
+during maintenance mode, and while removal is pending.
+
+On nodes without `monitoring.health-v1`, deploy prints "node-side monitoring
+inactive on <node>; run tako upgrade servers" and continues. Deploy fails
+with exit code 2 only when the new keys (`alerts.services`, `host`,
+`containers`, `certificates`, or `monitoring.timeout`, `alertAfter`,
+`recoverAfter`) are set explicitly. Read state with `tako monitor`. The
+payload schema, flap control and Prometheus series are described in
+[Resource Monitoring](RESOURCE-MONITORING.md#4-alerting).
+
+## Self-Healing
+
+takod can restart an unhealthy container, or start a crashed one that Docker
+will not restart, on its own node. It is off by default:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    selfHealing:
+      enabled: true
+    services:
+      web:
+        image: nginx:1.27
+        port: 80
+        healthCheck:
+          path: /
+        selfHealing:
+          unhealthyThreshold: 4
+          maxRestarts: 3
+          window: 30m
+      db:
+        image: postgres:16
+        persistent: true
+        volumes:
+          - pgdata:/var/lib/postgresql/data
+        selfHealing:
+          enabled: true
+          restartUnhealthy: false
+```
+
+| Key | Default | Range |
+|---|---|---|
+| `selfHealing.enabled` | `false` | |
+| `selfHealing.restartUnhealthy` | `true` | |
+| `selfHealing.startExited` | `true` | |
+| `selfHealing.unhealthyThreshold` | `3` | 1-20 |
+| `selfHealing.maxRestarts` | `3` | 1-20 |
+| `selfHealing.window` | `30m` | 5m-24h |
+
+Service keys override environment keys. A `persistent: true` service needs
+its own `enabled: true`; the environment's `enabled` does not apply to it.
+`selfHealing` on a job or `run` service is a validation error. The block is
+not part of container identity, so changing it recreates no container. A
+deploy with an enabled policy fails with exit code 2 when a target node lacks
+`node.self-healing-v1`. Inspect and control it with `tako heal`. See
+[Self-Healing](SELF-HEALING.md).
 
 ## Operator Files
 
@@ -2795,3 +2951,31 @@ tako takod run --build-cache-prune-interval 24h --build-cache-keep-storage 20GB
 
 Set `--build-cache-prune-interval 0` to disable the scheduled prune, or lower
 `--build-cache-keep-storage` on small VPS disks.
+
+On agents with `node.disk-hygiene-v1`, this prune is part of the daily disk
+hygiene run, which also removes old Tako-built images beyond the newest 3 per
+service and environment (`--image-retention`). `--hygiene-interval` sets the
+run interval; when only `--build-cache-prune-interval` is set it keeps
+controlling the interval. See
+[Resource Monitoring](RESOURCE-MONITORING.md#disk-hygiene).
+
+## Host Metrics Collection
+
+takod samples host metrics natively and keeps a bounded on-node history for
+`tako metrics --since`. These are `takod run` flags with defaults, so
+`tako.yaml` needs no setting:
+
+```bash
+tako takod run --metrics-interval 60s --metrics-retention 168h --metrics-history-max-bytes 67108864
+```
+
+- `--metrics-interval` (default `60s`, minimum `5s`): `0` disables native
+  collection and history; takod then serves the legacy agent file if present.
+- `--metrics-retention` (default `168h`, `1h`–`744h`): history kept under
+  `/var/lib/tako/metrics/history/`.
+- `--metrics-history-max-bytes` (default 64 MiB): hard cap, oldest files first.
+- `--metrics-textfile-dir` (off): write `tako_node.prom` atomically after each
+  sample for node_exporter's textfile collector. takod never opens a network
+  listener.
+
+See [Resource Monitoring](RESOURCE-MONITORING.md).

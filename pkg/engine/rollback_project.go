@@ -511,6 +511,10 @@ type rollbackImageProbe struct {
 // local repo) or pull (registry image). Shared-build targets accept only a
 // retained image. It returns the services with no source; capability and
 // node errors abort planning.
+// rollbackRetentionHint explains a missing node-built image: the node's
+// disk hygiene keeps only the newest images per service and environment.
+const rollbackRetentionHint = "the image may have been removed by node retention (keeps 3 per service and environment by default); redeploy that revision or raise takod --image-retention"
+
 func preflightRollbackImages(outcomes []RollbackServiceOutcome, services map[string]config.ServiceConfig, targets map[string]remotestate.ServiceState, records map[string]*remotestate.DeploymentState, probe rollbackImageProbe) ([]string, error) {
 	var unavailable []string
 	for index := range outcomes {
@@ -532,7 +536,7 @@ func preflightRollbackImages(outcomes []RollbackServiceOutcome, services map[str
 		case retained:
 			outcome.ImageSource = RollbackImageRetained
 		case state.SharedBuildHash != "":
-			unavailable = append(unavailable, fmt.Sprintf("%s (%s: shared-build image is not retained on any node)", outcome.Name, state.Image))
+			unavailable = append(unavailable, fmt.Sprintf("%s (%s: shared-build image is not retained on any node; %s)", outcome.Name, state.Image, rollbackRetentionHint))
 		case strings.TrimSpace(service.Build) != "":
 			commit := RollbackTargetCommit(records[outcome.SourceDeploymentID])
 			if commit != "" && probe.CommitAvailable(commit) {
@@ -543,7 +547,7 @@ func preflightRollbackImages(outcomes []RollbackServiceOutcome, services map[str
 			if commit != "" {
 				reason = fmt.Sprintf("image is not retained and commit %s is not in the local repository", commit)
 			}
-			unavailable = append(unavailable, fmt.Sprintf("%s (%s: %s)", outcome.Name, state.Image, reason))
+			unavailable = append(unavailable, fmt.Sprintf("%s (%s: %s; %s)", outcome.Name, state.Image, reason, rollbackRetentionHint))
 		case strings.TrimSpace(service.Image) != "":
 			outcome.ImageSource = RollbackImagePull
 		default:

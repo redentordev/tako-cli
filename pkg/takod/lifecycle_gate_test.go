@@ -156,7 +156,9 @@ func TestEnrolledLifecycleGateFailsClosedForEveryRegisteredMutation(t *testing.T
 			}
 			handler.ServeHTTP(recorder, httptest.NewRequest(method, route.path, body))
 			_, safe := lifecycleSafeMutationPaths[route.path]
-			safe = safe && route.path != "/v1/alerts"
+			// Alert and heal control are lifecycle-safe but still require
+			// the controller fence; an unfenced request is refused.
+			safe = safe && route.path != "/v1/alerts" && route.path != "/v1/heal"
 			if _, readOnly := lifecycleReadOnlyPostPaths[route.path]; readOnly {
 				safe = true
 			}
@@ -215,6 +217,32 @@ func TestEnrolledLifecycleGateAllowsAlertDisableButBlocksEnableWhenDraining(t *t
 	handler.ServeHTTP(negativeRecorder, negative)
 	if calls != 1 || negativeRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("invalid disable bypassed lifecycle gate: calls=%d status=%d", calls, negativeRecorder.Code)
+	}
+}
+
+func TestEnrolledLifecycleGateAllowsFencedHealControlWhenDraining(t *testing.T) {
+	server := lifecycleTestServer(t, nodeidentity.NodeLifecycleDraining, false)
+	calls := 0
+	handler := server.enrolledLifecycleHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
+	body := `{"project":"demo","environment":"production","action":"pause"}`
+	unfenced := httptest.NewRecorder()
+	handler.ServeHTTP(unfenced, httptest.NewRequest(http.MethodPut, "/v1/heal", strings.NewReader(body)))
+	if calls != 0 || unfenced.Code != http.StatusConflict {
+		t.Fatalf("unfenced heal pause passed: calls=%d status=%d", calls, unfenced.Code)
+	}
+	fence := activateLifecycleTestFence(t, server, "demo", "production")
+	fenceJSON, _ := json.Marshal(fence)
+	request := httptest.NewRequest(http.MethodPut, "/v1/heal", strings.NewReader(body))
+	request.Header.Set(OperationFenceHeader, base64.RawURLEncoding.EncodeToString(fenceJSON))
+	request.Header.Set(OperationHolderHeader, testOperationHolderToken)
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	if calls != 1 {
+		t.Fatal("fenced heal pause was blocked on a draining node")
+	}
+	read := httptest.NewRecorder()
+	handler.ServeHTTP(read, httptest.NewRequest(http.MethodGet, "/v1/heal?project=demo&environment=production", nil))
+	if calls != 2 {
+		t.Fatalf("heal status read was blocked: status=%d", read.Code)
 	}
 }
 
