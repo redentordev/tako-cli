@@ -155,20 +155,38 @@ takod SHALL evaluate the read-only node conditions `os-updates`, `reboot-require
 - **THEN** after the restart the condition keeps `since` 2026-10-09
 
 ### Requirement: Node conditions feed alerts without owning them
-When the alert-source interface from `add-takod-health-monitoring` is available, takod SHALL publish each condition as a node-scoped subject `node/<type>`, opening:
-- `reboot-required` after 24h in `warn`
-- `os-updates` after 72h in `warn`
-- `clock-sync`, `docker-daemon` and `metrics-collector` on `fail`
-
-It SHALL send a recovery when a condition returns to `ok`. This change SHALL NOT define alert targets, routing or host-percentage thresholds.
+takod SHALL register the node-scoped alert kind `node` with the monitoring alert-source API and report conditions as levels on the subject named by the condition type, opening:
+- `reboot-required`: `reboot_required` (warning) after 24h in `warn`
+- `os-updates`: `security_updates_pending` (warning) after 72h in `warn`
+- `clock-sync`: `clock_unsynchronized` (critical) on `fail`
+- `docker-daemon`: `docker_unreachable` (critical) after 3m in `fail`
 
 #### Scenario: Reboot pending for a day
-- **WHEN** `reboot-required` has been `warn` for 25 hours and node alerts are configured
-- **THEN** an alert for `node/reboot-required` opens through the sibling's delivery
+- **WHEN** `reboot-required` has been `warn` for 25 hours and the scope has effective host alerts with `conditions` true
+- **THEN** one `node_reboot_required` alert for subject `reboot-required` opens through the sibling's delivery
+
+### Requirement: Node condition alert lifecycle
+Alert windows SHALL be measured from the condition's persisted `since`. takod SHALL report a recovery when a condition returns to `ok`, and SHALL report nothing for `unknown` or stale results. The `metrics-collector` condition SHALL NOT be published as an alert. This change SHALL NOT define alert targets, routing or host-percentage thresholds.
+
+#### Scenario: Window survives a restart
+- **WHEN** `os-updates` has been `warn` for 70 hours and takod restarts
+- **THEN** the alert opens 2 hours later, not 72 hours after the restart
 
 #### Scenario: Recovery
 - **WHEN** the node is rebooted and `reboot-required` returns to `ok`
-- **THEN** a recovery is published for `node/reboot-required`
+- **THEN** a `node_condition_cleared` recovery is delivered for subject `reboot-required`
+
+#### Scenario: Collector stall alerts once
+- **WHEN** the native collector stops producing samples and host alerts are configured
+- **THEN** only monitoring's `metrics_stale` alert opens
+- **AND** no `node` alert is reported for `metrics-collector`
+
+### Requirement: Native host samples feed monitoring
+When native collection is enabled, takod SHALL provide its latest sample to `add-takod-health-monitoring` through that change's host-sample interface, including bytes and inodes for `/` and a separate Docker data root, so that host threshold alerts never read the legacy `current.json` while native collection is on.
+
+#### Scenario: Inode alerts on a native node
+- **WHEN** native collection is enabled and the Docker data root reaches 92% inode usage
+- **THEN** monitoring evaluates its inode threshold from the native sample
 
 ### Requirement: Doctor reports node status
 `tako doctor` SHALL add per-node checks read from `/v1/node/status`: OS security updates, reboot required, clock synchronized and metrics collector. It SHALL also report whether the legacy `tako-monitor` agent is still installed. Nodes without `node.status-v1` SHALL report these checks as `skip`, with remediation `tako upgrade servers`. `--skip-remote` SHALL skip them.

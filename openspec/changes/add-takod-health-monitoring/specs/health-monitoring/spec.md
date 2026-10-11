@@ -19,14 +19,23 @@ For every service with `monitoring.enabled: true`, takod SHALL run the configure
 - **THEN** the checker node connects to its local proxy on `127.0.0.1:443`, using SNI and Host `shop.example.com`, and requests `/health` without following redirects
 - **AND** a 2xx response within the timeout counts as passing
 
+#### Scenario: Origin certificate not publicly trusted
+- **WHEN** the proxy serves a pushed origin certificate for `shop.example.com` that covers the domain and is within its validity window but does not chain to a public root
+- **THEN** the http check passes on a 2xx response and reports no `tls_invalid`
+
 #### Scenario: Container check compares local assignments
 - **WHEN** a node holds 2 assignments for `worker` in the desired revision and only 1 active container is running
 - **THEN** that node observes `worker` failing with reason `replicas_missing`, details `expected=2` and `running=1`
 
 #### Scenario: One checker node per HTTP monitor
-- **WHEN** an environment has servers `app-1` and `app-2`, and `web` has replicas on both
-- **THEN** exactly one server, the first by sort order that hosts a replica, runs the http check for `web`
+- **WHEN** an environment has servers `app-1` and `app-2`, and `web` has replicas and proxy routes on both
+- **THEN** exactly one server, the first by sort order that holds the service's proxy route, runs the http check for `web`
 - **AND** both servers run container checks for their own `web` replicas
+
+#### Scenario: Checker without a local route
+- **WHEN** the checker node has no proxy route manifest for the service's domain
+- **THEN** the subject is reported `unknown` with reason `no_local_route`
+- **AND** no failing observation or alert is produced
 
 ### Requirement: Checks pause during operations and maintenance
 takod SHALL NOT record failing observations for a service subject while the environment's operation lease is held, during the post-operation grace period, while an http-checked service is in maintenance mode, or while the service is pending removal.
@@ -62,10 +71,15 @@ A subject SHALL NOT produce more than 6 transitions per rolling hour. When the l
 - **AND** `tako monitor` shows `web` as `flapping`
 
 ### Requirement: Host threshold alerts
-When the deployed policy has a `notifications.alerts.host` section, takod SHALL raise host alerts from the node metrics file:
-- `disk_high`, on by default at 90% and critical at 95% or more;
+When the deployed policy has a `notifications.alerts.host` section, takod SHALL raise host alerts from the node's host samples:
+- `disk_high`, on by default at 90% and critical at 95% or more, for `/` and for a separate Docker data root;
+- `inodes_high`, on by default at 90% for the same filesystems, when the sample carries inode data;
 - `memory_high`, `cpu_high` and `load_high`, off unless configured;
-- `metrics_stale`, when the metrics file is missing or more than 5 minutes old.
+- `metrics_stale`, when there is no sample or the newest one is more than 5 minutes old.
+
+#### Scenario: Inodes exhausted
+- **WHEN** the native sample reports 93% inode usage on the Docker data root
+- **THEN** a `warning` alert with event `high_inodes`, subject `docker` and reason `inodes_high` is delivered
 
 #### Scenario: Disk filling up
 - **WHEN** the metrics file reports 91% root disk usage and the policy has the default host thresholds
@@ -84,6 +98,15 @@ When the deployed policy has a `notifications.alerts.host` section, takod SHALL 
 #### Scenario: Same endpoint, two environments
 - **WHEN** environments `staging` and `production` of one project share a server and the same Slack webhook, and both enable host alerts
 - **THEN** a disk alert for that server reaches the Slack webhook once, not twice
+- **AND** the recovery reaches it once, from the same scope that delivered the opening
+
+### Requirement: Host samples come from one source
+takod SHALL read host samples from the native collector whenever native collection is enabled, and from the legacy metrics file only when it is not. All host alert thresholds SHALL be owned by this capability; node components that act on disk pressure SHALL NOT raise `high_disk` or `high_inodes`.
+
+#### Scenario: Native collector preferred
+- **WHEN** native host collection is enabled and a stale legacy `current.json` is still being written by an old agent
+- **THEN** host thresholds are evaluated from the native sample only
+- **AND** no `metrics_stale` alert is raised because of the legacy file
 
 ### Requirement: Container OOM and crash-loop detection
 When container alerts are enabled, takod SHALL report an OOM kill of a monitored scope's container as a one-shot `container_oom` event, with at most one delivery per container per 15 minutes. It SHALL report a crash loop, meaning `crashLoop` restarts within `crashLoopWindow` or 3 consecutive samples in state `restarting`, as a `container_crash_loop` alert that recovers after two quiet windows. Detection SHALL NOT restart, stop or recreate any container.
@@ -99,7 +122,7 @@ When container alerts are enabled, takod SHALL report an OOM kill of a monitored
 - **AND** it recovers after `worker` has run for 20 minutes without restarting
 
 ### Requirement: Certificate expiry alerts
-When certificate alerts are enabled, takod SHALL check every certificate served for a subscribed scope at least every 6 hours: those in the takod certificate store and those in the proxy's ACME (HTTP-01) store. It SHALL raise a `warning` within `warnBefore` (default 336h), escalate to `critical` within `criticalBefore` (default 72h), raise `ssl_expired` after expiry, and recover after renewal.
+When certificate alerts are enabled, takod SHALL check, at least every 6 hours, the certificate the proxy serves for every routed domain of a subscribed scope. It SHALL raise a `warning` within `warnBefore` (default 336h), escalate to `critical` within `criticalBefore` (default 72h), raise `ssl_expired` after expiry, and recover after renewal.
 
 #### Scenario: Renewal has been failing
 - **WHEN** the certificate for `shop.example.com` expires in 10 days
@@ -108,6 +131,13 @@ When certificate alerts are enabled, takod SHALL check every certificate served 
 #### Scenario: Renewal succeeds
 - **WHEN** the certificate is then renewed and now expires in 89 days
 - **THEN** a `recovery` with event `ssl_renewed` is delivered
+
+### Requirement: The served certificate is the one checked
+For each domain, the checked certificate SHALL be the takod certificate store entry when one covers the domain, otherwise the proxy's ACME (HTTP-01) certificate, chosen with the same precedence and lookup as the node's certificate status endpoint.
+
+#### Scenario: Expiring pushed certificate shadows a fresh ACME certificate
+- **WHEN** a pushed certificate for `shop.example.com` expires in 5 days and the proxy's ACME store also holds one valid for 80 days
+- **THEN** a certificate alert with `details.source=pushed` is raised, because the pushed certificate is the one served
 
 #### Scenario: Caddy-managed certificate
 - **WHEN** a domain's certificate was issued by the proxy through HTTP-01 and exists only in the proxy data store
@@ -129,36 +159,59 @@ Every alert delivery, including job and backup alerts, SHALL use payload `schema
 ### Requirement: Alert targets are validated and SSRF-safe
 Every alert target, including `services.<name>.monitoring.webhook`, SHALL be validated at config load with the same rules as `notifications` targets: public HTTPS endpoints only. Delivery SHALL use the SSRF-safe transport that refuses private or loopback addresses after DNS resolution and does not follow redirects.
 
-#### Scenario: Private monitoring webhook
-- **WHEN** `monitoring.webhook` is `http://10.0.0.5/hook`
-- **THEN** config validation fails with exit 2, naming the service and the field
-
 #### Scenario: Per-service webhook without global targets
 - **WHEN** `notifications` has no target and `web.monitoring.webhook` is a valid public URL
 - **THEN** the config is valid
 - **AND** alerts for `web` go only to that webhook
 
+### Requirement: Existing invalid monitoring webhooks are deprecated, not fatal
+An existing `monitoring.webhook` that fails the target rules SHALL be reported as a validation warning, not an error, until the deprecated-keys removal release. Such a webhook SHALL NOT be sent to takod or used for delivery.
+
+#### Scenario: Private monitoring webhook
+- **WHEN** `monitoring.webhook` is `http://10.0.0.5/hook`
+- **THEN** `tako validate` succeeds with a warning naming the service and the field
+- **AND** the target is not sent to takod and receives no delivery
+
 ### Requirement: Alert source API for node components
 takod SHALL provide one alert source API through which node components report level and event observations for registered subject kinds, with closed reason and detail vocabularies. Episodes, damping, flap control, delivery, retries and targets SHALL be handled by the API, not by the source. Reports with unregistered kinds, reasons or detail keys SHALL be rejected.
 
 #### Scenario: Sibling source registers a kind
-- **WHEN** a node component registers kind `selfheal` with reasons `restart_budget_exhausted` and reports a level observation with that reason
+- **WHEN** a node component registers kind `selfheal` with reason `gave_up` and reports a level observation with that reason
 - **THEN** the subject opens and is delivered with the standard payload
 
 #### Scenario: Unknown detail key
 - **WHEN** a source reports a detail key that it did not register
 - **THEN** the report is rejected and nothing is delivered
 
-### Requirement: Monitoring requires a capable node agent
-`tako deploy` SHALL fail with exit code 2 before any mutation when the config enables service monitoring, host, container or certificate alerts, or per-service targets, and any schedulable target server lacks the `monitoring.health-v1` capability. The error SHALL name the servers and suggest `tako upgrade servers`.
+### Requirement: Alert kinds, severities and subjects are unambiguous
+Each alert kind SHALL be registered by exactly one source. Severities SHALL be `warning` or `critical` only. Subjects that are not services SHALL start with `@` so they never collide with a service name.
 
-#### Scenario: Old node agent
-- **WHEN** `app-2` runs a takod without `monitoring.health-v1` and the config enables `web.monitoring`
+#### Scenario: Duplicate kind registration
+- **WHEN** a second component tries to register kind `host`
+- **THEN** registration fails and takod reports the conflict at startup
+
+#### Scenario: Informational severity rejected
+- **WHEN** a source reports an observation with severity `info`
+- **THEN** the report is rejected and nothing is delivered
+
+### Requirement: Monitoring requires a capable node agent
+`tako deploy` SHALL fail with exit code 2 before any mutation when the config explicitly sets `notifications.alerts.services`, `.host`, `.containers` or `.certificates`, or `monitoring.timeout`, `alertAfter` or `recoverAfter`, and any schedulable target server lacks the `monitoring.health-v1` capability. The error SHALL name the servers and suggest `tako upgrade servers`.
+
+#### Scenario: Old node agent with explicit new keys
+- **WHEN** `app-2` runs a takod without `monitoring.health-v1` and the config sets `notifications.alerts.host.disk: 85`
 - **THEN** `tako deploy` exits 2, naming `app-2`, and no container is changed
+
+### Requirement: Default-derived monitoring never blocks a deploy
+Monitoring sections that exist only through defaults (an existing `alerts:` block or an existing `monitoring.enabled: true`) SHALL be sent only to servers with `monitoring.health-v1`, and deploy SHALL warn about the other servers instead of failing.
+
+#### Scenario: Existing monitoring config on an old node
+- **WHEN** `app-2` lacks `monitoring.health-v1` and the config, unchanged since the previous release, has `web.monitoring.enabled: true` and a valid `monitoring.webhook`
+- **THEN** deploy succeeds and warns that node-side monitoring is inactive on `app-2`
 
 #### Scenario: Job alerts on an old node are unaffected
 - **WHEN** the config only has `notifications.alerts.jobs` and the node has `scheduler.alerts-v1` but not `monitoring.health-v1`
 - **THEN** deploy succeeds and job alerts are applied as before
+- **AND** the default host, container and certificate sections are not sent to that node
 
 ### Requirement: Downgrade-safe alert storage
 New alert kinds and their state SHALL be stored separately from the existing job and backup alert state, so a node agent without this feature can load its own alert state unchanged.
@@ -175,6 +228,10 @@ New alert kinds and their state SHALL be stored separately from the existing job
 - **THEN** `tako monitor` prints `web` with state `alerting`, its severity, reasons and since-time
 - **AND** exits 6
 
+#### Scenario: Configured but never deployed
+- **WHEN** the local config enables `web.monitoring` but no node has a monitor for `web`
+- **THEN** `tako monitor` shows `web` as `unknown` with reason `not_deployed` and exits 6
+
 #### Scenario: Machine output
 - **WHEN** `tako monitor --output json` runs
 - **THEN** stdout is one `MonitorResult` document with per-node subjects and counts
@@ -185,9 +242,17 @@ New alert kinds and their state SHALL be stored separately from the existing job
 - **THEN** `tako monitor` exits 2 with a hint to run `tako upgrade servers` or use `--local`
 
 ### Requirement: Local foreground monitoring remains available
-`tako monitor --local` SHALL run checks from the CLI host against the public URLs at each service's own interval. It SHALL report the actual server name, or `external` for public URL checks, send one opening and one recovery per episode with the same damping defaults, use payload schema v1, and deliver only to validated targets through the SSRF-safe transport.
+`tako monitor --local` SHALL run checks from the CLI host against the public URLs at each service's own interval, and `--local --once` SHALL run a single pass. It SHALL report the actual server name, or `external` for public URL checks, send one opening and one recovery per episode with the same damping defaults, use payload schema v1, and deliver only to validated targets through the SSRF-safe transport.
 
 #### Scenario: Recovery from local mode
 - **WHEN** `tako monitor --local` sees `web` fail 3 times and then pass 2 times
 - **THEN** it sends one opening and one recovery
 - **AND** no payload contains `"server": "prod"` unless a server is actually named `prod`
+
+### Requirement: Deprecated one-shot monitor keeps its meaning
+The deprecated `tako monitor --once` SHALL behave as `tako monitor --local --once` and print a deprecation notice on stderr.
+
+#### Scenario: Legacy cron checker keeps alerting
+- **WHEN** a cron job runs `tako monitor --once` and `web` is down
+- **THEN** the CLI checks `web` locally and delivers the alert as before
+- **AND** stderr carries a deprecation notice pointing to `--local --once`

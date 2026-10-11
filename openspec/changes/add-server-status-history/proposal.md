@@ -25,11 +25,12 @@ Tako can show what a server looks like right now, but not what it looked like an
   - clock sync, from `timedatectl`.
 
   These are surfaced in `tako metrics`, `tako doctor` and `tako prometheus`. Tako never installs updates and never reboots.
-- **Node conditions.** takod evaluates a fixed set of read-only node checks on a schedule: `os-updates`, `reboot-required`, `clock-sync`, `docker-daemon` and `metrics-collector`. Each produces a condition (`ok`, `warn`, `fail` or `unknown`) exposed at `GET /v1/node/status`. When the sibling change `add-takod-health-monitoring` is present, the conditions are published through its alert-source interface; this change does not define alert targets, routing or host thresholds.
+- **Node conditions.** takod evaluates a fixed set of read-only node checks on a schedule: `os-updates`, `reboot-required`, `clock-sync`, `docker-daemon` and `metrics-collector`. Each produces a condition (`ok`, `warn`, `fail` or `unknown`) exposed at `GET /v1/node/status`. Four of them are published through the alert-source API of `add-takod-health-monitoring` as kind `node` (`reboot_required` after 24h, `security_updates_pending` after 72h, `clock_unsynchronized`, `docker_unreachable`), with windows measured from the persisted `since`. A stalled collector is alerted only by monitoring's `metrics_stale`. This change does not define alert targets, routing or host thresholds.
+- **Native samples for monitoring.** The collector implements monitoring's host-sample interface, so host threshold alerts (including inodes and a separate Docker data root) read native samples instead of the legacy `current.json`.
 - **`tako doctor`** gains checks backed by `/v1/node/status`: OS updates, reboot required, clock sync, collector freshness, and a note when the legacy agent is still installed. On nodes without the capability these checks are reported as `skip` with an upgrade hint.
 - **Prometheus.** `tako prometheus` gains node-condition, OS-status and real network/disk I/O series. takod also gains an opt-in `--metrics-textfile-dir` that writes a `.prom` file atomically for node_exporter's textfile collector. takod does **not** open a network listener; it stays socket-only.
 - **Setup and cleanup.**
-  - `tako setup` no longer installs the bash agent and removes an existing `tako-monitor` service and script.
+  - `tako setup` no longer installs the bash agent and removes an existing `tako-monitor` service and script. The step keeps its `SetupResult` key `monitor-agent`, moves after `takod-service` (it needs takod's capability), and runs in every setup mode.
   - The dead files in `pkg/monitoring/` are deleted.
   - `docs/RESOURCE-MONITORING.md` is rewritten to describe what is actually collected.
 - **Capabilities:** `node.metrics-history-v1` covers the history endpoint and the native collector. `node.status-v1` covers `/v1/node/status`. When a node lacks a capability, the new CLI features fail closed per node with a `tako upgrade servers` hint.
@@ -70,7 +71,8 @@ Tako can show what a server looks like right now, but not what it looked like an
   - `cmd/prometheus.go`: new series.
   - `pkg/engine/metrics.go`: the `MetricsHistoryResult` and additive `status` on `MetricsNodeSample`.
   - `pkg/takodclient`: endpoints and capability constants.
-- **Provisioner:** `InstallMonitoringAgent` is replaced by legacy-agent removal, `bc` is no longer installed, and `cmd/setup.go` call sites change.
+- **Provisioner:** `InstallMonitoringAgent` is replaced by legacy-agent removal, `bc` is no longer installed, `setup.CurrentVersion` is bumped, and `cmd/setup.go` moves the `monitor-agent` step after `takod-service` without the converge skip.
+- **Dependencies:** lands after `add-takod-health-monitoring` (alert-source API, `HostSampleSource`; contract in its design D13) and registers kind `node` in the same change. Independent of `add-disk-hygiene-defaults`; lands before `add-local-self-healing`. Owns the metric claims in `docs/RESOURCE-MONITORING.md`.
 - **Deleted:** `pkg/monitoring/agent.sh`, `agent_v2.sh` and `tako-monitor.service`, after a grep confirms they are unreferenced.
 - **Docs:** `docs/RESOURCE-MONITORING.md` (rewrite), `docs/MACHINE-INTERFACE.md` (the history result, node status, capabilities), and the takod flags reference in `docs/CONFIGURATION.md`.
 - **Tests:**

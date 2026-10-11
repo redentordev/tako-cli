@@ -22,6 +22,10 @@
   - Caddy's HTTP-01 and on-demand certificates live under `proxyCaddyDataDir` = `/etc/tako/proxy/caddy-data` (`proxy_routes.go:37`), mounted at `/data`. The layout is `caddy/certificates/<issuer>/<domain>/<domain>.crt`.
   - Route manifests (`readProxyRouteManifests`) map domains to a project and environment.
 - **Maintenance mode** writes a proxy config named by `runtimeid.MaintenanceProxyConfigFileName(project, env, service)`.
+- **Config layout:** services live under `environments.<env>.services.<name>`; `notifications` (targets and `alerts`) is top-level and project-wide. `services.<name>.monitoring.webhook` is not validated today (`validator.go:1121-1142`): existing configs may hold `http://` or private URLs.
+- **Certificate status (v0.14.2):** `pkg/takod/proxy_cert_status.go` adds `ProxyCertificateStatus`, `latestCaddyCertificate` and `readCaddyLeafCertificate` (Lstat, regular files only, 1 MiB cap). It consults the takod store first, because pushed and DNS-01 certificates take routing precedence, and then Caddy's storage, including covering wildcards.
+- **Proxy placement:** `environments.<env>.proxy.placement` can put a service's routes on servers that host none of its replicas.
+- **Locks:** the snapshot mutation lock and the maintenance barrier are *shared* flocks (`pkg/recovery/lock_unix.go`); they do not exclude other mutators. Per-environment exclusion is the operation lease, and on enrolled workers the worker fence admitted under `workerFenceAdmissionMu`.
 
 ## Goals / Non-Goals
 
@@ -92,10 +96,10 @@ func (m *SourceAlertManager) Status(project, environment string) (SourceAlertSta
 ```
 
 - **Validation:** an unknown kind, an unregistered reason or a non-allowlisted detail key is rejected. A detail value must match `^[A-Za-z0-9._:@/-]{1,128}$`, or be a number. A report for an unsubscribed scope or kind is dropped silently.
-- **Reserved kinds:**
-  - here: `service`, `host`, `container`, `certificate`;
-  - for siblings: `selfheal` (`add-local-self-healing`), `disk` (`add-disk-hygiene-defaults`) and `node` (`add-server-status-history`). Siblings define their own reasons and detail keys in their own specs and register them through `RegisterSource`.
-- **Shared engine:** the episode and delivery engine of `AlertManager` is extracted into an internal `alertCore` used by both managers. That covers queueing, dispatch, credential generations, retries, the SSRF client and payload building. `AlertManager`'s job and backup behavior and its persisted format stay byte-compatible.
+- **Subjects:** a service-bound kind uses the service name as subject. A subject that is not a service (node-wide or scope-wide) starts with `@` (for example `@node`). Service names only contain `[A-Za-z0-9_-]`, so the two can never collide. Host subjects are filesystem names (`root`, `docker`), certificate subjects are domains, node-condition subjects are condition types.
+- **Severity** is only `warning` or `critical`. There is no `info` alert: purely informational facts (a successful self-heal restart, a reclaim that freed space) go to journals and state events, never to alert targets.
+- **Kinds** (the full cross-plan table is D13): `service`, `host`, `container` and `certificate` here; `selfheal` (`add-local-self-healing`), `hygiene` (`add-disk-hygiene-defaults`) and `node` (`add-server-status-history`) are reserved for the siblings, which define their own reasons and detail keys and register them through `RegisterSource`. Each kind is registered by exactly one source.
+- **No shared-engine refactor.** `SourceAlertManager` is a new, separate implementation. It reuses only the stateless pieces of `alerts.go`: the SSRF-safe client (`newAlertHTTPClient`), `deliverHTTP`, target normalization and validation, and the v1 payload builder (D3). `AlertManager`'s episode logic, loader and persisted `scheduler-alerts` format are not touched, so job and backup alerts cannot regress through this change; only their payload gains the additive v1 keys.
 
 ### D2. Episodes, damping and flap control
 
@@ -129,7 +133,8 @@ The webhook body (Slack and Discord still receive only `message`, as today):
 
 - Existing keys keep their meaning: `eventId`, `episodeId`, `transition`, `project`, `environment`, `kind`, `service`, `message`, `reasons` and `timestamp`.
 - `service` is kept as an alias of `subject` for compatibility.
-- `event` uses the `pkg/notification` EventType vocabulary. Job and backup events: `job_alert` and `backup_stale`, which are new constants.
+- `event` uses the `pkg/notification` EventType vocabulary. Job and backup events: `job_alert` and `backup_stale`, which are new constants. Each sibling adds its own constants (D13).
+- Job and backup deliveries keep their current `message` text byte-for-byte; only the new kinds use the `… on <node>` form.
 - `message` is built only from public names, reason codes and numbers. It is never built from error strings, response bodies, headers or environment values, so no redaction pass is needed. Closed vocabularies replace redaction.
 
 ### D4. Config and delivery to takod
@@ -143,12 +148,14 @@ notifications:
     services:              # defaults for services with monitoring.enabled
       alertAfter: 3        # consecutive failed checks before alerting (default 3)
       recoverAfter: 2      # consecutive passed checks before recovery (default 2)
-    host:
-      disk: 90             # percent of / used; 0 disables (default 90 when alerts block exists)
+    host:                  # also subscribes the scope to node-wide kinds (D13)
+      disk: 90             # percent of a filesystem used (/ and a separate Docker data root); 0 disables (default 90 when alerts block exists)
+      inodes: 90           # percent of inodes used, same filesystems; 0 disables (default 90); evaluated only when the sample has inode data
       memory: 0            # percent; default off
       cpu: 0               # percent, sustained for cpuFor; default off
       cpuFor: 10m
       load: 0              # 5-min load per core; default off
+      conditions: true     # node-condition alerts from add-server-status-history; default true
     containers:
       oom: true            # default true
       crashLoop: 3         # restarts within crashLoopWindow; 0 disables (default 3)
@@ -156,42 +163,51 @@ notifications:
     certificates:
       warnBefore: 336h     # 14 days (Go duration; default 336h)
       criticalBefore: 72h  # default 72h
-services:
-  web:
-    monitoring:
-      enabled: true
-      interval: 60s        # 10s..1h, default 60s (now honored)
-      timeout: 10s         # 1s..60s, default 10s, must be < interval
-      alertAfter: 3        # overrides notifications.alerts.services
-      recoverAfter: 2
-      checkType: http      # http | container (auto-detected as today)
-      webhook: ${WEB_ALERT_HOOK}   # optional extra target for this service only
+environments:
+  production:
+    services:
+      web:
+        monitoring:
+          enabled: true
+          interval: 60s        # 10s..1h, default 60s (now honored)
+          timeout: 10s         # 1s..60s, default 10s, must be < interval
+          alertAfter: 3        # overrides notifications.alerts.services
+          recoverAfter: 2
+          checkType: http      # http | container (auto-detected as today)
+          webhook: ${WEB_ALERT_HOOK}   # optional extra target for this service only
 ```
 
 - **Defaults:** they apply only when a `notifications.alerts` block exists, as job and backup alerts do today. A config without `alerts:` sends nothing new. The exception is `monitoring.enabled` services, which are monitored whenever they have any target: a notifications target or `monitoring.webhook`.
+- **Explicit versus default sections.** The request records which sections came from explicit keys. A section is explicit when the config sets `notifications.alerts.services|host|containers|certificates` or any of `monitoring.timeout|alertAfter|recoverAfter`. Sections that exist only because of defaults (an `alerts:` block for jobs, or a pre-existing `monitoring.enabled: true`) are *default-derived*. D11 treats the two differently so that upgrading the CLI never breaks an existing config.
 - **Validation** (`validator.go`):
   - `monitoring.webhook` is required only when `notifications` has no slack, discord or webhook target. This relaxes `validator.go:1126-1128`.
-  - Every target, including per-service ones, must pass `alerttarget.NormalizeAndValidate` at config load. This catches an `http://10.0.0.5` target before deploy.
+  - New targets are validated with `alerttarget.NormalizeAndValidate` at config load and are errors when invalid. `notifications` targets already are.
+  - An existing `monitoring.webhook` that fails `alerttarget` (for example `http://10.0.0.5`) is a validation **warning** for one deprecation cycle (`ValidationWarnings`, until `DeprecatedKeysRemovalRelease`), not an error, because it was accepted before. Such a target is never sent to takod and never used by `--local`; the warning says so. It becomes an error at the removal release.
   - Durations must be within the bounds above, and percents within 1..99.
   - Monitoring on `kind: run`/`job` services stays rejected.
 - **Request:** `takod.AlertConfigRequest` gains additive fields:
   - `Monitors []MonitorSpec` with `{Service, CheckType, Interval, Timeout, AlertAfter, RecoverAfter, Domain, HealthPath, CheckerNode, HasWebhook}`;
   - `Host *HostAlertPolicy`, `Containers *ContainerAlertPolicy`, `Certificates *CertificateAlertPolicy`;
   - `Targets.Services map[string]string`, write-only like the other targets.
+
+  The explicit/default distinction is CLI-side only (it decides preflight and which nodes get default-derived sections); takod treats every received section the same.
 - **Persistence:** these fields are persisted by the new `SourceAlertManager` under a separate tree, `<dataDir>/alerts/{config,credentials,state}`. The legacy `scheduler-alerts` tree keeps `schemaVersion: 1` and only `job`/`backup` subjects.
 - **Why a separate tree:** a downgraded takod never sees the new kinds and cannot fail its strict loader (`alerts.go:1588-1634`). `alertPolicyEnabled` is extended so a policy with only new sections is "enabled".
 - **Disabling:** a zero policy still disables and removes both trees for the scope. `cleanup` (`server.go:1359,1388`) removes both trees.
 - **Per-service targets** are deliveries with provider `service-webhook`. They go only to subjects of that service: kind `service`, and `container`/`selfheal` subjects whose subject is that service.
 - **Checker node** (http checks only):
-  - The CLI assigns `CheckerNode` deterministically: the first, by sort order, of the schedulable environment servers that host a replica of the service. If none hosts one, the first schedulable server.
+  - The CLI assigns `CheckerNode` deterministically: the first, by sort order, of the schedulable servers the deploy writes the service's proxy route to. That is the environment `proxy.placement` targets when set, otherwise the servers hosting a replica. If that set is empty, the first schedulable server.
   - Each node runs only the http monitors whose `CheckerNode` is itself, so one service gets one http alert stream.
+  - A checker node that has no proxy route manifest for `Domain` reports the subject `unknown` (reason `no_local_route` in status) and never a failing observation, so a placement mistake cannot page anyone.
+  - When the checker moves (servers added or removed), the old checker retires its http subject the way removed job subjects are retired today: one `recovery` to the providers that received the opening, with `details.retired=true`.
   - Container checks run on every node, for that node's own assignments.
 
 ### D5. Service checks (`pkg/takod/monitor_checks.go`)
 
 - **Loop:** one goroutine per scope. It schedules each monitor at its `Interval`, with up to 10% jitter, and caps concurrency at 4 checks per node.
 - **`http` check:**
-  - It dials the node's local proxy at `127.0.0.1:443` and uses `Domain` for both SNI and Host. It verifies TLS against system roots for `Domain`, issues `GET HealthPath`, does not follow redirects, and reads at most 64 KiB of the body before discarding it.
+  - It dials the node's local proxy at `127.0.0.1:443` and uses `Domain` for both SNI and Host. It issues `GET HealthPath`, does not follow redirects, and reads at most 64 KiB of the body before discarding it.
+  - **TLS:** it verifies that the served leaf covers `Domain` and is inside its validity window. It does **not** verify the chain against system roots: pushed origin certificates (for example a CDN origin CA behind a fronting proxy) are legitimately not publicly trusted and would otherwise alert forever. Expiry is the `certificate` kind's job (D8).
   - **Success** is a 2xx status within `Timeout`.
   - **Failure reasons:**
     - `unreachable`, with `errorClass` = `connect|tls|timeout`;
@@ -208,39 +224,43 @@ services:
   - A node with no assignment for the service reports nothing.
 - **Pauses:** a subject is `paused`, with no observations and no transitions, while:
   - the scope's operation lease is held (`stateOperationLeaseHeld`, as in actual refresh);
-  - the post-lease grace period is running: `max(healthCheck.startPeriod, 30s)` after the lease is released;
+  - the post-lease grace period is running: `max(healthCheck.startPeriod, 30s)` after the later of the last observed lease release and the last write of the scope's desired `revision.json` (so an operation that started and finished between two checks still gets its grace). This includes `self-heal` leases from `add-local-self-healing`;
   - for http checks, the service's maintenance proxy config exists;
   - the service's desired entry has `RemovalPending`.
 - **Damping:** `OpenAfter = alertAfter`, `RecoverAfter = recoverAfter`.
 
 ### D6. Host thresholds (`pkg/takod/host_alerts.go`)
 
-- **Source:** every 60s, parse `current.json`. String percents are parsed as floats, and a parse error counts as stale.
+- **Source:** every 60s the evaluator reads one sample through a `HostSampleSource` interface (`Latest() (HostSample, time.Time, error)`); it never opens `current.json` itself.
+  - This change ships the *legacy adapter*, which parses `current.json` (string percents parsed as floats; a parse error counts as stale; no inode or Docker-root data).
+  - `add-server-status-history` provides the *native* source (`hostmetrics.Latest()`, typed, with inodes and a separate Docker data-root filesystem). takod uses the native source whenever native collection is enabled and falls back to the legacy adapter only when it is disabled (`--metrics-interval 0`). Monitoring therefore always consumes the native collector when present, and the two never run side by side for the same node.
+- **Subjects:** `root` for `/` plus the node-wide reasons (memory, cpu, load, staleness); `docker` for the Docker data root when it is a separate filesystem (native source only).
 - **Reasons and severities:**
-  - `disk_high`: critical at 95% or more, otherwise warning.
+  - `disk_high`: critical at 95% or more, otherwise warning. Evaluated per filesystem subject.
+  - `inodes_high`: same rule against `host.inodes`; native source only.
   - `memory_high`: warning.
   - `cpu_high`: uses `OpenFor = cpuFor`; warning.
   - `load_high`: `load_average.5min / nproc`; warning.
-  - `metrics_stale`: the file is missing or its timestamp is more than 5 minutes old; warning.
+  - `metrics_stale`: no sample, or the newest sample is more than 5 minutes old; warning. This is the only alert for a stalled collector: `add-server-status-history` keeps its `metrics-collector` condition for status and doctor but does not publish it as an alert.
   - Details carry `percent`, `threshold`, `usedMb` and `totalMb`.
+- **Ownership:** every host *alert* threshold (disk, inodes, memory, cpu, load) lives here. `add-disk-hygiene-defaults` owns reclaim *action* thresholds, which it measures itself with `statfs`; it never raises `high_disk`.
 - **Fan-out:** host subjects are `NodeScoped`. They are evaluated once per node per subscribing policy, and each scope with a `host` section gets its own episode against its own thresholds.
-- **Deduplication across scopes:** a node-global ledger keyed by `(node, reason, transition, targetFingerprint)` suppresses an identical delivery to the same endpoint from another scope within the same open window. `targetFingerprint` is the SHA-256 of provider plus normalized URL. The ledger is persisted in the new tree. Two environments of one project that share a server and a Slack webhook therefore produce one message, not two.
+- **Deduplication across scopes:** a node-global ledger keyed by `(kind, subject, reason, transition, targetFingerprint)` suppresses an identical delivery to the same endpoint from another scope while the first scope's episode is open. `targetFingerprint` is the SHA-256 of provider plus normalized URL. The ledger is persisted in the new tree. Two environments of one project that share a server and a Slack webhook therefore produce one message, not two.
+  - A target whose opening was suppressed by the ledger counts as "did not receive the opening", so that scope's later escalation and recovery are also not sent to it. The receiver sees one coherent episode, from the scope that opened first.
+  - The ledger applies to every `NodeScoped` kind (`host`, `node`, `hygiene`) and to `@`-subjects (for example the self-healing circuit breaker).
 
 ### D7. Container OOM and crash-loop detection (`pkg/takod/container_alerts.go`)
 
-- **Sampling:** every 30s, for each running or restarting container labeled with a subscribed scope, read `docker inspect` for `RestartCount`, `State.OOMKilled`, `State.StartedAt`, `State.Status` and `State.ExitCode`. Docker is called once per batch, at most 64 containers per call.
+- **Sampling:** every 30s, one shared sampler lists every container labelled `tako.project` (any state) and reads `docker inspect` for ID, name, labels, `RestartCount`, `State.OOMKilled`, `State.StartedAt`, `State.FinishedAt`, `State.Status`, `State.Restarting`, `State.ExitCode`, `State.Health.Status` and `HostConfig.RestartPolicy`. Docker is called once per batch, at most 64 containers per call. The sampler runs whenever any scope subscribes to container alerts or any desired service has a self-healing policy; detection below reports only for subscribed scopes.
 - **`container_oom`:** an event observation when `OOMKilled` is true and the `StartedAt` (or restart count) differs from the last sample. Details: `container`, `exitCode`, `memoryLimitMb` (when set).
 - **`crash_loop`:** a level observation when restarts inside `crashLoopWindow` reach `crashLoop`, or the status is `restarting` for 3 consecutive samples. It recovers after the container has been running 2 windows without a restart. Details: `restarts`, `window`, `exitCode`.
-- **Exported for siblings:** the samples are published in memory through `ContainerObservations() map[containerID]ContainerSample`, read-only. `add-local-self-healing` consumes them. This change performs no remediation.
+- **Exported for siblings:** the samples are published in memory through `ContainerObservations() (map[containerID]ContainerSample, time.Time)`, read-only, with the sample time. `add-local-self-healing` consumes them instead of running its own inspect loop, so the node runs one Docker inspect batch per 30s for both features. This change performs no remediation.
 
 ### D8. Certificate expiry (`pkg/takod/cert_expiry.go`)
 
 - **Frequency:** every 6h, and once 2 minutes after start.
-- **Sources:**
-  - takod store entries (`loadProxyCertificateEntries(false)`), skipping orphaned entries;
-  - Caddy's store: walk `proxyCaddyDataDir/caddy/certificates/*/*/*.crt`, without following symlinks and with a 1 MiB file cap, and parse the leaf `NotAfter`.
-- **Duplicates:** when both stores hold a domain, the later `NotAfter` wins, since that is the certificate actually served after renewal.
-- **Ownership:** a domain maps to a project and environment through the route manifests. Unowned certificates are ignored.
+- **Which domains:** the domains of the route manifests (`readProxyRouteManifests`) owned by subscribed scopes. The Caddy store is not walked; certificates for unrouted or unowned domains are ignored.
+- **Which certificate:** the one the proxy actually serves, chosen exactly as v0.14.2's `ProxyCertificateStatus` does (`pkg/takod/proxy_cert_status.go`): the takod store entry when one covers the domain (pushed and DNS-01 certificates take routing precedence), otherwise Caddy's best certificate via `latestCaddyCertificate`/`readCaddyLeafCertificate` (exact name before covering wildcard, symlinks refused, 1 MiB cap). This change reuses those helpers instead of adding a second walker. "Later `NotAfter` wins" would be wrong: an expiring pushed certificate is served even when Caddy holds a fresh one, and must alert.
 - **Reasons:**
   - `cert_expiring`: within `warnBefore`; warning. Escalates to critical within `criticalBefore`.
   - `cert_expired`: critical.
@@ -264,10 +284,11 @@ services:
   | `REASONS` | |
 
   It also prints a footer with pending and exhausted deliveries. `--service` filters to one service.
-- **Exit codes:** 0 when everything is ok; 6 when any subject is alerting or flapping, or any node read failed (the document is still emitted); 4 when every node is unreachable; 2 when no target node has `monitoring.health-v1`. In that last case it prints a hint to run `tako upgrade servers`, or to use `--local`.
+- **Configured but not deployed:** a service with `monitoring.enabled` in the local config for which no node reports a monitor is shown as `unknown` with reason `not_deployed` (deploy with this CLI to push the policy). It counts toward exit 6, so a cron job never reads "nothing configured" as "all ok".
+- **Exit codes:** 0 when everything is ok; 6 when any subject is alerting, flapping or `not_deployed`, or any node read failed (the document is still emitted); 4 when every node is unreachable; 2 when no target node has `monitoring.health-v1`. In that last case it prints a hint to run `tako upgrade servers`, or to use `--local`.
 - **`--watch [duration]`:** default 5s. Human mode only; rejected in machine modes, as `drift --watch` is.
-- **`--once`:** accepted, hidden and deprecated. It prints a stderr notice that it is now the default.
-- **`--local`:** the legacy foreground checker, fixed:
+- **`--once`:** keeps its old meaning, one local check pass that delivers alerts, and is now an alias of `--local --once`. It is hidden and deprecated with a stderr notice. Cron jobs that run `tako monitor --once` as an outside checker therefore keep alerting instead of silently turning into a status read.
+- **`--local [--once]`:** the legacy foreground checker (looping, or a single pass with `--once`), fixed:
   - per-service intervals;
   - the real node name (or `external`);
   - `opening` and `recovery` with the same damping defaults;
@@ -299,8 +320,10 @@ services:
 ### D11. Capability, rollout and compatibility
 
 - **New capability:** `monitoring.health-v1`.
-- **Deploy preflight** (`PreflightAlertPolicy`): when the request carries any of `Monitors`, `Host`, `Containers`, `Certificates` or `Targets.Services`, every schedulable target server must advertise the capability. Otherwise deploy fails with exit 2 before mutating anything, with a message naming the servers and pointing to `tako upgrade servers`.
-- **Disable path:** stale servers that lack the capability are skipped, as today (`deployer/alerts.go:75-82`).
+- **Deploy preflight** (`PreflightAlertPolicy`), using the explicit/default split from D4:
+  - **Explicit** new sections: every schedulable target server must advertise the capability. Otherwise deploy fails with exit 2 before mutating anything, naming the servers and pointing to `tako upgrade servers`. A user who wrote new keys asked for the feature and must not be silently unprotected.
+  - **Default-derived** sections (an existing `alerts:` block, or a pre-existing `monitoring.enabled: true`): sent only to servers that advertise the capability. Other servers get today's request unchanged, and deploy prints one warning per server ("node-side monitoring inactive on X; run tako upgrade servers"). Upgrading the CLI therefore never turns a deploy that passed yesterday into exit 2.
+- **Disable path:** stale servers that lack the capability are skipped, as today (`deployer/alerts.go:75-82`). `alertRequestEnabled` (`deployer/alerts.go:103`) is extended the same way as takod's `alertPolicyEnabled`, so a monitoring-only config is pushed as enabled.
 - **Lifecycle gate:** `lifecycle_gate.go` validates the extended request with the same normalizer.
 - **Older CLI against a newer takod:** the request has no new fields, so the source tree for that scope is cleared. This matches the existing semantics: the last deploy wins.
 
@@ -311,36 +334,74 @@ services:
 - Payload, status and `MonitorResult` fields come only from closed vocabularies, public names and numbers (D3). Raw error text is mapped to `errorClass` before it leaves the check function. Unit tests assert that no field contains an error string.
 - **Resource limits:** at most 4 concurrent checks per node, at most 64 KiB read per response, at most 200 monitored services per scope (validation error above that), and delivery queue caps unchanged. When `requireFreeDisk` fails, state is kept in memory and persisted later, and observations continue.
 
+### D13. Sibling integration contract
+
+This change owns the alert vocabulary and routing for all four ops-automation changes. Siblings register their kinds through D1 and add their `pkg/notification` constants; they never deliver anything themselves.
+
+| Kind | Owner | Scope | Subjects | Reasons (severity; type) | Events (opening / recovery) | Subscribed when |
+|---|---|---|---|---|---|---|
+| `service` | this change | scope | service | `unreachable`, `unhealthy_status`, `tls_invalid`, `replicas_missing` (critical); `unhealthy` (warning); level | `service_down` / `service_up`; `unhealthy`: `health_check_failed` / `health_check_recovered` | `monitoring.enabled` and any target |
+| `host` | this change | node | `root`, `docker` | `disk_high`, `inodes_high` (warning, critical ≥95%); `memory_high`, `cpu_high`, `load_high`, `metrics_stale` (warning); level | `high_disk`, `high_inodes`, `high_memory`, `high_cpu`, `high_load`, `metrics_stale` / `resource_normal` | `alerts.host` |
+| `container` | this change | scope | service | `crash_loop` (critical; level); `oom` (warning; event) | `container_crash_loop` / `container_recovered`; `container_oom` | `alerts.containers` |
+| `certificate` | this change | scope | domain | `cert_expiring` (warning, critical within `criticalBefore`); `cert_expired` (critical); level | `ssl_expiring_soon`, `ssl_expired` / `ssl_renewed` | `alerts.certificates` |
+| `selfheal` | `add-local-self-healing` | scope | service; `@node` | `gave_up` (critical; level); `circuit_open` (critical; level; subject `@node`); `action_failed` (warning; event) | `heal_gave_up` / `heal_resumed`; `heal_circuit_open` / `heal_circuit_closed`; `heal_action_failed` | an effective self-healing policy and any target |
+| `hygiene` | `add-disk-hygiene-defaults` | node | `root`, `docker`, `image-gc` | `reclaim_insufficient` (critical; level); `state_unreadable` (warning; level; subject `image-gc`) | `disk_reclaim_insufficient` / `resource_normal`; `image_gc_blocked` / `image_gc_resumed` | `alerts.host` |
+| `node` | `add-server-status-history` | node | condition type | `reboot_required`, `security_updates_pending` (warning); `clock_unsynchronized`, `docker_unreachable` (critical); level | `node_reboot_required`, `node_security_updates`, `node_clock_unsynchronized`, `node_docker_unreachable` / `node_condition_cleared` | `alerts.host` with `conditions: true` |
+
+- **Naming:** alert kinds and reason codes are `snake_case` tokens. Dotted names stay for state-event types (`heal.restarted`, `cert.renew.*`) and are not alert vocabulary.
+- **Per-service webhooks** receive only service-bound subjects of that service (`service`, `container`, `selfheal` with that subject), never `@`-subjects or node-scoped kinds.
+- **Capabilities** follow `<area>.<feature>-v1`: `monitoring.health-v1` (this change), `node.disk-hygiene-v1`, `node.metrics-history-v1`, `node.status-v1` and `node.self-healing-v1`. A sibling capability never implies alert delivery; sibling kinds are delivered only on nodes that also advertise `monitoring.health-v1`. Alert kinds need no capability of their own, because subscription travels inside this change's policy.
+- **Config in one `tako.yaml`:**
+
+  ```yaml
+  notifications:                # project-wide targets and alert policy (this change)
+    slack: ${SLACK_WEBHOOK}
+    alerts: {jobs: {...}, backups: {...}, services: {...}, host: {...}, containers: {...}, certificates: {...}}
+  environments:
+    production:
+      selfHealing: {enabled: true}   # add-local-self-healing, environment defaults
+      services:
+        web:
+          logging: {...}             # existing; when absent takod applies its node default (add-disk-hygiene-defaults)
+          monitoring: {...}          # this change
+          selfHealing: {...}         # add-local-self-healing
+  ```
+
+  `add-disk-hygiene-defaults` and `add-server-status-history` add no `tako.yaml` keys: their knobs are takod flags whose defaults ship in the binary, overridden through a systemd drop-in.
+- **takod loops once all four have landed:** this change's check scheduler, host evaluator (60s), shared container sampler (30s), certificate scan (6h) and source dispatch; the hygiene loop, which replaces the build-cache loop; the native collector and node-status loop; and the heal loop, which reads the shared container sampler and probes `healthCheck.path`/TCP per container itself (this change's http checks go through the load-balanced proxy and cannot single out a replica). Nothing reads `current.json` while native collection is on.
+- **Implementation order:** this change first; then `add-disk-hygiene-defaults` (after v0.14.2's `image_cleanup.go` is on master) and `add-server-status-history` in either order; `add-local-self-healing` last. Each later change registers its kind in the same PR that adds its source, so no sibling needs a "monitoring not present" fallback.
+
 ## Risks / Trade-offs
 
 - **Local-proxy http checks miss DNS and upstream network faults.** This is accepted and documented. `--local` and external probes cover outside-in checks.
 - **Host alerts on by default (disk 90%) for users who already have an `alerts:` block** may surprise some. This is mitigated by release notes and `host.disk: 0`. Disk-full is the most damaging silent failure, so on by default is the safer default.
 - **Per-scope host episodes multiply internal state** (subjects x scopes). This is bounded by the number of scopes on a node. The ledger deduplicates outward noise.
-- **Reading Caddy's store relies on its on-disk layout.** That layout is stable across Caddy 2.x. If the walk fails, the source logs an error and keeps the takod-store results.
-- **Refactoring `AlertManager` into `alertCore` risks job and backup alert regressions.** The existing `alerts_test.go` suite must pass unchanged, and a golden test pins the persisted format.
+- **Reading Caddy's store relies on its on-disk layout.** That layout is stable across Caddy 2.x, and the lookup is v0.14.2's, already used by `tako domains status`. If it fails, the source keeps the takod-store results.
+- **Two alert managers share targets but not code paths.** Episode logic exists twice (jobs/backups untouched, sources new). That duplication is the price of not touching the job and backup path; the shared stateless pieces (client, delivery, validation, payload) keep behavior aligned. The existing `alerts_test.go` must pass unchanged, and a golden test pins the `scheduler-alerts` format.
 
 ## Migration Plan
 
 1. Ship takod with `monitoring.health-v1`, the source manager and the extended `/v1/alerts`. With old CLIs, nothing changes.
-2. Operators run `tako upgrade servers`. The next `tako deploy` with a new CLI pushes the policies.
+2. Operators run `tako upgrade servers`. The next `tako deploy` with a new CLI pushes the policies. Configs that only gain default-derived sections keep deploying to un-upgraded servers, with a warning (D11).
 3. `tako monitor` users:
    - The default changes from an endless loop to a status read.
-   - Scripts that relied on the loop should deploy (takod now does the checking) or switch to `tako monitor --local`.
+   - Scripts that relied on the loop should deploy (takod now does the checking) or switch to `tako monitor --local`. `tako monitor --once` keeps checking locally and alerting.
    - The release notes call this out.
 4. Downgrading takod is safe: the `alerts/` tree is ignored by older binaries, and job and backup alerts keep working.
 
 ## Assumptions
 
-- Each server runs a `tako-proxy` that serves the domains of services hosted on it (true for the current proxy model, `proxy_routes.go`).
+- The checker node runs a `tako-proxy` holding the service's route (D4 picks it from the route placement; otherwise the check reports `unknown`).
 - `nproc` is available to takod through `runtime.NumCPU()` on the host. takod runs on the host, not in a container.
 
-## Open questions
+## Resolved questions
 
-1. **Should host and container alerts be on by default when an `alerts:` block exists?** *Recommendation: yes for `disk` (90%), `oom`, `crashLoop` and certificates; no for cpu, memory and load.* The defaults catch silent failures; the noisy ones stay opt-in.
-2. **Should the http check go through the local proxy or the public URL from the node?** *Recommendation: the local proxy.* Hairpin NAT breaks public-URL checks on many VPS providers. Public reachability is covered by `--local` and by external monitors.
-3. **Which node runs a service's http check: one checker node or every proxy node?** *Recommendation: one deterministic checker node.* One alert stream per service. Multi-node proxy coverage can be added later as an opt-in.
-4. **Should `tako monitor` with no flags keep the endless loop for compatibility?** *Recommendation: no, it becomes a status read; `--local` keeps the loop.* The old loop was buggy and needs a terminal. The new default is safe to script.
-5. **Should host alerts deduplicate across scopes through a target-fingerprint ledger, or use one node-global policy?** *Recommendation: the ledger.* Each project keeps its own thresholds, and identical endpoints still get one message.
-6. **Should new alert state live in a new storage tree or bump `scheduler-alerts` to schema 2?** *Recommendation: a new tree.* Downgrade safety outweighs the duplicated credential documents.
-7. **Should job and backup payloads gain the v1 keys?** *Recommendation: yes, additively.* One schema for webhook consumers; existing keys are untouched.
-8. **Should certificate alerts escalate to a separate `critical` delivery?** *Recommendation: yes, one `escalation` transition.* "3 days left" deserves a second notice.
+1. **Host and container alerts on by default when an `alerts:` block exists?** **Yes** for `disk` (90%), `inodes` (90%, native source only), `oom`, `crashLoop` and certificates; **no** for cpu, memory and load. They reach un-upgraded servers only as default-derived sections, which never fail a deploy (D11). *Rationale: silent disk, inode and certificate failures are the costly ones, and defaults must not break existing configs.*
+2. **Local proxy or public URL for the http check?** **Local proxy**, verifying hostname and validity but not the chain. *Rationale: hairpin NAT breaks public checks, and origin certificates are not publicly trusted; outside-in stays with `--local`.*
+3. **One checker node or every proxy node?** **One deterministic checker, chosen from the route placement.** *Rationale: one alert stream per service, and a replica node may not hold the route.*
+4. **Keep the endless loop as the `tako monitor` default?** **No**; it becomes a status read, `--local` keeps the loop, and `--once` keeps its old meaning as `--local --once`. *Rationale: a safe scriptable default without silently disabling existing cron-based checkers.*
+5. **Target-fingerprint ledger or one node-global policy?** **The ledger**, applied to all node-scoped kinds and `@`-subjects, with suppressed openings also suppressing the matching recovery. *Rationale: projects keep their own thresholds, and each endpoint sees one coherent episode.*
+6. **New storage tree or `scheduler-alerts` schema 2?** **New tree**, and no shared-engine refactor. *Rationale: downgrade safety, and the job and backup path stays untouched.*
+7. **v1 keys on job and backup payloads?** **Yes, additively**, and the job and backup `message` text stays byte-identical. *Rationale: one schema for consumers with no change to existing keys or text.*
+8. **Separate `critical` delivery for certificates?** **Yes, one `escalation`.** *Rationale: "3 days left" deserves a second notice.*
+9. **Existing invalid `monitoring.webhook` values?** **Warning for one deprecation cycle; never sent to takod or used by `--local`.** *Rationale: SSRF safety without failing config loads that worked yesterday.*

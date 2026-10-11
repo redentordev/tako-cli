@@ -17,3 +17,14 @@
 #### Scenario: Takod not ready
 - **WHEN** takod on the server does not advertise `node.metrics-history-v1` after installation
 - **THEN** setup leaves the legacy agent in place and reports why
+
+### Requirement: Legacy agent step keeps its machine identity
+The legacy-agent step SHALL keep the `SetupResult` step key `monitor-agent`. It SHALL run after the `takod-service` step and SHALL run in every setup mode, including converge.
+
+#### Scenario: Machine output step key
+- **WHEN** `tako setup --output json` runs on a server
+- **THEN** the node's steps include `monitor-agent` after `takod-service`
+
+#### Scenario: Server already at the current setup version
+- **WHEN** `tako setup` converges a server at the current setup version that still has `tako-monitor.service` installed
+- **THEN** the `monitor-agent` step runs and removes the agent
