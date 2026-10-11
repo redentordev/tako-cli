@@ -106,6 +106,35 @@ func TestStatusReportsSourceChangesWhenTakoLocalStateExists(t *testing.T) {
 	}
 }
 
+func TestCommitInfoUsesCommitAuthorWithoutUserName(t *testing.T) {
+	dir := initRealGitRepo(t)
+	// Mirror a CI runner: no user.name configured anywhere.
+	runRealGit(t, dir, "config", "--unset", "user.name")
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "empty-gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GITHUB_ACTOR", "ci-actor")
+
+	info, err := NewClient(dir).GetCommitInfo("")
+	if err != nil {
+		t.Fatalf("GetCommitInfo returned error: %v", err)
+	}
+	if info.Author != "Test User" {
+		t.Fatalf("author = %q, want commit author %q", info.Author, "Test User")
+	}
+}
+
+func TestChooseAuthorFallbacks(t *testing.T) {
+	if got := chooseAuthor("", " ", "ci-actor"); got != "ci-actor" {
+		t.Fatalf("chooseAuthor = %q, want GITHUB_ACTOR fallback", got)
+	}
+	if got := chooseAuthor("", "Local Name", "ci-actor"); got != "Local Name" {
+		t.Fatalf("chooseAuthor = %q, want user.name fallback", got)
+	}
+	if got := chooseAuthor("", "", ""); got != "unknown" {
+		t.Fatalf("chooseAuthor = %q, want unknown", got)
+	}
+}
+
 func useFakeGitCommand(t *testing.T) func() {
 	t.Helper()
 	oldCommand := gitCommandContext

@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -70,6 +71,34 @@ func (c *Client) GetCommitMessage(commitHash string) (string, error) {
 		return "", fmt.Errorf("failed to get commit message: %w", err)
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+// GetCommitAuthor returns the author name recorded on a commit. It works on
+// shallow clones because it reads only the commit object itself.
+func (c *Client) GetCommitAuthor(commitHash string) (string, error) {
+	output, err := c.gitOutput("log", "-1", "--format=%an", commitHash)
+	if err != nil {
+		return "", fmt.Errorf("failed to get commit author: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// resolveCommitAuthor prefers the commit's recorded author. The local
+// user.name is only a fallback: CI runners such as GitHub Actions do not
+// configure it, which previously made every CI deploy report "unknown".
+func (c *Client) resolveCommitAuthor(commitHash string) string {
+	commitAuthor, _ := c.GetCommitAuthor(commitHash)
+	userName, _ := c.GetUserName()
+	return chooseAuthor(commitAuthor, userName, os.Getenv("GITHUB_ACTOR"))
+}
+
+func chooseAuthor(candidates ...string) string {
+	for _, candidate := range candidates {
+		if candidate = strings.TrimSpace(candidate); candidate != "" {
+			return candidate
+		}
+	}
+	return "unknown"
 }
 
 // GetCurrentBranch returns the current branch name
@@ -169,10 +198,7 @@ func (c *Client) GetCommitInfo(commitHash string) (*CommitInfo, error) {
 		return nil, err
 	}
 
-	author, err := c.GetUserName()
-	if err != nil {
-		author = "unknown"
-	}
+	author := c.resolveCommitAuthor(commitHash)
 
 	branch, err := c.GetCurrentBranch()
 	if err != nil {

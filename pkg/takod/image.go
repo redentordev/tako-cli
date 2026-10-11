@@ -566,7 +566,7 @@ func extractTarGzWithLimits(r io.Reader, destDir string, limits buildContextLimi
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
-			return nil
+			return normalizeBuildContextDirModes(destDir)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to read build context tar stream: %w", err)
@@ -600,16 +600,20 @@ func extractTarGzWithLimits(r io.Reader, destDir string, limits buildContextLimi
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 				return fmt.Errorf("failed to create build context parent for %s: %w", header.Name, err)
 			}
-			mode := header.FileInfo().Mode().Perm()
-			if mode == 0 {
-				mode = 0644
-			}
+			mode := normalizedBuildContextFileMode(header.FileInfo().Mode().Perm())
 			file, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 			if err != nil {
 				return fmt.Errorf("failed to create build context file %s: %w", header.Name, err)
 			}
+			// The daemon umask (takod runs with UMask=0007) would otherwise strip
+			// the world-readable bits, and COPY preserves the context file mode, so
+			// a non-root Dockerfile USER could not read the copied sources.
+			chmodErr := file.Chmod(mode)
 			_, copyErr := io.Copy(file, tarReader)
 			closeErr := file.Close()
+			if chmodErr != nil {
+				return fmt.Errorf("failed to set build context file mode %s: %w", header.Name, chmodErr)
+			}
 			if copyErr != nil {
 				return fmt.Errorf("failed to write build context file %s: %w", header.Name, copyErr)
 			}
@@ -620,6 +624,33 @@ func extractTarGzWithLimits(r io.Reader, destDir string, limits buildContextLimi
 			return fmt.Errorf("unsupported build context entry %s", header.Name)
 		}
 	}
+}
+
+// normalizedBuildContextFileMode maps an archive file mode to 0644, or 0755
+// when any execute bit is set, independent of the archive's group/other bits
+// and of the process umask.
+func normalizedBuildContextFileMode(mode os.FileMode) os.FileMode {
+	if mode.Perm()&0111 != 0 {
+		return 0755
+	}
+	return 0644
+}
+
+// normalizeBuildContextDirModes sets every directory below destDir to 0755.
+// Directories are created with MkdirAll, which is subject to the daemon umask.
+func normalizeBuildContextDirModes(destDir string) error {
+	return filepath.WalkDir(destDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == destDir || !entry.IsDir() {
+			return nil
+		}
+		if err := os.Chmod(path, 0755); err != nil {
+			return fmt.Errorf("failed to set build context directory mode %s: %w", path, err)
+		}
+		return nil
+	})
 }
 
 func safeArchiveTarget(destDir string, name string) (string, error) {

@@ -52,6 +52,26 @@ func AuthoritativeStateServer(cfg *config.Config, fallback []string) (string, er
 	return PreferredRuntimeServer(cfg, fallback)
 }
 
+// servicesBuildImages reports whether any selected service builds an image
+// (directly or through a shared build) rather than using a prebuilt image.
+func servicesBuildImages(services map[string]config.ServiceConfig) bool {
+	for _, service := range services {
+		if service.Build != "" || service.SharedBuildHash != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// buildStrategyHeaderLine returns the deploy header's build strategy line, or
+// an empty string when no selected service builds anything.
+func buildStrategyHeaderLine(cfg *config.Config, services map[string]config.ServiceConfig) string {
+	if !servicesBuildImages(services) {
+		return ""
+	}
+	return fmt.Sprintf("Build strategy: %s\n", cfg.GetBuildStrategy())
+}
+
 // DeployLeaseTargets includes every schedulable environment worker plus any
 // schedulable builder that an auto/remote build may mutate. Setup remains
 // scoped to environment workers; the builder lease protects the later exact
@@ -61,16 +81,7 @@ func DeployLeaseTargets(cfg *config.Config, environmentServers []string, service
 	for _, name := range environmentServers {
 		seen[name] = struct{}{}
 	}
-	needsRemoteBuilder := cfg.GetBuildStrategy() != config.BuildStrategyLocal
-	if needsRemoteBuilder {
-		needsRemoteBuilder = false
-		for _, service := range services {
-			if service.Build != "" || service.SharedBuildHash != "" {
-				needsRemoteBuilder = true
-				break
-			}
-		}
-	}
+	needsRemoteBuilder := cfg.GetBuildStrategy() != config.BuildStrategyLocal && servicesBuildImages(services)
 	if needsRemoteBuilder {
 		for name, server := range cfg.Servers {
 			if server.Schedulable() && server.HasPlatformRole(nodeidentity.RoleBuilder) {

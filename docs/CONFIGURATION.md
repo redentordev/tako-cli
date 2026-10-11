@@ -816,6 +816,29 @@ tako secrets list --env production
 tako deploy --env production
 ```
 
+A value passed as `KEY=value` is visible to other local users (`ps`,
+`/proc/<pid>/cmdline`) while the command runs and can end up in shell history.
+In scripts and CI, keep values off the command line:
+
+```bash
+# Read one value from stdin (one trailing newline is stripped)
+printf '%s' "$DB_PASSWORD" | tako secrets set DB_PASSWORD --stdin --env production
+op read op://Prod/api/token | tako secrets set API_TOKEN --stdin --env production
+
+# Read one value from a file (one trailing newline is stripped)
+tako secrets set TLS_KEY --from-file ./certs/server.key --env production
+
+# Import many KEY=value lines from a dotenv stream (dry run until --write)
+vault-export-script | tako secrets import --format env --env production --write
+tako secrets import --format env --file prod.env --env production --write
+```
+
+`--stdin` and `--from-file` are mutually exclusive and take a bare `KEY` (no
+`=value`); values are capped at 1 MiB. `KEY=value` stores the value verbatim,
+including a leading `@`. `import --format env` keeps dotenv keys as
+written (rename with `--map SOURCE=DEST`), skips existing keys unless
+`--overwrite` is set, and never prints values.
+
 ### Resolving secrets from external stores at deploy time
 
 Like Kamal's `.kamal/secrets` + `kamal secrets fetch`, `secretSources` keep the
