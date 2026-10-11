@@ -80,7 +80,7 @@ var secretsInitCmd = &cobra.Command{
 }
 
 var secretsSetCmd = &cobra.Command{
-	Use:   "set KEY=value | KEY=@FILE | KEY --stdin",
+	Use:   "set KEY=value | KEY --stdin | KEY --from-file PATH",
 	Short: "Set a secret value",
 	Long: `Set a secret value in the .tako/secrets files.
 
@@ -88,19 +88,20 @@ A value passed as KEY=value is visible to other local users (ps,
 /proc/<pid>/cmdline) while the command runs and may be saved in shell
 history. Prefer one of the forms that keep the value off the command line:
 
-  KEY --stdin   read the value from standard input
-  KEY=@FILE     read the value from FILE
+  KEY --stdin             read the value from standard input
+  KEY --from-file PATH    read the value from PATH
 
-One trailing newline is stripped from values read from stdin or a file.
-To store a literal value that starts with '@', write it as KEY=@@value.
+--stdin and --from-file are mutually exclusive and take a bare KEY. One
+trailing newline is stripped from values read from stdin or a file.
 To import many secrets at once, use 'tako secrets import --format env'.`,
 	Example: `  printf '%s' "$DB_PASSWORD" | tako secrets set DB_PASSWORD --stdin --env production
-  tako secrets set TLS_KEY=@./certs/server.key
+  tako secrets set TLS_KEY --from-file ./certs/server.key
   op read op://Prod/api/token | tako secrets set API_TOKEN --stdin`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		useStdin, _ := cmd.Flags().GetBool("stdin")
-		key, value, err := resolveSecretSetArg(args[0], useStdin, cmd.InOrStdin())
+		fromFile, _ := cmd.Flags().GetString("from-file")
+		key, value, err := resolveSecretSetArg(args[0], useStdin, fromFile, cmd.InOrStdin())
 		if err != nil {
 			return err
 		}
@@ -569,6 +570,8 @@ func init() {
 	secretsImportCmd.Flags().StringVar(&secretsImportFormat, "format", "", "Import a local stream instead of a provider (supported: env)")
 	secretsImportCmd.Flags().StringVar(&secretsImportFile, "file", "", "Read the --format env stream from FILE instead of stdin ('-' = stdin)")
 	secretsSetCmd.Flags().Bool("stdin", false, "Read the secret value from stdin (one trailing newline is stripped)")
+	secretsSetCmd.Flags().String("from-file", "", "Read the secret value from PATH (one trailing newline is stripped)")
+	secretsSetCmd.MarkFlagsMutuallyExclusive("stdin", "from-file")
 }
 
 var (

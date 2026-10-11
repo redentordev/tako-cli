@@ -826,15 +826,16 @@ printf '%s' "$DB_PASSWORD" | tako secrets set DB_PASSWORD --stdin --env producti
 op read op://Prod/api/token | tako secrets set API_TOKEN --stdin --env production
 
 # Read one value from a file (one trailing newline is stripped)
-tako secrets set TLS_KEY=@./certs/server.key --env production
+tako secrets set TLS_KEY --from-file ./certs/server.key --env production
 
 # Import many KEY=value lines from a dotenv stream (dry run until --write)
 vault-export-script | tako secrets import --format env --env production --write
 tako secrets import --format env --file prod.env --env production --write
 ```
 
-`KEY=@FILE` reads the value from `FILE`; to store a literal value that starts
-with `@`, write `KEY=@@value`. `import --format env` keeps dotenv keys as
+`--stdin` and `--from-file` are mutually exclusive and take a bare `KEY` (no
+`=value`); values are capped at 1 MiB. `KEY=value` stores the value verbatim,
+including a leading `@`. `import --format env` keeps dotenv keys as
 written (rename with `--map SOURCE=DEST`), skips existing keys unless
 `--overwrite` is set, and never prints values.
 

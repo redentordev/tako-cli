@@ -17,51 +17,47 @@ const maxSecretInputBytes = 1 << 20
 // resolveSecretSetArg turns the `tako secrets set` argument into a key and a
 // value. Supported forms:
 //
-//	KEY=value       literal value (visible in argv; kept for compatibility)
-//	KEY=@FILE       value read from FILE
-//	KEY=@@value     literal value "@value"
-//	KEY --stdin     value read from stdin
+//	KEY=value               literal value (visible in argv; kept for compatibility)
+//	KEY --stdin             value read from stdin
+//	KEY --from-file PATH    value read from PATH
 //
-// Values read from stdin or a file have exactly one trailing newline removed.
-// Errors never include the value.
-func resolveSecretSetArg(arg string, useStdin bool, stdin io.Reader) (string, string, error) {
+// A literal value is stored verbatim, including a leading '@'. Values read
+// from stdin or a file have exactly one trailing newline removed. Errors never
+// include the value.
+func resolveSecretSetArg(arg string, useStdin bool, fromFile string, stdin io.Reader) (string, string, error) {
 	key, value, hasValue := strings.Cut(arg, "=")
+	if !useStdin && fromFile == "" {
+		if !hasValue {
+			return "", "", fmt.Errorf("invalid format, use: KEY=value, KEY --stdin, or KEY --from-file PATH")
+		}
+		return key, value, nil
+	}
+	if useStdin && fromFile != "" {
+		return "", "", fmt.Errorf("--stdin and --from-file cannot be used together")
+	}
+	if hasValue {
+		return "", "", fmt.Errorf("--stdin and --from-file take only the key: tako secrets set KEY --stdin | --from-file PATH")
+	}
+	if !secrets.IsValidSecretKey(key) {
+		return "", "", fmt.Errorf("invalid secret key %q", key)
+	}
 	if useStdin {
-		if hasValue {
-			return "", "", fmt.Errorf("--stdin takes only the key: tako secrets set KEY --stdin")
-		}
-		if !secrets.IsValidSecretKey(key) {
-			return "", "", fmt.Errorf("invalid secret key %q", key)
-		}
 		data, err := readSecretInput(stdin, "stdin")
 		if err != nil {
 			return "", "", err
 		}
 		return key, data, nil
 	}
-	if !hasValue {
-		return "", "", fmt.Errorf("invalid format, use: KEY=value, KEY=@FILE, or KEY --stdin")
+	file, err := os.Open(fromFile)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to open secret value file: %w", err)
 	}
-	switch {
-	case strings.HasPrefix(value, "@@"):
-		value = value[1:]
-	case strings.HasPrefix(value, "@"):
-		path := value[1:]
-		if path == "" {
-			return "", "", fmt.Errorf("KEY=@FILE requires a file path")
-		}
-		file, err := os.Open(path)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to read secret value file: %w", err)
-		}
-		defer file.Close()
-		data, err := readSecretInput(file, path)
-		if err != nil {
-			return "", "", err
-		}
-		value = data
+	defer file.Close()
+	data, err := readSecretInput(file, fromFile)
+	if err != nil {
+		return "", "", err
 	}
-	return key, value, nil
+	return key, data, nil
 }
 
 func readSecretInput(r io.Reader, source string) (string, error) {

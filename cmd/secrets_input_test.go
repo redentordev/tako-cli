@@ -28,22 +28,24 @@ func TestResolveSecretSetArgForms(t *testing.T) {
 		arg      string
 		stdin    string
 		useStdin bool
+		fromFile string
 		wantKey  string
 		want     string
 	}{
 		{name: "literal", arg: "API_TOKEN=" + fakeSecretValue, wantKey: "API_TOKEN", want: fakeSecretValue},
 		{name: "literal with equals", arg: "DSN=a=b", wantKey: "DSN", want: "a=b"},
 		{name: "empty literal", arg: "EMPTY=", wantKey: "EMPTY", want: ""},
-		{name: "escaped at", arg: "HANDLE=@@team", wantKey: "HANDLE", want: "@team"},
-		{name: "file", arg: "API_TOKEN=@" + valueFile, wantKey: "API_TOKEN", want: fakeSecretValue},
-		{name: "file strips one newline only", arg: "CERT=@" + multiLineFile, wantKey: "CERT", want: "line-one\nline-two\n"},
+		{name: "literal leading at is kept", arg: "HANDLE=@team", wantKey: "HANDLE", want: "@team"},
+		{name: "literal double at is kept", arg: "HANDLE=@@team", wantKey: "HANDLE", want: "@@team"},
+		{name: "from-file", arg: "API_TOKEN", fromFile: valueFile, wantKey: "API_TOKEN", want: fakeSecretValue},
+		{name: "from-file strips one newline only", arg: "CERT", fromFile: multiLineFile, wantKey: "CERT", want: "line-one\nline-two\n"},
 		{name: "stdin", arg: "API_TOKEN", useStdin: true, stdin: fakeSecretValue + "\n", wantKey: "API_TOKEN", want: fakeSecretValue},
 		{name: "stdin crlf", arg: "API_TOKEN", useStdin: true, stdin: fakeSecretValue + "\r\n", wantKey: "API_TOKEN", want: fakeSecretValue},
 		{name: "stdin no newline", arg: "API_TOKEN", useStdin: true, stdin: fakeSecretValue, wantKey: "API_TOKEN", want: fakeSecretValue},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			key, value, err := resolveSecretSetArg(tc.arg, tc.useStdin, strings.NewReader(tc.stdin))
+			key, value, err := resolveSecretSetArg(tc.arg, tc.useStdin, tc.fromFile, strings.NewReader(tc.stdin))
 			if err != nil {
 				t.Fatalf("resolveSecretSetArg returned error: %v", err)
 			}
@@ -55,19 +57,26 @@ func TestResolveSecretSetArgForms(t *testing.T) {
 }
 
 func TestResolveSecretSetArgRejectsInvalidForms(t *testing.T) {
+	valueFile := filepath.Join(t.TempDir(), "value.txt")
+	if err := os.WriteFile(valueFile, []byte(fakeSecretValue), 0600); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		arg      string
 		useStdin bool
+		fromFile string
 	}{
 		{arg: "API_TOKEN"},
 		{arg: "API_TOKEN=" + fakeSecretValue, useStdin: true},
+		{arg: "API_TOKEN=" + fakeSecretValue, fromFile: valueFile},
+		{arg: "API_TOKEN", useStdin: true, fromFile: valueFile},
 		{arg: "bad-key", useStdin: true},
-		{arg: "API_TOKEN=@"},
-		{arg: "API_TOKEN=@" + filepath.Join(t.TempDir(), "missing")},
+		{arg: "bad-key", fromFile: valueFile},
+		{arg: "API_TOKEN", fromFile: filepath.Join(t.TempDir(), "missing")},
 	} {
-		_, _, err := resolveSecretSetArg(tc.arg, tc.useStdin, strings.NewReader(fakeSecretValue))
+		_, _, err := resolveSecretSetArg(tc.arg, tc.useStdin, tc.fromFile, strings.NewReader(fakeSecretValue))
 		if err == nil {
-			t.Fatalf("resolveSecretSetArg(%q, stdin=%v) should fail", tc.arg, tc.useStdin)
+			t.Fatalf("resolveSecretSetArg(%q, stdin=%v, file=%q) should fail", tc.arg, tc.useStdin, tc.fromFile)
 		}
 		if strings.Contains(err.Error(), fakeSecretValue) {
 			t.Fatalf("error leaked the value: %v", err)
