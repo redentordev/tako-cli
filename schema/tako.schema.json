@@ -80,6 +80,53 @@
         { "console": ["exec", "-it", "web", "--", "bin/rails", "console"], "logsw": "logs web --follow" }
       ]
     },
+    "hooks": {
+      "type": "object",
+      "description": "Local lifecycle hooks: executables in the hook directory or argv commands that run on the operator's machine (never on nodes) around deploy, rollback, promote, and setup. Hooks get a curated, secret-free environment; see docs/HOOKS.md.",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "default": ".tako-hooks",
+          "description": "Hook directory relative to the directory containing the config file. Must stay inside the project and outside the gitignored .tako/ directory."
+        },
+        "timeout": {
+          "type": "string",
+          "default": "5m",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|μs|ms|s|m|h))+$",
+          "description": "Per-hook timeout as a Go duration from 1s to 1h. On timeout the hook's whole process tree is terminated."
+        },
+        "output": {
+          "type": "string",
+          "enum": ["verbose", "quiet"],
+          "default": "verbose",
+          "description": "verbose emits hook output lines at info level; quiet emits them at debug level (shown with --verbose and always present in NDJSON)."
+        },
+        "passEnv": {
+          "type": "array",
+          "description": "Process variables forwarded to hooks: exact names or a single trailing * prefix pattern. Nothing else from the process environment, including .env values, reaches a hook. TAKO_ names are reserved.",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*\\*?$",
+            "not": { "pattern": "^[Tt][Aa][Kk][Oo]_" }
+          },
+          "examples": [["GITHUB_TOKEN", "SLACK_*"]]
+        },
+        "commands": {
+          "type": "object",
+          "description": "Hooks declared as argv lists, run without a shell from the project directory. ${...} references are rejected; forward variables with passEnv. A hook defined here and as a file is an error.",
+          "propertyNames": {
+            "enum": ["pre-deploy", "post-deploy", "pre-rollback", "post-rollback", "pre-promote", "post-promote", "pre-setup", "post-setup", "on-failure"]
+          },
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" }
+          },
+          "examples": [{ "pre-deploy": ["make", "check"] }]
+        }
+      }
+    },
     "$schema": {
       "type": "string",
       "description": "JSON Schema reference for IDE support"

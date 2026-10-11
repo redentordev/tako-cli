@@ -45,6 +45,9 @@ type Config struct {
 	// to the listed Tako arguments before command dispatch. Values are
 	// literal (no ${...} expansion); see AliasMap and ValidateAliases.
 	Aliases AliasMap `yaml:"aliases,omitempty" json:"aliases,omitempty"`
+	// Hooks configures local lifecycle hooks run on the operator's machine
+	// around deploy, rollback, promote, and setup; see HooksConfig.
+	Hooks *HooksConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 
 	Servers      map[string]ServerConfig      `yaml:"servers" json:"servers"`
 	Environments map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
@@ -1299,6 +1302,9 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, err
 	}
 	if err := validateRawAliases(data, isJSON); err != nil {
+		return nil, err
+	}
+	if err := validateRawHookCommands(data, isJSON); err != nil {
 		return nil, err
 	}
 
