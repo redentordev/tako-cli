@@ -1711,6 +1711,27 @@ func TestLoadEnvFileWarningsUseStderr(t *testing.T) {
 	}
 }
 
+func TestLoadEnvFileInvalidLineWarningNeverPrintsContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	// A pasted secret without a key is a plausible invalid line.
+	secretLine := "pasted-without-key-9f3e2a7c41b8d6e05a"
+	if err := os.WriteFile(path, []byte("GOOD=value\n"+secretLine+"\n"), 0600); err != nil {
+		t.Fatalf("failed to write env file: %v", err)
+	}
+
+	stdout, stderr := captureConfigOutput(t, func() {
+		if _, err := LoadEnvFile(path); err != nil {
+			t.Fatalf("LoadEnvFile returned error: %v", err)
+		}
+	})
+	if strings.Contains(stdout+stderr, secretLine) || strings.Contains(stdout+stderr, "PastedWithoutKey") {
+		t.Fatalf("invalid line content leaked to output: stdout=%q stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "line 2") || !strings.Contains(stderr, path) {
+		t.Fatalf("stderr = %q, want line number and path", stderr)
+	}
+}
+
 func validValidationConfig() *Config {
 	return &Config{
 		Project: ProjectConfig{Name: "demo", Version: "1.0.0"},

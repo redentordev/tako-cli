@@ -593,9 +593,10 @@ environments:
 - Chains are allowed (`staging -> production -> base`) up to 8 `extends`
   hops. A cycle (including `extends` naming itself), an unknown parent, or a
   chain deeper than 8 hops fails validation with the full chain in the error.
-- `extends` and `abstract` are not inherited. Abstract environments do not
-  need `servers` or `serverSelector`. An abstract environment that nothing
-  extends produces a `tako validate` warning.
+- `extends`, `abstract` and `preview` are not inherited. Abstract
+  environments do not need `servers` or `serverSelector`. An abstract
+  environment that nothing extends produces a `tako validate` warning, unless
+  it declares `preview:` (see [Preview Environments](#preview-environments)).
 - An unknown or mistyped field is reported against the environment that
   declared it, and validation errors in an inheriting environment end with
   the chain, for example `(environment staging extends production)`.
@@ -612,6 +613,58 @@ Without `-e`, Tako uses the only deployable (non-abstract) environment, else
 `production`, else the first environment name in alphabetical order. In that
 last case it prints `no -e and no 'production'; using '<name>'; pass -e` to
 stderr, so pass `-e` in scripts and CI.
+
+### Preview environments
+
+A `preview:` block makes an environment the base of short-lived preview
+environments. `tako deploy --preview pr-42` synthesizes `preview-pr-42`, which
+extends the base, and deploys it. The usual base is an abstract template:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      web:
+        image: ghcr.io/example/app:1.4.2
+        port: 3000
+        replicas: 2
+        proxy:
+          domain: app.example.com
+  preview:
+    abstract: true
+    extends: production
+    preview:
+      domain: "{name}.preview.example.com"
+      ttl: 72h
+      max: 5
+      maxReplicas: 1
+      keepJobs: false
+      env:
+        PUBLIC_URL: "{url:web}"
+      services:
+        web:
+          env:
+            PREVIEW_HOST: "{host:web}"
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `domain` | `{name}.{domain}` | Host template for proxied services. Placeholders: `{name}` (preview name), `{service}` (service name), `{domain}` (the service's own domain, or internal `host`). |
+| `ttl` | `168h` | Go duration or `none`; the preview expires this long after its last successful deploy. |
+| `max` | `5` | Previews this base may have at once. |
+| `maxReplicas` | `1` | Replica cap for every service except global placement. |
+| `keepJobs` | `false` | Keep `kind: job` services, which are dropped by default. |
+| `env` | | Merged into every service. Placeholders: `{name}`, `{host:<service>}`, `{url:<service>}`. |
+| `services.<name>.env` | | Merged into one service, with the same placeholders. |
+
+`preview` is not inherited: an environment that extends a base is not itself
+a base. Preview services must not publish host ports, use `imports`,
+bind-mount host paths, or mount `name`/`external`/driver volumes; `tako
+validate` warns about these and a preview deploy rejects them. A preview reads
+the secrets files of its base (`.tako/secrets.preview` above). See
+[PREVIEW-ENVIRONMENTS.md](./PREVIEW-ENVIRONMENTS.md) for DNS, certificates,
+TTL and pruning.
 
 ### Environment variables and `-e`
 
@@ -646,6 +699,11 @@ depends on whether the command was given `-e`:
   command (for example `tako setup`, `tako upgrade servers`, and `tako doctor`),
   every variable in the file is required. Run `tako validate` without `-e` to
   check all environments at once.
+- With `--preview` (`tako deploy`, `tako config explain`, `ps`, `logs`,
+  `exec`, `history`, `rollback`), `-e` names the preview's base and the
+  scope is that base and its `extends` chain: the base is never left out and
+  its variables are required, even when it is abstract. Without `-e` every
+  variable is required.
 
 A CI job for one environment therefore only needs that environment's
 variables:
@@ -1800,6 +1858,44 @@ environments:
         image: example/worker:latest
         envFiles: [.env.base, .env.production]
 ```
+
+Credential-like values loaded from `envFile`/`envFiles` are masked in
+command output by the same rule as inline `env:` values (a credential-like
+name, a URL with credentials or a token-like part, or a long token mixing
+letters and digits) and show as `[REDACTED:envFile.<NAME>]`. Commands that
+only read logs or state (`logs`, `rollback`, `promote`, `scale`, `remove`,
+`destroy`) warn once when an envFile cannot be read on the operator machine,
+because its values will not be masked.
+
+Every mask names its source: `[REDACTED:secrets.STRIPE_KEY]`,
+`[REDACTED:env.DATABASE_URL]`, `[REDACTED:servers.app.password]`, or
+`[REDACTED:pattern.jwt]` for a heuristic match. Set
+`TAKO_REDACTION_LABELS=off` to print plain `[REDACTED]` markers instead. To
+see, before deploying, what Tako will mask and why, run:
+
+```bash
+tako config explain --redaction -e production
+```
+
+```text
+Redaction: production (config tako.yaml)
+Labels: on (TAKO_REDACTION_LABELS)
+
+Masked
+  servers.app.password                   ssh password
+  services.mongo.backup.secretAccessKey  backup storage credential
+
+Services
+  admin:
+    masked   secrets.STRIPE_KEY      secrets list (from .tako/secrets.production)
+    masked   envFile.SMTP_PASSWORD   credential-like name (.env.production)
+    visible  env.CMS_RUNTIME_MODE    plain setting
+```
+
+The report never prints a value, never contacts servers and never runs
+secret provider CLIs; keys that would come from `secretSources` are listed
+as `from secretSources[i] <provider>; not resolved here`, and `secrets:`
+references that nothing can resolve are listed under "Not resolvable".
 
 Container runtime controls map directly to Docker run options and work for
 long-running services and scheduled jobs:

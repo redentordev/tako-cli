@@ -168,12 +168,12 @@ func (e *Engine) PlanDestroy(ctx context.Context, req DestroyRequest) (*DestroyS
 		return nil, err
 	}
 
-	for _, server := range serversToDestroy {
-		e.RegisterSecret(server.Password)
-	}
+	e.RegisterServerPasswords(serversToDestroy)
 	if services, servicesErr := cfg.GetServices(session.envName); servicesErr == nil {
 		e.RegisterPublicConfigNames(cfg, services)
 		e.RegisterServiceEnvValues(services)
+		e.registerServiceEnvFileValuesOrWarn(services, session.envName, events.PhasePlan)
+		e.RegisterBackupSecrets(services)
 	}
 
 	mode := DestroyModeDecommission

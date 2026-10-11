@@ -1,0 +1,72 @@
+# Preview Environments Example
+# One short-lived copy of the app per pull request:
+#   tako deploy --preview pr-42        # create or update preview-pr-42
+#   tako preview list                  # every preview of the project
+#   tako preview destroy pr-42 --yes   # remove it and its data
+#   tako preview prune --yes           # remove every expired preview
+# See docs/PREVIEW-ENVIRONMENTS.md.
+
+project:
+  name: preview-shop
+  version: 1.0.0
+
+servers:
+  app:
+    host: ${SERVER1_HOST}
+    user: root
+    sshKey: ${SSH_KEY}
+  # A dedicated preview server keeps previews off production capacity and
+  # lets image retention run normally there.
+  previews:
+    host: ${SERVER2_HOST}
+    user: root
+    sshKey: ${SSH_KEY}
+
+environments:
+  production:
+    servers: [app]
+    services:
+      web:
+        image: ghcr.io/example/shop:1.4.2
+        port: 3000
+        replicas: 2
+        env:
+          DATABASE_HOST: db
+        secrets: [DATABASE_PASSWORD]
+        proxy:
+          domain: shop.example.com
+          email: ${LETSENCRYPT_EMAIL}
+      worker:
+        image: ghcr.io/example/shop:1.4.2
+        command: ["bin/worker"]
+        secrets: [DATABASE_PASSWORD]
+      db:
+        image: postgres:16
+        persistent: true
+        volumes: ["pgdata:/var/lib/postgresql/data"]
+        env:
+          POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+  # The preview template. It is abstract, so it is never deployed itself;
+  # each `tako deploy --preview NAME` synthesizes preview-NAME from it.
+  # Its secrets come from .tako/secrets.preview, never secrets.production.
+  preview:
+    abstract: true
+    extends: production
+    servers: [previews]
+    services:
+      # Previews do not need the background worker.
+      worker: null
+      web:
+        proxy:
+          # Use the Let's Encrypt staging CA while trying previews out.
+          tls:
+            staging: true
+    preview:
+      # Needs a wildcard DNS record: *.preview.example.com -> previews.
+      domain: "{name}.preview.example.com"
+      ttl: 72h
+      max: 5
+      maxReplicas: 1
+      env:
+        PUBLIC_URL: "{url:web}"

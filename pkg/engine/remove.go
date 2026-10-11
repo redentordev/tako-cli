@@ -144,11 +144,11 @@ func (e *Engine) PlanRemove(ctx context.Context, req RemoveRequest) (*RemoveSess
 		return nil, err
 	}
 
-	for _, server := range servers {
-		e.RegisterSecret(server.Password)
-	}
+	e.RegisterServerPasswords(servers)
 	e.RegisterPublicConfigNames(cfg, services)
 	e.RegisterServiceEnvValues(services)
+	e.registerServiceEnvFileValuesOrWarn(services, envName, events.PhasePlan)
+	e.RegisterBackupSecrets(services)
 
 	session := &RemoveSession{
 		engine:      e,

@@ -132,7 +132,7 @@ func TestStreamLogsRedactsSourcedAliasedAndLocalSecrets(t *testing.T) {
 	}
 	assertNoSecretValues(t, "data.data", fmt.Sprint(lines[0].Data["data"]))
 	assertNoSecretValues(t, "message", lines[0].Message)
-	if !strings.Contains(lines[0].Message, "db=va***13 stripe=st***07 local=lo***55") {
+	if !strings.Contains(lines[0].Message, "db=[REDACTED:secrets.DATABASE_PASSWORD] stripe=[REDACTED:secrets.STRIPE_KEY] local=[REDACTED:secrets.LOCAL_TOKEN]") {
 		t.Fatalf("message = %q", lines[0].Message)
 	}
 	if warnings := eventsOfType(sink, events.TypeWarning); len(warnings) != 0 {

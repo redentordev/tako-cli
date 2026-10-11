@@ -380,3 +380,58 @@ environments:
 		})
 	}
 }
+
+func TestRunValidatePreviewTemplateWarnsAboutIsolationOnly(t *testing.T) {
+	root := switchToTempDir(t)
+	sshKey := filepath.Join(root, "id_ed25519")
+	if err := os.WriteFile(sshKey, []byte("test-key"), 0600); err != nil {
+		t.Fatalf("failed to write ssh key fixture: %v", err)
+	}
+	configData := []byte(`project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 203.0.113.10
+    user: deploy
+    sshKey: ` + sshKey + `
+environments:
+  staging:
+    servers: [node-a]
+    services:
+      db:
+        image: postgres:16
+        ports: ["5432:5432"]
+        deploy:
+          strategy: recreate
+  preview:
+    abstract: true
+    extends: staging
+    preview:
+      ttl: 72h
+`)
+	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), configData, 0600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	resetValidateGlobals(t)
+	validateQuiet = true
+	restoreOutput := outputFormatFlag
+	outputFormatFlag = outputFormatJSON
+	t.Cleanup(func() { outputFormatFlag = restoreOutput })
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = runValidate(&cobra.Command{}, nil)
+	})
+	if runErr != nil {
+		t.Fatalf("runValidate returned error: %v", runErr)
+	}
+	var result engine.ValidateResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\n%s", err, stdout)
+	}
+	if !result.Valid || len(result.Findings) != 1 || result.Findings[0].Severity != engine.ValidateSeverityWarn ||
+		result.Findings[0].Field != "preview" || !strings.Contains(result.Findings[0].Message, "service db publishes host ports") {
+		t.Fatalf("findings = %+v, want one preview isolation warning and no unused-abstract warning", result.Findings)
+	}
+}

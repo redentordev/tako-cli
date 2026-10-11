@@ -196,6 +196,9 @@ Variables marked *when known* are omitted when they do not apply.
 | `TAKO_PLAN_DESTRUCTIVE` | deploy | `true` when the plan needed destructive confirmation. |
 | `TAKO_DEPLOYMENT_ID` | when known | Recorded deployment ID (`post-deploy`, `on-failure` after history was written). Matches `deploymentId` in the `DeployResult`. |
 | `TAKO_ROLLBACK_TARGET` | rollback | Deployment ID being rolled back to. |
+| `TAKO_PREVIEW_NAME` | preview runs | Normalized preview name (`--preview`); `TAKO_ENVIRONMENT` is then `preview-<name>`. Absent otherwise. See [PREVIEW-ENVIRONMENTS.md](./PREVIEW-ENVIRONMENTS.md). |
+| `TAKO_PREVIEW_BASE` | preview runs | Base environment of the preview. |
+| `TAKO_PREVIEW_EXPIRES_AT` | preview runs | Expiry in RFC 3339 UTC; empty when the preview never expires. |
 | `TAKO_RESULT` | `post-*`, `on-failure` | Operation status, e.g. `success`, `warmed`, `rolled_back`, or `failed`. |
 | `TAKO_DURATION_SECONDS` | `post-*`, `on-failure` when known | Operation duration in seconds. |
 | `TAKO_ERROR_CLASS` | `on-failure` | `failed`, `invalid`, `locked`, `connectivity`, `cancelled`, or `attention`. |

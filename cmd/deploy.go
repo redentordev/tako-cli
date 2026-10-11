@@ -40,6 +40,8 @@ var (
 	deployPlanFile        string
 	deployAcceptCluster   string
 	deploySkipHooks       bool
+	deployPreviewTTL      string
+	deployNoPrune         bool
 )
 
 var blueGreenGraceSleep = time.Sleep
@@ -84,13 +86,15 @@ func init() {
 	deployCmd.Flags().StringVar(&deployPlanFile, "plan", "", "Path to a reviewed plan document; apply fails if the computed plan drifted from it")
 	deployCmd.Flags().StringVar(&deployAcceptCluster, "accept-cluster", "", "Attach this workspace to the exact detected platform cluster ID")
 	deployCmd.Flags().BoolVar(&deploySkipHooks, "skip-hooks", false, skipHooksFlagUsage)
+	deployCmd.Flags().StringVar(&deployPreviewTTL, "ttl", "", "With --preview: expiry for this deploy only (for example 72h, or none); defaults to the template ttl")
+	deployCmd.Flags().BoolVar(&deployNoPrune, "no-prune", false, "With --preview: skip the opportunistic prune of expired previews")
 }
 
 // loadDeployConfig loads the config requiring every ${VAR} it references.
 // Commands that span servers or environments beyond the one selected (for
 // example `tako upgrade servers`) use it.
 func loadDeployConfig(configPath string) (*config.Config, error) {
-	cfg, err := config.LoadConfig(configPath)
+	cfg, err := loadOfflinePreviewConfig(configPath)
 	if err != nil {
 		return nil, &engine.InvalidRequestError{Err: formatDeployConfigError(resolveDeployConfigPath(configPath), err)}
 	}
@@ -101,10 +105,12 @@ func loadDeployConfig(configPath string) (*config.Config, error) {
 // only on the environment selected with -e. Unset ${VAR} references used
 // only by other environments, or by servers the selected environment cannot
 // use, do not fail the load; those environments and servers are left out of
-// the returned config. Without -e every reference is required, exactly as
-// loadDeployConfig.
+// the returned config. With --preview, -e names the preview's base: the
+// scope is that base and its extends chain, which are never pruned and whose
+// references are required. Without -e every reference is required, exactly
+// as loadDeployConfig.
 func loadSelectedEnvironmentConfig(configPath string) (*config.Config, error) {
-	cfg, err := config.LoadConfigForEnvironment(configPath, envFlag)
+	cfg, err := loadOfflinePreviewConfigForEnvironment(configPath, envFlag)
 	if err != nil {
 		return nil, &engine.InvalidRequestError{Err: formatDeployConfigError(resolveDeployConfigPath(configPath), err)}
 	}
@@ -125,6 +131,9 @@ func resolveDeployConfigPath(configPath string) string {
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
+	if !previewRequested() && (deployPreviewTTL != "" || deployNoPrune) {
+		return &engine.InvalidRequestError{Err: fmt.Errorf("--ttl and --no-prune require --preview")}
+	}
 	configPath := resolveDeployConfigPath(cfgFile)
 	cfg, err := loadSelectedEnvironmentConfig(cfgFile)
 	if err != nil {
@@ -159,10 +168,20 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		DomainTimeout:   deployDomainTimeout,
 		DomainTargets:   deployDomainTargets,
 	}
+	if cfg.PreviewInstance() != nil {
+		request.Preview = &engine.DeployPreviewOptions{
+			TTL:          deployPreviewTTL,
+			NoPrune:      deployNoPrune,
+			LoadInstance: previewInstanceLoader(cfgFile),
+		}
+	}
 
 	hookSession, err := newHookSession(hookCommandDeploy, cfg, configPath, deploySkipHooks)
 	if err != nil {
 		return err
+	}
+	if instance := cfg.PreviewInstance(); instance != nil && deployPreviewTTL != "" {
+		hookSession.setPreviewExpiry(previewExpiryEstimate(deployPreviewTTL))
 	}
 
 	session, err := planDeploy(cmd.Context(), request)
@@ -203,16 +222,27 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	plan := session.Plan()
 	planContext := deployHookContext(plan)
 	var result *engine.DeployResult
+	applied := false
 	err = hookSession.runPre(cmd.Context(), planContext)
 	if err == nil {
 		err = commitDeployClusterAttachment(cmd, pendingAttachment)
 	}
 	if err == nil {
 		result, err = session.Apply(cmd.Context())
+		// An Apply that failed before its first change reports nothing
+		// attempted, like a failing pre-deploy hook.
+		applied = !engine.IsBeforeMutation(err)
 	}
 	// Post hooks run after the lock and leases are released so a slow smoke
 	// test does not block other operators.
 	session.Close()
+	if result != nil && result.Preview != nil {
+		expiresAt := ""
+		if result.Preview.ExpiresAt != nil {
+			expiresAt = result.Preview.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		hookSession.setPreviewExpiry(expiresAt)
+	}
 	err = hookSession.finish(cmd.Context(), err, func() hooks.Context {
 		values := planContext
 		if result != nil {
@@ -231,11 +261,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	})
 	if outcomes := hookSession.hookOutcomes(); outcomes != nil {
 		if result == nil {
-			result = failedDeployResult(cfg, request.Environment, plan, err)
+			result = failedDeployResult(cfg, request.Environment, plan, err, applied)
 		}
 		result.Hooks = outcomes
 	}
 	if result != nil {
+		emitOperationSummary(result.Summary, result.Hooks)
 		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
 			err = emitErr
 		}
@@ -262,8 +293,11 @@ var planDeploy = func(ctx context.Context, request engine.DeployRequest) (deploy
 }
 
 // failedDeployResult is the result document for a deploy that stopped
-// before Apply produced one (for example a failing pre-deploy hook).
-func failedDeployResult(cfg *config.Config, envName string, plan engine.DeployPlan, err error) *engine.DeployResult {
+// before Apply produced one (for example a failing pre-deploy hook or an
+// Apply preflight failure, engine.IsBeforeMutation). Its summary marks every
+// planned service not_attempted, or, when Apply ran past its first change and
+// failed without a result, failed with an unknown state.
+func failedDeployResult(cfg *config.Config, envName string, plan engine.DeployPlan, err error, applied bool) *engine.DeployResult {
 	result := &engine.DeployResult{
 		APIVersion:  takoapi.APIVersionCurrent,
 		Kind:        engine.KindDeployResult,
@@ -278,6 +312,14 @@ func failedDeployResult(cfg *config.Config, envName string, plan engine.DeployPl
 	}
 	if err != nil {
 		result.Error = cliEngine().RedactSensitive(err.Error())
+	}
+	if applied {
+		result.Summary = cliEngine().FailedWithoutResultSummary(engine.SummaryOperationDeploy, result.Project, envName, plan.Services, result.StartedAt, result.Error)
+	} else {
+		result.Summary = cliEngine().FailedBeforeMutationSummary(engine.SummaryOperationDeploy, result.Project, envName, plan.Services, result.StartedAt, result.Error)
+	}
+	if result.Summary != nil {
+		result.Summary.Revision = plan.Revision
 	}
 	return result
 }

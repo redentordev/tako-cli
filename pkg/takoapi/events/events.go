@@ -44,6 +44,8 @@ const (
 	PhaseSetup   = "setup"
 	// PhaseHooks groups local lifecycle hook events (hook.*).
 	PhaseHooks = "hooks"
+	// PhaseSummary carries the end-of-operation summary (operation.summary).
+	PhaseSummary = "summary"
 )
 
 // Event types. Consumers must tolerate unknown types (additive schema).
@@ -161,7 +163,22 @@ const (
 	TypeHookFailed    = "hook.failed"
 	TypeHookSkipped   = "hook.skipped"
 
+	// Preview lifecycle events. preview.destroyed is emitted once per preview
+	// torn down by `tako preview destroy`; preview.pruned once per expired
+	// preview destroyed by `tako preview prune` or by the opportunistic
+	// prune of `tako deploy --preview`. Both carry `data.name`,
+	// `data.environment` and `data.base`.
+	TypePreviewDestroyed = "preview.destroyed"
+	TypePreviewPruned    = "preview.pruned"
+
 	TypeWarning = "warning"
+
+	// TypeOperationSummary carries the end-of-operation summary for deploy,
+	// rollback, promote, and scale. It is emitted once, immediately before
+	// the result event. Message is the plain-text rendering; data.summary
+	// equals the result document's summary field and data.operation names
+	// the operation.
+	TypeOperationSummary = "operation.summary"
 
 	// TypeResult is the terminal event carrying the operation result document
 	// in machine-output mode.

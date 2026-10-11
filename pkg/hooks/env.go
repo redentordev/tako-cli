@@ -55,6 +55,17 @@ type Context struct {
 	ErrorClass      string
 	Error           string
 	FailedHook      Name
+
+	// Preview is set for preview runs only.
+	Preview *PreviewContext
+}
+
+// PreviewContext is rendered as TAKO_PREVIEW_NAME, TAKO_PREVIEW_BASE and
+// TAKO_PREVIEW_EXPIRES_AT (empty when the preview never expires).
+type PreviewContext struct {
+	Name      string
+	Base      string
+	ExpiresAt string
 }
 
 // Vars renders the context as TAKO_* variables.
@@ -98,6 +109,11 @@ func (c Context) Vars() map[string]string {
 			vars[key] = value
 		}
 	}
+	if c.Preview != nil {
+		vars["TAKO_PREVIEW_NAME"] = c.Preview.Name
+		vars["TAKO_PREVIEW_BASE"] = c.Preview.Base
+		vars["TAKO_PREVIEW_EXPIRES_AT"] = c.Preview.ExpiresAt
+	}
 	return vars
 }
 
@@ -135,16 +151,32 @@ func BuildEnv(base []string, passEnv []string, ctx Context, goos string) []strin
 // not mask ordinary words in events.
 func CredentialValues(base []string, passEnv []string, goos string) []string {
 	var values []string
+	for _, credential := range CredentialEnv(base, passEnv, goos) {
+		values = append(values, credential.Value)
+	}
+	return values
+}
+
+// Credential is one passEnv variable with a credential-like name.
+type Credential struct {
+	Name  string
+	Value string
+}
+
+// CredentialEnv is CredentialValues with the variable names, in base order,
+// so callers can label each value for redaction.
+func CredentialEnv(base []string, passEnv []string, goos string) []Credential {
+	var credentials []Credential
 	for _, entry := range base {
 		name, value, ok := strings.Cut(entry, "=")
 		if !ok || value == "" || isTakoName(name) {
 			continue
 		}
 		if matchesPassEnv(name, passEnv, goos) && config.IsCredentialEnvName(name) {
-			values = append(values, value)
+			credentials = append(credentials, Credential{Name: name, Value: value})
 		}
 	}
-	return values
+	return credentials
 }
 
 func isTakoName(name string) bool {

@@ -64,6 +64,16 @@ type DeploySession struct {
 	actualState             map[string]*reconcile.ActualService
 	actualByNode            map[string]map[string]*reconcile.ActualService
 	priorDesired            *takodstate.DesiredRevision
+	// runPrerequisiteNames lists the deploy-time runs a targeted deploy
+	// requires; they appear in the summary scope.
+	runPrerequisiteNames []string
+	// previousStable is the newest stable history record before this
+	// deploy, the undo target; historyErr is set when history could not be
+	// read at plan time.
+	previousStable *remotestate.DeploymentState
+	historyErr     error
+	// preview is set for a `deploy --preview` run.
+	preview *previewDeployState
 
 	archiveDir    string
 	stateLock     *localstate.StateLock
@@ -214,6 +224,13 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	session.lockInfo = lockInfo
 	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired deployment lock (ID: %s)\n", lockInfo.ID))
 
+	// Read-only preview checks (capability, base, declared-environment
+	// state, max) run before any build or mutation; the prune and the record
+	// write wait for Apply.
+	if err := e.preparePreviewDeploy(ctx, session); err != nil {
+		return nil, err
+	}
+
 	// Display source info.
 	if sourceInfo.SourceMode {
 		e.info(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("\n📦 Deploying source:\n  Source:   %s\n  Revision: %s\n", sourceInfo.StateSource, session.buildTag))
@@ -235,23 +252,16 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	session.allServices = allServices
 	e.RegisterPublicConfigNames(cfg, allServices)
 	e.RegisterServiceEnvValues(allServices)
-	for _, build := range cfg.Builds {
-		for _, value := range build.Args {
-			e.RegisterSecret(value)
-		}
-	}
+	// An unreadable envFile fails the deploy later, when env files are built.
+	_ = e.RegisterServiceEnvFileValues(allServices)
+	e.RegisterBuildArgs(cfg)
 	// Unresolvable secrets fail the deploy later, when env files are built.
 	_ = e.registerServiceSecretValues(cfg, session.envName, allServices)
-	for _, server := range cfg.Servers {
-		e.RegisterSecret(server.Password)
-	}
+	e.RegisterServerPasswords(cfg.Servers)
 	e.RegisterRegistrySecrets(cfg)
+	e.RegisterBackupSecrets(allServices)
 	e.RegisterACMEDNSSecrets(cfg)
-	if cfg.Notifications != nil {
-		e.RegisterSecret(cfg.Notifications.Slack)
-		e.RegisterSecret(cfg.Notifications.Discord)
-		e.RegisterSecret(cfg.Notifications.Webhook)
-	}
+	e.RegisterNotificationSecrets(cfg)
 
 	// Create SSH pool.
 	session.sshPool = ssh.NewPool()
@@ -504,9 +514,18 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 			return nil, err
 		}
 	}
+	session.runPrerequisiteNames = sortedServiceNames(runPrerequisites)
+	// History is loaded once under the held lease: deploy-time runs need it,
+	// and the summary's undo targets the newest stable record before this
+	// deploy. Without runs a load error is not fatal.
+	history, historyErr := session.stateManager.LoadHistoryContext(ctx)
+	if historyErr != nil && !errors.Is(historyErr, remotestate.ErrNotFound) {
+		session.historyErr = historyErr
+	} else {
+		session.previousStable = newestStableRecord(history, "", time.Time{}, "")
+	}
 	if HasRunServices(planServices) || len(runPrerequisites) > 0 {
-		history, historyErr := session.stateManager.LoadHistoryContext(ctx)
-		if historyErr != nil && !errors.Is(historyErr, remotestate.ErrNotFound) {
+		if session.historyErr != nil {
 			return nil, fmt.Errorf("failed to load deploy-time run history: %w", historyErr)
 		}
 		addRunHistoryActual(actualState, planServices, history)
@@ -622,30 +641,38 @@ func (e *Engine) warnRetiredDeploymentServers(localStateMgr *localstate.Manager,
 // Apply executes a planned deployment. The caller is responsible for
 // confirmation gating; Apply runs the plan unconditionally.
 func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
+	// Errors returned before the first mutation are wrapped with
+	// beforeMutation so callers without a result report nothing attempted.
 	if s.closed {
-		return nil, fmt.Errorf("deploy session is closed")
+		return nil, beforeMutation(fmt.Errorf("deploy session is closed"))
 	}
 	if s.applied {
-		return nil, fmt.Errorf("deploy session was already applied")
+		return nil, beforeMutation(fmt.Errorf("deploy session was already applied"))
 	}
 	s.applied = true
 	leaseCtx, cancelLeaseContext := s.leases.BindContext(ctx)
 	defer cancelLeaseContext()
 	ctx = leaseCtx
 	if err := s.leases.Err(); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	s.deployer.SetBaseContext(ctx)
 	if err := s.deployer.PreflightTakodProxyCapabilities(s.allServices); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	if err := s.deployer.PreflightGracefulStopCapabilities(); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	if err := s.deployer.PreflightServiceMutationCapabilities(s.services); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	if err := s.deployer.PreflightAlertPolicy(); err != nil {
+		return nil, beforeMutation(err)
+	}
+	// A preview's expired siblings are pruned and its record exists on
+	// every target before the first mutation, so a failed first deploy
+	// stays listable and destroyable (D7). Planning never does either.
+	if err := s.applyPreviewBeforeMutation(ctx); err != nil {
 		return nil, err
 	}
 
@@ -657,7 +684,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	plan := s.plan
 	services := s.services
 	if err := rejectPersistentConfigRemovals(plan); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	desiredStateServices := s.allServices
 	actualState := s.actualState
@@ -690,6 +717,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		if err := s.reconcileProxy(services, activeRevisions); err != nil {
 			return nil, fmt.Errorf("failed to reconcile proxy routes: %w", err)
 		}
+		s.refreshPreviewRecord(ctx)
 		e.info(events.TypePlanUpToDate, events.PhaseDeploy, "\n✓ All services are up-to-date. Proxy routes reconciled.\n")
 		result.Status = takoapi.DeploymentStatus(remotestate.StatusSuccess)
 		result.Message = "all services up-to-date; proxy routes reconciled"
@@ -697,6 +725,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			result.Services = append(result.Services, ServiceOutcome{Name: name, Action: OutcomeUpToDate})
 		}
 		result.Duration = time.Since(result.StartedAt).Seconds()
+		s.finishSummary(ctx, result, nil, nil)
 		return result, nil
 	}
 	if plan.IsEmpty() {
@@ -709,15 +738,16 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		}
 	}
 	servicesToDeploy := deployplan.ServicesToDeployForPlan(plan, services, req.Force, req.Service != "")
+	applyState := &deployApplyState{servicesToDeploy: servicesToDeploy}
 	if err := s.deployer.PreflightAssignmentMutations(servicesToDeploy); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	if err := s.deployer.PreflightAssignmentRemovals(removalServiceNames(plan)); err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	pendingRemovals, err := removalServiceConfigs(plan)
 	if err != nil {
-		return nil, err
+		return nil, beforeMutation(err)
 	}
 	if skipped := deployplan.PersistentServicesSkippedByForce(services, servicesToDeploy, req.Force, req.Service != ""); len(skipped) > 0 {
 		e.info(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("\n-> Skipping persistent service(s) during broad --force: %s\n   Use --service <name> --force when you intentionally need to recreate one.\n", strings.Join(skipped, ", ")))
@@ -1058,6 +1088,9 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			deploymentError = err
 			deployment.Status = remotestate.StatusFailed
 			deployment.Error = err.Error()
+			applyState.removalsFailed = len(removalServiceNames(plan)) > 0
+		} else {
+			applyState.removalsApplied = len(removalServiceNames(plan)) > 0
 		}
 	}
 
@@ -1081,14 +1114,15 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		}
 		deployment.Duration = time.Since(startTime)
 		if err := s.stateManager.SaveDeploymentContext(ctx, deployment); err != nil {
-			return nil, RemoteHistoryError(err)
+			return s.bookkeepingFailure(ctx, result, applyState, RemoteHistoryError(err))
 		}
 
 		finalNodeActualState, err := reconcile.GatherActualStateByServer(s.sshPool, cfg, envName, s.mutationServerNames)
 		if err != nil {
-			return nil, fmt.Errorf("deployment succeeded but failed to gather final actual state: %w", err)
+			return s.bookkeepingFailure(ctx, result, applyState, fmt.Errorf("deployment succeeded but failed to gather final actual state: %w", err))
 		}
 		finalActualState := reconcile.AggregateActualStateByServer(finalNodeActualState)
+		applyState.finalActual = finalActualState
 		runtimeServices := desiredStateServices
 		runtimeImageRefs := deployplan.MergeRuntimeImageRefs(cfg, envName, runtimeServices, imageRefs, finalActualState)
 		var baseline *takodstate.DesiredRevision
@@ -1118,7 +1152,7 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			},
 			req.Verbose,
 		); err != nil {
-			return nil, fmt.Errorf("deployment succeeded but failed to persist takod state: %w", err)
+			return s.bookkeepingFailure(ctx, result, applyState, fmt.Errorf("deployment succeeded but failed to persist takod state: %w", err))
 		}
 		e.debug(events.TypeStatePersisted, events.PhaseState, "")
 
@@ -1127,10 +1161,10 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			replicator := remotestate.NewStateReplicator(s.sshPool, cfg, envName, cfg.Project.Name, req.Verbose)
 			history, err := s.stateManager.LoadHistoryContext(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("deployment succeeded but failed to load remote deployment history for replication: %w", err)
+				return s.bookkeepingFailure(ctx, result, applyState, fmt.Errorf("deployment succeeded but failed to load remote deployment history for replication: %w", err))
 			}
 			if err := replicator.ReplicateDeploymentContext(ctx, deployment, history); err != nil {
-				return nil, fmt.Errorf("deployment succeeded but failed to replicate remote deployment history: %w", err)
+				return s.bookkeepingFailure(ctx, result, applyState, fmt.Errorf("deployment succeeded but failed to replicate remote deployment history: %w", err))
 			}
 			e.debug(events.TypeStateReplicated, events.PhaseState, "")
 		}
@@ -1202,16 +1236,21 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 			Message: "",
 			Data:    map[string]any{"error": deploymentError.Error()},
 		})
-		if recordErr != nil {
-			return result, fmt.Errorf("takod deployment failed; additionally failed to record failed deployment state: %w", recordErr)
+		var failErr error
+		switch {
+		case recordErr != nil:
+			failErr = fmt.Errorf("takod deployment failed; additionally failed to record failed deployment state: %w", recordErr)
+		case ctx.Err() != nil:
+			failErr = ctx.Err()
+		default:
+			failErr = fmt.Errorf("takod deployment failed")
 		}
-		if ctx.Err() != nil {
-			return result, ctx.Err()
-		}
-		return result, fmt.Errorf("takod deployment failed")
+		s.finishSummary(ctx, result, applyState, failErr)
+		return result, failErr
 	}
 
 	e.info(events.TypeLogLine, events.PhaseCleanup, "\n✓ takod deployment completed!\n")
+	s.refreshPreviewRecord(ctx)
 
 	// Automatic cleanup after successful deployment.
 	e.debug(events.TypeLogLine, events.PhaseCleanup, "\n→ Running automatic cleanup...\n")
@@ -1226,12 +1265,14 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		client, _, err := cleanupFactory.Client(ctx, serverName)
 		if err == nil {
 			response, cleanupErr := CleanupViaTakod(client, cfg, takod.CleanupRequest{
-				Project:                cfg.Project.Name,
-				Environment:            envName,
-				ImageRepositories:      imageRepositories,
-				ExternalVolumes:        externalVolumes,
-				KeepImages:             3,
-				CleanOldImages:         true,
+				Project:           cfg.Project.Name,
+				Environment:       envName,
+				ImageRepositories: imageRepositories,
+				ExternalVolumes:   externalVolumes,
+				KeepImages:        3,
+				// Preview image repositories are shared with the base; a
+				// preview never prunes them where a declared env runs.
+				CleanOldImages:         s.cleanOldImagesOn(serverName),
 				CleanStoppedContainers: true,
 				CleanDanglingImages:    true,
 				CleanBuildCache:        true,
@@ -1252,15 +1293,8 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 
 	e.info(events.TypeDeploySucceeded, events.PhaseCleanup, "\n✓ Deployment completed successfully!\n\n")
 
-	// Collect deployed service URLs.
-	var urls []string
-	for _, svc := range services {
-		if svc.Proxy != nil && svc.IsPublic() {
-			for _, domain := range svc.Proxy.GetAllDomains() {
-				urls = append(urls, fmt.Sprintf("https://%s", domain))
-			}
-		}
-	}
+	// Collect deployed service URLs, sorted by service then URL.
+	urls, internalURLs := deployResultURLs(services)
 	result.URLs = urls
 
 	// Send success notification.
@@ -1283,61 +1317,40 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		})
 	}
 
-	// Show service URLs (iterate through services with proxy configured).
-	hasPublicServices := false
-	hasInternalServices := false
-	domainSpecs := CollectConfiguredDomainSpecs(services, "")
-
-	var urlText strings.Builder
-	for serviceName, service := range services {
-		if service.Proxy != nil && service.IsPublic() && service.Proxy.GetPrimaryDomain() != "" {
-			allDomains := service.Proxy.GetAllDomains()
-			if !hasPublicServices {
-				urlText.WriteString("Your application is available at:\n")
-				hasPublicServices = true
-			}
-			urlText.WriteString(fmt.Sprintf("\n%s:\n", serviceName))
-			for _, domain := range allDomains {
-				urlText.WriteString(fmt.Sprintf("  https://%s\n", domain))
-			}
-		}
-	}
-	var internalURLs []string
-	for serviceName, service := range services {
-		if service.Proxy != nil && service.Proxy.IsInternal() && service.Proxy.GetPrimaryHost() != "" {
-			if !hasInternalServices {
-				urlText.WriteString("\nInternal routes:\n")
-				hasInternalServices = true
-			}
-			urlText.WriteString(fmt.Sprintf("\n%s:\n", serviceName))
-			for _, host := range service.Proxy.GetAllHosts() {
-				urlText.WriteString(fmt.Sprintf("  http://%s\n", host))
-				internalURLs = append(internalURLs, fmt.Sprintf("http://%s", host))
-			}
-		}
-	}
-	if hasInternalServices {
-		urlText.WriteString(fmt.Sprintf("\nRun `tako domains hosts -e %s` to print /etc/hosts entries for internal routes.\n", envName))
-	}
-	if urlText.Len() > 0 {
-		e.info(events.TypeLogLine, events.PhaseDomains, urlText.String())
-	}
+	// Service URLs are reported in the end-of-operation summary, after the
+	// domain checks below.
 	result.InternalURLs = internalURLs
+	hasPublicServices := false
+	for _, service := range services {
+		if service.Proxy != nil && service.IsPublic() && service.Proxy.GetPrimaryDomain() != "" {
+			hasPublicServices = true
+			break
+		}
+	}
+	domainSpecs := CollectConfiguredDomainSpecs(services, "")
 
 	if hasPublicServices && !req.SkipDomainCheck {
 		targets, err := DomainExpectedTargets(cfg, envName, req.DomainTargets)
 		if err != nil {
 			if req.StrictDomains {
-				return result, fmt.Errorf("failed to resolve domain check targets: %w", err)
+				domainErr := fmt.Errorf("failed to resolve domain check targets: %w", err)
+				s.finishSummary(ctx, result, applyState, domainErr)
+				return result, domainErr
 			}
 			e.debug(events.TypeWarning, events.PhaseDomains, fmt.Sprintf("\n⚠️  Skipping public domain DNS/TLS checks: %v\n", err))
-		} else if _, err := e.MonitorDomainStatuses(ctx, health.NewHealthChecker(), domainSpecs, DomainStatusOptions{
-			Timeout:          req.DomainTimeout,
-			Strict:           req.StrictDomains,
-			ExpectedTargets:  targets,
-			NodeCertificates: DomainNodeCertificateChecker(cfg, envName, s.runtime, domainSpecs),
-		}); err != nil {
-			return result, err
+		} else {
+			statuses, err := e.MonitorDomainStatuses(ctx, health.NewHealthChecker(), domainSpecs, DomainStatusOptions{
+				Timeout:          req.DomainTimeout,
+				Strict:           req.StrictDomains,
+				ExpectedTargets:  targets,
+				NodeCertificates: DomainNodeCertificateChecker(cfg, envName, s.runtime, domainSpecs),
+			})
+			applyState.domainChecked = true
+			applyState.domainStatuses = statuses
+			if err != nil {
+				s.finishSummary(ctx, result, applyState, err)
+				return result, err
+			}
 		}
 	} else if hasPublicServices && req.SkipDomainCheck {
 		e.debug(events.TypeLogLine, events.PhaseDomains, "\nSkipping public domain DNS/TLS checks (--skip-domain-check).\n")
@@ -1346,7 +1359,23 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 	result.Status = takoapi.DeploymentStatus(deployment.Status)
 	result.ManualPending = manualPending
 	result.Duration = time.Since(startTime).Seconds()
+	s.finishSummary(ctx, result, applyState, nil)
 	return result, nil
+}
+
+// bookkeepingFailure returns the populated result of a deploy whose rollout
+// succeeded but whose state bookkeeping failed: status failed, the redacted
+// error, and a partial summary that keeps the undo. err is returned
+// unchanged so the exit class does not change.
+func (s *DeploySession) bookkeepingFailure(ctx context.Context, result *DeployResult, state *deployApplyState, err error) (*DeployResult, error) {
+	result.Status = takoapi.StatusFailed
+	result.Error = s.engine.RedactSensitive(err.Error())
+	result.Duration = time.Since(result.StartedAt).Seconds()
+	if state != nil {
+		state.bookkeepingErr = result.Error
+	}
+	s.finishSummary(ctx, result, state, err)
+	return result, err
 }
 
 func localSaverOrNil(manager *localstate.Manager) LocalDeploymentSaver {

@@ -392,7 +392,7 @@ func TestStreamLogsFramedEventsCarryAttributionAndRedactSecrets(t *testing.T) {
 		t.Fatalf("env secret leaked: data=%q message=%q", first.Data["data"], first.Message)
 	}
 	// web has two replicas, so lines carry padded source prefixes.
-	if first.Message != "web.1@node-a | starting with li***et\n" || first.Data["data"] != "starting with li***et" {
+	if first.Message != "web.1@node-a | starting with [REDACTED:env.API_TOKEN]\n" || first.Data["data"] != "starting with [REDACTED:env.API_TOKEN]" {
 		t.Fatalf("message = %q data = %q", first.Message, first.Data["data"])
 	}
 	if strings.Contains(first.Message, "\x1b[") {
