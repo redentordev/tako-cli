@@ -33,13 +33,13 @@
 
 ## 5. Engine reporting: plan, result, events, notification, history
 
-- [ ] 5.1 Add `Strategy`/`StrategySource` to `PlanChange` and fill them in `newDeployPlanDocument`. Verify with an engine plan test asserting the JSON fields, and update plan-hash golden values if any.
-- [ ] 5.2 Add the "Deploy strategy default changed: recreate → rolling" reason in `detectChanges` (`pkg/reconcile/reconcile.go:304-311`) and the strategy column in `FormatPlanVerbose`. Verify with reconcile plan tests.
-- [ ] 5.3 Add `OutcomeRestored`, `ServiceOutcome.Strategy` and `ServiceOutcome.Recovery` and populate them in the failure branch (`pkg/engine/deploy.go:942-956`). Verify with engine tests for restored, failed restore, disabled and unsupported, each still exiting 1.
-- [ ] 5.4 Add the event types in `pkg/takoapi/events/events.go` and emit them in order (failed → restore.started → restored or restore_failed). Verify with an ndjson event-order test and a test that recovery payloads contain no env values.
-- [ ] 5.5 Add recovery status to the failure notification `Details`/`Message` (`deploy.go:1158-1171`). Verify with a notifier fake test.
-- [ ] 5.6 Add `deployStrategy` and `recovery` to `ServiceStateDocument` (`pkg/takoapi/state.go:258`) and record them for the failed service. Verify with a history round-trip test.
-- [ ] 5.7 Document the new `PlanChange`/`ServiceOutcome` fields, the `restored` action, the events, and the plan-hash note in `docs/MACHINE-INTERFACE.md`. Verify that `go test ./cmd/ -run Machine` still passes (no new commands, so `cmd/machine_coverage_test.go` is unchanged).
+- [x] 5.1 Add `Strategy`/`StrategySource` to `PlanChange` and fill them in `newDeployPlanDocument`. Verify with an engine plan test asserting the JSON fields, and update plan-hash golden values if any.
+- [x] 5.2 Add the "Deploy strategy default changed: recreate → rolling" reason in `detectChanges` (`pkg/reconcile/reconcile.go:304-311`) and the strategy column in `FormatPlanVerbose`. Verify with reconcile plan tests.
+- [x] 5.3 Add `OutcomeRestored`, `ServiceOutcome.Strategy` and `ServiceOutcome.Recovery` and populate them in the failure branch (`pkg/engine/deploy.go:942-956`). Verify with engine tests for restored, failed restore, disabled and unsupported, each still exiting 1.
+- [x] 5.4 Add the event types in `pkg/takoapi/events/events.go` and emit them in order (failed → restore.started → restored or restore_failed). Verify with an ndjson event-order test and a test that recovery payloads contain no env values.
+- [x] 5.5 Add recovery status to the failure notification `Details`/`Message` (`deploy.go:1158-1171`). Verify with a notifier fake test.
+- [x] 5.6 Add `deployStrategy` and `recovery` to `ServiceStateDocument` (`pkg/takoapi/state.go:258`) and record them for the failed service. Verify with a history round-trip test.
+- [x] 5.7 Document the new `PlanChange`/`ServiceOutcome` fields, the `restored` action, the events, and the plan-hash note in `docs/MACHINE-INTERFACE.md`. Verify that `go test ./cmd/ -run Machine` still passes (no new commands, so `cmd/machine_coverage_test.go` is unchanged).
 
 ## 6. User documentation
 
