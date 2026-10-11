@@ -1730,6 +1730,10 @@ func TestTakodCommandHelper(t *testing.T) {
 			}
 		}
 		createFakeBackupArchive(commandArgs)
+		if id := os.Getenv("TAKO_FAKE_DOCKER_RUN_ID"); id != "" {
+			_, _ = os.Stdout.WriteString(id + "\n")
+			os.Exit(0)
+		}
 		_, _ = os.Stdout.WriteString("container-id\n")
 		os.Exit(0)
 	case "rename":

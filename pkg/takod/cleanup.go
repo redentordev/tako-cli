@@ -152,6 +152,12 @@ func CleanupProjectWithDataDir(ctx context.Context, dataDir string, req CleanupR
 	}
 
 	if req.RemoveContainers {
+		// Self-healing must never restart a container that is being torn
+		// down: drop the converged records (waiting for an in-flight heal
+		// action) before any container is removed.
+		if err := healClearScope(dataDir, req.Project, req.Environment); err != nil {
+			return response, fmt.Errorf("failed to clear self-healing state: %w", err)
+		}
 		count, err := cleanupContainers(ctx, req.Project, req.Environment)
 		if err != nil {
 			return response, err

@@ -346,6 +346,15 @@ Each node stores enough state to stand alone:
 If a node loses contact with the CLI or peers, it keeps serving its last accepted
 revision. New deployments obey `state.onUnreachableNode`.
 
+With opt-in [self-healing](SELF-HEALING.md), takod restarts an unhealthy
+container or starts a crashed one, but only on its own node and only the
+containers it recorded after the last successful reconcile. It never
+recreates a missing container, moves a replica to another node or changes
+desired state. There is no failover: replicas on a lost node stay down until
+the node returns or an operator applies a placement plan, and
+`state.onUnreachableNode` stays `block`. Self-healing keeps its records,
+counters and journal under `/var/lib/tako/heal/<project>/<env>/`.
+
 ## Deployment Strategies
 
 ### Default selection

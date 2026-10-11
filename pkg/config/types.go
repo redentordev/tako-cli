@@ -443,6 +443,10 @@ type ServiceConfig struct {
 	// Per-service monitoring
 	Monitoring *MonitoringConfig `yaml:"monitoring,omitempty" json:"monitoring,omitempty"`
 
+	// SelfHealing overrides the environment's self-healing policy for this
+	// service. It is not part of container identity.
+	SelfHealing *SelfHealingConfig `yaml:"selfHealing,omitempty" json:"selfHealing,omitempty"`
+
 	// Container resource limits.
 	Resources *ResourceLimitsConfig `yaml:"resources,omitempty" json:"resources,omitempty"`
 
@@ -875,6 +879,10 @@ type EnvironmentConfig struct {
 	Labels        map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`
 	Services      map[string]ServiceConfig `yaml:"services" json:"services"`                               // Services to deploy in this environment
 	SecretSources []SecretSource           `yaml:"secretSources,omitempty" json:"secretSources,omitempty"` // Environment-specific external secret stores
+
+	// SelfHealing sets the default self-healing policy for this environment's
+	// services. Persistent services ignore the environment-level enabled flag.
+	SelfHealing *SelfHealingConfig `yaml:"selfHealing,omitempty" json:"selfHealing,omitempty"`
 
 	// Preview makes this environment a preview base (see PreviewConfig).
 	// Like Extends and Abstract it is consumed while the document is

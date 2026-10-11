@@ -46,6 +46,13 @@ type ContainerSample struct {
 	Health        string
 	RestartPolicy string
 	MemoryLimitMB int64
+	// Image, Revision and Active carry the container's configured image and
+	// its tako.revision / tako.active labels for self-healing record checks.
+	Image    string
+	Revision string
+	Active   string
+	// Role is the tako.role label (e.g. scheduled-backup).
+	Role string
 }
 
 func containerAlertSourceSpec() AlertSourceSpec {
@@ -143,6 +150,7 @@ type dockerInspectDocument struct {
 	ID     string `json:"Id"`
 	Name   string `json:"Name"`
 	Config struct {
+		Image  string            `json:"Image"`
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
 	RestartCount int `json:"RestartCount"`
@@ -199,6 +207,8 @@ func (s *containerAlertSampler) SampleOnce(ctx context.Context) {
 				Restarting: document.State.Restarting, RestartCount: document.RestartCount, OOMKilled: document.State.OOMKilled,
 				ExitCode: document.State.ExitCode, RestartPolicy: document.HostConfig.RestartPolicy.Name,
 				MemoryLimitMB: document.HostConfig.Memory / (1 << 20),
+				Image:         document.Config.Image, Revision: document.Config.Labels["tako.revision"],
+				Active: document.Config.Labels["tako.active"], Role: document.Config.Labels["tako.role"],
 			}
 			sample.StartedAt, _ = time.Parse(time.RFC3339Nano, document.State.StartedAt)
 			sample.FinishedAt, _ = time.Parse(time.RFC3339Nano, document.State.FinishedAt)

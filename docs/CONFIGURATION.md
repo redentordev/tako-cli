@@ -2146,6 +2146,54 @@ with exit code 2 only when the new keys (`alerts.services`, `host`,
 payload schema, flap control and Prometheus series are described in
 [Resource Monitoring](RESOURCE-MONITORING.md#4-alerting).
 
+## Self-Healing
+
+takod can restart an unhealthy container, or start a crashed one that Docker
+will not restart, on its own node. It is off by default:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    selfHealing:
+      enabled: true
+    services:
+      web:
+        image: nginx:1.27
+        port: 80
+        healthCheck:
+          path: /
+        selfHealing:
+          unhealthyThreshold: 4
+          maxRestarts: 3
+          window: 30m
+      db:
+        image: postgres:16
+        persistent: true
+        volumes:
+          - pgdata:/var/lib/postgresql/data
+        selfHealing:
+          enabled: true
+          restartUnhealthy: false
+```
+
+| Key | Default | Range |
+|---|---|---|
+| `selfHealing.enabled` | `false` | |
+| `selfHealing.restartUnhealthy` | `true` | |
+| `selfHealing.startExited` | `true` | |
+| `selfHealing.unhealthyThreshold` | `3` | 1-20 |
+| `selfHealing.maxRestarts` | `3` | 1-20 |
+| `selfHealing.window` | `30m` | 5m-24h |
+
+Service keys override environment keys. A `persistent: true` service needs
+its own `enabled: true`; the environment's `enabled` does not apply to it.
+`selfHealing` on a job or `run` service is a validation error. The block is
+not part of container identity, so changing it recreates no container. A
+deploy with an enabled policy fails with exit code 2 when a target node lacks
+`node.self-healing-v1`. Inspect and control it with `tako heal`. See
+[Self-Healing](SELF-HEALING.md).
+
 ## Operator Files
 
 `files:` distributes local regular files or whole directories to the node and

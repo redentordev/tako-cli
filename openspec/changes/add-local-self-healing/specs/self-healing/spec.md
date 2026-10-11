@@ -178,11 +178,15 @@ On an enrolled node, takod SHALL hold the worker-fence admission lock for readin
 - **THEN** either the fence activation waits until the single action returns, or takod sees the active fence under the lock and does not act
 
 ### Requirement: CLI waits briefly for self-heal leases
-A CLI operation that finds the environment lease held with operation `self-heal` SHALL wait and retry for up to 60 seconds before failing with the existing lock error. Leases held by any other operation SHALL keep their current behavior.
+A CLI operation that finds the environment lease held with operation `self-heal` SHALL wait and retry until that lease expires, at most 5 minutes, before failing with the existing lock error. Leases held by any other operation SHALL keep their current behavior.
 
 #### Scenario: Deploy meets a heal action
 - **WHEN** `tako deploy` starts while takod holds the lease for a 3-second restart
 - **THEN** the deploy waits, acquires the lease after it is released, and proceeds normally
+
+#### Scenario: Docker restart outlives its call
+- **WHEN** the `docker restart` call times out while the daemon is still restarting the container
+- **THEN** takod keeps the `self-heal` lease until a fresh inspect shows the container running or the lease expires, and the deploy waits for it
 
 ### Requirement: Per-container backoff
 takod SHALL wait at least 2 minutes after an action before acting on the same container again, doubling the wait per action up to 30 minutes, and SHALL reset a container's action count and wait after it stays healthy for a full `window`. takod SHALL run at most one action at a time per node.

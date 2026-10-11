@@ -56,6 +56,7 @@ type Server struct {
 	containerSampler                   *containerAlertSampler
 	certificateScheduler               *CertificateScheduler
 	hygiene                            *hygieneManager
+	heal                               *healManager
 	uploadReadTimeout                  time.Duration
 	diskReservationMu                  sync.Mutex
 	diskReservations                   map[string]int64
@@ -325,6 +326,7 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 	server.certificateScheduler.admit = func(paths ...string) error { return server.checkFreeDisk(0, paths...) }
 	server.initStatusHistory(opts.Metrics, opts.HostSampleSource == nil)
 	server.initHygiene(opts)
+	server.initSelfHealing()
 	return server
 }
 
@@ -466,6 +468,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.hygiene != nil {
 		// The hygiene loop replaces runBuildCachePruneLoop (hygiene.go).
 		start(func() { s.hygiene.Run(runCtx) })
+	}
+	if s.heal != nil {
+		start(func() { s.heal.Run(runCtx) })
 	}
 	start(func() { s.backupScheduler.Run(runCtx) })
 	start(func() { s.jobScheduler.Run(runCtx) })
@@ -925,6 +930,7 @@ func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	request.DataDir = s.dataDir
 	response, err := RemoveService(r.Context(), request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -2723,6 +2729,9 @@ func (s *Server) Status() Status {
 	status.Capabilities = append(status.Capabilities, s.statusHistoryCapabilities()...)
 	if s.hygiene != nil {
 		status.Capabilities = append(status.Capabilities, CapabilityNodeDiskHygieneV1)
+	}
+	if s.heal != nil {
+		status.Capabilities = append(status.Capabilities, CapabilityNodeSelfHealingV1)
 	}
 	if s.installation != nil {
 		status.Capabilities = append(status.Capabilities, CapabilityPlatformWorkerHandoffV1)
