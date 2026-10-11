@@ -111,11 +111,8 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 
 	// Register sensitive values with the redactor before emitting anything
 	// that could contain them.
-	for _, svc := range services {
-		for _, value := range svc.Env {
-			e.RegisterSecret(value)
-		}
-	}
+	e.RegisterPublicConfigNames(cfg, services)
+	e.RegisterServiceEnvValues(services)
 	for _, server := range cfg.Servers {
 		e.RegisterSecret(server.Password)
 	}

@@ -156,11 +156,8 @@ func (s *hookSession) registerSecrets(envName string) {
 		eng.RegisterSecret(server.Password)
 	}
 	if services, err := s.cfg.GetServices(envName); err == nil {
-		for _, service := range services {
-			for _, value := range service.Env {
-				eng.RegisterSecret(value)
-			}
-		}
+		eng.RegisterPublicConfigNames(s.cfg, services)
+		eng.RegisterServiceEnvValues(services)
 	}
 	eng.RegisterRegistrySecrets(s.cfg)
 	eng.RegisterACMEDNSSecrets(s.cfg)

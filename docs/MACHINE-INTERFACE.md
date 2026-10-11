@@ -769,9 +769,19 @@ See [Rollback](#rollback).
 
 ## Redaction Guarantees
 
-- Service environment values and SSH passwords are registered with a
-  redactor before any event is emitted; event messages and string data
-  values pass through it.
+- SSH passwords and credential-like service `env:` values are registered
+  with a redactor before any event is emitted; event messages and string
+  data values pass through it. An `env:` value counts as credential-like
+  when its name contains `TOKEN`, `SECRET`, `KEY`, `PASSWORD`, `PASS`,
+  `CREDENTIAL` or `AUTH`, when it is a URL with embedded credentials or a
+  token-like path or query part (webhook URLs), or when it is a single
+  16+ character token mixing letters and digits. Plain settings such as
+  `NODE_ENV: production` are not masked; put sensitive values under
+  `secrets:` or a credential-like name.
+- Project, environment, server and service names, service image
+  references, and hex image tags or digests (`repo:<commit-sha>`,
+  `@sha256:<digest>`) stay readable even when a registered secret is a
+  substring of them.
 - Secret values referenced by a service's `secrets:` list are registered
   too, whether they come from `.tako/secrets*` files or from
   `secretSources` providers, and including aliased references

@@ -233,11 +233,8 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 		return nil, fmt.Errorf("failed to get services: %w", err)
 	}
 	session.allServices = allServices
-	for _, service := range allServices {
-		for _, value := range service.Env {
-			e.RegisterSecret(value)
-		}
-	}
+	e.RegisterPublicConfigNames(cfg, allServices)
+	e.RegisterServiceEnvValues(allServices)
 	for _, build := range cfg.Builds {
 		for _, value := range build.Args {
 			e.RegisterSecret(value)

@@ -87,8 +87,9 @@ type Options struct {
 }
 
 // New constructs an Engine. Every emitted event passes through a secrets
-// redactor; operations register sensitive values (service env values, SSH
-// passwords) before emitting anything that could contain them.
+// redactor; operations register sensitive values (credential-like service env
+// values, secrets, SSH passwords) before emitting anything that could contain
+// them, and mark names and image references public so they stay readable.
 func New(opts Options) *Engine {
 	redactor := secrets.NewRedactor()
 	return &Engine{
@@ -105,6 +106,47 @@ func New(opts Options) *Engine {
 func (e *Engine) RegisterSecret(value string) {
 	if value != "" {
 		e.redactor.Register(value)
+	}
+}
+
+// RegisterPublic marks a value that output must keep readable, such as a
+// service name, image reference or git commit, even when a registered secret
+// is a substring of it or a secret pattern would match it.
+func (e *Engine) RegisterPublic(value string) {
+	if value != "" {
+		e.redactor.RegisterPublic(value)
+	}
+}
+
+// RegisterServiceEnvValues registers the plain `env:` values of services that
+// look like credentials (see secrets.ShouldRedactEnvValue). Ordinary settings
+// stay readable so they don't mask unrelated output.
+func (e *Engine) RegisterServiceEnvValues(services map[string]config.ServiceConfig) {
+	for _, service := range services {
+		for name, value := range service.Env {
+			if secrets.ShouldRedactEnvValue(name, value) {
+				e.RegisterSecret(value)
+			}
+		}
+	}
+}
+
+// RegisterPublicConfigNames keeps the identifiers that appear throughout
+// command output (project, environment, server and service names, and
+// service image references) from being masked.
+func (e *Engine) RegisterPublicConfigNames(cfg *config.Config, services map[string]config.ServiceConfig) {
+	if cfg != nil {
+		e.RegisterPublic(cfg.Project.Name)
+		for name := range cfg.Environments {
+			e.RegisterPublic(name)
+		}
+		for name := range cfg.Servers {
+			e.RegisterPublic(name)
+		}
+	}
+	for name, service := range services {
+		e.RegisterPublic(name)
+		e.RegisterPublic(service.Image)
 	}
 }
 
