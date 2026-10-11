@@ -153,6 +153,9 @@ func TestValidateAliases(t *testing.T) {
 		{"cfg": ListValue("exec", "web", "--", "mytool", "--config", "/etc/app.conf")},
 		{"hk": ListValue("exec", "web", "--", "x", "--host-key-mode=tofu")},
 		{"logs": ListValue("logs", "web")}, // shadowing is a CLI-side warning
+		// A first argument naming a shadowed alias refers to the built-in;
+		// alias-to-alias references are rejected by the CLI.
+		{"logs": ListValue("logs", "web"), "logsw": ListValue("logs", "--follow")},
 		{"stg": ListValue("logs", "web", "-e", "staging")},
 	}
 	for _, aliases := range valid {
@@ -181,7 +184,6 @@ func TestValidateAliases(t *testing.T) {
 		{"empty first", AliasMap{"x": ListValue("", "ps")}, "first argument must name a Tako command"},
 		{"flag first", AliasMap{"x": ListValue("-e", "staging", "ps")}, "not the flag"},
 		{"leading tako", AliasMap{"x": StringValue("tako exec web -- env")}, `omit the leading "tako"`},
-		{"alias to alias", AliasMap{"a": ListValue("logs", "web"), "b": ListValue("a", "--follow")}, "aliases cannot reference other aliases"},
 		{"config flag", AliasMap{"x": ListValue("deploy", "--config", "other.yaml")}, "--config is not allowed"},
 		{"config equals", AliasMap{"x": ListValue("deploy", "--config=other.yaml")}, "--config is not allowed"},
 		{"host key mode first", AliasMap{"x": ListValue("--host-key-mode", "tofu", "deploy")}, "not the flag"},

@@ -214,9 +214,9 @@ func IsReservedAliasName(name string) bool {
 
 // ValidateAliases checks alias names and values without knowledge of the
 // CLI command tree: name format, reserved names, value parsing, the leading
-// command token, alias-to-alias references, and forbidden global flags.
-// Whether the target command exists, and whether a built-in shadows the
-// alias, is checked by the CLI.
+// command token, and forbidden global flags. Whether the target is a visible
+// built-in command (and not another alias), and whether a built-in shadows
+// the alias, is checked by the CLI.
 func ValidateAliases(aliases AliasMap) error {
 	for _, name := range aliases.Names() {
 		label := "aliases." + name
@@ -239,11 +239,9 @@ func ValidateAliases(aliases AliasMap) error {
 		case first == "tako":
 			return fmt.Errorf("%s: omit the leading \"tako\"; alias values are Tako arguments such as [exec, web, --, sh]", label)
 		}
-		// An alias whose first argument is its own name can only be a
-		// built-in it shadows (built-ins win); the CLI checks the target.
-		if _, isAlias := aliases[first]; isAlias && first != name {
-			return fmt.Errorf("%s: aliases cannot reference other aliases (%q is an alias)", label, first)
-		}
+		// Alias-to-alias references are rejected by the CLI, which knows the
+		// built-in commands: a first argument that names both a built-in and
+		// a (shadowed) alias refers to the built-in.
 		for _, arg := range args {
 			if arg == "--" {
 				break
