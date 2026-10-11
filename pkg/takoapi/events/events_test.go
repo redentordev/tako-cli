@@ -92,3 +92,28 @@ func TestFanoutSinkForwardsInOrder(t *testing.T) {
 		t.Fatalf("fanout did not reach all sinks")
 	}
 }
+
+func TestStreamContextDataLayersAndRestores(t *testing.T) {
+	buffer := &BufferSink{}
+	stream := NewStream(buffer, strings.ToUpper)
+	outer := stream.SetContextData(map[string]any{"operation": "rollback"})
+	inner := stream.SetContextData(map[string]any{"targetDeploymentId": "d2"})
+	stream.Emit(Event{Type: TypeDeployStarted, Data: map[string]any{"operation": "override", "scope": "project"}})
+	// Layers can be removed in any order.
+	outer()
+	stream.Emit(Event{Type: TypeDeploySucceeded})
+	inner()
+	inner()
+	stream.Emit(Event{Type: TypeResult})
+
+	emitted := buffer.Events()
+	if got := emitted[0].Data; got["operation"] != "OVERRIDE" || got["targetDeploymentId"] != "D2" || got["scope"] != "PROJECT" {
+		t.Fatalf("first event data = %#v", got)
+	}
+	if got := emitted[1].Data; got["operation"] != nil || got["targetDeploymentId"] != "D2" {
+		t.Fatalf("second event data = %#v", got)
+	}
+	if emitted[2].Data != nil {
+		t.Fatalf("third event data = %#v, want none", emitted[2].Data)
+	}
+}

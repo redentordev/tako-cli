@@ -73,9 +73,13 @@ const (
 	TypeDeployServiceRestored       = "deploy.service.restored"
 	TypeDeployServiceRestoreFailed  = "deploy.service.restore_failed"
 	TypeDeployServiceRemoved        = "deploy.service.removed"
-	TypeDeploySucceeded             = "deploy.succeeded"
-	TypeDeployFailed                = "deploy.failed"
-	TypeDeployCancelled             = "deploy.cancelled"
+	// TypeDeployServiceSkipped reports a service an operation left alone
+	// (project rollback: skipped or unchanged); data.action and
+	// data.reason say why.
+	TypeDeployServiceSkipped = "deploy.service.skipped"
+	TypeDeploySucceeded      = "deploy.succeeded"
+	TypeDeployFailed         = "deploy.failed"
+	TypeDeployCancelled      = "deploy.cancelled"
 
 	TypeProxyReconciled    = "proxy.reconciled"
 	TypeRevisionsPruned    = "revisions.pruned"

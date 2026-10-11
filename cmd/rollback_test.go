@@ -104,6 +104,32 @@ func TestSelectRollbackTargetRejectsFailedSpecificDeployment(t *testing.T) {
 	}
 }
 
+func TestSelectRollbackTargetAcceptsHistoryDisplayIDAndCommit(t *testing.T) {
+	base := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+	older := rollbackHistoryDeployment("1781352000123456789_77", remotestate.StatusSuccess, base, "web")
+	older.GitCommit = "0123456789abcdef0123456789abcdef01234567"
+	history := &remotestate.DeploymentHistory{
+		Deployments: []*remotestate.DeploymentState{
+			older,
+			rollbackHistoryDeployment("1781355600123456789_78", remotestate.StatusSuccess, base.Add(time.Hour), "web"),
+		},
+	}
+
+	// The short ID `tako history` prints resolves as a unique prefix.
+	displayID := remotestate.FormatDeploymentID(older.ID)
+	deployment, err := selectRollbackTargetFromHistory(history, displayID, "web")
+	if err != nil || deployment.ID != older.ID {
+		t.Fatalf("display ID %s resolved to %v, %v", displayID, deployment, err)
+	}
+	deployment, err = selectRollbackTargetFromHistory(history, "0123456", "web")
+	if err != nil || deployment.ID != older.ID {
+		t.Fatalf("commit prefix resolved to %v, %v", deployment, err)
+	}
+	if _, err := selectRollbackTargetFromHistory(history, "178135", "web"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous prefix error = %v", err)
+	}
+}
+
 func TestRollbackRemoteHistoryErrorFailsSuccessfulRuntimeMutation(t *testing.T) {
 	err := rollbackRemoteHistoryError(errors.New("disk full"))
 	if err == nil {
