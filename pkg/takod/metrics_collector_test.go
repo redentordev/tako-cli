@@ -142,6 +142,63 @@ func TestCollectorCollectNowDoesNotTouchHistoryAndRespectsContext(t *testing.T) 
 	}
 }
 
+// scriptedSnapshotReader returns snapshots whose network receive counter
+// follows rx, one value per read.
+type scriptedSnapshotReader struct {
+	mu sync.Mutex
+	rx []uint64
+}
+
+func (r *scriptedSnapshotReader) Read(now time.Time) (hostmetrics.Snapshot, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	value := r.rx[0]
+	if len(r.rx) > 1 {
+		r.rx = r.rx[1:]
+	}
+	return hostmetrics.Snapshot{
+		At: now, CPUCount: 1, CPU: hostmetrics.CPUTimes{Total: 1000, Busy: 10},
+		Memory: hostmetrics.Memory{TotalKB: 1 << 20, AvailableKB: 1 << 19},
+		Net:    &hostmetrics.NetCounters{RxBytes: value, TxBytes: value},
+		Disk:   &hostmetrics.DiskCounters{ReadSectors: value, WriteSectors: value},
+	}, nil
+}
+
+func TestCollectorTotalsMonotonicAcrossCollectNow(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)}
+	// First (0 -> 100), CollectNow A (100 -> 1100), CollectNow B
+	// (1100 -> 1110), Tick (1200).
+	reader := &scriptedSnapshotReader{rx: []uint64{0, 100, 100, 1100, 1100, 1110, 1200}}
+	collector := newNodeMetricsCollector(reader, time.Minute, nil)
+	collector.now = clock.Now
+	collector.sleep = func(_ context.Context, d time.Duration) error { clock.Advance(d); return nil }
+	collector.First(context.Background())
+	var totals []uint64
+	latest, _ := collector.Latest()
+	totals = append(totals, latest.Network.InTotal)
+	for i := 0; i < 2; i++ {
+		clock.Advance(10 * time.Second)
+		sample, err := collector.CollectNow(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		totals = append(totals, sample.Network.InTotal)
+	}
+	clock.Advance(time.Minute)
+	collector.Tick()
+	latest, _ = collector.Latest()
+	totals = append(totals, latest.Network.InTotal)
+	if !slices.Equal(totals, []uint64{100, 1100, 1110, 1200}) {
+		t.Fatalf("network totals = %v, want monotonic [100 1100 1110 1200]", totals)
+	}
+	if latest.Network.InBytes != 1100 {
+		t.Fatalf("periodic window bytes = %d, want 1100 since the previous tick", latest.Network.InBytes)
+	}
+	if latest.DiskIO.InTotal != 1200*512 {
+		t.Fatalf("disk read total = %d", latest.DiskIO.InTotal)
+	}
+}
+
 func TestCollectorHistoryWriteFailureKeepsLatest(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)}
 	collector := newFakeCollector(t, &fakeSnapshotReader{}, clock)

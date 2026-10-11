@@ -54,12 +54,16 @@ type nodeMetricsCollector struct {
 	// onSample runs after each periodic sample (node status, textfile).
 	onSample func(hostmetrics.Sample)
 
-	mu         sync.Mutex
-	prev       *hostmetrics.Snapshot
-	totals     hostmetrics.Totals
-	latest     *hostmetrics.Sample
-	historyErr error
-	readErr    error
+	mu   sync.Mutex
+	prev *hostmetrics.Snapshot
+	// counterPrev is the newest snapshot folded into totals by either a
+	// periodic tick or CollectNow, so exported *_total counters only ever
+	// advance.
+	counterPrev *hostmetrics.Snapshot
+	totals      hostmetrics.Totals
+	latest      *hostmetrics.Sample
+	historyErr  error
+	readErr     error
 }
 
 func newNodeMetricsCollector(reader hostSnapshotReader, interval time.Duration, history *metricsHistoryStore) *nodeMetricsCollector {
@@ -101,6 +105,7 @@ func (c *nodeMetricsCollector) First(ctx context.Context) {
 	}
 	c.mu.Lock()
 	c.prev = &first
+	c.advanceCountersLocked(first)
 	c.mu.Unlock()
 	if err := c.sleep(ctx, metricsFirstSampleWindow); err != nil {
 		return
@@ -117,7 +122,9 @@ func (c *nodeMetricsCollector) Tick() {
 		return
 	}
 	c.mu.Lock()
-	sample := hostmetrics.Compute(c.prev, snapshot, &c.totals)
+	sample := hostmetrics.Compute(c.prev, snapshot, nil)
+	c.advanceCountersLocked(snapshot)
+	applyTotals(&sample, c.totals)
 	c.prev = &snapshot
 	c.latest = &sample
 	c.readErr = nil
@@ -157,9 +164,35 @@ func (c *nodeMetricsCollector) Errors() (readErr, historyErr error) {
 	return c.readErr, c.historyErr
 }
 
+// advanceCountersLocked folds the counter deltas from the newest snapshot
+// already counted to snapshot into totals. Snapshots not newer than it
+// (a CollectNow read that raced a tick) are ignored, so totals never count
+// a window twice and never go backwards.
+func (c *nodeMetricsCollector) advanceCountersLocked(snapshot hostmetrics.Snapshot) {
+	if c.counterPrev != nil {
+		if !snapshot.At.After(c.counterPrev.At) {
+			return
+		}
+		hostmetrics.Compute(c.counterPrev, snapshot, &c.totals)
+	}
+	c.counterPrev = &snapshot
+}
+
+// applyTotals reports the collector's monotonic totals in sample.
+func applyTotals(sample *hostmetrics.Sample, totals hostmetrics.Totals) {
+	if sample.Network != nil {
+		sample.Network.InTotal, sample.Network.OutTotal = totals.NetRx, totals.NetTx
+	}
+	if sample.DiskIO != nil {
+		sample.DiskIO.InTotal, sample.DiskIO.OutTotal = totals.DiskRead, totals.DiskWrite
+	}
+}
+
 // CollectNow takes a fresh sample over a 1s window without touching the
-// periodic state or history. Totals are reported relative to the periodic
-// totals so counters stay monotonic for scrapers.
+// periodic sample or history. Its rates cover the 1s window; its totals are
+// the collector's totals advanced to the fresh read and kept in collector
+// state, so *_total counters stay monotonic across collect=true requests and
+// periodic samples.
 func (c *nodeMetricsCollector) CollectNow(ctx context.Context) (hostmetrics.Sample, error) {
 	first, err := c.reader.Read(c.now())
 	if err != nil {
@@ -175,10 +208,13 @@ func (c *nodeMetricsCollector) CollectNow(ctx context.Context) (hostmetrics.Samp
 	if err != nil {
 		return hostmetrics.Sample{}, err
 	}
+	sample := hostmetrics.Compute(&first, second, nil)
 	c.mu.Lock()
-	totals := c.totals
+	c.advanceCountersLocked(first)
+	c.advanceCountersLocked(second)
+	applyTotals(&sample, c.totals)
 	c.mu.Unlock()
-	return hostmetrics.Compute(&first, second, &totals), nil
+	return sample, nil
 }
 
 // nativeHostSampleSource implements monitoring's HostSampleSource over the
