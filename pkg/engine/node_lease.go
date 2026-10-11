@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
@@ -15,10 +17,14 @@ import (
 	"github.com/redentordev/tako-cli/pkg/takodclient"
 )
 
-// NodeMaintenanceLeaseTTL bounds a node maintenance lease. The lease is not
-// renewed because the agent restarts mid-operation; if the release fails the
-// lease expires on its own.
+// NodeMaintenanceLeaseTTL bounds a node maintenance lease. Holders renew it
+// every NodeMaintenanceLeaseRenewInterval (KeepAlive) for as long as the
+// operation runs; if the release fails the lease expires on its own.
 const NodeMaintenanceLeaseTTL = 15 * time.Minute
+
+// NodeMaintenanceLeaseRenewInterval leaves two renewal attempts before the
+// lease could lapse, so one attempt failing while takod restarts is harmless.
+const NodeMaintenanceLeaseRenewInterval = NodeMaintenanceLeaseTTL / 3
 
 const nodeMaintenanceLeaseEndpoint = "/v1/node-lease/maintenance"
 
@@ -49,6 +55,10 @@ type NodeMaintenanceLease struct {
 	client          any
 	socket          string
 	id              string
+	operation       string
+	who             string
+	mu              sync.Mutex
+	lost            error
 	fallbackManager *remotestate.StateManager
 	fallbackLease   *remotestate.LeaseInfo
 }
@@ -90,10 +100,11 @@ func acquireNodeMaintenanceLeaseV1(ctx context.Context, req NodeMaintenanceLease
 	if err != nil {
 		return nil, err
 	}
+	who := nodeMaintenancePrincipal()
 	output, err := takodclient.RequestJSONWithContext(ctx, req.Client, req.Socket, "POST", nodeMaintenanceLeaseEndpoint, takod.NodeMaintenanceLeaseRequest{
 		ID:         id,
 		Operation:  req.Operation,
-		Who:        nodeMaintenancePrincipal(),
+		Who:        who,
 		PID:        os.Getpid(),
 		TTLSeconds: int64(NodeMaintenanceLeaseTTL / time.Second),
 	})
@@ -107,7 +118,7 @@ func acquireNodeMaintenanceLeaseV1(ctx context.Context, req NodeMaintenanceLease
 	if !response.Acquired {
 		return nil, nodeMaintenanceLockedError(req, response)
 	}
-	return &NodeMaintenanceLease{Server: req.Server, client: req.Client, socket: req.Socket, id: id}, nil
+	return &NodeMaintenanceLease{Server: req.Server, client: req.Client, socket: req.Socket, id: id, operation: req.Operation, who: who}, nil
 }
 
 func nodeMaintenanceLockedError(req NodeMaintenanceLeaseRequest, response takod.NodeMaintenanceLeaseResponse) error {
@@ -143,13 +154,136 @@ func (l *NodeMaintenanceLease) Release(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	if l.Fallback {
-		return l.fallbackManager.ReleaseLeaseContext(ctx, l.fallbackLease)
+		l.mu.Lock()
+		lease := l.fallbackLease
+		l.mu.Unlock()
+		return l.fallbackManager.ReleaseLeaseContext(ctx, lease)
 	}
 	_, err := takodclient.RequestJSONWithContext(ctx, l.client, l.socket, "DELETE", nodeMaintenanceLeaseEndpoint, takod.NodeMaintenanceLeaseRequest{ID: l.id})
 	if err != nil {
 		return fmt.Errorf("release node maintenance lease on %s (it expires within %s): %w", l.Server, NodeMaintenanceLeaseTTL, err)
 	}
 	return nil
+}
+
+// Renew extends the lease to NodeMaintenanceLeaseTTL from now by acquiring it
+// again under the same ID (takod keeps the creation time). It returns a
+// LockedError, and Err reports it from then on, when the lease was lost: it
+// lapsed and another operation took the node. Other errors (for example the
+// agent restarting) are transient and leave the lease as it was.
+func (l *NodeMaintenanceLease) Renew(ctx context.Context) error {
+	if l == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if l.Fallback {
+		if l.fallbackManager == nil {
+			return nil
+		}
+		l.mu.Lock()
+		current := l.fallbackLease
+		l.mu.Unlock()
+		renewed, err := l.fallbackManager.RenewLeaseContext(ctx, current, NodeMaintenanceLeaseTTL)
+		if err != nil {
+			if errors.Is(err, remotestate.ErrLeaseLost) {
+				return l.markLost(&LockedError{Operation: current.Operation, Err: fmt.Errorf("lost the %s lease on %s: %w", current.Operation, l.Server, err)})
+			}
+			return fmt.Errorf("renew %s lease on %s: %w", current.Operation, l.Server, err)
+		}
+		l.mu.Lock()
+		l.fallbackLease = renewed
+		l.mu.Unlock()
+		return nil
+	}
+	output, err := takodclient.RequestJSONWithContext(ctx, l.client, l.socket, "POST", nodeMaintenanceLeaseEndpoint, takod.NodeMaintenanceLeaseRequest{
+		ID:         l.id,
+		Operation:  l.operation,
+		Who:        l.who,
+		PID:        os.Getpid(),
+		TTLSeconds: int64(NodeMaintenanceLeaseTTL / time.Second),
+	})
+	if err != nil {
+		return fmt.Errorf("renew node maintenance lease on %s: %w", l.Server, err)
+	}
+	var response takod.NodeMaintenanceLeaseResponse
+	if err := json.Unmarshal([]byte(output), &response); err != nil {
+		return fmt.Errorf("parse node maintenance lease renewal from %s: %w", l.Server, err)
+	}
+	if !response.Acquired {
+		refusal := nodeMaintenanceLockedError(NodeMaintenanceLeaseRequest{Server: l.Server, Operation: l.operation}, response)
+		holder := ""
+		var locked *LockedError
+		if errors.As(refusal, &locked) {
+			holder = locked.Holder
+		}
+		return l.markLost(&LockedError{Operation: l.operation, Holder: holder, Err: fmt.Errorf("lost the node maintenance lease on %s: %w", l.Server, refusal)})
+	}
+	return nil
+}
+
+func (l *NodeMaintenanceLease) markLost(err error) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.lost == nil {
+		l.lost = err
+	}
+	return err
+}
+
+// Err reports a lost lease (nil while it is held). Holders check it before
+// each mutation step and stop when it is set.
+func (l *NodeMaintenanceLease) Err() error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lost
+}
+
+// KeepAlive renews the lease every interval until stop is called, so a long
+// setup or upgrade cannot outlive it. Renewal errors go to onError; after a
+// lost lease renewal stops and Err reports it. stop waits for an in-flight
+// renewal and must be called before Release.
+func (l *NodeMaintenanceLease) KeepAlive(interval time.Duration, onError func(error)) (stop func()) {
+	if l == nil {
+		return func() {}
+	}
+	if interval <= 0 {
+		interval = NodeMaintenanceLeaseRenewInterval
+	}
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), interval)
+				err := l.Renew(ctx)
+				cancel()
+				if err != nil && onError != nil {
+					onError(err)
+				}
+				if l.Err() != nil {
+					return
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-finished
+		})
+	}
 }
 
 func statusHasCapability(status *takod.Status, capability string) bool {

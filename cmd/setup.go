@@ -185,13 +185,19 @@ func runSetupNode(cfg *config.Config, sshPool *ssh.Pool, name string, server con
 	// A node whose takod answers may be running another environment's or
 	// project's operation: hold the node maintenance lease while setup
 	// reinstalls takod, the firewall and deploy access.
+	// The lease is renewed in the background and before every step, and a
+	// lost lease stops setup before its next step.
+	var lease *engine.NodeMaintenanceLease
 	if status, statusErr := probeTakodAgentStatus(client, cfg, upgradeServersStatusProbe); statusErr == nil && status != nil {
-		lease, err := acquireNodeMaintenanceLeaseForCommand(client, cfg, envName, name, server, status, nil, "setup", setupLineWriter{node: name})
+		acquired, err := acquireNodeMaintenanceLeaseForCommand(client, cfg, envName, name, server, status, nil, "setup", setupLineWriter{node: name})
 		if err != nil {
 			node.Error = err.Error()
 			return node, err
 		}
+		lease = acquired
 		defer releaseUpgradeNodeLease(lease, setupLineWriter{node: name})
+		stopRenewal := keepNodeMaintenanceLeaseAlive(lease, setupLineWriter{node: name})
+		defer stopRenewal()
 	}
 
 	steps := setupNodeSteps(prov, cfg, name, server.User, meshListenPort, takodBinaryForSetup(), node.Mode == engine.SetupModeConverge, access)
@@ -200,6 +206,11 @@ func runSetupNode(cfg *config.Config, sshPool *ssh.Pool, name string, server con
 			node.Steps = append(node.Steps, engine.SetupStepOutcome{Step: step.key, Title: step.title, Status: engine.SetupStepSkipped})
 			emitSetupStepEvent(events.TypeSetupStepSkipped, events.LevelInfo, name, "", step, nil)
 			continue
+		}
+		if err := checkNodeMaintenanceLease(lease); err != nil {
+			err = fmt.Errorf("stopped before step '%s' on server %s: %w", step.title, name, err)
+			node.Error = err.Error()
+			return node, err
 		}
 		emitSetupStepEvent(events.TypeSetupStepStarted, events.LevelInfo, name, fmt.Sprintf("→ %s...\n", step.title), step, nil)
 		if err := step.fn(); err != nil {

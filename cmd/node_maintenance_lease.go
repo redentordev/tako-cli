@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
@@ -94,3 +95,34 @@ func lockedUpgradeError(leaseErrors []error) error {
 		Err:       fmt.Errorf("server agent upgrade blocked on %d node(s): %s", len(leaseErrors), strings.Join(messages, "; ")),
 	}
 }
+
+// keepNodeMaintenanceLeaseAlive renews a held lease in the background for as
+// long as the operation runs (setup and upgrade can outlive the 15-minute
+// TTL). Renewal failures are printed; a lost lease is reported by
+// checkNodeMaintenanceLease. Call the returned stop before releasing.
+func keepNodeMaintenanceLeaseAlive(lease *engine.NodeMaintenanceLease, out io.Writer) func() {
+	if lease == nil {
+		return func() {}
+	}
+	return lease.KeepAlive(engine.NodeMaintenanceLeaseRenewInterval, func(err error) {
+		fmt.Fprintf(out, "  ⚠ %v\n", err)
+	})
+}
+
+// checkNodeMaintenanceLease renews the lease before the next mutation step
+// and fails when it was lost. A renewal that fails only because the agent is
+// restarting is not an error; the background renewal retries it.
+func checkNodeMaintenanceLease(lease *engine.NodeMaintenanceLease) error {
+	if lease == nil {
+		return nil
+	}
+	if err := lease.Err(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), nodeMaintenanceRenewTimeout)
+	defer cancel()
+	_ = lease.Renew(ctx)
+	return lease.Err()
+}
+
+const nodeMaintenanceRenewTimeout = 30 * time.Second

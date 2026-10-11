@@ -529,11 +529,13 @@ func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, env
 		fmt.Fprintf(out, "✓ takod already at %s; nothing to do (use --force to reinstall)\n", Version)
 		return node
 	}
+	var lease *engine.NodeMaintenanceLease
 	if stage == engine.UpgradeStageLegacy {
 		// Non-enrolled nodes have no cluster upgrade coordinator. Hold the node
 		// maintenance lease from just before the first mutation until the
-		// restarted agent verified (or the rollback finished).
-		lease, leaseErr := acquireUpgradeNodeLease(client, cfg, envName, name, server, status, statusErr, out)
+		// restarted agent verified (or the rollback finished), renewing it in
+		// the background so a slow upgrade cannot outlive its TTL.
+		acquired, leaseErr := acquireUpgradeNodeLease(client, cfg, envName, name, server, status, statusErr, out)
 		if leaseErr != nil {
 			if !isLockedError(leaseErr) {
 				return fail(leaseErr)
@@ -544,7 +546,10 @@ func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, env
 			fmt.Fprintf(out, "✗ %v\n", leaseErr)
 			return node
 		}
+		lease = acquired
 		defer releaseUpgradeNodeLease(lease, out)
+		stopRenewal := keepNodeMaintenanceLeaseAlive(lease, out)
+		defer stopRenewal()
 	}
 	prov := provisioner.NewProvisioner(client, verbose)
 	prov.SetOutput(humanOut())
@@ -591,6 +596,9 @@ func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, env
 		node.Error = cause.Error()
 		fmt.Fprintf(out, "↩ %v; restored takod %s\n", cause, node.FromVersion)
 		return node
+	}
+	if err := checkNodeMaintenanceLease(lease); err != nil {
+		return rollback(fmt.Errorf("server %s takod upgrade stopped before activation: %w", name, err))
 	}
 	if err := prov.ActivateTakodUpgrade(); err != nil {
 		return rollback(fmt.Errorf("failed to activate takod upgrade on server %s: %w", name, err))
