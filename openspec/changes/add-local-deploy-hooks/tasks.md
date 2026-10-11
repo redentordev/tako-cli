@@ -99,5 +99,6 @@
 
 ## 8. Integration checks
 
-- [ ] 8.1 Run `go build ./...` and `go test ./...` on Linux CI and confirm that they pass. On Windows, confirm that any failures are limited to the known Windows-only cases (symlinks, directory fsync, POSIX paths).
+- [x] 8.1 Run `go build ./...` and `go test ./...` on Linux CI and confirm that they pass. On Windows, confirm that any failures are limited to the known Windows-only cases (symlinks, directory fsync, POSIX paths).
+  - Note: run locally on WSL Ubuntu 24.04 and Windows 11. All touched packages pass on Linux. The remaining Linux failures (`pkg/nodeidentity`, `pkg/platform`, and the ACME/certificate/proxy tests in `pkg/takod`) and the Windows failing packages match the pre-change baseline exactly.
 - [ ] 8.2 Run a manual end-to-end check against a test VPS with `pre-deploy`, `post-deploy`, and `on-failure` hooks. Run it once from Linux with shell scripts and once from Windows with `.ps1`. Confirm ordering, environment contents (no `.env` secrets), and exit codes 0, 1, and 6, and record the transcript in the PR description.
