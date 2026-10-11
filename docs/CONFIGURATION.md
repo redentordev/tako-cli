@@ -1434,7 +1434,9 @@ takod (capability `mesh.peer-sets-v1`) keeps one peer set per app/stage and
 configures the interface from the union of all sets. Deploying one app/stage
 never removes the peers another app/stage contributed, and `tako destroy`
 removes only the destroyed app/stage's set. Nodes of different environments
-that only share a server do not peer with each other.
+that only share a server do not peer with each other. After removing a server
+from an environment's `servers` list, run `tako mesh prune -e <env>` to
+delete the set that environment left on it.
 
 Multi-node environments that share a server must use compatible `mesh:`
 blocks: the same `networkCIDR`, `subnetBits`, and `listenPort`, and the same

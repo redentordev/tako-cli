@@ -388,8 +388,12 @@ verified:
   project is live, the maintenance lease is refused immediately and the
   command exits 3 listing the holders. takod checks and writes both kinds under
   one mutex.
-- It lasts 15 minutes and is not renewed, because the agent restarts during
-  the operation; a lease whose release failed expires on its own.
+- It lasts 15 minutes. The holder renews it under the same ID every five
+  minutes in the background and before each setup step and the upgrade
+  activation (the lease file survives the agent restart, so the restarted agent
+  accepts the renewal). If a renewal finds the lease lost, setup stops before
+  its next step and the upgrade rolls back before activating. A lease whose
+  release failed expires on its own.
 - An agent without `lease.node-maintenance-v1` cannot grant it. The command
   then holds the selected environment's lease on that node for the same window
   and warns that other environments and projects on the node are not fenced.
@@ -802,7 +806,13 @@ serves mesh apply, proxy upstreams, and `tako domains hosts`:
 2. A node keeps the address its takod recorded (`node.json` `mesh.address`)
    when it lies inside `mesh.networkCIDR`. If two members record the same
    address, the member whose name sorts first keeps it, the other gets a new
-   one, and the deploy prints a warning.
+   one, and the deploy prints a warning. A recorded address that a member lists
+   for a peer outside the environment (another app/stage on a shared node) is
+   taken as well: two environments numbered by an earlier Tako both recorded
+   `.1` for their first node, and the shared node could not carry both. On a
+   shared node whose stored peer sets peer with other nodes, the node's own
+   address is the one those sets agree on, not `node.json`, which every
+   metadata write replaces.
 3. Every other node gets the lowest free host address of `mesh.networkCIDR`,
    in sorted name order. Addresses that a member lists for peers outside the
    environment (another app/stage on a shared node) are not free.
@@ -811,6 +821,12 @@ A fresh environment therefore gets `.1`, `.2`, ... in sorted name order, and
 nodes upgraded from an earlier Tako keep the addresses they already have.
 The result never depends on the operation's target list, server declaration
 order, or which environment variables are exported.
+
+Operations that do not apply the mesh (placement apply, proxy-only
+reconciles) resolve addresses read-only. When a member they need has no
+applied address yet (a fresh member, or a record the resolver had to replace),
+they stop with an invalid-request error (exit 2) asking for a deploy instead
+of routing to an address the member's interface does not carry.
 
 ### Shared-Node Peer Sets
 
@@ -841,13 +857,25 @@ Union rules:
 A conflicting request stores nothing and leaves the interface unchanged; takod
 answers `409 Conflict` with a message naming both `(project, env, server)`
 entries, and the deploy fails with it. Redeploy (or destroy) the environment
-that owns the stale entry, or align the `mesh:` blocks.
+that owns the stale entry, or align the `mesh:` blocks. Deploys write node
+metadata only after the node accepted the peer set, so a rejected attempt does
+not change the node's recorded address.
+
+A deploy only contacts the environment's members, so when a server is removed
+from an environment's `servers` list, the set that environment stored there
+stays behind. `tako mesh prune -e <env>` removes it: for every declared,
+non-enrolled server outside the environment (or those named with `--server`)
+that still stores the set, it takes the environment's lease on that server,
+deletes the set, and releases the lease. Unreachable servers are reported and
+skipped; a refused lease exits 3.
 
 On first use takod converts an existing `mesh/peers.json` into the set named
 by its `project`/`environment` tags; an untagged file becomes `_legacy`, which
 the next peer-set write drops. A legacy `POST /v1/mesh/apply` from an older CLI
-is stored as the set named by the tags of the `peers.json` it just wrote, so
-it no longer erases other environments' peers.
+is stored as the set named by the tags of the metadata that CLI wrote with the
+same peer list (takod records them under the peer-set mutex, so another
+environment's metadata write in between does not change the key), so it no
+longer erases other environments' peers.
 
 Deploy success is intentionally separate from public DNS readiness. A deploy
 can reconcile containers, routes, state, and proxy config before a domain points

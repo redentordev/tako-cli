@@ -57,7 +57,7 @@
   - a live environment lease of any project blocks the maintenance lease, and the error lists the holders;
   - expiry releases both;
   - a lease written before a restart is honored after it.
-- [x] 3.2 CLI: add `AcquireNodeMaintenanceLease(node)` (`pkg/engine/leases.go`) with a 15-minute TTL, no renewal, and the D6 fallback that takes the selected environment's lease and warns. Use it per node in `cmd/upgrade.go` (non-enrolled stage only) and in `cmd/setup.go` converge. Verify with:
+- [x] 3.2 CLI: add `AcquireNodeMaintenanceLease(node)` (`pkg/engine/leases.go`) with a 15-minute TTL (renewed under the same ID during the operation), and the D6 fallback that takes the selected environment's lease and warns. Use it per node in `cmd/upgrade.go` (non-enrolled stage only) and in `cmd/setup.go` converge. Verify with:
   - engine tests using fake agents with and without the capability;
   - an upgrade test proving that the lease is released on the restarted agent and that an environment lease held elsewhere makes the upgrade exit 3.
 - [x] 3.3 Docs: add the node lease and the fallback warning to `docs/ORCHESTRATION-MODEL.md`. Add a `tako upgrade servers` note to `docs/MACHINE-INTERFACE.md` (exit 3 when an environment lease is live).
@@ -77,7 +77,7 @@
   - a CIDR or port mismatch between multi-node sets is rejected;
   - single-node sets with a different `mesh:` block are accepted without changing the interface;
   - delete re-renders the union.
-- [x] 4.3 takod: migrate a legacy `peers.json` (tagged becomes that set; untagged becomes `_legacy`, dropped on the next write). Key a legacy `POST /v1/mesh/apply` by the tags of the just-written `peers.json`. Verify with tests: an old-CLI request sequence against a new takod preserves the other environment's peers.
+- [x] 4.3 takod: migrate a legacy `peers.json` (tagged becomes that set; untagged becomes `_legacy`, dropped on the next write). Key a legacy `POST /v1/mesh/apply` by the tags of the metadata written with the same peer list. Verify with tests: an old-CLI request sequence against a new takod preserves the other environment's peers.
 - [x] 4.4 CLI:
   - use the peer-set endpoint when every member advertises `mesh.peer-sets-v1`, and use the legacy path per member otherwise;
   - have the D5 used set read `meshPeerSets` when present;
