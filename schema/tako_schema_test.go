@@ -5,6 +5,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -231,6 +232,74 @@ func TestTakoSchemaDescribesAliases(t *testing.T) {
 	}
 	if list["type"] != "array" || list["minItems"] != float64(1) || schemaPath(t, list, "items")["type"] != "string" {
 		t.Fatalf("alias list branch = %#v", list)
+	}
+}
+
+func TestTakoSchemaDescribesHooks(t *testing.T) {
+	schema := loadTakoSchema(t)
+	hooks := schemaPath(t, schema, "properties", "hooks")
+	if hooks["type"] != "object" || hooks["additionalProperties"] != false {
+		t.Fatalf("hooks must be a closed object: %#v", hooks)
+	}
+	assertRequiredDoesNotContain(t, schema, []string{"hooks"})
+	properties := schemaPath(t, hooks, "properties")
+	var keys []string
+	for key := range properties {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if want := []string{"commands", "output", "passEnv", "path", "timeout"}; !reflect.DeepEqual(keys, want) {
+		t.Fatalf("hooks properties = %v, want %v", keys, want)
+	}
+	assertStringEnum(t, schemaPath(t, properties, "output"), []string{"verbose", "quiet"})
+	if got := schemaPath(t, properties, "path")["default"]; got != config.DefaultHooksPath {
+		t.Fatalf("hooks.path default = %#v", got)
+	}
+
+	timeoutPattern := regexp.MustCompile(schemaPath(t, properties, "timeout")["pattern"].(string))
+	for _, value := range []string{"5m", "1h", "90s", "1m30s"} {
+		if !timeoutPattern.MatchString(value) {
+			t.Fatalf("timeout pattern rejects %q", value)
+		}
+	}
+	for _, value := range []string{"5", "five minutes", ""} {
+		if timeoutPattern.MatchString(value) {
+			t.Fatalf("timeout pattern accepts %q", value)
+		}
+	}
+
+	passEnvItems := schemaPath(t, properties, "passEnv", "items")
+	namePattern := regexp.MustCompile(passEnvItems["pattern"].(string))
+	reserved := regexp.MustCompile(schemaPath(t, passEnvItems, "not")["pattern"].(string))
+	for _, name := range []string{"GITHUB_TOKEN", "SLACK_*", "_X"} {
+		if !namePattern.MatchString(name) || reserved.MatchString(name) {
+			t.Fatalf("passEnv schema rejects %q", name)
+		}
+	}
+	for _, name := range []string{"SLACK-*", "A*B", "*", "1X"} {
+		if namePattern.MatchString(name) {
+			t.Fatalf("passEnv schema accepts %q", name)
+		}
+	}
+	if !reserved.MatchString("TAKO_TOKEN") || !reserved.MatchString("tako_x") {
+		t.Fatal("passEnv schema must reserve TAKO_ names")
+	}
+
+	commands := schemaPath(t, properties, "commands")
+	names, ok := schemaPath(t, commands, "propertyNames")["enum"].([]any)
+	if !ok {
+		t.Fatalf("hooks.commands propertyNames enum missing: %#v", commands["propertyNames"])
+	}
+	var gotNames []string
+	for _, name := range names {
+		gotNames = append(gotNames, name.(string))
+	}
+	if !reflect.DeepEqual(gotNames, config.HookNames) {
+		t.Fatalf("hook names = %v, want %v", gotNames, config.HookNames)
+	}
+	argv := schemaPath(t, commands, "additionalProperties")
+	if argv["type"] != "array" || argv["minItems"] != float64(1) || schemaPath(t, argv, "items")["type"] != "string" {
+		t.Fatalf("hooks.commands argv schema = %#v", argv)
 	}
 }
 

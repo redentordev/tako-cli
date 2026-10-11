@@ -42,6 +42,8 @@ const (
 	PhaseNotify  = "notify"
 	PhaseLogs    = "logs"
 	PhaseSetup   = "setup"
+	// PhaseHooks groups local lifecycle hook events (hook.*).
+	PhaseHooks = "hooks"
 )
 
 // Event types. Consumers must tolerate unknown types (additive schema).
@@ -141,6 +143,19 @@ const (
 	TypeJobTriggerStarted   = "jobs.trigger.started"
 	TypeJobTriggerOutput    = "jobs.trigger.output"
 	TypeJobTriggerCompleted = "jobs.trigger.completed"
+
+	// Local lifecycle hook events (phase "hooks"). Every event carries
+	// `data.hook`. started adds `data.source` ("file"/"config"),
+	// `data.path` or `data.argv`, and `data.timeoutSeconds`; output carries
+	// one line in `data.data` with `data.stream` ("stdout"/"stderr");
+	// completed/failed carry `data.exitCode` and `data.durationMs`, and
+	// failed adds `data.error` and `data.timedOut`. skipped carries
+	// `data.reason` (--skip-hooks).
+	TypeHookStarted   = "hook.started"
+	TypeHookOutput    = "hook.output"
+	TypeHookCompleted = "hook.completed"
+	TypeHookFailed    = "hook.failed"
+	TypeHookSkipped   = "hook.skipped"
 
 	TypeWarning = "warning"
 

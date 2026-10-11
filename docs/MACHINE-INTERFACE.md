@@ -169,6 +169,54 @@ service's rollout fails, its outcome carries a `recovery` object:
   text only. The failed deployment's history record stores the same object
   as `services.<name>.recovery` along with `deployStrategy`.
 
+`DeployResult` also carries `deploymentId` once the deployment history entry
+is recorded (omitted for plan-only runs and for failures before recording).
+
+### Lifecycle hooks
+
+`deploy`, `rollback`, `promote`, and `setup` run local hooks
+([HOOKS.md](./HOOKS.md)). Hook processes never write to process stdout; each
+output line becomes an event, so `--output json` stdout stays a single
+document (hook lines go to stderr) and `--events ndjson` stdout stays pure
+NDJSON. Hook events use phase `hooks`:
+
+| Type | Level | `data` |
+|------|-------|--------|
+| `hook.started` | `info` | `hook`, `source` (`file`\|`config`), `path` or `argv`, `timeoutSeconds`, `interpreter` (when used) |
+| `hook.output` | `info`, or `debug` with `hooks.output: quiet` | `hook`, `stream` (`stdout`\|`stderr`), `data` (one redacted line) |
+| `hook.completed` | `info` | `hook`, `exitCode`, `durationMs` |
+| `hook.failed` | `error` | `hook`, `exitCode` (`-1` when the process did not exit normally), `durationMs`, `error`, `timedOut`, optional `hint` |
+| `hook.skipped` | `info` | `hook`, `reason` (`--skip-hooks`) |
+
+Hook-like files with unknown names emit a `warning` event in phase `hooks`
+(`data.file`), and a failing `on-failure` hook emits a `warning`. All hook
+events precede the terminal `result` event. Projects without hooks emit no
+hook events.
+
+`DeployResult`, `RollbackResult`, `PromoteResult`, and `SetupResult` gain an
+optional `hooks` array, one entry per hook considered, in run order:
+
+```json
+"hooks": [
+  { "name": "pre-deploy", "status": "completed", "exitCode": 0, "durationMs": 812 },
+  { "name": "post-deploy", "status": "failed", "exitCode": 1, "durationMs": 95 }
+]
+```
+
+`status` is `completed`, `failed`, `timed_out`, or `skipped`; `exitCode` and
+`durationMs` are present when the hook ran. The array is omitted when no hook
+was considered, so results of projects without hooks are unchanged.
+
+- A failing `pre-*` hook aborts before any mutation: the command emits its
+  result document with `status: failed` and an `error` naming the hook and
+  its exit status, and exits 1 (5 when interrupted). `RollbackResult` and
+  `PromoteResult` carry the same `error` field.
+- A failing `post-*` hook keeps the operation's `status` (for example
+  `success`), marks the hook `failed`, and exits 6.
+- `tako validate` resolves hooks without running them: resolution errors are
+  `error` findings with field `hooks.<name>` (exit 2), misspelled hook files
+  are `warn` findings, and no `hook.*` event is emitted.
+
 `tako ps --output json` returns a
 `StatusResult` document with project/environment, selected server(s), optional
 service filter, and service rows (`name`, `running`, `desired`, `status`,
@@ -483,7 +531,7 @@ machine behavior:
 | Category | Commands |
 | -------- | -------- |
 | Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
-| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
+| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), lifecycle hooks in `deploy\|rollback\|promote\|setup` (`hook.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
 | Human-only by design | `init`, `backup recover`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
 | Infrastructure-only | `takod run`, hidden `platform worker run\|prepare-enrollment\|verify-enrollment\|reconcile-mesh`, hidden `platform node upgrade-publication-guard`, and hidden internal E2E helpers |
@@ -596,6 +644,12 @@ the target `servers`, and exit with code 2.
 
 The mapping is derived from typed engine error classes
 (`pkg/engine.Classify`); errors that predate the taxonomy report 1.
+
+Lifecycle hooks map onto the same codes: a failing `pre-*` hook exits 1, an
+unresolvable hook (not executable, ambiguous, missing interpreter) exits 2,
+an interrupted hook exits 5, and a failing `post-*` hook after a successful
+operation exits 6. A failing `on-failure` hook never changes the code. See
+[Lifecycle hooks](#lifecycle-hooks).
 
 ## Redaction Guarantees
 

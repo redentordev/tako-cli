@@ -53,6 +53,11 @@ type RollbackRequest struct {
 	// with other cmd files; see the type docs.
 	HistorySource   RollbackHistorySourceFunc
 	ListDeployments ListDeploymentsFunc
+
+	// BeforeMutation, when set, runs after the lock and leases are held and
+	// the target deployment is selected, before notifications or any
+	// mutation. Its error aborts the rollback. Nil changes nothing.
+	BeforeMutation BeforeMutationFunc
 }
 
 // RollbackResult is the serializable outcome of Rollback.
@@ -69,6 +74,9 @@ type RollbackResult struct {
 	StartedAt    time.Time                `json:"startedAt"`
 	Duration     float64                  `json:"durationSeconds"`
 	Message      string                   `json:"message,omitempty"`
+	Error        string                   `json:"error,omitempty"`
+	// Hooks lists the local lifecycle hooks considered, in run order.
+	Hooks []HookOutcome `json:"hooks,omitempty"`
 }
 
 // Rollback re-deploys a service from a recorded deployment state, reconciles
@@ -225,6 +233,17 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 		targetDeployment.Timestamp.Format("2006-01-02 15:04:05"),
 		targetDeployment.Version,
 		targetDeployment.User))
+
+	if err := callBeforeMutation(ctx, req.BeforeMutation, MutationInfo{
+		Operation:          "rollback",
+		Services:           []string{req.Service},
+		Servers:            append([]string(nil), mutationServers...),
+		TargetDeploymentID: targetDeployment.ID,
+		Revision:           RollbackTargetCommit(targetDeployment),
+		Image:              targetDeployment.Services[req.Service].Image,
+	}); err != nil {
+		return nil, err
+	}
 
 	// Setup notifications if configured.
 	var notifier *notification.Notifier

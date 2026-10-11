@@ -39,6 +39,10 @@ type PromoteRequest struct {
 	// message. The cmd layer injects its shared shortRevision helper (also
 	// used by `tako ps`, so it stays in cmd); nil leaves revisions unshortened.
 	ShortRevision func(string) string
+	// BeforeMutation, when set, runs after the lock and leases are held and
+	// the warmed revision and image are selected, before any mutation. Its
+	// error aborts the promotion. Nil changes nothing.
+	BeforeMutation BeforeMutationFunc
 }
 
 // PromoteResult is the serializable outcome of Promote.
@@ -53,6 +57,9 @@ type PromoteResult struct {
 	Status      takoapi.DeploymentStatus `json:"status"`
 	StartedAt   time.Time                `json:"startedAt"`
 	Duration    float64                  `json:"durationSeconds"`
+	Error       string                   `json:"error,omitempty"`
+	// Hooks lists the local lifecycle hooks considered, in run order.
+	Hooks []HookOutcome `json:"hooks,omitempty"`
 }
 
 // Promote switches proxy routes to a warmed blue-green revision, prunes stale
@@ -207,6 +214,15 @@ func (e *Engine) Promote(ctx context.Context, req PromoteRequest) (*PromoteResul
 	targetImage, err := promotionTargetImage(cfg, envName, serviceName, service, actual, targetRevision)
 	if err != nil {
 		return nil, fmt.Errorf("cannot promote %s: %w", serviceName, err)
+	}
+	if err := callBeforeMutation(ctx, req.BeforeMutation, MutationInfo{
+		Operation: "promote",
+		Services:  []string{serviceName},
+		Servers:   append([]string(nil), serverNames...),
+		Revision:  targetRevision,
+		Image:     targetImage,
+	}); err != nil {
+		return nil, err
 	}
 	if err := deploy.PreflightAssignmentMutations(map[string]config.ServiceConfig{serviceName: service}); err != nil {
 		return nil, err

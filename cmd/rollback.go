@@ -1,18 +1,22 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	remotestate "github.com/redentordev/tako-cli/internal/state"
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/hooks"
 	"github.com/redentordev/tako-cli/pkg/reconcile"
+	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/spf13/cobra"
 )
 
 var (
-	rollbackService string
+	rollbackService   string
+	rollbackSkipHooks bool
 )
 
 var rollbackCmd = &cobra.Command{
@@ -38,6 +42,7 @@ func init() {
 	rootCmd.AddCommand(rollbackCmd)
 	rollbackCmd.Flags().StringVar(&rollbackService, "service", "", "Service to rollback (required)")
 	rollbackCmd.MarkFlagRequired("service")
+	rollbackCmd.Flags().BoolVar(&rollbackSkipHooks, "skip-hooks", false, skipHooksFlagUsage)
 }
 
 func runRollback(cmd *cobra.Command, args []string) error {
@@ -67,13 +72,59 @@ func runRollback(cmd *cobra.Command, args []string) error {
 		ListDeployments: listDeploymentsFromHistory,
 	}
 
-	result, err := cliEngine().Rollback(cmd.Context(), request)
+	hookSession, err := newHookSession(hookCommandRollback, cfg, resolveDeployConfigPath(cfgFile), rollbackSkipHooks)
+	if err != nil {
+		return err
+	}
+	// pre-rollback runs inside the engine once the target is selected and
+	// the lock and leases are held; post hooks run after the engine
+	// released them.
+	var target engine.MutationInfo
+	request.BeforeMutation = hookSession.beforeMutation(&target)
+
+	result, err := runRollbackEngine(cmd.Context(), request)
+	err = hookSession.finish(cmd.Context(), err, func() hooks.Context {
+		values := mutationHookContext(target)
+		if result != nil {
+			values.Result = string(result.Status)
+			values.DurationSeconds = durationPointer(result.Duration)
+		}
+		return values
+	}, func() hooks.Context { return mutationHookContext(target) })
+	if outcomes := hookSession.hookOutcomes(); outcomes != nil {
+		if result == nil {
+			result = &engine.RollbackResult{
+				APIVersion:   takoapi.APIVersionCurrent,
+				Kind:         engine.KindRollbackResult,
+				Project:      cfg.Project.Name,
+				Environment:  envName,
+				Service:      rollbackService,
+				DeploymentID: target.TargetDeploymentID,
+				Status:       takoapi.StatusFailed,
+				StartedAt:    time.Now(),
+				Error:        cliEngine().RedactSensitive(errorText(err)),
+			}
+		}
+		result.Hooks = outcomes
+	}
 	if result != nil {
 		if emitErr := emitResultDocument(result); emitErr != nil && err == nil {
 			err = emitErr
 		}
 	}
 	return err
+}
+
+// runRollbackEngine runs the engine rollback. Seam for tests.
+var runRollbackEngine = func(ctx context.Context, request engine.RollbackRequest) (*engine.RollbackResult, error) {
+	return cliEngine().Rollback(ctx, request)
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func selectRollbackHistorySource(cfg *config.Config, envName string, requestedServer string) (stateHistoryCandidate, error) {

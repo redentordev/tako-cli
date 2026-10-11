@@ -8,6 +8,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/hooks"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/setup"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -19,6 +20,7 @@ import (
 var (
 	setupServer      string
 	setupTakodBinary string
+	setupSkipHooks   bool
 )
 
 var setupCmd = &cobra.Command{
@@ -49,6 +51,7 @@ func init() {
 	rootCmd.AddCommand(setupCmd)
 	setupCmd.Flags().StringVarP(&setupServer, "server", "s", "", "Server to set up (default: all servers)")
 	setupCmd.Flags().StringVar(&setupTakodBinary, "takod-binary", "", "Path to a Linux tako binary to install as takod during setup (for development/testing)")
+	setupCmd.Flags().BoolVar(&setupSkipHooks, "skip-hooks", false, skipHooksFlagUsage)
 }
 
 func runSetup(cmd *cobra.Command, args []string) error {
@@ -56,6 +59,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return formatConfigLoadError(cfgFile, err)
+	}
+	hookSession, err := newHookSession(hookCommandSetup, cfg, resolveDeployConfigPath(cfgFile), setupSkipHooks)
+	if err != nil {
+		return err
 	}
 
 	// Create SSH pool
@@ -76,14 +83,21 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		Nodes:       []engine.SetupNodeResult{},
 	}
 
+	// Setup takes no leases: pre-setup runs once before the first node and
+	// post-setup once after the last.
+	setupContext := hooks.Context{Servers: targetServerNames}
+	setupStarted := time.Now()
+	opErr := hookSession.runPre(cmd.Context(), setupContext)
+
 	// Set up each server; abort on the first failing node.
-	var opErr error
-	for _, name := range targetServerNames {
-		node, err := runSetupNode(cfg, sshPool, name, servers[name], envName)
-		result.Nodes = append(result.Nodes, node)
-		if err != nil {
-			opErr = err
-			break
+	if opErr == nil {
+		for _, name := range targetServerNames {
+			node, err := setupNode(cfg, sshPool, name, servers[name], envName)
+			result.Nodes = append(result.Nodes, node)
+			if err != nil {
+				opErr = err
+				break
+			}
 		}
 	}
 
@@ -91,13 +105,23 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		emitSetupLine("", "\nAll servers set up successfully!\n")
 		emitSetupLine("", "\nNext step: Run 'tako deploy' to deploy your application\n")
 	} else {
-		result.Error = opErr.Error()
+		result.Error = cliEngine().RedactSensitive(opErr.Error())
 	}
+	opErr = hookSession.finish(cmd.Context(), opErr, func() hooks.Context {
+		values := setupContext
+		values.Result = "success"
+		values.DurationSeconds = durationPointer(time.Since(setupStarted).Seconds())
+		return values
+	}, func() hooks.Context { return setupContext })
+	result.Hooks = hookSession.hookOutcomes()
 	if emitErr := emitResultDocument(result); emitErr != nil && opErr == nil {
 		opErr = emitErr
 	}
 	return opErr
 }
+
+// setupNode provisions one node. Seam for tests.
+var setupNode = runSetupNode
 
 // runSetupNode provisions one server and reports its per-step outcomes plus
 // the adoption facts (OS, versions, firewall, recorded host key).

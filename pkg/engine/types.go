@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -228,6 +229,54 @@ type DeployResult struct {
 	PlanHash      string    `json:"planHash,omitempty"`
 	Message       string    `json:"message,omitempty"`
 	Error         string    `json:"error,omitempty"`
+	// DeploymentID is the deployment history record ID, set once the
+	// in-progress record has been written.
+	DeploymentID string `json:"deploymentId,omitempty"`
+	// Hooks lists the local lifecycle hooks considered, in run order.
+	Hooks []HookOutcome `json:"hooks,omitempty"`
+}
+
+// Hook outcome statuses carried in HookOutcome.Status.
+const (
+	HookCompleted = "completed"
+	HookFailed    = "failed"
+	HookTimedOut  = "timed_out"
+	HookSkipped   = "skipped"
+)
+
+// HookOutcome reports one local lifecycle hook in a result document.
+// ExitCode and DurationMs are set when the hook process ran.
+type HookOutcome struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	ExitCode   *int   `json:"exitCode,omitempty"`
+	DurationMs *int64 `json:"durationMs,omitempty"`
+}
+
+// MutationInfo describes the operation a BeforeMutation callback is about to
+// let proceed: the resolved target, before the first mutation.
+type MutationInfo struct {
+	// Operation is "rollback" or "promote".
+	Operation string
+	Services  []string
+	Servers   []string
+	// TargetDeploymentID is the rollback target deployment.
+	TargetDeploymentID string
+	// Revision is the promoted revision, or the rollback target's commit.
+	Revision string
+	Image    string
+}
+
+// BeforeMutationFunc runs after an operation has taken its lock and leases
+// and resolved its target, and before any mutation. A non-nil error aborts
+// the operation with that error; the lock and leases are released.
+type BeforeMutationFunc func(ctx context.Context, info MutationInfo) error
+
+func callBeforeMutation(ctx context.Context, fn BeforeMutationFunc, info MutationInfo) error {
+	if fn == nil {
+		return nil
+	}
+	return fn(ctx, info)
 }
 
 func newDeployPlanDocument(project string, environment string, plan *reconcile.ReconciliationPlan, services map[string]config.ServiceConfig) DeployPlan {

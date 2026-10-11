@@ -2010,6 +2010,55 @@ invalid section.
 `aliases:` requires a Tako release with alias support; older releases reject
 the key as `unknown field "aliases"`.
 
+## Lifecycle Hooks
+
+`hooks:` configures local scripts that run on the machine executing the CLI
+around `tako deploy`, `tako rollback`, `tako promote`, and `tako setup`. Hooks
+never run on a node. Hook files live in `.tako-hooks/` next to `tako.yaml`;
+the block is only needed to change the defaults or to declare argv commands.
+See [HOOKS.md](./HOOKS.md) for hook names, placement, the `TAKO_*`
+environment, and failure semantics.
+
+<!-- tako:snippet partial -->
+```yaml
+hooks:
+  path: .tako-hooks          # default; relative to the config file's directory
+  timeout: 5m                # per hook, 1s..1h
+  output: verbose            # verbose | quiet (quiet emits hook output at debug level)
+  passEnv:                   # process variables a hook may see
+    - GITHUB_TOKEN
+    - SLACK_*                # PREFIX* matches every SLACK_... variable
+  commands:                  # argv form, run without a shell
+    pre-deploy: [make, check]
+    post-deploy: [./scripts/notify.sh]
+```
+
+| Key | Default | Rules |
+|-----|---------|-------|
+| `path` | `.tako-hooks` | Relative to the config file's directory. Absolute paths, paths that escape the project, and paths under `.tako/` (gitignored, so hooks there would never be committed) are rejected. |
+| `timeout` | `5m` | Go duration from `1s` to `1h`, applied to each hook. On timeout the hook's whole process tree is killed and the hook counts as failed. |
+| `output` | `verbose` | `quiet` keeps hook output out of the terminal unless `--verbose`; it still appears as debug-level `hook.output` events. |
+| `passEnv` | none | Exact variable names or `PREFIX*` patterns. Names starting with `TAKO_` are rejected. |
+| `commands` | none | Map from hook name to a non-empty argv list. Unknown hook names are rejected. `argv[0]` is looked up on PATH; a value containing a path separator is resolved relative to the project directory. |
+
+Secret rules:
+
+- A hook gets a minimal baseline environment (`PATH`, home and temp
+  directories, locale, terminal, Windows system variables, `CI`), the
+  variables matched by `passEnv`, and the `TAKO_*` context. Nothing else is
+  inherited: `.env` keys, `.tako/secrets`, and `secretSources` values never
+  reach a hook unless you pass the same process variable through `passEnv`.
+- `${VAR}` references inside `hooks.commands` are a validation error, so a
+  secret is never expanded into a committed argv or echoed in hook events.
+  Read secrets from the environment inside the hook and list them in
+  `passEnv`.
+- Values of passed variables whose names look like credentials (`TOKEN`,
+  `SECRET`, `KEY`, `PASSWORD`, `PASS`, `CREDENTIAL`, `AUTH`) are redacted from
+  hook output and events.
+
+A hook defined both as a file and in `hooks.commands` is an error. `tako
+validate` checks hooks without running them.
+
 ## Container Resource Limits
 
 Set a Docker memory limit per service with `resources.memory`:
