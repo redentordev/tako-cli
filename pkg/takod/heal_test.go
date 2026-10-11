@@ -236,6 +236,76 @@ func TestHealHoldsSelfHealLeaseOnlyDuringAction(t *testing.T) {
 	}
 }
 
+// TestHealIntentIsDurableBeforeDockerRuns: the action counts toward the
+// budget and cooldown before docker is called, so a takod crash mid-action
+// cannot reset them.
+func TestHealIntentIsDurableBeforeDockerRuns(t *testing.T) {
+	f := newHealFixture(t)
+	f.crashedWeb()
+	var during *selfheal.ServiceControl
+	var nodeActions int
+	f.onAct = func() {
+		control, _ := selfheal.ReadControl(f.dataDir, "demo", "production")
+		during = control.Lookup("web")
+		node, _ := selfheal.ReadNodeState(f.dataDir)
+		nodeActions = len(node.Actions)
+	}
+	f.manager.Tick(context.Background())
+	if during == nil || len(during.Actions) != 1 || during.LastAction != selfheal.DecisionPending || during.Containers[healWebID] == nil || !during.Containers[healWebID].CooldownUntil.After(f.now) || nodeActions != 1 {
+		t.Fatalf("intent not persisted before docker ran: %+v (node actions %d)", during, nodeActions)
+	}
+	control, _ := selfheal.ReadControl(f.dataDir, "demo", "production")
+	if web := control.Lookup("web"); web == nil || len(web.Actions) != 1 || web.LastAction != selfheal.DecisionStarted {
+		t.Fatalf("outcome = %+v, want one counted action recorded as started", web)
+	}
+}
+
+// TestHealCrashMidActionKeepsCooldown: a takod that died after writing the
+// intent comes back to a counted action: the restarted loop releases its
+// stale lease and the container stays in cooldown.
+func TestHealCrashMidActionKeepsCooldown(t *testing.T) {
+	f := newHealFixture(t)
+	f.crashedWeb()
+	candidate := selfheal.Candidate{Project: "demo", Environment: "production", Service: "web", Revision: "r1", Action: selfheal.ActionStart,
+		Container: selfheal.RecordContainer{Name: "demo_production_web_1", ID: healWebID}, Reason: selfheal.ReasonExitedNonzero, Window: 30 * time.Minute}
+	if _, err := AcquireLease(context.Background(), f.dataDir, LeaseRequest{Project: "demo", Environment: "production", ID: "self-heal-crashed", Operation: healLeaseOperation, Who: "takod/app-1", TTLSeconds: 300}); err != nil {
+		t.Fatal(err)
+	}
+	if !f.manager.executor.recordIntent(candidate) {
+		t.Fatal("intent not recorded")
+	}
+	// takod restarts here.
+	f.manager.releaseStaleLeases(context.Background())
+	f.now = f.now.Add(healEvaluateInterval)
+	f.manager.Tick(context.Background())
+	if got := f.actions(); len(got) != 0 {
+		t.Fatalf("acted again right after a crashed action: %v", got)
+	}
+	if status := f.manager.Status("demo", "production", 0); status.Services[0].Skip == selfheal.SkipLeaseHeld {
+		t.Fatalf("stale self-heal lease still blocks: %+v", status.Services[0])
+	}
+}
+
+func TestHealReleasesOnlyOwnStaleSelfHealLeases(t *testing.T) {
+	f := newHealFixture(t)
+	acquire := func(environment, id, operation, who string) {
+		if response, err := AcquireLease(context.Background(), f.dataDir, LeaseRequest{Project: "demo", Environment: environment, ID: id, Operation: operation, Who: who, TTLSeconds: 300}); err != nil || !response.Acquired {
+			t.Fatalf("acquire %s: %+v %v", id, response, err)
+		}
+	}
+	acquire("production", "self-heal-own", healLeaseOperation, "takod/app-1")
+	acquire("staging", "self-heal-other", healLeaseOperation, "takod/app-2")
+	acquire("preview", "deploy-1", "deploy", "takod/app-1")
+	f.manager.releaseStaleLeases(context.Background())
+	for environment, wantHeld := range map[string]bool{"production": false, "staging": true, "preview": true} {
+		path, _ := leasePath(f.dataDir, "demo", environment)
+		lease, err := readLeaseFile(path)
+		if err != nil || (lease != nil) != wantHeld {
+			t.Fatalf("%s lease = %+v %v, want held=%t", environment, lease, err, wantHeld)
+		}
+	}
+}
+
 func TestHealRestartStopTimeoutIsBounded(t *testing.T) {
 	for value, want := range map[string]time.Duration{"": 10 * time.Second, "15s": 15 * time.Second, "60s": 30 * time.Second, "10m": 30 * time.Second, "bogus": 10 * time.Second} {
 		if got := healRestartStopTimeout(value); got != want {

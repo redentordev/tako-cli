@@ -891,6 +891,18 @@ func RecordAction(control *Control, node *NodeState, candidate Candidate, decisi
 	}
 }
 
+// RecordOutcome replaces the pending last action that RecordAction wrote
+// as the intent with the action's outcome. It counts nothing (the intent
+// already did) and reports whether anything changed.
+func RecordOutcome(control *Control, candidate Candidate, decision string) bool {
+	service := control.Lookup(candidate.Service)
+	if service == nil || service.LastContainer != candidate.Container.ID || service.LastAction != DecisionPending {
+		return false
+	}
+	service.LastAction = decision
+	return true
+}
+
 // ApplyEval applies an evaluation's give-up, clear and reset requests to the
 // control state. It reports whether the service gave up or was cleared now.
 func ApplyEval(control *Control, eval ServiceEval, now time.Time) (gaveUp, cleared bool) {

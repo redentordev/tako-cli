@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -179,6 +180,9 @@ func (e *healExecutor) Execute(ctx context.Context, candidate selfheal.Candidate
 		}
 	}
 
+	if !e.recordIntent(candidate) {
+		return
+	}
 	actionCtx, cancel := context.WithTimeout(ctx, healDockerTimeout)
 	actErr := e.act(actionCtx, candidate.Action, candidate.Container.ID, healRestartStopTimeout(service.Desired.StopGracePeriod))
 	timedOut := actionCtx.Err() != nil || errors.Is(actErr, context.DeadlineExceeded)
@@ -191,6 +195,55 @@ func (e *healExecutor) Execute(ctx context.Context, candidate selfheal.Candidate
 	}
 	releaseLease()
 	e.record(candidate, actErr)
+}
+
+// releaseStaleLeases releases self-heal leases this node's takod left
+// behind (it crashed or was restarted mid-action). It runs when the loop
+// starts, before any action of this process can hold one, so every
+// self-heal lease held by takod/<this node> is stale.
+func (h *healManager) releaseStaleLeases(ctx context.Context) {
+	who := "takod/" + h.node()
+	matches, _ := filepath.Glob(filepath.Join(h.dataDir, "leases", "*", "*.json"))
+	for _, match := range matches {
+		project := filepath.Base(filepath.Dir(match))
+		environment := strings.TrimSuffix(filepath.Base(match), ".json")
+		if !isSafeProjectName(project) || !isSafeRuntimeName(environment) {
+			continue
+		}
+		lease, err := readLeaseFile(match)
+		if err != nil || lease == nil || lease.Operation != healLeaseOperation || lease.Who != who {
+			continue
+		}
+		if _, err := ReleaseLease(ctx, h.dataDir, LeaseRequest{Project: project, Environment: environment, ID: lease.ID}); err != nil {
+			logHealRecordError("stale lease release", err)
+		}
+	}
+}
+
+// recordIntent counts the action toward the budget, cooldown and node
+// action rate before docker is called, so a takod crash mid-action cannot
+// hand the container a fresh budget. It reports whether the intent was
+// persisted; without it the action does not run.
+func (e *healExecutor) recordIntent(candidate selfheal.Candidate) bool {
+	h := e.h
+	now := h.now()
+	h.controlMu.Lock()
+	defer h.controlMu.Unlock()
+	control, controlErr := selfheal.ReadControl(h.dataDir, candidate.Project, candidate.Environment)
+	node, nodeErr := selfheal.ReadNodeState(h.dataDir)
+	if controlErr != nil || nodeErr != nil {
+		return false
+	}
+	selfheal.RecordAction(control, node, candidate, selfheal.DecisionPending, now)
+	if err := selfheal.WriteControl(h.dataDir, candidate.Project, candidate.Environment, control); err != nil {
+		logHealRecordError("control write", err)
+		return false
+	}
+	if err := selfheal.WriteNodeState(h.dataDir, node); err != nil {
+		logHealRecordError("node state write", err)
+		return false
+	}
+	return true
 }
 
 // healRestartStopTimeout is the docker restart -t value: the service's
@@ -354,13 +407,11 @@ func (e *healExecutor) record(candidate selfheal.Candidate, actErr error) {
 			result = "timeout"
 		}
 	}
+	// The action was counted by recordIntent; only the outcome is new.
 	h.controlMu.Lock()
 	control, controlErr := selfheal.ReadControl(h.dataDir, candidate.Project, candidate.Environment)
-	node, nodeErr := selfheal.ReadNodeState(h.dataDir)
-	if controlErr == nil && nodeErr == nil {
-		selfheal.RecordAction(control, node, candidate, decision, now)
+	if controlErr == nil && selfheal.RecordOutcome(control, candidate, decision) {
 		logHealRecordError("control write", selfheal.WriteControl(h.dataDir, candidate.Project, candidate.Environment, control))
-		logHealRecordError("node state write", selfheal.WriteNodeState(h.dataDir, node))
 	}
 	h.controlMu.Unlock()
 	h.journal(candidate.Project, candidate.Environment, selfheal.JournalEntry{

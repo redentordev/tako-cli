@@ -29,6 +29,10 @@ const (
 	// DecisionAllReplicasUnhealthy: every local replica needed an action
 	// at once; the service is held instead of restarted.
 	DecisionAllReplicasUnhealthy = "all_replicas_unhealthy"
+	// DecisionPending is a service's last action while its docker call
+	// runs (the intent written before acting). It is never journaled; a
+	// takod that crashed mid-action leaves it in place.
+	DecisionPending = "pending"
 )
 
 var knownDecisions = map[string]bool{

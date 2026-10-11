@@ -255,6 +255,7 @@ func (h *healManager) Run(ctx context.Context) {
 	defer probeTicker.Stop()
 	evaluateTicker := time.NewTicker(healEvaluateInterval)
 	defer evaluateTicker.Stop()
+	h.releaseStaleLeases(ctx)
 	h.refreshActive()
 	for {
 		select {

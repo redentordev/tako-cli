@@ -482,6 +482,22 @@ func TestBackoffGiveUpAndClear(t *testing.T) {
 	}
 }
 
+func TestRecordOutcomeDoesNotCountAgain(t *testing.T) {
+	control, node := &Control{}, &NodeState{}
+	candidate := Candidate{Service: "web", Container: RecordContainer{ID: "id1"}, Window: 30 * time.Minute}
+	RecordAction(control, node, candidate, DecisionPending, t0)
+	if !RecordOutcome(control, candidate, DecisionRestarted) {
+		t.Fatal("outcome not applied")
+	}
+	web := control.Lookup("web")
+	if web.LastAction != DecisionRestarted || len(web.Actions) != 1 || web.Containers["id1"].Actions != 1 || len(node.Actions) != 1 {
+		t.Fatalf("outcome counted again: %+v node %+v", web, node)
+	}
+	if RecordOutcome(control, candidate, DecisionFailed) {
+		t.Fatal("outcome overwrote a final decision")
+	}
+}
+
 func TestHealthyWindowResetsBackoff(t *testing.T) {
 	f := newFixture(HealthNone)
 	RecordAction(f.control, f.node, Candidate{Service: "web", Container: RecordContainer{ID: "id1"}, Window: 30 * time.Minute}, DecisionStarted, f.now)
