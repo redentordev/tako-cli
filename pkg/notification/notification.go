@@ -28,12 +28,19 @@ const (
 	EventHighCPU        EventType = "high_cpu"
 	EventHighMemory     EventType = "high_memory"
 	EventHighDisk       EventType = "high_disk"
+	EventHighInodes     EventType = "high_inodes"
+	EventHighLoad       EventType = "high_load"
+	EventMetricsStale   EventType = "metrics_stale"
 	EventResourceNormal EventType = "resource_normal"
 	// Health alerts
 	EventHealthCheckFailed    EventType = "health_check_failed"
 	EventHealthCheckRecovered EventType = "health_check_recovered"
 	EventContainerOOM         EventType = "container_oom"
 	EventContainerCrashLoop   EventType = "container_crash_loop"
+	EventContainerRecovered   EventType = "container_recovered"
+	// Scheduler alerts (takod job and backup alert payloads, schema v1)
+	EventJobAlert    EventType = "job_alert"
+	EventBackupStale EventType = "backup_stale"
 	// SSL alerts
 	EventSSLExpiringSoon EventType = "ssl_expiring_soon"
 	EventSSLExpired      EventType = "ssl_expired"

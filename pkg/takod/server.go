@@ -50,6 +50,9 @@ type Server struct {
 	backupScheduler                    *BackupScheduler
 	jobScheduler                       *JobScheduler
 	alertManager                       *AlertManager
+	sourceAlerts                       *SourceAlertManager
+	hostSamples                        HostSampleSource
+	containerSampler                   *containerAlertSampler
 	certificateScheduler               *CertificateScheduler
 	uploadReadTimeout                  time.Duration
 	diskReservationMu                  sync.Mutex
@@ -228,6 +231,10 @@ type ServerOptions struct {
 	MemoryAvailable                func() (int64, error)
 	PostgresVerificationQuotaProbe func(context.Context) bool
 	UploadReadTimeout              time.Duration
+	// HostSampleSource supplies host metrics to host alerts. When nil the
+	// legacy current.json adapter is used; the native collector of
+	// add-server-status-history plugs in here.
+	HostSampleSource HostSampleSource
 }
 
 func NewServerWithOptions(socket string, dataDir string, version string, opts ServerOptions) *Server {
@@ -260,6 +267,15 @@ func NewServerWithOptions(socket string, dataDir string, version string, opts Se
 	}
 	server.backupScheduler.alerts = alertManager
 	server.jobScheduler.alerts = alertManager
+	server.sourceAlerts = NewSourceAlertManager(dataDir)
+	if err := registerBuiltinAlertSources(server.sourceAlerts); err != nil {
+		panic(err)
+	}
+	server.hostSamples = opts.HostSampleSource
+	if server.hostSamples == nil {
+		server.hostSamples = newLegacyHostSampleSource()
+	}
+	server.containerSampler = newContainerAlertSampler(server.sourceAlerts)
 	if server.diskAvailable == nil {
 		server.diskAvailable = availableDiskBytes
 	}
@@ -380,6 +396,13 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.alertManager.LoadContext(ctx); err != nil {
 		return fmt.Errorf("load scheduler alerts: %w", err)
 	}
+	s.alertManager.SetNodeName(s.nodeName)
+	s.sourceAlerts.SetNodeName(s.nodeName)
+	if err := s.sourceAlerts.Load(ctx); err != nil {
+		// Node-side monitoring state never blocks startup; the next deploy
+		// rewrites it.
+		fmt.Fprintf(os.Stderr, "takod: node-side monitoring state not loaded: %v\n", err)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(s.socket), 0755); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
@@ -434,6 +457,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	start(func() { s.alertManager.Run(runCtx) })
 	start(func() { s.certificateScheduler.Run(runCtx) })
+	s.startHealthMonitoring(runCtx, start)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -1362,6 +1386,10 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("failed to remove scheduler alert state after cleanup: %v", err), http.StatusInternalServerError)
 			return
 		}
+		if err := s.sourceAlerts.RemoveScope(request.Project, request.Environment); err != nil {
+			http.Error(w, fmt.Sprintf("failed to remove monitoring alert state after cleanup: %v", err), http.StatusInternalServerError)
+			return
+		}
 		releaseSchedulerDrains = true
 		if err := ReleaseProjectPortAllocations(r.Context(), s.dataDir, request.Project, request.Environment); err != nil {
 			response.Warnings = append(response.Warnings, fmt.Sprintf("failed to release port allocations: %v", err))
@@ -1387,6 +1415,9 @@ func (s *Server) removeEnvironmentSchedulerState(_ context.Context, project stri
 	}
 	if err := s.alertManager.RemoveConfig(project, environment); err != nil {
 		return 0, fmt.Errorf("failed to remove scheduler alert state after cleanup: %w", err)
+	}
+	if err := s.sourceAlerts.RemoveScope(project, environment); err != nil {
+		return 0, fmt.Errorf("failed to remove monitoring alert state after cleanup: %w", err)
 	}
 	return len(removedJobs), nil
 }
@@ -2636,7 +2667,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	response.Alerts = s.alertManager.StatusAll()
+	response.Alerts = s.alertStatusWithSources()
 
 	w.Header().Set("Content-Type", "application/json")
 	encoder := json.NewEncoder(w)
@@ -2711,7 +2742,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityLogsStreamV1, CapabilityDeployRestoreOnFailureV1, CapabilityPreviewLifecycleV1, CapabilityProxyCertStatusV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityMonitoringHealthV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityLogsStreamV1, CapabilityDeployRestoreOnFailureV1, CapabilityPreviewLifecycleV1, CapabilityProxyCertStatusV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,

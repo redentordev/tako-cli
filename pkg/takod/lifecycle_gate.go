@@ -234,5 +234,5 @@ func alertDisableRequest(r *http.Request) (bool, error) {
 	if err := validateAlertConfigRequest(request); err != nil {
 		return false, err
 	}
-	return !alertPolicyEnabled(request.Policy), nil
+	return !alertConfigEnabled(request), nil
 }

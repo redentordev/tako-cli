@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/redentordev/tako-cli/pkg/alerttarget"
 	"github.com/redentordev/tako-cli/pkg/envexpand"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
@@ -173,6 +174,49 @@ type NotificationsConfig struct {
 type SchedulerAlertsConfig struct {
 	Jobs    JobAlertsConfig    `yaml:"jobs,omitempty" json:"jobs,omitempty"`
 	Backups BackupAlertsConfig `yaml:"backups,omitempty" json:"backups,omitempty"`
+
+	// Services, Host, Containers and Certificates configure takod-run
+	// health monitoring (monitoring.health-v1). A nil section means "not
+	// explicitly configured": defaults still apply when the alerts block
+	// exists, but only explicitly set sections fail a deploy on nodes
+	// without the capability.
+	Services     *ServiceAlertsConfig     `yaml:"services,omitempty" json:"services,omitempty"`
+	Host         *HostAlertsConfig        `yaml:"host,omitempty" json:"host,omitempty"`
+	Containers   *ContainerAlertsConfig   `yaml:"containers,omitempty" json:"containers,omitempty"`
+	Certificates *CertificateAlertsConfig `yaml:"certificates,omitempty" json:"certificates,omitempty"`
+}
+
+// ServiceAlertsConfig holds damping defaults for services with
+// monitoring.enabled.
+type ServiceAlertsConfig struct {
+	AlertAfter   int `yaml:"alertAfter,omitempty" json:"alertAfter,omitempty"`     // consecutive failed checks before alerting (default 3)
+	RecoverAfter int `yaml:"recoverAfter,omitempty" json:"recoverAfter,omitempty"` // consecutive passed checks before recovery (default 2)
+}
+
+// HostAlertsConfig holds node threshold alerts. Percent thresholds use
+// 1..99; 0 disables. A host section also subscribes the environment to the
+// node-wide alert kinds (hygiene and node conditions).
+type HostAlertsConfig struct {
+	Disk       *int    `yaml:"disk,omitempty" json:"disk,omitempty"`             // percent of a filesystem used (default 90)
+	Inodes     *int    `yaml:"inodes,omitempty" json:"inodes,omitempty"`         // percent of inodes used (default 90)
+	Memory     int     `yaml:"memory,omitempty" json:"memory,omitempty"`         // percent (default off)
+	CPU        int     `yaml:"cpu,omitempty" json:"cpu,omitempty"`               // percent sustained for cpuFor (default off)
+	CPUFor     string  `yaml:"cpuFor,omitempty" json:"cpuFor,omitempty"`         // default 10m
+	Load       float64 `yaml:"load,omitempty" json:"load,omitempty"`             // 5-minute load per core (default off)
+	Conditions *bool   `yaml:"conditions,omitempty" json:"conditions,omitempty"` // node-condition alerts (default true)
+}
+
+// ContainerAlertsConfig holds container OOM and crash-loop detection.
+type ContainerAlertsConfig struct {
+	OOM             *bool  `yaml:"oom,omitempty" json:"oom,omitempty"`                         // default true
+	CrashLoop       *int   `yaml:"crashLoop,omitempty" json:"crashLoop,omitempty"`             // restarts within crashLoopWindow; 0 disables (default 3)
+	CrashLoopWindow string `yaml:"crashLoopWindow,omitempty" json:"crashLoopWindow,omitempty"` // default 10m
+}
+
+// CertificateAlertsConfig holds certificate expiry thresholds.
+type CertificateAlertsConfig struct {
+	WarnBefore     string `yaml:"warnBefore,omitempty" json:"warnBefore,omitempty"`         // default 336h
+	CriticalBefore string `yaml:"criticalBefore,omitempty" json:"criticalBefore,omitempty"` // default 72h
 }
 
 type JobAlertsConfig struct {
@@ -775,10 +819,41 @@ type ResourceLimitsConfig struct {
 
 // MonitoringConfig defines per-service monitoring settings
 type MonitoringConfig struct {
-	Enabled   bool   `yaml:"enabled" json:"enabled"`                         // Enable monitoring for this service
-	Interval  string `yaml:"interval,omitempty" json:"interval,omitempty"`   // Check interval (e.g., "60s")
-	Webhook   string `yaml:"webhook,omitempty" json:"webhook,omitempty"`     // Webhook URL for alerts
-	CheckType string `yaml:"checkType,omitempty" json:"checkType,omitempty"` // "http" or "container" (default: auto-detect)
+	Enabled      bool   `yaml:"enabled" json:"enabled"`                               // Enable monitoring for this service
+	Interval     string `yaml:"interval,omitempty" json:"interval,omitempty"`         // Check interval (10s..1h, default 60s)
+	Timeout      string `yaml:"timeout,omitempty" json:"timeout,omitempty"`           // Check timeout (1s..60s, default 10s, < interval)
+	AlertAfter   int    `yaml:"alertAfter,omitempty" json:"alertAfter,omitempty"`     // Overrides notifications.alerts.services.alertAfter
+	RecoverAfter int    `yaml:"recoverAfter,omitempty" json:"recoverAfter,omitempty"` // Overrides notifications.alerts.services.recoverAfter
+	Webhook      string `yaml:"webhook,omitempty" json:"webhook,omitempty"`           // Extra webhook target for this service only
+	CheckType    string `yaml:"checkType,omitempty" json:"checkType,omitempty"`       // "http" or "container" (default: auto-detect)
+}
+
+// DeliverableWebhook returns the normalized per-service webhook when it
+// passes the alert target rules (public HTTPS), and "" when it is unset or
+// fails them. A failing value was accepted by earlier releases; it is
+// reported as a deprecation warning and is never sent to takod or used for
+// local delivery.
+func (m *MonitoringConfig) DeliverableWebhook() string {
+	if m == nil || strings.TrimSpace(m.Webhook) == "" {
+		return ""
+	}
+	normalized, err := alerttarget.NormalizeAndValidate("webhook", m.Webhook)
+	if err != nil {
+		return ""
+	}
+	return normalized
+}
+
+// WebhookDeprecated reports whether the configured webhook fails the alert
+// target rules and is therefore ignored for delivery.
+func (m *MonitoringConfig) WebhookDeprecated() bool {
+	return m != nil && strings.TrimSpace(m.Webhook) != "" && m.DeliverableWebhook() == ""
+}
+
+// ExplicitHealthKeys reports whether this block sets a monitoring key that
+// only node-side health monitoring understands.
+func (m *MonitoringConfig) ExplicitHealthKeys() bool {
+	return m != nil && (strings.TrimSpace(m.Timeout) != "" || m.AlertAfter != 0 || m.RecoverAfter != 0)
 }
 
 // EnvironmentConfig defines an environment (production, staging, etc.)
