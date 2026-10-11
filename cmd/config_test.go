@@ -158,7 +158,7 @@ environments:
 		"Servers (from staging)\n",
 		"auth: password (env, redacted)",
 		"  api:\n    type: worker\n    source: image \"nginx:alpine\" (config, from base)\n    replicas: 1 (config, from staging)\n",
-		"  web:\n    type: public\n    source: image \"nginx:alpine\" (config, from base)\n    replicas: 2 (config, from production)\n    deploy.strategy: recreate (default)\n",
+		"  web:\n    type: public\n    source: image \"nginx:alpine\" (config, from base)\n    replicas: 2 (config, from production)\n    deploy.strategy: rolling (default)\n",
 		"proxy.domain: app.example.com (config, from production)",
 	} {
 		if !strings.Contains(output, want) {

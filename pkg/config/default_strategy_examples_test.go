@@ -41,7 +41,14 @@ func TestExampleConfigsStillValidateWithDefaultStrategySelection(t *testing.T) {
 	sort.Strings(configs)
 
 	home := t.TempDir()
-	sshKey := filepath.Join(home, "id_ed25519")
+	// Examples without sshKey fall back to ~/.ssh/id_ed25519, so point HOME at
+	// a fixture instead of depending on the machine running the tests.
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	sshKey := filepath.Join(home, ".ssh", "id_ed25519")
 	if err := os.WriteFile(sshKey, []byte("test-key"), 0600); err != nil {
 		t.Fatal(err)
 	}
