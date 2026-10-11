@@ -131,6 +131,40 @@ func deliverAlertHTTP(ctx context.Context, client *http.Client, provider, endpoi
 	return alertDeliveryResult{Retryable: retryable, Error: fmt.Sprintf("http_%d", response.StatusCode)}
 }
 
+// AlertPayload is the exported schema v1 payload builder used by
+// `tako monitor --local`, so the outside checker sends the same body as
+// takod.
+type AlertPayload struct {
+	EventID, EpisodeID, Transition, Event                        string
+	Project, Environment, Node, Kind, Subject, Severity, Message string
+	Reasons                                                      []string
+	Details                                                      map[string]string
+	OpenedAt, Timestamp                                          time.Time
+}
+
+// Map renders the payload as the webhook JSON object.
+func (p AlertPayload) Map() map[string]any {
+	return alertPayloadV1{
+		EventID: p.EventID, EpisodeID: p.EpisodeID, Transition: p.Transition, Event: p.Event,
+		Project: p.Project, Environment: p.Environment, Node: p.Node, Kind: p.Kind, Subject: p.Subject,
+		Severity: p.Severity, Reasons: p.Reasons, Details: p.Details, OpenedAt: p.OpenedAt, Message: p.Message, Timestamp: p.Timestamp,
+	}.Map()
+}
+
+// NewAlertHTTPClient returns the SSRF-safe alert delivery client: public
+// addresses only, no proxy, no redirects.
+func NewAlertHTTPClient() *http.Client { return newAlertHTTPClient() }
+
+// DeliverAlert posts payload to a validated target through client and
+// returns whether it was delivered plus a generic error token.
+func DeliverAlert(ctx context.Context, client *http.Client, provider, endpoint string, payload map[string]any) (bool, string) {
+	result := deliverAlertHTTP(ctx, client, provider, endpoint, payload)
+	return result.Delivered, result.Error
+}
+
+// NewAlertID returns a random event or episode identifier.
+func NewAlertID() string { return newAlertID() }
+
 func sortedUniqueStrings(values []string) []string {
 	if len(values) == 0 {
 		return nil

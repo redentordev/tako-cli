@@ -60,7 +60,7 @@ func TestInternalMonitorUsesAuthenticatedLocalRuntimeWithoutSSH(t *testing.T) {
 	monitor.runtimeFactory = factory
 	monitor.envName = "production"
 	defer monitor.Close()
-	if err := monitor.checkInternalService("web", &config.ServiceConfig{Replicas: 1}); err != nil {
+	if err := monitor.checkInternalService(context.Background(), "web", &config.ServiceConfig{Replicas: 1}); err != nil {
 		t.Fatal(err)
 	}
 }

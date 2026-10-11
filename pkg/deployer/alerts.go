@@ -13,7 +13,7 @@ import (
 )
 
 func (d *Deployer) PreflightAlertPolicy() error {
-	request, err := d.buildAlertConfigRequest()
+	request, plan, err := d.fullAlertRequest()
 	if err != nil {
 		return err
 	}
@@ -27,13 +27,26 @@ func (d *Deployer) PreflightAlertPolicy() error {
 	if len(targetServers) == 0 {
 		return nil
 	}
-	return d.preflightTakodCapability(targetServers, takod.CapabilitySchedulerAlertsV1, "durable scheduler alerts")
+	if alertPolicyEnabled(request.Policy) {
+		if err := d.preflightTakodCapability(targetServers, takod.CapabilitySchedulerAlertsV1, "durable scheduler alerts"); err != nil {
+			return err
+		}
+	}
+	if plan.enabled() && plan.Explicit {
+		// Explicit monitoring keys ask for node-side monitoring; a node
+		// that cannot run it must not leave the user silently unprotected.
+		return d.preflightTakodCapability(targetServers, takod.CapabilityMonitoringHealthV1, "node-side health monitoring (run tako upgrade servers)")
+	}
+	return nil
 }
 
 func (d *Deployer) ApplyAlertPolicy() error {
-	request, err := d.buildAlertConfigRequest()
+	request, plan, err := d.fullAlertRequest()
 	if err != nil {
 		return err
+	}
+	for _, warning := range plan.Warnings {
+		d.warnf("%s", warning)
 	}
 	allServers, err := d.alertTargetServers(false)
 	if err != nil {
@@ -50,11 +63,16 @@ func (d *Deployer) ApplyAlertPolicy() error {
 	for _, serverName := range targetServers {
 		targetSet[serverName] = true
 	}
-	enableErr := d.applyAlertRequest(targetServers, request)
+	var enableErr error
+	if plan.enabled() {
+		enableErr = d.applyHealthAwareAlertRequest(targetServers, request)
+	} else {
+		enableErr = d.applyAlertRequest(targetServers, request)
+	}
 	if enableErr != nil {
 		return enableErr
 	}
-	disabled := request
+	disabled := withoutHealthSections(request)
 	disabled.Policy = takod.AlertPolicy{}
 	disabled.Targets = takod.AlertTargets{}
 	var staleServers []string
@@ -100,9 +118,36 @@ func (d *Deployer) alertTargetServers(enabled bool) ([]string, error) {
 	return config.ResolveSchedulableEnvironmentTargets(d.config.Servers, servers, d.environment)
 }
 
+// alertRequestEnabled mirrors takod's alertConfigEnabled: job and backup
+// policy or node-side monitoring sections.
 func alertRequestEnabled(request takod.AlertConfigRequest) bool {
-	policy := request.Policy
+	return alertPolicyEnabled(request.Policy) || len(request.Monitors) > 0 || request.Host != nil || request.Containers != nil || request.Certificates != nil
+}
+
+func alertPolicyEnabled(policy takod.AlertPolicy) bool {
 	return policy.JobConsecutiveFailures > 0 || policy.JobConsecutiveTimeouts > 0 || policy.JobConsecutiveSkipped > 0 || policy.JobNoSuccessSeconds > 0 || policy.BackupMaxAgeSeconds > 0
+}
+
+// applyHealthAwareAlertRequest sends the full request to nodes advertising
+// monitoring.health-v1. Older nodes (only possible for default-derived
+// sections, since explicit ones fail preflight) get the job and backup
+// request unchanged, or are skipped when that part is empty.
+func (d *Deployer) applyHealthAwareAlertRequest(targetServers []string, request takod.AlertConfigRequest) error {
+	legacy := withoutHealthSections(request)
+	if !alertPolicyEnabled(legacy.Policy) {
+		legacy.Targets = takod.AlertTargets{}
+	}
+	return runTakodNodeActions(targetServers, func(serverName string) error {
+		capable, err := d.healthCapable(serverName)
+		if err != nil {
+			return err
+		}
+		if capable {
+			return d.applyAlertRequest([]string{serverName}, request)
+		}
+		d.warnf("node-side monitoring inactive on %s; run tako upgrade servers", serverName)
+		return d.applyAlertRequest([]string{serverName}, legacy)
+	})
 }
 
 func (d *Deployer) buildAlertConfigRequest() (takod.AlertConfigRequest, error) {
