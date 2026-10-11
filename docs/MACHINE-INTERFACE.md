@@ -113,6 +113,14 @@ Events follow `pkg/takoapi/events.Event` (apiVersion
   `deploy.restore-on-failure-v1` and `rollbackOnFailure` is not set, one
   `warning` event per service names the nodes (`data.nodes`) and the
   capability (`data.capability`).
+- `tako rollback` stamps every event it emits with `data.operation:
+  "rollback"` and, once the target is selected, `data.targetDeploymentId`.
+  Project rollback reuses the deploy service events (`deploy.service.started`,
+  `deploy.service.reconciled`, `deploy.service.failed`, and the restore
+  events) and emits `deploy.service.skipped` (`data.reason`: `kind: run`,
+  `kind: job`, `persistent`, or `not present at target`) for each service
+  it leaves alone. Including a persistent service with
+  `--include-persistent` emits a `warning` event.
 - Consumers MUST ignore unknown event types, fields, and `data` keys —
   the schema grows additively.
 - `level` is one of `debug`, `info`, `warn`, `error`. Debug events are
@@ -171,6 +179,87 @@ service's rollout fails, its outcome carries a `recovery` object:
 
 `DeployResult` also carries `deploymentId` once the deployment history entry
 is recorded (omitted for plan-only runs and for failures before recording).
+
+### Rollback
+
+`tako rollback` has two scopes, reported in `RollbackResult.scope`:
+
+- `service` (`tako rollback --service NAME [ID]`): unchanged contract. The
+  result carries `service`, the target `deploymentId`, the restored
+  `version`, `status`, timings, and `error` on failure. It never prompts.
+- `project` (`tako rollback [ID]`): rolls every eligible service of the
+  environment back to its state at the target deployment. `service` is
+  omitted; `services` lists one outcome per service.
+
+The positional target resolves, in order, as an exact deployment ID, a unique
+deployment-ID prefix (so the short `displayId` printed by `tako history`
+works), or a git commit (7+ characters; the newest stable deployment with that
+commit). Without a target, project scope uses the newest stable deployment
+before the current one. Unknown, ambiguous, or non-stable targets exit 2.
+
+Project rollback first emits a `RollbackPlan` (with `--plan-only`, in a
+`ConfirmationRequired` document, or implicitly before apply):
+
+```json
+{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "RollbackPlan",
+  "project": "shop",
+  "environment": "production",
+  "servers": ["node-1", "node-2"],
+  "target": {
+    "id": "1767225600123456789",
+    "displayId": "1767225600",
+    "timestamp": "2026-07-01T12:00:00Z",
+    "commit": "ab12cd34ef",
+    "version": "v42",
+    "message": "release 42"
+  },
+  "services": [
+    { "name": "api", "action": "rolled_back", "fromImage": "shop/api:new",
+      "toImage": "shop/api:old", "replicas": 2,
+      "sourceDeploymentId": "1767225600123456789", "imageSource": "retained" },
+    { "name": "migrate", "action": "skipped", "reason": "kind: run" },
+    { "name": "postgres", "action": "skipped", "reason": "persistent" }
+  ],
+  "warnings": ["..."],
+  "releaseCommands": "skip",
+  "hash": "9b2e…"
+}
+```
+
+- `services[].action` is `rolled_back` (planned or applied), `unchanged`
+  (already at the target image, replicas and file hashes), `skipped`, and,
+  in results only, `failed` or `not_attempted`.
+- `imageSource` is `retained` (the exact image is still on the nodes and is
+  reused without a build), `rebuild` (the target commit is rebuilt from git),
+  or `pull` (registry image). Planning fails with `status: failed`, every
+  candidate `not_attempted`, and exit 1 when a service has no usable image
+  source; no runtime state is changed. Locating retained images requires the
+  `image.descriptor-v1` takod capability; older agents exit 2 with an upgrade
+  hint.
+- `reason` explains skips: `kind: run`, `kind: job` (jobs are never rolled
+  back; a `warnings` entry says so), `persistent` (excluded unless
+  `--include-persistent`; including them adds a warning about data
+  compatibility), or `not present at target`.
+- `releaseCommands` is `skip` by default; `--run-release` sets it to `run`.
+- `hash` (hex SHA-256) covers the environment, target ID, per-service
+  actions, target images, replicas, image sources and source deployments,
+  `releaseCommands` and `includePersistent`. Human text, `fromImage`,
+  warnings and timestamps are excluded.
+
+The project `RollbackResult` repeats the plan's `services` with final actions
+and adds `error` for failed services. A service whose rollout failed and was
+restored by restore-on-failure carries the same `recovery` object as
+`DeployResult.services.<name>.recovery`. `status` is:
+
+| `status` | Meaning | Exit |
+|----------|---------|------|
+| `rolled_back` | Every planned service was rolled back. | 0 |
+| `up_to_date` | Every service already matched the target; nothing was mutated and no history entry was written. | 0 |
+| `failed` | Planning found no image source, or a service failed. Rollout stops at the first failure, later services are `not_attempted`, and proxy routes, takod state and history are still reconciled for services that already changed. | 1 |
+
+The single-service form keeps its existing `status` values.
 
 ### Lifecycle hooks
 
@@ -274,8 +363,7 @@ project/environment, requested server filter, reachable node count, selected
 history/desired/actual/node-actual sources, per-node and aggregate write
 counts, warning/error details, local `.tako` sync status/count, and final
 `error` when repair is incomplete or fails. `tako rollback` returns a
-`RollbackResult` with project/environment, the service, the target
-`deploymentId`, restored `version`, `status`, and timings. `tako promote`
+`RollbackResult` (see [Rollback](#rollback) below). `tako promote`
 returns a `PromoteResult` with project/environment, the service, the promoted
 `revision` and `image`, `status`, and timings. `tako scale` (and its `start`/
 `stop` wrappers) returns a `ScaleResult` with project/environment, `status`,
@@ -531,7 +619,7 @@ machine behavior:
 | Category | Commands |
 | -------- | -------- |
 | Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
-| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), lifecycle hooks in `deploy\|rollback\|promote\|setup` (`hook.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
+| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), project `rollback` (`deploy.service.*`, including `deploy.service.skipped`), lifecycle hooks in `deploy\|rollback\|promote\|setup` (`hook.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
 | Human-only by design | `init`, `backup recover`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
 | Infrastructure-only | `takod run`, hidden `platform worker run\|prepare-enrollment\|verify-enrollment\|reconcile-mesh`, hidden `platform node upgrade-publication-guard`, and hidden internal E2E helpers |
@@ -630,6 +718,27 @@ without `--yes` (or `--force`) they emit a `ConfirmationRequired` document
 carrying `operation` (`remove` or `destroy`), `project`, `environment`, and
 the target `servers`, and exit with code 2.
 
+Project-wide `tako rollback` follows the same plan/approve/apply flow:
+
+1. `tako rollback [ID] --plan-only --output json` prints the `RollbackPlan`
+   and mutates nothing.
+2. `tako rollback [ID] --yes --plan plan.json` recomputes the plan while the
+   lock and leases are held and applies only when its `hash` matches the
+   reviewed plan. Drift, an unreadable file, or a document whose `kind` is not
+   `RollbackPlan` (for example a saved `DeployPlan`) exits 2 with nothing
+   mutated; re-run `--plan-only` and review again. `--plan` is not an
+   approval on its own: `--yes` (or an interactive `[y/N]` prompt) is still
+   required.
+3. Without `--yes`, machine modes emit a `ConfirmationRequired` document with
+   `operation: "rollback"`, project, environment, servers and the full `plan`,
+   and exit 2. A human-mode run that cannot prompt (`TAKO_NONINTERACTIVE`,
+   `CI`, or no TTY) also exits 2, as `tako remove` does. Declining the prompt
+   exits 0 with nothing changed.
+
+`--plan-only`, `--plan`, `--yes`, `--include-persistent` and `--run-release`
+apply to project scope only; combining any of them with `--service` exits 2.
+Single-service rollback never prompts.
+
 ## Exit Codes
 
 | Code | Meaning |
@@ -650,6 +759,13 @@ unresolvable hook (not executable, ambiguous, missing interpreter) exits 2,
 an interrupted hook exits 5, and a failing `post-*` hook after a successful
 operation exits 6. A failing `on-failure` hook never changes the code. See
 [Lifecycle hooks](#lifecycle-hooks).
+
+Project-wide rollback: an unknown, ambiguous, or non-stable target, a service
+whose target state was pruned from history, plan drift, a missing takod
+capability, and confirmation required without `--yes` exit 2; no usable image
+source, an apply failure, or a partial rollback exits 1; a held lock or lease
+exits 3. A `post-rollback` hook failure after a successful rollback exits 6.
+See [Rollback](#rollback).
 
 ## Redaction Guarantees
 

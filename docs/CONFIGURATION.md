@@ -1561,6 +1561,56 @@ rejected starting in `v0.15.0`.
 | `deployment.cache` (`enabled`, `type`, `retention`) | Remove it. Docker manages build cache; use `tako cleanup --docker-cache` or the takod `--build-cache-keep-storage` setting. | `v0.15.0` |
 | `environments.<env>.labels` | Remove it. Set `servers.<name>.labels` and select servers with `serverSelector.labels` or placement constraints. | `v0.15.0` |
 
+## Rolling Back
+
+`tako rollback` returns an environment to an earlier deployment. It needs no
+configuration; it reads the replicated deployment history (`tako history`).
+
+```bash
+tako rollback --plan-only             # review: newest stable deployment before the current one
+tako rollback -y                      # roll every eligible service back to it
+tako rollback 1767225600 -y           # a deployment ID, the short ID from `tako history`, or a git commit (7+ chars)
+tako rollback --service web           # one service only, previous deployment that contains it
+tako rollback --service web 1767225600
+```
+
+Project-wide rollback rebuilds each service's state at the target from the
+newest stable history record at or before it, so services the target
+deployment did not touch return to the version they ran at that time. It
+shows the plan, then asks for confirmation (`[y/N]`); pass `-y/--yes` in
+scripts. Non-interactive sessions (`CI`, `TAKO_NONINTERACTIVE`, no TTY)
+without `--yes` stop with exit 2. `--plan-only` prints the plan and changes
+nothing, and `--plan FILE` applies only when the fresh plan still matches a
+reviewed `--plan-only --output json` document.
+
+How each service is handled:
+
+| Service | Project rollback |
+| --- | --- |
+| Long-running service | Rolled back in dependency order. Already at the target image, replica count and operator-file content: `unchanged`. |
+| `persistent: true` | Skipped. Pass `--include-persistent` to include it; Tako warns that the old image must still understand the current data on its volumes. |
+| `kind: run` | Skipped. Deploy-time runs are not replayed. |
+| `kind: job` | Skipped with a warning: job images and schedules stay at the current deployment. |
+| Added after the target | Skipped (`not present at target`), left running. Planning fails with exit 2 if history has been pruned to its 50-entry limit and the service's state at the target can no longer be proven; use `tako rollback --service` instead. |
+
+`deploy.release` commands are skipped by default because migrations are
+usually not reversible; pass `--run-release` to run them for the rolled-back
+services. Rollout stops at the first failed service; the remaining services
+are reported `not_attempted`, and proxy routes, node state and one history
+entry are still written for the services that changed. The history entry has
+status `rolled_back` (or `failed` after a partial rollback), so running
+`tako rollback -y` again returns to the deployment you rolled back from.
+
+Before changing anything, Tako checks that every image it needs is available:
+the exact image still retained on the environment's nodes (reused without a
+build), the target commit in the local git repository (rebuilt), or a registry
+image (pulled). `tako cleanup` keeps the newest images per service (`--keep`,
+default 3), so older targets of build-backed services usually need the
+commit to rebuild; shared-build images must still be retained. If any image is
+unavailable, the plan fails with exit 1 and nothing is changed. Finding
+retained images needs a node agent with the `image.descriptor-v1` capability;
+run `tako upgrade servers` if the plan asks for it.
+
 ## Build Strategy
 
 Build-backed services use `deployment.build.strategy: remote` by default: Tako

@@ -18,13 +18,13 @@ func TestResultsWithoutHooksOmitHookFields(t *testing.T) {
 	started := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	documents := map[string]any{
 		"deploy":   DeployResult{APIVersion: takoapi.APIVersionCurrent, Kind: KindDeployResult, Project: "demo", Environment: "production", Status: "success", Services: []ServiceOutcome{{Name: "web", Action: OutcomeDeployed}}, StartedAt: started},
-		"rollback": RollbackResult{APIVersion: takoapi.APIVersionCurrent, Kind: KindRollbackResult, Project: "demo", Environment: "production", Service: "web", DeploymentID: "d-1", Status: "rolled_back", StartedAt: started},
+		"rollback": RollbackResult{APIVersion: takoapi.APIVersionCurrent, Kind: KindRollbackResult, Project: "demo", Environment: "production", Scope: RollbackScopeService, Service: "web", DeploymentID: "d-1", Status: "rolled_back", StartedAt: started},
 		"promote":  PromoteResult{APIVersion: takoapi.APIVersionCurrent, Kind: KindPromoteResult, Project: "demo", Environment: "production", Service: "web", Revision: "r1", Status: "success", StartedAt: started},
 		"setup":    SetupResult{APIVersion: takoapi.APIVersionCurrent, Kind: KindSetupResult, Project: "demo", Environment: "production", Nodes: []SetupNodeResult{}},
 	}
 	want := map[string]string{
 		"deploy":   `{"apiVersion":"tako.redentor.dev/v1alpha1","kind":"DeployResult","project":"demo","environment":"production","status":"success","services":[{"name":"web","action":"deployed"}],"startedAt":"2026-01-02T03:04:05Z","durationSeconds":0}`,
-		"rollback": `{"apiVersion":"tako.redentor.dev/v1alpha1","kind":"RollbackResult","project":"demo","environment":"production","service":"web","deploymentId":"d-1","status":"rolled_back","startedAt":"2026-01-02T03:04:05Z","durationSeconds":0}`,
+		"rollback": `{"apiVersion":"tako.redentor.dev/v1alpha1","kind":"RollbackResult","project":"demo","environment":"production","scope":"service","service":"web","deploymentId":"d-1","status":"rolled_back","startedAt":"2026-01-02T03:04:05Z","durationSeconds":0}`,
 		"promote":  `{"apiVersion":"tako.redentor.dev/v1alpha1","kind":"PromoteResult","project":"demo","environment":"production","service":"web","revision":"r1","status":"success","startedAt":"2026-01-02T03:04:05Z","durationSeconds":0}`,
 		"setup":    `{"apiVersion":"tako.redentor.dev/v1alpha1","kind":"SetupResult","project":"demo","environment":"production","nodes":[]}`,
 	}

@@ -34,7 +34,7 @@ A non-zero exit from `pre-deploy` stops the deploy before anything changes.
 |------|---------|------|
 | `pre-deploy` | `deploy` | After the plan is computed, `--plan` is verified, and the deploy is approved (`--yes` or the prompt), while the local lock and remote leases are held, before workspace attachment, image builds, or any container change. |
 | `post-deploy` | `deploy` | After a successful deploy (including `warmed` blue-green deploys and up-to-date deploys), once the lock and leases are released. |
-| `pre-rollback` | `rollback` | After the lock and leases are held and the rollback target is selected, before any container changes. |
+| `pre-rollback` | `rollback` | After the lock and leases are held and the rollback target is selected (for a project rollback: after the image preflight and approval), before any container changes. |
 | `post-rollback` | `rollback` | After a successful rollback, once the lock and leases are released. |
 | `pre-promote` | `promote` | After the lock and leases are held and the warmed revision and image are selected, before proxy routes change. |
 | `post-promote` | `promote` | After a successful promotion, once the lock and leases are released. |
@@ -179,14 +179,14 @@ Variables marked *when known* are omitted when they do not apply.
 | `TAKO_COMMAND` | always | Canonical command: `deploy`, `rollback`, `promote`, or `setup`, also when invoked through an alias. |
 | `TAKO_PROJECT` | always | `project.name`. |
 | `TAKO_ENVIRONMENT` | always | Target environment. |
-| `TAKO_SERVICES` | always | Services in scope: the plan's services for deploy, the target service for rollback and promote; empty for setup. |
+| `TAKO_SERVICES` | always | Services in scope: the plan's services for deploy, the target service for single-service rollback and promote, every service being rolled back for project rollback; empty for setup. |
 | `TAKO_SERVERS` | always | Server names in scope. |
 | `TAKO_HOSTS` | always | Host addresses of those servers. |
 | `TAKO_PERFORMER` | always | The operator identity Tako records in deployment history. |
 | `TAKO_RECORDED_AT` | always | Time the hook started, RFC 3339 UTC. |
 | `TAKO_VERSION` | always | Tako CLI version. |
 | `TAKO_REVISION` | when known | Deploy revision; for rollback the target's commit; for promote the selected warmed revision. |
-| `TAKO_IMAGE` | when known | Image being rolled back to or promoted. |
+| `TAKO_IMAGE` | when known | Image being rolled back to (single-service rollback) or promoted. |
 | `TAKO_GIT_COMMIT` | when known | Full git commit of the deployed checkout. |
 | `TAKO_GIT_COMMIT_SHORT` | when known | Short commit. |
 | `TAKO_GIT_BRANCH` | when known | Git branch. |

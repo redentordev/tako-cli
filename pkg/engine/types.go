@@ -144,6 +144,12 @@ func (p *DeployPlan) Hash() string {
 	return hex.EncodeToString(sum[:])
 }
 
+// PlanHash is Hash under the name every reviewed plan document shares
+// (RollbackPlan stores its hash in a field named Hash).
+func (p *DeployPlan) PlanHash() string {
+	return p.Hash()
+}
+
 // ServiceOutcome reports what happened to one service during apply.
 type ServiceOutcome struct {
 	Name     string          `json:"name"`

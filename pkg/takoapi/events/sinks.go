@@ -83,6 +83,41 @@ type Stream struct {
 	sink   Sink
 	redact func(string) string
 	now    func() time.Time
+	// context holds layers of Data keys stamped on every event (see
+	// SetContextData); later layers win.
+	context     []contextLayer
+	nextContext int
+}
+
+type contextLayer struct {
+	id   int
+	data map[string]any
+}
+
+// SetContextData adds keys to the Data of every event emitted afterwards,
+// for example data.operation for every event of a rollback. Keys an event
+// sets itself win. The returned func removes exactly this layer, so nested
+// callers may restore in any order. It is idempotent.
+func (s *Stream) SetContextData(data map[string]any) (restore func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextContext++
+	id := s.nextContext
+	layer := make(map[string]any, len(data))
+	for key, value := range data {
+		layer[key] = value
+	}
+	s.context = append(s.context, contextLayer{id: id, data: layer})
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for index, existing := range s.context {
+			if existing.id == id {
+				s.context = append(s.context[:index:index], s.context[index+1:]...)
+				return
+			}
+		}
+	}
 }
 
 // NewStream wraps sink. redact may be nil for streams that carry no secret
@@ -114,6 +149,18 @@ func (s *Stream) Emit(event Event) {
 	event.Time = s.now()
 	if event.Level == "" {
 		event.Level = LevelInfo
+	}
+	if len(s.context) > 0 {
+		data := make(map[string]any, len(event.Data)+2)
+		for _, layer := range s.context {
+			for key, value := range layer.data {
+				data[key] = value
+			}
+		}
+		for key, value := range event.Data {
+			data[key] = value
+		}
+		event.Data = data
 	}
 	if s.redact != nil {
 		event.Message = s.redact(event.Message)

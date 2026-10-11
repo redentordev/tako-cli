@@ -2,30 +2,57 @@
 .TH "TAKO" "1" "Jun 2026" "Tako CLI" "Tako CLI Manual"
 
 .SH NAME
-tako-rollback - Rollback to previous deployment
+tako-rollback - Roll the environment or one service back to an earlier deployment
 
 
 .SH SYNOPSIS
-\fBtako rollback [deployment-id] [flags]\fP
+\fBtako rollback [target] [flags]\fP
 
 
 .SH DESCRIPTION
-Rollback to a previous deployment.
+Roll back to an earlier deployment recorded in the mesh history.
 
 .PP
-If no deployment-id is provided, rolls back to the most recent successful deployment.
-Specify a deployment-id to rollback to a specific deployment.
+Without --service, rollback restores every eligible service in the
+environment to the state it had at the target deployment, as one operation
+under one lock and lease set:
+  - Each service's target is its entry in the newest stable record at or
+    before the target; services already in that state are left untouched.
+  - kind: run and kind: job services are never rolled back (jobs keep the
+    newer image and schedule); persistent: true services are skipped unless
+    --include-persistent is given; services added after the target keep
+    running.
+  - deploy.release commands are not re-run unless --run-release is given.
+  - Every target image must be retained on a node, rebuildable from a commit
+    in the local repository, or pullable from a registry before anything
+    changes. 'tako cleanup' can remove old images.
+  - Services roll back in dependency order and stop at the first failure.
+  - The plan is shown and confirmed first; use -y/--yes to approve without a
+    prompt, --plan-only to review, and --plan  to apply only a
+    reviewed plan.
+
+.PP
+With --service, only that service rolls back, without a prompt, and its
+deploy.release command runs as before.
+
+.PP
+The target is optional. Without it, rollback picks the previous stable
+deployment (project) or the previous stable deployment of the service. It
+can be a deployment ID, the short ID 'tako history' prints (a unique ID
+prefix), or a git commit (full hash or at least 7 characters).
 
 .PP
 Rollback reads the freshest reachable deployment history from the mesh.
 
 .PP
-Use 'tako history' to view available deployments.
-
-.PP
 Examples:
-  tako rollback --service web                 # Rollback to previous deployment
-  tako rollback --service web deploy-123      # Rollback to specific deployment
+  tako rollback                               # Roll the environment back to the previous deployment
+  tako rollback 1767225600 -y                 # Roll back to the deployment shown as 1767225600 in 'tako history'
+  tako rollback abc1234 --plan-only           # Review a rollback to commit abc1234
+  tako rollback --plan-only --output json > plan.json
+  tako rollback --plan plan.json -y           # Apply only the reviewed plan
+  tako rollback --service web                 # Roll back one service to its previous deployment
+  tako rollback --service web 1767225600      # Roll back one service to a specific deployment
 
 
 .SH OPTIONS
@@ -33,12 +60,32 @@ Examples:
 	help for rollback
 
 .PP
+\fB--include-persistent\fP[=false]
+	Also roll back persistent: true services (volume data is not rolled back)
+
+.PP
+\fB--plan\fP=""
+	Apply only if the current plan matches this reviewed --plan-only document
+
+.PP
+\fB--plan-only\fP[=false]
+	Print the rollback plan and exit without changing anything
+
+.PP
+\fB--run-release\fP[=false]
+	Re-run each rolled-back service's deploy.release command from its target image
+
+.PP
 \fB--service\fP=""
-	Service to rollback (required)
+	Roll back only this service (no prompt; runs its release command)
 
 .PP
 \fB--skip-hooks\fP[=false]
 	Skip local lifecycle hooks (including on-failure) for this invocation
+
+.PP
+\fB-y\fP, \fB--yes\fP[=false]
+	Approve the project rollback without a confirmation prompt
 
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS

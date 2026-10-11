@@ -74,7 +74,8 @@ func TestRenderHistoryResultMachineJSONKeepsStdoutParseable(t *testing.T) {
 func TestHistoryNextStepsReferenceCurrentCommands(t *testing.T) {
 	output := historyNextSteps()
 	for _, want := range []string{
-		"tako rollback <deployment-id>",
+		"tako rollback <ID> (the short ID above works)",
+		"tako rollback --service <service> <ID>",
 		"tako logs --service <service> --tail 200",
 		"tako access <service>",
 	} {

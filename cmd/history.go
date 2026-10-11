@@ -151,7 +151,8 @@ func renderHistoryResult(result *engine.HistoryResult) error {
 }
 
 func historyNextSteps() string {
-	return "\nTo rollback to a specific deployment: tako rollback <deployment-id>\n" +
+	return "\nTo roll the environment back to a deployment: tako rollback <ID> (the short ID above works)\n" +
+		"To roll back one service: tako rollback --service <service> <ID>\n" +
 		"To inspect service logs: tako logs --service <service> --tail 200\n" +
 		"To inspect proxy access logs: tako access <service>\n\n"
 }

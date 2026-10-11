@@ -80,6 +80,8 @@ type takodServiceDeployOptions struct {
 	BuildImage bool
 	PullImage  bool
 	WarmOnly   bool
+	// SkipRelease skips the deploy.release command (project rollback).
+	SkipRelease bool
 }
 
 type takodServiceRolloutOperations struct {
@@ -515,10 +517,11 @@ func (d *Deployer) deployServiceTakod(serviceName string, service *config.Servic
 			return d.buildImageOnTakodNodes(serviceName, service, imageRef, assignmentServers)
 		},
 		// Release runs once per service after its image exists and before any
-		// rollout activation in reconcile.
-		Release: func() error {
+		// rollout activation in reconcile. Project rollbacks skip it unless
+		// the operator opts in.
+		Release: takodReleaseOperation(options.SkipRelease, func() error {
 			return d.runReleaseCommand(serviceName, service, imageRef, assignmentServers)
-		},
+		}),
 		Reconcile: func() error {
 			reconcileStarted = true
 			revision := takodServiceRevisionID(d.config.Project.Name, d.environment, serviceName, imageRef, *service)
@@ -586,6 +589,15 @@ func runTakodJobBuildPhases(preflight func() error, build func() error, record f
 	}
 	record()
 	return nil
+}
+
+// takodReleaseOperation returns the rollout's Release phase: run, or a no-op
+// when skip is set.
+func takodReleaseOperation(skip bool, run func() error) func() error {
+	if skip {
+		return func() error { return nil }
+	}
+	return run
 }
 
 func runTakodServiceRollout(needsArgvCapability bool, operations takodServiceRolloutOperations) error {
@@ -838,9 +850,96 @@ func (d *Deployer) buildImageRemotelyOnTakodNodes(serviceName string, service *c
 }
 
 func (d *Deployer) transferExistingImageToNodes(imageRef string, requiredServers []string) error {
-	allServers, err := d.getTakodTargetServers()
+	located, requiredGroups, err := d.locateRetainedImage(imageRef, requiredServers)
 	if err != nil {
 		return err
+	}
+	for _, source := range located {
+		if source.Server == "" {
+			return fmt.Errorf("no %s node retains the exact image", source.Platform)
+		}
+	}
+	for _, source := range located {
+		targets := requiredGroups[source.Platform]
+		sort.Strings(targets)
+		for _, target := range targets {
+			actual, inspectErr := d.inspectImageOnTakodNode(target, imageRef)
+			if inspectErr == nil && sameImageContent(source.Descriptor, actual) {
+				continue
+			}
+			if err := d.transferImageBetweenNodes(source.Server, target, imageRef); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// retainedImageSource is the node that retains an exact image for one
+// platform group of required nodes. Server is empty when none does.
+type retainedImageSource struct {
+	Platform   string
+	Server     string
+	Descriptor *takod.ImageDescriptor
+}
+
+// LocateRetainedImage reports, without mutating anything, whether the exact
+// image is retained with consistent content on a target or builder node of
+// every platform among requiredServers. It requires image descriptor support
+// on the required nodes and fails closed with CapabilityRequiredError when a
+// node lacks it. Conflicting digests for the same tag are an error.
+func (d *Deployer) LocateRetainedImage(imageRef string, requiredServers []string) (bool, error) {
+	return locateRetainedImageGated(requiredServers, func(servers []string) error {
+		return d.preflightTakodCapability(servers, takod.CapabilityImageDescriptorV1, "exact image reuse")
+	}, func() ([]retainedImageSource, error) {
+		located, _, err := d.locateRetainedImage(imageRef, requiredServers)
+		return located, err
+	})
+}
+
+// locateRetainedImageGated runs the capability gate before any image
+// inspection so an older node agent fails closed.
+func locateRetainedImageGated(requiredServers []string, checkCapability func([]string) error, locate func() ([]retainedImageSource, error)) (bool, error) {
+	if err := checkCapability(uniqueStringsSorted(requiredServers)); err != nil {
+		return false, err
+	}
+	located, err := locate()
+	if err != nil {
+		return false, err
+	}
+	return retainedOnEveryPlatform(located), nil
+}
+
+// LocateRetainedServiceImage runs LocateRetainedImage for the nodes the
+// service's resolved placement uses.
+func (d *Deployer) LocateRetainedServiceImage(serviceName string, service *config.ServiceConfig, imageRef string) (bool, error) {
+	assignments, err := d.planTakodAssignments(serviceName, service)
+	if err != nil {
+		return false, err
+	}
+	servers := uniqueAssignmentServers(assignments)
+	if len(servers) == 0 {
+		return false, fmt.Errorf("service %s has no placement nodes", serviceName)
+	}
+	return d.LocateRetainedImage(imageRef, servers)
+}
+
+func retainedOnEveryPlatform(located []retainedImageSource) bool {
+	if len(located) == 0 {
+		return false
+	}
+	for _, source := range located {
+		if source.Server == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *Deployer) locateRetainedImage(imageRef string, requiredServers []string) ([]retainedImageSource, map[string][]string, error) {
+	allServers, err := d.getTakodTargetServers()
+	if err != nil {
+		return nil, nil, err
 	}
 	// A dedicated builder remains a valid exact-image source even when it is
 	// not a workload placement target for this environment. Export is
@@ -850,51 +949,46 @@ func (d *Deployer) transferExistingImageToNodes(imageRef string, requiredServers
 	}
 	allGroups, err := d.groupTakodNodesByPlatform(allServers)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	requiredGroups, err := d.groupTakodNodesByPlatform(requiredServers)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
+	located, err := locateRetainedImageSources(imageRef, allGroups, requiredGroups, d.inspectImageOnTakodNode)
+	return located, requiredGroups, err
+}
+
+// locateRetainedImageSources picks, per required platform, the first node
+// (sorted by name) that retains imageRef, and refuses ambiguous reuse when
+// two nodes of the platform hold different content under the same tag.
+func locateRetainedImageSources(imageRef string, allGroups, requiredGroups map[string][]string, inspect func(serverName, imageRef string) (*takod.ImageDescriptor, error)) ([]retainedImageSource, error) {
 	platforms := make([]string, 0, len(requiredGroups))
 	for platform := range requiredGroups {
 		platforms = append(platforms, platform)
 	}
 	sort.Strings(platforms)
+	located := make([]retainedImageSource, 0, len(platforms))
 	for _, platform := range platforms {
 		sources := append([]string(nil), allGroups[platform]...)
 		sort.Strings(sources)
-		source := ""
-		var expected *takod.ImageDescriptor
+		found := retainedImageSource{Platform: platform}
 		for _, candidate := range sources {
-			descriptor, inspectErr := d.inspectImageOnTakodNode(candidate, imageRef)
-			if inspectErr != nil || !descriptor.Exists {
+			descriptor, inspectErr := inspect(candidate, imageRef)
+			if inspectErr != nil || descriptor == nil || !descriptor.Exists {
 				continue
 			}
-			if expected == nil {
-				source, expected = candidate, descriptor
+			if found.Descriptor == nil {
+				found.Server, found.Descriptor = candidate, descriptor
 				continue
 			}
-			if !sameImageContent(expected, descriptor) {
-				return fmt.Errorf("image tag %s resolves to conflicting digests on %s (%s) and %s (%s); refusing ambiguous reuse", imageRef, source, expected.ImageID, candidate, descriptor.ImageID)
+			if !sameImageContent(found.Descriptor, descriptor) {
+				return nil, fmt.Errorf("image tag %s resolves to conflicting digests on %s (%s) and %s (%s); refusing ambiguous reuse", imageRef, found.Server, found.Descriptor.ImageID, candidate, descriptor.ImageID)
 			}
 		}
-		if source == "" {
-			return fmt.Errorf("no %s node retains the exact image", platform)
-		}
-		targets := requiredGroups[platform]
-		sort.Strings(targets)
-		for _, target := range targets {
-			actual, inspectErr := d.inspectImageOnTakodNode(target, imageRef)
-			if inspectErr == nil && sameImageContent(expected, actual) {
-				continue
-			}
-			if err := d.transferImageBetweenNodes(source, target, imageRef); err != nil {
-				return err
-			}
-		}
+		located = append(located, found)
 	}
-	return nil
+	return located, nil
 }
 
 func mergeTakodImageSourceNames(targets, builders []string) []string {

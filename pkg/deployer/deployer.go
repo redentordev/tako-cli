@@ -379,8 +379,36 @@ func createCrossPlatformTarGzWithLimits(sourceDir, archivePath string, limits bu
 	})
 }
 
+// RollbackImageSourceRetained marks a rollback whose exact target image is
+// retained on a node: it is transferred to the assigned nodes and deployed
+// without a build or pull.
+const RollbackImageSourceRetained = "retained"
+
+// RollbackOptions tunes RollbackToState.
+type RollbackOptions struct {
+	// SkipRelease skips the service's deploy.release command.
+	SkipRelease bool
+	// ImageSource is the preflight's chosen image source: "retained",
+	// "rebuild", "pull", or empty for the legacy per-kind default.
+	ImageSource string
+}
+
+// rollbackDeployOptions decides how a rollback rollout obtains its image.
+// exactTransfer reports that the exact retained image must be transferred
+// to the assigned nodes first; shared-build targets always need it.
+func rollbackDeployOptions(service *config.ServiceConfig, serviceState *state.ServiceState, opts RollbackOptions) (options takodServiceDeployOptions, exactTransfer bool) {
+	switch {
+	case serviceState.SharedBuildHash != "", opts.ImageSource == RollbackImageSourceRetained:
+		options, exactTransfer = takodServiceDeployOptions{}, true
+	default:
+		options = takodRollbackDeployOptionsForService(service)
+	}
+	options.SkipRelease = opts.SkipRelease
+	return options, exactTransfer
+}
+
 // RollbackToState converges a service back to a saved takod deployment state.
-func (d *Deployer) RollbackToState(serviceName string, serviceState *state.ServiceState) error {
+func (d *Deployer) RollbackToState(serviceName string, serviceState *state.ServiceState, opts RollbackOptions) error {
 	if strings.TrimSpace(serviceState.Image) == "" {
 		return fmt.Errorf("deployment state for %s does not include an image", serviceName)
 	}
@@ -401,14 +429,13 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 	}
 	rollbackService.ImageFrom = serviceState.SharedBuild
 	rollbackService.SharedBuildHash = serviceState.SharedBuildHash
-	options := takodRollbackDeployOptionsForService(service)
+	options, exactTransfer := rollbackDeployOptions(service, serviceState, opts)
 	if serviceState.SharedBuildHash != "" {
 		if serviceState.SharedBuild == "" {
 			return fmt.Errorf("deployment state for %s does not include the shared build name needed for exact rollback", serviceName)
 		}
 		rollbackService.ClearBuild()
 		rollbackService.Image = ""
-		options = takodServiceDeployOptions{}
 		if err := d.EnsurePreparedServiceImage(serviceName, &rollbackService, serviceState.Image); err != nil {
 			return fmt.Errorf("historical shared image is unavailable: %w", err)
 		}
@@ -418,6 +445,13 @@ func (d *Deployer) RollbackToState(serviceName string, serviceState *state.Servi
 	}
 	if serviceState.SharedBuildHash == "" {
 		rollbackService.Image = serviceState.Image
+		if exactTransfer {
+			// The retained exact image is reused on every assigned node:
+			// no rebuild, no registry pull.
+			if err := d.EnsurePreparedServiceImage(serviceName, &rollbackService, serviceState.Image); err != nil {
+				return fmt.Errorf("retained rollback image is unavailable: %w", err)
+			}
+		}
 	}
 
 	return d.deployServiceTakod(serviceName, &rollbackService, serviceState.Image, options)
