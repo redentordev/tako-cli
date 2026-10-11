@@ -1144,25 +1144,21 @@ func (d *Deployer) meshHostIPForServer(serverName string) (string, error) {
 		}
 		return strings.TrimSpace(server.MeshIP), nil
 	}
-	servers, err := d.getTakodTargetServers()
+	// Proxy upstreams use the operation's resolved member addresses, the
+	// same map mesh apply used, never a position in a target list.
+	addresses, err := d.ensureMeshAddresses()
 	if err != nil {
 		return "", err
 	}
-	for i, name := range servers {
-		if name != serverName {
-			continue
-		}
-		address, err := d.meshAddress(i)
-		if err != nil {
-			return "", err
-		}
-		ip, _, err := net.ParseCIDR(address)
-		if err != nil {
-			return "", fmt.Errorf("invalid mesh address for %s: %w", serverName, err)
-		}
-		return ip.String(), nil
+	address, ok := addresses[serverName]
+	if !ok {
+		return "", fmt.Errorf("server %s is not a mesh member of environment %s", serverName, d.environment)
 	}
-	return "", fmt.Errorf("server %s is not a takod target", serverName)
+	ip, _, err := net.ParseCIDR(address)
+	if err != nil {
+		return "", fmt.Errorf("invalid mesh address for %s: %w", serverName, err)
+	}
+	return ip.String(), nil
 }
 
 func (d *Deployer) meshUpstreamPort(serviceName string, slot int) (int, error) {

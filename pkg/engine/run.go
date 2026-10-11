@@ -183,7 +183,7 @@ func (e *Engine) PlanRun(ctx context.Context, req RunRequest) (*RunSession, erro
 		return nil, err
 	}
 	runServices := map[string]config.ServiceConfig{req.ServiceName: req.Service}
-	if err := preflightAndSetupTakodRuntime(deploy, runServices, runServices); err != nil {
+	if err := preflightAndVerifyTakodRuntime(deploy, runServices, runServices); err != nil {
 		return nil, err
 	}
 	session.deployer = deploy

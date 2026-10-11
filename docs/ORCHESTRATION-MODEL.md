@@ -757,6 +757,33 @@ routes to local containers through Docker DNS and remote containers through
 node-local mesh-only upstream ports. Health is enforced by the generated Caddy
 reverse-proxy health checks when configured.
 
+### Mesh Addressing
+
+Mesh membership is environment-wide. Every mesh apply lists all schedulable
+servers of the environment as peers and is sent to every member, whatever
+subset of nodes the operation's workloads touch, so a scale or a pinned deploy
+can never drop peers. Only operations that lease every member apply the mesh:
+deploy, rollback, project rollback, scale, and promote. `tako run` only
+verifies the takod agents it uses and never rewrites mesh addresses, peers, or
+node metadata.
+
+Addresses come from recorded state, not from list positions. One resolver
+serves mesh apply, proxy upstreams, and `tako domains hosts`:
+
+1. An enrolled node uses its platform mesh address.
+2. A node keeps the address its takod recorded (`node.json` `mesh.address`)
+   when it lies inside `mesh.networkCIDR`. If two members record the same
+   address, the member whose name sorts first keeps it, the other gets a new
+   one, and the deploy prints a warning.
+3. Every other node gets the lowest free host address of `mesh.networkCIDR`,
+   in sorted name order. Addresses that a member lists for peers outside the
+   environment (another app/stage on a shared node) are not free.
+
+A fresh environment therefore gets `.1`, `.2`, ... in sorted name order, and
+nodes upgraded from an earlier Tako keep the addresses they already have.
+The result never depends on the operation's target list, server declaration
+order, or which environment variables are exported.
+
 Deploy success is intentionally separate from public DNS readiness. A deploy
 can reconcile containers, routes, state, and proxy config before a domain points
 at the edge. After successful reconciliation, the CLI checks public domains for
@@ -778,7 +805,8 @@ re-check domains without redeploying.
 Internal routes are intentionally excluded from public DNS/TLS readiness checks.
 Run `tako domains hosts` to print host-file entries for internal proxy hosts.
 The command maps each internal host to `servers.<name>.privateHost` when present
-and otherwise to the deterministic mesh IP for that proxy node; `--address
+and otherwise to the mesh address that proxy node's takod recorded (read over
+SSH, so the node must be reachable and already deployed); `--address
 private`, `--address mesh`, and `--address ssh` make the target selection
 explicit.
 

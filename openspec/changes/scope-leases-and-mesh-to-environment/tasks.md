@@ -28,27 +28,27 @@
 
 ## 2. PR2: Stable mesh addresses and environment-wide peer lists (CLI only)
 
-- [ ] 2.1 Write the regression tests first and confirm they fail on master:
+- [x] 2.1 Write the regression tests first and confirm they fail on master:
   - `tako run` on the second server of a three-server environment keeps that node's address and peers, because no mesh request is sent;
   - scale with `servers: [b, a]` resolves the same addresses as deploy;
   - a deploy whose workloads touch only `c` still sends the full peer list `[a, b, c]` with unchanged addresses.
-- [ ] 2.2 Implement `resolveMeshAddresses` (D5) as a pure function over the CIDR, the sorted members and the `GET /v1/status` records. Verify with table tests:
+- [x] 2.2 Implement `resolveMeshAddresses` (D5) as a pure function over the CIDR, the sorted members and the `GET /v1/status` records. Verify with table tests:
   - a fresh environment yields `.1, .2, .3`;
   - recorded addresses are kept;
   - a duplicate recorded address is kept by the first name and reassigned for the other, with a warning;
   - a recorded address outside a changed CIDR is reassigned;
   - addresses used by another project's peers on a shared member are avoided;
   - results are identical whether or not unrelated servers were pruned.
-- [ ] 2.3 Wire the resolver into the deployer:
+- [x] 2.3 Wire the resolver into the deployer:
   - `SetupTakodRuntime` sends the full schedulable membership as peers and applies to every member for deploy, rollback, project rollback, scale and promote (D4);
   - delete `meshAddress(i)`;
   - route `meshHostIPForServer` (`takod_proxy.go:1140-1166`) through the operation's resolved map.
 
   Verify with deployer tests on the request payloads.
-- [ ] 2.4 Make `tako run` verify-only (`pkg/engine/run.go:182-186`). Verify with an engine test that no `PUT /v1/metadata` or `POST /v1/mesh/apply` is sent.
-- [ ] 2.5 Make `tako domains hosts --address mesh|auto` read recorded addresses from the proxy nodes and fail for unreachable ones (`cmd/domain_hosts.go:125-200`). Verify with command tests using fake status responses.
-- [ ] 2.6 Warn when a member's recorded `node.project`/`node.environment` differs from the deploy's and the agent lacks `mesh.peer-sets-v1`. Verify with a deployer test.
-- [ ] 2.7 Docs: in `docs/ORCHESTRATION-MODEL.md`, describe mesh addressing (recorded first, lowest free otherwise) and say that `run` does not touch the mesh. In `docs/CONFIGURATION.md`, add the "Shared Nodes" mesh caveat until takod supports peer sets, and the connectivity requirement of `domains hosts --address mesh`. Regenerate `man/` if command help text changes.
+- [x] 2.4 Make `tako run` verify-only (`pkg/engine/run.go:182-186`). Verify with an engine test that no `PUT /v1/metadata` or `POST /v1/mesh/apply` is sent.
+- [x] 2.5 Make `tako domains hosts --address mesh|auto` read recorded addresses from the proxy nodes and fail for unreachable ones (`cmd/domain_hosts.go:125-200`). Verify with command tests using fake status responses.
+- [x] 2.6 Warn when a member's recorded `node.project`/`node.environment` differs from the deploy's and the agent lacks `mesh.peer-sets-v1`. Verify with a deployer test.
+- [x] 2.7 Docs: in `docs/ORCHESTRATION-MODEL.md`, describe mesh addressing (recorded first, lowest free otherwise) and say that `run` does not touch the mesh. In `docs/CONFIGURATION.md`, add the "Shared Nodes" mesh caveat until takod supports peer sets, and the connectivity requirement of `domains hosts --address mesh`. Regenerate `man/` if command help text changes.
 
 ## 3. PR3: Node maintenance lease (takod and CLI)
 

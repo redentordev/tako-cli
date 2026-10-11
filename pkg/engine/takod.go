@@ -290,6 +290,33 @@ func preflightAndSetupTakodRuntime(runtime takodRuntimeSetup, routeServices, mut
 	return nil
 }
 
+type takodRuntimeVerifier interface {
+	PreflightTakodProxyCapabilities(map[string]config.ServiceConfig) error
+	PreflightGracefulStopCapabilities() error
+	PreflightServiceMutationCapabilities(map[string]config.ServiceConfig) error
+	VerifyTakodRuntime() error
+}
+
+// preflightAndVerifyTakodRuntime is the narrow-operation variant used by
+// `tako run`: it runs the same capability admission but only verifies the
+// target agent. It never writes node metadata or mesh config, because a run
+// contacts too few nodes to build a correct environment-wide peer list.
+func preflightAndVerifyTakodRuntime(runtime takodRuntimeVerifier, routeServices, mutationServices map[string]config.ServiceConfig) error {
+	if err := runtime.PreflightTakodProxyCapabilities(routeServices); err != nil {
+		return err
+	}
+	if err := runtime.PreflightGracefulStopCapabilities(); err != nil {
+		return err
+	}
+	if err := runtime.PreflightServiceMutationCapabilities(mutationServices); err != nil {
+		return err
+	}
+	if err := runtime.VerifyTakodRuntime(); err != nil {
+		return fmt.Errorf("failed to verify takod runtime: %w", err)
+	}
+	return nil
+}
+
 // CleanupViaTakod runs post-deploy cleanup on one node through takod.
 func CleanupViaTakod(client any, cfg *config.Config, request takod.CleanupRequest) (*takod.CleanupResponse, error) {
 	return CleanupViaTakodContext(context.Background(), client, cfg, request)

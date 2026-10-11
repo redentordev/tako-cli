@@ -90,6 +90,17 @@ type Deployer struct {
 	runtimeFactoryMu         sync.Mutex
 	assignmentMu             sync.Mutex
 	assignments              map[string][]scheduler.Assignment
+	// meshMu guards the per-operation mesh view: the GET /v1/status results
+	// captured while verifying agents and the resolved member addresses that
+	// mesh apply and proxy upstreams share.
+	meshMu        sync.Mutex
+	meshStatuses  map[string]takod.Status
+	meshAddresses map[string]string
+	// meshStatusReader overrides how member status is read (tests).
+	meshStatusReader func(serverName string) (takod.Status, error)
+	// meshClient overrides the takod client used for mesh key, metadata and
+	// mesh apply requests (tests).
+	meshClient func(serverName string) (any, error)
 }
 
 const (

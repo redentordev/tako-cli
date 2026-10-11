@@ -2,7 +2,6 @@ package deployer
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -98,11 +97,15 @@ type localImageClient interface {
 	Export(context.Context, string, io.Writer) error
 }
 
-// SetupTakodRuntime prepares every selected environment server for the takod runtime.
+// SetupTakodRuntime prepares the environment's mesh for the takod runtime.
+// Every mesh apply lists all schedulable environment members as peers and is
+// sent to every member, whatever subset the operation's workloads touch, so
+// a narrow operation can never drop peers or renumber a node. Addresses come
+// from mesh.ResolveAddresses over the members' recorded state.
 func (d *Deployer) SetupTakodRuntime() error {
-	servers, err := d.getTakodTargetServers()
+	servers, err := d.meshMembers()
 	if err != nil {
-		return fmt.Errorf("failed to get takod target servers: %w", err)
+		return fmt.Errorf("failed to get takod mesh members: %w", err)
 	}
 	if len(servers) == 0 {
 		return fmt.Errorf("environment %s has no target servers", d.environment)
@@ -121,12 +124,19 @@ func (d *Deployer) SetupTakodRuntime() error {
 		return err
 	}
 
-	peers, err := d.buildTakodMeshPeers(servers, nodePublicKeys)
+	addresses, err := d.resolveTakodMeshAddresses(servers, nodePublicKeys)
 	if err != nil {
 		return err
 	}
 
-	if err := d.prepareTakodNodes(servers, peers, nodePublicKeys); err != nil {
+	peers, err := d.buildTakodMeshPeers(servers, nodePublicKeys, addresses)
+	if err != nil {
+		return err
+	}
+
+	d.warnLegacySharedMeshNodes(servers)
+
+	if err := d.prepareTakodNodes(servers, peers, nodePublicKeys, addresses); err != nil {
 		return err
 	}
 
@@ -137,32 +147,59 @@ func (d *Deployer) SetupTakodRuntime() error {
 	return nil
 }
 
+// VerifyTakodRuntime only checks the operation's target agents. Narrow
+// operations such as `tako run` use it instead of SetupTakodRuntime: they
+// contact too few nodes to build a correct environment-wide peer list, so
+// they never write node metadata or mesh config.
+func (d *Deployer) VerifyTakodRuntime() error {
+	servers, err := d.getTakodTargetServers()
+	if err != nil {
+		return fmt.Errorf("failed to get takod target servers: %w", err)
+	}
+	if len(servers) == 0 {
+		return fmt.Errorf("environment %s has no target servers", d.environment)
+	}
+	return d.verifyTakodAgents(servers)
+}
+
 // verifyTakodAgents is deliberately read-only. Application operations never
 // install, restart, or upgrade node software; setup and node lifecycle
-// commands own that privileged boundary.
+// commands own that privileged boundary. The status responses are kept for
+// mesh address resolution.
 func (d *Deployer) verifyTakodAgents(servers []string) error {
 	return runTakodNodeActions(servers, func(serverName string) error {
 		if _, ok := d.config.Servers[serverName]; !ok {
 			return fmt.Errorf("server %s not found", serverName)
 		}
-		client, err := d.getRuntimeClient(serverName)
+		status, err := d.readTakodStatus(serverName)
 		if err != nil {
-			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
-		}
-
-		output, err := takodclient.RequestJSON(client, d.takodSocket(), "GET", "/v1/status", nil)
-		if err != nil {
-			return fmt.Errorf("takod is unavailable on %s; run 'tako setup --server %s' or 'tako upgrade servers --server %s': %w", serverName, serverName, serverName, err)
-		}
-		var status takod.Status
-		if err := json.Unmarshal([]byte(output), &status); err != nil {
-			return fmt.Errorf("takod returned invalid status on %s: %w", serverName, err)
+			return err
 		}
 		if err := validateTakodAgentForAppOperation(serverName, d.cliVersion, status); err != nil {
 			return err
 		}
+		d.storeMeshStatus(serverName, status)
 		return nil
 	})
+}
+
+func (d *Deployer) readTakodStatus(serverName string) (takod.Status, error) {
+	if d.meshStatusReader != nil {
+		return d.meshStatusReader(serverName)
+	}
+	client, err := d.getRuntimeClient(serverName)
+	if err != nil {
+		return takod.Status{}, fmt.Errorf("failed to connect to %s: %w", serverName, err)
+	}
+	output, err := takodclient.RequestJSON(client, d.takodSocket(), "GET", "/v1/status", nil)
+	if err != nil {
+		return takod.Status{}, fmt.Errorf("takod is unavailable on %s; run 'tako setup --server %s' or 'tako upgrade servers --server %s': %w", serverName, serverName, serverName, err)
+	}
+	var status takod.Status
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		return takod.Status{}, fmt.Errorf("takod returned invalid status on %s: %w", serverName, err)
+	}
+	return status, nil
 }
 
 func validateTakodAgentForAppOperation(serverName string, cliVersion string, status takod.Status) error {
@@ -1480,10 +1517,9 @@ func (e *takodNodeActionsError) Unwrap() []error {
 	return errs
 }
 
-func (d *Deployer) prepareTakodNode(client any, serverName string, server config.ServerConfig, index int, peers []takodMeshPeer, publicKey string) error {
-	meshAddress, err := d.meshAddressForServer(server, index)
-	if err != nil {
-		return err
+func (d *Deployer) prepareTakodNode(client any, serverName string, server config.ServerConfig, meshAddress string, peers []takodMeshPeer, publicKey string) error {
+	if strings.TrimSpace(meshAddress) == "" {
+		return fmt.Errorf("no resolved mesh address for %s", serverName)
 	}
 	endpoint := net.JoinHostPort(server.Host, strconv.Itoa(d.config.Mesh.ListenPort))
 
@@ -1558,9 +1594,9 @@ type prepareTakodNodeResult struct {
 	err        error
 }
 
-func (d *Deployer) prepareTakodNodes(servers []string, peers []takodMeshPeer, publicKeys map[string]string) error {
-	return d.prepareTakodNodesWith(servers, func(index int, serverName string, server config.ServerConfig) error {
-		client, err := d.getRuntimeClient(serverName)
+func (d *Deployer) prepareTakodNodes(servers []string, peers []takodMeshPeer, publicKeys map[string]string, addresses map[string]string) error {
+	return d.prepareTakodNodesWith(servers, func(_ int, serverName string, server config.ServerConfig) error {
+		client, err := d.meshNodeClient(serverName)
 		if err != nil {
 			return fmt.Errorf("failed to connect to %s: %w", serverName, err)
 		}
@@ -1569,7 +1605,7 @@ func (d *Deployer) prepareTakodNodes(servers []string, peers []takodMeshPeer, pu
 			d.printf("  -> %s (%s)\n", serverName, server.Host)
 		}
 
-		if err := d.prepareTakodNode(client, serverName, server, index, peers, publicKeys[serverName]); err != nil {
+		if err := d.prepareTakodNode(client, serverName, server, addresses[serverName], peers, publicKeys[serverName]); err != nil {
 			return fmt.Errorf("failed to prepare takod node %s: %w", serverName, err)
 		}
 		return nil
@@ -2485,7 +2521,7 @@ func (d *Deployer) preferDefaultWorker(targets []string, placement *config.Place
 
 func (d *Deployer) ensureTakodMeshKeys(servers []string) (map[string]string, error) {
 	return d.ensureTakodMeshKeysWith(servers, func(serverName string) (string, error) {
-		client, err := d.getRuntimeClient(serverName)
+		client, err := d.meshNodeClient(serverName)
 		if err != nil {
 			return "", err
 		}
@@ -2557,13 +2593,13 @@ func (d *Deployer) ensureTakodMeshKeysWith(servers []string, ensure ensureTakodM
 	return publicKeys, nil
 }
 
-func (d *Deployer) buildTakodMeshPeers(servers []string, publicKeys map[string]string) ([]takodMeshPeer, error) {
+func (d *Deployer) buildTakodMeshPeers(servers []string, publicKeys map[string]string, addresses map[string]string) ([]takodMeshPeer, error) {
 	peers := make([]takodMeshPeer, 0, len(servers))
-	for i, serverName := range servers {
+	for _, serverName := range servers {
 		server := d.config.Servers[serverName]
-		address, err := d.meshAddress(i)
-		if err != nil {
-			return nil, err
+		address := addresses[serverName]
+		if address == "" {
+			return nil, fmt.Errorf("no resolved mesh address for %s", serverName)
 		}
 		publicKey := publicKeys[serverName]
 		if publicKey == "" {
@@ -2604,36 +2640,6 @@ func takodPeersToWireGuardNodes(peers []takodMeshPeer) []mesh.Node {
 	return nodes
 }
 
-func (d *Deployer) meshAddress(index int) (string, error) {
-	_, ipNet, err := net.ParseCIDR(d.config.Mesh.NetworkCIDR)
-	if err != nil {
-		return "", fmt.Errorf("invalid mesh CIDR: %w", err)
-	}
-	ip := ipNet.IP.To4()
-	if ip == nil {
-		return "", fmt.Errorf("mesh.networkCIDR must be IPv4")
-	}
-
-	base := binary.BigEndian.Uint32(ip)
-	nodeIP := make(net.IP, 4)
-	binary.BigEndian.PutUint32(nodeIP, base+uint32(index+1))
-	return fmt.Sprintf("%s/%d", nodeIP.String(), d.config.Mesh.SubnetBits), nil
-}
-
-func (d *Deployer) meshAddressForServer(server config.ServerConfig, index int) (string, error) {
-	if strings.TrimSpace(server.MeshIP) != "" {
-		if net.ParseIP(strings.TrimSpace(server.MeshIP)) == nil {
-			return "", fmt.Errorf("invalid platform mesh IP %q", server.MeshIP)
-		}
-		bits := 32
-		if d.config.Mesh != nil && d.config.Mesh.SubnetBits > 0 {
-			bits = d.config.Mesh.SubnetBits
-		}
-		return fmt.Sprintf("%s/%d", strings.TrimSpace(server.MeshIP), bits), nil
-	}
-	return d.meshAddress(index)
-}
-
 func (d *Deployer) getTakodTargetServers() ([]string, error) {
 	var targets []string
 	if len(d.targetServers) > 0 {
@@ -2668,8 +2674,10 @@ func (p directSSHClientPool) GetOrCreateWithAuth(_ string, _ int, _ string, _ st
 func (d *Deployer) getRuntimeClient(serverName string) (*takodclient.AgentClient, error) {
 	d.runtimeFactoryMu.Lock()
 	if d.runtimeFactory == nil {
-		var pool nodeclient.SSHPool = d.sshPool
-		if pool == nil {
+		var pool nodeclient.SSHPool
+		if d.sshPool != nil {
+			pool = d.sshPool
+		} else {
 			if client, ok := d.client.(*ssh.Client); ok && client != nil {
 				pool = directSSHClientPool{client: client}
 			}

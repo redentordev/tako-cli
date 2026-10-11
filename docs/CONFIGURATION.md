@@ -1393,7 +1393,12 @@ tako domains hosts -e production --address mesh
 ```
 
 `--address auto` is the default: it uses `servers.<name>.privateHost` when set
-and falls back to the deterministic Tako mesh IP for the proxy node.
+and otherwise the proxy node's recorded Tako mesh address. Mesh addresses are
+read from each proxy node's takod over SSH (`GET /v1/status`), so `--address
+mesh` (and `auto` without `privateHost`) needs SSH access to the proxy nodes
+and fails when a node is unreachable or has never been deployed. Use
+`--address private` or `--address ssh` to print entries without contacting
+nodes.
 
 ## Shared Nodes
 
@@ -1423,6 +1428,14 @@ wiping the whole cache; takod also prunes Docker builder cache on a daily
 background interval using that same budget. Override explicit cleanup with
 `--docker-cache-keep-storage <size>`. Dangling image cleanup only runs during
 deploy cleanup or when `tako cleanup --docker-cache` is explicitly requested.
+
+Mesh caveat for shared nodes: a node's takod keeps one WireGuard peer list.
+Until every shared node runs a takod that supports per-environment peer sets
+(capability `mesh.peer-sets-v1`), each deploy replaces that list with its own
+environment's members, so the last app/stage to deploy wins and another
+app/stage's cross-node mesh traffic through that node can break until it
+deploys again. Deploys warn when they detect this (`server X is shared with
+app/stage`); run `tako upgrade servers --server X` to remove the caveat.
 
 By default every selected environment node with proxy routes reconciles the
 shared proxy for that app/stage. Built-in ACME TLS for public routes currently
