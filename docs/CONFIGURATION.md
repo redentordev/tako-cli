@@ -1321,6 +1321,11 @@ state; `tako config export` writes `REDACTED` placeholders. The setting requires
 agents advertising `proxy.request-headers-v1`; deploys fail before mutation on
 older agents.
 
+[Preview environments](PREVIEW-ENVIRONMENTS.md) inherit `requestHeaders` and
+`trustedProxies`, except a request header whose value is one of the base's
+hosts (such as the `X-Forwarded-Host: www.example.com` above): a preview drops
+it so its own host is forwarded, and `tako validate` warns about it.
+
 #### Trusting CDN ranges with presets
 
 To recover the real client IP (for `allowIps`, logs, or rate limiting), Caddy
