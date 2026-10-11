@@ -1269,14 +1269,16 @@ environments:
             - 2001:db8::/32
 ```
 
-`trustedProxies` accepts CIDRs only. IPv4 prefixes broader than `/8` and IPv6
-prefixes broader than `/24` are rejected, including the catch-all networks
-`0.0.0.0/0` and `::/0`. Without this setting, `allowIps` continues to match the
-direct TCP peer. Networked domain checks emit a warning when access controls
-appear to sit behind an external proxy/CDN without trusted proxies configured.
-All routes sharing one proxy node that set `trustedProxies` must use the same
-CIDR set because Caddy's client-IP trust policy is server-global; conflicting
-sets are rejected rather than merged.
+`trustedProxies` accepts CIDRs and the CDN presets `cloudfront` and
+`cloudflare` (see [Behind a CDN](#behind-a-cdn)). IPv4 prefixes broader than
+`/8` and IPv6 prefixes broader than `/24` are rejected, including the catch-all
+networks `0.0.0.0/0` and `::/0`. Without this setting, `allowIps` continues to
+match the direct TCP peer. Networked domain checks emit a warning when access
+controls appear to sit behind an external proxy/CDN without trusted proxies
+configured. All routes sharing one proxy node that set `trustedProxies` must
+declare the same set (the same CIDRs and the same presets) because Caddy's
+client-IP trust policy is server-global; conflicting sets are rejected rather
+than merged.
 
 Per-service route policy can hide private endpoints, cap request bodies, and
 set security response headers without adding another proxy container:
@@ -1334,6 +1336,140 @@ as defense in depth. `responseHeaders` names and values are validated, safely qu
 deferred so they replace upstream values. HTTP hop-by-hop and
 message-framing headers such as `Connection`, `Content-Length`, and
 `Transfer-Encoding` cannot be overridden.
+
+### Behind a CDN
+
+A CDN such as CloudFront usually connects to the origin with the origin
+hostname in `Host`, because it needs that name for TLS to the origin. The app
+then sees `https://origin.example.com` as its own URL, and frameworks that
+compare `Origin` with the request URL (Astro `checkOrigin`, CSRF middleware)
+reject the site's own form posts with 403.
+
+#### CloudFront: pin the public host
+
+Set `X-Forwarded-Host` to the public hostname with `proxy.requestHeaders`. Caddy
+sends it to the upstream on every request, replacing whatever the client or
+CDN sent, so the app reconstructs its public URL without trusting any CDN
+address range:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: origin.example.com
+          cdn: generic
+          requestHeaders:
+            X-Forwarded-Host: www.example.com
+            X-Forwarded-Proto: https
+```
+
+`requestHeaders` sets literal headers on the request forwarded to the service
+(Caddy `header_up`) on public and internal routes. An explicit
+`X-Forwarded-Host` or `X-Forwarded-Proto` overrides Caddy's default for that
+service only. The rules, enforced by the CLI and again by `takod`:
+
+- At most 32 entries. Names are at most 128 characters of letters, digits, and
+  `-`, and are canonicalized (`x-forwarded-host` becomes `X-Forwarded-Host`);
+  two names that canonicalize to the same header are an error.
+- Values are 1-1024 visible ASCII characters or spaces, without surrounding
+  whitespace, control characters, `"`, or `\`. Values are literal: Caddy
+  placeholders such as `{http.request.host}` (any `{` or `}`) are rejected.
+- Hop-by-hop and framing headers (`Connection`, `Keep-Alive`,
+  `Proxy-Connection`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`,
+  `Trailer`, `Transfer-Encoding`, `Upgrade`, `Http2-Settings`,
+  `Content-Length`, `Host`) and client-identity headers (`X-Forwarded-For`,
+  `Forwarded`, `X-Real-IP`) cannot be set. The proxy manages client identity,
+  so the app and logs keep seeing the real client IP.
+
+These headers are sent on **every** request to the service, so do not use them
+to assert identity or privileges (for example `X-User: admin`) unless every
+request through this route really should carry that value. Like
+`responseHeaders`, their values are not stored in the replicated desired
+state; `tako config export` writes `REDACTED` placeholders. The setting requires
+agents advertising `proxy.request-headers-v1`; deploys fail before mutation on
+older agents.
+
+[Preview environments](PREVIEW-ENVIRONMENTS.md) inherit `requestHeaders` and
+`trustedProxies`, except a request header whose value is one of the base's
+hosts (such as the `X-Forwarded-Host: www.example.com` above): a preview drops
+it so its own host is forwarded, and `tako validate` warns about it.
+
+#### Trusting CDN ranges with presets
+
+To recover the real client IP (for `allowIps`, logs, or rate limiting), Caddy
+must trust the CDN's addresses. Instead of hard-coding a provider's changing
+range list, name a preset in `trustedProxies`, alone or next to explicit CIDRs:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: origin.example.com
+          cdn: generic
+          trustedProxies:
+            - cloudfront
+          requestHeaders:
+            X-Forwarded-Host: www.example.com
+          allowIps:
+            - 198.51.100.0/24
+```
+
+For Cloudflare, use `cdn: cloudflare` with `trustedProxies: [cloudflare]`.
+`cdn: cloudflare` alone does not trust Cloudflare's ranges; it only changes
+domain and DNS checks.
+
+| Preset | Source | Ranges used |
+| --- | --- | --- |
+| `cloudfront` | `https://ip-ranges.amazonaws.com/ip-ranges.json` | IPv4 and IPv6 prefixes whose `service` is `CLOUDFRONT_ORIGIN_FACING` |
+| `cloudflare` | `https://www.cloudflare.com/ips-v4`, `https://www.cloudflare.com/ips-v6` | every listed prefix |
+
+Presets are resolved on the machine running `tako`, never on the nodes, before
+any command that writes proxy routes (`deploy`, `rollback`, `run`, `scale`,
+placement apply) changes anything:
+
+- Fetched ranges pass the same checks as explicit CIDRs, and a preset must
+  resolve to 1-512 prefixes. Bodies over 16 MiB, empty lists, and malformed
+  documents count as failed fetches.
+- Results are cached for 24 hours in
+  `<user cache dir>/tako/trusted-proxies/<preset>.json` (for example
+  `~/.cache/tako/trusted-proxies/cloudfront.json` on Linux and
+  `~/Library/Caches/tako/trusted-proxies/` on macOS). A fresh cache is used
+  without a network call. Delete the file to force a refresh on the next deploy.
+- If a fetch fails, a cached copy up to 30 days old is used and a warning names
+  the preset and its age. With no usable cache, the command fails before
+  mutation, naming the URL. List the CIDRs explicitly if the deploying machine
+  cannot reach the range URLs. Ranges are never embedded in the binary.
+- Without a user cache directory (for example in CI without `HOME`), every
+  resolution fetches.
+- The route manifest carries the resolved CIDRs with their provenance (preset
+  name, fetch time, source fingerprint). On a proxy node shared by several
+  projects, routes still must declare the same presets and CIDRs, and each
+  preset uses the newest snapshot on the node, so a newer deploy of one
+  project refreshes the ranges for all of them. `takod` rejects a snapshot
+  whose fetch time is more than 5 minutes ahead of its clock.
+- Presets need agents advertising `proxy.trusted-proxy-presets-v1`.
+- `tako doctor` reports each configured preset's local cache age and warns
+  after 30 days.
+
+A preset trusts **every customer of that CDN**, not just your distribution:
+anyone can point their own CloudFront distribution or Cloudflare zone at your
+origin and send any `X-Forwarded-Host` and `X-Forwarded-For`. Pin
+`X-Forwarded-Host` with `requestHeaders` (config validation warns when a
+preset is used without it), and where the client IP matters, restrict who can
+reach the origin, for example with a secret origin header checked by the app or
+a firewall. Switching a shared node from explicit CIDRs to a preset must happen
+for every route on that node at once, because a preset and its CIDRs are
+different declared sets.
 
 ### Bring-your-own TLS certificates
 

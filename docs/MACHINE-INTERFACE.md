@@ -121,6 +121,13 @@ Events follow `pkg/takoapi/events.Event` (apiVersion
   `kind: job`, `persistent`, or `not present at target`) for each service
   it leaves alone. Including a persistent service with
   `--include-persistent` emits a `warning` event.
+- Commands that write proxy routes (`deploy`, `rollback`, `run`, `scale`,
+  placement apply) resolve `proxy.trustedProxies` presets during proxy
+  preflight. Using a cached range list after a failed fetch, or failing to
+  write the local preset cache, emits a `warning` event with
+  `data.reason: "trusted-proxy-preset"`. When a preset cannot be resolved
+  from the network or a cache younger than 30 days, the command fails before
+  mutation with exit code 1 and an error naming the range URL.
 - Consumers MUST ignore unknown event types, fields, and `data` keys —
   the schema grows additively.
 - `level` is one of `debug`, `info`, `warn`, `error`. Debug events are
@@ -1076,7 +1083,9 @@ provider CLI on the deploying machine.
 - Deployment records store env **keys** only (`<redacted>` values).
 - Generated configs (`tako config export`) redact SSH passwords, environment
   values, volume driver options and labels, proxy basic-auth verifiers, and
-  custom response-header values. Warnings identify every value that must be
+  custom response- and request-header values. Warnings
+  (`proxy_response_header_values_redacted`,
+  `proxy_request_header_values_redacted`) identify every value that must be
   restored before deploying the export.
 
 ### Redaction markers

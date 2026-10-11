@@ -937,9 +937,19 @@ client-supplied leftmost entries cannot override the trusted proxy chain.
 Prefixes broader than `/8` for IPv4 or `/24` for IPv6 are rejected;
 `0.0.0.0/0` and `::/0` are never accepted. Because Caddy's trust set is
 server-global, every route sharing a node that declares `trustedProxies` must
-declare the same nonempty CIDR set; conflicting sets fail before publication
-instead of letting one project weaken another project's trust boundary. Routes
-without `trustedProxies` keep evaluating their allowlist with `remote_ip`.
+declare the same nonempty set (the same explicit CIDRs and the same preset
+names); conflicting sets fail before publication instead of letting one project
+weaken another project's trust boundary. The presets `cloudfront` and
+`cloudflare` are resolved to CIDR snapshots on the deploying machine during
+proxy preflight and shipped with their provenance (fetch time and source
+fingerprint). When routes on one node declare the same preset with snapshots of
+different ages, `takod` uses the newest snapshot of each preset (ties broken by
+the greatest fingerprint), so an older route never regresses a newer range
+list; snapshots dated more than 5 minutes ahead of the node clock are rejected.
+Routes without `trustedProxies` keep evaluating their allowlist with
+`remote_ip`. `proxy.requestHeaders` sets literal upstream headers (Caddy
+`header_up`), such as a pinned `X-Forwarded-Host`; hop-by-hop, framing, `Host`,
+and client-identity headers cannot be set.
 Both controls are validated at config time and again by `takod` before route
 manifests reach the generated Caddy config. Networked domain checks warn when
 an access-controlled route appears to be behind a CDN without trusted proxies.

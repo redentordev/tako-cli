@@ -305,12 +305,20 @@ func applyPreviewPolicy(cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	baseHosts := previewBaseHostSet(services)
 	for _, name := range names {
 		service := services[name]
 		if service.Proxy == nil {
 			continue
 		}
 		proxy := *service.Proxy
+		// requestHeaders and trustedProxies (CIDRs and presets) are
+		// inherited. A request header pinned to one of the base's hosts
+		// (for example X-Forwarded-Host behind a CDN) would make the
+		// preview's upstream build links to the base, so it is dropped and
+		// Caddy's default (the preview host) applies.
+		proxy.RequestHeaders = previewRequestHeaders(proxy.RequestHeaders, baseHosts)
+		proxy.TrustedProxies = append([]string(nil), proxy.TrustedProxies...)
 		if proxy.IsInternal() {
 			proxy.Host = hosts[name]
 		} else {
@@ -706,6 +714,72 @@ func previewIsolationWarnings(cfg *Config) []ValidationWarning {
 				})
 			}
 		}
+		baseHosts := previewBaseHostSet(services)
+		for _, name := range sortedServiceNames(services) {
+			service := services[name]
+			if service.Proxy == nil || (service.IsJob() && !policy.KeepJobs) {
+				continue
+			}
+			for _, header := range droppedPreviewRequestHeaders(service.Proxy.RequestHeaders, baseHosts) {
+				warnings = append(warnings, ValidationWarning{
+					Environment: base,
+					Service:     name,
+					Field:       "proxy.requestHeaders." + header,
+					Message:     fmt.Sprintf("environment %s: proxy.requestHeaders.%s of service %s names a host of %s; previews drop it so the preview host is forwarded instead", base, header, name, base),
+				})
+			}
+		}
 	}
 	return warnings
+}
+
+// previewBaseHostSet returns the lowercased serving, internal and redirect
+// hosts of a preview base's proxied services.
+func previewBaseHostSet(services map[string]ServiceConfig) map[string]bool {
+	set := map[string]bool{}
+	for _, service := range services {
+		if service.Proxy == nil {
+			continue
+		}
+		for _, host := range service.Proxy.GetAllHosts() {
+			set[strings.ToLower(strings.TrimSpace(host))] = true
+		}
+		for _, host := range service.Proxy.GetRedirectDomains() {
+			set[strings.ToLower(strings.TrimSpace(host))] = true
+		}
+	}
+	delete(set, "")
+	return set
+}
+
+// droppedPreviewRequestHeaders returns the sorted request header names whose
+// value is one of the base's hosts.
+func droppedPreviewRequestHeaders(headers map[string]string, baseHosts map[string]bool) []string {
+	var dropped []string
+	for name, value := range headers {
+		if baseHosts[strings.ToLower(strings.TrimSpace(value))] {
+			dropped = append(dropped, name)
+		}
+	}
+	sort.Strings(dropped)
+	return dropped
+}
+
+// previewRequestHeaders copies a base route's request headers for a preview,
+// without the headers pinned to one of the base's hosts.
+func previewRequestHeaders(headers map[string]string, baseHosts map[string]bool) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(headers))
+	for name, value := range headers {
+		if baseHosts[strings.ToLower(strings.TrimSpace(value))] {
+			continue
+		}
+		out[name] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

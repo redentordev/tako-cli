@@ -21,6 +21,7 @@ import (
 	"github.com/redentordev/tako-cli/pkg/nixpacks"
 	"github.com/redentordev/tako-cli/pkg/nodeclient"
 	"github.com/redentordev/tako-cli/pkg/nodeidentity"
+	"github.com/redentordev/tako-cli/pkg/proxypresets"
 	"github.com/redentordev/tako-cli/pkg/scheduler"
 	"github.com/redentordev/tako-cli/pkg/ssh"
 	"github.com/redentordev/tako-cli/pkg/takoapi/events"
@@ -93,6 +94,9 @@ type Deployer struct {
 	assignments              map[string][]scheduler.Assignment
 	registryMinter           RegistryMinter
 	ghCLITokenUsed           atomic.Bool
+	presetResolver           trustedProxyPresetResolver
+	presetSnapshots          map[string]proxypresets.Snapshot
+	presetMu                 sync.Mutex
 	// meshMu guards the per-operation mesh view: the GET /v1/status results
 	// captured while verifying agents and the resolved member addresses that
 	// mesh apply and proxy upstreams share.

@@ -1159,9 +1159,12 @@
                       "type": "array",
                       "items": {
                         "type": "string",
-                        "pattern": "^[^/]+/[0-9]+$"
+                        "anyOf": [
+                          { "pattern": "^[^/]+/[0-9]+$" },
+                          { "enum": ["cloudfront", "cloudflare"] }
+                        ]
                       },
-                      "description": "Explicit proxy/CDN CIDRs whose forwarded client IP headers may be trusted. IPv4 prefixes broader than /8 and IPv6 prefixes broader than /24 are rejected. All routes sharing a proxy node must use the same nonempty set."
+                      "description": "Proxy/CDN CIDRs, or the presets cloudfront and cloudflare, whose forwarded client IP headers may be trusted. Presets are resolved to the CDN's published ranges on the deploying machine (cached for 24 hours in the user cache directory) and require takod capability proxy.trusted-proxy-presets-v1. IPv4 prefixes broader than /8 and IPv6 prefixes broader than /24 are rejected. All routes sharing a proxy node must declare the same nonempty set (same CIDRs and same presets)."
                     },
                     "denyPathPrefixes": {
                       "type": "array",
@@ -1215,6 +1218,24 @@
                         "pattern": "^[^\\s\\x00-\\x1F\\x7F](?:[^\\x00-\\x1F\\x7F]*[^\\s\\x00-\\x1F\\x7F])?$"
                       },
                       "description": "Response headers added or replaced for this route. Hop-by-hop and message-framing headers are rejected."
+                    },
+                    "requestHeaders": {
+                      "type": "object",
+                      "maxProperties": 32,
+                      "propertyNames": {
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*$",
+                        "maxLength": 128,
+                        "not": {
+                          "pattern": "^(?:[Cc][Oo][Nn][Nn][Ee][Cc][Tt][Ii][Oo][Nn]|[Cc][Oo][Nn][Tt][Ee][Nn][Tt]-[Ll][Ee][Nn][Gg][Tt][Hh]|[Hh][Oo][Ss][Tt]|[Hh][Tt][Tt][Pp]2-[Ss][Ee][Tt][Tt][Ii][Nn][Gg][Ss]|[Kk][Ee][Ee][Pp]-[Aa][Ll][Ii][Vv][Ee]|[Pp][Rr][Oo][Xx][Yy]-[Aa][Uu][Tt][Hh][Ee][Nn][Tt][Ii][Cc][Aa][Tt][Ee]|[Pp][Rr][Oo][Xx][Yy]-[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Pp][Rr][Oo][Xx][Yy]-[Cc][Oo][Nn][Nn][Ee][Cc][Tt][Ii][Oo][Nn]|[Tt][Ee]|[Tt][Rr][Aa][Ii][Ll][Ee][Rr]|[Tt][Rr][Aa][Nn][Ss][Ff][Ee][Rr]-[Ee][Nn][Cc][Oo][Dd][Ii][Nn][Gg]|[Uu][Pp][Gg][Rr][Aa][Dd][Ee]|[Xx]-[Ff][Oo][Rr][Ww][Aa][Rr][Dd][Ee][Dd]-[Ff][Oo][Rr]|[Ff][Oo][Rr][Ww][Aa][Rr][Dd][Ee][Dd]|[Xx]-[Rr][Ee][Aa][Ll]-[Ii][Pp])$"
+                        }
+                      },
+                      "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1024,
+                        "pattern": "^[\\x21\\x23-\\x5B\\x5D-\\x7A\\x7C\\x7E](?:[\\x20\\x21\\x23-\\x5B\\x5D-\\x7A\\x7C\\x7E]*[\\x21\\x23-\\x5B\\x5D-\\x7A\\x7C\\x7E])?$"
+                      },
+                      "description": "Literal headers set on every request forwarded to this service (Caddy header_up), for example X-Forwarded-Host: www.example.com behind CloudFront. Overrides Caddy's default X-Forwarded-Host/X-Forwarded-Proto for this route only. Values are visible ASCII without placeholders ({ }), quotes, or backslashes. Hop-by-hop, framing, Host, X-Forwarded-For, Forwarded, and X-Real-IP are rejected. Requires takod capability proxy.request-headers-v1."
                     },
                     "cdn": {
                       "type": "string",

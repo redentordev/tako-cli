@@ -134,8 +134,13 @@ Applied to the synthesized environment only; the base is unchanged:
    to `automatic`.
 4. Replicas are capped at `maxReplicas`.
 5. Proxy routes get the rendered host; `domains`, `redirectFrom`,
-   `dynamicDomains` and `cdn` are cleared. `tls`, `basicAuth`, `allowIps`
-   and the other route settings are kept.
+   `dynamicDomains` and `cdn` are cleared. `tls`, `basicAuth`, `allowIps`,
+   `trustedProxies` (CIDRs and presets such as `cloudflare`, resolved at
+   preview deploy time like any deploy) and the other route settings are
+   kept. `requestHeaders` are kept except a header whose value is one of the
+   base's hosts (for example `X-Forwarded-Host: app.example.com` behind a
+   CDN): previews drop it so the preview host is forwarded instead, and
+   `tako validate` warns about it.
 6. `preview.env` and `preview.services.<name>.env` are merged in.
 
 Preview data is never cloned from the base. Seed it with a `kind: run` step

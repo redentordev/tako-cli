@@ -632,6 +632,11 @@ type ProxyConfig struct {
 
 	// ResponseHeaders adds or replaces response headers for this route.
 	ResponseHeaders map[string]string `yaml:"responseHeaders,omitempty" json:"responseHeaders,omitempty"`
+
+	// RequestHeaders sets literal headers on every request forwarded to the
+	// service (Caddy header_up). Explicit X-Forwarded-Host/X-Forwarded-Proto
+	// values override Caddy's defaults for this route only.
+	RequestHeaders map[string]string `yaml:"requestHeaders,omitempty" json:"requestHeaders,omitempty"`
 }
 
 // ProxyBasicAuthConfig protects a proxy route with HTTP basic auth.
