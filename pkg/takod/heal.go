@@ -539,6 +539,7 @@ func (h *healManager) Tick(ctx context.Context) {
 	if !h.active.Load() {
 		h.engine.Forget(now)
 		h.clearProbes()
+		h.keepEvals(nil)
 		return
 	}
 	samples, sampledAt := h.samples()
@@ -581,6 +582,7 @@ func (h *healManager) Tick(ctx context.Context) {
 	}
 	h.reportBreaker(policyScopes, node, now)
 	h.controlMu.Unlock()
+	h.keepEvals(policyScopes)
 	h.setProbeTargets(targets)
 	h.engine.Forget(now.Add(-10 * time.Minute))
 
@@ -602,6 +604,9 @@ func (h *healManager) applyEvals(scope healScope, control *selfheal.Control, eva
 	for _, eval := range evals {
 		gaveUp, cleared := selfheal.ApplyEval(control, eval, now)
 		if gaveUp || cleared || len(eval.ResetContainers) > 0 {
+			changed = true
+		}
+		if selfheal.PruneContainers(control, eval) {
 			changed = true
 		}
 		for _, entry := range eval.Journal {

@@ -139,6 +139,23 @@ func (h *healManager) remember(project, environment string, evals []selfheal.Ser
 	h.lastEvals[alertScopeKey(project, environment)] = healCachedScope{Evals: append([]selfheal.ServiceEval(nil), evals...), At: now}
 }
 
+// keepEvals drops cached evaluations of scopes that no longer have a
+// healed service (destroyed environments, torn-down previews, policy
+// removed), so the cache does not grow with every preview.
+func (h *healManager) keepEvals(scopes []healScope) {
+	keep := make(map[string]bool, len(scopes))
+	for _, scope := range scopes {
+		keep[alertScopeKey(scope.Project, scope.Environment)] = true
+	}
+	h.statusMu.Lock()
+	defer h.statusMu.Unlock()
+	for key := range h.lastEvals {
+		if !keep[key] {
+			delete(h.lastEvals, key)
+		}
+	}
+}
+
 type healCachedScope struct {
 	Evals []selfheal.ServiceEval
 	At    time.Time
@@ -256,9 +273,7 @@ func (h *healManager) Change(request HealChangeRequest) (*HealChangeResponse, er
 	if err := validateHealChangeRequest(request, now); err != nil {
 		return nil, err
 	}
-	lock := healScopeLock(request.Project, request.Environment)
-	lock.Lock()
-	defer lock.Unlock()
+	defer lockHealScope(request.Project, request.Environment)()
 	h.controlMu.Lock()
 	defer h.controlMu.Unlock()
 	control, err := selfheal.ReadControl(h.dataDir, request.Project, request.Environment)

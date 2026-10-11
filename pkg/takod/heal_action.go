@@ -162,9 +162,7 @@ func (e *healExecutor) Execute(ctx context.Context, candidate selfheal.Candidate
 	}
 	defer releaseFence()
 
-	scopeLock := healScopeLock(candidate.Project, candidate.Environment)
-	scopeLock.Lock()
-	defer scopeLock.Unlock()
+	defer lockHealScope(candidate.Project, candidate.Environment)()
 
 	service, eligible := e.stillEligible(ctx, candidate)
 	if !eligible {

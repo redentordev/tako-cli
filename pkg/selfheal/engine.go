@@ -302,7 +302,11 @@ type ServiceEval struct {
 	ResetContainers []string `json:"-"`
 	// Journal lists decision changes that should be journaled once.
 	Journal []JournalEntry `json:"-"`
-	Window  time.Duration  `json:"-"`
+	// RecordIDs are the container IDs of the service's valid converged
+	// record (empty when the record is missing, converging or invalid).
+	// ApplyEval drops per-container backoff state of any other ID.
+	RecordIDs []string      `json:"-"`
+	Window    time.Duration `json:"-"`
 }
 
 type tracker struct {
@@ -504,6 +508,11 @@ func (e *Engine) evaluateService(scope ScopeInput, in ServiceInput, now time.Tim
 	}
 	serviceControl := control.Lookup(spec.Name)
 	valid := in.Record.Valid(spec.Image)
+	if valid {
+		for _, container := range in.Record.Containers {
+			eval.RecordIDs = append(eval.RecordIDs, container.ID)
+		}
+	}
 	if serviceControl != nil && serviceControl.GaveUp {
 		if valid && in.Record.Revision != serviceControl.GaveUpRevision {
 			eval.ClearGaveUp = true
@@ -901,6 +910,29 @@ func RecordOutcome(control *Control, candidate Candidate, decision string) bool 
 	}
 	service.LastAction = decision
 	return true
+}
+
+// PruneContainers drops per-container backoff state of containers that are
+// no longer in the service's valid converged record (replaced by a deploy,
+// scale or restore), so control.json does not grow with every rollout. The
+// service's action budget is kept. It reports whether anything changed.
+func PruneContainers(control *Control, eval ServiceEval) bool {
+	entry := control.Lookup(eval.Service)
+	if entry == nil || len(eval.RecordIDs) == 0 || len(entry.Containers) == 0 {
+		return false
+	}
+	current := make(map[string]bool, len(eval.RecordIDs))
+	for _, id := range eval.RecordIDs {
+		current[id] = true
+	}
+	changed := false
+	for id := range entry.Containers {
+		if !current[id] {
+			delete(entry.Containers, id)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // ApplyEval applies an evaluation's give-up, clear and reset requests to the

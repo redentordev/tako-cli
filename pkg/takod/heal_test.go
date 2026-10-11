@@ -306,6 +306,82 @@ func TestHealReleasesOnlyOwnStaleSelfHealLeases(t *testing.T) {
 	}
 }
 
+// TestHealPrunesStateOfReplacedContainersAndGoneScopes: per-container
+// backoff of containers a deploy replaced, cached evaluations of destroyed
+// environments and their scope locks are dropped.
+func TestHealPrunesStateOfReplacedContainersAndGoneScopes(t *testing.T) {
+	f := newHealFixture(t)
+	f.crashedWeb()
+	f.manager.Tick(context.Background())
+	control, _ := selfheal.ReadControl(f.dataDir, "demo", "production")
+	if web := control.Lookup("web"); web == nil || web.Containers[healWebID] == nil {
+		t.Fatalf("no backoff state after an action: %+v", control)
+	}
+	// A deploy replaces the container.
+	replacement := strings.Repeat("d", 64)
+	f.record("web", replacement, "demo/web:1", time.Hour)
+	f.mu.Lock()
+	delete(f.samples, healWebID)
+	f.mu.Unlock()
+	f.sample("web", replacement, "running", 0)
+	f.now = f.now.Add(healEvaluateInterval)
+	f.manager.Tick(context.Background())
+	control, _ = selfheal.ReadControl(f.dataDir, "demo", "production")
+	web := control.Lookup("web")
+	if web == nil || web.Containers[healWebID] != nil || len(web.Actions) != 1 {
+		t.Fatalf("control after replacement = %+v, want the old container pruned and the budget kept", web)
+	}
+
+	// The environment is destroyed.
+	if _, ok := f.manager.lastEvals[alertScopeKey("demo", "production")]; !ok {
+		t.Fatal("no cached evaluation before teardown")
+	}
+	if err := healClearScope(f.dataDir, "demo", "production"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(f.dataDir, "desired", "demo", "production")); err != nil {
+		t.Fatal(err)
+	}
+	f.manager.Tick(context.Background())
+	f.manager.statusMu.Lock()
+	cached := len(f.manager.lastEvals)
+	f.manager.statusMu.Unlock()
+	if cached != 0 {
+		t.Fatalf("cached evaluations of a destroyed environment kept: %d", cached)
+	}
+	if got := healScopeLockCount(); got != 0 {
+		t.Fatalf("scope locks kept after use: %d", got)
+	}
+}
+
+func TestHealScopeLockStillExcludes(t *testing.T) {
+	unlock := lockHealScope("demo", "production")
+	acquired := make(chan struct{})
+	go func() {
+		release := lockHealScope("demo", "production")
+		close(acquired)
+		release()
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("second holder acquired a held scope lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case <-acquired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter never acquired the released scope lock")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for healScopeLockCount() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := healScopeLockCount(); got != 0 {
+		t.Fatalf("scope lock entries = %d after all holders released", got)
+	}
+}
+
 func TestHealRestartStopTimeoutIsBounded(t *testing.T) {
 	for value, want := range map[string]time.Duration{"": 10 * time.Second, "15s": 15 * time.Second, "60s": 30 * time.Second, "10m": 30 * time.Second, "bogus": 10 * time.Second} {
 		if got := healRestartStopTimeout(value); got != want {

@@ -482,6 +482,25 @@ func TestBackoffGiveUpAndClear(t *testing.T) {
 	}
 }
 
+func TestPruneContainersKeepsOnlyRecordedIDs(t *testing.T) {
+	f := newFixture(HealthNone)
+	RecordAction(f.control, f.node, Candidate{Service: "web", Container: RecordContainer{ID: "old"}, Window: 30 * time.Minute}, DecisionStarted, f.now)
+	RecordAction(f.control, f.node, Candidate{Service: "web", Container: RecordContainer{ID: "id1"}, Window: 30 * time.Minute}, DecisionStarted, f.now)
+	eval := f.tick(30 * time.Second)
+	if !PruneContainers(f.control, eval) {
+		t.Fatal("nothing pruned")
+	}
+	web := f.control.Lookup("web")
+	if web.Containers["old"] != nil || web.Containers["id1"] == nil || len(web.Actions) != 2 {
+		t.Fatalf("pruned control = %+v", web)
+	}
+	// A converging record names no IDs: nothing is pruned meanwhile.
+	f.service.Record.Converging = true
+	if PruneContainers(f.control, f.tick(30*time.Second)) || web.Containers["id1"] == nil {
+		t.Fatal("pruned against a converging record")
+	}
+}
+
 func TestRecordOutcomeDoesNotCountAgain(t *testing.T) {
 	control, node := &Control{}, &NodeState{}
 	candidate := Candidate{Service: "web", Container: RecordContainer{ID: "id1"}, Window: 30 * time.Minute}

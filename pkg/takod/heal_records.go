@@ -14,11 +14,48 @@ import (
 // restore, cleanup, preview teardown) with a self-healing action's critical
 // section in the same environment, so an in-flight docker restart/start
 // finishes before a teardown or rollout rewrites the record.
-var healScopeLocks sync.Map
+//
+// Entries are reference counted and removed when nobody holds or waits for
+// them, so locks of destroyed environments and torn-down previews do not
+// accumulate for the life of takod.
+var (
+	healScopeLocksMu sync.Mutex
+	healScopeLocks   = map[string]*healScopeLockEntry{}
+)
 
-func healScopeLock(project, environment string) *sync.Mutex {
-	value, _ := healScopeLocks.LoadOrStore(project+"/"+environment, &sync.Mutex{})
-	return value.(*sync.Mutex)
+type healScopeLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockHealScope takes the environment's scope lock and returns its unlock.
+func lockHealScope(project, environment string) func() {
+	key := project + "/" + environment
+	healScopeLocksMu.Lock()
+	entry := healScopeLocks[key]
+	if entry == nil {
+		entry = &healScopeLockEntry{}
+		healScopeLocks[key] = entry
+	}
+	entry.refs++
+	healScopeLocksMu.Unlock()
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		healScopeLocksMu.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(healScopeLocks, key)
+		}
+		healScopeLocksMu.Unlock()
+	}
+}
+
+// healScopeLockCount is the number of live scope-lock entries (tests).
+func healScopeLockCount() int {
+	healScopeLocksMu.Lock()
+	defer healScopeLocksMu.Unlock()
+	return len(healScopeLocks)
 }
 
 var healRecordNow = func() time.Time { return time.Now().UTC() }
@@ -50,9 +87,7 @@ func healMarkConverging(req ReconcileServiceRequest) {
 	if strings.TrimSpace(req.DataDir) == "" || reconcileIsWarmOnly(req) {
 		return
 	}
-	lock := healScopeLock(req.Project, req.Environment)
-	lock.Lock()
-	defer lock.Unlock()
+	defer lockHealScope(req.Project, req.Environment)()
 	logHealRecordError("mark converging", selfheal.MarkConverging(req.DataDir, req.Project, req.Environment, req.Service, req.Image, req.Revision, healRecordNow()))
 }
 
@@ -73,9 +108,7 @@ func healRecordConverged(req ReconcileServiceRequest, started []string, ids map[
 		}
 		containers = append(containers, selfheal.RecordContainer{Name: name, ID: id})
 	}
-	lock := healScopeLock(req.Project, req.Environment)
-	lock.Lock()
-	defer lock.Unlock()
+	defer lockHealScope(req.Project, req.Environment)()
 	logHealRecordError("write", selfheal.Converged(req.DataDir, req.Project, req.Environment, req.Service, selfheal.Record{
 		Image: req.Image, Revision: req.Revision, Containers: containers, Restart: req.Restart, RecordedAt: healRecordNow(),
 	}))
@@ -86,9 +119,7 @@ func healClearRecord(dataDir, project, environment, service string) {
 	if strings.TrimSpace(dataDir) == "" {
 		return
 	}
-	lock := healScopeLock(project, environment)
-	lock.Lock()
-	defer lock.Unlock()
+	defer lockHealScope(project, environment)()
 	logHealRecordError("clear", selfheal.ClearRecord(dataDir, project, environment, service))
 }
 
@@ -98,9 +129,7 @@ func healClearRecordUnlessRevision(dataDir, project, environment, service, keepR
 	if strings.TrimSpace(dataDir) == "" {
 		return
 	}
-	lock := healScopeLock(project, environment)
-	lock.Lock()
-	defer lock.Unlock()
+	defer lockHealScope(project, environment)()
 	if keepRevision != "" {
 		record, err := selfheal.ReadRecord(dataDir, project, environment, service)
 		if err == nil && record != nil && record.Revision == keepRevision {
@@ -123,15 +152,11 @@ func healClearScope(dataDir, project, environment string) error {
 			return err
 		}
 		for _, env := range environments {
-			lock := healScopeLock(project, env)
-			lock.Lock()
-			lock.Unlock()
+			lockHealScope(project, env)()
 		}
 		return selfheal.ClearProject(dataDir, project)
 	}
-	lock := healScopeLock(project, environment)
-	lock.Lock()
-	defer lock.Unlock()
+	defer lockHealScope(project, environment)()
 	return selfheal.ClearScope(dataDir, project, environment)
 }
 
@@ -143,9 +168,7 @@ func healRecordRestored(dataDir string, state *retainedServiceState) {
 	if strings.TrimSpace(dataDir) == "" || state == nil {
 		return
 	}
-	lock := healScopeLock(state.Project, state.Environment)
-	lock.Lock()
-	defer lock.Unlock()
+	defer lockHealScope(state.Project, state.Environment)()
 	restored := make([]selfheal.RecordContainer, 0, len(state.Containers))
 	for _, retained := range state.Containers {
 		restored = append(restored, selfheal.RecordContainer{Name: retained.Name, ID: retained.ID})
