@@ -881,6 +881,84 @@ func TestParseUnrotatedContainers(t *testing.T) {
 	}
 }
 
+func TestContainerLoggingPolicyKeepsLastGoodOnProbeFailure(t *testing.T) {
+	policy := newContainerLoggingPolicy(false, "", 0)
+	policy.daemonJSONPath = filepath.Join(t.TempDir(), "daemon.json")
+	policy.extraDaemonJSONPaths = nil
+	policy.dockerdArgs = nil
+	probeErr := errors.New("context deadline exceeded")
+	policy.loggingDriver = func(context.Context) (string, error) { return "", probeErr }
+	// At startup with no good result the default is not applied, but the
+	// probe is retried soon.
+	if status := policy.Refresh(context.Background()); status.Active || !policy.NeedsRetry() {
+		t.Fatalf("startup probe failure = %+v retry=%t", status, policy.NeedsRetry())
+	}
+	policy.loggingDriver = func(context.Context) (string, error) { return "json-file", nil }
+	if status := policy.Refresh(context.Background()); !status.Active || policy.NeedsRetry() || policy.Current() == nil {
+		t.Fatalf("probe recovery = %+v", status)
+	}
+	// A failed or slow probe keeps the last good default.
+	policy.loggingDriver = func(context.Context) (string, error) { return "", probeErr }
+	status := policy.Refresh(context.Background())
+	if !status.Active || policy.Current() == nil || !strings.Contains(status.Reason, "last docker probe failed") || !policy.NeedsRetry() {
+		t.Fatalf("probe failure dropped the default: %+v current=%v", status, policy.Current())
+	}
+}
+
+func TestContainerLoggingPolicyOperatorConfigSources(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	snap := write("snap-daemon.json", `{"log-opts":{"max-size":"5m"}}`)
+	custom := write("custom-daemon.json", `{"log-driver":"local"}`)
+	cases := []struct {
+		name     string
+		extra    []string
+		args     []string
+		contains string
+	}{
+		{name: "snap daemon.json", extra: []string{snap}, contains: "snap-daemon.json sets log-opts"},
+		{name: "--config-file", args: []string{"/usr/bin/dockerd", "--config-file", custom}, contains: "sets log-driver"},
+		{name: "--config-file=", args: []string{"/usr/bin/dockerd", "--config-file=" + custom}, contains: "sets log-driver"},
+		{name: "--log-opt", args: []string{"/usr/bin/dockerd", "-H", "fd://", "--log-opt", "max-size=5m"}, contains: "--log-opt"},
+		{name: "--log-driver=", args: []string{"/usr/bin/dockerd", "--log-driver=json-file"}, contains: "--log-driver"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := newContainerLoggingPolicy(false, "", 0)
+			policy.daemonJSONPath = filepath.Join(dir, "absent.json")
+			policy.extraDaemonJSONPaths = tc.extra
+			args := tc.args
+			policy.dockerdArgs = func(context.Context) []string { return args }
+			policy.loggingDriver = func(context.Context) (string, error) { return "json-file", nil }
+			status := policy.Refresh(context.Background())
+			if status.Active || policy.Current() != nil || !strings.Contains(status.Reason, tc.contains) {
+				t.Fatalf("status = %+v", status)
+			}
+		})
+	}
+	proc := filepath.Join(dir, "proc")
+	for pid, comm := range map[string]string{"1": "systemd", "812": "dockerd"} {
+		if err := os.MkdirAll(filepath.Join(proc, pid), 0755); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(filepath.Join(proc, pid, "comm"), []byte(comm+"\n"), 0600)
+		_ = os.WriteFile(filepath.Join(proc, pid, "cmdline"), []byte("/usr/bin/"+comm+"\x00--log-opt\x00max-size=5m\x00"), 0600)
+	}
+	if got := dockerdArgsFromProc(proc); !slices.Equal(got, []string{"/usr/bin/dockerd", "--log-opt", "max-size=5m"}) {
+		t.Fatalf("proc args = %q", got)
+	}
+	execStart := "{ path=/usr/bin/dockerd ; argv[]=/usr/bin/dockerd -H fd:// --config-file /etc/custom.json ; ignore_errors=no ; start_time=[n/a] }"
+	if got := parseSystemdExecStartArgs(execStart); !slices.Equal(got, []string{"/usr/bin/dockerd", "-H", "fd://", "--config-file", "/etc/custom.json"}) {
+		t.Fatalf("systemd args = %q", got)
+	}
+}
+
 func TestContainerLoggingPolicyCases(t *testing.T) {
 	dir := t.TempDir()
 	cases := []struct {
@@ -909,6 +987,8 @@ func TestContainerLoggingPolicyCases(t *testing.T) {
 				}
 			}
 			policy.loggingDriver = func(context.Context) (string, error) { return tc.driver, nil }
+			policy.extraDaemonJSONPaths = nil
+			policy.dockerdArgs = nil
 			status := policy.Refresh(context.Background())
 			published := policy.Current()
 			if status.Active != tc.active || (tc.contains != "" && !strings.Contains(status.Reason, tc.contains)) {

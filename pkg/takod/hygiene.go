@@ -403,7 +403,18 @@ func (h *hygieneManager) admitWithReclaim(admit func(...string) error) func(...s
 // Run is the hygiene loop. It refreshes the logging guard on every check
 // tick; with a zero maintenance interval it runs nothing autonomously.
 func (h *hygieneManager) Run(ctx context.Context) {
-	h.logging.Refresh(ctx)
+	// A failed docker probe of the logging guard is retried every
+	// loggingPolicyRetryInterval until it succeeds.
+	retry := time.NewTimer(loggingPolicyRetryInterval)
+	retry.Stop()
+	defer retry.Stop()
+	refreshLogging := func() {
+		h.logging.Refresh(ctx)
+		if h.logging.NeedsRetry() {
+			retry.Reset(loggingPolicyRetryInterval)
+		}
+	}
+	refreshLogging()
 	checkTicker := time.NewTicker(h.check)
 	defer checkTicker.Stop()
 	var maintenance <-chan time.Time
@@ -417,8 +428,10 @@ func (h *hygieneManager) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-retry.C:
+			refreshLogging()
 		case <-checkTicker.C:
-			h.logging.Refresh(ctx)
+			refreshLogging()
 			if h.maintenance > 0 {
 				h.PressureCheck(ctx)
 			}
