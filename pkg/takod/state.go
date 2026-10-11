@@ -75,6 +75,11 @@ func WriteStateDocument(ctx context.Context, dataDir string, req StateDocumentRe
 	if err != nil {
 		return nil, err
 	}
+	if req.Document == stateDocumentPreview {
+		if err := checkPreviewRecordCreation(dataDir, req.Project, req.Environment); err != nil {
+			return nil, err
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create state directory: %w", err)
 	}

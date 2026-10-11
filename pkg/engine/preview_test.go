@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +24,8 @@ type fakePreviewNode struct {
 	records      []takod.PreviewRecord
 	failCleanup  error
 	failStatus   error
+	// documents marks "<environment>/<document>" state documents as found.
+	documents map[string]bool
 
 	mu       sync.Mutex
 	requests []fakePreviewRequest
@@ -75,6 +78,12 @@ func (n *fakePreviewNode) RequestJSONWithTimeout(_ context.Context, method strin
 		n.records = []takod.PreviewRecord{record}
 		return `{"found":true}`, nil
 	case strings.HasPrefix(endpoint, "/v1/state"):
+		if parsed, err := url.Parse(endpoint); err == nil {
+			query := parsed.Query()
+			if n.documents[query.Get("environment")+"/"+query.Get("document")] {
+				return `{"found":true,"content":"{}"}`, nil
+			}
+		}
 		return `{"found":false}`, nil
 	}
 	return "", fmt.Errorf("unexpected request %s %s", method, endpoint)
@@ -113,6 +122,9 @@ type fakePreviewFleet struct {
 	unreachable map[string]bool
 	heldLeases  map[string]bool
 	leases      []string
+	// onAcquire runs after a lease is granted, before the operation reads
+	// anything under it.
+	onAcquire func(env string)
 }
 
 func (f *fakePreviewFleet) install(e *Engine) {
@@ -124,6 +136,9 @@ func (f *fakePreviewFleet) install(e *Engine) {
 					return nil, nil, &LockedError{Operation: operation, Err: fmt.Errorf("lease for %s is held", env)}
 				}
 				f.leases = append(f.leases, env+":"+strings.Join(servers, ","))
+				if f.onAcquire != nil {
+					f.onAcquire(env)
+				}
 				return ctx, func() {}, nil
 			},
 			close: func() {},
@@ -298,6 +313,14 @@ func TestDestroyPreviewSendsOneGuardedTeardownPerServer(t *testing.T) {
 		if request.Environment != "preview-pr-42" || !request.RemovePreviewData || request.RemoveImages || len(request.ImageRepositories) > 0 || request.RemoveDeployFiles {
 			t.Fatalf("%s teardown = %#v", server, request)
 		}
+	}
+	// Each server's request carries the updatedAt of its own record, read
+	// under the lease; a server without a record sends none.
+	if got := fleet.nodes["a"].cleanupRequests()[0].PreviewUpdatedAt; got == nil || !got.Equal(record.UpdatedAt) {
+		t.Fatalf("a: previewUpdatedAt = %v, want %v", got, record.UpdatedAt)
+	}
+	if got := fleet.nodes["b"].cleanupRequests()[0].PreviewUpdatedAt; got != nil {
+		t.Fatalf("b: previewUpdatedAt = %v, want none", got)
 	}
 	if got := fleet.nodes["base"].cleanupRequests(); len(got) != 0 {
 		t.Fatalf("a server outside the preview got a teardown: %#v", got)
@@ -544,14 +567,203 @@ func TestPreparePreviewDeployPrunesExpiredBeforeCounting(t *testing.T) {
 	e, _ := newPreviewTestEngine(t)
 	fleet.install(e)
 	// max is 2: pr-1 plus the expired stale preview would block pr-3 unless
-	// the prune runs first.
+	// the prune runs first. Planning only discounts the expired preview;
+	// Apply prunes it before the record write.
 	session := newPreviewDeploySession(t, e, "pr-3", &DeployPreviewOptions{})
 	if err := e.preparePreviewDeploy(context.Background(), session); err != nil {
 		t.Fatalf("prepare with prune: %v", err)
 	}
+	if requests := node.cleanupRequests(); len(requests) != 0 {
+		t.Fatalf("planning pruned: %#v", requests)
+	}
+	session.preview.clientFor = fleet.clientFor
+	session.mutationServerNames = []string{"app-1"}
+	if err := session.applyPreviewBeforeMutation(context.Background()); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
 	requests := node.cleanupRequests()
 	if len(requests) != 1 || requests[0].Environment != "preview-stale" {
 		t.Fatalf("prune teardowns = %#v", requests)
+	}
+	if writes := node.recordWrites(); len(writes) != 1 || writes[0].Name != "pr-3" {
+		t.Fatalf("record writes = %#v", writes)
+	}
+}
+
+func TestPreparePreviewDeployIsReadOnly(t *testing.T) {
+	// A plan-only, cancelled or refused deploy must neither prune expired
+	// previews (deleting their volumes) nor leave a record behind.
+	now := time.Now()
+	node := &fakePreviewNode{capabilities: previewCapabilities, records: []takod.PreviewRecord{
+		previewRecord("stale", "preview", []string{"app-1"}, now.Add(-100*time.Hour), timePointer(now.Add(-time.Hour))),
+	}}
+	box := &fakePreviewNode{capabilities: previewCapabilities}
+	fleet := &fakePreviewFleet{nodes: map[string]*fakePreviewNode{"app-1": node, "preview-box": box}}
+	e, _ := newPreviewTestEngine(t)
+	fleet.install(e)
+	session := newPreviewDeploySession(t, e, "pr-3", &DeployPreviewOptions{})
+	if err := e.preparePreviewDeploy(context.Background(), session); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	for name, n := range fleet.nodes {
+		if requests := n.cleanupRequests(); len(requests) != 0 {
+			t.Fatalf("%s: planning sent teardowns %#v", name, requests)
+		}
+		if writes := n.recordWrites(); len(writes) != 0 {
+			t.Fatalf("%s: planning wrote records %#v", name, writes)
+		}
+	}
+	if len(fleet.leases) != 0 {
+		t.Fatalf("planning took preview leases %v", fleet.leases)
+	}
+}
+
+func TestApplyPreviewRechecksLimitWhenPruneCannotFreeASlot(t *testing.T) {
+	now := time.Now()
+	node := &fakePreviewNode{capabilities: previewCapabilities, records: []takod.PreviewRecord{
+		previewRecord("pr-1", "preview", []string{"app-1"}, now, timePointer(now.Add(time.Hour))),
+		previewRecord("busy", "preview", []string{"app-1"}, now.Add(-100*time.Hour), timePointer(now.Add(-time.Hour))),
+	}}
+	fleet := &fakePreviewFleet{
+		nodes:      map[string]*fakePreviewNode{"app-1": node, "preview-box": {capabilities: previewCapabilities}},
+		heldLeases: map[string]bool{"preview-busy": true},
+	}
+	e, _ := newPreviewTestEngine(t)
+	fleet.install(e)
+	session := newPreviewDeploySession(t, e, "pr-3", &DeployPreviewOptions{})
+	if err := e.preparePreviewDeploy(context.Background(), session); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	session.preview.clientFor = fleet.clientFor
+	session.mutationServerNames = []string{"app-1"}
+	err := session.applyPreviewBeforeMutation(context.Background())
+	if Classify(err) != ClassInvalid || !strings.Contains(err.Error(), "preview limit reached") {
+		t.Fatalf("err = %v, want the limit error after a skipped prune", err)
+	}
+	if writes := node.recordWrites(); len(writes) != 0 {
+		t.Fatalf("record written past the limit: %#v", writes)
+	}
+}
+
+func TestPreparePreviewDeployRefusesDeclaredEnvironmentState(t *testing.T) {
+	for _, document := range []string{"desired", "history"} {
+		t.Run(document, func(t *testing.T) {
+			// A declared environment preview-demo was deployed from another
+			// branch; this config lacks it and asks for preview demo.
+			node := &fakePreviewNode{capabilities: previewCapabilities, documents: map[string]bool{"preview-demo/" + document: true}}
+			fleet := &fakePreviewFleet{nodes: map[string]*fakePreviewNode{"app-1": node, "preview-box": {capabilities: previewCapabilities}}}
+			e, _ := newPreviewTestEngine(t)
+			fleet.install(e)
+			session := newPreviewDeploySession(t, e, "demo", &DeployPreviewOptions{NoPrune: true})
+			err := e.preparePreviewDeploy(context.Background(), session)
+			if Classify(err) != ClassInvalid || !strings.Contains(err.Error(), "declared environment") {
+				t.Fatalf("err = %v, want invalid refusing to adopt the declared environment", err)
+			}
+			if writes := node.recordWrites(); len(writes) != 0 {
+				t.Fatalf("record written: %#v", writes)
+			}
+		})
+	}
+
+	// An existing preview's own state never blocks its redeploy.
+	now := time.Now()
+	node := &fakePreviewNode{
+		capabilities: previewCapabilities,
+		records:      []takod.PreviewRecord{previewRecord("demo", "preview", []string{"app-1"}, now, nil)},
+		documents:    map[string]bool{"preview-demo/desired": true, "preview-demo/history": true},
+	}
+	fleet := &fakePreviewFleet{nodes: map[string]*fakePreviewNode{"app-1": node, "preview-box": {capabilities: previewCapabilities}}}
+	e, _ := newPreviewTestEngine(t)
+	fleet.install(e)
+	if err := e.preparePreviewDeploy(context.Background(), newPreviewDeploySession(t, e, "demo", &DeployPreviewOptions{NoPrune: true})); err != nil {
+		t.Fatalf("redeploy of existing preview: %v", err)
+	}
+}
+
+const declaredPreviewNamedConfigYAML = `project:
+  name: demo
+  version: 1.0.0
+servers:
+  app-1:
+    host: 192.0.2.10
+    user: deploy
+    password: test-password
+environments:
+  preview-demo:
+    servers: [app-1]
+    services:
+      web:
+        image: nginx:1
+        port: 80
+`
+
+func TestDeclaredDeployRefusedWhilePreviewRecordExists(t *testing.T) {
+	cfg, err := config.ParseConfigDocumentWithOptions([]byte(declaredPreviewNamedConfigYAML), false, config.LoadOptions{})
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	node := &fakePreviewNode{capabilities: previewCapabilities, records: []takod.PreviewRecord{
+		previewRecord("demo", "preview", []string{"app-1"}, time.Now(), nil),
+	}}
+	fleet := &fakePreviewFleet{nodes: map[string]*fakePreviewNode{"app-1": node}}
+	e, _ := newPreviewTestEngine(t)
+	fleet.install(e)
+	session := &DeploySession{engine: e, cfg: cfg, envName: "preview-demo", req: DeployRequest{Config: cfg, Environment: "preview-demo"}}
+	err = e.preparePreviewDeploy(context.Background(), session)
+	if Classify(err) != ClassInvalid || !strings.Contains(err.Error(), "tako preview destroy demo") {
+		t.Fatalf("err = %v, want invalid naming the preview", err)
+	}
+
+	node.records = nil
+	if err := e.preparePreviewDeploy(context.Background(), session); err != nil || session.preview != nil {
+		t.Fatalf("declared deploy without a preview record: err = %v, preview = %#v", err, session.preview)
+	}
+}
+
+func TestPreparePreviewDeployAllowsRedeployAfterMaxLowered(t *testing.T) {
+	now := time.Now()
+	future := timePointer(now.Add(time.Hour))
+	node := &fakePreviewNode{capabilities: previewCapabilities, records: []takod.PreviewRecord{
+		previewRecord("pr-1", "preview", []string{"app-1"}, now, future),
+		previewRecord("pr-2", "preview", []string{"app-1"}, now, future),
+		previewRecord("pr-3", "preview", []string{"app-1"}, now, future),
+	}}
+	fleet := &fakePreviewFleet{nodes: map[string]*fakePreviewNode{"app-1": node, "preview-box": {capabilities: previewCapabilities}}}
+	e, _ := newPreviewTestEngine(t)
+	fleet.install(e)
+	// max is 2 and three previews exist (max was lowered): existing ones
+	// still redeploy; only a new one is refused.
+	if err := e.preparePreviewDeploy(context.Background(), newPreviewDeploySession(t, e, "pr-1", &DeployPreviewOptions{NoPrune: true})); err != nil {
+		t.Fatalf("redeploy of pr-1: %v", err)
+	}
+	if err := e.preparePreviewDeploy(context.Background(), newPreviewDeploySession(t, e, "pr-4", &DeployPreviewOptions{NoPrune: true})); Classify(err) != ClassInvalid {
+		t.Fatalf("new preview over the limit: err = %v", err)
+	}
+}
+
+func TestPrunePreviewsSkipsPreviewRedeployedAfterListing(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	expired := previewRecord("old", "preview", []string{"a"}, now.Add(-200*time.Hour), timePointer(now.Add(-time.Hour)))
+	node := &fakePreviewNode{capabilities: previewCapabilities, records: []takod.PreviewRecord{expired}}
+	fleet := &fakePreviewFleet{nodes: map[string]*fakePreviewNode{"a": node}}
+	// A deploy of the preview finishes between the prune's listing and its
+	// lease: the record now carries a new expiry.
+	fleet.onAcquire = func(env string) {
+		if env == "preview-old" {
+			node.records = []takod.PreviewRecord{previewRecord("old", "preview", []string{"a"}, now, timePointer(now.Add(72*time.Hour)))}
+		}
+	}
+	e, _ := newPreviewTestEngine(t)
+	fleet.install(e)
+	result, err := e.PrunePreviews(context.Background(), PreviewPruneRequest{Config: previewTestConfig("a"), Now: now})
+	if err != nil {
+		t.Fatalf("PrunePreviews: %v", err)
+	}
+	if len(result.Destroyed) != 0 || len(result.Skipped) != 1 || result.Skipped[0].Name != "old" {
+		t.Fatalf("result = %#v, want the redeployed preview skipped", result)
+	}
+	if requests := node.cleanupRequests(); len(requests) != 0 {
+		t.Fatalf("redeployed preview was torn down: %#v", requests)
 	}
 }
 

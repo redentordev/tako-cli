@@ -171,11 +171,15 @@ non-production credentials for previews.
 
 - Each deploy sets `expiresAt` to now plus the ttl (`--ttl` for that deploy,
   else the template's `ttl`). A failed deploy does not extend it.
-- `tako preview prune` destroys every expired preview. `tako deploy
-  --preview` runs the same prune first (best effort; `--no-prune` skips it)
-  and then checks `max` for the base. Reaching `max` exits 2 and lists the
-  existing previews. Previews left by failed first deploys count, because
-  they still hold containers and volumes.
+- `tako preview prune` destroys every expired preview. A preview that was
+  redeployed while the prune waited for its lease is skipped. `tako deploy
+  --preview` runs the same prune just before it changes anything (best
+  effort; `--no-prune` skips it), so `--plan-only` or a declined
+  confirmation never prunes or records anything.
+- A new preview is checked against `max` for the base. Reaching `max` exits
+  2 and lists the existing previews. Previews left by failed first deploys
+  count, because they still hold containers and volumes. Redeploying an
+  existing preview is never blocked by `max`, even after lowering it.
 - `tako preview list` marks expired previews, and `tako doctor` warns about
   them.
 - Schedule `tako preview prune --yes` (for example nightly in CI) so expired
@@ -217,6 +221,8 @@ skips such servers with a warning.
 | `several environments declare a preview: block` | Choose the base with `-e`. |
 | `preview pr-42 was created from preview, not staging` | A preview keeps its base; drop `-e` or destroy it first. |
 | `preview limit reached` | Destroy a preview, run `tako preview prune --yes`, or raise `max`. |
+| `environment preview-NAME already has desired state … it is a declared environment` | A declared environment uses the preview's identity (perhaps on another branch). Choose another preview name. |
+| `environment preview-NAME is preview NAME …` on `deploy -e preview-NAME` | A preview owns that name; destroy it before deploying a declared environment of that name. |
 | `service web publishes host ports` (or bind mounts, shared volumes, imports) | Override the key in the template, for example `ports: null`. |
 | `host … is already served by environment …` | Change `preview.domain` so previews get their own hosts. |
 | Domain check pending | Create the wildcard DNS record. |

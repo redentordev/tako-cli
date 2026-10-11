@@ -472,7 +472,7 @@ func (e *Engine) DestroyPreview(ctx context.Context, req PreviewDestroyRequest) 
 		return finish(nil)
 	}
 	result.Base = item.Base
-	outcome, err := e.teardownPreview(ctx, cfg, runtime, item, req.LoadInstance, false)
+	outcome, err := e.teardownPreview(ctx, cfg, runtime, item, req.LoadInstance, false, time.Now())
 	result.Servers = outcome.servers
 	result.VolumesRemoved = outcome.volumes
 	if err != nil {
@@ -495,10 +495,19 @@ type previewTeardownOutcome struct {
 	volumes int
 }
 
+// previewSkipError reports a prune that left a preview alone after
+// re-reading its record under the lease.
+type previewSkipError struct {
+	reason string
+}
+
+func (e *previewSkipError) Error() string { return e.reason }
+
 // teardownPreview removes one preview: it takes the preview's leases on
 // every target server, requires preview.lifecycle-v1 on all of them before
-// any mutation, and sends each server one guarded RemovePreviewData request.
-func (e *Engine) teardownPreview(ctx context.Context, cfg *config.Config, runtime *previewRuntime, item *PreviewListItem, load PreviewInstanceLoader, pruning bool) (previewTeardownOutcome, error) {
+// any mutation, re-reads the record, and sends each server one guarded
+// RemovePreviewData request. now is the clock a prune judges expiry by.
+func (e *Engine) teardownPreview(ctx context.Context, cfg *config.Config, runtime *previewRuntime, item *PreviewListItem, load PreviewInstanceLoader, pruning bool, now time.Time) (previewTeardownOutcome, error) {
 	outcome := previewTeardownOutcome{servers: []PreviewDestroyServer{}}
 	identity := item.Environment
 	services := map[string]config.ServiceConfig{}
@@ -563,6 +572,36 @@ func (e *Engine) teardownPreview(ctx context.Context, cfg *config.Config, runtim
 		}
 		clients[server] = client
 	}
+	// The listing that chose this preview may be stale: re-read the record
+	// under the lease. A prune skips a preview that was redeployed (and so
+	// is no longer expired) or destroyed meanwhile, and every server's
+	// request carries the updatedAt read here for takod to compare.
+	recordUpdatedAt := map[string]time.Time{}
+	var fresh *takod.PreviewRecord
+	for _, server := range serverNames {
+		response, err := readPreviewListing(ctx, clients[server], cfg)
+		if err != nil {
+			return outcome, fmt.Errorf("%s: re-read preview record: %w", server, err)
+		}
+		for index := range response.Previews {
+			record := response.Previews[index]
+			if record.Project != cfg.Project.Name || record.Environment != identity {
+				continue
+			}
+			recordUpdatedAt[server] = record.UpdatedAt
+			if fresh == nil || record.UpdatedAt.After(fresh.UpdatedAt) {
+				fresh = &record
+			}
+		}
+	}
+	if pruning {
+		switch {
+		case fresh == nil:
+			return outcome, &previewSkipError{reason: "already destroyed"}
+		case previewStatus(fresh.ExpiresAt, now) != PreviewStatusExpired:
+			return outcome, &previewSkipError{reason: "redeployed since the listing; no longer expired"}
+		}
+	}
 	for _, server := range serverNames {
 		desired, err := takodstate.NewManager(clients[server], cfg, identity).ReadDesired()
 		if err != nil {
@@ -584,7 +623,11 @@ func (e *Engine) teardownPreview(ctx context.Context, cfg *config.Config, runtim
 		if err := ctx.Err(); err != nil {
 			return outcome, err
 		}
-		response, err := CleanupViaTakodContext(ctx, clients[server], cfg, request)
+		serverRequest := request
+		if updatedAt, ok := recordUpdatedAt[server]; ok {
+			serverRequest.PreviewUpdatedAt = &updatedAt
+		}
+		response, err := CleanupViaTakodContext(ctx, clients[server], cfg, serverRequest)
 		if err != nil {
 			row.Status = PreviewDestroyStatusFailed
 			row.Error = e.RedactSensitive(err.Error())
@@ -685,9 +728,14 @@ func (e *Engine) prunePreviews(ctx context.Context, cfg *config.Config, runtime 
 			result.Destroyed = append(result.Destroyed, entry)
 			continue
 		}
-		_, err := e.teardownPreview(ctx, cfg, runtime, item, load, true)
+		_, err := e.teardownPreview(ctx, cfg, runtime, item, load, true, now)
 		var locked *LockedError
+		var skipped *previewSkipError
 		switch {
+		case errors.As(err, &skipped):
+			entry.Reason = skipped.reason
+			result.Skipped = append(result.Skipped, entry)
+			e.debug(events.TypeLogLine, events.PhaseCleanup, fmt.Sprintf("→ Skipped preview %s: %s\n", item.Name, skipped.reason))
 		case err == nil:
 			result.Destroyed = append(result.Destroyed, entry)
 			e.emit(events.Event{
@@ -738,15 +786,21 @@ func (p *previewDeployState) expiresAt(now time.Time) *time.Time {
 	return &expires
 }
 
-// preparePreviewDeploy runs the preview checks of `deploy --preview` before
-// any build or mutation: capability on every target server, base mismatch,
-// opportunistic prune and the max limit (D6, D7, D12).
+// preparePreviewDeploy runs the read-only preview checks of `deploy
+// --preview` during planning, before any build or mutation: capability on
+// every target server, base mismatch, adoption of a declared environment's
+// state, and the max limit (D6, D7, D12). The opportunistic prune and the
+// record write happen in Apply (applyPreviewBeforeMutation), so a plan-only,
+// cancelled or refused deploy changes nothing.
 func (e *Engine) preparePreviewDeploy(ctx context.Context, session *DeploySession) error {
 	cfg := session.cfg
 	info := cfg.PreviewInstance()
 	if info == nil || info.Identity != session.envName {
 		if session.req.Preview != nil {
 			return invalidRequestf("deploy --preview requires a config loaded for the preview")
+		}
+		if takod.IsPreviewEnvironment(session.envName) {
+			return e.refuseDeclaredDeployOverPreview(ctx, cfg, session.envName)
 		}
 		return nil
 	}
@@ -793,6 +847,7 @@ func (e *Engine) preparePreviewDeploy(ctx context.Context, session *DeploySessio
 		return err
 	}
 	defer runtime.close()
+	clients := map[string]any{}
 	for _, server := range targets {
 		client, err := runtime.clientFor(ctx, server)
 		if err != nil {
@@ -801,6 +856,7 @@ func (e *Engine) preparePreviewDeploy(ctx context.Context, session *DeploySessio
 		if err := requirePreviewCapability(ctx, client, cfg, server); err != nil {
 			return err
 		}
+		clients[server] = client
 	}
 
 	now := time.Now()
@@ -813,19 +869,41 @@ func (e *Engine) preparePreviewDeploy(ctx context.Context, session *DeploySessio
 		record := existing.PreviewRecord
 		state.existing = &record
 	}
-	if !opts.NoPrune {
-		prune := &PreviewPruneResult{}
-		if err := e.prunePreviews(ctx, cfg, runtime, opts.LoadInstance, false, now, info.Identity, prune); err != nil {
-			e.warn(events.PhasePlan, fmt.Sprintf("⚠ preview prune: %v (the deploy continues)\n", err))
+	if state.existing == nil {
+		// A new preview must not adopt a declared environment of the same
+		// name: its containers, volumes and state would become preview data
+		// that preview destroy removes.
+		for _, server := range targets {
+			found, err := identityDeployState(ctx, clients[server], cfg, info.Identity)
+			if err != nil {
+				return fmt.Errorf("%s: %w", server, err)
+			}
+			if found != "" {
+				return invalidRequestf("environment %s already has %s on %s but no preview record; it is a declared environment, not preview %s. Choose another preview name", info.Identity, found, server, info.Name)
+			}
 		}
-		if len(prune.Destroyed) > 0 {
-			listing = collectPreviewListing(ctx, cfg, sortedServerNames(cfg), runtime.clientFor, now)
+		// Expired previews do not count when the prune in Apply will remove
+		// them; Apply checks the limit again after the prune.
+		if err := checkPreviewLimit(info, listing.items, !opts.NoPrune); err != nil {
+			return err
 		}
 	}
+	session.preview = state
+	return nil
+}
+
+// checkPreviewLimit fails when the base already has preview.max previews
+// other than the one being created. ignoreExpired leaves out expired
+// previews that the opportunistic prune is about to remove. Redeploys of an
+// existing preview never call it, so lowering preview.max never blocks them.
+func checkPreviewLimit(info *config.PreviewInstanceInfo, items []PreviewListItem, ignoreExpired bool) error {
 	limit := info.Policy.EffectiveMax()
 	var others []string
-	for _, item := range listing.items {
+	for _, item := range items {
 		if item.Base != info.Base || item.Environment == info.Identity {
+			continue
+		}
+		if ignoreExpired && item.Status == PreviewStatusExpired {
 			continue
 		}
 		expiry := "never"
@@ -837,8 +915,101 @@ func (e *Engine) preparePreviewDeploy(ctx context.Context, session *DeploySessio
 	if len(others) >= limit {
 		return invalidRequestf("preview limit reached: %s allows %d preview(s) and has %s; destroy one with tako preview destroy <name> or raise preview.max", info.Base, limit, strings.Join(others, ", "))
 	}
-	session.preview = state
 	return nil
+}
+
+// identityDeployState names the deploy state the node holds for
+// environment (its desired revision or deployment history); empty means
+// neither exists.
+func identityDeployState(ctx context.Context, client any, cfg *config.Config, environment string) (string, error) {
+	for _, document := range []struct{ name, label string }{{"desired", "desired state"}, {"history", "deployment history"}} {
+		output, err := takodclient.RequestJSONWithContext(ctx, client, TakodSocketFromConfig(cfg), "GET", takodclient.StateEndpoint(cfg.Project.Name, environment, document.name), nil)
+		if err != nil {
+			return "", fmt.Errorf("read %s of %s: %w", document.label, environment, err)
+		}
+		var response takod.StateDocumentResponse
+		if err := json.Unmarshal([]byte(output), &response); err != nil {
+			return "", fmt.Errorf("parse %s of %s: %w", document.label, environment, err)
+		}
+		if response.Found {
+			return document.label, nil
+		}
+	}
+	return "", nil
+}
+
+// refuseDeclaredDeployOverPreview fails a deploy of a declared environment
+// named preview-* while a preview record exists for that name: the deploy
+// would replace the preview's containers and a later preview destroy or
+// prune would remove the declared environment's data.
+func (e *Engine) refuseDeclaredDeployOverPreview(ctx context.Context, cfg *config.Config, environment string) error {
+	servers, err := cfg.GetEnvironmentServers(environment)
+	if err != nil || len(servers) == 0 {
+		return nil
+	}
+	runtime, err := e.newPreviewRuntime(cfg)
+	if err != nil {
+		return err
+	}
+	defer runtime.close()
+	for _, server := range servers {
+		client, err := runtime.clientFor(ctx, server)
+		if err != nil {
+			return err
+		}
+		capable, err := takodHasCapability(ctx, client, cfg, takod.CapabilityPreviewLifecycleV1)
+		if err != nil {
+			return fmt.Errorf("%s: %w", server, err)
+		}
+		if !capable {
+			continue
+		}
+		response, err := readPreviewListing(ctx, client, cfg)
+		if err != nil {
+			return fmt.Errorf("%s: %w", server, err)
+		}
+		for _, record := range response.Previews {
+			if record.Environment == environment {
+				return invalidRequestf("environment %s is preview %s (created from %s) on %s; destroy it with tako preview destroy %s before deploying a declared environment of that name", environment, record.Name, record.Base, server, record.Name)
+			}
+		}
+		for _, invalid := range response.Invalid {
+			if invalid == environment {
+				return invalidRequestf("environment %s has an unreadable preview record on %s; inspect it before deploying a declared environment of that name", environment, server)
+			}
+		}
+	}
+	return nil
+}
+
+// applyPreviewBeforeMutation runs in Apply immediately before the first
+// mutation: the opportunistic prune of expired previews, the limit check
+// for a new preview, and step 1 of D7 (the record write).
+func (s *DeploySession) applyPreviewBeforeMutation(ctx context.Context) error {
+	if s.preview == nil {
+		return nil
+	}
+	e := s.engine
+	info := s.preview.info
+	if !s.preview.opts.NoPrune {
+		runtime, err := e.newPreviewRuntime(s.cfg)
+		if err != nil {
+			return err
+		}
+		defer runtime.close()
+		now := time.Now()
+		prune := &PreviewPruneResult{}
+		if err := e.prunePreviews(ctx, s.cfg, runtime, s.preview.opts.LoadInstance, false, now, info.Identity, prune); err != nil {
+			e.warn(events.PhaseDeploy, fmt.Sprintf("⚠ preview prune: %v (the deploy continues)\n", err))
+		}
+		if s.preview.existing == nil {
+			listing := collectPreviewListing(ctx, s.cfg, sortedServerNames(s.cfg), runtime.clientFor, now)
+			if err := checkPreviewLimit(info, listing.items, false); err != nil {
+				return err
+			}
+		}
+	}
+	return s.writePreviewRecordBeforeMutation(ctx)
 }
 
 // writePreviewRecordBeforeMutation is step 1 of D7: before the first takod

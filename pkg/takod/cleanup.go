@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/redentordev/tako-cli/pkg/runtimeid"
@@ -37,9 +38,18 @@ type CleanupRequest struct {
 	// RemoveContainers, RemoveNetworks and RemoveTakodState and rejects image,
 	// deploy-file and maintenance cleanup.
 	RemovePreviewData bool `json:"removePreviewData,omitempty"`
+	// PreviewUpdatedAt, with RemovePreviewData, is the updatedAt of the
+	// preview record the caller read under the preview's lease. The guard
+	// refuses the teardown when the node's record differs.
+	PreviewUpdatedAt *time.Time `json:"previewUpdatedAt,omitempty"`
 	// DataDir is the takod data directory. The server sets it; it is never
 	// read from the request body.
 	DataDir string `json:"-"`
+	// BeforeRecordRemoval, with RemovePreviewData, runs after the preview's
+	// runtime, data and state are gone and before its record is deleted.
+	// The server sets it to remove scheduler, alert and port state; it is
+	// never read from the request body.
+	BeforeRecordRemoval func(ctx context.Context, response *CleanupResponse) error `json:"-"`
 }
 
 type CleanupResponse struct {

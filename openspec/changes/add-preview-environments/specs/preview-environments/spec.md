@@ -167,6 +167,17 @@ Before the first takod mutation of a preview deploy, Tako SHALL write a `Preview
 - **THEN** `app-1` holds a `PreviewRecord` for `preview-pr-42`
 - **AND** `tako preview list` shows `pr-42`, and `tako preview destroy pr-42 --yes` removes its containers and volumes
 
+### Requirement: Previews never adopt declared environments
+A preview deploy that would create a new record SHALL fail with exit code 2 before any mutation when a target server already holds desired state or deployment history for the preview's identity, and takod SHALL refuse to create a preview record for an environment that has desired state or deployment history but no record. A deploy of a declared environment named `preview-*` SHALL fail with exit code 2 while a preview record exists for that name.
+
+#### Scenario: Declared environment with a preview-shaped name
+- **WHEN** a declared environment `preview-demo` was deployed from the main branch and a branch config without it runs `tako deploy --preview demo`
+- **THEN** the deploy fails with exit code 2, writes no record, and leaves `preview-demo`'s containers and volumes untouched
+
+#### Scenario: Declared deploy over a preview
+- **WHEN** preview `demo` exists and a config declaring environment `preview-demo` runs `tako deploy -e preview-demo`
+- **THEN** the deploy fails with exit code 2 naming preview `demo` and `tako preview destroy demo`
+
 ### Requirement: Preview record refresh
 After a successful rollout, Tako SHALL refresh `updatedAt`, `expiresAt`, `ttl`, `hosts` and `source` of the preview's record on every target server, under the deploy lease. A failed rollout SHALL NOT refresh `updatedAt` or `expiresAt`.
 
@@ -208,7 +219,7 @@ Destroying a preview SHALL NOT remove images, whose repositories are shared with
 - **THEN** every image tag, every `staging` volume and network, and `/opt/<project>` remain
 
 ### Requirement: Preview destroy is idempotent and retryable
-Destroying a preview that has no record SHALL succeed with status `not_found`. On each server the record SHALL be removed last, after every other preview resource, so that a partially failed destroy leaves the record in place and the same command can be retried.
+Destroying a preview that has no record SHALL succeed with status `not_found`. On each server the record SHALL be removed last, after every other preview resource including the node's backup and job schedules, scheduler alert state and port allocations, so that a partially failed destroy leaves the record in place and the same command can be retried.
 
 #### Scenario: Already gone
 - **WHEN** `tako preview destroy pr-42 --yes` runs after the preview was destroyed
@@ -225,19 +236,37 @@ Destroying a preview that has no record SHALL succeed with status `not_found`. O
 - **WHEN** preview `pr-41` expired yesterday and `pr-42` expires tomorrow
 - **THEN** `tako preview prune --yes` destroys `pr-41` only and reports it in `destroyed`
 
+### Requirement: Prune re-checks each preview under its lease
+After taking a preview's lease, the prune SHALL re-read its record and skip the preview when the record is gone or no longer expired. Each teardown request SHALL carry the `updatedAt` of the record read under the lease, and takod SHALL refuse the teardown when its record differs.
+
+#### Scenario: Redeployed while the prune waited
+- **WHEN** the prune lists `pr-41` as expired and a deploy of `pr-41` refreshes its record before the prune takes its lease
+- **THEN** the prune reports `pr-41` in `skipped` and removes nothing
+
 ### Requirement: Opportunistic prune and TTL override on deploy
-`tako deploy --preview` SHALL run the prune for the project before checking limits unless `--no-prune` is given. Prune failures during deploy SHALL be warnings that never change the deploy outcome. `--ttl <duration|none>` SHALL override the template's `ttl` for that deploy only; a later deploy without `--ttl` SHALL use the template's `ttl`.
+`tako deploy --preview` SHALL run the prune for the project when it applies, immediately before its first mutation, unless `--no-prune` is given. Prune failures during deploy SHALL be warnings that never change the deploy outcome. `--ttl <duration|none>` SHALL override the template's `ttl` for that deploy only; a later deploy without `--ttl` SHALL use the template's `ttl`.
 
 #### Scenario: Opportunistic prune
 - **WHEN** preview `pr-41` has expired and the operator deploys `--preview pr-50`
 - **THEN** `pr-41` is destroyed before `pr-50` is deployed and a `preview.pruned` event is emitted
 
+### Requirement: Planning a preview deploy is read-only
+Planning `tako deploy --preview` SHALL neither prune nor write a record. `--plan-only`, a declined confirmation, a plan mismatch or a failed pre-deploy hook SHALL leave every preview and record as it was.
+
+#### Scenario: Plan only
+- **WHEN** preview `pr-41` has expired and the operator runs `tako deploy --preview pr-50 --plan-only`
+- **THEN** `pr-41` and its volumes remain and no record of `pr-50` is written
+
 ### Requirement: Preview limit per base
-Deploying a new preview SHALL fail with exit code 2 when the base already has `max` previews after pruning, listing the existing previews and their expiry. Records left by failed first deploys SHALL count. Redeploying an existing preview SHALL NOT count against the limit. The limit is checked without a project-wide lock, so concurrent first deploys of different previews MAY exceed it.
+Deploying a new preview SHALL fail with exit code 2 when the base already has `max` previews after pruning, listing the existing previews and their expiry. Records left by failed first deploys SHALL count. Redeploying an existing preview SHALL NOT be checked against the limit, even after `max` was lowered. The limit is checked without a project-wide lock, so concurrent first deploys of different previews MAY exceed it.
 
 #### Scenario: Limit reached
 - **WHEN** `max` is 2, previews `pr-1` and `pr-2` of the same base are active, and the operator deploys `--preview pr-3`
 - **THEN** the deploy fails with exit code 2 naming `pr-1` and `pr-2`
+
+#### Scenario: Limit lowered
+- **WHEN** previews `pr-1`, `pr-2` and `pr-3` exist and `max` is lowered to 2
+- **THEN** `tako deploy --preview pr-1` still succeeds, and `--preview pr-4` fails with exit code 2
 
 ### Requirement: Commands that accept --preview
 `--preview <name>` SHALL be accepted by `deploy`, `ps`, `logs`, `exec`, `history`, `rollback` and `config explain`, which SHALL operate on the preview's environment. Every other command SHALL reject `--preview` with exit code 2.

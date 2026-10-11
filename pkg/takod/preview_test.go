@@ -381,6 +381,126 @@ func TestPreviewStateDocumentRules(t *testing.T) {
 	}
 }
 
+func TestPreviewRecordRefusedForDeclaredEnvironmentState(t *testing.T) {
+	ctx := context.Background()
+	for name, path := range map[string]func(dataDir string) string{
+		"desired state": func(dataDir string) string {
+			return filepath.Join(dataDir, "desired", "demo", "preview-demo", "revision.json")
+		},
+		"deployment history": func(dataDir string) string {
+			return filepath.Join(dataDir, "history", "demo", "preview-demo", "history.json")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			writeTestFile(t, path(dataDir), "{}")
+			_, err := WriteStateDocument(ctx, dataDir, StateDocumentRequest{
+				Project: "demo", Environment: "preview-demo", Document: stateDocumentPreview,
+				Content: testPreviewRecordJSON(t, "demo", "preview-demo"),
+			})
+			if err == nil || !strings.Contains(err.Error(), "declared environment") {
+				t.Fatalf("err = %v, want refusal for a declared environment's state", err)
+			}
+			if _, err := os.Stat(previewRecordPath(dataDir, "demo", "preview-demo")); !os.IsNotExist(err) {
+				t.Fatalf("preview record created over declared state (err=%v)", err)
+			}
+		})
+	}
+
+	// A preview's own state never blocks rewriting its existing record.
+	dataDir := t.TempDir()
+	writeTestPreviewRecord(t, dataDir, "demo", "preview-pr-42")
+	writeTestFile(t, filepath.Join(dataDir, "desired", "demo", "preview-pr-42", "revision.json"), "{}")
+	writeTestFile(t, filepath.Join(dataDir, "history", "demo", "preview-pr-42", "history.json"), "{}")
+	writeTestPreviewRecord(t, dataDir, "demo", "preview-pr-42")
+}
+
+func TestPreviewTeardownGuardRefusesChangedRecord(t *testing.T) {
+	useTempProxyPaths(t)
+	dataDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	env := "preview-pr-42"
+	writeTestPreviewRecord(t, dataDir, "demo", env)
+	stale := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	req := previewTeardownRequest(env)
+	req.DataDir = dataDir
+	req.PreviewUpdatedAt = &stale
+	if _, err := CleanupProject(context.Background(), req); err == nil || !strings.Contains(err.Error(), PreviewRecordChangedMessage) {
+		t.Fatalf("err = %v, want refusal for a changed record", err)
+	}
+	if _, err := os.Stat(previewRecordPath(dataDir, "demo", env)); err != nil {
+		t.Fatalf("record removed despite refusal: %v", err)
+	}
+	for _, entry := range readCommandLog(t, logPath) {
+		if !strings.HasPrefix(entry, "docker volume ls") {
+			t.Fatalf("refused teardown ran %q", entry)
+		}
+	}
+
+	current := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	req.PreviewUpdatedAt = &current
+	if response, err := CleanupProject(context.Background(), req); err != nil || !response.PreviewRecordRemoved {
+		t.Fatalf("matching updatedAt: response = %+v, err = %v", response, err)
+	}
+}
+
+func TestHandleCleanupPreviewRemovesSchedulesAndPortsBeforeRecord(t *testing.T) {
+	useTempProxyPaths(t)
+	dataDir := t.TempDir()
+	oldRoot := serviceFilesRoot
+	serviceFilesRoot = t.TempDir()
+	defer func() { serviceFilesRoot = oldRoot }()
+	server := NewServer(filepath.Join(t.TempDir(), "takod.sock"), dataDir, "test")
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	restore := useFakeCommands(t, logPath)
+	defer restore()
+
+	env := "preview-pr-42"
+	writeTestPreviewRecord(t, dataDir, "demo", env)
+	schedule := testBackupScheduleRequest()
+	schedule.Environment = env
+	if _, err := server.backupScheduler.Upsert(context.Background(), schedule); err != nil {
+		t.Fatal(err)
+	}
+	// An unreadable port registry makes the port release fail.
+	writeTestFile(t, portAllocationRegistryPath(dataDir), "{not json")
+
+	body, _ := json.Marshal(previewTeardownRequest(env))
+	recorder := httptest.NewRecorder()
+	server.handleCleanup(recorder, httptest.NewRequest(http.MethodPost, "/v1/cleanup", bytes.NewReader(body)))
+	if recorder.Code == http.StatusOK {
+		t.Fatalf("teardown succeeded despite a failed port release: %s", recorder.Body.String())
+	}
+	if _, err := os.Stat(previewRecordPath(dataDir, "demo", env)); err != nil {
+		t.Fatalf("record removed before the port release succeeded, so a retry would be a no-op: %v", err)
+	}
+
+	if err := os.Remove(portAllocationRegistryPath(dataDir)); err != nil {
+		t.Fatal(err)
+	}
+	recorder = httptest.NewRecorder()
+	server.handleCleanup(recorder, httptest.NewRequest(http.MethodPost, "/v1/cleanup", bytes.NewReader(body)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("retry status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response CleanupResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.PreviewRecordRemoved {
+		t.Fatalf("retry response = %+v", response)
+	}
+	if _, err := os.Stat(previewRecordPath(dataDir, "demo", env)); !os.IsNotExist(err) {
+		t.Fatalf("record survived the retry (err=%v)", err)
+	}
+	if _, err := os.Stat(backupSchedulePath(dataDir, schedule)); !os.IsNotExist(err) {
+		t.Fatalf("backup schedule survived preview teardown (err=%v)", err)
+	}
+}
+
 func TestHandleStatePreviewsIsRegisteredReadOnlyRoute(t *testing.T) {
 	dataDir := t.TempDir()
 	writeTestPreviewRecord(t, dataDir, "demo", "preview-pr-42")

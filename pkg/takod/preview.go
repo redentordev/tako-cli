@@ -33,6 +33,10 @@ const (
 	previewRecordFileName = "preview.json"
 )
 
+// PreviewRecordChangedMessage is part of the teardown guard's refusal when
+// CleanupRequest.PreviewUpdatedAt does not match the node's record.
+const PreviewRecordChangedMessage = "the preview record changed since the teardown was planned"
+
 // PreviewRecord is the replicated record of one preview environment. It is
 // written by the CLI before the first mutation of every preview deploy and
 // deleted last by preview teardown.
@@ -156,6 +160,49 @@ func readPreviewRecord(dataDir string, project string, environment string) (*Pre
 	return &record, true, nil
 }
 
+// previewIdentityDeployState names the deploy state this node holds for
+// environment: its desired revision or its deployment history. Empty means
+// neither exists.
+func previewIdentityDeployState(dataDir string, project string, environment string) (string, error) {
+	for _, candidate := range []struct {
+		label string
+		path  string
+	}{
+		{"desired state", filepath.Join(dataDir, "desired", project, environment, "revision.json")},
+		{"deployment history", filepath.Join(dataDir, "history", project, environment)},
+	} {
+		if _, err := os.Stat(candidate.path); err == nil {
+			return candidate.label, nil
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("failed to inspect %s of %s: %w", candidate.label, environment, err)
+		}
+	}
+	return "", nil
+}
+
+// checkPreviewRecordCreation refuses to create the first preview record of
+// an environment that already has desired state or deployment history on
+// this node: that environment was deployed as a declared environment, and a
+// record would let preview teardown remove its data. Rewriting an existing
+// record is always allowed.
+func checkPreviewRecordCreation(dataDir string, project string, environment string) error {
+	_, found, err := readPreviewRecord(dataDir, project, environment)
+	if err != nil {
+		return fmt.Errorf("refusing preview record for %s: unreadable existing record: %w", environment, err)
+	}
+	if found {
+		return nil
+	}
+	state, err := previewIdentityDeployState(dataDir, project, environment)
+	if err != nil {
+		return fmt.Errorf("refusing preview record for %s: %w", environment, err)
+	}
+	if state != "" {
+		return fmt.Errorf("refusing preview record for %s: the environment already has %s without a preview record; it was deployed as a declared environment", environment, state)
+	}
+	return nil
+}
+
 // validatePreviewTeardownRequest rejects preview data removal combined with
 // anything that reaches resources shared with other environments: image
 // tags (repositories are shared with the base), /opt/<project>, and the
@@ -187,19 +234,24 @@ func validatePreviewTeardownRequest(req CleanupRequest) error {
 // preview record is missing while volumes labeled with exactly the
 // preview's project and environment remain: the record is the proof that
 // the volumes belong to a preview. With neither a record nor such volumes,
-// an earlier attempt already tore the node down and noop is true.
-func checkPreviewTeardownGuard(ctx context.Context, dataDir string, project string, environment string) (noop bool, err error) {
+// an earlier attempt already tore the node down and noop is true. When
+// expectedUpdatedAt is set, a record whose updatedAt differs (the preview
+// was redeployed after the caller read it) is refused.
+func checkPreviewTeardownGuard(ctx context.Context, dataDir string, project string, environment string, expectedUpdatedAt *time.Time) (noop bool, err error) {
 	if !IsPreviewEnvironment(environment) {
 		return false, fmt.Errorf("refusing preview data removal for %s: not a preview environment", environment)
 	}
 	if strings.TrimSpace(dataDir) == "" {
 		return false, fmt.Errorf("refusing preview data removal for %s: takod data directory is unknown", environment)
 	}
-	_, found, err := readPreviewRecord(dataDir, project, environment)
+	record, found, err := readPreviewRecord(dataDir, project, environment)
 	if err != nil {
 		return false, fmt.Errorf("refusing preview data removal for %s: unreadable preview record: %w", environment, err)
 	}
 	if found {
+		if expectedUpdatedAt != nil && !record.UpdatedAt.Equal(*expectedUpdatedAt) {
+			return false, fmt.Errorf("refusing preview data removal for %s: %s (record updatedAt %s, expected %s)", environment, PreviewRecordChangedMessage, record.UpdatedAt.UTC().Format(time.RFC3339Nano), expectedUpdatedAt.UTC().Format(time.RFC3339Nano))
+		}
 		return false, nil
 	}
 	volumes, err := listPreviewVolumes(ctx, project, environment)
@@ -228,15 +280,16 @@ func listPreviewVolumes(ctx context.Context, project string, environment string)
 
 // cleanupPreviewEnvironment tears down one preview on this node in a fixed
 // order: proxy files, containers, networks, preview data (volumes, their
-// ownership journals, history, operator files), takod state, and the
-// preview record last. Proxy, container, preview-data and state failures
-// return before the record is removed so the same request can be retried.
+// ownership journals, history, operator files), takod state, the node's
+// scheduler, alert and port state (req.BeforeRecordRemoval), and the
+// preview record last. Every failure returns before the record is removed
+// so the same request can be retried.
 func cleanupPreviewEnvironment(ctx context.Context, req CleanupRequest) (*CleanupResponse, error) {
 	response := &CleanupResponse{Project: req.Project, Environment: req.Environment}
 	warn := func(format string, args ...any) {
 		response.Warnings = append(response.Warnings, fmt.Sprintf(format, args...))
 	}
-	noop, err := checkPreviewTeardownGuard(ctx, req.DataDir, req.Project, req.Environment)
+	noop, err := checkPreviewTeardownGuard(ctx, req.DataDir, req.Project, req.Environment, req.PreviewUpdatedAt)
 	if err != nil {
 		return response, err
 	}
@@ -275,6 +328,11 @@ func cleanupPreviewEnvironment(ctx context.Context, req CleanupRequest) (*Cleanu
 
 	if err := removePreviewState(req.DataDir, req.Project, req.Environment); err != nil {
 		return response, err
+	}
+	if req.BeforeRecordRemoval != nil {
+		if err := req.BeforeRecordRemoval(ctx, response); err != nil {
+			return response, err
+		}
 	}
 	if err := os.Remove(previewRecordPath(req.DataDir, req.Project, req.Environment)); err != nil && !os.IsNotExist(err) {
 		return response, fmt.Errorf("failed to remove preview record: %w", err)

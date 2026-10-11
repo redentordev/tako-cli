@@ -224,8 +224,9 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	session.lockInfo = lockInfo
 	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired deployment lock (ID: %s)\n", lockInfo.ID))
 
-	// Preview checks (capability, base, prune, max) run before any build
-	// or mutation.
+	// Read-only preview checks (capability, base, declared-environment
+	// state, max) run before any build or mutation; the prune and the record
+	// write wait for Apply.
 	if err := e.preparePreviewDeploy(ctx, session); err != nil {
 		return nil, err
 	}
@@ -436,12 +437,6 @@ func (e *Engine) PlanDeploy(ctx context.Context, req DeployRequest) (*DeploySess
 	})
 	deploy.SetBaseContext(ctx)
 	e.debug(events.TypeLogLine, events.PhasePlan, fmt.Sprintf("→ Acquired remote deploy authority: %s\n", leaseSet.Summary()))
-
-	// A preview's record exists on every target before the first mutation,
-	// so a failed first deploy stays listable and destroyable (D7).
-	if err := session.writePreviewRecordBeforeMutation(ctx); err != nil {
-		return nil, err
-	}
 
 	if err := preflightAndSetupTakodRuntime(deploy, allServices, services); err != nil {
 		return nil, err
@@ -670,6 +665,12 @@ func (s *DeploySession) Apply(ctx context.Context) (*DeployResult, error) {
 		return nil, err
 	}
 	if err := s.deployer.PreflightAlertPolicy(); err != nil {
+		return nil, err
+	}
+	// A preview's expired siblings are pruned and its record exists on
+	// every target before the first mutation, so a failed first deploy
+	// stays listable and destroyable (D7). Planning never does either.
+	if err := s.applyPreviewBeforeMutation(ctx); err != nil {
 		return nil, err
 	}
 
