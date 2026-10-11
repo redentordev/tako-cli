@@ -37,8 +37,9 @@ Observed behavior today. Line numbers are from the current branch.
 
 ### D1. SSH port set = {22} ∪ {configured port} ∪ {live server-side port}
 Add `ResolveSSHPorts(configuredPort int) ([]int, error)` on `Provisioner`. It parses field 4 of `$SSH_CONNECTION` with a pure `parseSSHConnectionServerPort`. A missing or invalid value is not an error, because the configured port still applies. The function returns a sorted, de-duplicated list. `runSetupNode` computes the set once and passes it to both the firewall and hardening steps.
-- *Why keep 22:* today 22 is always allowed, and removing it could close the operator's own fallback path in the middle of setup. Leaving 22 open when nothing listens on it is low risk.
+- *Why keep 22 (resolved):* today 22 is always allowed, and removing it could close the operator's own fallback path in the middle of setup. Leaving 22 open when nothing listens on it is low risk. `22/tcp` stays in the set permanently; no later change is scheduled to remove it. Operators who want it closed delete the rule themselves.
 - *Why include the live port:* behind provider NAT, the configured port, for example 2222 forwarded to 22, is not the port the local firewall sees.
+- *NAT assumption (resolved, accepted):* provider port-forwarding setups where the configured port differs from the server-side port are assumed rare. Allowing both opens at most one extra non-listening port. Tako does not try to discover NAT mappings any further; the post-enable probe (D2) is the safety net for any mapping the port set misses.
 - *Alternatives:* parsing `sshd -T` listen ports, which is more complete but fails on socket-activated `ssh.socket` and needs root. Allowing only the configured port misses NAT setups.
 
 ### D2. Firewall step: apply → confirm → enable → probe → (rollback)
@@ -89,7 +90,7 @@ The firewall fix needs no bump, because the firewall step runs in converge mode.
 - [`$SSH_CONNECTION` is absent in some session types] → The configured port and 22 are still allowed. The probe catches anything they miss.
 - [The probe fails for a reason other than the firewall, such as a host-key prompt or transient network loss] → Setup disables UFW and fails loudly. That leaves the host open rather than locked out, which is the intended fail-safe direction. The operator re-runs setup.
 - [Disabling UFW during rollback briefly leaves the host without a host firewall] → This is the same exposure as the existing disable-update-enable window (`provisioner.go:1240-1244`). It is reported in the error.
-- [Keeping 22 always open on hosts that moved SSH elsewhere] → This matches current behavior. Removing it is an open question.
+- [Keeping 22 always open on hosts that moved SSH elsewhere] → This matches current behavior and is a deliberate, permanent choice (D1). Operators can delete the rule manually.
 - [`sshd_config.d` drop-ins can override the main-file edits] → Out of scope. `sshd -t` still validates the merged config.
 - [The bounded probe dial needs an SSH client option] → It is a small, additive API in `pkg/ssh`. Production dial behavior is unchanged.
 - [The `firewallPorts` semantic narrowing] → Consumers that read `firewallPorts` on skipped hosts get nothing instead of a misleading list. This is documented in `docs/MACHINE-INTERFACE.md`, and the new `firewall.status` field disambiguates.
@@ -98,8 +99,3 @@ The firewall fix needs no bump, because the firewall step runs in converge mode.
 
 - No tako.yaml migration. After upgrading the CLI, operators run `tako setup`. Servers at manifest `1.2.1` reapply. Servers already at `1.2.2` converge and still refresh firewall SSH rules.
 - Rollback is to install the previous CLI. Rules Tako added remain in place, which is harmless. The `.tako-bak` sshd backup is left on disk.
-
-## Open Questions
-
-- Should a later change stop allowing `22/tcp` when neither the configured nor the live port is 22? This is deferred. It would only change D1's constant, not the specs' safety requirements, beyond the "still allowed" scenario.
-- Assumption: provider port-forwarding setups where the configured port differs from the server-side port are rare. Allowing both is sufficient and opens at most one extra non-listening port.
