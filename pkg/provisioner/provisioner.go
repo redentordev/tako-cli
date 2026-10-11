@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1207,11 +1208,21 @@ func shellQuote(value string) string {
 
 // ConfigureFirewall configures UFW when available. Non-Debian cloud images
 // commonly rely on provider firewalls instead of UFW; setup should not fail on
-// those hosts merely because the ufw package is unavailable.
-func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
+// those hosts merely because the ufw package is unavailable, so it reports
+// the step as skipped instead.
+//
+// SSH access is protected in order: every SSH port is allowed and confirmed
+// before UFW is enabled, and after enabling, opts.Probe must open a fresh
+// SSH connection or UFW is disabled again over the live session.
+func (p *Provisioner) ConfigureFirewall(opts FirewallOptions) (*FirewallReport, error) {
+	meshListenPort := opts.MeshListenPort
 	if meshListenPort < 1 || meshListenPort > 65535 {
-		return fmt.Errorf("mesh listen port must be between 1 and 65535")
+		return nil, fmt.Errorf("mesh listen port must be between 1 and 65535")
 	}
+	if err := validateSSHPorts(opts.SSHPorts); err != nil {
+		return nil, err
+	}
+	sshPorts := normalizeSSHPorts(opts.SSHPorts)
 
 	hasUFW := true
 	if _, err := p.client.Execute("command -v ufw"); err != nil {
@@ -1220,12 +1231,16 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 	if !hasUFW {
 		osInfo, err := DetectOS(p.client)
 		if err == nil && shouldSkipUFWFirewall(osInfo) {
+			native := ""
+			if output, err := p.client.Execute("systemctl is-active firewalld 2>/dev/null"); err == nil {
+				native = parseNativeFirewall(output)
+			}
 			p.logf("  UFW not available on %s; relying on provider/native firewall\n", osInfo.String())
-			return nil
+			return skippedFirewallReport(osInfo.String(), native, meshListenPort, sshPorts), nil
 		}
 		p.logf("  Running: sudo apt-get install -y ufw\n")
 		if _, err := p.client.Execute("sudo apt-get install -y ufw"); err != nil {
-			return fmt.Errorf("failed to install ufw: %w", err)
+			return nil, fmt.Errorf("failed to install ufw: %w", err)
 		}
 	}
 
@@ -1258,21 +1273,53 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 	for _, cmd := range commands {
 		p.logf("  Running: %s\n", cmd)
 		if _, err := p.client.Execute(cmd); err != nil {
-			return fmt.Errorf("command failed '%s': %w", cmd, err)
+			return nil, fmt.Errorf("command failed '%s': %w", cmd, err)
 		}
 	}
 
-	// Allow essential services (use || true to ignore "Skipping adding existing rule" errors)
-	for _, cmd := range firewallAllowCommands(meshListenPort) {
+	// SSH allowances must apply. ufw exits 0 when a rule already exists, so
+	// any error here is real and UFW stays disabled.
+	for i, cmd := range sshFirewallAllowCommands(sshPorts) {
 		p.logf("  Running: %s\n", cmd)
-		// Execute but don't fail on "rule already exists" errors
+		if output, err := p.client.Execute(cmd); err != nil {
+			return nil, fmt.Errorf("failed to allow SSH port %d/tcp; UFW was not enabled: %w%s", sshPorts[i], err, formatCommandOutput(output))
+		}
+	}
+
+	// Other services (use || true to ignore "Skipping adding existing rule" errors)
+	for _, cmd := range serviceFirewallAllowCommands(meshListenPort) {
+		p.logf("  Running: %s\n", cmd)
 		p.client.Execute(cmd)
+	}
+
+	// Confirm every SSH allowance exists before enabling. `ufw show added`
+	// lists user rules even while UFW is inactive.
+	added, err := p.client.Execute("sudo ufw show added")
+	if err != nil {
+		return nil, fmt.Errorf("failed to confirm SSH allow rules; UFW was not enabled: %w%s", err, formatCommandOutput(added))
+	}
+	rules := parseUFWAddedRules(added)
+	if missing := missingSSHPorts(rules, sshPorts); len(missing) > 0 {
+		return nil, fmt.Errorf("SSH allow rule for %s could not be confirmed; UFW was not enabled", strings.Join(FormatTCPPorts(missing), ", "))
 	}
 
 	// Enable UFW
 	p.logf("  Running: sudo ufw --force enable\n")
 	if _, err := p.client.Execute("sudo ufw --force enable"); err != nil {
-		return fmt.Errorf("failed to enable ufw: %w", err)
+		return nil, fmt.Errorf("failed to enable ufw: %w", err)
+	}
+
+	// Prove a new SSH connection still gets through. The live session
+	// survives on conntrack, so it can undo the change if not.
+	if opts.Probe != nil {
+		p.logf("  Verifying a new SSH connection succeeds with UFW enabled\n")
+		if probeErr := opts.Probe(); probeErr != nil {
+			p.logf("  Running: sudo ufw --force disable\n")
+			if _, disableErr := p.client.Execute("sudo ufw --force disable"); disableErr != nil {
+				return nil, fmt.Errorf("new SSH connection failed after enabling UFW (%v) and disabling UFW also failed: %w; SSH may be locked out for new connections", probeErr, disableErr)
+			}
+			return nil, fmt.Errorf("firewall disabled to avert SSH lockout: a new SSH connection failed after enabling UFW: %w", probeErr)
+		}
 	}
 
 	// Show status
@@ -1281,7 +1328,23 @@ func (p *Provisioner) ConfigureFirewall(meshListenPort int) error {
 		p.logf("\n  UFW Status:\n%s\n", output)
 	}
 
-	return nil
+	allowed := FirewallAllowedPorts(meshListenPort, sshPorts)
+	return &FirewallReport{
+		Backend:       FirewallBackendUFW,
+		Status:        FirewallStatusConfigured,
+		SSHPorts:      sshPorts,
+		AllowedPorts:  allowed,
+		RequiredPorts: allowed,
+		StaleSSHPorts: staleSSHPorts(rules, sshPorts),
+	}, nil
+}
+
+func formatCommandOutput(output string) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return ""
+	}
+	return "\n" + output
 }
 
 func shouldSkipUFWFirewall(osInfo *OSInfo) bool {
@@ -1292,25 +1355,38 @@ func shouldSkipUFWFirewall(osInfo *OSInfo) bool {
 }
 
 // FirewallAllowedPorts lists the port/protocol pairs setup allows through
-// UFW, in the order the rules are applied.
-func FirewallAllowedPorts(meshListenPort int) []string {
-	return []string{
-		"22/tcp",
+// UFW, in the order the rules are applied: the SSH port set first, then
+// HTTP, HTTPS, HTTP/3, and the mesh port.
+func FirewallAllowedPorts(meshListenPort int, sshPorts []int) []string {
+	ports := FormatTCPPorts(normalizeSSHPorts(sshPorts))
+	return append(ports,
 		"80/tcp",
 		"443/tcp",
 		"443/udp",
 		fmt.Sprintf("%d/udp", meshListenPort),
-	}
+	)
 }
 
-func firewallAllowCommands(meshListenPort int) []string {
-	return []string{
-		// SSH is allowed without `ufw limit`: its 6-connections-per-30s cap is
-		// tripped by Tako's own connection bursts and retries, locking out
-		// deploys and backups. fail2ban bans brute-force sources instead. On
-		// hosts set up with the old limit rule, ufw updates it in place.
-		"sudo ufw allow 22/tcp comment 'SSH (fail2ban protected)' || true",
+func firewallAllowCommands(meshListenPort int, sshPorts []int) []string {
+	return append(sshFirewallAllowCommands(normalizeSSHPorts(sshPorts)), serviceFirewallAllowCommands(meshListenPort)...)
+}
 
+// sshFirewallAllowCommands returns one allow command per SSH port. SSH is
+// allowed without `ufw limit`: its 6-connections-per-30s cap is tripped by
+// Tako's own connection bursts and retries, locking out deploys and backups.
+// fail2ban bans brute-force sources instead. On hosts set up with the old
+// limit rule, ufw updates it in place. Errors are not masked: setup must
+// know whether each SSH allowance applied.
+func sshFirewallAllowCommands(sshPorts []int) []string {
+	commands := make([]string, 0, len(sshPorts))
+	for _, port := range sshPorts {
+		commands = append(commands, fmt.Sprintf("sudo ufw allow %d/tcp comment '%s'", port, sshFirewallComment))
+	}
+	return commands
+}
+
+func serviceFirewallAllowCommands(meshListenPort int) []string {
+	return []string{
 		// HTTP/HTTPS.
 		"sudo ufw allow 80/tcp comment 'HTTP' || true",
 		"sudo ufw allow 443/tcp comment 'HTTPS' || true",
@@ -1320,8 +1396,16 @@ func firewallAllowCommands(meshListenPort int) []string {
 	}
 }
 
-// HardenSecurity applies comprehensive security hardening
-func (p *Provisioner) HardenSecurity() error {
+// HardenSecurity applies security hardening: fail2ban on the SSH port set,
+// validated sshd edits, and automatic security updates. Password
+// authentication is disabled only when opts.KeyOnlyProbe proves key or agent
+// access works.
+func (p *Provisioner) HardenSecurity(opts HardeningOptions) error {
+	if err := validateSSHPorts(opts.SSHPorts); err != nil {
+		return err
+	}
+	sshPorts := normalizeSSHPorts(opts.SSHPorts)
+
 	p.logf("  Installing and configuring security tools...\n")
 
 	p.logf("  Installing security packages...\n")
@@ -1331,7 +1415,7 @@ func (p *Provisioner) HardenSecurity() error {
 
 	if p.fail2banAvailable() {
 		// Configure fail2ban with custom jail for SSH
-		fail2banConfig := fail2banSSHDJailConfig(p.detectSSHClientIP())
+		fail2banConfig := fail2banSSHDJailConfig(p.detectSSHClientIP(), sshPorts)
 
 		p.logf("  Configuring fail2ban jail for SSH...\n")
 
@@ -1352,41 +1436,32 @@ func (p *Provisioner) HardenSecurity() error {
 		p.logf("  fail2ban unavailable on this host; skipping fail2ban jail\n")
 	}
 
-	// Configure SSH hardening
-	p.logf("  Hardening SSH configuration...\n")
-
-	sshHardeningCommands := []string{
-		// Increase connection limits to prevent lockouts
-		"sudo sed -i 's/^#MaxStartups.*/MaxStartups 100:30:100/' /etc/ssh/sshd_config",
-		"sudo grep -q '^MaxStartups' /etc/ssh/sshd_config || echo 'MaxStartups 100:30:100' | sudo tee -a /etc/ssh/sshd_config",
-
-		"sudo sed -i 's/^#MaxSessions.*/MaxSessions 100/' /etc/ssh/sshd_config",
-		"sudo grep -q '^MaxSessions' /etc/ssh/sshd_config || echo 'MaxSessions 100' | sudo tee -a /etc/ssh/sshd_config",
-
-		// Keep connections alive
-		"sudo sed -i 's/^#ClientAliveInterval.*/ClientAliveInterval 60/' /etc/ssh/sshd_config",
-		"sudo grep -q '^ClientAliveInterval' /etc/ssh/sshd_config || echo 'ClientAliveInterval 60' | sudo tee -a /etc/ssh/sshd_config",
-
-		"sudo sed -i 's/^#ClientAliveCountMax.*/ClientAliveCountMax 10/' /etc/ssh/sshd_config",
-		"sudo grep -q '^ClientAliveCountMax' /etc/ssh/sshd_config || echo 'ClientAliveCountMax 10' | sudo tee -a /etc/ssh/sshd_config",
-
-		// Increase login grace time
-		"sudo sed -i 's/^#LoginGraceTime.*/LoginGraceTime 120/' /etc/ssh/sshd_config",
-		"sudo grep -q '^LoginGraceTime' /etc/ssh/sshd_config || echo 'LoginGraceTime 120' | sudo tee -a /etc/ssh/sshd_config",
-
-		// Disable password authentication (key-based only)
-		"sudo sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config",
-		"sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config",
-
-		// Keep PermitRootLogin yes for Tako deployments (we use keys, not passwords)
-		// This is needed for Tako to deploy applications
-		"sudo sed -i 's/^PermitRootLogin no/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config",
-		"sudo sed -i 's/^#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config",
-		"sudo grep -q '^PermitRootLogin' /etc/ssh/sshd_config || echo 'PermitRootLogin prohibit-password' | sudo tee -a /etc/ssh/sshd_config",
+	// Disable password authentication only once a fresh key/agent-only
+	// connection proves the operator will not be locked out.
+	disablePasswordAuth := false
+	if opts.KeyOnlyProbe != nil {
+		p.logf("  Verifying key-based SSH access before disabling password authentication...\n")
+		if err := opts.KeyOnlyProbe(); err != nil {
+			opts.warn(fmt.Sprintf("Warning: password authentication was kept enabled because key-based access could not be verified: %v", err))
+		} else {
+			disablePasswordAuth = true
+		}
+	} else {
+		opts.warn("Warning: password authentication was kept enabled because key-based access could not be verified")
 	}
 
-	for _, cmd := range sshHardeningCommands {
-		p.client.Execute(cmd)
+	// Configure SSH hardening as one validated script: back up, edit,
+	// `sshd -t`, and restore on failure without touching the running sshd.
+	p.logf("  Hardening SSH configuration...\n")
+	script := sshdHardeningScript(sshdHardeningOptions{DisablePasswordAuth: disablePasswordAuth})
+	if output, err := p.executeSecurityCommand(runRootScript(script)); err != nil {
+		return sshdHardeningError(output, err)
+	}
+
+	// Reload (not restart) so existing sessions, including this one, stay up.
+	p.logf("  Running: %s\n", sshdReloadCommand)
+	if output, err := p.client.Execute(sshdReloadCommand); err != nil {
+		opts.warn(fmt.Sprintf("Warning: sshd configuration is valid but reloading sshd failed; changes apply on the next sshd restart: %v%s", err, formatCommandOutput(output)))
 	}
 
 	// Configure automatic security updates
@@ -1395,27 +1470,24 @@ func (p *Provisioner) HardenSecurity() error {
 		return fmt.Errorf("failed to configure unattended upgrades: %w", err)
 	}
 
-	// Enable and restart SSH service
-	p.logf("  Enabling and restarting SSH service...\n")
-
 	// CRITICAL: Enable SSH to start on boot
-	if _, err := p.client.Execute("sudo systemctl enable ssh"); err != nil {
+	p.logf("  Enabling SSH service on boot...\n")
+	if _, err := p.client.Execute("sudo systemctl enable ssh || sudo systemctl enable sshd"); err != nil {
 		p.logf("  Warning: Failed to enable SSH service: %v\n", err)
 	}
 
-	// Restart SSH service to apply changes (try both ssh and sshd)
-	p.client.Execute("sudo systemctl restart ssh")
-	p.client.Execute("sudo systemctl restart sshd")
-
 	// Verify SSH is running
-	output, err := p.client.Execute("sudo systemctl is-active ssh")
-	if err != nil || strings.TrimSpace(output) != "active" {
+	if _, err := p.client.Execute("sudo systemctl is-active ssh || sudo systemctl is-active sshd"); err != nil {
 		p.logf("  Warning: SSH service may not be running properly\n")
 	}
 
 	p.logf("  ✓ Security hardening completed\n")
-	p.logf("  - fail2ban: enabled (5 retries in 10min = 1hr ban)\n")
-	p.logf("  - SSH: hardened (key-based auth only)\n")
+	p.logf("  - fail2ban: enabled (5 retries in 10min = 1hr ban) on SSH ports %s\n", strings.Join(FormatTCPPorts(sshPorts), ", "))
+	if disablePasswordAuth {
+		p.logf("  - SSH: hardened and validated (key-based auth only)\n")
+	} else {
+		p.logf("  - SSH: hardened and validated (password auth unchanged)\n")
+	}
 	p.logf("  - Auto-updates: enabled\n")
 	p.logf("  - SSH service: enabled on boot\n")
 
@@ -1468,11 +1540,18 @@ fi
 `
 }
 
-func fail2banSSHDJailConfig(clientIP string) string {
+// fail2banSSHDJailConfig bans on every port in the SSH port set; the `ssh`
+// service name would only cover port 22.
+func fail2banSSHDJailConfig(clientIP string, sshPorts []int) string {
+	ports := normalizeSSHPorts(sshPorts)
+	portList := make([]string, 0, len(ports))
+	for _, port := range ports {
+		portList = append(portList, strconv.Itoa(port))
+	}
 	var b strings.Builder
 	b.WriteString(`[sshd]
 enabled = true
-port = ssh
+port = ` + strings.Join(portList, ",") + `
 filter = sshd
 logpath = /var/log/auth.log
 maxretry = 5

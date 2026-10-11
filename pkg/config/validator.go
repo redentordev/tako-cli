@@ -52,9 +52,8 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Project.Name == "" {
 		return fmt.Errorf("project name is required")
 	}
-	// Validate project name format (alphanumeric + hyphen, must start with letter)
-	if !isValidProjectName(cfg.Project.Name) {
-		return fmt.Errorf("project name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, and hyphens, and be 1-63 characters long", cfg.Project.Name)
+	if err := ValidateProjectName(cfg.Project.Name); err != nil {
+		return err
 	}
 	if cfg.Project.Version == "" {
 		return fmt.Errorf("project version is required")
@@ -81,6 +80,12 @@ func ValidateConfig(cfg *Config) error {
 		if err := validateSecretSources(fmt.Sprintf("environments.%s.secretSources", envName), env.SecretSources); err != nil {
 			return err
 		}
+	}
+	if err := ValidateAliases(cfg.Aliases); err != nil {
+		return err
+	}
+	if err := validateHooks(cfg.Hooks); err != nil {
+		return err
 	}
 
 	// Validate servers
@@ -110,6 +115,9 @@ func ValidateConfig(cfg *Config) error {
 
 	// Validate environments
 	if len(cfg.Environments) == 0 {
+		if cfg.resolution != nil && len(cfg.resolution.abstract) > 0 {
+			return fmt.Errorf("at least one non-abstract environment must be configured")
+		}
 		return fmt.Errorf("at least one environment must be configured")
 	}
 	for envName, env := range cfg.Environments {
@@ -123,6 +131,16 @@ func ValidateConfig(cfg *Config) error {
 		cfg.Environments[envName] = env
 	}
 
+	return nil
+}
+
+// ValidateProjectName reports whether name satisfies the project-name rule:
+// it must start with a lowercase letter, contain only lowercase letters,
+// numbers and hyphens, and be 1-63 characters long.
+func ValidateProjectName(name string) error {
+	if !isValidProjectName(name) {
+		return fmt.Errorf("project name '%s' is invalid: must start with a lowercase letter, contain only lowercase letters, numbers, and hyphens, and be 1-63 characters long", name)
+	}
 	return nil
 }
 
@@ -199,6 +217,16 @@ func ValidationWarnings(cfg *Config) []ValidationWarning {
 	if cfg == nil {
 		return warnings
 	}
+	warnings = append(warnings, deprecatedConfigWarnings(cfg)...)
+	if cfg.resolution != nil {
+		for _, name := range cfg.resolution.unusedAbstractEnvironments() {
+			warnings = append(warnings, ValidationWarning{
+				Environment: name,
+				Field:       "abstract",
+				Message:     fmt.Sprintf("environment %s is abstract and no environment extends it; it has no effect", name),
+			})
+		}
+	}
 	environmentNames := make([]string, 0, len(cfg.Environments))
 	for name := range cfg.Environments {
 		environmentNames = append(environmentNames, name)
@@ -222,6 +250,57 @@ func ValidationWarnings(cfg *Config) []ValidationWarning {
 				})
 			}
 		}
+	}
+	return warnings
+}
+
+// DeprecatedKeysRemovalRelease is the release in which deprecated no-op config
+// keys stop validating. The warnings ship in the minor release before it.
+const DeprecatedKeysRemovalRelease = "v0.15.0"
+
+const (
+	deprecatedDeployOrderGuidance = "services deploy sequentially in dependency order; use dependsOn for ordering and services.<name>.deploy.strategy for rollout; remove this key"
+	deprecatedCacheGuidance       = "build cache is managed by Docker; use `tako cleanup --docker-cache` or the takod --build-cache-keep-storage setting; remove this key"
+	deprecatedEnvLabelsGuidance   = "set servers.<name>.labels and select them with serverSelector.labels or placement constraints"
+)
+
+// deprecatedKeyMessage renders the shared deprecation message template.
+func deprecatedKeyMessage(path, guidance string) string {
+	return fmt.Sprintf("%s is deprecated and has no effect; %s. It will be rejected starting in %s.", path, guidance, DeprecatedKeysRemovalRelease)
+}
+
+// deprecatedConfigWarnings reports accepted-but-ignored config keys in a
+// deterministic order: deployment.strategy, deployment.parallel,
+// deployment.cache, then environments.<env>.labels by environment name.
+func deprecatedConfigWarnings(cfg *Config) []ValidationWarning {
+	var warnings []ValidationWarning
+	add := func(environment, path, guidance string) {
+		warnings = append(warnings, ValidationWarning{
+			Environment: environment,
+			Field:       path,
+			Message:     deprecatedKeyMessage(path, guidance),
+		})
+	}
+	if cfg.Deployment != nil {
+		if strings.TrimSpace(cfg.Deployment.Strategy) != "" {
+			add("", "deployment.strategy", deprecatedDeployOrderGuidance)
+		}
+		if cfg.Deployment.Parallel != nil {
+			add("", "deployment.parallel", deprecatedDeployOrderGuidance)
+		}
+		if cfg.Deployment.Cache != nil {
+			add("", "deployment.cache", deprecatedCacheGuidance)
+		}
+	}
+	environmentNames := make([]string, 0, len(cfg.Environments))
+	for name, env := range cfg.Environments {
+		if len(env.Labels) > 0 {
+			environmentNames = append(environmentNames, name)
+		}
+	}
+	sort.Strings(environmentNames)
+	for _, name := range environmentNames {
+		add(name, fmt.Sprintf("environments.%s.labels", name), deprecatedEnvLabelsGuidance)
 	}
 	return warnings
 }
@@ -995,7 +1074,8 @@ func validateService(envName string, name string, service *ServiceConfig, cfg *C
 	// Deploy-time runs do not have a rollout strategy or restart policy.
 	if !service.IsRun() {
 		if service.Deploy.Strategy == "" {
-			service.Deploy.Strategy = DeployStrategyRecreate
+			service.Deploy.Strategy = DefaultDeployStrategy(service)
+			service.Deploy.StrategyDefaulted = true
 		}
 		if err := validateDeployStrategy(name, service); err != nil {
 			return err
@@ -1802,7 +1882,7 @@ func validateRunServiceKind(name string, service *ServiceConfig) error {
 		return fmt.Errorf("service %s: kind: run cannot use placement.strategy global because deploy-time runs execute exactly once", name)
 	}
 	deploy := service.Deploy
-	if deploy.Strategy != "" || deploy.MaxUnavailable != 0 || deploy.MaxSurge != 0 || deploy.RollbackOnFailure ||
+	if deploy.Strategy != "" || deploy.MaxUnavailable != 0 || deploy.MaxSurge != 0 || deploy.RollbackOnFailure != nil ||
 		deploy.Readiness != (DeployReadinessConfig{}) || deploy.SmokeTest != (DeploySmokeTestConfig{}) ||
 		deploy.Promotion != "" || deploy.GracePeriod != "" || deploy.Release != nil {
 		return fmt.Errorf("service %s: kind: run cannot set deploy rollout controls", name)

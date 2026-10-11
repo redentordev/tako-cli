@@ -9,6 +9,11 @@
     "servers",
     "environments"
   ],
+  "patternProperties": {
+    "^x-": {
+      "description": "Extension key: accepted and ignored. Use it to hold shared fragments and YAML anchors."
+    }
+  },
   "definitions": {
     "secretSources": {
       "type": "array",
@@ -48,6 +53,79 @@
   "properties": {
     "secretSources": {
       "$ref": "#/definitions/secretSources"
+    },
+    "aliases": {
+      "type": "object",
+      "description": "Project command aliases: `tako <alias> [args...]` runs `tako <alias args...> [args...]`. Values are Tako arguments (list form, preferred) or one string split on whitespace with shell-style quoting but no shell. Values are literal: ${...} references are rejected. Built-in commands always take precedence over aliases.",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+        "not": { "enum": ["help", "completion", "__complete", "__completeNoDesc", "aliases"] }
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tako arguments as one string, e.g. \"logs web --follow\""
+          },
+          {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" },
+            "description": "Tako arguments, e.g. [exec, -it, web, --, bin/rails, console]"
+          }
+        ]
+      },
+      "examples": [
+        { "console": ["exec", "-it", "web", "--", "bin/rails", "console"], "logsw": "logs web --follow" }
+      ]
+    },
+    "hooks": {
+      "type": "object",
+      "description": "Local lifecycle hooks: executables in the hook directory or argv commands that run on the operator's machine (never on nodes) around deploy, rollback, promote, and setup. Hooks get a curated, secret-free environment; see docs/HOOKS.md.",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "default": ".tako-hooks",
+          "description": "Hook directory relative to the directory containing the config file. Must stay inside the project and outside the gitignored .tako/ directory."
+        },
+        "timeout": {
+          "type": "string",
+          "default": "5m",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|μs|ms|s|m|h))+$",
+          "description": "Per-hook timeout as a Go duration from 1s to 1h. On timeout the hook's whole process tree is terminated."
+        },
+        "output": {
+          "type": "string",
+          "enum": ["verbose", "quiet"],
+          "default": "verbose",
+          "description": "verbose emits hook output lines at info level; quiet emits them at debug level (shown with --verbose and always present in NDJSON)."
+        },
+        "passEnv": {
+          "type": "array",
+          "description": "Process variables forwarded to hooks: exact names or a single trailing * prefix pattern. Nothing else from the process environment, including .env values, reaches a hook. TAKO_ names are reserved.",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*\\*?$",
+            "not": { "pattern": "^[Tt][Aa][Kk][Oo]_" }
+          },
+          "examples": [["GITHUB_TOKEN", "SLACK_*"]]
+        },
+        "commands": {
+          "type": "object",
+          "description": "Hooks declared as argv lists, run without a shell from the project directory. ${...} references are rejected; forward variables with passEnv. A hook defined here and as a file is an error.",
+          "propertyNames": {
+            "enum": ["pre-deploy", "post-deploy", "pre-rollback", "post-rollback", "pre-promote", "post-promote", "pre-setup", "post-setup", "on-failure"]
+          },
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" }
+          },
+          "examples": [{ "pre-deploy": ["make", "check"] }]
+        }
+      }
     },
     "$schema": {
       "type": "string",
@@ -300,7 +378,7 @@
     },
     "deployment": {
       "type": "object",
-      "description": "Deployment optimization settings",
+      "description": "Deployment settings",
       "properties": {
         "strategy": {
           "type": "string",
@@ -308,10 +386,13 @@
             "parallel",
             "sequential"
           ],
-          "description": "Deployment strategy"
+          "deprecated": true,
+          "description": "Deprecated and has no effect; rejected starting in v0.15.0. Services deploy sequentially in dependency order: use services.<name>.dependsOn for ordering and services.<name>.deploy.strategy for rollout, then remove this key."
         },
         "parallel": {
           "type": "object",
+          "deprecated": true,
+          "description": "Deprecated and has no effect; rejected starting in v0.15.0. Services deploy sequentially in dependency order: use services.<name>.dependsOn for ordering and services.<name>.deploy.strategy for rollout, then remove this key.",
           "properties": {
             "maxConcurrentBuilds": {
               "type": "integer",
@@ -333,6 +414,8 @@
         },
         "cache": {
           "type": "object",
+          "deprecated": true,
+          "description": "Deprecated and has no effect; rejected starting in v0.15.0. Build cache is managed by Docker: use `tako cleanup --docker-cache` or the takod --build-cache-keep-storage setting, then remove this key.",
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -449,6 +532,14 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
+          "extends": {
+            "type": "string",
+            "description": "Inherit from another environment: this environment's keys are deep-merged over the resolved parent. Mappings merge by key, scalars and lists replace, and null removes an inherited key. At most 8 extends hops."
+          },
+          "abstract": {
+            "type": "boolean",
+            "description": "Template-only environment: usable as an extends target but never validated, deployed, or chosen as the default. Not inherited."
+          },
           "servers": {
             "type": "array",
             "description": "Server names for this environment",
@@ -458,6 +549,32 @@
           },
           "secretSources": {
             "$ref": "#/definitions/secretSources"
+          },
+          "serverSelector": {
+            "type": "object",
+            "description": "Label-based server selection, used instead of an explicit servers list. Selects every server whose servers.<name>.labels match all labels, or every server when any is true.",
+            "additionalProperties": false,
+            "properties": {
+              "labels": {
+                "type": "object",
+                "description": "Match servers that carry all of these labels",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              },
+              "any": {
+                "type": "boolean",
+                "description": "Select every configured server"
+              }
+            }
+          },
+          "labels": {
+            "type": "object",
+            "deprecated": true,
+            "description": "Deprecated and has no effect; rejected starting in v0.15.0. Set servers.<name>.labels and select them with serverSelector.labels or placement constraints.",
+            "additionalProperties": {
+              "type": "string"
+            }
           },
           "proxy": {
             "type": "object",
@@ -484,6 +601,14 @@
                   },
                   "constraints": {
                     "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "preferences": {
+                    "type": "array",
+                    "maxItems": 0,
+                    "description": "Reserved; placement preferences are not supported yet and validation rejects any entry.",
                     "items": {
                       "type": "string"
                     }
@@ -568,6 +693,11 @@
                     }
                   ]
                 },
+                "dockerfile": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Dockerfile path relative to the build context"
+                },
                 "image": {
                   "type": "string",
                   "description": "Docker image"
@@ -582,7 +712,7 @@
                 },
                 "ports": {
                   "type": "array",
-                  "description": "Raw TCP/UDP host ports published directly on the node, bypassing tako-proxy (\"PORT\", \"HOST:CONTAINER\", \"IP:HOST:CONTAINER\", optional /tcp or /udp). Requires deploy.strategy recreate and at most one replica.",
+                  "description": "Raw TCP/UDP host ports published directly on the node, bypassing tako-proxy (\"PORT\", \"HOST:CONTAINER\", \"IP:HOST:CONTAINER\", optional /tcp or /udp). Requires deploy.strategy recreate and at most one replica; when deploy.strategy is omitted, a service with ports defaults to recreate.",
                   "items": {
                     "type": "string"
                   }
@@ -1093,7 +1223,7 @@
                 },
                 "deploy": {
                   "type": "object",
-                  "description": "Deployment strategy for takod reconciliation. recreate is the conservative default. rolling warms a full replacement revision, waits for readiness, switches proxy routes, then prunes stale revisions. blue_green warms a full green revision for stateless public services, waits for readiness and optional smoke tests, and switches proxy routes only after checks pass. Default automatic promotion switches during deploy; promotion: manual warms green for a later tako promote <service>. deploy.gracePeriod can retain the previous blue-green revision after promotion before stale revision cleanup.",
+                  "description": "Deployment strategy for takod reconciliation. When strategy is omitted, Tako selects rolling for a stateless long-running service that declares port and no raw ports or volumes, is not persistent, sets no maxUnavailable, a maxSurge of 0 or at least replicas, and no gracePeriod, promotion, or smokeTest, and would pass rolling validation; every other service (persistent, raw ports, volumes, portless workers) defaults to recreate. A defaulted rolling service without healthCheck or deploy.readiness waits for a TCP connect to port before traffic shifts. recreate stops the previous containers, keeps them restorable until the new revision passes health checks on every node, and restores them when the rollout fails (rollbackOnFailure). rolling warms a full replacement revision, waits for readiness, switches proxy routes, then prunes stale revisions. blue_green warms a full green revision for stateless public services, waits for readiness and optional smoke tests, and switches proxy routes only after checks pass. Default automatic promotion switches during deploy; promotion: manual warms green for a later tako promote <service>. deploy.gracePeriod can retain the previous blue-green revision after promotion before stale revision cleanup.",
                   "properties": {
                     "strategy": {
                       "type": "string",
@@ -1112,7 +1242,9 @@
                       "minimum": 0
                     },
                     "rollbackOnFailure": {
-                      "type": "boolean"
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Defaults to true: a failed rollout leaves the previous revision serving. recreate keeps the stopped previous containers and restarts them on every node of the service when any node fails; rolling never cuts traffic over. false disables recreate restore and keeps failed new containers stopped but not removed for debugging. Needs takod capability deploy.restore-on-failure-v1 when set explicitly; when omitted, older nodes fall back to legacy remove-then-start with a warning."
                     },
                     "readiness": {
                       "type": "object",
@@ -1213,6 +1345,14 @@
                       "items": {
                         "type": "string"
                       }
+                    },
+                    "preferences": {
+                      "type": "array",
+                      "maxItems": 0,
+                      "description": "Reserved; placement preferences are not supported yet and validation rejects any entry.",
+                      "items": {
+                        "type": "string"
+                      }
                     }
                   }
                 },
@@ -1226,6 +1366,47 @@
                         "round_robin",
                         "sticky"
                       ]
+                    },
+                    "healthCheck": {
+                      "type": "object",
+                      "description": "Proxy-side upstream health checks. When enabled, path defaults to healthCheck.path or /health and interval defaults to 10s.",
+                      "properties": {
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "interval": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "monitoring": {
+                  "type": "object",
+                  "description": "Per-service monitoring used by tako monitor",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Enable monitoring for this service"
+                    },
+                    "interval": {
+                      "type": "string",
+                      "description": "Check interval, for example 60s"
+                    },
+                    "webhook": {
+                      "type": "string",
+                      "description": "Webhook URL for alerts"
+                    },
+                    "checkType": {
+                      "type": "string",
+                      "enum": [
+                        "http",
+                        "container"
+                      ],
+                      "description": "Check type; auto-detected when omitted"
                     }
                   }
                 },

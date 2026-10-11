@@ -15,13 +15,19 @@ Setup configures your VPS server with all necessary components:
   - WireGuard mesh networking
   - takod node-local runtime
   - tako-proxy for automatic SSL and load balancing
-  - UFW firewall configuration
-  - Security hardening (disable root login, fail2ban)
+  - UFW firewall configuration where UFW is available (Debian/Ubuntu);
+    the configured SSH port is always allowed, and other hosts are left
+    to the provider or native firewall with a warning
+  - Security hardening: fail2ban on the SSH ports; block root password
+    login (key-based root login stays allowed) unless sshd_config already
+    sets PermitRootLogin; password authentication is disabled only after
+    key-based access is verified; sshd changes are validated before reload
   - Deploy user creation and SSH key setup
   - Monitoring agent for system metrics
 
 .PP
-This only needs to be run once per server.
+Re-running setup is safe: it refreshes the firewall and never removes an
+SSH allow rule. This only needs to be run once per server.
 
 
 .SH OPTIONS
@@ -31,6 +37,10 @@ This only needs to be run once per server.
 .PP
 \fB-s\fP, \fB--server\fP=""
 	Server to set up (default: all servers)
+
+.PP
+\fB--skip-hooks\fP[=false]
+	Skip local lifecycle hooks (including on-failure) for this invocation
 
 .PP
 \fB--takod-binary\fP=""
@@ -43,7 +53,7 @@ This only needs to be run once per server.
 
 .PP
 \fB-e\fP, \fB--env\fP=""
-	environment to deploy (default: production or only environment)
+	environment to use (default: the only environment, else production, else the first alphabetically)
 
 .PP
 \fB--events\fP=""

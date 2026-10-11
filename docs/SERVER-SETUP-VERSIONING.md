@@ -8,7 +8,7 @@ as a Tako setup manifest.
 
 ```json
 {
-  "version": "1.2.1",
+  "version": "1.2.2",
   "installed_at": "2026-06-13T00:00:00Z",
   "last_upgrade": "2026-06-13T00:00:00Z",
   "components": {
@@ -36,9 +36,23 @@ current provisioning path from scratch.
 3. Install and enable Docker.
 4. Verify that rootful system Docker is reachable through `sudo docker info`.
 5. Install WireGuard tools.
-6. Configure UFW for SSH, HTTP, HTTPS, HTTP/3 UDP 443, the mesh listen port,
-   routed peer mesh traffic, and persistent IPv4 forwarding for mesh routing.
-7. Apply host hardening and auto-recovery checks.
+6. Configure UFW for the SSH port set, HTTP, HTTPS, HTTP/3 UDP 443, the mesh
+   listen port, routed peer mesh traffic, and persistent IPv4 forwarding for
+   mesh routing. The SSH port set is 22, the server's configured `port`, and
+   the server-side port of the live SSH session. Setup confirms an allow rule
+   for every SSH port before it enables UFW, then opens a fresh SSH connection;
+   if that fails it disables UFW over the existing session and fails the step
+   ("firewall disabled to avert SSH lockout"). Hosts without UFW outside the
+   Debian family skip this step with a warning and are reported as
+   `firewall.status: skipped` (and `nativeFirewall: firewalld` when active).
+7. Apply host hardening and auto-recovery checks. The fail2ban sshd jail bans
+   on the SSH port set. sshd edits are backed up to
+   `/etc/ssh/sshd_config.tako-bak` and validated with `sshd -t`; an invalid
+   result is restored and the step fails without touching sshd, a valid one is
+   applied with a reload. `PermitRootLogin prohibit-password` is set only when
+   sshd_config has no active `PermitRootLogin` (an explicit `no` is kept).
+   Password authentication is disabled only after a key- or agent-only SSH
+   connection succeeds; otherwise it is left unchanged with a warning.
 8. Ensure the deploy user and monitoring agent.
 9. Install or reuse the server-side tako binary.
 10. Install and restart the takod systemd service with the configured node name
@@ -74,6 +88,17 @@ upgrade path and then refreshes the takod runtime. If the manifest is already at
 the current setup version, setup still refreshes the takod binary and systemd
 service so runtime changes, including takod flags and background refresh
 behavior, are applied without needing a manifest bump.
+
+The firewall step runs on every `tako setup`, including converge, so re-running
+setup refreshes the SSH allow rules after the configured SSH `port` changes. It
+never deletes an SSH allow rule: allowances that Tako created for a port that is
+no longer in the SSH port set are reported as `firewall.staleSshPorts` with a
+warning that includes the manual `sudo ufw delete allow <port>/tcp` command.
+
+Setup version `1.2.2` makes servers at `1.2.1` or older reapply the full setup
+path on the next `tako setup`, which installs the fail2ban jail for custom SSH
+ports and the validated sshd reload. `tako upgrade servers` does not touch the
+firewall or sshd.
 
 Use `tako doctor` to surface stale or unavailable server-side takod agents in
 the normal health report. Use `tako upgrade servers` when you only need to patch

@@ -8,6 +8,7 @@ import (
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/hooks"
 	"github.com/redentordev/tako-cli/pkg/provisioner"
 	"github.com/redentordev/tako-cli/pkg/setup"
 	"github.com/redentordev/tako-cli/pkg/ssh"
@@ -19,6 +20,7 @@ import (
 var (
 	setupServer      string
 	setupTakodBinary string
+	setupSkipHooks   bool
 )
 
 var setupCmd = &cobra.Command{
@@ -30,12 +32,18 @@ var setupCmd = &cobra.Command{
   - WireGuard mesh networking
   - takod node-local runtime
   - tako-proxy for automatic SSL and load balancing
-  - UFW firewall configuration
-  - Security hardening (disable root login, fail2ban)
+  - UFW firewall configuration where UFW is available (Debian/Ubuntu);
+    the configured SSH port is always allowed, and other hosts are left
+    to the provider or native firewall with a warning
+  - Security hardening: fail2ban on the SSH ports; block root password
+    login (key-based root login stays allowed) unless sshd_config already
+    sets PermitRootLogin; password authentication is disabled only after
+    key-based access is verified; sshd changes are validated before reload
   - Deploy user creation and SSH key setup
   - Monitoring agent for system metrics
 
-This only needs to be run once per server.`,
+Re-running setup is safe: it refreshes the firewall and never removes an
+SSH allow rule. This only needs to be run once per server.`,
 	RunE: runSetup,
 }
 
@@ -43,6 +51,7 @@ func init() {
 	rootCmd.AddCommand(setupCmd)
 	setupCmd.Flags().StringVarP(&setupServer, "server", "s", "", "Server to set up (default: all servers)")
 	setupCmd.Flags().StringVar(&setupTakodBinary, "takod-binary", "", "Path to a Linux tako binary to install as takod during setup (for development/testing)")
+	setupCmd.Flags().BoolVar(&setupSkipHooks, "skip-hooks", false, skipHooksFlagUsage)
 }
 
 func runSetup(cmd *cobra.Command, args []string) error {
@@ -50,6 +59,10 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return formatConfigLoadError(cfgFile, err)
+	}
+	hookSession, err := newHookSession(hookCommandSetup, cfg, resolveDeployConfigPath(cfgFile), setupSkipHooks)
+	if err != nil {
+		return err
 	}
 
 	// Create SSH pool
@@ -70,14 +83,21 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		Nodes:       []engine.SetupNodeResult{},
 	}
 
+	// Setup takes no leases: pre-setup runs once before the first node and
+	// post-setup once after the last.
+	setupContext := hooks.Context{Servers: targetServerNames}
+	setupStarted := time.Now()
+	opErr := hookSession.runPre(cmd.Context(), setupContext)
+
 	// Set up each server; abort on the first failing node.
-	var opErr error
-	for _, name := range targetServerNames {
-		node, err := runSetupNode(cfg, sshPool, name, servers[name], envName)
-		result.Nodes = append(result.Nodes, node)
-		if err != nil {
-			opErr = err
-			break
+	if opErr == nil {
+		for _, name := range targetServerNames {
+			node, err := setupNode(cfg, sshPool, name, servers[name], envName)
+			result.Nodes = append(result.Nodes, node)
+			if err != nil {
+				opErr = err
+				break
+			}
 		}
 	}
 
@@ -85,13 +105,23 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		emitSetupLine("", "\nAll servers set up successfully!\n")
 		emitSetupLine("", "\nNext step: Run 'tako deploy' to deploy your application\n")
 	} else {
-		result.Error = opErr.Error()
+		result.Error = cliEngine().RedactSensitive(opErr.Error())
 	}
+	opErr = hookSession.finish(cmd.Context(), opErr, func() hooks.Context {
+		values := setupContext
+		values.Result = "success"
+		values.DurationSeconds = durationPointer(time.Since(setupStarted).Seconds())
+		return values
+	}, func() hooks.Context { return setupContext })
+	result.Hooks = hookSession.hookOutcomes()
 	if emitErr := emitResultDocument(result); emitErr != nil && opErr == nil {
 		opErr = emitErr
 	}
 	return opErr
 }
+
+// setupNode provisions one node. Seam for tests.
+var setupNode = runSetupNode
 
 // runSetupNode provisions one server and reports its per-step outcomes plus
 // the adoption facts (OS, versions, firewall, recorded host key).
@@ -128,7 +158,30 @@ func runSetupNode(cfg *config.Config, sshPool *ssh.Pool, name string, server con
 		emitSetupLine(name, "→ Setting up server from scratch...\n")
 	}
 
-	steps := setupNodeSteps(prov, cfg, name, server.User, meshListenPort, takodBinaryForSetup(), node.Mode == engine.SetupModeConverge)
+	// Resolve the SSH ports once: the firewall must keep them open and the
+	// fail2ban jail bans on them.
+	sshPorts, err := prov.ResolveSSHPorts(server.Port)
+	if err != nil {
+		err = fmt.Errorf("failed to resolve SSH ports for server %s: %w", name, err)
+		node.Error = err.Error()
+		return node, err
+	}
+	access := setupAccessOptions{
+		sshPorts:      sshPorts,
+		firewallProbe: setupSSHProbe(server, server.Password),
+		keyOnlyProbe:  setupSSHProbe(server, ""),
+		onFirewallReport: func(report *provisioner.FirewallReport) {
+			applySetupFirewallReport(&node, report)
+			for _, warning := range report.Warnings() {
+				emitSetupLine(name, "  "+warning+"\n")
+			}
+		},
+		warn: func(message string) {
+			emitSetupLine(name, "  "+message+"\n")
+		},
+	}
+
+	steps := setupNodeSteps(prov, cfg, name, server.User, meshListenPort, takodBinaryForSetup(), node.Mode == engine.SetupModeConverge, access)
 	for _, step := range steps {
 		if step.skip {
 			node.Steps = append(node.Steps, engine.SetupStepOutcome{Step: step.key, Title: step.title, Status: engine.SetupStepSkipped})
@@ -159,7 +212,7 @@ func runSetupNode(cfg *config.Config, sshPool *ssh.Pool, name string, server con
 		return node, err
 	}
 
-	collectSetupNodeFacts(&node, client, cfg, server, meshListenPort)
+	collectSetupNodeFacts(&node, client, cfg, server)
 
 	if node.Mode != engine.SetupModeConverge {
 		emitSetupLine(name, fmt.Sprintf("\n✓ Server %s set up successfully!\n", name))
@@ -169,10 +222,10 @@ func runSetupNode(cfg *config.Config, sshPool *ssh.Pool, name string, server con
 
 // collectSetupNodeFacts fills the adoption facts a control plane reads from
 // the result document. Probe failures leave fields empty rather than failing
-// a setup that already succeeded.
-func collectSetupNodeFacts(node *engine.SetupNodeResult, client *ssh.Client, cfg *config.Config, server config.ServerConfig, meshListenPort int) {
+// a setup that already succeeded. Firewall facts come from the firewall
+// step's own report (applySetupFirewallReport), not from recomputation.
+func collectSetupNodeFacts(node *engine.SetupNodeResult, client *ssh.Client, cfg *config.Config, server config.ServerConfig) {
 	node.SetupVersion = setup.CurrentVersion
-	node.FirewallPorts = provisioner.FirewallAllowedPorts(meshListenPort)
 	if osInfo, err := provisioner.DetectOS(client); err == nil && osInfo != nil {
 		node.OS = osInfo.String()
 	}
@@ -184,6 +237,49 @@ func collectSetupNodeFacts(node *engine.SetupNodeResult, client *ssh.Client, cfg
 	}
 	if hostKey, err := ssh.LookupRecordedHostKey(server.Host, server.Port); err == nil && hostKey != nil {
 		node.HostKey = &engine.SetupHostKey{Type: hostKey.Type, Key: hostKey.Key, Fingerprint: hostKey.Fingerprint}
+	}
+}
+
+// applySetupFirewallReport records the firewall step's outcome on the node.
+// firewallPorts lists only ports actually applied, so a skipped step leaves
+// it empty (omitted from the result document).
+func applySetupFirewallReport(node *engine.SetupNodeResult, report *provisioner.FirewallReport) {
+	if report == nil {
+		return
+	}
+	node.FirewallPorts = append([]string(nil), report.AllowedPorts...)
+	node.Firewall = &engine.SetupFirewall{
+		Backend:        report.Backend,
+		Status:         report.Status,
+		Reason:         report.Reason,
+		SSHPorts:       provisioner.FormatTCPPorts(report.SSHPorts),
+		StaleSSHPorts:  provisioner.FormatTCPPorts(report.StaleSSHPorts),
+		NativeFirewall: report.NativeFirewall,
+	}
+}
+
+// setupAccessOptions carries the SSH access protections for one node: the
+// resolved SSH port set, the fresh-connection probes, and sinks for the
+// firewall report and operator warnings.
+type setupAccessOptions struct {
+	sshPorts         []int
+	firewallProbe    func() error
+	keyOnlyProbe     func() error
+	onFirewallReport func(*provisioner.FirewallReport)
+	warn             func(string)
+}
+
+// setupSSHProbe returns a probe that opens a fresh, non-pooled, bounded SSH
+// connection to the server's configured host and port. An empty password
+// restricts it to key and agent authentication. The host key is pinned to
+// the recorded one when available.
+func setupSSHProbe(server config.ServerConfig, password string) func() error {
+	return func() error {
+		var pinned *ssh.RecordedHostKey
+		if hostKey, err := ssh.LookupRecordedHostKey(server.Host, server.Port); err == nil && hostKey != nil {
+			pinned = hostKey
+		}
+		return ssh.ProbeAuth(server.Host, server.Port, server.User, server.SSHKey, password, ssh.ProbeOptions{}, pinned)
 	}
 }
 
@@ -202,7 +298,7 @@ type setupNodeProvisioner interface {
 	UpdateSystem() error
 	InstallDocker() error
 	InstallWireGuard() error
-	HardenSecurity() error
+	HardenSecurity(opts provisioner.HardeningOptions) error
 	VerifyAutoRecovery() error
 	InstallMonitoringAgent() error
 }
@@ -210,14 +306,35 @@ type setupNodeProvisioner interface {
 // setupNodeSteps returns the full provisioning sequence. Converge re-runs
 // only firewall, deploy access, and the takod runtime; the other steps are
 // marked skip so the result document reports them as skipped.
-func setupNodeSteps(prov setupNodeProvisioner, cfg *config.Config, nodeName string, username string, meshListenPort int, takodBinary string, converge bool) []setupProvisionStep {
+func setupNodeSteps(prov setupNodeProvisioner, cfg *config.Config, nodeName string, username string, meshListenPort int, takodBinary string, converge bool, access setupAccessOptions) []setupProvisionStep {
+	configureFirewall := func() error {
+		report, err := prov.ConfigureFirewall(provisioner.FirewallOptions{
+			MeshListenPort: meshListenPort,
+			SSHPorts:       access.sshPorts,
+			Probe:          access.firewallProbe,
+		})
+		if err != nil {
+			return err
+		}
+		if access.onFirewallReport != nil {
+			access.onFirewallReport(report)
+		}
+		return nil
+	}
+	hardenSecurity := func() error {
+		return prov.HardenSecurity(provisioner.HardeningOptions{
+			SSHPorts:     access.sshPorts,
+			KeyOnlyProbe: access.keyOnlyProbe,
+			Warn:         access.warn,
+		})
+	}
 	return []setupProvisionStep{
 		{engine.SetupStepOSCheck, "Checking system requirements", prov.CheckRequirements, converge},
 		{engine.SetupStepPackages, "Updating system packages", prov.UpdateSystem, converge},
 		{engine.SetupStepDocker, "Installing Docker", prov.InstallDocker, converge},
 		{engine.SetupStepWireGuard, "Installing WireGuard", prov.InstallWireGuard, converge},
-		{engine.SetupStepFirewall, "Configuring firewall (UFW)", func() error { return prov.ConfigureFirewall(meshListenPort) }, false},
-		{engine.SetupStepHardening, "Hardening security", prov.HardenSecurity, converge},
+		{engine.SetupStepFirewall, "Configuring firewall", configureFirewall, false},
+		{engine.SetupStepHardening, "Hardening security", hardenSecurity, converge},
 		{engine.SetupStepAutoRecovery, "Verifying auto-recovery", prov.VerifyAutoRecovery, converge},
 		{engine.SetupStepDeployUser, "Setting up deploy user", func() error { return prov.SetupDeployUser(username) }, false},
 		{engine.SetupStepMonitorAgent, "Installing monitoring agent", prov.InstallMonitoringAgent, converge},
@@ -315,7 +432,7 @@ type setupRuntimeInstaller interface {
 
 type currentSetupRefresher interface {
 	setupRuntimeInstaller
-	ConfigureFirewall(meshListenPort int) error
+	ConfigureFirewall(opts provisioner.FirewallOptions) (*provisioner.FirewallReport, error)
 	SetupDeployUser(username string) error
 }
 

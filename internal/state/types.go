@@ -46,6 +46,27 @@ type ServiceState struct {
 	Replicas         int                `json:"replicas"`
 	Env              map[string]string  `json:"env"`
 	HealthCheck      HealthCheckState   `json:"healthCheck"`
+	// DeployStrategy and Recovery are recorded for a service whose rollout
+	// failed: the effective strategy and how the previous revision was
+	// recovered.
+	DeployStrategy string         `json:"deployStrategy,omitempty"`
+	Recovery       *RecoveryState `json:"recovery,omitempty"`
+}
+
+// RecoveryState records how a failed service rollout was recovered. It holds
+// revision IDs, node names, container names and error text only.
+type RecoveryState struct {
+	Status   string              `json:"status"`
+	Mode     string              `json:"mode,omitempty"`
+	Revision string              `json:"revision,omitempty"`
+	Nodes    []RecoveryNodeState `json:"nodes,omitempty"`
+}
+
+type RecoveryNodeState struct {
+	Server     string   `json:"server"`
+	Status     string   `json:"status"`
+	Error      string   `json:"error,omitempty"`
+	Containers []string `json:"containers,omitempty"`
 }
 
 type ServiceFileState struct {

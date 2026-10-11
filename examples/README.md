@@ -49,7 +49,7 @@ We have ready-to-deploy examples covering common use cases:
 ### Testing & Advanced Examples
 | Example | Description | Features |
 |---------|-------------|----------|
-| [test-parallel](./test-parallel/) | Parallel deployment | Test concurrent service deployment |
+| [dependency-order](./dependency-order/) | Dependency order | Sequential, dependency-ordered service deploys with `dependsOn` |
 | [test-placement-strategies](./test-placement-strategies/) | Placement strategies | takod node placement testing |
 | [test-secrets](./test-secrets/) | Secrets management | Secure environment variables |
 

@@ -42,33 +42,64 @@ type ListDeploymentsFunc func(history *remotestate.DeploymentHistory, opts *remo
 type RollbackRequest struct {
 	Config      *config.Config
 	Environment string
-	// Service is the --service flag (required).
+	// Service is the --service flag. Set, Rollback restores that one
+	// service; empty selects a project-wide rollback (PlanRollback).
 	Service string
-	// DeploymentID is the optional positional deployment-id argument; empty
-	// rolls back to the previous stable deployment for the service.
+	// DeploymentID is the optional positional target argument: an exact
+	// deployment ID, a unique ID prefix, or a git commit. Empty rolls back
+	// to the previous stable deployment (per service or project-wide).
 	DeploymentID string
 	Verbose      bool
+
+	// IncludePersistent rolls back persistent: true services too (project
+	// scope only).
+	IncludePersistent bool
+	// RunRelease re-runs deploy.release from each target image (project
+	// scope only; single-service rollback always runs it).
+	RunRelease bool
 
 	// HistorySource and ListDeployments are seams for history helpers shared
 	// with other cmd files; see the type docs.
 	HistorySource   RollbackHistorySourceFunc
 	ListDeployments ListDeploymentsFunc
+
+	// BeforeMutation, when set, runs after the lock and leases are held and
+	// the target deployment is selected, before notifications or any
+	// mutation. Its error aborts the rollback. Nil changes nothing.
+	BeforeMutation BeforeMutationFunc
 }
 
-// RollbackResult is the serializable outcome of Rollback.
+// Scope reports whether the request rolls back one service or the project.
+func (r RollbackRequest) Scope() string {
+	if strings.TrimSpace(r.Service) != "" {
+		return RollbackScopeService
+	}
+	return RollbackScopeProject
+}
+
+// RollbackResult is the serializable outcome of Rollback and
+// RollbackSession.Apply.
 type RollbackResult struct {
 	APIVersion  string `json:"apiVersion"`
 	Kind        string `json:"kind"`
 	Project     string `json:"project"`
 	Environment string `json:"environment"`
-	Service     string `json:"service"`
-	// DeploymentID is the target deployment the service was rolled back to.
-	DeploymentID string                   `json:"deploymentId"`
-	Version      string                   `json:"version,omitempty"`
-	Status       takoapi.DeploymentStatus `json:"status"`
-	StartedAt    time.Time                `json:"startedAt"`
-	Duration     float64                  `json:"durationSeconds"`
-	Message      string                   `json:"message,omitempty"`
+	// Scope is "service" (--service) or "project".
+	Scope string `json:"scope"`
+	// Service is the rolled-back service; omitted for project scope.
+	Service string `json:"service,omitempty"`
+	// DeploymentID is the target deployment rolled back to.
+	DeploymentID string `json:"deploymentId"`
+	// Services reports each service's outcome (project scope).
+	Services  []RollbackServiceOutcome `json:"services,omitempty"`
+	Version   string                   `json:"version,omitempty"`
+	Status    takoapi.DeploymentStatus `json:"status"`
+	StartedAt time.Time                `json:"startedAt"`
+	Duration  float64                  `json:"durationSeconds"`
+	Message   string                   `json:"message,omitempty"`
+	Error     string                   `json:"error,omitempty"`
+	// Hooks lists the local lifecycle hooks considered, in run order.
+	Hooks []HookOutcome `json:"hooks,omitempty"`
 }
 
 // Rollback re-deploys a service from a recorded deployment state, reconciles
@@ -147,6 +178,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 		e.RegisterSecret(server.Password)
 	}
 	e.RegisterACMEDNSSecrets(cfg)
+	e.registerServiceSecretValuesOrWarn(cfg, envName, services, events.PhaseDeploy)
 
 	sshPool := ssh.NewPool()
 	defer sshPool.CloseAll()
@@ -194,7 +226,17 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	// Create state manager.
 	stateManager := remotestate.NewStateManagerWithSocket(client, cfg.Project.Name, envName, server.Host, TakodSocketFromConfig(cfg))
 
-	// Determine which deployment to rollback to.
+	// Determine which deployment to rollback to. Every event of the
+	// operation carries data.operation and, once known,
+	// data.targetDeploymentId.
+	restoreEventContext := e.stream.SetContextData(map[string]any{"operation": "rollback"})
+	defer restoreEventContext()
+	targetDeployment, err := SelectRollbackTargetFromHistory(history, req.DeploymentID, req.Service, req.ListDeployments)
+	if err != nil {
+		return nil, &InvalidRequestError{Err: err}
+	}
+	restoreTargetContext := e.stream.SetContextData(map[string]any{"targetDeploymentId": targetDeployment.ID})
+	defer restoreTargetContext()
 	if req.DeploymentID != "" {
 		e.emit(events.Event{
 			Type:    events.TypeDeployStarted,
@@ -212,10 +254,6 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 			Message: "\n=== Rolling back to previous successful deployment ===\n\n",
 		})
 	}
-	targetDeployment, err := SelectRollbackTargetFromHistory(history, req.DeploymentID, req.Service, req.ListDeployments)
-	if err != nil {
-		return nil, &InvalidRequestError{Err: err}
-	}
 
 	// Display deployment info.
 	e.info(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf(
@@ -224,6 +262,17 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 		targetDeployment.Timestamp.Format("2006-01-02 15:04:05"),
 		targetDeployment.Version,
 		targetDeployment.User))
+
+	if err := callBeforeMutation(ctx, req.BeforeMutation, MutationInfo{
+		Operation:          "rollback",
+		Services:           []string{req.Service},
+		Servers:            append([]string(nil), mutationServers...),
+		TargetDeploymentID: targetDeployment.ID,
+		Revision:           RollbackTargetCommit(targetDeployment),
+		Image:              targetDeployment.Services[req.Service].Image,
+	}); err != nil {
+		return nil, err
+	}
 
 	// Setup notifications if configured.
 	var notifier *notification.Notifier
@@ -256,6 +305,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 		Kind:         KindRollbackResult,
 		Project:      cfg.Project.Name,
 		Environment:  envName,
+		Scope:        RollbackScopeService,
 		Service:      req.Service,
 		DeploymentID: targetDeployment.ID,
 		Version:      targetDeployment.Version,
@@ -292,6 +342,11 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	if err := deploy.PreflightAssignmentMutations(map[string]config.ServiceConfig{req.Service: placementService}); err != nil {
 		return nil, err
 	}
+	// A retained exact image avoids the git-worktree rebuild of a
+	// build-backed service; release still runs as before.
+	rollbackOptions := deployer.RollbackOptions{
+		ImageSource: e.retainedRollbackImageSource(deploy, req.Service, placementService, serviceState),
+	}
 	intentActualState, err := reconcile.GatherActualStateFromServers(sshPool, cfg, envName, mutationServers, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to gather actual state before rollback placement intent: %w", err)
@@ -309,7 +364,7 @@ func (e *Engine) Rollback(ctx context.Context, req RollbackRequest) (*RollbackRe
 	}
 
 	// Perform rollback using state.
-	if err := e.rollbackToTargetState(deploy, req.Service, services[req.Service], targetDeployment, serviceState); err != nil {
+	if err := e.rollbackToTargetState(deploy, req.Service, services[req.Service], targetDeployment, serviceState, rollbackOptions); err != nil {
 		// Send failure notification.
 		if notifier != nil {
 			notifier.Notify(notification.Event{
@@ -426,18 +481,38 @@ func (e *Engine) rollbackToTargetState(
 	service config.ServiceConfig,
 	targetDeployment *remotestate.DeploymentState,
 	serviceState remotestate.ServiceState,
+	opts deployer.RollbackOptions,
 ) error {
-	if !RollbackNeedsTargetWorktree(service, targetDeployment) {
-		return deploy.RollbackToState(serviceName, &serviceState)
+	if opts.ImageSource == RollbackImageRetained || !RollbackNeedsTargetWorktree(service, targetDeployment) {
+		return deploy.RollbackToState(serviceName, &serviceState, opts)
 	}
 
 	commit := RollbackTargetCommit(targetDeployment)
 	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("  Rebuilding rollback image from commit %s...\n", commit))
 	return withRollbackGitWorktree(commit, func(worktreeDir string) error {
 		return WithWorkingDirectory(worktreeDir, func() error {
-			return deploy.RollbackToState(serviceName, &serviceState)
+			return deploy.RollbackToState(serviceName, &serviceState, opts)
 		})
 	})
+}
+
+// retainedRollbackImageSource picks the retained exact image for a
+// build-backed single-service rollback, falling back to the git-worktree
+// rebuild (empty source) when no node retains it or the check fails.
+func (e *Engine) retainedRollbackImageSource(deploy *deployer.Deployer, serviceName string, service config.ServiceConfig, serviceState remotestate.ServiceState) string {
+	if strings.TrimSpace(service.Build) == "" || serviceState.SharedBuildHash != "" {
+		return ""
+	}
+	retained, err := deploy.LocateRetainedServiceImage(serviceName, &service, serviceState.Image)
+	if err != nil {
+		e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("  Retained image check for %s failed; rebuilding instead: %v\n", serviceName, err))
+		return ""
+	}
+	if !retained {
+		return ""
+	}
+	e.debug(events.TypeLogLine, events.PhaseDeploy, fmt.Sprintf("  Reusing retained image %s for %s\n", serviceState.Image, serviceName))
+	return RollbackImageRetained
 }
 
 // RollbackNeedsTargetWorktree reports whether a rollback must rebuild the
@@ -459,26 +534,76 @@ func RollbackTargetCommit(targetDeployment *remotestate.DeploymentState) string 
 }
 
 func withRollbackGitWorktree(commit string, fn func(worktreeDir string) error) error {
+	worktreeDir, cleanup, err := addRollbackGitWorktree(commit)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	return fn(worktreeDir)
+}
+
+// addRollbackGitWorktree checks out commit into a temporary detached
+// worktree; cleanup removes it.
+func addRollbackGitWorktree(commit string) (string, func(), error) {
 	commit = strings.TrimSpace(commit)
 	if commit == "" {
-		return fmt.Errorf("rollback target deployment does not include a git commit for rebuild")
+		return "", nil, fmt.Errorf("rollback target deployment does not include a git commit for rebuild")
 	}
 
 	tempRoot, err := os.MkdirTemp("", "tako-rollback-worktree-*")
 	if err != nil {
-		return fmt.Errorf("failed to create rollback worktree directory: %w", err)
+		return "", nil, fmt.Errorf("failed to create rollback worktree directory: %w", err)
 	}
-	defer os.RemoveAll(tempRoot)
 
 	worktreeDir := filepath.Join(tempRoot, "source")
 	if err := runRollbackGit("worktree", "add", "--detach", "--quiet", worktreeDir, commit); err != nil {
-		return fmt.Errorf("failed to create rollback worktree for commit %s: %w", commit, err)
+		os.RemoveAll(tempRoot)
+		return "", nil, fmt.Errorf("failed to create rollback worktree for commit %s: %w", commit, err)
 	}
-	defer func() {
+	return worktreeDir, func() {
 		_ = runRollbackGit("worktree", "remove", "--force", worktreeDir)
-	}()
+		os.RemoveAll(tempRoot)
+	}, nil
+}
 
-	return fn(worktreeDir)
+// rollbackCommitAvailable reports whether commit exists in the local git
+// repository. Seam for tests.
+var rollbackCommitAvailable = func(commit string) bool {
+	commit = strings.TrimSpace(commit)
+	if commit == "" {
+		return false
+	}
+	return runRollbackGit("cat-file", "-e", commit+"^{commit}") == nil
+}
+
+// rollbackWorktrees shares one git worktree per distinct rebuild commit
+// across a project rollback.
+type rollbackWorktrees struct {
+	dirs     map[string]string
+	cleanups []func()
+}
+
+func (w *rollbackWorktrees) dir(commit string) (string, error) {
+	if dir, ok := w.dirs[commit]; ok {
+		return dir, nil
+	}
+	dir, cleanup, err := addRollbackGitWorktree(commit)
+	if err != nil {
+		return "", err
+	}
+	if w.dirs == nil {
+		w.dirs = map[string]string{}
+	}
+	w.dirs[commit] = dir
+	w.cleanups = append(w.cleanups, cleanup)
+	return dir, nil
+}
+
+func (w *rollbackWorktrees) close() {
+	for _, cleanup := range w.cleanups {
+		cleanup()
+	}
+	w.dirs, w.cleanups = nil, nil
 }
 
 // WithWorkingDirectory runs fn from dir, restoring the original working
@@ -518,8 +643,34 @@ func RollbackProxyInputs(
 	serviceState remotestate.ServiceState,
 	actualState map[string]*reconcile.ActualService,
 ) (map[string]config.ServiceConfig, map[string]string, map[string]string) {
+	return RollbackProxyInputsForServices(cfg, envName, services, map[string]remotestate.ServiceState{rollbackService: serviceState}, actualState)
+}
+
+// RollbackProxyInputsForServices derives the proxy reconciliation inputs
+// after rolling back every service in rolledBack to its recorded state;
+// other services keep their current config and active revision.
+func RollbackProxyInputsForServices(
+	cfg *config.Config,
+	envName string,
+	services map[string]config.ServiceConfig,
+	rolledBack map[string]remotestate.ServiceState,
+	actualState map[string]*reconcile.ActualService,
+) (map[string]config.ServiceConfig, map[string]string, map[string]string) {
 	desiredServices := CloneServiceMap(services)
-	rollbackConfig := desiredServices[rollbackService]
+	rollbackServices := make(map[string]config.ServiceConfig, len(rolledBack))
+	rollbackImageRefs := make(map[string]string, len(rolledBack))
+	for serviceName, serviceState := range rolledBack {
+		rollbackConfig := rollbackServiceConfig(desiredServices[serviceName], serviceState)
+		desiredServices[serviceName] = rollbackConfig
+		rollbackServices[serviceName] = rollbackConfig
+		rollbackImageRefs[serviceName] = serviceState.Image
+	}
+	activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, desiredServices, rollbackServices, rollbackImageRefs, actualState)
+	return desiredServices, rollbackImageRefs, activeRevisions
+}
+
+// rollbackServiceConfig is the service config that runs a recorded state.
+func rollbackServiceConfig(rollbackConfig config.ServiceConfig, serviceState remotestate.ServiceState) config.ServiceConfig {
 	if serviceState.SharedBuildHash != "" {
 		rollbackConfig.ClearBuild()
 		rollbackConfig.Image = ""
@@ -534,12 +685,7 @@ func RollbackProxyInputs(
 	if serviceState.Port > 0 {
 		rollbackConfig.Port = serviceState.Port
 	}
-	desiredServices[rollbackService] = rollbackConfig
-
-	rollbackServices := map[string]config.ServiceConfig{rollbackService: rollbackConfig}
-	rollbackImageRefs := map[string]string{rollbackService: serviceState.Image}
-	activeRevisions := deployplan.ProxyActiveRevisions(cfg, envName, desiredServices, rollbackServices, rollbackImageRefs, actualState)
-	return desiredServices, rollbackImageRefs, activeRevisions
+	return rollbackConfig
 }
 
 // DeploymentFromHistory finds a deployment by ID in a history document.
@@ -556,11 +702,22 @@ func DeploymentFromHistory(history *remotestate.DeploymentHistory, deploymentID 
 }
 
 // SelectRollbackTargetFromHistory resolves the rollback target: the requested
-// deployment when an ID is given, otherwise the previous stable deployment for
-// the service.
+// deployment when an argument is given (exact ID, then unique ID prefix,
+// then git commit), otherwise the previous stable deployment for the
+// service.
 func SelectRollbackTargetFromHistory(history *remotestate.DeploymentHistory, deploymentID string, serviceName string, listDeployments ListDeploymentsFunc) (*remotestate.DeploymentState, error) {
 	if deploymentID != "" {
 		deployment, err := DeploymentFromHistory(history, deploymentID)
+		if err != nil && listDeployments != nil {
+			// After an exact-ID miss, accept a unique ID prefix (the display
+			// ID `tako history` prints) or a git commit of a record that
+			// contains the service.
+			ordered := listDeployments(history, &remotestate.HistoryOptions{Limit: 0, IncludeFailed: true})
+			deployment, err = resolveRollbackTargetArgument(ordered, deploymentID, func(candidate *remotestate.DeploymentState) bool {
+				_, ok := candidate.Services[serviceName]
+				return ok
+			})
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to find deployment %s: %w", deploymentID, err)
 		}
@@ -643,17 +800,42 @@ func BuildRollbackDeployment(
 	cliVersion string,
 	cliCommit string,
 ) *remotestate.DeploymentState {
+	return BuildRollbackDeploymentForServices(cfg, envName, host, startTime, duration, targetDeployment,
+		map[string]remotestate.ServiceState{serviceName: serviceState},
+		fmt.Sprintf("rolled back %s to deployment %s", serviceName, targetDeployment.ID),
+		cliVersion, cliCommit)
+}
+
+// BuildRollbackDeploymentForServices builds the rolled_back history record
+// of a rollback that restored services; the caller sets Status and Error
+// for a partial failure.
+func BuildRollbackDeploymentForServices(
+	cfg *config.Config,
+	envName string,
+	host string,
+	startTime time.Time,
+	duration time.Duration,
+	targetDeployment *remotestate.DeploymentState,
+	services map[string]remotestate.ServiceState,
+	message string,
+	cliVersion string,
+	cliCommit string,
+) *remotestate.DeploymentState {
+	recorded := make(map[string]remotestate.ServiceState, len(services))
+	for name, serviceState := range services {
+		recorded[name] = serviceState
+	}
 	return &remotestate.DeploymentState{
 		Timestamp:      startTime,
 		ProjectName:    cfg.Project.Name,
 		Environment:    envName,
 		Version:        targetDeployment.Version,
 		Status:         remotestate.StatusRolledBack,
-		Services:       map[string]remotestate.ServiceState{serviceName: serviceState},
+		Services:       recorded,
 		User:           remotestate.GetCurrentUser(),
 		Host:           host,
 		Duration:       duration,
-		Message:        fmt.Sprintf("rolled back %s to deployment %s", serviceName, targetDeployment.ID),
+		Message:        message,
 		GitCommit:      targetDeployment.GitCommit,
 		GitCommitShort: targetDeployment.GitCommitShort,
 		GitBranch:      targetDeployment.GitBranch,
@@ -665,6 +847,10 @@ func BuildRollbackDeployment(
 }
 
 func (e *Engine) saveLocalRollbackState(cfg *config.Config, envName string, serverNames []string, deployment *remotestate.DeploymentState, serviceName string, targetDeploymentID string) {
+	e.saveLocalRollbackRecord(cfg, envName, serverNames, deployment, fmt.Sprintf("Rolled back %s to deployment %s", serviceName, targetDeploymentID))
+}
+
+func (e *Engine) saveLocalRollbackRecord(cfg *config.Config, envName string, serverNames []string, deployment *remotestate.DeploymentState, notes string) {
 	localStateMgr, err := localstate.NewManager(".", cfg.Project.Name, envName)
 	if err != nil {
 		e.debug(events.TypeWarning, events.PhaseState, fmt.Sprintf("Warning: failed to initialize local state for rollback: %v\n", err))
@@ -676,11 +862,11 @@ func (e *Engine) saveLocalRollbackState(cfg *config.Config, envName string, serv
 		Environment:     envName,
 		Mode:            cfg.GetRuntimeMode(),
 		Servers:         append([]string(nil), serverNames...),
-		Status:          string(remotestate.StatusRolledBack),
+		Status:          string(deployment.Status),
 		DurationSeconds: int(deployment.Duration.Seconds()),
 		GitCommit:       deployment.GitCommit,
 		TriggeredBy:     remotestate.GetCurrentUser(),
-		Notes:           fmt.Sprintf("Rolled back %s to deployment %s", serviceName, targetDeploymentID),
+		Notes:           notes,
 	}
 	if err := localStateMgr.SaveDeployment(localDeployment); err != nil {
 		e.debug(events.TypeWarning, events.PhaseState, fmt.Sprintf("Warning: failed to save local rollback state: %v\n", err))

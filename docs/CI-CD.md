@@ -177,8 +177,11 @@ Set `TAKO_SSH_CONNECT_ATTEMPTS` explicitly when you want a different budget.
 The first retry follows after one second; later retries wait about 31-35
 seconds so an SSH rate limiter such as `ufw limit 22/tcp` (six new connections
 per 30 seconds, re-armed by every blocked attempt) can clear. `tako setup`
-allows SSH with `ufw allow` and relies on fail2ban instead; re-run setup, or
-run `ufw allow 22/tcp`, on hosts provisioned with the older limit rule.
+allows SSH with `ufw allow` on 22 and the server's configured `port` and relies
+on fail2ban instead; re-run setup, or run `ufw allow <port>/tcp`, on hosts
+provisioned with the older limit rule. Setup's own post-firewall SSH probe
+uses a bounded budget (two attempts, 10 seconds each) and ignores
+`TAKO_SSH_CONNECT_ATTEMPTS`, so a blocked port fails the step quickly.
 
 When a node is destroyed or firewalled, state and deploy commands still fail
 closed, but SSH should not hang for minutes. Use `TAKO_SSH_CONNECT_TIMEOUT` and
@@ -218,6 +221,52 @@ matching release binary, restart `takod`, refresh `/etc/tako/version.json`, and
 verify `/v1/status` before deploying again. Development CLI builds must pass
 `--takod-binary` with a Linux binary because there is no release asset for
 `dev`.
+
+## Lifecycle Hooks in CI
+
+[Hooks](./HOOKS.md) in `.tako-hooks/` run on the CI runner, exactly as they
+do on a laptop, so a `pre-deploy` test gate or a `post-deploy` notification
+applies to every deploy path.
+
+- **Executable bit from Windows.** Linux runners only run hook files with the
+  executable bit, and Windows checkouts cannot set it. Record it in git when
+  you add the hook:
+
+  ```bash
+  git add .tako-hooks/pre-deploy
+  git update-index --chmod=+x .tako-hooks/pre-deploy
+  git commit -m "Add pre-deploy hook"
+  ```
+
+  A hook without the bit fails the deploy with exit code 2 before any lock is
+  taken. Run `tako validate` early in the job to catch it before deploying.
+- **CI tokens through `passEnv`.** Hooks do not inherit the runner's
+  environment. List the variables a hook needs, and set them from CI secrets:
+
+  <!-- tako:snippet partial -->
+  ```yaml
+  hooks:
+    passEnv: [GITHUB_TOKEN, SLACK_WEBHOOK_URL, GITHUB_SHA]
+  ```
+
+  ```yaml
+      - name: Deploy
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: tako deploy --yes
+  ```
+
+  Values of passed variables whose names look like credentials are redacted
+  from hook output. `CI` is always passed, so scripts can detect the runner.
+- **Exit codes.** A failing `pre-deploy` exits 1 with nothing deployed; a
+  failing `post-deploy` exits 6 while the deploy itself stays successful. End
+  best-effort notification commands with `|| true` if they must not fail the
+  job.
+- **Emergency deploys.** `tako deploy --skip-hooks --yes` (also on
+  `rollback`, `promote`, and `setup`) runs no hook, not even `on-failure`, and
+  ignores broken hook files. Each skipped hook still appears in the result as
+  `skipped`.
 
 ## Proving the Workflow
 

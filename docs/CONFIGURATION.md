@@ -5,23 +5,41 @@ model behind them, see [ORCHESTRATION-MODEL.md](./ORCHESTRATION-MODEL.md).
 Run `tako config explain -e <env>` to see the effective defaults Tako infers
 for any config without copying them into your YAML.
 
+## Snippet conventions
+
+Services always live under `environments.<env>.services`; there is no
+top-level `services:` key. Short snippets on this page show only the keys they
+discuss, using real paths from the config root. Merge them into a config that
+already has `project`, `servers`, and an `environments.production` entry that
+targets your servers, like the one in
+[Existing VPS Deployment](#existing-vps-deployment).
+
 ## Simple Web Application
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  web:
-    build: .
-    port: 3000
-    env:
-      NODE_ENV: production
-    proxy:
-      domain: app.example.com
-      email: admin@example.com
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        env:
+          NODE_ENV: production
+        proxy:
+          domain: app.example.com
+          email: admin@example.com
 ```
 
 ## Existing VPS Deployment
 
+<!-- tako:snippet complete -->
 ```yaml
+project:
+  name: my-app
+  version: 1.0.0
+
+
 servers:
   production:
     host: ${TAKO_PRODUCTION_HOST}
@@ -44,6 +62,40 @@ environments:
 ```bash
 tako setup && tako deploy
 ```
+
+### SSH port
+
+Set `port` on a server when sshd does not listen on 22 (the default):
+
+<!-- tako:snippet partial -->
+```yaml
+servers:
+  production:
+    host: ${TAKO_PRODUCTION_HOST}
+    port: 2222
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+```
+
+When `tako setup` configures UFW it allows the SSH port set before enabling
+the firewall: `22/tcp`, the configured `port`, and the server-side port of the
+SSH session it is running over (these differ behind provider port forwarding).
+It then opens a fresh SSH connection to `host:port`; if that fails, it disables
+UFW again and fails the firewall step instead of locking you out. The fail2ban
+SSH jail bans on the same ports.
+
+Setup never closes an SSH port on its own. After you move SSH to a new `port`
+and re-run `tako setup`, the old port stays open and setup prints a warning
+(and reports `firewall.staleSshPorts` in `--output json`). Once you have
+confirmed the new port works, remove the old rule manually:
+
+```bash
+sudo ufw delete allow 2200/tcp
+```
+
+On hosts without UFW outside the Debian family (for example RHEL, Rocky, Alma,
+SUSE, Alpine), setup does not manage the firewall. It warns and lists the ports
+to open in your provider or native firewall, including the SSH port.
 
 ## First PaaS Node With Local Deployments
 
@@ -147,6 +199,7 @@ environment may still select a member by canonical node name or an old server
 alias carrying the immutable `nodeId`. The explicit form below remains the
 legacy/off-node compatibility form:
 
+<!-- tako:snippet partial -->
 ```yaml
 servers:
   node-1:
@@ -271,51 +324,72 @@ verify and restore require `--cluster-id`.
 
 ## Full-Stack Application
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  web:
-    build: ./frontend
-    port: 3000
-    proxy:
-      domain: app.example.com
+environments:
+  production:
+    services:
+      web:
+        build: ./frontend
+        port: 3000
+        proxy:
+          domain: app.example.com
+          email: admin@example.com
 
-  api:
-    build: ./backend
-    port: 4000
-    replicas: 2
-    env:
-      DATABASE_URL: postgresql://db:5432/myapp
+      api:
+        build: ./backend
+        port: 4000
+        replicas: 2
+        dependsOn: [database]
+        env:
+          DATABASE_URL: postgresql://db:5432/myapp
 
-  database:
-    image: postgres:15
-    persistent: true
-    volumes:
-      - db_data:/var/lib/postgresql/data
-    placement:
-      strategy: pinned
-      servers: [production]
-    env:
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      database:
+        image: postgres:15
+        persistent: true
+        volumes:
+          - db_data:/var/lib/postgresql/data
+        placement:
+          strategy: pinned
+          servers: [production]
+        env:
+          POSTGRES_PASSWORD: ${DB_PASSWORD}
 ```
 
 ## Multi-Server Deployment
 
+Built-in ACME TLS needs a single proxy node, so a multi-server environment
+with public services pins its proxy placement to one node.
+
+<!-- tako:snippet complete -->
 ```yaml
+project:
+  name: my-app
+  version: 1.0.0
+
 servers:
   node1:
     host: ${NODE1_HOST}
     user: root
     sshKey: ~/.ssh/id_ed25519
+    labels:
+      role: web
   node2:
     host: ${NODE2_HOST}
     user: root
     sshKey: ~/.ssh/id_ed25519
+    labels:
+      role: web
 
 environments:
   production:
     servers:
       - node1
       - node2
+    proxy:
+      placement:
+        strategy: pinned
+        servers: [node1]
     services:
       web:
         build: .
@@ -330,25 +404,237 @@ environments:
           email: admin@example.com
 ```
 
+## Environment Inheritance And Shared Fragments
+
+Environments that differ only in a domain, a replica count, or a server list
+do not need to repeat every service. Use top-level `x-` keys for shared
+fragments and `extends` for environment overlays.
+
+### Shared fragments with `x-` keys
+
+Top-level keys that start with `x-` are accepted and ignored in `tako.yaml`
+and `tako.json`. Their content is not validated, so they are a scratch area
+for YAML anchors that the rest of the file reuses with `*name` or `<<: *name`.
+`x-` keys are only allowed at the top level; inside `environments`, services,
+or servers they are still unknown-field errors.
+
+<!-- tako:snippet complete -->
+```yaml
+x-web: &web
+  image: ghcr.io/example/app:1.4.2
+  port: 3000
+  healthCheck:
+    path: /health
+
+project:
+  name: my-app
+  version: 1.0.0
+
+servers:
+  production:
+    host: ${TAKO_PRODUCTION_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+  staging:
+    host: ${TAKO_STAGING_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+
+environments:
+  production:
+    servers: [production]
+    services:
+      web:
+        <<: *web
+        replicas: 2
+        proxy:
+          domain: app.example.com
+  staging:
+    servers: [staging]
+    services:
+      web:
+        <<: *web
+        proxy:
+          domain: staging.example.com
+```
+
+### Extending an environment
+
+An environment can declare `extends: <name>`. Tako resolves it by
+deep-merging the environment's own keys over the fully resolved parent before
+validation, so every command sees one flattened environment. An environment
+marked `abstract: true` is a template only: it can be extended, but it is not
+validated on its own, never deployed, never picked as the default
+environment, and `-e base` fails with a message that lists the environments
+that extend it.
+
+<!-- tako:snippet complete -->
+```yaml
+project:
+  name: my-app
+  version: 1.0.0
+
+servers:
+  production:
+    host: ${TAKO_PRODUCTION_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+  staging:
+    host: ${TAKO_STAGING_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+
+environments:
+  base:
+    abstract: true
+    services:
+      web:
+        image: ghcr.io/example/app:1.4.2
+        port: 3000
+        env:
+          LOG_LEVEL: info
+          REGION: eu
+        proxy:
+          domain: app.example.com
+      worker:
+        image: ghcr.io/example/app:1.4.2
+        command: ["bin/worker"]
+
+  production:
+    extends: base
+    servers: [production]
+    services:
+      web:
+        replicas: 2
+
+  staging:
+    extends: production
+    servers: [staging]
+    services:
+      web:
+        replicas: 1
+        env:
+          LOG_LEVEL: debug
+        proxy:
+          domain: staging.example.com
+      worker: null
+```
+
+Here `staging` runs `web` with one replica, `LOG_LEVEL=debug`, `REGION=eu`,
+and the staging domain, and has no `worker`. `production` is unchanged.
+
+Merge rules, applied at every path of the child environment:
+
+| Parent value | Child value | Result |
+|---|---|---|
+| any | not set | parent value |
+| mapping | mapping | merged key by key (services merge by name); parent keys keep their order, new child keys follow |
+| any | scalar or list | child value; lists are replaced, never appended |
+| any | value of a different kind | child value (for example `build: .` replaced by `build: {context: ., target: prod}`) |
+| any | `null` | key removed |
+
+- `null` removes an inherited key only in an environment that declares
+  `extends`. `services: {worker: null}` drops an inherited service, and
+  `servers: null` plus a `serverSelector` switches a child from a server list
+  to label selection. In an environment without `extends`, `null` keeps its
+  usual meaning (unset).
+- Lists replace. That includes `servers`, `volumes`, `ports`, `command`, and
+  environment `secretSources`. Top-level `secretSources` still apply first to
+  every environment, followed by the resolved environment's own list:
+
+<!-- tako:snippet complete -->
+```yaml
+project:
+  name: my-app
+  version: 1.0.0
+
+secretSources:
+  - provider: doppler
+    project: my-app
+    providerEnv: prd
+
+servers:
+  production:
+    host: ${TAKO_PRODUCTION_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+  staging:
+    host: ${TAKO_STAGING_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+
+environments:
+  production:
+    servers: [production]
+    secretSources:
+      - provider: aws-ssm
+        path: /my-app/production
+        region: us-east-1
+    services:
+      web:
+        image: ghcr.io/example/app:1.4.2
+        secrets: [DATABASE_URL]
+
+  staging:
+    extends: production
+    servers: [staging]
+    # Replaces the inherited aws-ssm source; doppler still applies first.
+    secretSources:
+      - provider: aws-ssm
+        path: /my-app/staging
+        region: us-east-1
+```
+
+- A structured `build` is a mapping, so it merges key by key: a child can
+  set only `build: {target: prod}` (or new `args`) and inherit `context` from
+  its parent. The resolved environment must still have a `context`; if no
+  environment in the chain supplies one, validation fails with the chain in
+  the error.
+- Chains are allowed (`staging -> production -> base`) up to 8 `extends`
+  hops. A cycle (including `extends` naming itself), an unknown parent, or a
+  chain deeper than 8 hops fails validation with the full chain in the error.
+- `extends` and `abstract` are not inherited. Abstract environments do not
+  need `servers` or `serverSelector`. An abstract environment that nothing
+  extends produces a `tako validate` warning.
+- An unknown or mistyped field is reported against the environment that
+  declared it, and validation errors in an inheriting environment end with
+  the chain, for example `(environment staging extends production)`.
+- `tako config explain -e staging` prints `Environment: staging (extends
+  production -> base)` and labels each environment-scoped value with the
+  environment that supplied it, for example `replicas: 2 (config, from
+  production)`.
+- Deployed state, history, and `tako config export` contain only the
+  flattened environment; `extends` and `abstract` never reach a node.
+
+### Default environment
+
+Without `-e`, Tako uses the only deployable (non-abstract) environment, else
+`production`, else the first environment name in alphabetical order. In that
+last case it prints `no -e and no 'production'; using '<name>'; pass -e` to
+stderr, so pass `-e` in scripts and CI.
+
 ## Background Workers
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  worker:
-    build: ./worker
-    replicas: 3
-    env:
-      REDIS_URL: redis://redis:6379
-    # No port = background service
+environments:
+  production:
+    services:
+      worker:
+        build: ./worker
+        replicas: 3
+        env:
+          REDIS_URL: redis://redis:6379
+        # No port = background service
 
-  redis:
-    image: redis:7-alpine
-    persistent: true
-    volumes:
-      - redis_data:/data
-    placement:
-      strategy: pinned
-      servers: [production]
+      redis:
+        image: redis:7-alpine
+        persistent: true
+        volumes:
+          - redis_data:/data
+        placement:
+          strategy: pinned
+          servers: [production]
 ```
 
 ## Container Command, Entrypoint, Health, And Labels
@@ -359,20 +645,23 @@ distroless images and exact Compose-style exec semantics. `entrypoint` accepts
 a single executable or a list; additional list entries are placed before the
 service command arguments.
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  consumer:
-    image: getsentry/sentry:26.6.0
-    entrypoint: [/etc/sentry/entrypoint.sh, run]
-    command: [sentry, run, consumer, errors]
-    labels:
-      com.example.role: errors-consumer
-    healthCheck:
-      command: test -f /tmp/healthy
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      startPeriod: 10m
+environments:
+  production:
+    services:
+      consumer:
+        image: getsentry/sentry:26.6.0
+        entrypoint: [/etc/sentry/entrypoint.sh, run]
+        command: [sentry, run, consumer, errors]
+        labels:
+          com.example.role: errors-consumer
+        healthCheck:
+          command: test -f /tmp/healthy
+          interval: 30s
+          timeout: 5s
+          retries: 3
+          startPeriod: 10m
 ```
 
 `healthCheck.command` becomes Docker's container health command and is mutually
@@ -395,21 +684,24 @@ Containers are disposable; Docker volumes are the data boundary. Databases,
 queues, CMS storage, and tools such as n8n should use prebuilt images with
 `persistent: true` and at least one named or external volume:
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  postgres:
-    image: postgres:16-alpine
-    port: 5432
-    persistent: true
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    placement:
-      strategy: pinned
-      servers: [primary]
-    env:
-      POSTGRES_USER: app
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: app
+environments:
+  production:
+    services:
+      postgres:
+        image: postgres:16-alpine
+        port: 5432
+        persistent: true
+        volumes:
+          - postgres_data:/var/lib/postgresql/data
+        placement:
+          strategy: pinned
+          servers: [production]
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+          POSTGRES_DB: app
 
 volumes:
   postgres_data:
@@ -493,17 +785,20 @@ until a separately explicit persistent-workload removal has completed.
 
 ## Secrets Management
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  api:
-    build: .
-    port: 3000
-    env:
-      NODE_ENV: production
-    secrets:
-      - DATABASE_URL           # Secret from .tako/secrets
-      - JWT_SECRET
-      - API_KEY:STRIPE_KEY    # Alias: container sees API_KEY, reads STRIPE_KEY
+environments:
+  production:
+    services:
+      api:
+        build: .
+        port: 3000
+        env:
+          NODE_ENV: production
+        secrets:
+          - DATABASE_URL           # Secret from .tako/secrets
+          - JWT_SECRET
+          - API_KEY:STRIPE_KEY    # Alias: container sees API_KEY, reads STRIPE_KEY
 ```
 
 ```bash
@@ -525,10 +820,11 @@ tako deploy --env production
 
 Like Kamal's `.kamal/secrets` + `kamal secrets fetch`, `secretSources` keep the
 secret store as the source of truth: Tako reads the values live every time it
-resolves secrets (`deploy`, `exec`, `jobs`, `secrets validate`, `doctor`), and
-nothing is written to disk. Sources hold only provider selectors, so they are
+resolves secrets (`deploy`, `exec`, `jobs`, `logs`, `rollback`, `promote`,
+`scale`, `secrets validate`, `doctor`), and nothing is written to disk. Sources hold only provider selectors, so they are
 safe to commit.
 
+<!-- tako:snippet partial -->
 ```yaml
 # Applies to every environment
 secretSources:
@@ -538,7 +834,7 @@ secretSources:
 
 environments:
   production:
-    servers: [web-1]
+    servers: [production]
     # Environment sources apply after the top-level ones
     secretSources:
       - provider: aws-ssm
@@ -559,7 +855,11 @@ environments:
 Precedence, lowest to highest: `.tako/secrets`, `.tako/secrets.<env>`,
 top-level `secretSources`, then environment `secretSources` (later sources
 override earlier ones). Each source is fetched once per command and its values
-are registered with the output redactor. Source fields mirror the
+are registered with the output redactor, so `tako logs` and health-check
+failures in `rollback`/`promote`/`scale` mask them (aliased refs such as
+`API_KEY:STRIPE_KEY` mask the value of `STRIPE_KEY`). If a source cannot be
+fetched, `logs`, `rollback`, `promote`, and `scale` print one warning that the values will not
+be redacted and continue. Source fields mirror the
 `tako secrets fetch` flags below (`names`, `path`, `from`, `profile`,
 `region`, `vault`, `project`, `providerEnv`, `prefixStrip`, `map`). Provider
 credentials come from each CLI's own login or environment variables (for
@@ -609,23 +909,27 @@ tako secrets import vault --path secret/myapp/prod --prefix-strip secret/myapp/p
 Automatically redirect traffic from one domain to another with proper SSL and
 path preservation:
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  web:
-    build: .
-    port: 3000
-    proxy:
-      # Primary domain where traffic is served
-      domain: example.com
-      # These domains will 301 redirect to the primary domain
-      redirectFrom:
-        - www.example.com
-        - old.example.com
-      email: admin@example.com
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          # Primary domain where traffic is served
+          domain: example.com
+          # These domains 308-redirect to the primary domain
+          redirectFrom:
+            - www.example.com
+            - old.example.com
+          email: admin@example.com
 ```
 
 - Automatic SSL certificates for all domains (primary + redirect domains)
-- 301 permanent redirects for SEO
+- 308 permanent redirects: permanent for SEO, and unlike 301 they preserve the
+  request method and body
 - Path preservation (`www.example.com/api/users` → `example.com/api/users`)
 - Works with both HTTP and HTTPS traffic
 - Wildcard domains such as `*.example.com` use the environment's embedded
@@ -669,13 +973,17 @@ tako domains status --strict --wait 2m
 
 When DNS intentionally terminates at a CDN, declare that fact in config:
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  web:
-    port: 3000
-    proxy:
-      domain: example.com
-      cdn: cloudflare # or generic
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: example.com
+          cdn: cloudflare # or generic
 ```
 
 When `proxy.cdn` is declared, valid HTTPS served from addresses other than the
@@ -704,18 +1012,22 @@ into an issuance failure. Config validation warns when `dynamicDomains` and
 When a service is behind a CDN or reverse proxy, declare only that provider's
 published egress CIDRs so Tako can recover the original client IP safely:
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  web:
-    port: 3000
-    proxy:
-      domain: example.com
-      cdn: cloudflare
-      allowIps:
-        - 198.51.100.0/24
-      trustedProxies:
-        - 203.0.113.0/24
-        - 2001:db8::/32
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: example.com
+          cdn: cloudflare
+          allowIps:
+            - 198.51.100.0/24
+          trustedProxies:
+            - 203.0.113.0/24
+            - 2001:db8::/32
 ```
 
 `trustedProxies` accepts CIDRs only. IPv4 prefixes broader than `/8` and IPv6
@@ -730,22 +1042,26 @@ sets are rejected rather than merged.
 Per-service route policy can hide private endpoints, cap request bodies, and
 set security response headers without adding another proxy container:
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  web:
-    port: 3000
-    proxy:
-      domain: example.com
-      denyPathPrefixes:
-        - /api/internal
-        - /.well-known/workflow
-      allowPathPrefixes:
-        - /api
-        - /health
-      maxRequestBody: 10MB
-      responseHeaders:
-        X-Content-Type-Options: nosniff
-        Content-Security-Policy: "default-src 'self'"
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: example.com
+          denyPathPrefixes:
+            - /api/internal
+            - /.well-known/workflow
+          allowPathPrefixes:
+            - /api
+            - /health
+          maxRequestBody: 10MB
+          responseHeaders:
+            X-Content-Type-Options: nosniff
+            Content-Security-Policy: "default-src 'self'"
 ```
 
 Each `denyPathPrefixes` entry is a literal, segment-aware prefix. For example,
@@ -814,18 +1130,21 @@ example, an orange-clouded CDN route) or when one wildcard certificate should
 cover many app hostnames. Grey-cloud routes do not need this configuration and
 continue to use Caddy's automatic HTTP-01 flow unchanged.
 
+<!-- tako:snippet partial -->
 ```yaml
 environments:
   production:
     proxy:
       placement:
-        servers: [edge-1]
+        strategy: pinned
+        servers: [production]
       acme:
         dnsProvider: cloudflare
         credentials:
           apiToken: ${CLOUDFLARE_DNS_API_TOKEN}
     services:
       web:
+        build: .
         port: 3000
         proxy:
           domain: "*.platform.example.com"
@@ -892,27 +1211,40 @@ by an indexed domain table; Caddy calls this endpoint during on-demand
 certificate authorization, so slow database scans can turn first requests for
 new domains into user-visible TLS failures.
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  admin:
-    build: ./admin
-    port: 3000
-  renderer:
-    build: ./renderer
-    port: 3000
-    proxy:
-      dynamicDomains:
-        ask: admin:/api/domains/authorize
+environments:
+  production:
+    services:
+      admin:
+        build: ./admin
+        port: 3000
+      renderer:
+        build: ./renderer
+        port: 3000
+        proxy:
+          dynamicDomains:
+            ask: admin:/api/domains/authorize
 ```
 
 You can combine a fixed app domain and dynamic customer domains on the same
 service:
 
+<!-- tako:snippet partial -->
 ```yaml
-proxy:
-  domain: sites.example.com
-  dynamicDomains:
-    ask: admin:/api/domains/authorize
+environments:
+  production:
+    services:
+      admin:
+        build: ./admin
+        port: 3000
+      renderer:
+        build: ./renderer
+        port: 3000
+        proxy:
+          domain: sites.example.com
+          dynamicDomains:
+            ask: admin:/api/domains/authorize
 ```
 
 ## Internal Proxy Routes Without Public DNS
@@ -922,6 +1254,7 @@ the shared proxy from a private network, VPN, or hosts-file mapping, but
 should not be treated as a public DNS/ACME domain. Internal routes are
 HTTP-only in this release and are skipped by public DNS/TLS readiness checks.
 
+<!-- tako:snippet partial -->
 ```yaml
 servers:
   edge:
@@ -990,16 +1323,19 @@ certificate issuance/storage is not implemented yet. To keep ingress on a
 dedicated edge node, set `environment.proxy.placement` with a pinned server or
 node-label constraint:
 
+<!-- tako:snippet partial -->
 ```yaml
 servers:
   edge-1:
     host: edge.example.com
     user: deploy
+    sshKey: ${TAKO_SSH_KEY}
     labels:
       role: edge
   app-1:
     host: app.example.com
     user: deploy
+    sshKey: ${TAKO_SSH_KEY}
     labels:
       role: app
 
@@ -1030,27 +1366,250 @@ metadata. Use `tako discovery exports` to inspect those records on reachable
 nodes, or `tako discovery exports --all-environments --server <node>` when
 auditing a shared host.
 
-## Parallel Deployment (Default)
+## Deploy Order and Concurrency
 
-Tako deploys services in parallel by default. Customize it:
+Tako deploys services one at a time, in dependency order. It resolves
+`dependsOn` into a single deterministic order (services that become ready at
+the same time are ordered by name), and each service finishes its rollout
+before the next one starts. If a service fails, the services after it are not
+deployed.
 
+Within one service, the rollout to each assigned node runs concurrently, so a
+service with replicas on several nodes updates those nodes in parallel.
+Per-service rollout behavior (recreate, rolling, or blue/green) is set with
+`services.<name>.deploy.strategy`; see [Deploy Strategies](#deploy-strategies)
+for the default.
+
+<!-- tako:snippet partial -->
 ```yaml
-project:
-  name: my-app
-  version: 1.0.0
+environments:
+  production:
+    services:
+      postgres:
+        image: postgres:16-alpine
+        persistent: true
+        volumes:
+          - postgres_data:/var/lib/postgresql/data
+        env:
+          POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      api:
+        build: ./api
+        port: 4000
+        dependsOn: [postgres]   # deploys after postgres
+        deploy:
+          strategy: rolling     # how this service's own replicas roll out
+      web:
+        build: ./web
+        port: 3000
+        dependsOn: [api]        # deploys after api
+        proxy:
+          domain: app.example.com
+          email: admin@example.com
+```
 
-# Optional: Customize parallel deployment (these are the defaults)
+Build location is configured separately under `deployment.build` (see
+[Build Strategy](#build-strategy)):
+
+<!-- tako:snippet partial -->
+```yaml
 deployment:
-  strategy: parallel  # or "sequential"
-  parallel:
-    maxConcurrentBuilds: 4   # Max builds at once
-    maxConcurrentDeploys: 4  # Max deploys at once
-  cache:
-    enabled: true     # Enable build caching
-    type: local       # Cache type
   build:
     strategy: remote  # remote, local, or auto
 ```
+
+## Deploy Strategies
+
+`services.<name>.deploy.strategy` controls how one service replaces its
+containers:
+
+- **`rolling`** starts the new revision next to the old one, waits for it to
+  become ready, moves proxy traffic, then stops the old revision. No downtime.
+- **`blue_green`** warms a full new revision and cuts traffic over at once
+  (optionally after `promotion: manual` or a `gracePeriod`).
+- **`recreate`** stops the old containers, then starts the new ones. There is
+  a short gap while the new container starts.
+
+### The default
+
+When `deploy.strategy` is not set, Tako picks `rolling` for a service that can
+run two revisions side by side, and `recreate` otherwise. A service defaults to
+`rolling` only when all of these hold:
+
+- it is a long-running service (not `kind: job` or `kind: run`) and not
+  `persistent`;
+- it has a `port` and no raw `ports` or `volumes`;
+- `deploy.maxUnavailable` is not set, and `deploy.maxSurge` is unset or at
+  least `replicas`;
+- it does not set `deploy.gracePeriod`, `deploy.promotion` or
+  `deploy.smokeTest`, which belong to `blue_green`;
+- its other `deploy` settings are valid for `rolling`.
+
+Everything else (databases, services with volumes or host ports, workers
+without a port) defaults to `recreate`. A defaulted service never fails
+validation because of the default; `tako config` prints
+`deploy.strategy: rolling (default)` so you can see which one Tako picked, and
+`tako deploy --plan-only` shows the strategy for every changed service.
+
+With the default `rolling`, `maxSurge` is the replica count: the whole new
+revision runs next to the old one before traffic moves. That briefly doubles
+the service's memory and CPU on its nodes, so leave headroom on small hosts.
+
+The first deploy after upgrading to a CLI with this default redeploys every
+service that ran with the old `recreate` default. The plan lists those
+services with the reason `Deploy strategy default changed: recreate → rolling`,
+and the redeploy itself is rolling, so it has no downtime.
+
+### Readiness for defaulted rolling services
+
+Traffic only moves to a new revision once it is ready. If a defaulted
+`rolling` service has no `healthCheck` and no `deploy.readiness`, Tako waits
+for the container to accept TCP connections on its `port`, for about a minute.
+If it never does, the rollout fails, the old revision keeps serving, and the
+error names the implicit probe. Fix it by making the app listen on `0.0.0.0`,
+adding a `healthCheck` that matches your app, or opting out with
+`deploy.strategy: recreate`.
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        healthCheck:
+          path: /health        # replaces the implicit TCP probe
+        proxy:
+          domain: app.example.com
+          email: admin@example.com
+```
+
+### Recovering from a failed rollout
+
+`deploy.rollbackOnFailure` defaults to `true`. When a rollout fails:
+
+- **`rolling` and `blue_green`**: the old revision never stopped and traffic
+  never moved, so it keeps serving. The failed containers are removed.
+- **`recreate`**: Tako stops the old containers and keeps them (renamed and
+  stopped) instead of removing them. If the new revision fails to start,
+  connect, or pass its health check on any node, Tako removes the new
+  containers and restarts the old ones under their original names on every
+  node of that service. The old containers are removed once the rollout
+  succeeds everywhere.
+
+The deploy still fails (exit code 1) and reports the service as `restored`.
+Restore applies only to the service that failed: services deployed earlier in
+the same run keep their new revision, and later services are not deployed.
+
+Restore restarts the previous containers; it does not undo changes the new
+revision made to data. If a new image migrated a database or wrote to a volume
+before failing, the restored container sees that data. Use a `deploy.release`
+command for migrations so they run before any container is replaced, and keep
+migrations backward compatible.
+
+Set `rollbackOnFailure: false` to keep failed containers stopped for
+debugging instead. The old revision of a `rolling` service still serves; a
+`recreate` service is left down until you fix it and deploy again.
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      worker:
+        build: .
+        deploy:
+          strategy: recreate
+          rollbackOnFailure: false   # keep failed containers for `docker logs`
+```
+
+Restoring `recreate` services and keeping failed containers
+(`rollbackOnFailure: false`) need the `deploy.restore-on-failure-v1` takod
+capability, which `tako upgrade servers` installs. Defaulted `rolling` services
+do not need it. If a node lacks it and `rollbackOnFailure` is not set, Tako
+warns and deploys that service with the old remove-then-start behavior on all
+of its nodes. If `rollbackOnFailure` is set explicitly, the deploy stops before
+touching any container and asks you to run `tako upgrade servers`.
+
+### Opting out
+
+To keep the previous behavior for a service, set the strategy explicitly:
+
+<!-- tako:snippet partial -->
+```yaml
+environments:
+  production:
+    services:
+      api:
+        build: .
+        port: 4000
+        deploy:
+          strategy: recreate
+```
+
+### Deprecated keys
+
+The keys below are still accepted but have no effect. `tako validate` and
+`tako deploy` print one warning per key that is present (shown as a `warn`
+finding in `tako validate --output json`), starting in `v0.14.0`. They will be
+rejected starting in `v0.15.0`.
+
+| Key | What to do instead | Rejected from |
+| --- | --- | --- |
+| `deployment.strategy` | Remove it. Services deploy sequentially in dependency order; use `dependsOn` for ordering and `services.<name>.deploy.strategy` for rollout. | `v0.15.0` |
+| `deployment.parallel` (`maxConcurrentBuilds`, `maxConcurrentDeploys`, `strategy`) | Remove it, as for `deployment.strategy`. | `v0.15.0` |
+| `deployment.cache` (`enabled`, `type`, `retention`) | Remove it. Docker manages build cache; use `tako cleanup --docker-cache` or the takod `--build-cache-keep-storage` setting. | `v0.15.0` |
+| `environments.<env>.labels` | Remove it. Set `servers.<name>.labels` and select servers with `serverSelector.labels` or placement constraints. | `v0.15.0` |
+
+## Rolling Back
+
+`tako rollback` returns an environment to an earlier deployment. It needs no
+configuration; it reads the replicated deployment history (`tako history`).
+
+```bash
+tako rollback --plan-only             # review: newest stable deployment before the current one
+tako rollback -y                      # roll every eligible service back to it
+tako rollback 1767225600 -y           # a deployment ID, the short ID from `tako history`, or a git commit (7+ chars)
+tako rollback --service web           # one service only, previous deployment that contains it
+tako rollback --service web 1767225600
+```
+
+Project-wide rollback rebuilds each service's state at the target from the
+newest stable history record at or before it, so services the target
+deployment did not touch return to the version they ran at that time. It
+shows the plan, then asks for confirmation (`[y/N]`); pass `-y/--yes` in
+scripts. Non-interactive sessions (`CI`, `TAKO_NONINTERACTIVE`, no TTY)
+without `--yes` stop with exit 2. `--plan-only` prints the plan and changes
+nothing, and `--plan FILE` applies only when the fresh plan still matches a
+reviewed `--plan-only --output json` document.
+
+How each service is handled:
+
+| Service | Project rollback |
+| --- | --- |
+| Long-running service | Rolled back in dependency order. Already at the target image, replica count and operator-file content: `unchanged`. |
+| `persistent: true` | Skipped. Pass `--include-persistent` to include it; Tako warns that the old image must still understand the current data on its volumes. |
+| `kind: run` | Skipped. Deploy-time runs are not replayed. |
+| `kind: job` | Skipped with a warning: job images and schedules stay at the current deployment. |
+| Added after the target | Skipped (`not present at target`), left running. Planning fails with exit 2 if history has been pruned to its 50-entry limit and the service's state at the target can no longer be proven; use `tako rollback --service` instead. |
+
+`deploy.release` commands are skipped by default because migrations are
+usually not reversible; pass `--run-release` to run them for the rolled-back
+services. Rollout stops at the first failed service; the remaining services
+are reported `not_attempted`, and proxy routes, node state and one history
+entry are still written for the services that changed. The history entry has
+status `rolled_back` (or `failed` after a partial rollback), so running
+`tako rollback -y` again returns to the deployment you rolled back from.
+
+Before changing anything, Tako checks that every image it needs is available:
+the exact image still retained on the environment's nodes (reused without a
+build), the target commit in the local git repository (rebuilt), or a registry
+image (pulled). `tako cleanup` keeps the newest images per service (`--keep`,
+default 3), so older targets of build-backed services usually need the
+commit to rebuild; shared-build images must still be retained. If any image is
+unavailable, the plan fails with exit 1 and nothing is changed. Finding
+retained images needs a node agent with the `image.descriptor-v1` capability;
+run `tako upgrade servers` if the plan asks for it.
 
 ## Build Strategy
 
@@ -1058,6 +1617,7 @@ Build-backed services use `deployment.build.strategy: remote` by default: Tako
 streams the build context to each assigned server and builds there with takod.
 For stronger developer or CI machines, use local build mode:
 
+<!-- tako:snippet partial -->
 ```yaml
 deployment:
   build:
@@ -1084,14 +1644,17 @@ values affect one-way config/artifact digests and must not contain passwords,
 tokens, or other low-entropy secrets. Use runtime `secrets:` or operator files
 for secret material instead.
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  web:
-    build:
-      context: .
-      args:
-        BASE_IMAGE: node:24-alpine
-      target: runtime
+environments:
+  production:
+    services:
+      web:
+        build:
+          context: .
+          args:
+            BASE_IMAGE: node:24-alpine
+          target: runtime
 ```
 
 When several services are variants of one image, declare a top-level shared
@@ -1100,6 +1663,7 @@ revision tag to the build, builds/transfers it once across the union of consumer
 placement nodes, then starts every consumer from that exact image without
 rebuilding or pulling it again.
 
+<!-- tako:snippet partial -->
 ```yaml
 builds:
   application:
@@ -1143,30 +1707,36 @@ in list order (later files override earlier files), then explicit `env:` and
 Tako `secrets:` take precedence. `envFile` remains supported for one file;
 configuring both forms is rejected.
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  worker:
-    image: example/worker:latest
-    envFiles: [.env.base, .env.production]
+environments:
+  production:
+    services:
+      worker:
+        image: example/worker:latest
+        envFiles: [.env.base, .env.production]
 ```
 
 Container runtime controls map directly to Docker run options and work for
 long-running services and scheduled jobs:
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  database:
-    image: postgres:17
-    user: "999:999"
-    workingDir: /var/lib/postgresql
-    stopGracePeriod: 60s
-    init: true
-    extraHosts: [host.docker.internal:host-gateway]
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
-    shmSize: 256m
+environments:
+  production:
+    services:
+      database:
+        image: postgres:17
+        user: "999:999"
+        workingDir: /var/lib/postgresql
+        stopGracePeriod: 60s
+        init: true
+        extraHosts: [host.docker.internal:host-gateway]
+        ulimits:
+          nofile:
+            soft: 262144
+            hard: 262144
+        shmSize: 256m
 ```
 
 `stopGracePeriod` uses whole seconds and is capped at 24 hours. `ulimits`
@@ -1179,14 +1749,17 @@ stale.
 Long-running services can opt into bounded Docker log rotation independently
 of the Docker daemon defaults:
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  worker:
-    image: example/worker:latest
-    logging:
-      driver: local
-      maxSize: 25m
-      maxFiles: 5
+environments:
+  production:
+    services:
+      worker:
+        image: example/worker:latest
+        logging:
+          driver: local
+          maxSize: 25m
+          maxFiles: 5
 ```
 
 `driver`, `maxSize`, and `maxFiles` are all required when `logging` is set.
@@ -1206,6 +1779,7 @@ agent.
 scheduled volume backups. The existing Slack, Discord, and generic webhook
 targets are reused:
 
+<!-- tako:snippet partial -->
 ```yaml
 notifications:
   slack: ${SLACK_WEBHOOK_URL}
@@ -1293,23 +1867,26 @@ atomically into a content-addressed version below
 `/var/lib/tako/files/<project>/<environment>/<service>/`, and is not stored in
 desired state or deployment history.
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  relay:
-    image: getsentry/relay:26.6.0
-    files:
-      - source: ./relay/config.yml
-        target: /work/.relay/config.yml
-      - source: ./relay/credentials.json
-        target: /work/.relay/credentials.json
-        secret: true
-        owner: "1000:1000"
+environments:
+  production:
+    services:
+      relay:
+        image: getsentry/relay:26.6.0
+        files:
+          - source: ./relay/config.yml
+            target: /work/.relay/config.yml
+          - source: ./relay/credentials.json
+            target: /work/.relay/credentials.json
+            secret: true
+            owner: "1000:1000"
 
-  nginx:
-    image: nginx:1.27-alpine
-    files:
-      - source: ./nginx
-        target: /etc/nginx
+      nginx:
+        image: nginx:1.27-alpine
+        files:
+          - source: ./nginx
+            target: /etc/nginx
 ```
 
 File bytes are binary-safe, and directory sources preserve their relative
@@ -1344,31 +1921,37 @@ graph. Its `command` must be an argv list. The step runs in a fresh `--rm`
 container at its topological slot, and dependent services start only after it
 exits 0. A non-zero exit aborts the deployment.
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  migrate:
-    kind: run
-    image: getsentry/sentry:26.6.0
-    command: [sentry, upgrade, --noinput]
-    timeout: 30m
+environments:
+  production:
+    services:
+      migrate:
+        kind: run
+        image: getsentry/sentry:26.6.0
+        command: [sentry, upgrade, --noinput]
+        timeout: 30m
 
-  web:
-    image: getsentry/sentry:26.6.0
-    dependsOn: [migrate]
+      web:
+        image: getsentry/sentry:26.6.0
+        dependsOn: [migrate]
 ```
 
 Use `imageFrom` to reuse another service's resolved image. Tako adds that
 service as an implicit dependency; build-backed image sources must share at
 least one eligible node with the run.
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  app:
-    build: .
-  migrate:
-    kind: run
-    imageFrom: app
-    command: [bin/app, migrate]
+environments:
+  production:
+    services:
+      app:
+        build: .
+      migrate:
+        kind: run
+        imageFrom: app
+        command: [bin/app, migrate]
 ```
 
 Successful runs record their resolved-image/config fingerprint, command, node,
@@ -1391,16 +1974,154 @@ Local build mode needs only Docker with buildx on the client. Image handoff uses
 Tako's structured node transport and does not require an additional Docker CLI
 plugin.
 
+## Command Aliases
+
+`aliases:` records project shortcuts for long Tako invocations next to
+`tako.yaml`. `tako <alias> [args...]` runs `tako <alias args...> [args...]`.
+
+<!-- tako:snippet partial -->
+```yaml
+aliases:
+  # List form (preferred): each item is one Tako argument, used verbatim.
+  console: [exec, -it, web, --, bin/rails, console]
+  migrate: [exec, web, --oneoff, --, php, artisan, migrate]
+  stg-console: [exec, -it, web, -e, staging, --, bin/rails, console]
+  # String form: split into arguments without a shell.
+  logsw: logs --service web --follow
+  shell: exec -it web -- sh -c "cd /app && exec bash"
+```
+
+```bash
+tako console                       # tako exec -it web -- bin/rails console
+tako logsw --tail 50              # tako logs --service web --follow --tail 50
+tako -e staging logsw              # tako -e staging logs --service web --follow
+tako --config deploy/tako.yaml -v migrate
+tako aliases                       # list aliases and what they run
+```
+
+Rules:
+
+- **Names** match `^[a-z0-9][a-z0-9_-]*$` (at most 63 characters). `help`,
+  `completion`, `__complete`, `__completeNoDesc`, and `aliases` are reserved
+  and rejected.
+- **Values** are Tako arguments, not shell commands. The first argument must
+  be a visible top-level Tako command (`exec`, `logs`, `deploy`, ...); it
+  cannot be a flag, `tako` itself, another alias, `help`, `completion`,
+  `takod`, or a hidden command. Expansion is single-level, so aliases never
+  reference each other.
+- **String form** splits on unquoted whitespace. `'...'` is literal, `"..."`
+  honors `\"` and `\\`, and `\x` outside quotes yields `x`. There is no
+  variable expansion, globbing, `~`, command substitution, or operator
+  handling: `;`, `|`, `&&`, `$(...)`, and `*` are passed to Tako as ordinary
+  text. To run a shell pipeline on the server, pass it to a remote shell as in
+  the `shell` example above. An unterminated quote or an empty value is a
+  validation error.
+- **Extra arguments** typed after the alias name are appended unchanged. When
+  the alias already contains `--`, they land after it and reach the remote
+  command: with `rails: [exec, -it, web, --, bin/rails]`, `tako rails
+  db:migrate:status` runs `bin/rails db:migrate:status`.
+- **Global flags** that affect alias lookup (`--config`) go before the alias
+  name. Aliases are read from that config file.
+- **Environments**: an alias may pin one with `-e`/`--env` before any `--`.
+  Passing a different `-e` on the command line fails with exit code 2
+  (`alias stg-console pins environment staging; ...`); the same value is
+  accepted. Unpinned aliases follow `-e` and the default environment as usual.
+- **Forbidden flags**: `--config` and `--host-key-mode` (either spelling)
+  are rejected before `--`, so a committed alias cannot redirect the config
+  or weaken SSH host key checks. After `--` they are remote command data.
+- **Literal values**: `${...}` inside an alias is a validation error, reported
+  before environment expansion. Aliases are never env-expanded.
+- **Built-ins win.** A name that matches a built-in command or built-in
+  command alias always runs the built-in, without reading the config. Such an
+  alias is not a load error (a future Tako release adding a command must not
+  break an existing `tako.yaml`), but `tako validate` and `tako aliases` warn
+  that it is shadowed and can never run.
+
+An invoked alias behaves exactly like the expanded command: same flags, exit
+codes, `--output json`/`--events ndjson` support or human-only rejection, and
+project-mutation preflight. `-v` prints the expansion to stderr
+(`alias logsw -> tako -v logs --service web --follow`); nothing extra is
+written to stdout, and no extra NDJSON event is emitted.
+
+`tako --help` lists aliases under "Project Aliases", `tako help <alias>` shows
+the expansion, and shell completion offers alias names, all when a valid
+config is present. Completion does not offer the target command's flags after
+an alias name. Generated man pages and the tracked completion scripts never
+include project aliases.
+
+`tako aliases` lists every alias with its expansion and shadowing status
+without contacting servers or requiring env vars referenced elsewhere in the
+config. `--output json` returns an `AliasList` document. Invoking an alias
+also reads only the `aliases` section, so an invalid alias fails with exit
+code 2 while built-in commands are unaffected. Commands that load the whole
+config (`deploy`, `validate`, ...) reject invalid aliases like any other
+invalid section.
+
+`aliases:` requires a Tako release with alias support; older releases reject
+the key as `unknown field "aliases"`.
+
+## Lifecycle Hooks
+
+`hooks:` configures local scripts that run on the machine executing the CLI
+around `tako deploy`, `tako rollback`, `tako promote`, and `tako setup`. Hooks
+never run on a node. Hook files live in `.tako-hooks/` next to `tako.yaml`;
+the block is only needed to change the defaults or to declare argv commands.
+See [HOOKS.md](./HOOKS.md) for hook names, placement, the `TAKO_*`
+environment, and failure semantics.
+
+<!-- tako:snippet partial -->
+```yaml
+hooks:
+  path: .tako-hooks          # default; relative to the config file's directory
+  timeout: 5m                # per hook, 1s..1h
+  output: verbose            # verbose | quiet (quiet emits hook output at debug level)
+  passEnv:                   # process variables a hook may see
+    - GITHUB_TOKEN
+    - SLACK_*                # PREFIX* matches every SLACK_... variable
+  commands:                  # argv form, run without a shell
+    pre-deploy: [make, check]
+    post-deploy: [./scripts/notify.sh]
+```
+
+| Key | Default | Rules |
+|-----|---------|-------|
+| `path` | `.tako-hooks` | Relative to the config file's directory. Absolute paths, paths that escape the project, and paths under `.tako/` (gitignored, so hooks there would never be committed) are rejected. |
+| `timeout` | `5m` | Go duration from `1s` to `1h`, applied to each hook. On timeout the hook's whole process tree is killed and the hook counts as failed. |
+| `output` | `verbose` | `quiet` keeps hook output out of the terminal unless `--verbose`; it still appears as debug-level `hook.output` events. |
+| `passEnv` | none | Exact variable names or `PREFIX*` patterns. Names starting with `TAKO_` are rejected. |
+| `commands` | none | Map from hook name to a non-empty argv list. Unknown hook names are rejected. `argv[0]` is looked up on PATH; a value containing a path separator is resolved relative to the project directory. |
+
+Secret rules:
+
+- A hook gets a minimal baseline environment (`PATH`, home and temp
+  directories, locale, terminal, Windows system variables, `CI`), the
+  variables matched by `passEnv`, and the `TAKO_*` context. Nothing else is
+  inherited: `.env` keys, `.tako/secrets`, and `secretSources` values never
+  reach a hook unless you pass the same process variable through `passEnv`.
+- `${VAR}` references inside `hooks.commands` are a validation error, so a
+  secret is never expanded into a committed argv or echoed in hook events.
+  Read secrets from the environment inside the hook and list them in
+  `passEnv`.
+- Values of passed variables whose names look like credentials (`TOKEN`,
+  `SECRET`, `KEY`, `PASSWORD`, `PASS`, `CREDENTIAL`, `AUTH`) are redacted from
+  hook output and events.
+
+A hook defined both as a file and in `hooks.commands` is an error. `tako
+validate` checks hooks without running them.
+
 ## Container Resource Limits
 
 Set a Docker memory limit per service with `resources.memory`:
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  web:
-    build: .
-    resources:
-      memory: 512m
+environments:
+  production:
+    services:
+      web:
+        build: .
+        resources:
+          memory: 512m
 ```
 
 Tako passes this to Docker as `--memory`. Accepted units are Docker-style
@@ -1412,17 +2133,20 @@ byte, k, m, or g values such as `512m`, `1g`, or `768mb`.
 game servers, MQTT brokers, SMTP, externally reachable databases — publish
 host ports directly on the node with `ports`:
 
+<!-- tako:snippet partial -->
 ```yaml
-services:
-  minecraft:
-    image: itzg/minecraft-server
-    persistent: true
-    volumes:
-      - mc-data:/data
-    ports:
-      - "25565:25565"       # host:container, TCP by default
-      - "19132:19132/udp"
-      - "127.0.0.1:9090:9090"  # bind a specific interface only
+environments:
+  production:
+    services:
+      minecraft:
+        image: itzg/minecraft-server
+        persistent: true
+        volumes:
+          - mc-data:/data
+        ports:
+          - "25565:25565"       # host:container, TCP by default
+          - "19132:19132/udp"
+          - "127.0.0.1:9090:9090"  # bind a specific interface only
 ```
 
 Entries use docker-compose publish syntax (`PORT`, `HOST:CONTAINER`,
@@ -1430,7 +2154,8 @@ Entries use docker-compose publish syntax (`PORT`, `HOST:CONTAINER`,
 `--publish`. Traffic reaches the container directly — no TLS termination,
 health-gated routing, or basic auth from tako-proxy applies. Constraints:
 
-- **`deploy.strategy` must be `recreate`** (the default). Rolling and
+- **`deploy.strategy` must be `recreate`**, which is the default for services
+  with `ports` (see [Deploy Strategies](#deploy-strategies)). Rolling and
   blue-green keep the old and new revision running at once, and the second
   container cannot bind an already-bound host port, so raw port services
   take a brief listener gap on deploy.
@@ -1457,6 +2182,7 @@ retention cleanup fails after the local archive is created, Tako keeps the
 local archive and reports a warning so the backup remains available for
 node-local restore:
 
+<!-- tako:snippet partial -->
 ```yaml
 environments:
   production:

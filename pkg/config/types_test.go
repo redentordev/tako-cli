@@ -909,9 +909,148 @@ func TestValidateConfigDefaultsDeploymentStrategy(t *testing.T) {
 		t.Fatalf("ValidateConfig returned error: %v", err)
 	}
 
-	got := cfg.Environments["production"].Services["web"].Deploy.Strategy
-	if got != DeployStrategyRecreate {
-		t.Fatalf("deploy strategy = %q, want %q", got, DeployStrategyRecreate)
+	// The fixture service has no port, so the default stays recreate.
+	got := cfg.Environments["production"].Services["web"].Deploy
+	if got.Strategy != DeployStrategyRecreate || !got.StrategyDefaulted {
+		t.Fatalf("deploy = %+v, want defaulted %q", got, DeployStrategyRecreate)
+	}
+}
+
+func TestValidateConfigDefaultDeployStrategySelection(t *testing.T) {
+	boolPtr := func(value bool) *bool { return &value }
+	tests := []struct {
+		name    string
+		service ServiceConfig
+		proxied bool
+		want    string
+	}{
+		{name: "stateless proxied web", service: ServiceConfig{Image: "web:1", Replicas: 2}, proxied: true, want: DeployStrategyRolling},
+		{name: "internal port only", service: ServiceConfig{Image: "api:1", Port: 8080}, want: DeployStrategyRolling},
+		{name: "persistent", service: ServiceConfig{Image: "postgres:16", Port: 5432, Persistent: true, Volumes: []string{"pgdata:/var/lib/postgresql/data"}}, want: DeployStrategyRecreate},
+		{name: "raw host ports", service: ServiceConfig{Image: "postgres:16", Port: 5432, Ports: []string{"5432:5432"}}, want: DeployStrategyRecreate},
+		{name: "volumes", service: ServiceConfig{Image: "web:1", Port: 3000, Volumes: []string{"uploads:/app/uploads"}}, want: DeployStrategyRecreate},
+		{name: "portless worker", service: ServiceConfig{Image: "worker:1"}, want: DeployStrategyRecreate},
+		{name: "maxSurge below replicas", service: ServiceConfig{Image: "web:1", Port: 3000, Replicas: 3, Deploy: DeployConfig{MaxSurge: 1}}, want: DeployStrategyRecreate},
+		{name: "maxSurge equal to replicas", service: ServiceConfig{Image: "web:1", Port: 3000, Replicas: 3, Deploy: DeployConfig{MaxSurge: 3}}, want: DeployStrategyRolling},
+		{name: "maxSurge above replicas", service: ServiceConfig{Image: "web:1", Port: 3000, Replicas: 2, Deploy: DeployConfig{MaxSurge: 4}}, want: DeployStrategyRolling},
+		{name: "maxUnavailable", service: ServiceConfig{Image: "web:1", Port: 3000, Deploy: DeployConfig{MaxUnavailable: 1}}, want: DeployStrategyRecreate},
+		{name: "promotion", service: ServiceConfig{Image: "web:1", Port: 3000, Deploy: DeployConfig{Promotion: DeployPromotionAutomatic}}, want: DeployStrategyRecreate},
+		{name: "smokeTest", service: ServiceConfig{Image: "web:1", Port: 3000, Deploy: DeployConfig{SmokeTest: DeploySmokeTestConfig{Path: "/up"}}}, want: DeployStrategyRecreate},
+		{name: "invalid readiness", service: ServiceConfig{Image: "web:1", Port: 3000, Deploy: DeployConfig{Readiness: DeployReadinessConfig{Path: "/up", TCPPort: 3000}}}, want: DeployStrategyRecreate},
+		{name: "invalid release", service: ServiceConfig{Image: "web:1", Port: 3000, Deploy: DeployConfig{Release: &ReleaseConfig{}}}, want: DeployStrategyRecreate},
+		{name: "valid readiness and release", service: ServiceConfig{Image: "web:1", Port: 3000, Deploy: DeployConfig{Readiness: DeployReadinessConfig{Path: "/up"}, Release: &ReleaseConfig{Command: []string{"migrate"}}}}, want: DeployStrategyRolling},
+		{name: "rollbackOnFailure false", service: ServiceConfig{Image: "web:1", Port: 3000, Deploy: DeployConfig{RollbackOnFailure: boolPtr(false)}}, want: DeployStrategyRolling},
+		{name: "kind job", service: ServiceConfig{Image: "job:1", Kind: ServiceKindJob, Schedule: "0 * * * *", Command: StringValue("run")}, want: DeployStrategyRecreate},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validValidationConfig()
+			production := cfg.Environments["production"]
+			production.Servers = []string{"node-a"}
+			service := tt.service
+			if tt.proxied {
+				configureValidationWebProxy(&production, &service)
+			}
+			production.Services = map[string]ServiceConfig{"web": service}
+			cfg.Environments["production"] = production
+
+			if err := ValidateConfig(cfg); err != nil {
+				t.Fatalf("ValidateConfig returned error: %v", err)
+			}
+			got := cfg.Environments["production"].Services["web"]
+			if got.Deploy.Strategy != tt.want {
+				t.Fatalf("deploy strategy = %q, want %q", got.Deploy.Strategy, tt.want)
+			}
+			if !got.Deploy.StrategyDefaulted || got.DeployStrategySource() != DeployStrategySourceDefault {
+				t.Fatalf("strategy source = %q (defaulted %v), want default", got.DeployStrategySource(), got.Deploy.StrategyDefaulted)
+			}
+		})
+	}
+}
+
+func TestValidateConfigGracePeriodWithoutStrategyStillFails(t *testing.T) {
+	// gracePeriod was already rejected under the implicit recreate default;
+	// default selection must not change that error.
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Port = 3000
+	web.Deploy.GracePeriod = "30s"
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "deploy.gracePeriod is only supported by blue_green") {
+		t.Fatalf("ValidateConfig error = %v, want gracePeriod rejection", err)
+	}
+	if got := DefaultDeployStrategy(&ServiceConfig{Port: 3000, Deploy: DeployConfig{GracePeriod: "30s"}}); got != DeployStrategyRecreate {
+		t.Fatalf("DefaultDeployStrategy(gracePeriod) = %q, want recreate", got)
+	}
+}
+
+func TestValidateConfigKeepsExplicitDeployStrategy(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	web := production.Services["web"]
+	web.Port = 3000
+	web.Deploy.Strategy = DeployStrategyRecreate
+	production.Services["web"] = web
+	cfg.Environments["production"] = production
+
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig returned error: %v", err)
+	}
+	got := cfg.Environments["production"].Services["web"]
+	if got.Deploy.Strategy != DeployStrategyRecreate || got.Deploy.StrategyDefaulted || got.DeployStrategySource() != DeployStrategySourceExplicit {
+		t.Fatalf("deploy = %+v source %q, want explicit recreate", got.Deploy, got.DeployStrategySource())
+	}
+}
+
+func TestValidateConfigExplicitRollingKeepsPersistentError(t *testing.T) {
+	cfg := validValidationConfig()
+	production := cfg.Environments["production"]
+	production.Servers = []string{"node-a"}
+	production.Services = map[string]ServiceConfig{"db": {
+		Image: "postgres:16", Port: 5432, Persistent: true,
+		Volumes: []string{"pgdata:/var/lib/postgresql/data"},
+		Deploy:  DeployConfig{Strategy: DeployStrategyRolling},
+	}}
+	cfg.Environments["production"] = production
+
+	err := ValidateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "deploy.strategy=rolling is not supported for persistent services") {
+		t.Fatalf("ValidateConfig error = %v, want unchanged persistent rolling rejection", err)
+	}
+}
+
+func TestValidateConfigRunRejectsRollbackOnFailure(t *testing.T) {
+	for _, value := range []bool{true, false} {
+		value := value
+		cfg := validValidationConfig()
+		production := cfg.Environments["production"]
+		production.Services = map[string]ServiceConfig{"migrate": {
+			Image: "web:1", Kind: ServiceKindRun, Command: ListValue("migrate"),
+			Deploy: DeployConfig{RollbackOnFailure: &value},
+		}}
+		cfg.Environments["production"] = production
+
+		err := ValidateConfig(cfg)
+		if err == nil || !strings.Contains(err.Error(), "kind: run cannot set deploy rollout controls") {
+			t.Fatalf("rollbackOnFailure=%v: ValidateConfig error = %v, want run rejection", value, err)
+		}
+	}
+}
+
+func TestDefaultDeployStrategyDoesNotMutateService(t *testing.T) {
+	service := &ServiceConfig{Port: 3000}
+	if got := DefaultDeployStrategy(service); got != DeployStrategyRolling {
+		t.Fatalf("DefaultDeployStrategy() = %q, want rolling", got)
+	}
+	if service.Deploy.Strategy != "" || service.Deploy.StrategyDefaulted || service.Replicas != 0 {
+		t.Fatalf("DefaultDeployStrategy mutated service: %+v", service)
+	}
+	if got := DefaultDeployStrategy(&ServiceConfig{Port: 3000, Kind: ServiceKindRun}); got != DeployStrategyRecreate {
+		t.Fatalf("DefaultDeployStrategy(run) = %q, want recreate", got)
 	}
 }
 

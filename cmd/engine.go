@@ -32,7 +32,7 @@ func cliEngine() *engine.Engine {
 			sink = humanEventSink{writer: os.Stderr}
 			buildOutput = os.Stderr
 		default:
-			sink = humanEventSink{writer: os.Stdout}
+			sink = humanEventSink{writer: os.Stdout, color: logsColorEnabled(os.Stdout)}
 		}
 		cliEngineInstance = engine.New(engine.Options{
 			CLIVersion:  Version,
@@ -112,6 +112,9 @@ type operationConfirmationRequiredDocument struct {
 	Project     string   `json:"project"`
 	Environment string   `json:"environment"`
 	Servers     []string `json:"servers,omitempty"`
+	// Plan carries the operation's plan document when it has one
+	// (rollback: a RollbackPlan).
+	Plan any `json:"plan,omitempty"`
 }
 
 func newOperationConfirmationRequiredDocument(reason string, operation string, project string, environment string, servers []string) operationConfirmationRequiredDocument {
@@ -150,21 +153,50 @@ func newStateForgetNodeConfirmationRequiredDocument(reason string, project strin
 	}
 }
 
+// hashedPlan is a reviewed plan document type (DeployPlan, RollbackPlan)
+// whose pointer fingerprints the content that determines the mutation.
+type hashedPlan[T any] interface {
+	*T
+	PlanHash() string
+}
+
 // verifyPlanFileMatches asserts that a previously reviewed plan document
-// still matches the freshly computed plan, refusing to apply on drift.
-func verifyPlanFileMatches(planPath string, current engine.DeployPlan) error {
+// still matches the freshly computed plan, refusing to apply on drift. A
+// document of another kind (a DeployPlan passed to rollback) is an invalid
+// plan file. Every rejection is an invalid request (exit 2).
+func verifyPlanFileMatches[T any, P hashedPlan[T]](planPath string, current T) error {
 	payload, err := os.ReadFile(planPath)
 	if err != nil {
 		return &engine.InvalidRequestError{Err: fmt.Errorf("failed to read plan file %q: %w", planPath, err)}
 	}
-	var reviewed engine.DeployPlan
+	var reviewed T
 	if err := json.Unmarshal(payload, &reviewed); err != nil {
 		return &engine.InvalidRequestError{Err: fmt.Errorf("failed to parse plan file %q: %w", planPath, err)}
 	}
-	if reviewed.Hash() != current.Hash() {
+	if want := planDocumentKind(current); want != "" {
+		if got := planDocumentKind(reviewed); got != want {
+			return &engine.InvalidRequestError{Err: fmt.Errorf("plan file %q is not a %s document (kind %q)", planPath, want, got)}
+		}
+	}
+	if P(&reviewed).PlanHash() != P(&current).PlanHash() {
 		return &engine.InvalidRequestError{Err: fmt.Errorf("plan drift detected: reviewed plan %q no longer matches the computed plan; re-run with --plan-only and review again", planPath)}
 	}
 	return nil
+}
+
+// planDocumentKind reads a plan document's kind field.
+func planDocumentKind(document any) string {
+	payload, err := json.Marshal(document)
+	if err != nil {
+		return ""
+	}
+	var header struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(payload, &header); err != nil {
+		return ""
+	}
+	return header.Kind
 }
 
 // humanEventSink renders engine events as the CLI's terminal output. Event
@@ -172,6 +204,10 @@ func verifyPlanFileMatches(planPath string, current engine.DeployPlan) error {
 // sink writes them verbatim; debug-level events render only with --verbose.
 type humanEventSink struct {
 	writer io.Writer
+	// color enables ANSI source-prefix colors on log.line events; it is set
+	// only when stdout is a terminal, NO_COLOR is unset, and no machine
+	// output mode is active.
+	color bool
 }
 
 func (s humanEventSink) Emit(event events.Event) {
@@ -179,6 +215,20 @@ func (s humanEventSink) Emit(event events.Event) {
 		return
 	}
 	if event.Message == "" {
+		return
+	}
+	if event.Type == events.TypeLogLine {
+		// Container output keeps its terminal destination regardless of the
+		// container stream it came from (data.stream is attribution only).
+		writer := s.writer
+		if writer == nil {
+			writer = os.Stdout
+		}
+		message := event.Message
+		if s.color {
+			message = colorizeLogLinePrefix(event, message)
+		}
+		fmt.Fprint(writer, message)
 		return
 	}
 	if stream, ok := event.Data["stream"].(string); ok && stream == "stderr" {

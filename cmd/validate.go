@@ -1,14 +1,17 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/engine"
+	"github.com/redentordev/tako-cli/pkg/hooks"
 	"github.com/redentordev/tako-cli/pkg/takoapi"
 	"github.com/spf13/cobra"
 )
@@ -71,6 +74,32 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			Message:  warning.Message,
 		})
 	}
+	// Alias targets and built-in shadowing need the command tree, so they
+	// are checked here rather than in pkg/config.
+	var blockingErrors []string
+	for _, finding := range checkAliasTargets(rootCmd, cfg.Aliases) {
+		finding.Path = configPath
+		result.Findings = append(result.Findings, finding)
+		if finding.Severity == engine.ValidateSeverityError {
+			blockingErrors = append(blockingErrors, finding.Message)
+		}
+	}
+	// Hooks are resolved exactly as the lifecycle commands resolve them,
+	// without executing anything.
+	for _, finding := range checkHooks(cfg, configPath) {
+		finding.Path = configPath
+		result.Findings = append(result.Findings, finding)
+		if finding.Severity == engine.ValidateSeverityError {
+			blockingErrors = append(blockingErrors, finding.Message)
+		}
+	}
+	if len(blockingErrors) > 0 {
+		result.Valid = false
+		if err := emitResultDocument(result); err != nil {
+			return err
+		}
+		return &engine.InvalidRequestError{Err: fmt.Errorf("invalid config %s: %s", configPath, strings.Join(blockingErrors, "; "))}
+	}
 	if err := ensureDeployRuntimeSupported(cfg); err != nil {
 		return fail(formatDeployConfigError(configPath, fmt.Errorf("invalid config: %w", err)))
 	}
@@ -123,4 +152,29 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	}
 
 	return emitResultDocument(result)
+}
+
+// checkHooks reports hook resolution problems as validate findings: errors
+// for hooks the lifecycle commands would refuse to run, warnings for
+// hook-like files that would never run. It starts no process and emits no
+// hook events.
+func checkHooks(cfg *config.Config, configPath string) []engine.ValidateFinding {
+	projectDir, err := filepath.Abs(filepath.Dir(configPath))
+	if err != nil {
+		projectDir = filepath.Dir(configPath)
+	}
+	resolution := hooks.Resolve(projectDir, cfg.Hooks, runtime.GOOS)
+	var findings []engine.ValidateFinding
+	for _, resolveErr := range resolution.Errors {
+		field := "hooks"
+		var hookErr hooks.HookError
+		if errors.As(resolveErr, &hookErr) {
+			field = "hooks." + string(hookErr.HookName())
+		}
+		findings = append(findings, engine.ValidateFinding{Severity: engine.ValidateSeverityError, Field: field, Message: resolveErr.Error()})
+	}
+	for _, unknown := range resolution.Unknown {
+		findings = append(findings, engine.ValidateFinding{Severity: engine.ValidateSeverityWarn, Field: "hooks", Message: unknown.Message})
+	}
+	return findings
 }

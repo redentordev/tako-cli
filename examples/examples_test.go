@@ -116,7 +116,7 @@ func TestAllExamplesValidatorCoversTopLevelAndPatternConfigs(t *testing.T) {
 	validateScript := readExampleFile(t, "validate.sh")
 	for _, expected := range []string{
 		"find \"$ROOT/examples\" -mindepth 2 -maxdepth 2",
-		"-name 'tako-parallel.yaml'",
+		"-mindepth 2 -maxdepth 2 -name 'tako.yaml' -print",
 		"find \"$ROOT/examples/deployment-patterns\" -mindepth 2 -maxdepth 2",
 		"VALIDATION_HOME=\"$TMP_DIR/home\"",
 		"HOME=\"$VALIDATION_HOME\"",
@@ -126,6 +126,9 @@ func TestAllExamplesValidatorCoversTopLevelAndPatternConfigs(t *testing.T) {
 		if !strings.Contains(validateScript, expected) {
 			t.Fatalf("all examples validator missing %q", expected)
 		}
+	}
+	if strings.Contains(validateScript, "tako-parallel.yaml") {
+		t.Fatal("validator still references removed tako-parallel.yaml configs")
 	}
 }
 
@@ -503,6 +506,18 @@ func assertStagesPattern(t *testing.T, cfg *config.Config) {
 	}
 	if preview.Env["APP_STAGE"] != "preview" || production.Env["APP_STAGE"] != "production" {
 		t.Fatalf("stage env values should make runtime identity visible: preview=%#v production=%#v", preview.Env, production.Env)
+	}
+	// Both stages extend the abstract base and inherit everything else.
+	if _, ok := cfg.Environments["base"]; ok || !cfg.IsAbstractEnvironment("base") {
+		t.Fatal("stage template base must be abstract and not deployable")
+	}
+	for name, service := range map[string]*config.ServiceConfig{"preview": preview, "production": production} {
+		if service.Build != "." || service.Port != 3000 || service.HealthCheck.Path != "/health" || service.Env["NODE_ENV"] != "production" || service.Proxy.Email == "" {
+			t.Fatalf("%s web should inherit the base service: %#v", name, service)
+		}
+		if chain := cfg.EnvironmentExtendsChain(name); len(chain) != 1 || chain[0] != "base" {
+			t.Fatalf("%s extends chain = %v, want [base]", name, chain)
+		}
 	}
 }
 

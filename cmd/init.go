@@ -3,7 +3,9 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/redentordev/tako-cli/pkg/config"
 	"github.com/redentordev/tako-cli/pkg/fileutil"
 	"github.com/redentordev/tako-cli/pkg/syscheck"
 	"github.com/spf13/cobra"
@@ -33,6 +35,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 	projectName := "my-app"
 	if len(args) > 0 {
 		projectName = args[0]
+	}
+	// Reject names `tako validate` would reject before any check or write.
+	if err := config.ValidateProjectName(projectName); err != nil {
+		return err
 	}
 
 	// Check system requirements
@@ -222,11 +228,285 @@ func generateJSONConfig(projectName string) string {
 `, projectName, projectName)
 }
 
-// generateYAMLConfig creates a YAML configuration (moved from inline)
+// initExample is one optional, commented example in the generated tako.yaml.
+// Body is valid, uncommented YAML that uses real key paths from the config
+// root, so tests can merge it into the generated base config and validate it.
+type initExample struct {
+	Title string
+	Notes []string
+	Body  string
+}
+
+// initExamples returns the optional examples appended to the generated
+// tako.yaml, in render order.
+func initExamples() []initExample {
+	return []initExample{
+		{
+			Title: "DATABASE SERVICE (Optional) - PostgreSQL example",
+			Notes: []string{
+				"persistent: true requires a volume; broad --force skips persistent services.",
+				"In multi-node environments, pin it with placement so data has a known home.",
+			},
+			Body: `environments:
+  production:
+    services:
+      postgres:
+        image: postgres:16-alpine
+        port: 5432
+        persistent: true
+        volumes:
+          - postgres_data:/var/lib/postgresql/data
+        env:
+          POSTGRES_USER: myapp
+          POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+          POSTGRES_DB: myapp_production
+`,
+		},
+		{
+			Title: "CACHE SERVICE (Optional) - Redis example",
+			Body: `environments:
+  production:
+    services:
+      redis:
+        image: redis:7-alpine
+        port: 6379
+        persistent: true
+        volumes:
+          - redis_data:/data
+`,
+		},
+		{
+			Title: "WORKER SERVICE (Optional) - Background jobs example",
+			Notes: []string{"No port = background service (not publicly accessible)."},
+			Body: `environments:
+  production:
+    services:
+      worker:
+        build: ./worker
+        replicas: 2
+        env:
+          REDIS_URL: redis://redis:6379
+          QUEUE_NAME: default
+`,
+		},
+		{
+			Title: "EDGE PROXY AND DNS-01 (Optional)",
+			Notes: []string{
+				"Keep public ingress on one node. Built-in ACME TLS requires a single",
+				"proxy node until distributed certificate handling is implemented.",
+				"DNS-01 serves CDN-fronted origins and wildcard certificates; use a",
+				"per-zone, DNS-edit-only token. Literal credentials are rejected.",
+				"dnsProvider: cloudflare, hetzner, or digitalocean.",
+			},
+			Body: `environments:
+  production:
+    proxy:
+      placement:
+        strategy: pinned
+        servers: [production]
+      acme:
+        dnsProvider: cloudflare
+        credentials:
+          apiToken: ${CLOUDFLARE_DNS_API_TOKEN}
+`,
+		},
+		{
+			Title: "ADVANCED RUNTIME OVERRIDES (Optional)",
+			Notes: []string{
+				"Tako infers these defaults. Add this block only when you intentionally need",
+				"to customize the node-local runtime, replicated state, or mesh network.",
+			},
+			Body: `runtime:
+  mode: takod
+  proxy: tako-proxy
+  agent:
+    enabled: true
+    socket: /run/tako/takod.sock
+    dataDir: /var/lib/tako
+state:
+  backend: replicated
+  deployConsistency: lease
+  onUnreachableNode: block
+  remoteCacheEnabled: true
+mesh:
+  enabled: true
+  networkCIDR: 10.210.0.0/16
+  interface: tako
+  listenPort: 51820
+  subnetBits: 24
+  natTraversal: true
+`,
+		},
+		{
+			Title: "PRIVATE REGISTRIES (Optional - for private images)",
+			Notes: []string{
+				"Keyed by registry host. Credentials must be ${ENV_VAR} references.",
+			},
+			Body: `registries:
+  ghcr.io:
+    username: ${REGISTRY_USER}
+    password: ${REGISTRY_TOKEN}
+`,
+		},
+		{
+			Title: "MULTI-SERVER MESH CONFIGURATION (Optional - for 2+ servers)",
+			Notes: []string{
+				"Additional servers join the same takod mesh model. This replaces the",
+				"servers block above. Public services with built-in ACME TLS need the",
+				"environment proxy pinned to a single node.",
+				"Placement strategies: spread (distribute across servers), pinned",
+				"(with servers: [...]), any, or global.",
+			},
+			Body: `servers:
+  server1:
+    host: ${SERVER1_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+  server2:
+    host: ${SERVER2_HOST}
+    user: root
+    sshKey: ~/.ssh/id_ed25519
+environments:
+  production:
+    servers: [server1, server2]
+    proxy:
+      placement:
+        strategy: pinned
+        servers: [server1]
+    services:
+      web:
+        replicas: 4
+        placement:
+          strategy: spread
+`,
+		},
+		{
+			Title: "NOTIFICATIONS (Optional - deployment notifications)",
+			Notes: []string{
+				"Get notified on Slack, Discord, or a custom webhook (receives JSON)",
+				"when deployments start and finish.",
+			},
+			Body: `notifications:
+  slack: ${SLACK_WEBHOOK_URL}
+  discord: ${DISCORD_WEBHOOK_URL}
+  webhook: https://your-endpoint.example.com/deploy
+`,
+		},
+		{
+			Title: "BUILD LOCATION (Optional)",
+			Notes: []string{
+				"Where build-backed images are produced: remote (default), local, or auto.",
+			},
+			Body: `deployment:
+  build:
+    strategy: auto
+`,
+		},
+		{
+			Title: "REFERENCE: Web app with www redirect",
+			Notes: []string{
+				"redirectFrom domains get their own certificates and a 308 permanent",
+				"redirect to the primary domain that preserves path and method.",
+			},
+			Body: `environments:
+  production:
+    services:
+      web:
+        build: .
+        port: 3000
+        proxy:
+          domain: app.example.com
+          redirectFrom:
+            - www.app.example.com
+          email: admin@example.com
+        env:
+          NODE_ENV: production
+`,
+		},
+		{
+			Title: "REFERENCE: Full-stack app with database",
+			Body: `environments:
+  production:
+    services:
+      web:
+        build: ./frontend
+        port: 3000
+        dependsOn: [api]
+        proxy:
+          domain: app.example.com
+          email: admin@example.com
+      api:
+        build: ./backend
+        port: 4000
+        dependsOn: [postgres]
+        env:
+          DATABASE_URL: postgresql://myapp:${POSTGRES_PASSWORD}@postgres:5432/myapp
+      postgres:
+        image: postgres:16-alpine
+        persistent: true
+        volumes:
+          - postgres_data:/var/lib/postgresql/data
+        env:
+          POSTGRES_USER: myapp
+          POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+          POSTGRES_DB: myapp
+`,
+		},
+	}
+}
+
+const initSectionRule = "# ============================================================================"
+
+// commentBlock renders body as YAML comment lines, prefixing every line with
+// "# " (blank lines become "#").
+func commentBlock(body string) string {
+	var out strings.Builder
+	for _, line := range strings.Split(strings.TrimRight(body, "\n"), "\n") {
+		if strings.TrimSpace(line) == "" {
+			out.WriteString("#\n")
+			continue
+		}
+		out.WriteString("# ")
+		out.WriteString(line)
+		out.WriteString("\n")
+	}
+	return out.String()
+}
+
+func renderInitExample(example initExample) string {
+	var out strings.Builder
+	out.WriteString("\n")
+	out.WriteString(initSectionRule + "\n")
+	out.WriteString("# " + example.Title + "\n")
+	out.WriteString(initSectionRule + "\n")
+	for _, note := range example.Notes {
+		out.WriteString("# " + note + "\n")
+	}
+	if len(example.Notes) > 0 {
+		out.WriteString("#\n")
+	}
+	out.WriteString(commentBlock(example.Body))
+	return out.String()
+}
+
+// generateYAMLConfig creates the commented tako.yaml written by tako init: an
+// active base config followed by the optional examples from initExamples.
 func generateYAMLConfig(projectName string) string {
+	var out strings.Builder
+	out.WriteString(generateYAMLBaseConfig(projectName))
+	for _, example := range initExamples() {
+		out.WriteString(renderInitExample(example))
+	}
+	return out.String()
+}
+
+// generateYAMLBaseConfig is the active part of the generated tako.yaml.
+func generateYAMLBaseConfig(projectName string) string {
 	return fmt.Sprintf(`# 🐙 Tako CLI Configuration
 # Minimal app-focused config. Tako infers the meshed takod runtime, replicated
 # state, and WireGuard mesh defaults unless you add advanced overrides.
+# Optional examples at the end of this file use full key paths from the
+# config root; merge the keys you need into the matching blocks above.
 # Learn more: https://github.com/redentordev/tako-cli
 
 # ============================================================================
@@ -255,19 +535,6 @@ environments:
   production:
     servers:
       - production
-    # Optional: keep public ingress on one edge node in multi-node setups.
-    # Built-in ACME TLS requires a single proxy node until distributed
-    # certificate handling is implemented.
-    # proxy:
-    #   placement:
-    #     constraints:
-    #       - node.labels.role==edge
-    #   # Optional DNS-01 for CDN-fronted origins and wildcard certificates.
-    #   # Use a per-zone, DNS-edit-only token; literal credentials are rejected.
-    #   acme:
-    #     dnsProvider: cloudflare  # cloudflare, hetzner, or digitalocean
-    #     credentials:
-    #       apiToken: ${CLOUDFLARE_DNS_API_TOKEN}
     services:
       # ======================================================================
       # WEB SERVICE - Basic web application
@@ -278,15 +545,16 @@ environments:
         port: 3000        # Internal container port
         # replicas: 1     # Number of container replicas (default: 1)
         # restart: unless-stopped  # Restart policy: no, on-failure, always, unless-stopped
-        
+
         # Public proxy routing
         proxy:
           # Primary explicit hostname where traffic is served.
           # Wildcards such as *.example.com require environment.proxy.acme.
           domain: %s.${TAKO_PRODUCTION_HOST}.sslip.io  # sslip.io provides automatic DNS
           # cdn: cloudflare  # or generic; required for strict checks when DNS is CDN-proxied
-          
-          # Domain redirects (301 redirect to primary domain with path preservation)
+
+          # Domain redirects (308 permanent redirect to the primary domain,
+          # preserving path and method)
           # redirectFrom:
           #   - www.example.com      # www -> non-www
           #   - old.example.com      # old domain -> new domain
@@ -307,215 +575,37 @@ environments:
           # This is HTTP-only and skipped by public DNS/TLS checks.
           # visibility: internal
           # host: web.production.%s.tako.internal
-          
+
           email: ${LETSENCRYPT_EMAIL}     # Email for Let's Encrypt SSL certificates
-          # port: 3000      # Optional: specify if different from service port
-        
+
         # Environment variables
         env:
           NODE_ENV: production
           # DATABASE_URL: postgresql://postgres:5432/myapp
-        
+
         # Secrets (stored in .tako/secrets/)
         # secrets:
         #   - DATABASE_URL        # Load from secrets storage
         #   - JWT_SECRET
         #   - API_KEY:STRIPE_KEY  # Alias: container sees API_KEY, reads STRIPE_KEY
-        
+
         # Volumes (persistent data)
         # volumes:
         #   - uploads:/app/uploads              # Named volume
         #   - /host/path:/container/path        # Bind mount
-        
+
         # Health checks
         # healthCheck:
         #   path: /health
         #   interval: 10s
         #   timeout: 5s
         #   retries: 3
-        
+
         # Cross-project service imports
         # imports:
         #   - other-project.postgres  # Provides other-project-production-postgres DNS
-        
+
         # Export service to other projects
         # export: true
-
-      # ======================================================================
-      # DATABASE SERVICE - PostgreSQL example
-      # ======================================================================
-      # postgres:
-      #   image: postgres:16-alpine
-      #   port: 5432
-      #   persistent: true  # Requires a volume; broad --force skips persistent services
-      #   volumes:
-      #     - postgres_data:/var/lib/postgresql/data
-      #   # Required in multi-node environments so data has a known home.
-      #   # placement:
-      #   #   strategy: pinned
-      #   #   servers: [server1]
-      #   env:
-      #     POSTGRES_USER: myapp
-      #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      #     POSTGRES_DB: myapp_production
-      #   # export: true  # Allow other projects to import this service
-
-      # ======================================================================
-      # CACHE SERVICE - Redis example
-      # ======================================================================
-      # redis:
-      #   image: redis:7-alpine
-      #   port: 6379
-      #   persistent: true
-      #   volumes:
-      #     - redis_data:/data
-      #   # placement:
-      #   #   strategy: pinned
-      #   #   servers: [server1]
-
-      # ======================================================================
-      # WORKER SERVICE - Background jobs example
-      # ======================================================================
-      # worker:
-      #   build: ./worker
-      #   # No port = background service (not publicly accessible)
-      #   replicas: 2
-      #   env:
-      #     REDIS_URL: redis://redis:6379
-      #     QUEUE_NAME: default
-
-# ============================================================================
-# DEPLOYMENT CONFIGURATION (Optional)
-# ============================================================================
-# deployment:
-#   strategy: parallel      # parallel or sequential
-#   parallel:
-#     maxConcurrentBuilds: 4   # Max simultaneous builds
-#     maxConcurrentDeploys: 4  # Max simultaneous deploys
-#   cache:
-#     enabled: true         # Enable Docker build cache
-#     type: local           # Cache type: local
-
-# ============================================================================
-# ADVANCED RUNTIME OVERRIDES (Optional)
-# ============================================================================
-# Tako infers these defaults. Add this block only when you intentionally need
-# to customize the node-local runtime, replicated state, or mesh network.
-#
-# runtime:
-#   mode: takod
-#   proxy: tako-proxy
-#   agent:
-#     enabled: true
-#     socket: /run/tako/takod.sock
-#     dataDir: /var/lib/tako
-#
-# state:
-#   backend: replicated
-#   deployConsistency: lease
-#   onUnreachableNode: block
-#   remoteCacheEnabled: true
-#
-# mesh:
-#   enabled: true
-#   networkCIDR: 10.210.0.0/16
-#   interface: tako
-#   listenPort: 51820
-#   subnetBits: 24
-#   natTraversal: true
-
-# ============================================================================
-# DOCKER REGISTRY (Optional - for private images)
-# ============================================================================
-# registry:
-#   url: ghcr.io
-#   username: ${REGISTRY_USER}
-#   password: ${REGISTRY_TOKEN}
-
-# ============================================================================
-# MULTI-SERVER MESH CONFIGURATION (Optional - for 2+ servers)
-# ============================================================================
-# Additional servers join the same takod mesh model.
-#
-# servers:
-#   server1:
-#     host: ${SERVER1_HOST}
-#     user: root
-#     sshKey: ~/.ssh/id_ed25519
-#   server2:
-#     host: ${SERVER2_HOST}
-#     user: root
-#     sshKey: ~/.ssh/id_ed25519
-#
-# environments:
-#   production:
-#     servers: [server1, server2]
-#     # Required for public services with built-in ACME TLS on multi-node setups.
-#     proxy:
-#       placement:
-#         strategy: pinned
-#         servers: [server1]
-#     services:
-#       web:
-#         build: .
-#         replicas: 4
-#         placement:
-#           strategy: spread  # Distribute across all servers
-#           # strategy: pinned  # Pin to specific servers
-#           # servers: [server1]
-#           # strategy: any     # No placement preference
-
-# ============================================================================
-# NOTIFICATIONS (Optional - deployment notifications)
-# ============================================================================
-# Get notified on Slack, Discord, or custom webhook when deployments start/finish
-# notifications:
-#   slack: ${SLACK_WEBHOOK_URL}       # Slack incoming webhook URL
-#   discord: ${DISCORD_WEBHOOK_URL}   # Discord webhook URL  
-#   webhook: https://your-endpoint.com/deploy  # Generic webhook (receives JSON)
-
-# ============================================================================
-# REFERENCE: Common Service Patterns
-# ============================================================================
-
-# Next.js App with www redirect:
-# web:
-#   build: .
-#   port: 3000
-#   proxy:
-#     domain: app.example.com
-#     redirectFrom:
-#       - www.app.example.com
-#     email: admin@example.com
-#   env:
-#     NODE_ENV: production
-#     DATABASE_URL: postgresql://postgres:5432/myapp
-
-# Laravel App:
-# api:
-#   build: .
-#   port: 8000
-# Python/Django:
-# api:
-#   build: .
-#   port: 8000
-
-# Full-stack with database:
-# web:
-#   build: ./frontend
-#   port: 3000
-#   proxy:
-#     domain: app.example.com
-# api:
-#   build: ./backend
-#   port: 4000
-#   env:
-#     DATABASE_URL: postgresql://postgres:5432/myapp
-# postgres:
-#   image: postgres:16-alpine
-#   volumes:
-#     - postgres_data:/var/lib/postgresql/data
-#   env:
-#     POSTGRES_PASSWORD: ${DB_PASSWORD}
 `, projectName, projectName, projectName)
 }

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -323,8 +325,8 @@ func buildExecEnvFileContent(e *Engine, cfg *config.Config, envName string, serv
 	if err != nil {
 		return "", fmt.Errorf("failed to create secrets manager: %w", err)
 	}
-	for _, key := range service.Secrets {
-		if value, err := mgr.Get(key); err == nil {
+	for _, ref := range service.Secrets {
+		if value, err := mgr.Get(secrets.SecretRefKey(ref)); err == nil {
 			e.RegisterSecret(value)
 		}
 	}
@@ -341,9 +343,14 @@ func buildExecEnvFileContent(e *Engine, cfg *config.Config, envName string, serv
 
 // registerServiceSecretValues adds every referenced secret value to the
 // event redactor so streamed output (logs, exec, release commands) never
-// carries plaintext secrets.
-func (e *Engine) registerServiceSecretValues(cfg *config.Config, envName string, services map[string]config.ServiceConfig) {
+// carries plaintext secrets. Values come from local .tako/secrets* files and
+// secretSources; aliased refs (CONTAINER_VAR:SECRET_KEY) resolve by
+// SECRET_KEY. Every resolvable value is registered even when some refs fail;
+// the returned error reports the manager or the refs that could not be
+// resolved so callers can warn that those values will not be redacted.
+func (e *Engine) registerServiceSecretValues(cfg *config.Config, envName string, services map[string]config.ServiceConfig) error {
 	var mgr *secrets.Manager
+	var missing []string
 	for _, service := range services {
 		if len(service.Secrets) == 0 {
 			continue
@@ -351,14 +358,40 @@ func (e *Engine) registerServiceSecretValues(cfg *config.Config, envName string,
 		if mgr == nil {
 			created, err := secrets.NewManagerForConfig(cfg, envName)
 			if err != nil {
-				return
+				return err
 			}
 			mgr = created
 		}
-		for _, key := range service.Secrets {
-			if value, err := mgr.Get(key); err == nil {
-				e.RegisterSecret(value)
+		for _, ref := range service.Secrets {
+			key := secrets.SecretRefKey(ref)
+			value, err := mgr.Get(key)
+			if err != nil {
+				missing = append(missing, key)
+				continue
 			}
+			e.RegisterSecret(value)
 		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		missing = slices.Compact(missing)
+		return fmt.Errorf("secret(s) not found: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// registerServiceSecretValuesOrWarn registers referenced secret values and,
+// when some cannot be resolved, emits one warning instead of failing:
+// read-only and recovery commands must keep working when a vault provider is
+// unavailable, but the operator must know sourced values are not masked.
+func (e *Engine) registerServiceSecretValuesOrWarn(cfg *config.Config, envName string, services map[string]config.ServiceConfig, phase string) {
+	if err := e.registerServiceSecretValues(cfg, envName, services); err != nil {
+		e.emit(events.Event{
+			Type:    events.TypeWarning,
+			Phase:   phase,
+			Level:   events.LevelWarn,
+			Message: fmt.Sprintf("Warning: could not resolve secrets for %s; values from secretSources/.tako/secrets will not be redacted: %s\n", envName, e.RedactSensitive(err.Error())),
+			Data:    map[string]any{"environment": envName, "reason": "secrets-unresolved", "stream": "stderr"},
+		})
 	}
 }

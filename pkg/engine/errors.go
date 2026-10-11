@@ -79,6 +79,20 @@ type AttentionError struct {
 func (e *AttentionError) Error() string { return e.Err.Error() }
 func (e *AttentionError) Unwrap() error { return e.Err }
 
+// HookFailedError is a local lifecycle hook that blocked an operation: a
+// pre-* hook that exited non-zero, could not start, or timed out. It is an
+// operation that ran and failed by policy (exit code 1); a hook stopped by
+// cancellation wraps the context error and classifies as cancelled.
+type HookFailedError struct {
+	Hook     string
+	ExitCode *int
+	TimedOut bool
+	Err      error
+}
+
+func (e *HookFailedError) Error() string { return e.Err.Error() }
+func (e *HookFailedError) Unwrap() error { return e.Err }
+
 // Classify maps an error to its Class for exit-code selection.
 func Classify(err error) Class {
 	if err == nil {
@@ -111,5 +125,8 @@ func Classify(err error) Class {
 	if errors.As(err, &attention) {
 		return ClassAttention
 	}
+	// Everything else, including HookFailedError, is an operation that ran
+	// and failed. An AttentionError wrapping a failed post hook stays
+	// attention-class because it is matched above.
 	return ClassFailed
 }

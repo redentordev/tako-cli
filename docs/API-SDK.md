@@ -40,7 +40,8 @@ commands in `cmd/` are thin adapters over this package.
   history with redacted output tails), and `TriggerJob(ctx,
   JobTriggerRequest)` (immediate run streaming output events and returning
   the remote exit code). `StreamLogs` on a `kind: job` service returns the
-  latest run's recorded output.
+  latest run's recorded output, or with `Follow` streams the running and
+  every later run from the job's owning node.
 - Public domain reachability is available as `MonitorDomainStatuses(ctx,
   checker, specs, options)`, which probes serving domains (including
   `proxy.domains` extras) and emits progress events; `tako domains status`
@@ -71,8 +72,37 @@ commands in `cmd/` are thin adapters over this package.
   and a per-node `nodes` placement breakdown). The engine does not render the
   human table.
 - Log streaming is available as `StreamLogs(ctx, LogsRequest)`, which emits
-  `log.line` events carrying service/node/raw-line data and returns a
-  `LogsResult` summary when the stream completes.
+  `log.line` events carrying service/node/raw-line data (plus
+  `replica`/`container`/`revision`/`stream`/`time` when the node supplies
+  them) and returns a `LogsResult` summary when the stream completes.
+  `LogsRequest` fields:
+  - `Config`, `Environment`: the loaded config and resolved environment.
+  - `Services`: services and jobs to show (comma-separated entries are
+    split, duplicates removed). Empty selects every long-running service;
+    jobs are shown only when named, and deploy-time `kind: run` services
+    and unknown names are rejected. `Service` is the historical
+    single-service field and is merged into `Services`.
+  - `Server`: restrict to one node (default: every environment node).
+  - `Tail`: historical lines per container, 0–10000 (default 100); with
+    `Grep` it counts matching lines. `TailExplicit` marks `Tail` as chosen
+    by the caller; without it a `Since` window widens the limit to 10000.
+  - `Follow`: keep streaming and attach containers started later.
+  - `Since`, `Until`: a Go duration (relative to each node's clock), an
+    RFC3339 timestamp, or Unix seconds. `Until` cannot be combined with
+    `Follow`.
+  - `Grep`: an RE2 pattern of at most 1024 bytes; `IgnoreCase` makes it
+    case-insensitive.
+  - `Timestamps`: prefix human renderings with each line's timestamp.
+
+  Invalid values return `InvalidRequestError` (exit class 2) before any
+  node is contacted. `LogsResult` adds `services`, `since`, `until`,
+  `grep` (redacted), `ignoreCase`, `timestamps`, and per-node `lines` and
+  `sources`. Its `status` is `success`, `partial` (some nodes failed:
+  `AttentionError`, exit 6), or `failed` (`ConnectivityError` when every
+  failure was connectivity, `CapabilityRequiredError` when every node lacks
+  `logs.stream-v1` for a requested feature, otherwise a plain error). Each
+  failing node also emits a `warning` event as soon as it fails. Nodes are
+  streamed with at most 8 concurrent connections unless `Follow` is set.
 - Deployment history is available as `History(ctx, HistoryRequest)`, the engine
   backing `tako history --output json`. Adapters provide the mesh history source
   and deployment-listing seams shared with rollback; the engine applies the

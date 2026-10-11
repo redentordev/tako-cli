@@ -76,7 +76,7 @@ environments:
 		"web:",
 		"source: image \"nginx:alpine\" (config)",
 		"replicas: 1 (default)",
-		"deploy.strategy: recreate (default)",
+		"deploy.strategy: rolling (default)",
 		"proxy.domain: app.example.com (config)",
 		"proxy.cdn: cloudflare (config)",
 	} {
@@ -96,4 +96,82 @@ func resetConfigExplainGlobals(t *testing.T) {
 		cfgFile = oldCfgFile
 		envFlag = oldEnvFlag
 	})
+}
+
+func TestRunConfigExplainShowsExtendsChainAndProvenance(t *testing.T) {
+	root := switchToTempDir(t)
+	t.Setenv("TAKO_EXPLAIN_SSH_PASSWORD", "super-secret-ssh-password")
+
+	configData := []byte(`x-image: &image nginx:alpine
+project:
+  name: demo
+  version: 1.0.0
+servers:
+  node-a:
+    host: 203.0.113.10
+    user: root
+    password: ${TAKO_EXPLAIN_SSH_PASSWORD}
+  node-b:
+    host: 203.0.113.11
+    user: root
+    password: ${TAKO_EXPLAIN_SSH_PASSWORD}
+environments:
+  base:
+    abstract: true
+    services:
+      web:
+        image: *image
+        port: 80
+      api:
+        image: *image
+        replicas: 4
+  production:
+    extends: base
+    servers: [node-a]
+    services:
+      web:
+        replicas: 2
+        proxy:
+          domain: app.example.com
+  staging:
+    extends: production
+    servers: [node-b]
+    services:
+      api:
+        replicas: 1
+`)
+	if err := os.WriteFile(filepath.Join(root, "tako.yaml"), configData, 0600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	resetConfigExplainGlobals(t)
+	envFlag = "staging"
+
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := runConfigExplain(cmd, nil); err != nil {
+		t.Fatalf("runConfigExplain returned error: %v", err)
+	}
+	output := out.String()
+	for _, want := range []string{
+		"Environment: staging (extends production -> base)\n",
+		"Servers (from staging)\n",
+		"auth: password (env, redacted)",
+		"  api:\n    type: worker\n    source: image \"nginx:alpine\" (config, from base)\n    replicas: 1 (config, from staging)\n",
+		"  web:\n    type: public\n    source: image \"nginx:alpine\" (config, from base)\n    replicas: 2 (config, from production)\n    deploy.strategy: rolling (default)\n",
+		"proxy.domain: app.example.com (config, from production)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output = %q, want %q", output, want)
+		}
+	}
+	if strings.Contains(output, "super-secret-ssh-password") {
+		t.Fatalf("explain leaked the SSH password: %q", output)
+	}
+
+	envFlag = "base"
+	err := runConfigExplain(&cobra.Command{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "environment 'base' is abstract and cannot be deployed; use one of: production, staging") {
+		t.Fatalf("explain -e base err = %v", err)
+	}
 }

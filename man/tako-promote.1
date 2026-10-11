@@ -26,6 +26,10 @@ the warmed revision, prunes stale revisions, and persists the promoted state.
 \fB--revision\fP=""
 	Specific warmed revision to promote (full value or unique prefix)
 
+.PP
+\fB--skip-hooks\fP[=false]
+	Skip local lifecycle hooks (including on-failure) for this invocation
+
 
 .SH OPTIONS INHERITED FROM PARENT COMMANDS
 \fB--config\fP=""
@@ -33,7 +37,7 @@ the warmed revision, prunes stale revisions, and persists the promoted state.
 
 .PP
 \fB-e\fP, \fB--env\fP=""
-	environment to deploy (default: production or only environment)
+	environment to use (default: the only environment, else production, else the first alphabetically)
 
 .PP
 \fB--events\fP=""

@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -39,6 +41,13 @@ type Config struct {
 	// SecretSources are external secret stores read at deploy time for every
 	// environment; see SecretSource.
 	SecretSources []SecretSource `yaml:"secretSources,omitempty" json:"secretSources,omitempty"`
+	// Aliases are project-defined command shortcuts: `tako <alias>` expands
+	// to the listed Tako arguments before command dispatch. Values are
+	// literal (no ${...} expansion); see AliasMap and ValidateAliases.
+	Aliases AliasMap `yaml:"aliases,omitempty" json:"aliases,omitempty"`
+	// Hooks configures local lifecycle hooks run on the operator's machine
+	// around deploy, rollback, promote, and setup; see HooksConfig.
+	Hooks *HooksConfig `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 
 	Servers      map[string]ServerConfig      `yaml:"servers" json:"servers"`
 	Environments map[string]EnvironmentConfig `yaml:"environments" json:"environments"`
@@ -51,6 +60,10 @@ type Config struct {
 	// enrollment is incomplete and no authoritative inventory can be
 	// materialized. Project mutations fail closed while this is non-empty.
 	PlatformArtifacts []string `yaml:"-" json:"-"`
+
+	// resolution records environment inheritance (extends/abstract) and
+	// value provenance when the document used it; nil otherwise.
+	resolution *environmentResolution
 }
 
 // PlatformContext identifies the enrolled cluster that owns the runtime
@@ -178,22 +191,32 @@ type ProjectConfig struct {
 	Version string `yaml:"version" json:"version"`
 }
 
-// DeploymentConfig defines deployment optimization settings
+// DeploymentConfig defines deployment settings.
 type DeploymentConfig struct {
-	Strategy string          `yaml:"strategy,omitempty" json:"strategy,omitempty"` // "parallel" or "sequential" (default: sequential)
+	// Deprecated: deployment.strategy has no effect. Services deploy
+	// sequentially in dependency order. It is kept so existing configs decode
+	// and is reported by ValidationWarnings until DeprecatedKeysRemovalRelease.
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	// Deprecated: deployment.parallel has no effect; see Strategy.
 	Parallel *ParallelConfig `yaml:"parallel,omitempty" json:"parallel,omitempty"`
-	Cache    *CacheConfig    `yaml:"cache,omitempty" json:"cache,omitempty"`
-	Build    *BuildConfig    `yaml:"build,omitempty" json:"build,omitempty"`
+	// Deprecated: deployment.cache has no effect. Build cache is managed by
+	// Docker (tako cleanup --docker-cache, takod --build-cache-keep-storage).
+	Cache *CacheConfig `yaml:"cache,omitempty" json:"cache,omitempty"`
+	Build *BuildConfig `yaml:"build,omitempty" json:"build,omitempty"`
 }
 
-// ParallelConfig defines parallel deployment settings
+// ParallelConfig is the shape of the deprecated deployment.parallel key.
+//
+// Deprecated: no code reads these settings.
 type ParallelConfig struct {
 	MaxConcurrentBuilds  int    `yaml:"maxConcurrentBuilds,omitempty" json:"maxConcurrentBuilds,omitempty"`   // Default: 4
 	MaxConcurrentDeploys int    `yaml:"maxConcurrentDeploys,omitempty" json:"maxConcurrentDeploys,omitempty"` // Default: 4
 	Strategy             string `yaml:"strategy,omitempty" json:"strategy,omitempty"`                         // "dependency-aware" (default), "resource-aware", "round-robin"
 }
 
-// CacheConfig defines build caching settings
+// CacheConfig is the shape of the deprecated deployment.cache key.
+//
+// Deprecated: no code reads these settings.
 type CacheConfig struct {
 	Enabled   bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`     // Enable build caching (default: true)
 	Type      string `yaml:"type,omitempty" json:"type,omitempty"`           // "local" (default), "registry"
@@ -470,10 +493,17 @@ type HealthCheckConfig struct {
 
 // DeployConfig defines deployment strategy
 type DeployConfig struct {
-	Strategy          string                `yaml:"strategy,omitempty" json:"strategy,omitempty"` // recreate, rolling, blue_green
-	MaxUnavailable    int                   `yaml:"maxUnavailable,omitempty" json:"maxUnavailable,omitempty"`
-	MaxSurge          int                   `yaml:"maxSurge,omitempty" json:"maxSurge,omitempty"`
-	RollbackOnFailure bool                  `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"` // recreate, rolling, blue_green
+	// StrategyDefaulted records that validation selected Strategy because the
+	// config omitted it. It is never serialized, so it stays out of the config
+	// hash and the schema; a JSON/YAML round trip degrades it to explicit.
+	StrategyDefaulted bool `yaml:"-" json:"-"`
+	MaxUnavailable    int  `yaml:"maxUnavailable,omitempty" json:"maxUnavailable,omitempty"`
+	MaxSurge          int  `yaml:"maxSurge,omitempty" json:"maxSurge,omitempty"`
+	// RollbackOnFailure is tri-state: nil means the default (true). True keeps
+	// the previous revision serving when a rollout fails; false disables
+	// recreate restore and keeps failed new containers stopped for debugging.
+	RollbackOnFailure *bool                 `yaml:"rollbackOnFailure,omitempty" json:"rollbackOnFailure,omitempty"`
 	Readiness         DeployReadinessConfig `yaml:"readiness,omitempty" json:"readiness,omitempty"`
 	SmokeTest         DeploySmokeTestConfig `yaml:"smokeTest,omitempty" json:"smokeTest,omitempty"`
 	Promotion         string                `yaml:"promotion,omitempty" json:"promotion,omitempty"` // automatic, manual
@@ -542,7 +572,8 @@ type ProxyConfig struct {
 	CDN string `yaml:"cdn,omitempty" json:"cdn,omitempty"`
 
 	// RedirectFrom specifies domains that should redirect to the primary Domain
-	// These domains will get their own TLS certificates and 301 redirect to Domain
+	// These domains will get their own TLS certificates and a 308 permanent redirect
+	// to Domain that preserves the request path and method.
 	// Example: ["www.example.com", "old.example.com"] -> redirects to "example.com"
 	RedirectFrom []string `yaml:"redirectFrom,omitempty" json:"redirectFrom,omitempty"`
 
@@ -745,12 +776,23 @@ type MonitoringConfig struct {
 
 // EnvironmentConfig defines an environment (production, staging, etc.)
 type EnvironmentConfig struct {
-	Servers        []string                 `yaml:"servers" json:"servers"`                                   // List of server names to use
-	ServerSelector *ServerSelector          `yaml:"serverSelector,omitempty" json:"serverSelector,omitempty"` // Label-based server selection
-	Proxy          *EnvironmentProxyConfig  `yaml:"proxy,omitempty" json:"proxy,omitempty"`                   // Environment-level proxy placement
-	Labels         map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`                 // Environment labels for nodes
-	Services       map[string]ServiceConfig `yaml:"services" json:"services"`                                 // Services to deploy in this environment
-	SecretSources  []SecretSource           `yaml:"secretSources,omitempty" json:"secretSources,omitempty"`   // Environment-specific external secret stores
+	// Extends names the environment this one inherits from and Abstract
+	// marks a template-only environment. Both are consumed while the config
+	// document is resolved, so they are always empty on a loaded config and
+	// are never written back out.
+	Extends  string `yaml:"extends,omitempty" json:"extends,omitempty"`
+	Abstract bool   `yaml:"abstract,omitempty" json:"abstract,omitempty"`
+
+	Servers        []string                `yaml:"servers" json:"servers"`                                   // List of server names to use
+	ServerSelector *ServerSelector         `yaml:"serverSelector,omitempty" json:"serverSelector,omitempty"` // Label-based server selection
+	Proxy          *EnvironmentProxyConfig `yaml:"proxy,omitempty" json:"proxy,omitempty"`                   // Environment-level proxy placement
+	// Deprecated: environments.<env>.labels has no effect. Set
+	// servers.<name>.labels and select them with serverSelector.labels or
+	// placement constraints. Reported by ValidationWarnings until
+	// DeprecatedKeysRemovalRelease.
+	Labels        map[string]string        `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Services      map[string]ServiceConfig `yaml:"services" json:"services"`                               // Services to deploy in this environment
+	SecretSources []SecretSource           `yaml:"secretSources,omitempty" json:"secretSources,omitempty"` // Environment-specific external secret stores
 }
 
 // EnvironmentProxyConfig controls where environment-level proxy routes are
@@ -823,27 +865,34 @@ func (s *ServiceConfig) IsWorker() bool {
 	return s.Port == 0
 }
 
-// GetDefaultEnvironment returns the default environment name
-// Returns "production" if it exists, otherwise the first environment
+// GetDefaultEnvironment returns the environment used when none is selected;
+// see ResolveDefaultEnvironment.
 func (c *Config) GetDefaultEnvironment() string {
-	// If only one environment, return it
-	if len(c.Environments) == 1 {
-		for name := range c.Environments {
-			return name
-		}
-	}
+	name, _ := c.ResolveDefaultEnvironment()
+	return name
+}
 
-	// Check if "production" exists
+// ResolveDefaultEnvironment deterministically picks the environment used when
+// none is selected, from the deployable (non-abstract) environments: the only
+// one, else "production", else the first name in ascending order. implicit is
+// true only in that last case, so callers can tell the user to pass -e. It
+// returns "" when no environments are configured.
+func (c *Config) ResolveDefaultEnvironment() (name string, implicit bool) {
+	if c == nil || len(c.Environments) == 0 {
+		return "", false
+	}
+	names := make([]string, 0, len(c.Environments))
+	for envName := range c.Environments {
+		names = append(names, envName)
+	}
+	if len(names) == 1 {
+		return names[0], false
+	}
 	if _, exists := c.Environments["production"]; exists {
-		return "production"
+		return "production", false
 	}
-
-	// Return first environment (alphabetically)
-	for name := range c.Environments {
-		return name
-	}
-
-	return ""
+	sort.Strings(names)
+	return names[0], true
 }
 
 // GetEnvironment retrieves a specific environment configuration
@@ -858,6 +907,12 @@ func (c *Config) GetEnvironment(name string) (*EnvironmentConfig, error) {
 
 	env, exists := c.Environments[name]
 	if !exists {
+		if c.IsAbstractEnvironment(name) {
+			if children := c.resolution.concreteDescendants(name); len(children) > 0 {
+				return nil, fmt.Errorf("environment '%s' is abstract and cannot be deployed; use one of: %s", name, strings.Join(children, ", "))
+			}
+			return nil, fmt.Errorf("environment '%s' is abstract and cannot be deployed; no environment extends it", name)
+		}
 		return nil, fmt.Errorf("environment '%s' not found", name)
 	}
 	return &env, nil
@@ -1246,6 +1301,12 @@ func LoadConfig(configPath string) (*Config, error) {
 	if err := validateRawACMEDNSCredentials(data, isJSON); err != nil {
 		return nil, err
 	}
+	if err := validateRawAliases(data, isJSON); err != nil {
+		return nil, err
+	}
+	if err := validateRawHookCommands(data, isJSON); err != nil {
+		return nil, err
+	}
 
 	// Expand environment variables in the content with trimming
 	// This handles cases where environment variables have trailing spaces
@@ -1254,10 +1315,52 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to expand config environment variables: %w", err)
 	}
 
-	// Parse config into Config struct
+	// Resolve environment inheritance and decode into the Config struct
+	parsed, err := ParseConfigDocument([]byte(expandedData), isJSON)
+	if err != nil {
+		return nil, err
+	}
+	config := *parsed
+
+	normalizeConfigRelativePaths(&config, configDir)
+	if err := materializeDefaultPlatformInventory(&config); err != nil {
+		return nil, fmt.Errorf("materialize platform inventory: %w", err)
+	}
+	// Validate config
+	if err := ValidateConfig(&config); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", config.annotateEnvironmentChain(err))
+	}
+	if err := validateExistingProjectClusterBinding(&config, configPath); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+// ParseConfigDocument strictly decodes a tako.yaml (isJSON false) or
+// tako.json document without validating it. Top-level x- keys are dropped
+// and environments are resolved through extends/abstract first, so every
+// environment in the result is flattened and deployable. A document that
+// uses none of these features is decoded exactly as written. Errors carry
+// the "failed to parse YAML config:"/"failed to parse JSON config:" prefix
+// for decode failures and "invalid config:" for inheritance failures.
+func ParseConfigDocument(data []byte, isJSON bool) (*Config, error) {
+	format := "YAML"
+	if isJSON {
+		format = "JSON"
+	}
+	resolved, resolution, err := resolveConfigDocument(data, isJSON)
+	if err != nil {
+		var decodeErr *configDecodeError
+		if errors.As(err, &decodeErr) {
+			return nil, fmt.Errorf("failed to parse %s config: %w", format, decodeErr.err)
+		}
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
 	var config Config
 	if isJSON {
-		decoder := json.NewDecoder(strings.NewReader(expandedData))
+		decoder := json.NewDecoder(bytes.NewReader(resolved))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&config); err != nil {
 			return nil, fmt.Errorf("failed to parse JSON config: %w", err)
@@ -1270,26 +1373,21 @@ func LoadConfig(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("failed to parse JSON config: %w", err)
 		}
 	} else {
-		// Parse YAML
-		decoder := yaml.NewDecoder(strings.NewReader(expandedData))
+		decoder := yaml.NewDecoder(bytes.NewReader(resolved))
 		decoder.KnownFields(true) // Strict mode - error on unknown fields
 		if err := decoder.Decode(&config); err != nil {
+			if resolution != nil {
+				err = remapYAMLErrorLines(err, resolution.encodedLines)
+			}
 			return nil, fmt.Errorf("failed to parse YAML config: %w", err)
 		}
 	}
-
-	normalizeConfigRelativePaths(&config, configDir)
-	if err := materializeDefaultPlatformInventory(&config); err != nil {
-		return nil, fmt.Errorf("materialize platform inventory: %w", err)
+	for name, env := range config.Environments {
+		if env.Extends != "" || env.Abstract {
+			return nil, fmt.Errorf("invalid config: environment %s: extends/abstract could not be resolved", name)
+		}
 	}
-	// Validate config
-	if err := ValidateConfig(&config); err != nil {
-		return nil, fmt.Errorf("invalid config: %w", err)
-	}
-	if err := validateExistingProjectClusterBinding(&config, configPath); err != nil {
-		return nil, err
-	}
-
+	config.resolution = resolution
 	return &config, nil
 }
 
@@ -1375,43 +1473,6 @@ func SaveConfig(configPath string, cfg *Config) error {
 	}
 
 	return nil
-}
-
-// GetDeploymentStrategy returns the deployment strategy (parallel or sequential)
-func (c *Config) GetDeploymentStrategy() string {
-	if c.Deployment != nil && c.Deployment.Strategy != "" {
-		return c.Deployment.Strategy
-	}
-	return "parallel" // Default to parallel deployment
-}
-
-// IsParallelDeployment returns true if parallel deployment is enabled
-func (c *Config) IsParallelDeployment() bool {
-	return c.GetDeploymentStrategy() == "parallel"
-}
-
-// GetMaxConcurrentBuilds returns the max concurrent builds configuration
-func (c *Config) GetMaxConcurrentBuilds() int {
-	if c.Deployment != nil && c.Deployment.Parallel != nil && c.Deployment.Parallel.MaxConcurrentBuilds > 0 {
-		return c.Deployment.Parallel.MaxConcurrentBuilds
-	}
-	return 4 // Default
-}
-
-// GetMaxConcurrentDeploys returns the max concurrent deploys configuration
-func (c *Config) GetMaxConcurrentDeploys() int {
-	if c.Deployment != nil && c.Deployment.Parallel != nil && c.Deployment.Parallel.MaxConcurrentDeploys > 0 {
-		return c.Deployment.Parallel.MaxConcurrentDeploys
-	}
-	return 4 // Default
-}
-
-// IsCacheEnabled returns true if build caching is enabled
-func (c *Config) IsCacheEnabled() bool {
-	if c.Deployment != nil && c.Deployment.Cache != nil {
-		return c.Deployment.Cache.Enabled
-	}
-	return true // Default to enabled
 }
 
 // IsNFSVolume checks if a volume spec uses the removed nfs: prefix.

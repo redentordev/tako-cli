@@ -9,7 +9,11 @@ servers:
     sshKey: ${SSH_KEY}
 
 environments:
-  preview:
+  # Template shared by every stage. Abstract environments are never deployed
+  # on their own; preview and production extend it and override only what
+  # differs.
+  base:
+    abstract: true
     servers:
       - prod
     services:
@@ -17,10 +21,8 @@ environments:
         build: .
         port: 3000
         proxy:
-          domain: preview-stages.${SERVER_HOST}.sslip.io
           email: ${LETSENCRYPT_EMAIL}
         env:
-          APP_STAGE: preview
           NODE_ENV: production
         healthCheck:
           path: /health
@@ -28,21 +30,20 @@ environments:
           timeout: 5s
           retries: 3
 
-  production:
-    servers:
-      - prod
+  preview:
+    extends: base
     services:
       web:
-        build: .
-        port: 3000
+        proxy:
+          domain: preview-stages.${SERVER_HOST}.sslip.io
+        env:
+          APP_STAGE: preview
+
+  production:
+    extends: base
+    services:
+      web:
         proxy:
           domain: stages.${SERVER_HOST}.sslip.io
-          email: ${LETSENCRYPT_EMAIL}
         env:
           APP_STAGE: production
-          NODE_ENV: production
-        healthCheck:
-          path: /health
-          interval: 30s
-          timeout: 5s
-          retries: 3

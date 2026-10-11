@@ -1,0 +1,30 @@
+schema: spec-driven
+
+context: |
+  Tako is a Go CLI (cobra) plus a node agent (takod) that deploys Docker containers to
+  existing VPS hosts over SSH. It never provisions cloud infrastructure.
+  Compatibility: tako.yaml files that validate today must keep validating unless a change
+  explicitly lists a breaking change with a migration path and a validation error that
+  names the replacement. The CLI and takod negotiate capabilities; new takod behavior must
+  be gated on a capability so a newer CLI talking to an older takod fails closed with a
+  clear upgrade message.
+  Machine interface: commands either honor the full contract (--output json result
+  document, --events ndjson, typed exit codes 0-6) or are registered human-only; new
+  commands must be added to docs/MACHINE-INTERFACE.md and cmd/machine_coverage_test.go.
+  Secrets must never appear in machine output, events, logs, or hook environments unless
+  explicitly requested.
+  Generated artifacts that are tracked and checked in CI: man/ (make man),
+  completions/, schema/tako.schema.json (kept in sync with pkg/config types).
+  Development happens on Windows but CI and production are Linux; some existing tests fail
+  on Windows only (symlinks, directory fsync, POSIX paths) and are not regressions.
+
+rules:
+  proposal:
+    - State what is explicitly out of scope
+    - Call out any breaking change to tako.yaml, CLI flags, or JSON result documents
+  design:
+    - Reference concrete files and functions (path:line) the change touches
+    - Describe the takod capability gate when node-side behavior changes
+  tasks:
+    - Include tasks for tests, docs/CONFIGURATION.md, schema, man pages, and machine-interface coverage where affected
+    - Keep each task small enough to review in one sitting

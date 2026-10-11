@@ -59,10 +59,25 @@ carries the same result document. Combine with `--output json` to also get
 the bare result document appended after the event stream.
 
 `tako logs --events ndjson` emits service log entries as structured
-`log.line` events on stdout. Each event sets `service`, `node`, and
-`data.data` (the raw log line without the trailing newline); `message`
-contains the human rendering, including the node prefix used for multi-node
-text output. `tako access --events ndjson` mirrors this with `access.line`
+`log.line` events on stdout. Each event sets `service`, `node`,
+`data.service`, `data.node`, and `data.data` (the raw log line without the
+trailing newline). When the node agent knows them, events also carry
+`data.replica` (the `tako.slot` replica number, or `run` for job runs),
+`data.container`, `data.revision`, `data.stream` (`stdout` or `stderr`, the
+container stream the line was written to), and `data.time` (the Docker
+timestamp, RFC3339Nano); legacy agents omit these keys. `message` contains
+the human rendering: a `service.slot@node` source prefix padded to a common
+width when more than one source is shown, preceded by the timestamp with
+`--timestamps`. `message` never contains ANSI color escapes (terminal colors
+are applied only by the human renderer). With `-f`, a node agent that
+advertises `logs.stream-v1` attaches containers started after the stream
+began (rolling deploys, restarts, job runs). Stream lifecycle notices are
+`phase.started` events (phase `logs`) distinguished by `data.event`:
+`source.attached`/`source.detached` (debug level; `data.service`,
+`data.replica`, `data.container`), `run.started`/`run.finished` for
+followed job runs (`data.job`, `data.container`, and `data.exitCode` when
+known), and `run.waiting` when a followed job has no run in progress. A node that fails mid-stream emits a `warning` event immediately
+with `data.node` and `data.error`. `tako access --events ndjson` mirrors this with `access.line`
 events carrying the raw proxy access-log entry in `data.data`, the source
 node in `data.node`, and the formatted rendering in `message`.
 
@@ -89,6 +104,23 @@ Events follow `pkg/takoapi/events.Event` (apiVersion
 - `seq` is monotonic per process. `message` is the human rendering (may
   contain newlines); parse `type`, `phase`, `level`, `service`, and `data`
   instead of `message`.
+- A failed service rollout emits `deploy.service.failed`, then, when a
+  restore applies, `deploy.service.restore.started` followed by
+  `deploy.service.restored` or `deploy.service.restore_failed`. Their `data`
+  carries the recovery `status`, `mode`, `revision`, `failedRevision` and
+  `nodes` (see Result documents). Recoveries with status `disabled` or
+  `unsupported` emit no restore events. When a node lacks
+  `deploy.restore-on-failure-v1` and `rollbackOnFailure` is not set, one
+  `warning` event per service names the nodes (`data.nodes`) and the
+  capability (`data.capability`).
+- `tako rollback` stamps every event it emits with `data.operation:
+  "rollback"` and, once the target is selected, `data.targetDeploymentId`.
+  Project rollback reuses the deploy service events (`deploy.service.started`,
+  `deploy.service.reconciled`, `deploy.service.failed`, and the restore
+  events) and emits `deploy.service.skipped` (`data.reason`: `kind: run`,
+  `kind: job`, `persistent`, or `not present at target`) for each service
+  it leaves alone. Including a persistent service with
+  `--include-persistent` emits a `warning` event.
 - Consumers MUST ignore unknown event types, fields, and `data` keys —
   the schema grows additively.
 - `level` is one of `debug`, `info`, `warn`, `error`. Debug events are
@@ -101,8 +133,180 @@ Mutation commands return versioned result documents (for example
 `DeployResult`, kind `DeployResult`, apiVersion
 `tako.redentor.dev/v1alpha1`) containing: project, environment, `status`
 (`success`, `warmed`, `failed`, ...), revision, per-service outcomes
-(`deployed`, `warmed`, `removed`, `up_to_date`, `failed`), URLs, timings,
-`planHash`, and `error` when failed. `tako ps --output json` returns a
+(`deployed`, `warmed`, `removed`, `up_to_date`, `failed`, `restored`, `ran`),
+URLs, timings, `planHash`, and `error` when failed. Long-running service
+outcomes carry `strategy` (`recreate`, `rolling`, `blue_green`). When a
+service's rollout fails, its outcome carries a `recovery` object:
+
+```json
+{
+  "name": "web",
+  "action": "restored",
+  "strategy": "recreate",
+  "error": "...",
+  "recovery": {
+    "status": "restored",
+    "mode": "restore",
+    "revision": "rev-previous",
+    "failedRevision": "rev-new",
+    "nodes": [{ "server": "node-a", "status": "restored" }]
+  }
+}
+```
+
+- `recovery.status` is `restored` (the previous revision serves again, or
+  was never taken out of service), `failed` (restoring failed on at least one
+  node; containers are left in place and the node `error` says why),
+  `disabled` (`deploy.rollbackOnFailure: false`; failed containers are kept
+  stopped and listed in the node's `containers`), or `unsupported` (a node
+  lacks the `deploy.restore-on-failure-v1` takod capability, so legacy
+  remove-then-start replacement ran).
+- `recovery.mode` is `restore` (recreate containers were retained and
+  restarted), `not-cut-over` (rolling or blue/green: traffic never moved),
+  `not-started` (preflight, build or release failed before any container
+  changed), `retain-failed`, or `legacy`.
+- `recovery.revision` is the revision serving after recovery;
+  `failedRevision` is the one whose rollout failed. Node `status` values are
+  `restored`, `unchanged`, `not-cut-over`, `kept-failed`, `failed`, or
+  `unknown`.
+- The action is `restored` only when `recovery.status` is `restored`. The
+  `DeployResult` `status` stays `failed` and the process exits 1 in every
+  case: restore is per service, so services deployed earlier in the same run
+  keep their new revision and services after the failed one are not deployed.
+- Recovery data holds revision IDs, node names, container names and error
+  text only. The failed deployment's history record stores the same object
+  as `services.<name>.recovery` along with `deployStrategy`.
+
+`DeployResult` also carries `deploymentId` once the deployment history entry
+is recorded (omitted for plan-only runs and for failures before recording).
+
+### Rollback
+
+`tako rollback` has two scopes, reported in `RollbackResult.scope`:
+
+- `service` (`tako rollback --service NAME [ID]`): unchanged contract. The
+  result carries `service`, the target `deploymentId`, the restored
+  `version`, `status`, timings, and `error` on failure. It never prompts.
+- `project` (`tako rollback [ID]`): rolls every eligible service of the
+  environment back to its state at the target deployment. `service` is
+  omitted; `services` lists one outcome per service.
+
+The positional target resolves, in order, as an exact deployment ID, a unique
+deployment-ID prefix (so the short `displayId` printed by `tako history`
+works), or a git commit (7+ characters; the newest stable deployment with that
+commit). Without a target, project scope uses the newest stable deployment
+before the current one. Unknown, ambiguous, or non-stable targets exit 2.
+
+Project rollback first emits a `RollbackPlan` (with `--plan-only`, in a
+`ConfirmationRequired` document, or implicitly before apply):
+
+```json
+{
+  "apiVersion": "tako.redentor.dev/v1alpha1",
+  "kind": "RollbackPlan",
+  "project": "shop",
+  "environment": "production",
+  "servers": ["node-1", "node-2"],
+  "target": {
+    "id": "1767225600123456789",
+    "displayId": "1767225600",
+    "timestamp": "2026-07-01T12:00:00Z",
+    "commit": "ab12cd34ef",
+    "version": "v42",
+    "message": "release 42"
+  },
+  "services": [
+    { "name": "api", "action": "rolled_back", "fromImage": "shop/api:new",
+      "toImage": "shop/api:old", "replicas": 2,
+      "sourceDeploymentId": "1767225600123456789", "imageSource": "retained" },
+    { "name": "migrate", "action": "skipped", "reason": "kind: run" },
+    { "name": "postgres", "action": "skipped", "reason": "persistent" }
+  ],
+  "warnings": ["..."],
+  "releaseCommands": "skip",
+  "hash": "9b2e…"
+}
+```
+
+- `services[].action` is `rolled_back` (planned or applied), `unchanged`
+  (already at the target image, replicas and file hashes), `skipped`, and,
+  in results only, `failed` or `not_attempted`.
+- `imageSource` is `retained` (the exact image is still on the nodes and is
+  reused without a build), `rebuild` (the target commit is rebuilt from git),
+  or `pull` (registry image). Planning fails with `status: failed`, every
+  candidate `not_attempted`, and exit 1 when a service has no usable image
+  source; no runtime state is changed. Locating retained images requires the
+  `image.descriptor-v1` takod capability; older agents exit 2 with an upgrade
+  hint.
+- `reason` explains skips: `kind: run`, `kind: job` (jobs are never rolled
+  back; a `warnings` entry says so), `persistent` (excluded unless
+  `--include-persistent`; including them adds a warning about data
+  compatibility), or `not present at target`.
+- `releaseCommands` is `skip` by default; `--run-release` sets it to `run`.
+- `hash` (hex SHA-256) covers the environment, target ID, per-service
+  actions, target images, replicas, image sources and source deployments,
+  `releaseCommands` and `includePersistent`. Human text, `fromImage`,
+  warnings and timestamps are excluded.
+
+The project `RollbackResult` repeats the plan's `services` with final actions
+and adds `error` for failed services. A service whose rollout failed and was
+restored by restore-on-failure carries the same `recovery` object as
+`DeployResult.services.<name>.recovery`. `status` is:
+
+| `status` | Meaning | Exit |
+|----------|---------|------|
+| `rolled_back` | Every planned service was rolled back. | 0 |
+| `up_to_date` | Every service already matched the target; nothing was mutated and no history entry was written. | 0 |
+| `failed` | Planning found no image source, or a service failed. Rollout stops at the first failure, later services are `not_attempted`, and proxy routes, takod state and history are still reconciled for services that already changed. | 1 |
+
+The single-service form keeps its existing `status` values.
+
+### Lifecycle hooks
+
+`deploy`, `rollback`, `promote`, and `setup` run local hooks
+([HOOKS.md](./HOOKS.md)). Hook processes never write to process stdout; each
+output line becomes an event, so `--output json` stdout stays a single
+document (hook lines go to stderr) and `--events ndjson` stdout stays pure
+NDJSON. Hook events use phase `hooks`:
+
+| Type | Level | `data` |
+|------|-------|--------|
+| `hook.started` | `info` | `hook`, `source` (`file`\|`config`), `path` or `argv`, `timeoutSeconds`, `interpreter` (when used) |
+| `hook.output` | `info`, or `debug` with `hooks.output: quiet` | `hook`, `stream` (`stdout`\|`stderr`), `data` (one redacted line) |
+| `hook.completed` | `info` | `hook`, `exitCode`, `durationMs` |
+| `hook.failed` | `error` | `hook`, `exitCode` (`-1` when the process did not exit normally), `durationMs`, `error`, `timedOut`, optional `hint` |
+| `hook.skipped` | `info` | `hook`, `reason` (`--skip-hooks`) |
+
+Hook-like files with unknown names emit a `warning` event in phase `hooks`
+(`data.file`), and a failing `on-failure` hook emits a `warning`. All hook
+events precede the terminal `result` event. Projects without hooks emit no
+hook events.
+
+`DeployResult`, `RollbackResult`, `PromoteResult`, and `SetupResult` gain an
+optional `hooks` array, one entry per hook considered, in run order:
+
+```json
+"hooks": [
+  { "name": "pre-deploy", "status": "completed", "exitCode": 0, "durationMs": 812 },
+  { "name": "post-deploy", "status": "failed", "exitCode": 1, "durationMs": 95 }
+]
+```
+
+`status` is `completed`, `failed`, `timed_out`, or `skipped`; `exitCode` and
+`durationMs` are present when the hook ran. The array is omitted when no hook
+was considered, so results of projects without hooks are unchanged.
+
+- A failing `pre-*` hook aborts before any mutation: the command emits its
+  result document with `status: failed` and an `error` naming the hook and
+  its exit status, and exits 1 (5 when interrupted). `RollbackResult` and
+  `PromoteResult` carry the same `error` field.
+- A failing `post-*` hook keeps the operation's `status` (for example
+  `success`), marks the hook `failed`, and exits 6.
+- `tako validate` resolves hooks without running them: resolution errors are
+  `error` findings with field `hooks.<name>` (exit 2), misspelled hook files
+  are `warn` findings, and no `hook.*` event is emitted.
+
+`tako ps --output json` returns a
 `StatusResult` document with project/environment, selected server(s), optional
 service filter, and service rows (`name`, `running`, `desired`, `status`,
 `ports`, `revision`, `warming`, `internal`, `image`, `strategy`, `health`,
@@ -112,8 +316,17 @@ empty when no container defines a health check or the node agent predates
 health capture. `nodes` breaks placement down per selected node (`name`,
 `running`, `warming`, `health`); nodes not running the service are omitted,
 and job/run rows carry no breakdown. `tako logs` returns a
-`LogsResult` document with project, environment, service, tail/follow options,
-per-node stream outcomes, timings, and `error` when any node stream failed.
+`LogsResult` document with project, environment, `services` (the resolved
+selection; `service` is still set when exactly one is selected), `tail`,
+`follow`, `since`, `until`, `grep` (redacted), `ignoreCase`, `timestamps`,
+per-node stream outcomes (`name`, `host`, `status`, `error`, `lines`,
+`sources`), timings, `status` (`success`, `partial`, or `failed`), and
+`error` when any node stream failed. `partial` means at least one node
+streamed while another failed; it exits 6. When every node fails the exit
+code is 4 if all failures were connectivity failures, 2 if every node lacks
+the `logs.stream-v1` capability a requested feature needs (run `tako upgrade
+servers`), and 1 otherwise. A run that finds no matching container on any
+node fails with exit 1.
 `tako access` returns an `AccessResult` document with the same shape (project,
 environment, optional service filter, tail/follow options, per-node stream
 outcomes, timings, `error`); the log entries themselves stream as
@@ -150,8 +363,7 @@ project/environment, requested server filter, reachable node count, selected
 history/desired/actual/node-actual sources, per-node and aggregate write
 counts, warning/error details, local `.tako` sync status/count, and final
 `error` when repair is incomplete or fails. `tako rollback` returns a
-`RollbackResult` with project/environment, the service, the target
-`deploymentId`, restored `version`, `status`, and timings. `tako promote`
+`RollbackResult` (see [Rollback](#rollback) below). `tako promote`
 returns a `PromoteResult` with project/environment, the service, the promoted
 `revision` and `image`, `status`, and timings. `tako scale` (and its `start`/
 `stop` wrappers) returns a `ScaleResult` with project/environment, `status`,
@@ -172,7 +384,15 @@ returns a `ValidateResult` with the resolved `configPath`,
 project/environment, `valid`, `findings` (`severity`, `path`, `field`,
 `message`) for errors and non-fatal validation warnings, and the resolved environment summary (runtime,
 state backend, consistency, mesh, server/service counts) when valid;
-invalid configs exit with code 2 and still emit the document. `tako doctor
+invalid configs exit with code 2 and still emit the document. Deprecated
+config keys appear as `warn` findings with `field` set to the key path
+(for example `deployment.cache`) and do not change the exit code. `tako aliases
+--output json` returns an `AliasList` with the resolved `configPath` and
+`aliases` sorted by name (`name`, `args` after string splitting, `form`
+`list|string`, `target`, `shadowed`, optional `shadowedBy`; an empty array
+when none are defined) plus `findings` in the validate finding shape
+(shadowed aliases are warnings; unknown or forbidden targets are errors that
+exit 2 and still emit the document). A missing config exits 2. `tako doctor
 --output json` returns a `DoctorResult` with project/environment,
 `skipRemote`, overall `status` (`ok` or `attention`), pass/warn/fail
 counts, and `checks` (`name`, `status` `pass|warn|fail|skip`, `detail`,
@@ -271,9 +491,17 @@ deploy access, and the takod runtime and reports the untouched steps as
 `packages`, `docker`, `wireguard`, `firewall`, `hardening`,
 `auto-recovery`, `deploy-user`, `monitor-agent`, `takod-install`,
 `takod-service`), the detected `os`, installed `dockerVersion` and
-`takodVersion`, the applied `firewallPorts`, and the node's recorded SSH
-`hostKey` (`type`, base64 `key`, SHA256 `fingerprint`) so callers can pin
-it for `--host-key-mode strict`; with `--events ndjson` each step also
+`takodVersion`, the applied `firewallPorts`, a `firewall` report, and the
+node's recorded SSH `hostKey` (`type`, base64 `key`, SHA256 `fingerprint`)
+so callers can pin it for `--host-key-mode strict`. `firewall` carries
+`backend` (`ufw` or `none`), `status` (`configured` or `skipped`), the skip
+`reason`, `sshPorts` (the SSH port set: 22, the configured `port`, and the
+live session's server-side port, as `<port>/tcp`), `staleSshPorts` (Tako SSH
+allowances no longer in that set, reported and never removed), and
+`nativeFirewall` (for example `firewalld` when it is active and Tako left it
+untouched). `firewallPorts` lists only ports actually applied to UFW and is
+omitted when the firewall step was skipped; it includes every SSH port in
+the set. With `--events ndjson` each step also
 emits `setup.step.started/.completed/.failed/.skipped` events carrying
 `data.step`. Setup aborts on the first failing node and the document lists
 the nodes attempted. `tako upgrade servers` returns an
@@ -317,7 +545,9 @@ like exec — machine modes exit 0 whenever the run completed while text mode
 mirrors the job's exit code. Job services appear in the `StatusResult` with
 `kind: "job"`, their `schedule`, the last run's status (`lastRun`), and
 `nextRun` instead of replica counts; `tako logs JOB` returns the recorded
-output of the latest run (no `--follow`). Deploys reconcile job schedules
+output of the latest run (filtered by `--grep`/`--tail`, selected by
+`--since`/`--until`), and `tako logs JOB -f` streams the run in progress and
+every later run on the job's owning node. Deploys reconcile job schedules
 declaratively and emit `deploy.jobs.applied` events per node. `tako proxy
 hash-password` returns a `ProxyHashPasswordResult` with the bcrypt `cost` and
 `hash` for `proxy.basicAuth.passwordBcrypt`; the plaintext password is read
@@ -333,6 +563,14 @@ instead of silently falling back to daemon logging defaults. The private
 reconcile request carries the normalized `driver`, `maxSize`, and `maxFiles`
 values. These fields and capability names are additive, but clients must not
 send a configured feature to an agent that lacks its capability.
+
+`tako logs` probes each node for `logs.stream-v1`, which serves the framed
+`POST /v1/logs/stream` endpoint (NDJSON frames of type `line`, `source`,
+`run`, `ready`, then a terminal `end` or `error`). A node without it falls
+back to the legacy `GET /v1/logs` stream for a plain single-service request
+(no `--since`, `--until`, `--grep`, `--timestamps`, multiple services, or
+job follow); a request that needs any of those fails for that node with a
+capability error naming `tako upgrade servers`.
 
 ### Terminal stream contract (ptystream)
 
@@ -380,8 +618,8 @@ machine behavior:
 
 | Category | Commands |
 | -------- | -------- |
-| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
-| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
+| Full contract (result document + NDJSON events + typed exit codes) | `deploy`, `run`, `ps`, `logs`, `access`, `aliases`, `history`, `project attach`, `config export`, `config pull`, `state pull\|lease\|lease release\|status\|forget-node\|repair`, `rollback`, `promote`, `scale`, `start`, `stop`, `placement plan cordon\|drain\|rebalance`, `placement verify\|apply`, `platform inspect`, `remove`, `destroy`, `validate`, `doctor`, `drift`, `metrics`, `stats`, `secrets list`, `secrets validate`, `certs push\|ls\|rm`, `domains status`, `domains hosts`, `discovery exports`, `maintenance`, `live`, `cleanup`, `backup`, `backup verify-postgres`, `setup`, `clone-setup`, `upgrade servers`, `exec`, `jobs`, `jobs runs`, `jobs trigger`, `proxy hash-password` |
+| Event streams (`--events ndjson`) | `logs` (`log.line`), `access` (`access.line`), `stats --follow` (`stats.sample`), `setup` (`setup.step.*`), `exec` (`exec.*`), `deploy` release steps (`deploy.release.*`), project `rollback` (`deploy.service.*`, including `deploy.service.skipped`), lifecycle hooks in `deploy\|rollback\|promote\|setup` (`hook.*`), DNS-01 issuance (`cert.issue.started\|completed\|failed\|skipped`), node renewal (`cert.renew.completed\|failed` in the state-event log), `jobs trigger` (`jobs.trigger.*`), `deploy` job schedules (`deploy.jobs.applied`), `certs push\|ls\|rm` (`certificate.operation`) |
 | Machine-native output format | `prometheus` (Prometheus exposition format on stdout) |
 | Human-only by design | `init`, `backup recover`, `platform init`, `platform backup create\|verify\|restore`, `platform controller promotion verify`, `platform join-token create`, `platform node list\|enroll\|ready\|schedulable\|cordon\|drain\|remove`, `config explain`, `monitor`, `env`, `secrets init\|set\|delete\|fetch\|import\|providers` (local mutations; `fetch`/`import` print redacted command-local JSON), `upgrade` (CLI self-update; `upgrade servers` keeps the full contract) |
 | Infrastructure-only | `takod run`, hidden `platform worker run\|prepare-enrollment\|verify-enrollment\|reconcile-mesh`, hidden `platform node upgrade-publication-guard`, and hidden internal E2E helpers |
@@ -391,6 +629,16 @@ typed invalid-request error (exit code 2) instead of printing human text to
 a stdout the caller expected to parse. The categorization is test-enforced:
 `cmd/machine_coverage_test.go` walks the registered command tree and fails
 when a runnable command is missing from this table or listed twice.
+
+Project command aliases (`aliases:` in tako.yaml, see
+docs/CONFIGURATION.md) are not commands of their own: `tako <alias>` is
+rewritten to the expanded Tako command line before dispatch, so an invoked
+alias inherits the target command's category, flags, result document, events,
+and exit codes. Expansion adds nothing to stdout and emits no extra NDJSON
+event; `-v` prints the expansion to stderr only. Alias resolution errors
+(invalid aliases, an unknown or forbidden target, an `-e` that conflicts with
+an alias's pinned environment) exit 2 before the target runs and emit no
+result document.
 
 `platform inspect` emits a `PlatformEnrollmentInspection` result with status
 `not-enrolled`, `enrolled`, or `incomplete`. The first two statuses exit 0.
@@ -444,7 +692,14 @@ flow mirrors the interactive confirmation:
    servers, services, typed changes with reasons, redacted `sharedBuilds`
    artifact identities (`key`, resolved `image`, and `consumers`),
    `destructive`, `empty`, the human plan text, and a content hash (via
-   `planHash` on results).
+   `planHash` on results). Changes to long-running services carry
+   `strategy` and `strategySource` (`explicit` when tako.yaml sets
+   `deploy.strategy`, `default` when Tako selected it); runs, jobs and
+   removals omit both. Both fields are part of the plan hash, so plans saved
+   by an older CLI no longer match and must be recomputed. The first deploy
+   after the rolling default shipped lists services that ran with the old
+   recreate default with the reason "Deploy strategy default changed:
+   recreate → rolling".
    `tako run ... --plan-only` behaves the same.
 2. **Review**: present `changes`/`humanText` to the approver; persist the
    plan document.
@@ -463,6 +718,27 @@ without `--yes` (or `--force`) they emit a `ConfirmationRequired` document
 carrying `operation` (`remove` or `destroy`), `project`, `environment`, and
 the target `servers`, and exit with code 2.
 
+Project-wide `tako rollback` follows the same plan/approve/apply flow:
+
+1. `tako rollback [ID] --plan-only --output json` prints the `RollbackPlan`
+   and mutates nothing.
+2. `tako rollback [ID] --yes --plan plan.json` recomputes the plan while the
+   lock and leases are held and applies only when its `hash` matches the
+   reviewed plan. Drift, an unreadable file, or a document whose `kind` is not
+   `RollbackPlan` (for example a saved `DeployPlan`) exits 2 with nothing
+   mutated; re-run `--plan-only` and review again. `--plan` is not an
+   approval on its own: `--yes` (or an interactive `[y/N]` prompt) is still
+   required.
+3. Without `--yes`, machine modes emit a `ConfirmationRequired` document with
+   `operation: "rollback"`, project, environment, servers and the full `plan`,
+   and exit 2. A human-mode run that cannot prompt (`TAKO_NONINTERACTIVE`,
+   `CI`, or no TTY) also exits 2, as `tako remove` does. Declining the prompt
+   exits 0 with nothing changed.
+
+`--plan-only`, `--plan`, `--yes`, `--include-persistent` and `--run-release`
+apply to project scope only; combining any of them with `--service` exits 2.
+Single-service rollback never prompts.
+
 ## Exit Codes
 
 | Code | Meaning |
@@ -473,16 +749,39 @@ the target `servers`, and exit with code 2.
 | 3 | Another operation holds the local state lock or a remote lease. Retry later; see `tako state lease`. |
 | 4 | SSH/node connectivity failure. |
 | 5 | Cancelled (signal/timeout). |
-| 6 | Partial success needing operator attention (for example strict domain checks still pending). |
+| 6 | Partial success needing operator attention (for example strict domain checks still pending, or `tako logs` streaming from some nodes while others failed). |
 
 The mapping is derived from typed engine error classes
 (`pkg/engine.Classify`); errors that predate the taxonomy report 1.
+
+Lifecycle hooks map onto the same codes: a failing `pre-*` hook exits 1, an
+unresolvable hook (not executable, ambiguous, missing interpreter) exits 2,
+an interrupted hook exits 5, and a failing `post-*` hook after a successful
+operation exits 6. A failing `on-failure` hook never changes the code. See
+[Lifecycle hooks](#lifecycle-hooks).
+
+Project-wide rollback: an unknown, ambiguous, or non-stable target, a service
+whose target state was pruned from history, plan drift, a missing takod
+capability, and confirmation required without `--yes` exit 2; no usable image
+source, an apply failure, or a partial rollback exits 1; a held lock or lease
+exits 3. A `post-rollback` hook failure after a successful rollback exits 6.
+See [Rollback](#rollback).
 
 ## Redaction Guarantees
 
 - Service environment values and SSH passwords are registered with a
   redactor before any event is emitted; event messages and string data
   values pass through it.
+- Secret values referenced by a service's `secrets:` list are registered
+  too, whether they come from `.tako/secrets*` files or from
+  `secretSources` providers, and including aliased references
+  (`API_KEY:STRIPE_KEY` registers the value of `STRIPE_KEY`). `logs`
+  registers them for the selected services and jobs; `deploy`, `exec`,
+  `jobs`, `rollback`, `promote`, and `scale` register them before emitting
+  output. If secrets cannot be resolved (provider CLI missing or failing,
+  missing keys) `logs`, `rollback`, `promote`, and `scale` emit one
+  `warning` event with `data.reason: "secrets-unresolved"` stating that
+  those values will not be redacted, and continue.
 - Registry passwords from the top-level `registries:` block are registered
   with the same redactor. Config validation rejects literal registry
   passwords before environment expansion — they must be `${ENV_VAR}`

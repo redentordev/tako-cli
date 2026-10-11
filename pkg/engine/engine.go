@@ -26,6 +26,8 @@ type Engine struct {
 	stateAutoSync StateAutoSyncFunc
 	buildOutput   io.Writer
 	buildWriter   *redactingWriter
+	// logsHooks substitutes node access for StreamLogs in tests.
+	logsHooks *logsHooks
 }
 
 type redactingWriter struct {

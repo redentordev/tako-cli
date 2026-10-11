@@ -169,6 +169,7 @@ func TestRollbackResultDocumentGolden(t *testing.T) {
 		Kind:         engine.KindRollbackResult,
 		Project:      "demo",
 		Environment:  "production",
+		Scope:        engine.RollbackScopeService,
 		Service:      "web",
 		DeploymentID: "deploy-123",
 		Version:      "abc123",
@@ -186,6 +187,7 @@ func TestRollbackResultDocumentGolden(t *testing.T) {
   "kind": "RollbackResult",
   "project": "demo",
   "environment": "production",
+  "scope": "service",
   "service": "web",
   "deploymentId": "deploy-123",
   "version": "abc123",
@@ -196,6 +198,84 @@ func TestRollbackResultDocumentGolden(t *testing.T) {
 }`
 	if string(payload) != want {
 		t.Fatalf("rollback result document drifted:\n%s", payload)
+	}
+}
+
+// TestProjectRollbackDocumentsGolden pins the project RollbackPlan and
+// RollbackResult schemas.
+func TestProjectRollbackDocumentsGolden(t *testing.T) {
+	plan := engine.RollbackPlan{
+		APIVersion:  takoapi.APIVersionCurrent,
+		Kind:        engine.KindRollbackPlan,
+		Project:     "demo",
+		Environment: "production",
+		Servers:     []string{"node-a"},
+		Target:      engine.RollbackPlanTarget{ID: "1767225600000_1", DisplayID: "1767225600", Timestamp: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Commit: "abc1234", Version: "1.0.0", Message: "Fix login"},
+		Services: []engine.RollbackServiceOutcome{
+			{Name: "api", Action: engine.RollbackActionRolledBack, FromImage: "api:2", ToImage: "api:1", Replicas: 2, SourceDeploymentID: "1767225600000_1", ImageSource: engine.RollbackImageRetained},
+			{Name: "nightly", Action: engine.RollbackActionSkipped, Reason: engine.RollbackReasonKindJob},
+		},
+		Warnings:        []string{"job nightly is not rolled back and keeps running the newer image and schedule"},
+		ReleaseCommands: engine.RollbackReleaseSkip,
+		Hash:            "h",
+	}
+	payload, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPlan := `{"apiVersion":"tako.redentor.dev/v1alpha1","kind":"RollbackPlan","project":"demo","environment":"production","servers":["node-a"],"target":{"id":"1767225600000_1","displayId":"1767225600","timestamp":"2026-01-01T00:00:00Z","commit":"abc1234","version":"1.0.0","message":"Fix login"},"services":[{"name":"api","action":"rolled_back","fromImage":"api:2","toImage":"api:1","replicas":2,"sourceDeploymentId":"1767225600000_1","imageSource":"retained"},{"name":"nightly","action":"skipped","reason":"kind: job"}],"warnings":["job nightly is not rolled back and keeps running the newer image and schedule"],"releaseCommands":"skip","hash":"h"}`
+	if string(payload) != wantPlan {
+		t.Fatalf("rollback plan document drifted:\n%s", payload)
+	}
+
+	result := engine.RollbackResult{
+		APIVersion:   takoapi.APIVersionCurrent,
+		Kind:         engine.KindRollbackResult,
+		Project:      "demo",
+		Environment:  "production",
+		Scope:        engine.RollbackScopeProject,
+		DeploymentID: "1767225600000_1",
+		Services: []engine.RollbackServiceOutcome{
+			{Name: "api", Action: engine.RollbackActionRolledBack, ToImage: "api:1", Replicas: 2, ImageSource: engine.RollbackImageRetained},
+			{Name: "web", Action: engine.RollbackActionFailed, ToImage: "web:1", Error: "health check failed", Recovery: &engine.RecoveryOutcome{Status: "restored", Mode: "restore"}},
+			{Name: "worker", Action: engine.RollbackActionNotAttempted, ToImage: "worker:1"},
+		},
+		Status:    takoapi.StatusFailed,
+		StartedAt: time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC),
+		Duration:  9,
+		Error:     "rollback of web failed: health check failed",
+	}
+	payload, err = json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantResult := `{"apiVersion":"tako.redentor.dev/v1alpha1","kind":"RollbackResult","project":"demo","environment":"production","scope":"project","deploymentId":"1767225600000_1","services":[{"name":"api","action":"rolled_back","toImage":"api:1","replicas":2,"imageSource":"retained"},{"name":"web","action":"failed","toImage":"web:1","error":"health check failed","recovery":{"status":"restored","mode":"restore"}},{"name":"worker","action":"not_attempted","toImage":"worker:1"}],"status":"failed","startedAt":"2026-07-06T12:00:00Z","durationSeconds":9,"error":"rollback of web failed: health check failed"}`
+	if string(payload) != wantResult {
+		t.Fatalf("project rollback result document drifted:\n%s", payload)
+	}
+}
+
+func TestRollbackConfirmationRequiredDocumentCarriesPlan(t *testing.T) {
+	document := newOperationConfirmationRequiredDocument("rollback replaces the running version of 1 service(s)", "rollback", "demo", "production", []string{"node-a"})
+	document.Plan = engine.RollbackPlan{Kind: engine.KindRollbackPlan, Hash: "h"}
+	payload, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["kind"] != "ConfirmationRequired" || decoded["operation"] != "rollback" {
+		t.Fatalf("document = %s", payload)
+	}
+	if plan, ok := decoded["plan"].(map[string]any); !ok || plan["kind"] != engine.KindRollbackPlan {
+		t.Fatalf("plan missing: %s", payload)
+	}
+	// Remove and destroy documents keep omitting the plan.
+	payload, _ = json.Marshal(newOperationConfirmationRequiredDocument("r", "remove", "demo", "production", nil))
+	if strings.Contains(string(payload), `"plan"`) {
+		t.Fatalf("remove confirmation gained a plan field: %s", payload)
 	}
 }
 
@@ -1124,7 +1204,13 @@ func TestSetupResultDocumentGolden(t *testing.T) {
 				DockerVersion: "27.0.3",
 				TakodVersion:  "1.2.3",
 				SetupVersion:  "3",
-				FirewallPorts: []string{"22/tcp", "80/tcp", "443/tcp", "443/udp", "51820/udp"},
+				FirewallPorts: []string{"22/tcp", "2222/tcp", "80/tcp", "443/tcp", "443/udp", "51820/udp"},
+				Firewall: &engine.SetupFirewall{
+					Backend:       engine.SetupFirewallBackendUFW,
+					Status:        engine.SetupFirewallConfigured,
+					SSHPorts:      []string{"22/tcp", "2222/tcp"},
+					StaleSSHPorts: []string{"2200/tcp"},
+				},
 				HostKey: &engine.SetupHostKey{
 					Type:        "ssh-ed25519",
 					Key:         "AAAAC3NzaC1lZDI1NTE5AAAAIP//////////////////////////////////////////",
@@ -1139,14 +1225,22 @@ func TestSetupResultDocumentGolden(t *testing.T) {
 				Server: "node-b",
 				Host:   "10.0.0.2",
 				Mode:   engine.SetupModeConverge,
+				Firewall: &engine.SetupFirewall{
+					Backend:        engine.SetupFirewallBackendNone,
+					Status:         engine.SetupFirewallSkipped,
+					Reason:         "UFW is not available on Rocky Linux 9.4",
+					SSHPorts:       []string{"22/tcp"},
+					NativeFirewall: "firewalld",
+				},
 				Steps: []engine.SetupStepOutcome{
 					{Step: engine.SetupStepOSCheck, Title: "Checking system requirements", Status: engine.SetupStepSkipped},
-					{Step: engine.SetupStepFirewall, Title: "Configuring firewall (UFW)", Status: engine.SetupStepFailed, Error: "ufw not available"},
+					{Step: engine.SetupStepFirewall, Title: "Configuring firewall", Status: engine.SetupStepCompleted},
+					{Step: engine.SetupStepDeployUser, Title: "Setting up deploy user", Status: engine.SetupStepFailed, Error: "usermod failed"},
 				},
-				Error: "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available",
+				Error: "failed at step 'Setting up deploy user' on server node-b: usermod failed",
 			},
 		},
-		Error: "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available",
+		Error: "failed at step 'Setting up deploy user' on server node-b: usermod failed",
 	}
 	payload, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
@@ -1168,11 +1262,23 @@ func TestSetupResultDocumentGolden(t *testing.T) {
       "setupVersion": "3",
       "firewallPorts": [
         "22/tcp",
+        "2222/tcp",
         "80/tcp",
         "443/tcp",
         "443/udp",
         "51820/udp"
       ],
+      "firewall": {
+        "backend": "ufw",
+        "status": "configured",
+        "sshPorts": [
+          "22/tcp",
+          "2222/tcp"
+        ],
+        "staleSshPorts": [
+          "2200/tcp"
+        ]
+      },
       "hostKey": {
         "type": "ssh-ed25519",
         "key": "AAAAC3NzaC1lZDI1NTE5AAAAIP//////////////////////////////////////////",
@@ -1195,6 +1301,15 @@ func TestSetupResultDocumentGolden(t *testing.T) {
       "server": "node-b",
       "host": "10.0.0.2",
       "mode": "converge",
+      "firewall": {
+        "backend": "none",
+        "status": "skipped",
+        "reason": "UFW is not available on Rocky Linux 9.4",
+        "sshPorts": [
+          "22/tcp"
+        ],
+        "nativeFirewall": "firewalld"
+      },
       "steps": [
         {
           "step": "os-check",
@@ -1203,15 +1318,20 @@ func TestSetupResultDocumentGolden(t *testing.T) {
         },
         {
           "step": "firewall",
-          "title": "Configuring firewall (UFW)",
+          "title": "Configuring firewall",
+          "status": "completed"
+        },
+        {
+          "step": "deploy-user",
+          "title": "Setting up deploy user",
           "status": "failed",
-          "error": "ufw not available"
+          "error": "usermod failed"
         }
       ],
-      "error": "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available"
+      "error": "failed at step 'Setting up deploy user' on server node-b: usermod failed"
     }
   ],
-  "error": "failed at step 'Configuring firewall (UFW)' on server node-b: ufw not available"
+  "error": "failed at step 'Setting up deploy user' on server node-b: usermod failed"
 }`
 	if string(payload) != want {
 		t.Fatalf("setup result document drifted:\n%s", payload)

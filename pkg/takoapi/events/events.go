@@ -42,13 +42,21 @@ const (
 	PhaseNotify  = "notify"
 	PhaseLogs    = "logs"
 	PhaseSetup   = "setup"
+	// PhaseHooks groups local lifecycle hook events (hook.*).
+	PhaseHooks = "hooks"
 )
 
 // Event types. Consumers must tolerate unknown types (additive schema).
 const (
 	TypePhaseStarted   = "phase.started"
 	TypePhaseCompleted = "phase.completed"
-	TypeLogLine        = "log.line"
+	// TypeLogLine carries one line of operation or container output. For
+	// `tako logs` the raw line is in data.data alongside data.service and
+	// data.node, plus data.replica, data.container, data.revision,
+	// data.stream ("stdout"/"stderr"), and data.time (RFC3339Nano) when the
+	// node agent supplies them. Message is the human rendering and never
+	// contains ANSI escapes.
+	TypeLogLine = "log.line"
 
 	TypePlanComputed             = "plan.computed"
 	TypePlanConfirmationRequired = "plan.confirmation_required"
@@ -59,10 +67,19 @@ const (
 	TypeDeployServiceReconciled = "deploy.service.reconciled"
 	TypeDeployServiceWarmed     = "deploy.service.warmed"
 	TypeDeployServiceFailed     = "deploy.service.failed"
-	TypeDeployServiceRemoved    = "deploy.service.removed"
-	TypeDeploySucceeded         = "deploy.succeeded"
-	TypeDeployFailed            = "deploy.failed"
-	TypeDeployCancelled         = "deploy.cancelled"
+	// Restore events follow deploy.service.failed when the previous
+	// revision is restored (or was never cut over) after a failed rollout.
+	TypeDeployServiceRestoreStarted = "deploy.service.restore.started"
+	TypeDeployServiceRestored       = "deploy.service.restored"
+	TypeDeployServiceRestoreFailed  = "deploy.service.restore_failed"
+	TypeDeployServiceRemoved        = "deploy.service.removed"
+	// TypeDeployServiceSkipped reports a service an operation left alone
+	// (project rollback: skipped or unchanged); data.action and
+	// data.reason say why.
+	TypeDeployServiceSkipped = "deploy.service.skipped"
+	TypeDeploySucceeded      = "deploy.succeeded"
+	TypeDeployFailed         = "deploy.failed"
+	TypeDeployCancelled      = "deploy.cancelled"
 
 	TypeProxyReconciled    = "proxy.reconciled"
 	TypeRevisionsPruned    = "revisions.pruned"
@@ -130,6 +147,19 @@ const (
 	TypeJobTriggerStarted   = "jobs.trigger.started"
 	TypeJobTriggerOutput    = "jobs.trigger.output"
 	TypeJobTriggerCompleted = "jobs.trigger.completed"
+
+	// Local lifecycle hook events (phase "hooks"). Every event carries
+	// `data.hook`. started adds `data.source` ("file"/"config"),
+	// `data.path` or `data.argv`, and `data.timeoutSeconds`; output carries
+	// one line in `data.data` with `data.stream` ("stdout"/"stderr");
+	// completed/failed carry `data.exitCode` and `data.durationMs`, and
+	// failed adds `data.error` and `data.timedOut`. skipped carries
+	// `data.reason` (--skip-hooks).
+	TypeHookStarted   = "hook.started"
+	TypeHookOutput    = "hook.output"
+	TypeHookCompleted = "hook.completed"
+	TypeHookFailed    = "hook.failed"
+	TypeHookSkipped   = "hook.skipped"
 
 	TypeWarning = "warning"
 

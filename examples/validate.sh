@@ -65,7 +65,7 @@ echo "Building validation binary..."
 go build -o "$TMP_DIR/tako" "$ROOT"
 
 echo "Validating top-level example configs..."
-find "$ROOT/examples" -mindepth 2 -maxdepth 2 \( -name 'tako.yaml' -o -name 'tako-parallel.yaml' \) -print | sort | while IFS= read -r config_path; do
+find "$ROOT/examples" -mindepth 2 -maxdepth 2 -name 'tako.yaml' -print | sort | while IFS= read -r config_path; do
   validate_config "$config_path"
 done
 

@@ -21,12 +21,21 @@ func TestServiceRevisionIDStable(t *testing.T) {
 	}
 }
 
-func TestEffectiveDeployStrategyDefaultsToRecreate(t *testing.T) {
+func TestEffectiveDeployStrategyDelegatesToDefaultSelection(t *testing.T) {
 	if got := EffectiveDeployStrategy(nil); got != config.DeployStrategyRecreate {
 		t.Fatalf("EffectiveDeployStrategy(nil) = %q, want recreate", got)
 	}
 	if got := EffectiveDeployStrategy(&config.ServiceConfig{}); got != config.DeployStrategyRecreate {
-		t.Fatalf("EffectiveDeployStrategy(empty service) = %q, want recreate", got)
+		t.Fatalf("EffectiveDeployStrategy(portless service) = %q, want recreate", got)
+	}
+	if got := EffectiveDeployStrategy(&config.ServiceConfig{Port: 3000}); got != config.DeployStrategyRolling {
+		t.Fatalf("EffectiveDeployStrategy(stateless port service) = %q, want rolling", got)
+	}
+	if got := EffectiveDeployStrategy(&config.ServiceConfig{Port: 5432, Persistent: true, Volumes: []string{"data:/var/lib/postgresql/data"}}); got != config.DeployStrategyRecreate {
+		t.Fatalf("EffectiveDeployStrategy(persistent service) = %q, want recreate", got)
+	}
+	if got := EffectiveDeployStrategy(&config.ServiceConfig{Port: 3000, Deploy: config.DeployConfig{Strategy: config.DeployStrategyRecreate}}); got != config.DeployStrategyRecreate {
+		t.Fatalf("EffectiveDeployStrategy(explicit recreate) = %q, want recreate", got)
 	}
 	service := &config.ServiceConfig{Deploy: config.DeployConfig{Strategy: config.DeployStrategyRolling}}
 	if got := EffectiveDeployStrategy(service); got != config.DeployStrategyRolling {

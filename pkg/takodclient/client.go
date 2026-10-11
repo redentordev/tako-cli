@@ -567,6 +567,13 @@ func LogsEndpoint(project string, environment string, service string, tail int, 
 	return "/v1/logs?" + query.Encode()
 }
 
+// LogsStreamEndpoint returns the framed multi-service logs endpoint served by
+// agents advertising logs.stream-v1. Requests POST a JSON body; responses are
+// NDJSON frames (see LogsStreamFrame).
+func LogsStreamEndpoint() string {
+	return "/v1/logs/stream"
+}
+
 func StatsEndpoint(project string, environment string, service string, all bool) string {
 	query := url.Values{}
 	if project != "" {

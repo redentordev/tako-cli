@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -70,6 +71,12 @@ type PlanChange struct {
 	// will run before cutover when this change applies.
 	ReleaseCommand []string `json:"releaseCommand,omitempty"`
 	RunCommand     []string `json:"runCommand,omitempty"`
+	// Strategy is the effective deploy strategy (recreate, rolling,
+	// blue_green) and StrategySource says whether tako.yaml set it
+	// ("explicit") or Tako selected it ("default"). Both are empty for runs,
+	// jobs and removed services.
+	Strategy       string `json:"strategy,omitempty"`
+	StrategySource string `json:"strategySource,omitempty"`
 }
 
 type PlanSharedBuild struct {
@@ -137,6 +144,12 @@ func (p *DeployPlan) Hash() string {
 	return hex.EncodeToString(sum[:])
 }
 
+// PlanHash is Hash under the name every reviewed plan document shares
+// (RollbackPlan stores its hash in a field named Hash).
+func (p *DeployPlan) PlanHash() string {
+	return p.Hash()
+}
+
 // ServiceOutcome reports what happened to one service during apply.
 type ServiceOutcome struct {
 	Name     string          `json:"name"`
@@ -146,6 +159,10 @@ type ServiceOutcome struct {
 	Release  *ReleaseOutcome `json:"release,omitempty"`
 	Run      *RunOutcome     `json:"run,omitempty"`
 	Error    string          `json:"error,omitempty"`
+	// Strategy is the effective deploy strategy of a long-running service.
+	Strategy string `json:"strategy,omitempty"`
+	// Recovery reports how a failed rollout was recovered.
+	Recovery *RecoveryOutcome `json:"recovery,omitempty"`
 }
 
 type RunOutcome struct {
@@ -194,6 +211,9 @@ const (
 	OutcomeUpToDate = "up_to_date"
 	OutcomeFailed   = "failed"
 	OutcomeRan      = "ran"
+	// OutcomeRestored marks a service whose rollout failed but whose
+	// previous revision serves again; the deploy still fails (exit 1).
+	OutcomeRestored = "restored"
 )
 
 // DeployResult is the serializable outcome of ApplyDeploy.
@@ -215,6 +235,54 @@ type DeployResult struct {
 	PlanHash      string    `json:"planHash,omitempty"`
 	Message       string    `json:"message,omitempty"`
 	Error         string    `json:"error,omitempty"`
+	// DeploymentID is the deployment history record ID, set once the
+	// in-progress record has been written.
+	DeploymentID string `json:"deploymentId,omitempty"`
+	// Hooks lists the local lifecycle hooks considered, in run order.
+	Hooks []HookOutcome `json:"hooks,omitempty"`
+}
+
+// Hook outcome statuses carried in HookOutcome.Status.
+const (
+	HookCompleted = "completed"
+	HookFailed    = "failed"
+	HookTimedOut  = "timed_out"
+	HookSkipped   = "skipped"
+)
+
+// HookOutcome reports one local lifecycle hook in a result document.
+// ExitCode and DurationMs are set when the hook process ran.
+type HookOutcome struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	ExitCode   *int   `json:"exitCode,omitempty"`
+	DurationMs *int64 `json:"durationMs,omitempty"`
+}
+
+// MutationInfo describes the operation a BeforeMutation callback is about to
+// let proceed: the resolved target, before the first mutation.
+type MutationInfo struct {
+	// Operation is "rollback" or "promote".
+	Operation string
+	Services  []string
+	Servers   []string
+	// TargetDeploymentID is the rollback target deployment.
+	TargetDeploymentID string
+	// Revision is the promoted revision, or the rollback target's commit.
+	Revision string
+	Image    string
+}
+
+// BeforeMutationFunc runs after an operation has taken its lock and leases
+// and resolved its target, and before any mutation. A non-nil error aborts
+// the operation with that error; the lock and leases are released.
+type BeforeMutationFunc func(ctx context.Context, info MutationInfo) error
+
+func callBeforeMutation(ctx context.Context, fn BeforeMutationFunc, info MutationInfo) error {
+	if fn == nil {
+		return nil
+	}
+	return fn(ctx, info)
 }
 
 func newDeployPlanDocument(project string, environment string, plan *reconcile.ReconciliationPlan, services map[string]config.ServiceConfig) DeployPlan {
@@ -240,6 +308,9 @@ func newDeployPlanDocument(project string, environment string, plan *reconcile.R
 		if service, ok := services[change.ServiceName]; ok && service.IsRun() {
 			planChange.RunCommand = service.Command.Arguments()
 		}
+		if service, ok := services[change.ServiceName]; ok && change.Type != reconcile.ChangeRemove {
+			planChange.Strategy, planChange.StrategySource = serviceStrategyReport(&service)
+		}
 		doc.Changes = append(doc.Changes, planChange)
 	}
 	sort.Slice(doc.Changes, func(i, j int) bool {
@@ -249,6 +320,16 @@ func newDeployPlanDocument(project string, environment string, plan *reconcile.R
 		return doc.Changes[i].Type < doc.Changes[j].Type
 	})
 	return doc
+}
+
+// serviceStrategyReport returns the effective deploy strategy and its source
+// for plan and result documents; both are empty for runs and jobs, which
+// have no rollout strategy.
+func serviceStrategyReport(service *config.ServiceConfig) (string, string) {
+	if service == nil || service.IsRun() || service.IsJob() {
+		return "", ""
+	}
+	return deployplan.EffectiveDeployStrategy(service), service.DeployStrategySource()
 }
 
 func sortedServiceNames(services map[string]config.ServiceConfig) []string {

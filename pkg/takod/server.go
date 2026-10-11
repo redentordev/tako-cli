@@ -198,6 +198,11 @@ const CapabilityProxyRemoteMeshRoutesV1 = "proxy.remote-mesh-routes-v1"
 // store API and can render store-backed TLS directives safely.
 const CapabilityProxyCertsV1 = "proxy.certs-v1"
 
+// CapabilityLogsStreamV1 means the node serves POST /v1/logs/stream: framed,
+// attributed, node-filtered (since/until/grep) multi-service log streams
+// whose follow mode attaches containers started later, including job runs.
+const CapabilityLogsStreamV1 = "logs.stream-v1"
+
 // CapabilityNodeIdentityV1 means status exposes an immutable installation
 // identity separately from mutable project/environment node metadata.
 const CapabilityNodeIdentityV1 = nodeidentity.Capability
@@ -810,6 +815,11 @@ func (s *Server) handleReconcileService(w http.ResponseWriter, r *http.Request) 
 
 	response, err := ReconcileService(r.Context(), request)
 	if err != nil {
+		var failure *ReconcileFailure
+		if errors.As(err, &failure) {
+			writeReconcileFailure(w, failure)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -863,6 +873,51 @@ func (s *Server) handleServiceFilesCheck(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"fileSetId": request.FileSetID})
+}
+
+// writeReconcileFailure returns the typed failure document for reconciles
+// that used a non-legacy failure policy.
+func writeReconcileFailure(w http.ResponseWriter, failure *ReconcileFailure) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadGateway)
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(failure.Body())
+}
+
+func (s *Server) handleServiceFinalize(w http.ResponseWriter, r *http.Request) {
+	s.handleServiceRecovery(w, r, FinalizeRetainedService)
+}
+
+func (s *Server) handleServiceRestore(w http.ResponseWriter, r *http.Request) {
+	s.handleServiceRecovery(w, r, RestoreRetainedService)
+}
+
+func (s *Server) handleServiceRecovery(w http.ResponseWriter, r *http.Request, operation func(context.Context, string, ServiceRecoveryRequest) (*ServiceRecoveryResponse, error)) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request ServiceRecoveryRequest
+	if err := decodeJSONRequest(w, r, &request); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateServiceRecoveryRequest(request); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	response, err := operation(r.Context(), s.dataDir, request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(response)
 }
 
 func (s *Server) handleRemoveService(w http.ResponseWriter, r *http.Request) {
@@ -2235,6 +2290,43 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// takodMaxLogsStreamBodyBytes bounds the small JSON logs stream request.
+const takodMaxLogsStreamBodyBytes = 64 << 10
+
+// handleLogsStream serves POST /v1/logs/stream (logs.stream-v1). Validation
+// errors return HTTP 400 before any output; once streaming starts, every
+// outcome is reported in-band with a terminal `end` or `error` frame so the
+// NDJSON body is never corrupted by a late HTTP error.
+func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+
+	var request LogsStreamRequest
+	if err := decodeJSONRequestWithLimit(w, r, &request, takodMaxLogsStreamBodyBytes); err != nil {
+		http.Error(w, "invalid logs stream request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	pattern, err := validateLogsStreamRequest(&request)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	streamer := newLogsStreamer(request, pattern, &flushResponseWriter{writer: w})
+	if err := streamer.run(r.Context()); err != nil {
+		if r.Context().Err() == nil {
+			_ = streamer.out.write(LogsStreamFrame{Type: LogsFrameError, Message: err.Error()})
+		}
+		return
+	}
+	_ = streamer.out.write(LogsStreamFrame{Type: LogsFrameEnd})
+}
+
 // handleExec streams a service-context command run. Validation and
 // resolution errors return HTTP errors before any output; once the stream
 // starts, failures surface as output text and the terminal exit marker.
@@ -2541,7 +2633,7 @@ func (s *Server) Status() Status {
 		Version:                s.version,
 		UpgradeProtocol:        upgradeprotocol.Current,
 		MinimumUpgradeProtocol: upgradeprotocol.Current,
-		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1},
+		Capabilities:           []string{CapabilityContainerArgvV1, CapabilityContainerRuntimeControlsV1, CapabilityContainerLoggingV1, CapabilityContainerGracefulStopV1, CapabilityImageBuildOptionsV1, CapabilityImageDescriptorV1, CapabilityNodePlatformV1, CapabilityExecOneOffControlsV1, CapabilityServiceFilesV1, CapabilityVolumeCreationOwnershipV1, CapabilitySchedulerAlertsV1, CapabilityProxyActivationV1, CapabilityProxyRoutePolicyV1, CapabilityProxyAllowPathPrefixesV1, CapabilityProxyTrustedProxiesV1, CapabilityProxyCertsV1, CapabilityAcmeDNSV1, CapabilityLogsStreamV1, CapabilityDeployRestoreOnFailureV1},
 		Hostname:               hostname,
 		Socket:                 s.socket,
 		DataDir:                s.dataDir,

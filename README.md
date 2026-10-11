@@ -18,7 +18,7 @@ replicated deployment state.
 ## Why Tako?
 
 - Use your own servers (DigitalOcean, Hetzner, AWS EC2, any VPS)
-- Health-checked deployments (recreate, rolling, blue-green) with rollback
+- Health-checked deployments (rolling by default for stateless services, recreate, blue-green) that restore the previous revision when a rollout fails
 - Automatic HTTPS through tako-proxy, including DNS-01 and on-demand customer domains
 - Git-clean deployments with full version history
 - Meshed takod orchestration from one server to many
@@ -177,7 +177,7 @@ settings; run `tako validate` to check the file offline and
 
 ```bash
 git add . && git commit -m "Initial Tako deployment config"
-tako setup -e production     # Docker, WireGuard, takod, tako-proxy, ufw, fail2ban, hardening
+tako setup -e production     # Docker, WireGuard, takod, tako-proxy, ufw (keeps your SSH port open), fail2ban, hardening
 tako deploy -e production
 ```
 
@@ -245,13 +245,22 @@ keys. See
 
 ## Features
 
-**Deployment & operations** — reconciled deploys (recreate, rolling,
-blue-green with manual or automatic promotion), graceful container
-replacement, parallel deployment, instant rollback, Git-based versioning,
+**Deployment & operations** — reconciled deploys (zero-downtime rolling by
+default for stateless services, recreate, blue-green with manual or automatic
+promotion), restore-on-failure of the previous revision, graceful container
+replacement, concurrent per-node rollout in dependency order, instant rollback, Git-based versioning,
 replicated deployment state with remote operation leases, release hooks
 (`release:` commands gate traffic), scheduled jobs (`kind: job` with cron, run
 history, and manual trigger), remote exec in service containers, health checks,
 drift detection, maintenance mode, service log rotation.
+
+**Lifecycle hooks** — committable local scripts in `.tako-hooks/` (or argv
+commands in `hooks.commands`) that run on the operator's machine or CI runner
+before and after `deploy`, `rollback`, `promote`, and `setup`, plus
+`on-failure`. A failing `pre-*` hook aborts before anything changes, hooks get
+a minimal environment with `TAKO_*` context and opt-in `passEnv`, output is
+redacted and streamed as `hook.*` events, and `.ps1`/`.cmd` variants run
+natively on Windows ([hooks guide](./docs/HOOKS.md)).
 
 **Backups** — volume backup/restore across the mesh, per-service `backup:`
 schedules with `retain` days, off-node copies to S3, R2, or any S3-compatible
@@ -270,17 +279,20 @@ internal HTTP-only routes without public DNS.
 **Servers & scaling** — multi-server takod mesh over WireGuard, placement
 strategies (spread, pinned, global, label constraints), reviewable placement
 plans, commit-tagged image reuse, one-command server setup (Docker, takod,
-ufw firewall, fail2ban, SSH hardening) and agent upgrades, shared nodes with
+ufw firewall that keeps the configured SSH port open, fail2ban, validated SSH
+hardening) and agent upgrades, shared nodes with
 app/stage isolation, cross-project service exports/imports, raw TCP/UDP port
 publishing.
 
 **Security & automation** — SSH host-key verification (`tofu`, `strict`,
 `ask`), secrets with automatic redaction and AWS SSM / Secrets Manager import,
 encrypted env bundles, private registry auth via a `registries:` block with
-`${ENV_VAR}` credentials, every command supports `--output json` (versioned
-result documents) and `--events ndjson` (typed progress events) with stable
-exit codes ([machine interface](./docs/MACHINE-INTERFACE.md)); single static
-binary for Linux/macOS/Windows.
+`${ENV_VAR}` credentials, commands with the machine contract support
+`--output json` (versioned result documents) and `--events ndjson` (typed
+progress events) with stable exit codes, while a small human-only set
+(such as `init` and `monitor`) rejects them
+([machine interface and command coverage](./docs/MACHINE-INTERFACE.md#command-coverage));
+single static binary for Linux/macOS/Windows.
 
 ---
 
@@ -299,7 +311,8 @@ pages with `make man` after flag changes.
 | `tako deploy` | Deploy configured application to environment |
 | `tako run <image> --name <app> --port <p> --server <host-or-ip>` | Configless deploy of a public image to an existing node |
 | `tako promote <service>` | Promote a warmed blue-green revision |
-| `tako rollback [id]` | Roll back to previous/specific deployment |
+| `tako rollback [id]` | Roll the environment back to the previous or a specific deployment (shows a plan, `-y` to approve) |
+| `tako rollback --service <name> [id]` | Roll back one service only |
 | `tako history` | View deployment history |
 | `tako ps` / `tako logs` / `tako access` | Service status, container logs, proxy access logs |
 | `tako exec <service> -- <cmd>` | Run a command in a running service container |
@@ -390,7 +403,7 @@ The [Configuration guide](./docs/CONFIGURATION.md) covers the full recipe set:
 multi-server placement, background workers, stateful services and volumes,
 secrets, domain redirects and readiness checks, DNS-01 and dynamic customer
 domains, internal proxy routes, shared nodes and cross-project exports,
-parallel deployment, build strategies, resource limits, volume backups, and
+concurrent per-node rollout in dependency order, build strategies, resource limits, volume backups, and
 build cache pruning.
 
 ---

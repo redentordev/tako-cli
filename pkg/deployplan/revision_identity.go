@@ -26,10 +26,16 @@ func ServiceRevisionID(project string, environment string, serviceName string, i
 	return hex.EncodeToString(sum[:])[:12]
 }
 
-// EffectiveDeployStrategy returns the configured deploy strategy, defaulting to recreate.
+// EffectiveDeployStrategy returns the configured deploy strategy. An
+// unvalidated config that omits it gets the same default validation would
+// select (config.DefaultDeployStrategy), so revision identity agrees between
+// raw and validated configs.
 func EffectiveDeployStrategy(service *config.ServiceConfig) string {
-	if service == nil || service.Deploy.Strategy == "" {
+	if service == nil {
 		return config.DeployStrategyRecreate
+	}
+	if service.Deploy.Strategy == "" {
+		return config.DefaultDeployStrategy(service)
 	}
 	return service.Deploy.Strategy
 }

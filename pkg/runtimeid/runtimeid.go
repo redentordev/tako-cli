@@ -30,6 +30,17 @@ func RevisionContainerName(project string, environment string, service string, r
 	return compactName("_", dockerNameMax, []string{"tako", project, environment, service, "r", revision, slotText}, shortHash(project, environment, service, revision, slotText))
 }
 
+// RetainedContainerName is the name a recreate rollout gives a previous
+// container while it is kept restorable. The fixed "prev" component and its
+// own hash input keep it distinct from every live slot name and every
+// revision-scoped name, and compactName bounds it to Docker's 128-character
+// limit. takod identifies retained containers only by recomputing this name
+// from a container's own labels, never by suffix matching.
+func RetainedContainerName(project string, environment string, service string, slot int) string {
+	slotText := strconv.Itoa(slot)
+	return compactName("_", dockerNameMax, []string{"tako", project, environment, service, "prev", slotText}, shortHash("retained", project, environment, service, slotText))
+}
+
 func ContainerAlias(project string, environment string, service string, slot int) string {
 	slotText := strconv.Itoa(slot)
 	return compactName("-", dockerNetworkMax, []string{"tako", project, environment, service, slotText}, shortHash(project, environment, service, slotText))
