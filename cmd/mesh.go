@@ -47,13 +47,11 @@ func init() {
 	rootCmd.AddCommand(meshCmd)
 	meshCmd.AddCommand(meshPruneCmd)
 	meshPruneCmd.Flags().StringSliceVar(&meshPruneServers, "server", nil, "Prune only these servers (repeatable)")
+	markHumanOnly(meshPruneCmd)
 }
 
 func runMeshPrune(cmd *cobra.Command, args []string) error {
 	var out io.Writer = os.Stdout
-	if machineOutputEnabled() {
-		out = os.Stderr
-	}
 	cfg, err := config.LoadConfig(cfgFile)
 	if err != nil {
 		return formatConfigLoadError(cfgFile, err)
