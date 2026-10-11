@@ -1,24 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Redaction markers name their source
-Every mask produced by the engine redactor SHALL be rendered as `[REDACTED:<label>]`, where `<label>` matches `[A-Za-z0-9_\-@/:.]{1,96}` and is a config-path-like name of the value's origin. A label SHALL begin with one of these kinds:
-- `secrets.`
-- `env.`
-- `envFile.`
-- `servers.`
-- `registries.`
-- `environments.`
-- `services.`
-- `builds.`
-- `notifications.`
-- `hooks.`
-- `run.`
-- `export.`
-- `certs.`
-- `proxy.`
-- `pattern.`
-
-For key/value pattern matches the key SHALL be kept, followed by the marker.
+Every mask produced by the engine redactor SHALL be rendered as `[REDACTED:<label>]`, where `<label>` matches `[A-Za-z0-9_\-@/:.]{1,96}` and is a config-path-like name of the value's origin. A label SHALL begin with a kind: `secrets.`, `env.`, `envFile.`, `servers.`, `registries.`, `environments.`, `services.`, `builds.`, `notifications.`, `hooks.`, `run.`, `export.`, `certs.`, `proxy.` or `pattern.`. Key/value pattern matches SHALL keep the key.
 
 #### Scenario: Aliased secret is labeled by its secret key
 - **WHEN** service `web` declares `secrets: ["API_KEY:STRIPE_KEY"]` and a container log line contains the value of `STRIPE_KEY`
