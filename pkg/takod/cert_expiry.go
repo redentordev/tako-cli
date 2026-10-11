@@ -42,6 +42,25 @@ type certificateExpiryScanner struct {
 	now       func() time.Time
 	routesDir func() string
 	status    func(ctx context.Context, domain string) (*ProxyCertificateStatusResponse, error)
+	// node returns this node's name; nil or "" disables reporter election.
+	node func() string
+}
+
+// certificateReporter elects the node that reports certificate expiry for
+// a scope: the http checker node of its monitors (the lowest name when
+// they differ), so a domain routed on every proxy node alerts once instead
+// of once per node. "" means no election (every node reports).
+func certificateReporter(policy SourceAlertPolicy) string {
+	reporter := ""
+	for _, monitor := range policy.Monitors {
+		if monitor.CheckType != MonitorCheckHTTP || monitor.CheckerNode == "" {
+			continue
+		}
+		if reporter == "" || monitor.CheckerNode < reporter {
+			reporter = monitor.CheckerNode
+		}
+	}
+	return reporter
 }
 
 func newCertificateExpiryScanner(alerts *SourceAlertManager) *certificateExpiryScanner {
@@ -120,7 +139,12 @@ func (c *certificateExpiryScanner) ScanOnce(ctx context.Context) {
 			continue
 		}
 		current := map[string]bool{}
-		for _, domain := range domains[alertScopeKey(scope.Project, scope.Environment)] {
+		scopeDomains := domains[alertScopeKey(scope.Project, scope.Environment)]
+		if reporter := certificateReporter(scope.Policy); reporter != "" && c.node != nil && c.node() != "" && c.node() != reporter {
+			// Another node reports this scope's certificates.
+			scopeDomains = nil
+		}
+		for _, domain := range scopeDomains {
 			if ctx.Err() != nil {
 				return
 			}

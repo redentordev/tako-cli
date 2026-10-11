@@ -31,6 +31,7 @@ func (s *Server) startHealthMonitoring(ctx context.Context, start func(func())) 
 	monitors := newServiceMonitorRunner(s.sourceAlerts, s.dataDir, func() string { return s.nodeName })
 	hosts := newHostAlertEvaluator(s.sourceAlerts, s.hostSamples)
 	certificates := newCertificateExpiryScanner(s.sourceAlerts)
+	certificates.node = func() string { return s.nodeName }
 	start(func() { s.sourceAlerts.Run(ctx) })
 	start(func() { monitors.Run(ctx) })
 	start(func() { hosts.Run(ctx) })

@@ -214,6 +214,32 @@ func TestCertificateExpiryScanner(t *testing.T) {
 	}
 }
 
+func TestCertificateExpiryReportedByCheckerNodeOnly(t *testing.T) {
+	routes := t.TempDir()
+	writeTestRouteManifest(t, routes, "shop", "production", "web", "shop.example.com")
+	sent := map[string]int{}
+	for _, node := range []string{"app-1", "app-2"} {
+		h := newSourceTestHarness(t, t.TempDir())
+		h.manager.SetNodeName(node)
+		// testMonitorRequest elects app-1 as the http checker node.
+		if err := h.manager.ApplyConfig(testMonitorRequest("shop", "production")); err != nil {
+			t.Fatal(err)
+		}
+		scanner := newCertificateExpiryScanner(h.manager)
+		scanner.now = func() time.Time { return h.now }
+		scanner.routesDir = func() string { return routes }
+		scanner.node = func() string { return node }
+		scanner.status = func(_ context.Context, domain string) (*ProxyCertificateStatusResponse, error) {
+			return &ProxyCertificateStatusResponse{Domain: domain, Present: true, Source: "caddy", NotAfter: h.now.Add(48 * time.Hour)}, nil
+		}
+		scanner.ScanOnce(context.Background())
+		sent[node] = len(h.dispatch())
+	}
+	if sent["app-1"] != 1 || sent["app-2"] != 0 {
+		t.Fatalf("certificate alerts per node = %v, want only the checker node app-1", sent)
+	}
+}
+
 func writeTestDesiredRevision(t *testing.T, dataDir, project, environment, content string, modified time.Time) {
 	t.Helper()
 	path := filepath.Join(dataDir, "desired", project, environment, "revision.json")
