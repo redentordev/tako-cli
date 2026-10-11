@@ -30,7 +30,7 @@ func acquireUpgradeNodeLease(client any, cfg *config.Config, envName, name strin
 
 func acquireNodeMaintenanceLeaseForCommand(client any, cfg *config.Config, envName, name string, server config.ServerConfig, status *takod.Status, statusErr error, operation string, out io.Writer) (*engine.NodeMaintenanceLease, error) {
 	if statusErr != nil || status == nil {
-		fmt.Fprintf(out, "  ⚠ takod is not answering on %s; continuing without a node maintenance lease\n", name)
+		fmt.Fprintf(out, "  âš  takod is not answering on %s; continuing without a node maintenance lease\n", name)
 		return nil, nil
 	}
 	lease, err := acquireNodeMaintenanceLeaseWith(context.Background(), engine.NodeMaintenanceLeaseRequest{
@@ -47,7 +47,7 @@ func acquireNodeMaintenanceLeaseForCommand(client any, cfg *config.Config, envNa
 		return nil, err
 	}
 	if lease != nil && lease.Warning != "" {
-		fmt.Fprintf(out, "  ⚠ %s\n", lease.Warning)
+		fmt.Fprintf(out, "  âš  %s\n", lease.Warning)
 	}
 	return lease, nil
 }
@@ -70,7 +70,7 @@ func releaseUpgradeNodeLease(lease *engine.NodeMaintenanceLease, out io.Writer) 
 		return
 	}
 	if err := lease.Release(context.Background()); err != nil {
-		fmt.Fprintf(out, "  ⚠ %v\n", err)
+		fmt.Fprintf(out, "  âš  %v\n", err)
 	}
 }
 
@@ -105,7 +105,7 @@ func keepNodeMaintenanceLeaseAlive(lease *engine.NodeMaintenanceLease, out io.Wr
 		return func() {}
 	}
 	return lease.KeepAlive(engine.NodeMaintenanceLeaseRenewInterval, func(err error) {
-		fmt.Fprintf(out, "  ⚠ %v\n", err)
+		fmt.Fprintf(out, "  âš  %v\n", err)
 	})
 }
 
