@@ -517,7 +517,12 @@ the nodes attempted. `tako upgrade servers` returns an
 on apply; `current`/`upgrade-needed`/`downgrade-blocked`/`setup-required`/`status-unavailable`
 on `--dry-run`). Enrolled nodes are ordered as worker canary, remaining
 workers, and controller last; a failed stage blocks later stages. Partial
-failure exits 6, total failure exits 1, and both still emit the document. `tako clone-setup`
+failure exits 6, total failure exits 1, and both still emit the document.
+On non-enrolled nodes each node is upgraded under the node maintenance lease;
+when any project or environment holds a live lease on a node, that node is
+reported `blocked` with the holders in `error`, the remaining nodes still run,
+and the command exits 3. `tako setup` takes the same lease on a node whose
+takod answers and exits 3 under the same condition. `tako clone-setup`
 returns a `CloneSetupResult` (doctor-style `checks` with pass/warn/fail
 counts covering config, .env, SSH connectivity, env bundle, state, and
 secrets); machine modes skip its interactive fix-up prompts and any failed

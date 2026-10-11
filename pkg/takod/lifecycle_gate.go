@@ -29,7 +29,7 @@ func (s *Server) registeredRoutes() []takodRoute {
 		{"/v1/remove-service", s.handleRemoveService}, {"/v1/services/finalize", s.handleServiceFinalize}, {"/v1/services/restore", s.handleServiceRestore},
 		{"/v1/proxy-file", s.handleProxyFile}, {"/v1/proxy", s.handleProxy},
 		{"/v1/certs", s.handleProxyCertificates}, {"/v1/certs/status", s.handleProxyCertificateStatus}, {"/v1/acme-dns", s.handleProxyACMEDNS}, {"/v1/ports/allocate", s.handlePortAllocate},
-		{"/v1/cleanup", s.handleCleanup}, {"/v1/state", s.handleState}, {"/v1/lease", s.handleLease}, {"/v1/fence", s.handleFence}, {"/v1/env-bundle", s.handleEnvBundle},
+		{"/v1/cleanup", s.handleCleanup}, {"/v1/state", s.handleState}, {"/v1/lease", s.handleLease}, {"/v1/node-lease/maintenance", s.handleNodeMaintenanceLease}, {"/v1/fence", s.handleFence}, {"/v1/env-bundle", s.handleEnvBundle},
 		{"/v1/backups", s.handleBackups}, {"/v1/backups/restore", s.handleBackupRestore}, {"/v1/backups/postgres/verify", s.handlePostgresBackupVerification}, {"/v1/backups/cleanup", s.handleBackupCleanup},
 		{"/v1/backup-schedule", s.handleBackupSchedule}, {"/v1/metadata", s.handleMetadata}, {"/v1/mesh/key", s.handleMeshKey},
 		{"/v1/mesh/apply", s.handleMeshApply}, {"/v1/mesh/status", s.handleMeshStatus}, {"/v1/images/exists", s.handleImageExists},
@@ -50,9 +50,12 @@ var lifecycleSafeMutationPaths = map[string]struct{}{
 	"/v1/platform/inventory": {},
 	"/v1/fence":              {},
 	"/v1/lease":              {},
-	"/v1/platform":           {},
-	"/v1/mesh/key":           {},
-	"/v1/mesh/apply":         {},
+	// The node maintenance lease only coordinates operators; it never
+	// mutates workloads.
+	"/v1/node-lease/maintenance": {},
+	"/v1/platform":               {},
+	"/v1/mesh/key":               {},
+	"/v1/mesh/apply":             {},
 	// Alert policy is node-local control-plane state, not a workload mutation.
 	// Keep authenticated disable available on cordoned/draining nodes.
 	"/v1/alerts": {},

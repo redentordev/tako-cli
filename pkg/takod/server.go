@@ -2645,7 +2645,7 @@ func (s *Server) Status() Status {
 	if s.postgresVerificationQuotaSupported && s.minimumFreeDiskBytes > 0 && s.reservedMemoryBytes > 0 {
 		status.Capabilities = append(status.Capabilities, CapabilityBackupPostgresVerifyV1)
 	}
-	status.Capabilities = append(status.Capabilities, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1)
+	status.Capabilities = append(status.Capabilities, CapabilityNodeIdentityV1, CapabilityNodeUpgradeV1, CapabilityNodeMaintenanceLeaseV1)
 	if s.installation != nil {
 		status.Capabilities = append(status.Capabilities, CapabilityPlatformWorkerHandoffV1)
 		if inventory, err := nodeidentity.ReadInventory(s.inventoryFile); err == nil && inventory.ClusterID == s.installation.ClusterID {

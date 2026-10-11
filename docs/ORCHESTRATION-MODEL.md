@@ -372,6 +372,34 @@ variables. A prior owner that is absent from `servers:` keeps the retired-node
 warning. Enrolled clusters keep their single controller lease, inventory roles,
 and cluster-wide builder and edge candidates.
 
+### Node Maintenance Lease
+
+Node software changes affect every app/stage on a server, so they take a
+node-wide lease instead of an environment lease. `tako upgrade servers` (for
+non-enrolled nodes; enrolled clusters keep the cluster upgrade coordinator) and
+`tako setup` (on a node whose takod answers) acquire the node maintenance lease
+on each node just before mutating it and release it after the restarted agent
+verified:
+
+- takod stores it at `<dataDir>/node-leases/maintenance.json` in a frozen,
+  versioned format, so the upgraded agent honors a lease its predecessor wrote.
+- While it is live, every environment lease on the node fails with a locked
+  error naming the maintenance operation. While any environment lease of any
+  project is live, the maintenance lease is refused immediately and the
+  command exits 3 listing the holders. takod checks and writes both kinds under
+  one mutex.
+- It lasts 15 minutes and is not renewed, because the agent restarts during
+  the operation; a lease whose release failed expires on its own.
+- An agent without `lease.node-maintenance-v1` cannot grant it. The command
+  then holds the selected environment's lease on that node for the same window
+  and warns that other environments and projects on the node are not fenced.
+  The first `tako upgrade servers` after updating the CLI takes this path.
+- A node whose takod does not answer is upgraded or set up without a lease:
+  no agent is running that could grant environment leases.
+
+`tako cleanup`, `tako backup`, `tako state forget-node` and `tako state repair`
+act on one app/stage and keep using environment leases.
+
 ## Deployment Strategies
 
 ### Default selection

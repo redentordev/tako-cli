@@ -52,15 +52,15 @@
 
 ## 3. PR3: Node maintenance lease (takod and CLI)
 
-- [ ] 3.1 takod: add the maintenance lease at `<dataDir>/node-leases/maintenance.json` with a frozen v1 format. Enforce mutual exclusion with environment leases under one mutex (`pkg/takod/lease.go`), and advertise `lease.node-maintenance-v1`. Verify with takod unit tests:
+- [x] 3.1 takod: add the maintenance lease at `<dataDir>/node-leases/maintenance.json` with a frozen v1 format. Enforce mutual exclusion with environment leases under one mutex (`pkg/takod/lease.go`), and advertise `lease.node-maintenance-v1`. Verify with takod unit tests:
   - the maintenance lease blocks environment leases;
   - a live environment lease of any project blocks the maintenance lease, and the error lists the holders;
   - expiry releases both;
   - a lease written before a restart is honored after it.
-- [ ] 3.2 CLI: add `AcquireNodeMaintenanceLease(node)` (`pkg/engine/leases.go`) with a 15-minute TTL, no renewal, and the D6 fallback that takes the selected environment's lease and warns. Use it per node in `cmd/upgrade.go` (non-enrolled stage only) and in `cmd/setup.go` converge. Verify with:
+- [x] 3.2 CLI: add `AcquireNodeMaintenanceLease(node)` (`pkg/engine/leases.go`) with a 15-minute TTL, no renewal, and the D6 fallback that takes the selected environment's lease and warns. Use it per node in `cmd/upgrade.go` (non-enrolled stage only) and in `cmd/setup.go` converge. Verify with:
   - engine tests using fake agents with and without the capability;
   - an upgrade test proving that the lease is released on the restarted agent and that an environment lease held elsewhere makes the upgrade exit 3.
-- [ ] 3.3 Docs: add the node lease and the fallback warning to `docs/ORCHESTRATION-MODEL.md`. Add a `tako upgrade servers` note to `docs/MACHINE-INTERFACE.md` (exit 3 when an environment lease is live).
+- [x] 3.3 Docs: add the node lease and the fallback warning to `docs/ORCHESTRATION-MODEL.md`. Add a `tako upgrade servers` note to `docs/MACHINE-INTERFACE.md` (exit 3 when an environment lease is live).
 
 ## 4. PR4: Shared-node mesh peer sets (takod and CLI)
 

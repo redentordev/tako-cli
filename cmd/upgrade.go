@@ -217,6 +217,8 @@ func runUpgradeServers(cmd *cobra.Command, args []string) error {
 		defer func() { _ = coordinator.ReleaseTakodUpgradeCoordinatorLock() }()
 	}
 	blocked := false
+	var leaseErrors []error
+	lastUpgradeLeaseError = nil
 	for _, planned := range plan {
 		if blocked {
 			result.Nodes = append(result.Nodes, engine.UpgradeServersNodeOutcome{
@@ -247,8 +249,12 @@ func runUpgradeServers(cmd *cobra.Command, args []string) error {
 				continue
 			}
 		}
-		outcome := upgradeServerNode(cfg, sshPool, out, planned.Name, servers[planned.Name], planned.Stage)
+		outcome := upgradeServerNode(cfg, sshPool, out, envName, planned.Name, servers[planned.Name], planned.Stage)
 		result.Nodes = append(result.Nodes, outcome)
+		if outcome.Outcome == engine.UpgradeOutcomeBlocked && lastUpgradeLeaseError != nil {
+			leaseErrors = append(leaseErrors, lastUpgradeLeaseError)
+			lastUpgradeLeaseError = nil
+		}
 		if planned.Stage != engine.UpgradeStageLegacy && (outcome.Outcome == engine.UpgradeOutcomeFailed || outcome.Outcome == engine.UpgradeOutcomeRolledBack) {
 			blocked = true
 		}
@@ -263,6 +269,8 @@ func runUpgradeServers(cmd *cobra.Command, args []string) error {
 
 	var opErr error
 	switch {
+	case len(leaseErrors) > 0:
+		opErr = lockedUpgradeError(leaseErrors)
 	case failed == 0:
 		if upgradeServersDryRun {
 			fmt.Fprintln(out, "\nDry-run complete. Apply with: tako upgrade servers")
@@ -444,7 +452,7 @@ func validateControllerLastWorkers(cfg *config.Config, sshPool *ssh.Pool, contro
 
 // upgradeServerNode upgrades (or, in dry-run, assesses) one node's takod
 // agent. Failures are recorded in the outcome so remaining nodes still run.
-func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, name string, server config.ServerConfig, stage string) engine.UpgradeServersNodeOutcome {
+func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, envName string, name string, server config.ServerConfig, stage string) engine.UpgradeServersNodeOutcome {
 	node := engine.UpgradeServersNodeOutcome{Server: name, Host: server.Host, ToVersion: Version, Stage: stage}
 	fail := func(err error) engine.UpgradeServersNodeOutcome {
 		node.Outcome = engine.UpgradeOutcomeFailed
@@ -520,6 +528,23 @@ func upgradeServerNode(cfg *config.Config, sshPool *ssh.Pool, out io.Writer, nam
 		node.Outcome = engine.UpgradeOutcomeCurrent
 		fmt.Fprintf(out, "✓ takod already at %s; nothing to do (use --force to reinstall)\n", Version)
 		return node
+	}
+	if stage == engine.UpgradeStageLegacy {
+		// Non-enrolled nodes have no cluster upgrade coordinator. Hold the node
+		// maintenance lease from just before the first mutation until the
+		// restarted agent verified (or the rollback finished).
+		lease, leaseErr := acquireUpgradeNodeLease(client, cfg, envName, name, server, status, statusErr, out)
+		if leaseErr != nil {
+			if !isLockedError(leaseErr) {
+				return fail(leaseErr)
+			}
+			lastUpgradeLeaseError = leaseErr
+			node.Outcome = engine.UpgradeOutcomeBlocked
+			node.Error = leaseErr.Error()
+			fmt.Fprintf(out, "✗ %v\n", leaseErr)
+			return node
+		}
+		defer releaseUpgradeNodeLease(lease, out)
 	}
 	prov := provisioner.NewProvisioner(client, verbose)
 	prov.SetOutput(humanOut())

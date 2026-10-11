@@ -94,6 +94,16 @@ func AcquireLease(ctx context.Context, dataDir string, req LeaseRequest) (*Lease
 	if req.Renew {
 		return renewLease(path, req.ID, ttl, now)
 	}
+	// A live node maintenance lease (upgrade, setup) excludes every
+	// environment lease on the node. Checked under leaseMu, which the
+	// maintenance lease also holds, so neither can slip in between.
+	maintenance, err := readNodeMaintenanceLeaseLocked(dataDir, now)
+	if err != nil {
+		return nil, err
+	}
+	if maintenance != nil {
+		return maintenanceBlockedEnvironmentLease(maintenance), nil
+	}
 
 	content, err := json.MarshalIndent(lease, "", "  ")
 	if err != nil {

@@ -83,8 +83,9 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		Nodes:       []engine.SetupNodeResult{},
 	}
 
-	// Setup takes no leases: pre-setup runs once before the first node and
-	// post-setup once after the last.
+	// Setup takes no environment leases; a node whose takod answers is held
+	// under the node maintenance lease while it is set up. Pre-setup runs
+	// once before the first node and post-setup once after the last.
 	setupContext := hooks.Context{Servers: targetServerNames}
 	setupStarted := time.Now()
 	opErr := hookSession.runPre(cmd.Context(), setupContext)
@@ -179,6 +180,18 @@ func runSetupNode(cfg *config.Config, sshPool *ssh.Pool, name string, server con
 		warn: func(message string) {
 			emitSetupLine(name, "  "+message+"\n")
 		},
+	}
+
+	// A node whose takod answers may be running another environment's or
+	// project's operation: hold the node maintenance lease while setup
+	// reinstalls takod, the firewall and deploy access.
+	if status, statusErr := probeTakodAgentStatus(client, cfg, upgradeServersStatusProbe); statusErr == nil && status != nil {
+		lease, err := acquireNodeMaintenanceLeaseForCommand(client, cfg, envName, name, server, status, nil, "setup", setupLineWriter{node: name})
+		if err != nil {
+			node.Error = err.Error()
+			return node, err
+		}
+		defer releaseUpgradeNodeLease(lease, setupLineWriter{node: name})
 	}
 
 	steps := setupNodeSteps(prov, cfg, name, server.User, meshListenPort, takodBinaryForSetup(), node.Mode == engine.SetupModeConverge, access)
