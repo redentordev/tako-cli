@@ -60,8 +60,19 @@ When the environment variable `TAKO_REDACTION_LABELS` is `off`, `0`, `false` or 
 - **WHEN** `TAKO_REDACTION_LABELS=off` is set and a registered `secrets.STRIPE_KEY` value appears in a log line
 - **THEN** the `log.line` `message` and `data.data` contain `[REDACTED]` and do not contain `STRIPE_KEY`
 
+### Requirement: Public values never shield a secret
+A registered secret occurrence SHALL be left unmasked only when it lies entirely inside an occurrence of a longer registered public value (a project, environment or service name, image reference or similar). A public value that lies inside, or overlaps, a secret occurrence SHALL NOT prevent the secret from being masked.
+
+#### Scenario: Public name inside a longer secret does not shield it
+- **WHEN** project `acme` is registered as public, `acme-prod-token-9f8e7d6c` is registered as `secrets.API_TOKEN`, and output contains `acme-prod-token-9f8e7d6c`
+- **THEN** the output shows `[REDACTED:secrets.API_TOKEN]` and contains no part of `-prod-token-9f8e7d6c`
+
+#### Scenario: Short secret inside a longer public name
+- **WHEN** service `jardin-cms` is registered as public, `jardin` is registered as `env.SITE_TOKEN`, and output contains `deployed jardin-cms with jardin`
+- **THEN** the output is `deployed jardin-cms with [REDACTED:env.SITE_TOKEN]`
+
 ### Requirement: Redaction is deterministic and idempotent
-Registered values SHALL be replaced longest first, so that overlapping secrets produce the same output on every run. Applying redaction to already-redacted text SHALL NOT change it. Markers already present, and markers inserted during redaction, SHALL NOT be altered by registered values or patterns.
+Registered values SHALL be replaced longest first, so that overlapping secrets produce the same output on every run. Applying redaction to already-redacted text with the same redactor SHALL NOT change it. Markers this redactor could have produced SHALL NOT be altered by registered values or patterns, whether already present or inserted during redaction.
 
 #### Scenario: Overlapping secrets
 - **WHEN** both `abcd1234` (as `env.A_TOKEN`) and `xxabcd1234yy` (as `env.B_TOKEN`) are registered and output contains `xxabcd1234yy`
@@ -74,6 +85,13 @@ Registered values SHALL be replaced longest first, so that overlapping secrets p
 #### Scenario: Marker survives the key/value pattern
 - **WHEN** text containing `[REDACTED:secrets.API_KEY]` is redacted again
 - **THEN** the marker is unchanged
+
+### Requirement: Only markers the redactor could have produced are protected
+Marker protection SHALL apply only to the bare `[REDACTED]`, to markers whose label is registered with the same redactor, and to `[REDACTED:pattern.<id>]` for a known pattern ID. Any other text shaped like a marker SHALL be redacted as ordinary text.
+
+#### Scenario: Marker-shaped text does not shield a secret
+- **WHEN** `ghp_abcdefghijklmnop1234` is registered as `secrets.GH_TOKEN` and output contains `[REDACTED:ghp_abcdefghijklmnop1234]`
+- **THEN** the output contains `[REDACTED:[REDACTED:secrets.GH_TOKEN]]` and does not contain `ghp_abcdefghijklmnop1234`
 
 ### Requirement: envFile values are registered for redaction
 Every command that registers inline service `env:` values SHALL also register the values loaded from the service's `envFile`/`envFiles`, using the same credential-like rule as inline `env:` values and the label `envFile.<NAME>`. `deploy` and `exec` SHALL ignore a load error here, because building the container env file fails on it. All other commands SHALL emit one `warning` event with `data.reason: "envfile-unreadable"` stating that the file's values will not be redacted, and continue.

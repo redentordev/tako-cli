@@ -26,16 +26,17 @@ CI makes it worse. In GitHub Actions the answer to "did it work and what's live"
 - **Undo command:**
   - **Deploy:** an explicit project rollback to the stable deployment that was current before this run, e.g. `tako rollback -e production 1767225000`.
   - **Rollback:** a roll-forward to the record it rolled away from.
-  - **Promote:** `tako rollback --service NAME`.
+  - **Promote:** re-promote the retained previous revision; when it was pruned, a rollback pinned to a display ID, e.g. `tako rollback -e production --service web 1767225000`.
   - **Scale:** `tako scale NAME=<previous>`.
   - **No safe undo** (first deploy, nothing changed, history unreadable): the undo is omitted with a reason.
-  - `--config` is included when a non-default config path was used.
-- **Redaction.** The summary is built from already-redacted strings. The event stream redacts only top-level string `data` values (`pkg/takoapi/events/sinks.go:165-178`), and result documents are not redacted at all. Images, service names, URLs and IDs are public values per v0.14.1. Error text, commit messages and next-step text go through `Engine.RedactSensitive`.
+  - Every undo names its environment and target explicitly and never relies on a command's default target. `--config` is included when a non-default config path was used.
+- **Redaction.** The summary is built from already-redacted strings. The event stream redacts only top-level string `data` values (`pkg/takoapi/events/sinks.go:165-178`), and result documents are not redacted at all. Images, service names, URLs and IDs are public values per v0.14.1. Error text, commit messages and next-step text go through `Engine.RedactSensitive`. The existing `error` and `services[].error` fields of `DeployResult` and `ScaleResult`, raw today, are redacted the same way.
 - **Supporting behavior changes:**
   - URL lists in `DeployResult.urls` and the summary are sorted.
   - The mid-output "Your application is available at" block is folded into the summary. Human text is not a contract.
-  - Post-rollout bookkeeping failures in deploy now return the partial `DeployResult` (status `failed`, `error` set, summary present) instead of `nil`. Exit codes do not change.
-- **Preview environments.** The summary carries `environment.kind` (`standard` today) and per-URL `kind`. The sibling change `add-preview-environments` can then report `kind: preview` and an expiry without redesigning the summary.
+  - Post-rollout bookkeeping failures in deploy now return the partial `DeployResult` (status `failed`, `error` set, summary outcome `partial` with the undo) instead of `nil`. Exit codes do not change.
+  - A failure whose recovery did not restore every service reports outcome `partial`, not `failed`, so the undo is kept.
+- **Preview environments.** The summary carries `environment.kind` (`standard` today) and per-URL `kind` (`public` or `internal`). The sibling change `add-preview-environments` can then report `environment.kind: preview` and an expiry without redesigning the summary, and swaps `-e <env>` for `--preview <name>` in generated commands.
 - No **BREAKING** changes. Every field and event type is additive, existing result fields keep their meaning, and exit codes do not change.
 
 ## Out of Scope

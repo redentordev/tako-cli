@@ -94,7 +94,7 @@ type SummaryReplicas struct{ Desired, Running int }   // json: desired, running
 type SummaryURL struct {
     Service string `json:"service"`
     URL     string `json:"url"`
-    Kind    string `json:"kind"`             // public | internal (preview reserved)
+    Kind    string `json:"kind"`             // public | internal; consumers treat other values as opaque
     Status  string `json:"status,omitempty"` // ready | pending | failed | not_checked
     Detail  string `json:"detail,omitempty"`
 }
@@ -197,17 +197,17 @@ Reasons for the extra read:
 
 ### D6. Undo command derivation
 
-The builder produces `argv` and `command`. `command` is a POSIX-shell-quoted join, so it is copy-pasteable on Windows PowerShell for these argument shapes, which use no special characters. The cmd layer adds `--config <path>` when `cfgFile != ""`. `-e <env>` is always included.
+The builder produces `argv` and `command`. `command` is a POSIX-shell-quoted join, so it is copy-pasteable on Windows PowerShell for these argument shapes, which use no special characters. The cmd layer adds `--config <path>` when `cfgFile != ""`. The environment is always selected explicitly: `-e <env>` for a declared environment. (The sibling `add-preview-environments` substitutes `--preview <name>` for a preview, because `-e preview-<name>` names no declared environment; every command the builder emits goes through one environment-selector helper so that substitution is a single change.) `argv` and `command` carry only config names, deployment IDs, revisions, replica counts and the config path, so they are not passed through the redactor and stay runnable.
 
 | Operation | Undo |
 | --- | --- |
-| deploy, outcome `succeeded`, `partial` or `failed` with any service changed and kept | `tako rollback -e ENV <displayId of P>` where P is the newest stable record (`success`/`rolled_back`) before this deploy's record. `targetDeploymentId` = P's full ID. |
+| deploy, outcome `succeeded` or `partial` (D9) | `tako rollback -e ENV <displayId of P>` where P is the newest stable record (`success`/`rolled_back`) before this deploy's record. `targetDeploymentId` = P's full ID. |
 | deploy with no stable predecessor (first deploy) | none: `unavailable: "first deployment; nothing to roll back to"`; next step `tako destroy`/`tako remove` is **not** suggested |
 | deploy `up_to_date` / `warmed` (nothing went live) | none: `unavailable: "nothing changed"` / `"warmed revision is not serving; nothing to undo"` |
 | deploy where a changed service is `persistent: true` | the command as above plus a note: "persistent services X are skipped by project rollback; add --include-persistent to include them" (the flag is not added automatically) |
 | project rollback `rolled_back`/`failed` | `tako rollback -e ENV <displayId of the newest record before the rollback ran>`, which rolls forward to what was rolled away from |
 | single-service rollback | `tako rollback -e ENV --service NAME <displayId of the record before the rollback>` |
-| promote | `tako promote NAME -e ENV --revision <fromRevision>` when the post-promote actual state still lists `fromRevision` as retained; otherwise `tako rollback -e ENV --service NAME` |
+| promote | `tako promote NAME -e ENV --revision <fromRevision>` when the post-promote actual state (already gathered by promote, `promote.go:275`) still lists `fromRevision` as retained; otherwise `tako rollback -e ENV --service NAME <displayId of R>` where R is the newest stable record older than the promote's own record that contains NAME. R comes from one best-effort history read after the promote record is saved; on failure the undo is unavailable with `deployment history unreadable` and next step `tako history -e ENV` |
 | scale | `tako scale -e ENV NAME=<old> [NAME2=<old2>]` |
 
 How P is found:
@@ -221,6 +221,8 @@ Why the target is explicit rather than a bare `tako rollback`:
 - The displayed `displayId` is accepted by rollback's prefix resolution. If it ever becomes ambiguous, rollback fails closed with exit 2, so a stale command cannot silently do the wrong thing.
 
 The command omits `-y`, so a human sees the plan and confirms.
+
+Every undo is pinned. An unpinned `tako rollback --service NAME` is never emitted: its default target moves with the next deploy, so a command copied from an old CI log could roll back the wrong release.
 
 ### D7. Next steps
 
@@ -243,7 +245,7 @@ There are at most 5 entries.
   - the failure path;
   - success;
   - strict-domain error.
-- The bookkeeping-failure returns at `deploy.go:1083-1136` change from `return nil, err` to setting `result.Status = failed` and `result.Error = redacted`, building the summary with `outcome: failed` and the note "rollout succeeded; state bookkeeping failed: …", and returning `result, err`. The error, and therefore the exit class, is unchanged. Today those paths emit no result document, so this is additive.
+- The bookkeeping-failure returns at `deploy.go:1083-1136` change from `return nil, err` to setting `result.Status = failed` and `result.Error = redacted`, building the summary with `outcome: partial` (the rollout is live, so rows keep `added`/`updated` and the undo is derived as usual) and the note "rollout succeeded; state bookkeeping failed: …", and returning `result, err`. The error, and therefore the exit class, is unchanged. Today those paths emit no result document, so this is additive.
 - `failedDeployResult` (pre-hook failure) builds a summary with `outcome: failed`, every planned service `not_attempted`, and no undo (`unavailable: "nothing was changed"`).
 - The cmd layer attaches hook outcomes, then calls `emitOperationSummary(result.Summary)`, then `emitResultDocument(result)`. This lets the summary mention a failed post-deploy hook in `notes`, e.g. "post-deploy hook smoke failed (exit 1)".
 
@@ -256,10 +258,10 @@ Rollback, promote and scale build the summary at the end of their engine method,
 | `succeeded` | Status success / rolled_back / promoted, with at least one service changed |
 | `up_to_date` | Nothing changed |
 | `warmed` | Deploy succeeded, but manual-promotion services are only warmed (`DeploymentSuccessStatus`) |
-| `partial` | Failed, but at least one service kept a new state (`added`/`updated`/`rolled_back` before the failure) |
-| `failed` | Failed with no service left changed (all restored, not attempted, or failed before cutover) |
+| `partial` | Failed, but at least one service differs from its pre-operation state: it kept a new state (`added`/`updated`/`rolled_back` before the failure), or it failed and its recovery status is not `restored` (`failed`, `disabled`, `unsupported`) |
+| `failed` | Failed with every service back at its pre-operation state (all restored, not attempted, or failed before cutover) |
 
-Exit codes are unchanged. `partial` and `failed` both exit 1, as today.
+Exit codes are unchanged. `partial` and `failed` both exit 1, as today. The `partial` rule deliberately counts an unrestored failure as a change: that is exactly the case where the operator needs the undo command most.
 
 ### D10. Emission: event, human text, JSON
 
@@ -310,11 +312,15 @@ Images, URLs, service, environment and project names, IDs and revisions are emit
 
 The GitHub writer and text renderer consume only the built summary, so they inherit the redaction. A test registers a secret that appears in an error string and asserts that it is absent from the JSON, the event, the text and the Markdown.
 
+The result documents themselves have the same gap today: deploy copies raw error text into `DeployResult.error` and `services[].error` (`deploy.go:962`, `:1197`), and scale does the same (`scale.go:278`, `:302`). Health-failure errors embed recent container log lines, so `--output json` can carry a secret that the event stream masks. Because `finishSummary` (and the scale builder) already touches every return path, it also redacts those existing fields in place with `e.RedactSensitive` before the summary copies them. This changes only text that contained a registered secret or matched a pattern, which the documented redaction guarantee already forbids in result documents. Rollback and promote already redact at the source.
+
+Re-redacting text is safe: a second pass cannot reveal anything, and the sibling `explain-secret-redaction` (D5) makes it byte-identical, so a field the summary re-renders through the event stream keeps its markers intact.
+
 ### D12. GitHub Actions step summary
 
 `writeGitHubStepSummary(s)` runs inside `emitOperationSummary` when all of these hold:
 - `GITHUB_STEP_SUMMARY` is non-empty;
-- `TAKO_STEP_SUMMARY` is not `off`, `0` or `false` (case-insensitive);
+- `TAKO_STEP_SUMMARY` is not `off`, `0`, `false` or `no` (case-insensitive; the same vocabulary as `TAKO_REDACTION_LABELS` in `explain-secret-redaction`);
 - the summary is non-nil.
 
 It appends (`O_APPEND|O_CREATE`, mode 0644) Markdown:
@@ -324,7 +330,7 @@ It appends (`O_APPEND|O_CREATE`, mode 0644) Markdown:
 - a URL list;
 - the undo command in a fenced `sh` block;
 - next steps;
-- the error inside `<details>`.
+- the error inside `<details>`, as a fenced code block so redaction markers and other text render verbatim instead of as Markdown.
 
 Limits:
 - The writer caps at 200 service rows and 64 KiB (GitHub's limit is 1 MiB per step), with a truncation note.
@@ -344,13 +350,15 @@ It runs regardless of `--output` / `--events`, because the file is not stdout.
 - [Returning a result on bookkeeping failure changes what JSON consumers see on those paths] → Previously there was no document, which was a contract gap. Status `failed` and exit codes are unchanged.
 - [Text-mode output changes (URL block moves)] → Human text is not a contract. Golden transcript tests are updated.
 - [The undo command is not runnable as-is on Windows `cmd.exe` when the config path has spaces] → The config path is quoted POSIX-style. Docs note it. The argv array is the exact form for automation.
+- [Redacting `DeployResult.error`, `services[].error` and the scale equivalents changes those strings] → Only text that carried a registered secret or matched a secret pattern changes; leaving it raw contradicts the documented redaction guarantee.
+- [The pinned promote fallback needs one more history read] → Best effort after the promote record is saved, under the leases promote already holds; a failure only makes the undo unavailable.
 
 ## Migration Plan
 
 - Pure CLI change, with no takod or state-format change. Older CLIs ignore nothing, since they never see the new fields.
 - Machine consumers may start reading `summary` / `operation.summary` immediately. Nothing they read today changes, except that `urls` is now sorted.
 - Sibling ordering:
-  - `add-preview-environments` sets `Environment.Kind = "preview"`, adds `Environment.Preview = {name, base, expiresAt}` (shape owned by that change's design), and adds `URLs[].Kind = "preview"`. All of these are additive. If it lands first, it adds those fields to this type as part of its own work.
+  - `add-preview-environments` sets `Environment.Kind = "preview"`, adds `Environment.Preview = {name, base, expiresAt}` (shape owned by that change's design), and swaps the environment selector in derived commands to `--preview <name>`. Preview URLs keep `kind: public`/`internal`, so a consumer that filters public URLs works for previews unchanged. All of these are additive. If it lands first, it adds those fields to this type as part of its own work.
   - `explain-secret-redaction` changes the mask text only, and summaries inherit it automatically.
 
 ## Assumptions
@@ -359,21 +367,19 @@ It runs regardless of `--output` / `--events`, because the file is not stdout.
 - A2. Loading history in `PlanDeploy` under the held lease is safe and cheap, since it is the same call used for run services today.
 - A3. `FormatDeploymentID` display IDs (10 characters) stay unique in practice. Rollback fails closed if they are not.
 
-## Open Questions (with recommended answers)
+## Resolved questions
 
-1. **Should `scale` and `promote` be in scope for v1, or only deploy and rollback?**
-   Recommended: include them. They share the builder, the cost is small, and a uniform shape across mutating commands is the point.
-2. **Should the human summary also print in machine modes (to stderr)?**
-   Recommended: yes. It is consistent with all other human output, and CI logs using `--events ndjson` still show a readable end block. No extra flag.
-3. **Is an opt-out for the human block needed (e.g. `TAKO_SUMMARY=off`)?**
-   Recommended: no for v1. It replaces the URL block rather than adding much noise. Revisit if users ask.
-4. **Should the undo command include `-y`?**
-   Recommended: no. A human should see the rollback plan. CI users can append `-y`, and `undo.argv` makes that trivial.
-5. **For promote undo, should it prefer `--revision <previous>` (instant) over `rollback --service` (redeploy)?**
-   Recommended: prefer promote-back only when the post-promote actual state still lists the previous revision as retained; otherwise fall back to rollback (D6).
-6. **Should the step summary be enabled by default?**
-   Recommended: yes, default on whenever `GITHUB_STEP_SUMMARY` is set, with `TAKO_STEP_SUMMARY=off` to disable. That gives zero-config value in CI.
-7. **Should health wait for `starting` containers to settle?**
-   Recommended: no. Report `starting` truthfully. The rollout health gate already waited, and waiting again would slow every deploy.
-8. **Should event type naming be `operation.summary` or `deploy.summary`?**
-   Recommended: `operation.summary`, since it covers four commands. `data.operation` distinguishes them, as rollback events already do.
+1. **Are `scale` and `promote` in scope for v1?** Yes. They share the builder and the additive `summary` field, and a uniform shape across mutating commands is the point of the change.
+2. **Does the human summary also print in machine modes (to stderr)?** Yes, with no extra flag. It follows the existing `humanEventSink` rule for every human message, so stdout stays parseable.
+3. **Is there an opt-out for the human block?** No, not in v1. The block replaces the mid-output URL block rather than adding noise, and an opt-out can be added later without breaking anything.
+4. **Does the undo command include `-y`?** No. A human should see the rollback plan first; automation appends `-y` to `undo.argv`.
+5. **Does promote undo prefer `--revision <previous>` over a rollback?** Yes, when the post-promote actual state still retains the previous revision. Otherwise the fallback is a rollback pinned to an explicit record (changed from the unpinned `tako rollback --service NAME`, whose default target moves with the next deploy).
+6. **Is the step summary on by default?** Yes, whenever `GITHUB_STEP_SUMMARY` is set, with `TAKO_STEP_SUMMARY=off|0|false|no` to disable. It is a side file, so it cannot break stdout or exit codes; the opt-out vocabulary matches `TAKO_REDACTION_LABELS`.
+7. **Does the health read wait for `starting` containers?** No. It reports `starting` truthfully; the rollout gate already waited, and a second wait would slow every deploy.
+8. **Is the event `operation.summary` or `deploy.summary`?** `operation.summary`. It covers four commands and `data.operation` distinguishes them, as rollback events already do.
+
+Review additions (not open questions in the draft):
+- **Bookkeeping failure after a live rollout is `partial`, not `failed`** (D8). The new state is serving, so the operator needs the undo command.
+- **An unrestored failed service makes the outcome `partial`** (D9). The environment differs from where it started, which is the case where undo matters most.
+- **Existing result error fields are redacted** (D11). `DeployResult.error`, `services[].error` and the scale equivalents carry raw error text today, including health-failure log lines.
+- **The environment selector is one helper** (D6). This lets previews use `--preview <name>`, since `-e preview-<name>` cannot load.

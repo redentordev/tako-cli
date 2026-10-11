@@ -57,11 +57,11 @@ The summary `outcome` SHALL be:
 
 | `outcome` | When |
 | --- | --- |
-| `succeeded` | at least one service changed and nothing failed |
+| `succeeded` | a service changed and nothing failed |
 | `up_to_date` | nothing changed |
 | `warmed` | the only changes are revisions warmed for manual promotion |
-| `partial` | the operation failed after at least one service kept a new state |
-| `failed` | the operation failed and no service kept a new state |
+| `partial` | failed, and a service is not at its pre-operation state (kept or unrestored) |
+| `failed` | failed, and every service is at its pre-operation state |
 
 Exit codes SHALL be unchanged by this requirement.
 
@@ -74,6 +74,11 @@ Exit codes SHALL be unchanged by this requirement.
 #### Scenario: Failure with everything restored
 - **WHEN** the first and only planned service fails and its previous revision is restored
 - **THEN** the outcome is `failed`
+
+#### Scenario: Failure that could not be restored
+- **WHEN** the only planned service fails and its recovery status is `failed`
+- **THEN** the outcome is `partial`
+- **AND** the summary includes the undo command
 
 ### Requirement: Post-operation health
 After an operation that changed at least one service, Tako SHALL read the services' current state once, with a bounded timeout. It SHALL report each row's `health` as one of `healthy`, `unhealthy`, `starting`, `degraded`, `stopped`, `unknown` or `n/a`, and report running and desired replicas. A failed or timed-out read SHALL yield `unknown` with a note, and SHALL NOT fail the operation or change its exit code.
@@ -108,7 +113,7 @@ The summary SHALL list the public URLs (`https://` + each proxy domain) and the 
 - **THEN** every public URL has status `not_checked`
 
 ### Requirement: Undo command
-The summary SHALL include an undo command pinned to an explicit target, both as `argv` and as a shell-quoted `command`, unless no safe undo exists. When no safe undo exists, `undo.unavailable` SHALL state why. The command SHALL include `-e <environment>`, and `--config <path>` when a non-default config path was used. It SHALL NOT include `-y`.
+The summary SHALL include an undo command pinned to an explicit target, both as `argv` and as a shell-quoted `command`, unless no safe undo exists. When no safe undo exists, `undo.unavailable` SHALL state why. The command SHALL select the operation's environment explicitly (`-e <environment>` for a declared environment), and SHALL include `--config <path>` when a non-default config path was used. It SHALL NOT include `-y`, and SHALL NOT rely on a command's default target.
 
 #### Scenario: Deploy undo targets the previous stable deployment
 - **WHEN** the newest stable deployment before this deploy has ID `1767225000123456789`
@@ -140,7 +145,10 @@ The summary SHALL include an undo command pinned to an explicit target, both as 
 #### Scenario: Promote undo
 - **WHEN** `tako promote web` switches from revision `r1` to `r2`, and `r1` is still retained
 - **THEN** the undo is `tako promote web -e production --revision r1`
-- **AND** when `r1` is no longer retained, the undo is `tako rollback -e production --service web`
+
+#### Scenario: Promote undo when the previous revision is gone
+- **WHEN** `tako promote web` switches from `r1` to `r2`, `r1` is no longer retained, and the newest stable record before the promotion that contains `web` has display ID `1767225000`
+- **THEN** the undo is `tako rollback -e production --service web 1767225000`
 
 #### Scenario: Custom config path
 - **WHEN** the operator ran `tako --config deploy/tako.yaml deploy`
@@ -185,7 +193,8 @@ The `DeployResult`, `RollbackResult`, `PromoteResult` and `ScaleResult` document
 
 #### Scenario: Result returned when bookkeeping fails after rollout
 - **WHEN** a deploy's rollout succeeds but persisting takod state fails
-- **THEN** a `DeployResult` with status `failed`, `error`, and a summary noting that the rollout succeeded but state bookkeeping failed is emitted
+- **THEN** a `DeployResult` with status `failed`, `error`, and a summary with outcome `partial` noting that the rollout succeeded but state bookkeeping failed is emitted
+- **AND** the summary keeps the undo command
 - **AND** the command exits with the same code as before this change
 
 ### Requirement: Summary redaction
@@ -200,8 +209,15 @@ Every free-text field of the summary SHALL pass through the engine's secret reda
 - **AND** a short env value `site` is registered as a secret
 - **THEN** the summary shows the service name and image unmasked
 
+### Requirement: Result error fields are redacted
+The `error` field and every per-service `error` field of `DeployResult` and `ScaleResult` SHALL pass through the engine's secret redactor before the result document is emitted, in every output mode.
+
+#### Scenario: Secret in a health-failure error
+- **WHEN** a deploy fails a health check and the error embeds a container log line containing the value of a registered secret
+- **THEN** that value appears masked in the result document's `error` and `services[].error`
+
 ### Requirement: GitHub Actions step summary
-When the `GITHUB_STEP_SUMMARY` environment variable names a file and `TAKO_STEP_SUMMARY` is not `off`, `0` or `false`, Tako SHALL append a Markdown rendering of the summary to that file in every output mode. The rendering contains a status heading, the service table, URLs, the undo command in a code block, next steps, and the error.
+When the `GITHUB_STEP_SUMMARY` environment variable names a file and `TAKO_STEP_SUMMARY` is not `off`, `0`, `false` or `no` (case-insensitive), Tako SHALL append a Markdown rendering of the summary to that file in every output mode. The rendering contains a status heading, the service table, URLs, the undo command in a code block, next steps, and the error.
 
 #### Scenario: Step summary written in CI
 - **WHEN** `tako deploy -y --events ndjson` runs in GitHub Actions
@@ -228,7 +244,7 @@ A failure to write the step summary SHALL emit a `warning` event and SHALL NOT c
 - **THEN** no file is written
 
 ### Requirement: Environment kind for future preview environments
-The summary's `environment.kind` SHALL be `standard` for environments declared under `environments:`, and each URL SHALL carry a `kind`. Consumers SHALL treat unknown `environment.kind` and URL `kind` values as opaque, so that preview environments can report `preview` without a schema change.
+The summary's `environment.kind` SHALL be `standard` for environments declared under `environments:`, and each URL SHALL carry a `kind` of `public` or `internal`. Consumers SHALL treat unknown `environment.kind` and URL `kind` values as opaque, so that preview environments can report `environment.kind: preview` without a schema change.
 
 #### Scenario: Standard environment
 - **WHEN** any deploy to a declared environment completes

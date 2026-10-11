@@ -16,6 +16,7 @@ Observed behavior today (v0.14.1):
   3. Applies 17 regex patterns (`compilePatterns`, `:85-131`) through `redactPatternMatches` (`:241-261`). That function skips hex image tags and digests and, for key/value matches, keeps the key (`redactMatch`, `:281-288`).
   4. Restores the placeholders.
 - Patterns are anonymous, so there is no way to say which pattern fired.
+- **Leak: a public value shields a longer secret that contains it.** Step 1 replaces public values before any secret is looked at. With project `acme` (registered public) and secret `acme-prod-token-9f8e…`, the project name inside the secret becomes a placeholder, the secret no longer matches in step 2, and the rest of the secret is printed unless a pattern happens to catch it. Public values are only 4+ character config names, but project and service names are routinely used as prefixes of generated credentials.
 - `RedactMap` and `IsSensitiveKey` (`:291-325`) have no callers outside the package.
 
 ### Engine (`pkg/engine/engine.go:89-202`)
@@ -184,16 +185,28 @@ Characters outside `segment` in a name, which config validation should already p
   - Helpers that build labels take names from the config, never from values.
 - **In `secrets.Manager`,** loaded secrets are registered as `secrets.<KEY>` (`manager.go:109-112`).
 
-### D4. Deterministic replacement order
+### D4. One deterministic pass over secrets and public values
 
-`Redact` replaces registered secrets in descending length, with ties broken by value order, mirroring `protectPublic`. The sorted slice is cached and rebuilt lazily after `Register*` calls, which happen before streaming, so steady-state cost is unchanged.
+`protectPublic` and the map-ordered secret loop are replaced by one pass that treats public values and secrets together:
+
+1. Find every occurrence of every registered secret and every registered public value in the input.
+2. A secret occurrence is left alone only when it lies entirely inside an occurrence of a **longer** public value. This keeps today's intended behavior: service `jardin-cms` stays readable even when a short secret such as `cms1` is a substring of it.
+3. Every other secret occurrence is masked. Longer secrets are matched first, ties broken by value order, so a secret that contains another is masked as one marker with the longer secret's label.
+4. A public occurrence is protected (placeholder) only when it does not overlap a masked secret occurrence. A public value inside or overlapping a secret therefore never shields it, which closes the leak described in Context.
+5. Patterns run on the result; markers and protected public values are placeholders and are never matched. All placeholders are restored at the end.
+
+A value registered as both public and secret is a secret (as today). The sorted value lists are cached and rebuilt lazily after `Register*` calls, which happen before streaming, so steady-state cost is unchanged. The output no longer depends on map iteration order.
 
 ### D5. Marker protection and idempotence
 
-- Before anything else, `Redact` replaces every existing marker matching `\[REDACTED(?::[A-Za-z0-9_\-@/:.]{1,96})?\]` with a placeholder, using the same NUL-delimited scheme as public values in a separate index space.
+- Before anything else, `Redact` replaces existing markers with a placeholder, using the same NUL-delimited scheme as public values in a separate index space. Only markers this redactor could have produced are protected:
+  - the bare `[REDACTED]`;
+  - `[REDACTED:<label>]` where `<label>` is a label registered with this redactor;
+  - `[REDACTED:pattern.<id>]` for a known pattern ID.
+- Any other text shaped like a marker is ordinary input. Protecting every match of the grammar would let marker-shaped text shield a secret: an application that logs `[REDACTED:ghp_…]`, or a secret made only of label characters, would pass through unmasked because the whole bracket was treated as a finished marker. A foreign marker that is not protected can at worst be rewritten by a pattern, which is cosmetic, never a leak.
 - The markers it inserts also go in as placeholders, so later patterns never see them. Without this, the key/value pattern `(?i)(secret|token|key|...)[\s=:]+([^\s]+)` would rewrite `[REDACTED:secrets.API_KEY]`, because `secrets.` contains `secret`, and break the label.
 - All placeholders are restored at the end.
-- Guarantee: `Redact(Redact(x)) == Redact(x)`. A registered value that is itself a substring of a marker (for example a secret equal to `REDACTED`) cannot corrupt the marker, because markers are protected before secret replacement.
+- Guarantee: `Redact(Redact(x)) == Redact(x)` for the same redactor, which is what the deploy summary relies on when it re-redacts already-redacted strings. A registered value that is itself a substring of a marker (for example a secret equal to `REDACTED`) cannot corrupt the marker, because markers are protected before secret replacement.
 
 ### D6. Opt-out: `TAKO_REDACTION_LABELS`
 
@@ -283,6 +296,7 @@ New `Engine.RegisterBackupSecrets(services)` walks each selected service's `back
   - A secretSources listing mode cannot be expanded statically, so the report states that sourced keys are verified at deploy/logs time.
 - **Exit codes.** The command exits 0 even when entries are unresolvable; this is a report. An unreadable `envFile` is reported inline and does not fail the command.
 - **Machine interface.** `config explain` stays in the human-only row of `docs/MACHINE-INTERFACE.md:624`, and `--output json` with `--redaction` returns the existing human-only error.
+- **Previews.** If `add-preview-environments` lands, `--redaction --preview <name>` reports the preview instance, with local secrets read from the base's file (`.tako/secrets.<base>`), still offline.
 
 ### D10. Compatibility statement
 
@@ -294,6 +308,7 @@ New `Engine.RegisterBackupSecrets(services)` walks each selected service's `back
 - **Names of secrets now appear in logs.** Names come from committed config. `TAKO_REDACTION_LABELS=off` covers strict environments, and provider locators are never used.
 - **Registering `envFile` values masks more output than today.** For example, a 16+ character mixed token in `.env.production` that is not actually secret will now be masked. The same rule already applies to inline `env:`, the label makes any such mask self-explaining, and `config explain --redaction` lists it as `token-shaped value`.
 - **Explain and runtime registration drifting.** Both use one classification function, and a parity test checks it.
+- **Public names inside secrets are now masked with the secret.** A line that contains a secret prefixed with the project name loses that name too. That is the intended fix: safety outranks readability, and the label says what was hidden.
 - **Extra placeholder pass per `Redact` call.** One regex scan for existing markers. `Redact` is per event or line, and the work is linear in line length.
 - **An `envFile` read in read-only commands (`logs`, `rollback`) where the file is missing on the operator's machine.** This emits one warning and does not fail.
 
@@ -303,14 +318,16 @@ New `Engine.RegisterBackupSecrets(services)` walks each selected service's `back
 2. Release notes call out the BREAKING marker change and `TAKO_REDACTION_LABELS=off`.
 3. Rollback: downgrading the CLI restores the old masks. No state is involved.
 
-## Open Questions
+## Resolved questions
 
-1. **Should JSON (machine) output keep a plain `[REDACTED]` while human output is labeled?** *Recommendation: no, label both.*
-   - Event `message` is documented as the human rendering, and `data` strings pass through the same function.
-   - Splitting them needs a second redaction pass per event, and lets `message` and `data.data` disagree.
-   - Machine consumers detect masks with the documented regex (D10).
-2. **Keep the partial reveal behind a flag?** *Recommendation: no.* It is strictly less safe than a full mask, and the label replaces its use.
-3. **Should `--redaction` also print the normal explain sections?** *Recommendation: no, report only.* `config explain` without the flag is unchanged. Combined output is long, and the redaction report is usually wanted on its own.
-4. **Should `config explain --redaction --resolve` invoke providers to confirm sourced keys exist?** *Recommendation: not in this change.* It would run vault CLIs from an "explain" command. `tako secrets fetch` already previews sourced keys with redacted output.
-5. **Opt-out spelling: an env var only, or also a `--no-redaction-labels` global flag?** *Recommendation: env var only* (D6 rationale). A flag can be added later without breaking anything.
-6. **Should an unreadable `envFile` in read-only commands warn or stay silent?** *Recommendation: warn once,* matching `secrets-unresolved`. A silent gap is exactly what this change exists to remove.
+1. **Should JSON (machine) output keep a plain `[REDACTED]` while human output is labeled?** Decision: no, label both. Event `message` and `data` strings pass through one function; splitting them needs a second pass and lets them disagree, and consumers detect masks with the documented regex (D10).
+2. **Keep the partial reveal behind a flag?** Decision: no, and its removal is required, not cosmetic. It leaks 2–4 characters and the approximate length of every secret, and the label replaces its only use.
+3. **Should `--redaction` also print the normal explain sections?** Decision: no, report only. `config explain` without the flag is unchanged, and the report is usually wanted on its own.
+4. **Should `config explain --redaction --resolve` invoke providers to confirm sourced keys exist?** Decision: not in this change. An explain command must not run vault CLIs; `tako secrets fetch` already previews sourced keys.
+5. **Opt-out spelling: an env var only, or also a `--no-redaction-labels` global flag?** Decision: env var only (D6). It is operator policy, must reach hooks and SDK embedders, and a flag can be added later without breaking anything.
+6. **Should an unreadable `envFile` in read-only commands warn or stay silent?** Decision: warn once, matching `secrets-unresolved`. A silent gap is what this change exists to remove.
+
+Review additions (flaws found and fixed in this design):
+
+- **Public values no longer shield secrets that contain them (D4).** One length-ordered pass over secrets and public values replaces protect-then-replace, which leaked the rest of any secret that starts with or contains a project or service name. A secret stays visible only when it lies entirely inside a longer public value.
+- **Only markers this redactor could have produced are protected (D5).** Protecting every grammar match let marker-shaped text shield a secret inside the brackets.

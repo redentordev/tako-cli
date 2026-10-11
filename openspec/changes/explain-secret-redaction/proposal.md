@@ -27,7 +27,8 @@ There is also no way to ask Tako, before deploying, "what will you mask, and is 
 - **Opt-out.** Setting `TAKO_REDACTION_LABELS=off` (also `0`, `false`, `no`) emits a plain `[REDACTED]` for every mask, for environments where even secret *names* must not appear in output. Masking itself cannot be turned off.
 - **Deterministic, idempotent redaction.**
   - Registered secrets are replaced longest first. Today map iteration order decides, so a secret that is a substring of another can produce different output on different runs.
-  - Existing markers are protected, so redacting already-redacted text (the engine does this when `RedactSensitive` output is re-emitted) never rewrites or nests markers.
+  - Existing markers this redactor could have produced are protected, so redacting already-redacted text (the engine does this when `RedactSensitive` output is re-emitted) never rewrites or nests markers. Other marker-shaped text is redacted normally, so it cannot shield a secret.
+- **Leak fix: public names no longer shield secrets.** Today public values (project, service, environment names) are protected before secrets are replaced, so a secret that contains the project name, such as `acme-prod-token-…` in project `acme`, is no longer matched and is printed minus the name. Secrets and public values are now resolved in one pass; a secret stays visible only when it lies entirely inside a longer public value (the jardin-cms case).
 - **Registration gaps closed:**
   - `envFile`/`envFiles` values are registered with the same `secrets.ShouldRedactEnvValue` rule as inline `env:` values, everywhere inline env values are registered today.
   - Backup storage credentials are registered in every command that registers config secrets.
@@ -46,11 +47,11 @@ Out of scope:
 - None.
 
 ### Modified Capabilities
-- `secret-redaction`: adds labeled masks, the label opt-out, deterministic and idempotent redaction, registration of `envFile` values and backup storage credentials, and the `config explain --redaction` report. It also modifies "Logs redact every resolved secret value" to include `envFile` values.
+- `secret-redaction`: adds labeled masks, the label opt-out, deterministic and idempotent redaction, the rule that public values never shield a secret, registration of `envFile` values and backup storage credentials, and the `config explain --redaction` report. It also modifies "Logs redact every resolved secret value" to include `envFile` values.
 
 ## Impact
 
-- Redactor: `pkg/secrets/redactor.go` (labels, pattern IDs, marker protection, longest-first replacement, removal of `createRedacted` partial reveal), `pkg/secrets/redactor_test.go`.
+- Redactor: `pkg/secrets/redactor.go` (labels, pattern IDs, marker protection, one longest-first pass over secrets and public values replacing `protectPublic`, removal of `createRedacted` partial reveal), `pkg/secrets/redactor_test.go`.
 - Labels and reasons: a new `pkg/secrets/labels.go` with label constructors, the label grammar validator, and a `RedactionReason` enum shared by registration and the explain report.
 - Engine registration: `pkg/engine/engine.go` (`RegisterSecretAs`, labeled `RegisterServiceEnvValues`, new `RegisterServiceEnvFileValues`, `RegisterBackupSecrets`, labeled registry/ACME helpers). Every `RegisterSecret` caller is updated with a label:
   - in `pkg/engine`: `deploy.go`, `destroy.go`, `exec.go`, `exec_interactive.go`, `jobs.go`, `logs.go`, `promote.go`, `remove.go`, `rollback.go`, `rollback_project.go`, `run.go`, `scale.go`, `state_lease.go`, `status.go` and `config_export.go`;

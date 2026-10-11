@@ -17,11 +17,17 @@
   - no partial reveal for 5-, 8- and 30-character secrets;
   - the same value registered as `env.X` and `secrets.Y` renders `secrets.Y` regardless of order.
 - [ ] 1.3 Give each compiled pattern an ID (D1 table) and make `redactPatternMatches` render `pattern.<id>`, keeping the key for `assignment` matches. Verify tests for `password=hunter2…` → `password=[REDACTED:pattern.assignment]`, a JWT → `[REDACTED:pattern.jwt]`, and that the existing hex image-tag and digest exemptions still hold.
-- [ ] 1.4 Replace registered secrets longest first, using a lazily rebuilt sorted slice (D4). Verify that two overlapping secrets (`abcd1234` inside `xxabcd1234yy`) give identical output across 100 runs.
-- [ ] 1.5 Protect existing markers and the inserted markers with placeholders (D5). Verify:
+- [ ] 1.4 Replace `protectPublic` and the map-ordered secret loop with the single occurrence pass of D4 (secrets longest first; a secret is unmasked only inside a longer public occurrence; a public occurrence overlapping a masked secret is not protected), using lazily rebuilt sorted slices. Verify:
+  - two overlapping secrets (`abcd1234` inside `xxabcd1234yy`) give identical output across 100 runs;
+  - public `acme` does not shield secret `acme-prod-token-9f8e7d6c` (no fragment of the secret in the output);
+  - a public value that overlaps the start or end of a secret does not shield it;
+  - public `jardin-cms` stays readable while a standalone registered `jardin` is masked;
+  - the existing public-value tests (service names, image references, commits) still pass.
+- [ ] 1.5 Protect existing markers and the inserted markers with placeholders (D5), limited to the bare `[REDACTED]`, markers whose label is registered with this redactor, and known `pattern.<id>` markers. Verify:
   - `Redact(Redact(x)) == Redact(x)` over a corpus;
   - `[REDACTED:secrets.API_KEY]` survives the key/value pattern;
-  - a registered secret equal to `REDACTED` does not corrupt markers.
+  - a registered secret equal to `REDACTED` does not corrupt markers;
+  - marker-shaped text wrapping a registered secret (`[REDACTED:ghp_…]`) is still masked inside the brackets.
 - [ ] 1.6 Read `TAKO_REDACTION_LABELS` in `NewRedactor` (`off|0|false|no`, case-insensitive). Verify a test that sets the env var and asserts plain `[REDACTED]` for registered values and patterns, with keys still kept for assignment matches.
 - [ ] 1.7 Register `secrets.Manager` loaded values as `secrets.<KEY>` (`manager.go:109-112`). Verify that `sources_test.go` still passes and that the label appears.
 - [ ] 1.8 Extract `LoadServiceEnvFiles(service)` from `CreateEnvFile` (`manager.go:431-444`) and have `CreateEnvFile` use it. Verify that existing `CreateEnvFile` tests still pass and add a precedence test (envFile vs envFiles, later file wins).
