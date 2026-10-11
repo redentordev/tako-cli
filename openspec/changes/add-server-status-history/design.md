@@ -296,3 +296,23 @@ See proposal.md for motivation and `specs/node-status/spec.md` for the behavior 
 7. **Per-container stats in history?** **No.** *Rationale: cardinality grows with services; `tako stats` covers the point-in-time view.*
 8. **Publish `metrics-collector` as an alert?** **No; monitoring's `metrics_stale` owns a stalled collector.** *Rationale: one alert per fault, and the native source's sample time already drives it.*
 9. **How does the setup step change without breaking `SetupResult`?** **Keep the key `monitor-agent`, change only the title, move it after `takod-service`, and run it in every mode.** *Rationale: step keys are machine contract, and the capability guard needs takod installed first.*
+
+## Implementation notes
+
+Differences from the plan above, chosen as the safest equivalent while implementing:
+
+- **`os.listsAgeSeconds`** (integer seconds) is used instead of a `listsAge` duration string, so machine clients do not parse durations.
+- **History records add `mp`, `dp`, `ddp` and `w`** (memory, root and Docker disk percent, plus the sample's I/O window in seconds) alongside the planned keys. This keeps bucket math exact without recomputing percentages. Unknown keys are ignored on read.
+- **Additive `/v1/metrics` fields beyond D2:** `disk.path`, `cpu_count`, `warnings`, and `*_total` counters in `network` and `disk_io`. These counters feed the Prometheus `_total` series. All legacy fields keep their names and types.
+- **`GET /v1/metrics/history` returns 404** when native collection is disabled (`--metrics-interval 0`), matching the missing `node.metrics-history-v1` capability.
+- **`reboot-required` `since`** is the earliest observation: the `/var/run/reboot-required` mtime when present, otherwise the first check that saw it. A later probe never moves it forward.
+- **Inside an alert window**, a `warn`/`fail` condition is reported to the alert-source API as passing, so an open episode can still recover. `unknown` and stale results report nothing.
+- **`tako_node_condition`** emits all four statuses per condition (1 for the current one, 0 for the others), so absent-versus-zero is never ambiguous.
+- **No TCP listener** is verified by a source-scan test of `pkg/takod` (no `net.Listen("tcp"…)`/`http.ListenAndServe`), in addition to the textfile writer tests.
+- **`ServerOptions.Metrics` with a zero interval keeps legacy behavior** for embedders and existing tests (`NewServer`). The `takod run` flag default (`60s`) is what enables native collection on nodes.
+- **Node alert event names** (`node_reboot_required`, …, `node_condition_cleared`) are local takod constants in the `node` alert-source spec, rather than additions to `pkg/notification`. This avoids churn in a package shared with a parallel change.
+- **Doctor node-status checks** run inside the existing "Node Agent Health" section, not a new section. The `--skip-remote` section list is unchanged and already skips them. The legacy-agent check is a `pass` with the `tako setup` remediation, so it never fails doctor.
+- **`tako metrics --since` accepts a day suffix** (`7d`), which the CLI normalizes to hours (`168h`) before querying takod, because Go durations have no day unit. Gaps in the sparkline render as blanks.
+- **Setup:** `RemoveLegacyMonitoringAgent` retries the capability guard 5 times, 2s apart, because takod has just restarted in the preceding step. If the guard is not met, the step completes and emits a setup warning. Converge runs it too.
+- **7.3 (manual live-server check)** was not performed in this environment. It is listed in the PR for a reviewer with server access.
+- **7.2 verification** ran on Windows: `go build ./...`, `GOOS=linux go vet ./...`, and `go test` for the touched packages that compile on Windows. The Linux-only `pkg/takod` tests run in CI.

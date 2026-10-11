@@ -304,7 +304,8 @@ type setupNodeProvisioner interface {
 }
 
 // setupNodeSteps returns the full provisioning sequence. Converge re-runs
-// only firewall, deploy access, and the takod runtime; the other steps are
+// only firewall, deploy access, the takod runtime, and legacy monitoring
+// agent removal; the other steps are
 // marked skip so the result document reports them as skipped.
 func setupNodeSteps(prov setupNodeProvisioner, cfg *config.Config, nodeName string, username string, meshListenPort int, takodBinary string, converge bool, access setupAccessOptions) []setupProvisionStep {
 	configureFirewall := func() error {
