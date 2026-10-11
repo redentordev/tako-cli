@@ -507,6 +507,18 @@ func assertStagesPattern(t *testing.T, cfg *config.Config) {
 	if preview.Env["APP_STAGE"] != "preview" || production.Env["APP_STAGE"] != "production" {
 		t.Fatalf("stage env values should make runtime identity visible: preview=%#v production=%#v", preview.Env, production.Env)
 	}
+	// Both stages extend the abstract base and inherit everything else.
+	if _, ok := cfg.Environments["base"]; ok || !cfg.IsAbstractEnvironment("base") {
+		t.Fatal("stage template base must be abstract and not deployable")
+	}
+	for name, service := range map[string]*config.ServiceConfig{"preview": preview, "production": production} {
+		if service.Build != "." || service.Port != 3000 || service.HealthCheck.Path != "/health" || service.Env["NODE_ENV"] != "production" || service.Proxy.Email == "" {
+			t.Fatalf("%s web should inherit the base service: %#v", name, service)
+		}
+		if chain := cfg.EnvironmentExtendsChain(name); len(chain) != 1 || chain[0] != "base" {
+			t.Fatalf("%s extends chain = %v, want [base]", name, chain)
+		}
+	}
 }
 
 func assertWebSocketPattern(t *testing.T, cfg *config.Config) {

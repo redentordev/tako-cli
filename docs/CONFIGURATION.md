@@ -404,6 +404,215 @@ environments:
           email: admin@example.com
 ```
 
+## Environment Inheritance And Shared Fragments
+
+Environments that differ only in a domain, a replica count, or a server list
+do not need to repeat every service. Use top-level `x-` keys for shared
+fragments and `extends` for environment overlays.
+
+### Shared fragments with `x-` keys
+
+Top-level keys that start with `x-` are accepted and ignored in `tako.yaml`
+and `tako.json`. Their content is not validated, so they are a scratch area
+for YAML anchors that the rest of the file reuses with `*name` or `<<: *name`.
+`x-` keys are only allowed at the top level; inside `environments`, services,
+or servers they are still unknown-field errors.
+
+<!-- tako:snippet complete -->
+```yaml
+x-web: &web
+  image: ghcr.io/example/app:1.4.2
+  port: 3000
+  healthCheck:
+    path: /health
+
+project:
+  name: my-app
+  version: 1.0.0
+
+servers:
+  production:
+    host: ${TAKO_PRODUCTION_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+  staging:
+    host: ${TAKO_STAGING_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+
+environments:
+  production:
+    servers: [production]
+    services:
+      web:
+        <<: *web
+        replicas: 2
+        proxy:
+          domain: app.example.com
+  staging:
+    servers: [staging]
+    services:
+      web:
+        <<: *web
+        proxy:
+          domain: staging.example.com
+```
+
+### Extending an environment
+
+An environment can declare `extends: <name>`. Tako resolves it by
+deep-merging the environment's own keys over the fully resolved parent before
+validation, so every command sees one flattened environment. An environment
+marked `abstract: true` is a template only: it can be extended, but it is not
+validated on its own, never deployed, never picked as the default
+environment, and `-e base` fails with a message that lists the environments
+that extend it.
+
+<!-- tako:snippet complete -->
+```yaml
+project:
+  name: my-app
+  version: 1.0.0
+
+servers:
+  production:
+    host: ${TAKO_PRODUCTION_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+  staging:
+    host: ${TAKO_STAGING_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+
+environments:
+  base:
+    abstract: true
+    services:
+      web:
+        image: ghcr.io/example/app:1.4.2
+        port: 3000
+        env:
+          LOG_LEVEL: info
+          REGION: eu
+        proxy:
+          domain: app.example.com
+      worker:
+        image: ghcr.io/example/app:1.4.2
+        command: ["bin/worker"]
+
+  production:
+    extends: base
+    servers: [production]
+    services:
+      web:
+        replicas: 2
+
+  staging:
+    extends: production
+    servers: [staging]
+    services:
+      web:
+        replicas: 1
+        env:
+          LOG_LEVEL: debug
+        proxy:
+          domain: staging.example.com
+      worker: null
+```
+
+Here `staging` runs `web` with one replica, `LOG_LEVEL=debug`, `REGION=eu`,
+and the staging domain, and has no `worker`. `production` is unchanged.
+
+Merge rules, applied at every path of the child environment:
+
+| Parent value | Child value | Result |
+|---|---|---|
+| any | not set | parent value |
+| mapping | mapping | merged key by key (services merge by name); parent keys keep their order, new child keys follow |
+| any | scalar or list | child value; lists are replaced, never appended |
+| any | value of a different kind | child value (for example `build: .` replaced by `build: {context: ., target: prod}`) |
+| any | `null` | key removed |
+
+- `null` removes an inherited key only in an environment that declares
+  `extends`. `services: {worker: null}` drops an inherited service, and
+  `servers: null` plus a `serverSelector` switches a child from a server list
+  to label selection. In an environment without `extends`, `null` keeps its
+  usual meaning (unset).
+- Lists replace. That includes `servers`, `volumes`, `ports`, `command`, and
+  environment `secretSources`. Top-level `secretSources` still apply first to
+  every environment, followed by the resolved environment's own list:
+
+<!-- tako:snippet complete -->
+```yaml
+project:
+  name: my-app
+  version: 1.0.0
+
+secretSources:
+  - provider: doppler
+    project: my-app
+    providerEnv: prd
+
+servers:
+  production:
+    host: ${TAKO_PRODUCTION_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+  staging:
+    host: ${TAKO_STAGING_HOST}
+    user: root
+    sshKey: ${TAKO_SSH_KEY}
+
+environments:
+  production:
+    servers: [production]
+    secretSources:
+      - provider: aws-ssm
+        path: /my-app/production
+        region: us-east-1
+    services:
+      web:
+        image: ghcr.io/example/app:1.4.2
+        secrets: [DATABASE_URL]
+
+  staging:
+    extends: production
+    servers: [staging]
+    # Replaces the inherited aws-ssm source; doppler still applies first.
+    secretSources:
+      - provider: aws-ssm
+        path: /my-app/staging
+        region: us-east-1
+```
+
+- A structured `build` is a mapping, so it merges key by key: a child can
+  set only `build: {target: prod}` (or new `args`) and inherit `context` from
+  its parent. The resolved environment must still have a `context`; if no
+  environment in the chain supplies one, validation fails with the chain in
+  the error.
+- Chains are allowed (`staging -> production -> base`) up to 8 `extends`
+  hops. A cycle (including `extends` naming itself), an unknown parent, or a
+  chain deeper than 8 hops fails validation with the full chain in the error.
+- `extends` and `abstract` are not inherited. Abstract environments do not
+  need `servers` or `serverSelector`. An abstract environment that nothing
+  extends produces a `tako validate` warning.
+- An unknown or mistyped field is reported against the environment that
+  declared it, and validation errors in an inheriting environment end with
+  the chain, for example `(environment staging extends production)`.
+- `tako config explain -e staging` prints `Environment: staging (extends
+  production -> base)` and labels each environment-scoped value with the
+  environment that supplied it, for example `replicas: 2 (config, from
+  production)`.
+- Deployed state, history, and `tako config export` contain only the
+  flattened environment; `extends` and `abstract` never reach a node.
+
+### Default environment
+
+Without `-e`, Tako uses the only deployable (non-abstract) environment, else
+`production`, else the first environment name in alphabetical order. In that
+last case it prints `no -e and no 'production'; using '<name>'; pass -e` to
+stderr, so pass `-e` in scripts and CI.
+
 ## Background Workers
 
 <!-- tako:snippet partial -->

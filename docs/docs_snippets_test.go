@@ -285,3 +285,50 @@ func TestTopLevelServicesSnippetIsRejectedWithFixIt(t *testing.T) {
 		t.Fatalf("nested services rejected: %v", err)
 	}
 }
+
+// TestEnvironmentInheritanceSnippetsResolve checks that the documented x-
+// anchor and extends examples resolve to what the prose describes.
+func TestEnvironmentInheritanceSnippetsResolve(t *testing.T) {
+	data, err := os.ReadFile("CONFIGURATION.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	find := func(marker string) snippet {
+		for _, s := range parseSnippets("CONFIGURATION.md", string(data)) {
+			if strings.Contains(s.content, marker) {
+				return s
+			}
+		}
+		t.Fatalf("no CONFIGURATION.md snippet contains %q", marker)
+		return snippet{}
+	}
+
+	configtest.SetupEnv(t)
+	cfg, _, err := configtest.LoadAndValidate(t, t.TempDir(), "tako.yaml", []byte(find("x-web: &web").content))
+	if err != nil {
+		t.Fatalf("x- snippet: %v", err)
+	}
+	for _, env := range []string{"production", "staging"} {
+		web := cfg.Environments[env].Services["web"]
+		if web.Image != "ghcr.io/example/app:1.4.2" || web.Port != 3000 || web.HealthCheck.Path != "/health" {
+			t.Fatalf("%s web = %+v, want the shared x-web fragment", env, web)
+		}
+	}
+
+	cfg, _, err = configtest.LoadAndValidate(t, t.TempDir(), "tako.yaml", []byte(find("worker: null").content))
+	if err != nil {
+		t.Fatalf("extends snippet: %v", err)
+	}
+	if _, ok := cfg.Environments["base"]; ok {
+		t.Fatal("abstract base must not be a deployable environment")
+	}
+	staging := cfg.Environments["staging"]
+	web := staging.Services["web"]
+	if _, ok := staging.Services["worker"]; ok || web.Replicas != 1 || web.Env["LOG_LEVEL"] != "debug" || web.Env["REGION"] != "eu" || web.Proxy.Domain != "staging.example.com" {
+		t.Fatalf("staging = %+v", staging)
+	}
+	production := cfg.Environments["production"]
+	if production.Services["web"].Replicas != 2 || production.Services["web"].Proxy.Domain != "app.example.com" || len(production.Services) != 2 {
+		t.Fatalf("production = %+v", production)
+	}
+}

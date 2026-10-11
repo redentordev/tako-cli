@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -278,7 +279,7 @@ Built:   %s
 	// Global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./tako.yaml or ./tako.json)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
-	rootCmd.PersistentFlags().StringVarP(&envFlag, "env", "e", "", "environment to deploy (default: production or only environment)")
+	rootCmd.PersistentFlags().StringVarP(&envFlag, "env", "e", "", "environment to use (default: the only environment, else production, else the first alphabetically)")
 	rootCmd.PersistentFlags().StringVar(&hostKeyModeFlag, "host-key-mode", "", "SSH host key verification mode: tofu, strict, ask (default: tofu)")
 	rootCmd.PersistentFlags().StringVar(&outputFormatFlag, "output", outputFormatText, "output format: text or json (json reserves stdout for the final result document)")
 	rootCmd.PersistentFlags().StringVar(&eventsFormatFlag, "events", "", "stream progress events to stdout: ndjson (human output moves to stderr)")
@@ -354,12 +355,39 @@ func getEnvironmentName(cfg interface{}) string {
 		return envFlag
 	}
 
-	// Use default from config (GetDefaultEnvironment)
+	// Use the deterministic default from config; announce an alphabetical
+	// pick on stderr so it never changes machine stdout.
+	if c, ok := cfg.(interface {
+		ResolveDefaultEnvironment() (string, bool)
+	}); ok {
+		name, implicit := c.ResolveDefaultEnvironment()
+		if implicit {
+			noteImplicitEnvironment(name)
+		}
+		return name
+	}
 	if c, ok := cfg.(interface{ GetDefaultEnvironment() string }); ok {
 		return c.GetDefaultEnvironment()
 	}
 
 	return "production"
+}
+
+var (
+	implicitEnvironmentNoticeMu    sync.Mutex
+	implicitEnvironmentNoticeShown = map[string]bool{}
+)
+
+// noteImplicitEnvironment prints the alphabetical-default notice once per
+// process and environment.
+func noteImplicitEnvironment(name string) {
+	implicitEnvironmentNoticeMu.Lock()
+	defer implicitEnvironmentNoticeMu.Unlock()
+	if implicitEnvironmentNoticeShown[name] {
+		return
+	}
+	implicitEnvironmentNoticeShown[name] = true
+	fmt.Fprintf(os.Stderr, "no -e and no 'production'; using '%s'; pass -e\n", name)
 }
 
 // initHostKeyMode configures SSH host key verification based on flag/env

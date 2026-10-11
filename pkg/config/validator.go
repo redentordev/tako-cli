@@ -112,6 +112,9 @@ func ValidateConfig(cfg *Config) error {
 
 	// Validate environments
 	if len(cfg.Environments) == 0 {
+		if cfg.resolution != nil && len(cfg.resolution.abstract) > 0 {
+			return fmt.Errorf("at least one non-abstract environment must be configured")
+		}
 		return fmt.Errorf("at least one environment must be configured")
 	}
 	for envName, env := range cfg.Environments {
@@ -212,6 +215,15 @@ func ValidationWarnings(cfg *Config) []ValidationWarning {
 		return warnings
 	}
 	warnings = append(warnings, deprecatedConfigWarnings(cfg)...)
+	if cfg.resolution != nil {
+		for _, name := range cfg.resolution.unusedAbstractEnvironments() {
+			warnings = append(warnings, ValidationWarning{
+				Environment: name,
+				Field:       "abstract",
+				Message:     fmt.Sprintf("environment %s is abstract and no environment extends it; it has no effect", name),
+			})
+		}
+	}
 	environmentNames := make([]string, 0, len(cfg.Environments))
 	for name := range cfg.Environments {
 		environmentNames = append(environmentNames, name)

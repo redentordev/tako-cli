@@ -234,6 +234,23 @@ func TestTakoSchemaDescribesAliases(t *testing.T) {
 	}
 }
 
+func TestTakoSchemaDescribesEnvironmentInheritanceAndExtensionKeys(t *testing.T) {
+	schema := loadTakoSchema(t)
+	if _, ok := schemaPath(t, schema, "patternProperties")["^x-"].(map[string]any); !ok {
+		t.Fatalf("root patternProperties must accept ^x- extension keys: %#v", schema["patternProperties"])
+	}
+	if _, closed := schema["additionalProperties"]; closed {
+		t.Fatal("root schema must not close additionalProperties; x- keys are open")
+	}
+	environment := schemaPath(t, schema, "properties", "environments", "additionalProperties", "properties")
+	if got := schemaPath(t, environment, "extends")["type"]; got != "string" {
+		t.Fatalf("environments.*.extends type = %#v, want string", got)
+	}
+	if got := schemaPath(t, environment, "abstract")["type"]; got != "boolean" {
+		t.Fatalf("environments.*.abstract type = %#v, want boolean", got)
+	}
+}
+
 func assertStringOrListSchema(t *testing.T, field map[string]any) {
 	t.Helper()
 	oneOf, ok := field["oneOf"].([]any)
